@@ -1,0 +1,38 @@
+name: reopt
+version: 0.0.1
+author: Galois, Inc.
+maintainer: jhendrix@galois.com
+build-type: Simple
+cabal-version: >= 1.9.2
+
+library
+  build-depends:
+    base >= 4,
+    bytestring,
+    elf >= 0.28,
+    fingertree,
+    lens,
+    mtl,
+    wl-pprint
+
+  hs-source-dirs: src
+
+  exposed-modules:
+    Reopt.ByteReader
+    Reopt.Loader
+    Reopt.Memory
+
+  ghc-options: -Wall
+  ghc-prof-options: -O2 -fprof-auto-top
+
+executable reopt
+  build-depends:
+    base >= 4,
+    cmdargs,
+    lens
+
+  hs-source-dirs: reopt
+  main-is: Main_reopt.hs
+
+  ghc-options: -Wall
+  ghc-prof-options: -O2 -fprof-auto-top
