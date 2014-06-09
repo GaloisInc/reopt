@@ -5,12 +5,17 @@ maintainer: jhendrix@galois.com
 build-type: Simple
 cabal-version: >= 1.9.2
 
+flag enable-hpc
+  Description: Collect HPC coverage information.
+  Default: False
+
 library
   build-depends:
     base >= 4,
     bytestring,
     elf >= 0.28,
     fingertree,
+    flexdis86,
     lens,
     mtl,
     wl-pprint
@@ -29,10 +34,16 @@ executable reopt
   build-depends:
     base >= 4,
     cmdargs,
-    lens
+    flexdis86,
+    lens,
+    reopt
+
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
+
+  if flag(enable-hpc)
+    ghc-options: -fhpc
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top

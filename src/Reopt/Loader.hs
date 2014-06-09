@@ -1,8 +1,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.Loader 
-  ( loadElf
+  ( loadExecutable
+  
   ) where
 
+import Control.Applicative
 import Control.Lens
 import Control.Monad.State
 import qualified Data.ByteString as BS
@@ -11,6 +13,14 @@ import Data.Maybe (mapMaybe)
 import Data.Monoid (mappend)
 
 import Reopt.Memory
+
+loadExecutable :: FilePath -> IO SomeMemory
+loadExecutable path = do
+  bs <- BS.readFile path
+  case parseElf bs of
+    Left (_,msg) -> fail $ "Parse error: " ++ msg
+    Right (Elf64 e) -> Memory64 <$> execStateT (loadElf e) emptyMemory
+    Right (Elf32 e) -> Memory32 <$> execStateT (loadElf e) emptyMemory
 
 -- | Load an elf file into memory.
 loadElf :: (ElfWidth w, MonadState (Memory w) m) => Elf w -> m ()

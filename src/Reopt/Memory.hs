@@ -1,11 +1,14 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Reopt.Memory 
-  ( Memory
+  ( SomeMemory(..)
+  , Memory
   , emptyMemory
-  , memSegments
   , insertMemSegment
+  , memSegments
+  , executableSegments
   , MemSegment(..)
+  , isExecutable
   , ppMemSegment
   , MemoryByteReader
   , runMemoryByteReader
@@ -14,22 +17,23 @@ module Reopt.Memory
 
 import Control.Applicative
 import Control.Exception (assert)
-import Control.Lens
 import Control.Monad.Error
 import Control.Monad.State
 import Data.Bits
 import qualified Data.ByteString as BS
 import Data.Elf
 import qualified Data.Foldable as Fold
-import Data.Maybe (listToMaybe)
 import qualified Data.IntervalMap.FingerTree as IMap
+import Data.Maybe (listToMaybe)
+import Data.Word
+
 import Numeric (showHex)
 import Text.PrettyPrint.Leijen hiding ((<$>))
 
 import Reopt.ByteReader
 
 ------------------------------------------------------------------------
--- Datatype declarations.
+-- MemSegment
 
 -- | Describes a memory segment.
 data MemSegment w = MemSegment { memBase :: w
@@ -37,7 +41,11 @@ data MemSegment w = MemSegment { memBase :: w
                                , memBytes :: BS.ByteString
                                }
 
--- | Pretty print a memsegment.
+-- | Return true if the segment is executable.
+isExecutable :: MemSegment w -> Bool
+isExecutable m = (memFlags m .&. pf_x) == pf_x
+
+-- | Pretty print a memory segment.
 ppMemSegment :: (Integral w, Show w) => MemSegment w -> Doc
 ppMemSegment ms = 
   indent 2 $ vcat [ text "base =" <+> text (showHex (memBase ms) "")
@@ -47,6 +55,13 @@ ppMemSegment ms =
 
 instance (Integral w, Show w) => Show (MemSegment w) where
   show = show . ppMemSegment
+
+------------------------------------------------------------------------
+-- Memory
+
+data SomeMemory 
+   = Memory32 !(Memory Word32)
+   | Memory64 !(Memory Word64)
 
 -- | The state of the memory.
 newtype Memory w = Memory { _memMap :: IMap.IntervalMap w (MemSegment w) }
@@ -58,9 +73,13 @@ instance (Integral w, Show w) => Show (Memory w) where
 emptyMemory :: Ord w => Memory w
 emptyMemory = Memory IMap.empty
 
--- | Traverse segemnt in memory.
-memSegments :: Simple Traversal (Memory w) (MemSegment w)
-memSegments f (Memory m) = Memory <$> traverse f m
+-- | Get memory segments.
+memSegments :: Memory w -> [MemSegment w]
+memSegments (Memory m) = Fold.toList m
+
+-- | Get executable segments.
+executableSegments :: Memory w -> [MemSegment w]
+executableSegments = filter isExecutable . memSegments
 
 -- | Returns an interval representing the range of addresses for the segment
 -- if it is non-empty.
@@ -70,7 +89,6 @@ memSegmentInterval s
     | otherwise = Just $ IMap.Interval base (base + sz - 1)
   where base = memBase s
         sz = fromIntegral $ BS.length (memBytes s)
-
 
 -- | Insert segement into memory or fail if this overlaps with another
 -- segment in memory.
@@ -97,7 +115,6 @@ data MemStream w = MS { _msNext :: !BS.ByteString
                       , msAddr :: !w
                       , msPerm :: ElfSegmentFlags
                       }
-
 
 -- | Type of errors that may occur when reading memory.
 data MemoryError w

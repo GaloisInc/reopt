@@ -9,6 +9,11 @@ import System.Exit (exitFailure)
 
 import Paths_reopt (version)
 
+import Flexdis86
+import Reopt.Loader
+import Reopt.Memory
+
+
 ------------------------------------------------------------------------
 -- Args
 
@@ -99,7 +104,19 @@ dumpDisassembly path = do
     putStrLn "Please specify a binary."
     showUsage
     exitFailure
-  putStrLn "TODO: Dump disassembly"
+  mm <- loadExecutable path
+  case mm of
+    Memory32 _m -> do
+      putStrLn "32-bit executables are not yet supported."
+      exitFailure
+    Memory64 m -> do
+     let segments = filter isExecutable $ memSegments m
+     when (null segments) $ do
+       putStrLn "Binary contains no executable segments."
+     forM_ segments $ \s -> do
+       let r = disassembleBuffer defaultX64Disassembler (memBase s) (memBytes s)
+       putStrLn "TODO: Dump disassembly"
+       undefined r
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
