@@ -2,6 +2,8 @@ module Main (main) where
 
 import Control.Lens hiding (Action)
 import Control.Monad
+import qualified Data.ByteString as B
+import Data.Elf
 import Data.Version
 import System.Console.CmdArgs.Explicit
 import System.Environment (getArgs)
@@ -10,9 +12,7 @@ import System.Exit (exitFailure)
 import Paths_reopt (version)
 
 import Flexdis86
-import Reopt.Loader
-import Reopt.Memory
-
+import Reopt
 
 ------------------------------------------------------------------------
 -- Args
@@ -98,33 +98,49 @@ showUsage :: IO ()
 showUsage = do
   putStrLn "For help on using reopt, run \"reopt --help\"."
 
-dumpDisassembly :: FilePath -> IO ()
-dumpDisassembly path = do
+readElf64 :: FilePath -> IO (Elf Word64)
+readElf64 path = do
   when (null path) $ do
     putStrLn "Please specify a binary."
     showUsage
     exitFailure
-  mm <- loadExecutable path
-  case mm of
-    Memory32 _m -> do
+  bs <- B.readFile path 
+  case parseElf bs of
+    Left (_,msg) -> do
+      putStrLn $ "Error reading " ++ path ++ ":"
+      putStrLn $ "  " ++ msg
+      exitFailure
+    Right (Elf32 _) -> do
       putStrLn "32-bit executables are not yet supported."
       exitFailure
-    Memory64 m -> do
-     let segments = filter isExecutable $ memSegments m
-     when (null segments) $ do
-       putStrLn "Binary contains no executable segments."
-     forM_ segments $ \s -> do
-       let r = disassembleBuffer defaultX64Disassembler (memBase s) (memBytes s)
-       putStrLn "TODO: Dump disassembly"
-       undefined r
+    Right (Elf64 e) ->
+      return e
+
+dumpDisassembly :: FilePath -> IO ()
+dumpDisassembly path = do
+  e <- readElf64 path
+  let sections = filter isCodeSection $ e^..elfSections
+  when (null sections) $ do
+    putStrLn "Binary contains no executable sections."
+  mapM_ printSectionDisassembly sections
+  -- print $ Set.size $ instructionNames sections
+  --print $ Set.toList $ instructionNames sections
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
-  when (null path) $ do
-    putStrLn "Please specify a binary."
-    showUsage
-    exitFailure
-  putStrLn "TODO: Show CFG"
+  e <- readElf64 path
+  mi <- elfInterpreter e
+  case mi of
+    Nothing -> putStrLn "No interpreter"
+    Just interp -> putStrLn interp
+  print $ parseSymbolTables e
+  Just dyn_sect 
+    <- dynamicEntries e :: IO (Maybe (DynamicSection Word64 Int64 X86_64_RelocationType))
+--  print $ ppSymbolTableEntries (dynSymbols ds)
+--  print $ dynSymVersionTable ds
+--  print $ dynVersionReqs ds
+  print $ ppRelaEntries $ dynRelocations dyn_sect
+  print $ dynUnparsed dyn_sect
 
 main :: IO ()
 main = do
@@ -133,6 +149,7 @@ main = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
+      --printExecutableAddressesInGlobalData (args^.programPath)
       showCFG (args^.programPath)
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments

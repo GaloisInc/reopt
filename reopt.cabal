@@ -12,20 +12,29 @@ flag enable-hpc
 library
   build-depends:
     base >= 4,
+    binary,
     bytestring,
+    containers,
+    crucible,
     elf >= 0.28,
     fingertree,
     flexdis86,
     lens,
     mtl,
+    vector,
     wl-pprint
 
   hs-source-dirs: src
 
   exposed-modules:
+    Reopt
     Reopt.ByteReader
+    Reopt.CFG
+    Reopt.CFG.JumpTargets
     Reopt.Loader
     Reopt.Memory
+    Reopt.Semantics
+    Reopt.Semantics.Monad
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
@@ -33,11 +42,13 @@ library
 executable reopt
   build-depends:
     base >= 4,
+    bytestring,
     cmdargs,
+    containers,
+    elf,
     flexdis86,
     lens,
     reopt
-
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs

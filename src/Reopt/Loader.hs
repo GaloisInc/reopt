@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.Loader 
   ( loadExecutable
-  
+  , loadElf
   ) where
 
 import Control.Applicative
@@ -19,12 +19,17 @@ loadExecutable path = do
   bs <- BS.readFile path
   case parseElf bs of
     Left (_,msg) -> fail $ "Parse error: " ++ msg
-    Right (Elf64 e) -> Memory64 <$> execStateT (loadElf e) emptyMemory
-    Right (Elf32 e) -> Memory32 <$> execStateT (loadElf e) emptyMemory
+    Right (Elf64 e) -> Memory64 <$> loadElf e
+    Right (Elf32 e) -> Memory32 <$> loadElf e
 
 -- | Load an elf file into memory.
-loadElf :: (ElfWidth w, MonadState (Memory w) m) => Elf w -> m ()
-loadElf = mapM_ insertMemSegment
+loadElf :: (ElfWidth w, Monad m) => Elf w -> m (Memory w)
+loadElf e = execStateT (insertElf e) emptyMemory
+
+
+-- | Load an elf file into memory.
+insertElf :: (ElfWidth w, MonadState (Memory w) m) => Elf w -> m ()
+insertElf = mapM_ insertMemSegment
         . mapMaybe memSegment 
         . renderedElfSegments
 
