@@ -129,6 +129,12 @@ dumpDisassembly path = do
 showCFG :: FilePath -> IO ()
 showCFG path = do
   e <- readElf64 path
+  mem <- loadElf e
+
+  undefined mem
+
+{-
+      --printExecutableAddressesInGlobalData (args^.programPath)
   mi <- elfInterpreter e
   case mi of
     Nothing -> putStrLn "No interpreter"
@@ -141,6 +147,7 @@ showCFG path = do
 --  print $ dynVersionReqs ds
   print $ ppRelaEntries $ dynRelocations dyn_sect
   print $ dynUnparsed dyn_sect
+-}
 
 main :: IO ()
 main = do
@@ -149,7 +156,6 @@ main = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      --printExecutableAddressesInGlobalData (args^.programPath)
       showCFG (args^.programPath)
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments

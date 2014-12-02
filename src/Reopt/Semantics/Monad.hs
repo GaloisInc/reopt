@@ -1,20 +1,36 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics.Monad
- ( module Reopt.Semantics.Monad 
+ ( IsAssignable(..)
+ , IsValue(..)
+ , IsLeq(..)
+ , BV
+ , Value
+ , Pred
+ , Assignable
+ , Semantics(..)
+ , IsAssignableBV
  , Bits.Bits
  , (Bits..&.)
  ) where
 
 import Control.Applicative
 import Data.Bits as Bits
-import Data.Word
+import GHC.TypeLits
+
+import Lang.Crucible.Utils.Width
 
 ------------------------------------------------------------------------
 -- InterruptNo
 
+{-
 newtype InterruptNo = InterruptNo { interruptNoIdx :: Word8 }
 
 de :: InterruptNo
@@ -22,108 +38,97 @@ de = InterruptNo 0
 
 db :: InterruptNo
 db = InterruptNo 1
+-}
+
+data BV (n :: Nat)
+
+class IsLeq (m :: Nat) (n :: Nat) where
+  leqProof :: LeqProof m n
+
+instance IsLeq 1 16 where
+  leqProof = knownLeq
+instance IsLeq 4 16 where
+  leqProof = knownLeq
+instance IsLeq 8 16 where
+  leqProof = knownLeq
+
+instance IsLeq 1 32 where
+  leqProof = knownLeq
+instance IsLeq 4 32 where
+  leqProof = knownLeq
+instance IsLeq 8 32 where
+  leqProof = knownLeq
+
+instance IsLeq 1 64 where
+  leqProof = knownLeq
+instance IsLeq 4 64 where
+  leqProof = knownLeq
+instance IsLeq 8 64 where
+  leqProof = knownLeq
 
 ------------------------------------------------------------------------
 -- SemanticsMonad
 
-data family Value (m :: * -> *) tp
-data family Assignable (m :: * -> *) tp
+class IsAssignable v where
+  af_flag :: v Bool
+  cf_flag :: v Bool
+  of_flag :: v Bool
+  pf_flag :: v Bool
+  sf_flag :: v Bool
+  zf_flag :: v Bool
+
+class IsValue v where
+  false :: v Bool
+  true  :: v Bool
+
+  even_parity :: v (BV 8) -> v Bool
+
+  msb :: IsLeq 1 n => v (BV n) -> v Bool
+
+  is_zero :: v (BV n) -> v Bool
+
+  -- | Return least-significant nibble (4 bits).
+  least_nibble :: IsLeq 4 n => v (BV n) -> v (BV 4)
+
+  -- | Return least-significant byte.
+  least_byte   :: IsLeq 8 n => v (BV n) -> v (BV 8)
+
+  sadd_overflows :: IsLeq 1 n => v (BV n) -> v (BV n) -> v Bool
+  uadd_overflows :: v (BV n) -> v (BV n) -> v Bool
+
+  sadc_overflows :: v (BV n) -> v (BV n) -> v Bool -> v Bool
+  uadc_overflows :: v (BV n) -> v (BV n) -> v Bool -> v Bool
+
+  -- | bsf "bit scan forward" returns the index of the least-significant
+  -- bit that is 1.  Undefined if value is zero.
+  -- All bits at indices less than return value must be unset.
+  bsf :: v (BV n) -> v (BV n)
+  -- | bsr "bit scan reverse" returns the index of the most-significant
+  -- bit that is 1.  Undefined if value is zero.
+  -- All bits at indices less than return value must be unset.
+  bsr :: v (BV n) -> v (BV n)
+
+type family Value (m :: * -> *) :: * -> *
+type family Assignable (m :: * -> *) :: * -> *
 
 type Pred m = Value m Bool
 
-class (Applicative m, Monad m) => ProcessorMonad m where
-  af_flag :: Assignable m Bool
-  cf_flag :: Assignable m Bool
-  of_flag :: Assignable m Bool
-  pf_flag :: Assignable m Bool
-  sf_flag :: Assignable m Bool
-  zf_flag :: Assignable m Bool
+class ( Applicative m
+      , Monad m
+      , IsAssignable (Assignable m)
+      , IsValue (Value m)
+      ) => Semantics m where
+  set_undefined :: Assignable m Bool -> m ()
 
-  false :: Value m Bool
-  true  :: Value m Bool
-
-  undef :: Value m Bool
-
-  even_parity :: Value m Word8 -> Pred m
-  uadd4_overflows :: Value m Word8 -> Value m Word8 -> Pred m
-
-{-
-  mux :: Pred m -> m () -> m () -> m ()
--}
-
-{-
-  getPC :: m (ValueOf m Word64)
-  setPC :: ValueOf m Word64 -> m ()
-
-  incPC :: SemanticsMonad m => Int64 -> m ()
-
-
-  getMem :: TypeOf tp -> ValueOf m Word64 -> m (ValueOf m tp)
-  setMem :: TypeOf tp -> ValueOf m Word64 -> ValueOf m tp -> m ()
-
-  getReg8 :: Reg8 -> m (ValueOf m Word8)
-  setReg8 :: Reg8 -> ValueOf m Word8 -> m ()
-
-  getReg16 :: Reg16 -> m (ValueOf m Word16)
-  setReg16 :: Reg16 -> ValueOf m Word16 -> m ()
-
-  getReg32 :: Reg32 -> m (ValueOf m Word32)
-  setReg32 :: Reg32 -> ValueOf m Word32 -> m ()
-
-  getReg64 :: Reg64 -> m (ValueOf m Word64)
-  setReg64 :: Reg64 -> ValueOf m Word64 -> m ()
-
-  getFlag :: RFLAGS -> m (Value1 m)   
-  setFlag :: RFLAGS -> Value1 m -> m ()
-
-  raiseInterrupt :: InterruptNo -> m ()
-  exec_syscall :: m ()
--}
-
-class ProcessorMonad m => IsAssignable m tp where
   get :: Assignable m tp -> m (Value m tp)
   (.=) :: Assignable m tp -> Value m tp -> m ()
 
-{-
-class IsBV m tp where
-  msb :: Value m tp -> Pred m
-  is_zero :: Value m tp -> Pred m
-  sadd_overflows :: Value m tp -> Value m tp -> Pred m
-  uadd_overflows :: Value m tp -> Value m tp -> Pred m
-  least_byte :: Value m tp -> Value m Word8
-
-  -- | bsf "bit scan forward" returns the index of the least-significant
-  -- bit that is 1.  Undefined if value is zero.
-  -- All bits at indices less than return value must be unset.
-  bsf :: Value m tp -> Value m tp
-  -- | bsr "bit scan reverse" returns the index of the most-significant
-  -- bit that is 1.  Undefined if value is zero.
-  -- All bits at indices less than return value must be unset.
-  bsr :: Value m tp -> Value m tp
--}
-
-class IsBV v tp where
-  msb :: v tp -> v Bool
-  is_zero :: v tp -> v Bool
-  sadd_overflows :: v tp -> v tp -> v Bool
-  uadd_overflows :: v tp -> v tp -> v Bool
-  least_byte :: v tp -> v Word8
-
-  -- | bsf "bit scan forward" returns the index of the least-significant
-  -- bit that is 1.  Undefined if value is zero.
-  -- All bits at indices less than return value must be unset.
-  bsf :: v tp -> v tp
-  -- | bsr "bit scan reverse" returns the index of the most-significant
-  -- bit that is 1.  Undefined if value is zero.
-  -- All bits at indices less than return value must be unset.
-  bsr :: v tp -> v tp
-
-class ( IsAssignable m Bool
-      , IsAssignable m Word8
-      , IsAssignable m tp
-      , IsBV (Value m) tp
-      , Num (Value m tp)
-      , Bits (Value m tp)
-      )
-   => IsAssignableBV m tp where
-
+type IsAssignableBV m n
+   = ( IsValue (Value m)
+     , Bits (Value m (BV n))
+     , Num  (Value m (BV n))
+     , Semantics m
+     , IsLeq 1 n
+     , IsLeq 4 n
+     , IsLeq 8 n
+     )

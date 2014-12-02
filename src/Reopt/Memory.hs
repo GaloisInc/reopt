@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TupleSections #-}
-module Reopt.Memory 
+module Reopt.Memory
   ( SomeMemory(..)
   , Memory
   , emptyMemory
@@ -18,7 +18,7 @@ module Reopt.Memory
   , MemoryByteReader
   , runMemoryByteReader
   , MemoryError(..)
-  
+
     -- * Re-exports
   , Elf.ElfSegmentFlags
   , Elf.pf_r
@@ -29,7 +29,6 @@ module Reopt.Memory
 
 import Control.Applicative
 import Control.Exception (assert)
-import Control.Lens
 import Control.Monad.Error
 import Control.Monad.State
 import Data.Binary.Get
@@ -62,7 +61,7 @@ isExecutable s = (memFlags s `hasPermissions` pf_x)
 
 -- | Pretty print a memory segment.
 ppMemSegment :: (Integral w, Show w) => MemSegment w -> Doc
-ppMemSegment ms = 
+ppMemSegment ms =
   indent 2 $ vcat [ text "base =" <+> text (showHex (memBase ms) "")
                   , text "flags =" <+> text (show (memFlags ms))
                   , text "size =" <+>  text (showHex (BS.length (memBytes ms)) "")
@@ -74,7 +73,7 @@ segmentAsWord64le s = go (BSL.fromChunks [memBytes s])
   where go b | BSL.length b >= 8 =
           case runGetOrFail getWord64le b of
             Left{} -> error "internal error in segmentAsWord64le"
-            Right (b',_, w) -> w:go b' 
+            Right (b',_, w) -> w:go b'
         go _ = []
 
 instance (Integral w, Show w) => Show (MemSegment w) where
@@ -83,7 +82,7 @@ instance (Integral w, Show w) => Show (MemSegment w) where
 ------------------------------------------------------------------------
 -- Memory
 
-data SomeMemory 
+data SomeMemory
    = Memory32 !(Memory Word32)
    | Memory64 !(Memory Word64)
 
@@ -141,7 +140,7 @@ addrHasPermissions w req m = fromMaybe False $ do
 -- MemReader
 
 data MemStream w = MS { msNext :: !BS.ByteString
-                      , msMem  :: !(Memory w) 
+                      , msMem  :: !(Memory w)
                       , msAddr :: !w
                       , msPerm :: ElfSegmentFlags
                       }
@@ -192,7 +191,7 @@ instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
 -- | Create a memory stream pointing to given address, and return pair whose
 -- first element is the value read or an error, and whose second element is
 -- the address of the next value to read.
-runMemoryByteReader :: ElfSegmentFlags 
+runMemoryByteReader :: ElfSegmentFlags
                     -> Memory w -- ^ Memory to read from.
                     -> w -- ^ Starting address.
                     -> MemoryByteReader w a -- ^ Byte reader to read values from.

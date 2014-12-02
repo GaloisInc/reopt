@@ -9,7 +9,7 @@ import Control.Lens
 import Control.Monad.State
 import qualified Data.ByteString as BS
 import Data.Elf
-import Data.Maybe (mapMaybe)
+import qualified Data.Foldable as Fold
 import Data.Monoid (mappend)
 
 import Reopt.Memory
@@ -24,21 +24,25 @@ loadExecutable path = do
 
 -- | Load an elf file into memory.
 loadElf :: (ElfWidth w, Monad m) => Elf w -> m (Memory w)
-loadElf e = execStateT (insertElf e) emptyMemory
+loadElf e = do
+  execStateT (insertElf e) emptyMemory
 
 
 -- | Load an elf file into memory.
 insertElf :: (ElfWidth w, MonadState (Memory w) m) => Elf w -> m ()
-insertElf = mapM_ insertMemSegment
-        . mapMaybe memSegment 
-        . renderedElfSegments
+insertElf e = do
+  forM_ (renderedElfSegments e) $ \elf_seg -> do
+    mseg <- memSegment elf_seg
+    Fold.mapM_ insertMemSegment mseg
 
 -- | Return a memory segment for elf segment if it loadable.
-memSegment :: Integral w => RenderedElfSegment w -> Maybe (MemSegment w)
-memSegment seg 
-    | tp == PT_LOAD = Just mseg
-    | tp == PT_DYNAMIC = error "Dynamic elf libraries not yet supported."
-    | otherwise = Nothing
+memSegment :: (Monad m, Integral w)
+           => RenderedElfSegment w
+           -> m (Maybe (MemSegment w))
+memSegment seg
+    | tp == PT_LOAD = return (Just mseg)
+    | tp == PT_DYNAMIC = fail "Dynamic elf files are not yet supported."
+    | otherwise = return Nothing
   where tp = elfSegmentType seg
         dta = seg^.elfSegmentData
         sz = fromIntegral $ elfSegmentMemSize seg

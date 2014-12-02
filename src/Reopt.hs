@@ -6,6 +6,8 @@ module Reopt
   , printExecutableAddressesInGlobalData
   , showBytes
   , slice
+    -- * Re-exports
+  , loadElf
   ) where
 
 import Control.Applicative
@@ -96,6 +98,7 @@ sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ]
   where buffer = elfSectionData s
         dta = disassembleBuffer defaultX64Disassembler buffer
 
+-- | Elf sections 
 printSectionDisassembly :: ElfSection Word64 -> IO ()
 printSectionDisassembly s = do
   let nm = elfSectionName s
