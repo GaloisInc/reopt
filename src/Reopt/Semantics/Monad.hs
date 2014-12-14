@@ -123,6 +123,9 @@ class ( Applicative m
   get :: Assignable m tp -> m (Value m tp)
   (.=) :: Assignable m tp -> Value m tp -> m ()
 
+-- | IsAssignmableBV m n is a constraint used to indicate that @m@ implements
+-- Semantics, and @Value m (BV n)@ supports the operations used to assign
+-- registers.
 type IsAssignableBV m n
    = ( IsValue (Value m)
      , Bits (Value m (BV n))

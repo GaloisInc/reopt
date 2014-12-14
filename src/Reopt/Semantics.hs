@@ -44,7 +44,7 @@ set_bitwise_flags res = do
   set_undefined af_flag
   set_result_flags res
 
-exec_adc :: IsAssignableBV m nn
+exec_adc :: IsAssignableBV m n
          => Assignable m (BV n)
          -> Value m (BV n)
          -> m ()

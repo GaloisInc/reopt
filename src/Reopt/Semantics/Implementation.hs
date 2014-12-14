@@ -21,7 +21,7 @@ import Data.Word
 
 import qualified Lang.Crucible.Generator as C
 import qualified Lang.Crucible.Syntax as C
-import Lang.Crucible.Utils.ParameterizedTypes
+import Lang.Crucible.Types
 import Lang.Crucible.Utils.TypeContext
 
 import Reopt.Memory
@@ -72,10 +72,11 @@ instance IsAssignable (Location s) where
 newtype Expr s tp = E (C.Expr s tp)
   deriving (C.IsExpr)
 
+{-
 instance IsValue (Expr s) where
   false = C.false
   true  = C.true
-
+-}
 
 ------------------------------------------------------------------------
 -- X86State
@@ -83,9 +84,12 @@ instance IsValue (Expr s) where
 -- | Components of an x86 processor state.
 type X86Fields = EmptyCtx
 
+type Word64Type = BVType (UnsignedBV 64) StandardStyle
+
+
 data X64State s
-   = X64State { regs :: V.Vector (C.Reg (BV 64))
-              , flags :: V.Vector (C.Reg s Bool)
+   = X64State { regs  :: V.Vector (C.Reg s Word64Type)
+              , flags :: V.Vector (C.Reg s BoolType)
               }
 
 {-
@@ -97,15 +101,15 @@ data X86State s = X86State
 ------------------------------------------------------------------------
 -- X86Generator
 
-type X86Generator s = C.Generator s X86State C.EmptyCtx ()
+type X86Generator s = C.Generator s X64State UnitType
 
 type instance Assignable (X86Generator s) = Location s
-type instance Value (X86Generator s) = Expr s
+--type instance Value (X86Generator s) = Expr s
 
 getPosition :: X86Generator s C.Position
 getPosition = undefined
 
-getFlagReg :: FlagReg -> X86Generator s (C.Reg s Bool)
+getFlagReg :: FlagReg -> X86Generator s (C.Reg s BoolType)
 getFlagReg = undefined
 {-
 getFlagReg f = do
@@ -114,6 +118,7 @@ getFlagReg f = do
   return r
 -}
 
+{-
 instance Semantics (X86Generator s) where
   set_undefined (FlagReg f) = do
     p <- getPosition
@@ -129,14 +134,18 @@ instance Semantics (X86Generator s) where
     p <- getPosition
     r <- getFlagReg f
     C.assignReg p r e
+-}
 
 type StructType args = Assignment Identity args
 
-type X86Inputs = EmptyCtx ::> X86State
+type X86State = BoolType -- TODO: Figure this out.
+
+type X86Inputs = EmptyCtx ::> BoolType
+-- TODO: Populate this.
 
 -- | Control flow graph for x86 basic block.  This takes the processor
 -- state as an argument, and returns the processor state as the output.
-type X86BlockCFG s = C.CFG s X86Inputs X86State
+type X86BlockCFG s = C.CFG s X86Inputs UnitType
 
 
 cfgFromAddress :: Memory Word64
@@ -158,6 +167,7 @@ completeProgram :: Memory Word64
 completeProgram mem addr = do
   undefined
 
+{-
 resolve :: Memory Word64
         -> [Word64]
         -> X86ProgramCFG s
@@ -166,3 +176,4 @@ resolve mem [] pg = return pg
 resolve mem (a:r) pg = do
   g <- cfgFromAddress mem a
   resolve mem r (Map.insert a g)
+-}
