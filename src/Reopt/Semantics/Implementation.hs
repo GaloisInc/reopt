@@ -84,7 +84,7 @@ instance IsValue (Expr s) where
 -- | Components of an x86 processor state.
 type X86Fields = EmptyCtx
 
-type Word64Type = BVType (UnsignedBV 64) StandardStyle
+type Word64Type = BVType 64
 
 
 data X64State s
