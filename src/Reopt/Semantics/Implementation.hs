@@ -8,21 +8,17 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Semantics.Implementation
   ( cfgFromAddress
+  , completeProgram
   ) where
 
 import Control.Applicative
 import Control.Monad.Identity
-import Control.Monad.State.Class
+import Control.Monad.State
 import Control.Monad.ST
 import Data.Map as Map
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import Data.Word
-
-import qualified Lang.Crucible.Generator as C
-import qualified Lang.Crucible.Syntax as C
-import Lang.Crucible.Types
-import Lang.Crucible.Utils.TypeContext
 
 import Reopt.Memory
 import Reopt.Semantics.Monad
@@ -33,6 +29,7 @@ import Reopt.Semantics.Monad
 -- | A flag register.
 data FlagReg
    = CF_FLAG
+   | DF_FLAG
    | PF_FLAG
    | AF_FLAG
    | ZF_FLAG
@@ -55,12 +52,13 @@ instance Enum FlagReg where
   fromEnum SF_FLAG = 4
   fromEnum OF_FLAG = 5
 
-data Location s tp where
-  FlagReg :: !(FlagReg) -> Location s Bool
+data ImpLocation tp where
+  FlagReg :: !FlagReg -> ImpLocation BoolType
 
-instance IsAssignable (Location s) where
+instance IsLocation ImpLocation where
   af_flag = FlagReg AF_FLAG
   cf_flag = FlagReg CF_FLAG
+  df_flag = FlagReg DF_FLAG
   of_flag = FlagReg OF_FLAG
   pf_flag = FlagReg PF_FLAG
   sf_flag = FlagReg SF_FLAG
@@ -69,8 +67,9 @@ instance IsAssignable (Location s) where
 ------------------------------------------------------------------------
 -- Expr IsValue instance
 
-newtype Expr s tp = E (C.Expr s tp)
-  deriving (C.IsExpr)
+data Expr s tp where
+   FalseExpr :: Expr s BoolType
+   TrueExpr :: Expr s BoolType
 
 {-
 instance IsValue (Expr s) where
@@ -79,18 +78,32 @@ instance IsValue (Expr s) where
 -}
 
 ------------------------------------------------------------------------
+-- X86ProgramCFG
+
+type Addr = Word64
+
+data Block = Block { blockLabel :: Addr
+                   , blockStmts :: [Stmt]
+                   }
+
+data Stmt where
+  UndefinedStmt :: Stmt
+
+-- | A complete CFG is a map from all reachable code locations
+-- to the block for that code location.
+type X86ProgramCFG = Map Addr Block
+
+------------------------------------------------------------------------
 -- X86State
 
--- | Components of an x86 processor state.
-type X86Fields = EmptyCtx
+newtype X64State = X64State ()
 
-type Word64Type = BVType 64
-
-
+{-
 data X64State s
-   = X64State { regs  :: V.Vector (C.Reg s Word64Type)
-              , flags :: V.Vector (C.Reg s BoolType)
+   = X64State { regs  :: V.Vector (C.Reg s (BVType 64))
+              , flags :: V.Vector (C.Reg s C.BoolType)
               }
+-}
 
 {-
 data X86State s = X86State
@@ -101,16 +114,17 @@ data X86State s = X86State
 ------------------------------------------------------------------------
 -- X86Generator
 
-type X86Generator s = C.Generator s X64State UnitType
+newtype X86Generator a = X86G { unX86G :: State X64State a }
 
-type instance Assignable (X86Generator s) = Location s
+type instance Location X86Generator = ImpLocation
 --type instance Value (X86Generator s) = Expr s
 
-getPosition :: X86Generator s C.Position
-getPosition = undefined
+--getPosition :: X86Generator s C.Position
+--getPosition = undefined
 
-getFlagReg :: FlagReg -> X86Generator s (C.Reg s BoolType)
-getFlagReg = undefined
+--getFlagReg :: FlagReg -> X86Generator s (C.Reg s BoolType)
+--getFlagReg = undefined
+
 {-
 getFlagReg f = do
   fr <- gets flagRegs
@@ -136,36 +150,20 @@ instance Semantics (X86Generator s) where
     C.assignReg p r e
 -}
 
-type StructType args = Assignment Identity args
-
-type X86State = BoolType -- TODO: Figure this out.
-
-type X86Inputs = EmptyCtx ::> BoolType
--- TODO: Populate this.
-
--- | Control flow graph for x86 basic block.  This takes the processor
--- state as an argument, and returns the processor state as the output.
-type X86BlockCFG s = C.CFG s X86Inputs UnitType
-
 
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> Word64
                   -- ^ Address to start disassembler form.
-               -> ST s (X86BlockCFG s)
-cfgFromAddress = undefined
-
-
--- | A complete CFG is a map from all reachable code locations
--- to the block for that code location.
-type X86ProgramCFG s = Map Word64 (X86BlockCFG s)
+               -> X86ProgramCFG
+cfgFromAddress = error "Reopt.Semantics.Implementation.cfgFromAddress undefined"
 
 
 completeProgram :: Memory Word64
-                -> Word64
-                -> ST s (X86ProgramCFG s)
+                -> Addr
+                -> X86ProgramCFG
 completeProgram mem addr = do
-  undefined
+  error "completeProgram undefined"
 
 {-
 resolve :: Memory Word64

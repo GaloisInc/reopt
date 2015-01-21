@@ -59,7 +59,7 @@ nextEntryPoints :: Simple Lens CFGState [Word64]
 nextEntryPoints = lens _knownEntryPoints (\s v -> s { _knownEntryPoints = v })
 
 finalCFG :: CFGState -> CFG
-finalCFG = undefined
+finalCFG = error "Reopt.CFG.Generator.finalCFG undefined"
 
 
 type Generator = StateT CFGState IO
@@ -104,14 +104,14 @@ explore_entry_point base = do
       -- Run instruction
       exec_instruction i
 
--- | 
+-- |
 exploreBlock :: Word64 -> Generator ()
 
 exec_instruction :: InstructionInstance -> Generator ()
 exec_instruction i = do
-  
 
-  disassembleInstruction 
+
+  disassembleInstruction
 
 undefined base
 
@@ -124,5 +124,4 @@ generate m entry_points = do
   finalCFG <$> execStateT explore_all_entry_points s0
 
 
-data BlockState 
-
+data BlockState

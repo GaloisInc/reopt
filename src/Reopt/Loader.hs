@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
-module Reopt.Loader 
+module Reopt.Loader
   ( loadExecutable
   , loadElf
   ) where
@@ -24,9 +24,7 @@ loadExecutable path = do
 
 -- | Load an elf file into memory.
 loadElf :: (ElfWidth w, Monad m) => Elf w -> m (Memory w)
-loadElf e = do
-  execStateT (insertElf e) emptyMemory
-
+loadElf e = execStateT (insertElf e) emptyMemory
 
 -- | Load an elf file into memory.
 insertElf :: (ElfWidth w, MonadState (Memory w) m) => Elf w -> m ()

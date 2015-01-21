@@ -13,6 +13,7 @@ import Paths_reopt (version)
 
 import Flexdis86
 import Reopt
+import Reopt.Semantics.Implementation
 
 ------------------------------------------------------------------------
 -- Args
@@ -68,7 +69,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
 reoptVersion :: String
 reoptVersion = "Reopt binary reoptimizer (reopt) "
              ++ versionString ++ ", June 2014."
-  where [h,l,r] = versionBranch version 
+  where [h,l,r] = versionBranch version
         versionString = show h ++ "." ++ show l ++ "." ++ show r
 
 copyrightNotice :: String
@@ -104,7 +105,7 @@ readElf64 path = do
     putStrLn "Please specify a binary."
     showUsage
     exitFailure
-  bs <- B.readFile path 
+  bs <- B.readFile path
   case parseElf bs of
     Left (_,msg) -> do
       putStrLn $ "Error reading " ++ path ++ ":"
@@ -129,18 +130,23 @@ dumpDisassembly path = do
 showCFG :: FilePath -> IO ()
 showCFG path = do
   e <- readElf64 path
+  mi <- elfInterpreter e
+  case mi of
+    Nothing ->
+      return ()
+    Just{} ->
+      fail "reopt does not yet support generating CFGs from dynamically linked executables."
+  -- TODO:
+  -- Build model of executable memory from elf.
   mem <- loadElf e
-
-  undefined mem
+  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
+  let g = completeProgram mem (elfEntry e)
+  error "showCFG undefined" g
 
 {-
       --printExecutableAddressesInGlobalData (args^.programPath)
-  mi <- elfInterpreter e
-  case mi of
-    Nothing -> putStrLn "No interpreter"
-    Just interp -> putStrLn interp
   print $ parseSymbolTables e
-  Just dyn_sect 
+  Just dyn_sect
     <- dynamicEntries e :: IO (Maybe (DynamicSection Word64 Int64 X86_64_RelocationType))
 --  print $ ppSymbolTableEntries (dynSymbols ds)
 --  print $ dynSymVersionTable ds

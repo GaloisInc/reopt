@@ -1,4 +1,4 @@
-module Reopt 
+module Reopt
   ( printDisassemblyLine
   , isCodeSection
   , instructionNames
@@ -7,7 +7,7 @@ module Reopt
   , showBytes
   , slice
     -- * Re-exports
-  , loadElf
+  , Reopt.Loader.loadElf
   ) where
 
 import Control.Applicative
@@ -29,10 +29,10 @@ import Flexdis86
 -- | @stringToFixedBuffer n s@ returns a string with length @n@ containing
 -- @s@ or a prefix of @s@.  If @n@ exceeds the length of @s@, then additional
 -- whitespace is appended to @s@.
-stringToFixedBuffer :: Int -> String -> String 
+stringToFixedBuffer :: Int -> String -> String
 stringToFixedBuffer g s | g == n = s
                         | g < n = take g s
-                        | otherwise = s ++ replicate (g-n) ' ' 
+                        | otherwise = s ++ replicate (g-n) ' '
   where n = length s
 
 -- | Slice part of bytestring.
@@ -41,7 +41,7 @@ slice i n b = B.take n (B.drop i b)
 
 showPaddedHex :: (Integral a, Show a) => Int -> a -> String
 showPaddedHex l v = assert (l >= n) $ replicate (l-n) '0' ++ s
-  where s = showHex v "" 
+  where s = showHex v ""
         n = length s
 
 word8AsHex :: Word8 -> String
@@ -54,7 +54,7 @@ showAddr64 = showPaddedHex 16
 showBytes :: B.ByteString -> String
 showBytes b = unwords (word8AsHex <$> B.unpack b)
 
--- | Digits required to show 
+-- | Digits required to show
 hexDigitsReq :: Bits a => a -> Int
 hexDigitsReq b = go 1 (b `shiftR` 4)
   where go r v | popCount v == 0 = r
@@ -94,11 +94,11 @@ instructionNames l = Set.fromList $ concatMap resolve l
   where resolve s = iiOp <$> sectionInstructions s
 
 sectionInstructions :: ElfSection Word64 -> [InstructionInstance]
-sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ] 
+sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ]
   where buffer = elfSectionData s
         dta = disassembleBuffer defaultX64Disassembler buffer
 
--- | Elf sections 
+-- | Elf sections
 printSectionDisassembly :: ElfSection Word64 -> IO ()
 printSectionDisassembly s = do
   let nm = elfSectionName s
