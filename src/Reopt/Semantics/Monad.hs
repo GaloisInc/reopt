@@ -45,21 +45,14 @@ import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
 -- IsLeq
 
 class IsLeq (m :: Nat) (n :: Nat) where
---  leqProof :: LeqProof m n
 
 instance IsLeq 1 16 where
---  leqProof = knownLeq
 instance IsLeq 4 16 where
---  leqProof = knownLeq
 instance IsLeq 8 16 where
---  leqProof = knownLeq
 
 instance IsLeq 1 32 where
---  leqProof = knownLeq
 instance IsLeq 4 32 where
---  leqProof = knownLeq
 instance IsLeq 8 32 where
---  leqProof = knownLeq
 
 instance IsLeq 1 64 where
 --  leqProof = knownLeq

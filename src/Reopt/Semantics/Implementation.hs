@@ -27,7 +27,7 @@ import Reopt.Semantics.Monad
 -- Location
 
 -- | A flag register.
-data FlagReg
+data FlagReg = FlagReg Int
    = CF_FLAG
    | DF_FLAG
    | PF_FLAG
@@ -96,8 +96,6 @@ type X86ProgramCFG = Map Addr Block
 ------------------------------------------------------------------------
 -- X86State
 
-newtype X64State = X64State ()
-
 {-
 data X64State s
    = X64State { regs  :: V.Vector (C.Reg s (BVType 64))
@@ -105,11 +103,9 @@ data X64State s
               }
 -}
 
-{-
-data X86State s = X86State
+data X86State = X86State
      { flagRegs :: Vector (C.Reg s Bool)
      }
--}
 
 ------------------------------------------------------------------------
 -- X86Generator
