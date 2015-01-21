@@ -28,6 +28,7 @@ module Reopt.Semantics.Monad
  , Location
  , Semantics(..)
  , IsLocationBV
+ , FullSemantics
  , Bits.Bits
  , Bits.complement
  , (Bits..&.)
@@ -190,15 +191,29 @@ class ( Applicative m
   when_ :: Value m BoolType -> m () -> m ()
   when_ p x = ifte_ p x (return ())
 
--- | IsAssignmableBV m n is a constraint used to indicate that @m@ implements
--- Semantics, and @Value m (BV n)@ supports the operations used to assign
--- registers.
-type IsLocationBV m n
-   = ( IsValue (Value m)
-     , Bits (Value m (BVType n))
+-- | Defines operations that need to be supported at a specific bitwidht.
+type SupportedBVWidth m n
+   = ( Bits (Value m (BVType n))
      , Num  (Value m (BVType n))
+     )
+
+-- | @IsLocationBV m n@ is a constraint used to indicate that @m@
+-- implements Semantics, and @Value m (BV n)@ supports the operations
+-- used to assign registers.
+type IsLocationBV m n
+   = ( SupportedBVWidth m n
      , Semantics m
      , IsLeq 1 n
      , IsLeq 4 n
      , IsLeq 8 n
+     )
+
+-- | @This defines all the constraint that must be implemented to support
+-- interpreting x86 instructions.
+type FullSemantics m
+   = ( Semantics m
+     , SupportedBVWidth m 8
+     , SupportedBVWidth m 16
+     , SupportedBVWidth m 32
+     , SupportedBVWidth m 64
      )

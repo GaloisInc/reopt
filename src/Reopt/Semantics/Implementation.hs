@@ -27,7 +27,9 @@ import Reopt.Semantics.Monad
 -- Location
 
 -- | A flag register.
-data FlagReg = FlagReg Int
+data FlagReg = FR Int
+
+{-
    = CF_FLAG
    | DF_FLAG
    | PF_FLAG
@@ -35,7 +37,9 @@ data FlagReg = FlagReg Int
    | ZF_FLAG
    | SF_FLAG
    | OF_FLAG
+-}
 
+{-
 instance Enum FlagReg where
   toEnum 0 = CF_FLAG
   toEnum 1 = PF_FLAG
@@ -51,11 +55,13 @@ instance Enum FlagReg where
   fromEnum ZF_FLAG = 3
   fromEnum SF_FLAG = 4
   fromEnum OF_FLAG = 5
+-}
 
 data ImpLocation tp where
   FlagReg :: !FlagReg -> ImpLocation BoolType
 
 instance IsLocation ImpLocation where
+{-
   af_flag = FlagReg AF_FLAG
   cf_flag = FlagReg CF_FLAG
   df_flag = FlagReg DF_FLAG
@@ -63,6 +69,7 @@ instance IsLocation ImpLocation where
   pf_flag = FlagReg PF_FLAG
   sf_flag = FlagReg SF_FLAG
   zf_flag = FlagReg ZF_FLAG
+-}
 
 ------------------------------------------------------------------------
 -- Expr IsValue instance
@@ -104,13 +111,13 @@ data X64State s
 -}
 
 data X86State = X86State
-     { flagRegs :: Vector (C.Reg s Bool)
+     { flagRegs :: Vector ()
      }
 
 ------------------------------------------------------------------------
 -- X86Generator
 
-newtype X86Generator a = X86G { unX86G :: State X64State a }
+newtype X86Generator a = X86G { unX86G :: State X86State a }
 
 type instance Location X86Generator = ImpLocation
 --type instance Value (X86Generator s) = Expr s
