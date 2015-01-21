@@ -38,9 +38,8 @@ import Control.Applicative
 import Data.Bits as Bits
 import GHC.TypeLits
 
+import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
-
---import Lang.Crucible.Utils.Width (LeqProof, knownLeq)
 
 ------------------------------------------------------------------------
 -- IsLeq
@@ -122,6 +121,15 @@ class ( Num (v DoubleType)
 
   -- | Return true expression if a unsigned add-with carry would overflow.
   uadc_overflows :: v (BVType n) -> v (BVType n) -> v BoolType -> v BoolType
+
+  -- | Perform a signed extension of a bitvector.
+  sext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
+
+  -- | Perform a unsigned extension of a bitvector.
+  uext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
+
+  -- | Performs a imul on
+  mul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | bsf "bit scan forward" returns the index of the least-significant
   -- bit that is 1.  Undefined if value is zero.
