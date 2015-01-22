@@ -36,11 +36,14 @@ getValue = undefined
 getBVLocation :: NatRepr n -> F.Value -> m (MLocation m (BVType n))
 getBVLocation = undefined
 
+binop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()) -> [F.Value] -> m ()
+binop f [loc, val] = do SomeBV v <- getValue val
+                        l <- getBVLocation (bv_width v) loc
+                        f l v
+binop _f vs        = error $ "binop: expecting 2 arguments, got " ++ show (length vs)
+
 execInstruction :: FullSemantics m => F.InstructionInstance -> m ()
 execInstruction ii =
   case (F.iiOp ii, F.iiArgs ii) of
-    ("add", [loc, val]) -> do
-      SomeBV v <- getValue val
-      l <- getBVLocation (bv_width v) loc
-      exec_add l v
+    ("add", vs) -> binop exec_add vs
     _ -> fail $ "Unsupported instruction: " ++ show ii
