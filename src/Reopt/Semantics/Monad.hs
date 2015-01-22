@@ -20,45 +20,46 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics.Monad
- ( -- * Type
-   Type(..)
- , TypeRepr(..)
-   -- * Location
- , Location(..)
- , low_dword
- , high_dword
- , cf_flag
- , pf_flag
- , af_flag
- , zf_flag
- , sf_flag
- , tf_flag
- , if_flag
- , df_flag
- , of_flag
-   -- * IsLeq utility
- , IsLeq
-   -- * Value operations
- , IsValue(..)
- , Pred
-   -- * Semantics
- , Semantics(..)
- , Value
- , MLocation
- , IsLocationBV
- , FullSemantics
- , SupportedBVWidth
-   -- * Re-exports
- , ValueBits(..)
- , ValueNum(..)
--- , Bits.complement
--- , (Bits..&.)
- , Flexdis86.Reg64
- ) where
+  ( -- * Type
+    Type(..)
+  , BoolType
+  , DoubleType
+  , TypeRepr(..)
+  , type_width
+  , KnownType(..)
+    -- * Location
+  , Location(..)
+  , loc_width
+  , low_dword
+  , high_dword
+  , cf_flag
+  , pf_flag
+  , af_flag
+  , zf_flag
+  , sf_flag
+  , tf_flag
+  , if_flag
+  , df_flag
+  , of_flag
+    -- * IsLeq utility
+  , IsLeq
+    -- * Value operations
+  , IsValue(..)
+  , Pred
+    -- * Semantics
+  , Semantics(..)
+  , Value
+  , MLocation
+  , SupportedBVWidth
+  , IsLocationBV
+  , FullSemantics
+    -- * Re-exports
+  , Flexdis86.Reg64
+  ) where
 
 import Control.Applicative
 --import Data.Bits as Bits
-import GHC.TypeLits
+import GHC.TypeLits as TypeLits
 
 import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
@@ -69,16 +70,23 @@ import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
 data Type
   = -- | An array of bits
     BVType Nat
-    -- | A Boolean vlaue
-  | BoolType
-    -- | A 64-bit floating point value in IEEE format.
-  | DoubleType
+
+type BoolType = BVType 1
+type DoubleType = BVType 64
+
 
 -- | A runtime representation of @Type@ for case matching purposes.
 data TypeRepr tp where
   BVTypeRepr     :: {-# UNPACK #-} !(NatRepr n) -> TypeRepr (BVType n)
-  BoolTypeRepr   :: TypeRepr BoolType
-  DoubleTypeRepr :: TypeRepr DoubleType
+
+type_width :: TypeRepr (BVType n) -> NatRepr n
+type_width (BVTypeRepr n) = n
+
+class KnownType tp where
+  knownType :: TypeRepr tp
+
+instance KnownNat n => KnownType (BVType n) where
+  knownType = BVTypeRepr knownNat
 
 ------------------------------------------------------------------------
 -- Location
@@ -103,31 +111,36 @@ data Location addr (tp :: Type) where
   -- We expect that the 128-bits will be used to store one of:
   -- * four 32-bit single-precision floating point numbers
   -- * two 64-bit double-precision floating point numbers (SSE2)
-  -- * two 64-bit integers (SSE2)
-  -- * four 32-bit integers (SSE2)
+  -- * two 64-bit integers         (SSE2)
+  -- * four 32-bit integers        (SSE2)
   -- * eight 16-bit short integers (SSE2)
   -- * sixteen 8-bit bytes or characters (SSE2)
   -- The source from this list is wikipedia:
   --   http://en.wikipedia.org/wiki/Streaming_SIMD_Extensions
-  XMMReg:: XMMReg
-        -> Location addr (BVType 128)
+  XMMReg :: XMMReg
+         -> Location addr (BVType 128)
 
   -- A portion of a bitvector value.
-  VecEntry :: Location addr (BVType n) -- Location of bitvector.
-           -> Int         -- Bit level offset.
-           -> TypeRepr tp -- Type representation
-           -> Location addr tp
+  BVSlice :: Location addr (BVType n) -- Location of bitvector.
+          -> Int         -- Bit level offset.
+          -> TypeRepr tp -- Type representation
+          -> Location addr tp
 
-knownBVType :: KnownNat n => TypeRepr (BVType n)
-knownBVType = BVTypeRepr knownNat
+loc_width :: Location addr (BVType n) -> NatRepr n
+loc_width (FlagReg _) = knownNat
+loc_width (MemoryAddr _ tp) = type_width tp
+loc_width (GPReg _) = knownNat
+loc_width (XMMReg _) = knownNat
+loc_width (BVSlice _ _ tp) = type_width tp
+
 
 -- | Return the low 32-bits of the location.
 low_dword :: Reg64 -> Location addr (BVType 32)
-low_dword r = VecEntry (GPReg r) 0 knownBVType
+low_dword r = BVSlice (GPReg r) 0 knownType
 
 -- | Return the high 32-bits of the location.
 high_dword :: Reg64 -> Location addr (BVType 32)
-high_dword r = VecEntry (GPReg r) 32 knownBVType
+high_dword r = BVSlice (GPReg r) 32 knownType
 
 -- | CF flag
 cf_flag :: Location addr BoolType
@@ -188,23 +201,20 @@ instance IsLeq 8 64 where
 ------------------------------------------------------------------------
 -- Values
 
-class ValueBits tp where
-  (.&.) :: tp -> tp -> tp
-  (.|.) :: tp -> tp -> tp
-  complement :: tp -> tp
-
-class ValueNum tp where
-  (.+) :: tp -> tp -> tp
-
 -- | @IsValue@ is a class used to define types expressions.
-class ( Num (v DoubleType)
-      , ValueBits (v BoolType)
-      )
-      => IsValue (v  :: Type -> *) where
+class IsValue (v  :: Type -> *) where
   false :: v BoolType
   true  :: v BoolType
 
+  -- | Add two bitvectors together dropping overflow.
+  bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | Add two double precision floating point numbers.
+  doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
+
+  (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  (.|.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  complement :: b (BVType n) -> v (BVType n)
 
   -- | Return true if value contains an even number of true bits.
   even_parity :: v (BVType 8) -> v BoolType
@@ -247,7 +257,7 @@ class ( Num (v DoubleType)
   sext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
+  uext :: (KnownNat n, IsLeq m n) => v (BVType m) -> v (BVType n)
 
   -- | Performs a imul on
   mul :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -304,19 +314,18 @@ class ( Applicative m
   when_ p x = ifte_ p x (return ())
 
 -- | Defines operations that need to be supported at a specific bitwidht.
-type SupportedBVWidth v n
-   = ( ValueBits (v (BVType n))
-     , ValueNum (v (BVType n))
-     , IsLeq 1 n
+type SupportedBVWidth n
+   = ( IsLeq 1 n
      , IsLeq 4 n
      , IsLeq 8 n
+     , KnownNat n
      )
 
 -- | @IsLocationBV m n@ is a constraint used to indicate that @m@
 -- implements Semantics, and @Value m (BV n)@ supports the operations
 -- used to assign registers.
 type IsLocationBV m n
-   = ( SupportedBVWidth (Value m) n
+   = ( SupportedBVWidth n
      , Semantics m
      )
 
@@ -324,8 +333,4 @@ type IsLocationBV m n
 -- interpreting x86 instructions.
 type FullSemantics m
    = ( Semantics m
-     , SupportedBVWidth (Value m) 8
-     , SupportedBVWidth (Value m) 16
-     , SupportedBVWidth (Value m) 32
-     , SupportedBVWidth (Value m) 64
      )

@@ -28,19 +28,19 @@ import Reopt.Semantics.Monad
 import Data.Parameterized.NatRepr
 
 data SomeBV v where
-  SomeBV :: SupportedBVWidth v n => v (BVType n) -> SomeBV v
+  SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
 
-getValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
-getValue = undefined
+getBVValue :: FullSemantics m => NatRepr n -> F.Value -> m (Value m (BVType n))
+getBVValue = undefined
 
-getBVLocation :: NatRepr n -> F.Value -> m (MLocation m (BVType n))
+getBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getBVLocation = undefined
 
 execInstruction :: FullSemantics m => F.InstructionInstance -> m ()
 execInstruction ii =
   case (F.iiOp ii, F.iiArgs ii) of
     ("add", [loc, val]) -> do
-      SomeBV v <- getValue val
-      l <- getBVLocation (bv_width v) loc
+      SomeBV l <- getBVLocation loc
+      v <- getBVValue (loc_width l) val
       exec_add l v
     _ -> fail $ "Unsupported instruction: " ++ show ii

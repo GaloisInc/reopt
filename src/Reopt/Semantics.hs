@@ -70,7 +70,7 @@ exec_adc dst y = do
   af_flag .= uadc4_overflows dst_val y c
   cf_flag .= uadc_overflows  dst_val y c
   -- Set result value.
-  set_result_value dst (dst_val .+ y)
+  set_result_value dst (dst_val `bvAdd` y `bvAdd` uext c)
 
 -- | @add@
 exec_add :: IsLocationBV m n
@@ -85,11 +85,11 @@ exec_add dst y = do
   af_flag .= uadd4_overflows dst_val y
   cf_flag .= uadd_overflows  dst_val y
   -- Set result value.
-  set_result_value dst (dst_val .+ y)
+  set_result_value dst (dst_val `bvAdd` y)
 
 -- | Add sign double
 exec_addsd :: Semantics m => MLocation m DoubleType -> Value m DoubleType -> m ()
-exec_addsd r y = modify r (+y)
+exec_addsd r y = modify r (`doubleAdd` y)
 
 -- | And two values together.
 exec_and :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
