@@ -108,19 +108,24 @@ data X64State s
               }
 -}
 
-data Expr tp where
+data App f tp where
   -- Concatenate two bitvectors together (low-bits are first)
   ConcatV :: {-#UNPACK #-} !(NatRepr n)
-          -> !(Expr (BVType n))
-          -> !(Expr (BVType n))
-          -> Expr (BVType (n+n))
+          -> !(f (BVType n))
+          -> !(f (BVType n))
+          -> App f (BVType (n+n))
+  AndApp :: !(f BoolType) -> !(f BoolType) -> App f BoolType
+  OrApp  :: !(f BoolType) -> !(f BoolType) -> App f BoolType
+  NotApp :: !(f BoolType) -> App f BoolType
 
-instance ValueBits (Expr BoolType) where
-instance ValueNum  (Expr (BVType n)) where
-instance Num (Expr DoubleType) where
+data Expr tp where
+  Expr :: !(TypeRepr tp) -> !(App Expr tp) -> Expr tp
+  TrueExpr :: Expr BoolType
+  FalseExpr :: Expr BoolType
 
 instance IsValue Expr where
-
+  true  = TrueExpr
+  false = FalseExpr
 
 data X86State = X86State
      { _flagRegs :: Expr (BVType 64)

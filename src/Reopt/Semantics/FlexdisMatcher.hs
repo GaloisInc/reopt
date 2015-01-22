@@ -28,17 +28,17 @@ import Reopt.Semantics.Monad
 import Data.Parameterized.NatRepr
 
 data SomeBV v where
-  SomeBV :: SupportedBVWidth v n => v (BVType n) -> SomeBV v
+  SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
 
-getValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
-getValue = undefined
+getBVValue :: FullSemantics m => NatRepr n -> F.Value -> m (Value m (BVType n))
+getBVValue = undefined
 
-getBVLocation :: NatRepr n -> F.Value -> m (MLocation m (BVType n))
+getBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getBVLocation = undefined
 
 binop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()) -> [F.Value] -> m ()
-binop f [loc, val] = do SomeBV v <- getValue val
-                        l <- getBVLocation (bv_width v) loc
+binop f [loc, val] = do SomeBV l <- getBVLocation loc
+                        v <- getBVValue (loc_width l) val
                         f l v
 binop _f vs        = error $ "binop: expecting 2 arguments, got " ++ show (length vs)
 
