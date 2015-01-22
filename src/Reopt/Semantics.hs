@@ -88,8 +88,8 @@ exec_add dst y = do
   set_result_value dst (dst_val `bvAdd` y)
 
 -- | Add sign double
-exec_addsd :: Semantics m => MLocation m DoubleType -> Value m DoubleType -> m ()
-exec_addsd r y = modify r (`doubleAdd` y)
+exec_addsd :: Semantics m => MLocation m XMMType -> Value m DoubleType -> m ()
+exec_addsd r y = modify (xmm_low64 r) (`doubleAdd` y)
 
 -- | And two values together.
 exec_and :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()

@@ -24,11 +24,13 @@ module Reopt.Semantics.Monad
     Type(..)
   , BoolType
   , DoubleType
+  , XMMType
   , TypeRepr(..)
   , type_width
   , KnownType(..)
     -- * Location
   , Location(..)
+  , xmm_low64
   , loc_width
   , low_dword
   , high_dword
@@ -73,6 +75,7 @@ data Type
 
 type BoolType = BVType 1
 type DoubleType = BVType 64
+type XMMType = BVType 128
 
 
 -- | A runtime representation of @Type@ for case matching purposes.
@@ -133,6 +136,8 @@ loc_width (GPReg _) = knownNat
 loc_width (XMMReg _) = knownNat
 loc_width (BVSlice _ _ tp) = type_width tp
 
+xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
+xmm_low64 l = BVSlice l 0 knownType
 
 -- | Return the low 32-bits of the location.
 low_dword :: Reg64 -> Location addr (BVType 32)
@@ -212,8 +217,13 @@ class IsValue (v  :: Type -> *) where
   -- | Add two double precision floating point numbers.
   doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
 
+  -- | Bitwise and
   (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
+  -- | Bitwise or
   (.|.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
+  -- | Bitwise complement
   complement :: b (BVType n) -> v (BVType n)
 
   -- | Return true if value contains an even number of true bits.
@@ -273,7 +283,6 @@ class IsValue (v  :: Type -> *) where
 
   -- | Returns the width of a bit-vector value.
   bv_width :: v (BVType n) -> NatRepr n
-
 
 ------------------------------------------------------------------------
 -- Monadic definition
