@@ -43,7 +43,7 @@ set_result_flags res = do
   pf_flag .= even_parity (least_byte res)
 
 -- | Assign value to location and update corresponding flags.
-set_result_value :: IsLocationBV m n => Location m (BVType n) -> Value m (BVType n) -> m ()
+set_result_value :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 set_result_value dst res = do
   set_result_flags res
   dst .= res
@@ -57,7 +57,7 @@ set_bitwise_flags res = do
   set_result_flags res
 
 exec_adc :: IsLocationBV m n
-         => Location m (BVType n)
+         => MLocation m (BVType n)
          -> Value m (BVType n)
          -> m ()
 exec_adc dst y = do
@@ -70,11 +70,11 @@ exec_adc dst y = do
   af_flag .= uadc4_overflows dst_val y c
   cf_flag .= uadc_overflows  dst_val y c
   -- Set result value.
-  set_result_value dst (dst_val + y)
+  set_result_value dst (dst_val .+ y)
 
 -- | @add@
 exec_add :: IsLocationBV m n
-         => Location m (BVType n)
+         => MLocation m (BVType n)
          -> Value m (BVType n)
          -> m ()
 exec_add dst y = do
@@ -85,21 +85,21 @@ exec_add dst y = do
   af_flag .= uadd4_overflows dst_val y
   cf_flag .= uadd_overflows  dst_val y
   -- Set result value.
-  set_result_value dst (dst_val + y)
+  set_result_value dst (dst_val .+ y)
 
 -- | Add sign double
-exec_addsd :: Semantics m => Location m DoubleType -> Value m DoubleType -> m ()
+exec_addsd :: Semantics m => MLocation m DoubleType -> Value m DoubleType -> m ()
 exec_addsd r y = modify r (+y)
 
 -- | And two values together.
-exec_and :: IsLocationBV m n => Location m (BVType n) -> Value m (BVType n) -> m ()
+exec_and :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_and r y = do
   x <- get r
   let z = x .&. y
   set_bitwise_flags z
   r .= z
 
-exec_bsf :: IsLocationBV m n => Location m (BVType n) -> Value m (BVType n) -> m ()
+exec_bsf :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_bsf r y = do
   zf_flag .= is_zero y
   set_undefined cf_flag
@@ -109,7 +109,7 @@ exec_bsf r y = do
   set_undefined pf_flag
   r .= bsf y
 
-exec_bsr :: IsLocationBV m n => Location m (BVType n) -> Value m (BVType n) -> m ()
+exec_bsr :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_bsr r y = do
   zf_flag .= is_zero y
   set_undefined cf_flag
@@ -120,7 +120,7 @@ exec_bsr r y = do
   r .= bsr y
 
 -- | Run bswap instruction.
-exec_bswap :: IsLocationBV m n => Location m (BVType n) -> m ()
+exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_bswap r = modify r reverse_bytes
 
 -- | Run clc instruction.
@@ -137,7 +137,7 @@ is_above = do
   zf <- get zf_flag
   return $ complement cf .&. complement zf
 
-exec_cmova :: Semantics m => Location m (BVType n) -> Value m (BVType n) -> m ()
+exec_cmova :: Semantics m => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_cmova r y = do
   a <- is_above
   when_ a (r .= y)

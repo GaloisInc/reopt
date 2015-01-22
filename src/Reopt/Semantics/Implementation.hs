@@ -12,6 +12,7 @@ module Reopt.Semantics.Implementation
   ) where
 
 import Control.Applicative
+import Control.Lens
 import Control.Monad.Identity
 import Control.Monad.State
 import Control.Monad.ST
@@ -19,15 +20,14 @@ import Data.Map as Map
 import Data.Vector (Vector)
 import qualified Data.Vector as V
 import Data.Word
+import GHC.TypeLits
+import Data.Parameterized.NatRepr
 
 import Reopt.Memory
 import Reopt.Semantics.Monad
 
 ------------------------------------------------------------------------
 -- Location
-
--- | A flag register.
-data FlagReg = FR Int
 
 {-
    = CF_FLAG
@@ -57,10 +57,6 @@ instance Enum FlagReg where
   fromEnum OF_FLAG = 5
 -}
 
-data ImpLocation tp where
-  FlagReg :: !FlagReg -> ImpLocation BoolType
-
-instance IsLocation ImpLocation where
 {-
   af_flag = FlagReg AF_FLAG
   cf_flag = FlagReg CF_FLAG
@@ -74,9 +70,11 @@ instance IsLocation ImpLocation where
 ------------------------------------------------------------------------
 -- Expr IsValue instance
 
+{-
 data Expr s tp where
    FalseExpr :: Expr s BoolType
    TrueExpr :: Expr s BoolType
+-}
 
 {-
 instance IsValue (Expr s) where
@@ -110,17 +108,34 @@ data X64State s
               }
 -}
 
+data Expr tp where
+  -- Concatenate two bitvectors together (low-bits are first)
+  ConcatV :: {-#UNPACK #-} !(NatRepr n)
+          -> !(Expr (BVType n))
+          -> !(Expr (BVType n))
+          -> Expr (BVType (n+n))
+
+instance ValueBits (Expr BoolType) where
+instance ValueNum  (Expr (BVType n)) where
+instance Num (Expr DoubleType) where
+
+instance IsValue Expr where
+
+
 data X86State = X86State
-     { flagRegs :: Vector ()
+     { _flagRegs :: Expr (BVType 64)
      }
+
+flagRegs :: Simple Lens X86State (Expr (BVType 64))
+flagRegs = lens _flagRegs (\s v -> s { _flagRegs = v })
 
 ------------------------------------------------------------------------
 -- X86Generator
 
 newtype X86Generator a = X86G { unX86G :: State X86State a }
+  deriving (Functor, Applicative, Monad)
 
-type instance Location X86Generator = ImpLocation
---type instance Value (X86Generator s) = Expr s
+type instance Value X86Generator = Expr
 
 --getPosition :: X86Generator s C.Position
 --getPosition = undefined
@@ -135,9 +150,9 @@ getFlagReg f = do
   return r
 -}
 
-{-
-instance Semantics (X86Generator s) where
-  set_undefined (FlagReg f) = do
+instance Semantics X86Generator where
+
+{-  set_undefined (FlagReg f) = do
     p <- getPosition
     r <- getFlagReg f
     C.assignReg p r C.false

@@ -15,32 +15,155 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics.Monad
- ( IsLocation(..)
+ ( -- * Type
+   Type(..)
+ , TypeRepr(..)
+   -- * Location
+ , Location(..)
+ , low_dword
+ , high_dword
+ , cf_flag
+ , pf_flag
+ , af_flag
+ , zf_flag
+ , sf_flag
+ , tf_flag
+ , if_flag
+ , df_flag
+ , of_flag
+   -- * IsLeq utility
+ , IsLeq
+   -- * Value operations
  , IsValue(..)
- , IsLeq(..)
- , ValueType(..)
- , Value
  , Pred
- , Location
+   -- * Semantics
  , Semantics(..)
+ , Value
+ , MLocation
  , IsLocationBV
  , FullSemantics
- , Bits.Bits
- , Bits.complement
- , (Bits..&.)
+ , SupportedBVWidth
+   -- * Re-exports
+ , ValueBits(..)
+ , ValueNum(..)
+-- , Bits.complement
+-- , (Bits..&.)
  , Flexdis86.Reg64
  ) where
 
 import Control.Applicative
-import Data.Bits as Bits
+--import Data.Bits as Bits
 import GHC.TypeLits
 
 import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
+
+------------------------------------------------------------------------
+-- Type
+
+data Type
+  = -- | An array of bits
+    BVType Nat
+    -- | A Boolean vlaue
+  | BoolType
+    -- | A 64-bit floating point value in IEEE format.
+  | DoubleType
+
+-- | A runtime representation of @Type@ for case matching purposes.
+data TypeRepr tp where
+  BVTypeRepr     :: {-# UNPACK #-} !(NatRepr n) -> TypeRepr (BVType n)
+  BoolTypeRepr   :: TypeRepr BoolType
+  DoubleTypeRepr :: TypeRepr DoubleType
+
+------------------------------------------------------------------------
+-- Location
+
+-- | This returns the type associated with values that can be read
+-- or assigned for the semantics monad.
+data Location addr (tp :: Type) where
+  -- A flag register (a constant from 0 to 63).
+  -- Constant defined in:
+  --  Intel 64 and IA-32 Architectures Software Developer’s Manual
+  --  June 2013, Vol 1.  3-15
+  FlagReg :: !Int -> Location addr BoolType
+
+  -- A location in the virtual address space of the process.
+  MemoryAddr :: addr -> TypeRepr tp  -> Location addr tp
+
+  -- | A general purpose register.
+  GPReg :: Reg64 -> Location addr (BVType 64)
+
+  -- A XMM register with type representation information.
+  --
+  -- We expect that the 128-bits will be used to store one of:
+  -- * four 32-bit single-precision floating point numbers
+  -- * two 64-bit double-precision floating point numbers (SSE2)
+  -- * two 64-bit integers (SSE2)
+  -- * four 32-bit integers (SSE2)
+  -- * eight 16-bit short integers (SSE2)
+  -- * sixteen 8-bit bytes or characters (SSE2)
+  -- The source from this list is wikipedia:
+  --   http://en.wikipedia.org/wiki/Streaming_SIMD_Extensions
+  XMMReg:: XMMReg
+        -> Location addr (BVType 128)
+
+  -- A portion of a bitvector value.
+  VecEntry :: Location addr (BVType n) -- Location of bitvector.
+           -> Int         -- Bit level offset.
+           -> TypeRepr tp -- Type representation
+           -> Location addr tp
+
+knownBVType :: KnownNat n => TypeRepr (BVType n)
+knownBVType = BVTypeRepr knownNat
+
+-- | Return the low 32-bits of the location.
+low_dword :: Reg64 -> Location addr (BVType 32)
+low_dword r = VecEntry (GPReg r) 0 knownBVType
+
+-- | Return the high 32-bits of the location.
+high_dword :: Reg64 -> Location addr (BVType 32)
+high_dword r = VecEntry (GPReg r) 32 knownBVType
+
+-- | CF flag
+cf_flag :: Location addr BoolType
+cf_flag = FlagReg 0
+
+-- | PF flag
+pf_flag :: Location addr BoolType
+pf_flag = FlagReg 2
+
+-- | AF flag
+af_flag :: Location addr BoolType
+af_flag = FlagReg 4
+
+-- | ZF flag
+zf_flag :: Location addr BoolType
+zf_flag = FlagReg 6
+
+-- | SF flag
+sf_flag :: Location addr BoolType
+sf_flag = FlagReg 7
+
+-- | TF flag
+tf_flag :: Location addr BoolType
+tf_flag = FlagReg 8
+
+-- | IF flag
+if_flag :: Location addr BoolType
+if_flag = FlagReg 9
+
+-- | DF flag
+df_flag :: Location addr BoolType
+df_flag = FlagReg 10
+
+-- | OF flag
+of_flag :: Location addr BoolType
+of_flag = FlagReg 11
 
 ------------------------------------------------------------------------
 -- IsLeq
@@ -63,21 +186,25 @@ instance IsLeq 8 64 where
 --  leqProof = knownLeq
 
 ------------------------------------------------------------------------
--- SemanticsMonad
+-- Values
 
-data ValueType
-  = BVType GHC.TypeLits.Nat
-  | BoolType
-    -- | A 64-bit floating point value in IEEE format.
-  | DoubleType
+class ValueBits tp where
+  (.&.) :: tp -> tp -> tp
+  (.|.) :: tp -> tp -> tp
+  complement :: tp -> tp
+
+class ValueNum tp where
+  (.+) :: tp -> tp -> tp
 
 -- | @IsValue@ is a class used to define types expressions.
 class ( Num (v DoubleType)
-      , Bits (v BoolType)
+      , ValueBits (v BoolType)
       )
-      => IsValue (v  :: ValueType -> *) where
+      => IsValue (v  :: Type -> *) where
   false :: v BoolType
   true  :: v BoolType
+
+
 
   -- | Return true if value contains an even number of true bits.
   even_parity :: v (BVType 8) -> v BoolType
@@ -134,52 +261,37 @@ class ( Num (v DoubleType)
   -- All bits at indices less than return value must be unset.
   bsr :: v (BVType n) -> v (BVType n)
 
--- | This defines expressions that need to be assignable.
-class IsLocation (v :: ValueType -> *) where
-  af_flag :: v BoolType
-  cf_flag :: v BoolType
-  df_flag :: v BoolType
-  of_flag :: v BoolType
-  pf_flag :: v BoolType
-  sf_flag :: v BoolType
-  zf_flag :: v BoolType
+  -- | Returns the width of a bit-vector value.
+  bv_width :: v (BVType n) -> NatRepr n
 
-  -- | The bits 0 to 63 stored as a floating point double.
-  xmm_low :: XMMReg -> v DoubleType
 
-  -- | Return the high 32-bit of the location.
-  low_dword :: Reg64 -> v (BVType 32)
-
-  -- | Return the high 32-bit of the location.
-  high_dword :: Reg64 -> v (BVType 32)
+------------------------------------------------------------------------
+-- Monadic definition
 
 -- | This returns the type associated with values that can be read
 -- for the semantics monad.
-type family Value (m :: * -> *) :: ValueType -> *
-
--- | This returns the type associated with values that can be read
--- or assigned for the semantics monad.
-type family Location (m :: * -> *) :: ValueType -> *
+type family Value (m :: * -> *) :: Type -> *
 
 type Pred m = Value m BoolType
+
+type MLocation m = Location (Value m (BVType 64))
 
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m
       , Monad m
-      , IsLocation (Location m)
       , IsValue (Value m)
       ) => Semantics m where
   -- | Mark a Boolean variable as undefined.
-  set_undefined :: Location m BoolType -> m ()
+  set_undefined :: MLocation m BoolType -> m ()
 
   -- | Read from the given location.
-  get :: Location m tp -> m (Value m tp)
+  get :: MLocation m tp -> m (Value m tp)
   -- | Assign a value to alocation.
-  (.=) :: Location m tp -> Value m tp -> m ()
+  (.=) :: MLocation m tp -> Value m tp -> m ()
 
   -- | Modify the value at a location
-  modify :: Location m tp -> (Value m tp -> Value m tp) -> m ()
+  modify :: MLocation m tp -> (Value m tp -> Value m tp) -> m ()
   modify r f = do
     x <- get r
     r .= f x
@@ -192,28 +304,28 @@ class ( Applicative m
   when_ p x = ifte_ p x (return ())
 
 -- | Defines operations that need to be supported at a specific bitwidht.
-type SupportedBVWidth m n
-   = ( Bits (Value m (BVType n))
-     , Num  (Value m (BVType n))
+type SupportedBVWidth v n
+   = ( ValueBits (v (BVType n))
+     , ValueNum (v (BVType n))
+     , IsLeq 1 n
+     , IsLeq 4 n
+     , IsLeq 8 n
      )
 
 -- | @IsLocationBV m n@ is a constraint used to indicate that @m@
 -- implements Semantics, and @Value m (BV n)@ supports the operations
 -- used to assign registers.
 type IsLocationBV m n
-   = ( SupportedBVWidth m n
+   = ( SupportedBVWidth (Value m) n
      , Semantics m
-     , IsLeq 1 n
-     , IsLeq 4 n
-     , IsLeq 8 n
      )
 
 -- | @This defines all the constraint that must be implemented to support
 -- interpreting x86 instructions.
 type FullSemantics m
    = ( Semantics m
-     , SupportedBVWidth m 8
-     , SupportedBVWidth m 16
-     , SupportedBVWidth m 32
-     , SupportedBVWidth m 64
+     , SupportedBVWidth (Value m) 8
+     , SupportedBVWidth (Value m) 16
+     , SupportedBVWidth (Value m) 32
+     , SupportedBVWidth (Value m) 64
      )

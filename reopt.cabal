@@ -34,7 +34,7 @@ library
     Reopt.Loader
     Reopt.Memory
     Reopt.Semantics
---    Reopt.Semantics.FlexdisMatcher
+    Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Implementation
     Reopt.Semantics.Monad
 
