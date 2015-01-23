@@ -30,6 +30,7 @@ import Data.Parameterized.NatRepr
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
 
+-- | Extracts the value 
 getBVValue :: FullSemantics m => NatRepr n -> F.Value -> m (Value m (BVType n))
 getBVValue = undefined
 
