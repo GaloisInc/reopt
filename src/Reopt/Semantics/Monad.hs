@@ -269,13 +269,14 @@ class IsValue (v  :: Type -> *) where
   -- | Perform a unsigned extension of a bitvector.
   uext :: (KnownNat n, IsLeq m n) => v (BVType m) -> v (BVType n)
 
-  -- | Performs a imul on
+  -- | Performs a multiplication of two bitvector values.
   mul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | bsf "bit scan forward" returns the index of the least-significant
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices less than return value must be unset.
   bsf :: v (BVType n) -> v (BVType n)
+
   -- | bsr "bit scan reverse" returns the index of the most-significant
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices less than return value must be unset.
