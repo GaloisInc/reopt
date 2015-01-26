@@ -34,6 +34,8 @@ module Reopt.Semantics.Monad
   , loc_width
   , low_dword
   , high_dword
+  , reg_low
+  , reg_high
   , cf_flag
   , pf_flag
   , af_flag
@@ -43,8 +45,12 @@ module Reopt.Semantics.Monad
   , if_flag
   , df_flag
   , of_flag
+  , mkBVAddr
+  -- ** Registers
+  , rsp, rbp, r_rax, rax
     -- * IsLeq utility
   , IsLeq
+  , n8, n16, n32, n64
     -- * Value operations
   , IsValue(..)
   , Pred
@@ -64,7 +70,22 @@ import Control.Applicative
 import GHC.TypeLits as TypeLits
 
 import Data.Parameterized.NatRepr
-import Flexdis86.InstructionSet as Flexdis86 (Reg64, XMMReg)
+import Flexdis86.InstructionSet (Reg64, XMMReg)
+import qualified Flexdis86.InstructionSet as Flexdis86
+
+
+-- FIXME: move
+n8 :: NatRepr 8
+n8 = knownNat
+
+n16 :: NatRepr 16
+n16 = knownNat
+
+n32 :: NatRepr 32
+n32 = knownNat
+
+n64 :: NatRepr 64
+n64 = knownNat
 
 ------------------------------------------------------------------------
 -- Type
@@ -73,10 +94,9 @@ data Type
   = -- | An array of bits
     BVType Nat
 
-type BoolType = BVType 1
+type BoolType   = BVType 1
 type DoubleType = BVType 64
-type XMMType = BVType 128
-
+type XMMType    = BVType 128
 
 -- | A runtime representation of @Type@ for case matching purposes.
 data TypeRepr tp where
@@ -109,6 +129,8 @@ data Location addr (tp :: Type) where
   -- | A general purpose register.
   GPReg :: Reg64 -> Location addr (BVType 64)
 
+  IPReg :: Location addr (BVType 64)
+
   -- A XMM register with type representation information.
   --
   -- We expect that the 128-bits will be used to store one of:
@@ -133,6 +155,7 @@ loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (FlagReg _) = knownNat
 loc_width (MemoryAddr _ tp) = type_width tp
 loc_width (GPReg _) = knownNat
+loc_width IPReg      = knownNat
 loc_width (XMMReg _) = knownNat
 loc_width (BVSlice _ _ tp) = type_width tp
 
@@ -183,10 +206,30 @@ df_flag = FlagReg 10
 of_flag :: Location addr BoolType
 of_flag = FlagReg 11
 
+-- | Tuen an address into a location of size @n
+mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
+mkBVAddr sz addr = MemoryAddr addr (BVTypeRepr sz)
+
+-- | This addresses e.g. al and ah
+reg_low, reg_high :: NatRepr n -> Reg64 -> Location addr (BVType n)
+reg_low  n r = BVSlice (GPReg r) 0 (BVTypeRepr n)
+reg_high n r = BVSlice (GPReg r) (widthVal n) (BVTypeRepr n)
+
+r_rax :: Reg64
+r_rax = Flexdis86.rax
+
+rsp, rbp, rax :: Location addr (BVType 64)
+rax = GPReg Flexdis86.rax
+rsp = GPReg Flexdis86.rsp
+rbp = GPReg Flexdis86.rbp
+
+
 ------------------------------------------------------------------------
 -- IsLeq
 
 class IsLeq (m :: Nat) (n :: Nat) where
+
+instance IsLeq 1 4 where
 
 instance IsLeq 1 16 where
 instance IsLeq 4 16 where
@@ -195,6 +238,7 @@ instance IsLeq 8 16 where
 instance IsLeq 1 32 where
 instance IsLeq 4 32 where
 instance IsLeq 8 32 where
+instance IsLeq 16 32 where
 
 instance IsLeq 1 64 where
 --  leqProof = knownLeq
@@ -203,16 +247,39 @@ instance IsLeq 4 64 where
 instance IsLeq 8 64 where
 --  leqProof = knownLeq
 
+instance IsLeq 32 64 where
+instance IsLeq 64 64 where
+
 ------------------------------------------------------------------------
 -- Values
 
 -- | @IsValue@ is a class used to define types expressions.
 class IsValue (v  :: Type -> *) where
+
+  -- | fold_msbf f init bv == f (msb bv) (f ... (f (lsb bv) init))
+  fold_msbf :: (v (BVType 1) -> b -> b) -> b -> v (BVType n) -> b
+
+  -- | fold_lsbf f init bv == f (lsb bv) (f ... (f (msb bv) init))
+  fold_lsbf :: (v (BVType 1) -> b -> b) -> b -> v (BVType n) -> b
+
+  -- | undefined as according to the intel manual
+  undef :: v a
+
   false :: v BoolType
   true  :: v BoolType
 
+  -- | Construct a literal bit vector.  The result is undefined if the
+  -- literal does not fit withint the given number of bits.
+  bvLit :: NatRepr n -> Int -> v (BVType n)
+
   -- | Add two bitvectors together dropping overflow.
   bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
+  -- | Subtract two vectors, ignoring underflow.
+  bvSub :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
+  -- | Exclusive or
+  bvXor :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Add two double precision floating point numbers.
   doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
@@ -223,8 +290,12 @@ class IsValue (v  :: Type -> *) where
   -- | Bitwise or
   (.|.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | Equality
+  (.=.) :: v (BVType n) -> v (BVType n) -> v BoolType
+  bv .=. bv' = is_zero (bv `bvXor` bv')
+
   -- | Bitwise complement
-  complement :: b (BVType n) -> v (BVType n)
+  complement :: v (BVType n) -> v (BVType n)
 
   -- | Return true if value contains an even number of true bits.
   even_parity :: v (BVType 8) -> v BoolType
@@ -250,10 +321,18 @@ class IsValue (v  :: Type -> *) where
   sadd_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
   sadd_overflows x y = sadc_overflows x y false
 
+  -- | Return true expression is signed sub overflows.
+  ssub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
+
   -- | Return true expression is unsigned add overflows.  See
   -- @sadc_overflows@ for definition.
   uadd_overflows :: v (BVType n) -> v (BVType n) -> v BoolType
   uadd_overflows x y = uadc_overflows x y false
+
+
+
+  -- | Return true expression is unsigned sub overflows.
+  usub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | Return true expression if a signed add-with carry would overflow.
   -- This holds if the sign bits of the arguments are the same, and the sign
@@ -276,6 +355,7 @@ class IsValue (v  :: Type -> *) where
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices less than return value must be unset.
   bsf :: v (BVType n) -> v (BVType n)
+  -- bsf bv = fold_lsbf ()
 
   -- | bsr "bit scan reverse" returns the index of the most-significant
   -- bit that is 1.  Undefined if value is zero.
@@ -304,6 +384,7 @@ class ( Applicative m
       ) => Semantics m where
   -- | Mark a Boolean variable as undefined.
   set_undefined :: MLocation m BoolType -> m ()
+  set_undefined l = l .= undef
 
   -- | Read from the given location.
   get :: MLocation m tp -> m (Value m tp)
