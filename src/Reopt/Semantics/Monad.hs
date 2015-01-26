@@ -24,6 +24,7 @@ module Reopt.Semantics.Monad
     Type(..)
   , BoolType
   , DoubleType
+  , FloatType
   , XMMType
   , TypeRepr(..)
   , type_width
@@ -95,6 +96,7 @@ data Type
     BVType Nat
 
 type BoolType   = BVType 1
+type FloatType  = BVType 32
 type DoubleType = BVType 64
 type XMMType    = BVType 128
 
@@ -126,7 +128,7 @@ data Location addr (tp :: Type) where
   -- A location in the virtual address space of the process.
   MemoryAddr :: addr -> TypeRepr tp  -> Location addr tp
 
-  -- | A general purpose register.
+  -- A general purpose register.
   GPReg :: Reg64 -> Location addr (BVType 64)
 
   IPReg :: Location addr (BVType 64)
