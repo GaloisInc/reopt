@@ -45,15 +45,15 @@ jmp
 lea
 leave
 mov
-
--- Not done
-
 movapd
 movaps
 movsd
 movss
 movsx
 movsxd
+
+-- Not done
+
 movzx
 mul
 mulsd

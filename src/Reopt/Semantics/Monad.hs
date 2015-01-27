@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.Monad
@@ -69,11 +70,11 @@ module Reopt.Semantics.Monad
 import Control.Applicative
 --import Data.Bits as Bits
 import GHC.TypeLits as TypeLits
+import GHC.TypeLits (type (<=) )
 
 import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet (Reg64, XMMReg)
 import qualified Flexdis86.InstructionSet as Flexdis86
-
 
 -- FIXME: move
 n8 :: NatRepr 8
@@ -133,6 +134,11 @@ data Location addr (tp :: Type) where
 
   IPReg :: Location addr (BVType 64)
 
+  CReg :: Flexdis86.ControlReg -> Location addr (BVType 64)
+  DReg :: Flexdis86.DebugReg -> Location addr (BVType 64)
+  MMXReg :: Flexdis86.MMXReg -> Location addr (BVType 64)
+  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 16)
+
   -- A XMM register with type representation information.
   --
   -- We expect that the 128-bits will be used to store one of:
@@ -154,12 +160,17 @@ data Location addr (tp :: Type) where
           -> Location addr tp
 
 loc_width :: Location addr (BVType n) -> NatRepr n
-loc_width (FlagReg _) = knownNat
 loc_width (MemoryAddr _ tp) = type_width tp
+loc_width (BVSlice _ _ tp)  = type_width tp
 loc_width (GPReg _) = knownNat
+loc_width (DReg {}) = knownNat
+loc_width (FlagReg {}) = knownNat
+loc_width (CReg {}) = knownNat
+loc_width (MMXReg {}) = knownNat
+loc_width (SegmentReg {}) = knownNat
 loc_width IPReg      = knownNat
 loc_width (XMMReg _) = knownNat
-loc_width (BVSlice _ _ tp) = type_width tp
+
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
 xmm_low64 l = BVSlice l 0 knownType
@@ -231,39 +242,48 @@ rbp = GPReg Flexdis86.rbp
 
 class IsLeq (m :: Nat) (n :: Nat) where
 
-instance IsLeq 1 4 where  
+instance (n <= m) => IsLeq n m where
 
-instance IsLeq 1 16 where
-instance IsLeq 4 16 where
-instance IsLeq 8 16 where
+-- instance IsLeq 1 4 where  
 
-instance IsLeq 1 32 where
-instance IsLeq 4 32 where
-instance IsLeq 8 32 where
-instance IsLeq 16 32 where
+-- instance IsLeq 8 8 where
 
-instance IsLeq 1 64 where
---  leqProof = knownLeq
-instance IsLeq 4 64 where
---  leqProof = knownLeq
-instance IsLeq 8 64 where
---  leqProof = knownLeq
+-- instance IsLeq 1 16 where
+-- instance IsLeq 4 16 where
+-- instance IsLeq 8 16 where
 
-instance IsLeq 32 64 where
-instance IsLeq 64 64 where
+-- instance IsLeq 1 32 where
+-- instance IsLeq 4 32 where
+-- instance IsLeq 8 32 where
+-- instance IsLeq 16 32 where
 
+-- instance IsLeq 1 64 where
+-- --  leqProof = knownLeq
+-- instance IsLeq 4 64 where
+-- --  leqProof = knownLeq
+-- instance IsLeq 8 64 where
+-- --  leqProof = knownLeq
+
+-- instance IsLeq 32 64 where
+-- instance IsLeq 64 64 where
+
+-- instance IsLeq 1 128 where
+-- --  leqProof = knownLeq
+-- instance IsLeq 4 128 where
+-- --  leqProof = knownLeq
+-- instance IsLeq 8 128 where
+-- --  leqProof = knownLeq
+
+-- instance IsLeq 32 128 where
+-- instance IsLeq 64 128 where
+
+
+  
 ------------------------------------------------------------------------
 -- Values
 
 -- | @IsValue@ is a class used to define types expressions.
 class IsValue (v  :: Type -> *) where
-
-  -- | fold_msbf f init bv == f (msb bv) (f ... (f (lsb bv) init))
-  fold_msbf :: (v (BVType 1) -> b -> b) -> b -> v (BVType n) -> b
-
-  -- | fold_lsbf f init bv == f (lsb bv) (f ... (f (msb bv) init))
-  fold_lsbf :: (v (BVType 1) -> b -> b) -> b -> v (BVType n) -> b
-
   -- | undefined as according to the intel manual
   undef :: v a
 
@@ -274,8 +294,15 @@ class IsValue (v  :: Type -> *) where
   -- literal does not fit withint the given number of bits.
   bvLit :: NatRepr n -> Int -> v (BVType n)
 
+  -- | Truncate the value
+  bvTrunc :: -- IsLeq m n =>
+             NatRepr m -> v (BVType n) -> v (BVType m)
+
   -- | Add two bitvectors together dropping overflow.
   bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
+  -- | Add two bitvectors together dropping overflow.
+  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType (2 * n))
 
   -- | Subtract two vectors, ignoring underflow.
   bvSub :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -330,8 +357,6 @@ class IsValue (v  :: Type -> *) where
   -- @sadc_overflows@ for definition.
   uadd_overflows :: v (BVType n) -> v (BVType n) -> v BoolType
   uadd_overflows x y = uadc_overflows x y false
-
-  
   
   -- | Return true expression is unsigned sub overflows. 
   usub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType

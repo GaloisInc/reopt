@@ -17,7 +17,7 @@ module Reopt.Semantics where
 
 import Control.Applicative ( (<$>), (<*>) )
 
-import Data.Parameterized.NatRepr (widthVal, NatRepr, knownNat)
+import Data.Parameterized.NatRepr (widthVal, NatRepr)
 import Reopt.Semantics.Monad
 
 uadd4_overflows :: ( IsLeq 4 n
@@ -59,17 +59,19 @@ set_bitwise_flags res = do
   set_undefined af_flag
   set_result_flags res
 
-push :: IsLocationBV m n => NatRepr n -> Value m (BVType n) -> m ()
-push sz v = do old_sp <- get rsp
-               let delta   = bvLit (knownNat :: NatRepr 64) $ widthVal sz `div` 8 -- delta in bytes
-                   new_sp  = old_sp `bvSub` delta
-                   sp_addr = mkBVAddr sz new_sp
-               sp_addr .= v
-               rsp     .= new_sp
+push :: IsLocationBV m n => Value m (BVType n) -> m ()
+push v = do old_sp <- get rsp
+            let delta   = bvLit n64 $ widthVal sz `div` 8 -- delta in bytes
+                new_sp  = old_sp `bvSub` delta
+                sp_addr = mkBVAddr sz new_sp
+            sp_addr .= v
+            rsp     .= new_sp
+     where
+       sz = bv_width v
 
 pop :: IsLocationBV m n => NatRepr n -> m (Value m (BVType n))
 pop sz = do old_sp <- get rsp
-            let delta   = bvLit (knownNat :: NatRepr 64) $ widthVal sz `div` 8 -- delta in bytes
+            let delta   = bvLit n64 $ widthVal sz `div` 8 -- delta in bytes
                 new_sp  = old_sp `bvAdd` delta
                 sp_addr = mkBVAddr sz old_sp
             v   <- get sp_addr
@@ -148,7 +150,7 @@ exec_bswap r = modify r reverse_bytes
 really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
 really_exec_call next_pc = do
   old_pc <- get IPReg
-  push (knownNat :: NatRepr 64) old_pc -- push value of next instruction
+  push old_pc -- push value of next instruction
   IPReg .= next_pc
   
 exec_call_relative :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
@@ -269,8 +271,22 @@ exec_leave = do bp_v <- get rbp
 exec_mov :: Semantics m =>  MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_mov l v = l .= v
 
+exec_movapd :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movapd l v = l .= v
+
 exec_movaps :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movaps l v = l .= v
+
+exec_movasd :: Semantics m =>  MLocation m (BVType 64) -> Value m DoubleType -> m ()
+exec_movasd l v = l .= v
+
+exec_movass :: Semantics m =>  MLocation m (BVType 32) -> Value m FloatType -> m ()
+exec_movass l v = l .= v
+
+-- And exec_movsxd
+exec_movsx_d :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_movsx_d l v = l .= sext (loc_width l) v
+
 
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
