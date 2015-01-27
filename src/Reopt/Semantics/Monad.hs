@@ -248,6 +248,8 @@ instance (n <= m) => IsLeq n m where
 
 -- instance IsLeq 8 8 where
 
+-- instance IsLeq 1 4 where
+
 -- instance IsLeq 1 16 where
 -- instance IsLeq 4 16 where
 -- instance IsLeq 8 16 where
@@ -276,8 +278,6 @@ instance (n <= m) => IsLeq n m where
 
 -- instance IsLeq 32 128 where
 -- instance IsLeq 64 128 where
-
-
   
 ------------------------------------------------------------------------
 -- Values
@@ -350,15 +350,14 @@ class IsValue (v  :: Type -> *) where
   sadd_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
   sadd_overflows x y = sadc_overflows x y false
 
-  -- | Return true expression is signed sub overflows. 
+  -- | Return true expression is signed sub overflows.
   ssub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | Return true expression is unsigned add overflows.  See
   -- @sadc_overflows@ for definition.
   uadd_overflows :: v (BVType n) -> v (BVType n) -> v BoolType
   uadd_overflows x y = uadc_overflows x y false
-  
-  -- | Return true expression is unsigned sub overflows. 
+  -- | Return true expression if unsigned sub overflows.
   usub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | Return true expression if a signed add-with carry would overflow.
@@ -375,7 +374,7 @@ class IsValue (v  :: Type -> *) where
   -- | Perform a unsigned extension of a bitvector.
   uext :: (KnownNat n, IsLeq m n) => v (BVType m) -> v (BVType n)
 
-  -- | Performs a imul on
+  -- | Performs a multiplication of two bitvector values.
   mul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | bsf "bit scan forward" returns the index of the least-significant
