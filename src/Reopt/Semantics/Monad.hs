@@ -70,7 +70,7 @@ module Reopt.Semantics.Monad
 import Control.Applicative
 --import Data.Bits as Bits
 import GHC.TypeLits as TypeLits
-import GHC.TypeLits (type (<=) )
+-- import GHC.TypeLits (type (<=) )
 
 import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet (Reg64, XMMReg)
@@ -292,11 +292,10 @@ class IsValue (v  :: Type -> *) where
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
-  bvLit :: NatRepr n -> Int -> v (BVType n)
+  bvLit :: Integral a => NatRepr n -> a -> v (BVType n)
 
   -- | Truncate the value
-  bvTrunc :: -- IsLeq m n =>
-             NatRepr m -> v (BVType n) -> v (BVType m)
+  bvTrunc :: IsLeq m n => NatRepr m -> v (BVType n) -> v (BVType m)
 
   -- | Add two bitvectors together dropping overflow.
   bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -372,7 +371,7 @@ class IsValue (v  :: Type -> *) where
   sext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: (KnownNat n, IsLeq m n) => v (BVType m) -> v (BVType n)
+  uext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Performs a multiplication of two bitvector values.
   mul :: v (BVType n) -> v (BVType n) -> v (BVType n)

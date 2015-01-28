@@ -94,7 +94,7 @@ exec_adc dst y = do
   af_flag .= uadc4_overflows dst_val y c
   cf_flag .= uadc_overflows  dst_val y c
   -- Set result value.
-  set_result_value dst (dst_val `bvAdd` y `bvAdd` uext c)
+  set_result_value dst (dst_val `bvAdd` y `bvAdd` uext (loc_width dst) c)
 
 -- | @add@
 exec_add :: IsLocationBV m n
@@ -219,7 +219,7 @@ exec_cmp dst y = do dst_val <- get dst
 
 exec_dec :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_dec dst = do dst_val <- get dst
-                  let v1 = bvLit (bv_width dst_val) 1
+                  let v1 = bvLit (bv_width dst_val) (1 :: Int)
                   -- Set overflow and arithmetic flags
                   of_flag .= ssub_overflows  dst_val v1
                   af_flag .= usub4_overflows dst_val v1
@@ -234,7 +234,7 @@ exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
   -- Get current value stored in destination.
   dst_val <- get dst
-  let y  = bvLit (bv_width dst_val) 1
+  let y  = bvLit (bv_width dst_val) (1 :: Int)
   -- Set overflow and arithmetic flags
   of_flag .= sadd_overflows  dst_val y
   af_flag .= uadd4_overflows dst_val y
@@ -251,10 +251,6 @@ exec_jcc cc off = do
 
 exec_jmp_absolute :: Semantics m => Value m (BVType 64) -> m ()
 exec_jmp_absolute v = IPReg .= v
-
-exec_jmp_relative :: Semantics m => Value m (BVType 64) -> m ()
-exec_jmp_relative off = do old_pc <- get IPReg
-                           IPReg .= (old_pc `bvAdd` off)
 
 -- FIXME: ensure that v is the address, not the contents
 exec_lea :: Semantics m =>  MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -277,17 +273,18 @@ exec_movapd l v = l .= v
 exec_movaps :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movaps l v = l .= v
 
-exec_movasd :: Semantics m =>  MLocation m (BVType 64) -> Value m DoubleType -> m ()
-exec_movasd l v = l .= v
+exec_movsd :: Semantics m =>  MLocation m (BVType 64) -> Value m DoubleType -> m ()
+exec_movsd l v = l .= v
 
-exec_movass :: Semantics m =>  MLocation m (BVType 32) -> Value m FloatType -> m ()
-exec_movass l v = l .= v
+exec_movss :: Semantics m =>  MLocation m (BVType 32) -> Value m FloatType -> m ()
+exec_movss l v = l .= v
 
 -- And exec_movsxd
 exec_movsx_d :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movsx_d l v = l .= sext (loc_width l) v
 
-
+exec_movzx:: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_movzx l v = l .= uext (loc_width l) v
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
 exec_sub :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
