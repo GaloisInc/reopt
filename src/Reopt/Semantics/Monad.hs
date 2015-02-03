@@ -288,8 +288,11 @@ class IsValue (v  :: Type -> *) where
   undef :: v a
 
   false :: v BoolType
-  true  :: v BoolType
+  false = bvLit knownNat (0 :: Int)
 
+  true  :: v BoolType
+  true = bvLit knownNat (1 :: Int)
+  
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
   bvLit :: Integral a => NatRepr n -> a -> v (BVType n)
@@ -309,6 +312,10 @@ class IsValue (v  :: Type -> *) where
   -- | Exclusive or
   bvXor :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | 2's complement
+  bvNeg :: v (BVType n) -> v (BVType n)
+  bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
+
   -- | Add two double precision floating point numbers.
   doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
 
@@ -321,6 +328,16 @@ class IsValue (v  :: Type -> *) where
   -- | Equality
   (.=.) :: v (BVType n) -> v (BVType n) -> v BoolType
   bv .=. bv' = is_zero (bv `bvXor` bv')
+
+  -- | Concatentates two bit vectors
+  bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + m))
+
+  -- FIXME: constants shifts?
+  -- | Rotations 
+  bvRol, bvRor :: Int -> v (BVType n) -> v (BVType n)
+
+  -- | Shifts
+  bvShr, bvShl :: Int -> v (BVType n) -> v (BVType n)  
 
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
@@ -417,8 +434,8 @@ class ( Applicative m
   (.=) :: MLocation m tp -> Value m tp -> m ()
 
   -- | Modify the value at a location
-  modify :: MLocation m tp -> (Value m tp -> Value m tp) -> m ()
-  modify r f = do
+  modify :: (Value m tp -> Value m tp) -> MLocation m tp -> m ()
+  modify f r = do
     x <- get r
     r .= f x
 

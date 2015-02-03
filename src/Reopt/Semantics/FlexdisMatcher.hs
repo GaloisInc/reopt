@@ -25,15 +25,16 @@ module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
   ) where
 
-import Control.Applicative ( (<$>) )
-import GHC.TypeLits (KnownNat)
-import Data.Type.Equality -- (testEquality, castWith, :~:(..) )
+import           Control.Applicative ( (<$>) )
+import           Data.List (stripPrefix)
+import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
+import           GHC.TypeLits (KnownNat)
 
 import qualified Flexdis86 as F
-import Reopt.Semantics
-import Reopt.Semantics.Monad
+import           Reopt.Semantics
+import           Reopt.Semantics.Monad
 
-import Data.Parameterized.NatRepr
+import           Data.Parameterized.NatRepr
 
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
@@ -162,8 +163,7 @@ getSomeBVLocation v =
     mk :: forall m n. (FullSemantics m, SupportedBVWidth n) => MLocation m (BVType n) -> m (SomeBV (MLocation m))
     mk = return . SomeBV
 
-
-checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType n') -> m (f (BVType n))
+checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
   | Just Refl <- testEquality (getW v) n = return v
   | otherwise                            = fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
@@ -204,13 +204,20 @@ execInstruction ii =
     "jmp"    -> maybe_ip_relative exec_jmp_absolute
     "movsx"  -> geBinop exec_movsx_d
     "movsxd" -> geBinop exec_movsx_d
-    "movsx"  -> geBinop exec_movzx
+    "movzx"  -> geBinop exec_movzx
+
+    -- conditional instructions 
+    _ | Just f <- isConditional "cmov"
+             -> binop (exec_cmovcc f)
+    _ | Just f <- isConditional "j", [v] <- F.iiArgs ii
+             -> getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= exec_jcc f
+                    
     -- fixed size instructions
-    "addsd"  -> knownBinop exec_addsd
-    "movapd" -> knownBinop exec_movapd
-    "movaps" -> knownBinop exec_movapd
-    "movsd"  -> knownBinop exec_movss
-    "movss"  -> knownBinop exec_movss  
+    "addsd"  -> truncateKnownBinop exec_addsd
+    "movapd" -> truncateKnownBinop exec_movapd
+    "movaps" -> truncateKnownBinop exec_movapd
+    "movsd"  -> truncateKnownBinop exec_movss
+    "movss"  -> truncateKnownBinop exec_movss  
     -- regular instructions
     "add"    -> binop exec_add
     "adc"    -> binop exec_adc
@@ -223,16 +230,33 @@ execInstruction ii =
     "cdqe"   -> exec_cdqe
     "clc"    -> exec_clc 
     "cld"    -> exec_cld
-    -- "cmov"
     "cmp"    -> binop exec_cmp
     "dec"    -> unop exec_dec
     "inc"    -> unop exec_inc
-    -- "j"
     "leave"  -> exec_leave
     "mov"    -> binop exec_mov
+    "neg"    -> unop exec_neg
+    "nop"    -> return ()
+    "not"    -> unop exec_not
+    "or"     -> binop exec_or
+    "pause"  -> return ()
+    "pop"    -> unop exec_pop
+    "push"   -> unopV exec_push
+    "ret"    -> exec_ret Nothing
+    "ret_imm" | [F.WordImm imm] <- F.iiArgs ii
+             -> exec_ret (Just imm)
     "sub"    -> binop exec_sub
     _        -> fail $ "Unsupported instruction: " ++ show ii
   where
+    -- conditional instruction support (cmovcc, jcc)
+    conditionals = [ ("a", cond_a),   ("ae", cond_ae), ("b", cond_b),   ("be", cond_be), ("g", cond_g),
+                     ("ge", cond_ge), ("l", cond_l),   ("le", cond_le), ("o", cond_o),   ("p", cond_p),
+                     ("s", cond_s),   ("z", cond_z),   ("no", cond_no), ("np", cond_np), ("ns", cond_ns),
+                     ("nz", cond_nz) ]
+    isConditional pfx
+      | Just p <- stripPrefix pfx (F.iiOp ii)  = lookup p conditionals
+      | otherwise                              = Nothing
+
     maybe_ip_relative f 
       | [F.JumpOffset off] <- F.iiArgs ii
            = do next_ip <- bvAdd (bvLit n64 off) <$> get IPReg
@@ -264,6 +288,12 @@ execInstruction ii =
                                       v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
                                       f l v
                      vs         -> fail $ "binop: expecting 2 arguments, got " ++ show (length vs)
+
+    unopV :: FullSemantics m => (forall n. Semantics m => Value m (BVType n) -> m ()) -> m ()
+    unopV f = case F.iiArgs ii of
+                [val] -> do SomeBV v <- getSomeBVValue val
+                            f v
+                vs    -> fail $ "unop: expecting 1 argument, got " ++ show (length vs)
 
     unop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> m ()) -> m ()
     unop f = case F.iiArgs ii of

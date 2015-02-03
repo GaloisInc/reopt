@@ -51,22 +51,25 @@ movsd
 movss
 movsx
 movsxd
-
--- Not done
-
 movzx
-mul
-mulsd
 neg
 nop
 not
 or
 pause
+-- segments?
 pop
 push
+ret
+
+-- Not done
+
+mul
+mulsd
+
 rep
 repz
-ret
+
 rol
 sar
 sbb
