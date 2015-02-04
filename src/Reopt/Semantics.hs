@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics
@@ -16,13 +17,17 @@
 {-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics where
 
-
+import Data.Word
 import Control.Applicative ( (<$>), (<*>) )
 
 import Data.Parameterized.NatRepr (widthVal, NatRepr)
 import Reopt.Semantics.Monad
 
-uadd4_overflows :: (4 <= n, IsValue v)
+type Binop = IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
+type Unop  = IsLocationBV m n => MLocation m (BVType n) -> m ()
+type UnopV = Semantics m => Value m (BVType n) -> m ()
+
+uadd4_overflows :: ( 4 <= n, IsValue v)
                 => v (BVType n) -> v (BVType n) -> v BoolType
 uadd4_overflows x y = uadd_overflows (least_nibble x) (least_nibble y)
 
@@ -57,7 +62,7 @@ set_bitwise_flags res = do
   set_undefined af_flag
   set_result_flags res
 
-push :: IsLocationBV m n => Value m (BVType n) -> m ()
+push :: Semantics m => Value m (BVType n) -> m ()
 push v = do old_sp <- get rsp
             let delta   = bvLit n64 $ widthVal sz `div` 8 -- delta in bytes
                 new_sp  = old_sp `bvSub` delta
@@ -111,7 +116,7 @@ exec_add dst y = do
 
 -- | Add sign double
 exec_addsd :: Semantics m => MLocation m XMMType -> Value m DoubleType -> m ()
-exec_addsd r y = modify (xmm_low64 r) (`doubleAdd` y)
+exec_addsd r y = modify (`doubleAdd` y) (xmm_low64 r)
 
 -- | And two values together.
 exec_and :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -143,7 +148,7 @@ exec_bsr r y = do
 
 -- | Run bswap instruction.
 exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
-exec_bswap r = modify r reverse_bytes
+exec_bswap = modify reverse_bytes
 
 really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
 really_exec_call next_pc = do
@@ -286,8 +291,48 @@ exec_movsx_d :: (Semantics m, 1 <= n', n' <= n)
              =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movsx_d l v = l .= sext (loc_width l) v
 
-exec_movzx:: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_movzx :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movzx l v = l .= uext (loc_width l) v
+
+-- | Should be equiv to 0 - *l
+exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
+exec_neg l = do
+  v <- get l
+  ifte_ (is_zero v) (cf_flag .= false) (cf_flag .= true)
+  let r = bvNeg v
+      zero = bvLit (bv_width v) (0 :: Int)
+  of_flag .= ssub_overflows  zero v
+  af_flag .= usub4_overflows zero v
+  set_result_value l r
+
+exec_not :: (Semantics m) => MLocation m (BVType n) -> m ()
+exec_not = modify complement
+
+exec_or :: Binop
+exec_or l v = do
+  v' <- get l
+  set_undefined af_flag
+  of_flag .= false
+  cf_flag .= false
+  set_result_value l (v' .|. v)
+
+exec_pop :: Unop
+exec_pop l = do v <- pop (loc_width l)
+                l .= v
+
+exec_push :: UnopV
+exec_push v = push v
+
+exec_ret :: Semantics m => Maybe Word16 -> m ()
+exec_ret m_off = do
+  next_ip <- pop n64
+  case m_off of
+    Nothing  -> return ()
+    Just off -> modify (bvAdd (bvLit n64 off)) rsp
+  IPReg .= next_ip
+
+-- exec_ror :: Semantics m =>
+
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
 exec_sub :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()

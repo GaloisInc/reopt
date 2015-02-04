@@ -349,16 +349,13 @@ class IsValue (v  :: Type -> *) where
   -- | Performs a multiplication of two bitvector values.
   bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-{-
-  -- | Add two bitvectors together without dropping overflow.
-  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType (2 * n))
-  bvMul x y = mul (sext w2 x) ((addNat
-    where w = bv_width x
-          w2 = addNat w w
--}
 
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
+
+  -- | 2's complement
+  bvNeg :: v (BVType n) -> v (BVType n)
+  bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
 
   -- | Bitwise and
   (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -376,6 +373,16 @@ class IsValue (v  :: Type -> *) where
   -- | Return true if value is zero.
   is_zero :: v (BVType n) -> v BoolType
   is_zero x = x .=. bvLit (bv_width x) (0::Integer)
+
+  -- | Concatentates two bit vectors
+  bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
+
+  -- FIXME: constants shifts?
+  -- | Rotations
+  bvRol, bvRor :: Int -> v (BVType n) -> v (BVType n)
+
+  -- | Shifts
+  bvShr, bvShl :: Int -> v (BVType n) -> v (BVType n)
 
   -- | Truncate the value
   bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
@@ -466,7 +473,6 @@ class IsValue (v  :: Type -> *) where
   -- | Add two double precision floating point numbers.
   doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
 
-
 ------------------------------------------------------------------------
 -- Monadic definition
 
@@ -493,8 +499,8 @@ class ( Applicative m
   (.=) :: MLocation m tp -> Value m tp -> m ()
 
   -- | Modify the value at a location
-  modify :: MLocation m tp -> (Value m tp -> Value m tp) -> m ()
-  modify r f = do
+  modify :: (Value m tp -> Value m tp) -> MLocation m tp -> m ()
+  modify f r = do
     x <- get r
     r .= f x
 
