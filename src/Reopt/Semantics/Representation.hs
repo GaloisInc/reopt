@@ -34,6 +34,7 @@ module Reopt.Semantics.Representation
   , bvValue
   , App(..)
   , appWidth
+  , mapApp
   , traverseApp
     -- * X86State
   , X86State(..)
@@ -222,27 +223,39 @@ assignRhsWidth = undefined -- TODO: implement this.
 -----------------------------------------------------------------------
 -- App
 
-
+-- | App defines builtin operations on values.
 data App f tp where
+
+  ----------------------------------------------------------------------
+  -- Operations related to concatenating and extending bitvectors.
+
   -- Concatenate two bitvectors together (low-bits are first)
   ConcatV :: {-#UNPACK #-} !(NatRepr n)
           -> !(f (BVType n))
           -> !(f (BVType n))
           -> App f (BVType (n+n))
 
-  -- Get lower half of bitvector
-  LowerHalf :: {-# UNPACK #-} !(NatRepr n)
-            -> !(f (BVType (n+n)))
-            -> App f (BVType n)
-
   -- Get upper half of bitvector
   UpperHalf :: {-# UNPACK #-} !(NatRepr n)
             -> !(f (BVType (n+n)))
             -> App f (BVType n)
 
+  -- Truncate a bitvector value.
+  Trunc :: (n <= m) => !(f (BVType m)) -> !(NatRepr n) -> App f (BVType n)
+  -- Signed extension.
+  SExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
+  -- Unsigned extension.
+  UExt :: (m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
+
+  ----------------------------------------------------------------------
+  -- Boolean operations
+
   AndApp :: !(f BoolType) -> !(f BoolType) -> App f BoolType
   OrApp  :: !(f BoolType) -> !(f BoolType) -> App f BoolType
   NotApp :: !(f BoolType) -> App f BoolType
+
+  ----------------------------------------------------------------------
+  -- Bitvector operations
 
   BVAdd :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
   BVSub :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
@@ -261,10 +274,6 @@ data App f tp where
 
   -- Compare for equality.
   BVEq :: f (BVType n) -> f (BVType n) -> App f BoolType
-  -- Signed extension (we may want to replace this with lowerHalf/upperHalf things)
-  BVSExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
-  -- Unsigned extension (we may want to replace this with lowerHalf/upperHalf things)
-  BVUExt :: (m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
 
   -- Return true if value contains even number of true bits.
   EvenParity :: f (BVType 8) -> App f BoolType
@@ -308,6 +317,9 @@ data App f tp where
   -- All bits at indices greater than return value must be unset.
   Bsr :: NatRepr n -> f (BVType n) -> App f (BVType n)
 
+  ----------------------------------------------------------------------
+  -- Floating point operations
+
   -- Double precision addition.
   DoubleAdd :: f DoubleType -> f DoubleType -> App f DoubleType
 
@@ -316,9 +328,10 @@ appWidth :: App f (BVType n) -> NatRepr n
 appWidth a =
   case a of
     ConcatV n _ _ -> addNat n n
-    LowerHalf n _ -> n
-    UpperHalf n _ -> n
-
+--    LowerHalf n _ -> n
+--    UpperHalf n _ -> n
+    SExt _ n -> n
+    UExt _ n -> n
 
     AndApp{} -> knownNat
     OrApp{}  -> knownNat
@@ -334,8 +347,6 @@ appWidth a =
     BVXor w _ _ -> w
     BVEq _ _ -> knownNat
     EvenParity _ -> knownNat
-    BVSExt _ n -> n
-    BVUExt _ n -> n
     ReverseBytes w _ -> w
 
     UadcOverflows{}  -> knownNat
@@ -347,6 +358,12 @@ appWidth a =
     Bsr w _ -> w
     DoubleAdd _ _ -> knownNat
 
+
+mapApp :: (forall u . f u -> g u)
+       -> App f tp
+       -> App g tp
+-- TODO: Look at TemplateHaskell code in Crucible to autogenerate this.
+mapApp = undefined
 
 traverseApp :: Applicative m
             => (forall u . f u -> m (g u))

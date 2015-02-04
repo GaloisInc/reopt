@@ -14,6 +14,9 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
@@ -116,14 +119,11 @@ instance S.IsValue Expr where
   bvXor x y = app $ BVXor (exprWidth x) x y
   x .=. y   = app $ BVEq x y
 
-{-
-  bvTrunc w v = app $ BVExtract v 0 w
-  msb x = app $ BVExtract x (widthVal w - 1) knownNat
-    where w = exprWidth x
--}
 
-  sext w x = app $ BVSExt x w
-  uext w x = app $ BVUExt x w
+  bvTrunc = flip truncExpr
+
+  sext w x = app $ SExt x w
+  uext w x = app $ UExt x w
 
   even_parity x = app $ EvenParity x
   reverse_bytes x = app $ ReverseBytes (exprWidth x) x
@@ -346,33 +346,55 @@ getLoc l0 =
     S.LowerHalf l -> lowerHalf <$> getLoc l
     S.UpperHalf l -> upperHalf <$> getLoc l
 
-lowerHalf :: Expr (BVType (n+n)) -> Expr (BVType n)
-lowerHalf = fst . splitExpr
+asApp :: Expr tp -> Maybe (App Expr tp)
+asApp (AppExpr a) = Just a
+asApp (ValueExpr (AssignedValue (Assignment _ (EvalApp a))))
+  = Just (mapApp ValueExpr a)
+asApp _ = Nothing
 
-upperHalf :: Expr (BVType (n+n)) -> Expr (BVType n)
-upperHalf = snd . splitExpr
+lowerHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
+lowerHalf e =
+     -- Workaround for GHC typechecker
+     case testLeq half_width (exprWidth e) of
+       Just LeqProof -> truncExpr e half_width
+       Nothing -> error "lowerHalf given bad width"
+  where half_width :: NatRepr n
+        half_width = halfNat (exprWidth e)
 
+-- | Apply trunc to expression with simplification.
+truncExpr :: (m <= n) => Expr (BVType n) -> NatRepr m -> Expr (BVType m)
+truncExpr e w | Just Refl <- testEquality (exprWidth e) w = e
+truncExpr e0 w =
+  case asApp e0 of
+    Just (ConcatV lw l _) | Just LeqProof <- testLeq w lw ->
+      truncExpr l w
+    Just (Trunc e _) ->
+       -- Runtime check to workaround GHC typechecker.
+      case testLeq w (exprWidth e) of
+        Just LeqProof -> truncExpr e w
+        Nothing -> error "truncExpr given bad width"
+    _ -> app (Trunc e0 w)
 
--- | Split an expression into an upper half and a lower half.
-splitExpr :: Expr (BVType (n+n)) -> (Expr (BVType n), Expr (BVType n))
--- Handle expression concatenation.
--- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in splitExpr
--- to the (n+n) bound in ConcatV.
-splitExpr (AppExpr (ConcatV _ l h)) = unsafeCoerce (l,h)
+-- | Get the upper half of a bitvector.
+upperHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
 -- Handle concrete values
-splitExpr (ValueExpr (BVValue w i)) = (l,h)
+upperHalf (ValueExpr (BVValue w i)) = h
    where half_width = halfNat w
-         l = bvLit half_width i
          h = bvLit half_width (i `shiftR` widthVal half_width)
--- Handle case where an assignment has already occured by getting previous values.
---
--- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in splitExpr
--- to the (n+n) bound in ConcatV.
-splitExpr (ValueExpr (AssignedValue (Assignment _ (EvalApp (ConcatV _ l h))))) =
-  unsafeCoerce $ (ValueExpr l, ValueExpr h)
--- Introduce split operations
-splitExpr v = (app (LowerHalf half_width v), app (UpperHalf half_width v))
-  where half_width = halfNat (exprWidth v)
+upperHalf e =
+   case asApp e of
+      -- Handle expression concatenation.
+      -- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in upperHalf
+      -- to the (n+n) bound in ConcatV.
+      Just (ConcatV _ _ h) -> unsafeCoerce h
+      -- Introduce split operations
+      _ ->
+        -- Workaround for GHC typechecker
+        case testLeq half_width (exprWidth e) of
+          Just LeqProof -> app (UpperHalf half_width e)
+          Nothing -> error "upperHalf given bad width"
+  where half_width :: NatRepr n
+        half_width = halfNat (exprWidth e)
 
 -- | Assign a value to a location
 setLoc :: ImpLocation tp -> Value tp -> X86Generator ()
