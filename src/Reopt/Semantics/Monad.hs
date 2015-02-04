@@ -34,10 +34,13 @@ module Reopt.Semantics.Monad
   , Location(..)
   , xmm_low64
   , loc_width
-  , low_dword
-  , high_dword
-  , reg_low
-  , reg_high
+  , reg_low8
+  , reg_high8
+  , reg_low16
+  , reg_low32
+
+--  , reg_low
+--  , reg_high
   , cf_flag
   , pf_flag
   , af_flag
@@ -65,6 +68,7 @@ module Reopt.Semantics.Monad
   , FullSemantics
     -- * Re-exports
   , Flexdis86.Reg64
+  , type (TypeLits.<=)
   ) where
 
 import Control.Applicative
@@ -137,7 +141,8 @@ data Location addr (tp :: Type) where
   CReg :: Flexdis86.ControlReg -> Location addr (BVType 64)
   DReg :: Flexdis86.DebugReg -> Location addr (BVType 64)
   MMXReg :: Flexdis86.MMXReg -> Location addr (BVType 64)
-  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 16)
+  -- JHx: Shouldn't this be a 64-bit value?
+  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 64)
 
   -- A XMM register with type representation information.
   --
@@ -153,15 +158,24 @@ data Location addr (tp :: Type) where
   XMMReg :: XMMReg
          -> Location addr (BVType 128)
 
+  -- | Refers to the least significant half of the bitvector.
+  LowerHalf :: Location addr (BVType (n+n))
+            -> Location addr (BVType n)
+
+  -- | Refers to the most significant half of the bitvector.
+  UpperHalf :: Location addr (BVType (n+n))
+            -> Location addr (BVType n)
+
+{-
   -- A portion of a bitvector value.
   BVSlice :: Location addr (BVType n) -- Location of bitvector.
           -> Int         -- Bit level offset.
-          -> TypeRepr tp -- Type representation
-          -> Location addr tp
+          -> NatRepr m   -- Type representation
+          -> Location addr (BVType m)
+-}
 
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (MemoryAddr _ tp) = type_width tp
-loc_width (BVSlice _ _ tp)  = type_width tp
 loc_width (GPReg _) = knownNat
 loc_width (DReg {}) = knownNat
 loc_width (FlagReg {}) = knownNat
@@ -173,15 +187,17 @@ loc_width (XMMReg _) = knownNat
 
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
-xmm_low64 l = BVSlice l 0 knownType
+xmm_low64 l = LowerHalf l
 
+{-
 -- | Return the low 32-bits of the location.
 low_dword :: Reg64 -> Location addr (BVType 32)
-low_dword r = BVSlice (GPReg r) 0 knownType
+low_dword r = LowerHalf (GPReg r)
+-}
 
 -- | Return the high 32-bits of the location.
 high_dword :: Reg64 -> Location addr (BVType 32)
-high_dword r = BVSlice (GPReg r) 32 knownType
+high_dword r = UpperHalf (GPReg r)
 
 -- | CF flag
 cf_flag :: Location addr BoolType
@@ -223,10 +239,30 @@ of_flag = FlagReg 11
 mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
 mkBVAddr sz addr = MemoryAddr addr (BVTypeRepr sz)
 
+
+-- | Return low 32-bits of register e.g. rax -> eax
+reg_low32 :: Reg64 -> Location addr (BVType 32)
+reg_low32 r = LowerHalf (GPReg r)
+
+-- | Return low 16-bits of register e.g. rax -> ax
+reg_low16 :: Reg64 -> Location addr (BVType 16)
+reg_low16 r = LowerHalf (LowerHalf (GPReg r))
+
+-- | Return low 8-bits of register e.g. rax -> al
+reg_low8 :: Reg64 -> Location addr (BVType 8)
+reg_low8 r = LowerHalf (reg_low16 r)
+
+-- | Return bits 8-15 of the register e.g. rax -> ah
+reg_high8 :: Reg64 -> Location addr (BVType 8)
+reg_high8 r = UpperHalf (reg_low16 r)
+
+
+{-
 -- | This addresses e.g. al and ah
 reg_low, reg_high :: NatRepr n -> Reg64 -> Location addr (BVType n)
-reg_low  n r = BVSlice (GPReg r) 0 (BVTypeRepr n)
-reg_high n r = BVSlice (GPReg r) (widthVal n) (BVTypeRepr n)
+reg_low  n r = BVSlice (GPReg r) 0 n
+reg_high n r = BVSlice (GPReg r) (widthVal n) n
+-}
 
 r_rax :: Reg64
 r_rax = Flexdis86.rax
@@ -240,15 +276,13 @@ rbp = GPReg Flexdis86.rbp
 ------------------------------------------------------------------------
 -- IsLeq
 
-class IsLeq (m :: Nat) (n :: Nat) where
+type IsLeq (m :: Nat) (n :: Nat) = (m <= n)
 
-instance (n <= m) => IsLeq n m where
-
--- instance IsLeq 1 4 where  
-
--- instance IsLeq 8 8 where
+--instance (n <= m) => IsLeq n m where
 
 -- instance IsLeq 1 4 where
+
+-- instance IsLeq 8 8 where
 
 -- instance IsLeq 1 16 where
 -- instance IsLeq 4 16 where
@@ -278,39 +312,53 @@ instance (n <= m) => IsLeq n m where
 
 -- instance IsLeq 32 128 where
 -- instance IsLeq 64 128 where
-  
+
 ------------------------------------------------------------------------
 -- Values
 
 -- | @IsValue@ is a class used to define types expressions.
 class IsValue (v  :: Type -> *) where
-  -- | undefined as according to the intel manual
+{-
+  -- JHx: I removed this, because I don't think there is a pure way to
+  -- introduce undefined expressions (without some form of cheating like
+  -- stable pointers).  We may want to not only know that a result is
+  -- undefined, but able to distinguish between undefined values.
   undef :: v a
+-}
+
+  -- | Returns the width of a bit-vector value.
+  bv_width :: v (BVType n) -> NatRepr n
+
+
+  true :: v BoolType
+  true = bvLit knownNat (1::Integer)
 
   false :: v BoolType
-  true  :: v BoolType
+  false = bvLit knownNat (0::Integer)
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
   bvLit :: Integral a => NatRepr n -> a -> v (BVType n)
 
-  -- | Truncate the value
-  bvTrunc :: IsLeq m n => NatRepr m -> v (BVType n) -> v (BVType m)
-
   -- | Add two bitvectors together dropping overflow.
   bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
-
-  -- | Add two bitvectors together dropping overflow.
-  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType (2 * n))
 
   -- | Subtract two vectors, ignoring underflow.
   bvSub :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-  -- | Exclusive or
-  bvXor :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  -- | Performs a multiplication of two bitvector values.
+  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-  -- | Add two double precision floating point numbers.
-  doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
+{-
+  -- | Add two bitvectors together without dropping overflow.
+  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType (2 * n))
+  bvMul x y = mul (sext w2 x) ((addNat
+    where w = bv_width x
+          w2 = addNat w w
+-}
+
+  -- | Bitwise complement
+  complement :: v (BVType n) -> v (BVType n)
 
   -- | Bitwise and
   (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -318,46 +366,53 @@ class IsValue (v  :: Type -> *) where
   -- | Bitwise or
   (.|.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | Exclusive or
+  bvXor :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
   -- | Equality
   (.=.) :: v (BVType n) -> v (BVType n) -> v BoolType
   bv .=. bv' = is_zero (bv `bvXor` bv')
 
-  -- | Bitwise complement
-  complement :: v (BVType n) -> v (BVType n)
+  -- | Return true if value is zero.
+  is_zero :: v (BVType n) -> v BoolType
+  is_zero x = x .=. bvLit (bv_width x) (0::Integer)
+
+  -- | Truncate the value
+  bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
+
+  -- | Return most significant bit of number.
+  msb :: (1 <= n) => v (BVType n) -> v BoolType
+
+  -- | Perform a signed extension of a bitvector.
+  sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+
+  -- | Perform a unsigned extension of a bitvector.
+  uext :: (m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+
+  -- | Return least-significant nibble (4 bits).
+  least_nibble :: (4 <= n) => v (BVType n) -> v (BVType 4)
+  least_nibble x = bvTrunc knownNat x
+
+  -- | Return least-significant byte.
+  least_byte :: (8 <= n) => v (BVType n) -> v (BVType 8)
+  least_byte x = bvTrunc knownNat x
 
   -- | Return true if value contains an even number of true bits.
   even_parity :: v (BVType 8) -> v BoolType
-
-  -- | Return most significant bit of number.
-  msb :: IsLeq 1 n => v (BVType n) -> v BoolType
-
-  -- | Return true if value is zero.
-  is_zero :: v (BVType n) -> v BoolType
-
-  -- | Return least-significant nibble (4 bits).
-  least_nibble :: IsLeq 4 n => v (BVType n) -> v (BVType 4)
 
   -- | Reverse the bytes in a bitvector expression.
   -- The parameter n should be a multiple of 8.
   reverse_bytes :: v (BVType n) -> v (BVType n)
 
-  -- | Return least-significant byte.
-  least_byte   :: IsLeq 8 n => v (BVType n) -> v (BVType 8)
-
   -- | Return true expression is signed add overflows.  See
   -- @sadc_overflows@ for definition.
-  sadd_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
+  sadd_overflows :: (1 <= n) => v (BVType n) -> v (BVType n) -> v BoolType
   sadd_overflows x y = sadc_overflows x y false
-
-  -- | Return true expression is signed sub overflows.
-  ssub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | Return true expression is unsigned add overflows.  See
   -- @sadc_overflows@ for definition.
   uadd_overflows :: v (BVType n) -> v (BVType n) -> v BoolType
   uadd_overflows x y = uadc_overflows x y false
-  -- | Return true expression if unsigned sub overflows.
-  usub_overflows :: IsLeq 1 n => v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | Return true expression if a signed add-with carry would overflow.
   -- This holds if the sign bits of the arguments are the same, and the sign
@@ -367,28 +422,50 @@ class IsValue (v  :: Type -> *) where
   -- | Return true expression if a unsigned add-with carry would overflow.
   uadc_overflows :: v (BVType n) -> v (BVType n) -> v BoolType -> v BoolType
 
-  -- | Perform a signed extension of a bitvector.
-  sext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
+  -- | Return true expression if unsigned sub overflows.
+  -- @usub_overflows x y@ is true when @x - y@ (interpreted as unsigned numbers),
+  -- would return a negative result.
+  usub_overflows :: (1 <= n) => v (BVType n) -> v (BVType n) -> v BoolType
+  usub_overflows x y = usbb_overflows x y false
 
-  -- | Perform a unsigned extension of a bitvector.
-  uext :: IsLeq m n => NatRepr n -> v (BVType m) -> v (BVType n)
+  -- | Return true expression is signed sub overflows.
+  ssub_overflows :: (1 <= n) => v (BVType n) -> v (BVType n) -> v BoolType
+  ssub_overflows x y = ssbb_overflows x y false
 
-  -- | Performs a multiplication of two bitvector values.
-  mul :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  -- | Return true expression if unsigned sbb overflows.
+  -- @usbb_overflows x y c@ is true when @x - (y+c)@ with
+  -- x,y interpreted as unsigned numbers and c a borrow bit,
+  -- would return a negative result.
+  usbb_overflows :: (1 <= n)
+                 => v (BVType n)
+                 -> v (BVType n)
+                 -> v BoolType
+                 -> v BoolType
+
+  -- | Return true expression if unsigned sub overflows.
+  -- @ssbb_overflows x y c@ is true when @x - (y+c)@ with
+  -- x,y interpreted as signed numbers and c a borrow bit,
+  -- would return a number different from the expected integer due to
+  -- wrap-around.
+  ssbb_overflows :: (1 <= n)
+                 => v (BVType n)
+                 -> v (BVType n)
+                 -> v BoolType
+                 -> v BoolType
 
   -- | bsf "bit scan forward" returns the index of the least-significant
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices less than return value must be unset.
   bsf :: v (BVType n) -> v (BVType n)
-  -- bsf bv = fold_lsbf ()
 
   -- | bsr "bit scan reverse" returns the index of the most-significant
   -- bit that is 1.  Undefined if value is zero.
-  -- All bits at indices less than return value must be unset.
+  -- All bits at indices greater than return value must be unset.
   bsr :: v (BVType n) -> v (BVType n)
 
-  -- | Returns the width of a bit-vector value.
-  bv_width :: v (BVType n) -> NatRepr n
+  -- | Add two double precision floating point numbers.
+  doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
+
 
 ------------------------------------------------------------------------
 -- Monadic definition
@@ -409,7 +486,6 @@ class ( Applicative m
       ) => Semantics m where
   -- | Mark a Boolean variable as undefined.
   set_undefined :: MLocation m BoolType -> m ()
-  set_undefined l = l .= undef
 
   -- | Read from the given location.
   get :: MLocation m tp -> m (Value m tp)

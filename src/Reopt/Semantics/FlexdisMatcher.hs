@@ -1,11 +1,9 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE PatternGuards #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.FlexdisMatcher
 -- Description      : Pattern matches against a Flexdis86 InstructionInstance.
 -- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
+-- Maintainer       : Simon Winwood <sjw@galois.com>
 -- Stability        : provisional
 --
 -- This contains a function "execInstruction" that steps a single Flexdis86
@@ -17,8 +15,10 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Reopt.Semantics.FlexdisMatcher
@@ -40,8 +40,8 @@ data SomeBV v where
 
 -- -- | Extracts the value, truncating as required
 -- getBVValue :: (FullSemantics m) => NatRepr n -> F.Value -> m (Value m (BVType n))
--- getBVValue (sz :: NatRepr n) v = 
---   case v of 
+-- getBVValue (sz :: NatRepr n) v =
+--   case v of
 --     F.ControlReg cr     -> mk (CReg cr)
 --     F.DebugReg dr       -> mk (DReg dr)
 --     F.MMXReg mmx        -> mk (MMXReg mmx)
@@ -64,7 +64,7 @@ data SomeBV v where
 --     F.ByteImm  w                    -> return (bvLit sz $ fromIntegral w) -- FIXME: should we cast here?
 --     F.WordImm  w                    -> return (bvLit sz $ fromIntegral w)
 --     F.DWordImm w                    -> return (bvLit sz $ fromIntegral w)
---     F.QWordImm w                    -> return (bvLit sz $ fromIntegral w) 
+--     F.QWordImm w                    -> return (bvLit sz $ fromIntegral w)
 --     F.JumpOffset off                -> return (bvLit sz $ fromIntegral off)
 --   where
 --     -- FIXME: what happens with signs etc?
@@ -74,8 +74,8 @@ data SomeBV v where
 
 -- | Extracts the value, truncating as required
 getSomeBVValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
-getSomeBVValue v = 
-  case v of 
+getSomeBVValue v =
+  case v of
     F.ControlReg cr     -> mk (CReg cr)
     F.DebugReg dr       -> mk (DReg dr)
     F.MMXReg mmx        -> mk (MMXReg mmx)
@@ -89,16 +89,16 @@ getSomeBVValue v =
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
     F.ByteReg  r
-      | Just r64 <- F.is_low_reg r  -> mk (reg_low n8 r64)
-      | Just r64 <- F.is_high_reg r -> mk (reg_high n8 r64)
+      | Just r64 <- F.is_low_reg r  -> mk (reg_low8 r64)
+      | Just r64 <- F.is_high_reg r -> mk (reg_high8 r64)
       | otherwise                   -> fail "unknown r8"
-    F.WordReg  r                    -> mk (reg_low n16 (F.reg16_reg r))
-    F.DWordReg r                    -> mk (reg_low n32 (F.reg32_reg r))
+    F.WordReg  r                    -> mk (reg_low16 (F.reg16_reg r))
+    F.DWordReg r                    -> mk (reg_low32 (F.reg32_reg r))
     F.QWordReg r                    -> mk (GPReg r)
     F.ByteImm  w                    -> return (SomeBV $ bvLit n8  w) -- FIXME: should we cast here?
     F.WordImm  w                    -> return (SomeBV $ bvLit n16 w)
     F.DWordImm w                    -> return (SomeBV $ bvLit n32 w)
-    F.QWordImm w                    -> return (SomeBV $ bvLit n64 w) 
+    F.QWordImm w                    -> return (SomeBV $ bvLit n64 w)
     F.JumpOffset off                -> return (SomeBV $ bvLit n64 off)
   where
     -- FIXME: what happens with signs etc?
@@ -109,7 +109,7 @@ getSomeBVValue v =
 getBVAddress :: FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
 getBVAddress ar =
   case ar of
-    F.Addr_32      _seg _m_r32 _m_int_r32 _i32 -> fail "Addr_32"                                                 
+    F.Addr_32      _seg _m_r32 _m_int_r32 _i32 -> fail "Addr_32"
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
     F.Offset_64    seg w64                 -> do check_seg_value seg
@@ -133,26 +133,26 @@ getBVAddress ar =
 -- | Extract the _location_ of a value, not the value contained.
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getSomeBVLocation v =
-  case v of 
+  case v of
     F.ControlReg cr     -> mk (CReg cr)
     F.DebugReg dr       -> mk (DReg dr)
     F.MMXReg mmx        -> mk (MMXReg mmx)
     F.XMMReg xmm        -> mk (XMMReg xmm)
     F.SegmentValue s    -> mk (SegmentReg s)
-    F.FarPointer _      -> fail "FarPointer"    
+    F.FarPointer _      -> fail "FarPointer"
     F.VoidMem ar        -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
     F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
     F.ByteReg  r
-      | Just r64 <- F.is_low_reg r  -> mk (reg_low n8 r64)
-      | Just r64 <- F.is_high_reg r -> mk (reg_high n8 r64)
+      | Just r64 <- F.is_low_reg r  -> mk (reg_low8  r64)
+      | Just r64 <- F.is_high_reg r -> mk (reg_high8 r64)
       | otherwise                   -> fail "unknown r8"
-    F.WordReg  r                    -> mk (reg_low n16 (F.reg16_reg r))
-    F.DWordReg r                    -> mk (reg_low n16 (F.reg32_reg r))
+    F.WordReg  r                    -> mk (reg_low16 (F.reg16_reg r))
+    F.DWordReg r                    -> mk (reg_low32 (F.reg32_reg r))
     F.QWordReg r                    -> mk (GPReg r)
-    -- ByteImm  Word8    
+    -- ByteImm  Word8
     -- WordImm  Word16
     -- DWordImm Word32
     -- QWordImm Word64
@@ -171,6 +171,7 @@ checkEqBV getW n v
 checkSomeBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> SomeBV f -> m (f (BVType n))
 checkSomeBV getW n (SomeBV v) = checkEqBV getW n v
 
+{-
 truncateBVValue :: (Monad m, IsValue v)  => NatRepr n -> v (BVType n') -> m (v (BVType n))
 truncateBVValue n v
   | Just LeqProof <- testLeq n (bv_width v) = return (bvTrunc n v)
@@ -178,8 +179,10 @@ truncateBVValue n v
 
 truncateBVLocation :: (Semantics m)  => NatRepr n -> MLocation m (BVType n') -> m (MLocation m (BVType n))
 truncateBVLocation n v
-  | Just LeqProof <- testLeq n (loc_width v) = return (BVSlice v 0 (BVTypeRepr n))
+  | Just LeqProof <- testLeq n (loc_width v) =
+      return (BVSlice v 0 n)
   | otherwise                                = fail $ "Widths isn't >=: " ++ show (loc_width v) ++ " and " ++ show n
+-}
 
 unimplemented :: Monad m => m ()
 unimplemented = fail "UNIMPLEMENTED"
@@ -210,7 +213,7 @@ execInstruction ii =
     "movapd" -> knownBinop exec_movapd
     "movaps" -> knownBinop exec_movapd
     "movsd"  -> knownBinop exec_movss
-    "movss"  -> knownBinop exec_movss  
+    "movss"  -> knownBinop exec_movss
     -- regular instructions
     "add"    -> binop exec_add
     "adc"    -> binop exec_adc
@@ -218,10 +221,10 @@ execInstruction ii =
     "bsf"    -> binop exec_bsf
     "bsr"    -> binop exec_bsr
     "bswap"  -> unop  exec_bswap
-    "cbw"    -> exec_cbw 
-    "cwde"   -> exec_cwde 
+    "cbw"    -> exec_cbw
+    "cwde"   -> exec_cwde
     "cdqe"   -> exec_cdqe
-    "clc"    -> exec_clc 
+    "clc"    -> exec_clc
     "cld"    -> exec_cld
     -- "cmov"
     "cmp"    -> binop exec_cmp
@@ -233,7 +236,7 @@ execInstruction ii =
     "sub"    -> binop exec_sub
     _        -> fail $ "Unsupported instruction: " ++ show ii
   where
-    maybe_ip_relative f 
+    maybe_ip_relative f
       | [F.JumpOffset off] <- F.iiArgs ii
            = do next_ip <- bvAdd (bvLit n64 off) <$> get IPReg
                 f next_ip
@@ -242,7 +245,9 @@ execInstruction ii =
 
       | otherwise  = fail "wrong number of operands"
 
-    mkBinop :: FullSemantics m => (forall n n'. MLocation m (BVType n) -> Value m (BVType n') -> m a) -> m a
+    mkBinop :: FullSemantics m
+            => (forall n n'. (1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
+            -> m a
     mkBinop f = case F.iiArgs ii of
                   [loc, val] -> do SomeBV l <- getSomeBVLocation loc
                                    SomeBV v <- getSomeBVValue val
@@ -250,13 +255,23 @@ execInstruction ii =
                   vs         -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
     -- The location size must be >= the value size.
-    geBinop :: FullSemantics m => (forall n n'. IsLeq n' n => MLocation m (BVType n) -> Value m (BVType n') -> m ()) -> m ()
-    geBinop f = mkBinop $ \l v -> do { Just LeqProof <- return $ testLeq (bv_width v) (loc_width l); f l v }
+    geBinop :: FullSemantics m
+            => (forall n n'. (1 <= n', n' <= n)
+                           => MLocation m (BVType n) -> Value m (BVType n') -> m ())
+            -> m ()
+    geBinop f = mkBinop $ \l v -> do
+                  Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
+                  f l v
 
-    truncateKnownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ()) -> m ()
-    truncateKnownBinop f = mkBinop $ \l v -> do l' <- truncateBVLocation knownNat l
-                                                v' <- truncateBVValue knownNat v
-                                                f l' v'
+{-
+    truncateKnownBinop :: (KnownNat n, KnownNat n', FullSemantics m)
+                       => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
+                       -> m ()
+    truncateKnownBinop f = mkBinop $ \l v -> do
+      l' <- truncateBVLocation knownNat l
+      v' <- truncateBVValue knownNat v
+      f l' v'
+-}
 
     knownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ()) -> m ()
     knownBinop f = case F.iiArgs ii of
@@ -270,7 +285,7 @@ execInstruction ii =
                [loc] -> do SomeBV l <- getSomeBVLocation loc
                            f l
                vs    -> fail $ "unop: expecting 1 argument, got " ++ show (length vs)
-             
+
     binop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()) -> m ()
     binop f = case F.iiArgs ii of
                 [loc, val] -> do SomeBV l <- getSomeBVLocation loc

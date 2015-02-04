@@ -12,6 +12,8 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics where
 
 
@@ -20,16 +22,12 @@ import Control.Applicative ( (<$>), (<*>) )
 import Data.Parameterized.NatRepr (widthVal, NatRepr)
 import Reopt.Semantics.Monad
 
-uadd4_overflows :: ( IsLeq 4 n
-                   , IsValue v
-                   )
+uadd4_overflows :: (4 <= n, IsValue v)
                 => v (BVType n) -> v (BVType n) -> v BoolType
 uadd4_overflows x y = uadd_overflows (least_nibble x) (least_nibble y)
 
-usub4_overflows :: ( IsLeq 4 n
-                       , IsValue v
-                       )
-                    => v (BVType n) -> v (BVType n) -> v BoolType
+usub4_overflows :: (4 <= n, IsValue v)
+                => v (BVType n) -> v (BVType n) -> v BoolType
 usub4_overflows x y = usub_overflows (least_nibble x) (least_nibble y)
 
 uadc4_overflows :: ( IsLeq 4 n
@@ -77,7 +75,7 @@ pop sz = do old_sp <- get rsp
             v   <- get sp_addr
             rsp .= new_sp
             return v
-            
+
 -- * Implementation of the semantics
 
 exec_adc :: IsLocationBV m n
@@ -152,7 +150,7 @@ really_exec_call next_pc = do
   old_pc <- get IPReg
   push old_pc -- push value of next instruction
   IPReg .= next_pc
-  
+
 exec_call_relative :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
 exec_call_relative off = do
   old_pc <- get IPReg
@@ -164,13 +162,13 @@ exec_call_absolute = really_exec_call
 
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
 exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
-exec_cbw = do v <- get (reg_low n8 r_rax)
-              reg_low n16 r_rax .= sext n16 v
+exec_cbw = do v <- get (reg_low8 r_rax)
+              reg_low16 r_rax .= sext n16 v
 
-exec_cwde = do v <- get (reg_low n16 r_rax)
-               reg_low n32 r_rax .= sext n32 v
+exec_cwde = do v <- get (reg_low16 r_rax)
+               reg_low32 r_rax .= sext n32 v
 
-exec_cdqe = do v <- get (reg_low n32 r_rax)
+exec_cdqe = do v <- get (reg_low32 r_rax)
                rax .= sext n64 v
 
 -- | Run clc instruction.
@@ -228,7 +226,7 @@ exec_dec dst = do dst_val <- get dst
                   set_result_value dst (dst_val `bvSub` v1)
 
 -- exec_div :: Int -> Value m (BVType 8) -> m ()
--- exec_div os v = do 
+-- exec_div os v = do
 
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
@@ -245,9 +243,13 @@ exec_inc dst = do
 exec_jcc :: Semantics m => m (Value m BoolType) -> Value m (BVType 64) -> m ()
 exec_jcc cc off = do
   a <- cc
-  when_ a $ do old_pc <- get IPReg
-               let next_pc = old_pc `bvAdd` off
-               IPReg .= next_pc
+  when_ a $ jump_off off
+
+jump_off :: Semantics m => Value m (BVType 64) -> m ()
+jump_off off = do
+  old_pc <- get IPReg
+  let next_pc = old_pc `bvAdd` off
+  IPReg .= next_pc
 
 exec_jmp_absolute :: Semantics m => Value m (BVType 64) -> m ()
 exec_jmp_absolute v = IPReg .= v
@@ -280,7 +282,8 @@ exec_movss :: Semantics m =>  MLocation m (BVType 32) -> Value m FloatType -> m 
 exec_movss l v = l .= v
 
 -- And exec_movsxd
-exec_movsx_d :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_movsx_d :: (Semantics m, 1 <= n', n' <= n)
+             =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movsx_d l v = l .= sext (loc_width l) v
 
 exec_movzx:: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
@@ -290,7 +293,7 @@ exec_movzx l v = l .= uext (loc_width l) v
 exec_sub :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_sub l v = do v0 <- get l
                   l .= (v0 `bvSub` v)
-                  exec_cmp l v -- set flags 
+                  exec_cmp l v -- set flags
 
 
 -- exec_cmova_ia64_32 :: (Semantics m, Num  (Value m (BVType 32)))

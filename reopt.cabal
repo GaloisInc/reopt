@@ -18,7 +18,7 @@ library
     elf >= 0.28,
     fingertree,
     flexdis86,
-    lens,
+    lens >= 4.7,
     mtl,
     parameterized-utils,
     vector,
@@ -37,6 +37,7 @@ library
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Implementation
     Reopt.Semantics.Monad
+    Reopt.Semantics.Representation
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
