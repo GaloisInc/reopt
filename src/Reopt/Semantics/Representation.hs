@@ -11,6 +11,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 module Reopt.Semantics.Representation
   ( CFG
@@ -50,9 +51,12 @@ import Control.Lens
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Parameterized.NatRepr
+import Data.Parameterized.TH.GADT
 import qualified Data.Vector as V
 import Data.Word
 import GHC.TypeLits
+
+
 
 import qualified Flexdis86.InstructionSet as Flexdis86
 import Reopt.Semantics.Monad
@@ -220,6 +224,24 @@ data AssignRhs tp where
 assignRhsWidth :: AssignRhs (BVType n) -> NatRepr n
 assignRhsWidth = undefined -- TODO: implement this.
 
+------------------------------------------------------------------------
+-- Value
+
+-- | A value at runtime.
+data Value tp where
+  -- | Bitvector value.
+  BVValue :: !(NatRepr n) -> Integer -> Value (BVType n)
+
+  -- | Value from an assignment statement.
+  AssignedValue :: !(Assignment tp) -> Value tp
+
+valueWidth :: Value (BVType n) -> NatRepr n
+valueWidth (BVValue n _) = n
+valueWidth (AssignedValue a) = assignmentWidth a
+
+bvValue :: KnownNat n => Integer -> Value (BVType n)
+bvValue i = BVValue knownNat i
+
 -----------------------------------------------------------------------
 -- App
 
@@ -328,8 +350,8 @@ appWidth :: App f (BVType n) -> NatRepr n
 appWidth a =
   case a of
     ConcatV n _ _ -> addNat n n
---    LowerHalf n _ -> n
---    UpperHalf n _ -> n
+    UpperHalf n _ -> n
+    Trunc _ n -> n
     SExt _ n -> n
     UExt _ n -> n
 
@@ -358,51 +380,19 @@ appWidth a =
     Bsr w _ -> w
     DoubleAdd _ _ -> knownNat
 
+-----------------------------------------------------------------------
+-- App utilities
 
-mapApp :: (forall u . f u -> g u)
-       -> App f tp
-       -> App g tp
--- TODO: Look at TemplateHaskell code in Crucible to autogenerate this.
-mapApp = undefined
+-- Force app to be in template-haskell context.
+$(return [])
 
 traverseApp :: Applicative m
             => (forall u . f u -> m (g u))
             -> App f tp
             -> m (App g tp)
--- TODO: Look at TemplateHaskell code in Crucible to autogenerate this.
-traverseApp = undefined
+traverseApp = $(structuralTraversal $[t|App|])
 
-------------------------------------------------------------------------
--- Value
-
--- | A value at runtime.
-data Value tp where
-  -- | Bitvector value.
-  BVValue :: !(NatRepr n) -> Integer -> Value (BVType n)
-
-  -- | Value from an assignment statement.
-  AssignedValue :: !(Assignment tp) -> Value tp
-
-valueWidth :: Value (BVType n) -> NatRepr n
-valueWidth (BVValue n _) = n
-valueWidth (AssignedValue a) = assignmentWidth a
-
-bvValue :: KnownNat n => Integer -> Value (BVType n)
-bvValue i = BVValue knownNat i
-
-{-
--- | Return portion of a bitvector
-bvSlice :: Value (BVType n) -- ^ Expression to evaluate
-        -> Int             -- ^ Offset in bits
-        -> NatRepr m       -- ^ Type representation
-        -> Value (BVType m)
-bvSlice = undefined
-
-
--- | Update a bitvector array at a given slice.
-updateBVSlice :: Value (BVType n) -- ^ Value to update slice of.
-              -> Int              -- ^ Offset in bits.
-              -> Value (BVType m) -- ^ Value to update
-              -> Value (BVType n)
-updateBVSlice = undefined
--}
+mapApp :: (forall u . f u -> g u)
+       -> App f tp
+       -> App g tp
+mapApp f m = runIdentity $ traverseApp (return . f) m
