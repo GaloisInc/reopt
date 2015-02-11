@@ -62,17 +62,6 @@ pop
 push
 ret
 
--- Not done
-
-mul
-mulsd
-
-rep
-repz
-
-rol
-sar
-sbb
 seta
 setb
 setbe
@@ -81,16 +70,28 @@ setg
 setge
 setne
 setp
-shl
-shr
-std
-
-subsd
-syscall
 test
-ucomisd
+syscall
+sbb
 xchg
 xor
+mul
+imul
+
+-- Not done
+
+mulsd
+rep
+repz
+
+rol
+sar
+shl
+shr
+
+std
+subsd
+ucomisd
 xorpd
 
 -- later bucket
@@ -106,7 +107,7 @@ fnstcw
 fstp
 fsubrp
 idiv
-imul
+
 
 -- Unknown
 movabs

@@ -1,4 +1,3 @@
-{-# LANGUAGE RankNTypes #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics
@@ -15,12 +14,18 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
+
 module Reopt.Semantics where
 
-import Data.Word
 import Control.Applicative ( (<$>), (<*>) )
+import Data.Type.Equality
+import Data.Word
+import GHC.TypeLits
 
-import Data.Parameterized.NatRepr (widthVal, NatRepr)
+import Data.Parameterized.NatRepr (widthVal, NatRepr, addNat, addIsLeq, withAddLeq)
 import Reopt.Semantics.Monad
 
 type Binop = IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -294,6 +299,70 @@ exec_movsx_d l v = l .= sext (loc_width l) v
 exec_movzx :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movzx l v = l .= uext (loc_width l) v
 
+set_reg_pair :: Semantics m => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
+set_reg_pair upperL lowerL v = do lowerL .= lower
+                                  upperL .= upper
+  where
+    (upper, lower) = bvSplit v
+    
+-- FIXME: is this the right way around?
+exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
+exec_mul v
+  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)                                                 
+  | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+  | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+  | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
+  | otherwise                                  = fail "mul: Unknown bit width"
+  where
+    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
+    go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
+    go f l = do v' <- get l 
+                let sz = addNat (bv_width v) (bv_width v)                    
+                    r  = uext sz v' `bvMul` uext sz v -- FIXME: uext here is OK?
+                    upper_r = fst (bvSplit r) :: Value m (BVType n)
+                set_undefined sf_flag
+                set_undefined af_flag
+                set_undefined pf_flag
+                set_undefined zf_flag
+                ifte_ (is_zero upper_r)
+                  (do of_flag .= false
+                      cf_flag .= false)                  
+                  (do of_flag .= true
+                      cf_flag .= true)
+                f r
+
+really_exec_imul :: forall m n. IsLocationBV m n => Value m (BVType n) -> Value m (BVType n) -> (Value m (BVType (n + n)) -> m ()) -> m ()
+really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
+   let r  = sext sz v' `bvMul` sext sz v
+       (_, lower_r :: Value m (BVType n)) = bvSplit r
+   set_undefined af_flag
+   set_undefined pf_flag
+   set_undefined zf_flag                    
+   sf_flag .= msb lower_r
+   ifte_ (r .=. sext sz lower_r)
+     (do of_flag .= false
+         cf_flag .= false)                  
+     (do of_flag .= true
+         cf_flag .= true)
+   f r
+
+exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
+exec_imul1 v
+  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)                                                 
+  | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+  | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+  | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
+  | otherwise                                  = fail "imul: Unknown bit width"
+  where
+    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
+    go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
+    go f l = do v' <- get l 
+                really_exec_imul v v' f
+
+-- FIXME: clag from exec_mul, exec_imul
+exec_imul2_3 :: forall m n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n) -> m ()
+exec_imul2_3 l v v' = really_exec_imul v v' $ \r -> l .= snd (bvSplit r)
+ 
 -- | Should be equiv to 0 - *l
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
 exec_neg l = do
@@ -333,13 +402,39 @@ exec_ret m_off = do
 
 -- exec_ror :: Semantics m =>
 
+exec_setcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType 8) -> m ()
+exec_setcc cc l = do
+  a <- cc
+  ifte_ a (l .= bvLit n8 (1 :: Int)) (l .= bvLit n8 (0 :: Int))
+
+exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
+exec_sbb l v = do cf <- get cf_flag
+                  exec_sub l (v `bvAdd` uext (bv_width v) cf)
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
-exec_sub :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
+exec_sub :: Binop
 exec_sub l v = do v0 <- get l
                   l .= (v0 `bvSub` v)
                   exec_cmp l v -- set flags
 
+exec_test :: Binop
+exec_test l v = do
+  v' <- get l
+  let r = v' .&. v
+  set_bitwise_flags r
+
+exec_xchg :: IsLocationBV m n => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
+exec_xchg l l' = do v  <- get l
+                    v' <- get l'
+                    l  .= v'
+                    l' .= v
+
+exec_xor :: Binop
+exec_xor l v = do
+  v0 <- get l
+  let r = v0 `bvXor` v
+  set_bitwise_flags r
+  l .= r
 
 -- exec_cmova_ia64_32 :: (Semantics m, Num  (Value m (BVType 32)))
 --                    => Reg64 -> Value m (BVType 32) -> m ()

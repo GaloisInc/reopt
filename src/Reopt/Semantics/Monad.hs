@@ -52,7 +52,7 @@ module Reopt.Semantics.Monad
   , of_flag
   , mkBVAddr
   -- ** Registers
-  , rsp, rbp, r_rax, rax
+  , rsp, rbp, r_rax, rax, r_rdx, rdx
     -- * IsLeq utility
   , IsLeq
   , n8, n16, n32, n64
@@ -267,11 +267,14 @@ reg_high n r = BVSlice (GPReg r) (widthVal n) n
 r_rax :: Reg64
 r_rax = Flexdis86.rax
 
-rsp, rbp, rax :: Location addr (BVType 64)
+r_rdx :: Reg64
+r_rdx = Flexdis86.rdx
+
+rsp, rbp, rax, rdx :: Location addr (BVType 64)
 rax = GPReg Flexdis86.rax
 rsp = GPReg Flexdis86.rsp
 rbp = GPReg Flexdis86.rbp
-
+rdx = GPReg r_rdx
 
 ------------------------------------------------------------------------
 -- IsLeq
@@ -349,7 +352,6 @@ class IsValue (v  :: Type -> *) where
   -- | Performs a multiplication of two bitvector values.
   bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
 
@@ -377,12 +379,18 @@ class IsValue (v  :: Type -> *) where
   -- | Concatentates two bit vectors
   bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
 
+  -- | Splits a bit vectors into two
+  bvSplit :: v (BVType (n + n)) -> (v (BVType n), v (BVType n))
+  -- bvSplit v = (bvTrunc sz (bvShr (widthVal sz) v), bvTrunc sz v)
+  --   where
+  --     sz = halfNat (bv_width v)
+
   -- FIXME: constants shifts?
   -- | Rotations
   bvRol, bvRor :: Int -> v (BVType n) -> v (BVType n)
 
   -- | Shifts
-  bvShr, bvShl :: Int -> v (BVType n) -> v (BVType n)
+  bvShr, bvSar, bvShl :: Int -> v (BVType n) -> v (BVType n)
 
   -- | Truncate the value
   bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
@@ -511,6 +519,9 @@ class ( Applicative m
   when_ :: Value m BoolType -> m () -> m ()
   when_ p x = ifte_ p x (return ())
 
+  -- | execute the system call with the given id.  
+  syscall :: Value m (BVType 64) -> m ()
+  
 -- | Defines operations that need to be supported at a specific bitwidht.
 type SupportedBVWidth n
    = ( IsLeq 1 n

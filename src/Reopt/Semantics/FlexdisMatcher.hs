@@ -208,59 +208,71 @@ execInstruction ii =
                    v <- getBVAddress ar
                    exec_lea l (bvTrunc (loc_width l) v)
     "call"   -> maybe_ip_relative really_exec_call
+    "imul"
+      | length (F.iiArgs ii) == 1       -> unopV exec_imul1
+      | length (F.iiArgs ii) == 2       -> binop (\l v' -> do { v <- get l; exec_imul2_3 l v v' })
+      | [loc, val, val'] <- F.iiArgs ii -> do SomeBV l <- getSomeBVLocation loc
+                                              v  <- getSomeBVValue val  >>= checkSomeBV bv_width (loc_width l)
+                                              v' <- getSomeBVValue val' >>= checkSomeBV bv_width (loc_width l)
+                                              exec_imul2_3 l v v'
+                                              
     "jmp"    -> maybe_ip_relative exec_jmp_absolute
     "movsx"  -> geBinop exec_movsx_d
     "movsxd" -> geBinop exec_movsx_d
     "movzx"  -> geBinop exec_movzx
-
+    "xchg"   -> mkBinop $ \v v' -> do SomeBV l <- getSomeBVLocation v
+                                      l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
+                                      exec_xchg l l'
     -- conditional instructions
+    -- CMOVcc
     _ | Just f <- isConditional "cmov"
              -> binop (exec_cmovcc f)
+    -- Jcc
     _ | Just f <- isConditional "j", [v] <- F.iiArgs ii
              -> getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= exec_jcc f
-
+    -- SETcc
+    _ | Just f <- isConditional "set", [v] <- F.iiArgs ii
+             -> getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f
     -- fixed size instructions
-{-
-    "addsd"  -> knownBinop exec_addsd
-    "movapd" -> knownBinop exec_movapd
-    "movaps" -> knownBinop exec_movapd
-    "movsd"  -> knownBinop exec_movss
-    "movss"  -> knownBinop exec_movss
--}
-    "addsd"  -> truncateKnownBinop exec_addsd
-    "movapd" -> truncateKnownBinop exec_movapd
-    "movaps" -> truncateKnownBinop exec_movapd
-    "movsd"  -> truncateKnownBinop exec_movss
-    "movss"  -> truncateKnownBinop exec_movss
+    "addsd"   -> truncateKnownBinop exec_addsd
+    "movapd"  -> truncateKnownBinop exec_movapd
+    "movaps"  -> truncateKnownBinop exec_movapd
+    "movsd"   -> truncateKnownBinop exec_movss
+    "movss"   -> truncateKnownBinop exec_movss
     -- regular instructions
-    "add"    -> binop exec_add
-    "adc"    -> binop exec_adc
-    "and"    -> binop exec_and
-    "bsf"    -> binop exec_bsf
-    "bsr"    -> binop exec_bsr
-    "bswap"  -> unop  exec_bswap
-    "cbw"    -> exec_cbw
-    "cwde"   -> exec_cwde
-    "cdqe"   -> exec_cdqe
-    "clc"    -> exec_clc
-    "cld"    -> exec_cld
-    "cmp"    -> binop exec_cmp
-    "dec"    -> unop exec_dec
-    "inc"    -> unop exec_inc
-    "leave"  -> exec_leave
-    "mov"    -> binop exec_mov
-    "neg"    -> unop exec_neg
-    "nop"    -> return ()
-    "not"    -> unop exec_not
-    "or"     -> binop exec_or
-    "pause"  -> return ()
-    "pop"    -> unop exec_pop
-    "push"   -> unopV exec_push
-    "ret"    -> exec_ret Nothing
+    "add"     -> binop exec_add
+    "adc"     -> binop exec_adc
+    "and"     -> binop exec_and
+    "bsf"     -> binop exec_bsf
+    "bsr"     -> binop exec_bsr
+    "bswap"   -> unop  exec_bswap
+    "cbw"     -> exec_cbw
+    "cwde"    -> exec_cwde
+    "cdqe"    -> exec_cdqe
+    "clc"     -> exec_clc
+    "cld"     -> exec_cld
+    "cmp"     -> binop exec_cmp
+    "dec"     -> unop exec_dec
+    "inc"     -> unop exec_inc
+    "leave"   -> exec_leave
+    "mov"     -> binop exec_mov
+    "mul"     -> unopV exec_mul
+    "neg"     -> unop exec_neg
+    "nop"     -> return ()
+    "not"     -> unop exec_not
+    "or"      -> binop exec_or
+    "pause"   -> return ()
+    "pop"     -> unop exec_pop
+    "push"    -> unopV exec_push
+    "ret"     -> exec_ret Nothing
     "ret_imm" | [F.WordImm imm] <- F.iiArgs ii
-             -> exec_ret (Just imm)
-    "sub"    -> binop exec_sub
-    _        -> fail $ "Unsupported instruction: " ++ show ii
+              -> exec_ret (Just imm)
+    "sbb"     -> binop exec_sbb
+    "sub"     -> binop exec_sub
+    "syscall" -> get rax >>= syscall 
+    "test"    -> binop exec_test
+    "xor"     -> binop exec_xor
+    _         -> fail $ "Unsupported instruction: " ++ show ii
   where
     -- conditional instruction support (cmovcc, jcc)
     conditionals = [ ("a", cond_a),   ("ae", cond_ae), ("b", cond_b),   ("be", cond_be), ("g", cond_g),
@@ -281,39 +293,44 @@ execInstruction ii =
       | otherwise  = fail "wrong number of operands"
 
     mkBinop :: FullSemantics m
-            => (forall n n'. (1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
+            => (F.Value -> F.Value -> m a)
             -> m a
     mkBinop f = case F.iiArgs ii of
-                  [loc, val] -> do SomeBV l <- getSomeBVLocation loc
-                                   SomeBV v <- getSomeBVValue val
-                                   f l v
-                  vs         -> fail $ "expecting 2 arguments, got " ++ show (length vs)
+                  [v, v']   -> f v v'
+                  vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
+
+    mkBinopLV :: FullSemantics m
+            => (forall n n'. (1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
+            -> m a
+    mkBinopLV f = case F.iiArgs ii of
+                    [loc, val] -> do SomeBV l <- getSomeBVLocation loc
+                                     SomeBV v <- getSomeBVValue val
+                                     f l v
+                    vs         -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
     -- The location size must be >= the value size.
     geBinop :: FullSemantics m
             => (forall n n'. (1 <= n', n' <= n)
                            => MLocation m (BVType n) -> Value m (BVType n') -> m ())
             -> m ()
-    geBinop f = mkBinop $ \l v -> do
+    geBinop f = mkBinopLV $ \l v -> do
                   Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
                   f l v
 
     truncateKnownBinop :: (KnownNat n, KnownNat n', FullSemantics m)
                        => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
                        -> m ()
-    truncateKnownBinop f = mkBinop $ \l v -> do
+    truncateKnownBinop f = mkBinopLV $ \l v -> do
       l' <- truncateBVLocation knownNat l
       v' <- truncateBVValue knownNat v
       f l' v'
 
     knownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ()) -> m ()
-    knownBinop f = case F.iiArgs ii of
-                     [loc, val] -> do l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
-                                      v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
-                                      f l v
-                     vs         -> fail $ "binop: expecting 2 arguments, got " ++ show (length vs)
+    knownBinop f = mkBinop $ \loc val -> do l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
+                                            v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
+                                            f l v
 
-    unopV :: FullSemantics m => (forall n. Semantics m => Value m (BVType n) -> m ()) -> m ()
+    unopV :: FullSemantics m => (forall n. IsLocationBV m n => Value m (BVType n) -> m ()) -> m ()
     unopV f = case F.iiArgs ii of
                 [val] -> do SomeBV v <- getSomeBVValue val
                             f v
