@@ -351,6 +351,9 @@ class IsValue (v  :: Type -> *) where
   -- | Performs a multiplication of two bitvector values.
   bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | Performs a modulo of two bitvector values.
+  bvMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
 

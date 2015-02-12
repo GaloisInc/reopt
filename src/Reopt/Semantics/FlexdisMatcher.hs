@@ -269,6 +269,7 @@ execInstruction ii =
               -> exec_ret Nothing
       | [F.WordImm imm] <- F.iiArgs ii
               -> exec_ret (Just imm)
+    "rol"     -> mkBinopLV exec_rol
     "sbb"     -> binop exec_sbb
     "sar"     -> mkBinopLV exec_sar
     "shl"     -> mkBinopLV exec_shl

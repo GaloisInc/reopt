@@ -401,66 +401,54 @@ exec_ret m_off = do
   IPReg .= next_ip
 
 -- exec_sar ::
-  
-exec_shl :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
-exec_shl l count = do
+
+really_exec_shift :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n')
+                     -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n))
+                     -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n') -> Value m BoolType)
+                     -> (Value m (BVType n) -> Value m (BVType n)  -> Value m BoolType    -> Value m BoolType)                     
+                     -> m ()
+really_exec_shift l count do_shift mk_cf mk_of = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper
   -- bound on the time the shift takes, with a mask of 63 in the case
   -- of a 64 bit operand, and 31 in the other cases.
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
-                       _             -> 64                     
+                       _             -> 64             
       countMASK = bvLit (bv_width count) (nbits - 1)
       tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
-      r = bvShl v tempCOUNT
+      r = do_shift v tempCOUNT
           
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero tempCOUNT) $ do
     let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
-    let new_cf = bvBit v (dest_width `bvSub` tempCOUNT)
+    let new_cf = mk_cf v dest_width tempCOUNT
         
     ifte_ (tempCOUNT `bvLt` dest_width)
       (cf_flag .= new_cf)
       (set_undefined cf_flag)
     
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_flag .= (msb r `bvXor` new_cf))
+      (of_flag .= mk_of v r new_cf)
       (set_undefined of_flag)
 
     set_undefined af_flag
     set_result_value l r
 
--- FIXME: SHR and SAR are similar to each other and SHL
+-- FIXME: could be 8 instead of n' here ...
+exec_shl :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shl l count = really_exec_shift l count bvShl
+                   (\v dest_width tempCOUNT -> bvBit v (dest_width `bvSub` tempCOUNT))
+                   (\_ r new_cf -> msb r `bvXor` new_cf)
+
 exec_shr :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
-exec_shr l count = do
-  v    <- get l
-  -- The intel manual says that the count is masked to give an upper
-  -- bound on the time the shift takes, with a mask of 63 in the case
-  -- of a 64 bit operand, and 31 in the other cases.
-  let nbits :: Int = case testLeq (bv_width v) n32 of
-                       Just LeqProof -> 32
-                       _             -> 64                     
-      countMASK = bvLit (bv_width count) (nbits - 1)
-      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
-      r = bvShr v tempCOUNT
-          
-  -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero tempCOUNT) $ do
-    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
-    let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
-    
-    ifte_ (tempCOUNT `bvLt` dest_width)
-      (cf_flag .= new_cf)
-      (set_undefined cf_flag)
-    
-    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_flag .= msb v)
-      (set_undefined of_flag)
+exec_shr l count = really_exec_shift l count bvShl
+                   (\v _ tempCOUNT -> bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int)))
+                   (\v _ _         -> msb v)
 
-    set_undefined af_flag
-    set_result_value l r
-
+-- FIXME: we can factor this out as above, but we need to check the CF
+-- for SAR (intel manual says it is only undefined for shl/shr when
+-- the shift is >= the bit width.
 exec_sar :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_sar l count = do
   v    <- get l
@@ -481,7 +469,7 @@ exec_sar l count = do
     
     ifte_ (tempCOUNT `bvLt` dest_width)
       (cf_flag .= new_cf)
-      (set_undefined cf_flag)
+      (cf_flag .= msb v) -- FIXME: correct?  we assume here that we will get the sign bit ...
     
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_flag .= false)
@@ -490,7 +478,33 @@ exec_sar l count = do
     set_undefined af_flag
     set_result_value l r
 
--- exec_ror :: Semantics m =>
+-- FIXME: use really_exec_shift above?
+exec_rol :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_rol l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64             
+      countMASK = bvLit (bv_width count) (nbits - 1)
+      -- FIXME: this is from the manual, but I think the masking is overridden by the mod?
+      tempCOUNT = (count .&. countMASK) `bvMod` (bvLit (bv_width count) (widthVal (bv_width v)))
+      r = bvRol v tempCOUNT
+          
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero tempCOUNT) $ do
+    let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+        
+    cf_flag .= new_cf
+    
+    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+      (of_flag .= (msb r `bvXor` new_cf))
+      (set_undefined of_flag)
+
+    l .= r
+  
 
 exec_setcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType 8) -> m ()
 exec_setcc cc l = do

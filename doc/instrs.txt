@@ -77,24 +77,23 @@ xchg
 xor
 mul
 imul
+sar
+shl
+shr
+rol
 
 -- Not done
 
 mulsd
+
 rep
 repz
-
-rol
-sar
-shl
-shr
 
 std
 subsd
 ucomisd
 xorpd
 
--- later bucket
 cvtsi2sd
 cvtss2sd
 cvttsd2si
