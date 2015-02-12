@@ -141,8 +141,7 @@ data Location addr (tp :: Type) where
   CReg :: Flexdis86.ControlReg -> Location addr (BVType 64)
   DReg :: Flexdis86.DebugReg -> Location addr (BVType 64)
   MMXReg :: Flexdis86.MMXReg -> Location addr (BVType 64)
-  -- JHx: Shouldn't this be a 64-bit value?
-  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 64)
+  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 16)
 
   -- A XMM register with type representation information.
   --
@@ -387,16 +386,23 @@ class IsValue (v  :: Type -> *) where
 
   -- FIXME: constants shifts?
   -- | Rotations
-  bvRol, bvRor :: Int -> v (BVType n) -> v (BVType n)
+  bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
-  -- | Shifts
-  bvShr, bvSar, bvShl :: Int -> v (BVType n) -> v (BVType n)
+  -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
+  bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
   -- | Truncate the value
   bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
 
+  -- | Less than
+  bvLt :: v (BVType n) -> v (BVType n) -> v BoolType
+
+  -- | returns bit n, 0 being lsb
+  bvBit :: v (BVType n) -> v (BVType log_n) -> v BoolType
+
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
+  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1)) -- FIXME: should be log2 (bv_width v) here
 
   -- | Perform a signed extension of a bitvector.
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)

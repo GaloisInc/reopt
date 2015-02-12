@@ -131,9 +131,9 @@ data Stmt where
   -- Write to debug register.
   WriteDebugReg   :: !Flexdis86.DebugReg -> Value (BVType 64) -> Stmt
   -- Read the FS segment register.
-  WriteFS :: Value (BVType 64) -> Stmt
+  WriteFS :: Value (BVType 16) -> Stmt
   -- Read the GS segment register.
-  WriteGS :: Value (BVType 64) -> Stmt
+  WriteGS :: Value (BVType 16) -> Stmt
 
 ------------------------------------------------------------------------
 -- TermStmt
@@ -216,10 +216,10 @@ data AssignRhs tp where
   ReadDebugReg :: !Flexdis86.DebugReg -> AssignRhs (BVType 64)
 
   -- Read the FS segment register.
-  ReadFS :: AssignRhs (BVType 64)
+  ReadFS :: AssignRhs (BVType 16)
 
   -- Read the GS segment register.
-  ReadGS :: AssignRhs (BVType 64)
+  ReadGS :: AssignRhs (BVType 16)
 
 assignRhsWidth :: AssignRhs (BVType n) -> NatRepr n
 assignRhsWidth = undefined -- TODO: implement this.

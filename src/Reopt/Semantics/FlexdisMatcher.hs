@@ -264,10 +264,15 @@ execInstruction ii =
     "pause"   -> return ()
     "pop"     -> unop exec_pop
     "push"    -> unopV exec_push
-    "ret"     -> exec_ret Nothing
-    "ret_imm" | [F.WordImm imm] <- F.iiArgs ii
+    "ret"
+      | [] <- F.iiArgs ii
+              -> exec_ret Nothing
+      | [F.WordImm imm] <- F.iiArgs ii
               -> exec_ret (Just imm)
     "sbb"     -> binop exec_sbb
+    "sar"     -> mkBinopLV exec_sar
+    "shl"     -> mkBinopLV exec_shl
+    "shr"     -> mkBinopLV exec_shr
     "sub"     -> binop exec_sub
     "syscall" -> get rax >>= syscall 
     "test"    -> binop exec_test
@@ -299,8 +304,8 @@ execInstruction ii =
                   [v, v']   -> f v v'
                   vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
-    mkBinopLV :: FullSemantics m
-            => (forall n n'. (1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
+    mkBinopLV ::  Semantics m
+            => (forall n n'. (IsLocationBV m n, 1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
             -> m a
     mkBinopLV f = case F.iiArgs ii of
                     [loc, val] -> do SomeBV l <- getSomeBVLocation loc

@@ -25,7 +25,7 @@ import Data.Type.Equality
 import Data.Word
 import GHC.TypeLits
 
-import Data.Parameterized.NatRepr (widthVal, NatRepr, addNat, addIsLeq, withAddLeq)
+import Data.Parameterized.NatRepr (widthVal, NatRepr, addNat, addIsLeq, withAddLeq, testLeq, LeqProof(..))
 import Reopt.Semantics.Monad
 
 type Binop = IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -399,6 +399,96 @@ exec_ret m_off = do
     Nothing  -> return ()
     Just off -> modify (bvAdd (bvLit n64 off)) rsp
   IPReg .= next_ip
+
+-- exec_sar ::
+  
+exec_shl :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shl l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64                     
+      countMASK = bvLit (bv_width count) (nbits - 1)
+      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
+      r = bvShl v tempCOUNT
+          
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero tempCOUNT) $ do
+    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
+    let new_cf = bvBit v (dest_width `bvSub` tempCOUNT)
+        
+    ifte_ (tempCOUNT `bvLt` dest_width)
+      (cf_flag .= new_cf)
+      (set_undefined cf_flag)
+    
+    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+      (of_flag .= (msb r `bvXor` new_cf))
+      (set_undefined of_flag)
+
+    set_undefined af_flag
+    set_result_value l r
+
+-- FIXME: SHR and SAR are similar to each other and SHL
+exec_shr :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shr l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64                     
+      countMASK = bvLit (bv_width count) (nbits - 1)
+      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
+      r = bvShr v tempCOUNT
+          
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero tempCOUNT) $ do
+    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
+    let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
+    
+    ifte_ (tempCOUNT `bvLt` dest_width)
+      (cf_flag .= new_cf)
+      (set_undefined cf_flag)
+    
+    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+      (of_flag .= msb v)
+      (set_undefined of_flag)
+
+    set_undefined af_flag
+    set_result_value l r
+
+exec_sar :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_sar l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64                     
+      countMASK = bvLit (bv_width count) (nbits - 1)
+      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
+      r = bvSar v tempCOUNT
+          
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero tempCOUNT) $ do
+    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
+    let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
+    
+    ifte_ (tempCOUNT `bvLt` dest_width)
+      (cf_flag .= new_cf)
+      (set_undefined cf_flag)
+    
+    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+      (of_flag .= false)
+      (set_undefined of_flag)
+
+    set_undefined af_flag
+    set_result_value l r
 
 -- exec_ror :: Semantics m =>
 
