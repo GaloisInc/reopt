@@ -233,12 +233,19 @@ execInstruction ii =
     -- SETcc
     _ | Just f <- isConditional "set", [v] <- F.iiArgs ii
              -> getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f
-    -- fixed size instructions
+
+    -- fixed size instructions.  We truncate in the case of an xmm register, for example
     "addsd"   -> truncateKnownBinop exec_addsd
+    "subsd"   -> truncateKnownBinop exec_subsd
     "movapd"  -> truncateKnownBinop exec_movapd
-    "movaps"  -> truncateKnownBinop exec_movapd
-    "movsd"   -> truncateKnownBinop exec_movss
+    "movaps"  -> truncateKnownBinop exec_movaps
+    "movsd"   -> truncateKnownBinop exec_movsd
     "movss"   -> truncateKnownBinop exec_movss
+    "mulsd"   -> truncateKnownBinop exec_mulsd
+    "divsd"   -> truncateKnownBinop exec_divsd
+    "ucomisd" -> truncateKnownBinop exec_ucomisd
+    "xorpd"   -> binop (\l v -> modify (`bvXor` v) l) -- FIXME: add size annots?
+    
     -- regular instructions
     "add"     -> binop exec_add
     "adc"     -> binop exec_adc
@@ -253,6 +260,8 @@ execInstruction ii =
     "cld"     -> exec_cld
     "cmp"     -> binop exec_cmp
     "dec"     -> unop exec_dec
+    "div"     -> unopV exec_div
+    "idiv"    -> unopV exec_idiv
     "inc"     -> unop exec_inc
     "leave"   -> exec_leave
     "mov"     -> binop exec_mov
@@ -274,6 +283,7 @@ execInstruction ii =
     "sar"     -> mkBinopLV exec_sar
     "shl"     -> mkBinopLV exec_shl
     "shr"     -> mkBinopLV exec_shr
+    "std"     -> df_flag .= true
     "sub"     -> binop exec_sub
     "syscall" -> get rax >>= syscall 
     "test"    -> binop exec_test

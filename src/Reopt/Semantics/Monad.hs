@@ -8,7 +8,7 @@
 -- Maintainer       : Joe Hendrix <jhendrix@galois.com>
 -- Stability        : provisional
 --
--- Deifnes typeclasses used to implement x86 instruction semantics.
+-- Defines typeclasses used to implement x86 instruction semantics.
 ------------------------------------------------------------------------
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -24,12 +24,15 @@ module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
   , BoolType
-  , DoubleType
   , FloatType
   , XMMType
   , TypeRepr(..)
   , type_width
   , KnownType(..)
+  , FloatInfo(..)
+  , FloatInfoRepr(..)
+  , FloatInfoBits
+  , floatInfoBits
     -- * Location
   , Location(..)
   , xmm_low64
@@ -66,6 +69,7 @@ module Reopt.Semantics.Monad
   , SupportedBVWidth
   , IsLocationBV
   , FullSemantics
+  , ExceptionClass(..)
     -- * Re-exports
   , Flexdis86.Reg64
   , type (TypeLits.<=)
@@ -101,8 +105,8 @@ data Type
     BVType Nat
 
 type BoolType   = BVType 1
-type FloatType  = BVType 32
-type DoubleType = BVType 64
+-- type FloatType  = BVType 32
+-- type DoubleType = BVType 64
 type XMMType    = BVType 128
 
 -- | A runtime representation of @Type@ for case matching purposes.
@@ -165,6 +169,30 @@ data Location addr (tp :: Type) where
   UpperHalf :: Location addr (BVType (n+n))
             -> Location addr (BVType n)
 
+  -- Floating point
+  
+  -- | The register stack: the argument is an offset from the stack
+  -- top, so X87Register 0 is the top, X87Register 1 is the second,
+  -- and so forth.
+  X87Register :: !Int -> Location addr (FloatType X86_80Float)
+  
+  -- | Flag registers, not including TOP
+  X87FlagReg :: !Int -> Location addr BoolType
+  
+  -- Top of stack register, part of FPFlags but modeled separately
+  -- X87Top :: Location addr (BVType 3)
+
+  -- | Control register, only mask bits are used.  We assume that the
+  -- precision control flag is set to 11b, i.e., 80 bit precision.
+  X87ExceptionMaskReg :: !Int -> Location addr BoolType
+
+  -- x87 tag register, mapping register to valid/zero/special/empty
+  -- X87TagRegister :: !Int -> Location addr (BVType 2)
+
+  
+
+  
+
 {-
   -- A portion of a bitvector value.
   BVSlice :: Location addr (BVType n) -- Location of bitvector.
@@ -183,7 +211,8 @@ loc_width (MMXReg {}) = knownNat
 loc_width (SegmentReg {}) = knownNat
 loc_width IPReg      = knownNat
 loc_width (XMMReg _) = knownNat
-
+loc_width (LowerHalf l) = halfNat (loc_width l)
+loc_width (UpperHalf l) = halfNat (loc_width l)
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
 xmm_low64 l = LowerHalf l
@@ -194,9 +223,9 @@ low_dword :: Reg64 -> Location addr (BVType 32)
 low_dword r = LowerHalf (GPReg r)
 -}
 
--- | Return the high 32-bits of the location.
-high_dword :: Reg64 -> Location addr (BVType 32)
-high_dword r = UpperHalf (GPReg r)
+-- -- | Return the high 32-bits of the location.
+-- high_dword :: Reg64 -> Location addr (BVType 32)
+-- high_dword r = UpperHalf (GPReg r)
 
 -- | CF flag
 cf_flag :: Location addr BoolType
@@ -280,41 +309,48 @@ rdx = GPReg r_rdx
 
 type IsLeq (m :: Nat) (n :: Nat) = (m <= n)
 
---instance (n <= m) => IsLeq n m where
+------------------------------------------------------------------------
+-- Floating point sizes
 
--- instance IsLeq 1 4 where
+-- | This data kind describes the styles of floating-point values understood
+--   by recent LLVM bytecode formats.  This consist of the standard IEEE 754-2008
+--   binary floating point formats, as well as the X86 extended 80-bit format
+--   and the double-double format.
+data FloatInfo where
+  HalfFloat         :: FloatInfo  --  16 bit binary IEE754
+  SingleFloat       :: FloatInfo  --  32 bit binary IEE754
+  DoubleFloat       :: FloatInfo  --  64 bit binary IEE754
+  QuadFloat         :: FloatInfo  -- 128 bit binary IEE754
+  X86_80Float       :: FloatInfo  -- X86 80-bit extended floats
+--  DoubleDoubleFloat :: FloatInfo -- 2 64-bit floats fused in the "double-double" style
 
--- instance IsLeq 8 8 where
+data FloatInfoRepr (flt::FloatInfo) where
+  HalfFloatRepr         :: FloatInfoRepr HalfFloat
+  SingleFloatRepr       :: FloatInfoRepr SingleFloat
+  DoubleFloatRepr       :: FloatInfoRepr DoubleFloat
+  QuadFloatRepr         :: FloatInfoRepr QuadFloat
+  X86_80FloatRepr       :: FloatInfoRepr X86_80Float
+--  DoubleDoubleFloatRepr :: FloatInfoRepr DoubleDoubleFloat
 
--- instance IsLeq 1 16 where
--- instance IsLeq 4 16 where
--- instance IsLeq 8 16 where
+type family FloatInfoBits (flt :: FloatInfo) :: Nat where
+  FloatInfoBits HalfFloat         = 16 
+  FloatInfoBits SingleFloat       = 32
+  FloatInfoBits DoubleFloat       = 64
+  FloatInfoBits QuadFloat         = 128
+  FloatInfoBits X86_80Float       = 80
 
--- instance IsLeq 1 32 where
--- instance IsLeq 4 32 where
--- instance IsLeq 8 32 where
--- instance IsLeq 16 32 where
+type FloatType flt = BVType (FloatInfoBits flt)
 
--- instance IsLeq 1 64 where
--- --  leqProof = knownLeq
--- instance IsLeq 4 64 where
--- --  leqProof = knownLeq
--- instance IsLeq 8 64 where
--- --  leqProof = knownLeq
+-- type instance FloatInfoBits DoubleDoubleFloat = 
 
--- instance IsLeq 32 64 where
--- instance IsLeq 64 64 where
-
--- instance IsLeq 1 128 where
--- --  leqProof = knownLeq
--- instance IsLeq 4 128 where
--- --  leqProof = knownLeq
--- instance IsLeq 8 128 where
--- --  leqProof = knownLeq
-
--- instance IsLeq 32 128 where
--- instance IsLeq 64 128 where
-
+floatInfoBits :: FloatInfoRepr flt -> NatRepr (FloatInfoBits flt)
+floatInfoBits fir = case fir of 
+                      HalfFloatRepr         -> knownNat
+                      SingleFloatRepr       -> knownNat 
+                      DoubleFloatRepr       -> knownNat
+                      QuadFloatRepr         -> knownNat
+                      X86_80FloatRepr       -> knownNat
+                      
 ------------------------------------------------------------------------
 -- Values
 
@@ -330,7 +366,6 @@ class IsValue (v  :: Type -> *) where
 
   -- | Returns the width of a bit-vector value.
   bv_width :: v (BVType n) -> NatRepr n
-
 
   true :: v BoolType
   true = bvLit knownNat (1::Integer)
@@ -351,8 +386,13 @@ class IsValue (v  :: Type -> *) where
   -- | Performs a multiplication of two bitvector values.
   bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
+  -- | Performs a multiplication of two bitvector values.
+  bvDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvSignedDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
+
   -- | Performs a modulo of two bitvector values.
   bvMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvSignedMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
@@ -387,7 +427,6 @@ class IsValue (v  :: Type -> *) where
   --   where
   --     sz = halfNat (bv_width v)
 
-  -- FIXME: constants shifts?
   -- | Rotations
   bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
@@ -487,8 +526,32 @@ class IsValue (v  :: Type -> *) where
   -- All bits at indices greater than return value must be unset.
   bsr :: v (BVType n) -> v (BVType n)
 
-  -- | Add two double precision floating point numbers.
-  doubleAdd :: v DoubleType -> v DoubleType -> v DoubleType
+  -- FP stuff
+
+  -- | is NaN (quiet and signalling)
+  isQNaN :: FloatInfoRepr flt -> v (FloatType flt) -> v BoolType
+  isSNaN :: FloatInfoRepr flt -> v (FloatType flt) -> v BoolType
+
+  isNaN :: FloatInfoRepr flt -> v (FloatType flt) -> v BoolType
+  isNaN fir v = isQNaN fir v .|. isSNaN fir v
+
+  -- | Add two floating point numbers.
+  fpAdd :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+  
+  -- | Subtracts two floating point numbers.
+  fpSub :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+
+  -- | Multiplies two floating point numbers.
+  fpMul :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+
+  -- | Divides two floating point numbers.
+  fpDiv :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+
+  fpLt :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
+
+  -- | Floating point equality (equates -0 and 0)
+  fpEq :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
+  fpEq fir v v' = complement (fpLt fir v v' .|. fpLt fir v' v)
 
 ------------------------------------------------------------------------
 -- Monadic definition
@@ -500,6 +563,8 @@ type family Value (m :: * -> *) :: Type -> *
 type Pred m = Value m BoolType
 
 type MLocation m = Location (Value m (BVType 64))
+
+data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException -- | AlignmentCheck
 
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
@@ -530,7 +595,22 @@ class ( Applicative m
 
   -- | execute the system call with the given id.  
   syscall :: Value m (BVType 64) -> m ()
-  
+
+  -- | raises an exception if the predicate is true and the mask is false
+  exception :: Value m BoolType    -- mask
+               -> Value m BoolType -- predicate
+               -> ExceptionClass
+               -> m ()
+
+  -- FIXME: those should also mutate the underflow/overflow flag and
+  -- related state.
+
+  -- | X87 support --- these both affect the register stack for the
+  -- x87 state.  
+  x87Push :: Value m (FloatType X86_80Float) -> m ()
+  x87Pop  :: m ()
+
+
 -- | Defines operations that need to be supported at a specific bitwidht.
 type SupportedBVWidth n
    = ( IsLeq 1 n

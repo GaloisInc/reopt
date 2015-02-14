@@ -81,32 +81,33 @@ sar
 shl
 shr
 rol
+std
+
+subsd
+mulsd
+xorpd
+divsd
+
+div
+idvi
+
+ucomisd
 
 -- Not done
 
-mulsd
-
-rep
+rep movs
 repz
-
-std
-subsd
-ucomisd
-xorpd
 
 cvtsi2sd
 cvtss2sd
 cvttsd2si
-div
-divsd
+
 fadd
 fld
 fmul
 fnstcw
 fstp
 fsubrp
-idiv
-
 
 -- Unknown
 movabs
