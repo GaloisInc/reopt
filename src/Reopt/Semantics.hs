@@ -605,11 +605,31 @@ exec_lea l v = l .= v
 -- ** BMI1, BMI2
 
 -- * X86 FPU instructions
+
+type FPUnop  = Semantics m => FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ()
+type FPUnopV = Semantics m => FloatInfoRepr flt -> Value m (FloatType flt) -> m ()
+type FPBinop = Semantics m => FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) -> FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ()
+
 -- ** Data transfer instructions
 
--- FLD Load floating-point value
--- FST Store floating-point value
--- FSTP Store floating-point value
+-- | FLD Load floating-point value
+exec_fld :: FPUnopV
+exec_fld fir v = x87Push (fpCvt fir X86_80FloatRepr v)
+
+-- | FST Store floating-point value
+exec_fst :: FPUnop
+exec_fst fir l = do
+  v <- get (X87StackRegister 0)
+  set_undefined c0_flag
+  set_undefined c2_flag
+  set_undefined c3_flag
+  c1_flag .= fpCvtRoundsUp X86_80FloatRepr fir v
+  l .= fpCvt X86_80FloatRepr fir v
+  
+-- | FSTP Store floating-point value
+exec_fstp :: FPUnop
+exec_fstp fir l = exec_fst fir l >> x87Pop
+
 -- FILD Load integer
 -- FIST Store integer
 -- FISTP1 Store integer and pop
@@ -627,16 +647,54 @@ exec_lea l v = l .= v
 
 -- ** Basic arithmetic instructions
 
--- FADD Add floating-point
+fparith :: Semantics m =>
+           (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> Value m (FloatType flt) -> Value m (FloatType flt))
+           -> (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> Value m (FloatType flt) -> Value m BoolType)
+           -> FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) -> FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ()
+fparith op opRoundedUp fir_d l fir_s v = do
+  let up_v = fpCvt fir_s fir_d v
+  v' <- get l
+  set_undefined c0_flag
+  set_undefined c2_flag
+  set_undefined c3_flag
+  c1_flag .= opRoundedUp fir_d v' up_v
+  l .= op fir_d v' up_v
+
+-- | FADD Add floating-point
+
+exec_fadd :: FPBinop
+exec_fadd = fparith fpAdd fpAddRoundedUp
+
 -- FADDP Add floating-point and pop
 -- FIADD Add integer
--- FSUB Subtract floating-point
--- FSUBP Subtract floating-point and pop
+
+-- | FSUB Subtract floating-point
+exec_fsub :: FPBinop
+exec_fsub = fparith fpSub fpSubRoundedUp
+
+-- | FSUBP Subtract floating-point and pop
+exec_fsubp :: FPBinop
+exec_fsubp fir_d l fir_s v = exec_fsub fir_d l fir_s v >> x87Pop
+
 -- FISUB Subtract integer
--- FSUBR Subtract floating-point reverse
--- FSUBRP Subtract floating-point reverse and pop 
+
+-- | FSUBR Subtract floating-point reverse
+exec_fsubr :: FPBinop
+exec_fsubr = fparith (reverseOp fpSub) (reverseOp fpSubRoundedUp)
+  where
+    reverseOp f = \fir x y -> f fir y x
+  
+-- | FSUBRP Subtract floating-point reverse and pop
+exec_fsubrp :: FPBinop
+exec_fsubrp fir_d l fir_s v = exec_fsubr fir_d l fir_s v >> x87Pop
+    
 -- FISUBR Subtract integer reverse
--- FMUL Multiply floating-point
+
+-- FIXME: we could factor out commonalities between this and fadd
+-- | FMUL Multiply floating-point
+exec_fmul :: FPBinop
+exec_fmul = fparith fpMul fpMulRoundedUp
+
 -- FMULP Multiply floating-point and pop
 -- FIMUL Multiply integer
 -- FDIV Divide floating-point
@@ -703,7 +761,17 @@ exec_lea l v = l .= v
 -- FCLEX Clear floating-point exception flags after checking for error conditions
 -- FNCLEX Clear floating-point exception flags without checking for error conditions
 -- FSTCW Store FPU control word after checking error conditions 
--- FNSTCW Store FPU control word without checking error conditions 
+
+-- | FNSTCW Store FPU control word without checking error conditions
+exec_fnstcw :: Semantics m => MLocation m (BVType 16) -> m ()
+exec_fnstcw l = do
+  v <- get X87ControlReg
+  set_undefined c0_flag
+  set_undefined c1_flag  
+  set_undefined c2_flag
+  set_undefined c3_flag
+  l .= v
+
 -- FLDCW Load FPU control word
 -- FSTENV Store FPU environment after checking error conditions 
 -- FNSTENV Store FPU environment without checking error conditions 
@@ -785,7 +853,7 @@ exec_movss l v = l .= v
 -- *** SSE Conversion Instructions
 
 -- CVTPI2PS Convert packed doubleword integers to packed single-precision floating-point values
-CVTSI2SS Convert doubleword integer to scalar single-precision floating-point value
+-- CVTSI2SS Convert doubleword integer to scalar single-precision floating-point value
 -- CVTPS2PI Convert packed single-precision floating-point values to packed doubleword integers
 -- CVTTPS2PI Convert with truncation packed single-precision floating-point values to packed doubleword integers
 -- CVTSS2SI Convert a scalar single-precision floating-point value to a doubleword integer
@@ -918,11 +986,23 @@ exec_ucomisd l v = do v' <- get lower_l
 -- CVTDQ2PD  Convert packed doubleword integers to packed double-precision floating-point values                     
 -- CVTPS2PD  Convert packed single-precision floating-point values to packed double-precision floating- point values 
 -- CVTPD2PS  Convert packed double-precision floating-point values to packed single-precision floating- point values
--- CVTSS2SD  Convert scalar single-precision floating-point values to scalar double-precision floating-point values 
+
+-- | CVTSS2SD  Convert scalar single-precision floating-point values to scalar double-precision floating-point values
+exec_cvtss2sd :: Semantics m => MLocation m (BVType 128) -> Value m (FloatType SingleFloat) -> m ()
+exec_cvtss2sd l v = xmm_low64 l .= fpCvt SingleFloatRepr DoubleFloatRepr v
+  
 -- CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values 
 -- CVTSD2SI  Convert scalar double-precision floating-point values to a doubleword integer                          
--- CVTTSD2SI Convert with truncation scalar double-precision floating-point values to scalar doubleword integers    
--- CVTSI2SD  Convert doubleword integer to scalar double-precision floating-point value                            
+
+-- | CVTTSD2SI Convert with truncation scalar double-precision floating-point values to scalar doubleword integers
+exec_cvttsd2si :: IsLocationBV m n => MLocation m (BVType n) -> Value m (FloatType DoubleFloat) -> m ()
+-- Invalid, Precision.  Returns 80000000 if exception is masked
+exec_cvttsd2si l v = l .= fpToBV (loc_width l) DoubleFloatRepr v
+
+-- | CVTSI2SD  Convert doubleword integer to scalar double-precision floating-point value
+exec_cvtsi2sd :: IsLocationBV m n => MLocation m (BVType 128) -> Value m (BVType n) -> m ()
+exec_cvtsi2sd l v = xmm_low64 l .= fpFromBV DoubleFloatRepr v
+
 -- ** SSE2 Packed Single-Precision Floating-Point Instructions
 
 -- CVTDQ2PS  Convert packed doubleword integers to packed single-precision floating-point values                 

@@ -92,22 +92,21 @@ div
 idvi
 
 ucomisd
+fadd
+fld
+fmul
+fstp
+fsubrp
+fnstcw
+cvttsd2si
+cvtsi2sd
+cvtss2sd
 
 -- Not done
 
 rep movs
 repz
 
-cvtsi2sd
-cvtss2sd
-cvttsd2si
-
-fadd
-fld
-fmul
-fnstcw
-fstp
-fsubrp
 
 -- Unknown
 movabs

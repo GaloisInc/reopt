@@ -133,7 +133,7 @@ instance S.IsValue Expr where
   bsf x = app $ Bsf (exprWidth x) x
   bsr x = app $ Bsr (exprWidth x) x
 
-  doubleAdd x y = app $ DoubleAdd x y
+  -- doubleAdd x y = app $ DoubleAdd x y
 
 {-
 -- | Return portion of a bitvector

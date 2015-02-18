@@ -61,7 +61,6 @@ import GHC.TypeLits
 import qualified Flexdis86.InstructionSet as Flexdis86
 import Reopt.Semantics.Monad
   ( BoolType
-  , DoubleType
   , Type(..)
   , TypeRepr(..)
   )
@@ -343,7 +342,7 @@ data App f tp where
   -- Floating point operations
 
   -- Double precision addition.
-  DoubleAdd :: f DoubleType -> f DoubleType -> App f DoubleType
+  -- DoubleAdd :: f DoubleType -> f DoubleType -> App f DoubleType
 
 
 appWidth :: App f (BVType n) -> NatRepr n
@@ -378,7 +377,7 @@ appWidth a =
 
     Bsf w _ -> w
     Bsr w _ -> w
-    DoubleAdd _ _ -> knownNat
+    -- DoubleAdd _ _ -> knownNat
 
 -----------------------------------------------------------------------
 -- App utilities

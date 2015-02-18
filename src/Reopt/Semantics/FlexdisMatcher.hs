@@ -39,40 +39,6 @@ import           Data.Parameterized.NatRepr
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
 
--- -- | Extracts the value, truncating as required
--- getBVValue :: (FullSemantics m) => NatRepr n -> F.Value -> m (Value m (BVType n))
--- getBVValue (sz :: NatRepr n) v =
---   case v of
---     F.ControlReg cr     -> mk (CReg cr)
---     F.DebugReg dr       -> mk (DReg dr)
---     F.MMXReg mmx        -> mk (MMXReg mmx)
---     F.XMMReg xmm        -> mk (XMMReg xmm)
---     F.SegmentValue s    -> mk (SegmentReg s)
---     F.FarPointer _      -> fail "FarPointer"
---     -- If an instruction can take a VoidMem, it needs to get it explicitly
---     F.VoidMem _ar       -> fail "VoidMem"
---     F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
---     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
---     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
---     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
---     F.ByteReg  r
---       | Just r64 <- F.is_low_reg r  -> mk (reg_low n8 r64)
---       | Just r64 <- F.is_high_reg r -> mk (reg_high n8 r64)
---       | otherwise                   -> fail "unknown r8"
---     F.WordReg  r                    -> mk (reg_low n16 (F.reg16_reg r))
---     F.DWordReg r                    -> mk (reg_low n32 (F.reg32_reg r))
---     F.QWordReg r                    -> mk (GPReg r)
---     F.ByteImm  w                    -> return (bvLit sz $ fromIntegral w) -- FIXME: should we cast here?
---     F.WordImm  w                    -> return (bvLit sz $ fromIntegral w)
---     F.DWordImm w                    -> return (bvLit sz $ fromIntegral w)
---     F.QWordImm w                    -> return (bvLit sz $ fromIntegral w)
---     F.JumpOffset off                -> return (bvLit sz $ fromIntegral off)
---   where
---     -- FIXME: what happens with signs etc?
---     mk :: forall m n'. (FullSemantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (Value m (BVType n))
---     mk l = do when (widthVal (loc_width l) < widthVal sz) $ fail "Extending in getBVValue"
---               get (BVSlice l 0 (BVTypeRepr sz))
-
 -- | Extracts the value, truncating as required
 getSomeBVValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
 getSomeBVValue v =
@@ -82,6 +48,7 @@ getSomeBVValue v =
     F.MMXReg mmx        -> mk (MMXReg mmx)
     F.XMMReg xmm        -> mk (XMMReg xmm)
     F.SegmentValue s    -> mk (SegmentReg s)
+    F.X87Register n     -> mk (X87StackRegister n)
     F.FarPointer _      -> fail "FarPointer"
     -- If an instruction can take a VoidMem, it needs to get it explicitly
     F.VoidMem _ar       -> fail "VoidMem"
@@ -89,6 +56,11 @@ getSomeBVValue v =
     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
+    -- Floating point memory
+    F.FPMem32 ar          -> getBVAddress ar >>= mk . mkFPAddr SingleFloatRepr
+    F.FPMem64 ar          -> getBVAddress ar >>= mk . mkFPAddr DoubleFloatRepr
+    F.FPMem80 ar          -> getBVAddress ar >>= mk . mkFPAddr X86_80FloatRepr
+    
     F.ByteReg  r
       | Just r64 <- F.is_low_reg r  -> mk (reg_low8 r64)
       | Just r64 <- F.is_high_reg r -> mk (reg_high8 r64)
@@ -142,7 +114,7 @@ getSomeBVLocation v =
     F.SegmentValue s    -> mk (SegmentReg s)
     F.FarPointer _      -> fail "FarPointer"
     F.VoidMem ar        -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
-    F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
+    F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8
     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
@@ -234,6 +206,12 @@ execInstruction ii =
     _ | Just f <- isConditional "set", [v] <- F.iiArgs ii
              -> getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f
 
+    "ret"
+      | [] <- F.iiArgs ii
+              -> exec_ret Nothing
+      | [F.WordImm imm] <- F.iiArgs ii
+              -> exec_ret (Just imm)
+
     -- fixed size instructions.  We truncate in the case of an xmm register, for example
     "addsd"   -> truncateKnownBinop exec_addsd
     "subsd"   -> truncateKnownBinop exec_subsd
@@ -245,6 +223,15 @@ execInstruction ii =
     "divsd"   -> truncateKnownBinop exec_divsd
     "ucomisd" -> truncateKnownBinop exec_ucomisd
     "xorpd"   -> binop (\l v -> modify (`bvXor` v) l) -- FIXME: add size annots?
+    "cvttsd2si" -> mkBinop $ \loc val -> do SomeBV l  <- getSomeBVLocation loc 
+                                            v <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
+                                            exec_cvttsd2si l v
+      
+    "cvtsi2sd" -> mkBinop $ \loc val -> do l <- getSomeBVLocation loc >>= checkSomeBV loc_width n128
+                                           SomeBV v <- getSomeBVValue val
+                                           exec_cvtsi2sd l v
+                                           
+    "cvtss2sd" -> truncateKnownBinop exec_cvtss2sd
     
     -- regular instructions
     "add"     -> binop exec_add
@@ -273,11 +260,6 @@ execInstruction ii =
     "pause"   -> return ()
     "pop"     -> unop exec_pop
     "push"    -> unopV exec_push
-    "ret"
-      | [] <- F.iiArgs ii
-              -> exec_ret Nothing
-      | [F.WordImm imm] <- F.iiArgs ii
-              -> exec_ret (Just imm)
     "rol"     -> mkBinopLV exec_rol
     "sbb"     -> binop exec_sbb
     "sar"     -> mkBinopLV exec_sar
@@ -288,8 +270,20 @@ execInstruction ii =
     "syscall" -> get rax >>= syscall 
     "test"    -> binop exec_test
     "xor"     -> binop exec_xor
+    -- X87 FP instructions
+    "fadd"    -> fpUnopOrRegBinop exec_fadd
+    "fld"     -> fpUnopV exec_fld
+    "fmul"    -> fpUnopOrRegBinop exec_fmul
+    "fnstcw"  -> knownUnop exec_fnstcw -- stores to bv memory (i.e., not FP)
+    "fst"     -> fpUnop exec_fst
+    "fstp"    -> fpUnop exec_fstp
+    "fsub"    -> fpUnopOrRegBinop exec_fsub
+    "fsubp"   -> fpUnopOrRegBinop exec_fsubp
+    "fsubr"   -> fpUnopOrRegBinop exec_fsubr
+    "fsubrp"  -> fpUnopOrRegBinop exec_fsubrp
     _         -> fail $ "Unsupported instruction: " ++ show ii
   where
+    x87fir = X86_80FloatRepr
     -- conditional instruction support (cmovcc, jcc)
     conditionals = [ ("a", cond_a),   ("ae", cond_ae), ("b", cond_b),   ("be", cond_be), ("g", cond_g),
                      ("ge", cond_ge), ("l", cond_l),   ("le", cond_le), ("o", cond_o),   ("p", cond_p),
@@ -315,14 +309,19 @@ execInstruction ii =
                   [v, v']   -> f v v'
                   vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
+    mkUnop :: FullSemantics m
+              => (F.Value -> m a)
+              -> m a
+    mkUnop f = case F.iiArgs ii of
+                 [v]   -> f v
+                 vs    -> fail $ "expecting 1 arguments, got " ++ show (length vs)
+
     mkBinopLV ::  Semantics m
             => (forall n n'. (IsLocationBV m n, 1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
             -> m a
-    mkBinopLV f = case F.iiArgs ii of
-                    [loc, val] -> do SomeBV l <- getSomeBVLocation loc
-                                     SomeBV v <- getSomeBVValue val
-                                     f l v
-                    vs         -> fail $ "expecting 2 arguments, got " ++ show (length vs)
+    mkBinopLV f = mkBinop $ \loc val -> do SomeBV l <- getSomeBVLocation loc
+                                           SomeBV v <- getSomeBVValue val
+                                           f l v
 
     -- The location size must be >= the value size.
     geBinop :: FullSemantics m
@@ -346,21 +345,50 @@ execInstruction ii =
                                             v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
                                             f l v
 
+    knownUnop :: (KnownNat n, FullSemantics m) => (MLocation m (BVType n) -> m ()) -> m ()
+    knownUnop f = mkUnop $ \loc -> do l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
+                                      f l
+
     unopV :: FullSemantics m => (forall n. IsLocationBV m n => Value m (BVType n) -> m ()) -> m ()
-    unopV f = case F.iiArgs ii of
-                [val] -> do SomeBV v <- getSomeBVValue val
-                            f v
-                vs    -> fail $ "unop: expecting 1 argument, got " ++ show (length vs)
+    unopV f = mkUnop $ \val -> do SomeBV v <- getSomeBVValue val
+                                  f v
 
     unop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> m ()) -> m ()
-    unop f = case F.iiArgs ii of
-               [loc] -> do SomeBV l <- getSomeBVLocation loc
-                           f l
-               vs    -> fail $ "unop: expecting 1 argument, got " ++ show (length vs)
+    unop f = mkUnop $ \val -> do SomeBV v <- getSomeBVLocation val
+                                 f v
 
     binop :: FullSemantics m => (forall n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()) -> m ()
-    binop f = case F.iiArgs ii of
-                [loc, val] -> do SomeBV l <- getSomeBVLocation loc
-                                 v <- getSomeBVValue val >>= checkSomeBV bv_width (loc_width l)
-                                 f l v
-                vs         -> fail $ "binop: expecting 2 arguments, got " ++ show (length vs)
+    binop f = mkBinop $ \loc val -> do SomeBV l <- getSomeBVLocation loc
+                                       v <- getSomeBVValue val >>= checkSomeBV bv_width (loc_width l)
+                                       f l v
+
+    fpUnopV :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> m ()) -> m ()
+    fpUnopV f
+      | [F.FPMem32 ar]     <- F.iiArgs ii = go SingleFloatRepr ar
+      | [F.FPMem64 ar]     <- F.iiArgs ii = go DoubleFloatRepr ar
+      | [F.FPMem80 ar]     <- F.iiArgs ii = go X86_80FloatRepr ar
+      | [F.X87Register n]  <- F.iiArgs ii = get (X87StackRegister n) >>= f x87fir
+      | otherwise                         = fail $ "fpUnop: expecting 1 FP argument, got: " ++ show (F.iiArgs ii)
+      where
+        go :: forall flt. FloatInfoRepr flt -> F.AddrRef -> m ()
+        go sz ar = do v <- getBVAddress ar >>= get . mkFPAddr sz
+                      f sz v
+
+    fpUnop :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ()) -> m ()
+    fpUnop f
+      | [F.FPMem32 ar]     <- F.iiArgs ii = go SingleFloatRepr ar
+      | [F.FPMem64 ar]     <- F.iiArgs ii = go DoubleFloatRepr ar
+      | [F.FPMem80 ar]     <- F.iiArgs ii = go X86_80FloatRepr ar
+      | [F.X87Register n]  <- F.iiArgs ii = f x87fir (X87StackRegister n)
+      | otherwise                         = fail $ "fpUnop: expecting 1 FP argument, got: " ++ show (F.iiArgs ii)
+      where
+        go :: forall flt. FloatInfoRepr flt -> F.AddrRef -> m ()
+        go sz ar = do l <- mkFPAddr sz <$> getBVAddress ar 
+                      f sz l
+
+    fpUnopOrRegBinop :: forall m. Semantics m =>
+                        (forall flt_d flt_s. FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) -> FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ())
+                        -> m ()
+    fpUnopOrRegBinop f 
+      | length (F.iiArgs ii) == 1     = fpUnopV (f x87fir (X87StackRegister 0))
+      | otherwise                     = knownBinop (\r r' -> f x87fir r x87fir r')

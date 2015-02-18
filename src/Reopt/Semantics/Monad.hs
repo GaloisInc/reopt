@@ -53,12 +53,19 @@ module Reopt.Semantics.Monad
   , if_flag
   , df_flag
   , of_flag
+    -- X87
+  , c0_flag
+  , c1_flag
+  , c2_flag
+  , c3_flag
+    
   , mkBVAddr
+  , mkFPAddr    
   -- ** Registers
   , rsp, rbp, r_rax, rax, r_rdx, rdx
     -- * IsLeq utility
   , IsLeq
-  , n8, n16, n32, n64
+  , n8, n16, n32, n64, n80, n128
     -- * Value operations
   , IsValue(..)
   , Pred
@@ -96,6 +103,13 @@ n32 = knownNat
 
 n64 :: NatRepr 64
 n64 = knownNat
+
+n80 :: NatRepr 80
+n80 = knownNat
+
+n128 :: NatRepr 128
+n128 = knownNat
+
 
 ------------------------------------------------------------------------
 -- Type
@@ -174,7 +188,7 @@ data Location addr (tp :: Type) where
   -- | The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
-  X87Register :: !Int -> Location addr (FloatType X86_80Float)
+  X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
   
   -- | Flag registers, not including TOP
   X87FlagReg :: !Int -> Location addr BoolType
@@ -182,24 +196,12 @@ data Location addr (tp :: Type) where
   -- Top of stack register, part of FPFlags but modeled separately
   -- X87Top :: Location addr (BVType 3)
 
-  -- | Control register, only mask bits are used.  We assume that the
+  -- Control register, only mask bits are used.  We assume that the
   -- precision control flag is set to 11b, i.e., 80 bit precision.
-  X87ExceptionMaskReg :: !Int -> Location addr BoolType
+  -- X87ExceptionMaskReg :: !Int -> Location addr BoolType
 
-  -- x87 tag register, mapping register to valid/zero/special/empty
-  -- X87TagRegister :: !Int -> Location addr (BVType 2)
-
-  
-
-  
-
-{-
-  -- A portion of a bitvector value.
-  BVSlice :: Location addr (BVType n) -- Location of bitvector.
-          -> Int         -- Bit level offset.
-          -> NatRepr m   -- Type representation
-          -> Location addr (BVType m)
--}
+  -- FIXME: this is convenient until we implement exceptions.
+  X87ControlReg :: Location addr (BVType 16)
 
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (MemoryAddr _ tp) = type_width tp
@@ -213,6 +215,10 @@ loc_width IPReg      = knownNat
 loc_width (XMMReg _) = knownNat
 loc_width (LowerHalf l) = halfNat (loc_width l)
 loc_width (UpperHalf l) = halfNat (loc_width l)
+loc_width (X87StackRegister _) = knownNat
+loc_width (X87FlagReg _) = knownNat
+loc_width (X87ControlReg) = knownNat
+
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
 xmm_low64 l = LowerHalf l
@@ -263,10 +269,20 @@ df_flag = FlagReg 10
 of_flag :: Location addr BoolType
 of_flag = FlagReg 11
 
+-- | x87 flags
+c0_flag, c1_flag, c2_flag, c3_flag :: Location addr BoolType
+c0_flag = X87FlagReg 0
+c1_flag = X87FlagReg 1
+c2_flag = X87FlagReg 2
+c3_flag = X87FlagReg 3
+
 -- | Tuen an address into a location of size @n
 mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
 mkBVAddr sz addr = MemoryAddr addr (BVTypeRepr sz)
 
+-- | Tuen an address into a location of size @n
+mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
+mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
 
 -- | Return low 32-bits of register e.g. rax -> eax
 reg_low32 :: Reg64 -> Location addr (BVType 32)
@@ -537,12 +553,21 @@ class IsValue (v  :: Type -> *) where
 
   -- | Add two floating point numbers.
   fpAdd :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+
+  -- | Whether the result of the add was rounded up
+  fpAddRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
   
   -- | Subtracts two floating point numbers.
   fpSub :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
 
+  -- | Subtracts two floating point numbers.
+  fpSubRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
+
   -- | Multiplies two floating point numbers.
   fpMul :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+
+  -- | Whether the result of the mul was rounded up
+  fpMulRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
 
   -- | Divides two floating point numbers.
   fpDiv :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
@@ -552,6 +577,18 @@ class IsValue (v  :: Type -> *) where
   -- | Floating point equality (equates -0 and 0)
   fpEq :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
   fpEq fir v v' = complement (fpLt fir v v' .|. fpLt fir v' v)
+
+  -- | Convert between floating point values
+  fpCvt :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v (FloatType flt')
+
+  -- | Convert from integer to float
+  fpFromBV :: FloatInfoRepr flt -> v (BVType n) -> v (FloatType flt)
+
+  -- | Convert from float to integer
+  fpToBV   :: NatRepr n -> FloatInfoRepr flt -> v (FloatType flt) -> v (BVType n)
+
+  -- | Whether roundup occurs when converting between FP formats
+  fpCvtRoundsUp :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v BoolType
 
 ------------------------------------------------------------------------
 -- Monadic definition
