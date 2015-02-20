@@ -62,7 +62,7 @@ module Reopt.Semantics.Monad
   , mkBVAddr
   , mkFPAddr    
   -- ** Registers
-  , rsp, rbp, r_rax, rax, r_rdx, rdx
+  , rsp, rbp, r_rax, rax, r_rdx, rdx, rsi, rdi, rcx
     -- * IsLeq utility
   , IsLeq
   , n8, n16, n32, n64, n80, n128
@@ -314,11 +314,14 @@ r_rax = Flexdis86.rax
 r_rdx :: Reg64
 r_rdx = Flexdis86.rdx
 
-rsp, rbp, rax, rdx :: Location addr (BVType 64)
+rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)
 rax = GPReg Flexdis86.rax
 rsp = GPReg Flexdis86.rsp
 rbp = GPReg Flexdis86.rbp
 rdx = GPReg r_rdx
+rsi = GPReg Flexdis86.rsi
+rdi = GPReg Flexdis86.rdi
+rcx = GPReg Flexdis86.rcx
 
 ------------------------------------------------------------------------
 -- IsLeq
@@ -388,6 +391,9 @@ class IsValue (v  :: Type -> *) where
 
   false :: v BoolType
   false = bvLit knownNat (0::Integer)
+
+  -- | Choose a value based upon the boolean (basically a pure if then else)
+  mux :: v BoolType -> v a -> v a -> v a
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
@@ -590,6 +596,16 @@ class IsValue (v  :: Type -> *) where
   -- | Whether roundup occurs when converting between FP formats
   fpCvtRoundsUp :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v BoolType
 
+-- Basically so I can get fromInteger, but the others might be handy too ...
+instance (IsValue v, KnownNat n) => Num (v (BVType n)) where
+  (+) = bvAdd
+  (*) = bvMul
+  (-) = bvSub
+  negate = bvNeg
+  abs    = error "abs is unimplemented for Values"
+  signum = error "signum is unimplemented for Values"
+  fromInteger = bvLit knownNat
+  
 ------------------------------------------------------------------------
 -- Monadic definition
 
@@ -630,6 +646,20 @@ class ( Applicative m
   when_ :: Value m BoolType -> m () -> m ()
   when_ p x = ifte_ p x (return ())
 
+  -- FIXME: use location instead?
+  -- | Move n bits at a time, with count moves
+  memmove :: NatRepr n -> Value m (BVType 64) -> Value m (BVType 64) -> Value m (BVType 64) -> m ()
+  -- memmove n count src dest
+
+  -- | Set memory to the given value, for the number of words (nbytes = count * bv_width v)
+  memset :: Value m (BVType 64) -> Value m (BVType n) -> Value m (BVType 64) -> m ()
+  -- memset count v dest
+
+  -- | Compare the memory regions.  Returns the number of elements which are
+  -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.  
+  memcmp :: NatRepr n -> Value m (BVType 64) -> Value m BoolType -> Value m (BVType 64) -> Value m (BVType 64) -> m (Value m (BVType 64))
+  -- memcmp n count direction srd dest 
+
   -- | execute the system call with the given id.  
   syscall :: Value m (BVType 64) -> m ()
 
@@ -646,7 +676,6 @@ class ( Applicative m
   -- x87 state.  
   x87Push :: Value m (FloatType X86_80Float) -> m ()
   x87Pop  :: m ()
-
 
 -- | Defines operations that need to be supported at a specific bitwidht.
 type SupportedBVWidth n

@@ -576,6 +576,112 @@ exec_ret m_off = do
   IPReg .= next_ip
 
 -- ** String Instructions
+
+
+-- FIXME: just use memmove always?
+-- FIXME: we need to check the size prefix --- 67 a4 is
+-- movs   BYTE PTR es:[edi],BYTE PTR ds:[esi]
+-- | MOVS/MOVSB Move string/Move byte string
+-- MOVS/MOVSW Move string/Move word string                 
+-- MOVS/MOVSD Move string/Move doubleword string             
+exec_movs :: Semantics m => Bool -> NatRepr n -> m ()
+exec_movs rep_pfx sz = do
+  -- The direction flag indicates post decrement or post increment.
+  df <- get df_flag
+  src  <- get rsi
+  dest <- get rdi
+  let szv        = bvLit n64 (widthVal sz)
+  if rep_pfx
+    then do count <- get rcx            
+            let nbytes_off = (count `bvSub` 1) `bvMul` szv
+                nbytes     = count `bvMul` szv
+                move_src  = mux df (src  `bvSub` nbytes_off) src
+                move_dest = mux df (dest `bvSub` nbytes_off) dest
+            -- FIXME: we might need direction for overlapping regions
+            memmove sz count move_src move_dest
+            rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
+            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
+            rcx .= 0
+    else do v <- get $ mkBVAddr sz src
+            mkBVAddr sz dest .= v
+            rsi .= mux df (src  `bvSub` szv) (src  `bvAdd` szv)
+            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+
+-- FIXME: can also take rep prefix
+-- | CMPS/CMPSB Compare string/Compare byte string           
+-- CMPS/CMPSW Compare string/Compare word string           
+-- CMPS/CMPSD Compare string/Compare doubleword string
+exec_cmps :: IsLocationBV m n => Bool -> NatRepr n -> m ()
+exec_cmps repz_pfx sz = do
+  -- The direction flag indicates post decrement or post increment.
+  df <- get df_flag
+  src  <- get rsi
+  dest <- get rdi
+  if repz_pfx
+    then do count <- get rcx
+            ifte_ (count .=. 0)
+              (return ())
+              (do_memcmp df src dest count)
+    else do v' <- get $ mkBVAddr sz dest
+            exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
+            rsi .= mux df (src  `bvSub` szv) (src  `bvAdd` szv)
+            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+  where
+    szv = bvLit n64 $ widthVal sz
+    do_memcmp df src dest count = do
+      nsame <- memcmp sz count df src dest
+      let equal = (nsame .=. count)
+          nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` 1))
+
+      -- we need to set the flags as if the last comparison was done, hence this.
+      let lastWordBytes = (nwordsSeen `bvSub` 1) `bvMul` szv
+          lastSrc  = mux df (src  `bvSub` lastWordBytes) (src  `bvAdd` lastWordBytes)
+          lastDest = mux df (dest `bvSub` lastWordBytes) (dest `bvAdd` lastWordBytes)
+          
+      v' <- get $ mkBVAddr sz lastDest
+      exec_cmp (mkBVAddr sz lastSrc) v' -- FIXME: right way around?
+      
+      -- we do this to make it obvious so repz cmpsb ; jz ... is clear
+      zf_flag .= equal 
+      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ widthVal sz `div` 8)
+        
+      rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
+      rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
+      rcx .= (count `bvSub` nwordsSeen)
+      
+-- SCAS/SCASB Scan string/Scan byte string                 
+-- SCAS/SCASW Scan string/Scan word string                 
+-- SCAS/SCASD Scan string/Scan doubleword string           
+-- LODS/LODSB Load string/Load byte string                 
+-- LODS/LODSW Load string/Load word string                 
+-- LODS/LODSD Load string/Load doubleword string           
+
+-- | STOS/STOSB Store string/Store byte string               
+-- STOS/STOSW Store string/Store word string               
+-- STOS/STOSD Store string/Store doubleword string
+exec_stos :: Semantics m => Bool -> MLocation m (BVType n) -> m ()
+exec_stos rep_pfx l = do
+  -- The direction flag indicates post decrement or post increment.
+  df <- get df_flag
+  dest <- get rdi
+  v    <- get l
+  let szv        = bvLit n64 (widthVal (loc_width l))
+  if rep_pfx
+    then do count <- get rcx
+            let nbytes_off = (count `bvSub` 1) `bvMul` szv
+                nbytes     = count `bvMul` szv
+                move_dest = mux df (dest `bvSub` nbytes_off) dest
+            -- FIXME: we might need direction for overlapping regions
+            memset count v move_dest
+            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
+            rcx .= 0
+    else do mkBVAddr (loc_width l) dest .= v
+            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+
+-- REP        Repeat while ECX not zero                    
+-- REPE/REPZ  Repeat while equal/Repeat while zero         
+-- REPNE/REPNZ Repeat while not equal/Repeat while not zero 
+  
 -- ** I/O Instructions
 -- ** Enter and Leave Instructions
 

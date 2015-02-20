@@ -101,12 +101,15 @@ fnstcw
 cvttsd2si
 cvtsi2sd
 cvtss2sd
+rep movs
+rep stos
+repz cmps
 
 -- Not done
 
-rep movs
-repz
+
+
 
 
 -- Unknown
-movabs
+

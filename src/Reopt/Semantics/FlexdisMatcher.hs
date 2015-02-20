@@ -212,6 +212,21 @@ execInstruction ii =
       | [F.WordImm imm] <- F.iiArgs ii
               -> exec_ret (Just imm)
 
+    "cmpsb"   -> exec_cmps (F.iiLockPrefix ii == F.RepZPrefix) n8
+    "cmpsw"   -> exec_cmps (F.iiLockPrefix ii == F.RepZPrefix) n16
+    "cmpsd"   -> exec_cmps (F.iiLockPrefix ii == F.RepZPrefix) n32
+    "cmpsq"   -> exec_cmps (F.iiLockPrefix ii == F.RepZPrefix) n64
+
+    "movsb"   -> exec_movs (F.iiLockPrefix ii == F.RepPrefix) n8
+    "movsw"   -> exec_movs (F.iiLockPrefix ii == F.RepPrefix) n16
+    "movsd"   -> exec_movs (F.iiLockPrefix ii == F.RepPrefix) n32
+    "movsq"   -> exec_movs (F.iiLockPrefix ii == F.RepPrefix) n64
+
+    "stosb"   -> exec_stos (F.iiLockPrefix ii == F.RepPrefix) (reg_low8 r_rax)
+    "stosw"   -> exec_stos (F.iiLockPrefix ii == F.RepPrefix) (reg_low16 r_rax)
+    "stosd"   -> exec_stos (F.iiLockPrefix ii == F.RepPrefix) (reg_low32 r_rax)
+    "stosq"   -> exec_stos (F.iiLockPrefix ii == F.RepPrefix) rax
+
     -- fixed size instructions.  We truncate in the case of an xmm register, for example
     "addsd"   -> truncateKnownBinop exec_addsd
     "subsd"   -> truncateKnownBinop exec_subsd
