@@ -28,7 +28,7 @@ module Reopt.Semantics.Representation
   , assignmentWidth
   , AssignId
   , AssignRhs(..)
-  , assignRhsWidth
+--  , assignRhsWidth
     -- * Value
   , Value(..)
   , valueWidth
@@ -220,8 +220,17 @@ data AssignRhs tp where
   -- Read the GS segment register.
   ReadGS :: AssignRhs (BVType 16)
 
+-- | Returns the width of a
 assignRhsWidth :: AssignRhs (BVType n) -> NatRepr n
-assignRhsWidth = undefined -- TODO: implement this.
+assignRhsWidth rhs =
+  case rhs of
+    EvalApp a -> appWidth a
+    SetUndefined w -> w
+    ReadAddr _ (BVTypeRepr w) -> w
+    ReadControlReg{} -> knownNat
+    ReadDebugReg{} -> knownNat
+    ReadFS -> knownNat
+    ReadGS -> knownNat
 
 ------------------------------------------------------------------------
 -- Value
@@ -247,8 +256,15 @@ bvValue i = BVValue knownNat i
 -- | App defines builtin operations on values.
 data App f tp where
 
+  Mux :: !(NatRepr n)
+      -> !(f BoolType)
+      -> !(f (BVType n))
+      -> !(f (BVType n))
+      -> App f (BVType n)
+
   ----------------------------------------------------------------------
   -- Operations related to concatenating and extending bitvectors.
+
 
   -- Concatenate two bitvectors together (low-bits are first)
   ConcatV :: {-#UNPACK #-} !(NatRepr n)
@@ -283,6 +299,22 @@ data App f tp where
 
   -- Multiply two numbers
   BVMul :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+
+  -- Unsigned division (rounds fractions to zero).
+  BVDiv :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+
+  -- Signed division (rounds fractional results to zero).
+  BVSignedDiv :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+
+  -- Unsigned modulo
+  BVMod :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+
+  -- Signed modulo.
+  -- The resulting modulus has the same sign as the quotient and satisfies
+  -- the constraint that for all x y where y != 0:
+  --   x = (y * BVSignedDiv x y) + BVSignedMod x y
+  BVSignedMod :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+
 
   -- Bitwise complement
   BVComplement :: NatRepr n -> f (BVType n) -> App f (BVType n)
@@ -348,11 +380,13 @@ data App f tp where
 appWidth :: App f (BVType n) -> NatRepr n
 appWidth a =
   case a of
-    ConcatV n _ _ -> addNat n n
-    UpperHalf n _ -> n
-    Trunc _ n -> n
-    SExt _ n -> n
-    UExt _ n -> n
+    Mux w _ _ _ -> w
+
+    ConcatV w _ _ -> addNat w w
+    UpperHalf w _ -> w
+    Trunc _ w -> w
+    SExt _ w -> w
+    UExt _ w -> w
 
     AndApp{} -> knownNat
     OrApp{}  -> knownNat
@@ -361,6 +395,10 @@ appWidth a =
     BVAdd w _ _ -> w
     BVSub w _ _ -> w
     BVMul w _ _ -> w
+    BVDiv w _ _ -> w
+    BVSignedDiv w _ _ -> w
+    BVMod w _ _ -> w
+    BVSignedMod w _ _ -> w
 
     BVComplement w _ -> w
     BVAnd w _ _ -> w

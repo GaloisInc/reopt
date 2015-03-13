@@ -58,9 +58,9 @@ module Reopt.Semantics.Monad
   , c1_flag
   , c2_flag
   , c3_flag
-    
+
   , mkBVAddr
-  , mkFPAddr    
+  , mkFPAddr
   -- ** Registers
   , rsp, rbp, r_rax, rax, r_rdx, rdx, rsi, rdi, rcx
     -- * IsLeq utility
@@ -184,15 +184,15 @@ data Location addr (tp :: Type) where
             -> Location addr (BVType n)
 
   -- Floating point
-  
+
   -- | The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
-  
+
   -- | Flag registers, not including TOP
   X87FlagReg :: !Int -> Location addr BoolType
-  
+
   -- Top of stack register, part of FPFlags but modeled separately
   -- X87Top :: Location addr (BVType 3)
 
@@ -352,7 +352,7 @@ data FloatInfoRepr (flt::FloatInfo) where
 --  DoubleDoubleFloatRepr :: FloatInfoRepr DoubleDoubleFloat
 
 type family FloatInfoBits (flt :: FloatInfo) :: Nat where
-  FloatInfoBits HalfFloat         = 16 
+  FloatInfoBits HalfFloat         = 16
   FloatInfoBits SingleFloat       = 32
   FloatInfoBits DoubleFloat       = 64
   FloatInfoBits QuadFloat         = 128
@@ -360,40 +360,27 @@ type family FloatInfoBits (flt :: FloatInfo) :: Nat where
 
 type FloatType flt = BVType (FloatInfoBits flt)
 
--- type instance FloatInfoBits DoubleDoubleFloat = 
+-- type instance FloatInfoBits DoubleDoubleFloat =
 
 floatInfoBits :: FloatInfoRepr flt -> NatRepr (FloatInfoBits flt)
-floatInfoBits fir = case fir of 
+floatInfoBits fir = case fir of
                       HalfFloatRepr         -> knownNat
-                      SingleFloatRepr       -> knownNat 
+                      SingleFloatRepr       -> knownNat
                       DoubleFloatRepr       -> knownNat
                       QuadFloatRepr         -> knownNat
                       X86_80FloatRepr       -> knownNat
-                      
+
 ------------------------------------------------------------------------
 -- Values
 
 -- | @IsValue@ is a class used to define types expressions.
 class IsValue (v  :: Type -> *) where
-{-
-  -- JHx: I removed this, because I don't think there is a pure way to
-  -- introduce undefined expressions (without some form of cheating like
-  -- stable pointers).  We may want to not only know that a result is
-  -- undefined, but able to distinguish between undefined values.
-  undef :: v a
--}
 
   -- | Returns the width of a bit-vector value.
   bv_width :: v (BVType n) -> NatRepr n
 
-  true :: v BoolType
-  true = bvLit knownNat (1::Integer)
-
-  false :: v BoolType
-  false = bvLit knownNat (0::Integer)
-
   -- | Choose a value based upon the boolean (basically a pure if then else)
-  mux :: v BoolType -> v a -> v a -> v a
+  mux :: v BoolType -> v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
@@ -408,20 +395,22 @@ class IsValue (v  :: Type -> *) where
   -- | Performs a multiplication of two bitvector values.
   bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-  -- | Performs a multiplication of two bitvector values.
+  -- | 2's complement
+  bvNeg :: v (BVType n) -> v (BVType n)
+  bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
+
+  -- | Unsigned divison (round fractional part to zero).
   bvDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  -- | Signed divison (round fractional part to zero).
   bvSignedDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
-  -- | Performs a modulo of two bitvector values.
+  -- | Unsigned modulo.
   bvMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  -- | Signed modulo (assumes division rounds to zero).
   bvSignedMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Bitwise complement
   complement :: v (BVType n) -> v (BVType n)
-
-  -- | 2's complement
-  bvNeg :: v (BVType n) -> v (BVType n)
-  bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
 
   -- | Bitwise and
   (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -562,7 +551,7 @@ class IsValue (v  :: Type -> *) where
 
   -- | Whether the result of the add was rounded up
   fpAddRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
-  
+
   -- | Subtracts two floating point numbers.
   fpSub :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
 
@@ -596,6 +585,12 @@ class IsValue (v  :: Type -> *) where
   -- | Whether roundup occurs when converting between FP formats
   fpCvtRoundsUp :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v BoolType
 
+  true :: v BoolType
+  true = bvLit knownNat (1::Integer)
+
+  false :: v BoolType
+  false = bvLit knownNat (0::Integer)
+
 -- Basically so I can get fromInteger, but the others might be handy too ...
 instance (IsValue v, KnownNat n) => Num (v (BVType n)) where
   (+) = bvAdd
@@ -605,7 +600,7 @@ instance (IsValue v, KnownNat n) => Num (v (BVType n)) where
   abs    = error "abs is unimplemented for Values"
   signum = error "signum is unimplemented for Values"
   fromInteger = bvLit knownNat
-  
+
 ------------------------------------------------------------------------
 -- Monadic definition
 
@@ -656,11 +651,11 @@ class ( Applicative m
   -- memset count v dest
 
   -- | Compare the memory regions.  Returns the number of elements which are
-  -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.  
+  -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
   memcmp :: NatRepr n -> Value m (BVType 64) -> Value m BoolType -> Value m (BVType 64) -> Value m (BVType 64) -> m (Value m (BVType 64))
-  -- memcmp n count direction srd dest 
+  -- memcmp n count direction srd dest
 
-  -- | execute the system call with the given id.  
+  -- | execute the system call with the given id.
   syscall :: Value m (BVType 64) -> m ()
 
   -- | raises an exception if the predicate is true and the mask is false
@@ -673,7 +668,7 @@ class ( Applicative m
   -- related state.
 
   -- | X87 support --- these both affect the register stack for the
-  -- x87 state.  
+  -- x87 state.
   x87Push :: Value m (FloatType X86_80Float) -> m ()
   x87Pop  :: m ()
 

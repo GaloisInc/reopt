@@ -103,11 +103,18 @@ instance S.IsValue Expr where
 
   bv_width = exprWidth
 
+  mux c x y = app $ Mux (exprWidth x) c x y
+
   bvLit n v = ValueExpr $ BVValue n (toInteger v .&. mask)
     where mask = 2^(widthVal n) - 1
   bvAdd x y = app $ BVAdd (exprWidth x) x y
   bvSub x y = app $ BVSub (exprWidth x) x y
   bvMul x y = app $ BVMul (exprWidth x) x y
+
+  bvDiv       x y = app $ BVDiv       (exprWidth x) x y
+  bvSignedDiv x y = app $ BVSignedDiv (exprWidth x) x y
+  bvMod       x y = app $ BVMod       (exprWidth x) x y
+  bvSignedMod x y = app $ BVSignedMod (exprWidth x) x y
 
   complement x = app $ BVComplement (exprWidth x) x
   x .&. y   = app $ BVAnd (exprWidth x) x y

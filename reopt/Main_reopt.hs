@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Control.Lens hiding (Action)
+import Control.Lens
 import Control.Monad
 import qualified Data.ByteString as B
 import Data.Elf

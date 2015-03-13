@@ -146,7 +146,7 @@ exec_movsx_d l v = l .= sext (loc_width l) v
 
 exec_movzx :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movzx l v = l .= uext (loc_width l) v
- 
+
 exec_pop :: Unop
 exec_pop l = do v <- pop (loc_width l)
                 l .= v
@@ -215,45 +215,66 @@ exec_dec dst = do dst_val <- get dst
 
 exec_div :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_div v
-  | Just Refl <- testEquality (bv_width v) n8  = get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 r_rax) (reg_low16 r_rdx) 
-  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 r_rax) (reg_low32 r_rdx) 
-  | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
-  | otherwise                                  = fail "div: Unknown bit width"
+    -- 8-bit division.
+  | Just Refl <- testEquality (bv_width v) n8 =
+    get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
+    -- 16-bit division.
+  | Just Refl <- testEquality (bv_width v) n16 =
+    go2 (reg_low16 r_rax) (reg_low16 r_rdx)
+    -- 32-bit division.
+  | Just Refl <- testEquality (bv_width v) n32 =
+    go2 (reg_low32 r_rax) (reg_low32 r_rdx)
+    -- 64-bit division.
+  | Just Refl <- testEquality (bv_width v) n64 =
+    go2 rax rdx
+    -- Unsupported division.
+  | otherwise =
+    fail "div: Unknown bit width"
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
-    go2 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
-    go2 ax dx = do axv <- get ax
-                   dxv <- get dx                   
-                   go1 ax dx (bvCat dxv axv)
-    
-    go1 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
-    go1 quotL remL w = do let q = w `bvDiv` uext (bv_width w) v
-                          exception false (is_zero v) DivideError -- divide by zero
-                          exception false (bvLit (bv_width q) (maxBound :: Word64) `bvLt` q) DivideError -- if quot >= 2^64
-                          set_undefined cf_flag
-                          set_undefined of_flag                    
-                          set_undefined sf_flag                
-                          set_undefined af_flag
-                          set_undefined pf_flag
-                          set_undefined zf_flag                          
-                          quotL .= bvTrunc (bv_width v) q
-                          remL  .= bvTrunc (bv_width v) (w `bvMod` uext (bv_width w) v)
+
+    go2 :: (n <= n + n)
+        => MLocation m (BVType n)
+        -> MLocation m (BVType n) -> m ()
+    go2 ax dx = do
+      axv <- get ax
+      dxv <- get dx
+      go1 ax dx (bvCat dxv axv)
+
+    go1 :: (n <= n + n) -- Add obvious constraint to help Haskell type-checker.
+        => MLocation m (BVType n) -- Location to store quotient
+        -> MLocation m (BVType n) -- Location to store remainder.
+        -> Value m (BVType (n + n)) -- The numerator in the division.
+        -> m ()
+    go1 quotL remL w = do
+      let q = w `bvDiv` uext (bv_width w) v
+      -- Report error on divide by zero.
+      exception false (is_zero v) DivideError -- divide by zero
+      -- Report error if quot >= 2^64
+      exception false (bvLit (bv_width q) (maxBound :: Word64) `bvLt` q) DivideError
+      set_undefined cf_flag
+      set_undefined of_flag
+      set_undefined sf_flag
+      set_undefined af_flag
+      set_undefined pf_flag
+      set_undefined zf_flag
+      quotL .= bvTrunc (bv_width v) q
+      remL  .= bvTrunc (bv_width v) (w `bvMod` uext (bv_width w) v)
 
 exec_idiv :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_idiv v
   | Just Refl <- testEquality (bv_width v) n8  = get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 r_rax) (reg_low16 r_rdx) 
-  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 r_rax) (reg_low32 r_rdx) 
+  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 r_rax) (reg_low16 r_rdx)
+  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 r_rax) (reg_low32 r_rdx)
   | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
   | otherwise                                  = fail "div: Unknown bit width"
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go2 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
     go2 ax dx = do axv <- get ax
-                   dxv <- get dx                   
+                   dxv <- get dx
                    go1 ax dx (bvCat dxv axv)
-    
+
     go1 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
     go1 quotL remL w = do let ext_v = sext (bv_width w) v
                               q     = w `bvSignedDiv` ext_v
@@ -261,11 +282,11 @@ exec_idiv v
                           exception false (q `bvLt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64)) DivideError -- q < - 2 ^ 63 + 1
                           exception false (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvLt` q) DivideError -- 2 ^ 63 < q
                           set_undefined cf_flag
-                          set_undefined of_flag                    
-                          set_undefined sf_flag                
+                          set_undefined of_flag
+                          set_undefined sf_flag
                           set_undefined af_flag
                           set_undefined pf_flag
-                          set_undefined zf_flag                          
+                          set_undefined zf_flag
                           quotL .= bvTrunc (bv_width v) q
                           remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
 
@@ -287,11 +308,11 @@ set_reg_pair upperL lowerL v = do lowerL .= lower
                                   upperL .= upper
   where
     (upper, lower) = bvSplit v
-    
+
 -- FIXME: is this the right way around?
 exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_mul v
-  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)                                                 
+  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
   | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
   | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
   | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
@@ -299,8 +320,8 @@ exec_mul v
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
-    go f l = do v' <- get l 
-                let sz = addNat (bv_width v) (bv_width v)                    
+    go f l = do v' <- get l
+                let sz = addNat (bv_width v) (bv_width v)
                     r  = uext sz v' `bvMul` uext sz v -- FIXME: uext here is OK?
                     upper_r = fst (bvSplit r) :: Value m (BVType n)
                 set_undefined sf_flag
@@ -309,7 +330,7 @@ exec_mul v
                 set_undefined zf_flag
                 ifte_ (is_zero upper_r)
                   (do of_flag .= false
-                      cf_flag .= false)                  
+                      cf_flag .= false)
                   (do of_flag .= true
                       cf_flag .= true)
                 f r
@@ -320,18 +341,18 @@ really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
        (_, lower_r :: Value m (BVType n)) = bvSplit r
    set_undefined af_flag
    set_undefined pf_flag
-   set_undefined zf_flag                    
+   set_undefined zf_flag
    sf_flag .= msb lower_r
    ifte_ (r .=. sext sz lower_r)
      (do of_flag .= false
-         cf_flag .= false)                  
+         cf_flag .= false)
      (do of_flag .= true
          cf_flag .= true)
    f r
 
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
-  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)                                                 
+  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
   | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
   | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
   | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
@@ -339,7 +360,7 @@ exec_imul1 v
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
-    go f l = do v' <- get l 
+    go f l = do v' <- get l
                 really_exec_imul v v' f
 
 -- FIXME: clag from exec_mul, exec_imul
@@ -395,14 +416,14 @@ exec_xor l v = do
   let r = v0 `bvXor` v
   set_bitwise_flags r
   l .= r
-  
+
 -- ** Shift and Rotate Instructions
 
 
 really_exec_shift :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n')
                      -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n))
                      -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n') -> Value m BoolType)
-                     -> (Value m (BVType n) -> Value m (BVType n)  -> Value m BoolType    -> Value m BoolType)                     
+                     -> (Value m (BVType n) -> Value m (BVType n)  -> Value m BoolType    -> Value m BoolType)
                      -> m ()
 really_exec_shift l count do_shift mk_cf mk_of = do
   v    <- get l
@@ -411,20 +432,20 @@ really_exec_shift l count do_shift mk_cf mk_of = do
   -- of a 64 bit operand, and 31 in the other cases.
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
-                       _             -> 64             
+                       _             -> 64
       countMASK = bvLit (bv_width count) (nbits - 1)
       tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
       r = do_shift v tempCOUNT
-          
+
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero tempCOUNT) $ do
     let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
     let new_cf = mk_cf v dest_width tempCOUNT
-        
+
     ifte_ (tempCOUNT `bvLt` dest_width)
       (cf_flag .= new_cf)
       (set_undefined cf_flag)
-    
+
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_flag .= mk_of v r new_cf)
       (set_undefined of_flag)
@@ -454,20 +475,20 @@ exec_sar l count = do
   -- of a 64 bit operand, and 31 in the other cases.
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
-                       _             -> 64                     
+                       _             -> 64
       countMASK = bvLit (bv_width count) (nbits - 1)
       tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
       r = bvSar v tempCOUNT
-          
+
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero tempCOUNT) $ do
     let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
     let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
-    
+
     ifte_ (tempCOUNT `bvLt` dest_width)
       (cf_flag .= new_cf)
       (cf_flag .= msb v) -- FIXME: correct?  we assume here that we will get the sign bit ...
-    
+
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_flag .= false)
       (set_undefined of_flag)
@@ -484,25 +505,25 @@ exec_rol l count = do
   -- of a 64 bit operand, and 31 in the other cases.
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
-                       _             -> 64             
+                       _             -> 64
       countMASK = bvLit (bv_width count) (nbits - 1)
       -- FIXME: this is from the manual, but I think the masking is overridden by the mod?
       tempCOUNT = (count .&. countMASK) `bvMod` (bvLit (bv_width count) (widthVal (bv_width v)))
       r = bvRol v tempCOUNT
-          
+
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero tempCOUNT) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
-        
+
     cf_flag .= new_cf
-    
+
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_flag .= (msb r `bvXor` new_cf))
       (set_undefined of_flag)
 
     l .= r
 
-  
+
 -- ** Bit and Byte Instructions
 
 exec_bsf :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -582,8 +603,8 @@ exec_ret m_off = do
 -- FIXME: we need to check the size prefix --- 67 a4 is
 -- movs   BYTE PTR es:[edi],BYTE PTR ds:[esi]
 -- | MOVS/MOVSB Move string/Move byte string
--- MOVS/MOVSW Move string/Move word string                 
--- MOVS/MOVSD Move string/Move doubleword string             
+-- MOVS/MOVSW Move string/Move word string
+-- MOVS/MOVSD Move string/Move doubleword string
 exec_movs :: Semantics m => Bool -> NatRepr n -> m ()
 exec_movs rep_pfx sz = do
   -- The direction flag indicates post decrement or post increment.
@@ -592,7 +613,7 @@ exec_movs rep_pfx sz = do
   dest <- get rdi
   let szv        = bvLit n64 (widthVal sz)
   if rep_pfx
-    then do count <- get rcx            
+    then do count <- get rcx
             let nbytes_off = (count `bvSub` 1) `bvMul` szv
                 nbytes     = count `bvMul` szv
                 move_src  = mux df (src  `bvSub` nbytes_off) src
@@ -600,7 +621,7 @@ exec_movs rep_pfx sz = do
             -- FIXME: we might need direction for overlapping regions
             memmove sz count move_src move_dest
             rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
-            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
+            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
             rcx .= 0
     else do v <- get $ mkBVAddr sz src
             mkBVAddr sz dest .= v
@@ -608,8 +629,8 @@ exec_movs rep_pfx sz = do
             rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
 
 -- FIXME: can also take rep prefix
--- | CMPS/CMPSB Compare string/Compare byte string           
--- CMPS/CMPSW Compare string/Compare word string           
+-- | CMPS/CMPSB Compare string/Compare byte string
+-- CMPS/CMPSW Compare string/Compare word string
 -- CMPS/CMPSD Compare string/Compare doubleword string
 exec_cmps :: IsLocationBV m n => Bool -> NatRepr n -> m ()
 exec_cmps repz_pfx sz = do
@@ -637,27 +658,27 @@ exec_cmps repz_pfx sz = do
       let lastWordBytes = (nwordsSeen `bvSub` 1) `bvMul` szv
           lastSrc  = mux df (src  `bvSub` lastWordBytes) (src  `bvAdd` lastWordBytes)
           lastDest = mux df (dest `bvSub` lastWordBytes) (dest `bvAdd` lastWordBytes)
-          
+
       v' <- get $ mkBVAddr sz lastDest
       exec_cmp (mkBVAddr sz lastSrc) v' -- FIXME: right way around?
-      
-      -- we do this to make it obvious so repz cmpsb ; jz ... is clear
-      zf_flag .= equal 
-      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ widthVal sz `div` 8)
-        
-      rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
-      rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
-      rcx .= (count `bvSub` nwordsSeen)
-      
--- SCAS/SCASB Scan string/Scan byte string                 
--- SCAS/SCASW Scan string/Scan word string                 
--- SCAS/SCASD Scan string/Scan doubleword string           
--- LODS/LODSB Load string/Load byte string                 
--- LODS/LODSW Load string/Load word string                 
--- LODS/LODSD Load string/Load doubleword string           
 
--- | STOS/STOSB Store string/Store byte string               
--- STOS/STOSW Store string/Store word string               
+      -- we do this to make it obvious so repz cmpsb ; jz ... is clear
+      zf_flag .= equal
+      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ widthVal sz `div` 8)
+
+      rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
+      rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
+      rcx .= (count `bvSub` nwordsSeen)
+
+-- SCAS/SCASB Scan string/Scan byte string
+-- SCAS/SCASW Scan string/Scan word string
+-- SCAS/SCASD Scan string/Scan doubleword string
+-- LODS/LODSB Load string/Load byte string
+-- LODS/LODSW Load string/Load word string
+-- LODS/LODSD Load string/Load doubleword string
+
+-- | STOS/STOSB Store string/Store byte string
+-- STOS/STOSW Store string/Store word string
 -- STOS/STOSD Store string/Store doubleword string
 exec_stos :: Semantics m => Bool -> MLocation m (BVType n) -> m ()
 exec_stos rep_pfx l = do
@@ -673,15 +694,15 @@ exec_stos rep_pfx l = do
                 move_dest = mux df (dest `bvSub` nbytes_off) dest
             -- FIXME: we might need direction for overlapping regions
             memset count v move_dest
-            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)            
+            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
             rcx .= 0
     else do mkBVAddr (loc_width l) dest .= v
             rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
 
--- REP        Repeat while ECX not zero                    
--- REPE/REPZ  Repeat while equal/Repeat while zero         
--- REPNE/REPNZ Repeat while not equal/Repeat while not zero 
-  
+-- REP        Repeat while ECX not zero
+-- REPE/REPZ  Repeat while equal/Repeat while zero
+-- REPNE/REPNZ Repeat while not equal/Repeat while not zero
+
 -- ** I/O Instructions
 -- ** Enter and Leave Instructions
 
@@ -731,7 +752,7 @@ exec_fst fir l = do
   set_undefined c3_flag
   c1_flag .= fpCvtRoundsUp X86_80FloatRepr fir v
   l .= fpCvt X86_80FloatRepr fir v
-  
+
 -- | FSTP Store floating-point value
 exec_fstp :: FPUnop
 exec_fstp fir l = exec_fst fir l >> x87Pop
@@ -742,14 +763,14 @@ exec_fstp fir l = exec_fst fir l >> x87Pop
 -- FBLD Load BCD
 -- FBSTP Store BCD and pop
 -- FXCH Exchange registers
--- FCMOVE Floating-point conditional   move if equal             
--- FCMOVNE Floating-point conditional  move if not equal         
--- FCMOVB Floating-point conditional   move if below             
--- FCMOVBE Floating-point conditional  move if below or equal    
--- FCMOVNB Floating-point conditional  move if not below         
+-- FCMOVE Floating-point conditional   move if equal
+-- FCMOVNE Floating-point conditional  move if not equal
+-- FCMOVB Floating-point conditional   move if below
+-- FCMOVBE Floating-point conditional  move if below or equal
+-- FCMOVNB Floating-point conditional  move if not below
 -- FCMOVNBE Floating-point conditional move if not below or equal
--- FCMOVU Floating-point conditional   move if unordered         
--- FCMOVNU Floating-point conditional  move if not unordered     
+-- FCMOVU Floating-point conditional   move if unordered
+-- FCMOVNU Floating-point conditional  move if not unordered
 
 -- ** Basic arithmetic instructions
 
@@ -789,11 +810,11 @@ exec_fsubr :: FPBinop
 exec_fsubr = fparith (reverseOp fpSub) (reverseOp fpSubRoundedUp)
   where
     reverseOp f = \fir x y -> f fir y x
-  
+
 -- | FSUBRP Subtract floating-point reverse and pop
 exec_fsubrp :: FPBinop
 exec_fsubrp fir_d l fir_s v = exec_fsubr fir_d l fir_s v >> x87Pop
-    
+
 -- FISUBR Subtract integer reverse
 
 -- FIXME: we could factor out commonalities between this and fadd
@@ -807,7 +828,7 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- FDIVP Divide floating-point and pop
 -- FIDIV Divide integer
 -- FDIVR Divide floating-point reverse
--- FDIVRP Divide floating-point reverse and pop 
+-- FDIVRP Divide floating-point reverse and pop
 -- FIDIVR Divide integer reverse
 -- FPREM Partial remainder
 -- FPREM1 IEEE Partial remainder
@@ -829,9 +850,9 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- FICOM Compare integer
 -- FICOMP Compare integer and pop
 -- FCOMI Compare floating-point and set EFLAGS
--- FUCOMI Unordered compare floating-point and set EFLAGS 
+-- FUCOMI Unordered compare floating-point and set EFLAGS
 -- FCOMIP Compare floating-point, set EFLAGS, and pop
--- FUCOMIP Unordered compare floating-point, set EFLAGS, and pop 
+-- FUCOMIP Unordered compare floating-point, set EFLAGS, and pop
 -- FTST Test floating-point (compare with 0.0)
 -- FXAM Examine floating-point
 
@@ -840,20 +861,20 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- FSIN Sine
 -- FCOS Cosine
 -- FSINCOS Sine and cosine
--- FPTAN Partial tangent 
--- FPATAN Partial arctangent 
+-- FPTAN Partial tangent
+-- FPATAN Partial arctangent
 -- F2XM1 2x − 1
 -- FYL2X y∗log2x
 -- FYL2XP1 y∗log2(x+1)
 
 -- ** Load constant instructions
 
--- FLD1 Load +1.0 
--- FLDZ Load +0.0 
--- FLDPI Load π 
--- FLDL2E Load log2e 
--- FLDLN2 Load loge2 
--- FLDL2T Load log210 
+-- FLD1 Load +1.0
+-- FLDZ Load +0.0
+-- FLDPI Load π
+-- FLDL2E Load log2e
+-- FLDLN2 Load loge2
+-- FLDL2T Load log210
 -- FLDLG2 Load log102
 
 
@@ -866,27 +887,27 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- FNINIT Initialize FPU without checking error conditions
 -- FCLEX Clear floating-point exception flags after checking for error conditions
 -- FNCLEX Clear floating-point exception flags without checking for error conditions
--- FSTCW Store FPU control word after checking error conditions 
+-- FSTCW Store FPU control word after checking error conditions
 
 -- | FNSTCW Store FPU control word without checking error conditions
 exec_fnstcw :: Semantics m => MLocation m (BVType 16) -> m ()
 exec_fnstcw l = do
   v <- get X87ControlReg
   set_undefined c0_flag
-  set_undefined c1_flag  
+  set_undefined c1_flag
   set_undefined c2_flag
   set_undefined c3_flag
   l .= v
 
 -- FLDCW Load FPU control word
--- FSTENV Store FPU environment after checking error conditions 
--- FNSTENV Store FPU environment without checking error conditions 
+-- FSTENV Store FPU environment after checking error conditions
+-- FNSTENV Store FPU environment without checking error conditions
 -- FLDENV Load FPU environment
 -- FSAVE Save FPU state after checking error conditions
--- FNSAVE Save FPU state without checking error conditions 
+-- FNSAVE Save FPU state without checking error conditions
 -- FRSTOR Restore FPU state
--- FSTSW Store FPU status word after checking error conditions 
--- FNSTSW Store FPU status word without checking error conditions 
+-- FSTSW Store FPU status word after checking error conditions
+-- FNSTSW Store FPU status word without checking error conditions
 -- WAIT/FWAIT Wait for FPU
 -- FNOP FPU no operation
 
@@ -919,8 +940,8 @@ exec_movss l v = l .= v
 
 -- ADDPS Add packed single-precision floating-point values
 -- ADDSS Add scalar single-precision floating-point values
--- SUBPS Subtract packed single-precision floating-point values 
--- SUBSS Subtract scalar single-precision floating-point values 
+-- SUBPS Subtract packed single-precision floating-point values
+-- SUBSS Subtract scalar single-precision floating-point values
 -- MULPS Multiply packed single-precision floating-point values
 -- MULSS Multiply scalar single-precision floating-point values
 -- DIVPS Divide packed single-precision floating-point values
@@ -929,10 +950,10 @@ exec_movss l v = l .= v
 -- RCPSS Compute reciprocal of scalar single-precision floating-point values
 -- SQRTPS Compute square roots of packed single-precision floating-point values
 -- SQRTSS Compute square root of scalar single-precision floating-point values
--- RSQRTPS Compute reciprocals of square roots of packed single-precision floating-point values 
+-- RSQRTPS Compute reciprocals of square roots of packed single-precision floating-point values
 -- RSQRTSS Compute reciprocal of square root of scalar single-precision floating-point values
 -- MAXPS Return maximum packed single-precision floating-point values
--- MAXSS Return maximum scalar single-precision floating-point values 
+-- MAXSS Return maximum scalar single-precision floating-point values
 -- MINPS Return minimum packed single-precision floating-point values
 -- MINSS Return minimum scalar single-precision floating-point values
 
@@ -942,20 +963,20 @@ exec_movss l v = l .= v
 -- CMPSS Compare scalar single-precision floating-point values
 -- COMISS Perform ordered comparison of scalar single-precision floating-point values and set flags in EFLAGS register
 -- UCOMISS Perform unordered comparison of scalar single-precision floating-point values and set flags in EFLAGS register
-  
+
 -- *** SSE Logical Instructions
 
 -- ANDPS Perform bitwise logical AND of packed single-precision floating-point values
--- ANDNPS Perform bitwise logical AND NOT of packed single-precision floating-point values 
+-- ANDNPS Perform bitwise logical AND NOT of packed single-precision floating-point values
 -- ORPS Perform bitwise logical OR of packed single-precision floating-point values
--- XORPS Perform bitwise logical XOR of packed single-precision floating-point values  
+-- XORPS Perform bitwise logical XOR of packed single-precision floating-point values
 
 -- *** SSE Shuffle and Unpack Instructions
 
 -- SHUFPS Shuffles values in packed single-precision floating-point operands
 -- UNPCKHPS Unpacks and interleaves the two high-order values from two single-precision floating-point operands
 -- UNPCKLPS Unpacks and interleaves the two low-order values from two single-precision floating-point operands
-  
+
 -- *** SSE Conversion Instructions
 
 -- CVTPI2PS Convert packed doubleword integers to packed single-precision floating-point values
@@ -964,7 +985,7 @@ exec_movss l v = l .= v
 -- CVTTPS2PI Convert with truncation packed single-precision floating-point values to packed doubleword integers
 -- CVTSS2SI Convert a scalar single-precision floating-point value to a doubleword integer
 -- CVTTSS2SI Convert with truncation a scalar single-precision floating-point value to a scalar doubleword integer
-  
+
 -- ** SSE MXCSR State Management Instructions
 
 -- LDMXCSR Load MXCSR register
@@ -972,7 +993,7 @@ exec_movss l v = l .= v
 
 -- ** SSE 64-Bit SIMD Integer Instructions
 
--- PAVGB Compute average of packed unsigned byte integers 
+-- PAVGB Compute average of packed unsigned byte integers
 -- PAVGW Compute average of packed unsigned word integers
 -- PEXTRW Extract word
 -- PINSRW Insert word
@@ -989,24 +1010,31 @@ exec_movss l v = l .= v
 
 -- MASKMOVQ Non-temporal store of selected bytes from an MMX register into memory
 -- MOVNTQ  Non-temporal store of quadword from an MMX register into memory
--- MOVNTPS Non-temporal store of four packed single-precision floating-point values from an XMM register into memory
--- PREFETCHh Load 32 or more of bytes from memory to a selected level of the processor’s cache hierarchy 
+-- MOVNTPS Non-temporal store of four packed single-precision floating-point
+--   values from an XMM register into memory
+-- PREFETCHh Load 32 or more of bytes from memory to a selected level of the
+--   processor's cache hierarchy
 -- SFENCE Serializes store operations
 
 -- * SSE2 Instructions
 -- ** SSE2 Packed and Scalar Double-Precision Floating-Point Instructions
 -- *** SSE2 Data Movement Instructions
 
--- | MOVAPD Move two aligned packed double-precision floating-point values between XMM registers or between and XMM register and memory
+-- | MOVAPD Move two aligned packed double-precision floating-point values
+-- between XMM registers or between and XMM register and memory
 exec_movapd :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movapd l v = l .= v
 
--- MOVUPD Move two unaligned packed double-precision floating-point values between XMM registers or between and XMM register and memory
--- MOVHPD Move high packed double-precision floating-point value to an from the high quadword of an XMM register and memory
--- MOVLPD Move low packed single-precision floating-point value to an from the low quadword of an XMM register and memory
+-- MOVUPD Move two unaligned packed double-precision floating-point values
+--   between XMM registers or between and XMM register and memory
+-- MOVHPD Move high packed double-precision floating-point value to an from
+--   the high quadword of an XMM register and memory
+-- MOVLPD Move low packed single-precision floating-point value to an from
+--   the low quadword of an XMM register and memory
 -- MOVMSKPD Extract sign mask from two packed double-precision floating-point values
 
--- | MOVSD Move scalar double-precision floating-point value between XMM registers or between an XMM register and memory
+-- | MOVSD Move scalar double-precision floating-point value between XMM
+-- registers or between an XMM register and memory
 exec_movsd :: Semantics m => MLocation m (BVType 64) -> Value m (FloatType DoubleFloat) -> m ()
 exec_movsd l v = l .= v
 
@@ -1045,10 +1073,10 @@ exec_divsd r y = modify (\x -> fpDiv DoubleFloatRepr x y) (xmm_low64 r)
 
 -- *** SSE2 Logical Instructions
 
--- ANDPD  Perform bitwise logical AND of packed double-precision floating-point values     
--- ANDNPD Perform bitwise logical AND NOT of packed double-precision floating-point values 
--- ORPD   Perform bitwise logical OR of packed double-precision floating-point values      
--- XORPD  Perform bitwise logical XOR of packed double-precision floating-point values     
+-- ANDPD  Perform bitwise logical AND of packed double-precision floating-point values
+-- ANDNPD Perform bitwise logical AND NOT of packed double-precision floating-point values
+-- ORPD   Perform bitwise logical OR of packed double-precision floating-point values
+-- XORPD  Perform bitwise logical XOR of packed double-precision floating-point values
 
 -- *** SSE2 Compare Instructions
 
@@ -1063,14 +1091,14 @@ exec_ucomisd l v = do v' <- get lower_l
                       let unordered = (isNaN fir v .|. isNaN fir v')
                           lt        = fpLt fir v' v
                           eq        = fpEq fir v' v
-                          
+
                       zf_flag .= (unordered .|. eq)
                       pf_flag .= unordered
                       cf_flag .= (unordered .|. lt)
 
                       of_flag .= false
                       af_flag .= false
-                      sf_flag .= false 
+                      sf_flag .= false
   where
   fir = DoubleFloatRepr
   lower_l = xmm_low64 l
@@ -1084,21 +1112,21 @@ exec_ucomisd l v = do v' <- get lower_l
 
 -- *** SSE2 Conversion Instructions
 
--- CVTPD2PI  Convert packed double-precision floating-point values to packed doubleword integers.                    
--- CVTTPD2PI Convert with truncation packed double-precision floating-point values to packed doubleword integers     
--- CVTPI2PD  Convert packed doubleword integers to packed double-precision floating-point values                     
--- CVTPD2DQ  Convert packed double-precision floating-point values to packed doubleword integers                     
--- CVTTPD2DQ Convert with truncation packed double-precision floating-point values to packed doubleword integers     
--- CVTDQ2PD  Convert packed doubleword integers to packed double-precision floating-point values                     
--- CVTPS2PD  Convert packed single-precision floating-point values to packed double-precision floating- point values 
+-- CVTPD2PI  Convert packed double-precision floating-point values to packed doubleword integers.
+-- CVTTPD2PI Convert with truncation packed double-precision floating-point values to packed doubleword integers
+-- CVTPI2PD  Convert packed doubleword integers to packed double-precision floating-point values
+-- CVTPD2DQ  Convert packed double-precision floating-point values to packed doubleword integers
+-- CVTTPD2DQ Convert with truncation packed double-precision floating-point values to packed doubleword integers
+-- CVTDQ2PD  Convert packed doubleword integers to packed double-precision floating-point values
+-- CVTPS2PD  Convert packed single-precision floating-point values to packed double-precision floating- point values
 -- CVTPD2PS  Convert packed double-precision floating-point values to packed single-precision floating- point values
 
 -- | CVTSS2SD  Convert scalar single-precision floating-point values to scalar double-precision floating-point values
 exec_cvtss2sd :: Semantics m => MLocation m (BVType 128) -> Value m (FloatType SingleFloat) -> m ()
 exec_cvtss2sd l v = xmm_low64 l .= fpCvt SingleFloatRepr DoubleFloatRepr v
-  
--- CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values 
--- CVTSD2SI  Convert scalar double-precision floating-point values to a doubleword integer                          
+
+-- CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values
+-- CVTSD2SI  Convert scalar double-precision floating-point values to a doubleword integer
 
 -- | CVTTSD2SI Convert with truncation scalar double-precision floating-point values to scalar doubleword integers
 exec_cvttsd2si :: IsLocationBV m n => MLocation m (BVType n) -> Value m (FloatType DoubleFloat) -> m ()
@@ -1111,17 +1139,17 @@ exec_cvtsi2sd l v = xmm_low64 l .= fpFromBV DoubleFloatRepr v
 
 -- ** SSE2 Packed Single-Precision Floating-Point Instructions
 
--- CVTDQ2PS  Convert packed doubleword integers to packed single-precision floating-point values                 
--- CVTPS2DQ  Convert packed single-precision floating-point values to packed doubleword integers                 
--- CVTTPS2DQ Convert with truncation packed single-precision floating-point values to packed doubleword integers 
+-- CVTDQ2PS  Convert packed doubleword integers to packed single-precision floating-point values
+-- CVTPS2DQ  Convert packed single-precision floating-point values to packed doubleword integers
+-- CVTTPS2DQ Convert with truncation packed single-precision floating-point values to packed doubleword integers
 
 -- ** SSE2 128-Bit SIMD Integer Instructions
 
 -- MOVDQA Move aligned double quadword.
 -- MOVDQU Move unaligned double quadword
 -- MOVQ2DQ Move quadword integer from MMX to XMM registers
--- MOVDQ2Q Move quadword integer from XMM to MMX registers 
--- PMULUDQ Multiply packed unsigned doubleword integers 
+-- MOVDQ2Q Move quadword integer from XMM to MMX registers
+-- PMULUDQ Multiply packed unsigned doubleword integers
 -- PADDQ Add packed quadword integers
 -- PSUBQ Subtract packed quadword integers
 -- PSHUFLW Shuffle packed low words
@@ -1138,11 +1166,11 @@ exec_cvtsi2sd l v = xmm_low64 l .= fpFromBV DoubleFloatRepr v
 -- CLFLUSH Flushes and invalidates a memory operand and its associated cache line from all levels of the processor’s cache hierarchy
 -- LFENCE Serializes load operations
 -- MFENCE Serializes load and store operations
--- PAUSE      Improves the performance of “spin-wait loops”                                                           
--- MASKMOVDQU Non-temporal store of selected bytes from an XMM register into memory                                   
+-- PAUSE      Improves the performance of “spin-wait loops”
+-- MASKMOVDQU Non-temporal store of selected bytes from an XMM register into memory
 -- MOVNTPD    Non-temporal store of two packed double-precision floating-point values from an XMM register into memory
--- MOVNTDQ    Non-temporal store of double quadword from an XMM register into memory                                  
--- MOVNTI     Non-temporal store of a doubleword from a general-purpose register into memory                          
+-- MOVNTDQ    Non-temporal store of double quadword from an XMM register into memory
+-- MOVNTI     Non-temporal store of a doubleword from a general-purpose register into memory
 
 -- * SSE3 Instructions
 -- ** SSE3 x87-FP Integer Conversion Instruction
@@ -1176,4 +1204,3 @@ exec_cvtsi2sd l v = xmm_low64 l .= fpFromBV DoubleFloatRepr v
 
 -- MONITOR Sets up an address range used to monitor write-back stores
 -- MWAIT Enables a logical processor to enter into an optimized state while waiting for a write-back store to the address range set up by the MONITOR instruction
-
