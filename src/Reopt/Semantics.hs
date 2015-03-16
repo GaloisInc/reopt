@@ -27,7 +27,15 @@ import Data.Word
 import Prelude hiding (isNaN)
 import GHC.TypeLits
 
-import Data.Parameterized.NatRepr (widthVal, NatRepr, addNat, addIsLeq, withAddLeq, testLeq, LeqProof(..))
+import Data.Parameterized.NatRepr
+    ( widthVal
+    , NatRepr
+    , addNat
+    , addIsLeq
+    , withAddLeq
+    , testLeq
+    , LeqProof(..)
+    )
 import Reopt.Semantics.Monad
 
 -- * Preliminaries
@@ -263,7 +271,8 @@ exec_div v
 
 exec_idiv :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_idiv v
-  | Just Refl <- testEquality (bv_width v) n8  = get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
+  | Just Refl <- testEquality (bv_width v) n8  =
+    get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
   | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 r_rax) (reg_low16 r_rdx)
   | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 r_rax) (reg_low32 r_rdx)
   | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
@@ -276,19 +285,20 @@ exec_idiv v
                    go1 ax dx (bvCat dxv axv)
 
     go1 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
-    go1 quotL remL w = do let ext_v = sext (bv_width w) v
-                              q     = w `bvSignedDiv` ext_v
-                          exception false (is_zero v) DivideError -- divide by zero
-                          exception false (q `bvLt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64)) DivideError -- q < - 2 ^ 63 + 1
-                          exception false (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvLt` q) DivideError -- 2 ^ 63 < q
-                          set_undefined cf_flag
-                          set_undefined of_flag
-                          set_undefined sf_flag
-                          set_undefined af_flag
-                          set_undefined pf_flag
-                          set_undefined zf_flag
-                          quotL .= bvTrunc (bv_width v) q
-                          remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
+    go1 quotL remL w = do
+      let ext_v = sext (bv_width w) v
+          q     = w `bvSignedDiv` ext_v
+      exception false (is_zero v) DivideError -- divide by zero
+      exception false (q `bvLt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64)) DivideError -- q < - 2 ^ 63 + 1
+      exception false (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvLt` q) DivideError -- 2 ^ 63 < q
+      set_undefined cf_flag
+      set_undefined of_flag
+      set_undefined sf_flag
+      set_undefined af_flag
+      set_undefined pf_flag
+      set_undefined zf_flag
+      quotL .= bvTrunc (bv_width v) q
+      remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
 
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
@@ -312,11 +322,16 @@ set_reg_pair upperL lowerL v = do lowerL .= lower
 -- FIXME: is this the right way around?
 exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_mul v
-  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
-  | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
-  | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
-  | otherwise                                  = fail "mul: Unknown bit width"
+  | Just Refl <- testEquality (bv_width v) n8  =
+    go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
+  | Just Refl <- testEquality (bv_width v) n16 =
+    go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+  | Just Refl <- testEquality (bv_width v) n32 =
+    go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+  | Just Refl <- testEquality (bv_width v) n64 =
+    go (set_reg_pair rdx rax) rax
+  | otherwise =
+    fail "mul: Unknown bit width"
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
@@ -328,14 +343,17 @@ exec_mul v
                 set_undefined af_flag
                 set_undefined pf_flag
                 set_undefined zf_flag
-                ifte_ (is_zero upper_r)
-                  (do of_flag .= false
-                      cf_flag .= false)
-                  (do of_flag .= true
-                      cf_flag .= true)
+                let does_overflow = complement (is_zero upper_r)
+                of_flag .= does_overflow
+                cf_flag .= does_overflow
                 f r
 
-really_exec_imul :: forall m n. IsLocationBV m n => Value m (BVType n) -> Value m (BVType n) -> (Value m (BVType (n + n)) -> m ()) -> m ()
+really_exec_imul :: forall m n
+                  . IsLocationBV m n
+                 => Value m (BVType n)
+                 -> Value m (BVType n)
+                 -> (Value m (BVType (n + n)) -> m ())
+                 -> m ()
 really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
    let r  = sext sz v' `bvMul` sext sz v
        (_, lower_r :: Value m (BVType n)) = bvSplit r
@@ -343,20 +361,23 @@ really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
    set_undefined pf_flag
    set_undefined zf_flag
    sf_flag .= msb lower_r
-   ifte_ (r .=. sext sz lower_r)
-     (do of_flag .= false
-         cf_flag .= false)
-     (do of_flag .= true
-         cf_flag .= true)
+   let does_overflow = (r .=/=. sext sz lower_r)
+   of_flag .= does_overflow
+   cf_flag .= does_overflow
    f r
 
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
-  | Just Refl <- testEquality (bv_width v) n8  = go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
-  | Just Refl <- testEquality (bv_width v) n32 = go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
-  | Just Refl <- testEquality (bv_width v) n64 = go (set_reg_pair rdx rax) rax
-  | otherwise                                  = fail "imul: Unknown bit width"
+  | Just Refl <- testEquality (bv_width v) n8  =
+    go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
+  | Just Refl <- testEquality (bv_width v) n16 =
+    go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+  | Just Refl <- testEquality (bv_width v) n32 =
+    go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+  | Just Refl <- testEquality (bv_width v) n64 =
+    go (set_reg_pair rdx rax) rax
+  | otherwise =
+    fail "imul: Unknown bit width"
   where
     _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
@@ -420,11 +441,17 @@ exec_xor l v = do
 -- ** Shift and Rotate Instructions
 
 
-really_exec_shift :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n')
-                     -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n))
-                     -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n') -> Value m BoolType)
-                     -> (Value m (BVType n) -> Value m (BVType n)  -> Value m BoolType    -> Value m BoolType)
-                     -> m ()
+really_exec_shift :: IsLocationBV m n
+                  => MLocation m (BVType n)
+                  -> Value m (BVType n')
+                  -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n))
+                  -> (Value m (BVType n) -> Value m (BVType n')
+                                         -> Value m (BVType n')
+                                         -> Value m BoolType)
+                  -> (Value m (BVType n) -> Value m (BVType n)
+                                         -> Value m BoolType
+                                         -> Value m BoolType)
+                  -> m ()
 really_exec_shift l count do_shift mk_cf mk_of = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper

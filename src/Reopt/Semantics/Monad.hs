@@ -425,6 +425,10 @@ class IsValue (v  :: Type -> *) where
   (.=.) :: v (BVType n) -> v (BVType n) -> v BoolType
   bv .=. bv' = is_zero (bv `bvXor` bv')
 
+  -- | Inequality
+  (.=/=.) :: v (BVType n) -> v (BVType n) -> v BoolType
+
+
   -- | Return true if value is zero.
   is_zero :: v (BVType n) -> v BoolType
   is_zero x = x .=. bvLit (bv_width x) (0::Integer)
@@ -620,8 +624,14 @@ class ( Applicative m
       , Monad m
       , IsValue (Value m)
       ) => Semantics m where
+  -- | Create a fresh "undefined" value.
+  make_undefined :: TypeRepr tp -> m (Value m tp)
+
   -- | Mark a Boolean variable as undefined.
   set_undefined :: MLocation m BoolType -> m ()
+  set_undefined l = do
+    u <- make_undefined knownType
+    l .= u
 
   -- | Read from the given location.
   get :: MLocation m tp -> m (Value m tp)

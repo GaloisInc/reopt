@@ -44,7 +44,7 @@ import Data.Word
 import Numeric (showHex)
 import Text.PrettyPrint.Leijen hiding ((<$>))
 
-import Reopt.ByteReader
+import Flexdis86.ByteReader
 
 ------------------------------------------------------------------------
 -- MemSegment
@@ -172,12 +172,16 @@ instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
         Nothing -> MBR $ throwError $ AccessViolation w
         Just s -> assert (memBase s <= w) $ do
           MBR $ do
-            unless (memFlags s .&. reqPerm == reqPerm) $ do
+            -- Throw error when permissions check fails.
+            when ((memFlags s .&. reqPerm) /= reqPerm) $ do
               throwError $ PermissionsError w
             -- Let d be number of bytes to drop from start of segment.
             let d = fromIntegral (w - memBase s)
-            let ms = MS (BS.drop d (memBytes s)) m w reqPerm
-            put ms
+            put MS { msNext = BS.drop d (memBytes s)
+                   , msMem = m
+                   , msAddr = w
+                   , msPerm = reqPerm
+                   }
           readByte
     else do
       let v = BS.head b
@@ -192,6 +196,9 @@ instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
 -- first element is the value read or an error, and whose second element is
 -- the address of the next value to read.
 runMemoryByteReader :: ElfSegmentFlags
+                       -- ^ Permissions that memory accesses are expected to
+                       -- satisfy.
+                       -- Added so we can check for read and/or execute permission.
                     -> Memory w -- ^ Memory to read from.
                     -> w -- ^ Starting address.
                     -> MemoryByteReader w a -- ^ Byte reader to read values from.

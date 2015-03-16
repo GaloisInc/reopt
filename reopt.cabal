@@ -28,7 +28,6 @@ library
 
   exposed-modules:
     Reopt
-    Reopt.ByteReader
     Reopt.CFG
     Reopt.CFG.JumpTargets
     Reopt.Loader
@@ -51,7 +50,8 @@ executable reopt
     elf,
     flexdis86,
     lens,
-    reopt
+    reopt,
+    wl-pprint
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs

@@ -8,6 +8,7 @@ import Data.Version
 import System.Console.CmdArgs.Explicit
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import Text.PrettyPrint.Leijen (pretty)
 
 import Paths_reopt (version)
 
@@ -136,12 +137,12 @@ showCFG path = do
       return ()
     Just{} ->
       fail "reopt does not yet support generating CFGs from dynamically linked executables."
-  -- TODO:
   -- Build model of executable memory from elf.
   mem <- loadElf e
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g = completeProgram mem (elfEntry e)
-  error "showCFG undefined" g
+  let g = cfgFromAddress mem (elfEntry e)
+  -- TODO:
+  print (pretty g)
 
 {-
       --printExecutableAddressesInGlobalData (args^.programPath)
