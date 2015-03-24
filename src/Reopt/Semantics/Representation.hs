@@ -10,6 +10,8 @@
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
@@ -78,7 +80,7 @@ import GHC.TypeLits
 import Numeric (showHex)
 import Text.PrettyPrint.Leijen hiding ((<$>))
 
-
+import Data.Parameterized.Classes
 import qualified Flexdis86.InstructionSet as Flexdis86
 import Reopt.Semantics.Monad
   ( BoolType
@@ -90,6 +92,38 @@ import Reopt.Semantics.Monad
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
 -- definitions should be first.
+
+
+type Prec = Int
+
+colonPrec :: Prec
+colonPrec = 5
+
+------------------------------------------------------------------------
+-- Pretty printing utilities
+
+orderingIsEqual :: OrderingF (x :: k) (y :: k) -> Maybe (x :~: y)
+orderingIsEqual o =
+  case o of
+    LTF -> Nothing
+    EQF -> Just Refl
+    GTF -> Nothing
+
+bracketsep :: [Doc] -> Doc
+bracketsep [] = text "{}"
+bracketsep (h:l) =
+  vcat ([text "{" <+> h] ++ fmap (text "," <+>) l ++ [text "}"])
+
+rec :: String -> Value tp -> Doc
+rec nm v = text nm <+> text "=" <+> ppValue 0 v
+
+recv :: String -> V.Vector (Value tp) -> [Doc]
+recv nm v = f <$> [0..V.length v - 1]
+  where f i = text nm <> parens (text (show i)) <+> text "=" <+> ppValue 0 (v V.! i)
+
+parenIf :: Bool -> Doc -> Doc
+parenIf True d = parens d
+parenIf False d = d
 
 ------------------------------------------------------------------------
 -- CFG
@@ -134,7 +168,7 @@ type CodeAddr = Word64
 
 instance Pretty BlockLabel where
   pretty (DecompiledBlock a) = text ("addr_" ++ showHex a "")
-  pretty (GeneratedBlock w) = text (show w)
+  pretty (GeneratedBlock w)  = text ("label_" ++ show w)
 
 ------------------------------------------------------------------------
 -- Block
@@ -150,7 +184,7 @@ data Block = Block { blockLabel :: BlockLabel
 
 instance Pretty Block where
   pretty b =
-     text "label" <> pretty (blockLabel b) <> text ":" <$$>
+     pretty (blockLabel b) <> text ":" <$$>
      indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
 
 ------------------------------------------------------------------------
@@ -164,7 +198,7 @@ data StmtLoc tp where
   GS :: StmtLoc (BVType 16)
 
 stmtLocType :: StmtLoc tp -> TypeRepr tp
-stmtLocType (MemLoc v tp) = tp
+stmtLocType (MemLoc _ tp) = tp
 stmtLocType ControlLoc{} = knownType
 stmtLocType DebugLoc{}   = knownType
 stmtLocType FS = knownType
@@ -172,7 +206,7 @@ stmtLocType GS = knownType
 
 
 instance Pretty (StmtLoc tp) where
-  pretty (MemLoc a _) = text "*" <> parens (pretty a)
+  pretty (MemLoc a _) = text "*" <> ppValue 11 a
   pretty (ControlLoc r) = text (show r)
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
@@ -187,7 +221,7 @@ data Stmt where
 
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
-  pretty (Write loc rhs) = pretty loc <+> text ":=" <+> pretty rhs
+  pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
 
 ------------------------------------------------------------------------
 -- TermStmt
@@ -204,8 +238,11 @@ data TermStmt where
          -> TermStmt
 
 instance Pretty TermStmt where
-  pretty (FetchAndExecute s) = text "fetch_and_execute"
-  pretty (Branch c x y) = text "branch" <+> pretty c <+> pretty x <+> pretty y
+  pretty (FetchAndExecute s) =
+    text "fetch_and_execute" <$$>
+    indent 2 (pretty s)
+  pretty (Branch c x y) =
+    text "branch" <+> ppValue 0 c <+> pretty x <+> pretty y
 
 ------------------------------------------------------------------------
 -- X87StatusWord
@@ -336,6 +373,35 @@ x87Regs = lens _x87Regs (\s v -> s { _x87Regs = v })
 xmmRegs :: Simple Lens X86State (V.Vector (Value (BVType 128)))
 xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 
+ppStatus :: X87StatusWord -> [Doc]
+ppStatus s =
+  [ rec "x87_ie" (s^.x87_ie)
+  , rec "x87_de" (s^.x87_de)
+  , rec "x87_ze" (s^.x87_ze)
+  , rec "x87_oe" (s^.x87_oe)
+  , rec "x87_ue" (s^.x87_ue)
+  , rec "x87_pe" (s^.x87_pe)
+  , rec "x87_ef" (s^.x87_ef)
+  , rec "x87_es" (s^.x87_es)
+  , rec "x87_c0" (s^.x87_c0)
+  , rec "x87_c1" (s^.x87_c1)
+  , rec "x87_c2" (s^.x87_c2)
+  , rec "x87_c3" (s^.x87_c3)
+  , rec "x87_top"  (s^.x87_top)
+  , rec "x87_busy" (s^.x87_busy)
+  ]
+
+instance Pretty X86State where
+  pretty s =
+    bracketsep ([ rec "ip" (s^.curIP)]
+                ++ recv "reg" (s^.reg64Regs)
+                ++ recv "flag" (s^.flagRegs)
+                ++ recv "x87_control" (s^.x87ControlWord)
+                ++ ppStatus (s^.x87StatusWord)
+                ++ recv "x87_tag" (s^.x87TagWords)
+                ++ recv "r" (s^.x87Regs)
+                ++ recv "xmm" (s^.xmmRegs))
+
 ------------------------------------------------------------------------
 -- Assignment
 
@@ -355,6 +421,19 @@ data Assignment tp = Assignment { assignId :: !AssignId
 assignmentType :: Assignment tp -> TypeRepr tp
 assignmentType (Assignment _ rhs) = assignRhsType rhs
 
+instance TestEquality Assignment where
+  testEquality x y = orderingIsEqual (compareF x y)
+
+instance OrdF Assignment where
+  compareF x y =
+    case compare (assignId x) (assignId y) of
+      LT -> LTF
+      GT -> GTF
+      EQ ->
+        case testEquality (assignRhsType (assignRhs x)) (assignRhsType (assignRhs y)) of
+          Just Refl -> EQF
+          Nothing -> error "mismatched types"
+
 instance Pretty (Assignment tp) where
   pretty (Assignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
@@ -372,7 +451,7 @@ data AssignRhs tp where
   Read :: !(StmtLoc tp) -> AssignRhs tp
 
 instance Pretty (AssignRhs tp) where
-  pretty (EvalApp a) = ppApp pretty a
+  pretty (EvalApp a) = ppApp (ppValue 10) a
   pretty (SetUndefined w) = text "undef ::" <+> brackets (text (show w))
   pretty (Read loc) = pretty loc
 
@@ -427,6 +506,30 @@ data Value tp where
   -- One of 8 XMM registers
   InitialXMMReg :: Int -> Value (BVType 128)
 
+instance TestEquality Value where
+  testEquality x y = orderingIsEqual (compareF x y)
+
+instance OrdF Value where
+
+  compareF (BVValue wx vx) (BVValue wy vy) =
+    case compareF wx wy of
+      LTF -> LTF
+      EQF -> fromOrdering (compare vx vy)
+      GTF -> GTF
+
+  compareF BVValue{} _ = LTF
+  compareF _ BVValue{} = GTF
+
+{-
+  compareF (AssignedValue x) (AssignedValue y) =
+    case compareF wx wy of
+      EQF -> fromOrdering (compare vx vy)
+      r -> r
+  compareF BVValue{} _ = LTF
+  compareF _ BVValue{} = GTF
+-}
+
+
 valueType :: Value tp -> TypeRepr tp
 valueType (BVValue n _) = BVTypeRepr n
 valueType (AssignedValue a) = assignmentType a
@@ -457,10 +560,11 @@ valueWidth v =
 bvValue :: KnownNat n => Integer -> Value (BVType n)
 bvValue i = BVValue knownNat i
 
-instance Pretty (Value tp) where
-  pretty (BVValue w i) = text (show i) <+> text "::" <+> brackets (text (show w))
-  pretty (AssignedValue a) = ppAssignId (assignId a)
-  pretty _ = text "initial"
+ppValue :: Prec -> Value tp -> Doc
+ppValue p (BVValue w i) = parenIf (p > colonPrec) $
+  text (show i) <+> text "::" <+> brackets (text (show w))
+ppValue _ (AssignedValue a) = ppAssignId (assignId a)
+ppValue _ _ = text "initial"
 
 -----------------------------------------------------------------------
 -- App
@@ -598,12 +702,51 @@ data App f tp where
   -- Double precision addition.
   -- DoubleAdd :: f DoubleType -> f DoubleType -> App f DoubleType
 
+sexpr :: String -> [Doc] -> Doc
+sexpr nm d = parens (hsep (text nm : d))
+
+ppNat :: NatRepr n -> Doc
+ppNat n = text (show n)
+
 ppApp :: (forall u . f u -> Doc)
       -> App f tp
       -> Doc
-ppApp _ a0 =
+ppApp pp a0 =
   case a0 of
-    _ -> text "app"
+    Mux _ c x y -> sexpr "mux" [ pp c, pp x, pp y ]
+    MMXExtend e -> sexpr "mmx_extend" [ pp e ]
+    ConcatV _ x y -> sexpr "concat" [ pp x, pp y ]
+    UpperHalf _ x -> sexpr "upper_half" [ pp x ]
+    Trunc x w -> sexpr "trunc" [ pp x, ppNat w ]
+    SExt x w -> sexpr "sext" [ pp x, ppNat w ]
+    UExt x w -> sexpr "uext" [ pp x, ppNat w ]
+    AndApp x y -> sexpr "and" [ pp x, pp y ]
+    OrApp  x y -> sexpr "or"  [ pp x, pp y ]
+    NotApp x   -> sexpr "not" [ pp x ]
+    BVAdd _ x y -> sexpr "bv_add" [ pp x, pp y ]
+    BVSub _ x y -> sexpr "bv_sub" [ pp x, pp y ]
+    BVMul _ x y -> sexpr "bv_mul" [ pp x, pp y ]
+    BVDiv _ x y       -> sexpr "bv_udiv" [ pp x, pp y ]
+    BVSignedDiv _ x y -> sexpr "bv_sdiv" [ pp x, pp y ]
+    BVMod _ x y       -> sexpr "bv_umod" [ pp x, pp y ]
+    BVSignedMod _ x y -> sexpr "bv_smod" [ pp x, pp y ]
+    BVUnsignedLt x y  -> sexpr "bv_ult"  [ pp x, pp y ]
+    BVBit x i -> sexpr "bv_bitset" [ pp x, pp i]
+    BVComplement _ x -> sexpr "bv_complement" [ pp x ]
+    BVAnd _ x y -> sexpr "bv_and" [ pp x, pp y ]
+    BVOr  _ x y -> sexpr "bv_or"  [ pp x, pp y ]
+    BVXor _ x y -> sexpr "bv_xor" [ pp x, pp y ]
+    BVEq x y    -> sexpr "bv_eq" [ pp x, pp y ]
+    EvenParity x -> sexpr "even_parity" [ pp x ]
+    ReverseBytes _ x -> sexpr "reverse_bytes" [ pp x ]
+    UadcOverflows x y c -> sexpr "uadc_overflows" [ pp x, pp y, pp c ]
+    SadcOverflows x y c -> sexpr "sadc_overflows" [ pp x, pp y, pp c ]
+    UsbbOverflows x y c -> sexpr "usbb_overflows" [ pp x, pp y, pp c ]
+    SsbbOverflows x y c -> sexpr "ssbb_overflows" [ pp x, pp y, pp c ]
+    Bsf _ x -> sexpr "bsf" [ pp x ]
+    Bsr _ x -> sexpr "bsr" [ pp x ]
+
+
 
 
 appType :: App f tp -> TypeRepr tp
@@ -628,6 +771,9 @@ appType a =
     BVSignedDiv w _ _ -> BVTypeRepr w
     BVMod w _ _ -> BVTypeRepr w
     BVSignedMod w _ _ -> BVTypeRepr w
+
+    BVUnsignedLt{} -> knownType
+    BVBit{} -> knownType
 
     BVComplement w _ -> BVTypeRepr w
     BVAnd w _ _ -> BVTypeRepr w

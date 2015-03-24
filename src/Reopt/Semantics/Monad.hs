@@ -83,10 +83,9 @@ module Reopt.Semantics.Monad
   ) where
 
 import Control.Applicative
---import Data.Bits as Bits
 import GHC.TypeLits as TypeLits
--- import GHC.TypeLits (type (<=) )
 
+import Data.Parameterized.Classes
 import Data.Parameterized.NatRepr
 import Flexdis86.InstructionSet (Reg64, XMMReg)
 import qualified Flexdis86.InstructionSet as Flexdis86
@@ -129,6 +128,10 @@ data TypeRepr tp where
 
 type_width :: TypeRepr (BVType n) -> NatRepr n
 type_width (BVTypeRepr n) = n
+
+instance TestEquality TypeRepr where
+
+instance OrdF TypeRepr where
 
 class KnownType tp where
   knownType :: TypeRepr tp
