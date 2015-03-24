@@ -130,8 +130,16 @@ type_width :: TypeRepr (BVType n) -> NatRepr n
 type_width (BVTypeRepr n) = n
 
 instance TestEquality TypeRepr where
+  testEquality (BVTypeRepr m) (BVTypeRepr n) = do
+    Refl <- testEquality m n
+    return Refl
 
 instance OrdF TypeRepr where
+  compareF (BVTypeRepr m) (BVTypeRepr n) = do
+    case compareF m n of
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF
 
 class KnownType tp where
   knownType :: TypeRepr tp

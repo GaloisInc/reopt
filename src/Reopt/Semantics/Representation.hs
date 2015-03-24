@@ -487,7 +487,6 @@ data Value tp where
   Initial_X87_C2 :: Value BoolType
   Initial_X87_C3 :: Value BoolType
 
-
   -- Initial state of one of 16 general-purpose registers.
   InitialGenReg :: Int -> Value (BVType 64)
 
@@ -510,7 +509,6 @@ instance TestEquality Value where
   testEquality x y = orderingIsEqual (compareF x y)
 
 instance OrdF Value where
-
   compareF (BVValue wx vx) (BVValue wy vy) =
     case compareF wx wy of
       LTF -> LTF
@@ -519,16 +517,6 @@ instance OrdF Value where
 
   compareF BVValue{} _ = LTF
   compareF _ BVValue{} = GTF
-
-{-
-  compareF (AssignedValue x) (AssignedValue y) =
-    case compareF wx wy of
-      EQF -> fromOrdering (compare vx vy)
-      r -> r
-  compareF BVValue{} _ = LTF
-  compareF _ BVValue{} = GTF
--}
-
 
 valueType :: Value tp -> TypeRepr tp
 valueType (BVValue n _) = BVTypeRepr n
@@ -564,7 +552,7 @@ ppValue :: Prec -> Value tp -> Doc
 ppValue p (BVValue w i) = parenIf (p > colonPrec) $
   text (show i) <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
-ppValue _ _ = text "initial"
+ppValue _ _ = text "initial" -- TODO: Print out the actual initial value.
 
 -----------------------------------------------------------------------
 -- App
@@ -614,87 +602,87 @@ data App f tp where
   ----------------------------------------------------------------------
   -- Bitvector operations
 
-  BVAdd :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
-  BVSub :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVAdd :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  BVSub :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Multiply two numbers
-  BVMul :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVMul :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned division (rounds fractions to zero).
-  BVDiv :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVDiv :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Signed division (rounds fractional results to zero).
-  BVSignedDiv :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVSignedDiv :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned modulo
-  BVMod :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVMod :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Signed modulo.
   -- The resulting modulus has the same sign as the quotient and satisfies
   -- the constraint that for all x y where y != 0:
   --   x = (y * BVSignedDiv x y) + BVSignedMod x y
-  BVSignedMod :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVSignedMod :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned less than.
-  BVUnsignedLt :: f (BVType n) -> f (BVType n) -> App f BoolType
+  BVUnsignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
   -- @BVBit x i@ returns true iff bit @i@ of @x@ is true.
   -- 0 is the index of the least-significant bit.
-  BVBit :: f (BVType n) -> f (BVType log_n) -> App f BoolType
+  BVBit :: !(f (BVType n)) -> !(f (BVType log_n)) -> App f BoolType
 
   -- Bitwise complement
-  BVComplement :: NatRepr n -> f (BVType n) -> App f (BVType n)
+  BVComplement :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
   -- Bitwise and
-  BVAnd :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVAnd :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
   -- Bitwise or
-  BVOr  :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVOr  :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
   -- Exclusive or
-  BVXor :: NatRepr n -> f (BVType n) -> f (BVType n) -> App f (BVType n)
+  BVXor :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Compare for equality.
-  BVEq :: f (BVType n) -> f (BVType n) -> App f BoolType
+  BVEq :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
   -- Return true if value contains even number of true bits.
-  EvenParity :: f (BVType 8) -> App f BoolType
+  EvenParity :: !(f (BVType 8)) -> App f BoolType
 
   -- Reverse the bytes in a bitvector expression.
-  ReverseBytes :: NatRepr n -> f (BVType n) -> App f (BVType n)
+  ReverseBytes :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Add two values and a carry bit to determine if they have a signed
   -- overflow.
-  UadcOverflows :: f (BVType n)
-                -> f (BVType n)
-                -> f BoolType
+  UadcOverflows :: !(f (BVType n))
+                -> !(f (BVType n))
+                -> !(f BoolType)
                 -> App f BoolType
   -- Add two values and a carry bit to determine if they have a signed
   -- overflow.
-  SadcOverflows :: f (BVType n)
-                -> f (BVType n)
-                -> f BoolType
+  SadcOverflows :: !(f (BVType n))
+                -> !(f (BVType n))
+                -> !(f BoolType)
                 -> App f BoolType
 
   -- Unsigned subtract with borrow overflow
-  UsbbOverflows :: f (BVType n)
-                -> f (BVType n)
-                -> f BoolType
+  UsbbOverflows :: !(f (BVType n))
+                -> !(f (BVType n))
+                -> !(f BoolType)
                 -> App f BoolType
 
   -- Signed subtract with borrow overflow
-  SsbbOverflows :: f (BVType n)
-                -> f (BVType n)
-                -> f BoolType
+  SsbbOverflows :: !(f (BVType n))
+                -> !(f (BVType n))
+                -> !(f BoolType)
                 -> App f BoolType
 
 
   -- bsf "bit scan forward" returns the index of the least-significant
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices less than return value must be unset.
-  Bsf :: NatRepr n -> f (BVType n) -> App f (BVType n)
+  Bsf :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
 
   -- bsr "bit scan reverse" returns the index of the most-significant
   -- bit that is 1.  Undefined if value is zero.
   -- All bits at indices greater than return value must be unset.
-  Bsr :: NatRepr n -> f (BVType n) -> App f (BVType n)
+  Bsr :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
 
   -----------------------dat -----------------------------------------------
   -- Floating point operations
@@ -745,9 +733,6 @@ ppApp pp a0 =
     SsbbOverflows x y c -> sexpr "ssbb_overflows" [ pp x, pp y, pp c ]
     Bsf _ x -> sexpr "bsf" [ pp x ]
     Bsr _ x -> sexpr "bsr" [ pp x ]
-
-
-
 
 appType :: App f tp -> TypeRepr tp
 appType a =

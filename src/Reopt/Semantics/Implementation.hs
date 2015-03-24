@@ -665,7 +665,6 @@ disassembleBlock' mem gs0 addr = do
                              , _prevStmts  = Seq.fromList (blockStmts b)
                              , _curX86State = s
                              }
-          trace ("Continuing " ++ showHex next_ip "") $ do
           disassembleBlock' mem gs1 next_ip
         block_list -> (mergeFrontier pcfg, getFrontierNext block_list)
 
