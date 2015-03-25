@@ -15,6 +15,7 @@ import Paths_reopt (version)
 import Flexdis86
 import Reopt
 import Reopt.Semantics.Implementation
+import Reopt.Semantics.DeadRegisterElimination
 
 ------------------------------------------------------------------------
 -- Args
@@ -141,8 +142,9 @@ showCFG path = do
   mem <- loadElf e
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   let g = cfgFromAddress mem (elfEntry e)
+      g' = eliminateDeadRegisters g
   -- TODO:
-  print (pretty g)
+  print (pretty g')
 
 {-
       --printExecutableAddressesInGlobalData (args^.programPath)

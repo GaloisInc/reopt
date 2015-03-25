@@ -37,6 +37,7 @@ library
     Reopt.Semantics.Implementation
     Reopt.Semantics.Monad
     Reopt.Semantics.Representation
+    Reopt.Semantics.DeadRegisterElimination
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top

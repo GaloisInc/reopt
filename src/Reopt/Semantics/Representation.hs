@@ -18,6 +18,7 @@
 module Reopt.Semantics.Representation
   ( CFG
   , emptyCFG
+  , cfgBlocks
   , insertBlock
     -- * Block level declarations
   , BlockLabel(..)
@@ -39,6 +40,7 @@ module Reopt.Semantics.Representation
   , App(..)
   , appType
   , mapApp
+  , foldApp
   , traverseApp
     -- * X86State
   , X86State(..)
@@ -50,6 +52,7 @@ module Reopt.Semantics.Representation
   , x87Regs
   , xmmRegs
   , flagRegs
+  , foldX86StateValue
     -- * X87StatusWord
   , X87StatusWord(..)
   , x87_ie
@@ -79,6 +82,8 @@ import Data.Word
 import GHC.TypeLits
 import Numeric (showHex)
 import Text.PrettyPrint.Leijen hiding ((<$>))
+import Data.Monoid (Monoid, mappend)
+import Data.Foldable (foldMap)
 
 import Data.Parameterized.Classes
 import qualified Flexdis86.InstructionSet as Flexdis86
@@ -339,6 +344,34 @@ data X86State = X86State
        -- One of 8 128-bit XMM registers
      , _xmmRegs   :: !(V.Vector (Value (BVType 128)))
      }
+
+foldX86StateValue :: Monoid a => (forall u. Value u -> a) -> X86State -> a
+foldX86StateValue f s = f (s^.curIP)
+                        `mappend` foldMap f (s^.reg64Regs)
+                        `mappend` foldMap f (s^.flagRegs)
+                        `mappend` foldMap f (s^.x87ControlWord)
+                        `mappend` foldSW  (s^.x87StatusWord)
+                        `mappend` foldMap f (s^.x87TagWords)
+                        `mappend` foldMap f (s^.x87Regs)
+                        `mappend` foldMap f (s^.xmmRegs)
+  where
+    foldSW s' = f (s'^.x87_ie)
+                `mappend` f (s'^.x87_de)
+                `mappend` f (s'^.x87_ze)
+                `mappend` f (s'^.x87_oe)
+                `mappend` f (s'^.x87_ue)
+                `mappend` f (s'^.x87_pe)
+                `mappend` f (s'^.x87_ef)
+                `mappend` f (s'^.x87_es)
+                `mappend` f (s'^.x87_c0)
+                `mappend` f (s'^.x87_c1)
+                `mappend` f (s'^.x87_c2)
+                `mappend` f (s'^.x87_c3)
+                `mappend` f (s'^.x87_top)
+                `mappend` f (s'^.x87_busy)
+
+
+
 
 -- | The value of the current instruction pointer.
 curIP :: Simple Lens X86State (Value (BVType 64))
@@ -793,3 +826,9 @@ mapApp :: (forall u . f u -> g u)
        -> App f tp
        -> App g tp
 mapApp f m = runIdentity $ traverseApp (return . f) m
+
+foldApp :: Monoid m => (forall u. f u -> (b -> m)) -> b -> App f tp -> m
+foldApp f v m = getConst (traverseApp (\f_u -> Const $ \b -> f f_u b) m) v
+
+
+    
