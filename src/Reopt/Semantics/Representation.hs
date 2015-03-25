@@ -71,23 +71,24 @@ module Reopt.Semantics.Representation
   , x87_busy
   ) where
 
-import Control.Applicative
-import Control.Lens
-import Data.Map.Strict (Map)
+import           Control.Applicative
+import           Control.Lens
+import           Data.Foldable (foldMap)
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Parameterized.NatRepr
-import Data.Parameterized.TH.GADT
+import           Data.Maybe (catMaybes)
+import           Data.Monoid (Monoid, mappend)
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.TH.GADT
 import qualified Data.Vector as V
-import Data.Word
-import GHC.TypeLits
-import Numeric (showHex)
-import Text.PrettyPrint.Leijen hiding ((<$>))
-import Data.Monoid (Monoid, mappend)
-import Data.Foldable (foldMap)
+import           Data.Word
+import           GHC.TypeLits
+import           Numeric (showHex)
+import           Text.PrettyPrint.Leijen as PP hiding ((<$>))
 
-import Data.Parameterized.Classes
+import           Data.Parameterized.Classes
 import qualified Flexdis86.InstructionSet as Flexdis86
-import Reopt.Semantics.Monad
+import           Reopt.Semantics.Monad
   ( BoolType
   , Type(..)
   , TypeRepr(..)
@@ -119,12 +120,23 @@ bracketsep [] = text "{}"
 bracketsep (h:l) =
   vcat ([text "{" <+> h] ++ fmap (text "," <+>) l ++ [text "}"])
 
-rec :: String -> Value tp -> Doc
-rec nm v = text nm <+> text "=" <+> ppValue 0 v
+-- FIXME: move
+isInitial :: Value tp -> Bool
+isInitial (BVValue {})       = False
+isInitial (AssignedValue {}) = False
+isInitial _                  = True
 
-recv :: String -> V.Vector (Value tp) -> [Doc]
+ppValueEq :: Doc -> Value tp -> Maybe Doc
+ppValueEq nm v
+  | isInitial v = Nothing
+  | otherwise   = Just $ nm <+> text "=" <+> ppValue 0 v
+
+rec :: String -> Value tp -> Maybe Doc
+rec nm v = ppValueEq (text nm) v
+
+recv :: String -> V.Vector (Value tp) -> [Maybe Doc]
 recv nm v = f <$> [0..V.length v - 1]
-  where f i = text nm <> parens (text (show i)) <+> text "=" <+> ppValue 0 (v V.! i)
+  where f i = ppValueEq (text nm <> parens (int i)) (v V.! i)
 
 parenIf :: Bool -> Doc -> Doc
 parenIf True d = parens d
@@ -406,8 +418,8 @@ x87Regs = lens _x87Regs (\s v -> s { _x87Regs = v })
 xmmRegs :: Simple Lens X86State (V.Vector (Value (BVType 128)))
 xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 
-ppStatus :: X87StatusWord -> [Doc]
-ppStatus s =
+ppStatus :: X87StatusWord -> [Maybe Doc]
+ppStatus s = 
   [ rec "x87_ie" (s^.x87_ie)
   , rec "x87_de" (s^.x87_de)
   , rec "x87_ze" (s^.x87_ze)
@@ -426,14 +438,14 @@ ppStatus s =
 
 instance Pretty X86State where
   pretty s =
-    bracketsep ([ rec "ip" (s^.curIP)]
-                ++ recv "reg" (s^.reg64Regs)
-                ++ recv "flag" (s^.flagRegs)
-                ++ recv "x87_control" (s^.x87ControlWord)
-                ++ ppStatus (s^.x87StatusWord)
-                ++ recv "x87_tag" (s^.x87TagWords)
-                ++ recv "r" (s^.x87Regs)
-                ++ recv "xmm" (s^.xmmRegs))
+    bracketsep $ catMaybes ([ rec "ip" (s^.curIP)]
+                            ++ recv "reg" (s^.reg64Regs)
+                            ++ recv "flag" (s^.flagRegs)
+                            ++ recv "x87_control" (s^.x87ControlWord)
+                            ++ ppStatus (s^.x87StatusWord)
+                            ++ recv "x87_tag" (s^.x87TagWords)
+                            ++ recv "r" (s^.x87Regs)
+                            ++ recv "xmm" (s^.xmmRegs))
 
 ------------------------------------------------------------------------
 -- Assignment
