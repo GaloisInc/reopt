@@ -36,7 +36,9 @@ import Data.Parameterized.NatRepr
     , testLeq
     , LeqProof(..)
     )
+
 import Reopt.Semantics.Monad
+import qualified Reopt.Semantics.StateNames as N
 
 -- * Preliminaries
 
@@ -61,9 +63,9 @@ uadc4_overflows x y c = uadc_overflows (least_nibble x) (least_nibble y) c
 -- | Update flags with given result value.
 set_result_flags :: IsLocationBV m n => Value m (BVType n) -> m ()
 set_result_flags res = do
-  sf_flag .= msb res
-  zf_flag .= is_zero res
-  pf_flag .= even_parity (least_byte res)
+  sf_loc .= msb res
+  zf_loc .= is_zero res
+  pf_loc .= even_parity (least_byte res)
 
 -- | Assign value to location and update corresponding flags.
 set_result_value :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -74,9 +76,9 @@ set_result_value dst res = do
 -- | Set bitwise flags.
 set_bitwise_flags :: IsLocationBV m n => Value m (BVType n) -> m ()
 set_bitwise_flags res = do
-  of_flag .= false
-  cf_flag .= false
-  set_undefined af_flag
+  of_loc .= false
+  cf_loc .= false
+  set_undefined af_loc
   set_result_flags res
 
 push :: Semantics m => Value m (BVType n) -> m ()
@@ -102,18 +104,18 @@ pop sz = do old_sp <- get rsp
 
 cond_a, cond_ae, cond_b, cond_be, cond_g, cond_ge, cond_l, cond_le, cond_o, cond_p, cond_s, cond_z,
   cond_no, cond_np, cond_ns, cond_nz :: Semantics m => m (Value m BoolType)
-cond_a = (\c z -> complement c .&. complement z) <$> get cf_flag <*> get zf_flag
-cond_ae  = complement <$> get cf_flag
-cond_b   = get cf_flag
-cond_be  = (.|.) <$> get cf_flag <*> get zf_flag
-cond_g   = (\z s o -> complement z .&. (s `bvXor` o)) <$> get zf_flag <*> get sf_flag <*> get of_flag
-cond_ge  = (\s o   -> s `bvXor` o) <$> get sf_flag <*> get of_flag
+cond_a = (\c z -> complement c .&. complement z) <$> get cf_loc <*> get zf_loc
+cond_ae  = complement <$> get cf_loc
+cond_b   = get cf_loc
+cond_be  = (.|.) <$> get cf_loc <*> get zf_loc
+cond_g   = (\z s o -> complement z .&. (s `bvXor` o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
+cond_ge  = (\s o   -> s `bvXor` o) <$> get sf_loc <*> get of_loc
 cond_l   = complement <$> cond_ge
 cond_le  = complement <$> cond_g
-cond_o   = get of_flag
-cond_p   = get pf_flag
-cond_s   = get sf_flag
-cond_z   = get zf_flag
+cond_o   = get of_loc
+cond_p   = get pf_loc
+cond_s   = get sf_loc
+cond_z   = get zf_loc
 cond_no  = complement <$> cond_o
 cond_np  = complement <$> cond_p
 cond_ns  = complement <$> cond_s
@@ -133,13 +135,13 @@ exec_bswap = modify reverse_bytes
 
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
 exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
-exec_cbw = do v <- get (reg_low8 r_rax)
-              reg_low16 r_rax .= sext n16 v
+exec_cbw = do v <- get (reg_low8 N.rax)
+              reg_low16 N.rax .= sext n16 v
 
-exec_cwde = do v <- get (reg_low16 r_rax)
-               reg_low32 r_rax .= sext n32 v
+exec_cwde = do v <- get (reg_low16 N.rax)
+               reg_low32 N.rax .= sext n32 v
 
-exec_cdqe = do v <- get (reg_low32 r_rax)
+exec_cdqe = do v <- get (reg_low32 N.rax)
                rax .= sext n64 v
 
 -- FIXME: special segment stuff?
@@ -178,11 +180,11 @@ exec_adc dst y = do
   -- Get current value stored in destination.
   dst_val <- get dst
   -- Get current value of carry bit
-  c <- get cf_flag
+  c <- get cf_loc
   -- Set overflow and arithmetic flags
-  of_flag .= sadc_overflows  dst_val y c
-  af_flag .= uadc4_overflows dst_val y c
-  cf_flag .= uadc_overflows  dst_val y c
+  of_loc .= sadc_overflows  dst_val y c
+  af_loc .= uadc4_overflows dst_val y c
+  cf_loc .= uadc_overflows  dst_val y c
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y `bvAdd` uext (loc_width dst) c)
 
@@ -195,9 +197,9 @@ exec_add dst y = do
   -- Get current value stored in destination.
   dst_val <- get dst
   -- Set overflow and arithmetic flags
-  of_flag .= sadd_overflows  dst_val y
-  af_flag .= uadd4_overflows dst_val y
-  cf_flag .= uadd_overflows  dst_val y
+  of_loc .= sadd_overflows  dst_val y
+  af_loc .= uadd4_overflows dst_val y
+  cf_loc .= uadd_overflows  dst_val y
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
 
@@ -205,9 +207,9 @@ exec_add dst y = do
 exec_cmp :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_cmp dst y = do dst_val <- get dst
                     -- Set overflow and arithmetic flags
-                    of_flag .= ssub_overflows  dst_val y
-                    af_flag .= usub4_overflows dst_val y
-                    cf_flag .= usub_overflows  dst_val y
+                    of_loc .= ssub_overflows  dst_val y
+                    af_loc .= usub4_overflows dst_val y
+                    cf_loc .= usub_overflows  dst_val y
                     -- Set result value.
                     set_result_flags (dst_val `bvSub` y)
 
@@ -215,8 +217,8 @@ exec_dec :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_dec dst = do dst_val <- get dst
                   let v1 = bvLit (bv_width dst_val) (1 :: Int)
                   -- Set overflow and arithmetic flags
-                  of_flag .= ssub_overflows  dst_val v1
-                  af_flag .= usub4_overflows dst_val v1
+                  of_loc .= ssub_overflows  dst_val v1
+                  af_loc .= usub4_overflows dst_val v1
                   -- no carry flag
                   -- Set result value.
                   set_result_value dst (dst_val `bvSub` v1)
@@ -225,13 +227,13 @@ exec_div :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_div v
     -- 8-bit division.
   | Just Refl <- testEquality (bv_width v) n8 =
-    get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
+    get (reg_low16 N.rax) >>= go1 (reg_low8 N.rax) (reg_high8 N.rax)
     -- 16-bit division.
   | Just Refl <- testEquality (bv_width v) n16 =
-    go2 (reg_low16 r_rax) (reg_low16 r_rdx)
+    go2 (reg_low16 N.rax) (reg_low16 N.rdx)
     -- 32-bit division.
   | Just Refl <- testEquality (bv_width v) n32 =
-    go2 (reg_low32 r_rax) (reg_low32 r_rdx)
+    go2 (reg_low32 N.rax) (reg_low32 N.rdx)
     -- 64-bit division.
   | Just Refl <- testEquality (bv_width v) n64 =
     go2 rax rdx
@@ -260,21 +262,21 @@ exec_div v
       exception false (is_zero v) DivideError -- divide by zero
       -- Report error if quot >= 2^64
       exception false (bvLit (bv_width q) (maxBound :: Word64) `bvLt` q) DivideError
-      set_undefined cf_flag
-      set_undefined of_flag
-      set_undefined sf_flag
-      set_undefined af_flag
-      set_undefined pf_flag
-      set_undefined zf_flag
+      set_undefined cf_loc
+      set_undefined of_loc
+      set_undefined sf_loc
+      set_undefined af_loc
+      set_undefined pf_loc
+      set_undefined zf_loc
       quotL .= bvTrunc (bv_width v) q
       remL  .= bvTrunc (bv_width v) (w `bvMod` uext (bv_width w) v)
 
 exec_idiv :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_idiv v
   | Just Refl <- testEquality (bv_width v) n8  =
-    get (reg_low16 r_rax) >>= go1 (reg_low8 r_rax) (reg_high8 r_rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 r_rax) (reg_low16 r_rdx)
-  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 r_rax) (reg_low32 r_rdx)
+    get (reg_low16 N.rax) >>= go1 (reg_low8 N.rax) (reg_high8 N.rax)
+  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 N.rax) (reg_low16 N.rdx)
+  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 N.rax) (reg_low32 N.rdx)
   | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
   | otherwise                                  = fail "div: Unknown bit width"
   where
@@ -291,12 +293,12 @@ exec_idiv v
       exception false (is_zero v) DivideError -- divide by zero
       exception false (q `bvLt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64)) DivideError -- q < - 2 ^ 63 + 1
       exception false (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvLt` q) DivideError -- 2 ^ 63 < q
-      set_undefined cf_flag
-      set_undefined of_flag
-      set_undefined sf_flag
-      set_undefined af_flag
-      set_undefined pf_flag
-      set_undefined zf_flag
+      set_undefined cf_loc
+      set_undefined of_loc
+      set_undefined sf_loc
+      set_undefined af_loc
+      set_undefined pf_loc
+      set_undefined zf_loc
       quotL .= bvTrunc (bv_width v) q
       remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
 
@@ -306,9 +308,9 @@ exec_inc dst = do
   dst_val <- get dst
   let y  = bvLit (bv_width dst_val) (1 :: Int)
   -- Set overflow and arithmetic flags
-  of_flag .= sadd_overflows  dst_val y
-  af_flag .= uadd4_overflows dst_val y
-  -- no cf_flag
+  of_loc .= sadd_overflows  dst_val y
+  af_loc .= uadd4_overflows dst_val y
+  -- no cf_loc
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
 
@@ -323,11 +325,11 @@ set_reg_pair upperL lowerL v = do lowerL .= lower
 exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_mul v
   | Just Refl <- testEquality (bv_width v) n8  =
-    go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
+    go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
   | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+    go (set_reg_pair (reg_low16 N.rdx) (reg_low16 N.rax)) (reg_low16 N.rax)
   | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+    go (set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax)) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
     go (set_reg_pair rdx rax) rax
   | otherwise =
@@ -339,13 +341,13 @@ exec_mul v
                 let sz = addNat (bv_width v) (bv_width v)
                     r  = uext sz v' `bvMul` uext sz v -- FIXME: uext here is OK?
                     upper_r = fst (bvSplit r) :: Value m (BVType n)
-                set_undefined sf_flag
-                set_undefined af_flag
-                set_undefined pf_flag
-                set_undefined zf_flag
+                set_undefined sf_loc
+                set_undefined af_loc
+                set_undefined pf_loc
+                set_undefined zf_loc
                 let does_overflow = complement (is_zero upper_r)
-                of_flag .= does_overflow
-                cf_flag .= does_overflow
+                of_loc .= does_overflow
+                cf_loc .= does_overflow
                 f r
 
 really_exec_imul :: forall m n
@@ -357,23 +359,23 @@ really_exec_imul :: forall m n
 really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
    let r  = sext sz v' `bvMul` sext sz v
        (_, lower_r :: Value m (BVType n)) = bvSplit r
-   set_undefined af_flag
-   set_undefined pf_flag
-   set_undefined zf_flag
-   sf_flag .= msb lower_r
+   set_undefined af_loc
+   set_undefined pf_loc
+   set_undefined zf_loc
+   sf_loc .= msb lower_r
    let does_overflow = (r .=/=. sext sz lower_r)
-   of_flag .= does_overflow
-   cf_flag .= does_overflow
+   of_loc .= does_overflow
+   cf_loc .= does_overflow
    f r
 
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
   | Just Refl <- testEquality (bv_width v) n8  =
-    go (\v' -> reg_low16 r_rax .= v') (reg_low8 r_rax)
+    go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
   | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair (reg_low16 r_rdx) (reg_low16 r_rax)) (reg_low16 r_rax)
+    go (set_reg_pair (reg_low16 N.rdx) (reg_low16 N.rax)) (reg_low16 N.rax)
   | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair (reg_low32 r_rdx) (reg_low32 r_rax)) (reg_low32 r_rax)
+    go (set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax)) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
     go (set_reg_pair rdx rax) rax
   | otherwise =
@@ -392,15 +394,15 @@ exec_imul2_3 l v v' = really_exec_imul v v' $ \r -> l .= snd (bvSplit r)
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
 exec_neg l = do
   v <- get l
-  ifte_ (is_zero v) (cf_flag .= false) (cf_flag .= true)
+  ifte_ (is_zero v) (cf_loc .= false) (cf_loc .= true)
   let r = bvNeg v
       zero = bvLit (bv_width v) (0 :: Int)
-  of_flag .= ssub_overflows  zero v
-  af_flag .= usub4_overflows zero v
+  of_loc .= ssub_overflows  zero v
+  af_loc .= usub4_overflows zero v
   set_result_value l r
 
 exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
-exec_sbb l v = do cf <- get cf_flag
+exec_sbb l v = do cf <- get cf_loc
                   exec_sub l (v `bvAdd` uext (bv_width v) cf)
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
@@ -426,9 +428,9 @@ exec_not = modify complement
 exec_or :: Binop
 exec_or l v = do
   v' <- get l
-  set_undefined af_flag
-  of_flag .= false
-  cf_flag .= false
+  set_undefined af_loc
+  of_loc .= false
+  cf_loc .= false
   set_result_value l (v' .|. v)
 
 exec_xor :: Binop
@@ -470,14 +472,14 @@ really_exec_shift l count do_shift mk_cf mk_of = do
     let new_cf = mk_cf v dest_width tempCOUNT
 
     ifte_ (tempCOUNT `bvLt` dest_width)
-      (cf_flag .= new_cf)
-      (set_undefined cf_flag)
+      (cf_loc .= new_cf)
+      (set_undefined cf_loc)
 
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_flag .= mk_of v r new_cf)
-      (set_undefined of_flag)
+      (of_loc .= mk_of v r new_cf)
+      (set_undefined of_loc)
 
-    set_undefined af_flag
+    set_undefined af_loc
     set_result_value l r
 
 -- FIXME: could be 8 instead of n' here ...
@@ -513,14 +515,14 @@ exec_sar l count = do
     let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
 
     ifte_ (tempCOUNT `bvLt` dest_width)
-      (cf_flag .= new_cf)
-      (cf_flag .= msb v) -- FIXME: correct?  we assume here that we will get the sign bit ...
+      (cf_loc .= new_cf)
+      (cf_loc .= msb v) -- FIXME: correct?  we assume here that we will get the sign bit ...
 
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_flag .= false)
-      (set_undefined of_flag)
+      (of_loc .= false)
+      (set_undefined of_loc)
 
-    set_undefined af_flag
+    set_undefined af_loc
     set_result_value l r
 
 -- FIXME: use really_exec_shift above?
@@ -542,11 +544,11 @@ exec_rol l count = do
   when_ (complement $ is_zero tempCOUNT) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
 
-    cf_flag .= new_cf
+    cf_loc .= new_cf
 
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_flag .= (msb r `bvXor` new_cf))
-      (set_undefined of_flag)
+      (of_loc .= (msb r `bvXor` new_cf))
+      (set_undefined of_loc)
 
     l .= r
 
@@ -555,22 +557,22 @@ exec_rol l count = do
 
 exec_bsf :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_bsf r y = do
-  zf_flag .= is_zero y
-  set_undefined cf_flag
-  set_undefined of_flag
-  set_undefined sf_flag
-  set_undefined af_flag
-  set_undefined pf_flag
+  zf_loc .= is_zero y
+  set_undefined cf_loc
+  set_undefined of_loc
+  set_undefined sf_loc
+  set_undefined af_loc
+  set_undefined pf_loc
   r .= bsf y
 
 exec_bsr :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_bsr r y = do
-  zf_flag .= is_zero y
-  set_undefined cf_flag
-  set_undefined of_flag
-  set_undefined sf_flag
-  set_undefined af_flag
-  set_undefined pf_flag
+  zf_loc .= is_zero y
+  set_undefined cf_loc
+  set_undefined of_loc
+  set_undefined sf_loc
+  set_undefined af_loc
+  set_undefined pf_loc
   r .= bsr y
 
 exec_test :: Binop
@@ -588,13 +590,13 @@ exec_setcc cc l = do
 
 really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
 really_exec_call next_pc = do
-  old_pc <- get IPReg
+  old_pc <- get rip
   push old_pc -- push value of next instruction
-  IPReg .= next_pc
+  rip .= next_pc
 
 exec_call_relative :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
 exec_call_relative off = do
-  old_pc <- get IPReg
+  old_pc <- get rip
   let next_pc = old_pc `bvAdd` off
   really_exec_call next_pc
 
@@ -608,12 +610,12 @@ exec_jcc cc off = do
 
 jump_off :: Semantics m => Value m (BVType 64) -> m ()
 jump_off off = do
-  old_pc <- get IPReg
+  old_pc <- get rip
   let next_pc = old_pc `bvAdd` off
-  IPReg .= next_pc
+  rip .= next_pc
 
 exec_jmp_absolute :: Semantics m => Value m (BVType 64) -> m ()
-exec_jmp_absolute v = IPReg .= v
+exec_jmp_absolute v = rip .= v
 
 exec_ret :: Semantics m => Maybe Word16 -> m ()
 exec_ret m_off = do
@@ -621,7 +623,7 @@ exec_ret m_off = do
   case m_off of
     Nothing  -> return ()
     Just off -> modify (bvAdd (bvLit n64 off)) rsp
-  IPReg .= next_ip
+  rip .= next_ip
 
 -- ** String Instructions
 
@@ -635,7 +637,7 @@ exec_ret m_off = do
 exec_movs :: Semantics m => Bool -> NatRepr n -> m ()
 exec_movs rep_pfx sz = do
   -- The direction flag indicates post decrement or post increment.
-  df <- get df_flag
+  df <- get df_loc
   src  <- get rsi
   dest <- get rdi
   let szv        = bvLit n64 (widthVal sz)
@@ -662,7 +664,7 @@ exec_movs rep_pfx sz = do
 exec_cmps :: IsLocationBV m n => Bool -> NatRepr n -> m ()
 exec_cmps repz_pfx sz = do
   -- The direction flag indicates post decrement or post increment.
-  df <- get df_flag
+  df <- get df_loc
   src  <- get rsi
   dest <- get rdi
   if repz_pfx
@@ -690,7 +692,7 @@ exec_cmps repz_pfx sz = do
       exec_cmp (mkBVAddr sz lastSrc) v' -- FIXME: right way around?
 
       -- we do this to make it obvious so repz cmpsb ; jz ... is clear
-      zf_flag .= equal
+      zf_loc .= equal
       let nbytes = nwordsSeen `bvMul` (bvLit n64 $ widthVal sz `div` 8)
 
       rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
@@ -710,7 +712,7 @@ exec_cmps repz_pfx sz = do
 exec_stos :: Semantics m => Bool -> MLocation m (BVType n) -> m ()
 exec_stos rep_pfx l = do
   -- The direction flag indicates post decrement or post increment.
-  df <- get df_flag
+  df <- get df_loc
   dest <- get rdi
   v    <- get l
   let szv        = bvLit n64 (widthVal (loc_width l))
@@ -743,11 +745,11 @@ exec_leave = do bp_v <- get rbp
 
 -- | Run clc instruction.
 exec_clc :: Semantics m => m ()
-exec_clc = cf_flag .= false
+exec_clc = cf_loc .= false
 
 -- | Run cld instruction.
 exec_cld :: Semantics m => m ()
-exec_cld = df_flag .= false
+exec_cld = df_loc .= false
 
 -- ** Segment Register Instructions
 -- ** Miscellaneous Instructions
@@ -774,10 +776,10 @@ exec_fld fir v = x87Push (fpCvt fir X86_80FloatRepr v)
 exec_fst :: FPUnop
 exec_fst fir l = do
   v <- get (X87StackRegister 0)
-  set_undefined c0_flag
-  set_undefined c2_flag
-  set_undefined c3_flag
-  c1_flag .= fpCvtRoundsUp X86_80FloatRepr fir v
+  set_undefined c0_loc
+  set_undefined c2_loc
+  set_undefined c3_loc
+  c1_loc .= fpCvtRoundsUp X86_80FloatRepr fir v
   l .= fpCvt X86_80FloatRepr fir v
 
 -- | FSTP Store floating-point value
@@ -808,10 +810,10 @@ fparith :: Semantics m =>
 fparith op opRoundedUp fir_d l fir_s v = do
   let up_v = fpCvt fir_s fir_d v
   v' <- get l
-  set_undefined c0_flag
-  set_undefined c2_flag
-  set_undefined c3_flag
-  c1_flag .= opRoundedUp fir_d v' up_v
+  set_undefined c0_loc
+  set_undefined c2_loc
+  set_undefined c3_loc
+  c1_loc .= opRoundedUp fir_d v' up_v
   l .= op fir_d v' up_v
 
 -- | FADD Add floating-point
@@ -919,11 +921,11 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- | FNSTCW Store FPU control word without checking error conditions
 exec_fnstcw :: Semantics m => MLocation m (BVType 16) -> m ()
 exec_fnstcw l = do
-  v <- get X87ControlReg
-  set_undefined c0_flag
-  set_undefined c1_flag
-  set_undefined c2_flag
-  set_undefined c3_flag
+  v <- packWord N.x87ControlBitPacking
+  set_undefined c0_loc
+  set_undefined c1_loc
+  set_undefined c2_loc
+  set_undefined c3_loc
   l .= v
 
 -- FLDCW Load FPU control word
@@ -1119,13 +1121,13 @@ exec_ucomisd l v = do v' <- get lower_l
                           lt        = fpLt fir v' v
                           eq        = fpEq fir v' v
 
-                      zf_flag .= (unordered .|. eq)
-                      pf_flag .= unordered
-                      cf_flag .= (unordered .|. lt)
+                      zf_loc .= (unordered .|. eq)
+                      pf_loc .= unordered
+                      cf_loc .= (unordered .|. lt)
 
-                      of_flag .= false
-                      af_flag .= false
-                      sf_flag .= false
+                      of_loc .= false
+                      af_loc .= false
+                      sf_loc .= false
   where
   fir = DoubleFloatRepr
   lower_l = xmm_low64 l

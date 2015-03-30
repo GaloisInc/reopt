@@ -33,6 +33,8 @@ library
     Reopt.Loader
     Reopt.Memory
     Reopt.Semantics
+    Reopt.Semantics.Types
+    Reopt.Semantics.StateNames
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Implementation
     Reopt.Semantics.Monad

@@ -24,35 +24,36 @@ module Reopt.Semantics.Implementation
   ( cfgFromAddress
   ) where
 
-import Control.Applicative
-import Control.Lens
-import Control.Monad.Cont
-import Control.Monad.State.Strict
-import Data.Bits
+import           Control.Applicative
+import           Control.Lens
+import           Control.Monad.Cont
+import           Control.Monad.State.Strict
+import           Data.Bits
 import qualified Data.Foldable as Fold
-import Data.Parameterized.NatRepr
-import Data.Sequence (Seq)
+import           Data.Parameterized.NatRepr
+import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Data.Set (Set)
+import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
-import Data.Word
-import Numeric (showHex)
+import           Data.Word
+import           Numeric (showHex)
 
-import Unsafe.Coerce (unsafeCoerce)
+import           Unsafe.Coerce (unsafeCoerce)
 
 import qualified Flexdis86 as Flexdis
 
-import Reopt.Memory
-import Reopt.Semantics.Monad
+import           Debug.Trace
+import           Reopt.Memory
+import           Reopt.Semantics.FlexdisMatcher (execInstruction)
+import           Reopt.Semantics.Monad
   ( Type(..)
   , BoolType
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-import Reopt.Semantics.Representation
-import Reopt.Semantics.FlexdisMatcher (execInstruction)
-import Debug.Trace
+import           Reopt.Semantics.Representation
+import qualified Reopt.Semantics.StateNames as N
 
 ------------------------------------------------------------------------
 -- Location
@@ -364,32 +365,24 @@ type ImpLocation tp = S.Location AddrExpr tp
 getLoc :: ImpLocation tp -> X86Generator r (Expr tp)
 getLoc l0 =
   case l0 of
-    S.FlagReg r -> do
-      fmap (ValueExpr . (V.! r)) $ modState $ use flagRegs
     S.MemoryAddr w tp -> do
       addr <- eval w
       ValueExpr <$> addAssignment (Read (MemLoc addr tp))
-
-    S.GPReg  r -> modState $ ValueExpr . (V.! idx) <$> use reg64Regs
-      where idx = Flexdis.reg64Idx r
-    S.IPReg    -> modState $ ValueExpr <$> use curIP
-
-    S.CReg   r -> ValueExpr <$> addAssignment (Read (ControlLoc r))
-    S.DReg   r -> ValueExpr <$> addAssignment (Read (DebugLoc r))
-
-    S.MMXReg r -> do
-      let idx = Flexdis.mmxRegIdx r
-      e <- modState $ ValueExpr . (V.! idx) <$> use x87Regs
-      ValueExpr <$> eval (truncExpr e knownNat)
-
-    S.SegmentReg r
-      | r == Flexdis.fs -> ValueExpr <$> addAssignment (Read FS)
-      | r == Flexdis.gs -> ValueExpr <$> addAssignment (Read GS)
-        -- Otherwise registers are 0.
-      | otherwise -> return (ValueExpr (bvValue 0))
-
-    S.XMMReg r -> modState $ ValueExpr . (V.! idx) <$> use xmmRegs
-      where idx = Flexdis.xmmRegIdx r
+  
+    S.Register r ->
+      case r of
+       -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
+       -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
+       N.SegmentReg {}
+         | r == N.fs -> ValueExpr <$> addAssignment (Read FS)
+         | r == N.gs -> ValueExpr <$> addAssignment (Read GS)
+         -- Otherwise registers are 0.
+         | otherwise ->
+             fail $ "On x86-64 registers other than fs and gs may not be set."
+       -- S.MMXReg {} -> do
+       --   e <- modState $ ValueExpr <$> use (register r)
+       --   ValueExpr <$> eval (truncExpr e knownNat)
+       _ -> modState $ ValueExpr <$> use (register r)
 
     S.LowerHalf l -> lowerHalf <$> getLoc l
     S.UpperHalf l -> upperHalf <$> getLoc l
@@ -456,27 +449,25 @@ upperHalf e =
 setLoc :: ImpLocation tp -> Value tp -> X86Generator r ()
 setLoc l0 v =
   case l0 of
-    S.FlagReg r -> modState $ flagRegs . ix r .= v
     S.MemoryAddr w _ -> do
       addr <- eval w
       addStmt $ Write (MemLoc addr (valueType v)) v
-    S.GPReg r -> modState $ reg64Regs . ix idx .= v
-      where idx = Flexdis.reg64Idx r
-    S.IPReg -> modState $ curIP .= v
-    S.CReg r -> addStmt $ Write (ControlLoc r) v
-    S.DReg r -> addStmt $ Write (DebugLoc r)   v
-    S.MMXReg r -> do
-      ext_v <- evalApp (MMXExtend v)
-      let idx = Flexdis.mmxRegIdx r
-      modState $ x87Regs . ix idx .= ext_v
-    S.SegmentReg r
-      | r == Flexdis.fs -> addStmt $ Write FS v
-      | r == Flexdis.gs -> addStmt $ Write GS v
-        -- Otherwise registers are 0.
-      | otherwise -> do
-        fail $ "On x86-64 registers other than fs and gs may not be set."
-    S.XMMReg r -> modState $ xmmRegs . ix idx .= v
-      where idx = Flexdis.xmmRegIdx r
+  
+    S.Register r ->
+      case r of
+       N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
+       N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
+       N.SegmentReg {}
+         | r == N.fs -> addStmt $ Write FS v
+         | r == N.gs -> addStmt $ Write GS v
+         -- Otherwise registers are 0.
+         | otherwise ->
+             fail $ "On x86-64 registers other than fs and gs may not be set."
+       -- S.MMXReg {} -> do
+       --   ext_v <- evalApp (MMXExtend v)
+       --   modState $ register r .= ext_v
+       _ -> modState $ register r .= v
+
     S.LowerHalf l -> do
       b <- getLoc l
       upper <- eval (upperHalf b)
@@ -485,6 +476,7 @@ setLoc l0 v =
       b <- getLoc l
       lower <- eval (lowerHalf b)
       setLoc l =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
+      
     S.X87StackRegister i -> do
       undefined
 
@@ -560,26 +552,6 @@ falseBit = BVValue knownNat 0
 trueBit :: Value BoolType
 trueBit = BVValue knownNat 1
 
-initStatusWord :: Int -> X87StatusWord
-initStatusWord top = X87StatusWord
-  { _x87_ie = Initial_X87_IE
-  , _x87_de = Initial_X87_DE
-  , _x87_ze = Initial_X87_ZE
-  , _x87_oe = Initial_X87_OE
-  , _x87_ue = Initial_X87_UE
-  , _x87_pe = Initial_X87_PE
-  , _x87_ef = Initial_X87_EF
-  , _x87_es = Initial_X87_ES
-  , _x87_c0 = Initial_X87_C0
-  , _x87_c1 = Initial_X87_C1
-  , _x87_c2 = Initial_X87_C2
-  , _x87_c3 = Initial_X87_C3
-  , _x87_top  = BVValue knownNat (toInteger top)
-  , _x87_busy = falseBit
-  }
-
-
-
 
 -- | Read instruction at a given memory address.
 readInstruction :: Memory Word64 -- Memory to read.
@@ -601,13 +573,14 @@ initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State
 initX86State loc =
   X86State { _curIP = BVValue knownNat (toInteger (loc_ip loc))
-           , _reg64Regs = V.generate 16 (\i -> InitialGenReg i)
-           , _flagRegs  = V.generate 32 (\i -> InitialFlag i)
-           , _x87ControlWord = V.generate 16 (\i -> InitialX87ControlBit i)
-           , _x87StatusWord = initStatusWord (loc_x87_top loc)
-           , _x87TagWords = V.generate 8 (\i -> InitialTagWord i)
-           , _x87Regs = V.generate 8 (\i -> InitialFPUReg i)
-           , _xmmRegs = V.generate 8 (\i -> InitialXMMReg i)
+           , _reg64Regs = V.generate 16 (Initial . N.GPReg)
+           , _flagRegs  = V.generate 32 (Initial . N.FlagReg)
+           , _x87ControlWord = V.generate 16 (Initial . N.X87ControlReg)
+           , _x87StatusWord = V.generate 16 (Initial . N.X87StatusReg)
+           , _x87TopReg   = BVValue knownNat (fromIntegral $ loc_x87_top loc)
+           , _x87TagWords = V.generate 8 (Initial . N.X87TagReg)
+           , _x87Regs = V.generate 8 (Initial . N.X87FPUReg)
+           , _xmmRegs = V.generate 8 (Initial . N.XMMReg)
            }
 
 disassembleBlock :: Memory Word64
@@ -625,7 +598,7 @@ disassembleBlock mem g loc = do
 
 getExploreLocs :: X86State -> [ExploreLoc]
 getExploreLocs s =
-  case (s^.curIP, s^.x87StatusWord^.x87_top) of
+  case (s^.curIP, s^.x87TopReg) of
     (BVValue _ ip, BVValue _ top) -> [loc]
       where loc = ExploreLoc { loc_ip = fromInteger ip
                              , loc_x87_top = fromInteger top

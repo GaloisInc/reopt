@@ -44,31 +44,17 @@ module Reopt.Semantics.Representation
   , traverseApp
     -- * X86State
   , X86State(..)
+  , register
   , curIP
   , reg64Regs
   , x87ControlWord
   , x87StatusWord
   , x87TagWords
+  , x87TopReg
   , x87Regs
   , xmmRegs
   , flagRegs
   , foldX86StateValue
-    -- * X87StatusWord
-  , X87StatusWord(..)
-  , x87_ie
-  , x87_de
-  , x87_ze
-  , x87_oe
-  , x87_ue
-  , x87_pe
-  , x87_ef
-  , x87_es
-  , x87_c0
-  , x87_c1
-  , x87_c2
-  , x87_c3
-  , x87_top
-  , x87_busy
   ) where
 
 import           Control.Applicative
@@ -94,6 +80,8 @@ import           Reopt.Semantics.Monad
   , TypeRepr(..)
   , knownType
   )
+import qualified Reopt.Semantics.StateNames as N
+
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
@@ -209,8 +197,8 @@ instance Pretty Block where
 
 data StmtLoc tp where
   MemLoc     :: !(Value (BVType 64)) -> TypeRepr tp -> StmtLoc tp
-  ControlLoc :: !Flexdis86.ControlReg -> StmtLoc (BVType 64)
-  DebugLoc   :: !Flexdis86.DebugReg   -> StmtLoc (BVType 64)
+  ControlLoc :: !(N.RegisterName N.Control) -> StmtLoc (BVType 64)
+  DebugLoc   :: !(N.RegisterName N.Debug)   -> StmtLoc (BVType 64)
   FS :: StmtLoc (BVType 16)
   GS :: StmtLoc (BVType 16)
 
@@ -264,27 +252,7 @@ instance Pretty TermStmt where
 ------------------------------------------------------------------------
 -- X87StatusWord
 
--- The X87 status word.
-data X87StatusWord
-   = X87StatusWord
-   { _x87_ie   :: !(Value BoolType) -- Bit 0
-   , _x87_de   :: !(Value BoolType) -- Bit 1
-   , _x87_ze   :: !(Value BoolType) -- Bit 2
-   , _x87_oe   :: !(Value BoolType) -- Bit 3
-   , _x87_ue   :: !(Value BoolType) -- Bit 4
-   , _x87_pe   :: !(Value BoolType) -- Bit 5
-   , _x87_ef   :: !(Value BoolType) -- Bit 6
-   , _x87_es   :: !(Value BoolType) -- Bit 7
-   , _x87_c0   :: !(Value BoolType) -- Bit 8
-   , _x87_c1   :: !(Value BoolType) -- Bit 9
-   , _x87_c2   :: !(Value BoolType) -- Bit 10
-   , _x87_c3   :: !(Value BoolType) -- Bit 14
-     -- Top of the stack pointer.
-     -- This contains a value 0-7 indicating the top of the stack.
-   , _x87_top  :: !(Value (BVType 3)) -- Bits 11-13
-   , _x87_busy :: !(Value BoolType)  -- Bit 15
-   }
-
+{-
 x87_ie :: Simple Lens X87StatusWord (Value BoolType)
 x87_ie = lens _x87_ie (\s v -> s { _x87_ie = v })
 
@@ -326,6 +294,7 @@ x87_top = lens _x87_top (\s v -> s { _x87_top = v })
 
 x87_busy :: Simple Lens X87StatusWord (Value BoolType)
 x87_busy = lens _x87_busy (\s v -> s { _x87_busy = v })
+-}
 
 ------------------------------------------------------------------------
 -- X86State
@@ -345,7 +314,8 @@ data X86State = X86State
        --   Section 8.1.5
      , _x87ControlWord :: !(V.Vector (Value BoolType))
        -- The x86 status word.
-     , _x87StatusWord :: !X87StatusWord
+     , _x87StatusWord :: !(V.Vector (Value BoolType))
+     , _x87TopReg     :: !(Value (BVType 3))
        -- The 8 x87 tag words
        -- (used to indicate the status of different FPU registers).
      , _x87TagWords :: !(V.Vector (Value (BVType 2)))
@@ -362,30 +332,33 @@ foldX86StateValue f s = f (s^.curIP)
                         `mappend` foldMap f (s^.reg64Regs)
                         `mappend` foldMap f (s^.flagRegs)
                         `mappend` foldMap f (s^.x87ControlWord)
-                        `mappend` foldSW  (s^.x87StatusWord)
+                        `mappend` foldMap f (s^.x87StatusWord)
                         `mappend` foldMap f (s^.x87TagWords)
                         `mappend` foldMap f (s^.x87Regs)
                         `mappend` foldMap f (s^.xmmRegs)
+
+register :: N.RegisterName cl -> Simple Lens X86State (Value (N.RegisterType cl))
+register reg = case reg of
+                N.IPReg           -> curIP
+                N.GPReg n         -> reg64Regs . idx n
+                N.FlagReg n       -> flagRegs . idx n                
+                N.X87ControlReg n -> x87ControlWord . idx n
+                N.X87StatusReg n  -> x87StatusWord . idx n
+                N.X87TopReg       -> x87TopReg
+                N.X87TagReg n     -> x87TagWords . idx n
+                N.X87FPUReg n     -> x87Regs . idx n
+                N.XMMReg n        -> xmmRegs . idx n
+                -- X87PC
+                -- X87RC
+                -- SegmentReg
+                -- DebugReg
+                -- ControlReg 
+                _               -> error $ "Unexpected reg: " ++ show reg
   where
-    foldSW s' = f (s'^.x87_ie)
-                `mappend` f (s'^.x87_de)
-                `mappend` f (s'^.x87_ze)
-                `mappend` f (s'^.x87_oe)
-                `mappend` f (s'^.x87_ue)
-                `mappend` f (s'^.x87_pe)
-                `mappend` f (s'^.x87_ef)
-                `mappend` f (s'^.x87_es)
-                `mappend` f (s'^.x87_c0)
-                `mappend` f (s'^.x87_c1)
-                `mappend` f (s'^.x87_c2)
-                `mappend` f (s'^.x87_c3)
-                `mappend` f (s'^.x87_top)
-                `mappend` f (s'^.x87_busy)
-
-
-
-
--- | The value of the current instruction pointer.
+    idx :: forall tp. Int -> Lens' (V.Vector (Value tp)) (Value tp)
+    idx n = lens (V.! n) (\s v -> (ix n .~ v) s)
+  
+-- | the value oDebugReg{}  f the current instruction pointer.
 curIP :: Simple Lens X86State (Value (BVType 64))
 curIP = lens _curIP (\s v -> s { _curIP = v })
 
@@ -402,13 +375,17 @@ x87ControlWord :: Simple Lens X86State (V.Vector (Value BoolType))
 x87ControlWord = lens _x87ControlWord (\s v -> s { _x87ControlWord = v })
 
 -- | The current x87 status word.
-x87StatusWord :: Simple Lens X86State X87StatusWord
+x87StatusWord :: Simple Lens X86State (V.Vector (Value BoolType))
 x87StatusWord = lens _x87StatusWord (\s v -> s { _x87StatusWord = v })
 
 -- | The 8 x87 tag words
 -- used to indicate the status of different FPU registers.
 x87TagWords :: Simple Lens X86State (V.Vector (Value (BVType 2)))
 x87TagWords = lens _x87TagWords (\s v -> s { _x87TagWords = v })
+
+-- | the value oDebugReg{}  f the current instruction pointer.
+x87TopReg :: Simple Lens X86State (Value (BVType 3))
+x87TopReg = lens _x87TopReg (\s v -> s { _x87TopReg = v })
 
 -- | Assignments to the 8 80-bit FPU registers.
 x87Regs :: Simple Lens X86State (V.Vector (Value (BVType 80)))
@@ -418,31 +395,13 @@ x87Regs = lens _x87Regs (\s v -> s { _x87Regs = v })
 xmmRegs :: Simple Lens X86State (V.Vector (Value (BVType 128)))
 xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 
-ppStatus :: X87StatusWord -> [Maybe Doc]
-ppStatus s = 
-  [ rec "x87_ie" (s^.x87_ie)
-  , rec "x87_de" (s^.x87_de)
-  , rec "x87_ze" (s^.x87_ze)
-  , rec "x87_oe" (s^.x87_oe)
-  , rec "x87_ue" (s^.x87_ue)
-  , rec "x87_pe" (s^.x87_pe)
-  , rec "x87_ef" (s^.x87_ef)
-  , rec "x87_es" (s^.x87_es)
-  , rec "x87_c0" (s^.x87_c0)
-  , rec "x87_c1" (s^.x87_c1)
-  , rec "x87_c2" (s^.x87_c2)
-  , rec "x87_c3" (s^.x87_c3)
-  , rec "x87_top"  (s^.x87_top)
-  , rec "x87_busy" (s^.x87_busy)
-  ]
-
 instance Pretty X86State where
   pretty s =
     bracketsep $ catMaybes ([ rec "ip" (s^.curIP)]
                             ++ recv "reg" (s^.reg64Regs)
                             ++ recv "flag" (s^.flagRegs)
                             ++ recv "x87_control" (s^.x87ControlWord)
-                            ++ ppStatus (s^.x87StatusWord)
+                            ++ recv "" (s^.x87StatusWord)
                             ++ recv "x87_tag" (s^.x87TagWords)
                             ++ recv "r" (s^.x87Regs)
                             ++ recv "xmm" (s^.xmmRegs))
@@ -519,36 +478,7 @@ data Value tp where
   -- Value from an assignment statement.
   AssignedValue :: !(Assignment tp) -> Value tp
 
-  Initial_X87_IE :: Value BoolType
-  Initial_X87_DE :: Value BoolType
-  Initial_X87_ZE :: Value BoolType
-  Initial_X87_OE :: Value BoolType
-  Initial_X87_UE :: Value BoolType
-  Initial_X87_PE :: Value BoolType
-  Initial_X87_EF :: Value BoolType
-  Initial_X87_ES :: Value BoolType
-  Initial_X87_C0 :: Value BoolType
-  Initial_X87_C1 :: Value BoolType
-  Initial_X87_C2 :: Value BoolType
-  Initial_X87_C3 :: Value BoolType
-
-  -- Initial state of one of 16 general-purpose registers.
-  InitialGenReg :: Int -> Value (BVType 64)
-
-  -- One of 32 initial flag registers.
-  InitialFlag :: Int -> Value BoolType
-
-  -- Control bit
-  InitialX87ControlBit :: Int -> Value BoolType
-
-  -- X87 tag register.
-  InitialTagWord :: Int -> Value (BVType 2)
-
-  -- One of 8 fpu/mmx registers.
-  InitialFPUReg :: Int -> Value (BVType 80)
-
-  -- One of 8 XMM registers
-  InitialXMMReg :: Int -> Value (BVType 128)
+  Initial :: !(N.RegisterName cl) -> Value (N.RegisterType cl)
 
 instance TestEquality Value where
   testEquality x y = orderingIsEqual (compareF x y)
@@ -566,24 +496,7 @@ instance OrdF Value where
 valueType :: Value tp -> TypeRepr tp
 valueType (BVValue n _) = BVTypeRepr n
 valueType (AssignedValue a) = assignmentType a
-valueType Initial_X87_IE = knownType
-valueType Initial_X87_DE = knownType
-valueType Initial_X87_ZE = knownType
-valueType Initial_X87_OE = knownType
-valueType Initial_X87_UE = knownType
-valueType Initial_X87_PE = knownType
-valueType Initial_X87_EF = knownType
-valueType Initial_X87_ES = knownType
-valueType Initial_X87_C0 = knownType
-valueType Initial_X87_C1 = knownType
-valueType Initial_X87_C2 = knownType
-valueType Initial_X87_C3 = knownType
-valueType InitialGenReg{} = knownType
-valueType InitialFlag{}   = knownType
-valueType InitialX87ControlBit{} = knownType
-valueType InitialTagWord{}  = knownType
-valueType InitialFPUReg{}   = knownType
-valueType InitialXMMReg{}   = knownType
+valueType (Initial r)       = N.registerType r
 
 valueWidth :: Value (BVType n) -> NatRepr n
 valueWidth v =
@@ -597,7 +510,7 @@ ppValue :: Prec -> Value tp -> Doc
 ppValue p (BVValue w i) = parenIf (p > colonPrec) $
   text (show i) <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
-ppValue _ _ = text "initial" -- TODO: Print out the actual initial value.
+ppValue _ (Initial r)       = text (show r) <> text "_0"
 
 -----------------------------------------------------------------------
 -- App

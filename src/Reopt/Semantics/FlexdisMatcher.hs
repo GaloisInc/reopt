@@ -33,11 +33,11 @@ import qualified Data.Map as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
 import           GHC.TypeLits (KnownNat)
 
+import           Data.Parameterized.NatRepr
 import qualified Flexdis86 as F
 import           Reopt.Semantics
 import           Reopt.Semantics.Monad
-
-import           Data.Parameterized.NatRepr
+import qualified Reopt.Semantics.StateNames as N
 
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
@@ -46,11 +46,11 @@ data SomeBV v where
 getSomeBVValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
 getSomeBVValue v =
   case v of
-    F.ControlReg cr     -> mk (CReg cr)
-    F.DebugReg dr       -> mk (DReg dr)
-    F.MMXReg mmx        -> mk (MMXReg mmx)
-    F.XMMReg xmm        -> mk (XMMReg xmm)
-    F.SegmentValue s    -> mk (SegmentReg s)
+    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
+    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
+    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
+    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.X87Register n     -> mk (X87StackRegister n)
     F.FarPointer _      -> fail "FarPointer"
     -- If an instruction can take a VoidMem, it needs to get it explicitly
@@ -65,12 +65,12 @@ getSomeBVValue v =
     F.FPMem80 ar          -> getBVAddress ar >>= mk . mkFPAddr X86_80FloatRepr
     
     F.ByteReg  r
-      | Just r64 <- F.is_low_reg r  -> mk (reg_low8 r64)
-      | Just r64 <- F.is_high_reg r -> mk (reg_high8 r64)
+      | Just r64 <- F.is_low_reg r  -> mk (reg_low8 $ N.gpFromFlexdis r64)
+      | Just r64 <- F.is_high_reg r -> mk (reg_high8 $ N.gpFromFlexdis r64)
       | otherwise                   -> fail "unknown r8"
-    F.WordReg  r                    -> mk (reg_low16 (F.reg16_reg r))
-    F.DWordReg r                    -> mk (reg_low32 (F.reg32_reg r))
-    F.QWordReg r                    -> mk (GPReg r)
+    F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
+    F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
+    F.QWordReg r                    -> mk (Register $ N.gpFromFlexdis r)
     F.ByteImm  w                    -> return (SomeBV $ bvLit n8  w) -- FIXME: should we cast here?
     F.WordImm  w                    -> return (SomeBV $ bvLit n16 w)
     F.DWordImm w                    -> return (SomeBV $ bvLit n32 w)
@@ -78,7 +78,7 @@ getSomeBVValue v =
     F.JumpOffset off                -> return (SomeBV $ bvLit n64 off)
   where
     -- FIXME: what happens with signs etc?
-    mk :: forall m n'. (FullSemantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
+    mk :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
     mk l = SomeBV <$> get l
 
 -- | Calculates the address corresponding to an AddrRef
@@ -93,13 +93,14 @@ getBVAddress ar =
     F.Addr_64      seg m_r64 m_int_r64 i32 -> do check_seg_value seg
                                                  base <- case m_r64 of
                                                            Nothing -> return v0_64
-                                                           Just r  -> get (GPReg r)
+                                                           Just r  -> get (Register $ N.gpFromFlexdis r)
                                                  scale <- case m_int_r64 of
                                                             Nothing     -> return v0_64
-                                                            Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i) <$> get (GPReg r)
+                                                            Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
+                                                                           <$> get (Register $ N.gpFromFlexdis r)
                                                  return (base `bvAdd` scale `bvAdd` bvLit n64 i32)
     F.IP_Offset_64 seg i32                 -> do check_seg_value seg
-                                                 bvAdd (bvLit n64 i32) <$> get IPReg
+                                                 bvAdd (bvLit n64 i32) <$> get (Register N.rip)
   where
     v0_64 = bvLit n64 (0 :: Int)
     check_seg_value seg
@@ -110,11 +111,11 @@ getBVAddress ar =
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getSomeBVLocation v =
   case v of
-    F.ControlReg cr     -> mk (CReg cr)
-    F.DebugReg dr       -> mk (DReg dr)
-    F.MMXReg mmx        -> mk (MMXReg mmx)
-    F.XMMReg xmm        -> mk (XMMReg xmm)
-    F.SegmentValue s    -> mk (SegmentReg s)
+    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)  
+    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)    
+    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)     
+    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)     
+    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)   
     F.FarPointer _      -> fail "FarPointer"
     F.VoidMem ar        -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
     F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8
@@ -122,12 +123,12 @@ getSomeBVLocation v =
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
     F.ByteReg  r
-      | Just r64 <- F.is_low_reg r  -> mk (reg_low8  r64)
-      | Just r64 <- F.is_high_reg r -> mk (reg_high8 r64)
+      | Just r64 <- F.is_low_reg r  -> mk (reg_low8  $ N.gpFromFlexdis r64)
+      | Just r64 <- F.is_high_reg r -> mk (reg_high8 $ N.gpFromFlexdis r64)
       | otherwise                   -> fail "unknown r8"
-    F.WordReg  r                    -> mk (reg_low16 (F.reg16_reg r))
-    F.DWordReg r                    -> mk (reg_low32 (F.reg32_reg r))
-    F.QWordReg r                    -> mk (GPReg r)
+    F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
+    F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
+    F.QWordReg r                    -> mk (Register $ N.gpFromFlexdis r)
     -- ByteImm  Word8
     -- WordImm  Word16
     -- DWordImm Word32
@@ -211,9 +212,9 @@ semanticsMap = M.fromList instrs
               , mk "movsd"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n32
               , mk "movsq"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n64
             
-              , mk "stosb"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low8 r_rax)
-              , mk "stosw"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low16 r_rax)
-              , mk "stosd"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low32 r_rax)
+              , mk "stosb"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low8 N.rax)
+              , mk "stosw"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low16 N.rax)
+              , mk "stosd"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low32 N.rax)
               , mk "stosq"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) rax
             
               -- fixed size instructions.  We truncate in the case of
@@ -270,7 +271,7 @@ semanticsMap = M.fromList instrs
               , mk "sar"     $ mkBinopLV exec_sar
               , mk "shl"     $ mkBinopLV exec_shl
               , mk "shr"     $ mkBinopLV exec_shr
-              , mk "std"     $ const (df_flag .= true)
+              , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
               , mk "syscall" $ const (get rax >>= syscall)
               , mk "test"    $ binop exec_test
@@ -321,7 +322,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
 
 maybe_ip_relative f (_, vs)
   | [F.JumpOffset off] <- vs
-       = do next_ip <- bvAdd (bvLit n64 off) <$> get IPReg
+       = do next_ip <- bvAdd (bvLit n64 off) <$> get (Register N.rip)
             f next_ip
   | [v]                <- vs
        = getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= f

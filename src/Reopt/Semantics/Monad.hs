@@ -20,6 +20,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
@@ -44,25 +45,27 @@ module Reopt.Semantics.Monad
 
 --  , reg_low
 --  , reg_high
-  , cf_flag
-  , pf_flag
-  , af_flag
-  , zf_flag
-  , sf_flag
-  , tf_flag
-  , if_flag
-  , df_flag
-  , of_flag
+  , cf_loc
+  , pf_loc
+  , af_loc
+  , zf_loc
+  , sf_loc
+  , tf_loc
+  , if_loc
+  , df_loc
+  , of_loc
     -- X87
-  , c0_flag
-  , c1_flag
-  , c2_flag
-  , c3_flag
+  , c0_loc
+  , c1_loc
+  , c2_loc
+  , c3_loc
 
   , mkBVAddr
   , mkFPAddr
+  , packWord
+  , unpackWord
   -- ** Registers
-  , rsp, rbp, r_rax, rax, r_rdx, rdx, rsi, rdi, rcx
+  , rsp, rbp, rax, rdx, rsi, rdi, rcx, rip
     -- * IsLeq utility
   , IsLeq
   , n8, n16, n32, n64, n80, n128
@@ -78,74 +81,17 @@ module Reopt.Semantics.Monad
   , FullSemantics
   , ExceptionClass(..)
     -- * Re-exports
-  , Flexdis86.Reg64
   , type (TypeLits.<=)
   ) where
 
-import Control.Applicative
-import GHC.TypeLits as TypeLits
+import           Control.Applicative
+import           Data.Bits (shiftL)
+import           GHC.TypeLits as TypeLits
 
-import Data.Parameterized.Classes
-import Data.Parameterized.NatRepr
-import Flexdis86.InstructionSet (Reg64, XMMReg)
-import qualified Flexdis86.InstructionSet as Flexdis86
-
--- FIXME: move
-n8 :: NatRepr 8
-n8 = knownNat
-
-n16 :: NatRepr 16
-n16 = knownNat
-
-n32 :: NatRepr 32
-n32 = knownNat
-
-n64 :: NatRepr 64
-n64 = knownNat
-
-n80 :: NatRepr 80
-n80 = knownNat
-
-n128 :: NatRepr 128
-n128 = knownNat
-
-
-------------------------------------------------------------------------
--- Type
-
-data Type
-  = -- | An array of bits
-    BVType Nat
-
-type BoolType   = BVType 1
--- type FloatType  = BVType 32
--- type DoubleType = BVType 64
-type XMMType    = BVType 128
-
--- | A runtime representation of @Type@ for case matching purposes.
-data TypeRepr tp where
-  BVTypeRepr     :: {-# UNPACK #-} !(NatRepr n) -> TypeRepr (BVType n)
-
-type_width :: TypeRepr (BVType n) -> NatRepr n
-type_width (BVTypeRepr n) = n
-
-instance TestEquality TypeRepr where
-  testEquality (BVTypeRepr m) (BVTypeRepr n) = do
-    Refl <- testEquality m n
-    return Refl
-
-instance OrdF TypeRepr where
-  compareF (BVTypeRepr m) (BVTypeRepr n) = do
-    case compareF m n of
-      LTF -> LTF
-      EQF -> EQF
-      GTF -> GTF
-
-class KnownType tp where
-  knownType :: TypeRepr tp
-
-instance KnownNat n => KnownType (BVType n) where
-  knownType = BVTypeRepr knownNat
+import           Data.Parameterized.NatRepr
+import           Reopt.Semantics.StateNames (RegisterName, RegisterClass(..))
+import qualified Reopt.Semantics.StateNames as N
+import           Reopt.Semantics.Types
 
 ------------------------------------------------------------------------
 -- Location
@@ -153,38 +99,10 @@ instance KnownNat n => KnownType (BVType n) where
 -- | This returns the type associated with values that can be read
 -- or assigned for the semantics monad.
 data Location addr (tp :: Type) where
-  -- A flag register (a constant from 0 to 63).
-  -- Constant defined in:
-  --  Intel 64 and IA-32 Architectures Software Developer’s Manual
-  --  June 2013, Vol 1.  3-15
-  FlagReg :: !Int -> Location addr BoolType
-
   -- A location in the virtual address space of the process.
   MemoryAddr :: addr -> TypeRepr tp  -> Location addr tp
 
-  -- A general purpose register.
-  GPReg :: Reg64 -> Location addr (BVType 64)
-
-  IPReg :: Location addr (BVType 64)
-
-  CReg :: Flexdis86.ControlReg -> Location addr (BVType 64)
-  DReg :: Flexdis86.DebugReg -> Location addr (BVType 64)
-  MMXReg :: Flexdis86.MMXReg -> Location addr (BVType 64)
-  SegmentReg :: Flexdis86.Segment -> Location addr (BVType 16)
-
-  -- A XMM register with type representation information.
-  --
-  -- We expect that the 128-bits will be used to store one of:
-  -- * four 32-bit single-precision floating point numbers
-  -- * two 64-bit double-precision floating point numbers (SSE2)
-  -- * two 64-bit integers         (SSE2)
-  -- * four 32-bit integers        (SSE2)
-  -- * eight 16-bit short integers (SSE2)
-  -- * sixteen 8-bit bytes or characters (SSE2)
-  -- The source from this list is wikipedia:
-  --   http://en.wikipedia.org/wiki/Streaming_SIMD_Extensions
-  XMMReg :: XMMReg
-         -> Location addr (BVType 128)
+  Register :: RegisterName cl -> Location addr (N.RegisterType cl)
 
   -- | Refers to the least significant half of the bitvector.
   LowerHalf :: Location addr (BVType (n+n))
@@ -194,98 +112,63 @@ data Location addr (tp :: Type) where
   UpperHalf :: Location addr (BVType (n+n))
             -> Location addr (BVType n)
 
-  -- Floating point
-
   -- | The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
 
-  -- | Flag registers, not including TOP
-  X87FlagReg :: !Int -> Location addr BoolType
-
-  -- Top of stack register, part of FPFlags but modeled separately
-  -- X87Top :: Location addr (BVType 3)
-
-  -- Control register, only mask bits are used.  We assume that the
-  -- precision control flag is set to 11b, i.e., 80 bit precision.
-  -- X87ExceptionMaskReg :: !Int -> Location addr BoolType
-
-  -- FIXME: this is convenient until we implement exceptions.
-  X87ControlReg :: Location addr (BVType 16)
-
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (MemoryAddr _ tp) = type_width tp
-loc_width (GPReg _) = knownNat
-loc_width (DReg {}) = knownNat
-loc_width (FlagReg {}) = knownNat
-loc_width (CReg {}) = knownNat
-loc_width (MMXReg {}) = knownNat
-loc_width (SegmentReg {}) = knownNat
-loc_width IPReg      = knownNat
-loc_width (XMMReg _) = knownNat
+loc_width (Register r)  = N.registerWidth r
 loc_width (LowerHalf l) = halfNat (loc_width l)
 loc_width (UpperHalf l) = halfNat (loc_width l)
 loc_width (X87StackRegister _) = knownNat
-loc_width (X87FlagReg _) = knownNat
-loc_width (X87ControlReg) = knownNat
-
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
 xmm_low64 l = LowerHalf l
 
-{-
--- | Return the low 32-bits of the location.
-low_dword :: Reg64 -> Location addr (BVType 32)
-low_dword r = LowerHalf (GPReg r)
--}
-
--- -- | Return the high 32-bits of the location.
--- high_dword :: Reg64 -> Location addr (BVType 32)
--- high_dword r = UpperHalf (GPReg r)
-
 -- | CF flag
-cf_flag :: Location addr BoolType
-cf_flag = FlagReg 0
+cf_loc :: Location addr BoolType
+cf_loc = Register N.cf
 
 -- | PF flag
-pf_flag :: Location addr BoolType
-pf_flag = FlagReg 2
+pf_loc :: Location addr BoolType
+pf_loc = Register N.pf
 
 -- | AF flag
-af_flag :: Location addr BoolType
-af_flag = FlagReg 4
+af_loc :: Location addr BoolType
+af_loc = Register N.af
 
 -- | ZF flag
-zf_flag :: Location addr BoolType
-zf_flag = FlagReg 6
+zf_loc :: Location addr BoolType
+zf_loc = Register N.zf
 
 -- | SF flag
-sf_flag :: Location addr BoolType
-sf_flag = FlagReg 7
+sf_loc :: Location addr BoolType
+sf_loc = Register N.sf
 
 -- | TF flag
-tf_flag :: Location addr BoolType
-tf_flag = FlagReg 8
+tf_loc :: Location addr BoolType
+tf_loc = Register N.tf
 
 -- | IF flag
-if_flag :: Location addr BoolType
-if_flag = FlagReg 9
+if_loc :: Location addr BoolType
+if_loc = Register N.iflag
 
 -- | DF flag
-df_flag :: Location addr BoolType
-df_flag = FlagReg 10
+df_loc :: Location addr BoolType
+df_loc = Register N.df
 
 -- | OF flag
-of_flag :: Location addr BoolType
-of_flag = FlagReg 11
+of_loc :: Location addr BoolType
+of_loc = Register N.oflag
 
 -- | x87 flags
-c0_flag, c1_flag, c2_flag, c3_flag :: Location addr BoolType
-c0_flag = X87FlagReg 0
-c1_flag = X87FlagReg 1
-c2_flag = X87FlagReg 2
-c3_flag = X87FlagReg 3
+c0_loc, c1_loc, c2_loc, c3_loc :: Location addr BoolType
+c0_loc = Register N.x87c0
+c1_loc = Register N.x87c1
+c2_loc = Register N.x87c2
+c3_loc = Register N.x87c3
 
 -- | Tuen an address into a location of size @n
 mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
@@ -296,90 +179,52 @@ mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
 mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
 
 -- | Return low 32-bits of register e.g. rax -> eax
-reg_low32 :: Reg64 -> Location addr (BVType 32)
-reg_low32 r = LowerHalf (GPReg r)
+reg_low32 :: RegisterName GP -> Location addr (BVType 32)
+reg_low32 r = LowerHalf (Register r)
 
 -- | Return low 16-bits of register e.g. rax -> ax
-reg_low16 :: Reg64 -> Location addr (BVType 16)
-reg_low16 r = LowerHalf (LowerHalf (GPReg r))
+reg_low16 :: RegisterName GP -> Location addr (BVType 16)
+reg_low16 r = LowerHalf (LowerHalf (Register r))
 
 -- | Return low 8-bits of register e.g. rax -> al
-reg_low8 :: Reg64 -> Location addr (BVType 8)
+reg_low8 :: RegisterName GP -> Location addr (BVType 8)
 reg_low8 r = LowerHalf (reg_low16 r)
 
 -- | Return bits 8-15 of the register e.g. rax -> ah
-reg_high8 :: Reg64 -> Location addr (BVType 8)
+reg_high8 :: RegisterName GP -> Location addr (BVType 8)
 reg_high8 r = UpperHalf (reg_low16 r)
 
-
-{-
--- | This addresses e.g. al and ah
-reg_low, reg_high :: NatRepr n -> Reg64 -> Location addr (BVType n)
-reg_low  n r = BVSlice (GPReg r) 0 n
-reg_high n r = BVSlice (GPReg r) (widthVal n) n
--}
-
-r_rax :: Reg64
-r_rax = Flexdis86.rax
-
-r_rdx :: Reg64
-r_rdx = Flexdis86.rdx
-
 rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)
-rax = GPReg Flexdis86.rax
-rsp = GPReg Flexdis86.rsp
-rbp = GPReg Flexdis86.rbp
-rdx = GPReg r_rdx
-rsi = GPReg Flexdis86.rsi
-rdi = GPReg Flexdis86.rdi
-rcx = GPReg Flexdis86.rcx
+rax = Register N.rax
+rsp = Register N.rsp
+rbp = Register N.rbp
+rdx = Register N.rdx
+rsi = Register N.rsi
+rdi = Register N.rdi
+rcx = Register N.rcx
 
-------------------------------------------------------------------------
--- IsLeq
+rip :: Location addr (BVType 64)
+rip = Register N.IPReg
 
-type IsLeq (m :: Nat) (n :: Nat) = (m <= n)
-
-------------------------------------------------------------------------
--- Floating point sizes
-
--- | This data kind describes the styles of floating-point values understood
---   by recent LLVM bytecode formats.  This consist of the standard IEEE 754-2008
---   binary floating point formats, as well as the X86 extended 80-bit format
---   and the double-double format.
-data FloatInfo where
-  HalfFloat         :: FloatInfo  --  16 bit binary IEE754
-  SingleFloat       :: FloatInfo  --  32 bit binary IEE754
-  DoubleFloat       :: FloatInfo  --  64 bit binary IEE754
-  QuadFloat         :: FloatInfo  -- 128 bit binary IEE754
-  X86_80Float       :: FloatInfo  -- X86 80-bit extended floats
---  DoubleDoubleFloat :: FloatInfo -- 2 64-bit floats fused in the "double-double" style
-
-data FloatInfoRepr (flt::FloatInfo) where
-  HalfFloatRepr         :: FloatInfoRepr HalfFloat
-  SingleFloatRepr       :: FloatInfoRepr SingleFloat
-  DoubleFloatRepr       :: FloatInfoRepr DoubleFloat
-  QuadFloatRepr         :: FloatInfoRepr QuadFloat
-  X86_80FloatRepr       :: FloatInfoRepr X86_80Float
---  DoubleDoubleFloatRepr :: FloatInfoRepr DoubleDoubleFloat
-
-type family FloatInfoBits (flt :: FloatInfo) :: Nat where
-  FloatInfoBits HalfFloat         = 16
-  FloatInfoBits SingleFloat       = 32
-  FloatInfoBits DoubleFloat       = 64
-  FloatInfoBits QuadFloat         = 128
-  FloatInfoBits X86_80Float       = 80
-
-type FloatType flt = BVType (FloatInfoBits flt)
-
--- type instance FloatInfoBits DoubleDoubleFloat =
-
-floatInfoBits :: FloatInfoRepr flt -> NatRepr (FloatInfoBits flt)
-floatInfoBits fir = case fir of
-                      HalfFloatRepr         -> knownNat
-                      SingleFloatRepr       -> knownNat
-                      DoubleFloatRepr       -> knownNat
-                      QuadFloatRepr         -> knownNat
-                      X86_80FloatRepr       -> knownNat
+packWord :: forall m n. Semantics m => N.BitPacking n -> m (Value m (BVType n))
+packWord (N.BitPacking sz bits) = 
+  do injs <- mapM getMoveBits bits
+     return (foldl1 (.|.) injs)
+  where
+    getMoveBits :: N.BitConversion n -> m (Value m (BVType n))
+    getMoveBits (N.ConstantBit b off)
+      = return $ bvLit sz (if b then 1 `shiftL` widthVal off else (0 :: Integer))
+    getMoveBits (N.RegisterBit reg off)
+      = do v <- uext sz <$> get (Register reg)
+           return $ v `bvShl` bvLit sz (widthVal off)
+    
+unpackWord :: forall m n. Semantics m => N.BitPacking n -> Value m (BVType n) -> m ()
+unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
+  where
+    unpackOne :: N.BitConversion n -> m ()
+    unpackOne N.ConstantBit{}         = return ()
+    unpackOne (N.RegisterBit reg off) =
+      Register reg .= bvTrunc (N.registerWidth reg) (v `bvShr` bvLit sz (widthVal off))
 
 ------------------------------------------------------------------------
 -- Values
