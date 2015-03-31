@@ -363,16 +363,36 @@ addAssignment rhs = do
   
 -- FIXME: make less ad-hoc
 constPropagate :: forall tp. App Value tp -> Maybe (Value tp)
-constPropagate v = 
+constPropagate v =
   case v of
    BVAnd _ l r
      | Just _ <- testEquality l r -> Just l
    BVAnd sz l r                   -> binop (.&.) sz l r
+   -- Units
    BVAdd _  l (BVValue _ 0)       -> Just l
    BVAdd _  (BVValue _ 0) r       -> Just r
+   BVAdd _  l (BVValue _ 1)       -> Just l
+   BVAdd _  (BVValue _ 1) r       -> Just r
+   
+   UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
    BVAdd sz l r                   -> binop (+) sz l r
+   -- Boolean operations
+   BVUnsignedLt l r               -> boolop (<) l r
+   BVEq l r                       -> boolop (==) l r
+   BVComplement sz x              -> unop complement sz x
    _                              -> Nothing
   where
+    boolop :: (tp ~ BoolType) => (Integer -> Integer -> Bool)
+              -> Value n -> Value n -> Maybe (Value BoolType)
+    boolop f (BVValue _ l) (BVValue _ r) = Just $ BVValue knownNat (if f l r then 1 else 0)
+    boolop _ _ _ = Nothing
+
+    unop :: (tp ~ BVType n) => (Integer -> Integer)
+             -> NatRepr n -> Value tp -> Maybe (Value tp)
+    unop f sz (BVValue _ l)  = Just $ BVValue sz ( (f l) .&. mask)
+      where mask = 2^(widthVal sz) - 1
+    unop _ _ _                         = Nothing
+
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
              -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
     binop f sz (BVValue _ l) (BVValue _ r) = Just $ BVValue sz ( (f l r) .&. mask)
@@ -535,37 +555,40 @@ instance S.Semantics (X86Generator PartialCFG) where
   --
   -- This would support the cmov instruction, but result in divergence for branches, which
   -- I think is what we want.
-  ifte_ c_expr t f = do
-    cond <- eval c_expr
-    X86G $ \c s -> do
-      let last_block_id = s^.curBlockID
-      let last_block_stmts = Fold.toList $ s^.prevStmts
-
-      -- Label for true branch
-      let t_cfg = s^.partialCFG
-      let true_block_id = GeneratedBlock (t_cfg^.nextBlockID)
-      let t_start = emptyGenState (t_cfg & nextBlockID +~ 1) true_block_id (s^.curX86State)
-      -- Get state after running t followed by c
-      let t_end :: PartialCFG
-          t_end = unX86G t c t_start
-      -- Label for false branch
-      let false_block_id = GeneratedBlock (t_end^.nextBlockID)
-      -- Get block for code before branch now that we can get label
-      -- for false branch.
-      let last_block = Block { blockLabel = last_block_id
-                             , blockStmts = last_block_stmts
-                             , blockTerm  = Branch cond true_block_id false_block_id
-                             }
-      -- Update partial CFG now that we have last_block
-      let f_cfg   = t_end & nextBlockID +~ 1
-                          & prevCFG %~ insertBlock last_block
-      -- Create state for starting evaluation of false branch.
-      let f_start = emptyGenState f_cfg false_block_id (s^.curX86State)
-      -- Get final state
-      let f_end :: PartialCFG
-          f_end = unX86G f c f_start
-      --  Return since we've already run continuation in branches.
-      f_end
+  ifte_ c_expr t f = eval c_expr >>= go
+    where
+      go (BVValue _ 1) = t
+      go (BVValue _ 0) = f
+      go cond =
+        X86G $ \c s -> do
+          let last_block_id = s^.curBlockID
+          let last_block_stmts = Fold.toList $ s^.prevStmts
+        
+          -- Label for true branch
+          let t_cfg = s^.partialCFG
+          let true_block_id = GeneratedBlock (t_cfg^.nextBlockID)
+          let t_start = emptyGenState (t_cfg & nextBlockID +~ 1) true_block_id (s^.curX86State)
+          -- Get state after running t followed by c
+          let t_end :: PartialCFG
+              t_end = unX86G t c t_start
+          -- Label for false branch
+          let false_block_id = GeneratedBlock (t_end^.nextBlockID)
+          -- Get block for code before branch now that we can get label
+          -- for false branch.
+          let last_block = Block { blockLabel = last_block_id
+                                 , blockStmts = last_block_stmts
+                                 , blockTerm  = Branch cond true_block_id false_block_id
+                                 }
+          -- Update partial CFG now that we have last_block
+          let f_cfg   = t_end & nextBlockID +~ 1
+                              & prevCFG %~ insertBlock last_block
+          -- Create state for starting evaluation of false branch.
+          let f_start = emptyGenState f_cfg false_block_id (s^.curX86State)
+          -- Get final state
+          let f_end :: PartialCFG
+              f_end = unX86G f c f_start
+          --  Return since we've already run continuation in branches.
+          f_end
   
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate
