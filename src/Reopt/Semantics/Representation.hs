@@ -72,6 +72,7 @@ import           GHC.TypeLits
 import           Numeric (showHex)
 import           Text.PrettyPrint.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Flexdis86.InstructionSet as Flexdis86
 import           Reopt.Semantics.Monad
@@ -223,10 +224,16 @@ instance Pretty (StmtLoc tp) where
 data Stmt where
   AssignStmt :: !(Assignment tp) -> Stmt
   Write :: !(StmtLoc tp) -> Value tp -> Stmt
+  PlaceHolderStmt :: [Some Value] -> String -> Stmt
+  Comment :: String -> Stmt
 
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
+  pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
+                                       <+> parens (hcat $ punctuate comma
+                                                   $ map (viewSome (ppValue 0)) vals)
+  pretty (Comment s) = text $ "# " ++ s
 
 ------------------------------------------------------------------------
 -- TermStmt
@@ -490,6 +497,17 @@ instance OrdF Value where
       EQF -> fromOrdering (compare vx vy)
       GTF -> GTF
 
+  compareF (AssignedValue a1) (AssignedValue a2) = compareF a1 a2
+
+  compareF (Initial r) (Initial r') =
+    case compareF r r' of
+     LTF -> LTF
+     EQF -> EQF
+     GTF -> GTF
+  
+  compareF _ Initial{} = LTF
+  compareF Initial{} _ = GTF
+  
   compareF BVValue{} _ = LTF
   compareF _ BVValue{} = GTF
 
@@ -508,7 +526,7 @@ bvValue i = BVValue knownNat i
 
 ppValue :: Prec -> Value tp -> Doc
 ppValue p (BVValue w i) = parenIf (p > colonPrec) $
-  text (show i) <+> text "::" <+> brackets (text (show w))
+  text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) <> text "_0"
 
@@ -597,6 +615,13 @@ data App f tp where
   -- Exclusive or
   BVXor :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
+  -- Logical left shift (x * 2 ^ n)
+  BVShl :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  -- Logical right shift (x / 2 ^ n)
+  BVShr :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  -- Arithmetic right shift (x / 2 ^ n)
+  BVSar :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+
   -- Compare for equality.
   BVEq :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
@@ -682,6 +707,9 @@ ppApp pp a0 =
     BVAnd _ x y -> sexpr "bv_and" [ pp x, pp y ]
     BVOr  _ x y -> sexpr "bv_or"  [ pp x, pp y ]
     BVXor _ x y -> sexpr "bv_xor" [ pp x, pp y ]
+    BVShl _ x y -> sexpr "bv_shl" [ pp x, pp y ]
+    BVShr _ x y -> sexpr "bv_shr" [ pp x, pp y ]
+    BVSar _ x y -> sexpr "bv_sar" [ pp x, pp y ]    
     BVEq x y    -> sexpr "bv_eq" [ pp x, pp y ]
     EvenParity x -> sexpr "even_parity" [ pp x ]
     ReverseBytes _ x -> sexpr "reverse_bytes" [ pp x ]
@@ -722,6 +750,9 @@ appType a =
     BVAnd w _ _ -> BVTypeRepr w
     BVOr  w _ _ -> BVTypeRepr w
     BVXor w _ _ -> BVTypeRepr w
+    BVShl w _ _ -> BVTypeRepr w
+    BVShr w _ _ -> BVTypeRepr w
+    BVSar w _ _ -> BVTypeRepr w
     BVEq _ _ -> knownType
     EvenParity _ -> knownType
     ReverseBytes w _ -> BVTypeRepr w

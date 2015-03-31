@@ -104,15 +104,15 @@ data Location addr (tp :: Type) where
 
   Register :: RegisterName cl -> Location addr (N.RegisterType cl)
 
-  -- | Refers to the least significant half of the bitvector.
+  -- Refers to the least significant half of the bitvector.
   LowerHalf :: Location addr (BVType (n+n))
             -> Location addr (BVType n)
 
-  -- | Refers to the most significant half of the bitvector.
+  -- Refers to the most significant half of the bitvector.
   UpperHalf :: Location addr (BVType (n+n))
             -> Location addr (BVType n)
 
-  -- | The register stack: the argument is an offset from the stack
+  -- The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
@@ -283,7 +283,7 @@ class IsValue (v  :: Type -> *) where
 
   -- | Inequality
   (.=/=.) :: v (BVType n) -> v (BVType n) -> v BoolType
-
+  bv .=/=. bv' = complement (bv .=. bv')
 
   -- | Return true if value is zero.
   is_zero :: v (BVType n) -> v BoolType
@@ -291,6 +291,11 @@ class IsValue (v  :: Type -> *) where
 
   -- | Concatentates two bit vectors
   bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
+  bvCat h l = case addIsLeq (bv_width l) (bv_width l) of
+               LeqProof -> (uext n_plus_n h `bvShl` bvLit n_plus_n (widthVal $ bv_width l))
+                           .|. (uext n_plus_n l)
+    where
+      n_plus_n = addNat (bv_width l) (bv_width l)
 
   -- | Splits a bit vectors into two
   bvSplit :: v (BVType (n + n)) -> (v (BVType n), v (BVType n))
@@ -302,7 +307,7 @@ class IsValue (v  :: Type -> *) where
   bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
-  bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
+  bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Truncate the value
   bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
@@ -472,8 +477,10 @@ type Pred m = Value m BoolType
 
 type MLocation m = Location (Value m (BVType 64))
 
-data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException -- | AlignmentCheck
-
+data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException
+                                                         -- | AlignmentCheck
+                    deriving Show
+                                                         
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m

@@ -241,8 +241,6 @@ exec_div v
   | otherwise =
     fail "div: Unknown bit width"
   where
-    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
-
     go2 :: (n <= n + n)
         => MLocation m (BVType n)
         -> MLocation m (BVType n) -> m ()
@@ -280,7 +278,6 @@ exec_idiv v
   | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
   | otherwise                                  = fail "div: Unknown bit width"
   where
-    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go2 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
     go2 ax dx = do axv <- get ax
                    dxv <- get dx
@@ -313,8 +310,7 @@ exec_inc dst = do
   -- no cf_loc
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
-
-
+  
 set_reg_pair :: Semantics m => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
 set_reg_pair upperL lowerL v = do lowerL .= lower
                                   upperL .= upper
@@ -335,7 +331,6 @@ exec_mul v
   | otherwise =
     fail "mul: Unknown bit width"
   where
-    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
     go f l = do v' <- get l
                 let sz = addNat (bv_width v) (bv_width v)
@@ -381,7 +376,6 @@ exec_imul1 v
   | otherwise =
     fail "imul: Unknown bit width"
   where
-    _ = addIsLeq (bv_width v) (bv_width v) -- hack to get n <= n + n
     go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
     go f l = do v' <- get l
                 really_exec_imul v v' f
@@ -443,10 +437,10 @@ exec_xor l v = do
 -- ** Shift and Rotate Instructions
 
 
-really_exec_shift :: IsLocationBV m n
+really_exec_shift :: (n' <= n, IsLocationBV m n)
                   => MLocation m (BVType n)
                   -> Value m (BVType n')
-                  -> (Value m (BVType n) -> Value m (BVType n') -> Value m (BVType n))
+                  -> (Value m (BVType n) -> Value m (BVType n) -> Value m (BVType n))
                   -> (Value m (BVType n) -> Value m (BVType n')
                                          -> Value m (BVType n')
                                          -> Value m BoolType)
@@ -464,7 +458,7 @@ really_exec_shift l count do_shift mk_cf mk_of = do
                        _             -> 64
       countMASK = bvLit (bv_width count) (nbits - 1)
       tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
-      r = do_shift v tempCOUNT
+      r = do_shift v (uext (bv_width v) tempCOUNT)
 
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero tempCOUNT) $ do
@@ -483,12 +477,12 @@ really_exec_shift l count do_shift mk_cf mk_of = do
     set_result_value l r
 
 -- FIXME: could be 8 instead of n' here ...
-exec_shl :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shl :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_shl l count = really_exec_shift l count bvShl
                    (\v dest_width tempCOUNT -> bvBit v (dest_width `bvSub` tempCOUNT))
                    (\_ r new_cf -> msb r `bvXor` new_cf)
 
-exec_shr :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shr :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_shr l count = really_exec_shift l count bvShl
                    (\v _ tempCOUNT -> bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int)))
                    (\v _ _         -> msb v)
@@ -496,7 +490,7 @@ exec_shr l count = really_exec_shift l count bvShl
 -- FIXME: we can factor this out as above, but we need to check the CF
 -- for SAR (intel manual says it is only undefined for shl/shr when
 -- the shift is >= the bit width.
-exec_sar :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_sar :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_sar l count = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper
@@ -505,8 +499,8 @@ exec_sar l count = do
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
                        _             -> 64
-      countMASK = bvLit (bv_width count) (nbits - 1)
-      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
+      countMASK = bvLit (bv_width v) (nbits - 1)
+      tempCOUNT = uext (bv_width v) count .&. countMASK  -- FIXME: prefer mod?
       r = bvSar v tempCOUNT
 
   -- When the count is zero, nothing happens, in particular, no flags change

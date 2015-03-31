@@ -27,6 +27,7 @@ import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 
+import           Data.Parameterized.Some
 import           Reopt.Semantics.Representation
 
 eliminateDeadRegisters :: CFG -> CFG
@@ -72,9 +73,14 @@ blockLiveRegisters b = do addIDs terminalIds
              do addIDs (refsInAssignRhs rhs)
                 return (stmt : ss)
              else return ss
-    noteAndFilter stmt@(Write loc rhs) ss    = do addIDs (refsInLoc loc)
-                                                  addIDs (refsInValue rhs)
-                                                  return (stmt : ss)
+    noteAndFilter stmt@(Write loc rhs) ss    
+      = do addIDs (refsInLoc loc)
+           addIDs (refsInValue rhs)
+           return (stmt : ss)
+    noteAndFilter stmt@(PlaceHolderStmt vals _) ss
+      = do mapM_ (addIDs . viewSome refsInValue) vals
+           return (stmt : ss)
+    noteAndFilter stmt@Comment{} ss = return (stmt : ss)
 
 refsInAssignRhs :: AssignRhs tp -> Set AssignId
 refsInAssignRhs rhs = case rhs of

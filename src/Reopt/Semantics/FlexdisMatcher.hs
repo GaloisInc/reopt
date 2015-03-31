@@ -268,9 +268,9 @@ semanticsMap = M.fromList instrs
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ mkBinopLV exec_rol
               , mk "sbb"     $ binop exec_sbb
-              , mk "sar"     $ mkBinopLV exec_sar
-              , mk "shl"     $ mkBinopLV exec_shl
-              , mk "shr"     $ mkBinopLV exec_shr
+              , mk "sar"     $ geBinop exec_sar
+              , mk "shl"     $ geBinop exec_shl
+              , mk "shr"     $ geBinop exec_shr
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
               , mk "syscall" $ const (get rax >>= syscall)
@@ -354,7 +354,7 @@ mkBinopLV f = mkBinop $ \loc val -> do SomeBV l <- getSomeBVLocation loc
 
 -- The location size must be >= the value size.
 geBinop :: FullSemantics m
-        => (forall n n'. (1 <= n', n' <= n)
+        => (forall n n'. (IsLocationBV m n, 1 <= n', n' <= n)
                        => MLocation m (BVType n) -> Value m (BVType n') -> m ())
         -> (F.LockPrefix, [F.Value]) -> m ()
 geBinop f = mkBinopLV $ \l v -> do

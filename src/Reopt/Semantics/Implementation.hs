@@ -38,12 +38,13 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
+import           Text.PrettyPrint.Leijen (text, colon, (<>), (<+>)) -- hack for instruction comment
 
 import           Unsafe.Coerce (unsafeCoerce)
 
-import qualified Flexdis86 as Flexdis
-
+import           Data.Parameterized.Some
 import           Debug.Trace
+import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -130,6 +131,7 @@ instance S.IsValue Expr where
   x .&. y   = app $ BVAnd (exprWidth x) x y
   x .|. y   = app $ BVOr  (exprWidth x) x y
   bvXor x y = app $ BVXor (exprWidth x) x y
+  
   x .=. y   = app $ BVEq x y
 
   -- | Concatentates two bit vectors
@@ -137,12 +139,16 @@ instance S.IsValue Expr where
 
   -- | Splits a bit vectors into two
   -- bvSplit :: v (BVType (n + n)) -> (v (BVType n), v (BVType n))
+  bvSplit v = (upperHalf v, lowerHalf v)
 
   -- | Rotations
   -- bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
   -- bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
+  bvShr x y = app $ BVShr (exprWidth x) x y
+  bvSar x y = app $ BVSar (exprWidth x) x y
+  bvShl x y = app $ BVShl (exprWidth x) x y
 
   bvTrunc = flip truncExpr
 
@@ -350,8 +356,33 @@ addAssignment rhs = do
   addStmt $ AssignStmt a
   return  $ AssignedValue a
 
+
+-- | This function does a top-level constant propagation/constant reduction.
+-- We assuem that the leaf nodes have also been propagated (i.e., we only operate
+-- at the outermost term)
+  
+-- FIXME: make less ad-hoc
+constPropagate :: forall tp. App Value tp -> Maybe (Value tp)
+constPropagate v = 
+  case v of
+   BVAnd _ l r
+     | Just _ <- testEquality l r -> Just l
+   BVAnd sz l r                   -> binop (.&.) sz l r
+   BVAdd _  l (BVValue _ 0)       -> Just l
+   BVAdd _  (BVValue _ 0) r       -> Just r
+   BVAdd sz l r                   -> binop (+) sz l r
+   _                              -> Nothing
+  where
+    binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
+             -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
+    binop f sz (BVValue _ l) (BVValue _ r) = Just $ BVValue sz ( (f l r) .&. mask)
+      where mask = 2^(widthVal sz) - 1
+    binop _ _ _ _                         = Nothing
+
 evalApp :: App Value tp  -> X86Generator r (Value tp)
-evalApp a = addAssignment (EvalApp a)
+evalApp a = case constPropagate a of
+             Nothing -> addAssignment (EvalApp a)
+             Just v  -> return v
 
 eval :: Expr tp -> X86Generator r (Value tp)
 eval (ValueExpr v) = return v
@@ -535,6 +566,27 @@ instance S.Semantics (X86Generator PartialCFG) where
           f_end = unX86G f c f_start
       --  Return since we've already run continuation in branches.
       f_end
+  
+  -- exception :: Value m BoolType    -- mask
+  --            -> Value m BoolType -- predicate
+  --            -> ExceptionClass
+  --            -> m ()
+  exception m p c = S.ifte_ (S.complement m S..&. p)
+                    (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
+                    (return ())
+  syscall v = do v' <- eval v
+                 addStmt (PlaceHolderStmt [Some v'] "Syscall")
+  memmove _n count src dest =
+    do vs <- sequence [ Some <$> eval count
+                      , Some <$> eval src
+                      , Some <$> eval dest ]
+       addStmt (PlaceHolderStmt vs "memmove")
+       
+  memset count v dest =
+    do vs <- sequence [ Some <$> eval count
+                      , Some <$> eval v
+                      , Some <$> eval dest ]
+       addStmt (PlaceHolderStmt vs "memset")
 
 {-
 Steps:
@@ -622,7 +674,11 @@ disassembleBlock' mem gs0 addr = do
     Right (i,next_ip) -> do
       -- Update current IP
       let gs1 = gs0 & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
-      let pcfg = runX86Generator gs1 $ execInstruction i
+      let pcfg = runX86Generator gs1
+                 $ do let line = text (showHex addr "") <> colon <+> Flexdis.ppInstruction addr i
+                      addStmt (Comment (show line))
+                      execInstruction i
+                                          
       case Fold.toList (pcfg^.frontierBlocks) of
         -- If we have a single block that goes to the next instruction,
         -- then we just disassemble the next block and concat it with
