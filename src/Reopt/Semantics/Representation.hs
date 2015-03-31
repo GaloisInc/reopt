@@ -15,6 +15,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE PatternGuards #-}
+
 module Reopt.Semantics.Representation
   ( CFG
   , emptyCFG
@@ -115,17 +117,19 @@ isInitial (BVValue {})       = False
 isInitial (AssignedValue {}) = False
 isInitial _                  = True
 
-ppValueEq :: Doc -> Value tp -> Maybe Doc
-ppValueEq nm v
-  | isInitial v = Nothing
-  | otherwise   = Just $ nm <+> text "=" <+> ppValue 0 v
+ppValueEq :: N.RegisterName cl -> Value (N.RegisterType cl) -> Maybe Doc
+ppValueEq r v
+  | Just _ <- testEquality v (Initial r) = Nothing
+  | otherwise   = Just $ text (show r) <+> text "=" <+> ppValue 0 v
 
-rec :: String -> Value tp -> Maybe Doc
-rec nm v = ppValueEq (text nm) v
+rec :: N.RegisterName cl -> Value (N.RegisterType cl) -> Maybe Doc
+rec init v = ppValueEq init v
 
-recv :: String -> V.Vector (Value tp) -> [Maybe Doc]
-recv nm v = f <$> [0..V.length v - 1]
-  where f i = ppValueEq (text nm <> parens (int i)) (v V.! i)
+recv :: (Int -> N.RegisterName cl)
+        -> V.Vector (Value (N.RegisterType cl)) -> [Maybe Doc]
+recv mkR v = f <$> [0..V.length v - 1]
+  where
+    f i = ppValueEq (mkR i) (v V.! i)
 
 parenIf :: Bool -> Doc -> Doc
 parenIf True d = parens d
@@ -404,14 +408,14 @@ xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 
 instance Pretty X86State where
   pretty s =
-    bracketsep $ catMaybes ([ rec "ip" (s^.curIP)]
-                            ++ recv "reg" (s^.reg64Regs)
-                            ++ recv "flag" (s^.flagRegs)
-                            ++ recv "x87_control" (s^.x87ControlWord)
-                            ++ recv "" (s^.x87StatusWord)
-                            ++ recv "x87_tag" (s^.x87TagWords)
-                            ++ recv "r" (s^.x87Regs)
-                            ++ recv "xmm" (s^.xmmRegs))
+    bracketsep $ catMaybes ([ rec   N.rip (s^.curIP)]
+                            ++ recv N.GPReg (s^.reg64Regs)
+                            ++ recv N.FlagReg (s^.flagRegs)
+                            ++ recv N.X87ControlReg (s^.x87ControlWord)
+                            ++ recv N.X87StatusReg (s^.x87StatusWord)
+                            ++ recv N.X87TagReg (s^.x87TagWords)
+                            ++ recv N.X87FPUReg (s^.x87Regs)
+                            ++ recv N.XMMReg (s^.xmmRegs))
 
 ------------------------------------------------------------------------
 -- Assignment
