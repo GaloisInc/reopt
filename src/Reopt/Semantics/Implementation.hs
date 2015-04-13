@@ -371,8 +371,9 @@ constPropagate v =
    -- Units
    BVAdd _  l (BVValue _ 0)       -> Just l
    BVAdd _  (BVValue _ 0) r       -> Just r
-   BVAdd _  l (BVValue _ 1)       -> Just l
-   BVAdd _  (BVValue _ 1) r       -> Just r
+   
+   BVMul _  l (BVValue _ 1)       -> Just l
+   BVMul _  (BVValue _ 1) r       -> Just r
    
    UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
    BVAdd sz l r                   -> binop (+) sz l r
