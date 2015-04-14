@@ -22,6 +22,9 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Semantics.Implementation
   ( cfgFromAddress
+    -- debugging
+  , BlockLabel(..)
+  , readInstruction
   ) where
 
 import           Control.Applicative
@@ -33,6 +36,7 @@ import qualified Data.Foldable as Fold
 import           Data.Parameterized.NatRepr
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
@@ -598,7 +602,7 @@ initX86State loc =
 disassembleBlock :: Memory Word64
                  -> PartialCFG
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc)
+                 -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
 disassembleBlock mem g loc =
   let gs = GenState { _partialCFG = g
                     , _curBlockID = DecompiledBlock (loc_ip loc)
@@ -627,7 +631,7 @@ getFrontierNext = Fold.foldl' f Set.empty
 disassembleBlock' :: Memory Word64
                   -> GenState -- ^ Initial state
                   -> CodeAddr
-                  -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc)
+                  -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
 disassembleBlock' mem gs0 addr =
   do (i, next_ip) <- readInstruction mem addr
      -- Update current IP
@@ -652,7 +656,7 @@ disassembleBlock' mem gs0 addr =
                             , _curX86State = s
                             }
          disassembleBlock' mem gs1 next_ip
-       block_list -> return (mergeFrontier pcfg, getFrontierNext block_list)
+       block_list -> return (mergeFrontier pcfg, getFrontierNext block_list, next_ip)
 
 -- FIXME: move
 newtype Hex = Hex CodeAddr
@@ -666,20 +670,21 @@ instance Show Hex where
   
 recursiveDescent :: Memory Word64
                 -> PartialCFG     -- ^ CFG generated so far.
+                -> Set CodeAddr   -- ^ Set of addresses after blocks we stopped at.
                 -> Set ExploreLoc -- ^ Set of locations explored so far.
                 -> Set ExploreLoc -- ^ List of addresses to explore next.
-                -> CFG
-recursiveDescent mem pg1 explored frontier
-    | Set.null frontier = pg1^.prevCFG
+                -> (CFG, Set CodeAddr)
+recursiveDescent mem pg1 ends explored frontier
+    | Set.null frontier = (pg1^.prevCFG, ends)
     | otherwise =
         let (loc,s)         = Set.deleteFindMin frontier
             explored'       = Set.insert loc explored
-            go pg frontier' = recursiveDescent mem pg explored' frontier'
+            go pg ends' frontier' = recursiveDescent mem pg ends' explored' frontier'
         in
         case disassembleBlock mem pg1 loc of
           Left  e  -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e))
-                      $ go pg1 s
-          Right (pg2, next) ->
+                      $ go pg1 ends s
+          Right (pg2, next, end) ->
             let guesses   = discoverCodePointers mem (pg2^.prevCFG)
                             (DecompiledBlock (loc_ip loc)) -- FIXME
                 allNext   = trace ("At " ++ show (mkHex $ loc_ip loc)
@@ -688,17 +693,17 @@ recursiveDescent mem pg1 explored frontier
                                    ++ " with next "
                                    ++ show (Set.map (mkHex . loc_ip)  next))
                             $ next `Set.union` Set.map locFromGuess guesses
-            in go pg2 (Set.union s (Set.difference allNext explored'))
+            in go pg2 (Set.insert end ends) (Set.union s (Set.difference allNext explored'))
     
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> CodeAddr
                   -- ^ Location to start disassembler form.
-               -> CFG
+               -> (CFG, Set CodeAddr)
 cfgFromAddress mem a = -- recursiveDescent mem pcfg Set.empty (Set.singleton loc)
   -- XXXXXXXX FIXME: frame_dummy has a call to 0 for some reason, so we pretend we have seen it
   -- this is a giant hack.
-  recursiveDescent mem pcfg (Set.singleton (rootLoc 0)) (Set.singleton loc)
+  recursiveDescent mem pcfg Set.empty (Set.singleton (rootLoc 0)) (Set.singleton loc)
   where pcfg = emptyPartialCFG
         loc = rootLoc a
 
