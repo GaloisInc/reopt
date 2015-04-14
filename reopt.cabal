@@ -40,6 +40,7 @@ library
     Reopt.Semantics.Monad
     Reopt.Semantics.Representation
     Reopt.Semantics.DeadRegisterElimination
+    Reopt.Semantics.CodePointerDiscovery
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
