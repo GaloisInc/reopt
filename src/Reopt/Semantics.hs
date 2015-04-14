@@ -381,8 +381,9 @@ exec_imul1 v
                 really_exec_imul v v' f
 
 -- FIXME: clag from exec_mul, exec_imul
-exec_imul2_3 :: forall m n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n) -> m ()
-exec_imul2_3 l v v' = really_exec_imul v v' $ \r -> l .= snd (bvSplit r)
+exec_imul2_3 :: forall m n n'. (IsLocationBV m n, 1 <= n', n' <= n)
+                => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n') -> m ()
+exec_imul2_3 l v v' = really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd (bvSplit r)
 
 -- | Should be equiv to 0 - *l
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()

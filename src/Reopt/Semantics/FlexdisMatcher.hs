@@ -188,8 +188,10 @@ semanticsMap = M.fromList instrs
                                             [_, _]           -> binop (\l v' -> do { v <- get l; exec_imul2_3 l v v' }) arg
                                             [loc, val, val'] -> do SomeBV l <- getSomeBVLocation loc
                                                                    v  <- getSomeBVValue val  >>= checkSomeBV bv_width (loc_width l)
-                                                                   v' <- getSomeBVValue val' >>= checkSomeBV bv_width (loc_width l)
-                                                                   exec_imul2_3 l v v'                                                   
+                                                                   SomeBV v' <- getSomeBVValue val'
+                                                                   Just LeqProof <- return $ testLeq (bv_width v') (bv_width v)
+                                                                   exec_imul2_3 l v v'
+                                            _                 -> fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
