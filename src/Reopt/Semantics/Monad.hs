@@ -304,7 +304,14 @@ class IsValue (v  :: Type -> *) where
   --     sz = halfNat (bv_width v)
 
   -- | Rotations
-  bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
+  bvRol, bvRor :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvRol v n = bvShl v n .|. bvShr v bits_less_n
+    where
+      bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
+      
+  bvRor v n = bvShr v n .|. bvShl v bits_less_n
+    where
+      bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
   bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType n) -> v (BVType n)

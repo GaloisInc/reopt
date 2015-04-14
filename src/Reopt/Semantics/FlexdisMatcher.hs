@@ -268,7 +268,7 @@ semanticsMap = M.fromList instrs
               , mk "pause"   $ const (return ())
               , mk "pop"     $ unop exec_pop
               , mk "push"    $ unopV exec_push
-              , mk "rol"     $ mkBinopLV exec_rol
+              , mk "rol"     $ geBinop exec_rol
               , mk "sbb"     $ binop exec_sbb
               , mk "sar"     $ geBinop exec_sar
               , mk "shl"     $ geBinop exec_shl
