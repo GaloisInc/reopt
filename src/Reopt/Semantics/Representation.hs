@@ -74,11 +74,11 @@ import qualified Data.Vector as V
 import           Data.Word
 import           GHC.TypeLits
 import           Numeric (showHex)
-import           Text.PrettyPrint.Leijen as PP hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
-import qualified Flexdis86.InstructionSet as Flexdis86
 import           Reopt.Semantics.Monad
   ( BoolType
   , Type(..)
@@ -113,19 +113,14 @@ bracketsep [] = text "{}"
 bracketsep (h:l) =
   vcat ([text "{" <+> h] ++ fmap (text "," <+>) l ++ [text "}"])
 
--- FIXME: move
-isInitial :: Value tp -> Bool
-isInitial (BVValue {})       = False
-isInitial (AssignedValue {}) = False
-isInitial _                  = True
-
 ppValueEq :: N.RegisterName cl -> Value (N.RegisterType cl) -> Maybe Doc
 ppValueEq r v
   | Just _ <- testEquality v (Initial r) = Nothing
   | otherwise   = Just $ text (show r) <+> text "=" <+> ppValue 0 v
 
+-- | Pretty print  a register equals a value.
 rec :: N.RegisterName cl -> Value (N.RegisterType cl) -> Maybe Doc
-rec init v = ppValueEq init v
+rec nm v = ppValueEq nm v
 
 recv :: (Int -> N.RegisterName cl)
         -> V.Vector (Value (N.RegisterType cl)) -> [Maybe Doc]
@@ -162,12 +157,12 @@ instance Pretty CFG where
   pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
 
 -- FIXME: refactor to be more efficient
--- FIXME: not a Traversal, more like a map+fold  
+-- FIXME: not a Traversal, more like a map+fold
 traverseBlocks :: CFG
-                  -> BlockLabel
-                  -> (Block -> a)
-                  -> (a -> a -> a -> a)
-                  -> a
+               -> BlockLabel
+               -> (Block -> a)
+               -> (a -> a -> a -> a)
+               -> a
 traverseBlocks cfg root f merge = go root
   where
     go l = case cfg ^. cfgBlocks . at l of
@@ -193,13 +188,13 @@ instance Ord BlockLabel where
   compare (DecompiledBlock v) (GeneratedBlock p _)
     | p == v = LT
     | otherwise = compare v p
-  compare (GeneratedBlock p _) (DecompiledBlock v) 
+  compare (GeneratedBlock p _) (DecompiledBlock v)
     | p == v = GT
     | otherwise = compare p v
   compare (GeneratedBlock p v) (GeneratedBlock p' v')
     | p == p' = compare v v'
     | otherwise = compare p p'
-    
+
 -- | A label always has a parent, i.e., the DecompiledBlock that
 -- generated it
 blockParent :: BlockLabel -> CodeAddr
@@ -222,10 +217,12 @@ instance Pretty BlockLabel where
 -- | A basic block in a control flow graph.
 -- Consists of:
 -- 1. A label that should uniquely identify the block, equence of
-data Block = Block { blockLabel :: BlockLabel
-                   , blockStmts :: [Stmt]
+data Block = Block { blockLabel :: !BlockLabel
+                   , blockStmts :: !([Stmt])
+                     -- | This maps applications to the associated assignment.
+                   , blockCache :: !(MapF (App Value) Assignment)
                      -- | The last statement in the block.
-                   , blockTerm :: TermStmt
+                   , blockTerm :: !(TermStmt)
                    }
 
 instance Pretty Block where
@@ -388,7 +385,7 @@ register :: N.RegisterName cl -> Simple Lens X86State (Value (N.RegisterType cl)
 register reg = case reg of
                 N.IPReg           -> curIP
                 N.GPReg n         -> reg64Regs . idx n
-                N.FlagReg n       -> flagRegs . idx n                
+                N.FlagReg n       -> flagRegs . idx n
                 N.X87ControlReg n -> x87ControlWord . idx n
                 N.X87StatusReg n  -> x87StatusWord . idx n
                 N.X87TopReg       -> x87TopReg
@@ -399,12 +396,12 @@ register reg = case reg of
                 -- X87RC
                 -- SegmentReg
                 -- DebugReg
-                -- ControlReg 
+                -- ControlReg
                 _               -> error $ "Unexpected reg: " ++ show reg
   where
     idx :: forall tp. Int -> Lens' (V.Vector (Value tp)) (Value tp)
     idx n = lens (V.! n) (\s v -> (ix n .~ v) s)
-  
+
 -- | the value oDebugReg{}  f the current instruction pointer.
 curIP :: Simple Lens X86State (Value (BVType 64))
 curIP = lens _curIP (\s v -> s { _curIP = v })
@@ -527,6 +524,9 @@ data Value tp where
 
   Initial :: !(N.RegisterName cl) -> Value (N.RegisterType cl)
 
+instance Eq (Value tp) where
+  x == y = isJust (testEquality x y)
+
 instance TestEquality Value where
   testEquality x y = orderingIsEqual (compareF x y)
 
@@ -544,10 +544,10 @@ instance OrdF Value where
      LTF -> LTF
      EQF -> EQF
      GTF -> GTF
-  
+
   compareF _ Initial{} = LTF
   compareF Initial{} _ = GTF
-  
+
   compareF BVValue{} _ = LTF
   compareF _ BVValue{} = GTF
 
@@ -749,7 +749,7 @@ ppApp pp a0 =
     BVXor _ x y -> sexpr "bv_xor" [ pp x, pp y ]
     BVShl _ x y -> sexpr "bv_shl" [ pp x, pp y ]
     BVShr _ x y -> sexpr "bv_shr" [ pp x, pp y ]
-    BVSar _ x y -> sexpr "bv_sar" [ pp x, pp y ]    
+    BVSar _ x y -> sexpr "bv_sar" [ pp x, pp y ]
     BVEq x y    -> sexpr "bv_eq" [ pp x, pp y ]
     EvenParity x -> sexpr "even_parity" [ pp x ]
     ReverseBytes _ x -> sexpr "reverse_bytes" [ pp x ]
@@ -812,6 +812,23 @@ appType a =
 -- Force app to be in template-haskell context.
 $(return [])
 
+instance TestEquality f => Eq (App f tp) where
+  (==) = \x y -> isJust (testEquality x y)
+
+instance TestEquality f => TestEquality (App f) where
+  testEquality = $(structuralTypeEquality [t|App|]
+                   [ TypeApp (DataArg 0)            AnyType
+                   , TypeApp (ConType [t|NatRepr|]) AnyType
+                   ]
+                  )
+
+instance OrdF f => OrdF (App f) where
+  compareF = $(structuralTypeOrd [t|App|]
+                 [ TypeApp (DataArg 0)            AnyType
+                 , TypeApp (ConType [t|NatRepr|]) AnyType
+                 ]
+              )
+
 traverseApp :: Applicative m
             => (forall u . f u -> m (g u))
             -> App f tp
@@ -825,6 +842,3 @@ mapApp f m = runIdentity $ traverseApp (return . f) m
 
 foldApp :: Monoid m => (forall u. f u -> (b -> m)) -> b -> App f tp -> m
 foldApp f v m = getConst (traverseApp (\f_u -> Const $ \b -> f f_u b) m) v
-
-
-    

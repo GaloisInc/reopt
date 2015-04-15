@@ -12,6 +12,7 @@ flag enable-hpc
 library
   build-depends:
     base >= 4,
+    ansi-wl-pprint,
     binary,
     bytestring,
     containers,
@@ -20,9 +21,8 @@ library
     flexdis86,
     lens >= 4.7,
     mtl,
-    parameterized-utils >= 0.1.1,
-    vector,
-    wl-pprint
+    parameterized-utils >= 0.1.6,
+    vector
 
   hs-source-dirs: src
 
@@ -48,14 +48,14 @@ library
 executable reopt
   build-depends:
     base >= 4,
+    ansi-wl-pprint,
     bytestring,
     cmdargs,
     containers,
     elf,
     flexdis86,
     lens,
-    reopt,
-    wl-pprint
+    reopt
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs

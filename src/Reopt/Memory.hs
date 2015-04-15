@@ -42,7 +42,7 @@ import Data.Maybe
 import Data.Word
 
 import Numeric (showHex)
-import Text.PrettyPrint.Leijen hiding ((<$>))
+import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import Flexdis86.ByteReader
 

@@ -1,11 +1,11 @@
+{-# LANGUAGE GADTs #-}
 module Main (main) where
 
 import           Control.Lens
 import           Control.Monad
 import qualified Data.ByteString as B
 import           Data.Elf
-import           Data.Map (Map)
-import qualified Data.Map as M
+import qualified Data.Map as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Version
@@ -13,7 +13,7 @@ import           Numeric (showHex)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
-import           Text.PrettyPrint.Leijen (pretty, punctuate, comma, fillSep, text, (<>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Paths_reopt (version)
 
@@ -165,17 +165,17 @@ isInterestingCode mem (start, Just end) = go start end
                    case iiArgs ii of
                     [x, y] -> x == y
                     _      -> False)
-               
+
     go b e | b < e = case readInstruction mem b of
                       Left _           -> False -- FIXME: ignore illegal sequences?
                       Right (ii, next) -> not (isNop ii) || go next e
            | otherwise = False
-                        
+
 isInterestingCode _ _ = True -- Last bit
-  
+
 showGaps :: FilePath ->  IO ()
 showGaps path = do (mem, (cfg, ends)) <- getCFG path
-                   let blocks = [ addr | DecompiledBlock addr <- M.keys (cfg ^. cfgBlocks) ]
+                   let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
                    let gaps = filter (isInterestingCode mem)
                               $ out_gap blocks (Set.elems ends)
 
@@ -185,34 +185,21 @@ showGaps path = do (mem, (cfg, ends)) <- getCFG path
                            case m_end of
                             Nothing -> text "END)"
                             Just e  -> text (showHex e ")")
-    
+
     in_gap start bs@(b:_) ess = (start, Just b) : out_gap bs (dropWhile (<= b) ess)
     in_gap start [] _ = [(start, Nothing)]
-    
+
     out_gap (b:bs') ess@(e:es')
       | b < e          = out_gap bs' ess
-      | b == e         = out_gap bs' es'                         
+      | b == e         = out_gap bs' es'
     out_gap bs (e:es') = in_gap e bs es'
     out_gap _ _        = []
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
-  (_, (g, _)) <- getCFG path
-  let g' = eliminateDeadRegisters g
-  -- TODO:
-  print (pretty g')
-
-{-
-      --printExecutableAddressesInGlobalData (args^.programPath)
-  print $ parseSymbolTables e
-  Just dyn_sect
-    <- dynamicEntries e :: IO (Maybe (DynamicSection Word64 Int64 X86_64_RelocationType))
---  print $ ppSymbolTableEntries (dynSymbols ds)
---  print $ dynSymVersionTable ds
---  print $ dynVersionReqs ds
-  print $ ppRelaEntries $ dynRelocations dyn_sect
-  print $ dynUnparsed dyn_sect
--}
+  (_, (g0, _)) <- getCFG path
+  let g = eliminateDeadRegisters g0
+  print (pretty g)
 
 main :: IO ()
 main = do
