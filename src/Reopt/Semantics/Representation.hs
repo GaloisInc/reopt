@@ -22,6 +22,7 @@ module Reopt.Semantics.Representation
   , emptyCFG
   , cfgBlocks
   , insertBlock
+  , traverseBlocks
     -- * Block level declarations
   , BlockLabel(..)
   , Block(..)
@@ -153,6 +154,22 @@ insertBlock b c = do
 
 instance Pretty CFG where
   pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
+
+-- FIXME: refactor to be more efficient
+-- FIXME: not a Traversal, more like a map+fold
+traverseBlocks :: CFG
+                  -> BlockLabel
+                  -> (Block -> a)
+                  -> (a -> a -> a -> a)
+                  -> a
+traverseBlocks cfg root f merge = go root
+  where
+    go l = case cfg ^. cfgBlocks . at l of
+            Nothing -> error $ "label not found"
+            Just b  -> let v = f b in
+                        case blockTerm b of
+                         Branch _ lb rb -> merge (go lb) v (go rb)
+                         _              -> v
 
 ------------------------------------------------------------------------
 -- BlockLabel
@@ -773,11 +790,20 @@ appType a =
 -- Force app to be in template-haskell context.
 $(return [])
 
+
 instance TestEquality f => TestEquality (App f) where
-  testEquality = $(structuralTypeEquality [t|App|])
+  testEquality = $(structuralTypeEquality [t|App|]
+                   [ TypeApp (DataArg 0)            AnyType
+                   , TypeApp (ConType [t|NatRepr|]) AnyType
+                   ]
+                  )
 
 instance OrdF f => OrdF (App f) where
-  compareF = $(structuralTypeOrd [t|App|])
+  compareF = $(structuralTypeOrd [t|App|]
+                 [ TypeApp (DataArg 0)            AnyType
+                 , TypeApp (ConType [t|NatRepr|]) AnyType
+                 ]
+              )
 
 traverseApp :: Applicative m
             => (forall u . f u -> m (g u))

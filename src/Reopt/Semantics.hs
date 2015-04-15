@@ -381,8 +381,9 @@ exec_imul1 v
                 really_exec_imul v v' f
 
 -- FIXME: clag from exec_mul, exec_imul
-exec_imul2_3 :: forall m n. IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n) -> m ()
-exec_imul2_3 l v v' = really_exec_imul v v' $ \r -> l .= snd (bvSplit r)
+exec_imul2_3 :: forall m n n'. (IsLocationBV m n, 1 <= n', n' <= n)
+                => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n') -> m ()
+exec_imul2_3 l v v' = really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd (bvSplit r)
 
 -- | Should be equiv to 0 - *l
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
@@ -520,7 +521,7 @@ exec_sar l count = do
     set_result_value l r
 
 -- FIXME: use really_exec_shift above?
-exec_rol :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_rol :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_rol l count = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper
@@ -529,9 +530,10 @@ exec_rol l count = do
   let nbits :: Int = case testLeq (bv_width v) n32 of
                        Just LeqProof -> 32
                        _             -> 64
-      countMASK = bvLit (bv_width count) (nbits - 1)
+      countMASK = bvLit (bv_width v) (nbits - 1)
       -- FIXME: this is from the manual, but I think the masking is overridden by the mod?
-      tempCOUNT = (count .&. countMASK) `bvMod` (bvLit (bv_width count) (widthVal (bv_width v)))
+      tempCOUNT = (uext (bv_width v) count .&. countMASK)
+                  `bvMod` (bvLit (bv_width v) (widthVal (bv_width v)))
       r = bvRol v tempCOUNT
 
   -- When the count is zero, nothing happens, in particular, no flags change

@@ -1,21 +1,27 @@
 module Main (main) where
 
-import Control.Lens
-import Control.Monad
+import           Control.Lens
+import           Control.Monad
 import qualified Data.ByteString as B
-import Data.Elf
-import Data.Version
-import System.Console.CmdArgs.Explicit
-import System.Environment (getArgs)
-import System.Exit (exitFailure)
-import Text.PrettyPrint.ANSI.Leijen (pretty)
+import           Data.Elf
+import qualified Data.Map as M
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import           Data.Version
+import           Numeric (showHex)
+import           System.Console.CmdArgs.Explicit
+import           System.Environment (getArgs)
+import           System.Exit (exitFailure)
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import Paths_reopt (version)
+import           Paths_reopt (version)
 
-import Flexdis86
-import Reopt
-import Reopt.Semantics.Implementation
-import Reopt.Semantics.DeadRegisterElimination
+import           Flexdis86
+import           Reopt
+import           Reopt.Memory
+import           Reopt.Semantics.DeadRegisterElimination
+import           Reopt.Semantics.Implementation
+import           Reopt.Semantics.Representation
 
 ------------------------------------------------------------------------
 -- Args
@@ -24,6 +30,7 @@ import Reopt.Semantics.DeadRegisterElimination
 data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
+   | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
 
@@ -59,11 +66,17 @@ cfgFlag = flagNone [ "cfg", "c" ] upd help
   where upd  = reoptAction .~ ShowCFG
         help = "Print out recovered control flow graph of executable."
 
+gapFlag :: Flag Args
+gapFlag = flagNone [ "gap", "g" ] upd help
+  where upd  = reoptAction .~ ShowGaps
+        help = "Print out gaps in the recovered  control flow graph of executable."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
         flags = [ disassembleFlag
                 , cfgFlag
+                , gapFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -129,8 +142,8 @@ dumpDisassembly path = do
   -- print $ Set.size $ instructionNames sections
   --print $ Set.toList $ instructionNames sections
 
-showCFG :: FilePath -> IO ()
-showCFG path = do
+getCFG :: FilePath -> IO (Memory Word64, (CFG, Set CodeAddr))
+getCFG path =  do
   e <- readElf64 path
   mi <- elfInterpreter e
   case mi of
@@ -141,8 +154,50 @@ showCFG path = do
   -- Build model of executable memory from elf.
   mem <- loadElf e
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g = cfgFromAddress mem (elfEntry e)
-      g' = eliminateDeadRegisters g
+  return $ (mem, cfgFromAddress mem (elfEntry e))
+
+isInterestingCode :: Memory Word64 -> (CodeAddr, Maybe CodeAddr) -> Bool
+isInterestingCode mem (start, Just end) = go start end
+  where
+    isNop ii = (iiOp ii == "nop")
+               || (iiOp ii == "xchg" &&
+                   case iiArgs ii of
+                    [x, y] -> x == y
+                    _      -> False)
+
+    go b e | b < e = case readInstruction mem b of
+                      Left _           -> False -- FIXME: ignore illegal sequences?
+                      Right (ii, next) -> not (isNop ii) || go next e
+           | otherwise = False
+
+isInterestingCode _ _ = True -- Last bit
+
+showGaps :: FilePath ->  IO ()
+showGaps path = do (mem, (cfg, ends)) <- getCFG path
+                   let blocks = [ addr | DecompiledBlock addr <- M.keys (cfg ^. cfgBlocks) ]
+                   let gaps = filter (isInterestingCode mem)
+                              $ out_gap blocks (Set.elems ends)
+
+                   mapM_ (print . pretty . ppOne) gaps
+  where
+    ppOne (start, m_end) = text ("[" ++ showHex start "..") <>
+                           case m_end of
+                            Nothing -> text "END)"
+                            Just e  -> text (showHex e ")")
+
+    in_gap start bs@(b:_) ess = (start, Just b) : out_gap bs (dropWhile (<= b) ess)
+    in_gap start [] _ = [(start, Nothing)]
+
+    out_gap (b:bs') ess@(e:es')
+      | b < e          = out_gap bs' ess
+      | b == e         = out_gap bs' es'
+    out_gap bs (e:es') = in_gap e bs es'
+    out_gap _ _        = []
+
+showCFG :: FilePath -> IO ()
+showCFG path = do
+  (_, (g, _)) <- getCFG path
+  let g' = eliminateDeadRegisters g
   -- TODO:
   print (pretty g')
 
@@ -166,6 +221,7 @@ main = do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
       showCFG (args^.programPath)
+    ShowGaps -> showGaps (args^.programPath)
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->

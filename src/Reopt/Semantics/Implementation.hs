@@ -22,6 +22,9 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Semantics.Implementation
   ( cfgFromAddress
+    -- debugging
+  , BlockLabel(..)
+  , readInstruction
   ) where
 
 import           Control.Applicative
@@ -33,6 +36,7 @@ import qualified Data.Foldable as Fold
 import           Data.Parameterized.NatRepr
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
@@ -49,6 +53,7 @@ import Data.Parameterized.Some
 import           Debug.Trace
 import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
+import           Reopt.Semantics.CodePointerDiscovery (discoverCodePointers)
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
   ( Type(..)
@@ -61,34 +66,6 @@ import qualified Reopt.Semantics.StateNames as N
 
 ------------------------------------------------------------------------
 -- Location
-
-{-
-instance Enum FlagReg where
-  toEnum 0 = CF_FLAG
-  toEnum 1 = PF_FLAG
-  toEnum 2 = AF_FLAG
-  toEnum 3 = ZF_FLAG
-  toEnum 4 = SF_FLAG
-  toEnum 5 = OF_FLAG
-  toEnum _ = error "Unexpected numerator."
-
-  fromEnum CF_FLAG = 0
-  fromEnum PF_FLAG = 1
-  fromEnum AF_FLAG = 2
-  fromEnum ZF_FLAG = 3
-  fromEnum SF_FLAG = 4
-  fromEnum OF_FLAG = 5
--}
-
-{-
-  af_flag = FlagReg AF_FLAG
-  cf_flag = FlagReg CF_FLAG
-  df_flag = FlagReg DF_FLAG
-  of_flag = FlagReg OF_FLAG
-  pf_flag = FlagReg PF_FLAG
-  sf_flag = FlagReg SF_FLAG
-  zf_flag = FlagReg ZF_FLAG
--}
 
 ------------------------------------------------------------------------
 -- Expr
@@ -173,42 +150,6 @@ instance S.IsValue Expr where
 
   bsf x = app $ Bsf (exprWidth x) x
   bsr x = app $ Bsr (exprWidth x) x
-
-  -- doubleAdd x y = app $ DoubleAdd x y
-
-{-
--- | Return portion of a bitvector
-bvSlice :: Expr (BVType n) -- ^ Expression to evaluate
-        -> Int             -- ^ Offset in bits
-        -> NatRepr m       -- ^ Type representation
-        -> Expr (BVType m)
-bvSlice e0 o w =
-  case e0 of
-    ValueExpr (BVValue n i) -> bvLit w (i `shiftR` o)
-    AppExpr (
-
--- | Update a bitvector array at a given slice.
-updateBVSlice :: Expr (BVType n) -- ^ Value to update slice of.
-              -> Int             -- ^ Offset in bits.
-              -> Expr (BVType m) -- ^ Value to update
-              -> Expr (BVType n)
-updateBVSlice b o v
-   | Just Refl <- testEquality bw vw = v -- Overwriting full value.
-   |
-
- where bw = exprWidth b
-       vw = exprWidth v
-       half_width =
-       updateLow
-
-
-
-  case testEquality o v of
-    JustRefl ->
-  -- Cases: Update whole range.
-  --
-undefined
--}
 
 ------------------------------------------------------------------------
 -- PartialCFG
@@ -379,8 +320,8 @@ constPropagate v =
    -- Units
    BVAdd _  l (BVValue _ 0)       -> Just l
    BVAdd _  (BVValue _ 0) r       -> Just r
-   BVAdd _  l (BVValue _ 1)       -> Just l
-   BVAdd _  (BVValue _ 1) r       -> Just r
+   BVMul _  l (BVValue _ 1)       -> Just l
+   BVMul _  (BVValue _ 1) r       -> Just r
 
    UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
    BVAdd sz l r                   -> binop (+) sz l r
@@ -640,6 +581,13 @@ data ExploreLoc
                 }
  deriving (Eq, Ord)
 
+rootLoc :: CodeAddr -> ExploreLoc
+rootLoc ip = ExploreLoc { loc_ip = ip
+                        , loc_x87_top = 7 }
+
+locFromGuess :: CodeAddr -> ExploreLoc
+locFromGuess = rootLoc
+
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State
 initX86State loc =
@@ -657,16 +605,16 @@ initX86State loc =
 disassembleBlock :: Memory Word64
                  -> PartialCFG
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> (PartialCFG, Set ExploreLoc)
-disassembleBlock mem g loc = do
+                 -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
+disassembleBlock mem g loc =
   let gs = GenState { _partialCFG = g
                     , _curBlockID = DecompiledBlock (loc_ip loc)
                     , _prevStmts  = Seq.empty
                     , _cachedApps = MapF.empty
                     , _curX86State = initX86State loc
                     }
-  trace ("Exploring " ++ showHex (loc_ip loc) "") $ do
-  disassembleBlock' mem gs (loc_ip loc)
+  in trace ("Exploring " ++ showHex (loc_ip loc) "")
+     $ disassembleBlock' mem gs (loc_ip loc)
 
 getExploreLocs :: X86State -> [ExploreLoc]
 getExploreLocs s =
@@ -687,25 +635,22 @@ getFrontierNext = Fold.foldl' f Set.empty
 disassembleBlock' :: Memory Word64
                   -> GenState -- ^ Initial state
                   -> CodeAddr
-                  -> (PartialCFG, Set ExploreLoc)
-disassembleBlock' mem gs0 addr =
-  case readInstruction mem addr of
-    Left e -> error (show e)
-    Right (i,next_ip) -> do
-      -- Update current IP
-      let gs1 = gs0 & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
-      let pcfg = runX86Generator gs1
-                 $ do let line = text (showHex addr "") <> colon <+> Flexdis.ppInstruction addr i
-                      addStmt (Comment (show line))
-                      execInstruction i
-
-      case Fold.toList (pcfg^.frontierBlocks) of
-        -- If we have a single block that goes to the next instruction,
-        -- then we just disassemble the next block and concat it with
-        -- this one.
-        [b] | FetchAndExecute s <- blockTerm b
-            , [loc] <- getExploreLocs s
-            , loc_ip loc == next_ip -> do
+                  -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
+disassembleBlock' mem gs0 addr = do
+  (i, next_ip) <- readInstruction mem addr
+  -- Update current IP
+  let gs1 = gs0 & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
+  let pcfg = runX86Generator gs1 $ do
+               let line = text (showHex addr "") <> colon <+> Flexdis.ppInstruction addr i
+               addStmt (Comment (show line))
+               execInstruction i
+  case Fold.toList (pcfg^.frontierBlocks) of
+    -- If we have a single block that goes to the next instruction,
+    -- then we just disassemble the next block and concat it with
+    -- this one.
+    [b] | FetchAndExecute s <- blockTerm b
+        , [loc] <- getExploreLocs s
+        , loc_ip loc == next_ip -> do
           let -- Clear frontier blocks
               pcfg1 = pcfg & frontierBlocks .~ Seq.empty
               -- Create state to continue from.
@@ -716,32 +661,56 @@ disassembleBlock' mem gs0 addr =
                              , _curX86State = s
                              }
           disassembleBlock' mem gs2 next_ip
-        block_list -> (mergeFrontier pcfg, getFrontierNext block_list)
+    block_list -> return (mergeFrontier pcfg, getFrontierNext block_list, next_ip)
 
-recursiveDecent :: Memory Word64
+-- FIXME: move
+newtype Hex = Hex CodeAddr
+              deriving (Eq, Ord)
+
+mkHex :: CodeAddr -> Hex
+mkHex = Hex
+
+instance Show Hex where
+  show (Hex v) = showHex v ""
+
+recursiveDescent :: Memory Word64
                 -> PartialCFG     -- ^ CFG generated so far.
+                -> Set CodeAddr   -- ^ Set of addresses after blocks we stopped at.
                 -> Set ExploreLoc -- ^ Set of locations explored so far.
                 -> Set ExploreLoc -- ^ List of addresses to explore next.
-                -> CFG
-recursiveDecent mem pg1 explored frontier
-    | Set.null frontier = pg1^.prevCFG
+                -> (CFG, Set CodeAddr)
+recursiveDescent mem pg1 ends explored frontier
+    | Set.null frontier = (pg1^.prevCFG, ends)
     | otherwise =
-        let (loc,s) = Set.deleteFindMin frontier
-            (pg2, next) = disassembleBlock mem pg1 loc
-            explored' = Set.insert loc explored
-            frontier' = Set.union s (Set.difference next explored')
-         in recursiveDecent mem pg2 explored' frontier'
+        let (loc,s)         = Set.deleteFindMin frontier
+            explored'       = Set.insert loc explored
+            go pg ends' frontier' = recursiveDescent mem pg ends' explored' frontier'
+        in
+        case disassembleBlock mem pg1 loc of
+          Left  e  -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e))
+                      $ go pg1 ends s
+          Right (pg2, next, end) ->
+            let guesses   = discoverCodePointers mem (pg2^.prevCFG)
+                            (DecompiledBlock (loc_ip loc)) -- FIXME
+                allNext   = trace ("At " ++ show (mkHex $ loc_ip loc)
+                                   ++ " guessing pointers "
+                                   ++ show (Set.map mkHex guesses)
+                                   ++ " with next "
+                                   ++ show (Set.map (mkHex . loc_ip)  next))
+                            $ next `Set.union` Set.map locFromGuess guesses
+            in go pg2 (Set.insert end ends) (Set.union s (Set.difference allNext explored'))
 
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> CodeAddr
                   -- ^ Location to start disassembler form.
-               -> CFG
-cfgFromAddress mem a = recursiveDecent mem pcfg Set.empty (Set.singleton loc)
+               -> (CFG, Set CodeAddr)
+cfgFromAddress mem a = -- recursiveDescent mem pcfg Set.empty (Set.singleton loc)
+  -- XXXXXXXX FIXME: frame_dummy has a call to 0 for some reason, so we pretend we have seen it
+  -- this is a giant hack.
+  recursiveDescent mem pcfg Set.empty (Set.singleton (rootLoc 0)) (Set.singleton loc)
   where pcfg = emptyPartialCFG
-        loc = ExploreLoc { loc_ip = a
-                         , loc_x87_top = 7
-                         }
+        loc = rootLoc a
 
 {-
 completeProgram :: Memory Word64

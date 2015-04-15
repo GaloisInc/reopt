@@ -36,21 +36,6 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
                                             , case l of { DecompiledBlock _ -> True; _ -> False } ]
              
--- FIXME: refactor to be more efficient
-traverseBlocks :: CFG
-                  -> BlockLabel
-                  -> (Block -> a)
-                  -> (a -> a -> a -> a)
-                  -> a
-traverseBlocks cfg root f merge = go root
-  where
-    go l = case cfg ^. cfgBlocks . at l of
-            Nothing -> error $ "label not found"
-            Just b  -> let v = f b in
-                        case blockTerm b of
-                         Branch _ lb rb -> merge (go lb) v (go rb)
-                         _              -> v
-
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
 liveRegisters :: CFG -> BlockLabel -> Map BlockLabel Block
