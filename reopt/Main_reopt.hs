@@ -1,10 +1,11 @@
+{-# LANGUAGE GADTs #-}
 module Main (main) where
 
 import           Control.Lens
 import           Control.Monad
 import qualified Data.ByteString as B
 import           Data.Elf
-import qualified Data.Map as M
+import qualified Data.Map as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Version
@@ -174,7 +175,7 @@ isInterestingCode _ _ = True -- Last bit
 
 showGaps :: FilePath ->  IO ()
 showGaps path = do (mem, (cfg, ends)) <- getCFG path
-                   let blocks = [ addr | DecompiledBlock addr <- M.keys (cfg ^. cfgBlocks) ]
+                   let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
                    let gaps = filter (isInterestingCode mem)
                               $ out_gap blocks (Set.elems ends)
 
@@ -196,22 +197,9 @@ showGaps path = do (mem, (cfg, ends)) <- getCFG path
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
-  (_, (g, _)) <- getCFG path
-  let g' = eliminateDeadRegisters g
-  -- TODO:
-  print (pretty g')
-
-{-
-      --printExecutableAddressesInGlobalData (args^.programPath)
-  print $ parseSymbolTables e
-  Just dyn_sect
-    <- dynamicEntries e :: IO (Maybe (DynamicSection Word64 Int64 X86_64_RelocationType))
---  print $ ppSymbolTableEntries (dynSymbols ds)
---  print $ dynSymVersionTable ds
---  print $ dynVersionReqs ds
-  print $ ppRelaEntries $ dynRelocations dyn_sect
-  print $ dynUnparsed dyn_sect
--}
+  (_, (g0, _)) <- getCFG path
+  let g = eliminateDeadRegisters g0
+  print (pretty g)
 
 main :: IO ()
 main = do

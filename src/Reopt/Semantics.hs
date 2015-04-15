@@ -31,7 +31,6 @@ import Data.Parameterized.NatRepr
     ( widthVal
     , NatRepr
     , addNat
-    , addIsLeq
     , withAddLeq
     , testLeq
     , LeqProof(..)
@@ -313,7 +312,7 @@ exec_inc dst = do
   -- no cf_loc
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
-  
+
 set_reg_pair :: Semantics m => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
 set_reg_pair upperL lowerL v = do lowerL .= lower
                                   upperL .= upper
@@ -513,7 +512,7 @@ exec_sar l count = do
     let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
 
     -- FIXME: correct?  we assume here that we will get the sign bit ...
-    cf_loc .= mux (tempCOUNT `bvLt` dest_width) new_cf (msb v) 
+    cf_loc .= mux (tempCOUNT `bvLt` dest_width) new_cf (msb v)
 
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_loc .= false)
@@ -583,7 +582,7 @@ exec_setcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType 8) -> m
 exec_setcc cc l = do
   c <- cc
   l .= mux c 1 0
-  
+
 -- ** Control Transfer Instructions
 
 really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()

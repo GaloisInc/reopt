@@ -20,6 +20,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.Semantics.Implementation
   ( cfgFromAddress
     -- debugging
@@ -33,6 +34,10 @@ import           Control.Monad.Cont
 import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.Foldable as Fold
+import Data.Maybe
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
+import Data.Parameterized.Some
 import           Data.Parameterized.NatRepr
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -47,9 +52,6 @@ import Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 
 import           Unsafe.Coerce (unsafeCoerce)
 
-import Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-import Data.Parameterized.Some
 import           Debug.Trace
 import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
@@ -77,6 +79,18 @@ data Expr tp where
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(App Expr tp) -> Expr tp
 
+instance Eq (Expr tp) where
+  (==) = \x y -> isJust (testEquality x y)
+
+instance TestEquality Expr where
+  testEquality (ValueExpr x) (ValueExpr y) = do
+    Refl <- testEquality x y
+    return Refl
+  testEquality (AppExpr x) (AppExpr y) = do
+    Refl <- testEquality x y
+    return Refl
+  testEquality _ _ = Nothing
+
 app :: App Expr tp -> Expr tp
 app = AppExpr
 
@@ -90,6 +104,10 @@ exprWidth e =
   case exprType e of
     S.BVTypeRepr n -> n
 
+asBVLit :: Expr tp -> Maybe Integer
+asBVLit (ValueExpr (BVValue _ v)) = Just v
+asBVLit _ = Nothing
+
 instance S.IsValue Expr where
 
   bv_width = exprWidth
@@ -97,8 +115,30 @@ instance S.IsValue Expr where
   mux c x y = app $ Mux (exprWidth x) c x y
 
   bvLit n v = ValueExpr $ BVValue n (toInteger v .&. mask)
-    where mask = 2^(widthVal n) - 1
-  bvAdd x y = app $ BVAdd (exprWidth x) x y
+    where mask = maxUnsigned n
+  bvAdd x y
+      -- Eliminate add 0
+    | Just 0 <- asBVLit y = x
+    | Just 0 <- asBVLit x = y
+
+      -- Constant folding.
+    | ValueExpr (BVValue w xv) <- x
+    , Just yv <- asBVLit y
+    = bvLit w (xv + yv)
+
+      -- Shift constants to right-hand-side.
+    | Just _ <- asBVLit x = S.bvAdd y x
+
+      -- Reorganize addition by constant to offset.
+    | Just (BVAdd w x_base (asBVLit -> Just x_off)) <- asApp x
+    , Just y_off <- asBVLit y
+    = S.bvAdd x_base (bvLit w (x_off + y_off))
+    | Just (BVAdd w y_base (asBVLit -> Just y_off)) <- asApp y
+    , Just x_off <- asBVLit x
+    = S.bvAdd y_base (bvLit w (x_off + y_off))
+
+    | otherwise = app $ BVAdd (exprWidth x) x y
+
   bvSub x y = app $ BVSub (exprWidth x) x y
   bvMul x y = app $ BVMul (exprWidth x) x y
 
@@ -110,7 +150,9 @@ instance S.IsValue Expr where
   complement x = app $ BVComplement (exprWidth x) x
   x .&. y   = app $ BVAnd (exprWidth x) x y
   x .|. y   = app $ BVOr  (exprWidth x) x y
-  bvXor x y = app $ BVXor (exprWidth x) x y
+  bvXor x y
+    | x == y = bvLit (exprWidth x) (0::Integer)
+    | otherwise = app $ BVXor (exprWidth x) x y
 
   x .=. y   = app $ BVEq x y
 
@@ -130,7 +172,25 @@ instance S.IsValue Expr where
   bvSar x y = app $ BVSar (exprWidth x) x y
   bvShl x y = app $ BVShl (exprWidth x) x y
 
-  bvTrunc = flip truncExpr
+  bvTrunc w e0
+    | Just v <- asBVLit e0 =
+      bvLit w v
+    -- Eliminate redundant trunc
+    | Just Refl <- testEquality (exprWidth e0) w =
+      e0
+      -- Eliminate MMXExtend
+    | Just (MMXExtend e) <- asApp e0
+    , Just Refl <- testEquality w n64 =
+      e
+    | Just (ConcatV lw l _) <- asApp e0
+    , Just LeqProof <- testLeq w lw =
+      S.bvTrunc w l
+    | Just (Trunc e _) <- asApp e0 =
+      -- Runtime check to workaround GHC typechecker.
+      case testLeq w (exprWidth e) of
+        Just LeqProof -> S.bvTrunc w e
+        Nothing -> error "bvTrunc given bad width"
+    | otherwise = app (Trunc e0 w)
 
   bvLt x y = app $ BVUnsignedLt x y
 
@@ -339,13 +399,13 @@ constPropagate v =
     unop :: (tp ~ BVType n) => (Integer -> Integer)
          -> NatRepr n -> Value tp -> Maybe (Value tp)
     unop f sz (BVValue _ l)  = Just $ BVValue sz ( (f l) .&. mask)
-      where mask = 2^(widthVal sz) - 1
+      where mask = maxUnsigned sz
     unop _ _ _ = Nothing
 
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
              -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
     binop f sz (BVValue _ l) (BVValue _ r) = Just $ BVValue sz ( (f l r) .&. mask)
-      where mask = 2^(widthVal sz) - 1
+      where mask = maxUnsigned sz
     binop _ _ _ _ = Nothing
 
 evalApp :: App Value tp  -> X86Generator r (Value tp)
@@ -389,7 +449,7 @@ getLoc l0 =
              fail $ "On x86-64 registers other than fs and gs may not be set."
        -- S.MMXReg {} -> do
        --   e <- modState $ ValueExpr <$> use (register r)
-       --   ValueExpr <$> eval (truncExpr e knownNat)
+       --   ValueExpr <$> eval (S.bvTrunc knownNat e)
        _ -> modState $ ValueExpr <$> use (register r)
 
     S.LowerHalf l -> lowerHalf <$> getLoc l
@@ -407,29 +467,13 @@ lowerHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
      -- Workaround for GHC typechecker
      case testLeq half_width (exprWidth e) of
-       Just LeqProof -> truncExpr e half_width
+       Just LeqProof -> S.bvTrunc half_width e
        Nothing -> error "lowerHalf given bad width"
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
 n64 :: NatRepr 64
 n64 = knownNat
-
--- | Apply trunc to expression with simplification.
-truncExpr :: (m <= n) => Expr (BVType n) -> NatRepr m -> Expr (BVType m)
-truncExpr e w | Just Refl <- testEquality (exprWidth e) w = e
-truncExpr e0 w =
-  case asApp e0 of
-    Just (MMXExtend e) | Just Refl <- testEquality w n64 ->
-      e
-    Just (ConcatV lw l _) | Just LeqProof <- testLeq w lw ->
-      truncExpr l w
-    Just (Trunc e _) ->
-       -- Runtime check to workaround GHC typechecker.
-      case testLeq w (exprWidth e) of
-        Just LeqProof -> truncExpr e w
-        Nothing -> error "truncExpr given bad width"
-    _ -> app (Trunc e0 w)
 
 -- | Get the upper half of a bitvector.
 upperHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)

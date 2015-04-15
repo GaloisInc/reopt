@@ -159,10 +159,10 @@ instance Pretty CFG where
 -- FIXME: refactor to be more efficient
 -- FIXME: not a Traversal, more like a map+fold
 traverseBlocks :: CFG
-                  -> BlockLabel
-                  -> (Block -> a)
-                  -> (a -> a -> a -> a)
-                  -> a
+               -> BlockLabel
+               -> (Block -> a)
+               -> (a -> a -> a -> a)
+               -> a
 traverseBlocks cfg root f merge = go root
   where
     go l = case cfg ^. cfgBlocks . at l of
@@ -188,13 +188,13 @@ instance Ord BlockLabel where
   compare (DecompiledBlock v) (GeneratedBlock p _)
     | p == v = LT
     | otherwise = compare v p
-  compare (GeneratedBlock p _) (DecompiledBlock v) 
+  compare (GeneratedBlock p _) (DecompiledBlock v)
     | p == v = GT
     | otherwise = compare p v
   compare (GeneratedBlock p v) (GeneratedBlock p' v')
     | p == p' = compare v v'
     | otherwise = compare p p'
-    
+
 -- | A label always has a parent, i.e., the DecompiledBlock that
 -- generated it
 blockParent :: BlockLabel -> CodeAddr
@@ -524,6 +524,9 @@ data Value tp where
 
   Initial :: !(N.RegisterName cl) -> Value (N.RegisterType cl)
 
+instance Eq (Value tp) where
+  x == y = isJust (testEquality x y)
+
 instance TestEquality Value where
   testEquality x y = orderingIsEqual (compareF x y)
 
@@ -809,6 +812,8 @@ appType a =
 -- Force app to be in template-haskell context.
 $(return [])
 
+instance TestEquality f => Eq (App f tp) where
+  (==) = \x y -> isJust (testEquality x y)
 
 instance TestEquality f => TestEquality (App f) where
   testEquality = $(structuralTypeEquality [t|App|]
