@@ -87,14 +87,17 @@ exprWidth e =
   case exprType e of
     S.BVTypeRepr n -> n
 
+mkLit :: Integral a => NatRepr n -> a -> Value (BVType n)
+mkLit n v = BVValue n (toInteger v .&. mask)
+  where mask = 2^(widthVal n) - 1
+
 instance S.IsValue Expr where
 
   bv_width = exprWidth
 
   mux c x y = app $ Mux (exprWidth x) c x y
 
-  bvLit n v = ValueExpr $ BVValue n (toInteger v .&. mask)
-    where mask = 2^(widthVal n) - 1
+  bvLit n v = ValueExpr $ mkLit n v
   bvAdd x y = app $ BVAdd (exprWidth x) x y
   bvSub x y = app $ BVSub (exprWidth x) x y
   bvMul x y = app $ BVMul (exprWidth x) x y
@@ -318,6 +321,10 @@ constPropagate v =
    
    UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
    BVAdd sz l r                   -> binop (+) sz l r
+
+   -- Word operations
+   Trunc (BVValue _ x) sz         -> Just $ mkLit sz x
+   
    -- Boolean operations
    BVUnsignedLt l r               -> boolop (<) l r
    BVEq l r                       -> boolop (==) l r
@@ -331,15 +338,13 @@ constPropagate v =
 
     unop :: (tp ~ BVType n) => (Integer -> Integer)
              -> NatRepr n -> Value tp -> Maybe (Value tp)
-    unop f sz (BVValue _ l)  = Just $ BVValue sz ( (f l) .&. mask)
-      where mask = 2^(widthVal sz) - 1
+    unop f sz (BVValue _ l)  = Just $ mkLit sz (f l) 
     unop _ _ _                         = Nothing
 
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
              -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
-    binop f sz (BVValue _ l) (BVValue _ r) = Just $ BVValue sz ( (f l r) .&. mask)
-      where mask = 2^(widthVal sz) - 1
-    binop _ _ _ _                         = Nothing
+    binop f sz (BVValue _ l) (BVValue _ r) = Just $ mkLit sz (f l r)
+    binop _ _ _ _                          = Nothing
 
 evalApp :: App Value tp  -> X86Generator r (Value tp)
 evalApp a = case constPropagate a of
