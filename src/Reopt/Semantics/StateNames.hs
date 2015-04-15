@@ -19,33 +19,33 @@
 
 module Reopt.Semantics.StateNames where
 
-import           GHC.TypeLits
 
-import           Data.Parameterized.Classes
+import Data.Parameterized.Classes
+import GHC.TypeLits
 
 import qualified Flexdis86 as F
-import           Reopt.Semantics.Types
+import Reopt.Semantics.Types
 
 data RegisterClass = ProgramCounter
                    | GP | Flag | Segment | Control
                    | Debug
                    | X87_Tag | X87_FPU | X87_Status | X87_Control | X87_Top | X87_ControlMask
                    | XMM
-  
+
 data RegisterClassRepr (r :: RegisterClass) where
   ProgramCounterRepr  :: RegisterClassRepr ProgramCounter
-  GPRepr              :: RegisterClassRepr GP            
-  FlagRepr            :: RegisterClassRepr Flag          
+  GPRepr              :: RegisterClassRepr GP
+  FlagRepr            :: RegisterClassRepr Flag
   SegmentRepr         :: RegisterClassRepr Segment
   ControlRepr         :: RegisterClassRepr Control
-  DebugRepr           :: RegisterClassRepr Debug         
-  X87_FPURepr         :: RegisterClassRepr X87_FPU       
+  DebugRepr           :: RegisterClassRepr Debug
+  X87_FPURepr         :: RegisterClassRepr X87_FPU
   X87_StatusRepr      :: RegisterClassRepr X87_Status
   X87_TopRepr         :: RegisterClassRepr X87_Top
   X87_TagRepr         :: RegisterClassRepr X87_Tag
   X87_ControlRepr     :: RegisterClassRepr X87_Control
   X87_ControlMaskRepr :: RegisterClassRepr X87_ControlMask
-  XMMRepr             :: RegisterClassRepr XMM           
+  XMMRepr             :: RegisterClassRepr XMM
 
 {-
 type family NRegisters (r :: RegisterClass) :: Nat where
@@ -73,7 +73,6 @@ nRegisters X87_ControlRepr    = knownNat
 nRegisters XMMRepr            = knownNat
 -}
 
-
 type family RegisterClassBits (cl :: RegisterClass) :: Nat where
   RegisterClassBits ProgramCounter = 64
   RegisterClassBits GP             = 64
@@ -81,7 +80,7 @@ type family RegisterClassBits (cl :: RegisterClass) :: Nat where
   RegisterClassBits Segment        = 16
   RegisterClassBits Debug          = 64
   RegisterClassBits Control        = 64
-  RegisterClassBits X87_FPU         = 80 
+  RegisterClassBits X87_FPU         = 80
   RegisterClassBits X87_Status      = 1
   RegisterClassBits X87_Top         = 3
   RegisterClassBits X87_Tag         = 2
@@ -93,7 +92,7 @@ type family RegisterClassBits (cl :: RegisterClass) :: Nat where
 type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 
 data RegisterName cl where
-  IPReg      :: RegisterName ProgramCounter 
+  IPReg      :: RegisterName ProgramCounter
 
   GPReg      :: !Int -> RegisterName GP
 
@@ -108,7 +107,7 @@ data RegisterName cl where
   X87TopReg    :: RegisterName X87_Top
 
   -- FIXME: These are currently read-only
-  X87ControlReg :: !Int -> RegisterName X87_ControlMask 
+  X87ControlReg :: !Int -> RegisterName X87_ControlMask
   X87PC      :: RegisterName X87_Control
   X87RC      :: RegisterName X87_Control
 
@@ -127,7 +126,7 @@ instance Show (RegisterName cl) where
   show IPReg          = "rip"
   show (GPReg n)      = gpNames !! n
   show (SegmentReg n) = segmentNames !! n
-  show (FlagReg n)    = flagNames !! n       
+  show (FlagReg n)    = flagNames !! n
   show (ControlReg n) = "cr" ++ show n
   show (X87StatusReg n) = x87StatusNames !! n
   show X87TopReg      = "x87top"
@@ -167,48 +166,48 @@ instance OrdF RegisterName where
   compareF (DebugReg n)      (DebugReg n')      = fromOrdering (compare n n')
   compareF IPReg             _                  = LTF
   compareF _                 IPReg              = GTF
-  
+
   compareF GPReg{}           _                  = LTF
   compareF _                 GPReg{}            = GTF
-  
+
   compareF SegmentReg{}      _                  = LTF
   compareF _                 SegmentReg{}       = GTF
-  
+
   compareF FlagReg{}         _                  = LTF
   compareF _                 FlagReg{}          = GTF
-  
+
   compareF ControlReg{}      _                  = LTF
   compareF _                 ControlReg{}       = GTF
-  
-  compareF X87StatusReg{}    _                  = LTF 
-  compareF _                 X87StatusReg{}     = GTF 
+
+  compareF X87StatusReg{}    _                  = LTF
+  compareF _                 X87StatusReg{}     = GTF
 
   compareF X87TopReg         _                  = LTF
-  compareF _                 X87TopReg          = GTF 
-  
-  compareF X87ControlReg{}   _                  = LTF 
-  compareF _                 X87ControlReg{}    = GTF 
+  compareF _                 X87TopReg          = GTF
 
-  compareF X87PC             _                  = LTF 
-  compareF _                 X87PC              = GTF 
+  compareF X87ControlReg{}   _                  = LTF
+  compareF _                 X87ControlReg{}    = GTF
 
-  compareF X87RC             _                  = LTF 
-  compareF _                 X87RC              = GTF 
+  compareF X87PC             _                  = LTF
+  compareF _                 X87PC              = GTF
 
-  compareF X87TagReg{}       _                  = LTF 
-  compareF _                 X87TagReg{}        = GTF 
+  compareF X87RC             _                  = LTF
+  compareF _                 X87RC              = GTF
 
-  compareF X87FPUReg{}       _                  = LTF 
-  compareF _                 X87FPUReg{}        = GTF 
+  compareF X87TagReg{}       _                  = LTF
+  compareF _                 X87TagReg{}        = GTF
 
-  compareF XMMReg{}          _                  = LTF 
-  compareF _                 XMMReg{}           = GTF 
+  compareF X87FPUReg{}       _                  = LTF
+  compareF _                 X87FPUReg{}        = GTF
 
-  -- compareF DebugReg{}        _                  = LTF 
-  -- compareF _                 DebugReg{}         = GTF 
+  compareF XMMReg{}          _                  = LTF
+  compareF _                 XMMReg{}           = GTF
+
+  -- compareF DebugReg{}        _                  = LTF
+  -- compareF _                 DebugReg{}         = GTF
 
 registerWidth :: RegisterName cl -> NatRepr (RegisterClassBits cl)
-registerWidth IPReg           = knownNat 
+registerWidth IPReg           = knownNat
 registerWidth GPReg{}         = knownNat
 registerWidth FlagReg{}       = knownNat
 registerWidth ControlReg{}    = knownNat
@@ -216,15 +215,15 @@ registerWidth X87ControlReg{} = knownNat
 registerWidth X87StatusReg{}  = knownNat
 registerWidth X87TopReg       = knownNat
 registerWidth X87PC           = knownNat
-registerWidth X87RC           = knownNat 
-registerWidth X87TagReg{}     = knownNat        
+registerWidth X87RC           = knownNat
+registerWidth X87TagReg{}     = knownNat
 registerWidth X87FPUReg{}     = knownNat
 registerWidth XMMReg{}        = knownNat
 registerWidth SegmentReg{}    = knownNat
 registerWidth DebugReg{}      = knownNat
 
 registerType :: RegisterName cl -> TypeRepr (RegisterType cl)
-registerType IPReg           = knownType 
+registerType IPReg           = knownType
 registerType GPReg{}         = knownType
 registerType FlagReg{}       = knownType
 registerType ControlReg{}    = knownType
@@ -232,8 +231,8 @@ registerType X87ControlReg{} = knownType
 registerType X87StatusReg{}  = knownType
 registerType X87TopReg       = knownType
 registerType X87PC           = knownType
-registerType X87RC           = knownType 
-registerType X87TagReg{}     = knownType        
+registerType X87RC           = knownType
+registerType X87TagReg{}     = knownType
 registerType X87FPUReg{}     = knownType
 registerType XMMReg{}        = knownType
 registerType SegmentReg{}    = knownType
@@ -282,7 +281,7 @@ gs = SegmentReg 5
 
 instance Eq (RegisterName Segment) where
   (SegmentReg n) == (SegmentReg n') = n == n'
-  
+
 
 segmentNames :: [String]
 segmentNames = ["es", "cs", "ss", "ds", "fs", "gs"]
@@ -318,7 +317,7 @@ flagBitPacking = BitPacking knownNat $ flagBits ++ constants
                 , RegisterBit df    (knownNat :: NatRepr 10)
                 , RegisterBit oflag (knownNat :: NatRepr 11)
                 ]
-      
+
     constants = [ ConstantBit True  (knownNat :: NatRepr 1)
                 , ConstantBit False (knownNat :: NatRepr 3)
                 , ConstantBit False (knownNat :: NatRepr 5)
@@ -348,7 +347,7 @@ x87ef = X87StatusReg 6
 x87es = X87StatusReg 7
 x87c0 = X87StatusReg 8
 x87c1 = X87StatusReg 9
-x87c2 = X87StatusReg 10 
+x87c2 = X87StatusReg 10
 x87c3 = X87StatusReg 14
 
 x87StatusNames :: [String]

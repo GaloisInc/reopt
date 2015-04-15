@@ -91,6 +91,10 @@ instance TestEquality Expr where
     return Refl
   testEquality _ _ = Nothing
 
+asApp :: Expr tp -> Maybe (App Expr tp)
+asApp (AppExpr   a) = Just a
+asApp (ValueExpr v) = mapApp ValueExpr <$> valueAsApp v
+
 app :: App Expr tp -> Expr tp
 app = AppExpr
 
@@ -142,7 +146,9 @@ instance S.IsValue Expr where
 
     | otherwise = app $ BVAdd (exprWidth x) x y
 
-  bvSub x y = app $ BVSub (exprWidth x) x y
+  bvSub x y
+    | Just yv <- asBVLit y = S.bvAdd x (bvLit (exprWidth x) (negate yv))
+    | otherwise = app $ BVSub (exprWidth x) x y
   bvMul x y = app $ BVMul (exprWidth x) x y
 
   bvDiv       x y = app $ BVDiv       (exprWidth x) x y
@@ -153,11 +159,17 @@ instance S.IsValue Expr where
   complement x = app $ BVComplement (exprWidth x) x
   x .&. y   = app $ BVAnd (exprWidth x) x y
   x .|. y   = app $ BVOr  (exprWidth x) x y
+
   bvXor x y
+      -- Eliminate xor with 0.
+    | Just 0 <- asBVLit x = y
+    | Just 0 <- asBVLit y = x
+      -- Eliminate xor with self.
     | x == y = bvLit (exprWidth x) (0::Integer)
+      -- Default case.
     | otherwise = app $ BVXor (exprWidth x) x y
 
-  x .=. y   = app $ BVEq x y
+  x .=. y = app $ BVEq x y
 
   -- | Concatentates two bit vectors
   -- bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
@@ -176,9 +188,10 @@ instance S.IsValue Expr where
   bvShl x y = app $ BVShl (exprWidth x) x y
 
   bvTrunc w e0
+      -- Constant propagation
     | Just v <- asBVLit e0 =
       bvLit w v
-    -- Eliminate redundant trunc
+      -- Eliminate redundant trunc
     | Just Refl <- testEquality (exprWidth e0) w =
       e0
       -- Eliminate MMXExtend
@@ -188,6 +201,16 @@ instance S.IsValue Expr where
     | Just (ConcatV lw l _) <- asApp e0
     , Just LeqProof <- testLeq w lw =
       S.bvTrunc w l
+    | Just (UExt e _) <- asApp e0 =
+      case testLeq w (S.bv_width e) of
+        -- Check if original value width is less than new width.
+        Just LeqProof -> S.bvTrunc w e
+        Nothing ->
+           -- Runtime check to wordaround GHC typechecker
+           case testLeq (S.bv_width e) w of
+             Just LeqProof -> S.uext w e
+             Nothing -> error "bvTrunc internal error"
+
     | Just (Trunc e _) <- asApp e0 =
       -- Runtime check to workaround GHC typechecker.
       case testLeq w (exprWidth e) of
@@ -391,7 +414,7 @@ constPropagate v =
 
    -- Word operations
    Trunc (BVValue _ x) sz         -> Just $ mkLit sz x
-   
+
    -- Boolean operations
    BVUnsignedLt l r               -> boolop (<) l r
    BVEq l r                       -> boolop (==) l r
@@ -405,7 +428,7 @@ constPropagate v =
 
     unop :: (tp ~ BVType n) => (Integer -> Integer)
              -> NatRepr n -> Value tp -> Maybe (Value tp)
-    unop f sz (BVValue _ l)  = Just $ mkLit sz (f l) 
+    unop f sz (BVValue _ l)  = Just $ mkLit sz (f l)
     unop _ _ _               = Nothing
 
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
@@ -460,14 +483,6 @@ getLoc l0 =
     S.LowerHalf l -> lowerHalf <$> getLoc l
     S.UpperHalf l -> upperHalf <$> getLoc l
 
-valueAsApp :: Value tp -> Maybe (App Value tp)
-valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
-valueAsApp _ = Nothing
-
-asApp :: Expr tp -> Maybe (App Expr tp)
-asApp (AppExpr   a) = Just a
-asApp (ValueExpr v) = mapApp ValueExpr <$> valueAsApp v
-
 lowerHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
      -- Workaround for GHC typechecker
@@ -502,7 +517,6 @@ upperHalf e =
         half_width = halfNat (exprWidth e)
 
 -- | Assign a value to a location
-<<<<<<< HEAD
 setLoc :: forall tp r. ImpLocation tp -> Value tp -> X86Generator r ()
 setLoc loc v0 =
   -- So x86 says that when you assign a 32 bit register, the upper bits
@@ -523,7 +537,7 @@ setLoc loc v0 =
        S.MemoryAddr w _ -> do
          addr <- eval w
          addStmt $ Write (MemLoc addr (valueType v)) v
-  
+
        S.Register r ->
          case r of
            N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
@@ -539,17 +553,17 @@ setLoc loc v0 =
            --   ext_v <- evalApp (MMXExtend v)
            --   modState $ register r .= ext_v
            _ -> modState $ register r .= v
-     
+
        S.LowerHalf l -> do
          b <- getLoc l
          upper <- eval (upperHalf b)
-         go l =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
+         go l . AssignedValue =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
        S.UpperHalf l -> do
          b <- getLoc l
          lower <- eval (lowerHalf b)
-         go l =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
-          
-       S.X87StackRegister i -> do
+         go l . AssignedValue =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
+
+       S.X87StackRegister _ -> do
          error "setLoc X87StackRegister undefined"
 
 instance S.Semantics (X86Generator PartialCFG) where

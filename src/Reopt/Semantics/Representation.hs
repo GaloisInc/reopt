@@ -38,9 +38,11 @@ module Reopt.Semantics.Representation
   , AssignRhs(..)
     -- * Value
   , Value(..)
+  , valueAsApp
   , valueType
   , valueWidth
   , bvValue
+  , ppValue
   , App(..)
   , appType
   , mapApp
@@ -561,6 +563,10 @@ valueWidth v =
   case valueType v of
     BVTypeRepr n -> n
 
+valueAsApp :: Value tp -> Maybe (App Value tp)
+valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
+valueAsApp _ = Nothing
+
 bvValue :: KnownNat n => Integer -> Value (BVType n)
 bvValue i = BVValue knownNat i
 
@@ -569,6 +575,9 @@ ppValue p (BVValue w i) = parenIf (p > colonPrec) $
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) <> text "_0"
+
+instance Pretty (Value tp) where
+  pretty = ppValue 0
 
 -----------------------------------------------------------------------
 -- App

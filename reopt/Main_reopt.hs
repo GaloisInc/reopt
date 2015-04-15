@@ -1,4 +1,6 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
 import           Control.Lens
@@ -9,6 +11,7 @@ import qualified Data.Map as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Version
+import           GHC.TypeLits
 import           Numeric (showHex)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
@@ -16,6 +19,7 @@ import           System.Exit (exitFailure)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Paths_reopt (version)
+import Data.Type.Equality as Equality
 
 import           Flexdis86
 import           Reopt
@@ -23,6 +27,7 @@ import           Reopt.Memory
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
+import qualified Reopt.Semantics.StateNames as N
 
 ------------------------------------------------------------------------
 -- Args
@@ -199,7 +204,72 @@ showCFG :: FilePath -> IO ()
 showCFG path = do
   (_, (g0, _)) <- getCFG path
   let g = eliminateDeadRegisters g0
+  forM_ (Map.elems (g^.cfgBlocks)) printSP
   print (pretty g)
+
+printSP :: Block -> IO ()
+printSP b = do
+  case blockTerm b of
+    Branch _ _ _ -> return ()
+    FetchAndExecute s -> do
+      let rsp_val = s^.register N.rsp
+      case rsp_val of
+        _ | Initial v <- rsp_val
+          , Just Refl <- testEquality v N.rsp ->
+            return ()
+        _ | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
+          , Just Refl <- testEquality r N.rsp -> do
+            return ()
+        _ | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
+          , Just Refl <- testEquality r N.rbp -> do
+            return ()
+          | otherwise -> do
+            print $ "Block " ++ show (pretty (blockLabel b))
+            print $ "RSP = " ++ show (pretty rsp_val)
+      let rbp_val = s^.register N.rbp
+      case rbp_val of
+           -- This leaves the base pointer unchanged.  It is likely an
+           -- internal block.
+        _ | Initial v <- rbp_val
+          , Just Refl <- testEquality v N.rbp ->
+            return ()
+           -- This assigns the base pointer the current stack.
+           -- It is likely a function entry point
+        _ | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rbp_val
+          , Just Refl <- testEquality r N.rsp -> do
+            return ()
+           -- This block assigns the base pointer a value from the stack.
+           -- It is likely a function exit.
+        _ | AssignedValue (assignRhs -> Read (MemLoc addr _)) <- rbp_val
+          , Initial v <- addr
+          , Just Refl <- testEquality v N.rbp -> do
+            return ()
+           -- This block assigns the base pointer a value from the stack.
+           -- It is likely a function exit.
+        _ | AssignedValue (assignRhs -> Read (MemLoc addr _)) <- rbp_val
+          , Just (BVAdd _ (Initial v) BVValue{}) <- valueAsApp addr
+          , Just Refl <- testEquality v N.rsp -> do
+            return ()
+
+        _ | otherwise -> do
+            print $ "Block " ++ show (pretty (blockLabel b))
+            print $ "RBP = " ++ show (pretty rbp_val)
+
+{-
+printIP :: Block -> IO ()
+printIP b =
+    case blockTerm b of
+      Branch _ _ _ -> return ()
+      FetchAndExecute s ->
+        case s^.cur of
+          Initial a -> do
+            print $ "Block " ++ show (pretty (blockLabel b))
+            print $ "Next IP " ++ show a
+          BVValue _ _ -> return ()
+          AssignedValue a -> do
+            print $ "Block " ++ show (pretty (blockLabel b))
+            print $ "Next IP: " ++ show (pretty a)
+-}
 
 main :: IO ()
 main = do
