@@ -124,10 +124,13 @@ cond_nz  = complement <$> cond_z
 -- * General Purpose Instructions
 -- ** Data Transfer Instructions
 
+-- FIXME: has the side effect of reading r, but this should be safe because r can only be a register.
 exec_cmovcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_cmovcc cc r y = do
-  a <- cc
-  when_ a (r .= y)
+  c <- cc
+  r_v <- get r
+  r .= mux c y r_v
+  -- when_ a (r .= y)
 
 -- | Run bswap instruction.
 exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
