@@ -519,13 +519,15 @@ instance S.Semantics (X86Generator PartialCFG) where
 
           -- Label for true branch
           let t_cfg = s^.partialCFG
-          let true_block_id = GeneratedBlock (t_cfg^.nextBlockID)
+          let true_block_id = GeneratedBlock (blockParent last_block_id)
+                              (t_cfg^.nextBlockID)
           let t_start = emptyGenState (t_cfg & nextBlockID +~ 1) true_block_id (s^.curX86State)
           -- Get state after running t followed by c
           let t_end :: PartialCFG
               t_end = unX86G t c t_start
           -- Label for false branch
-          let false_block_id = GeneratedBlock (t_end^.nextBlockID)
+          let false_block_id = GeneratedBlock (blockParent last_block_id)
+                               (t_end^.nextBlockID)
           -- Get block for code before branch now that we can get label
           -- for false branch.
           let last_block = Block { blockLabel = last_block_id

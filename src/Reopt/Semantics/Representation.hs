@@ -25,6 +25,7 @@ module Reopt.Semantics.Representation
   , traverseBlocks
     -- * Block level declarations
   , BlockLabel(..)
+  , blockParent
   , Block(..)
   , CodeAddr
     -- * Stmt level declarations
@@ -178,9 +179,27 @@ traverseBlocks cfg root f merge = go root
 data BlockLabel
    = DecompiledBlock CodeAddr
      -- ^ A block that came from an address in the code.
-   | GeneratedBlock Word64
+   | GeneratedBlock CodeAddr Word64
      -- ^ A unique identifier for a generated block.
-  deriving (Eq, Ord)
+  deriving Eq
+
+instance Ord BlockLabel where
+  compare (DecompiledBlock v) (DecompiledBlock v') = compare v v'
+  compare (DecompiledBlock v) (GeneratedBlock p _)
+    | p == v = LT
+    | otherwise = compare v p
+  compare (GeneratedBlock p _) (DecompiledBlock v) 
+    | p == v = GT
+    | otherwise = compare p v
+  compare (GeneratedBlock p v) (GeneratedBlock p' v')
+    | p == p' = compare v v'
+    | otherwise = compare p p'
+    
+-- | A label always has a parent, i.e., the DecompiledBlock that
+-- generated it
+blockParent :: BlockLabel -> CodeAddr
+blockParent (DecompiledBlock v)  = v
+blockParent (GeneratedBlock v _) = v
 
 -- | An address of a code location.
 --
@@ -189,8 +208,8 @@ data BlockLabel
 type CodeAddr = Word64
 
 instance Pretty BlockLabel where
-  pretty (DecompiledBlock a) = text ("addr_" ++ showHex a "")
-  pretty (GeneratedBlock w)  = text ("label_" ++ show w)
+  pretty (DecompiledBlock a)   = text ("addr_" ++ showHex a "")
+  pretty (GeneratedBlock p w)  = text ("label_" ++ showHex p "_" ++ show w)
 
 ------------------------------------------------------------------------
 -- Block

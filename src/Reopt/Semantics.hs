@@ -124,10 +124,13 @@ cond_nz  = complement <$> cond_z
 -- * General Purpose Instructions
 -- ** Data Transfer Instructions
 
+-- FIXME: has the side effect of reading r, but this should be safe because r can only be a register.
 exec_cmovcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_cmovcc cc r y = do
-  a <- cc
-  when_ a (r .= y)
+  c <- cc
+  r_v <- get r
+  r .= mux c y r_v
+  -- when_ a (r .= y)
 
 -- | Run bswap instruction.
 exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
@@ -389,7 +392,7 @@ exec_imul2_3 l v v' = really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
 exec_neg l = do
   v <- get l
-  ifte_ (is_zero v) (cf_loc .= false) (cf_loc .= true)
+  cf_loc .= mux (is_zero v) false true
   let r = bvNeg v
       zero = bvLit (bv_width v) (0 :: Int)
   of_loc .= ssub_overflows  zero v
@@ -509,9 +512,8 @@ exec_sar l count = do
     let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
     let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
 
-    ifte_ (tempCOUNT `bvLt` dest_width)
-      (cf_loc .= new_cf)
-      (cf_loc .= msb v) -- FIXME: correct?  we assume here that we will get the sign bit ...
+    -- FIXME: correct?  we assume here that we will get the sign bit ...
+    cf_loc .= mux (tempCOUNT `bvLt` dest_width) new_cf (msb v) 
 
     ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
       (of_loc .= false)
@@ -579,9 +581,9 @@ exec_test l v = do
 
 exec_setcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType 8) -> m ()
 exec_setcc cc l = do
-  a <- cc
-  ifte_ a (l .= bvLit n8 (1 :: Int)) (l .= bvLit n8 (0 :: Int))
-
+  c <- cc
+  l .= mux c 1 0
+  
 -- ** Control Transfer Instructions
 
 really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
