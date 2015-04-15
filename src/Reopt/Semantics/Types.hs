@@ -13,15 +13,15 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-
 module Reopt.Semantics.Types (
   module Reopt.Semantics.Types -- export everything
   , module Exports
   ) where
 
 import Data.Parameterized.Classes
-import Data.Parameterized.NatRepr 
+import Data.Parameterized.NatRepr
 import Data.Parameterized.NatRepr as Exports (NatRepr (..), knownNat)
 
 import GHC.TypeLits as TypeLits
@@ -55,6 +55,8 @@ n128 = knownNat
 data Type
   = -- | An array of bits
     BVType Nat
+
+type BVType = 'BVType
 
 type family TypeBits (tp :: Type) :: Nat where
   TypeBits (BVType n) = n
@@ -135,5 +137,3 @@ floatInfoBits fir = case fir of
                       DoubleFloatRepr       -> knownNat
                       QuadFloatRepr         -> knownNat
                       X86_80FloatRepr       -> knownNat
-
-

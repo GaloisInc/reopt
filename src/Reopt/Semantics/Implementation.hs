@@ -38,11 +38,14 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
-import           Text.PrettyPrint.Leijen (text, colon, (<>), (<+>)) -- hack for instruction comment
+import Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
+  -- hack for instruction comment
 
 import           Unsafe.Coerce (unsafeCoerce)
 
-import           Data.Parameterized.Some
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
+import Data.Parameterized.Some
 import           Debug.Trace
 import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
@@ -131,7 +134,7 @@ instance S.IsValue Expr where
   x .&. y   = app $ BVAnd (exprWidth x) x y
   x .|. y   = app $ BVOr  (exprWidth x) x y
   bvXor x y = app $ BVXor (exprWidth x) x y
-  
+
   x .=. y   = app $ BVEq x y
 
   -- | Concatentates two bit vectors
@@ -222,7 +225,6 @@ data PartialCFG = PartialCFG
          -- | Index of next assignment identifier to use.
          -- (all used assignment indices must be less than this).
        , _nextAssignId :: !AssignId
-         -- | List of addresses added to CFG so far.
        }
 
 emptyPartialCFG :: PartialCFG
@@ -262,6 +264,7 @@ data GenState = GenState
        { _partialCFG   :: !PartialCFG
        , _curBlockID   :: !BlockLabel
        , _prevStmts    :: !(Seq Stmt)
+       , _cachedApps   :: !(MapF (App Value) Assignment)
        , _curX86State  :: !X86State
        }
 
@@ -273,6 +276,7 @@ emptyGenState cfg lbl s =
   GenState { _partialCFG = cfg
            , _curBlockID = lbl
            , _prevStmts = Seq.empty
+           , _cachedApps = MapF.empty
            , _curX86State = s
            }
 
@@ -287,6 +291,10 @@ curBlockID = lens _curBlockID (\s v -> s { _curBlockID = v })
 -- | Statements seen so far in this block
 prevStmts :: Simple Lens GenState (Seq Stmt)
 prevStmts = lens _prevStmts (\s v -> s { _prevStmts = v })
+
+-- | Cache mapping applications to assignment.
+cachedApps :: Simple Lens GenState (MapF (App Value) Assignment)
+cachedApps = lens _cachedApps (\s v -> s { _cachedApps = v })
 
 -- | Statements seen so far.
 curX86State :: Simple Lens GenState X86State
@@ -322,6 +330,7 @@ getPartialCFG s = g & frontierBlocks %~ (Seq.|> b)
         -- Create block for final state.
         b = Block { blockLabel = s^.curBlockID
                   , blockStmts = Fold.toList $ s^.prevStmts
+                  , blockCache = s^.cachedApps
                   , blockTerm = FetchAndExecute $ s^.curX86State
                   }
 
@@ -349,18 +358,17 @@ newAssignId = modGenState $ do
 addStmt :: Stmt -> X86Generator r ()
 addStmt stmt = modGenState $ prevStmts %= (Seq.|> stmt)
 
-addAssignment :: AssignRhs tp -> X86Generator r (Value tp)
+addAssignment :: AssignRhs tp -> X86Generator r (Assignment tp)
 addAssignment rhs = do
   l <- newAssignId
   let a = Assignment l rhs
   addStmt $ AssignStmt a
-  return  $ AssignedValue a
-
+  return a
 
 -- | This function does a top-level constant propagation/constant reduction.
 -- We assuem that the leaf nodes have also been propagated (i.e., we only operate
 -- at the outermost term)
-  
+
 -- FIXME: make less ad-hoc
 constPropagate :: forall tp. App Value tp -> Maybe (Value tp)
 constPropagate v =
@@ -373,7 +381,7 @@ constPropagate v =
    BVAdd _  (BVValue _ 0) r       -> Just r
    BVAdd _  l (BVValue _ 1)       -> Just l
    BVAdd _  (BVValue _ 1) r       -> Just r
-   
+
    UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
    BVAdd sz l r                   -> binop (+) sz l r
    -- Boolean operations
@@ -388,21 +396,29 @@ constPropagate v =
     boolop _ _ _ = Nothing
 
     unop :: (tp ~ BVType n) => (Integer -> Integer)
-             -> NatRepr n -> Value tp -> Maybe (Value tp)
+         -> NatRepr n -> Value tp -> Maybe (Value tp)
     unop f sz (BVValue _ l)  = Just $ BVValue sz ( (f l) .&. mask)
       where mask = 2^(widthVal sz) - 1
-    unop _ _ _                         = Nothing
+    unop _ _ _ = Nothing
 
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
              -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
     binop f sz (BVValue _ l) (BVValue _ r) = Just $ BVValue sz ( (f l r) .&. mask)
       where mask = 2^(widthVal sz) - 1
-    binop _ _ _ _                         = Nothing
+    binop _ _ _ _ = Nothing
 
 evalApp :: App Value tp  -> X86Generator r (Value tp)
-evalApp a = case constPropagate a of
-             Nothing -> addAssignment (EvalApp a)
-             Just v  -> return v
+evalApp a = do
+  case constPropagate a of
+    Nothing -> do
+      m <- modGenState $ use cachedApps
+      case MapF.lookup a m of
+        Nothing -> do
+          r <- addAssignment (EvalApp a)
+          modGenState $ cachedApps %= MapF.insert a r
+          return (AssignedValue r)
+        Just r -> return (AssignedValue r)
+    Just v  -> return v
 
 eval :: Expr tp -> X86Generator r (Value tp)
 eval (ValueExpr v) = return v
@@ -418,15 +434,15 @@ getLoc l0 =
   case l0 of
     S.MemoryAddr w tp -> do
       addr <- eval w
-      ValueExpr <$> addAssignment (Read (MemLoc addr tp))
-  
+      ValueExpr . AssignedValue <$> addAssignment (Read (MemLoc addr tp))
+
     S.Register r ->
       case r of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
        N.SegmentReg {}
-         | r == N.fs -> ValueExpr <$> addAssignment (Read FS)
-         | r == N.gs -> ValueExpr <$> addAssignment (Read GS)
+         | r == N.fs -> ValueExpr . AssignedValue <$> addAssignment (Read FS)
+         | r == N.gs -> ValueExpr . AssignedValue <$> addAssignment (Read GS)
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
@@ -445,7 +461,6 @@ valueAsApp _ = Nothing
 asApp :: Expr tp -> Maybe (App Expr tp)
 asApp (AppExpr   a) = Just a
 asApp (ValueExpr v) = mapApp ValueExpr <$> valueAsApp v
-asApp _ = Nothing
 
 lowerHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
@@ -503,7 +518,7 @@ setLoc l0 v =
     S.MemoryAddr w _ -> do
       addr <- eval w
       addStmt $ Write (MemLoc addr (valueType v)) v
-  
+
     S.Register r ->
       case r of
        N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
@@ -513,27 +528,24 @@ setLoc l0 v =
          | r == N.gs -> addStmt $ Write GS v
          -- Otherwise registers are 0.
          | otherwise ->
-             fail $ "On x86-64 registers other than fs and gs may not be set."
-       -- S.MMXReg {} -> do
-       --   ext_v <- evalApp (MMXExtend v)
-       --   modState $ register r .= ext_v
+             fail $ "On x86-64 segment registers other than fs and gs may not be set."
        _ -> modState $ register r .= v
 
     S.LowerHalf l -> do
       b <- getLoc l
       upper <- eval (upperHalf b)
-      setLoc l =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
+      setLoc l =<< evalApp (ConcatV (valueWidth v) v upper)
     S.UpperHalf l -> do
       b <- getLoc l
       lower <- eval (lowerHalf b)
-      setLoc l =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
-      
-    S.X87StackRegister i -> do
-      undefined
+      setLoc l =<< evalApp (ConcatV (valueWidth v) lower v)
+
+    S.X87StackRegister _ -> do
+      error "setLoc X87StackRegister undefined"
 
 instance S.Semantics (X86Generator PartialCFG) where
   make_undefined (S.BVTypeRepr n) =
-    ValueExpr <$> addAssignment (SetUndefined n)
+    ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
 
   -- Get value of a location.
   get l = getLoc l
@@ -563,7 +575,7 @@ instance S.Semantics (X86Generator PartialCFG) where
         X86G $ \c s -> do
           let last_block_id = s^.curBlockID
           let last_block_stmts = Fold.toList $ s^.prevStmts
-        
+
           -- Label for true branch
           let t_cfg = s^.partialCFG
           let true_block_id = GeneratedBlock (t_cfg^.nextBlockID)
@@ -577,6 +589,7 @@ instance S.Semantics (X86Generator PartialCFG) where
           -- for false branch.
           let last_block = Block { blockLabel = last_block_id
                                  , blockStmts = last_block_stmts
+                                 , blockCache = s^.cachedApps
                                  , blockTerm  = Branch cond true_block_id false_block_id
                                  }
           -- Update partial CFG now that we have last_block
@@ -589,7 +602,7 @@ instance S.Semantics (X86Generator PartialCFG) where
               f_end = unX86G f c f_start
           --  Return since we've already run continuation in branches.
           f_end
-  
+
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate
   --            -> ExceptionClass
@@ -604,29 +617,12 @@ instance S.Semantics (X86Generator PartialCFG) where
                       , Some <$> eval src
                       , Some <$> eval dest ]
        addStmt (PlaceHolderStmt vs "memmove")
-       
+
   memset count v dest =
     do vs <- sequence [ Some <$> eval count
                       , Some <$> eval v
                       , Some <$> eval dest ]
        addStmt (PlaceHolderStmt vs "memset")
-
-{-
-Steps:
--}
-
-{-
-disassembleInstruction :: ByteReader m
-                       => InstructionParser
-                       -> m InstructionInstance
--}
-
-falseBit :: Value BoolType
-falseBit = BVValue knownNat 0
-
-trueBit :: Value BoolType
-trueBit = BVValue knownNat 1
-
 
 -- | Read instruction at a given memory address.
 readInstruction :: Memory Word64 -- Memory to read.
@@ -666,6 +662,7 @@ disassembleBlock mem g loc = do
   let gs = GenState { _partialCFG = g
                     , _curBlockID = DecompiledBlock (loc_ip loc)
                     , _prevStmts  = Seq.empty
+                    , _cachedApps = MapF.empty
                     , _curX86State = initX86State loc
                     }
   trace ("Exploring " ++ showHex (loc_ip loc) "") $ do
@@ -691,7 +688,7 @@ disassembleBlock' :: Memory Word64
                   -> GenState -- ^ Initial state
                   -> CodeAddr
                   -> (PartialCFG, Set ExploreLoc)
-disassembleBlock' mem gs0 addr = do
+disassembleBlock' mem gs0 addr =
   case readInstruction mem addr of
     Left e -> error (show e)
     Right (i,next_ip) -> do
@@ -701,7 +698,7 @@ disassembleBlock' mem gs0 addr = do
                  $ do let line = text (showHex addr "") <> colon <+> Flexdis.ppInstruction addr i
                       addStmt (Comment (show line))
                       execInstruction i
-                                          
+
       case Fold.toList (pcfg^.frontierBlocks) of
         -- If we have a single block that goes to the next instruction,
         -- then we just disassemble the next block and concat it with
@@ -712,12 +709,13 @@ disassembleBlock' mem gs0 addr = do
           let -- Clear frontier blocks
               pcfg1 = pcfg & frontierBlocks .~ Seq.empty
               -- Create state to continue from.
-              gs1 = GenState { _partialCFG = pcfg1
+              gs2 = GenState { _partialCFG = pcfg1
                              , _curBlockID = blockLabel b
                              , _prevStmts  = Seq.fromList (blockStmts b)
+                             , _cachedApps = blockCache b
                              , _curX86State = s
                              }
-          disassembleBlock' mem gs1 next_ip
+          disassembleBlock' mem gs2 next_ip
         block_list -> (mergeFrontier pcfg, getFrontierNext block_list)
 
 recursiveDecent :: Memory Word64

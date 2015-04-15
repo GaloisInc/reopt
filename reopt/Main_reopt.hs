@@ -8,7 +8,7 @@ import Data.Version
 import System.Console.CmdArgs.Explicit
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import Text.PrettyPrint.Leijen (pretty)
+import Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import Paths_reopt (version)
 
