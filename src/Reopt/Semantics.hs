@@ -31,7 +31,6 @@ import Data.Parameterized.NatRepr
     ( widthVal
     , NatRepr
     , addNat
-    , addIsLeq
     , withAddLeq
     , testLeq
     , LeqProof(..)
