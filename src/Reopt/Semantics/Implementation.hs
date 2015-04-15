@@ -23,7 +23,6 @@
 module Reopt.Semantics.Implementation
   ( cfgFromAddress
     -- debugging
-  , BlockLabel(..)
   , readInstruction
   ) where
 
@@ -60,6 +59,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
+import           Reopt.Semantics.Types (TypeBits)
 
 ------------------------------------------------------------------------
 -- Location
@@ -438,39 +438,53 @@ upperHalf e =
         half_width = halfNat (exprWidth e)
 
 -- | Assign a value to a location
-setLoc :: ImpLocation tp -> Value tp -> X86Generator r ()
-setLoc l0 v =
-  case l0 of
-    S.MemoryAddr w _ -> do
-      addr <- eval w
-      addStmt $ Write (MemLoc addr (valueType v)) v
+setLoc :: forall tp r. ImpLocation tp -> Value tp -> X86Generator r ()
+setLoc loc v0 =
+  -- So x86 says that when you assign a 32 bit register, the upper bits
+  -- are set to zero, which is different to the 16- and 8-bit cases.  This
+  -- bit of special code checks when you are updating a 32bit register and
+  -- zeroes accordingly.
+  case loc of
+   S.LowerHalf (S.Register r@(N.GPReg _))
+     -> do -- hack to infer that n + n ~ 64 ==> n < 64
+           (LeqProof :: LeqProof (TypeBits tp) 64) <- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
+           zext_v <- evalApp $ UExt v0 n64
+           modState $ register r .= zext_v
+   _ -> go loc v0
+  where
+    go :: forall tp' r'. ImpLocation tp' -> Value tp' -> X86Generator r' ()
+    go l0 v =
+      case l0 of
+       S.MemoryAddr w _ -> do
+         addr <- eval w
+         addStmt $ Write (MemLoc addr (valueType v)) v
   
-    S.Register r ->
-      case r of
-       N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
-       N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
-       N.SegmentReg {}
-         | r == N.fs -> addStmt $ Write FS v
-         | r == N.gs -> addStmt $ Write GS v
-         -- Otherwise registers are 0.
-         | otherwise ->
-             fail $ "On x86-64 registers other than fs and gs may not be set."
-       -- S.MMXReg {} -> do
-       --   ext_v <- evalApp (MMXExtend v)
-       --   modState $ register r .= ext_v
-       _ -> modState $ register r .= v
-
-    S.LowerHalf l -> do
-      b <- getLoc l
-      upper <- eval (upperHalf b)
-      setLoc l =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
-    S.UpperHalf l -> do
-      b <- getLoc l
-      lower <- eval (lowerHalf b)
-      setLoc l =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
-      
-    S.X87StackRegister i -> do
-      undefined
+       S.Register r ->
+         case r of
+           N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
+           N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
+           N.SegmentReg {}
+             | r == N.fs -> addStmt $ Write FS v
+             | r == N.gs -> addStmt $ Write GS v
+             -- Otherwise registers are 0.
+             | otherwise ->
+                 fail $ "On x86-64 registers other than fs and gs may not be set."
+           -- S.MMXReg {} -> do
+           --   ext_v <- evalApp (MMXExtend v)
+           --   modState $ register r .= ext_v
+           _ -> modState $ register r .= v
+     
+       S.LowerHalf l -> do
+         b <- getLoc l
+         upper <- eval (upperHalf b)
+         go l =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
+       S.UpperHalf l -> do
+         b <- getLoc l
+         lower <- eval (lowerHalf b)
+         go l =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
+          
+       S.X87StackRegister i -> do
+         undefined
 
 instance S.Semantics (X86Generator PartialCFG) where
   make_undefined (S.BVTypeRepr n) =

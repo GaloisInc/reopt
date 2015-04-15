@@ -73,22 +73,24 @@ nRegisters X87_ControlRepr    = knownNat
 nRegisters XMMRepr            = knownNat
 -}
 
-type family RegisterType (cl :: RegisterClass) :: Type where
-  RegisterType ProgramCounter = BVType 64
-  RegisterType GP             = BVType 64
-  RegisterType Flag           = BoolType
-  RegisterType Segment        = BVType 16
-  RegisterType Debug          = BVType 64
-  RegisterType Control        = BVType 64
-  -- FIXME: we could also have undecidable instances and have
-  -- FloatType X86_80Float
-  RegisterType X87_FPU         = BVType 80 
-  RegisterType X87_Status      = BoolType
-  RegisterType X87_Top         = BVType 3
-  RegisterType X87_Tag         = BVType 2
-  RegisterType X87_ControlMask = BoolType
-  RegisterType X87_Control     = BVType 2
-  RegisterType XMM             = BVType 128
+
+type family RegisterClassBits (cl :: RegisterClass) :: Nat where
+  RegisterClassBits ProgramCounter = 64
+  RegisterClassBits GP             = 64
+  RegisterClassBits Flag           = 1
+  RegisterClassBits Segment        = 16
+  RegisterClassBits Debug          = 64
+  RegisterClassBits Control        = 64
+  RegisterClassBits X87_FPU         = 80 
+  RegisterClassBits X87_Status      = 1
+  RegisterClassBits X87_Top         = 3
+  RegisterClassBits X87_Tag         = 2
+  RegisterClassBits X87_ControlMask = 1
+  RegisterClassBits X87_Control     = 2
+  RegisterClassBits XMM             = 128
+
+
+type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 
 data RegisterName cl where
   IPReg      :: RegisterName ProgramCounter 
@@ -205,7 +207,7 @@ instance OrdF RegisterName where
   -- compareF DebugReg{}        _                  = LTF 
   -- compareF _                 DebugReg{}         = GTF 
 
-registerWidth :: RegisterName cl -> NatRepr (TypeBits (RegisterType cl))
+registerWidth :: RegisterName cl -> NatRepr (RegisterClassBits cl)
 registerWidth IPReg           = knownNat 
 registerWidth GPReg{}         = knownNat
 registerWidth FlagReg{}       = knownNat
