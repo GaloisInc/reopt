@@ -207,7 +207,7 @@ rip :: Location addr (BVType 64)
 rip = Register N.IPReg
 
 packWord :: forall m n. Semantics m => N.BitPacking n -> m (Value m (BVType n))
-packWord (N.BitPacking sz bits) = 
+packWord (N.BitPacking sz bits) =
   do injs <- mapM getMoveBits bits
      return (foldl1 (.|.) injs)
   where
@@ -217,7 +217,7 @@ packWord (N.BitPacking sz bits) =
     getMoveBits (N.RegisterBit reg off)
       = do v <- uext sz <$> get (Register reg)
            return $ v `bvShl` bvLit sz (widthVal off)
-    
+
 unpackWord :: forall m n. Semantics m => N.BitPacking n -> Value m (BVType n) -> m ()
 unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
   where
@@ -308,7 +308,7 @@ class IsValue (v  :: Type -> *) where
   bvRol v n = bvShl v n .|. bvShr v bits_less_n
     where
       bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
-      
+
   bvRor v n = bvShr v n .|. bvShl v bits_less_n
     where
       bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
@@ -463,6 +463,9 @@ class IsValue (v  :: Type -> *) where
   false :: v BoolType
   false = bvLit knownNat (0::Integer)
 
+  boolValue :: Bool -> v BoolType
+  boolValue b = if b then true else false
+
 -- Basically so I can get fromInteger, but the others might be handy too ...
 instance (IsValue v, KnownNat n) => Num (v (BVType n)) where
   (+) = bvAdd
@@ -487,7 +490,7 @@ type MLocation m = Location (Value m (BVType 64))
 data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException
                                                          -- | AlignmentCheck
                     deriving Show
-                                                         
+
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m
