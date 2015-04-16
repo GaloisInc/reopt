@@ -28,6 +28,7 @@ module Reopt.Semantics.Implementation
   ) where
 
 import           Control.Applicative
+import Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
 import           Control.Monad.State.Strict
@@ -198,9 +199,11 @@ instance S.IsValue Expr where
     | Just (MMXExtend e) <- asApp e0
     , Just Refl <- testEquality w n64 =
       e
+
     | Just (ConcatV lw l _) <- asApp e0
     , Just LeqProof <- testLeq w lw =
       S.bvTrunc w l
+
     | Just (UExt e _) <- asApp e0 =
       case testLeq w (S.bv_width e) of
         -- Check if original value width is less than new width.
@@ -211,28 +214,74 @@ instance S.IsValue Expr where
              Just LeqProof -> S.uext w e
              Nothing -> error "bvTrunc internal error"
 
+      -- Simplify truncation.
     | Just (Trunc e _) <- asApp e0 =
       -- Runtime check to workaround GHC typechecker.
       case testLeq w (exprWidth e) of
         Just LeqProof -> S.bvTrunc w e
         Nothing -> error "bvTrunc given bad width"
+
     | otherwise = app (Trunc e0 w)
 
   bvLt x y = app $ BVUnsignedLt x y
 
-  bvBit x y = app $ BVBit x y
+  bvBit x y
+    | Just xv <- asBVLit x
+    , Just yv <- asBVLit y =
+      S.boolValue (xv `testBit` fromInteger yv)
+    | Just (Trunc xe w) <- asApp x
+    , Just yv <- asBVLit y = assert (0 <= yv && yv < natValue w) $
+      S.bvBit xe y
 
-  sext w x = app $ SExt x w
-  uext w x = app $ UExt x w
+    | Just (ConcatV lw x_low x_high) <- asApp x
+    , Just yv <- asBVLit y = assert (0 <= yv && yv < 2*natValue lw) $
+      if yv >= natValue lw then
+        S.bvBit x_high (S.bvLit (exprWidth y) (yv - natValue lw))
+      else
+        S.bvBit x_low y
 
-  even_parity x = app $ EvenParity x
+    | otherwise =
+      app $ BVBit x y
+
+  sext w e0
+    | Just (SExt e _) <- asApp e0 =
+      -- Runtime check to wordaround GHC typechecker
+      case testLeq (S.bv_width e) w of
+        Just LeqProof -> S.sext w e
+        Nothing -> error "sext internal error"
+    | otherwise = app $ SExt e0 w
+
+  uext w e0
+    | Just (UExt e _) <- asApp e0 =
+      -- Runtime check to wordaround GHC typechecker
+      case testLeq (S.bv_width e) w of
+        Just LeqProof -> S.uext w e
+        Nothing -> error "uext internal error"
+      -- Default case
+    | otherwise = app $ UExt e0 w
+
+  even_parity x
+    | Just xv <- asBVLit x =
+        let go 8 r = r
+            go i r = go (i+1) $! (xv `testBit` i /= r)
+         in S.boolValue (go 0 True)
+    | otherwise = app $ EvenParity x
   reverse_bytes x = app $ ReverseBytes (exprWidth x) x
 
-  uadc_overflows x y c = app $ UadcOverflows x y c
-  sadc_overflows x y c = app $ SadcOverflows x y c
+  uadc_overflows x y c
+    | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+    | otherwise = app $ UadcOverflows x y c
+  sadc_overflows x y c
+    | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+    | otherwise = app $ SadcOverflows x y c
 
-  usbb_overflows x y c = app $ SsbbOverflows x y c
-  ssbb_overflows x y c = app $ UsbbOverflows x y c
+  usbb_overflows x y c
+    | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+    | otherwise = app $ UsbbOverflows x y c
+
+  ssbb_overflows x y c
+    | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+    | otherwise = app $ SsbbOverflows x y c
 
   bsf x = app $ Bsf (exprWidth x) x
   bsr x = app $ Bsr (exprWidth x) x
@@ -527,7 +576,7 @@ setLoc loc v0 =
    S.LowerHalf (S.Register r@(N.GPReg _))
      -> do -- hack to infer that n + n ~ 64 ==> n < 64
            (LeqProof :: LeqProof (TypeBits tp) 64) <- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
-           zext_v <- evalApp $ UExt v0 n64
+           zext_v <- eval $ S.uext n64 (ValueExpr v0)
            modState $ register r .= zext_v
    _ -> go loc v0
   where

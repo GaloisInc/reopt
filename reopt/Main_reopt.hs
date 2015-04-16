@@ -204,8 +204,9 @@ showCFG :: FilePath -> IO ()
 showCFG path = do
   (_, (g0, _)) <- getCFG path
   let g = eliminateDeadRegisters g0
-  forM_ (Map.elems (g^.cfgBlocks)) printSP
+--  forM_ (Map.elems (g^.cfgBlocks)) printSP
   print (pretty g)
+--  print (Map.size (g^.cfgBlocks))
 
 printSP :: Block -> IO ()
 printSP b = do
