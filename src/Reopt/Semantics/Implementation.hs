@@ -31,9 +31,7 @@ import           Control.Applicative
 import Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
-import           Control.Monad.Error
 import           Control.Monad.State.Strict
-import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.Foldable as Fold
 import           Data.Maybe
