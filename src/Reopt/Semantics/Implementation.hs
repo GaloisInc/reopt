@@ -21,32 +21,35 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
-module Reopt.Semantics.Implementation
-  ( cfgFromAddress
-    -- debugging
-  , readInstruction
-  ) where
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DataKinds #-} -- MaybeF
+{-# LANGUAGE KindSignatures #-} -- MaybeF
+
+module Reopt.Semantics.Implementation (cfgFromAddress, readInstruction) where
 
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.Cont
+import           Control.Monad.Error
 import           Control.Monad.State.Strict
+import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.Foldable as Fold
-import Data.Maybe
-import Data.Parameterized.Map (MapF)
+import           Data.Maybe
+import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import Data.Parameterized.Some
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
-import Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
+import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
   -- hack for instruction comment
 
 import           Unsafe.Coerce (unsafeCoerce)
@@ -65,9 +68,6 @@ import qualified Reopt.Semantics.Monad as S
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types (TypeBits)
-
-------------------------------------------------------------------------
--- Location
 
 ------------------------------------------------------------------------
 -- Expr
@@ -120,7 +120,10 @@ instance S.IsValue Expr where
 
   bv_width = exprWidth
 
-  mux c x y = app $ Mux (exprWidth x) c x y
+  mux c x y
+    | Just 1 <- asBVLit c = x
+    | Just 0 <- asBVLit c = y
+    | otherwise = app $ Mux (exprWidth x) c x y
 
   bvLit n v = ValueExpr $ mkLit n v
   bvAdd x y
@@ -238,154 +241,162 @@ instance S.IsValue Expr where
   bsr x = app $ Bsr (exprWidth x) x
 
 ------------------------------------------------------------------------
--- PartialCFG
+-- GenState
 
--- | A Partial CFG as it is constructed.
-data PartialCFG = PartialCFG
-       { _prevCFG      :: !CFG
+-- | Global for the entire program.
+data GlobalGenState = GlobalGenState
+       { -- | Index of next assignment identifier to use.
+         -- (all used assignment indices must be less than this).
+         _nextAssignId :: !AssignId
+       , _nextBlockID  :: !Word64         
+       }
+
+-- | Number of assignments so far.
+nextAssignId :: Simple Lens GlobalGenState AssignId
+nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
+
+-- | Control flow blocs generated so far.
+nextBlockID :: Simple Lens GlobalGenState Word64
+nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
+
+data PreBlock = PreBlock { _pBlockLabel :: !BlockLabel
+                         , _pBlockStmts :: !(Seq Stmt)
+                           -- | The last statement in the block.
+                         , _pBlockState :: !X86State
+                         , _pBlockApps  :: !(MapF (App Value) Assignment)
+                         }
+
+pBlockLabel :: Simple Lens PreBlock BlockLabel
+pBlockLabel = lens _pBlockLabel (\s v -> s { _pBlockLabel = v })
+
+pBlockStmts :: Simple Lens PreBlock (Seq Stmt)
+pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
+
+pBlockState :: Simple Lens PreBlock X86State
+pBlockState = lens _pBlockState (\s v -> s { _pBlockState = v })
+
+pBlockApps  :: Simple Lens PreBlock (MapF (App Value) Assignment)
+pBlockApps = lens _pBlockApps (\s v -> s { _pBlockApps = v })
+
+data MaybeF (t :: Bool) a where
+  NothingF :: MaybeF 'False a
+  JustF    :: a -> MaybeF 'True a
+
+_JustF :: Lens (MaybeF 'True a) (MaybeF 'True b) a b
+_JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
+
+-- | Local to block discovery.
+data GenState tag = GenState 
+       { -- | The global state
+         _globalGenState :: GlobalGenState
          -- | Blocks that are not in CFG that end with a FetchAndExecute,
          -- which we need to analyze to compute new potential branch targets.
        , _frontierBlocks :: !(Seq Block)
-         -- | Index of next generated block
-         -- (all used indices must be less than this).
-       , _nextBlockID  :: !Word64
-         -- | Index of next assignment identifier to use.
-         -- (all used assignment indices must be less than this).
-       , _nextAssignId :: !AssignId
+       , _blockState     :: !(MaybeF tag PreBlock)
        }
 
-emptyPartialCFG :: PartialCFG
-emptyPartialCFG =
-  PartialCFG { _prevCFG = emptyCFG
-             , _frontierBlocks = Seq.empty
-             , _nextBlockID = 0
-             , _nextAssignId = 0
-             }
+emptyPreBlock :: X86State
+                 -> BlockLabel
+                 -> PreBlock
+emptyPreBlock s lbl =
+  PreBlock { _pBlockLabel = lbl
+           , _pBlockStmts = Seq.empty
+           , _pBlockApps  = MapF.empty
+           , _pBlockState = s
+           }
+  
+emptyGenState :: GlobalGenState -> GenState 'False
+emptyGenState st =
+  GenState { _globalGenState = st
+           , _frontierBlocks = Seq.empty
+           , _blockState     = NothingF
+           }
 
--- | Control flow blocs generated so far.
-prevCFG :: Simple Lens PartialCFG CFG
-prevCFG = lens _prevCFG (\s v -> s { _prevCFG = v })
+globalGenState :: Simple Lens (GenState tag) GlobalGenState
+globalGenState = lens _globalGenState (\s v -> s { _globalGenState = v })
 
 -- | Blocks that are not in CFG that end with a FetchAndExecute,
 -- which we need to analyze to compute new potential branch targets.
-frontierBlocks :: Simple Lens PartialCFG (Seq Block)
+frontierBlocks :: Simple Lens (GenState tag) (Seq Block)
 frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
 
--- | Control flow blocs generated so far.
-nextBlockID :: Simple Lens PartialCFG Word64
-nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
+-- | Blocks that are not in CFG that end with a FetchAndExecute,
+-- which we need to analyze to compute new potential branch targets.
+blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBlock)
+blockState = lens _blockState (\s v -> s { _blockState = v })
 
--- | Number of assignments so far.
-nextAssignId :: Simple Lens PartialCFG AssignId
-nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
+curX86State :: Simple Lens (GenState 'True) X86State
+curX86State = blockState . _JustF . pBlockState                            
 
-mergeFrontier :: PartialCFG -> PartialCFG
-mergeFrontier pg = pg & prevCFG %~ flip (Fold.foldl' (flip insertBlock)) frontier
-                      & frontierBlocks .~ Seq.empty
-  where frontier = pg^.frontierBlocks
+-- | Finishes the current block, if it is started.
+finishBlock :: (X86State -> TermStmt) -> (GenState a -> GenState 'False)
+finishBlock term st =
+  case st^.blockState of
+   NothingF    -> st
+   JustF pre_b -> st & frontierBlocks %~ (Seq.|> b)
+                     & blockState .~ NothingF
+     where
+       b = Block { blockLabel = pre_b^.pBlockLabel
+                 , blockStmts = Fold.toList (pre_b^.pBlockStmts)
+                 , blockCache = pre_b^.pBlockApps
+                 , blockTerm  = term (pre_b^.pBlockState)
+                 }
 
-------------------------------------------------------------------------
--- GenState
+-- | Starts a new block.  If there is a current block it will finish
+-- it with FetchAndExecute       
+startBlock :: X86State -> BlockLabel -> (GenState a -> GenState 'True)
+startBlock s lbl st = finishBlock FetchAndExecute st
+                      & blockState .~ JustF (emptyPreBlock s lbl)
 
-data GenState = GenState
-       { _partialCFG   :: !PartialCFG
-       , _curBlockID   :: !BlockLabel
-       , _prevStmts    :: !(Seq Stmt)
-       , _cachedApps   :: !(MapF (App Value) Assignment)
-       , _curX86State  :: !X86State
-       }
+-- newtype GenM a = GenM { unGenM :: StateT GenState (Except (MemoryError Word64)) a }
+--                deriving (Functor, Applicative, Monad, MonadState GenState)
 
-emptyGenState :: PartialCFG
-              -> BlockLabel
-              -> X86State
-              -> GenState
-emptyGenState cfg lbl s =
-  GenState { _partialCFG = cfg
-           , _curBlockID = lbl
-           , _prevStmts = Seq.empty
-           , _cachedApps = MapF.empty
-           , _curX86State = s
-           }
-
--- | Index of current block being generated.
-partialCFG :: Simple Lens GenState PartialCFG
-partialCFG = lens _partialCFG (\s v -> s { _partialCFG = v })
-
--- | Index of current block being generated.
-curBlockID :: Simple Lens GenState BlockLabel
-curBlockID = lens _curBlockID (\s v -> s { _curBlockID = v })
-
--- | Statements seen so far in this block
-prevStmts :: Simple Lens GenState (Seq Stmt)
-prevStmts = lens _prevStmts (\s v -> s { _prevStmts = v })
-
--- | Cache mapping applications to assignment.
-cachedApps :: Simple Lens GenState (MapF (App Value) Assignment)
-cachedApps = lens _cachedApps (\s v -> s { _cachedApps = v })
-
--- | Statements seen so far.
-curX86State :: Simple Lens GenState X86State
-curX86State = lens _curX86State (\s v -> s { _curX86State = v })
+-- runGenM :: GenM a -> GenState -> Either (MemoryError Word64) (a, GenState)
+-- runGenM m s = runExcept (runStateT (unGenM m) s)
 
 ------------------------------------------------------------------------
 -- X86Generator
 
-newtype X86Generator r a = X86G { unX86G :: (a -> GenState -> r)
-                                         -> GenState
-                                         -> r
-                                }
+newtype X86Generator a = X86G { unX86G :: (a -> GenState 'True -> Some GenState)
+                                           -> GenState 'True -> Some GenState
+                              }
 
-instance Functor (X86Generator r) where
+instance Functor X86Generator where
   fmap = liftM
 
-instance Applicative (X86Generator r) where
+instance Applicative X86Generator where
   pure = return
   (<*>) = ap
 
-instance Monad (X86Generator r) where
+instance Monad X86Generator where
   return v = X86G $ \c -> c v
   m >>= h = X86G $ \c -> unX86G m (\mv -> unX86G (h mv) c)
   fail = error
+  
+type instance S.Value X86Generator = Expr
+runX86Generator :: GenState 'True -> X86Generator () -> Some GenState
+runX86Generator st m = unX86G m (\() -> Some) st
 
-type instance S.Value (X86Generator r) = Expr
-
--- | Create a block to fetch and execute from the previous statements and
--- current x86 state.
-getPartialCFG :: GenState -> PartialCFG
-getPartialCFG s = g & frontierBlocks %~ (Seq.|> b)
-  where g = s^.partialCFG
-        -- Create block for final state.
-        b = Block { blockLabel = s^.curBlockID
-                  , blockStmts = Fold.toList $ s^.prevStmts
-                  , blockCache = s^.cachedApps
-                  , blockTerm = FetchAndExecute $ s^.curX86State
-                  }
-
-runX86Generator :: GenState -- ^ Initial state of generator.
-                -> X86Generator PartialCFG ()
-                -> PartialCFG
-runX86Generator gs0 m = unX86G m (\() gs -> getPartialCFG gs) gs0
-
-modGenState :: State GenState a -> X86Generator r a
+modGenState :: State (GenState 'True) a -> X86Generator a
 modGenState m = X86G $ \c s -> uncurry c (runState m s)
 
-modState :: State X86State a -> X86Generator r a
+modState :: State X86State a -> X86Generator a
 modState m = modGenState $ do
-  s <- use $ curX86State
+  s <- use curX86State
   let (r,s') = runState m s
   curX86State .= s'
   return r
 
-newAssignId :: X86Generator r AssignId
+newAssignId :: X86Generator AssignId
 newAssignId = modGenState $ do
-  l <- use $ partialCFG . nextAssignId
-  partialCFG . nextAssignId += 1
+  l <- use $ globalGenState . nextAssignId
+  globalGenState . nextAssignId += 1
   return l
 
-addStmt :: Stmt -> X86Generator r ()
-addStmt stmt = modGenState $ prevStmts %= (Seq.|> stmt)
+addStmt :: Stmt -> X86Generator ()
+addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
 
-addAssignment :: AssignRhs tp -> X86Generator r (Assignment tp)
+addAssignment :: AssignRhs tp -> X86Generator (Assignment tp)
 addAssignment rhs = do
   l <- newAssignId
   let a = Assignment l rhs
@@ -436,29 +447,32 @@ constPropagate v =
     binop f sz (BVValue _ l) (BVValue _ r) = Just $ mkLit sz (f l r)
     binop _ _ _ _                          = Nothing
 
-evalApp :: App Value tp  -> X86Generator r (Value tp)
+evalApp :: App Value tp  -> X86Generator (Value tp)
 evalApp a = do
   case constPropagate a of
     Nothing -> do
-      m <- modGenState $ use cachedApps
+      m <- modGenState $ use (blockState . _JustF . pBlockApps)
       case MapF.lookup a m of
         Nothing -> do
           r <- addAssignment (EvalApp a)
-          modGenState $ cachedApps %= MapF.insert a r
+          modGenState $ (blockState . _JustF . pBlockApps) %= MapF.insert a r
           return (AssignedValue r)
         Just r -> return (AssignedValue r)
     Just v  -> return v
 
-eval :: Expr tp -> X86Generator r (Value tp)
+eval :: Expr tp -> X86Generator (Value tp)
 eval (ValueExpr v) = return v
 eval (AppExpr a) = evalApp =<< traverseApp eval a
 
 -- | Type for addresses.
 type AddrExpr = Expr (BVType 64)
 
+------------------------------------------------------------------------
+-- Location
+
 type ImpLocation tp = S.Location AddrExpr tp
 
-getLoc :: ImpLocation tp -> X86Generator r (Expr tp)
+getLoc :: ImpLocation tp -> X86Generator (Expr tp)
 getLoc l0 =
   case l0 of
     S.MemoryAddr w tp -> do
@@ -517,7 +531,7 @@ upperHalf e =
         half_width = halfNat (exprWidth e)
 
 -- | Assign a value to a location
-setLoc :: forall tp r. ImpLocation tp -> Value tp -> X86Generator r ()
+setLoc :: forall tp. ImpLocation tp -> Value tp -> X86Generator ()
 setLoc loc v0 =
   -- So x86 says that when you assign a 32 bit register, the upper bits
   -- are set to zero, which is different to the 16- and 8-bit cases.  This
@@ -531,7 +545,7 @@ setLoc loc v0 =
            modState $ register r .= zext_v
    _ -> go loc v0
   where
-    go :: forall tp' r'. ImpLocation tp' -> Value tp' -> X86Generator r' ()
+    go :: forall tp'. ImpLocation tp' -> Value tp' -> X86Generator ()
     go l0 v =
       case l0 of
        S.MemoryAddr w _ -> do
@@ -566,7 +580,7 @@ setLoc loc v0 =
        S.X87StackRegister _ -> do
          error "setLoc X87StackRegister undefined"
 
-instance S.Semantics (X86Generator PartialCFG) where
+instance S.Semantics X86Generator where
   make_undefined (S.BVTypeRepr n) =
     ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
 
@@ -596,37 +610,24 @@ instance S.Semantics (X86Generator PartialCFG) where
       go (BVValue _ 0) = f
       go cond =
         X86G $ \c s -> do
-          let last_block_id = s^.curBlockID
-          let last_block_stmts = Fold.toList $ s^.prevStmts
+          let p_b = s ^. (blockState . _JustF)
+              (t_block_id, s')  = s  & globalGenState . nextBlockID <<+~ 1
+              (f_block_id, s'') = s' & globalGenState . nextBlockID <<+~ 1
 
-          -- Label for true branch
-          let t_cfg = s^.partialCFG
-          let true_block_id = GeneratedBlock (blockParent last_block_id)
-                              (t_cfg^.nextBlockID)
-          let t_start = emptyGenState (t_cfg & nextBlockID +~ 1) true_block_id (s^.curX86State)
-          -- Get state after running t followed by c
-          let t_end :: PartialCFG
-              t_end = unX86G t c t_start
-          -- Label for false branch
-          let false_block_id = GeneratedBlock (blockParent last_block_id)
-                               (t_end^.nextBlockID)
-          -- Get block for code before branch now that we can get label
-          -- for false branch.
-          let last_block = Block { blockLabel = last_block_id
-                                 , blockStmts = last_block_stmts
-                                 , blockCache = s^.cachedApps
-                                 , blockTerm  = Branch cond true_block_id false_block_id
-                                 }
-          -- Update partial CFG now that we have last_block
-          let f_cfg   = t_end & nextBlockID +~ 1
-                              & prevCFG %~ insertBlock last_block
-          -- Create state for starting evaluation of false branch.
-          let f_start = emptyGenState f_cfg false_block_id (s^.curX86State)
-          -- Get final state
-          let f_end :: PartialCFG
-              f_end = unX86G f c f_start
-          --  Return since we've already run continuation in branches.
-          f_end
+          let last_block_id = p_b^.pBlockLabel
+              t_block_label = GeneratedBlock (blockParent last_block_id) t_block_id
+              f_block_label = GeneratedBlock (blockParent last_block_id) f_block_id
+
+          -- Note that startBlock flushes the current block if required.
+          let flush_current = finishBlock (const (Branch cond t_block_label f_block_label))
+              run_t, run_f :: forall tp. GenState tp -> Some GenState
+              run_t = unX86G t c . startBlock (p_b^.pBlockState) t_block_label
+              run_f = unX86G f c . startBlock (p_b^.pBlockState) f_block_label
+
+          -- The finishBlock here results in a new block after
+          -- conditional jumps, for example (no continuing blocks)
+          Some . viewSome (finishBlock FetchAndExecute)
+            . viewSome run_f . run_t . flush_current $ s''
 
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate
@@ -687,18 +688,17 @@ initX86State loc =
            }
 
 disassembleBlock :: Memory Word64
-                 -> PartialCFG
+                 -> GlobalGenState
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
-disassembleBlock mem g loc =
-  let gs = GenState { _partialCFG = g
-                    , _curBlockID = DecompiledBlock (loc_ip loc)
-                    , _prevStmts  = Seq.empty
-                    , _cachedApps = MapF.empty
-                    , _curX86State = initX86State loc
-                    }
-  in trace ("Exploring " ++ showHex (loc_ip loc) "")
-     $ disassembleBlock' mem gs (loc_ip loc)
+                 -> Either (MemoryError Word64)
+                           (GlobalGenState, [Block], Set ExploreLoc, CodeAddr)
+disassembleBlock mem st loc =
+  let lbl = DecompiledBlock (loc_ip loc)
+      p_b = emptyPreBlock (initX86State loc) lbl
+      gs  = emptyGenState st & blockState .~ JustF p_b      
+      mk (gs', ip) = let block_list = Fold.toList (gs'^.frontierBlocks) in
+                      (gs' ^. globalGenState, block_list, getFrontierNext block_list, ip)
+  in mk <$> (trace ("Exploring " ++ showHex (loc_ip loc) "") $ disassembleBlock' mem gs (loc_ip loc))
 
 getExploreLocs :: X86State -> [ExploreLoc]
 getExploreLocs s =
@@ -711,41 +711,31 @@ getExploreLocs s =
 
 getFrontierNext :: [Block] -> Set ExploreLoc
 getFrontierNext = Fold.foldl' f Set.empty
-  where f locs b =
+  where f locs b = 
           case blockTerm b of
             FetchAndExecute s -> Fold.foldl' (flip Set.insert) locs (getExploreLocs s)
-            _ -> error "Frontier node does not end with FetchAndExecute."
+            _ -> locs
 
 disassembleBlock' :: Memory Word64
-                  -> GenState -- ^ Initial state
+                  -> GenState 'True
                   -> CodeAddr
-                  -> Either (MemoryError Word64) (PartialCFG, Set ExploreLoc, CodeAddr)
-disassembleBlock' mem gs0 addr = do
+                  -> Either (MemoryError Word64)
+                            (GenState 'False, CodeAddr)
+disassembleBlock' mem gs addr = do
   (i, next_ip) <- readInstruction mem addr
   -- Update current IP
-  let gs1 = gs0 & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
-  let pcfg = runX86Generator gs1 $ do
-               let line = text (showHex addr "") <> colon <+> Flexdis.ppInstruction addr i
-               addStmt (Comment (show line))
-               execInstruction i
-  case Fold.toList (pcfg^.frontierBlocks) of
-    -- If we have a single block that goes to the next instruction,
-    -- then we just disassemble the next block and concat it with
-    -- this one.
-    [b] | FetchAndExecute s <- blockTerm b
-        , [loc] <- getExploreLocs s
-        , loc_ip loc == next_ip -> do
-          let -- Clear frontier blocks
-              pcfg1 = pcfg & frontierBlocks .~ Seq.empty
-              -- Create state to continue from.
-              gs2 = GenState { _partialCFG = pcfg1
-                             , _curBlockID = blockLabel b
-                             , _prevStmts  = Seq.fromList (blockStmts b)
-                             , _cachedApps = blockCache b
-                             , _curX86State = s
-                             }
-          disassembleBlock' mem gs2 next_ip
-    block_list -> return (mergeFrontier pcfg, getFrontierNext block_list, next_ip)
+  let gs1 = gs & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
+  let some_gs2 = runX86Generator gs1 $ do
+                      let line = text (showHex addr "") <> colon
+                                 <+> Flexdis.ppInstruction addr i
+                      addStmt (Comment (show line))
+                      execInstruction i
+  case some_gs2 of
+   Some gs2 -> case gs2^.blockState of
+                JustF p_b | [loc] <- getExploreLocs (p_b^.pBlockState)
+                          , loc_ip loc == next_ip ->
+                              disassembleBlock' mem gs2 next_ip
+                _ -> return (finishBlock FetchAndExecute gs2, next_ip)
 
 -- FIXME: move
 newtype Hex = Hex CodeAddr
@@ -757,24 +747,30 @@ mkHex = Hex
 instance Show Hex where
   show (Hex v) = showHex v ""
 
+mergeFrontier :: [Block] -> CFG -> CFG
+mergeFrontier bs cfg = Fold.foldl' (flip insertBlock) cfg bs
+
 recursiveDescent :: Memory Word64
-                -> PartialCFG     -- ^ CFG generated so far.
+                -> CFG     -- ^ CFG generated so far.
+                -> GlobalGenState
                 -> Set CodeAddr   -- ^ Set of addresses after blocks we stopped at.
                 -> Set ExploreLoc -- ^ Set of locations explored so far.
                 -> Set ExploreLoc -- ^ List of addresses to explore next.
                 -> (CFG, Set CodeAddr)
-recursiveDescent mem pg1 ends explored frontier
-    | Set.null frontier = (pg1^.prevCFG, ends)
+recursiveDescent mem cfg st ends explored frontier
+    | Set.null frontier = (cfg, ends)
     | otherwise =
         let (loc,s)         = Set.deleteFindMin frontier
             explored'       = Set.insert loc explored
-            go pg ends' frontier' = recursiveDescent mem pg ends' explored' frontier'
+            go cfg' st' ends' frontier'
+              = recursiveDescent mem cfg' st' ends' explored' frontier'
         in
-        case disassembleBlock mem pg1 loc of
+        case disassembleBlock mem st loc of
           Left  e  -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e))
-                      $ go pg1 ends s
-          Right (pg2, next, end) ->
-            let guesses   = discoverCodePointers mem (pg2^.prevCFG)
+                      $ go cfg st ends s
+          Right (st', blocks, next, end) ->
+            let cfg' = mergeFrontier blocks cfg
+                guesses   = discoverCodePointers mem cfg'
                             (DecompiledBlock (loc_ip loc)) -- FIXME
                 allNext   = trace ("At " ++ show (mkHex $ loc_ip loc)
                                    ++ " guessing pointers "
@@ -782,18 +778,20 @@ recursiveDescent mem pg1 ends explored frontier
                                    ++ " with next "
                                    ++ show (Set.map (mkHex . loc_ip)  next))
                             $ next `Set.union` Set.map locFromGuess guesses
-            in go pg2 (Set.insert end ends) (Set.union s (Set.difference allNext explored'))
+            in go cfg' st' (Set.insert end ends) (Set.union s (Set.difference allNext explored'))
 
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> CodeAddr
                   -- ^ Location to start disassembler form.
                -> (CFG, Set CodeAddr)
-cfgFromAddress mem a = -- recursiveDescent mem pcfg Set.empty (Set.singleton loc)
+cfgFromAddress mem a =
+  recursiveDescent mem emptyCFG st Set.empty
+  (Set.singleton (rootLoc 0)) (Set.singleton loc)
+  -- recursiveDescent mem pcfg Set.empty (Set.singleton loc)
   -- XXXXXXXX FIXME: frame_dummy has a call to 0 for some reason, so we pretend we have seen it
   -- this is a giant hack.
-  recursiveDescent mem pcfg Set.empty (Set.singleton (rootLoc 0)) (Set.singleton loc)
-  where pcfg = emptyPartialCFG
+  where st = GlobalGenState { _nextBlockID = 0, _nextAssignId = 0 }
         loc = rootLoc a
 
 {-
