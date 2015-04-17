@@ -151,16 +151,50 @@ instance S.IsValue Expr where
   bvSub x y
     | Just yv <- asBVLit y = S.bvAdd x (bvLit (exprWidth x) (negate yv))
     | otherwise = app $ BVSub (exprWidth x) x y
-  bvMul x y = app $ BVMul (exprWidth x) x y
+  bvMul x y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y =
+      bvLit (exprWidth x) (xv * yv)
+    | Just 0 <- asBVLit x = x
+    | Just 0 <- asBVLit y = y
+    | Just 1 <- asBVLit x = y
+    | Just 1 <- asBVLit y = x
+    | otherwise = app $ BVMul (exprWidth x) x y
 
   bvDiv       x y = app $ BVDiv       (exprWidth x) x y
   bvSignedDiv x y = app $ BVSignedDiv (exprWidth x) x y
   bvMod       x y = app $ BVMod       (exprWidth x) x y
   bvSignedMod x y = app $ BVSignedMod (exprWidth x) x y
 
-  complement x = app $ BVComplement (exprWidth x) x
-  x .&. y   = app $ BVAnd (exprWidth x) x y
-  x .|. y   = app $ BVOr  (exprWidth x) x y
+  complement x
+    | Just xv <- asBVLit x = bvLit (exprWidth x) (complement xv)
+    | otherwise = app $ BVComplement (exprWidth x) x
+  x .&. y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y =
+      bvLit (exprWidth x) (xv .&. yv)
+      -- Eliminate and when one argument is maxUnsigned
+    | Just xv <- asBVLit x, xv == maxUnsigned (exprWidth x) = y
+    | Just yv <- asBVLit y, yv == maxUnsigned (exprWidth x) = x
+      -- Cancel when and with 0.
+    | Just 0 <- asBVLit x = x
+    | Just 0 <- asBVLit y = y
+      -- Idempotence
+    | x == y = x
+      -- Default case
+    | otherwise = app $ BVAnd (exprWidth x) x y
+
+  x .|. y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y =
+      bvLit (exprWidth x) (xv .|. yv)
+      -- Cancel or when one argument is maxUnsigned
+    | Just xv <- asBVLit x, xv == maxUnsigned (exprWidth x) = x
+    | Just yv <- asBVLit y, yv == maxUnsigned (exprWidth x) = y
+      -- Eliminate or when one argument is 0
+    | Just 0 <- asBVLit x = y
+    | Just 0 <- asBVLit y = x
+      -- Idempotence
+    | x == y = x
+      -- Default case
+    | otherwise = app $ BVOr (exprWidth x) x y
 
   bvXor x y
       -- Eliminate xor with 0.
@@ -171,7 +205,10 @@ instance S.IsValue Expr where
       -- Default case.
     | otherwise = app $ BVXor (exprWidth x) x y
 
-  x .=. y = app $ BVEq x y
+  x .=. y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv == yv)
+    | x == y = S.true
+    | otherwise = app $ BVEq x y
 
   -- | Concatentates two bit vectors
   -- bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
@@ -187,12 +224,19 @@ instance S.IsValue Expr where
   -- bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
   bvShr x y = app $ BVShr (exprWidth x) x y
   bvSar x y = app $ BVSar (exprWidth x) x y
-  bvShl x y = app $ BVShl (exprWidth x) x y
+  bvShl x y
+    | Just 0 <- asBVLit y = x
+
+    | Just xv <- asBVLit x
+    , Just yv <- asBVLit y =
+      assert (yv <= toInteger (maxBound :: Int)) $
+        bvLit (exprWidth x) (xv `shiftL` fromInteger yv)
+
+    | otherwise = app $ BVShl (exprWidth x) x y
 
   bvTrunc w e0
       -- Constant propagation
-    | Just v <- asBVLit e0 =
-      bvLit w v
+    | Just v <- asBVLit e0 = bvLit w v
       -- Eliminate redundant trunc
     | Just Refl <- testEquality (exprWidth e0) w =
       e0
@@ -224,7 +268,10 @@ instance S.IsValue Expr where
 
     | otherwise = app (Trunc e0 w)
 
-  bvLt x y = app $ BVUnsignedLt x y
+  bvLt x y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
+    | x == y = S.false
+    | otherwise = app $ BVUnsignedLt x y
 
   bvBit x y
     | Just xv <- asBVLit x
@@ -253,6 +300,8 @@ instance S.IsValue Expr where
     | otherwise = app $ SExt e0 w
 
   uext w e0
+    | Just v <- asBVLit e0 = bvLit w v
+      -- Collapse duplicate extensions.
     | Just (UExt e _) <- asApp e0 =
       -- Runtime check to wordaround GHC typechecker
       case testLeq (S.bv_width e) w of
@@ -470,11 +519,11 @@ constPropagate v =
    -- Units
    BVAdd _  l (BVValue _ 0)       -> Just l
    BVAdd _  (BVValue _ 0) r       -> Just r
+   BVAdd sz l r                   -> binop (+) sz l r
    BVMul _  l (BVValue _ 1)       -> Just l
    BVMul _  (BVValue _ 1) r       -> Just r
 
    UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
-   BVAdd sz l r                   -> binop (+) sz l r
 
    -- Word operations
    Trunc (BVValue _ x) sz         -> Just $ mkLit sz x
