@@ -55,6 +55,7 @@ executable reopt
     elf,
     flexdis86,
     lens,
+    mtl,
     reopt
 
   hs-source-dirs: reopt

@@ -295,7 +295,7 @@ data GlobalGenState = GlobalGenState
        { -- | Index of next assignment identifier to use.
          -- (all used assignment indices must be less than this).
          _nextAssignId :: !AssignId
-       , _nextBlockID  :: !Word64         
+       , _nextBlockID  :: !Word64
        }
 
 -- | Number of assignments so far.
@@ -306,15 +306,13 @@ nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
 nextBlockID :: Simple Lens GlobalGenState Word64
 nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 
-data PreBlock = PreBlock { _pBlockLabel :: !BlockLabel
+-- | A block that we have not yet finished.
+data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
                          , _pBlockStmts :: !(Seq Stmt)
                            -- | The last statement in the block.
                          , _pBlockState :: !X86State
                          , _pBlockApps  :: !(MapF (App Value) Assignment)
                          }
-
-pBlockLabel :: Simple Lens PreBlock BlockLabel
-pBlockLabel = lens _pBlockLabel (\s v -> s { _pBlockLabel = v })
 
 pBlockStmts :: Simple Lens PreBlock (Seq Stmt)
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
@@ -325,6 +323,7 @@ pBlockState = lens _pBlockState (\s v -> s { _pBlockState = v })
 pBlockApps  :: Simple Lens PreBlock (MapF (App Value) Assignment)
 pBlockApps = lens _pBlockApps (\s v -> s { _pBlockApps = v })
 
+-- | A tagged maybe
 data MaybeF (t :: Bool) a where
   NothingF :: MaybeF 'False a
   JustF    :: a -> MaybeF 'True a
@@ -333,7 +332,7 @@ _JustF :: Lens (MaybeF 'True a) (MaybeF 'True b) a b
 _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 
 -- | Local to block discovery.
-data GenState tag = GenState 
+data GenState tag = GenState
        { -- | The global state
          _globalGenState :: GlobalGenState
          -- | Blocks that are not in CFG that end with a FetchAndExecute,
@@ -343,15 +342,15 @@ data GenState tag = GenState
        }
 
 emptyPreBlock :: X86State
-                 -> BlockLabel
-                 -> PreBlock
+              -> BlockLabel
+              -> PreBlock
 emptyPreBlock s lbl =
-  PreBlock { _pBlockLabel = lbl
+  PreBlock { pBlockLabel = lbl
            , _pBlockStmts = Seq.empty
            , _pBlockApps  = MapF.empty
            , _pBlockState = s
            }
-  
+
 emptyGenState :: GlobalGenState -> GenState 'False
 emptyGenState st =
   GenState { _globalGenState = st
@@ -373,27 +372,28 @@ blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBl
 blockState = lens _blockState (\s v -> s { _blockState = v })
 
 curX86State :: Simple Lens (GenState 'True) X86State
-curX86State = blockState . _JustF . pBlockState                            
+curX86State = blockState . _JustF . pBlockState
 
 -- | Finishes the current block, if it is started.
-finishBlock :: (X86State -> TermStmt) -> (GenState a -> GenState 'False)
+finishBlock :: (X86State -> TermStmt)
+            -> (GenState a -> GenState 'False)
 finishBlock term st =
   case st^.blockState of
    NothingF    -> st
    JustF pre_b -> st & frontierBlocks %~ (Seq.|> b)
                      & blockState .~ NothingF
      where
-       b = Block { blockLabel = pre_b^.pBlockLabel
+       b = Block { blockLabel = pBlockLabel pre_b
                  , blockStmts = Fold.toList (pre_b^.pBlockStmts)
                  , blockCache = pre_b^.pBlockApps
                  , blockTerm  = term (pre_b^.pBlockState)
                  }
 
 -- | Starts a new block.  If there is a current block it will finish
--- it with FetchAndExecute       
+-- it with FetchAndExecute
 startBlock :: X86State -> BlockLabel -> (GenState a -> GenState 'True)
-startBlock s lbl st = finishBlock FetchAndExecute st
-                      & blockState .~ JustF (emptyPreBlock s lbl)
+startBlock s lbl st =
+  finishBlock FetchAndExecute st & blockState .~ JustF (emptyPreBlock s lbl)
 
 -- newtype GenM a = GenM { unGenM :: StateT GenState (Except (MemoryError Word64)) a }
 --                deriving (Functor, Applicative, Monad, MonadState GenState)
@@ -404,8 +404,14 @@ startBlock s lbl st = finishBlock FetchAndExecute st
 ------------------------------------------------------------------------
 -- X86Generator
 
+-- | X86Generator is used to construct basic blocks from a stream of instructions
+-- using the semantics.
+--
+-- It is implemented as a state monad in a continuation passing style so that
+-- we can perform symbolic branches.
 newtype X86Generator a = X86G { unX86G :: (a -> GenState 'True -> Some GenState)
-                                           -> GenState 'True -> Some GenState
+                                       -> GenState 'True
+                                       -> Some GenState
                               }
 
 instance Functor X86Generator where
@@ -419,8 +425,10 @@ instance Monad X86Generator where
   return v = X86G $ \c -> c v
   m >>= h = X86G $ \c -> unX86G m (\mv -> unX86G (h mv) c)
   fail = error
-  
+
 type instance S.Value X86Generator = Expr
+
+-- | Run X86Generator starting from the given state.
 runX86Generator :: GenState 'True -> X86Generator () -> Some GenState
 runX86Generator st m = unX86G m (\() -> Some) st
 
@@ -434,11 +442,9 @@ modState m = modGenState $ do
   curX86State .= s'
   return r
 
+-- | Create a new identity for
 newAssignId :: X86Generator AssignId
-newAssignId = modGenState $ do
-  l <- use $ globalGenState . nextAssignId
-  globalGenState . nextAssignId += 1
-  return l
+newAssignId = modGenState $ globalGenState . nextAssignId <<+= 1
 
 addStmt :: Stmt -> X86Generator ()
 addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
@@ -567,7 +573,10 @@ upperHalf e =
       -- Handle expression concatenation.
       -- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in upperHalf
       -- to the (n+n) bound in ConcatV.
-      Just (ConcatV _ _ h) -> unsafeCoerce h
+      Just (ConcatV _ _ h) -> do
+        case testEquality half_width (exprWidth h) of
+          Just Refl -> h
+          Nothing -> error "upper half given illegal widths."
       -- Introduce split operations
       _ ->
         -- Workaround for GHC typechecker
@@ -661,7 +670,7 @@ instance S.Semantics X86Generator where
               (t_block_id, s')  = s  & globalGenState . nextBlockID <<+~ 1
               (f_block_id, s'') = s' & globalGenState . nextBlockID <<+~ 1
 
-          let last_block_id = p_b^.pBlockLabel
+          let last_block_id = pBlockLabel p_b
               t_block_label = GeneratedBlock (blockParent last_block_id) t_block_id
               f_block_label = GeneratedBlock (blockParent last_block_id) f_block_id
 
@@ -674,7 +683,7 @@ instance S.Semantics X86Generator where
           -- The finishBlock here results in a new block after
           -- conditional jumps, for example (no continuing blocks)
           Some . viewSome (finishBlock FetchAndExecute)
-            . viewSome run_f . run_t . flush_current $ s''
+               . viewSome run_f . run_t . flush_current $ s''
 
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate
@@ -734,18 +743,18 @@ initX86State loc =
            , _xmmRegs = V.generate 8 (Initial . N.XMMReg)
            }
 
+-- | Disassemble block
 disassembleBlock :: Memory Word64
                  -> GlobalGenState
                  -> ExploreLoc -- ^ Location to explore from.
                  -> Either (MemoryError Word64)
-                           (GlobalGenState, [Block], Set ExploreLoc, CodeAddr)
+                           (GenState 'False, CodeAddr)
 disassembleBlock mem st loc =
   let lbl = DecompiledBlock (loc_ip loc)
       p_b = emptyPreBlock (initX86State loc) lbl
-      gs  = emptyGenState st & blockState .~ JustF p_b      
-      mk (gs', ip) = let block_list = Fold.toList (gs'^.frontierBlocks) in
-                      (gs' ^. globalGenState, block_list, getFrontierNext block_list, ip)
-  in mk <$> (trace ("Exploring " ++ showHex (loc_ip loc) "") $ disassembleBlock' mem gs (loc_ip loc))
+      gs  = emptyGenState st & blockState .~ JustF p_b
+   in trace ("Exploring " ++ showHex (loc_ip loc) "") $
+        disassembleBlock' mem gs (loc_ip loc)
 
 getExploreLocs :: X86State -> [ExploreLoc]
 getExploreLocs s =
@@ -758,14 +767,16 @@ getExploreLocs s =
 
 getFrontierNext :: [Block] -> Set ExploreLoc
 getFrontierNext = Fold.foldl' f Set.empty
-  where f locs b = 
+  where f locs b =
           case blockTerm b of
             FetchAndExecute s -> Fold.foldl' (flip Set.insert) locs (getExploreLocs s)
             _ -> locs
 
-disassembleBlock' :: Memory Word64
-                  -> GenState 'True
-                  -> CodeAddr
+
+-- |
+disassembleBlock' :: Memory Word64  -- ^ Memory containing code to disasemble.
+                  -> GenState 'True -- ^ Starting processor state
+                  -> CodeAddr       -- ^ Address of code to start disassembling from.
                   -> Either (MemoryError Word64)
                             (GenState 'False, CodeAddr)
 disassembleBlock' mem gs addr = do
@@ -786,7 +797,7 @@ disassembleBlock' mem gs addr = do
 
 -- FIXME: move
 newtype Hex = Hex CodeAddr
-              deriving (Eq, Ord)
+  deriving (Eq, Ord)
 
 mkHex :: CodeAddr -> Hex
 mkHex = Hex
@@ -794,38 +805,43 @@ mkHex = Hex
 instance Show Hex where
   show (Hex v) = showHex v ""
 
-mergeFrontier :: [Block] -> CFG -> CFG
-mergeFrontier bs cfg = Fold.foldl' (flip insertBlock) cfg bs
-
 recursiveDescent :: Memory Word64
-                -> CFG     -- ^ CFG generated so far.
-                -> GlobalGenState
-                -> Set CodeAddr   -- ^ Set of addresses after blocks we stopped at.
-                -> Set ExploreLoc -- ^ Set of locations explored so far.
-                -> Set ExploreLoc -- ^ List of addresses to explore next.
-                -> (CFG, Set CodeAddr)
-recursiveDescent mem cfg st ends explored frontier
-    | Set.null frontier = (cfg, ends)
-    | otherwise =
-        let (loc,s)         = Set.deleteFindMin frontier
-            explored'       = Set.insert loc explored
-            go cfg' st' ends' frontier'
-              = recursiveDescent mem cfg' st' ends' explored' frontier'
-        in
+                 -> CFG     -- ^ CFG generated so far.
+                 -> GlobalGenState
+                 -> Set CodeAddr   -- ^ Set of addresses after blocks we stopped at.
+                 -> Set ExploreLoc -- ^ Set of locations explored so far.
+                 -> Set ExploreLoc -- ^ List of addresses to explore next.
+                 -> (CFG, Set CodeAddr)
+recursiveDescent mem cfg st ends explored frontier0
+    | Set.null frontier0 = (cfg, ends)
+    | otherwise = do
+        let (loc, s) = Set.deleteFindMin frontier0
+            -- Add loc to explored locations.
+            next_explored = Set.insert loc explored
+        -- Disassemble code at location.
         case disassembleBlock mem st loc of
-          Left  e  -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e))
-                      $ go cfg st ends s
-          Right (st', blocks, next, end) ->
-            let cfg' = mergeFrontier blocks cfg
+          -- We encountered an invalid memory read at the given address.
+          Left e -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e)) $
+            recursiveDescent mem cfg st ends next_explored s
+          -- We read a set of blocks ending with the given ip.
+          Right (gs', end_ip) -> do
+            let st' = gs'^.globalGenState
+                -- Get list of blocks in genstate
+                blocks = Fold.toList (gs'^.frontierBlocks)
+                -- Compute new instruction pointers to explore from list of blocks.
+                next = getFrontierNext blocks
+
+            let cfg' = insertBlocksForCode (loc_ip loc) end_ip blocks cfg
                 guesses   = discoverCodePointers mem cfg'
                             (DecompiledBlock (loc_ip loc)) -- FIXME
                 allNext   = trace ("At " ++ show (mkHex $ loc_ip loc)
                                    ++ " guessing pointers "
                                    ++ show (Set.map mkHex guesses)
                                    ++ " with next "
-                                   ++ show (Set.map (mkHex . loc_ip)  next))
+                                   ++ show (Set.map (mkHex . loc_ip) next))
                             $ next `Set.union` Set.map locFromGuess guesses
-            in go cfg' st' (Set.insert end ends) (Set.union s (Set.difference allNext explored'))
+            let frontier' = s `Set.union` (Set.difference allNext next_explored)
+            recursiveDescent mem cfg' st' (Set.insert end_ip ends) next_explored frontier'
 
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
