@@ -18,7 +18,8 @@ module Reopt.Memory
   , MemoryByteReader
   , runMemoryByteReader
   , MemoryError(..)
-
+  , readInstruction
+    
     -- * Re-exports
   , Elf.ElfSegmentFlags
   , Elf.pf_r
@@ -27,24 +28,25 @@ module Reopt.Memory
   , Elf.hasPermissions
   ) where
 
-import Control.Applicative
-import Control.Exception (assert)
-import Control.Monad.Error
-import Control.Monad.State
-import Data.Binary.Get
-import Data.Bits
+import           Control.Applicative
+import           Control.Exception (assert)
+import           Control.Monad.Error
+import           Control.Monad.State
+import           Data.Binary.Get
+import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.Elf as Elf
+import           Data.Elf as Elf
 import qualified Data.Foldable as Fold
 import qualified Data.IntervalMap.FingerTree as IMap
-import Data.Maybe
-import Data.Word
+import           Data.Maybe
+import           Data.Word
 
-import Numeric (showHex)
-import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Numeric (showHex)
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import Flexdis86.ByteReader
+import qualified Flexdis86 as Flexdis
+import           Flexdis86.ByteReader
 
 ------------------------------------------------------------------------
 -- MemSegment
@@ -207,3 +209,11 @@ runMemoryByteReader reqPerm mem addr (MBR m) =
   case runState (runErrorT m) (MS BS.empty mem addr reqPerm) of
     (Left e, _) -> Left e
     (Right v, s) -> Right (v,msAddr s)
+
+-- | Read instruction at a given memory address.
+readInstruction :: Memory Word64 -- Memory to read.
+                -> Word64 -- Address to read from.
+                -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
+readInstruction mem addr = runMemoryByteReader pf_x mem addr m
+  where m = Flexdis.disassembleInstruction Flexdis.defaultX64Disassembler
+    

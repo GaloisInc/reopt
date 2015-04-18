@@ -16,6 +16,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Reopt.Semantics.Representation
   ( CFG
@@ -23,6 +26,7 @@ module Reopt.Semantics.Representation
   , cfgBlocks
   , insertBlock
   , traverseBlocks
+  , traverseBlockAndChildren    
     -- * Block level declarations
   , BlockLabel(..)
   , blockParent
@@ -49,7 +53,9 @@ module Reopt.Semantics.Representation
   , foldApp
   , traverseApp
     -- * X86State
-  , X86State(..)
+  , X86State'(..)
+  , X86State
+  , mkX86State
   , register
   , curIP
   , reg64Regs
@@ -61,6 +67,12 @@ module Reopt.Semantics.Representation
   , xmmRegs
   , flagRegs
   , foldX86StateValue
+  , zipWithX86State
+  , mapX86State
+  , cmpX86State
+    --
+  , EqF(..)
+  , mkEqF
   ) where
 
 import           Control.Applicative
@@ -173,6 +185,23 @@ traverseBlocks cfg root f merge = go root
                         case blockTerm b of
                          Branch _ lb rb -> merge (go lb) v (go rb)
                          _              -> v
+
+-- | As for traverseBlocks but starting from a block in the cfg, not
+-- an address
+traverseBlockAndChildren :: CFG
+                         -> Block
+                         -> (Block -> a)
+                         -> (Block -> a -> a -> a)
+                         -> a
+traverseBlockAndChildren cfg b0 f merge = goBlock b0
+  where
+    goBlock b = case blockTerm b of
+                 Branch _ lb rb -> merge b (go lb) (go rb)
+                 _              -> f b
+                  
+    go l = case cfg ^. cfgBlocks . at l of
+            Nothing -> error $ "label not found"
+            Just b  -> goBlock b
 
 ------------------------------------------------------------------------
 -- BlockLabel
@@ -347,33 +376,61 @@ x87_busy = lens _x87_busy (\s v -> s { _x87_busy = v })
 
 -- | This represents the state of the processor registers after some
 -- execution.
-data X86State = X86State
-     { _curIP  :: !(Value (BVType 64))
+data X86State' f = X86State
+     { _curIP  :: !(f (BVType 64))
        -- 16 general purposes registers.
-     , _reg64Regs :: !(V.Vector (Value (BVType  64)))
+     , _reg64Regs :: !(V.Vector (f (BVType 64)))
        -- 32 individual bits in the flags register.
-     , _flagRegs  :: !(V.Vector (Value BoolType))
+     , _flagRegs  :: !(V.Vector (f BoolType))
        -- The 16-bit x87 control word.
        -- See:
        --   Intel® 64 and IA-32 Architectures Software Developer’s Manual
        --   Volume 1:
        --   Section 8.1.5
-     , _x87ControlWord :: !(V.Vector (Value BoolType))
+     , _x87ControlWord :: !(V.Vector (f BoolType))
        -- The x86 status word.
-     , _x87StatusWord :: !(V.Vector (Value BoolType))
-     , _x87TopReg     :: !(Value (BVType 3))
+     , _x87StatusWord :: !(V.Vector (f BoolType))
+     , _x87TopReg     :: !(f (BVType 3))
        -- The 8 x87 tag words
        -- (used to indicate the status of different FPU registers).
-     , _x87TagWords :: !(V.Vector (Value (BVType 2)))
+     , _x87TagWords :: !(V.Vector (f (BVType 2)))
        -- The 8 x87 FPU regs (MMX registers alias these).
        -- MMX registers alias these with (for example).
        -- MM3 maps to R3.
-     , _x87Regs   :: !(V.Vector (Value (BVType  80)))
+     , _x87Regs   :: !(V.Vector (f (BVType  80)))
        -- One of 8 128-bit XMM registers
-     , _xmmRegs   :: !(V.Vector (Value (BVType 128)))
+     , _xmmRegs   :: !(V.Vector (f (BVType 128)))
      }
 
-foldX86StateValue :: Monoid a => (forall u. Value u -> a) -> X86State -> a
+class EqF (f :: k -> *) where
+  eqF :: f a -> f a -> Bool
+
+instance EqF f => Eq (X86State' f) where
+  s == s' = cmpX86State eqF s s'
+
+mkEqF :: TestEquality f => f a -> f a -> Bool
+mkEqF x y = isJust (testEquality x y)
+
+vectorCompare :: (a -> b -> Bool) -> V.Vector a -> V.Vector b -> Bool
+vectorCompare f x y = V.and $ V.zipWith f x y
+
+cmpX86State :: (forall u. f u -> g u -> Bool)
+               -> X86State' f
+               -> X86State' g
+               -> Bool
+cmpX86State r s s' =
+  (s^.curIP) `r` (s'^.curIP)
+  && vectorCompare r (s^.reg64Regs)      (s'^.reg64Regs)     
+  && vectorCompare r (s^.flagRegs)       (s'^.flagRegs)      
+  && vectorCompare r (s^.x87ControlWord) (s'^.x87ControlWord)
+  && vectorCompare r (s^.x87StatusWord)  (s'^.x87StatusWord) 
+  && vectorCompare r (s^.x87TagWords)    (s'^.x87TagWords)   
+  && vectorCompare r (s^.x87Regs)        (s'^.x87Regs)       
+  && vectorCompare r (s^.xmmRegs)        (s'^.xmmRegs)       
+
+type X86State = X86State' Value
+
+foldX86StateValue :: Monoid a => (forall u. f u -> a) -> X86State' f -> a
 foldX86StateValue f s = f (s^.curIP)
                         `mappend` foldMap f (s^.reg64Regs)
                         `mappend` foldMap f (s^.flagRegs)
@@ -383,7 +440,32 @@ foldX86StateValue f s = f (s^.curIP)
                         `mappend` foldMap f (s^.x87Regs)
                         `mappend` foldMap f (s^.xmmRegs)
 
-register :: N.RegisterName cl -> Simple Lens X86State (Value (N.RegisterType cl))
+zipWithX86State :: (forall u. f u -> g u -> h u)
+                   -> X86State' f
+                   -> X86State' g
+                   -> X86State' h
+zipWithX86State f x y = mkX86State (\r -> f (x ^. register r) (y ^. register r))
+
+mapX86State :: (forall u. f u -> g u)
+               -> X86State' f
+               -> X86State' g
+mapX86State f x = mkX86State (\r -> f (x ^. register r))
+
+mkX86State :: (forall cl. N.RegisterName cl -> f (N.RegisterType cl)) -> X86State' f
+mkX86State f =               
+  X86State { _curIP = f N.IPReg
+           , _reg64Regs = V.generate 16 (f . N.GPReg)
+           , _flagRegs  = V.generate 32 (f . N.FlagReg)
+           , _x87ControlWord = V.generate 16 (f . N.X87ControlReg)
+           , _x87StatusWord = V.generate 16 (f . N.X87StatusReg)
+           , _x87TopReg   = f N.X87TopReg
+           , _x87TagWords = V.generate 8 (f . N.X87TagReg)
+           , _x87Regs = V.generate 8 (f . N.X87FPUReg)
+           , _xmmRegs = V.generate 8 (f . N.XMMReg)
+           }
+
+register :: forall f cl. N.RegisterName cl
+            -> Simple Lens (X86State' f) (f (N.RegisterType cl))
 register reg = case reg of
                 N.IPReg           -> curIP
                 N.GPReg n         -> reg64Regs . idx n
@@ -401,47 +483,47 @@ register reg = case reg of
                 -- ControlReg
                 _               -> error $ "Unexpected reg: " ++ show reg
   where
-    idx :: forall tp. Int -> Lens' (V.Vector (Value tp)) (Value tp)
+    idx :: forall tp. Int -> Lens' (V.Vector (f tp)) (f tp)
     idx n = lens (V.! n) (\s v -> (ix n .~ v) s)
 
 -- | the value oDebugReg{}  f the current instruction pointer.
-curIP :: Simple Lens X86State (Value (BVType 64))
+curIP :: Simple Lens (X86State' f) (f (BVType 64))
 curIP = lens _curIP (\s v -> s { _curIP = v })
 
 -- | Assignments to the 16 general-purpose registers.
-reg64Regs :: Simple Lens X86State (V.Vector (Value (BVType 64)))
+reg64Regs :: Simple Lens (X86State' f) (V.Vector (f (BVType 64)))
 reg64Regs = lens _reg64Regs (\s v -> s { _reg64Regs = v })
 
 -- | 32 individual bits in the flags register.
-flagRegs :: Simple Lens X86State (V.Vector (Value BoolType))
+flagRegs :: Simple Lens (X86State' f) (V.Vector (f BoolType))
 flagRegs = lens _flagRegs (\s v -> s { _flagRegs = v })
 
 -- | The current x87 control word.
-x87ControlWord :: Simple Lens X86State (V.Vector (Value BoolType))
+x87ControlWord :: Simple Lens (X86State' f) (V.Vector (f BoolType))
 x87ControlWord = lens _x87ControlWord (\s v -> s { _x87ControlWord = v })
 
 -- | The current x87 status word.
-x87StatusWord :: Simple Lens X86State (V.Vector (Value BoolType))
+x87StatusWord :: Simple Lens (X86State' f) (V.Vector (f BoolType))
 x87StatusWord = lens _x87StatusWord (\s v -> s { _x87StatusWord = v })
 
 -- | The 8 x87 tag words
 -- used to indicate the status of different FPU registers.
-x87TagWords :: Simple Lens X86State (V.Vector (Value (BVType 2)))
+x87TagWords :: Simple Lens (X86State' f) (V.Vector (f (BVType 2)))
 x87TagWords = lens _x87TagWords (\s v -> s { _x87TagWords = v })
 
 -- | the value oDebugReg{}  f the current instruction pointer.
-x87TopReg :: Simple Lens X86State (Value (BVType 3))
+x87TopReg :: Simple Lens (X86State' f) (f (BVType 3))
 x87TopReg = lens _x87TopReg (\s v -> s { _x87TopReg = v })
 
 -- | Assignments to the 8 80-bit FPU registers.
-x87Regs :: Simple Lens X86State (V.Vector (Value (BVType 80)))
+x87Regs :: Simple Lens (X86State' f) (V.Vector (f (BVType 80)))
 x87Regs = lens _x87Regs (\s v -> s { _x87Regs = v })
 
 -- | Assignments to the 16 128-bit XMM registers.
-xmmRegs :: Simple Lens X86State (V.Vector (Value (BVType 128)))
+xmmRegs :: Simple Lens (X86State' f) (V.Vector (f (BVType 128)))
 xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 
-instance Pretty X86State where
+instance Pretty (X86State' Value) where
   pretty s =
     bracketsep $ catMaybes ([ rec   N.rip (s^.curIP)]
                             ++ recv N.GPReg (s^.reg64Regs)
@@ -531,6 +613,9 @@ instance Eq (Value tp) where
 
 instance TestEquality Value where
   testEquality x y = orderingIsEqual (compareF x y)
+
+instance EqF Value where
+  eqF = mkEqF
 
 instance OrdF Value where
   compareF (BVValue wx vx) (BVValue wy vy) =

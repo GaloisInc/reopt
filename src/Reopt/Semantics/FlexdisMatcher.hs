@@ -32,6 +32,7 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
 import           GHC.TypeLits (KnownNat)
+import           Debug.Trace
 
 import           Data.Parameterized.NatRepr
 import qualified Flexdis86 as F
@@ -448,8 +449,10 @@ fpUnopOrRegBinop f args@(_, vs)
 --   * regular:   those which take arguments of the same, polymorphic, width
 --   * irrugular: those which have particular parsing requirements
 --   * fixed:     those which have exact sizes known
-execInstruction :: FullSemantics m => F.InstructionInstance -> m ()
+
+-- FIXME: do something more interesting here than 'Maybe'
+execInstruction :: FullSemantics m => F.InstructionInstance -> Maybe (m ())
 execInstruction ii =
   case M.lookup (F.iiOp ii) semanticsMap of
-    Just (SemanticsOp f) -> f (F.iiLockPrefix ii, F.iiArgs ii)
-    _      -> fail $ "Unsupported instruction: " ++ show ii
+    Just (SemanticsOp f) -> Just $ f (F.iiLockPrefix ii, F.iiArgs ii)
+    _                    -> trace ("Unsupported instruction: " ++ show ii) Nothing

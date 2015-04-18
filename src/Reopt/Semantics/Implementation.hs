@@ -22,10 +22,17 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DataKinds #-} -- MaybeF
 {-# LANGUAGE KindSignatures #-} -- MaybeF
 
-module Reopt.Semantics.Implementation (cfgFromAddress, readInstruction) where
+module Reopt.Semantics.Implementation
+       ( -- Threaded global state
+         GlobalGenState
+       , emptyGlobalGenState
+         -- The main disassemble function
+       , disassembleBlock
+       , ExploreLoc(..)
+       , rootLoc
+       ) where
 
 import           Control.Applicative
 import Control.Exception (assert)
@@ -41,7 +48,7 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
+import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -49,7 +56,6 @@ import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
-  -- hack for instruction comment
 
 import           Unsafe.Coerce (unsafeCoerce)
 
@@ -298,6 +304,10 @@ data GlobalGenState = GlobalGenState
        , _nextBlockID  :: !Word64         
        }
 
+emptyGlobalGenState :: GlobalGenState
+emptyGlobalGenState = GlobalGenState { _nextBlockID = 0
+                                     , _nextAssignId = 0 }
+
 -- | Number of assignments so far.
 nextAssignId :: Simple Lens GlobalGenState AssignId
 nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
@@ -394,12 +404,6 @@ finishBlock term st =
 startBlock :: X86State -> BlockLabel -> (GenState a -> GenState 'True)
 startBlock s lbl st = finishBlock FetchAndExecute st
                       & blockState .~ JustF (emptyPreBlock s lbl)
-
--- newtype GenM a = GenM { unGenM :: StateT GenState (Except (MemoryError Word64)) a }
---                deriving (Functor, Applicative, Monad, MonadState GenState)
-
--- runGenM :: GenM a -> GenState -> Either (MemoryError Word64) (a, GenState)
--- runGenM m s = runExcept (runStateT (unGenM m) s)
 
 ------------------------------------------------------------------------
 -- X86Generator
@@ -697,13 +701,6 @@ instance S.Semantics X86Generator where
                       , Some <$> eval dest ]
        addStmt (PlaceHolderStmt vs "memset")
 
--- | Read instruction at a given memory address.
-readInstruction :: Memory Word64 -- Memory to read.
-                -> Word64 -- Address to read from.
-                -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
-readInstruction mem addr = runMemoryByteReader pf_x mem addr m
-  where m = Flexdis.disassembleInstruction Flexdis.defaultX64Disassembler
-
 -- | A location to explore
 data ExploreLoc
    = ExploreLoc { loc_ip :: CodeAddr
@@ -712,6 +709,9 @@ data ExploreLoc
                   -- ^ Top of x86 address.
                 }
  deriving (Eq, Ord)
+
+instance Pretty ExploreLoc where
+  pretty loc = text $ showHex (loc_ip loc) ""
 
 rootLoc :: CodeAddr -> ExploreLoc
 rootLoc ip = ExploreLoc { loc_ip = ip
@@ -722,31 +722,27 @@ locFromGuess = rootLoc
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State
-initX86State loc =
-  X86State { _curIP = BVValue knownNat (toInteger (loc_ip loc))
-           , _reg64Regs = V.generate 16 (Initial . N.GPReg)
-           , _flagRegs  = V.generate 32 (Initial . N.FlagReg)
-           , _x87ControlWord = V.generate 16 (Initial . N.X87ControlReg)
-           , _x87StatusWord = V.generate 16 (Initial . N.X87StatusReg)
-           , _x87TopReg   = BVValue knownNat (fromIntegral $ loc_x87_top loc)
-           , _x87TagWords = V.generate 8 (Initial . N.X87TagReg)
-           , _x87Regs = V.generate 8 (Initial . N.X87FPUReg)
-           , _xmmRegs = V.generate 8 (Initial . N.XMMReg)
-           }
+initX86State loc = mkX86State Initial
+                   & curIP .~  BVValue knownNat (toInteger (loc_ip loc))
+                   & x87TopReg .~ BVValue knownNat (fromIntegral $ loc_x87_top loc)
 
+data GenError = DecodeError (MemoryError Word64) 
+              | DisassembleError Flexdis.InstructionInstance
+                deriving Show
+                                                   
 disassembleBlock :: Memory Word64
-                 -> GlobalGenState
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> Either (MemoryError Word64)
-                           (GlobalGenState, [Block], Set ExploreLoc, CodeAddr)
-disassembleBlock mem st loc =
+                 -> StateT GlobalGenState (Either GenError)
+                           ([Block], CodeAddr)
+disassembleBlock mem loc = do
   let lbl = DecompiledBlock (loc_ip loc)
-      p_b = emptyPreBlock (initX86State loc) lbl
-      gs  = emptyGenState st & blockState .~ JustF p_b      
-      mk (gs', ip) = let block_list = Fold.toList (gs'^.frontierBlocks) in
-                      (gs' ^. globalGenState, block_list, getFrontierNext block_list, ip)
-  in mk <$> (trace ("Exploring " ++ showHex (loc_ip loc) "") $ disassembleBlock' mem gs (loc_ip loc))
+  gs <- gets (startBlock (initX86State loc) lbl . emptyGenState)
+  (gs', ip) <- lift $ trace ("Exploring " ++ showHex (loc_ip loc) "")
+                    $ disassembleBlock' mem gs (loc_ip loc)
+  put (gs' ^. globalGenState)
+  return (Fold.toList (gs'^.frontierBlocks), ip)
 
+{-
 getExploreLocs :: X86State -> [ExploreLoc]
 getExploreLocs s =
   case (s^.curIP, s^.x87TopReg) of
@@ -762,27 +758,34 @@ getFrontierNext = Fold.foldl' f Set.empty
           case blockTerm b of
             FetchAndExecute s -> Fold.foldl' (flip Set.insert) locs (getExploreLocs s)
             _ -> locs
+-}
 
 disassembleBlock' :: Memory Word64
                   -> GenState 'True
                   -> CodeAddr
-                  -> Either (MemoryError Word64)
+                  -> Either GenError
                             (GenState 'False, CodeAddr)
 disassembleBlock' mem gs addr = do
   (i, next_ip) <- readInstruction mem addr
+                  & _Left %~ DecodeError
+                  
   -- Update current IP
   let gs1 = gs & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
-  let some_gs2 = runX86Generator gs1 $ do
-                      let line = text (showHex addr "") <> colon
-                                 <+> Flexdis.ppInstruction addr i
-                      addStmt (Comment (show line))
-                      execInstruction i
-  case some_gs2 of
-   Some gs2 -> case gs2^.blockState of
-                JustF p_b | [loc] <- getExploreLocs (p_b^.pBlockState)
-                          , loc_ip loc == next_ip ->
-                              disassembleBlock' mem gs2 next_ip
-                _ -> return (finishBlock FetchAndExecute gs2, next_ip)
+      line = text (showHex addr "") <> colon
+             <+> Flexdis.ppInstruction addr i
+
+  exec <- case execInstruction i of
+           Nothing -> Left (DisassembleError i)
+           Just v  -> return v
+  
+  Some gs2 <- return $ runX86Generator gs1 $ do
+                       addStmt (Comment (show line))
+                       exec
+                        
+  case gs2 ^. blockState of
+   JustF p_b | BVValue _ ip <- p_b^.(pBlockState . curIP)
+             , ip == fromIntegral next_ip -> disassembleBlock' mem gs2 next_ip
+   _ -> return (finishBlock FetchAndExecute gs2, next_ip)
 
 -- FIXME: move
 newtype Hex = Hex CodeAddr
@@ -793,6 +796,8 @@ mkHex = Hex
 
 instance Show Hex where
   show (Hex v) = showHex v ""
+
+{-
 
 mergeFrontier :: [Block] -> CFG -> CFG
 mergeFrontier bs cfg = Fold.foldl' (flip insertBlock) cfg bs
@@ -815,8 +820,9 @@ recursiveDescent mem cfg st ends explored frontier
         case disassembleBlock mem st loc of
           Left  e  -> trace ("Skipping " ++ showHex (loc_ip loc) (": " ++ show e))
                       $ go cfg st ends s
-          Right (st', blocks, next, end) ->
-            let cfg' = mergeFrontier blocks cfg
+          Right (st', blocks, end) ->
+            let 
+                cfg' = mergeFrontier blocks cfg
                 guesses   = discoverCodePointers mem cfg'
                             (DecompiledBlock (loc_ip loc)) -- FIXME
                 allNext   = trace ("At " ++ show (mkHex $ loc_ip loc)
@@ -838,8 +844,11 @@ cfgFromAddress mem a =
   -- recursiveDescent mem pcfg Set.empty (Set.singleton loc)
   -- XXXXXXXX FIXME: frame_dummy has a call to 0 for some reason, so we pretend we have seen it
   -- this is a giant hack.
-  where st = GlobalGenState { _nextBlockID = 0, _nextAssignId = 0 }
+  where st = emptyGlobalGenState
         loc = rootLoc a
+-}
+
+
 
 {-
 completeProgram :: Memory Word64

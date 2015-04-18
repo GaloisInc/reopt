@@ -25,7 +25,7 @@ import           Flexdis86
 import           Reopt
 import           Reopt.Memory
 import           Reopt.Semantics.DeadRegisterElimination
-import           Reopt.Semantics.Implementation
+import           Reopt.Semantics.CFGDiscovery
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
 

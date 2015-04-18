@@ -41,6 +41,8 @@ library
     Reopt.Semantics.Representation
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.CodePointerDiscovery
+    Reopt.Semantics.CFGDiscovery
+    Reopt.Semantics.WorkList
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
