@@ -30,6 +30,7 @@ import GHC.TypeLits
 import Data.Parameterized.NatRepr
     ( widthVal
     , NatRepr
+    , natValue
     , addNat
     , withAddLeq
     , testLeq
@@ -82,7 +83,7 @@ set_bitwise_flags res = do
 
 push :: Semantics m => Value m (BVType n) -> m ()
 push v = do old_sp <- get rsp
-            let delta   = bvLit n64 $ widthVal sz `div` 8 -- delta in bytes
+            let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
                 new_sp  = old_sp `bvSub` delta
                 sp_addr = mkBVAddr sz new_sp
             sp_addr .= v
@@ -92,7 +93,7 @@ push v = do old_sp <- get rsp
 
 pop :: IsLocationBV m n => NatRepr n -> m (Value m (BVType n))
 pop sz = do old_sp <- get rsp
-            let delta   = bvLit n64 $ widthVal sz `div` 8 -- delta in bytes
+            let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
                 new_sp  = old_sp `bvAdd` delta
                 sp_addr = mkBVAddr sz old_sp
             v   <- get sp_addr
@@ -443,10 +444,14 @@ exec_xor l v = do
 really_exec_shift :: (n' <= n, IsLocationBV m n)
                   => MLocation m (BVType n)
                   -> Value m (BVType n')
+                     -- | Operation for performing the shift.
+                     -- Takes value as first argument and shift amount as second arg.
                   -> (Value m (BVType n) -> Value m (BVType n) -> Value m (BVType n))
+                     -- | Operation for constructing new carry flag "cf" value.
                   -> (Value m (BVType n) -> Value m (BVType n')
                                          -> Value m (BVType n')
                                          -> Value m BoolType)
+                     -- | Operation for constructing new overflow flag "of" value.
                   -> (Value m (BVType n) -> Value m (BVType n)
                                          -> Value m BoolType
                                          -> Value m BoolType)
@@ -456,39 +461,42 @@ really_exec_shift l count do_shift mk_cf mk_of = do
   -- The intel manual says that the count is masked to give an upper
   -- bound on the time the shift takes, with a mask of 63 in the case
   -- of a 64 bit operand, and 31 in the other cases.
-  let nbits :: Int = case testLeq (bv_width v) n32 of
-                       Just LeqProof -> 32
-                       _             -> 64
-      countMASK = bvLit (bv_width count) (nbits - 1)
-      tempCOUNT = count .&. countMASK  -- FIXME: prefer mod?
-      r = do_shift v (uext (bv_width v) tempCOUNT)
+  let nbits :: Int
+      nbits =
+        case testLeq (bv_width v) n32 of
+          Just LeqProof -> 32
+          _             -> 64
+      count_mask = bvLit (bv_width count) (nbits - 1)
+      --
+      low_count = count .&. count_mask  -- FIXME: prefer mod?
+      r = do_shift v (uext (bv_width v) low_count)
 
   -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero tempCOUNT) $ do
-    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
-    let new_cf = mk_cf v dest_width tempCOUNT
+  unless_ (is_zero low_count) $ do
+    let dest_width = bvLit (bv_width low_count) (natValue (bv_width v))
 
-    ifte_ (tempCOUNT `bvLt` dest_width)
-      (cf_loc .= new_cf)
-      (set_undefined cf_loc)
+    let new_cf = mk_cf v dest_width low_count
+    cf_undef <- make_undefined knownType
+    cf_loc .= mux (low_count `bvLt` dest_width) new_cf cf_undef
 
-    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
-      (of_loc .= mk_of v r new_cf)
-      (set_undefined of_loc)
+    let low1 = bvLit (bv_width low_count) (1 :: Int)
+
+    of_undef <- make_undefined knownType
+    of_loc .= mux (low_count .=. low1) (mk_of v r new_cf) of_undef
 
     set_undefined af_loc
     set_result_value l r
 
 -- FIXME: could be 8 instead of n' here ...
 exec_shl :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
-exec_shl l count = really_exec_shift l count bvShl
-                   (\v dest_width tempCOUNT -> bvBit v (dest_width `bvSub` tempCOUNT))
-                   (\_ r new_cf -> msb r `bvXor` new_cf)
+exec_shl l count = really_exec_shift l count bvShl mk_cf mk_of
+  where mk_cf v dest_width low_count = bvBit v (dest_width `bvSub` low_count)
+        mk_of _ r new_cf = msb r `bvXor` new_cf
 
 exec_shr :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
-exec_shr l count = really_exec_shift l count bvShl
-                   (\v _ tempCOUNT -> bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int)))
-                   (\v _ _         -> msb v)
+exec_shr l count = really_exec_shift l count bvShr mk_cf mk_of
+  where mk_cf v _ low_count = bvBit v (low_count `bvSub` bvLit (bv_width low_count) (1 :: Int))
+        mk_of v _ _         = msb v
 
 -- FIXME: we can factor this out as above, but we need to check the CF
 -- for SAR (intel manual says it is only undefined for shl/shr when
@@ -503,18 +511,18 @@ exec_sar l count = do
                        Just LeqProof -> 32
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
-      tempCOUNT = uext (bv_width v) count .&. countMASK  -- FIXME: prefer mod?
-      r = bvSar v tempCOUNT
+      low_count = uext (bv_width v) count .&. countMASK  -- FIXME: prefer mod?
+      r = bvSar v low_count
 
   -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero tempCOUNT) $ do
-    let dest_width = bvLit (bv_width tempCOUNT) (widthVal (bv_width v))
-    let new_cf = bvBit v (tempCOUNT `bvSub` bvLit (bv_width tempCOUNT) (1 :: Int))
+  when_ (complement $ is_zero low_count) $ do
+    let dest_width = bvLit (bv_width low_count) (natValue (bv_width v))
+    let new_cf = bvBit v (low_count `bvSub` bvLit (bv_width low_count) (1 :: Int))
 
     -- FIXME: correct?  we assume here that we will get the sign bit ...
-    cf_loc .= mux (tempCOUNT `bvLt` dest_width) new_cf (msb v)
+    cf_loc .= mux (low_count `bvLt` dest_width) new_cf (msb v)
 
-    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
       (of_loc .= false)
       (set_undefined of_loc)
 
@@ -533,17 +541,17 @@ exec_rol l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       -- FIXME: this is from the manual, but I think the masking is overridden by the mod?
-      tempCOUNT = (uext (bv_width v) count .&. countMASK)
-                  `bvMod` (bvLit (bv_width v) (widthVal (bv_width v)))
-      r = bvRol v tempCOUNT
+      low_count = (uext (bv_width v) count .&. countMASK)
+                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
+      r = bvRol v low_count
 
   -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero tempCOUNT) $ do
+  when_ (complement $ is_zero low_count) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
 
     cf_loc .= new_cf
 
-    ifte_ (tempCOUNT .=. bvLit (bv_width tempCOUNT) (1 :: Int))
+    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
       (of_loc .= (msb r `bvXor` new_cf))
       (set_undefined of_loc)
 
@@ -637,7 +645,7 @@ exec_movs rep_pfx sz = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let szv        = bvLit n64 (widthVal sz)
+  let szv        = bvLit n64 (natValue sz)
   if rep_pfx
     then do count <- get rcx
             let nbytes_off = (count `bvSub` 1) `bvMul` szv
@@ -674,7 +682,7 @@ exec_cmps repz_pfx sz = do
             rsi .= mux df (src  `bvSub` szv) (src  `bvAdd` szv)
             rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
   where
-    szv = bvLit n64 $ widthVal sz
+    szv = bvLit n64 $ natValue sz
     do_memcmp df src dest count = do
       nsame <- memcmp sz count df src dest
       let equal = (nsame .=. count)
@@ -690,7 +698,7 @@ exec_cmps repz_pfx sz = do
 
       -- we do this to make it obvious so repz cmpsb ; jz ... is clear
       zf_loc .= equal
-      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ widthVal sz `div` 8)
+      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ natValue sz `div` 8)
 
       rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
       rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
@@ -712,7 +720,7 @@ exec_stos rep_pfx l = do
   df <- get df_loc
   dest <- get rdi
   v    <- get l
-  let szv        = bvLit n64 (widthVal (loc_width l))
+  let szv        = bvLit n64 (natValue (loc_width l))
   if rep_pfx
     then do count <- get rcx
             let nbytes_off = (count `bvSub` 1) `bvMul` szv

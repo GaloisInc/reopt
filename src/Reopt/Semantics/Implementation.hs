@@ -128,6 +128,8 @@ instance S.IsValue Expr where
   mux c x y
     | Just 1 <- asBVLit c = x
     | Just 0 <- asBVLit c = y
+    | x == y = x
+    | Just (BVComplement _ cn) <- asApp c = app $ Mux (exprWidth x) cn y x
     | otherwise = app $ Mux (exprWidth x) c x y
 
   bvLit n v = ValueExpr $ mkLit n v
@@ -157,13 +159,15 @@ instance S.IsValue Expr where
   bvSub x y
     | Just yv <- asBVLit y = S.bvAdd x (bvLit (exprWidth x) (negate yv))
     | otherwise = app $ BVSub (exprWidth x) x y
+
   bvMul x y
+    | Just 0 <- asBVLit x = x
+    | Just 1 <- asBVLit x = y
+    | Just 0 <- asBVLit y = y
+    | Just 1 <- asBVLit y = x
+
     | Just xv <- asBVLit x, Just yv <- asBVLit y =
       bvLit (exprWidth x) (xv * yv)
-    | Just 0 <- asBVLit x = x
-    | Just 0 <- asBVLit y = y
-    | Just 1 <- asBVLit x = y
-    | Just 1 <- asBVLit y = x
     | otherwise = app $ BVMul (exprWidth x) x y
 
   bvDiv       x y = app $ BVDiv       (exprWidth x) x y
@@ -216,15 +220,9 @@ instance S.IsValue Expr where
     | x == y = S.true
     | otherwise = app $ BVEq x y
 
-  -- | Concatentates two bit vectors
-  -- bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
-
   -- | Splits a bit vectors into two
   -- bvSplit :: v (BVType (n + n)) -> (v (BVType n), v (BVType n))
   bvSplit v = (upperHalf v, lowerHalf v)
-
-  -- | Rotations
-  -- bvRol, bvRor :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
   -- bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
@@ -639,6 +637,17 @@ upperHalf e =
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
+
+bvConcat :: Expr (BVType n) -> Expr (BVType n) -> Expr (BVType (n+n))
+bvConcat l h
+    | Just 0 <- asBVLit h =
+        let dbl_w = addNat w w
+         in case testLeq w dbl_w of
+              Just LeqProof -> S.uext dbl_w l
+              Nothing -> error "Illegal width"
+    | otherwise = app (ConcatV (exprWidth l) l h)
+  where w = exprWidth l
+
 -- | Assign a value to a location
 setLoc :: forall tp. ImpLocation tp -> Value tp -> X86Generator ()
 setLoc loc v0 =
@@ -679,13 +688,10 @@ setLoc loc v0 =
 
        S.LowerHalf l -> do
          b <- getLoc l
-         upper <- eval (upperHalf b)
-         go l . AssignedValue =<< addAssignment (EvalApp (ConcatV (valueWidth v) v upper))
+         go l =<< eval (bvConcat (ValueExpr v) (upperHalf b))
        S.UpperHalf l -> do
          b <- getLoc l
-         lower <- eval (lowerHalf b)
-         go l . AssignedValue =<< addAssignment (EvalApp (ConcatV (valueWidth v) lower v))
-
+         go l =<< eval (bvConcat (lowerHalf b) (ValueExpr v))
        S.X87StackRegister _ -> do
          error "setLoc X87StackRegister undefined"
 
@@ -784,10 +790,10 @@ initX86State loc = mkX86State Initial
                    & curIP .~  BVValue knownNat (toInteger (loc_ip loc))
                    & x87TopReg .~ BVValue knownNat (fromIntegral $ loc_x87_top loc)
 
-data GenError = DecodeError (MemoryError Word64) 
+data GenError = DecodeError (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
-                                                   
+
 -- | Disassemble block
 disassembleBlock :: Memory Word64
                  -> ExploreLoc -- ^ Location to explore from.
@@ -827,7 +833,7 @@ disassembleBlock' :: Memory Word64
 disassembleBlock' mem gs addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError
-                  
+
   -- Update current IP
   let gs1 = gs & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
       line = text (showHex addr "") <> colon
@@ -836,11 +842,11 @@ disassembleBlock' mem gs addr = do
   exec <- case execInstruction i of
            Nothing -> Left (DisassembleError i)
            Just v  -> return v
-  
+
   Some gs2 <- return $ runX86Generator gs1 $ do
                        addStmt (Comment (show line))
                        exec
-                        
+
   case gs2 ^. blockState of
    JustF p_b | BVValue _ ip <- p_b^.(pBlockState . curIP)
              , ip == fromIntegral next_ip -> disassembleBlock' mem gs2 next_ip

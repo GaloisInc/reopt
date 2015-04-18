@@ -524,6 +524,10 @@ class ( Applicative m
   when_ :: Value m BoolType -> m () -> m ()
   when_ p x = ifte_ p x (return ())
 
+  -- | Run a step if condition is false.
+  unless_ :: Value m BoolType -> m () -> m ()
+  unless_ p x = ifte_ p (return ()) x
+
   -- FIXME: use location instead?
   -- | Move n bits at a time, with count moves
   memmove :: NatRepr n -> Value m (BVType 64) -> Value m (BVType 64) -> Value m (BVType 64) -> m ()
