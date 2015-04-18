@@ -24,7 +24,7 @@ module Reopt.Semantics.Representation
   ( CFG
   , emptyCFG
   , cfgBlocks
-  , insertBlock
+  , insertBlocksForCode
   , traverseBlocks
   , traverseBlockAndChildren    
     -- * Block level declarations
@@ -77,7 +77,9 @@ module Reopt.Semantics.Representation
 
 import           Control.Applicative
 import           Control.Lens
+import           Control.Monad.State.Strict
 import           Data.Foldable (foldMap)
+import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (catMaybes)
@@ -151,14 +153,24 @@ parenIf False d = d
 
 -- | A CFG is a map from all reachable code locations
 -- to the block for that code location.
-newtype CFG = CFG { _cfgBlocks :: (Map BlockLabel Block) }
+data CFG = CFG { _cfgBlocks :: !(Map BlockLabel Block)
+                 -- | Maps each address that is the start of a block
+                 -- to the address just past the end of that block.
+                 -- Blocks are expected to be contiguous.
+               , _cfgBlockRanges :: !(Map CodeAddr CodeAddr)
+               }
 
 -- | Create empty CFG
 emptyCFG :: CFG
-emptyCFG = CFG { _cfgBlocks = Map.empty }
+emptyCFG = CFG { _cfgBlocks = Map.empty
+               , _cfgBlockRanges = Map.empty
+               }
 
 cfgBlocks :: Simple Lens CFG (Map BlockLabel Block)
 cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
+
+cfgBlockRanges :: Simple Lens CFG (Map CodeAddr CodeAddr)
+cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
 
 insertBlock :: Block -> CFG -> CFG
 insertBlock b c = do
@@ -166,6 +178,12 @@ insertBlock b c = do
   case Map.lookup lbl (c^.cfgBlocks) of
     Just{} -> error $ "Block with label " ++ show (pretty lbl) ++ " already defined."
     Nothing -> c & cfgBlocks %~ Map.insert (blockLabel b) b
+
+-- | Inserts blocks for a contiguous region of code.
+insertBlocksForCode :: CodeAddr -> CodeAddr -> [Block] -> CFG -> CFG
+insertBlocksForCode start end bs = execState $ do
+  modify $ \cfg -> foldl' (flip insertBlock) cfg bs
+  cfgBlockRanges %= Map.insert start end
 
 instance Pretty CFG where
   pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
@@ -249,6 +267,7 @@ instance Pretty BlockLabel where
 -- Consists of:
 -- 1. A label that should uniquely identify the block, equence of
 data Block = Block { blockLabel :: !BlockLabel
+                     -- | List of statements in the block.
                    , blockStmts :: !([Stmt])
                      -- | This maps applications to the associated assignment.
                    , blockCache :: !(MapF (App Value) Assignment)
@@ -257,9 +276,9 @@ data Block = Block { blockLabel :: !BlockLabel
                    }
 
 instance Pretty Block where
-  pretty b =
-     pretty (blockLabel b) <> text ":" <$$>
-     indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
+  pretty b = do
+    pretty (blockLabel b) <> text ":" <$$>
+      indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
 
 ------------------------------------------------------------------------
 -- Loctions a statement may need to read or write to.
@@ -623,20 +642,18 @@ instance OrdF Value where
       LTF -> LTF
       EQF -> fromOrdering (compare vx vy)
       GTF -> GTF
+  compareF BVValue{} _ = LTF
+  compareF _ BVValue{} = GTF
 
   compareF (AssignedValue a1) (AssignedValue a2) = compareF a1 a2
+  compareF AssignedValue{} _ = LTF
+  compareF _ AssignedValue{} = GTF
 
   compareF (Initial r) (Initial r') =
     case compareF r r' of
-     LTF -> LTF
-     EQF -> EQF
-     GTF -> GTF
-
-  compareF _ Initial{} = LTF
-  compareF Initial{} _ = GTF
-
-  compareF BVValue{} _ = LTF
-  compareF _ BVValue{} = GTF
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF
 
 valueType :: Value tp -> TypeRepr tp
 valueType (BVValue n _) = BVTypeRepr n

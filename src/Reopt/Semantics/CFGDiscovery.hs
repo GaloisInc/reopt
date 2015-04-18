@@ -209,11 +209,10 @@ reallyGetBlock loc = do
    Left _e -> trace ("Failed for address " ++ show (pretty loc)) $
               do failedAddrs %= S.insert (loc_ip loc)
                  return Nothing
-   Right (bs, next_ip) -> do cfg %= addBlocks bs
-                             blockEnds %= S.insert next_ip
-                             lookupBlock (loc_ip loc)
-  where
-    addBlocks bs c = Fold.foldl' (flip insertBlock) c bs
+   Right (bs, next_ip) ->
+     do cfg       %= insertBlocksForCode (loc_ip loc) next_ip bs
+        blockEnds %= S.insert next_ip
+        lookupBlock (loc_ip loc)
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.

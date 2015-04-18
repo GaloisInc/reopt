@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -5,9 +6,14 @@ module Main (main) where
 
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.State.Strict
 import qualified Data.ByteString as B
 import           Data.Elf
+import           Data.Foldable (traverse_)
+import           Data.Map (Map)
+import           Data.List
 import qualified Data.Map as Map
+import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Version
@@ -18,14 +24,18 @@ import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Paths_reopt (version)
-import Data.Type.Equality as Equality
+import           Data.Int
+import           Data.Word
 
-import           Flexdis86
+import           Paths_reopt (version)
+import           Data.Type.Equality as Equality
+
+import           Flexdis86 (InstructionInstance(..))
 import           Reopt
 import           Reopt.Memory
-import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.CFGDiscovery
+import           Reopt.Semantics.DeadRegisterElimination
+import           Reopt.Semantics.Monad (Type(..))
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
 
@@ -204,10 +214,159 @@ showCFG :: FilePath -> IO ()
 showCFG path = do
   (_, (g0, _)) <- getCFG path
   let g = eliminateDeadRegisters g0
---  forM_ (Map.elems (g^.cfgBlocks)) printSP
   print (pretty g)
---  print (Map.size (g^.cfgBlocks))
+{-
+  putStrLn $ "Found potential calls: " ++ show (Map.size (cfgCalls g))
 
+  let rCalls = reverseEdges (cfgCalls g)
+
+  let rEdgeMap = reverseEdges (cfgSuccessors g)
+
+
+  let sources = getTargets (Map.keys rCalls) rEdgeMap
+
+  forM_ (Set.toList sources) $ \a -> do
+    let Just b = findBlock g (DecompiledBlock a)
+    when (hasCall b == False) $ do
+      print $ "Found start " ++ showHex a ""
+      print (pretty b)
+-}
+
+hasCall :: Block -> Bool
+hasCall b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "call" `isInfixOf` s
+        isCallComment _ = False
+
+------------------------------------------------------------------------
+-- Function determination
+
+{-
+A procedure is a contiguous set of blocks that:
+ * Has a unique entry point.
+ * Returns to the address stored at the address "sp".
+-}
+
+
+type AbsStack = Map Int64 Word64
+
+emptyAbsStack :: AbsStack
+emptyAbsStack = Map.empty
+
+{-
+data ProcState
+   = ProcState { addrStart ::
+               }
+
+
+-- Map BlockLabel AbsStack
+
+-- Returns map that maps address at start of procedure to the
+-- set of labels within that procedure.
+findProcedure :: CFG Block
+                 -- ^ CFG
+              -> Set Word64
+                 -- ^ Potential call locations
+              -> Map Word64 (Set BlockLabel)
+findProcudure g s = undefined g s
+-}
+
+
+
+------------------------------------------------------------------------
+-- Call detection
+
+
+-- | @v `asOffsetOf` b@ returns @Just o@ if @v@ can be interpreted
+-- as a constant offset from a term at base @b@, and @Nothing@
+-- otherwise.
+asOffsetOf :: Value tp -> Value tp -> Maybe Integer
+asOffsetOf v base
+  | v == base = Just 0
+  | Just (BVAdd _ v' (BVValue _ o)) <- valueAsApp v
+  , v' == base = Just o
+  | otherwise = Nothing
+
+runStmt :: Stmt -> State AbsStack ()
+runStmt (Write (MemLoc a _) (BVValue _ v))
+  | Just o <- a `asOffsetOf` (Initial N.rsp) = do
+    modify $ Map.insert (fromInteger o) (fromInteger v)
+runStmt _ = return ()
+
+lookupStack :: Int64 -> AbsStack -> Maybe Word64
+lookupStack o s = Map.lookup o s
+
+decompiledBlocks :: CFG -> [Block]
+decompiledBlocks g =
+  [ b | b <- Map.elems (g^.cfgBlocks)
+      , DecompiledBlock _ <- [blockLabel b]
+      ]
+
+findBlock :: CFG -> BlockLabel -> Maybe Block
+findBlock g l = Map.lookup l (g^.cfgBlocks)
+
+-- | Maps blocks to set of concrete addresses they may call.
+type CallState = Map CodeAddr (Set CodeAddr)
+
+addAddrs :: CodeAddr -> Value (BVType 64) -> State CallState ()
+addAddrs b (BVValue _ o) =
+  modify $ Map.insertWith Set.union b (Set.singleton (fromInteger o))
+addAddrs _ _ = return ()
+
+detectCalls :: CFG -> Block -> AbsStack -> State CallState ()
+detectCalls g b initStack = do
+  let finStack = flip execState initStack $
+                   traverse_ runStmt (blockStmts b)
+  case blockTerm b of
+    FetchAndExecute x86_state -> do
+      let rsp = x86_state^.register N.rsp
+      case rsp `asOffsetOf` (Initial N.rsp) of
+        Just o | Just _ <- lookupStack (fromInteger o) finStack -> do
+          addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+        _ -> return ()
+    Branch _ x y -> do
+      let Just xb = findBlock g x
+          Just yb = findBlock g y
+      detectCalls g xb finStack
+      detectCalls g yb finStack
+
+cfgCalls :: CFG -> CallState
+cfgCalls g = flip execState Map.empty $ do
+  traverse_ (\b -> detectCalls g b emptyAbsStack) (decompiledBlocks g)
+
+detectSuccessors :: CFG -> Block -> State CallState ()
+detectSuccessors g b = do
+  case blockTerm b of
+    FetchAndExecute x86_state -> do
+      addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+    Branch _ x y -> do
+      let Just xb = findBlock g x
+          Just yb = findBlock g y
+      detectSuccessors g xb
+      detectSuccessors g yb
+
+cfgSuccessors :: CFG -> CallState
+cfgSuccessors g = flip execState Map.empty $ do
+  traverse_ (detectSuccessors g) (decompiledBlocks g)
+
+toAllList :: Map a (Set b) -> [(a,b)]
+toAllList m = do
+  (k,s) <- Map.toList m
+  v <- Set.toList s
+  return (k,v)
+
+reverseEdges :: Ord a => Map a (Set a) -> Map a (Set a)
+reverseEdges m = flip execState Map.empty $ do
+  forM_ (toAllList m) $ \(k,v) -> do
+    modify $ Map.insertWith Set.union v (Set.singleton k)
+
+getTargets :: (Ord a, Ord b) => [a] -> Map a (Set b) -> Set b
+getTargets l m = foldl' Set.union Set.empty $
+  fmap (fromMaybe Set.empty . (`Map.lookup` m)) l
+
+------------------------------------------------------------------------
+-- Pattern match on stack pointer possibilities.
+
+{-
 printSP :: Block -> IO ()
 printSP b = do
   case blockTerm b of
@@ -255,6 +414,7 @@ printSP b = do
         _ | otherwise -> do
             print $ "Block " ++ show (pretty (blockLabel b))
             print $ "RBP = " ++ show (pretty rbp_val)
+-}
 
 {-
 printIP :: Block -> IO ()
