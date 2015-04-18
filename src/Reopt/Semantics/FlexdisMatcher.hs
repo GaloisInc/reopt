@@ -85,7 +85,18 @@ getSomeBVValue v =
 getBVAddress :: FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
 getBVAddress ar =
   case ar of
-    F.Addr_32      _seg _m_r32 _m_int_r32 _i32 -> fail "Addr_32"
+   -- FIXME: It seems that there is no sign extension here ...
+    F.Addr_32      seg m_r32 m_int_r32 i32 -> do
+      check_seg_value seg
+      base <- case m_r32 of
+                Nothing -> return 0
+                Just r  -> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
+      scale <- case m_int_r32 of
+                 Nothing     -> return 0
+                 Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
+                                <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
+      return $ uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
+      
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
     F.Offset_64    seg w64                 -> do check_seg_value seg
