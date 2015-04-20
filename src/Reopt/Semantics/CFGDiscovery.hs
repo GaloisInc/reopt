@@ -33,6 +33,8 @@ import qualified Data.Map as M
 import           Data.Maybe (fromJust, fromMaybe, catMaybes)
 import           Data.Monoid (mappend, mempty)
 import           Data.Parameterized.NatRepr
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Vector as V
@@ -61,31 +63,36 @@ class Eq d => AbsDomain d where
 
   -- | Least upper bound (always defined, as we have top)
   lub :: d -> d -> d
-  
+
   -- | Join the old and new states and return the updated state iff
   -- the result is larger than the old state.
   joinD :: d -> d -> Maybe d
   joinD old new
     | new `leq` old = Nothing
     | otherwise     = Just $ lub old new
-    
+
 ------------------------------------------------------------------------
 -- Interpreter state
 
 -- FIXME: types/sizes?
-data AbsValue = TopV
-              | AbsValue { _absValues :: Set Integer }
-                deriving Eq
+data AbsValue (tp :: Type)
+   = AbsValue !(Set Integer)
+   | TopV
 
-abstractSingleton :: Integer -> AbsValue
+instance Eq (AbsValue tp) where
+  AbsValue x == AbsValue y = x == y
+  TopV == TopV = True
+  _ == _ = False
+
+abstractSingleton :: Integer -> AbsValue tp
 abstractSingleton = AbsValue . S.singleton
 
-concretize :: AbsValue -> Maybe (Set Integer)
+concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize TopV         = Nothing
 concretize (AbsValue s) = Just s
 
-newtype AbsValue' (a :: Type) = AbsValue' { unAbsValue' :: AbsValue }
-                                deriving (AbsDomain)
+newtype AbsValue' (tp :: Type) = AbsValue' { unAbsValue' :: AbsValue tp }
+  deriving (AbsDomain)
 
 instance Eq (AbsValue' a) where
   AbsValue' x == AbsValue' y = x == y
@@ -93,16 +100,16 @@ instance Eq (AbsValue' a) where
 instance EqF AbsValue' where
   eqF = (==)
 
-emptyAbsValue :: AbsValue
+emptyAbsValue :: AbsValue tp
 emptyAbsValue = AbsValue S.empty
 
 newtype AbsBlockState = AbsBlockState { _absX86State :: X86State' AbsValue' }
-                        deriving Eq
+  deriving Eq
 
 absX86State :: Simple Lens AbsBlockState (X86State' AbsValue')
 absX86State = lens _absX86State (\s v -> s { _absX86State = v })
 
-instance AbsDomain AbsValue where
+instance AbsDomain (AbsValue tp) where
   top = TopV
 
   leq _ TopV = True
@@ -112,14 +119,14 @@ instance AbsDomain AbsValue where
   lub _ TopV = TopV
   lub TopV _ = TopV
   lub (AbsValue v) (AbsValue v') = AbsValue $ v `S.union` v'
-  
+
 instance AbsDomain AbsBlockState where
   top = AbsBlockState $ mkX86State (\_ -> top)
   leq (AbsBlockState x) (AbsBlockState y)
     = cmpX86State leq x y
   lub (AbsBlockState x) (AbsBlockState y)
     = AbsBlockState $ zipWithX86State lub x y
-  
+
 type AbsState = Map CodeAddr AbsBlockState
 
 emptyAbsState :: AbsState
@@ -129,7 +136,7 @@ data InterpState = InterpState
                    { _cfg      :: !CFG
                    , _failedAddrs  :: !(Set CodeAddr)
                    , _guessedAddrs :: !(Set CodeAddr)
-                   , _blockEnds   :: !(Set CodeAddr)                     
+                   , _blockEnds   :: !(Set CodeAddr)
                    , _genState :: !GlobalGenState
                    , _memory   :: !(Memory Word64) -- read only
                    , _absState :: !AbsState
@@ -238,30 +245,40 @@ type Path = [(Value BoolType, Bool)]
 --                        ++ map (_2 %~ (:) (cond, False)) r
 --     go b = case blockTerm b of
 --             FetchAndExecute s -> [(s, [])]
---             _                 -> [] 
+--             _                 -> []
 
-transferValue :: AbsBlockState -> Map AssignId AbsValue -> Value tp -> AbsValue
+type AbsCache = MapF Assignment AbsValue
+
+transferValue :: AbsBlockState
+              -> AbsCache
+              -> Value tp
+              -> AbsValue tp
 transferValue ab m v =
   case v of
    BVValue _ i -> abstractSingleton i
    -- Invariant: v is in m
-   AssignedValue (Assignment r _) ->
-     fromMaybe (error $ "Missing assignment for " ++ show r) (M.lookup r m)
+   AssignedValue a ->
+     fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
+               (MapF.lookup a m)
    Initial r -> unAbsValue' $ ab ^. (absX86State . register r)
-   
-transferApp :: AbsBlockState -> Map AssignId AbsValue -> App Value tp -> AbsValue
+
+transferApp :: AbsBlockState
+            -> AbsCache
+            -> App Value tp
+            -> AbsValue tp
 transferApp ab app m = top
 
 type_width' :: TypeRepr tp -> Int
 type_width' (BVTypeRepr n) = widthVal n
 
-transferStmt :: AbsBlockState -> Stmt
-                -> State (Map AssignId AbsValue) (Set CodeAddr)
+transferStmt :: AbsBlockState
+             -> Stmt
+             -> State AbsCache (Set CodeAddr)
 transferStmt ab stmt = go stmt
   where
-    go :: Stmt -> State (Map AssignId AbsValue) (Set CodeAddr)
-    go (AssignStmt (Assignment v rhs)) =
-      do modify (\m -> M.insert v (evalRHS m rhs) m)
+    go :: Stmt -> State AbsCache (Set CodeAddr)
+    go (AssignStmt a@(Assignment v rhs)) =
+      do modify (\m -> MapF.insert a (evalRHS m rhs) m)
          return S.empty
     go (Write (MemLoc _ tp) v)
       | type_width' tp == 64 = do
@@ -271,19 +288,24 @@ transferStmt ab stmt = go stmt
                     Just vs' -> S.map fromInteger vs'
     go _                               = return S.empty
 
-    evalRHS :: forall tp.  Map AssignId AbsValue -> AssignRhs tp -> AbsValue
+    evalRHS :: forall tp
+            .  AbsCache
+            -> AssignRhs tp
+            -> AbsValue tp
     evalRHS m rhs =
       case rhs of
        EvalApp app    -> transferApp ab m app
        SetUndefined _ -> TopV
        Read _         -> TopV
 
-abstractState :: AbsBlockState -> Map AssignId AbsValue -> X86State
-                 -> [(ExploreLoc, AbsBlockState)]
+abstractState :: AbsBlockState
+              -> AbsCache
+              -> X86State
+              -> [(ExploreLoc, AbsBlockState)]
 abstractState ab m s =
   case concretize (unAbsValue' (abst ^. curIP)) of
    Nothing  -> trace "Hit top" [] -- we hit top, so give up
-   Just ips -> 
+   Just ips ->
      [ (loc, AbsBlockState $ abst & curIP .~ x_w)
      | x <- S.toList ips
      , let x_w = AbsValue' (abstractSingleton x)
@@ -300,19 +322,20 @@ abstractState ab m s =
 transferBlock :: CFG -> Block -> AbsBlockState
                  -> (Set CodeAddr, [(ExploreLoc, AbsBlockState)])
 transferBlock c root ab =
-  traverseBlockAndChildren c root leaf merge M.empty
+  traverseBlockAndChildren c root leaf merge MapF.empty
   & _1 %~ S.unions
   where
     merge b l r m = let (guesses, m_b) = go b m
                     in l m_b `mappend` r m_b `mappend` (guesses, [])
     leaf b m = case blockTerm b of
-                 FetchAndExecute s -> let (guesses, m_b) = go b m
-                                      in (guesses, abstractState ab m_b s)
+                 FetchAndExecute s ->
+                   let (guesses, m_b) = go b m
+                    in (guesses, abstractState ab m_b s)
                  _                 -> mempty -- can't happen
 
     go b = runState (mapM (transferStmt ab) (blockStmts b))
 
-      
+
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
 mergeBlocks :: [(ExploreLoc, AbsBlockState)] -> State AbsState [ExploreLoc]
@@ -363,15 +386,15 @@ cfgFromAddress mem start = (s' ^. cfg, s' ^. blockEnds)
               st'  = st & absState %~ addTops roots
               st'' = execState (WL.iterate transfer wl) st'
           in go (st'' & guessedAddrs .~ S.empty) (st'' ^. guessedAddrs)
-    
+
     addTops roots m =
       Fold.foldl' (\m' k -> M.insertWith (\_ old -> old) k top m') m
       (S.filter isCodePointer roots)
-       
+
     isCodePointer :: CodeAddr -> Bool
     isCodePointer val = addrHasPermissions (fromIntegral val) pf_x mem
 
-       
+
 ------------------------------------------------------------------------
 -- Pretty printing utilities (copied)
 

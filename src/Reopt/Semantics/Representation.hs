@@ -26,7 +26,7 @@ module Reopt.Semantics.Representation
   , cfgBlocks
   , insertBlocksForCode
   , traverseBlocks
-  , traverseBlockAndChildren    
+  , traverseBlockAndChildren
     -- * Block level declarations
   , BlockLabel(..)
   , blockParent
@@ -216,7 +216,7 @@ traverseBlockAndChildren cfg b0 f merge = goBlock b0
     goBlock b = case blockTerm b of
                  Branch _ lb rb -> merge b (go lb) (go rb)
                  _              -> f b
-                  
+
     go l = case cfg ^. cfgBlocks . at l of
             Nothing -> error $ "label not found"
             Just b  -> goBlock b
@@ -439,13 +439,13 @@ cmpX86State :: (forall u. f u -> g u -> Bool)
                -> Bool
 cmpX86State r s s' =
   (s^.curIP) `r` (s'^.curIP)
-  && vectorCompare r (s^.reg64Regs)      (s'^.reg64Regs)     
-  && vectorCompare r (s^.flagRegs)       (s'^.flagRegs)      
+  && vectorCompare r (s^.reg64Regs)      (s'^.reg64Regs)
+  && vectorCompare r (s^.flagRegs)       (s'^.flagRegs)
   && vectorCompare r (s^.x87ControlWord) (s'^.x87ControlWord)
-  && vectorCompare r (s^.x87StatusWord)  (s'^.x87StatusWord) 
-  && vectorCompare r (s^.x87TagWords)    (s'^.x87TagWords)   
-  && vectorCompare r (s^.x87Regs)        (s'^.x87Regs)       
-  && vectorCompare r (s^.xmmRegs)        (s'^.xmmRegs)       
+  && vectorCompare r (s^.x87StatusWord)  (s'^.x87StatusWord)
+  && vectorCompare r (s^.x87TagWords)    (s'^.x87TagWords)
+  && vectorCompare r (s^.x87Regs)        (s'^.x87Regs)
+  && vectorCompare r (s^.xmmRegs)        (s'^.xmmRegs)
 
 type X86State = X86State' Value
 
@@ -471,7 +471,7 @@ mapX86State :: (forall u. f u -> g u)
 mapX86State f x = mkX86State (\r -> f (x ^. register r))
 
 mkX86State :: (forall cl. N.RegisterName cl -> f (N.RegisterType cl)) -> X86State' f
-mkX86State f =               
+mkX86State f =
   X86State { _curIP = f N.IPReg
            , _reg64Regs = V.generate 16 (f . N.GPReg)
            , _flagRegs  = V.generate 32 (f . N.FlagReg)
