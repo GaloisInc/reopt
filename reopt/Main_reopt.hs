@@ -158,7 +158,7 @@ dumpDisassembly path = do
   -- print $ Set.size $ instructionNames sections
   --print $ Set.toList $ instructionNames sections
 
-getCFG :: FilePath -> IO (Memory Word64, (CFG, Set CodeAddr))
+getCFG :: FilePath -> IO (Memory Word64, CFG)
 getCFG path =  do
   e <- readElf64 path
   mi <- elfInterpreter e
@@ -170,7 +170,7 @@ getCFG path =  do
   -- Build model of executable memory from elf.
   mem <- loadElf e
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  return $ (mem, cfgFromAddress mem (elfEntry e))
+  return $ (mem,  cfgFromAddress mem (elfEntry e))
 
 isInterestingCode :: Memory Word64 -> (CodeAddr, Maybe CodeAddr) -> Bool
 isInterestingCode mem (start, Just end) = go start end
@@ -189,7 +189,8 @@ isInterestingCode mem (start, Just end) = go start end
 isInterestingCode _ _ = True -- Last bit
 
 showGaps :: FilePath ->  IO ()
-showGaps path = do (mem, (cfg, ends)) <- getCFG path
+showGaps path = do (mem, cfg) <- getCFG path
+                   let ends = cfgBlockEnds cfg
                    let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
                    let gaps = filter (isInterestingCode mem)
                               $ out_gap blocks (Set.elems ends)
@@ -212,7 +213,7 @@ showGaps path = do (mem, (cfg, ends)) <- getCFG path
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
-  (_, (g0, _)) <- getCFG path
+  (_, g0) <- getCFG path
   let g = eliminateDeadRegisters g0
   print (pretty g)
 {-

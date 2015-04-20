@@ -28,6 +28,7 @@ library
 
   exposed-modules:
     Reopt
+    Reopt.AbsState
     Reopt.CFG
     Reopt.CFG.JumpTargets
     Reopt.Loader
@@ -43,7 +44,9 @@ library
     Reopt.Semantics.CodePointerDiscovery
     Reopt.Semantics.CFGDiscovery
     Reopt.Semantics.WorkList
+    Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
+    Reopt.X86State
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
