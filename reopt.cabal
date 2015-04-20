@@ -43,6 +43,7 @@ library
     Reopt.Semantics.CodePointerDiscovery
     Reopt.Semantics.CFGDiscovery
     Reopt.Semantics.WorkList
+    Reopt.Utils.PrettyPrint
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top

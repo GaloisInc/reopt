@@ -25,12 +25,11 @@ module Reopt.Semantics.CFGDiscovery
 
 import           Control.Applicative ( (<$>) )
 import           Control.Lens
-import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Data.Foldable as Fold
 import           Data.Map (Map)
 import qualified Data.Map as M
-import           Data.Maybe (fromJust, fromMaybe, catMaybes)
+import           Data.Maybe
 import           Data.Monoid (mappend, mempty)
 import           Data.Parameterized.NatRepr
 import Data.Parameterized.Map (MapF)
@@ -41,8 +40,7 @@ import qualified Data.Vector as V
 import           Data.Word
 import           Debug.Trace
 import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
-import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
@@ -84,29 +82,21 @@ instance Eq (AbsValue tp) where
   TopV == TopV = True
   _ == _ = False
 
+instance EqF AbsValue where
+  eqF = (==)
+
 abstractSingleton :: Integer -> AbsValue tp
 abstractSingleton = AbsValue . S.singleton
 
+-- | Returns values that a abstract domain can be.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize TopV         = Nothing
 concretize (AbsValue s) = Just s
 
-newtype AbsValue' (tp :: Type) = AbsValue' { unAbsValue' :: AbsValue tp }
-  deriving (AbsDomain)
-
-instance Eq (AbsValue' a) where
-  AbsValue' x == AbsValue' y = x == y
-
-instance EqF AbsValue' where
-  eqF = (==)
-
-emptyAbsValue :: AbsValue tp
-emptyAbsValue = AbsValue S.empty
-
-newtype AbsBlockState = AbsBlockState { _absX86State :: X86State' AbsValue' }
+newtype AbsBlockState = AbsBlockState { _absX86State :: X86State AbsValue }
   deriving Eq
 
-absX86State :: Simple Lens AbsBlockState (X86State' AbsValue')
+absX86State :: Simple Lens AbsBlockState (X86State AbsValue)
 absX86State = lens _absX86State (\s v -> s { _absX86State = v })
 
 instance AbsDomain (AbsValue tp) where
@@ -177,14 +167,14 @@ liftEither :: StateT s (Either e) a -> State s (Either e a)
 liftEither m = state go
   where
     go s = case runStateT m s of
-            Left e       -> (Left e,  s)
-            Right (r, t) -> (Right r, t)
+             Left e       -> (Left e,  s)
+             Right (r, t) -> (Right r, t)
 
   -- FIXME: move
-subMonad :: (MonadState s m) =>
-            Simple Lens s t
-            -> State t r
-            -> m r
+subMonad :: (MonadState s m)
+         => Simple Lens s t
+         -> State t r
+         -> m r
 subMonad l m = l %%= runState m
 
 ------------------------------------------------------------------------
@@ -197,46 +187,39 @@ lookupBlock addr = uses (cfg . cfgBlocks) (M.lookup (DecompiledBlock addr))
 lookupAbsState :: MonadState InterpState m => CodeAddr -> m (Maybe AbsBlockState)
 lookupAbsState addr = uses absState (M.lookup addr)
 
-newtype Hex = Hex Integer
-              deriving (Eq, Ord)
-
-mkHex :: Integer -> Hex
-mkHex = Hex
-
-instance Show Hex where
-  show (Hex v) = showHex v ""
-
 -- | This is the worker for getBlock, in the case that the cfg doesn't
 -- contain the address of interest.
 reallyGetBlock :: MonadState InterpState m => ExploreLoc -> m (Maybe Block)
 reallyGetBlock loc = do
   mem <- use memory
-  r <- subMonad genState (liftEither $ disassembleBlock mem loc)
+  r <- subMonad genState $ do
+    liftEither $ disassembleBlock mem loc
   case r of
-   Left _e -> trace ("Failed for address " ++ show (pretty loc)) $
-              do failedAddrs %= S.insert (loc_ip loc)
-                 return Nothing
-   Right (bs, next_ip) ->
-     do cfg       %= insertBlocksForCode (loc_ip loc) next_ip bs
-        blockEnds %= S.insert next_ip
-        lookupBlock (loc_ip loc)
+   Left _e -> trace ("Failed for address " ++ show (pretty loc)) $ do
+     failedAddrs %= S.insert (loc_ip loc)
+     return Nothing
+   Right (bs, next_ip) -> do
+     cfg       %= insertBlocksForCode (loc_ip loc) next_ip bs
+     blockEnds %= S.insert next_ip
+     lookupBlock (loc_ip loc)
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all it's children are
 -- present in the cfg (assuming successful disassembly)
 getBlock :: MonadState InterpState m => ExploreLoc -> m (Maybe Block)
-getBlock loc = do let addr = (loc_ip loc)
-                  m_b <- lookupBlock addr
-                  failed <- uses failedAddrs (S.member addr)
-                  case m_b of
-                    Nothing | not failed -> reallyGetBlock loc
-                    _                    -> return m_b
+getBlock loc = do
+  let addr = (loc_ip loc)
+  m_b <- lookupBlock addr
+  failed <- uses failedAddrs (S.member addr)
+  case m_b of
+    Nothing | not failed -> reallyGetBlock loc
+    _                    -> return m_b
 
 ------------------------------------------------------------------------
 -- Transfer functions
 
-type Path = [(Value BoolType, Bool)]
+--type Path = [(Value BoolType, Bool)]
 
 -- blockPaths :: CFG -> Block -> [(X86State, Path)]
 -- blockPaths c root = traverseBlockAndChildren c root go merge
@@ -260,7 +243,7 @@ transferValue ab m v =
    AssignedValue a ->
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
                (MapF.lookup a m)
-   Initial r -> unAbsValue' $ ab ^. (absX86State . register r)
+   Initial r -> ab ^. (absX86State . register r)
 
 transferApp :: AbsBlockState
             -> AbsCache
@@ -300,24 +283,24 @@ transferStmt ab stmt = go stmt
 
 abstractState :: AbsBlockState
               -> AbsCache
-              -> X86State
+              -> X86State Value
               -> [(ExploreLoc, AbsBlockState)]
 abstractState ab m s =
-  case concretize (unAbsValue' (abst ^. curIP)) of
-   Nothing  -> trace "Hit top" [] -- we hit top, so give up
-   Just ips ->
-     [ (loc, AbsBlockState $ abst & curIP .~ x_w)
-     | x <- S.toList ips
-     , let x_w = AbsValue' (abstractSingleton x)
-     , let t = case s ^. x87TopReg of
-                BVValue _ v -> v
-                _ -> error "x87top is not concrete"
-     , let loc = ExploreLoc { loc_ip = fromInteger x
-                            , loc_x87_top = fromInteger t
-                            }
-     ]
+  case concretize (abst ^. curIP) of
+    Nothing  -> trace "Hit top" [] -- we hit top, so give up
+    Just ips ->
+      [ (loc, AbsBlockState $ abst & curIP .~ x_w)
+      | x <- S.toList ips
+      , let x_w = abstractSingleton x
+      , let t = case s ^. x87TopReg of
+                  BVValue _ v -> v
+                  _ -> error "x87top is not concrete"
+      , let loc = ExploreLoc { loc_ip = fromInteger x
+                             , loc_x87_top = fromInteger t
+                             }
+      ]
   where
-    abst = mkX86State (\r -> AbsValue' $ transferValue ab m (s ^. register r))
+    abst = mkX86State (\r -> transferValue ab m (s ^. register r))
 
 transferBlock :: CFG -> Block -> AbsBlockState
                  -> (Set CodeAddr, [(ExploreLoc, AbsBlockState)])
@@ -394,42 +377,15 @@ cfgFromAddress mem start = (s' ^. cfg, s' ^. blockEnds)
     isCodePointer :: CodeAddr -> Bool
     isCodePointer val = addrHasPermissions (fromIntegral val) pf_x mem
 
-
 ------------------------------------------------------------------------
--- Pretty printing utilities (copied)
+-- Pretty printing utilities
 
-bracketsep :: [Doc] -> Doc
-bracketsep [] = text "{}"
-bracketsep (h:l) =
-  vcat ([text "{" <+> h] ++ fmap (text "," <+>) l ++ [text "}"])
-
-ppValueEq :: N.RegisterName cl -> AbsValue' (N.RegisterType cl) -> Maybe Doc
-ppValueEq r v = pp <$> concretize (unAbsValue' v)
-  where
-    pp vs =  text (show r) <+> text "="
-             <+> encloseSep lbrace rbrace comma (map (\v' -> text (showHex v' "")) ( S.toList vs))
-
--- | Pretty print  a register equals a value.
-rec :: N.RegisterName cl -> AbsValue' (N.RegisterType cl) -> Maybe Doc
-rec nm v = ppValueEq nm v
-
-recv :: (Int -> N.RegisterName cl)
-        -> V.Vector (AbsValue' (N.RegisterType cl)) -> [Maybe Doc]
-recv mkR v = f <$> [0..V.length v - 1]
-  where
-    f i = ppValueEq (mkR i) (v V.! i)
-
-parenIf :: Bool -> Doc -> Doc
-parenIf True d = parens d
-parenIf False d = d
+-- | Print a list of Docs vertically separated.
+instance PrettyRegValue AbsValue where
+  ppValueEq r v = pp <$> concretize v
+    where
+      pp vs = text (show r) <+> text "="
+        <+> encloseSep lbrace rbrace comma (map (\v' -> text (showHex v' "")) ( S.toList vs))
 
 instance Pretty AbsBlockState where
-  pretty (AbsBlockState s) =
-    bracketsep $ catMaybes ([ rec   N.rip (s^.curIP)]
-                            ++ recv N.GPReg (s^.reg64Regs)
-                            ++ recv N.FlagReg (s^.flagRegs)
-                            ++ recv N.X87ControlReg (s^.x87ControlWord)
-                            ++ recv N.X87StatusReg (s^.x87StatusWord)
-                            ++ recv N.X87TagReg (s^.x87TagWords)
-                            ++ recv N.X87FPUReg (s^.x87Regs)
-                            ++ recv N.XMMReg (s^.xmmRegs))
+  pretty (AbsBlockState s) = pretty s

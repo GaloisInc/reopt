@@ -367,14 +367,14 @@ nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
                          , _pBlockStmts :: !(Seq Stmt)
                            -- | The last statement in the block.
-                         , _pBlockState :: !X86State
+                         , _pBlockState :: !(X86State Value)
                          , _pBlockApps  :: !(MapF (App Value) Assignment)
                          }
 
 pBlockStmts :: Simple Lens PreBlock (Seq Stmt)
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
 
-pBlockState :: Simple Lens PreBlock X86State
+pBlockState :: Simple Lens PreBlock (X86State Value)
 pBlockState = lens _pBlockState (\s v -> s { _pBlockState = v })
 
 pBlockApps  :: Simple Lens PreBlock (MapF (App Value) Assignment)
@@ -398,7 +398,7 @@ data GenState tag = GenState
        , _blockState     :: !(MaybeF tag PreBlock)
        }
 
-emptyPreBlock :: X86State
+emptyPreBlock :: X86State Value
               -> BlockLabel
               -> PreBlock
 emptyPreBlock s lbl =
@@ -428,11 +428,11 @@ frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
 blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBlock)
 blockState = lens _blockState (\s v -> s { _blockState = v })
 
-curX86State :: Simple Lens (GenState 'True) X86State
+curX86State :: Simple Lens (GenState 'True) (X86State Value)
 curX86State = blockState . _JustF . pBlockState
 
 -- | Finishes the current block, if it is started.
-finishBlock :: (X86State -> TermStmt)
+finishBlock :: (X86State Value -> TermStmt)
             -> (GenState a -> GenState 'False)
 finishBlock term st =
   case st^.blockState of
@@ -448,7 +448,7 @@ finishBlock term st =
 
 -- | Starts a new block.  If there is a current block it will finish
 -- it with FetchAndExecute
-startBlock :: X86State -> BlockLabel -> (GenState a -> GenState 'True)
+startBlock :: X86State Value -> BlockLabel -> (GenState a -> GenState 'True)
 startBlock s lbl st =
   finishBlock FetchAndExecute st & blockState .~ JustF (emptyPreBlock s lbl)
 
@@ -486,7 +486,7 @@ runX86Generator st m = unX86G m (\() -> Some) st
 modGenState :: State (GenState 'True) a -> X86Generator a
 modGenState m = X86G $ \c s -> uncurry c (runState m s)
 
-modState :: State X86State a -> X86Generator a
+modState :: State (X86State Value) a -> X86Generator a
 modState m = modGenState $ do
   s <- use curX86State
   let (r,s') = runState m s
@@ -785,7 +785,7 @@ locFromGuess :: CodeAddr -> ExploreLoc
 locFromGuess = rootLoc
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> X86State
+             -> X86State Value
 initX86State loc = mkX86State Initial
                    & curIP .~  BVValue knownNat (toInteger (loc_ip loc))
                    & x87TopReg .~ BVValue knownNat (fromIntegral $ loc_x87_top loc)
@@ -828,36 +828,31 @@ getFrontierNext = Fold.foldl' f Set.empty
 disassembleBlock' :: Memory Word64
                   -> GenState 'True
                   -> CodeAddr
-                  -> Either GenError
-                            (GenState 'False, CodeAddr)
+                  -> Either GenError (GenState 'False, CodeAddr)
 disassembleBlock' mem gs addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError
+  let next_ip_val = BVValue knownNat (toInteger next_ip)
 
   -- Update current IP
-  let gs1 = gs & curX86State . curIP .~ BVValue knownNat (toInteger next_ip)
-      line = text (showHex addr "") <> colon
-             <+> Flexdis.ppInstruction addr i
+  let gs1 = gs & curX86State . curIP .~ next_ip_val
 
-  exec <- case execInstruction i of
-           Nothing -> Left (DisassembleError i)
-           Just v  -> return v
 
-  Some gs2 <- return $ runX86Generator gs1 $ do
-                       addStmt (Comment (show line))
-                       exec
+  let line = text (showHex addr "") <> colon
+             <+> Flexdis.ppInstruction next_ip i
 
-  case gs2 ^. blockState of
-   JustF p_b | BVValue _ ip <- p_b^.(pBlockState . curIP)
-             , ip == fromIntegral next_ip -> disassembleBlock' mem gs2 next_ip
-   _ -> return (finishBlock FetchAndExecute gs2, next_ip)
+  exec <-
+    case execInstruction i of
+      Nothing -> Left (DisassembleError i)
+      Just v  -> return v
 
--- FIXME: move
-newtype Hex = Hex CodeAddr
-  deriving (Eq, Ord)
-
-mkHex :: CodeAddr -> Hex
-mkHex = Hex
-
-instance Show Hex where
-  show (Hex v) = showHex v ""
+  let res = runX86Generator gs1 $ do
+              addStmt (Comment (show line))
+              exec
+  case res of
+    Some gs2 -> do
+     case gs2 ^. blockState of
+       JustF p_b
+         | v <- p_b^.(pBlockState . curIP), v == next_ip_val -> do
+           disassembleBlock' mem gs2 next_ip
+       _ -> return (finishBlock FetchAndExecute gs2, next_ip)
