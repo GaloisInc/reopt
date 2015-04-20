@@ -57,12 +57,9 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 
-import           Unsafe.Coerce (unsafeCoerce)
-
 import           Debug.Trace
 import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
-import           Reopt.Semantics.CodePointerDiscovery (discoverCodePointers)
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
   ( Type(..)
