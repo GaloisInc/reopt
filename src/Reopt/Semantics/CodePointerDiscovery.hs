@@ -18,8 +18,8 @@ module Reopt.Semantics.CodePointerDiscovery
 import           Data.Foldable (foldMap)
 import           Data.Set (Set)
 import qualified Data.Set as S
-
 import           Data.Parameterized.NatRepr (widthVal)
+
 import           Reopt.Memory
 import           Reopt.Semantics.Representation
 

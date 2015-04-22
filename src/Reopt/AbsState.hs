@@ -8,13 +8,13 @@ module Reopt.AbsState
   , AbsValue
   , abstractSingleton
   , concretize
+  , asConcreteSingleton
   , AbsDomain(..)
-  , AbsCache
-  , initAbsCache
+  , AbsRegs
+  , initAbsRegs
   , finalAbsBlockState
   , addAssignment
   , transferValue
-  , transferApp
   , transferRHS
   ) where
 
@@ -64,25 +64,40 @@ class Eq d => AbsDomain d where
 
   {-# MINIMAL (top, ((leq,lub) | joinD)) #-}
 
+
+type ValueSet = Set Integer
+
 ------------------------------------------------------------------------
 -- AbsValue
 
-data AbsValue (tp :: Type)
-   = AbsValue !(Set Integer)
-   | TopV
+data AbsValue (tp :: Type) where
+  AbsValue :: !ValueSet -> AbsValue (BVType n)
+  StackAddr :: !ValueSet -> AbsValue (BVType 64)
+  TopV :: AbsValue tp
 
 instance Eq (AbsValue tp) where
   AbsValue x == AbsValue y = x == y
+  StackAddr x == StackAddr y = x == y
   TopV == TopV = True
   _ == _ = False
 
 instance EqF AbsValue where
   eqF = (==)
 
--- | Returns values that a abstract domain can be.
+-- | Returns a set of concrete integers that this value may be.
+-- This function will neither return the complete set or an
+-- known under-approximation.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize TopV         = Nothing
 concretize (AbsValue s) = Just s
+
+-- | Return single value is the abstract value can only take on one value.
+asConcreteSingleton :: AbsValue tp -> Maybe Integer
+asConcreteSingleton (AbsValue s) =
+  case Set.toList s of
+    [v] -> Just v
+    _ -> Nothing
+asConcreteSingleton TopV = Nothing
 
 instance AbsDomain (AbsValue tp) where
   top = TopV
@@ -102,7 +117,7 @@ instance PrettyRegValue AbsValue where
       pp vs = text (show r) <+> text "="
         <+> encloseSep lbrace rbrace comma (map (\v' -> text (showHex v' "")) (Set.toList vs))
 
-abstractSingleton :: Integer -> AbsValue tp
+abstractSingleton :: Integer -> AbsValue (BVType n)
 abstractSingleton = AbsValue . Set.singleton
 
 ------------------------------------------------------------------------
@@ -125,29 +140,30 @@ instance Pretty AbsBlockState where
   pretty (AbsBlockState s) = pretty s
 
 ------------------------------------------------------------------------
--- AbsCache
+-- AbsRegs
 
 -- | This is used to cache all changes to a state within a block.
-data AbsCache = AbsCache { absInitial :: !AbsBlockState
-                         , _absAssignments :: !(MapF Assignment AbsValue) }
+data AbsRegs = AbsRegs { absInitial :: !AbsBlockState
+                         , _absAssignments :: !(MapF Assignment AbsValue)
+                         }
 
-initAbsCache :: AbsBlockState -> AbsCache
-initAbsCache s = AbsCache s MapF.empty
+initAbsRegs :: AbsBlockState -> AbsRegs
+initAbsRegs s = AbsRegs s MapF.empty
 
-absAssignments :: Simple Lens AbsCache (MapF Assignment AbsValue)
+absAssignments :: Simple Lens AbsRegs (MapF Assignment AbsValue)
 absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 
-addAssignment :: Assignment tp -> AbsCache -> AbsCache
+addAssignment :: Assignment tp -> AbsRegs -> AbsRegs
 addAssignment a c = c & absAssignments %~ MapF.insert a (transferRHS c (assignRhs a))
 
-finalAbsBlockState :: AbsCache -> X86State Value -> AbsBlockState
+finalAbsBlockState :: AbsRegs -> X86State Value -> AbsBlockState
 finalAbsBlockState c s = AbsBlockState $ mkX86State $ \r ->
                                  transferValue c (s ^. register r)
 
 ------------------------------------------------------------------------
 -- Transfer functions
 
-transferValue :: AbsCache
+transferValue :: AbsRegs
               -> Value tp
               -> AbsValue tp
 transferValue c v =
@@ -159,7 +175,7 @@ transferValue c v =
                (MapF.lookup a (c^.absAssignments))
    Initial r -> absInitial c ^. (absX86State . register r)
 
-transferApp :: AbsCache
+transferApp :: AbsRegs
             -> App Value tp
             -> AbsValue tp
 transferApp _ _ = top
@@ -168,7 +184,7 @@ type_width' :: TypeRepr tp -> Int
 type_width' (BVTypeRepr n) = widthVal n
 
 transferRHS :: forall tp
-            .  AbsCache
+            .  AbsRegs
             -> AssignRhs tp
             -> AbsValue tp
 transferRHS m rhs =

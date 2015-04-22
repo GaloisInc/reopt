@@ -105,11 +105,12 @@ data Location addr (tp :: Type) where
   Register :: RegisterName cl -> Location addr (N.RegisterType cl)
 
   -- Refers to the least significant half of the bitvector.
-  LowerHalf :: Location addr (BVType (n+n))
+  LowerHalf :: (1 <= n)
+            => Location addr (BVType (n+n))
             -> Location addr (BVType n)
-
   -- Refers to the most significant half of the bitvector.
-  UpperHalf :: Location addr (BVType (n+n))
+  UpperHalf :: (1 <= n)
+            => Location addr (BVType (n+n))
             -> Location addr (BVType n)
 
   -- The register stack: the argument is an offset from the stack
@@ -206,7 +207,7 @@ rcx = Register N.rcx
 rip :: Location addr (BVType 64)
 rip = Register N.IPReg
 
-packWord :: forall m n. Semantics m => N.BitPacking n -> m (Value m (BVType n))
+packWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> m (Value m (BVType n))
 packWord (N.BitPacking sz bits) =
   do injs <- mapM getMoveBits bits
      return (foldl1 (.|.) injs)
@@ -218,7 +219,7 @@ packWord (N.BitPacking sz bits) =
       = do v <- uext sz <$> get (Register reg)
            return $ v `bvShl` bvLit sz (widthVal off)
 
-unpackWord :: forall m n. Semantics m => N.BitPacking n -> Value m (BVType n) -> m ()
+unpackWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> Value m (BVType n) -> m ()
 unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
   where
     unpackOne :: N.BitConversion n -> m ()
@@ -240,19 +241,19 @@ class IsValue (v  :: Type -> *) where
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
-  bvLit :: Integral a => NatRepr n -> a -> v (BVType n)
+  bvLit :: (Integral a, 1 <= n) => NatRepr n -> a -> v (BVType n)
 
   -- | Add two bitvectors together dropping overflow.
-  bvAdd :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvAdd :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Subtract two vectors, ignoring underflow.
-  bvSub :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvSub :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Performs a multiplication of two bitvector values.
-  bvMul :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvMul :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | 2's complement
-  bvNeg :: v (BVType n) -> v (BVType n)
+  bvNeg :: (1 <= n) => v (BVType n) -> v (BVType n)
   bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
 
   -- | Unsigned divison (round fractional part to zero).
@@ -266,64 +267,70 @@ class IsValue (v  :: Type -> *) where
   bvSignedMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Bitwise complement
-  complement :: v (BVType n) -> v (BVType n)
+  complement :: (1 <= n) => v (BVType n) -> v (BVType n)
 
   -- | Bitwise and
-  (.&.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  (.&.) :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Bitwise or
-  (.|.) :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  (.|.) :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Exclusive or
-  bvXor :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvXor :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Equality
-  (.=.) :: v (BVType n) -> v (BVType n) -> v BoolType
+  (.=.) :: (1 <= n) => v (BVType n) -> v (BVType n) -> v BoolType
   bv .=. bv' = is_zero (bv `bvXor` bv')
 
   -- | Inequality
-  (.=/=.) :: v (BVType n) -> v (BVType n) -> v BoolType
+  (.=/=.) :: (1 <= n) => v (BVType n) -> v (BVType n) -> v BoolType
   bv .=/=. bv' = complement (bv .=. bv')
 
   -- | Return true if value is zero.
-  is_zero :: v (BVType n) -> v BoolType
+  is_zero :: (1 <= n) => v (BVType n) -> v BoolType
   is_zero x = x .=. bvLit (bv_width x) (0::Integer)
 
   -- | Concatentates two bit vectors
-  bvCat :: v (BVType n) -> v (BVType n) -> v (BVType (n + n))
-  bvCat h l = case addIsLeq (bv_width l) (bv_width l) of
-               LeqProof -> (uext n_plus_n h `bvShl` bvLit n_plus_n (widthVal $ bv_width l))
-                           .|. (uext n_plus_n l)
+  bvCat :: forall n . (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType (n + n))
+  bvCat h l =
+      case (addIsLeq (bv_width l) (bv_width l), dblPosIsPos (LeqProof :: LeqProof 1 n)) of
+        (LeqProof, LeqProof) ->
+          (uext n_plus_n h `bvShl` bvLit n_plus_n (widthVal $ bv_width l))
+          .|. (uext n_plus_n l)
     where
       n_plus_n = addNat (bv_width l) (bv_width l)
 
   -- | Splits a bit vectors into two
-  bvSplit :: v (BVType (n + n)) -> (v (BVType n), v (BVType n))
+  bvSplit :: (1 <= n) => v (BVType (n + n)) -> (v (BVType n), v (BVType n))
   -- bvSplit v = (bvTrunc sz (bvShr (widthVal sz) v), bvTrunc sz v)
   --   where
   --     sz = halfNat (bv_width v)
 
   -- | Rotations
-  bvRol, bvRor :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvRol :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
   bvRol v n = bvShl v n .|. bvShr v bits_less_n
     where
       bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
 
+  bvRor :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
   bvRor v n = bvShr v n .|. bvShl v bits_less_n
     where
       bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
-  bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvShr, bvSar, bvShl :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Truncate the value
-  bvTrunc :: (m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
+  bvTrunc :: (1 <= m, m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
 
-  -- | Less than
-  bvLt :: v (BVType n) -> v (BVType n) -> v BoolType
+  -- | Unsigned less than
+  bvUlt :: v (BVType n) -> v (BVType n) -> v BoolType
+
+  -- | Signed less than
+  bvSlt :: v (BVType n) -> v (BVType n) -> v BoolType
 
   -- | returns bit n, 0 being lsb
-  bvBit :: v (BVType n) -> v (BVType log_n) -> v BoolType
+  bvBit :: (1 <= log_n) => v (BVType n) -> v (BVType log_n) -> v BoolType
 
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
@@ -333,14 +340,14 @@ class IsValue (v  :: Type -> *) where
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: (m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+  uext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Return least-significant nibble (4 bits).
-  least_nibble :: (4 <= n) => v (BVType n) -> v (BVType 4)
+  least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)
   least_nibble x = bvTrunc knownNat x
 
   -- | Return least-significant byte.
-  least_byte :: (8 <= n) => v (BVType n) -> v (BVType 8)
+  least_byte :: forall n . (8 <= n) => v (BVType n) -> v (BVType 8)
   least_byte x = bvTrunc knownNat x
 
   -- | Return true if value contains an even number of true bits.
@@ -467,7 +474,7 @@ class IsValue (v  :: Type -> *) where
   boolValue b = if b then true else false
 
 -- Basically so I can get fromInteger, but the others might be handy too ...
-instance (IsValue v, KnownNat n) => Num (v (BVType n)) where
+instance (IsValue v, KnownNat n, 1 <= n) => Num (v (BVType n)) where
   (+) = bvAdd
   (*) = bvMul
   (-) = bvSub

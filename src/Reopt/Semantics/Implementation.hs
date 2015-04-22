@@ -118,6 +118,10 @@ asBVLit :: Expr tp -> Maybe Integer
 asBVLit (ValueExpr (BVValue _ v)) = Just v
 asBVLit _ = Nothing
 
+asBVSLit :: (1 <= w) => Expr (BVType w) -> Maybe Integer
+asBVSLit (ValueExpr (BVValue w v)) = Just (toSigned w v)
+asBVSLit _ = Nothing
+
 instance S.IsValue Expr where
 
   bv_width = exprWidth
@@ -175,6 +179,7 @@ instance S.IsValue Expr where
   complement x
     | Just xv <- asBVLit x = bvLit (exprWidth x) (complement xv)
     | otherwise = app $ BVComplement (exprWidth x) x
+
   x .&. y
     | Just xv <- asBVLit x, Just yv <- asBVLit y =
       bvLit (exprWidth x) (xv .&. yv)
@@ -269,7 +274,12 @@ instance S.IsValue Expr where
 
     | otherwise = app (Trunc e0 w)
 
-  bvLt x y
+  bvUlt x y
+    | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
+    | x == y = S.false
+    | otherwise = app $ BVUnsignedLt x y
+
+  bvSlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
     | x == y = S.false
     | otherwise = app $ BVUnsignedLt x y
@@ -293,21 +303,21 @@ instance S.IsValue Expr where
       app $ BVBit x y
 
   sext w e0
-    | Just (SExt e _) <- asApp e0 =
+    | Just (SExt e w0) <- asApp e0 =
       -- Runtime check to wordaround GHC typechecker
-      case testLeq (S.bv_width e) w of
-        Just LeqProof -> S.sext w e
-        Nothing -> error "sext internal error"
+      withLeqProof (leqTrans (leqProof (S.bv_width e) w0) (leqProof w0 w)) $
+        S.sext w e
     | otherwise = app $ SExt e0 w
 
   uext w e0
-    | Just v <- asBVLit e0 = bvLit w v
+    | Just v <- asBVLit e0 =
+      let w0 = S.bv_width e0
+       in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (leqProof w0 w)) $
+            bvLit w v
       -- Collapse duplicate extensions.
-    | Just (UExt e _) <- asApp e0 =
-      -- Runtime check to wordaround GHC typechecker
-      case testLeq (S.bv_width e) w of
-        Just LeqProof -> S.uext w e
-        Nothing -> error "uext internal error"
+    | Just (UExt e w0) <- asApp e0 =
+      withLeqProof (leqTrans (leqProof (S.bv_width e) w0) (leqProof w0 w)) $
+        S.uext w e
       -- Default case
     | otherwise = app $ UExt e0 w
 
@@ -598,12 +608,11 @@ getLoc l0 =
     S.LowerHalf l -> lowerHalf <$> getLoc l
     S.UpperHalf l -> upperHalf <$> getLoc l
 
-lowerHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
+lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
      -- Workaround for GHC typechecker
-     case testLeq half_width (exprWidth e) of
-       Just LeqProof -> S.bvTrunc half_width e
-       Nothing -> error "lowerHalf given bad width"
+     withLeqProof (addIsLeq half_width half_width) $ do
+       S.bvTrunc half_width e
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
@@ -611,7 +620,7 @@ n64 :: NatRepr 64
 n64 = knownNat
 
 -- | Get the upper half of a bitvector.
-upperHalf :: forall n . Expr (BVType (n+n)) -> Expr (BVType n)
+upperHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 -- Handle concrete values
 upperHalf (ValueExpr (BVValue w i)) = h
    where half_width = halfNat w
@@ -628,20 +637,17 @@ upperHalf e =
       -- Introduce split operations
       _ ->
         -- Workaround for GHC typechecker
-        case testLeq half_width (exprWidth e) of
-          Just LeqProof -> app (UpperHalf half_width e)
-          Nothing -> error "upperHalf given bad width"
+        withLeqProof (addIsLeq half_width half_width) $
+          app (UpperHalf half_width e)
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
 
-bvConcat :: Expr (BVType n) -> Expr (BVType n) -> Expr (BVType (n+n))
+bvConcat :: (1 <= n) => Expr (BVType n) -> Expr (BVType n) -> Expr (BVType (n+n))
 bvConcat l h
     | Just 0 <- asBVLit h =
-        let dbl_w = addNat w w
-         in case testLeq w dbl_w of
-              Just LeqProof -> S.uext dbl_w l
-              Nothing -> error "Illegal width"
+        withLeqProof (addIsLeq w w) $ do
+          S.uext (addNat w w) l
     | otherwise = app (ConcatV (exprWidth l) l h)
   where w = exprWidth l
 
@@ -776,10 +782,8 @@ instance Pretty ExploreLoc where
 
 rootLoc :: CodeAddr -> ExploreLoc
 rootLoc ip = ExploreLoc { loc_ip = ip
-                        , loc_x87_top = 7 }
-
-locFromGuess :: CodeAddr -> ExploreLoc
-locFromGuess = rootLoc
+                        , loc_x87_top = 7
+                        }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State Value
@@ -799,8 +803,7 @@ disassembleBlock :: Memory Word64
 disassembleBlock mem loc = do
   let lbl = DecompiledBlock (loc_ip loc)
   gs <- gets (startBlock (initX86State loc) lbl . emptyGenState)
-  (gs', ip) <- lift $ trace ("Exploring " ++ showHex (loc_ip loc) "")
-                    $ disassembleBlock' mem gs (loc_ip loc)
+  (gs', ip) <- lift $ disassembleBlock' mem gs (loc_ip loc)
   put (gs' ^. globalGenState)
   return (Fold.toList (gs'^.frontierBlocks), ip)
 

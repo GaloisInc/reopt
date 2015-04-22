@@ -27,14 +27,18 @@ import Data.Word
 import Prelude hiding (isNaN)
 import GHC.TypeLits
 
+import Data.Proxy
 import Data.Parameterized.NatRepr
-    ( widthVal
-    , NatRepr
+    ( NatRepr
     , natValue
     , addNat
+
+    , LeqProof(..)
+    , withLeqProof
+    , addIsLeq
     , withAddLeq
     , testLeq
-    , LeqProof(..)
+    , dblPosIsPos
     )
 
 import Reopt.Semantics.Monad
@@ -157,7 +161,9 @@ exec_movsx_d :: (Semantics m, 1 <= n', n' <= n)
              =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_movsx_d l v = l .= sext (loc_width l) v
 
-exec_movzx :: (Semantics m, IsLeq n' n) =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_movzx :: (Semantics m, 1 <= n', n' <= n)
+           =>  MLocation m (BVType n)
+           -> Value m (BVType n') -> m ()
 exec_movzx l v = l .= uext (loc_width l) v
 
 exec_pop :: Unop
@@ -244,7 +250,7 @@ exec_div v
   | otherwise =
     fail "div: Unknown bit width"
   where
-    go2 :: (n <= n + n)
+    go2 :: (1 <= n + n, n <= n + n)
         => MLocation m (BVType n)
         -> MLocation m (BVType n) -> m ()
     go2 ax dx = do
@@ -252,7 +258,7 @@ exec_div v
       dxv <- get dx
       go1 ax dx (bvCat dxv axv)
 
-    go1 :: (n <= n + n) -- Add obvious constraint to help Haskell type-checker.
+    go1 :: (1 <= n + n, n <= n + n) -- Add obvious constraint to help Haskell type-checker.
         => MLocation m (BVType n) -- Location to store quotient
         -> MLocation m (BVType n) -- Location to store remainder.
         -> Value m (BVType (n + n)) -- The numerator in the division.
@@ -262,7 +268,7 @@ exec_div v
       -- Report error on divide by zero.
       exception false (is_zero v) DivideError -- divide by zero
       -- Report error if quot >= 2^64
-      exception false (bvLit (bv_width q) (maxBound :: Word64) `bvLt` q) DivideError
+      exception false (bvLit (bv_width q) (maxBound :: Word64) `bvUlt` q) DivideError
       set_undefined cf_loc
       set_undefined of_loc
       set_undefined sf_loc
@@ -286,13 +292,22 @@ exec_idiv v
                    dxv <- get dx
                    go1 ax dx (bvCat dxv axv)
 
-    go1 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
+    go1 :: MLocation m (BVType n)
+        -> MLocation m (BVType n)
+        -> Value m (BVType (n + n))
+        -> m ()
     go1 quotL remL w = do
+      withLeqProof (addIsLeq (Proxy :: Proxy n) (Proxy :: Proxy n)) $ do
+      withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
       let ext_v = sext (bv_width w) v
           q     = w `bvSignedDiv` ext_v
       exception false (is_zero v) DivideError -- divide by zero
-      exception false (q `bvLt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64)) DivideError -- q < - 2 ^ 63 + 1
-      exception false (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvLt` q) DivideError -- 2 ^ 63 < q
+      exception false
+                (q `bvUlt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64))
+                DivideError -- q < - 2 ^ 63 + 1
+      exception false
+                (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvUlt` q)
+                DivideError -- 2 ^ 63 < q
       set_undefined cf_loc
       set_undefined of_loc
       set_undefined sf_loc
@@ -314,11 +329,15 @@ exec_inc dst = do
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
 
-set_reg_pair :: Semantics m => MLocation m (BVType n) -> MLocation m (BVType n) -> Value m (BVType (n + n)) -> m ()
-set_reg_pair upperL lowerL v = do lowerL .= lower
-                                  upperL .= upper
-  where
-    (upper, lower) = bvSplit v
+set_reg_pair :: (Semantics m, 1 <= n)
+             => MLocation m (BVType n)
+             -> MLocation m (BVType n)
+             -> Value m (BVType (n + n))
+             -> m ()
+set_reg_pair upperL lowerL v = do
+  let (upper, lower) = bvSplit v
+  lowerL .= lower
+  upperL .= upper
 
 -- FIXME: is this the right way around?
 exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
@@ -334,22 +353,24 @@ exec_mul v
   | otherwise =
     fail "mul: Unknown bit width"
   where
-    go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
-    go f l = do v' <- get l
-                let sz = addNat (bv_width v) (bv_width v)
-                    r  = uext sz v' `bvMul` uext sz v -- FIXME: uext here is OK?
-                    upper_r = fst (bvSplit r) :: Value m (BVType n)
-                set_undefined sf_loc
-                set_undefined af_loc
-                set_undefined pf_loc
-                set_undefined zf_loc
-                let does_overflow = complement (is_zero upper_r)
-                of_loc .= does_overflow
-                cf_loc .= does_overflow
-                f r
+    go :: (1 <= n+n, n <= n+n)
+       => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
+    go f l = do
+      v' <- get l
+      let sz = addNat (bv_width v) (bv_width v)
+          r  = uext sz v' `bvMul` uext sz v -- FIXME: uext here is OK?
+          upper_r = fst (bvSplit r) :: Value m (BVType n)
+      set_undefined sf_loc
+      set_undefined af_loc
+      set_undefined pf_loc
+      set_undefined zf_loc
+      let does_overflow = complement (is_zero upper_r)
+      of_loc .= does_overflow
+      cf_loc .= does_overflow
+      f r
 
 really_exec_imul :: forall m n
-                  . IsLocationBV m n
+                  . (IsLocationBV m n, 1 <= (n+n))
                  => Value m (BVType n)
                  -> Value m (BVType n)
                  -> (Value m (BVType (n + n)) -> m ())
@@ -361,6 +382,7 @@ really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
    set_undefined pf_loc
    set_undefined zf_loc
    sf_loc .= msb lower_r
+   withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
    let does_overflow = (r .=/=. sext sz lower_r)
    of_loc .= does_overflow
    cf_loc .= does_overflow
@@ -379,14 +401,18 @@ exec_imul1 v
   | otherwise =
     fail "imul: Unknown bit width"
   where
-    go :: (n <= n + n) => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
+    go :: (1 <= n + n, n <= n + n)
+       => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
     go f l = do v' <- get l
                 really_exec_imul v v' f
 
 -- FIXME: clag from exec_mul, exec_imul
-exec_imul2_3 :: forall m n n'. (IsLocationBV m n, 1 <= n', n' <= n)
-                => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n') -> m ()
-exec_imul2_3 l v v' = really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd (bvSplit r)
+exec_imul2_3 :: forall m n n'
+              . (IsLocationBV m n, 1 <= n', n' <= n)
+             => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n') -> m ()
+exec_imul2_3 l v v' = do
+  withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
+  really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd (bvSplit r)
 
 -- | Should be equiv to 0 - *l
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
@@ -394,7 +420,7 @@ exec_neg l = do
   v <- get l
   cf_loc .= mux (is_zero v) false true
   let r = bvNeg v
-      zero = bvLit (bv_width v) (0 :: Int)
+      zero = bvLit (bv_width v) (0 :: Integer)
   of_loc .= ssub_overflows  zero v
   af_loc .= usub4_overflows zero v
   set_result_value l r
@@ -420,7 +446,7 @@ exec_and r y = do
   set_bitwise_flags z
   r .= z
 
-exec_not :: (Semantics m) => MLocation m (BVType n) -> m ()
+exec_not :: (Semantics m, 1 <= n) => MLocation m (BVType n) -> m ()
 exec_not = modify complement
 
 exec_or :: Binop
@@ -441,7 +467,7 @@ exec_xor l v = do
 -- ** Shift and Rotate Instructions
 
 
-really_exec_shift :: (n' <= n, IsLocationBV m n)
+really_exec_shift :: (1 <= n', n' <= n, IsLocationBV m n)
                   => MLocation m (BVType n)
                   -> Value m (BVType n')
                      -- | Operation for performing the shift.
@@ -477,7 +503,7 @@ really_exec_shift l count do_shift mk_cf mk_of = do
 
     let new_cf = mk_cf v dest_width low_count
     cf_undef <- make_undefined knownType
-    cf_loc .= mux (low_count `bvLt` dest_width) new_cf cf_undef
+    cf_loc .= mux (low_count `bvUlt` dest_width) new_cf cf_undef
 
     let low1 = bvLit (bv_width low_count) (1 :: Int)
 
@@ -488,12 +514,15 @@ really_exec_shift l count do_shift mk_cf mk_of = do
     set_result_value l r
 
 -- FIXME: could be 8 instead of n' here ...
-exec_shl :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shl :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_shl l count = really_exec_shift l count bvShl mk_cf mk_of
   where mk_cf v dest_width low_count = bvBit v (dest_width `bvSub` low_count)
         mk_of _ r new_cf = msb r `bvXor` new_cf
 
-exec_shr :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_shr :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n)
+         -> Value m (BVType n') -> m ()
 exec_shr l count = really_exec_shift l count bvShr mk_cf mk_of
   where mk_cf v _ low_count = bvBit v (low_count `bvSub` bvLit (bv_width low_count) (1 :: Int))
         mk_of v _ _         = msb v
@@ -501,7 +530,8 @@ exec_shr l count = really_exec_shift l count bvShr mk_cf mk_of
 -- FIXME: we can factor this out as above, but we need to check the CF
 -- for SAR (intel manual says it is only undefined for shl/shr when
 -- the shift is >= the bit width.
-exec_sar :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_sar :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n) -> Value m (BVType n') -> m ()
 exec_sar l count = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper
@@ -520,7 +550,7 @@ exec_sar l count = do
     let new_cf = bvBit v (low_count `bvSub` bvLit (bv_width low_count) (1 :: Int))
 
     -- FIXME: correct?  we assume here that we will get the sign bit ...
-    cf_loc .= mux (low_count `bvLt` dest_width) new_cf (msb v)
+    cf_loc .= mux (low_count `bvUlt` dest_width) new_cf (msb v)
 
     ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
       (of_loc .= false)
@@ -530,7 +560,10 @@ exec_sar l count = do
     set_result_value l r
 
 -- FIXME: use really_exec_shift above?
-exec_rol :: (n' <= n, IsLocationBV m n) => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_rol :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n)
+         -> Value m (BVType n')
+         -> m ()
 exec_rol l count = do
   v    <- get l
   -- The intel manual says that the count is masked to give an upper

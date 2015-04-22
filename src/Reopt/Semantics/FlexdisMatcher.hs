@@ -64,7 +64,7 @@ getSomeBVValue v =
     F.FPMem32 ar          -> getBVAddress ar >>= mk . mkFPAddr SingleFloatRepr
     F.FPMem64 ar          -> getBVAddress ar >>= mk . mkFPAddr DoubleFloatRepr
     F.FPMem80 ar          -> getBVAddress ar >>= mk . mkFPAddr X86_80FloatRepr
-    
+
     F.ByteReg  r
       | Just r64 <- F.is_low_reg r  -> mk (reg_low8 $ N.gpFromFlexdis r64)
       | Just r64 <- F.is_high_reg r -> mk (reg_high8 $ N.gpFromFlexdis r64)
@@ -97,7 +97,7 @@ getBVAddress ar =
                  Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
                                 <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
       return $ uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
-      
+
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
     F.Offset_64    seg w64                 -> do check_seg_value seg
@@ -123,11 +123,11 @@ getBVAddress ar =
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getSomeBVLocation v =
   case v of
-    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)  
-    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)    
-    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)     
-    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)     
-    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)   
+    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
+    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
+    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
+    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.FarPointer _      -> fail "FarPointer"
     F.VoidMem ar        -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
     F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8
@@ -159,9 +159,11 @@ checkEqBV getW n v
 checkSomeBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> SomeBV f -> m (f (BVType n))
 checkSomeBV getW n (SomeBV v) = checkEqBV getW n v
 
-truncateBVValue :: (Monad m, IsValue v)  => NatRepr n -> v (BVType n') -> m (v (BVType n))
+truncateBVValue :: (Monad m, IsValue v, 1 <= n)
+                => NatRepr n -> v (BVType n') -> m (v (BVType n))
 truncateBVValue n v
-  | Just LeqProof <- testLeq n (bv_width v) = return (bvTrunc n v)
+  | Just LeqProof <- testLeq n (bv_width v) = do
+      return (bvTrunc n v)
   | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
 truncateBVLocation :: (Semantics m)
@@ -188,7 +190,7 @@ semanticsMap = M.fromList instrs
     mk s f = (s, SemanticsOp f)
 
     instrs :: [(String, SemanticsOp)]
-    instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) -> 
+    instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) ->
                                        do SomeBV l <- getSomeBVLocation loc
                                           -- ensure that the location is at most 64 bits
                                           Just LeqProof <- return $ testLeq (loc_width l) n64
@@ -211,26 +213,26 @@ semanticsMap = M.fromList instrs
               , mk "xchg"   $ mkBinop $ \v v' -> do SomeBV l <- getSomeBVLocation v
                                                     l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
                                                     exec_xchg l l'
-                                                           
-              , mk "ret"    $ \args@(_, vs) -> case vs of 
+
+              , mk "ret"    $ \args@(_, vs) -> case vs of
                                                  []              -> exec_ret Nothing
                                                  [F.WordImm imm] -> exec_ret (Just imm)
-                    
+
               , mk "cmpsb"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n8
               , mk "cmpsw"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n16
               , mk "cmpsd"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n32
               , mk "cmpsq"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n64
-            
+
               , mk "movsb"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n8
               , mk "movsw"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n16
               , mk "movsd"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n32
               , mk "movsq"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n64
-            
+
               , mk "stosb"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low8 N.rax)
               , mk "stosw"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low16 N.rax)
               , mk "stosd"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low32 N.rax)
               , mk "stosq"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) rax
-            
+
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
@@ -243,16 +245,16 @@ semanticsMap = M.fromList instrs
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ binop (\l v -> modify (`bvXor` v) l) -- FIXME: add size annots?
-              , mk "cvttsd2si" $ mkBinop $ \loc val -> do SomeBV l  <- getSomeBVLocation loc 
+              , mk "cvttsd2si" $ mkBinop $ \loc val -> do SomeBV l  <- getSomeBVLocation loc
                                                           v <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
                                                           exec_cvttsd2si l v
-                                                           
+
               , mk "cvtsi2sd" $ mkBinop $ \loc val -> do l <- getSomeBVLocation loc >>= checkSomeBV loc_width n128
                                                          SomeBV v <- getSomeBVValue val
                                                          exec_cvtsi2sd l v
-                                                          
+
               , mk "cvtss2sd" $ truncateKnownBinop exec_cvtss2sd
-            
+
               -- regular instructions
               , mk "add"     $ binop exec_add
               , mk "adc"     $ binop exec_adc
@@ -320,7 +322,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , (,) "ae" $ SemanticsOp $ mkop cond_ae
                    , (,) "b"  $ SemanticsOp $ mkop cond_b
                    , (,) "be" $ SemanticsOp $ mkop cond_be
-                   , (,) "g"  $ SemanticsOp $ mkop cond_g                     
+                   , (,) "g"  $ SemanticsOp $ mkop cond_g
                    , (,) "ge" $ SemanticsOp $ mkop cond_ge
                    , (,) "l" $ SemanticsOp $ mkop cond_l
                    , (,) "le" $ SemanticsOp $ mkop cond_le
@@ -375,7 +377,7 @@ geBinop f = mkBinopLV $ \l v -> do
               Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
               f l v
 
-truncateKnownBinop :: (KnownNat n, KnownNat n', FullSemantics m)
+truncateKnownBinop :: (KnownNat n, KnownNat n', 1 <= n', FullSemantics m)
                    => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
                    -> (F.LockPrefix, [F.Value]) -> m ()
 truncateKnownBinop f = mkBinopLV $ \l v -> do
@@ -433,7 +435,7 @@ fpUnop f (_, vs)
   | otherwise                = fail $ "fpUnop: expecting 1 FP argument, got: " ++ show vs
   where
     go :: forall flt. FloatInfoRepr flt -> F.AddrRef -> m ()
-    go sz ar = do l <- mkFPAddr sz <$> getBVAddress ar 
+    go sz ar = do l <- mkFPAddr sz <$> getBVAddress ar
                   f sz l
 
 fpUnopOrRegBinop :: forall m. Semantics m =>

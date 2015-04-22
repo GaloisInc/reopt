@@ -468,7 +468,7 @@ data App f tp where
   -- Signed extension.
   SExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
   -- Unsigned extension.
-  UExt :: (m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
+  UExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
 
   ----------------------------------------------------------------------
   -- Boolean operations
@@ -503,6 +503,10 @@ data App f tp where
 
   -- Unsigned less than.
   BVUnsignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
+
+  -- Signed less than
+  BVSignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
+
 
   -- @BVBit x i@ returns true iff bit @i@ of @x@ is true.
   -- 0 is the index of the least-significant bit.
@@ -604,6 +608,7 @@ ppApp pp a0 =
     BVMod _ x y       -> sexpr "bv_umod" [ pp x, pp y ]
     BVSignedMod _ x y -> sexpr "bv_smod" [ pp x, pp y ]
     BVUnsignedLt x y  -> sexpr "bv_ult"  [ pp x, pp y ]
+    BVSignedLt x y    -> sexpr "bv_slt"  [ pp x, pp y ]
     BVBit x i -> sexpr "bv_bitset" [ pp x, pp i]
     BVComplement _ x -> sexpr "bv_complement" [ pp x ]
     BVAnd _ x y -> sexpr "bv_and" [ pp x, pp y ]
@@ -646,6 +651,7 @@ appType a =
     BVSignedMod w _ _ -> BVTypeRepr w
 
     BVUnsignedLt{} -> knownType
+    BVSignedLt{} -> knownType
     BVBit{} -> knownType
 
     BVComplement w _ -> BVTypeRepr w

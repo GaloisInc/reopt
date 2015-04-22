@@ -10,7 +10,7 @@
 ------------------------------------------------------------------------
 {-# LANGUAGE PatternGuards #-}
 
--- FIXME: move somewhere else 
+-- FIXME: move somewhere else
 module Reopt.Semantics.WorkList
        ( WorkList
        , null
@@ -41,7 +41,7 @@ import           Prelude hiding (null, iterate)
 -- In particular, double insertion is idempotent
 
 newtype WorkList a = WL { _workList :: Set a }
-                              
+
 workList :: Simple Lens (WorkList a) (Set a)
 workList = lens _workList (\s v -> s { _workList = v })
 
@@ -70,10 +70,8 @@ insertFold :: (Ord a, Fold.Foldable t) => t a -> WorkList a -> WorkList a
 insertFold vs wl = Fold.foldl' (\b a -> b & workList %~ S.insert a) wl vs
 
 iterate :: (Ord a, Monad m) => (a -> m [a]) -> WorkList a -> m ()
-iterate f = go
-  where
-    go wl 
-      | Just (v, wl') <- split wl =
-          do nexts <- f v
-             go (insertFold nexts wl')
-      | otherwise = return ()
+iterate f wl
+  | Just (v, wl') <- split wl = do
+    nexts <- f v
+    iterate f (insertFold nexts wl')
+  | otherwise = return ()
