@@ -19,7 +19,7 @@ module Reopt.Memory
   , runMemoryByteReader
   , MemoryError(..)
   , readInstruction
-    
+
     -- * Re-exports
   , Elf.ElfSegmentFlags
   , Elf.pf_r
@@ -160,8 +160,8 @@ instance Error (MemoryError w) where
 
 instance (Integral w, Show w) => Show (MemoryError w) where
   show (UserMemoryError msg) = msg
-  show (AccessViolation a)  = "Access violation at " ++ showHex a ""
-  show (PermissionsError a) = "Insufficient permissions at " ++ showHex a ""
+  show (AccessViolation a)  | a >= 0 = "Access violation at " ++ showHex a ""
+  show (PermissionsError a) | a >= 0 = "Insufficient permissions at " ++ showHex a ""
 
 newtype MemoryByteReader w a = MBR (ErrorT (MemoryError w) (State (MemStream w)) a)
   deriving (Functor, Applicative, Monad)
@@ -216,4 +216,3 @@ readInstruction :: Memory Word64 -- Memory to read.
                 -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
 readInstruction mem addr = runMemoryByteReader pf_x mem addr m
   where m = Flexdis.disassembleInstruction Flexdis.defaultX64Disassembler
-    

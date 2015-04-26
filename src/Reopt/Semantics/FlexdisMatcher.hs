@@ -160,15 +160,16 @@ checkSomeBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n
 checkSomeBV getW n (SomeBV v) = checkEqBV getW n v
 
 truncateBVValue :: (Monad m, IsValue v, 1 <= n)
-                => NatRepr n -> v (BVType n') -> m (v (BVType n))
-truncateBVValue n v
+                => NatRepr n -> SomeBV v -> m (v (BVType n))
+truncateBVValue n (SomeBV v)
   | Just LeqProof <- testLeq n (bv_width v) = do
       return (bvTrunc n v)
   | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
+
 truncateBVLocation :: (Semantics m)
                    => NatRepr n -> MLocation m (BVType n') -> m (MLocation m (BVType n))
-truncateBVLocation = undefined
+truncateBVLocation = error "truncateBVLocation"
 --TODO: Implement this using lowerHalf/upperHalf if possible.
 {-
 truncateBVLocation n v
@@ -210,9 +211,10 @@ semanticsMap = M.fromList instrs
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
               , mk "movzx"  $ geBinop exec_movzx
-              , mk "xchg"   $ mkBinop $ \v v' -> do SomeBV l <- getSomeBVLocation v
-                                                    l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
-                                                    exec_xchg l l'
+              , mk "xchg"   $ mkBinop $ \v v' -> do
+                  SomeBV l <- getSomeBVLocation v
+                  l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
+                  exec_xchg l l'
 
               , mk "ret"    $ \args@(_, vs) -> case vs of
                                                  []              -> exec_ret Nothing
@@ -239,19 +241,21 @@ semanticsMap = M.fromList instrs
               , mk "subsd"   $ truncateKnownBinop exec_subsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
-              , mk "movsd"   $ truncateKnownBinop exec_movsd
-              , mk "movss"   $ truncateKnownBinop exec_movss
+              , mk "movsd"   $ truncate64Op exec_movsd
+              , mk "movss"   $ truncate32Op exec_movss
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ binop (\l v -> modify (`bvXor` v) l) -- FIXME: add size annots?
-              , mk "cvttsd2si" $ mkBinop $ \loc val -> do SomeBV l  <- getSomeBVLocation loc
-                                                          v <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
-                                                          exec_cvttsd2si l v
+              , mk "cvttsd2si" $ mkBinop $ \loc val -> do
+                  SomeBV l  <- getSomeBVLocation loc
+                  v <- truncateBVValue knownNat =<< getSomeBVValue val
+                  exec_cvttsd2si l v
 
-              , mk "cvtsi2sd" $ mkBinop $ \loc val -> do l <- getSomeBVLocation loc >>= checkSomeBV loc_width n128
-                                                         SomeBV v <- getSomeBVValue val
-                                                         exec_cvtsi2sd l v
+              , mk "cvtsi2sd" $ mkBinop $ \loc val -> do
+                l <- getSomeBVLocation loc >>= checkSomeBV loc_width n128
+                SomeBV v <- getSomeBVValue val
+                exec_cvtsi2sd l v
 
               , mk "cvtss2sd" $ truncateKnownBinop exec_cvtss2sd
 
@@ -349,9 +353,10 @@ mkBinop :: FullSemantics m
         => (F.Value -> F.Value -> m a)
         -> (F.LockPrefix, [F.Value])
         -> m a
-mkBinop f (_, vs) = case vs of
-                      [v, v']   -> f v v'
-                      vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
+mkBinop f (_, vs) =
+  case vs of
+    [v, v']   -> f v v'
+    vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
 mkUnop :: FullSemantics m
           => (F.Value -> m a)
@@ -364,9 +369,10 @@ mkUnop f (_, vs) = case vs of
 mkBinopLV ::  Semantics m
         => (forall n n'. (IsLocationBV m n, 1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
         -> (F.LockPrefix, [F.Value]) -> m a
-mkBinopLV f = mkBinop $ \loc val -> do SomeBV l <- getSomeBVLocation loc
-                                       SomeBV v <- getSomeBVValue val
-                                       f l v
+mkBinopLV f = mkBinop $ \loc val -> do
+  SomeBV l <- getSomeBVLocation loc
+  SomeBV v <- getSomeBVValue val
+  f l v
 
 -- The location size must be >= the value size.
 geBinop :: FullSemantics m
@@ -377,13 +383,33 @@ geBinop f = mkBinopLV $ \l v -> do
               Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
               f l v
 
-truncateKnownBinop :: (KnownNat n, KnownNat n', 1 <= n', FullSemantics m)
-                   => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
+truncateKnownBinop :: ( KnownNat n'
+                      , 1 <= n'
+                      , FullSemantics m
+                      )
+                   => (MLocation m XMMType -> Value m (BVType n') -> m ())
                    -> (F.LockPrefix, [F.Value]) -> m ()
-truncateKnownBinop f = mkBinopLV $ \l v -> do
-  l' <- truncateBVLocation knownNat l
-  v' <- truncateBVValue knownNat v
-  f l' v'
+truncateKnownBinop f = mkBinop $ \loc val -> do
+  l <- checkSomeBV loc_width (knownNat :: NatRepr 128) =<< getSomeBVLocation loc
+  v <- truncateBVValue knownNat =<< getSomeBVValue val
+  f l v
+
+truncate32Op :: (FullSemantics m)
+             => (MLocation m (BVType 32) -> Value m (BVType 32) -> m ())
+             -> (F.LockPrefix, [F.Value]) -> m ()
+truncate32Op f = mkBinop $ \loc val -> do
+  l <- checkSomeBV loc_width knownNat =<< getSomeBVLocation loc
+  v <- checkSomeBV bv_width  knownNat =<< getSomeBVValue val
+  f l v
+
+truncate64Op :: (FullSemantics m)
+             => (MLocation m (BVType 64) -> Value m (BVType 64) -> m ())
+             -> (F.LockPrefix, [F.Value]) -> m ()
+truncate64Op f = mkBinop $ \loc val -> do
+  l <- checkSomeBV loc_width knownNat =<< getSomeBVLocation loc
+  v <- checkSomeBV bv_width  knownNat =<< getSomeBVValue val
+  f l v
+
 
 knownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
               -> (F.LockPrefix, [F.Value]) -> m ()

@@ -15,14 +15,15 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-module Reopt.Semantics.Types (
-  module Reopt.Semantics.Types -- export everything
+module Reopt.Semantics.Types
+  ( module Reopt.Semantics.Types -- export everything
   , module Exports
   ) where
 
 import Data.Parameterized.Classes
 import Data.Parameterized.NatRepr
 import Data.Parameterized.NatRepr as Exports (NatRepr (..), knownNat)
+import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import GHC.TypeLits as TypeLits
 
@@ -104,20 +105,48 @@ type IsLeq (m :: Nat) (n :: Nat) = (m <= n)
 --   binary floating point formats, as well as the X86 extended 80-bit format
 --   and the double-double format.
 data FloatInfo where
-  HalfFloat         :: FloatInfo  --  16 bit binary IEE754
-  SingleFloat       :: FloatInfo  --  32 bit binary IEE754
   DoubleFloat       :: FloatInfo  --  64 bit binary IEE754
-  QuadFloat         :: FloatInfo  -- 128 bit binary IEE754
+  SingleFloat       :: FloatInfo  --  32 bit binary IEE754
   X86_80Float       :: FloatInfo  -- X86 80-bit extended floats
---  DoubleDoubleFloat :: FloatInfo -- 2 64-bit floats fused in the "double-double" style
+  QuadFloat         :: FloatInfo  -- 128 bit binary IEE754
+  HalfFloat         :: FloatInfo  --  16 bit binary IEE754
 
 data FloatInfoRepr (flt::FloatInfo) where
-  HalfFloatRepr         :: FloatInfoRepr HalfFloat
-  SingleFloatRepr       :: FloatInfoRepr SingleFloat
   DoubleFloatRepr       :: FloatInfoRepr DoubleFloat
-  QuadFloatRepr         :: FloatInfoRepr QuadFloat
+  SingleFloatRepr       :: FloatInfoRepr SingleFloat
   X86_80FloatRepr       :: FloatInfoRepr X86_80Float
---  DoubleDoubleFloatRepr :: FloatInfoRepr DoubleDoubleFloat
+  QuadFloatRepr         :: FloatInfoRepr QuadFloat
+  HalfFloatRepr         :: FloatInfoRepr HalfFloat
+
+instance TestEquality FloatInfoRepr where
+  testEquality x y = orderingF_refl (compareF x y)
+
+instance OrdF FloatInfoRepr where
+  compareF DoubleFloatRepr DoubleFloatRepr = EQF
+  compareF DoubleFloatRepr _               = LTF
+  compareF _               DoubleFloatRepr = GTF
+
+  compareF SingleFloatRepr SingleFloatRepr = EQF
+  compareF SingleFloatRepr _               = LTF
+  compareF _               SingleFloatRepr = GTF
+
+  compareF X86_80FloatRepr X86_80FloatRepr = EQF
+  compareF X86_80FloatRepr _               = LTF
+  compareF _               X86_80FloatRepr = GTF
+
+  compareF QuadFloatRepr   QuadFloatRepr   = EQF
+  compareF QuadFloatRepr   _               = LTF
+  compareF _               QuadFloatRepr   = GTF
+
+  compareF HalfFloatRepr   HalfFloatRepr   = EQF
+
+instance Pretty (FloatInfoRepr flt) where
+  pretty DoubleFloatRepr = text "double"
+  pretty SingleFloatRepr = text "single"
+  pretty X86_80FloatRepr = text "x87_80"
+  pretty QuadFloatRepr   = text "quad"
+  pretty HalfFloatRepr   = text "half"
+
 
 type family FloatInfoBits (flt :: FloatInfo) :: Nat where
   FloatInfoBits HalfFloat         = 16
@@ -131,9 +160,13 @@ type FloatType flt = BVType (FloatInfoBits flt)
 -- type instance FloatInfoBits DoubleDoubleFloat =
 
 floatInfoBits :: FloatInfoRepr flt -> NatRepr (FloatInfoBits flt)
-floatInfoBits fir = case fir of
-                      HalfFloatRepr         -> knownNat
-                      SingleFloatRepr       -> knownNat
-                      DoubleFloatRepr       -> knownNat
-                      QuadFloatRepr         -> knownNat
-                      X86_80FloatRepr       -> knownNat
+floatInfoBits fir =
+  case fir of
+    HalfFloatRepr         -> knownNat
+    SingleFloatRepr       -> knownNat
+    DoubleFloatRepr       -> knownNat
+    QuadFloatRepr         -> knownNat
+    X86_80FloatRepr       -> knownNat
+
+floatTypeRepr :: FloatInfoRepr flt -> TypeRepr (BVType (FloatInfoBits flt))
+floatTypeRepr fir = BVTypeRepr (floatInfoBits fir)

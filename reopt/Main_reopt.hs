@@ -4,28 +4,32 @@
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
+import Control.Applicative
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
 import qualified Data.ByteString as B
 import           Data.Elf
 import           Data.Foldable (traverse_)
-import           Data.Map (Map)
+import           Data.Int
 import           Data.List
+import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Word
 import           Data.Version
 import           GHC.TypeLits
 import           Numeric (showHex)
+import           Reopt.AbsState
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Int
-import           Data.Word
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
@@ -46,6 +50,7 @@ import qualified Reopt.Semantics.StateNames as N
 data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
+   | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -82,6 +87,11 @@ cfgFlag = flagNone [ "cfg", "c" ] upd help
   where upd  = reoptAction .~ ShowCFG
         help = "Print out recovered control flow graph of executable."
 
+cfgAIFlag :: Flag Args
+cfgAIFlag = flagNone [ "ai", "a" ] upd help
+  where upd  = reoptAction .~ ShowCFGAI
+        help = "Print out recovered control flow graph + AI of executable."
+
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
@@ -92,6 +102,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
         flags = [ disassembleFlag
                 , cfgFlag
+                , cfgAIFlag
                 , gapFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
@@ -158,8 +169,8 @@ dumpDisassembly path = do
   -- print $ Set.size $ instructionNames sections
   --print $ Set.toList $ instructionNames sections
 
-getCFG :: FilePath -> IO (Memory Word64, CFG)
-getCFG path =  do
+readStaticElf :: FilePath -> IO (Elf Word64)
+readStaticElf path = do
   e <- readElf64 path
   mi <- elfInterpreter e
   case mi of
@@ -167,10 +178,7 @@ getCFG path =  do
       return ()
     Just{} ->
       fail "reopt does not yet support generating CFGs from dynamically linked executables."
-  -- Build model of executable memory from elf.
-  mem <- loadElf e
-  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  return $ (mem,  cfgFromAddress mem (elfEntry e))
+  return e
 
 isInterestingCode :: Memory Word64 -> (CodeAddr, Maybe CodeAddr) -> Bool
 isInterestingCode mem (start, Just end) = go start end
@@ -189,13 +197,16 @@ isInterestingCode mem (start, Just end) = go start end
 isInterestingCode _ _ = True -- Last bit
 
 showGaps :: FilePath ->  IO ()
-showGaps path = do (mem, cfg) <- getCFG path
-                   let ends = cfgBlockEnds cfg
-                   let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
-                   let gaps = filter (isInterestingCode mem)
-                              $ out_gap blocks (Set.elems ends)
-
-                   mapM_ (print . pretty . ppOne) gaps
+showGaps path = do
+    e <- readStaticElf path
+    -- Build model of executable memory from elf.
+    mem <- loadElf e
+    let cfg = finalCFG (cfgFromAddress mem (elfEntry e))
+    let ends = cfgBlockEnds cfg
+    let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
+    let gaps = filter (isInterestingCode mem)
+             $ out_gap blocks (Set.elems ends)
+    mapM_ (print . pretty . ppOne) gaps
   where
     ppOne (start, m_end) = text ("[" ++ showHex start "..") <>
                            case m_end of
@@ -213,7 +224,11 @@ showGaps path = do (mem, cfg) <- getCFG path
 
 showCFG :: FilePath -> IO ()
 showCFG path = do
-  (_, g0) <- getCFG path
+  e <- readStaticElf path
+  -- Build model of executable memory from elf.
+  mem <- loadElf e
+  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
+  let g0 = finalCFG (cfgFromAddress mem (elfEntry e))
   let g = eliminateDeadRegisters g0
   print (pretty g)
 {-
@@ -253,23 +268,6 @@ type AbsStack = Map Int64 Word64
 emptyAbsStack :: AbsStack
 emptyAbsStack = Map.empty
 
-{-
-data ProcState
-   = ProcState { addrStart ::
-               }
-
-
--- Map BlockLabel AbsStack
-
--- Returns map that maps address at start of procedure to the
--- set of labels within that procedure.
-findProcedure :: CFG Block
-                 -- ^ CFG
-              -> Set Word64
-                 -- ^ Potential call locations
-              -> Map Word64 (Set BlockLabel)
-findProcudure g s = undefined g s
--}
 
 
 
@@ -433,6 +431,50 @@ printIP b =
             print $ "Next IP: " ++ show (pretty a)
 -}
 
+ppStmtAndAbs :: MapF Assignment AbsValue -> Stmt -> Doc
+ppStmtAndAbs m stmt =
+  case stmt of
+    AssignStmt a ->
+      case ppAbsValue =<< MapF.lookup a m of
+        Just d -> vcat [ text "#" <+> ppAssignId (assignId a) <+> text ":=" <+> d
+                       , pretty a
+                       ]
+        Nothing -> pretty a
+    _ -> pretty stmt
+
+
+ppTermStmtAndAbs :: MapF Assignment AbsValue -> TermStmt -> Doc
+ppTermStmtAndAbs = undefined
+
+ppBlockAndAbs :: MapF Assignment AbsValue -> Block -> Doc
+ppBlockAndAbs m b =
+  pretty (blockLabel b) <> text ":" <$$>
+  indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
+            pretty (blockTerm b))
+
+
+showCFGAndAI :: FilePath -> IO ()
+showCFGAndAI path = do
+  e <- readStaticElf path
+  -- Build model of executable memory from elf.
+  mem <- loadElf e
+  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
+  let fg = cfgFromAddress mem (elfEntry e)
+  let abst = finalAbsState fg
+      amap = assignmentAbsValues fg
+  let g  = eliminateDeadRegisters (finalCFG fg)
+      ppOne b =
+         vcat [case (blockLabel b, Map.lookup (blockParent (blockLabel b)) abst) of
+                  (DecompiledBlock _, Just ab) -> pretty ab
+                  (DecompiledBlock _, Nothing) -> text "Stored in memory"
+                  (_,_) -> text ""
+
+              , ppBlockAndAbs amap b
+              ]
+
+  print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
+
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs
@@ -441,6 +483,8 @@ main = do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
       showCFG (args^.programPath)
+    ShowCFGAI -> do
+      showCFGAndAI (args^.programPath)
     ShowGaps -> showGaps (args^.programPath)
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments

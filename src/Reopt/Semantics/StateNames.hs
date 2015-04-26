@@ -122,6 +122,32 @@ data RegisterName cl where
 
   DebugReg :: !Int -> RegisterName Debug
 
+
+
+gpRegs :: [RegisterName GP]
+gpRegs = [GPReg i | i <- [0..15]]
+
+flagRegs :: [RegisterName Flag]
+flagRegs = [FlagReg i | i <- [0,2,4,6,7,8,9,10,11]]
+
+x87StatusRegs :: [RegisterName X87_Status]
+x87StatusRegs = [X87StatusReg i | i <- [0..15]]
+
+x87ControlRegs :: [RegisterName X87_ControlMask]
+x87ControlRegs = [X87ControlReg i | i <- [0..15]]
+
+x87TagRegs :: [RegisterName X87_Tag]
+x87TagRegs = [X87TagReg i | i <- [0..7]]
+
+x87FPURegs :: [RegisterName X87_FPU]
+x87FPURegs = [X87FPUReg i | i <- [0..7]]
+
+xmmRegs :: [RegisterName XMM]
+xmmRegs = [XMMReg i | i <- [0..7]]
+
+instance ShowF RegisterName where
+  showF = show
+
 instance Show (RegisterName cl) where
   show IPReg          = "rip"
   show (GPReg n)      = gpNames !! n
@@ -265,6 +291,9 @@ rsp = GPReg 4
 rbp = GPReg 5
 rsi = GPReg 6
 rdi = GPReg 7
+
+gpCount :: Int
+gpCount = 16
 
 gpNames :: [String]
 gpNames = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]

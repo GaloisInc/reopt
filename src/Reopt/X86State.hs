@@ -7,6 +7,7 @@
 module Reopt.X86State
   ( X86State
   , mkX86State
+  , mkX86StateM
   , curIP
   , reg64Regs
   , flagRegs
@@ -27,6 +28,8 @@ module Reopt.X86State
     -- * Pretty printing
   , PrettyRegValue(..)
   , X87StatusWord
+    -- * Utilities
+  , x86StateRegisters
   ) where
 
 import Control.Applicative
@@ -34,14 +37,12 @@ import Control.Lens
 import Data.Foldable (foldMap)
 import Data.Maybe
 import Data.Monoid (Monoid, mappend)
+import Data.Parameterized.Some
 import qualified Data.Vector as V
-import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
+import Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Reopt.Semantics.Monad
-  ( BoolType
-  , Type(..)
-  )
 import qualified Reopt.Semantics.StateNames as N
+import           Reopt.Semantics.Types
 import Reopt.Utils.PrettyPrint
 
 ------------------------------------------------------------------------
@@ -98,6 +99,20 @@ x87_busy = lens _x87_busy (\s v -> s { _x87_busy = v })
 -}
 
 type X87StatusWord f = V.Vector (f BoolType)
+
+
+-- | List of registers stored in X86State
+x86StateRegisters :: [Some N.RegisterName]
+x86StateRegisters
+  = [Some N.IPReg]
+  ++ (Some <$> N.gpRegs)
+  ++ (Some <$> N.flagRegs)
+  ++ (Some <$> N.x87ControlRegs)
+  ++ (Some <$> N.x87StatusRegs)
+  ++ [Some N.X87TopReg]
+  ++ (Some <$> N.x87TagRegs)
+  ++ (Some <$> N.x87FPURegs)
+  ++ (Some <$> N.xmmRegs)
 
 ------------------------------------------------------------------------
 -- X86State
@@ -170,38 +185,44 @@ xmmRegs = lens _xmmRegs (\s v -> s { _xmmRegs = v })
 register :: forall f cl
           . N.RegisterName cl
          -> Simple Lens (X86State f) (f (N.RegisterType cl))
-register reg = case reg of
-                N.IPReg           -> curIP
-                N.GPReg n         -> reg64Regs . idx n
-                N.FlagReg n       -> flagRegs . idx n
-                N.X87ControlReg n -> x87ControlWord . idx n
-                N.X87StatusReg n  -> x87StatusWord . idx n
-                N.X87TopReg       -> x87TopReg
-                N.X87TagReg n     -> x87TagWords . idx n
-                N.X87FPUReg n     -> x87Regs . idx n
-                N.XMMReg n        -> xmmRegs . idx n
-                -- X87PC
-                -- X87RC
-                -- SegmentReg
-                -- DebugReg
-                -- ControlReg
-                _               -> error $ "Unexpected reg: " ++ show reg
+register reg =
+    case reg of
+      N.IPReg           -> curIP
+      N.GPReg n         -> reg64Regs . idx n
+      N.FlagReg n       -> flagRegs . idx n
+      N.X87ControlReg n -> x87ControlWord . idx n
+      N.X87StatusReg n  -> x87StatusWord . idx n
+      N.X87TopReg       -> x87TopReg
+      N.X87TagReg n     -> x87TagWords . idx n
+      N.X87FPUReg n     -> x87Regs . idx n
+      N.XMMReg n        -> xmmRegs . idx n
+      -- X87PC
+      -- X87RC
+      -- SegmentReg
+      -- DebugReg
+      -- ControlReg
+      _               -> error $ "Unexpected reg: " ++ show reg
   where
     idx :: forall tp. Int -> Lens' (V.Vector (f tp)) (f tp)
     idx n = lens (V.! n) (\s v -> (ix n .~ v) s)
 
+mkX86StateM :: (Applicative m, Monad m)
+            => (forall cl. N.RegisterName cl -> m (f (N.RegisterType cl)))
+            -> m (X86State f)
+mkX86StateM f =
+  X86State <$> f N.IPReg
+           <*> V.generateM 16 (f . N.GPReg)
+           <*> V.generateM 16 (f . N.FlagReg)
+           <*> V.generateM 16 (f . N.X87ControlReg)
+           <*> V.generateM 16 (f . N.X87StatusReg)
+           <*> f N.X87TopReg
+           <*> V.generateM 8 (f . N.X87TagReg)
+           <*> V.generateM 8 (f . N.X87FPUReg)
+           <*> V.generateM 8 (f . N.XMMReg)
+
+
 mkX86State :: (forall cl. N.RegisterName cl -> f (N.RegisterType cl)) -> X86State f
-mkX86State f =
-  X86State { _curIP = f N.IPReg
-           , _reg64Regs = V.generate 16 (f . N.GPReg)
-           , _flagRegs  = V.generate 32 (f . N.FlagReg)
-           , _x87ControlWord = V.generate 16 (f . N.X87ControlReg)
-           , _x87StatusWord = V.generate 16 (f . N.X87StatusReg)
-           , _x87TopReg   = f N.X87TopReg
-           , _x87TagWords = V.generate 8 (f . N.X87TagReg)
-           , _x87Regs = V.generate 8 (f . N.X87FPUReg)
-           , _xmmRegs = V.generate 8 (f . N.XMMReg)
-           }
+mkX86State f = runIdentity (mkX86StateM (return . f))
 
 ------------------------------------------------------------------------
 -- Combinators
@@ -238,9 +259,9 @@ instance EqF f => Eq (X86State f) where
   s == s' = cmpX86State eqF s s'
 
 cmpX86State :: (forall u. f u -> g u -> Bool)
-               -> X86State f
-               -> X86State g
-               -> Bool
+            -> X86State f
+            -> X86State g
+            -> Bool
 cmpX86State r s s' =
   (s^.curIP) `r` (s'^.curIP)
   && vectorCompare r (s^.reg64Regs)      (s'^.reg64Regs)

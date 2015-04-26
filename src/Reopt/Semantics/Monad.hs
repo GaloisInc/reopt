@@ -86,6 +86,7 @@ module Reopt.Semantics.Monad
 
 import           Control.Applicative
 import           Data.Bits (shiftL)
+import Data.Proxy
 import           GHC.TypeLits as TypeLits
 
 import           Data.Parameterized.NatRepr
@@ -224,8 +225,9 @@ unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
   where
     unpackOne :: N.BitConversion n -> m ()
     unpackOne N.ConstantBit{}         = return ()
-    unpackOne (N.RegisterBit reg off) =
-      Register reg .= bvTrunc (N.registerWidth reg) (v `bvShr` bvLit sz (widthVal off))
+    unpackOne (N.RegisterBit reg off) = do
+      let res_w = N.registerWidth reg
+      Register reg .= bvTrunc res_w (v `bvShr` bvLit sz (widthVal off))
 
 ------------------------------------------------------------------------
 -- Values
@@ -293,12 +295,18 @@ class IsValue (v  :: Type -> *) where
   -- | Concatentates two bit vectors
   bvCat :: forall n . (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType (n + n))
   bvCat h l =
-      case (addIsLeq (bv_width l) (bv_width l), dblPosIsPos (LeqProof :: LeqProof 1 n)) of
+      case ( leqAdd (leqRefl n) n
+           , dblPosIsPos le_1_n
+           ) of
         (LeqProof, LeqProof) ->
           (uext n_plus_n h `bvShl` bvLit n_plus_n (widthVal $ bv_width l))
           .|. (uext n_plus_n l)
     where
       n_plus_n = addNat (bv_width l) (bv_width l)
+      n :: Proxy n
+      n = Proxy
+      le_1_n :: LeqProof 1 n
+      le_1_n = LeqProof
 
   -- | Splits a bit vectors into two
   bvSplit :: (1 <= n) => v (BVType (n + n)) -> (v (BVType n), v (BVType n))
@@ -344,11 +352,11 @@ class IsValue (v  :: Type -> *) where
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)
-  least_nibble x = bvTrunc knownNat x
+  least_nibble = bvTrunc knownNat
 
   -- | Return least-significant byte.
   least_byte :: forall n . (8 <= n) => v (BVType n) -> v (BVType 8)
-  least_byte x = bvTrunc knownNat x
+  least_byte = bvTrunc knownNat
 
   -- | Return true if value contains an even number of true bits.
   even_parity :: v (BVType 8) -> v BoolType
@@ -426,43 +434,84 @@ class IsValue (v  :: Type -> *) where
   isNaN fir v = isQNaN fir v .|. isSNaN fir v
 
   -- | Add two floating point numbers.
-  fpAdd :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+  -- This can throw exceptions, including:
+  -- #IA Operand is an SNaN value or unsupported format.
+  --     Operands are infinities of unlike sign.
+  -- #D  Source operand is a denormal value.
+  -- #U  Result is too small for destination format.
+  -- #O  Result is too large for destination format.
+  -- #P  Value cannot be represented exactly in destination format.
+  fpAdd :: FloatInfoRepr flt
+        -> v (FloatType flt)
+        -> v (FloatType flt)
+        -> v (FloatType flt)
 
-  -- | Whether the result of the add was rounded up
-  fpAddRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
+  -- | Indicates whether floating point representation from addition is
+  -- larger than the actual value.
+  -- TODO: Describe exceptions or modify usage to avoid them.
+  fpAddRoundedUp :: FloatInfoRepr flt
+                 -> v (FloatType flt)
+                 -> v (FloatType flt)
+                 -> v BoolType
 
-  -- | Subtracts two floating point numbers.
-  fpSub :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
+  -- | Subtracts one floating point numbers from another.
+  -- TODO: Describe exceptions or modify usage to avoid them.
+  fpSub :: FloatInfoRepr flt
+        -> v (FloatType flt)
+        -> v (FloatType flt)
+        -> v (FloatType flt)
 
-  -- | Subtracts two floating point numbers.
-  fpSubRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
+  -- | Indicates whether floating point representation from subtraction
+  -- is larger than the actual value.
+  -- TODO: Describe exceptions or modify usage to avoid them.
+  fpSubRoundedUp :: FloatInfoRepr flt
+                 -> v (FloatType flt)
+                 -> v (FloatType flt)
+                 -> v BoolType
 
   -- | Multiplies two floating point numbers.
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpMul :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
 
   -- | Whether the result of the mul was rounded up
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpMulRoundedUp :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
 
   -- | Divides two floating point numbers.
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpDiv :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v (FloatType flt)
 
+  -- | Compare if one floating is strictly less than another.
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpLt :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
 
   -- | Floating point equality (equates -0 and 0)
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpEq :: FloatInfoRepr flt -> v (FloatType flt) -> v (FloatType flt) -> v BoolType
   fpEq fir v v' = complement (fpLt fir v v' .|. fpLt fir v' v)
 
   -- | Convert between floating point values
+  -- TODO: Describe exceptions or modify usage to avoid them.
   fpCvt :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v (FloatType flt')
-
-  -- | Convert from integer to float
-  fpFromBV :: FloatInfoRepr flt -> v (BVType n) -> v (FloatType flt)
-
-  -- | Convert from float to integer
-  fpToBV   :: NatRepr n -> FloatInfoRepr flt -> v (FloatType flt) -> v (BVType n)
 
   -- | Whether roundup occurs when converting between FP formats
   fpCvtRoundsUp :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v BoolType
+
+  -- | Convert a signed vitvector to a float.
+  -- We assume that the floating point representation is large enough to hold
+  -- all the values at that bitwidth.
+  fpFromBV :: FloatInfoRepr flt -> v (BVType n) -> v (FloatType flt)
+
+  -- | Convert a floating point value to a signed integer.
+  -- * If the conversion is inexact, then the value is truncated to zero.
+  -- * If the conversion is out of the range of the bitvector, then a
+  --   floating point exception should be raised.
+  -- * If that exception is masked, then this returns -1 (as a signed bitvector).
+  truncFPToSignedBV :: NatRepr n
+                    -> FloatInfoRepr flt
+                    -> v (FloatType flt)
+                    -> v (BVType n)
+
 
   true :: v BoolType
   true = bvLit knownNat (1::Integer)

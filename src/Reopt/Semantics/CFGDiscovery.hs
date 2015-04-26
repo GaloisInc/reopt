@@ -21,29 +21,35 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Reopt.Semantics.CFGDiscovery
-       ( cfgFromAddress
+       ( FinalCFG(..)
+       , cfgFromAddress
+       , assignmentAbsValues
        ) where
 
-import           Control.Lens
-import           Control.Monad.State.Strict
+import Control.Applicative
+import Control.Exception
+import Control.Lens
+import Control.Monad.State.Strict
 import Data.List
-import           Data.Map.Strict (Map)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
+import Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
 import           Debug.Trace
 import Numeric
-import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import Reopt.AbsState
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
 import           Reopt.Semantics.Types
-import qualified Reopt.Semantics.WorkList as WL
 
 ------------------------------------------------------------------------
 -- AbsState
@@ -52,19 +58,17 @@ import qualified Reopt.Semantics.WorkList as WL
 type AbsState = Map CodeAddr AbsBlockState
 
 
+setAbsIP :: CodeAddr -> AbsBlockState -> AbsBlockState
+setAbsIP a = absX86State . curIP .~ abstractSingleton knownNat (toInteger a)
+
+
 defBlockState :: CodeAddr -> AbsBlockState
 defBlockState addr =
-  top & absX86State . curIP .~ abstractSingleton (toInteger addr)
-      & absX86State . x87TopReg .~ abstractSingleton 7
+  top & setAbsIP addr
+      & absX86State . x87TopReg .~ abstractSingleton knownNat 7
 
 emptyAbsState :: CodeAddr -> AbsState
 emptyAbsState start = Map.singleton start (defBlockState start)
-
-addAddr :: CodeAddr -> AbsState -> AbsState
-addAddr a s = Map.insertWith (\_ old -> old) a (defBlockState a) s
-
-addAddrs :: [CodeAddr] -> AbsState -> AbsState
-addAddrs l a = foldl' (flip addAddr) a l
 
 lookupAbsBlock :: CodeAddr -> AbsState -> AbsBlockState
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
@@ -151,9 +155,6 @@ getAbsBlockState a = do
     return $ lookupAbsBlock a (s^.absState)
 
 
-setAbsIP :: CodeAddr -> AbsBlockState -> AbsBlockState
-setAbsIP a = absX86State . curIP .~ abstractSingleton (toInteger a)
-
 -- | This is the worker for getBlock, in the case that the cfg doesn't
 -- contain the address of interest.
 reallyGetBlock :: CodeAddr -> State InterpState (Maybe Block)
@@ -169,11 +170,11 @@ reallyGetBlock addr = do
   r <- subMonad genState $ do
     liftEither $ disassembleBlock mem loc
   case r of
-   Left _e -> do
+   Left _e -> trace ("Block failed: 0x" ++ showHex addr "") $ do
      failedAddrs %= Set.insert addr
      return Nothing
    Right (bs, next_ip) -> do
-     cfg       %= insertBlocksForCode addr next_ip bs
+     cfg %= insertBlocksForCode addr next_ip bs
      lookupBlock addr
 
 -- | Returns a block at the given location, if at all possible.  This
@@ -193,41 +194,87 @@ getBlock addr = do
         reallyGetBlock addr
 
 ------------------------------------------------------------------------
--- Transfer functions
+-- Transfer stmts
 
---type Path = [(Value BoolType, Bool)]
+class (Applicative m, Monad m) => TransferMonad m where
+  recordWrite :: AbsRegs -> Value (BVType 64) -> Value tp -> m ()
 
--- blockPaths :: CFG -> Block -> [(X86State, Path)]
--- blockPaths c root = traverseBlockAndChildren c root go merge
---   where
---     merge cond l _ r = map (_2 %~ (:) (cond, True)) l
---                        ++ map (_2 %~ (:) (cond, False)) r
---     go b = case blockTerm b of
---             FetchAndExecute s -> [(s, [])]
---             _                 -> []
-
-transferStmt :: Memory Word64
-             -> Stmt
-             -> StateT AbsRegs (State InterpState) ()
-transferStmt mem stmt =
+transferStmt :: TransferMonad m
+             => Stmt
+             -> StateT AbsRegs m ()
+transferStmt stmt =
   case stmt of
     AssignStmt a -> do
       modify $ addAssignment a
-    Write (MemLoc _ (BVTypeRepr n)) v | widthVal n == 64 -> do
-      vs <- gets (`transferValue` v)
-      case concretize vs of
+    Write (MemLoc addr _) v -> do
+      regs <- get
+      lift $ recordWrite regs addr v
+    _ -> return ()
+
+transferStmts :: TransferMonad m => AbsRegs -> [Stmt] -> m AbsRegs
+transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
+
+finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
+finalBlockState a g
+  | Set.member a (finalCodePointersInMem g) = defBlockState a
+  | otherwise = lookupAbsBlock a (finalAbsState g)
+
+assignmentAbsValues :: FinalCFG -> MapF Assignment AbsValue
+assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
+  where g = finalCFG fg
+
+        go :: MapF Assignment AbsValue
+           -> Block
+           -> MapF Assignment AbsValue
+        go m0 b =
+          case blockLabel b of
+            GeneratedBlock{} -> m0
+            DecompiledBlock a -> insBlock b (initAbsRegs (finalBlockState a fg)) m0
+
+        insBlock :: Block
+                 -> AbsRegs
+                 -> MapF Assignment AbsValue
+                 -> MapF Assignment AbsValue
+        insBlock b r0 m0 =
+            case blockTerm b of
+              Branch _ lb rb ->
+                insBlock (findBlock g lb) r $
+                insBlock (findBlock g rb) r $
+                m
+              FetchAndExecute _ -> m
+
+          where r = runIdentity $ transferStmts r0 (blockStmts b)
+                m = MapF.union (r^.absAssignments) m0
+
+
+
+------------------------------------------------------------------------
+-- Transfer functions
+
+instance TransferMonad Identity where
+  recordWrite _ _ _ = return ()
+
+instance TransferMonad (State InterpState) where
+  recordWrite regs addr v
+    | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64)) = do
+      let block_addr = absInitial regs^.absX86State^.curIP
+      case transferValue regs addr of
+        StackOffset _ -> return ()
+        AbsValue _ -> return ()
+        TopV -> trace ("Write to top at " ++ show (pretty block_addr)) return ()
+      case concretize (transferValue regs v) of
         Nothing  -> return ()
         Just vs1 -> do
+          mem <- gets memory
           let vs2 = map fromInteger (Set.toList vs1)
-          lift $ do
-            forM_ vs2 $ \val -> do
-              alreadyInMem <- uses codePointersInMem $ Set.member val
-              when (isCodePointer mem val && not alreadyInMem) $ do
-                codePointersInMem %= Set.insert val
-                absState %= Map.delete val
-                frontier %= Set.insert val
+          forM_ vs2 $ \val -> do
+            alreadyInMem <- uses codePointersInMem $ Set.member val
+            when (isCodePointer mem val && not alreadyInMem) $ do
+              codePointersInMem %= Set.insert val
+              absState %= Map.delete val
+              frontier %= Set.insert val
+    | otherwise = return ()
 
-    _ -> return ()
 
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
@@ -241,7 +288,7 @@ mergeBlock ab0 addr = do
           absState %= Map.insert addr new
           frontier %= Set.insert addr
 
-    let ab = ab0 & absX86State . curIP .~ abstractSingleton (toInteger addr)
+    let ab = ab0 & setAbsIP addr
     case Map.lookup addr (s^.absState) of
       -- We have seen this block before, so need to join and see if
       -- the results is changed.
@@ -251,6 +298,11 @@ mergeBlock ab0 addr = do
           Just new -> upd new
       -- We haven't seen this block before
       Nothing  -> upd ab
+
+_showAbsDiff :: AbsBlockState -> AbsBlockState -> Doc
+_showAbsDiff x y = vcat (pp <$> absBlockDiff x y)
+  where pp (Some n) = pretty (show n) <+> pretty (x^.absX86State^.register n)
+                                      <+> pretty (x^.absX86State^.register n)
 
 isCodePointer :: Memory Word64 -> CodeAddr -> Bool
 isCodePointer mem val = addrHasPermissions (fromIntegral val) pf_x mem
@@ -284,10 +336,7 @@ transfer addr = do
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
       goBlock b regs = do
-        mem <- gets memory
-        regs' <- flip execStateT regs $ do
-          mapM_ (transferStmt mem) (blockStmts b)
-
+        regs' <- transferStmts regs (blockStmts b)
         case blockTerm b of
           Branch _ lb rb -> do
             g <- use cfg
@@ -307,7 +356,7 @@ transfer addr = do
                     -- This likely ends with a call.
                     return ()
 
-                  next -> do
+                  next -> assert (addr >= 0) $ do
                     trace ("INVALID IP " ++ showHex addr "\n" ++ show (pretty next)) $ do
                     -- we hit top, so give up
                     return ()
@@ -315,22 +364,34 @@ transfer addr = do
                 mapM_ (mergeBlock abst) (fmap fromInteger (Set.toList ips))
 
   doMaybe (getBlock addr) () $ \root -> do
-  ab <- getAbsBlockState addr
-  goBlock root (initAbsRegs ab)
-
+    ab <- getAbsBlockState addr
+    goBlock root (initAbsRegs ab)
 
 ------------------------------------------------------------------------
 -- Main loop
 
+data FinalCFG = FinalCFG { finalCFG :: !CFG
+                         , finalAbsState :: !AbsState
+                         , finalCodePointersInMem :: !(Set CodeAddr)
+                         , finalFailedAddrs :: !(Set CodeAddr)
+                         }
+
+
 cfgFromAddress :: Memory Word64
-                  -- ^ Memory to use when decoding instructions.
-               -> CodeAddr
-                  -- ^ Location to start disassembler form.
-               -> CFG
-cfgFromAddress mem start = s'^.cfg
+                   -- ^ Memory to use when decoding instructions.
+                -> CodeAddr
+                   -- ^ Location to start disassembler form.
+                -> FinalCFG
+cfgFromAddress mem start = r
   where
     s0 = emptyInterpState mem start
     s' = go s0
+
+    r = FinalCFG { finalCFG = s'^.cfg
+                 , finalAbsState = s'^.absState
+                 , finalCodePointersInMem = s'^.codePointersInMem
+                 , finalFailedAddrs = s'^.failedAddrs
+                 }
 
     go :: InterpState
        -> InterpState
@@ -339,6 +400,5 @@ cfgFromAddress mem start = s'^.cfg
         Nothing -> st
         Just (addr, next_roots) ->
           let st_pre = st & frontier .~ next_roots
-              st_post = flip execState st_pre $ do
-                transfer addr
+              st_post = flip execState st_pre $ transfer addr
            in go st_post

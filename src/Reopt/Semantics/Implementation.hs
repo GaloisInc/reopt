@@ -110,10 +110,6 @@ exprWidth e =
   case exprType e of
     S.BVTypeRepr n -> n
 
-mkLit :: Integral a => NatRepr n -> a -> Value (BVType n)
-mkLit n v = BVValue n (toInteger v .&. mask)
-  where mask = maxUnsigned n
-
 asBVLit :: Expr tp -> Maybe Integer
 asBVLit (ValueExpr (BVValue _ v)) = Just v
 asBVLit _ = Nothing
@@ -133,7 +129,7 @@ instance S.IsValue Expr where
     | Just (BVComplement _ cn) <- asApp c = app $ Mux (exprWidth x) cn y x
     | otherwise = app $ Mux (exprWidth x) c x y
 
-  bvLit n v = ValueExpr $ mkLit n v
+  bvLit n v = ValueExpr $ mkLit n (toInteger v)
   bvAdd x y
       -- Eliminate add 0
     | Just 0 <- asBVLit y = x
@@ -272,7 +268,10 @@ instance S.IsValue Expr where
         Just LeqProof -> S.bvTrunc w e
         Nothing -> error "bvTrunc given bad width"
 
-    | otherwise = app (Trunc e0 w)
+    | otherwise =
+      case testStrictLeq w (exprWidth e0) of
+        Left LeqProof -> app (Trunc e0 w)
+        Right Refl -> e0
 
   bvUlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
@@ -303,11 +302,16 @@ instance S.IsValue Expr where
       app $ BVBit x y
 
   sext w e0
-    | Just (SExt e w0) <- asApp e0 =
+    | Just (SExt e w0) <- asApp e0 = do
       -- Runtime check to wordaround GHC typechecker
-      withLeqProof (leqTrans (leqProof (S.bv_width e) w0) (leqProof w0 w)) $
+      let we = S.bv_width e
+      withLeqProof (leqTrans (addIsLeq we (knownNat :: NatRepr 1))
+                             (leqTrans (leqProof (incNat we) w0) (leqProof w0 w))) $
         S.sext w e
-    | otherwise = app $ SExt e0 w
+    | otherwise =
+      case testStrictLeq (exprWidth e0) w of
+        Left LeqProof -> app (SExt e0 w)
+        Right Refl -> e0
 
   uext w e0
     | Just v <- asBVLit e0 =
@@ -315,11 +319,18 @@ instance S.IsValue Expr where
        in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (leqProof w0 w)) $
             bvLit w v
       -- Collapse duplicate extensions.
-    | Just (UExt e w0) <- asApp e0 =
-      withLeqProof (leqTrans (leqProof (S.bv_width e) w0) (leqProof w0 w)) $
+    | Just (UExt e w0) <- asApp e0 = do
+      let we = S.bv_width e
+      withLeqProof (leqTrans (addIsLeq we (knownNat :: NatRepr 1))
+                             (leqTrans (leqProof (incNat we) w0)
+                                       (leqProof w0 w))) $
         S.uext w e
       -- Default case
-    | otherwise = app $ UExt e0 w
+
+    | otherwise =
+      case testStrictLeq (exprWidth e0) w of
+        Left LeqProof -> app (UExt e0 w)
+        Right Refl -> e0
 
   even_parity x
     | Just xv <- asBVLit x =
@@ -346,6 +357,29 @@ instance S.IsValue Expr where
 
   bsf x = app $ Bsf (exprWidth x) x
   bsr x = app $ Bsr (exprWidth x) x
+
+  isQNaN rep x = app $ FPIsQNaN rep x
+  isSNaN rep x = app $ FPIsSNaN rep x
+
+  fpAdd rep x y = app $ FPAdd rep x y
+  fpAddRoundedUp rep x y = app $ FPAddRoundedUp rep x y
+
+  fpSub rep x y = app $ FPSub rep x y
+  fpSubRoundedUp rep x y = app $ FPSubRoundedUp rep x y
+
+  fpMul rep x y = app $ FPMul rep x y
+  fpMulRoundedUp rep x y = app $ FPMulRoundedUp rep x y
+
+  fpDiv rep x y = app $ FPDiv rep x y
+
+  fpLt rep x y = app $ FPLt rep x y
+  fpEq rep x y = app $ FPEq rep x y
+
+  fpCvt src tgt x = app $ FPCvt src x tgt
+  fpCvtRoundsUp src tgt x = app $ FPCvtRoundsUp src x tgt
+
+  fpFromBV tgt x = app $ FPFromBV x tgt
+  truncFPToSignedBV tgt src x = app $ TruncFPToSignedBV src x tgt
 
 ------------------------------------------------------------------------
 -- GenState
@@ -532,7 +566,7 @@ constPropagate v =
    BVMul _  l (BVValue _ 1)       -> Just l
    BVMul _  (BVValue _ 1) r       -> Just r
 
-   UExt  (BVValue _ n) sz         -> Just $ BVValue sz n
+   UExt  (BVValue _ n) sz         -> Just $ mkLit sz n
 
    -- Word operations
    Trunc (BVValue _ x) sz         -> Just $ mkLit sz x
@@ -545,7 +579,7 @@ constPropagate v =
   where
     boolop :: (tp ~ BoolType) => (Integer -> Integer -> Bool)
               -> Value n -> Value n -> Maybe (Value BoolType)
-    boolop f (BVValue _ l) (BVValue _ r) = Just $ BVValue knownNat (if f l r then 1 else 0)
+    boolop f (BVValue _ l) (BVValue _ r) = Just $ mkLit knownNat (if f l r then 1 else 0)
     boolop _ _ _ = Nothing
 
     unop :: (tp ~ BVType n) => (Integer -> Integer)
@@ -788,8 +822,8 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State Value
 initX86State loc = mkX86State Initial
-                   & curIP .~  BVValue knownNat (toInteger (loc_ip loc))
-                   & x87TopReg .~ BVValue knownNat (fromIntegral $ loc_x87_top loc)
+                   & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
+                   & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
 data GenError = DecodeError (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
@@ -832,7 +866,7 @@ disassembleBlock' :: Memory Word64
 disassembleBlock' mem gs addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError
-  let next_ip_val = BVValue knownNat (toInteger next_ip)
+  let next_ip_val = mkLit knownNat (toInteger next_ip)
 
   -- Update current IP
   let gs1 = gs & curX86State . curIP .~ next_ip_val
@@ -841,18 +875,16 @@ disassembleBlock' mem gs addr = do
   let line = text (showHex addr "") <> colon
              <+> Flexdis.ppInstruction next_ip i
 
-  exec <-
-    case execInstruction i of
-      Nothing -> Left (DisassembleError i)
-      Just v  -> return v
-
-  let res = runX86Generator gs1 $ do
-              addStmt (Comment (show line))
-              exec
-  case res of
-    Some gs2 -> do
-     case gs2 ^. blockState of
-       JustF p_b
-         | v <- p_b^.(pBlockState . curIP), v == next_ip_val -> do
-           disassembleBlock' mem gs2 next_ip
-       _ -> return (finishBlock FetchAndExecute gs2, next_ip)
+  case execInstruction i of
+    Nothing -> Left (DisassembleError i)
+    Just exec -> do
+      let res = runX86Generator gs1 $ do
+                  addStmt (Comment (show line))
+                  exec
+      case res of
+        Some gs2 -> do
+          case gs2 ^. blockState of
+            JustF p_b | v <- p_b^.(pBlockState . curIP)
+                      , v == next_ip_val ->
+              disassembleBlock' mem gs2 next_ip
+            _ -> return (finishBlock FetchAndExecute gs2, next_ip)

@@ -40,16 +40,19 @@ module Reopt.Semantics.Representation
   , Assignment(..)
   , assignmentType
   , AssignId
+  , ppAssignId
   , AssignRhs(..)
     -- * Value
   , Value(..)
   , valueAsApp
   , valueType
   , valueWidth
+  , mkLit
   , bvValue
   , ppValue
   , App(..)
   , appType
+  , appWidth
   , mapApp
   , foldApp
   , traverseApp
@@ -60,6 +63,7 @@ module Reopt.Semantics.Representation
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.State.Strict
+import           Data.Bits
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -76,20 +80,14 @@ import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
-import           Reopt.Semantics.Monad
-  ( BoolType
-  , Type(..)
-  , TypeRepr(..)
-  , knownType
-  )
 import qualified Reopt.Semantics.StateNames as N
+import Reopt.Semantics.Types
 import Reopt.Utils.PrettyPrint
 import Reopt.X86State
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
 -- definitions should be first.
-
 
 type Prec = Int
 
@@ -210,8 +208,8 @@ blockParent (DecompiledBlock v)  = v
 blockParent (GeneratedBlock v _) = v
 
 instance Pretty BlockLabel where
-  pretty (DecompiledBlock a)   = text ("addr_" ++ showHex a "")
-  pretty (GeneratedBlock p w)  = text ("label_" ++ showHex p "_" ++ show w)
+  pretty (DecompiledBlock a)   | a >= 0 = text ("addr_" ++ showHex a "")
+  pretty (GeneratedBlock p w)  | p >= 0 = text ("label_" ++ showHex p "_" ++ show w)
 
 ------------------------------------------------------------------------
 -- Block
@@ -415,11 +413,15 @@ valueAsApp :: Value tp -> Maybe (App Value tp)
 valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
 valueAsApp _ = Nothing
 
+mkLit :: NatRepr n -> Integer -> Value (BVType n)
+mkLit n v = BVValue n (v .&. mask)
+  where mask = maxUnsigned n
+
 bvValue :: KnownNat n => Integer -> Value (BVType n)
-bvValue i = BVValue knownNat i
+bvValue i = mkLit knownNat i
 
 ppValue :: Prec -> Value tp -> Doc
-ppValue p (BVValue w i) = parenIf (p > colonPrec) $
+ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) <> text "_0"
@@ -464,11 +466,11 @@ data App f tp where
             -> App f (BVType n)
 
   -- Truncate a bitvector value.
-  Trunc :: (n <= m) => !(f (BVType m)) -> !(NatRepr n) -> App f (BVType n)
+  Trunc :: (1 <= n, n+1 <= m) => !(f (BVType m)) -> !(NatRepr n) -> App f (BVType n)
   -- Signed extension.
-  SExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
+  SExt :: (1 <= m, m+1 <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
   -- Unsigned extension.
-  UExt :: (1 <= m, m <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
+  UExt :: (1 <= m, m+1 <= n) => f (BVType m) -> NatRepr n -> App f (BVType n)
 
   ----------------------------------------------------------------------
   -- Boolean operations
@@ -573,11 +575,89 @@ data App f tp where
   -- All bits at indices greater than return value must be unset.
   Bsr :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
 
-  -----------------------dat -----------------------------------------------
+  ----------------------------------------------------------------------
   -- Floating point operations
 
-  -- Double precision addition.
-  -- DoubleAdd :: f DoubleType -> f DoubleType -> App f DoubleType
+  FPIsQNaN :: !(FloatInfoRepr flt)
+           -> !(f (FloatType flt))
+           -> App f BoolType
+
+  FPIsSNaN :: !(FloatInfoRepr flt)
+           -> !(f (FloatType flt))
+           -> App f BoolType
+
+  FPAdd :: !(FloatInfoRepr flt)
+        -> !(f (FloatType flt))
+        -> !(f (FloatType flt))
+        -> App f (FloatType flt)
+
+  FPAddRoundedUp :: !(FloatInfoRepr flt)
+                 -> !(f (FloatType flt))
+                 -> !(f (FloatType flt))
+                 -> App f BoolType
+
+  FPSub :: !(FloatInfoRepr flt)
+        -> !(f (FloatType flt))
+        -> !(f (FloatType flt))
+        -> App f (FloatType flt)
+
+  FPSubRoundedUp
+    :: !(FloatInfoRepr flt)
+    -> !(f (FloatType flt))
+    -> !(f (FloatType flt))
+    -> App f BoolType
+
+  FPMul :: !(FloatInfoRepr flt)
+        -> !(f (FloatType flt))
+        -> !(f (FloatType flt))
+        -> App f (FloatType flt)
+
+  FPMulRoundedUp :: !(FloatInfoRepr flt)
+                 -> !(f (FloatType flt))
+                 -> !(f (FloatType flt))
+                 -> App f BoolType
+
+  -- Divides two floating point numbers.
+  FPDiv :: !(FloatInfoRepr flt)
+        -> !(f (FloatType flt))
+        -> !(f (FloatType flt))
+        -> App f (FloatType flt)
+
+  -- Compare if one floating is strictly less than another.
+  FPLt :: !(FloatInfoRepr flt)
+       -> !(f (FloatType flt))
+       -> !(f (FloatType flt))
+       -> App f BoolType
+
+  -- Floating point equality (equates -0 and 0)
+  FPEq :: !(FloatInfoRepr flt)
+       -> !(f (FloatType flt))
+       -> !(f (FloatType flt))
+       -> App f BoolType
+
+  FPCvt :: !(FloatInfoRepr flt)
+        -> !(f (FloatType flt))
+        -> !(FloatInfoRepr flt')
+        -> App f (FloatType flt')
+
+  FPCvtRoundsUp :: !(FloatInfoRepr flt)
+                -> !(f (FloatType flt))
+                -> !(FloatInfoRepr flt')
+                -> App f BoolType
+
+  FPFromBV :: !(f (BVType n))
+           -> !(FloatInfoRepr flt)
+           -> App f (FloatType flt)
+
+  -- Convert a floating point value to a signed integer.
+  -- If the conversion is inexact, then the value is truncated to zero.
+  -- If the conversion is out of the range of the bitvector, then a floating
+  -- point exception should be raised.
+  -- If that exception is masked, then this returns -1 (as a signed bitvector).
+  TruncFPToSignedBV :: FloatInfoRepr flt
+                    -> f (FloatType flt)
+                    -> NatRepr n
+                    -> App f (BVType n)
 
 sexpr :: String -> [Doc] -> Doc
 sexpr nm d = parens (hsep (text nm : d))
@@ -627,6 +707,28 @@ ppApp pp a0 =
     Bsf _ x -> sexpr "bsf" [ pp x ]
     Bsr _ x -> sexpr "bsr" [ pp x ]
 
+    -- Floating point
+    FPIsQNaN rep x          -> sexpr "fpIsQNaN" [ pretty rep, pp x ]
+    FPIsSNaN rep x          -> sexpr "fpIsSNaN" [ pretty rep, pp x ]
+    FPAdd rep x y           -> sexpr "fpAdd" [ pretty rep, pp x, pp y ]
+    FPAddRoundedUp rep x y  -> sexpr "fpAddRoundedUp" [ pretty rep, pp x, pp y ]
+    FPSub rep x y           -> sexpr "fpSub" [ pretty rep, pp x, pp y ]
+    FPSubRoundedUp rep x y  -> sexpr "fpSubRoundedUp" [ pretty rep, pp x, pp y ]
+    FPMul rep x y           -> sexpr "fpMul" [ pretty rep, pp x, pp y ]
+    FPMulRoundedUp rep x y  -> sexpr "fpMulRoundedUp" [ pretty rep, pp x, pp y ]
+    FPDiv rep x y           -> sexpr "fpDiv" [ pretty rep, pp x, pp y ]
+    FPLt rep x y            -> sexpr "fpLt" [ pretty rep, pp x, pp y ]
+    FPEq rep x y            -> sexpr "fpEq" [ pretty rep, pp x, pp y ]
+    FPCvt src x tgt         -> sexpr "fpCvt" [ pretty src, pp x, pretty tgt ]
+    FPCvtRoundsUp src x tgt -> sexpr "fpCvtRoundsRep" [ pretty src, pp x, pretty tgt ]
+    FPFromBV x tgt          -> sexpr "fpFromBV" [ pp x, pretty tgt ]
+    TruncFPToSignedBV _ x w -> sexpr "truncFP_sbv" [ pp x, ppNat w]
+
+appWidth :: App f (BVType n) -> NatRepr n
+appWidth a =
+  case appType a of
+    BVTypeRepr n -> n
+
 appType :: App f tp -> TypeRepr tp
 appType a =
   case a of
@@ -672,7 +774,23 @@ appType a =
 
     Bsf w _ -> BVTypeRepr w
     Bsr w _ -> BVTypeRepr w
-    -- DoubleAdd _ _ -> knownType
+
+    -- Floating point
+    FPIsQNaN _ _ -> knownType
+    FPIsSNaN _ _ -> knownType
+    FPAdd rep _ _ -> floatTypeRepr rep
+    FPAddRoundedUp{} -> knownType
+    FPSub rep _ _ -> floatTypeRepr rep
+    FPSubRoundedUp{} -> knownType
+    FPMul rep _ _ -> floatTypeRepr rep
+    FPMulRoundedUp{} -> knownType
+    FPDiv rep _ _ -> floatTypeRepr rep
+    FPLt{} -> knownType
+    FPEq{} -> knownType
+    FPCvt _ _ tgt   -> floatTypeRepr tgt
+    FPCvtRoundsUp{} -> knownType
+    FPFromBV _ tgt  -> floatTypeRepr tgt
+    TruncFPToSignedBV _ _ w -> BVTypeRepr w
 
 -----------------------------------------------------------------------
 -- App utilities
@@ -687,6 +805,7 @@ instance TestEquality f => TestEquality (App f) where
   testEquality = $(structuralTypeEquality [t|App|]
                    [ TypeApp (DataArg 0)            AnyType
                    , TypeApp (ConType [t|NatRepr|]) AnyType
+                   , TypeApp (ConType [t|FloatInfoRepr|]) AnyType
                    ]
                   )
 
@@ -694,6 +813,7 @@ instance OrdF f => OrdF (App f) where
   compareF = $(structuralTypeOrd [t|App|]
                  [ TypeApp (DataArg 0)            AnyType
                  , TypeApp (ConType [t|NatRepr|]) AnyType
+                 , TypeApp (ConType [t|FloatInfoRepr|]) AnyType
                  ]
               )
 

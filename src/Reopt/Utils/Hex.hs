@@ -5,4 +5,4 @@ newtype Hex = Hex Integer
   deriving (Eq, Ord)
 
 instance Show Hex where
-  show (Hex v) = showHex v ""
+  show (Hex v) | v >= 0 = showHex v ""

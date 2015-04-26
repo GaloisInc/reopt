@@ -62,6 +62,7 @@ executable reopt
     flexdis86,
     lens,
     mtl,
+    parameterized-utils >= 0.1.6,
     reopt
 
   hs-source-dirs: reopt
