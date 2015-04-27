@@ -447,7 +447,13 @@ showCFGAndAI path = do
   print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
   forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
     case blockLabel b of
-      DecompiledBlock{} -> showReturnBlock g b
+      DecompiledBlock{} -> do
+        checkReturnsIdentified g b
+      _ -> return ()
+  forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
+    case blockLabel b of
+      DecompiledBlock{} -> do
+        checkCallsIdentified mem g b
       _ -> return ()
 
 -- | This is designed to detect returns from the X86 representation.
@@ -464,20 +470,46 @@ stateEndsWithRet s = do
         ip_base == sp_base && ip_off + 8 == sp_off
     _ -> False
 
-showReturnBlock :: CFG -> Block -> IO ()
-showReturnBlock g b = do
+-- | Returns true if it looks like block ends with a call.
+blockContainsCall :: Memory Word64 -> Block -> X86State Value -> Bool
+blockContainsCall mem b s =
+  let next_sp = s^.register N.rsp
+      go [] = False
+      go (Write (MemLoc a _) (BVValue _ val):_)
+        | Just Refl <- testEquality a next_sp
+        , isCodePointer mem (fromInteger val) =
+          True
+      go (Write _ _:_) = False
+      go (_:r) = go r
+   in go (reverse (blockStmts b))
+
+checkReturnsIdentified :: CFG -> Block -> IO ()
+checkReturnsIdentified g b = do
   case blockNextStates g b of
     [s] -> do
       let lbl = blockLabel b
       case (stateEndsWithRet s, hasRetComment b) of
-        (True, True) -> do
-          hPutStrLn stderr $ "Return Block " ++ showHex (blockParent lbl) ""
+        (True, True) -> return ()
         (True, False) -> do
           hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (blockParent lbl) ""
         (False, True) -> do
           hPutStrLn stderr $ "MISSING return Block " ++ showHex (blockParent lbl) ""
         _ -> return ()
     _ -> return ()
+
+checkCallsIdentified :: Memory Word64 -> CFG -> Block -> IO ()
+checkCallsIdentified mem g b = do
+  let lbl = blockLabel b
+  case blockNextStates g b of
+    [s] -> do
+      case (blockContainsCall mem b s, hasCallComment b) of
+        (True, False) -> do
+          hPutStrLn stderr $ "UNEXPECTED call Block " ++ showHex (blockParent lbl) ""
+        (False, True) -> do
+          hPutStrLn stderr $ "MISSING call Block " ++ showHex (blockParent lbl) ""
+        _ -> return ()
+    _ -> return ()
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs

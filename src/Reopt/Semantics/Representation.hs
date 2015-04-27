@@ -230,7 +230,7 @@ instance Show BlockLabel where
 
 instance Pretty BlockLabel where
   pretty (DecompiledBlock a)   | a >= 0 = text ("block_" ++ showHex a "")
-  pretty (GeneratedBlock p w)  | p >= 0 = text ("block_" ++ showHex p "_" ++ show w)
+  pretty (GeneratedBlock p w)  | p >= 0 = text ("subblock_" ++ showHex p "_" ++ show w)
 
 ------------------------------------------------------------------------
 -- Block

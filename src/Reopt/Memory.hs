@@ -10,6 +10,7 @@ module Reopt.Memory
   , memSegments
   , executableSegments
   , addrHasPermissions
+  , isCodePointer
   , findSegment
   , MemSegment(..)
   , isExecutable
@@ -137,6 +138,10 @@ addrHasPermissions :: Ord w => w -> ElfSegmentFlags -> Memory w -> Bool
 addrHasPermissions w req m = fromMaybe False $ do
   s <- findSegment w m
   return (memFlags s `hasPermissions` req)
+
+-- | Indicates if address is a code pointer.
+isCodePointer :: Memory Word64 -> Word64 -> Bool
+isCodePointer mem val = addrHasPermissions val pf_x mem
 
 ------------------------------------------------------------------------
 -- MemReader

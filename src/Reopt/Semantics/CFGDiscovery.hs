@@ -302,9 +302,6 @@ _showAbsDiff x y = vcat (pp <$> absBlockDiff x y)
   where pp (Some n) = pretty (show n) <+> pretty (x^.absX86State^.register n)
                                       <+> pretty (x^.absX86State^.register n)
 
-isCodePointer :: Memory Word64 -> CodeAddr -> Bool
-isCodePointer mem val = addrHasPermissions (fromIntegral val) pf_x mem
-
 doMaybe :: Monad m => m (Maybe a) -> b -> (a -> m b) -> m b
 doMaybe m n j = do
   ma <- m

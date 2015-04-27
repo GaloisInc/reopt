@@ -11,6 +11,7 @@
 ------------------------------------------------------------------------
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.Semantics.CodePointerDiscovery
   ( discoverCodePointers
   ) where
@@ -37,10 +38,7 @@ scanBlock mem = foldMap go . blockStmts
     -- FIXME: remove hard coded size value here.
     -- At the moment, our criteria is simply that the pointer is 64 bits
     -- and points somewhere in the code section(s).
-    go (Write _ (BVValue sz val))
+    go (Write _ (BVValue sz (fromInteger -> val)))
       | widthVal sz == 64
-      , isCodePointer val          = S.singleton (fromInteger val)
+      , isCodePointer mem val      = S.singleton val
     go _                           = S.empty
-
-    isCodePointer :: Integer -> Bool
-    isCodePointer val = addrHasPermissions (fromInteger val) pf_x mem
