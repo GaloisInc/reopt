@@ -48,6 +48,7 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
 import           Data.Word
@@ -109,6 +110,11 @@ exprWidth e =
 asBVLit :: Expr tp -> Maybe Integer
 asBVLit (ValueExpr (BVValue _ v)) = Just v
 asBVLit _ = Nothing
+
+ltProof :: forall f n m . (n+1 <= m) => f n -> f m -> LeqProof n m
+ltProof _ _ = leqTrans lt LeqProof
+  where lt :: LeqProof n (n+1)
+        lt = leqAdd LeqProof S.n1
 
 instance S.IsValue Expr where
 
@@ -315,24 +321,19 @@ instance S.IsValue Expr where
         Left LeqProof -> app (SExt e0 w)
         Right Refl -> e0
 
-  uext w e0
+  uext' w e0
     | Just v <- asBVLit e0 =
       let w0 = S.bv_width e0
-       in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (leqProof w0 w)) $
+       in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (ltProof w0 w)) $
             bvLit w v
       -- Collapse duplicate extensions.
     | Just (UExt e w0) <- asApp e0 = do
       let we = S.bv_width e
-      withLeqProof (leqTrans (addIsLeq we (knownNat :: NatRepr 1))
-                             (leqTrans (leqProof (incNat we) w0)
-                                       (leqProof w0 w))) $
+      withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
         S.uext w e
       -- Default case
 
-    | otherwise =
-      case testStrictLeq (exprWidth e0) w of
-        Left LeqProof -> app (UExt e0 w)
-        Right Refl -> e0
+    | otherwise = app (UExt e0 w)
 
   even_parity x
     | Just xv <- asBVLit x =
@@ -409,7 +410,6 @@ nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 -- | A block that we have not yet finished.
 data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
                          , _pBlockStmts :: !(Seq Stmt)
-                           -- | The last statement in the block.
                          , _pBlockState :: !(X86State Value)
                          , _pBlockApps  :: !(MapF (App Value) Assignment)
                          }
@@ -434,12 +434,25 @@ _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 -- | Local to block discovery.
 data GenState tag = GenState
        { -- | The global state
-         _globalGenState :: GlobalGenState
+         _globalGenState :: !GlobalGenState
          -- | Blocks that are not in CFG that end with a FetchAndExecute,
          -- which we need to analyze to compute new potential branch targets.
        , _frontierBlocks :: !(Seq Block)
        , _blockState     :: !(MaybeF tag PreBlock)
        }
+
+globalGenState :: Simple Lens (GenState tag) GlobalGenState
+globalGenState = lens _globalGenState (\s v -> s { _globalGenState = v })
+
+-- | Blocks that are not in CFG that end with a FetchAndExecute,
+-- which we need to analyze to compute new potential branch targets.
+frontierBlocks :: Simple Lens (GenState tag) (Seq Block)
+frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
+
+-- | Blocks that are not in CFG that end with a FetchAndExecute,
+-- which we need to analyze to compute new potential branch targets.
+blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBlock)
+blockState = lens _blockState (\s v -> s { _blockState = v })
 
 emptyPreBlock :: X86State Value
               -> BlockLabel
@@ -457,19 +470,6 @@ emptyGenState st =
            , _frontierBlocks = Seq.empty
            , _blockState     = NothingF
            }
-
-globalGenState :: Simple Lens (GenState tag) GlobalGenState
-globalGenState = lens _globalGenState (\s v -> s { _globalGenState = v })
-
--- | Blocks that are not in CFG that end with a FetchAndExecute,
--- which we need to analyze to compute new potential branch targets.
-frontierBlocks :: Simple Lens (GenState tag) (Seq Block)
-frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
-
--- | Blocks that are not in CFG that end with a FetchAndExecute,
--- which we need to analyze to compute new potential branch targets.
-blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBlock)
-blockState = lens _blockState (\s v -> s { _blockState = v })
 
 curX86State :: Simple Lens (GenState 'True) (X86State Value)
 curX86State = blockState . _JustF . pBlockState
@@ -619,6 +619,15 @@ type AddrExpr = Expr (BVType 64)
 
 type ImpLocation tp = S.Location AddrExpr tp
 
+getX87Offset :: Int -> X86Generator Int
+getX87Offset i = do
+  top_val <- modState $ use $ x87TopReg
+  case top_val of
+    BVValue _ (fromInteger -> top) | i <= top, top <= i + 7 -> do
+      return (top - i)
+    _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
+
+
 getLoc :: ImpLocation tp -> X86Generator (Expr tp)
 getLoc l0 =
   case l0 of
@@ -643,6 +652,16 @@ getLoc l0 =
 
     S.LowerHalf l -> lowerHalf <$> getLoc l
     S.UpperHalf l -> upperHalf <$> getLoc l
+    S.TruncLoc l w -> do
+      withLeqProof (ltProof w (S.loc_width l)) $
+        S.bvTrunc w <$> getLoc l
+
+    -- TODO
+    S.X87StackRegister i -> do
+      v <- modState $ use $ x87Regs
+      off <- getX87Offset i
+      return (ValueExpr (v V.! off))
+
 
 lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
@@ -724,15 +743,26 @@ setLoc loc v0 =
            --   ext_v <- evalApp (MMXExtend v)
            --   modState $ register r .= ext_v
            _ -> modState $ register r .= v
-
+       S.TruncLoc l w -> do
+         b <- getLoc l
+         let lw = S.loc_width l
+         -- Build mask containing only upper most lw - w bits
+         case isPosNat lw of
+           Nothing -> fail "Illegal width to TruncLoc"
+           Just LeqProof -> do
+             let mask = bvLit lw (complement (maxUnsigned w))
+             let old_part = mask S..&. b
+             go l =<< eval (old_part S..|. S.uext' lw (ValueExpr v))
        S.LowerHalf l -> do
          b <- getLoc l
          go l =<< eval (bvConcat (ValueExpr v) (upperHalf b))
        S.UpperHalf l -> do
          b <- getLoc l
          go l =<< eval (bvConcat (lowerHalf b) (ValueExpr v))
-       S.X87StackRegister _ -> do
-         error "setLoc X87StackRegister undefined"
+       S.X87StackRegister i -> do
+         off <- getX87Offset i
+         modState $ x87Regs . ix off .= v
+
 
 instance S.Semantics X86Generator where
   make_undefined (S.BVTypeRepr n) =
@@ -783,15 +813,6 @@ instance S.Semantics X86Generator where
           Some . viewSome (finishBlock FetchAndExecute)
                . viewSome run_f . run_t . flush_current $ s''
 
-  -- exception :: Value m BoolType    -- mask
-  --            -> Value m BoolType -- predicate
-  --            -> ExceptionClass
-  --            -> m ()
-  exception m p c = S.ifte_ (S.complement m S..&. p)
-                    (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
-                    (return ())
-  syscall v = do v' <- eval v
-                 addStmt (PlaceHolderStmt [Some v'] "Syscall")
   memmove _n count src dest =
     do vs <- sequence [ Some <$> eval count
                       , Some <$> eval src
@@ -803,6 +824,20 @@ instance S.Semantics X86Generator where
                       , Some <$> eval v
                       , Some <$> eval dest ]
        addStmt (PlaceHolderStmt vs "memset")
+
+  syscall v = do v' <- eval v
+                 addStmt (PlaceHolderStmt [Some v'] "Syscall")
+
+  -- exception :: Value m BoolType    -- mask
+  --            -> Value m BoolType -- predicate
+  --            -> ExceptionClass
+  --            -> m ()
+  exception m p c = S.ifte_ (S.complement m S..&. p)
+                    (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
+                    (return ())
+
+  x87Push _ = return ()
+  x87Pop = return ()
 
 -- | A location to explore
 data ExploreLoc

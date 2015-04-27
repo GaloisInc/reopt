@@ -210,18 +210,23 @@ transferStmt stmt =
       put $ addMemWrite addr v regs
     _ -> return ()
 
+recordEscapedCodePointer :: Word64 -> InterpState -> InterpState
+recordEscapedCodePointer val s
+  | Set.member val (s^.codePointersInMem) = s
+  | otherwise = s & codePointersInMem %~ Set.insert val
+                  & absState          %~ Map.delete val
+                  & frontier          %~ Set.insert val
+
+recordEscapedCodePointers :: [Word64] -> InterpState -> InterpState
+recordEscapedCodePointers = flip (foldl' (flip recordEscapedCodePointer))
+
 recordWriteStmt :: AbsRegs -> Stmt -> State InterpState ()
 recordWriteStmt regs (Write (MemLoc _addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , Just vs1 <- concretize (transferValue regs v) = do
     mem <- gets memory
-    let vs2 = map fromInteger (Set.toList vs1)
-    forM_ vs2 $ \val -> do
-      alreadyInMem <- uses codePointersInMem $ Set.member val
-      when (isCodePointer mem val && not alreadyInMem) $ do
-        codePointersInMem %= Set.insert val
-        absState %= Map.delete val
-        frontier %= Set.insert val
+    let vs2 = filter (isCodePointer mem) $ map fromInteger (Set.toList vs1)
+    modify $ recordEscapedCodePointers vs2
 recordWriteStmt _ _ = return ()
 
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
@@ -306,11 +311,6 @@ getAbsX87Top abst =
     Just v -> return (fromInteger v)
     _ -> fail "x87top is not concrete"
 
-hasCall :: Block -> Bool
-hasCall b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `isInfixOf` s
-        isCallComment _ = False
-
 -- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
 isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
@@ -394,7 +394,10 @@ cfgFromAddress :: Memory Word64
                -> FinalCFG
 cfgFromAddress mem start = r
   where
-    s0 = emptyInterpState mem start
+    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
+    s0 = recordEscapedCodePointers code_pointers
+       $ emptyInterpState mem start
+
     s' = go s0
 
     r = FinalCFG { finalCFG = s'^.cfg

@@ -68,7 +68,7 @@ module Reopt.Semantics.Monad
   , rsp, rbp, rax, rdx, rsi, rdi, rcx, rip
     -- * IsLeq utility
   , IsLeq
-  , n8, n16, n32, n64, n80, n128
+  , n1, n8, n16, n32, n64, n80, n128
     -- * Value operations
   , IsValue(..)
   , Pred
@@ -105,6 +105,11 @@ data Location addr (tp :: Type) where
 
   Register :: RegisterName cl -> Location addr (N.RegisterType cl)
 
+  TruncLoc :: (1 <= n', n'+1 <= n)
+           => Location addr (BVType n)
+           -> NatRepr n'
+           -> Location addr (BVType n')
+
   -- Refers to the least significant half of the bitvector.
   LowerHalf :: (1 <= n)
             => Location addr (BVType (n+n))
@@ -122,6 +127,7 @@ data Location addr (tp :: Type) where
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (MemoryAddr _ tp) = type_width tp
 loc_width (Register r)  = N.registerWidth r
+loc_width (TruncLoc _ n) = n
 loc_width (LowerHalf l) = halfNat (loc_width l)
 loc_width (UpperHalf l) = halfNat (loc_width l)
 loc_width (X87StackRegister _) = knownNat
@@ -342,13 +348,21 @@ class IsValue (v  :: Type -> *) where
 
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
-  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1)) -- FIXME: should be log2 (bv_width v) here
+  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
+     -- FIXME: should be log2 (bv_width v) here
 
   -- | Perform a signed extension of a bitvector.
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
   uext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+  uext w e =
+    case testStrictLeq (bv_width e) w of
+      Left LeqProof -> uext' w e
+      Right Refl -> e
+
+  -- | Perform a unsigned extension of a bitvector.
+  uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)

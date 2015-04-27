@@ -31,6 +31,9 @@ import GHC.TypeLits as Exports (Nat)
 
 
 -- FIXME: move
+n1 :: NatRepr 1
+n1 = knownNat
+
 n8 :: NatRepr 8
 n8 = knownNat
 

@@ -8,6 +8,7 @@ module Reopt.Memory
   , emptyMemory
   , insertMemSegment
   , memSegments
+  , memAsWord64le
   , executableSegments
   , addrHasPermissions
   , isCodePointer
@@ -62,6 +63,9 @@ data MemSegment w = MemSegment { memBase :: w
 isExecutable :: MemSegment w -> Bool
 isExecutable s = (memFlags s `hasPermissions` pf_x)
 
+instance (Integral w, Show w) => Show (MemSegment w) where
+  show = show . ppMemSegment
+
 -- | Pretty print a memory segment.
 ppMemSegment :: (Integral w, Show w) => MemSegment w -> Doc
 ppMemSegment ms =
@@ -70,17 +74,37 @@ ppMemSegment ms =
                   , text "size =" <+>  text (showHex (BS.length (memBytes ms)) "")
                   ]
 
--- | Project segment into 64-bit words with least-significant-bit first.
-segmentAsWord64le :: MemSegment w -> [Word64]
-segmentAsWord64le s = go (BSL.fromChunks [memBytes s])
-  where go b | BSL.length b >= 8 =
-          case runGetOrFail getWord64le b of
-            Left{} -> error "internal error in segmentAsWord64le"
-            Right (b',_, w) -> w:go b'
-        go _ = []
+lsbWord64FromByteString :: BS.ByteString -> Word64
+lsbWord64FromByteString b =
+        w64At 7
+    .|. w64At 6
+    .|. w64At 5
+    .|. w64At 4
+    .|. w64At 3
+    .|. w64At 2
+    .|. w64At 1
+    .|. w64At 0
+  where w64At :: Int -> Word64
+        w64At i = fromIntegral (b `BS.index` i) `shiftL` (8*i)
 
-instance (Integral w, Show w) => Show (MemSegment w) where
-  show = show . ppMemSegment
+-- | Return list of aligned word 64s in the memory segments.
+segmentAsWord64le :: Integral w => MemSegment w -> [Word64]
+segmentAsWord64le s = go base (memBytes s) cnt
+  where base :: Int
+        base = fromIntegral (memBase s) .&. 0x7
+        cnt = (BS.length (memBytes s) - base) `shiftR` 3
+        go _ _ 0 = []
+        go o b c = lsbWord64FromByteString s : go (o+8) b' (c-1)
+          where (s,b') = BS.splitAt 8 b
+
+-- | Returns an interval representing the range of addresses for the segment
+-- if it is non-empty.
+memSegmentInterval :: (Eq w, Num w) => MemSegment w -> Maybe (IMap.Interval w)
+memSegmentInterval s
+    | sz == 0 = Nothing
+    | otherwise = Just $ IMap.Interval base (base + sz - 1)
+  where base = memBase s
+        sz = fromIntegral $ BS.length (memBytes s)
 
 ------------------------------------------------------------------------
 -- Memory
@@ -103,18 +127,13 @@ emptyMemory = Memory IMap.empty
 memSegments :: Memory w -> [MemSegment w]
 memSegments (Memory m) = Fold.toList m
 
+-- | Return list of words in the memory
+memAsWord64le :: Integral w => Memory w -> [Word64]
+memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
+
 -- | Get executable segments.
 executableSegments :: Memory w -> [MemSegment w]
 executableSegments = filter isExecutable . memSegments
-
--- | Returns an interval representing the range of addresses for the segment
--- if it is non-empty.
-memSegmentInterval :: (Eq w, Num w) => MemSegment w -> Maybe (IMap.Interval w)
-memSegmentInterval s
-    | sz == 0 = Nothing
-    | otherwise = Just $ IMap.Interval base (base + sz - 1)
-  where base = memBase s
-        sz = fromIntegral $ BS.length (memBytes s)
 
 -- | Insert segment into memory or fail if this overlaps with another
 -- segment in memory.
@@ -144,7 +163,7 @@ isCodePointer :: Memory Word64 -> Word64 -> Bool
 isCodePointer mem val = addrHasPermissions val pf_x mem
 
 ------------------------------------------------------------------------
--- MemReader
+-- MemStream
 
 data MemStream w = MS { msNext :: !BS.ByteString
                       , msMem  :: !(Memory w)
