@@ -627,27 +627,30 @@ getX87Offset i = do
       return (top - i)
     _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
 
+readLoc :: StmtLoc tp -> X86Generator (Expr tp)
+readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
 
 getLoc :: ImpLocation tp -> X86Generator (Expr tp)
 getLoc l0 =
   case l0 of
     S.MemoryAddr w tp -> do
       addr <- eval w
-      ValueExpr . AssignedValue <$> addAssignment (Read (MemLoc addr tp))
-
+      readLoc (MemLoc addr tp)
     S.Register r ->
       case r of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
        N.SegmentReg {}
-         | r == N.fs -> ValueExpr . AssignedValue <$> addAssignment (Read FS)
-         | r == N.gs -> ValueExpr . AssignedValue <$> addAssignment (Read GS)
+         | r == N.fs -> readLoc FS
+         | r == N.gs -> readLoc GS
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
        -- S.MMXReg {} -> do
        --   e <- modState $ ValueExpr <$> use (register r)
        --   ValueExpr <$> eval (S.bvTrunc knownNat e)
+       N.X87PC ->  readLoc X87_PC
+       N.X87RC ->  readLoc X87_RC
        _ -> modState $ ValueExpr <$> use (register r)
 
     S.LowerHalf l -> lowerHalf <$> getLoc l
@@ -738,6 +741,8 @@ setLoc loc v0 =
              -- Otherwise registers are 0.
              | otherwise ->
                  fail $ "On x86-64 registers other than fs and gs may not be set."
+           N.X87PC -> addStmt $ Write X87_PC v
+           N.X87RC -> addStmt $ Write X87_RC v
            -- FIXME: sort this out
            -- S.MMXReg {} -> do
            --   ext_v <- evalApp (MMXExtend v)

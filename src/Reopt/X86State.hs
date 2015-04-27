@@ -196,8 +196,6 @@ register reg =
       N.X87TagReg n     -> x87TagWords . idx n
       N.X87FPUReg n     -> x87Regs . idx n
       N.XMMReg n        -> xmmRegs . idx n
-      -- X87PC
-      -- X87RC
       -- SegmentReg
       -- DebugReg
       -- ControlReg

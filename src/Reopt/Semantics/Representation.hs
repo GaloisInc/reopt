@@ -274,13 +274,40 @@ data StmtLoc tp where
   FS :: StmtLoc (BVType 16)
   GS :: StmtLoc (BVType 16)
 
+  -- X87 precision control field.  Values are:
+  -- 00 Single Precision (24 bits)
+  -- 01 Reserved
+  -- 10 Double Precision (53 bits)
+  -- 11 Double Extended Precision (64 bits)
+  X87_PC :: StmtLoc (BVType 2)
+
+  -- X87 rounding control field.  Values are:
+  --
+  -- 00 Round to nearest (even)
+  -- Rounded result is the closest to the infinitely precise result. If two
+  -- values are equally close, the result is the even value (that is, the one
+  -- with the least-significant bit of zero). Default
+  --
+  -- 01 Round down (toward −∞)
+  -- Rounded result is closest to but no greater than the infinitely precise result.
+  --
+  -- 10 Round up (toward +∞)
+  -- Rounded result is closest to but no less than the infinitely precise result.
+  --
+  -- 11 Round toward zero (Truncate)
+  -- Rounded result is closest to but no greater in absolute value than the
+  -- infinitely precise result.
+  X87_RC :: StmtLoc (BVType 2)
+
+
 stmtLocType :: StmtLoc tp -> TypeRepr tp
 stmtLocType (MemLoc _ tp) = tp
 stmtLocType ControlLoc{} = knownType
 stmtLocType DebugLoc{}   = knownType
 stmtLocType FS = knownType
 stmtLocType GS = knownType
-
+stmtLocType X87_PC = knownType
+stmtLocType X87_RC = knownType
 
 instance Pretty (StmtLoc tp) where
   pretty (MemLoc a _) = text "*" <> ppValue 11 a
@@ -288,6 +315,8 @@ instance Pretty (StmtLoc tp) where
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
   pretty GS = text "gs"
+  pretty X87_PC = text "x87_pc"
+  pretty X87_RC = text "x87_rc"
 
 ------------------------------------------------------------------------
 -- Stmt
