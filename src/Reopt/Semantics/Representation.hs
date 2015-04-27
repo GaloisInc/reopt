@@ -28,11 +28,15 @@ module Reopt.Semantics.Representation
   , insertBlocksForCode
   , traverseBlocks
   , traverseBlockAndChildren
+  , findBlock
+  , blockNextStates
     -- * Block level declarations
   , BlockLabel(..)
   , blockParent
   , Block(..)
   , CodeAddr
+  , hasCallComment
+  , hasRetComment
     -- * Stmt level declarations
   , Stmt(..)
   , StmtLoc(..)
@@ -47,6 +51,7 @@ module Reopt.Semantics.Representation
   , valueAsApp
   , valueType
   , valueWidth
+  , asBaseOffset
   , mkLit
   , bvValue
   , ppValue
@@ -140,6 +145,19 @@ insertBlocksForCode start end bs = execState $ do
   modify $ \cfg -> foldl' (flip insertBlock) cfg bs
   cfgBlockRanges %= Map.insert start end
 
+-- | Return block with given label.
+findBlock :: CFG -> BlockLabel -> Maybe Block
+findBlock g l = Map.lookup l (g^.cfgBlocks)
+
+-- | Return next states for block.
+blockNextStates :: CFG -> Block -> [X86State Value]
+blockNextStates g b =
+  case blockTerm b of
+    FetchAndExecute s -> [s]
+    Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
+      where Just x = findBlock g x_lbl
+            Just y = findBlock g y_lbl
+
 instance Pretty CFG where
   pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
 
@@ -207,9 +225,12 @@ blockParent :: BlockLabel -> CodeAddr
 blockParent (DecompiledBlock v)  = v
 blockParent (GeneratedBlock v _) = v
 
+instance Show BlockLabel where
+  show l = show (pretty l)
+
 instance Pretty BlockLabel where
-  pretty (DecompiledBlock a)   | a >= 0 = text ("addr_" ++ showHex a "")
-  pretty (GeneratedBlock p w)  | p >= 0 = text ("label_" ++ showHex p "_" ++ show w)
+  pretty (DecompiledBlock a)   | a >= 0 = text ("block_" ++ showHex a "")
+  pretty (GeneratedBlock p w)  | p >= 0 = text ("block_" ++ showHex p "_" ++ show w)
 
 ------------------------------------------------------------------------
 -- Block
@@ -230,6 +251,18 @@ instance Pretty Block where
   pretty b = do
     pretty (blockLabel b) <> text ":" <$$>
       indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
+
+-- | Returns true if block has a call comment.
+hasCallComment :: Block -> Bool
+hasCallComment b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "call" `isInfixOf` s
+        isCallComment _ = False
+
+-- | Returns true if block has a ret comment.
+hasRetComment :: Block -> Bool
+hasRetComment b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "ret " `isSuffixOf` s
+        isCallComment _ = False
 
 ------------------------------------------------------------------------
 -- Loctions a statement may need to read or write to.
@@ -412,6 +445,11 @@ valueWidth v =
 valueAsApp :: Value tp -> Maybe (App Value tp)
 valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
 valueAsApp _ = Nothing
+
+asBaseOffset :: Value (BVType 64) -> (Value (BVType 64), Integer)
+asBaseOffset x
+  | Just (BVAdd _ x_base (BVValue _  x_off)) <- valueAsApp x = (x_base, x_off)
+  | otherwise = (x,0)
 
 mkLit :: NatRepr n -> Integer -> Value (BVType n)
 mkLit n v = BVValue n (v .&. mask)

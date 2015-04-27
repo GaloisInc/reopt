@@ -96,13 +96,14 @@ push v = do old_sp <- get rsp
        sz = bv_width v
 
 pop :: IsLocationBV m n => NatRepr n -> m (Value m (BVType n))
-pop sz = do old_sp <- get rsp
-            let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
-                new_sp  = old_sp `bvAdd` delta
-                sp_addr = mkBVAddr sz old_sp
-            v   <- get sp_addr
-            rsp .= new_sp
-            return v
+pop sz = do
+  old_sp <- get rsp
+  let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
+      new_sp  = old_sp `bvAdd` delta
+      sp_addr = mkBVAddr sz old_sp
+  v   <- get sp_addr
+  rsp .= new_sp
+  return v
 
 -- ** Condition codes
 

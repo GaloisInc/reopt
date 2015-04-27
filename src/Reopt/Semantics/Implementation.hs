@@ -50,14 +50,10 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
-import           Data.Set (Set)
-import qualified Data.Set as Set
-import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 
-import           Debug.Trace
 import qualified Flexdis86 as Flexdis
 import           Reopt.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
@@ -114,10 +110,6 @@ asBVLit :: Expr tp -> Maybe Integer
 asBVLit (ValueExpr (BVValue _ v)) = Just v
 asBVLit _ = Nothing
 
-asBVSLit :: (1 <= w) => Expr (BVType w) -> Maybe Integer
-asBVSLit (ValueExpr (BVValue w v)) = Just (toSigned w v)
-asBVSLit _ = Nothing
-
 instance S.IsValue Expr where
 
   bv_width = exprWidth
@@ -147,6 +139,7 @@ instance S.IsValue Expr where
     | Just (BVAdd w x_base (asBVLit -> Just x_off)) <- asApp x
     , Just y_off <- asBVLit y
     = S.bvAdd x_base (bvLit w (x_off + y_off))
+
     | Just (BVAdd w y_base (asBVLit -> Just y_off)) <- asApp y
     , Just x_off <- asBVLit x
     = S.bvAdd y_base (bvLit w (x_off + y_off))
@@ -224,8 +217,11 @@ instance S.IsValue Expr where
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
   -- bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
-  bvShr x y = app $ BVShr (exprWidth x) x y
+  bvShr x y
+    | Just 0 <- asBVLit y = x
+    | otherwise = app $ BVShr (exprWidth x) x y
   bvSar x y = app $ BVSar (exprWidth x) x y
+
   bvShl x y
     | Just 0 <- asBVLit y = x
 
@@ -233,6 +229,12 @@ instance S.IsValue Expr where
     , Just yv <- asBVLit y =
       assert (yv <= toInteger (maxBound :: Int)) $
         bvLit (exprWidth x) (xv `shiftL` fromInteger yv)
+
+      -- Replace "(x >> c) << c" with (x .&. - 2^c)
+    | Just yv <- asBVLit y
+    , Just (BVShr w x_base (asBVLit -> Just x_shft)) <- asApp x
+    , x_shft == yv =
+      x_base S..&. bvLit w (negate (2^x_shft) ::Integer)
 
     | otherwise = app $ BVShl (exprWidth x) x y
 

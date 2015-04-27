@@ -49,6 +49,7 @@ import Reopt.AbsState
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
+import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types
 
 ------------------------------------------------------------------------
@@ -65,6 +66,7 @@ setAbsIP a = absX86State . curIP .~ abstractSingleton knownNat (toInteger a)
 defBlockState :: CodeAddr -> AbsBlockState
 defBlockState addr =
   top & setAbsIP addr
+      & absX86State . register N.rsp .~ concreteStackOffset 0
       & absX86State . x87TopReg .~ abstractSingleton knownNat 7
 
 emptyAbsState :: CodeAddr -> AbsState
@@ -208,6 +210,7 @@ transferStmt stmt =
       modify $ addAssignment a
     Write (MemLoc addr _) v -> do
       regs <- get
+      put $ addMemWrite addr v regs
       lift $ recordWrite regs addr v
     _ -> return ()
 
@@ -237,16 +240,16 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
                  -> MapF Assignment AbsValue
         insBlock b r0 m0 =
             case blockTerm b of
-              Branch _ lb rb ->
-                insBlock (findBlock g lb) r $
-                insBlock (findBlock g rb) r $
-                m
+              Branch _ lb rb -> do
+                let Just l = findBlock g lb
+                let Just r = findBlock g rb
+                insBlock l final $
+                  insBlock r final $
+                  m
               FetchAndExecute _ -> m
 
-          where r = runIdentity $ transferStmts r0 (blockStmts b)
-                m = MapF.union (r^.absAssignments) m0
-
-
+          where final = runIdentity $ transferStmts r0 (blockStmts b)
+                m = MapF.union (final^.absAssignments) m0
 
 ------------------------------------------------------------------------
 -- Transfer functions
@@ -255,13 +258,8 @@ instance TransferMonad Identity where
   recordWrite _ _ _ = return ()
 
 instance TransferMonad (State InterpState) where
-  recordWrite regs addr v
+  recordWrite regs _addr v
     | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64)) = do
-      let block_addr = absInitial regs^.absX86State^.curIP
-      case transferValue regs addr of
-        StackOffset _ -> return ()
-        AbsValue _ -> return ()
-        TopV -> trace ("Write to top at " ++ show (pretty block_addr)) return ()
       case concretize (transferValue regs v) of
         Nothing  -> return ()
         Just vs1 -> do
@@ -314,10 +312,6 @@ doMaybe m n j = do
     Nothing -> return n
     Just a -> j a
 
-findBlock :: CFG -> BlockLabel -> Block
-findBlock g l = b
-  where Just b = g^.cfgBlocks^.at l
-
 -- Check floating point top.
 getAbsX87Top :: Monad m => AbsBlockState -> m Int
 getAbsX87Top abst =
@@ -340,8 +334,10 @@ transfer addr = do
         case blockTerm b of
           Branch _ lb rb -> do
             g <- use cfg
-            goBlock (findBlock g lb) regs'
-            goBlock (findBlock g rb) regs'
+            let Just l = findBlock g lb
+            let Just r = findBlock g rb
+            goBlock l regs'
+            goBlock r regs'
 
           FetchAndExecute s' -> do
             let abst = finalAbsBlockState regs' s'
@@ -378,10 +374,10 @@ data FinalCFG = FinalCFG { finalCFG :: !CFG
 
 
 cfgFromAddress :: Memory Word64
-                   -- ^ Memory to use when decoding instructions.
-                -> CodeAddr
-                   -- ^ Location to start disassembler form.
-                -> FinalCFG
+                  -- ^ Memory to use when decoding instructions.
+               -> CodeAddr
+                  -- ^ Location to start disassembler form.
+               -> FinalCFG
 cfgFromAddress mem start = r
   where
     s0 = emptyInterpState mem start

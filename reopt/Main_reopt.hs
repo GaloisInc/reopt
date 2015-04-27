@@ -26,6 +26,7 @@ import           Reopt.AbsState
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
+import System.IO
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import Data.Parameterized.Map (MapF)
@@ -248,11 +249,6 @@ showCFG path = do
       print (pretty b)
 -}
 
-hasCall :: Block -> Bool
-hasCall b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `isInfixOf` s
-        isCallComment _ = False
-
 ------------------------------------------------------------------------
 -- Function determination
 
@@ -267,8 +263,6 @@ type AbsStack = Map Int64 Word64
 
 emptyAbsStack :: AbsStack
 emptyAbsStack = Map.empty
-
-
 
 
 ------------------------------------------------------------------------
@@ -299,9 +293,6 @@ decompiledBlocks g =
   [ b | b <- Map.elems (g^.cfgBlocks)
       , DecompiledBlock _ <- [blockLabel b]
       ]
-
-findBlock :: CFG -> BlockLabel -> Maybe Block
-findBlock g l = Map.lookup l (g^.cfgBlocks)
 
 -- | Maps blocks to set of concrete addresses they may call.
 type CallState = Map CodeAddr (Set CodeAddr)
@@ -365,26 +356,27 @@ getTargets l m = foldl' Set.union Set.empty $
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
+printSP :: CFG -> Block -> IO ()
+printSP g b = do
+  let next = fmap (view (register N.rsp)) $ blockNextStates g b
+  case nub next of
+    [] -> hPutStrLn stderr $ "No rsp values for " ++ show (blockLabel b)
+    _:_:_ -> hPutStrLn stderr $ "Multiple rsp values for " ++ show (blockLabel b)
+    [rsp_val]
+      | Initial v <- rsp_val
+      , Just Refl <- testEquality v N.rsp ->
+        return ()
+      | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
+      , Just Refl <- testEquality r N.rsp -> do
+        return ()
+      | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
+      , Just Refl <- testEquality r N.rbp -> do
+        return ()
+      | otherwise -> do
+        hPutStrLn stderr $ "Block " ++ show (pretty (blockLabel b))
+        hPutStrLn stderr $ "RSP = " ++ show (pretty rsp_val)
+
 {-
-printSP :: Block -> IO ()
-printSP b = do
-  case blockTerm b of
-    Branch _ _ _ -> return ()
-    FetchAndExecute s -> do
-      let rsp_val = s^.register N.rsp
-      case rsp_val of
-        _ | Initial v <- rsp_val
-          , Just Refl <- testEquality v N.rsp ->
-            return ()
-        _ | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
-          , Just Refl <- testEquality r N.rsp -> do
-            return ()
-        _ | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
-          , Just Refl <- testEquality r N.rbp -> do
-            return ()
-          | otherwise -> do
-            print $ "Block " ++ show (pretty (blockLabel b))
-            print $ "RSP = " ++ show (pretty rsp_val)
       let rbp_val = s^.register N.rbp
       case rbp_val of
            -- This leaves the base pointer unchanged.  It is likely an
@@ -415,22 +407,6 @@ printSP b = do
             print $ "RBP = " ++ show (pretty rbp_val)
 -}
 
-{-
-printIP :: Block -> IO ()
-printIP b =
-    case blockTerm b of
-      Branch _ _ _ -> return ()
-      FetchAndExecute s ->
-        case s^.cur of
-          Initial a -> do
-            print $ "Block " ++ show (pretty (blockLabel b))
-            print $ "Next IP " ++ show a
-          BVValue _ _ -> return ()
-          AssignedValue a -> do
-            print $ "Block " ++ show (pretty (blockLabel b))
-            print $ "Next IP: " ++ show (pretty a)
--}
-
 ppStmtAndAbs :: MapF Assignment AbsValue -> Stmt -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
@@ -442,9 +418,6 @@ ppStmtAndAbs m stmt =
         Nothing -> pretty a
     _ -> pretty stmt
 
-
-ppTermStmtAndAbs :: MapF Assignment AbsValue -> TermStmt -> Doc
-ppTermStmtAndAbs = undefined
 
 ppBlockAndAbs :: MapF Assignment AbsValue -> Block -> Doc
 ppBlockAndAbs m b =
@@ -471,10 +444,40 @@ showCFGAndAI path = do
 
               , ppBlockAndAbs amap b
               ]
-
   print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
+  forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
+    case blockLabel b of
+      DecompiledBlock{} -> showReturnBlock g b
+      _ -> return ()
 
+-- | This is designed to detect returns from the X86 representation.
+-- It pattern matches on a X86State to detect if it read its instruction
+-- pointer from an address that is 8 below the stack pointer.
+stateEndsWithRet :: X86State Value -> Bool
+stateEndsWithRet s = do
+  let next_ip = s^.register N.rip
+      next_sp = s^.register N.rsp
+  case () of
+    _ | AssignedValue (Assignment _ (Read (MemLoc a _))) <- next_ip
+      , (ip_base, ip_off) <- asBaseOffset a
+      , (sp_base, sp_off) <- asBaseOffset next_sp ->
+        ip_base == sp_base && ip_off + 8 == sp_off
+    _ -> False
 
+showReturnBlock :: CFG -> Block -> IO ()
+showReturnBlock g b = do
+  case blockNextStates g b of
+    [s] -> do
+      let lbl = blockLabel b
+      case (stateEndsWithRet s, hasRetComment b) of
+        (True, True) -> do
+          hPutStrLn stderr $ "Return Block " ++ showHex (blockParent lbl) ""
+        (True, False) -> do
+          hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (blockParent lbl) ""
+        (False, True) -> do
+          hPutStrLn stderr $ "MISSING return Block " ++ showHex (blockParent lbl) ""
+        _ -> return ()
+    _ -> return ()
 main :: IO ()
 main = do
   args <- getCommandLineArgs
