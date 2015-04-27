@@ -198,10 +198,7 @@ getBlock addr = do
 ------------------------------------------------------------------------
 -- Transfer stmts
 
-class (Applicative m, Monad m) => TransferMonad m where
-  recordWrite :: AbsRegs -> Value (BVType 64) -> Value tp -> m ()
-
-transferStmt :: TransferMonad m
+transferStmt :: Monad m
              => Stmt
              -> StateT AbsRegs m ()
 transferStmt stmt =
@@ -211,10 +208,23 @@ transferStmt stmt =
     Write (MemLoc addr _) v -> do
       regs <- get
       put $ addMemWrite addr v regs
-      lift $ recordWrite regs addr v
     _ -> return ()
 
-transferStmts :: TransferMonad m => AbsRegs -> [Stmt] -> m AbsRegs
+recordWriteStmt :: AbsRegs -> Stmt -> State InterpState ()
+recordWriteStmt regs (Write (MemLoc _addr _) v)
+  | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
+  , Just vs1 <- concretize (transferValue regs v) = do
+    mem <- gets memory
+    let vs2 = map fromInteger (Set.toList vs1)
+    forM_ vs2 $ \val -> do
+      alreadyInMem <- uses codePointersInMem $ Set.member val
+      when (isCodePointer mem val && not alreadyInMem) $ do
+        codePointersInMem %= Set.insert val
+        absState %= Map.delete val
+        frontier %= Set.insert val
+recordWriteStmt _ _ = return ()
+
+transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
 finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
@@ -253,26 +263,6 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
 
 ------------------------------------------------------------------------
 -- Transfer functions
-
-instance TransferMonad Identity where
-  recordWrite _ _ _ = return ()
-
-instance TransferMonad (State InterpState) where
-  recordWrite regs _addr v
-    | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64)) = do
-      case concretize (transferValue regs v) of
-        Nothing  -> return ()
-        Just vs1 -> do
-          mem <- gets memory
-          let vs2 = map fromInteger (Set.toList vs1)
-          forM_ vs2 $ \val -> do
-            alreadyInMem <- uses codePointersInMem $ Set.member val
-            when (isCodePointer mem val && not alreadyInMem) $ do
-              codePointersInMem %= Set.insert val
-              absState %= Map.delete val
-              frontier %= Set.insert val
-    | otherwise = return ()
-
 
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
@@ -321,6 +311,41 @@ hasCall b = any isCallComment (blockStmts b)
   where isCallComment (Comment s) = "call" `isInfixOf` s
         isCallComment _ = False
 
+-- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
+-- with a write having the given type.
+isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
+isWriteTo (Write (MemLoc a _) val) expected tp
+  | Just _ <- testEquality a expected
+  , Just Refl <- testEquality (valueType val) tp =
+    Just val
+isWriteTo _ _ _ = Nothing
+
+-- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
+isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodePointerWriteTo mem s sp
+  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
+  , isCodePointer mem (fromInteger val)
+  = Just (fromInteger val)
+isCodePointerWriteTo _ _ _ = Nothing
+
+-- | Returns true if it looks like block ends with a call.
+checkBlockCall :: Memory Word64
+               -> AbsRegs
+               -> [Stmt]
+               -> X86State Value
+               -> State InterpState [Word64]
+checkBlockCall mem regs stmts s = go (reverse stmts)
+  where next_sp = s^.register N.rsp
+        go (stmt:r)
+          | Just ret <- isCodePointerWriteTo mem stmt next_sp = do
+            mapM_ (recordWriteStmt regs) r
+            return [ret]
+        go r@(Write{}:_) = do
+          mapM_ (recordWriteStmt regs) r
+          return []
+        go (_:r) = go r
+        go [] = return []
+
 transfer :: CodeAddr -> State InterpState ()
 transfer addr = do
   let goBlock :: Block   -- ^ Block to start from.
@@ -330,6 +355,7 @@ transfer addr = do
         regs' <- transferStmts regs (blockStmts b)
         case blockTerm b of
           Branch _ lb rb -> do
+            mapM_ (recordWriteStmt regs') (blockStmts b)
             g <- use cfg
             let Just l = findBlock g lb
             let Just r = findBlock g rb
@@ -337,24 +363,15 @@ transfer addr = do
             goBlock r regs'
 
           FetchAndExecute s' -> do
+            mem <- gets memory
+            rets <- checkBlockCall mem regs' (blockStmts b) s'
             let abst = finalAbsBlockState regs' s'
             -- Look for new ips.
-            case concretize (abst^.absX86State^.curIP) of
-              Nothing  -> do
-                case s'^.curIP of
-                  AssignedValue (assignRhs -> Read (MemLoc _ _)) -> do
-                    -- we hit top, so give up
-                    return ()
-                  _ | hasCall b -> do
-                    -- This likely ends with a call.
-                    return ()
-
-                  next -> assert (addr >= 0) $ do
-                    trace ("INVALID IP " ++ showHex addr "\n" ++ show (pretty next)) $ do
-                    -- we hit top, so give up
-                    return ()
-              Just ips -> do
-                mapM_ (mergeBlock abst) (fmap fromInteger (Set.toList ips))
+            let ips :: [Word64]
+                ips = case concretize (abst^.absX86State^.curIP) of
+                        Nothing -> []
+                        Just ips' -> fmap fromInteger (Set.toList ips')
+            mapM_ (mergeBlock abst) (rets ++ ips)
 
   doMaybe (getBlock addr) () $ \root -> do
     ab <- getAbsBlockState addr

@@ -43,6 +43,7 @@ import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.Monad (Type(..))
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
+import           Reopt.Semantics.Types
 
 ------------------------------------------------------------------------
 -- Args
@@ -470,15 +471,29 @@ stateEndsWithRet s = do
         ip_base == sp_base && ip_off + 8 == sp_off
     _ -> False
 
+-- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
+-- with a write having the given type.
+isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
+isWriteTo (Write (MemLoc a _) val) expected tp
+  | Just _ <- testEquality a expected
+  , Just Refl <- testEquality (valueType val) tp =
+    Just val
+isWriteTo _ _ _ = Nothing
+
+-- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
+isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodePointerWriteTo mem s sp
+  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
+  , isCodePointer mem (fromInteger val)
+  = Just (fromInteger val)
+isCodePointerWriteTo _ _ _ = Nothing
+
 -- | Returns true if it looks like block ends with a call.
 blockContainsCall :: Memory Word64 -> Block -> X86State Value -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.register N.rsp
       go [] = False
-      go (Write (MemLoc a _) (BVValue _ val):_)
-        | Just Refl <- testEquality a next_sp
-        , isCodePointer mem (fromInteger val) =
-          True
+      go (stmt:_) | Just _ <- isCodePointerWriteTo mem stmt next_sp = True
       go (Write _ _:_) = False
       go (_:r) = go r
    in go (reverse (blockStmts b))
