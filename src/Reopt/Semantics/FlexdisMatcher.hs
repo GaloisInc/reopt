@@ -280,9 +280,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ mkBinop $ \loc val -> do
-                  trace "xorpd loc" $ do
                   l <- getBVLocation loc n128
-                  trace "xorpd val" $ do
                   v <- getBVValue val n128
                   modify (`bvXor` v) l
               , mk "cvttsd2si" $ mkBinop $ \loc val -> do
@@ -520,7 +518,7 @@ fpUnopOrRegBinop f args@(_, vs)
 
 -- FIXME: do something more interesting here than 'Maybe'
 execInstruction :: FullSemantics m => F.InstructionInstance -> Maybe (m ())
-execInstruction ii = trace ("II " ++ show ii) $
+execInstruction ii =
   case M.lookup (F.iiOp ii) semanticsMap of
     Just (SemanticsOp f) -> Just $ f (F.iiLockPrefix ii, F.iiArgs ii)
     _                    -> trace ("Unsupported instruction: " ++ show ii) Nothing

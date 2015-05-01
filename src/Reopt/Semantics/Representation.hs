@@ -888,7 +888,7 @@ traverseApp :: Applicative m
             => (forall u . f u -> m (g u))
             -> App f tp
             -> m (App g tp)
-traverseApp = $(structuralTraversal $[t|App|])
+traverseApp = $(structuralTraversal [t|App|] [])
 
 mapApp :: (forall u . f u -> g u)
        -> App f tp

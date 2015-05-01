@@ -21,6 +21,7 @@ module Reopt.Semantics.StateNames where
 
 
 import Data.Parameterized.Classes
+import qualified Data.Vector as V
 import GHC.TypeLits
 
 import qualified Flexdis86 as F
@@ -108,6 +109,7 @@ data RegisterName cl where
 
   -- FIXME: These are currently read-only
   X87ControlReg :: !Int -> RegisterName X87_ControlMask
+
   X87PC      :: RegisterName X87_Control
   X87RC      :: RegisterName X87_Control
 
@@ -150,13 +152,18 @@ instance ShowF RegisterName where
 
 instance Show (RegisterName cl) where
   show IPReg          = "rip"
-  show (GPReg n)      = gpNames !! n
-  show (SegmentReg n) = segmentNames !! n
-  show (FlagReg n)    = flagNames !! n
+  show (GPReg n)      = nm
+    where Just nm = gpNames V.!? n
+  show (SegmentReg n) = nm
+    where Just nm = segmentNames V.!? n
+  show (FlagReg n)    = nm
+    where Just nm = flagNames V.!? n
   show (ControlReg n) = "cr" ++ show n
-  show (X87StatusReg n) = x87StatusNames !! n
+  show (X87StatusReg n) = nm
+    where Just nm = x87StatusNames V.!? n
   show X87TopReg      = "x87top"
-  show (X87ControlReg n)  = x87ControlNames !! n
+  show (X87ControlReg n)  = nm
+    where Just nm = x87ControlNames V.!? n
   show X87PC          = "pc"
   show X87RC          = "rc"
   show (X87TagReg n)  = "tag" ++ show n
@@ -295,9 +302,10 @@ rdi = GPReg 7
 gpCount :: Int
 gpCount = 16
 
-gpNames :: [String]
-gpNames = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
-          ++ map ((++) "r" . show) [(8 :: Int) .. 15]
+gpNames :: V.Vector String
+gpNames = V.fromList $
+  ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+  ++ map ((++) "r" . show) [(8 :: Int) .. 15]
 
 -- | Segments
 es, cs, ss, ds, fs, gs :: RegisterName Segment
@@ -312,8 +320,8 @@ instance Eq (RegisterName Segment) where
   (SegmentReg n) == (SegmentReg n') = n == n'
 
 
-segmentNames :: [String]
-segmentNames = ["es", "cs", "ss", "ds", "fs", "gs"]
+segmentNames :: V.Vector String
+segmentNames = V.fromList ["es", "cs", "ss", "ds", "fs", "gs"]
 
 -- | Flags
 cf, pf, af, zf, sf, tf, iflag, df, oflag :: RegisterName Flag
@@ -327,9 +335,11 @@ iflag = FlagReg 9
 df    = FlagReg 10
 oflag = FlagReg 11
 
-flagNames :: [String]
-flagNames = ["cf", "RESERVED", "pf", "RESERVED", "af"
-            , "RESERVED", "zf", "sf", "tf", "if", "df", "of"]
+flagNames :: V.Vector String
+flagNames = V.fromList
+  [ "cf", "RESERVED", "pf", "RESERVED", "af", "RESERVED"
+  , "zf", "sf",       "tf", "if",       "df", "of"
+  ]
 
 -- FIXME: missing the system flags
 flagBitPacking :: BitPacking 64
@@ -379,8 +389,11 @@ x87c1 = X87StatusReg 9
 x87c2 = X87StatusReg 10
 x87c3 = X87StatusReg 14
 
-x87StatusNames :: [String]
-x87StatusNames = ["ie", "de", "ze", "oe", "ue", "pe", "ef", "es", "c0", "c1", "c2", "c3"]
+x87StatusNames :: V.Vector String
+x87StatusNames = V.fromList $
+  [ "ie", "de", "ze", "oe",       "ue",       "pe",       "ef", "es"
+  , "c0", "c1", "c2", "RESERVED", "RESERVED", "RESERVED", "c3", "RESERVED"
+  ]
 
 -- FIXME: what about Busy bit
 x87StatusBitPacking :: BitPacking 16
@@ -402,10 +415,11 @@ x87StatusBitPacking = BitPacking knownNat $ flags
             , RegisterBit x87c3 (knownNat :: NatRepr 14)
             ]
 
-x87ControlNames :: [String]
-x87ControlNames = ["im", "dm", "zm", "om", "um", "pm"]
-                  ++ replicate 6 "RESERVED"
-                  ++ ["x"]
+x87ControlNames :: V.Vector String
+x87ControlNames = V.fromList $
+  ["im", "dm", "zm", "om", "um", "pm"]
+  ++ replicate 6 "RESERVED"
+  ++ ["x"]
 
 x87im, x87dm, x87zm, x87om, x87um, x87pm, x87x :: RegisterName X87_ControlMask
 x87im = X87ControlReg 0

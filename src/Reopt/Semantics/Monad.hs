@@ -558,8 +558,8 @@ type Pred m = Value m BoolType
 type MLocation m = Location (Value m (BVType 64))
 
 data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException
-                                                         -- | AlignmentCheck
-                    deriving Show
+                                                    -- | AlignmentCheck
+  deriving Show
 
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
@@ -567,6 +567,7 @@ class ( Applicative m
       , Monad m
       , IsValue (Value m)
       ) => Semantics m where
+
   -- | Create a fresh "undefined" value.
   make_undefined :: TypeRepr tp -> m (Value m tp)
 
