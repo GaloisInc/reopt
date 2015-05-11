@@ -558,7 +558,7 @@ type Pred m = Value m BoolType
 type MLocation m = Location (Value m (BVType 64))
 
 data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException
-                                                    -- | AlignmentCheck
+                                                    -- -- | AlignmentCheck
   deriving Show
 
 -- | The Semantics Monad defines all the operations needed for the x86

@@ -328,6 +328,89 @@ isCodePointerWriteTo mem s sp
   = Just (fromInteger val)
 isCodePointerWriteTo _ _ _ = Nothing
 
+-- -----------------------------------------------------------------------------
+-- Refining an abstract state based upon a condition
+
+-- FIXME: if val \notin av then we should return bottom
+refineValue :: Value tp
+               -> AbsValue tp
+               -> AbsRegs
+               -> AbsRegs
+refineValue v@(BVValue _n _val) av regs = regs
+refineValue (Initial r) av regs =
+  regs & (absInitialRegs . register r) %~ flip meet av
+refineValue (AssignedValue ass@(Assignment _ rhs)) av regs
+  -- av adds no new information
+  | av_old `leq` av = regs
+  -- av adds new information, we need to refine any parents
+  | EvalApp app <- rhs = refineApp app av' regs'
+  -- no parents, but update ass 
+  | otherwise          = regs'
+  where
+    av_old = regs ^. absAssignments ^. assignLens ass
+    av'    = meet av_old av
+    regs'  = regs & (absAssignments . assignLens ass) .~ av'
+
+refineApp :: App Value tp
+             -> AbsValue tp
+             -> AbsRegs
+             -> AbsRegs
+refineApp app av regs =
+  case app of
+   -- We specialise these to booleans for the moment
+   -- BVComplement sz v
+   --   | Just Refl <- testEquality sz n1
+   --   , Just b    <- asConcreteSingleton av ->
+   --     refineValue v (abstractSingleton n1 (1 - b)) regs
+   -- BVAnd sz l r
+   --   | Just Refl <- testEquality sz n1
+   --   , Just b    <- asConcreteSingleton av ->
+   --     let l_regs = refineValue l av regs
+   --         r_regs = refineValue r av regs
+   --     in if b == 1 then  -- both are true, so we do a meet
+   --          glb l_regs r_regs
+   --        else -- one is false, so we do a join
+   --          lub l_regs r_regs
+   --  -- basically less-than: does x - y overflow? only if x < y.
+   UsbbOverflows sz l r (BVValue _ 0)
+     | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
+   -- Mux can let us infer the condition?
+   _ -> regs
+
+refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
+refineLt tp x y b regs
+  -- y <= x
+  | b == 0     = refineValue x x_leq (refineValue y y_leq regs)
+  -- x < y case
+  | otherwise  = refineValue x x_lt (refineValue y y_lt regs)
+  where
+    x_av = transferValue regs x
+    y_av = transferValue regs y
+    (x_lt, y_lt)   = abstractLt tp x_av y_av
+    (y_leq, x_leq) = abstractLeq tp y_av x_av 
+
+-- -- FIXME: bottom
+-- refineLVal :: Simple Lens AbsRegs (AbsValue tp)
+--               -> Value tp
+--               -> AbsRegs
+--               -> AbsRegs
+-- refineLVal l (BVValue n val) regs =
+--   -- FIXME: if val \notin absinit l then we should return bottom  
+--   regs & l .~ abstractSingleton n val
+-- refineLVal l (Initial r) regs =
+--   regs & l .~ new_v & (absInitialRegs . register r) .~ new_v
+--   where
+--     abs_l  = regs ^. l
+--     abs_r  = regs ^. absInitialRegs ^. register r
+--     new_v  = meet abs_l abs_r
+-- refineLVal l (AssignedValue ass@(Assignment _ rhs)) regs =
+--   regs & l .~ new_v & (absInitialRegs .  assignLens ass) .~ new_v
+--   where
+--     abs_l  = regs ^. l
+--     abs_r  = regs ^. absInitialRegs ^. assignLens ass
+--     new_v  = meet abs_l abs_r
+
+
 -- | Returns true if it looks like block ends with a call.
 checkBlockCall :: Memory Word64
                -> AbsRegs
@@ -353,14 +436,22 @@ transfer addr = do
               -> State InterpState ()
       goBlock b regs = do
         regs' <- transferStmts regs (blockStmts b)
+        -- FIXME: we should propagate c back to the initial block, not just b
         case blockTerm b of
-          Branch _ lb rb -> do
+          Branch c lb rb -> do
             mapM_ (recordWriteStmt regs') (blockStmts b)
             g <- use cfg
             let Just l = findBlock g lb
+                l_regs = refineValue c (abstractSingleton n1 1) regs'
             let Just r = findBlock g rb
-            goBlock l regs'
-            goBlock r regs'
+                r_regs = refineValue c (abstractSingleton n1 0) regs'
+            -- We re-transfer the stmts to propagate any changes from
+            -- the above refineValue.  This could be more efficient by
+            -- tracking what (if anything) changed.  We also might
+            -- need to keep going back and forth until we reach a
+            -- fixpoint
+            goBlock l =<< transferStmts l_regs (blockStmts b)
+            goBlock r =<< transferStmts r_regs (blockStmts b)
 
           FetchAndExecute s' -> do
             mem <- gets memory

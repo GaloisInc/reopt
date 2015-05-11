@@ -35,7 +35,7 @@ module Reopt.Semantics.Implementation
        ) where
 
 import           Control.Applicative
-import Control.Exception (assert)
+import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
 import           Control.Monad.State.Strict
@@ -50,6 +50,9 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
+
+import           Unsafe.Coerce -- Only required to work around a ghc crash
+
 
 import           Data.Word
 import           Numeric (showHex)
@@ -345,18 +348,18 @@ instance S.IsValue Expr where
 
   uadc_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
-    | otherwise = app $ UadcOverflows x y c
+    | otherwise = app $ UadcOverflows (exprWidth x) x y c
   sadc_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
-    | otherwise = app $ SadcOverflows x y c
+    | otherwise = app $ SadcOverflows (exprWidth x) x y c
 
   usbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
-    | otherwise = app $ UsbbOverflows x y c
+    | otherwise = app $ UsbbOverflows (exprWidth x) x y c
 
   ssbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
-    | otherwise = app $ SsbbOverflows x y c
+    | otherwise = app $ SsbbOverflows (exprWidth x) x y c
 
   bsf x = app $ Bsf (exprWidth x) x
   bsr x = app $ Bsr (exprWidth x) x
@@ -719,7 +722,7 @@ setLoc loc v0 =
   case loc of
    S.LowerHalf (S.Register r@(N.GPReg _))
      -> do -- hack to infer that n + n ~ 64 ==> n < 64
-           (LeqProof :: LeqProof (TypeBits tp) 64) <- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
+           (LeqProof :: LeqProof (TypeBits tp) 64) <- return (unsafeCoerce (LeqProof :: LeqProof 0 0)) -- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
            zext_v <- eval $ S.uext n64 (ValueExpr v0)
            modState $ register r .= zext_v
    _ -> go loc v0

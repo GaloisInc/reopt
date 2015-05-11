@@ -14,42 +14,46 @@ module Reopt.AbsState
   , concreteStackOffset
   , concretize
   , asConcreteSingleton
+  , meet
   , AbsDomain(..)
   , AbsRegs
   , absInitialRegs
   , initAbsRegs
   , absAssignments
+  , assignLens
   , finalAbsBlockState
   , addAssignment
   , addMemWrite
   , transferValue
   , transferRHS
+  , abstractLt
+  , abstractLeq
   ) where
 
-import Control.Applicative ( (<$>) )
-import Control.Exception (assert)
-import Control.Lens
-import Control.Monad.State.Strict
-import Data.Maybe
-import Data.Map (Map)
+import           Control.Applicative ( (<$>) )
+import           Control.Exception (assert)
+import           Control.Lens
+import           Data.Maybe
+import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
-import Data.Parameterized.Map (MapF)
+import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import Data.Parameterized.NatRepr
-import Data.Parameterized.Some
-import Data.Set (Set)
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Some
+import           Data.Set (Set)
 import qualified Data.Set as Set
-import Numeric (showHex)
-import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Numeric (showHex)
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import qualified Reopt.Domains.StridedInterval as SI
+import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
-import Reopt.Semantics.Types
-import Reopt.Semantics.Representation
-import Reopt.X86State
+import           Reopt.Semantics.Types
+
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- Abstract states
-
 
 class Eq d => AbsDomain d where
   -- | The top element
@@ -90,13 +94,21 @@ data AbsValue (tp :: Type) where
   StackOffset :: !ValueSet -> AbsValue (BVType 64)
   -- | An address (doesn't constraint value precisely).
   SomeStackOffset :: AbsValue (BVType 64)
+  -- | A strided interval
+  StridedInterval :: !(SI.StridedInterval (BVType n)) -> AbsValue (BVType n)
   -- | Any value
   TopV :: AbsValue tp
+
+-- | The maximum number of values we hold in a ValueSet, after which
+-- we move to intervals
+maxSetSize :: Int
+maxSetSize = 5
 
 instance Eq (AbsValue tp) where
   AbsValue x    == AbsValue y    = x == y
   StackOffset s == StackOffset t = s == t
   SomeStackOffset          == SomeStackOffset          = True
+  StridedInterval si1 == StridedInterval si2 = si1 == si2
   TopV          == TopV          = True
   _             ==               _ = False
 
@@ -106,6 +118,7 @@ instance EqF AbsValue where
 instance Pretty (AbsValue tp) where
   pretty (AbsValue s) = ppIntegerSet s
   pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
+  pretty (StridedInterval s) = pretty s
   pretty SomeStackOffset = text "rsp_0 + ?"
   pretty TopV = text "top"
 
@@ -119,6 +132,7 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 -- known under-approximation.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (AbsValue s) = Just s
+concretize (StridedInterval s) = Just (Set.fromList (SI.toList s))
 concretize _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
@@ -148,14 +162,26 @@ instance AbsDomain (AbsValue tp) where
   joinD TopV _ = Nothing
   joinD (AbsValue old) (AbsValue new)
       | new `Set.isSubsetOf` old = Nothing
-      | Set.size r > 5 = Just TopV
+      | Set.size r > maxSetSize = Just TopV
       | otherwise = Just (AbsValue r)
     where r = Set.union old new
   joinD (StackOffset old) (StackOffset new)
       | new `Set.isSubsetOf` old = Nothing
-      | Set.size r > 5 = Just TopV
+      | Set.size r > maxSetSize = Just TopV
       | otherwise = Just (StackOffset r)
     where r = Set.union old new
+
+  -- Intervals
+  joinD v v'
+    | StridedInterval si_old <- v, StridedInterval si_new <- v'
+    , si_new `SI.isSubsetOf` si_old = Nothing
+    | StridedInterval si_old <- v, StridedInterval si_new <- v'
+      = go si_old si_new
+    | StridedInterval si <- v,  AbsValue s <- v'
+      = go si (SI.fromFoldable (type_width (SI.typ si)) s)
+    | StridedInterval si <- v', AbsValue s <- v 
+      = go si (SI.fromFoldable (type_width (SI.typ si)) s)
+    where go si1 si2 = Just $ StridedInterval (SI.lub si1 si2)
 
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
@@ -164,17 +190,42 @@ instance AbsDomain (AbsValue tp) where
 
   joinD _ _ = Just TopV
 
+meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
+meet TopV x = x
+meet x TopV = x
+-- FIXME: reuse an old value if possible?
+meet (AbsValue old) (AbsValue new) = AbsValue $ Set.intersection old new
+meet (StackOffset old) (StackOffset new) =
+  StackOffset $ Set.intersection old new
+
+-- Intervals
+meet v v'
+  | StridedInterval si_old <- v, StridedInterval si_new <- v'
+    = StridedInterval $ si_old `SI.glb` si_new
+  | StridedInterval si <- v,  AbsValue s <- v'
+    = AbsValue $ Set.filter (`SI.member` si) s
+  | StridedInterval si <- v', AbsValue s <- v
+    = AbsValue $ Set.filter (`SI.member` si) s
+
+-- Join addresses
+meet SomeStackOffset s@StackOffset{} = s
+meet s@StackOffset{} SomeStackOffset = s
+meet SomeStackOffset SomeStackOffset = SomeStackOffset
+meet _ _ = error "meet: impossible"
+
 trunc :: (v+1 <= u)
       => AbsValue (BVType u)
       -> NatRepr v
       -> AbsValue (BVType v)
 trunc (AbsValue s) w = AbsValue (Set.map (toUnsigned w) s)
+trunc (StridedInterval s) w = StridedInterval (SI.trunc s w)
 trunc (StackOffset _) _ = TopV
 trunc SomeStackOffset _ = TopV
 trunc TopV _ = TopV
 
 uext :: (u+1 <= v) => AbsValue (BVType u) -> NatRepr v -> AbsValue (BVType v)
 uext (AbsValue s) _ = AbsValue s
+uext (StridedInterval si) w = StridedInterval (si { SI.typ = BVTypeRepr w } ) -- FIXME
 uext (StackOffset _) _ = TopV
 uext SomeStackOffset _ = TopV
 uext TopV _ = TopV
@@ -183,32 +234,49 @@ bvadd :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
+-- Stacks      
 bvadd w (StackOffset s) (AbsValue t) | [o] <- Set.toList t = do
-  StackOffset $ Set.map (addOff w o) s
+  StackOffset $ Set.map (addOff w o) s  
 bvadd w (AbsValue t) (StackOffset s) | [o] <- Set.toList t = do
   StackOffset $ Set.map (addOff w o) s
+-- Strided intervals
+bvadd w v v'
+  | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
+  | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
+  where
+    go si1 si2 = StridedInterval $ SI.bvadd w si1 si2
+    
+-- the rest  
 bvadd _ StackOffset{} _ = SomeStackOffset
 bvadd _ _ StackOffset{} = SomeStackOffset
 bvadd _ SomeStackOffset _ = SomeStackOffset
 bvadd _ _ SomeStackOffset = SomeStackOffset
 bvadd _ _ _ = TopV
 
-setL :: AbsValue (BVType n)
+setL :: ([Integer] -> AbsValue (BVType n))
      -> (Set Integer -> AbsValue (BVType n))
      -> [Integer]
      -> AbsValue (BVType n)
-setL def c l | length l > 5 = def
+setL def c l | length l > maxSetSize = def l
              | otherwise = c (Set.fromList l)
 
 bvsub :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
-bvsub w (AbsValue s) (AbsValue t) = setL TopV AbsValue $ do
+bvsub w (AbsValue s) (AbsValue t) =
+  setL (StridedInterval . SI.fromFoldable w) AbsValue $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x - y))
-bvsub w (StackOffset s) (AbsValue t) = setL SomeStackOffset StackOffset $ do
+bvsub w v v'
+  | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
+  | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
+  where
+    go _si1 _si2 = TopV -- FIXME
+bvsub w (StackOffset s) (AbsValue t) = setL (const SomeStackOffset) StackOffset $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x - y))
@@ -216,17 +284,25 @@ bvsub _ StackOffset{} _ = SomeStackOffset
 bvsub _ _ StackOffset{} = TopV
 bvsub _ SomeStackOffset _ = SomeStackOffset
 bvsub _ _ SomeStackOffset = TopV
-bvsub _ TopV _ = TopV
-bvsub _ _ TopV = TopV
+bvsub _ _ _ = TopV -- Keep the pattern checker happy
+-- bvsub _ TopV _ = TopV
+-- bvsub _ _ TopV = TopV
 
 bvmul :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
-bvmul w (AbsValue s) (AbsValue t) = setL TopV AbsValue $ do
+bvmul w (AbsValue s) (AbsValue t) =
+  setL (StridedInterval . SI.fromFoldable w) AbsValue $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x * y))
+bvmul w v v'
+  | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
+  | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
+  where
+    go si1 si2 = StridedInterval $ SI.bvmul w si1 si2    
 bvmul _ _ _ = TopV
 
 ppAbsValue :: AbsValue tp -> Maybe Doc
@@ -247,6 +323,60 @@ concreteStackOffset :: Integer -> AbsValue (BVType 64)
 concreteStackOffset o = StackOffset (Set.singleton o)
 
 ------------------------------------------------------------------------
+-- Restrictions
+
+hasMaximum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
+hasMaximum tp v =
+  case v of
+   AbsValue s         -> Just (Set.findMax s)
+   StridedInterval si -> Just (SI.intervalEnd si)
+   TopV               -> Just $ case tp of BVTypeRepr n -> maxUnsigned n
+   _                  -> Nothing
+
+
+hasMinimum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
+hasMinimum tp v =
+  case v of
+   AbsValue s         -> Just (Set.findMin s)
+   StridedInterval si -> Just (SI.base si)
+   TopV               -> Just 0
+   _                  -> Nothing
+
+-- | @abstractLt x y@ refines x and y with the knowledge that @x < y@
+--
+-- For example, given {2, 3} and {2, 3, 4}, we know (only) that
+-- {2, 3} and {3, 4} because we may pick any element from either set.
+
+abstractLt :: TypeRepr tp
+              -> AbsValue tp -> AbsValue tp
+              -> (AbsValue tp, AbsValue tp)
+abstractLt _tp TopV TopV = (TopV, TopV)              
+abstractLt tp x y
+  | Just u_y <- hasMaximum tp y 
+  , Just l_x <- hasMinimum tp x
+  , BVTypeRepr n <- tp =
+    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    ( meet x (StridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
+    , meet y (StridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
+                                                     (maxUnsigned n) 1))
+abstractLt _tp x y = (x, y)
+
+-- | @abstractLeq x y@ refines x and y with the knowledge that @x <= y@
+abstractLeq :: TypeRepr tp
+               -> AbsValue tp -> AbsValue tp
+               -> (AbsValue tp, AbsValue tp)
+abstractLeq _tp TopV TopV = (TopV, TopV)
+abstractLeq tp x y
+  | Just u_y <- hasMaximum tp y 
+  , Just l_x <- hasMinimum tp x
+  , BVTypeRepr n <- tp =
+    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    ( meet x (StridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
+    , meet y (StridedInterval $ SI.mkStridedInterval tp False l_x
+                                                     (maxUnsigned n) 1))
+abstractLeq _tp x y = (x, y)
+
+------------------------------------------------------------------------
 -- AbsBlockState
 
 data StackEntry where
@@ -256,7 +386,6 @@ instance Eq StackEntry where
   StackEntry x_tp x_v == StackEntry y_tp y_v
     | Just Refl <- testEquality x_tp y_tp = x_v == y_v
     | otherwise = False
-
 
 type AbsBlockStack = Map Integer StackEntry
 
@@ -334,16 +463,20 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
 -- AbsRegs
 
 -- | This is used to cache all changes to a state within a block.
-data AbsRegs = AbsRegs { absInitialRegs :: !(X86State AbsValue)
+data AbsRegs = AbsRegs { _absInitialRegs :: !(X86State AbsValue)
                        , _absAssignments :: !(MapF Assignment AbsValue)
                        , _curAbsStack :: !AbsBlockStack
                        }
 
 initAbsRegs :: AbsBlockState -> AbsRegs
-initAbsRegs s = AbsRegs { absInitialRegs = s^.absX86State
+initAbsRegs s = AbsRegs { _absInitialRegs = s^.absX86State
                         , _absAssignments = MapF.empty
                         , _curAbsStack = s^.startAbsStack
                         }
+
+
+absInitialRegs :: Simple Lens AbsRegs (X86State AbsValue)
+absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
 
 absAssignments :: Simple Lens AbsRegs (MapF Assignment AbsValue)
 absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
@@ -351,8 +484,16 @@ absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 curAbsStack :: Simple Lens AbsRegs AbsBlockStack
 curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
+assignLens :: Assignment tp
+              -> Simple Lens (MapF Assignment AbsValue) (AbsValue tp)
+assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
+                      (\s v -> MapF.insert ass v s)
+
+-- | Merge in the value of the assignment.  If we have already seen a
+-- value, this will combine with meet.
 addAssignment :: Assignment tp -> AbsRegs -> AbsRegs
-addAssignment a c = c & absAssignments %~ MapF.insert a (transferRHS c (assignRhs a))
+addAssignment a c =
+  c & (absAssignments . assignLens a) %~ flip meet (transferRHS c (assignRhs a))
 
 deleteRange :: Integer -> Integer -> Map Integer v -> Map Integer v
 deleteRange l h m
@@ -447,7 +588,7 @@ transferValue c v =
    Initial r
      | Just Refl <- testEquality r N.rsp -> do
        StackOffset (Set.singleton 0)
-     | otherwise -> absInitialRegs c ^. register r
+     | otherwise -> c ^. absInitialRegs ^. register r
 
 transferApp :: AbsRegs
             -> App Value tp

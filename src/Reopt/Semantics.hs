@@ -471,14 +471,14 @@ exec_xor l v = do
 really_exec_shift :: (1 <= n', n' <= n, IsLocationBV m n)
                   => MLocation m (BVType n)
                   -> Value m (BVType n')
-                     -- | Operation for performing the shift.
+                     -- Operation for performing the shift.
                      -- Takes value as first argument and shift amount as second arg.
                   -> (Value m (BVType n) -> Value m (BVType n) -> Value m (BVType n))
-                     -- | Operation for constructing new carry flag "cf" value.
+                     -- Operation for constructing new carry flag "cf" value.
                   -> (Value m (BVType n) -> Value m (BVType n')
                                          -> Value m (BVType n')
                                          -> Value m BoolType)
-                     -- | Operation for constructing new overflow flag "of" value.
+                     -- Operation for constructing new overflow flag "of" value.
                   -> (Value m (BVType n) -> Value m (BVType n)
                                          -> Value m BoolType
                                          -> Value m BoolType)

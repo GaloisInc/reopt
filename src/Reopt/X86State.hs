@@ -32,18 +32,19 @@ module Reopt.X86State
   , x86StateRegisters
   ) where
 
-import Control.Applicative
-import Control.Lens
-import Data.Foldable (foldMap)
-import Data.Maybe
-import Data.Monoid (Monoid, mappend)
-import Data.Parameterized.Some
+import           Control.Applicative
+import           Control.Lens
+import           Data.Foldable (foldMap)
+import           Data.Maybe
+import           Data.Monoid (Monoid, mappend)
+import           Data.Parameterized.Classes (EqF(..))
+import           Data.Parameterized.Some
 import qualified Data.Vector as V
-import Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types
-import Reopt.Utils.PrettyPrint
+import           Reopt.Utils.PrettyPrint
 
 ------------------------------------------------------------------------
 -- X87StatusWord
@@ -248,10 +249,6 @@ mapX86State f x = mkX86State (\r -> f (x ^. register r))
 
 vectorCompare :: (a -> b -> Bool) -> V.Vector a -> V.Vector b -> Bool
 vectorCompare f x y = V.and $ V.zipWith f x y
-
-class EqF (f :: k -> *) where
-  eqF :: f a -> f a -> Bool
-
 
 instance EqF f => Eq (X86State f) where
   s == s' = cmpX86State eqF s s'

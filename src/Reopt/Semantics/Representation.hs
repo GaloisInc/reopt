@@ -231,7 +231,8 @@ instance Show BlockLabel where
 instance Pretty BlockLabel where
   pretty (DecompiledBlock a)   | a >= 0 = text ("block_" ++ showHex a "")
   pretty (GeneratedBlock p w)  | p >= 0 = text ("subblock_" ++ showHex p "_" ++ show w)
-
+  pretty _ = error "Pretty BlockLabel"
+  
 ------------------------------------------------------------------------
 -- Block
 
@@ -492,6 +493,7 @@ ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) <> text "_0"
+ppValue _ _                 = error "ppValue"
 
 instance Pretty (Value tp) where
   pretty = ppValue 0
@@ -608,25 +610,29 @@ data App f tp where
 
   -- Add two values and a carry bit to determine if they have a signed
   -- overflow.
-  UadcOverflows :: !(f (BVType n))
+  UadcOverflows :: !(NatRepr n)
+                -> !(f (BVType n))
                 -> !(f (BVType n))
                 -> !(f BoolType)
                 -> App f BoolType
   -- Add two values and a carry bit to determine if they have a signed
   -- overflow.
-  SadcOverflows :: !(f (BVType n))
+  SadcOverflows :: !(NatRepr n)
+                -> !(f (BVType n))
                 -> !(f (BVType n))
                 -> !(f BoolType)
                 -> App f BoolType
 
   -- Unsigned subtract with borrow overflow
-  UsbbOverflows :: !(f (BVType n))
+  UsbbOverflows :: !(NatRepr n)
+                -> !(f (BVType n))
                 -> !(f (BVType n))
                 -> !(f BoolType)
                 -> App f BoolType
 
   -- Signed subtract with borrow overflow
-  SsbbOverflows :: !(f (BVType n))
+  SsbbOverflows :: !(NatRepr n)
+                -> !(f (BVType n))
                 -> !(f (BVType n))
                 -> !(f BoolType)
                 -> App f BoolType
@@ -767,10 +773,10 @@ ppApp pp a0 =
     BVEq x y    -> sexpr "bv_eq" [ pp x, pp y ]
     EvenParity x -> sexpr "even_parity" [ pp x ]
     ReverseBytes _ x -> sexpr "reverse_bytes" [ pp x ]
-    UadcOverflows x y c -> sexpr "uadc_overflows" [ pp x, pp y, pp c ]
-    SadcOverflows x y c -> sexpr "sadc_overflows" [ pp x, pp y, pp c ]
-    UsbbOverflows x y c -> sexpr "usbb_overflows" [ pp x, pp y, pp c ]
-    SsbbOverflows x y c -> sexpr "ssbb_overflows" [ pp x, pp y, pp c ]
+    UadcOverflows _ x y c -> sexpr "uadc_overflows" [ pp x, pp y, pp c ]
+    SadcOverflows _ x y c -> sexpr "sadc_overflows" [ pp x, pp y, pp c ]
+    UsbbOverflows _ x y c -> sexpr "usbb_overflows" [ pp x, pp y, pp c ]
+    SsbbOverflows _ x y c -> sexpr "ssbb_overflows" [ pp x, pp y, pp c ]
     Bsf _ x -> sexpr "bsf" [ pp x ]
     Bsr _ x -> sexpr "bsr" [ pp x ]
 
