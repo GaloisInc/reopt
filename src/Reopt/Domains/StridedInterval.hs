@@ -21,7 +21,7 @@ module Reopt.Domains.StridedInterval
          -- Constructors 
        , singleton, mkStridedInterval, fromFoldable
          -- Predicates
-       , isSingleton, member, isSubsetOf
+       , isSingleton, isTop, member, isSubsetOf
          -- Destructors
        , toList, intervalEnd
          -- Domain operations
@@ -123,6 +123,10 @@ fromFoldable sz vs
 isSingleton :: StridedInterval tp -> Maybe Integer
 isSingleton StridedInterval { base = b, range = 0 } = Just b
 isSingleton _  = Nothing
+
+isTop :: StridedInterval tp -> Bool
+isTop si@StridedInterval{} = case typ si of BVTypeRepr sz -> si == top sz
+isTop _  = False
 
 member :: Integer -> StridedInterval tp -> Bool
 member _ EmptyInterval = False
@@ -381,12 +385,12 @@ trunc :: (v+1 <= u)
       -> NatRepr v
       -> StridedInterval (BVType v)
 trunc EmptyInterval _ = EmptyInterval
--- FIXME: HACK (we shouldn't just update typ like this)
-trunc si sz = glb (si { typ = typ top' }) top' 
+trunc si sz 
+  | si' `isSubsetOf` top' = si'
+  | otherwise     = top'
   where
-    top' = top sz
-
-
+    si'  = si { typ = typ top' }
+    top' = top sz      
 
 -- -----------------------------------------------------------------------------
 -- Testing

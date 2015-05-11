@@ -232,6 +232,17 @@ recordWriteStmt _ _ = return ()
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
+transferStmtsTracing :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
+transferStmtsTracing r stmts = execStateT (mapM_ go stmts) r
+  where
+    go stmt = do regs <- get
+                 traceM (show (pretty stmt))
+                 transferStmt stmt
+                 case stmt of
+                  AssignStmt a -> do rhs <- use (absAssignments . assignLens a)
+                                     traceM (show (pretty rhs))
+                  _ -> return ()
+
 finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
 finalBlockState a g
   | Set.member a (finalCodePointersInMem g) = defBlockState a
@@ -371,11 +382,51 @@ refineApp app av regs =
    --          glb l_regs r_regs
    --        else -- one is false, so we do a join
    --          lub l_regs r_regs
-   --  -- basically less-than: does x - y overflow? only if x < y.
+   
+   -- basically less-than: does x - y overflow? only if x < y.
    UsbbOverflows sz l r (BVValue _ 0)
      | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
-   -- Mux can let us infer the condition?
+
+   -- FIXME: HACK
+   -- This detects r - x < 0 || r - x == 0, i.e. r <= x
+   BVOr _ (getAssignApp -> Just (UsbbOverflows _ r xv@(BVValue sz x) (BVValue _ 0)))
+          (getAssignApp -> Just (BVEq (getAssignApp -> Just (BVAdd _ r' y)) (BVValue _ 0)))
+     | Just Refl <- testEquality r r'
+     , Just Refl <- testEquality y (mkLit sz (negate x))
+     , Just b    <- asConcreteSingleton av ->
+       -- trace ("Saw the OR abomination: " ++ show (pretty r <+> pretty x)) $
+       refineLeq (BVTypeRepr sz) r xv b regs
+
+   -- FIXME: HACK
+   -- This detects not (r - x < 0) && not (r - x == 0), i.e. x < r
+   BVAnd _ (getAssignApp -> Just (BVComplement _
+                                  (getAssignApp -> Just (UsbbOverflows _ r xv@(BVValue sz x) (BVValue _ 0)))))
+           (getAssignApp -> Just (BVComplement _
+                                  (getAssignApp -> Just (BVEq (getAssignApp -> Just (BVAdd _ r' y)) (BVValue _ 0)))))
+     | Just Refl <- testEquality r r'
+     , Just Refl <- testEquality y (mkLit sz (negate x))
+     , Just b    <- asConcreteSingleton av ->
+       trace ("Saw the AND abomination: " ++ show (pretty r <+> pretty x)) $
+       refineLt (BVTypeRepr sz) xv r b regs
+
+  -- Mux can let us infer the condition?
    _ -> regs
+  where
+    getAssignApp (AssignedValue (Assignment _ (EvalApp app))) = Just app
+    getAssignApp _ = Nothing
+
+refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
+refineLeq tp x y b regs
+  -- y < x
+  | b == 0     = refineValue x x_lt (refineValue y y_lt regs)
+  -- x <= y 
+  | otherwise  = refineValue x x_leq (refineValue y y_leq regs)
+  where
+    x_av = transferValue regs x
+    y_av = transferValue regs y
+    (x_leq, y_leq)   = abstractLeq tp x_av y_av
+    (y_lt, x_lt)     = abstractLt  tp y_av x_av 
+
 
 refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLt tp x y b regs
@@ -436,6 +487,7 @@ transfer addr = do
               -> State InterpState ()
       goBlock b regs = do
         regs' <- transferStmts regs (blockStmts b)
+
         -- FIXME: we should propagate c back to the initial block, not just b
         case blockTerm b of
           Branch c lb rb -> do

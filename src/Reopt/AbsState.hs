@@ -81,7 +81,6 @@ class Eq d => AbsDomain d where
 
   {-# MINIMAL (top, ((leq,lub) | joinD)) #-}
 
-
 type ValueSet = Set Integer
 
 ------------------------------------------------------------------------
@@ -142,6 +141,12 @@ asConcreteSingleton v =
     Just [e] -> Just e
     _ -> Nothing
 
+-- | Smart constructor for strided intervals which takes care of top
+stridedInterval :: SI.StridedInterval (BVType tp) -> AbsValue (BVType tp)
+stridedInterval si
+  | SI.isTop si = TopV
+  | otherwise   = StridedInterval si
+
 instance AbsDomain (AbsValue tp) where
   top = TopV
 
@@ -181,8 +186,7 @@ instance AbsDomain (AbsValue tp) where
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
     | StridedInterval si <- v', AbsValue s <- v 
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
-    where go si1 si2 = Just $ StridedInterval (SI.lub si1 si2)
-
+    where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
   joinD StackOffset{} SomeStackOffset = Just SomeStackOffset
@@ -201,7 +205,7 @@ meet (StackOffset old) (StackOffset new) =
 -- Intervals
 meet v v'
   | StridedInterval si_old <- v, StridedInterval si_new <- v'
-    = StridedInterval $ si_old `SI.glb` si_new
+    = stridedInterval $ si_old `SI.glb` si_new
   | StridedInterval si <- v,  AbsValue s <- v'
     = AbsValue $ Set.filter (`SI.member` si) s
   | StridedInterval si <- v', AbsValue s <- v
@@ -218,7 +222,7 @@ trunc :: (v+1 <= u)
       -> NatRepr v
       -> AbsValue (BVType v)
 trunc (AbsValue s) w = AbsValue (Set.map (toUnsigned w) s)
-trunc (StridedInterval s) w = StridedInterval (SI.trunc s w)
+trunc (StridedInterval s) w = stridedInterval (SI.trunc s w)
 trunc (StackOffset _) _ = TopV
 trunc SomeStackOffset _ = TopV
 trunc TopV _ = TopV
@@ -245,7 +249,7 @@ bvadd w v v'
   | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
   | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
   where
-    go si1 si2 = StridedInterval $ SI.bvadd w si1 si2
+    go si1 si2 = stridedInterval $ SI.bvadd w si1 si2
     
 -- the rest  
 bvadd _ StackOffset{} _ = SomeStackOffset
@@ -266,7 +270,7 @@ bvsub :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
 bvsub w (AbsValue s) (AbsValue t) =
-  setL (StridedInterval . SI.fromFoldable w) AbsValue $ do
+  setL (stridedInterval . SI.fromFoldable w) AbsValue $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x - y))
@@ -293,7 +297,7 @@ bvmul :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
 bvmul w (AbsValue s) (AbsValue t) =
-  setL (StridedInterval . SI.fromFoldable w) AbsValue $ do
+  setL (stridedInterval . SI.fromFoldable w) AbsValue $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x * y))
@@ -302,7 +306,7 @@ bvmul w v v'
   | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
   | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
   where
-    go si1 si2 = StridedInterval $ SI.bvmul w si1 si2    
+    go si1 si2 = stridedInterval $ SI.bvmul w si1 si2    
 bvmul _ _ _ = TopV
 
 ppAbsValue :: AbsValue tp -> Maybe Doc
@@ -355,9 +359,9 @@ abstractLt tp x y
   | Just u_y <- hasMaximum tp y 
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
-    ( meet x (StridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
-    , meet y (StridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
+    -- trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
+    , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
 abstractLt _tp x y = (x, y)
 
@@ -370,9 +374,9 @@ abstractLeq tp x y
   | Just u_y <- hasMaximum tp y 
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
-    ( meet x (StridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
-    , meet y (StridedInterval $ SI.mkStridedInterval tp False l_x
+    -- trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
+    , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
 abstractLeq _tp x y = (x, y)
 
@@ -468,6 +472,13 @@ data AbsRegs = AbsRegs { _absInitialRegs :: !(X86State AbsValue)
                        , _curAbsStack :: !AbsBlockStack
                        }
 
+-- FIXME
+instance Pretty AbsRegs where
+  pretty regs = pretty (AbsBlockState { _absX86State   = regs ^. absInitialRegs 
+                                      , _startAbsStack = regs ^. curAbsStack })
+ 
+
+                        
 initAbsRegs :: AbsBlockState -> AbsRegs
 initAbsRegs s = AbsRegs { _absInitialRegs = s^.absX86State
                         , _absAssignments = MapF.empty
