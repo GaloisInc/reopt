@@ -95,19 +95,39 @@ data AbsValue (tp :: Type) where
   SomeStackOffset :: AbsValue (BVType 64)
   -- | A strided interval
   StridedInterval :: !(SI.StridedInterval (BVType n)) -> AbsValue (BVType n)
+  -- | A sub-value about which we know more than the containing value
+  -- (e.g., we know that the lower 8 bits are < 10)
+
+  -- FIXME: we probably want n < n'
+  SubValue :: !(NatRepr n) -> !(AbsValue (BVType n))
+              -> !(AbsValue (BVType n')) -> AbsValue (BVType n')
   -- | Any value
   TopV :: AbsValue tp
+
+prop_SubValue :: AbsValue tp -> Bool
+prop_SubValue (SubValue n v v') =
+  case (concretize v, concretize v') of
+   (_, Nothing)         -> True
+   -- FIXME: maybe? this just says all lower bits are set.  We could
+   -- expand out the Top, but that might be expensive for large n.
+   (Nothing, _)         -> False 
+   (Just vs, Just vs')  -> vs `Set.isSubsetOf` (Set.map (toUnsigned n) vs')
+prop_SubValue _ = True
 
 -- | The maximum number of values we hold in a ValueSet, after which
 -- we move to intervals
 maxSetSize :: Int
 maxSetSize = 5
 
+-- Note that this is syntactic equality only.
 instance Eq (AbsValue tp) where
   AbsValue x    == AbsValue y    = x == y
   StackOffset s == StackOffset t = s == t
-  SomeStackOffset          == SomeStackOffset          = True
-  StridedInterval si1 == StridedInterval si2 = si1 == si2
+  SomeStackOffset          == SomeStackOffset = True
+  StridedInterval si1 == StridedInterval si2  = si1 == si2
+  SubValue n v c == SubValue n' v' c'
+    | Just Refl <- testEquality n n' = v == v' && c == c'
+    | otherwise = False
   TopV          == TopV          = True
   _             ==               _ = False
 
@@ -116,9 +136,10 @@ instance EqF AbsValue where
 
 instance Pretty (AbsValue tp) where
   pretty (AbsValue s) = ppIntegerSet s
-  pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty (StridedInterval s) = pretty s
+  pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty SomeStackOffset = text "rsp_0 + ?"
+  pretty (SubValue n v c) = pretty c <+> parens (int (natValue n) <+> pretty v)
   pretty TopV = text "top"
 
 ppIntegerSet :: (Show w, Integral w) => Set w -> Doc
@@ -132,6 +153,11 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (AbsValue s) = Just s
 concretize (StridedInterval s) = Just (Set.fromList (SI.toList s))
+-- OPT: might be faster to just do concretize v'
+concretize (SubValue n v v') =
+  do v_vs <- concretize v
+     v_vs' <- concretize v'
+     return (Set.filter (flip Set.member v_vs . toUnsigned n) v_vs')
 concretize _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
@@ -141,11 +167,27 @@ asConcreteSingleton v =
     Just [e] -> Just e
     _ -> Nothing
 
+-- -----------------------------------------------------------------------------
+-- Smart constructors
+
 -- | Smart constructor for strided intervals which takes care of top
 stridedInterval :: SI.StridedInterval (BVType tp) -> AbsValue (BVType tp)
 stridedInterval si
   | SI.isTop si = TopV
   | otherwise   = StridedInterval si
+
+-- | Smart constructor for sub-values.  This ensures that the
+-- subvalues are sorted on size.
+subValue :: NatRepr n -> AbsValue (BVType n) -> AbsValue tp -> AbsValue tp
+subValue n v v'@(SubValue nc vc container)
+  -- FIXME: meet seems like what we want here? Maybe the combination
+  -- operator should be a parameter (i.e. maybe join is what we want)
+  | Just Refl <- testEquality n nc = SubValue nc (meet v vc) container 
+  | Just LeqProof <- testLeq n nc  = SubValue n v v'
+  | otherwise = SubValue nc vc (subValue n v container)
+
+-- -----------------------------------------------------------------------------
+-- Instances
 
 instance AbsDomain (AbsValue tp) where
   top = TopV
@@ -187,6 +229,27 @@ instance AbsDomain (AbsValue tp) where
     | StridedInterval si <- v', AbsValue s <- v 
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
     where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
+
+  -- Sub values
+
+  -- FIXME: can we do something more fine-grained here than just
+  -- dropping the sub-value?
+  joinD v v'
+    | SubValue n av c <- v, SubValue n' av' c' <- v'
+    , Just Refl <- testEquality n n' =
+      case (joinD av av', joinD c c') of
+       (Nothing, Nothing)     -> Nothing
+       (new_av, new_c) ->
+         Just $ SubValue n (fromMaybe av new_av) (fromMaybe c new_c)           
+      -- if n < n' (or n' < n) we drop the sub-value and always return
+      -- a new value
+    | SubValue n av c <- v, SubValue n' av' c' <- v'
+    , Just LeqProof <- testLeq n n' = Just $ fromMaybe c (joinD c v')
+    | SubValue n av c <- v, SubValue n' av' c' <- v' =
+        Just $ fromMaybe v (joinD v c')
+    | SubValue _n _av c <- v  = Just $ fromMaybe c (joinD c v')
+    | SubValue _n _av c <- v' = Just $ fromMaybe v (joinD v c)
+  
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
   joinD StackOffset{} SomeStackOffset = Just SomeStackOffset
@@ -210,6 +273,19 @@ meet v v'
     = AbsValue $ Set.filter (`SI.member` si) s
   | StridedInterval si <- v', AbsValue s <- v
     = AbsValue $ Set.filter (`SI.member` si) s
+
+meet v v'
+  | SubValue n av c <- v, SubValue n' av' c' <- v'
+  , Just Refl <- testEquality n n' =
+    SubValue n (meet av av') (meet c c')
+
+  | SubValue n av c <- v, SubValue n' av' c' <- v'
+  , Just LeqProof <- testLeq n n' = error "FIXME"
+                                    
+  | SubValue n av c <- v, SubValue n' av' c' <- v' =
+      Just $ fromMaybe v (joinD v c')
+  | SubValue _n _av c <- v  = Just $ fromMaybe c (joinD c v')
+  | SubValue _n _av c <- v' = Just $ fromMaybe v (joinD v c)
 
 -- Join addresses
 meet SomeStackOffset s@StackOffset{} = s
