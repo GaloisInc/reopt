@@ -23,7 +23,7 @@ module Reopt.Domains.StridedInterval
          -- Predicates
        , isSingleton, isTop, member, isSubsetOf
          -- Destructors
-       , toList, intervalEnd
+       , toList, intervalEnd, size
          -- Domain operations
        , lub, lubSingleton, glb
          -- Operations
@@ -44,7 +44,6 @@ import           Data.Parameterized.Some
 import           Reopt.Semantics.Types
 
 import           Test.QuickCheck
-
 
 -- -----------------------------------------------------------------------------
 -- Data type decl and instances
@@ -74,6 +73,9 @@ intervalEnd :: StridedInterval tp -> Integer
 intervalEnd EmptyInterval = error "intervalEnd"
 intervalEnd si = base si + range si * stride si
 
+size :: StridedInterval tp -> Integer
+size EmptyInterval = 0
+size si = range si + 1
 
 -- -----------------------------------------------------------------------------
 -- Constructors
@@ -356,12 +358,13 @@ bvmul :: NatRepr u
       -> StridedInterval (BVType u)
 bvmul _ EmptyInterval{} _ = EmptyInterval
 bvmul _ _ EmptyInterval{} = EmptyInterval
-bvmul sz si1 si2 =
-  bvadd sz
-        (bvadd sz
-               (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
-               (mk 0 (range si2) (stride si2 * base si1)))
-        (mk 0 (range si1 * range si2) (stride si1 * stride si2))
+bvmul sz si1 si2 = top sz -- FIXME: this blows up with the trunc, unfortunately
+-- bvmul sz si1 si2 =
+--   bvadd sz
+--         (bvadd sz
+--                (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
+--                (mk 0 (range si2) (stride si2 * base si1)))
+--         (mk 0 (range si1 * range si2) (stride si1 * stride si2))
   where
     mk b r s
       | s == 0    = singleton (typ si1) b
@@ -391,8 +394,10 @@ trunc EmptyInterval _ = EmptyInterval
 trunc si sz
   -- No change/complete wrap case --- happens when we add
   -- (unsigned int) -1, for example.
+  | isTop si              = top'
   | si' `isSubsetOf` top' = si'
-  | otherwise     = go pfx (next_g pfx) (range si - (range pfx + 1))
+  | otherwise     = -- trace ("trunc " ++ show (pretty si) ++ " " ++ show sz) $
+                    go pfx (next_g pfx) (range si - (range pfx + 1))
   where
     mk_range b r =
       let max_range = (maxUnsigned sz - b) `div` stride si
@@ -404,6 +409,7 @@ trunc si sz
     -- FIXME: we should stop when we see repeated elements, but it
     -- might be faster to do it this way.
     go acc g n
+      | isTop acc = acc
       -- no more range left
       | n < 0 = acc
       -- we hit a cycle (maybe via lub)
@@ -414,7 +420,7 @@ trunc si sz
                                        , base = g
                                        , range = new_range
                                        , stride = stride si }
-          in -- trace ("new_si at " ++ show n ++ " " ++ show (pretty new_si)
+          in -- trace ("new_si for " ++ show (natValue sz) ++ " at " ++ show n ++ " " ++ show (pretty new_si)
              --        ++ " acc " ++ show (pretty acc)) $
              go (lub acc new_si) (next_g new_si) (n - (range new_si + 1))
 

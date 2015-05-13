@@ -15,6 +15,7 @@ module Reopt.AbsState
   , concretize
   , asConcreteSingleton
   , meet
+  , size
   , AbsDomain(..)
   , AbsRegs
   , absInitialRegs
@@ -33,9 +34,10 @@ module Reopt.AbsState
 import           Control.Applicative ( (<$>) )
 import           Control.Exception (assert)
 import           Control.Lens
-import           Data.Maybe
+import           Control.Monad (guard)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -131,15 +133,25 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 -- known under-approximation.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (AbsValue s) = Just s
-concretize (StridedInterval s) = Just (Set.fromList (SI.toList s))
+concretize (StridedInterval s) =
+  trace ("Concretizing " ++ show (pretty s)) $
+  Just (Set.fromList (SI.toList s))
 concretize _ = Nothing
+
+-- FIXME: make total, we would need to carry around tp
+size :: AbsValue tp -> Maybe Integer
+size (AbsValue s) = Just $ fromIntegral (Set.size s)
+size (StridedInterval s) = Just $ SI.size s
+size (StackOffset s) = Just $ fromIntegral (Set.size s)
+size _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
 asConcreteSingleton :: AbsValue tp -> Maybe Integer
-asConcreteSingleton v =
-  case Set.toList <$> concretize v of
-    Just [e] -> Just e
-    _ -> Nothing
+asConcreteSingleton v = do
+  sz <- size v
+  guard (sz == 1)
+  [v] <- Set.toList <$> concretize v
+  return v
 
 -- | Smart constructor for strided intervals which takes care of top
 stridedInterval :: SI.StridedInterval (BVType tp) -> AbsValue (BVType tp)
@@ -187,6 +199,9 @@ instance AbsDomain (AbsValue tp) where
     | StridedInterval si <- v', AbsValue s <- v 
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
     where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
+-- trace ("LUB " ++ show (pretty si1) ++ "@" ++ show (type_width (SI.typ si1)) 
+--                    ++ " " ++ show (pretty si2) ++ "@" ++ show (type_width (SI.typ si2)) ) $
+          
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
   joinD StackOffset{} SomeStackOffset = Just SomeStackOffset

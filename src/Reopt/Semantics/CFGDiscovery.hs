@@ -26,26 +26,26 @@ module Reopt.Semantics.CFGDiscovery
        , assignmentAbsValues
        ) where
 
-import Control.Applicative
-import Control.Exception
-import Control.Lens
-import Control.Monad.State.Strict
-import Data.List
-import Data.Map.Strict (Map)
+import           Control.Applicative
+import           Control.Exception
+import           Control.Lens
+import           Control.Monad.State.Strict
+import           Data.List
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe
-import Data.Parameterized.Map (MapF)
+import           Data.Maybe
+import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
-import Data.Parameterized.Some
+import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
 import           Debug.Trace
-import Numeric
+import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import Reopt.AbsState
+import           Reopt.AbsState
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
@@ -223,10 +223,14 @@ recordEscapedCodePointers = flip (foldl' (flip recordEscapedCodePointer))
 recordWriteStmt :: AbsRegs -> Stmt -> State InterpState ()
 recordWriteStmt regs (Write (MemLoc _addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
-  , Just vs1 <- concretize (transferValue regs v) = do
+  , Just sz <- size av
+  , sz < 100 -- FIXME: GIANT HACK (avoids explosion in concretize)
+  , Just vs1 <- concretize av = do
     mem <- gets memory
     let vs2 = filter (isCodePointer mem) $ map fromInteger (Set.toList vs1)
     modify $ recordEscapedCodePointers vs2
+    where
+      av = transferValue regs v
 recordWriteStmt _ _ = return ()
 
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
@@ -406,7 +410,7 @@ refineApp app av regs =
      | Just Refl <- testEquality r r'
      , Just Refl <- testEquality y (mkLit sz (negate x))
      , Just b    <- asConcreteSingleton av ->
-       trace ("Saw the AND abomination: " ++ show (pretty r <+> pretty x)) $
+       -- trace ("Saw the AND abomination: " ++ show (pretty r <+> pretty x)) $
        refineLt (BVTypeRepr sz) xv r b regs
 
   -- Mux can let us infer the condition?
