@@ -31,7 +31,7 @@ module Reopt.Domains.StridedInterval
          -- Debugging
        ) where
 
--- import           Debug.Trace
+import           Debug.Trace
 
 import           Control.Applicative ( (<$>), (<*>) )
 import qualified Data.Foldable as Fold
@@ -40,6 +40,7 @@ import qualified Data.Set as S
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Some
 import           Reopt.Semantics.Types
 
 import           Test.QuickCheck
@@ -315,9 +316,7 @@ top sz = StridedInterval { typ = BVTypeRepr sz
                          , stride = 1 }
 
 clamp :: NatRepr u -> StridedInterval (BVType u) -> StridedInterval (BVType u)
-clamp sz v
-  | intervalEnd v > maxUnsigned sz = top sz
-  | otherwise = v
+clamp sz v = trunc v sz 
 
 bvadd :: NatRepr u
       -> StridedInterval (BVType u)
@@ -358,10 +357,11 @@ bvmul :: NatRepr u
 bvmul _ EmptyInterval{} _ = EmptyInterval
 bvmul _ _ EmptyInterval{} = EmptyInterval
 bvmul sz si1 si2 =
-  bvadd sz (bvadd sz
-            (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
-            (mk 0 (range si2) (stride si2 * base si1)))
-  (mk 0 (range si1 * range si2) (stride si1 * stride si2))
+  bvadd sz
+        (bvadd sz
+               (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
+               (mk 0 (range si2) (stride si2 * base si1)))
+        (mk 0 (range si1 * range si2) (stride si1 * stride si2))
   where
     mk b r s
       | s == 0    = singleton (typ si1) b
@@ -380,17 +380,60 @@ prop_bvmul = mk_prop (*) bvmul
 --   where
 --     u = case tp of BVTypeRepr n -> maxUnsigned n
 
-trunc :: (v+1 <= u)
-      => StridedInterval (BVType u)
-      -> NatRepr v
-      -> StridedInterval (BVType v)
+-- | Truncate an interval.
+
+-- OPT: this could be made much more efficient I think.
+trunc :: -- (v+1 <= u) =>
+  StridedInterval (BVType u)
+  -> NatRepr v
+  -> StridedInterval (BVType v)
 trunc EmptyInterval _ = EmptyInterval
-trunc si sz 
+trunc si sz
+  -- No change/complete wrap case --- happens when we add
+  -- (unsigned int) -1, for example.
   | si' `isSubsetOf` top' = si'
-  | otherwise     = top'
+  | otherwise     = go pfx (next_g pfx) (range si - (range pfx + 1))
   where
-    si'  = si { typ = typ top' }
+    mk_range b r =
+      let max_range = (maxUnsigned sz - b) `div` stride si
+      in if r <= max_range then r else max_range
+
+    pfx = si' { range = mk_range (base si') (range si') }
+
+    next_g new_si = toUnsigned sz (intervalEnd new_si + stride si)
+    -- FIXME: we should stop when we see repeated elements, but it
+    -- might be faster to do it this way.
+    go acc g n
+      -- no more range left
+      | n < 0 = acc
+      -- we hit a cycle (maybe via lub)
+      -- | g `member` acc = acc
+      | otherwise      =
+          let new_range = mk_range g n
+              new_si = StridedInterval { typ = typ top'
+                                       , base = g
+                                       , range = new_range
+                                       , stride = stride si }
+          in -- trace ("new_si at " ++ show n ++ " " ++ show (pretty new_si)
+             --        ++ " acc " ++ show (pretty acc)) $
+             go (lub acc new_si) (next_g new_si) (n - (range new_si + 1))
+
+    si'  = si { typ = typ top'
+              , base = toUnsigned sz (base si) }
     top' = top sz      
+
+prop_trunc :: StridedInterval (BVType 64)
+              -> Positive (Small Integer)
+              -> Property
+prop_trunc si sz
+  | Just (Some n) <- someNat sz' = sz' < 64 ==> p n
+  | otherwise = True ==> True
+  where
+    p :: NatRepr n -> Bool
+    p n = S.fromList (map (toUnsigned n) (toList si))
+          `S.isSubsetOf`
+          S.fromList (toList (trunc si n))
+    sz' = getSmall (getPositive sz)
 
 -- -----------------------------------------------------------------------------
 -- Testing
@@ -403,7 +446,9 @@ mk_prop :: (Integer -> Integer -> Integer)
            -> StridedInterval (BVType 64)
            -> StridedInterval (BVType 64)
            -> Bool
-mk_prop int_f si_f x y = and [ (int_f v v') `member` (si_f n64 x y)
+mk_prop int_f si_f x y = and [ (toUnsigned n64 (int_f v v'))
+                               `member`
+                               (si_f n64 x y)
                              | v  <- toList x
                              , v' <- toList y ]
 
