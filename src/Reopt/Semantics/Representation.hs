@@ -876,18 +876,18 @@ instance TestEquality f => Eq (App f tp) where
 
 instance TestEquality f => TestEquality (App f) where
   testEquality = $(structuralTypeEquality [t|App|]
-                   [ TypeApp (DataArg 0)            AnyType
-                   , TypeApp (ConType [t|NatRepr|]) AnyType
-                   , TypeApp (ConType [t|FloatInfoRepr|]) AnyType
+                   [ (DataArg 0                  `TypeApp` AnyType, [|testEquality|])
+                   , (ConType [t|NatRepr|]       `TypeApp` AnyType, [|testEquality|])
+                   , (ConType [t|FloatInfoRepr|] `TypeApp` AnyType, [|testEquality|])
                    ]
                   )
 
 instance OrdF f => OrdF (App f) where
   compareF = $(structuralTypeOrd [t|App|]
-                 [ TypeApp (DataArg 0)            AnyType
-                 , TypeApp (ConType [t|NatRepr|]) AnyType
-                 , TypeApp (ConType [t|FloatInfoRepr|]) AnyType
-                 ]
+                   [ (DataArg 0                  `TypeApp` AnyType, [|compareF|])
+                   , (ConType [t|NatRepr|]       `TypeApp` AnyType, [|compareF|])
+                   , (ConType [t|FloatInfoRepr|] `TypeApp` AnyType, [|compareF|])
+                   ]
               )
 
 traverseApp :: Applicative m
