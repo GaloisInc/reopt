@@ -565,31 +565,43 @@ data FinalCFG = FinalCFG { finalCFG :: !CFG
                          , finalFailedAddrs :: !(Set CodeAddr)
                          }
 
+mkFinalCFG :: InterpState -> FinalCFG
+mkFinalCFG s = FinalCFG { finalCFG = s^.cfg
+                      , finalAbsState = s^.absState
+                      , finalCodePointersInMem = s^.codePointersInMem
+                      , finalFailedAddrs = s^.failedAddrs
+                      }
+
+explore_frontier :: InterpState -> InterpState
+explore_frontier st =
+  case Map.minViewWithKey (st^.frontier) of
+    Nothing -> st
+    Just ((addr,rsn), next_roots) ->
+      let st_pre = st & frontier .~ next_roots
+          st_post = flip execState st_pre $ transfer rsn addr
+       in explore_frontier st_post
+
+
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> CodeAddr
                   -- ^ Location to start disassembler form.
                -> FinalCFG
-cfgFromAddress mem start = r
+cfgFromAddress mem start = mkFinalCFG s3
+
   where
-    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
-    s0 = recordEscapedCodePointers code_pointers InInitialData
-       $ emptyInterpState mem start
+--    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
+    s0 = emptyInterpState mem start
 
-    s' = go s0
+    s1 = explore_frontier s0
 
-    r = FinalCFG { finalCFG = s'^.cfg
-                 , finalAbsState = s'^.absState
-                 , finalCodePointersInMem = s'^.codePointersInMem
-                 , finalFailedAddrs = s'^.failedAddrs
-                 }
+    go s (a,v)
+      | not (isCodePointer mem v) = s
+      | Set.member v (s^.codePointersInMem) = s
+      | otherwise =
+        trace ("Found new code pointer " ++ showHex v " at " ++ showHex a ".") $
+        recordEscapedCodePointer v InInitialData s
 
-    go :: InterpState
-       -> InterpState
-    go st =
-      case Map.minViewWithKey (st^.frontier) of
-        Nothing -> st
-        Just ((addr,rsn), next_roots) ->
-          let st_pre = st & frontier .~ next_roots
-              st_post = flip execState st_pre $ transfer rsn addr
-           in go st_post
+    s2  = foldl' go s1 (memAsWord64le_withAddr mem)
+
+    s3 = explore_frontier s2
