@@ -33,12 +33,16 @@ module Reopt.Memory
 import           Control.Applicative
 import           Control.Exception (assert)
 import           Control.Monad.Error
-import           Control.Monad.State
-import           Data.Binary.Get
+import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import           Data.Elf as Elf
+  ( ElfSegmentFlags
+  , pf_r
+  , pf_w
+  , pf_x
+  , hasPermissions
+  )
 import qualified Data.Foldable as Fold
 import qualified Data.IntervalMap.FingerTree as IMap
 import           Data.Maybe
@@ -54,9 +58,9 @@ import           Flexdis86.ByteReader
 -- MemSegment
 
 -- | Describes a memory segment.
-data MemSegment w = MemSegment { memBase :: w
-                               , memFlags :: ElfSegmentFlags
-                               , memBytes :: BS.ByteString
+data MemSegment w = MemSegment { memBase  :: !w
+                               , memFlags :: !ElfSegmentFlags
+                               , memBytes :: !BS.ByteString
                                }
 
 -- | Return true if the segment is executable.
@@ -94,8 +98,8 @@ segmentAsWord64le s = go base (memBytes s) cnt
         base = fromIntegral (memBase s) .&. 0x7
         cnt = (BS.length (memBytes s) - base) `shiftR` 3
         go _ _ 0 = []
-        go o b c = lsbWord64FromByteString s : go (o+8) b' (c-1)
-          where (s,b') = BS.splitAt 8 b
+        go o b c = lsbWord64FromByteString s' : go (o+8) b' (c-1)
+          where (s',b') = BS.splitAt 8 b
 
 -- | Returns an interval representing the range of addresses for the segment
 -- if it is non-empty.
@@ -139,7 +143,7 @@ executableSegments = filter isExecutable . memSegments
 -- segment in memory.
 insertMemSegment :: (Ord w, Num w, MonadState (Memory w) m)
                  => MemSegment w -> m ()
-insertMemSegment mseg =
+insertMemSegment mseg = seq mseg $ do
   case memSegmentInterval mseg of
     Nothing -> return ()
     Just i -> do
@@ -168,7 +172,7 @@ isCodePointer mem val = addrHasPermissions val pf_x mem
 data MemStream w = MS { msNext :: !BS.ByteString
                       , msMem  :: !(Memory w)
                       , msAddr :: !w
-                      , msPerm :: ElfSegmentFlags
+                      , msPerm :: !ElfSegmentFlags
                       }
 
 -- | Type of errors that may occur when reading memory.
@@ -184,8 +188,8 @@ instance Error (MemoryError w) where
 
 instance (Integral w, Show w) => Show (MemoryError w) where
   show (UserMemoryError msg) = msg
-  show (AccessViolation a)  | a >= 0 = "Access violation at " ++ showHex a ""
-  show (PermissionsError a) | a >= 0 = "Insufficient permissions at " ++ showHex a ""
+  show (AccessViolation a)   = "Access violation at " ++ showHex a ""
+  show (PermissionsError a)  = "Insufficient permissions at " ++ showHex a ""
 
 newtype MemoryByteReader w a = MBR (ErrorT (MemoryError w) (State (MemStream w)) a)
   deriving (Functor, Applicative, Monad)

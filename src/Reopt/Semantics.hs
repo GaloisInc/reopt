@@ -12,11 +12,11 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
 
 module Reopt.Semantics where
 
@@ -29,17 +29,6 @@ import GHC.TypeLits
 
 import Data.Proxy
 import Data.Parameterized.NatRepr
-    ( NatRepr
-    , natValue
-    , addNat
-
-    , LeqProof(..)
-    , withLeqProof
-    , addIsLeq
-    , withAddLeq
-    , testLeq
-    , dblPosIsPos
-    )
 
 import Reopt.Semantics.Monad
 import qualified Reopt.Semantics.StateNames as N
@@ -279,44 +268,66 @@ exec_div v
       quotL .= bvTrunc (bv_width v) q
       remL  .= bvTrunc (bv_width v) (w `bvMod` uext (bv_width w) v)
 
-exec_idiv :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
+exec_idiv :: forall m n
+           . (IsLocationBV m n)
+          => Value m (BVType n)
+          -> m ()
 exec_idiv v
-  | Just Refl <- testEquality (bv_width v) n8  =
-    get (reg_low16 N.rax) >>= go1 (reg_low8 N.rax) (reg_high8 N.rax)
-  | Just Refl <- testEquality (bv_width v) n16 = go2 (reg_low16 N.rax) (reg_low16 N.rdx)
-  | Just Refl <- testEquality (bv_width v) n32 = go2 (reg_low32 N.rax) (reg_low32 N.rdx)
-  | Just Refl <- testEquality (bv_width v) n64 = go2 rax rdx
-  | otherwise                                  = fail "div: Unknown bit width"
+  | Just Refl <- testEquality w n8  = do
+    dividend <- get (reg_low16 N.rax)
+    do_exec_idiv (reg_low8 N.rax) (reg_high8 N.rax) dividend v
+  | Just Refl <- testEquality w n16 =
+    go2 (reg_low16 N.rax) (reg_low16 N.rdx)
+  | Just Refl <- testEquality w n32 =
+    go2 (reg_low32 N.rax) (reg_low32 N.rdx)
+  | Just Refl <- testEquality w n64 =
+    go2 rax rdx
+  | otherwise =
+    fail "div: Unknown bit width"
   where
+    w :: NatRepr n
+    w = bv_width v
     go2 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
-    go2 ax dx = do axv <- get ax
-                   dxv <- get dx
-                   go1 ax dx (bvCat dxv axv)
+    go2 ax dx = do
+      axv <- get ax
+      dxv <- get dx
+      do_exec_idiv ax dx (bvCat dxv axv) v
 
-    go1 :: MLocation m (BVType n)
-        -> MLocation m (BVType n)
-        -> Value m (BVType (n + n))
-        -> m ()
-    go1 quotL remL w = do
-      withLeqProof (addIsLeq (Proxy :: Proxy n) (Proxy :: Proxy n)) $ do
-      withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
-      let ext_v = sext (bv_width w) v
-          q     = w `bvSignedDiv` ext_v
-      exception false (is_zero v) DivideError -- divide by zero
-      exception false
-                (q `bvUlt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64))
-                DivideError -- q < - 2 ^ 63 + 1
-      exception false
-                (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvUlt` q)
-                DivideError -- 2 ^ 63 < q
-      set_undefined cf_loc
-      set_undefined of_loc
-      set_undefined sf_loc
-      set_undefined af_loc
-      set_undefined pf_loc
-      set_undefined zf_loc
-      quotL .= bvTrunc (bv_width v) q
-      remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
+do_exec_idiv :: forall m n
+              . (IsLocationBV m n)
+             => MLocation m (BVType n)
+                -- ^ Location to store quotient
+             -> MLocation m (BVType n)
+                -- ^ Location to store remainder
+             -> Value m (BVType (n + n))
+                -- ^ The dividend
+             -> Value m (BVType n)
+                -- ^ The divisor
+             -> m ()
+do_exec_idiv quotL remL w v = do
+  let wi = bv_width v
+  let dbl_wi = bv_width w
+  let wi_is_pos :: LeqProof 1 n
+      wi_is_pos = LeqProof
+  withLeqProof (leqAdd wi_is_pos wi) $ do
+  withLeqProof (addIsLeq wi wi) $ do
+  let ext_v = sext dbl_wi v
+      q     = w `bvSignedDiv` ext_v
+  exception false (is_zero v) DivideError -- divide by zero
+  exception false
+            (q `bvUlt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64))
+            DivideError -- q < - 2 ^ 63 + 1
+  exception false
+            (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvUlt` q)
+            DivideError -- 2 ^ 63 < q
+  set_undefined cf_loc
+  set_undefined of_loc
+  set_undefined sf_loc
+  set_undefined af_loc
+  set_undefined pf_loc
+  set_undefined zf_loc
+  quotL .= bvTrunc (bv_width v) q
+  remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
 
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
@@ -341,7 +352,10 @@ set_reg_pair upperL lowerL v = do
   upperL .= upper
 
 -- FIXME: is this the right way around?
-exec_mul :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
+exec_mul :: forall m n
+          . (IsLocationBV m n)
+         => Value m (BVType n)
+         -> m ()
 exec_mul v
   | Just Refl <- testEquality (bv_width v) n8  =
     go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
@@ -371,23 +385,29 @@ exec_mul v
       f r
 
 really_exec_imul :: forall m n
-                  . (IsLocationBV m n, 1 <= (n+n))
+                  . (IsLocationBV m n)
                  => Value m (BVType n)
                  -> Value m (BVType n)
                  -> (Value m (BVType (n + n)) -> m ())
                  -> m ()
-really_exec_imul v v' f = withAddLeq (bv_width v) (bv_width v') $ \sz -> do
-   let r  = sext sz v' `bvMul` sext sz v
-       (_, lower_r :: Value m (BVType n)) = bvSplit r
-   set_undefined af_loc
-   set_undefined pf_loc
-   set_undefined zf_loc
-   sf_loc .= msb lower_r
-   withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
-   let does_overflow = (r .=/=. sext sz lower_r)
-   of_loc .= does_overflow
-   cf_loc .= does_overflow
-   f r
+really_exec_imul v v' f = do
+  let w = bv_width v
+  let sz = addNat w w
+  let w_is_pos :: LeqProof 1 n
+      w_is_pos = LeqProof
+  withLeqProof (leqAdd w_is_pos w) $ do
+  withLeqProof (addIsLeq w w) $ do
+  let r :: Value m (BVType (n + n))
+      r  = sext sz v' .* sext sz v
+      (_, lower_r :: Value m (BVType n)) = bvSplit r
+  set_undefined af_loc
+  set_undefined pf_loc
+  set_undefined zf_loc
+  sf_loc .= msb lower_r
+  let does_overflow = (r .=/=. sext sz lower_r)
+  of_loc .= does_overflow
+  cf_loc .= does_overflow
+  f r
 
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
@@ -623,7 +643,7 @@ exec_test l v = do
 exec_setcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType 8) -> m ()
 exec_setcc cc l = do
   c <- cc
-  l .= mux c 1 0
+  l .= mux c (bvKLit 1) (bvKLit 0)
 
 -- ** Control Transfer Instructions
 
@@ -682,19 +702,19 @@ exec_movs rep_pfx sz = do
   let szv        = bvLit n64 (natValue sz)
   if rep_pfx
     then do count <- get rcx
-            let nbytes_off = (count `bvSub` 1) `bvMul` szv
+            let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
                 nbytes     = count `bvMul` szv
                 move_src  = mux df (src  `bvSub` nbytes_off) src
                 move_dest = mux df (dest `bvSub` nbytes_off) dest
             -- FIXME: we might need direction for overlapping regions
             memmove sz count move_src move_dest
-            rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
-            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
-            rcx .= 0
+            rsi .= mux df (src  .- nbytes) (src  .+ nbytes)
+            rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
+            rcx .= bvKLit 0
     else do v <- get $ mkBVAddr sz src
             mkBVAddr sz dest .= v
-            rsi .= mux df (src  `bvSub` szv) (src  `bvAdd` szv)
-            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+            rsi .= mux df (src  .- szv) (src  .+ szv)
+            rdi .= mux df (dest .- szv) (dest .+ szv)
 
 -- FIXME: can also take rep prefix
 -- | CMPS/CMPSB Compare string/Compare byte string
@@ -708,7 +728,7 @@ exec_cmps repz_pfx sz = do
   dest <- get rdi
   if repz_pfx
     then do count <- get rcx
-            ifte_ (count .=. 0)
+            ifte_ (count .=. bvKLit 0)
               (return ())
               (do_memcmp df src dest count)
     else do v' <- get $ mkBVAddr sz dest
@@ -720,10 +740,10 @@ exec_cmps repz_pfx sz = do
     do_memcmp df src dest count = do
       nsame <- memcmp sz count df src dest
       let equal = (nsame .=. count)
-          nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` 1))
+          nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
       -- we need to set the flags as if the last comparison was done, hence this.
-      let lastWordBytes = (nwordsSeen `bvSub` 1) `bvMul` szv
+      let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` szv
           lastSrc  = mux df (src  `bvSub` lastWordBytes) (src  `bvAdd` lastWordBytes)
           lastDest = mux df (dest `bvSub` lastWordBytes) (dest `bvAdd` lastWordBytes)
 
@@ -736,7 +756,7 @@ exec_cmps repz_pfx sz = do
 
       rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
       rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
-      rcx .= (count `bvSub` nwordsSeen)
+      rcx .= (count .- nwordsSeen)
 
 -- SCAS/SCASB Scan string/Scan byte string
 -- SCAS/SCASW Scan string/Scan word string
@@ -757,13 +777,13 @@ exec_stos rep_pfx l = do
   let szv        = bvLit n64 (natValue (loc_width l))
   if rep_pfx
     then do count <- get rcx
-            let nbytes_off = (count `bvSub` 1) `bvMul` szv
+            let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
                 nbytes     = count `bvMul` szv
                 move_dest = mux df (dest `bvSub` nbytes_off) dest
             -- FIXME: we might need direction for overlapping regions
             memset count v move_dest
             rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
-            rcx .= 0
+            rcx .= bvKLit 0
     else do mkBVAddr (loc_width l) dest .= v
             rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
 
@@ -1134,13 +1154,13 @@ exec_subsd r y = modify (\x -> fpSub DoubleFloatRepr x y) (xmm_low64 r)
 -- MULPD Multiply packed double-precision floating-point values
 
 -- | MULSD Multiply scalar double-precision floating-point values
-exec_mulsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
+exec_mulsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
 exec_mulsd r y = modify (\x -> fpMul DoubleFloatRepr x y) (xmm_low64 r)
 
 -- DIVPD Divide packed double-precision floating-point values
 
 -- | DIVSD Divide scalar double-precision floating-point values
-exec_divsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
+exec_divsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
 exec_divsd r y = modify (\x -> fpDiv DoubleFloatRepr x y) (xmm_low64 r)
 
 -- SQRTPD Compute packed square roots of packed double-precision floating-point values
@@ -1164,7 +1184,7 @@ exec_divsd r y = modify (\x -> fpDiv DoubleFloatRepr x y) (xmm_low64 r)
 -- COMISD Perform ordered comparison of scalar double-precision floating-point values and set flags in EFLAGS register
 
 -- | UCOMISD Perform unordered comparison of scalar double-precision floating-point values and set flags in EFLAGS register.
-exec_ucomisd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
+exec_ucomisd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
 -- Invalid (if SNaN operands), Denormal.
 exec_ucomisd l v = do v' <- get lower_l
                       let unordered = (isNaN fir v .|. isNaN fir v')

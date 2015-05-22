@@ -6,8 +6,6 @@ module Reopt
   , printExecutableAddressesInGlobalData
   , showBytes
   , slice
-    -- * Re-exports
-  , Reopt.Loader.loadElf
   ) where
 
 import Control.Applicative
@@ -119,7 +117,7 @@ printSectionDisassembly s = do
 -- identifying possible entry points via global data.
 printExecutableAddressesInGlobalData :: Elf Word64 -> IO ()
 printExecutableAddressesInGlobalData e = do
-  mem <- loadElf e
+  mem <- memoryForElfSegments e
   let exec_words :: [Word64]
       exec_words = [ w | w <- segmentAsWord64le =<< memSegments mem
                    , mem & addrHasPermissions w pf_x

@@ -232,7 +232,7 @@ instance Pretty BlockLabel where
   pretty (DecompiledBlock a)   | a >= 0 = text ("block_" ++ showHex a "")
   pretty (GeneratedBlock p w)  | p >= 0 = text ("subblock_" ++ showHex p "_" ++ show w)
   pretty _ = error "Pretty BlockLabel"
-  
+
 ------------------------------------------------------------------------
 -- Block
 
@@ -270,8 +270,8 @@ hasRetComment b = any isCallComment (blockStmts b)
 
 data StmtLoc tp where
   MemLoc     :: !(Value (BVType 64)) -> TypeRepr tp -> StmtLoc tp
-  ControlLoc :: !(N.RegisterName N.Control) -> StmtLoc (BVType 64)
-  DebugLoc   :: !(N.RegisterName N.Debug)   -> StmtLoc (BVType 64)
+  ControlLoc :: !(N.RegisterName 'N.Control) -> StmtLoc (BVType 64)
+  DebugLoc   :: !(N.RegisterName 'N.Debug)   -> StmtLoc (BVType 64)
   FS :: StmtLoc (BVType 16)
   GS :: StmtLoc (BVType 16)
 
@@ -524,13 +524,13 @@ data App f tp where
             -> App f (BVType 80)
 
   -- Concatenate two bitvectors together (low-bits are first)
-  ConcatV :: {-#UNPACK #-} !(NatRepr n)
+  ConcatV :: !(NatRepr n)
           -> !(f (BVType n))
           -> !(f (BVType n))
           -> App f (BVType (n+n))
 
   -- Get upper half of bitvector
-  UpperHalf :: {-# UNPACK #-} !(NatRepr n)
+  UpperHalf :: !(NatRepr n)
             -> !(f (BVType (n+n)))
             -> App f (BVType n)
 

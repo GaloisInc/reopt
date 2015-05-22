@@ -18,7 +18,7 @@
 -- FIXME: only really useful for unsigned?
 module Reopt.Domains.StridedInterval
        ( StridedInterval(..)
-         -- Constructors 
+         -- Constructors
        , singleton, mkStridedInterval, fromFoldable
          -- Predicates
        , isSingleton, isTop, member, isSubsetOf
@@ -90,7 +90,7 @@ singleton tp v = StridedInterval { typ = tp
 -- | Make an interval given the start, end, and stride. Note that this
 -- will round up if (start - end) is not a multiple of the stride,
 -- i.e., @mkStr
-mkStridedInterval :: TypeRepr tp -> Bool 
+mkStridedInterval :: TypeRepr tp -> Bool
                   -> Integer -> Integer -> Integer
                   -> StridedInterval tp
 mkStridedInterval tp roundUp start end s
@@ -135,7 +135,7 @@ member :: Integer -> StridedInterval tp -> Bool
 member _ EmptyInterval = False
 member n si = base si <= n
               && (n - base si) `mod` stride si == 0
-              && (n - base si) `div` stride si <= range si 
+              && (n - base si) `div` stride si <= range si
 
 -- is the set represented by si1 contained in si2?
 isSubsetOf :: StridedInterval (BVType n)
@@ -160,7 +160,7 @@ lub EmptyInterval{} si = si
 lub si EmptyInterval{} = si
 -- FIXME: make more precise?
 lub si1 si2
-  | Just s <- isSingleton si1 = lubSingleton s si2 
+  | Just s <- isSingleton si1 = lubSingleton s si2
   | Just s <- isSingleton si2 = lubSingleton s si1
   | otherwise =
       mkStridedInterval (typ si1) True lower upper
@@ -183,9 +183,9 @@ lubSingleton s si
   | member s si  = si
   | Just s' <- isSingleton si =
       let l = (min s s')
-          u = (max s s') 
+          u = (max s s')
       in mkStridedInterval (typ si) True l u (u - l)
-  | s < base si  = go s si_upper (base si) 
+  | s < base si  = go s si_upper (base si)
   -- | si_upper < s = go (base si) s si_upper
   | otherwise    = go (base si) (max s si_upper) s
   where
@@ -221,7 +221,7 @@ glb si1 si2
    -- base1 + n * stride1 = base2 + m * stride2
    --
    -- or
-   -- 
+   --
    --    n * stride1 - m * stride2 = base2 - base1
    --
    -- where n, m are integers s.t. the above holds, we want also that
@@ -247,9 +247,9 @@ glb si1 si2
 -- ceiling (max (n * c / - a, m * c / - b)) <= t
 -- and
 -- t <= floor (min ((a_max * gcd - n * c) / b, b_max * gcd - m * c) / a)
-    
+
 solveLinearDiophantine :: Integer -> Integer -> Integer
-                          -> Integer -> Integer 
+                          -> Integer -> Integer
                           -> Maybe (Integer, Integer)
 solveLinearDiophantine a b c a_max b_max
   | c `rem` g /= 0 = Nothing
@@ -264,7 +264,7 @@ solveLinearDiophantine a b c a_max b_max
                   (floor_quot (b_max * g - m * c) a)
 
 -- calculates ceil(x/y)
-ceil_quot :: Integral a => a -> a -> a    
+ceil_quot :: Integral a => a -> a -> a
 ceil_quot x y = x `quot` y + (if x `rem` y == 0 then 0 else 1)
 
 floor_quot :: Integral a => a -> a -> a
@@ -283,8 +283,8 @@ prop_sld a b c d e = not (isNothing v) ==> p
          _ -> True
     v = solveLinearDiophantine (getPositive a) (getPositive b) (getNonZero c)
                                (getPositive d) (getPositive e)
-        
-      
+
+
 -- | Returns the gcd, and n and m s.t. n * a + m * b = g
 -- clagged, fixed, from http://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm
 -- this is presumably going to be slower than the gmp version :(
@@ -318,7 +318,7 @@ top sz = StridedInterval { typ = BVTypeRepr sz
                          , stride = 1 }
 
 clamp :: NatRepr u -> StridedInterval (BVType u) -> StridedInterval (BVType u)
-clamp sz v = trunc v sz 
+clamp sz v = trunc v sz
 
 bvadd :: NatRepr u
       -> StridedInterval (BVType u)
@@ -339,7 +339,7 @@ bvadd sz si1 si2 =
                              , stride = m }
   where
     m = gcd (stride si1) (stride si2)
-    r = (range si1 * (stride si1 `div` m)) + (range si2 * (stride si2 `div` m)) 
+    r = (range si1 * (stride si1 `div` m)) + (range si2 * (stride si2 `div` m))
 
 prop_bvadd ::  StridedInterval (BVType 64)
             -> StridedInterval (BVType 64)
@@ -426,7 +426,7 @@ trunc si sz
 
     si'  = si { typ = typ top'
               , base = toUnsigned sz (base si) }
-    top' = top sz      
+    top' = top sz
 
 prop_trunc :: StridedInterval (BVType 64)
               -> Positive (Small Integer)
@@ -474,7 +474,7 @@ instance Arbitrary (StridedInterval (BVType 64)) where
   arbitrary = frequency [ (1, return EmptyInterval)
                         , (9, si) ]
     where
-      si = do lower <- arbitrarySizedNatural
-              upper <- suchThat arbitrarySizedNatural (>= lower)
-              s     <- suchThat arbitrarySizedNatural (> 0)
+      si = do lower <- sized $ \n -> choose (0, toInteger n)
+              upper <- sized $ \n -> choose (lower, toInteger n)
+              s     <- sized $ \n -> choose (1, toInteger n)
               return $ mkStridedInterval (BVTypeRepr n64) True lower upper s

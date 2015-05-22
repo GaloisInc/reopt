@@ -27,9 +27,9 @@ module Reopt.Semantics.CFGDiscovery
        ) where
 
 import           Control.Applicative
-import           Control.Exception
 import           Control.Lens
 import           Control.Monad.State.Strict
+import qualified Data.Foldable as Fold
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -38,6 +38,8 @@ import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import           Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
@@ -92,10 +94,22 @@ data InterpState
                    -- | Abstract state common to all code that can be jumped to in memory.
                  , memBlockState :: !AbsBlockState
                    -- | Set of addresses to explore next.
-                 , _frontier :: !(Set CodeAddr)
+                 , _frontier :: !(Map CodeAddr FrontierReason)
                    -- | Abstract state
                  , _absState :: !AbsState
                  }
+
+data FrontierReason
+   = InInitialData
+     -- | Exploring because the given block writes it to memory.
+   | InWrite       !BlockLabel
+     -- | Exploring because the given block stores address as a
+     -- return address.
+   | ReturnAddress !BlockLabel
+     -- | Exploring because the given block jumps here.
+   | NextIP !BlockLabel
+   | StartAddr
+  deriving (Show)
 
 emptyInterpState :: Memory Word64 -> CodeAddr -> InterpState
 emptyInterpState mem start = InterpState
@@ -105,7 +119,7 @@ emptyInterpState mem start = InterpState
       , _failedAddrs = Set.empty
       , _codePointersInMem = Set.empty
       , memBlockState = defBlockState 0
-      , _frontier     = Set.singleton start
+      , _frontier     = Map.singleton start StartAddr
       , _absState     = emptyAbsState start
       }
 
@@ -121,7 +135,7 @@ failedAddrs = lens _failedAddrs (\s v -> s { _failedAddrs = v })
 codePointersInMem :: Simple Lens InterpState (Set CodeAddr)
 codePointersInMem = lens _codePointersInMem (\s v -> s { _codePointersInMem = v })
 
-frontier :: Simple Lens InterpState (Set CodeAddr)
+frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })
 
 absState :: Simple Lens InterpState AbsState
@@ -159,8 +173,11 @@ getAbsBlockState a = do
 
 -- | This is the worker for getBlock, in the case that the cfg doesn't
 -- contain the address of interest.
-reallyGetBlock :: CodeAddr -> State InterpState (Maybe Block)
-reallyGetBlock addr = do
+reallyGetBlock :: FrontierReason
+                  -- ^ Reason we are exploring block.
+               -> CodeAddr
+               -> State InterpState (Maybe Block)
+reallyGetBlock rsn addr = do
   mem <- gets memory
   -- Get top
   ab <- getAbsBlockState addr
@@ -172,7 +189,7 @@ reallyGetBlock addr = do
   r <- subMonad genState $ do
     liftEither $ disassembleBlock mem loc
   case r of
-   Left _e -> trace ("Block failed: 0x" ++ showHex addr "") $ do
+   Left _e -> trace ("Block failed: 0x" ++ showHex addr "" ++ ", Reason " ++ show rsn) $ do
      failedAddrs %= Set.insert addr
      return Nothing
    Right (bs, next_ip) -> do
@@ -183,8 +200,8 @@ reallyGetBlock addr = do
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all it's children are
 -- present in the cfg (assuming successful disassembly)
-getBlock :: CodeAddr -> State InterpState (Maybe Block)
-getBlock addr = do
+getBlock :: FrontierReason -> CodeAddr -> State InterpState (Maybe Block)
+getBlock rsn addr = do
   m_b <- lookupBlock addr
   case m_b of
     Just b -> return (Just b)
@@ -193,7 +210,7 @@ getBlock addr = do
       if failed then
         return Nothing
       else
-        reallyGetBlock addr
+        reallyGetBlock rsn addr
 
 ------------------------------------------------------------------------
 -- Transfer stmts
@@ -210,42 +227,45 @@ transferStmt stmt =
       put $ addMemWrite addr v regs
     _ -> return ()
 
-recordEscapedCodePointer :: Word64 -> InterpState -> InterpState
-recordEscapedCodePointer val s
+recordEscapedCodePointer :: Word64 -> FrontierReason -> InterpState -> InterpState
+recordEscapedCodePointer val rsn s
   | Set.member val (s^.codePointersInMem) = s
-  | otherwise = s & codePointersInMem %~ Set.insert val
-                  & absState          %~ Map.delete val
-                  & frontier          %~ Set.insert val
+  | otherwise =
+     s & codePointersInMem %~ Set.insert val
+       & absState          %~ Map.delete val
+       & frontier          %~ Map.insert val rsn
 
-recordEscapedCodePointers :: [Word64] -> InterpState -> InterpState
-recordEscapedCodePointers = flip (foldl' (flip recordEscapedCodePointer))
+recordEscapedCodePointers :: [Word64] -> FrontierReason -> InterpState -> InterpState
+recordEscapedCodePointers addrs rsn s0 =
+  foldl' (\s v -> recordEscapedCodePointer v rsn s) s0 addrs
 
-recordWriteStmt :: AbsRegs -> Stmt -> State InterpState ()
-recordWriteStmt regs (Write (MemLoc _addr _) v)
+recordWriteStmt :: BlockLabel -> AbsRegs -> Stmt -> State InterpState ()
+recordWriteStmt lbl regs (Write (MemLoc _addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , Just sz <- size av
   , sz < 100 -- FIXME: GIANT HACK (avoids explosion in concretize)
   , Just vs1 <- concretize av = do
     mem <- gets memory
-    let vs2 = filter (isCodePointer mem) $ map fromInteger (Set.toList vs1)
-    modify $ recordEscapedCodePointers vs2
+    let vs2 = filter (isCodePointer mem) $ fmap fromInteger (Set.toList vs1)
+    modify $ recordEscapedCodePointers vs2 (InWrite lbl)
     where
       av = transferValue regs v
-recordWriteStmt _ _ = return ()
+recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
+{-
 transferStmtsTracing :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmtsTracing r stmts = execStateT (mapM_ go stmts) r
   where
-    go stmt = do regs <- get
-                 traceM (show (pretty stmt))
+    go stmt = do traceM (show (pretty stmt))
                  transferStmt stmt
                  case stmt of
                   AssignStmt a -> do rhs <- use (absAssignments . assignLens a)
                                      traceM (show (pretty rhs))
                   _ -> return ()
+-}
 
 finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
 finalBlockState a g
@@ -286,16 +306,19 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
 
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
-mergeBlock :: AbsBlockState
+mergeBlock :: FrontierReason
+              -- ^ Reason we are going to explore the next address.
+           -> AbsBlockState
+              -- ^ Block state after executing instructions.
            -> CodeAddr
+              -- ^ Address we are trying to reach.
            -> State InterpState ()
-mergeBlock ab0 addr = do
+mergeBlock rsn ab0 addr = do
   s <- get
   when (Set.member addr (s^.codePointersInMem) == False) $ do
     let upd new = do
           absState %= Map.insert addr new
-          frontier %= Set.insert addr
-
+          frontier %= Map.insert addr rsn
     let ab = ab0 & setAbsIP addr
     case Map.lookup addr (s^.absState) of
       -- We have seen this block before, so need to join and see if
@@ -336,6 +359,7 @@ isWriteTo (Write (MemLoc a _) val) expected tp
 isWriteTo _ _ _ = Nothing
 
 -- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
+-- an address marked executable in @mem@ to @addr@.
 isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
 isCodePointerWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
@@ -351,7 +375,7 @@ refineValue :: Value tp
                -> AbsValue tp
                -> AbsRegs
                -> AbsRegs
-refineValue v@(BVValue _n _val) av regs = regs
+refineValue (BVValue _n _val) _av regs = regs
 refineValue (Initial r) av regs =
   regs & (absInitialRegs . register r) %~ flip meet av
 refineValue (AssignedValue ass@(Assignment _ rhs)) av regs
@@ -359,7 +383,7 @@ refineValue (AssignedValue ass@(Assignment _ rhs)) av regs
   | av_old `leq` av = regs
   -- av adds new information, we need to refine any parents
   | EvalApp app <- rhs = refineApp app av' regs'
-  -- no parents, but update ass 
+  -- no parents, but update ass
   | otherwise          = regs'
   where
     av_old = regs ^. absAssignments ^. assignLens ass
@@ -386,7 +410,7 @@ refineApp app av regs =
    --          glb l_regs r_regs
    --        else -- one is false, so we do a join
    --          lub l_regs r_regs
-   
+
    -- basically less-than: does x - y overflow? only if x < y.
    UsbbOverflows sz l r (BVValue _ 0)
      | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
@@ -416,20 +440,20 @@ refineApp app av regs =
   -- Mux can let us infer the condition?
    _ -> regs
   where
-    getAssignApp (AssignedValue (Assignment _ (EvalApp app))) = Just app
+    getAssignApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
     getAssignApp _ = Nothing
 
 refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLeq tp x y b regs
   -- y < x
   | b == 0     = refineValue x x_lt (refineValue y y_lt regs)
-  -- x <= y 
+  -- x <= y
   | otherwise  = refineValue x x_leq (refineValue y y_leq regs)
   where
     x_av = transferValue regs x
     y_av = transferValue regs y
     (x_leq, y_leq)   = abstractLeq tp x_av y_av
-    (y_lt, x_lt)     = abstractLt  tp y_av x_av 
+    (y_lt, x_lt)     = abstractLt  tp y_av x_av
 
 
 refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
@@ -442,7 +466,7 @@ refineLt tp x y b regs
     x_av = transferValue regs x
     y_av = transferValue regs y
     (x_lt, y_lt)   = abstractLt tp x_av y_av
-    (y_leq, x_leq) = abstractLeq tp y_av x_av 
+    (y_leq, x_leq) = abstractLeq tp y_av x_av
 
 -- -- FIXME: bottom
 -- refineLVal :: Simple Lens AbsRegs (AbsValue tp)
@@ -450,7 +474,7 @@ refineLt tp x y b regs
 --               -> AbsRegs
 --               -> AbsRegs
 -- refineLVal l (BVValue n val) regs =
---   -- FIXME: if val \notin absinit l then we should return bottom  
+--   -- FIXME: if val \notin absinit l then we should return bottom
 --   regs & l .~ abstractSingleton n val
 -- refineLVal l (Initial r) regs =
 --   regs & l .~ new_v & (absInitialRegs . register r) .~ new_v
@@ -466,63 +490,71 @@ refineLt tp x y b regs
 --     new_v  = meet abs_l abs_r
 
 
--- | Returns true if it looks like block ends with a call.
+-- | Attempt to identify the write to a stack return address, returning
+-- instructions prior to that write , and return  values.
 checkBlockCall :: Memory Word64
-               -> AbsRegs
                -> [Stmt]
                -> X86State Value
-               -> State InterpState [Word64]
-checkBlockCall mem regs stmts s = go (reverse stmts)
+               -> (Seq Stmt, [Word64])
+checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
-        go (stmt:r)
-          | Just ret <- isCodePointerWriteTo mem stmt next_sp = do
-            mapM_ (recordWriteStmt regs) r
-            return [ret]
-        go r@(Write{}:_) = do
-          mapM_ (recordWriteStmt regs) r
-          return []
-        go (_:r) = go r
-        go [] = return []
+        go stmts =
+          case Seq.viewr stmts of
+            Seq.EmptyR ->
+              (stmts, [])
+            prev Seq.:> stmt
+              | Just ret <- isCodePointerWriteTo mem stmt next_sp ->
+                (prev, [ret])
+              | Write{} <- stmt ->
+                (stmts, [])
+              | otherwise ->
+                go prev
 
-transfer :: CodeAddr -> State InterpState ()
-transfer addr = do
-  let goBlock :: Block   -- ^ Block to start from.
+transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
-      goBlock b regs = do
-        regs' <- transferStmts regs (blockStmts b)
+transferBlock b regs = do
+  regs' <- transferStmts regs (blockStmts b)
+  -- FIXME: we should propagate c back to the initial block, not just b
+  case blockTerm b of
+    Branch c lb rb -> do
+      mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
+      g <- use cfg
+      let Just l = findBlock g lb
+          l_regs = refineValue c (abstractSingleton n1 1) regs'
+      let Just r = findBlock g rb
+          r_regs = refineValue c (abstractSingleton n1 0) regs'
+      -- We re-transfer the stmts to propagate any changes from
+      -- the above refineValue.  This could be more efficient by
+      -- tracking what (if anything) changed.  We also might
+      -- need to keep going back and forth until we reach a
+      -- fixpoint
+      transferBlock l =<< transferStmts l_regs (blockStmts b)
+      transferBlock r =<< transferStmts r_regs (blockStmts b)
 
-        -- FIXME: we should propagate c back to the initial block, not just b
-        case blockTerm b of
-          Branch c lb rb -> do
-            mapM_ (recordWriteStmt regs') (blockStmts b)
-            g <- use cfg
-            let Just l = findBlock g lb
-                l_regs = refineValue c (abstractSingleton n1 1) regs'
-            let Just r = findBlock g rb
-                r_regs = refineValue c (abstractSingleton n1 0) regs'
-            -- We re-transfer the stmts to propagate any changes from
-            -- the above refineValue.  This could be more efficient by
-            -- tracking what (if anything) changed.  We also might
-            -- need to keep going back and forth until we reach a
-            -- fixpoint
-            goBlock l =<< transferStmts l_regs (blockStmts b)
-            goBlock r =<< transferStmts r_regs (blockStmts b)
+    FetchAndExecute s' -> do
+      mem <- gets memory
+      let (prev_stmts, rets) = checkBlockCall mem (blockStmts b) s'
+      Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
 
-          FetchAndExecute s' -> do
-            mem <- gets memory
-            rets <- checkBlockCall mem regs' (blockStmts b) s'
-            let abst = finalAbsBlockState regs' s'
-            -- Look for new ips.
-            let ips :: [Word64]
-                ips = case concretize (abst^.absX86State^.curIP) of
-                        Nothing -> []
-                        Just ips' -> fmap fromInteger (Set.toList ips')
-            mapM_ (mergeBlock abst) (rets ++ ips)
+      let lbl = blockLabel b
+      let abst = finalAbsBlockState regs' s'
+      mapM_ (mergeBlock (ReturnAddress lbl) abst) rets
+      -- Look for new ips.
+      case concretize (abst^.absX86State^.curIP) of
+        Nothing ->
+          return ()
+        Just ips -> do
+          Fold.forM_ ips $ \addr -> do
+            when (isCodePointer mem (fromInteger addr)) $ do
+              mergeBlock (NextIP lbl) abst (fromInteger addr)
 
-  doMaybe (getBlock addr) () $ \root -> do
+
+transfer :: FrontierReason -> CodeAddr -> State InterpState ()
+transfer rsn addr = do
+  doMaybe (getBlock rsn addr) () $ \root -> do
     ab <- getAbsBlockState addr
-    goBlock root (initAbsRegs ab)
+    transferBlock root (initAbsRegs ab)
 
 ------------------------------------------------------------------------
 -- Main loop
@@ -533,7 +565,6 @@ data FinalCFG = FinalCFG { finalCFG :: !CFG
                          , finalFailedAddrs :: !(Set CodeAddr)
                          }
 
-
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.
                -> CodeAddr
@@ -542,7 +573,7 @@ cfgFromAddress :: Memory Word64
 cfgFromAddress mem start = r
   where
     code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
-    s0 = recordEscapedCodePointers code_pointers
+    s0 = recordEscapedCodePointers code_pointers InInitialData
        $ emptyInterpState mem start
 
     s' = go s0
@@ -556,9 +587,9 @@ cfgFromAddress mem start = r
     go :: InterpState
        -> InterpState
     go st =
-      case Set.minView (st^.frontier) of
+      case Map.minViewWithKey (st^.frontier) of
         Nothing -> st
-        Just (addr, next_roots) ->
+        Just ((addr,rsn), next_roots) ->
           let st_pre = st & frontier .~ next_roots
-              st_post = flip execState st_pre $ transfer addr
+              st_post = flip execState st_pre $ transfer rsn addr
            in go st_post

@@ -34,19 +34,19 @@ data RegisterClass = ProgramCounter
                    | XMM
 
 data RegisterClassRepr (r :: RegisterClass) where
-  ProgramCounterRepr  :: RegisterClassRepr ProgramCounter
-  GPRepr              :: RegisterClassRepr GP
-  FlagRepr            :: RegisterClassRepr Flag
-  SegmentRepr         :: RegisterClassRepr Segment
-  ControlRepr         :: RegisterClassRepr Control
-  DebugRepr           :: RegisterClassRepr Debug
-  X87_FPURepr         :: RegisterClassRepr X87_FPU
-  X87_StatusRepr      :: RegisterClassRepr X87_Status
-  X87_TopRepr         :: RegisterClassRepr X87_Top
-  X87_TagRepr         :: RegisterClassRepr X87_Tag
-  X87_ControlRepr     :: RegisterClassRepr X87_Control
-  X87_ControlMaskRepr :: RegisterClassRepr X87_ControlMask
-  XMMRepr             :: RegisterClassRepr XMM
+  ProgramCounterRepr  :: RegisterClassRepr 'ProgramCounter
+  GPRepr              :: RegisterClassRepr 'GP
+  FlagRepr            :: RegisterClassRepr 'Flag
+  SegmentRepr         :: RegisterClassRepr 'Segment
+  ControlRepr         :: RegisterClassRepr 'Control
+  DebugRepr           :: RegisterClassRepr 'Debug
+  X87_FPURepr         :: RegisterClassRepr 'X87_FPU
+  X87_StatusRepr      :: RegisterClassRepr 'X87_Status
+  X87_TopRepr         :: RegisterClassRepr 'X87_Top
+  X87_TagRepr         :: RegisterClassRepr 'X87_Tag
+  X87_ControlRepr     :: RegisterClassRepr 'X87_Control
+  X87_ControlMaskRepr :: RegisterClassRepr 'X87_ControlMask
+  XMMRepr             :: RegisterClassRepr 'XMM
 
 {-
 type family NRegisters (r :: RegisterClass) :: Nat where
@@ -75,76 +75,74 @@ nRegisters XMMRepr            = knownNat
 -}
 
 type family RegisterClassBits (cl :: RegisterClass) :: Nat where
-  RegisterClassBits ProgramCounter = 64
-  RegisterClassBits GP             = 64
-  RegisterClassBits Flag           = 1
-  RegisterClassBits Segment        = 16
-  RegisterClassBits Debug          = 64
-  RegisterClassBits Control        = 64
-  RegisterClassBits X87_FPU         = 80
-  RegisterClassBits X87_Status      = 1
-  RegisterClassBits X87_Top         = 3
-  RegisterClassBits X87_Tag         = 2
-  RegisterClassBits X87_ControlMask = 1
-  RegisterClassBits X87_Control     = 2
-  RegisterClassBits XMM             = 128
+  RegisterClassBits 'ProgramCounter = 64
+  RegisterClassBits 'GP             = 64
+  RegisterClassBits 'Flag           = 1
+  RegisterClassBits 'Segment        = 16
+  RegisterClassBits 'Debug          = 64
+  RegisterClassBits 'Control        = 64
+  RegisterClassBits 'X87_FPU         = 80
+  RegisterClassBits 'X87_Status      = 1
+  RegisterClassBits 'X87_Top         = 3
+  RegisterClassBits 'X87_Tag         = 2
+  RegisterClassBits 'X87_ControlMask = 1
+  RegisterClassBits 'X87_Control     = 2
+  RegisterClassBits 'XMM             = 128
 
 
 type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 
 data RegisterName cl where
-  IPReg      :: RegisterName ProgramCounter
+  IPReg      :: RegisterName 'ProgramCounter
 
-  GPReg      :: !Int -> RegisterName GP
+  GPReg      :: !Int -> RegisterName 'GP
 
-  SegmentReg :: !Int -> RegisterName Segment
+  SegmentReg :: !Int -> RegisterName 'Segment
 
   -- One of 32 initial flag registers.
-  FlagReg    :: !Int -> RegisterName Flag
+  FlagReg    :: !Int -> RegisterName 'Flag
 
-  ControlReg :: !Int -> RegisterName Control
+  ControlReg :: !Int -> RegisterName 'Control
 
-  X87StatusReg :: !Int -> RegisterName X87_Status
-  X87TopReg    :: RegisterName X87_Top
+  X87StatusReg :: !Int -> RegisterName 'X87_Status
+  X87TopReg    :: RegisterName 'X87_Top
 
   -- FIXME: These are currently read-only
-  X87ControlReg :: !Int -> RegisterName X87_ControlMask
+  X87ControlReg :: !Int -> RegisterName 'X87_ControlMask
 
-  X87PC      :: RegisterName X87_Control
-  X87RC      :: RegisterName X87_Control
+  X87PC      :: RegisterName 'X87_Control
+  X87RC      :: RegisterName 'X87_Control
 
   -- X87 tag register.
-  X87TagReg :: !Int -> RegisterName X87_Tag
+  X87TagReg :: !Int -> RegisterName 'X87_Tag
 
   -- One of 8 fpu/mmx registers.
-  X87FPUReg :: !Int -> RegisterName X87_FPU
+  X87FPUReg :: !Int -> RegisterName 'X87_FPU
 
   -- One of 8 XMM registers
-  XMMReg :: !Int -> RegisterName XMM
+  XMMReg :: !Int -> RegisterName 'XMM
 
-  DebugReg :: !Int -> RegisterName Debug
+  DebugReg :: !Int -> RegisterName 'Debug
 
-
-
-gpRegs :: [RegisterName GP]
+gpRegs :: [RegisterName 'GP]
 gpRegs = [GPReg i | i <- [0..15]]
 
-flagRegs :: [RegisterName Flag]
+flagRegs :: [RegisterName 'Flag]
 flagRegs = [FlagReg i | i <- [0,2,4,6,7,8,9,10,11]]
 
-x87StatusRegs :: [RegisterName X87_Status]
+x87StatusRegs :: [RegisterName 'X87_Status]
 x87StatusRegs = [X87StatusReg i | i <- [0..15]]
 
-x87ControlRegs :: [RegisterName X87_ControlMask]
+x87ControlRegs :: [RegisterName 'X87_ControlMask]
 x87ControlRegs = [X87ControlReg i | i <- [0..15]]
 
-x87TagRegs :: [RegisterName X87_Tag]
+x87TagRegs :: [RegisterName 'X87_Tag]
 x87TagRegs = [X87TagReg i | i <- [0..7]]
 
-x87FPURegs :: [RegisterName X87_FPU]
+x87FPURegs :: [RegisterName 'X87_FPU]
 x87FPURegs = [X87FPUReg i | i <- [0..7]]
 
-xmmRegs :: [RegisterName XMM]
+xmmRegs :: [RegisterName 'XMM]
 xmmRegs = [XMMReg i | i <- [0..7]]
 
 instance ShowF RegisterName where
@@ -285,11 +283,11 @@ data BitConversion n = -- forall cl m. (m + TypeBits (RegisterType cl) <= n)
                      | forall m. (m + 1 <= n) => ConstantBit Bool (NatRepr m)
 
 -- | Instruction Pointer
-rip :: RegisterName ProgramCounter
+rip :: RegisterName 'ProgramCounter
 rip = IPReg
 
 -- | GPRs
-rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp :: RegisterName GP
+rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp :: RegisterName 'GP
 rax = GPReg 0
 rcx = GPReg 1
 rdx = GPReg 2
@@ -308,7 +306,7 @@ gpNames = V.fromList $
   ++ map ((++) "r" . show) [(8 :: Int) .. 15]
 
 -- | Segments
-es, cs, ss, ds, fs, gs :: RegisterName Segment
+es, cs, ss, ds, fs, gs :: RegisterName 'Segment
 es = SegmentReg 0
 cs = SegmentReg 1
 ss = SegmentReg 2
@@ -316,7 +314,7 @@ ds = SegmentReg 3
 fs = SegmentReg 4
 gs = SegmentReg 5
 
-instance Eq (RegisterName Segment) where
+instance Eq (RegisterName 'Segment) where
   (SegmentReg n) == (SegmentReg n') = n == n'
 
 
@@ -324,7 +322,7 @@ segmentNames :: V.Vector String
 segmentNames = V.fromList ["es", "cs", "ss", "ds", "fs", "gs"]
 
 -- | Flags
-cf, pf, af, zf, sf, tf, iflag, df, oflag :: RegisterName Flag
+cf, pf, af, zf, sf, tf, iflag, df, oflag :: RegisterName 'Flag
 cf    = FlagReg 0
 pf    = FlagReg 2
 af    = FlagReg 4
@@ -375,7 +373,7 @@ flagBitPacking = BitPacking knownNat $ flagBits ++ constants
 
 -- | x87 flags
 x87ie, x87de, x87ze, x87oe, x87ue, x87pe, x87ef, x87es,
-  x87c0, x87c1, x87c2, x87c3 :: RegisterName X87_Status
+  x87c0, x87c1, x87c2, x87c3 :: RegisterName 'X87_Status
 x87ie = X87StatusReg 0
 x87de = X87StatusReg 1
 x87ze = X87StatusReg 2
@@ -421,7 +419,7 @@ x87ControlNames = V.fromList $
   ++ replicate 6 "RESERVED"
   ++ ["x"]
 
-x87im, x87dm, x87zm, x87om, x87um, x87pm, x87x :: RegisterName X87_ControlMask
+x87im, x87dm, x87zm, x87om, x87um, x87pm, x87x :: RegisterName 'X87_ControlMask
 x87im = X87ControlReg 0
 x87dm = X87ControlReg 1
 x87zm = X87ControlReg 2
@@ -451,21 +449,21 @@ x87ControlBitPacking = BitPacking knownNat flags
 -- reliant on the layout of x86 registers/bits
 
 -- FIXME: maybe these should be in FlexdisMatcher.hs?
-controlFromFlexdis :: F.ControlReg -> RegisterName Control
+controlFromFlexdis :: F.ControlReg -> RegisterName 'Control
 controlFromFlexdis cr = ControlReg (fromIntegral $ F.controlRegNo cr)
 
-debugFromFlexdis :: F.DebugReg -> RegisterName Debug
+debugFromFlexdis :: F.DebugReg -> RegisterName 'Debug
 debugFromFlexdis dr   = DebugReg (fromIntegral $ F.debugRegNo dr)
 
 -- FIXME: should we expose this?
-mmxFromFlexdis :: F.MMXReg -> RegisterName X87_FPU
+mmxFromFlexdis :: F.MMXReg -> RegisterName 'X87_FPU
 mmxFromFlexdis mmx    = X87FPUReg (fromIntegral $ F.mmxRegNo mmx)
 
-xmmFromFlexdis :: F.XMMReg -> RegisterName XMM
+xmmFromFlexdis :: F.XMMReg -> RegisterName 'XMM
 xmmFromFlexdis xmm    = XMMReg (fromIntegral $ F.xmmRegNo xmm)
 
-segmentFromFlexdis :: F.Segment -> RegisterName Segment
+segmentFromFlexdis :: F.Segment -> RegisterName 'Segment
 segmentFromFlexdis s  = SegmentReg (fromIntegral $ F.segmentRegNo s)
 
-gpFromFlexdis :: F.Reg64 -> RegisterName GP
+gpFromFlexdis :: F.Reg64 -> RegisterName 'GP
 gpFromFlexdis r       = GPReg (fromIntegral $ F.reg64No r)

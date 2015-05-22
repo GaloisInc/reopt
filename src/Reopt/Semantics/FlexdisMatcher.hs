@@ -90,10 +90,10 @@ getBVAddress ar =
     F.Addr_32 seg m_r32 m_int_r32 i32 -> do
       check_seg_value seg
       base <- case m_r32 of
-                Nothing -> return 0
+                Nothing -> return $! bvKLit 0
                 Just r  -> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
       scale <- case m_int_r32 of
-                 Nothing     -> return 0
+                 Nothing     -> return $! bvKLit 0
                  Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
                                 <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
       return $ uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
