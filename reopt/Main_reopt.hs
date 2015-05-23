@@ -44,6 +44,7 @@ import           Reopt.Semantics.Monad (Type(..))
 import           Reopt.Semantics.Representation
 import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types
+import Reopt.Loader
 
 ------------------------------------------------------------------------
 -- Args
@@ -58,22 +59,35 @@ data Action
    | ShowVersion     -- ^ Print out version
 
 -- | Command line arguments.
-data Args = Args { _reoptAction :: Action
-                 , _programPath :: FilePath
+data Args = Args { _reoptAction :: !Action
+                 , _programPath :: !FilePath
+                 , _loadStyle   :: !LoadStyle
                  }
+
+-- | How to load Elf file.
+data LoadStyle
+   = LoadBySection
+     -- ^ Load loadable sections in Elf file.
+   | LoadBySegment
+     -- ^ Load segments in Elf file.
 
 -- | Action to perform when running.
 reoptAction :: Simple Lens Args Action
 reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 
--- | Action to perform when running.
+-- | Path to load
 programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
+
+-- | Whether to load file by segment or sections.
+loadStyle :: Simple Lens Args LoadStyle
+loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = ShowCFG
                    , _programPath = ""
+                   , _loadStyle = LoadBySection
                    }
 
 ------------------------------------------------------------------------
@@ -99,6 +113,16 @@ gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
         help = "Print out gaps in the recovered  control flow graph of executable."
 
+segmentFlag :: Flag Args
+segmentFlag = flagNone [ "load-segments" ] upd help
+  where upd  = loadStyle .~ LoadBySegment
+        help = "Load the Elf file using segment information."
+
+sectionFlag :: Flag Args
+sectionFlag = flagNone [ "load-sections" ] upd help
+  where upd  = loadStyle .~ LoadBySection
+        help = "Load the Elf file using section information (default)."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -106,6 +130,8 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , cfgAIFlag
                 , gapFlag
+                , segmentFlag
+                , sectionFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -198,12 +224,9 @@ isInterestingCode mem (start, Just end) = go start end
 
 isInterestingCode _ _ = True -- Last bit
 
-showGaps :: FilePath ->  IO ()
-showGaps path = do
-    e <- readStaticElf path
-    -- Build model of executable memory from elf.
-    mem <- loadElf e
-    let cfg = finalCFG (cfgFromAddress mem (elfEntry e))
+showGaps :: Memory Word64 -> Word64 -> IO ()
+showGaps mem entry = do
+    let cfg = finalCFG (cfgFromAddress mem entry)
     let ends = cfgBlockEnds cfg
     let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -224,13 +247,10 @@ showGaps path = do
     out_gap bs (e:es') = in_gap e bs es'
     out_gap _ _        = []
 
-showCFG :: FilePath -> IO ()
-showCFG path = do
-  e <- readStaticElf path
-  -- Build model of executable memory from elf.
-  mem <- loadElf e
+showCFG :: Memory Word64 -> Word64 -> IO ()
+showCFG mem entry = do
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g0 = finalCFG (cfgFromAddress mem (elfEntry e))
+  let g0 = finalCFG (cfgFromAddress mem entry)
   let g = eliminateDeadRegisters g0
   print (pretty g)
 {-
@@ -427,13 +447,11 @@ ppBlockAndAbs m b =
             pretty (blockTerm b))
 
 
-showCFGAndAI :: FilePath -> IO ()
-showCFGAndAI path = do
-  e <- readStaticElf path
+showCFGAndAI :: Memory Word64 -> Word64 -> IO ()
+showCFGAndAI mem entry = do
   -- Build model of executable memory from elf.
-  mem <- loadElf e
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let fg = cfgFromAddress mem (elfEntry e)
+  let fg = cfgFromAddress mem entry
   let abst = finalAbsState fg
       amap = assignmentAbsValues fg
   let g  = eliminateDeadRegisters (finalCFG fg)
@@ -525,6 +543,11 @@ checkCallsIdentified mem g b = do
         _ -> return ()
     _ -> return ()
 
+mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
+mkElfMem LoadBySection e = memoryForElfSections e
+mkElfMem LoadBySegment e = memoryForElfSegments e
+
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs
@@ -532,10 +555,17 @@ main = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      showCFG (args^.programPath)
+      e <- readStaticElf (args^.programPath)
+      mem <- mkElfMem (args^.loadStyle) e
+      showCFG mem (elfEntry e)
     ShowCFGAI -> do
-      showCFGAndAI (args^.programPath)
-    ShowGaps -> showGaps (args^.programPath)
+      e <- readStaticElf (args^.programPath)
+      mem <- mkElfMem (args^.loadStyle) e
+      showCFGAndAI mem (elfEntry e)
+    ShowGaps -> do
+      e <- readStaticElf (args^.programPath)
+      mem <- mkElfMem (args^.loadStyle) e
+      showGaps mem (elfEntry e)
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->

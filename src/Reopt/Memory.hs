@@ -9,6 +9,7 @@ module Reopt.Memory
   , insertMemSegment
   , memSegments
   , memAsWord64le
+  , memAsWord64le_withAddr
   , executableSegments
   , addrHasPermissions
   , isCodePointer
@@ -33,12 +34,16 @@ module Reopt.Memory
 import           Control.Applicative
 import           Control.Exception (assert)
 import           Control.Monad.Error
-import           Control.Monad.State
-import           Data.Binary.Get
+import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import           Data.Elf as Elf
+  ( ElfSegmentFlags
+  , pf_r
+  , pf_w
+  , pf_x
+  , hasPermissions
+  )
 import qualified Data.Foldable as Fold
 import qualified Data.IntervalMap.FingerTree as IMap
 import           Data.Maybe
@@ -54,9 +59,9 @@ import           Flexdis86.ByteReader
 -- MemSegment
 
 -- | Describes a memory segment.
-data MemSegment w = MemSegment { memBase :: w
-                               , memFlags :: ElfSegmentFlags
-                               , memBytes :: BS.ByteString
+data MemSegment w = MemSegment { memBase  :: !w
+                               , memFlags :: !ElfSegmentFlags
+                               , memBytes :: !BS.ByteString
                                }
 
 -- | Return true if the segment is executable.
@@ -89,13 +94,13 @@ lsbWord64FromByteString b =
 
 -- | Return list of aligned word 64s in the memory segments.
 segmentAsWord64le :: Integral w => MemSegment w -> [Word64]
-segmentAsWord64le s = go base (memBytes s) cnt
+segmentAsWord64le s = go (memBytes s) cnt
   where base :: Int
         base = fromIntegral (memBase s) .&. 0x7
         cnt = (BS.length (memBytes s) - base) `shiftR` 3
-        go _ _ 0 = []
-        go o b c = lsbWord64FromByteString s : go (o+8) b' (c-1)
-          where (s,b') = BS.splitAt 8 b
+        go _ 0 = []
+        go b c = lsbWord64FromByteString s' : go b' (c-1)
+          where (s',b') = BS.splitAt 8 b
 
 -- | Returns an interval representing the range of addresses for the segment
 -- if it is non-empty.
@@ -128,6 +133,13 @@ memSegments :: Memory w -> [MemSegment w]
 memSegments (Memory m) = Fold.toList m
 
 -- | Return list of words in the memory
+memAsWord64le_withAddr :: (Bits w, Integral w) => Memory w -> [(w, Word64)]
+memAsWord64le_withAddr m = do
+  s <- memSegments m
+  let base = (memBase s + 7) `xor` 0x7
+  [base,base+8..] `zip` segmentAsWord64le s
+
+-- | Return list of words in the memory
 memAsWord64le :: Integral w => Memory w -> [Word64]
 memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
 
@@ -139,7 +151,7 @@ executableSegments = filter isExecutable . memSegments
 -- segment in memory.
 insertMemSegment :: (Ord w, Num w, MonadState (Memory w) m)
                  => MemSegment w -> m ()
-insertMemSegment mseg =
+insertMemSegment mseg = seq mseg $ do
   case memSegmentInterval mseg of
     Nothing -> return ()
     Just i -> do
@@ -168,7 +180,7 @@ isCodePointer mem val = addrHasPermissions val pf_x mem
 data MemStream w = MS { msNext :: !BS.ByteString
                       , msMem  :: !(Memory w)
                       , msAddr :: !w
-                      , msPerm :: ElfSegmentFlags
+                      , msPerm :: !ElfSegmentFlags
                       }
 
 -- | Type of errors that may occur when reading memory.
@@ -184,8 +196,8 @@ instance Error (MemoryError w) where
 
 instance (Integral w, Show w) => Show (MemoryError w) where
   show (UserMemoryError msg) = msg
-  show (AccessViolation a)  | a >= 0 = "Access violation at " ++ showHex a ""
-  show (PermissionsError a) | a >= 0 = "Insufficient permissions at " ++ showHex a ""
+  show (AccessViolation a)   = "Access violation at " ++ showHex a ""
+  show (PermissionsError a)  = "Insufficient permissions at " ++ showHex a ""
 
 newtype MemoryByteReader w a = MBR (ErrorT (MemoryError w) (State (MemStream w)) a)
   deriving (Functor, Applicative, Monad)

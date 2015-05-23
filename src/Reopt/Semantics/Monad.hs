@@ -24,6 +24,7 @@
 module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
+  , type BVType
   , BoolType
   , FloatType
   , XMMType
@@ -71,6 +72,10 @@ module Reopt.Semantics.Monad
   , n1, n8, n16, n32, n64, n80, n128
     -- * Value operations
   , IsValue(..)
+  , bvKLit
+  , (.+)
+  , (.-)
+  , (.*)
   , Pred
     -- * Semantics
   , Semantics(..)
@@ -84,7 +89,6 @@ module Reopt.Semantics.Monad
   , type (TypeLits.<=)
   ) where
 
-import           Control.Applicative
 import           Data.Bits (shiftL)
 import Data.Proxy
 import           GHC.TypeLits as TypeLits
@@ -93,6 +97,8 @@ import           Data.Parameterized.NatRepr
 import           Reopt.Semantics.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types
+
+import           Control.Applicative
 
 ------------------------------------------------------------------------
 -- Location
@@ -187,19 +193,19 @@ mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
 mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
 
 -- | Return low 32-bits of register e.g. rax -> eax
-reg_low32 :: RegisterName GP -> Location addr (BVType 32)
+reg_low32 :: RegisterName 'GP -> Location addr (BVType 32)
 reg_low32 r = LowerHalf (Register r)
 
 -- | Return low 16-bits of register e.g. rax -> ax
-reg_low16 :: RegisterName GP -> Location addr (BVType 16)
+reg_low16 :: RegisterName 'GP -> Location addr (BVType 16)
 reg_low16 r = LowerHalf (LowerHalf (Register r))
 
 -- | Return low 8-bits of register e.g. rax -> al
-reg_low8 :: RegisterName GP -> Location addr (BVType 8)
+reg_low8 :: RegisterName 'GP -> Location addr (BVType 8)
 reg_low8 r = LowerHalf (reg_low16 r)
 
 -- | Return bits 8-15 of the register e.g. rax -> ah
-reg_high8 :: RegisterName GP -> Location addr (BVType 8)
+reg_high8 :: RegisterName 'GP -> Location addr (BVType 8)
 reg_high8 r = UpperHalf (reg_low16 r)
 
 rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)
@@ -316,7 +322,7 @@ class IsValue (v  :: Type -> *) where
 
   -- | Splits a bit vectors into two
   bvSplit :: (1 <= n) => v (BVType (n + n)) -> (v (BVType n), v (BVType n))
-  -- bvSplit v = (bvTrunc sz (bvShr (widthVal sz) v), bvTrunc sz v)
+  -- bvSplit v = (bvTrunc:: sz (bvShr (widthVal sz) v), bvTrunc sz v)
   --   where
   --     sz = halfNat (bv_width v)
 
@@ -355,14 +361,17 @@ class IsValue (v  :: Type -> *) where
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+  uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+
+  -- | Perform a unsigned extension of a bitvector.
+  uext :: (1 <= m, m <= n)
+        => NatRepr n
+        -> v (BVType m)
+        -> v (BVType n)
   uext w e =
     case testStrictLeq (bv_width e) w of
       Left LeqProof -> uext' w e
       Right Refl -> e
-
-  -- | Perform a unsigned extension of a bitvector.
-  uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)
@@ -536,6 +545,28 @@ class IsValue (v  :: Type -> *) where
   boolValue :: Bool -> v BoolType
   boolValue b = if b then true else false
 
+-- | Construct a literal bit vector.  The result is undefined if the
+-- literal does not fit withint the given number of bits.
+bvKLit :: (IsValue v, KnownNat n, 1 <= n) => Integer -> v (BVType n)
+bvKLit = bvLit knownNat
+
+-- | Add two bitvectors together dropping overflow.
+(.+) :: (1 <= n, IsValue v) => v (BVType n) -> v (BVType n) -> v (BVType n)
+(.+) = bvAdd
+
+-- | Subtract two vectors, ignoring underflow.
+(.-) :: (1 <= n, IsValue v) => v (BVType n) -> v (BVType n) -> v (BVType n)
+(.-) = bvSub
+
+-- | Performs a multiplication of two bitvector values.
+(.*) :: (1 <= n, IsValue v) => v (BVType n) -> v (BVType n) -> v (BVType n)
+(.*) = bvMul
+
+infixl 7 .*
+infixl 6 .+
+infixl 6 .-
+
+{-
 -- Basically so I can get fromInteger, but the others might be handy too ...
 instance (IsValue v, KnownNat n, 1 <= n) => Num (v (BVType n)) where
   (+) = bvAdd
@@ -545,6 +576,7 @@ instance (IsValue v, KnownNat n, 1 <= n) => Num (v (BVType n)) where
   abs    = error "abs is unimplemented for Values"
   signum = error "signum is unimplemented for Values"
   fromInteger = bvLit knownNat
+-}
 
 ------------------------------------------------------------------------
 -- Monadic definition

@@ -72,7 +72,7 @@ type XMMType    = BVType 128
 
 -- | A runtime representation of @Type@ for case matching purposes.
 data TypeRepr tp where
-  BVTypeRepr     :: {-# UNPACK #-} !(NatRepr n) -> TypeRepr (BVType n)
+  BVTypeRepr     :: !(NatRepr n) -> TypeRepr (BVType n)
 
 type_width :: TypeRepr (BVType n) -> NatRepr n
 type_width (BVTypeRepr n) = n
@@ -113,6 +113,12 @@ data FloatInfo where
   X86_80Float       :: FloatInfo  -- X86 80-bit extended floats
   QuadFloat         :: FloatInfo  -- 128 bit binary IEE754
   HalfFloat         :: FloatInfo  --  16 bit binary IEE754
+
+type SingleFloat = 'SingleFloat
+type DoubleFloat = 'DoubleFloat
+type X86_80Float = 'X86_80Float
+type QuadFloat = 'QuadFloat
+type HalfFloat = 'HalfFloat
 
 data FloatInfoRepr (flt::FloatInfo) where
   DoubleFloatRepr       :: FloatInfoRepr DoubleFloat

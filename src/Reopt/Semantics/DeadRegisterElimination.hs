@@ -14,8 +14,8 @@
 --
 -- this code will remove the (unused) r2
 ------------------------------------------------------------------------
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-
 module Reopt.Semantics.DeadRegisterElimination (eliminateDeadRegisters) where
 
 import           Control.Applicative ((<$>), (<*>))
@@ -35,14 +35,14 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
   where
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
                                             , case l of { DecompiledBlock _ -> True; _ -> False } ]
-             
+
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
 liveRegisters :: CFG -> BlockLabel -> Map BlockLabel Block
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v
-      
+
 blockLiveRegisters :: Block -> State (Set AssignId) (Map BlockLabel Block)
 blockLiveRegisters b = do addIDs terminalIds
                           stmts' <- foldrM noteAndFilter [] (blockStmts b)
@@ -58,7 +58,7 @@ blockLiveRegisters b = do addIDs terminalIds
              do addIDs (refsInAssignRhs rhs)
                 return (stmt : ss)
              else return ss
-    noteAndFilter stmt@(Write loc rhs) ss    
+    noteAndFilter stmt@(Write loc rhs) ss
       = do addIDs (refsInLoc loc)
            addIDs (refsInValue rhs)
            return (stmt : ss)

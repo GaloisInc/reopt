@@ -15,6 +15,7 @@ module Reopt.AbsState
   , concretize
   , asConcreteSingleton
   , meet
+  , size
   , AbsDomain(..)
   , AbsRegs
   , absInitialRegs
@@ -33,9 +34,10 @@ module Reopt.AbsState
 import           Control.Applicative ( (<$>) )
 import           Control.Exception (assert)
 import           Control.Lens
-import           Data.Maybe
+import           Control.Monad (guard)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -152,20 +154,30 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 -- known under-approximation.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (AbsValue s) = Just s
-concretize (StridedInterval s) = Just (Set.fromList (SI.toList s))
 -- OPT: might be faster to just do concretize v'
 concretize (SubValue n v v') =
   do v_vs <- concretize v
      v_vs' <- concretize v'
      return (Set.filter (flip Set.member v_vs . toUnsigned n) v_vs')
+concretize (StridedInterval s) =
+  trace ("Concretizing " ++ show (pretty s)) $
+  Just (Set.fromList (SI.toList s))
 concretize _ = Nothing
+
+-- FIXME: make total, we would need to carry around tp
+size :: AbsValue tp -> Maybe Integer
+size (AbsValue s) = Just $ fromIntegral (Set.size s)
+size (StridedInterval s) = Just $ SI.size s
+size (StackOffset s) = Just $ fromIntegral (Set.size s)
+size _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
 asConcreteSingleton :: AbsValue tp -> Maybe Integer
-asConcreteSingleton v =
-  case Set.toList <$> concretize v of
-    Just [e] -> Just e
-    _ -> Nothing
+asConcreteSingleton v = do
+  sz <- size v
+  guard (sz == 1)
+  [v] <- Set.toList <$> concretize v
+  return v
 
 -- -----------------------------------------------------------------------------
 -- Smart constructors
