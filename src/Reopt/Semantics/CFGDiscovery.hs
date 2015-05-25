@@ -27,6 +27,7 @@ module Reopt.Semantics.CFGDiscovery
        ) where
 
 import           Control.Applicative
+import           Control.Exception
 import           Control.Lens
 import           Control.Monad.State.Strict
 import qualified Data.Foldable as Fold
@@ -42,6 +43,7 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Vector as V
 import           Data.Word
 import           Debug.Trace
 import           Numeric
@@ -79,7 +81,30 @@ lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
   where msg = "Could not find block " ++ show addr
 
 ------------------------------------------------------------------------
+-- FrontierState
+
+-- | Data describing why an address was added to the frontier.
+data FrontierReason
+     -- | Exploring because a pointer to this address was found stored in
+     -- memory.
+   = InInitialData
+     -- | Exploring because the given block writes it to memory.
+   | InWrite       !BlockLabel
+     -- | Exploring because the given block stores address as a
+     -- return address.
+   | ReturnAddress !BlockLabel
+     -- | Exploring because the given block jumps here.
+   | NextIP !BlockLabel
+     -- | Added as the initial start state.
+   | StartAddr
+  deriving (Show)
+
+------------------------------------------------------------------------
 -- Interpreter state
+
+data BlockRegion = BlockRegion { brEnd :: !CodeAddr
+                               , brBlocks :: !(V.Vector Block)
+                               }
 
 -- | The state of the interpreter
 data InterpState
@@ -87,8 +112,12 @@ data InterpState
                    memory   :: !(Memory Word64)
                  , _cfg      :: !CFG
                  , _genState :: !GlobalGenState
+                   -- | Intervals maps code addresses to blocks at address.
+                 , _blocks   :: !(Map CodeAddr BlockRegion)
                    -- | Set of code adddresses that could not be interpreted.
                  , _failedAddrs  :: !(Set CodeAddr)
+                   -- | Addresses that are marked as the start of a function
+                 , _functionEntries :: !(Set CodeAddr)
                    -- | Set of code addresses stored in memory.
                  , _codePointersInMem :: !(Set CodeAddr)
                    -- | Abstract state common to all code that can be jumped to in memory.
@@ -99,24 +128,14 @@ data InterpState
                  , _absState :: !AbsState
                  }
 
-data FrontierReason
-   = InInitialData
-     -- | Exploring because the given block writes it to memory.
-   | InWrite       !BlockLabel
-     -- | Exploring because the given block stores address as a
-     -- return address.
-   | ReturnAddress !BlockLabel
-     -- | Exploring because the given block jumps here.
-   | NextIP !BlockLabel
-   | StartAddr
-  deriving (Show)
-
 emptyInterpState :: Memory Word64 -> CodeAddr -> InterpState
 emptyInterpState mem start = InterpState
       { memory        = mem
-      , _cfg = emptyCFG
+      , _cfg          = emptyCFG
       , _genState     = emptyGlobalGenState
-      , _failedAddrs = Set.empty
+      , _blocks       = Map.empty
+      , _failedAddrs  = Set.empty
+      , _functionEntries   = Set.empty
       , _codePointersInMem = Set.empty
       , memBlockState = defBlockState 0
       , _frontier     = Map.singleton start StartAddr
@@ -128,6 +147,9 @@ cfg = lens _cfg (\s v -> s { _cfg = v })
 
 genState :: Simple Lens InterpState GlobalGenState
 genState = lens _genState (\s v -> s { _genState = v })
+
+blocks :: Simple Lens InterpState (Map CodeAddr BlockRegion)
+blocks = lens _blocks (\s v -> s { _blocks = v })
 
 failedAddrs :: Simple Lens InterpState (Set CodeAddr)
 failedAddrs = lens _failedAddrs (\s v -> s { _failedAddrs = v })
@@ -170,6 +192,8 @@ getAbsBlockState a = do
   else
     return $ lookupAbsBlock a (s^.absState)
 
+ppHexInterval :: (Integral a, Show a) => (a,a) -> String
+ppHexInterval (l, h) = "(low: " ++ showHex l (", high: " ++ showHex h ")\n")
 
 -- | This is the worker for getBlock, in the case that the cfg doesn't
 -- contain the address of interest.
@@ -186,13 +210,35 @@ reallyGetBlock rsn addr = do
   let loc = ExploreLoc { loc_ip = addr
                        , loc_x87_top = t
                        }
+  cur_intervals <- use blocks
+  let -- Returns true if we are not at the start of a block
+      not_at_block addr0 = do
+        case Map.notMember addr0 cur_intervals of
+          True -> True
+          False -> trace ("terminate block: " ++ showHex addr0 "") False
+
+
   r <- subMonad genState $ do
-    liftEither $ disassembleBlock mem loc
+    liftEither $ disassembleBlock mem not_at_block loc
   case r of
    Left _e -> trace ("Block failed: 0x" ++ showHex addr "" ++ ", Reason " ++ show rsn) $ do
      failedAddrs %= Set.insert addr
      return Nothing
-   Right (bs, next_ip) -> do
+   Right (bs, next_ip) -> assert (next_ip > addr) $ do
+     case Map.lookupLT next_ip cur_intervals of
+       Just (l,br) | brEnd br >= addr -> do
+         trace ("Found code intersection:\n"
+                ++ ppHexInterval (addr,next_ip)
+                ++ ppHexInterval (l, brEnd br)) $ do
+         return ()
+       _ -> return ()
+
+     -- Add blocks ot code.
+     let br = BlockRegion { brEnd = next_ip
+                          , brBlocks = V.fromList bs
+                          }
+     blocks %= Map.insert addr br
+
      cfg %= insertBlocksForCode addr next_ip bs
      lookupBlock addr
 
@@ -204,7 +250,8 @@ getBlock :: FrontierReason -> CodeAddr -> State InterpState (Maybe Block)
 getBlock rsn addr = do
   m_b <- lookupBlock addr
   case m_b of
-    Just b -> return (Just b)
+    Just b ->
+      return (Just b)
     Nothing -> do
       failed <- uses failedAddrs (Set.member addr)
       if failed then
@@ -254,18 +301,6 @@ recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
-
-{-
-transferStmtsTracing :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
-transferStmtsTracing r stmts = execStateT (mapM_ go stmts) r
-  where
-    go stmt = do traceM (show (pretty stmt))
-                 transferStmt stmt
-                 case stmt of
-                  AssignStmt a -> do rhs <- use (absAssignments . assignLens a)
-                                     traceM (show (pretty rhs))
-                  _ -> return ()
--}
 
 finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
 finalBlockState a g
@@ -359,7 +394,7 @@ isWriteTo (Write (MemLoc a _) val) expected tp
 isWriteTo _ _ _ = Nothing
 
 -- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
--- an address marked executable in @mem@ to @addr@.
+-- a single address to a marked executable in @mem@ to @addr@.
 isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
 isCodePointerWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
@@ -491,24 +526,21 @@ refineLt tp x y b regs
 
 
 -- | Attempt to identify the write to a stack return address, returning
--- instructions prior to that write , and return  values.
-checkBlockCall :: Memory Word64
+-- instructions prior to that write and return  values.
+identifyCall :: Memory Word64
                -> [Stmt]
                -> X86State Value
-               -> (Seq Stmt, [Word64])
-checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
+               -> Maybe (Seq Stmt, Word64)
+identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
         go stmts =
           case Seq.viewr stmts of
-            Seq.EmptyR ->
-              (stmts, [])
+            Seq.EmptyR -> Nothing
             prev Seq.:> stmt
               | Just ret <- isCodePointerWriteTo mem stmt next_sp ->
-                (prev, [ret])
-              | Write{} <- stmt ->
-                (stmts, [])
-              | otherwise ->
-                go prev
+                Just (prev, ret)
+              | Write{} <- stmt -> Nothing
+              | otherwise -> go prev
 
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
@@ -534,12 +566,19 @@ transferBlock b regs = do
 
     FetchAndExecute s' -> do
       mem <- gets memory
-      let (prev_stmts, rets) = checkBlockCall mem (blockStmts b) s'
-      Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
-
-      let lbl = blockLabel b
       let abst = finalAbsBlockState regs' s'
-      mapM_ (mergeBlock (ReturnAddress lbl) abst) rets
+      let lbl = blockLabel b
+      seq abst $ do
+      -- See if next statement appears to end with a call.
+      -- We define calls as statements that end with a write that
+      -- stores the pc to an address.
+      case identifyCall mem (blockStmts b) s' of
+        -- The last statement was a call.
+        Just (prev_stmts, ret) -> do
+          Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
+          mergeBlock (ReturnAddress lbl) abst ret
+        Nothing -> do
+          mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
       -- Look for new ips.
       case concretize (abst^.absX86State^.curIP) of
         Nothing ->
@@ -580,7 +619,6 @@ explore_frontier st =
       let st_pre = st & frontier .~ next_roots
           st_post = flip execState st_pre $ transfer rsn addr
        in explore_frontier st_post
-
 
 cfgFromAddress :: Memory Word64
                   -- ^ Memory to use when decoding instructions.

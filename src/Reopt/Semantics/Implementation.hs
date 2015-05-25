@@ -874,15 +874,17 @@ data GenError = DecodeError (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
 
--- | Disassemble block
+-- | Disassemble block, returning either an error, or a list of blocks
+-- and ending PC.
 disassembleBlock :: Memory Word64
+                 -> (CodeAddr -> Bool)
                  -> ExploreLoc -- ^ Location to explore from.
                  -> StateT GlobalGenState (Either GenError)
                            ([Block], CodeAddr)
-disassembleBlock mem loc = do
+disassembleBlock mem contFn loc = do
   let lbl = DecompiledBlock (loc_ip loc)
   gs <- gets (startBlock (initX86State loc) lbl . emptyGenState)
-  (gs', ip) <- lift $ disassembleBlock' mem gs (loc_ip loc)
+  (gs', ip) <- lift $ disassembleBlock' mem gs contFn (loc_ip loc)
   put (gs' ^. globalGenState)
   return (Fold.toList (gs'^.frontierBlocks), ip)
 
@@ -904,18 +906,26 @@ getFrontierNext = Fold.foldl' f Set.empty
             _ -> locs
 -}
 
+-- | Disassemble block, returning either an error, or a list of blocks
+-- and ending PC.
 disassembleBlock' :: Memory Word64
+                     -- ^ Memory to use for disassembling block
                   -> GenState 'True
+                     -- ^ State information for disassembling.
+                  -> (CodeAddr -> Bool)
+                     -- ^ This function should return true if
+                     -- we should keep disassembling when we step
+                     -- to the given address with the functions.
                   -> CodeAddr
+                     -- ^ Address to disassemble from.
                   -> Either GenError (GenState 'False, CodeAddr)
-disassembleBlock' mem gs addr = do
+disassembleBlock' mem gs contFn addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError
   let next_ip_val = mkLit knownNat (toInteger next_ip)
 
   -- Update current IP
   let gs1 = gs & curX86State . curIP .~ next_ip_val
-
 
   let line = text (showHex addr "") <> colon
              <+> Flexdis.ppInstruction next_ip i
@@ -929,7 +939,9 @@ disassembleBlock' mem gs addr = do
       case res of
         Some gs2 -> do
           case gs2 ^. blockState of
+            -- If next ip is exactly the next_ip_val then keep running.
             JustF p_b | v <- p_b^.(pBlockState . curIP)
-                      , v == next_ip_val ->
-              disassembleBlock' mem gs2 next_ip
+                      , v == next_ip_val
+                      , contFn next_ip  ->
+              disassembleBlock' mem gs2 contFn next_ip
             _ -> return (finishBlock FetchAndExecute gs2, next_ip)
