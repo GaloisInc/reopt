@@ -112,6 +112,8 @@ data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
                  , _genState :: !GlobalGenState
+                   -- | Addresses that we have seen.
+                 , _seenAddrs :: !(Set CodeAddr)
                    -- | Intervals maps code addresses to blocks at address.
                  , _blocks   :: !(Map CodeAddr BlockRegion)
                    -- | Set of code adddresses that could not be interpreted.
@@ -132,6 +134,7 @@ emptyInterpState :: Memory Word64 -> CodeAddr -> InterpState
 emptyInterpState mem start = InterpState
       { memory        = mem
       , _genState     = emptyGlobalGenState
+      , _seenAddrs    = Set.empty
       , _blocks       = Map.empty
       , _failedAddrs  = Set.empty
       , _functionEntries   = Set.empty
@@ -143,6 +146,9 @@ emptyInterpState mem start = InterpState
 
 genState :: Simple Lens InterpState GlobalGenState
 genState = lens _genState (\s v -> s { _genState = v })
+
+seenAddrs :: Simple Lens InterpState (Set CodeAddr)
+seenAddrs = lens _seenAddrs (\s v -> s { _seenAddrs = v })
 
 blocks :: Simple Lens InterpState (Map CodeAddr BlockRegion)
 blocks = lens _blocks (\s v -> s { _blocks = v })
@@ -213,33 +219,34 @@ reallyGetBlock :: FrontierReason
                   -- ^ Reason we are exploring block.
                -> CodeAddr
                -> State InterpState (Maybe Block)
-reallyGetBlock rsn addr = do
+reallyGetBlock rsn addr = trace ("Exploring " ++ showHex addr (", reason: " ++ show rsn)) $ do
+  seenAddrs %= Set.insert addr
   mem <- gets memory
   -- Get top
   ab <- getAbsBlockState addr
   t <- getAbsX87Top ab
+  -- Check to see if we should delete an overlapping block
+  do m_lt <- uses blocks (Map.lookupLT addr)
+     case m_lt of
+       Just (l,br) | brEnd br > addr -> do
+         blocks %= Map.delete l
+         frontier %= Map.insert l rsn
+       _ -> return ()
   -- Create explore loc
   let loc = ExploreLoc { loc_ip = addr
                        , loc_x87_top = t
                        }
-  cur_intervals <- use blocks
+  addrs <- use seenAddrs
   let -- Returns true if we are not at the start of a block
-      not_at_block addr0 = do
-        Map.notMember addr0 cur_intervals
+      not_at_block addr0 = Set.notMember addr0 addrs
   r <- subMonad genState $ do
     liftEither $ disassembleBlock mem not_at_block loc
+
   case r of
    Left _e -> trace ("Block failed: 0x" ++ showHex addr "" ++ ", Reason " ++ show rsn) $ do
      failedAddrs %= Set.insert addr
      return Nothing
    Right (bs, next_ip) -> assert (next_ip > addr) $ do
-     case Map.lookupLT next_ip cur_intervals of
-       Just (l,br) | brEnd br >= addr -> do
-         trace ("Found code intersection:\n"
-                ++ ppHexInterval (addr,next_ip)
-                ++ ppHexInterval (l, brEnd br)) $ do
-         return ()
-       _ -> return ()
      let block_vec = V.fromList bs
      let block_indices = blockIndex . blockLabel <$> block_vec
      Fold.forM_ (V.enumFromN 0 (V.length block_vec)) $ \i -> do
@@ -249,11 +256,9 @@ reallyGetBlock rsn addr = do
      -- Add blocks ot code.
      let br = BlockRegion { brEnd = next_ip
                           , brBlocks = block_vec
-
                           }
      blocks %= Map.insert addr br
-
-     lookupBlock addr
+     return $ Just (block_vec V.! 0)
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.
