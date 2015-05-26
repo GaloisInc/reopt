@@ -141,7 +141,7 @@ instance Pretty (AbsValue tp) where
   pretty (StridedInterval s) = pretty s
   pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty SomeStackOffset = text "rsp_0 + ?"
-  pretty (SubValue n v c) = pretty c <+> parens (int (natValue n) <+> pretty v)
+  pretty (SubValue n v c) = pretty c <+> parens (integer (natValue n) <+> pretty v)
   pretty TopV = text "top"
 
 ppIntegerSet :: (Show w, Integral w) => Set w -> Doc
@@ -295,9 +295,9 @@ meet v v'
   , Just LeqProof <- testLeq n n' = error "FIXME"
                                     
   | SubValue n av c <- v, SubValue n' av' c' <- v' =
-      Just $ fromMaybe v (joinD v c')
-  | SubValue _n _av c <- v  = Just $ fromMaybe c (joinD c v')
-  | SubValue _n _av c <- v' = Just $ fromMaybe v (joinD v c)
+      fromMaybe v (joinD v c')
+  | SubValue _n _av c <- v  = fromMaybe c (joinD c v')
+  | SubValue _n _av c <- v' = fromMaybe v (joinD v c)
 
 -- Join addresses
 meet SomeStackOffset s@StackOffset{} = s
