@@ -395,20 +395,15 @@ data GlobalGenState = GlobalGenState
        { -- | Index of next assignment identifier to use.
          -- (all used assignment indices must be less than this).
          _nextAssignId :: !AssignId
-       , _nextBlockID  :: !Word64
        }
 
 emptyGlobalGenState :: GlobalGenState
-emptyGlobalGenState = GlobalGenState { _nextBlockID = 0
-                                     , _nextAssignId = 0 }
+emptyGlobalGenState = GlobalGenState { _nextAssignId = 0
+                                     }
 
 -- | Number of assignments so far.
 nextAssignId :: Simple Lens GlobalGenState AssignId
 nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
-
--- | Control flow blocs generated so far.
-nextBlockID :: Simple Lens GlobalGenState Word64
-nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 
 -- | A block that we have not yet finished.
 data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
@@ -438,14 +433,19 @@ _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 data GenState tag = GenState
        { -- | The global state
          _globalGenState :: !GlobalGenState
-         -- | Blocks that are not in CFG that end with a FetchAndExecute,
-         -- which we need to analyze to compute new potential branch targets.
+         -- | Index of next block
+       , _nextBlockID  :: !Word64
+         -- | Blocks added to CFG.
        , _frontierBlocks :: !(Seq Block)
        , _blockState     :: !(MaybeF tag PreBlock)
        }
 
 globalGenState :: Simple Lens (GenState tag) GlobalGenState
 globalGenState = lens _globalGenState (\s v -> s { _globalGenState = v })
+
+-- | Control flow blocs generated so far.
+nextBlockID :: Simple Lens (GenState tag) Word64
+nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 
 -- | Blocks that are not in CFG that end with a FetchAndExecute,
 -- which we need to analyze to compute new potential branch targets.
@@ -470,12 +470,24 @@ emptyPreBlock s lbl =
 emptyGenState :: GlobalGenState -> GenState 'False
 emptyGenState st =
   GenState { _globalGenState = st
+           , _nextBlockID    = 1
            , _frontierBlocks = Seq.empty
            , _blockState     = NothingF
            }
 
 curX86State :: Simple Lens (GenState 'True) (X86State Value)
 curX86State = blockState . _JustF . pBlockState
+
+-- | Finishes the current block, if it is started.
+finishBlock' :: PreBlock
+             -> (X86State Value -> TermStmt)
+             -> Block
+finishBlock' pre_b term =
+  Block { blockLabel = pBlockLabel pre_b
+        , blockStmts = Fold.toList (pre_b^.pBlockStmts)
+        , blockCache = pre_b^.pBlockApps
+        , blockTerm  = term (pre_b^.pBlockState)
+        }
 
 -- | Finishes the current block, if it is started.
 finishBlock :: (X86State Value -> TermStmt)
@@ -486,11 +498,7 @@ finishBlock term st =
    JustF pre_b -> st & frontierBlocks %~ (Seq.|> b)
                      & blockState .~ NothingF
      where
-       b = Block { blockLabel = pBlockLabel pre_b
-                 , blockStmts = Fold.toList (pre_b^.pBlockStmts)
-                 , blockCache = pre_b^.pBlockApps
-                 , blockTerm  = term (pre_b^.pBlockState)
-                 }
+       b = finishBlock' pre_b term
 
 -- | Starts a new block.  If there is a current block it will finish
 -- it with FetchAndExecute
@@ -801,25 +809,32 @@ instance S.Semantics X86Generator where
       go (BVValue _ 1) = t
       go (BVValue _ 0) = f
       go cond =
-        X86G $ \c s -> do
-          let p_b = s ^. (blockState . _JustF)
-              (t_block_id, s')  = s  & globalGenState . nextBlockID <<+~ 1
-              (f_block_id, s'') = s' & globalGenState . nextBlockID <<+~ 1
-
+        X86G $ \c s0 -> do
+          let p_b = s0 ^. (blockState . _JustF)
           let last_block_id = pBlockLabel p_b
-              t_block_label = GeneratedBlock (blockParent last_block_id) t_block_id
-              f_block_label = GeneratedBlock (blockParent last_block_id) f_block_id
+          let st = p_b^.pBlockState
+          let (t_block_id, s1) = s0 & nextBlockID <<+~ 1
+          let t_block_label = GeneratedBlock (blockParent last_block_id) t_block_id
+          let s2 = s1 & blockState .~ JustF (emptyPreBlock st t_block_label)
+                      & frontierBlocks .~ Seq.empty
+          -- Run true block.
+          case unX86G t c s2 of
+            Some (finishBlock FetchAndExecute -> s3)
+             | otherwise -> do
+              -- Run false block
+              let (f_block_id, s4) = s3 & nextBlockID <<+~ 1
+              let f_block_label = GeneratedBlock (blockParent last_block_id) f_block_id
+              let s5 = s4 & blockState .~ JustF (emptyPreBlock st f_block_label)
+                          & frontierBlocks .~ Seq.empty
 
-          -- Note that startBlock flushes the current block if required.
-          let flush_current = finishBlock (const (Branch cond t_block_label f_block_label))
-              run_t, run_f :: forall tp. GenState tp -> Some GenState
-              run_t = unX86G t c . startBlock (p_b^.pBlockState) t_block_label
-              run_f = unX86G f c . startBlock (p_b^.pBlockState) f_block_label
-
-          -- The finishBlock here results in a new block after
-          -- conditional jumps, for example (no continuing blocks)
-          Some . viewSome (finishBlock FetchAndExecute)
-               . viewSome run_f . run_t . flush_current $ s''
+              case unX86G f c s5 of
+                Some (finishBlock FetchAndExecute -> s6) -> do
+                  -- Note that startBlock flushes the current block if required.
+                  let fin_b = finishBlock' p_b (\_ -> Branch cond t_block_label f_block_label)
+                  Some $ s6 & frontierBlocks .~ (s0^.frontierBlocks Seq.|> fin_b)
+                                         Seq.>< s3^.frontierBlocks
+                                         Seq.>< s6^.frontierBlocks
+                            & blockState .~ NothingF
 
   memmove _n count src dest =
     do vs <- sequence [ Some <$> eval count
@@ -882,7 +897,7 @@ disassembleBlock :: Memory Word64
                  -> StateT GlobalGenState (Either GenError)
                            ([Block], CodeAddr)
 disassembleBlock mem contFn loc = do
-  let lbl = DecompiledBlock (loc_ip loc)
+  let lbl = GeneratedBlock (loc_ip loc) 0
   gs <- gets (startBlock (initX86State loc) lbl . emptyGenState)
   (gs', ip) <- lift $ disassembleBlock' mem gs contFn (loc_ip loc)
   put (gs' ^. globalGenState)
@@ -940,8 +955,9 @@ disassembleBlock' mem gs contFn addr = do
         Some gs2 -> do
           case gs2 ^. blockState of
             -- If next ip is exactly the next_ip_val then keep running.
-            JustF p_b | v <- p_b^.(pBlockState . curIP)
+            JustF p_b | Seq.null (gs2^.frontierBlocks)
+                      , v <- p_b^.(pBlockState . curIP)
                       , v == next_ip_val
-                      , contFn next_ip  ->
+                      , contFn next_ip ->
               disassembleBlock' mem gs2 contFn next_ip
             _ -> return (finishBlock FetchAndExecute gs2, next_ip)

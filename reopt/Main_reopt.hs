@@ -228,7 +228,7 @@ showGaps :: Memory Word64 -> Word64 -> IO ()
 showGaps mem entry = do
     let cfg = finalCFG (cfgFromAddress mem entry)
     let ends = cfgBlockEnds cfg
-    let blocks = [ addr | DecompiledBlock addr <- Map.keys (cfg ^. cfgBlocks) ]
+    let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
              $ out_gap blocks (Set.elems ends)
     mapM_ (print . pretty . ppOne) gaps
@@ -264,7 +264,7 @@ showCFG mem entry = do
   let sources = getTargets (Map.keys rCalls) rEdgeMap
 
   forM_ (Set.toList sources) $ \a -> do
-    let Just b = findBlock g (DecompiledBlock a)
+    let Just b = findBlock g (GeneratedBlock a 0)
     when (hasCall b == False) $ do
       print $ "Found start " ++ showHex a ""
       print (pretty b)
@@ -312,7 +312,7 @@ lookupStack o s = Map.lookup o s
 decompiledBlocks :: CFG -> [Block]
 decompiledBlocks g =
   [ b | b <- Map.elems (g^.cfgBlocks)
-      , DecompiledBlock _ <- [blockLabel b]
+      , GeneratedBlock _ 0 <- [blockLabel b]
       ]
 
 -- | Maps blocks to set of concrete addresses they may call.
@@ -457,8 +457,8 @@ showCFGAndAI mem entry = do
   let g  = eliminateDeadRegisters (finalCFG fg)
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (blockParent (blockLabel b)) abst) of
-                  (DecompiledBlock _, Just ab) -> pretty ab
-                  (DecompiledBlock _, Nothing) -> text "Stored in memory"
+                  (GeneratedBlock _ 0, Just ab) -> pretty ab
+                  (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
 
               , ppBlockAndAbs amap b
@@ -466,12 +466,12 @@ showCFGAndAI mem entry = do
   print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
   forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
     case blockLabel b of
-      DecompiledBlock{} -> do
+      GeneratedBlock _ 0 -> do
         checkReturnsIdentified g b
       _ -> return ()
   forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
     case blockLabel b of
-      DecompiledBlock{} -> do
+      GeneratedBlock _ 0 -> do
         checkCallsIdentified mem g b
       _ -> return ()
 

@@ -34,7 +34,7 @@ eliminateDeadRegisters :: CFG -> CFG
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
   where
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
-                                            , case l of { DecompiledBlock _ -> True; _ -> False } ]
+                                            , isRootBlockLabel l ]
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.

@@ -106,11 +106,11 @@ data BlockRegion = BlockRegion { brEnd :: !CodeAddr
                                , brBlocks :: !(V.Vector Block)
                                }
 
+
 -- | The state of the interpreter
 data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
-                 , _cfg      :: !CFG
                  , _genState :: !GlobalGenState
                    -- | Intervals maps code addresses to blocks at address.
                  , _blocks   :: !(Map CodeAddr BlockRegion)
@@ -131,7 +131,6 @@ data InterpState
 emptyInterpState :: Memory Word64 -> CodeAddr -> InterpState
 emptyInterpState mem start = InterpState
       { memory        = mem
-      , _cfg          = emptyCFG
       , _genState     = emptyGlobalGenState
       , _blocks       = Map.empty
       , _failedAddrs  = Set.empty
@@ -141,9 +140,6 @@ emptyInterpState mem start = InterpState
       , _frontier     = Map.singleton start StartAddr
       , _absState     = emptyAbsState start
       }
-
-cfg :: Simple Lens InterpState CFG
-cfg = lens _cfg (\s v -> s { _cfg = v })
 
 genState :: Simple Lens InterpState GlobalGenState
 genState = lens _genState (\s v -> s { _genState = v })
@@ -182,7 +178,23 @@ subMonad l m = l %%= runState m
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
 lookupBlock :: MonadState InterpState m => CodeAddr -> m (Maybe Block)
-lookupBlock addr = uses (cfg . cfgBlocks) (Map.lookup (DecompiledBlock addr))
+lookupBlock addr = do
+  m <- use blocks
+  case Map.lookup addr m of
+    Nothing -> return Nothing
+    Just br -> assert (V.length (brBlocks br) > 0) $ do
+      let b = brBlocks br V.! 0
+      seq b $ return $! Just b
+
+-- | Does a simple lookup in the cfg at a given DecompiledBlock address.
+lookupBlock' :: MonadState InterpState m => BlockLabel -> m Block
+lookupBlock' lbl = do
+  m <- use blocks
+  let i = fromIntegral (blockIndex lbl)
+  case Map.lookup (blockParent lbl) m of
+    Nothing -> error $ "Could not find block for " ++ show lbl
+    Just br -> assert (V.length (brBlocks br) > i) $ do
+      return $! brBlocks br V.! i
 
 getAbsBlockState :: CodeAddr -> State InterpState AbsBlockState
 getAbsBlockState a = do
@@ -213,11 +225,7 @@ reallyGetBlock rsn addr = do
   cur_intervals <- use blocks
   let -- Returns true if we are not at the start of a block
       not_at_block addr0 = do
-        case Map.notMember addr0 cur_intervals of
-          True -> True
-          False -> trace ("terminate block: " ++ showHex addr0 "") False
-
-
+        Map.notMember addr0 cur_intervals
   r <- subMonad genState $ do
     liftEither $ disassembleBlock mem not_at_block loc
   case r of
@@ -232,14 +240,19 @@ reallyGetBlock rsn addr = do
                 ++ ppHexInterval (l, brEnd br)) $ do
          return ()
        _ -> return ()
-
+     let block_vec = V.fromList bs
+     let block_indices = blockIndex . blockLabel <$> block_vec
+     Fold.forM_ (V.enumFromN 0 (V.length block_vec)) $ \i -> do
+       let b = block_vec V.! i
+       when (blockIndex (blockLabel b) /= fromIntegral i) $ do
+         error $ "blocks occur in illegal order" ++ show block_indices
      -- Add blocks ot code.
      let br = BlockRegion { brEnd = next_ip
-                          , brBlocks = V.fromList bs
+                          , brBlocks = block_vec
+
                           }
      blocks %= Map.insert addr br
 
-     cfg %= insertBlocksForCode addr next_ip bs
      lookupBlock addr
 
 -- | Returns a block at the given location, if at all possible.  This
@@ -316,8 +329,8 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
            -> MapF Assignment AbsValue
         go m0 b =
           case blockLabel b of
-            GeneratedBlock{} -> m0
-            DecompiledBlock a -> insBlock b (initAbsRegs (finalBlockState a fg)) m0
+            GeneratedBlock a 0 -> insBlock b (initAbsRegs (finalBlockState a fg)) m0
+            _ -> m0
 
         insBlock :: Block
                  -> AbsRegs
@@ -551,11 +564,10 @@ transferBlock b regs = do
   case blockTerm b of
     Branch c lb rb -> do
       mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
-      g <- use cfg
-      let Just l = findBlock g lb
-          l_regs = refineValue c (abstractSingleton n1 1) regs'
-      let Just r = findBlock g rb
-          r_regs = refineValue c (abstractSingleton n1 0) regs'
+      l <- lookupBlock' lb
+      let  l_regs = refineValue c (abstractSingleton n1 1) regs'
+      r <- lookupBlock' rb
+      let r_regs = refineValue c (abstractSingleton n1 0) regs'
       -- We re-transfer the stmts to propagate any changes from
       -- the above refineValue.  This could be more efficient by
       -- tracking what (if anything) changed.  We also might
@@ -588,7 +600,6 @@ transferBlock b regs = do
             when (isCodePointer mem (fromInteger addr)) $ do
               mergeBlock (NextIP lbl) abst (fromInteger addr)
 
-
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
 transfer rsn addr = do
   doMaybe (getBlock rsn addr) () $ \root -> do
@@ -604,12 +615,17 @@ data FinalCFG = FinalCFG { finalCFG :: !CFG
                          , finalFailedAddrs :: !(Set CodeAddr)
                          }
 
+mkCFG :: Map CodeAddr BlockRegion -> CFG
+mkCFG m = Map.foldlWithKey' go emptyCFG m
+  where go g addr br = insertBlocksForCode addr (brEnd br) l g
+          where l = V.toList (brBlocks br)
+
 mkFinalCFG :: InterpState -> FinalCFG
-mkFinalCFG s = FinalCFG { finalCFG = s^.cfg
-                      , finalAbsState = s^.absState
-                      , finalCodePointersInMem = s^.codePointersInMem
-                      , finalFailedAddrs = s^.failedAddrs
-                      }
+mkFinalCFG s = FinalCFG { finalCFG = mkCFG (s^.blocks)
+                        , finalAbsState = s^.absState
+                        , finalCodePointersInMem = s^.codePointersInMem
+                        , finalFailedAddrs = s^.failedAddrs
+                        }
 
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =

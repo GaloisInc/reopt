@@ -32,7 +32,7 @@ module Reopt.Semantics.Representation
   , blockNextStates
     -- * Block level declarations
   , BlockLabel(..)
-  , blockParent
+  , isRootBlockLabel
   , Block(..)
   , CodeAddr
   , hasCallComment
@@ -72,7 +72,7 @@ import           Data.Bits
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Monoid (Monoid())
+import           Data.Monoid as Monoid
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.TH.GADT
 import           Data.Set (Set)
@@ -201,37 +201,26 @@ traverseBlockAndChildren cfg b0 f merge = goBlock b0
 
 -- | A label used to identify a block.
 data BlockLabel
-   = DecompiledBlock CodeAddr
      -- ^ A block that came from an address in the code.
-   | GeneratedBlock CodeAddr Word64
+   = GeneratedBlock { blockParent :: {-# UNPACK #-} !CodeAddr
+                    , blockIndex  :: {-# UNPACK #-} !Word64
+                    }
      -- ^ A unique identifier for a generated block.
   deriving Eq
 
-instance Ord BlockLabel where
-  compare (DecompiledBlock v) (DecompiledBlock v') = compare v v'
-  compare (DecompiledBlock v) (GeneratedBlock p _)
-    | p == v = LT
-    | otherwise = compare v p
-  compare (GeneratedBlock p _) (DecompiledBlock v)
-    | p == v = GT
-    | otherwise = compare p v
-  compare (GeneratedBlock p v) (GeneratedBlock p' v')
-    | p == p' = compare v v'
-    | otherwise = compare p p'
+isRootBlockLabel :: BlockLabel -> Bool
+isRootBlockLabel (GeneratedBlock _ w) = w == 0
 
--- | A label always has a parent, i.e., the DecompiledBlock that
--- generated it
-blockParent :: BlockLabel -> CodeAddr
-blockParent (DecompiledBlock v)  = v
-blockParent (GeneratedBlock v _) = v
+instance Ord BlockLabel where
+  compare (GeneratedBlock p v) (GeneratedBlock p' v') =
+    compare p p' Monoid.<> compare v v'
 
 instance Show BlockLabel where
-  show l = show (pretty l)
+  showsPrec _ (GeneratedBlock a 0) s = "block_" ++ showHex a s
+  showsPrec _ (GeneratedBlock a w) s = "subblock_" ++ showHex a ("_" ++ shows w s)
 
 instance Pretty BlockLabel where
-  pretty (DecompiledBlock a)   | a >= 0 = text ("block_" ++ showHex a "")
-  pretty (GeneratedBlock p w)  | p >= 0 = text ("subblock_" ++ showHex p "_" ++ show w)
-  pretty _ = error "Pretty BlockLabel"
+  pretty l = text (show l)
 
 ------------------------------------------------------------------------
 -- Block
@@ -250,7 +239,7 @@ data Block = Block { blockLabel :: !BlockLabel
 
 instance Pretty Block where
   pretty b = do
-    pretty (blockLabel b) <> text ":" <$$>
+    pretty (blockLabel b) PP.<> text ":" <$$>
       indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
 
 -- | Returns true if block has a call comment.
@@ -311,7 +300,7 @@ stmtLocType X87_PC = knownType
 stmtLocType X87_RC = knownType
 
 instance Pretty (StmtLoc tp) where
-  pretty (MemLoc a _) = text "*" <> ppValue 11 a
+  pretty (MemLoc a _) = text "*" PP.<> ppValue 11 a
   pretty (ControlLoc r) = text (show r)
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
@@ -492,7 +481,7 @@ ppValue :: Prec -> Value tp -> Doc
 ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
-ppValue _ (Initial r)       = text (show r) <> text "_0"
+ppValue _ (Initial r)       = text (show r) PP.<> text "_0"
 ppValue _ _                 = error "ppValue"
 
 instance Pretty (Value tp) where
