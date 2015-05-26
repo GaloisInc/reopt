@@ -13,6 +13,7 @@ module Reopt.Memory
   , executableSegments
   , addrHasPermissions
   , isCodePointer
+  , isRODataPointer
   , findSegment
   , MemSegment(..)
   , isExecutable
@@ -173,6 +174,10 @@ addrHasPermissions w req m = fromMaybe False $ do
 -- | Indicates if address is a code pointer.
 isCodePointer :: Memory Word64 -> Word64 -> Bool
 isCodePointer mem val = addrHasPermissions val pf_x mem
+
+isRODataPointer :: Memory Word64 -> Word64 -> Bool
+isRODataPointer mem val = addrHasPermissions val pf_r mem
+                          && not (addrHasPermissions val pf_w mem)
 
 ------------------------------------------------------------------------
 -- MemStream

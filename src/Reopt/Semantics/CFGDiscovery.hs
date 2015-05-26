@@ -510,6 +510,28 @@ checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
               | otherwise ->
                 go prev
 
+-- looks for jump tables
+getJumpTable :: Memory Word64 -> X86State Value -> AbsRegs -> Maybe (Set Integer)
+getJumpTable mem conc regs
+  -- basically, (8 * x) + addr
+  | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
+  , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
+  , AssignedValue (Assignment _ (EvalApp (BVMul _ (BVValue _ 8) xv))) <- lhs
+  , AssignedValue x <- xv
+  , Just vs <- concretize (regs^.absAssignments^.assignLens x) =
+    let addrs = Set.map (\off -> fromIntegral $ base + off * 8) vs
+        bptrs = Set.map (\addr -> fromIntegral $ fromJust
+                                  $ Map.lookup addr wordMap) addrs
+    in
+    if all (isRODataPointer mem) $ Set.toList addrs
+       then trace ("getJumpTable: " ++ show (pretty x)
+                   ++ " " ++ show (Set.map (flip showHex "") bptrs)) $    
+            Just bptrs
+       else Nothing
+  | otherwise = Nothing
+  where
+    wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
+
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
@@ -541,7 +563,7 @@ transferBlock b regs = do
       let abst = finalAbsBlockState regs' s'
       mapM_ (mergeBlock (ReturnAddress lbl) abst) rets
       -- Look for new ips.
-      case concretize (abst^.absX86State^.curIP) of
+      case getJumpTable mem s' regs' <|> concretize (abst^.absX86State^.curIP) of
         Nothing ->
           return ()
         Just ips -> do
