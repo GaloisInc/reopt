@@ -79,16 +79,16 @@ memoryForElfSections e = flip execStateT emptyMemory $ do
 -- | Load an elf file into memory.
 insertElfSection :: (ElfWidth w, MonadState (Memory w) m) => ElfSection w -> m ()
 insertElfSection s =
-  when (elfSectionFlags s `sectionHasPermissions` shf_alloc) $ do
+  when (elfSectionFlags s `hasPermissions` shf_alloc) $ do
     insertMemSegment (memSegmentForElfSection s)
 
 -- | Convert elf section flags to a segment flags.
 flagsForSectionFlags :: ElfWidth w => ElfSectionFlags w -> ElfSegmentFlags
 flagsForSectionFlags f = pf_r .|. write_flag .|. exec_flag
-  where can_write = f `sectionHasPermissions` shf_write
+  where can_write = f `hasPermissions` shf_write
         write_flag | can_write = pf_w
                    | otherwise = pf_none
-        can_exec = f `sectionHasPermissions` shf_execinstr
+        can_exec = f `hasPermissions` shf_execinstr
         exec_flag | can_exec  = pf_x
                   | otherwise = pf_none
 
