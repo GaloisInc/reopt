@@ -358,13 +358,13 @@ bvmul :: NatRepr u
       -> StridedInterval (BVType u)
 bvmul _ EmptyInterval{} _ = EmptyInterval
 bvmul _ _ EmptyInterval{} = EmptyInterval
-bvmul sz si1 si2 = top sz -- FIXME: this blows up with the trunc, unfortunately
--- bvmul sz si1 si2 =
---   bvadd sz
---         (bvadd sz
---                (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
---                (mk 0 (range si2) (stride si2 * base si1)))
---         (mk 0 (range si1 * range si2) (stride si1 * stride si2))
+-- bvmul sz si1 si2 = top sz -- FIXME: this blows up with the trunc, unfortunately
+bvmul sz si1 si2 =
+  bvadd sz
+        (bvadd sz
+               (mk (base si1 * base si2) (range si1) (stride si1 * base si2))
+               (mk 0 (range si2) (stride si2 * base si1)))
+        (mk 0 (range si1 * range si2) (stride si1 * stride si2))
   where
     mk b r s
       | s == 0    = singleton (typ si1) b
@@ -383,6 +383,55 @@ prop_bvmul = mk_prop (*) bvmul
 --   where
 --     u = case tp of BVTypeRepr n -> maxUnsigned n
 
+-- | Returns the least b' s.t. exists i < n. b' = (b + i * q) mod m
+-- This is a little tricky.  We want to find { b + i * q | i <- {0 .. n} } mod M
+-- Now, if we know the values in {0..q} we can figure out the whole sequence.
+-- In particular, we are looking for the new b --- the stride is gcd q M (assuming wrap)
+--
+-- Let q_w be k * q mod M s.t. 0 <= q_w < q.  Alternately, q_w = q - M mod q 
+--
+-- Assume wlog b0 = b < q.  Take
+-- b1 = b0 + q_w
+-- b2 = b1 + q_w
+-- b3 = ...
+--
+-- i.e. bs = { b + i * q_w | i <- {0 .. n `div` ceil(m / q)} }
+--
+-- Now, we are interested in these value mod q, so take
+-- bs = { b0 + i * q_w } mod q
+-- 
+-- Thus, we get a recursion of (M, q) (q, q_w) (q_w, ...)
+-- 
+-- = (M, q) (q, q - M mod q) (q - M mod q, (q - M mod q) - q mod (q - M mod q))
+--
+-- Base cases:
+--  Firstly, when q divides M, we can stop, or n == 0
+--  Otherwise, for small M we can search for some i, that is
+--  the least 0 <= k < M s.t.
+--
+--  EX i. (b + i * q) mod M = k
+--
+
+-- Assumes b < q (?)
+-- currently broken :(
+leastMod :: Integer -> Integer -> Integer -> Integer -> Integer
+leastMod b m q n
+  | b + n * q < m  = b -- no wrap
+  | m `mod` q == 0 = b -- assumes q <= m
+  | otherwise =
+      trace (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` (m `div`q)))) $
+      leastMod next_b m' q'
+                -- FIXME: we sometimes miss a +1 here, we do this to
+                -- be conservative (overapprox.)
+      (next_n `div` (m `div`q))
+  where
+    m' = q
+    q' = q - m `mod` q
+    (next_b, next_n)
+      | b < q'    = (b, n)
+      | otherwise = let i = (m `div` q) + 1
+                    in (((b + i * q) `mod` m) `mod` q, n - i)
+
 -- | Truncate an interval.
 
 -- OPT: this could be made much more efficient I think.
@@ -392,41 +441,28 @@ trunc :: -- (v+1 <= u) =>
   -> StridedInterval (BVType v)
 trunc EmptyInterval _ = EmptyInterval
 trunc si sz
-  -- No change/complete wrap case --- happens when we add
-  -- (unsigned int) -1, for example.
   | isTop si              = top'
+  -- No change/complete wrap case --- happens when we add
+  -- (unsigned int) -1, for example.                            
   | si' `isSubsetOf` top' = si'
-  | otherwise     = -- trace ("trunc " ++ show (pretty si) ++ " " ++ show sz) $
-                    go pfx (next_g pfx) (range si - (range pfx + 1))
+  -- where stride is a power of 2 (well, divides 2 ^ sz), we easily
+  -- figure out the new base and just over-approximate by all the values
+  | modulus `mod` stride si == 0 =
+      let base' = (base_mod_sz
+                  + (stride si * ((modulus - base_mod_sz) `ceilDiv` stride si)))
+                  `mod` modulus
+      in si' { base = base', range = (modulus `ceilDiv` stride si) - 1 }
+   -- We wrap at least once
+  | otherwise     = trace ("trunc failing: " ++ show (pretty si) ++ " " ++ show sz) $
+                    top'
   where
-    mk_range b r =
-      let max_range = (maxUnsigned sz - b) `div` stride si
-      in if r <= max_range then r else max_range
-
-    pfx = si' { range = mk_range (base si') (range si') }
-
-    next_g new_si = toUnsigned sz (intervalEnd new_si + stride si)
-    -- FIXME: we should stop when we see repeated elements, but it
-    -- might be faster to do it this way.
-    go acc g n
-      | isTop acc = acc
-      -- no more range left
-      | n < 0 = acc
-      -- we hit a cycle (maybe via lub)
-      -- | g `member` acc = acc
-      | otherwise      =
-          let new_range = mk_range g n
-              new_si = StridedInterval { typ = typ top'
-                                       , base = g
-                                       , range = new_range
-                                       , stride = stride si }
-          in -- trace ("new_si for " ++ show (natValue sz) ++ " at " ++ show n ++ " " ++ show (pretty new_si)
-             --        ++ " acc " ++ show (pretty acc)) $
-             go (lub acc new_si) (next_g new_si) (n - (range new_si + 1))
-
+    modulus = 2 ^ (natValue sz)
     si'  = si { typ = typ top'
               , base = toUnsigned sz (base si) }
     top' = top sz
+    base_mod_sz = base si'
+    -- positive only
+    ceilDiv x y = (x + y - 1) `div` y
 
 prop_trunc :: StridedInterval (BVType 64)
               -> Positive (Small Integer)

@@ -19,6 +19,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Reopt.Semantics.CFGDiscovery
        ( FinalCFG(..)
@@ -30,6 +31,7 @@ import           Control.Applicative
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad.State.Strict
+import qualified Data.ByteString as BS
 import qualified Data.Foldable as Fold
 import           Data.List
 import           Data.Map.Strict (Map)
@@ -50,6 +52,7 @@ import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.AbsState
+import qualified Reopt.Domains.StridedInterval as SI
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
@@ -460,6 +463,10 @@ refineApp app av regs =
    --        else -- one is false, so we do a join
    --          lub l_regs r_regs
 
+   -- If we know something about the result of a trunc, we can
+   -- propagate back a subvalue.
+   Trunc x sz -> refineTrunc x sz av regs
+
    -- basically less-than: does x - y overflow? only if x < y.
    UsbbOverflows sz l r (BVValue _ 0)
      | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
@@ -492,6 +499,11 @@ refineApp app av regs =
     getAssignApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
     getAssignApp _ = Nothing
 
+refineTrunc :: ((n + 1) <= n') =>
+               Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
+               -> AbsRegs -> AbsRegs
+refineTrunc v sz av regs = refineValue v (subValue sz av) regs
+
 refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLeq tp x y b regs
   -- y < x
@@ -503,7 +515,6 @@ refineLeq tp x y b regs
     y_av = transferValue regs y
     (x_leq, y_leq)   = abstractLeq tp x_av y_av
     (y_lt, x_lt)     = abstractLt  tp y_av x_av
-
 
 refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLt tp x y b regs
@@ -571,6 +582,56 @@ x86StateRegisters
   ++ (Some <$> N.xmmRegs)
 -}
 
+-- looks for jump tables
+getJumpTable :: Memory Word64
+             -> X86State Value
+             -> AbsRegs
+             -> Value (BVType 64)
+             -> Maybe (Set CodeAddr)
+getJumpTable mem conc regs ptr
+  | AssignedValue ass <- ptr
+  , absAddrs <- regs^.absAssignments^.assignLens ass
+  , any (\rorange -> absAddrs `leq` rorange) roranges
+  , Just addrs <- concretize absAddrs =
+    let bptrs = Set.map (\addr -> fromIntegral $ fromJust
+                                  $ Map.lookup (fromIntegral addr) wordMap) addrs
+    in
+    if all (isRODataPointer mem . fromIntegral) $ Set.toList addrs
+       then trace ("getJumpTable: " ++ show (pretty ass)
+                   ++ " " ++ show (Set.map (flip showHex "") bptrs)) $
+            Just bptrs
+       else Nothing
+  where
+    wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
+    -- FIXME: move to Memory?
+    rosegs  = readonlySegments mem
+    -- FIXME: could also use 8 here
+    roranges = map (\roseg ->
+                     let base = fromIntegral $ memBase roseg
+                         sz   = fromIntegral $ BS.length (memBytes roseg)
+                     in
+                     stridedInterval (SI.mkStridedInterval (BVTypeRepr n64) False
+                                      base (base + sz - 1) 1))
+               rosegs
+
+getJumpTable _mem _conc _regs _ = Nothing
+  -- -- basically, (8 * x) + addr
+  -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
+  -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
+  -- , AssignedValue (Assignment _ (EvalApp (BVMul _ (BVValue _ 8) xv))) <- lhs
+  -- , AssignedValue x <- xv
+  -- , Just vs <- concretize (regs^.absAssignments^.assignLens x) =
+  --   let addrs = Set.map (\off -> fromIntegral $ base + off * 8) vs
+  --       bptrs = Set.map (\addr -> fromIntegral $ fromJust
+  --                                 $ Map.lookup addr wordMap) addrs
+  --   in
+  --   if all (isRODataPointer mem) $ Set.toList addrs
+  --      then trace ("getJumpTable: " ++ show (pretty x)
+  --                  ++ " " ++ show (Set.map (flip showHex "") bptrs)) $
+  --           Just bptrs
+  --      else Nothing
+  -- | otherwise = Nothing
+
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
@@ -606,19 +667,24 @@ transferBlock b regs = do
           Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
           mergeBlock (ReturnAddress lbl) abst ret
           -- Look for new ips.
-          let ips = getNextIps mem abst
+          let ips = getNextIps mem s' regs'
           functionEntries %= Set.union ips
           Fold.forM_ ips $ \addr -> do
             mergeBlock (NextIP lbl) abst addr
         Nothing -> do
           mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
           -- Look for new ips.
-          Fold.forM_ (getNextIps mem abst) $ \addr -> do
+          Fold.forM_ (getNextIps mem s' regs') $ \addr -> do
             mergeBlock (NextIP lbl) abst addr
 
 
-getNextIps :: Memory Word64 -> AbsBlockState -> Set CodeAddr
-getNextIps mem abst = getNextIps' mem (abst^.absX86State^.curIP)
+getNextIps :: Memory Word64 -> X86State Value -> AbsRegs -> Set CodeAddr
+getNextIps mem s' regs' = do
+    case s'^.curIP of
+      AssignedValue (Assignment _ (Read (MemLoc ptr _))) ->
+        fromMaybe Set.empty (getJumpTable mem s' regs' ptr)
+      _ -> getNextIps' mem (abst^.absX86State^.curIP)
+  where abst = finalAbsBlockState regs' s'
 
 getNextIps' :: Memory Word64 -> AbsValue (BVType 64) -> Set CodeAddr
 getNextIps' mem v =
@@ -688,6 +754,8 @@ cfgFromAddress mem start = g -- trace ("Function:\n" ++ concatMap ppStackHeights
     go s (a,v)
       | not (isCodePointer mem v) = s
       | Set.member v (s^.codePointersInMem) = s
+      | Set.member v (s^.seenAddrs) =
+        recordEscapedCodePointer v InInitialData s
       | otherwise =
         trace ("Found new code pointer " ++ showHex v " at " ++ showHex a ".") $
         recordEscapedCodePointer v InInitialData s

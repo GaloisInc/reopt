@@ -11,8 +11,10 @@ module Reopt.Memory
   , memAsWord64le
   , memAsWord64le_withAddr
   , executableSegments
+  , readonlySegments
   , addrHasPermissions
   , isCodePointer
+  , isRODataPointer
   , findSegment
   , MemSegment(..)
   , isExecutable
@@ -147,6 +149,11 @@ memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
 executableSegments :: Memory w -> [MemSegment w]
 executableSegments = filter isExecutable . memSegments
 
+readonlySegments :: Memory w -> [MemSegment w]
+readonlySegments = filter (\s -> memFlags s `hasPermissions` pf_r
+                                 && not (memFlags s `hasPermissions` pf_w)
+                          ). memSegments
+
 -- | Insert segment into memory or fail if this overlaps with another
 -- segment in memory.
 insertMemSegment :: (Ord w, Num w, MonadState (Memory w) m)
@@ -173,6 +180,10 @@ addrHasPermissions w req m = fromMaybe False $ do
 -- | Indicates if address is a code pointer.
 isCodePointer :: Memory Word64 -> Word64 -> Bool
 isCodePointer mem val = addrHasPermissions val pf_x mem
+
+isRODataPointer :: Memory Word64 -> Word64 -> Bool
+isRODataPointer mem val = addrHasPermissions val pf_r mem
+                          && not (addrHasPermissions val pf_w mem)
 
 ------------------------------------------------------------------------
 -- MemStream
