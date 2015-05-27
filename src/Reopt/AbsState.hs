@@ -13,6 +13,7 @@ module Reopt.AbsState
   , AbsValue(..)
   , ppAbsValue
   , abstractSingleton
+  , subValue
   , concreteStackOffset
   , concretize
   , asConcreteSingleton
@@ -99,25 +100,23 @@ data AbsValue (tp :: Type) where
   SomeStackOffset :: AbsValue (BVType 64)
   -- | A strided interval
   StridedInterval :: !(SI.StridedInterval (BVType n)) -> AbsValue (BVType n)
-  -- | A sub-value about which we know more than the containing value
+  
+  -- | A sub-value about which we know only some bits.
   -- (e.g., we know that the lower 8 bits are < 10)
-
-  -- FIXME: we probably want n < n'
   SubValue :: ((n + 1) <= n') =>
-              !(NatRepr n) -> !(AbsValue (BVType n))
-              -> !(AbsValue (BVType n')) -> AbsValue (BVType n')
+              !(NatRepr n) -> !(AbsValue (BVType n)) ->  AbsValue (BVType n')
   -- | Any value
   TopV :: AbsValue tp
 
-prop_SubValue :: AbsValue tp -> Bool
-prop_SubValue (SubValue n v v') =
-  case (concretize v, concretize v') of
-   (_, Nothing)         -> True
-   -- FIXME: maybe? this just says all lower bits are set.  We could
-   -- expand out the Top, but that might be expensive for large n.
-   (Nothing, _)         -> False 
-   (Just vs, Just vs')  -> vs `Set.isSubsetOf` (Set.map (toUnsigned n) vs')
-prop_SubValue _ = True
+-- prop_SubValue :: AbsValue tp -> Bool
+-- prop_SubValue (SubValue n v v') =
+--   case (concretize v, concretize v') of
+--    (_, Nothing)         -> True
+--    -- FIXME: maybe? this just says all lower bits are set.  We could
+--    -- expand out the Top, but that might be expensive for large n.
+--    (Nothing, _)         -> False 
+--    (Just vs, Just vs')  -> vs `Set.isSubsetOf` (Set.map (toUnsigned n) vs')
+-- prop_SubValue _ = True
 
 -- | The maximum number of values we hold in a ValueSet, after which
 -- we move to intervals
@@ -130,8 +129,8 @@ instance Eq (AbsValue tp) where
   StackOffset s == StackOffset t = s == t
   SomeStackOffset          == SomeStackOffset = True
   StridedInterval si1 == StridedInterval si2  = si1 == si2
-  SubValue n v c == SubValue n' v' c'
-    | Just Refl <- testEquality n n' = v == v' && c == c'
+  SubValue n v == SubValue n' v'
+    | Just Refl <- testEquality n n' = v == v'
     | otherwise = False
   TopV          == TopV          = True
   _             ==               _ = False
@@ -142,8 +141,7 @@ instance EqF AbsValue where
 instance Pretty (AbsValue tp) where
   pretty (AbsValue s) = ppIntegerSet s
   pretty (StridedInterval s) = pretty s
-  pretty (SubValue n av c) = parens (pretty c <+> (pretty av)
-                             <> brackets (integer (natValue n)))
+  pretty (SubValue n av) = (pretty av) <> brackets (integer (natValue n))
   pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty SomeStackOffset = text "rsp_0 + ?"
   pretty TopV = text "top"
@@ -158,11 +156,7 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 -- known under-approximation.
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (AbsValue s) = Just s
--- OPT: might be faster to just do concretize v'
-concretize (SubValue n v v') =
-  do v_vs <- concretize v
-     v_vs' <- concretize v'
-     return (Set.filter (flip Set.member v_vs . toUnsigned n) v_vs')
+concretize (SubValue n v) = Nothing -- we know nothing about _all_ values
 concretize (StridedInterval s) =
   trace ("Concretizing " ++ show (pretty s)) $
   Just (Set.fromList (SI.toList s))
@@ -196,16 +190,10 @@ stridedInterval si
 -- subvalues are sorted on size.
 subValue :: ((n + 1) <= n') =>
             NatRepr n -> AbsValue (BVType n)
-            -> AbsValue (BVType n') -> AbsValue (BVType n')
-subValue n v v'@(SubValue nc vc container)
-  -- FIXME: meet seems like what we want here? Maybe the combination
-  -- operator should be a parameter (i.e. maybe join is what we want).
-  -- In general I don't expect this to arise because subvalues get
-  -- thrown away a lot.
-  | Just Refl <- testEquality n nc = SubValue nc (meet v vc) container 
-  | Just LeqProof <- testLeq n nc  = SubValue n v v'
-  | otherwise = SubValue nc vc (subValue n v container)
-subValue n v v' = SubValue n v v'
+            -> AbsValue (BVType n')
+subValue n v
+  | TopV <- v = top
+  | otherwise = SubValue n v
 
 -- -----------------------------------------------------------------------------
 -- Instances
@@ -252,28 +240,13 @@ instance AbsDomain (AbsValue tp) where
     where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
 
   -- Sub values
-  joinD v v'
-    | SubValue n av c <- v, SubValue n' av' c' <- v'
-    , Just Refl <- testEquality n n' =
-      case (joinD av av', joinD c c') of
-       (Nothing, Nothing)     -> Nothing
-       (new_av, new_c) ->
-         Just $ SubValue n (fromMaybe av new_av) (fromMaybe c new_c)           
-      -- if n < n' (or n' < n) we drop the sub-value and always return
-      -- a new value
-    | SubValue n av c <- v, SubValue n' av' c' <- v'
-    , Just LeqProof <- testLeq n n' = Just $ fromMaybe c (joinD c v')
-    | SubValue n av c <- v, SubValue n' av' c' <- v' =
-        Just $ fromMaybe v (joinD v c')
-      -- Joining non sub-values.  This is the interesting case as leq
-      -- uses joinD, and refineValue uses leq to determine if things changed.
-    | SubValue n av c <- v  =
-        case (joinD av (trunc v' n), joinD c v') of
-         (Nothing, Nothing) -> Nothing
-         (new_av, new_c) ->
-           Just $ SubValue n (fromMaybe av new_av) (fromMaybe c new_c)           
-    | SubValue n av c <- v' =
-        Just $ fromMaybe v (joinD v c)
+  joinD (SubValue n av) (SubValue n' av') =
+    case testNatCases n n' of
+     NatCaseLT LeqProof -> subValue n  <$> joinD av (trunc av' n)
+     NatCaseEQ          -> subValue n  <$> joinD av av'
+     NatCaseGT LeqProof ->
+       let new_av = trunc av n'
+       in  Just $ subValue n' (fromMaybe new_av (joinD new_av av'))
         
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
@@ -282,6 +255,13 @@ instance AbsDomain (AbsValue tp) where
 
   joinD _ _ = Just TopV
 
+
+member :: Integer -> AbsValue tp -> Bool
+member n TopV = True
+member n (AbsValue s) = Set.member n s
+member n (StridedInterval si) = SI.member n si
+member n (SubValue _n' v) = member n v 
+member _n _v = False
 
 -- meet is probably the wrong word here --- we are really refining the
 -- abstract value based upon some new information.  Thus, we want to
@@ -305,23 +285,21 @@ meet v v'
   | StridedInterval si <- v', AbsValue s <- v
     = AbsValue $ Set.filter (`SI.member` si) s
 
+-- These cases are currently sub-optimal: really we want to remove all
+-- those from the larger set which don't have a prefix in the smaller
+-- set.
 meet v v'
-  | SubValue n av c <- v, SubValue n' av' c' <- v'
-  , Just Refl <- testEquality n n' =
-    SubValue n (meet av av') (meet c c')
-
-    -- n < n' case.
-  | SubValue n av c <- v, SubValue n' av' c' <- v'
-  , Just LeqProof <- testLeq n n' = error "FIXME" -- can't happen at the moment
-
-    -- n' < n case.
-  | SubValue n av c <- v, SubValue n' av' c' <- v' =
-      fromMaybe v (joinD v c') -- just discard the sub-interval
-    -- v' is not a sub-interval (nor Top)
-  | SubValue n av c <- v  =
-      SubValue n (meet av (trunc v' n)) (meet c v')
-  | SubValue n av c <- v' =
-      SubValue n (meet av (trunc v n)) (meet c v)
+  | SubValue n av <- v, SubValue n' av' <- v' =
+      case testNatCases n n' of
+       NatCaseLT LeqProof -> subValue n av -- FIXME
+       NatCaseEQ          -> subValue n (meet av av')
+       NatCaseGT LeqProof -> subValue n' av' -- FIXME 
+  | SubValue n av <- v, AbsValue s <- v' =
+      AbsValue $ Set.filter (\x -> (toUnsigned n x) `member` av) s
+  | SubValue n av <- v', AbsValue s <- v =
+      AbsValue $ Set.filter (\x -> (toUnsigned n x) `member` av) s      
+  | SubValue n av <- v, StridedInterval si <- v' = v' -- FIXME: ? 
+  | StridedInterval si <- v, SubValue n av <- v' = v -- FIXME: ? 
 
 -- Join addresses
 meet SomeStackOffset s@StackOffset{} = s
@@ -335,11 +313,11 @@ trunc :: (v+1 <= u)
       -> AbsValue (BVType v)
 trunc (AbsValue s) w = AbsValue (Set.map (toUnsigned w) s)
 trunc (StridedInterval s) w = stridedInterval (SI.trunc s w)
-trunc (SubValue n av c) w
-  | Just Refl <- testEquality n w = av
-  | Just LeqProof <- testLeq (incNat w) n = trunc av w
-  | otherwise = trunc c w -- throw away subinterval
-                
+trunc (SubValue n av) w =
+  case testNatCases n w of
+   NatCaseLT LeqProof -> SubValue n av
+   NatCaseEQ          -> av
+   NatCaseGT LeqProof -> trunc av w                
 trunc (StackOffset _) _ = TopV
 trunc SomeStackOffset _ = TopV
 trunc TopV _ = TopV
@@ -348,16 +326,15 @@ uext :: forall u v.
         (u+1 <= v) => AbsValue (BVType u) -> NatRepr v -> AbsValue (BVType v)
 uext (AbsValue s) _ = AbsValue s
 uext (StridedInterval si) w = StridedInterval (si { SI.typ = BVTypeRepr w } ) -- FIXME
-uext (SubValue (n :: NatRepr n) av c) w =
+uext (SubValue (n :: NatRepr n) av) w =
   -- u + 1 <= v, n + 1 <= u, need n + 1 <= v
   -- proof: n + 1 <= u + 1 by addIsLeq
   --        u + 1 <= v     by assumption
   --        n + 1 <= v     by transitivity
-  case proof of LeqProof -> SubValue n av (uext c w)
+  case proof of LeqProof -> SubValue n av
   where
     proof :: LeqProof (n + 1) v
-    proof = leqTrans (leqAdd LeqProof n1) (LeqProof :: LeqProof (u + 1) v)
-      
+    proof = leqTrans (leqAdd LeqProof n1) (LeqProof :: LeqProof (u + 1) v)      
 uext (StackOffset _) _ = TopV
 uext SomeStackOffset _ = TopV
 uext TopV _ = TopV
@@ -380,8 +357,8 @@ bvadd w v v'
     go si1 si2 = stridedInterval $ SI.bvadd w si1 si2
 
 -- subvalues
-bvadd w (SubValue _n _av c) v' = bvadd w c v'
-bvadd w v (SubValue _n _av c)  = bvadd w v c
+-- bvadd w (SubValue _n _av c) v' = bvadd w c v'
+-- bvadd w v (SubValue _n _av c)  = bvadd w v c
 
 -- the rest  
 bvadd _ StackOffset{} _ = SomeStackOffset
@@ -418,8 +395,8 @@ bvsub w (StackOffset s) (AbsValue t) = setL (const SomeStackOffset) StackOffset 
   return (toUnsigned w (x - y))
 
 -- subvalues
-bvsub w (SubValue _n _av c) v' = bvsub w c v'
-bvsub w v (SubValue _n _av c)  = bvsub w v c
+-- bvsub w (SubValue _n _av c) v' = bvsub w c v'
+-- bvsub w v (SubValue _n _av c)  = bvsub w v c
   
 bvsub _ StackOffset{} _ = SomeStackOffset
 bvsub _ _ StackOffset{} = TopV
@@ -445,8 +422,8 @@ bvmul w v v'
   where
     go si1 si2 = stridedInterval $ SI.bvmul w si1 si2
 
-bvmul w (SubValue _n _av c) v' = bvmul w c v'
-bvmul w v (SubValue _n _av c)  = bvmul w v c
+-- bvmul w (SubValue _n _av c) v' = bvmul w c v'
+-- bvmul w v (SubValue _n _av c)  = bvmul w v c
 
 bvmul _ _ _ = TopV
 

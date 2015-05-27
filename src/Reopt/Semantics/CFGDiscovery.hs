@@ -451,7 +451,7 @@ refineApp app av regs =
 refineTrunc :: ((n + 1) <= n') =>
                Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
                -> AbsRegs -> AbsRegs
-refineTrunc v sz av regs = refineValue v (SubValue sz av top) regs
+refineTrunc v sz av regs = refineValue v (subValue sz av) regs
 
 refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLeq tp x y b regs
@@ -521,7 +521,15 @@ checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
 
 -- looks for jump tables
 getJumpTable :: Memory Word64 -> X86State Value -> AbsRegs -> Maybe (Set Integer)
-getJumpTable mem conc regs = Nothing
+getJumpTable mem conc regs
+  | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP =
+      regs^.absAssignments^.assignLens x
+  where
+    
+    
+  , 
+  , Just vs <- concretize ()
+               
   -- -- basically, (8 * x) + addr
   -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
   -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
