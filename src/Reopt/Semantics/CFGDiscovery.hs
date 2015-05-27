@@ -19,6 +19,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Reopt.Semantics.CFGDiscovery
        ( FinalCFG(..)
@@ -411,6 +412,10 @@ refineApp app av regs =
    --        else -- one is false, so we do a join
    --          lub l_regs r_regs
 
+   -- If we know something about the result of a trunc, we can
+   -- propagate back a subvalue.
+   Trunc x sz -> refineTrunc x sz av regs
+  
    -- basically less-than: does x - y overflow? only if x < y.
    UsbbOverflows sz l r (BVValue _ 0)
      | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
@@ -443,6 +448,11 @@ refineApp app av regs =
     getAssignApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
     getAssignApp _ = Nothing
 
+refineTrunc :: ((n + 1) <= n') =>
+               Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
+               -> AbsRegs -> AbsRegs
+refineTrunc v sz av regs = refineValue v (SubValue sz av top) regs
+
 refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLeq tp x y b regs
   -- y < x
@@ -454,7 +464,6 @@ refineLeq tp x y b regs
     y_av = transferValue regs y
     (x_leq, y_leq)   = abstractLeq tp x_av y_av
     (y_lt, x_lt)     = abstractLt  tp y_av x_av
-
 
 refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLt tp x y b regs
@@ -512,25 +521,25 @@ checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
 
 -- looks for jump tables
 getJumpTable :: Memory Word64 -> X86State Value -> AbsRegs -> Maybe (Set Integer)
-getJumpTable mem conc regs
-  -- basically, (8 * x) + addr
-  | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
-  , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
-  , AssignedValue (Assignment _ (EvalApp (BVMul _ (BVValue _ 8) xv))) <- lhs
-  , AssignedValue x <- xv
-  , Just vs <- concretize (regs^.absAssignments^.assignLens x) =
-    let addrs = Set.map (\off -> fromIntegral $ base + off * 8) vs
-        bptrs = Set.map (\addr -> fromIntegral $ fromJust
-                                  $ Map.lookup addr wordMap) addrs
-    in
-    if all (isRODataPointer mem) $ Set.toList addrs
-       then trace ("getJumpTable: " ++ show (pretty x)
-                   ++ " " ++ show (Set.map (flip showHex "") bptrs)) $    
-            Just bptrs
-       else Nothing
-  | otherwise = Nothing
-  where
-    wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
+getJumpTable mem conc regs = Nothing
+  -- -- basically, (8 * x) + addr
+  -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
+  -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
+  -- , AssignedValue (Assignment _ (EvalApp (BVMul _ (BVValue _ 8) xv))) <- lhs
+  -- , AssignedValue x <- xv
+  -- , Just vs <- concretize (regs^.absAssignments^.assignLens x) =
+  --   let addrs = Set.map (\off -> fromIntegral $ base + off * 8) vs
+  --       bptrs = Set.map (\addr -> fromIntegral $ fromJust
+  --                                 $ Map.lookup addr wordMap) addrs
+  --   in
+  --   if all (isRODataPointer mem) $ Set.toList addrs
+  --      then trace ("getJumpTable: " ++ show (pretty x)
+  --                  ++ " " ++ show (Set.map (flip showHex "") bptrs)) $    
+  --           Just bptrs
+  --      else Nothing
+  -- | otherwise = Nothing
+  -- where
+  --   wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
 
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
