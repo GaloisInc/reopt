@@ -22,6 +22,7 @@ library
     lens >= 4.7,
     mtl,
     parameterized-utils >= 0.1.6,
+    text,
     vector,
     QuickCheck
 

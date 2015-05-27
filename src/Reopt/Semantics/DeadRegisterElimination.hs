@@ -14,6 +14,7 @@
 --
 -- this code will remove the (unused) r2
 ------------------------------------------------------------------------
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 module Reopt.Semantics.DeadRegisterElimination (eliminateDeadRegisters) where
@@ -29,6 +30,7 @@ import qualified Data.Set as S
 
 import           Data.Parameterized.Some
 import           Reopt.Semantics.Representation
+import           Reopt.Semantics.Types
 
 eliminateDeadRegisters :: CFG -> CFG
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
@@ -76,7 +78,7 @@ refsInAssignRhs rhs = case rhs of
 refsInApp :: App Value tp -> Set AssignId
 refsInApp app = foldApp (\v s -> refsInValue v `S.union` s) S.empty app
 
-refsInLoc :: StmtLoc tp -> Set AssignId
+refsInLoc :: StmtLoc (Value (BVType 64)) tp -> Set AssignId
 refsInLoc (MemLoc v _) = refsInValue v
 refsInLoc _            = S.empty
 

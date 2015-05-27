@@ -9,17 +9,17 @@
 -- This defines the data types needed to represent X86 control flow graps.
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-
 module Reopt.Semantics.Representation
   ( CFG
   , emptyCFG
@@ -77,6 +77,8 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.TH.GADT
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Text (Text)
+import qualified Data.Text as Text
 import           Data.Word
 import           GHC.TypeLits
 import           Numeric (showHex)
@@ -245,31 +247,31 @@ instance Pretty Block where
 -- | Returns true if block has a call comment.
 hasCallComment :: Block -> Bool
 hasCallComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `isInfixOf` s
+  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
         isCallComment _ = False
 
 -- | Returns true if block has a ret comment.
 hasRetComment :: Block -> Bool
 hasRetComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "ret " `isSuffixOf` s
+  where isCallComment (Comment s) = "ret " `Text.isSuffixOf` s
         isCallComment _ = False
 
 ------------------------------------------------------------------------
 -- Loctions a statement may need to read or write to.
 
-data StmtLoc tp where
-  MemLoc     :: !(Value (BVType 64)) -> TypeRepr tp -> StmtLoc tp
-  ControlLoc :: !(N.RegisterName 'N.Control) -> StmtLoc (BVType 64)
-  DebugLoc   :: !(N.RegisterName 'N.Debug)   -> StmtLoc (BVType 64)
-  FS :: StmtLoc (BVType 16)
-  GS :: StmtLoc (BVType 16)
+data StmtLoc a tp where
+  MemLoc     :: !a -> TypeRepr tp -> StmtLoc a tp
+  ControlLoc :: !(N.RegisterName 'N.Control) -> StmtLoc a (BVType 64)
+  DebugLoc   :: !(N.RegisterName 'N.Debug)   -> StmtLoc a (BVType 64)
+  FS :: StmtLoc a (BVType 16)
+  GS :: StmtLoc a (BVType 16)
 
   -- X87 precision control field.  Values are:
   -- 00 Single Precision (24 bits)
   -- 01 Reserved
   -- 10 Double Precision (53 bits)
   -- 11 Double Extended Precision (64 bits)
-  X87_PC :: StmtLoc (BVType 2)
+  X87_PC :: StmtLoc a (BVType 2)
 
   -- X87 rounding control field.  Values are:
   --
@@ -287,10 +289,10 @@ data StmtLoc tp where
   -- 11 Round toward zero (Truncate)
   -- Rounded result is closest to but no greater in absolute value than the
   -- infinitely precise result.
-  X87_RC :: StmtLoc (BVType 2)
+  X87_RC :: StmtLoc a (BVType 2)
 
 
-stmtLocType :: StmtLoc tp -> TypeRepr tp
+stmtLocType :: StmtLoc a tp -> TypeRepr tp
 stmtLocType (MemLoc _ tp) = tp
 stmtLocType ControlLoc{} = knownType
 stmtLocType DebugLoc{}   = knownType
@@ -299,8 +301,11 @@ stmtLocType GS = knownType
 stmtLocType X87_PC = knownType
 stmtLocType X87_RC = knownType
 
-instance Pretty (StmtLoc tp) where
-  pretty (MemLoc a _) = text "*" PP.<> ppValue 11 a
+class PrettyPrec v where
+  prettyPrec :: Int -> v -> Doc
+
+instance PrettyPrec a => Pretty (StmtLoc a tp) where
+  pretty (MemLoc a _) = text "*" PP.<> prettyPrec 11 a
   pretty (ControlLoc r) = text (show r)
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
@@ -313,9 +318,9 @@ instance Pretty (StmtLoc tp) where
 
 data Stmt where
   AssignStmt :: !(Assignment tp) -> Stmt
-  Write :: !(StmtLoc tp) -> Value tp -> Stmt
+  Write :: !(StmtLoc (Value (BVType 64)) tp) -> Value tp -> Stmt
   PlaceHolderStmt :: [Some Value] -> String -> Stmt
-  Comment :: String -> Stmt
+  Comment :: !Text -> Stmt
 
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
@@ -323,7 +328,7 @@ instance Pretty Stmt where
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)
-  pretty (Comment s) = text $ "# " ++ s
+  pretty (Comment s) = text $ "# " ++ Text.unpack s
 
 ------------------------------------------------------------------------
 -- TermStmt
@@ -395,7 +400,7 @@ data AssignRhs tp where
   SetUndefined :: !(NatRepr n) -- Width of undefined value.
                -> AssignRhs (BVType n)
 
-  Read :: !(StmtLoc tp) -> AssignRhs tp
+  Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
 
 instance Pretty (AssignRhs tp) where
   pretty (EvalApp a) = ppApp (ppValue 10) a
@@ -477,12 +482,18 @@ mkLit n v = BVValue n (v .&. mask)
 bvValue :: KnownNat n => Integer -> Value (BVType n)
 bvValue i = mkLit knownNat i
 
+instance PrettyPrec (Value tp) where
+  prettyPrec = ppValue
+
 ppValue :: Prec -> Value tp -> Doc
 ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) PP.<> text "_0"
 ppValue _ _                 = error "ppValue"
+
+instance Show (Value tp) where
+  show = show . pretty
 
 instance Pretty (Value tp) where
   pretty = ppValue 0

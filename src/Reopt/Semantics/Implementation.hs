@@ -48,6 +48,7 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
@@ -638,7 +639,7 @@ getX87Offset i = do
       return (top - i)
     _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
 
-readLoc :: StmtLoc tp -> X86Generator (Expr tp)
+readLoc :: StmtLoc (Value (BVType 64)) tp -> X86Generator (Expr tp)
 readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
 
 getLoc :: ImpLocation tp -> X86Generator (Expr tp)
@@ -949,7 +950,7 @@ disassembleBlock' mem gs contFn addr = do
     Nothing -> Left (DisassembleError i)
     Just exec -> do
       let res = runX86Generator gs1 $ do
-                  addStmt (Comment (show line))
+                  addStmt (Comment (Text.pack (show line)))
                   exec
       case res of
         Some gs2 -> do

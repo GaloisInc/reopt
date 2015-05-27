@@ -130,6 +130,7 @@ data InterpState
                  , _absState :: !AbsState
                  }
 
+-- | Empty interpreter state.
 emptyInterpState :: Memory Word64 -> CodeAddr -> InterpState
 emptyInterpState mem start = InterpState
       { memory        = mem
@@ -155,6 +156,9 @@ blocks = lens _blocks (\s v -> s { _blocks = v })
 
 failedAddrs :: Simple Lens InterpState (Set CodeAddr)
 failedAddrs = lens _failedAddrs (\s v -> s { _failedAddrs = v })
+
+functionEntries :: Simple Lens InterpState (Set CodeAddr)
+functionEntries = lens _functionEntries (\s v -> s { _functionEntries = v })
 
 codePointersInMem :: Simple Lens InterpState (Set CodeAddr)
 codePointersInMem = lens _codePointersInMem (\s v -> s { _codePointersInMem = v })
@@ -210,21 +214,14 @@ getAbsBlockState a = do
   else
     return $ lookupAbsBlock a (s^.absState)
 
-ppHexInterval :: (Integral a, Show a) => (a,a) -> String
-ppHexInterval (l, h) = "(low: " ++ showHex l (", high: " ++ showHex h ")\n")
-
 -- | This is the worker for getBlock, in the case that the cfg doesn't
 -- contain the address of interest.
 reallyGetBlock :: FrontierReason
                   -- ^ Reason we are exploring block.
                -> CodeAddr
                -> State InterpState (Maybe Block)
-reallyGetBlock rsn addr = trace ("Exploring " ++ showHex addr (", reason: " ++ show rsn)) $ do
+reallyGetBlock rsn addr = do
   seenAddrs %= Set.insert addr
-  mem <- gets memory
-  -- Get top
-  ab <- getAbsBlockState addr
-  t <- getAbsX87Top ab
   -- Check to see if we should delete an overlapping block
   do m_lt <- uses blocks (Map.lookupLT addr)
      case m_lt of
@@ -232,6 +229,9 @@ reallyGetBlock rsn addr = trace ("Exploring " ++ showHex addr (", reason: " ++ s
          blocks %= Map.delete l
          frontier %= Map.insert l rsn
        _ -> return ()
+  -- Get top
+  ab <- getAbsBlockState addr
+  t <- getAbsX87Top ab
   -- Create explore loc
   let loc = ExploreLoc { loc_ip = addr
                        , loc_x87_top = t
@@ -239,25 +239,22 @@ reallyGetBlock rsn addr = trace ("Exploring " ++ showHex addr (", reason: " ++ s
   addrs <- use seenAddrs
   let -- Returns true if we are not at the start of a block
       not_at_block addr0 = Set.notMember addr0 addrs
+  mem <- gets memory
   r <- subMonad genState $ do
     liftEither $ disassembleBlock mem not_at_block loc
-
+  -- disassemble block.
   case r of
    Left _e -> trace ("Block failed: 0x" ++ showHex addr "" ++ ", Reason " ++ show rsn) $ do
      failedAddrs %= Set.insert addr
      return Nothing
    Right (bs, next_ip) -> assert (next_ip > addr) $ do
      let block_vec = V.fromList bs
-     let block_indices = blockIndex . blockLabel <$> block_vec
-     Fold.forM_ (V.enumFromN 0 (V.length block_vec)) $ \i -> do
-       let b = block_vec V.! i
-       when (blockIndex (blockLabel b) /= fromIntegral i) $ do
-         error $ "blocks occur in illegal order" ++ show block_indices
-     -- Add blocks ot code.
+     -- Add block region to blocks.
      let br = BlockRegion { brEnd = next_ip
                           , brBlocks = block_vec
                           }
      blocks %= Map.insert addr br
+     -- Return first block.
      return $ Just (block_vec V.! 0)
 
 -- | Returns a block at the given location, if at all possible.  This
@@ -307,14 +304,13 @@ recordEscapedCodePointers addrs rsn s0 =
 recordWriteStmt :: BlockLabel -> AbsRegs -> Stmt -> State InterpState ()
 recordWriteStmt lbl regs (Write (MemLoc _addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
+  , av <- transferValue regs v
   , Just sz <- size av
-  , sz < 100 -- FIXME: GIANT HACK (avoids explosion in concretize)
-  , Just vs1 <- concretize av = do
+    -- FIXME: GIANT HACK (avoids explosion in concretize)
+  , sz < 100 = do
     mem <- gets memory
-    let vs2 = filter (isCodePointer mem) $ fmap fromInteger (Set.toList vs1)
+    let vs2 = Set.toList (getNextIps' mem av)
     modify $ recordEscapedCodePointers vs2 (InWrite lbl)
-    where
-      av = transferValue regs v
 recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
@@ -560,6 +556,21 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
               | Write{} <- stmt -> Nothing
               | otherwise -> go prev
 
+{-
+-- | List of registers stored in X86State
+x86CallerStateRegisters :: [Some N.RegisterName]
+x86StateRegisters
+  = [Some N.IPReg]
+  ++ (Some <$> N.gpRegs)
+  ++ (Some <$> N.flagRegs)
+  ++ (Some <$> N.x87ControlRegs)
+  ++ (Some <$> N.x87StatusRegs)
+  ++ [Some N.X87TopReg]
+  ++ (Some <$> N.x87TagRegs)
+  ++ (Some <$> N.x87FPURegs)
+  ++ (Some <$> N.xmmRegs)
+-}
+
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
@@ -594,16 +605,28 @@ transferBlock b regs = do
         Just (prev_stmts, ret) -> do
           Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
           mergeBlock (ReturnAddress lbl) abst ret
+          -- Look for new ips.
+          let ips = getNextIps mem abst
+          functionEntries %= Set.union ips
+          Fold.forM_ ips $ \addr -> do
+            mergeBlock (NextIP lbl) abst addr
         Nothing -> do
           mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
-      -- Look for new ips.
-      case concretize (abst^.absX86State^.curIP) of
-        Nothing ->
-          return ()
-        Just ips -> do
-          Fold.forM_ ips $ \addr -> do
-            when (isCodePointer mem (fromInteger addr)) $ do
-              mergeBlock (NextIP lbl) abst (fromInteger addr)
+          -- Look for new ips.
+          Fold.forM_ (getNextIps mem abst) $ \addr -> do
+            mergeBlock (NextIP lbl) abst addr
+
+
+getNextIps :: Memory Word64 -> AbsBlockState -> Set CodeAddr
+getNextIps mem abst = getNextIps' mem (abst^.absX86State^.curIP)
+
+getNextIps' :: Memory Word64 -> AbsValue (BVType 64) -> Set CodeAddr
+getNextIps' mem v =
+  case concretize v of
+    Nothing -> Set.empty
+    Just ips -> Set.filter (isCodePointer mem) $
+                  Set.mapMonotonic fromInteger $
+                    ips
 
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
 transfer rsn addr = do
@@ -646,9 +669,17 @@ cfgFromAddress :: Memory Word64
                -> CodeAddr
                   -- ^ Location to start disassembler form.
                -> FinalCFG
-cfgFromAddress mem start = mkFinalCFG s3
+cfgFromAddress mem start = g -- trace ("Function:\n" ++ concatMap ppStackHeights stack_heights) g
 
   where
+--    fn = recoverFunction s3 0x422b10
+--    0x422030
+
+--    stack_heights = recoverFunction s3 <$> functionAddrs
+
+
+--    functionAddrs = Set.toList (s3^.functionEntries)
+--    ppAddr a = showHex a "\n"
 --    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
     s0 = emptyInterpState mem start
 
@@ -664,3 +695,244 @@ cfgFromAddress mem start = mkFinalCFG s3
     s2  = foldl' go s1 (memAsWord64le_withAddr mem)
 
     s3 = explore_frontier s2
+    g = mkFinalCFG s3
+
+{-
+------------------------------------------------------------------------
+-- Function recovery
+
+data FnAssignRhs w tp where
+  -- An expression that is computed from evaluating subexpressions.
+  FnEvalApp :: !(App Value tp)
+            -> FnAssignRhs w tp
+
+  -- An expression with an undefined value.
+  FnSetUndefined :: !(NatRepr n) -- Width of undefined value.
+                 -> FnAssignRhs w (BVType n)
+
+  -- Read given location.
+  FnRead :: !(StmtLoc tp) -> FnAssignRhs w tp
+
+  -- Allocate a given number of bytes on the stack.
+  FnAlloca :: !w -> FnAssignRhs w (BVType 64)
+
+data FnAssignment w tp
+   = FnAssignment { fnAssignId :: !AssignId
+                  , fnAssignRhs :: !(FnAssignRhs w tp)
+                  }
+
+
+-- | A value at runtime.
+data FnValue w tp where
+
+  -- Bitvector value.
+  FnBVValue :: !(NatRepr n) -> Integer -> FnValue w (BVType n)
+
+  -- Value from an assignment statement.
+  FnAssignedValue :: !(FnAssignment w tp) -> FnValue w tp
+
+  FnInitial :: !(N.RegisterName cl) -> FnValue w (N.RegisterType cl)
+
+data FnStmt w where
+  FnAssignStmt :: !(FnAssignment w tp) -> FnStmt
+  FnComment :: !Text -> FnStmt
+  FnWrite :: !(StmtLoc (FnValue w (BVType 64)) tp) -> !(FnValue w tp) -> FnStmt
+
+
+data FnTermStmt w where
+
+  FnReturn :: !(FnValue w (BVType 64)) -> FnTermStmt w
+  FnBranch :: !(FnValue w BoolType) -> !BlockLabel -> !BlockLabel -> FnTermStmt w
+  FnJump :: !BlockLabel -> FnTermStmt w
+
+data FnBlock w
+   = FnBlock { fbLabel :: !BlockLabel
+             , fbStmts :: Seq (FnStmt w)
+             , fbTerm :: !(FnTermStmt w)
+             }
+
+data Function = Function { fnAddr :: CodeAddr
+                         , fnBlocks :: [FnBlockunctionBlock]
+                         }
+
+data DelayedAllocaValue s where
+  ConcreteAValue :: !(FnValue (DelayedAllocaValue s) (BVType 64))
+                 -> DelayedAllocaValue s
+  DelayedAValue  :: !(STRef s Word64)-> DelayedAllocaValue s
+
+type DelayedFnBlock s = FnBlock (DelayedAllocaValue s)
+
+data RecoverStates s = RS { rsBlocks :: !(Map CodeAddr BlockRegion)
+                          , _rsFnBlocks :: !(Seq (DelayedFnBlock s))
+                          }
+
+
+rsFnBlocks :: Simple Lens (RecoverState s) (Seq (DelayedFnBlock s))
+rsFnBlocks = lens _rsFnBlocks (\s v -> s { _rsFnBlocks = v })
+
+type Recover s = StateT (RecoverState s) (ST s)
+-}
+
+{-
+recoverBlock :: CodeAddr -> Int -> Block
+recoverBlock a i = do
+  mbr <- gets $ Map.lookup a . rsBlocks
+  case mbr of
+    Nothing -> fail $ "Could not recover " ++ showHex a "."
+    Just br
+      | 0 <= i && i < V.length (brBlocks br) -> do
+        return $! brBlocks br V.! i
+      | otherwise ->
+        fail $ "Could not identify block."
+
+recoverFunctionBlock :: Block -> Recover FunctionBlock
+recoverFunctionBlock = error "recoverFunctionBlock unimplemented."
+
+recoverStmtLoc :: StmtLoc (Value (BVType 64)) tp -> Recover (StmtLoc (FnValue (BVType 64)) tp)
+recoverStmtLoc = error "recoverStmtLoc unimplemented."
+
+recoverValue :: Value tp -> Recover (FnValue tp)
+recoverValue = error "recoverValue unimplemented."
+
+recoverStmt :: Stmt -> Recover FunctionStmt
+recoverStmt stmt =
+  case stmt of
+    AssignStmt a -> do
+      error "recoverStmt AssignStmt unimplemented."
+    Write loc v -> do
+      loc' <- recoverStmtLoc loc
+      v' <- recoverValue v
+      return $! FnWrite loc' v'
+    PlaceHolderStmt _ _ -> do
+      error "recoverStmt PlaceHolderStmt unimplemented."
+    Comment msg -> do
+      return $! FnComment msg
+
+recoverAddrs :: Set CodeAddr
+             -> Map CodeAddr RecoverBlockState
+             -> Recover ()
+recoverAddrs seen next = )do
+  case Map.minViewWithKey next of
+    Nothing -> return $! ()
+    Just ((a,rbs), next') -> do
+      b <- recoverBlock a 0
+      stmts' <- mapM recoverStmt (blockStmts b)
+
+      case blockTerm b of
+        FetchAndExecute s -> undefined s
+        Branch c x y -> undefined c x y
+-}
+
+data StackInfo = StackInfo { siAllocs :: ![Value (BVType 64)]
+                           , siReserved :: !Word64
+                           , siBPIsFramePtr :: !Bool
+                           }
+  deriving (Eq, Show)
+
+
+type Function = Map BlockLabel StackInfo
+
+ppStackHeights :: Function -> String
+ppStackHeights m = concatMap go (Map.toList m)
+  where go (lbl,si) = show lbl ++ "\n" ++ show si ++ "\n\n"
+
+data RecoverState = RS { rsStart :: CodeAddr
+                       , rsEnd :: CodeAddr
+                       , rsBlocks :: Map CodeAddr BlockRegion
+                       }
+
+recoverBlock :: RecoverState -> BlockLabel -> Block
+recoverBlock s (GeneratedBlock a i) =
+  case Map.lookup a (rsBlocks s) of
+    Nothing -> error $ "recoverBlock given bad address: " ++ showHex a "."
+    Just br | fromIntegral i < V.length (brBlocks br) -> brBlocks br V.! fromIntegral i
+            | otherwise -> error $ "recoverBlock given bad index: " ++ show i ++ "."
+
+recoverStmt :: Stmt -> State StackInfo ()
+recoverStmt stmt0 =
+  case stmt0 of
+    _ -> return ()
+
+mergeSI :: BlockLabel
+        -> StackInfo
+        -> (Function, Set BlockLabel)
+        -> (Function, Set BlockLabel)
+mergeSI lbl si (m,s) =
+  case Map.lookup lbl m of
+    Nothing -> (Map.insert lbl si m, Set.insert lbl s)
+    Just si'| si == si' -> (m, s)
+            | otherwise ->
+              error $ "mergeSI given incompatiable values:\n"
+                 ++ show si  ++ "\n"
+                 ++ show si' ++ "\n"
+
+-- | This is designed to detect returns from the X86 representation.
+-- It pattern matches on a X86State to detect if it read its instruction
+-- pointer from an address that is 8 below the stack pointer.
+recoverIsReturnStmt :: X86State Value -> Bool
+recoverIsReturnStmt s = do
+  let next_ip = s^.register N.rip
+      next_sp = s^.register N.rsp
+  let expected_base = Initial N.rsp
+  case () of
+    _ | AssignedValue (Assignment _ (Read (MemLoc a _))) <- next_ip
+      , (ip_base, ip_off) <- asBaseOffset a
+      , (sp_base, sp_off) <- asBaseOffset next_sp
+      , ip_base == expected_base
+      , sp_base == expected_base
+      , ip_off + 8 == sp_off -> True
+    _ -> False
+
+{-
+recoverIsTailCall :: X86State Value -> Bool
+recoverIsTailCall _ = error "recoverIsTailCall"
+-}
+
+
+
+inFunctionRange :: RecoverState -> CodeAddr -> Bool
+inFunctionRange s a = rsStart s <= a && a < rsEnd s
+
+recoverAddrs :: RecoverState  -> Function -> Set BlockLabel -> Function
+recoverAddrs s m next =
+  case Set.minView next of
+    Nothing -> m
+    Just (lbl, next1) -> do
+      let Just si = Map.lookup lbl m
+      let b   = recoverBlock s lbl
+      let si' = execState (mapM_ recoverStmt (blockStmts b)) si
+      case blockTerm b of
+        FetchAndExecute xs
+           -- Stop at return stmt
+          | recoverIsReturnStmt xs -> do
+            recoverAddrs s m next1
+           -- TODO:check if s is a function call, tail call, or jump to another block
+           -- within the procedure.
+          | BVValue _ (fromInteger -> concrete_ip) <- next_ip
+          , next_sp == Initial N.rsp
+          , inFunctionRange s concrete_ip -> do
+            let lbl' = GeneratedBlock concrete_ip 0
+            let (m',next2) = (m,next1) & mergeSI lbl' si'
+            recoverAddrs s m' next2
+          | otherwise -> error $ "recoverAddrs FetchAndExecute unimplemented:" ++ show lbl
+         where next_ip = xs^.register N.rip
+               next_sp = xs^.register N.rsp
+
+        Branch _c x y -> do
+          let (m', next2) = (m,next1) & mergeSI x si' & mergeSI y si'
+          recoverAddrs s m' next2
+
+recoverFunction :: InterpState -> CodeAddr -> Function
+recoverFunction s addr = recoverAddrs rs m (Set.singleton lbl)
+  where rs = RS { rsStart = addr
+                , rsEnd = case Map.lookupGT addr (s^.blocks) of
+                            Just (e,_) -> e
+                            Nothing -> fromInteger (-1)
+                , rsBlocks = s^.blocks
+                }
+        lbl = GeneratedBlock addr 0
+        m = Map.singleton lbl si
+        si = StackInfo { siAllocs = []
+                       , siReserved = 0
+                       , siBPIsFramePtr = False
+                       }

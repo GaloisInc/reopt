@@ -110,8 +110,8 @@ instance Eq (AbsValue tp) where
   StackOffset s == StackOffset t = s == t
   SomeStackOffset          == SomeStackOffset          = True
   StridedInterval si1 == StridedInterval si2 = si1 == si2
-  TopV          == TopV          = True
-  _             ==               _ = False
+  TopV == TopV = True
+  _    == _    = False
 
 instance EqF AbsValue where
   eqF = (==)
@@ -150,8 +150,8 @@ asConcreteSingleton :: AbsValue tp -> Maybe Integer
 asConcreteSingleton v = do
   sz <- size v
   guard (sz == 1)
-  [v] <- Set.toList <$> concretize v
-  return v
+  [i] <- Set.toList <$> concretize v
+  return i
 
 -- | Smart constructor for strided intervals which takes care of top
 stridedInterval :: SI.StridedInterval (BVType tp) -> AbsValue (BVType tp)
@@ -196,12 +196,12 @@ instance AbsDomain (AbsValue tp) where
       = go si_old si_new
     | StridedInterval si <- v,  AbsValue s <- v'
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
-    | StridedInterval si <- v', AbsValue s <- v 
+    | StridedInterval si <- v', AbsValue s <- v
       = go si (SI.fromFoldable (type_width (SI.typ si)) s)
     where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
--- trace ("LUB " ++ show (pretty si1) ++ "@" ++ show (type_width (SI.typ si1)) 
+-- trace ("LUB " ++ show (pretty si1) ++ "@" ++ show (type_width (SI.typ si1))
 --                    ++ " " ++ show (pretty si2) ++ "@" ++ show (type_width (SI.typ si2)) ) $
-          
+
   -- Join addresses
   joinD SomeStackOffset StackOffset{} = Nothing
   joinD StackOffset{} SomeStackOffset = Just SomeStackOffset
@@ -253,9 +253,9 @@ bvadd :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
--- Stacks      
+-- Stacks
 bvadd w (StackOffset s) (AbsValue t) | [o] <- Set.toList t = do
-  StackOffset $ Set.map (addOff w o) s  
+  StackOffset $ Set.map (addOff w o) s
 bvadd w (AbsValue t) (StackOffset s) | [o] <- Set.toList t = do
   StackOffset $ Set.map (addOff w o) s
 -- Strided intervals
@@ -265,8 +265,8 @@ bvadd w v v'
   | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
   where
     go si1 si2 = stridedInterval $ SI.bvadd w si1 si2
-    
--- the rest  
+
+-- the rest
 bvadd _ StackOffset{} _ = SomeStackOffset
 bvadd _ _ StackOffset{} = SomeStackOffset
 bvadd _ SomeStackOffset _ = SomeStackOffset
@@ -321,7 +321,7 @@ bvmul w v v'
   | StridedInterval si <- v,  AbsValue s <- v' = go si (SI.fromFoldable w s)
   | StridedInterval si <- v', AbsValue s <- v  = go si (SI.fromFoldable w s)
   where
-    go si1 si2 = stridedInterval $ SI.bvmul w si1 si2    
+    go si1 si2 = stridedInterval $ SI.bvmul w si1 si2
 bvmul _ _ _ = TopV
 
 ppAbsValue :: AbsValue tp -> Maybe Doc
@@ -369,12 +369,12 @@ hasMinimum tp v =
 abstractLt :: TypeRepr tp
               -> AbsValue tp -> AbsValue tp
               -> (AbsValue tp, AbsValue tp)
-abstractLt _tp TopV TopV = (TopV, TopV)              
+abstractLt _tp TopV TopV = (TopV, TopV)
 abstractLt tp x y
-  | Just u_y <- hasMaximum tp y 
+  | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    -- trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    -- trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
@@ -386,10 +386,10 @@ abstractLeq :: TypeRepr tp
                -> (AbsValue tp, AbsValue tp)
 abstractLeq _tp TopV TopV = (TopV, TopV)
 abstractLeq tp x y
-  | Just u_y <- hasMaximum tp y 
+  | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    -- trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))    
+    -- trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
@@ -489,11 +489,11 @@ data AbsRegs = AbsRegs { _absInitialRegs :: !(X86State AbsValue)
 
 -- FIXME
 instance Pretty AbsRegs where
-  pretty regs = pretty (AbsBlockState { _absX86State   = regs ^. absInitialRegs 
+  pretty regs = pretty (AbsBlockState { _absX86State   = regs ^. absInitialRegs
                                       , _startAbsStack = regs ^. curAbsStack })
- 
 
-                        
+
+
 initAbsRegs :: AbsBlockState -> AbsRegs
 initAbsRegs s = AbsRegs { _absInitialRegs = s^.absX86State
                         , _absAssignments = MapF.empty
