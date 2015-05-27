@@ -25,6 +25,7 @@ module Reopt.AbsState
   , initAbsRegs
   , absAssignments
   , assignLens
+  , stridedInterval
   , finalAbsBlockState
   , addAssignment
   , addMemWrite

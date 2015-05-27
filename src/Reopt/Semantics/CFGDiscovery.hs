@@ -30,6 +30,7 @@ module Reopt.Semantics.CFGDiscovery
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.State.Strict
+import qualified Data.ByteString as BS
 import qualified Data.Foldable as Fold
 import           Data.List
 import           Data.Map.Strict (Map)
@@ -49,6 +50,7 @@ import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.AbsState
+import qualified Reopt.Domains.StridedInterval as SI
 import           Reopt.Memory
 import           Reopt.Semantics.Implementation
 import           Reopt.Semantics.Representation
@@ -522,14 +524,33 @@ checkBlockCall mem stmts0 s = go (Seq.fromList stmts0)
 -- looks for jump tables
 getJumpTable :: Memory Word64 -> X86State Value -> AbsRegs -> Maybe (Set Integer)
 getJumpTable mem conc regs
-  | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP =
-      regs^.absAssignments^.assignLens x
+  | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
+  , AssignedValue ass <- ptr
+  , absAddrs <- regs^.absAssignments^.assignLens ass
+  , any (\rorange -> absAddrs `leq` rorange) roranges
+  , Just addrs <- concretize absAddrs =
+    let bptrs = Set.map (\addr -> fromIntegral $ fromJust
+                                  $ Map.lookup (fromIntegral addr) wordMap) addrs
+    in
+    if all (isRODataPointer mem . fromIntegral) $ Set.toList addrs
+       then trace ("getJumpTable: " ++ show (pretty ass)
+                   ++ " " ++ show (Set.map (flip showHex "") bptrs)) $    
+            Just bptrs
+       else Nothing
   where
-    
-    
-  , 
-  , Just vs <- concretize ()
-               
+    wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
+    -- FIXME: move to Memory?
+    rosegs  = readonlySegments mem
+    -- FIXME: could also use 8 here
+    roranges = map (\roseg ->
+                     let base = fromIntegral $ memBase roseg
+                         sz   = fromIntegral $ BS.length (memBytes roseg)
+                     in
+                     stridedInterval (SI.mkStridedInterval (BVTypeRepr n64) False
+                                      base (base + sz - 1) 1))
+               rosegs
+      
+getJumpTable _mem _conc _regs = Nothing               
   -- -- basically, (8 * x) + addr
   -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
   -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
@@ -546,8 +567,6 @@ getJumpTable mem conc regs
   --           Just bptrs
   --      else Nothing
   -- | otherwise = Nothing
-  -- where
-  --   wordMap = Map.fromAscList $ memAsWord64le_withAddr mem
 
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.

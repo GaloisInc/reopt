@@ -11,6 +11,7 @@ module Reopt.Memory
   , memAsWord64le
   , memAsWord64le_withAddr
   , executableSegments
+  , readonlySegments
   , addrHasPermissions
   , isCodePointer
   , isRODataPointer
@@ -147,6 +148,11 @@ memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
 -- | Get executable segments.
 executableSegments :: Memory w -> [MemSegment w]
 executableSegments = filter isExecutable . memSegments
+
+readonlySegments :: Memory w -> [MemSegment w]
+readonlySegments = filter (\s -> memFlags s `hasPermissions` pf_r
+                                 && not (memFlags s `hasPermissions` pf_w)
+                          ). memSegments
 
 -- | Insert segment into memory or fail if this overlaps with another
 -- segment in memory.
