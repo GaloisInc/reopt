@@ -453,7 +453,7 @@ showCFGAndAI mem entry = do
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   let fg = cfgFromAddress mem entry
   let abst = finalAbsState fg
-      amap = assignmentAbsValues fg
+      amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (blockParent (blockLabel b)) abst) of

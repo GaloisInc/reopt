@@ -66,18 +66,18 @@ import           Reopt.Semantics.Types
 type AbsState = Map CodeAddr AbsBlockState
 
 
-setAbsIP :: CodeAddr -> AbsBlockState -> AbsBlockState
-setAbsIP a = absX86State . curIP .~ abstractSingleton knownNat (toInteger a)
+setAbsIP :: Memory Word64 -> CodeAddr -> AbsBlockState -> AbsBlockState
+setAbsIP mem a = absX86State . curIP .~ abstractSingleton mem knownNat (toInteger a)
 
 
-defBlockState :: CodeAddr -> AbsBlockState
-defBlockState addr =
-  top & setAbsIP addr
+defBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState
+defBlockState mem addr =
+  top & setAbsIP mem addr
       & absX86State . register N.rsp .~ concreteStackOffset 0
-      & absX86State . x87TopReg .~ abstractSingleton knownNat 7
+      & absX86State . x87TopReg .~ abstractSingleton mem knownNat 7
 
-emptyAbsState :: CodeAddr -> AbsState
-emptyAbsState start = Map.singleton start (defBlockState start)
+emptyAbsState :: Memory Word64 -> CodeAddr -> AbsState
+emptyAbsState mem start = Map.singleton start (defBlockState mem start)
 
 lookupAbsBlock :: CodeAddr -> AbsState -> AbsBlockState
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
@@ -143,9 +143,9 @@ emptyInterpState mem start = InterpState
       , _failedAddrs  = Set.empty
       , _functionEntries   = Set.empty
       , _codePointersInMem = Set.empty
-      , memBlockState = defBlockState 0
+      , memBlockState = defBlockState mem 0
       , _frontier     = Map.singleton start StartAddr
-      , _absState     = emptyAbsState start
+      , _absState     = emptyAbsState mem start
       }
 
 genState :: Simple Lens InterpState GlobalGenState
@@ -213,7 +213,7 @@ getAbsBlockState :: CodeAddr -> State InterpState AbsBlockState
 getAbsBlockState a = do
   s <- get
   if Set.member a (s^.codePointersInMem) then
-    return (memBlockState s & setAbsIP a)
+    return (memBlockState s & setAbsIP (memory s) a)
   else
     return $ lookupAbsBlock a (s^.absState)
 
@@ -319,13 +319,13 @@ recordWriteStmt _ _ _ = return ()
 transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
-finalBlockState :: CodeAddr -> FinalCFG -> AbsBlockState
-finalBlockState a g
-  | Set.member a (finalCodePointersInMem g) = defBlockState a
+finalBlockState :: Memory Word64 -> CodeAddr -> FinalCFG -> AbsBlockState
+finalBlockState mem a g
+  | Set.member a (finalCodePointersInMem g) = defBlockState mem a
   | otherwise = lookupAbsBlock a (finalAbsState g)
 
-assignmentAbsValues :: FinalCFG -> MapF Assignment AbsValue
-assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
+assignmentAbsValues :: Memory Word64 -> FinalCFG -> MapF Assignment AbsValue
+assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
   where g = finalCFG fg
 
         go :: MapF Assignment AbsValue
@@ -333,7 +333,7 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
            -> MapF Assignment AbsValue
         go m0 b =
           case blockLabel b of
-            GeneratedBlock a 0 -> insBlock b (initAbsRegs (finalBlockState a fg)) m0
+            GeneratedBlock a 0 -> insBlock b (initAbsRegs mem (finalBlockState mem a fg)) m0
             _ -> m0
 
         insBlock :: Block
@@ -358,20 +358,21 @@ assignmentAbsValues fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
 
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
-mergeBlock :: FrontierReason
+mergeBlock :: Memory Word64
+           -> FrontierReason
               -- ^ Reason we are going to explore the next address.
            -> AbsBlockState
               -- ^ Block state after executing instructions.
            -> CodeAddr
               -- ^ Address we are trying to reach.
            -> State InterpState ()
-mergeBlock rsn ab0 addr = do
+mergeBlock mem rsn ab0 addr = do
   s <- get
   when (Set.member addr (s^.codePointersInMem) == False) $ do
     let upd new = do
           absState %= Map.insert addr new
           frontier %= Map.insert addr rsn
-    let ab = ab0 & setAbsIP addr
+    let ab = ab0 & setAbsIP mem addr
     case Map.lookup addr (s^.absState) of
       -- We have seen this block before, so need to join and see if
       -- the results is changed.
@@ -584,11 +585,10 @@ x86StateRegisters
 
 -- looks for jump tables
 getJumpTable :: Memory Word64
-             -> X86State Value
              -> AbsRegs
              -> Value (BVType 64)
              -> Maybe (Set CodeAddr)
-getJumpTable mem conc regs ptr
+getJumpTable mem regs ptr
   | AssignedValue ass <- ptr
   , absAddrs <- regs^.absAssignments^.assignLens ass
   , any (\rorange -> absAddrs `leq` rorange) roranges
@@ -614,7 +614,7 @@ getJumpTable mem conc regs ptr
                                       base (base + sz - 1) 1))
                rosegs
 
-getJumpTable _mem _conc _regs _ = Nothing
+getJumpTable _mem _regs _ = Nothing
   -- -- basically, (8 * x) + addr
   -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
   -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
@@ -636,15 +636,16 @@ transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
 transferBlock b regs = do
+  mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
   case blockTerm b of
     Branch c lb rb -> do
       mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
       l <- lookupBlock' lb
-      let  l_regs = refineValue c (abstractSingleton n1 1) regs'
+      let  l_regs = refineValue c (abstractSingleton mem n1 1) regs'
       r <- lookupBlock' rb
-      let r_regs = refineValue c (abstractSingleton n1 0) regs'
+      let r_regs = refineValue c (abstractSingleton mem n1 0) regs'
       -- We re-transfer the stmts to propagate any changes from
       -- the above refineValue.  This could be more efficient by
       -- tracking what (if anything) changed.  We also might
@@ -654,7 +655,6 @@ transferBlock b regs = do
       transferBlock r =<< transferStmts r_regs (blockStmts b)
 
     FetchAndExecute s' -> do
-      mem <- gets memory
       let abst = finalAbsBlockState regs' s'
       let lbl = blockLabel b
       seq abst $ do
@@ -665,24 +665,24 @@ transferBlock b regs = do
         -- The last statement was a call.
         Just (prev_stmts, ret) -> do
           Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
-          mergeBlock (ReturnAddress lbl) abst ret
+          mergeBlock mem (ReturnAddress lbl) abst ret
           -- Look for new ips.
           let ips = getNextIps mem s' regs'
           functionEntries %= Set.union ips
           Fold.forM_ ips $ \addr -> do
-            mergeBlock (NextIP lbl) abst addr
+            mergeBlock mem (NextIP lbl) abst addr
         Nothing -> do
           mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
           -- Look for new ips.
           Fold.forM_ (getNextIps mem s' regs') $ \addr -> do
-            mergeBlock (NextIP lbl) abst addr
+            mergeBlock mem (NextIP lbl) abst addr
 
 
 getNextIps :: Memory Word64 -> X86State Value -> AbsRegs -> Set CodeAddr
 getNextIps mem s' regs' = do
     case s'^.curIP of
       AssignedValue (Assignment _ (Read (MemLoc ptr _))) ->
-        fromMaybe Set.empty (getJumpTable mem s' regs' ptr)
+        fromMaybe Set.empty (getJumpTable mem regs' ptr)
       _ -> getNextIps' mem (abst^.absX86State^.curIP)
   where abst = finalAbsBlockState regs' s'
 
@@ -696,9 +696,10 @@ getNextIps' mem v =
 
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
 transfer rsn addr = do
+  mem <- gets memory
   doMaybe (getBlock rsn addr) () $ \root -> do
     ab <- getAbsBlockState addr
-    transferBlock root (initAbsRegs ab)
+    transferBlock root (initAbsRegs mem ab)
 
 ------------------------------------------------------------------------
 -- Main loop
@@ -741,10 +742,10 @@ cfgFromAddress mem start = g -- trace ("Function:\n" ++ concatMap ppStackHeights
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
 
+--    functionAddrs = Set.toList (s3^.functionEntries)
 --    stack_heights = recoverFunction s3 <$> functionAddrs
 
 
---    functionAddrs = Set.toList (s3^.functionEntries)
 --    ppAddr a = showHex a "\n"
 --    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
     s0 = emptyInterpState mem start
