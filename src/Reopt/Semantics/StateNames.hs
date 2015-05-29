@@ -297,6 +297,31 @@ rbp = GPReg 5
 rsi = GPReg 6
 rdi = GPReg 7
 
+r8 :: RegisterName 'GP
+r8 = GPReg 8
+
+r9 :: RegisterName 'GP
+r9 = GPReg 9
+
+r10 :: RegisterName 'GP
+r10 = GPReg 10
+
+r11 :: RegisterName 'GP
+r11 = GPReg 11
+
+r12 :: RegisterName 'GP
+r12 = GPReg 12
+
+r13 :: RegisterName 'GP
+r13 = GPReg 13
+
+r14 :: RegisterName 'GP
+r14 = GPReg 14
+
+r15 :: RegisterName 'GP
+r15 = GPReg 15
+
+
 gpCount :: Int
 gpCount = 16
 

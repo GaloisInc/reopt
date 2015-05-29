@@ -8,9 +8,13 @@
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.AbsState
   ( AbsBlockState
+  , mkAbsBlockState
   , absX86State
   , absBlockDiff
+  , shiftSpecificOffset
   , AbsValue(..)
+  , emptyAbsValue
+  , joinAbsValue
   , ppAbsValue
   , abstractSingleton
   , subValue
@@ -22,6 +26,7 @@ module Reopt.AbsState
   , AbsDomain(..)
   , AbsRegs
   , absInitialRegs
+  , startAbsStack
   , initAbsRegs
   , absAssignments
   , assignLens
@@ -39,6 +44,7 @@ import           Control.Applicative ( (<$>) )
 import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad (guard)
+import           Control.Monad.State.Strict
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -97,7 +103,7 @@ type ValueSet = Set Integer
 data AbsValue (tp :: Type) where
   -- | An absolute value.
   FinSet :: !ValueSet -> AbsValue (BVType n)
-  -- | Code pointers
+  -- A possibly empty set of values that either point to a code segment or 0.
   CodePointers :: !(Set Word64) -> AbsValue (BVType 64)
 
   -- | Offset of stack at beginning of the block.
@@ -109,19 +115,39 @@ data AbsValue (tp :: Type) where
 
   -- | A sub-value about which we know only some bits.
   -- (e.g., we know that the lower 8 bits are < 10)
-  SubValue :: ((n + 1) <= n') =>
-              !(NatRepr n) -> !(AbsValue (BVType n)) ->  AbsValue (BVType n')
+  SubValue :: ((n + 1) <= n')
+           => !(NatRepr n)
+           -> !(AbsValue (BVType n))
+           ->  AbsValue (BVType n')
   -- | Any value
   TopV :: AbsValue tp
+
+-- | Denotes that we do not know of any value that could be in set.
+emptyAbsValue :: AbsValue (BVType 64)
+emptyAbsValue = CodePointers Set.empty
 
 data SomeFinSet tp where
   IsFin :: ValueSet -> SomeFinSet (BVType n)
   NotFin :: SomeFinSet tp
 
-asFinSet :: AbsValue tp -> SomeFinSet tp
-asFinSet (FinSet s) = IsFin s
-asFinSet (CodePointers s) = IsFin (Set.mapMonotonic toInteger s)
-asFinSet _ = NotFin
+asFinSet :: String -> AbsValue tp -> SomeFinSet tp
+asFinSet _ (FinSet s) = IsFin s
+asFinSet nm (CodePointers s)
+  | s == Set.singleton 0 = IsFin (Set.singleton 0)
+  | otherwise = trace ("dropping Codeptr " ++ nm) $
+      IsFin (Set.mapMonotonic toInteger s)
+asFinSet _ _ = NotFin
+
+asFinSet64 :: String -> AbsValue (BVType 64) -> Maybe (Set Word64)
+asFinSet64 _ (FinSet s) = Just $! (Set.mapMonotonic fromInteger s)
+asFinSet64 nm (CodePointers s)
+  | isZeroPtr s = Just s
+  | otherwise = trace ("dropping Codeptr " ++ nm) $ Just s
+asFinSet64 _ _ = Nothing
+
+codePointerSet :: AbsValue tp -> Set Word64
+codePointerSet (CodePointers s) = s
+codePointerSet _ = Set.empty
 
 -- prop_SubValue :: AbsValue tp -> Bool
 -- prop_SubValue (SubValue n v v') =
@@ -177,7 +203,7 @@ ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 concretize :: AbsValue tp -> Maybe (Set Integer)
 concretize (FinSet s) = Just s
 concretize (CodePointers s) = Just (Set.mapMonotonic toInteger s)
-concretize (SubValue n v) = Nothing -- we know nothing about _all_ values
+concretize (SubValue _ _) = Nothing -- we know nothing about _all_ values
 concretize (StridedInterval s) =
   trace ("Concretizing " ++ show (pretty s)) $
   Just (Set.fromList (SI.toList s))
@@ -214,75 +240,123 @@ subValue :: ((n + 1) <= n') =>
             NatRepr n -> AbsValue (BVType n)
             -> AbsValue (BVType n')
 subValue n v
-  | TopV <- v = top
+  | TopV <- v = TopV
   | otherwise = SubValue n v
+
+isEmpty :: AbsValue tp -> Bool
+isEmpty (CodePointers s) = Set.null s
+isEmpty (FinSet s) = Set.null s
+isEmpty _ = False
 
 -- -----------------------------------------------------------------------------
 -- Instances
 
-instance AbsDomain (AbsValue tp) where
-  top = TopV
+-- | Returns true if set just contains 0.
+isZeroPtr :: Set Word64 -> Bool
+isZeroPtr s = Set.size s == 1 && Set.findMin s == 0
 
-{-
-  leq _ TopV = True
-  leq TopV _ = False
-  leq (StackOffset s) (StackOffset t) = s `Set.isSubsetOf` t
-  leq (AbsValue v) (AbsValue v') = v `Set.isSubsetOf` v'
-  leq _ _ = False
+-- | Join the old and new states and return the updated state iff
+-- the result is larger than the old state.
+-- This also returns any addresses that are discarded during joining.
+joinAbsValue :: AbsValue tp -> AbsValue tp -> Maybe (AbsValue tp)
+joinAbsValue x y | Set.null s = r
+                 | otherwise = trace ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
+  where (r,s) = runState (joinAbsValue' x y) Set.empty
 
-  lub (StackOffset s) (StackOffset t) = StackOffset $ s `Set.union` t
-  lub (AbsValue v) (AbsValue v') = AbsValue $ v `Set.union` v'
-  lub _ _ = TopV
--}
+addWords :: Set Word64 -> State (Set Word64) ()
+addWords s = modify $ Set.union (Set.delete 0 s)
 
-  -- | Join the old and new states and return the updated state iff
-  -- the result is larger than the old state.
-  joinD TopV _ = Nothing
-  joinD (CodePointers old) (CodePointers new)
-      | new `Set.isSubsetOf` old = Nothing
-      | Set.size r > maxSetSize = trace ("Lost Values " ++ show (ppIntegerSet r)) $
-        Just $! CodePointers r
-      | otherwise = Just $! CodePointers r
-    where r = Set.union old new
-  joinD (asFinSet -> IsFin old) (asFinSet -> IsFin new)
-      | new `Set.isSubsetOf` old = Nothing
-      | Set.size r > maxSetSize = Just TopV
-      | otherwise = Just (FinSet r)
-    where r = Set.union old new
-  joinD (StackOffset old) (StackOffset new)
-      | new `Set.isSubsetOf` old = Nothing
-      | Set.size r > maxSetSize = Just TopV
-      | otherwise = Just (StackOffset r)
-    where r = Set.union old new
+-- | Join the old and new states and return the updated state iff
+-- the result is larger than the old state.
+-- This also returns any addresses that are discarded during joining.
+joinAbsValue' :: AbsValue tp -> AbsValue tp -> State (Set Word64) (Maybe (AbsValue tp))
 
-  -- Intervals
-  joinD v v'
+joinAbsValue' TopV x = do
+  addWords (codePointerSet x)
+  return $! Nothing
+joinAbsValue' x y | isEmpty y = return $ Nothing
+                  | isEmpty x = return $ (Just $! y)
+joinAbsValue' (CodePointers old) (CodePointers new)
+    | new `Set.isSubsetOf` old = return $ Nothing
+    | otherwise = return $ (Just $! CodePointers r)
+  where r = Set.union old new
+joinAbsValue' (FinSet old) (CodePointers new0)
+    | isZeroPtr new0 =
+      if Set.member 0 old then
+        return $ Nothing
+      else
+        return $ (Just $! FinSet $ Set.insert 0 old)
+    | new `Set.isSubsetOf` old = do
+      addWords new0
+      return $ Nothing
+    | Set.size r > maxSetSize = do
+      addWords new0
+      return $ Just TopV
+    | otherwise = do
+      addWords new0
+      return $ Just (FinSet r)
+
+  where r = Set.union old new
+        new = Set.mapMonotonic toInteger new0
+
+joinAbsValue' (CodePointers old) (FinSet new)
+    | isZeroPtr old = do
+      return $ (Just $! FinSet (Set.insert 0 new))
+    | Set.size r > maxSetSize = do
+      addWords old
+      return $ Just TopV
+    | otherwise = do
+      addWords old
+      return $ Just (FinSet r)
+  where r = Set.union (Set.mapMonotonic toInteger old) new
+joinAbsValue' (FinSet old) (FinSet new)
+    | new `Set.isSubsetOf` old = return $ Nothing
+    | Set.size r > maxSetSize = return $ Just TopV
+    | otherwise = return $ Just (FinSet r)
+  where r = Set.union old new
+joinAbsValue' (StackOffset old) (StackOffset new)
+    | new `Set.isSubsetOf` old = return $ Nothing
+    | Set.size r > maxSetSize = return $ Just TopV
+    | otherwise = return $ Just (StackOffset r)
+  where r = Set.union old new
+
+-- Intervals
+joinAbsValue' v v'
     | StridedInterval si_old <- v, StridedInterval si_new <- v'
-    , si_new `SI.isSubsetOf` si_old = Nothing
-    | StridedInterval si_old <- v, StridedInterval si_new <- v'
-      = go si_old si_new
-    | StridedInterval si <- v,  IsFin s <- asFinSet v'
-      = go si (SI.fromFoldable (type_width (SI.typ si)) s)
-    | StridedInterval si <- v', IsFin s <- asFinSet v
-      = go si (SI.fromFoldable (type_width (SI.typ si)) s)
-    where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
+    , si_new `SI.isSubsetOf` si_old =
+      return $ Nothing
+    | StridedInterval si_old <- v, StridedInterval si_new <- v' =
+      return $ go si_old si_new
+    | StridedInterval si <- v,  FinSet s <- v' =
+      return $ go si (SI.fromFoldable (type_width (SI.typ si)) s)
+    | StridedInterval si <- v,  CodePointers s <- v' = do
+      addWords s
+      return $ go si (SI.fromFoldable (type_width (SI.typ si)) (Set.mapMonotonic toInteger s))
+    | StridedInterval si <- v', FinSet s <- v =
+      return $ go si (SI.fromFoldable (type_width (SI.typ si)) s)
+    | StridedInterval si <- v', CodePointers s <- v = do
+      addWords s
+      return $ go si (SI.fromFoldable (type_width (SI.typ si)) (Set.mapMonotonic toInteger s))
+  where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
 
-  -- Sub values
-  joinD (SubValue n av) (SubValue n' av') =
-    case testNatCases n n' of
-     NatCaseLT LeqProof -> subValue n  <$> joinD av (trunc av' n)
-     NatCaseEQ          -> subValue n  <$> joinD av av'
-     NatCaseGT LeqProof ->
-       let new_av = trunc av n'
-       in  Just $ subValue n' (fromMaybe new_av (joinD new_av av'))
+-- Sub values
+joinAbsValue' (SubValue n av) (SubValue n' av') =
+  case testNatCases n n' of
+    NatCaseLT LeqProof -> fmap (subValue n) <$> joinAbsValue' av (trunc av' n)
+    NatCaseEQ          -> fmap (subValue n) <$> joinAbsValue' av av'
+    NatCaseGT LeqProof -> do
+      let new_av = trunc av n'
+      mv <- joinAbsValue' new_av av'
+      return $ Just $! subValue n' (fromMaybe new_av mv)
+-- Join addresses
+joinAbsValue' SomeStackOffset StackOffset{} = return $ Nothing
+joinAbsValue' StackOffset{} SomeStackOffset = return $ Just SomeStackOffset
+joinAbsValue' SomeStackOffset SomeStackOffset = return $ Nothing
 
-  -- Join addresses
-  joinD SomeStackOffset StackOffset{} = Nothing
-  joinD StackOffset{} SomeStackOffset = Just SomeStackOffset
-  joinD SomeStackOffset SomeStackOffset = Nothing
-
-  joinD _ _ = Just TopV
-
+joinAbsValue' x y = do
+  addWords (codePointerSet x)
+  addWords (codePointerSet y)
+  return $! Just TopV
 
 member :: Integer -> AbsValue tp -> Bool
 member n TopV = True
@@ -304,7 +378,8 @@ meet x TopV = x
 -- FIXME: reuse an old value if possible?
 meet (CodePointers old) (CodePointers new) = CodePointers $ Set.intersection old new
 --TODO: Fix below
-meet (asFinSet -> IsFin old) (asFinSet -> IsFin new) = FinSet $ Set.intersection old new
+meet (asFinSet "meet" -> IsFin old) (asFinSet "meet" -> IsFin new) =
+  FinSet $ Set.intersection old new
 meet (StackOffset old) (StackOffset new) =
   StackOffset $ Set.intersection old new
 
@@ -312,9 +387,9 @@ meet (StackOffset old) (StackOffset new) =
 meet v v'
   | StridedInterval si_old <- v, StridedInterval si_new <- v'
     = stridedInterval $ si_old `SI.glb` si_new
-  | StridedInterval si <- v,  IsFin s <- asFinSet v'
+  | StridedInterval si <- v,  IsFin s <- asFinSet "meet" v'
     = FinSet $ Set.filter (`SI.member` si) s
-  | StridedInterval si <- v', IsFin s <- asFinSet v
+  | StridedInterval si <- v', IsFin s <- asFinSet "meet" v
     = FinSet $ Set.filter (`SI.member` si) s
 
 -- These cases are currently sub-optimal: really we want to remove all
@@ -326,9 +401,9 @@ meet v v'
         NatCaseLT LeqProof -> subValue n av -- FIXME
         NatCaseEQ          -> subValue n (meet av av')
         NatCaseGT LeqProof -> subValue n' av' -- FIXME
-  | SubValue n av <- v, IsFin s <- asFinSet v' =
+  | SubValue n av <- v, IsFin s <- asFinSet "meet" v' =
       FinSet $ Set.filter (\x -> (toUnsigned n x) `member` av) s
-  | SubValue n av <- v', IsFin s <- asFinSet v =
+  | SubValue n av <- v', IsFin s <- asFinSet "meet" v =
       FinSet $ Set.filter (\x -> (toUnsigned n x) `member` av) s
   | SubValue n av <- v, StridedInterval si <- v' = v' -- FIXME: ?
   | StridedInterval si <- v, SubValue n av <- v' = v -- FIXME: ?
@@ -386,8 +461,8 @@ bvadd w (FinSet t) (StackOffset s) | [o] <- Set.toList t = do
 -- Strided intervals
 bvadd w v v'
   | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
-  | StridedInterval si <- v,  IsFin s <- asFinSet v' = go si (SI.fromFoldable w s)
-  | StridedInterval si <- v', IsFin s <- asFinSet v  = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v,  IsFin s <- asFinSet "bvadd" v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', IsFin s <- asFinSet "bvadd" v  = go si (SI.fromFoldable w s)
   where
     go si1 si2 = stridedInterval $ SI.bvadd w si1 si2
 
@@ -409,22 +484,35 @@ setL :: ([Integer] -> AbsValue (BVType n))
 setL def c l | length l > maxSetSize = def l
              | otherwise = c (Set.fromList l)
 
-bvsub :: NatRepr u
+bvsub :: Memory Word64
+      -> NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
-bvsub w (asFinSet -> IsFin s) (asFinSet -> IsFin t) =
+bvsub mem w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
+    | all (isCodePointerOrNull mem) vals = CodePointers (Set.fromList vals)
+    | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
+    | otherwise = error "Losing code pointers due to bvsub."
+      -- TODO: Fix this.
+--      trace ("drooping " ++ show (ppIntegerSet s) ++ " " ++ show (ppIntegerSet t)) $
+--        setL (stridedInterval . SI.fromFoldable w) FinSet (toInteger <$> vals)
+  where vals :: [Word64]
+        vals = do
+          x <- Set.toList s
+          y <- Set.toList t
+          return $! x - fromInteger y
+bvsub _ w (FinSet s) (asFinSet "bvsub3" -> IsFin t) =
   setL (stridedInterval . SI.fromFoldable w) FinSet $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x - y))
-bvsub w v v'
+bvsub _ w v v'
   | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
-  | StridedInterval si <- v,  IsFin s <- asFinSet v' = go si (SI.fromFoldable w s)
-  | StridedInterval si <- v', IsFin s <- asFinSet v  = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v,  IsFin s <- asFinSet "bvsub4" v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', IsFin s <- asFinSet "bvsub5" v  = go si (SI.fromFoldable w s)
   where
     go _si1 _si2 = TopV -- FIXME
-bvsub w (StackOffset s) (asFinSet -> IsFin t) = setL (const SomeStackOffset) StackOffset $ do
+bvsub _ w (StackOffset s) (asFinSet "bvsub6" -> IsFin t) = setL (const SomeStackOffset) StackOffset $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x - y))
@@ -433,11 +521,11 @@ bvsub w (StackOffset s) (asFinSet -> IsFin t) = setL (const SomeStackOffset) Sta
 -- bvsub w (SubValue _n _av c) v' = bvsub w c v'
 -- bvsub w v (SubValue _n _av c)  = bvsub w v c
 
-bvsub _ StackOffset{} _ = SomeStackOffset
-bvsub _ _ StackOffset{} = TopV
-bvsub _ SomeStackOffset _ = SomeStackOffset
-bvsub _ _ SomeStackOffset = TopV
-bvsub _ _ _ = TopV -- Keep the pattern checker happy
+bvsub _ _ StackOffset{} _ = SomeStackOffset
+bvsub _ _ _ StackOffset{} = TopV
+bvsub _ _ SomeStackOffset _ = SomeStackOffset
+bvsub _ _ _ SomeStackOffset = TopV
+bvsub _ _ _ _ = TopV -- Keep the pattern checker happy
 -- bvsub _ TopV _ = TopV
 -- bvsub _ _ TopV = TopV
 
@@ -445,15 +533,15 @@ bvmul :: NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
-bvmul w (asFinSet -> IsFin s) (asFinSet -> IsFin t) =
+bvmul w (asFinSet "bvmul" -> IsFin s) (asFinSet "bvmul" -> IsFin t) =
   setL (stridedInterval . SI.fromFoldable w) FinSet $ do
   x <- Set.toList s
   y <- Set.toList t
   return (toUnsigned w (x * y))
 bvmul w v v'
   | StridedInterval si1 <- v, StridedInterval si2 <- v' = go si1 si2
-  | StridedInterval si <- v,  IsFin s <- asFinSet v' = go si (SI.fromFoldable w s)
-  | StridedInterval si <- v', IsFin s <- asFinSet v  = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v,  IsFin s <- asFinSet "bvmul" v' = go si (SI.fromFoldable w s)
+  | StridedInterval si <- v', IsFin s <- asFinSet "bvmul" v  = go si (SI.fromFoldable w s)
   where
     go si1 si2 = stridedInterval $ SI.bvmul w si1 si2
 
@@ -471,11 +559,17 @@ instance PrettyRegValue AbsValue where
   ppValueEq _ TopV = Nothing
   ppValueEq r v = Just (text (show r) <+> text "=" <+> pretty v)
 
+
+-- | Indicates if address is a code pointer.
+isCodePointerOrNull :: Memory Word64 -> Word64 -> Bool
+isCodePointerOrNull _ 0 = True
+isCodePointerOrNull mem a = isCodePointer mem a
+
 abstractSingleton :: Memory Word64 -> NatRepr n -> Integer -> AbsValue (BVType n)
 abstractSingleton mem w i
   | Just Refl <- testEquality w n64
   , 0 <= i && i <= maxUnsigned w
-  , isCodePointer mem (fromIntegral i) =
+  , isCodePointerOrNull mem (fromIntegral i) =
     CodePointers (Set.singleton (fromIntegral i))
   | 0 <= i && i <= maxUnsigned w = FinSet (Set.singleton i)
   | otherwise = error $ "abstractSingleton given bad value: " ++ show i ++ " " ++ show w
@@ -489,20 +583,24 @@ concreteStackOffset o = StackOffset (Set.singleton o)
 hasMaximum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
 hasMaximum tp v =
   case v of
-   FinSet s           -> Just $! Set.findMax s
-   CodePointers s     -> Just $! (toInteger (Set.findMax s))
+   FinSet s | Set.null s -> Nothing
+            | otherwise  -> Just $! Set.findMax s
+   CodePointers s | Set.null s -> Nothing
+                  | otherwise  -> Just $! (toInteger (Set.findMax s))
    StridedInterval si -> Just (SI.intervalEnd si)
    TopV               -> Just $ case tp of BVTypeRepr n -> maxUnsigned n
    _                  -> Nothing
 
 
-hasMinimum :: TypeRepr tp -> AbsValue tp -> Integer
-hasMinimum tp v =
+hasMinimum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
+hasMinimum _tp v =
   case v of
-   FinSet s         -> Set.findMin s
-   CodePointers s   -> toInteger (Set.findMin s)
-   StridedInterval si -> SI.base si
-   _                  -> 0
+   FinSet s       | Set.null s -> Nothing
+                  | otherwise  -> Just $! Set.findMin s
+   CodePointers s | Set.null s -> Nothing
+                  | otherwise  -> Just $! toInteger (Set.findMin s)
+   StridedInterval si -> Just $! SI.base si
+   _                  -> Just 0
 
 -- | @abstractLt x y@ refines x and y with the knowledge that @x < y@
 --
@@ -515,7 +613,7 @@ abstractLt :: TypeRepr tp
 abstractLt _tp TopV TopV = (TopV, TopV)
 abstractLt tp x y
   | Just u_y <- hasMaximum tp y
-  , l_x <- hasMinimum tp x
+  , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
     -- trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
@@ -530,7 +628,7 @@ abstractLeq :: TypeRepr tp
 abstractLeq _tp TopV TopV = (TopV, TopV)
 abstractLeq tp x y
   | Just u_y <- hasMaximum tp y
-  , l_x <- hasMinimum tp x
+  , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
     -- trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
@@ -549,6 +647,10 @@ instance Eq StackEntry where
     | Just Refl <- testEquality x_tp y_tp = x_v == y_v
     | otherwise = False
 
+-- | The AbsBlockStack describes offsets of the stack.
+-- Values that are not in the map may denote any values.
+-- The stack grows down, so nonegative keys are those within
+-- rsp.
 type AbsBlockStack = Map Integer StackEntry
 
 absStackLeq :: AbsBlockStack -> AbsBlockStack -> Bool
@@ -556,8 +658,34 @@ absStackLeq x y = all entryLeq (Map.toList y)
   where entryLeq (o, StackEntry y_tp y_v) =
           case Map.lookup o x of
             Just (StackEntry x_tp x_v) | Just Refl <- testEquality x_tp y_tp ->
-              leq x_v y_v
+              isNothing (joinAbsValue y_v x_v)
             _ -> False
+
+-- | @absStackJoinD x y@ returns the stack containing the union @z@ of the
+-- values in @x@ and @y@.  It sets the first state parameter to true if @z@
+-- is different from @x@ and adds and escaped code pointers to the second
+-- parameter.
+absStackJoinD :: AbsBlockStack -> AbsBlockStack -> State (Bool,Set Word64) AbsBlockStack
+absStackJoinD y x = do
+  let entryLeq (o, StackEntry y_tp y_v) =
+        case Map.lookup o x of
+          Just (StackEntry x_tp x_v) | Just Refl <- testEquality x_tp y_tp -> do
+            s <- use _2
+            case runState (joinAbsValue' y_v x_v) s of
+              (Nothing,  s') -> do
+                _2 .= s'
+                return $ Just (o, StackEntry y_tp y_v)
+              (Just z_v, s') -> do
+                _1 .= True
+                _2 .= s'
+                return $ Just (o, StackEntry y_tp z_v)
+          _ -> do
+            _1 .= True
+            _2 %= Set.union (Set.delete 0 (codePointerSet y_v))
+            return Nothing
+  z <- mapM entryLeq (Map.toList y)
+  return $ Map.fromList (catMaybes z)
+
 
 absStackLub :: AbsBlockStack -> AbsBlockStack -> AbsBlockStack
 absStackLub = Map.mergeWithKey merge (\_ -> Map.empty) (\_ -> Map.empty)
@@ -565,9 +693,12 @@ absStackLub = Map.mergeWithKey merge (\_ -> Map.empty) (\_ -> Map.empty)
         merge _ (StackEntry x_tp x_v) (StackEntry y_tp y_v) =
           case testEquality x_tp y_tp of
             Just Refl ->
-              case lub x_v y_v of
-                TopV -> Nothing
-                v -> Just (StackEntry x_tp v)
+              case joinAbsValue x_v y_v of
+                Nothing | x_v == TopV -> Nothing
+
+                        | otherwise -> Just (StackEntry x_tp x_v)
+                Just TopV -> Nothing
+                Just v -> Just (StackEntry x_tp v)
             Nothing -> Nothing
 
 ppAbsStack :: AbsBlockStack -> Doc
@@ -588,20 +719,41 @@ absX86State = lens _absX86State (\s v -> s { _absX86State = v })
 startAbsStack :: Simple Lens AbsBlockState AbsBlockStack
 startAbsStack = lens _startAbsStack (\s v -> s { _startAbsStack = v })
 
+traceUnless :: Bool -> String -> a -> a
+traceUnless True _ = id
+traceUnless False msg = trace msg
 
 instance AbsDomain AbsBlockState where
-  top = AbsBlockState { _absX86State = mkX86State (\_ -> top)
+  top = AbsBlockState { _absX86State = mkX86State (\_ -> TopV)
                       , _startAbsStack = Map.empty
                       }
 
-  leq x y =
-    cmpX86State leq (x^.absX86State) (y^.absX86State)
-      && absStackLeq (x^.startAbsStack) (y^.startAbsStack)
+  joinD x y | regs_changed = Just $! z
+            | otherwise = Nothing
+    where xs = x^.absX86State
+          ys = y^.absX86State
 
-  lub x y =
-    AbsBlockState { _absX86State   = zipWithX86State lub (x^.absX86State) (y^.absX86State)
-                  , _startAbsStack = absStackLub (x^.startAbsStack) (y^.startAbsStack)
-                  }
+          x_stk = x^.startAbsStack
+          y_stk = y^.startAbsStack
+
+          (zs,(regs_changed,dropped)) = flip runState (False, Set.empty) $ do
+            z_regs <- mkX86StateM $ \r -> do
+              let xr = xs^.register r
+              (c,s) <- get
+              case runState (joinAbsValue' xr (ys^.register r)) s of
+                (Nothing,s') -> do
+                  seq s' $ put $ (c,s')
+                  return $! xr
+                (Just zr,s') -> do
+                  seq s' $ put $ (True,s')
+                  return $! zr
+            z_stk <- absStackJoinD x_stk y_stk
+            return $ AbsBlockState { _absX86State   = z_regs
+                                   , _startAbsStack = z_stk
+                                   }
+
+          z = traceUnless (Set.null dropped) ("dropped abs " ++ show (ppIntegerSet dropped)) $
+              zs
 
 instance Pretty AbsBlockState where
   pretty s =
@@ -701,37 +853,28 @@ resetRSP otherFn r
   | Just Refl <- testEquality r N.rsp = concreteStackOffset 0
   | otherwise = otherFn r
 
+mkAbsBlockState :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
+                -> AbsBlockStack
+                -> AbsBlockState
+mkAbsBlockState trans newStack =
+  AbsBlockState { _absX86State = mkX86State (resetRSP trans)
+                , _startAbsStack = newStack
+                }
+
 -- | Return state for after value has run.
 finalAbsBlockState :: AbsRegs -> X86State Value -> AbsBlockState
 finalAbsBlockState c s = do
-  let mkState :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
-              -> AbsBlockStack
-              -> AbsBlockState
-      mkState trans newStack =
-        AbsBlockState { _absX86State = mkX86State (resetRSP trans)
-                      , _startAbsStack = newStack
-                      }
   case transferValue c (s^.register N.rsp) of
     StackOffset offsets | [0] <- Set.toList offsets ->
       let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
           transferReg r = transferValue c (s^.register r)
-       in mkState transferReg (c^.curAbsStack)
-    StackOffset offsets | [o] <- Set.toList offsets ->
-      let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-          transferReg r =
-            case transferValue c (s^.register r) of
-              StackOffset t -> StackOffset (Set.map (\v -> subOff n64 v o) t)
-              v -> v
-          newStack = Map.fromList $
-            [ (subOff n64 a o, v) | (a,v) <- Map.toList (c^.curAbsStack) ]
-       in mkState transferReg newStack
-    SomeStackOffset ->
-      let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-          transferReg r =
-            case transferValue c (s^.register r) of
-              StackOffset _ -> SomeStackOffset
-              v -> v
-       in mkState transferReg Map.empty
+       in mkAbsBlockState transferReg (c^.curAbsStack)
+    StackOffset offsets
+      | [o] <- Set.toList offsets ->
+        shiftSpecificOffset (\r -> transferValue c (s^.register r)) (c^.curAbsStack) o
+      | otherwise ->
+        shiftSomeOffset (\r -> transferValue c (s^.register r))
+    SomeStackOffset -> shiftSomeOffset (\r -> transferValue c (s^.register r))
     _ ->
       let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
           transferReg r =
@@ -739,7 +882,33 @@ finalAbsBlockState c s = do
               StackOffset _ -> TopV
               SomeStackOffset -> TopV
               v -> v
-       in mkState transferReg Map.empty
+       in mkAbsBlockState transferReg Map.empty
+
+
+shiftSpecificOffset :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
+                       -- ^ Function for getting register values.
+                    -> AbsBlockStack
+                       -- ^ Stack before shift.
+                    -> Integer
+                       -- ^ Amount to shift offset by
+                    -> AbsBlockState
+shiftSpecificOffset f stk o = mkAbsBlockState transferReg newStack
+  where transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
+        transferReg r =
+          case f r of
+            StackOffset t -> StackOffset (Set.map (\v -> subOff n64 v o) t)
+            v -> v
+        newStack = Map.fromList $
+            [ (subOff n64 a o, v) | (a,v) <- Map.toList stk ]
+
+shiftSomeOffset :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
+                -> AbsBlockState
+shiftSomeOffset f = mkAbsBlockState transferReg Map.empty
+  where transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
+        transferReg r =
+          case f r of
+            StackOffset _ -> SomeStackOffset
+            v -> v
 
 ------------------------------------------------------------------------
 -- Transfer functions
@@ -769,9 +938,9 @@ transferApp r a =
     Trunc v w -> trunc (transferValue r v) w
     UExt  v w -> uext  (transferValue r v) w
     BVAdd w x y -> bvadd w (transferValue r x) (transferValue r y)
-    BVSub w x y -> bvsub w (transferValue r x) (transferValue r y)
+    BVSub w x y -> bvsub (absMem r) w (transferValue r x) (transferValue r y)
     BVMul w x y -> bvmul w (transferValue r x) (transferValue r y)
-    _ -> top
+    _ -> TopV
 
 transferRHS :: forall tp
             .  AbsRegs
@@ -780,11 +949,11 @@ transferRHS :: forall tp
 transferRHS r rhs =
   case rhs of
     EvalApp app    -> transferApp r app
-    SetUndefined _ -> top
+    SetUndefined _ -> TopV
     Read (MemLoc a tp)
       | StackOffset s <- transferValue r a
       , [o] <- Set.toList s
       , Just (StackEntry v_tp v) <- Map.lookup o (r^.curAbsStack)
       , Just Refl <- testEquality tp v_tp ->
          v
-    Read _ -> top
+    Read _ -> TopV
