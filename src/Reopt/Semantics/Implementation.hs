@@ -170,11 +170,6 @@ instance S.IsValue Expr where
       bvLit (exprWidth x) (xv * yv)
     | otherwise = app $ BVMul (exprWidth x) x y
 
-  bvDiv       x y = app $ BVDiv       (exprWidth x) x y
-  bvSignedDiv x y = app $ BVSignedDiv (exprWidth x) x y
-  bvMod       x y = app $ BVMod       (exprWidth x) x y
-  bvSignedMod x y = app $ BVSignedMod (exprWidth x) x y
-
   complement x
     | Just xv <- asBVLit x = bvLit (exprWidth x) (complement xv)
     | otherwise = app $ BVComplement (exprWidth x) x
@@ -780,6 +775,11 @@ setLoc loc v0 =
          off <- getX87Offset i
          modState $ x87Regs . ix off .= v
 
+mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel, GenState any)
+mkBlockLabel a s0 = (lbl, s1)
+  where (b_id, s1) = s0 & nextBlockID <<+~ 1
+        lbl = GeneratedBlock a b_id
+
 
 instance S.Semantics X86Generator where
   make_undefined (S.BVTypeRepr n) =
@@ -812,10 +812,9 @@ instance S.Semantics X86Generator where
       go cond =
         X86G $ \c s0 -> do
           let p_b = s0 ^. (blockState . _JustF)
-          let last_block_id = pBlockLabel p_b
           let st = p_b^.pBlockState
-          let (t_block_id, s1) = s0 & nextBlockID <<+~ 1
-          let t_block_label = GeneratedBlock (blockParent last_block_id) t_block_id
+          let a  = blockParent (pBlockLabel p_b)
+          let (t_block_label, s1) = mkBlockLabel a s0
           let s2 = s1 & blockState .~ JustF (emptyPreBlock st t_block_label)
                       & frontierBlocks .~ Seq.empty
           -- Run true block.
@@ -823,14 +822,11 @@ instance S.Semantics X86Generator where
             Some (finishBlock FetchAndExecute -> s3)
              | otherwise -> do
               -- Run false block
-              let (f_block_id, s4) = s3 & nextBlockID <<+~ 1
-              let f_block_label = GeneratedBlock (blockParent last_block_id) f_block_id
+              let (f_block_label, s4) = mkBlockLabel a s3
               let s5 = s4 & blockState .~ JustF (emptyPreBlock st f_block_label)
                           & frontierBlocks .~ Seq.empty
-
               case unX86G f c s5 of
                 Some (finishBlock FetchAndExecute -> s6) -> do
-                  -- Note that startBlock flushes the current block if required.
                   let fin_b = finishBlock' p_b (\_ -> Branch cond t_block_label f_block_label)
                   Some $ s6 & frontierBlocks .~ (s0^.frontierBlocks Seq.|> fin_b)
                                          Seq.>< s3^.frontierBlocks
@@ -849,16 +845,40 @@ instance S.Semantics X86Generator where
                       , Some <$> eval dest ]
        addStmt (PlaceHolderStmt vs "memset")
 
-  syscall v = do v' <- eval v
-                 addStmt (PlaceHolderStmt [Some v'] "Syscall")
+  syscall = do
+    X86G $ \_ s0 -> do
+      -- Get last block.
+      let p_b = s0 ^. (blockState . _JustF)
+      -- Create finished block.
+      let fin_b = finishBlock' p_b Syscall
+      -- Return early
+      Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
+                & blockState .~ NothingF
+
+  bvDiv x y = do
+    let w = exprWidth y
+    xv <- eval x
+    yv <- eval y
+    qv <- evalApp (BVDiv w xv yv)
+    rv <- evalApp (BVMod w xv yv)
+    return $ ( ValueExpr qv, ValueExpr rv)
+
+  bvSignedDiv x y = do
+    let w = exprWidth y
+    xv <- eval x
+    yv <- eval y
+    qv <- evalApp (BVSignedDiv w xv yv)
+    rv <- evalApp (BVSignedMod w xv yv)
+    return $ ( ValueExpr qv, ValueExpr rv)
 
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate
   --            -> ExceptionClass
   --            -> m ()
-  exception m p c = S.ifte_ (S.complement m S..&. p)
-                    (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
-                    (return ())
+  exception m p c =
+    S.ifte_ (S.complement m S..&. p)
+            (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
+            (return ())
 
   x87Push _ = return ()
   x87Pop = return ()
@@ -883,8 +903,8 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State Value
 initX86State loc = mkX86State Initial
-                   & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
-                   & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
+                 & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
+                 & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
 data GenError = DecodeError (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance

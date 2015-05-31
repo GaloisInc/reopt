@@ -29,7 +29,6 @@ module Reopt.Semantics.Representation
   , traverseBlocks
   , traverseBlockAndChildren
   , findBlock
-  , blockNextStates
     -- * Block level declarations
   , BlockLabel(..)
   , isRootBlockLabel
@@ -108,97 +107,6 @@ colonPrec = 5
 type CodeAddr = Word64
 
 ------------------------------------------------------------------------
--- CFG
-
--- | A CFG is a map from all reachable code locations
--- to the block for that code location.
-data CFG = CFG { _cfgBlocks :: !(Map BlockLabel Block)
-                 -- | Maps each address that is the start of a block
-                 -- to the address just past the end of that block.
-                 -- Blocks are expected to be contiguous.
-               , _cfgBlockRanges :: !(Map CodeAddr CodeAddr)
-               }
-
--- | Create empty CFG
-emptyCFG :: CFG
-emptyCFG = CFG { _cfgBlocks = Map.empty
-               , _cfgBlockRanges = Map.empty
-               }
-
-cfgBlocks :: Simple Lens CFG (Map BlockLabel Block)
-cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
-
-cfgBlockRanges :: Simple Lens CFG (Map CodeAddr CodeAddr)
-cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
-
-cfgBlockEnds :: CFG -> Set CodeAddr
-cfgBlockEnds g = Set.fromList (Map.elems (g^.cfgBlockRanges))
-
-insertBlock :: Block -> CFG -> CFG
-insertBlock b c = do
-  let lbl = blockLabel b
-  case Map.lookup lbl (c^.cfgBlocks) of
-    Just{} -> error $ "Block with label " ++ show (pretty lbl) ++ " already defined."
-    Nothing -> c & cfgBlocks %~ Map.insert (blockLabel b) b
-
--- | Inserts blocks for a contiguous region of code.
-insertBlocksForCode :: CodeAddr -> CodeAddr -> [Block] -> CFG -> CFG
-insertBlocksForCode start end bs = execState $ do
-  modify $ \cfg -> foldl' (flip insertBlock) cfg bs
-  cfgBlockRanges %= Map.insert start end
-
--- | Return block with given label.
-findBlock :: CFG -> BlockLabel -> Maybe Block
-findBlock g l = Map.lookup l (g^.cfgBlocks)
-
--- | Return next states for block.
-blockNextStates :: CFG -> Block -> [X86State Value]
-blockNextStates g b =
-  case blockTerm b of
-    FetchAndExecute s -> [s]
-    Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
-      where Just x = findBlock g x_lbl
-            Just y = findBlock g y_lbl
-
-instance Pretty CFG where
-  pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
-
--- FIXME: refactor to be more efficient
--- FIXME: not a Traversal, more like a map+fold
-traverseBlocks :: CFG
-               -> BlockLabel
-               -> (Block -> a)
-               -> (a -> a -> a -> a)
-               -> a
-traverseBlocks cfg root f merge = go root
-  where
-    go l = case cfg ^. cfgBlocks . at l of
-            Nothing -> error $ "label not found"
-            Just b  -> let v = f b in
-                        case blockTerm b of
-                         Branch _ lb rb -> merge (go lb) v (go rb)
-                         _              -> v
-
--- | As for traverseBlocks but starting from a block in the cfg, not
--- an address
-traverseBlockAndChildren :: CFG
-                         -> Block
-                         -> (Block -> a)
-                            -- Maps a block to a value
-                         -> (Block -> a -> a -> a)
-                            -- Maps results from to sub-blocks together.
-                         -> a
-traverseBlockAndChildren cfg b0 f merge = goBlock b0
-  where
-    goBlock b = case blockTerm b of
-                 Branch _ lb rb -> merge b (go lb) (go rb)
-                 _              -> f b
-
-    go l = case cfg ^. cfgBlocks . at l of
-            Nothing -> error $ "label not found"
-            Just b  -> goBlock b
-
-------------------------------------------------------------------------
 -- BlockLabel
 
 -- | A label used to identify a block.
@@ -223,38 +131,6 @@ instance Show BlockLabel where
 
 instance Pretty BlockLabel where
   pretty l = text (show l)
-
-------------------------------------------------------------------------
--- Block
-
--- | A basic block in a control flow graph.
--- Consists of:
--- 1. A label that should uniquely identify the block, equence of
-data Block = Block { blockLabel :: !BlockLabel
-                     -- | List of statements in the block.
-                   , blockStmts :: !([Stmt])
-                     -- | This maps applications to the associated assignment.
-                   , blockCache :: !(MapF (App Value) Assignment)
-                     -- | The last statement in the block.
-                   , blockTerm :: !(TermStmt)
-                   }
-
-instance Pretty Block where
-  pretty b = do
-    pretty (blockLabel b) PP.<> text ":" <$$>
-      indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
-
--- | Returns true if block has a call comment.
-hasCallComment :: Block -> Bool
-hasCallComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
-        isCallComment _ = False
-
--- | Returns true if block has a ret comment.
-hasRetComment :: Block -> Bool
-hasRetComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "ret " `Text.isSuffixOf` s
-        isCallComment _ = False
 
 ------------------------------------------------------------------------
 -- Loctions a statement may need to read or write to.
@@ -316,15 +192,18 @@ instance PrettyPrec a => Pretty (StmtLoc a tp) where
 ------------------------------------------------------------------------
 -- Stmt
 
+type BVValue n = Value (BVType n)
+
 data Stmt where
   AssignStmt :: !(Assignment tp) -> Stmt
-  Write :: !(StmtLoc (Value (BVType 64)) tp) -> Value tp -> Stmt
+  Write :: !(StmtLoc (BVValue 64) tp) -> Value tp -> Stmt
   PlaceHolderStmt :: [Some Value] -> String -> Stmt
   Comment :: !Text -> Stmt
 
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
+--  pretty (Syscall     = text "syscall"
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)
@@ -344,28 +223,53 @@ data TermStmt where
          -> !BlockLabel
          -> TermStmt
 
+  -- The syscall instruction.
+  -- We model system calls as terminal instructions because from the
+  -- application perspective, the semantics will depend on the operating
+  -- system.
+  Syscall :: !(X86State Value) -> TermStmt
+
 instance Pretty TermStmt where
   pretty (FetchAndExecute s) =
     text "fetch_and_execute" <$$>
     indent 2 (pretty s)
   pretty (Branch c x y) =
     text "branch" <+> ppValue 0 c <+> pretty x <+> pretty y
+  pretty (Syscall s) =
+    text "syscall" <$$>
+    indent 2 (pretty s)
 
 ------------------------------------------------------------------------
--- Assignment
+-- Assignment and AssignRhs declarations.
 
 -- | This should be an identifier that can be used to identify the
 -- assignment statement uniquely within the CFG.
 type AssignId = Word64
-
-ppAssignId :: AssignId -> Doc
-ppAssignId w = text ("r" ++ show w)
 
 -- | An assignment consists of a unique location identifier and a right-
 -- hand side that returns a value.
 data Assignment tp = Assignment { assignId :: !AssignId
                                 , assignRhs :: !(AssignRhs tp)
                                 }
+
+-- | The right hand side of an assignment is an expression that
+-- returns a value.
+data AssignRhs tp where
+  -- An expression that is computed from evaluating subexpressions.
+  EvalApp :: !(App Value tp)
+          -> AssignRhs tp
+
+  -- An expression with an undefined value.
+  SetUndefined :: !(NatRepr n) -- Width of undefined value.
+               -> AssignRhs (BVType n)
+
+  Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
+
+------------------------------------------------------------------------
+-- Assignment
+
+ppAssignId :: AssignId -> Doc
+ppAssignId w = text ("r" ++ show w)
 
 assignmentType :: Assignment tp -> TypeRepr tp
 assignmentType (Assignment _ rhs) = assignRhsType rhs
@@ -388,19 +292,6 @@ instance Pretty (Assignment tp) where
 
 ------------------------------------------------------------------------
 -- AssignRhs
-
--- | The right hand side of an assignment is an expression that
--- returns a value.
-data AssignRhs tp where
-  -- An expression that is computed from evaluating subexpressions.
-  EvalApp :: !(App Value tp)
-          -> AssignRhs tp
-
-  -- An expression with an undefined value.
-  SetUndefined :: !(NatRepr n) -- Width of undefined value.
-               -> AssignRhs (BVType n)
-
-  Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
 
 instance Pretty (AssignRhs tp) where
   pretty (EvalApp a) = ppApp (ppValue 10) a
@@ -558,19 +449,29 @@ data App f tp where
   BVMul :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned division (rounds fractions to zero).
-  BVDiv :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
-
-  -- Signed division (rounds fractional results to zero).
-  BVSignedDiv :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  -- This operation should result in a #de exception when the denominator is zero.
+  -- It should also throw a #de exception when evaluated and the quotient cannot
+  -- fit in the given number of bits.
+  BVDiv :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned modulo
-  BVMod :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  -- This operation should result in a #de exception when the denominator is zero.
+  BVMod :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
+
+  -- Signed division (rounds fractional results to zero).
+  -- This operation should result in a #de exception when the denominator is zero.
+  -- It should also throw a #de exception when evaluated and the quotient cannot
+  -- fit in the given number of bits.
+  BVSignedDiv :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Signed modulo.
   -- The resulting modulus has the same sign as the quotient and satisfies
   -- the constraint that for all x y where y != 0:
   --   x = (y * BVSignedDiv x y) + BVSignedMod x y
-  BVSignedMod :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
+  -- This operation should result in a #de exception when the denominator is zero.
+  -- It should also throw a #de exception when evaluated and the quotient cannot
+  -- fit in the given number of bits.
+  BVSignedMod :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned less than.
   BVUnsignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
@@ -903,3 +804,117 @@ mapApp f m = runIdentity $ traverseApp (return . f) m
 
 foldApp :: Monoid m => (forall u. f u -> (b -> m)) -> b -> App f tp -> m
 foldApp f v m = getConst (traverseApp (\f_u -> Const $ \b -> f f_u b) m) v
+
+------------------------------------------------------------------------
+-- Block
+
+-- | A basic block in a control flow graph.
+-- Consists of:
+-- 1. A label that should uniquely identify the block, equence of
+data Block = Block { blockLabel :: !BlockLabel
+                     -- | List of statements in the block.
+                   , blockStmts :: !([Stmt])
+                     -- | This maps applications to the associated assignment.
+                   , blockCache :: !(MapF (App Value) Assignment)
+                     -- | The last statement in the block.
+                   , blockTerm :: !(TermStmt)
+                   }
+
+instance Pretty Block where
+  pretty b = do
+    pretty (blockLabel b) PP.<> text ":" <$$>
+      indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
+
+-- | Returns true if block has a call comment.
+hasCallComment :: Block -> Bool
+hasCallComment b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
+        isCallComment _ = False
+
+-- | Returns true if block has a ret comment.
+hasRetComment :: Block -> Bool
+hasRetComment b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "ret " `Text.isSuffixOf` s
+        isCallComment _ = False
+
+------------------------------------------------------------------------
+-- CFG
+
+-- | A CFG is a map from all reachable code locations
+-- to the block for that code location.
+data CFG = CFG { _cfgBlocks :: !(Map BlockLabel Block)
+                 -- | Maps each address that is the start of a block
+                 -- to the address just past the end of that block.
+                 -- Blocks are expected to be contiguous.
+               , _cfgBlockRanges :: !(Map CodeAddr CodeAddr)
+               }
+
+-- | Create empty CFG
+emptyCFG :: CFG
+emptyCFG = CFG { _cfgBlocks = Map.empty
+               , _cfgBlockRanges = Map.empty
+               }
+
+cfgBlocks :: Simple Lens CFG (Map BlockLabel Block)
+cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
+
+cfgBlockRanges :: Simple Lens CFG (Map CodeAddr CodeAddr)
+cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
+
+cfgBlockEnds :: CFG -> Set CodeAddr
+cfgBlockEnds g = Set.fromList (Map.elems (g^.cfgBlockRanges))
+
+insertBlock :: Block -> CFG -> CFG
+insertBlock b c = do
+  let lbl = blockLabel b
+  case Map.lookup lbl (c^.cfgBlocks) of
+    Just{} -> error $ "Block with label " ++ show (pretty lbl) ++ " already defined."
+    Nothing -> c & cfgBlocks %~ Map.insert (blockLabel b) b
+
+-- | Inserts blocks for a contiguous region of code.
+insertBlocksForCode :: CodeAddr -> CodeAddr -> [Block] -> CFG -> CFG
+insertBlocksForCode start end bs = execState $ do
+  modify $ \cfg -> foldl' (flip insertBlock) cfg bs
+  cfgBlockRanges %= Map.insert start end
+
+-- | Return block with given label.
+findBlock :: CFG -> BlockLabel -> Maybe Block
+findBlock g l = Map.lookup l (g^.cfgBlocks)
+
+instance Pretty CFG where
+  pretty g = vcat (pretty <$> Map.elems (g^.cfgBlocks))
+
+-- FIXME: refactor to be more efficient
+-- FIXME: not a Traversal, more like a map+fold
+traverseBlocks :: CFG
+               -> BlockLabel
+               -> (Block -> a)
+               -> (a -> a -> a -> a)
+               -> a
+traverseBlocks cfg root f merge = go root
+  where
+    go l = case cfg ^. cfgBlocks . at l of
+            Nothing -> error $ "label not found"
+            Just b  -> let v = f b in
+                        case blockTerm b of
+                         Branch _ lb rb -> merge (go lb) v (go rb)
+                         _              -> v
+
+-- | As for traverseBlocks but starting from a block in the cfg, not
+-- an address
+traverseBlockAndChildren :: CFG
+                         -> Block
+                         -> (Block -> a)
+                            -- Maps a block to a value
+                         -> (Block -> a -> a -> a)
+                            -- Maps results from to sub-blocks together.
+                         -> a
+traverseBlockAndChildren cfg b0 f merge = goBlock b0
+  where
+    goBlock b = case blockTerm b of
+                 Branch _ lb rb -> merge b (go lb) (go rb)
+                 _              -> f b
+
+    go l = case cfg ^. cfgBlocks . at l of
+            Nothing -> error $ "label not found"
+            Just b  -> goBlock b

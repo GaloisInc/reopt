@@ -1,4 +1,3 @@
-------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.Types
 -- Description      : This defines the types of machine words
@@ -60,19 +59,17 @@ data Type
   = -- | An array of bits
     BVType Nat
 
-type BVType = 'BVType
-
 type family TypeBits (tp :: Type) :: Nat where
   TypeBits (BVType n) = n
 
+type BVType = 'BVType
+
 type BoolType   = BVType 1
--- type FloatType  = BVType 32
--- type DoubleType = BVType 64
 type XMMType    = BVType 128
 
 -- | A runtime representation of @Type@ for case matching purposes.
 data TypeRepr tp where
-  BVTypeRepr     :: !(NatRepr n) -> TypeRepr (BVType n)
+  BVTypeRepr :: !(NatRepr n) -> TypeRepr (BVType n)
 
 type_width :: TypeRepr (BVType n) -> NatRepr n
 type_width (BVTypeRepr n) = n

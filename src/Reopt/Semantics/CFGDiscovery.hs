@@ -160,6 +160,7 @@ blocks = lens _blocks (\s v -> s { _blocks = v })
 failedAddrs :: Simple Lens InterpState (Set CodeAddr)
 failedAddrs = lens _failedAddrs (\s v -> s { _failedAddrs = v })
 
+-- | Addresses that start each function.
 functionEntries :: Simple Lens InterpState (Set CodeAddr)
 functionEntries = lens _functionEntries (\s v -> s { _functionEntries = v })
 
@@ -288,8 +289,7 @@ transferStmt stmt =
     AssignStmt a -> do
       modify $ addAssignment a
     Write (MemLoc addr _) v -> do
-      regs <- get
-      put $ addMemWrite addr v regs
+      modify $ addMemWrite addr v
     _ -> return ()
 
 recordEscapedCodePointer :: Word64 -> FrontierReason -> InterpState -> InterpState
@@ -324,6 +324,8 @@ finalBlockState mem a g
   | Set.member a (finalCodePointersInMem g) = defBlockState mem a
   | otherwise = lookupAbsBlock a (finalAbsState g)
 
+-- | Generate map that maps each assignment in the CFG to the abstract value
+-- associated with it.
 assignmentAbsValues :: Memory Word64 -> FinalCFG -> MapF Assignment AbsValue
 assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
   where g = finalCFG fg
@@ -349,6 +351,7 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
                   insBlock r final $
                   m
               FetchAndExecute _ -> m
+              Syscall _ -> m
 
           where final = runIdentity $ transferStmts r0 (blockStmts b)
                 m = MapF.union (final^.absAssignments) m0
@@ -383,16 +386,17 @@ mergeBlock mem rsn ab0 addr = do
       -- We haven't seen this block before
       Nothing  -> upd ab
 
--- | Joins in the new abstract state and returns the locations for
--- which the new state is changed.
-mergeCalleeReturn :: BlockLabel
+-- | This updates the state of a function when returning from a function.
+mergeFreeBSDSyscall :: BlockLabel
+                     -- ^ Label for callee block that is return.
                   -> Memory Word64
+                     -- ^ State of memory
                   -> AbsBlockState
-                     -- ^ Block state after executing instructions.
+                     -- ^ Block state just before return.
                   -> CodeAddr
                      -- ^ Address we are returning to.
                   -> State InterpState ()
-mergeCalleeReturn lbl mem ab0 addr = do
+mergeFreeBSDSyscall lbl mem ab0 addr = do
   let rsn = NextIP lbl
   s <- get
   when (Set.member addr (s^.codePointersInMem) == False) $ do
@@ -403,21 +407,71 @@ mergeCalleeReturn lbl mem ab0 addr = do
           -- Set IPReg
         | N.IPReg <- r =
           CodePointers (Set.singleton addr)
-          -- Stack pointer
-        | Just Refl <- testEquality r N.rsp =
-          ab0^.absX86State^.register r
-          -- Integer return vlaue
+          -- Two pointers that are modified by syscalls
+        | Just Refl <- testEquality r N.rcx =
+          TopV
+        | Just Refl <- testEquality r N.r11 =
+          TopV
+          -- Carry flag and rax is used by BSD for return values.
+        | Just Refl <- testEquality r N.cf =
+          TopV
         | Just Refl <- testEquality r N.rax =
+          TopV
+          -- Keep other registers the same.
+        | otherwise =
           ab0^.absX86State^.register r
-          -- Floating point return vlaue
-        | N.XMMReg 0 <- r =
-          ab0^.absX86State^.register r
+  let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
+  let upd new = do
+        absState %= Map.insert addr new
+        frontier %= Map.insert addr rsn
+  case Map.lookup addr (s^.absState) of
+    -- We have seen this block before, so need to join and see if
+    -- the results is changed.
+    Just ab_old ->
+      case joinD ab_old ab of
+        Nothing  -> return ()
+        Just new -> upd new
+    -- We haven't seen this block before
+    Nothing  -> upd ab
+
+-- | This updates the state of a function when returning from a function.
+mergeCalleeReturn :: BlockLabel
+                     -- ^ Label for callee block that is return.
+                  -> Memory Word64
+                     -- ^ State of memory
+                  -> AbsBlockState
+                     -- ^ Block state just before return.
+                  -> CodeAddr
+                     -- ^ Address we are returning to.
+                  -> State InterpState ()
+mergeCalleeReturn lbl mem ab0 addr = do
+  let rsn = NextIP lbl
+  s <- get
+  when (Set.member addr (s^.codePointersInMem) == False) $ do
+    trace ("Callee return address for " ++ showHex (blockParent lbl) " is stored in mem.") $ do
+      return ()
+      -- Registers to copy vlaue from abst.
+  let regsToCopy :: Set (Some N.RegisterName)
+      regsToCopy = Set.fromList
+        [ Some N.rsp -- Stack pointer
+        , Some N.rax -- Integer return pointer
+        , Some (N.XMMReg 7) -- Floating point return value
+        ]
+      -- Get register function.
+  let regFn :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
+      regFn r
+          -- Set IPReg
+        | N.IPReg <- r =
+          CodePointers (Set.singleton addr)
+          -- Stack pointer
+        | Set.member (Some r) regsToCopy =
+            ab0^.absX86State^.register r
+          -- Floating point height
+        | N.X87TopReg <- r =
+          ab0^.absX86State^.register N.X87TopReg
           -- Return no value for GPRegs
         | N.GPReg _ <- r =
           emptyAbsValue
-          -- Floating point height
-        | N.X87TopReg <- r =
-          ab0^.absX86State^.register r
           -- We know nothing about other registers.
         | otherwise =
           TopV
@@ -739,12 +793,13 @@ transferBlock :: Block   -- ^ Block to start from.
               -> AbsRegs -- ^ Registers at this block.
               -> State InterpState ()
 transferBlock b regs = do
+  let lbl = blockLabel b
   mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
   case blockTerm b of
     Branch c lb rb -> do
-      mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
+      mapM_ (recordWriteStmt lbl regs') (blockStmts b)
       l <- lookupBlock' lb
       let  l_regs = refineValue c (abstractSingleton mem n1 1) regs'
       r <- lookupBlock' rb
@@ -757,9 +812,16 @@ transferBlock b regs = do
       transferBlock l =<< transferStmts l_regs (blockStmts b)
       transferBlock r =<< transferStmts r_regs (blockStmts b)
 
+    Syscall s' -> do
+      let abst = finalAbsBlockState regs' s'
+      mapM_ (recordWriteStmt lbl regs') (blockStmts b)
+      let ips = getNextIps mem s' regs'
+      -- Look for new ips.
+      Fold.forM_ ips $ \addr -> do
+        mergeFreeBSDSyscall lbl mem abst addr
+
     FetchAndExecute s' -> do
       let abst = finalAbsBlockState regs' s'
-      let lbl = blockLabel b
       seq abst $ do
       -- See if next statement appears to end with a call.
       -- We define calls as statements that end with a write that
@@ -767,27 +829,27 @@ transferBlock b regs = do
       case () of
           -- The last statement was a call.
         _ | Just (prev_stmts, ret) <- identifyCall mem (blockStmts b) s' -> do
-            Fold.mapM_ (recordWriteStmt (blockLabel b) regs') prev_stmts
+            Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             mergeCallerReturn lbl abst ret
             -- Look for new ips.
             let ips = getNextIps mem s' regs'
             functionEntries %= Set.union ips
             Fold.forM_ ips $ \addr -> do
               mergeBlock mem (NextIP lbl) abst addr
+          -- This block ends with a return.
           | recoverIsReturnStmt s' -> do
-            mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
+            mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             let ips = getNextIps mem s' regs'
             -- Look for new ips.
             Fold.forM_ (getNextIps mem s' regs') $ \addr -> do
               mergeCalleeReturn lbl mem abst addr
 
-          | otherwise -> do
-            mapM_ (recordWriteStmt (blockLabel b) regs') (blockStmts b)
+          | otherwise -> trace ("transferToUnknown: " ++ show lbl) $ do
+            mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             let ips = getNextIps mem s' regs'
             -- Look for new ips.
             Fold.forM_ ips $ \addr -> do
               mergeBlock mem (NextIP lbl) abst addr
-
 
 getNextIps :: Memory Word64 -> X86State Value -> AbsRegs -> Set CodeAddr
 getNextIps mem s' regs' = do
@@ -1021,11 +1083,14 @@ ppStackHeights :: Function -> String
 ppStackHeights m = concatMap go (Map.toList m)
   where go (lbl,si) = show lbl ++ "\n" ++ show si ++ "\n\n"
 
+{-
 data RecoverState = RS { rsStart :: CodeAddr
                        , rsEnd :: CodeAddr
                        , rsBlocks :: Map CodeAddr BlockRegion
                        }
+-}
 
+{-
 recoverBlock :: RecoverState -> BlockLabel -> Block
 recoverBlock s (GeneratedBlock a i) =
   case Map.lookup a (rsBlocks s) of
@@ -1050,6 +1115,7 @@ mergeSI lbl si (m,s) =
               error $ "mergeSI given incompatiable values:\n"
                  ++ show si  ++ "\n"
                  ++ show si' ++ "\n"
+-}
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -1069,12 +1135,6 @@ recoverIsReturnStmt s = do
     _ -> False
 
 {-
-recoverIsTailCall :: X86State Value -> Bool
-recoverIsTailCall _ = error "recoverIsTailCall"
--}
-
-
-
 inFunctionRange :: RecoverState -> CodeAddr -> Bool
 inFunctionRange s a = rsStart s <= a && a < rsEnd s
 
@@ -1121,3 +1181,4 @@ recoverFunction s addr = recoverAddrs rs m (Set.singleton lbl)
                        , siReserved = 0
                        , siBPIsFramePtr = False
                        }
+-}

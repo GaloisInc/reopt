@@ -752,7 +752,7 @@ instance AbsDomain AbsBlockState where
                                    , _startAbsStack = z_stk
                                    }
 
-          z = traceUnless (Set.null dropped) ("dropped abs " ++ show (ppIntegerSet dropped)) $
+          z = traceUnless (Set.null dropped) ("dropped abs " ++ show (ppIntegerSet dropped) ++ show x ++ "\n" ++ show y) $
               zs
 
 instance Pretty AbsBlockState where

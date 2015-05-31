@@ -516,6 +516,16 @@ blockContainsCall mem b s =
       go (_:r) = go r
    in go (reverse (blockStmts b))
 
+-- | Return next states for block.
+blockNextStates :: CFG -> Block -> [X86State Value]
+blockNextStates g b =
+  case blockTerm b of
+    FetchAndExecute s -> [s]
+    Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
+      where Just x = findBlock g x_lbl
+            Just y = findBlock g y_lbl
+    Syscall _ -> []
+
 checkReturnsIdentified :: CFG -> Block -> IO ()
 checkReturnsIdentified g b = do
   case blockNextStates g b of

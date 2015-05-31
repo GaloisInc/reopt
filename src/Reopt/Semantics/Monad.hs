@@ -270,16 +270,6 @@ class IsValue (v  :: Type -> *) where
   bvNeg :: (1 <= n) => v (BVType n) -> v (BVType n)
   bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
 
-  -- | Unsigned divison (round fractional part to zero).
-  bvDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
-  -- | Signed divison (round fractional part to zero).
-  bvSignedDiv :: v (BVType n) -> v (BVType n) -> v (BVType n)
-
-  -- | Unsigned modulo.
-  bvMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
-  -- | Signed modulo (assumes division rounds to zero).
-  bvSignedMod :: v (BVType n) -> v (BVType n) -> v (BVType n)
-
   -- | Bitwise complement
   complement :: (1 <= n) => v (BVType n) -> v (BVType n)
 
@@ -589,8 +579,11 @@ type Pred m = Value m BoolType
 
 type MLocation m = Location (Value m (BVType 64))
 
-data ExceptionClass = DivideError | FloatingPointError | SIMDFloatingPointException
-                                                    -- -- | AlignmentCheck
+data ExceptionClass
+   = DivideError -- #DE
+   | FloatingPointError
+   | SIMDFloatingPointException
+     -- -- | AlignmentCheck
   deriving Show
 
 -- | The Semantics Monad defines all the operations needed for the x86
@@ -604,7 +597,7 @@ class ( Applicative m
   make_undefined :: TypeRepr tp -> m (Value m tp)
 
   -- | Mark a Boolean variable as undefined.
-  set_undefined :: MLocation m BoolType -> m ()
+  set_undefined :: KnownType tp => MLocation m tp -> m ()
   set_undefined l = do
     u <- make_undefined knownType
     l .= u
@@ -642,17 +635,44 @@ class ( Applicative m
 
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
-  memcmp :: NatRepr n -> Value m (BVType 64) -> Value m BoolType -> Value m (BVType 64) -> Value m (BVType 64) -> m (Value m (BVType 64))
+  memcmp :: NatRepr n
+         -> Value m (BVType 64)
+         -> Value m BoolType
+         -> Value m (BVType 64)
+         -> Value m (BVType 64)
+         -> m (Value m (BVType 64))
   -- memcmp n count direction srd dest
 
-  -- | execute the system call with the given id.
-  syscall :: Value m (BVType 64) -> m ()
+  -- | execute the system call instruction.
+  syscall :: m ()
+
+  -- | Performs an unsigned division.  It rounds the result to zero,
+  -- and returns both the quotient and remainder.
+  -- This throws an #de exception if the denominator is zero, or if the
+  -- quotient is too large to fit into the result.
+  bvDiv :: (1 <= n)
+        => Value m (BVType (n+n))
+        -> Value m (BVType n)
+        -> m ( Value m (BVType n)
+             , Value m (BVType n)
+             )
+
+  -- | Signed divison.  It rounds the result to zero, and returns both the
+  -- quotient and remainder.
+  -- This throws an #de exception if the denominator is zero, or if the
+  -- (signed) quotient is too large to fit into the result.
+  bvSignedDiv :: (1 <= n)
+              => Value m (BVType (n+n))
+              -> Value m (BVType n)
+              -> m ( Value m (BVType n)
+                   , Value m (BVType n)
+                   )
 
   -- | raises an exception if the predicate is true and the mask is false
   exception :: Value m BoolType    -- mask
-               -> Value m BoolType -- predicate
-               -> ExceptionClass
-               -> m ()
+            -> Value m BoolType -- predicate
+            -> ExceptionClass
+            -> m ()
 
   -- FIXME: those should also mutate the underflow/overflow flag and
   -- related state.

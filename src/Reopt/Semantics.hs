@@ -222,51 +222,52 @@ exec_dec dst = do dst_val <- get dst
                   -- Set result value.
                   set_result_value dst (dst_val `bvSub` v1)
 
+-- | div instruction
 exec_div :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
-exec_div v
+exec_div v0
     -- 8-bit division.
-  | Just Refl <- testEquality (bv_width v) n8 =
-    get (reg_low16 N.rax) >>= go1 (reg_low8 N.rax) (reg_high8 N.rax)
+  | Just Refl <- testEquality (bv_width v0) n8 = do
+    w <- get (reg_low16 N.rax)
+    go1 (reg_low8 N.rax) (reg_high8 N.rax) w v0
     -- 16-bit division.
-  | Just Refl <- testEquality (bv_width v) n16 =
-    go2 (reg_low16 N.rax) (reg_low16 N.rdx)
+  | Just Refl <- testEquality (bv_width v0) n16 =
+    go2 (reg_low16 N.rax) (reg_low16 N.rdx) v0
     -- 32-bit division.
-  | Just Refl <- testEquality (bv_width v) n32 =
-    go2 (reg_low32 N.rax) (reg_low32 N.rdx)
+  | Just Refl <- testEquality (bv_width v0) n32 =
+    go2 (reg_low32 N.rax) (reg_low32 N.rdx) v0
     -- 64-bit division.
-  | Just Refl <- testEquality (bv_width v) n64 =
-    go2 rax rdx
+  | Just Refl <- testEquality (bv_width v0) n64 =
+    go2 rax rdx v0
     -- Unsupported division.
   | otherwise =
     fail "div: Unknown bit width"
   where
     go2 :: (1 <= n + n, n <= n + n)
         => MLocation m (BVType n)
-        -> MLocation m (BVType n) -> m ()
-    go2 ax dx = do
+        -> MLocation m (BVType n)
+        -> Value m (BVType n) -- The denominator y in the divison x/y
+        -> m ()
+    go2 ax dx v = do
       axv <- get ax
       dxv <- get dx
-      go1 ax dx (bvCat dxv axv)
+      go1 ax dx (bvCat dxv axv) v
 
     go1 :: (1 <= n + n, n <= n + n) -- Add obvious constraint to help Haskell type-checker.
         => MLocation m (BVType n) -- Location to store quotient
         -> MLocation m (BVType n) -- Location to store remainder.
-        -> Value m (BVType (n + n)) -- The numerator in the division.
+        -> Value m (BVType (n + n)) -- The numerator x in the division x/y
+        -> Value m (BVType n)       -- The denominator y in the divison x/y
         -> m ()
-    go1 quotL remL w = do
-      let q = w `bvDiv` uext (bv_width w) v
-      -- Report error on divide by zero.
-      exception false (is_zero v) DivideError -- divide by zero
-      -- Report error if quot >= 2^64
-      exception false (bvLit (bv_width q) (maxBound :: Word64) `bvUlt` q) DivideError
+    go1 quotL remL w v = do
+      (q,r) <- bvDiv w v
       set_undefined cf_loc
       set_undefined of_loc
       set_undefined sf_loc
       set_undefined af_loc
       set_undefined pf_loc
       set_undefined zf_loc
-      quotL .= bvTrunc (bv_width v) q
-      remL  .= bvTrunc (bv_width v) (w `bvMod` uext (bv_width w) v)
+      quotL .= q
+      remL  .= r
 
 exec_idiv :: forall m n
            . (IsLocationBV m n)
@@ -305,29 +306,15 @@ do_exec_idiv :: forall m n
                 -- ^ The divisor
              -> m ()
 do_exec_idiv quotL remL w v = do
-  let wi = bv_width v
-  let dbl_wi = bv_width w
-  let wi_is_pos :: LeqProof 1 n
-      wi_is_pos = LeqProof
-  withLeqProof (leqAdd wi_is_pos wi) $ do
-  withLeqProof (addIsLeq wi wi) $ do
-  let ext_v = sext dbl_wi v
-      q     = w `bvSignedDiv` ext_v
-  exception false (is_zero v) DivideError -- divide by zero
-  exception false
-            (q `bvUlt` bvLit (bv_width q) (fromIntegral (minBound :: Int64) :: Word64))
-            DivideError -- q < - 2 ^ 63 + 1
-  exception false
-            (bvLit (bv_width q) (fromIntegral (maxBound :: Int64) :: Word64) `bvUlt` q)
-            DivideError -- 2 ^ 63 < q
+  (q,r) <- bvSignedDiv w v
+  quotL .= q
+  remL  .= r
   set_undefined cf_loc
   set_undefined of_loc
   set_undefined sf_loc
   set_undefined af_loc
   set_undefined pf_loc
   set_undefined zf_loc
-  quotL .= bvTrunc (bv_width v) q
-  remL  .= bvTrunc (bv_width v) (w `bvSignedMod` ext_v)
 
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
@@ -594,9 +581,9 @@ exec_rol l count = do
                        Just LeqProof -> 32
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
-      -- FIXME: this is from the manual, but I think the masking is overridden by the mod?
-      low_count = (uext (bv_width v) count .&. countMASK)
-                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
+      low_count = uext (bv_width v) count .&. countMASK
+      -- Note: The manual includes a mod, but it seems like the mask is sufficient.
+      --                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
       r = bvRol v low_count
 
   -- When the count is zero, nothing happens, in particular, no flags change
