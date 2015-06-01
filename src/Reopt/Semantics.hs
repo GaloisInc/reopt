@@ -27,7 +27,6 @@ import Data.Word
 import Prelude hiding (isNaN)
 import GHC.TypeLits
 
-import Data.Proxy
 import Data.Parameterized.NatRepr
 
 import Reopt.Semantics.Monad
@@ -673,35 +672,50 @@ exec_ret m_off = do
 
 -- ** String Instructions
 
-
--- FIXME: just use memmove always?
--- FIXME: we need to check the size prefix --- 67 a4 is
--- movs   BYTE PTR es:[edi],BYTE PTR ds:[esi]
 -- | MOVS/MOVSB Move string/Move byte string
 -- MOVS/MOVSW Move string/Move word string
 -- MOVS/MOVSD Move string/Move doubleword string
-exec_movs :: Semantics m => Bool -> NatRepr n -> m ()
-exec_movs rep_pfx sz = do
+exec_movs :: IsLocationBV m n
+          => Bool -- Flag indicating if RepPrefix appeared before instruction
+          -> SizeConstraint
+          -> NatRepr n -- Number of bits to move.
+          -> m ()
+exec_movs False _ sz = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let szv        = bvLit n64 (natValue sz)
-  if rep_pfx
-    then do count <- get rcx
-            let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
-                nbytes     = count `bvMul` szv
-                move_src  = mux df (src  `bvSub` nbytes_off) src
-                move_dest = mux df (dest `bvSub` nbytes_off) dest
-            -- FIXME: we might need direction for overlapping regions
-            memmove sz count move_src move_dest
-            rsi .= mux df (src  .- nbytes) (src  .+ nbytes)
-            rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
-            rcx .= bvKLit 0
-    else do v <- get $ mkBVAddr sz src
-            mkBVAddr sz dest .= v
-            rsi .= mux df (src  .- szv) (src  .+ szv)
-            rdi .= mux df (dest .- szv) (dest .+ szv)
+  v' <- get $ mkBVAddr sz dest
+  exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
+  let szv = bvLit n64 (natValue sz)
+  rsi .= mux df (src  .- szv) (src  .+ szv)
+  rdi .= mux df (dest .- szv) (dest .+ szv)
+exec_movs True Size16 sz = exec_movs' cx  (fromInteger (natValue sz) `div` 8)
+exec_movs True Size32 sz = exec_movs' ecx (fromInteger (natValue sz) `div` 8)
+exec_movs True Size64 sz = exec_movs' rcx (fromInteger (natValue sz) `div` 8)
+
+-- Execute movs with rep prefix.
+exec_movs' :: (IsLocationBV m n, n <= 64)
+           => MLocation m (BVType n) -- Register for counter
+           -> Int  -- Number of bytes to move each time.
+           -> m ()
+exec_movs' count_reg sz = do
+  -- The direction flag indicates post decrement or post increment.
+  df <- get df_loc
+  src  <- get rsi
+  dest <- get rdi
+  let szv = bvLit n64 (toInteger sz)
+  count <- uext n64 <$> get count_reg
+  let nbytes = count .* szv
+  -- FIXME: we might need direction for overlapping regions
+  count_reg .= bvLit (loc_width count_reg) (0::Integer)
+  ifte_ df
+        (do memmove sz count src dest True
+            rsi .= src  .- nbytes
+            rdi .= dest .- nbytes)
+        (do memmove sz count src dest False
+            rsi .= (src  .+ nbytes)
+            rdi .= (dest .+ nbytes))
 
 -- FIXME: can also take rep prefix
 -- | CMPS/CMPSB Compare string/Compare byte string
@@ -755,24 +769,41 @@ exec_cmps repz_pfx sz = do
 -- | STOS/STOSB Store string/Store byte string
 -- STOS/STOSW Store string/Store word string
 -- STOS/STOSD Store string/Store doubleword string
-exec_stos :: Semantics m => Bool -> MLocation m (BVType n) -> m ()
-exec_stos rep_pfx l = do
+exec_stos :: Semantics m => Bool -> SizeConstraint -> MLocation m (BVType n) -> m ()
+exec_stos False _ l = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   dest <- get rdi
   v    <- get l
-  let szv        = bvLit n64 (natValue (loc_width l))
-  if rep_pfx
-    then do count <- get rcx
-            let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
-                nbytes     = count `bvMul` szv
-                move_dest = mux df (dest `bvSub` nbytes_off) dest
-            -- FIXME: we might need direction for overlapping regions
-            memset count v move_dest
-            rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
-            rcx .= bvKLit 0
-    else do mkBVAddr (loc_width l) dest .= v
-            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+  let szv = bvLit n64 (natValue (loc_width l))
+  let neg_szv = bvLit n64 (negate (natValue (loc_width l)))
+  mkBVAddr (loc_width l) dest .= v
+  rdi .= dest .+ (mux df neg_szv szv)
+
+exec_stos True Size16 l = exec_stos'  cx l
+exec_stos True Size32 l = exec_stos' ecx l
+exec_stos True Size64 l = exec_stos' rcx l
+
+exec_stos' :: Semantics m => (IsLocationBV m n, n <= 64)
+           => MLocation m (BVType n) -- Register for counter
+           -> MLocation m (BVType v) -- Value to copy in
+           -> m ()
+exec_stos' count_reg l = do
+  -- The direction flag indicates post decrement or post increment.
+  df <- get df_loc
+  dest <- get rdi
+  v    <- get l
+  let szv = bvLit n64 (natValue (loc_width l))
+  count <- uext n64 <$> get count_reg
+  let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
+      nbytes     = count `bvMul` szv
+  ifte_ df
+        (do memset count v (dest .- nbytes_off)
+            rdi .= dest .- nbytes
+            rcx .= bvKLit 0)
+        (do memset count v dest
+            rdi .= dest .+ nbytes
+            rcx .= bvKLit 0)
 
 -- REP        Repeat while ECX not zero
 -- REPE/REPZ  Repeat while equal/Repeat while zero

@@ -205,7 +205,9 @@ unimplemented :: Monad m => m ()
 unimplemented = fail "UNIMPLEMENTED"
 
 newtype SemanticsOp
-      = SemanticsOp { unSemanticsOp :: forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m () }
+      = SemanticsOp { unSemanticsOp :: forall m. Semantics m
+                                    => F.InstructionInstance
+                                    -> m () }
 
 
 mapNoDupFromList :: (Ord k, Show k) => String -> [(k,v)] -> Map k v
@@ -220,7 +222,11 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
     mk :: String
        -> (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
        -> (String, SemanticsOp)
-    mk s f = (s, SemanticsOp f)
+    mk s f = (s, SemanticsOp $ \ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
+    mk' :: String
+       -> (forall m. Semantics m => F.InstructionInstance -> m ())
+       -> (String, SemanticsOp)
+    mk' s f = (s, SemanticsOp f)
 
     instrs :: [(String, SemanticsOp)]
     instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) ->
@@ -257,16 +263,23 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "cmpsd"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n32
               , mk "cmpsq"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n64
 
-              , mk "movsb"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n8
-              , mk "movsw"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n16
-              , mk "movsd"   $ \(pfx, _) -> do
-                  exec_movs (pfx == F.RepPrefix) n32
-              , mk "movsq"   $ \(pfx, _) -> exec_movs (pfx == F.RepPrefix) n64
+              , mk' "movsb"  $ \ii ->
+                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n8
+              , mk' "movsw"   $ \ii -> do
+                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n16
+              , mk' "movsd"   $ \ii -> do
+                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n32
+              , mk' "movsq"   $ \ii ->
+                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n64
 
-              , mk "stosb"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low8 N.rax)
-              , mk "stosw"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low16 N.rax)
-              , mk "stosd"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) (reg_low32 N.rax)
-              , mk "stosq"   $ \(pfx, _) -> exec_stos (pfx == F.RepPrefix) rax
+              , mk' "stosb"   $ \ii ->
+                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low8 N.rax)
+              , mk' "stosw"   $ \ii ->
+                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low16 N.rax)
+              , mk' "stosd"   $ \ii ->
+                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low32 N.rax)
+              , mk' "stosq"   $ \ii ->
+                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) rax
 
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
@@ -352,29 +365,37 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
 x87fir :: FloatInfoRepr X86_80Float
 x87fir = X86_80FloatRepr
 
-mkConditionals :: String -> (forall m. Semantics m => m (Value m BoolType) -> (F.LockPrefix, [F.Value]) -> m ())
-                  -> [(String, SemanticsOp)]
+semanticsOp :: (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
+            -> SemanticsOp
+semanticsOp f = SemanticsOp (\ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
+
+
+mkConditionals :: String
+               -> (forall m. Semantics m
+                   => m (Value m BoolType)
+                   -> (F.LockPrefix, [F.Value])
+                   -> m ())
+               -> [(String, SemanticsOp)]
 mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
   where
     -- conditional instruction support (cmovcc, jcc)
     conditionals :: [(String, SemanticsOp)]
-    conditionals = [ (,) "a"  $ SemanticsOp $ mkop cond_a
-                   , (,) "ae" $ SemanticsOp $ mkop cond_ae
-                   , (,) "b"  $ SemanticsOp $ mkop cond_b
-                   , (,) "be" $ SemanticsOp $ mkop cond_be
-                   , (,) "g"  $ SemanticsOp $ mkop cond_g
-                   , (,) "ge" $ SemanticsOp $ mkop cond_ge
-                   , (,) "l" $ SemanticsOp $ mkop cond_l
-                   , (,) "le" $ SemanticsOp $ mkop cond_le
-                   , (,) "o" $ SemanticsOp $ mkop cond_o
-                   , (,) "p" $ SemanticsOp $ mkop cond_p
-                   , (,) "s" $ SemanticsOp $ mkop cond_s
-                   , (,) "z" $ SemanticsOp $ mkop cond_z
-                   , (,) "no" $ SemanticsOp $ mkop cond_no
-                   , (,) "np" $ SemanticsOp $ mkop cond_np
-                   , (,) "ns" $ SemanticsOp $ mkop cond_ns
-                   , (,) "nz" $ SemanticsOp $ mkop cond_nz ]
-
+    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a
+                   , (,) "ae" $ semanticsOp $ mkop cond_ae
+                   , (,) "b"  $ semanticsOp $ mkop cond_b
+                   , (,) "be" $ semanticsOp $ mkop cond_be
+                   , (,) "g"  $ semanticsOp $ mkop cond_g
+                   , (,) "ge" $ semanticsOp $ mkop cond_ge
+                   , (,) "l"  $ semanticsOp $ mkop cond_l
+                   , (,) "le" $ semanticsOp $ mkop cond_le
+                   , (,) "o"  $ semanticsOp $ mkop cond_o
+                   , (,) "p"  $ semanticsOp $ mkop cond_p
+                   , (,) "s"  $ semanticsOp $ mkop cond_s
+                   , (,) "z"  $ semanticsOp $ mkop cond_z
+                   , (,) "no" $ semanticsOp $ mkop cond_no
+                   , (,) "np" $ semanticsOp $ mkop cond_np
+                   , (,) "ns" $ semanticsOp $ mkop cond_ns
+                   , (,) "nz" $ semanticsOp $ mkop cond_nz ]
 
 maybe_ip_relative f (_, vs)
   | [F.JumpOffset off] <- vs
@@ -489,8 +510,10 @@ fpUnopV f (_, vs)
     go sz ar = do v <- getBVAddress ar >>= get . mkFPAddr sz
                   f sz v
 
-fpUnop :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ())
-          -> (F.LockPrefix, [F.Value]) -> m ()
+fpUnop :: forall m. Semantics m
+       => (forall flt. FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ())
+       -> (F.LockPrefix, [F.Value])
+       -> m ()
 fpUnop f (_, vs)
   | [F.FPMem32 ar]     <- vs = go SingleFloatRepr ar
   | [F.FPMem64 ar]     <- vs = go DoubleFloatRepr ar
@@ -520,5 +543,5 @@ fpUnopOrRegBinop f args@(_, vs)
 execInstruction :: FullSemantics m => F.InstructionInstance -> Maybe (m ())
 execInstruction ii =
   case M.lookup (F.iiOp ii) semanticsMap of
-    Just (SemanticsOp f) -> Just $ f (F.iiLockPrefix ii, F.iiArgs ii)
+    Just (SemanticsOp f) -> Just $ f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
     _                    -> trace ("Unsupported instruction: " ++ show ii) Nothing

@@ -197,13 +197,41 @@ type BVValue n = Value (BVType n)
 data Stmt where
   AssignStmt :: !(Assignment tp) -> Stmt
   Write :: !(StmtLoc (BVValue 64) tp) -> Value tp -> Stmt
+  MemMove :: !Int
+             -- ^ Number of bytes to copy at a time (1,2,4,8)
+          -> !(BVValue 64)
+             -- ^ Number of values to move.
+          -> !(BVValue 64)
+             -- ^ Start of source buffer.
+          -> !(BVValue 64)
+             -- ^ Start of destination buffer.
+          -> !Bool
+             -- ^ Flag indicates whether direction of move:
+             -- True means we should decrement buffer pointers after each copy.
+             -- False means we should increment the buffer pointers after each copy.
+          -> Stmt
+
+  MemSet :: BVValue 64
+            -- ^ Number of values to assign
+         -> BVValue n
+            -- ^ Value to assign
+         -> BVValue 64
+            -- ^ Address to start assigning from.
+         -> Stmt
+
   PlaceHolderStmt :: [Some Value] -> String -> Stmt
   Comment :: !Text -> Stmt
 
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
---  pretty (Syscall     = text "syscall"
+  pretty (MemMove sz cnt src dest rev) =
+      text "memcopy" <+> parens (hcat $ punctuate comma args)
+    where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
+  pretty (MemSet cnt val dest) =
+      text "memst" <+> parens (hcat $ punctuate comma args)
+    where args = [pretty cnt, pretty val, pretty dest]
+
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)

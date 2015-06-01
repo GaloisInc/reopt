@@ -833,17 +833,18 @@ instance S.Semantics X86Generator where
                                          Seq.>< s6^.frontierBlocks
                             & blockState .~ NothingF
 
-  memmove _n count src dest =
-    do vs <- sequence [ Some <$> eval count
-                      , Some <$> eval src
-                      , Some <$> eval dest ]
-       addStmt (PlaceHolderStmt vs "memmove")
+  memmove val_sz count src dest is_reverse = do
+    count_v <- eval count
+    src_v   <- eval src
+    dest_v  <- eval dest
+    addStmt (MemMove val_sz count_v src_v dest_v is_reverse)
 
-  memset count v dest =
-    do vs <- sequence [ Some <$> eval count
-                      , Some <$> eval v
-                      , Some <$> eval dest ]
-       addStmt (PlaceHolderStmt vs "memset")
+
+  memset count val dest = do
+    count_v <- eval count
+    val_v   <- eval val
+    dest_v  <- eval dest
+    addStmt (MemSet count_v val_v dest_v)
 
   syscall = do
     X86G $ \_ s0 -> do

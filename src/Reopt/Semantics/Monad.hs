@@ -67,6 +67,7 @@ module Reopt.Semantics.Monad
   , unpackWord
   -- ** Registers
   , rsp, rbp, rax, rdx, rsi, rdi, rcx, rip
+  , cx,  ecx
     -- * IsLeq utility
   , IsLeq
   , n1, n8, n16, n32, n64, n80, n128
@@ -87,10 +88,12 @@ module Reopt.Semantics.Monad
   , ExceptionClass(..)
     -- * Re-exports
   , type (TypeLits.<=)
+  , type Flexdis86.OpTable.SizeConstraint(..)
   ) where
 
+import           Control.Applicative
 import           Data.Bits (shiftL)
-import Data.Proxy
+import           Data.Proxy
 import           GHC.TypeLits as TypeLits
 
 import           Data.Parameterized.NatRepr
@@ -98,7 +101,7 @@ import           Reopt.Semantics.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Semantics.StateNames as N
 import           Reopt.Semantics.Types
 
-import           Control.Applicative
+import Flexdis86.OpTable (SizeConstraint(..))
 
 ------------------------------------------------------------------------
 -- Location
@@ -216,6 +219,12 @@ rdx = Register N.rdx
 rsi = Register N.rsi
 rdi = Register N.rdi
 rcx = Register N.rcx
+
+cx :: Location addr (BVType 16)
+cx = reg_low16 N.rcx
+
+ecx :: Location addr (BVType 32)
+ecx = reg_low32 N.rcx
 
 rip :: Location addr (BVType 64)
 rip = Register N.IPReg
@@ -555,7 +564,7 @@ bvKLit = bvLit knownNat
 infixl 7 .*
 infixl 6 .+
 infixl 6 .-
-
+infix  4 .=
 {-
 -- Basically so I can get fromInteger, but the others might be handy too ...
 instance (IsValue v, KnownNat n, 1 <= n) => Num (v (BVType n)) where
@@ -626,12 +635,23 @@ class ( Applicative m
 
   -- FIXME: use location instead?
   -- | Move n bits at a time, with count moves
-  memmove :: NatRepr n -> Value m (BVType 64) -> Value m (BVType 64) -> Value m (BVType 64) -> m ()
+  memmove :: Int
+             -- ^ Number of bytes to copy at a time (1,2,4,8)
+          -> Value m (BVType 64)
+             -- ^ Number of values to move.
+          -> Value m (BVType 64)
+             -- ^ Start of source buffer
+          -> Value m (BVType 64)
+             -- ^ Start of destination buffer.
+          -> Bool
+             -- ^ Flag indicates direction of move:
+             -- True means we should decrement buffer pointers after each copy.
+             -- False means we should increment the buffer pointers after each copy.
+          -> m ()
   -- memmove n count src dest
 
   -- | Set memory to the given value, for the number of words (nbytes = count * bv_width v)
   memset :: Value m (BVType 64) -> Value m (BVType n) -> Value m (BVType 64) -> m ()
-  -- memset count v dest
 
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
