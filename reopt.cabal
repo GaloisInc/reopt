@@ -24,7 +24,7 @@ library
     parameterized-utils >= 0.1.6,
     text,
     vector,
-    QuickCheck
+    QuickCheck >= 2.7
 
   hs-source-dirs: src
 
@@ -51,7 +51,7 @@ library
     Reopt.Utils.PrettyPrint
     Reopt.X86State
 
-  ghc-options: -Wall
+  ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -74,5 +74,5 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall
+  ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top
