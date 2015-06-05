@@ -426,7 +426,7 @@ instance PrettyRegValue Value where
 -- App
 
 -- | App defines builtin operations on values.
-data App f tp where
+data App (f :: Type -> *) (tp :: Type) where
 
   Mux :: !(NatRepr n)
       -> !(f BoolType)

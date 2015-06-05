@@ -930,6 +930,7 @@ cfgFromAddress mem start = g -- trace ("Function:\n" ++ concatMap ppStackHeights
 
     s1 = explore_frontier s0
 
+    -- Add in code pointers from memory.
     go s (a,v)
       | not (isCodePointer mem v) = s
       | Set.member v (s^.codePointersInMem) = s
@@ -939,8 +940,8 @@ cfgFromAddress mem start = g -- trace ("Function:\n" ++ concatMap ppStackHeights
         trace ("Found new code pointer " ++ showHex v " at " ++ showHex a ".") $
         recordEscapedCodePointer v InInitialData s
 
+    -- Explore data values
     s2  = foldl' go s1 (memAsWord64le_withAddr mem)
-
     s3 = explore_frontier s2
     g = mkFinalCFG s3
 
