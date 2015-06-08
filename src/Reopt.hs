@@ -79,9 +79,9 @@ printDisassemblyLine base buffer (DAddr i n mi) = do
   let b = showBytes $ slice i n buffer
   let next = o + fromIntegral n
   let r = case mi of
-            Nothing  -> take 16 b
-            Just ins -> stringToFixedBuffer 16 b ++ " " ++ show (ppInstruction next ins)
-  putStrLn $ "  " ++ ppAddr o ++ ": " ++ r
+            Nothing  -> take 21 b
+            Just ins -> stringToFixedBuffer 21 b ++ "\t" ++ show (ppInstruction next ins)
+  putStrLn $ "  " ++ ppAddr o ++ ":\t" ++ r
 
 isCodeSection :: (Bits w, Eq w, Num w) => ElfSection w -> Bool
 isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
@@ -101,9 +101,9 @@ printSectionDisassembly :: ElfSection Word64 -> IO ()
 printSectionDisassembly s = do
   let nm = elfSectionName s
   let addr = elfSectionAddr s
-  putStrLn $ "Disassembly of section " ++ nm
+  putStrLn $ "Disassembly of section " ++ nm ++ ":"
   putStrLn ""
-  putStrLn $ show addr ++ " <" ++ nm ++ ">:"
+  putStrLn $ (showPaddedHex 16 addr) ++ " <" ++ nm ++ ">:"
   let buffer = elfSectionData s
   let dta = disassembleBuffer defaultX64Disassembler buffer
   let pp da = do
