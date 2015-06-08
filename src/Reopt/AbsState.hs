@@ -435,7 +435,9 @@ uext :: forall u v.
         (u+1 <= v) => AbsValue (BVType u) -> NatRepr v -> AbsValue (BVType v)
 uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
-uext (StridedInterval si) w = StridedInterval (si { SI.typ = BVTypeRepr w } ) -- FIXME
+uext (StridedInterval si) w = 
+  StridedInterval $ case si of SI.StridedInterval{} -> si { SI.typ = BVTypeRepr w }
+                               SI.EmptyInterval -> SI.EmptyInterval
 uext (SubValue (n :: NatRepr n) av) w =
   -- u + 1 <= v, n + 1 <= u, need n + 1 <= v
   -- proof: n + 1 <= u + 1 by addIsLeq

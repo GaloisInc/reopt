@@ -60,6 +60,7 @@ getSomeBVValue v =
     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
+    F.Mem128 ar          -> getBVAddress ar >>= mk . mkBVAddr n128
     -- Floating point memory
     F.FPMem32 ar          -> getBVAddress ar >>= mk . mkFPAddr SingleFloatRepr
     F.FPMem64 ar          -> getBVAddress ar >>= mk . mkFPAddr DoubleFloatRepr
@@ -134,6 +135,7 @@ getSomeBVLocation v =
     F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
     F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
     F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
+    F.Mem128 ar         -> getBVAddress ar >>= mk . mkBVAddr n128
     F.ByteReg  r
       | Just r64 <- F.is_low_reg r  -> mk (reg_low8  $ N.gpFromFlexdis r64)
       | Just r64 <- F.is_high_reg r -> mk (reg_high8 $ N.gpFromFlexdis r64)
@@ -161,7 +163,7 @@ getSomeBVLocation v =
 checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
   | Just Refl <- testEquality (getW v) n = return v
-  | otherwise = fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
+  | otherwise = traceStack "WIDTH_ERROR" $ fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
 
 checkSomeBV :: Monad m
             => (forall n'. f (BVType n') -> NatRepr n')
@@ -180,6 +182,7 @@ getBVValue (F.Mem8    ar) w = readBVAddress ar w
 getBVValue (F.Mem16   ar) w = readBVAddress ar w
 getBVValue (F.Mem32   ar) w = readBVAddress ar w
 getBVValue (F.Mem64   ar) w = readBVAddress ar w
+getBVValue (F.Mem128  ar) w = readBVAddress ar w
 getBVValue v w = checkSomeBV bv_width w =<< getSomeBVValue v
 
 getBVLocation :: FullSemantics m => F.Value -> NatRepr n -> m (MLocation m (BVType n))
@@ -412,7 +415,7 @@ mkBinop :: FullSemantics m
         -> m a
 mkBinop f (_, vs) =
   case vs of
-    [v, v']   -> f v v'
+    [v, v']   -> traceShow (v,v') (f v v')
     vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
 mkUnop :: FullSemantics m
