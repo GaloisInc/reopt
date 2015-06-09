@@ -31,8 +31,6 @@ library
   exposed-modules:
     Reopt
     Reopt.AbsState
-    Reopt.CFG
-    Reopt.CFG.JumpTargets
     Reopt.Loader
     Reopt.Memory
     Reopt.Domains.StridedInterval
