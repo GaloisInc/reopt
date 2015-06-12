@@ -79,9 +79,13 @@ printDisassemblyLine base buffer (DAddr i n mi) = do
   let b = showBytes $ slice i n buffer
   let next = o + fromIntegral n
   let r = case mi of
-            Nothing  -> take 21 b
+            Nothing  -> take 20 b
             Just ins -> stringToFixedBuffer 21 b ++ "\t" ++ show (ppInstruction next ins)
   putStrLn $ "  " ++ ppAddr o ++ ":\t" ++ r
+  if n > 7
+    then printDisassemblyLine base buffer $ DAddr (i+7) (n-7) Nothing
+    else return ()
+   
 
 isCodeSection :: (Bits w, Eq w, Num w) => ElfSection w -> Bool
 isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
@@ -151,5 +155,6 @@ printExecutableAddressesInGlobalData e = do
         let (n,mi) = tryDisassemble defaultX64Disassembler (B.drop offset buffer)
         let da = DAddr offset n mi
         printDisassemblyLine base buffer da
+        
       Nothing -> do
         putStrLn $ showHex o " not found in segment."
