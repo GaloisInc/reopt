@@ -383,7 +383,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
   where
     -- conditional instruction support (cmovcc, jcc)
     conditionals :: [(String, SemanticsOp)]
-    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a
+    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a     
                    , (,) "ae" $ semanticsOp $ mkop cond_ae
                    , (,) "b"  $ semanticsOp $ mkop cond_b
                    , (,) "be" $ semanticsOp $ mkop cond_be
@@ -395,6 +395,8 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , (,) "p"  $ semanticsOp $ mkop cond_p
                    , (,) "s"  $ semanticsOp $ mkop cond_s
                    , (,) "z"  $ semanticsOp $ mkop cond_z
+                   , (,) "e"  $ semanticsOp $ mkop cond_z
+                   , (,) "ne" $ semanticsOp $ mkop cond_nz 
                    , (,) "no" $ semanticsOp $ mkop cond_no
                    , (,) "np" $ semanticsOp $ mkop cond_np
                    , (,) "ns" $ semanticsOp $ mkop cond_ns
