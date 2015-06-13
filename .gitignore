@@ -2,3 +2,4 @@ dist
 deps
 sandbox
 cabal.sandbox.config
+tmp
