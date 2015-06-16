@@ -29,8 +29,8 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 
 import           Data.Parameterized.Some
-import           Reopt.Semantics.Representation
-import           Reopt.Semantics.Types
+import           Reopt.CFG.Representation
+import           Reopt.Machine.Types
 
 eliminateDeadRegisters :: CFG -> CFG
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg

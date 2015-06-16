@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
-module Reopt.Loader
+module Reopt.Object.Loader
   ( readElf
   , loadExecutable
   , loadElfBySection
@@ -15,7 +15,7 @@ import qualified Data.ByteString as BS
 import Data.Elf
 import Data.Monoid (mappend)
 
-import Reopt.Memory
+import Reopt.Object.Memory
 
 readElf :: FilePath -> IO SomeElf
 readElf path = do
