@@ -21,7 +21,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Reopt.Semantics.CFGDiscovery
+module Reopt.CFG.CFGDiscovery
        ( FinalCFG(..)
        , cfgFromAddress
        , assignmentAbsValues
@@ -51,13 +51,13 @@ import           Debug.Trace
 import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Reopt.AbsState
-import qualified Reopt.Domains.StridedInterval as SI
-import           Reopt.Memory
-import           Reopt.Semantics.Implementation
-import           Reopt.Semantics.Representation
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types
+import           Reopt.Analysis.AbsState
+import qualified Reopt.Analysis.Domains.StridedInterval as SI
+import           Reopt.Object.Memory
+import           Reopt.CFG.Implementation
+import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
 
 ------------------------------------------------------------------------
 -- AbsState

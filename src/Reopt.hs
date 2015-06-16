@@ -19,8 +19,8 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word
 import Numeric
-import Reopt.Loader
-import Reopt.Memory
+import Reopt.Object.Loader
+import Reopt.Object.Memory
 
 import Flexdis86
 

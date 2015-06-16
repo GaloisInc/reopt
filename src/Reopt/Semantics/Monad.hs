@@ -97,9 +97,9 @@ import           Data.Proxy
 import           GHC.TypeLits as TypeLits
 
 import           Data.Parameterized.NatRepr
-import           Reopt.Semantics.StateNames (RegisterName, RegisterClass(..))
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types
+import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
 
 import Flexdis86.OpTable (SizeConstraint(..))
 

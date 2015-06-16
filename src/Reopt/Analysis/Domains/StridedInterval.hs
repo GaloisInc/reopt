@@ -16,7 +16,7 @@
 
 -- FIXME: take rounding/number of bits/etc. into consideration
 -- FIXME: only really useful for unsigned?
-module Reopt.Domains.StridedInterval
+module Reopt.Analysis.Domains.StridedInterval
        ( StridedInterval(..)
          -- Constructors
        , singleton, mkStridedInterval, fromFoldable
@@ -41,7 +41,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import           Reopt.Semantics.Types
+import           Reopt.Machine.Types
 
 import           Test.QuickCheck
 

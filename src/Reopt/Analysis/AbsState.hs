@@ -6,7 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-module Reopt.AbsState
+module Reopt.Analysis.AbsState
   ( AbsBlockState
   , mkAbsBlockState
   , absX86State
@@ -58,11 +58,11 @@ import Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import qualified Reopt.Domains.StridedInterval as SI
-import           Reopt.Memory
-import           Reopt.Semantics.Representation
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types
+import qualified Reopt.Analysis.Domains.StridedInterval as SI
+import           Reopt.Object.Memory
+import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
 
 import           Debug.Trace
 

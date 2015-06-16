@@ -30,24 +30,22 @@ library
 
   exposed-modules:
     Reopt
-    Reopt.AbsState
-    Reopt.Loader
-    Reopt.Memory
-    Reopt.Domains.StridedInterval
-    Reopt.Semantics
-    Reopt.Semantics.Types
-    Reopt.Semantics.StateNames
-    Reopt.Semantics.FlexdisMatcher
-    Reopt.Semantics.Implementation
-    Reopt.Semantics.Monad
-    Reopt.Semantics.Representation
+    Reopt.Analysis.AbsState
+    Reopt.Analysis.Domains.StridedInterval
+    Reopt.CFG.CFGDiscovery
+    Reopt.CFG.Implementation
+    Reopt.CFG.Representation
+    Reopt.Machine.StateNames
+    Reopt.Machine.Types
+    Reopt.Machine.X86State
+    Reopt.Object.Loader
+    Reopt.Object.Memory
     Reopt.Semantics.DeadRegisterElimination
-    Reopt.Semantics.CodePointerDiscovery
-    Reopt.Semantics.CFGDiscovery
-    Reopt.Semantics.WorkList
+    Reopt.Semantics.FlexdisMatcher
+    Reopt.Semantics.Monad
+    Reopt.Semantics.Semantics
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
-    Reopt.X86State
 
   ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top

@@ -24,7 +24,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE KindSignatures #-} -- MaybeF
 
-module Reopt.Semantics.Implementation
+module Reopt.CFG.Implementation
        ( -- Threaded global state
          GlobalGenState
        , emptyGlobalGenState
@@ -60,7 +60,10 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 
 import qualified Flexdis86 as Flexdis
-import           Reopt.Memory
+import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types (TypeBits)
+import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
   ( Type(..)
@@ -68,9 +71,6 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-import           Reopt.Semantics.Representation
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types (TypeBits)
 
 ------------------------------------------------------------------------
 -- Expr

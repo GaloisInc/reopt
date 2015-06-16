@@ -20,7 +20,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
-module Reopt.Semantics.Representation
+module Reopt.CFG.Representation
   ( CFG
   , emptyCFG
   , cfgBlocks
@@ -61,7 +61,7 @@ module Reopt.Semantics.Representation
   , foldApp
   , traverseApp
     -- * X86State
-  , module Reopt.X86State
+  , module Reopt.Machine.X86State
   ) where
 
 import           Control.Applicative
@@ -83,13 +83,13 @@ import           GHC.TypeLits
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
-import           Data.Parameterized.Classes
-import qualified Reopt.Semantics.StateNames as N
-import Reopt.Semantics.Types
-import Reopt.Utils.PrettyPrint
-import Reopt.X86State
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
+import           Reopt.Utils.PrettyPrint
+import           Reopt.Machine.X86State
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
