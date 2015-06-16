@@ -17,7 +17,7 @@
 {-# LANGUAGE FlexibleInstances #-} -- for Eq
 {-# LANGUAGE PolyKinds #-}
 
-module Reopt.Semantics.StateNames where
+module Reopt.Machine.StateNames where
 
 
 import Data.Parameterized.Classes
@@ -25,7 +25,7 @@ import qualified Data.Vector as V
 import GHC.TypeLits
 
 import qualified Flexdis86 as F
-import Reopt.Semantics.Types
+import Reopt.Machine.Types
 
 data RegisterClass = ProgramCounter
                    | GP | Flag | Segment | Control

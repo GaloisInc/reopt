@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TupleSections #-}
-module Reopt.Memory
+module Reopt.Object.Memory
   ( SomeMemory(..)
   , Memory
   , emptyMemory

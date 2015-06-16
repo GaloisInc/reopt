@@ -36,9 +36,9 @@ import           Debug.Trace
 
 import           Data.Parameterized.NatRepr
 import qualified Flexdis86 as F
-import           Reopt.Semantics
+import           Reopt.Semantics.Semantics
 import           Reopt.Semantics.Monad
-import qualified Reopt.Semantics.StateNames as N
+import qualified Reopt.Machine.StateNames as N
 
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v

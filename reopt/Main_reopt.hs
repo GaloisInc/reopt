@@ -4,7 +4,7 @@
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
-import Control.Applicative
+import           Control.Applicative
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
@@ -22,14 +22,14 @@ import           Data.Word
 import           Data.Version
 import           GHC.TypeLits
 import           Numeric (showHex)
-import           Reopt.AbsState
+import           Reopt.Analysis.AbsState
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
-import System.IO
+import           System.IO
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import Data.Parameterized.Map (MapF)
+import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
 import           Paths_reopt (version)
@@ -37,14 +37,14 @@ import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
-import           Reopt.Memory
-import           Reopt.Semantics.CFGDiscovery
+import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
+import           Reopt.Object.Loader
+import           Reopt.Object.Memory
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.Monad (Type(..))
-import           Reopt.Semantics.Representation
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types
-import Reopt.Loader
 
 ------------------------------------------------------------------------
 -- Args

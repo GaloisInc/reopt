@@ -18,19 +18,19 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Reopt.Semantics where
+module Reopt.Semantics.Semantics where
 
-import Control.Applicative ( (<$>), (<*>) )
-import Data.Type.Equality
-import Data.Int
-import Data.Word
-import Prelude hiding (isNaN)
-import GHC.TypeLits
+import           Control.Applicative ( (<$>), (<*>) )
+import           Data.Type.Equality
+import           Data.Int
+import           Data.Word
+import           Prelude hiding (isNaN)
+import           GHC.TypeLits
 
-import Data.Parameterized.NatRepr
+import           Data.Parameterized.NatRepr
 
-import Reopt.Semantics.Monad
-import qualified Reopt.Semantics.StateNames as N
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Semantics.Monad
 
 -- * Preliminaries
 

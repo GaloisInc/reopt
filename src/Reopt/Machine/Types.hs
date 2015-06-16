@@ -14,8 +14,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-module Reopt.Semantics.Types
-  ( module Reopt.Semantics.Types -- export everything
+module Reopt.Machine.Types
+  ( module Reopt.Machine.Types -- export everything
   , module Exports
   ) where
 

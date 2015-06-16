@@ -4,7 +4,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Reopt.X86State
+module Reopt.Machine.X86State
   ( X86State
   , mkX86State
   , mkX86StateM
@@ -42,8 +42,8 @@ import           Data.Parameterized.Some
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import qualified Reopt.Semantics.StateNames as N
-import           Reopt.Semantics.Types
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
 import           Reopt.Utils.PrettyPrint
 
 ------------------------------------------------------------------------
