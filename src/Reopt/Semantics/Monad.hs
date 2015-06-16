@@ -38,6 +38,7 @@ module Reopt.Semantics.Monad
     -- * Location
   , Location(..)
   , xmm_low64
+  , loc_type
   , loc_width
   , reg_low8
   , reg_high8
@@ -132,6 +133,14 @@ data Location addr (tp :: Type) where
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
+
+loc_type :: Location addr tp -> TypeRepr tp
+loc_type (MemoryAddr _ tp) = tp
+loc_type (Register r)      = N.registerType r
+loc_type (TruncLoc _ n)    = BVTypeRepr n
+loc_type (LowerHalf l)     = BVTypeRepr $ halfNat (loc_width l)
+loc_type (UpperHalf l)     = BVTypeRepr $ halfNat (loc_width l)
+loc_type (X87StackRegister _) = knownType
 
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (MemoryAddr _ tp) = type_width tp
