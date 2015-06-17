@@ -39,9 +39,12 @@ import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
 import           Control.Monad.State.Strict
+import           Control.Monad.Writer
+  (censor, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
 import qualified Data.Foldable as Fold
 import           Data.Maybe
+import           Data.Monoid (mempty)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -88,6 +91,8 @@ import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 -- 'App' constructors more uniform, eliminating the need for extra
 -- constructors below in our version 'Expr'.
 
+type Name = String
+
 -- | A pure expression for isValue.
 data Expr tp where
   -- An expression obtained from some value.
@@ -109,7 +114,26 @@ data Expr tp where
   -- class as 'uext'', so we can use 'App's 'UExt' there ... seems ad
   -- hoc.
   SExtExpr :: (1 <= m, m <= n) =>
-    !(NatRepr n) -> Expr (BVType m) -> Expr (BVType n)
+    !(NatRepr n) -> !(Expr (BVType m)) -> Expr (BVType n)
+  -- A variable.
+  --
+  -- Not doing anything fancy with names for now; can use 'unbound'
+  -- later.
+  VarExpr :: !(TypeRepr t) -> !Name -> Expr t
+  -- Simon suggests:
+  --
+  -- Use a variable type instead of raw strings for 'Name's in
+  -- 'Stmt's, and track the variable type in the 'Variable' type.
+  --
+  -- Something like
+  {-
+  data Variable tp = Variable (TypeRepr tp) Name
+  -}
+  -- or
+  {-
+  data Variable :: Type -> * where
+    Variable :: TypeRepr tp -> Name -> Variable tp
+  -}
 
 mkLit :: NatRepr n -> Integer -> Value (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
@@ -127,6 +151,7 @@ exprType (LowerHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (UpperHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (TruncExpr r _) = S.BVTypeRepr r
 exprType (SExtExpr r _) = S.BVTypeRepr r
+exprType (VarExpr r _) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.
 exprWidth :: Expr (BVType n) -> NatRepr n
@@ -210,3 +235,141 @@ instance S.IsValue Expr where
 --
 -- - complement -> bvComplement
 -- - Trunc -> BVTrunc
+
+type Value = Expr
+type MLocation = S.Location (Value (BVType 64))
+
+-- | Potentially side-effecting operations, corresponding the to the
+-- 'S.Semantics' class.
+data Stmt where
+  -- | Bind the results of a statement to names.
+  --
+  -- Some statements, e.g. 'bvDiv', return multiple results, so we
+  -- bind a list of 'Name's here.
+  NamedStmt :: [Name] -> Stmt -> Stmt
+
+  -- The remaining constructors correspond to the 'S.Semantics
+  -- operations'.
+  MakeUndefined :: TypeRepr tp -> Stmt
+  Get :: MLocation tp -> Stmt
+  (:=) :: MLocation tp -> Expr tp -> Stmt
+  Ifte_ :: Value BoolType -> [Stmt] -> [Stmt] -> Stmt
+  MemMove :: Int
+          -> Value (BVType 64)
+          -> Value (BVType 64)
+          -> Value (BVType 64)
+          -> Bool
+          -> Stmt
+  MemSet :: Value (BVType 64) -> Value (BVType n) -> Value (BVType 64) -> Stmt
+  MemCmp :: NatRepr n
+         -> Value (BVType 64)
+         -> Value BoolType
+         -> Value (BVType 64)
+         -> Value (BVType 64)
+         -> Stmt
+  Syscall :: Stmt
+  BVDiv :: (1 <= n)
+        => Value (BVType (n+n))
+        -> Value (BVType n)
+        -> Stmt
+  BVSignedDiv :: (1 <= n)
+              => Value (BVType (n+n))
+              -> Value (BVType n)
+              -> Stmt
+  Exception :: Value BoolType
+            -> Value BoolType
+            -> S.ExceptionClass
+            -> Stmt
+  X87Push :: Value (S.FloatType X86_80Float) -> Stmt
+  X87Pop  :: Stmt
+
+-- | An 'S.Semantics' monad.
+--
+-- We collect effects in a 'Writer' and use 'State' to generate fresh
+-- names.
+newtype Semantics a =
+  Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
+  deriving (Functor, Monad, MonadState Integer, MonadWriter [Stmt])
+
+type instance S.Value Semantics = Expr
+
+#if !MIN_VERSION_base(4,8,0)
+instance Applicative Semantics where
+  pure = return
+  (<*>) = ap
+#endif
+
+-- | Generate a fresh variable with basename 'basename'.
+fresh :: MonadState Integer m => String -> m String
+fresh basename = do
+  x <- get
+  put (x + 1)
+  return $ basename ++ show x
+
+-- | Interpret 'S.Semantics' operations into 'Stmt's.
+--
+-- Operations that return 'Value's return fresh variables; we track
+-- the relation between variables and the 'Stmt's they bind to using
+-- 'NamedStmt's.
+instance S.Semantics Semantics where
+  make_undefined t = do
+    name <- fresh "undef"
+    tell [NamedStmt [name] (MakeUndefined t)]
+    return $ VarExpr t name
+
+  get l = do
+    name <- fresh "get"
+    tell [NamedStmt [name] (Get l)]
+    return $ VarExpr (S.loc_type l) name
+
+  l .= v = tell [l := v]
+
+  ifte_ c trueBranch falseBranch = do
+    trueStmts <- collectAndForget trueBranch
+    falseStmts <- collectAndForget falseBranch
+    tell [Ifte_ c trueStmts falseStmts]
+    where
+      -- | Run a subcomputation and collect and return the writes.
+      --
+      -- In the enclosing computation, the state changes persist and
+      -- the writes are forgotten.
+      collectAndForget :: MonadWriter w m => m a -> m w
+      collectAndForget = liftM snd . censor (const mempty) . listen
+      -- More obvious / less abstract version:
+      {-
+      collectAndForget :: Semantics a -> Semantics [Stmt]
+      collectAndForget = Semantics . lift . execWriterT . runSemantics
+      -}
+
+  memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
+
+  memset v1 v2 v3 = tell [MemSet v1 v2 v3]
+
+  memcmp r v1 v2 v3 v4 = do
+    name <- fresh "memcmp"
+    tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
+    return $ VarExpr S.knownType name
+
+  syscall = tell [Syscall]
+
+  bvDiv v1 v2 = do
+    nameQuot <- fresh "divQuot"
+    nameRem <- fresh "divRem"
+    tell [NamedStmt [nameQuot, nameRem] (BVDiv v1 v2)]
+    return (VarExpr r nameQuot, VarExpr r nameRem)
+    where
+      r = exprType v2
+
+  bvSignedDiv v1 v2 = do
+    nameQuot <- fresh "sdivQuot"
+    nameRem <- fresh "sdivRem"
+    tell [NamedStmt [nameQuot, nameRem] (BVSignedDiv v1 v2)]
+    return (VarExpr r nameQuot, VarExpr r nameRem)
+    where
+      r = exprType v2
+
+  exception v1 v2 c = tell [Exception v1 v2 c]
+
+  x87Push v = tell [X87Push v]
+
+  x87Pop = tell [X87Pop]
