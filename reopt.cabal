@@ -40,6 +40,7 @@ library
     Reopt.Machine.X86State
     Reopt.Object.Loader
     Reopt.Object.Memory
+    Reopt.Semantics.Concrete
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
@@ -72,3 +73,16 @@ executable reopt
 
   ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top
+
+executable ConcreteDumpInstr
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    binary,
+    bytestring,
+    containers,
+    flexdis86,
+    reopt
+
+  hs-source-dirs: utils
+  main-is: ConcreteDumpInstr.hs
