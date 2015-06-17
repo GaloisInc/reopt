@@ -408,8 +408,22 @@ ppExpr e = case e of
       where
         n' = natValue n
 
+-- | Pretty print 'S.Location'.
+--
+-- Going back to pretty names for subregisters is pretty ad hoc;
+-- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
+-- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
+ppLocation :: (addr -> Doc) -> S.Location addr tp -> Doc
+ppLocation ppAddr l = case l of
+  S.MemoryAddr addr _ -> ppAddr addr
+  S.Register r -> text $ "%" ++ show r
+  S.TruncLoc l n -> R.sexpr "trunc" [ ppLocation ppAddr l,  pretty (natValue n) ]
+  S.LowerHalf l -> R.sexpr "lower_half" [ ppLocation ppAddr l ]
+  S.UpperHalf l -> R.sexpr "upper_half" [ ppLocation ppAddr l ]
+  S.X87StackRegister i -> text $ "x87_stack@" ++ show i
+
 ppMLocation :: MLocation tp -> Doc
-ppMLocation l = text "(TODO: ppMLocation)"
+ppMLocation = ppLocation ppExpr
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
