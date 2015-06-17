@@ -53,13 +53,18 @@ module Reopt.CFG.Representation
   , asBaseOffset
   , mkLit
   , bvValue
-  , ppValue
   , App(..)
+  -- * App
   , appType
   , appWidth
   , mapApp
   , foldApp
   , traverseApp
+  -- * Pretty printing
+  , ppApp
+  , ppNat
+  , ppValue
+  , sexpr
     -- * X86State
   , module Reopt.Machine.X86State
   ) where

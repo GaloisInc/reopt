@@ -29,7 +29,8 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Reopt.Semantics.Concrete
-       (
+       ( execSemantics
+       , ppStmts
        ) where
 
 #if !MIN_VERSION_base(4,8,0)
@@ -40,7 +41,7 @@ import           Control.Lens
 import           Control.Monad.Cont
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
-  (censor, listen, tell, MonadWriter, WriterT)
+  (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
 import qualified Data.Foldable as Fold
 import           Data.Maybe
@@ -53,14 +54,11 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Vector as V
-import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
-
-import           Unsafe.Coerce -- Only required to work around a ghc crash
-
+import           Text.PrettyPrint.ANSI.Leijen
+  ((<>), (<+>), colon, indent, line, pretty, text, tupled, vsep, Doc, Pretty(..))
 
 import           Data.Word
 import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 
 import qualified Flexdis86 as Flexdis
 import           Reopt.Object.Memory
@@ -236,6 +234,9 @@ instance S.IsValue Expr where
 -- - complement -> bvComplement
 -- - Trunc -> BVTrunc
 
+------------------------------------------------------------------------
+-- Statements.
+
 type Value = Expr
 type MLocation = S.Location (Value (BVType 64))
 
@@ -283,6 +284,9 @@ data Stmt where
   X87Push :: Value (S.FloatType X86_80Float) -> Stmt
   X87Pop  :: Stmt
 
+------------------------------------------------------------------------
+-- Semantics monad instance.
+
 -- | An 'S.Semantics' monad.
 --
 -- We collect effects in a 'Writer' and use 'State' to generate fresh
@@ -290,6 +294,10 @@ data Stmt where
 newtype Semantics a =
   Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
   deriving (Functor, Monad, MonadState Integer, MonadWriter [Stmt])
+
+-- | Execute a 'Semantics' computation, returning its effects.
+execSemantics :: Semantics a -> [Stmt]
+execSemantics = flip evalState 0 . execWriterT . runSemantics
 
 type instance S.Value Semantics = Expr
 
@@ -373,3 +381,48 @@ instance S.Semantics Semantics where
   x87Push v = tell [X87Push v]
 
   x87Pop = tell [X87Pop]
+
+------------------------------------------------------------------------
+-- Pretty printing.
+
+ppExpr :: Expr a -> Doc
+ppExpr e = case e of
+  LitExpr _ i -> text "(TODO: ppExpr LitExpr)"
+  AppExpr app -> R.ppApp ppExpr app
+  LowerHalfExpr n e -> R.sexpr "lower_half" [ ppExpr e, R.ppNat n ]
+  UpperHalfExpr n e -> R.sexpr "upper_half" [ ppExpr e, R.ppNat n ]
+  TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
+  SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
+  VarExpr _ x -> text x
+
+ppMLocation :: MLocation tp -> Doc
+ppMLocation l = text "(TODO: ppMLocation)"
+
+ppStmts :: [Stmt] -> Doc
+ppStmts = vsep . map ppStmt
+
+ppStmt :: Stmt -> Doc
+ppStmt s = case s of
+  NamedStmt names s -> text "let" <+> tupled (map text names) <+> text "=" <+> ppStmt s
+  MakeUndefined _ -> text "make_undefined"
+  Get l -> R.sexpr "get" [ ppMLocation l ]
+  l := e -> ppMLocation l <+> text ":=" <+> ppExpr e
+  Ifte_ v t f -> vsep
+    [ text "if" <+> ppExpr v
+    , text "then"
+    ,   indent 2 (ppStmts t)
+    , text "else"
+    ,   indent 2 (ppStmts f)
+    ]
+  MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
+  MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
+  MemCmp n v1 v2 v3 v4 -> R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+  Syscall -> text "syscall"
+  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
+  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
+  X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
+  X87Pop -> text "x87_pop"
+
+instance Pretty Stmt where
+  pretty = ppStmt
