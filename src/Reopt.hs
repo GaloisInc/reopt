@@ -85,7 +85,6 @@ printDisassemblyLine base buffer (DAddr i n mi) = do
   if n > 7
     then printDisassemblyLine base buffer $ DAddr (i+7) (n-7) Nothing
     else return ()
-   
 
 isCodeSection :: (Bits w, Eq w, Num w) => ElfSection w -> Bool
 isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
