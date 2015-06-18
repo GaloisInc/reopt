@@ -55,8 +55,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), colon, indent, line, pretty, text, tupled, vsep, Doc, Pretty(..))
-import           Text.Printf (printf)
+  ((<>), (<+>), colon, indent, line, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
 import           Data.Word
 import           Numeric (showHex)
@@ -387,25 +386,13 @@ instance S.Semantics Semantics where
 
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
-  LitExpr n i -> ppLit n i
+  LitExpr n i -> parens $ R.ppLit n i
   AppExpr app -> R.ppApp ppExpr app
   LowerHalfExpr n e -> R.sexpr "lower_half" [ ppExpr e, R.ppNat n ]
   UpperHalfExpr n e -> R.sexpr "upper_half" [ ppExpr e, R.ppNat n ]
   TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
   SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
   VarExpr _ x -> text x
-  where
-    -- | Fomat in hex or binary, depending on bit width.
-    --
-    -- Use hex if bit width is a multiple of four, and binary
-    -- otherwise.
-    ppLit :: NatRepr n -> Integer -> Doc
-    ppLit n i = text $
-      if n' `mod` 4 == 0
-      then printf "0x%0*x" (n' `div` 4) i
-      else printf "0b%0*b" n' i
-      where
-        n' = natValue n
 
 -- | Pretty print 'S.Location'.
 --
