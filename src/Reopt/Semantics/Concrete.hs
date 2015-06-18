@@ -134,7 +134,7 @@ data Expr tp where
     Variable :: TypeRepr tp -> Name -> Variable tp
   -}
 
-mkLit :: NatRepr n -> Integer -> Value (BVType n)
+mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
   where mask = maxUnsigned n
 
@@ -238,8 +238,7 @@ instance S.IsValue Expr where
 ------------------------------------------------------------------------
 -- Statements.
 
-type Value = Expr
-type MLocation = S.Location (Value (BVType 64))
+type MLocation = S.Location (Expr (BVType 64))
 
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
@@ -255,34 +254,34 @@ data Stmt where
   MakeUndefined :: TypeRepr tp -> Stmt
   Get :: MLocation tp -> Stmt
   (:=) :: MLocation tp -> Expr tp -> Stmt
-  Ifte_ :: Value BoolType -> [Stmt] -> [Stmt] -> Stmt
+  Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
   MemMove :: Int
-          -> Value (BVType 64)
-          -> Value (BVType 64)
-          -> Value (BVType 64)
+          -> Expr (BVType 64)
+          -> Expr (BVType 64)
+          -> Expr (BVType 64)
           -> Bool
           -> Stmt
-  MemSet :: Value (BVType 64) -> Value (BVType n) -> Value (BVType 64) -> Stmt
+  MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   MemCmp :: NatRepr n
-         -> Value (BVType 64)
-         -> Value BoolType
-         -> Value (BVType 64)
-         -> Value (BVType 64)
+         -> Expr (BVType 64)
+         -> Expr BoolType
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
          -> Stmt
   Syscall :: Stmt
   BVDiv :: (1 <= n)
-        => Value (BVType (n+n))
-        -> Value (BVType n)
+        => Expr (BVType (n+n))
+        -> Expr (BVType n)
         -> Stmt
   BVSignedDiv :: (1 <= n)
-              => Value (BVType (n+n))
-              -> Value (BVType n)
+              => Expr (BVType (n+n))
+              -> Expr (BVType n)
               -> Stmt
-  Exception :: Value BoolType
-            -> Value BoolType
+  Exception :: Expr BoolType
+            -> Expr BoolType
             -> S.ExceptionClass
             -> Stmt
-  X87Push :: Value (S.FloatType X86_80Float) -> Stmt
+  X87Push :: Expr (S.FloatType X86_80Float) -> Stmt
   X87Pop  :: Stmt
 
 ------------------------------------------------------------------------
