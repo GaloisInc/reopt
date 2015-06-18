@@ -416,10 +416,35 @@ ppLocation :: (addr -> Doc) -> S.Location addr tp -> Doc
 ppLocation ppAddr l = case l of
   S.MemoryAddr addr _ -> ppAddr addr
   S.Register r -> text $ "%" ++ show r
-  S.TruncLoc l n -> R.sexpr "trunc" [ ppLocation ppAddr l,  pretty (natValue n) ]
-  S.LowerHalf l -> R.sexpr "lower_half" [ ppLocation ppAddr l ]
-  S.UpperHalf l -> R.sexpr "upper_half" [ ppLocation ppAddr l ]
+  S.TruncLoc _ _ -> ppSubregister l
+  S.LowerHalf _ -> ppSubregister l
+  S.UpperHalf _ -> ppSubregister l
   S.X87StackRegister i -> text $ "x87_stack@" ++ show i
+  where
+    -- | Print subregister as Python-style slice @<reg>[<low>:<high>]@.
+    --
+    -- The low bit is inclusive and the high bit is exclusive, but I
+    -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
+    ppSubregister :: S.Location addr tp -> Doc
+    ppSubregister l =
+      r <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
+      where
+        (r, low, high) = go l
+
+    -- | Return pretty-printed register and subrange bounds.
+    go :: S.Location addr tp -> (Doc, Integer, Integer)
+    go (S.TruncLoc l n) = truncLoc n $ go l
+    go (S.LowerHalf l) = lowerHalf $ go l
+    go (S.UpperHalf l) = upperHalf $ go l
+    go (S.Register r) = (text $ "%" ++ show r, 0, natValue $ N.registerWidth r)
+    go _ = error "ppLocation.go: unexpected constructor"
+
+    -- Transformations on subranges.
+    truncLoc :: NatRepr n -> (Doc, Integer, Integer) -> (Doc, Integer, Integer)
+    truncLoc n (r, low, _high) = (r, low, low + natValue n)
+    lowerHalf, upperHalf :: (Doc, Integer, Integer) -> (Doc, Integer, Integer)
+    lowerHalf (r, low, high) = (r, low, (low + high) `div` 2)
+    upperHalf (r, low, high) = (r, (low + high) `div` 2, high)
 
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
