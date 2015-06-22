@@ -2,7 +2,7 @@
 
 # Install reopt in a Cabal sandbox.
 
-PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils linux-ptrace posix-waitpid)
+PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils
 cd "$(dirname "${BASH_SOURCE[0]}")"
 sandbox=$(pwd)/sandbox
 
