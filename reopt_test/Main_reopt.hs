@@ -62,6 +62,7 @@ import System.Linux.Ptrace.X86_64Regs
 -- | Action to perform when running
 data Action
    = Test            -- * Execute and simulate in parallel, printing errors
+   | Instr
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
 
@@ -103,7 +104,8 @@ defaultArgs = Args { _reoptAction = Test
 arguments :: Mode Args
 arguments = mode "reopt_test" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
-        flags = [ testFlag
+        flags = [ instrFlag
+                , testFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -112,6 +114,11 @@ testFlag :: CmdArgs.Flag Args
 testFlag = flagNone [ "test", "t"] upd help
   where upd = reoptAction .~ Test
         help = "Test concrete semantics by executing in parallel with a binary"
+
+instrFlag :: CmdArgs.Flag Args
+instrFlag = flagNone [ "instructions", "i"] upd help
+  where upd = reoptAction .~ Instr
+        help = "Print disassembly of executed instructions in a binary"
 
 reoptVersion :: String
 reoptVersion = "Reopt binary reoptimizer (reopt) "
@@ -182,46 +189,71 @@ mkElfMem LoadBySegment e = memoryForElfSegments e
 test :: Args -> IO ()
 test args = do
   e <- readStaticElf (args^.programPath)
-  let mem = mkElfMem (args^.loadStyle) e :: Identity (Memory Word64)
-  child <- forkProcess $ testChild (args^.programPath)
+  let Identity mem = mkElfMem (args^.loadStyle) e
+  child <- traceFile $ args^.programPath
+  runStateT (testInner (printRegsAndInstr mem) child) ()
+  return ()
+
+printExecutedInstructions :: Args -> IO ()
+printExecutedInstructions args = do
+  e <- readStaticElf (args^.programPath)
+  let Identity mem = mkElfMem (args^.loadStyle) e
+  child <- traceFile $ args^.programPath
+  runStateT (testInner (printInstr mem) child) ()
+  return ()
+
+traceFile :: FilePath -> IO CPid
+traceFile path = do
+  child <- forkProcess $ traceChild path
   waitpid child []
-  ptrace_cont child Nothing
-  waitpid child []
-  testInner mem child
-  
-  
-testInner :: Identity (Memory Word64) -> CPid -> IO ()
-testInner mem pid = do
-  regs <- ptrace_getregs pid
+  return child
+
+traceChild :: FilePath -> IO ()
+traceChild file = do
+  ptrace_traceme
+  executeFile file False [] Nothing
+  trace "EXEC FAILED" $ fail "EXEC FAILED"
+
+testInner :: (CPid -> StateT s IO ()) -> CPid -> StateT s IO ()
+testInner act pid = do
+  act pid
+  lift $ ptrace_singlestep pid Nothing
+  (spid, status) <- lift $ waitForRes pid
+  if spid == pid
+    then case status of W.Stopped _ -> testInner act pid
+                        Signaled _ -> testInner act pid
+                        Continued -> testInner act pid
+                        W.Exited _ -> return ()
+    else fail "Wrong pid from waitpid!"
+
+printInstr :: Memory Word64 -> CPid -> StateT s IO ()
+printInstr mem pid = do
+  regs <- lift $ ptrace_getregs pid
   case regs 
     of X86 _ -> fail "X86Regs! only 64 bit is handled"
        X86_64 regs64 -> do
-         putStrLn $ show regs64
          let rip_val = rip regs64
-         case fmap (flip readInstruction rip_val) mem
-           of Identity (Left err) -> putStrLn "Couldn't find instruction at address "
-              Identity (Right (ii, nextAddr)) -> putStrLn $ show $ ppInstruction nextAddr ii
-  ptrace_singlestep pid Nothing
-  (spid, status) <- waitForRes pid
-  if spid == pid
-    then case status of W.Stopped _ -> testInner mem pid
-                        Signaled _ -> testInner mem pid
-                        Continued -> testInner mem pid
-                        W.Exited _ -> return ()
-    else fail "Wrong pid from waitpid!"
+         case readInstruction mem rip_val
+           of Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
+              Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
+
+printRegsAndInstr :: Memory Word64 -> CPid -> StateT s IO ()
+printRegsAndInstr mem pid = do
+  regs <- lift $ ptrace_getregs pid
+  case regs 
+    of X86 _ -> fail "X86Regs! only 64 bit is handled"
+       X86_64 regs64 -> do
+         lift $ putStrLn $ show regs64
+         let rip_val = rip regs64
+         case readInstruction mem rip_val
+           of Left err -> lift $ putStrLn "Couldn't find instruction at address "
+              Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
 
 waitForRes :: CPid -> IO (CPid, Status)
 waitForRes pid = do
   res <- waitpid pid []
   case res of Just x -> return x
               Nothing -> waitForRes pid
-
-testChild :: FilePath -> IO ()
-testChild file = do
-  ptrace_traceme
-  raiseSignal softwareStop
-  executeFile file False [] Nothing
-  trace "EXEC FAILED" $ fail "EXEC FAILED"
   
   
 
@@ -230,6 +262,7 @@ main = do
   args <- getCommandLineArgs
   case args^.reoptAction of
     Test -> test args
+    Instr -> printExecutedInstructions args
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->
