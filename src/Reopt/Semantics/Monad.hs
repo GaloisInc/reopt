@@ -369,6 +369,9 @@ class IsValue (v  :: Type -> *) where
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
+  --
+  -- Unlike 'uext' below, this is a strict extension: the 'm+1 <= n'
+  -- means 'm < n'.
   uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.

@@ -43,7 +43,6 @@ module Reopt.CFG.Representation
   , Assignment(..)
   , assignmentType
   , AssignId
-  , ppAssignId
   , AssignRhs(..)
     -- * Value
   , Value(..)
@@ -53,13 +52,20 @@ module Reopt.CFG.Representation
   , asBaseOffset
   , mkLit
   , bvValue
-  , ppValue
   , App(..)
+  -- * App
   , appType
   , appWidth
   , mapApp
   , foldApp
   , traverseApp
+  -- * Pretty printing
+  , ppApp
+  , ppAssignId
+  , ppLit
+  , ppNat
+  , ppValue
+  , sexpr
     -- * X86State
   , module Reopt.Machine.X86State
   ) where
@@ -405,11 +411,14 @@ instance PrettyPrec (Value tp) where
   prettyPrec = ppValue
 
 ppValue :: Prec -> Value tp -> Doc
-ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $
-  text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
+ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) PP.<> text "_0"
 ppValue _ _                 = error "ppValue"
+
+ppLit :: NatRepr n -> Integer -> Doc
+ppLit w i =
+  text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 
 instance Show (Value tp) where
   show = show . pretty
