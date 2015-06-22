@@ -290,6 +290,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "subsd"   $ truncateKnownBinop exec_subsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
+              , mk "movdqa"  $ truncateKnownBinop exec_movdqa
+              , mk "movdqu"  $ truncateKnownBinop exec_movdqa                
               , mk "movsd_sse" $ truncate64Op exec_movsd
               , mk "movss"   $ truncate32Op exec_movss
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
@@ -417,7 +419,7 @@ mkBinop :: FullSemantics m
         -> m a
 mkBinop f (_, vs) =
   case vs of
-    [v, v']   -> traceShow (v,v') (f v v')
+    [v, v']   -> f v v'
     vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
 mkUnop :: FullSemantics m

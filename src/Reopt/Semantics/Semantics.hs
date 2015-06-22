@@ -1270,8 +1270,18 @@ exec_cvtsi2sd l v = do
 
 -- ** SSE2 128-Bit SIMD Integer Instructions
 
--- MOVDQA Move aligned double quadword.
--- MOVDQU Move unaligned double quadword
+-- | MOVDQA Move aligned double quadword.
+
+-- FIXME: exception on unaligned loads
+exec_movdqa :: Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movdqa l v = l .= v
+
+-- | MOVDQU Move unaligned double quadword
+
+-- FIXME: no exception on unaligned loads
+exec_movdqu :: Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movdqu l v = l .= v
+
 -- MOVQ2DQ Move quadword integer from MMX to XMM registers
 -- MOVDQ2Q Move quadword integer from XMM to MMX registers
 -- PMULUDQ Multiply packed unsigned doubleword integers
