@@ -340,6 +340,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "or"      $ binop exec_or
               , mk "pause"   $ const (return ())
               , mk "pop"     $ unop exec_pop
+
+              , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ geBinop exec_rol
               , mk "sbb"     $ binop exec_sbb

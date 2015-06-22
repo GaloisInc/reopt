@@ -152,6 +152,30 @@ exec_cqo = do
   v <- get rax
   set_reg_pair rdx rax (sext n128 v)
 
+-- get_reg_pair :: (N.RegisterName cl -> MLocation m (BVType n))
+--                 -> N.RegisterName cl -> N.RegisterName cl
+--                 -> m (Value (BVType (n + n)))
+
+-- set_reg_pair :: (N.RegisterName cl -> MLocation m (BVType n))
+--                 -> N.RegisterName cl -> N.RegisterName cl
+--                 -> Value (BVType (n + n))
+--                 -> m ()
+
+exec_cmpxchg8b :: Semantics m => MLocation m (BVType 64) -> m ()
+exec_cmpxchg8b loc = do
+  temp64 <- get loc
+  -- edx_eax  <- get_reg_pair reg_low16 N.rdx N.rax  
+  edx_eax  <- bvCat <$> get (reg_low32 N.rdx) <*> get (reg_low32 N.rax)
+  ifte_ (edx_eax .=. temp64)
+    (do zf_loc .= true
+        ecx_ebx <- bvCat <$> get (reg_low32 N.rcx) <*> get (reg_low32 N.rbx)
+        loc .= ecx_ebx
+    )
+    (do zf_loc .= false
+        set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax) temp64
+        loc .= edx_eax -- FIXME: this store is redundant, but it is in the ISA, so we do it.
+    )
+
 -- And exec_movsxd
 exec_movsx_d :: (Semantics m, 1 <= n', n' <= n)
              =>  MLocation m (BVType n) -> Value m (BVType n') -> m ()
