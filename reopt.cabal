@@ -74,6 +74,32 @@ executable reopt
   ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top
 
+executable reopt_test
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    bytestring,
+    cmdargs,
+    containers,
+    elf,
+    flexdis86,
+    lens,
+    linux-ptrace,
+    mtl,
+    parameterized-utils >= 0.1.6,
+    posix-waitpid,
+    unix,
+    reopt
+
+  hs-source-dirs: reopt_test
+  main-is: Main_reopt.hs
+
+  if flag(enable-hpc)
+    ghc-options: -fhpc
+
+  ghc-options: -Wall -fcontext-stack=50000
+  ghc-prof-options: -O2 -fprof-auto-top
+
 executable ConcreteDumpInstr
   build-depends:
     base >= 4,
