@@ -117,6 +117,7 @@ cond_nz  = complement <$> cond_z
 -- * General Purpose Instructions
 -- ** Data Transfer Instructions
 
+
 -- FIXME: has the side effect of reading r, but this should be safe because r can only be a register.
 exec_cmovcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_cmovcc cc r y = do
@@ -144,6 +145,12 @@ exec_cdqe = do v <- get (reg_low32 N.rax)
 -- FIXME: CR and debug regs?
 exec_mov :: Semantics m =>  MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_mov l v = l .= v
+
+-- FIXME: this just sets rdx to be the sign of rax, but this is maybe better symbolically?
+exec_cqo :: Semantics m => m ()
+exec_cqo = do
+  v <- get rax
+  set_reg_pair rdx rax (sext n128 v)
 
 -- And exec_movsxd
 exec_movsx_d :: (Semantics m, 1 <= n', n' <= n)

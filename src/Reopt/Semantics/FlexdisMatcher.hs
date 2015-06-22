@@ -249,6 +249,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                                                                    exec_imul2_3 l v v'
                                             _                 -> fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
+              , mk "cqo"    $ \_ -> exec_cqo
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
               , mk "movzx"  $ geBinop exec_movzx
@@ -257,9 +258,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
                   exec_xchg l l'
 
-              , mk "ret"    $ \args@(_, vs) -> case vs of
-                                                 []              -> exec_ret Nothing
-                                                 [F.WordImm imm] -> exec_ret (Just imm)
+              , mk "ret"    $ \(_, vs) -> case vs of
+                                            []              -> exec_ret Nothing
+                                            [F.WordImm imm] -> exec_ret (Just imm)
 
               , mk "cmpsb"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n8
               , mk "cmpsw"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n16
