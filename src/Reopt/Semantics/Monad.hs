@@ -665,14 +665,16 @@ class ( Applicative m
   -- | Set memory to the given value, for the number of words (nbytes = count * bv_width v)
   memset :: Value m (BVType 64) -> Value m (BVType n) -> Value m (BVType 64) -> m ()
 
+  -- FIXME: be consistent wrt direction flags (cf memmove).
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
+  -- The number of bytes which are the same is stored into rax
   memcmp :: NatRepr n
          -> Value m (BVType 64)
          -> Value m BoolType
          -> Value m (BVType 64)
          -> Value m (BVType 64)
-         -> m (Value m (BVType 64))
+         -> m ()
   -- memcmp n count direction srd dest
 
   -- | execute the system call instruction.

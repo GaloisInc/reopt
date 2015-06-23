@@ -217,6 +217,18 @@ data Stmt where
              -- False means we should increment the buffer pointers after each copy.
           -> Stmt
 
+  MemCmp :: !Int
+             -- ^ Number of bytes to copy at a time (1,2,4,8)
+          -> !(BVValue 64)
+             -- ^ Number of values to move.
+          -> !(BVValue 64)
+             -- ^ Start of source buffer.
+          -> !(BVValue 64)
+             -- ^ Start of destination buffer.
+          -> !(BVValue 1)
+             -- ^ Direction flag, False means increasing          
+          -> Stmt
+
   MemSet :: BVValue 64
             -- ^ Number of values to assign
          -> BVValue n
@@ -235,8 +247,11 @@ instance Pretty Stmt where
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
   pretty (MemSet cnt val dest) =
-      text "memst" <+> parens (hcat $ punctuate comma args)
+      text "memset" <+> parens (hcat $ punctuate comma args)
     where args = [pretty cnt, pretty val, pretty dest]
+  pretty (MemCmp sz cnt src dest rev) =
+      text "memcmp" <+> parens (hcat $ punctuate comma args)
+    where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
 
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma

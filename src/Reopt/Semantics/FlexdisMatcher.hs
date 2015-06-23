@@ -261,33 +261,25 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                                                  []              -> exec_ret Nothing
                                                  [F.WordImm imm] -> exec_ret (Just imm)
 
-              , mk "cmpsb"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n8
-              , mk "cmpsw"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n16
-              , mk "cmpsd"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n32
-              , mk "cmpsq"   $ \(pfx, _) -> exec_cmps (pfx == F.RepZPrefix) n64
+              , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
+                                                     
+              , mk "movs"  $ mkBinopPfxLL
+                $ \pfx dest_loc src_loc ->
+                   case testLeq (loc_width dest_loc) n64 of
+                    Just LeqProof -> exec_movs (pfx == F.RepPrefix) dest_loc src_loc
+                    Nothing       -> fail "Argument to movs is too large"
 
-              , mk' "movsb"  $ \ii ->
-                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n8
-              , mk' "movsw"   $ \ii -> do
-                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n16
-              , mk' "movsd"   $ \ii -> do
-                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n32
-              , mk' "movsq"   $ \ii ->
-                   exec_movs (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) n64
-
-              , mk' "stosb"   $ \ii ->
-                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low8 N.rax)
-              , mk' "stosw"   $ \ii ->
-                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low16 N.rax)
-              , mk' "stosd"   $ \ii ->
-                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) (reg_low32 N.rax)
-              , mk' "stosq"   $ \ii ->
-                  exec_stos (F.iiLockPrefix ii == F.RepPrefix) (F.iiAddrSize ii) rax
+              , mk "stos" $ mkBinopPfxLL
+                $ \pfx dest_loc src_loc ->
+                   case testLeq (loc_width dest_loc) n64 of
+                    Just LeqProof -> exec_stos (pfx == F.RepPrefix) dest_loc src_loc
+                    Nothing       -> fail "Argument to movs is too large"
 
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
               , mk "subsd"   $ truncateKnownBinop exec_subsd
+              , mk "movsd"   $ truncate64Op exec_movsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
               , mk "movsd_sse" $ truncate64Op exec_movsd
@@ -402,6 +394,9 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , (,) "ns" $ semanticsOp $ mkop cond_ns
                    , (,) "nz" $ semanticsOp $ mkop cond_nz ]
 
+maybe_ip_relative :: Semantics m =>
+                     (Value m (BVType 64) -> m b)
+                     -> (t, [F.Value]) -> m b
 maybe_ip_relative f (_, vs)
   | [F.JumpOffset off] <- vs
        = do next_ip <- bvAdd (bvLit n64 off) <$> get (Register N.rip)
@@ -415,9 +410,15 @@ mkBinop :: FullSemantics m
         => (F.Value -> F.Value -> m a)
         -> (F.LockPrefix, [F.Value])
         -> m a
-mkBinop f (_, vs) =
+mkBinop f = mkBinopPfx (\_ -> f)
+
+mkBinopPfx :: FullSemantics m
+              => (F.LockPrefix -> F.Value -> F.Value -> m a)
+              -> (F.LockPrefix, [F.Value])
+              -> m a
+mkBinopPfx f (pfx, vs) =
   case vs of
-    [v, v']   -> traceShow (v,v') (f v v')
+    [v, v']   -> f pfx v v'
     vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
 mkUnop :: FullSemantics m
@@ -435,6 +436,15 @@ mkBinopLV f = mkBinop $ \loc val -> do
   SomeBV l <- getSomeBVLocation loc
   SomeBV v <- getSomeBVValue val
   f l v
+
+mkBinopPfxLL ::  Semantics m
+        => (forall n. (IsLocationBV m n, 1 <= n) =>
+            F.LockPrefix ->  MLocation m (BVType n) -> MLocation m (BVType n) -> m a)
+        -> (F.LockPrefix, [F.Value]) -> m a
+mkBinopPfxLL f = mkBinopPfx $ \pfx loc loc' -> do
+  SomeBV l <- getSomeBVLocation loc
+  l'       <- getSomeBVLocation loc' >>= checkSomeBV loc_width (loc_width l)
+  f pfx l l'
 
 -- The location size must be >= the value size.
 geBinop :: FullSemantics m

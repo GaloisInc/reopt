@@ -839,6 +839,13 @@ instance S.Semantics X86Generator where
     dest_v  <- eval dest
     addStmt (MemMove val_sz count_v src_v dest_v is_reverse)
 
+  memcmp sz count is_reverse src dest  = do
+    count_v <- eval count
+    is_reverse_v <- eval is_reverse
+    src_v   <- eval src
+    dest_v  <- eval dest
+    let nbytes = fromInteger (natValue sz) `div` 8 
+    addStmt (MemCmp nbytes count_v src_v dest_v is_reverse_v)
 
   memset count val dest = do
     count_v <- eval count

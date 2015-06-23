@@ -355,7 +355,7 @@ instance S.Semantics Semantics where
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    return $ VarExpr S.knownType name
+    -- return $ VarExpr S.knownType name
 
   syscall = tell [Syscall]
 

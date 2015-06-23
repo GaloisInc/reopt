@@ -675,12 +675,24 @@ exec_ret m_off = do
 -- | MOVS/MOVSB Move string/Move byte string
 -- MOVS/MOVSW Move string/Move word string
 -- MOVS/MOVSD Move string/Move doubleword string
-exec_movs :: IsLocationBV m n
+
+-- FIXME: this will conflict on merge, sorry.
+regLocation :: NatRepr n -> N.RegisterName N.GP -> Location addr (BVType n)
+regLocation sz
+  | Just Refl <- testEquality sz n8  = reg_low8
+  | Just Refl <- testEquality sz n16 = reg_low16
+  | Just Refl <- testEquality sz n32 = reg_low32
+  | Just Refl <- testEquality sz n64 = Register
+  | otherwise = fail "regLocation: Unknown bit width"
+
+-- FIXME: probably doesn't work for 32 bit address sizes
+-- arguments are only for the size, they are fixed at rsi/rdi
+exec_movs :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
-          -> SizeConstraint
-          -> NatRepr n -- Number of bits to move.
+          -> MLocation m (BVType n)
+          -> MLocation m (BVType n)          
           -> m ()
-exec_movs False _ sz = do
+exec_movs False dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   src  <- get rsi
@@ -690,56 +702,59 @@ exec_movs False _ sz = do
   let szv = bvLit n64 (natValue sz)
   rsi .= mux df (src  .- szv) (src  .+ szv)
   rdi .= mux df (dest .- szv) (dest .+ szv)
-exec_movs True Size16 sz = exec_movs' cx  (fromInteger (natValue sz) `div` 8)
-exec_movs True Size32 sz = exec_movs' ecx (fromInteger (natValue sz) `div` 8)
-exec_movs True Size64 sz = exec_movs' rcx (fromInteger (natValue sz) `div` 8)
-
--- Execute movs with rep prefix.
-exec_movs' :: (IsLocationBV m n, n <= 64)
-           => MLocation m (BVType n) -- Register for counter
-           -> Int  -- Number of bytes to move each time.
-           -> m ()
-exec_movs' count_reg sz = do
+  where
+    sz = loc_width dest_loc
+exec_movs True dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let szv = bvLit n64 (toInteger sz)
+  let nbytesv = bvLit n64 (toInteger nbytes)
   count <- uext n64 <$> get count_reg
-  let nbytes = count .* szv
+  let total_bytes = count .* nbytesv
   -- FIXME: we might need direction for overlapping regions
   count_reg .= bvLit (loc_width count_reg) (0::Integer)
   ifte_ df
-        (do memmove sz count src dest True
-            rsi .= src  .- nbytes
-            rdi .= dest .- nbytes)
-        (do memmove sz count src dest False
-            rsi .= (src  .+ nbytes)
-            rdi .= (dest .+ nbytes))
-
+        (do memmove nbytes count src dest True
+            rsi .= src  .- total_bytes
+            rdi .= dest .- total_bytes)
+        (do memmove nbytes count src dest False
+            rsi .= (src  .+ total_bytes)
+            rdi .= (dest .+ total_bytes))
+  where
+    count_reg = regLocation sz N.rcx    
+    sz = loc_width dest_loc
+    nbytes = fromInteger (natValue sz) `div` 8 
+      
 -- FIXME: can also take rep prefix
+-- FIXME: we ignore the aso here.  
 -- | CMPS/CMPSB Compare string/Compare byte string
 -- CMPS/CMPSW Compare string/Compare word string
 -- CMPS/CMPSD Compare string/Compare doubleword string
-exec_cmps :: IsLocationBV m n => Bool -> NatRepr n -> m ()
-exec_cmps repz_pfx sz = do
+exec_cmps :: IsLocationBV m n => Bool
+             -> MLocation m (BVType n)
+             -> MLocation m (BVType n)
+             -> m ()
+exec_cmps repz_pfx loc_rsi _loc_rdi = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
-  src  <- get rsi
-  dest <- get rdi
+  v_rsi <- get rsi
+  v_rdi <- get rdi
   if repz_pfx
     then do count <- get rcx
             ifte_ (count .=. bvKLit 0)
               (return ())
-              (do_memcmp df src dest count)
-    else do v' <- get $ mkBVAddr sz dest
-            exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
-            rsi .= mux df (src  `bvSub` szv) (src  `bvAdd` szv)
-            rdi .= mux df (dest `bvSub` szv) (dest `bvAdd` szv)
+              (do_memcmp df v_rsi v_rdi count)
+    else do v' <- get $ mkBVAddr sz v_rdi
+            exec_cmp (mkBVAddr sz v_rsi) v' -- FIXME: right way around?
+            rsi .= mux df (v_rsi  `bvSub` szv) (v_rsi `bvAdd` szv)
+            rdi .= mux df (v_rdi  `bvSub` szv) (v_rdi `bvAdd` szv)
   where
+    sz  = loc_width loc_rsi
     szv = bvLit n64 $ natValue sz
     do_memcmp df src dest count = do
-      nsame <- memcmp sz count df src dest
+      memcmp sz count df src dest
+      nsame <- get rax -- FIXME: this should really be returned by memcmp
       let equal = (nsame .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
@@ -769,31 +784,28 @@ exec_cmps repz_pfx sz = do
 -- | STOS/STOSB Store string/Store byte string
 -- STOS/STOSW Store string/Store word string
 -- STOS/STOSD Store string/Store doubleword string
-exec_stos :: Semantics m => Bool -> SizeConstraint -> MLocation m (BVType n) -> m ()
-exec_stos False _ l = do
+exec_stos :: (IsLocationBV m n, n <= 64)
+          => Bool -- Flag indicating if RepPrefix appeared before instruction
+          -> MLocation m (BVType n)
+          -> MLocation m (BVType n)          
+          -> m ()
+exec_stos False _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   dest <- get rdi
-  v    <- get l
-  let szv = bvLit n64 (natValue (loc_width l))
-  let neg_szv = bvLit n64 (negate (natValue (loc_width l)))
-  mkBVAddr (loc_width l) dest .= v
+  v    <- get val_loc
+  let szv = bvLit n64 (natValue sz)
+  let neg_szv = bvLit n64 (negate (natValue sz))
+  mkBVAddr sz dest .= v
   rdi .= dest .+ (mux df neg_szv szv)
-
-exec_stos True Size16 l = exec_stos'  cx l
-exec_stos True Size32 l = exec_stos' ecx l
-exec_stos True Size64 l = exec_stos' rcx l
-
-exec_stos' :: Semantics m => (IsLocationBV m n, n <= 64)
-           => MLocation m (BVType n) -- Register for counter
-           -> MLocation m (BVType v) -- Value to copy in
-           -> m ()
-exec_stos' count_reg l = do
+  where
+    sz = loc_width val_loc
+exec_stos True _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   dest <- get rdi
-  v    <- get l
-  let szv = bvLit n64 (natValue (loc_width l))
+  v    <- get val_loc
+  let szv = bvLit n64 (natValue sz)
   count <- uext n64 <$> get count_reg
   let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
       nbytes     = count `bvMul` szv
@@ -804,6 +816,11 @@ exec_stos' count_reg l = do
         (do memset count v dest
             rdi .= dest .+ nbytes
             rcx .= bvKLit 0)
+  where
+    sz = loc_width val_loc
+    count_reg = regLocation sz N.rcx
+    
+
 
 -- REP        Repeat while ECX not zero
 -- REPE/REPZ  Repeat while equal/Repeat while zero

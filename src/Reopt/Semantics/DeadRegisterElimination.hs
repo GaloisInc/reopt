@@ -70,6 +70,12 @@ blockLiveRegisters b = do addIDs terminalIds
       addIDs (refsInValue src)
       addIDs (refsInValue dest)
       return (stmt : ss)
+    noteAndFilter stmt@(MemCmp _ cnt src dest dir) ss = do
+      addIDs (refsInValue cnt)
+      addIDs (refsInValue src)
+      addIDs (refsInValue dest)
+      addIDs (refsInValue dir)      
+      return (stmt : ss) 
     noteAndFilter stmt@(MemSet cnt val dest) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue val)
