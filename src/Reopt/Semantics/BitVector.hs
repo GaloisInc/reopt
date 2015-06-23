@@ -2,8 +2,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 
-module Reopt.Semantics.BitVector
-where
+module Reopt.Semantics.BitVector where
+
 import qualified Data.BitVector as BV
 import Data.Parameterized.NatRepr
 import GHC.TypeLits

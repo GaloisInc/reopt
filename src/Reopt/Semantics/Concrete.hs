@@ -36,14 +36,18 @@ module Reopt.Semantics.Concrete
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative ((<*>), pure, Applicative)
 #endif
+import           Control.Arrow ((***))
 import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
+import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
+import qualified Data.BitVector as BV
 import qualified Data.Foldable as Fold
+import           Data.Functor
 import           Data.Maybe
 import           Data.Monoid (mempty)
 import           Data.Parameterized.Map (MapF)
@@ -72,6 +76,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
+import qualified Reopt.Semantics.ConcreteState as CS
 import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 
 ------------------------------------------------------------------------
@@ -117,21 +122,9 @@ data Expr tp where
   --
   -- Not doing anything fancy with names for now; can use 'unbound'
   -- later.
-  VarExpr :: !(TypeRepr t) -> !Name -> Expr t
-  -- Simon suggests:
-  --
-  -- Use a variable type instead of raw strings for 'Name's in
-  -- 'Stmt's, and track the variable type in the 'Variable' type.
-  --
-  -- Something like
-  {-
-  data Variable tp = Variable (TypeRepr tp) Name
-  -}
-  -- or
-  {-
-  data Variable :: Type -> * where
-    Variable :: TypeRepr tp -> Name -> Variable tp
-  -}
+  VarExpr :: Variable tp -> Expr tp
+
+data Variable tp = Variable !(TypeRepr tp) !Name
 
 mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
@@ -149,7 +142,7 @@ exprType (LowerHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (UpperHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (TruncExpr r _) = S.BVTypeRepr r
 exprType (SExtExpr r _) = S.BVTypeRepr r
-exprType (VarExpr r _) = r -- S.BVTypeRepr r
+exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.
 exprWidth :: Expr (BVType n) -> NatRepr n
@@ -322,12 +315,12 @@ instance S.Semantics Semantics where
   make_undefined t = do
     name <- fresh "undef"
     tell [NamedStmt [name] (MakeUndefined t)]
-    return $ VarExpr t name
+    return $ VarExpr (Variable t name)
 
   get l = do
     name <- fresh "get"
     tell [NamedStmt [name] (Get l)]
-    return $ VarExpr (S.loc_type l) name
+    return $ VarExpr (Variable (S.loc_type l) name)
 
   l .= v = tell [l := v]
 
@@ -355,7 +348,7 @@ instance S.Semantics Semantics where
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    return $ VarExpr S.knownType name
+    return $ VarExpr (Variable S.knownType name)
 
   syscall = tell [Syscall]
 
@@ -363,7 +356,7 @@ instance S.Semantics Semantics where
     nameQuot <- fresh "divQuot"
     nameRem <- fresh "divRem"
     tell [NamedStmt [nameQuot, nameRem] (BVDiv v1 v2)]
-    return (VarExpr r nameQuot, VarExpr r nameRem)
+    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
     where
       r = exprType v2
 
@@ -371,7 +364,7 @@ instance S.Semantics Semantics where
     nameQuot <- fresh "sdivQuot"
     nameRem <- fresh "sdivRem"
     tell [NamedStmt [nameQuot, nameRem] (BVSignedDiv v1 v2)]
-    return (VarExpr r nameQuot, VarExpr r nameRem)
+    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
     where
       r = exprType v2
 
@@ -392,7 +385,7 @@ ppExpr e = case e of
   UpperHalfExpr n e -> R.sexpr "upper_half" [ ppExpr e, R.ppNat n ]
   TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
   SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
-  VarExpr _ x -> text x
+  VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.
 --
@@ -464,3 +457,20 @@ ppStmt s = case s of
 
 instance Pretty Stmt where
   pretty = ppStmt
+
+
+
+evalStmt :: MonadMachineState m => Stmt -> m ()
+evalStmt = undefined
+
+evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
+evalExpr (AppExpr a) = do
+  a' <- R.traverseApp evalExpr a
+  return $ case a' of
+    R.BVAdd   nr c1 c2 -> CS.liftValue2 (+)    nr             c1 c2
+    R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
+
+type Env = MapF Variable CS.Value
+
+class Monad m => MonadMachineState m where
+
