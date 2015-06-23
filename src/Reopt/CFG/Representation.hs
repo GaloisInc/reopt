@@ -117,11 +117,11 @@ type CodeAddr = Word64
 
 -- | A label used to identify a block.
 data BlockLabel
-     -- ^ A block that came from an address in the code.
+     -- | A block that came from an address in the code.
    = GeneratedBlock { blockParent :: {-# UNPACK #-} !CodeAddr
                     , blockIndex  :: {-# UNPACK #-} !Word64
+                    -- ^ A unique identifier for a generated block.
                     }
-     -- ^ A unique identifier for a generated block.
   deriving Eq
 
 isRootBlockLabel :: BlockLabel -> Bool
