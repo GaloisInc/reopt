@@ -306,6 +306,13 @@ fresh basename = do
   put (x + 1)
   return $ basename ++ show x
 
+
+-- FIXME: Move
+addIsLeqLeft1' :: forall f g n m. LeqProof (n + n) m ->
+                  f (BVType n) -> g m
+                  -> LeqProof n m
+addIsLeqLeft1' prf _v _v' = addIsLeqLeft1 prf
+
 -- | Interpret 'S.Semantics' operations into 'Stmt's.
 --
 -- Operations that return 'Value's return fresh variables; we track
@@ -322,6 +329,23 @@ instance S.Semantics Semantics where
     tell [NamedStmt [name] (Get l)]
     return $ VarExpr (Variable (S.loc_type l) name)
 
+  -- sjw: This is a huge hack, but then again, so is the fact that it
+  -- happens at all.  According to the ISA, assigning a 32 bit value
+  -- to a 64 bit register performs a zero extension so the upper 32
+  -- bits are zero.  This may not be the best place for this, but I
+  -- can't think of a nicer one ... 
+  (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
+    -- FIXME: doing this the obvious way breaks GHC
+    --     case addIsLeqLeft1' LeqProof v S.n64 of ...
+    --
+    -- ghc: panic! (the 'impossible' happened)
+    --     (GHC version 7.8.4 for x86_64-apple-darwin):
+    --   	tcIfaceCoAxiomRule Sub0R
+    --
+    case testLeq (S.bv_width v) S.n64 of
+     Just LeqProof -> tell [loc := S.uext knownNat v]
+     Nothing -> error "impossible"
+     
   l .= v = tell [l := v]
 
   ifte_ c trueBranch falseBranch = do
