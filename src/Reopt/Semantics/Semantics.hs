@@ -161,6 +161,34 @@ exec_cqo = do
 --                 -> Value (BVType (n + n))
 --                 -> m ()
 
+exec_cmpxchg :: forall m n
+              . (IsLocationBV m n)
+             => MLocation m (BVType n)
+             -> Value m (BVType n)
+             -> m ()
+exec_cmpxchg dest src
+  | Just Refl <- testEquality (bv_width src) n8  = go dest src (reg_low8  N.rax)
+  | Just Refl <- testEquality (bv_width src) n16 = go dest src (reg_low16 N.rax)
+  | Just Refl <- testEquality (bv_width src) n32 = go dest src (reg_low32 N.rax)
+  | Just Refl <- testEquality (bv_width src) n64 = go dest src rax
+  | otherwise = fail "cmpxchg: Unknown bit width"
+  where
+    go :: MLocation m (BVType n)
+       -> Value m (BVType n)
+       -> MLocation m (BVType n) -- AL/AX/EAX/RAX depending on operand size
+       -> m ()
+    go d s acc = do
+      temp <- get d
+      a  <- get acc
+      ifte_ (a .=. temp)
+        (do zf_loc .= true
+            d .= s
+        )
+        (do zf_loc .= false
+            acc .= temp
+            d   .= temp -- FIXME: this store is redundant, but it is in the ISA, so we do it.
+        )
+
 exec_cmpxchg8b :: Semantics m => MLocation m (BVType 64) -> m ()
 exec_cmpxchg8b loc = do
   temp64 <- get loc
