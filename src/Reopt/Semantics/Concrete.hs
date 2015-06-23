@@ -18,6 +18,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE KindSignatures #-} -- MaybeF
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
@@ -104,10 +105,7 @@ data Expr tp where
   AppExpr :: !(R.App Expr tp) -> Expr tp
 
   -- Extra constructors where 'App' does not provide what we want.
-  LowerHalfExpr :: (1 <= n) =>
-    !(NatRepr (n+n)) -> !(Expr (BVType (n+n))) -> Expr (BVType n)
-  UpperHalfExpr :: (1 <= n) =>
-    !(NatRepr (n+n)) -> !(Expr (BVType (n+n))) -> Expr (BVType n)
+  --
   -- Here 'App' has 'Trunc', but its type is different; see notes at
   -- bottom of file.
   TruncExpr :: (1 <= m, m <= n) =>
@@ -118,8 +116,8 @@ data Expr tp where
   -- hoc.
   SExtExpr :: (1 <= m, m <= n) =>
     !(NatRepr n) -> !(Expr (BVType m)) -> Expr (BVType n)
-  -- A variable.
   --
+  -- A variable.
   -- Not doing anything fancy with names for now; can use 'unbound'
   -- later.
   VarExpr :: Variable tp -> Expr tp
@@ -136,10 +134,6 @@ app = AppExpr
 exprType :: Expr tp -> S.TypeRepr tp
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
--- Added constructors for lower and upper half to avoid duplicating a
--- bunch of code in 'Reopt.Semantics.Implementation'.
-exprType (LowerHalfExpr r _) = S.BVTypeRepr $ halfNat r
-exprType (UpperHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (TruncExpr r _) = S.BVTypeRepr r
 exprType (SExtExpr r _) = S.BVTypeRepr r
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
@@ -165,7 +159,13 @@ instance S.IsValue Expr where
   x .|. y = app $ R.BVOr (exprWidth x) x y
   bvXor x y = app $ R.BVXor (exprWidth x) x y
   x .=. y = app $ R.BVEq x y
-  bvSplit v = (UpperHalfExpr (exprWidth v) v, LowerHalfExpr (exprWidth v) v)
+  bvSplit :: forall n. (1 <= n)
+          => Expr (BVType (n + n))
+          -> (Expr (BVType n), Expr (BVType n))
+  bvSplit v = case doubleLeq hn of
+    Refl -> ( app (R.UpperHalf hn v)
+            , TruncExpr        hn v)
+    where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
@@ -405,8 +405,6 @@ ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app -> R.ppApp ppExpr app
-  LowerHalfExpr n e -> R.sexpr "lower_half" [ ppExpr e, R.ppNat n ]
-  UpperHalfExpr n e -> R.sexpr "upper_half" [ ppExpr e, R.ppNat n ]
   TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
   SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
   VarExpr (Variable _ x) -> text x
