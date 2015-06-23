@@ -157,17 +157,21 @@ exec_cqo = do
 --                 -> Value (BVType (n + n))
 --                 -> m ()
 
+
+regLocation :: NatRepr n -> N.RegisterName 'N.GP -> Location addr (BVType n)
+regLocation sz
+  | Just Refl <- testEquality sz n8  = reg_low8
+  | Just Refl <- testEquality sz n16 = reg_low16
+  | Just Refl <- testEquality sz n32 = reg_low32
+  | Just Refl <- testEquality sz n64 = Register
+  | otherwise = fail "regAtSize: Unknown bit width"
+
 exec_cmpxchg :: forall m n
               . (IsLocationBV m n)
              => MLocation m (BVType n)
              -> Value m (BVType n)
              -> m ()
-exec_cmpxchg dest src
-  | Just Refl <- testEquality (bv_width src) n8  = go dest src (reg_low8  N.rax)
-  | Just Refl <- testEquality (bv_width src) n16 = go dest src (reg_low16 N.rax)
-  | Just Refl <- testEquality (bv_width src) n32 = go dest src (reg_low32 N.rax)
-  | Just Refl <- testEquality (bv_width src) n64 = go dest src rax
-  | otherwise = fail "cmpxchg: Unknown bit width"
+exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
   where
     go :: MLocation m (BVType n)
        -> Value m (BVType n)
