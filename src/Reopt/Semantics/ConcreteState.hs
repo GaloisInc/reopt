@@ -3,6 +3,8 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Reopt.Semantics.ConcreteState
     ( module Reopt.Semantics.ConcreteState
@@ -10,7 +12,7 @@ module Reopt.Semantics.ConcreteState
     ) where
 
 import qualified Data.BitVector as BV
-import           Data.Map (Map)
+import qualified Data.Map as M
 import           Data.Maybe (mapMaybe)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
@@ -20,6 +22,7 @@ import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.BitVector (BitVector, BV, bitVector, unBitVector)
 import qualified Reopt.Semantics.BitVector as B
+import qualified Control.Monad.State as S
 
 ------------------------------------------------------------------------
 -- Concrete values
@@ -29,10 +32,9 @@ data Value (tp :: Type) where
   Undefined :: TypeRepr tp -> Value tp
 
 instance Eq (Value tp) where
-  Literal x == Literal y = x == y
-  -- XXX Should undefined values be equal to everything?
+  Literal x == Literal y     = x == y
   Undefined _ == Undefined _ = True
-  _ == _ = False
+  _ == _                     = False
 
 instance Ord (Value tp) where
   compare (Literal x) (Literal y) = compare x y
@@ -141,11 +143,11 @@ instance Ord (Address n) where
 -- the 8-bit primitive operations.
 class Monad m => MonadMachineState m where
   -- | Get a byte.
-  getMem8 :: Address8 -> m Value8
+  getMem :: Address tp -> m (Value tp)
   -- | Set a byte.
-  setMem8 :: Address8 -> Value8 -> m ()
+  setMem :: Address tp -> Value tp -> m ()
   -- | Return finite map of all known memory values.
-  dumpMem8 :: m (Map Address8 Value8)
+  dumpMem8 :: m (M.Map Address8 Value8)
   -- | Get the value of a register.
   getReg :: N.RegisterName cl -> m (Value (N.RegisterType cl))
   -- | Set the value of a register.
@@ -153,46 +155,6 @@ class Monad m => MonadMachineState m where
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
 
-------------------------------------------------------------------------
--- Bitwidth-polymorphic memory operations.
+type ConcreteMemory = M.Map Address8 Value8
+type ConcreteState = S.State (ConcreteMemory, X.X86State Value)
 
--- | Get @TypeBits tp@ bits.
---
--- The implementation assumes that @type_width tp@ is a multiple of 8.
--- If this is not true, 'error' will be called.
-getMem :: MonadMachineState m => Address tp -> m (Value tp)
-getMem a@(Address nr _) = do
-  vs <- mapM getMem8 (byteAddresses a)
-  let bvs = mapMaybe asBV vs
-  -- We can't directly concat 'vs' since we can't type the
-  -- intermediate concatenations.
-  let bv = foldl (BV.#) (BV.zeros 0) bvs
-  -- Return 'Undefined' if we had any 'Undefined' values in 'vs'.
-  return $ if length bvs /= length vs
-           then Undefined (BVTypeRepr nr)
-           else Literal (bitVector nr bv)
-
--- | Set @TypeBits tp@ bits.
-setMem :: MonadMachineState m => Address tp -> Value tp -> m ()
-setMem a@(Address _ _) v = mapM_ (uncurry setMem8) (zip as vs)
-  where
-    as :: [Address8]
-    as = byteAddresses a
-    vs :: [Value8]
-    vs = group knownNat v
-
--- | Convert adress of 'n*8' bits into 'n' sequential byte addresses.
-byteAddresses :: Address tp -> [Address8]
-byteAddresses (Address nr v) = addrs
-  where
-    -- | The 'count'-many addresses of sequential bytes composing the
-    -- requested value of @count * 8@ bit value.
-    addrs :: [Address8]
-    addrs = [ Address knownNat $ modify (+ mkBv k) v | k <- [0 .. count - 1] ]
-    -- | Make a 'BV' with value 'k' using minimal bits.
-    mkBv :: Integer -> BV
-    mkBv k = BV.bitVec (BV.integerWidth k) k
-    count =
-      if natValue nr `mod` 8 /= 0
-      then error "getMem: requested number of bits is not a multiple of 8!"
-      else natValue nr `div` 8
