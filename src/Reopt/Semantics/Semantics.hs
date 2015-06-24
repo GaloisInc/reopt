@@ -150,12 +150,7 @@ exec_mov l v = l .= v
 exec_cqo :: Semantics m => m ()
 exec_cqo = do
   v <- get rax
-  set_reg_pair rdx rax (sext n128 v)
-
--- set_reg_pair :: (N.RegisterName cl -> MLocation m (BVType n))
---                 -> N.RegisterName cl -> N.RegisterName cl
---                 -> Value (BVType (n + n))
---                 -> m ()
+  set_reg_pair Register N.rdx N.rax (sext n128 v)
 
 
 regLocation :: NatRepr n -> N.RegisterName 'N.GP -> Location addr (BVType n)
@@ -164,7 +159,7 @@ regLocation sz
   | Just Refl <- testEquality sz n16 = reg_low16
   | Just Refl <- testEquality sz n32 = reg_low32
   | Just Refl <- testEquality sz n64 = Register
-  | otherwise = fail "regAtSize: Unknown bit width"
+  | otherwise = fail "regLocation: Unknown bit width"
 
 exec_cmpxchg :: forall m n
               . (IsLocationBV m n)
@@ -190,22 +185,23 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
         )
 
 get_reg_pair :: (Semantics m, 1 <= n)
-             => MLocation m (BVType n)
-             -> MLocation m (BVType n)
+             => (N.RegisterName cl -> MLocation m (BVType n))
+             -> N.RegisterName cl
+             -> N.RegisterName cl
              -> m (Value m (BVType (n+n)))
-get_reg_pair upperL lowerL = bvCat <$> get upperL <*> get lowerL
+get_reg_pair f upperL lowerL = bvCat <$> get (f upperL) <*> get (f lowerL)
 
 exec_cmpxchg8b :: Semantics m => MLocation m (BVType 64) -> m ()
 exec_cmpxchg8b loc = do
   temp64 <- get loc
-  edx_eax <- get_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax)
+  edx_eax <- get_reg_pair reg_low32 N.rdx N.rax
   ifte_ (edx_eax .=. temp64)
     (do zf_loc .= true
-        ecx_ebx <- get_reg_pair (reg_low32 N.rcx) (reg_low32 N.rbx)
+        ecx_ebx <- get_reg_pair reg_low32 N.rcx N.rbx
         loc .= ecx_ebx
     )
     (do zf_loc .= false
-        set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax) temp64
+        set_reg_pair reg_low32 N.rdx N.rax temp64
         loc .= edx_eax -- FIXME: this store is redundant, but it is in the ISA, so we do it.
     )
 
@@ -392,14 +388,15 @@ exec_inc dst = do
   set_result_value dst (dst_val `bvAdd` y)
 
 set_reg_pair :: (Semantics m, 1 <= n)
-             => MLocation m (BVType n)
-             -> MLocation m (BVType n)
+             => (N.RegisterName cl -> MLocation m (BVType n))
+             -> N.RegisterName cl
+             -> N.RegisterName cl
              -> Value m (BVType (n + n))
              -> m ()
-set_reg_pair upperL lowerL v = do
+set_reg_pair f upperL lowerL v = do
   let (upper, lower) = bvSplit v
-  lowerL .= lower
-  upperL .= upper
+  f lowerL .= lower
+  f upperL .= upper
 
 -- FIXME: is this the right way around?
 exec_mul :: forall m n
@@ -410,11 +407,11 @@ exec_mul v
   | Just Refl <- testEquality (bv_width v) n8  =
     go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
   | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair (reg_low16 N.rdx) (reg_low16 N.rax)) (reg_low16 N.rax)
+    go (set_reg_pair reg_low16 N.rdx N.rax) (reg_low16 N.rax)
   | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax)) (reg_low32 N.rax)
+    go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair rdx rax) rax
+    go (set_reg_pair Register N.rdx N.rax) rax
   | otherwise =
     fail "mul: Unknown bit width"
   where
@@ -464,11 +461,11 @@ exec_imul1 v
   | Just Refl <- testEquality (bv_width v) n8  =
     go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
   | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair (reg_low16 N.rdx) (reg_low16 N.rax)) (reg_low16 N.rax)
+    go (set_reg_pair reg_low16 N.rdx N.rax) (reg_low16 N.rax)
   | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair (reg_low32 N.rdx) (reg_low32 N.rax)) (reg_low32 N.rax)
+    go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair rdx rax) rax
+    go (set_reg_pair Register N.rdx N.rax) rax
   | otherwise =
     fail "imul: Unknown bit width"
   where
