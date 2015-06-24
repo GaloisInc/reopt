@@ -118,7 +118,7 @@ modify _ v@(Undefined _) = v
 
 data Address tp where
   Address :: NatRepr n         -- ^ Number of bits.
-          -> Value (BVType 64) -- ^ Address of first byte.
+          -> BitVector 64      -- ^ Address of first byte.
           -> Address (BVType n)
 type Address8 = Address (BVType 8)
 type Value8 = Value (BVType 8)
