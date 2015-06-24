@@ -4,9 +4,12 @@
 {-# LANGUAGE ViewPatterns #-}
 
 
-module Reopt.Semantics.ConcreteState where
+module Reopt.Semantics.ConcreteState
+    ( module Reopt.Semantics.ConcreteState
+    , module Reopt.Semantics.BitVector
+    ) where
 
-import           Data.BitVector (BV, width)
+import           Data.BitVector (BV)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
@@ -46,6 +49,14 @@ instance PrettyRegValue Value where
 --
 -- The result-type 'NatRepr' is passed separately and used to
 -- construct the result 'Value'.
+liftValue :: (BV -> BV)
+           -> NatRepr n2
+           -> Value (BVType n1)
+           -> Value (BVType n2)
+liftValue f nr (asBV -> Just v) =
+  Literal $ bitVector nr (f v)
+liftValue _ nr _ = Undefined (BVTypeRepr nr)
+
 liftValue2 :: (BV -> BV -> BV)
            -> NatRepr n3
            -> Value (BVType n1)

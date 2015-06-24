@@ -51,6 +51,7 @@ import qualified Data.Foldable as Fold
 import           Data.Functor
 import           Data.Maybe
 import           Data.Monoid (mempty)
+import           Data.Parameterized.Classes (OrderingF(..), OrdF, compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -95,7 +96,23 @@ import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 -- 'App' constructors more uniform, eliminating the need for extra
 -- constructors below in our version 'Expr'.
 
+
+-- | Variables and corresponding instances
+data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
+
+instance TestEquality Variable where
+  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+    Refl <- testEquality tp1 tp2
+    return Refl
+
+instance MapF.OrdF Variable where
+  (Variable tp1 n1) `compareF` (Variable tp2 n2) =
+    case (tp1 `compareF` tp2, n1 `compare` n2) of
+      (LTF,_) -> LTF
+      (GTF,_) -> GTF
+      (EQF,o) -> fromOrdering o
+
 
 -- | A pure expression for isValue.
 data Expr tp where
@@ -121,8 +138,6 @@ data Expr tp where
   -- Not doing anything fancy with names for now; can use 'unbound'
   -- later.
   VarExpr :: Variable tp -> Expr tp
-
-data Variable tp = Variable !(TypeRepr tp) !Name
 
 mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
@@ -485,6 +500,34 @@ evalStmt :: MonadMachineState m => Stmt -> m ()
 evalStmt = undefined
 
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
+evalExpr (LitExpr nr i) = return $ CS.Literal bVec
+  where
+    bVec = CS.bitVector nr (BV.bitVec bitWidth i)
+    bitWidth = fromInteger (natValue nr)
+
+evalExpr (TruncExpr nr e) = do
+  c <- evalExpr e
+  let bitWidth :: Int
+      bitWidth = fromInteger (natValue nr)
+  return $ CS.liftValue (BV.least bitWidth) nr c
+
+evalExpr (SExtExpr nr e) = do
+  c <- evalExpr e
+  let -- Desired length.
+      bitWidth :: Int
+      bitWidth = fromInteger (natValue nr)
+      -- Grow the BV by the difference to desired length.
+      sExtGrow :: BV.BV -> BV.BV
+      sExtGrow bv = let currentBitWidth = BV.width bv
+                        diff = bitWidth - currentBitWidth
+                    in BV.signExtend diff bv
+  return $ CS.liftValue sExtGrow nr c
+
+evalExpr (VarExpr var) = do
+  maybeVal <- asks (MapF.lookup var)
+  let msg = "Bug: unbound variable in expr"
+  maybe (error msg) return maybeVal
+
 evalExpr (AppExpr a) = do
   a' <- R.traverseApp evalExpr a
   return $ case a' of
