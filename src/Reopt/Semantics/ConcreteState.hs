@@ -43,7 +43,7 @@ instance PrettyRegValue Value where
   ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
 
 ------------------------------------------------------------------------
--- Combinators
+-- 'Value' combinators
 
 -- | Lift a computation on 'BV's to a computation on 'Value's.
 --
@@ -62,11 +62,11 @@ liftValue2 :: (BV -> BV -> BV)
            -> Value (BVType n1)
            -> Value (BVType n2)
            -> Value (BVType n3)
-liftValue2 f nr (asBV -> Just v1) (asBV -> Just v2) =
-  Literal $ bitVector nr (f v1 v2)
+liftValue2 f nr (asBV -> Just bv1) (asBV -> Just bv2) =
+  Literal $ bitVector nr (f bv1 bv2)
 liftValue2 _ nr _ _ = Undefined (BVTypeRepr nr)
 
 asBV :: Value tp -> Maybe BV
-asBV (Literal (unBitVector -> (_, v))) = Just v
+asBV (Literal (unBitVector -> (_, bv))) = Just bv
 asBV _ = Nothing
 
