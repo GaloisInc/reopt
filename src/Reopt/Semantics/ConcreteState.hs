@@ -140,3 +140,46 @@ class Monad m => MonadMachineState m where
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
 
+------------------------------------------------------------------------
+-- Bitwidth-polymorphic memory operations.
+
+-- | Get @TypeBits tp@ bits.
+--
+-- The implementation assumes that @type_width tp@ is a multiple of 8.
+-- If this is not true, 'error' will be called.
+getMem :: MonadMachineState m => Address tp -> m (Value tp)
+getMem a@(Address nr _) = do
+  vs <- mapM getMem8 (byteAddresses a)
+  let bvs = mapMaybe asBV vs
+  -- We can't directly concat 'vs' since we can't type the
+  -- intermediate concatenations.
+  let bv = foldl (BV.#) (BV.zeros 0) bvs
+  -- Return 'Undefined' if we had any 'Undefined' values in 'vs'.
+  return $ if length bvs /= length vs
+           then Undefined (BVTypeRepr nr)
+           else Literal (bitVector nr bv)
+
+-- | Set @TypeBits tp@ bits.
+setMem :: MonadMachineState m => Address tp -> Value tp -> m ()
+setMem a@(Address _ _) v = mapM_ (uncurry setMem8) (zip as vs)
+  where
+    as :: [Address8]
+    as = byteAddresses a
+    vs :: [Value8]
+    vs = group knownNat v
+
+-- | Convert adress of 'n*8' bits into 'n' sequential byte addresses.
+byteAddresses :: Address tp -> [Address8]
+byteAddresses (Address nr v) = addrs
+  where
+    -- | The 'count'-many addresses of sequential bytes composing the
+    -- requested value of @count * 8@ bit value.
+    addrs :: [Address8]
+    addrs = [ Address knownNat $ modify (+ mkBv k) v | k <- [0 .. count - 1] ]
+    -- | Make a 'BV' with value 'k' using minimal bits.
+    mkBv :: Integer -> BV
+    mkBv k = BV.bitVec (BV.integerWidth k) k
+    count =
+      if natValue nr `mod` 8 /= 0
+      then error "getMem: requested number of bits is not a multiple of 8!"
+      else natValue nr `div` 8
