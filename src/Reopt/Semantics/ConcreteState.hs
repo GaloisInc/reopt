@@ -31,7 +31,14 @@ data Value (tp :: Type) where
 instance Eq (Value tp) where
   Literal x == Literal y = x == y
   -- XXX Should undefined values be equal to everything?
-  _ == _                             = True
+  Undefined _ == Undefined _ = True
+  _ == _ = False
+
+instance Ord (Value tp) where
+  compare (Literal x) (Literal y) = compare x y
+  compare (Undefined _) (Literal _) = LT
+  compare (Literal _) (Undefined _) = GT
+  compare (Undefined _) (Undefined _) = EQ
 
 instance Show (Value tp) where
   show = show . pretty
@@ -113,6 +120,12 @@ data Address tp where
           -> Address (BVType n)
 type Address8 = Address (BVType 8)
 type Value8 = Value (BVType 8)
+
+instance Eq (Address n) where
+  (Address _ x) == (Address _ y) = x == y
+
+instance Ord (Address n) where
+  compare (Address _ x) (Address _ y) = compare x y
 
 -- | Operations on machine state.
 --

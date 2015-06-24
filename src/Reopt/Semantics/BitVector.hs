@@ -55,6 +55,9 @@ instance Eq (BitVector n) where
 instance Show (BitVector n) where
   show (BitVector _ x) = show x
 
+instance Ord (BitVector n) where
+  compare (BitVector _ x) (BitVector _ y) = compare x y
+
 ------------------------------------------------------------------------
 -- Operations on 'BitVector's
 
