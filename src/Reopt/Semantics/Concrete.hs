@@ -162,9 +162,8 @@ instance S.IsValue Expr where
   bvSplit :: forall n. (1 <= n)
           => Expr (BVType (n + n))
           -> (Expr (BVType n), Expr (BVType n))
-  bvSplit v = case doubleLeq hn of
-    Refl -> ( app (R.UpperHalf hn v)
-            , TruncExpr        hn v)
+  bvSplit v = withAddPrefixLeq hn hn ( app (R.UpperHalf hn v)
+                                     , TruncExpr        hn v)
     where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
@@ -333,7 +332,7 @@ instance S.Semantics Semantics where
   -- happens at all.  According to the ISA, assigning a 32 bit value
   -- to a 64 bit register performs a zero extension so the upper 32
   -- bits are zero.  This may not be the best place for this, but I
-  -- can't think of a nicer one ... 
+  -- can't think of a nicer one ...
   (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
     -- FIXME: doing this the obvious way breaks GHC
     --     case addIsLeqLeft1' LeqProof v S.n64 of ...
@@ -345,7 +344,7 @@ instance S.Semantics Semantics where
     case testLeq (S.bv_width v) S.n64 of
      Just LeqProof -> tell [loc := S.uext knownNat v]
      Nothing -> error "impossible"
-     
+
   l .= v = tell [l := v]
 
   ifte_ c trueBranch falseBranch = do
