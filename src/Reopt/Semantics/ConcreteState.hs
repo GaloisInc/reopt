@@ -104,3 +104,39 @@ modify :: (BV -> BV) -> Value (BVType n) -> Value (BVType n)
 modify f (Literal b) = Literal (B.modify f b)
 modify _ v@(Undefined _) = v
 
+------------------------------------------------------------------------
+-- Machine state monad
+
+data Address tp where
+  Address :: NatRepr n         -- ^ Number of bits.
+          -> Value (BVType 64) -- ^ Address of first byte.
+          -> Address (BVType n)
+type Address8 = Address (BVType 8)
+type Value8 = Value (BVType 8)
+
+-- | Operations on machine state.
+--
+-- We restrict the operations to bytes, so that the underlying memory
+-- map, as returned by 'dumpMem8', can be implemented in a straight
+-- forward way. We had considered making all the operations
+-- polymorphic in their bitwidth, but as Robert pointed out this would
+-- lead to aliasing concerns for the proposed memory map
+--
+-- > dumpMem :: MapF Adress Value
+--
+-- The bitwidth-polymorphic operations can then be defined in terms of
+-- the 8-bit primitive operations.
+class Monad m => MonadMachineState m where
+  -- | Get a byte.
+  getMem8 :: Address8 -> m Value8
+  -- | Set a byte.
+  setMem8 :: Address8 -> Value8 -> m ()
+  -- | Return finite map of all known memory values.
+  dumpMem8 :: m (Map Address8 Value8)
+  -- | Get the value of a register.
+  getReg :: N.RegisterName cl -> m (Value (N.RegisterType cl))
+  -- | Set the value of a register.
+  setReg :: N.RegisterName cl -> Value (N.RegisterType cl) -> m ()
+  -- | Get the value of all registers.
+  dumpRegs :: m (X.X86State Value)
+
