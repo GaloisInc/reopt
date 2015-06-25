@@ -17,6 +17,7 @@ module Reopt.Semantics.BitVector
   -- | To construct 'BV.BV' values.
   , BV
   , BV.bitVec
+  , BV.nat
   ) where
 
 import           Data.BitVector (BV)

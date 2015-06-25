@@ -496,7 +496,7 @@ instance Pretty Stmt where
 
 
 
-evalStmt :: MonadMachineState m => Stmt -> m ()
+evalStmt :: CS.MonadMachineState m => Stmt -> m ()
 evalStmt = undefined
 
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
@@ -535,6 +535,4 @@ evalExpr (AppExpr a) = do
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
 
 type Env = MapF Variable CS.Value
-
-class Monad m => MonadMachineState m where
 

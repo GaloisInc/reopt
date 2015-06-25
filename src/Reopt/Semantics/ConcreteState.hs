@@ -24,6 +24,8 @@ import           Reopt.Semantics.BitVector (BitVector, BV, bitVector, unBitVecto
 import qualified Reopt.Semantics.BitVector as B
 import qualified Control.Monad.State as S
 
+import Control.Lens
+
 ------------------------------------------------------------------------
 -- Concrete values
 
@@ -146,8 +148,6 @@ class Monad m => MonadMachineState m where
   getMem :: Address tp -> m (Value tp)
   -- | Set a byte.
   setMem :: Address tp -> Value tp -> m ()
-  -- | Return finite map of all known memory values.
-  dumpMem8 :: m (M.Map Address8 Value8)
   -- | Get the value of a register.
   getReg :: N.RegisterName cl -> m (Value (N.RegisterType cl))
   -- | Set the value of a register.
@@ -155,6 +155,68 @@ class Monad m => MonadMachineState m where
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
 
+class MonadMachineState m => FoldableMachineState m where
+  -- fold across all known addresses
+  foldMem8 :: (Address8 -> Value8 -> a -> a) -> a -> m a
+
 type ConcreteMemory = M.Map Address8 Value8
-type ConcreteState = S.State (ConcreteMemory, X.X86State Value)
+type ConcreteState = S.StateT (ConcreteMemory, X.X86State Value)
+
+-- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
+byteAddresses :: Address tp -> [Address8]
+byteAddresses (Address nr v) = addrs
+  where
+    -- | The 'count'-many addresses of sequential bytes composing the
+    -- requested value of @count * 8@ bit value.
+    addrs :: [Address8]
+    addrs = [ Address knownNat $ modify (+ mkBv k) v | k <- [0 .. count - 1] ]
+    -- | Make a 'BV' with value 'k' using minimal bits.
+    mkBv :: Integer -> BV
+    mkBv k = BV.bitVec (BV.integerWidth k) k
+    count =
+      if natValue nr `mod` 8 /= 0
+      then error "getMem: requested number of bits is not a multiple of 8!"
+      else natValue nr `div` 8
+
+
+getMem8 :: MonadMachineState m => Address8 -> ConcreteState m Value8
+getMem8 addr8 = do
+  (mem,_) <- S.get
+  case val mem of Undefined _ -> S.lift $ getMem addr8
+                  res -> return res
+  where
+    val mem = case M.lookup addr8 mem of
+      Just x -> x
+      Nothing -> Undefined (BVTypeRepr knownNat)
+
+instance MonadMachineState m => MonadMachineState (ConcreteState m) where
+  getMem a@(Address nr _) = do
+    vs <- mapM getMem8 $ byteAddresses a
+    
+    let bvs = mapMaybe asBV vs
+    -- We can't directly concat 'vs' since we can't type the
+    -- intermediate concatenations.
+    let bv = foldl (BV.#) (BV.zeros 0) bvs -- Endianness?  are we backwards?
+    -- Return 'Undefined' if we had any 'Undefined' values in 'vs'.
+    return $ if length bvs /= length vs
+             then Undefined (BVTypeRepr nr)
+             else Literal (bitVector nr bv)
+
+  setMem addr@Address{} val = 
+    S.foldM (\_ (a,v) -> S.modify $ mapFst $ M.insert a v)  () (zip addrs $ reverse $ group (knownNat :: NatRepr 8) val) where
+      mapFst f (a,b) = (f a, b)
+      addrs = byteAddresses addr
+
+  getReg reg = do 
+    val <- S.liftM (^.(X.register reg)) dumpRegs
+    case val 
+      of Undefined _ -> S.lift $ getReg reg
+         _ -> return val
+      
+  setReg reg val = S.modify $ mapSnd $ X.register reg .~ val
+    where mapSnd f (a,b) = (a, f b)
+  dumpRegs = S.liftM snd S.get
+
+instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
+  foldMem8 f x = S.liftM (M.foldrWithKey f x . fst) S.get
 
