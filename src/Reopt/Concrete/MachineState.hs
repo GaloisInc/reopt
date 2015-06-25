@@ -5,7 +5,8 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverlappingInstances #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Reopt.Concrete.MachineState
     ( module Reopt.Concrete.MachineState
@@ -22,6 +23,8 @@ import qualified Reopt.Machine.X86State as X
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
 import qualified Data.BitVector as BV
+
+import           Control.Applicative
 import           Control.Monad.State
 import           Control.Monad.Reader
 
@@ -166,7 +169,9 @@ class MonadMachineState m => FoldableMachineState m where
   foldMem8 :: (Address8 -> Value8 -> a -> a) -> a -> m a
 
 type ConcreteMemory = M.Map Address8 Value8
-type ConcreteState = StateT (ConcreteMemory, X.X86State Value)
+newtype ConcreteState m a = ConcreteState {unConcreteState :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative)
+
+deriving instance Monad m => Monad (ConcreteState m)
 
 -- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
 byteAddresses :: Address tp -> [Address8]
