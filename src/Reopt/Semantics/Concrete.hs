@@ -501,10 +501,10 @@ ppStmt s = case s of
 instance Pretty Stmt where
   pretty = ppStmt
 
+------------------------------------------------------------------------
+-- Expression evaluation
 
-
-evalStmt :: MonadMachineState m => Stmt -> m ()
-evalStmt = undefined
+type Env = MapF Variable CS.Value
 
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec
@@ -541,7 +541,33 @@ evalExpr (AppExpr a) = do
     R.BVAdd   nr c1 c2 -> CS.liftValue2 (+)    nr             c1 c2
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
 
-type Env = MapF Variable CS.Value
+------------------------------------------------------------------------
+-- Statement evaluation
 
-class Monad m => MonadMachineState m where
+-- | A version of 'evalExpr' for use in the state monad of 'evalStmt'.
+evalExpr' :: (Applicative m, MonadState Env m) => Expr tp -> m (CS.Value tp)
+evalExpr' e = runReader (evalExpr e) <$> get
 
+evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+evalStmt (NamedStmt names ns) = undefined
+evalStmt (l := e) = do
+  ve <- evalExpr' e
+  case l of
+    S.MemoryAddr addr (BVTypeRepr nr) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        -- Alternatively, we could mark all known memory values
+        -- ('dumpMem8') as 'Undefined' here. It would be more accurate
+        -- to mark *all* of memory as undefined.
+        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+        CS.Literal bvaddr -> CS.setMem (CS.Address nr bvaddr) ve
+    S.Register rn -> CS.setReg rn ve
+    S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
+    _ -> undefined -- subregisters
+evalStmt (Ifte_ s1 s2 s3) = undefined
+evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
+evalStmt (MemSet s1 s2 s3) = undefined
+evalStmt Syscall = undefined
+evalStmt (Exception s1 s2 s3) = undefined
+evalStmt (X87Push s) = undefined
+evalStmt X87Pop = undefined
