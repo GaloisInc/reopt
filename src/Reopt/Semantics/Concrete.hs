@@ -504,13 +504,7 @@ instance Pretty Stmt where
 ------------------------------------------------------------------------
 -- Expression evaluation
 
-<<<<<<< HEAD
-
-evalStmt :: CS.MonadMachineState m => Stmt -> m ()
-evalStmt = undefined
-=======
 type Env = MapF Variable CS.Value
->>>>>>> 15bf691a2fa0310da41d54a322e97b0e56eed0d8
 
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec

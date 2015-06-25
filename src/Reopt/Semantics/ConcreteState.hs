@@ -20,7 +20,10 @@ import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.BitVector (BitVector, BV, bitVector, unBitVector)
 import qualified Reopt.Semantics.BitVector as B
+import qualified Data.BitVector as BV
 import qualified Control.Monad.State as S
+
+import Data.Maybe (mapMaybe)
 
 import Control.Lens
 
@@ -129,6 +132,9 @@ instance Eq (Address n) where
 instance Ord (Address n) where
   compare (Address _ x) (Address _ y) = compare x y
 
+modifyAddr :: (BV -> BV) -> Address (BVType n) -> Address (BVType n)
+modifyAddr f (Address nr bv) = Address nr (B.modify f bv)
+
 -- | Operations on machine state.
 --
 -- We restrict the operations to bytes, so that the underlying memory
@@ -162,15 +168,15 @@ type ConcreteState = S.StateT (ConcreteMemory, X.X86State Value)
 
 -- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
 byteAddresses :: Address tp -> [Address8]
-byteAddresses (Address nr v) = addrs
+byteAddresses (Address nr bv) = addrs
   where
     -- | The 'count'-many addresses of sequential bytes composing the
     -- requested value of @count * 8@ bit value.
     addrs :: [Address8]
-    addrs = [ Address knownNat $ modify (+ mkBv k) v | k <- [0 .. count - 1] ]
+    addrs = [ Address knownNat $ B.modify (+ mkBv k) bv | k <- [0 .. count - 1] ]
     -- | Make a 'BV' with value 'k' using minimal bits.
     mkBv :: Integer -> BV
-    mkBv k = BV.bitVec (BV.integerWidth k) k
+    mkBv k = B.bitVec 64 k
     count =
       if natValue nr `mod` 8 /= 0
       then error "getMem: requested number of bits is not a multiple of 8!"
