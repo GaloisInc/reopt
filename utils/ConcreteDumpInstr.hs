@@ -10,7 +10,7 @@ import           System.Exit (exitFailure)
 
 import           Flexdis86
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
-import           Reopt.Semantics.Concrete as C
+import           Reopt.Concrete.Semantics as C
 
 
 usageExit :: IO ()

@@ -7,9 +7,9 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverlappingInstances #-}
 
-module Reopt.Semantics.ConcreteState
-    ( module Reopt.Semantics.ConcreteState
-    , module Reopt.Semantics.BitVector
+module Reopt.Concrete.MachineState
+    ( module Reopt.Concrete.MachineState
+    , module Reopt.Concrete.BitVector
     ) where
 
 import qualified Data.Map as M
@@ -19,8 +19,8 @@ import           Data.Parameterized.NatRepr
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
-import           Reopt.Semantics.BitVector (BitVector, BV, bitVector, unBitVector)
-import qualified Reopt.Semantics.BitVector as B
+import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, unBitVector)
+import qualified Reopt.Concrete.BitVector as B
 import qualified Data.BitVector as BV
 import           Control.Monad.State
 import           Control.Monad.Reader

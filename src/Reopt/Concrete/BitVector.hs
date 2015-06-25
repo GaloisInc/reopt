@@ -3,7 +3,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Reopt.Semantics.BitVector
+module Reopt.Concrete.BitVector
   (
   -- | The constructor is not exported; use 'bitVector' and 'unBitVector'.
     BitVector

@@ -1,6 +1,6 @@
 ------------------------------------------------------------------------
 -- |
--- Module           : Reopt.Semantics.Concrete
+-- Module           : Reopt.Concrete.Semantics
 -- Description      : Free instance for Reopt.Semantics.Monad.Semantics
 -- Copyright        : (c) Galois, Inc 2015
 -- Maintainer       : Nathan Collins <conathan@galois.com>
@@ -29,7 +29,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Reopt.Semantics.Concrete
+module Reopt.Concrete.Semantics
        ( execSemantics
        , ppStmts
        ) where
@@ -78,7 +78,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
-import qualified Reopt.Semantics.ConcreteState as CS
+import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 
 ------------------------------------------------------------------------

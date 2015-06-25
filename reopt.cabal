@@ -41,9 +41,9 @@ library
     Reopt.Machine.X86State
     Reopt.Object.Loader
     Reopt.Object.Memory
-    Reopt.Semantics.BitVector
-    Reopt.Semantics.Concrete
-    Reopt.Semantics.ConcreteState
+    Reopt.Concrete.BitVector
+    Reopt.Concrete.Semantics
+    Reopt.Concrete.MachineState
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
