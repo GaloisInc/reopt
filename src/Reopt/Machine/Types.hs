@@ -68,7 +68,7 @@ type BoolType   = BVType 1
 type XMMType    = BVType 128
 
 -- | A runtime representation of @Type@ for case matching purposes.
-data TypeRepr tp where
+data TypeRepr (tp :: Type) where
   BVTypeRepr :: !(NatRepr n) -> TypeRepr (BVType n)
 
 type_width :: TypeRepr (BVType n) -> NatRepr n

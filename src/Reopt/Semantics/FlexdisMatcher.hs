@@ -249,6 +249,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                                                                    exec_imul2_3 l v v'
                                             _                 -> fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
+              , mk "cqo"    $ \_ -> exec_cqo
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
               , mk "movzx"  $ geBinop exec_movzx
@@ -257,9 +258,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
                   exec_xchg l l'
 
-              , mk "ret"    $ \args@(_, vs) -> case vs of
-                                                 []              -> exec_ret Nothing
-                                                 [F.WordImm imm] -> exec_ret (Just imm)
+              , mk "ret"    $ \(_, vs) -> case vs of
+                                            []              -> exec_ret Nothing
+                                            [F.WordImm imm] -> exec_ret (Just imm)
 
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
                                                      
@@ -282,6 +283,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movsd"   $ truncate64Op exec_movsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
+              , mk "movdqa"  $ truncateKnownBinop exec_movdqa
+              , mk "movdqu"  $ truncateKnownBinop exec_movdqa                
               , mk "movsd_sse" $ truncate64Op exec_movsd
               , mk "movss"   $ truncate32Op exec_movss
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
@@ -329,6 +332,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "or"      $ binop exec_or
               , mk "pause"   $ const (return ())
               , mk "pop"     $ unop exec_pop
+
+              , mk "cmpxchg" $ binop exec_cmpxchg
+              , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ geBinop exec_rol
               , mk "sbb"     $ binop exec_sbb

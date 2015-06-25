@@ -18,6 +18,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE KindSignatures #-} -- MaybeF
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
@@ -36,16 +37,21 @@ module Reopt.Semantics.Concrete
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative ((<*>), pure, Applicative)
 #endif
+import           Control.Arrow ((***))
 import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
+import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
+import qualified Data.BitVector as BV
 import qualified Data.Foldable as Fold
+import           Data.Functor
 import           Data.Maybe
 import           Data.Monoid (mempty)
+import           Data.Parameterized.Classes (OrderingF(..), OrdF, compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -72,6 +78,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
+import qualified Reopt.Semantics.ConcreteState as CS
 import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 
 ------------------------------------------------------------------------
@@ -89,7 +96,23 @@ import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
 -- 'App' constructors more uniform, eliminating the need for extra
 -- constructors below in our version 'Expr'.
 
+
+-- | Variables and corresponding instances
+data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
+
+instance TestEquality Variable where
+  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+    Refl <- testEquality tp1 tp2
+    return Refl
+
+instance MapF.OrdF Variable where
+  (Variable tp1 n1) `compareF` (Variable tp2 n2) =
+    case (tp1 `compareF` tp2, n1 `compare` n2) of
+      (LTF,_) -> LTF
+      (GTF,_) -> GTF
+      (EQF,o) -> fromOrdering o
+
 
 -- | A pure expression for isValue.
 data Expr tp where
@@ -99,10 +122,7 @@ data Expr tp where
   AppExpr :: !(R.App Expr tp) -> Expr tp
 
   -- Extra constructors where 'App' does not provide what we want.
-  LowerHalfExpr :: (1 <= n) =>
-    !(NatRepr (n+n)) -> !(Expr (BVType (n+n))) -> Expr (BVType n)
-  UpperHalfExpr :: (1 <= n) =>
-    !(NatRepr (n+n)) -> !(Expr (BVType (n+n))) -> Expr (BVType n)
+  --
   -- Here 'App' has 'Trunc', but its type is different; see notes at
   -- bottom of file.
   TruncExpr :: (1 <= m, m <= n) =>
@@ -113,25 +133,11 @@ data Expr tp where
   -- hoc.
   SExtExpr :: (1 <= m, m <= n) =>
     !(NatRepr n) -> !(Expr (BVType m)) -> Expr (BVType n)
-  -- A variable.
   --
+  -- A variable.
   -- Not doing anything fancy with names for now; can use 'unbound'
   -- later.
-  VarExpr :: !(TypeRepr t) -> !Name -> Expr t
-  -- Simon suggests:
-  --
-  -- Use a variable type instead of raw strings for 'Name's in
-  -- 'Stmt's, and track the variable type in the 'Variable' type.
-  --
-  -- Something like
-  {-
-  data Variable tp = Variable (TypeRepr tp) Name
-  -}
-  -- or
-  {-
-  data Variable :: Type -> * where
-    Variable :: TypeRepr tp -> Name -> Variable tp
-  -}
+  VarExpr :: Variable tp -> Expr tp
 
 mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
@@ -143,13 +149,9 @@ app = AppExpr
 exprType :: Expr tp -> S.TypeRepr tp
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
--- Added constructors for lower and upper half to avoid duplicating a
--- bunch of code in 'Reopt.Semantics.Implementation'.
-exprType (LowerHalfExpr r _) = S.BVTypeRepr $ halfNat r
-exprType (UpperHalfExpr r _) = S.BVTypeRepr $ halfNat r
 exprType (TruncExpr r _) = S.BVTypeRepr r
 exprType (SExtExpr r _) = S.BVTypeRepr r
-exprType (VarExpr r _) = r -- S.BVTypeRepr r
+exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.
 exprWidth :: Expr (BVType n) -> NatRepr n
@@ -172,7 +174,12 @@ instance S.IsValue Expr where
   x .|. y = app $ R.BVOr (exprWidth x) x y
   bvXor x y = app $ R.BVXor (exprWidth x) x y
   x .=. y = app $ R.BVEq x y
-  bvSplit v = (UpperHalfExpr (exprWidth v) v, LowerHalfExpr (exprWidth v) v)
+  bvSplit :: forall n. (1 <= n)
+          => Expr (BVType (n + n))
+          -> (Expr (BVType n), Expr (BVType n))
+  bvSplit v = withAddPrefixLeq hn hn ( app (R.UpperHalf hn v)
+                                     , TruncExpr        hn v)
+    where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
@@ -239,6 +246,24 @@ instance S.IsValue Expr where
 
 type MLocation = S.Location (Expr (BVType 64))
 
+data NamedStmt where
+  MakeUndefined :: TypeRepr tp -> NamedStmt
+  Get :: MLocation tp -> NamedStmt
+  BVDiv :: (1 <= n)
+        => Expr (BVType (n+n))
+        -> Expr (BVType n)
+        -> NamedStmt
+  BVSignedDiv :: (1 <= n)
+              => Expr (BVType (n+n))
+              -> Expr (BVType n)
+              -> NamedStmt
+  MemCmp :: NatRepr n
+         -> Expr (BVType 64)
+         -> Expr BoolType
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> NamedStmt
+
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
 data Stmt where
@@ -246,12 +271,10 @@ data Stmt where
   --
   -- Some statements, e.g. 'bvDiv', return multiple results, so we
   -- bind a list of 'Name's here.
-  NamedStmt :: [Name] -> Stmt -> Stmt
+  NamedStmt :: [Name] -> NamedStmt -> Stmt
 
   -- The remaining constructors correspond to the 'S.Semantics
   -- operations'.
-  MakeUndefined :: TypeRepr tp -> Stmt
-  Get :: MLocation tp -> Stmt
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
   MemMove :: Int
@@ -261,21 +284,7 @@ data Stmt where
           -> Bool
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
-  MemCmp :: NatRepr n
-         -> Expr (BVType 64)
-         -> Expr BoolType
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
-         -> Stmt
   Syscall :: Stmt
-  BVDiv :: (1 <= n)
-        => Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> Stmt
-  BVSignedDiv :: (1 <= n)
-              => Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -313,6 +322,13 @@ fresh basename = do
   put (x + 1)
   return $ basename ++ show x
 
+
+-- FIXME: Move
+addIsLeqLeft1' :: forall f g n m. LeqProof (n + n) m ->
+                  f (BVType n) -> g m
+                  -> LeqProof n m
+addIsLeqLeft1' prf _v _v' = addIsLeqLeft1 prf
+
 -- | Interpret 'S.Semantics' operations into 'Stmt's.
 --
 -- Operations that return 'Value's return fresh variables; we track
@@ -322,12 +338,29 @@ instance S.Semantics Semantics where
   make_undefined t = do
     name <- fresh "undef"
     tell [NamedStmt [name] (MakeUndefined t)]
-    return $ VarExpr t name
+    return $ VarExpr (Variable t name)
 
   get l = do
     name <- fresh "get"
     tell [NamedStmt [name] (Get l)]
-    return $ VarExpr (S.loc_type l) name
+    return $ VarExpr (Variable (S.loc_type l) name)
+
+  -- sjw: This is a huge hack, but then again, so is the fact that it
+  -- happens at all.  According to the ISA, assigning a 32 bit value
+  -- to a 64 bit register performs a zero extension so the upper 32
+  -- bits are zero.  This may not be the best place for this, but I
+  -- can't think of a nicer one ...
+  (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
+    -- FIXME: doing this the obvious way breaks GHC
+    --     case addIsLeqLeft1' LeqProof v S.n64 of ...
+    --
+    -- ghc: panic! (the 'impossible' happened)
+    --     (GHC version 7.8.4 for x86_64-apple-darwin):
+    --   	tcIfaceCoAxiomRule Sub0R
+    --
+    case testLeq (S.bv_width v) S.n64 of
+     Just LeqProof -> tell [loc := S.uext knownNat v]
+     Nothing -> error "impossible"
 
   l .= v = tell [l := v]
 
@@ -355,7 +388,7 @@ instance S.Semantics Semantics where
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    -- return $ VarExpr S.knownType name
+    -- return $ VarExpr (Variable S.knownType name)
 
   syscall = tell [Syscall]
 
@@ -363,7 +396,7 @@ instance S.Semantics Semantics where
     nameQuot <- fresh "divQuot"
     nameRem <- fresh "divRem"
     tell [NamedStmt [nameQuot, nameRem] (BVDiv v1 v2)]
-    return (VarExpr r nameQuot, VarExpr r nameRem)
+    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
     where
       r = exprType v2
 
@@ -371,7 +404,7 @@ instance S.Semantics Semantics where
     nameQuot <- fresh "sdivQuot"
     nameRem <- fresh "sdivRem"
     tell [NamedStmt [nameQuot, nameRem] (BVSignedDiv v1 v2)]
-    return (VarExpr r nameQuot, VarExpr r nameRem)
+    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
     where
       r = exprType v2
 
@@ -388,11 +421,9 @@ ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app -> R.ppApp ppExpr app
-  LowerHalfExpr n e -> R.sexpr "lower_half" [ ppExpr e, R.ppNat n ]
-  UpperHalfExpr n e -> R.sexpr "upper_half" [ ppExpr e, R.ppNat n ]
   TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
   SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
-  VarExpr _ x -> text x
+  VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.
 --
@@ -436,14 +467,22 @@ ppLocation ppAddr l = case l of
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
+ppNamedStmt :: NamedStmt -> Doc
+ppNamedStmt s = case s of
+  MakeUndefined _ -> text "make_undefined"
+  Get l -> R.sexpr "get" [ ppMLocation l ]
+  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
+  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  MemCmp n v1 v2 v3 v4 ->
+    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
 
 ppStmt :: Stmt -> Doc
 ppStmt s = case s of
-  NamedStmt names s -> text "let" <+> tupled (map text names) <+> text "=" <+> ppStmt s
-  MakeUndefined _ -> text "make_undefined"
-  Get l -> R.sexpr "get" [ ppMLocation l ]
+  NamedStmt names s' ->
+    text "let" <+> tupled (map text names) <+> text "=" <+> ppNamedStmt s'
   l := e -> ppMLocation l <+> text ":=" <+> ppExpr e
   Ifte_ v t f -> vsep
     [ text "if" <+> ppExpr v
@@ -454,13 +493,82 @@ ppStmt s = case s of
     ]
   MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
-  MemCmp n v1 v2 v3 v4 -> R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
   Syscall -> text "syscall"
-  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"
 
 instance Pretty Stmt where
   pretty = ppStmt
+
+------------------------------------------------------------------------
+-- Expression evaluation
+
+type Env = MapF Variable CS.Value
+
+evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
+evalExpr (LitExpr nr i) = return $ CS.Literal bVec
+  where
+    bVec = CS.bitVector nr (BV.bitVec bitWidth i)
+    bitWidth = fromInteger (natValue nr)
+
+evalExpr (TruncExpr nr e) = do
+  c <- evalExpr e
+  let bitWidth :: Int
+      bitWidth = fromInteger (natValue nr)
+  return $ CS.liftValue (BV.least bitWidth) nr c
+
+evalExpr (SExtExpr nr e) = do
+  c <- evalExpr e
+  let -- Desired length.
+      bitWidth :: Int
+      bitWidth = fromInteger (natValue nr)
+      -- Grow the BV by the difference to desired length.
+      sExtGrow :: BV.BV -> BV.BV
+      sExtGrow bv = let currentBitWidth = BV.width bv
+                        diff = bitWidth - currentBitWidth
+                    in BV.signExtend diff bv
+  return $ CS.liftValue sExtGrow nr c
+
+evalExpr (VarExpr var) = do
+  maybeVal <- asks (MapF.lookup var)
+  let msg = "Bug: unbound variable in expr"
+  maybe (error msg) return maybeVal
+
+evalExpr (AppExpr a) = do
+  a' <- R.traverseApp evalExpr a
+  return $ case a' of
+    R.BVAdd   nr c1 c2 -> CS.liftValue2 (+)    nr             c1 c2
+    R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
+
+------------------------------------------------------------------------
+-- Statement evaluation
+
+-- | A version of 'evalExpr' for use in the state monad of 'evalStmt'.
+evalExpr' :: (Applicative m, MonadState Env m) => Expr tp -> m (CS.Value tp)
+evalExpr' e = runReader (evalExpr e) <$> get
+
+evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+evalStmt (NamedStmt names ns) = undefined
+evalStmt (l := e) = do
+  ve <- evalExpr' e
+  case l of
+    S.MemoryAddr addr (BVTypeRepr nr) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        -- Alternatively, we could mark all known memory values
+        -- ('dumpMem8') as 'Undefined' here. It would be more accurate
+        -- to mark *all* of memory as undefined.
+        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+        CS.Literal bvaddr -> CS.setMem (CS.Address nr bvaddr) ve
+    S.Register rn -> CS.setReg rn ve
+    S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
+    _ -> undefined -- subregisters
+evalStmt (Ifte_ s1 s2 s3) = undefined
+evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
+evalStmt (MemSet s1 s2 s3) = undefined
+evalStmt Syscall = undefined
+evalStmt (Exception s1 s2 s3) = undefined
+evalStmt (X87Push s) = undefined
+evalStmt X87Pop = undefined
+

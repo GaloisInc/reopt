@@ -14,6 +14,7 @@ library
     base >= 4,
     ansi-wl-pprint,
     binary,
+    bv,
     bytestring,
     containers,
     elf >= 0.28,
@@ -40,7 +41,9 @@ library
     Reopt.Machine.X86State
     Reopt.Object.Loader
     Reopt.Object.Memory
+    Reopt.Semantics.BitVector
     Reopt.Semantics.Concrete
+    Reopt.Semantics.ConcreteState
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
@@ -55,6 +58,7 @@ executable reopt
   build-depends:
     base >= 4,
     ansi-wl-pprint,
+    bv,
     bytestring,
     cmdargs,
     containers,
