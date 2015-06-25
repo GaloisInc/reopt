@@ -5,6 +5,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverlappingInstances #-}
 
 module Reopt.Semantics.ConcreteState
     ( module Reopt.Semantics.ConcreteState
@@ -21,7 +22,8 @@ import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.BitVector (BitVector, BV, bitVector, unBitVector)
 import qualified Reopt.Semantics.BitVector as B
 import qualified Data.BitVector as BV
-import qualified Control.Monad.State as S
+import           Control.Monad.State
+import           Control.Monad.Reader
 
 import Data.Maybe (mapMaybe)
 
@@ -112,9 +114,9 @@ group nr v@(Undefined _) = replicate count (Undefined (BVTypeRepr nr))
 -- | Modify the underlying 'BV'.
 --
 -- The modification must not change the width.
-modify :: (BV -> BV) -> Value (BVType n) -> Value (BVType n)
-modify f (Literal b) = Literal (B.modify f b)
-modify _ v@(Undefined _) = v
+modifyValue :: (BV -> BV) -> Value (BVType n) -> Value (BVType n)
+modifyValue f (Literal b) = Literal (B.modify f b)
+modifyValue _ v@(Undefined _) = v
 
 ------------------------------------------------------------------------
 -- Machine state monad
@@ -164,7 +166,7 @@ class MonadMachineState m => FoldableMachineState m where
   foldMem8 :: (Address8 -> Value8 -> a -> a) -> a -> m a
 
 type ConcreteMemory = M.Map Address8 Value8
-type ConcreteState = S.StateT (ConcreteMemory, X.X86State Value)
+type ConcreteState = StateT (ConcreteMemory, X.X86State Value)
 
 -- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
 byteAddresses :: Address tp -> [Address8]
@@ -182,11 +184,10 @@ byteAddresses (Address nr bv) = addrs
       then error "getMem: requested number of bits is not a multiple of 8!"
       else natValue nr `div` 8
 
-
 getMem8 :: MonadMachineState m => Address8 -> ConcreteState m Value8
 getMem8 addr8 = do
-  (mem,_) <- S.get
-  case val mem of Undefined _ -> S.lift $ getMem addr8
+  (mem,_) <- get
+  case val mem of Undefined _ -> lift $ getMem addr8
                   res -> return res
   where
     val mem = case M.lookup addr8 mem of
@@ -207,20 +208,35 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
              else Literal (bitVector nr bv)
 
   setMem addr@Address{} val = 
-    S.foldM (\_ (a,v) -> S.modify $ mapFst $ M.insert a v)  () (zip addrs $ reverse $ group (knownNat :: NatRepr 8) val) where
+    foldM (\_ (a,v) -> modify $ mapFst $ M.insert a v)  () (zip addrs $ reverse $ group (knownNat :: NatRepr 8) val) where
       mapFst f (a,b) = (f a, b)
       addrs = byteAddresses addr
 
   getReg reg = do 
-    val <- S.liftM (^.(X.register reg)) dumpRegs
+    val <- liftM (^.(X.register reg)) dumpRegs
     case val 
-      of Undefined _ -> S.lift $ getReg reg
+      of Undefined _ -> lift $ getReg reg
          _ -> return val
       
-  setReg reg val = S.modify $ mapSnd $ X.register reg .~ val
+  setReg reg val = modify $ mapSnd $ X.register reg .~ val
     where mapSnd f (a,b) = (a, f b)
-  dumpRegs = S.liftM snd S.get
+  dumpRegs = liftM snd get
+
+instance (MonadMachineState m) => MonadMachineState (StateT s m) where
+  getMem = lift . getMem
+  setMem addr val = lift $ setMem addr val
+  getReg = lift . getReg
+  setReg reg val = lift $ setReg reg val
+  dumpRegs = lift dumpRegs
+
+instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
+  getMem = lift . getMem
+  setMem addr val = lift $ setMem addr val
+  getReg = lift . getReg
+  setReg reg val = lift $ setReg reg val
+  dumpRegs = lift dumpRegs
 
 instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
-  foldMem8 f x = S.liftM (M.foldrWithKey f x . fst) S.get
+  foldMem8 f x = liftM (M.foldrWithKey f x . fst) get
+
 
