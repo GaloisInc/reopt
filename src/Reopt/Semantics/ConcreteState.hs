@@ -11,9 +11,7 @@ module Reopt.Semantics.ConcreteState
     , module Reopt.Semantics.BitVector
     ) where
 
-import qualified Data.BitVector as BV
 import qualified Data.Map as M
-import           Data.Maybe (mapMaybe)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
@@ -120,7 +118,7 @@ modify _ v@(Undefined _) = v
 
 data Address tp where
   Address :: NatRepr n         -- ^ Number of bits.
-          -> Value (BVType 64) -- ^ Address of first byte.
+          -> BitVector 64      -- ^ Address of first byte.
           -> Address (BVType n)
 type Address8 = Address (BVType 8)
 type Value8 = Value (BVType 8)

@@ -246,6 +246,24 @@ instance S.IsValue Expr where
 
 type MLocation = S.Location (Expr (BVType 64))
 
+data NamedStmt where
+  MakeUndefined :: TypeRepr tp -> NamedStmt
+  Get :: MLocation tp -> NamedStmt
+  BVDiv :: (1 <= n)
+        => Expr (BVType (n+n))
+        -> Expr (BVType n)
+        -> NamedStmt
+  BVSignedDiv :: (1 <= n)
+              => Expr (BVType (n+n))
+              -> Expr (BVType n)
+              -> NamedStmt
+  MemCmp :: NatRepr n
+         -> Expr (BVType 64)
+         -> Expr BoolType
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> NamedStmt
+
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
 data Stmt where
@@ -253,12 +271,10 @@ data Stmt where
   --
   -- Some statements, e.g. 'bvDiv', return multiple results, so we
   -- bind a list of 'Name's here.
-  NamedStmt :: [Name] -> Stmt -> Stmt
+  NamedStmt :: [Name] -> NamedStmt -> Stmt
 
   -- The remaining constructors correspond to the 'S.Semantics
   -- operations'.
-  MakeUndefined :: TypeRepr tp -> Stmt
-  Get :: MLocation tp -> Stmt
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
   MemMove :: Int
@@ -268,21 +284,7 @@ data Stmt where
           -> Bool
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
-  MemCmp :: NatRepr n
-         -> Expr (BVType 64)
-         -> Expr BoolType
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
-         -> Stmt
   Syscall :: Stmt
-  BVDiv :: (1 <= n)
-        => Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> Stmt
-  BVSignedDiv :: (1 <= n)
-              => Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -465,14 +467,22 @@ ppLocation ppAddr l = case l of
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
+ppNamedStmt :: NamedStmt -> Doc
+ppNamedStmt s = case s of
+  MakeUndefined _ -> text "make_undefined"
+  Get l -> R.sexpr "get" [ ppMLocation l ]
+  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
+  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  MemCmp n v1 v2 v3 v4 ->
+    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
 
 ppStmt :: Stmt -> Doc
 ppStmt s = case s of
-  NamedStmt names s -> text "let" <+> tupled (map text names) <+> text "=" <+> ppStmt s
-  MakeUndefined _ -> text "make_undefined"
-  Get l -> R.sexpr "get" [ ppMLocation l ]
+  NamedStmt names s' ->
+    text "let" <+> tupled (map text names) <+> text "=" <+> ppNamedStmt s'
   l := e -> ppMLocation l <+> text ":=" <+> ppExpr e
   Ifte_ v t f -> vsep
     [ text "if" <+> ppExpr v
@@ -483,10 +493,7 @@ ppStmt s = case s of
     ]
   MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
-  MemCmp n v1 v2 v3 v4 -> R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
   Syscall -> text "syscall"
-  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"
@@ -494,10 +501,16 @@ ppStmt s = case s of
 instance Pretty Stmt where
   pretty = ppStmt
 
+------------------------------------------------------------------------
+-- Expression evaluation
 
+<<<<<<< HEAD
 
 evalStmt :: CS.MonadMachineState m => Stmt -> m ()
 evalStmt = undefined
+=======
+type Env = MapF Variable CS.Value
+>>>>>>> 15bf691a2fa0310da41d54a322e97b0e56eed0d8
 
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec
@@ -534,5 +547,34 @@ evalExpr (AppExpr a) = do
     R.BVAdd   nr c1 c2 -> CS.liftValue2 (+)    nr             c1 c2
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
 
-type Env = MapF Variable CS.Value
+------------------------------------------------------------------------
+-- Statement evaluation
+
+-- | A version of 'evalExpr' for use in the state monad of 'evalStmt'.
+evalExpr' :: (Applicative m, MonadState Env m) => Expr tp -> m (CS.Value tp)
+evalExpr' e = runReader (evalExpr e) <$> get
+
+evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+evalStmt (NamedStmt names ns) = undefined
+evalStmt (l := e) = do
+  ve <- evalExpr' e
+  case l of
+    S.MemoryAddr addr (BVTypeRepr nr) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        -- Alternatively, we could mark all known memory values
+        -- ('dumpMem8') as 'Undefined' here. It would be more accurate
+        -- to mark *all* of memory as undefined.
+        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+        CS.Literal bvaddr -> CS.setMem (CS.Address nr bvaddr) ve
+    S.Register rn -> CS.setReg rn ve
+    S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
+    _ -> undefined -- subregisters
+evalStmt (Ifte_ s1 s2 s3) = undefined
+evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
+evalStmt (MemSet s1 s2 s3) = undefined
+evalStmt Syscall = undefined
+evalStmt (Exception s1 s2 s3) = undefined
+evalStmt (X87Push s) = undefined
+evalStmt X87Pop = undefined
 
