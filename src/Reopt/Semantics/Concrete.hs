@@ -246,6 +246,24 @@ instance S.IsValue Expr where
 
 type MLocation = S.Location (Expr (BVType 64))
 
+data NamedStmt where
+  MakeUndefined :: TypeRepr tp -> NamedStmt
+  Get :: MLocation tp -> NamedStmt
+  BVDiv :: (1 <= n)
+        => Expr (BVType (n+n))
+        -> Expr (BVType n)
+        -> NamedStmt
+  BVSignedDiv :: (1 <= n)
+              => Expr (BVType (n+n))
+              -> Expr (BVType n)
+              -> NamedStmt
+  MemCmp :: NatRepr n
+         -> Expr (BVType 64)
+         -> Expr BoolType
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> NamedStmt
+
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
 data Stmt where
@@ -253,12 +271,10 @@ data Stmt where
   --
   -- Some statements, e.g. 'bvDiv', return multiple results, so we
   -- bind a list of 'Name's here.
-  NamedStmt :: [Name] -> Stmt -> Stmt
+  NamedStmt :: [Name] -> NamedStmt -> Stmt
 
   -- The remaining constructors correspond to the 'S.Semantics
   -- operations'.
-  MakeUndefined :: TypeRepr tp -> Stmt
-  Get :: MLocation tp -> Stmt
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
   MemMove :: Int
@@ -268,21 +284,7 @@ data Stmt where
           -> Bool
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
-  MemCmp :: NatRepr n
-         -> Expr (BVType 64)
-         -> Expr BoolType
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
-         -> Stmt
   Syscall :: Stmt
-  BVDiv :: (1 <= n)
-        => Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> Stmt
-  BVSignedDiv :: (1 <= n)
-              => Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -465,14 +467,22 @@ ppLocation ppAddr l = case l of
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
+ppNamedStmt :: NamedStmt -> Doc
+ppNamedStmt s = case s of
+  MakeUndefined _ -> text "make_undefined"
+  Get l -> R.sexpr "get" [ ppMLocation l ]
+  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
+  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  MemCmp n v1 v2 v3 v4 ->
+    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
 
 ppStmt :: Stmt -> Doc
 ppStmt s = case s of
-  NamedStmt names s -> text "let" <+> tupled (map text names) <+> text "=" <+> ppStmt s
-  MakeUndefined _ -> text "make_undefined"
-  Get l -> R.sexpr "get" [ ppMLocation l ]
+  NamedStmt names s' ->
+    text "let" <+> tupled (map text names) <+> text "=" <+> ppNamedStmt s'
   l := e -> ppMLocation l <+> text ":=" <+> ppExpr e
   Ifte_ v t f -> vsep
     [ text "if" <+> ppExpr v
@@ -483,10 +493,7 @@ ppStmt s = case s of
     ]
   MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
-  MemCmp n v1 v2 v3 v4 -> R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
   Syscall -> text "syscall"
-  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"

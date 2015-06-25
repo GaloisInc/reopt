@@ -11,9 +11,7 @@ module Reopt.Semantics.ConcreteState
     , module Reopt.Semantics.BitVector
     ) where
 
-import qualified Data.BitVector as BV
 import qualified Data.Map as M
-import           Data.Maybe (mapMaybe)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
@@ -157,4 +155,3 @@ class Monad m => MonadMachineState m where
 
 type ConcreteMemory = M.Map Address8 Value8
 type ConcreteState = S.State (ConcreteMemory, X.X86State Value)
-
