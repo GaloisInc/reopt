@@ -312,7 +312,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "and"     $ binop exec_and
               , mk "bt"      $ geBinop exec_bt
               , mk "btc"     $ geBinop exec_btc
-              , mk "btr"     $ geBinop exec_btc
+              , mk "btr"     $ geBinop exec_btr
               , mk "bts"     $ geBinop exec_bts
               , mk "bsf"     $ binop exec_bsf
               , mk "bsr"     $ binop exec_bsr

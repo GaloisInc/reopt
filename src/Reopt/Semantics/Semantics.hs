@@ -698,7 +698,7 @@ exec_bt_chg op base offset = do
 
 exec_btc, exec_btr, exec_bts :: (IsLocationBV m n, 1 <= log_n, log_n <= n) => MLocation m (BVType n) -> Value m (BVType log_n) -> m ()
 exec_btc = exec_bt_chg bvXor
-exec_btr = exec_bt_chg $ (.&.) . complement
+exec_btr = exec_bt_chg $ \l r -> l .&. (complement r)
 exec_bts = exec_bt_chg (.|.)
 
 
