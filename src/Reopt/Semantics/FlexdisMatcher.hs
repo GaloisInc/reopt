@@ -310,6 +310,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "add"     $ binop exec_add
               , mk "adc"     $ binop exec_adc
               , mk "and"     $ binop exec_and
+              , mk "bt"      $ geBinop exec_bt
+              , mk "btc"     $ geBinop exec_btc
+              , mk "btr"     $ geBinop exec_btc
+              , mk "bts"     $ geBinop exec_bts
               , mk "bsf"     $ binop exec_bsf
               , mk "bsr"     $ binop exec_bsr
               , mk "bswap"   $ unop  exec_bswap
