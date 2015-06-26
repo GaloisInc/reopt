@@ -431,7 +431,7 @@ ppExpr e = case e of
 -- Going back to pretty names for subregisters is pretty ad hoc;
 -- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
 -- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
-ppLocation :: (addr -> Doc) -> S.Location addr tp -> Doc
+ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
 ppLocation ppAddr l = case l of
   S.MemoryAddr addr _ -> ppAddr addr
   S.Register r -> text $ "%" ++ show r
@@ -444,19 +444,21 @@ ppLocation ppAddr l = case l of
     --
     -- The low bit is inclusive and the high bit is exclusive, but I
     -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubregister :: S.Location addr tp -> Doc
+    ppSubregister :: forall tp. S.Location addr tp -> Doc
     ppSubregister l =
       r <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
       where
         (r, low, high) = go l
 
     -- | Return pretty-printed register and subrange bounds.
-    go :: S.Location addr tp -> (Doc, Integer, Integer)
+    go :: forall tp. S.Location addr tp -> (Doc, Integer, Integer)
     go (S.TruncLoc l n) = truncLoc n $ go l
     go (S.LowerHalf l) = lowerHalf $ go l
     go (S.UpperHalf l) = upperHalf $ go l
     go (S.Register r) = (text $ "%" ++ show r, 0, natValue $ N.registerWidth r)
-    go _ = error "ppLocation.go: unexpected constructor"
+    go (S.MemoryAddr addr (BVTypeRepr nr)) = (ppAddr addr, 0, natValue nr)
+    go (S.MemoryAddr _ _) = error "ppLocation.go: address of non 'BVType n' type!"
+
 
     -- Transformations on subranges.
     truncLoc :: NatRepr n -> (Doc, Integer, Integer) -> (Doc, Integer, Integer)
@@ -549,8 +551,33 @@ evalExpr (AppExpr a) = do
 evalExpr' :: (Applicative m, MonadState Env m) => Expr tp -> m (CS.Value tp)
 evalExpr' e = runReader (evalExpr e) <$> get
 
+extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
+extendEnv x v = modify (MapF.insert x v)
+
 evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
-evalStmt (NamedStmt names ns) = undefined
+evalStmt (NamedStmt names (MakeUndefined ns)) = undefined
+evalStmt (NamedStmt [x] (Get l)) = do
+  case l of
+    S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        CS.Undefined _ -> error "evalStmt: undefined address in 'get'!"
+        CS.Literal bvaddr -> do
+          v <- CS.getMem (CS.Address nr bvaddr)
+          extendEnv (Variable tr x) v
+    S.Register rn -> do
+      let tr = N.registerType rn
+      v <- CS.getReg rn
+      extendEnv (Variable tr x) v
+    S.X87StackRegister i -> do
+      let rn = N.X87FPUReg i
+      let tr = N.registerType rn
+      v <- CS.getReg rn
+      extendEnv (Variable tr x) v
+    _ -> undefined -- subregisters
+evalStmt (NamedStmt names (BVDiv ns1 ns2)) = undefined
+evalStmt (NamedStmt names (BVSignedDiv ns1 ns2)) = undefined
+evalStmt (NamedStmt names (MemCmp ns1 ns2 ns3 ns4 ns5)) = undefined
 evalStmt (l := e) = do
   ve <- evalExpr' e
   case l of
