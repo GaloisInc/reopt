@@ -166,6 +166,7 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
     go d s acc = do
       temp <- get d
       a  <- get acc
+      exec_cmp d s -- set flags
       ifte_ (a .=. temp)
         (do zf_loc .= true
             d .= s
@@ -651,6 +652,55 @@ exec_rol l count = do
 
 
 -- ** Bit and Byte Instructions
+
+isRegister :: Location addr tp -> Bool
+isRegister (Register _)   = True
+isRegister (TruncLoc l _) = isRegister l
+isRegister (LowerHalf l)  = isRegister l
+isRegister (UpperHalf l)  = isRegister l
+isRegister _ = False
+
+-- return val modulo the size of the register at loc iff loc is a register, otherwise return val
+moduloRegSize :: (IsValue v, 1 <= n) => Location addr (BVType n') -> v (BVType n) -> v (BVType n)
+moduloRegSize loc val
+  | Just Refl <- testEquality (loc_width loc) n8  = go loc val ( 7 :: Int)
+  | Just Refl <- testEquality (loc_width loc) n16 = go loc val (15 :: Int)
+  | Just Refl <- testEquality (loc_width loc) n32 = go loc val (31 :: Int)
+  | Just Refl <- testEquality (loc_width loc) n64 = go loc val (63 :: Int)
+  | otherwise = val -- doesn't match any of the register sizes
+  where go l v maskVal = if isRegister l
+                         then v .&. bvLit (bv_width v) maskVal -- v mod maskVal
+                         else v
+
+-- make a bitmask of size 'width' with only the bit at bitPosition set
+singleBitMask :: (IsValue v, 1 <= n, 1 <= log_n, log_n <= n) => NatRepr n -> v (BVType log_n) -> v (BVType n)
+singleBitMask width bitPosition = bvShl (bvLit width (1 :: Int)) (uext width bitPosition)
+
+exec_bt :: (IsLocationBV m n, 1 <= log_n) => MLocation m (BVType n) -> Value m (BVType log_n) -> m ()
+exec_bt base offset = do
+  b <- get base
+  -- if base is register, take offset modulo 16/32/64 based on reg width
+  cf_loc .= bvBit b (moduloRegSize base offset)
+  set_undefined of_loc
+  set_undefined sf_loc
+  set_undefined af_loc
+  set_undefined pf_loc
+
+-- for all BT* instructions that modify the checked bit
+exec_bt_chg :: (IsLocationBV m n, 1 <= log_n, log_n <= n)
+            => (Value m (BVType n) -> Value m (BVType n) -> Value m (BVType n))
+            -> MLocation m (BVType n)
+            -> Value m (BVType log_n) -> m ()
+exec_bt_chg op base offset = do
+  exec_bt base offset
+  b <- get base
+  base .= b `op` singleBitMask (loc_width base) (moduloRegSize base offset)
+
+exec_btc, exec_btr, exec_bts :: (IsLocationBV m n, 1 <= log_n, log_n <= n) => MLocation m (BVType n) -> Value m (BVType log_n) -> m ()
+exec_btc = exec_bt_chg bvXor
+exec_btr = exec_bt_chg $ \l r -> l .&. (complement r)
+exec_bts = exec_bt_chg (.|.)
+
 
 exec_bsf :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_bsf r y = do
