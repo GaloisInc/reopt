@@ -31,6 +31,7 @@
 
 module Reopt.Concrete.Semantics
        ( execSemantics
+       , evalStmt
        , ppStmts
        ) where
 

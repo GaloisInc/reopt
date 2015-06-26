@@ -16,7 +16,7 @@ import Control.Applicative
 import           Control.Concurrent
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.State.Strict
+import           Control.Monad.State
 import           Control.Monad.Reader
 import           Data.Bits
 import qualified Data.ByteString as B
@@ -41,6 +41,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import Debug.Trace
 
 import Data.Parameterized.NatRepr
+import Data.Parameterized.Some
 import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
@@ -63,7 +64,10 @@ import           Reopt.Object.Memory
 import           Reopt.Object.Loader
 import           Reopt.Concrete.BitVector
 import           Reopt.Concrete.MachineState as MS
+import           Reopt.Concrete.MachineState()
+import           Reopt.Concrete.Semantics
 import           Reopt.Semantics.DeadRegisterElimination
+import           Reopt.Semantics.FlexdisMatcher
 import           Reopt.Semantics.Monad (Type(..), bvLit)
 import System.Posix.Waitpid as W
 import System.Posix.Types
@@ -216,7 +220,14 @@ test :: Args -> IO ()
 test args = do
   child <- traceFile $ args^.programPath
   procMem <- openChildProcMem child
-  runStateT (testInner (printRegsAndInstrProcMem procMem) child) ()
+  procMaps <- openChildProcMaps child
+  ptrace_singlestep child Nothing
+  _ <- trace "stepping over exec" $ waitForRes child
+--  mem <- exploreMem procMem procMaps
+--  trace "initial mem load" $ return ()
+  runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
+    regs <- dumpRegs
+    runConcreteState (runInParallel $ checkAndClear stderr) Map.empty regs
   return ()
 
 printExecutedInstructions :: Args -> IO ()
@@ -224,7 +235,7 @@ printExecutedInstructions args = do
   e <- readStaticElf (args^.programPath)
   let Identity mem = mkElfMem (args^.loadStyle) e
   child <- traceFile $ args^.programPath
-  runStateT (testInner (printInstr mem) child) ()
+  runStateT (traceInner (printInstr mem) child) ()
   return ()
 
 traceFile :: FilePath -> IO CPid
@@ -239,21 +250,25 @@ traceChild file = do
   executeFile file False [] Nothing
   trace "EXEC FAILED" $ fail "EXEC FAILED"
 
-testInner :: (CPid -> StateT s IO ()) -> CPid -> StateT s IO ()
-testInner act pid = do
+traceInner :: (CPid -> StateT s IO ()) -> CPid -> StateT s IO ()
+traceInner act pid = do
   act pid
   lift $ ptrace_singlestep pid Nothing
   (spid, status) <- lift $ waitForRes pid
   if spid == pid
-    then case status of W.Stopped _ -> testInner act pid
-                        Signaled _ -> testInner act pid
-                        Continued -> testInner act pid
+    then case status of W.Stopped _ -> traceInner act pid
+                        Signaled _ -> traceInner act pid
+                        Continued -> traceInner act pid
                         W.Exited _ -> return ()
     else fail "Wrong pid from waitpid!"
 
 openChildProcMem :: CPid -> IO Handle
 openChildProcMem pid = do
   openFile ("/proc/" ++ (show pid) ++ "/mem") ReadWriteMode
+
+openChildProcMaps :: CPid -> IO Handle
+openChildProcMaps pid = do
+  openFile ("/proc/" ++ (show pid) ++ "/maps") ReadMode
 
 readFileOffset :: Handle -> Word64 -> Word64 -> IO B.ByteString
 readFileOffset h addr width = do
@@ -357,12 +372,12 @@ printRegsAndInstrProcMem procMem pid = do
 
 newtype PTraceMachineState a = PTraceMachineState {unPTraceMachineState ::
    ReaderT PTraceInfo IO a}
-   deriving (Monad, MonadReader PTraceInfo, MonadIO)
+   deriving (Monad, MonadReader PTraceInfo, MonadIO, Functor)
 
 data PTraceInfo = PTraceInfo {cpid :: CPid, memHandle :: Handle, mapHandle :: Handle}
 
 instance MonadMachineState PTraceMachineState where
-  setMem = fail "unimplemented"
+  setMem = fail "setMem unimplemented for PTraceMachineState"
   getMem (Address width bv) = do
     memH <- asks memHandle
     bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral $ widthVal width)
@@ -371,7 +386,7 @@ instance MonadMachineState PTraceMachineState where
   getReg regname = do
     regs <- dumpRegs
     return $ regs^.(register regname)
-  setReg = fail "unimplemented"
+  setReg = fail "setReg unimplemented for PTraceMachineState"
   dumpRegs = do
      pid <- asks cpid
      regs <-liftIO $ ptrace_getregs pid
@@ -385,8 +400,73 @@ instance FoldableMachineState PTraceMachineState where
     memH <- asks memHandle
     mapH <- asks mapHandle
     memMap <- liftIO $ exploreMem memH mapH
-    return $ Map.foldrWithKey f x memMap
+    Map.foldrWithKey (\k v m -> do m' <- m; f k v m') (return x) memMap
 
+runPTraceMachineState :: PTraceInfo -> PTraceMachineState a -> IO a
+runPTraceMachineState info (PTraceMachineState {unPTraceMachineState = m}) = runReaderT m info
+
+newtype MachineByteReader m a = MachineByteReader (StateT (Address8, Int) m a) deriving (MonadTrans, MonadState (Address8, Int), Functor, Applicative, Monad)
+
+
+instance (Functor m, MonadMachineState m) => 
+  ByteReader (MachineByteReader m) where
+    readByte = do
+      (addr, disp) <- get
+      put $ (modifyAddr (+ bitVec 64 (1 :: Int)) addr, disp + 1)
+      val <- lift $ getMem addr
+      case asBV val of Nothing -> fail $ "Could not read byte at " ++ show addr
+                       Just bv -> return $ fromIntegral bv
+
+runMachineByteReader :: Monad m => MachineByteReader m a -> Address8 ->  m (Int, a)
+runMachineByteReader (MachineByteReader s) addr = do
+  (v, (_, l)) <- runStateT s (addr, 0)
+  return (l,v)
+
+stepConcrete :: (Functor m, MonadMachineState m) => ConcreteState m InstructionInstance
+stepConcrete = do
+  rip' <- getReg N.rip
+  instrAddr <- case rip' of Literal bv -> return $ Address knownNat bv
+                            Undefined _ -> fail "Undefined rip!"
+  (w, ii) <- runMachineByteReader (disassembleInstruction defaultX64Disassembler) instrAddr
+  trace (show ii) (return ())
+  case execInstruction w ii of Just s -> trace (show $ ppStmts  $ execSemantics s)$ evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
+                               Nothing -> fail $ "could not exec instruction at " ++ show rip'
+  return ii
+
+runInParallel :: (InstructionInstance -> ConcreteState PTraceMachineState ()) 
+              -> ConcreteState PTraceMachineState ()
+runInParallel updater = do
+  ii <-trace "runInParallel stepping concrete semantics" stepConcrete
+  pid <- lift $ asks cpid
+  lift $ liftIO $ ptrace_singlestep pid Nothing
+  (spid, status) <- lift $ liftIO $ waitForRes pid
+  if spid == pid
+    then case status of W.Exited _ -> return ()
+                        _ -> runInParallel updater
+    else fail "Wrong pid from waitpid!"
+
+
+checkAndClear :: Handle -> InstructionInstance -> ConcreteState PTraceMachineState () 
+checkAndClear out ii = do
+  realRegs <- lift dumpRegs
+  emuRegs <- dumpRegs  
+  foldMem8 (\addr val _ -> do
+    realVal <- lift $ getMem addr
+    if realVal == val
+      then lift $ liftIO $ hPutStr out (show addr ++ " executed successfully")
+      else lift $ liftIO $ hPutStr out (show addr ++ " does not match after instruction " ++ show ii)) ()
+  put (Map.empty, realRegs)
+
+compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
+compareRegs real emu =
+  catMaybes $ map (viewSome (\reg -> 
+    let lens = register reg
+        realVal = real^.lens
+        emuVal = emu^.lens
+     in if realVal == emuVal
+          then Nothing
+          else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
+     x86StateRegisters
 
 toBitVector :: NatRepr n -> B.ByteString -> BitVector n
 toBitVector n bs =
@@ -404,12 +484,13 @@ exploreMem memH mapH =
                                _ -> fail "couldn't parse /proc/pid/map"
       a2 <- case readHex s2 of ((a2, _) : _) -> return a2
                                _ -> fail "couldn't parse /proc/pid/map"
-      acc' <- loadMem memH acc a1 a2
+      acc' <- trace line $ trace ("loading range " ++ s1 ++ " - " ++ s2) (loadMem memH acc a1 a2)
+      trace ("loaded range " ++ s1 ++ " - " ++ s2) (return ())
       ready <- hReady mapH
       if ready then exploreInner memH mapH acc else return acc'
     splitFirst c (c' : rest)
       | c == c' = ([], rest)
-      | otherwise = case splitFirst c rest of (l1, l2) -> (c : l1, l2)
+      | otherwise = case splitFirst c rest of (l1, l2) -> (c' : l1, l2)
     splitFirst c [] = ([], [])
 
 loadMem :: Handle

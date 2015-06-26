@@ -3,7 +3,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -137,6 +136,12 @@ instance Eq (Address n) where
 instance Ord (Address n) where
   compare (Address _ x) (Address _ y) = compare x y
 
+instance Show (Address n) where
+  show = show . pretty
+
+instance Pretty (Address n) where
+  pretty (Address _ bv) = text $ show bv
+
 modifyAddr :: (BV -> BV) -> Address (BVType n) -> Address (BVType n)
 modifyAddr f (Address nr bv) = Address nr (B.modify f bv)
 
@@ -166,12 +171,14 @@ class Monad m => MonadMachineState m where
 
 class MonadMachineState m => FoldableMachineState m where
   -- fold across all known addresses
-  foldMem8 :: (Address8 -> Value8 -> a -> a) -> a -> m a
+  foldMem8 :: (Address8 -> Value8 -> a -> m a) -> a -> m a
 
 type ConcreteMemory = M.Map Address8 Value8
-newtype ConcreteState m a = ConcreteState {unConcreteState :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative)
+newtype ConcreteState m a = ConcreteState {unConcreteState :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative, Monad)
 
-deriving instance Monad m => Monad (ConcreteState m)
+runConcreteState :: ConcreteState m a -> ConcreteMemory -> X.X86State Value -> m (a, (ConcreteMemory,X.X86State Value))
+runConcreteState (ConcreteState{unConcreteState = m}) mem regs = 
+  runStateT m (mem, regs)
 
 -- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
 byteAddresses :: Address tp -> [Address8]
@@ -242,6 +249,8 @@ instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   dumpRegs = lift dumpRegs
 
 instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
-  foldMem8 f x = liftM (M.foldrWithKey f x . fst) get
+  foldMem8 f x = do
+    (mem, _) <- get 
+    M.foldrWithKey (\k v m -> do m' <- m; f k v m') (return x) mem
 
 

@@ -27,10 +27,13 @@ main = do args <- getArgs
 
           let bs = BS.pack $ map (fst . head) nums
 
-          let instrs = (catMaybes $ map disInstruction $ disassembleBuffer defaultX64Disassembler bs)
-          forM_ instrs $ \i -> do
-            putStrLn $ "Semantics for " ++ show i ++ ":"
-            case execInstruction i of
-              Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
-              Just result -> print . C.ppStmts . C.execSemantics $ result
-          return ()
+          let diss = disassembleBuffer defaultX64Disassembler bs
+          forM_ diss $ \dis -> do
+            case disInstruction dis
+              of Just i -> 
+                   do putStrLn $ "Semantics for " ++ show i ++ ":"
+                      case execInstruction (disLen dis) i of
+                        Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
+                        Just result -> print . C.ppStmts . C.execSemantics $ result
+           
+                 Nothing ->return ()
