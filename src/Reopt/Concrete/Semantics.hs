@@ -548,8 +548,33 @@ evalExpr (AppExpr a) = do
 evalExpr' :: (Applicative m, MonadState Env m) => Expr tp -> m (CS.Value tp)
 evalExpr' e = runReader (evalExpr e) <$> get
 
+extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
+extendEnv x v = modify (MapF.insert x v)
+
 evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
-evalStmt (NamedStmt names ns) = undefined
+evalStmt (NamedStmt names (MakeUndefined ns)) = undefined
+evalStmt (NamedStmt [x] (Get l)) = do
+  case l of
+    S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        CS.Undefined _ -> error "evalStmt: undefined address in 'get'!"
+        CS.Literal bvaddr -> do
+          v <- CS.getMem (CS.Address nr bvaddr)
+          extendEnv (Variable tr x) v
+    S.Register rn -> do
+      let tr = N.registerType rn
+      v <- CS.getReg rn
+      extendEnv (Variable tr x) v
+    S.X87StackRegister i -> do
+      let rn = N.X87FPUReg i
+      let tr = N.registerType rn
+      v <- CS.getReg rn
+      extendEnv (Variable tr x) v
+    _ -> undefined -- subregisters
+evalStmt (NamedStmt names (BVDiv ns1 ns2)) = undefined
+evalStmt (NamedStmt names (BVSignedDiv ns1 ns2)) = undefined
+evalStmt (NamedStmt names (MemCmp ns1 ns2 ns3 ns4 ns5)) = undefined
 evalStmt (l := e) = do
   ve <- evalExpr' e
   case l of
