@@ -430,7 +430,7 @@ ppExpr e = case e of
 -- Going back to pretty names for subregisters is pretty ad hoc;
 -- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
 -- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
-ppLocation :: (addr -> Doc) -> S.Location addr tp -> Doc
+ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
 ppLocation ppAddr l = case l of
   S.MemoryAddr addr _ -> ppAddr addr
   S.Register r -> text $ "%" ++ show r
@@ -443,19 +443,21 @@ ppLocation ppAddr l = case l of
     --
     -- The low bit is inclusive and the high bit is exclusive, but I
     -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubregister :: S.Location addr tp -> Doc
+    ppSubregister :: forall tp. S.Location addr tp -> Doc
     ppSubregister l =
       r <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
       where
         (r, low, high) = go l
 
     -- | Return pretty-printed register and subrange bounds.
-    go :: S.Location addr tp -> (Doc, Integer, Integer)
+    go :: forall tp. S.Location addr tp -> (Doc, Integer, Integer)
     go (S.TruncLoc l n) = truncLoc n $ go l
     go (S.LowerHalf l) = lowerHalf $ go l
     go (S.UpperHalf l) = upperHalf $ go l
     go (S.Register r) = (text $ "%" ++ show r, 0, natValue $ N.registerWidth r)
-    go _ = error "ppLocation.go: unexpected constructor"
+    go (S.MemoryAddr addr (BVTypeRepr nr)) = (ppAddr addr, 0, natValue nr)
+    go (S.MemoryAddr _ _) = error "ppLocation.go: address of non 'BVType n' type!"
+
 
     -- Transformations on subranges.
     truncLoc :: NatRepr n -> (Doc, Integer, Integer) -> (Doc, Integer, Integer)
