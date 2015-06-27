@@ -25,7 +25,8 @@ library
     parameterized-utils >= 0.1.6,
     text,
     vector,
-    QuickCheck >= 2.7
+    QuickCheck >= 2.7,
+    data-binary-ieee754
 
   hs-source-dirs: src
 
