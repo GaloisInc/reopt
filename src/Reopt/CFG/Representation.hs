@@ -546,7 +546,7 @@ data App (f :: Type -> *) (tp :: Type) where
   -- Reverse the bytes in a bitvector expression.
   ReverseBytes :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
 
-  -- Add two values and a carry bit to determine if they have a signed
+  -- Add two values and a carry bit to determine if they have an unsigned
   -- overflow.
   UadcOverflows :: !(NatRepr n)
                 -> !(f (BVType n))

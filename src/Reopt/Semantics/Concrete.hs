@@ -45,7 +45,9 @@ import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
+import           Data.Binary.IEEE754
 import           Data.Bits
+import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
 import qualified Data.Foldable as Fold
 import           Data.Functor
@@ -64,6 +66,8 @@ import           Text.PrettyPrint.ANSI.Leijen
   ((<>), (<+>), colon, indent, line, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
 import           Data.Word
+import           GHC.Float (float2Double, double2Float)
+import           GHC.TypeLits
 import           Numeric (showHex)
 
 import qualified Flexdis86 as Flexdis
@@ -79,7 +83,9 @@ import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Semantics.ConcreteState as CS
-import           Reopt.Machine.Types (type_width, FloatInfo(..), TypeBits)
+import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
+                                     , TypeBits, floatInfoBits, n1, type_width
+                                     )
 
 ------------------------------------------------------------------------
 -- Expr
@@ -506,29 +512,20 @@ instance Pretty Stmt where
 
 type Env = MapF Variable CS.Value
 
+-- `c` in this context means `concrete value`.
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec
   where
     bVec = CS.bitVector nr (BV.bitVec bitWidth i)
     bitWidth = fromInteger (natValue nr)
 
-evalExpr (TruncExpr nr e) = do
-  c <- evalExpr e
-  let bitWidth :: Int
-      bitWidth = fromInteger (natValue nr)
-  return $ CS.liftValue (BV.least bitWidth) nr c
+-- TruncExpr and SExtExpr differ from App's Trunc & SExt only in the types.
+-- These allow for trivial truncations & extensions, where App does not.
+evalExpr (TruncExpr nr e) =
+  return . CS.liftValue (truncBV nr) nr =<< evalExpr e
 
-evalExpr (SExtExpr nr e) = do
-  c <- evalExpr e
-  let -- Desired length.
-      bitWidth :: Int
-      bitWidth = fromInteger (natValue nr)
-      -- Grow the BV by the difference to desired length.
-      sExtGrow :: BV.BV -> BV.BV
-      sExtGrow bv = let currentBitWidth = BV.width bv
-                        diff = bitWidth - currentBitWidth
-                    in BV.signExtend diff bv
-  return $ CS.liftValue sExtGrow nr c
+evalExpr (SExtExpr nr e) =
+  return . CS.liftValue (sExtBV nr) nr =<< evalExpr e
 
 evalExpr (VarExpr var) = do
   maybeVal <- asks (MapF.lookup var)
@@ -538,8 +535,101 @@ evalExpr (VarExpr var) = do
 evalExpr (AppExpr a) = do
   a' <- R.traverseApp evalExpr a
   return $ case a' of
-    R.BVAdd   nr c1 c2 -> CS.liftValue2 (+)    nr             c1 c2
+    -- Resize ops
+    R.Mux nr c1 c2 c3 -> undefined
+    R.MMXExtend c -> undefined
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
+    R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
+    R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
+    R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
+    R.UExt c nr -> CS.liftValue (uExtBV nr) nr c
+
+    -- Boolean ops
+    R.AndApp c1 c2 -> CS.liftValue2 (.&.) boolNatRepr c1 c2
+    R.OrApp c1 c2 -> CS.liftValue2 (.|.) boolNatRepr c1 c2
+    R.NotApp c -> CS.liftValue (complement) boolNatRepr c
+
+    -- Arithmetic ops
+    R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
+    R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
+    R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
+    R.BVDiv nr c1 c2 -> CS.liftValue2 (div) nr c1 c2
+    R.BVMod nr c1 c2 -> CS.liftValue2 (mod) nr c1 c2
+    R.BVSignedDiv nr c1 c2 -> CS.liftValue2 (BV.sdiv) nr c1 c2
+    R.BVSignedMod nr c1 c2 -> CS.liftValue2 (BV.smod) nr c1 c2
+
+    -- Comparisons
+    R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
+    R.BVSignedLt c1 c2 -> CS.liftValue2 (predBV (BV.slt)) boolNatRepr c1 c2
+
+    R.BVBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
+
+    -- Bit vector ops
+    R.BVComplement nr c -> CS.liftValue (complement) nr c
+    R.BVAnd nr c1 c2 -> CS.liftValue2 (.&.) nr c1 c2
+    R.BVOr nr c1 c2 -> CS.liftValue2 (.|.) nr c1 c2
+    R.BVXor nr c1 c2 -> CS.liftValue2 (xor) nr c1 c2
+    R.BVShl nr c1 c2 -> CS.liftValue2 (BV.shl) nr c1 c2
+    R.BVShr nr c1 c2 -> CS.liftValue2 (BV.shr) nr c1 c2
+    R.BVSar nr c1 c2 -> CS.liftValue2 (BV.ashr) nr c1 c2
+    R.BVEq c1 c2 -> CS.liftValue2 (predBV (BV.==.)) boolNatRepr c1 c2
+
+    R.EvenParity c -> CS.liftValue isEvenParity boolNatRepr c
+    R.ReverseBytes nr c -> CS.liftValue BV.reverse nr c
+    R.UadcOverflows _nr c1 c2 carryBit ->
+      CS.liftValue3 checkUadcOverflow boolNatRepr c1 c2 carryBit
+    R.SadcOverflows _nr c1 c2 carryBit ->
+      CS.liftValue3 checkSadcOverflow boolNatRepr c1 c2 carryBit
+    R.UsbbOverflows _nr c1 c2 borrowBit ->
+      CS.liftValue3 checkUsbbOverflow boolNatRepr c1 c2 borrowBit
+    R.SsbbOverflows _nr c1 c2 borrowBit ->
+      CS.liftValue3 checkSsbbOverflow boolNatRepr c1 c2 borrowBit
+
+    R.Bsf nr c -> CS.liftValueMaybe (bsf nr) nr c
+    R.Bsr nr c -> CS.liftValueMaybe (bsr nr) nr c
+
+
+    --       _~
+    --    _~ )_)_~
+    --    )_))_))_)
+    --    _!__!__!_
+    --    \_______/
+    -- ~~~~~~~~~~~~~~~
+    -- Floating point
+    -- (Pirate ship to indicate these are treacherous waters. Arrr.)
+    -- ===============
+    --
+    -- XXX These are defined using simply isNaN because SNaN is a "signaling"
+    -- NaN which triggers a hardware exception. We're punting on this for now.
+    R.FPIsQNaN fr c -> liftFPPred isNaN fr c
+    R.FPIsSNaN fr c -> liftFPPred isNaN fr c
+
+    -- Arith
+    R.FPAdd fr c1 c2 -> liftFP2 (+) fr c1 c2
+    R.FPSub fr c1 c2 -> liftFP2 (-) fr c1 c2
+    R.FPMul fr c1 c2 -> liftFP2 (-) fr c1 c2
+    R.FPDiv fr c1 c2 -> liftFP2 (/) fr c1 c2
+
+    -- XXX For now we return `Undefined` for whether a given PF (precision fault)
+    -- was due to rounding up or down. This means the C1 x87 FPU flag will be
+    -- Undefined, so we'll see if that's problematic.
+    R.FPAddRoundedUp _fr c1 c2 ->
+      CS.liftValueMaybe2 (\_ _ -> Nothing) boolNatRepr c1 c2
+    R.FPSubRoundedUp _fr c1 c2 ->
+      CS.liftValueMaybe2 (\_ _ -> Nothing) boolNatRepr c1 c2
+    R.FPMulRoundedUp _fr c1 c2 ->
+      CS.liftValueMaybe2 (\_ _ -> Nothing) boolNatRepr c1 c2
+    R.FPCvtRoundsUp _fr1 c _fr2 ->
+      CS.liftValueMaybe (const Nothing) boolNatRepr c
+
+    -- Tests
+    R.FPLt fr c1 c2 -> liftFPPred2 (<)  fr c1 c2
+    R.FPEq fr c1 c2 -> liftFPPred2 (==) fr c1 c2
+
+    -- Conversion
+    R.FPCvt fr1 c fr2 -> convert fr1 fr2 c
+    R.FPFromBV fr c -> undefined
+    R.TruncFPToSignedBV fr c nr -> undefined
 
 ------------------------------------------------------------------------
 -- Statement evaluation
@@ -571,4 +661,188 @@ evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined
 evalStmt (X87Push s) = undefined
 evalStmt X87Pop = undefined
+
+boolNatRepr :: NatRepr 1
+boolNatRepr =  n1
+
+
+---
+-- Helper functions
+---
+sExtBV :: NatRepr n -> BV -> BV
+sExtBV nr bv = BV.signExtend diff bv
+  where
+    diff = (fromInteger (natValue nr)) - BV.width bv
+
+uExtBV :: NatRepr n -> BV -> BV
+uExtBV nr bv = BV.zeroExtend diff bv
+  where
+    diff = (fromInteger (natValue nr)) - BV.width bv
+
+upperBV :: NatRepr n -> BV -> BV
+upperBV nr = BV.most (fromInteger (natValue nr) :: Int)
+
+truncBV :: NatRepr n -> BV -> BV
+truncBV nr = BV.least (fromInteger (natValue nr) :: Int)
+
+bitIdx :: BV -> BV -> BV
+bitIdx x i = BV.fromBool $ BV.index (BV.uint i) x
+
+
+-- Wraps the result of a predicate into a BV
+predBV :: (BV -> BV -> Bool) -> BV -> BV -> BV
+predBV f a b = BV.fromBool $ f a b
+
+isEvenParity :: BV -> BV
+isEvenParity bv = BV.fromBool isEven
+  where
+    isEven = 0 == (trueCount `mod` 2)
+    trueCount = length $ filter id (BV.toBits bv)
+
+checkUadcOverflow :: BV -> BV -> BV -> BV
+checkUadcOverflow a b carry = BV.fromBool didOverflow
+  where
+    didOverflow = total >= (2 ^ bitWidth)
+    bitWidth = max (BV.width a) (BV.width b)
+    total = sum $ map BV.uint [a,b,carry]
+
+checkSadcOverflow :: BV -> BV -> BV -> BV
+checkSadcOverflow a b carry = BV.fromBool didUnderOverflow
+  where
+    didUnderOverflow = total >= (2 ^ (bitWidth-1)) || total < (- (2 ^ (bitWidth-1)))
+    bitWidth = max (BV.width a) (BV.width b)
+    total = sum $ map BV.int [a,b,carry]
+
+checkUsbbOverflow :: BV -> BV -> BV -> BV
+checkUsbbOverflow a b borrow = BV.fromBool didUnderflow
+  where
+    didUnderflow = total < 0
+    bitWidth = max (BV.width a) (BV.width b)
+    total = foldl1 (-) $ map BV.uint [a,b,borrow]
+
+checkSsbbOverflow :: BV -> BV -> BV -> BV
+checkSsbbOverflow a b borrow = BV.fromBool didUnderOverflow
+  where
+    didUnderOverflow = total >= (2 ^ (bitWidth-1)) || total < (- (2 ^ (bitWidth-1)))
+    bitWidth = max (BV.width a) (BV.width b)
+    total = foldl1 (-) $ map BV.int [a,b,borrow]
+
+-- Index of least significant non-zero bit
+bsf :: NatRepr n -> BV -> Maybe BV
+bsf nr bv = case BV.nat bv of
+  0 -> Nothing
+  _ -> Just . BV.bitVec destWidth $ BV.lsb1 bv
+  where
+    destWidth = fromInteger $ natValue nr :: Int
+
+-- Index of most significant non-zero bit
+bsr :: NatRepr n -> BV -> Maybe BV
+bsr nr bv = case BV.nat bv of
+  0 -> Nothing
+  _ -> Just . BV.bitVec destWidth $ BV.msb1 bv
+  where
+    destWidth = fromInteger $ natValue nr :: Int
+
+
+---
+-- Float madness
+---
+--
+-- XXX For now we are punting on 16, 80, and 128 bit floats. We're just
+-- using GHC's Float & Double types. We are also punting on rounding modes,
+-- since we assume those will be rarely used and don't want to invest
+-- energy if it is not necessary. We will just use the GHC default behavior,
+-- which (I believe) is round-to-nearest. It is hard to find good information
+-- about this though.
+liftFPPred :: (forall a. (RealFloat a) => (a -> Bool))
+           -> FloatInfoRepr flt
+           -> CS.Value (FloatType flt)
+           -> CS.Value BoolType
+liftFPPred f fr = CS.liftValue wrap boolNatRepr
+  where
+    wrap :: BV -> BV
+    wrap bv = case natValue (floatInfoBits fr) of
+      32 -> let fromBV :: BV -> Float
+                fromBV = wordToFloat . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv)
+
+      64 -> let fromBV :: BV -> Double
+                fromBV = wordToDouble . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv)
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
+
+
+liftFPPred2 :: (forall a. (Eq a, Ord a) => (a -> a -> Bool))
+            -> FloatInfoRepr flt
+            -> CS.Value (FloatType flt)
+            -> CS.Value (FloatType flt)
+            -> CS.Value BoolType
+liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
+  where
+    wrap2 :: BV -> BV -> BV
+    wrap2 bv1 bv2 = case natValue (floatInfoBits fr) of
+      32 -> let fromBV :: BV -> Float
+                fromBV = wordToFloat . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      64 -> let fromBV :: BV -> Double
+                fromBV = wordToDouble . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
+
+
+liftFP2 :: (forall a. (Floating a, Num a) => (a -> a -> a))
+        -> FloatInfoRepr flt
+        -> CS.Value (FloatType flt)
+        -> CS.Value (FloatType flt)
+        -> CS.Value (FloatType flt)
+liftFP2 f fr = CS.liftValue2 wrap2 nr
+  where
+    nr = floatInfoBits fr
+    --
+    wrap2 :: BV -> BV -> BV
+    wrap2 bv1 bv2 = case natValue nr of
+      32 -> let toBV :: Float -> BV
+                toBV = BV.bitVec w . fromIntegral . floatToWord
+                fromBV :: BV -> Float
+                fromBV = wordToFloat . fromInteger . BV.int
+             in toBV $ f (fromBV bv1) (fromBV bv2)
+
+      64 -> let toBV :: Double -> BV
+                toBV = BV.bitVec w . fromIntegral . doubleToWord
+                fromBV :: BV -> Double
+                fromBV = wordToDouble . fromInteger . BV.int
+             in toBV $ f (fromBV bv1) (fromBV bv2)
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
+      where
+        w = max (BV.width bv1) (BV.width bv2)
+
+convert :: FloatInfoRepr flt1
+        -> FloatInfoRepr flt2
+        -> CS.Value (FloatType flt1)
+        -> CS.Value (FloatType flt2)
+convert fr1 fr2 = CS.liftValue wrap nr2
+  where
+    nr1 = floatInfoBits fr1
+    nr2 = floatInfoBits fr2
+    destWidth = fromIntegral $ natValue nr2
+    --
+    wrap :: BV -> BV
+    wrap bv = case (natValue nr1, natValue nr2) of
+      (32,64) -> let toBV :: Double -> BV
+                     toBV = BV.bitVec destWidth . fromIntegral . doubleToWord
+                     fromBV :: BV -> Float
+                     fromBV = wordToFloat . fromInteger . BV.int
+                  in toBV $ float2Double (fromBV bv)
+
+      (64,32) -> let toBV :: Float -> BV
+                     toBV = BV.bitVec destWidth . fromIntegral . floatToWord
+                     fromBV :: BV -> Double
+                     fromBV = wordToDouble . fromInteger . BV.int
+                  in toBV $ double2Float (fromBV bv)
+
+      _       -> error "Sorry, can only convert between 32 & 64 bit floats"
 

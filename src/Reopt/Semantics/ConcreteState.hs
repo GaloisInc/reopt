@@ -83,6 +83,37 @@ liftValue2 f nr (asBV -> Just bv1) (asBV -> Just bv2) =
   Literal $ bitVector nr (f bv1 bv2)
 liftValue2 _ nr _ _ = Undefined (BVTypeRepr nr)
 
+liftValue3 :: (BV -> BV -> BV -> BV)
+           -> NatRepr n4
+           -> Value (BVType n1)
+           -> Value (BVType n2)
+           -> Value (BVType n3)
+           -> Value (BVType n4)
+liftValue3 f nr (asBV -> Just bv1) (asBV -> Just bv2) (asBV -> Just bv3) =
+  Literal $ bitVector nr (f bv1 bv2 bv3)
+liftValue3 _ nr _ _ _ = Undefined (BVTypeRepr nr)
+
+-- Lift functions with the possibility of an undefined return value
+liftValueMaybe :: (BV -> Maybe BV)
+               -> NatRepr n2
+               -> Value (BVType n1)
+               -> Value (BVType n2)
+liftValueMaybe f nr (asBV -> Just v) = case f v of
+  Nothing -> Undefined (BVTypeRepr nr)
+  Just bv -> Literal $ bitVector nr bv
+liftValueMaybe _ nr _ = Undefined (BVTypeRepr nr)
+
+liftValueMaybe2 :: (BV -> BV -> Maybe BV)
+               -> NatRepr n3
+               -> Value (BVType n1)
+               -> Value (BVType n1)
+               -> Value (BVType n3)
+liftValueMaybe2 f nr (asBV -> Just v1) (asBV -> Just v2) =
+  case f v1 v2 of
+    Nothing -> Undefined (BVTypeRepr nr)
+    Just bv -> Literal $ bitVector nr bv
+liftValueMaybe2 _ nr _ _ = Undefined (BVTypeRepr nr)
+
 asBV :: Value tp -> Maybe BV
 asBV (Literal (unBitVector -> (_, bv))) = Just bv
 asBV _ = Nothing
