@@ -213,7 +213,7 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
     let bvs = mapMaybe asBV vs
     -- We can't directly concat 'vs' since we can't type the
     -- intermediate concatenations.
-    let bv = foldl (BV.#) (BV.zeros 0) bvs -- Endianness?  are we backwards?
+    let bv = foldl (flip (BV.#)) (BV.zeros 0) bvs -- Endianness?  are we backwards?
     -- Return 'Undefined' if we had any 'Undefined' values in 'vs'.
     return $ if length bvs /= length vs
              then Undefined (BVTypeRepr nr)

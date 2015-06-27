@@ -380,8 +380,8 @@ instance MonadMachineState PTraceMachineState where
   setMem = fail "setMem unimplemented for PTraceMachineState"
   getMem (Address width bv) = do
     memH <- asks memHandle
-    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral $ widthVal width)
-    return $ Literal $ toBitVector width bs
+    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral (widthVal width) `div` 8)
+    trace (show $ toBitVector width bs) $ return $ Literal $ toBitVector width bs
 
   getReg regname = do
     regs <- dumpRegs
@@ -442,19 +442,25 @@ runInParallel updater = do
   (spid, status) <- lift $ liftIO $ waitForRes pid
   if spid == pid
     then case status of W.Exited _ -> return ()
-                        _ -> runInParallel updater
+                        _ -> do updater ii
+                                runInParallel updater
     else fail "Wrong pid from waitpid!"
 
 
 checkAndClear :: Handle -> InstructionInstance -> ConcreteState PTraceMachineState () 
 checkAndClear out ii = do
   realRegs <- lift dumpRegs
-  emuRegs <- dumpRegs  
-  foldMem8 (\addr val _ -> do
+  emuRegs <- dumpRegs
+  let regCmp = compareRegs realRegs emuRegs
+  memCmp <- foldMem8 (\addr val errs -> do
     realVal <- lift $ getMem addr
     if realVal == val
-      then lift $ liftIO $ hPutStr out (show addr ++ " executed successfully")
-      else lift $ liftIO $ hPutStr out (show addr ++ " does not match after instruction " ++ show ii)) ()
+      then return errs
+      else return $ errs ++ [show addr ++ " does not match"]) []
+  case regCmp ++ memCmp of [] -> lift $ liftIO $ hPutStrLn out $ "instruction " ++ show ii ++ " executed successfully"
+                           l ->do lift $ liftIO $ mapM_ (hPutStrLn out) ((
+                                    "After executing instruction " ++ show ii) : l)
+                                  return ()
   put (Map.empty, realRegs)
 
 compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
@@ -470,7 +476,7 @@ compareRegs real emu =
 
 toBitVector :: NatRepr n -> B.ByteString -> BitVector n
 toBitVector n bs =
-  bitVector n $ bitVec (widthVal n) (B.foldr (\b acc -> acc*(2^(8::Integer)) + fromIntegral b) (0::Integer) bs)
+  bitVector n $ bitVec (widthVal n) (B.foldl (\acc b -> acc*(2^(8::Integer)) + fromIntegral b) (0::Integer) bs)
 
 exploreMem :: Handle -> Handle -> IO (Map Address8 MS.Value8)
 exploreMem memH mapH =
