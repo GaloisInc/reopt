@@ -32,7 +32,7 @@ main = do args <- getArgs
             case disInstruction dis
               of Just i -> 
                    do putStrLn $ "Semantics for " ++ show i ++ ":"
-                      case execInstruction (disLen dis) i of
+                      case execInstruction (fromIntegral $ disLen dis) i of
                         Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
                         Just result -> print . C.ppStmts . C.execSemantics $ result
            

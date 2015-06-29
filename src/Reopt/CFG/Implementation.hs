@@ -974,7 +974,7 @@ disassembleBlock' mem gs contFn addr = do
   let line = text (showHex addr "") <> colon
              <+> Flexdis.ppInstruction next_ip i
 
-  case execInstruction 0 i of
+  case execInstruction addr i of
     Nothing -> Left (DisassembleError i)
     Just exec -> do
       let res = runX86Generator gs1 $ do

@@ -565,11 +565,10 @@ fpUnopOrRegBinop f args@(_, vs)
 --   * fixed:     those which have exact sizes known
 
 -- FIXME: do something more interesting here than 'Maybe'
-execInstruction :: FullSemantics m => Int -> F.InstructionInstance -> Maybe (m ())
-execInstruction w ii =
+execInstruction :: FullSemantics m => F.Word64 -> F.InstructionInstance -> Maybe (m ())
+execInstruction next ii =
   case M.lookup (F.iiOp ii) semanticsMap of
     Just (SemanticsOp f) -> Just $ do
-      old_pc <- get rip
-      rip .= old_pc `bvAdd` (bvLit n64 w)
+      rip .= bvLit knownNat next
       f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
     _                    -> trace ("Unsupported instruction: " ++ show ii) Nothing

@@ -422,15 +422,21 @@ runMachineByteReader (MachineByteReader s) addr = do
   (v, (_, l)) <- runStateT s (addr, 0)
   return (l,v)
 
-stepConcrete :: (Functor m, MonadMachineState m) => ConcreteState m InstructionInstance
+stepConcrete :: (Functor m, MonadMachineState m) 
+             => ConcreteState m InstructionInstance
 stepConcrete = do
   rip' <- getReg N.rip
-  instrAddr <- case rip' of Literal bv -> return $ Address knownNat bv
-                            Undefined _ -> fail "Undefined rip!"
+  bv <- case rip' of Literal bv -> return bv
+                     Undefined _ -> fail "Undefined rip!"
+  
+  let instrAddr = Address knownNat bv
   (w, ii) <- runMachineByteReader (disassembleInstruction defaultX64Disassembler) instrAddr
   trace (show ii) (return ())
-  case execInstruction w ii of Just s -> trace (show $ ppStmts  $ execSemantics s)$ evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
-                               Nothing -> fail $ "could not exec instruction at " ++ show rip'
+  case execInstruction (fromIntegral $ (nat $ snd $ unBitVector bv) + 
+                        fromIntegral w) ii 
+    of Just s -> trace (show $ ppStmts  $ execSemantics s) $ 
+	               evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
+       Nothing -> fail $ "could not exec instruction at " ++ show rip'
   return ii
 
 runInParallel :: (InstructionInstance -> ConcreteState PTraceMachineState ()) 
