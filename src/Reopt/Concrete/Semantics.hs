@@ -13,6 +13,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -687,13 +688,28 @@ evalStmt (l := e) = do
     S.Register rn -> CS.setReg rn ve
     S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
     _ -> undefined -- subregisters
-evalStmt (Ifte_ s1 s2 s3) = undefined
+evalStmt (Ifte_ c t f) = do
+  vc <- evalExpr' c
+  case vc of
+    CS.Undefined _ -> error "evalStmt: Ifte_: undefined condition!"
+    CS.Literal (CS.unBitVector -> (_, bv)) -> do
+      -- All names in the environment are only defined once, and usage
+      -- of names in the enviroment is constrained by scoping in the
+      -- meta language, Haskell, so this save and restore of the
+      -- environment here should be technically unnecessary.
+      env0 <- get
+      if BV.nat bv /= 0
+      then mapM_ evalStmt t
+      else mapM_ evalStmt f
+      put env0
 evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
 evalStmt (MemSet s1 s2 s3) = undefined
 evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined
 evalStmt (X87Push s) = undefined
 evalStmt X87Pop = undefined
+
+------------------------------------------------------------------------
 
 boolNatRepr :: NatRepr 1
 boolNatRepr =  n1
