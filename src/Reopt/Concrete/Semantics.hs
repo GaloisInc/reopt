@@ -84,7 +84,7 @@ import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , TypeBits, floatInfoBits, n1, type_width
+                                     , TypeBits, floatInfoBits, n1, n80, type_width
                                      )
 
 ------------------------------------------------------------------------
@@ -537,9 +537,12 @@ evalExpr (VarExpr var) = do
 evalExpr (AppExpr a) = do
   a' <- R.traverseApp evalExpr a
   return $ case a' of
+    -- Mux is if-then-else
+    R.Mux nr c1 c2 c3 -> CS.liftValue3 doMux nr c1 c2 c3
+
     -- Resize ops
-    R.Mux nr c1 c2 c3 -> undefined
-    R.MMXExtend c -> undefined
+    R.MMXExtend c -> let ones = BV.ones 16
+                      in CS.liftValue (BV.# ones) extPrecisionNatRepr c
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
     R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
@@ -629,9 +632,12 @@ evalExpr (AppExpr a) = do
     R.FPEq fr c1 c2 -> liftFPPred2 (==) fr c1 c2
 
     -- Conversion
-    R.FPCvt fr1 c fr2 -> convert fr1 fr2 c
-    R.FPFromBV fr c -> undefined
-    R.TruncFPToSignedBV fr c nr -> undefined
+    R.FPCvt fr1 c fr2 -> convertFP fr1 fr2 c
+    R.FPFromBV fr c -> convertBVtoFP fr c
+    -- XXX FIXME: If a conversion is out of the range of the bitvector, we
+    -- should raise a floating point exception. If that is masked, we should
+    -- return -1 as a BV.
+    R.TruncFPToSignedBV fr c nr -> liftFPtoBV (truncateIfValid nr) fr nr c
 
 ------------------------------------------------------------------------
 -- Statement evaluation
@@ -692,10 +698,20 @@ evalStmt X87Pop = undefined
 boolNatRepr :: NatRepr 1
 boolNatRepr =  n1
 
+extPrecisionNatRepr :: NatRepr 80
+extPrecisionNatRepr = n80
 
----
--- Helper functions
----
+
+
+------------------------------------------------------------------------
+-- Helper functions ----------------------------------------------------
+------------------------------------------------------------------------
+
+doMux :: BV -> BV -> BV -> BV
+doMux tst thn els = case BV.toBits tst of
+  [b] -> if b then thn else els
+  _   -> error "Impossible: type mismatch with BV"
+
 sExtBV :: NatRepr n -> BV -> BV
 sExtBV nr bv = BV.signExtend diff bv
   where
@@ -770,6 +786,15 @@ bsr nr bv = case BV.nat bv of
   where
     destWidth = fromInteger $ natValue nr :: Int
 
+truncateIfValid :: RealFloat a
+                => NatRepr n -> a -> Integer
+truncateIfValid nr c = if -(2^width) <= i || i < (2^width)
+                          then i
+                          else -1
+  where
+    i     = truncate c
+    width = natValue nr
+
 
 ---
 -- Float madness
@@ -781,41 +806,24 @@ bsr nr bv = case BV.nat bv of
 -- energy if it is not necessary. We will just use the GHC default behavior,
 -- which (I believe) is round-to-nearest. It is hard to find good information
 -- about this though.
-liftFPPred :: (forall a. (RealFloat a) => (a -> Bool))
+liftFPtoBV :: (forall a. (RealFloat a) => (a -> Integer))
            -> FloatInfoRepr flt
+           -> NatRepr n
            -> CS.Value (FloatType flt)
-           -> CS.Value BoolType
-liftFPPred f fr = CS.liftValue wrap boolNatRepr
+           -> CS.Value (BVType n)
+liftFPtoBV f fr nr = CS.liftValue wrap nr
   where
+    width = fromIntegral $ natValue nr
+    --
     wrap :: BV -> BV
     wrap bv = case natValue (floatInfoBits fr) of
       32 -> let fromBV :: BV -> Float
                 fromBV = wordToFloat . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv)
+             in BV.bitVec width $ f (fromBV bv)
 
       64 -> let fromBV :: BV -> Double
                 fromBV = wordToDouble . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv)
-
-      _  -> error "Sorry, 32 or 64 bit floats only"
-
-
-liftFPPred2 :: (forall a. (Eq a, Ord a) => (a -> a -> Bool))
-            -> FloatInfoRepr flt
-            -> CS.Value (FloatType flt)
-            -> CS.Value (FloatType flt)
-            -> CS.Value BoolType
-liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
-  where
-    wrap2 :: BV -> BV -> BV
-    wrap2 bv1 bv2 = case natValue (floatInfoBits fr) of
-      32 -> let fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
-
-      64 -> let fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+             in BV.bitVec width $ f (fromBV bv)
 
       _  -> error "Sorry, 32 or 64 bit floats only"
 
@@ -847,11 +855,35 @@ liftFP2 f fr = CS.liftValue2 wrap2 nr
       where
         w = max (BV.width bv1) (BV.width bv2)
 
-convert :: FloatInfoRepr flt1
-        -> FloatInfoRepr flt2
-        -> CS.Value (FloatType flt1)
-        -> CS.Value (FloatType flt2)
-convert fr1 fr2 = CS.liftValue wrap nr2
+convertBVtoFP :: CS.Value (BVType n)
+              -> FloatInfoRepr flt
+              -> CS.Value (FloatType flt)
+convertBVtoFP c fr = CS.liftValue wrap nr c
+  where
+    nr = floatInfoBits fr
+    width = fromIntegral $ natValue nr
+    --
+    wrap :: BV -> BV
+    wrap bv = case width of
+      32 -> let toBV :: Float -> BV
+                toBV = BV.bitVec width . fromIntegral . floatToWord
+                mkFP :: BV -> Float
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      64 -> let toBV :: Double -> BV
+                toBV = BV.bitVec width . fromIntegral . doubleToWord
+                mkFP :: BV -> Double
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
+
+convertFP :: FloatInfoRepr flt1
+          -> FloatInfoRepr flt2
+          -> CS.Value (FloatType flt1)
+          -> CS.Value (FloatType flt2)
+convertFP fr1 fr2 = CS.liftValue wrap nr2
   where
     nr1 = floatInfoBits fr1
     nr2 = floatInfoBits fr2
@@ -872,4 +904,36 @@ convert fr1 fr2 = CS.liftValue wrap nr2
                   in toBV $ double2Float (fromBV bv)
 
       _       -> error "Sorry, can only convert between 32 & 64 bit floats"
+
+
+---
+-- Predicates
+---
+liftFPPred :: (forall a. (RealFloat a) => (a -> Bool))
+           -> FloatInfoRepr flt
+           -> CS.Value (FloatType flt)
+           -> CS.Value BoolType
+liftFPPred f fr = liftFPtoBV f' fr boolNatRepr
+  where
+    f' :: (forall a. (RealFloat a) => (a -> Integer))
+    f' x = if (f x) then 1 else 0
+
+liftFPPred2 :: (forall a. (Eq a, Ord a) => (a -> a -> Bool))
+            -> FloatInfoRepr flt
+            -> CS.Value (FloatType flt)
+            -> CS.Value (FloatType flt)
+            -> CS.Value BoolType
+liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
+  where
+    wrap2 :: BV -> BV -> BV
+    wrap2 bv1 bv2 = case natValue (floatInfoBits fr) of
+      32 -> let fromBV :: BV -> Float
+                fromBV = wordToFloat . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      64 -> let fromBV :: BV -> Double
+                fromBV = wordToDouble . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
 
