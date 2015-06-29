@@ -1179,6 +1179,88 @@ exec_pxor l v = do
   l .= v0 `bvXor` v
 
 
+-- uses bvCat to turn [a, b, c, d] into [ab, cd]
+concatBVPairs :: (IsValue v, 1 <= n) => [v (BVType n)] -> [v (BVType (n+n))]
+concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
+concatBVPairs _ = []
+
+concatIntoSize :: (IsValue v) => NatRepr n -> [v (BVType m)] -> v (BVType n)
+concatIntoSize sz bvs@(bv:_)
+  | Just Refl <- testEquality (bv_width bv) n8
+  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
+  | Just Refl <- testEquality (bv_width bv) n16
+  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
+  | Just Refl <- testEquality (bv_width bv) n32
+  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs bvs
+  | Just Refl <- testEquality (bv_width bv) n64
+  , Just Refl <- testEquality sz n128 = head $ concatBVPairs bvs
+
+  | Just Refl <- testEquality (bv_width bv) n8
+  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
+  | Just Refl <- testEquality (bv_width bv) n16
+  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs bvs
+  | Just Refl <- testEquality (bv_width bv) n32
+  , Just Refl <- testEquality sz n64 = head $ concatBVPairs bvs
+
+-- uses bvSplit to turn [ab, cd] into [a, b, c, d]
+splitBVs :: (IsValue v, 1 <= n) => [v (BVType (n+n))] -> [v (BVType n)]
+splitBVs = concatMap (\bv -> let (a, b) = bvSplit bv in [a, b])
+
+splitIntoSize :: (IsValue v) => NatRepr n -> v (BVType m) -> [v (BVType n)]
+splitIntoSize sz bv
+  | Just Refl <- testEquality (bv_width bv) n16
+  , Just Refl <- testEquality sz n8 = splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n32
+  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n64
+  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n128
+  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs $ splitBVs [bv]
+
+  | Just Refl <- testEquality (bv_width bv) n32
+  , Just Refl <- testEquality sz n16 = splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n64
+  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n128
+  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs $ splitBVs [bv]
+
+  | Just Refl <- testEquality (bv_width bv) n64
+  , Just Refl <- testEquality sz n32 = splitBVs [bv]
+  | Just Refl <- testEquality (bv_width bv) n128
+  , Just Refl <- testEquality sz n32 = splitBVs $ splitBVs [bv]
+
+  | Just Refl <- testEquality (bv_width bv) n128
+  , Just Refl <- testEquality sz n64 = splitBVs [bv]
+
+punpck :: (IsLocationBV m n)
+       => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
+       -> NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+punpck f pieceSize l v = do
+  v0 <- get l
+  let dSplit = f $ splitHalf $ splitIntoSize pieceSize v0
+      sSplit = f $ splitHalf $ splitIntoSize pieceSize v
+      r = concatIntoSize (loc_width l) $ concat $ zipWith (\a b -> [b, a]) dSplit sSplit
+  l .= r
+  where splitHalf :: [a] -> ([a], [a])
+        splitHalf xs = splitAt ((length xs + 1) `div` 2) xs
+
+punpckh, punpckl :: (IsLocationBV m n) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+punpckh = punpck fst
+punpckl = punpck snd
+
+exec_punpckhbw, exec_punpckhwd, exec_punpckhdq, exec_punpckhqdq :: Binop
+exec_punpckhbw  = punpckh n8
+exec_punpckhwd  = punpckh n16
+exec_punpckhdq  = punpckh n32
+exec_punpckhqdq = punpckh n64
+
+exec_punpcklbw, exec_punpcklwd, exec_punpckldq, exec_punpcklqdq :: Binop
+exec_punpcklbw  = punpckl n8
+exec_punpcklwd  = punpckl n16
+exec_punpckldq  = punpckl n32
+exec_punpcklqdq = punpckl n64
+
+
 -- * SSE Instructions
 -- ** SSE SIMD Single-Precision Floating-Point Instructions
 -- *** SSE Data Transfer Instructions
