@@ -89,10 +89,10 @@ executable reopt_test
     elf,
     flexdis86,
     lens,
-    linux-ptrace,
+    linux-ptrace >= 0.1.2.1,
     mtl,
     parameterized-utils >= 0.1.6,
-    posix-waitpid,
+    posix-waitpid >= 0.1.0.1,
     unix,
     reopt
 
