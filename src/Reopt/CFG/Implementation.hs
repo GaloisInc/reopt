@@ -966,18 +966,15 @@ disassembleBlock' :: Memory Word64
 disassembleBlock' mem gs contFn addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError
-  let next_ip_val = mkLit knownNat (toInteger next_ip)
-
-  -- Update current IP
-  let gs1 = gs & curX86State . curIP .~ next_ip_val
+  let next_ip_val = mkLit n64 (toInteger next_ip)
 
   let line = text (showHex addr "") <> colon
              <+> Flexdis.ppInstruction next_ip i
 
-  case execInstruction addr i of
+  case execInstruction next_ip i of
     Nothing -> Left (DisassembleError i)
     Just exec -> do
-      let res = runX86Generator gs1 $ do
+      let res = runX86Generator gs $ do
                   addStmt (Comment (Text.pack (show line)))
                   exec
       case res of
