@@ -34,16 +34,34 @@ data BitVector (n :: Nat) where
 
 -- | Smart constructor that enforces term and type level width agreement.
 --
--- The underlying 'BV.BV' width must agree with the 'NatRepr n' width.
+-- The underlying 'BV.BV' width must agree with the 'NatRepr n' width,
+-- and there is a *partial* check that the given number of bits can
+-- represent the given value.
 --
 -- To construct a 'BitVector' from an integer @i@ and a 'NatRepr' @nr@
 -- do @'bitVector' nr ('BV.bitVec' ('natValue' nr) i)@. This should be
--- an uncommon operation; in most cases operations on 'BV.BV' will be
--- used to construct new 'BV.BV's from existing 'BV.BV's.
+-- an uncommon operation; in most cases operations on 'BV' will be
+-- used to construct new 'BV's from existing 'BV's.
 bitVector :: NatRepr n -> BV -> BitVector n
 bitVector nr v =
   if natValue nr == fromIntegral (BV.width v)
-  then BitVector nr v
+  -- Internally, 'BV' attempts to convert all values to non-negative,
+  -- by adding negative values to @2^n@. We first check if this
+  -- conversion to unsigned overflowed.
+  --
+  -- We don't detect too-small negative values in
+  --
+  -- @[-2^n, -2^(n-1) - 1]@
+  --
+  -- or too-large *signed* postive values in
+  --
+  -- @[2^(n-1), 2^n - 1]@
+  --
+  -- Note that, for positive values, being "signed" is determined by
+  -- the the intent of the caller and is not tracked anywhere.
+  then if BV.nat v < 0 || BV.nat v >= 2^(BV.width v)
+       then error "bitVector: width is too small! Calling code is buggy!"
+       else BitVector nr v
   else error "bitVector: type-level and term-level bit widths disagree! Calling code is buggy!"
 
 -- | Deconstructor for 'BitVector'.
