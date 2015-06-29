@@ -1163,6 +1163,21 @@ exec_movd l v
   | otherwise = fail "movd: Unknown bit width"
 exec_movq = exec_movd
 
+exec_pand :: Binop
+exec_pand l v = do
+  v0 <- get l
+  l .= v0 .&. v
+
+exec_por :: Binop
+exec_por l v = do
+  v0 <- get l
+  l .= v0 .|. v
+
+exec_pxor :: Binop
+exec_pxor l v = do
+  v0 <- get l
+  l .= v0 `bvXor` v
+
 
 -- * SSE Instructions
 -- ** SSE SIMD Single-Precision Floating-Point Instructions
