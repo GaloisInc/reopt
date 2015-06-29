@@ -350,6 +350,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "syscall" $ const syscall
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
+              , mk "movd"    $ mkBinopLV exec_movd
+              , mk "movq"    $ mkBinopLV exec_movq
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
               , mk "fld"     $ fpUnopV exec_fld

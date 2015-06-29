@@ -1153,6 +1153,17 @@ exec_fnstcw l = do
 
 -- * MMX Instructions
 
+exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
+                     => MLocation m (BVType n)
+                     -> Value m (BVType n')
+                     -> m ()
+exec_movd l v
+  | Just LeqProof <- testLeq  (loc_width l) (bv_width v) = l .= bvTrunc (loc_width l) v
+  | Just LeqProof <- testLeq  (bv_width v) (loc_width l) = l .=    uext (loc_width l) v
+  | otherwise = fail "movd: Unknown bit width"
+exec_movq = exec_movd
+
+
 -- * SSE Instructions
 -- ** SSE SIMD Single-Precision Floating-Point Instructions
 -- *** SSE Data Transfer Instructions
