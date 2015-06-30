@@ -263,7 +263,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                                             [F.WordImm imm] -> exec_ret (Just imm)
 
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
-                                                     
+
               , mk "movs"  $ mkBinopPfxLL
                 $ \pfx dest_loc src_loc ->
                    case testLeq (loc_width dest_loc) n64 of
@@ -284,7 +284,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
               , mk "movdqa"  $ truncateKnownBinop exec_movdqa
-              , mk "movdqu"  $ truncateKnownBinop exec_movdqa                
+              , mk "movdqu"  $ truncateKnownBinop exec_movdqa
               , mk "movsd_sse" $ truncate64Op exec_movsd
               , mk "movss"   $ truncate32Op exec_movss
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
@@ -369,6 +369,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pcmpgtw" $ binop exec_pcmpgtw
               , mk "pcmpgtd" $ binop exec_pcmpgtd
               , mk "pand"    $ binop exec_pand
+              , mk "pandn"   $ binop exec_pandn
               , mk "por"     $ binop exec_por
               , mk "pxor"    $ binop exec_pxor
 
@@ -421,7 +422,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
   where
     -- conditional instruction support (cmovcc, jcc)
     conditionals :: [(String, SemanticsOp)]
-    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a     
+    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a
                    , (,) "ae" $ semanticsOp $ mkop cond_ae
                    , (,) "b"  $ semanticsOp $ mkop cond_b
                    , (,) "be" $ semanticsOp $ mkop cond_be
@@ -434,7 +435,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , (,) "s"  $ semanticsOp $ mkop cond_s
                    , (,) "z"  $ semanticsOp $ mkop cond_z
                    , (,) "e"  $ semanticsOp $ mkop cond_z
-                   , (,) "ne" $ semanticsOp $ mkop cond_nz 
+                   , (,) "ne" $ semanticsOp $ mkop cond_nz
                    , (,) "no" $ semanticsOp $ mkop cond_no
                    , (,) "np" $ semanticsOp $ mkop cond_np
                    , (,) "ns" $ semanticsOp $ mkop cond_ns

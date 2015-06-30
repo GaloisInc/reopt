@@ -791,7 +791,7 @@ regLocation sz
 exec_movs :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
-          -> MLocation m (BVType n)          
+          -> MLocation m (BVType n)
           -> m ()
 exec_movs False dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
@@ -823,12 +823,12 @@ exec_movs True dest_loc _src_loc = do
             rsi .= (src  .+ total_bytes)
             rdi .= (dest .+ total_bytes))
   where
-    count_reg = regLocation sz N.rcx    
+    count_reg = regLocation sz N.rcx
     sz = loc_width dest_loc
-    nbytes = fromInteger (natValue sz) `div` 8 
-      
+    nbytes = fromInteger (natValue sz) `div` 8
+
 -- FIXME: can also take rep prefix
--- FIXME: we ignore the aso here.  
+-- FIXME: we ignore the aso here.
 -- | CMPS/CMPSB Compare string/Compare byte string
 -- CMPS/CMPSW Compare string/Compare word string
 -- CMPS/CMPSD Compare string/Compare doubleword string
@@ -888,7 +888,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 exec_stos :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
-          -> MLocation m (BVType n)          
+          -> MLocation m (BVType n)
           -> m ()
 exec_stos False _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
@@ -920,7 +920,7 @@ exec_stos True _dest_loc val_loc = do
   where
     sz = loc_width val_loc
     count_reg = regLocation sz N.rcx
-    
+
 
 
 -- REP        Repeat while ECX not zero
@@ -1208,7 +1208,7 @@ splitIntoSize sz bv
   , Just Refl <- testEquality sz n64 = splitBVs [bv]
 
 
--- ** MMX data transfer
+-- ** MMX Data Transfer Instructions
 
 exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
                      => MLocation m (BVType n)
@@ -1221,7 +1221,11 @@ exec_movd l v
 exec_movq = exec_movd
 
 
--- ** MMX conversion
+-- ** MMX Conversion Instructions
+
+-- PACKSSWB Pack words into bytes with signed saturation
+-- PACKSSDW Pack doublewords into words with signed saturation
+-- PACKUSWB Pack words into bytes with unsigned saturation
 
 punpck :: (IsLocationBV m n)
        => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
@@ -1252,25 +1256,50 @@ exec_punpckldq  = punpckl n32
 exec_punpcklqdq = punpckl n64
 
 
--- ** MMX packed arithmatic
+-- ** MMX Packed Arithmetic Instructions
+
+-- PADDB Add packed byte integers
+-- PADDW Add packed word integers
+-- PADDD Add packed doubleword integers
+-- PADDSB Add packed signed byte integers with signed saturation
+-- PADDSW Add packed signed word integers with signed saturation
+-- PADDUSB Add packed unsigned byte integers with unsigned saturation
+-- PADDUSW Add packed unsigned word integers with unsigned saturation
+-- PSUBB Subtract packed byte integers
+-- PSUBW Subtract packed word integers
+-- PSUBD Subtract packed doubleword integers
+-- PSUBSB Subtract packed signed byte integers with signed saturation
+-- PSUBSW Subtract packed signed word integers with signed saturation
+-- PSUBUSB Subtract packed unsigned byte integers with unsigned saturation
+-- PSUBUSW Subtract packed unsigned word integers with unsigned saturation
+-- PMULHW Multiply packed signed word integers and store high result
+-- PMULLW Multiply packed signed word integers and store low result
+-- PMADDWD Multiply and add packed word integers
 
 
--- ** MMX comparison
+-- ** MMX Comparison Instructions
 
-pcmp :: (IsLocationBV m n, 1 <= o)
-     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BoolType))
+-- split into chunks of size sz, zip, replace pairs using f, and merge
+pcombine :: (IsLocationBV m n, 1 <= o)
+     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BVType o))
      -> NatRepr o
      -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcmp op sz l v = do
+pcombine f sz l v = do
   v0 <- get l
   let dSplit = splitIntoSize sz v0
       sSplit = splitIntoSize sz v
 
-      resultValues = map chkPair $ zip dSplit sSplit
+      resultValues = zipWith f dSplit sSplit
       r = concatIntoSize (loc_width l) resultValues
   l .= r
-  where zero = bvLit sz (0::Integer)
-        chkPair (d, s) = mux (d `op` s) (complement zero) zero
+
+-- replace pairs with 0xF..F if `op` returns true, otherwise 0x0..0
+pcmp :: (IsLocationBV m n, 1 <= o)
+     => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
+     -> NatRepr o
+     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pcmp op = pcombine chkHighLow
+  where chkHighLow d s = mux (d `op` s) (complement (bvLit (bv_width d) (0 :: Integer))) (bvLit (bv_width d) (0 :: Integer))
 
 exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
 exec_pcmpeqb = pcmp (.=.) n8
@@ -1283,12 +1312,17 @@ exec_pcmpgtw = pcmp (flip bvSlt) n16
 exec_pcmpgtd = pcmp (flip bvSlt) n32
 
 
--- ** MMX logical
+-- ** MMX Logical Instructions
 
 exec_pand :: Binop
 exec_pand l v = do
   v0 <- get l
   l .= v0 .&. v
+
+exec_pandn :: Binop
+exec_pandn l v = do
+  v0 <- get l
+  l .= complement v0 .&. v
 
 exec_por :: Binop
 exec_por l v = do
@@ -1301,7 +1335,21 @@ exec_pxor l v = do
   l .= v0 `bvXor` v
 
 
--- ** MMX shift and rotate
+-- ** MMX Shift and Rotate Instructions
+
+-- PSLLW Shift packed words left logical
+-- PSLLD Shift packed doublewords left logical
+-- PSLLQ Shift packed quadword left logical
+-- PSRLW Shift packed words right logical
+-- PSRLD Shift packed doublewords right logical
+-- PSRLQ Shift packed quadword right logical
+-- PSRAW Shift packed words right arithmetic
+-- PSRAD Shift packed doublewords right arithmetic
+
+
+-- ** MMX State Management Instructions
+
+-- EMMS Empty MMX state
 
 
 -- * SSE Instructions
@@ -1379,21 +1427,13 @@ exec_movss l v = l .= v
 
 -- ** SSE 64-Bit SIMD Integer Instructions
 
--- select packed values given an operator (like bvUlt for min)
+-- replace pairs with the left operand if `op` is true (e.g., bvUlt for min)
 pselect :: (IsLocationBV m n, 1 <= o)
-        => (Value m (BVType o) -> Value m (BVType o) -> Value m (BoolType))
+        => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
         -> NatRepr o
         -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pselect op sz l v = do
-  v0 <- get l
-  let dSplit = splitIntoSize sz v0
-      sSplit = splitIntoSize sz v
-
-      resultValues = map chkPair $ zip dSplit sSplit
-      r = concatIntoSize (loc_width l) resultValues
-  l .= r
-  where chkPair (d, s) = mux (d `op` s) d s
-
+pselect op = pcombine chkPair
+  where chkPair d s = mux (d `op` s) d s
 
 -- PAVGB Compute average of packed unsigned byte integers
 -- PAVGW Compute average of packed unsigned word integers
