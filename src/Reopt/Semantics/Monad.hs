@@ -648,6 +648,45 @@ class ( Applicative m
   -- FIXME: use location instead?
   -- | Move n bits at a time, with count moves
   --
+  -- Semantic sketch. The effect on memory should be like @memcopy@
+  -- below, not like @memcopy2@. These sketches ignore the issue of
+  -- copying in chunks of size `bytes`, which should only be an
+  -- efficiency concern.
+  --
+  -- @
+  -- void memcopy(int bytes, int copies, char *src, char *dst, int reversed) {
+  --   int maybeFlip = reversed ? -1 : 1;
+  --   for (int c = 0; c < copies; ++c) {
+  --     for (int b = 0; b < bytes; ++b) {
+  --       int offset = maybeFlip * (b + c * bytes);
+  --       *(dst + offset) = *(src + offset);
+  --     }
+  --   }
+  -- }
+  -- @
+  --
+  -- Compare with:
+  --
+  -- @
+  -- void memcopy2(int bytes, int copies, char *src, char *dst, int reversed) {
+  --   int maybeFlip = reversed ? -1 : 1;
+  --   /* The only difference from `memcopy` above: here the same memory is
+  --      copied whether `reversed` is true or false -- only the order of
+  --      copies changes -- whereas above different memory is copied for
+  --      each direction. */
+  --   if (reversed) {
+  --     /* Start at the end and work backwards. */
+  --     src += copies * bytes - 1;
+  --     dst += copies * bytes - 1;
+  --   }
+  --   for (int c = 0; c < copies; ++c) {
+  --     for (int b = 0; b < bytes; ++b) {
+  --       int offset = maybeFlip * (b + c * bytes);
+  --       *(dst + offset) = *(src + offset);
+  --     }
+  --   }
+  -- }
+  -- @
   memcopy :: Integer
              -- ^ Number of bytes to copy at a time (1,2,4,8)
           -> Value m (BVType 64)
@@ -664,7 +703,9 @@ class ( Applicative m
 
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
-  -- The number of bytes which are the same is stored into rax
+  --
+  -- See `memcopy` above for explanation of which memory regions are
+  -- compared: the regions copied there are compared here.
   memcmp :: Integer
             -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
             -> Value m (BVType 64)
