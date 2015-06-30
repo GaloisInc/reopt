@@ -1257,8 +1257,11 @@ exec_punpcklqdq = punpckl n64
 
 -- ** MMX comparison
 
-pcmpeq :: (IsLocationBV m n, 1 <= o) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcmpeq sz l v = do
+pcmp :: (IsLocationBV m n, 1 <= o)
+     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BoolType))
+     -> NatRepr o
+     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pcmp op sz l v = do
   v0 <- get l
   let dSplit = splitIntoSize sz v0
       sSplit = splitIntoSize sz v
@@ -1267,12 +1270,17 @@ pcmpeq sz l v = do
       r = concatIntoSize (loc_width l) resultValues
   l .= r
   where zero = bvLit sz (0::Integer)
-        chkPair (x, y) = mux (x .=. y) (complement zero) zero
+        chkPair (d, s) = mux (d `op` s) (complement zero) zero
 
 exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
-exec_pcmpeqb = pcmpeq n8
-exec_pcmpeqw = pcmpeq n16
-exec_pcmpeqd = pcmpeq n32
+exec_pcmpeqb = pcmp (.=.) n8
+exec_pcmpeqw = pcmp (.=.) n16
+exec_pcmpeqd = pcmp (.=.) n32
+
+exec_pcmpgtb, exec_pcmpgtw, exec_pcmpgtd  :: Binop
+exec_pcmpgtb = pcmp (flip bvSlt) n8
+exec_pcmpgtw = pcmp (flip bvSlt) n16
+exec_pcmpgtd = pcmp (flip bvSlt) n32
 
 
 -- ** MMX logical

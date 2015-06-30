@@ -365,6 +365,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pcmpeqb" $ binop exec_pcmpeqb
               , mk "pcmpeqw" $ binop exec_pcmpeqw
               , mk "pcmpeqd" $ binop exec_pcmpeqd
+              , mk "pcmpgtb" $ binop exec_pcmpgtb
+              , mk "pcmpgtw" $ binop exec_pcmpgtw
+              , mk "pcmpgtd" $ binop exec_pcmpgtd
               , mk "pand"    $ binop exec_pand
               , mk "por"     $ binop exec_por
               , mk "pxor"    $ binop exec_pxor
