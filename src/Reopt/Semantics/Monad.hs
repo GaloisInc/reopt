@@ -663,7 +663,13 @@ class ( Applicative m
   -- memmove n count src dest
 
   -- | Set memory to the given value, for the number of words (nbytes = count * bv_width v)
-  memset :: Value m (BVType 64) -> Value m (BVType n) -> Value m (BVType 64) -> m ()
+  memset :: Value m (BVType 64)
+         -- ^ Number of values to assign.
+         -> Value m (BVType n)
+         -- ^ Value to assign.
+         -> Value m (BVType 64)
+         -- ^ Address to start assigning from.
+         -> m ()
 
   -- FIXME: be consistent wrt direction flags (cf memmove).
   -- | Compare the memory regions.  Returns the number of elements which are

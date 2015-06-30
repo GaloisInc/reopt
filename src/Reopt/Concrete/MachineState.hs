@@ -217,7 +217,7 @@ byteAddresses (Address nr bv) = addrs
     mkBv k = B.bitVec 64 k
     count =
       if natValue nr `mod` 8 /= 0
-      then error "getMem: requested number of bits is not a multiple of 8!"
+      then error "byteAddresses: requested number of bits is not a multiple of 8!"
       else natValue nr `div` 8
 
 getMem8 :: MonadMachineState m => Address8 -> ConcreteState m Value8

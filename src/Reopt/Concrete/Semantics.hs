@@ -651,7 +651,8 @@ extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
 evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
-evalStmt (NamedStmt names (MakeUndefined ns)) = undefined
+evalStmt (NamedStmt [x] (MakeUndefined tr)) =
+  extendEnv (Variable tr x) (CS.Undefined tr)
 evalStmt (NamedStmt [x] (Get l)) = do
   case l of
     S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
@@ -703,11 +704,48 @@ evalStmt (Ifte_ c t f) = do
       else mapM_ evalStmt f
       put env0
 evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
-evalStmt (MemSet s1 s2 s3) = undefined
+evalStmt (MemSet n v a) = do
+  vn <- evalExpr' n
+  vv <- evalExpr' v
+  va <- evalExpr' a
+  let addrs = addressSequence va (CS.width vv) vn
+  forM_ addrs $ \addr -> do
+    CS.setMem addr vv
 evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined
 evalStmt (X87Push s) = undefined
 evalStmt X87Pop = undefined
+
+-- | Convert a base address, increment (in bits), and count, into a sequence of
+-- addresses.
+--
+-- TODO: move into 'MachineState' and refactor 'byteAddresses' in
+-- terms of this.
+addressSequence :: forall n.
+                   CS.Value (BVType 64)
+                -> NatRepr n
+                -> CS.Value (BVType 64)
+                -> [CS.Address (BVType n)]
+addressSequence (CS.Literal baseB) nr (CS.Literal countB) =
+  [ CS.modifyAddr (incBv k) baseAddr
+  | k <- [0..count - 1] ]
+  where
+    baseAddr :: CS.Address (BVType n)
+    baseAddr = CS.Address nr baseB
+    -- | Increment 'BV' by given number of byte-steps.
+    incBv :: Integer -> BV -> BV
+    incBv k = (+ BV.bitVec 64 (k * byteInc))
+    -- | Convert bit increment to byte increment.
+    byteInc :: Integer
+    byteInc =
+      if natValue nr `mod` 8 /= 0
+      then error "addressSequence: requested number of bits is not a multiple of 8!"
+      else natValue nr `div` 8
+    count :: Integer
+    count = BV.nat countBV
+      where
+        (_, countBV) = CS.unBitVector countB
+addressSequence _ _ _ = error "addressSequence: undefined argument!"
 
 ------------------------------------------------------------------------
 
