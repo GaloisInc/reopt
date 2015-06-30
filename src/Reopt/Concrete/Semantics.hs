@@ -267,7 +267,7 @@ data NamedStmt where
          -> Expr (BVType 64)
          -> Expr (BVType 64)
          -> Expr (BVType 64)
-         -> Expr BoolType         
+         -> Expr BoolType
          -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
@@ -279,15 +279,16 @@ data Stmt where
   -- bind a list of 'Name's here.
   NamedStmt :: [Name] -> NamedStmt -> Stmt
 
-  -- The remaining constructors correspond to the 'S.Semantics
-  -- operations'.
+  -- The remaining constructors correspond to the 'S.Semantics'
+  -- operations; the arguments are documented there and in
+  -- 'Reopt.CFG.Representation.Stmt'.
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
-  MemMove :: Int
+  MemCopy :: Integer
           -> Expr (BVType 64)
           -> Expr (BVType 64)
           -> Expr (BVType 64)
-          -> Bool
+          -> Expr BoolType
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Syscall :: Stmt
@@ -387,8 +388,7 @@ instance S.Semantics Semantics where
       collectAndForget = Semantics . lift . execWriterT . runSemantics
       -}
 
-  -- FIXME:
-  -- memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
+  memcopy i v1 v2 v3 b = tell [MemCopy i v1 v2 v3 b]
 
   memset v1 v2 v3 = tell [MemSet v1 v2 v3]
 
@@ -482,9 +482,8 @@ ppNamedStmt s = case s of
   Get l -> R.sexpr "get" [ ppMLocation l ]
   BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
   BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
-  -- FIXME
-  -- MemCmp n v1 v2 v3 v4 ->
-  --   R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+  MemCmp n v1 v2 v3 v4 ->
+    R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
@@ -501,7 +500,7 @@ ppStmt s = case s of
     , text "else"
     ,   indent 2 (ppStmts f)
     ]
-  MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
+  MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
   Syscall -> text "syscall"
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
@@ -690,7 +689,7 @@ evalStmt (l := e) = do
     S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
     _ -> undefined -- subregisters
 evalStmt (Ifte_ s1 s2 s3) = undefined
-evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
+evalStmt (MemCopy s1 s2 s3 s4 s5) = undefined
 evalStmt (MemSet s1 s2 s3) = undefined
 evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined

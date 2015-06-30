@@ -662,16 +662,6 @@ class ( Applicative m
              -- False means we should increment the buffer pointers after each copy.
           -> m ()
 
-  -- | Set memory to the given value, for the number of words (nbytes
-  -- = count * bv_width v)
-  memset :: Value m (BVType 64)
-            -- ^ Number of values to set
-            -> Value m (BVType n)
-            -- ^ Value to set
-            -> Value m (BVType 64)
-            -- ^ Pointer to buffer to set
-            -> m ()
-
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
   -- The number of bytes which are the same is stored into rax
@@ -688,6 +678,16 @@ class ( Applicative m
              -- True means we should decrement buffer pointers after each copy.
              -- False means we should increment the buffer pointers after each copy.
             -> m (Value m (BVType 64))
+
+  -- | Set memory to the given value, for the number of words (nbytes
+  -- = count * bv_width v)
+  memset :: Value m (BVType 64)
+            -- ^ Number of values to set
+            -> Value m (BVType n)
+            -- ^ Value to set
+            -> Value m (BVType 64)
+            -- ^ Pointer to buffer to set
+            -> m ()
 
   -- | execute the system call instruction.
   syscall :: m ()
