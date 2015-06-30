@@ -117,6 +117,13 @@ liftValueMaybe2 f nr (asBV -> Just v1) (asBV -> Just v2) =
     Just bv -> Literal $ bitVector nr bv
 liftValueMaybe2 _ nr _ _ = Undefined (BVTypeRepr nr)
 
+liftValueSame :: (BV -> BV)
+              -> Value (BVType n)
+              -> Value (BVType n)
+liftValueSame f (Literal (unBitVector -> (nr, v))) =
+  Literal $ bitVector nr (f v)
+liftValueSame _ u@(Undefined _) = u
+
 asBV :: Value tp -> Maybe BV
 asBV (Literal (unBitVector -> (_, bv))) = Just bv
 asBV _ = Nothing

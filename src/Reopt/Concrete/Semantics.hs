@@ -713,8 +713,23 @@ evalStmt (MemSet n v a) = do
     CS.setMem addr vv
 evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined
-evalStmt (X87Push s) = undefined
-evalStmt X87Pop = undefined
+evalStmt (X87Push s) = do
+  let top = N.X87TopReg
+  vTop <- CS.getReg top
+  let vTop' = CS.liftValueSame ((-) 1) vTop
+  CS.setReg top vTop'
+  case vTop' of
+    CS.Undefined _ -> error "evalStmt: X87Push: Undefined Top index"
+    CS.Literal (CS.unBitVector -> (_, bv)) -> do
+      let idx = fromIntegral $ BV.uint bv
+      if idx > 7
+         then error "evalStmt: X87Push: index out of bounds"
+         else CS.setReg (N.X87FPUReg idx) =<< evalExpr' s
+
+evalStmt X87Pop = do
+  let top = N.X87TopReg
+  vTop <- CS.getReg top
+  CS.setReg top $ CS.liftValueSame (+1) vTop
 
 -- | Convert a base address, increment (in bits), and count, into a sequence of
 -- addresses.
