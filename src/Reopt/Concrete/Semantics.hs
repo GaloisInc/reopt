@@ -192,7 +192,7 @@ instance S.IsValue Expr where
   bvShl x y = app $ R.BVShl (exprWidth x) x y
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
-  bvSlt x y = app $ R.BVUnsignedLt x y
+  bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
