@@ -263,11 +263,11 @@ data NamedStmt where
               => Expr (BVType (n+n))
               -> Expr (BVType n)
               -> NamedStmt
-  MemCmp :: NatRepr n
-         -> Expr (BVType 64)
-         -> Expr BoolType
+  MemCmp :: Integer
          -> Expr (BVType 64)
          -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> Expr BoolType         
          -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
@@ -387,14 +387,15 @@ instance S.Semantics Semantics where
       collectAndForget = Semantics . lift . execWriterT . runSemantics
       -}
 
-  memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
+  -- FIXME:
+  -- memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
 
   memset v1 v2 v3 = tell [MemSet v1 v2 v3]
 
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    -- return $ VarExpr (Variable S.knownType name)
+    return $ VarExpr (Variable S.knownType name)
 
   syscall = tell [Syscall]
 
@@ -481,8 +482,9 @@ ppNamedStmt s = case s of
   Get l -> R.sexpr "get" [ ppMLocation l ]
   BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
   BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
-  MemCmp n v1 v2 v3 v4 ->
-    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+  -- FIXME
+  -- MemCmp n v1 v2 v3 v4 ->
+  --   R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
