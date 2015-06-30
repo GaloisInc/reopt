@@ -1151,33 +1151,8 @@ exec_fnstcw l = do
 -- FXSAVE Save x87 FPU and SIMD state
 -- FXRSTOR Restore x87 FPU and SIMD state
 
+
 -- * MMX Instructions
-
-exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
-                     => MLocation m (BVType n)
-                     -> Value m (BVType n')
-                     -> m ()
-exec_movd l v
-  | Just LeqProof <- testLeq  (loc_width l) (bv_width v) = l .= bvTrunc (loc_width l) v
-  | Just LeqProof <- testLeq  (bv_width v) (loc_width l) = l .=    uext (loc_width l) v
-  | otherwise = fail "movd: Unknown bit width"
-exec_movq = exec_movd
-
-exec_pand :: Binop
-exec_pand l v = do
-  v0 <- get l
-  l .= v0 .&. v
-
-exec_por :: Binop
-exec_por l v = do
-  v0 <- get l
-  l .= v0 .|. v
-
-exec_pxor :: Binop
-exec_pxor l v = do
-  v0 <- get l
-  l .= v0 `bvXor` v
-
 
 -- uses bvCat to turn [a, b, c, d] into [ab, cd]
 concatBVPairs :: (IsValue v, 1 <= n) => [v (BVType n)] -> [v (BVType (n+n))]
@@ -1232,6 +1207,22 @@ splitIntoSize sz bv
   | Just Refl <- testEquality (bv_width bv) n128
   , Just Refl <- testEquality sz n64 = splitBVs [bv]
 
+
+-- ** MMX data transfer
+
+exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
+                     => MLocation m (BVType n)
+                     -> Value m (BVType n')
+                     -> m ()
+exec_movd l v
+  | Just LeqProof <- testLeq  (loc_width l) (bv_width v) = l .= bvTrunc (loc_width l) v
+  | Just LeqProof <- testLeq  (bv_width v) (loc_width l) = l .=    uext (loc_width l) v
+  | otherwise = fail "movd: Unknown bit width"
+exec_movq = exec_movd
+
+
+-- ** MMX conversion
+
 punpck :: (IsLocationBV m n)
        => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
        -> NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -1259,6 +1250,50 @@ exec_punpcklbw  = punpckl n8
 exec_punpcklwd  = punpckl n16
 exec_punpckldq  = punpckl n32
 exec_punpcklqdq = punpckl n64
+
+
+-- ** MMX packed arithmatic
+
+
+-- ** MMX comparison
+
+pcmpeq :: (IsLocationBV m n, 1 <= o) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pcmpeq sz l v = do
+  v0 <- get l
+  let dSplit = splitIntoSize sz v0
+      sSplit = splitIntoSize sz v
+
+      resultValues = map chkPair $ zip dSplit sSplit
+      r = concatIntoSize (loc_width l) resultValues
+  l .= r
+  where zero = bvLit sz (0::Integer)
+        chkPair (x, y) = mux (x .=. y) (complement zero) zero
+
+exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
+exec_pcmpeqb = pcmpeq n8
+exec_pcmpeqw = pcmpeq n16
+exec_pcmpeqd = pcmpeq n32
+
+
+-- ** MMX logical
+
+exec_pand :: Binop
+exec_pand l v = do
+  v0 <- get l
+  l .= v0 .&. v
+
+exec_por :: Binop
+exec_por l v = do
+  v0 <- get l
+  l .= v0 .|. v
+
+exec_pxor :: Binop
+exec_pxor l v = do
+  v0 <- get l
+  l .= v0 `bvXor` v
+
+
+-- ** MMX shift and rotate
 
 
 -- * SSE Instructions

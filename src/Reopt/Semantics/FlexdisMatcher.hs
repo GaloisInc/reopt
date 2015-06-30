@@ -351,11 +351,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
 
+              -- MMX instructions
               , mk "movd"    $ mkBinopLV exec_movd
               , mk "movq"    $ mkBinopLV exec_movq
-              , mk "pand"    $ binop exec_pand
-              , mk "por"     $ binop exec_por
-              , mk "pxor"    $ binop exec_pxor
               , mk "punpckhbw"  $ binop exec_punpckhbw
               , mk "punpckhwd"  $ binop exec_punpckhwd
               , mk "punpckhdq"  $ binop exec_punpckhdq
@@ -364,6 +362,13 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "punpcklwd"  $ binop exec_punpcklwd
               , mk "punpckldq"  $ binop exec_punpckldq
               , mk "punpcklqdq" $ binop exec_punpcklqdq
+              , mk "pcmpeqb" $ binop exec_pcmpeqb
+              , mk "pcmpeqw" $ binop exec_pcmpeqw
+              , mk "pcmpeqd" $ binop exec_pcmpeqd
+              , mk "pand"    $ binop exec_pand
+              , mk "por"     $ binop exec_por
+              , mk "pxor"    $ binop exec_pxor
+
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
               , mk "fld"     $ fpUnopV exec_fld
