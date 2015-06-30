@@ -1379,14 +1379,51 @@ exec_movss l v = l .= v
 
 -- ** SSE 64-Bit SIMD Integer Instructions
 
+-- select packed values given an operator (like bvUlt for min)
+pselect :: (IsLocationBV m n, 1 <= o)
+        => (Value m (BVType o) -> Value m (BVType o) -> Value m (BoolType))
+        -> NatRepr o
+        -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pselect op sz l v = do
+  v0 <- get l
+  let dSplit = splitIntoSize sz v0
+      sSplit = splitIntoSize sz v
+
+      resultValues = map chkPair $ zip dSplit sSplit
+      r = concatIntoSize (loc_width l) resultValues
+  l .= r
+  where chkPair (d, s) = mux (d `op` s) d s
+
+
 -- PAVGB Compute average of packed unsigned byte integers
 -- PAVGW Compute average of packed unsigned word integers
 -- PEXTRW Extract word
 -- PINSRW Insert word
+
 -- PMAXUB Maximum of packed unsigned byte integers
 -- PMAXSW Maximum of packed signed word integers
 -- PMINUB Minimum of packed unsigned byte integers
 -- PMINSW Minimum of packed signed word integers
+exec_pmaxub, exec_pmaxuw, exec_pmaxud :: Binop
+exec_pmaxub = pselect (flip bvUlt) n8
+exec_pmaxuw = pselect (flip bvUlt) n16
+exec_pmaxud = pselect (flip bvUlt) n32
+
+exec_pmaxsb, exec_pmaxsw, exec_pmaxsd :: Binop
+exec_pmaxsb = pselect (flip bvSlt) n8
+exec_pmaxsw = pselect (flip bvSlt) n16
+exec_pmaxsd = pselect (flip bvSlt) n32
+
+exec_pminub, exec_pminuw, exec_pminud :: Binop
+exec_pminub = pselect bvUlt n8
+exec_pminuw = pselect bvUlt n16
+exec_pminud = pselect bvUlt n32
+
+exec_pminsb, exec_pminsw, exec_pminsd :: Binop
+exec_pminsb = pselect bvSlt n8
+exec_pminsw = pselect bvSlt n16
+exec_pminsd = pselect bvSlt n32
+
 -- PMOVMSKB Move byte mask
 -- PMULHUW Multiply packed unsigned integers and store high result
 -- PSADBW Compute sum of absolute differences

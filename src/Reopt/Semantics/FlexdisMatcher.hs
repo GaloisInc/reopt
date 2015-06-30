@@ -372,6 +372,20 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "por"     $ binop exec_por
               , mk "pxor"    $ binop exec_pxor
 
+              -- SSE instructions
+              , mk "pmaxub"  $ binop exec_pmaxub
+              , mk "pmaxuw"  $ binop exec_pmaxuw
+              , mk "pmaxud"  $ binop exec_pmaxud
+              , mk "pmaxsb"  $ binop exec_pmaxsb
+              , mk "pmaxsw"  $ binop exec_pmaxsw
+              , mk "pmaxsd"  $ binop exec_pmaxsd
+              , mk "pminub"  $ binop exec_pminub
+              , mk "pminuw"  $ binop exec_pminuw
+              , mk "pminud"  $ binop exec_pminud
+              , mk "pminsb"  $ binop exec_pminsb
+              , mk "pminsw"  $ binop exec_pminsw
+              , mk "pminsd"  $ binop exec_pminsd
+
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
               , mk "fld"     $ fpUnopV exec_fld
