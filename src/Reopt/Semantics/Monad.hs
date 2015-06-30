@@ -647,7 +647,8 @@ class ( Applicative m
 
   -- FIXME: use location instead?
   -- | Move n bits at a time, with count moves
-  memmove :: Int
+  --
+  memcopy :: Integer
              -- ^ Number of bytes to copy at a time (1,2,4,8)
           -> Value m (BVType 64)
              -- ^ Number of values to move.
@@ -655,33 +656,38 @@ class ( Applicative m
              -- ^ Start of source buffer
           -> Value m (BVType 64)
              -- ^ Start of destination buffer.
-          -> Bool
+          -> Value m BoolType
              -- ^ Flag indicates direction of move:
              -- True means we should decrement buffer pointers after each copy.
              -- False means we should increment the buffer pointers after each copy.
           -> m ()
-  -- memmove n count src dest
 
-  -- | Set memory to the given value, for the number of words (nbytes = count * bv_width v)
-  memset :: Value m (BVType 64)
-         -- ^ Number of values to assign.
-         -> Value m (BVType n)
-         -- ^ Value to assign.
-         -> Value m (BVType 64)
-         -- ^ Address to start assigning from.
-         -> m ()
-
-  -- FIXME: be consistent wrt direction flags (cf memmove).
   -- | Compare the memory regions.  Returns the number of elements which are
   -- identical.  If the direction is 0 then it is increasing, otherwise decreasing.
   -- The number of bytes which are the same is stored into rax
-  memcmp :: NatRepr n
-         -> Value m (BVType 64)
-         -> Value m BoolType
-         -> Value m (BVType 64)
-         -> Value m (BVType 64)
-         -> m ()
-  -- memcmp n count direction srd dest
+  memcmp :: Integer
+            -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+            -> Value m (BVType 64)
+            -- ^ Number of elementes to compare
+            -> Value m (BVType 64)
+            -- ^ Pointer to first buffer
+            -> Value m (BVType 64)
+            -- ^ Pointer to second buffer
+            -> Value m BoolType
+             -- ^ Flag indicates direction of copy:
+             -- True means we should decrement buffer pointers after each copy.
+             -- False means we should increment the buffer pointers after each copy.
+            -> m (Value m (BVType 64))
+
+  -- | Set memory to the given value, for the number of words (nbytes
+  -- = count * bv_width v)
+  memset :: Value m (BVType 64)
+            -- ^ Number of values to set
+            -> Value m (BVType n)
+            -- ^ Value to set
+            -> Value m (BVType 64)
+            -- ^ Pointer to buffer to set
+            -> m ()
 
   -- | execute the system call instruction.
   syscall :: m ()

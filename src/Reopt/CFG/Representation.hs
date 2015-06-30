@@ -203,21 +203,7 @@ type BVValue n = Value (BVType n)
 data Stmt where
   AssignStmt :: !(Assignment tp) -> Stmt
   Write :: !(StmtLoc (BVValue 64) tp) -> Value tp -> Stmt
-  MemMove :: !Int
-             -- ^ Number of bytes to copy at a time (1,2,4,8)
-          -> !(BVValue 64)
-             -- ^ Number of values to move.
-          -> !(BVValue 64)
-             -- ^ Start of source buffer.
-          -> !(BVValue 64)
-             -- ^ Start of destination buffer.
-          -> !Bool
-             -- ^ Flag indicates whether direction of move:
-             -- True means we should decrement buffer pointers after each copy.
-             -- False means we should increment the buffer pointers after each copy.
-          -> Stmt
-
-  MemCmp :: !Int
+  MemCopy :: !Integer
              -- ^ Number of bytes to copy at a time (1,2,4,8)
           -> !(BVValue 64)
              -- ^ Number of values to move.
@@ -226,7 +212,9 @@ data Stmt where
           -> !(BVValue 64)
              -- ^ Start of destination buffer.
           -> !(BVValue 1)
-             -- ^ Direction flag, False means increasing          
+             -- ^ Flag indicates whether direction of move:
+             -- True means we should decrement buffer pointers after each copy.
+             -- False means we should increment the buffer pointers after each copy.
           -> Stmt
 
   MemSet :: BVValue 64
@@ -243,16 +231,12 @@ data Stmt where
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
-  pretty (MemMove sz cnt src dest rev) =
+  pretty (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
   pretty (MemSet cnt val dest) =
       text "memset" <+> parens (hcat $ punctuate comma args)
     where args = [pretty cnt, pretty val, pretty dest]
-  pretty (MemCmp sz cnt src dest rev) =
-      text "memcmp" <+> parens (hcat $ punctuate comma args)
-    where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)
@@ -314,6 +298,19 @@ data AssignRhs tp where
 
   Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
 
+  -- Here because it returns a value
+  MemCmp :: !Integer
+             -- ^ Number of bytes to copy at a time (1,2,4,8)
+          -> !(BVValue 64)
+             -- ^ Number of values to move.
+          -> !(BVValue 64)
+             -- ^ Start of source buffer.
+          -> !(BVValue 64)
+             -- ^ Start of destination buffer.
+          -> !(BVValue 1)
+             -- ^ Direction flag, False means increasing
+          -> AssignRhs (BVType 64)
+
 ------------------------------------------------------------------------
 -- Assignment
 
@@ -346,6 +343,9 @@ instance Pretty (AssignRhs tp) where
   pretty (EvalApp a) = ppApp (ppValue 10) a
   pretty (SetUndefined w) = text "undef ::" <+> brackets (text (show w))
   pretty (Read loc) = pretty loc
+  pretty (MemCmp sz cnt src dest rev) =
+      text "memcmp" <+> parens (hcat $ punctuate comma args)
+    where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
 
 -- | Returns the type of an assignment rhs.
 assignRhsType :: AssignRhs tp -> TypeRepr tp
@@ -354,6 +354,7 @@ assignRhsType rhs =
     EvalApp a -> appType a
     SetUndefined w -> BVTypeRepr w
     Read loc  -> stmtLocType loc
+    MemCmp _sz _cnt _src _dest _rev -> knownType
 
 ------------------------------------------------------------------------
 -- Value

@@ -810,22 +810,18 @@ exec_movs True dest_loc _src_loc = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let nbytesv = bvLit n64 (toInteger nbytes)
+  let nbytesv = bvLit n64 nbytes
   count <- uext n64 <$> get count_reg
   let total_bytes = count .* nbytesv
   -- FIXME: we might need direction for overlapping regions
   count_reg .= bvLit (loc_width count_reg) (0::Integer)
-  ifte_ df
-        (do memmove nbytes count src dest True
-            rsi .= src  .- total_bytes
-            rdi .= dest .- total_bytes)
-        (do memmove nbytes count src dest False
-            rsi .= (src  .+ total_bytes)
-            rdi .= (dest .+ total_bytes))
+  memcopy nbytes count src dest df
+  rsi .= mux df (src  .- total_bytes) (src  .+ total_bytes)
+  rdi .= mux df (dest  .- total_bytes) (dest  .+ total_bytes)
   where
     count_reg = regLocation sz N.rcx
     sz = loc_width dest_loc
-    nbytes = fromInteger (natValue sz) `div` 8
+    nbytes = natValue sz `div` 8 
 
 -- FIXME: can also take rep prefix
 -- FIXME: we ignore the aso here.
@@ -853,9 +849,10 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
   where
     sz  = loc_width loc_rsi
     szv = bvLit n64 $ natValue sz
+    nbytes = natValue sz `div` 8
+    
     do_memcmp df src dest count = do
-      memcmp sz count df src dest
-      nsame <- get rax -- FIXME: this should really be returned by memcmp
+      nsame <- memcmp nbytes count src dest df
       let equal = (nsame .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
