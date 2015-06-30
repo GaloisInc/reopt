@@ -12,6 +12,10 @@ building.
 
 ## Dependencies
 
+In addition to Hackage dependencies, Reopt has the following internally maintained dependencies:
+
 - https://github.com/GaloisInc/elf (a fork of `elf` package on Hackage)
 - https://github.com/GaloisInc/flexdis86
+- https://github.com/GaloisInc/linux-ptrace (a fork of `linux-ptrace` package on Hackage)
 - https://github.com/GaloisInc/parameterized-utils
+- https://github.com/GaloisInc/posix-waitpid (a fork of `posix-waitpid` package on Hackage)

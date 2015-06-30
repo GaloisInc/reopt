@@ -356,6 +356,14 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pand"    $ binop exec_pand
               , mk "por"     $ binop exec_por
               , mk "pxor"    $ binop exec_pxor
+              , mk "punpckhbw"  $ binop exec_punpckhbw
+              , mk "punpckhwd"  $ binop exec_punpckhwd
+              , mk "punpckhdq"  $ binop exec_punpckhdq
+              , mk "punpckhqdq" $ binop exec_punpckhqdq
+              , mk "punpcklbw"  $ binop exec_punpcklbw
+              , mk "punpcklwd"  $ binop exec_punpcklwd
+              , mk "punpckldq"  $ binop exec_punpckldq
+              , mk "punpcklqdq" $ binop exec_punpcklqdq
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
               , mk "fld"     $ fpUnopV exec_fld
