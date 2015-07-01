@@ -3,3 +3,4 @@ deps
 sandbox
 cabal.sandbox.config
 tmp
+.stack-work
