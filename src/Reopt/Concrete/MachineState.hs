@@ -127,6 +127,10 @@ asBV :: Value tp -> Maybe BV
 asBV (Literal (unBitVector -> (_, bv))) = Just bv
 asBV _ = Nothing
 
+asTypeRepr :: Value tp -> TypeRepr tp
+asTypeRepr (Literal (unBitVector -> (nr, _))) = BVTypeRepr nr
+asTypeRepr (Undefined tr)                     = tr
+
 ------------------------------------------------------------------------
 -- Operations on 'Value's
 

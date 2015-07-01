@@ -561,10 +561,10 @@ evalExpr (AppExpr a) = do
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
-    R.BVDiv nr c1 c2 -> CS.liftValue2 (div) nr c1 c2
-    R.BVMod nr c1 c2 -> CS.liftValue2 (mod) nr c1 c2
-    R.BVSignedDiv nr c1 c2 -> CS.liftValue2 (BV.sdiv) nr c1 c2
-    R.BVSignedMod nr c1 c2 -> CS.liftValue2 (BV.smod) nr c1 c2
+    R.BVDiv nr c1 c2 -> error "Impossible: BVDiv should be unreachable"
+    R.BVMod nr c1 c2 -> error "Impossible: BVMod should be unreachable"
+    R.BVSignedDiv nr c1 c2 -> error "Impossible: BVSignedDiv should be unreachable"
+    R.BVSignedMod nr c1 c2 -> error "Impossible: BVSignedMod should be unreachable"
 
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
@@ -674,8 +674,38 @@ evalStmt (NamedStmt [x] (Get l)) = do
       v <- CS.getReg rn
       extendEnv (Variable tr x) v
     _ -> undefined -- subregisters
-evalStmt (NamedStmt names (BVDiv ns1 ns2)) = undefined
-evalStmt (NamedStmt names (BVSignedDiv ns1 ns2)) = undefined
+evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
+  v1 <- evalExpr' ns1
+  v2 <- evalExpr' ns2
+  let tr = CS.asTypeRepr v2
+      (q,r) = case (v1,v2) of
+                (_, CS.Literal (CS.unBitVector -> (nr,bv)))
+                  -> if BV.nat bv == 0
+                        then error "evalStmt: BVDiv: #DE"
+                        -- XXX: We use quot/rem & div/mod interchangeably,
+                        --      but they round differently.
+                        else ( CS.liftValue2 (takeSecondWidth div) nr v1 v2
+                             , CS.liftValue2 (takeSecondWidth mod) nr v1 v2
+                             )
+                _ -> (CS.Undefined tr, CS.Undefined tr)
+  extendEnv (Variable tr nameQuot) q
+  extendEnv (Variable tr nameRem)  r
+evalStmt (NamedStmt [nameQuot, nameRem] (BVSignedDiv ns1 ns2)) = do
+  v1 <- evalExpr' ns1
+  v2 <- evalExpr' ns2
+  let tr = CS.asTypeRepr v2
+      (q,r) = case (v1,v2) of
+                (_, CS.Literal (CS.unBitVector -> (nr,bv)))
+                  -> if BV.nat bv == 0
+                        then error "evalStmt: BVSignedDiv: #DE"
+                        -- XXX: We use quot/rem & div/mod interchangeably,
+                        --      but they round differently.
+                        else ( CS.liftValue2 (takeSecondWidth BV.sdiv) nr v1 v2
+                             , CS.liftValue2 (takeSecondWidth BV.smod) nr v1 v2
+                             )
+                _ -> (CS.Undefined tr, CS.Undefined tr)
+  extendEnv (Variable tr nameQuot) q
+  extendEnv (Variable tr nameRem)  r
 -- Based on 'MemCopy' eval below.
 evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
   case bytes of
@@ -704,6 +734,7 @@ evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
       extendEnv (Variable tr x_matches) lit
 evalStmt (NamedStmt _ _) =
   error "evalStmt: wrong number of bindings for 'NamedStmt'!"
+
 evalStmt (l := e) = do
   ve <- evalExpr' e
   case l of
@@ -761,8 +792,10 @@ evalStmt (MemSet n v a) = do
   let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
-evalStmt Syscall = undefined
-evalStmt (Exception s1 s2 s3) = undefined
+evalStmt Syscall = error "Syscall"
+-- FIXME: in Exception and BVDiv/BVSigned we use error, but we may want
+-- more real exception support in the MachineState monad in the future.
+evalStmt (Exception s1 s2 s3) = error "Exception"
 evalStmt (X87Push s) = do
   let top = N.X87TopReg
   vTop <- CS.getReg top
@@ -775,7 +808,6 @@ evalStmt (X87Push s) = do
       if idx > 7
          then error "evalStmt: X87Push: index out of bounds"
          else CS.setReg (N.X87FPUReg idx) =<< evalExpr' s
-
 evalStmt X87Pop = do
   let top = N.X87TopReg
   vTop <- CS.getReg top
@@ -827,6 +859,17 @@ extPrecisionNatRepr = n80
 ------------------------------------------------------------------------
 -- Helper functions ----------------------------------------------------
 ------------------------------------------------------------------------
+
+-- Truncate the result to the width of the second bitvector.
+takeSecondWidth :: (BV -> BV -> BV) -> BV -> BV -> BV
+takeSecondWidth f bv1 bv2 =
+  if resUInt >= 2^w2
+     then error "takeSecondWidth: result does not fit in allowed width"
+     else BV.bitVec w2 resUInt
+  where
+    w2 = BV.width bv2
+    res = f bv1 bv2
+    resUInt = BV.uint res
 
 doMux :: BV -> BV -> BV -> BV
 doMux tst thn els = case BV.toBits tst of
