@@ -380,7 +380,7 @@ instance MonadMachineState PTraceMachineState where
   setMem = fail "setMem unimplemented for PTraceMachineState"
   getMem (Address width bv) = do
     memH <- asks memHandle
-    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral (widthVal width) `div` 8)
+    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat bv) (fromIntegral (widthVal width) `div` 8)
     return $ Literal $ toBitVector width bs
 
   getReg regname = do
@@ -432,7 +432,7 @@ stepConcrete = do
   let instrAddr = Address knownNat bv
   (w, ii) <- runMachineByteReader (disassembleInstruction defaultX64Disassembler) instrAddr
   trace (show ii) (return ())
-  case execInstruction (fromIntegral $ (nat $ snd $ unBitVector bv) + 
+  case execInstruction (fromIntegral $ (nat bv) + 
                         fromIntegral w) ii 
     of Just s -> trace (show $ ppStmts  $ execSemantics s) $ 
 	               evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
