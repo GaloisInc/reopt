@@ -959,3 +959,8 @@ transferRHS r rhs =
       , Just Refl <- testEquality tp v_tp ->
          v
     Read _ -> TopV
+    -- We know only that it will return up to (and including(?)) cnt
+    MemCmp _sz cnt _src _dest _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt)
+        -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+      | otherwise -> TopV

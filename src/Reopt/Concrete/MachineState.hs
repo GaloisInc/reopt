@@ -20,7 +20,7 @@ import           Data.Parameterized.NatRepr
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
-import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, unBitVector)
+import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
 import qualified Data.BitVector as BV
 
@@ -116,6 +116,13 @@ liftValueMaybe2 f nr (asBV -> Just v1) (asBV -> Just v2) =
     Nothing -> Undefined (BVTypeRepr nr)
     Just bv -> Literal $ bitVector nr bv
 liftValueMaybe2 _ nr _ _ = Undefined (BVTypeRepr nr)
+
+liftValueSame :: (BV -> BV)
+              -> Value (BVType n)
+              -> Value (BVType n)
+liftValueSame f (Literal (unBitVector -> (nr, v))) =
+  Literal $ bitVector nr (f v)
+liftValueSame _ u@(Undefined _) = u
 
 asBV :: Value tp -> Maybe BV
 asBV (Literal (unBitVector -> (_, bv))) = Just bv
@@ -217,7 +224,7 @@ byteAddresses (Address nr bv) = addrs
     mkBv k = B.bitVec 64 k
     count =
       if natValue nr `mod` 8 /= 0
-      then error "getMem: requested number of bits is not a multiple of 8!"
+      then error "byteAddresses: requested number of bits is not a multiple of 8!"
       else natValue nr `div` 8
 
 getMem8 :: MonadMachineState m => Address8 -> ConcreteState m Value8

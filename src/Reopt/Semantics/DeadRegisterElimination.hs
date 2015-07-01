@@ -65,17 +65,12 @@ blockLiveRegisters b = do addIDs terminalIds
       = do addIDs (refsInLoc loc)
            addIDs (refsInValue rhs)
            return (stmt : ss)
-    noteAndFilter stmt@(MemMove _ cnt src dest _) ss = do
+    noteAndFilter stmt@(MemCopy _ cnt src dest df) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue src)
       addIDs (refsInValue dest)
+      addIDs (refsInValue df)      
       return (stmt : ss)
-    noteAndFilter stmt@(MemCmp _ cnt src dest dir) ss = do
-      addIDs (refsInValue cnt)
-      addIDs (refsInValue src)
-      addIDs (refsInValue dest)
-      addIDs (refsInValue dir)      
-      return (stmt : ss) 
     noteAndFilter stmt@(MemSet cnt val dest) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue val)
@@ -91,6 +86,11 @@ refsInAssignRhs rhs = case rhs of
                        EvalApp v      -> refsInApp v
                        SetUndefined _ -> S.empty
                        Read loc       -> refsInLoc loc
+                       MemCmp _ cnt src dest dir ->
+                         S.unions [ refsInValue cnt
+                                  , refsInValue src
+                                  , refsInValue dest
+                                  , refsInValue dir ]
 
 refsInApp :: App Value tp -> Set AssignId
 refsInApp app = foldApp (\v s -> refsInValue v `S.union` s) S.empty app

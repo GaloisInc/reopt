@@ -13,6 +13,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -84,7 +85,7 @@ import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , TypeBits, floatInfoBits, n1, type_width
+                                     , TypeBits, floatInfoBits, n1, n80, type_width
                                      )
 
 ------------------------------------------------------------------------
@@ -191,7 +192,7 @@ instance S.IsValue Expr where
   bvShl x y = app $ R.BVShl (exprWidth x) x y
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
-  bvSlt x y = app $ R.BVUnsignedLt x y
+  bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
@@ -263,11 +264,11 @@ data NamedStmt where
               => Expr (BVType (n+n))
               -> Expr (BVType n)
               -> NamedStmt
-  MemCmp :: NatRepr n
+  MemCmp :: Integer
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
          -> Expr (BVType 64)
          -> Expr BoolType
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
          -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
@@ -279,15 +280,16 @@ data Stmt where
   -- bind a list of 'Name's here.
   NamedStmt :: [Name] -> NamedStmt -> Stmt
 
-  -- The remaining constructors correspond to the 'S.Semantics
-  -- operations'.
+  -- The remaining constructors correspond to the 'S.Semantics'
+  -- operations; the arguments are documented there and in
+  -- 'Reopt.CFG.Representation.Stmt'.
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
-  MemMove :: Int
+  MemCopy :: Integer
           -> Expr (BVType 64)
           -> Expr (BVType 64)
           -> Expr (BVType 64)
-          -> Bool
+          -> Expr BoolType
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Syscall :: Stmt
@@ -387,14 +389,14 @@ instance S.Semantics Semantics where
       collectAndForget = Semantics . lift . execWriterT . runSemantics
       -}
 
-  memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
+  memcopy i v1 v2 v3 b = tell [MemCopy i v1 v2 v3 b]
 
   memset v1 v2 v3 = tell [MemSet v1 v2 v3]
 
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    -- return $ VarExpr (Variable S.knownType name)
+    return $ VarExpr (Variable S.knownType name)
 
   syscall = tell [Syscall]
 
@@ -482,7 +484,7 @@ ppNamedStmt s = case s of
   BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
   BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   MemCmp n v1 v2 v3 v4 ->
-    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+    R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
@@ -499,7 +501,7 @@ ppStmt s = case s of
     , text "else"
     ,   indent 2 (ppStmts f)
     ]
-  MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
+  MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
   Syscall -> text "syscall"
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
@@ -537,9 +539,12 @@ evalExpr (VarExpr var) = do
 evalExpr (AppExpr a) = do
   a' <- R.traverseApp evalExpr a
   return $ case a' of
+    -- Mux is if-then-else
+    R.Mux nr c1 c2 c3 -> CS.liftValue3 doMux nr c1 c2 c3
+
     -- Resize ops
-    R.Mux nr c1 c2 c3 -> undefined
-    R.MMXExtend c -> undefined
+    R.MMXExtend c -> let ones = BV.ones 16
+                      in CS.liftValue (BV.# ones) extPrecisionNatRepr c
     R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
     R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
@@ -629,9 +634,12 @@ evalExpr (AppExpr a) = do
     R.FPEq fr c1 c2 -> liftFPPred2 (==) fr c1 c2
 
     -- Conversion
-    R.FPCvt fr1 c fr2 -> convert fr1 fr2 c
-    R.FPFromBV fr c -> undefined
-    R.TruncFPToSignedBV fr c nr -> undefined
+    R.FPCvt fr1 c fr2 -> convertFP fr1 fr2 c
+    R.FPFromBV fr c -> convertBVtoFP fr c
+    -- XXX FIXME: If a conversion is out of the range of the bitvector, we
+    -- should raise a floating point exception. If that is masked, we should
+    -- return -1 as a BV.
+    R.TruncFPToSignedBV fr c nr -> liftFPtoBV (truncateIfValid nr) fr nr c
 
 ------------------------------------------------------------------------
 -- Statement evaluation
@@ -643,8 +651,9 @@ evalExpr' e = runReader (evalExpr e) <$> get
 extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
-evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
-evalStmt (NamedStmt names (MakeUndefined ns)) = undefined
+evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+evalStmt (NamedStmt [x] (MakeUndefined tr)) =
+  extendEnv (Variable tr x) (CS.Undefined tr)
 evalStmt (NamedStmt [x] (Get l)) = do
   case l of
     S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
@@ -666,7 +675,34 @@ evalStmt (NamedStmt [x] (Get l)) = do
     _ -> undefined -- subregisters
 evalStmt (NamedStmt names (BVDiv ns1 ns2)) = undefined
 evalStmt (NamedStmt names (BVSignedDiv ns1 ns2)) = undefined
-evalStmt (NamedStmt names (MemCmp ns1 ns2 ns3 ns4 ns5)) = undefined
+-- Based on 'MemCopy' eval below.
+evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
+  case bytes of
+    1 -> go S.n8
+    2 -> go S.n16
+    4 -> go S.n32
+    8 -> go S.n64
+    _ -> error "evalStmt: MemCmp: unsupported number of bytes!"
+  where
+    go :: NatRepr n -> m ()
+    go nr = do
+      [vcompares, vsrc, vdst] <- mapM evalExpr' [compares, src, dst]
+      vreversed <- evalExpr' reversed
+      let srcAddrs = addressSequence vsrc nr vcompares vreversed
+      let dstAddrs = addressSequence vdst nr vcompares vreversed
+
+      matches <- forM (zip srcAddrs dstAddrs) $ \(s, d) -> do
+        l <- CS.getMem s
+        r <- CS.getMem d
+        return $ if l == r then 1 else 0
+
+      let tr :: TypeRepr (BVType 64)
+          tr = S.knownType
+      let lit :: CS.Value (BVType 64)
+          lit = CS.Literal $ CS.bitVector knownNat (sum matches)
+      extendEnv (Variable tr x_matches) lit
+evalStmt (NamedStmt _ _) =
+  error "evalStmt: wrong number of bindings for 'NamedStmt'!"
 evalStmt (l := e) = do
   ve <- evalExpr' e
   case l of
@@ -681,21 +717,121 @@ evalStmt (l := e) = do
     S.Register rn -> CS.setReg rn ve
     S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
     _ -> undefined -- subregisters
-evalStmt (Ifte_ s1 s2 s3) = undefined
-evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
-evalStmt (MemSet s1 s2 s3) = undefined
+evalStmt (Ifte_ c t f) = do
+  vc <- evalExpr' c
+  case vc of
+    CS.Undefined _ -> error "evalStmt: Ifte_: undefined condition!"
+    CS.Literal (CS.unBitVector -> (_, bv)) -> do
+      -- All names in the environment are only defined once, and usage
+      -- of names in the enviroment is constrained by scoping in the
+      -- meta language, Haskell, so this save and restore of the
+      -- environment here should be technically unnecessary.
+      env0 <- get
+      if BV.nat bv /= 0
+      then mapM_ evalStmt t
+      else mapM_ evalStmt f
+      put env0
+evalStmt (MemCopy bytes copies src dst reversed) = do
+  case bytes of
+    1 -> go S.n8
+    2 -> go S.n16
+    4 -> go S.n32
+    8 -> go S.n64
+    _ -> error "evalStmt: MemCopy: unsupported number of bytes!"
+  where
+    -- Construct source and destination address sequences of type
+    -- @CS.Address (BVType (bytes * 8))@ and do the copies.  The
+    -- address type depends on the incoming integer 'bytes', so we
+    -- can't type the addresses in general; if 'bytes' were a
+    -- 'NatRepr' we could.
+    go :: NatRepr n -> m ()
+    go nr = do
+      [vcopies, vsrc, vdst] <- mapM evalExpr' [copies, src, dst]
+      vreversed <- evalExpr' reversed
+      let srcAddrs = addressSequence vsrc nr vcopies vreversed
+      let dstAddrs = addressSequence vdst nr vcopies vreversed
+
+      forM_ (zip srcAddrs dstAddrs) $ \(s, d) -> do
+        CS.setMem d =<< CS.getMem s
+evalStmt (MemSet n v a) = do
+  vn <- evalExpr' n
+  vv <- evalExpr' v
+  va <- evalExpr' a
+  let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
+  forM_ addrs $ \addr -> do
+    CS.setMem addr vv
 evalStmt Syscall = undefined
 evalStmt (Exception s1 s2 s3) = undefined
-evalStmt (X87Push s) = undefined
-evalStmt X87Pop = undefined
+evalStmt (X87Push s) = do
+  let top = N.X87TopReg
+  vTop <- CS.getReg top
+  let vTop' = CS.liftValueSame ((-) 1) vTop
+  CS.setReg top vTop'
+  case vTop' of
+    CS.Undefined _ -> error "evalStmt: X87Push: Undefined Top index"
+    CS.Literal (CS.unBitVector -> (_, bv)) -> do
+      let idx = fromIntegral $ BV.uint bv
+      if idx > 7
+         then error "evalStmt: X87Push: index out of bounds"
+         else CS.setReg (N.X87FPUReg idx) =<< evalExpr' s
+
+evalStmt X87Pop = do
+  let top = N.X87TopReg
+  vTop <- CS.getReg top
+  CS.setReg top $ CS.liftValueSame (+1) vTop
+
+-- | Convert a base address, increment (in bits), and count, into a sequence of
+-- addresses.
+--
+-- TODO: move into 'MachineState' and refactor 'byteAddresses' in
+-- terms of this.
+addressSequence :: forall n.
+                   CS.Value (BVType 64)
+                -> NatRepr n
+                -> CS.Value (BVType 64)
+                -> CS.Value BoolType
+                -> [CS.Address (BVType n)]
+addressSequence (CS.Literal baseB) nr (CS.Literal countB) (CS.Literal reversedB) =
+  [ CS.modifyAddr (incBv k) baseAddr
+  | k <- [0..count - 1] ]
+  where
+    baseAddr :: CS.Address (BVType n)
+    baseAddr = CS.Address nr baseB
+    -- | Increment 'BV' by given number of byte-steps.
+    incBv :: Integer -> BV -> BV
+    incBv k = op (BV.bitVec 64 (k * byteInc))
+      where
+        op = if reversed == 1 then (-) else (+)
+    -- | Convert bit increment to byte increment.
+    byteInc :: Integer
+    byteInc =
+      if natValue nr `mod` 8 /= 0
+      then error "addressSequence: requested number of bits is not a multiple of 8!"
+      else natValue nr `div` 8
+    count, reversed :: Integer
+    count = CS.nat countB
+    reversed = CS.nat reversedB
+addressSequence _ _ _ _ = error "addressSequence: undefined argument!"
+
+------------------------------------------------------------------------
 
 boolNatRepr :: NatRepr 1
 boolNatRepr =  n1
 
+extPrecisionNatRepr :: NatRepr 80
+extPrecisionNatRepr = n80
 
----
--- Helper functions
----
+
+
+------------------------------------------------------------------------
+-- Helper functions ----------------------------------------------------
+------------------------------------------------------------------------
+
+doMux :: BV -> BV -> BV -> BV
+doMux tst thn els = case BV.toBits tst of
+  [b] -> if b then thn else els
+  _   -> error "Impossible: type mismatch with BV"
+
 sExtBV :: NatRepr n -> BV -> BV
 sExtBV nr bv = BV.signExtend diff bv
   where
@@ -770,6 +906,15 @@ bsr nr bv = case BV.nat bv of
   where
     destWidth = fromInteger $ natValue nr :: Int
 
+truncateIfValid :: RealFloat a
+                => NatRepr n -> a -> Integer
+truncateIfValid nr c = if -(2^width) <= i || i < (2^width)
+                          then i
+                          else -1
+  where
+    i     = truncate c
+    width = natValue nr
+
 
 ---
 -- Float madness
@@ -781,41 +926,24 @@ bsr nr bv = case BV.nat bv of
 -- energy if it is not necessary. We will just use the GHC default behavior,
 -- which (I believe) is round-to-nearest. It is hard to find good information
 -- about this though.
-liftFPPred :: (forall a. (RealFloat a) => (a -> Bool))
+liftFPtoBV :: (forall a. (RealFloat a) => (a -> Integer))
            -> FloatInfoRepr flt
+           -> NatRepr n
            -> CS.Value (FloatType flt)
-           -> CS.Value BoolType
-liftFPPred f fr = CS.liftValue wrap boolNatRepr
+           -> CS.Value (BVType n)
+liftFPtoBV f fr nr = CS.liftValue wrap nr
   where
+    width = fromIntegral $ natValue nr
+    --
     wrap :: BV -> BV
     wrap bv = case natValue (floatInfoBits fr) of
       32 -> let fromBV :: BV -> Float
                 fromBV = wordToFloat . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv)
+             in BV.bitVec width $ f (fromBV bv)
 
       64 -> let fromBV :: BV -> Double
                 fromBV = wordToDouble . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv)
-
-      _  -> error "Sorry, 32 or 64 bit floats only"
-
-
-liftFPPred2 :: (forall a. (Eq a, Ord a) => (a -> a -> Bool))
-            -> FloatInfoRepr flt
-            -> CS.Value (FloatType flt)
-            -> CS.Value (FloatType flt)
-            -> CS.Value BoolType
-liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
-  where
-    wrap2 :: BV -> BV -> BV
-    wrap2 bv1 bv2 = case natValue (floatInfoBits fr) of
-      32 -> let fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
-
-      64 -> let fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+             in BV.bitVec width $ f (fromBV bv)
 
       _  -> error "Sorry, 32 or 64 bit floats only"
 
@@ -847,11 +975,35 @@ liftFP2 f fr = CS.liftValue2 wrap2 nr
       where
         w = max (BV.width bv1) (BV.width bv2)
 
-convert :: FloatInfoRepr flt1
-        -> FloatInfoRepr flt2
-        -> CS.Value (FloatType flt1)
-        -> CS.Value (FloatType flt2)
-convert fr1 fr2 = CS.liftValue wrap nr2
+convertBVtoFP :: CS.Value (BVType n)
+              -> FloatInfoRepr flt
+              -> CS.Value (FloatType flt)
+convertBVtoFP c fr = CS.liftValue wrap nr c
+  where
+    nr = floatInfoBits fr
+    width = fromIntegral $ natValue nr
+    --
+    wrap :: BV -> BV
+    wrap bv = case width of
+      32 -> let toBV :: Float -> BV
+                toBV = BV.bitVec width . fromIntegral . floatToWord
+                mkFP :: BV -> Float
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      64 -> let toBV :: Double -> BV
+                toBV = BV.bitVec width . fromIntegral . doubleToWord
+                mkFP :: BV -> Double
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
+
+convertFP :: FloatInfoRepr flt1
+          -> FloatInfoRepr flt2
+          -> CS.Value (FloatType flt1)
+          -> CS.Value (FloatType flt2)
+convertFP fr1 fr2 = CS.liftValue wrap nr2
   where
     nr1 = floatInfoBits fr1
     nr2 = floatInfoBits fr2
@@ -872,4 +1024,36 @@ convert fr1 fr2 = CS.liftValue wrap nr2
                   in toBV $ double2Float (fromBV bv)
 
       _       -> error "Sorry, can only convert between 32 & 64 bit floats"
+
+
+---
+-- Predicates
+---
+liftFPPred :: (forall a. (RealFloat a) => (a -> Bool))
+           -> FloatInfoRepr flt
+           -> CS.Value (FloatType flt)
+           -> CS.Value BoolType
+liftFPPred f fr = liftFPtoBV f' fr boolNatRepr
+  where
+    f' :: (forall a. (RealFloat a) => (a -> Integer))
+    f' x = if (f x) then 1 else 0
+
+liftFPPred2 :: (forall a. (Eq a, Ord a) => (a -> a -> Bool))
+            -> FloatInfoRepr flt
+            -> CS.Value (FloatType flt)
+            -> CS.Value (FloatType flt)
+            -> CS.Value BoolType
+liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
+  where
+    wrap2 :: BV -> BV -> BV
+    wrap2 bv1 bv2 = case natValue (floatInfoBits fr) of
+      32 -> let fromBV :: BV -> Float
+                fromBV = wordToFloat . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      64 -> let fromBV :: BV -> Double
+                fromBV = wordToDouble . fromInteger . BV.int
+             in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
+
+      _  -> error "Sorry, 32 or 64 bit floats only"
 

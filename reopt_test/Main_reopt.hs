@@ -365,7 +365,7 @@ instance MonadMachineState PTraceMachineState where
   setMem = fail "unimplemented"
   getMem (Address width bv) = do
     memH <- asks memHandle
-    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral $ widthVal width)
+    bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat bv) (fromIntegral $ widthVal width)
     return $ Literal $ toBitVector width bs
 
   getReg regname = do
