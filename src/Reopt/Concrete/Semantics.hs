@@ -792,7 +792,8 @@ evalStmt (MemSet n v a) = do
   let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
-evalStmt Syscall = error "Syscall"
+-- FIXME: What do we do on syscalls?
+evalStmt Syscall = error "Syscall unimplemented"
 -- FIXME: in Exception and BVDiv/BVSigned we use error, but we may want
 -- more real exception support in the MachineState monad in the future.
 evalStmt (Exception s1 s2 s3) = error "Exception"
