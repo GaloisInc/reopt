@@ -19,7 +19,7 @@ import           Data.Parameterized.NatRepr
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
-import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, unBitVector)
+import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
 import qualified Data.BitVector as BV
 

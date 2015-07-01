@@ -193,7 +193,7 @@ instance S.IsValue Expr where
   bvShl x y = app $ R.BVShl (exprWidth x) x y
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
-  bvSlt x y = app $ R.BVUnsignedLt x y
+  bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
@@ -265,11 +265,11 @@ data NamedStmt where
               => Expr (BVType (n+n))
               -> Expr (BVType n)
               -> NamedStmt
-  MemCmp :: NatRepr n
+  MemCmp :: Integer
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
          -> Expr (BVType 64)
          -> Expr BoolType
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
          -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
@@ -281,15 +281,16 @@ data Stmt where
   -- bind a list of 'Name's here.
   NamedStmt :: [Name] -> NamedStmt -> Stmt
 
-  -- The remaining constructors correspond to the 'S.Semantics
-  -- operations'.
+  -- The remaining constructors correspond to the 'S.Semantics'
+  -- operations; the arguments are documented there and in
+  -- 'Reopt.CFG.Representation.Stmt'.
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
-  MemMove :: Int
+  MemCopy :: Integer
           -> Expr (BVType 64)
           -> Expr (BVType 64)
           -> Expr (BVType 64)
-          -> Bool
+          -> Expr BoolType
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Syscall :: Stmt
@@ -389,14 +390,14 @@ instance S.Semantics Semantics where
       collectAndForget = Semantics . lift . execWriterT . runSemantics
       -}
 
-  memmove i v1 v2 v3 b = tell [MemMove i v1 v2 v3 b]
+  memcopy i v1 v2 v3 b = tell [MemCopy i v1 v2 v3 b]
 
   memset v1 v2 v3 = tell [MemSet v1 v2 v3]
 
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    -- return $ VarExpr (Variable S.knownType name)
+    return $ VarExpr (Variable S.knownType name)
 
   syscall = tell [Syscall]
 
@@ -484,7 +485,7 @@ ppNamedStmt s = case s of
   BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
   BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   MemCmp n v1 v2 v3 v4 ->
-    R.sexpr "memcmp" [ R.ppNat n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+    R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
@@ -501,7 +502,7 @@ ppStmt s = case s of
     , text "else"
     ,   indent 2 (ppStmts f)
     ]
-  MemMove i v1 v2 v3 b -> R.sexpr "memmove" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, pretty b ]
+  MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
   Syscall -> text "syscall"
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
@@ -651,7 +652,7 @@ evalExpr' e = runReader (evalExpr e) <$> get
 extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
-evalStmt :: (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
 evalStmt (NamedStmt [x] (MakeUndefined tr)) =
   extendEnv (Variable tr x) (CS.Undefined tr)
 evalStmt (NamedStmt [x] (Get l)) = do
@@ -675,7 +676,34 @@ evalStmt (NamedStmt [x] (Get l)) = do
     _ -> undefined -- subregisters
 evalStmt (NamedStmt names (BVDiv ns1 ns2)) = undefined
 evalStmt (NamedStmt names (BVSignedDiv ns1 ns2)) = undefined
-evalStmt (NamedStmt names (MemCmp ns1 ns2 ns3 ns4 ns5)) = undefined
+-- Based on 'MemCopy' eval below.
+evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
+  case bytes of
+    1 -> go S.n8
+    2 -> go S.n16
+    4 -> go S.n32
+    8 -> go S.n64
+    _ -> error "evalStmt: MemCmp: unsupported number of bytes!"
+  where
+    go :: NatRepr n -> m ()
+    go nr = do
+      [vcompares, vsrc, vdst] <- mapM evalExpr' [compares, src, dst]
+      vreversed <- evalExpr' reversed
+      let srcAddrs = addressSequence vsrc nr vcompares vreversed
+      let dstAddrs = addressSequence vdst nr vcompares vreversed
+
+      matches <- forM (zip srcAddrs dstAddrs) $ \(s, d) -> do
+        l <- CS.getMem s
+        r <- CS.getMem d
+        return $ if l == r then 1 else 0
+
+      let tr :: TypeRepr (BVType 64)
+          tr = S.knownType
+      let lit :: CS.Value (BVType 64)
+          lit = CS.Literal $ CS.bitVector knownNat (sum matches)
+      extendEnv (Variable tr x_matches) lit
+evalStmt (NamedStmt _ _) =
+  error "evalStmt: wrong number of bindings for 'NamedStmt'!"
 evalStmt (l := e) = do
   ve <- evalExpr' e
   case l of
@@ -704,12 +732,33 @@ evalStmt (Ifte_ c t f) = do
       then mapM_ evalStmt t
       else mapM_ evalStmt f
       put env0
-evalStmt (MemMove s1 s2 s3 s4 s5) = undefined
+evalStmt (MemCopy bytes copies src dst reversed) = do
+  case bytes of
+    1 -> go S.n8
+    2 -> go S.n16
+    4 -> go S.n32
+    8 -> go S.n64
+    _ -> error "evalStmt: MemCopy: unsupported number of bytes!"
+  where
+    -- Construct source and destination address sequences of type
+    -- @CS.Address (BVType (bytes * 8))@ and do the copies.  The
+    -- address type depends on the incoming integer 'bytes', so we
+    -- can't type the addresses in general; if 'bytes' were a
+    -- 'NatRepr' we could.
+    go :: NatRepr n -> m ()
+    go nr = do
+      [vcopies, vsrc, vdst] <- mapM evalExpr' [copies, src, dst]
+      vreversed <- evalExpr' reversed
+      let srcAddrs = addressSequence vsrc nr vcopies vreversed
+      let dstAddrs = addressSequence vdst nr vcopies vreversed
+
+      forM_ (zip srcAddrs dstAddrs) $ \(s, d) -> do
+        CS.setMem d =<< CS.getMem s
 evalStmt (MemSet n v a) = do
   vn <- evalExpr' n
   vv <- evalExpr' v
   va <- evalExpr' a
-  let addrs = addressSequence va (CS.width vv) vn
+  let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
 evalStmt Syscall = undefined
@@ -741,8 +790,9 @@ addressSequence :: forall n.
                    CS.Value (BVType 64)
                 -> NatRepr n
                 -> CS.Value (BVType 64)
+                -> CS.Value BoolType
                 -> [CS.Address (BVType n)]
-addressSequence (CS.Literal baseB) nr (CS.Literal countB) =
+addressSequence (CS.Literal baseB) nr (CS.Literal countB) (CS.Literal reversedB) =
   [ CS.modifyAddr (incBv k) baseAddr
   | k <- [0..count - 1] ]
   where
@@ -750,18 +800,19 @@ addressSequence (CS.Literal baseB) nr (CS.Literal countB) =
     baseAddr = CS.Address nr baseB
     -- | Increment 'BV' by given number of byte-steps.
     incBv :: Integer -> BV -> BV
-    incBv k = (+ BV.bitVec 64 (k * byteInc))
+    incBv k = op (BV.bitVec 64 (k * byteInc))
+      where
+        op = if reversed == 1 then (-) else (+)
     -- | Convert bit increment to byte increment.
     byteInc :: Integer
     byteInc =
       if natValue nr `mod` 8 /= 0
       then error "addressSequence: requested number of bits is not a multiple of 8!"
       else natValue nr `div` 8
-    count :: Integer
-    count = BV.nat countBV
-      where
-        (_, countBV) = CS.unBitVector countB
-addressSequence _ _ _ = error "addressSequence: undefined argument!"
+    count, reversed :: Integer
+    count = CS.nat countB
+    reversed = CS.nat reversedB
+addressSequence _ _ _ _ = error "addressSequence: undefined argument!"
 
 ------------------------------------------------------------------------
 

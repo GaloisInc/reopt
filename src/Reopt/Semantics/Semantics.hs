@@ -791,7 +791,7 @@ regLocation sz
 exec_movs :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
-          -> MLocation m (BVType n)          
+          -> MLocation m (BVType n)
           -> m ()
 exec_movs False dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
@@ -810,25 +810,21 @@ exec_movs True dest_loc _src_loc = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let nbytesv = bvLit n64 (toInteger nbytes)
+  let nbytesv = bvLit n64 nbytes
   count <- uext n64 <$> get count_reg
   let total_bytes = count .* nbytesv
   -- FIXME: we might need direction for overlapping regions
   count_reg .= bvLit (loc_width count_reg) (0::Integer)
-  ifte_ df
-        (do memmove nbytes count src dest True
-            rsi .= src  .- total_bytes
-            rdi .= dest .- total_bytes)
-        (do memmove nbytes count src dest False
-            rsi .= (src  .+ total_bytes)
-            rdi .= (dest .+ total_bytes))
+  memcopy nbytes count src dest df
+  rsi .= mux df (src  .- total_bytes) (src  .+ total_bytes)
+  rdi .= mux df (dest  .- total_bytes) (dest  .+ total_bytes)
   where
-    count_reg = regLocation sz N.rcx    
+    count_reg = regLocation sz N.rcx
     sz = loc_width dest_loc
-    nbytes = fromInteger (natValue sz) `div` 8 
-      
+    nbytes = natValue sz `div` 8 
+
 -- FIXME: can also take rep prefix
--- FIXME: we ignore the aso here.  
+-- FIXME: we ignore the aso here.
 -- | CMPS/CMPSB Compare string/Compare byte string
 -- CMPS/CMPSW Compare string/Compare word string
 -- CMPS/CMPSD Compare string/Compare doubleword string
@@ -853,9 +849,10 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
   where
     sz  = loc_width loc_rsi
     szv = bvLit n64 $ natValue sz
+    nbytes = natValue sz `div` 8
+    
     do_memcmp df src dest count = do
-      memcmp sz count df src dest
-      nsame <- get rax -- FIXME: this should really be returned by memcmp
+      nsame <- memcmp nbytes count src dest df
       let equal = (nsame .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
@@ -888,7 +885,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 exec_stos :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
-          -> MLocation m (BVType n)          
+          -> MLocation m (BVType n)
           -> m ()
 exec_stos False _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
@@ -920,7 +917,7 @@ exec_stos True _dest_loc val_loc = do
   where
     sz = loc_width val_loc
     count_reg = regLocation sz N.rcx
-    
+
 
 
 -- REP        Repeat while ECX not zero
@@ -1151,33 +1148,8 @@ exec_fnstcw l = do
 -- FXSAVE Save x87 FPU and SIMD state
 -- FXRSTOR Restore x87 FPU and SIMD state
 
+
 -- * MMX Instructions
-
-exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
-                     => MLocation m (BVType n)
-                     -> Value m (BVType n')
-                     -> m ()
-exec_movd l v
-  | Just LeqProof <- testLeq  (loc_width l) (bv_width v) = l .= bvTrunc (loc_width l) v
-  | Just LeqProof <- testLeq  (bv_width v) (loc_width l) = l .=    uext (loc_width l) v
-  | otherwise = fail "movd: Unknown bit width"
-exec_movq = exec_movd
-
-exec_pand :: Binop
-exec_pand l v = do
-  v0 <- get l
-  l .= v0 .&. v
-
-exec_por :: Binop
-exec_por l v = do
-  v0 <- get l
-  l .= v0 .|. v
-
-exec_pxor :: Binop
-exec_pxor l v = do
-  v0 <- get l
-  l .= v0 `bvXor` v
-
 
 -- uses bvCat to turn [a, b, c, d] into [ab, cd]
 concatBVPairs :: (IsValue v, 1 <= n) => [v (BVType n)] -> [v (BVType (n+n))]
@@ -1232,6 +1204,26 @@ splitIntoSize sz bv
   | Just Refl <- testEquality (bv_width bv) n128
   , Just Refl <- testEquality sz n64 = splitBVs [bv]
 
+
+-- ** MMX Data Transfer Instructions
+
+exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
+                     => MLocation m (BVType n)
+                     -> Value m (BVType n')
+                     -> m ()
+exec_movd l v
+  | Just LeqProof <- testLeq  (loc_width l) (bv_width v) = l .= bvTrunc (loc_width l) v
+  | Just LeqProof <- testLeq  (bv_width v) (loc_width l) = l .=    uext (loc_width l) v
+  | otherwise = fail "movd: Unknown bit width"
+exec_movq = exec_movd
+
+
+-- ** MMX Conversion Instructions
+
+-- PACKSSWB Pack words into bytes with signed saturation
+-- PACKSSDW Pack doublewords into words with signed saturation
+-- PACKUSWB Pack words into bytes with unsigned saturation
+
 punpck :: (IsLocationBV m n)
        => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
        -> NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -1259,6 +1251,102 @@ exec_punpcklbw  = punpckl n8
 exec_punpcklwd  = punpckl n16
 exec_punpckldq  = punpckl n32
 exec_punpcklqdq = punpckl n64
+
+
+-- ** MMX Packed Arithmetic Instructions
+
+-- PADDB Add packed byte integers
+-- PADDW Add packed word integers
+-- PADDD Add packed doubleword integers
+-- PADDSB Add packed signed byte integers with signed saturation
+-- PADDSW Add packed signed word integers with signed saturation
+-- PADDUSB Add packed unsigned byte integers with unsigned saturation
+-- PADDUSW Add packed unsigned word integers with unsigned saturation
+-- PSUBB Subtract packed byte integers
+-- PSUBW Subtract packed word integers
+-- PSUBD Subtract packed doubleword integers
+-- PSUBSB Subtract packed signed byte integers with signed saturation
+-- PSUBSW Subtract packed signed word integers with signed saturation
+-- PSUBUSB Subtract packed unsigned byte integers with unsigned saturation
+-- PSUBUSW Subtract packed unsigned word integers with unsigned saturation
+-- PMULHW Multiply packed signed word integers and store high result
+-- PMULLW Multiply packed signed word integers and store low result
+-- PMADDWD Multiply and add packed word integers
+
+
+-- ** MMX Comparison Instructions
+
+-- split into chunks of size sz, zip, replace pairs using f, and merge
+pcombine :: (IsLocationBV m n, 1 <= o)
+     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BVType o))
+     -> NatRepr o
+     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pcombine f sz l v = do
+  v0 <- get l
+  let dSplit = splitIntoSize sz v0
+      sSplit = splitIntoSize sz v
+
+      resultValues = zipWith f dSplit sSplit
+      r = concatIntoSize (loc_width l) resultValues
+  l .= r
+
+-- replace pairs with 0xF..F if `op` returns true, otherwise 0x0..0
+pcmp :: (IsLocationBV m n, 1 <= o)
+     => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
+     -> NatRepr o
+     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pcmp op = pcombine chkHighLow
+  where chkHighLow d s = mux (d `op` s) (complement (bvLit (bv_width d) (0 :: Integer))) (bvLit (bv_width d) (0 :: Integer))
+
+exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
+exec_pcmpeqb = pcmp (.=.) n8
+exec_pcmpeqw = pcmp (.=.) n16
+exec_pcmpeqd = pcmp (.=.) n32
+
+exec_pcmpgtb, exec_pcmpgtw, exec_pcmpgtd  :: Binop
+exec_pcmpgtb = pcmp (flip bvSlt) n8
+exec_pcmpgtw = pcmp (flip bvSlt) n16
+exec_pcmpgtd = pcmp (flip bvSlt) n32
+
+
+-- ** MMX Logical Instructions
+
+exec_pand :: Binop
+exec_pand l v = do
+  v0 <- get l
+  l .= v0 .&. v
+
+exec_pandn :: Binop
+exec_pandn l v = do
+  v0 <- get l
+  l .= complement v0 .&. v
+
+exec_por :: Binop
+exec_por l v = do
+  v0 <- get l
+  l .= v0 .|. v
+
+exec_pxor :: Binop
+exec_pxor l v = do
+  v0 <- get l
+  l .= v0 `bvXor` v
+
+
+-- ** MMX Shift and Rotate Instructions
+
+-- PSLLW Shift packed words left logical
+-- PSLLD Shift packed doublewords left logical
+-- PSLLQ Shift packed quadword left logical
+-- PSRLW Shift packed words right logical
+-- PSRLD Shift packed doublewords right logical
+-- PSRLQ Shift packed quadword right logical
+-- PSRAW Shift packed words right arithmetic
+-- PSRAD Shift packed doublewords right arithmetic
+
+
+-- ** MMX State Management Instructions
+
+-- EMMS Empty MMX state
 
 
 -- * SSE Instructions
@@ -1336,14 +1424,43 @@ exec_movss l v = l .= v
 
 -- ** SSE 64-Bit SIMD Integer Instructions
 
+-- replace pairs with the left operand if `op` is true (e.g., bvUlt for min)
+pselect :: (IsLocationBV m n, 1 <= o)
+        => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
+        -> NatRepr o
+        -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+pselect op = pcombine chkPair
+  where chkPair d s = mux (d `op` s) d s
+
 -- PAVGB Compute average of packed unsigned byte integers
 -- PAVGW Compute average of packed unsigned word integers
 -- PEXTRW Extract word
 -- PINSRW Insert word
+
 -- PMAXUB Maximum of packed unsigned byte integers
 -- PMAXSW Maximum of packed signed word integers
 -- PMINUB Minimum of packed unsigned byte integers
 -- PMINSW Minimum of packed signed word integers
+exec_pmaxub, exec_pmaxuw, exec_pmaxud :: Binop
+exec_pmaxub = pselect (flip bvUlt) n8
+exec_pmaxuw = pselect (flip bvUlt) n16
+exec_pmaxud = pselect (flip bvUlt) n32
+
+exec_pmaxsb, exec_pmaxsw, exec_pmaxsd :: Binop
+exec_pmaxsb = pselect (flip bvSlt) n8
+exec_pmaxsw = pselect (flip bvSlt) n16
+exec_pmaxsd = pselect (flip bvSlt) n32
+
+exec_pminub, exec_pminuw, exec_pminud :: Binop
+exec_pminub = pselect bvUlt n8
+exec_pminuw = pselect bvUlt n16
+exec_pminud = pselect bvUlt n32
+
+exec_pminsb, exec_pminsw, exec_pminsd :: Binop
+exec_pminsb = pselect bvSlt n8
+exec_pminsw = pselect bvSlt n16
+exec_pminsd = pselect bvSlt n32
+
 -- PMOVMSKB Move byte mask
 -- PMULHUW Multiply packed unsigned integers and store high result
 -- PSADBW Compute sum of absolute differences

@@ -1,0 +1,12 @@
+flags: {}
+packages:
+- '.'
+- deps/elf
+- deps/flexdis86
+- deps/parameterized-utils
+- deps/linux-ptrace
+- deps/posix-waitpid
+extra-deps:
+- bv-0.3.0
+- happy-1.19.5
+resolver: lts-2.16

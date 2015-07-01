@@ -9,15 +9,18 @@ module Reopt.Concrete.BitVector
     BitVector
   , bitVector
   , unBitVector
+  -- | Constants.
+  , false
+  , true
   -- | Operations.
   , (#)
   , group
   , modify
+  , nat
   , width
   -- | To construct 'BV.BV' values.
   , BV
   , BV.bitVec
-  , BV.nat
   ) where
 
 import           Data.BitVector (BV)
@@ -101,3 +104,12 @@ group nr (BitVector _ bv) =
 -- The modification must not change the width.
 modify :: (BV -> BV) -> BitVector n -> BitVector n
 modify f (BitVector nr bv) = bitVector nr (f bv)
+
+-- | Return the unsigned value of the underlying 'BV'.
+nat :: BitVector n -> Integer
+nat (BitVector _ bv) = BV.nat bv
+
+-- | Booleans.
+true, false :: BitVector 1
+true = bitVector knownNat (BV.bitVec 1 1)
+false = bitVector knownNat (BV.bitVec 1 0)

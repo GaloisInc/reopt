@@ -263,7 +263,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                                             [F.WordImm imm] -> exec_ret (Just imm)
 
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
-                                                     
+
               , mk "movs"  $ mkBinopPfxLL
                 $ \pfx dest_loc src_loc ->
                    case testLeq (loc_width dest_loc) n64 of
@@ -284,7 +284,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
               , mk "movdqa"  $ truncateKnownBinop exec_movdqa
-              , mk "movdqu"  $ truncateKnownBinop exec_movdqa                
+              , mk "movdqu"  $ truncateKnownBinop exec_movdqa
               , mk "movsd_sse" $ truncate64Op exec_movsd
               , mk "movss"   $ truncate32Op exec_movss
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
@@ -351,11 +351,9 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
 
+              -- MMX instructions
               , mk "movd"    $ mkBinopLV exec_movd
               , mk "movq"    $ mkBinopLV exec_movq
-              , mk "pand"    $ binop exec_pand
-              , mk "por"     $ binop exec_por
-              , mk "pxor"    $ binop exec_pxor
               , mk "punpckhbw"  $ binop exec_punpckhbw
               , mk "punpckhwd"  $ binop exec_punpckhwd
               , mk "punpckhdq"  $ binop exec_punpckhdq
@@ -364,6 +362,31 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "punpcklwd"  $ binop exec_punpcklwd
               , mk "punpckldq"  $ binop exec_punpckldq
               , mk "punpcklqdq" $ binop exec_punpcklqdq
+              , mk "pcmpeqb" $ binop exec_pcmpeqb
+              , mk "pcmpeqw" $ binop exec_pcmpeqw
+              , mk "pcmpeqd" $ binop exec_pcmpeqd
+              , mk "pcmpgtb" $ binop exec_pcmpgtb
+              , mk "pcmpgtw" $ binop exec_pcmpgtw
+              , mk "pcmpgtd" $ binop exec_pcmpgtd
+              , mk "pand"    $ binop exec_pand
+              , mk "pandn"   $ binop exec_pandn
+              , mk "por"     $ binop exec_por
+              , mk "pxor"    $ binop exec_pxor
+
+              -- SSE instructions
+              , mk "pmaxub"  $ binop exec_pmaxub
+              , mk "pmaxuw"  $ binop exec_pmaxuw
+              , mk "pmaxud"  $ binop exec_pmaxud
+              , mk "pmaxsb"  $ binop exec_pmaxsb
+              , mk "pmaxsw"  $ binop exec_pmaxsw
+              , mk "pmaxsd"  $ binop exec_pmaxsd
+              , mk "pminub"  $ binop exec_pminub
+              , mk "pminuw"  $ binop exec_pminuw
+              , mk "pminud"  $ binop exec_pminud
+              , mk "pminsb"  $ binop exec_pminsb
+              , mk "pminsw"  $ binop exec_pminsw
+              , mk "pminsd"  $ binop exec_pminsd
+
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
               , mk "fld"     $ fpUnopV exec_fld
@@ -399,7 +422,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
   where
     -- conditional instruction support (cmovcc, jcc)
     conditionals :: [(String, SemanticsOp)]
-    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a     
+    conditionals = [ (,) "a"  $ semanticsOp $ mkop cond_a
                    , (,) "ae" $ semanticsOp $ mkop cond_ae
                    , (,) "b"  $ semanticsOp $ mkop cond_b
                    , (,) "be" $ semanticsOp $ mkop cond_be
@@ -412,7 +435,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , (,) "s"  $ semanticsOp $ mkop cond_s
                    , (,) "z"  $ semanticsOp $ mkop cond_z
                    , (,) "e"  $ semanticsOp $ mkop cond_z
-                   , (,) "ne" $ semanticsOp $ mkop cond_nz 
+                   , (,) "ne" $ semanticsOp $ mkop cond_nz
                    , (,) "no" $ semanticsOp $ mkop cond_no
                    , (,) "np" $ semanticsOp $ mkop cond_np
                    , (,) "ns" $ semanticsOp $ mkop cond_ns

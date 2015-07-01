@@ -381,7 +381,7 @@ instance MonadMachineState PTraceMachineState where
   getMem (Address width bv) = do
     memH <- asks memHandle
     bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat $ snd $ unBitVector bv) (fromIntegral (widthVal width) `div` 8)
-    trace (show $ toBitVector width bs) $ return $ Literal $ toBitVector width bs
+    return $ Literal $ toBitVector width bs
 
   getReg regname = do
     regs <- dumpRegs
