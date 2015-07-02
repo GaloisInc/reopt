@@ -49,7 +49,7 @@ getSomeBVValue v =
   case v of
     F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
     F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
     F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
     F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.X87Register n     -> mk (X87StackRegister n)
@@ -82,6 +82,10 @@ getSomeBVValue v =
     -- FIXME: what happens with signs etc?
     mk :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
     mk l = SomeBV <$> get l
+
+    mk64 :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
+    mk64 l
+      | Just LeqProof <- testLeq n64 (loc_width l) = SomeBV <$> bvTrunc n64 <$> get l
 
 -- | Calculates the address corresponding to an AddrRef
 getBVAddress :: FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
@@ -126,7 +130,7 @@ getSomeBVLocation v =
   case v of
     F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
     F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
     F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
     F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.FarPointer _      -> fail "FarPointer"
@@ -159,6 +163,12 @@ getSomeBVLocation v =
        => MLocation m (BVType n)
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
+
+    mk64 :: forall m n. (FullSemantics m, SupportedBVWidth n)
+       => MLocation m (BVType n)
+       -> m (SomeBV (MLocation m))
+    mk64 l
+      | Just LeqProof <- testLeq (addNat n1 n64) (loc_width l) = return $ SomeBV $ TruncLoc l n64
 
 checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
