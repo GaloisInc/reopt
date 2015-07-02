@@ -352,6 +352,15 @@ class IsValue (v  :: Type -> *) where
           concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
           concatBVPairs _ = []
 
+  vectorize2 :: (1 <= k)
+             => NatRepr k
+             -> (v (BVType k) -> v (BVType k) -> v (BVType k))
+             -> v (BVType n) -> v (BVType n)
+             -> v (BVType n)
+  vectorize2 sz op x y = let xs = bvVectorize sz x
+                             ys = bvVectorize sz y
+                         in bvUnvectorize (bv_width x) $ zipWith op xs ys
+
   -- | Rotations
   bvRol :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
   bvRol v n = bvShl v n .|. bvShr v bits_less_n
