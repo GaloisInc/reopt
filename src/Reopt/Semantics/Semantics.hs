@@ -821,7 +821,7 @@ exec_movs True dest_loc _src_loc = do
   where
     count_reg = regLocation sz N.rcx
     sz = loc_width dest_loc
-    nbytes = natValue sz `div` 8 
+    nbytes = natValue sz `div` 8
 
 -- FIXME: can also take rep prefix
 -- FIXME: we ignore the aso here.
@@ -850,7 +850,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
     sz  = loc_width loc_rsi
     szv = bvLit n64 $ natValue sz
     nbytes = natValue sz `div` 8
-    
+
     do_memcmp df src dest count = do
       nsame <- memcmp nbytes count src dest df
       let equal = (nsame .=. count)
@@ -1151,60 +1151,6 @@ exec_fnstcw l = do
 
 -- * MMX Instructions
 
--- uses bvCat to turn [a, b, c, d] into [ab, cd]
-concatBVPairs :: (IsValue v, 1 <= n) => [v (BVType n)] -> [v (BVType (n+n))]
-concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
-concatBVPairs _ = []
-
-concatIntoSize :: (IsValue v) => NatRepr n -> [v (BVType m)] -> v (BVType n)
-concatIntoSize sz bvs@(bv:_)
-  | Just Refl <- testEquality (bv_width bv) n8
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs bvs
-
-  | Just Refl <- testEquality (bv_width bv) n8
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs bvs
-
--- uses bvSplit to turn [ab, cd] into [a, b, c, d]
-splitBVs :: (IsValue v, 1 <= n) => [v (BVType (n+n))] -> [v (BVType n)]
-splitBVs = concatMap (\bv -> let (a, b) = bvSplit bv in [a, b])
-
-splitIntoSize :: (IsValue v) => NatRepr n -> v (BVType m) -> [v (BVType n)]
-splitIntoSize sz bv
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n8 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n16 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n32 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n32 = splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n64 = splitBVs [bv]
-
-
 -- ** MMX Data Transfer Instructions
 
 exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
@@ -1224,19 +1170,19 @@ exec_movq = exec_movd
 -- PACKSSDW Pack doublewords into words with signed saturation
 -- PACKUSWB Pack words into bytes with unsigned saturation
 
-punpck :: (IsLocationBV m n)
+punpck :: (IsLocationBV m n, 1 <= o)
        => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
        -> NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 punpck f pieceSize l v = do
   v0 <- get l
-  let dSplit = f $ splitHalf $ splitIntoSize pieceSize v0
-      sSplit = f $ splitHalf $ splitIntoSize pieceSize v
-      r = concatIntoSize (loc_width l) $ concat $ zipWith (\a b -> [b, a]) dSplit sSplit
+  let dSplit = f $ splitHalf $ bvVectorize pieceSize v0
+      sSplit = f $ splitHalf $ bvVectorize pieceSize v
+      r = bvUnvectorize (loc_width l) $ concat $ zipWith (\a b -> [b, a]) dSplit sSplit
   l .= r
   where splitHalf :: [a] -> ([a], [a])
         splitHalf xs = splitAt ((length xs + 1) `div` 2) xs
 
-punpckh, punpckl :: (IsLocationBV m n) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+punpckh, punpckl :: (IsLocationBV m n, 1 <= o) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 punpckh = punpck fst
 punpckl = punpck snd
 
@@ -1283,11 +1229,11 @@ pcombine :: (IsLocationBV m n, 1 <= o)
      -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 pcombine f sz l v = do
   v0 <- get l
-  let dSplit = splitIntoSize sz v0
-      sSplit = splitIntoSize sz v
+  let dSplit = bvVectorize sz v0
+      sSplit = bvVectorize sz v
 
       resultValues = zipWith f dSplit sSplit
-      r = concatIntoSize (loc_width l) resultValues
+      r = bvUnvectorize (loc_width l) resultValues
   l .= r
 
 -- replace pairs with 0xF..F if `op` returns true, otherwise 0x0..0

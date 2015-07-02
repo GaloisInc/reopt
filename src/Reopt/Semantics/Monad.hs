@@ -18,6 +18,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -333,6 +334,23 @@ class IsValue (v  :: Type -> *) where
   -- bvSplit v = (bvTrunc:: sz (bvShr (widthVal sz) v), bvTrunc sz v)
   --   where
   --     sz = halfNat (bv_width v)
+
+  -- | Vectorization
+  bvVectorize :: forall k n. (1 <= k) => NatRepr k -> v (BVType n) -> [v (BVType k)]
+  bvVectorize sz bv
+    | Just Refl <- testEquality (bv_width bv) sz = [bv]
+    | Just LeqProof <- testLeq sz (bv_width bv) =
+        let bvs2n :: [v (BVType (k+k))] -- solve for size (n+n), then split into size n
+            bvs2n = withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 k)) $ bvVectorize (addNat sz sz) bv
+        in concatMap (\v -> let (a, b) = bvSplit v in [a, b]) bvs2n
+
+  bvUnvectorize :: forall k n. (1 <= k) => NatRepr n -> [v (BVType k)] -> v (BVType n)
+  bvUnvectorize sz [x]
+    | Just Refl <- testEquality (bv_width x) sz = x
+  bvUnvectorize sz bvs = withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 k)) $ bvUnvectorize sz $ concatBVPairs bvs
+    where concatBVPairs :: (1 <= o) => [v (BVType o)] -> [v (BVType (o+o))]
+          concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
+          concatBVPairs _ = []
 
   -- | Rotations
   bvRol :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
