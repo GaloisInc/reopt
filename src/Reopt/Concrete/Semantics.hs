@@ -440,40 +440,22 @@ ppExpr e = case e of
 -- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
 -- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
 ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
-ppLocation ppAddr l = case l of
-  S.MemoryAddr addr _ -> ppAddr addr
-  S.Register r -> text $ "%" ++ show r
-  S.TruncLoc _ _ -> ppSubregister l
-  S.LowerHalf _ -> ppSubregister l
-  S.UpperHalf _ -> ppSubregister l
-  S.X87StackRegister i -> text $ "x87_stack@" ++ show i
+ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
   where
-    -- | Print subregister as Python-style slice @<reg>[<low>:<high>]@.
+    ppMemCont :: forall tp'.
+                 (Integer, Integer) -> Integer -> (addr, TypeRepr tp') -> Doc
+    ppMemCont = ppSubrange (ppAddr . fst)
+    ppRegCont :: (Integer, Integer) -> Integer -> N.RegisterName cl -> Doc
+    ppRegCont = ppSubrange (\r -> text $ "%" ++ show r)
+    ppX87Cont = ppSubrange (\i -> text $ "x87_stack@" ++ show i)
+    -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
     --
     -- The low bit is inclusive and the high bit is exclusive, but I
     -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubregister :: forall tp. S.Location addr tp -> Doc
-    ppSubregister l =
-      r <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
-      where
-        (r, low, high) = go l
-
-    -- | Return pretty-printed register and subrange bounds.
-    go :: forall tp. S.Location addr tp -> (Doc, Integer, Integer)
-    go (S.TruncLoc l n) = truncLoc n $ go l
-    go (S.LowerHalf l) = lowerHalf $ go l
-    go (S.UpperHalf l) = upperHalf $ go l
-    go (S.Register r) = (text $ "%" ++ show r, 0, natValue $ N.registerWidth r)
-    go (S.MemoryAddr addr (BVTypeRepr nr)) = (ppAddr addr, 0, natValue nr)
-    go (S.MemoryAddr _ _) = error "ppLocation.go: address of non 'BVType n' type!"
-
-
-    -- Transformations on subranges.
-    truncLoc :: NatRepr n -> (Doc, Integer, Integer) -> (Doc, Integer, Integer)
-    truncLoc n (r, low, _high) = (r, low, low + natValue n)
-    lowerHalf, upperHalf :: (Doc, Integer, Integer) -> (Doc, Integer, Integer)
-    lowerHalf (r, low, high) = (r, low, (low + high) `div` 2)
-    upperHalf (r, low, high) = (r, (low + high) `div` 2, high)
+    ppSubrange pp (low, high) width x =
+      if width == high
+      then pp x
+      else pp x <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
 
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
