@@ -1247,26 +1247,14 @@ exec_psubd l v = do
 
 -- ** MMX Comparison Instructions
 
--- split into chunks of size sz, zip, replace pairs using f, and merge
-pcombine :: (IsLocationBV m n, 1 <= o)
-     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BVType o))
-     -> NatRepr o
-     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcombine f sz l v = do
-  v0 <- get l
-  let dSplit = bvVectorize sz v0
-      sSplit = bvVectorize sz v
-
-      resultValues = zipWith f dSplit sSplit
-      r = bvUnvectorize (loc_width l) resultValues
-  l .= r
-
 -- replace pairs with 0xF..F if `op` returns true, otherwise 0x0..0
 pcmp :: (IsLocationBV m n, 1 <= o)
      => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
      -> NatRepr o
      -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcmp op = pcombine chkHighLow
+pcmp op sz l v = do
+  v0 <- get l
+  l .= vectorize2 sz chkHighLow v0 v
   where chkHighLow d s = mux (d `op` s) (complement (bvLit (bv_width d) (0 :: Integer))) (bvLit (bv_width d) (0 :: Integer))
 
 exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
@@ -1400,7 +1388,9 @@ pselect :: (IsLocationBV m n, 1 <= o)
         => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
         -> NatRepr o
         -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pselect op = pcombine chkPair
+pselect op sz l v = do
+  v0 <- get l
+  l .= vectorize2 sz chkPair v0 v
   where chkPair d s = mux (d `op` s) d s
 
 -- PAVGB Compute average of packed unsigned byte integers
