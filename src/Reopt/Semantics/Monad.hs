@@ -18,9 +18,10 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
@@ -134,6 +135,9 @@ data Location addr (tp :: Type) where
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
 
+------------------------------------------------------------------------
+-- Operations on locations.
+
 loc_type :: Location addr tp -> TypeRepr tp
 loc_type (MemoryAddr _ tp) = tp
 loc_type (Register r)      = N.registerType r
@@ -143,12 +147,10 @@ loc_type (UpperHalf l)     = BVTypeRepr $ halfNat (loc_width l)
 loc_type (X87StackRegister _) = knownType
 
 loc_width :: Location addr (BVType n) -> NatRepr n
-loc_width (MemoryAddr _ tp) = type_width tp
-loc_width (Register r)  = N.registerWidth r
-loc_width (TruncLoc _ n) = n
-loc_width (LowerHalf l) = halfNat (loc_width l)
-loc_width (UpperHalf l) = halfNat (loc_width l)
-loc_width (X87StackRegister _) = knownNat
+loc_width (loc_type -> BVTypeRepr nr) = nr
+
+------------------------------------------------------------------------
+-- Specific locations.
 
 xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
 xmm_low64 l = LowerHalf l
@@ -237,6 +239,8 @@ ecx = reg_low32 N.rcx
 
 rip :: Location addr (BVType 64)
 rip = Register N.IPReg
+
+------------------------------------------------------------------------
 
 packWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> m (Value m (BVType n))
 packWord (N.BitPacking sz bits) =
