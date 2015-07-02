@@ -362,6 +362,12 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "punpcklwd"  $ binop exec_punpcklwd
               , mk "punpckldq"  $ binop exec_punpckldq
               , mk "punpcklqdq" $ binop exec_punpcklqdq
+              , mk "paddb"   $ binop exec_paddb
+              , mk "paddw"   $ binop exec_paddw
+              , mk "paddd"   $ binop exec_paddd
+              , mk "psubb"   $ binop exec_psubb
+              , mk "psubw"   $ binop exec_psubw
+              , mk "psubd"   $ binop exec_psubd
               , mk "pcmpeqb" $ binop exec_pcmpeqb
               , mk "pcmpeqw" $ binop exec_pcmpeqw
               , mk "pcmpeqd" $ binop exec_pcmpeqd

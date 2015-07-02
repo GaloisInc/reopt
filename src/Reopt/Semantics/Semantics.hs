@@ -1201,16 +1201,41 @@ exec_punpcklqdq = punpckl n64
 
 -- ** MMX Packed Arithmetic Instructions
 
--- PADDB Add packed byte integers
--- PADDW Add packed word integers
--- PADDD Add packed doubleword integers
+exec_paddb :: Binop
+exec_paddb l v = do
+  v0 <- get l
+  l .= vectorize2 n8 bvAdd v0 v
+
+exec_paddw :: Binop
+exec_paddw l v = do
+  v0 <- get l
+  l .= vectorize2 n16 bvAdd v0 v
+
+exec_paddd :: Binop
+exec_paddd l v = do
+  v0 <- get l
+  l .= vectorize2 n32 bvAdd v0 v
+
 -- PADDSB Add packed signed byte integers with signed saturation
 -- PADDSW Add packed signed word integers with signed saturation
 -- PADDUSB Add packed unsigned byte integers with unsigned saturation
 -- PADDUSW Add packed unsigned word integers with unsigned saturation
--- PSUBB Subtract packed byte integers
--- PSUBW Subtract packed word integers
--- PSUBD Subtract packed doubleword integers
+
+exec_psubb :: Binop
+exec_psubb l v = do
+  v0 <- get l
+  l .= vectorize2 n8 bvSub v0 v
+
+exec_psubw :: Binop
+exec_psubw l v = do
+  v0 <- get l
+  l .= vectorize2 n16 bvSub v0 v
+
+exec_psubd :: Binop
+exec_psubd l v = do
+  v0 <- get l
+  l .= vectorize2 n32 bvSub v0 v
+
 -- PSUBSB Subtract packed signed byte integers with signed saturation
 -- PSUBSW Subtract packed signed word integers with signed saturation
 -- PSUBUSB Subtract packed unsigned byte integers with unsigned saturation
