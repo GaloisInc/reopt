@@ -38,9 +38,11 @@ module Reopt.Semantics.Monad
   , floatInfoBits
     -- * Location
   , Location(..)
-  , xmm_low64
+  , elimLocation
   , loc_type
   , loc_width
+
+  , xmm_low64
   , reg_low8
   , reg_high8
   , reg_low16
@@ -148,6 +150,50 @@ loc_type (X87StackRegister _) = knownType
 
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (loc_type -> BVTypeRepr nr) = nr
+
+-- | Eliminate a 'Location' after normalizing subrange transforms.
+--
+-- The arguments are continuations for the location base cases,
+-- 'S.MemoryAddr', 'S.Register', and 'S.X87StackRegister', which take
+-- the @[low bit, high bit)@ subrange, full width, and arguments to
+-- the corresponding base case.
+elimLocation :: forall addr tp a i.
+                Integral i
+             => (forall tp'. (i, i) -> i -> (addr, TypeRepr tp')  -> a)
+             -> (forall cl.  (i, i) -> i -> N.RegisterName cl    -> a)
+             -> (            (i, i) -> i -> Int                  -> a)
+             -> Location addr tp -> a
+elimLocation memCont regCont x87Cont l = go id l
+  where
+    -- | Compute subrange and call continuation.
+    --
+    -- In the recursive cases we build a subrange transformation.  In
+    -- the base cases we use the subrange transformation to compute
+    -- the subrange, by applying it to the full range @(0, w)@ of the
+    -- base location, and then call the continutation corresponding to
+    -- the base location.
+    go :: forall tp. ((i, i) -> (i, i)) -> Location addr tp -> a
+    go t l = case l of
+      -- Recursive cases.
+      TruncLoc l n -> go (t . truncLoc n) l
+      LowerHalf l -> go (t . lowerHalf) l
+      UpperHalf l -> go (t . upperHalf) l
+      -- Base cases.
+      Register r -> regCont (t (0, w)) w r
+      MemoryAddr addr tr -> memCont (t (0, w)) w (addr, tr)
+      X87StackRegister i -> x87Cont (t (0, w)) w i
+      where
+        -- The width of the base location.
+        w :: i
+        w = case loc_type l of
+          BVTypeRepr nr -> fromIntegral $ natValue nr
+
+    -- Transformations on subranges.
+    truncLoc :: NatRepr n -> (i, i) -> (i, i)
+    truncLoc n (low, _high) = (low, low + fromIntegral (natValue n))
+    lowerHalf, upperHalf :: (i, i) -> (i, i)
+    lowerHalf (low, high) = (low, (low + high) `div` 2)
+    upperHalf (low, high) = ((low + high) `div` 2, high)
 
 ------------------------------------------------------------------------
 -- Specific locations.
