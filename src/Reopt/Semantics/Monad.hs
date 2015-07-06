@@ -159,7 +159,7 @@ loc_width (loc_type -> BVTypeRepr nr) = nr
 -- the corresponding base case.
 elimLocation :: forall addr tp a i.
                 Integral i
-             => (forall tp'. (i, i) -> i -> (addr, TypeRepr tp')  -> a)
+             => (forall tp'. (i, i) -> i -> (addr, TypeRepr tp') -> a)
              -> (forall cl.  (i, i) -> i -> N.RegisterName cl    -> a)
              -> (            (i, i) -> i -> Int                  -> a)
              -> Location addr tp -> a
