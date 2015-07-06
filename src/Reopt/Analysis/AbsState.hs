@@ -12,6 +12,7 @@ module Reopt.Analysis.AbsState
   , absX86State
   , absBlockDiff
   , shiftSpecificOffset
+  , setAbsIP
   , AbsValue(..)
   , emptyAbsValue
   , joinAbsValue
@@ -435,7 +436,7 @@ uext :: forall u v.
         (u+1 <= v) => AbsValue (BVType u) -> NatRepr v -> AbsValue (BVType v)
 uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
-uext (StridedInterval si) w = 
+uext (StridedInterval si) w =
   StridedInterval $ case si of SI.StridedInterval{} -> si { SI.typ = BVTypeRepr w }
                                SI.EmptyInterval -> SI.EmptyInterval
 uext (SubValue (n :: NatRepr n) av) w =
@@ -560,7 +561,6 @@ ppAbsValue v = Just (pretty v)
 instance PrettyRegValue AbsValue where
   ppValueEq _ TopV = Nothing
   ppValueEq r v = Just (text (show r) <+> text "=" <+> pretty v)
-
 
 -- | Indicates if address is a code pointer.
 isCodePointerOrNull :: Memory Word64 -> Word64 -> Bool
@@ -754,7 +754,9 @@ instance AbsDomain AbsBlockState where
                                    , _startAbsStack = z_stk
                                    }
 
-          z = traceUnless (Set.null dropped) ("dropped abs " ++ show (ppIntegerSet dropped) ++ show x ++ "\n" ++ show y) $
+          z = traceUnless (Set.null dropped)
+                ("dropped abs " ++ show (ppIntegerSet dropped) ++ "\n"
+                                ++ show x ++ "\n" ++ show y) $
               zs
 
 instance Pretty AbsBlockState where
@@ -911,6 +913,19 @@ shiftSomeOffset f = mkAbsBlockState transferReg Map.empty
           case f r of
             StackOffset _ -> SomeStackOffset
             v -> v
+
+-- | Update the block state to point to a specific IP address.
+setAbsIP :: Memory Word64 -> CodeAddr -> AbsBlockState -> AbsBlockState
+setAbsIP mem a b
+  | not (isCodePointerOrNull mem a) =
+    error "setAbsIP given address that is not a code pointer."
+    -- Check to avoid reassigning next IP if it is not needed.
+  | CodePointers s <- b^.absX86State^.curIP
+  , Set.size s == 1
+  , Set.member a s =
+    b
+  | otherwise =
+    b & absX86State . curIP .~ CodePointers (Set.singleton a)
 
 ------------------------------------------------------------------------
 -- Transfer functions
