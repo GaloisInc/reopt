@@ -642,25 +642,48 @@ extendEnv x v = modify (MapF.insert x v)
 evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
 evalStmt (NamedStmt [x] (MakeUndefined tr)) =
   extendEnv (Variable tr x) (CS.Undefined tr)
-evalStmt (NamedStmt [x] (Get l)) = do
-  case l of
-    S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
-      vaddr <- evalExpr' addr
-      case vaddr of
-        CS.Undefined _ -> error "evalStmt: undefined address in 'get'!"
-        CS.Literal bvaddr -> do
-          v <- CS.getMem (CS.Address nr bvaddr)
-          extendEnv (Variable tr x) v
-    S.Register rn -> do
-      let tr = N.registerType rn
-      v <- CS.getReg rn
-      extendEnv (Variable tr x) v
-    S.X87StackRegister i -> do
-      let rn = N.X87FPUReg i
-      let tr = N.registerType rn
-      v <- CS.getReg rn
-      extendEnv (Variable tr x) v
-    _ -> undefined -- subregisters
+evalStmt (NamedStmt [x] (Get l)) =
+  -- Force 'tp' to be a 'BVType n'.
+  case S.loc_type l of
+  BVTypeRepr _ -> do
+
+  let tr = S.loc_type l
+  let nr = S.loc_width l
+
+  let memCont :: forall tp0 i.
+                 Integer ~ i
+              => (i, i) -> i -> (Expr (BVType 64), TypeRepr tp0) -> m ()
+      memCont (low, high) _width (addr, BVTypeRepr nr0) = do
+        vaddr <- evalExpr' addr
+        case vaddr of
+          CS.Undefined _ -> error "evalStmt: undefined address in 'Get'!"
+          CS.Literal bvaddr -> do
+            let a = CS.Address nr0 bvaddr
+            v0 <- CS.getMem a
+            let v1 = CS.liftValue (sliceBV (low, high)) nr v0
+            extendEnv (Variable tr x) v1
+
+  let regCont :: forall cl i.
+                 Integer ~ i
+              => (i, i) -> i -> N.RegisterName cl -> m ()
+      regCont (low, high) _width rn =
+        -- Force 'tp' to be a 'BVType n'.
+        case S.loc_type l of
+        BVTypeRepr _ -> do
+        v0 <- CS.getReg rn
+        let v1 = CS.liftValue (sliceBV (low, high)) nr v0
+        extendEnv (Variable tr x) v1
+
+  let x87Cont (low, high) width i =
+        regCont (low, high) width (N.X87FPUReg i)
+
+  S.elimLocation memCont regCont x87Cont l
+  where
+    -- TODO(conathan): test this slicing code
+    sliceBV :: Integer ~ i
+            => (i, i) -> BV -> BV
+    sliceBV (low, high) super = super BV.@@ (high - 1, low)
+
 evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
   v1 <- evalExpr' ns1
   v2 <- evalExpr' ns2
