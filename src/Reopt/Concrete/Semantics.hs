@@ -639,6 +639,18 @@ evalExpr' e = runReader (evalExpr e) <$> get
 extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
+-- | Slice a subrange from a 'BV'.
+--
+-- This is a wrapper around 'BV.@@' which differs by supporting empty
+-- slices.
+(@@) :: Integral ix => BV -> (ix, ix) -> BV
+bv @@ (high, low) =
+  if high >= low
+  then bv BV.@@ (high, low)
+  else empty
+  where
+    empty = BV.zeros 0
+
 evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
 evalStmt (NamedStmt [x] (MakeUndefined tr)) =
   extendEnv (Variable tr x) (CS.Undefined tr)
@@ -679,10 +691,9 @@ evalStmt (NamedStmt [x] (Get l)) =
 
   S.elimLocation memCont regCont x87Cont l
   where
-    -- TODO(conathan): test this slicing code
     sliceBV :: Integer ~ i
             => (i, i) -> BV -> BV
-    sliceBV (low, high) super = super BV.@@ (high - 1, low)
+    sliceBV (low, high) super = super @@ (high - 1, low)
 
 evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
   v1 <- evalExpr' ns1
@@ -792,13 +803,12 @@ evalStmt (l := e) =
         regCont (low, high) width (N.X87FPUReg i)
   S.elimLocation memCont regCont x87Cont l
   where
-    -- TODO(conathan): test this slicing code
     combineBV :: Integer ~ i
               => (i, i) -> i -> BV -> BV -> BV
     combineBV (low, high) width super sub =
-      (super BV.@@ (width - 1, high)) BV.#
+      (super @@ (width - 1, high)) BV.#
       sub BV.#
-      (super BV.@@ (low - 1, 0))
+      (super @@ (low - 1, 0))
 
 evalStmt (Ifte_ c t f) = do
   vc <- evalExpr' c
