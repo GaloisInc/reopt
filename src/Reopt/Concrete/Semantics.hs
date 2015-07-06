@@ -359,6 +359,11 @@ instance S.Semantics Semantics where
   -- to a 64 bit register performs a zero extension so the upper 32
   -- bits are zero.  This may not be the best place for this, but I
   -- can't think of a nicer one ...
+  --
+  -- TODO(conathan): verify that this is sufficient. E.g., what is
+  -- supposed to happen for @UpperHalf (LowerHalf (Register _))@? That
+  -- won't get special treatment here, but maybe it also needs the
+  -- upper 32 bits to be zeroed?
   (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
     -- FIXME: doing this the obvious way breaks GHC
     --     case addIsLeqLeft1' LeqProof v S.n64 of ...
@@ -440,40 +445,22 @@ ppExpr e = case e of
 -- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
 -- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
 ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
-ppLocation ppAddr l = case l of
-  S.MemoryAddr addr _ -> ppAddr addr
-  S.Register r -> text $ "%" ++ show r
-  S.TruncLoc _ _ -> ppSubregister l
-  S.LowerHalf _ -> ppSubregister l
-  S.UpperHalf _ -> ppSubregister l
-  S.X87StackRegister i -> text $ "x87_stack@" ++ show i
+ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
   where
-    -- | Print subregister as Python-style slice @<reg>[<low>:<high>]@.
+    ppMemCont :: forall tp'.
+                 (Integer, Integer) -> Integer -> (addr, TypeRepr tp') -> Doc
+    ppMemCont = ppSubrange (ppAddr . fst)
+    ppRegCont :: (Integer, Integer) -> Integer -> N.RegisterName cl -> Doc
+    ppRegCont = ppSubrange (\r -> text $ "%" ++ show r)
+    ppX87Cont = ppSubrange (\i -> text $ "x87_stack@" ++ show i)
+    -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
     --
     -- The low bit is inclusive and the high bit is exclusive, but I
     -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubregister :: forall tp. S.Location addr tp -> Doc
-    ppSubregister l =
-      r <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
-      where
-        (r, low, high) = go l
-
-    -- | Return pretty-printed register and subrange bounds.
-    go :: forall tp. S.Location addr tp -> (Doc, Integer, Integer)
-    go (S.TruncLoc l n) = truncLoc n $ go l
-    go (S.LowerHalf l) = lowerHalf $ go l
-    go (S.UpperHalf l) = upperHalf $ go l
-    go (S.Register r) = (text $ "%" ++ show r, 0, natValue $ N.registerWidth r)
-    go (S.MemoryAddr addr (BVTypeRepr nr)) = (ppAddr addr, 0, natValue nr)
-    go (S.MemoryAddr _ _) = error "ppLocation.go: address of non 'BVType n' type!"
-
-
-    -- Transformations on subranges.
-    truncLoc :: NatRepr n -> (Doc, Integer, Integer) -> (Doc, Integer, Integer)
-    truncLoc n (r, low, _high) = (r, low, low + natValue n)
-    lowerHalf, upperHalf :: (Doc, Integer, Integer) -> (Doc, Integer, Integer)
-    lowerHalf (r, low, high) = (r, low, (low + high) `div` 2)
-    upperHalf (r, low, high) = (r, (low + high) `div` 2, high)
+    ppSubrange pp (low, high) width x =
+      if width == high
+      then pp x
+      else pp x <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
 
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
@@ -532,9 +519,9 @@ evalExpr (TruncExpr nr e) =
 evalExpr (SExtExpr nr e) =
   return . CS.liftValue (sExtBV nr) nr =<< evalExpr e
 
-evalExpr (VarExpr var) = do
+evalExpr (VarExpr var@(Variable _ name)) = do
   maybeVal <- asks (MapF.lookup var)
-  let msg = "Bug: unbound variable in expr"
+  let msg = "Bug: unbound variable " ++ name ++ " in expr"
   maybe (error msg) return maybeVal
 
 evalExpr (AppExpr a) = do
@@ -652,28 +639,62 @@ evalExpr' e = runReader (evalExpr e) <$> get
 extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
+-- | Slice a subrange from a 'BV'.
+--
+-- This is a wrapper around 'BV.@@' which differs by supporting empty
+-- slices.
+(@@) :: Integral ix => BV -> (ix, ix) -> BV
+bv @@ (high, low) =
+  if high >= low
+  then bv BV.@@ (high, low)
+  else empty
+  where
+    empty = BV.zeros 0
+
 evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
 evalStmt (NamedStmt [x] (MakeUndefined tr)) =
   extendEnv (Variable tr x) (CS.Undefined tr)
-evalStmt (NamedStmt [x] (Get l)) = do
-  case l of
-    S.MemoryAddr addr tr@(BVTypeRepr nr) -> do
-      vaddr <- evalExpr' addr
-      case vaddr of
-        CS.Undefined _ -> error "evalStmt: undefined address in 'get'!"
-        CS.Literal bvaddr -> do
-          v <- CS.getMem (CS.Address nr bvaddr)
-          extendEnv (Variable tr x) v
-    S.Register rn -> do
-      let tr = N.registerType rn
-      v <- CS.getReg rn
-      extendEnv (Variable tr x) v
-    S.X87StackRegister i -> do
-      let rn = N.X87FPUReg i
-      let tr = N.registerType rn
-      v <- CS.getReg rn
-      extendEnv (Variable tr x) v
-    _ -> undefined -- subregisters
+evalStmt (NamedStmt [x] (Get l)) =
+  -- Force 'tp' to be a 'BVType n'.
+  case S.loc_type l of
+  BVTypeRepr _ -> do
+
+  let tr = S.loc_type l
+  let nr = S.loc_width l
+
+  let memCont :: forall tp0 i.
+                 Integer ~ i
+              => (i, i) -> i -> (Expr (BVType 64), TypeRepr tp0) -> m ()
+      memCont (low, high) _width (addr, BVTypeRepr nr0) = do
+        vaddr <- evalExpr' addr
+        case vaddr of
+          CS.Undefined _ -> error "evalStmt: undefined address in 'Get'!"
+          CS.Literal bvaddr -> do
+            let a = CS.Address nr0 bvaddr
+            v0 <- CS.getMem a
+            let v1 = CS.liftValue (sliceBV (low, high)) nr v0
+            extendEnv (Variable tr x) v1
+
+  let regCont :: forall cl i.
+                 Integer ~ i
+              => (i, i) -> i -> N.RegisterName cl -> m ()
+      regCont (low, high) _width rn =
+        -- Force 'tp' to be a 'BVType n'.
+        case S.loc_type l of
+        BVTypeRepr _ -> do
+        v0 <- CS.getReg rn
+        let v1 = CS.liftValue (sliceBV (low, high)) nr v0
+        extendEnv (Variable tr x) v1
+
+  let x87Cont (low, high) width i =
+        regCont (low, high) width (N.X87FPUReg i)
+
+  S.elimLocation memCont regCont x87Cont l
+  where
+    sliceBV :: Integer ~ i
+            => (i, i) -> BV -> BV
+    sliceBV (low, high) super = super @@ (high - 1, low)
+
 evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
   v1 <- evalExpr' ns1
   v2 <- evalExpr' ns2
@@ -735,20 +756,60 @@ evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
 evalStmt (NamedStmt _ _) =
   error "evalStmt: wrong number of bindings for 'NamedStmt'!"
 
-evalStmt (l := e) = do
+-- Strategy for handling subregion writes: read the current value of
+-- the full memory or register underlying the subregion in 'l',
+-- redefine the subregion 'l' of the current value with the given
+-- value in 'e', write back the updated value.
+--
+-- For example, the subregister write
+--
+--   %rax[8:16] := e
+--
+-- is effected by
+--
+--   v0 <- getReg %rax
+--   let v1 = v0[0:8] ++ e ++ v0[16:64]
+--   setReg %rax v1
+--
+evalStmt (l := e) =
+  -- Force 'tp' to be a 'BVType n'.
+  case S.loc_type l of
+  BVTypeRepr _ -> do
+
   ve <- evalExpr' e
-  case l of
-    S.MemoryAddr addr (BVTypeRepr nr) -> do
-      vaddr <- evalExpr' addr
-      case vaddr of
-        -- Alternatively, we could mark all known memory values
-        -- ('dumpMem8') as 'Undefined' here. It would be more accurate
-        -- to mark *all* of memory as undefined.
-        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
-        CS.Literal bvaddr -> CS.setMem (CS.Address nr bvaddr) ve
-    S.Register rn -> CS.setReg rn ve
-    S.X87StackRegister i -> CS.setReg (N.X87FPUReg i) ve
-    _ -> undefined -- subregisters
+  let memCont :: forall tp i.
+                 Integer ~ i
+              => (i, i) -> i -> (Expr (BVType 64), TypeRepr tp) -> m ()
+      memCont (low, high) width (addr, BVTypeRepr nr) = do
+        vaddr <- evalExpr' addr
+        case vaddr of
+          -- Alternatively, we could mark memory values known to
+          -- the machine state monad 'm' as 'Undefined' here.
+          CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+          CS.Literal bvaddr -> do
+            let a = CS.Address nr bvaddr
+            v0 <- CS.getMem a
+            let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
+            CS.setMem a v1
+  let regCont :: forall cl i.
+                 Integer ~ i
+              => (i, i) -> i -> N.RegisterName cl -> m ()
+      regCont (low, high) width rn = do
+        let nr = N.registerWidth rn
+        v0 <- CS.getReg rn
+        let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
+        CS.setReg rn v1
+  let x87Cont (low, high) width i =
+        regCont (low, high) width (N.X87FPUReg i)
+  S.elimLocation memCont regCont x87Cont l
+  where
+    combineBV :: Integer ~ i
+              => (i, i) -> i -> BV -> BV -> BV
+    combineBV (low, high) width super sub =
+      (super @@ (width - 1, high)) BV.#
+      sub BV.#
+      (super @@ (low - 1, 0))
+
 evalStmt (Ifte_ c t f) = do
   vc <- evalExpr' c
   case vc of
