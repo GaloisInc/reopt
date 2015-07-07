@@ -19,3 +19,24 @@ In addition to Hackage dependencies, Reopt has the following internally maintain
 - https://github.com/GaloisInc/linux-ptrace (a fork of `linux-ptrace` package on Hackage)
 - https://github.com/GaloisInc/parameterized-utils
 - https://github.com/GaloisInc/posix-waitpid (a fork of `posix-waitpid` package on Hackage)
+
+## Testing
+
+The `reopt` executable can be tested by running it on
+`examples/nweb23_static_fresbsd`. It should not crash ...
+
+The `reopt_test` executable, which checks our implementation of the
+X86_64 semantics against the hardware using `ptrace`, can be tested by
+running it on `examples/thttpd`:
+
+```
+ reopt_test examples/thttpd 2>&1 | grep 'instruction II' | wc -l
+```
+
+To test changes in which an error would result in a changed memory or
+register value, it can be useful to compare the number of "did not
+match" warnings before and after your change:
+
+```
+ reopt_test examples/thttpd 2>&1 | grep 'did not match' | wc -l
+```

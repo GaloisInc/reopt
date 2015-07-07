@@ -878,8 +878,8 @@ evalStmt X87Pop = do
 -- | Convert a base address, increment (in bits), and count, into a sequence of
 -- addresses.
 --
--- TODO: move into 'MachineState' and refactor 'byteAddresses' in
--- terms of this.
+-- TODO(conathan): move into 'MachineState' and refactor
+-- 'byteAddresses' in terms of this.
 addressSequence :: forall n.
                    CS.Value (BVType 64)
                 -> NatRepr n
