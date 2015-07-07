@@ -274,11 +274,7 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
       mapFst f (a,b) = (f a, b)
       addrs = byteAddresses addr
 
-  getReg reg = do 
-    val <- liftM (^.(X.register reg)) dumpRegs
-    case val 
-      of Undefined _ -> lift $ getReg reg
-         _ -> return val
+  getReg reg = liftM (^.(X.register reg)) dumpRegs
       
   setReg reg val = modify $ mapSnd $ X.register reg .~ val
     where mapSnd f (a,b) = (a, f b)
