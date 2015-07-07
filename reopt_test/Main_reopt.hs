@@ -460,9 +460,9 @@ checkAndClear out ii = do
   let regCmp = compareRegs realRegs emuRegs
   memCmp <- foldMem8 (\addr val errs -> do
     realVal <- lift $ getMem addr
-    if realVal == val
+    if realVal `equalOrUndef` val
       then return errs
-      else return $ errs ++ [show addr ++ " does not match"]) []
+      else return $ errs ++ [show addr ++ " did not match"]) []
   case regCmp ++ memCmp of [] -> lift $ liftIO $ hPutStrLn out $ "instruction " ++ show ii ++ " executed successfully"
                            l ->do lift $ liftIO $ mapM_ (hPutStrLn out) ((
                                     "After executing instruction " ++ show ii) : l)
@@ -475,7 +475,7 @@ compareRegs real emu =
     let lens = register reg
         realVal = real^.lens
         emuVal = emu^.lens
-     in if realVal == emuVal
+     in if realVal `equalOrUndef` emuVal
           then Nothing
           else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
      x86StateRegisters

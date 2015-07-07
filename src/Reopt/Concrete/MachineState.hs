@@ -43,6 +43,14 @@ instance Eq (Value tp) where
   Undefined _ == Undefined _ = True
   _ == _                     = False
 
+-- | Equal or at least one side undefined.
+--
+-- This is not transitive, so it doesn't make sense as the 'Eq'
+-- instance.
+equalOrUndef :: Value tp -> Value tp -> Bool
+Literal x `equalOrUndef` Literal y = x == y
+_ `equalOrUndef` _ = True
+
 instance Ord (Value tp) where
   compare (Literal x) (Literal y) = compare x y
   compare (Undefined _) (Literal _) = LT
