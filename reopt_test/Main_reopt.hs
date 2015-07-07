@@ -393,6 +393,7 @@ instance MonadMachineState PTraceMachineState where
      case regs of
        X86_64 regs' -> return $ translatePtraceRegs regs'
        _ -> fail "64-bit only!"
+  syscall = fail "syscall unimplemented for PTraceMachineState"
 
 instance FoldableMachineState PTraceMachineState where
 

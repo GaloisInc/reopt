@@ -218,6 +218,8 @@ class Monad m => MonadMachineState m where
   setReg :: N.RegisterName cl -> Value (N.RegisterType cl) -> m ()
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
+  -- | Update the state for a syscall.
+  syscall :: m ()
 
 class MonadMachineState m => FoldableMachineState m where
   -- fold across all known addresses
@@ -263,7 +265,11 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
     let bvs = mapMaybe asBV vs
     -- We can't directly concat 'vs' since we can't type the
     -- intermediate concatenations.
-    let bv = foldl (flip (BV.#)) (BV.zeros 0) bvs -- Endianness?  are we backwards?
+    --
+    -- The 'BV.#' is big endian -- the higher-order bits come first --
+    -- so @flip BV.#@ is little endian, which is consistent with our
+    -- list of values 'bvs' read in increasing address order.
+    let bv = foldl (flip (BV.#)) (BV.zeros 0) bvs
     -- Return 'Undefined' if we had any 'Undefined' values in 'vs'.
     return $ if length bvs /= length vs
              then Undefined (BVTypeRepr nr)
@@ -278,7 +284,16 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
       
   setReg reg val = modify $ mapSnd $ X.register reg .~ val
     where mapSnd f (a,b) = (a, f b)
+
   dumpRegs = liftM snd get
+
+  -- | We implement syscall by assuming anything could have happened.
+  --
+  -- I.e., we forget everything we know about the machine state.
+  syscall = do
+    let regs = X.mkX86State (\rn -> Undefined (N.registerType rn))
+    let mem = M.empty
+    put (mem, regs)
 
 instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   getMem = lift . getMem
@@ -286,6 +301,7 @@ instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   getReg = lift . getReg
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
+  syscall = lift syscall
 
 instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   getMem = lift . getMem
@@ -293,10 +309,9 @@ instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   getReg = lift . getReg
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
+  syscall = lift syscall
 
 instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
   foldMem8 f x = do
     (mem, _) <- get 
     M.foldrWithKey (\k v m -> do m' <- m; f k v m') (return x) mem
-
-
