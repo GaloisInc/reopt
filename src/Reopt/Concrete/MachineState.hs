@@ -21,6 +21,7 @@ import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
+import           Reopt.Semantics.Monad (Primitive)
 import qualified Data.BitVector as BV
 
 import           Control.Applicative
@@ -218,8 +219,8 @@ class Monad m => MonadMachineState m where
   setReg :: N.RegisterName cl -> Value (N.RegisterType cl) -> m ()
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
-  -- | Update the state for a syscall.
-  syscall :: m ()
+  -- | Update the state for a primitive.
+  primitive :: Primitive -> m ()
 
 class MonadMachineState m => FoldableMachineState m where
   -- fold across all known addresses
@@ -287,10 +288,16 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
 
   dumpRegs = liftM snd get
 
-  -- | We implement syscall by assuming anything could have happened.
+  -- | We implement primitives by assuming anything could have happened.
   --
   -- I.e., we forget everything we know about the machine state.
-  syscall = do
+  --
+  -- TODO(conathan): this is probably overly lossy: the 'Undefined's
+  -- will persist. Instead, we could do the equivalent of setting
+  -- memory to 'M.empty', i.e., we could force the register state to
+  -- be reread. I removed some other code that caused 'Undefined' in a
+  -- reg to turn into a read of the hardware.
+  primitive _ = do
     let regs = X.mkX86State (\rn -> Undefined (N.registerType rn))
     let mem = M.empty
     put (mem, regs)
@@ -301,7 +308,7 @@ instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   getReg = lift . getReg
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
-  syscall = lift syscall
+  primitive = lift . primitive
 
 instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   getMem = lift . getMem
@@ -309,7 +316,7 @@ instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   getReg = lift . getReg
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
-  syscall = lift syscall
+  primitive = lift . primitive
 
 instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
   foldMem8 f x = do

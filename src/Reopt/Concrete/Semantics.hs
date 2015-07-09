@@ -51,6 +51,7 @@ import           Data.Binary.IEEE754
 import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
+import           Data.Char (toLower)
 import qualified Data.Foldable as Fold
 import           Data.Functor
 import           Data.Maybe
@@ -293,7 +294,7 @@ data Stmt where
           -> Expr BoolType
           -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
-  Syscall :: Stmt
+  Primitive :: S.Primitive -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -404,7 +405,7 @@ instance S.Semantics Semantics where
     tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
     return $ VarExpr (Variable S.knownType name)
 
-  syscall = tell [Syscall]
+  primitive p = tell [Primitive p]
 
   bvDiv v1 v2 = do
     nameQuot <- fresh "divQuot"
@@ -465,6 +466,9 @@ ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
+ppPrimitive :: S.Primitive -> Doc
+ppPrimitive = text . map toLower . show
+
 ppNamedStmt :: NamedStmt -> Doc
 ppNamedStmt s = case s of
   MakeUndefined _ -> text "make_undefined"
@@ -491,7 +495,7 @@ ppStmt s = case s of
     ]
   MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
-  Syscall -> text "syscall"
+  Primitive p -> ppPrimitive p
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"
@@ -853,7 +857,7 @@ evalStmt (MemSet n v a) = do
   let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
-evalStmt Syscall = CS.syscall
+evalStmt (Primitive p) = CS.primitive p
 -- FIXME: in Exception and BVDiv/BVSigned we use error, but we may want
 -- more real exception support in the MachineState monad in the future.
 evalStmt (Exception s1 s2 s3) = error "evalStmt: Exception: unimplemented"

@@ -256,6 +256,8 @@ data TermStmt where
          -> !BlockLabel
          -> TermStmt
 
+  -- TODO(conathan): add support for 'CPUID' here.
+
   -- The syscall instruction.
   -- We model system calls as terminal instructions because from the
   -- application perspective, the semantics will depend on the operating

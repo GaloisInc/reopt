@@ -854,7 +854,8 @@ instance S.Semantics X86Generator where
     dest_v  <- eval dest
     addStmt (MemSet count_v val_v dest_v)
 
-  syscall = do
+  -- TODO(conathan): handle 'CPUID' here.
+  primitive S.Syscall = do
     X86G $ \_ s0 -> do
       -- Get last block.
       let p_b = s0 ^. (blockState . _JustF)

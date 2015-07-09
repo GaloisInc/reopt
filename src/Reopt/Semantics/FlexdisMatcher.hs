@@ -347,7 +347,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "shr"     $ geBinop exec_shr
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
-              , mk "syscall" $ const syscall
+              , mk "syscall" $ const (primitive Syscall)
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
 

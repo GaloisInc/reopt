@@ -90,6 +90,7 @@ module Reopt.Semantics.Monad
   , IsLocationBV
   , FullSemantics
   , ExceptionClass(..)
+  , Primitive(..)
     -- * Re-exports
   , type (TypeLits.<=)
   , type Flexdis86.OpTable.SizeConstraint(..)
@@ -657,6 +658,15 @@ data ExceptionClass
      -- -- | AlignmentCheck
   deriving Show
 
+-- | Primitive instructions.
+--
+-- A primitive instruction is one whose semantics depend on the
+-- underlying hardware or OS.
+data Primitive
+   = Syscall
+   | CPUID
+   deriving Show
+
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m
@@ -780,8 +790,8 @@ class ( Applicative m
             -- ^ Pointer to buffer to set
             -> m ()
 
-  -- | execute the system call instruction.
-  syscall :: m ()
+  -- | execute a primitive instruction.
+  primitive :: Primitive -> m ()
 
   -- | Performs an unsigned division.  It rounds the result to zero,
   -- and returns both the quotient and remainder.
