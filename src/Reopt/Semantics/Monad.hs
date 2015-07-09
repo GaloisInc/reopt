@@ -669,6 +669,8 @@ data ExceptionClass
 data Primitive
    = Syscall
    | CPUID
+   -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
+   | XGetBV
    deriving Show
 
 ppPrimitive :: Primitive -> Doc

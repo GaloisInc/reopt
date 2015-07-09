@@ -347,10 +347,13 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "shr"     $ geBinop exec_shr
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
-              , mk "syscall" $ const (primitive Syscall)
-              , mk "cpuid"   $ const (primitive CPUID)
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
+
+              -- Primitive instructions
+              , mk "syscall" $ const (primitive Syscall)
+              , mk "cpuid"   $ const (primitive CPUID)
+              , mk "xgetbv"  $ const (primitive XGetBV)
 
               -- MMX instructions
               , mk "movd"    $ mkBinopLV exec_movd
