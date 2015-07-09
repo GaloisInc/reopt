@@ -58,6 +58,7 @@ import           Reopt.CFG.Implementation
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Semantics.Monad (Primitive(..))
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -387,7 +388,7 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
                   insBlock r final $
                   m
               FetchAndExecute _ -> m
-              Syscall _ -> m
+              Primitive _ _ -> m
 
           where final = runIdentity $ transferStmts r0 (blockStmts b)
                 m = MapF.union (final^.absAssignments) m0
@@ -798,13 +799,15 @@ transferBlock b regs = do
       transferBlock l =<< transferStmts l_regs (blockStmts b)
       transferBlock r =<< transferStmts r_regs (blockStmts b)
 
-    Syscall s' -> do
+    Primitive Syscall s' -> do
       let abst = finalAbsBlockState regs' s'
       mapM_ (recordWriteStmt lbl regs') (blockStmts b)
       let ips = getNextIps mem s' regs'
       -- Look for new ips.
       Fold.forM_ ips $ \addr -> do
         mergeFreeBSDSyscall lbl abst addr
+
+    Primitive p _ -> error $ "transferBlock: " ++ show p ++ " unimplemented!"
 
     FetchAndExecute s' -> do
       let abst = finalAbsBlockState regs' s'

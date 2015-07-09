@@ -53,7 +53,7 @@ blockLiveRegisters b = do addIDs terminalIds
     terminalIds = case blockTerm b of
                    Branch v _ _      -> refsInValue v
                    FetchAndExecute s -> foldX86StateValue refsInValue s
-                   Syscall s         -> foldX86StateValue refsInValue s
+                   Primitive _ s     -> foldX86StateValue refsInValue s
     addIDs ids = modify (S.union ids)
     noteAndFilter stmt@(AssignStmt (Assignment v rhs)) ss
       = do v_in <- gets (S.member v)

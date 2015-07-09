@@ -348,6 +348,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
               , mk "syscall" $ const (primitive Syscall)
+              , mk "cpuid"   $ const (primitive CPUID)
               , mk "test"    $ binop exec_test
               , mk "xor"     $ binop exec_xor
 

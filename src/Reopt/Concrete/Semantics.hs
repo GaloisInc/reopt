@@ -51,7 +51,6 @@ import           Data.Binary.IEEE754
 import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
-import           Data.Char (toLower)
 import qualified Data.Foldable as Fold
 import           Data.Functor
 import           Data.Maybe
@@ -466,9 +465,6 @@ ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
-ppPrimitive :: S.Primitive -> Doc
-ppPrimitive = text . map toLower . show
-
 ppNamedStmt :: NamedStmt -> Doc
 ppNamedStmt s = case s of
   MakeUndefined _ -> text "make_undefined"
@@ -495,7 +491,7 @@ ppStmt s = case s of
     ]
   MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
   MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
-  Primitive p -> ppPrimitive p
+  Primitive p -> pretty p
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"

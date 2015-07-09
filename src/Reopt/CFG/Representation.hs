@@ -94,8 +94,9 @@ import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Utils.PrettyPrint
 import           Reopt.Machine.X86State
+import           Reopt.Semantics.Monad (Primitive)
+import           Reopt.Utils.PrettyPrint
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
@@ -256,13 +257,12 @@ data TermStmt where
          -> !BlockLabel
          -> TermStmt
 
-  -- TODO(conathan): add support for 'CPUID' here.
-
-  -- The syscall instruction.
-  -- We model system calls as terminal instructions because from the
+  -- Primitive instructions.
+  --
+  -- We model primitives as terminal instructions because from the
   -- application perspective, the semantics will depend on the operating
   -- system.
-  Syscall :: !(X86State Value) -> TermStmt
+  Primitive :: Primitive -> !(X86State Value) -> TermStmt
 
 instance Pretty TermStmt where
   pretty (FetchAndExecute s) =
@@ -270,8 +270,8 @@ instance Pretty TermStmt where
     indent 2 (pretty s)
   pretty (Branch c x y) =
     text "branch" <+> ppValue 0 c <+> pretty x <+> pretty y
-  pretty (Syscall s) =
-    text "syscall" <$$>
+  pretty (Primitive p s) =
+    pretty p <$$>
     indent 2 (pretty s)
 
 ------------------------------------------------------------------------

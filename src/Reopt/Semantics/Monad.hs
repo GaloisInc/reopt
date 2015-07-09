@@ -98,8 +98,10 @@ module Reopt.Semantics.Monad
 
 import           Control.Applicative
 import           Data.Bits (shiftL)
+import           Data.Char (toLower)
 import           Data.Proxy
 import           GHC.TypeLits as TypeLits
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
@@ -195,6 +197,8 @@ elimLocation memCont regCont x87Cont l = go id l
     lowerHalf, upperHalf :: (i, i) -> (i, i)
     lowerHalf (low, high) = (low, (low + high) `div` 2)
     upperHalf (low, high) = ((low + high) `div` 2, high)
+
+
 
 ------------------------------------------------------------------------
 -- Specific locations.
@@ -666,6 +670,12 @@ data Primitive
    = Syscall
    | CPUID
    deriving Show
+
+ppPrimitive :: Primitive -> Doc
+ppPrimitive = text . map toLower . show
+
+instance Pretty Primitive where
+  pretty = ppPrimitive
 
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.

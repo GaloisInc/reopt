@@ -524,7 +524,7 @@ blockNextStates g b =
     Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
       where Just x = findBlock g x_lbl
             Just y = findBlock g y_lbl
-    Syscall _ -> []
+    Primitive _ _ -> []
 
 checkReturnsIdentified :: CFG -> Block -> IO ()
 checkReturnsIdentified g b = do
