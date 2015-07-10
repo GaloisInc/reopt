@@ -864,6 +864,9 @@ instance S.Semantics X86Generator where
       Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
                 & blockState .~ NothingF
 
+  getSegmentBase _seg =
+    error "Reopt.Semantics.Implementation.getSegmentBase: unimplemented!"
+
   bvDiv x y = do
     let w = exprWidth y
     xv <- eval x
