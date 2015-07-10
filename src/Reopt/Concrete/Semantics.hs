@@ -39,9 +39,6 @@ module Reopt.Concrete.Semantics
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative ((<*>), pure, Applicative)
 #endif
-import           Control.Arrow ((***))
-import           Control.Exception (assert)
-import           Control.Lens
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
@@ -51,30 +48,17 @@ import           Data.Binary.IEEE754
 import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
-import qualified Data.Foldable as Fold
 import           Data.Functor
-import           Data.Maybe
 import           Data.Monoid (mempty)
-import           Data.Parameterized.Classes (OrderingF(..), OrdF, compareF, fromOrdering)
+import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Some
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
-import qualified Data.Text as Text
-import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), colon, indent, line, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
+  ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
-import           Data.Word
 import           GHC.Float (float2Double, double2Float)
-import           GHC.TypeLits
-import           Numeric (showHex)
 
-import qualified Flexdis86 as Flexdis
-import           Reopt.Object.Memory
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
@@ -86,7 +70,7 @@ import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , TypeBits, floatInfoBits, n1, n80, type_width
+                                     , floatInfoBits, n1, n80
                                      )
 
 ------------------------------------------------------------------------
