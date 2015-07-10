@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -69,6 +70,7 @@ import           Reopt.Concrete.Semantics
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
 import           Reopt.Semantics.Monad (Type(..), bvLit)
+import qualified Reopt.Semantics.Monad as SM
 import System.Posix.Waitpid as W
 import System.Posix.Types
 import System.Posix.Process
@@ -331,8 +333,9 @@ translatePtraceRegs ptraceRegs =
 
     mkLit16 :: Word64 -> MS.Value (BVType 16)
     mkLit16 = Literal . bitVector knownNat . bitVec 16
-    mkLit64 :: Word64 -> MS.Value (BVType 64)
-    mkLit64 = Literal . bitVector knownNat . bitVec 64
+
+mkLit64 :: Word64 -> MS.Value (BVType 64)
+mkLit64 = Literal . bitVector knownNat . bitVec 64
 
 data FileByteReader a = FileByteReader (Handle -> IO a)
 
@@ -394,6 +397,18 @@ instance MonadMachineState PTraceMachineState where
        X86_64 regs' -> return $ translatePtraceRegs regs'
        _ -> fail "64-bit only!"
   primitive = fail "primitive unimplemented for PTraceMachineState"
+  getSegmentBase seg = do
+    pid <- asks cpid
+    regs <- liftIO $ ptrace_getregs pid
+    case regs of
+      X86_64 regs'
+        | seg == SM.fs -> return $ mkLit64 (fs_base regs')
+        | seg == SM.gs -> return $ mkLit64 (gs_base regs')
+        -- We already treated the (trivial) segments other than FS and
+        -- GS in 'Reopt.Semantics.FlexdisMatcher.getBVAddress'.
+        | otherwise -> fail $ "getSegmentBase: bug: unexpected segment: " ++
+                         show seg
+      _ -> fail "getSegmentBase: 64-bit only!"
 
 instance FoldableMachineState PTraceMachineState where
 
