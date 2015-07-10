@@ -271,6 +271,7 @@ data NamedStmt where
          -> Expr (BVType 64)
          -> Expr BoolType
          -> NamedStmt
+  GetSegmentBase :: S.Segment -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
@@ -406,6 +407,11 @@ instance S.Semantics Semantics where
 
   primitive p = tell [Primitive p]
 
+  getSegmentBase seg = do
+    name <- fresh $ show seg ++ "_base"
+    tell [NamedStmt [name] (GetSegmentBase seg)]
+    return (VarExpr (Variable S.knownType name))
+
   bvDiv v1 v2 = do
     nameQuot <- fresh "divQuot"
     nameRem <- fresh "divRem"
@@ -473,6 +479,7 @@ ppNamedStmt s = case s of
   BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
   MemCmp n v1 v2 v3 v4 ->
     R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+  GetSegmentBase seg -> R.sexpr "get_segment_base" [ text $ show seg ]
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
@@ -753,6 +760,10 @@ evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
       let lit :: CS.Value (BVType 64)
           lit = CS.Literal $ CS.bitVector knownNat (sum matches)
       extendEnv (Variable tr x_matches) lit
+evalStmt (NamedStmt [x] (GetSegmentBase seg)) = do
+  base <- CS.getSegmentBase seg
+  extendEnv (Variable S.knownType x) base
+
 evalStmt (NamedStmt _ _) =
   error "evalStmt: wrong number of bindings for 'NamedStmt'!"
 

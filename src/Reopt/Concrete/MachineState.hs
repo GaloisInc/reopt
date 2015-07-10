@@ -21,7 +21,7 @@ import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
-import           Reopt.Semantics.Monad (Primitive)
+import           Reopt.Semantics.Monad (Primitive, Segment)
 import qualified Data.BitVector as BV
 
 import           Control.Applicative
@@ -221,6 +221,8 @@ class Monad m => MonadMachineState m where
   dumpRegs :: m (X.X86State Value)
   -- | Update the state for a primitive.
   primitive :: Primitive -> m ()
+  -- | Return the base address of the given segment.
+  getSegmentBase :: Segment -> m (Value (BVType 64))
 
 class MonadMachineState m => FoldableMachineState m where
   -- fold across all known addresses
@@ -302,6 +304,8 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
     let mem = M.empty
     put (mem, regs)
 
+  getSegmentBase = lift . getSegmentBase
+
 instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   getMem = lift . getMem
   setMem addr val = lift $ setMem addr val
@@ -309,6 +313,7 @@ instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
   primitive = lift . primitive
+  getSegmentBase = lift . getSegmentBase
 
 instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   getMem = lift . getMem
@@ -317,6 +322,7 @@ instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
   setReg reg val = lift $ setReg reg val
   dumpRegs = lift dumpRegs
   primitive = lift . primitive
+  getSegmentBase = lift . getSegmentBase
 
 instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
   foldMem8 f x = do
