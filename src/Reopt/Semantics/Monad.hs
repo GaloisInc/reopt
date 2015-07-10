@@ -94,6 +94,7 @@ module Reopt.Semantics.Monad
     -- * Re-exports
   , type (TypeLits.<=)
   , type Flexdis86.OpTable.SizeConstraint(..)
+  , module Flexdis86.InstructionSet
   ) where
 
 import           Control.Applicative
@@ -109,6 +110,7 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 import Flexdis86.OpTable (SizeConstraint(..))
+import Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
 
 ------------------------------------------------------------------------
 -- Location
@@ -804,6 +806,9 @@ class ( Applicative m
 
   -- | execute a primitive instruction.
   primitive :: Primitive -> m ()
+
+  -- | Return the base address of the given segment.
+  getSegmentBase :: Segment -> m (Value m (BVType 64))
 
   -- | Performs an unsigned division.  It rounds the result to zero,
   -- and returns both the quotient and remainder.

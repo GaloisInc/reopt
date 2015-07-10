@@ -84,12 +84,11 @@ getSomeBVValue v =
     mk l = SomeBV <$> get l
 
 -- | Calculates the address corresponding to an AddrRef
-getBVAddress :: FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
+getBVAddress :: forall m. FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
 getBVAddress ar =
   case ar of
    -- FIXME: It seems that there is no sign extension here ...
     F.Addr_32 seg m_r32 m_int_r32 i32 -> do
-      check_seg_value seg
       base <- case m_r32 of
                 Nothing -> return $! bvKLit 0
                 Just r  -> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
@@ -97,28 +96,39 @@ getBVAddress ar =
                  Nothing     -> return $! bvKLit 0
                  Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
                                 <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-      return $ uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
-
+      let offset = uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
+      mk_absolute seg offset
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
-    F.Offset_64    seg w64                 -> do check_seg_value seg
-                                                 return (bvLit n64 w64)
-    F.Addr_64      seg m_r64 m_int_r64 i32 -> do check_seg_value seg
-                                                 base <- case m_r64 of
+    F.Offset_64    seg w64                 -> do let offset = bvLit n64 w64
+                                                 mk_absolute seg offset
+    F.Addr_64      seg m_r64 m_int_r64 i32 -> do base <- case m_r64 of
                                                            Nothing -> return v0_64
                                                            Just r  -> get (Register $ N.gpFromFlexdis r)
                                                  scale <- case m_int_r64 of
                                                             Nothing     -> return v0_64
                                                             Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
                                                                            <$> get (Register $ N.gpFromFlexdis r)
-                                                 return (base `bvAdd` scale `bvAdd` bvLit n64 i32)
-    F.IP_Offset_64 seg i32                 -> do check_seg_value seg
-                                                 bvAdd (bvLit n64 i32) <$> get (Register N.rip)
+                                                 let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
+                                                 mk_absolute seg offset
+    F.IP_Offset_64 seg i32                 -> do offset <- bvAdd (bvLit n64 i32) <$> get (Register N.rip)
+                                                 mk_absolute seg offset
   where
     v0_64 = bvLit n64 (0 :: Int)
-    check_seg_value seg
-            | seg == F.cs || seg == F.ds || seg == F.es || seg == F.ss = return ()
-            | otherwise                                                = fail "Segmentation is not supported"
+    -- | Add the segment base to compute an absolute address.
+    mk_absolute :: F.Segment -> Value m (BVType 64) -> m (Value m (BVType 64))
+    mk_absolute seg offset
+      -- In 64-bit mode the CS, DS, ES, and SS segment registers
+      -- are forced to zero, and so segmentation is a nop.
+      --
+      -- We could nevertheless call 'getSegmentBase' in all cases
+      -- here, but that adds a lot of noise to the AST in the common
+      -- case of segments other than FS or GS.
+      | seg == F.cs || seg == F.ds || seg == F.es || seg == F.ss = return offset
+      -- The FS and GS segments can be non-zero based in 64-bit mode.
+      | otherwise = do
+        base <- getSegmentBase seg
+        return $ base `bvAdd` offset
 
 -- | Extract the _location_ of a value, not the value contained.
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
