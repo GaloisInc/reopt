@@ -239,33 +239,12 @@ instance S.IsValue Expr where
 type MLocation = S.Location (Expr (BVType 64))
 
 data NamedStmt where
-  MakeUndefined :: TypeRepr tp -> NamedStmt
-  Get :: MLocation tp -> NamedStmt
-  BVDiv :: (1 <= n)
-        => Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> NamedStmt
-  BVSignedDiv :: (1 <= n)
-              => Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> NamedStmt
-  MemCmp :: Integer
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
-         -> Expr (BVType 64)
-         -> Expr BoolType
-         -> NamedStmt
-  GetSegmentBase :: S.Segment -> NamedStmt
 
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
 data Stmt where
-  -- | Bind the results of a statement to names.
-  --
-  -- Some statements, e.g. 'bvDiv', return multiple results, so we
-  -- bind a list of 'Name's here.
-  NamedStmt :: [Name] -> NamedStmt -> Stmt
-
+  MakeUndefined :: Variable tp -> TypeRepr tp -> Stmt
+  Get :: Variable tp -> MLocation tp -> Stmt
   -- The remaining constructors correspond to the 'S.Semantics'
   -- operations; the arguments are documented there and in
   -- 'Reopt.CFG.Representation.Stmt'.
@@ -277,8 +256,26 @@ data Stmt where
           -> Expr (BVType 64)
           -> Expr BoolType
           -> Stmt
+  MemCmp :: Variable (BVType 64)
+         -> Integer
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> Expr (BVType 64)
+         -> Expr BoolType
+         -> Stmt
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Primitive :: S.Primitive -> Stmt
+  GetSegmentBase :: Variable (BVType 64) -> S.Segment -> Stmt
+  BVDiv :: (1 <= n)
+        => (Variable (BVType n), Variable (BVType n))
+        -> Expr (BVType (n+n))
+        -> Expr (BVType n)
+        -> Stmt
+  BVSignedDiv :: (1 <= n)
+              => (Variable (BVType n), Variable (BVType n))
+              -> Expr (BVType (n+n))
+              -> Expr (BVType n)
+              -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -331,13 +328,15 @@ addIsLeqLeft1' prf _v _v' = addIsLeqLeft1 prf
 instance S.Semantics Semantics where
   make_undefined t = do
     name <- fresh "undef"
-    tell [NamedStmt [name] (MakeUndefined t)]
-    return $ VarExpr (Variable t name)
+    let var = Variable t name
+    tell [MakeUndefined var t]
+    return $ VarExpr var
 
   get l = do
     name <- fresh "get"
-    tell [NamedStmt [name] (Get l)]
-    return $ VarExpr (Variable (S.loc_type l) name)
+    let var = Variable (S.loc_type l) name
+    tell [Get var l]
+    return $ VarExpr var
 
   -- sjw: This is a huge hack, but then again, so is the fact that it
   -- happens at all.  According to the ISA, assigning a 32 bit value
@@ -386,29 +385,35 @@ instance S.Semantics Semantics where
 
   memcmp r v1 v2 v3 v4 = do
     name <- fresh "memcmp"
-    tell [NamedStmt [name] (MemCmp r v1 v2 v3 v4)]
-    return $ VarExpr (Variable S.knownType name)
+    let var = Variable S.knownType name
+    tell [MemCmp var r v1 v2 v3 v4]
+    return $ VarExpr var
 
   primitive p = tell [Primitive p]
 
   getSegmentBase seg = do
     name <- fresh $ show seg ++ "_base"
-    tell [NamedStmt [name] (GetSegmentBase seg)]
-    return (VarExpr (Variable S.knownType name))
+    let var = Variable S.knownType name
+    tell [GetSegmentBase var seg]
+    return $ VarExpr var
 
   bvDiv v1 v2 = do
     nameQuot <- fresh "divQuot"
     nameRem <- fresh "divRem"
-    tell [NamedStmt [nameQuot, nameRem] (BVDiv v1 v2)]
-    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
+    let varQuot = Variable r nameQuot
+    let varRem = Variable r nameRem
+    tell [BVDiv (varQuot, varRem) v1 v2]
+    return (VarExpr varQuot, VarExpr varRem)
     where
       r = exprType v2
 
   bvSignedDiv v1 v2 = do
     nameQuot <- fresh "sdivQuot"
     nameRem <- fresh "sdivRem"
-    tell [NamedStmt [nameQuot, nameRem] (BVSignedDiv v1 v2)]
-    return (VarExpr (Variable r nameQuot), VarExpr (Variable r nameRem))
+    let varQuot = Variable r nameQuot
+    let varRem = Variable r nameRem
+    tell [BVSignedDiv (varQuot, varRem) v1 v2]
+    return (VarExpr varQuot, VarExpr varRem)
     where
       r = exprType v2
 
@@ -455,23 +460,25 @@ ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
 ppMLocation :: MLocation tp -> Doc
 ppMLocation = ppLocation ppExpr
 
-ppNamedStmt :: NamedStmt -> Doc
-ppNamedStmt s = case s of
-  MakeUndefined _ -> text "make_undefined"
-  Get l -> R.sexpr "get" [ ppMLocation l ]
-  BVDiv v1 v2 -> R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv v1 v2 -> R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
-  MemCmp n v1 v2 v3 v4 ->
-    R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
-  GetSegmentBase seg -> R.sexpr "get_segment_base" [ text $ show seg ]
-
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt
 
 ppStmt :: Stmt -> Doc
 ppStmt s = case s of
-  NamedStmt names s' ->
-    text "let" <+> tupled (map text names) <+> text "=" <+> ppNamedStmt s'
+  -- Named.
+  MakeUndefined (Variable _ x) _ -> ppNamedStmt [x] $ text "make_undefined"
+  Get (Variable _ x) l -> ppNamedStmt [x] $ R.sexpr "get" [ ppMLocation l ]
+  BVDiv (Variable _ x, Variable _ y) v1 v2 ->
+    ppNamedStmt [x,y] $ R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
+  BVSignedDiv (Variable _ x, Variable _ y) v1 v2 ->
+    ppNamedStmt [x,y] $ R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  MemCmp (Variable _ x) n v1 v2 v3 v4 ->
+    ppNamedStmt [x] $
+      R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
+  GetSegmentBase (Variable _ x) seg ->
+    ppNamedStmt [x] $ R.sexpr "get_segment_base" [ text $ show seg ]
+
+  -- Unamed.
   l := e -> ppMLocation l <+> text ":=" <+> ppExpr e
   Ifte_ v t f -> vsep
     [ text "if" <+> ppExpr v
@@ -486,6 +493,13 @@ ppStmt s = case s of
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]
   X87Pop -> text "x87_pop"
+  where
+    ppNamedStmt :: [Name] -> Doc -> Doc
+    ppNamedStmt [] _ = error "ppNamedStmt: bug! Named stmts have names!"
+    ppNamedStmt [x] d =
+      text x <+> text "<-" <+> d
+    ppNamedStmt names d =
+      tupled (map text names) <+> text "<-" <+> d
 
 instance Pretty Stmt where
   pretty = ppStmt
@@ -643,14 +657,13 @@ bv @@ (high, low) =
     empty = BV.zeros 0
 
 evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
-evalStmt (NamedStmt [x] (MakeUndefined tr)) =
-  extendEnv (Variable tr x) (CS.Undefined tr)
-evalStmt (NamedStmt [x] (Get l)) =
+evalStmt (MakeUndefined x tr) =
+  extendEnv x (CS.Undefined tr)
+evalStmt (Get x l) =
   -- Force 'tp' to be a 'BVType n'.
   case S.loc_type l of
   BVTypeRepr _ -> do
 
-  let tr = S.loc_type l
   let nr = S.loc_width l
 
   let memCont :: forall tp0 i.
@@ -664,7 +677,7 @@ evalStmt (NamedStmt [x] (Get l)) =
             let a = CS.Address nr0 bvaddr
             v0 <- CS.getMem a
             let v1 = CS.liftValue (sliceBV (low, high)) nr v0
-            extendEnv (Variable tr x) v1
+            extendEnv x v1
 
   let regCont :: forall cl i.
                  Integer ~ i
@@ -675,7 +688,7 @@ evalStmt (NamedStmt [x] (Get l)) =
         BVTypeRepr _ -> do
         v0 <- CS.getReg rn
         let v1 = CS.liftValue (sliceBV (low, high)) nr v0
-        extendEnv (Variable tr x) v1
+        extendEnv x v1
 
   let x87Cont (low, high) width i =
         regCont (low, high) width (N.X87FPUReg i)
@@ -686,7 +699,7 @@ evalStmt (NamedStmt [x] (Get l)) =
             => (i, i) -> BV -> BV
     sliceBV (low, high) super = super @@ (high - 1, low)
 
-evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
+evalStmt (BVDiv (xQuot, xRem) ns1 ns2) = do
   v1 <- evalExpr' ns1
   v2 <- evalExpr' ns2
   let tr = CS.asTypeRepr v2
@@ -700,9 +713,9 @@ evalStmt (NamedStmt [nameQuot, nameRem] (BVDiv ns1 ns2)) = do
                              , CS.liftValue2 (takeSecondWidth mod) nr v1 v2
                              )
                 _ -> (CS.Undefined tr, CS.Undefined tr)
-  extendEnv (Variable tr nameQuot) q
-  extendEnv (Variable tr nameRem)  r
-evalStmt (NamedStmt [nameQuot, nameRem] (BVSignedDiv ns1 ns2)) = do
+  extendEnv xQuot q
+  extendEnv xRem r
+evalStmt (BVSignedDiv (xQuot, xRem) ns1 ns2) = do
   v1 <- evalExpr' ns1
   v2 <- evalExpr' ns2
   let tr = CS.asTypeRepr v2
@@ -716,10 +729,10 @@ evalStmt (NamedStmt [nameQuot, nameRem] (BVSignedDiv ns1 ns2)) = do
                              , CS.liftValue2 (takeSecondWidth BV.smod) nr v1 v2
                              )
                 _ -> (CS.Undefined tr, CS.Undefined tr)
-  extendEnv (Variable tr nameQuot) q
-  extendEnv (Variable tr nameRem)  r
+  extendEnv xQuot q
+  extendEnv xRem r
 -- Based on 'MemCopy' eval below.
-evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
+evalStmt (MemCmp x bytes compares src dst reversed) = do
   case bytes of
     1 -> go S.n8
     2 -> go S.n16
@@ -739,17 +752,12 @@ evalStmt (NamedStmt [x_matches] (MemCmp bytes compares src dst reversed)) = do
         r <- CS.getMem d
         return $ if l == r then 1 else 0
 
-      let tr :: TypeRepr (BVType 64)
-          tr = S.knownType
       let lit :: CS.Value (BVType 64)
           lit = CS.Literal $ CS.bitVector knownNat (sum matches)
-      extendEnv (Variable tr x_matches) lit
-evalStmt (NamedStmt [x] (GetSegmentBase seg)) = do
+      extendEnv x lit
+evalStmt (GetSegmentBase x seg) = do
   base <- CS.getSegmentBase seg
-  extendEnv (Variable S.knownType x) base
-
-evalStmt (NamedStmt _ _) =
-  error "evalStmt: wrong number of bindings for 'NamedStmt'!"
+  extendEnv x base
 
 -- Strategy for handling subregion writes: read the current value of
 -- the full memory or register underlying the subregion in 'l',
