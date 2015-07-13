@@ -1,10 +1,19 @@
-#! /bin/bash -x
+#! /bin/bash
 
 # Install reopt in a Cabal sandbox.
 
-PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils linux-ptrace posix-waitpid)
+PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils linux-ptrace posix-waitpid mss)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 sandbox=$(pwd)/sandbox
+
+# Check if 'stack' is in the path
+if  type stack >/dev/null 2>&1; then
+    echo "Found stack"
+else
+    echo >&2 "I require 'stack' but it's not installed. Aborting."
+    echo >&2 "Stack available at: https://github.com/commercialhaskell/stack/wiki/Downloads"
+    exit 1
+fi
 
 while getopts "p" opt; do
   case $opt in
@@ -19,17 +28,14 @@ while getopts "p" opt; do
 done
 
 mkdir -p deps
-if ! [ -e sandbox ]; then
-  cabal sandbox init --sandbox="$sandbox"
-fi
 for dep in "${PRIVATE_GITHUB_REPOS[@]}"; do
-  if ! [ -e deps/"$dep" ]; then  
+  if ! [ -e deps/"$dep" ]; then
     git clone git@github.com:GaloisInc/"$dep".git deps/"$dep"
-    cabal sandbox add-source deps/"$dep"
-    (cd deps/"$dep" && cabal sandbox --sandbox="$sandbox" init)
   elif [ "$dopull" == true ]; then
+    echo ">> Pulling repo $dep"
     (cd deps/"$dep" && git pull)
   fi
 done
 
-cabal install
+echo "Building"
+stack build
