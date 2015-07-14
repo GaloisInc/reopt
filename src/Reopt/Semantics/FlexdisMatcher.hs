@@ -416,6 +416,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pminsb"  $ binop exec_pminsb
               , mk "pminsw"  $ binop exec_pminsw
               , mk "pminsd"  $ binop exec_pminsd
+              , mk "palignr" $ ternop exec_palignr
 
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
@@ -482,6 +483,21 @@ maybe_ip_relative f (_, vs)
        = getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= f
 
   | otherwise  = fail "wrong number of operands"
+
+mkTernop :: FullSemantics m
+        => (F.Value -> F.Value -> F.Value -> m a)
+        -> (F.LockPrefix, [F.Value])
+        -> m a
+mkTernop f = mkTernopPfx (\_ -> f)
+
+mkTernopPfx :: FullSemantics m
+              => (F.LockPrefix -> F.Value -> F.Value -> F.Value -> m a)
+              -> (F.LockPrefix, [F.Value])
+              -> m a
+mkTernopPfx f (pfx, vs) =
+  case vs of
+    [v, v', v''] -> f pfx v v' v''
+    vs           -> fail $ "expecting 3 arguments, got " ++ show (length vs)
 
 mkBinop :: FullSemantics m
         => (F.Value -> F.Value -> m a)
@@ -588,6 +604,19 @@ binop f = mkBinop $ \loc val -> do
   SomeBV l <- getSomeBVLocation loc
   v <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val
   f l v
+
+ternop :: FullSemantics m
+       => (forall k n. (IsLocationBV m n, 1 <= k, k <= n) => MLocation m (BVType n)
+                                                          -> Value m (BVType n)
+                                                          -> Value m (BVType k)
+                                                          -> m ())
+       -> (F.LockPrefix, [F.Value]) -> m ()
+ternop f = mkTernop $ \loc val1 val2 -> do
+  SomeBV l <- getSomeBVLocation loc
+  v1 <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val1
+  SomeBV v2 <- getSomeBVValue val2
+  Just LeqProof <- return $ testLeq (bv_width v2) (bv_width v1)
+  f l v1 v2
 
 fpUnopV :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> m ())
            -> (F.LockPrefix, [F.Value]) -> m ()

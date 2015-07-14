@@ -23,6 +23,7 @@ module Reopt.Semantics.Semantics where
 import           Control.Applicative ( (<$>), (<*>) )
 import           Data.Type.Equality
 import           Data.Int
+import           Data.Proxy
 import           Data.Word
 import           Prelude hiding (isNaN)
 import           GHC.TypeLits
@@ -1643,3 +1644,64 @@ exec_movdqu l v = l .= v
 
 -- MONITOR Sets up an address range used to monitor write-back stores
 -- MWAIT Enables a logical processor to enter into an optimized state while waiting for a write-back store to the address range set up by the MONITOR instruction
+
+
+-- * Supplemental Streaming SIMD Extensions 3 (SSSE3) Instructions
+-- ** Horizontal Addition/Subtraction
+
+-- PHADDW Adds two adjacent, signed 16-bit integers horizontally from the source and destination operands and packs the signed 16-bit results to the destination operand.
+-- PHADDSW Adds two adjacent, signed 16-bit integers horizontally from the source and destination operands and packs the signed, saturated 16-bit results to the destination operand.
+-- PHADDD Adds two adjacent, signed 32-bit integers horizontally from the source and destination operands and packs the signed 32-bit results to the destination operand.
+-- PHSUBW Performs horizontal subtraction on each adjacent pair of 16-bit signed integers by subtracting the most significant word from the least significant word of each pair in the source and destination operands. The signed 16-bit results are packed and written to the destination operand.
+-- PHSUBSW Performs horizontal subtraction on each adjacent pair of 16-bit signed integers by subtracting the most significant word from the least significant word of each pair in the source and destination operands. The signed, saturated 16-bit results are packed and written to the destination operand.
+-- PHSUBD Performs horizontal subtraction on each adjacent pair of 32-bit signed integers by subtracting the most significant doubleword from the least significant double word of each pair in the source and destination operands. The signed 32-bit results are packed and written to the destination operand.
+
+-- ** Packed Absolute Values
+
+-- PABSB Computes the absolute value of each signed byte data element.
+-- PABSW Computes the absolute value of each signed 16-bit data element.
+-- PABSD Computes the absolute value of each signed 32-bit data element.
+
+-- ** Multiply and Add Packed Signed and Unsigned Bytes
+
+-- PMADDUBSW Multiplies each unsigned byte value with the corresponding signed byte value to produce an intermediate, 16-bit signed integer. Each adjacent pair of 16-bit signed values are added horizontally. The signed, saturated 16-bit results are packed to the destination operand.
+
+-- ** Packed Multiply High with Round and Scale
+
+-- PMULHRSW Multiplies vertically each signed 16-bit integer from the destination operand with the corresponding signed 16-bit integer of the source operand, producing intermediate, signed 32-bit integers. Each intermediate 32-bit integer is truncated to the 18 most significant bits. Rounding is always performed by adding 1 to the least significant bit of the 18-bit intermediate result. The final result is obtained by selecting the 16 bits immediately to the right of the most significant bit of each 18-bit intermediate result and packed to the destination operand.
+
+-- ** Packed Shuffle Bytes
+
+-- PSHUFB Permutes each byte in place, according to a shuffle control mask. The least significant three or four bits of each shuffle control byte of the control mask form the shuffle index. The shuffle mask is unaffected. If the most significant bit (bit 7) of a shuffle control byte is set, the constant zero is written in the result byte.
+
+
+-- ** Packed Sign
+
+-- PSIGNB/W/D Negates each signed integer element of the destination operand if the sign of the corresponding data element in the source operand is less than zero.
+
+-- ** Packed Align Right
+
+exec_palignr :: forall m n k. (IsLocationBV m n, 1 <= k, k <= n)
+             => MLocation m (BVType n)
+             -> Value m (BVType n)
+             -> Value m (BVType k)
+             -> m ()
+exec_palignr l v imm = do
+  v0 <- get l
+
+  -- 1 <= n+n, given 1 <= n
+  withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
+  -- k <= (n+n), given k <= n and n <= n+n
+  withLeqProof (leqTrans k_leq_n (leqAdd (leqRefl n) n)) $ do
+
+  -- imm is # of bytes to shift, so multiply by 8 for bits to shift
+  let n_plus_n = addNat (bv_width v) (bv_width v)
+      shiftAmt = bvMul (uext n_plus_n imm) $ bvLit n_plus_n (8 :: Int)
+
+  let (_, lower) = bvSplit $ (v0 `bvCat` v) `bvShr` shiftAmt
+  l .= lower
+
+  where n :: Proxy n
+        n = Proxy
+        k_leq_n :: LeqProof k n
+        k_leq_n = LeqProof
