@@ -83,6 +83,7 @@ executable reopt_test
   build-depends:
     base >= 4,
     ansi-wl-pprint,
+    bv,
     bytestring,
     cmdargs,
     containers,

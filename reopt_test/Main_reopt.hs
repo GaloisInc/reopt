@@ -20,6 +20,7 @@ import           Control.Monad
 import           Control.Monad.State
 import           Control.Monad.Reader
 import           Data.Bits
+import qualified Data.BitVector as BV
 import qualified Data.ByteString as B
 import           Data.Elf
 import           Data.Foldable (traverse_)
@@ -288,8 +289,8 @@ printInstr mem pid = do
            of Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
               Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
 
-translatePtraceRegs :: X86_64Regs -> X86State MS.Value
-translatePtraceRegs ptraceRegs =
+translatePtraceRegs :: X86_64Regs -> X86_64FPRegs -> X86State MS.Value
+translatePtraceRegs ptraceRegs ptraceFPRegs =
   mkX86State fillReg
   where
     fillReg :: N.RegisterName cl -> MS.Value (N.RegisterType cl)
@@ -321,18 +322,54 @@ translatePtraceRegs ptraceRegs =
                                then 1
                                else 0 :: Int)
     fillReg (N.ControlReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87ControlReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87StatusReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg N.X87TopReg = Undefined $ BVTypeRepr  knownNat
-    fillReg N.X87PC = Undefined $ BVTypeRepr  knownNat
-    fillReg N.X87RC = Undefined $ BVTypeRepr  knownNat
+    fillReg (N.X87ControlReg n) = Literal $ bitVector knownNat $ BV.extract n n cwd'
+    fillReg (N.X87StatusReg n) = Literal $ bitVector knownNat $ BV.extract n n swd'
+    fillReg N.X87TopReg = Literal $ bitVector knownNat $
+                            BV.extract (13 :: Int) 11 swd'
+    fillReg N.X87PC =  Literal $ bitVector knownNat $ bitVec 2 $ 
+                            BV.extract (9 :: Int) 8 $ cwd'
+    fillReg N.X87RC =  Literal $ bitVector knownNat $ bitVec 2 $ 
+                            BV.extract (11 :: Int) 10 $ cwd'
     fillReg (N.X87TagReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87FPUReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg (N.XMMReg _) = Undefined $ BVTypeRepr  knownNat
+    fillReg (N.X87FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
+    fillReg (N.X87FPUReg 1) = mkLit80 $ st1 ptraceFPRegs
+    fillReg (N.X87FPUReg 2) = mkLit80 $ st2 ptraceFPRegs
+    fillReg (N.X87FPUReg 3) = mkLit80 $ st3 ptraceFPRegs
+    fillReg (N.X87FPUReg 4) = mkLit80 $ st4 ptraceFPRegs
+    fillReg (N.X87FPUReg 5) = mkLit80 $ st5 ptraceFPRegs
+    fillReg (N.X87FPUReg 6) = mkLit80 $ st6 ptraceFPRegs
+    fillReg (N.X87FPUReg 7) = mkLit80 $ st7 ptraceFPRegs
+    fillReg (N.XMMReg 0) = mkLit128 (xmm0 ptraceFPRegs)
+    fillReg (N.XMMReg 1) = mkLit128 (xmm1 ptraceFPRegs)
+    fillReg (N.XMMReg 2) = mkLit128 (xmm2 ptraceFPRegs)
+    fillReg (N.XMMReg 3) = mkLit128 (xmm3 ptraceFPRegs)
+    fillReg (N.XMMReg 4) = mkLit128 (xmm4 ptraceFPRegs)
+    fillReg (N.XMMReg 5) = mkLit128 (xmm5 ptraceFPRegs)
+    fillReg (N.XMMReg 6) = mkLit128 (xmm6 ptraceFPRegs)
+    fillReg (N.XMMReg 7) = mkLit128 (xmm7 ptraceFPRegs)
+    fillReg (N.XMMReg 8) = mkLit128 (xmm8 ptraceFPRegs)
+    fillReg (N.XMMReg 9) = mkLit128 (xmm9 ptraceFPRegs)
+    fillReg (N.XMMReg 10) = mkLit128 (xmm10 ptraceFPRegs)
+    fillReg (N.XMMReg 11) = mkLit128 (xmm11 ptraceFPRegs)
+    fillReg (N.XMMReg 12) = mkLit128 (xmm12 ptraceFPRegs)
+    fillReg (N.XMMReg 13) = mkLit128 (xmm13 ptraceFPRegs)
+    fillReg (N.XMMReg 14) = mkLit128 (xmm14 ptraceFPRegs)
+    fillReg (N.XMMReg 15) = mkLit128 (xmm15 ptraceFPRegs)
     fillReg (N.DebugReg _) = Undefined $ BVTypeRepr  knownNat
 
     mkLit16 :: Word64 -> MS.Value (BVType 16)
     mkLit16 = Literal . bitVector knownNat . bitVec 16
+
+    mkLit128 :: (Word64, Word64) -> MS.Value (BVType 128)
+    mkLit128 (high, low) = Literal $ bitVector knownNat $ bitVec 128 $ 
+      ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
+
+    mkLit80 :: (Word16, Word64) -> MS.Value (BVType 80)
+    mkLit80 (high, low) = Literal $ bitVector knownNat $ bitVec 80 $ 
+      ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
+    cwd' = bitVec 16 $ cwd ptraceFPRegs
+    swd' = bitVec 16 $ swd ptraceFPRegs
+
 
 mkLit64 :: Word64 -> MS.Value (BVType 64)
 mkLit64 = Literal . bitVector knownNat . bitVec 64
@@ -393,8 +430,9 @@ instance MonadMachineState PTraceMachineState where
   dumpRegs = do
      pid <- asks cpid
      regs <-liftIO $ ptrace_getregs pid
-     case regs of
-       X86_64 regs' -> return $ translatePtraceRegs regs'
+     fpregs <- liftIO $ ptrace_getfpregs pid
+     case (regs, fpregs) of
+       (X86_64 regs', X86_64FP fpregs') -> return $ translatePtraceRegs regs' fpregs'
        _ -> fail "64-bit only!"
   primitive = fail "primitive unimplemented for PTraceMachineState"
   getSegmentBase seg = do
