@@ -102,8 +102,8 @@ cond_a = (\c z -> complement c .&. complement z) <$> get cf_loc <*> get zf_loc
 cond_ae  = complement <$> get cf_loc
 cond_b   = get cf_loc
 cond_be  = (.|.) <$> get cf_loc <*> get zf_loc
-cond_g   = (\z s o -> complement z .&. (s `bvXor` o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
-cond_ge  = (\s o   -> s `bvXor` o) <$> get sf_loc <*> get of_loc
+cond_g   = (\z s o -> complement z .&. (s .=. o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
+cond_ge  = (\s o   -> s .=. o) <$> get sf_loc <*> get of_loc
 cond_l   = complement <$> cond_ge
 cond_le  = complement <$> cond_g
 cond_o   = get of_loc
@@ -167,7 +167,7 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
     go d s acc = do
       temp <- get d
       a  <- get acc
-      exec_cmp d s -- set flags
+      exec_cmp d a -- set flags
       ifte_ (a .=. temp)
         (do zf_loc .= true
             d .= s
@@ -493,8 +493,8 @@ exec_sbb l v = do cf <- get cf_loc
 -- FIXME: duplicates subtraction term by calling exec_cmp
 exec_sub :: Binop
 exec_sub l v = do v0 <- get l
-                  l .= (v0 `bvSub` v)
                   exec_cmp l v -- set flags
+                  l .= (v0 `bvSub` v)
 
 -- ** Decimal Arithmetic Instructions
 -- ** Logical Instructions
@@ -904,7 +904,7 @@ exec_stos True _dest_loc val_loc = do
   df <- get df_loc
   dest <- get rdi
   v    <- get val_loc
-  let szv = bvLit n64 (natValue sz)
+  let szv = bvLit n64 (natValue sz `div` 8)
   count <- uext n64 <$> get count_reg
   let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
       nbytes     = count `bvMul` szv
@@ -917,7 +917,7 @@ exec_stos True _dest_loc val_loc = do
             rcx .= bvKLit 0)
   where
     sz = loc_width val_loc
-    count_reg = regLocation sz N.rcx
+    count_reg = regLocation n64 N.rcx
 
 
 
