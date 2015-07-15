@@ -698,6 +698,7 @@ data ExceptionClass
 data Primitive
    = Syscall
    | CPUID
+   | RDTSC
    -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
    | XGetBV
    deriving Show

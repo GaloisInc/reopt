@@ -373,6 +373,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               -- Primitive instructions
               , mk "syscall" $ const (primitive Syscall)
               , mk "cpuid"   $ const (primitive CPUID)
+              , mk "rdtsc"   $ const (primitive RDTSC)
               , mk "xgetbv"  $ const (primitive XGetBV)
 
               -- MMX instructions
