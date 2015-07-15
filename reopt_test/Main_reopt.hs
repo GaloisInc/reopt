@@ -19,6 +19,7 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State
 import           Control.Monad.Reader
+import           Control.Monad.Writer.Strict
 import           Data.Bits
 import qualified Data.BitVector as BV
 import qualified Data.ByteString as B
@@ -53,7 +54,9 @@ import           Numeric (readHex)
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
-import           Flexdis86 (InstructionInstance(..), ppInstruction, ByteReader(..), defaultX64Disassembler, disassembleInstruction)
+import           Flexdis86 (InstructionInstance(..), ppInstruction,
+                  ByteReader(..), defaultX64Disassembler,
+                  disassembleInstruction, LockPrefix(..))
 import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
@@ -80,13 +83,15 @@ import System.Linux.Ptrace
 import System.Linux.Ptrace.Syscall
 import System.Linux.Ptrace.Types
 import System.Linux.Ptrace.X86_64Regs
+import System.Linux.Ptrace.X86_64FPRegs
 
 ------------------------------------------------------------------------
 -- Args
 
 -- | Action to perform when running
 data Action
-   = Test            -- * Execute and simulate in parallel, printing errors
+   = Application    -- * Exectue and simulate in parallel, printing errors
+   | Test            -- * Execute a single-instruction test in parallel
    | Instr
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -118,7 +123,7 @@ loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
-defaultArgs = Args { _reoptAction = Test
+defaultArgs = Args { _reoptAction = Application
                    , _programPath = ""
                    , _loadStyle = LoadBySection
                    }
@@ -131,14 +136,20 @@ arguments = mode "reopt_test" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
         flags = [ instrFlag
                 , testFlag
+                , applicationFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
 
+applicationFlag :: CmdArgs.Flag Args
+applicationFlag = flagNone [ "application", "a"] upd help
+  where upd = reoptAction .~ Application
+        help = "Test concrete semantics by executing in parallel with a binary"
+
 testFlag :: CmdArgs.Flag Args
 testFlag = flagNone [ "test", "t"] upd help
   where upd = reoptAction .~ Test
-        help = "Test concrete semantics by executing in parallel with a binary"
+        help = "Test concrete semantics by executing in parallel with a single-instruction test"
 
 instrFlag :: CmdArgs.Flag Args
 instrFlag = flagNone [ "instructions", "i"] upd help
@@ -211,13 +222,15 @@ mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory 
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
 
-{-test :: Args -> IO ()
-test args = do
-  e <- readStaticElf (args^.programPath)
-  let Identity mem = mkElfMem (args^.loadStyle) e
+testApplication :: Args -> IO ()
+testApplication args = do
   child <- traceFile $ args^.programPath
-  runStateT (testInner (printRegsAndInstr mem) child) ()
-  return ()-}
+  procMem <- openChildProcMem child
+  procMaps <- openChildProcMaps child
+  (((), out), _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
+    regs <- dumpRegs
+    runConcreteState (runWriterT (runInParallel (checkAndClear stdout))) Map.empty regs
+  mapM_ putStrLn out
 
 test :: Args -> IO ()
 test args = do
@@ -228,10 +241,10 @@ test args = do
   _ <- trace "stepping over exec" $ waitForRes child
 --  mem <- exploreMem procMem procMaps
 --  trace "initial mem load" $ return ()
-  runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
+  (((), out), _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
     regs <- dumpRegs
-    runConcreteState (runInParallel $ checkAndClear stderr) Map.empty regs
-  return ()
+    runConcreteState (runWriterT instTest) Map.empty regs
+  mapM_ putStrLn out
 
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
@@ -251,7 +264,7 @@ traceChild :: FilePath -> IO ()
 traceChild file = do
   ptrace_traceme
   executeFile file False [] Nothing
-  trace "EXEC FAILED" $ fail "EXEC FAILED"
+  fail "EXEC FAILED"
 
 traceInner :: (CPid -> StateT s IO ()) -> CPid -> StateT s IO ()
 traceInner act pid = do
@@ -477,7 +490,7 @@ runMachineByteReader (MachineByteReader s) addr = do
   return (l,v)
 
 stepConcrete :: (Functor m, MonadMachineState m) 
-             => ConcreteState m InstructionInstance
+             => WriterT [String] (ConcreteState m) (Bool, InstructionInstance)
 stepConcrete = do
   rip' <- getReg N.rip
   bv <- case rip' of Literal bv -> return bv
@@ -485,42 +498,88 @@ stepConcrete = do
   
   let instrAddr = Address knownNat bv
   (w, ii) <- runMachineByteReader (disassembleInstruction defaultX64Disassembler) instrAddr
-  trace (show ii) (return ())
+  tell [show ii]
   case execInstruction (fromIntegral $ (nat bv) + 
                         fromIntegral w) ii 
-    of Just s -> trace (show $ ppStmts  $ execSemantics s) $ 
-	               evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
-       Nothing -> fail $ "could not exec instruction at " ++ show rip'
-  return ii
+    of Just s -> do tell [show $ ppStmts  $ execSemantics s]
+                    evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
+                    return (True, ii)
+       Nothing -> do tell ["could not exec instruction at " ++ show rip']
+                     return (False, ii)
 
-runInParallel :: (InstructionInstance -> ConcreteState PTraceMachineState ()) 
-              -> ConcreteState PTraceMachineState ()
+runInParallel :: ((Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) ()) 
+              -> WriterT [String] (ConcreteState PTraceMachineState) ()
 runInParallel updater = do
-  ii <-trace "runInParallel stepping concrete semantics" stepConcrete
-  pid <- lift $ asks cpid
-  lift $ liftIO $ ptrace_singlestep pid Nothing
-  (spid, status) <- lift $ liftIO $ waitForRes pid
+  tell ["runInParallel stepping concrete semantics"]
+  (execSuccess, ii) <-  stepConcrete
+  pid <-lift $ lift $ asks cpid
+  case (iiLockPrefix ii)
+    of RepPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
+       RepZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
+       RepNZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
+       NoLockPrefix ->lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
+       LockPrefix -> lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
+  (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
   if spid == pid
     then case status of W.Exited _ -> return ()
-                        _ -> do updater ii
-                                runInParallel updater
+                        W.Stopped 5 -> do updater (execSuccess, ii)
+                                          runInParallel updater
+                        _ -> return ()
+    else fail "Wrong pid from waitpid!"
+  where
+    -- TODO: insert 0xCC and continue to it
+    step_to_next_inst pid = do
+      X86_64 regs <- ptrace_getregs pid
+      let addr = rip regs
+      step_while_inst pid addr
+    step_while_inst pid addr = do
+      ptrace_singlestep pid Nothing
+      X86_64 regs <- ptrace_getregs pid
+      let addr' = rip regs
+      if addr' == addr
+        then step_while_inst pid addr
+        else return ()
+
+instTest :: WriterT [String] (ConcreteState PTraceMachineState) ()
+instTest = do
+  pid <- lift $ lift $ asks cpid
+  lift $ lift $ liftIO $ ptrace_cont pid Nothing
+  (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
+  if spid == pid
+    then case status 
+      of W.Exited _ -> return ()
+         W.Stopped 5 -> do
+           tell ["child stopped: " ++ show status]
+           trapRegs <- lift $ lift $ liftIO $ ptrace_getregs pid
+           trapFPRegs <- lift $ lift $ liftIO $ ptrace_getfpregs pid
+           (modRegs, modFPRegs) <- case (trapRegs, trapFPRegs) of
+             (X86_64 regs', X86_64FP fpregs')-> return (regs', fpregs')
+             _ -> fail "64-bit only!"
+           --lift $ liftIO $ ptrace_setregs pid $ X86_64 modRegs
+           put (Map.empty, translatePtraceRegs modRegs modFPRegs)
+           (execSuccess, ii) <- trace "instTest stepping concrete semantics" stepConcrete
+           lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
+           checkAndClear stderr (execSuccess, ii)
+         _ -> do
+           tell ["child stopped: " ++ show status]
+           instTest 
     else fail "Wrong pid from waitpid!"
 
-
-checkAndClear :: Handle -> InstructionInstance -> ConcreteState PTraceMachineState () 
-checkAndClear out ii = do
-  realRegs <- lift dumpRegs
+checkAndClear :: Handle -> (Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) () 
+checkAndClear out (True, ii) = do
+  realRegs <- lift $ lift dumpRegs
   emuRegs <- dumpRegs
   let regCmp = compareRegs realRegs emuRegs
-  memCmp <- foldMem8 (\addr val errs -> do
+  memCmp <- lift $ foldMem8 (\addr val errs -> do
     realVal <- lift $ getMem addr
     if realVal `equalOrUndef` val
       then return errs
       else return $ errs ++ [show addr ++ " did not match"]) []
-  case regCmp ++ memCmp of [] -> lift $ liftIO $ hPutStrLn out $ "instruction " ++ show ii ++ " executed successfully"
-                           l ->do lift $ liftIO $ mapM_ (hPutStrLn out) ((
-                                    "After executing instruction " ++ show ii) : l)
-                                  return ()
+  case regCmp ++ memCmp of [] -> tell ["instruction " ++ show ii ++ " executed successfully"]
+                           l -> tell (("After executing instruction " ++ show ii) : l)
+  put (Map.empty, realRegs)
+checkAndClear out (False, ii) = do
+  realRegs <- lift $ lift dumpRegs
   put (Map.empty, realRegs)
 
 compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
@@ -602,6 +661,7 @@ main :: IO ()
 main = do
   args <- getCommandLineArgs
   case args^.reoptAction of
+    Application -> testApplication args
     Test -> test args
     Instr -> printExecutedInstructions args
     ShowHelp ->

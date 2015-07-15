@@ -27,6 +27,7 @@ import qualified Data.BitVector as BV
 import           Control.Applicative
 import           Control.Monad.State
 import           Control.Monad.Reader
+import           Control.Monad.Writer.Strict
 
 import Data.Maybe (mapMaybe)
 
@@ -316,6 +317,15 @@ instance (MonadMachineState m) => MonadMachineState (StateT s m) where
   getSegmentBase = lift . getSegmentBase
 
 instance (MonadMachineState m) => MonadMachineState (ReaderT s m) where
+  getMem = lift . getMem
+  setMem addr val = lift $ setMem addr val
+  getReg = lift . getReg
+  setReg reg val = lift $ setReg reg val
+  dumpRegs = lift dumpRegs
+  primitive = lift . primitive
+  getSegmentBase = lift . getSegmentBase
+
+instance (Monoid w, MonadMachineState m) => MonadMachineState (WriterT w m) where
   getMem = lift . getMem
   setMem addr val = lift $ setMem addr val
   getReg = lift . getReg
