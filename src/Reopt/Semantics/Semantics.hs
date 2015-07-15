@@ -1594,7 +1594,24 @@ exec_movdqu l v = l .= v
 -- PSUBQ Subtract packed quadword integers
 -- PSHUFLW Shuffle packed low words
 -- PSHUFHW Shuffle packed high words
--- PSHUFD Shuffle packed doublewords
+
+exec_pshufd :: forall m n k. (IsLocationBV m n, 1 <= k, k <= n)
+            => MLocation m (BVType n)
+            -> Value m (BVType n)
+            -> Value m (BVType k)
+            -> m ()
+exec_pshufd l v imm
+  | Just Refl <- testEquality (bv_width imm) n8 = do
+      let order = bvVectorize (addNat n1 n1) imm
+          dstPieces = concatMap (\src128 -> map (getPiece src128) order) $ bvVectorize n128 v
+      l .= bvUnvectorize (loc_width l) dstPieces
+  | otherwise = fail "pshufd: Unknown bit width"
+  where shiftAmt :: Value m (BVType 2) -> Value m (BVType 128)
+        shiftAmt pieceID = bvMul (uext n128 pieceID) $ bvLit n128 (32 :: Int)
+
+        getPiece :: Value m (BVType 128) -> Value m (BVType 2) -> Value m (BVType 32)
+        getPiece src pieceID = bvTrunc n32 $ src `bvShr` (shiftAmt pieceID)
+
 -- PSLLDQ Shift double quadword left logical
 -- PSRLDQ Shift double quadword right logical
 -- PUNPCKHQDQ Unpack high quadwords
