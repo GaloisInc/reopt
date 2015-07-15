@@ -690,8 +690,17 @@ evalStmt (Get x l) =
         let v1 = CS.liftValue (sliceBV (low, high)) nr v0
         extendEnv x v1
 
-  let x87Cont (low, high) width i =
-        regCont (low, high) width (N.X87FPUReg i)
+  let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
+      x87Cont (low, high) width i = 
+        case S.loc_type l 
+          of BVTypeRepr n -> do
+             topReg <- CS.getReg N.X87TopReg
+             case topReg
+               of CS.Literal bv -> do
+                    let top = BV.nat $ snd $ CS.unBitVector bv
+                    regCont (low, high) width (N.X87FPUReg (
+                     fromIntegral top + i `mod` 8))
+                  CS.Undefined _ -> extendEnv x $ CS.Undefined $ BVTypeRepr n
 
   S.elimLocation memCont regCont x87Cont l
   where
@@ -804,6 +813,22 @@ evalStmt (l := e) =
         CS.setReg rn v1
   let x87Cont (low, high) width i =
         regCont (low, high) width (N.X87FPUReg i)
+  let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
+      x87Cont (low, high) width i = 
+        case S.loc_type l 
+          of BVTypeRepr n -> do
+             topReg <- CS.getReg N.X87TopReg
+             case topReg
+               of CS.Literal bv -> do
+                    let top = BV.nat $ snd $ CS.unBitVector bv
+                    regCont (low, high) width (N.X87FPUReg (
+                     fromIntegral top + i `mod` 8))
+                  CS.Undefined _ -> do
+                    -- undefine all the floating point registers, I guess?
+                    mapM_ 
+                      (\reg -> CS.setReg reg 
+                               (CS.Undefined $ N.registerType reg))
+                      N.x87FPURegs
   S.elimLocation memCont regCont x87Cont l
   where
     combineBV :: Integer ~ i
