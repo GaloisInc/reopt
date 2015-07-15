@@ -416,6 +416,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pminsb"  $ binop exec_pminsb
               , mk "pminsw"  $ binop exec_pminsw
               , mk "pminsd"  $ binop exec_pminsd
+              , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
               , mk "pshufd"  $ ternop exec_pshufd
               , mk "palignr" $ ternop exec_palignr
 

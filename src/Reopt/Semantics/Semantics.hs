@@ -1423,7 +1423,20 @@ exec_pminsb = pselect bvSlt n8
 exec_pminsw = pselect bvSlt n16
 exec_pminsd = pselect bvSlt n32
 
--- PMOVMSKB Move byte mask
+exec_pmovmskb :: forall m n n'. (IsLocationBV m n, 1 <= n')
+              => MLocation m (BVType n)
+              -> Value m (BVType n')
+              -> m ()
+exec_pmovmskb l v
+  | Just Refl <- testEquality (bv_width v) n64 = do
+      l .= uext (loc_width l) (mkMask n8 v)
+  | Just LeqProof <- testLeq n32 (loc_width l)
+  , Just Refl <- testEquality (bv_width v) n128 = do
+      let prf = withLeqProof (leqTrans (LeqProof :: LeqProof 16 32)
+                                       (LeqProof :: LeqProof 32 n))
+      l .= prf (uext (loc_width l) (mkMask n16 v))
+  where mkMask sz src = bvUnvectorize sz $ map msb $ bvVectorize n8 src
+
 -- PMULHUW Multiply packed unsigned integers and store high result
 -- PSADBW Compute sum of absolute differences
 -- PSHUFW Shuffle packed integer word in MMX register
