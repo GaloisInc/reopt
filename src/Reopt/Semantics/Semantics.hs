@@ -648,9 +648,11 @@ exec_rol l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       low_count = uext (bv_width v) count .&. countMASK
-      -- Note: The manual includes a mod, but it seems like the mask is sufficient.
-      --                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
-      r = bvRol v low_count
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or 
+      -- 8, so we need to mask those off again...
+      effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
+      effective = uext (bv_width v) count .&. effectiveMASK
+      r = bvRol v effective
 
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero low_count) $ do
@@ -679,9 +681,11 @@ exec_ror l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       low_count = uext (bv_width v) count .&. countMASK
-      -- Note: The manual includes a mod, but it seems like the mask is sufficient.
-      --                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
-      r = bvRor v low_count
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or 
+      -- 8, so we need to mask those off again...
+      effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
+      effective = uext (bv_width v) count .&. effectiveMASK
+      r = bvRor v effective
 
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero low_count) $ do
