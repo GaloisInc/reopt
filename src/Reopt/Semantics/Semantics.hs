@@ -648,7 +648,7 @@ exec_rol l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       low_count = uext (bv_width v) count .&. countMASK
-      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or 
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or
       -- 8, so we need to mask those off again...
       effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
       effective = uext (bv_width v) count .&. effectiveMASK
@@ -681,7 +681,7 @@ exec_ror l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       low_count = uext (bv_width v) count .&. countMASK
-      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or 
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or
       -- 8, so we need to mask those off again...
       effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
       effective = uext (bv_width v) count .&. effectiveMASK
@@ -1367,7 +1367,14 @@ exec_movaps l v = l .= v
 
 -- MOVUPS Move four unaligned packed single-precision floating-point values between XMM registers or between and XMM register and memory
 -- MOVHPS Move two packed single-precision floating-point values to an from the high quadword of an XMM register and memory
--- MOVHLPS Move two packed single-precision floating-point values from the high quadword of an XMM register to the low quadword of another XMM register
+
+exec_movhlps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movhlps l v = do
+  v0 <- get l
+  l .= (f v0) `bvCat` (f v)
+  where f :: Value m (BVType 128) -> Value m (BVType 64)
+        f = fst . bvSplit
+
 -- MOVLPS Move two packed single-precision floating-point values to an from the low quadword of an XMM register and memory
 -- MOVLHPS Move two packed single-precision floating-point values from the low quadword of an XMM register to the high quadword of another XMM register
 -- MOVMSKPS Extract sign mask from four packed single-precision floating-point values
