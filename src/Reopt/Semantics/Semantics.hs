@@ -1670,7 +1670,15 @@ exec_pshufd l v imm
         getPiece :: Value m (BVType 128) -> Value m (BVType 2) -> Value m (BVType 32)
         getPiece src pieceID = bvTrunc n32 $ src `bvShr` (shiftAmt pieceID)
 
--- PSLLDQ Shift double quadword left logical
+exec_pslldq :: (IsLocationBV m n, 1 <= n', n' <= n)
+            => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_pslldq l v = do
+  v0 <- get l
+  -- temp is 16 if v is greater than 15, otherwise v
+  let not15 = complement $ bvLit (bv_width v) (15 :: Int)
+      temp = mux (is_zero $ not15 .&. v) (uext (bv_width v0) v) (bvLit (bv_width v0) (16 :: Int))
+  l .= v0 `bvShl` (temp .* (bvLit (bv_width v0) (8 :: Int)))
+
 -- PSRLDQ Shift double quadword right logical
 -- PUNPCKHQDQ Unpack high quadwords
 -- PUNPCKLQDQ Unpack low quadwords

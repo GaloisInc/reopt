@@ -424,6 +424,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pminsd"  $ binop exec_pminsd
               , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
               , mk "pshufd"  $ ternop exec_pshufd
+              , mk "pslldq"  $ geBinop exec_pslldq
               , mk "palignr" $ ternop exec_palignr
 
               -- X87 FP instructions
