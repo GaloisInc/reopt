@@ -167,7 +167,7 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
     go d s acc = do
       temp <- get d
       a  <- get acc
-      exec_cmp d a -- set flags
+      exec_cmp acc temp -- set flags
       ifte_ (a .=. temp)
         (do zf_loc .= true
             d .= s
@@ -1446,6 +1446,7 @@ exec_pmovmskb l v
       let prf = withLeqProof (leqTrans (LeqProof :: LeqProof 16 32)
                                        (LeqProof :: LeqProof 32 n))
       l .= prf (uext (loc_width l) (mkMask n16 v))
+  | otherwise = fail "pmovmskb: Unknown bit width"
   where mkMask sz src = bvUnvectorize sz $ map msb $ bvVectorize n8 src
 
 -- PMULHUW Multiply packed unsigned integers and store high result
