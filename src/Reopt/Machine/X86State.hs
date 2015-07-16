@@ -187,7 +187,7 @@ register :: forall f cl
           . N.RegisterName cl
          -> Simple Lens (X86State f) (f (N.RegisterType cl))
 register reg =
-    case reg of
+   case reg of
       N.IPReg           -> curIP
       N.GPReg n         -> reg64Regs . idx n
       N.FlagReg n       -> flagRegs . idx n
@@ -217,7 +217,7 @@ mkX86StateM f =
            <*> f N.X87TopReg
            <*> V.generateM 8 (f . N.X87TagReg)
            <*> V.generateM 8 (f . N.X87FPUReg)
-           <*> V.generateM 8 (f . N.XMMReg)
+           <*> V.generateM 16 (f . N.XMMReg)
 
 
 mkX86State :: (forall cl. N.RegisterName cl -> f (N.RegisterType cl)) -> X86State f

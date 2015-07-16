@@ -699,7 +699,7 @@ evalStmt (Get x l) =
                of CS.Literal bv -> do
                     let top = BV.nat $ snd $ CS.unBitVector bv
                     regCont (low, high) width (N.X87FPUReg (
-                     fromIntegral top + i `mod` 8))
+                     (fromIntegral top + i) `mod` 8))
                   CS.Undefined _ -> extendEnv x $ CS.Undefined $ BVTypeRepr n
 
   S.elimLocation memCont regCont x87Cont l
@@ -822,7 +822,7 @@ evalStmt (l := e) =
                of CS.Literal bv -> do
                     let top = BV.nat $ snd $ CS.unBitVector bv
                     regCont (low, high) width (N.X87FPUReg (
-                     fromIntegral top + i `mod` 8))
+                     (fromIntegral top + i) `mod` 8))
                   CS.Undefined _ -> do
                     -- undefine all the floating point registers, I guess?
                     mapM_ 
