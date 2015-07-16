@@ -488,7 +488,18 @@ exec_neg l = do
 
 exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_sbb l v = do cf <- get cf_loc
-                  exec_sub l (v `bvAdd` uext (bv_width v) cf)
+                  v0 <- get l
+                  let v' = v `bvAdd` (uext (loc_width l) cf)
+                  -- Set overflow and arithmetic flags
+                  of_loc .= ssbb_overflows v0 v cf
+                  af_loc .= uadd4_overflows v (uext knownNat cf) .|.
+                    usub4_overflows v0 v'
+                  cf_loc .= uadd_overflows v (uext (loc_width l) cf) .|.
+                    (usub_overflows  v0 v')
+                  -- Set result value.
+                  let res = v0 `bvSub` v'
+                  set_result_flags res
+                  l .= res
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
 exec_sub :: Binop
