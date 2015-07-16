@@ -662,6 +662,37 @@ exec_rol l count = do
 
     l .= r
 
+-- FIXME: use really_exec_shift above?
+exec_ror :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n)
+         -> Value m (BVType n')
+         -> m ()
+exec_ror l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64
+      countMASK = bvLit (bv_width v) (nbits - 1)
+      low_count = uext (bv_width v) count .&. countMASK
+      -- Note: The manual includes a mod, but it seems like the mask is sufficient.
+      --                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
+      r = bvRor v low_count
+
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero low_count) $ do
+    let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+
+    cf_loc .= new_cf
+
+    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+      (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
+      (set_undefined of_loc)
+
+    l .= r
+
 
 -- ** Bit and Byte Instructions
 

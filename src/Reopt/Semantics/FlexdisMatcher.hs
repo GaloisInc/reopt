@@ -361,6 +361,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ geBinop exec_rol
+              , mk "ror"     $ geBinop exec_ror
               , mk "sbb"     $ binop exec_sbb
               , mk "sar"     $ geBinop exec_sar
               , mk "shl"     $ geBinop exec_shl
