@@ -314,6 +314,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   l <- getBVLocation loc n128
                   v <- getBVValue val n128
                   modify (`bvXor` v) l
+              , mk "xorps"   $ mkBinop $ \loc val -> do
+                  l <- getBVLocation loc n128
+                  v <- getBVValue val n128
+                  modify (`bvXor` v) l
               , mk "cvttsd2si" $ mkBinop $ \loc val -> do
                   SomeBV l  <- getSomeBVLocation loc
                   v <- truncateBVValue knownNat =<< getSomeBVValue val

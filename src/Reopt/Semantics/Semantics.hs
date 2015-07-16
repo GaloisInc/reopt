@@ -685,7 +685,7 @@ exec_ror l count = do
 
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero low_count) $ do
-    let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+    let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
 
     cf_loc .= new_cf
 
