@@ -129,7 +129,9 @@ exec_cmovcc cc r y = do
 
 -- | Run bswap instruction.
 exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
-exec_bswap = modify reverse_bytes
+exec_bswap l = do
+  v0 <- get l
+  l .= (bvUnvectorize (loc_width l) $ reverse $ bvVectorize n8 v0)
 
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
 exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
