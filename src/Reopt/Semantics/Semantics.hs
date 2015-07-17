@@ -1518,10 +1518,24 @@ exec_movapd l v = l .= v
 
 -- MOVUPD Move two unaligned packed double-precision floating-point values
 --   between XMM registers or between and XMM register and memory
--- MOVHPD Move high packed double-precision floating-point value to an from
---   the high quadword of an XMM register and memory
--- MOVLPD Move low packed single-precision floating-point value to an from
---   the low quadword of an XMM register and memory
+
+exec_movhpd, exec_movlpd :: forall m n n'. (IsLocationBV m n, 1 <= n')
+                         => MLocation m (BVType n)
+                         -> Value m (BVType n')
+                         -> m ()
+exec_movhpd l v = do
+  v0 <- get l
+  let dstPieces = bvVectorize n64 v0
+      srcPieces = bvVectorize n64 v
+      rPieces = [head srcPieces] ++ (drop 1 dstPieces)
+  l .= bvUnvectorize (loc_width l) rPieces
+exec_movlpd l v = do
+  v0 <- get l
+  let dstPieces = bvVectorize n64 v0
+      srcPieces = bvVectorize n64 v
+      rPieces =  (init dstPieces) ++ [last srcPieces]
+  l .= bvUnvectorize (loc_width l) rPieces
+
 -- MOVMSKPD Extract sign mask from two packed double-precision floating-point values
 
 -- | MOVSD Move scalar double-precision floating-point value between XMM

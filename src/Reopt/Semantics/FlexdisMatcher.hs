@@ -424,6 +424,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pminsw"  $ binop exec_pminsw
               , mk "pminsd"  $ binop exec_pminsd
               , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
+              , mk "movhpd"  $ mkBinopLV exec_movhpd
+              , mk "movlpd"  $ mkBinopLV exec_movlpd
               , mk "pshufd"  $ ternop exec_pshufd
               , mk "pslldq"  $ geBinop exec_pslldq
               , mk "lddqu"   $ mkBinop $ \loc val ->
