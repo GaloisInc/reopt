@@ -426,6 +426,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
               , mk "pshufd"  $ ternop exec_pshufd
               , mk "pslldq"  $ geBinop exec_pslldq
+              , mk "lddqu"   $ mkBinop $ \loc val ->
+                                          do l <- getBVLocation loc n128
+                                             v <- getBVValue val n128
+                                             exec_lddqu l v
               , mk "palignr" $ ternop exec_palignr
 
               -- X87 FP instructions

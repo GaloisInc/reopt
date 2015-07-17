@@ -1713,7 +1713,8 @@ exec_pslldq l v = do
 
 -- ** SSE3 Specialized 128-bit Unaligned Data Load Instruction
 
--- LDDQU Special 128-bit unaligned load designed to avoid cache line splits
+exec_lddqu :: Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_lddqu l v = l .= v
 
 -- ** SSE3 SIMD Floating-Point Packed ADD/SUB Instructions
 
