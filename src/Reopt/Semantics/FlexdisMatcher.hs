@@ -303,6 +303,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movsd"   $ truncate64Op exec_movsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
+              , mk "movups"  $ truncateKnownBinop exec_movups
               , mk "movdqa"  $ truncateKnownBinop exec_movdqa
               , mk "movdqu"  $ truncateKnownBinop exec_movdqa
               , mk "movsd_sse" $ truncate64Op exec_movsd

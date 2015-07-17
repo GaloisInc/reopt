@@ -1365,7 +1365,9 @@ exec_pxor l v = do
 exec_movaps :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movaps l v = l .= v
 
--- MOVUPS Move four unaligned packed single-precision floating-point values between XMM registers or between and XMM register and memory
+exec_movups :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movups l v = l .= v
+
 -- MOVHPS Move two packed single-precision floating-point values to an from the high quadword of an XMM register and memory
 
 exec_movhlps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
