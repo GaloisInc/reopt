@@ -1,6 +1,6 @@
 ------------------------------------------------------------------------
 -- |
--- Module           : Reopt.Semantics.Representation
+-- Module           : Reopt.CFG.Representation
 -- Description      : Defines basic data types used for representing Reopt CFG.
 -- Copyright        : (c) Galois, Inc 2015
 -- Maintainer       : Joe Hendrix <jhendrix@galois.com>
@@ -50,6 +50,8 @@ module Reopt.CFG.Representation
   , valueType
   , valueWidth
   , asBaseOffset
+  , asInt64Constant
+  , asStackAddrOffset
   , mkLit
   , bvValue
   , App(..)
@@ -74,6 +76,7 @@ import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Bits
+import           Data.Int (Int64)
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -408,6 +411,23 @@ valueWidth v =
 valueAsApp :: Value tp -> Maybe (App Value tp)
 valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
 valueAsApp _ = Nothing
+
+asInt64Constant :: Value (BVType 64) -> Maybe Int64
+asInt64Constant (BVValue _ o) = Just (fromInteger o)
+asInt64Constant _ = Nothing
+
+asStackAddrOffset :: Value (BVType 64) -> Maybe (Value (BVType 64))
+asStackAddrOffset addr
+  | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr = do
+    Refl <- testEquality base N.rsp
+    Just offset
+  | Initial base <- addr = do
+    Refl <- testEquality base N.rsp
+    Just (BVValue knownNat 0)
+  | otherwise =
+    Nothing
+
+
 
 asBaseOffset :: Value (BVType 64) -> (Value (BVType 64), Integer)
 asBaseOffset x

@@ -36,6 +36,8 @@ library
     Reopt.Analysis.Domains.StridedInterval
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation
+    Reopt.CFG.InterpState
+    Reopt.CFG.Recovery
     Reopt.CFG.Representation
     Reopt.Machine.StateNames
     Reopt.Machine.Types
