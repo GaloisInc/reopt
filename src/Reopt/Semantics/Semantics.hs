@@ -133,6 +133,13 @@ exec_bswap l = do
   v0 <- get l
   l .= (bvUnvectorize (loc_width l) $ reverse $ bvVectorize n8 v0)
 
+exec_xadd :: IsLocationBV m n => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
+exec_xadd d s = do
+  d0 <- get d
+  s0 <- get s
+  s .= d0
+  exec_add d s0 -- sets flags
+
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
 exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
 exec_cbw = do v <- get (reg_low8 N.rax)

@@ -374,6 +374,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
               , mk "test"    $ binop exec_test
+              , mk "xadd"    $ mkBinopPfxLL (\_ -> exec_xadd)
               , mk "xor"     $ binop exec_xor
 
               -- Primitive instructions
