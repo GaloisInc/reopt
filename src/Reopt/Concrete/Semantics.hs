@@ -194,7 +194,7 @@ instance S.IsValue Expr where
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
-  bvBit x y = app $ R.BVBit x y
+  bvBit x y = app $ R.BVTestBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
@@ -557,7 +557,7 @@ evalExpr (AppExpr a) = do
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
     R.BVSignedLt c1 c2 -> CS.liftValue2 (predBV (BV.slt)) boolNatRepr c1 c2
 
-    R.BVBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
+    R.BVTestBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
 
     -- Bit vector ops
     R.BVComplement nr c -> CS.liftValue (complement) nr c
@@ -1161,4 +1161,3 @@ liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
              in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
 
       _  -> error "Sorry, 32 or 64 bit floats only"
-

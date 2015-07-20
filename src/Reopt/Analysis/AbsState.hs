@@ -13,6 +13,8 @@ module Reopt.Analysis.AbsState
   , absBlockDiff
   , shiftSpecificOffset
   , setAbsIP
+  , AbsBlockStack
+  , StackEntry(..)
   , AbsValue(..)
   , emptyAbsValue
   , joinAbsValue
@@ -24,6 +26,7 @@ module Reopt.Analysis.AbsState
   , asConcreteSingleton
   , meet
   , size
+  , codePointerSet
   , AbsDomain(..)
   , AbsRegs
   , absInitialRegs
@@ -107,9 +110,10 @@ data AbsValue (tp :: Type) where
   -- A possibly empty set of values that either point to a code segment or 0.
   CodePointers :: !(Set Word64) -> AbsValue (BVType 64)
 
-  -- | Offset of stack at beginning of the block.
-  StackOffset :: !ValueSet -> AbsValue (BVType 64)
-  -- | An address (doesn't constraint value precisely).
+  -- Offset of stack from the beginning of the block at the given address.
+  -- First argument is address of block.
+  StackOffset :: !(Set Integer) -> AbsValue (BVType 64)
+  -- An offset to the stack at some offset.
   SomeStackOffset :: AbsValue (BVType 64)
   -- | A strided interval
   StridedInterval :: !(SI.StridedInterval (BVType n)) -> AbsValue (BVType n)
@@ -127,6 +131,7 @@ data AbsValue (tp :: Type) where
 emptyAbsValue :: AbsValue (BVType 64)
 emptyAbsValue = CodePointers Set.empty
 
+-- | Returns a finite set of values with some width.
 data SomeFinSet tp where
   IsFin :: ValueSet -> SomeFinSet (BVType n)
   NotFin :: SomeFinSet tp
@@ -169,8 +174,8 @@ maxSetSize = 5
 instance Eq (AbsValue tp) where
   FinSet x    == FinSet y      = x == y
   CodePointers x == CodePointers y = x == y
-  StackOffset s == StackOffset t   = s == t
-  SomeStackOffset     == SomeStackOffset     = True
+  StackOffset ox  == StackOffset oy   = ox == oy
+  SomeStackOffset == SomeStackOffset  = True
   StridedInterval si1 == StridedInterval si2 = si1 == si2
   SubValue n v == SubValue n' v'
     | Just Refl <- testEquality n n' = v == v'
@@ -189,7 +194,7 @@ instance Pretty (AbsValue tp) where
   pretty (CodePointers s) = ppIntegerSet s
   pretty (StridedInterval s) = pretty s
   pretty (SubValue n av) = (pretty av) <> brackets (integer (natValue n))
-  pretty (StackOffset s) = text "rsp_0 +" <+> ppIntegerSet s
+  pretty (StackOffset     s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty SomeStackOffset = text "rsp_0 + ?"
   pretty TopV = text "top"
 
@@ -350,9 +355,9 @@ joinAbsValue' (SubValue n av) (SubValue n' av') =
       mv <- joinAbsValue' new_av av'
       return $ Just $! subValue n' (fromMaybe new_av mv)
 -- Join addresses
-joinAbsValue' SomeStackOffset StackOffset{} = return $ Nothing
-joinAbsValue' StackOffset{} SomeStackOffset = return $ Just SomeStackOffset
-joinAbsValue' SomeStackOffset SomeStackOffset = return $ Nothing
+joinAbsValue' SomeStackOffset{} StackOffset{} = return $ Nothing
+joinAbsValue' StackOffset{} new@SomeStackOffset = return $ Just new
+joinAbsValue' SomeStackOffset{} SomeStackOffset{} = return $ Nothing
 
 joinAbsValue' x y = do
   addWords (codePointerSet x)
@@ -410,9 +415,9 @@ meet v v'
   | StridedInterval si <- v, SubValue n av <- v' = v -- FIXME: ?
 
 -- Join addresses
-meet SomeStackOffset s@StackOffset{} = s
-meet s@StackOffset{} SomeStackOffset = s
-meet SomeStackOffset SomeStackOffset = SomeStackOffset
+meet SomeStackOffset{} s@StackOffset{} = s
+meet s@StackOffset{} SomeStackOffset{} = s
+meet SomeStackOffset SomeStackOffset{} = SomeStackOffset
 meet x _ = x -- Arbitrarily pick one.
 -- meet x y = error $ "meet: impossible" ++ show (x,y)
 
@@ -780,7 +785,7 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
 ------------------------------------------------------------------------
 -- AbsRegs
 
--- | This is used to cache all changes to a state within a block.
+-- | This stores the abstract state of the system at a given point in time.
 data AbsRegs = AbsRegs { absMem :: !(Memory Word64)
                        , _absInitialRegs :: !(X86State AbsValue)
                        , _absAssignments :: !(MapF Assignment AbsValue)
@@ -811,8 +816,10 @@ absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 curAbsStack :: Simple Lens AbsRegs AbsBlockStack
 curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
+-- | A lens that allows one to lookup and update the value of an assignment in
+-- map from assignments to abstract values.
 assignLens :: Assignment tp
-              -> Simple Lens (MapF Assignment AbsValue) (AbsValue tp)
+           -> Simple Lens (MapF Assignment AbsValue) (AbsValue tp)
 assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
                       (\s v -> MapF.insert ass v s)
 
@@ -869,6 +876,7 @@ mkAbsBlockState trans newStack =
 finalAbsBlockState :: AbsRegs -> X86State Value -> AbsBlockState
 finalAbsBlockState c s = do
   case transferValue c (s^.register N.rsp) of
+    --
     StackOffset offsets | [0] <- Set.toList offsets ->
       let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
           transferReg r = transferValue c (s^.register r)
@@ -930,6 +938,7 @@ setAbsIP mem a b
 ------------------------------------------------------------------------
 -- Transfer functions
 
+-- | Compute abstract value from value and current registers.
 transferValue :: AbsRegs
               -> Value tp
               -> AbsValue tp
@@ -943,8 +952,8 @@ transferValue c v =
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
                (MapF.lookup a (c^.absAssignments))
    Initial r
-     | Just Refl <- testEquality r N.rsp -> do
-       StackOffset (Set.singleton 0)
+--     | Just Refl <- testEquality r N.rsp -> do
+--       StackOffset (Set.singleton 0)
      | otherwise -> c ^. absInitialRegs ^. register r
 
 transferApp :: AbsRegs

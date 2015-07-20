@@ -128,7 +128,9 @@ isSingleton StridedInterval { base = b, range = 0 } = Just b
 isSingleton _  = Nothing
 
 isTop :: StridedInterval tp -> Bool
-isTop si@StridedInterval{} = case typ si of BVTypeRepr sz -> si == top sz
+isTop si@StridedInterval{} =
+  case typ si of
+    BVTypeRepr sz -> si == top sz
 isTop _  = False
 
 member :: Integer -> StridedInterval tp -> Bool
@@ -388,7 +390,7 @@ prop_bvmul = mk_prop (*) bvmul
 -- Now, if we know the values in {0..q} we can figure out the whole sequence.
 -- In particular, we are looking for the new b --- the stride is gcd q M (assuming wrap)
 --
--- Let q_w be k * q mod M s.t. 0 <= q_w < q.  Alternately, q_w = q - M mod q 
+-- Let q_w be k * q mod M s.t. 0 <= q_w < q.  Alternately, q_w = q - M mod q
 --
 -- Assume wlog b0 = b < q.  Take
 -- b1 = b0 + q_w
@@ -399,9 +401,9 @@ prop_bvmul = mk_prop (*) bvmul
 --
 -- Now, we are interested in these value mod q, so take
 -- bs = { b0 + i * q_w } mod q
--- 
+--
 -- Thus, we get a recursion of (M, q) (q, q_w) (q_w, ...)
--- 
+--
 -- = (M, q) (q, q - M mod q) (q - M mod q, (q - M mod q) - q mod (q - M mod q))
 --
 -- Base cases:
@@ -443,7 +445,7 @@ trunc EmptyInterval _ = EmptyInterval
 trunc si sz
   | isTop si              = top'
   -- No change/complete wrap case --- happens when we add
-  -- (unsigned int) -1, for example.                            
+  -- (unsigned int) -1, for example.
   | si' `isSubsetOf` top' = si'
   -- where stride is a power of 2 (well, divides 2 ^ sz), we easily
   -- figure out the new base and just over-approximate by all the values

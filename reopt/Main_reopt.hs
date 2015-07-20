@@ -332,7 +332,7 @@ detectCalls g b initStack = do
       let rsp = x86_state^.register N.rsp
       case rsp `asOffsetOf` (Initial N.rsp) of
         Just o | Just _ <- lookupStack (fromInteger o) finStack -> do
-          addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+          addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
         _ -> return ()
     Branch _ x y -> do
       let Just xb = findBlock g x
@@ -348,7 +348,7 @@ detectSuccessors :: CFG -> Block -> State CallState ()
 detectSuccessors g b = do
   case blockTerm b of
     FetchAndExecute x86_state -> do
-      addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+      addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
     Branch _ x y -> do
       let Just xb = findBlock g x
           Just yb = findBlock g y
@@ -456,7 +456,7 @@ showCFGAndAI mem entry = do
       amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
       ppOne b =
-         vcat [case (blockLabel b, Map.lookup (blockParent (blockLabel b)) abst) of
+         vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty ab
                   (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
@@ -534,9 +534,9 @@ checkReturnsIdentified g b = do
       case (stateEndsWithRet s, hasRetComment b) of
         (True, True) -> return ()
         (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (labelAddr lbl) ""
         (False, True) -> do
-          hPutStrLn stderr $ "MISSING return Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "MISSING return Block " ++ showHex (labelAddr lbl) ""
         _ -> return ()
     _ -> return ()
 
@@ -547,9 +547,9 @@ checkCallsIdentified mem g b = do
     [s] -> do
       case (blockContainsCall mem b s, hasCallComment b) of
         (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED call Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "UNEXPECTED call Block " ++ showHex (labelAddr lbl) ""
         (False, True) -> do
-          hPutStrLn stderr $ "MISSING call Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "MISSING call Block " ++ showHex (labelAddr lbl) ""
         _ -> return ()
     _ -> return ()
 

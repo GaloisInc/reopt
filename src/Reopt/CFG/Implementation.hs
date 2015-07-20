@@ -199,6 +199,13 @@ instance S.IsValue Expr where
     | Just 0 <- asBVLit y = x
       -- Idempotence
     | x == y = x
+      -- Rewrite "x < y | x == y" to "x <= y"
+    | Just (BVUnsignedLt u1 v1) <- asApp x
+    , Just (BVEq u2 v2) <- asApp y
+    , Just Refl <- testEquality u1 u2
+    , v1 == v2 =
+      app $ BVUnsignedLe u1 v1
+
       -- Default case
     | otherwise = app $ BVOr (exprWidth x) x y
 
@@ -212,8 +219,21 @@ instance S.IsValue Expr where
     | otherwise = app $ BVXor (exprWidth x) x y
 
   x .=. y
-    | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv == yv)
     | x == y = S.true
+      -- Add two literals.
+    | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv == yv)
+      -- Move constant to second argument
+    | Just _ <- asBVLit x = y S..=. x
+
+      -- Rewrite "base + offset = constant" to "base = constant - offset".
+    | Just (BVAdd w x_base (asBVLit -> Just x_off)) <- asApp x
+    , Just yv <- asBVLit y =
+      app $ BVEq x_base (bvLit w (yv - x_off))
+      -- Rewrite "u - v == c" to "u = c + v".
+    | Just (BVSub _ x_1 x_2) <- asApp x = x_1 S..=. S.bvAdd y x_2
+      -- Rewrite "c == u - v" to "u = c + v".
+    | Just (BVSub _ y_1 y_2) <- asApp y = y_1 S..=. S.bvAdd x y_2
+
     | otherwise = app $ BVEq x y
 
   -- | Splits a bit vectors into two
@@ -306,7 +326,7 @@ instance S.IsValue Expr where
         S.bvBit x_low y
 
     | otherwise =
-      app $ BVBit x y
+      app $ BVTestBit x y
 
   sext w e0
     | Just (SExt e w0) <- asApp e0 = do
@@ -351,10 +371,14 @@ instance S.IsValue Expr where
 
   usbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+      -- If the borrow bit is zero, this is equivalent to unsigned x < y.
+    | Just 0 <- asBVLit c = app $ BVUnsignedLt x y
     | otherwise = app $ UsbbOverflows (exprWidth x) x y c
 
   ssbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
+      -- If the borrow bit is zero, this is equivalent to signed x < y.
+    | Just 0 <- asBVLit c = app $ BVSignedLt x y
     | otherwise = app $ SsbbOverflows (exprWidth x) x y c
 
   bsf x = app $ Bsf (exprWidth x) x
@@ -813,7 +837,7 @@ instance S.Semantics X86Generator where
         X86G $ \c s0 -> do
           let p_b = s0 ^. (blockState . _JustF)
           let st = p_b^.pBlockState
-          let a  = blockParent (pBlockLabel p_b)
+          let a  = labelAddr (pBlockLabel p_b)
           let (t_block_label, s1) = mkBlockLabel a s0
           let s2 = s1 & blockState .~ JustF (emptyPreBlock st t_block_label)
                       & frontierBlocks .~ Seq.empty

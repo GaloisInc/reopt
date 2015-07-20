@@ -118,8 +118,8 @@ type CodeAddr = Word64
 -- | A label used to identify a block.
 data BlockLabel
      -- | A block that came from an address in the code.
-   = GeneratedBlock { blockParent :: {-# UNPACK #-} !CodeAddr
-                    , blockIndex  :: {-# UNPACK #-} !Word64
+   = GeneratedBlock { labelAddr   :: {-# UNPACK #-} !CodeAddr
+                    , labelIndex  :: {-# UNPACK #-} !Word64
                     -- ^ A unique identifier for a generated block.
                     }
   deriving Eq
@@ -246,21 +246,16 @@ instance Pretty Stmt where
 -- TermStmt
 
 -- A terminal statement in a block
-data TermStmt where
-  -- Fetch and execute the next instruction from the given processor state.
-  FetchAndExecute :: !(X86State Value) -> TermStmt
-
-  -- Branch and execute one block or another.
-  Branch :: !(Value BoolType)
-         -> !BlockLabel
-         -> !BlockLabel
-         -> TermStmt
-
-  -- The syscall instruction.
-  -- We model system calls as terminal instructions because from the
-  -- application perspective, the semantics will depend on the operating
-  -- system.
-  Syscall :: !(X86State Value) -> TermStmt
+data TermStmt
+     -- | Fetch and execute the next instruction from the given processor state.
+  = FetchAndExecute !(X86State Value)
+    -- | Branch and execute one block or another.
+  | Branch !(Value BoolType) !BlockLabel !BlockLabel
+    -- | The syscall instruction.
+    -- We model system calls as terminal instructions because from the
+    -- application perspective, the semantics will depend on the operating
+    -- system.
+  | Syscall !(X86State Value)
 
 instance Pretty TermStmt where
   pretty (FetchAndExecute s) =
@@ -298,15 +293,15 @@ data AssignRhs tp where
 
   Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
 
-  -- Here because it returns a value
+  -- Compares to memory regions
   MemCmp :: !Integer
-             -- ^ Number of bytes to copy at a time (1,2,4,8)
+             -- ^ Number of bytes per value.
           -> !(BVValue 64)
-             -- ^ Number of values to move.
+             -- ^ Number of values to compare
           -> !(BVValue 64)
-             -- ^ Start of source buffer.
+             -- ^ Pointer to first buffer.
           -> !(BVValue 64)
-             -- ^ Start of destination buffer.
+             -- ^ Pointer to second buffer.
           -> !(BVValue 1)
              -- ^ Direction flag, False means increasing
           -> AssignRhs (BVType 64)
@@ -371,6 +366,9 @@ data Value tp where
 
 instance Eq (Value tp) where
   x == y = isJust (testEquality x y)
+
+instance Ord (Value tp) where
+  compare x y = toOrdering (compareF x y)
 
 instance TestEquality Value where
   testEquality x y = orderingF_refl (compareF x y)
@@ -529,13 +527,18 @@ data App (f :: Type -> *) (tp :: Type) where
   -- Unsigned less than.
   BVUnsignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
+  -- Unsigned less than or equal.
+  BVUnsignedLe :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
+
   -- Signed less than
   BVSignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
+  -- Signed less than or equal.
+  BVSignedLe :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
 
-  -- @BVBit x i@ returns true iff bit @i@ of @x@ is true.
+  -- @BVTestBit x i@ returns true iff bit @i@ of @x@ is true.
   -- 0 is the index of the least-significant bit.
-  BVBit :: !(f (BVType n)) -> !(f (BVType log_n)) -> App f BoolType
+  BVTestBit :: !(f (BVType n)) -> !(f (BVType log_n)) -> App f BoolType
 
   -- Bitwise complement
   BVComplement :: !(NatRepr n) -> !(f (BVType n)) -> App f (BVType n)
@@ -715,8 +718,10 @@ ppApp pp a0 =
     BVMod _ x y       -> sexpr "bv_umod" [ pp x, pp y ]
     BVSignedMod _ x y -> sexpr "bv_smod" [ pp x, pp y ]
     BVUnsignedLt x y  -> sexpr "bv_ult"  [ pp x, pp y ]
+    BVUnsignedLe x y  -> sexpr "bv_ule"  [ pp x, pp y ]
     BVSignedLt x y    -> sexpr "bv_slt"  [ pp x, pp y ]
-    BVBit x i -> sexpr "bv_bitset" [ pp x, pp i]
+    BVSignedLe x y    -> sexpr "bv_sle"  [ pp x, pp y ]
+    BVTestBit x i -> sexpr "bv_testbit" [ pp x, pp i]
     BVComplement _ x -> sexpr "bv_complement" [ pp x ]
     BVAnd _ x y -> sexpr "bv_and" [ pp x, pp y ]
     BVOr  _ x y -> sexpr "bv_or"  [ pp x, pp y ]
@@ -780,8 +785,10 @@ appType a =
     BVSignedMod w _ _ -> BVTypeRepr w
 
     BVUnsignedLt{} -> knownType
+    BVUnsignedLe{} -> knownType
     BVSignedLt{} -> knownType
-    BVBit{} -> knownType
+    BVSignedLe{} -> knownType
+    BVTestBit{} -> knownType
 
     BVComplement w _ -> BVTypeRepr w
     BVAnd w _ _ -> BVTypeRepr w
@@ -870,7 +877,7 @@ data Block = Block { blockLabel :: !BlockLabel
                      -- | This maps applications to the associated assignment.
                    , blockCache :: !(MapF (App Value) Assignment)
                      -- | The last statement in the block.
-                   , blockTerm :: !(TermStmt)
+                   , blockTerm :: !TermStmt
                    }
 
 instance Pretty Block where
@@ -886,9 +893,9 @@ hasCallComment b = any isCallComment (blockStmts b)
 
 -- | Returns true if block has a ret comment.
 hasRetComment :: Block -> Bool
-hasRetComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "ret " `Text.isSuffixOf` s
-        isCallComment _ = False
+hasRetComment b = any isRetComment (blockStmts b)
+  where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
+        isRetComment _ = False
 
 ------------------------------------------------------------------------
 -- CFG
