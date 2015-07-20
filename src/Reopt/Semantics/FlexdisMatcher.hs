@@ -49,7 +49,7 @@ getSomeBVValue v =
   case v of
     F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
     F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
     F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
     F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.X87Register n     -> mk (X87StackRegister n)
@@ -83,13 +83,16 @@ getSomeBVValue v =
     mk :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
     mk l = SomeBV <$> get l
 
+    mk64 :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
+    mk64 l
+      | Just LeqProof <- testLeq n64 (loc_width l) = SomeBV <$> bvTrunc n64 <$> get l
+
 -- | Calculates the address corresponding to an AddrRef
-getBVAddress :: FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
+getBVAddress :: forall m. FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
 getBVAddress ar =
   case ar of
    -- FIXME: It seems that there is no sign extension here ...
     F.Addr_32 seg m_r32 m_int_r32 i32 -> do
-      check_seg_value seg
       base <- case m_r32 of
                 Nothing -> return $! bvKLit 0
                 Just r  -> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
@@ -97,28 +100,39 @@ getBVAddress ar =
                  Nothing     -> return $! bvKLit 0
                  Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
                                 <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-      return $ uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
-
+      let offset = uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
+      mk_absolute seg offset
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
-    F.Offset_64    seg w64                 -> do check_seg_value seg
-                                                 return (bvLit n64 w64)
-    F.Addr_64      seg m_r64 m_int_r64 i32 -> do check_seg_value seg
-                                                 base <- case m_r64 of
+    F.Offset_64    seg w64                 -> do let offset = bvLit n64 w64
+                                                 mk_absolute seg offset
+    F.Addr_64      seg m_r64 m_int_r64 i32 -> do base <- case m_r64 of
                                                            Nothing -> return v0_64
                                                            Just r  -> get (Register $ N.gpFromFlexdis r)
                                                  scale <- case m_int_r64 of
                                                             Nothing     -> return v0_64
                                                             Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
                                                                            <$> get (Register $ N.gpFromFlexdis r)
-                                                 return (base `bvAdd` scale `bvAdd` bvLit n64 i32)
-    F.IP_Offset_64 seg i32                 -> do check_seg_value seg
-                                                 bvAdd (bvLit n64 i32) <$> get (Register N.rip)
+                                                 let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
+                                                 mk_absolute seg offset
+    F.IP_Offset_64 seg i32                 -> do offset <- bvAdd (bvLit n64 i32) <$> get (Register N.rip)
+                                                 mk_absolute seg offset
   where
     v0_64 = bvLit n64 (0 :: Int)
-    check_seg_value seg
-            | seg == F.cs || seg == F.ds || seg == F.es || seg == F.ss = return ()
-            | otherwise                                                = fail "Segmentation is not supported"
+    -- | Add the segment base to compute an absolute address.
+    mk_absolute :: F.Segment -> Value m (BVType 64) -> m (Value m (BVType 64))
+    mk_absolute seg offset
+      -- In 64-bit mode the CS, DS, ES, and SS segment registers
+      -- are forced to zero, and so segmentation is a nop.
+      --
+      -- We could nevertheless call 'getSegmentBase' in all cases
+      -- here, but that adds a lot of noise to the AST in the common
+      -- case of segments other than FS or GS.
+      | seg == F.cs || seg == F.ds || seg == F.es || seg == F.ss = return offset
+      -- The FS and GS segments can be non-zero based in 64-bit mode.
+      | otherwise = do
+        base <- getSegmentBase seg
+        return $ base `bvAdd` offset
 
 -- | Extract the _location_ of a value, not the value contained.
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
@@ -126,7 +140,7 @@ getSomeBVLocation v =
   case v of
     F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
     F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk (Register $ N.mmxFromFlexdis mmx)
+    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
     F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
     F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.FarPointer _      -> fail "FarPointer"
@@ -159,6 +173,12 @@ getSomeBVLocation v =
        => MLocation m (BVType n)
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
+
+    mk64 :: forall m n. (FullSemantics m, SupportedBVWidth n)
+       => MLocation m (BVType n)
+       -> m (SomeBV (MLocation m))
+    mk64 l
+      | Just LeqProof <- testLeq (addNat n1 n64) (loc_width l) = return $ SomeBV $ TruncLoc l n64
 
 checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
@@ -283,6 +303,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movsd"   $ truncate64Op exec_movsd
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
+              , mk "movups"  $ truncateKnownBinop exec_movups
               , mk "movdqa"  $ truncateKnownBinop exec_movdqa
               , mk "movdqu"  $ truncateKnownBinop exec_movdqa
               , mk "movsd_sse" $ truncate64Op exec_movsd
@@ -291,6 +312,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ mkBinop $ \loc val -> do
+                  l <- getBVLocation loc n128
+                  v <- getBVValue val n128
+                  modify (`bvXor` v) l
+              , mk "xorps"   $ mkBinop $ \loc val -> do
                   l <- getBVLocation loc n128
                   v <- getBVValue val n128
                   modify (`bvXor` v) l
@@ -341,15 +366,22 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ geBinop exec_rol
+              , mk "ror"     $ geBinop exec_ror
               , mk "sbb"     $ binop exec_sbb
               , mk "sar"     $ geBinop exec_sar
               , mk "shl"     $ geBinop exec_shl
               , mk "shr"     $ geBinop exec_shr
               , mk "std"     $ const (df_loc .= true)
               , mk "sub"     $ binop exec_sub
-              , mk "syscall" $ const syscall
               , mk "test"    $ binop exec_test
+              , mk "xadd"    $ mkBinopPfxLL (\_ -> exec_xadd)
               , mk "xor"     $ binop exec_xor
+
+              -- Primitive instructions
+              , mk "syscall" $ const (primitive Syscall)
+              , mk "cpuid"   $ const (primitive CPUID)
+              , mk "rdtsc"   $ const (primitive RDTSC)
+              , mk "xgetbv"  $ const (primitive XGetBV)
 
               -- MMX instructions
               , mk "movd"    $ mkBinopLV exec_movd
@@ -362,6 +394,12 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "punpcklwd"  $ binop exec_punpcklwd
               , mk "punpckldq"  $ binop exec_punpckldq
               , mk "punpcklqdq" $ binop exec_punpcklqdq
+              , mk "paddb"   $ binop exec_paddb
+              , mk "paddw"   $ binop exec_paddw
+              , mk "paddd"   $ binop exec_paddd
+              , mk "psubb"   $ binop exec_psubb
+              , mk "psubw"   $ binop exec_psubw
+              , mk "psubd"   $ binop exec_psubd
               , mk "pcmpeqb" $ binop exec_pcmpeqb
               , mk "pcmpeqw" $ binop exec_pcmpeqw
               , mk "pcmpeqd" $ binop exec_pcmpeqd
@@ -374,6 +412,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pxor"    $ binop exec_pxor
 
               -- SSE instructions
+              , mk "movhlps" $ knownBinop exec_movhlps
+              , mk "movlhps" $ knownBinop exec_movlhps
               , mk "pmaxub"  $ binop exec_pmaxub
               , mk "pmaxuw"  $ binop exec_pmaxuw
               , mk "pmaxud"  $ binop exec_pmaxud
@@ -386,6 +426,16 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pminsb"  $ binop exec_pminsb
               , mk "pminsw"  $ binop exec_pminsw
               , mk "pminsd"  $ binop exec_pminsd
+              , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
+              , mk "movhpd"  $ mkBinopLV exec_movhpd
+              , mk "movlpd"  $ mkBinopLV exec_movlpd
+              , mk "pshufd"  $ ternop exec_pshufd
+              , mk "pslldq"  $ geBinop exec_pslldq
+              , mk "lddqu"   $ mkBinop $ \loc val ->
+                                          do l <- getBVLocation loc n128
+                                             v <- getBVValue val n128
+                                             exec_lddqu l v
+              , mk "palignr" $ ternop exec_palignr
 
               -- X87 FP instructions
               , mk "fadd"    $ fpUnopOrRegBinop exec_fadd
@@ -452,6 +502,21 @@ maybe_ip_relative f (_, vs)
        = getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= f
 
   | otherwise  = fail "wrong number of operands"
+
+mkTernop :: FullSemantics m
+        => (F.Value -> F.Value -> F.Value -> m a)
+        -> (F.LockPrefix, [F.Value])
+        -> m a
+mkTernop f = mkTernopPfx (\_ -> f)
+
+mkTernopPfx :: FullSemantics m
+              => (F.LockPrefix -> F.Value -> F.Value -> F.Value -> m a)
+              -> (F.LockPrefix, [F.Value])
+              -> m a
+mkTernopPfx f (pfx, vs) =
+  case vs of
+    [v, v', v''] -> f pfx v v' v''
+    vs           -> fail $ "expecting 3 arguments, got " ++ show (length vs)
 
 mkBinop :: FullSemantics m
         => (F.Value -> F.Value -> m a)
@@ -558,6 +623,19 @@ binop f = mkBinop $ \loc val -> do
   SomeBV l <- getSomeBVLocation loc
   v <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val
   f l v
+
+ternop :: FullSemantics m
+       => (forall k n. (IsLocationBV m n, 1 <= k, k <= n) => MLocation m (BVType n)
+                                                          -> Value m (BVType n)
+                                                          -> Value m (BVType k)
+                                                          -> m ())
+       -> (F.LockPrefix, [F.Value]) -> m ()
+ternop f = mkTernop $ \loc val1 val2 -> do
+  SomeBV l <- getSomeBVLocation loc
+  v1 <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val1
+  SomeBV v2 <- getSomeBVValue val2
+  Just LeqProof <- return $ testLeq (bv_width v2) (bv_width v1)
+  f l v1 v2
 
 fpUnopV :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> m ())
            -> (F.LockPrefix, [F.Value]) -> m ()

@@ -97,8 +97,9 @@ import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Utils.PrettyPrint
 import           Reopt.Machine.X86State
+import           Reopt.Semantics.Monad (Primitive)
+import           Reopt.Utils.PrettyPrint
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
@@ -259,6 +260,7 @@ data TermStmt
     -- application perspective, the semantics will depend on the operating
     -- system.
   | Syscall !(X86State Value)
+
 
 instance Pretty TermStmt where
   pretty (FetchAndExecute s) =

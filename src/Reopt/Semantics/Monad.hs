@@ -18,6 +18,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -90,15 +91,19 @@ module Reopt.Semantics.Monad
   , IsLocationBV
   , FullSemantics
   , ExceptionClass(..)
+  , Primitive(..)
     -- * Re-exports
   , type (TypeLits.<=)
   , type Flexdis86.OpTable.SizeConstraint(..)
+  , module Flexdis86.InstructionSet
   ) where
 
 import           Control.Applicative
 import           Data.Bits (shiftL)
+import           Data.Char (toLower)
 import           Data.Proxy
 import           GHC.TypeLits as TypeLits
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
@@ -106,6 +111,7 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 import Flexdis86.OpTable (SizeConstraint(..))
+import Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
 
 ------------------------------------------------------------------------
 -- Location
@@ -194,6 +200,8 @@ elimLocation memCont regCont x87Cont l = go id l
     lowerHalf, upperHalf :: (i, i) -> (i, i)
     lowerHalf (low, high) = (low, (low + high) `div` 2)
     upperHalf (low, high) = ((low + high) `div` 2, high)
+
+
 
 ------------------------------------------------------------------------
 -- Specific locations.
@@ -383,6 +391,32 @@ class IsValue (v  :: Type -> *) where
   -- bvSplit v = (bvTrunc:: sz (bvShr (widthVal sz) v), bvTrunc sz v)
   --   where
   --     sz = halfNat (bv_width v)
+
+  -- | Vectorization
+  bvVectorize :: forall k n. (1 <= k) => NatRepr k -> v (BVType n) -> [v (BVType k)]
+  bvVectorize sz bv
+    | Just Refl <- testEquality (bv_width bv) sz = [bv]
+    | Just LeqProof <- testLeq sz (bv_width bv) =
+        let bvs2n :: [v (BVType (k+k))] -- solve for size (n+n), then split into size n
+            bvs2n = withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 k)) $ bvVectorize (addNat sz sz) bv
+        in concatMap (\v -> let (a, b) = bvSplit v in [a, b]) bvs2n
+
+  bvUnvectorize :: forall k n. (1 <= k) => NatRepr n -> [v (BVType k)] -> v (BVType n)
+  bvUnvectorize sz [x]
+    | Just Refl <- testEquality (bv_width x) sz = x
+  bvUnvectorize sz bvs = withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 k)) $ bvUnvectorize sz $ concatBVPairs bvs
+    where concatBVPairs :: (1 <= o) => [v (BVType o)] -> [v (BVType (o+o))]
+          concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
+          concatBVPairs _ = []
+
+  vectorize2 :: (1 <= k)
+             => NatRepr k
+             -> (v (BVType k) -> v (BVType k) -> v (BVType k))
+             -> v (BVType n) -> v (BVType n)
+             -> v (BVType n)
+  vectorize2 sz op x y = let xs = bvVectorize sz x
+                             ys = bvVectorize sz y
+                         in bvUnvectorize (bv_width x) $ zipWith op xs ys
 
   -- | Rotations
   bvRol :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
@@ -657,6 +691,24 @@ data ExceptionClass
      -- -- | AlignmentCheck
   deriving Show
 
+-- | Primitive instructions.
+--
+-- A primitive instruction is one whose semantics depend on the
+-- underlying hardware or OS.
+data Primitive
+   = Syscall
+   | CPUID
+   | RDTSC
+   -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
+   | XGetBV
+   deriving Show
+
+ppPrimitive :: Primitive -> Doc
+ppPrimitive = text . map toLower . show
+
+instance Pretty Primitive where
+  pretty = ppPrimitive
+
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m
@@ -780,8 +832,11 @@ class ( Applicative m
             -- ^ Pointer to buffer to set
             -> m ()
 
-  -- | execute the system call instruction.
-  syscall :: m ()
+  -- | execute a primitive instruction.
+  primitive :: Primitive -> m ()
+
+  -- | Return the base address of the given segment.
+  getSegmentBase :: Segment -> m (Value m (BVType 64))
 
   -- | Performs an unsigned division.  It rounds the result to zero,
   -- and returns both the quotient and remainder.

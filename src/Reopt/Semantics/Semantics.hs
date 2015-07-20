@@ -23,6 +23,7 @@ module Reopt.Semantics.Semantics where
 import           Control.Applicative ( (<$>), (<*>) )
 import           Data.Type.Equality
 import           Data.Int
+import           Data.Proxy
 import           Data.Word
 import           Prelude hiding (isNaN)
 import           GHC.TypeLits
@@ -101,8 +102,8 @@ cond_a = (\c z -> complement c .&. complement z) <$> get cf_loc <*> get zf_loc
 cond_ae  = complement <$> get cf_loc
 cond_b   = get cf_loc
 cond_be  = (.|.) <$> get cf_loc <*> get zf_loc
-cond_g   = (\z s o -> complement z .&. (s `bvXor` o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
-cond_ge  = (\s o   -> s `bvXor` o) <$> get sf_loc <*> get of_loc
+cond_g   = (\z s o -> complement z .&. (s .=. o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
+cond_ge  = (\s o   -> s .=. o) <$> get sf_loc <*> get of_loc
 cond_l   = complement <$> cond_ge
 cond_le  = complement <$> cond_g
 cond_o   = get of_loc
@@ -128,7 +129,16 @@ exec_cmovcc cc r y = do
 
 -- | Run bswap instruction.
 exec_bswap :: IsLocationBV m n => MLocation m (BVType n) -> m ()
-exec_bswap = modify reverse_bytes
+exec_bswap l = do
+  v0 <- get l
+  l .= (bvUnvectorize (loc_width l) $ reverse $ bvVectorize n8 v0)
+
+exec_xadd :: IsLocationBV m n => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
+exec_xadd d s = do
+  d0 <- get d
+  s0 <- get s
+  s .= d0
+  exec_add d s0 -- sets flags
 
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
 exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
@@ -166,7 +176,7 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
     go d s acc = do
       temp <- get d
       a  <- get acc
-      exec_cmp d s -- set flags
+      exec_cmp acc temp -- set flags
       ifte_ (a .=. temp)
         (do zf_loc .= true
             d .= s
@@ -487,13 +497,24 @@ exec_neg l = do
 
 exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_sbb l v = do cf <- get cf_loc
-                  exec_sub l (v `bvAdd` uext (bv_width v) cf)
+                  v0 <- get l
+                  let v' = v `bvAdd` (uext (loc_width l) cf)
+                  -- Set overflow and arithmetic flags
+                  of_loc .= ssbb_overflows v0 v cf
+                  af_loc .= uadd4_overflows v (uext knownNat cf) .|.
+                    usub4_overflows v0 v'
+                  cf_loc .= uadd_overflows v (uext (loc_width l) cf) .|.
+                    (usub_overflows  v0 v')
+                  -- Set result value.
+                  let res = v0 `bvSub` v'
+                  set_result_flags res
+                  l .= res
 
 -- FIXME: duplicates subtraction term by calling exec_cmp
 exec_sub :: Binop
 exec_sub l v = do v0 <- get l
-                  l .= (v0 `bvSub` v)
                   exec_cmp l v -- set flags
+                  l .= (v0 `bvSub` v)
 
 -- ** Decimal Arithmetic Instructions
 -- ** Logical Instructions
@@ -634,9 +655,11 @@ exec_rol l count = do
                        _             -> 64
       countMASK = bvLit (bv_width v) (nbits - 1)
       low_count = uext (bv_width v) count .&. countMASK
-      -- Note: The manual includes a mod, but it seems like the mask is sufficient.
-      --                  `bvMod` (bvLit (bv_width v) (natValue (bv_width v)))
-      r = bvRol v low_count
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or
+      -- 8, so we need to mask those off again...
+      effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
+      effective = uext (bv_width v) count .&. effectiveMASK
+      r = bvRol v effective
 
   -- When the count is zero, nothing happens, in particular, no flags change
   when_ (complement $ is_zero low_count) $ do
@@ -646,6 +669,39 @@ exec_rol l count = do
 
     ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
       (of_loc .= (msb r `bvXor` new_cf))
+      (set_undefined of_loc)
+
+    l .= r
+
+-- FIXME: use really_exec_shift above?
+exec_ror :: (1 <= n', n' <= n, IsLocationBV m n)
+         => MLocation m (BVType n)
+         -> Value m (BVType n')
+         -> m ()
+exec_ror l count = do
+  v    <- get l
+  -- The intel manual says that the count is masked to give an upper
+  -- bound on the time the shift takes, with a mask of 63 in the case
+  -- of a 64 bit operand, and 31 in the other cases.
+  let nbits :: Int = case testLeq (bv_width v) n32 of
+                       Just LeqProof -> 32
+                       _             -> 64
+      countMASK = bvLit (bv_width v) (nbits - 1)
+      low_count = uext (bv_width v) count .&. countMASK
+      -- countMASK is sufficient for 32 and 64 bit operand sizes, but not 16 or
+      -- 8, so we need to mask those off again...
+      effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
+      effective = uext (bv_width v) count .&. effectiveMASK
+      r = bvRor v effective
+
+  -- When the count is zero, nothing happens, in particular, no flags change
+  when_ (complement $ is_zero low_count) $ do
+    let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
+
+    cf_loc .= new_cf
+
+    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+      (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
       (set_undefined of_loc)
 
     l .= r
@@ -821,7 +877,7 @@ exec_movs True dest_loc _src_loc = do
   where
     count_reg = regLocation sz N.rcx
     sz = loc_width dest_loc
-    nbytes = natValue sz `div` 8 
+    nbytes = natValue sz `div` 8
 
 -- FIXME: can also take rep prefix
 -- FIXME: we ignore the aso here.
@@ -850,7 +906,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
     sz  = loc_width loc_rsi
     szv = bvLit n64 $ natValue sz
     nbytes = natValue sz `div` 8
-    
+
     do_memcmp df src dest count = do
       nsame <- memcmp nbytes count src dest df
       let equal = (nsame .=. count)
@@ -903,7 +959,7 @@ exec_stos True _dest_loc val_loc = do
   df <- get df_loc
   dest <- get rdi
   v    <- get val_loc
-  let szv = bvLit n64 (natValue sz)
+  let szv = bvLit n64 (natValue sz `div` 8)
   count <- uext n64 <$> get count_reg
   let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
       nbytes     = count `bvMul` szv
@@ -916,7 +972,7 @@ exec_stos True _dest_loc val_loc = do
             rcx .= bvKLit 0)
   where
     sz = loc_width val_loc
-    count_reg = regLocation sz N.rcx
+    count_reg = regLocation n64 N.rcx
 
 
 
@@ -1151,60 +1207,6 @@ exec_fnstcw l = do
 
 -- * MMX Instructions
 
--- uses bvCat to turn [a, b, c, d] into [ab, cd]
-concatBVPairs :: (IsValue v, 1 <= n) => [v (BVType n)] -> [v (BVType (n+n))]
-concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
-concatBVPairs _ = []
-
-concatIntoSize :: (IsValue v) => NatRepr n -> [v (BVType m)] -> v (BVType n)
-concatIntoSize sz bvs@(bv:_)
-  | Just Refl <- testEquality (bv_width bv) n8
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n128 = head $ concatBVPairs bvs
-
-  | Just Refl <- testEquality (bv_width bv) n8
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs $ concatBVPairs bvs
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n64 = head $ concatBVPairs bvs
-
--- uses bvSplit to turn [ab, cd] into [a, b, c, d]
-splitBVs :: (IsValue v, 1 <= n) => [v (BVType (n+n))] -> [v (BVType n)]
-splitBVs = concatMap (\bv -> let (a, b) = bvSplit bv in [a, b])
-
-splitIntoSize :: (IsValue v) => NatRepr n -> v (BVType m) -> [v (BVType n)]
-splitIntoSize sz bv
-  | Just Refl <- testEquality (bv_width bv) n16
-  , Just Refl <- testEquality sz n8 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n8 = splitBVs $ splitBVs $ splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n32
-  , Just Refl <- testEquality sz n16 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n16 = splitBVs $ splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n64
-  , Just Refl <- testEquality sz n32 = splitBVs [bv]
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n32 = splitBVs $ splitBVs [bv]
-
-  | Just Refl <- testEquality (bv_width bv) n128
-  , Just Refl <- testEquality sz n64 = splitBVs [bv]
-
-
 -- ** MMX Data Transfer Instructions
 
 exec_movd, exec_movq :: (IsLocationBV m n, 1 <= n')
@@ -1224,19 +1226,19 @@ exec_movq = exec_movd
 -- PACKSSDW Pack doublewords into words with signed saturation
 -- PACKUSWB Pack words into bytes with unsigned saturation
 
-punpck :: (IsLocationBV m n)
+punpck :: (IsLocationBV m n, 1 <= o)
        => (([Value m (BVType o)], [Value m (BVType o)]) -> [Value m (BVType o)])
        -> NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 punpck f pieceSize l v = do
   v0 <- get l
-  let dSplit = f $ splitHalf $ splitIntoSize pieceSize v0
-      sSplit = f $ splitHalf $ splitIntoSize pieceSize v
-      r = concatIntoSize (loc_width l) $ concat $ zipWith (\a b -> [b, a]) dSplit sSplit
+  let dSplit = f $ splitHalf $ bvVectorize pieceSize v0
+      sSplit = f $ splitHalf $ bvVectorize pieceSize v
+      r = bvUnvectorize (loc_width l) $ concat $ zipWith (\a b -> [b, a]) dSplit sSplit
   l .= r
   where splitHalf :: [a] -> ([a], [a])
         splitHalf xs = splitAt ((length xs + 1) `div` 2) xs
 
-punpckh, punpckl :: (IsLocationBV m n) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
+punpckh, punpckl :: (IsLocationBV m n, 1 <= o) => NatRepr o -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
 punpckh = punpck fst
 punpckl = punpck snd
 
@@ -1255,16 +1257,41 @@ exec_punpcklqdq = punpckl n64
 
 -- ** MMX Packed Arithmetic Instructions
 
--- PADDB Add packed byte integers
--- PADDW Add packed word integers
--- PADDD Add packed doubleword integers
+exec_paddb :: Binop
+exec_paddb l v = do
+  v0 <- get l
+  l .= vectorize2 n8 bvAdd v0 v
+
+exec_paddw :: Binop
+exec_paddw l v = do
+  v0 <- get l
+  l .= vectorize2 n16 bvAdd v0 v
+
+exec_paddd :: Binop
+exec_paddd l v = do
+  v0 <- get l
+  l .= vectorize2 n32 bvAdd v0 v
+
 -- PADDSB Add packed signed byte integers with signed saturation
 -- PADDSW Add packed signed word integers with signed saturation
 -- PADDUSB Add packed unsigned byte integers with unsigned saturation
 -- PADDUSW Add packed unsigned word integers with unsigned saturation
--- PSUBB Subtract packed byte integers
--- PSUBW Subtract packed word integers
--- PSUBD Subtract packed doubleword integers
+
+exec_psubb :: Binop
+exec_psubb l v = do
+  v0 <- get l
+  l .= vectorize2 n8 bvSub v0 v
+
+exec_psubw :: Binop
+exec_psubw l v = do
+  v0 <- get l
+  l .= vectorize2 n16 bvSub v0 v
+
+exec_psubd :: Binop
+exec_psubd l v = do
+  v0 <- get l
+  l .= vectorize2 n32 bvSub v0 v
+
 -- PSUBSB Subtract packed signed byte integers with signed saturation
 -- PSUBSW Subtract packed signed word integers with signed saturation
 -- PSUBUSB Subtract packed unsigned byte integers with unsigned saturation
@@ -1276,26 +1303,14 @@ exec_punpcklqdq = punpckl n64
 
 -- ** MMX Comparison Instructions
 
--- split into chunks of size sz, zip, replace pairs using f, and merge
-pcombine :: (IsLocationBV m n, 1 <= o)
-     => (Value m (BVType o) -> Value m (BVType o) -> Value m (BVType o))
-     -> NatRepr o
-     -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcombine f sz l v = do
-  v0 <- get l
-  let dSplit = splitIntoSize sz v0
-      sSplit = splitIntoSize sz v
-
-      resultValues = zipWith f dSplit sSplit
-      r = concatIntoSize (loc_width l) resultValues
-  l .= r
-
 -- replace pairs with 0xF..F if `op` returns true, otherwise 0x0..0
 pcmp :: (IsLocationBV m n, 1 <= o)
      => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
      -> NatRepr o
      -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pcmp op = pcombine chkHighLow
+pcmp op sz l v = do
+  v0 <- get l
+  l .= vectorize2 sz chkHighLow v0 v
   where chkHighLow d s = mux (d `op` s) (complement (bvLit (bv_width d) (0 :: Integer))) (bvLit (bv_width d) (0 :: Integer))
 
 exec_pcmpeqb, exec_pcmpeqw, exec_pcmpeqd  :: Binop
@@ -1357,11 +1372,27 @@ exec_pxor l v = do
 exec_movaps :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movaps l v = l .= v
 
--- MOVUPS Move four unaligned packed single-precision floating-point values between XMM registers or between and XMM register and memory
+exec_movups :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movups l v = l .= v
+
 -- MOVHPS Move two packed single-precision floating-point values to an from the high quadword of an XMM register and memory
--- MOVHLPS Move two packed single-precision floating-point values from the high quadword of an XMM register to the low quadword of another XMM register
+
+exec_movhlps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movhlps l v = do
+  v0 <- get l
+  l .= (f v0) `bvCat` (f v)
+  where f :: Value m (BVType 128) -> Value m (BVType 64)
+        f = fst . bvSplit
+
 -- MOVLPS Move two packed single-precision floating-point values to an from the low quadword of an XMM register and memory
--- MOVLHPS Move two packed single-precision floating-point values from the low quadword of an XMM register to the high quadword of another XMM register
+
+exec_movlhps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movlhps l v = do
+  v0 <- get l
+  l .= (f v) `bvCat` (f v0)
+  where f :: Value m (BVType 128) -> Value m (BVType 64)
+        f = snd . bvSplit
+
 -- MOVMSKPS Extract sign mask from four packed single-precision floating-point values
 -- | MOVSS Move scalar single-precision floating-point value between XMM registers or between an XMM register and memory
 exec_movss :: Semantics m => MLocation m (BVType 32) -> Value m (FloatType SingleFloat) -> m ()
@@ -1429,7 +1460,9 @@ pselect :: (IsLocationBV m n, 1 <= o)
         => (Value m (BVType o) -> Value m (BVType o) -> Value m BoolType)
         -> NatRepr o
         -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
-pselect op = pcombine chkPair
+pselect op sz l v = do
+  v0 <- get l
+  l .= vectorize2 sz chkPair v0 v
   where chkPair d s = mux (d `op` s) d s
 
 -- PAVGB Compute average of packed unsigned byte integers
@@ -1461,7 +1494,21 @@ exec_pminsb = pselect bvSlt n8
 exec_pminsw = pselect bvSlt n16
 exec_pminsd = pselect bvSlt n32
 
--- PMOVMSKB Move byte mask
+exec_pmovmskb :: forall m n n'. (IsLocationBV m n, 1 <= n')
+              => MLocation m (BVType n)
+              -> Value m (BVType n')
+              -> m ()
+exec_pmovmskb l v
+  | Just Refl <- testEquality (bv_width v) n64 = do
+      l .= uext (loc_width l) (mkMask n8 v)
+  | Just LeqProof <- testLeq n32 (loc_width l)
+  , Just Refl <- testEquality (bv_width v) n128 = do
+      let prf = withLeqProof (leqTrans (LeqProof :: LeqProof 16 32)
+                                       (LeqProof :: LeqProof 32 n))
+      l .= prf (uext (loc_width l) (mkMask n16 v))
+  | otherwise = fail "pmovmskb: Unknown bit width"
+  where mkMask sz src = bvUnvectorize sz $ map msb $ bvVectorize n8 src
+
 -- PMULHUW Multiply packed unsigned integers and store high result
 -- PSADBW Compute sum of absolute differences
 -- PSHUFW Shuffle packed integer word in MMX register
@@ -1487,10 +1534,24 @@ exec_movapd l v = l .= v
 
 -- MOVUPD Move two unaligned packed double-precision floating-point values
 --   between XMM registers or between and XMM register and memory
--- MOVHPD Move high packed double-precision floating-point value to an from
---   the high quadword of an XMM register and memory
--- MOVLPD Move low packed single-precision floating-point value to an from
---   the low quadword of an XMM register and memory
+
+exec_movhpd, exec_movlpd :: forall m n n'. (IsLocationBV m n, 1 <= n')
+                         => MLocation m (BVType n)
+                         -> Value m (BVType n')
+                         -> m ()
+exec_movhpd l v = do
+  v0 <- get l
+  let dstPieces = bvVectorize n64 v0
+      srcPieces = bvVectorize n64 v
+      rPieces = [head srcPieces] ++ (drop 1 dstPieces)
+  l .= bvUnvectorize (loc_width l) rPieces
+exec_movlpd l v = do
+  v0 <- get l
+  let dstPieces = bvVectorize n64 v0
+      srcPieces = bvVectorize n64 v
+      rPieces =  (init dstPieces) ++ [last srcPieces]
+  l .= bvUnvectorize (loc_width l) rPieces
+
 -- MOVMSKPD Extract sign mask from two packed double-precision floating-point values
 
 -- | MOVSD Move scalar double-precision floating-point value between XMM
@@ -1632,8 +1693,33 @@ exec_movdqu l v = l .= v
 -- PSUBQ Subtract packed quadword integers
 -- PSHUFLW Shuffle packed low words
 -- PSHUFHW Shuffle packed high words
--- PSHUFD Shuffle packed doublewords
--- PSLLDQ Shift double quadword left logical
+
+exec_pshufd :: forall m n k. (IsLocationBV m n, 1 <= k, k <= n)
+            => MLocation m (BVType n)
+            -> Value m (BVType n)
+            -> Value m (BVType k)
+            -> m ()
+exec_pshufd l v imm
+  | Just Refl <- testEquality (bv_width imm) n8 = do
+      let order = bvVectorize (addNat n1 n1) imm
+          dstPieces = concatMap (\src128 -> map (getPiece src128) order) $ bvVectorize n128 v
+      l .= bvUnvectorize (loc_width l) dstPieces
+  | otherwise = fail "pshufd: Unknown bit width"
+  where shiftAmt :: Value m (BVType 2) -> Value m (BVType 128)
+        shiftAmt pieceID = bvMul (uext n128 pieceID) $ bvLit n128 (32 :: Int)
+
+        getPiece :: Value m (BVType 128) -> Value m (BVType 2) -> Value m (BVType 32)
+        getPiece src pieceID = bvTrunc n32 $ src `bvShr` (shiftAmt pieceID)
+
+exec_pslldq :: (IsLocationBV m n, 1 <= n', n' <= n)
+            => MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_pslldq l v = do
+  v0 <- get l
+  -- temp is 16 if v is greater than 15, otherwise v
+  let not15 = complement $ bvLit (bv_width v) (15 :: Int)
+      temp = mux (is_zero $ not15 .&. v) (uext (bv_width v0) v) (bvLit (bv_width v0) (16 :: Int))
+  l .= v0 `bvShl` (temp .* (bvLit (bv_width v0) (8 :: Int)))
+
 -- PSRLDQ Shift double quadword right logical
 -- PUNPCKHQDQ Unpack high quadwords
 -- PUNPCKLQDQ Unpack low quadwords
@@ -1657,7 +1743,8 @@ exec_movdqu l v = l .= v
 
 -- ** SSE3 Specialized 128-bit Unaligned Data Load Instruction
 
--- LDDQU Special 128-bit unaligned load designed to avoid cache line splits
+exec_lddqu :: Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_lddqu l v = l .= v
 
 -- ** SSE3 SIMD Floating-Point Packed ADD/SUB Instructions
 
@@ -1682,3 +1769,64 @@ exec_movdqu l v = l .= v
 
 -- MONITOR Sets up an address range used to monitor write-back stores
 -- MWAIT Enables a logical processor to enter into an optimized state while waiting for a write-back store to the address range set up by the MONITOR instruction
+
+
+-- * Supplemental Streaming SIMD Extensions 3 (SSSE3) Instructions
+-- ** Horizontal Addition/Subtraction
+
+-- PHADDW Adds two adjacent, signed 16-bit integers horizontally from the source and destination operands and packs the signed 16-bit results to the destination operand.
+-- PHADDSW Adds two adjacent, signed 16-bit integers horizontally from the source and destination operands and packs the signed, saturated 16-bit results to the destination operand.
+-- PHADDD Adds two adjacent, signed 32-bit integers horizontally from the source and destination operands and packs the signed 32-bit results to the destination operand.
+-- PHSUBW Performs horizontal subtraction on each adjacent pair of 16-bit signed integers by subtracting the most significant word from the least significant word of each pair in the source and destination operands. The signed 16-bit results are packed and written to the destination operand.
+-- PHSUBSW Performs horizontal subtraction on each adjacent pair of 16-bit signed integers by subtracting the most significant word from the least significant word of each pair in the source and destination operands. The signed, saturated 16-bit results are packed and written to the destination operand.
+-- PHSUBD Performs horizontal subtraction on each adjacent pair of 32-bit signed integers by subtracting the most significant doubleword from the least significant double word of each pair in the source and destination operands. The signed 32-bit results are packed and written to the destination operand.
+
+-- ** Packed Absolute Values
+
+-- PABSB Computes the absolute value of each signed byte data element.
+-- PABSW Computes the absolute value of each signed 16-bit data element.
+-- PABSD Computes the absolute value of each signed 32-bit data element.
+
+-- ** Multiply and Add Packed Signed and Unsigned Bytes
+
+-- PMADDUBSW Multiplies each unsigned byte value with the corresponding signed byte value to produce an intermediate, 16-bit signed integer. Each adjacent pair of 16-bit signed values are added horizontally. The signed, saturated 16-bit results are packed to the destination operand.
+
+-- ** Packed Multiply High with Round and Scale
+
+-- PMULHRSW Multiplies vertically each signed 16-bit integer from the destination operand with the corresponding signed 16-bit integer of the source operand, producing intermediate, signed 32-bit integers. Each intermediate 32-bit integer is truncated to the 18 most significant bits. Rounding is always performed by adding 1 to the least significant bit of the 18-bit intermediate result. The final result is obtained by selecting the 16 bits immediately to the right of the most significant bit of each 18-bit intermediate result and packed to the destination operand.
+
+-- ** Packed Shuffle Bytes
+
+-- PSHUFB Permutes each byte in place, according to a shuffle control mask. The least significant three or four bits of each shuffle control byte of the control mask form the shuffle index. The shuffle mask is unaffected. If the most significant bit (bit 7) of a shuffle control byte is set, the constant zero is written in the result byte.
+
+
+-- ** Packed Sign
+
+-- PSIGNB/W/D Negates each signed integer element of the destination operand if the sign of the corresponding data element in the source operand is less than zero.
+
+-- ** Packed Align Right
+
+exec_palignr :: forall m n k. (IsLocationBV m n, 1 <= k, k <= n)
+             => MLocation m (BVType n)
+             -> Value m (BVType n)
+             -> Value m (BVType k)
+             -> m ()
+exec_palignr l v imm = do
+  v0 <- get l
+
+  -- 1 <= n+n, given 1 <= n
+  withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
+  -- k <= (n+n), given k <= n and n <= n+n
+  withLeqProof (leqTrans k_leq_n (leqAdd (leqRefl n) n)) $ do
+
+  -- imm is # of bytes to shift, so multiply by 8 for bits to shift
+  let n_plus_n = addNat (bv_width v) (bv_width v)
+      shiftAmt = bvMul (uext n_plus_n imm) $ bvLit n_plus_n (8 :: Int)
+
+  let (_, lower) = bvSplit $ (v0 `bvCat` v) `bvShr` shiftAmt
+  l .= lower
+
+  where n :: Proxy n
+        n = Proxy
+        k_leq_n :: LeqProof k n
+        k_leq_n = LeqProof
