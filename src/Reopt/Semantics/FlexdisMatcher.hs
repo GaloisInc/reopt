@@ -413,6 +413,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
 
               -- SSE instructions
               , mk "movhlps" $ knownBinop exec_movhlps
+              , mk "movlhps" $ knownBinop exec_movlhps
               , mk "pmaxub"  $ binop exec_pmaxub
               , mk "pmaxuw"  $ binop exec_pmaxuw
               , mk "pmaxud"  $ binop exec_pmaxud

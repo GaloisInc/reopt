@@ -1385,7 +1385,14 @@ exec_movhlps l v = do
         f = fst . bvSplit
 
 -- MOVLPS Move two packed single-precision floating-point values to an from the low quadword of an XMM register and memory
--- MOVLHPS Move two packed single-precision floating-point values from the low quadword of an XMM register to the high quadword of another XMM register
+
+exec_movlhps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movlhps l v = do
+  v0 <- get l
+  l .= (f v) `bvCat` (f v0)
+  where f :: Value m (BVType 128) -> Value m (BVType 64)
+        f = snd . bvSplit
+
 -- MOVMSKPS Extract sign mask from four packed single-precision floating-point values
 -- | MOVSS Move scalar single-precision floating-point value between XMM registers or between an XMM register and memory
 exec_movss :: Semantics m => MLocation m (BVType 32) -> Value m (FloatType SingleFloat) -> m ()
