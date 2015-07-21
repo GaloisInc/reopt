@@ -449,10 +449,11 @@ uext (SubValue (n :: NatRepr n) av) w =
   -- proof: n + 1 <= u + 1 by addIsLeq
   --        u + 1 <= v     by assumption
   --        n + 1 <= v     by transitivity
-  case proof of LeqProof -> SubValue n av
+  case proof of
+    LeqProof -> SubValue n av
   where
     proof :: LeqProof (n + 1) v
-    proof = leqTrans (leqAdd LeqProof n1) (LeqProof :: LeqProof (u + 1) v)
+    proof = leqTrans (leqAdd (LeqProof :: LeqProof (n+1) u) n1) (LeqProof :: LeqProof (u + 1) v)
 uext (StackOffset _) _ = TopV
 uext SomeStackOffset _ = TopV
 uext TopV _ = TopV

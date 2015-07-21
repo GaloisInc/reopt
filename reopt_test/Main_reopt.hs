@@ -339,9 +339,9 @@ translatePtraceRegs ptraceRegs ptraceFPRegs =
     fillReg (N.X87StatusReg n) = Literal $ bitVector knownNat $ BV.extract n n swd'
     fillReg N.X87TopReg = Literal $ bitVector knownNat $
                             BV.extract (13 :: Int) 11 swd'
-    fillReg N.X87PC =  Literal $ bitVector knownNat $ bitVec 2 $ 
+    fillReg N.X87PC =  Literal $ bitVector knownNat $ bitVec 2 $
                             BV.extract (9 :: Int) 8 $ cwd'
-    fillReg N.X87RC =  Literal $ bitVector knownNat $ bitVec 2 $ 
+    fillReg N.X87RC =  Literal $ bitVector knownNat $ bitVec 2 $
                             BV.extract (11 :: Int) 10 $ cwd'
     fillReg (N.X87TagReg _) = Undefined $ BVTypeRepr  knownNat
     fillReg (N.X87FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
@@ -374,11 +374,11 @@ translatePtraceRegs ptraceRegs ptraceFPRegs =
     mkLit16 = Literal . bitVector knownNat . bitVec 16
 
     mkLit128 :: (Word64, Word64) -> MS.Value (BVType 128)
-    mkLit128 (high, low) = Literal $ bitVector knownNat $ bitVec 128 $ 
+    mkLit128 (high, low) = Literal $ bitVector knownNat $ bitVec 128 $
       ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
 
     mkLit80 :: (Word16, Word64) -> MS.Value (BVType 80)
-    mkLit80 (high, low) = Literal $ bitVector knownNat $ bitVec 80 $ 
+    mkLit80 (high, low) = Literal $ bitVector knownNat $ bitVec 80 $
       ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
     cwd' = bitVec 16 $ cwd ptraceFPRegs
     swd' = bitVec 16 $ swd ptraceFPRegs
@@ -425,7 +425,7 @@ printRegsAndInstrProcMem procMem pid = do
 
 newtype PTraceMachineState a = PTraceMachineState {unPTraceMachineState ::
    ReaderT PTraceInfo IO a}
-   deriving (Monad, MonadReader PTraceInfo, MonadIO, Functor)
+   deriving (Applicative, Monad, MonadReader PTraceInfo, MonadIO, Functor)
 
 data PTraceInfo = PTraceInfo {cpid :: CPid, memHandle :: Handle, mapHandle :: Handle}
 
@@ -475,7 +475,7 @@ runPTraceMachineState info (PTraceMachineState {unPTraceMachineState = m}) = run
 newtype MachineByteReader m a = MachineByteReader (StateT (Address8, Int) m a) deriving (MonadTrans, MonadState (Address8, Int), Functor, Applicative, Monad)
 
 
-instance (Functor m, MonadMachineState m) => 
+instance (Functor m, MonadMachineState m) =>
   ByteReader (MachineByteReader m) where
     readByte = do
       (addr, disp) <- get
@@ -489,25 +489,25 @@ runMachineByteReader (MachineByteReader s) addr = do
   (v, (_, l)) <- runStateT s (addr, 0)
   return (l,v)
 
-stepConcrete :: (Functor m, MonadMachineState m) 
+stepConcrete :: (Functor m, MonadMachineState m)
              => WriterT [String] (ConcreteState m) (Bool, InstructionInstance)
 stepConcrete = do
   rip' <- getReg N.rip
   bv <- case rip' of Literal bv -> return bv
                      Undefined _ -> fail "Undefined rip!"
-  
+
   let instrAddr = Address knownNat bv
   (w, ii) <- runMachineByteReader (disassembleInstruction defaultX64Disassembler) instrAddr
   tell [show ii]
-  case execInstruction (fromIntegral $ (nat bv) + 
-                        fromIntegral w) ii 
+  case execInstruction (fromIntegral $ (nat bv) +
+                        fromIntegral w) ii
     of Just s -> do tell [show $ ppStmts  $ execSemantics s]
                     evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
                     return (True, ii)
        Nothing -> do tell ["could not exec instruction at " ++ show rip']
                      return (False, ii)
 
-runInParallel :: ((Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) ()) 
+runInParallel :: ((Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) ())
               -> WriterT [String] (ConcreteState PTraceMachineState) ()
 runInParallel updater = do
   tell ["runInParallel stepping concrete semantics"]
@@ -546,7 +546,7 @@ instTest = do
   lift $ lift $ liftIO $ ptrace_cont pid Nothing
   (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
   if spid == pid
-    then case status 
+    then case status
       of W.Exited _ -> return ()
          W.Stopped 5 -> do
            tell ["child stopped: " ++ show status]
@@ -562,10 +562,10 @@ instTest = do
            checkAndClear stderr (execSuccess, ii)
          _ -> do
            tell ["child stopped: " ++ show status]
-           instTest 
+           instTest
     else fail "Wrong pid from waitpid!"
 
-checkAndClear :: Handle -> (Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) () 
+checkAndClear :: Handle -> (Bool, InstructionInstance) -> WriterT [String] (ConcreteState PTraceMachineState) ()
 checkAndClear out (True, ii) = do
   realRegs <- lift $ lift dumpRegs
   emuRegs <- dumpRegs
@@ -584,7 +584,7 @@ checkAndClear out (False, ii) = do
 
 compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
 compareRegs real emu =
-  catMaybes $ map (viewSome (\reg -> 
+  catMaybes $ map (viewSome (\reg ->
     let lens = register reg
         realVal = real^.lens
         emuVal = emu^.lens

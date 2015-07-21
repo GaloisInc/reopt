@@ -113,6 +113,12 @@ import           Reopt.Machine.Types
 import Flexdis86.OpTable (SizeConstraint(..))
 import Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
 
+
+-- This is an identity function intended to be a workaround for GHC bug #10507
+--   https://ghc.haskell.org/trac/ghc/ticket/10507
+nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce Refl x = x
+
 ------------------------------------------------------------------------
 -- Location
 
@@ -393,7 +399,11 @@ class IsValue (v  :: Type -> *) where
   --     sz = halfNat (bv_width v)
 
   -- | Vectorization
-  bvVectorize :: forall k n. (1 <= k) => NatRepr k -> v (BVType n) -> [v (BVType k)]
+  bvVectorize :: forall k n
+               . (1 <= k, 1 <= n)
+              => NatRepr k
+              -> v (BVType n)
+              -> [v (BVType k)]
   bvVectorize sz bv
     | Just Refl <- testEquality (bv_width bv) sz = [bv]
     | Just LeqProof <- testLeq sz (bv_width bv) =
@@ -409,7 +419,7 @@ class IsValue (v  :: Type -> *) where
           concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
           concatBVPairs _ = []
 
-  vectorize2 :: (1 <= k)
+  vectorize2 :: (1 <= k, 1 <= n)
              => NatRepr k
              -> (v (BVType k) -> v (BVType k) -> v (BVType k))
              -> v (BVType n) -> v (BVType n)
@@ -459,14 +469,16 @@ class IsValue (v  :: Type -> *) where
   uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: (1 <= m, m <= n)
+  uext :: forall m n
+        . (1 <= m, m <= n)
         => NatRepr n
         -> v (BVType m)
         -> v (BVType n)
-  uext w e =
+  uext w e | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) =
     case testStrictLeq (bv_width e) w of
-      Left LeqProof -> uext' w e
-      Right Refl -> e
+      Left LeqProof ->
+          uext' w e
+      Right r -> nonLoopingCoerce r e
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)

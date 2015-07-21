@@ -291,20 +291,14 @@ data Stmt where
 -- We collect effects in a 'Writer' and use 'State' to generate fresh
 -- names.
 newtype Semantics a =
-  Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
-  deriving (Functor, Monad, MonadState Integer, MonadWriter [Stmt])
+    Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
+  deriving (Functor, Applicative, Monad, MonadState Integer, MonadWriter [Stmt])
 
 -- | Execute a 'Semantics' computation, returning its effects.
 execSemantics :: Semantics a -> [Stmt]
 execSemantics = flip evalState 0 . execWriterT . runSemantics
 
 type instance S.Value Semantics = Expr
-
-#if !MIN_VERSION_base(4,8,0)
-instance Applicative Semantics where
-  pure = return
-  (<*>) = ap
-#endif
 
 -- | Generate a fresh variable with basename 'basename'.
 fresh :: MonadState Integer m => String -> m String
@@ -691,8 +685,8 @@ evalStmt (Get x l) =
         extendEnv x v1
 
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i = 
-        case S.loc_type l 
+      x87Cont (low, high) width i =
+        case S.loc_type l
           of BVTypeRepr n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
@@ -814,8 +808,8 @@ evalStmt (l := e) =
   let x87Cont (low, high) width i =
         regCont (low, high) width (N.X87FPUReg i)
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i = 
-        case S.loc_type l 
+      x87Cont (low, high) width i =
+        case S.loc_type l
           of BVTypeRepr n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
@@ -825,8 +819,8 @@ evalStmt (l := e) =
                      (fromIntegral top + i) `mod` 8))
                   CS.Undefined _ -> do
                     -- undefine all the floating point registers, I guess?
-                    mapM_ 
-                      (\reg -> CS.setReg reg 
+                    mapM_
+                      (\reg -> CS.setReg reg
                                (CS.Undefined $ N.registerType reg))
                       N.x87FPURegs
   S.elimLocation memCont regCont x87Cont l
