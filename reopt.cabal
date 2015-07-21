@@ -34,6 +34,7 @@ library
     Reopt
     Reopt.Analysis.AbsState
     Reopt.Analysis.Domains.StridedInterval
+    Reopt.BasicBlock.Extract
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation
     Reopt.CFG.Representation
@@ -105,6 +106,32 @@ executable reopt_test
 
   ghc-options: -Wall -fcontext-stack=50000
   ghc-prof-options: -O2 -fprof-auto-top
+
+executable radss_compare
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    bv,
+    bytestring,
+    cmdargs,
+    containers,
+    elf,
+    flexdis86,
+    lens,
+    mtl,
+    parameterized-utils >= 0.1.6,
+    unix,
+    reopt
+
+  hs-source-dirs: radss_compare
+  main-is: Main_radss_compare.hs
+
+  if flag(enable-hpc)
+    ghc-options: -fhpc
+
+  ghc-options: -Wall
+  ghc-prof-options: -O2 -fprof-auto-top
+
 
 executable ConcreteDumpInstr
   build-depends:

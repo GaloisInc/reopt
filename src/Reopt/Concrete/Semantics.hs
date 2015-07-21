@@ -34,6 +34,9 @@ module Reopt.Concrete.Semantics
        ( execSemantics
        , evalStmt
        , ppStmts
+       , Stmt(..)
+       , Expr(..)
+       , Variable(..)
        ) where
 
 #if !MIN_VERSION_base(4,8,0)
@@ -105,6 +108,13 @@ instance MapF.OrdF Variable where
       (GTF,_) -> GTF
       (EQF,o) -> fromOrdering o
 
+instance Ord (Variable tp) where
+  (Variable _ n1) `compare` (Variable _ n2) =
+    n1 `compare` n2
+
+instance Eq (Variable tp) where
+  (Variable _ n1) == (Variable _ n2) =
+    n1 == n2
 
 -- | A pure expression for isValue.
 data Expr tp where
