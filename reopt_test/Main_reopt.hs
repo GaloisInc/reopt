@@ -513,13 +513,14 @@ runInParallel updater = do
   tell ["runInParallel stepping concrete semantics"]
   (execSuccess, ii) <-  stepConcrete
   pid <-lift $ lift $ asks cpid
-  case (iiLockPrefix ii)
+  (spid, status) <- case (iiLockPrefix ii)
     of RepPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
        RepZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
        RepNZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
-       NoLockPrefix ->lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-       LockPrefix -> lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-  (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
+       NoLockPrefix ->lift $ lift $ liftIO $ do ptrace_singlestep pid Nothing
+                                                waitForRes pid
+       LockPrefix -> lift $ lift $ liftIO $ do ptrace_singlestep pid Nothing
+                                               waitForRes pid
   if spid == pid
     then case status of W.Exited _ -> return ()
                         W.Stopped 5 -> do updater (execSuccess, ii)
@@ -531,14 +532,22 @@ runInParallel updater = do
     step_to_next_inst pid = do
       X86_64 regs <- ptrace_getregs pid
       let addr = rip regs
+      ptrace_singlestep pid Nothing
       step_while_inst pid addr
     step_while_inst pid addr = do
-      ptrace_singlestep pid Nothing
-      X86_64 regs <- ptrace_getregs pid
-      let addr' = rip regs
-      if addr' == addr
-        then step_while_inst pid addr
-        else return ()
+      (spid, status) <- liftIO $ waitForRes pid
+      if spid == pid
+        then case status 
+         of W.Exited _ -> return (spid, status)
+            W.Stopped 5 -> do 
+              X86_64 regs <- ptrace_getregs pid
+              let addr' = rip regs
+              if addr' == addr
+                then do ptrace_singlestep pid Nothing
+                        step_while_inst pid addr
+                else return (spid, status)
+            _ -> return (spid, status)
+        else fail "Wrong pid from waitpid!"
 
 instTest :: WriterT [String] (ConcreteState PTraceMachineState) ()
 instTest = do
@@ -559,7 +568,13 @@ instTest = do
            put (Map.empty, translatePtraceRegs modRegs modFPRegs)
            (execSuccess, ii) <- trace "instTest stepping concrete semantics" stepConcrete
            lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-           checkAndClear stderr (execSuccess, ii)
+           (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
+           if spid == pid
+             then case status 
+               of W.Exited _ -> return ()
+                  W.Stopped 5 -> checkAndClear stderr (execSuccess, ii)
+                  _ -> tell ["Exception while executing instruction " ++ show ii]
+              else fail "Wrong pid from waitpid!"
          _ -> do
            tell ["child stopped: " ++ show status]
            instTest
