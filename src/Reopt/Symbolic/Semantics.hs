@@ -33,8 +33,11 @@ module Reopt.Symbolic.Semantics
        ( execSemantics
        , ppStmts
        , gimmeCFG
+       , gen1
+       , gen2
        , module Lang.Crucible.FunctionHandle
        , argTypes
+       , retType
        ) where
 
 #if !MIN_VERSION_base(4,8,0)
@@ -207,7 +210,7 @@ instance S.IsValue Expr where
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
-  bvBit x y = app $ R.BVTestBit x y
+  bvBit x y = app $ R.BVBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
@@ -329,12 +332,6 @@ execSemantics :: Semantics a -> [Stmt]
 execSemantics = flip evalState 0 . execWriterT . runSemantics
 
 type instance S.Value Semantics = Expr
-
-#if !MIN_VERSION_base(4,8,0)
-instance Applicative Semantics where
-  pure = return
-  (<*>) = ap
-#endif
 
 -- | Generate a fresh variable with basename 'basename'.
 fresh :: MonadState Integer m => String -> m String
@@ -550,19 +547,31 @@ type RetTy = C.BVType 32
 argTypes = C.ctxRepr :: C.CtxRepr ArgTys
 retType  = C.BVRepr n32 :: C.TypeRepr RetTy
 
-gen :: Assignment (G.Atom s) ArgTys -> G.Generator s t RetTy a
-gen assn = do
+gen1 :: Assignment (G.Atom s) ArgTys -> G.Generator s t RetTy a
+gen1 assn = do
   reg <- G.newReg $ G.AtomExpr $ assn^._1 -- assn ! base
   val <- G.readReg reg
   let foo = G.App (C.BVLit n32 11)
   G.assignReg reg (G.App $ C.BVMul n32 val foo)
   G.returnFromFunction =<< G.readReg reg
 
+gen2 :: Assignment (G.Atom s) ArgTys -> G.Generator s t RetTy a
+gen2 assn = do
+  reg <- G.newReg $ G.AtomExpr $ assn^._1 -- assn ! base
+  val <- G.readReg reg
+  let foo1 = G.App (C.BVLit n32 6)
+      foo2 = G.App (C.BVLit n32 5)
+      bar = G.App (C.BVMul n32 val foo1)
+      baz = G.App (C.BVMul n32 val foo2)
+  G.assignReg reg (G.App $ C.BVAdd n32 bar baz)
+  G.returnFromFunction =<< G.readReg reg
+
 
 gimmeCFG :: HandleAllocator s
+         -> (forall s. Assignment (G.Atom s) ArgTys -> G.Generator s [] RetTy (G.Expr s RetTy))
          -- -> ST s (G.CFG s EmptyCtx RetTy, [C.AnyCFG])
-         -> ST s (C.AnyCFG, C.TypeRepr RetTy)
-gimmeCFG halloc = do
+         -> ST s C.AnyCFG
+gimmeCFG halloc gen = do
   fnH <- mkHandle' halloc "testFun" argTypes retType
   let fnDef :: G.FunctionDef [] ArgTys RetTy
       fnDef inputs = (s, f)
@@ -570,7 +579,7 @@ gimmeCFG halloc = do
               f = gen inputs
   (g,[]) <- G.defineFunction halloc InternalPos fnH fnDef
   case toSSA g of
-    C.SomeCFG g_ssa -> return (C.AnyCFG g_ssa, retType)
+    C.SomeCFG g_ssa -> return (C.AnyCFG g_ssa)
 
 
 

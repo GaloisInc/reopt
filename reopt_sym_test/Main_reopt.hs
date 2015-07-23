@@ -63,6 +63,7 @@ import           Lang.Crucible.Simulator.MSSim as MSS
 import           Lang.Crucible.Simulator.RegMap
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
+import           Lang.Crucible.Solver.SatResult
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Utils.MonadST
@@ -216,29 +217,38 @@ mkElfMem LoadBySegment e = memoryForElfSegments e
 
 test :: Args -> IO ()
 test args = do
+  out <- openFile "/tmp/sat" WriteMode
   halloc <- liftST newHandleAllocator
-  (C.AnyCFG cfg, retType) <- liftST $ gimmeCFG halloc
-  case testEquality (C.cfgArgTypes cfg) argTypes of
-    Nothing -> error "main should take no arguments"
-    Just Refl -> case C.cfgReturnType cfg of
-      retType@(C.BVRepr w) | Just LeqProof <- isPosNat w -> do
-        withSimpleBackend' halloc $ \ctx -> do
-          let sym = ctx^.ctxSymInterface
-          rr <- MSS.run ctx defaultErrorHandler retType $ do
-            arg1 <- liftIO $ I.freshConstant sym (I.BVVarType (knownNat))
-            -- arg1 <- liftIO $ I.bvLit sym knownNat 7
-            let rMap = assignReg C.typeRepr arg1 emptyRegMap
-            callCFG cfg rMap
-          liftIO $ case rr of
-            FinishedExecution _ (TotalRes xs) -> do
-              putStrLn $ "Execution finished! " ++ show xs
-              pred <- I.bvIsNonzero sym xs
-              solver_adapter_write_smt2 cvc4Adapter stdout pred
-              -- do inps <- readIORef (SAW.saw_inputs sym)
-              --    xs' <- traverse (traverse (SAW.closeOverValue sym inps)) xs
-              --    SAW.printSAWValues xs'
-            _ -> putStrLn $ "Execution not finished? "
-      _ -> fail "main should return an integer value"
+  C.AnyCFG cfg1 <- liftST $ gimmeCFG halloc gen1
+  C.AnyCFG cfg2 <- liftST $ gimmeCFG halloc gen2
+
+  case ( testEquality (C.cfgArgTypes cfg1) argTypes
+       , testEquality (C.cfgReturnType cfg1) retType
+       , testEquality (C.cfgArgTypes cfg2) argTypes
+       , testEquality (C.cfgReturnType cfg2) retType
+       ) of
+    (Just Refl, Just Refl, Just Refl, Just Refl) ->
+      withSimpleBackend' halloc $ \ctx -> do
+        let sym = ctx^.ctxSymInterface
+        arg <- I.freshConstant sym (I.BVVarType knownNat)
+        -- Run cfg1
+        rr1 <- MSS.run ctx defaultErrorHandler retType $ do
+          let rMap = assignReg C.typeRepr arg emptyRegMap
+          callCFG cfg1 rMap
+        -- Run cfg2
+        rr2 <- MSS.run ctx defaultErrorHandler retType $ do
+          let rMap = assignReg C.typeRepr arg emptyRegMap
+          callCFG cfg2 rMap
+        -- Compare
+        case (rr1,rr2) of
+          (FinishedExecution _ (TotalRes xs1),
+           FinishedExecution _ (TotalRes xs2)) -> do
+            putStrLn $ unwords ["Execution finished!:", show (xs1,xs2)]
+            pred <- I.notPred sym =<< I.bvEq sym xs1 xs2
+            solver_adapter_write_smt2 cvc4Adapter out pred
+            putStrLn $ "Wrote to file " ++ show out
+          _ -> fail "Execution not finished"
+
 
 withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
 withSimpleBackend' halloc action =
