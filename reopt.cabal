@@ -26,7 +26,9 @@ library
     text,
     vector,
     QuickCheck >= 2.7,
-    data-binary-ieee754
+    data-binary-ieee754,
+    llvm-pretty
+
 
   hs-source-dirs: src
 
@@ -37,6 +39,7 @@ library
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation
     Reopt.CFG.InterpState
+    Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.Representation
     Reopt.Machine.StateNames
@@ -120,3 +123,19 @@ executable ConcreteDumpInstr
 
   hs-source-dirs: utils
   main-is: ConcreteDumpInstr.hs
+
+executable LLVMDumpInstr
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    binary,
+    bytestring,
+    containers,
+    flexdis86,
+    reopt,
+    mtl,
+    llvm-pretty,
+    lens
+
+  hs-source-dirs: utils
+  main-is: LLVMDumpInstr.hs
