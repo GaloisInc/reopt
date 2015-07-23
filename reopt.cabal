@@ -26,6 +26,7 @@ library
     text,
     vector,
     QuickCheck >= 2.7,
+    crucible >= 0.1,
     data-binary-ieee754
 
   hs-source-dirs: src
@@ -46,6 +47,7 @@ library
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
+    Reopt.Symbolic.Semantics
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
@@ -53,7 +55,7 @@ library
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
 
-  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -77,7 +79,7 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt_test
@@ -131,6 +133,26 @@ executable radss_compare
 
   ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
+
+
+executable reopt_sym_test
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    bytestring,
+    cmdargs,
+    containers,
+    crucible,
+    elf,
+    flexdis86,
+    lens,
+    mtl,
+    parameterized-utils >= 0.1.6,
+    unix,
+    reopt
+
+  hs-source-dirs: reopt_sym_test
+  main-is: Main_reopt.hs
 
 
 executable ConcreteDumpInstr
