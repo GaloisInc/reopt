@@ -35,6 +35,7 @@ library
     Reopt.Analysis.AbsState
     Reopt.Analysis.Domains.StridedInterval
     Reopt.BasicBlock.Extract
+    Reopt.BasicBlock.FunctionCFG
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation
     Reopt.CFG.Representation

@@ -7,17 +7,18 @@ module Main (main) where
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.State.Strict
+import           Control.Monad.State
 import qualified Data.ByteString as B
+import qualified Data.BitVector as BV
 import           Data.Elf
 import           Data.Foldable (traverse_)
 import           Data.Int
 import           Data.List
 import           Data.Map (Map)
-import qualified Data.Map as Map
+import qualified Data.Map as M
 import           Data.Maybe
 import           Data.Set (Set)
-import qualified Data.Set as Set
+import qualified Data.Set as S
 import           Data.Word
 import           Data.Version
 import           GHC.TypeLits
@@ -31,29 +32,33 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
-import           Reopt.CFG.CFGDiscovery
-import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.Monad (Type(..))
 import           Reopt.BasicBlock.Extract
+import           Reopt.BasicBlock.FunctionCFG
 import qualified Reopt.Concrete.Semantics as CS
+import           Reopt.Concrete.BitVector
+import           Reopt.Concrete.MachineState as MS
 
 ------------------------------------------------------------------------
 -- Args
 
 -- | Action to perform when running
 data Action
-   = CompareBlocks   -- ^ Compare basic blocks in two programs
+   = FindBlocks      -- ^ Display a cfg for a function
+   | CompareBlocks   -- ^ Compare basic blocks in two programs
    | ShowSingleBlock -- ^ Print out concrete semantics of a basic block
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -110,6 +115,11 @@ singleBlockFlag = flagNone [ "concrete-blocks", "b" ] upd help
   where upd  = reoptAction .~ ShowSingleBlock
         help = "Print out concrete semantics for basic blocks of executable."
 
+functionCFGFlag :: Flag Args
+functionCFGFlag = flagNone [ "function-cfg", "f" ] upd help
+  where upd  = reoptAction .~ FindBlocks
+        help = "Print out control flow graph of a function."
+
 compareBlocksFlag :: Flag Args
 compareBlocksFlag = flagNone [ "compare-blocks", "c" ] upd help
   where upd  = reoptAction .~ CompareBlocks
@@ -146,6 +156,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , sectionFlag
                 , singleBlockFlag
                 , compareBlocksFlag
+                , functionCFGFlag
                 , addr1Flag
                 , addr2Flag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
@@ -216,28 +227,66 @@ readStaticElf path = do
 
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start = 
-  case runMemoryByteReader pf_x mem start $ extractBlock start of
+  case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> putStrLn $ show err
     Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
                                       ++ showHex err ""
-    Right (Right (nexts, stmts), _) -> do
+    Right (Right (nexts, ret, stmts), _) -> do
       putStrLn $ show nexts
+      putStrLn $ show ret
       putStrLn $ show $ CS.ppStmts stmts
+
 
 compareBlocks :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
 compareBlocks mem1 start1 mem2 start2 = do
-  (nexts1, stmts1) <- getBlock mem1 start1
-  (nexts2, stmts2) <- getBlock mem2 start2
-  putStrLn $ show nexts1
-  putStrLn $ show $ CS.ppStmts stmts1
-  putStrLn $ show nexts2
-  putStrLn $ show $ CS.ppStmts stmts2
+  (nexts1, ret1, stmts1) <- getBlock mem1 start1
+  (nexts2, ret2, stmts2) <- getBlock mem2 start2
+  let (_, (cmem1, regs1)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts1) MapF.empty) M.empty emptyX86State 
+  let (_, (cmem2, regs2)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts2) MapF.empty) M.empty emptyX86State
+  let regCmp = compareRegs regs1 regs2
+  let memCmp1 = M.foldrWithKey (\k v l -> case M.lookup k cmem2 of
+                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++ 
+                                                                 ":   1: " ++ show v ++ "   2:" ++ show v') : l
+                              Nothing -> ("1 had a value at address " ++ show k ++ " but 2 did not") : l)
+                  [] cmem1
+  let memCmp2 = M.foldrWithKey (\k v l -> case M.lookup k cmem1 of
+                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++ 
+                                                                 ":   1: " ++ show v' ++ "   2:" ++ show v) : l
+                              Nothing -> ("2 had a value at address " ++ show k ++ " but 1 did not") : l)
+                  [] cmem1
+  let allCmp = regCmp ++ memCmp1 ++ memCmp2
+  case allCmp of [] -> putStrLn "all matched!"
+                 _ -> mapM_ putStrLn allCmp
+  
   where
-  getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start of
+  getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> fail $ show err
     Right (Left err, _) -> fail $ "Could not disassemble instruction at 0x" ++
                                     showHex err ""
-    Right (Right (nexts, stmts), _) -> return (nexts, stmts)
+    Right (Right (nexts, ret, stmts), _) -> return (nexts, ret, stmts)
+  emptyX86State = mkX86State (\reg -> 
+    Literal $ bitVector (N.registerWidth reg) 
+      (BV.bitVec (fromIntegral $ natValue $ N.registerWidth reg) (0 :: Integer)))
+
+compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
+compareRegs rs1 rs2 =
+  catMaybes $ map (viewSome (\reg ->
+    let lens = register reg
+        r1Val = rs1^.lens
+        r2Val = rs2^.lens
+    in if r1Val `equalOrUndef` r2Val
+        then Nothing
+        else Just $ show reg ++ " did not match.  1: " ++ show r1Val ++ "   2:" ++ show r2Val)) 
+    x86StateRegisters
+
+extractCFG :: Memory Word64 -> Word64 -> IO ()
+extractCFG mem entry =
+  case findBlocks mem entry of 
+    Left err -> putStrLn err
+    Right cfg -> M.foldlWithKey 
+      (\ m addr (Block _ t) -> do m; putStrLn $ "0x" ++ showHex addr ": " ++ show t) 
+      (return ()) 
+      cfg
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
 mkElfMem LoadBySection e = memoryForElfSections e
@@ -255,6 +304,15 @@ main = do
         [path] -> readStaticElf path
       mem <- mkElfMem (args^.loadStyle) e
       showSingleBlock mem (elfEntry e)
+    FindBlocks -> do
+      e <- case args^.programPaths of
+        [] -> fail "A file name is required\n"
+        _ : _ : _ -> fail "Exactly one file name for function cfg"
+        [path] -> readStaticElf path
+      mem <- mkElfMem (args^.loadStyle) e
+      let a = case args^.addr1 of 0 -> elfEntry e
+                                  a' -> a'
+      extractCFG mem a
     CompareBlocks -> do
       (e1, e2) <- case args^.programPaths of
         [] -> fail "Two file names are required\n"

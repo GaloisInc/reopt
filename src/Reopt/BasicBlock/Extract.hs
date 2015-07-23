@@ -13,37 +13,44 @@ import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Machine.StateNames as N
 import           Data.Word
 import           Data.Parameterized.NatRepr
-import qualified Data.Map as M
 import qualified Data.List as L
+import qualified Data.Map as M
 import           Data.Map(Map)
+import qualified Data.Set as S
+import           Data.Set(Set)
 import           Flexdis86 as F
 
 data Next =
     Absolute Word64
-  | Indirect (N.RegisterName 'N.GP)
-  | Ret
+  | NIndirect (N.RegisterName 'N.GP)
+  | NFallthrough Word64
+  | NRet
   deriving Show
 
 instance Eq Next where
   Absolute n == Absolute m = n == m
-  Indirect (N.GPReg n) == Indirect (N.GPReg m) = n == m
-  Ret == Ret = True
+  NIndirect (N.GPReg n) == NIndirect (N.GPReg m) = n == m
+  NFallthrough n == NFallthrough m = n == m
+  NRet == NRet = True
 
 
-extractBlock :: (F.ByteReader r) => Word64 -> r (Either Word64 ([Next], [CS.Stmt]))
-extractBlock startAddr =
-  extractBlockInner startAddr []
-extractBlockInner startAddr prevStmts =
+extractBlock :: (F.ByteReader r) => Word64 -> Set Word64 -> r (Either Word64 ([Next], Maybe Word64, [CS.Stmt]))
+extractBlock startAddr breakAddrs =
+  extractBlockInner startAddr breakAddrs []
+extractBlockInner startAddr breakAddrs prevStmts =
   do (ii, w) <- runStateT (unWrappedByteReader $ disassembleInstruction defaultX64Disassembler) 0
      case execInstruction (startAddr + w) ii
        of Just m | stmts <- execSemantics m ->
-            case nexts M.empty [Absolute startAddr] stmts
-              of [Absolute addr] -> 
-                   if addr == startAddr + w 
-                     then extractBlockInner addr $ prevStmts ++ stmts
-                     else return $ Right ([Absolute addr], prevStmts ++ stmts)
-                 [] -> return $ Left startAddr
-                 addrs -> return$ Right (addrs, prevStmts ++ stmts)
+            case nexts M.empty [Absolute startAddr] Nothing stmts
+              of ([Absolute addr], ret)
+                   | addr == startAddr + w && S.member addr breakAddrs ->
+                        return $ Right ([NFallthrough addr], Nothing, prevStmts ++ stmts)
+                   | addr == startAddr + w ->
+                       extractBlockInner addr breakAddrs $ prevStmts ++ stmts
+                   | otherwise ->
+                       return $ Right ([Absolute addr], ret, prevStmts ++ stmts)
+                 ([], _) -> return $ Left startAddr
+                 (addrs, _) -> return$ Right (addrs, Nothing, prevStmts ++ stmts)
           Nothing -> return $ Left startAddr
 
 newtype WrappedByteReader r a = WrappedByteReader 
@@ -56,19 +63,27 @@ instance ByteReader r => ByteReader (WrappedByteReader r) where
     lift readByte}
 
 
-nexts :: Map (Variable (S.BVType 64)) [Next] -> [Next] -> [CS.Stmt] ->  [Next]
-nexts _ addrs [] = addrs
-nexts vars addrs (((S.Register N.IPReg) := expr) : rest) =
-  nexts vars (staticExpr vars expr) rest
-nexts vars addrs ((Ifte_ expr as bs) : rest) =
-  nexts vars (L.union (nexts vars addrs as) (nexts vars addrs bs)) rest
-nexts vars addrs ((Get v (S.Register N.IPReg)) : rest) =
-  nexts (M.insert v addrs vars) addrs rest
-nexts vars addrs ((Get v (S.Register (N.GPReg i))) : rest) =
-  nexts (M.insert v [Indirect (N.GPReg i)] vars) addrs rest
-nexts vars addrs ((Get v (S.MemoryAddr (VarExpr _ ) (S.BVTypeRepr n))) : rest)
-  | Just Refl <- testEquality n S.n64 = nexts (M.insert v [Ret] vars) addrs rest
-nexts vars addrs (_ : rest) = nexts vars addrs rest
+nexts :: Map (Variable (S.BVType 64)) [Next] -> [Next] -> Maybe Word64 ->
+  [CS.Stmt] -> ([Next], Maybe Word64)
+nexts _ addrs ret [] = (addrs, ret)
+nexts vars addrs ret (((S.Register N.IPReg) := expr) : rest) =
+  nexts vars (staticExpr vars expr) ret rest
+nexts vars addrs ret ((Ifte_ expr as bs) : rest) =
+  let (aAddrs, _) = nexts vars addrs ret as
+      (bAddrs, _) = nexts vars addrs ret bs
+  in nexts vars (L.union aAddrs bAddrs) ret rest
+nexts vars addrs ret ((Get v (S.Register N.IPReg)) : rest) =
+  nexts (M.insert v addrs vars) addrs ret rest
+nexts vars addrs ret ((Get v (S.Register (N.GPReg i))) : rest) =
+  nexts (M.insert v [NIndirect (N.GPReg i)] vars) addrs ret rest
+nexts vars addrs ret ((Get v (S.MemoryAddr (VarExpr _ ) (S.BVTypeRepr n))) : rest)
+  | Just Refl <- testEquality n S.n64 = 
+      nexts (M.insert v [NRet] vars) addrs ret rest
+nexts vars addrs ret ((S.MemoryAddr _ (S.BVTypeRepr n) := expr) : rest)
+  | Just Refl <- testEquality n S.n64
+  , [Absolute addr] <- staticExpr vars expr = 
+      nexts vars addrs (Just addr) rest
+nexts vars addrs ret (_ : rest) = nexts vars addrs ret rest
 
 staticExpr :: Map (Variable (S.BVType 64)) [Next] -> Expr (S.BVType 64) -> [Next]
 staticExpr _ (LitExpr nr i) = [Absolute $ fromIntegral i]
