@@ -499,7 +499,7 @@ bvsub :: Memory Word64
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
 bvsub mem w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
-    | all (isCodePointerOrNull mem) vals = CodePointers (Set.fromList vals)
+    | all (isCodeAddrOrNull mem) vals = CodePointers (Set.fromList vals)
     | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
     | otherwise = error "Losing code pointers due to bvsub."
       -- TODO: Fix this.
@@ -568,16 +568,16 @@ instance PrettyRegValue AbsValue where
   ppValueEq _ TopV = Nothing
   ppValueEq r v = Just (text (show r) <+> text "=" <+> pretty v)
 
--- | Indicates if address is a code pointer.
-isCodePointerOrNull :: Memory Word64 -> Word64 -> Bool
-isCodePointerOrNull _ 0 = True
-isCodePointerOrNull mem a = isCodePointer mem a
+-- | Indicates if address is an address in code segment or null.
+isCodeAddrOrNull :: Memory Word64 -> Word64 -> Bool
+isCodeAddrOrNull _ 0 = True
+isCodeAddrOrNull mem a = isCodeAddr mem a
 
 abstractSingleton :: Memory Word64 -> NatRepr n -> Integer -> AbsValue (BVType n)
 abstractSingleton mem w i
   | Just Refl <- testEquality w n64
   , 0 <= i && i <= maxUnsigned w
-  , isCodePointerOrNull mem (fromIntegral i) =
+  , isCodeAddrOrNull mem (fromIntegral i) =
     CodePointers (Set.singleton (fromIntegral i))
   | 0 <= i && i <= maxUnsigned w = FinSet (Set.singleton i)
   | otherwise = error $ "abstractSingleton given bad value: " ++ show i ++ " " ++ show w
@@ -926,7 +926,7 @@ shiftSomeOffset f = mkAbsBlockState transferReg Map.empty
 -- | Update the block state to point to a specific IP address.
 setAbsIP :: Memory Word64 -> CodeAddr -> AbsBlockState -> AbsBlockState
 setAbsIP mem a b
-  | not (isCodePointerOrNull mem a) =
+  | not (isCodeAddrOrNull mem a) =
     error "setAbsIP given address that is not a code pointer."
     -- Check to avoid reassigning next IP if it is not needed.
   | CodePointers s <- b^.absX86State^.curIP

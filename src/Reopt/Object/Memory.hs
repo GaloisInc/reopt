@@ -12,13 +12,12 @@ module Reopt.Object.Memory
   , memAsWord64le_withAddr
   , executableSegments
   , readonlySegments
+  , addrPermissions
   , addrHasPermissions
-  , isCodePointer
-  , isRODataPointer
+  , isCodeAddr
+  , isReadonlyAddr
   , findSegment
   , MemSegment(..)
-  , isExecutable
-  , isReadonly
   , ppMemSegment
   , segmentAsWord64le
   , segmentSize
@@ -33,10 +32,13 @@ module Reopt.Object.Memory
 
     -- * Re-exports
   , Elf.ElfSegmentFlags
+  , Elf.pf_none
   , Elf.pf_r
   , Elf.pf_w
   , Elf.pf_x
   , Elf.hasPermissions
+  , isExecutable
+  , isReadonly
   ) where
 
 import           Control.Applicative
@@ -47,6 +49,7 @@ import           Data.Bits
 import qualified Data.ByteString as BS
 import           Data.Elf as Elf
   ( ElfSegmentFlags
+  , pf_none
   , pf_r
   , pf_w
   , pf_x
@@ -100,14 +103,12 @@ data MemSegment w = MemSegment { memBase  :: !w
                                }
 
 -- | Return true if the segment is executable.
-isExecutable :: MemSegment w -> Bool
-isExecutable s = (memFlags s `hasPermissions` pf_x)
+isExecutable :: ElfSegmentFlags -> Bool
+isExecutable f = f `hasPermissions` pf_x
 
 -- | Return true if segment is read-only.
-isReadonly :: MemSegment w -> Bool
-isReadonly s = memFlags s `hasPermissions` pf_r
-       && not (memFlags s `hasPermissions` pf_w)
-
+isReadonly :: ElfSegmentFlags -> Bool
+isReadonly f = f .&. (pf_r .|. pf_w) == pf_r
 
 instance (Integral w, Show w) => Show (MemSegment w) where
   show = show . ppMemSegment
@@ -177,10 +178,10 @@ memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
 
 -- | Get executable segments.
 executableSegments :: Memory w -> [MemSegment w]
-executableSegments = filter isExecutable . memSegments
+executableSegments = filter (isExecutable . memFlags) . memSegments
 
 readonlySegments :: Memory w -> [MemSegment w]
-readonlySegments = filter isReadonly . memSegments
+readonlySegments = filter (isReadonly . memFlags) . memSegments
 
 -- | Insert segment into memory or fail if this overlaps with another
 -- segment in memory.
@@ -200,18 +201,19 @@ findSegment :: Ord w => w -> Memory w -> Maybe (MemSegment w)
 findSegment w (Memory m) = snd <$> listToMaybe (IMap.search w m)
 
 -- | Return true if address satisfies permissions check.
+addrPermissions :: Ord w => w -> Memory w -> ElfSegmentFlags
+addrPermissions w m = maybe pf_none memFlags (findSegment w m)
+
+-- | Return true if address satisfies permissions check.
 addrHasPermissions :: Ord w => w -> ElfSegmentFlags -> Memory w -> Bool
-addrHasPermissions w req m = fromMaybe False $ do
-  s <- findSegment w m
-  return (memFlags s `hasPermissions` req)
+addrHasPermissions w req m = addrPermissions w m `hasPermissions` req
 
 -- | Indicates if address is a code pointer.
-isCodePointer :: Memory Word64 -> Word64 -> Bool
-isCodePointer mem val = addrHasPermissions val pf_x mem
+isCodeAddr :: Memory Word64 -> Word64 -> Bool
+isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
 
-isRODataPointer :: Memory Word64 -> Word64 -> Bool
-isRODataPointer mem val = addrHasPermissions val pf_r mem
-                          && not (addrHasPermissions val pf_w mem)
+isReadonlyAddr :: Memory Word64 -> Word64 -> Bool
+isReadonlyAddr mem val = addrPermissions val mem .&. (pf_r .|. pf_w) == pf_r
 
 -- | Attempt to read a contiguous string of bytes from a single segment.
 memSubsegment :: Integral w
