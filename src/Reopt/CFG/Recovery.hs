@@ -116,11 +116,11 @@ data FnValue (tp :: Type) where
   -- Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
   -- The entry pointer to a function.
-  FnEntryValue :: Word64 -> FnValue (BVType 64)
+  FnFunctionEntryValue :: Word64 -> FnValue (BVType 64)
   -- A pointer to an internal block.
   FnBlockValue :: Word64 -> FnValue (BVType 64)
-  -- The address at the implicit alloca that occurs at the start of a block.
-  FnBlockAllocAddr :: Word64 -> FnValue (BVType 64)
+  -- This register comes from an integer argument.
+  FnIntArg :: Int -> FnValue (BVType 64)
 
 
 instance Pretty (FnValue tp) where
@@ -190,15 +190,18 @@ stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
 -- RecoverState
 
 data FnRegValue cl where
-  -- | This is a callee saved register.
+  -- This is a callee saved register.
   CalleeSaved :: N.RegisterName cl -> FnRegValue cl
-  -- | This register comes from an integer argument.
-  FnIntArg :: Int -> FnRegValue 'N.GP
+  -- A value assigned to a register
+  FnRegValue :: !(FnValue (BVType (N.RegisterClassBits cl))) -> FnRegValue cl
 
 data RecoverState = RS { _rsInterp :: !InterpState
                        , _rsBlocks :: !(Map BlockLabel FnBlock)
+                         -- | Labels to explore next.
                        , _rsFrontier :: !(Set BlockLabel)
                        , _rsNextAssignId :: !AssignId
+                         -- | Map code addresses and registers to function value at start of
+                         -- execution.
                        , _rsRegMap    :: !(Map CodeAddr (MapF N.RegisterName FnRegValue))
                        , _rsStackMap  :: !(Map CodeAddr FnStack)
 
@@ -288,12 +291,12 @@ lookupInitialReg reg = do
 recoverFunction :: InterpState -> CodeAddr -> Either String Function
 recoverFunction s a = do
   let initRegs = MapF.empty
-               & MapF.insert N.rdi (FnIntArg 0)
-               & MapF.insert N.rsi (FnIntArg 1)
-               & MapF.insert N.rdx (FnIntArg 2)
-               & MapF.insert N.rcx (FnIntArg 3)
-               & MapF.insert N.r8  (FnIntArg 4)
-               & MapF.insert N.r9  (FnIntArg 5)
+               & MapF.insert N.rdi (FnRegValue (FnIntArg 0))
+               & MapF.insert N.rsi (FnRegValue (FnIntArg 1))
+               & MapF.insert N.rdx (FnRegValue (FnIntArg 2))
+               & MapF.insert N.rcx (FnRegValue (FnIntArg 3))
+               & MapF.insert N.r8  (FnRegValue (FnIntArg 4))
+               & MapF.insert N.r9  (FnRegValue (FnIntArg 5))
                & MapF.insert N.rbx (CalleeSaved N.rbx)
                & MapF.insert N.r12 (CalleeSaved N.r12)
                & MapF.insert N.r13 (CalleeSaved N.r13)
@@ -373,7 +376,7 @@ recoverStmt s =
           rsAssignMap %= MapF.insert assign fnAssign
           addFnStmt $ FnAssignStmt fnAssign
         Read (MemLoc addr tp) -> do
-          fn_addr <- recoverValue addr
+          fn_addr <- recoverAddr addr
           fnAssign <- mkFnAssign (FnReadMem fn_addr tp)
           rsAssignMap %= MapF.insert assign fnAssign
           addFnStmt $ FnAssignStmt fnAssign
@@ -390,11 +393,11 @@ recoverStmt s =
             return ()
           _ -> do
             let r_addr = stackOffsetAddr stk int_addr_off
-            r_val  <- recoverValue val
+            r_val  <- recoverValue "write_val" val
             addFnStmt $ FnWriteMem r_addr r_val
       | otherwise -> do
-        r_addr <- recoverValue addr
-        r_val  <- recoverValue val
+        r_addr <- recoverAddr addr
+        r_val  <- recoverValue "write_val" val
         addFnStmt $ FnWriteMem r_addr r_val
     Comment msg -> do
       addFnStmt $ FnComment msg
@@ -405,18 +408,25 @@ recoverTermStmt :: TermStmt -> Recover FnTermStmt
 recoverTermStmt s =
   case s of
     Branch c x y -> do
-      cv <- recoverValue c
+      cv <- recoverValue "branch_cond" c
       addFrontier x
       addFrontier y
       return $! FnBranch cv x y
     _ -> trace ("recoverTermStmt undefined for " ++ show (pretty s)) $ do
       return $ FnTermStmtUndefined
 
-recoverValue :: Value tp -> Recover (FnValue tp)
-recoverValue v = do
+recoverAddr :: Value (BVType 64) -> Recover (FnValue (BVType 64))
+recoverAddr v = recoverValue "addr" v
+
+recoverValue :: String -> Value tp -> Recover (FnValue tp)
+recoverValue nm v = do
   interpState <- use rsInterp
   mem <- uses rsInterp memory
   case v of
+    _ | Just int_addr_off <- asStackAddrOffset v -> do
+      trace ("recoverValue encounted stack offset: " ++ show int_addr_off) $ do
+      return $ FnValueUnsupported
+
     BVValue w i
       | Just Refl <- testEquality w n64
       , let addr = fromInteger i
@@ -424,7 +434,7 @@ recoverValue v = do
         case () of
           _ | memFlags seg `hasPermissions` pf_x
             , Set.member addr (interpState^.functionEntries) -> do
-              return $ FnEntryValue addr
+              return $ FnFunctionEntryValue addr
 
             | memFlags seg `hasPermissions` pf_x
             , Map.member addr (interpState^.blocks) -> do
@@ -435,7 +445,7 @@ recoverValue v = do
               return $ FnBlockValue addr
 
             | otherwise -> do
-              trace ("recoverValue given segment pointer: " ++ showHex i "") $ do
+              trace ("recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
                 return $ FnValueUnsupported
       | otherwise -> do
         return $ FnConstantValue w i
@@ -448,7 +458,7 @@ recoverValue v = do
         Nothing -> do
           case assignRhs assign of
             EvalApp app -> do
-              app' <- traverseApp recoverValue app
+              app' <- traverseApp (recoverValue ('r':nm)) app
               fnAssign <- mkFnAssign (FnEvalApp app')
               rsAssignMap %= MapF.insert assign fnAssign
               return $! FnAssignedValue fnAssign
@@ -461,6 +471,8 @@ recoverValue v = do
         Just (CalleeSaved _) -> do
           trace ("recoverValue unexpectedly encountered callee saved register: " ++ show reg) $ do
           return $ FnValueUnsupported
+        Just (FnRegValue v) -> do
+          return v
         _ ->
-          trace ("recoverValue does not yet support initial value " ++ show reg) $
+          trace ("recoverValue " ++ nm ++ " does not yet support initial value " ++ show reg) $
             return $ FnValueUnsupported

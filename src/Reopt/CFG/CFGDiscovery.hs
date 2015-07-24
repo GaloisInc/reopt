@@ -33,6 +33,7 @@ import           Control.Lens
 import           Control.Monad.Error
 import           Control.Monad.Identity
 import           Control.Monad.State.Strict
+import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as Fold
 import           Data.Int
@@ -93,11 +94,11 @@ doMaybe m n j = do
 -- | Get code pointers out of a abstrcct value.
 concretizeAbsCodePointers :: Memory Word64 -> AbsValue (BVType 64) -> [CodeAddr]
 concretizeAbsCodePointers mem (FinSet s) =
-  filter (isCodePointer mem) $ fromInteger <$> Set.toList s
+  filter (isCodeAddr mem) $ fromInteger <$> Set.toList s
 concretizeAbsCodePointers mem (CodePointers s) =
-  filter (isCodePointer mem) $ Set.toList s
+  filter (isCodeAddr mem) $ Set.toList s
 concretizeAbsCodePointers mem (StridedInterval s) =
-  filter (isCodePointer mem) $ fromInteger <$> SI.toList s
+  filter (isCodeAddr mem) $ fromInteger <$> SI.toList s
 concretizeAbsCodePointers mem _ = []
 
 ------------------------------------------------------------------------
@@ -229,25 +230,30 @@ defBlockState mem addr =
       & absX86State . register N.rsp .~ concreteStackOffset 0
       & absX86State . x87TopReg .~ abstractSingleton mem knownNat 7
 
+newtype HexWord = HexWord Word64
 
+instance Show HexWord where
+  showsPrec _ (HexWord w) = showHex w
+
+showHexList :: [Word64] -> String
+showHexList l = show (fmap HexWord l)
+
+-- | Insert keys into map with given value, keeping old value if they are alread there.
+insertKeysIntoMap :: (Ord k, Foldable t) => t k -> a -> Map k a -> Map k a
+insertKeysIntoMap kl v m0 = Fold.foldl' (\m k -> Map.insertWith (const id) k v m) m0 kl
 
 -- | Mark a escaped code pointer as a function entry.
 recordEscapedCodePointer :: Word64 -> FrontierReason -> InterpState -> InterpState
 recordEscapedCodePointer addr rsn s
   | addr == 0 = s
   | Set.member addr (s^.functionEntries) = s
-  | otherwise =
+  | otherwise = trace ("Found escaped function entry " ++ showHex addr ".") $
      let mem = memory s
+         prev = fromMaybe Set.empty $ Map.lookup addr (s^.reverseEdges)
          s' = s & functionEntries %~ Set.insert addr
                 & absState        %~ Map.insert addr (defBlockState mem addr)
-                & frontier        %~ Map.insert addr rsn
-         new_addrs = case Map.lookup addr (s^.absState) of
-                       Nothing -> []
-                       Just abst -> do
-                         let reg_ptrs = fnRegCodePointers (abst^.absX86State)
-                             stk_ptr = stackCodePointers (abst^.startAbsStack)
-                          in reg_ptrs ++ stk_ptr
-      in recordEscapedCodePointers new_addrs rsn s'
+                & frontier        %~ Map.insert addr rsn . insertKeysIntoMap prev rsn
+      in s'
 
 
 recordEscapedCodePointers :: [Word64] -> FrontierReason -> InterpState -> InterpState
@@ -255,13 +261,14 @@ recordEscapedCodePointers addrs rsn s0 =
   foldl' (\s v -> recordEscapedCodePointer v rsn s) s0 addrs
 
 recordWriteStmt :: BlockLabel -> AbsRegs -> Stmt -> State InterpState ()
-recordWriteStmt lbl regs (Write (MemLoc _addr _) v)
+recordWriteStmt lbl regs (Write (MemLoc addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v
   , Just sz <- size av
     -- FIXME: GIANT HACK (avoids explosion in concretize)
   , sz < 100 = do
     mem <- gets memory
+    trace ("Found escaped code pointers via write of " ++ show addr ++ " to memory.") $ do
     let vs2 = concretizeAbsCodePointers mem av
     modify $ recordEscapedCodePointers vs2 (InWrite lbl)
 recordWriteStmt _ _ _ = return ()
@@ -469,14 +476,14 @@ isWriteTo (Write (MemLoc a _) val) expected tp
     Just val
 isWriteTo _ _ _ = Nothing
 
--- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
+-- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
 -- a single address to a marked executable in @mem@ to @addr@.
-isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodePointerWriteTo mem s sp
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodePointer mem (fromInteger val)
+  , isCodeAddr mem (fromInteger val)
   = Just (fromInteger val)
-isCodePointerWriteTo _ _ _ = Nothing
+isCodeAddrWriteTo _ _ _ = Nothing
 
 -- -----------------------------------------------------------------------------
 -- Refining an abstract state based upon a condition
@@ -621,7 +628,7 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
           case Seq.viewr stmts of
             Seq.EmptyR -> Nothing
             prev Seq.:> stmt
-              | Just ret <- isCodePointerWriteTo mem stmt next_sp ->
+              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
                 Just (prev, ret)
               | Write{} <- stmt -> Nothing
               | otherwise -> go prev
@@ -657,52 +664,57 @@ rangeInReadonlySegment :: Word64 -- ^ Start of range
 rangeInReadonlySegment base end mem =
   case findSegment base mem of
     Nothing -> False
-    Just seg -> isReadonly seg
+    Just seg -> isReadonly (memFlags seg)
              && end <= memBase seg + segmentSize seg
+
+-- See if expression matches form expected by jump tables
+matchJumpTable :: Memory Word64
+               -> Value (BVType 64) -- ^ Memory address that IP is read from.
+               -> Maybe (Word64, Value (BVType 64))
+matchJumpTable mem read_addr
+    -- Turn the read address into base + offset.
+  | Just (BVAdd _ offset (BVValue _ base)) <- trace "matchJumpTable0" $ valueAsApp read_addr
+    -- Turn the offset into a multiple by an index.
+  , Just (BVMul _ (BVValue _ 8) index) <- trace "matchJumpTable1" $ valueAsApp offset
+  , isReadonlyAddr mem (fromInteger base) = do
+    Just (fromInteger base, index)
+matchJumpTable _ _ =
+    Nothing
+
+-- looks for jump tables
+getJumpTableBounds :: Memory Word64 -- ^ State of memory
+                   -> AbsRegs       -- ^ Current processor registers.
+                   -> Word64
+                   -> Value (BVType 64) -- ^ Index in jump table
+                   -> Maybe (SI.StridedInterval (BVType 64))
+getJumpTableBounds mem regs base index
+    -- Get range for the index.
+  | let abs_value = transferValue regs index
+  , StridedInterval index_interval  <- trace ("getJumpTable2 " ++ show index ++ " " ++ show abs_value) $ abs_value
+    -- Check that relevant interval is completely contained within a read-only
+    -- read only range in the memory.
+  , SI.StridedInterval _ index_base index_range index_stride <-
+        trace "getJumpTable3" $ index_interval
+  , index_end <- index_base + index_range * index_stride
+  , read_end <- toInteger base + 8 * index_end
+  , rangeInReadonlySegment base (fromInteger read_end) mem
+
+  , base_interval <- trace "getJumpTable4" $  SI.singleton (BVTypeRepr n64) (toInteger base)
+  , offset_interval  <- SI.bvmul n64 (SI.singleton (BVTypeRepr n64) 8) index_interval
+  , read_interval <- SI.bvadd n64 base_interval offset_interval =
+    -- Get the addresses associated.
+    trace ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
+      Just $! read_interval
+getJumpTableBounds _ _ _ _ = Nothing
 
 -- looks for jump tables
 getJumpTable :: Memory Word64 -- ^ State of memory
              -> AbsRegs       -- ^ Current processor registers.
              -> Value (BVType 64) -- ^ Memory address that IP is read from.
              -> Maybe (SI.StridedInterval (BVType 64))
-getJumpTable mem regs read_addr
-    -- Turn the read address into base + offset.
-  | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp read_addr
-    -- Turn the offset into a multiple by an index.
-  , Just (BVMul _ (BVValue _ 8) index) <- valueAsApp offset
-    -- Get range for the index.
-  , StridedInterval index_interval  <- transferValue regs index
-    -- Check that relevant interval is completely contained within a read-only
-    -- read only range in the memory.
-  , SI.StridedInterval _ index_base index_range index_stride <- index_interval
-  , index_end <- index_base + index_range * index_stride
-  , read_end <- base + 8 * index_end
-  , rangeInReadonlySegment (fromInteger base) (fromInteger read_end) mem
-
-  , base_interval <- SI.singleton (BVTypeRepr n64) base
-  , offset_interval  <- SI.bvmul n64 (SI.singleton (BVTypeRepr n64) 8) index_interval
-  , read_interval <- SI.bvadd n64 base_interval offset_interval =
-    -- Get the addresses associated.
-    trace ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
-      Just $! read_interval
-      {-
-getJumpTable mem regs read_addr
-    -- Turn the read address into base + offset.
-  | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp read_addr
-    -- Turn the offset into a multiple by an index.
-  , Just (BVMul _ (BVValue _ stride) index) <- valueAsApp offset
-    -- Get range for the index.
-  , StridedInterval index_interval  <- transferValue regs index
-    -- Check that relevant interval is completely contained within a read-only
-    -- read only range in the memory.
-  , base_interval <- SI.singleton (BVTypeRepr n64) base
-  , offset_interval <- SI.bvmul n64 (SI.singleton (BVTypeRepr n64) stride) index_interval
-  , read_interval <- SI.bvadd n64 base_interval offset_interval
-  , intervalInReadonlyMem mem read_interval
-    -- Check stride is large enough.
-  , stride >= 8 = trace ("Indexed table " ++ show read_addr) $
-    -- Get the addresses associated.
-    Just $! read_interval-}
+getJumpTable mem regs read_addr = do
+  (base, index) <- matchJumpTable mem read_addr
+  getJumpTableBounds mem regs base index
 getJumpTable _mem _regs _ = Nothing
 
   -- -- basically, (8 * x) + addr
@@ -812,18 +824,28 @@ transferBlock b regs = do
               -- Merge block state.
               mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
+
           -- Block ends with what looks like a jump table.
-          | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- s'^.curIP
-          , Just read_interval <- getJumpTable mem regs' ptr -> do
+          | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- trace "try jump table" $ s'^.curIP
+            -- Attempt to compute interval of addresses interval is over.
+          , Just (base, index) <- matchJumpTable mem ptr -> do
+            trace "Found jump table" $ do
 
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
+
+
+            -- Compute jump table bounds
+            let mread_interval = getJumpTableBounds mem regs' base index
+            -- Compute end address.
+            let end_addr =
+                  case mread_interval of
+                    Just (SI.StridedInterval _ s_base n stride) -> Just $! fromInteger (s_base + n * stride)
+                    _ -> Nothing
             -- Record memory as in a jump table.
-            case read_interval of
-              SI.StridedInterval _ base n stride -> do
-                jumpTableAddrs %= Map.insert (fromInteger base) (fromInteger (base + n * stride))
-              _ -> return ()
+            globalDataMap %= Map.insert base (JumpTable end_addr)
+
             -- Read addresses in interval.
-            case traverse (memLookupWord64 mem pf_r . fromInteger) (SI.toList read_interval) of
+            case traverse (memLookupWord64 mem pf_r . fromInteger) (maybe [] SI.toList mread_interval) of
               Left e -> error "getJumpTable returned inconsistent value."
               Right ips -> do
                 -- Look for new ips.
@@ -855,7 +877,6 @@ transfer rsn addr = trace ("transfer " ++ showHex addr ".") $ do
     trace ("In function at " ++ showHex fn_addr ".") $ do
     transferBlock root (initAbsRegs mem ab)
 
-
 ------------------------------------------------------------------------
 -- Main loop
 
@@ -871,11 +892,16 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)
 
+ppGlobalData :: [(CodeAddr, GlobalDataInfo)] -> String
+ppGlobalData l = unlines (pp <$> l)
+  where pp (a,d) = "global " ++ showHex a (" " ++ show d)
+
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
+      trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
       FinalCFG { finalCFG = mkCFG (s^.blocks)
                , finalAbsState = s^.absState
                , finalCodePointersInMem = s^.functionEntries
@@ -892,11 +918,12 @@ explore_frontier st =
           st_post = flip execState st_pre $ transfer rsn addr
        in explore_frontier st_post
 
+-- | Attempt to determine if this address is in a jump table.
 addrInJumpTable :: InterpState -> Word64 -> Bool
 addrInJumpTable s a =
-  case Map.lookupLE a (s^.jumpTableAddrs) of
-    Nothing -> False
-    Just (_,end) -> a < end
+  case Map.lookupLE a (s^.globalDataMap) of
+    Just (_,JumpTable _) -> True
+    _ -> False
 
 emptyAbsState :: Memory Word64 -> CodeAddr -> AbsState
 emptyAbsState mem start = Map.singleton start (defBlockState mem start)
@@ -918,25 +945,37 @@ cfgFromAddress mem start = g
 
 
 --    ppAddr a = showHex a "\n"
---    code_pointers = filter (isCodePointer mem) (memAsWord64le mem)
+--    code_pointers = filter (isCodeAddr mem) (memAsWord64le mem)
+    global_data = Map.fromList
+      [ (v, ReferencedValue)
+      | (_,v) <- memAsWord64le_withAddr mem
+        -- Check this is readable, non-executable data
+      , addrPermissions v mem .&. (pf_r .|. pf_x) == pf_r
+      ]
+
     s0 = emptyInterpState mem
        & functionEntries .~ Set.singleton start
        & absState .~ emptyAbsState mem start
        & frontier .~ Map.singleton start StartAddr
+       & globalDataMap .~ global_data
 
     s1 = explore_frontier s0
 
     -- Add in code pointers from memory.
     go s (a,v)
-      | not (isCodePointer mem v) = s
-        -- Already a code pointer
+        -- Skip values not in memory.
+      | not (isCodeAddr mem v) = s
+        -- Skip this if it is already a known function.
       | Set.member v (s^.functionEntries) = s
-        -- Ignore jump table entries.
+        -- Ignore entries found in known bump tables
       | addrInJumpTable s a = s
+        -- Check if we already found this
       | Set.member v (s^.blockStartAddrs) =
+        trace ("Identified function entry "
+                ++ showHex v (" due to global store at " ++ showHex a ".")) $
         recordEscapedCodePointer v InInitialData s
       | otherwise =
-        trace ("Found new code pointer " ++ showHex v " at " ++ showHex a ".") $
+        trace ("Found function entry " ++ showHex v " at " ++ showHex a ".") $
         recordEscapedCodePointer v InInitialData s
 
     -- Explore data values

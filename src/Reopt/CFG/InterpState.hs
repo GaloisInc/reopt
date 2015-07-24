@@ -4,6 +4,7 @@ module Reopt.CFG.InterpState
   , FrontierReason(..)
   , BlockRegion(..)
   , lookupBlock
+  , GlobalDataInfo(..)
     -- * The interpreter state
   , InterpState(..)
   , emptyInterpState
@@ -13,7 +14,7 @@ module Reopt.CFG.InterpState
   , failedAddrs
   , functionEntries
   , reverseEdges
-  , jumpTableAddrs
+  , globalDataMap
   , frontier
   , absState
     -- ** InterpState utilities
@@ -82,6 +83,17 @@ data FrontierReason
   deriving (Show)
 
 ------------------------------------------------------------------------
+-- GlobalDataInfo
+
+data GlobalDataInfo
+     -- | A jump table that appears to end just before the given address.
+   = JumpTable !(Maybe CodeAddr)
+     -- | Some value that appears in the program text.
+   | ReferencedValue
+  deriving (Show)
+
+
+------------------------------------------------------------------------
 -- InterpState
 
 -- | The state of the interpreter
@@ -101,8 +113,9 @@ data InterpState
                    -- | Maps each code address to the list of predecessors that
                    -- affected its abstract state.
                  , _reverseEdges :: !(Map CodeAddr (Set CodeAddr))
-                   -- | Map each jump table start to the address just after the end.
-                 , _jumpTableAddrs :: !(Map CodeAddr CodeAddr)
+                   -- | Maps each address that appears to be global data to information
+                   -- inferred about it.
+                 , _globalDataMap :: !(Map CodeAddr GlobalDataInfo)
                    -- | Set of addresses to explore next.
                    -- This is a map so that we can associate a reason why a code address
                    -- was added to the frontier.
@@ -122,7 +135,7 @@ emptyInterpState mem = InterpState
       , _failedAddrs  = Set.empty
       , _functionEntries = Set.empty
       , _reverseEdges = Map.empty
-      , _jumpTableAddrs = Map.empty
+      , _globalDataMap  = Map.empty
       , _frontier     = Map.empty
       , _absState     = Map.empty
       }
@@ -146,8 +159,9 @@ functionEntries = lens _functionEntries (\s v -> s { _functionEntries = v })
 reverseEdges :: Simple Lens InterpState (Map CodeAddr (Set CodeAddr))
 reverseEdges = lens _reverseEdges (\s v -> s { _reverseEdges = v })
 
-jumpTableAddrs :: Simple Lens InterpState (Map CodeAddr Word64)
-jumpTableAddrs = lens _jumpTableAddrs (\s v -> s { _jumpTableAddrs = v })
+-- | Map each jump table start to the address just after the end.
+globalDataMap :: Simple Lens InterpState (Map CodeAddr GlobalDataInfo)
+globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
 frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })

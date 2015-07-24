@@ -418,7 +418,7 @@ asInt64Constant :: Value (BVType 64) -> Maybe Int64
 asInt64Constant (BVValue _ o) = Just (fromInteger o)
 asInt64Constant _ = Nothing
 
-asStackAddrOffset :: Value (BVType 64) -> Maybe (Value (BVType 64))
+asStackAddrOffset :: Value tp -> Maybe (Value (BVType 64))
 asStackAddrOffset addr
   | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr = do
     Refl <- testEquality base N.rsp
@@ -428,8 +428,6 @@ asStackAddrOffset addr
     Just (BVValue knownNat 0)
   | otherwise =
     Nothing
-
-
 
 asBaseOffset :: Value (BVType 64) -> (Value (BVType 64), Integer)
 asBaseOffset x
