@@ -212,6 +212,7 @@ addrHasPermissions w req m = addrPermissions w m `hasPermissions` req
 isCodeAddr :: Memory Word64 -> Word64 -> Bool
 isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
 
+-- | Return true if this is a read only address.
 isReadonlyAddr :: Memory Word64 -> Word64 -> Bool
 isReadonlyAddr mem val = addrPermissions val mem .&. (pf_r .|. pf_w) == pf_r
 

@@ -376,17 +376,27 @@ instance S.IsValue Expr where
   sext = sext_impl LeqProof LeqProof
 
   uext' w e0
+      -- Literal case
     | Just v <- asBVLit e0 =
       let w0 = S.bv_width e0
-       in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (ltProof w0 w)) $
+       in withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
             bvLit w v
       -- Collapse duplicate extensions.
     | Just (UExt e w0) <- asApp e0 = do
       let we = S.bv_width e
       withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
         S.uext w e
-      -- Default case
 
+-- Convert @uext w (trunc w0 e)@ into @e .&. (2^w0 - 1)@
+-- We have disabled this because our abstract domains are not as precise.
+{-
+    | Just (Trunc e w0) <- asApp e0
+    , Just Refl <- testEquality (S.bv_width e) w = do
+      withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
+        e S..&. bvLit w (maxUnsigned w0)
+-}
+
+      -- Default case
     | otherwise = app (UExt e0 w)
 
   even_parity x

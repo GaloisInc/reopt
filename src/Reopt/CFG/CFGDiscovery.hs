@@ -23,7 +23,7 @@
 
 module Reopt.CFG.CFGDiscovery
        ( FinalCFG(..)
-       , cfgFromAddress
+       , cfgFromAddrs
        , assignmentAbsValues
        ) where
 
@@ -892,6 +892,10 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)
 
+ppFunctionEntries :: [CodeAddr] -> String
+ppFunctionEntries l = unlines (pp <$> l)
+  where pp a = "discovered function entry " ++ showHex a ""
+
 ppGlobalData :: [(CodeAddr, GlobalDataInfo)] -> String
 ppGlobalData l = unlines (pp <$> l)
   where pp (a,d) = "global " ++ showHex a (" " ++ show d)
@@ -901,6 +905,7 @@ mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
+      trace (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
       FinalCFG { finalCFG = mkCFG (s^.blocks)
                , finalAbsState = s^.absState
@@ -929,13 +934,12 @@ emptyAbsState :: Memory Word64 -> CodeAddr -> AbsState
 emptyAbsState mem start = Map.singleton start (defBlockState mem start)
 
 
-cfgFromAddress :: Memory Word64
-                  -- ^ Memory to use when decoding instructions.
-               -> CodeAddr
-                  -- ^ Location to start disassembler form.
-               -> FinalCFG
-cfgFromAddress mem start = g
-
+cfgFromAddrs :: Memory Word64
+                -- ^ Memory to use when decoding instructions.
+             -> [CodeAddr]
+                -- ^ Location to start disassembler form.
+             -> FinalCFG
+cfgFromAddrs mem init_addrs = g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
@@ -954,9 +958,15 @@ cfgFromAddress mem start = g
       ]
 
     s0 = emptyInterpState mem
-       & functionEntries .~ Set.singleton start
-       & absState .~ emptyAbsState mem start
-       & frontier .~ Map.singleton start StartAddr
+       & functionEntries .~ Set.fromList init_addrs
+       & absState .~ Map.fromList
+           [ (a, defBlockState mem a)
+           | a <- init_addrs
+           ]
+       & frontier .~ Map.fromList
+           [ (a, StartAddr)
+           | a <- init_addrs
+           ]
        & globalDataMap .~ global_data
 
     s1 = explore_frontier s0
@@ -967,15 +977,16 @@ cfgFromAddress mem start = g
       | not (isCodeAddr mem v) = s
         -- Skip this if it is already a known function.
       | Set.member v (s^.functionEntries) = s
-        -- Ignore entries found in known bump tables
-      | addrInJumpTable s a = s
+        -- Ignore entries found in read only segments.
+        -- They have a high liklyhood of being elements of jump tables
+      | isReadonlyAddr mem a = s
         -- Check if we already found this
       | Set.member v (s^.blockStartAddrs) =
         trace ("Identified function entry "
                 ++ showHex v (" due to global store at " ++ showHex a ".")) $
         recordEscapedCodePointer v InInitialData s
       | otherwise =
-        trace ("Found function entry " ++ showHex v " at " ++ showHex a ".") $
+        trace ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
         recordEscapedCodePointer v InInitialData s
 
     -- Explore data values

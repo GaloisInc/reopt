@@ -226,7 +226,7 @@ isInterestingCode _ _ = True -- Last bit
 
 showGaps :: Memory Word64 -> Word64 -> IO ()
 showGaps mem entry = do
-    let cfg = finalCFG (cfgFromAddress mem entry)
+    let cfg = finalCFG (cfgFromAddrs mem [entry])
     let ends = cfgBlockEnds cfg
     let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -250,7 +250,7 @@ showGaps mem entry = do
 showCFG :: Memory Word64 -> Word64 -> IO ()
 showCFG mem entry = do
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g0 = finalCFG (cfgFromAddress mem entry)
+  let g0 = finalCFG (cfgFromAddrs mem [entry])
   let g = eliminateDeadRegisters g0
   print (pretty g)
 {-
@@ -447,11 +447,17 @@ ppBlockAndAbs m b =
             pretty (blockTerm b))
 
 
-showCFGAndAI :: Memory Word64 -> Word64 -> IO ()
-showCFGAndAI mem entry = do
+showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
+showCFGAndAI loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
   -- Build model of executable memory from elf.
   -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let fg = cfgFromAddress mem entry
+  let sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
+                                 , steType ste == STT_FUNC
+                                 , isCodeAddr mem (steValue ste)
+                                 ]
+  let fg = cfgFromAddrs mem (elfEntry e:sym_addrs)
   let abst = finalAbsState fg
       amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
@@ -558,7 +564,6 @@ mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory 
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
 
-
 main :: IO ()
 main = do
   args <- getCommandLineArgs
@@ -571,8 +576,7 @@ main = do
       showCFG mem (elfEntry e)
     ShowCFGAI -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showCFGAndAI mem (elfEntry e)
+      showCFGAndAI (args^.loadStyle) e
     ShowGaps -> do
       e <- readStaticElf (args^.programPath)
       mem <- mkElfMem (args^.loadStyle) e
