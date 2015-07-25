@@ -18,8 +18,8 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Data.Version
+import           Data.Word
 import           GHC.TypeLits
 import           Numeric (showHex)
 import           Reopt.Analysis.AbsState
@@ -27,17 +27,20 @@ import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.IO
+import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
 import           Paths_reopt (version)
+
 import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
 import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -54,6 +57,7 @@ data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
+   | ShowLLVM        -- ^ Print out generated LLVM
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -108,6 +112,11 @@ cfgAIFlag = flagNone [ "ai", "a" ] upd help
   where upd  = reoptAction .~ ShowCFGAI
         help = "Print out recovered control flow graph + AI of executable."
 
+llvmFlag :: Flag Args
+llvmFlag = flagNone [ "llvm", "l" ] upd help
+  where upd  = reoptAction .~ ShowLLVM
+        help = "Print out generated LLVM."
+
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
@@ -129,6 +138,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         flags = [ disassembleFlag
                 , cfgFlag
                 , cfgAIFlag
+                , llvmFlag
                 , gapFlag
                 , segmentFlag
                 , sectionFlag
@@ -475,6 +485,17 @@ showCFGAndAI mem entry = do
         checkCallsIdentified mem g b
       _ -> return ()
 
+showLLVM :: Memory Word64 -> Word64 -> IO ()
+showLLVM mem entry = do
+  let g0 = finalCFG (cfgFromAddress mem entry)
+  let g = eliminateDeadRegisters g0
+  let bs' = Map.elems (g^.cfgBlocks)
+      mkF = snd . L.runLLVM
+            . L.defineFresh L.emptyFunAttrs L.voidT ()
+            . mapM_ blockToLLVM
+      
+  print (L.ppModule $ mkF bs')  
+
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
 -- pointer from an address that is 8 below the stack pointer.
@@ -573,6 +594,10 @@ main = do
       e <- readStaticElf (args^.programPath)
       mem <- mkElfMem (args^.loadStyle) e
       showCFGAndAI mem (elfEntry e)
+    ShowLLVM -> do
+      e <- readStaticElf (args^.programPath)
+      mem <- mkElfMem (args^.loadStyle) e
+      showLLVM mem (elfEntry e)
     ShowGaps -> do
       e <- readStaticElf (args^.programPath)
       mem <- mkElfMem (args^.loadStyle) e
