@@ -23,7 +23,7 @@
 
 module Reopt.CFG.CFGDiscovery
        ( FinalCFG(..)
-       , cfgFromAddress
+       , cfgFromAddrs
        , assignmentAbsValues
        ) where
 
@@ -157,11 +157,13 @@ reallyGetBlock rsn addr = do
   -- Attempt to disassemble block.
   r <- do
     -- Get memory so that we can decode from it.
-    addrs <- use blockStartAddrs
+    function_addrs <- use functionEntries
+    block_addrs    <- use blockStartAddrs
         -- Returns true if we are not at the start of a block.
         -- This is used to stop the diassembler when we reach code
         -- that is part of a new block.
-    let not_at_block addr0 = Set.notMember addr0 addrs
+    let not_at_block addr0 = Set.notMember addr0 block_addrs
+                          && Set.notMember addr0 function_addrs
     mem <- gets memory
     subMonad genState $ do
       liftEither $ disassembleBlock mem not_at_block loc
@@ -819,6 +821,7 @@ transferBlock b regs = do
               -- Check that the current stack height is correct so that a
               -- tail call when go to the right place.
               -- TODO: Add check to ensure stack height is correct.
+              trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
             else
               -- Merge block state.
@@ -864,8 +867,10 @@ transferBlock b regs = do
             let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
             -- Look for new ips.
             Fold.forM_ ips $ \tgt_addr -> do
+              tgt_fn  <- gets $ getFunctionEntryPoint tgt_addr
               -- Treat the jump to the tgt_addr as a tail call.
               -- TODO: Add check to ensure stack height is correct.
+              trace ("Found symbolic jump to addr after function " ++ showHex tgt_fn ".") $ do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
@@ -892,6 +897,10 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)
 
+ppFunctionEntries :: [CodeAddr] -> String
+ppFunctionEntries l = unlines (pp <$> l)
+  where pp a = "discovered function entry " ++ showHex a ""
+
 ppGlobalData :: [(CodeAddr, GlobalDataInfo)] -> String
 ppGlobalData l = unlines (pp <$> l)
   where pp (a,d) = "global " ++ showHex a (" " ++ show d)
@@ -901,6 +910,7 @@ mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
+      trace (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
       FinalCFG { finalCFG = mkCFG (s^.blocks)
                , finalAbsState = s^.absState
@@ -929,13 +939,12 @@ emptyAbsState :: Memory Word64 -> CodeAddr -> AbsState
 emptyAbsState mem start = Map.singleton start (defBlockState mem start)
 
 
-cfgFromAddress :: Memory Word64
-                  -- ^ Memory to use when decoding instructions.
-               -> CodeAddr
-                  -- ^ Location to start disassembler form.
-               -> FinalCFG
-cfgFromAddress mem start = g
-
+cfgFromAddrs :: Memory Word64
+                -- ^ Memory to use when decoding instructions.
+             -> [CodeAddr]
+                -- ^ Location to start disassembler form.
+             -> FinalCFG
+cfgFromAddrs mem init_addrs = g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
@@ -954,9 +963,15 @@ cfgFromAddress mem start = g
       ]
 
     s0 = emptyInterpState mem
-       & functionEntries .~ Set.singleton start
-       & absState .~ emptyAbsState mem start
-       & frontier .~ Map.singleton start StartAddr
+       & functionEntries .~ Set.fromList init_addrs
+       & absState .~ Map.fromList
+           [ (a, defBlockState mem a)
+           | a <- init_addrs
+           ]
+       & frontier .~ Map.fromList
+           [ (a, StartAddr)
+           | a <- init_addrs
+           ]
        & globalDataMap .~ global_data
 
     s1 = explore_frontier s0
@@ -967,15 +982,16 @@ cfgFromAddress mem start = g
       | not (isCodeAddr mem v) = s
         -- Skip this if it is already a known function.
       | Set.member v (s^.functionEntries) = s
-        -- Ignore entries found in known bump tables
-      | addrInJumpTable s a = s
+        -- Ignore entries found in read only segments.
+        -- They have a high liklyhood of being elements of jump tables
+      | isReadonlyAddr mem a = s
         -- Check if we already found this
       | Set.member v (s^.blockStartAddrs) =
         trace ("Identified function entry "
                 ++ showHex v (" due to global store at " ++ showHex a ".")) $
         recordEscapedCodePointer v InInitialData s
       | otherwise =
-        trace ("Found function entry " ++ showHex v " at " ++ showHex a ".") $
+        trace ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
         recordEscapedCodePointer v InInitialData s
 
     -- Explore data values

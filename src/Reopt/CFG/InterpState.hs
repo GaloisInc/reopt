@@ -101,8 +101,8 @@ data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
                  , _genState :: !GlobalGenState
-                   -- | Addresses that we have attempted to disassemble as the
-                   -- start of a block.
+                   -- | Addresses that are known to start block locations.
+                   -- Should be a superset of function entries and fialedAddrs
                  , _blockStartAddrs :: !(Set CodeAddr)
                    -- | Intervals maps code addresses to blocks at address.
                  , _blocks   :: !(Map CodeAddr BlockRegion)
