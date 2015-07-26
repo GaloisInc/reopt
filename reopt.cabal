@@ -73,7 +73,9 @@ executable reopt
     lens,
     mtl,
     parameterized-utils >= 0.1.6,
-    reopt
+    reopt,
+    llvm-pretty
+
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs

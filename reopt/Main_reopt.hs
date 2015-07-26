@@ -18,8 +18,8 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Data.Version
+import           Data.Word
 import           GHC.TypeLits
 import           Numeric (showHex)
 import           Reopt.Analysis.AbsState
@@ -27,17 +27,20 @@ import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.IO
+import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
 import           Paths_reopt (version)
+
 import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
 import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -54,6 +57,7 @@ data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
+   | ShowLLVM        -- ^ Print out generated LLVM
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -108,6 +112,11 @@ cfgAIFlag = flagNone [ "ai", "a" ] upd help
   where upd  = reoptAction .~ ShowCFGAI
         help = "Print out recovered control flow graph + AI of executable."
 
+llvmFlag :: Flag Args
+llvmFlag = flagNone [ "llvm", "l" ] upd help
+  where upd  = reoptAction .~ ShowLLVM
+        help = "Print out generated LLVM."
+
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
@@ -129,6 +138,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         flags = [ disassembleFlag
                 , cfgFlag
                 , cfgAIFlag
+                , llvmFlag
                 , gapFlag
                 , segmentFlag
                 , sectionFlag
@@ -224,9 +234,11 @@ isInterestingCode mem (start, Just end) = go start end
 
 isInterestingCode _ _ = True -- Last bit
 
-showGaps :: Memory Word64 -> Word64 -> IO ()
-showGaps mem entry = do
-    let cfg = finalCFG (cfgFromAddrs mem [entry])
+showGaps :: LoadStyle -> Elf Word64 -> IO ()
+showGaps loadSty e = do
+    -- Create memory for elf
+    mem <- mkElfMem loadSty e
+    let cfg = finalCFG (mkFinalCFG mem e)
     let ends = cfgBlockEnds cfg
     let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -247,28 +259,13 @@ showGaps mem entry = do
     out_gap bs (e:es') = in_gap e bs es'
     out_gap _ _        = []
 
-showCFG :: Memory Word64 -> Word64 -> IO ()
-showCFG mem entry = do
-  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g0 = finalCFG (cfgFromAddrs mem [entry])
-  let g = eliminateDeadRegisters g0
+showCFG :: LoadStyle -> Elf Word64 -> IO ()
+showCFG loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
+  let g = eliminateDeadRegisters (finalCFG fg)
   print (pretty g)
-{-
-  putStrLn $ "Found potential calls: " ++ show (Map.size (cfgCalls g))
-
-  let rCalls = reverseEdges (cfgCalls g)
-
-  let rEdgeMap = reverseEdges (cfgSuccessors g)
-
-
-  let sources = getTargets (Map.keys rCalls) rEdgeMap
-
-  forM_ (Set.toList sources) $ \a -> do
-    let Just b = findBlock g (GeneratedBlock a 0)
-    when (hasCall b == False) $ do
-      print $ "Found start " ++ showHex a ""
-      print (pretty b)
--}
 
 ------------------------------------------------------------------------
 -- Function determination
@@ -446,18 +443,19 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
+mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
+mkFinalCFG mem e = cfgFromAddrs mem (elfEntry e:sym_addrs)
+        -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
+  where sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
+                                   , steType ste == STT_FUNC
+                                   , isCodeAddr mem (steValue ste)
+                                   ]
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  -- Build model of executable memory from elf.
-  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
-                                 , steType ste == STT_FUNC
-                                 , isCodeAddr mem (steValue ste)
-                                 ]
-  let fg = cfgFromAddrs mem (elfEntry e:sym_addrs)
+  let fg = mkFinalCFG mem e
   let abst = finalAbsState fg
       amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
@@ -480,6 +478,19 @@ showCFGAndAI loadSty e = do
       GeneratedBlock _ 0 -> do
         checkCallsIdentified mem g b
       _ -> return ()
+
+showLLVM :: LoadStyle -> Elf Word64 -> IO ()
+showLLVM loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
+  let g = eliminateDeadRegisters (finalCFG fg)
+  let bs' = Map.elems (g^.cfgBlocks)
+      mkF = snd . L.runLLVM
+            . L.defineFresh L.emptyFunAttrs L.voidT ()
+            . mapM_ blockToLLVM
+
+  print (L.ppModule $ mkF bs')
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -572,15 +583,16 @@ main = do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showCFG mem (elfEntry e)
+      showCFG (args^.loadStyle) e
     ShowCFGAI -> do
       e <- readStaticElf (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
+    ShowLLVM -> do
+      e <- readStaticElf (args^.programPath)
+      showLLVM (args^.loadStyle) e
     ShowGaps -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showGaps mem (elfEntry e)
+      showGaps (args^.loadStyle) e
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->

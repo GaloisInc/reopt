@@ -773,7 +773,7 @@ ppApp pp a0 =
     FPLt rep x y            -> sexpr "fpLt" [ pretty rep, pp x, pp y ]
     FPEq rep x y            -> sexpr "fpEq" [ pretty rep, pp x, pp y ]
     FPCvt src x tgt         -> sexpr "fpCvt" [ pretty src, pp x, pretty tgt ]
-    FPCvtRoundsUp src x tgt -> sexpr "fpCvtRoundsRep" [ pretty src, pp x, pretty tgt ]
+    FPCvtRoundsUp src x tgt -> sexpr "fpCvtRoundsUp" [ pretty src, pp x, pretty tgt ]
     FPFromBV x tgt          -> sexpr "fpFromBV" [ pp x, pretty tgt ]
     TruncFPToSignedBV _ x w -> sexpr "truncFP_sbv" [ pp x, ppNat w]
 
