@@ -157,11 +157,13 @@ reallyGetBlock rsn addr = do
   -- Attempt to disassemble block.
   r <- do
     -- Get memory so that we can decode from it.
-    addrs <- use blockStartAddrs
+    function_addrs <- use functionEntries
+    block_addrs    <- use blockStartAddrs
         -- Returns true if we are not at the start of a block.
         -- This is used to stop the diassembler when we reach code
         -- that is part of a new block.
-    let not_at_block addr0 = Set.notMember addr0 addrs
+    let not_at_block addr0 = Set.notMember addr0 block_addrs
+                          && Set.notMember addr0 function_addrs
     mem <- gets memory
     subMonad genState $ do
       liftEither $ disassembleBlock mem not_at_block loc
@@ -819,6 +821,7 @@ transferBlock b regs = do
               -- Check that the current stack height is correct so that a
               -- tail call when go to the right place.
               -- TODO: Add check to ensure stack height is correct.
+              trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
             else
               -- Merge block state.
@@ -864,8 +867,10 @@ transferBlock b regs = do
             let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
             -- Look for new ips.
             Fold.forM_ ips $ \tgt_addr -> do
+              tgt_fn  <- gets $ getFunctionEntryPoint tgt_addr
               -- Treat the jump to the tgt_addr as a tail call.
               -- TODO: Add check to ensure stack height is correct.
+              trace ("Found symbolic jump to addr after function " ++ showHex tgt_fn ".") $ do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
