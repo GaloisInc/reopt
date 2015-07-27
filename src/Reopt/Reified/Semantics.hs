@@ -187,7 +187,7 @@ instance S.IsValue Expr where
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
-  bvBit x y = app $ R.BVBit x y
+  bvBit x y = app $ R.BVTestBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
@@ -301,19 +301,13 @@ data Stmt where
 -- names.
 newtype Semantics a =
   Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
-  deriving (Functor, Monad, MonadState Integer, MonadWriter [Stmt])
+  deriving (Functor, Applicative, Monad, MonadState Integer, MonadWriter [Stmt])
 
 -- | Execute a 'Semantics' computation, returning its effects.
 execSemantics :: Semantics a -> [Stmt]
 execSemantics = flip evalState 0 . execWriterT . runSemantics
 
 type instance S.Value Semantics = Expr
-
-#if !MIN_VERSION_base(4,8,0)
-instance Applicative Semantics where
-  pure = return
-  (<*>) = ap
-#endif
 
 -- | Generate a fresh variable with basename 'basename'.
 fresh :: MonadState Integer m => String -> m String
