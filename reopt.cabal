@@ -50,6 +50,7 @@ library
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
+    Reopt.Reified.Semantics
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
