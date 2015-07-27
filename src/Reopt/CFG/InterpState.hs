@@ -16,6 +16,7 @@ module Reopt.CFG.InterpState
   , reverseEdges
   , globalDataMap
   , frontier
+  , function_frontier
   , absState
     -- ** InterpState utilities
   , getFunctionEntryPoint
@@ -90,8 +91,11 @@ data GlobalDataInfo
    = JumpTable !(Maybe CodeAddr)
      -- | Some value that appears in the program text.
    | ReferencedValue
-  deriving (Show)
 
+instance Show GlobalDataInfo where
+  show (JumpTable Nothing) = "unbound jump table"
+  show (JumpTable (Just w)) = "jump table end " ++ showHex w ""
+  show ReferencedValue = "global addr"
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -101,8 +105,8 @@ data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
                  , _genState :: !GlobalGenState
-                   -- | Addresses that we have attempted to disassemble as the
-                   -- start of a block.
+                   -- | Addresses that are known to start block locations.
+                   -- Should be a superset of function entries and fialedAddrs
                  , _blockStartAddrs :: !(Set CodeAddr)
                    -- | Intervals maps code addresses to blocks at address.
                  , _blocks   :: !(Map CodeAddr BlockRegion)
@@ -120,6 +124,8 @@ data InterpState
                    -- This is a map so that we can associate a reason why a code address
                    -- was added to the frontier.
                  , _frontier :: !(Map CodeAddr FrontierReason)
+                   -- | Set of functions to explore next.
+                 , _function_frontier :: !(Set CodeAddr)
                    -- | Map from code addresses to the abstract state at the start of
                    -- the block.
                  , _absState :: !AbsState
@@ -137,6 +143,7 @@ emptyInterpState mem = InterpState
       , _reverseEdges = Map.empty
       , _globalDataMap  = Map.empty
       , _frontier     = Map.empty
+      , _function_frontier = Set.empty
       , _absState     = Map.empty
       }
 
@@ -165,6 +172,9 @@ globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
 frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })
+
+function_frontier :: Simple Lens InterpState (Set CodeAddr)
+function_frontier = lens _function_frontier (\s v -> s { _function_frontier = v })
 
 absState :: Simple Lens InterpState AbsState
 absState = lens _absState (\s v -> s { _absState = v })

@@ -28,10 +28,10 @@ module Reopt.Analysis.AbsState
   , size
   , codePointerSet
   , AbsDomain(..)
-  , AbsRegs
+  , AbsProcessorState
   , absInitialRegs
   , startAbsStack
-  , initAbsRegs
+  , initAbsProcessorState
   , absAssignments
   , assignLens
   , stridedInterval
@@ -40,8 +40,8 @@ module Reopt.Analysis.AbsState
   , addMemWrite
   , transferValue
   , transferRHS
-  , abstractLt
-  , abstractLeq
+  , abstractULt
+  , abstractULeq
   , isBottom
   ) where
 
@@ -266,8 +266,9 @@ isZeroPtr s = Set.size s == 1 && Set.findMin s == 0
 -- the result is larger than the old state.
 -- This also returns any addresses that are discarded during joining.
 joinAbsValue :: AbsValue tp -> AbsValue tp -> Maybe (AbsValue tp)
-joinAbsValue x y | Set.null s = r
-                 | otherwise = trace ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
+joinAbsValue x y
+    | Set.null s = r
+    | otherwise = trace ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
   where (r,s) = runState (joinAbsValue' x y) Set.empty
 
 addWords :: Set Word64 -> State (Set Word64) ()
@@ -374,11 +375,6 @@ member n (StridedInterval si) = SI.member n si
 member n (SubValue _n' v) = member n v
 member _n _v = False
 
--- meet is probably the wrong word here --- we are really refining the
--- abstract value based upon some new information.  Thus, we want to
--- return an overapproximation rather than an underapproximation of
--- the value.
--- Currently the only case we care about is where v' is an interval
 
 isBottom :: AbsValue tp -> Bool
 isBottom (FinSet v)       = Set.null v
@@ -389,6 +385,13 @@ isBottom (StridedInterval v) = SI.size v == 0
 isBottom (SubValue _ v) = isBottom v
 isBottom TopV = False
 
+-- meet is probably the wrong word here --- we are really refining the
+-- abstract value based upon some new information.  Thus, we want to
+-- return an overapproximation rather than an underapproximation of
+-- the value.
+-- Currently the only case we care about is where v' is an interval
+
+-- @meet x y@ returns an over-approximation of the values in @x@ and @y@.
 meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
 meet x y
   | isBottom m, not (isBottom x), not (isBottom y) =
@@ -460,8 +463,7 @@ uext :: forall u v.
 uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
 uext (StridedInterval si) w =
-  StridedInterval $ case si of SI.StridedInterval{} -> si { SI.typ = BVTypeRepr w }
-                               SI.EmptyInterval -> SI.EmptyInterval
+  StridedInterval $ si { SI.typ = BVTypeRepr w }
 uext (SubValue (n :: NatRepr n) av) w =
   -- u + 1 <= v, n + 1 <= u, need n + 1 <= v
   -- proof: n + 1 <= u + 1 by addIsLeq
@@ -628,16 +630,16 @@ hasMinimum _tp v =
    StridedInterval si -> Just $! SI.base si
    _                  -> Just 0
 
--- | @abstractLt x y@ refines x and y with the knowledge that @x < y@
---
+-- | @abstractULt x y@ refines x and y with the knowledge that @x < y@
+-- is unsigned.
 -- For example, given {2, 3} and {2, 3, 4}, we know (only) that
 -- {2, 3} and {3, 4} because we may pick any element from either set.
 
-abstractLt :: TypeRepr tp
+abstractULt :: TypeRepr tp
               -> AbsValue tp -> AbsValue tp
               -> (AbsValue tp, AbsValue tp)
-abstractLt _tp TopV TopV = (TopV, TopV)
-abstractLt tp x y
+abstractULt _tp TopV TopV = (TopV, TopV)
+abstractULt tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
@@ -645,14 +647,14 @@ abstractLt tp x y
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
-abstractLt _tp x y = (x, y)
+abstractULt _tp x y = (x, y)
 
--- | @abstractLeq x y@ refines x and y with the knowledge that @x <= y@
-abstractLeq :: TypeRepr tp
+-- | @abstractULeq x y@ refines x and y with the knowledge that @x <= y@
+abstractULeq :: TypeRepr tp
                -> AbsValue tp -> AbsValue tp
                -> (AbsValue tp, AbsValue tp)
-abstractLeq _tp TopV TopV = (TopV, TopV)
-abstractLeq tp x y
+abstractULeq _tp TopV TopV = (TopV, TopV)
+abstractULeq tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
@@ -660,7 +662,7 @@ abstractLeq tp x y
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
-abstractLeq _tp x y = (x, y)
+abstractULeq _tp x y = (x, y)
 
 ------------------------------------------------------------------------
 -- AbsBlockState
@@ -802,37 +804,37 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
   where isDifferent (Some n) = x^.absX86State^.register n /= y^.absX86State^.register n
 
 ------------------------------------------------------------------------
--- AbsRegs
+-- AbsProcessorState
 
--- | This stores the abstract state of the system at a given point in time.
-data AbsRegs = AbsRegs { absMem :: !(Memory Word64)
+-- | this1 stores the abstract state of the system at a given point in time.
+data AbsProcessorState = AbsProcessorState { absMem :: !(Memory Word64)
                        , _absInitialRegs :: !(X86State AbsValue)
                        , _absAssignments :: !(MapF Assignment AbsValue)
                        , _curAbsStack :: !AbsBlockStack
                        }
 
 -- FIXME
-instance Pretty AbsRegs where
+instance Pretty AbsProcessorState where
   pretty regs = pretty (AbsBlockState { _absX86State   = regs ^. absInitialRegs
                                       , _startAbsStack = regs ^. curAbsStack })
 
 
 
-initAbsRegs :: Memory Word64 -> AbsBlockState -> AbsRegs
-initAbsRegs mem s = AbsRegs { absMem = mem
+initAbsProcessorState :: Memory Word64 -> AbsBlockState -> AbsProcessorState
+initAbsProcessorState mem s = AbsProcessorState { absMem = mem
                             , _absInitialRegs = s^.absX86State
                             , _absAssignments = MapF.empty
                             , _curAbsStack = s^.startAbsStack
                             }
 
 
-absInitialRegs :: Simple Lens AbsRegs (X86State AbsValue)
+absInitialRegs :: Simple Lens AbsProcessorState (X86State AbsValue)
 absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
 
-absAssignments :: Simple Lens AbsRegs (MapF Assignment AbsValue)
+absAssignments :: Simple Lens AbsProcessorState (MapF Assignment AbsValue)
 absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 
-curAbsStack :: Simple Lens AbsRegs AbsBlockStack
+curAbsStack :: Simple Lens AbsProcessorState AbsBlockStack
 curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
 -- | A lens that allows one to lookup and update the value of an assignment in
@@ -844,7 +846,7 @@ assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
 
 -- | Merge in the value of the assignment.  If we have already seen a
 -- value, this will combine with meet.
-addAssignment :: Assignment tp -> AbsRegs -> AbsRegs
+addAssignment :: Assignment tp -> AbsProcessorState -> AbsProcessorState
 addAssignment a c =
   c & (absAssignments . assignLens a) %~ flip meet (transferRHS c (assignRhs a))
 
@@ -861,7 +863,7 @@ someValueWidth v =
   case valueType v of
     BVTypeRepr w -> natValue w
 
-addMemWrite :: Value (BVType 64) -> Value tp -> AbsRegs -> AbsRegs
+addMemWrite :: Value (BVType 64) -> Value tp -> AbsProcessorState -> AbsProcessorState
 addMemWrite a v r =
   case (transferValue r a, transferValue r v) of
     -- (_,TopV) -> r
@@ -901,7 +903,7 @@ mkAbsBlockState trans newStack =
                 }
 
 -- | Return state for after value has run.
-finalAbsBlockState :: AbsRegs -> X86State Value -> AbsBlockState
+finalAbsBlockState :: AbsProcessorState -> X86State Value -> AbsBlockState
 finalAbsBlockState c s = do
   case transferValue c (s^.register N.rsp) of
     --
@@ -967,7 +969,7 @@ setAbsIP mem a b
 -- Transfer functions
 
 -- | Compute abstract value from value and current registers.
-transferValue :: AbsRegs
+transferValue :: AbsProcessorState
               -> Value tp
               -> AbsValue tp
 transferValue c v =
@@ -984,7 +986,7 @@ transferValue c v =
 --       StackOffset (Set.singleton 0)
      | otherwise -> c ^. absInitialRegs ^. register r
 
-transferApp :: AbsRegs
+transferApp :: AbsProcessorState
             -> App Value tp
             -> AbsValue tp
 transferApp r a =
@@ -997,7 +999,7 @@ transferApp r a =
     _ -> TopV
 
 transferRHS :: forall tp
-            .  AbsRegs
+            .  AbsProcessorState
             -> AssignRhs tp
             -> AbsValue tp
 transferRHS r rhs =

@@ -153,14 +153,15 @@ bvTrunc_impl :: forall m n
              -> NatRepr m
              -> Expr (BVType n)
              -> Expr (BVType m)
-bvTrunc_impl LeqProof _ w e0
+bvTrunc_impl p_1m _ w e0
     -- Constant propagation
-  | Just v <- asBVLit e0 = bvLit w v
+  | LeqProof <- p_1m
+  , Just v <- asBVLit e0 =
+    bvLit w v
 bvTrunc_impl _ _ w e0
     -- Eliminate redundant trunc
   | Just Refl <- testEquality (exprWidth e0) w =
     e0
-
 bvTrunc_impl _ _ w e0
     -- Eliminate MMXExtend
   | Just (MMXExtend e) <- asApp e0
@@ -171,7 +172,6 @@ bvTrunc_impl p_1m p_mn w e0
   | Just (ConcatV lw l _) <- asApp e0
   , Just p_w_lw <- testLeq w lw =
     bvTrunc_impl p_1m p_w_lw w l
-
 bvTrunc_impl p_1m _ w e0
   | Just (UExt e _) <- asApp e0 =
     case testLeq w (S.bv_width e) of
@@ -184,21 +184,31 @@ bvTrunc_impl p_1m _ w e0
           Nothing -> error "bvTrunc internal error"
 
 bvTrunc_impl p_1m p_mn w e0
-    -- Simplify truncation.
+    -- Trunc (x .&. y) w = trunc x w .&. trunc y w
+  | LeqProof <- p_1m
+  , Just (BVAnd _ x y) <- asApp e0 =
+    let x' = bvTrunc_impl p_1m p_mn w x
+        y' = bvTrunc_impl p_1m p_mn w y
+     in x' S..&. y'
+    -- trunc (Trunc e w1) w2 = trunc e w2
   | Just (Trunc e _) <- asApp e0 =
     -- Runtime check to workaround GHC typechecker.
     case testLeq w (exprWidth e) of
       Just p_we -> bvTrunc_impl p_1m p_we w e
       Nothing -> error "bvTrunc given bad width"
-
-bvTrunc_impl p_1m@LeqProof p_mn@LeqProof w e0
-  | LeqProof <- leqTrans p_1m p_mn =
+    -- Default case
+  | LeqProof <- p_1m
+  , LeqProof <- p_mn
+  , LeqProof <- leqTrans p_1m p_mn =
     case testStrictLeq w (exprWidth e0) of
       Left LeqProof -> app (Trunc e0 w)
       Right Refl -> e0
 
+bvSle :: Expr (BVType n) -> Expr (BVType n) -> Expr BoolType
+bvSle x y = app (BVSignedLe x y)
 
-
+bvUle :: Expr (BVType n) -> Expr (BVType n) -> Expr BoolType
+bvUle x y = app (BVUnsignedLe x y)
 
 instance S.IsValue Expr where
 
@@ -252,6 +262,16 @@ instance S.IsValue Expr where
 
   complement x
     | Just xv <- asBVLit x = bvLit (exprWidth x) (complement xv)
+      -- not (y < z) = y >= z = z <= y
+    | Just (BVUnsignedLt y z) <- asApp x = bvUle z y
+      -- not (y <= z) = y > z = z < y
+    | Just (BVUnsignedLe y z) <- asApp x = S.bvUlt z y
+      -- not (y < z) = y >= z = z <= y
+    | Just (BVSignedLt y z) <- asApp x = bvSle z y
+      -- not (y <= z) = y > z = z < y
+    | Just (BVSignedLe y z) <- asApp x = S.bvSlt z y
+      -- not (not p) = p
+    | Just (BVComplement _ y) <- asApp x = y
     | otherwise = app $ BVComplement (exprWidth x) x
 
   x .&. y
@@ -265,6 +285,20 @@ instance S.IsValue Expr where
     | Just 0 <- asBVLit y = y
       -- Idempotence
     | x == y = x
+      -- x1 <= x2 & x1 ~= x2 = x1 < x2
+    | Just (BVUnsignedLe x1 x2) <- asApp x
+    , Just (BVComplement _ yc) <- asApp y
+    , Just (BVEq y1 y2) <- asApp yc
+    , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
+    , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
+      S.bvUlt x1 x2
+      -- x1 ~= x2 & x1 <= x2 => x1 < x2
+    | Just (BVUnsignedLe y1 y2) <- asApp y
+    , Just (BVComplement _ xc) <- asApp x
+    , Just (BVEq x1 x2) <- asApp xc
+    , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
+    , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
+      S.bvUlt y1 y2
       -- Default case
     | otherwise = app $ BVAnd (exprWidth x) x y
 
@@ -274,17 +308,18 @@ instance S.IsValue Expr where
       -- Cancel or when one argument is maxUnsigned
     | Just xv <- asBVLit x, xv == maxUnsigned (exprWidth x) = x
     | Just yv <- asBVLit y, yv == maxUnsigned (exprWidth x) = y
-      -- Eliminate or when one argument is 0
+      -- Eliminate "or" when one argument is 0
     | Just 0 <- asBVLit x = y
     | Just 0 <- asBVLit y = x
       -- Idempotence
     | x == y = x
+
       -- Rewrite "x < y | x == y" to "x <= y"
-    | Just (BVUnsignedLt u1 v1) <- asApp x
-    , Just (BVEq u2 v2) <- asApp y
-    , Just Refl <- testEquality u1 u2
-    , v1 == v2 =
-      app $ BVUnsignedLe u1 v1
+    | Just (BVUnsignedLt x1 x2) <- asApp x
+    , Just (BVEq y1 y2) <- asApp y
+    , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
+    , (x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)
+    = bvUle x1 x2
 
       -- Default case
     | otherwise = app $ BVOr (exprWidth x) x y
@@ -376,17 +411,27 @@ instance S.IsValue Expr where
   sext = sext_impl LeqProof LeqProof
 
   uext' w e0
+      -- Literal case
     | Just v <- asBVLit e0 =
       let w0 = S.bv_width e0
-       in withLeqProof (leqTrans (leqProof (knownNat :: NatRepr 1) w0) (ltProof w0 w)) $
+       in withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
             bvLit w v
       -- Collapse duplicate extensions.
     | Just (UExt e w0) <- asApp e0 = do
       let we = S.bv_width e
       withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
         S.uext w e
-      -- Default case
 
+{-
+      -- Convert @uext w (trunc w0 e)@ into @e .&. (2^w0 - 1)@
+      -- We have disabled this because our abstract domains are not as precise.
+    | Just (Trunc e w0) <- asApp e0
+    , Just Refl <- testEquality (S.bv_width e) w = do
+      withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
+        e S..&. bvLit w (maxUnsigned w0)
+-}
+
+      -- Default case
     | otherwise = app (UExt e0 w)
 
   even_parity x
@@ -407,7 +452,7 @@ instance S.IsValue Expr where
   usbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
       -- If the borrow bit is zero, this is equivalent to unsigned x < y.
-    | Just 0 <- asBVLit c = app $ BVUnsignedLt x y
+    | Just 0 <- asBVLit c = S.bvUlt x y
     | otherwise = app $ UsbbOverflows (exprWidth x) x y c
 
   ssbb_overflows x y c

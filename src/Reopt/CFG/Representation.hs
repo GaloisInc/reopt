@@ -296,20 +296,21 @@ data AssignRhs tp where
   SetUndefined :: !(NatRepr n) -- Width of undefined value.
                -> AssignRhs (BVType n)
 
-  Read :: !(StmtLoc (Value (BVType 64)) tp) -> AssignRhs tp
+  Read :: !(StmtLoc (Value (BVType 64)) tp)
+       -> AssignRhs tp
 
   -- Compares to memory regions
   MemCmp :: !Integer
-             -- ^ Number of bytes per value.
-          -> !(BVValue 64)
-             -- ^ Number of values to compare
-          -> !(BVValue 64)
-             -- ^ Pointer to first buffer.
-          -> !(BVValue 64)
-             -- ^ Pointer to second buffer.
-          -> !(BVValue 1)
-             -- ^ Direction flag, False means increasing
-          -> AssignRhs (BVType 64)
+         -- ^ Number of bytes per value.
+         -> !(BVValue 64)
+         -- ^ Number of values to compare
+         -> !(BVValue 64)
+         -- ^ Pointer to first buffer.
+         -> !(BVValue 64)
+         -- ^ Pointer to second buffer.
+         -> !(BVValue 1)
+         -- ^ Direction flag, False means increasing
+         -> AssignRhs (BVType 64)
 
 ------------------------------------------------------------------------
 -- Assignment
