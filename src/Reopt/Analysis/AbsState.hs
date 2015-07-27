@@ -42,6 +42,7 @@ module Reopt.Analysis.AbsState
   , transferRHS
   , abstractLt
   , abstractLeq
+  , isBottom
   ) where
 
 import           Control.Applicative ( (<$>) )
@@ -191,7 +192,7 @@ instance Show (AbsValue tp) where
 
 instance Pretty (AbsValue tp) where
   pretty (FinSet s) = ppIntegerSet s
-  pretty (CodePointers s) = ppIntegerSet s
+  pretty (CodePointers s) = text "code" <+> ppIntegerSet s
   pretty (StridedInterval s) = pretty s
   pretty (SubValue n av) = (pretty av) <> brackets (integer (natValue n))
   pretty (StackOffset     s) = text "rsp_0 +" <+> ppIntegerSet s
@@ -378,19 +379,36 @@ member _n _v = False
 -- return an overapproximation rather than an underapproximation of
 -- the value.
 -- Currently the only case we care about is where v' is an interval
+
+isBottom :: AbsValue tp -> Bool
+isBottom (FinSet v)       = Set.null v
+isBottom (CodePointers v) = Set.null v
+isBottom (StackOffset v)  = Set.null v
+isBottom SomeStackOffset = False
+isBottom (StridedInterval v) = SI.size v == 0
+isBottom (SubValue _ v) = isBottom v
+isBottom TopV = False
+
 meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
-meet TopV x = x
-meet x TopV = x
+meet x y
+  | isBottom m, not (isBottom x), not (isBottom y) =
+      trace ("Got empty: " ++ show (pretty x) ++ " " ++ show (pretty y)) $ m
+  | otherwise = m  
+  where m = meet' x y
+   
+meet' :: AbsValue tp -> AbsValue tp -> AbsValue tp
+meet' TopV x = x
+meet' x TopV = x
 -- FIXME: reuse an old value if possible?
-meet (CodePointers old) (CodePointers new) = CodePointers $ Set.intersection old new
+meet' (CodePointers old) (CodePointers new) = CodePointers $ Set.intersection old new
 --TODO: Fix below
-meet (asFinSet "meet" -> IsFin old) (asFinSet "meet" -> IsFin new) =
+meet' (asFinSet "meet" -> IsFin old) (asFinSet "meet" -> IsFin new) =
   FinSet $ Set.intersection old new
-meet (StackOffset old) (StackOffset new) =
+meet' (StackOffset old) (StackOffset new) =
   StackOffset $ Set.intersection old new
 
 -- Intervals
-meet v v'
+meet' v v'
   | StridedInterval si_old <- v, StridedInterval si_new <- v'
     = stridedInterval $ si_old `SI.glb` si_new
   | StridedInterval si <- v,  IsFin s <- asFinSet "meet" v'
@@ -401,7 +419,7 @@ meet v v'
 -- These cases are currently sub-optimal: really we want to remove all
 -- those from the larger set which don't have a prefix in the smaller
 -- set.
-meet v v'
+meet' v v'
   | SubValue n av <- v, SubValue n' av' <- v' =
       case testNatCases n n' of
         NatCaseLT LeqProof -> subValue n av -- FIXME
@@ -415,10 +433,10 @@ meet v v'
   | StridedInterval si <- v, SubValue n av <- v' = v -- FIXME: ?
 
 -- Join addresses
-meet SomeStackOffset{} s@StackOffset{} = s
-meet s@StackOffset{} SomeStackOffset{} = s
-meet SomeStackOffset SomeStackOffset{} = SomeStackOffset
-meet x _ = x -- Arbitrarily pick one.
+meet' SomeStackOffset{} s@StackOffset{} = s
+meet' s@StackOffset{} SomeStackOffset{} = s
+meet' SomeStackOffset SomeStackOffset{} = SomeStackOffset
+meet' x _ = x -- Arbitrarily pick one.
 -- meet x y = error $ "meet: impossible" ++ show (x,y)
 
 trunc :: (v+1 <= u)
@@ -623,7 +641,7 @@ abstractLt tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    -- trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))
+    trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
@@ -638,7 +656,7 @@ abstractLeq tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    -- trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))
+    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
@@ -846,11 +864,20 @@ someValueWidth v =
 addMemWrite :: Value (BVType 64) -> Value tp -> AbsRegs -> AbsRegs
 addMemWrite a v r =
   case (transferValue r a, transferValue r v) of
-    (_,TopV) -> r
+    -- (_,TopV) -> r
+    -- We overwrite _some_ stack location.  An alternative would be to
+    -- update everything with v.
+    (SomeStackOffset, _) -> r & curAbsStack .~ Map.empty
+    (StackOffset s, _) | Set.size s > 1 ->
+      r & curAbsStack .~ Map.empty
+    (StackOffset s, TopV) | [o] <- Set.toList s -> do
+      let w = someValueWidth v
+       in r & curAbsStack %~ deleteRange o (o+w-1)           
     (StackOffset s, v_abs) | [o] <- Set.toList s -> do
       let w = someValueWidth v
           e = StackEntry (valueType v) v_abs
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
+    -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
 
 addOff :: NatRepr w -> Integer -> Integer -> Integer

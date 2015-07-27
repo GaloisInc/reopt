@@ -537,6 +537,12 @@ refineApp app av regs =
    UsbbOverflows sz l r (BVValue _ 0)
      | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
 
+   BVUnsignedLt l r
+     | Just b    <- asConcreteSingleton av -> refineLt (valueType l) l r b regs
+
+   BVUnsignedLe l r
+     | Just b    <- asConcreteSingleton av -> refineLeq (valueType l) l r b regs
+
    -- FIXME: HACK
    -- This detects r - x < 0 || r - x == 0, i.e. r <= x
    BVOr _ (getAssignApp -> Just (UsbbOverflows _ r xv@(BVValue sz x) (BVValue _ 0)))
@@ -544,7 +550,6 @@ refineApp app av regs =
      | Just Refl <- testEquality r r'
      , Just Refl <- testEquality y (mkLit sz (negate x))
      , Just b    <- asConcreteSingleton av ->
-       -- trace ("Saw the OR abomination: " ++ show (pretty r <+> pretty x)) $
        refineLeq (BVTypeRepr sz) r xv b regs
 
    -- FIXME: HACK
@@ -556,7 +561,6 @@ refineApp app av regs =
      | Just Refl <- testEquality r r'
      , Just Refl <- testEquality y (mkLit sz (negate x))
      , Just b    <- asConcreteSingleton av ->
-       -- trace ("Saw the AND abomination: " ++ show (pretty r <+> pretty x)) $
        refineLt (BVTypeRepr sz) xv r b regs
 
   -- Mux can let us infer the condition?
@@ -579,8 +583,14 @@ refineLeq tp x y b regs
   where
     x_av = transferValue regs x
     y_av = transferValue regs y
-    (x_leq, y_leq)   = abstractLeq tp x_av y_av
-    (y_lt, x_lt)     = abstractLt  tp y_av x_av
+    (x_leq, y_leq)   = check $ abstractLeq tp x_av y_av
+    (y_lt, x_lt)     = check $ abstractLt  tp y_av x_av
+    check r@(a, b)
+      | isBottom a = flip trace r $ "Bottom in refineLeq: " 
+                     ++ show (pretty regs)
+      | isBottom b = flip trace r $ "Bottom in refineLeq: " 
+                     ++ show (pretty regs)
+      | otherwise  = r
 
 refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
 refineLt tp x y b regs
@@ -591,9 +601,15 @@ refineLt tp x y b regs
   where
     x_av = transferValue regs x
     y_av = transferValue regs y
-    (x_lt, y_lt)   = abstractLt tp x_av y_av
-    (y_leq, x_leq) = abstractLeq tp y_av x_av
-
+    (x_lt, y_lt)   = check $ abstractLt tp x_av y_av
+    (y_leq, x_leq) = check $ abstractLeq tp y_av x_av
+    check r@(a, b)
+      | isBottom a = flip trace r $ "Bottom in refineLt: " 
+                     ++ show (pretty regs)
+      | isBottom b = flip trace r $ "Bottom in refineLt: " 
+                     ++ show (pretty regs)
+      | otherwise  = r
+                     
 -- -- FIXME: bottom
 -- refineLVal :: Simple Lens AbsRegs (AbsValue tp)
 --               -> Value tp
