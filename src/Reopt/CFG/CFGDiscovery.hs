@@ -110,8 +110,7 @@ recordFunctionEntry :: BlockLabel
                     -> AbsBlockState
                     -> CodeAddr
                     -> State InterpState ()
-recordFunctionEntry src rsn ab addr =
-  trace ("Found function entry " ++ showHex addr ".") $ do
+recordFunctionEntry src rsn ab addr = do
   mergeBlock src rsn ab addr
   functionEntries %= Set.insert addr
 
@@ -145,6 +144,7 @@ reallyGetBlock rsn addr = do
          -- Delete the old block
          blocks  %= Map.delete l
          -- Add its address to the frontier.
+         trace ("Adding to frontier " ++ show l) $ do
          frontier %= Map.insert l BlockSplit
        _ -> return ()
   -- Get top
@@ -541,13 +541,13 @@ refineApp app av regs =
    -- propagate back a subvalue.
    Trunc x sz -> refineTrunc x sz av regs
 
-   -- basically less-than: does x - y overflow? only if x < y.
-   UsbbOverflows sz l r (BVValue _ 0)
-     | Just b    <- asConcreteSingleton av -> refineLt l r b regs
-
    -- Assertion "r <= x"
-   BVUnsignedLe r x -> refineULeqTrue r x regs
-   BVUnsignedLt r x -> refineULtTrue  r x regs
+   BVUnsignedLe r x
+     | Just b    <- asConcreteSingleton av ->
+       refineLeq r x b regs
+   BVUnsignedLt r x
+     | Just b    <- asConcreteSingleton av ->
+       refineLt  r x b regs
 
    -- FIXME: HACK
    -- This detects r - x < 0 || r - x == 0, i.e. r <= x
@@ -708,16 +708,16 @@ getJumpTableBounds :: Memory Word64 -- ^ State of memory
                    -> AbsProcessorState       -- ^ Current processor registers.
                    -> Word64
                    -> Value (BVType 64) -- ^ Index in jump table
-                   -> Maybe Word64
+                   -> Maybe Word64 -- ^ One past last index in jump table.
 getJumpTableBounds mem regs base index
     -- Get range for the index.
   | let abs_value = transferValue regs index
-  , StridedInterval index_interval  <- trace ("getJumpTable2 " ++ show index ++ " " ++ show abs_value) $ abs_value
+  , StridedInterval index_interval  <- abs_value
     -- Check that relevant interval is completely contained within a read-only
     -- read only range in the memory.
   , SI.StridedInterval _ index_base index_range index_stride <-
         trace "getJumpTable3" $ index_interval
-  , index_end <- index_base + index_range * index_stride
+  , index_end <- index_base + (index_range + 1) * index_stride
   , read_end <- toInteger base + 8 * index_end
   , rangeInReadonlySegment base (fromInteger read_end) mem =
 
@@ -725,18 +725,6 @@ getJumpTableBounds mem regs base index
     trace ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
       Just $! fromInteger index_end
 getJumpTableBounds _ _ _ _ = Nothing
-
-{-
--- looks for jump tables
-getJumpTable :: Memory Word64 -- ^ State of memory
-             -> AbsProcessorState       -- ^ Current processor registers.
-             -> Value (BVType 64) -- ^ Memory address that IP is read from.
-             -> Maybe (SI.StridedInterval (BVType 64))
-getJumpTable mem regs read_addr = do
-  (base, index) <- matchJumpTable mem read_addr
-  getJumpTableBounds mem regs base index
-getJumpTable _mem _regs _ = Nothing
--}
 
   -- -- basically, (8 * x) + addr
   -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
@@ -843,7 +831,7 @@ transferBlock b regs = do
               -- TODO: Add check to ensure stack height is correct.
               trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
-            else
+            else do
               -- Merge block state.
               mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
@@ -858,10 +846,10 @@ transferBlock b regs = do
 
 
             -- Compute jump table bounds
-            let mread_interval = getJumpTableBounds mem regs' base index
+            let mread_end = getJumpTableBounds mem regs' base index
             -- Compute end address.
             let end_addr =
-                  case mread_interval of
+                  case mread_end of
                     Just index_end ->
                         Just $! base + 8 * index_end
                     _ -> trace ("Could not find interval at " ++ show lbl) $
@@ -869,21 +857,38 @@ transferBlock b regs = do
             -- Record memory as in a jump table.
             globalDataMap %= Map.insert base (JumpTable end_addr)
 
+            -- This function resolves jump table entries.
+            -- It is a recursive function that has an index into the jump table.
+            -- If the current index can be interpreted as a intra-procedural jump,
+            -- then it will add that to the current procedure.  If not, then it
+            -- will
+            let resolveJump :: Word64 -- ^ Current index
+                            -> State InterpState ()
+                resolveJump idx | Just idx == mread_end = do
+                  -- Stop jump table when we have reached computed bounds.
+                  return ()
+                resolveJump idx = do
+                  let read_addr = base + 8 * idx
+                  s <- get
+                  case memLookupWord64 mem pf_r read_addr of
+                    Left _ -> trace ("Stop jump table: invalid addr " ++ showHex read_addr ".") $
+                      return ()
+                    Right tgt_addr
+                      | isCodeAddr mem tgt_addr
+                      , inSameFunction (labelAddr lbl) tgt_addr s -> do
 
-            -- Read addresses in interval.
-            let indices =
-                  case mread_interval of
-                    Just 0 -> []
-                    Just n -> [0..n-1]
-                    Nothing -> []
-            -- Look for new ips.
-            Fold.forM_ indices $ \idx -> do
-              let Right tgt_addr = memLookupWord64 mem pf_r (base + 8 * idx)
-              when (isCodeAddr mem tgt_addr) $ do
-                trace ("Trying IP " ++ showHex tgt_addr ".") $ do
-                let abst = finalAbsBlockState regs' s'
-                seq abst $ do
-                mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
+                        trace ("Trying IP " ++ showHex tgt_addr ".") $ do
+                        let abst = finalAbsBlockState regs' s'
+                        seq abst $ do
+                        mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
+                        resolveJump (idx+1)
+                      | Just index_end <- mread_end
+                      , idx == index_end -> do
+                        return ()
+                      | otherwise -> do
+                        trace ("Stop jump table: " ++ show idx ++ " " ++ show mread_end) $ do
+                        return ()
+            resolveJump 0
 
           -- We have a jump that we do not understand.
           -- This could be a tail call.
@@ -950,7 +955,13 @@ mkFinalCFG s =
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =
   case Map.minViewWithKey (st^.frontier) of
-    Nothing -> st
+    Nothing ->
+      case Set.minView (st^.function_frontier) of
+        Nothing -> st
+        Just (addr, next_roots) ->
+          let st_pre = st & function_frontier .~ next_roots
+              st_post = flip execState st_pre $ transfer StartAddr addr
+           in explore_frontier st_post
     Just ((addr,rsn), next_roots) ->
       let st_pre = st & frontier .~ next_roots
           st_post = flip execState st_pre $ transfer rsn addr

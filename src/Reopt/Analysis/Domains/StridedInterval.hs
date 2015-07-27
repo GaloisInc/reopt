@@ -18,7 +18,6 @@
 -- FIXME: only really useful for unsigned?
 module Reopt.Analysis.Domains.StridedInterval
        ( StridedInterval(..)
-       , empty
          -- Constructors
        , singleton, mkStridedInterval, fromFoldable
          -- Predicates
@@ -35,6 +34,7 @@ module Reopt.Analysis.Domains.StridedInterval
 import           Debug.Trace
 
 import           Control.Applicative ( (<$>), (<*>) )
+import           Control.Exception (assert)
 import qualified Data.Foldable as Fold
 import           Data.Maybe (isNothing)
 import qualified Data.Set as S
@@ -57,7 +57,7 @@ import           Test.QuickCheck
 data StridedInterval (tp :: Type) =
   StridedInterval { typ :: TypeRepr tp -- maybe not needed?
                   , base :: Integer
-                  , range :: Integer
+                  , range :: Integer -- ^ This is the number of elements in the interval + 1
                   , stride :: Integer }
 --  | EmptyInterval
 
@@ -92,7 +92,7 @@ empty :: TypeRepr tp -> StridedInterval tp
 empty tp =
   StridedInterval { typ = tp
                   , base = 0
-                  , range = 0
+                  , range = -1
                   , stride = 1
                   }
 
@@ -132,6 +132,9 @@ fromFoldable sz vs
 -- -----------------------------------------------------------------------------
 -- Predicates
 
+isEmpty :: StridedInterval tp -> Bool
+isEmpty s = range s < 0
+
 isSingleton :: StridedInterval tp -> Maybe Integer
 isSingleton StridedInterval { base = b, range = 0 } = Just b
 isSingleton _  = Nothing
@@ -143,17 +146,17 @@ isTop si@StridedInterval{} =
 isTop _  = False
 
 member :: Integer -> StridedInterval tp -> Bool
---member _ EmptyInterval = False
-member n si = base si <= n
+member _ si | isEmpty si = False
+member n si = assert (stride si /= 0) $
+              base si <= n
               && (n - base si) `mod` stride si == 0
-              && (n - base si) `div` stride si <= range si
+              && n <= base si + stride si * range si
 
 -- is the set represented by si1 contained in si2?
 isSubsetOf :: StridedInterval (BVType n)
        -> StridedInterval (BVType n)
        -> Bool
---isSubsetOf EmptyInterval _ = True
---isSubsetOf _ EmptyInterval = False
+isSubsetOf si1 _ | isEmpty si1 = True
 isSubsetOf si1 si2
   | Just s <- isSingleton si1 = member s si2
   | otherwise = member (base si1) si2
@@ -167,8 +170,8 @@ isSubsetOf si1 si2
 lub :: StridedInterval (BVType n)
        -> StridedInterval (BVType n)
        -> StridedInterval (BVType n)
---lub EmptyInterval{} si = si
---lub si EmptyInterval{} = si
+lub s t | isEmpty s = t
+lub s t | isEmpty t = s
 -- FIXME: make more precise?
 lub si1 si2
   | Just s <- isSingleton si1 = lubSingleton s si2
@@ -279,6 +282,7 @@ ceil_quot :: Integral a => a -> a -> a
 ceil_quot x y = x `quot` y + (if x `rem` y == 0 then 0 else 1)
 
 floor_quot :: Integral a => a -> a -> a
+floor_quot _ 0 = error "floor_quot div by 0"
 floor_quot x y = x `div` y
 
 prop_sld :: Positive Integer -> Positive Integer
@@ -350,7 +354,8 @@ bvadd sz si1 si2 =
                              , stride = m }
   where
     m = gcd (stride si1) (stride si2)
-    r = (range si1 * (stride si1 `div` m)) + (range si2 * (stride si2 `div` m))
+    r | m == 0 = error "bvadd given 0 stride"
+      | otherwise = (range si1 * (stride si1 `div` m)) + (range si2 * (stride si2 `div` m))
 
 prop_bvadd ::  StridedInterval (BVType 64)
             -> StridedInterval (BVType 64)
@@ -426,21 +431,28 @@ prop_bvmul = mk_prop (*) bvmul
 -- Assumes b < q (?)
 -- currently broken :(
 leastMod :: Integer -> Integer -> Integer -> Integer -> Integer
+leastMod _ 0 _ _ = error "leastMod given m = 0"
+leastMod _ _ 0 _ = error "leastMod given q = 0"
 leastMod b m q n
   | b + n * q < m  = b -- no wrap
   | m `mod` q == 0 = b -- assumes q <= m
   | otherwise =
-      trace (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` (m `div`q)))) $
+      trace (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` m_div_q))) $
       leastMod next_b m' q'
                 -- FIXME: we sometimes miss a +1 here, we do this to
                 -- be conservative (overapprox.)
-      (next_n `div` (m `div`q))
+      (next_n `div` m_div_q)
   where
+    m_div_q | q == 0 = error "leastMod given q == 0"
+            | r == 0 = error "leastMod given m `div` q == 0"
+            | otherwise = r
+      where r = m `div` q
     m' = q
-    q' = q - m `mod` q
+    q' | q == 0 = error "leastMod given q == 0"
+       | otherwise = q - m `mod` q
     (next_b, next_n)
       | b < q'    = (b, n)
-      | otherwise = let i = (m `div` q) + 1
+      | otherwise = let i = m_div_q + 1
                     in (((b + i * q) `mod` m) `mod` q, n - i)
 
 -- | Truncate an interval.
@@ -473,6 +485,7 @@ trunc si sz
     top' = top sz
     base_mod_sz = base si'
     -- positive only
+    ceilDiv x 0 = error "SI.trunc given 0 stride."
     ceilDiv x y = (x + y - 1) `div` y
 
 prop_trunc :: StridedInterval (BVType 64)
@@ -511,6 +524,7 @@ toList si@StridedInterval{} = map (\v -> base si + stride si * v) [0 .. range si
 
 instance Pretty (StridedInterval tp) where
 --  pretty EmptyInterval        = brackets empty
+  pretty si | isEmpty si = text "[]"
   pretty si | Just s <- isSingleton si = brackets (integer s)
   pretty si@StridedInterval{} = brackets (integer (base si) <> comma
                                           <+> integer (base si + stride si)

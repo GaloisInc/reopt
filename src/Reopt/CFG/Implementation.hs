@@ -292,14 +292,13 @@ instance S.IsValue Expr where
     , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
     , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
       S.bvUlt x1 x2
-      -- x1 <= x2 & x1 ~= x2 = x1 < x2
+      -- x1 ~= x2 & x1 <= x2 => x1 < x2
     | Just (BVUnsignedLe y1 y2) <- asApp y
-    , Just (BVComplement w xc) <- asApp x
+    , Just (BVComplement _ xc) <- asApp x
     , Just (BVEq x1 x2) <- asApp xc
     , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
     , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
       S.bvUlt y1 y2
-
       -- Default case
     | otherwise = app $ BVAnd (exprWidth x) x y
 
@@ -309,16 +308,18 @@ instance S.IsValue Expr where
       -- Cancel or when one argument is maxUnsigned
     | Just xv <- asBVLit x, xv == maxUnsigned (exprWidth x) = x
     | Just yv <- asBVLit y, yv == maxUnsigned (exprWidth x) = y
-      -- Eliminate or when one argument is 0
+      -- Eliminate "or" when one argument is 0
     | Just 0 <- asBVLit x = y
     | Just 0 <- asBVLit y = x
       -- Idempotence
     | x == y = x
+
       -- Rewrite "x < y | x == y" to "x <= y"
-    | Just (BVUnsignedLt u1 v1) <- asApp x
-    , Just (BVEq u2 v2) <- asApp y
-    , Just Refl <- testEquality u1 u2
-    , v1 == v2 = bvUle u1 v1
+    | Just (BVUnsignedLt x1 x2) <- asApp x
+    , Just (BVEq y1 y2) <- asApp y
+    , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
+    , (x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)
+    = bvUle x1 x2
 
       -- Default case
     | otherwise = app $ BVOr (exprWidth x) x y
@@ -451,7 +452,7 @@ instance S.IsValue Expr where
   usbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
       -- If the borrow bit is zero, this is equivalent to unsigned x < y.
-    | Just 0 <- asBVLit c = app $ BVUnsignedLt x y
+    | Just 0 <- asBVLit c = S.bvUlt x y
     | otherwise = app $ UsbbOverflows (exprWidth x) x y c
 
   ssbb_overflows x y c
