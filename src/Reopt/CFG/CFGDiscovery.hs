@@ -206,7 +206,7 @@ getBlock rsn addr = do
 
 transferStmt :: Monad m
              => Stmt
-             -> StateT AbsRegs m ()
+             -> StateT AbsProcessorState m ()
 transferStmt stmt =
   case stmt of
     AssignStmt a -> do
@@ -262,7 +262,7 @@ recordEscapedCodePointers :: [Word64] -> FrontierReason -> InterpState -> Interp
 recordEscapedCodePointers addrs rsn s0 =
   foldl' (\s v -> recordEscapedCodePointer v rsn s) s0 addrs
 
-recordWriteStmt :: BlockLabel -> AbsRegs -> Stmt -> State InterpState ()
+recordWriteStmt :: BlockLabel -> AbsProcessorState -> Stmt -> State InterpState ()
 recordWriteStmt lbl regs (Write (MemLoc addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v
@@ -275,7 +275,7 @@ recordWriteStmt lbl regs (Write (MemLoc addr _) v)
     modify $ recordEscapedCodePointers vs2 (InWrite lbl)
 recordWriteStmt _ _ _ = return ()
 
-transferStmts :: Monad m => AbsRegs -> [Stmt] -> m AbsRegs
+transferStmts :: Monad m => AbsProcessorState -> [Stmt] -> m AbsProcessorState
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
 finalBlockState :: Memory Word64 -> CodeAddr -> FinalCFG -> AbsBlockState
@@ -294,11 +294,11 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
            -> MapF Assignment AbsValue
         go m0 b =
           case blockLabel b of
-            GeneratedBlock a 0 -> insBlock b (initAbsRegs mem (finalBlockState mem a fg)) m0
+            GeneratedBlock a 0 -> insBlock b (initAbsProcessorState mem (finalBlockState mem a fg)) m0
             _ -> m0
 
         insBlock :: Block
-                 -> AbsRegs
+                 -> AbsProcessorState
                  -> MapF Assignment AbsValue
                  -> MapF Assignment AbsValue
         insBlock b r0 m0 =
@@ -491,41 +491,47 @@ isCodeAddrWriteTo _ _ _ = Nothing
 -- Refining an abstract state based upon a condition
 
 -- FIXME: if val \notin av then we should return bottom
-refineValue :: Value tp
-               -> AbsValue tp
-               -> AbsRegs
-               -> AbsRegs
-refineValue (BVValue _n _val) _av regs = regs
-refineValue (Initial r) av regs =
+-- @refineProcState v av s@ returns a processor state after we have
+-- asserted that @v@ is contained in the set @AbsValue@.
+refineProcState :: Value tp -- ^ Value in processor state
+                -> AbsValue tp -- ^ Abstract value to assign value.
+                -> AbsProcessorState
+                -> AbsProcessorState
+refineProcState (BVValue _n _val) _av regs = regs
+refineProcState (Initial r) av regs =
   regs & (absInitialRegs . register r) %~ flip meet av
-refineValue (AssignedValue ass@(Assignment _ rhs)) av regs
+refineProcState (AssignedValue ass@(Assignment _ rhs)) av regs
   -- av is not a subset.
   | Nothing <- joinAbsValue av av_old = regs
-  -- av adds new information, we need to refine any parents
-  | EvalApp app <- rhs = refineApp app av' regs'
-  -- no parents, but update ass
-  | otherwise          = regs'
+  | otherwise = do
+    -- Get joined abstract value.
+    let av'    = meet av_old av
+    -- Get registers after updating assignment value to av'
+    let  regs'  = regs & (absAssignments . assignLens ass) .~ av'
+    case rhs of
+      -- av adds new information, we need to refine any parents
+      EvalApp app -> refineApp app av' regs'
+      -- no parents, but update ass
+      _ -> regs'
   where
     av_old = regs ^. absAssignments ^. assignLens ass
-    av'    = meet av_old av
-    regs'  = regs & (absAssignments . assignLens ass) .~ av'
 
 refineApp :: App Value tp
              -> AbsValue tp
-             -> AbsRegs
-             -> AbsRegs
+             -> AbsProcessorState
+             -> AbsProcessorState
 refineApp app av regs =
   case app of
    -- We specialise these to booleans for the moment
    -- BVComplement sz v
    --   | Just Refl <- testEquality sz n1
    --   , Just b    <- asConcreteSingleton av ->
-   --     refineValue v (abstractSingleton n1 (1 - b)) regs
+   --     refineProcState v (abstractSingleton n1 (1 - b)) regs
    -- BVAnd sz l r
    --   | Just Refl <- testEquality sz n1
    --   , Just b    <- asConcreteSingleton av ->
-   --     let l_regs = refineValue l av regs
-   --         r_regs = refineValue r av regs
+   --     let l_regs = refineProcState l av regs
+   --         r_regs = refineProcState r av regs
    --     in if b == 1 then  -- both are true, so we do a meet
    --          glb l_regs r_regs
    --        else -- one is false, so we do a join
@@ -537,7 +543,11 @@ refineApp app av regs =
 
    -- basically less-than: does x - y overflow? only if x < y.
    UsbbOverflows sz l r (BVValue _ 0)
-     | Just b    <- asConcreteSingleton av -> refineLt (BVTypeRepr sz) l r b regs
+     | Just b    <- asConcreteSingleton av -> refineLt l r b regs
+
+   -- Assertion "r <= x"
+   BVUnsignedLe r x -> refineULeqTrue r x regs
+   BVUnsignedLt r x -> refineULtTrue  r x regs
 
    -- FIXME: HACK
    -- This detects r - x < 0 || r - x == 0, i.e. r <= x
@@ -546,8 +556,9 @@ refineApp app av regs =
      | Just Refl <- testEquality r r'
      , Just Refl <- testEquality y (mkLit sz (negate x))
      , Just b    <- asConcreteSingleton av ->
-       -- trace ("Saw the OR abomination: " ++ show (pretty r <+> pretty x)) $
-       refineLeq (BVTypeRepr sz) r xv b regs
+       refineLeq r xv b regs
+
+
 
    -- FIXME: HACK
    -- This detects not (r - x < 0) && not (r - x == 0), i.e. x < r
@@ -558,8 +569,7 @@ refineApp app av regs =
      | Just Refl <- testEquality r r'
      , Just Refl <- testEquality y (mkLit sz (negate x))
      , Just b    <- asConcreteSingleton av ->
-       -- trace ("Saw the AND abomination: " ++ show (pretty r <+> pretty x)) $
-       refineLt (BVTypeRepr sz) xv r b regs
+       refineLt xv r b regs
 
   -- Mux can let us infer the condition?
    _ -> regs
@@ -569,38 +579,48 @@ refineApp app av regs =
 
 refineTrunc :: ((n + 1) <= n') =>
                Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
-               -> AbsRegs -> AbsRegs
-refineTrunc v sz av regs = refineValue v (subValue sz av) regs
+               -> AbsProcessorState -> AbsProcessorState
+refineTrunc v sz av regs = refineProcState v (subValue sz av) regs
 
-refineLeq :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
-refineLeq tp x y b regs
-  -- y < x
-  | b == 0     = refineValue x x_lt (refineValue y y_lt regs)
-  -- x <= y
-  | otherwise  = refineValue x x_leq (refineValue y y_leq regs)
+refineULeqTrue :: Value tp
+               -> Value tp
+               -> AbsProcessorState
+               -> AbsProcessorState
+refineULeqTrue x y regs = refineProcState x x_leq (refineProcState y y_leq regs)
   where
-    x_av = transferValue regs x
-    y_av = transferValue regs y
-    (x_leq, y_leq)   = abstractLeq tp x_av y_av
-    (y_lt, x_lt)     = abstractLt  tp y_av x_av
+    (x_leq, y_leq) = abstractULeq (valueType x) (transferValue regs x) (transferValue regs y)
 
-refineLt :: TypeRepr tp -> Value tp -> Value tp -> Integer -> AbsRegs -> AbsRegs
-refineLt tp x y b regs
+refineULtTrue :: Value tp
+              -> Value tp
+              -> AbsProcessorState
+              -> AbsProcessorState
+refineULtTrue x y regs = refineProcState x x_lt (refineProcState y y_lt regs)
+  where
+    (x_lt, y_lt) = abstractULt (valueType x) (transferValue regs x) (transferValue regs y)
+
+refineLeq :: Value tp
+          -> Value tp
+          -> Integer
+          -> AbsProcessorState
+          -> AbsProcessorState
+refineLeq x y b regs
+     -- y < x
+    | b == 0     = refineULtTrue y x regs
+    -- x <= y
+    | otherwise  = refineULeqTrue x y regs
+
+refineLt :: Value tp -> Value tp -> Integer -> AbsProcessorState -> AbsProcessorState
+refineLt x y b regs
   -- y <= x
-  | b == 0     = refineValue x x_leq (refineValue y y_leq regs)
+  | b == 0     = refineULeqTrue y x regs
   -- x < y case
-  | otherwise  = refineValue x x_lt (refineValue y y_lt regs)
-  where
-    x_av = transferValue regs x
-    y_av = transferValue regs y
-    (x_lt, y_lt)   = abstractLt tp x_av y_av
-    (y_leq, x_leq) = abstractLeq tp y_av x_av
+  | otherwise  = refineULtTrue  x y regs
 
 -- -- FIXME: bottom
--- refineLVal :: Simple Lens AbsRegs (AbsValue tp)
+-- refineLVal :: Simple Lens AbsProcessorState (AbsValue tp)
 --               -> Value tp
---               -> AbsRegs
---               -> AbsRegs
+--               -> AbsProcessorState
+--               -> AbsProcessorState
 -- refineLVal l (BVValue n val) regs =
 --   -- FIXME: if val \notin absinit l then we should return bottom
 --   regs & l .~ abstractSingleton n val
@@ -675,20 +695,20 @@ matchJumpTable :: Memory Word64
                -> Maybe (Word64, Value (BVType 64))
 matchJumpTable mem read_addr
     -- Turn the read address into base + offset.
-  | Just (BVAdd _ offset (BVValue _ base)) <- trace "matchJumpTable0" $ valueAsApp read_addr
+  | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp read_addr
     -- Turn the offset into a multiple by an index.
-  , Just (BVMul _ (BVValue _ 8) index) <- trace "matchJumpTable1" $ valueAsApp offset
+  , Just (BVMul _ (BVValue _ 8) index) <- valueAsApp offset
   , isReadonlyAddr mem (fromInteger base) = do
     Just (fromInteger base, index)
 matchJumpTable _ _ =
     Nothing
 
--- looks for jump tables
+-- Returns the index bounds for
 getJumpTableBounds :: Memory Word64 -- ^ State of memory
-                   -> AbsRegs       -- ^ Current processor registers.
+                   -> AbsProcessorState       -- ^ Current processor registers.
                    -> Word64
                    -> Value (BVType 64) -- ^ Index in jump table
-                   -> Maybe (SI.StridedInterval (BVType 64))
+                   -> Maybe Word64
 getJumpTableBounds mem regs base index
     -- Get range for the index.
   | let abs_value = transferValue regs index
@@ -699,25 +719,24 @@ getJumpTableBounds mem regs base index
         trace "getJumpTable3" $ index_interval
   , index_end <- index_base + index_range * index_stride
   , read_end <- toInteger base + 8 * index_end
-  , rangeInReadonlySegment base (fromInteger read_end) mem
+  , rangeInReadonlySegment base (fromInteger read_end) mem =
 
-  , base_interval <- trace "getJumpTable4" $  SI.singleton (BVTypeRepr n64) (toInteger base)
-  , offset_interval  <- SI.bvmul n64 (SI.singleton (BVTypeRepr n64) 8) index_interval
-  , read_interval <- SI.bvadd n64 base_interval offset_interval =
     -- Get the addresses associated.
     trace ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
-      Just $! read_interval
+      Just $! fromInteger index_end
 getJumpTableBounds _ _ _ _ = Nothing
 
+{-
 -- looks for jump tables
 getJumpTable :: Memory Word64 -- ^ State of memory
-             -> AbsRegs       -- ^ Current processor registers.
+             -> AbsProcessorState       -- ^ Current processor registers.
              -> Value (BVType 64) -- ^ Memory address that IP is read from.
              -> Maybe (SI.StridedInterval (BVType 64))
 getJumpTable mem regs read_addr = do
   (base, index) <- matchJumpTable mem read_addr
   getJumpTableBounds mem regs base index
 getJumpTable _mem _regs _ = Nothing
+-}
 
   -- -- basically, (8 * x) + addr
   -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
@@ -752,10 +771,11 @@ recoverIsReturnStmt s = do
     _ -> False
 
 transferBlock :: Block   -- ^ Block to start from.
-              -> AbsRegs -- ^ Registers at this block.
+              -> AbsProcessorState -- ^ Registers at this block.
               -> State InterpState ()
 transferBlock b regs = do
   let lbl = blockLabel b
+  trace ("transferBlock " ++ show lbl) $ do
   mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
@@ -763,11 +783,11 @@ transferBlock b regs = do
     Branch c lb rb -> do
       mapM_ (recordWriteStmt lbl regs') (blockStmts b)
       Just l <- lookupBlock' lb
-      let  l_regs = refineValue c (abstractSingleton mem n1 1) regs'
+      let  l_regs = refineProcState c (abstractSingleton mem n1 1) regs'
       Just r <- lookupBlock' rb
-      let r_regs = refineValue c (abstractSingleton mem n1 0) regs'
+      let r_regs = refineProcState c (abstractSingleton mem n1 0) regs'
       -- We re-transfer the stmts to propagate any changes from
-      -- the above refineValue.  This could be more efficient by
+      -- the above refineProcState.  This could be more efficient by
       -- tracking what (if anything) changed.  We also might
       -- need to keep going back and forth until we reach a
       -- fixpoint
@@ -832,7 +852,7 @@ transferBlock b regs = do
           | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- trace "try jump table" $ s'^.curIP
             -- Attempt to compute interval of addresses interval is over.
           , Just (base, index) <- matchJumpTable mem ptr -> do
-            trace "Found jump table" $ do
+            trace ("Found jump table at " ++ show lbl) $ do
 
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
@@ -842,20 +862,28 @@ transferBlock b regs = do
             -- Compute end address.
             let end_addr =
                   case mread_interval of
-                    Just (SI.StridedInterval _ s_base n stride) -> Just $! fromInteger (s_base + n * stride)
-                    _ -> Nothing
+                    Just index_end ->
+                        Just $! base + 8 * index_end
+                    _ -> trace ("Could not find interval at " ++ show lbl) $
+                        Nothing
             -- Record memory as in a jump table.
             globalDataMap %= Map.insert base (JumpTable end_addr)
 
+
             -- Read addresses in interval.
-            case traverse (memLookupWord64 mem pf_r . fromInteger) (maybe [] SI.toList mread_interval) of
-              Left e -> error "getJumpTable returned inconsistent value."
-              Right ips -> do
-                -- Look for new ips.
-                Fold.forM_ ips $ \tgt_addr -> do
-                  let abst = finalAbsBlockState regs' s'
-                  seq abst $ do
-                  mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
+            let indices =
+                  case mread_interval of
+                    Just 0 -> []
+                    Just n -> [0..n-1]
+                    Nothing -> []
+            -- Look for new ips.
+            Fold.forM_ indices $ \idx -> do
+              let Right tgt_addr = memLookupWord64 mem pf_r (base + 8 * idx)
+              when (isCodeAddr mem tgt_addr) $ do
+                trace ("Trying IP " ++ showHex tgt_addr ".") $ do
+                let abst = finalAbsBlockState regs' s'
+                seq abst $ do
+                mergeBlock lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
           -- We have a jump that we do not understand.
           -- This could be a tail call.
@@ -874,13 +902,13 @@ transferBlock b regs = do
               recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
 
 transfer :: FrontierReason -> CodeAddr -> State InterpState ()
-transfer rsn addr = trace ("transfer " ++ showHex addr ".") $ do
+transfer rsn addr = do -- trace ("transfer " ++ showHex addr ".") $ do
   mem <- gets memory
   doMaybe (getBlock rsn addr) () $ \root -> do
     ab <- getAbsBlockState addr
     fn_addr <- gets $ getFunctionEntryPoint addr
-    trace ("In function at " ++ showHex fn_addr ".") $ do
-    transferBlock root (initAbsRegs mem ab)
+--    trace ("In function at " ++ showHex fn_addr ".") $ do
+    transferBlock root (initAbsProcessorState mem ab)
 
 ------------------------------------------------------------------------
 -- Main loop

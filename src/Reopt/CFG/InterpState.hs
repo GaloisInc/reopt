@@ -90,8 +90,11 @@ data GlobalDataInfo
    = JumpTable !(Maybe CodeAddr)
      -- | Some value that appears in the program text.
    | ReferencedValue
-  deriving (Show)
 
+instance Show GlobalDataInfo where
+  show (JumpTable Nothing) = "unbound jump table"
+  show (JumpTable (Just w)) = "jump table end " ++ showHex w ""
+  show ReferencedValue = "global addr"
 
 ------------------------------------------------------------------------
 -- InterpState

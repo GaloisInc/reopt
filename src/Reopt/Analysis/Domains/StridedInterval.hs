@@ -18,6 +18,7 @@
 -- FIXME: only really useful for unsigned?
 module Reopt.Analysis.Domains.StridedInterval
        ( StridedInterval(..)
+       , empty
          -- Constructors
        , singleton, mkStridedInterval, fromFoldable
          -- Predicates
@@ -37,7 +38,7 @@ import           Control.Applicative ( (<$>), (<*>) )
 import qualified Data.Foldable as Fold
 import           Data.Maybe (isNothing)
 import qualified Data.Set as S
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -58,10 +59,10 @@ data StridedInterval (tp :: Type) =
                   , base :: Integer
                   , range :: Integer
                   , stride :: Integer }
-  | EmptyInterval
+--  | EmptyInterval
 
 instance Eq (StridedInterval tp) where
-  EmptyInterval == EmptyInterval = True
+--  EmptyInterval == EmptyInterval = True
   si1@StridedInterval{} == si2@StridedInterval{} =
     base si1 == base si2 && range si1 == range si2 && stride si1 == stride si2
   _ == _ = False
@@ -70,11 +71,11 @@ instance Show (StridedInterval tp) where
   show = show . pretty
 
 intervalEnd :: StridedInterval tp -> Integer
-intervalEnd EmptyInterval = error "intervalEnd"
+--intervalEnd EmptyInterval = error "intervalEnd"
 intervalEnd si = base si + range si * stride si
 
 size :: StridedInterval tp -> Integer
-size EmptyInterval = 0
+--size EmptyInterval = 0
 size si = range si + 1
 
 -- -----------------------------------------------------------------------------
@@ -87,6 +88,14 @@ singleton tp v = StridedInterval { typ = tp
                                  , range = 0
                                  , stride = 1 }
 
+empty :: TypeRepr tp -> StridedInterval tp
+empty tp =
+  StridedInterval { typ = tp
+                  , base = 0
+                  , range = 0
+                  , stride = 1
+                  }
+
 -- | Make an interval given the start, end, and stride. Note that this
 -- will round up if (start - end) is not a multiple of the stride,
 -- i.e., @mkStr
@@ -94,7 +103,7 @@ mkStridedInterval :: TypeRepr tp -> Bool
                   -> Integer -> Integer -> Integer
                   -> StridedInterval tp
 mkStridedInterval tp roundUp start end s
-  | end < start     = EmptyInterval
+  | end < start = empty tp
   | s == 0          = singleton tp start
   | r == 0          = singleton tp start
   | otherwise       =
@@ -103,13 +112,13 @@ mkStridedInterval tp roundUp start end s
                       , range = r
                       , stride = s }
   where
-    r = ((end - start) `div` s)
-        + (if roundUp && (end - start) `mod` s /= 0 then 1 else 0)
+    r | roundUp = ((end - start) + (s - 1)) `div` s
+      | otherwise = (end - start) `div` s
 
 fromFoldable :: Fold.Foldable t =>
                 NatRepr n -> t Integer -> StridedInterval (BVType n)
 fromFoldable sz vs
-  | isEmpty vs  = EmptyInterval
+  | isEmpty vs  = empty tp
   | otherwise  = mkStridedInterval tp True start end s
   where
     tp      = BVTypeRepr sz
@@ -134,7 +143,7 @@ isTop si@StridedInterval{} =
 isTop _  = False
 
 member :: Integer -> StridedInterval tp -> Bool
-member _ EmptyInterval = False
+--member _ EmptyInterval = False
 member n si = base si <= n
               && (n - base si) `mod` stride si == 0
               && (n - base si) `div` stride si <= range si
@@ -143,8 +152,8 @@ member n si = base si <= n
 isSubsetOf :: StridedInterval (BVType n)
        -> StridedInterval (BVType n)
        -> Bool
-isSubsetOf EmptyInterval _ = True
-isSubsetOf _ EmptyInterval = False
+--isSubsetOf EmptyInterval _ = True
+--isSubsetOf _ EmptyInterval = False
 isSubsetOf si1 si2
   | Just s <- isSingleton si1 = member s si2
   | otherwise = member (base si1) si2
@@ -158,8 +167,8 @@ isSubsetOf si1 si2
 lub :: StridedInterval (BVType n)
        -> StridedInterval (BVType n)
        -> StridedInterval (BVType n)
-lub EmptyInterval{} si = si
-lub si EmptyInterval{} = si
+--lub EmptyInterval{} si = si
+--lub si EmptyInterval{} = si
 -- FIXME: make more precise?
 lub si1 si2
   | Just s <- isSingleton si1 = lubSingleton s si2
@@ -207,13 +216,13 @@ prop_glb x y = (x `glb` y) `isSubsetOf` x
 glb :: StridedInterval (BVType n)
        -> StridedInterval (BVType n)
        -> StridedInterval (BVType n)
-glb EmptyInterval _ = EmptyInterval
-glb _ EmptyInterval = EmptyInterval
+--glb EmptyInterval _ = EmptyInterval
+--glb _ EmptyInterval = EmptyInterval
 glb si1 si2
   | Just s <- isSingleton si1 =
-      if s `member` si2 then si1 else EmptyInterval
+      if s `member` si2 then si1 else empty (typ si1)
   | Just s <- isSingleton si2 =
-      if s `member` si1 then si2 else EmptyInterval
+      if s `member` si1 then si2 else empty (typ si1)
   | base si1 == base si2 =
       mkStridedInterval (typ si1) False (base si1) upper
                         (lcm (stride si1) (stride si2))
@@ -232,7 +241,7 @@ glb si1 si2
                                           (base si2 - base si1)
                                           (range si1) (range si2) =
       mkStridedInterval (typ si1) False (base si1 + n * stride si1) upper s
-  | otherwise = EmptyInterval
+  | otherwise = empty (typ si1)
   where
     upper = min (intervalEnd si1) (intervalEnd si2)
     s     = lcm (stride si1) (stride si2)
@@ -326,8 +335,8 @@ bvadd :: NatRepr u
       -> StridedInterval (BVType u)
       -> StridedInterval (BVType u)
       -> StridedInterval (BVType u)
-bvadd _ EmptyInterval{} _ = EmptyInterval
-bvadd _ _ EmptyInterval{} = EmptyInterval
+--bvadd _ EmptyInterval{} _ = EmptyInterval
+--bvadd _ _ EmptyInterval{} = EmptyInterval
 bvadd sz si1 si2
   | Just s <- isSingleton si1 =
       clamp sz $ si2 { base = base si2 + s}
@@ -358,8 +367,8 @@ bvmul :: NatRepr u
       -> StridedInterval (BVType u)
       -> StridedInterval (BVType u)
       -> StridedInterval (BVType u)
-bvmul _ EmptyInterval{} _ = EmptyInterval
-bvmul _ _ EmptyInterval{} = EmptyInterval
+--bvmul _ EmptyInterval{} _ = EmptyInterval
+--bvmul _ _ EmptyInterval{} = EmptyInterval
 -- bvmul sz si1 si2 = top sz -- FIXME: this blows up with the trunc, unfortunately
 bvmul sz si1 si2 =
   bvadd sz
@@ -441,7 +450,7 @@ trunc :: -- (v+1 <= u) =>
   StridedInterval (BVType u)
   -> NatRepr v
   -> StridedInterval (BVType v)
-trunc EmptyInterval _ = EmptyInterval
+--trunc EmptyInterval _ = EmptyInterval
 trunc si sz
   | isTop si              = top'
   -- No change/complete wrap case --- happens when we add
@@ -497,11 +506,11 @@ mk_prop int_f si_f x y = and [ (toUnsigned n64 (int_f v v'))
                              , v' <- toList y ]
 
 toList :: StridedInterval (BVType sz) -> [Integer]
-toList EmptyInterval        = []
+--toList EmptyInterval        = []
 toList si@StridedInterval{} = map (\v -> base si + stride si * v) [0 .. range si]
 
 instance Pretty (StridedInterval tp) where
-  pretty EmptyInterval        = brackets empty
+--  pretty EmptyInterval        = brackets empty
   pretty si | Just s <- isSingleton si = brackets (integer s)
   pretty si@StridedInterval{} = brackets (integer (base si) <> comma
                                           <+> integer (base si + stride si)
@@ -509,7 +518,7 @@ instance Pretty (StridedInterval tp) where
                                           <+> integer (base si + range si * stride si))
 
 instance Arbitrary (StridedInterval (BVType 64)) where
-  arbitrary = frequency [ (1, return EmptyInterval)
+  arbitrary = frequency [ (1, return (empty (BVTypeRepr n64)))
                         , (9, si) ]
     where
       si = do lower <- sized $ \n -> choose (0, toInteger n)

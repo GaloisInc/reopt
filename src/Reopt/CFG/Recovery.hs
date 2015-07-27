@@ -146,7 +146,6 @@ mergeStackHeight :: StackHeight -> StackHeight -> StackHeight
 mergeStackHeight (StackHeight xc xs) (StackHeight yc ys) =
   StackHeight (min xc yc) (Set.union xs ys)
 
-
 -- | This code is reponsible for parsing the statement to determine
 -- what code needs to be added to support an alloca at the beginning
 -- of the block.
@@ -202,14 +201,13 @@ data RecoverState = RS { _rsInterp :: !InterpState
                        , _rsNextAssignId :: !AssignId
                          -- | Map code addresses and registers to function value at start of
                          -- execution.
-                       , _rsRegMap    :: !(Map CodeAddr (MapF N.RegisterName FnRegValue))
-                       , _rsStackMap  :: !(Map CodeAddr FnStack)
+                       , _rsRegMap    :: !(Map BlockLabel (MapF N.RegisterName FnRegValue))
+                       , _rsStackMap  :: !(Map BlockLabel FnStack)
 
-                       , _rsCurAddr   :: !CodeAddr
+                       , _rsCurLabel  :: !BlockLabel
                        , _rsCurStmts  :: !(Seq FnStmt)
                        , _rsAssignMap :: !(MapF Assignment FnAssignment)
                        }
-
 
 rsInterp :: Simple Lens RecoverState InterpState
 rsInterp = lens _rsInterp (\s v -> s { _rsInterp = v })
@@ -223,14 +221,14 @@ rsFrontier = lens _rsFrontier (\s v -> s { _rsFrontier = v })
 rsNextAssignId :: Simple Lens RecoverState AssignId
 rsNextAssignId = lens _rsNextAssignId (\s v -> s { _rsNextAssignId = v })
 
-rsRegMap :: Simple Lens RecoverState (Map CodeAddr (MapF N.RegisterName FnRegValue))
+rsRegMap :: Simple Lens RecoverState (Map BlockLabel (MapF N.RegisterName FnRegValue))
 rsRegMap = lens _rsRegMap (\s v -> s { _rsRegMap = v })
 
-rsStackMap :: Simple Lens RecoverState (Map CodeAddr FnStack)
+rsStackMap :: Simple Lens RecoverState (Map BlockLabel FnStack)
 rsStackMap = lens _rsStackMap (\s v -> s { _rsStackMap = v })
 
-rsCurAddr :: Simple Lens RecoverState CodeAddr
-rsCurAddr = lens _rsCurAddr (\s v -> s { _rsCurAddr = v })
+rsCurLabel :: Simple Lens RecoverState BlockLabel
+rsCurLabel = lens _rsCurLabel (\s v -> s { _rsCurLabel = v })
 
 -- | List of statements accumulated so far.
 rsCurStmts :: Simple Lens RecoverState (Seq FnStmt)
@@ -250,11 +248,22 @@ runRecover s m = runIdentity $ runErrorT $ evalStateT m s
 
 getCurStack :: Recover FnStack
 getCurStack = do
-  addr <- use rsCurAddr
-  m_stk <- uses rsStackMap (Map.lookup addr)
+  lbl  <- use rsCurLabel
+  m_stk <- uses rsStackMap (Map.lookup lbl)
   case m_stk of
     Nothing -> error "Current stack undefined."
     Just stk -> return stk
+
+-- | Return value bound to register (if any)
+getCurRegs :: Recover (MapF N.RegisterName FnRegValue)
+getCurRegs = do
+  lbl <- use rsCurLabel
+  maybe_map <- uses rsRegMap (Map.lookup lbl)
+  case maybe_map of
+    Nothing -> do
+      error $ "Did not define register map for " ++ show lbl ++ "."
+    Just reg_map -> do
+      return reg_map
 
 mkFnAssign :: FnAssignRhs tp -> Recover (FnAssignment tp)
 mkFnAssign rhs = do
@@ -265,29 +274,32 @@ mkFnAssign rhs = do
 addFnStmt :: FnStmt -> Recover ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 
-addFrontier :: BlockLabel -> Recover ()
-addFrontier lbl = do
+addFrontier :: BlockLabel
+               -- ^ Label for block
+               -> MapF N.RegisterName FnRegValue
+               -- ^ Map from register names to value
+               -> FnStack
+               -- ^ State of stack when frontier occurs.
+               -> Recover ()
+addFrontier lbl regs stk = do
   mr <- uses rsBlocks (Map.lookup lbl)
   case mr of
     Nothing -> do
       rsFrontier %= Set.insert lbl
+      rsRegMap   %= Map.insert lbl regs
+      rsStackMap %= Map.insert lbl stk
     Just{} -> do
       return ()
 
 -- | Return value bound to register (if any)
 lookupInitialReg :: N.RegisterName cl -> Recover (Maybe (FnRegValue cl))
-lookupInitialReg reg = do
-  addr <- use rsCurAddr
-  maybe_map <- uses rsRegMap (Map.lookup addr)
-  case maybe_map of
-    Nothing -> do
-      error $ "Did not define register map for " ++ showHex addr "."
-    Just reg_map -> do
-      return $! MapF.lookup reg reg_map
+lookupInitialReg reg = MapF.lookup reg <$> getCurRegs
 
 ------------------------------------------------------------------------
 -- recoverFunction
 
+
+-- | Recover the function at a given address.
 recoverFunction :: InterpState -> CodeAddr -> Either String Function
 recoverFunction s a = do
   let initRegs = MapF.empty
@@ -305,15 +317,16 @@ recoverFunction s a = do
                & MapF.insert N.rbp (CalleeSaved N.rbp)
   let rs = RS { _rsInterp = s
               , _rsBlocks = Map.empty
-              , _rsFrontier = Set.singleton (GeneratedBlock a 0)
+              , _rsFrontier = Set.empty
               , _rsNextAssignId = 0
-              , _rsRegMap = Map.singleton a initRegs
-              , _rsStackMap = Map.singleton a initFnStack
-              , _rsCurAddr = 0
-              , _rsCurStmts = Seq.empty
+              , _rsRegMap   = Map.empty
+              , _rsStackMap  = Map.empty
+              , _rsCurLabel  = GeneratedBlock 0 0
+              , _rsCurStmts  = Seq.empty
               , _rsAssignMap = MapF.empty
               }
   runRecover rs $ do
+    addFrontier (GeneratedBlock a 0) initRegs initFnStack
     recoverIter
     block_map <- use rsBlocks
     return $! Function { fnAddr = a
@@ -328,9 +341,6 @@ recoverIter = do
     Nothing -> return ()
     Just (lbl,f') -> do
       trace ("Exploring " ++ show lbl) $ do
-      rsCurAddr .= labelAddr lbl
-      rsCurStmts  .= Seq.empty
-      rsAssignMap .= MapF.empty
       b <- recoverBlock lbl
       rsFrontier %= Set.delete lbl
       rsBlocks   %= Map.insert lbl b
@@ -338,16 +348,24 @@ recoverIter = do
 recoverBlock :: BlockLabel
              -> Recover FnBlock
 recoverBlock lbl = do
+  -- Clear stack offsets
+  rsCurLabel  .= lbl
+  rsCurStmts  .= Seq.empty
+  rsAssignMap .= MapF.empty
+
+  -- Get original block for address.
   Just b <- uses (rsInterp . blocks)  (`lookupBlock` lbl)
 
 
+  -- Compute stack height
   let ht0 = StackHeight 0 Set.empty
       ht = flip execState ht0 $ do
              Fold.traverse_ recoverStmtStackHeight (blockStmts b)
              recoverTermStmtStackHeight (blockTerm b)
   case ht of
     StackHeight c s
-      | c == 0 && Set.null s -> return ()
+      | c == 0 && Set.null s ->
+        return ()
       | Set.null s -> do
         let sz = FnConstantValue n64 (toInteger (negate c))
         fnAssign <- mkFnAssign (FnAlloca sz)
@@ -409,8 +427,10 @@ recoverTermStmt s =
   case s of
     Branch c x y -> do
       cv <- recoverValue "branch_cond" c
-      addFrontier x
-      addFrontier y
+      regs <- getCurRegs
+      stk  <- getCurStack
+      addFrontier x regs stk
+      addFrontier y regs stk
       return $! FnBranch cv x y
     _ -> trace ("recoverTermStmt undefined for " ++ show (pretty s)) $ do
       return $ FnTermStmtUndefined
@@ -438,7 +458,7 @@ recoverValue nm v = do
 
             | memFlags seg `hasPermissions` pf_x
             , Map.member addr (interpState^.blocks) -> do
-              cur_addr <- use rsCurAddr
+              cur_addr <- uses rsCurLabel labelAddr
               when (not (inSameFunction cur_addr addr interpState)) $ do
                 trace ("Cross function jump " ++ showHex cur_addr " to " ++ showHex addr ".") $
                   return ()
@@ -476,3 +496,32 @@ recoverValue nm v = do
         _ ->
           trace ("recoverValue " ++ nm ++ " does not yet support initial value " ++ show reg) $
             return $ FnValueUnsupported
+
+{-
+edgeRelation :: InterpState
+                -> CodeAddr
+                -> Either String (Map BlockLabel (Set BlockLabel))
+edgeRelation s addr =
+
+inBounds :: Ord a => a -> (a,a) -> Bool
+inBounds v (l,h) = l <= v && v < h
+
+resolveTermStmtEdges :: (Word64, Word64) -> TermStmt -> Maybe [BlockLabel]
+resolveTermStmtEdges bounds s =
+  case s of
+    Branch _ x y -> Just [x,y]
+    Syscall s ->
+      case s^.register N.rsp of
+        BVValue _ a | inBounds a bounds -> Just [GeneratedBlock a 0]
+        _ -> Nothing
+
+
+resolveEdges :: (Word64, Word64) -> [BlockLabel] -> State (Map BlockLabel (Set BlockLabel))
+resolveEdges _ [] = return ()
+resolveEdges bounds (lbl:rest) = do
+  m0 <- get
+  case resolveTermStmtEdges bounds undefined of
+    Just next ->
+      put $ Map.insert lbl next
+    Nothing -> do
+-}
