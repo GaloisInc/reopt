@@ -48,11 +48,12 @@ library
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
-    Reopt.Symbolic.Semantics
+    Reopt.Reified.Semantics
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
+    Reopt.Symbolic.Semantics
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
 
