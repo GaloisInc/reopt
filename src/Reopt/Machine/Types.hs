@@ -33,6 +33,9 @@ import GHC.TypeLits as Exports (Nat)
 n1 :: NatRepr 1
 n1 = knownNat
 
+n4 :: NatRepr 4
+n4 = knownNat
+
 n8 :: NatRepr 8
 n8 = knownNat
 

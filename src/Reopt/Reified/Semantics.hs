@@ -33,6 +33,7 @@
 module Reopt.Reified.Semantics
        ( execSemantics
        , ppStmts
+       , ppStmt
        , Stmt(..)
        , Expr(..)
        , Variable(..)
