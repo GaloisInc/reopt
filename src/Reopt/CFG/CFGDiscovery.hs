@@ -305,23 +305,21 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
 
 -- | Joins in the new abstract state and returns the locations for
 -- which the new state is changed.
-mergeBlock :: BlockLabel
-              -- ^ Source label that we are jumping from.
-           -> FrontierReason
-              -- ^ "Reason" we are merging this block.
-           -> AbsBlockState
-              -- ^ Block state after executing instructions.
-           -> CodeAddr
-              -- ^ Address we are trying to reach.
-           -> State InterpState ()
-mergeBlock src rsn ab tgt = do
+mergeIntraJump  :: BlockLabel
+                  -- ^ Source label that we are jumping from.
+                -> AbsBlockState
+                   -- ^ Block state after executing instructions.
+                -> CodeAddr
+                   -- ^ Address we are trying to reach.
+                -> State InterpState ()
+mergeIntraJump src ab tgt = do
   s <- get
   -- Associate a new abstract state with the code region.
   let upd new = do
         -- Add reverse edge
         reverseEdges %= Map.insertWith Set.union tgt (Set.singleton (labelAddr src))
         absState %= Map.insert tgt new
-        frontier %= Map.insert tgt rsn
+        frontier %= Map.insert tgt (NextIP src)
   case Map.lookup tgt (s^.absState) of
     -- We have seen this block before, so need to join and see if
     -- the results is changed.
@@ -340,17 +338,6 @@ recordFunctionEntry :: BlockLabel
                     -> State InterpState ()
 recordFunctionEntry src rsn ab addr = do
   modify $ markAddrAsFunction addr rsn
-
--- | Recover that there is an intra-procedural jump from source to target.
-mergeIntraJump :: BlockLabel
-                  -- ^ Source label that we are jumping from.
-               -> AbsBlockState
-                  -- ^ Block state after executing instructions.
-               -> CodeAddr
-                  -- ^ Address we are trying to reach.
-               -> State InterpState ()
-mergeIntraJump src ab tgt =  do
-  mergeBlock src (NextIP src) ab tgt
 
 -- | This updates the state of a function when returning from a function.
 mergeFreeBSDSyscall :: BlockLabel
@@ -383,7 +370,7 @@ mergeFreeBSDSyscall src_lbl ab0 addr = do
   let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
 
   -- Merge the new abstract
-  mergeBlock src_lbl (NextIP src_lbl) ab addr
+  mergeIntraJump src_lbl ab addr
 
 {-
 -- | This updates the state of a function when returning from a function.
@@ -423,7 +410,7 @@ mergeCalleeReturn lbl mem ab0 addr = do
         | otherwise =
           TopV
   let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
-  mergeBlock lbl (NextIP lbl) ab addr
+  mergeIntraJump lbl (NextIP lbl) ab addr
 -}
 
 -- | This updates the abstract information based on the assumption that
@@ -443,10 +430,9 @@ mergeCallerReturn lbl ab0 addr = do
           -- We set IPReg
         | Just Refl <- testEquality r N.IPReg =
           CodePointers (Set.singleton addr)
-          -- We don't want to add any values to rax as that is the
-          -- return value.
+          -- We don't know anything about rax as it is the return value.
         | Just Refl <- testEquality r N.rax =
-          emptyAbsValue
+          TopV
           -- TODO: Transmit no value to first floating point register.
         | N.XMMReg 0 <- r =
           ab0^.absX86State^.register r
@@ -460,10 +446,11 @@ mergeCallerReturn lbl ab0 addr = do
         | otherwise =
           TopV
       -- Get values below return address.
+      -- TODO: Fix this; the called function may modify the stack.
   let stk = Map.filterWithKey (\k _ -> k >= 8) (ab0^.startAbsStack)
   let ab = shiftSpecificOffset regFn stk 8
 
-  mergeBlock lbl (ReturnAddress lbl) ab addr
+  mergeIntraJump lbl ab addr
 
 _showAbsDiff :: AbsBlockState -> AbsBlockState -> Doc
 _showAbsDiff x y = vcat (pp <$> absBlockDiff x y)
@@ -809,6 +796,7 @@ transferBlock b regs = do
             Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
+            -- Merge caller return information
             mergeCallerReturn lbl abst ret
             -- Look for new ips.
             let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
