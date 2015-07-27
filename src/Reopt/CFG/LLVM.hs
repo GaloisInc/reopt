@@ -117,6 +117,7 @@ stmtToLLVM stmt = do
        MemLoc ptr typ -> do
          p <- valueToLLVM ptr
          p' <- L.inttoptr p (L.ptrT (typeToLLVMType typ))
+         v'' <- L.bitcast v' (typeToLLVMType typ)
          let align = Nothing                           
          L.store v' p' align
        FS     -> L.call_ iWrite_FS [v']
