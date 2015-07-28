@@ -9,9 +9,7 @@ module Reopt.CFG.InterpState
   , InterpState(..)
   , emptyInterpState
   , genState
-  , blockStartAddrs
   , blocks
-  , failedAddrs
   , functionEntries
   , reverseEdges
   , globalDataMap
@@ -24,6 +22,7 @@ module Reopt.CFG.InterpState
   )  where
 
 import Control.Lens
+import Control.Monad (join)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
@@ -57,9 +56,9 @@ data BlockRegion = BlockRegion { brEnd :: !CodeAddr
                                }
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
-lookupBlock :: Map CodeAddr BlockRegion -> BlockLabel -> Maybe Block
+lookupBlock :: Map CodeAddr (Maybe BlockRegion) -> BlockLabel -> Maybe Block
 lookupBlock m lbl = do
-  br <-  Map.lookup (labelAddr lbl) m
+  br <- join $ Map.lookup (labelAddr lbl) m
   Map.lookup (labelIndex lbl) (brBlocks br)
 
 ------------------------------------------------------------------------
@@ -104,14 +103,12 @@ instance Show GlobalDataInfo where
 data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
+                   -- | State used for generating blocks.
                  , _genState :: !GlobalGenState
-                   -- | Addresses that are known to start block locations.
-                   -- Should be a superset of function entries and fialedAddrs
-                 , _blockStartAddrs :: !(Set CodeAddr)
-                   -- | Intervals maps code addresses to blocks at address.
-                 , _blocks   :: !(Map CodeAddr BlockRegion)
-                   -- | Set of code adddresses that could not be interpreted.
-                 , _failedAddrs  :: !(Set CodeAddr)
+                   -- | Intervals maps code addresses to blocks at address
+                   -- or nothing if disassembly failed.
+                 , _blocks   :: !(Map CodeAddr (Maybe BlockRegion))
+
                    -- | Maps addresses that are marked as the start of a function
                  , _functionEntries :: !(Set CodeAddr)
                    -- | Maps each code address to the list of predecessors that
@@ -136,9 +133,7 @@ emptyInterpState :: Memory Word64 -> InterpState
 emptyInterpState mem = InterpState
       { memory        = mem
       , _genState     = emptyGlobalGenState
-      , _blockStartAddrs    = Set.empty
       , _blocks       = Map.empty
-      , _failedAddrs  = Set.empty
       , _functionEntries = Set.empty
       , _reverseEdges = Map.empty
       , _globalDataMap  = Map.empty
@@ -150,14 +145,8 @@ emptyInterpState mem = InterpState
 genState :: Simple Lens InterpState GlobalGenState
 genState = lens _genState (\s v -> s { _genState = v })
 
-blockStartAddrs :: Simple Lens InterpState (Set CodeAddr)
-blockStartAddrs = lens _blockStartAddrs (\s v -> s { _blockStartAddrs = v })
-
-blocks :: Simple Lens InterpState (Map CodeAddr BlockRegion)
+blocks :: Simple Lens InterpState (Map CodeAddr (Maybe BlockRegion))
 blocks = lens _blocks (\s v -> s { _blocks = v })
-
-failedAddrs :: Simple Lens InterpState (Set CodeAddr)
-failedAddrs = lens _failedAddrs (\s v -> s { _failedAddrs = v })
 
 -- | Addresses that start each function.
 functionEntries :: Simple Lens InterpState (Set CodeAddr)

@@ -354,8 +354,7 @@ recoverBlock lbl = do
   rsAssignMap .= MapF.empty
 
   -- Get original block for address.
-  Just b <- uses (rsInterp . blocks)  (`lookupBlock` lbl)
-
+  Just b <- uses (rsInterp . blocks) (`lookupBlock` lbl)
 
   -- Compute stack height
   let ht0 = StackHeight 0 Set.empty

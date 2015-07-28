@@ -456,7 +456,8 @@ class IsValue (v  :: Type -> *) where
 
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
-  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
+  msb v = bvSlt v (bvLit (bv_width v) (0::Integer))
+--  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
      -- FIXME: should be log2 (bv_width v) here
 
   -- | Perform a signed extension of a bitvector.

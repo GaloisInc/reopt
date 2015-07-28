@@ -102,9 +102,6 @@ concretizeAbsCodePointers mem (StridedInterval s) =
 concretizeAbsCodePointers mem _ = []
 
 ------------------------------------------------------------------------
--- BlockRegion
-
-------------------------------------------------------------------------
 -- Block discovery
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
@@ -112,84 +109,82 @@ lookupBlock' :: MonadState InterpState m => BlockLabel -> m (Maybe Block)
 lookupBlock' lbl = uses blocks (`lookupBlock` lbl)
 
 getAbsBlockState :: CodeAddr -> State InterpState AbsBlockState
-getAbsBlockState a = do
-  s <- get
-  return $ lookupAbsBlock a (s^.absState)
+getAbsBlockState a = uses absState $ lookupAbsBlock a
+
+blockOverlaps :: CodeAddr -> Maybe BlockRegion -> Bool
+blockOverlaps a Nothing = True
+blockOverlaps a (Just br) = a < brEnd br
+
+-- | Mark this as the start of a block.
+markBlockStart :: CodeAddr -> AbsBlockState -> InterpState -> InterpState
+markBlockStart addr ab s =
+  -- Lookup block just before this address
+  case Map.lookupLT addr (s^.blocks) of
+    -- If that block overlaps with the address
+    Just (l,br) | addr `blockOverlaps` br ->
+      s   -- Get block for addr
+        & tryDisassembleAddr addr ab
+          -- Get block for old block
+        & tryDisassembleAddr l    (lookupAbsBlock l    (s^.absState))
+          -- Add old block to frontier
+        & frontier %~ Map.insert l BlockSplit
+    _ ->
+      s & tryDisassembleAddr addr ab
 
 -- | This is the worker for getBlock, in the case that we have not already
 -- read the block.
-reallyGetBlock :: FrontierReason
-                  -- ^ Reason we are exploring block.
-               -> CodeAddr
-               -> State InterpState (Maybe Block)
-reallyGetBlock rsn addr = do
-  -- Record this as the start of a block.
-  blockStartAddrs %= Set.insert addr
-  -- Check to see if we should delete an overlapping block
-  do -- Lookup block just before this address
-     m_lt <- uses blocks (Map.lookupLT addr)
-     case m_lt of
-       -- If that block overlaps with the address
-       Just (l,br) | brEnd br > addr -> do
-         -- Delete the old block
-         blocks  %= Map.delete l
-         -- Add its address to the frontier.
-         trace ("Adding to frontier " ++ show l) $ do
-         frontier %= Map.insert l BlockSplit
-       _ -> return ()
-  -- Get top
-  ab <- getAbsBlockState addr
-  t <- getAbsX87Top ab
+tryDisassembleAddr :: CodeAddr
+                      -> AbsBlockState
+                      -> InterpState
+                      -> InterpState
+tryDisassembleAddr addr ab s0 = do
+  -- Get FPU top
+  let Just t = getAbsX87Top ab
   -- Create explore loc
   let loc = ExploreLoc { loc_ip = addr
                        , loc_x87_top = t
                        }
   -- Attempt to disassemble block.
-  r <- do
-    -- Get memory so that we can decode from it.
-    function_addrs <- use functionEntries
-    block_addrs    <- use blockStartAddrs
-        -- Returns true if we are not at the start of a block.
-        -- This is used to stop the diassembler when we reach code
-        -- that is part of a new block.
-    let not_at_block addr0 = Set.notMember addr0 block_addrs
-                          && Set.notMember addr0 function_addrs
-    mem <- gets memory
-    subMonad genState $ do
-      liftEither $ disassembleBlock mem not_at_block loc
-  case r of
-    Left _e -> trace ("Block failed: 0x" ++ showHex addr (", Reason " ++ show rsn)) $ do
-      failedAddrs %= Set.insert addr
-      return Nothing
-    Right (bs@(first_b:_), next_ip) -> assert (next_ip > addr) $ do
+  -- Get memory so that we can decode from it.
+  let block_addrs = s0^.blocks
+  -- Returns true if we are not at the start of a block.
+  -- This is used to stop the disassembler when we reach code
+  -- that is part of a new block.
+  let not_at_block = (`Map.notMember` block_addrs)
+  let mem = memory s0
+  let gs0 = s0^.genState
+  case runStateT (disassembleBlock mem not_at_block loc) gs0 of
+    Left _e ->
+      s0 & blocks %~ Map.insert addr Nothing
+    Right ((bs, next_ip), gs) -> assert (next_ip > addr) $ do
       let block_map = Map.fromList [ (labelIndex (blockLabel b), b) | b <- bs ]
       -- Add block region to blocks.
       let br = BlockRegion { brEnd = next_ip
                            , brBlocks = block_map
                            }
-      blocks %= Map.insert addr br
-      -- Return first block.
-      return $ Just first_b
+      s0 & genState .~ gs
+         & blocks   %~ Map.insert addr (Just $! br)
+
+-- | This is the worker for getBlock, in the case that we have not already
+-- read the block.
+reallyGetBlockList :: AbsState
+                   -> InterpState
+                   -> InterpState
+reallyGetBlockList m s0 = Map.foldrWithKey' tryDisassembleAddr s0 m
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all it's children are
 -- present in the cfg (assuming successful disassembly)
-getBlock :: FrontierReason -> CodeAddr -> State InterpState (Maybe Block)
-getBlock rsn addr = do
-  let lbl = GeneratedBlock { labelAddr = addr
-                           , labelIndex = 0
-                           }
-  m_b <- lookupBlock' lbl
-  case m_b of
-    Just b ->
-      return (Just b)
-    Nothing -> do
-      failed <- uses failedAddrs (Set.member addr)
-      if failed then
-        return Nothing
-      else
-        reallyGetBlock rsn addr
+getBlock :: CodeAddr -> State InterpState (Maybe Block)
+getBlock addr = do
+  m_b <- use blocks
+  case Map.lookup addr m_b of
+    Just mbr ->
+      return $! Map.lookup 0 . brBlocks =<< mbr
+    -- We haven't tried to get this block.
+    Nothing -> error $ "getBlock called on block " ++ showHex addr " we have not seen."
+
 
 ------------------------------------------------------------------------
 -- Transfer stmts
@@ -235,19 +230,26 @@ insertKeysIntoMap :: (Ord k, Foldable t) => t k -> a -> Map k a -> Map k a
 insertKeysIntoMap kl v m0 = Fold.foldl' (\m k -> Map.insertWith (const id) k v m) m0 kl
 
 -- | Mark a escaped code pointer as a function entry.
-markAddrAsFunction :: Word64 -> FrontierReason -> InterpState -> InterpState
-markAddrAsFunction addr _ s
+markAddrAsFunction :: Word64 -> InterpState -> InterpState
+markAddrAsFunction addr s
   | addr == 0 = s
   | Set.member addr (s^.functionEntries) = s
   | otherwise = trace ("Found function entry " ++ showHex addr ".") $
      let mem = memory s
+         ab = defBlockState mem addr
          -- TODO: Figure out what we want to do with entries that used to think this
          -- was a function.
          --prev = fromMaybe Set.empty $ Map.lookup addr (s^.reverseEdges)
-         s' = s & functionEntries %~ Set.insert addr
-                & absState        %~ Map.insert addr (defBlockState mem addr)
+         s' = s & markBlockStart addr ab
+                & absState        %~ Map.insert addr ab
+                & functionEntries %~ Set.insert addr
                 & function_frontier %~ Set.insert addr
       in s'
+
+recordFunctionAddrs :: Memory Word64 -> AbsValue (BVType 64) -> State InterpState ()
+recordFunctionAddrs mem av = do
+  let addrs = concretizeAbsCodePointers mem av
+  modify $ \s0 -> foldl' (flip markAddrAsFunction) s0 addrs
 
 recordWriteStmt :: BlockLabel -> AbsProcessorState -> Stmt -> State InterpState ()
 recordWriteStmt lbl regs (Write (MemLoc addr _) v)
@@ -255,9 +257,7 @@ recordWriteStmt lbl regs (Write (MemLoc addr _) v)
   , av <- transferValue regs v = do
     mem <- gets memory
     trace ("Found escaped code pointers via write of " ++ show addr ++ " to memory.") $ do
-    let addrs = concretizeAbsCodePointers mem av
-    let rsn = InWrite lbl
-    modify $ \s0 -> foldl' (\s v -> markAddrAsFunction v rsn s) s0 addrs
+    recordFunctionAddrs mem av
 recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m => AbsProcessorState -> [Stmt] -> m AbsProcessorState
@@ -313,31 +313,24 @@ mergeIntraJump  :: BlockLabel
                    -- ^ Address we are trying to reach.
                 -> State InterpState ()
 mergeIntraJump src ab tgt = do
-  s <- get
   -- Associate a new abstract state with the code region.
-  let upd new = do
+  let upd new s = do
         -- Add reverse edge
-        reverseEdges %= Map.insertWith Set.union tgt (Set.singleton (labelAddr src))
-        absState %= Map.insert tgt new
-        frontier %= Map.insert tgt (NextIP src)
-  case Map.lookup tgt (s^.absState) of
+        s & reverseEdges %~ Map.insertWith Set.union tgt (Set.singleton (labelAddr src))
+          & absState %~ Map.insert tgt new
+          & frontier %~ Map.insert tgt (NextIP src)
+  s0 <- get
+  case Map.lookup tgt (s0^.absState) of
     -- We have seen this block before, so need to join and see if
     -- the results is changed.
     Just ab_old ->
       case joinD ab_old ab of
         Nothing  -> return ()
-        Just new -> upd new
+        Just new -> modify $ upd new
     -- We haven't seen this block before
-    Nothing  -> upd ab
-
--- | Record the given address as the start of a function.
-recordFunctionEntry :: BlockLabel
-                    -> FrontierReason
-                    -> AbsBlockState
-                    -> CodeAddr
-                    -> State InterpState ()
-recordFunctionEntry src rsn ab addr = do
-  modify $ markAddrAsFunction addr rsn
+    Nothing  ->
+      put $ s0 & upd ab
+               & markBlockStart tgt ab
 
 -- | This updates the state of a function when returning from a function.
 mergeFreeBSDSyscall :: BlockLabel
@@ -371,47 +364,6 @@ mergeFreeBSDSyscall src_lbl ab0 addr = do
 
   -- Merge the new abstract
   mergeIntraJump src_lbl ab addr
-
-{-
--- | This updates the state of a function when returning from a function.
-mergeCalleeReturn :: BlockLabel
-                     -- ^ Label for callee block that is return.
-                  -> Memory Word64
-                     -- ^ State of memory
-                  -> AbsBlockState
-                     -- ^ Block state just before return.
-                  -> CodeAddr
-                     -- ^ Address we are returning to.
-                  -> State InterpState ()
-mergeCalleeReturn lbl mem ab0 addr = do
-  s <- get
-  let regsToCopy :: Set (Some N.RegisterName)
-      regsToCopy = Set.fromList
-        [ Some N.rsp -- Stack pointer
-        , Some N.rax -- Integer return pointer
-        , Some (N.XMMReg 7) -- Floating point return value
-        ]
-      -- Get register function.
-  let regFn :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-      regFn r
-          -- Set IPReg
-        | N.IPReg <- r =
-          CodePointers (Set.singleton addr)
-          -- Stack pointer
-        | Set.member (Some r) regsToCopy =
-            ab0^.absX86State^.register r
-          -- Floating point height
-        | N.X87TopReg <- r =
-          ab0^.absX86State^.register N.X87TopReg
-          -- Return no value for GPRegs
-        | N.GPReg _ <- r =
-          emptyAbsValue
-          -- We know nothing about other registers.
-        | otherwise =
-          TopV
-  let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
-  mergeIntraJump lbl (NextIP lbl) ab addr
--}
 
 -- | This updates the abstract information based on the assumption that
 -- a called method will return to the return address, and will follow
@@ -587,11 +539,11 @@ refineULeqTrue :: Value tp
                -> AbsProcessorState
 refineULeqTrue x y regs = refineProcState x x_leq (refineProcState y y_leq regs)
   where
-    (x_leq, y_leq) = abstractULeq (valueType x) (transferValue regs x) (transferValue regs y)    
+    (x_leq, y_leq) = abstractULeq (valueType x) (transferValue regs x) (transferValue regs y)
     -- check r@(a, b)
-    --   | isBottom a = flip trace r $ "Bottom in refineLeq: " 
+    --   | isBottom a = flip trace r $ "Bottom in refineLeq: "
     --                  ++ show (pretty regs)
-    --   | isBottom b = flip trace r $ "Bottom in refineLeq: " 
+    --   | isBottom b = flip trace r $ "Bottom in refineLeq: "
     --                  ++ show (pretty regs)
     --   | otherwise  = r
 
@@ -809,9 +761,7 @@ transferBlock b regs = do
             -- Merge caller return information
             mergeCallerReturn lbl abst ret
             -- Look for new ips.
-            let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
-            Fold.forM_ ips $ \addr -> do
-              recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem addr) addr
+            recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
           -- This block ends with a return.
           | recoverIsReturnStmt s' -> do
@@ -844,14 +794,15 @@ transferBlock b regs = do
               -- tail call when go to the right place.
               -- TODO: Add check to ensure stack height is correct.
               trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
-              recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
+              modify $ markAddrAsFunction tgt_addr
             else do
               -- Merge block state.
               mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
 
 
           -- Block ends with what looks like a jump table.
-          | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- trace "try jump table" $ s'^.curIP
+          | AssignedValue (Assignment _ (Read (MemLoc ptr _)))
+                <- trace "try jump table" $ s'^.curIP
             -- Attempt to compute interval of addresses interval is over.
           , Just (base, index) <- matchJumpTable mem ptr -> do
             trace ("Found jump table at " ++ show lbl) $ do
@@ -869,28 +820,28 @@ transferBlock b regs = do
             -- If the current index can be interpreted as a intra-procedural jump,
             -- then it will add that to the current procedure.
             -- This returns the last address read.
-            let resolveJump :: Word64 -- ^ Current index
-                            -> State InterpState Word64
-                resolveJump idx | Just idx == mread_end = do
+            let resolveJump :: [Word64] -- ^ Addresses in jump table in reverse order
+                            -> Word64 -- ^ Current index
+                            -> State InterpState [Word64]
+                resolveJump prev idx | Just idx == mread_end = do
                   -- Stop jump table when we have reached computed bounds.
-                  return idx
-                resolveJump idx = do
+                  return (reverse prev)
+                resolveJump prev idx = do
                   let read_addr = base + 8 * idx
                   interpState <- get
                   case memLookupWord64 mem pf_r read_addr of
-                    Left _ -> trace ("Stop jump table: invalid addr " ++ showHex read_addr ".") $
-                      return idx
                     Right tgt_addr
                       | isCodeAddr mem tgt_addr
                       , inSameFunction (labelAddr lbl) tgt_addr interpState -> do
 
                         trace ("Trying IP " ++ showHex tgt_addr ".") $ do
                         mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
-                        resolveJump (idx+1)
-                      | otherwise -> do
-                        trace ("Stop jump table: " ++ show idx ++ " " ++ show mread_end) $ do
-                        return idx
-            last_index <- resolveJump 0
+                        resolveJump (tgt_addr:prev) (idx+1)
+                    _ -> do
+                      trace ("Stop jump table: " ++ show idx ++ " " ++ show mread_end) $ do
+                      return (reverse prev)
+            read_addrs <- resolveJump [] 0
+            let last_index = fromIntegral (length read_addrs)
             globalDataMap %= Map.insert base (JumpTable $! (Just $! base + 8 * last_index))
 
           -- We have a jump that we do not understand.
@@ -899,20 +850,13 @@ transferBlock b regs = do
             Just br <- Map.lookup (labelAddr lbl) <$> use blocks
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             let abst = finalAbsBlockState regs' s'
-            seq abst $ do
-            let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
-            -- Look for new ips.
-            Fold.forM_ ips $ \tgt_addr -> do
-              tgt_fn  <- gets $ getFunctionEntryPoint tgt_addr
-              -- Treat the jump to the tgt_addr as a tail call.
-              -- TODO: Add check to ensure stack height is correct.
-              trace ("Found symbolic jump to addr after function " ++ showHex tgt_fn ".") $ do
-              recordFunctionEntry lbl (NextIP lbl) (abst & setAbsIP mem tgt_addr) tgt_addr
+            recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
-transfer :: FrontierReason -> CodeAddr -> State InterpState ()
-transfer rsn addr = do -- trace ("transfer " ++ showHex addr ".") $ do
+transfer :: CodeAddr -> State InterpState ()
+transfer addr = trace ("transfer " ++ showHex addr ".") $ do
   mem <- gets memory
-  doMaybe (getBlock rsn addr) () $ \root -> do
+
+  doMaybe (getBlock addr) () $ \root -> do
     ab <- getAbsBlockState addr
     fn_addr <- gets $ getFunctionEntryPoint addr
 --    trace ("In function at " ++ showHex fn_addr ".") $ do
@@ -928,10 +872,11 @@ data FinalCFG = FinalCFG { finalCFG :: !CFG
                          , finalFunctions :: ![Function]
                          }
 
-mkCFG :: Map CodeAddr BlockRegion -> CFG
+mkCFG :: Map CodeAddr (Maybe BlockRegion) -> CFG
 mkCFG m = Map.foldlWithKey' go emptyCFG m
-  where go g addr br = insertBlocksForCode addr (brEnd br) l g
+  where go g addr (Just br) = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)
+        go g addr Nothing = g
 
 ppFunctionEntries :: [CodeAddr] -> String
 ppFunctionEntries l = unlines (pp <$> l)
@@ -951,7 +896,7 @@ mkFinalCFG s =
       FinalCFG { finalCFG = mkCFG (s^.blocks)
                , finalAbsState = s^.absState
                , finalCodePointersInMem = s^.functionEntries
-               , finalFailedAddrs = s^.failedAddrs
+               , finalFailedAddrs = Set.empty
                , finalFunctions = fns
                }
 
@@ -963,11 +908,11 @@ explore_frontier st =
         Nothing -> st
         Just (addr, next_roots) ->
           let st_pre = st & function_frontier .~ next_roots
-              st_post = flip execState st_pre $ transfer StartAddr addr
+              st_post = flip execState st_pre $ transfer addr
            in explore_frontier st_post
     Just ((addr,rsn), next_roots) ->
       let st_pre = st & frontier .~ next_roots
-          st_post = flip execState st_pre $ transfer rsn addr
+          st_post = flip execState st_pre $ transfer addr
        in explore_frontier st_post
 
 -- | Attempt to determine if this address is in a jump table.
@@ -1003,15 +948,18 @@ cfgFromAddrs mem init_addrs = g
         -- Check this is readable, non-executable data
       , addrPermissions v mem .&. (pf_r .|. pf_x) == pf_r
       ]
+    init_abs_state = Map.fromList
+                     [ (a, defBlockState mem a)
+                     | a <- init_addrs
+                     ]
+
 
     s0 = emptyInterpState mem
        & functionEntries .~ Set.fromList init_addrs
-       & absState .~ Map.fromList
-           [ (a, defBlockState mem a)
-           | a <- init_addrs
-           ]
+       & absState .~ init_abs_state
        & function_frontier .~ Set.fromList init_addrs
        & globalDataMap .~ global_data
+       & reallyGetBlockList init_abs_state
 
     s1 = explore_frontier s0
 
@@ -1025,13 +973,13 @@ cfgFromAddrs mem init_addrs = g
         -- They have a high liklyhood of being elements of jump tables
       | isReadonlyAddr mem a = s
         -- Check if we already found this
-      | Set.member v (s^.blockStartAddrs) =
+      | Map.member v (s^.blocks) =
         trace ("Identified function entry "
                 ++ showHex v (" due to global store at " ++ showHex a ".")) $
-        markAddrAsFunction v InInitialData s
+        markAddrAsFunction v s
       | otherwise =
         trace ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
-        markAddrAsFunction v InInitialData s
+        markAddrAsFunction v s
 
     -- Explore data values
     s2  = foldl' go s1 (memAsWord64le_withAddr mem)
