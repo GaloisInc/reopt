@@ -70,20 +70,6 @@ import           Reopt.Object.Memory
 ------------------------------------------------------------------------
 -- Utilities
 
--- | Run a computation over a part of the current state.
-subMonad :: (MonadState s m)
-         => Simple Lens s t
-         -> State t r
-         -> m r
-subMonad l m = l %%= runState m
-
-liftEither :: StateT s (Either e) a -> State s (Either e a)
-liftEither m = state go
-  where
-    go s = case runStateT m s of
-             Left e       -> (Left e,  s)
-             Right (r, t) -> (Right r, t)
-
 doMaybe :: Monad m => m (Maybe a) -> b -> (a -> m b) -> m b
 doMaybe m n j = do
   ma <- m
@@ -701,11 +687,10 @@ recoverIsReturnStmt s = do
   let next_ip = s^.register N.rip
       next_sp = s^.register N.rsp
   case next_ip of
-    AssignedValue (Assignment _ (Read (MemLoc ip_stored_here _))) ->
-      let (ip_base, ip_off) = asBaseOffset ip_stored_here
+    AssignedValue (Assignment _ (Read (MemLoc ip_addr _))) ->
+      let (ip_base, ip_off) = asBaseOffset ip_addr
           (sp_base, sp_off) = asBaseOffset next_sp
-       in ip_base == sp_base
-          && ip_off + 8 == sp_off
+       in (ip_base, ip_off + 8) == (sp_base, sp_off)
     _ -> False
 
 transferBlock :: Block   -- ^ Block to start from.
