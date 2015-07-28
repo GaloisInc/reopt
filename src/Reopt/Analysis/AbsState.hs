@@ -128,6 +128,9 @@ data AbsValue (tp :: Type) where
   -- | Any value
   TopV :: AbsValue tp
 
+  -- | Denotes a return address in the body of a function.
+  ReturnAddr :: AbsValue (BVType 64)
+
 -- | Denotes that we do not know of any value that could be in set.
 emptyAbsValue :: AbsValue (BVType 64)
 emptyAbsValue = CodePointers Set.empty
@@ -182,6 +185,7 @@ instance Eq (AbsValue tp) where
     | Just Refl <- testEquality n n' = v == v'
     | otherwise = False
   TopV == TopV = True
+  ReturnAddr == ReturnAddr = True
   _    == _    = False
 
 instance EqF AbsValue where
@@ -198,6 +202,7 @@ instance Pretty (AbsValue tp) where
   pretty (StackOffset     s) = text "rsp_0 +" <+> ppIntegerSet s
   pretty SomeStackOffset = text "rsp_0 + ?"
   pretty TopV = text "top"
+  pretty ReturnAddr = text "return_addr"
 
 ppIntegerSet :: (Show w, Integral w) => Set w -> Doc
 ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
@@ -375,7 +380,7 @@ member n (StridedInterval si) = SI.member n si
 member n (SubValue _n' v) = member n v
 member _n _v = False
 
-
+-- | Returns true if this value represents the empty set.
 isBottom :: AbsValue tp -> Bool
 isBottom (FinSet v)       = Set.null v
 isBottom (CodePointers v) = Set.null v
@@ -384,6 +389,7 @@ isBottom SomeStackOffset = False
 isBottom (StridedInterval v) = SI.size v == 0
 isBottom (SubValue _ v) = isBottom v
 isBottom TopV = False
+isBottom ReturnAddr = False
 
 -- meet is probably the wrong word here --- we are really refining the
 -- abstract value based upon some new information.  Thus, we want to
@@ -396,9 +402,9 @@ meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
 meet x y
   | isBottom m, not (isBottom x), not (isBottom y) =
       trace ("Got empty: " ++ show (pretty x) ++ " " ++ show (pretty y)) $ m
-  | otherwise = m  
+  | otherwise = m
   where m = meet' x y
-   
+
 meet' :: AbsValue tp -> AbsValue tp -> AbsValue tp
 meet' TopV x = x
 meet' x TopV = x
@@ -648,7 +654,7 @@ abstractULt tp x y
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
     where trace' m x = trace (m ++ show x) x
-          
+
 abstractULt _tp x y = (x, y)
 
 -- | @abstractULeq x y@ refines x and y with the knowledge that @x <= y@
@@ -665,7 +671,7 @@ abstractULeq tp x y
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
     where trace' m x = trace (m ++ show x) x
-    
+
 abstractULeq _tp x y = (x, y)
 
 ------------------------------------------------------------------------
@@ -880,14 +886,14 @@ addMemWrite a v r =
       in  r & curAbsStack %~ flip (Set.fold (\o m -> deleteRange o (o+w-1) m)) s
     (StackOffset s, TopV) | [o] <- Set.toList s -> do
       let w = someValueWidth v
-       in r & curAbsStack %~ deleteRange o (o+w-1)           
+       in r & curAbsStack %~ deleteRange o (o+w-1)
     (StackOffset s, v_abs) | [o] <- Set.toList s -> do
       let w = someValueWidth v
           e = StackEntry (valueType v) v_abs
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
     -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
-  where drop' msg = 
+  where drop' msg =
           trace ("addMemWrite: dropping stack at "
                  ++ show (pretty $ r ^. absInitialRegs ^. curIP)
                  ++ " via " ++ show (pretty a)

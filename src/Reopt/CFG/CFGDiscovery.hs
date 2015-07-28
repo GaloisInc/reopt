@@ -197,11 +197,13 @@ stackCodePointers stk =
   , ptr <- Set.toList (codePointerSet v)
   ]
 
-defBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState
-defBlockState mem addr =
+-- | The abstract state for a function begining at a given address.
+fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState
+fnBlockState mem addr =
   top & setAbsIP mem addr
       & absX86State . register N.rsp .~ concreteStackOffset 0
-      & absX86State . x87TopReg .~ abstractSingleton mem knownNat 7
+      & absX86State . x87TopReg .~ FinSet (Set.singleton 7)
+      & startAbsStack .~ Map.singleton 0 (StackEntry (BVTypeRepr n64) ReturnAddr)
 
 newtype HexWord = HexWord Word64
 
@@ -222,7 +224,7 @@ markAddrAsFunction addr s
   | Set.member addr (s^.functionEntries) = s
   | otherwise = trace ("Found function entry " ++ showHex addr ".") $
      let mem = memory s
-         ab = defBlockState mem addr
+         ab = fnBlockState mem addr
          -- TODO: Figure out what we want to do with entries that used to think this
          -- was a function.
          --prev = fromMaybe Set.empty $ Map.lookup addr (s^.reverseEdges)
@@ -250,9 +252,7 @@ transferStmts :: Monad m => AbsProcessorState -> [Stmt] -> m AbsProcessorState
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
 finalBlockState :: Memory Word64 -> CodeAddr -> FinalCFG -> AbsBlockState
-finalBlockState mem a g
-  | Set.member a (finalCodePointersInMem g) = defBlockState mem a
-  | otherwise = lookupAbsBlock a (finalAbsState g)
+finalBlockState _ a g = lookupAbsBlock a (finalAbsState g)
 
 -- | Generate map that maps each assignment in the CFG to the abstract value
 -- associated with it.
@@ -745,6 +745,19 @@ transferBlock b regs = do
           | recoverIsReturnStmt s' -> do
             trace ("Return statement") $ do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
+            trace ("Return statement2") $ do
+            let ip_val = s'^.register N.rip
+            case trace ("Return statement3") $ transferValue regs' ip_val of
+              ReturnAddr -> do
+                trace "return_val is correct" $
+                  returnCount += 1
+              TopV -> do
+                trace ("return_val is top at " ++ show lbl) $
+                  returnCount += 1
+              rv -> do
+                error ("return_val is bad at " ++ show lbl ++ ": " ++ show rv)
+
+
 -- Note: In the code below, we used to try to determine the return target and
 -- merge information into the return address.  We no longer do that as it did not
 -- appear to help discover new blocks, and we would like to minimize inter-procedural
@@ -900,10 +913,6 @@ addrInJumpTable s a =
     Just (_,JumpTable _) -> True
     _ -> False
 
-emptyAbsState :: Memory Word64 -> CodeAddr -> AbsState
-emptyAbsState mem start = Map.singleton start (defBlockState mem start)
-
-
 cfgFromAddrs :: Memory Word64
                 -- ^ Memory to use when decoding instructions.
              -> [CodeAddr]
@@ -927,7 +936,7 @@ cfgFromAddrs mem init_addrs = g
       , addrPermissions v mem .&. (pf_r .|. pf_x) == pf_r
       ]
     init_abs_state = Map.fromList
-                     [ (a, defBlockState mem a)
+                     [ (a, fnBlockState mem a)
                      | a <- init_addrs
                      ]
 

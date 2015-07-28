@@ -19,6 +19,7 @@ module Reopt.CFG.InterpState
     -- ** InterpState utilities
   , getFunctionEntryPoint
   , inSameFunction
+  , returnCount
   )  where
 
 import Control.Lens
@@ -126,6 +127,7 @@ data InterpState
                    -- | Map from code addresses to the abstract state at the start of
                    -- the block.
                  , _absState :: !AbsState
+                 , _returnCount :: !Int
                  }
 
 -- | Empty interpreter state.
@@ -140,6 +142,7 @@ emptyInterpState mem = InterpState
       , _frontier     = Map.empty
       , _function_frontier = Set.empty
       , _absState     = Map.empty
+      , _returnCount  = 0
       }
 
 genState :: Simple Lens InterpState GlobalGenState
@@ -167,6 +170,9 @@ function_frontier = lens _function_frontier (\s v -> s { _function_frontier = v 
 
 absState :: Simple Lens InterpState AbsState
 absState = lens _absState (\s v -> s { _absState = v })
+
+returnCount :: Simple Lens InterpState Int
+returnCount = lens _returnCount (\s v -> s { _returnCount = v })
 
 ------------------------------------------------------------------------
 -- InterpState utilities
