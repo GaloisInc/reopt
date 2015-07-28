@@ -247,8 +247,6 @@ instance S.IsValue Expr where
 
 type MLocation = S.Location (Expr (BVType 64))
 
-data NamedStmt where
-
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.
 data Stmt where

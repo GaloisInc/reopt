@@ -489,13 +489,6 @@ refineApp app av regs =
    Trunc x sz -> refineTrunc x sz av regs
 
    -- Assertion "r <= x"
-   BVUnsignedLe r x
-     | Just b    <- asConcreteSingleton av ->
-       refineLeq r x b regs
-   BVUnsignedLt r x
-     | Just b    <- asConcreteSingleton av ->
-       refineLt  r x b regs
-
    BVUnsignedLt l r
      | Just b    <- asConcreteSingleton av -> refineLt l r b regs
 

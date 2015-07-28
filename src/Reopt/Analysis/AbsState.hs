@@ -643,10 +643,12 @@ abstractULt tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y))
+    trace' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
+    where trace' m x = trace (m ++ show x) x
+          
 abstractULt _tp x y = (x, y)
 
 -- | @abstractULeq x y@ refines x and y with the knowledge that @x <= y@
@@ -658,10 +660,12 @@ abstractULeq tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y))
+    trace' ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
+    where trace' m x = trace (m ++ show x) x
+    
 abstractULeq _tp x y = (x, y)
 
 ------------------------------------------------------------------------
@@ -869,9 +873,11 @@ addMemWrite a v r =
     -- (_,TopV) -> r
     -- We overwrite _some_ stack location.  An alternative would be to
     -- update everything with v.
-    (SomeStackOffset, _) -> r & curAbsStack .~ Map.empty
-    (StackOffset s, _) | Set.size s > 1 ->
-      r & curAbsStack .~ Map.empty
+    (SomeStackOffset, _) ->
+      drop' " in SomeStackOffset case"
+    (st@(StackOffset s), _) | Set.size s > 1 ->
+      let w = someValueWidth v
+      in  r & curAbsStack %~ flip (Set.fold (\o m -> deleteRange o (o+w-1) m)) s
     (StackOffset s, TopV) | [o] <- Set.toList s -> do
       let w = someValueWidth v
        in r & curAbsStack %~ deleteRange o (o+w-1)           
@@ -881,6 +887,13 @@ addMemWrite a v r =
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
     -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
+  where drop' msg = 
+          trace ("addMemWrite: dropping stack at "
+                 ++ show (pretty $ r ^. absInitialRegs ^. curIP)
+                 ++ " via " ++ show (pretty a)
+                 ++ msg) $
+          r & curAbsStack .~ Map.empty
+
 
 addOff :: NatRepr w -> Integer -> Integer -> Integer
 addOff w o v = toUnsigned w (o + v)
