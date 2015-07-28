@@ -366,6 +366,10 @@ joinAbsValue' SomeStackOffset{} StackOffset{} = return $ Nothing
 joinAbsValue' StackOffset{} new@SomeStackOffset = return $ Just new
 joinAbsValue' SomeStackOffset{} SomeStackOffset{} = return $ Nothing
 
+
+joinAbsValue' ReturnAddr ReturnAddr = return Nothing
+
+
 joinAbsValue' x y = do
   addWords (codePointerSet x)
   addWords (codePointerSet y)

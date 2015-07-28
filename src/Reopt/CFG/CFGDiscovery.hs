@@ -746,17 +746,19 @@ transferBlock b regs = do
             trace ("Return statement") $ do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             trace ("Return statement2") $ do
+
+            rc0 <- use returnCount
             let ip_val = s'^.register N.rip
-            case trace ("Return statement3") $ transferValue regs' ip_val of
-              ReturnAddr -> do
-                trace "return_val is correct" $
+            case trace ("Return statement3 " ++ show rc0) $ transferValue regs' ip_val of
+              ReturnAddr ->
+                trace ("return_val is correct " ++ show lbl) $
                   returnCount += 1
-              TopV -> do
+              TopV ->
                 trace ("return_val is top at " ++ show lbl) $
                   returnCount += 1
-              rv -> do
-                error ("return_val is bad at " ++ show lbl ++ ": " ++ show rv)
-
+              rv ->
+                trace ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
+                  returnCount += 1
 
 -- Note: In the code below, we used to try to determine the return target and
 -- merge information into the return address.  We no longer do that as it did not
