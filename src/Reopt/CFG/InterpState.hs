@@ -45,7 +45,7 @@ type AbsState = Map CodeAddr AbsBlockState
 
 lookupAbsBlock :: CodeAddr -> AbsState -> AbsBlockState
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
-  where msg = "Could not find block " ++ show addr
+  where msg = "Could not find block " ++ showHex addr "."
 
 ------------------------------------------------------------------------
 -- BlockRegion
@@ -109,7 +109,6 @@ data InterpState
                    -- | Intervals maps code addresses to blocks at address
                    -- or nothing if disassembly failed.
                  , _blocks   :: !(Map CodeAddr (Maybe BlockRegion))
-
                    -- | Maps addresses that are marked as the start of a function
                  , _functionEntries :: !(Set CodeAddr)
                    -- | Maps each code address to the list of predecessors that

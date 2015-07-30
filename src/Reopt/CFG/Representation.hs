@@ -232,6 +232,9 @@ data Stmt where
   PlaceHolderStmt :: [Some Value] -> String -> Stmt
   Comment :: !Text -> Stmt
 
+instance Show Stmt where
+  show = show . pretty
+
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs

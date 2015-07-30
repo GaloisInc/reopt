@@ -1,8 +1,9 @@
 module Reopt.Utils.Hex (Hex(..)) where
+
 import Numeric (showHex)
 
-newtype Hex = Hex Integer
+newtype Hex a = Hex a
   deriving (Eq, Ord)
 
-instance Show Hex where
+instance (Integral a, Show a) => Show (Hex a) where
   show (Hex v) | v >= 0 = showHex v ""

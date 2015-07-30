@@ -35,6 +35,7 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.AbsState
+    Reopt.Analysis.Domains.DiffEquations
     Reopt.Analysis.Domains.StridedInterval
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation

@@ -29,6 +29,7 @@ module Reopt.Analysis.AbsState
   , codePointerSet
   , AbsDomain(..)
   , AbsProcessorState
+  , curAbsStack
   , absInitialRegs
   , startAbsStack
   , initAbsProcessorState
@@ -207,7 +208,6 @@ instance Pretty (AbsValue tp) where
 ppIntegerSet :: (Show w, Integral w) => Set w -> Doc
 ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
   where ppv v' = assert (v' >= 0) $ text ("0x" ++ showHex v' "")
-
 
 -- | Returns a set of concrete integers that this value may be.
 -- This function will neither return the complete set or an
@@ -820,12 +820,16 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
 ------------------------------------------------------------------------
 -- AbsProcessorState
 
--- | this1 stores the abstract state of the system at a given point in time.
+-- | this stores the abstract state of the system at a given point in time.
 data AbsProcessorState = AbsProcessorState { absMem :: !(Memory Word64)
-                       , _absInitialRegs :: !(X86State AbsValue)
-                       , _absAssignments :: !(MapF Assignment AbsValue)
-                       , _curAbsStack :: !AbsBlockStack
-                       }
+                                             -- ^ The state of memory.
+                                           , _absInitialRegs :: !(X86State AbsValue)
+                                           , _absAssignments :: !(MapF Assignment AbsValue)
+                                           , _curAbsStack :: !AbsBlockStack
+                                           }
+
+instance Show AbsProcessorState where
+  show = show . pretty
 
 -- FIXME
 instance Pretty AbsProcessorState where
@@ -835,12 +839,12 @@ instance Pretty AbsProcessorState where
 
 
 initAbsProcessorState :: Memory Word64 -> AbsBlockState -> AbsProcessorState
-initAbsProcessorState mem s = AbsProcessorState { absMem = mem
-                            , _absInitialRegs = s^.absX86State
-                            , _absAssignments = MapF.empty
-                            , _curAbsStack = s^.startAbsStack
-                            }
-
+initAbsProcessorState mem s =
+  AbsProcessorState { absMem = mem
+                    , _absInitialRegs = s^.absX86State
+                    , _absAssignments = MapF.empty
+                    , _curAbsStack = s^.startAbsStack
+                    }
 
 absInitialRegs :: Simple Lens AbsProcessorState (X86State AbsValue)
 absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
@@ -877,6 +881,9 @@ someValueWidth v =
   case valueType v of
     BVTypeRepr w -> natValue w
 
+valueByteSize :: Value tp -> Integer
+valueByteSize v = (someValueWidth v + 7) `div` 8
+
 addMemWrite :: Value (BVType 64) -> Value tp -> AbsProcessorState -> AbsProcessorState
 addMemWrite a v r =
   case (transferValue r a, transferValue r v) of
@@ -886,13 +893,13 @@ addMemWrite a v r =
     (SomeStackOffset, _) ->
       drop' " in SomeStackOffset case"
     (st@(StackOffset s), _) | Set.size s > 1 ->
-      let w = someValueWidth v
+      let w = valueByteSize v
       in  r & curAbsStack %~ flip (Set.fold (\o m -> deleteRange o (o+w-1) m)) s
-    (StackOffset s, TopV) | [o] <- Set.toList s -> do
-      let w = someValueWidth v
+    (StackOffset s, TopV) | [o] <- Set.toList s ->
+      let w = valueByteSize v
        in r & curAbsStack %~ deleteRange o (o+w-1)
-    (StackOffset s, v_abs) | [o] <- Set.toList s -> do
-      let w = someValueWidth v
+    (StackOffset s, v_abs) | [o] <- Set.toList s ->
+      let w = valueByteSize v
           e = StackEntry (valueType v) v_abs
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
     -- FIXME: nuke stack on an unknown address or Top?

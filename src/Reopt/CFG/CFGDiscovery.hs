@@ -66,6 +66,7 @@ import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
+import           Reopt.Utils.Hex
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -87,6 +88,62 @@ concretizeAbsCodePointers mem (StridedInterval s) =
   filter (isCodeAddr mem) $ fromInteger <$> SI.toList s
 concretizeAbsCodePointers mem _ = []
 
+-- | Insert keys into map with given value, keeping old value if they are alread there.
+insertKeysIntoMap :: (Ord k, Foldable t) => t k -> a -> Map k a -> Map k a
+insertKeysIntoMap kl v m0 = Fold.foldl' (\m k -> Map.insertWith (const id) k v m) m0 kl
+
+-- | @deleteMapRange l h m@ deletes all entries with keys greater than @l@ and
+-- less than @h@.
+deleteMapRange :: Ord k => Maybe k -> Maybe k -> Map k v -> Map k v
+deleteMapRange (Just l) (Just h) m =
+  case Map.splitLookup l m of
+    (lm, Nothing, hm) -> Map.union lm (deleteMapLessThan h hm)
+    (lm, Just v,  hm) -> Map.union (Map.insert l v lm) (deleteMapLessThan h hm)
+deleteMapRange (Just l) Nothing  m = deleteMapGreaterThan l m
+deleteMapRange Nothing  (Just h) m = deleteMapLessThan h m
+deleteMapRange Nothing  Nothing  m = m
+
+-- | @deleteMapGreaterThan k m@ returns a map with all keys greater than @k@ in @m@ deleted.
+deleteMapGreaterThan :: Ord k => k -> Map k v -> Map k v
+deleteMapGreaterThan k m =
+  case Map.splitLookup k m of
+    (lm, Nothing, _) -> lm
+    (lm, Just v, _)  -> Map.insert k v lm
+
+-- | @deleteMapLessThan k m@ returns a map with all keys less than @k@ in @m@ deleted.
+deleteMapLessThan :: Ord k => k -> Map k v -> Map k v
+deleteMapLessThan k m =
+  case Map.splitLookup k m of
+    (_, Nothing, hm) -> hm
+    (_, Just v, hm) -> Map.insert k v hm
+
+maybeSetInsert :: Ord a => Maybe a -> Set a -> Set a
+maybeSetInsert (Just k) s = Set.insert k s
+maybeSetInsert Nothing  s = s
+
+deleteSetRange :: Ord a => Maybe a -> Maybe a -> Set a -> Set a
+deleteSetRange (Just l) (Just h) s =
+  case Set.splitMember l s of
+    (ls, False, hs) -> Set.union ls                (deleteSetLessThan h hs)
+    (ls, True,  hs) -> Set.union (Set.insert l ls) (deleteSetLessThan h hs)
+deleteSetRange (Just l) Nothing  s = deleteSetGreaterThan l s
+deleteSetRange Nothing  (Just h) s = deleteSetLessThan    h s
+deleteSetRange Nothing  Nothing  s = s
+
+-- | @deleteSetGreaterThan k m@ returns a set with all keys greater than @k@ in @m@ deleted.
+deleteSetGreaterThan :: Ord k => k -> Set k -> Set k
+deleteSetGreaterThan k m =
+  case Set.splitMember k m of
+    (lm, False, _) -> lm
+    (lm, True,  _) -> Set.insert k lm
+
+-- | @deleteSetLessThan k m@ returns a map with all keys less than @k@ in @m@ deleted.
+deleteSetLessThan :: Ord k => k -> Set k -> Set k
+deleteSetLessThan k m =
+  case Set.splitMember k m of
+    (_, False, hm) -> hm
+    (_, True,  hm) -> Set.insert k hm
+
 ------------------------------------------------------------------------
 -- Block discovery
 
@@ -103,17 +160,23 @@ blockOverlaps a (Just br) = a < brEnd br
 
 -- | Mark this as the start of a block.
 markBlockStart :: CodeAddr -> AbsBlockState -> InterpState -> InterpState
-markBlockStart addr ab s =
+markBlockStart addr ab s = do
   -- Lookup block just before this address
   case Map.lookupLT addr (s^.blocks) of
     -- If that block overlaps with the address
-    Just (l,br) | addr `blockOverlaps` br ->
-      s   -- Get block for addr
-        & tryDisassembleAddr addr ab
+    Just (l,br) | addr `blockOverlaps` br -> do
+      let l_start = getFunctionEntryPoint l s
+          l_high  = Set.lookupGT addr (s^.functionEntries)
+          a_start = getFunctionEntryPoint addr s
+          a_high  = Set.lookupGT addr (s^.functionEntries)
+          -- Get block for addr
+      s & tryDisassembleAddr addr ab
           -- Get block for old block
-        & tryDisassembleAddr l    (lookupAbsBlock l    (s^.absState))
-          -- Add old block to frontier
-        & frontier %~ Map.insert l BlockSplit
+        & tryDisassembleAddr l    (lookupAbsBlock l (s^.absState))
+          -- Add function starts to split to frontier
+          -- This will result in us re-exploring l_start and a_start
+          -- once the current function is done.
+        & function_frontier %~ Set.insert l_start . Set.insert a_start
     _ ->
       s & tryDisassembleAddr addr ab
 
@@ -213,26 +276,20 @@ instance Show HexWord where
 showHexList :: [Word64] -> String
 showHexList l = show (fmap HexWord l)
 
--- | Insert keys into map with given value, keeping old value if they are alread there.
-insertKeysIntoMap :: (Ord k, Foldable t) => t k -> a -> Map k a -> Map k a
-insertKeysIntoMap kl v m0 = Fold.foldl' (\m k -> Map.insertWith (const id) k v m) m0 kl
-
 -- | Mark a escaped code pointer as a function entry.
 markAddrAsFunction :: Word64 -> InterpState -> InterpState
 markAddrAsFunction addr s
   | addr == 0 = s
   | Set.member addr (s^.functionEntries) = s
-  | otherwise = trace ("Found function entry " ++ showHex addr ".") $
+  | otherwise = trace ("Found function entry " ++ showHex addr ".") $ do
      let mem = memory s
-         ab = fnBlockState mem addr
-         -- TODO: Figure out what we want to do with entries that used to think this
-         -- was a function.
-         --prev = fromMaybe Set.empty $ Map.lookup addr (s^.reverseEdges)
-         s' = s & markBlockStart addr ab
-                & absState        %~ Map.insert addr ab
+     let low = Set.lookupLT addr (s^.functionEntries)
+     let high = Set.lookupGT addr (s^.functionEntries)
+         s' = s & markBlockStart addr (fnBlockState mem addr)
+                & absState %~ Map.insert addr (fnBlockState mem addr)
                 & functionEntries %~ Set.insert addr
-                & function_frontier %~ Set.insert addr
-      in s'
+                & function_frontier %~ maybeSetInsert low . Set.insert addr
+     s'
 
 recordFunctionAddrs :: Memory Word64 -> AbsValue (BVType 64) -> State InterpState ()
 recordFunctionAddrs mem av = do
@@ -265,7 +322,8 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
            -> MapF Assignment AbsValue
         go m0 b =
           case blockLabel b of
-            GeneratedBlock a 0 -> insBlock b (initAbsProcessorState mem (finalBlockState mem a fg)) m0
+            GeneratedBlock a 0 ->
+              insBlock b (initAbsProcessorState mem (finalBlockState mem a fg)) m0
             _ -> m0
 
         insBlock :: Block
@@ -273,15 +331,15 @@ assignmentAbsValues mem fg = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
                  -> MapF Assignment AbsValue
                  -> MapF Assignment AbsValue
         insBlock b r0 m0 =
-            case blockTerm b of
-              Branch _ lb rb -> do
-                let Just l = findBlock g lb
-                let Just r = findBlock g rb
-                insBlock l final $
-                  insBlock r final $
-                  m
-              FetchAndExecute _ -> m
-              Syscall _ -> m
+          case blockTerm b of
+            Branch _ lb rb -> do
+              let Just l = findBlock g lb
+              let Just r = findBlock g rb
+              insBlock l final $
+                insBlock r final $
+                m
+            FetchAndExecute _ -> m
+            Syscall _ -> m
 
           where final = runIdentity $ transferStmts r0 (blockStmts b)
                 m = MapF.union (final^.absAssignments) m0
@@ -298,25 +356,35 @@ mergeIntraJump  :: BlockLabel
                 -> CodeAddr
                    -- ^ Address we are trying to reach.
                 -> State InterpState ()
-mergeIntraJump src ab tgt = do
+mergeIntraJump src ab tgt = modify $ mergeIntraJump' src ab tgt
+
+-- | Joins in the new abstract state and returns the locations for
+-- which the new state is changed.
+mergeIntraJump'  :: BlockLabel
+                    -- ^ Source label that we are jumping from.
+                 -> AbsBlockState
+                    -- ^ Block state after executing instructions.
+                 -> CodeAddr
+                    -- ^ Address we are trying to reach.
+                 -> InterpState
+                 -> InterpState
+mergeIntraJump' src ab tgt s0 = do
   -- Associate a new abstract state with the code region.
   let upd new s = do
         -- Add reverse edge
         s & reverseEdges %~ Map.insertWith Set.union tgt (Set.singleton (labelAddr src))
           & absState %~ Map.insert tgt new
           & frontier %~ Map.insert tgt (NextIP src)
-  s0 <- get
   case Map.lookup tgt (s0^.absState) of
     -- We have seen this block before, so need to join and see if
     -- the results is changed.
     Just ab_old ->
       case joinD ab_old ab of
-        Nothing  -> return ()
-        Just new -> modify $ upd new
+        Nothing  -> s0
+        Just new -> upd new s0
     -- We haven't seen this block before
-    Nothing  ->
-      put $ s0 & upd ab
-               & markBlockStart tgt ab
+    Nothing -> s0 & upd ab
+                  & markBlockStart tgt ab
 
 -- | This updates the state of a function when returning from a function.
 mergeFreeBSDSyscall :: BlockLabel
@@ -383,12 +451,15 @@ mergeCallerReturn lbl ab0 addr = do
           -- We know nothing about other registers.
         | otherwise =
           TopV
+  --TODO: Compute how far  stack to clear.
+
       -- Get values below return address.
       -- TODO: Fix this; the called function may modify the stack.
   let stk = Map.filterWithKey (\k _ -> k >= 8) (ab0^.startAbsStack)
   let ab = shiftSpecificOffset regFn stk 8
 
-  mergeIntraJump lbl ab addr
+--  s <- get
+  put $ mergeIntraJump' lbl ab addr s
 
 _showAbsDiff :: AbsBlockState -> AbsBlockState -> Doc
 _showAbsDiff x y = vcat (pp <$> absBlockDiff x y)
@@ -745,36 +816,27 @@ transferBlock b regs = do
           | recoverIsReturnStmt s' -> do
             trace ("Return statement") $ do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
-            trace ("Return statement2") $ do
 
             rc0 <- use returnCount
             let ip_val = s'^.register N.rip
-            case trace ("Return statement3 " ++ show rc0) $ transferValue regs' ip_val of
+            case transferValue regs' ip_val of
               ReturnAddr ->
                 trace ("return_val is correct " ++ show lbl) $
                   returnCount += 1
               TopV ->
                 trace ("return_val is top at " ++ show lbl) $
                   returnCount += 1
+              -- The return_val is bad.
+              -- This could indicate that the caller knows that the function does
+              -- not return, and hence will not provide a reutrn value.
               rv ->
                 trace ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
                   returnCount += 1
 
--- Note: In the code below, we used to try to determine the return target and
--- merge information into the return address.  We no longer do that as it did not
--- appear to help discover new blocks, and we would like to minimize inter-procedural
--- analysis.
---            let abst = finalAbsBlockState regs' s'
---            let ips = concretizeAbsCodePointers mem (abst^.absX86State^.curIP)
---            -- Look for new ips.
---            Fold.forM_ ips $ \addr -> do
---              mergeCalleeReturn lbl mem abst addr
-
           -- Jump to concrete offset.
-          | BVValue _ tgt_addr_as_integer <- s'^.register N.rip ->
+          | BVValue _ (fromInteger -> tgt_addr) <- s'^.register N.rip ->
             trace ("Concrete jump") $ do
 
-            let tgt_addr = fromInteger tgt_addr_as_integer
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
             -- Try to check for a tail call.
@@ -788,9 +850,26 @@ transferBlock b regs = do
               -- TODO: Add check to ensure stack height is correct.
               trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               modify $ markAddrAsFunction tgt_addr
+              -- Check top of stack points to return value.
+              let sp_val = s'^.register N.rsp
+              let ret_val = transferRHS regs' (Read (MemLoc sp_val (BVTypeRepr n64)))
+              case ret_val of
+                ReturnAddr ->
+                  trace ("tail_ret_val is correct " ++ show lbl) $
+                    returnCount += 1
+                TopV ->
+                  trace ("tail_ret_val is top at " ++ show lbl) $
+                    returnCount += 1
+                rv ->
+                  -- The return_val is bad.
+                  -- This could indicate that the caller knows that the function does
+                  -- not return, and hence will not provide a reutrn value.
+                  trace ("tail_ret_val is bad at " ++ show lbl ++ ": " ++ show rv) $
+                    returnCount += 1
+
             else do
               -- Merge block state.
-              mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
+              modify $ mergeIntraJump' lbl (abst & setAbsIP mem tgt_addr) tgt_addr
 
 
           -- Block ends with what looks like a jump table.
@@ -801,7 +880,6 @@ transferBlock b regs = do
             trace ("Found jump table at " ++ show lbl) $ do
 
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
-
 
             -- Try to compute jump table bounds
             let mread_end = getJumpTableBounds mem regs' base index
@@ -851,8 +929,6 @@ transfer addr = trace ("transfer " ++ showHex addr ".") $ do
 
   doMaybe (getBlock addr) () $ \root -> do
     ab <- getAbsBlockState addr
-    fn_addr <- gets $ getFunctionEntryPoint addr
---    trace ("In function at " ++ showHex fn_addr ".") $ do
     transferBlock root (initAbsProcessorState mem ab)
 
 ------------------------------------------------------------------------
@@ -879,6 +955,10 @@ ppGlobalData :: [(CodeAddr, GlobalDataInfo)] -> String
 ppGlobalData l = unlines (pp <$> l)
   where pp (a,d) = "global " ++ showHex a (" " ++ show d)
 
+ppReverseEdges :: [(CodeAddr, Set CodeAddr)] -> String
+ppReverseEdges l = unlines (pp <$> l)
+  where pp (a,s) = "reverse " ++ showHex a (" -> " ++ show (Hex . toInteger <$> Set.toList s))
+
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
@@ -886,6 +966,7 @@ mkFinalCFG s =
     Right fns ->
       trace (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
+      trace (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       FinalCFG { finalCFG = mkCFG (s^.blocks)
                , finalAbsState = s^.absState
                , finalCodePointersInMem = s^.functionEntries
@@ -899,10 +980,15 @@ explore_frontier st =
     Nothing ->
       case Set.minView (st^.function_frontier) of
         Nothing -> st
-        Just (addr, next_roots) ->
-          let st_pre = st & function_frontier .~ next_roots
-              st_post = flip execState st_pre $ transfer addr
-           in explore_frontier st_post
+        Just (addr, next_roots) -> do
+          let high = Set.lookupGT addr (st^.functionEntries)
+              st' = st & function_frontier .~ next_roots
+                       & frontier .~ Map.singleton addr StartAddr
+                         -- Delete any entries we previously discovered for function.
+                       & reverseEdges    %~ deleteMapRange (Just addr) high
+                         -- Delete any entries we previously discovered for function.
+                       & absState        %~ deleteMapRange (Just addr) high
+           in explore_frontier st'
     Just ((addr,rsn), next_roots) ->
       let st_pre = st & frontier .~ next_roots
           st_post = flip execState st_pre $ transfer addr
