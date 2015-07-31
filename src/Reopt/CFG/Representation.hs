@@ -46,6 +46,7 @@ module Reopt.CFG.Representation
   , AssignRhs(..)
     -- * Value
   , Value(..)
+  , BVValue
   , valueAsApp
   , valueType
   , valueWidth

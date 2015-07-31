@@ -2,6 +2,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PatternGuards #-}
 module Reopt.CFG.Recovery
   ( Function(..)
   , FnBlock(..)

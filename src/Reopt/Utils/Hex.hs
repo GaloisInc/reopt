@@ -7,3 +7,4 @@ newtype Hex a = Hex a
 
 instance (Integral a, Show a) => Show (Hex a) where
   show (Hex v) | v >= 0 = showHex v ""
+               | otherwise = '-' : showHex (negate v) ""

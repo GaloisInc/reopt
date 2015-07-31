@@ -216,7 +216,7 @@ tryDisassembleAddr addr ab s0 = do
 
 -- | This is the worker for getBlock, in the case that we have not already
 -- read the block.
-reallyGetBlockList :: AbsState
+reallyGetBlockList :: AbsStateMap
                    -> InterpState
                    -> InterpState
 reallyGetBlockList m s0 = Map.foldrWithKey' tryDisassembleAddr s0 m
@@ -264,7 +264,7 @@ stackCodePointers stk =
 fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState
 fnBlockState mem addr =
   top & setAbsIP mem addr
-      & absX86State . register N.rsp .~ concreteStackOffset 0
+      & absX86State . register N.rsp .~ concreteStackOffset addr 0
       & absX86State . x87TopReg .~ FinSet (Set.singleton 7)
       & startAbsStack .~ Map.singleton 0 (StackEntry (BVTypeRepr n64) ReturnAddr)
 
@@ -431,6 +431,7 @@ mergeCallerReturn :: BlockLabel
                   -> State InterpState ()
 mergeCallerReturn lbl ab0 addr = do
   s <- get
+  let mem = memory s
   let regFn :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
       regFn r
           -- We set IPReg
@@ -439,6 +440,8 @@ mergeCallerReturn lbl ab0 addr = do
           -- We don't know anything about rax as it is the return value.
         | Just Refl <- testEquality r N.rax =
           TopV
+        | Just Refl <- testEquality r N.rsp =
+          bvadd n64 (ab0^.absX86State^.register r) (abstractSingleton mem n64 8)
           -- TODO: Transmit no value to first floating point register.
         | N.XMMReg 0 <- r =
           ab0^.absX86State^.register r
@@ -455,8 +458,11 @@ mergeCallerReturn lbl ab0 addr = do
 
       -- Get values below return address.
       -- TODO: Fix this; the called function may modify the stack.
-  let stk = Map.filterWithKey (\k _ -> k >= 8) (ab0^.startAbsStack)
-  let ab = shiftSpecificOffset regFn stk 8
+--  let stk = Map.filterWithKey (\k _ -> k >= 8) (ab0^.startAbsStack)
+--  let ab = shiftSpecificOffset regFn stk 8
+
+  let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
+
 
 --  s <- get
   put $ mergeIntraJump' lbl ab addr s
@@ -764,6 +770,8 @@ recoverIsReturnStmt s = do
        in (ip_base, ip_off + 8) == (sp_base, sp_off)
     _ -> False
 
+
+
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsProcessorState -- ^ Registers at this block.
               -> State InterpState ()
@@ -868,6 +876,7 @@ transferBlock b regs = do
                     returnCount += 1
 
             else do
+              trace "mergeIntraJump" $ do
               -- Merge block state.
               modify $ mergeIntraJump' lbl (abst & setAbsIP mem tgt_addr) tgt_addr
 
@@ -935,7 +944,7 @@ transfer addr = trace ("transfer " ++ showHex addr ".") $ do
 -- Main loop
 
 data FinalCFG = FinalCFG { finalCFG :: !CFG
-                         , finalAbsState :: !AbsState
+                         , finalAbsState :: !AbsStateMap
                          , finalCodePointersInMem :: !(Set CodeAddr)
                          , finalFailedAddrs :: !(Set CodeAddr)
                          , finalFunctions :: ![Function]

@@ -1,5 +1,9 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeOperators #-}
 module Reopt.CFG.InterpState
-  ( AbsState
+  ( AbsStateMap
   , lookupAbsBlock
   , FrontierReason(..)
   , BlockRegion(..)
@@ -27,9 +31,12 @@ import Control.Monad (join)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Data.Parameterized.Some
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Vector as V
 import Data.Word
+import GHC.TypeLits
 import Numeric (showHex)
 
 import Reopt.Analysis.AbsState
@@ -38,12 +45,12 @@ import Reopt.CFG.Representation
 import Reopt.Object.Memory
 
 ------------------------------------------------------------------------
--- AbsState
+-- AbsStateMap
 
 -- | Maps each code address to a set of abstract states
-type AbsState = Map CodeAddr AbsBlockState
+type AbsStateMap = Map CodeAddr AbsBlockState
 
-lookupAbsBlock :: CodeAddr -> AbsState -> AbsBlockState
+lookupAbsBlock :: CodeAddr -> AbsStateMap -> AbsBlockState
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
   where msg = "Could not find block " ++ showHex addr "."
 
@@ -98,6 +105,51 @@ instance Show GlobalDataInfo where
   show ReferencedValue = "global addr"
 
 ------------------------------------------------------------------------
+-- ParsedTermStmt
+
+-- | This term statement is used to describe higher level expressions
+-- of how block ending with a a FetchAndExecute statement should be
+-- interpreted.
+data ParsedTermStmt
+   = ParsedCall !(BVValue 64)
+                -- ^ Function to call
+                !([BVValue 64])
+                -- ^ Integer arguments to function
+                !([BVValue 128])
+                -- ^ Floating point values passed via XMM registers
+                !([Some Value])
+                -- ^ Values passed in the stack in order.
+                -- i.e.,The first argument is at the top of the stack
+                -- When calling these should be pushed to the stack in
+                -- reverse order.
+                !Word64 -- ^ Return location.
+     -- | A jump within a block
+   | ParsedJump !Word64
+     -- | A lookup table that branches to the given locations.
+   | forall n . (1 <= n) =>
+       ParsedLookupTable (BVValue n) (V.Vector Word64)
+     -- | A tail cthat branches to the given locations.
+   | ParsedTailCall !(BVValue 64)
+                    -- ^ Function to call
+                    !([BVValue 64])
+                    -- ^ Integer arguments to function
+                    !([BVValue 128])
+                    -- ^ Floating point values passed via XMM registers
+                    !([Some Value])
+                    -- ^ Values passed in the stack in order.
+                    -- i.e.,The first argument is at the top of the stack
+                    -- When calling these should be pushed to the stack in
+                    -- reverse order.
+
+   | ParsedReturn !(BVValue 64)
+                  -- ^ The integer return value (in RAX)
+                  !(BVValue 128)
+
+
+
+
+
+------------------------------------------------------------------------
 -- InterpState
 
 -- | The state of the interpreter
@@ -117,6 +169,9 @@ data InterpState
                    -- | Maps each address that appears to be global data to information
                    -- inferred about it.
                  , _globalDataMap :: !(Map CodeAddr GlobalDataInfo)
+                   -- | Information about the next state for blocks that end with
+                   -- @FetchAndExecute@ statements.
+                 , _parsedTermStmts :: !(Map CodeAddr ParsedTermStmt)
                    -- | Set of addresses to explore next.
                    -- This is a map so that we can associate a reason why a code address
                    -- was added to the frontier.
@@ -125,7 +180,7 @@ data InterpState
                  , _function_frontier :: !(Set CodeAddr)
                    -- | Map from code addresses to the abstract state at the start of
                    -- the block.
-                 , _absState :: !AbsState
+                 , _absState :: !AbsStateMap
                  , _returnCount :: !Int
                  }
 
@@ -136,12 +191,13 @@ emptyInterpState mem = InterpState
       , _genState     = emptyGlobalGenState
       , _blocks       = Map.empty
       , _functionEntries = Set.empty
-      , _reverseEdges = Map.empty
-      , _globalDataMap  = Map.empty
-      , _frontier     = Map.empty
+      , _reverseEdges    = Map.empty
+      , _globalDataMap   = Map.empty
+      , _parsedTermStmts = Map.empty
+      , _frontier        = Map.empty
       , _function_frontier = Set.empty
-      , _absState     = Map.empty
-      , _returnCount  = 0
+      , _absState        = Map.empty
+      , _returnCount     = 0
       }
 
 genState :: Simple Lens InterpState GlobalGenState
@@ -161,13 +217,18 @@ reverseEdges = lens _reverseEdges (\s v -> s { _reverseEdges = v })
 globalDataMap :: Simple Lens InterpState (Map CodeAddr GlobalDataInfo)
 globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
+-- | Information about the next state for blocks that end with
+-- @FetchAndExecute@ statements.
+parsedTermStmts :: Simple Lens InterpState (Map CodeAddr ParsedTermStmt)
+parsedTermStmts = lens _parsedTermStmts (\s v -> s { _parsedTermStmts = v })
+
 frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })
 
 function_frontier :: Simple Lens InterpState (Set CodeAddr)
 function_frontier = lens _function_frontier (\s v -> s { _function_frontier = v })
 
-absState :: Simple Lens InterpState AbsState
+absState :: Simple Lens InterpState AbsStateMap
 absState = lens _absState (\s v -> s { _absState = v })
 
 returnCount :: Simple Lens InterpState Int
