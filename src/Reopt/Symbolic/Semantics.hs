@@ -355,15 +355,11 @@ bvBit nr1 nr2 val idx =
     shiftedVal = G.App $ asPosNat nr1 (C.BVAshr nr1 val idx')
     idx' :: G.Expr s (C.BVType n)
     idx' = case testNatCases nr2 nr1 of
-      NatCaseLT prf1 -> case isPosNat nr2 of
-        Nothing  -> error "zero-width NatRepr"
-        Just prf2 ->
-          withLeqProof prf1 (withLeqProof prf2 (G.App $ C.BVZext nr1 nr2 idx))
+      NatCaseLT prf ->
+        withLeqProof prf (asPosNat nr2 (G.App $ C.BVZext nr1 nr2 idx))
       NatCaseEQ -> idx
-      NatCaseGT prf1 -> case isPosNat nr1 of
-        Nothing  -> error "zero-width NatRepr"
-        Just prf2 ->
-          withLeqProof prf1 (withLeqProof prf2 (G.App $ C.BVTrunc nr1 nr2 idx))
+      NatCaseGT prf ->
+        withLeqProof prf (asPosNat nr1 (G.App $ C.BVTrunc nr1 nr2 idx))
 
 
 translateVar :: Variable tp -> Var (F tp)
