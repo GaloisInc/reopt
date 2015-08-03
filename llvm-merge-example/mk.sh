@@ -6,10 +6,10 @@ syms=("w_str" "r_str" "root" "fopen" "fclose" "fputc" "fgetc" "fputs" "strcmp" "
 
 function get_addr ()
 {
-    nm --defined-only host-tree | grep -E "\<$1\>" | cut -d' ' -f1
+    nm --defined-only original-tree | grep -E "\<$1\>" | cut -d' ' -f1
 }
 
-function make_host_cflags () {
+function make_original_cflags () {
     local cflags="-O3"
     for i in ${syms[*]}; do
         local name=$(echo ${i} | tr 'a-z' 'A-Z')
@@ -19,10 +19,10 @@ function make_host_cflags () {
 }    
 
 
-host_cflags=$(make_host_cflags)
-make CFLAGS="${host_cflags}"
-mv tree host-tree
-mv tree.ll host-tree.ll
+original_cflags=$(make_original_cflags)
+make CFLAGS="${original_cflags}"
+mv tree original-tree
+mv tree.ll original-tree.ll
 
 
 function make_cflags () {
