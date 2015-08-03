@@ -23,6 +23,7 @@ data Term = Cond Word64 Word64 -- true, false
           | Fallthrough Word64
           | Indirect (N.RegisterName 'N.GP)
           | Ret
+
 instance Show Term where
   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 "" 

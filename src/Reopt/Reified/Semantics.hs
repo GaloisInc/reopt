@@ -34,6 +34,7 @@ module Reopt.Reified.Semantics
        ( execSemantics
        , ppStmts
        , ppStmt
+       , ppExpr
        , Stmt(..)
        , Expr(..)
        , Variable(..)
@@ -119,7 +120,8 @@ instance Eq (Variable tp) where
 -- | A pure expression for isValue.
 data Expr tp where
   -- An expression obtained from some value.
-  LitExpr :: !(NatRepr n) -> Integer -> Expr (BVType n)
+  LitExpr :: (1 <= n) =>
+    !(NatRepr n) -> Integer -> Expr (BVType n)
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(R.App Expr tp) -> Expr tp
 
@@ -141,7 +143,7 @@ data Expr tp where
   -- later.
   VarExpr :: Variable tp -> Expr tp
 
-mkLit :: NatRepr n -> Integer -> Expr (BVType n)
+mkLit :: (1 <= n) => NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
   where mask = maxUnsigned n
 

@@ -38,6 +38,7 @@ import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
+import           Lang.Crucible.Utils.MonadST
 import           Reopt
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -51,6 +52,8 @@ import           Reopt.BasicBlock.FunctionCFG
 import qualified Reopt.Concrete.Semantics as CS
 import           Reopt.Concrete.BitVector
 import           Reopt.Concrete.MachineState as MS
+import           Reopt.Symbolic.Semantics
+
 
 ------------------------------------------------------------------------
 -- Args
@@ -60,6 +63,7 @@ data Action
    = FindBlocks      -- ^ Display a cfg for a function
    | CompareBlocks   -- ^ Compare basic blocks in two programs
    | ShowSingleBlock -- ^ Print out concrete semantics of a basic block
+   | SymExec         -- ^ Symbolically execute a block
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
 
@@ -111,9 +115,9 @@ defaultArgs = Args { _reoptAction = ShowSingleBlock
 -- Argument processing
 
 singleBlockFlag :: Flag Args
-singleBlockFlag = flagNone [ "concrete-blocks", "b" ] upd help
+singleBlockFlag = flagNone [ "show-block", "b" ] upd help
   where upd  = reoptAction .~ ShowSingleBlock
-        help = "Print out concrete semantics for basic blocks of executable."
+        help = "Dump one basic block of an executable."
 
 functionCFGFlag :: Flag Args
 functionCFGFlag = flagNone [ "function-cfg", "f" ] upd help
@@ -124,6 +128,11 @@ compareBlocksFlag :: Flag Args
 compareBlocksFlag = flagNone [ "compare-blocks", "c" ] upd help
   where upd  = reoptAction .~ CompareBlocks
         help = "Print out concrete semantics for basic blocks of executable."
+
+symExecFlag :: Flag Args
+symExecFlag = flagNone [ "sym-exec", "s" ] upd help
+  where upd  = reoptAction .~ SymExec
+        help = "Symbolically execute a block."
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
@@ -156,6 +165,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , sectionFlag
                 , singleBlockFlag
                 , compareBlocksFlag
+                , symExecFlag
                 , functionCFGFlag
                 , addr1Flag
                 , addr2Flag
@@ -224,6 +234,26 @@ readStaticElf path = do
     Just{} ->
       fail "reopt does not yet support generating CFGs from dynamically linked executables."
   return e
+
+symExec :: Memory Word64 -> Word64 -> IO ()
+symExec mem start =
+  -- case findBlocks mem entry of
+  --   Left err -> putStrLn err
+  --   Right cfg -> do
+  --     let block0 = M.lookup entry cfg
+  --     block0 <- case M.lookup entry cfg of
+  --                 Nothing -> putStrLn "impossible" >> exitFailure
+  --                 Just b -> return b
+  case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
+    Left err -> putStrLn $ show err
+    Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
+                                      ++ showHex err ""
+    Right (Right (nexts, ret, stmts), _) -> do
+      let block0 = Block stmts Ret
+      halloc <- liftST newHandleAllocator
+      crucibleCFG <- liftST $ translateBlock halloc block0
+      return ()
+
 
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start = 
@@ -304,6 +334,15 @@ main = do
         [path] -> readStaticElf path
       mem <- mkElfMem (args^.loadStyle) e
       showSingleBlock mem (elfEntry e)
+    SymExec -> do
+      e <- case args^.programPaths of
+        [path] -> readStaticElf path
+        _      -> fail "usage: filename"
+      mem <- mkElfMem (args^.loadStyle) e
+      let a = case args^.addr1 of
+                0 -> elfEntry e
+                a' -> a'
+      symExec mem a
     FindBlocks -> do
       e <- case args^.programPaths of
         [] -> fail "A file name is required\n"
