@@ -34,9 +34,12 @@ import           Reopt.Semantics.Monad
 
 -- * Preliminaries
 
-type Binop = IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
-type Unop  = IsLocationBV m n => MLocation m (BVType n) -> m ()
-type UnopV = Semantics m => Value m (BVType n) -> m ()
+type Binop = forall m n.
+  IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
+type Unop  = forall m n.
+  IsLocationBV m n => MLocation m (BVType n) -> m ()
+type UnopV = forall m n.
+  Semantics m => Value m (BVType n) -> m ()
 
 uadd4_overflows :: ( 4 <= n, IsValue v)
                 => v (BVType n) -> v (BVType n) -> v BoolType
@@ -921,10 +924,10 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 
       -- we do this to make it obvious so repz cmpsb ; jz ... is clear
       zf_loc .= equal
-      let nbytes = nwordsSeen `bvMul` (bvLit n64 $ natValue sz `div` 8)
+      let nbytes' = nwordsSeen `bvMul` (bvLit n64 $ natValue sz `div` 8)
 
-      rsi .= mux df (src  `bvSub` nbytes) (src  `bvAdd` nbytes)
-      rdi .= mux df (dest `bvSub` nbytes) (dest `bvAdd` nbytes)
+      rsi .= mux df (src  `bvSub` nbytes') (src  `bvAdd` nbytes')
+      rdi .= mux df (dest `bvSub` nbytes') (dest `bvAdd` nbytes')
       rcx .= (count .- nwordsSeen)
 
 -- SCAS/SCASB Scan string/Scan byte string
@@ -1009,9 +1012,13 @@ exec_lea l v = l .= v
 
 -- * X86 FPU instructions
 
-type FPUnop  = Semantics m => FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ()
-type FPUnopV = Semantics m => FloatInfoRepr flt -> Value m (FloatType flt) -> m ()
-type FPBinop = Semantics m => FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) -> FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ()
+type FPUnop  = forall flt m.
+  Semantics m => FloatInfoRepr flt -> MLocation m (FloatType flt) -> m ()
+type FPUnopV = forall flt m.
+  Semantics m => FloatInfoRepr flt -> Value m (FloatType flt) -> m ()
+type FPBinop = forall flt_d flt_s m.
+  Semantics m => FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) ->
+                 FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ()
 
 -- ** Data transfer instructions
 
@@ -1376,7 +1383,8 @@ exec_movups l v = l .= v
 
 -- MOVHPS Move two packed single-precision floating-point values to an from the high quadword of an XMM register and memory
 
-exec_movhlps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movhlps :: forall m.
+  Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movhlps l v = do
   v0 <- get l
   l .= (f v0) `bvCat` (f v)
@@ -1385,7 +1393,8 @@ exec_movhlps l v = do
 
 -- MOVLPS Move two packed single-precision floating-point values to an from the low quadword of an XMM register and memory
 
-exec_movlhps :: forall m n. (Semantics m) => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movlhps :: forall m.
+  Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movlhps l v = do
   v0 <- get l
   l .= (f v) `bvCat` (f v0)
