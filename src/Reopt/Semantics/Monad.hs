@@ -183,12 +183,12 @@ elimLocation memCont regCont x87Cont l = go id l
     -- the subrange, by applying it to the full range @(0, w)@ of the
     -- base location, and then call the continutation corresponding to
     -- the base location.
-    go :: forall tp. ((i, i) -> (i, i)) -> Location addr tp -> a
-    go t l = case l of
+    go :: forall tp'. ((i, i) -> (i, i)) -> Location addr tp' -> a
+    go t l' = case l' of
       -- Recursive cases.
-      TruncLoc l n -> go (t . truncLoc n) l
-      LowerHalf l -> go (t . lowerHalf) l
-      UpperHalf l -> go (t . upperHalf) l
+      TruncLoc l'' n -> go (t . truncLoc n) l''
+      LowerHalf l'' -> go (t . lowerHalf) l''
+      UpperHalf l'' -> go (t . upperHalf) l''
       -- Base cases.
       Register r -> regCont (t (0, w)) w r
       MemoryAddr addr tr -> memCont (t (0, w)) w (addr, tr)
@@ -196,7 +196,7 @@ elimLocation memCont regCont x87Cont l = go id l
       where
         -- The width of the base location.
         w :: i
-        w = case loc_type l of
+        w = case loc_type l' of
           BVTypeRepr nr -> fromIntegral $ natValue nr
 
     -- Transformations on subranges.
