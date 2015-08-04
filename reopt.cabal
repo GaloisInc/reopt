@@ -60,6 +60,7 @@ library
     Reopt.Utils.PrettyPrint
 
   ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -86,6 +87,7 @@ executable reopt
     ghc-options: -fhpc
 
   ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt_test
@@ -113,6 +115,7 @@ executable reopt_test
     ghc-options: -fhpc
 
   ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable ConcreteDumpInstr
