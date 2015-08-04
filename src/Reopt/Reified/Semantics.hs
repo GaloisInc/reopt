@@ -38,28 +38,17 @@ module Reopt.Reified.Semantics
        , Variable(..)
        ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<*>), pure, Applicative)
-#endif
 import           Control.Monad.Cont
-import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
-import           Data.Binary.IEEE754
 import           Data.Bits
-import           Data.BitVector (BV)
-import qualified Data.BitVector as BV
-import           Data.Functor
-import           Data.Monoid (mempty)
+
 import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
-import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
   ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
-
-import           GHC.Float (float2Double, double2Float)
 
 import           Reopt.Semantics.Monad
   ( Type(..)
@@ -70,10 +59,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n80
-                                     )
+import           Reopt.Machine.Types (FloatInfo(..))
 
 ------------------------------------------------------------------------
 -- Expr
@@ -213,34 +199,6 @@ instance S.IsValue Expr where
   fpCvtRoundsUp src tgt x = app $ R.FPCvtRoundsUp src x tgt
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
-
--- ??? Why do the 'App' constructors take a 'NatRepr' argument? It can
--- always be reconstructed by the user using 'bv_width' after
--- unpacking, no?
-
--- ??? Why do 'Trunc' and 'bvTrunc' have slightly different constraints?
--- 'Trunc   :: (1 <= n, n+1 <= m) => ...'
--- 'bvTrunc :: (1 <= n, n   <= m) => ...'
---
--- Answer: because 'Trunc' is only used for *strict* truncations. The
--- 'testStrictLeq' function in
--- reopt.git/deps/parameterized-utils/src/Data/Parameterized/NatRepr.hs
--- is used to turn a proof of 'm <= n' into a proof of 'm < n \/ m =
--- n' and 'Trunc' is only used in cases where 'm < n', i.e. 'm+1 <=
--- n'.
-
--- ??? Why does 'bvTrunc' take a 'NatRepr' argument?
---
--- Answer: because it specifies the return type. Same with 'sext' and
--- 'uext'.
-
--- ??? Why does 'Trunc' take it's 'NatRepr' argument second? (Nearly?)
--- all the other 'NatRepr' args come first in 'App' constructors.
-
--- TODO: rename for consistency:
---
--- - complement -> bvComplement
--- - Trunc -> BVTrunc
 
 ------------------------------------------------------------------------
 -- Statements.

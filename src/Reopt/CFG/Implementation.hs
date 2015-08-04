@@ -34,7 +34,6 @@ module Reopt.CFG.Implementation
        , rootLoc
        ) where
 
-import           Control.Applicative
 import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Cont
@@ -53,7 +52,6 @@ import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
 import           Unsafe.Coerce -- Only required to work around a ghc crash
-
 
 import           Data.Word
 import           Numeric (showHex)

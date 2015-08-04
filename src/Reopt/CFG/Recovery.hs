@@ -15,7 +15,6 @@ module Reopt.CFG.Recovery
   , recoverFunction
   ) where
 
-import Control.Applicative
 import Control.Lens
 import Control.Monad.Error
 import Control.Monad.State.Strict

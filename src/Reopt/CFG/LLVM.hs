@@ -20,18 +20,13 @@
 
 module Reopt.CFG.LLVM where
 
-import           Control.Applicative
 import           Control.Monad
-import           Data.Text (Text)
-import qualified Data.Text as Text
 import           Text.LLVM (BB)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Reopt.Machine.Types
 import           Reopt.CFG.Representation
-
-import           Debug.Trace
 
 --------------------------------------------------------------------------------
 -- reopt intrinsics

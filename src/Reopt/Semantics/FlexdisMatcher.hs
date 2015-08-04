@@ -26,8 +26,7 @@ module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
   ) where
 
-import           Control.Applicative ( (<$>) )
-import           Data.List (foldl', stripPrefix)
+import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )

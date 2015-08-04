@@ -4,7 +4,6 @@
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
-import           Control.Applicative
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
@@ -20,7 +19,6 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Version
 import           Data.Word
-import           GHC.TypeLits
 import           Numeric (showHex)
 import           Reopt.Analysis.AbsState
 import           System.Console.CmdArgs.Explicit
@@ -47,7 +45,6 @@ import           Reopt.Machine.Types
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Semantics.DeadRegisterElimination
-import           Reopt.Semantics.Monad (Type(..))
 
 ------------------------------------------------------------------------
 -- Args

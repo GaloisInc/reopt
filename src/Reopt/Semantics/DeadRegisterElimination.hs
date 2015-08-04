@@ -19,7 +19,6 @@
 {-# LANGUAGE GADTs #-}
 module Reopt.Semantics.DeadRegisterElimination (eliminateDeadRegisters) where
 
-import           Control.Applicative ((<$>), (<*>))
 import           Control.Lens
 import           Control.Monad.State (State, evalState, gets, modify)
 import           Data.Foldable (foldrM)

@@ -12,11 +12,16 @@ module Reopt.Concrete.MachineState
     , module Reopt.Concrete.BitVector
     ) where
 
+import           Control.Lens
+import           Control.Monad.State
+import           Control.Monad.Reader
+import           Control.Monad.Writer.Strict
 import qualified Data.Map as M
+import           Data.Maybe (mapMaybe)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
-import           Debug.Trace
+
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
@@ -24,15 +29,6 @@ import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat,
 import qualified Reopt.Concrete.BitVector as B
 import           Reopt.Semantics.Monad (Primitive, Segment)
 import qualified Data.BitVector as BV
-
-import           Control.Applicative
-import           Control.Monad.State
-import           Control.Monad.Reader
-import           Control.Monad.Writer.Strict
-
-import Data.Maybe (mapMaybe)
-
-import Control.Lens
 
 ------------------------------------------------------------------------
 -- Concrete values

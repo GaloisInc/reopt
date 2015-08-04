@@ -1,4 +1,3 @@
-{-# LANGUAGE RankNTypes #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.Monad
@@ -19,6 +18,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -98,7 +98,6 @@ module Reopt.Semantics.Monad
   , module Flexdis86.InstructionSet
   ) where
 
-import           Control.Applicative
 import           Data.Bits (shiftL)
 import           Data.Char (toLower)
 import           Data.Proxy

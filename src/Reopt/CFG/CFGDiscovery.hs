@@ -27,11 +27,8 @@ module Reopt.CFG.CFGDiscovery
        , assignmentAbsValues
        ) where
 
-import           Control.Applicative
 import           Control.Exception
 import           Control.Lens
-import           Control.Monad.Error
-import           Control.Monad.Identity
 import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
@@ -40,7 +37,6 @@ import           Data.Int
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -49,9 +45,7 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Vector as V
+
 import           Data.Word
 import           Debug.Trace
 import           Numeric

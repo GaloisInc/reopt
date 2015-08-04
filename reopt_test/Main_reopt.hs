@@ -13,8 +13,6 @@
 
 module Main (main) where
 
-import Control.Applicative
-import           Control.Concurrent
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State
@@ -24,62 +22,42 @@ import           Data.Bits
 import qualified Data.BitVector as BV
 import qualified Data.ByteString as B
 import           Data.Elf
-import           Data.Foldable (traverse_)
-import           Data.Int
-import           Data.List
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
-import           Data.Set (Set)
-import qualified Data.Set as Set
 import           Data.Word
 import           Data.Version
-import           GHC.TypeLits
-import           Numeric (showHex)
 import           System.Console.CmdArgs.Explicit as CmdArgs
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import System.IO
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import Debug.Trace
 
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Some
-import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
--- import Reopt.Semantics.BitVector
 import           Numeric (readHex)
 
 import           Paths_reopt (version)
-import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..), ppInstruction,
                   ByteReader(..), defaultX64Disassembler,
                   disassembleInstruction, LockPrefix(..))
-import           Reopt
-import           Reopt.Analysis.AbsState
-import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Machine.X86State
---import           Reopt.Semantics.ConcreteState
 import           Reopt.Object.Memory
 import           Reopt.Object.Loader
 import           Reopt.Concrete.BitVector
 import           Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.MachineState()
 import           Reopt.Concrete.Semantics
-import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
-import           Reopt.Semantics.Monad (Type(..), bvLit)
 import qualified Reopt.Semantics.Monad as SM
 import System.Posix.Waitpid as W
 import System.Posix.Types
 import System.Posix.Process
-import System.Posix.Signals
-import System.Linux.Ptrace
 import System.Linux.Ptrace.Syscall
 import System.Linux.Ptrace.Types
 import System.Linux.Ptrace.X86_64Regs

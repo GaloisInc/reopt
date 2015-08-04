@@ -47,10 +47,8 @@ module Reopt.Analysis.AbsState
   , isBottom
   ) where
 
-import           Control.Applicative ( (<$>) )
 import           Control.Exception (assert)
 import           Control.Lens
-import           Control.Monad (guard)
 import           Control.Monad.State.Strict
 import           Data.Int
 import           Data.Map (Map)

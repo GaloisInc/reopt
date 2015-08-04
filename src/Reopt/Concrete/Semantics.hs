@@ -11,7 +11,6 @@
 -- Reopt.Semantics.Monad that treat some class methods as
 -- uninterpreted functions.
 ------------------------------------------------------------------------
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -36,26 +35,16 @@ module Reopt.Concrete.Semantics
        , module Reopt.Reified.Semantics
        ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<*>), pure, Applicative)
-#endif
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
-import           Control.Monad.Writer
-  (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Binary.IEEE754
 import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
-import           Data.Functor
-import           Data.Monoid (mempty)
-import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
-import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
 import           GHC.Float (float2Double, double2Float)
 
@@ -63,14 +52,13 @@ import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
   , BoolType
-  , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
 import           Reopt.Reified.Semantics
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
+import           Reopt.Machine.Types ( FloatInfoRepr, FloatType
                                      , floatInfoBits, n1, n80
                                      )
 
@@ -381,8 +369,6 @@ evalStmt (l := e) =
         v0 <- CS.getReg rn
         let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
         CS.setReg rn v1
-  let x87Cont (low, high) width i =
-        regCont (low, high) width (N.X87FPUReg i)
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
       x87Cont (low, high) width i =
         case S.loc_type l
@@ -583,7 +569,6 @@ checkUsbbOverflow :: BV -> BV -> BV -> BV
 checkUsbbOverflow a b borrow = BV.fromBool didUnderflow
   where
     didUnderflow = total < 0
-    bitWidth = max (BV.width a) (BV.width b)
     total = foldl1 (-) $ map BV.uint [a,b,borrow]
 
 checkSsbbOverflow :: BV -> BV -> BV -> BV

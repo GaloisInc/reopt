@@ -99,7 +99,6 @@ import           Data.Parameterized.Some
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
-import           Reopt.Semantics.Monad (Primitive)
 import           Reopt.Utils.PrettyPrint
 
 -- Note:

@@ -20,7 +20,6 @@
 
 module Reopt.Semantics.Semantics where
 
-import           Control.Applicative ( (<$>), (<*>) )
 import           Data.Type.Equality
 import           Data.Int
 import           Data.Proxy
