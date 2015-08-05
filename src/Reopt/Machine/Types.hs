@@ -36,6 +36,9 @@ n1 = knownNat
 n4 :: NatRepr 4
 n4 = knownNat
 
+n5 :: NatRepr 5
+n5 = knownNat
+
 n8 :: NatRepr 8
 n8 = knownNat
 

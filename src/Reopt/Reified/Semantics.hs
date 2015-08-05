@@ -35,6 +35,7 @@ module Reopt.Reified.Semantics
        ( execSemantics
        , ppStmts
        , ppStmt
+       , ppExpr
        , Stmt(..)
        , Expr(..)
        , Variable(..)
@@ -120,7 +121,8 @@ instance Eq (Variable tp) where
 -- | A pure expression for isValue.
 data Expr tp where
   -- An expression obtained from some value.
-  LitExpr :: !(NatRepr n) -> Integer -> Expr (BVType n)
+  LitExpr :: (1 <= n) =>
+    !(NatRepr n) -> Integer -> Expr (BVType n)
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(R.App Expr tp) -> Expr tp
 
@@ -142,6 +144,7 @@ data Expr tp where
   -- later.
   VarExpr :: Variable tp -> Expr tp
 
+<<<<<<< HEAD
 instance TestEquality Expr where
   testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
 
@@ -200,7 +203,7 @@ instance MapF.OrdF Expr where
 instance Ord (Expr tp) where
   e1 `compare` e2 = compareFin e1 e2
 
-mkLit :: NatRepr n -> Integer -> Expr (BVType n)
+mkLit :: (1 <= n) => NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
   where mask = maxUnsigned n
 
@@ -306,8 +309,6 @@ instance S.IsValue Expr where
 -- Statements.
 
 type MLocation = S.Location (Expr (BVType 64))
-
-data NamedStmt where
 
 -- | Potentially side-effecting operations, corresponding the to the
 -- 'S.Semantics' class.

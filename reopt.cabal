@@ -119,6 +119,7 @@ executable radss_compare
     bytestring,
     cmdargs,
     containers,
+    crucible,
     elf,
     flexdis86,
     lens,
