@@ -105,6 +105,7 @@ import           Data.Proxy
 import           GHC.TypeLits as TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
@@ -142,6 +143,78 @@ data Location addr (tp :: Type) where
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
+
+instance TestEquality (Location addr) where
+  testEquality l l' 
+    | Just Refl <- testEquality (loc_type l) (loc_type l') = Just Refl
+    | otherwise = Nothing
+
+instance Eq addr => EqF (Location addr) where 
+  MemoryAddr addr tp `eqF` MemoryAddr addr' tp'
+    | Just Refl <- testEquality tp tp' = addr == addr'
+  Register nm `eqF` Register nm' 
+    | Just Refl <- testEquality nm nm' = True
+  TruncLoc l nr `eqF` TruncLoc l' nr' 
+    | Just Refl <- testEquality l l' = l `eqF` l'
+  LowerHalf l `eqF` LowerHalf l' = l `eqF` l'
+  UpperHalf l `eqF` UpperHalf l' = l `eqF` l'
+  X87StackRegister i `eqF` X87StackRegister i' = i == i'
+
+instance Eq addr => Eq (Location addr tp) where 
+  l == l' = l `eqF` l'
+
+instance Ord addr => OrdF (Location addr) where
+  MemoryAddr addr tp `compareF` MemoryAddr addr' tp' =
+    case tp `compareF` tp' of
+      LTF -> LTF
+      EQF -> case addr `compare` addr' of
+        LT -> LTF
+        EQ -> EQF
+        GT -> GTF
+      GTF -> GTF
+  MemoryAddr _ _ `compareF` _ = GTF
+  _ `compareF` MemoryAddr _ _ = LTF
+  Register nm `compareF` Register nm' = 
+    case nm `compareF` nm' of
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF
+  Register _ `compareF` _ = GTF
+  _ `compareF` Register _ = LTF
+  TruncLoc l nr `compareF` TruncLoc l' nr' =
+    case l `compareF` l' of
+      LTF -> LTF
+      EQF -> case nr `compareF` nr' of
+        LTF -> LTF
+        EQF -> EQF
+        GTF -> GTF
+      GTF -> GTF
+  TruncLoc _ _ `compareF` _ = GTF
+  _ `compareF` TruncLoc _ _ = LTF
+  lh@(LowerHalf l) `compareF` lh'@(LowerHalf l') =
+    case l `compareF` l' of
+      LTF -> LTF
+      EQF -> case lh `testEquality` lh' of
+        Just Refl -> EQF -- this is a hack, but I don't see a better way?
+        Nothing -> error "Lower halves of equal-width registers were not equal-width"
+      GTF -> GTF
+  LowerHalf _ `compareF` _ = GTF
+  _ `compareF` LowerHalf _ = LTF
+  uh@(UpperHalf l) `compareF` uh'@(UpperHalf l') =
+    case l `compareF` l' of
+      LTF -> LTF
+      EQF -> case uh `testEquality` uh' of
+        Just Refl -> EQF
+        Nothing -> error "Upper halves of equal-width registers were not equal-width"
+      GTF -> GTF
+  UpperHalf _ `compareF` _ = GTF
+  _ `compareF` UpperHalf _ = LTF
+  X87StackRegister i `compareF` X87StackRegister i' = 
+    case compare i  i' of
+      LT -> LTF
+      EQ -> EQF
+      GT -> GTF
+
 
 ------------------------------------------------------------------------
 -- Operations on locations.
@@ -689,7 +762,7 @@ data ExceptionClass
    | FloatingPointError
    | SIMDFloatingPointException
      -- -- | AlignmentCheck
-  deriving Show
+  deriving (Eq, Ord, Show)
 
 -- | Primitive instructions.
 --
@@ -701,7 +774,7 @@ data Primitive
    | RDTSC
    -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
    | XGetBV
-   deriving Show
+   deriving (Eq, Ord, Show)
 
 ppPrimitive :: Primitive -> Doc
 ppPrimitive = text . map toLower . show

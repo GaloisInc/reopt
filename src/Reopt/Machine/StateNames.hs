@@ -14,6 +14,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FlexibleInstances #-} -- for Eq
 {-# LANGUAGE PolyKinds #-}
 
@@ -237,6 +238,18 @@ instance OrdF RegisterName where
   -- compareF DebugReg{}        _                  = LTF
   -- compareF _                 DebugReg{}         = GTF
 
+instance Eq (RegisterName cl) where
+  a == b = case a `compareF` b of
+    GTF -> False
+    EQF -> True
+    LTF -> False
+
+instance Ord (RegisterName cl) where
+  a `compare` b = case a `compareF` b of
+    GTF -> GT
+    EQF -> EQ
+    LTF -> LT
+
 registerWidth :: RegisterName cl -> NatRepr (RegisterClassBits cl)
 registerWidth IPReg           = knownNat
 registerWidth GPReg{}         = knownNat
@@ -338,10 +351,6 @@ ss = SegmentReg 2
 ds = SegmentReg 3
 fs = SegmentReg 4
 gs = SegmentReg 5
-
-instance Eq (RegisterName 'Segment) where
-  (SegmentReg n) == (SegmentReg n') = n == n'
-
 
 segmentNames :: V.Vector String
 segmentNames = V.fromList ["es", "cs", "ss", "ds", "fs", "gs"]

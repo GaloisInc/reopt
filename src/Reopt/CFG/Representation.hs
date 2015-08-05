@@ -18,6 +18,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 module Reopt.CFG.Representation
@@ -845,6 +846,11 @@ instance OrdF f => OrdF (App f) where
                    , (ConType [t|FloatInfoRepr|] `TypeApp` AnyType, [|compareF|])
                    ]
               )
+
+instance OrdF f => Ord (App f tp) where
+  compare a b = case compareF a b of LTF -> LT
+                                     EQF -> EQ
+                                     GTF -> GT
 
 traverseApp :: Applicative m
             => (forall u . f u -> m (g u))

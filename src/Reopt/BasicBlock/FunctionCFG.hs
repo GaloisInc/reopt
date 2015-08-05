@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 
-module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks)
+module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks,
+                                     termChildren)
 where
 import           Reopt.BasicBlock.Extract
 import           Data.Map (Map)
@@ -15,14 +16,15 @@ import           Reopt.Object.Memory
 
 type CFG = Map Word64 Block
 
-data Block = Block [Stmt] Term
+data Block = Block [Stmt] Term deriving (Eq, Ord)
 
 data Term = Cond Word64 Word64 -- true, false
           | Call Word64 Word64 -- call, ret
           | Direct Word64
           | Fallthrough Word64
           | Indirect (N.RegisterName 'N.GP)
-          | Ret
+          | Ret deriving (Eq, Ord)
+
 instance Show Term where
   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 "" 
@@ -31,6 +33,13 @@ instance Show Term where
   show (Indirect reg) = "Indirect " ++ show reg
   show Ret = "Ret"
 
+termChildren :: Term -> [Word64]
+termChildren (Cond w1 w2) = [w1, w2]
+termChildren (Call _ w) = [w]
+termChildren (Direct w) = [w]
+termChildren (Fallthrough w) = [w]
+termChildren (Indirect _) = []
+termChildren Ret = []
 
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...

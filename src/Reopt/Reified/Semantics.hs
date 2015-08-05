@@ -25,6 +25,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
@@ -140,6 +141,64 @@ data Expr tp where
   -- Not doing anything fancy with names for now; can use 'unbound'
   -- later.
   VarExpr :: Variable tp -> Expr tp
+
+instance TestEquality Expr where
+  testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
+
+instance MapF.EqF Expr where
+  LitExpr nr1 i1 `eqF` LitExpr nr2 i2 = i1 == i2
+  AppExpr app1 `eqF` AppExpr app2 = app1 == app2
+  TruncExpr nr1 e1 `eqF` TruncExpr nr2 e2 
+    | Just Refl <- e1 `testEquality` e2 = e1 `MapF.eqF` e2
+  SExtExpr nr1 e1 `eqF` SExtExpr nr2 e2
+    | Just Refl <- e1 `testEquality` e2 = e1 `MapF.eqF` e2
+  VarExpr v1 `eqF` VarExpr v2 = v1 == v2
+  _ `eqF` _ = False
+
+instance Eq (Expr tp) where
+  e1 == e2 = e1 `R.eqF` e2
+
+instance MapF.OrdF Expr where
+  LitExpr nr1 i1 `compareF` LitExpr nr2 i2
+    | Just Refl <- nr1 `testEquality` nr2 = 
+      case i1 `compare` i2 of
+        LT -> LTF
+        EQ -> EQF
+        GT -> GTF
+    | otherwise = case nr1 `compareF` nr2 of
+        LTF -> LTF
+        EQF -> EQF
+        GTF -> GTF
+  LitExpr _ _ `compareF` _ = GTF
+  _ `compareF` LitExpr _ _ = LTF
+  AppExpr app1 `compareF` AppExpr app2 = app1 `compareF` app2
+  AppExpr _ `compareF` _ = GTF
+  _ `compareF` AppExpr _ = LTF
+  TruncExpr nr1 e1 `compareF` TruncExpr nr2 e2 
+    | Just Refl <- testEquality nr1 nr2 = case e1 `compareF` e2 of
+        LTF -> LTF
+        EQF -> EQF
+        GTF -> GTF
+    | otherwise = case nr1 `compareF` nr2 of
+        LTF -> LTF
+        EQF -> EQF
+        GTF -> GTF
+  TruncExpr _  _ `compareF` _ = GTF
+  _ `compareF` TruncExpr _ _ = LTF
+  SExtExpr nr1 e1 `compareF` SExtExpr nr2 e2 
+    | Just Refl <- testEquality nr1 nr2 = case e1 `compareF` e2 of
+        LTF -> LTF
+        EQF -> EQF
+        GTF -> GTF
+    | LTF <- nr1 `compareF` nr2 = LTF
+    | GTF <- nr1 `compareF` nr2 = GTF
+    | EQF <- nr1 `compareF` nr2 = EQF
+  SExtExpr _  _ `compareF` _ = GTF
+  _ `compareF` SExtExpr _ _ = LTF
+  VarExpr v1 `compareF` VarExpr v2 = v1 `compareF` v2
+
+instance Ord (Expr tp) where
+  e1 `compare` e2 = compareFin e1 e2
 
 mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
@@ -292,6 +351,101 @@ data Stmt where
             -> Stmt
   X87Push :: Expr (S.FloatType X86_80Float) -> Stmt
   X87Pop  :: Stmt
+
+instance Eq Stmt where
+  MakeUndefined v1 tp1 == MakeUndefined v2 tp2 
+    | Just Refl <- testEquality v1 v2 = v1 == v2
+  Get v1 l1 == Get v2 l2
+    | Just Refl <- testEquality v1 v2 = v1 == v2 && l1 == l2 
+  (l1 := e1) == (l2 := e2) 
+    | Just Refl <- testEquality e1 e2 = l1 == l2 && e1 == e2
+  Ifte_ e1 s1 s1' == Ifte_ e2 s2 s2' = e1 == e2 && s1 == s2 && s1' == s2'
+  MemCopy i e1 e2 e3 e4 == MemCopy i' e1' e2' e3' e4' =
+    i == i' && e1 == e1' && e2 == e2' && e3 == e3' && e4 == e4'
+  MemCmp v i e1 e2 e3 e4 == MemCmp v' i' e1' e2' e3' e4' 
+    | Just Refl <- testEquality v v' = v == v' && i == i' && e1 == e1' &&
+                                       e2 == e2' &&  e3 == e3' && e4 == e4'
+  MemSet e1 e2 e3 == MemSet e1' e2' e3' 
+    | Just Refl <- testEquality e2 e2' = e1 == e1' && e2 == e2' && e3 == e3'
+  Primitive p1 == Primitive p2 = p1 == p2
+  GetSegmentBase v s == GetSegmentBase v' s' = v == v' && s == s'
+  BVDiv (v1, v2) e1 e2 == BVDiv (v1', v2') e1' e2'
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && v2 ==v2' && e1 == e1' && e2 == e2' 
+  BVSignedDiv (v1, v2) e1 e2 == BVSignedDiv (v1', v2') e1' e2' 
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && v2 ==v2' && e1 == e1' &&
+                                         e2 == e2'
+  Exception e1 e2 ec == Exception e1' e2' ec' = e1 == e1' && e2 == e2' && ec == ec'
+  X87Push e == X87Push e' = e == e'
+  X87Pop == X87Pop = True
+  _ == _ = False
+
+compareF' :: MapF.OrdF f => forall (a :: Type) . forall (b :: Type). f a -> f b -> Ordering -> Ordering
+compareF' a b def = case compareF a b of
+  GTF -> GT
+  EQF -> def
+  LTF -> LT
+
+compareFin :: MapF.OrdF f => forall (a :: Type) . forall (b :: Type). f a -> f b -> Ordering
+compareFin a b = compareF' a b EQ
+
+compare' :: Ord o => o -> o -> Ordering -> Ordering
+compare' a b def = case compare a b of
+  GT -> GT
+  EQ -> def
+  LT -> LT
+
+instance Ord Stmt where  
+  MakeUndefined v1 tp1 `compare` MakeUndefined v2 tp2 = compareFin v1 v2
+  MakeUndefined _ _ `compare` _ = GT
+  _ `compare` MakeUndefined _ _ = LT
+  Get v1 l1 `compare` Get v2 l2 = compareF' v1 v2 $ compareFin l1 l2
+  Get _ _ `compare` _ = GT
+  _ `compare` Get _ _ = LT
+  (l1 := e1) `compare` (l2 := e2) = compareF' l1 l2 $ compareFin e1 e2
+  (_ := _) `compare` _ = GT
+  _ `compare` (_ := _) = LT
+  Ifte_ e1 s1 s1' `compare` Ifte_ e2 s2 s2' =
+    compareF' e1 e2 $ compare' s1 s2 $ compare s1' s2'
+  Ifte_ _ _ _ `compare` _ = GT
+  _ `compare` Ifte_ _ _ _ = LT
+  MemCopy i e1 e2 e3 e4 `compare` MemCopy i' e1' e2' e3' e4' =
+    compare' i i' $ compareF' e1 e1' $ compareF' e2 e2' $ compareF' e3 e3' $
+      compareFin e4 e4'
+  MemCopy{} `compare` _ = GT
+  _ `compare` MemCopy{} = LT
+  MemCmp v i e1 e2 e3 e4 `compare` MemCmp v' i' e1' e2' e3' e4' =
+    compareF' v v' $ compare' i i' $ compareF' e1 e1' $ compareF' e2 e2' $
+      compareF' e3 e3' $ compareFin e4 e4'
+  MemCmp{} `compare` _ = GT
+  _ `compare` MemCmp{} = LT
+  MemSet e1 e2 e3 `compare` MemSet e1' e2' e3' =
+    compareF' e1 e1' $ compareF' e2 e2' $ compareFin e3 e3'
+  MemSet{} `compare` _ = GT
+  _ `compare` MemSet{} = LT
+  Primitive p1 `compare` Primitive p2 = p1 `compare` p2
+  Primitive _ `compare` _ = GT
+  _ `compare` Primitive _ = LT
+  GetSegmentBase v s `compare` GetSegmentBase v' s' = 
+    compare' v v' $ compare s s'
+  GetSegmentBase{} `compare` _ = GT
+  _ `compare` GetSegmentBase{} = LT
+  BVDiv (v1, v2) e1 e2 `compare` BVDiv (v1', v2') e1' e2' =
+    compareF' v1 v1' $ compareF' v2 v2' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVDiv{} `compare` _ = GT
+  _ `compare` BVDiv{} = LT
+  BVSignedDiv (v1, v2) e1 e2 `compare` BVSignedDiv (v1', v2') e1' e2' =
+    compareF' v1 v1' $ compareF' v2 v2' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVSignedDiv{} `compare` _ = GT
+  _ `compare` BVSignedDiv{} = LT
+  Exception e1 e2 ec `compare` Exception e1' e2' ec' = 
+    compareF' e1 e1' $ compareF' e2 e2' $ compare ec ec'
+  Exception{} `compare` _ = GT
+  _ `compare` Exception{} = LT
+  X87Push e `compare` X87Push e' = compareFin e e'
+  X87Push{} `compare` _ = GT
+  _ `compare` X87Push{} = LT
+  X87Pop `compare` X87Pop = EQ
+
 
 ------------------------------------------------------------------------
 -- Semantics monad instance.
