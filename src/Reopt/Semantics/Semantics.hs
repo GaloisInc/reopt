@@ -285,13 +285,77 @@ exec_dec dst = do dst_val <- get dst
                   -- Set result value.
                   set_result_value dst (dst_val `bvSub` v1)
 
+div_helper ::
+     ( IsLocationBV m n
+     , 1 <= n
+     , 1 <= n + n
+     , n <= n + n
+     , (4 <=? (n + n)) ~ (4 <=? (n + n))
+     , (8 <=? (n + n)) ~ (8 <=? (n + n))
+     )
+     -- ^ Obvious constraints help Haskell type-checker.
+  => (forall n'. (1 <= n')
+      => Value m (BVType n') -> Value m (BVType n') -> m (Value m (BVType n')))
+      -- ^ Quotient operation.
+  -> (forall n'. (1 <= n')
+      => Value m (BVType n') -> Value m (BVType n') -> m (Value m (BVType n')))
+      -- ^ Remainder operation.
+  -> (forall n1 n2. (1 <= n1, n1 <= n2)
+     => NatRepr n2 -> Value m (BVType n1) -> Value m (BVType n2))
+     -- ^ Extension operation.
+  -> MLocation m (BVType n) -- ^ Location to store quotient
+  -> MLocation m (BVType n) -- ^ Location to store remainder.
+  -> Value m (BVType (n + n)) -- ^ The numerator x in the division x/y
+  -> Value m (BVType n)       -- ^ The denominator y in the divison x/y
+  -> m ()
+div_helper quotOp remOp extOp quotL remL w v = do
+  -- Steps:
+  --
+  -- - check that denom is non-zero and raise exception if it is.
+  --   - read about x86 exceptions to learn right behavior of
+  --     predicate and flags.
+  --
+  -- - extend denominator to (n + n) bits and do division and
+  --   remainder.
+  --
+  -- - raise exception if quotient can't be truncated without
+  -- information loss.
+  --
+  -- - truncate the quotient and the remainder (it's always safe
+  -- to truncate the remainder, since the original fit in 'n'
+  -- bits. (does this still make sense for *signed* division when
+  -- the remainder is negative?)).
+  exception false (is_zero v) DivideError
+  let n = bv_width v
+  let nn = addNat n n
+  let v' = extOp nn v
+  q' <- quotOp w v'
+  r' <- remOp w v'
+  let q = bvTrunc n q'
+  let q'' = extOp nn q
+  exception false (q' .=/=. q'') DivideError
+  let r = bvTrunc n r'
+  -- (q,r) <- bvDiv w v
+  set_undefined cf_loc
+  set_undefined of_loc
+  set_undefined sf_loc
+  set_undefined af_loc
+  set_undefined pf_loc
+  set_undefined zf_loc
+  quotL .= q
+  remL  .= r
+
 -- | div instruction
-exec_div :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
+exec_div :: forall m n.
+     ( IsLocationBV m n
+     , (4 <=? (n + n)) ~ (4 <=? (n + n))
+     , (8 <=? (n + n)) ~ (8 <=? (n + n))
+     )
+  => Value m (BVType n) -> m ()
 exec_div v0
     -- 8-bit division.
   | Just Refl <- testEquality (bv_width v0) n8 = do
-    w <- get (reg_low16 N.rax)
-    go1 (reg_low8 N.rax) (reg_high8 N.rax) w v0
+    go2 (reg_low8 N.rax) (reg_high8 N.rax) v0
     -- 16-bit division.
   | Just Refl <- testEquality (bv_width v0) n16 =
     go2 (reg_low16 N.rax) (reg_low16 N.rdx) v0
@@ -306,31 +370,14 @@ exec_div v0
     fail "div: Unknown bit width"
   where
     go2 :: (1 <= n + n, n <= n + n)
-        => MLocation m (BVType n)
-        -> MLocation m (BVType n)
-        -> Value m (BVType n) -- The denominator y in the divison x/y
+        => MLocation m (BVType n) -- ^ Location of lower half of numerator.
+        -> MLocation m (BVType n) -- ^ Location of upper half of numerator.
+        -> Value m (BVType n) -- ^ Denominator y in the divison x/y
         -> m ()
     go2 ax dx v = do
       axv <- get ax
       dxv <- get dx
-      go1 ax dx (bvCat dxv axv) v
-
-    go1 :: (1 <= n + n, n <= n + n) -- Add obvious constraint to help Haskell type-checker.
-        => MLocation m (BVType n) -- Location to store quotient
-        -> MLocation m (BVType n) -- Location to store remainder.
-        -> Value m (BVType (n + n)) -- The numerator x in the division x/y
-        -> Value m (BVType n)       -- The denominator y in the divison x/y
-        -> m ()
-    go1 quotL remL w v = do
-      (q,r) <- bvDiv w v
-      set_undefined cf_loc
-      set_undefined of_loc
-      set_undefined sf_loc
-      set_undefined af_loc
-      set_undefined pf_loc
-      set_undefined zf_loc
-      quotL .= q
-      remL  .= r
+      div_helper bvQuot bvRem uext ax dx (bvCat dxv axv) v
 
 exec_idiv :: forall m n
            . (IsLocationBV m n)
@@ -369,7 +416,7 @@ do_exec_idiv :: forall m n
                 -- ^ The divisor
              -> m ()
 do_exec_idiv quotL remL w v = do
-  (q,r) <- bvSignedDiv w v
+  (q,r) <- undefined -- bvSignedDiv w v
   quotL .= q
   remL  .= r
   set_undefined cf_loc
