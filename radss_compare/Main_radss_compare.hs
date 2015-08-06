@@ -30,6 +30,8 @@ import           System.Exit (exitFailure)
 import           System.IO
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.Parameterized.Context ((%>))
+import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
@@ -40,7 +42,21 @@ import           Data.Type.Equality as Equality
 import Debug.Trace
 
 import           Flexdis86 (InstructionInstance(..))
+
+import           Lang.Crucible.Config (initialConfig)
+import qualified Lang.Crucible.Core as C
+import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
+import           Lang.Crucible.Simulator.CallFns
+import           Lang.Crucible.Simulator.ExecutionTree
+import           Lang.Crucible.Simulator.MSSim as MSS
+import           Lang.Crucible.Simulator.PartExpr
+import           Lang.Crucible.Simulator.RegMap
+import           Lang.Crucible.Solver.Adapter
+import qualified Lang.Crucible.Solver.Interface as I
+import           Lang.Crucible.Solver.SimpleBackend
+import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Utils.MonadST
+
 import           Reopt
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -243,28 +259,95 @@ readStaticElf path = do
       fail "reopt does not yet support generating CFGs from dynamically linked executables."
   return e
 
-symExec :: Memory Word64 -> Word64 -> IO ()
-symExec mem start =
-  -- case findBlocks mem entry of
-  --   Left err -> putStrLn err
-  --   Right cfg -> do
-  --     let block0 = M.lookup entry cfg
-  --     block0 <- case M.lookup entry cfg of
-  --                 Nothing -> putStrLn "impossible" >> exitFailure
-  --                 Just b -> return b
+extractFirstBlock :: Memory Word64 -> Word64 -> IO Block
+extractFirstBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
-    Left err -> putStrLn $ show err
-    Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
-                                      ++ showHex err ""
-    Right (Right (nexts, ret, stmts), _) -> do
-      let block0 = Block stmts Ret
-      halloc <- liftST newHandleAllocator
-      crucibleCFG <- liftST $ translateBlock halloc block0
-      return ()
+    Left err -> error $ show err
+    Right (Left err, _) -> error $ "Could not disassemble instruction at 0x"
+                                ++ showHex err ""
+    Right (Right (nexts, ret, stmts), _) -> return (Block stmts Ret)
+
+simulate :: Block -> Block -> IO ()
+simulate block1 block2 = do
+  out <- openFile "/tmp/sat_trans" WriteMode
+  halloc <- liftST newHandleAllocator
+  C.AnyCFG cfg1 <- liftST $ translateBlock halloc block1
+  C.AnyCFG cfg2 <- liftST $ translateBlock halloc block2
+
+  case ( testEquality (C.cfgArgTypes cfg1) machineStateCtx
+       , testEquality (C.cfgArgTypes cfg2) machineStateCtx
+       , testEquality (C.cfgReturnType cfg1) machineState
+       , testEquality (C.cfgReturnType cfg2) machineState
+       ) of
+    (Just Refl, Just Refl, Just Refl, Just Refl) ->
+      withSimpleBackend' halloc $ \ctx -> do
+        let sym = ctx^.ctxSymInterface
+        gprs   <- I.emptyWordMap sym n4
+        gprs'  <- foldM (initWordMap sym n4 n64) gprs [0..15]
+        flags  <- I.emptyWordMap sym n5
+        flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
+        pc     <- I.freshConstant sym (I.BVVarType n64)
+        let struct = Ctx.empty %> (RV gprs') %> (RV flags') %> (RV pc)
+            initialRegMap = assignReg C.typeRepr struct emptyRegMap
+        -- Run cfg1
+        rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
+          callCFG cfg1 initialRegMap
+        -- Run cfg2
+        rr2 <- MSS.run ctx defaultErrorHandler machineState $ do
+          callCFG cfg2 initialRegMap
+        -- Compare
+        case (rr1,rr2) of
+          (FinishedExecution _ (TotalRes xs1),
+           FinishedExecution _ (TotalRes xs2)) -> do
+            let gprs1 = xs1^._1
+                gprs2 = xs2^._1
+                gprPair = (unRV gprs1, unRV gprs2)
+                flags1 = xs1^._2
+                flags2 = xs2^._2
+                flagPair = (unRV flags1, unRV flags2)
+                pc1 = xs1^._3
+                pc2 = xs2^._3
+                -- flagIdxs = [0,2,4,6,7,8,9,10,11]
+                true = I.truePred sym
+            gprsEq  <- foldM (compareWordMapIdx sym n4 n64 gprPair) true [0..15] -- [0..15]
+            flagsEq <- foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
+            pcsEq   <- asPosNat (I.bvWidth (unRV pc1)) (I.bvEq sym (unRV pc1) (unRV pc2))
+            pred    <- I.andPred sym gprsEq =<< I.andPred sym flagsEq pcsEq
+            -- let pred = flagsEq
+            pred'   <- I.notPred sym pred
+            solver_adapter_write_smt2 cvc4Adapter out pred'
+            putStrLn $ "Wrote to file " ++ show out
+            return ()
+          _ -> fail "Execution not finished"
+
+  where
+    initWordMap sym nrKey nrVal acc i = do
+      idx <- I.bvLit sym nrKey i
+      val <- I.freshConstant sym (I.BVVarType nrVal)
+      I.insertWordMap sym nrKey idx val acc
+
+    compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
+      idx <- I.bvLit sym nrKey i
+      val1Part <- I.lookupWordMap sym nrKey idx wm1
+      val2Part <- I.lookupWordMap sym nrKey idx wm2
+      val1 <- readPartExpr sym val1Part $ unwords ["Comparison at index", show i, "failed"]
+      val2 <- readPartExpr sym val2Part $ unwords ["Comparison at index", show i, "failed"]
+      I.andPred sym acc =<< I.bvEq sym val1 val2
+
+
+    withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
+    withSimpleBackend' halloc action =
+      withSimpleBackend $ \sym -> do
+        cfg <- initialConfig 0 []
+        matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
+        action ctx
+
+    defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
 
 
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
-showSingleBlock mem start = 
+showSingleBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> putStrLn $ show err
     Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
@@ -279,31 +362,31 @@ compareBlocks :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
 compareBlocks mem1 start1 mem2 start2 = do
   (nexts1, ret1, stmts1) <- getBlock mem1 start1
   (nexts2, ret2, stmts2) <- getBlock mem2 start2
-  let (_, (cmem1, regs1)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts1) MapF.empty) M.empty emptyX86State 
+  let (_, (cmem1, regs1)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts1) MapF.empty) M.empty emptyX86State
   let (_, (cmem2, regs2)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts2) MapF.empty) M.empty emptyX86State
   let regCmp = compareRegs regs1 regs2
   let memCmp1 = M.foldrWithKey (\k v l -> case M.lookup k cmem2 of
-                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++ 
+                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++
                                                                  ":   1: " ++ show v ++ "   2:" ++ show v') : l
                               Nothing -> ("1 had a value at address " ++ show k ++ " but 2 did not") : l)
                   [] cmem1
   let memCmp2 = M.foldrWithKey (\k v l -> case M.lookup k cmem1 of
-                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++ 
+                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++
                                                                  ":   1: " ++ show v' ++ "   2:" ++ show v) : l
                               Nothing -> ("2 had a value at address " ++ show k ++ " but 1 did not") : l)
                   [] cmem1
   let allCmp = regCmp ++ memCmp1 ++ memCmp2
   case allCmp of [] -> putStrLn "all matched!"
                  _ -> mapM_ putStrLn allCmp
-  
+
   where
   getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> fail $ show err
     Right (Left err, _) -> fail $ "Could not disassemble instruction at 0x" ++
                                     showHex err ""
     Right (Right (nexts, ret, stmts), _) -> return (nexts, ret, stmts)
-  emptyX86State = mkX86State (\reg -> 
-    Literal $ bitVector (N.registerWidth reg) 
+  emptyX86State = mkX86State (\reg ->
+    Literal $ bitVector (N.registerWidth reg)
       (BV.bitVec (fromIntegral $ natValue $ N.registerWidth reg) (0 :: Integer)))
 
 compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
@@ -314,16 +397,16 @@ compareRegs rs1 rs2 =
         r2Val = rs2^.lens
     in if r1Val `equalOrUndef` r2Val
         then Nothing
-        else Just $ show reg ++ " did not match.  1: " ++ show r1Val ++ "   2:" ++ show r2Val)) 
+        else Just $ show reg ++ " did not match.  1: " ++ show r1Val ++ "   2:" ++ show r2Val))
     x86StateRegisters
 
 extractCFG :: Memory Word64 -> Word64 -> IO ()
 extractCFG mem entry =
-  case findBlocks mem entry of 
+  case findBlocks mem entry of
     Left err -> putStrLn err
-    Right cfg -> M.foldlWithKey 
-      (\ m addr (Block _ t) -> do m; putStrLn $ "0x" ++ showHex addr ": " ++ show t) 
-      (return ()) 
+    Right cfg -> M.foldlWithKey
+      (\ m addr (Block _ t) -> do m; putStrLn $ "0x" ++ showHex addr ": " ++ show t)
+      (return ())
       cfg
 
 matchCFGs :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
@@ -448,6 +531,13 @@ mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory 
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
 
+getMemAndEntry args path = do
+  e <- readStaticElf path
+  mem <- mkElfMem (args^.loadStyle) e
+  let a = case args^.addr1 of
+             0 -> elfEntry e
+             a' -> a'
+  return (mem, a)
 
 main :: IO ()
 main = do
@@ -460,15 +550,12 @@ main = do
         [path] -> readStaticElf path
       mem <- mkElfMem (args^.loadStyle) e
       showSingleBlock mem (elfEntry e)
-    SymExec -> do
-      e <- case args^.programPaths of
-        [path] -> readStaticElf path
-        _      -> fail "usage: filename"
-      mem <- mkElfMem (args^.loadStyle) e
-      let a = case args^.addr1 of
-                0 -> elfEntry e
-                a' -> a'
-      symExec mem a
+    SymExec -> case args^.programPaths of
+      [path1, path2] -> do
+        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1
+        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2
+        simulate block1 block2
+      _      -> fail "usage: filename1 filename2"
     FindBlocks -> do
       e <- case args^.programPaths of
         [] -> fail "A file name is required\n"

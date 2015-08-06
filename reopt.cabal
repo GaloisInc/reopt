@@ -135,7 +135,7 @@ executable radss_compare
     ghc-options: -fhpc
 
   ghc-options: -Wall
-  ghc-prof-options: -O2 -fprof-auto-top
+  ghc-prof-options: -O0 -fprof-auto-top
 
 
 executable reopt_sym_test

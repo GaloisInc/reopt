@@ -37,6 +37,10 @@ module Reopt.Symbolic.Semantics
        , argTypes
        , retType
        , translateBlock
+       , machineCtx
+       , machineState
+       , machineStateCtx
+       , asPosNat
        ) where
 
 #if !MIN_VERSION_base(4,8,0)
@@ -100,6 +104,8 @@ import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
                                      , n32, n64, type_width
                                      )
 import           Reopt.Reified.Semantics
+
+import           Debug.Trace
 
 
 ------------------------------------------------------------------------
@@ -217,7 +223,7 @@ mkDefn (Block stmts term) assn = (s, f)
   where s = Env $ MapF.empty
         f = do
           ms <- G.newReg $ G.AtomExpr $ assn^._1
-          mapM_ (generateStmt ms) stmts
+          trace (show $ ppStmts stmts) $ mapM_ (generateStmt ms) stmts
           generateTerm ms term
           G.returnFromFunction =<< G.readReg ms
 
@@ -239,16 +245,19 @@ generateStmt ms (Get v l) = case l of
     a <- G.mkAtom . (^.(register reg)) =<< G.readReg ms
     modify (insertEnv (translateVar v) a)
 
-  S.MemoryAddr _ _ -> error "get mem addr unimplemented"
+  -- TODO: Implement memory map
+  S.MemoryAddr addr tr -> case tr of
+    BVTypeRepr nr -> do
+      -- a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)
+      a <- G.mkAtom . G.App $ asPosNat nr (C.BVLit nr 0)
+      modify (insertEnv (translateVar v) a)
 
   _ -> return ()
 --
 generateStmt _ms (MakeUndefined v tr) = case tr of
-  BVTypeRepr nr -> case testLeq S.n1 nr of
-    Nothing -> error "boo!"
-    Just LeqProof -> do
-      a <- G.mkAtom . G.App $ C.BVUndef nr
-      modify (insertEnv (translateVar v) a)
+  BVTypeRepr nr -> do
+    a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)
+    modify (insertEnv (translateVar v) a)
 --
 generateStmt _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
                                       , show (ppStmt stmt)
@@ -257,8 +266,10 @@ generateStmt _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
 
 generateTerm :: (G.Reg s MachineState)
              -> Term
-             -> G.Generator s t MachineState a
-generateTerm = error "generateTerm is unimplemented"
+             -> G.Generator s t MachineState ()
+generateTerm ms Ret = return ()
+--
+generateTerm ms t = error $ "generateTerm: unimplemented case: " ++ show t
 
 
 
@@ -294,7 +305,7 @@ translateExpr (TruncExpr nr e) = do
   let width = S.bv_width e
   case testStrictLeq nr width of
     Right Refl -> return ge
-    Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVTrunc nr width e')
+    Left prf -> return . GExpr . G.App $ withLeqProof prf (tracer nr width $ C.BVTrunc nr width e')
 --
 translateExpr (SExtExpr nr e) = do
   ge@(GExpr e') <- translateExpr e
@@ -306,20 +317,46 @@ translateExpr (SExtExpr nr e) = do
 translateExpr (AppExpr a) = do
   a' <- R.traverseApp translateExpr a
   return $ case a' of
+    R.BVAdd nr (GExpr e1) (GExpr e2) ->
+      GExpr . G.App $ asPosNat nr (C.BVAdd nr e1 e2)
+
+    R.BVSub nr (GExpr e1) (GExpr e2) ->
+      GExpr . G.App $ asPosNat nr (C.BVSub nr e1 e2)
+
+    R.BVMul nr (GExpr e1) (GExpr e2) ->
+      GExpr . G.App $ asPosNat nr (C.BVMul nr e1 e2)
+
     R.BVBit (GExpr e1) (GExpr e2)
       | Cr.BVRepr nr1 <- G.exprType e1
       , Cr.BVRepr nr2 <- G.exprType e2 ->
         GExpr $ bvBit nr1 nr2 e1 e2
 
-    R.BVMul nr (GExpr e1) (GExpr e2) ->
-      GExpr . G.App $ asPosNat nr (C.BVMul nr e1 e2)
+    R.BVComplement nr (GExpr e) ->
+      GExpr . G.App $ asPosNat nr (C.BVNot nr e)
 
     R.BVEq (GExpr e1) (GExpr e2)
       | Cr.BVRepr nr <- G.exprType e1 ->
         GExpr . G.App . C.BoolToBV n1 . G.App $ asPosNat nr (C.BVEq nr e1 e2)
 
-    R.BVComplement nr (GExpr e) ->
-      GExpr . G.App $ asPosNat nr (C.BVNot nr e)
+    -- TODO: Actually implement this
+    R.EvenParity (GExpr e) ->
+      GExpr . G.App $ C.BVLit n1 0
+
+    -- TODO: Actually implement this
+    R.SadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
+      GExpr . G.App $ C.BVLit n1 0
+
+    -- TODO: Actually implement this
+    R.UadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
+      GExpr . G.App $ C.BVLit n1 0
+
+    -- TODO: Actually implement this
+    R.UsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
+      GExpr . G.App $ C.BVLit n1 0
+
+    -- TODO: Actually implement this
+    R.SsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
+      GExpr . G.App $ C.BVLit n1 0
 
     _ -> error $ unwords [ "translateExpr App case unimplemented:"
                          , show (ppExpr (AppExpr a))
@@ -338,6 +375,7 @@ asPosNat nr x = case isPosNat nr of
   Nothing -> error "zero-width NatRepr"
   Just prf -> withLeqProof prf x
 
+tracer x y = id -- trace (unwords ["target width:", show (natValue x), "current width:", show (natValue y)])
 
 bvBit :: forall s n log_n
        . NatRepr n
@@ -348,8 +386,8 @@ bvBit :: forall s n log_n
 bvBit nr1 nr2 val idx =
   case testNatCases nr1 n1 of
     NatCaseLT prf -> error "zero-width NatRepr"
-    -- NatCaseEQ -> val
-    NatCaseGT prf -> withLeqProof prf (G.App $ C.BVTrunc n1 nr1 shiftedVal)
+    NatCaseEQ -> val
+    NatCaseGT prf -> withLeqProof prf $ tracer n1 nr1 $ (G.App $ C.BVTrunc n1 nr1 shiftedVal)
   where
     shiftedVal :: G.Expr s (C.BVType n)
     shiftedVal = G.App $ asPosNat nr1 (C.BVAshr nr1 val idx')
@@ -359,7 +397,7 @@ bvBit nr1 nr2 val idx =
         withLeqProof prf (asPosNat nr2 (G.App $ C.BVZext nr1 nr2 idx))
       NatCaseEQ -> idx
       NatCaseGT prf ->
-        withLeqProof prf (asPosNat nr1 (G.App $ C.BVTrunc nr1 nr2 idx))
+        withLeqProof prf (asPosNat nr1 (G.App $ tracer nr1 nr2 $ C.BVTrunc nr1 nr2 idx))
 
 
 translateVar :: Variable tp -> Var (F tp)
