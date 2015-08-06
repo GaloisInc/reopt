@@ -37,6 +37,8 @@ import           Data.Parameterized.Some
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
+import Debug.Trace
+
 import           Flexdis86 (InstructionInstance(..))
 import           Lang.Crucible.Utils.MonadST
 import           Reopt
@@ -62,6 +64,7 @@ import           Reopt.Symbolic.Semantics
 data Action
    = FindBlocks      -- ^ Display a cfg for a function
    | CompareBlocks   -- ^ Compare basic blocks in two programs
+   | MatchBlocks     -- ^ Match basic blocks in two programs
    | ShowSingleBlock -- ^ Print out concrete semantics of a basic block
    | SymExec         -- ^ Symbolically execute a block
    | ShowHelp        -- ^ Print out help message
@@ -133,6 +136,10 @@ symExecFlag :: Flag Args
 symExecFlag = flagNone [ "sym-exec", "s" ] upd help
   where upd  = reoptAction .~ SymExec
         help = "Symbolically execute a block."
+matchBlocksFlag :: Flag Args
+matchBlocksFlag = flagNone [ "match-blocks", "m" ] upd help
+  where upd  = reoptAction .~ MatchBlocks
+        help = "Match basic blocks of a function in two different binaries."
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
@@ -166,6 +173,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , singleBlockFlag
                 , compareBlocksFlag
                 , symExecFlag
+                , matchBlocksFlag
                 , functionCFGFlag
                 , addr1Flag
                 , addr2Flag
@@ -318,6 +326,124 @@ extractCFG mem entry =
       (return ()) 
       cfg
 
+matchCFGs :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
+matchCFGs mem1 entry1 mem2 entry2 
+  | Right cfg1 <- findBlocks mem1 entry1
+  , Right cfg2 <- findBlocks mem2 entry2 = do
+      let Just initBlock1 = M.lookup entry1 cfg1
+      let Just initBlock2 = M.lookup entry2 cfg2
+      let blockMap = globalMatch cfg1 cfg2 M.empty allSels
+      let matched = matchCFGs' cfg1 cfg2 (M.insert entry1 entry2 blockMap) allSels
+      M.foldlWithKey (\m k v -> m >> (putStrLn $ "0x" ++ showHex k " <--> 0x" ++ showHex v "" )) (return ())  matched
+      S.foldl (\m k -> m >> (putStrLn $ "Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg1) (M.keysSet matched))
+      S.foldl (\m k -> m >> (putStrLn $ "              Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg2) (M.foldr S.insert S.empty matched))
+     
+     -- TODO: more fixed-points
+      -- TODO: backwards chain as well
+      -- TODO: unique parent of unique child chain shrinking
+matchCFGs' cfg1 cfg2 mapping (sel : sels) =
+  let mapping' = M.foldlWithKey (matchChildSets sel cfg1 cfg2) mapping mapping
+      mapping'' = M.foldlWithKey (matchParentSets sel cfg1 cfg2 (getParentMap cfg1) (getParentMap cfg2)) mapping' mapping'
+  in if mapping'' == mapping then matchCFGs' cfg1 cfg2 mapping sels else matchCFGs' cfg1 cfg2 mapping'' allSels
+matchCFGs' _ _ mapping [] = mapping
+
+globalMatch cfg1 cfg2 mapping (sel : sels) =
+  let s1 = M.keysSet cfg1
+      s2 = M.keysSet cfg2
+      (matched1, unmatched1) = S.partition (flip M.member mapping) s1
+      unmatched2 = S.difference s2 $ S.foldl (\s v -> case M.lookup v mapping of
+                                              Just v' -> S.insert v' s
+                                              Nothing -> s) S.empty matched1
+      newMap = snd $ S.foldl (\ (others, newMap) p1 -> case sel cfg1 cfg2 p1 others of 
+                                        Just (p2, newOthers) -> (newOthers, M.insert p1 p2 newMap)
+                                        Nothing -> (others, newMap)) (unmatched2, mapping) unmatched1
+  in if newMap == mapping then globalMatch cfg1 cfg2 mapping sels
+                          else globalMatch cfg1 cfg2 newMap allSels
+globalMatch _ _  mapping [] = mapping
+
+-- do we need an old mapping and a mapping being iterated over?
+matchChildSets :: (CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64))
+               -> CFG -> CFG -> Map Word64 Word64 -> Word64 -> Word64 -> Map Word64 Word64
+matchChildSets sel cfg1 cfg2 mapping k1 k2
+  | Just (Block _ (Direct c1)) <- M.lookup k1 cfg1
+  , Just (Block _ (Direct c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
+
+  | Just (Block _ (Direct c1)) <- M.lookup k1 cfg1
+  , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
+  
+  | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
+  , Just (Block _ (Direct c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
+  
+  | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
+  , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
+  | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
+  , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
+  | Just (Block _ (Cond c1 c1')) <- M.lookup k1 cfg1
+  , Just (Block _ (Cond c2 c2')) <- M.lookup k2 cfg2 = 
+      case sel cfg1 cfg2 c1 (S.fromList [c2, c2']) of
+        Just (m, s) -> M.insert c1' ( trace "matchChildSets" $ S.findMin s) (M.insert c1 m mapping)
+        Nothing -> case sel cfg1 cfg2 c1' (S.fromList [c2, c2']) of
+          Just (m, s) -> M.insert c1 (trace "matchChildSets" $ S.findMin s) (M.insert c1' m mapping)
+          Nothing -> mapping
+  | otherwise = mapping
+matchChildSets _ _ _ mapping _ _ = mapping
+
+allSels = [singletonSelector, termFuzzyMatchSelector]
+
+singletonSelector :: CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64)
+singletonSelector _ _ a as
+  | S.size as == 1 = Just (trace "singletonSelector" $ S.findMin as, S.empty)
+  | otherwise = Nothing
+
+termFuzzyMatchSelector :: CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64)
+termFuzzyMatchSelector cfg1 cfg2 a as = do 
+  b <- M.lookup a cfg1
+  let bs = S.map (\(Just b', a') -> (b', a')) $ S.filter (isJust . fst) $ S.map (\a' -> (M.lookup a' cfg2, a')) as
+  let matches = S.map snd $ S.filter (blockTermFuzzyMatches b . fst) bs
+  (match, _) <- if S.size matches <= 1 then S.minView matches else Nothing
+  Just (match, S.delete match as)
+
+getParentMap :: CFG -> Map Word64 (Set Word64)
+getParentMap = 
+  M.foldlWithKey (\m p (Block _ t) -> 
+                      foldl (\m' c -> M.insertWith (S.union) c (S.singleton p) m')
+                            m (termChildren t)) M.empty
+
+matchParentSets :: (CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64))
+                -> CFG 
+                -> CFG 
+                -> Map Word64  (Set Word64) 
+                -> Map Word64  (Set Word64) 
+                -> Map Word64 Word64 
+                -> Word64 
+                -> Word64 
+                -> Map Word64 Word64
+matchParentSets selector cfg1 cfg2 parentMap1 parentMap2 mapping k1 k2
+  | Just p1s <- M.lookup k1 parentMap1
+  , Just p2s <- M.lookup k2 parentMap2
+  , (matched1, unmatched1) <- S.partition (flip M.member mapping) p1s
+  , unmatched2 <- S.difference p2s $ S.foldl (\s v -> case M.lookup v mapping of
+                                              Just v' -> S.insert v' s
+                                              Nothing -> s) S.empty matched1 =
+      snd $ S.foldl (\ (others, newMap) p1 -> case selector cfg1 cfg2 p1 others of 
+                                        Just (p2, newOthers) -> (newOthers, M.insert p1 p2 newMap)
+                                        Nothing -> (others, newMap)) (unmatched2, mapping) unmatched1
+  | otherwise = mapping
+
+
+-- returns true if the two blocks have superficially similar control structures
+-- at the end - helps differentiate two children of a matched conditional
+blockTermFuzzyMatches :: Block -> Block -> Bool --  add some context here?
+blockTermFuzzyMatches (Block _ (Direct _)) (Block _ (Direct _)) = True
+blockTermFuzzyMatches (Block _ (Direct _)) (Block _ (Fallthrough _)) = True
+blockTermFuzzyMatches (Block _ (Fallthrough _)) (Block _ (Direct _)) = True
+blockTermFuzzyMatches (Block _ (Fallthrough _)) (Block _ (Fallthrough _)) = True
+blockTermFuzzyMatches (Block _ (Call _ _)) (Block _ (Call _ _)) = True
+blockTermFuzzyMatches (Block _ Ret) (Block _ Ret) = True
+blockTermFuzzyMatches (Block _ (Cond _ _)) (Block _ (Cond _ _)) = True
+blockTermFuzzyMatches (Block _ (Indirect _)) (Block _ (Indirect _)) = True
+blockTermFuzzyMatches _ _ = False
+
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
@@ -368,6 +494,22 @@ main = do
       let a2 = case args^.addr2 of 0 -> elfEntry e2
                                    a -> a
       compareBlocks mem1 a1 mem2 a2
+    MatchBlocks -> do
+      (e1, e2) <- case args^.programPaths of
+        [] -> fail "Two file names are required\n"
+        [_] -> fail "Two file names are required\n"
+        [f1,f2] -> do
+          e1' <- readStaticElf f1
+          e2' <- readStaticElf f2
+          return (e1', e2')
+        _ : _ : _ : _ -> fail "Exactly two file names for comparison"
+      mem1 <- mkElfMem (args^.loadStyle) e1
+      mem2 <- mkElfMem (args^.loadStyle) e2
+      let a1 = case args^.addr1 of 0 -> elfEntry e1
+                                   a -> a
+      let a2 = case args^.addr2 of 0 -> elfEntry e2
+                                   a -> a
+      matchCFGs mem1 a1 mem2 a2
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->
