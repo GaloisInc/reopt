@@ -144,7 +144,6 @@ data Expr tp where
   -- later.
   VarExpr :: Variable tp -> Expr tp
 
-<<<<<<< HEAD
 instance TestEquality Expr where
   testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
 
