@@ -586,16 +586,28 @@ truncateIfValid nr c = if -(2^width) <= i || i < (2^width)
     width = natValue nr
 
 
----
+------------------------------------------------------------------------
 -- Float madness
----
---
+
 -- XXX For now we are punting on 16, 80, and 128 bit floats. We're just
 -- using GHC's Float & Double types. We are also punting on rounding modes,
 -- since we assume those will be rarely used and don't want to invest
 -- energy if it is not necessary. We will just use the GHC default behavior,
 -- which (I believe) is round-to-nearest. It is hard to find good information
 -- about this though.
+
+bvToFloat :: BV -> Float
+bvToFloat = wordToFloat . fromInteger . BV.int
+
+bvToDouble :: BV -> Double
+bvToDouble = wordToDouble . fromInteger . BV.int
+
+floatToBV :: Int -> Float -> BV
+floatToBV width = BV.bitVec width . toInteger . floatToWord
+
+doubleToBV :: Int -> Double -> BV
+doubleToBV width = BV.bitVec width . toInteger . doubleToWord
+
 liftFPtoBV :: (forall a. (RealFloat a) => (a -> Integer))
            -> FloatInfoRepr flt
            -> NatRepr n
@@ -607,16 +619,9 @@ liftFPtoBV f fr nr = CS.liftValue wrap nr
     --
     wrap :: BV -> BV
     wrap bv = case natValue (floatInfoBits fr) of
-      32 -> let fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in BV.bitVec width $ f (fromBV bv)
-
-      64 -> let fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in BV.bitVec width $ f (fromBV bv)
-
+      32 -> BV.bitVec width $ f (bvToFloat bv)
+      64 -> BV.bitVec width $ f (bvToDouble bv)
       _  -> error "Sorry, 32 or 64 bit floats only"
-
 
 liftFP2 :: (forall a. (Floating a, Num a) => (a -> a -> a))
         -> FloatInfoRepr flt
@@ -629,18 +634,8 @@ liftFP2 f fr = CS.liftValue2 wrap2 nr
     --
     wrap2 :: BV -> BV -> BV
     wrap2 bv1 bv2 = case natValue nr of
-      32 -> let toBV :: Float -> BV
-                toBV = BV.bitVec w . fromIntegral . floatToWord
-                fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in toBV $ f (fromBV bv1) (fromBV bv2)
-
-      64 -> let toBV :: Double -> BV
-                toBV = BV.bitVec w . fromIntegral . doubleToWord
-                fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in toBV $ f (fromBV bv1) (fromBV bv2)
-
+      32 -> floatToBV w $ f (bvToFloat bv1) (bvToFloat bv2)
+      64 -> doubleToBV w $ f (bvToDouble bv1) (bvToDouble bv2)
       _  -> error "Sorry, 32 or 64 bit floats only"
       where
         w = max (BV.width bv1) (BV.width bv2)
@@ -655,18 +650,8 @@ convertBVtoFP c fr = CS.liftValue wrap nr c
     --
     wrap :: BV -> BV
     wrap bv = case width of
-      32 -> let toBV :: Float -> BV
-                toBV = BV.bitVec width . fromIntegral . floatToWord
-                mkFP :: BV -> Float
-                mkFP = fromInteger . BV.int
-             in toBV $ mkFP bv
-
-      64 -> let toBV :: Double -> BV
-                toBV = BV.bitVec width . fromIntegral . doubleToWord
-                mkFP :: BV -> Double
-                mkFP = fromInteger . BV.int
-             in toBV $ mkFP bv
-
+      32 -> floatToBV width $ bvToFloat bv
+      64 -> doubleToBV width $ bvToDouble bv
       _  -> error "Sorry, 32 or 64 bit floats only"
 
 convertFP :: FloatInfoRepr flt1
@@ -681,18 +666,8 @@ convertFP fr1 fr2 = CS.liftValue wrap nr2
     --
     wrap :: BV -> BV
     wrap bv = case (natValue nr1, natValue nr2) of
-      (32,64) -> let toBV :: Double -> BV
-                     toBV = BV.bitVec destWidth . fromIntegral . doubleToWord
-                     fromBV :: BV -> Float
-                     fromBV = wordToFloat . fromInteger . BV.int
-                  in toBV $ float2Double (fromBV bv)
-
-      (64,32) -> let toBV :: Float -> BV
-                     toBV = BV.bitVec destWidth . fromIntegral . floatToWord
-                     fromBV :: BV -> Double
-                     fromBV = wordToDouble . fromInteger . BV.int
-                  in toBV $ double2Float (fromBV bv)
-
+      (32,64) -> doubleToBV destWidth $ float2Double (bvToFloat bv)
+      (64,32) -> floatToBV destWidth $ double2Float (bvToDouble bv)
       _       -> error "Sorry, can only convert between 32 & 64 bit floats"
 
 
