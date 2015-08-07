@@ -872,7 +872,15 @@ class ( Applicative m
 
   -- | Signed division.
   --
-  -- Rounds the result to zero.  Undefined if the denominator is zero.
+  -- Rounds the result to zero.  Undefined if the denominator is zero,
+  -- or if the result overflows (dividing the largest negative number
+  -- by @-1@ causes this overflow).
+  --
+  -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
+  -- page 3-393) says that results should be rounded towards
+  -- zero. These operations are called @quot@ and @rem@ in Haskell,
+  -- whereas @div@ and @mod@ in Haskell round towards negative
+  -- infinity.
   bvSignedQuot :: (1 <= n)
                => Value m (BVType n)
                -> Value m (BVType n)

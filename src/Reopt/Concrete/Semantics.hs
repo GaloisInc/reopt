@@ -286,10 +286,12 @@ evalStmt (Get x l) =
     sliceBV :: Integer ~ i
             => (i, i) -> BV -> BV
     sliceBV (low, high) super = super @@ (high - 1, low)
--- BUG?: We use quot/rem & div/mod interchangeably,
--- but they round differently.
 evalStmt (BVQuot x ns1 ns2) = bvDivOp div x ns1 ns2
 evalStmt (BVRem x ns1 ns2) = bvDivOp mod x ns1 ns2
+-- TODO(conathan): BUG: We use @sdiv@ and @smod@ here, but they round
+-- towards negative infinity; we want @squot@ and @srem@ instead,
+-- which round towards zero in agreement with the x86 @idiv@
+-- semantics, but 'BV' does not provide an @squot@' operation.
 evalStmt (BVSignedQuot x ns1 ns2) = bvDivOp BV.sdiv x ns1 ns2
 evalStmt (BVSignedRem x ns1 ns2) = bvDivOp BV.smod x ns1 ns2
 -- Based on 'MemCopy' eval below.

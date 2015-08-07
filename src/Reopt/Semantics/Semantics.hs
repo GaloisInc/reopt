@@ -316,6 +316,13 @@ exec_dec dst = do dst_val <- get dst
 -- remainder are written to those fixed registers. An exception is
 -- raised if the denominator is zero or if the quotient does not fit
 -- in @n@ bits.
+--
+-- Also, results should be rounded towards zero. These operations are
+-- called @quot@ and @rem@ in Haskell, whereas @div@ and @mod@ in
+-- Haskell round towards negative infinity.
+--
+-- Source: the x86 documentation for @idiv@, Intel x86 manual volume
+-- 2A, page 3-393.
 exec_div_helper :: forall m n
    . IsLocationBV m n
   => Bool -- ^ Signed ('True') or unsigned ('False').
@@ -354,6 +361,21 @@ exec_div_helper signed denominator
       let numerator = bvCat dxv axv
 
       -- Quotient and remainder.
+      --
+      -- VERY SUBTLE BUG: for signed quotient, it's also an error if
+      -- the @n+n@-bit quotient overflows -- below we check that the
+      -- @n+n@-bit quotient fits in @n@ bits -- which happens when you
+      -- divide the largest @n@-bit negative number (@-2^(n+n-1)@) by
+      -- @-1@. Depending on how the 'quotOp' is defined, or check
+      -- below may or may not catch this overflow:
+      --
+      -- - in LLVM the 'quotOp' (@sdiv@) is undefined in this case, so
+      --   anything could happen.
+      --
+      -- - in an implementation that returns the @n+n@-bit 2's
+      --   complement representation of @2^(n+n-1)@ we detect the
+      --   error, since this number is equal to @-2^(n+n-1)@ in 2's
+      --   complement, which does not fit in @n@ bits.
       let nn = addNat n n
       let denominator' = extOp nn denominator
       q' <- quotOp numerator denominator'
