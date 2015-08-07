@@ -81,7 +81,7 @@ data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
 
 instance TestEquality Variable where
-  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+  (Variable tp1 _n1) `testEquality` (Variable tp2 _n2) = do
     Refl <- testEquality tp1 tp2
     return Refl
 
@@ -374,9 +374,9 @@ instance S.Semantics Semantics where
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
-  AppExpr app -> R.ppApp ppExpr app
-  TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
-  SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
+  AppExpr app' -> R.ppApp ppExpr app'
+  TruncExpr n e' -> R.sexpr "trunc" [ ppExpr e', R.ppNat n ]
+  SExtExpr n e' -> R.sexpr "sext" [ ppExpr e', R.ppNat n ]
   VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.

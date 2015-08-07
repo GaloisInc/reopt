@@ -112,10 +112,10 @@ evalExpr (AppExpr a) = do
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
-    R.BVDiv nr c1 c2 -> error "Impossible: BVDiv should be unreachable"
-    R.BVMod nr c1 c2 -> error "Impossible: BVMod should be unreachable"
-    R.BVSignedDiv nr c1 c2 -> error "Impossible: BVSignedDiv should be unreachable"
-    R.BVSignedMod nr c1 c2 -> error "Impossible: BVSignedMod should be unreachable"
+    R.BVDiv _nr _c1 _c2 -> error "Impossible: BVDiv should be unreachable"
+    R.BVMod _nr _c1 _c2 -> error "Impossible: BVMod should be unreachable"
+    R.BVSignedDiv _nr _c1 _c2 -> error "Impossible: BVSignedDiv should be unreachable"
+    R.BVSignedMod _nr _c1 _c2 -> error "Impossible: BVSignedMod should be unreachable"
 
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
@@ -366,7 +366,7 @@ evalStmt (l := e) =
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
       x87Cont (low, high) width i =
         case S.loc_type l
-          of BVTypeRepr n -> do
+          of BVTypeRepr _n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
                of CS.Literal bv -> do
@@ -433,7 +433,7 @@ evalStmt (MemSet n v a) = do
     CS.setMem addr vv
 evalStmt (Primitive p) = CS.primitive p
 -- TODO(conathan): implement exception handling.
-evalStmt (Exception s1 s2 s3) = return ()
+evalStmt (Exception _s1 _s2 _s3) = return ()
 evalStmt (X87Push s) = do
   let top = N.X87TopReg
   vTop <- CS.getReg top
