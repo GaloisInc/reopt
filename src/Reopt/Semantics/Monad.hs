@@ -1,4 +1,3 @@
-{-# LANGUAGE RankNTypes #-}
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.Monad
@@ -19,6 +18,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -98,7 +98,6 @@ module Reopt.Semantics.Monad
   , module Flexdis86.InstructionSet
   ) where
 
-import           Control.Applicative
 import           Data.Bits (shiftL)
 import           Data.Char (toLower)
 import           Data.Proxy
@@ -112,6 +111,12 @@ import           Reopt.Machine.Types
 
 import Flexdis86.OpTable (SizeConstraint(..))
 import Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
+
+
+-- This is an identity function intended to be a workaround for GHC bug #10507
+--   https://ghc.haskell.org/trac/ghc/ticket/10507
+nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce Refl x = x
 
 ------------------------------------------------------------------------
 -- Location
@@ -178,12 +183,12 @@ elimLocation memCont regCont x87Cont l = go id l
     -- the subrange, by applying it to the full range @(0, w)@ of the
     -- base location, and then call the continutation corresponding to
     -- the base location.
-    go :: forall tp. ((i, i) -> (i, i)) -> Location addr tp -> a
-    go t l = case l of
+    go :: forall tp'. ((i, i) -> (i, i)) -> Location addr tp' -> a
+    go t l' = case l' of
       -- Recursive cases.
-      TruncLoc l n -> go (t . truncLoc n) l
-      LowerHalf l -> go (t . lowerHalf) l
-      UpperHalf l -> go (t . upperHalf) l
+      TruncLoc l'' n -> go (t . truncLoc n) l''
+      LowerHalf l'' -> go (t . lowerHalf) l''
+      UpperHalf l'' -> go (t . upperHalf) l''
       -- Base cases.
       Register r -> regCont (t (0, w)) w r
       MemoryAddr addr tr -> memCont (t (0, w)) w (addr, tr)
@@ -191,7 +196,7 @@ elimLocation memCont regCont x87Cont l = go id l
       where
         -- The width of the base location.
         w :: i
-        w = case loc_type l of
+        w = case loc_type l' of
           BVTypeRepr nr -> fromIntegral $ natValue nr
 
     -- Transformations on subranges.
@@ -393,7 +398,11 @@ class IsValue (v  :: Type -> *) where
   --     sz = halfNat (bv_width v)
 
   -- | Vectorization
-  bvVectorize :: forall k n. (1 <= k) => NatRepr k -> v (BVType n) -> [v (BVType k)]
+  bvVectorize :: forall k n
+               . (1 <= k, 1 <= n)
+              => NatRepr k
+              -> v (BVType n)
+              -> [v (BVType k)]
   bvVectorize sz bv
     | Just Refl <- testEquality (bv_width bv) sz = [bv]
     | Just LeqProof <- testLeq sz (bv_width bv) =
@@ -409,7 +418,7 @@ class IsValue (v  :: Type -> *) where
           concatBVPairs (x:y:zs) = (x `bvCat` y) : concatBVPairs zs
           concatBVPairs _ = []
 
-  vectorize2 :: (1 <= k)
+  vectorize2 :: (1 <= k, 1 <= n)
              => NatRepr k
              -> (v (BVType k) -> v (BVType k) -> v (BVType k))
              -> v (BVType n) -> v (BVType n)
@@ -446,7 +455,8 @@ class IsValue (v  :: Type -> *) where
 
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
-  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
+  msb v = bvSlt v (bvLit (bv_width v) (0::Integer))
+--  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
      -- FIXME: should be log2 (bv_width v) here
 
   -- | Perform a signed extension of a bitvector.
@@ -459,14 +469,16 @@ class IsValue (v  :: Type -> *) where
   uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
-  uext :: (1 <= m, m <= n)
+  uext :: forall m n
+        . (1 <= m, m <= n)
         => NatRepr n
         -> v (BVType m)
         -> v (BVType n)
-  uext w e =
+  uext w e | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) =
     case testStrictLeq (bv_width e) w of
-      Left LeqProof -> uext' w e
-      Right Refl -> e
+      Left LeqProof ->
+          uext' w e
+      Right r -> nonLoopingCoerce r e
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)

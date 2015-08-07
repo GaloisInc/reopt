@@ -40,22 +40,21 @@ module Reopt.Reified.Semantics
        , Variable(..)
        ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<*>), pure, Applicative)
-#endif
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Binary.IEEE754
-import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
+import           Data.Bits
 import           Data.Functor
 import           Data.Monoid (mempty)
 import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
+
+import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
@@ -120,8 +119,8 @@ instance Eq (Variable tp) where
 -- | A pure expression for isValue.
 data Expr tp where
   -- An expression obtained from some value.
-  LitExpr :: (1 <= n) =>
-    !(NatRepr n) -> Integer -> Expr (BVType n)
+  LitExpr :: !(NatRepr n) -> Integer -> Expr (BVType n)
+
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(R.App Expr tp) -> Expr tp
 
@@ -143,7 +142,7 @@ data Expr tp where
   -- later.
   VarExpr :: Variable tp -> Expr tp
 
-mkLit :: (1 <= n) => NatRepr n -> Integer -> Expr (BVType n)
+mkLit :: NatRepr n -> Integer -> Expr (BVType n)
 mkLit n v = LitExpr n (v .&. mask)
   where mask = maxUnsigned n
 
@@ -190,7 +189,7 @@ instance S.IsValue Expr where
   bvTrunc w x = TruncExpr w x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
-  bvBit x y = app $ R.BVBit x y
+  bvBit x y = app $ R.BVTestBit x y
   sext w x = SExtExpr w x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
@@ -302,19 +301,13 @@ data Stmt where
 -- names.
 newtype Semantics a =
   Semantics { runSemantics :: WriterT [Stmt] (State Integer) a }
-  deriving (Functor, Monad, MonadState Integer, MonadWriter [Stmt])
+  deriving (Functor, Applicative, Monad, MonadState Integer, MonadWriter [Stmt])
 
 -- | Execute a 'Semantics' computation, returning its effects.
 execSemantics :: Semantics a -> [Stmt]
 execSemantics = flip evalState 0 . execWriterT . runSemantics
 
 type instance S.Value Semantics = Expr
-
-#if !MIN_VERSION_base(4,8,0)
-instance Applicative Semantics where
-  pure = return
-  (<*>) = ap
-#endif
 
 -- | Generate a fresh variable with basename 'basename'.
 fresh :: MonadState Integer m => String -> m String

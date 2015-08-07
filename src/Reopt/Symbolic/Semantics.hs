@@ -326,7 +326,7 @@ translateExpr (AppExpr a) = do
     R.BVMul nr (GExpr e1) (GExpr e2) ->
       GExpr . G.App $ asPosNat nr (C.BVMul nr e1 e2)
 
-    R.BVBit (GExpr e1) (GExpr e2)
+    R.BVTestBit (GExpr e1) (GExpr e2)
       | Cr.BVRepr nr1 <- G.exprType e1
       , Cr.BVRepr nr2 <- G.exprType e2 ->
         GExpr $ bvBit nr1 nr2 e1 e2
