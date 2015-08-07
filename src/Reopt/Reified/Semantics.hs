@@ -10,7 +10,6 @@
 -- Reopt.Semantics.Monad that treat some class methods as
 -- uninterpreted functions.
 ------------------------------------------------------------------------
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -82,7 +81,7 @@ data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
 
 instance TestEquality Variable where
-  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+  (Variable tp1 _n1) `testEquality` (Variable tp2 _n2) = do
     Refl <- testEquality tp1 tp2
     return Refl
 
@@ -231,16 +230,12 @@ data Stmt where
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Primitive :: S.Primitive -> Stmt
   GetSegmentBase :: Variable (BVType 64) -> S.Segment -> Stmt
-  BVDiv :: (1 <= n)
-        => (Variable (BVType n), Variable (BVType n))
-        -> Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> Stmt
-  BVSignedDiv :: (1 <= n)
-              => (Variable (BVType n), Variable (BVType n))
-              -> Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> Stmt
+  BVQuot, BVRem, BVSignedQuot, BVSignedRem ::
+       (1 <= n)
+    => Variable (BVType n)
+    -> Expr (BVType n)
+    -> Expr (BVType n)
+    -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -272,12 +267,18 @@ fresh basename = do
   put (x + 1)
   return $ basename ++ show x
 
-
--- FIXME: Move
-addIsLeqLeft1' :: forall f g n m. LeqProof (n + n) m ->
-                  f (BVType n) -> g m
-                  -> LeqProof n m
-addIsLeqLeft1' prf _v _v' = addIsLeqLeft1 prf
+-- | Helper for 'S.Semantics' instance below.
+bvBinOp ::
+     (Variable ('BVType n) -> Expr ('BVType n) -> Expr ('BVType n) -> Stmt)
+  -> String
+  -> Expr ('BVType n)
+  -> Expr ('BVType n)
+  -> Semantics (Expr ('BVType n))
+bvBinOp op varName v1 v2 = do
+  varName' <- fresh varName
+  let var = Variable (exprType v2) varName'
+  tell [op var v1 v2]
+  return (VarExpr var)
 
 -- | Interpret 'S.Semantics' operations into 'Stmt's.
 --
@@ -356,25 +357,10 @@ instance S.Semantics Semantics where
     tell [GetSegmentBase var seg]
     return $ VarExpr var
 
-  bvDiv v1 v2 = do
-    nameQuot <- fresh "divQuot"
-    nameRem <- fresh "divRem"
-    let varQuot = Variable r nameQuot
-    let varRem = Variable r nameRem
-    tell [BVDiv (varQuot, varRem) v1 v2]
-    return (VarExpr varQuot, VarExpr varRem)
-    where
-      r = exprType v2
-
-  bvSignedDiv v1 v2 = do
-    nameQuot <- fresh "sdivQuot"
-    nameRem <- fresh "sdivRem"
-    let varQuot = Variable r nameQuot
-    let varRem = Variable r nameRem
-    tell [BVSignedDiv (varQuot, varRem) v1 v2]
-    return (VarExpr varQuot, VarExpr varRem)
-    where
-      r = exprType v2
+  bvQuot = bvBinOp BVQuot "quot"
+  bvRem = bvBinOp BVRem "rem"
+  bvSignedQuot = bvBinOp BVSignedQuot "sQuot"
+  bvSignedRem = bvBinOp BVSignedRem "sRem"
 
   exception v1 v2 c = tell [Exception v1 v2 c]
 
@@ -388,9 +374,9 @@ instance S.Semantics Semantics where
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
-  AppExpr app -> R.ppApp ppExpr app
-  TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
-  SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
+  AppExpr app' -> R.ppApp ppExpr app'
+  TruncExpr n e' -> R.sexpr "trunc" [ ppExpr e', R.ppNat n ]
+  SExtExpr n e' -> R.sexpr "sext" [ ppExpr e', R.ppNat n ]
   VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.
@@ -427,10 +413,10 @@ ppStmt s = case s of
   -- Named.
   MakeUndefined (Variable _ x) _ -> ppNamedStmt [x] $ text "make_undefined"
   Get (Variable _ x) l -> ppNamedStmt [x] $ R.sexpr "get" [ ppMLocation l ]
-  BVDiv (Variable _ x, Variable _ y) v1 v2 ->
-    ppNamedStmt [x,y] $ R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv (Variable _ x, Variable _ y) v1 v2 ->
-    ppNamedStmt [x,y] $ R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  BVQuot x v1 v2 -> ppBinOp "bv_quot" x v1 v2
+  BVRem x v1 v2 -> ppBinOp "bv_rem" x v1 v2
+  BVSignedQuot x v1 v2 -> ppBinOp "bv_signed_quot" x v1 v2
+  BVSignedRem x v1 v2 -> ppBinOp "bv_signed_rem" x v1 v2
   MemCmp (Variable _ x) n v1 v2 v3 v4 ->
     ppNamedStmt [x] $
       R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
@@ -459,6 +445,13 @@ ppStmt s = case s of
       text x <+> text "<-" <+> d
     ppNamedStmt names d =
       tupled (map text names) <+> text "<-" <+> d
+    ppBinOp :: String
+      -> Variable ('BVType n)
+      -> Expr ('BVType n)
+      -> Expr ('BVType n)
+      -> Doc
+    ppBinOp op (Variable _ x) v1 v2 =
+      ppNamedStmt [x] $ R.sexpr op [ ppExpr v1, ppExpr v2 ]
 
 instance Pretty Stmt where
   pretty = ppStmt

@@ -35,6 +35,7 @@ module Reopt.Concrete.Semantics
        , module Reopt.Reified.Semantics
        ) where
 
+import           Control.Exception (assert)
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
@@ -111,10 +112,10 @@ evalExpr (AppExpr a) = do
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
-    R.BVDiv nr c1 c2 -> error "Impossible: BVDiv should be unreachable"
-    R.BVMod nr c1 c2 -> error "Impossible: BVMod should be unreachable"
-    R.BVSignedDiv nr c1 c2 -> error "Impossible: BVSignedDiv should be unreachable"
-    R.BVSignedMod nr c1 c2 -> error "Impossible: BVSignedMod should be unreachable"
+    R.BVQuot _nr _c1 _c2 -> error "Impossible: BVQuot should be unreachable"
+    R.BVRem _nr _c1 _c2 -> error "Impossible: BVRem should be unreachable"
+    R.BVSignedQuot _nr _c1 _c2 -> error "Impossible: BVSignedQuot should be unreachable"
+    R.BVSignedRem _nr _c1 _c2 -> error "Impossible: BVSignedRem should be unreachable"
 
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
@@ -214,6 +215,26 @@ bv @@ (high, low) =
   where
     empty = BV.zeros 0
 
+-- | Helper for division ops in 'evalStmt' below.
+bvDivOp :: (Applicative m, CS.MonadMachineState m, MonadState Env m)
+    => (BV -> BV -> BV)
+    -> Variable (BVType n)
+    -> Expr (BVType n)
+    -> Expr (BVType n)
+    -> m ()
+bvDivOp op var ns1 ns2 = do
+  v1 <- evalExpr' ns1
+  v2 <- evalExpr' ns2
+  let tr = CS.asTypeRepr v2
+      q = case v2 of
+            CS.Literal (CS.unBitVector -> (nr,bv)) ->
+              -- The caller should have already checked for non-zero
+              -- denominator.
+              assert (bv /= 0) $
+                CS.liftValue2 op nr v1 v2
+            _ -> CS.Undefined tr
+  extendEnv var q
+
 evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
 evalStmt (MakeUndefined x tr) =
   extendEnv x (CS.Undefined tr)
@@ -265,39 +286,14 @@ evalStmt (Get x l) =
     sliceBV :: Integer ~ i
             => (i, i) -> BV -> BV
     sliceBV (low, high) super = super @@ (high - 1, low)
-
-evalStmt (BVDiv (xQuot, xRem) ns1 ns2) = do
-  v1 <- evalExpr' ns1
-  v2 <- evalExpr' ns2
-  let tr = CS.asTypeRepr v2
-      (q,r) = case (v1,v2) of
-                (_, CS.Literal (CS.unBitVector -> (nr,bv)))
-                  -> if BV.nat bv == 0
-                        then error "evalStmt: BVDiv: #DE"
-                        -- XXX: We use quot/rem & div/mod interchangeably,
-                        --      but they round differently.
-                        else ( CS.liftValue2 (takeSecondWidth div) nr v1 v2
-                             , CS.liftValue2 (takeSecondWidth mod) nr v1 v2
-                             )
-                _ -> (CS.Undefined tr, CS.Undefined tr)
-  extendEnv xQuot q
-  extendEnv xRem r
-evalStmt (BVSignedDiv (xQuot, xRem) ns1 ns2) = do
-  v1 <- evalExpr' ns1
-  v2 <- evalExpr' ns2
-  let tr = CS.asTypeRepr v2
-      (q,r) = case (v1,v2) of
-                (_, CS.Literal (CS.unBitVector -> (nr,bv)))
-                  -> if BV.nat bv == 0
-                        then error "evalStmt: BVSignedDiv: #DE"
-                        -- XXX: We use quot/rem & div/mod interchangeably,
-                        --      but they round differently.
-                        else ( CS.liftValue2 (takeSecondWidth BV.sdiv) nr v1 v2
-                             , CS.liftValue2 (takeSecondWidth BV.smod) nr v1 v2
-                             )
-                _ -> (CS.Undefined tr, CS.Undefined tr)
-  extendEnv xQuot q
-  extendEnv xRem r
+evalStmt (BVQuot x ns1 ns2) = bvDivOp div x ns1 ns2
+evalStmt (BVRem x ns1 ns2) = bvDivOp mod x ns1 ns2
+-- TODO(conathan): BUG: We use @sdiv@ and @smod@ here, but they round
+-- towards negative infinity; we want @squot@ and @srem@ instead,
+-- which round towards zero in agreement with the x86 @idiv@
+-- semantics, but 'BV' does not provide an @squot@' operation.
+evalStmt (BVSignedQuot x ns1 ns2) = bvDivOp BV.sdiv x ns1 ns2
+evalStmt (BVSignedRem x ns1 ns2) = bvDivOp BV.smod x ns1 ns2
 -- Based on 'MemCopy' eval below.
 evalStmt (MemCmp x bytes compares src dst reversed) = do
   case bytes of
@@ -372,7 +368,7 @@ evalStmt (l := e) =
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
       x87Cont (low, high) width i =
         case S.loc_type l
-          of BVTypeRepr n -> do
+          of BVTypeRepr _n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
                of CS.Literal bv -> do
@@ -438,9 +434,8 @@ evalStmt (MemSet n v a) = do
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
 evalStmt (Primitive p) = CS.primitive p
--- FIXME: in Exception and BVDiv/BVSigned we use error, but we may want
--- more real exception support in the MachineState monad in the future.
-evalStmt (Exception s1 s2 s3) = error "evalStmt: Exception: unimplemented"
+-- TODO(conathan): implement exception handling.
+evalStmt (Exception _s1 _s2 _s3) = return ()
 evalStmt (X87Push s) = do
   let top = N.X87TopReg
   vTop <- CS.getReg top
@@ -504,17 +499,6 @@ extPrecisionNatRepr = n80
 ------------------------------------------------------------------------
 -- Helper functions ----------------------------------------------------
 ------------------------------------------------------------------------
-
--- Truncate the result to the width of the second bitvector.
-takeSecondWidth :: (BV -> BV -> BV) -> BV -> BV -> BV
-takeSecondWidth f bv1 bv2 =
-  if resUInt >= 2^w2
-     then error "takeSecondWidth: result does not fit in allowed width"
-     else BV.bitVec w2 resUInt
-  where
-    w2 = BV.width bv2
-    res = f bv1 bv2
-    resUInt = BV.uint res
 
 doMux :: BV -> BV -> BV -> BV
 doMux tst thn els = case BV.toBits tst of
@@ -604,16 +588,28 @@ truncateIfValid nr c = if -(2^width) <= i || i < (2^width)
     width = natValue nr
 
 
----
+------------------------------------------------------------------------
 -- Float madness
----
---
+
 -- XXX For now we are punting on 16, 80, and 128 bit floats. We're just
 -- using GHC's Float & Double types. We are also punting on rounding modes,
 -- since we assume those will be rarely used and don't want to invest
 -- energy if it is not necessary. We will just use the GHC default behavior,
 -- which (I believe) is round-to-nearest. It is hard to find good information
 -- about this though.
+
+bvToFloat :: BV -> Float
+bvToFloat = wordToFloat . fromInteger . BV.int
+
+bvToDouble :: BV -> Double
+bvToDouble = wordToDouble . fromInteger . BV.int
+
+floatToBV :: Int -> Float -> BV
+floatToBV width = BV.bitVec width . toInteger . floatToWord
+
+doubleToBV :: Int -> Double -> BV
+doubleToBV width = BV.bitVec width . toInteger . doubleToWord
+
 liftFPtoBV :: (forall a. (RealFloat a) => (a -> Integer))
            -> FloatInfoRepr flt
            -> NatRepr n
@@ -625,16 +621,9 @@ liftFPtoBV f fr nr = CS.liftValue wrap nr
     --
     wrap :: BV -> BV
     wrap bv = case natValue (floatInfoBits fr) of
-      32 -> let fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in BV.bitVec width $ f (fromBV bv)
-
-      64 -> let fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in BV.bitVec width $ f (fromBV bv)
-
+      32 -> BV.bitVec width $ f (bvToFloat bv)
+      64 -> BV.bitVec width $ f (bvToDouble bv)
       _  -> error "Sorry, 32 or 64 bit floats only"
-
 
 liftFP2 :: (forall a. (Floating a, Num a) => (a -> a -> a))
         -> FloatInfoRepr flt
@@ -647,18 +636,8 @@ liftFP2 f fr = CS.liftValue2 wrap2 nr
     --
     wrap2 :: BV -> BV -> BV
     wrap2 bv1 bv2 = case natValue nr of
-      32 -> let toBV :: Float -> BV
-                toBV = BV.bitVec w . fromIntegral . floatToWord
-                fromBV :: BV -> Float
-                fromBV = wordToFloat . fromInteger . BV.int
-             in toBV $ f (fromBV bv1) (fromBV bv2)
-
-      64 -> let toBV :: Double -> BV
-                toBV = BV.bitVec w . fromIntegral . doubleToWord
-                fromBV :: BV -> Double
-                fromBV = wordToDouble . fromInteger . BV.int
-             in toBV $ f (fromBV bv1) (fromBV bv2)
-
+      32 -> floatToBV w $ f (bvToFloat bv1) (bvToFloat bv2)
+      64 -> doubleToBV w $ f (bvToDouble bv1) (bvToDouble bv2)
       _  -> error "Sorry, 32 or 64 bit floats only"
       where
         w = max (BV.width bv1) (BV.width bv2)
@@ -673,18 +652,8 @@ convertBVtoFP c fr = CS.liftValue wrap nr c
     --
     wrap :: BV -> BV
     wrap bv = case width of
-      32 -> let toBV :: Float -> BV
-                toBV = BV.bitVec width . fromIntegral . floatToWord
-                mkFP :: BV -> Float
-                mkFP = fromInteger . BV.int
-             in toBV $ mkFP bv
-
-      64 -> let toBV :: Double -> BV
-                toBV = BV.bitVec width . fromIntegral . doubleToWord
-                mkFP :: BV -> Double
-                mkFP = fromInteger . BV.int
-             in toBV $ mkFP bv
-
+      32 -> floatToBV width $ bvToFloat bv
+      64 -> doubleToBV width $ bvToDouble bv
       _  -> error "Sorry, 32 or 64 bit floats only"
 
 convertFP :: FloatInfoRepr flt1
@@ -699,18 +668,8 @@ convertFP fr1 fr2 = CS.liftValue wrap nr2
     --
     wrap :: BV -> BV
     wrap bv = case (natValue nr1, natValue nr2) of
-      (32,64) -> let toBV :: Double -> BV
-                     toBV = BV.bitVec destWidth . fromIntegral . doubleToWord
-                     fromBV :: BV -> Float
-                     fromBV = wordToFloat . fromInteger . BV.int
-                  in toBV $ float2Double (fromBV bv)
-
-      (64,32) -> let toBV :: Float -> BV
-                     toBV = BV.bitVec destWidth . fromIntegral . floatToWord
-                     fromBV :: BV -> Double
-                     fromBV = wordToDouble . fromInteger . BV.int
-                  in toBV $ double2Float (fromBV bv)
-
+      (32,64) -> doubleToBV destWidth $ float2Double (bvToFloat bv)
+      (64,32) -> floatToBV destWidth $ double2Float (bvToDouble bv)
       _       -> error "Sorry, can only convert between 32 & 64 bit floats"
 
 
