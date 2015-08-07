@@ -112,10 +112,10 @@ evalExpr (AppExpr a) = do
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
-    R.BVDiv _nr _c1 _c2 -> error "Impossible: BVDiv should be unreachable"
-    R.BVMod _nr _c1 _c2 -> error "Impossible: BVMod should be unreachable"
-    R.BVSignedDiv _nr _c1 _c2 -> error "Impossible: BVSignedDiv should be unreachable"
-    R.BVSignedMod _nr _c1 _c2 -> error "Impossible: BVSignedMod should be unreachable"
+    R.BVQuot _nr _c1 _c2 -> error "Impossible: BVQuot should be unreachable"
+    R.BVRem _nr _c1 _c2 -> error "Impossible: BVRem should be unreachable"
+    R.BVSignedQuot _nr _c1 _c2 -> error "Impossible: BVSignedQuot should be unreachable"
+    R.BVSignedRem _nr _c1 _c2 -> error "Impossible: BVSignedRem should be unreachable"
 
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2

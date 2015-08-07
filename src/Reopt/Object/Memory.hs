@@ -41,7 +41,6 @@ module Reopt.Object.Memory
   , isReadonly
   ) where
 
-import           Control.Applicative
 import           Control.Exception (assert)
 import           Control.Monad.Error
 import           Control.Monad.State.Strict
