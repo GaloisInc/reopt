@@ -71,6 +71,7 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Vector as V
+import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Word
 import           GHC.TypeLits
@@ -395,64 +396,92 @@ translateExpr (SExtExpr nr e) =
   where
     width = S.bv_width e
 --
-translateExpr (AppExpr a) = do
-  a' <- R.traverseApp translateExpr a
-  return $ case a' of
-    R.BVAdd nr (GExpr e1) (GExpr e2) ->
-      GExpr . G.App $ asPosNat nr (C.BVAdd nr e1 e2)
-
-    R.BVSub nr (GExpr e1) (GExpr e2) ->
-      GExpr . G.App $ asPosNat nr (C.BVSub nr e1 e2)
-
-    R.BVMul nr (GExpr e1) (GExpr e2) ->
-      GExpr . G.App $ asPosNat nr (C.BVMul nr e1 e2)
-
-    R.BVTestBit (GExpr e1) (GExpr e2)
-      | Cr.BVRepr nr1 <- G.exprType e1
-      , Cr.BVRepr nr2 <- G.exprType e2 ->
-        GExpr $ bvBit nr1 nr2 e1 e2
-
-    R.BVComplement nr (GExpr e) ->
-      GExpr . G.App $ asPosNat nr (C.BVNot nr e)
-
-    R.BVEq (GExpr e1) (GExpr e2)
-      | Cr.BVRepr nr <- G.exprType e1 ->
-        GExpr . G.App . C.BoolToBV n1 . G.App $ asPosNat nr (C.BVEq nr e1 e2)
-
-    -- TODO: Actually implement this
-    R.EvenParity (GExpr e) ->
-      GExpr . G.App $ C.BVLit n1 0
-
-    -- TODO: Actually implement this
-    R.SadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
-      GExpr . G.App $ C.BVLit n1 0
-
-    -- TODO: Actually implement this
-    R.UadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
-      GExpr . G.App $ C.BVLit n1 0
-
-    -- TODO: Actually implement this
-    R.UsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
-      GExpr . G.App $ C.BVLit n1 0
-
-    -- TODO: Actually implement this
-    R.SsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
-      GExpr . G.App $ C.BVLit n1 0
-
-    R.UExt (GExpr e1) nr ->
-      GExpr . G.App $ C.BVZext nr 
-        (case e1 of 
-          G.App a'' | C.BVRepr n <- C.appType a'' -> n 
-          G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
-          _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
-
-    _ -> error $ unwords [ "translateExpr App case unimplemented:"
-                         , show (ppExpr (AppExpr a))
-                         ]
+translateExpr (AppExpr a) = translateApp <$> R.traverseApp translateExpr a
 --
 translateExpr expr = error $ unwords [ "translateExpr: unimplemented Expr case:"
                                      , show (ppExpr expr)
                                      ]
+
+translateApp :: R.App (GExpr s) tp -> GExpr s tp -- m (G.Expr s (F tp))
+translateApp a = case a of
+  R.BVAdd nr e1 e2 -> binop nr e1 e2 C.BVAdd
+  R.BVSub nr e1 e2 -> binop nr e1 e2 C.BVSub
+  R.BVMul nr e1 e2 -> binop nr e1 e2 C.BVMul
+  R.BVTestBit (GExpr e1) (GExpr e2)
+    | Cr.BVRepr nr1 <- G.exprType e1
+    , Cr.BVRepr nr2 <- G.exprType e2 ->
+      GExpr $ bvBit nr1 nr2 e1 e2
+
+  R.BVComplement nr e -> unop nr e C.BVNot
+  R.BVEq e1 e2 -> boolBinop e1 e2 C.BVEq
+  R.BVSignedLt e1 e2 -> boolBinop e1 e2 C.BVSlt
+
+  R.UExt (GExpr e1) nr ->
+    GExpr . G.App $ C.BVZext nr 
+      (case e1 of 
+        G.App a'' | C.BVRepr n <- C.appType a'' -> n 
+        G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
+        _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
+
+  -- TODO: Actually implement this
+  R.EvenParity e ->
+    GExpr . G.App $ C.BVLit n1 0
+
+  -- TODO: Actually implement this
+  R.SadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
+    GExpr . G.App $ C.BVLit n1 0
+
+  -- TODO: Actually implement this
+  R.UadcOverflows nr (GExpr e1) (GExpr e2) (GExpr carry) ->
+    GExpr . G.App $ C.BVLit n1 0
+
+  -- TODO: Actually implement this
+  R.UsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
+    GExpr . G.App $ C.BVLit n1 0
+
+  -- TODO: Actually implement this
+  R.SsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
+    GExpr . G.App $ C.BVLit n1 0
+
+  _ -> error $ unwords [ "translateExpr App case unimplemented:"
+                       , show (R.ppApp (pretty . unGExpr) a)
+                       ]
+  where
+    -- For some reason the booleans don't have their size, so we
+    -- figure it out here ...
+    boolBinop :: forall s tp.
+                 GExpr s tp
+                 -> GExpr s tp
+                 -> (forall n. (1 <= n) =>
+                     NatRepr n
+                     -> G.Expr s (F (BVType n))
+                     -> G.Expr s (F (BVType n))
+                     -> C.App (G.Expr s) C.BoolType)
+                 -> GExpr s (BVType 1)
+    boolBinop (GExpr e1) (GExpr e2) f
+      | Cr.BVRepr nr <- G.exprType e1 =
+         GExpr . G.App . C.BoolToBV n1 . G.App $ asPosNat nr (f nr e1 e2)
+
+    binop :: forall s n tp.
+             NatRepr n
+             -> GExpr s (BVType n)
+             -> GExpr s (BVType n)
+             -> ((1 <= n) => NatRepr n
+                 -> G.Expr s (F (BVType n))
+                 -> G.Expr s (F (BVType n))
+                 -> C.App (G.Expr s) (F tp))
+             -> GExpr s tp
+    binop nr (GExpr e1) (GExpr e2) f =
+          GExpr . G.App $ asPosNat nr (f nr e1 e2)
+
+    unop :: forall s n tp.
+            NatRepr n
+            -> GExpr s (BVType n)
+            -> ((1 <= n) => NatRepr n -> G.Expr s (F (BVType n)) -> C.App (G.Expr s) (F tp))
+            -> GExpr s tp
+    unop nr (GExpr e1) f =
+          GExpr . G.App $ asPosNat nr (f nr e1)
+
 
 asPosNat :: forall n s a
            . NatRepr n
