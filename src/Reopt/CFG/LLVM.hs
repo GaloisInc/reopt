@@ -217,10 +217,22 @@ appToLLVM app =
    BVAdd _sz x y -> binop L.add x y
    BVSub _sz x y -> binop L.sub x y
    BVMul _sz x y -> binop L.mul x y
-   BVDiv _sz x y -> binop L.udiv x y
-   BVMod _sz x y -> binop L.urem x y   -- FIXME: mod?
-   BVSignedDiv _sz x y -> binop L.sdiv x y
-   BVSignedMod _sz x y -> binop L.srem x y
+
+   -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
+   -- page 3-393) says that results should be rounded towards
+   -- zero. These operations are called @quot@ and @rem@ in Haskell,
+   -- whereas @div@ and @mod@ in Haskell round towards negative
+   -- infinity. The LLVM @srem@ and @sdiv@ also round towards negative
+   -- infinity, and so are the correct operations to use here.  The
+   -- LLVM documentation
+   -- (http://llvm.org/releases/2.5/docs/LangRef.html) describes the
+   -- semantics of @srem@ with "the result has the same sign as the
+   -- dividend", which is equivalent to rounding towards zero.
+   BVQuot _sz x y       -> binop L.udiv x y
+   BVRem _sz x y        -> binop L.urem x y
+   BVSignedQuot _sz x y -> binop L.sdiv x y
+   BVSignedRem _sz x y  -> binop L.srem x y
+
    BVUnsignedLt x y    -> binop (L.icmp L.Iult) x y
    BVUnsignedLe x y    -> binop (L.icmp L.Iule) x y
    BVSignedLt x y    -> binop (L.icmp L.Islt) x y

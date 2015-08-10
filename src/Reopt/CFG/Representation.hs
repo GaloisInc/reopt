@@ -525,29 +525,30 @@ data App (f :: Type -> *) (tp :: Type) where
   BVMul :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned division (rounds fractions to zero).
-  -- This operation should result in a #de exception when the denominator is zero.
-  -- It should also throw a #de exception when evaluated and the quotient cannot
-  -- fit in the given number of bits.
-  BVDiv :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
+  --
+  -- This operation is not defined when the denominator is zero. The
+  -- caller should raise a #de exception in this case (see
+  -- 'Reopt.Semantics.Implementation.exec_div').
+  BVQuot :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
-  -- Unsigned modulo
-  -- This operation should result in a #de exception when the denominator is zero.
-  BVMod :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
+  -- Unsigned modulo (rounds fractional results to zero)
+  --
+  -- See 'BVQuot' for usage.
+  BVRem :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Signed division (rounds fractional results to zero).
-  -- This operation should result in a #de exception when the denominator is zero.
-  -- It should also throw a #de exception when evaluated and the quotient cannot
-  -- fit in the given number of bits.
-  BVSignedDiv :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
+  --
+  -- See 'BVQuot' for usage.
+  BVSignedQuot :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
-  -- Signed modulo.
+  -- Signed modulo (rounds fractional results to zero).
+  --
   -- The resulting modulus has the same sign as the quotient and satisfies
   -- the constraint that for all x y where y != 0:
-  --   x = (y * BVSignedDiv x y) + BVSignedMod x y
-  -- This operation should result in a #de exception when the denominator is zero.
-  -- It should also throw a #de exception when evaluated and the quotient cannot
-  -- fit in the given number of bits.
-  BVSignedMod :: !(NatRepr n) -> !(f (BVType (n+n))) -> !(f (BVType n)) -> App f (BVType n)
+  --   x = (y * BVSignedQuot x y) + BVSignedRem x y
+  --
+  -- See 'BVQuot' for usage.
+  BVSignedRem :: !(NatRepr n) -> !(f (BVType n)) -> !(f (BVType n)) -> App f (BVType n)
 
   -- Unsigned less than.
   BVUnsignedLt :: !(f (BVType n)) -> !(f (BVType n)) -> App f BoolType
@@ -738,10 +739,10 @@ ppApp pp a0 =
     BVAdd _ x y -> sexpr "bv_add" [ pp x, pp y ]
     BVSub _ x y -> sexpr "bv_sub" [ pp x, pp y ]
     BVMul _ x y -> sexpr "bv_mul" [ pp x, pp y ]
-    BVDiv _ x y       -> sexpr "bv_udiv" [ pp x, pp y ]
-    BVSignedDiv _ x y -> sexpr "bv_sdiv" [ pp x, pp y ]
-    BVMod _ x y       -> sexpr "bv_umod" [ pp x, pp y ]
-    BVSignedMod _ x y -> sexpr "bv_smod" [ pp x, pp y ]
+    BVQuot _ x y      -> sexpr "bv_uquot" [ pp x, pp y ]
+    BVSignedQuot _ x y -> sexpr "bv_squot" [ pp x, pp y ]
+    BVRem _ x y       -> sexpr "bv_urem" [ pp x, pp y ]
+    BVSignedRem _ x y -> sexpr "bv_srem" [ pp x, pp y ]
     BVUnsignedLt x y  -> sexpr "bv_ult"  [ pp x, pp y ]
     BVUnsignedLe x y  -> sexpr "bv_ule"  [ pp x, pp y ]
     BVSignedLt x y    -> sexpr "bv_slt"  [ pp x, pp y ]
@@ -804,10 +805,10 @@ appType a =
     BVAdd w _ _ -> BVTypeRepr w
     BVSub w _ _ -> BVTypeRepr w
     BVMul w _ _ -> BVTypeRepr w
-    BVDiv w _ _ -> BVTypeRepr w
-    BVSignedDiv w _ _ -> BVTypeRepr w
-    BVMod w _ _ -> BVTypeRepr w
-    BVSignedMod w _ _ -> BVTypeRepr w
+    BVQuot w _ _ -> BVTypeRepr w
+    BVSignedQuot w _ _ -> BVTypeRepr w
+    BVRem w _ _ -> BVTypeRepr w
+    BVSignedRem w _ _ -> BVTypeRepr w
 
     BVUnsignedLt{} -> knownType
     BVUnsignedLe{} -> knownType
