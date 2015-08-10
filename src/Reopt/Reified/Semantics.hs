@@ -175,15 +175,21 @@ instance MapF.OrdF Expr where
   AppExpr app1 `compareF` AppExpr app2 = app1 `compareF` app2
   AppExpr _ `compareF` _ = GTF
   _ `compareF` AppExpr _ = LTF
-  TruncExpr nr1 e1 `compareF` TruncExpr nr2 e2 
-    | Just Refl <- testEquality nr1 nr2 = case e1 `compareF` e2 of
-        LTF -> LTF
-        EQF -> EQF
-        GTF -> GTF
-    | otherwise = case nr1 `compareF` nr2 of
-        LTF -> LTF
-        EQF -> EQF
-        GTF -> GTF
+  TruncExpr nr1 e1 `compareF` expr
+    | case expr of 
+        TruncExpr _ _ -> True
+        _ -> False =
+      case expr of
+        TruncExpr nr2 _ ->
+          case nr1 `compareF` nr2 of
+              LTF -> LTF
+              EQF -> case expr of 
+                TruncExpr _ e2 -> 
+                  case e1 `compareF` e2 of
+                     LTF -> LTF
+                     EQF -> EQF
+                     GTF -> GTF
+              GTF -> GTF
   TruncExpr _  _ `compareF` _ = GTF
   _ `compareF` TruncExpr _ _ = LTF
   SExtExpr nr1 e1 `compareF` SExtExpr nr2 e2 

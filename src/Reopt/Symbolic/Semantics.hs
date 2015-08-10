@@ -56,6 +56,8 @@ import           Data.Bits
 import qualified Data.Foldable as Fold
 import           Data.Functor
 import           Data.IORef
+import           Data.Map (Map)
+import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Monoid (mempty)
 import           Data.Parameterized.Classes (OrderingF(..), OrdF, compareF, fromOrdering)
@@ -109,10 +111,22 @@ import           Debug.Trace
 ------------------------------------------------------------------------
 -- Types
 ------------------------------------------------------------------------
-newtype Env s = Env { unEnv :: MapF Var (G.Atom s) }
+data Env s = Env { vars :: MapF Var (G.Atom s), blocks :: Map Word64 (G.Label s), trackedRip :: Word64}
 
-insertEnv :: Var tp -> G.Atom s tp -> Env s -> Env s
-insertEnv v a env = Env $ MapF.insert v a (unEnv env)
+insertVar :: Var tp -> G.Atom s tp -> Env s -> Env s
+insertVar v a env = env {vars = MapF.insert v a (vars env)}
+-- FIXME: lenses?
+
+getLabel :: Word64 -> G.End s Env init MachineState (G.Label s)
+getLabel addr = do
+  env <- get
+  let bm = blocks env
+  case Map.lookup addr bm of
+    Just l -> return l
+    Nothing -> do
+      l <- G.newLabel
+      put $ env {blocks = Map.insert addr l bm}
+      return l
 
 data Var tp = Var !(Cr.TypeRepr tp) !Name
 type Name = String
@@ -136,6 +150,7 @@ instance Ord (Var tp) where
 instance Eq (Var tp) where
   (Var _ n1) == (Var _ n2) =
     n1 == n2
+
 
 
 ------------------------------------------------------------------------
@@ -218,7 +233,7 @@ translateBlock halloc block = do
 
 mkDefn :: Block -> G.FunctionDef Env MachineStateCtx MachineState
 mkDefn (Block stmts term) assn = (s, f)
-  where s = Env $ MapF.empty
+  where s = Env {vars = MapF.empty, blocks = Map.empty, trackedRip = 0}
         f = do
           ms <- G.newReg $ G.AtomExpr $ assn^._1
           trace (show $ ppStmts stmts) $ mapM_ (generateStmt ms) stmts
@@ -229,6 +244,11 @@ generateStmt :: forall s.
                 (G.Reg s MachineState)
              -> Stmt
              -> G.Generator s Env MachineState ()
+
+generateStmt ms (S.Register N.IPReg := LitExpr nr i) = do
+  G.modifyReg ms (curIP .~ G.App (C.BVLit nr i))
+  modify $ \env -> env {trackedRip = fromIntegral i}
+--
 generateStmt ms (l := e) = case l of
   S.Register reg -> do
     e' <- fmap (runReader (translateExpr' e)) get
@@ -238,37 +258,83 @@ generateStmt ms (l := e) = case l of
 
   _ -> return ()
 --
-generateStmt ms (Get v l) = case l of
-  S.Register reg -> do
-    a <- G.mkAtom . (^.(register reg)) =<< G.readReg ms
-    modify (insertEnv (translateVar v) a)
-
-  -- TODO: Implement memory map
-  S.MemoryAddr addr tr -> case tr of
-    BVTypeRepr nr -> do
-      -- a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)
-      a <- G.mkAtom . G.App $ asPosNat nr (C.BVLit nr 0)
-      modify (insertEnv (translateVar v) a)
-
-  _ -> return ()
+generateStmt ms (Get v l) = do
+  a <- G.mkAtom =<< translateLocGet ms l
+  modify $ insertVar (translateVar v) a
 --
 generateStmt _ms (MakeUndefined v tr) = case tr of
   BVTypeRepr nr -> do
     a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)
-    modify (insertEnv (translateVar v) a)
+    modify (insertVar (translateVar v) a)
+--
+generateStmt _ms (Ifte_ e s1s s2s) =
+  case (s1s, s2s) of
+    -- This is the pattern we generate for Jcc, so we know that it's the end of
+    -- a block... it's a bit of a hack
+    ([Get v (S.Register N.IPReg), S.Register N.IPReg := AppExpr (R.BVAdd _ (VarExpr v') (LitExpr nr i))], []) | v == v' -> do
+      e' <- fmap (G.App . C.BVNonzero n1 . runReader (translateExpr' e)) get
+      a <- G.mkAtom e'
+      G.endNow $ \c -> do
+        branchTrampoline <- G.newLabel
+        nextRip <- fmap trackedRip get
+        fallthroughLabel <- getLabel nextRip
+        
+        G.endCurrentBlock (G.Br a branchTrampoline fallthroughLabel)
+        G.defineBlock branchTrampoline $ do
+          mapM_ (generateStmt _ms) s1s
+          G.endNow $ \c -> do
+            branchLabel <- getLabel $ nextRip + fromIntegral i
+            G.defineBlock branchLabel $ G.returnFromFunction =<< G.readReg _ms
+            G.endCurrentBlock (G.Jump branchLabel)
+        G.defineBlock fallthroughLabel $ G.returnFromFunction =<< G.readReg _ms
+
+    _ -> do 
+      e' <- fmap (G.App . C.BVNonzero n1 . runReader (translateExpr' e)) get
+      G.ifte_ e' (mapM_ (generateStmt _ms) s1s) (mapM_ (generateStmt _ms) s2s)
+    
 --
 generateStmt _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
                                       , show (ppStmt stmt)
                                       ]
 
 
+translateLocGet :: G.Reg s MachineState -> S.Location (Expr (S.BVType 64))tp -> G.Generator s Env MachineState (G.Expr s (F tp))
+translateLocGet ms (S.Register reg) = do
+  regs <- G.readReg ms
+  return $ regs ^. register reg
+translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = 
+  return $ G.App $ asPosNat nr (C.BVLit nr 0)
+translateLocGet ms (S.TruncLoc l nr) = do
+  e <- translateLocGet ms l
+  return $ G.App $ C.BVTrunc nr (S.loc_width l) e
+translateLocGet ms ll@(S.LowerHalf l) = do
+  e <- translateLocGet ms l
+  let w = S.loc_width l
+  let hw = S.loc_width ll
+  withLeqProof (leqAdd2 (leqRefl hw) (leqProof (knownNat::NatRepr 1) hw)) $
+      return $ G.App $ C.BVTrunc hw w e
+translateLocGet ms ll@(S.UpperHalf l) = do
+  e <- translateLocGet ms l
+  let w = S.loc_width l
+  let hw = S.loc_width ll
+  withLeqProof (leqAdd (leqProof (knownNat::NatRepr 1) hw) hw) $ return $ G.App $ C.BVSelect hw hw w e
+
 generateTerm :: (G.Reg s MachineState)
              -> Term
-             -> G.Generator s t MachineState ()
+             -> G.Generator s Env MachineState ()
 generateTerm ms Ret = return ()
+generateTerm ms (Cond _ _) = return () -- handled in a special case for Ifte
+generateTerm ms (Fallthrough w) = do
+  G.endNow $ \c -> do
+    l <- getLabel w
+    G.endCurrentBlock (G.Jump l)
+generateTerm ms (Direct w) = do
+  G.endNow $ \c -> do
+    l <- getLabel w
+    G.endCurrentBlock (G.Jump l)
+  
 --
 generateTerm ms t = error $ "generateTerm: unimplemented case: " ++ show t
-
 
 
 type family F (tp :: Type) :: C.CrucibleType where
@@ -280,7 +346,7 @@ type family F (tp :: Type) :: C.CrucibleType where
 newtype GExpr s tp = GExpr { unGExpr :: G.Expr s (F tp) }
 
 translateExpr' :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (G.Expr s (F tp))
-translateExpr' = fmap unGExpr . translateExpr
+translateExpr' e = trace (show $ ppExpr e) (fmap unGExpr $ translateExpr e)
 
 -- This is an identity function intended to be a workaround for GHC bug #10507
 --   https://ghc.haskell.org/trac/ghc/ticket/10507
@@ -302,7 +368,7 @@ translateExpr (LitExpr nr i) = return . GExpr $ G.App (C.BVLit nr i)
 --
 translateExpr (VarExpr var) = do
   let var'@(Var _ name) = translateVar var
-  mA <- reader (MapF.lookup var' . unEnv)
+  mA <- reader (MapF.lookup var' . vars)
   case mA of
     Just atom -> return . GExpr $ G.AtomExpr atom
     Nothing   -> error $ "translateExpr bug: unbound variable " ++ name ++ " in expr"
@@ -372,6 +438,13 @@ translateExpr (AppExpr a) = do
     -- TODO: Actually implement this
     R.SsbbOverflows nr (GExpr e1) (GExpr e2) (GExpr borrow) ->
       GExpr . G.App $ C.BVLit n1 0
+
+    R.UExt (GExpr e1) nr ->
+      GExpr . G.App $ C.BVZext nr 
+        (case e1 of 
+          G.App a'' | C.BVRepr n <- C.appType a'' -> n 
+          G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
+          _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
 
     _ -> error $ unwords [ "translateExpr App case unimplemented:"
                          , show (ppExpr (AppExpr a))
