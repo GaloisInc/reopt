@@ -12,17 +12,12 @@
 -- uninterpreted functions.
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
-{-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE KindSignatures #-} -- MaybeF
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -112,7 +107,8 @@ evalExpr (AppExpr a) = do
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
     R.BVSignedLt c1 c2 -> CS.liftValue2 (predBV (BV.slt)) boolNatRepr c1 c2
-
+    R.BVUnsignedLe c1 c2 -> CS.liftValue2 (predBV (BV.<=.)) boolNatRepr c1 c2
+    R.BVSignedLe c1 c2 -> CS.liftValue2 (predBV BV.sle) boolNatRepr c1 c2
     R.BVTestBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
 
     -- Bit vector ops
