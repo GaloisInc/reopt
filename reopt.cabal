@@ -27,18 +27,23 @@ library
     vector,
     QuickCheck >= 2.7,
     crucible >= 0.1,
-    data-binary-ieee754
+    data-binary-ieee754,
+    llvm-pretty
 
   hs-source-dirs: src
 
   exposed-modules:
     Reopt
     Reopt.Analysis.AbsState
+    Reopt.Analysis.Domains.DiffEquations
     Reopt.Analysis.Domains.StridedInterval
     Reopt.BasicBlock.Extract
     Reopt.BasicBlock.FunctionCFG
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.Implementation
+    Reopt.CFG.InterpState
+    Reopt.CFG.LLVM
+    Reopt.CFG.Recovery
     Reopt.CFG.Representation
     Reopt.Machine.StateNames
     Reopt.Machine.Types
@@ -57,7 +62,8 @@ library
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
 
-  ghc-options: -Wall
+  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -73,7 +79,9 @@ executable reopt
     lens,
     mtl,
     parameterized-utils >= 0.1.6,
-    reopt
+    reopt,
+    llvm-pretty
+
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
@@ -81,7 +89,8 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall
+  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt_test
@@ -109,6 +118,7 @@ executable reopt_test
     ghc-options: -fhpc
 
   ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable radss_compare
@@ -170,3 +180,19 @@ executable ConcreteDumpInstr
 
   hs-source-dirs: utils
   main-is: ConcreteDumpInstr.hs
+
+executable LLVMDumpInstr
+  build-depends:
+    base >= 4,
+    ansi-wl-pprint,
+    binary,
+    bytestring,
+    containers,
+    flexdis86,
+    reopt,
+    mtl,
+    llvm-pretty,
+    lens
+
+  hs-source-dirs: utils
+  main-is: LLVMDumpInstr.hs

@@ -12,25 +12,33 @@ module Reopt.Object.Memory
   , memAsWord64le_withAddr
   , executableSegments
   , readonlySegments
+  , addrPermissions
   , addrHasPermissions
-  , isCodePointer
-  , isRODataPointer
+  , isCodeAddr
+  , isReadonlyAddr
   , findSegment
   , MemSegment(..)
-  , isExecutable
   , ppMemSegment
   , segmentAsWord64le
+  , segmentSize
   , MemoryByteReader
   , runMemoryByteReader
   , MemoryError(..)
+  , memLookupWord8
+  , memLookupWord16
+  , memLookupWord32
+  , memLookupWord64
   , readInstruction
 
     -- * Re-exports
   , Elf.ElfSegmentFlags
+  , Elf.pf_none
   , Elf.pf_r
   , Elf.pf_w
   , Elf.pf_x
   , Elf.hasPermissions
+  , isExecutable
+  , isReadonly
   ) where
 
 import           Control.Applicative
@@ -41,6 +49,7 @@ import           Data.Bits
 import qualified Data.ByteString as BS
 import           Data.Elf as Elf
   ( ElfSegmentFlags
+  , pf_none
   , pf_r
   , pf_w
   , pf_x
@@ -58,6 +67,33 @@ import qualified Flexdis86 as Flexdis
 import           Flexdis86.ByteReader
 
 ------------------------------------------------------------------------
+-- Utilities
+
+bsWord16 :: BS.ByteString -> Word16
+bsWord16 bs = w0 .|. w1
+  where w0 = fromIntegral (BS.index bs 0)
+        w1 = fromIntegral (BS.index bs 1) `shiftL` 8
+
+
+bsWord32 :: BS.ByteString -> Word32
+bsWord32 bs = w0 .|. w1 .|. w2 .|. w3
+  where w0 = fromIntegral (BS.index bs 0)
+        w1 = fromIntegral (BS.index bs 1) `shiftL`  8
+        w2 = fromIntegral (BS.index bs 2) `shiftL` 16
+        w3 = fromIntegral (BS.index bs 3) `shiftL` 24
+
+bsWord64 :: BS.ByteString -> Word64
+bsWord64 bs = w0 .|. w1 .|. w2 .|. w3 .|. w4 .|. w5 .|. w6 .|. w7
+  where w0 = fromIntegral (BS.index bs 0)
+        w1 = fromIntegral (BS.index bs 1) `shiftL`  8
+        w2 = fromIntegral (BS.index bs 2) `shiftL` 16
+        w3 = fromIntegral (BS.index bs 3) `shiftL` 24
+        w4 = fromIntegral (BS.index bs 4) `shiftL` 32
+        w5 = fromIntegral (BS.index bs 5) `shiftL` 40
+        w6 = fromIntegral (BS.index bs 6) `shiftL` 48
+        w7 = fromIntegral (BS.index bs 7) `shiftL` 56
+
+------------------------------------------------------------------------
 -- MemSegment
 
 -- | Describes a memory segment.
@@ -67,8 +103,12 @@ data MemSegment w = MemSegment { memBase  :: !w
                                }
 
 -- | Return true if the segment is executable.
-isExecutable :: MemSegment w -> Bool
-isExecutable s = (memFlags s `hasPermissions` pf_x)
+isExecutable :: ElfSegmentFlags -> Bool
+isExecutable f = f `hasPermissions` pf_x
+
+-- | Return true if segment is read-only.
+isReadonly :: ElfSegmentFlags -> Bool
+isReadonly f = f .&. (pf_r .|. pf_w) == pf_r
 
 instance (Integral w, Show w) => Show (MemSegment w) where
   show = show . ppMemSegment
@@ -81,18 +121,9 @@ ppMemSegment ms =
                   , text "size =" <+>  text (showHex (BS.length (memBytes ms)) "")
                   ]
 
-lsbWord64FromByteString :: BS.ByteString -> Word64
-lsbWord64FromByteString b =
-        w64At 7
-    .|. w64At 6
-    .|. w64At 5
-    .|. w64At 4
-    .|. w64At 3
-    .|. w64At 2
-    .|. w64At 1
-    .|. w64At 0
-  where w64At :: Int -> Word64
-        w64At i = fromIntegral (b `BS.index` i) `shiftL` (8*i)
+-- | Return size of segment.
+segmentSize :: Num w => MemSegment w -> w
+segmentSize seg = fromIntegral (BS.length (memBytes seg))
 
 -- | Return list of aligned word 64s in the memory segments.
 segmentAsWord64le :: Integral w => MemSegment w -> [Word64]
@@ -101,7 +132,7 @@ segmentAsWord64le s = go (memBytes s) cnt
         base = fromIntegral (memBase s) .&. 0x7
         cnt = (BS.length (memBytes s) - base) `shiftR` 3
         go _ 0 = []
-        go b c = lsbWord64FromByteString s' : go b' (c-1)
+        go b c = bsWord64 s' : go b' (c-1)
           where (s',b') = BS.splitAt 8 b
 
 -- | Returns an interval representing the range of addresses for the segment
@@ -147,12 +178,10 @@ memAsWord64le m = concatMap segmentAsWord64le (memSegments m)
 
 -- | Get executable segments.
 executableSegments :: Memory w -> [MemSegment w]
-executableSegments = filter isExecutable . memSegments
+executableSegments = filter (isExecutable . memFlags) . memSegments
 
 readonlySegments :: Memory w -> [MemSegment w]
-readonlySegments = filter (\s -> memFlags s `hasPermissions` pf_r
-                                 && not (memFlags s `hasPermissions` pf_w)
-                          ). memSegments
+readonlySegments = filter (isReadonly . memFlags) . memSegments
 
 -- | Insert segment into memory or fail if this overlaps with another
 -- segment in memory.
@@ -172,18 +201,64 @@ findSegment :: Ord w => w -> Memory w -> Maybe (MemSegment w)
 findSegment w (Memory m) = snd <$> listToMaybe (IMap.search w m)
 
 -- | Return true if address satisfies permissions check.
+addrPermissions :: Ord w => w -> Memory w -> ElfSegmentFlags
+addrPermissions w m = maybe pf_none memFlags (findSegment w m)
+
+-- | Return true if address satisfies permissions check.
 addrHasPermissions :: Ord w => w -> ElfSegmentFlags -> Memory w -> Bool
-addrHasPermissions w req m = fromMaybe False $ do
-  s <- findSegment w m
-  return (memFlags s `hasPermissions` req)
+addrHasPermissions w req m = addrPermissions w m `hasPermissions` req
 
 -- | Indicates if address is a code pointer.
-isCodePointer :: Memory Word64 -> Word64 -> Bool
-isCodePointer mem val = addrHasPermissions val pf_x mem
+isCodeAddr :: Memory Word64 -> Word64 -> Bool
+isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
 
-isRODataPointer :: Memory Word64 -> Word64 -> Bool
-isRODataPointer mem val = addrHasPermissions val pf_r mem
-                          && not (addrHasPermissions val pf_w mem)
+-- | Return true if this is a read only address.
+isReadonlyAddr :: Memory Word64 -> Word64 -> Bool
+isReadonlyAddr mem val = addrPermissions val mem .&. (pf_r .|. pf_w) == pf_r
+
+-- | Attempt to read a contiguous string of bytes from a single segment.
+memSubsegment :: Integral w
+              => Memory w
+                 -- ^ Memory to read form
+              -> ElfSegmentFlags
+                 -- ^ Permissions expected during reading.
+              -> w
+                 -- ^ Address to read
+              -> Int
+                 -- ^ Number of bytes to read.
+              -> Either (MemoryError w) BS.ByteString
+memSubsegment m reqPerm addr n =
+  case findSegment addr m of
+    Nothing -> Left $! AccessViolation addr
+    Just s -> assert (memBase s <= addr) $ do
+      -- Let d be number of bytes to drop from start of segment.
+      let d = fromIntegral (addr - memBase s)
+      -- Throw error when permissions check fails.
+      if (memFlags s .&. reqPerm) /= reqPerm then
+        Left $! PermissionsError addr
+      else if n >= BS.length (memBytes s) - d then
+        Left $! AccessViolation addr
+      else
+        Right $! BS.take n (BS.drop d (memBytes s))
+
+memLookupWord8 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word8
+memLookupWord8 m reqPerm addr =
+  BS.head <$> memSubsegment m reqPerm addr 1
+
+-- | Return a word16 at given address (assume little-endian encoding)
+memLookupWord16 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word16
+memLookupWord16 m reqPerm addr = do
+  bsWord16 <$> memSubsegment m reqPerm addr 2
+
+-- | Return a word32 at given address (assume little-endian encoding)
+memLookupWord32 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word32
+memLookupWord32 m reqPerm addr = do
+  bsWord32 <$> memSubsegment m reqPerm addr 4
+
+-- | Return a word64 at given address (assume little-endian encoding)
+memLookupWord64 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word64
+memLookupWord64 m reqPerm addr = do
+  bsWord64 <$> memSubsegment m reqPerm addr 8
 
 ------------------------------------------------------------------------
 -- MemStream
@@ -192,6 +267,7 @@ data MemStream w = MS { msNext :: !BS.ByteString
                       , msMem  :: !(Memory w)
                       , msAddr :: !w
                       , msPerm :: !ElfSegmentFlags
+                        -- ^ Permissions that memory accesses are expected to satisfy.
                       }
 
 -- | Type of errors that may occur when reading memory.

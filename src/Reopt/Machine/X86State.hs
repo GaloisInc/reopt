@@ -32,11 +32,9 @@ module Reopt.Machine.X86State
   , x86StateRegisters
   ) where
 
-import           Control.Applicative
 import           Control.Lens
-import           Data.Foldable (foldMap)
 import           Data.Maybe
-import           Data.Monoid (Monoid, mappend)
+
 import           Data.Parameterized.Classes (EqF(..))
 import           Data.Parameterized.Some
 import qualified Data.Vector as V

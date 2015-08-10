@@ -11,7 +11,6 @@
 -- Reopt.Semantics.Monad that treat some class methods as
 -- uninterpreted functions.
 ------------------------------------------------------------------------
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -37,26 +36,16 @@ module Reopt.Concrete.Semantics
        , module Reopt.Reified.Semantics
        ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<*>), pure, Applicative)
-#endif
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
-import           Control.Monad.Writer
-  (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Binary.IEEE754
 import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
-import           Data.Functor
-import           Data.Monoid (mempty)
-import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
-import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
 import           GHC.Float (float2Double, double2Float)
 
@@ -64,14 +53,13 @@ import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
   , BoolType
-  , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
 import           Reopt.Reified.Semantics
 import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
+import           Reopt.Machine.Types ( FloatInfoRepr, FloatType
                                      , floatInfoBits, n1, n80
                                      )
 
@@ -133,7 +121,7 @@ evalExpr (AppExpr a) = do
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
     R.BVSignedLt c1 c2 -> CS.liftValue2 (predBV (BV.slt)) boolNatRepr c1 c2
 
-    R.BVBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
+    R.BVTestBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
 
     -- Bit vector ops
     R.BVComplement nr c -> CS.liftValue (complement) nr c
@@ -262,8 +250,8 @@ evalStmt (Get x l) =
         extendEnv x v1
 
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i = 
-        case S.loc_type l 
+      x87Cont (low, high) width i =
+        case S.loc_type l
           of BVTypeRepr n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
@@ -382,11 +370,9 @@ evalStmt (l := e) =
         v0 <- CS.getReg rn
         let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
         CS.setReg rn v1
-  let x87Cont (low, high) width i =
-        regCont (low, high) width (N.X87FPUReg i)
   let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i = 
-        case S.loc_type l 
+      x87Cont (low, high) width i =
+        case S.loc_type l
           of BVTypeRepr n -> do
              topReg <- CS.getReg N.X87TopReg
              case topReg
@@ -396,8 +382,8 @@ evalStmt (l := e) =
                      (fromIntegral top + i) `mod` 8))
                   CS.Undefined _ -> do
                     -- undefine all the floating point registers, I guess?
-                    mapM_ 
-                      (\reg -> CS.setReg reg 
+                    mapM_
+                      (\reg -> CS.setReg reg
                                (CS.Undefined $ N.registerType reg))
                       N.x87FPURegs
   S.elimLocation memCont regCont x87Cont l
@@ -584,7 +570,6 @@ checkUsbbOverflow :: BV -> BV -> BV -> BV
 checkUsbbOverflow a b borrow = BV.fromBool didUnderflow
   where
     didUnderflow = total < 0
-    bitWidth = max (BV.width a) (BV.width b)
     total = foldl1 (-) $ map BV.uint [a,b,borrow]
 
 checkSsbbOverflow :: BV -> BV -> BV -> BV
@@ -760,4 +745,3 @@ liftFPPred2 f fr = CS.liftValue2 wrap2 boolNatRepr
              in BV.fromBool $ f (fromBV bv1) (fromBV bv2)
 
       _  -> error "Sorry, 32 or 64 bit floats only"
-

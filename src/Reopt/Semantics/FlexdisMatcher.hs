@@ -26,8 +26,7 @@ module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
   ) where
 
-import           Control.Applicative ( (<$>) )
-import           Data.List (foldl', stripPrefix)
+import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
@@ -413,6 +412,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
 
               -- SSE instructions
               , mk "movhlps" $ knownBinop exec_movhlps
+              , mk "movlhps" $ knownBinop exec_movlhps
               , mk "pmaxub"  $ binop exec_pmaxub
               , mk "pmaxuw"  $ binop exec_pmaxuw
               , mk "pmaxud"  $ binop exec_pmaxud

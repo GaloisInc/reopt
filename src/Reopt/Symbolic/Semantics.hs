@@ -43,19 +43,16 @@ module Reopt.Symbolic.Semantics
        , asPosNat
        ) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative ((<*>), pure, Applicative)
-#endif
 import           Control.Lens
 import           Control.Monad.Reader
-import           Control.Monad.State.Strict
 import           Control.Monad.ST
+import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Binary.IEEE754
-import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
+import           Data.Bits
 import qualified Data.Foldable as Fold
 import           Data.Functor
 import           Data.IORef
@@ -67,6 +64,7 @@ import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import Data.Proxy
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
@@ -284,6 +282,19 @@ newtype GExpr s tp = GExpr { unGExpr :: G.Expr s (F tp) }
 translateExpr' :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (G.Expr s (F tp))
 translateExpr' = fmap unGExpr . translateExpr
 
+-- This is an identity function intended to be a workaround for GHC bug #10507
+--   https://ghc.haskell.org/trac/ghc/ticket/10507
+nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce Refl x = x
+
+nonLoopingCoerce' :: (y :~: x) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce' Refl x = x
+
+-- This is an identity function intended to be a workaround for GHC bug #10742
+--   https://ghc.haskell.org/trac/ghc/ticket/10742
+ghcBugWorkAround :: proxy n -> ((1 <=? n) ~ (1 <=? n) => a) -> a
+ghcBugWorkAround _ x = x
+  
 translateExpr :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (GExpr s tp) -- m (G.Expr s (F tp))
 -- FIXME: I'm specializing to BVType because I know that's the only (currently)
 -- possible `tp`. But that could change.
@@ -299,20 +310,24 @@ translateExpr (VarExpr var) = do
 -- TruncExpr and SExtExpr differ from App's Trunc & SExt only in the types.
 -- These allow for trivial truncations & extensions, where App does not.
 -- Crucible does not support trivial truncations, so we just drop the trivial
--- truncation by returning the contained Expr.
-translateExpr (TruncExpr nr e) = do
-  ge@(GExpr e') <- translateExpr e
-  let width = S.bv_width e
-  case testStrictLeq nr width of
-    Right Refl -> return ge
-    Left prf -> return . GExpr . G.App $ withLeqProof prf (tracer nr width $ C.BVTrunc nr width e')
---
-translateExpr (SExtExpr nr e) = do
-  ge@(GExpr e') <- translateExpr e
-  let width = S.bv_width e
-  case testStrictLeq width nr of
-    Right Refl -> return ge
-    Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVSext nr width e')
+-- truncation by returning the contained Expr.    
+translateExpr (TruncExpr nr e) =
+  ghcBugWorkAround width $ do
+    ge@(GExpr e') <- translateExpr e
+    case testStrictLeq nr width of
+     Right prf -> return (nonLoopingCoerce' prf ge)
+     Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVTrunc nr width e')
+  where
+    width = S.bv_width e
+-- 
+translateExpr (SExtExpr nr e) = 
+  ghcBugWorkAround nr $ do
+    ge@(GExpr e') <- translateExpr e
+    case testStrictLeq width nr of
+      Right prf -> return (nonLoopingCoerce prf ge)
+      Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVSext nr width e')
+  where
+    width = S.bv_width e
 --
 translateExpr (AppExpr a) = do
   a' <- R.traverseApp translateExpr a
@@ -326,7 +341,7 @@ translateExpr (AppExpr a) = do
     R.BVMul nr (GExpr e1) (GExpr e2) ->
       GExpr . G.App $ asPosNat nr (C.BVMul nr e1 e2)
 
-    R.BVBit (GExpr e1) (GExpr e2)
+    R.BVTestBit (GExpr e1) (GExpr e2)
       | Cr.BVRepr nr1 <- G.exprType e1
       , Cr.BVRepr nr2 <- G.exprType e2 ->
         GExpr $ bvBit nr1 nr2 e1 e2
@@ -365,7 +380,6 @@ translateExpr (AppExpr a) = do
 translateExpr expr = error $ unwords [ "translateExpr: unimplemented Expr case:"
                                      , show (ppExpr expr)
                                      ]
-
 
 asPosNat :: forall n s a
            . NatRepr n

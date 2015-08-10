@@ -4,7 +4,6 @@
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
-import           Control.Applicative
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
@@ -18,33 +17,34 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Data.Version
-import           GHC.TypeLits
+import           Data.Word
 import           Numeric (showHex)
 import           Reopt.Analysis.AbsState
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.IO
+import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 
 import           Paths_reopt (version)
+
 import           Data.Type.Equality as Equality
 
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
 import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Semantics.DeadRegisterElimination
-import           Reopt.Semantics.Monad (Type(..))
 
 ------------------------------------------------------------------------
 -- Args
@@ -54,6 +54,7 @@ data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
+   | ShowLLVM        -- ^ Print out generated LLVM
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -108,6 +109,11 @@ cfgAIFlag = flagNone [ "ai", "a" ] upd help
   where upd  = reoptAction .~ ShowCFGAI
         help = "Print out recovered control flow graph + AI of executable."
 
+llvmFlag :: Flag Args
+llvmFlag = flagNone [ "llvm", "l" ] upd help
+  where upd  = reoptAction .~ ShowLLVM
+        help = "Print out generated LLVM."
+
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
@@ -129,6 +135,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         flags = [ disassembleFlag
                 , cfgFlag
                 , cfgAIFlag
+                , llvmFlag
                 , gapFlag
                 , segmentFlag
                 , sectionFlag
@@ -224,9 +231,11 @@ isInterestingCode mem (start, Just end) = go start end
 
 isInterestingCode _ _ = True -- Last bit
 
-showGaps :: Memory Word64 -> Word64 -> IO ()
-showGaps mem entry = do
-    let cfg = finalCFG (cfgFromAddress mem entry)
+showGaps :: LoadStyle -> Elf Word64 -> IO ()
+showGaps loadSty e = do
+    -- Create memory for elf
+    mem <- mkElfMem loadSty e
+    let cfg = finalCFG (mkFinalCFG mem e)
     let ends = cfgBlockEnds cfg
     let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -247,28 +256,13 @@ showGaps mem entry = do
     out_gap bs (e:es') = in_gap e bs es'
     out_gap _ _        = []
 
-showCFG :: Memory Word64 -> Word64 -> IO ()
-showCFG mem entry = do
-  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let g0 = finalCFG (cfgFromAddress mem entry)
-  let g = eliminateDeadRegisters g0
+showCFG :: LoadStyle -> Elf Word64 -> IO ()
+showCFG loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
+  let g = eliminateDeadRegisters (finalCFG fg)
   print (pretty g)
-{-
-  putStrLn $ "Found potential calls: " ++ show (Map.size (cfgCalls g))
-
-  let rCalls = reverseEdges (cfgCalls g)
-
-  let rEdgeMap = reverseEdges (cfgSuccessors g)
-
-
-  let sources = getTargets (Map.keys rCalls) rEdgeMap
-
-  forM_ (Set.toList sources) $ \a -> do
-    let Just b = findBlock g (GeneratedBlock a 0)
-    when (hasCall b == False) $ do
-      print $ "Found start " ++ showHex a ""
-      print (pretty b)
--}
 
 ------------------------------------------------------------------------
 -- Function determination
@@ -332,7 +326,7 @@ detectCalls g b initStack = do
       let rsp = x86_state^.register N.rsp
       case rsp `asOffsetOf` (Initial N.rsp) of
         Just o | Just _ <- lookupStack (fromInteger o) finStack -> do
-          addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+          addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
         _ -> return ()
     Branch _ x y -> do
       let Just xb = findBlock g x
@@ -348,7 +342,7 @@ detectSuccessors :: CFG -> Block -> State CallState ()
 detectSuccessors g b = do
   case blockTerm b of
     FetchAndExecute x86_state -> do
-      addAddrs (blockParent (blockLabel b)) (x86_state^.curIP)
+      addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
     Branch _ x y -> do
       let Just xb = findBlock g x
           Just yb = findBlock g y
@@ -446,17 +440,24 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
+mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
+mkFinalCFG mem e = cfgFromAddrs mem (elfEntry e:sym_addrs)
+        -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
+  where sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
+                                   , steType ste == STT_FUNC
+                                   , isCodeAddr mem (steValue ste)
+                                   ]
 
-showCFGAndAI :: Memory Word64 -> Word64 -> IO ()
-showCFGAndAI mem entry = do
-  -- Build model of executable memory from elf.
-  -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  let fg = cfgFromAddress mem entry
+showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
+showCFGAndAI loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
   let abst = finalAbsState fg
       amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
       ppOne b =
-         vcat [case (blockLabel b, Map.lookup (blockParent (blockLabel b)) abst) of
+         vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty ab
                   (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
@@ -474,6 +475,19 @@ showCFGAndAI mem entry = do
       GeneratedBlock _ 0 -> do
         checkCallsIdentified mem g b
       _ -> return ()
+
+showLLVM :: LoadStyle -> Elf Word64 -> IO ()
+showLLVM loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
+  let g = eliminateDeadRegisters (finalCFG fg)
+  let bs' = Map.elems (g^.cfgBlocks)
+      mkF = snd . L.runLLVM
+            . L.defineFresh L.emptyFunAttrs L.voidT ()
+            . mapM_ blockToLLVM
+
+  print (L.ppModule $ mkF bs')
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -498,20 +512,21 @@ isWriteTo (Write (MemLoc a _) val) expected tp
     Just val
 isWriteTo _ _ _ = Nothing
 
--- | @isCodePointerWriteTo mem stmt addr@ returns true if @stmt@ writes
-isCodePointerWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodePointerWriteTo mem s sp
+-- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes to @addr@ and
+-- @addr@ is a code pointer.
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodePointer mem (fromInteger val)
+  , isCodeAddr mem (fromInteger val)
   = Just (fromInteger val)
-isCodePointerWriteTo _ _ _ = Nothing
+isCodeAddrWriteTo _ _ _ = Nothing
 
 -- | Returns true if it looks like block ends with a call.
 blockContainsCall :: Memory Word64 -> Block -> X86State Value -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.register N.rsp
       go [] = False
-      go (stmt:_) | Just _ <- isCodePointerWriteTo mem stmt next_sp = True
+      go (stmt:_) | Just _ <- isCodeAddrWriteTo mem stmt next_sp = True
       go (Write _ _:_) = False
       go (_:r) = go r
    in go (reverse (blockStmts b))
@@ -524,7 +539,7 @@ blockNextStates g b =
     Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
       where Just x = findBlock g x_lbl
             Just y = findBlock g y_lbl
-    Primitive _ _ -> []
+    Syscall _ -> []
 
 checkReturnsIdentified :: CFG -> Block -> IO ()
 checkReturnsIdentified g b = do
@@ -534,9 +549,9 @@ checkReturnsIdentified g b = do
       case (stateEndsWithRet s, hasRetComment b) of
         (True, True) -> return ()
         (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "UNEXPECTED return Block " ++ showHex (labelAddr lbl) ""
         (False, True) -> do
-          hPutStrLn stderr $ "MISSING return Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "MISSING return Block " ++ showHex (labelAddr lbl) ""
         _ -> return ()
     _ -> return ()
 
@@ -547,16 +562,15 @@ checkCallsIdentified mem g b = do
     [s] -> do
       case (blockContainsCall mem b s, hasCallComment b) of
         (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED call Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "UNEXPECTED call Block " ++ showHex (labelAddr lbl) ""
         (False, True) -> do
-          hPutStrLn stderr $ "MISSING call Block " ++ showHex (blockParent lbl) ""
+          hPutStrLn stderr $ "MISSING call Block " ++ showHex (labelAddr lbl) ""
         _ -> return ()
     _ -> return ()
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
-
 
 main :: IO ()
 main = do
@@ -566,16 +580,16 @@ main = do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showCFG mem (elfEntry e)
+      showCFG (args^.loadStyle) e
     ShowCFGAI -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showCFGAndAI mem (elfEntry e)
+      showCFGAndAI (args^.loadStyle) e
+    ShowLLVM -> do
+      e <- readStaticElf (args^.programPath)
+      showLLVM (args^.loadStyle) e
     ShowGaps -> do
       e <- readStaticElf (args^.programPath)
-      mem <- mkElfMem (args^.loadStyle) e
-      showGaps mem (elfEntry e)
+      showGaps (args^.loadStyle) e
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->

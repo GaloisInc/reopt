@@ -19,7 +19,6 @@
 {-# LANGUAGE GADTs #-}
 module Reopt.Semantics.DeadRegisterElimination (eliminateDeadRegisters) where
 
-import           Control.Applicative ((<$>), (<*>))
 import           Control.Lens
 import           Control.Monad.State (State, evalState, gets, modify)
 import           Data.Foldable (foldrM)
@@ -53,7 +52,7 @@ blockLiveRegisters b = do addIDs terminalIds
     terminalIds = case blockTerm b of
                    Branch v _ _      -> refsInValue v
                    FetchAndExecute s -> foldX86StateValue refsInValue s
-                   Primitive _ s     -> foldX86StateValue refsInValue s
+                   Syscall s     -> foldX86StateValue refsInValue s
     addIDs ids = modify (S.union ids)
     noteAndFilter stmt@(AssignStmt (Assignment v rhs)) ss
       = do v_in <- gets (S.member v)
@@ -69,7 +68,7 @@ blockLiveRegisters b = do addIDs terminalIds
       addIDs (refsInValue cnt)
       addIDs (refsInValue src)
       addIDs (refsInValue dest)
-      addIDs (refsInValue df)      
+      addIDs (refsInValue df)
       return (stmt : ss)
     noteAndFilter stmt@(MemSet cnt val dest) ss = do
       addIDs (refsInValue cnt)
