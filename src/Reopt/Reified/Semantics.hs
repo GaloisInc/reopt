@@ -106,19 +106,6 @@ data Expr tp where
   LitExpr :: !(NatRepr n) -> Integer -> Expr (BVType n)
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(R.App Expr tp) -> Expr tp
-
-  -- Extra constructors where 'App' does not provide what we want.
-  --
-  -- Here 'App' has 'Trunc', but its type is different; see notes at
-  -- bottom of file.
-  TruncExpr :: (1 <= m, m <= n) =>
-    !(NatRepr m) -> !(Expr (BVType n)) -> Expr (BVType m)
-  -- Here 'app' has 'SExt', but its type is different as with 'Trunc'.
-  -- But, strangely, the strict version of 'uext' is in the 'IsValue'
-  -- class as 'uext'', so we can use 'App's 'UExt' there ... seems ad
-  -- hoc.
-  SExtExpr :: (1 <= m, m <= n) =>
-    !(NatRepr n) -> !(Expr (BVType m)) -> Expr (BVType n)
   --
   -- A variable.
   -- Not doing anything fancy with names for now; can use 'unbound'
@@ -135,8 +122,6 @@ app = AppExpr
 exprType :: Expr tp -> S.TypeRepr tp
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
-exprType (TruncExpr r _) = S.BVTypeRepr r
-exprType (SExtExpr r _) = S.BVTypeRepr r
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.
@@ -163,17 +148,24 @@ instance S.IsValue Expr where
   bvSplit :: forall n. (1 <= n)
           => Expr (BVType (n + n))
           -> (Expr (BVType n), Expr (BVType n))
-  bvSplit v = withAddPrefixLeq hn hn ( app (R.UpperHalf hn v)
-                                     , TruncExpr        hn v)
+  bvSplit v = withLeqProof (leqAdd2 (leqRefl hn) (LeqProof :: LeqProof 1 n)) 
+                            ( app (R.UpperHalf hn v)
+                            , app (R.Trunc     v hn))
     where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
-  bvTrunc w x = TruncExpr w x
+  bvTrunc (w :: NatRepr m) (x :: Expr (BVType n)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
+    case testStrictLeq w (exprWidth x) of
+      Left LeqProof -> app $ R.Trunc x w
+      Right r -> nonLoopingCoerce' r x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
-  sext w x = SExtExpr w x
+  sext (w :: NatRepr n) (x :: Expr (BVType m)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
+    case testStrictLeq (exprWidth x) w of
+      Left LeqProof -> app $ R.SExt x w
+      Right r -> nonLoopingCoerce r x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
   reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x
@@ -198,6 +190,12 @@ instance S.IsValue Expr where
   fpCvtRoundsUp src tgt x = app $ R.FPCvtRoundsUp src x tgt
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
+
+nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce Refl x = x
+
+nonLoopingCoerce' :: (x :~: y) -> v (BVType y) -> v (BVType x)
+nonLoopingCoerce' Refl y = y
 
 ------------------------------------------------------------------------
 -- Statements.
@@ -375,8 +373,6 @@ ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app' -> R.ppApp ppExpr app'
-  TruncExpr n e' -> R.sexpr "trunc" [ ppExpr e', R.ppNat n ]
-  SExtExpr n e' -> R.sexpr "sext" [ ppExpr e', R.ppNat n ]
   VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.

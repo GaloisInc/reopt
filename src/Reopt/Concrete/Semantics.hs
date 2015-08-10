@@ -75,14 +75,6 @@ evalExpr (LitExpr nr i) = return $ CS.Literal bVec
     bVec = CS.bitVector nr (BV.bitVec bitWidth i)
     bitWidth = fromInteger (natValue nr)
 
--- TruncExpr and SExtExpr differ from App's Trunc & SExt only in the types.
--- These allow for trivial truncations & extensions, where App does not.
-evalExpr (TruncExpr nr e) =
-  return . CS.liftValue (truncBV nr) nr =<< evalExpr e
-
-evalExpr (SExtExpr nr e) =
-  return . CS.liftValue (sExtBV nr) nr =<< evalExpr e
-
 evalExpr (VarExpr var@(Variable _ name)) = do
   maybeVal <- asks (MapF.lookup var)
   let msg = "Bug: unbound variable " ++ name ++ " in expr"
