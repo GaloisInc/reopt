@@ -10,7 +10,6 @@
 -- Reopt.Semantics.Monad that treat some class methods as
 -- uninterpreted functions.
 ------------------------------------------------------------------------
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -98,7 +97,7 @@ data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
 
 instance TestEquality Variable where
-  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+  (Variable tp1 _n1) `testEquality` (Variable tp2 _n2) = do
     Refl <- testEquality tp1 tp2
     return Refl
 
@@ -124,19 +123,6 @@ data Expr tp where
 
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(R.App Expr tp) -> Expr tp
-
-  -- Extra constructors where 'App' does not provide what we want.
-  --
-  -- Here 'App' has 'Trunc', but its type is different; see notes at
-  -- bottom of file.
-  TruncExpr :: (1 <= m, m <= n) =>
-    !(NatRepr m) -> !(Expr (BVType n)) -> Expr (BVType m)
-  -- Here 'app' has 'SExt', but its type is different as with 'Trunc'.
-  -- But, strangely, the strict version of 'uext' is in the 'IsValue'
-  -- class as 'uext'', so we can use 'App's 'UExt' there ... seems ad
-  -- hoc.
-  SExtExpr :: (1 <= m, m <= n) =>
-    !(NatRepr n) -> !(Expr (BVType m)) -> Expr (BVType n)
   --
   -- A variable.
   -- Not doing anything fancy with names for now; can use 'unbound'
@@ -149,10 +135,6 @@ instance TestEquality Expr where
 instance MapF.EqF Expr where
   LitExpr nr1 i1 `eqF` LitExpr nr2 i2 = i1 == i2
   AppExpr app1 `eqF` AppExpr app2 = app1 == app2
-  TruncExpr nr1 e1 `eqF` TruncExpr nr2 e2 
-    | Just Refl <- e1 `testEquality` e2 = e1 `MapF.eqF` e2
-  SExtExpr nr1 e1 `eqF` SExtExpr nr2 e2
-    | Just Refl <- e1 `testEquality` e2 = e1 `MapF.eqF` e2
   VarExpr v1 `eqF` VarExpr v2 = v1 == v2
   _ `eqF` _ = False
 
@@ -175,33 +157,6 @@ instance MapF.OrdF Expr where
   AppExpr app1 `compareF` AppExpr app2 = app1 `compareF` app2
   AppExpr _ `compareF` _ = GTF
   _ `compareF` AppExpr _ = LTF
-  TruncExpr nr1 e1 `compareF` expr
-    | case expr of 
-        TruncExpr _ _ -> True
-        _ -> False =
-      case expr of
-        TruncExpr nr2 _ ->
-          case nr1 `compareF` nr2 of
-              LTF -> LTF
-              EQF -> case expr of 
-                TruncExpr _ e2 -> 
-                  case e1 `compareF` e2 of
-                     LTF -> LTF
-                     EQF -> EQF
-                     GTF -> GTF
-              GTF -> GTF
-  TruncExpr _  _ `compareF` _ = GTF
-  _ `compareF` TruncExpr _ _ = LTF
-  SExtExpr nr1 e1 `compareF` SExtExpr nr2 e2 
-    | Just Refl <- testEquality nr1 nr2 = case e1 `compareF` e2 of
-        LTF -> LTF
-        EQF -> EQF
-        GTF -> GTF
-    | LTF <- nr1 `compareF` nr2 = LTF
-    | GTF <- nr1 `compareF` nr2 = GTF
-    | EQF <- nr1 `compareF` nr2 = EQF
-  SExtExpr _  _ `compareF` _ = GTF
-  _ `compareF` SExtExpr _ _ = LTF
   VarExpr v1 `compareF` VarExpr v2 = v1 `compareF` v2
 
 instance Ord (Expr tp) where
@@ -217,8 +172,6 @@ app = AppExpr
 exprType :: Expr tp -> S.TypeRepr tp
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
-exprType (TruncExpr r _) = S.BVTypeRepr r
-exprType (SExtExpr r _) = S.BVTypeRepr r
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.
@@ -245,17 +198,24 @@ instance S.IsValue Expr where
   bvSplit :: forall n. (1 <= n)
           => Expr (BVType (n + n))
           -> (Expr (BVType n), Expr (BVType n))
-  bvSplit v = withAddPrefixLeq hn hn ( app (R.UpperHalf hn v)
-                                     , TruncExpr        hn v)
+  bvSplit v = withLeqProof (leqAdd2 (leqRefl hn) (LeqProof :: LeqProof 1 n)) 
+                            ( app (R.UpperHalf hn v)
+                            , app (R.Trunc     v hn))
     where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
-  bvTrunc w x = TruncExpr w x
+  bvTrunc (w :: NatRepr m) (x :: Expr (BVType n)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
+    case testStrictLeq w (exprWidth x) of
+      Left LeqProof -> app $ R.Trunc x w
+      Right r -> nonLoopingCoerce' r x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
-  sext w x = SExtExpr w x
+  sext (w :: NatRepr n) (x :: Expr (BVType m)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
+    case testStrictLeq (exprWidth x) w of
+      Left LeqProof -> app $ R.SExt x w
+      Right r -> nonLoopingCoerce r x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
   reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x
@@ -281,33 +241,11 @@ instance S.IsValue Expr where
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
 
--- ??? Why do the 'App' constructors take a 'NatRepr' argument? It can
--- always be reconstructed by the user using 'bv_width' after
--- unpacking, no?
+nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
+nonLoopingCoerce Refl x = x
 
--- ??? Why do 'Trunc' and 'bvTrunc' have slightly different constraints?
--- 'Trunc   :: (1 <= n, n+1 <= m) => ...'
--- 'bvTrunc :: (1 <= n, n   <= m) => ...'
---
--- Answer: because 'Trunc' is only used for *strict* truncations. The
--- 'testStrictLeq' function in
--- reopt.git/deps/parameterized-utils/src/Data/Parameterized/NatRepr.hs
--- is used to turn a proof of 'm <= n' into a proof of 'm < n \/ m =
--- n' and 'Trunc' is only used in cases where 'm < n', i.e. 'm+1 <=
--- n'.
-
--- ??? Why does 'bvTrunc' take a 'NatRepr' argument?
---
--- Answer: because it specifies the return type. Same with 'sext' and
--- 'uext'.
-
--- ??? Why does 'Trunc' take it's 'NatRepr' argument second? (Nearly?)
--- all the other 'NatRepr' args come first in 'App' constructors.
-
--- TODO: rename for consistency:
---
--- - complement -> bvComplement
--- - Trunc -> BVTrunc
+nonLoopingCoerce' :: (x :~: y) -> v (BVType y) -> v (BVType x)
+nonLoopingCoerce' Refl y = y
 
 ------------------------------------------------------------------------
 -- Statements.
@@ -340,16 +278,12 @@ data Stmt where
   MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
   Primitive :: S.Primitive -> Stmt
   GetSegmentBase :: Variable (BVType 64) -> S.Segment -> Stmt
-  BVDiv :: (1 <= n)
-        => (Variable (BVType n), Variable (BVType n))
-        -> Expr (BVType (n+n))
-        -> Expr (BVType n)
-        -> Stmt
-  BVSignedDiv :: (1 <= n)
-              => (Variable (BVType n), Variable (BVType n))
-              -> Expr (BVType (n+n))
-              -> Expr (BVType n)
-              -> Stmt
+  BVQuot, BVRem, BVSignedQuot, BVSignedRem ::
+       (1 <= n)
+    => Variable (BVType n)
+    -> Expr (BVType n)
+    -> Expr (BVType n)
+    -> Stmt
   Exception :: Expr BoolType
             -> Expr BoolType
             -> S.ExceptionClass
@@ -374,10 +308,15 @@ instance Eq Stmt where
     | Just Refl <- testEquality e2 e2' = e1 == e1' && e2 == e2' && e3 == e3'
   Primitive p1 == Primitive p2 = p1 == p2
   GetSegmentBase v s == GetSegmentBase v' s' = v == v' && s == s'
-  BVDiv (v1, v2) e1 e2 == BVDiv (v1', v2') e1' e2'
-    | Just Refl <- testEquality e2 e2' = v1 == v1' && v2 ==v2' && e1 == e1' && e2 == e2' 
-  BVSignedDiv (v1, v2) e1 e2 == BVSignedDiv (v1', v2') e1' e2' 
-    | Just Refl <- testEquality e2 e2' = v1 == v1' && v2 ==v2' && e1 == e1' &&
+  BVQuot v1 e1 e2 == BVQuot v1' e1' e2'
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2' 
+  BVRem v1 e1 e2 == BVRem v1' e1' e2'
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2' 
+  BVSignedQuot v1 e1 e2 == BVSignedQuot v1' e1' e2' 
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' &&
+                                         e2 == e2'
+  BVSignedRem v1 e1 e2 == BVSignedRem v1' e1' e2' 
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' &&
                                          e2 == e2'
   Exception e1 e2 ec == Exception e1' e2' ec' = e1 == e1' && e2 == e2' && ec == ec'
   X87Push e == X87Push e' = e == e'
@@ -434,14 +373,22 @@ instance Ord Stmt where
     compare' v v' $ compare s s'
   GetSegmentBase{} `compare` _ = GT
   _ `compare` GetSegmentBase{} = LT
-  BVDiv (v1, v2) e1 e2 `compare` BVDiv (v1', v2') e1' e2' =
-    compareF' v1 v1' $ compareF' v2 v2' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVDiv{} `compare` _ = GT
-  _ `compare` BVDiv{} = LT
-  BVSignedDiv (v1, v2) e1 e2 `compare` BVSignedDiv (v1', v2') e1' e2' =
-    compareF' v1 v1' $ compareF' v2 v2' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVSignedDiv{} `compare` _ = GT
-  _ `compare` BVSignedDiv{} = LT
+  BVQuot v1 e1 e2 `compare` BVQuot v1' e1' e2' =
+    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVQuot{} `compare` _ = GT
+  _ `compare` BVQuot{} = LT
+  BVRem v1 e1 e2 `compare` BVRem v1' e1' e2' =
+    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVRem{} `compare` _ = GT
+  _ `compare` BVRem{} = LT
+  BVSignedQuot v1 e1 e2 `compare` BVSignedQuot v1' e1' e2' =
+    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVSignedQuot{} `compare` _ = GT
+  _ `compare` BVSignedQuot{} = LT
+  BVSignedRem v1 e1 e2 `compare` BVSignedRem v1' e1' e2' =
+    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
+  BVSignedRem{} `compare` _ = GT
+  _ `compare` BVSignedRem{} = LT
   Exception e1 e2 ec `compare` Exception e1' e2' ec' = 
     compareF' e1 e1' $ compareF' e2 e2' $ compare ec ec'
   Exception{} `compare` _ = GT
@@ -476,12 +423,18 @@ fresh basename = do
   put (x + 1)
   return $ basename ++ show x
 
-
--- FIXME: Move
-addIsLeqLeft1' :: forall f g n m. LeqProof (n + n) m ->
-                  f (BVType n) -> g m
-                  -> LeqProof n m
-addIsLeqLeft1' prf _v _v' = addIsLeqLeft1 prf
+-- | Helper for 'S.Semantics' instance below.
+bvBinOp ::
+     (Variable ('BVType n) -> Expr ('BVType n) -> Expr ('BVType n) -> Stmt)
+  -> String
+  -> Expr ('BVType n)
+  -> Expr ('BVType n)
+  -> Semantics (Expr ('BVType n))
+bvBinOp op varName v1 v2 = do
+  varName' <- fresh varName
+  let var = Variable (exprType v2) varName'
+  tell [op var v1 v2]
+  return (VarExpr var)
 
 -- | Interpret 'S.Semantics' operations into 'Stmt's.
 --
@@ -560,25 +513,10 @@ instance S.Semantics Semantics where
     tell [GetSegmentBase var seg]
     return $ VarExpr var
 
-  bvDiv v1 v2 = do
-    nameQuot <- fresh "divQuot"
-    nameRem <- fresh "divRem"
-    let varQuot = Variable r nameQuot
-    let varRem = Variable r nameRem
-    tell [BVDiv (varQuot, varRem) v1 v2]
-    return (VarExpr varQuot, VarExpr varRem)
-    where
-      r = exprType v2
-
-  bvSignedDiv v1 v2 = do
-    nameQuot <- fresh "sdivQuot"
-    nameRem <- fresh "sdivRem"
-    let varQuot = Variable r nameQuot
-    let varRem = Variable r nameRem
-    tell [BVSignedDiv (varQuot, varRem) v1 v2]
-    return (VarExpr varQuot, VarExpr varRem)
-    where
-      r = exprType v2
+  bvQuot = bvBinOp BVQuot "quot"
+  bvRem = bvBinOp BVRem "rem"
+  bvSignedQuot = bvBinOp BVSignedQuot "sQuot"
+  bvSignedRem = bvBinOp BVSignedRem "sRem"
 
   exception v1 v2 c = tell [Exception v1 v2 c]
 
@@ -592,9 +530,7 @@ instance S.Semantics Semantics where
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
   LitExpr n i -> parens $ R.ppLit n i
-  AppExpr app -> R.ppApp ppExpr app
-  TruncExpr n e -> R.sexpr "trunc" [ ppExpr e, R.ppNat n ]
-  SExtExpr n e -> R.sexpr "sext" [ ppExpr e, R.ppNat n ]
+  AppExpr app' -> R.ppApp ppExpr app'
   VarExpr (Variable _ x) -> text x
 
 -- | Pretty print 'S.Location'.
@@ -631,10 +567,10 @@ ppStmt s = case s of
   -- Named.
   MakeUndefined (Variable _ x) _ -> ppNamedStmt [x] $ text "make_undefined"
   Get (Variable _ x) l -> ppNamedStmt [x] $ R.sexpr "get" [ ppMLocation l ]
-  BVDiv (Variable _ x, Variable _ y) v1 v2 ->
-    ppNamedStmt [x,y] $ R.sexpr "bv_div" [ ppExpr v1, ppExpr v2 ]
-  BVSignedDiv (Variable _ x, Variable _ y) v1 v2 ->
-    ppNamedStmt [x,y] $ R.sexpr "bv_signed_div" [ ppExpr v1, ppExpr v2 ]
+  BVQuot x v1 v2 -> ppBinOp "bv_quot" x v1 v2
+  BVRem x v1 v2 -> ppBinOp "bv_rem" x v1 v2
+  BVSignedQuot x v1 v2 -> ppBinOp "bv_signed_quot" x v1 v2
+  BVSignedRem x v1 v2 -> ppBinOp "bv_signed_rem" x v1 v2
   MemCmp (Variable _ x) n v1 v2 v3 v4 ->
     ppNamedStmt [x] $
       R.sexpr "memcmp" [ pretty n, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
@@ -663,6 +599,13 @@ ppStmt s = case s of
       text x <+> text "<-" <+> d
     ppNamedStmt names d =
       tupled (map text names) <+> text "<-" <+> d
+    ppBinOp :: String
+      -> Variable ('BVType n)
+      -> Expr ('BVType n)
+      -> Expr ('BVType n)
+      -> Doc
+    ppBinOp op (Variable _ x) v1 v2 =
+      ppNamedStmt [x] $ R.sexpr op [ ppExpr v1, ppExpr v2 ]
 
 instance Pretty Stmt where
   pretty = ppStmt

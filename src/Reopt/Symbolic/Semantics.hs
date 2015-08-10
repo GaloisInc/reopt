@@ -374,28 +374,6 @@ translateExpr (VarExpr var) = do
     Just atom -> return . GExpr $ G.AtomExpr atom
     Nothing   -> error $ "translateExpr bug: unbound variable " ++ name ++ " in expr"
 --
--- TruncExpr and SExtExpr differ from App's Trunc & SExt only in the types.
--- These allow for trivial truncations & extensions, where App does not.
--- Crucible does not support trivial truncations, so we just drop the trivial
--- truncation by returning the contained Expr.    
-translateExpr (TruncExpr nr e) =
-  ghcBugWorkAround width $ do
-    ge@(GExpr e') <- translateExpr e
-    case testStrictLeq nr width of
-     Right prf -> return (nonLoopingCoerce' prf ge)
-     Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVTrunc nr width e')
-  where
-    width = S.bv_width e
--- 
-translateExpr (SExtExpr nr e) = 
-  ghcBugWorkAround nr $ do
-    ge@(GExpr e') <- translateExpr e
-    case testStrictLeq width nr of
-      Right prf -> return (nonLoopingCoerce prf ge)
-      Left prf -> return . GExpr . G.App $ withLeqProof prf (C.BVSext nr width e')
-  where
-    width = S.bv_width e
---
 translateExpr (AppExpr a) = translateApp <$> R.traverseApp translateExpr a
 --
 translateExpr expr = error $ unwords [ "translateExpr: unimplemented Expr case:"

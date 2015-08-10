@@ -923,27 +923,49 @@ class ( Applicative m
   -- | Return the base address of the given segment.
   getSegmentBase :: Segment -> m (Value m (BVType 64))
 
-  -- | Performs an unsigned division.  It rounds the result to zero,
-  -- and returns both the quotient and remainder.
-  -- This throws an #de exception if the denominator is zero, or if the
-  -- quotient is too large to fit into the result.
-  bvDiv :: (1 <= n)
-        => Value m (BVType (n+n))
-        -> Value m (BVType n)
-        -> m ( Value m (BVType n)
-             , Value m (BVType n)
-             )
+  -- | Unsigned division.
+  --
+  -- Rounds the result to zero.  Undefined if the denominator is zero.
+  --
+  -- This and the other BV division operations ('bvRem',
+  -- 'bvSignedQuot', 'bvSignedRem') are defined in 'Semantics', and
+  -- not in 'IsValue', because they are inherently partial operations.
+  bvQuot :: (1 <= n)
+         => Value m (BVType n)
+         -> Value m (BVType n)
+         -> m (Value m (BVType n))
 
-  -- | Signed divison.  It rounds the result to zero, and returns both the
-  -- quotient and remainder.
-  -- This throws an #de exception if the denominator is zero, or if the
-  -- (signed) quotient is too large to fit into the result.
-  bvSignedDiv :: (1 <= n)
-              => Value m (BVType (n+n))
+  -- | Unsigned remainder.
+  --
+  -- Rounds the result to zero.  Undefined if the denominator is zero.
+  bvRem :: (1 <= n)
+        => Value m (BVType n)
+        -> Value m (BVType n)
+        -> m (Value m (BVType n))
+
+  -- | Signed division.
+  --
+  -- Rounds the result to zero.  Undefined if the denominator is zero,
+  -- or if the result overflows (dividing the largest negative number
+  -- by @-1@ causes this overflow).
+  --
+  -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
+  -- page 3-393) says that results should be rounded towards
+  -- zero. These operations are called @quot@ and @rem@ in Haskell,
+  -- whereas @div@ and @mod@ in Haskell round towards negative
+  -- infinity.
+  bvSignedQuot :: (1 <= n)
+               => Value m (BVType n)
+               -> Value m (BVType n)
+               -> m (Value m (BVType n))
+
+  -- | Signed remainder.
+  --
+  -- Rounds the result to zero.  Undefined if the denominator is zero.
+  bvSignedRem :: (1 <= n)
+              => Value m (BVType n)
               -> Value m (BVType n)
-              -> m ( Value m (BVType n)
-                   , Value m (BVType n)
-                   )
+              -> m (Value m (BVType n))
 
   -- | raises an exception if the predicate is true and the mask is false
   exception :: Value m BoolType    -- mask
