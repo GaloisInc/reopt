@@ -92,6 +92,7 @@ data Args = Args { _reoptAction  :: !Action
                  , _addr1        :: !Word64
                  , _addr2        :: !Word64
                  , _loadStyle    :: !LoadStyle
+                 , _ripFile      :: !FilePath
                  }
 
 -- | How to load Elf file.
@@ -109,13 +110,17 @@ reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 programPaths :: Simple Lens Args [FilePath]
 programPaths = lens _programPaths (\s v -> s { _programPaths = v })
 
--- | Path to load
+-- | Start address in first file
 addr1 :: Simple Lens Args Word64
 addr1 = lens _addr1 (\s v -> s { _addr1 = v })
 
--- | Path to load
+-- | Start address in second file
 addr2 :: Simple Lens Args Word64
 addr2 = lens _addr2 (\s v -> s { _addr2 = v })
+
+-- | file to load rip mapping from
+ripFile :: Simple Lens Args FilePath
+ripFile = lens _ripFile (\s v -> s { _ripFile = v })
 
 -- | Whether to load file by segment or sections.
 loadStyle :: Simple Lens Args LoadStyle
@@ -128,6 +133,7 @@ defaultArgs = Args { _reoptAction = ShowSingleBlock
                    , _addr1 = 0
                    , _addr2 = 0
                    , _loadStyle = LoadBySection
+                   , _ripFile = ""
                    }
 
 ------------------------------------------------------------------------
@@ -179,7 +185,13 @@ addr2Flag = flagReq [ "addr2" ] upd "Hex String" help
   where upd s old  = case readHex s of
           (addr, _) : _ -> Right $ (addr2 .~ addr) old
           _ -> Left "Could not parse addr2 - should be a bare hex value, like deadbeef"
+        help = "Address to start from in the second executable."
+
+ripFlag :: Flag Args
+ripFlag = flagReq [ "rip" ] upd "File Path" help
+  where upd s old  = Right $ (ripFile .~ s) old
         help = "Address to start from in the first executable."
+
 
 arguments :: Mode Args
 arguments = mode "radss_compare" defaultArgs help filenameArg flags
@@ -193,6 +205,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , functionCFGFlag
                 , addr1Flag
                 , addr2Flag
+                , ripFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -267,8 +280,8 @@ extractFirstBlock mem start =
                                 ++ showHex err ""
     Right (Right (nexts, ret, stmts), _) -> return (Block stmts Ret)
 
-simulate :: Block -> Block -> IO ()
-simulate block1 block2 = do
+simulate :: Block -> Block -> Map Word64 [Word64] -> IO ()
+simulate block1 block2 ripRel= do
   out <- openFile "/tmp/sat_trans" WriteMode
   halloc <- liftST newHandleAllocator
   C.AnyCFG cfg1 <- liftST $ translateBlock halloc block1
@@ -293,7 +306,7 @@ simulate block1 block2 = do
         rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
           callCFG cfg1 initialRegMap
         -- Run cfg2
-        rr2 <- MSS.run ctx defaultErrorHandler machineState $ do
+        rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
           callCFG cfg2 initialRegMap
         -- Compare
         case (rr1,rr2) of
@@ -311,8 +324,8 @@ simulate block1 block2 = do
                 true = I.truePred sym
             gprsEq  <- foldM (compareWordMapIdx sym n4 n64 gprPair) true [0..15] -- [0..15]
             flagsEq <- foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
-            pcsEq   <- asPosNat (I.bvWidth (unRV pc1)) (I.bvEq sym (unRV pc1) (unRV pc2))
-            pred    <- I.andPred sym gprsEq =<< I.andPred sym flagsEq pcsEq
+            pcsRel <- mkRipRelation ripRel sym pc1 pc2
+            pred    <- I.andPred sym gprsEq =<< I.andPred sym flagsEq pcsRel
             -- let pred = flagsEq
             pred'   <- I.notPred sym pred
             solver_adapter_write_smt2 cvc4Adapter out pred'
@@ -345,6 +358,30 @@ simulate block1 block2 = do
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
 
+mkRipRelation :: I.IsExprBuilder sym 
+              => Map Word64 [Word64]
+              -> sym
+              -> RegValue' sym (C.BVType 64) 
+              -> RegValue' sym (C.BVType 64) 
+              -> IO (I.Pred sym)
+mkRipRelation map sym reg1 reg2 = do
+  in1 <- foldM mkInCase (I.falsePred sym) (M.keys map)
+  match <- M.foldlWithKey mkMatchCase (return $ I.truePred sym) map
+  return match
+  where
+  mkInCase rest entry = do
+    lit <- I.bvLit sym (knownNat :: NatRepr 64) (fromIntegral entry)
+    myEq <- I.bvEq sym lit $ unRV reg1
+    I.orPred sym rest myEq
+  mkMatchCase rest key vals = do
+    restPred <- rest
+    keyLit <- I.bvLit sym (knownNat :: NatRepr 64) (fromIntegral key)
+    keyEq <- I.bvEq sym keyLit $ unRV reg1
+    foldM (\restPred' val -> do
+      valLit <- I.bvLit sym (knownNat :: NatRepr 64) (fromIntegral val)
+      valEq <- I.bvEq sym valLit $ unRV reg2
+      keyValImp <- I.impliesPred sym keyEq valEq
+      I.andPred sym restPred' keyValImp) restPred vals
 
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start =
@@ -531,10 +568,10 @@ mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory 
 mkElfMem LoadBySection e = memoryForElfSections e
 mkElfMem LoadBySegment e = memoryForElfSegments e
 
-getMemAndEntry args path = do
+getMemAndEntry args path addrL = do
   e <- readStaticElf path
   mem <- mkElfMem (args^.loadStyle) e
-  let a = case args^.addr1 of
+  let a = case args^.addrL of
              0 -> elfEntry e
              a' -> a'
   return (mem, a)
@@ -552,9 +589,10 @@ main = do
       showSingleBlock mem (elfEntry e)
     SymExec -> case args^.programPaths of
       [path1, path2] -> do
-        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1
-        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2
-        simulate block1 block2
+        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
+        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
+        ripMap <- fmap read $ readFile $ args^.ripFile 
+        simulate block1 block2 ripMap
       _      -> fail "usage: filename1 filename2"
     FindBlocks -> do
       e <- case args^.programPaths of
