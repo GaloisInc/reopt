@@ -394,6 +394,9 @@ translateApp a = case a of
   R.BVEq e1 e2 -> boolBinop e1 e2 C.BVEq
   R.BVSignedLt e1 e2 -> boolBinop e1 e2 C.BVSlt
 
+  R.Trunc x w
+    | Cr.BVRepr nr <- G.exprType (unGExpr x) -> unop nr x (C.BVTrunc w)
+
   R.UExt (GExpr e1) nr ->
     GExpr . G.App $ C.BVZext nr 
       (case e1 of 
