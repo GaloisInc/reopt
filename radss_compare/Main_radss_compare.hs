@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
@@ -93,6 +94,7 @@ data Args = Args { _reoptAction  :: !Action
                  , _addr2        :: !Word64
                  , _loadStyle    :: !LoadStyle
                  , _ripFile      :: !FilePath
+                 , _gprsFile      :: !FilePath
                  }
 
 -- | How to load Elf file.
@@ -122,6 +124,10 @@ addr2 = lens _addr2 (\s v -> s { _addr2 = v })
 ripFile :: Simple Lens Args FilePath
 ripFile = lens _ripFile (\s v -> s { _ripFile = v })
 
+-- | file to load gpr mapping from
+gprsFile :: Simple Lens Args FilePath
+gprsFile = lens _gprsFile (\s v -> s { _gprsFile = v })
+
 -- | Whether to load file by segment or sections.
 loadStyle :: Simple Lens Args LoadStyle
 loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
@@ -134,6 +140,7 @@ defaultArgs = Args { _reoptAction = ShowSingleBlock
                    , _addr2 = 0
                    , _loadStyle = LoadBySection
                    , _ripFile = ""
+                   , _gprsFile = ""
                    }
 
 ------------------------------------------------------------------------
@@ -192,6 +199,11 @@ ripFlag = flagReq [ "rip" ] upd "File Path" help
   where upd s old  = Right $ (ripFile .~ s) old
         help = "Address to start from in the first executable."
 
+gprsFlag :: Flag Args
+gprsFlag = flagReq [ "gprs" ] upd "File Path" help
+  where upd s old  = Right $ (gprsFile .~ s) old
+        help = "Address to start from in the first executable."
+
 
 arguments :: Mode Args
 arguments = mode "radss_compare" defaultArgs help filenameArg flags
@@ -206,6 +218,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , addr1Flag
                 , addr2Flag
                 , ripFlag
+                , gprsFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -280,8 +293,8 @@ extractFirstBlock mem start =
                                 ++ showHex err ""
     Right (Right (nexts, ret, stmts), _) -> return (Block stmts Ret)
 
-simulate :: Block -> Block -> Map Word64 [Word64] -> IO ()
-simulate block1 block2 ripRel= do
+simulate :: Block -> Block -> Map Word64 [Word64] -> Map Integer Integer -> IO ()
+simulate block1 block2 ripRel gprRel = do
   out <- openFile "/tmp/sat_trans" WriteMode
   halloc <- liftST newHandleAllocator
   C.AnyCFG cfg1 <- liftST $ translateBlock halloc block1
@@ -295,26 +308,26 @@ simulate block1 block2 ripRel= do
     (Just Refl, Just Refl, Just Refl, Just Refl) ->
       withSimpleBackend' halloc $ \ctx -> do
         let sym = ctx^.ctxSymInterface
-        gprs   <- I.emptyWordMap sym n4
-        gprs'  <- foldM (initWordMap sym n4 n64) gprs [0..15]
+        (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
         flags  <- I.emptyWordMap sym n5
         flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
         pc     <- I.freshConstant sym (I.BVVarType n64)
-        let struct = Ctx.empty %> (RV gprs') %> (RV flags') %> (RV pc)
-            initialRegMap = assignReg C.typeRepr struct emptyRegMap
+        let struct1 = Ctx.empty %> (RV initGprs1) %> (RV flags') %> (RV pc)
+            struct2 = Ctx.empty %> (RV initGprs2) %> (RV flags') %> (RV pc)
+            initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
+            initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
         -- Run cfg1
         rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
-          callCFG cfg1 initialRegMap
+          callCFG cfg1 initialRegMap1
         -- Run cfg2
         rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
-          callCFG cfg2 initialRegMap
+          callCFG cfg2 initialRegMap2
         -- Compare
         case (rr1,rr2) of
           (FinishedExecution _ (TotalRes xs1),
            FinishedExecution _ (TotalRes xs2)) -> do
-            let gprs1 = xs1^._1
-                gprs2 = xs2^._1
-                gprPair = (unRV gprs1, unRV gprs2)
+            let gprs1 = unRV $ xs1^._1
+                gprs2 = unRV $ xs2^._1
                 flags1 = xs1^._2
                 flags2 = xs2^._2
                 flagPair = (unRV flags1, unRV flags2)
@@ -322,13 +335,14 @@ simulate block1 block2 ripRel= do
                 pc2 = xs2^._3
                 -- flagIdxs = [0,2,4,6,7,8,9,10,11]
                 true = I.truePred sym
-            gprsEq  <- foldM (compareWordMapIdx sym n4 n64 gprPair) true [0..15] -- [0..15]
-            flagsEq <- foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
-            pcsRel <- mkRipRelation ripRel sym pc1 pc2
-            pred    <- I.andPred sym gprsEq =<< I.andPred sym flagsEq pcsRel
+            gprsUnRel  <- I.notPred sym =<< mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
+            flagsUnEq <- I.notPred sym =<< foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
+            pcsUnRel <- I.notPred sym =<< mkRipRelation ripRel sym pc1 pc2
+            pred    <- I.orPred sym gprsUnRel =<< I.orPred sym flagsUnEq pcsUnRel
             -- let pred = flagsEq
-            pred'   <- I.notPred sym pred
-            solver_adapter_write_smt2 cvc4Adapter out pred'
+            -- satisfied if there is some assignment of registers such that
+            -- relations at the end don't hold...
+            solver_adapter_write_smt2 cvc4Adapter out pred
             putStrLn $ "Wrote to file " ++ show out
             return ()
           _ -> fail "Execution not finished"
@@ -382,6 +396,51 @@ mkRipRelation map sym reg1 reg2 = do
       valEq <- I.bvEq sym valLit $ unRV reg2
       keyValImp <- I.impliesPred sym keyEq valEq
       I.andPred sym restPred' keyValImp) restPred vals
+
+mkInitialGPRs :: (I.IsExprBuilder sym, I.IsSymInterface sym, 1 <= nKey, 1 <= nVal)
+              => Map Integer Integer
+              -> sym
+              -> NatRepr nKey
+              -> NatRepr nVal
+              -> [Integer]
+              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)))
+mkInitialGPRs map sym nrKey nrVal range = do 
+  regs1Empty <- I.emptyWordMap sym nrKey
+  (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
+    idx <- I.bvLit sym nrKey entry
+    val <- I.freshConstant sym (I.BVVarType nrVal)
+    regs' <- I.insertWordMap sym nrKey idx val regs
+    return (regs', case M.lookup entry map of 
+                    Just inv -> M.insert inv val invMap
+                    Nothing -> invMap)) (regs1Empty, M.empty) range
+  regs2Empty <- I.emptyWordMap sym nrKey
+  regs2 <- foldM (\regs entry -> do
+    idx <- I.bvLit sym nrKey entry
+    val <- case M.lookup entry invMap of
+            Just val -> return val
+            Nothing -> I.freshConstant sym (I.BVVarType nrVal)
+    I.insertWordMap sym nrKey idx val regs) regs2Empty range
+  return (regs1, regs2)
+
+mkGPRsCheck :: (I.IsExprBuilder sym, 1 <= nKey, 1 <= nVal)
+            => Map Integer Integer
+            -> sym
+            -> NatRepr nKey
+            -> NatRepr nVal
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
+            -> IO (I.Pred sym)
+mkGPRsCheck map sym nrKey nrVal regs1 regs2 =
+  M.foldlWithKey (\pred idx1 idx2 -> do
+    pred' <- pred
+    idx1' <- I.bvLit sym nrKey idx1
+    idx2' <- I.bvLit sym nrKey idx2
+    val1Part <- I.lookupWordMap sym nrKey idx1' regs1
+    val2Part <- I.lookupWordMap sym nrKey idx2' regs2
+    val1 <- readPartExpr sym val1Part $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
+    val2 <- readPartExpr sym val2Part $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
+    I.andPred sym pred' =<< I.bvEq sym val1 val2
+    ) (return $ I.truePred sym) map
 
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start =
@@ -592,7 +651,8 @@ main = do
         block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
         block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
         ripMap <- fmap read $ readFile $ args^.ripFile 
-        simulate block1 block2 ripMap
+        gprMap <- fmap read $ readFile $ args^.gprsFile
+        simulate block1 block2 ripMap gprMap
       _      -> fail "usage: filename1 filename2"
     FindBlocks -> do
       e <- case args^.programPaths of
