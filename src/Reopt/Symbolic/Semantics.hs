@@ -404,14 +404,6 @@ translateApp a = case a of
         G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
         _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
 
-  R.Trunc (GExpr e1) nr ->
-    GExpr . G.App $ C.BVTrunc nr
-      (case e1 of
-        G.App a'' | C.BVRepr n <- C.appType a'' -> n
-        G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n
-        _ -> error $ "Type of expression" ++ show e1 ++ "being translated from Reified to Crucible was not BVType") e1
-
-
   -- TODO: Actually implement this
   R.EvenParity e ->
     GExpr . G.App $ C.BVLit n1 0
