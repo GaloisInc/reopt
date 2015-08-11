@@ -109,8 +109,8 @@ import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
-import Flexdis86.OpTable (SizeConstraint(..))
-import Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
+import           Flexdis86.OpTable (SizeConstraint(..))
+import           Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
 
 
 -- This is an identity function intended to be a workaround for GHC bug #10507
