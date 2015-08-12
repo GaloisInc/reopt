@@ -111,6 +111,8 @@ executable reopt_test
   hs-source-dirs: reopt_test
   main-is: Main_reopt.hs
 
+  other-modules: SignalUtils
+
   if flag(enable-hpc)
     ghc-options: -fhpc
 

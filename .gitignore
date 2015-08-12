@@ -1,6 +1,7 @@
 dist
 deps
-sandbox
 cabal.sandbox.config
+.cabal-sandbox
 tmp
 .stack-work
+TAGS
