@@ -64,6 +64,8 @@ import           Reopt.Object.Loader
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
 
+import           SignalUtils (statusToString)
+
 ------------------------------------------------------------------------
 -- Args
 
@@ -549,40 +551,50 @@ runInParallel updater = do
   (execSuccess, ii) <-  stepConcrete
   pid <-lift $ lift $ asks cpid
   (spid, status) <- case (iiLockPrefix ii)
-    of RepPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
-       RepZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
-       RepNZPrefix -> lift $ lift $ liftIO $ step_to_next_inst pid
-       NoLockPrefix ->lift $ lift $ liftIO $ do ptrace_singlestep pid Nothing
-                                                waitForRes pid
-       LockPrefix -> lift $ lift $ liftIO $ do ptrace_singlestep pid Nothing
-                                               waitForRes pid
+    of RepPrefix -> step_to_next_inst pid
+       RepZPrefix -> step_to_next_inst pid
+       RepNZPrefix -> step_to_next_inst pid
+       NoLockPrefix -> single_step pid
+       LockPrefix -> single_step pid
   if spid == pid
     then case status of W.Exited _ -> return ()
                         W.Stopped 5 -> do updater (execSuccess, ii)
                                           runInParallel updater
-                        _ -> return ()
+                        _ -> do
+                          str <- liftIO' $ statusToString status
+                          tell ["Main_reopt.runInParallel: unexpected status: " ++ str]
+                          return ()
     else fail "Wrong pid from waitpid!"
   where
     -- TODO: insert 0xCC and continue to it
     step_to_next_inst pid = do
-      X86_64 regs <- ptrace_getregs pid
-      let addr = rip regs
-      ptrace_singlestep pid Nothing
+      addr <- liftIO' $ do
+        X86_64 regs <- ptrace_getregs pid
+        ptrace_singlestep pid Nothing
+        let addr = rip regs
+        return addr
       step_while_inst pid addr
     step_while_inst pid addr = do
-      (spid, status) <- liftIO $ waitForRes pid
+      (spid, status) <- liftIO' $ waitForRes pid
       if spid == pid
         then case status 
          of W.Exited _ -> return (spid, status)
             W.Stopped 5 -> do 
-              X86_64 regs <- ptrace_getregs pid
+              X86_64 regs <- liftIO' $ ptrace_getregs pid
               let addr' = rip regs
               if addr' == addr
-                then do ptrace_singlestep pid Nothing
+                then do liftIO' $ ptrace_singlestep pid Nothing
                         step_while_inst pid addr
                 else return (spid, status)
-            _ -> return (spid, status)
+            _ -> do
+              str <- liftIO' $ statusToString status
+              tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
+              return (spid, status)
         else fail "Wrong pid from waitpid!"
+    single_step pid = liftIO' $ do
+      ptrace_singlestep pid Nothing
+      waitForRes pid
+    liftIO' = lift . lift . liftIO
 
 -- | Test a single instruction.
 --
