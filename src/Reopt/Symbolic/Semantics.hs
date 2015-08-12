@@ -393,6 +393,17 @@ translateApp a = case a of
   R.BVComplement nr e -> unop nr e C.BVNot
   R.BVEq e1 e2 -> boolBinop e1 e2 C.BVEq
   R.BVSignedLt e1 e2 -> boolBinop e1 e2 C.BVSlt
+  R.BVUnsignedLt e1 e2 -> boolBinop e1 e2 C.BVUlt
+  R.Mux nr (GExpr b) (GExpr e1) (GExpr e2) ->
+      GExpr $ G.App $ asPosNat nr $ C.BVIte (G.App $ C.BVEq n1 (G.App $ C.BVLit n1 1) b) nr e1 e2
+
+  R.BVAnd nr e1 e2 -> binop nr e1 e2 C.BVAnd
+  R.BVOr nr e1 e2 -> binop nr e1 e2 C.BVOr
+  R.BVXor nr e1 e2 -> binop nr e1 e2 C.BVXor
+
+  R.BVShl nr e1 e2 -> binop nr e1 e2 C.BVShl
+  R.BVShr nr e1 e2 -> binop nr e1 e2 C.BVLshr
+  R.BVSar nr e1 e2 -> binop nr e1 e2 C.BVAshr
 
   R.Trunc x w
     | Cr.BVRepr nr <- G.exprType (unGExpr x) -> unop nr x (C.BVTrunc w)
