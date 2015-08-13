@@ -15,6 +15,7 @@ module Reopt.Concrete.MachineState
 import           Control.Lens
 import           Control.Monad.State
 import           Control.Monad.Reader
+import           Control.Monad.Trans.Except (ExceptT)
 import           Control.Monad.Writer.Strict
 import qualified Data.Map as M
 import           Data.Maybe (mapMaybe)
@@ -329,6 +330,15 @@ instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
     let mem = M.empty
     put (mem, regs)
 
+  getSegmentBase = lift . getSegmentBase
+
+instance MonadMachineState m => MonadMachineState (ExceptT e m) where
+  getMem = lift . getMem
+  setMem addr val = lift $ setMem addr val
+  getReg = lift . getReg
+  setReg reg val = lift $ setReg reg val
+  dumpRegs = lift dumpRegs
+  primitive = lift . primitive
   getSegmentBase = lift . getSegmentBase
 
 instance (MonadMachineState m) => MonadMachineState (StateT s m) where
