@@ -25,7 +25,7 @@ import           Data.Parameterized.NatRepr
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
-import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
+import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
 import           Reopt.Semantics.Monad (Primitive, Segment)
 import qualified Data.BitVector as BV
@@ -67,6 +67,13 @@ instance X.PrettyRegValue Value where
   ppValueEq (N.FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
   ppValueEq (N.X87ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
   ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
+
+------------------------------------------------------------------------
+-- Constants
+
+true, false :: Value BoolType
+true = Literal B.true
+false = Literal B.false
 
 ------------------------------------------------------------------------
 -- 'Value' combinators
