@@ -15,7 +15,7 @@ module Reopt.Concrete.MachineState
 import           Control.Lens
 import           Control.Monad.State
 import           Control.Monad.Reader
-import           Control.Monad.Trans.Except (ExceptT)
+import           Control.Monad.Except (ExceptT)
 import           Control.Monad.Writer.Strict
 import qualified Data.Map as M
 import           Data.Maybe (mapMaybe)
