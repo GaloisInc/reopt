@@ -287,7 +287,8 @@ simulate block1 block2 = do
         flags  <- I.emptyWordMap sym n5
         flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
         pc     <- I.freshConstant sym (I.BVVarType n64)
-        let struct = Ctx.empty %> (RV gprs') %> (RV flags') %> (RV pc)
+        heap   <- I.uninterpArray sym C.typeRepr C.typeRepr
+        let struct = Ctx.empty %> (RV heap) %> (RV gprs') %> (RV flags') %> (RV pc)
             initialRegMap = assignReg C.typeRepr struct emptyRegMap
         -- Run cfg1
         rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
@@ -299,14 +300,14 @@ simulate block1 block2 = do
         case (rr1,rr2) of
           (FinishedExecution _ (TotalRes xs1),
            FinishedExecution _ (TotalRes xs2)) -> do
-            let gprs1 = xs1^._1
-                gprs2 = xs2^._1
+            let gprs1 = xs1^._2
+                gprs2 = xs2^._2
                 gprPair = (unRV gprs1, unRV gprs2)
-                flags1 = xs1^._2
-                flags2 = xs2^._2
+                flags1 = xs1^._3
+                flags2 = xs2^._3
                 flagPair = (unRV flags1, unRV flags2)
-                pc1 = xs1^._3
-                pc2 = xs2^._3
+                pc1 = xs1^._4
+                pc2 = xs2^._4
                 -- flagIdxs = [0,2,4,6,7,8,9,10,11]
                 true = I.truePred sym
             gprsEq  <- foldM (compareWordMapIdx sym n4 n64 gprPair) true [0..15] -- [0..15]

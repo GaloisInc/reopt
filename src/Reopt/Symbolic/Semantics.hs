@@ -101,7 +101,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , TypeBits, floatInfoBits, n1, n4, n5
+                                     , TypeBits, floatInfoBits, n1, n4, n5, n8
                                      , n32, n64, type_width
                                      )
 import           Reopt.Reified.Semantics
@@ -160,15 +160,15 @@ instance Eq (Var tp) where
 type GPRs = C.WordMapType 4 (C.BVType 64)
 type Flags = C.WordMapType 5 (C.BVType 1)
 type PC = C.BVType 64
+type Heap = C.ArrayType (C.BVType 64) (C.BVType 8)
 
-type MachineCtx = EmptyCtx ::> GPRs ::> Flags ::> PC
+type MachineCtx = EmptyCtx ::> Heap ::> GPRs ::> Flags ::> PC
 type MachineState = C.StructType MachineCtx
 type MachineStateCtx = EmptyCtx ::> MachineState
 
 machineCtx = C.ctxRepr :: C.CtxRepr MachineCtx
 machineState = C.StructRepr machineCtx :: C.TypeRepr MachineState
 machineStateCtx = C.ctxRepr :: C.CtxRepr MachineStateCtx
-
 
 -- | Instruction pointer / program counter
 curIP :: Simple Lens (G.Expr s MachineState) (G.Expr s PC)
@@ -177,16 +177,7 @@ curIP = lens getter setter
     getter st     = G.App $ C.GetStruct st idx (C.BVRepr n64)
     setter st val = G.App $ C.SetStruct machineCtx st idx val
     idx :: Ctx.Index MachineCtx PC
-    idx = nextIndex (incSize $ incSize zeroSize)
-
--- | The 16 general-purpose registers.
-reg64Regs :: Simple Lens (G.Expr s MachineState) (G.Expr s GPRs)
-reg64Regs = lens getter setter
-  where
-    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n4 (C.BVRepr n64))
-    setter st val = G.App $ C.SetStruct machineCtx st idx val
-    idx :: Ctx.Index MachineCtx GPRs
-    idx = skip . skip $ nextIndex zeroSize
+    idx = nextIndex (incSize . incSize . incSize $ zeroSize)
 
 -- | 32 individual bits in the flags register.
 flagRegs :: Simple Lens (G.Expr s MachineState) (G.Expr s Flags)
@@ -195,7 +186,25 @@ flagRegs = lens getter setter
     getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n5 (C.BVRepr n1))
     setter st val = G.App $ C.SetStruct machineCtx st idx val
     idx :: Ctx.Index MachineCtx Flags
-    idx = skip . nextIndex $ incSize zeroSize
+    idx = skip $ nextIndex $ incSize . incSize $ zeroSize
+
+-- | The 16 general-purpose registers.
+reg64Regs :: Simple Lens (G.Expr s MachineState) (G.Expr s GPRs)
+reg64Regs = lens getter setter
+  where
+    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n4 (C.BVRepr n64))
+    setter st val = G.App $ C.SetStruct machineCtx st idx val
+    idx :: Ctx.Index MachineCtx GPRs
+    idx = skip . skip $ nextIndex $ incSize zeroSize
+
+
+heap :: Simple Lens (G.Expr s MachineState) (G.Expr s Heap)
+heap = lens getter setter
+  where
+    getter st     = G.App $ C.GetStruct st idx (Cr.typeRepr :: Cr.TypeRepr Heap) --  (C.ArrayRepr (C.BVRepr n64) (C.BVRepr n8))
+    setter st val = G.App $ C.SetStruct machineCtx st idx val
+    idx :: Ctx.Index MachineCtx Heap
+    idx = skip . skip . skip $ nextIndex $ zeroSize
 
 -- | Lens for WordMaps
 wordMap :: forall s w n
@@ -299,12 +308,22 @@ generateStmt _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
                                       ]
 
 
-translateLocGet :: G.Reg s MachineState -> S.Location (Expr (S.BVType 64))tp -> G.Generator s Env MachineState (G.Expr s (F tp))
+translateLocGet :: G.Reg s MachineState -> S.Location (Expr (S.BVType 64)) tp
+                -> G.Generator s Env MachineState (G.Expr s (F tp))
 translateLocGet ms (S.Register reg) = do
   regs <- G.readReg ms
   return $ regs ^. register reg
-translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = 
-  return $ G.App $ asPosNat nr (C.BVLit nr 0)
+translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
+  h <- (^. heap) <$> G.readReg ms
+  addr' <- fmap (runReader (translateExpr' addr)) get
+  asPosNat nr $ do
+     let v  = C.SymArrayLookup C.typeRepr C.typeRepr h addr'
+         v' = case testNatCases nr n8 of
+                NatCaseLT LeqProof -> (C.BVTrunc nr n8 (G.App v))
+                NatCaseEQ     -> v
+                NatCaseGT LeqProof -> (C.BVZext nr n8 (G.App v))
+     return $ G.App v'
+
 translateLocGet ms (S.TruncLoc l nr) = do
   e <- translateLocGet ms l
   return $ G.App $ C.BVTrunc nr (S.loc_width l) e
@@ -394,15 +413,14 @@ translateApp a = case a of
   R.BVEq e1 e2 -> boolBinop e1 e2 C.BVEq
   R.BVSignedLt e1 e2 -> boolBinop e1 e2 C.BVSlt
 
-  R.Trunc x w
-    | Cr.BVRepr nr <- G.exprType (unGExpr x) -> unop nr x (C.BVTrunc w)
+  R.Trunc e w
+    | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVTrunc w)
 
-  R.UExt (GExpr e1) nr ->
-    GExpr . G.App $ C.BVZext nr 
-      (case e1 of 
-        G.App a'' | C.BVRepr n <- C.appType a'' -> n 
-        G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
-        _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
+  R.UExt e w
+    | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVZext w)
+
+  R.SExt e w
+    | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVSext w)
 
   -- TODO: Actually implement this
   R.EvenParity e ->
