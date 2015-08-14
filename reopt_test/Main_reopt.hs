@@ -240,14 +240,12 @@ traceInner act pid = do
 -- sure ...
 mkTest :: Foldable t
   => Args
-  -> (CPid -> IO a)
   -> WriterT (t String) (ConcreteStateT PTraceMachineState) ()
   -> IO ()
-mkTest args preTest test = do
+mkTest args test = do
   child <- traceFile $ args^.programPath
   procMem <- openChildProcMem child
   procMaps <- openChildProcMaps child
-  preTest child
   (((), out), _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
     regs <- dumpRegs
     runConcreteStateT (runWriterT test) Map.empty regs
@@ -264,15 +262,12 @@ mkTest args preTest test = do
 ------------------------------------------------------------------------
 
 testApplication :: Args -> IO ()
-testApplication args = mkTest args preTest test
+testApplication args = mkTest args test
   where
-    preTest _child = return ()
     test = runInParallel checkAndClear
 
 testSingleInstruction :: Args -> IO ()
-testSingleInstruction args = mkTest args preTest instTest
-  where
-    preTest child = trace "stepping over exec" $ waitForRes child
+testSingleInstruction args = mkTest args instTest
 
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
