@@ -166,7 +166,7 @@ bvTrunc_impl _ _ w e0
   , Just Refl <- testEquality w n64 =
     e
 
-bvTrunc_impl p_1m p_mn w e0
+bvTrunc_impl p_1m _p_mn w e0
   | Just (ConcatV lw l _) <- asApp e0
   , Just p_w_lw <- testLeq w lw =
     bvTrunc_impl p_1m p_w_lw w l
@@ -882,6 +882,16 @@ mkBlockLabel a s0 = (lbl, s1)
   where (b_id, s1) = s0 & nextBlockID <<+~ 1
         lbl = GeneratedBlock a b_id
 
+-- | Helper function for 'S.Semantics' instance below.
+bvBinOp ::
+     (NatRepr n -> Value tp -> Value ('BVType n) -> App Value tp1)
+  -> Expr tp -> Expr ('BVType n) -> X86Generator (Expr tp1)
+bvBinOp op' x y = do
+  let w = exprWidth y
+  xv <- eval x
+  yv <- eval y
+  zv <- evalApp (op' w xv yv)
+  return $ ValueExpr zv
 
 instance S.Semantics X86Generator where
   make_undefined (S.BVTypeRepr n) =
@@ -969,21 +979,10 @@ instance S.Semantics X86Generator where
   getSegmentBase _seg =
     error "Reopt.Semantics.Implementation.getSegmentBase: unimplemented!"
 
-  bvDiv x y = do
-    let w = exprWidth y
-    xv <- eval x
-    yv <- eval y
-    qv <- evalApp (BVDiv w xv yv)
-    rv <- evalApp (BVMod w xv yv)
-    return $ ( ValueExpr qv, ValueExpr rv)
-
-  bvSignedDiv x y = do
-    let w = exprWidth y
-    xv <- eval x
-    yv <- eval y
-    qv <- evalApp (BVSignedDiv w xv yv)
-    rv <- evalApp (BVSignedMod w xv yv)
-    return $ ( ValueExpr qv, ValueExpr rv)
+  bvQuot       = bvBinOp BVQuot
+  bvSignedQuot = bvBinOp BVSignedQuot
+  bvRem        = bvBinOp BVRem
+  bvSignedRem  = bvBinOp BVSignedRem
 
   -- exception :: Value m BoolType    -- mask
   --            -> Value m BoolType -- predicate

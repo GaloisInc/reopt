@@ -285,99 +285,124 @@ exec_dec dst = do dst_val <- get dst
                   -- Set result value.
                   set_result_value dst (dst_val `bvSub` v1)
 
--- | div instruction
-exec_div :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
-exec_div v0
-    -- 8-bit division.
-  | Just Refl <- testEquality (bv_width v0) n8 = do
-    w <- get (reg_low16 N.rax)
-    go1 (reg_low8 N.rax) (reg_high8 N.rax) w v0
-    -- 16-bit division.
-  | Just Refl <- testEquality (bv_width v0) n16 =
-    go2 (reg_low16 N.rax) (reg_low16 N.rdx) v0
-    -- 32-bit division.
-  | Just Refl <- testEquality (bv_width v0) n32 =
-    go2 (reg_low32 N.rax) (reg_low32 N.rdx) v0
-    -- 64-bit division.
-  | Just Refl <- testEquality (bv_width v0) n64 =
-    go2 rax rdx v0
-    -- Unsupported division.
+  -- Steps:
+  --
+  -- - check that denom is non-zero and raise exception if it is.
+  --   - read about x86 exceptions to learn right behavior of
+  --     predicate and flags.
+  --
+  -- - extend denominator to (n + n) bits and do division and
+  --   remainder.
+  --
+  -- - raise exception if quotient can't be truncated without
+  -- information loss.
+  --
+  -- - truncate the quotient and the remainder (it's always safe
+  -- to truncate the remainder, since the original fit in 'n'
+  -- bits. (does this still make sense for *signed* division when
+  -- the remainder is negative?)).
+
+  -- Making these ops parameters leads to weird type checking
+  -- problems: GHC 7.10.2 complains that it can't conclude that @t ~ t@
+  -- for @t = (4 <=? (n + n))@. Type equality should be reflexive, yeah?
+
+-- | Helper function for @div@ and @idiv@ instructions.
+--
+-- The difference between @div@ and @idiv@ is whether the primitive
+-- operations are signed or not.
+--
+-- The x86 division instructions are peculiar. A @2n@-bit numerator is
+-- read from fixed registers and an @n@-bit quotient and @n@-bit
+-- remainder are written to those fixed registers. An exception is
+-- raised if the denominator is zero or if the quotient does not fit
+-- in @n@ bits.
+--
+-- Also, results should be rounded towards zero. These operations are
+-- called @quot@ and @rem@ in Haskell, whereas @div@ and @mod@ in
+-- Haskell round towards negative infinity.
+--
+-- Source: the x86 documentation for @idiv@, Intel x86 manual volume
+-- 2A, page 3-393.
+exec_div_helper :: forall m n
+   . IsLocationBV m n
+  => Bool -- ^ Signed ('True') or unsigned ('False').
+  -> Value m (BVType n) -- ^ Denominator; numerator is read from regs.
+  -> m ()
+exec_div_helper signed denominator
+  | Just Refl <- testEquality n n8  =
+    go (reg_low8 N.rax) (reg_high8 N.rax)
+  | Just Refl <- testEquality n n16 =
+    go (reg_low16 N.rax) (reg_low16 N.rdx)
+  | Just Refl <- testEquality n n32 =
+    go (reg_low32 N.rax) (reg_low32 N.rdx)
+  | Just Refl <- testEquality n n64 =
+    go rax rdx
   | otherwise =
     fail "div: Unknown bit width"
   where
-    go2 :: (1 <= n + n, n <= n + n)
-        => MLocation m (BVType n)
-        -> MLocation m (BVType n)
-        -> Value m (BVType n) -- The denominator y in the divison x/y
-        -> m ()
-    go2 ax dx v = do
+    n :: NatRepr n
+    n = bv_width denominator
+
+    go :: (1 <= n + n, n <= n + n)
+       => MLocation m (BVType n) -- ^ Location of lower half of numerator.
+       -> MLocation m (BVType n) -- ^ Location of upper half of numerator.
+       -> m ()
+    go ax dx = do
+      exception false (is_zero denominator) DivideError
+
+      let (quotOp, remOp, extOp) =
+            if signed
+            then (bvSignedQuot, bvSignedRem, sext)
+            else (bvQuot, bvRem, uext)
+
+      -- Numerator.
       axv <- get ax
       dxv <- get dx
-      go1 ax dx (bvCat dxv axv) v
+      let numerator = bvCat dxv axv
 
-    go1 :: (1 <= n + n, n <= n + n) -- Add obvious constraint to help Haskell type-checker.
-        => MLocation m (BVType n) -- Location to store quotient
-        -> MLocation m (BVType n) -- Location to store remainder.
-        -> Value m (BVType (n + n)) -- The numerator x in the division x/y
-        -> Value m (BVType n)       -- The denominator y in the divison x/y
-        -> m ()
-    go1 quotL remL w v = do
-      (q,r) <- bvDiv w v
+      -- Quotient and remainder.
+      --
+      -- VERY SUBTLE BUG: for signed quotient, it's also an error if
+      -- the @n+n@-bit quotient overflows -- below we check that the
+      -- @n+n@-bit quotient fits in @n@ bits -- which happens when you
+      -- divide the largest @n@-bit negative number (@-2^(n+n-1)@) by
+      -- @-1@. Depending on how the 'quotOp' is defined, or check
+      -- below may or may not catch this overflow:
+      --
+      -- - in LLVM the 'quotOp' (@sdiv@) is undefined in this case, so
+      --   anything could happen.
+      --
+      -- - in an implementation that returns the @n+n@-bit 2's
+      --   complement representation of @2^(n+n-1)@ we detect the
+      --   error, since this number is equal to @-2^(n+n-1)@ in 2's
+      --   complement, which does not fit in @n@ bits.
+      let nn = addNat n n
+      let denominator' = extOp nn denominator
+      q' <- quotOp numerator denominator'
+      r' <- remOp numerator denominator'
+      let q = bvTrunc n q'
+      let r = bvTrunc n r'
+
+      -- Check that quotient fits in @n@ bits.
+      let q'' = extOp nn q
+      exception false (q' .=/=. q'') DivideError
+
       set_undefined cf_loc
       set_undefined of_loc
       set_undefined sf_loc
       set_undefined af_loc
       set_undefined pf_loc
       set_undefined zf_loc
-      quotL .= q
-      remL  .= r
 
-exec_idiv :: forall m n
-           . (IsLocationBV m n)
-          => Value m (BVType n)
-          -> m ()
-exec_idiv v
-  | Just Refl <- testEquality w n8  = do
-    dividend <- get (reg_low16 N.rax)
-    do_exec_idiv (reg_low8 N.rax) (reg_high8 N.rax) dividend v
-  | Just Refl <- testEquality w n16 =
-    go2 (reg_low16 N.rax) (reg_low16 N.rdx)
-  | Just Refl <- testEquality w n32 =
-    go2 (reg_low32 N.rax) (reg_low32 N.rdx)
-  | Just Refl <- testEquality w n64 =
-    go2 rax rdx
-  | otherwise =
-    fail "div: Unknown bit width"
-  where
-    w :: NatRepr n
-    w = bv_width v
-    go2 :: (n <= n + n) => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
-    go2 ax dx = do
-      axv <- get ax
-      dxv <- get dx
-      do_exec_idiv ax dx (bvCat dxv axv) v
+      ax .= q
+      dx .= r
 
-do_exec_idiv :: forall m n
-              . (IsLocationBV m n)
-             => MLocation m (BVType n)
-                -- ^ Location to store quotient
-             -> MLocation m (BVType n)
-                -- ^ Location to store remainder
-             -> Value m (BVType (n + n))
-                -- ^ The dividend
-             -> Value m (BVType n)
-                -- ^ The divisor
-             -> m ()
-do_exec_idiv quotL remL w v = do
-  (q,r) <- bvSignedDiv w v
-  quotL .= q
-  remL  .= r
-  set_undefined cf_loc
-  set_undefined of_loc
-  set_undefined sf_loc
-  set_undefined af_loc
-  set_undefined pf_loc
-  set_undefined zf_loc
+-- | Unsigned (@div@ instruction) and signed (@idiv@ instruction) division.
+exec_div, exec_idiv :: forall m n
+   . IsLocationBV m n
+  => Value m (BVType n) -> m ()
+exec_div = exec_div_helper False
+exec_idiv = exec_div_helper True
 
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
