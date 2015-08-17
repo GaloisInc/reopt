@@ -234,13 +234,8 @@ traceInner act pid = do
 -- Tests.
 
 -- | Test builder.
---
--- TODO: probably the @preTest@ can be incorporated into the @test@,
--- but conathan doesn't understand what's going here well enough to be
--- sure ...
-mkTest :: Foldable t
-  => Args
-  -> WriterT (t String) (ConcreteStateT PTraceMachineState) ()
+mkTest :: Args
+  -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
   -> IO ()
 mkTest args test = do
   child <- traceFile $ args^.programPath
