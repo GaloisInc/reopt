@@ -222,13 +222,11 @@ traceInner :: (CPid -> StateT s IO ()) -> CPid -> StateT s IO ()
 traceInner act pid = do
   act pid
   lift $ ptrace_singlestep pid Nothing
-  (spid, status) <- lift $ waitForRes pid
-  if spid == pid
-    then case status of W.Stopped _ -> traceInner act pid
+  status <- lift $ waitForRes pid
+  case status of        W.Stopped _ -> traceInner act pid
                         Signaled _ -> traceInner act pid
                         Continued -> traceInner act pid
                         W.Exited _ -> return ()
-    else fail "Wrong pid from waitpid!"
 
 ------------------------------------------------------------------------
 -- Tests.
@@ -540,21 +538,19 @@ runInParallel updater = do
   tell ["runInParallel stepping concrete semantics"]
   (execSuccess, ii) <-  stepConcrete
   pid <-lift $ lift $ asks cpid
-  (spid, status) <- case (iiLockPrefix ii)
+  status <- case (iiLockPrefix ii)
     of RepPrefix -> step_to_next_inst pid
        RepZPrefix -> step_to_next_inst pid
        RepNZPrefix -> step_to_next_inst pid
        NoLockPrefix -> single_step pid
        LockPrefix -> single_step pid
-  if spid == pid
-    then case status of W.Exited _ -> return ()
+  case status of        W.Exited _ -> return ()
                         W.Stopped 5 -> do updater (execSuccess, ii)
                                           runInParallel updater
                         _ -> do
                           str <- liftIO' $ statusToString status
                           tell ["Main_reopt.runInParallel: unexpected status: " ++ str]
                           return ()
-    else fail "Wrong pid from waitpid!"
   where
     -- TODO: insert 0xCC and continue to it
     step_to_next_inst pid = do
@@ -565,22 +561,20 @@ runInParallel updater = do
         return addr
       step_while_inst pid addr
     step_while_inst pid addr = do
-      (spid, status) <- liftIO' $ waitForRes pid
-      if spid == pid
-        then case status 
-         of W.Exited _ -> return (spid, status)
+      status <- liftIO' $ waitForRes pid
+      case status
+         of W.Exited _ -> return status
             W.Stopped 5 -> do 
               X86_64 regs <- liftIO' $ ptrace_getregs pid
               let addr' = rip regs
               if addr' == addr
                 then do liftIO' $ ptrace_singlestep pid Nothing
                         step_while_inst pid addr
-                else return (spid, status)
+                else return status
             _ -> do
               str <- liftIO' $ statusToString status
               tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
-              return (spid, status)
-        else fail "Wrong pid from waitpid!"
+              return status
     single_step pid = liftIO' $ do
       ptrace_singlestep pid Nothing
       waitForRes pid
@@ -595,9 +589,8 @@ instTest :: WriterT [String] (ConcreteStateT PTraceMachineState) ()
 instTest = do
   pid <- lift $ lift $ asks cpid
   lift $ lift $ liftIO $ ptrace_cont pid Nothing
-  (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
-  if spid == pid
-    then case status
+  status <- lift $ lift $ liftIO $ waitForRes pid
+  case status
       of W.Exited _ -> return ()
          W.Stopped 5 -> do
            tell ["child stopped: " ++ show status]
@@ -610,17 +603,14 @@ instTest = do
            put (Map.empty, translatePtraceRegs modRegs modFPRegs)
            (execSuccess, ii) <- trace "instTest stepping concrete semantics" stepConcrete
            lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-           (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
-           if spid == pid
-             then case status 
+           status <- lift $ lift $ liftIO $ waitForRes pid
+           case status
                of W.Exited _ -> return ()
                   W.Stopped 5 -> checkAndClear (execSuccess, ii)
                   _ -> tell ["Exception while executing instruction " ++ show ii]
-              else fail "Wrong pid from waitpid!"
          _ -> do
            tell ["child stopped: " ++ show status]
            instTest
-    else fail "Wrong pid from waitpid!"
 
 -- | Check that emulated and real states agree and then clear state.
 --
@@ -658,11 +648,24 @@ checkAndClear (False, ii) = do
   realRegs <- lift $ lift dumpRegs
   put (Map.empty, realRegs)
 
-waitForRes :: CPid -> IO (CPid, Status)
+-- | Do @waitpid@ on child with given PID and return status.
+--
+-- The child PID should be greater than zero, to specify a valid
+-- child. The @waitpid@ supports other values for the PID, but we do
+-- not support them here. See @man waitpid@.
+waitForRes :: CPid -> IO Status
 waitForRes pid = do
+  when (not $ pid > 0) $
+    error "waitForRes: non positive PID!"
   res <- waitpid pid []
-  case res of Just x -> return x
-              Nothing -> waitForRes pid
+  case res of
+    Just (pid', status) -> do
+      when (pid /= pid') $
+        error "waitForRes: 'waitpid' returned the wrong child PID!"
+      return status
+    -- We call @waitpid@ without any flags, in particular without
+    -- @WNOHANG@, so we expect it to succeed.
+    Nothing -> error "waitForRes: 'waitpid' failed unexpectedly!"
 
 ------------------------------------------------------------------------
 
