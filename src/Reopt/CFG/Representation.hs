@@ -492,9 +492,10 @@ data App (f :: Type -> *) (tp :: Type) where
 
   -- Concatenate two bitvectors together (low-bits are first)
   ConcatV :: !(NatRepr n)
+          -> !(NatRepr m)
           -> !(f (BVType n))
-          -> !(f (BVType n))
-          -> App f (BVType (n+n))
+          -> !(f (BVType m))
+          -> App f (BVType (n+m))
 
   -- Get upper half of bitvector
   UpperHalf :: !(NatRepr n)
@@ -728,7 +729,7 @@ ppApp pp a0 =
   case a0 of
     Mux _ c x y -> sexpr "mux" [ pp c, pp x, pp y ]
     MMXExtend e -> sexpr "mmx_extend" [ pp e ]
-    ConcatV _ x y -> sexpr "concat" [ pp x, pp y ]
+    ConcatV _ _ x y -> sexpr "concat" [ pp x, pp y ]
     UpperHalf _ x -> sexpr "upper_half" [ pp x ]
     Trunc x w -> sexpr "trunc" [ pp x, ppNat w ]
     SExt x w -> sexpr "sext" [ pp x, ppNat w ]
@@ -792,7 +793,7 @@ appType a =
   case a of
     Mux w _ _ _ -> BVTypeRepr w
     MMXExtend{} -> knownType
-    ConcatV w _ _ -> BVTypeRepr (addNat w w)
+    ConcatV w w' _ _ -> BVTypeRepr (addNat w w')
     UpperHalf w _ -> BVTypeRepr w
     Trunc _ w -> BVTypeRepr w
     SExt _ w -> BVTypeRepr w

@@ -272,6 +272,10 @@ generateStmt ms (Get v l) = do
   a <- G.mkAtom =<< translateLocGet ms l
   modify $ insertVar (translateVar v) a
 --
+generateStmt _ms (Let v e) = do
+  e' <- G.mkAtom =<< fmap (runReader (translateExpr' e)) get  
+  modify $ insertVar (translateVar v) e'
+--
 generateStmt _ms (MakeUndefined v tr) = case tr of
   BVTypeRepr nr -> do
     a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)

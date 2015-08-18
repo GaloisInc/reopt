@@ -263,9 +263,9 @@ extractFirstBlock :: Memory Word64 -> Word64 -> IO Block
 extractFirstBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> error $ show err
-    Right (Left err, _) -> error $ "Could not disassemble instruction at 0x"
+    Right (Left err, _) -> error $ "extractFirstBlock: Could not disassemble instruction at 0x"
                                 ++ showHex err ""
-    Right (Right (nexts, ret, stmts), _) -> return (Block stmts Ret)
+    Right (Right (nexts, stmts), _) -> return (Block stmts Ret)
 
 simulate :: Block -> Block -> IO ()
 simulate block1 block2 = do
@@ -351,18 +351,17 @@ showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> putStrLn $ show err
-    Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
+    Right (Left err, _) -> putStrLn  $ "showSingleBlock: Could not disassemble instruction at 0x"
                                       ++ showHex err ""
-    Right (Right (nexts, ret, stmts), _) -> do
+    Right (Right (nexts, stmts), _) -> do
       putStrLn $ show nexts
-      putStrLn $ show ret
       putStrLn $ show $ CS.ppStmts stmts
 
 
 compareBlocks :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
 compareBlocks mem1 start1 mem2 start2 = do
-  (nexts1, ret1, stmts1) <- getBlock mem1 start1
-  (nexts2, ret2, stmts2) <- getBlock mem2 start2
+  (nexts1, stmts1) <- getBlock mem1 start1
+  (nexts2, stmts2) <- getBlock mem2 start2
   let (_, (cmem1, regs1)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts1) MapF.empty) M.empty emptyX86State
   let (_, (cmem2, regs2)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts2) MapF.empty) M.empty emptyX86State
   let regCmp = compareRegs regs1 regs2
@@ -383,9 +382,9 @@ compareBlocks mem1 start1 mem2 start2 = do
   where
   getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> fail $ show err
-    Right (Left err, _) -> fail $ "Could not disassemble instruction at 0x" ++
+    Right (Left err, _) -> fail $ "compareBlocks: Could not disassemble instruction at 0x" ++
                                     showHex err ""
-    Right (Right (nexts, ret, stmts), _) -> return (nexts, ret, stmts)
+    Right (Right (nexts, stmts), _) -> return (nexts, stmts)
   emptyX86State = mkX86State (\reg ->
     Literal $ bitVector (N.registerWidth reg)
       (BV.bitVec (fromIntegral $ natValue $ N.registerWidth reg) (0 :: Integer)))
@@ -460,8 +459,8 @@ matchChildSets sel cfg1 cfg2 mapping k1 k2
   
   | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
   , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
-  | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
-  , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
+  -- | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
+  -- , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
   | Just (Block _ (Cond c1 c1')) <- M.lookup k1 cfg1
   , Just (Block _ (Cond c2 c2')) <- M.lookup k2 cfg2 = 
       case sel cfg1 cfg2 c1 (S.fromList [c2, c2']) of
@@ -525,7 +524,6 @@ blockTermFuzzyMatches (Block _ (Fallthrough _)) (Block _ (Fallthrough _)) = True
 blockTermFuzzyMatches (Block _ (Call _ _)) (Block _ (Call _ _)) = True
 blockTermFuzzyMatches (Block _ Ret) (Block _ Ret) = True
 blockTermFuzzyMatches (Block _ (Cond _ _)) (Block _ (Cond _ _)) = True
-blockTermFuzzyMatches (Block _ (Indirect _)) (Block _ (Indirect _)) = True
 blockTermFuzzyMatches _ _ = False
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)

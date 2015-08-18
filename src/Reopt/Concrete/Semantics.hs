@@ -90,7 +90,7 @@ evalExpr (AppExpr a) = do
     -- Resize ops
     R.MMXExtend c -> let ones = BV.ones 16
                       in CS.liftValue (BV.# ones) extPrecisionNatRepr c
-    R.ConcatV nr c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr) c1 c2
+    R.ConcatV nr nr' c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr') c1 c2
     R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
@@ -279,6 +279,8 @@ evalStmt (Get x l) =
     sliceBV :: Integer ~ i
             => (i, i) -> BV -> BV
     sliceBV (low, high) super = super @@ (high - 1, low)
+evalStmt (Let x e) = do e' <- evalExpr' e
+                        extendEnv x e'
 evalStmt (BVQuot x ns1 ns2) = bvDivOp div x ns1 ns2
 evalStmt (BVRem x ns1 ns2) = bvDivOp mod x ns1 ns2
 -- TODO(conathan): BUG: We use @sdiv@ and @smod@ here, but they round

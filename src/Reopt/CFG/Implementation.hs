@@ -167,7 +167,7 @@ bvTrunc_impl _ _ w e0
     e
 
 bvTrunc_impl p_1m _p_mn w e0
-  | Just (ConcatV lw l _) <- asApp e0
+  | Just (ConcatV lw lw' l _) <- asApp e0
   , Just p_w_lw <- testLeq w lw =
     bvTrunc_impl p_1m p_w_lw w l
 bvTrunc_impl p_1m _ w e0
@@ -396,7 +396,7 @@ instance S.IsValue Expr where
     , Just yv <- asBVLit y = assert (0 <= yv && yv < natValue w) $
       S.bvBit xe y
 
-    | Just (ConcatV lw x_low x_high) <- asApp x
+    | Just (ConcatV lw lw' x_low x_high) <- asApp x
     , Just yv <- asBVLit y = assert (0 <= yv && yv < 2*natValue lw) $
       if yv >= natValue lw then
         S.bvBit x_high (S.bvLit (exprWidth y) (yv - natValue lw))
@@ -797,7 +797,8 @@ upperHalf e =
       -- Handle expression concatenation.
       -- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in upperHalf
       -- to the (n+n) bound in ConcatV.
-      Just (ConcatV _ _ h) -> do
+      Just (ConcatV lw lw' _ h)
+        | Just Refl <- testEquality lw lw' -> do
         case testEquality half_width (exprWidth h) of
           Just Refl -> h
           Nothing -> error "upper half given illegal widths."
@@ -815,7 +816,7 @@ bvConcat l h
     | Just 0 <- asBVLit h =
         withLeqProof (addIsLeq w w) $ do
           S.uext (addNat w w) l
-    | otherwise = app (ConcatV (exprWidth l) l h)
+    | otherwise = app (ConcatV (exprWidth l) (exprWidth l) l h)
   where w = exprWidth l
 
 -- | Assign a value to a location

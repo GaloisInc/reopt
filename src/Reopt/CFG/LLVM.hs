@@ -200,7 +200,7 @@ appToLLVM app =
    Mux _sz b l r ->
      join $ L.select <$> valueToLLVM b <*> valueToLLVM l <*> valueToLLVM r
    MMXExtend _v -> unimplementedInstr
-   ConcatV sz low high -> do
+   ConcatV sz _sz' low high -> do
      low'  <- join $ flip L.zext typ <$> valueToLLVM low
      high' <- join $ flip L.zext typ <$> valueToLLVM high
      s_high <- L.shl high' (natValue sz)

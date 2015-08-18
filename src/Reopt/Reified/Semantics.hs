@@ -73,8 +73,10 @@ import qualified Reopt.CFG.Representation as R
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n80
+                                     , floatInfoBits, n1, n8, n80
                                      )
+
+import Debug.Trace
 
 ------------------------------------------------------------------------
 -- Expr
@@ -97,8 +99,9 @@ data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
 
 instance TestEquality Variable where
-  (Variable tp1 _n1) `testEquality` (Variable tp2 _n2) = do
+  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
     Refl <- testEquality tp1 tp2
+    guard (n1 == n2)
     return Refl
 
 instance MapF.OrdF Variable where
@@ -257,6 +260,7 @@ type MLocation = S.Location (Expr (BVType 64))
 data Stmt where
   MakeUndefined :: Variable tp -> TypeRepr tp -> Stmt
   Get :: Variable tp -> MLocation tp -> Stmt
+  Let :: Variable tp -> Expr tp -> Stmt
   -- The remaining constructors correspond to the 'S.Semantics'
   -- operations; the arguments are documented there and in
   -- 'Reopt.CFG.Representation.Stmt'.
@@ -295,7 +299,9 @@ instance Eq Stmt where
   MakeUndefined v1 tp1 == MakeUndefined v2 tp2 
     | Just Refl <- testEquality v1 v2 = v1 == v2
   Get v1 l1 == Get v2 l2
-    | Just Refl <- testEquality v1 v2 = v1 == v2 && l1 == l2 
+    | Just Refl <- testEquality v1 v2 = l1 == l2
+  Let v1 e1 == Let v2 e2
+    | Just Refl <- testEquality v1 v2 = e1 == e2
   (l1 := e1) == (l2 := e2) 
     | Just Refl <- testEquality e1 e2 = l1 == l2 && e1 == e2
   Ifte_ e1 s1 s1' == Ifte_ e2 s2 s2' = e1 == e2 && s1 == s2 && s1' == s2'
@@ -345,6 +351,11 @@ instance Ord Stmt where
   Get v1 l1 `compare` Get v2 l2 = compareF' v1 v2 $ compareFin l1 l2
   Get _ _ `compare` _ = GT
   _ `compare` Get _ _ = LT
+
+  Let v1 e1 `compare` Let v2 e2 = compareF' v1 v2 $ compareFin e1 e2
+  Let _ _ `compare` _ = GT
+  _ `compare` Let _ _ = LT
+
   (l1 := e1) `compare` (l2 := e2) = compareF' l1 l2 $ compareFin e1 e2
   (_ := _) `compare` _ = GT
   _ `compare` (_ := _) = LT
@@ -436,6 +447,10 @@ bvBinOp op varName v1 v2 = do
   tell [op var v1 v2]
   return (VarExpr var)
 
+
+freshVar :: String -> TypeRepr tp -> Semantics (Variable tp)
+freshVar name tp = Variable tp <$> fresh name
+
 -- | Interpret 'S.Semantics' operations into 'Stmt's.
 --
 -- Operations that return 'Value's return fresh variables; we track
@@ -443,15 +458,14 @@ bvBinOp op varName v1 v2 = do
 -- 'NamedStmt's.
 instance S.Semantics Semantics where
   make_undefined t = do
-    name <- fresh "undef"
-    let var = Variable t name
+    var <- freshVar "undef" t
     tell [MakeUndefined var t]
     return $ VarExpr var
 
   get l = do
-    name <- fresh "get"
-    let var = Variable (S.loc_type l) name
-    tell [Get var l]
+    var <- freshVar "get" (S.loc_type l)
+    expandMemOps (Get var l)
+    -- tell [Get var l]
     return $ VarExpr var
 
   -- sjw: This is a huge hack, but then again, so is the fact that it
@@ -500,16 +514,14 @@ instance S.Semantics Semantics where
   memset v1 v2 v3 = tell [MemSet v1 v2 v3]
 
   memcmp r v1 v2 v3 v4 = do
-    name <- fresh "memcmp"
-    let var = Variable S.knownType name
+    var <- freshVar "memcmp" S.knownType
     tell [MemCmp var r v1 v2 v3 v4]
     return $ VarExpr var
 
   primitive p = tell [Primitive p]
 
   getSegmentBase seg = do
-    name <- fresh $ show seg ++ "_base"
-    let var = Variable S.knownType name
+    var <- freshVar (show seg ++ "_base") S.knownType
     tell [GetSegmentBase var seg]
     return $ VarExpr var
 
@@ -523,6 +535,72 @@ instance S.Semantics Semantics where
   x87Push v = tell [X87Push v]
 
   x87Pop = tell [X87Pop]
+
+------------------------------------------------------------------------
+-- Expanding multi-byte memory operations to multiple single byte
+-- operations
+
+-- This doesn't exactly interleave, although it could ...
+
+wrapSemantics :: Semantics a -> (Stmt -> Semantics ()) -> Semantics a
+wrapSemantics m f = do
+  (v, r) <- censor (const mempty) . listen $ m
+  mapM_ f r
+  return v
+
+data P n where
+  ZeroCase    :: P 0
+  NonZeroCase :: (1 <= n) => Semantics (Expr (BVType (n * 8))) -> P n
+
+offsetAddr :: Integer -> Expr (BVType 64) -> Expr (BVType 64)
+offsetAddr bits addr
+  | bits `mod` 8 == 0 = AppExpr (R.BVAdd knownNat addr
+                                 (LitExpr knownNat $ bits `div` 8))
+  | otherwise = error "Addr bits isn't a multiple of 8"
+
+expandRead :: Variable tp -> Expr (BVType 64) -> TypeRepr tp
+           -> Semantics ()
+expandRead v addr (BVTypeRepr nr) =
+  withDivModNat nr n8 $ \divn modn ->
+    case testEquality modn (knownNat :: NatRepr 0) of
+      Nothing   -> error "Addr width not a multiple of 8"
+      Just Refl -> 
+        case natRec divn ZeroCase go of
+          ZeroCase      -> error "Zero case"
+          NonZeroCase m -> do e <- m
+                              tell [Let v e]
+  where
+    getOne :: Integer -> Semantics (Expr (BVType 8))
+    getOne n = do
+      v <- freshVar "expandRead" S.knownType
+      let addr' = offsetAddr (n * 8) addr
+      tell [Get v (S.MemoryAddr addr' S.knownType)]
+      return $ VarExpr v
+
+    go :: forall n'. NatRepr n' -> P n' -> P (n' + 1)
+    go nr ZeroCase  = NonZeroCase $ getOne (natValue nr)
+    go nr (NonZeroCase m) =
+        withAddPrefixLeq nr n1 $
+        withAddMulDistribRight nr n1 n8 $
+        NonZeroCase $ do
+          v <- m
+          v'  <- getOne (natValue nr)
+          let sz = natMultiply nr n8
+              e  = AppExpr (R.ConcatV sz n8 v v')
+          res_v <- freshVar "expandRead" (exprType e)
+          tell [Let res_v e]
+          return $ VarExpr res_v
+
+expandMemOps :: Stmt -> Semantics ()
+expandMemOps stmt@(Get v l) =
+  S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
+  where
+    memCase :: forall tp'. (Integer, Integer) -> Integer
+               -> (Expr (BVType 64), TypeRepr tp') -> Semantics ()
+    memCase (low, _high) _width (addr, _) =
+      expandRead v (offsetAddr low addr) (S.loc_type l)
+      
+expandMemOps stmt = tell [stmt]      
 
 ------------------------------------------------------------------------
 -- Pretty printing.
@@ -567,6 +645,7 @@ ppStmt s = case s of
   -- Named.
   MakeUndefined (Variable _ x) _ -> ppNamedStmt [x] $ text "make_undefined"
   Get (Variable _ x) l -> ppNamedStmt [x] $ R.sexpr "get" [ ppMLocation l ]
+  Let (Variable _ x) e -> ppNamedStmt [x] $ ppExpr e
   BVQuot x v1 v2 -> ppBinOp "bv_quot" x v1 v2
   BVRem x v1 v2 -> ppBinOp "bv_rem" x v1 v2
   BVSignedQuot x v1 v2 -> ppBinOp "bv_signed_quot" x v1 v2

@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
 
 module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks,
@@ -22,23 +23,22 @@ data Term = Cond Word64 Word64 -- true, false
           | Call Word64 Word64 -- call, ret
           | Direct Word64
           | Fallthrough Word64
-          | Indirect (N.RegisterName 'N.GP)
-          | Ret deriving (Eq, Ord)
+          | Indirect
+          | Ret deriving (Eq, Ord, Show)
 
-instance Show Term where
-  show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
-  show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 "" 
-  show (Direct w) = "Direct " ++ showHex w ""
-  show (Fallthrough w) = "Fallthrough " ++ showHex w ""
-  show (Indirect reg) = "Indirect " ++ show reg
-  show Ret = "Ret"
+-- instance Show Term where
+--   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
+--   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 "" 
+--   show (Direct w) = "Direct " ++ showHex w ""
+--   show (Fallthrough w) = "Fallthrough " ++ showHex w ""
+--   show (Indirect reg) = "Indirect " ++ show reg
+--   show Ret = "Ret"
 
 termChildren :: Term -> [Word64]
 termChildren (Cond w1 w2) = [w1, w2]
 termChildren (Call _ w) = [w]
 termChildren (Direct w) = [w]
 termChildren (Fallthrough w) = [w]
-termChildren (Indirect _) = []
 termChildren Ret = []
 
 -- FIXME: fancy data structures could do this better - keep instruction
@@ -58,25 +58,25 @@ findBlocks' mem breaks queue cfg
     case runMemoryByteReader pf_x mem entry $ extractBlock entry breaks of
       Left err -> Left $ show err
       Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
-      Right (Right ([Absolute callee], Just ret, stmts), _) -> 
-        if M.member ret cfg
-          then findBlocks' mem breaks queue' $ 
-            M.insert entry (Block stmts $ Call callee ret) cfg
-          else findBlocks' mem breaks (S.insert ret queue') 
-            (M.insert entry (Block stmts $ Call callee ret) cfg)
-      Right (Right ([Absolute next], Nothing, stmts), _) -> 
+      -- Right (Right ([Absolute callee], Just ret, stmts), _) -> 
+      --   if M.member ret cfg
+      --     then findBlocks' mem breaks queue' $ 
+      --       M.insert entry (Block stmts $ Call callee ret) cfg
+      --     else findBlocks' mem breaks (S.insert ret queue') 
+      --       (M.insert entry (Block stmts $ Call callee ret) cfg)
+      Right (Right ([Absolute next], stmts), _) -> 
         if M.member next cfg
           then findBlocks' mem breaks queue' $
             M.insert entry (Block stmts $ Direct next) cfg
           else findBlocks' mem breaks (S.insert next queue')
             (M.insert entry (Block stmts $ Direct next) cfg)
-      Right (Right ([NFallthrough next], Nothing, stmts), _) -> 
+      Right (Right ([NFallthrough next], stmts), _) -> 
         if M.member next cfg
           then findBlocks' mem breaks queue' $
             M.insert entry (Block stmts $ Fallthrough next) cfg
           else findBlocks' mem breaks (S.insert next queue')
             (M.insert entry (Block stmts $ Fallthrough next) cfg)
-      Right (Right ([Absolute branch, Absolute fallthrough], Nothing, stmts), _) -> 
+      Right (Right ([Absolute branch, Absolute fallthrough], stmts), _) -> 
         let queue'' = if M.member branch cfg 
                         then queue'
                         else S.insert branch queue' 
@@ -85,9 +85,7 @@ findBlocks' mem breaks queue cfg
                         else S.insert fallthrough queue''
         in findBlocks' mem breaks queue''' $ 
             M.insert entry (Block stmts $ Cond branch fallthrough) cfg
-      Right (Right ([NIndirect reg], Nothing, stmts), _) -> 
-        findBlocks' mem breaks queue' $ M.insert entry (Block stmts $ Indirect reg) cfg
-      Right (Right ([NRet], Nothing, stmts), _) ->
-        findBlocks' mem breaks queue' $ M.insert entry (Block stmts Ret) cfg
+      Right (Right ([NIndirect], stmts), _) -> 
+        findBlocks' mem breaks queue' $ M.insert entry (Block stmts $ Indirect) cfg
 
   | otherwise = Right cfg
