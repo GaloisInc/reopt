@@ -552,29 +552,34 @@ runInParallel updater = do
                           tell ["Main_reopt.runInParallel: unexpected status: " ++ str]
                           return ()
   where
-    -- TODO: insert 0xCC and continue to it
+    -- | Single step until the IP changes.
+    --
+    -- We might get a more efficient implementation of
+    -- 'step_to_next_inst' by replacing the subsequent instruction
+    -- with INT3 (breakpoint, opcode 0xCC) and then running until we
+    -- reach it. See
+    -- http://stackoverflow.com/questions/3747852/int-3-0xcc-x86-asm.
     step_to_next_inst pid = do
-      addr <- liftIO' $ do
-        X86_64 regs <- ptrace_getregs pid
-        ptrace_singlestep pid Nothing
-        let addr = rip regs
-        return addr
-      step_while_inst pid addr
-    step_while_inst pid addr = do
-      status <- liftIO' $ waitForRes pid
-      case status
-         of W.Exited _ -> return status
-            W.Stopped 5 -> do 
-              X86_64 regs <- liftIO' $ ptrace_getregs pid
-              let addr' = rip regs
-              if addr' == addr
-                then do liftIO' $ ptrace_singlestep pid Nothing
-                        step_while_inst pid addr
-                else return status
-            _ -> do
-              str <- liftIO' $ statusToString status
-              tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
-              return status
+      addr <- get_addr
+      go addr
+      where
+        go addr = do
+          liftIO' $ ptrace_singlestep pid Nothing
+          status <- liftIO' $ waitForRes pid
+          case status
+             of W.Exited _ -> return status
+                W.Stopped 5 -> do
+                  addr' <- get_addr
+                  if addr' == addr
+                    then go addr
+                    else return status
+                _ -> do
+                  str <- liftIO' $ statusToString status
+                  tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
+                  return status
+        get_addr = liftIO' $ do
+          X86_64 regs <- ptrace_getregs pid
+          return $ rip regs
     single_step pid = liftIO' $ do
       ptrace_singlestep pid Nothing
       waitForRes pid
