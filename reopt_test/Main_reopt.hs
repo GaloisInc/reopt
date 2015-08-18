@@ -232,16 +232,29 @@ traceInner act pid = do
 
 ------------------------------------------------------------------------
 -- Tests.
+data MessageType
+   = FailureRecord InstructionInstance [String]
+   | UnknownInstruction InstructionInstance
+   | Impossible String
+   | UnexpectedStatus String Status
+   | SuccessfulExecution InstructionInstance
+
+instance Show MessageType where
+  show (FailureRecord ii msgs) =
+    unlines (["Mismatch after executing instruction " ++ show ii] ++ map (" - " ++) msgs)
+  show (UnknownInstruction ii) = "Unknown instruction: " ++ show ii
+  show (Impossible msg) = "Impossible: " ++ msg
+  show (UnexpectedStatus name status) = name ++ ": unexpected status: " ++ show status
+  show (SuccessfulExecution ii) = "Instruction " ++ show ii ++ " executed successfully"
 
 -- | Test builder.
 --
 -- TODO: probably the @preTest@ can be incorporated into the @test@,
 -- but conathan doesn't understand what's going here well enough to be
 -- sure ...
-mkTest :: Foldable t
-  => Args
-  -> WriterT (t String) (ConcreteStateT PTraceMachineState) ()
-  -> IO ()
+mkTest :: Args
+       -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
+       -> IO ()
 mkTest args test = do
   child <- traceFile $ args^.programPath
   procMem <- openChildProcMem child
@@ -249,7 +262,17 @@ mkTest args test = do
   (((), out), _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
     regs <- dumpRegs
     runConcreteStateT (runWriterT test) Map.empty regs
-  mapM_ putStrLn out
+  mapM_ print out
+  let isMismatch m = case m of
+                       FailureRecord _ _ -> True
+                       _                 -> False
+      numMismatches = length (filter isMismatch out)
+  if numMismatches == 0
+     then putStrLn "No mismatches!"
+     else do
+       putStrLn (show numMismatches ++ " mismatches!")
+       exitFailure
+  --
   where
     openChildProcMem :: CPid -> IO Handle
     openChildProcMem pid = do
@@ -522,7 +545,7 @@ getInstruction instrAddr =
 -- Returns a bool indicating whether the instruction's semantics were
 -- defined or not.
 stepConcrete :: (Functor m, MonadMachineState m)
-             => WriterT [String] (ConcreteStateT m) (Bool, InstructionInstance)
+             => WriterT [MessageType] (ConcreteStateT m) (Bool, InstructionInstance)
 stepConcrete = do
   rip' <- getReg N.rip
   bv <- case rip' of Literal bv -> return bv
@@ -530,19 +553,19 @@ stepConcrete = do
 
   let instrAddr = Address knownNat bv
   (w, ii) <- getInstruction instrAddr
-  tell [show ii]
+  -- tell [show ii]
   case execInstruction (fromIntegral $ (nat bv) +
                         fromIntegral w) ii
-    of Just s -> do tell [show $ ppStmts  $ execSemantics s]
+    of Just s -> do --tell [show $ ppStmts  $ execSemantics s]
                     evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
                     return (True, ii)
-       Nothing -> do tell ["could not exec instruction at " ++ show rip']
+       Nothing -> do tell [UnknownInstruction ii] -- ["could not exec instruction at " ++ show rip']
                      return (False, ii)
 
-runInParallel :: ((Bool, InstructionInstance) -> WriterT [String] (ConcreteStateT PTraceMachineState) ())
-              -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
+runInParallel :: ((Bool, InstructionInstance) -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ())
+              -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
 runInParallel updater = do
-  tell ["runInParallel stepping concrete semantics"]
+  -- tell ["runInParallel stepping concrete semantics"]
   (execSuccess, ii) <-  stepConcrete
   pid <-lift $ lift $ asks cpid
   (spid, status) <- case (iiLockPrefix ii)
@@ -557,7 +580,7 @@ runInParallel updater = do
                                           runInParallel updater
                         _ -> do
                           str <- liftIO' $ statusToString status
-                          tell ["Main_reopt.runInParallel: unexpected status: " ++ str]
+                          tell [UnexpectedStatus "Main_reopt.runInParallel" status] -- ["Main_reopt.runInParallel: unexpected status: " ++ str]
                           return ()
     else fail "Wrong pid from waitpid!"
   where
@@ -572,9 +595,9 @@ runInParallel updater = do
     step_while_inst pid addr = do
       (spid, status) <- liftIO' $ waitForRes pid
       if spid == pid
-        then case status 
+        then case status
          of W.Exited _ -> return (spid, status)
-            W.Stopped 5 -> do 
+            W.Stopped 5 -> do
               X86_64 regs <- liftIO' $ ptrace_getregs pid
               let addr' = rip regs
               if addr' == addr
@@ -583,7 +606,7 @@ runInParallel updater = do
                 else return (spid, status)
             _ -> do
               str <- liftIO' $ statusToString status
-              tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
+              tell [UnexpectedStatus "Main_reopt.runInParallel.step_while_inst" status] -- ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
               return (spid, status)
         else fail "Wrong pid from waitpid!"
     single_step pid = liftIO' $ do
@@ -596,7 +619,7 @@ runInParallel updater = do
 -- TODO: could we make this a special case of testing a whole
 -- application? I.e., can we make this a special case of
 -- 'runInParallel'.
-instTest :: WriterT [String] (ConcreteStateT PTraceMachineState) ()
+instTest :: WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
 instTest = do
   pid <- lift $ lift $ asks cpid
   lift $ lift $ liftIO $ ptrace_cont pid Nothing
@@ -605,7 +628,7 @@ instTest = do
     then case status
       of W.Exited _ -> return ()
          W.Stopped 5 -> do
-           tell ["child stopped: " ++ show status]
+           -- tell [Impossible $ "child stopped: " ++ show status]
            trapRegs <- lift $ lift $ liftIO $ ptrace_getregs pid
            trapFPRegs <- lift $ lift $ liftIO $ ptrace_getfpregs pid
            (modRegs, modFPRegs) <- case (trapRegs, trapFPRegs) of
@@ -617,13 +640,13 @@ instTest = do
            lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
            (spid, status) <- lift $ lift $ liftIO $ waitForRes pid
            if spid == pid
-             then case status 
+             then case status
                of W.Exited _ -> return ()
                   W.Stopped 5 -> checkAndClear (execSuccess, ii)
-                  _ -> tell ["Exception while executing instruction " ++ show ii]
+                  _ -> tell [UnexpectedStatus "Main_reopt.instTest" status] -- ["Exception while executing instruction " ++ show ii]
               else fail "Wrong pid from waitpid!"
          _ -> do
-           tell ["child stopped: " ++ show status]
+           tell [Impossible $ "child stopped: " ++ show status]
            instTest
     else fail "Wrong pid from waitpid!"
 
@@ -634,14 +657,14 @@ instTest = do
 --
 -- TODO(conathan): split this into a check, and a separate state
 -- clearing function. I think the state clearing happens often.
-checkAndClear :: (Bool, InstructionInstance) -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
+checkAndClear :: (Bool, InstructionInstance) -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
 checkAndClear (True, ii) = do
   realRegs <- lift $ lift dumpRegs
   emuRegs <- dumpRegs
   let regCmp = compareRegs realRegs emuRegs
   memCmp <- compareMems
-  case regCmp ++ memCmp of [] -> tell ["instruction " ++ show ii ++ " executed successfully"]
-                           l -> tell (("After executing instruction " ++ show ii) : l)
+  case regCmp ++ memCmp of [] -> tell [SuccessfulExecution ii] -- ["instruction " ++ show ii ++ " executed successfully"]
+                           ls -> tell [FailureRecord ii ls] -- (("After executing instruction " ++ show ii) : l)
   put (Map.empty, realRegs)
   where
     compareMems = lift $ foldMem8 (\addr val errs -> do
