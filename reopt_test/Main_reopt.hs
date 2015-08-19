@@ -17,6 +17,7 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
 import           Control.Monad.State
+import           Control.Monad.Except (runExceptT)
 import           Control.Monad.Writer.Strict
 import qualified Data.BitVector as BV
 import           Data.Bits
@@ -38,6 +39,7 @@ import           Numeric (readHex)
 import           System.Posix.Waitpid as W
 import           System.Posix.Types
 import           System.Posix.Process
+import           System.Posix.Signals (Signal, sigFPE, sigTRAP)
 import           System.Linux.Ptrace.Syscall
 import           System.Linux.Ptrace.Types
 import           System.Linux.Ptrace.X86_64Regs
@@ -64,7 +66,7 @@ import           Reopt.Object.Loader
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
 
-import           SignalUtils (statusToString)
+import           SignalUtils (signalToString, statusToString)
 
 ------------------------------------------------------------------------
 -- Args
@@ -255,12 +257,10 @@ mkTest args test = do
 ------------------------------------------------------------------------
 
 testApplication :: Args -> IO ()
-testApplication args = mkTest args test
-  where
-    test = runInParallel checkAndClear
+testApplication args = mkTest args fullApplicationTest
 
 testSingleInstruction :: Args -> IO ()
-testSingleInstruction args = mkTest args instTest
+testSingleInstruction args = mkTest args singleInstructionTest
 
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
@@ -313,10 +313,9 @@ translatePtraceRegs ptraceRegs ptraceFPRegs =
     fillReg (N.SegmentReg 3) = mkLit16 (ss ptraceRegs)
     fillReg (N.SegmentReg 4) = mkLit16 (fs ptraceRegs)
     fillReg (N.SegmentReg 5) = mkLit16 (gs ptraceRegs)
-    fillReg (N.FlagReg n) = Literal $ bitVector knownNat $ bitVec 1
-                            (if testBit (eflags ptraceRegs) n
-                               then 1
-                               else 0 :: Int)
+    fillReg (N.FlagReg n) = if testBit (eflags ptraceRegs) n
+                            then MS.true
+                            else MS.false
     fillReg (N.ControlReg _) = Undefined $ BVTypeRepr  knownNat
     fillReg (N.X87ControlReg n) = Literal $ bitVector knownNat $ BV.extract n n cwd'
     fillReg (N.X87StatusReg n) = Literal $ bitVector knownNat $ BV.extract n n swd'
@@ -515,7 +514,8 @@ getInstruction instrAddr =
 -- Returns a bool indicating whether the instruction's semantics were
 -- defined or not.
 stepConcrete :: (Functor m, MonadMachineState m)
-             => WriterT [String] (ConcreteStateT m) (Bool, InstructionInstance)
+             => WriterT [String] (ConcreteStateT m)
+                        (Either SM.ExceptionClass Bool, InstructionInstance)
 stepConcrete = do
   rip' <- getReg N.rip
   bv <- case rip' of Literal bv -> return bv
@@ -526,16 +526,25 @@ stepConcrete = do
   tell [show ii]
   case execInstruction (fromIntegral $ (nat bv) +
                         fromIntegral w) ii
-    of Just s -> do tell [show $ ppStmts  $ execSemantics s]
-                    evalStateT (mapM_ evalStmt $ execSemantics s) MapF.empty
-                    return (True, ii)
-       Nothing -> do tell ["could not exec instruction at " ++ show rip']
-                     return (False, ii)
+    of Just s -> do
+         let stmts = execSemantics s
+         tell [show $ ppStmts stmts]
+         eitherExceptionUnit <- evalStateT (runExceptT $ evalStmts stmts)
+                                  MapF.empty
+         return $ case eitherExceptionUnit of
+           Left exception -> (Left exception, ii)
+           Right () -> (Right True, ii)
+       Nothing -> return (Right False, ii)
 
-runInParallel :: ((Bool, InstructionInstance) -> WriterT [String] (ConcreteStateT PTraceMachineState) ())
-              -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
-runInParallel updater = do
-  tell ["runInParallel stepping concrete semantics"]
+-- | Run an application in lock step with the concrete semantics.
+fullApplicationTest :: WriterT [String] (ConcreteStateT PTraceMachineState) ()
+fullApplicationTest = fullApplicationTest' sigTRAP
+-- | The signal, if not equal to 'sigTRAP', is passed to the
+-- traced process on resumption.
+fullApplicationTest' :: Signal
+  -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
+fullApplicationTest' sig = do
+  tell ["fullApplicationTest: stepping concrete semantics"]
   (execSuccess, ii) <-  stepConcrete
   pid <-lift $ lift $ asks cpid
   status <- case (iiLockPrefix ii)
@@ -545,14 +554,24 @@ runInParallel updater = do
        NoLockPrefix -> single_step pid
        LockPrefix -> single_step pid
   case status of        W.Exited _ -> return ()
-                        W.Stopped 5 -> do updater (execSuccess, ii)
-                                          runInParallel updater
+                        W.Stopped sig' -> do
+                          canContinue <- checkAndClear sig' (execSuccess, ii)
+                          if canContinue
+                          then fullApplicationTest' sig'
+                          else tell ["Main_reopt.fullApplicationTest: 'checkAndClear' failed!"]
+                        W.Signaled sig' -> do
+                          str <- liftIO' $ signalToString sig'
+                          tell ["Application terminated by signal: " ++ str]
                         _ -> do
                           str <- liftIO' $ statusToString status
-                          tell ["Main_reopt.runInParallel: unexpected status: " ++ str]
+                          tell ["Main_reopt.fullApplicationTest: unexpected status: " ++ str]
                           return ()
   where
-    -- | Single step until the IP changes.
+    -- | Single step a "rep" instruction until the IP changes.
+    --
+    -- MAYBE TODO: this code fails if a non-TRAP signal arrives. In
+    -- particular, it always passes 'Nothing' as the 'Maybe Signal'
+    -- argument to 'ptrace_singlestep'.
     --
     -- We might get a more efficient implementation of
     -- 'step_to_next_inst' by replacing the subsequent instruction
@@ -568,20 +587,27 @@ runInParallel updater = do
           status <- liftIO' $ waitForRes pid
           case status
              of W.Exited _ -> return status
-                W.Stopped 5 -> do
+                W.Stopped sig' | sig' == sigTRAP -> do
                   addr' <- get_addr
                   if addr' == addr
                     then go addr
                     else return status
                 _ -> do
                   str <- liftIO' $ statusToString status
-                  tell ["Main_reopt.runInParallel.step_while_inst: unexpected status: " ++ str]
+                  tell ["Main_reopt.runInParallel.step_to_next_inst: unexpected status: " ++ str]
                   return status
         get_addr = liftIO' $ do
           X86_64 regs <- ptrace_getregs pid
           return $ rip regs
     single_step pid = liftIO' $ do
-      ptrace_singlestep pid Nothing
+      -- If the pending signal is not 'sigTRAP', then we may need to
+      -- send it to the child process on resumption. Motivation: for
+      -- 'sigFPE' from division by zero, the instruction gets
+      -- restarted if the 'sigFPE' is not passed here.
+      let maybeSignal = if sig == sigTRAP
+                        then Nothing
+                        else Just sig
+      ptrace_singlestep pid maybeSignal
       waitForRes pid
     liftIO' = lift . lift . liftIO
 
@@ -589,15 +615,15 @@ runInParallel updater = do
 --
 -- TODO: could we make this a special case of testing a whole
 -- application? I.e., can we make this a special case of
--- 'runInParallel'.
-instTest :: WriterT [String] (ConcreteStateT PTraceMachineState) ()
-instTest = do
+-- 'fullApplicationtest'?
+singleInstructionTest :: WriterT [String] (ConcreteStateT PTraceMachineState) ()
+singleInstructionTest = do
   pid <- lift $ lift $ asks cpid
   lift $ lift $ liftIO $ ptrace_cont pid Nothing
   status <- lift $ lift $ liftIO $ waitForRes pid
   case status
       of W.Exited _ -> return ()
-         W.Stopped 5 -> do
+         W.Stopped sig | sig == sigTRAP -> do
            tell ["child stopped: " ++ show status]
            trapRegs <- lift $ lift $ liftIO $ ptrace_getregs pid
            trapFPRegs <- lift $ lift $ liftIO $ ptrace_getfpregs pid
@@ -608,50 +634,96 @@ instTest = do
            put (Map.empty, translatePtraceRegs modRegs modFPRegs)
            (execSuccess, ii) <- trace "instTest stepping concrete semantics" stepConcrete
            lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-           status <- lift $ lift $ liftIO $ waitForRes pid
-           case status
+           status' <- lift $ lift $ liftIO $ waitForRes pid
+           case status'
                of W.Exited _ -> return ()
-                  W.Stopped 5 -> checkAndClear (execSuccess, ii)
+                  W.Stopped sig' -> do
+                    canContinue <- checkAndClear sig' (execSuccess, ii)
+                    unless canContinue $
+                      tell ["Main_reopt.singleInsructionTest: 'checkAndClear' failed!"]
                   _ -> tell ["Exception while executing instruction " ++ show ii]
          _ -> do
            tell ["child stopped: " ++ show status]
-           instTest
+           singleInstructionTest
 
 -- | Check that emulated and real states agree and then clear state.
 --
--- If the 'Bool' arg is false, then nothing is checked and the state
--- is cleared.
+-- Any disagreements in the check, and failed instructions, are
+-- reported.
 --
--- TODO(conathan): split this into a check, and a separate state
--- clearing function. I think the state clearing happens often.
-checkAndClear :: (Bool, InstructionInstance) -> WriterT [String] (ConcreteStateT PTraceMachineState) ()
-checkAndClear (True, ii) = do
-  realRegs <- lift $ lift dumpRegs
-  emuRegs <- dumpRegs
-  let regCmp = compareRegs realRegs emuRegs
-  memCmp <- compareMems
-  case regCmp ++ memCmp of [] -> tell ["instruction " ++ show ii ++ " executed successfully"]
-                           l -> tell (("After executing instruction " ++ show ii) : l)
-  put (Map.empty, realRegs)
+-- Return value indicates whether the enclosing test should continue
+-- or not (would like to simply raise an error, but then all the
+-- 'tell' messages get lost, which makes debugging harder).
+checkAndClear :: Signal
+  -> (Either SM.ExceptionClass Bool, InstructionInstance)
+  -> WriterT [String] (ConcreteStateT PTraceMachineState) Bool
+checkAndClear sig (eitherExceptionBool, ii) = do
+  (canContinue, disagreements) <- check eitherExceptionBool
+  report disagreements
+  clear
+  return canContinue
   where
-    compareMems = lift $ foldMem8 (\addr val errs -> do
-      realVal <- lift $ getMem addr
-      if realVal `equalOrUndef` val
-        then return errs
-        else return $ errs ++ [show addr ++ " did not match"]) []
-    compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
-    compareRegs real emu =
-      catMaybes $ map (viewSome (\reg ->
-        let lens = register reg
-            realVal = real^.lens
-            emuVal = emu^.lens
-         in if realVal `equalOrUndef` emuVal
-              then Nothing
-              else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
-         x86StateRegisters
-checkAndClear (False, ii) = do
-  realRegs <- lift $ lift dumpRegs
-  put (Map.empty, realRegs)
+    check (Left exception) = checkException exception
+    check (Right bool) = checkBool bool
+
+    -- | Check that exception from concrete semantics agrees with signal.
+    --
+    -- As we are able to handle more exceptions and signals we will
+    -- add more cases here. We will also want to distinguish between
+    -- non-matching and unimplemented combos.
+    checkException SM.DivideError | sig == sigFPE = return (True, [])
+    checkException exception = do
+      sig' <- liftIO' $ signalToString sig
+      let msg = "Exception/signal did not match or are unimplemented! Exception: " ++
+                 show exception ++ ", signal: " ++ sig'
+      return (False, [msg])
+
+    -- | Check that concrete-semantics-simulator state agrees with HW state.
+    --
+    -- The bool arg is false for instructions that not have concrete
+    -- semantics.
+    checkBool False | sig == sigTRAP = do
+      rip' <- getReg N.rip
+      return (True, ["No concrete semantics for instruction at " ++ show rip'])
+    checkBool True | sig == sigTRAP = do
+      realRegs <- lift $ lift dumpRegs
+      emuRegs <- dumpRegs
+      let regCmp = compareRegs realRegs emuRegs
+      memCmp <- compareMems
+      return (True, regCmp ++ memCmp)
+      where
+        compareMems = lift $ foldMem8 (\addr val errs -> do
+          realVal <- lift $ getMem addr
+          if realVal `equalOrUndef` val
+            then return errs
+            else return $ errs ++ [show addr ++ " did not match"]) []
+        compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
+        compareRegs real emu =
+          catMaybes $ map (viewSome (\reg ->
+            let lens = register reg
+                realVal = real^.lens
+                emuVal = emu^.lens
+             in if realVal `equalOrUndef` emuVal
+                  then Nothing
+                  else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
+             x86StateRegisters
+    checkBool _ = do
+      sig' <- liftIO' $ signalToString sig
+      -- XXX: this should be an error? But we still want to see the
+      -- tells.
+      return (False, ["checkAndClear.checkBool: unexpected signal: " ++ sig'])
+
+    -- | Clear the simulator state.
+    clear = do
+      realRegs <- lift $ lift dumpRegs
+      put (Map.empty, realRegs)
+
+    report [] = tell ["Instruction " ++ show ii ++ " executed successfully"]
+    report disagreements =
+      tell (("After executing instruction " ++ show ii) : disagreements)
+
+    -- TODO(conathan): make 'WriterT ...' an instance of 'MonadIO'?
+    liftIO' = lift . lift . liftIO
 
 -- | Do @waitpid@ on child with given PID and return status.
 --
@@ -665,6 +737,11 @@ waitForRes pid = do
   res <- waitpid pid []
   case res of
     Just (pid', status) -> do
+      {-
+      -- DEBUG
+      s <- statusToString status
+      hPutStrLn stderr $ "waitForRes: status = " ++ s
+      -}
       when (pid /= pid') $
         error "waitForRes: 'waitpid' returned the wrong child PID!"
       return status
