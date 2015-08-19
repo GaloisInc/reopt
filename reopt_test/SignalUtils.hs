@@ -2,7 +2,7 @@
 Module      :  $Header$
 Description :  Utilities for POSIX signals.
 Copyright   :  (c) Galois, Inc 2015
-Maintainer  :  conathan@galois.com
+Maintainer  :  Nathan Collins <conathan@galois.com>
 
 Convert signals and @waitpid@ statuses to strings.
 -}

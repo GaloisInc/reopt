@@ -13,6 +13,7 @@
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -26,18 +27,19 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Reopt.Concrete.Semantics
-       ( evalStmt
+       ( evalStmts
        , module Reopt.Reified.Semantics
        ) where
 
 import           Control.Exception (assert)
 import           Control.Monad.Cont
+import           Control.Monad.Except (MonadError, throwError)
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Data.Binary.IEEE754
-import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
+import           Data.Bits
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -223,7 +225,24 @@ bvDivOp op var ns1 ns2 = do
             _ -> CS.Undefined tr
   extendEnv var q
 
-evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+type EvalStmtConstraint m =
+  ( CS.MonadMachineState m
+  , MonadError S.ExceptionClass m
+  , MonadState Env m
+  )
+
+-- | Eval the 'Stmt's giving the semantics of a *single* instruction.
+--
+-- The 'Stmt's should give the semantics to a single instruction,
+-- because any embedded exceptions will terminate execution. So,
+-- evaluating the concatenated semantics of multiple instructions
+-- would wrongly discard the semantics of any instruction after the
+-- instruction responsible for the first exception. This could matter
+-- if the exception was handled and the program did not terminate.
+evalStmts :: EvalStmtConstraint m => [Stmt] -> m ()
+evalStmts = mapM_ evalStmt
+
+evalStmt :: forall m. EvalStmtConstraint m => Stmt -> m ()
 evalStmt (MakeUndefined x tr) =
   extendEnv x (CS.Undefined tr)
 evalStmt (Get x l) =
@@ -389,8 +408,8 @@ evalStmt (Ifte_ c t f) = do
       -- environment here should be technically unnecessary.
       env0 <- get
       if BV.nat bv /= 0
-      then mapM_ evalStmt t
-      else mapM_ evalStmt f
+      then evalStmts t
+      else evalStmts f
       put env0
 evalStmt (MemCopy bytes copies src dst reversed) = do
   case bytes of
@@ -418,12 +437,21 @@ evalStmt (MemSet n v a) = do
   vn <- evalExpr' n
   vv <- evalExpr' v
   va <- evalExpr' a
-  let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
+  let addrs = addressSequence va (CS.width vv) vn CS.false
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
 evalStmt (Primitive p) = CS.primitive p
--- TODO(conathan): implement exception handling.
-evalStmt (Exception _s1 _s2 _s3) = return ()
+-- | The exception is raised if the @mask@ is false and the
+-- @predicate@ is true.
+--
+-- When @mask@ or @predicate@ are undefined, we raise the
+-- exception. We may want to revisit this decision later, but it seems
+-- like the conservative thing to do.
+evalStmt (Exception mask predicate exception) = do
+  let cond = S.complement mask S..&. predicate
+  vCond <- evalExpr' cond
+  when (vCond  `CS.equalOrUndef` CS.true) $
+    throwError exception
 evalStmt (X87Push s) = do
   let top = N.X87TopReg
   vTop <- CS.getReg top

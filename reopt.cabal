@@ -83,6 +83,9 @@ executable reopt
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
 
+  other-modules:
+    Paths_reopt
+
   if flag(enable-hpc)
     ghc-options: -fhpc
 
@@ -111,7 +114,9 @@ executable reopt_test
   hs-source-dirs: reopt_test
   main-is: Main_reopt.hs
 
-  other-modules: SignalUtils
+  other-modules:
+    SignalUtils
+    Paths_reopt
 
   if flag(enable-hpc)
     ghc-options: -fhpc
