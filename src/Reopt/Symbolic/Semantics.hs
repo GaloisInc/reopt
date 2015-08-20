@@ -264,7 +264,14 @@ generateStmt ms (l := e) = case l of
     e' <- fmap (runReader (translateExpr' e)) get
     G.modifyReg ms (register reg .~ e')
 
-  S.MemoryAddr _ _ -> error "assign meem addr unimplemented"
+  S.MemoryAddr addr (BVTypeRepr nr) ->
+    case testEquality nr S.n8 of
+      Nothing -> error "not a byte write!"
+      Just Refl -> do
+        e' <- fmap (runReader (translateExpr' e)) get
+        addr' <- fmap (runReader (translateExpr' addr)) get
+        let upd hp = G.App $ C.SymArrayUpdate C.typeRepr C.typeRepr hp addr' e'
+        G.modifyReg ms (heap %~ upd)
 
   _ -> return ()
 --
@@ -420,6 +427,10 @@ translateApp a = case a of
   R.Trunc e w
     | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVTrunc w)
 
+  -- FIXME: crucible swaps the order of the bytes ...
+  R.ConcatV n1 n2 (GExpr e1) (GExpr e2) ->
+    case plusComm n1 n2 of
+      Refl -> GExpr . G.App $ asPosNat n1 $ asPosNat n2 $ C.BVConcat n2 n1 e2 e1
   R.UExt e w
     | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVZext w)
 

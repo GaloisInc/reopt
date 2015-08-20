@@ -490,7 +490,7 @@ instance S.Semantics Semantics where
      Just LeqProof -> tell [loc := S.uext knownNat v]
      Nothing -> error "impossible"
 
-  l .= v = tell [l := v]
+  l .= v = expandMemOps (l := v)
 
   ifte_ c trueBranch falseBranch = do
     trueStmts <- collectAndForget trueBranch
@@ -558,6 +558,7 @@ offsetAddr bits addr
                                  (LitExpr knownNat $ bits `div` 8))
   | otherwise = error "Addr bits isn't a multiple of 8"
 
+-- This needs to be here for the fresh name generation ...
 expandRead :: Variable tp -> Expr (BVType 64) -> TypeRepr tp
            -> Semantics ()
 expandRead v addr (BVTypeRepr nr) =
@@ -591,15 +592,56 @@ expandRead v addr (BVTypeRepr nr) =
           tell [Let res_v e]
           return $ VarExpr res_v
 
+expandWrite :: forall n. (9 <= n) =>
+               Expr (BVType 64) -> TypeRepr (BVType n) -> Expr (BVType n)
+            -> Semantics ()
+expandWrite addr (BVTypeRepr nr) v =
+  withDivModNat nr n8 $ \divn modn ->
+    case ( testEquality modn (knownNat :: NatRepr 0)
+         , isZeroNat divn)  of
+      (Nothing, _) -> error "Addr width not a multiple of 8"
+      (_, ZeroNat) -> error "Addr width is zero" -- (shoudn't happen)
+      (Just Refl, NonZeroNat) ->
+        case leqTrans (LeqProof :: LeqProof 1 9) (LeqProof :: LeqProof 9 n) of
+          (LeqProof :: LeqProof 1 n) -> sequence_ (go divn)
+  where
+    go :: (1 <= n) => NatRepr (divn_pred + 1) -> [Semantics ()]
+    go divn = natForEach (knownNat :: NatRepr 0) (predNat divn) $ \n ->
+           let addr'   = offsetAddr (natValue n * 8) addr
+               v_shift = AppExpr (R.BVShr sz v (LitExpr sz (natValue n * 8)))
+               v'      = AppExpr (R.Trunc v_shift S.n8)
+           in
+              tell [ S.MemoryAddr addr' S.knownType := v' ]
+    sz = exprWidth v
+
 expandMemOps :: Stmt -> Semantics ()
-expandMemOps stmt@(Get v l) =
-  S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
+expandMemOps stmt@(Get v l)
+  | S.BVTypeRepr nr <- (S.loc_type l)
+  , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr =
+      S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
   where
     memCase :: forall tp'. (Integer, Integer) -> Integer
                -> (Expr (BVType 64), TypeRepr tp') -> Semantics ()
-    memCase (low, _high) _width (addr, _) =
-      expandRead v (offsetAddr low addr) (S.loc_type l)
-      
+    memCase (low, _high) _width (addr, _) = do
+        addrv <- freshVar "addr" S.knownType
+        tell [Let addrv (offsetAddr low addr)]
+        expandRead v (VarExpr addrv) (S.loc_type l)
+
+expandMemOps stmt@(l := e) = 
+    S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
+  where
+    memCase :: forall tp'. (Integer, Integer) -> Integer
+               -> (Expr (BVType 64), TypeRepr tp') -> Semantics ()
+    memCase (low, _high) _width (addr, _)
+      | S.BVTypeRepr nr <- S.loc_type l
+      , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr = do
+        addrv <- freshVar "addr" S.knownType
+        valv  <- freshVar "val" (S.BVTypeRepr nr)
+        tell [ Let addrv (offsetAddr low addr)
+             , Let valv e ]
+        expandWrite (VarExpr addrv) (BVTypeRepr nr) (VarExpr valv)
+      | otherwise = tell [stmt]
+
 expandMemOps stmt = tell [stmt]      
 
 ------------------------------------------------------------------------
