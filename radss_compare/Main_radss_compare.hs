@@ -46,6 +46,8 @@ import           Flexdis86 (InstructionInstance(..))
 
 import           Lang.Crucible.Config (initialConfig)
 import qualified Lang.Crucible.Core as C
+import           Lang.Crucible.ExtractSubgraph
+import           Lang.Crucible.ProgramLoc
 import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
@@ -289,65 +291,128 @@ extractFirstBlock :: Memory Word64 -> Word64 -> IO Block
 extractFirstBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> error $ show err
-    Right (Left err, _) -> error $ "extractFirstBlock: Could not disassemble instruction at 0x"
+    Right (Left err, _) -> error $ "Could not disassemble instruction at 0x"
                                 ++ showHex err ""
     Right (Right (nexts, stmts), _) -> return (Block stmts Ret)
 
-simulate :: Block -> Block -> Map Word64 [Word64] -> Map Integer Integer -> IO ()
-simulate block1 block2 ripRel gprRel = do
-  out <- openFile "/tmp/sat_trans" WriteMode
+simulateCFGs :: Word64 
+            -> Map Word64 Block
+            -> Word64
+            -> Map Word64 Block
+            -> Map Word64 [Word64]
+            -> Map Integer Integer
+            -> IO ()
+simulateCFGs entry1 reifcfg1 entry2 reifcfg2 ripRel gprRel = do
   halloc <- liftST newHandleAllocator
-  C.AnyCFG cfg1 <- liftST $ translateBlock halloc block1
-  C.AnyCFG cfg2 <- liftST $ translateBlock halloc block2
+  cfg1 <- liftST $ translateFunction halloc reifcfg1 entry1
+--  case cfg1 of C.SomeCFG cfg1' -> putStrLn $ show $ C.ppCFG True cfg1'
+  cfg2 <- liftST $ translateFunction halloc reifcfg2 entry2
+--  case cfg2 of C.SomeCFG cfg2' -> putStrLn $ show $ C.ppCFG True cfg2'
+  M.foldlWithKey (\ res k v -> do
+      res
+      putStrLn $ "carving first subcfg starting at 0x" ++ showHex k ""
+      Just subCFG1 <- case cfg1 of 
+        C.SomeCFG cfg1' -> do
+          let cuts = findCuts (M.keysSet ripRel) cfg1'
+          putStrLn $ show cuts
+          liftST $ extractSubgraph cfg1' cuts (findBlock k cfg1') halloc
+      putStrLn "first subcfg found"
+      Just subCFG2 <- case v of 
+        [v'] -> case cfg2 of 
+          C.SomeCFG cfg2' -> do
+            let cuts = findCuts (S.fromList $ concat $ M.elems ripRel) cfg2'
+            putStrLn $ show cuts
+            liftST $ extractSubgraph cfg2' cuts (findBlock v' cfg2') halloc
+      putStrLn "second subcfg found"
+      simulate (showHex k "") subCFG1 subCFG2 halloc ripRel gprRel) (return ()) ripRel
 
-  case ( testEquality (C.cfgArgTypes cfg1) machineStateCtx
-       , testEquality (C.cfgArgTypes cfg2) machineStateCtx
-       , testEquality (C.cfgReturnType cfg1) machineState
-       , testEquality (C.cfgReturnType cfg2) machineState
-       ) of
-    (Just Refl, Just Refl, Just Refl, Just Refl) ->
-      withSimpleBackend' halloc $ \ctx -> do
-        let sym = ctx^.ctxSymInterface
-        (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
-        flags  <- I.emptyWordMap sym n5
-        flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
-        pc     <- I.freshConstant sym (I.BVVarType n64)
-        heap   <- I.uninterpArray sym C.typeRepr C.typeRepr
-        let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
-            struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
-            initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
-            initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
-        
-        -- Run cfg1
-        rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
-          callCFG cfg1 initialRegMap1
-        -- Run cfg2
-        rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
-          callCFG cfg2 initialRegMap2
-        -- Compare
-        case (rr1,rr2) of
-          (FinishedExecution _ (TotalRes xs1),
-           FinishedExecution _ (TotalRes xs2)) -> do
-            let gprs1 = unRV $ xs1^._2
-                gprs2 = unRV $ xs2^._2
-                flags1 = xs1^._3
-                flags2 = xs2^._3
-                flagPair = (unRV flags1, unRV flags2)
-                pc1 = xs1^._4
-                pc2 = xs2^._4
-                -- flagIdxs = [0,2,4,6,7,8,9,10,11]
-                true = I.truePred sym
-            gprsUnRel  <- I.notPred sym =<< mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
-            flagsUnEq <- I.notPred sym =<< foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
-            pcsUnRel <- I.notPred sym =<< mkRipRelation ripRel sym pc1 pc2
-            pred    <- I.orPred sym gprsUnRel =<< I.orPred sym flagsUnEq pcsUnRel
-            -- let pred = flagsEq
-            -- satisfied if there is some assignment of registers such that
-            -- relations at the end don't hold...
-            solver_adapter_write_smt2 cvc4Adapter out pred
-            putStrLn $ "Wrote to file " ++ show out
-            return ()
-          _ -> fail "Execution not finished"
+findCuts :: Set Word64 -> C.CFG blocks init MachineState -> Set (C.BlockID blocks MachineStateCtx)
+findCuts tags C.CFG{C.cfgBlockMap = blockMap} =
+  S.fromList $ catMaybes $ Ctx.toList (\block ->
+    case testEquality machineStateCtx $ C.blockInputs block of
+      Just Refl -> case getBlockStartPos block of
+        Just tag -> if S.member tag tags then Just $ C.blockID block else Nothing
+        _ -> Nothing
+      Nothing -> Nothing) blockMap
+
+findBlock :: Word64 -> C.CFG blocks init MachineState -> C.BlockID blocks MachineStateCtx
+findBlock tag C.CFG{C.cfgBlockMap = blockMap} = 
+  case catMaybes $ Ctx.toList (\block ->
+    case testEquality machineStateCtx $ C.blockInputs block of
+      Just Refl -> case getBlockStartPos block of
+        Just tag' -> if tag == tag' then Just $ C.blockID block else Nothing
+        _ -> Nothing
+      Nothing -> Nothing) blockMap of
+    (blockID : _) -> blockID
+    [] -> error $ "no block found for address 0x" ++ showHex tag ""
+  
+getBlockStartPos :: C.Block blocks init ret -> Maybe Word64
+getBlockStartPos block =
+  case plSourceLoc (case block of
+    C.Block{C.blockDiffStmts = C.ConsStmt loc _ _} -> loc
+    C.Block{C.blockDiffStmts = C.TermStmt loc _} -> loc) of
+      BinaryPos _ w -> Just w
+      _ -> Nothing
+
+simulateBlocks :: Block -> Block -> Map Word64 [Word64] -> Map Integer Integer -> IO ()
+simulateBlocks block1 block2 ripRel gprRel = do
+  halloc <- liftST newHandleAllocator
+  cfg1 <- liftST $ translateSingleBlock halloc block1
+  cfg2 <- liftST $ translateSingleBlock halloc block2
+  simulate "0" cfg1 cfg2 halloc ripRel gprRel
+
+simulate :: String
+         -> C.SomeCFG MachineStateCtx MachineState
+         -> C.SomeCFG MachineStateCtx MachineState
+         -> HandleAllocator RealWorld
+         -> Map Word64 [Word64]
+         -> Map Integer Integer
+         -> IO ()
+simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
+  out <- openFile ("/tmp/sat_trans_" ++ name) WriteMode
+  withSimpleBackend' halloc $ \ctx -> do
+    let sym = ctx^.ctxSymInterface
+    (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
+    flags  <- I.emptyWordMap sym n5
+    flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
+    pc     <- I.freshConstant sym (I.BVVarType n64)
+    heap   <- I.uninterpArray sym C.typeRepr C.typeRepr
+    let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
+        struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
+        initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
+        initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
+    -- Run cfg1
+    rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
+      callCFG cfg1 initialRegMap1
+    -- Run cfg2
+    rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
+      callCFG cfg2 initialRegMap2
+    -- Compare
+    case (rr1,rr2) of
+      (FinishedExecution _ (TotalRes xs1),
+       FinishedExecution _ (TotalRes xs2)) -> do
+        let gprs1 = unRV $ xs1^._2
+            gprs2 = unRV $ xs2^._2
+            flags1 = xs1^._3
+            flags2 = xs2^._3
+            flagPair = (unRV flags1, unRV flags2)
+            pc1 = xs1^._4
+            pc2 = xs2^._4
+            -- flagIdxs = [0,2,4,6,7,8,9,10,11]
+            true = I.truePred sym
+        gprsUnRel  <- I.notPred sym =<< mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
+        flagsUnEq <- I.notPred sym =<< foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
+        pcsUnRel <- I.notPred sym =<< mkRipRelation ripRel sym pc1 pc2
+        pred    <- I.orPred sym gprsUnRel =<< I.orPred sym flagsUnEq pcsUnRel
+        -- let pred = flagsEq
+        -- satisfied if there is some assignment of registers such that
+        -- relations at the end don't hold.  We don't have forall on
+        -- bitvectors, so we express it as an implicit exists with
+        -- negation...
+        solver_adapter_write_smt2 cvc4Adapter out pred
+        putStrLn $ "Wrote to file " ++ show out
+        return ()
+      _ -> fail "Execution not finished"
 
   where
     initWordMap sym nrKey nrVal acc i = do
@@ -448,7 +513,7 @@ showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> putStrLn $ show err
-    Right (Left err, _) -> putStrLn  $ "showSingleBlock: Could not disassemble instruction at 0x"
+    Right (Left err, _) -> putStrLn  $ "Could not disassemble instruction at 0x"
                                       ++ showHex err ""
     Right (Right (nexts, stmts), _) -> do
       putStrLn $ show nexts
@@ -479,7 +544,7 @@ compareBlocks mem1 start1 mem2 start2 = do
   where
   getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
     Left err -> fail $ show err
-    Right (Left err, _) -> fail $ "compareBlocks: Could not disassemble instruction at 0x" ++
+    Right (Left err, _) -> fail $ "Could not disassemble instruction at 0x" ++
                                     showHex err ""
     Right (Right (nexts, stmts), _) -> return (nexts, stmts)
   emptyX86State = mkX86State (\reg ->
@@ -556,8 +621,8 @@ matchChildSets sel cfg1 cfg2 mapping k1 k2
   
   | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
   , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
-  -- | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
-  -- , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
+  | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
+  , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
   | Just (Block _ (Cond c1 c1')) <- M.lookup k1 cfg1
   , Just (Block _ (Cond c2 c2')) <- M.lookup k2 cfg2 = 
       case sel cfg1 cfg2 c1 (S.fromList [c2, c2']) of
@@ -621,6 +686,7 @@ blockTermFuzzyMatches (Block _ (Fallthrough _)) (Block _ (Fallthrough _)) = True
 blockTermFuzzyMatches (Block _ (Call _ _)) (Block _ (Call _ _)) = True
 blockTermFuzzyMatches (Block _ Ret) (Block _ Ret) = True
 blockTermFuzzyMatches (Block _ (Cond _ _)) (Block _ (Cond _ _)) = True
+blockTermFuzzyMatches (Block _ Indirect) (Block _ Indirect) = True
 blockTermFuzzyMatches _ _ = False
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
@@ -648,11 +714,22 @@ main = do
       showSingleBlock mem (elfEntry e)
     SymExec -> case args^.programPaths of
       [path1, path2] -> do
-        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
-        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
+--        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
+--        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
+        (mem1, entry1) <- getMemAndEntry args path1 addr1
+        (mem2, entry2) <- getMemAndEntry args path2 addr2
+        let cfg1 = case findBlocks mem1 entry1 of
+                     Left err -> error err
+                     Right res -> res
+        let cfg2 = case findBlocks mem2 entry2 of
+                     Left err -> error err
+                     Right res -> res
+
+--        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
+--        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
         ripMap <- fmap read $ readFile $ args^.ripFile 
         gprMap <- fmap read $ readFile $ args^.gprsFile
-        simulate block1 block2 ripMap gprMap
+        simulateCFGs entry1 cfg1 entry2 cfg2 ripMap gprMap
       _      -> fail "usage: filename1 filename2"
     FindBlocks -> do
       e <- case args^.programPaths of

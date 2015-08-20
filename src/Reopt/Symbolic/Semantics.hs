@@ -36,7 +36,11 @@ module Reopt.Symbolic.Semantics
        , module Lang.Crucible.FunctionHandle
        , argTypes
        , retType
-       , translateBlock
+       , translateSingleBlock
+       , translateFunction
+       , MachineCtx
+       , MachineState
+       , MachineStateCtx
        , machineCtx
        , machineState
        , machineStateCtx
@@ -88,6 +92,7 @@ import           Lang.Crucible.Solver.SimpleBuilder
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.SSAConversion (toSSA)
 import qualified Lang.Crucible.Types as Cr
+import           Numeric (showHex)
 import           Reopt.BasicBlock.FunctionCFG
 import           Reopt.Object.Memory
 import qualified Reopt.CFG.Representation as R
@@ -117,17 +122,6 @@ data Env s = Env { vars :: MapF Var (G.Atom s), blocks :: Map Word64 (G.Label s)
 insertVar :: Var tp -> G.Atom s tp -> Env s -> Env s
 insertVar v a env = env {vars = MapF.insert v a (vars env)}
 -- FIXME: lenses?
-
-getLabel :: Word64 -> G.End s Env init MachineState (G.Label s)
-getLabel addr = do
-  env <- get
-  let bm = blocks env
-  case Map.lookup addr bm of
-    Just l -> return l
-    Nothing -> do
-      l <- G.newLabel
-      put $ env {blocks = Map.insert addr l bm}
-      return l
 
 data Var tp = Var !(Cr.TypeRepr tp) !Name
 type Name = String
@@ -232,34 +226,82 @@ register reg =
       _                 -> error $ "unimplemented RegisterName" ++ show reg
 
 
-translateBlock :: HandleAllocator s
-               -> Block
-               -> ST s C.AnyCFG
-translateBlock halloc block = do
+translateSingleBlock :: HandleAllocator s
+                     -> Block
+                     -> ST s (C.SomeCFG MachineStateCtx MachineState)
+translateSingleBlock halloc block = do
   fnH <- mkHandle' halloc "testBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkDefn block
-  case toSSA g of
-    C.SomeCFG g_ssa -> return (C.AnyCFG g_ssa)
+  return $ toSSA g
 
 mkDefn :: Block -> G.FunctionDef Env MachineStateCtx MachineState
 mkDefn (Block stmts term) assn = (s, f)
   where s = Env {vars = MapF.empty, blocks = Map.empty, trackedRip = 0}
         f = do
           ms <- G.newReg $ G.AtomExpr $ assn^._1
-          trace (show $ ppStmts stmts) $ mapM_ (generateStmt ms) stmts
-          generateTerm ms term
+          let getLabel w = do
+                l <- G.newLabel
+                G.defineBlock l $ G.returnFromFunction =<< G.readReg ms
+                return l
+          trace (show $ ppStmts stmts) $ mapM_ (generateStmt ms getLabel) stmts
+          generateTerm ms getLabel term
           G.returnFromFunction =<< G.readReg ms
 
-generateStmt :: forall s.
-                (G.Reg s MachineState)
+translateFunction :: HandleAllocator s
+                  -> Map Word64 Block
+                  -> Word64
+                  -> ST s (C.SomeCFG MachineStateCtx MachineState)
+translateFunction halloc blockMap entry = do
+  fnH <- mkHandle' halloc "entryBlock" machineStateCtx machineState
+  (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkFunctionDefn entry blockMap
+  return $ toSSA g
+
+mkFunctionDefn :: Word64
+               -> Map Word64 Block
+               -> G.FunctionDef Env MachineStateCtx MachineState
+mkFunctionDefn entry  map assn = (s,f)
+  where s = Env {vars = MapF.empty, blocks = Map.empty, trackedRip = 0}
+        f = do
+          ms <- G.newReg $ G.AtomExpr $ assn^._1
+          let getLabel w = do
+              env <- get
+              let labelMap = blocks env
+              case Map.lookup w labelMap of
+                Just label -> return label
+                Nothing ->
+                  case Map.lookup w map of
+                    Just b -> do
+                      label <- G.newLabel
+                      put $ env{blocks = Map.insert w label labelMap}
+                      G.defineBlock label $ do
+                        G.setPosition $ BinaryPos "__BINARY__" w
+                        generateBlock ms getLabel b
+                      return label
+                    Nothing -> error $ "Unknown block entry 0x" ++ showHex w " in getLabel!"
+          G.setPosition $ BinaryPos "__BINARY__" entry
+          generateBlock ms getLabel (map Map.! entry)
+          G.readReg ms
+
+
+generateBlock :: (G.Reg s MachineState)
+              -> (Word64 -> G.End s Env init MachineState (G.Label s))
+              -> Block
+              -> G.Generator s Env MachineState ()
+generateBlock ms getLabel (Block stmts term) = do
+  mapM_ (generateStmt ms getLabel) stmts
+  generateTerm ms getLabel term
+  
+
+generateStmt :: (G.Reg s MachineState)
+             -> (Word64 -> G.End s Env init MachineState (G.Label s))
              -> Stmt
              -> G.Generator s Env MachineState ()
 
-generateStmt ms (S.Register N.IPReg := LitExpr nr i) = do
+generateStmt ms getLabel (S.Register N.IPReg := LitExpr nr i) = do
   G.modifyReg ms (curIP .~ G.App (C.BVLit nr i))
   modify $ \env -> env {trackedRip = fromIntegral i}
 --
-generateStmt ms (l := e) = case l of
+generateStmt ms getLabel (l := e) = case l of
   S.Register reg -> do
     e' <- fmap (runReader (translateExpr' e)) get
     G.modifyReg ms (register reg .~ e')
@@ -275,20 +317,20 @@ generateStmt ms (l := e) = case l of
 
   _ -> return ()
 --
-generateStmt ms (Get v l) = do
+generateStmt ms getLabel (Get v l) = do
   a <- G.mkAtom =<< translateLocGet ms l
   modify $ insertVar (translateVar v) a
 --
-generateStmt _ms (Let v e) = do
+generateStmt _ms getLabel (Let v e) = do
   e' <- G.mkAtom =<< fmap (runReader (translateExpr' e)) get  
   modify $ insertVar (translateVar v) e'
 --
-generateStmt _ms (MakeUndefined v tr) = case tr of
+generateStmt _ms getLabel (MakeUndefined v tr) = case tr of
   BVTypeRepr nr -> do
     a <- G.mkAtom . G.App $ asPosNat nr (C.BVUndef nr)
     modify (insertVar (translateVar v) a)
 --
-generateStmt _ms (Ifte_ e s1s s2s) =
+generateStmt _ms getLabel (Ifte_ e s1s s2s) =
   case (s1s, s2s) of
     -- This is the pattern we generate for Jcc, so we know that it's the end of
     -- a block... it's a bit of a hack
@@ -299,22 +341,21 @@ generateStmt _ms (Ifte_ e s1s s2s) =
         branchTrampoline <- G.newLabel
         nextRip <- fmap trackedRip get
         fallthroughLabel <- getLabel nextRip
-        
         G.endCurrentBlock (G.Br a branchTrampoline fallthroughLabel)
         G.defineBlock branchTrampoline $ do
-          mapM_ (generateStmt _ms) s1s
+          G.setPosition $ InternalPos
+          mapM_ (generateStmt _ms getLabel) s1s
           G.endNow $ \c -> do
             branchLabel <- getLabel $ nextRip + fromIntegral i
-            G.defineBlock branchLabel $ G.returnFromFunction =<< G.readReg _ms
             G.endCurrentBlock (G.Jump branchLabel)
-        G.defineBlock fallthroughLabel $ G.returnFromFunction =<< G.readReg _ms
 
     _ -> do 
       e' <- fmap (G.App . C.BVNonzero n1 . runReader (translateExpr' e)) get
-      G.ifte_ e' (mapM_ (generateStmt _ms) s1s) (mapM_ (generateStmt _ms) s2s)
-    
+      G.setPosition InternalPos
+      G.ifte_ e' (mapM_ (generateStmt _ms getLabel) s1s) (mapM_ (generateStmt _ms getLabel) s2s)
+
 --
-generateStmt _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
+generateStmt _ _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case:"
                                       , show (ppStmt stmt)
                                       ]
 
@@ -351,21 +392,27 @@ translateLocGet ms ll@(S.UpperHalf l) = do
   withLeqProof (leqAdd (leqProof (knownNat::NatRepr 1) hw) hw) $ return $ G.App $ C.BVSelect hw hw w e
 
 generateTerm :: (G.Reg s MachineState)
+             -> (Word64 -> G.End s Env init MachineState (G.Label s))
              -> Term
              -> G.Generator s Env MachineState ()
-generateTerm ms Ret = return ()
-generateTerm ms (Cond _ _) = return () -- handled in a special case for Ifte
-generateTerm ms (Fallthrough w) = do
+generateTerm ms getLabel Ret = do
+  G.returnFromFunction =<< G.readReg ms
+generateTerm ms getLabel (Cond _ _) = return () -- handled in a special case for Ifte
+generateTerm ms getLabel (Fallthrough w) = do
   G.endNow $ \c -> do
     l <- getLabel w
     G.endCurrentBlock (G.Jump l)
-generateTerm ms (Direct w) = do
+generateTerm ms getLabel (Direct w) = do
   G.endNow $ \c -> do
     l <- getLabel w
+    G.endCurrentBlock (G.Jump l)
+generateTerm ms getLabel (Call _ ret) = do
+  G.endNow $ \c -> do 
+    l <- getLabel ret
     G.endCurrentBlock (G.Jump l)
   
 --
-generateTerm ms t = error $ "generateTerm: unimplemented case: " ++ show t
+generateTerm ms getLabel t = error $ "generateTerm: unimplemented case: " ++ show t
 
 
 type family F (tp :: Type) :: C.CrucibleType where
