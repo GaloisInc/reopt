@@ -43,7 +43,7 @@ PASSES=0
 FAILS=0
 for file in ${BIN_NAMES}; do
   echo -n "${file}..."
-  if ! ${REOPT_TEST_BIN} -t ${FUZZ_BIN_DIR}/${file} > ${RUN_LOG_DIR}/${file}.log 2>&1; then
+  if ${REOPT_TEST_BIN} -t ${FUZZ_BIN_DIR}/${file} > ${RUN_LOG_DIR}/${file}.log 2>&1; then
     PASSES=$((PASSES+1))
     echo "passed."
   else
@@ -52,6 +52,6 @@ for file in ${BIN_NAMES}; do
   fi
 done
 
-echo "$PASSES tests passed."
-echo "$FAILS tests failed."
+echo "${PASSES} tests passed."
+echo "${FAILS} tests failed."
 
