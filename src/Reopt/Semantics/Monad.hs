@@ -627,7 +627,8 @@ class IsValue (v  :: Type -> *) where
   -- | Whether roundup occurs when converting between FP formats
   fpCvtRoundsUp :: FloatInfoRepr flt -> FloatInfoRepr flt' -> v (FloatType flt) -> v BoolType
 
-  -- | Convert a signed vitvector to a float.
+  -- | Convert a signed integer to a float. (e.g. 255 -> 255.0)
+  -- (see x86_64 CVTSI2SD instruction)
   -- We assume that the floating point representation is large enough to hold
   -- all the values at that bitwidth.
   fpFromBV :: FloatInfoRepr flt -> v (BVType n) -> v (FloatType flt)

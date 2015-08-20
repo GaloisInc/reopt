@@ -668,8 +668,17 @@ convertBVtoFP c fr = CS.liftValue wrap nr c
     --
     wrap :: BV -> BV
     wrap bv = case width of
-      32 -> floatToBV width $ bvToFloat bv
-      64 -> doubleToBV width $ bvToDouble bv
+      32 -> let toBV :: Float -> BV
+                toBV = BV.bitVec width . fromIntegral . floatToWord
+                mkFP :: BV -> Float
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      64 -> let toBV :: Double -> BV
+                toBV = BV.bitVec width . fromIntegral . doubleToWord
+                mkFP :: BV -> Double
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
       _  -> error "Sorry, 32 or 64 bit floats only"
 
 convertFP :: FloatInfoRepr flt1
