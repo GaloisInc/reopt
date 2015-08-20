@@ -328,9 +328,8 @@ simulate block1 block2 ripRel gprRel = do
         case (rr1,rr2) of
           (FinishedExecution _ (TotalRes xs1),
            FinishedExecution _ (TotalRes xs2)) -> do
-            let gprs1 = xs1^._2
-                gprs2 = xs2^._2
-                gprPair = (unRV gprs1, unRV gprs2)
+            let gprs1 = unRV $ xs1^._2
+                gprs2 = unRV $ xs2^._2
                 flags1 = xs1^._3
                 flags2 = xs2^._3
                 flagPair = (unRV flags1, unRV flags2)
