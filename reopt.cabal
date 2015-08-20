@@ -62,7 +62,7 @@ library
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
 
-  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
@@ -89,7 +89,7 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
@@ -117,7 +117,7 @@ executable reopt_test
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall -fcontext-stack=50000
+  ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
