@@ -670,7 +670,6 @@ singleInstructionTest = do
                           tell [UnexpectedStatus "Main_reopt.instTest" str]
          _ -> do
            tell [Impossible $ "child stopped: " ++ show status]
-           singleInstructionTest
   where
     liftIO' = lift . lift . liftIO
 
