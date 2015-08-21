@@ -1,0 +1,18 @@
+radss_compare <FILENAME1> --addr1 <FUNCTIONADDR1> <FILENAME2> --addr2
+<FUNCTIONADDR2> --rip <RIPMAPFILE> --gpr <GPRMAPFILE>
+
+produces a file in /tmp/ for each entry in <RIPMAPFILE> that is an SMT formula
+satisfiable if there is an assignment of initial register values obeying
+<GPRMAPFILE> such that the final values do not obey <GPRMAPFILE>
+
+This doesn't necessarily mean the programs are not equivalent in principle - the
+mapping of registers is not always consistent throughout a function, especially
+near the beginning and end.
+
+Known working cases as of 8/21/2015:
+xorshift.1234 and xorshift.123456, /tmp/sat_trans_401036 and
+/tmp/sat_trans_40101b
+
+fib_test.1234 and fib_test.123456, /tmp/sat_trans_401054
+
+
