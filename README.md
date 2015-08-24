@@ -40,3 +40,11 @@ match" warnings before and after your change:
 ```
  reopt_test examples/thttpd 2>&1 | grep 'did not match' | wc -l
 ```
+
+## Testing with `run-tests.sh`
+
+`reopt_test` can also be run with `run-tests.sh`. The script will generate
+single instruction tests using the [fuzzer](https://github.com/GaloisInc/fuzz64)
+and then execute them. Called with no arguments, the script will generate 1 test
+of each iform and run `reopt_test` over all of them. There is also the `-s` flag
+which takes the name of a test to run, for testing a single iform only.
