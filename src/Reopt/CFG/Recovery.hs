@@ -13,6 +13,7 @@ module Reopt.CFG.Recovery
   , FnAssignRhs(..)
 
   , recoverFunction
+  , identifyCall
   ) where
 
 import Control.Lens
@@ -22,8 +23,10 @@ import Data.Int (Int64)
 import Data.Foldable as Fold (toList, traverse_)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes)
 import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import Data.Parameterized.Some
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
@@ -35,13 +38,51 @@ import Data.Word
 import Numeric (showHex)
 import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import Reopt.CFG.FnRep
 import Reopt.CFG.InterpState
 import Reopt.CFG.Representation
+import Reopt.CFG.StackHeight
 import qualified Reopt.Machine.StateNames as N
 import Reopt.Machine.Types
 import Reopt.Object.Memory
 
 import Debug.Trace
+
+-- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
+-- with a write having the given type.
+isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
+isWriteTo (Write (MemLoc a _) val) expected tp
+  | Just _ <- testEquality a expected
+  , Just Refl <- testEquality (valueType val) tp =
+    Just val
+isWriteTo _ _ _ = Nothing
+
+-- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
+-- a single address to a marked executable in @mem@ to @addr@.
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo mem s sp
+  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
+  , isCodeAddr mem (fromInteger val)
+  = Just (fromInteger val)
+isCodeAddrWriteTo _ _ _ = Nothing
+
+
+-- | Attempt to identify the write to a stack return address, returning
+-- instructions prior to that write and return  values.
+identifyCall :: Memory Word64
+             -> [Stmt]
+             -> X86State Value
+             -> Maybe (Seq Stmt, Word64)
+identifyCall mem stmts0 s = go (Seq.fromList stmts0)
+  where next_sp = s^.register N.rsp
+        go stmts =
+          case Seq.viewr stmts of
+            Seq.EmptyR -> Nothing
+            prev Seq.:> stmt
+              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
+                Just (prev, ret)
+              | Write{} <- stmt -> Nothing
+              | otherwise -> go prev
 
 ------------------------------------------------------------------------
 -- Function definitions
@@ -60,7 +101,6 @@ data FnBlock
              , fbStmts :: ![FnStmt]
              , fbTerm :: !(FnTermStmt)
              }
-
 
 instance Pretty FnBlock where
   pretty b =
@@ -91,106 +131,48 @@ instance Pretty FnTermStmt where
       FnTermStmtUndefined -> text "undefined term"
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
 
-data FnAssignment tp
-   = FnAssignment { fnAssignId :: !AssignId
-                  , fnAssignRhs :: !(FnAssignRhs tp)
-                  }
-
--- | The right-hand side of a function assingment statement.
-data FnAssignRhs (tp :: Type) where
-  -- An expression with an undefined value.
-  FnSetUndefined :: !(NatRepr n) -- Width of undefined value.
-                 -> FnAssignRhs (BVType n)
-  FnReadMem :: !(FnValue (BVType 64))
-            -> !(TypeRepr tp)
-            -> FnAssignRhs tp
-  FnEvalApp :: !(App FnValue tp)
-            -> FnAssignRhs tp
-  FnAlloca :: !(FnValue (BVType 64))
-           -> FnAssignRhs (BVType 64)
-
--- | A function value.
-data FnValue (tp :: Type) where
-  FnValueUnsupported :: FnValue tp
-  FnConstantValue :: NatRepr n -> Integer -> FnValue (BVType n)
-  -- Value from an assignment statement.
-  FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
-  -- The entry pointer to a function.
-  FnFunctionEntryValue :: Word64 -> FnValue (BVType 64)
-  -- A pointer to an internal block.
-  FnBlockValue :: Word64 -> FnValue (BVType 64)
-  -- This register comes from an integer argument.
-  FnIntArg :: Int -> FnValue (BVType 64)
-
-
-instance Pretty (FnValue tp) where
-  pretty FnValueUnsupported = text "unsupported"
-
 ------------------------------------------------------------------------
--- StackHeight
-
--- | Describe the amount of space needed to allocate for the stack.
--- The first parameter is a constant, the remaining values are the
--- set of stack locations accessed.  The height of the stack must be
--- at least as large as each value in the set.
-data StackHeight = StackHeight Int64 (Set (Value (BVType 64)))
-
--- | Create a stack height from a single value.
-valueAsStackHeight :: Value (BVType 64) -> StackHeight
-valueAsStackHeight x
-  | Just xc <- asInt64Constant x = StackHeight (min xc 0) Set.empty
-  | otherwise = StackHeight 0 (Set.singleton x)
-
--- | Conjoin two stack heights to compute the maximum height.
-mergeStackHeight :: StackHeight -> StackHeight -> StackHeight
-mergeStackHeight (StackHeight xc xs) (StackHeight yc ys) =
-  StackHeight (min xc yc) (Set.union xs ys)
+-- StackDelta
 
 -- | This code is reponsible for parsing the statement to determine
 -- what code needs to be added to support an alloca at the beginning
 -- of the block.
-recoverStmtStackHeight :: Stmt -> State StackHeight ()
-recoverStmtStackHeight s = do
+recoverStmtStackDelta :: Stmt -> State StackDelta ()
+recoverStmtStackDelta s = do
   case s of
-    Write (MemLoc addr _) val
-      | Just offset <- asStackAddrOffset addr -> do
-        modify $ mergeStackHeight (valueAsStackHeight offset)
+    Write (MemLoc addr _) val ->
+      modify $ mergeStackDelta addr 0 False
+
     _ -> do
       return ()
 
-recoverTermStmtStackHeight :: TermStmt -> State StackHeight ()
-recoverTermStmtStackHeight (FetchAndExecute s) =
-  case asStackAddrOffset (s ^. register N.rsp) of
-    Nothing ->
-      trace "Could not intepret stack height" $ do
-        return ()
-    Just offset -> do
-      modify $ mergeStackHeight (valueAsStackHeight offset)
-recoverTermStmtStackHeight _ = do
+recoverTermStmtStackDelta :: TermStmt -> State StackDelta ()
+recoverTermStmtStackDelta (FetchAndExecute s) =
+  modify $ mergeStackDelta (s ^. register N.rsp) 0 True
+recoverTermStmtStackDelta _ = do
   return ()
 
-------------------------------------------------------------------------
--- FnStack
+computeAllocSize :: State StackDelta () -> Recover ()
+computeAllocSize action = do
+  stk <- getCurStack
+  let dt0 = initStackDelta stk
+      dt = execState action dt0
+  case stackDeltaAllocSize dt of
+    Just sz -> do
+      fnAssign <- mkFnAssign (FnAlloca sz)
+      addFnStmt $ FnAssignStmt fnAssign
+      -- Update the stack to reflect the allocation.
+      modifyCurStack $ recordStackAlloca sz
+    Nothing -> do
+      return ()
 
--- | This stores information about the current stack when working on function
--- identification.
-data FnStack = UndefinedFnStack
-
-initFnStack :: FnStack
-initFnStack = UndefinedFnStack
-
--- | Given information about the stack and a offset into the stack, return
--- a function value denoting the given location.
-stackOffsetAddr :: FnStack -> Value (BVType 64) -> FnValue (BVType 64)
-stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
- FnValueUnsupported
 
 ------------------------------------------------------------------------
 -- RecoverState
 
 data FnRegValue cl where
   -- This is a callee saved register.
-  CalleeSaved :: N.RegisterName cl -> FnRegValue cl
+  CalleeSaved :: N.RegisterName 'N.GP -> FnRegValue 'N.GP
   -- A value assigned to a register
   FnRegValue :: !(FnValue (BVType (N.RegisterClassBits cl))) -> FnRegValue cl
 
@@ -254,6 +236,14 @@ getCurStack = do
     Nothing -> error "Current stack undefined."
     Just stk -> return stk
 
+modifyCurStack :: (FnStack -> FnStack) -> Recover ()
+modifyCurStack f = do
+  lbl  <- use rsCurLabel
+  m_stk <- uses rsStackMap (Map.lookup lbl)
+  case m_stk of
+    Nothing -> error "Current stack undefined."
+    Just stk -> rsStackMap . at lbl .= Just (f stk)
+
 -- | Return value bound to register (if any)
 getCurRegs :: Recover (MapF N.RegisterName FnRegValue)
 getCurRegs = do
@@ -295,6 +285,14 @@ addFrontier lbl regs stk = do
 lookupInitialReg :: N.RegisterName cl -> Recover (Maybe (FnRegValue cl))
 lookupInitialReg reg = MapF.lookup reg <$> getCurRegs
 
+{-
+regMapFromState :: X86State f -> MapF N.RegisterName f
+regMapFromState s =
+  MapF.fromList [ MapF.Pair nm (s^.register nm)
+                | Some nm <- x86StateRegisters
+                ]
+-}
+
 ------------------------------------------------------------------------
 -- recoverFunction
 
@@ -316,10 +314,10 @@ recoverFunction s a = do
                & MapF.insert N.r15 (CalleeSaved N.r15)
                & MapF.insert N.rbp (CalleeSaved N.rbp)
   let rs = RS { _rsInterp = s
-              , _rsBlocks = Map.empty
+              , _rsBlocks   = Map.empty
               , _rsFrontier = Set.empty
               , _rsNextAssignId = 0
-              , _rsRegMap   = Map.empty
+              , _rsRegMap    = Map.empty
               , _rsStackMap  = Map.empty
               , _rsCurLabel  = GeneratedBlock 0 0
               , _rsCurStmts  = Seq.empty
@@ -345,6 +343,11 @@ recoverIter = do
       rsFrontier %= Set.delete lbl
       rsBlocks   %= Map.insert lbl b
 
+regValuePair :: N.RegisterName cl
+             -> FnValue (BVType (N.RegisterClassBits cl))
+             -> Recover (Maybe (MapF.Pair N.RegisterName FnRegValue))
+regValuePair nm v = return $ Just $ MapF.Pair nm (FnRegValue v)
+
 recoverBlock :: BlockLabel
              -> Recover FnBlock
 recoverBlock lbl = do
@@ -356,29 +359,68 @@ recoverBlock lbl = do
   -- Get original block for address.
   Just b <- uses (rsInterp . blocks) (`lookupBlock` lbl)
 
-  -- Compute stack height
-  let ht0 = StackHeight 0 Set.empty
-      ht = flip execState ht0 $ do
-             Fold.traverse_ recoverStmtStackHeight (blockStmts b)
-             recoverTermStmtStackHeight (blockTerm b)
-  case ht of
-    StackHeight c s
-      | c == 0 && Set.null s ->
-        return ()
-      | Set.null s -> do
-        let sz = FnConstantValue n64 (toInteger (negate c))
-        fnAssign <- mkFnAssign (FnAlloca sz)
-        addFnStmt $ FnAssignStmt fnAssign
-      | otherwise ->
-        trace "Unsupported stack height" $ return ()
 
-  Fold.traverse_ recoverStmt (blockStmts b)
-  term <- recoverTermStmt (blockTerm b)
-  stmts <- use rsCurStmts
-  return $! FnBlock { fbLabel = lbl
-                    , fbStmts = Fold.toList stmts
-                    , fbTerm = term
-                    }
+  -- Compute stack height
+  computeAllocSize $ do
+    Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+    recoverTermStmtStackDelta (blockTerm b)
+
+  mem <- uses rsInterp memory
+  case blockTerm b of
+    Branch c x y -> do
+      computeAllocSize $ do
+        Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+        recoverTermStmtStackDelta (blockTerm b)
+      Fold.traverse_ recoverStmt (blockStmts b)
+      cv <- recoverValue "branch_cond" c
+      regs <- getCurRegs
+      stk  <- getCurStack
+      addFrontier x regs stk
+      addFrontier y regs stk
+      stmts <- uses rsCurStmts Fold.toList
+      return $! FnBlock { fbLabel = lbl
+                        , fbStmts = stmts
+                        , fbTerm = FnBranch cv x y
+                        }
+    FetchAndExecute s
+        -- The last statement was a call.
+      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) s -> do
+        -- Compute any allocations that need to occur.
+        computeAllocSize $ do
+          Fold.traverse_ recoverStmtStackDelta prev_stmts
+          modify $ mergeStackDelta (s ^. register N.rsp) 8 True
+
+        Fold.traverse_ recoverStmt prev_stmts
+        stk <- getCurStack
+        reg_pairs <- forM x86StateRegisters $ \(Some reg_name) -> do
+          case () of
+            _ | Just Refl <- testEquality reg_name N.IPReg -> do
+              regValuePair reg_name $ FnConstantValue knownNat (toInteger ret_addr)
+            _ | otherwise -> do
+              return $ Nothing
+        addFrontier (GeneratedBlock ret_addr 0) (MapF.fromList (catMaybes reg_pairs)) stk
+        fn_stmts <- uses rsCurStmts Fold.toList
+        return $! FnBlock { fbLabel = lbl
+                          , fbStmts = fn_stmts
+                          , fbTerm = FnTermStmtUndefined
+                          }
+    _ -> do
+      trace ("recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do
+      computeAllocSize $ do
+        Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+        recoverTermStmtStackDelta (blockTerm b)
+      Fold.traverse_ recoverStmt (blockStmts b)
+      stmts <- uses rsCurStmts Fold.toList
+      return $! FnBlock { fbLabel = lbl
+                        , fbStmts = stmts
+                        , fbTerm = FnTermStmtUndefined
+                        }
+
+recoverWrite :: Value (BVType 64) -> Value tp -> Recover ()
+recoverWrite addr val = do
+  r_addr <- recoverAddr addr
+  r_val  <- recoverValue "write_val" val
+  addFnStmt $ FnWriteMem r_addr r_val
 
 -- | This should add code as needed to support the statement.
 recoverStmt :: Stmt -> Recover ()
@@ -400,39 +442,23 @@ recoverStmt s =
         _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
           return ()
     Write (MemLoc addr _) val
-      | Just int_addr_off <- asStackAddrOffset addr
-      , Initial reg <- val -> do
-        stk <- getCurStack
+      | Initial reg <- val -> do
         m_reg_val <- lookupInitialReg reg
         case m_reg_val of
-          Just (CalleeSaved _) -> do
-            -- TODO: Update stack with this information.
-            return ()
+          Just (CalleeSaved saved_reg) -> do
+            case asStackAddrOffset addr of
+              Just int_addr_off -> do
+                modifyCurStack $ recordCalleeSavedWrite int_addr_off saved_reg
+              Nothing -> trace "Could not interpret callee saved offset" $ do
+                recoverWrite addr val
           _ -> do
-            let r_addr = stackOffsetAddr stk int_addr_off
-            r_val  <- recoverValue "write_val" val
-            addFnStmt $ FnWriteMem r_addr r_val
+            recoverWrite addr val
       | otherwise -> do
-        r_addr <- recoverAddr addr
-        r_val  <- recoverValue "write_val" val
-        addFnStmt $ FnWriteMem r_addr r_val
+        recoverWrite addr val
     Comment msg -> do
       addFnStmt $ FnComment msg
     _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
       return ()
-
-recoverTermStmt :: TermStmt -> Recover FnTermStmt
-recoverTermStmt s =
-  case s of
-    Branch c x y -> do
-      cv <- recoverValue "branch_cond" c
-      regs <- getCurRegs
-      stk  <- getCurStack
-      addFrontier x regs stk
-      addFrontier y regs stk
-      return $! FnBranch cv x y
-    _ -> trace ("recoverTermStmt undefined for " ++ show (pretty s)) $ do
-      return $ FnTermStmtUndefined
 
 recoverAddr :: Value (BVType 64) -> Recover (FnValue (BVType 64))
 recoverAddr v = recoverValue "addr" v
@@ -443,7 +469,7 @@ recoverValue nm v = do
   mem <- uses rsInterp memory
   case v of
     _ | Just int_addr_off <- asStackAddrOffset v -> do
-      trace ("recoverValue encounted stack offset: " ++ show int_addr_off) $ do
+      trace ("recoverValue encountered stack offset: " ++ show int_addr_off) $ do
       return $ FnValueUnsupported
 
     BVValue w i

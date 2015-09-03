@@ -21,14 +21,15 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ImpredicativeTypes #-}
-
 module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
   ) where
 
+import           Control.Exception (assert)
 import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Maybe (isJust)
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
 import           GHC.TypeLits (KnownNat)
 import           Debug.Trace
@@ -139,7 +140,8 @@ getSomeBVLocation v =
   case v of
     F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
     F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
+    F.MMXReg mmx        ->
+      return $ SomeBV $ TruncLoc (Register $ N.mmxFromFlexdis mmx) n64
     F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
     F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
     F.FarPointer _      -> fail "FarPointer"
@@ -173,11 +175,14 @@ getSomeBVLocation v =
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
 
+{-
     mk64 :: forall m n. (FullSemantics m, SupportedBVWidth n)
        => MLocation m (BVType n)
        -> m (SomeBV (MLocation m))
     mk64 l
-      | Just LeqProof <- testLeq (addNat n1 n64) (loc_width l) = return $ SomeBV $ TruncLoc l n64
+      | Just LeqProof <- testLeq (addNat n1 n64) (loc_width l) =
+        return $ SomeBV $ TruncLoc l n64
+-}
 
 checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
@@ -215,9 +220,32 @@ truncateBVValue n (SomeBV v)
       return (bvTrunc n v)
   | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
+-- | Given a bitvector
+truncateBVLocation :: forall addr n
+                    . (1 <= n)
+                   => SomeBV (Location addr)
+                      -- ^ The location to truncate
+                   -> NatRepr n
+                      -- ^ The width of the resulting type.
+                   -> Location addr (BVType n)
+truncateBVLocation (SomeBV l) tgt_width = truncateBVLocation' l tgt_width
 
-truncateBVLocation :: (1 <= n) => SomeBV (Location addr) -> NatRepr n -> Location addr (BVType n)
-truncateBVLocation (SomeBV l) tgt
+-- | Given a bitvector
+truncateBVLocation' :: forall addr m n
+                    . (1 <= n)
+                    => Location addr (BVType m)
+                       -- ^ The location to truncate
+                    -> NatRepr n
+                       -- ^ The width of the resulting type.
+                    -> Location addr (BVType n)
+truncateBVLocation' (MemoryAddr a (BVTypeRepr src_width)) tgt_width =
+  assert (isJust (testLeq tgt_width src_width)) $
+    MemoryAddr a (BVTypeRepr tgt_width)
+truncateBVLocation' (TruncLoc l w) tgt_width =
+  truncateBVLocation' l tgt_width
+truncateBVLocation' (LowerHalf l) tgt_width =
+  truncateBVLocation' l tgt_width
+truncateBVLocation' l tgt
   | Just Refl <- testEquality tgt (loc_width l) = l
   | Just LeqProof <- testLeq (incNat tgt) (loc_width l) =
     TruncLoc l tgt

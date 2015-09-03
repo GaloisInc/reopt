@@ -38,11 +38,13 @@ library
     Reopt.Analysis.Domains.DiffEquations
     Reopt.Analysis.Domains.StridedInterval
     Reopt.CFG.CFGDiscovery
+    Reopt.CFG.FnRep
     Reopt.CFG.Implementation
     Reopt.CFG.InterpState
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.Representation
+    Reopt.CFG.StackHeight
     Reopt.Machine.StateNames
     Reopt.Machine.Types
     Reopt.Machine.X86State

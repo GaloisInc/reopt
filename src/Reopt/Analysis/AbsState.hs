@@ -13,6 +13,7 @@ module Reopt.Analysis.AbsState
   , absBlockDiff
 --  , shiftSpecificOffset
   , setAbsIP
+  , absStackHasReturnAddr
   , AbsBlockStack
   , StackEntry(..)
   , AbsValue(..)
@@ -51,6 +52,7 @@ import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Int
+import           Data.List (find)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -198,16 +200,23 @@ instance Show (AbsValue tp) where
 instance Pretty (AbsValue tp) where
   pretty (FinSet s) = ppIntegerSet s
   pretty (CodePointers s) = text "code" <+> ppIntegerSet s
+
   pretty (StridedInterval s) = pretty s
   pretty (SubValue n av) = (pretty av) <> brackets (integer (natValue n))
-  pretty (StackOffset a    s) = text ("rsp_" ++ shows (Hex a) " + ") <> ppIntegerSet s
+  pretty (StackOffset a    s) = ppSet ppv s
+    where ppv v' | v' >= 0   = text ("rsp_" ++ shows (Hex a) " + " ++ show (Hex v'))
+                 | otherwise = text ("rsp_" ++ shows (Hex a) " - " ++ show (Hex (negate v')))
+
   pretty (SomeStackOffset a) = text ("rsp_" ++ shows (Hex a) " + ?")
   pretty TopV = text "top"
   pretty ReturnAddr = text "return_addr"
 
-ppIntegerSet :: (Show w, Integral w) => Set w -> Doc
-ppIntegerSet vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
-  where ppv v' = assert (v' >= 0) $ text ("0x" ++ show (Hex v'))
+ppSet :: (w -> Doc) -> Set w -> Doc
+ppSet ppv vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
+
+ppIntegerSet :: (Integral w, Show w) => Set w -> Doc
+ppIntegerSet = ppSet ppv
+  where ppv v' = assert (v' >= 0) $ text (show (Hex v'))
 
 -- | Returns a set of concrete integers that this value may be.
 -- This function will neither return the complete set or an
@@ -707,30 +716,44 @@ absStackLeq x y = all entryLeq (Map.toList y)
               isNothing (joinAbsValue y_v x_v)
             _ -> False
 
--- | @absStackJoinD x y@ returns the stack containing the union @z@ of the
--- values in @x@ and @y@.  It sets the first state parameter to true if @z@
--- is different from @x@ and adds and escaped code pointers to the second
+-- | @absStackJoinD y x@ returns the stack containing the union @z@ of the
+-- values in @y@ and @x@.  It sets the first state parameter to true if @z@
+-- is different from @y@ and adds and escaped code pointers to the second
 -- parameter.
 absStackJoinD :: AbsBlockStack -> AbsBlockStack -> State (Bool,Set Word64) AbsBlockStack
 absStackJoinD y x = do
+  -- This attempts to merge information from the new state into the old state.
   let entryLeq (o, StackEntry y_tp y_v) =
         case Map.lookup o x of
+          -- The new state contains a valuewith the same type.
           Just (StackEntry x_tp x_v) | Just Refl <- testEquality x_tp y_tp -> do
             s <- use _2
+            -- Attempt to merge values
             case runState (joinAbsValue' y_v x_v) s of
+              -- If merging returns the value y_v, then keep it.
               (Nothing,  s') -> do
                 _2 .= s'
                 return $ Just (o, StackEntry y_tp y_v)
+              -- Otherwise merging returned a new value.
               (Just z_v, s') -> do
+                case y_v of
+                  ReturnAddr -> trace ("absStackJoinD dropping return value:\n"
+                                    ++ "Old state: " ++ show (ppAbsStack y)
+                                    ++ "New state: " ++ show (ppAbsStack x)) $
+                    return ()
+                  _ -> return ()
                 _1 .= True
                 _2 .= s'
                 return $ Just (o, StackEntry y_tp z_v)
           _ -> do
+            case y_v of
+              ReturnAddr -> trace ("absStackJoinD dropping return value:\nOld state: " ++ show (ppAbsStack y) ++ "\nNew state: " ++ show (ppAbsStack x)) $ return ()
+              _ -> return ()
             _1 .= True
             _2 %= Set.union (Set.delete 0 (codePointerSet y_v))
             return Nothing
   z <- mapM entryLeq (Map.toList y)
-  return $ Map.fromList (catMaybes z)
+  return $! Map.fromList (catMaybes z)
 
 
 absStackLub :: AbsBlockStack -> AbsBlockStack -> AbsBlockStack
@@ -764,9 +787,6 @@ absX86State = lens _absX86State (\s v -> s { _absX86State = v })
 
 startAbsStack :: Simple Lens AbsBlockState AbsBlockStack
 startAbsStack = lens _startAbsStack (\s v -> s { _startAbsStack = v })
-
-
-
 
 traceUnless :: Bool -> String -> a -> a
 traceUnless True _ = id
@@ -814,7 +834,7 @@ instance Pretty AbsBlockState where
     where stack = s^.startAbsStack
           stack_d | Map.null stack = empty
                   | otherwise = text "stack:" <$$>
-                                indent 2 (ppAbsStack (s^.startAbsStack))
+                                indent 2 (ppAbsStack stack)
 
 instance Show AbsBlockState where
   show s = show (pretty s)
@@ -878,6 +898,20 @@ addAssignment :: Assignment tp -> AbsProcessorState -> AbsProcessorState
 addAssignment a c =
   c & (absAssignments . assignLens a) %~ flip meet (transferRHS c (assignRhs a))
 
+deleteRange :: Int64 -> Int64 -> AbsBlockStack -> AbsBlockStack
+deleteRange l h m
+  | h < l = m
+  | otherwise =
+    case Map.lookupGE l m of
+      Just (k,v)
+        | k <= h
+        , StackEntry _ ReturnAddr <- v ->
+          trace ("Deleting return address at offset " ++ show (k,l,h))
+                (deleteRange (k+1) h (Map.delete k m))
+        | k <= h ->
+          deleteRange (k+1) h (Map.delete k m)
+      _ -> m
+{-
 deleteRange :: (Ord k, Num k) => k -> k -> Map k v -> Map k v
 deleteRange l h m
   | h < l = m
@@ -885,6 +919,7 @@ deleteRange l h m
     case Map.lookupGE l m of
       Just (k,_) | k <= h -> deleteRange (k+1) h (Map.delete k m)
       _ -> m
+-}
 
 someValueWidth :: Value tp -> Integer
 someValueWidth v =
@@ -893,6 +928,12 @@ someValueWidth v =
 
 valueByteSize :: Value tp -> Int64
 valueByteSize v = fromInteger $ (someValueWidth v + 7) `div` 8
+
+-- | Prune stack based on write that may modify stack.
+pruneStack :: AbsBlockStack -> AbsBlockStack
+pruneStack = Map.filter f
+  where f (StackEntry _ ReturnAddr) = True
+        f _ = False
 
 addMemWrite :: Value (BVType 64)
             -> Value tp
@@ -904,7 +945,11 @@ addMemWrite a v r =
     -- We overwrite _some_ stack location.  An alternative would be to
     -- update everything with v.
     (SomeStackOffset _, _) ->
-      drop' " in SomeStackOffset case"
+      trace ("addMemWrite: dropping stack at "
+             ++ show (pretty $ r ^. absInitialRegs ^. curIP)
+             ++ " via " ++ show (pretty a)
+             ++" in SomeStackOffset case") $
+      r & curAbsStack %~ pruneStack
     (st@(StackOffset _ s), _) | Set.size s > 1 ->
       let w = valueByteSize v
       in  r & curAbsStack %~ flip (Set.fold (\o m -> deleteRange o (o+w-1) m)) s
@@ -917,27 +962,12 @@ addMemWrite a v r =
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
     -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
-  where drop' msg =
-          trace ("addMemWrite: dropping stack at "
-                 ++ show (pretty $ r ^. absInitialRegs ^. curIP)
-                 ++ " via " ++ show (pretty a)
-                 ++ msg) $
-          r & curAbsStack .~ Map.empty
-
 
 addOff :: NatRepr w -> Integer -> Integer -> Integer
 addOff w o v = toUnsigned w (o + v)
 
 subOff :: NatRepr w -> Integer -> Integer -> Integer
 subOff w o v = toUnsigned w (o - v)
-
-{-
-resetRSP :: (N.RegisterName cl -> AbsValue (N.RegisterType cl))
-         -> (N.RegisterName cl -> AbsValue (N.RegisterType cl))
-resetRSP otherFn r
-  | Just Refl <- testEquality r N.rsp = concreteStackOffset a 0
-  | otherwise = otherFn r
--}
 
 mkAbsBlockState :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
                 -> AbsBlockStack
@@ -947,14 +977,11 @@ mkAbsBlockState trans newStack =
                 , _startAbsStack = newStack
                 }
 
+absStackHasReturnAddr :: AbsBlockState -> Bool
+absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStack))
+  where isReturnAddr (StackEntry _ ReturnAddr) = True
+        isReturnAddr _ = False
 
--- | Analyze the processor state and
-potentialStackArgs :: AbsProcessorState
-                      -- ^ State of processor.
-                   -> BVValue 64
-                      -- ^ Address of stack just before pushing return pointer.
-                   -> [BVValue 64]
-potentialStackArgs _ _ = trace "TODO: implement potentialStackArgs" []
 
 -- | Return state for after value has run.
 finalAbsBlockState :: AbsProcessorState -> X86State Value -> AbsBlockState
@@ -962,57 +989,6 @@ finalAbsBlockState c s =
   let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
       transferReg r = transferValue c (s^.register r)
    in mkAbsBlockState transferReg (c^.curAbsStack)
-
-{-
-finalAbsBlockState c s = do
-  case transferValue c (s^.register N.rsp) of
-    --
-    StackOffset offsets | [0] <- Set.toList offsets ->
-      let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-          transferReg r = transferValue c (s^.register r)
-       in mkAbsBlockState transferReg (c^.curAbsStack)
-    StackOffset offsets
-      | [o] <- Set.toList offsets ->
-        shiftSpecificOffset (\r -> transferValue c (s^.register r)) (c^.curAbsStack) o
-      | otherwise ->
-        shiftSomeOffset (\r -> transferValue c (s^.register r))
-    SomeStackOffset -> shiftSomeOffset (\r -> transferValue c (s^.register r))
-    _ ->
-      let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-          transferReg r =
-            case transferValue c (s^.register r) of
-              StackOffset _ -> TopV
-              SomeStackOffset -> TopV
-              v -> v
-       in mkAbsBlockState transferReg Map.empty
--}
-
-{-
-shiftSpecificOffset :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
-                       -- ^ Function for getting register values.
-                    -> AbsBlockStack
-                       -- ^ Stack before shift.
-                    -> Integer
-                       -- ^ Amount to shift offset by
-                    -> AbsBlockState
-shiftSpecificOffset f stk o = mkAbsBlockState transferReg newStack
-  where transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-        transferReg r =
-          case f r of
-            StackOffset t -> StackOffset (Set.map (\v -> subOff n64 v o) t)
-            v -> v
-        newStack = Map.fromList $
-            [ (subOff n64 a o, v) | (a,v) <- Map.toList stk ]
-
-shiftSomeOffset :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
-                -> AbsBlockState
-shiftSomeOffset f = mkAbsBlockState transferReg Map.empty
-  where transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-        transferReg r =
-          case f r of
-            StackOffset a _ -> SomeStackOffset a
-            v -> v
--}
 
 -- | Update the block state to point to a specific IP address.
 setAbsIP :: Memory Word64 -> CodeAddr -> AbsBlockState -> AbsBlockState
