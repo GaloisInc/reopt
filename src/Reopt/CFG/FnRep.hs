@@ -44,7 +44,8 @@ data FnValue (tp :: Type) where
   FnBlockValue :: Word64 -> FnValue (BVType 64)
   -- This register comes from an integer argument.
   FnIntArg :: Int -> FnValue (BVType 64)
-
+  -- This register comes from a floating point XMM argument.
+  FnFloatArg :: Int -> FnValue (BVType 128)
 
 instance Pretty (FnValue tp) where
   pretty FnValueUnsupported = text "unsupported"

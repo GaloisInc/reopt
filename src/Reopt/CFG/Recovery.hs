@@ -305,6 +305,8 @@ regMapFromState s =
 ------------------------------------------------------------------------
 -- recoverFunction
 
+insertXMMRegs :: MapF N.RegisterName FnRegValue -> MapF N.RegisterName FnRegValue
+insertXMMRegs m = foldr (\i -> MapF.insert (N.XMMReg i) (FnRegValue (FnFloatArg i))) m [0..7]
 
 -- | Recover the function at a given address.
 recoverFunction :: InterpState -> CodeAddr -> Either String Function
@@ -316,6 +318,7 @@ recoverFunction s a = do
                & MapF.insert N.rcx (FnRegValue (FnIntArg 3))
                & MapF.insert N.r8  (FnRegValue (FnIntArg 4))
                & MapF.insert N.r9  (FnRegValue (FnIntArg 5))
+               & insertXMMRegs
                & MapF.insert N.rbx (CalleeSaved N.rbx)
                & MapF.insert N.r12 (CalleeSaved N.r12)
                & MapF.insert N.r13 (CalleeSaved N.r13)

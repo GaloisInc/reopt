@@ -529,13 +529,14 @@ _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 
 -- | Local to block discovery.
 data GenState tag = GenState
-       { -- | The global state
-         _globalGenState :: !GlobalGenState
-         -- | Index of next block
+       { _globalGenState :: !GlobalGenState
+         -- ^ The global state
        , _nextBlockID  :: !Word64
-         -- | Blocks added to CFG.
+         -- ^ Index of next block
        , _frontierBlocks :: !(Seq Block)
+         -- ^ Blocks added to CFG
        , _blockState     :: !(MaybeF tag PreBlock)
+         -- ^ Blocks generated so far
        }
 
 globalGenState :: Simple Lens (GenState tag) GlobalGenState
@@ -728,13 +729,21 @@ type AddrExpr = Expr (BVType 64)
 
 type ImpLocation tp = S.Location AddrExpr tp
 
-getX87Offset :: Int -> X86Generator Int
-getX87Offset i = do
+getX87Top :: X86Generator Int
+getX87Top = do
   top_val <- modState $ use $ x87TopReg
   case top_val of
-    BVValue _ (fromInteger -> top) | i <= top, top <= i + 7 -> do
-      return (top - i)
+    -- Validate that i is less than top and top +
+    BVValue _ (fromInteger -> top) ->
+      return top
     _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
+
+getX87Offset :: Int -> X86Generator Int
+getX87Offset i = do
+  top <- getX87Top
+  unless (0 <= top + i && top + i <= 7) $ do
+    fail $ "Illegal floating point index"
+  return $! top + i
 
 readLoc :: StmtLoc (Value (BVType 64)) tp -> X86Generator (Expr tp)
 readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
@@ -771,8 +780,9 @@ getLoc l0 =
     -- TODO
     S.X87StackRegister i -> do
       v <- modState $ use $ x87Regs
-      off <- getX87Offset i
-      return (ValueExpr (v V.! off))
+      idx <- getX87Offset i
+      -- TODO: Check tag register is assigned.
+      return $! ValueExpr (v V.! idx)
 
 
 lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
@@ -898,7 +908,7 @@ instance S.Semantics X86Generator where
     ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
 
   -- Get value of a location.
-  get l = getLoc l
+  get = getLoc
 
   l .= e = setLoc l =<< eval e
 
@@ -993,8 +1003,24 @@ instance S.Semantics X86Generator where
             (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
             (return ())
 
-  x87Push _ = return ()
-  x87Pop = return ()
+  x87Push e = do
+    v <- eval e
+    top <- getX87Top
+    let new_top = (top - 1) .&. 0x7
+    modState $ do
+      -- TODO: Update tagWords
+      -- Store value at new top
+      x87Regs . ix new_top .= v
+      -- Update top
+      x87TopReg .= BVValue knownNat (toInteger new_top)
+  x87Pop = do
+    top <- getX87Top
+    let new_top = (top + 1) .&. 0x7
+    modState $ do
+      -- Update top
+      x87TopReg .= BVValue knownNat (toInteger new_top)
+
+    return ()
 
 -- | A location to explore
 data ExploreLoc
@@ -1010,7 +1036,7 @@ instance Pretty ExploreLoc where
 
 rootLoc :: CodeAddr -> ExploreLoc
 rootLoc ip = ExploreLoc { loc_ip = ip
-                        , loc_x87_top = 7
+                        , loc_x87_top = 0
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.

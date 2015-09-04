@@ -1058,7 +1058,11 @@ exec_fst fir l = do
   set_undefined c0_loc
   set_undefined c2_loc
   set_undefined c3_loc
+  -- TODO: The value assigned to c1_loc seems wrong
+  -- The bit is only set if the floating-point inexact exception is thrown.
+  -- It should be set to 0 is if a stack underflow occurred.
   c1_loc .= fpCvtRoundsUp X86_80FloatRepr fir v
+
   l .= fpCvt X86_80FloatRepr fir v
 
 -- | FSTP Store floating-point value
