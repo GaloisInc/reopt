@@ -198,11 +198,13 @@ instance Show (AbsValue tp) where
   show = show . pretty
 
 instance Pretty (AbsValue tp) where
-  pretty (FinSet s) = ppIntegerSet s
+  pretty (FinSet s) = text "finset" <+> ppIntegerSet s
   pretty (CodePointers s) = text "code" <+> ppIntegerSet s
 
-  pretty (StridedInterval s) = pretty s
-  pretty (SubValue n av) = (pretty av) <> brackets (integer (natValue n))
+  pretty (StridedInterval s) =
+    text "strided" <> parens (pretty s)
+  pretty (SubValue n av) =
+    text "sub" <> parens (integer (natValue n) <> comma <+> pretty av)
   pretty (StackOffset a    s) = ppSet ppv s
     where ppv v' | v' >= 0   = text ("rsp_" ++ shows (Hex a) " + " ++ show (Hex v'))
                  | otherwise = text ("rsp_" ++ shows (Hex a) " - " ++ show (Hex (negate v')))
@@ -415,7 +417,9 @@ isBottom ReturnAddr = False
 -- @meet x y@ returns an over-approximation of the values in @x@ and @y@.
 meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
 meet x y
-  | isBottom m, not (isBottom x), not (isBottom y) =
+  | isBottom m
+  , not (isBottom x)
+  , not (isBottom y) =
       trace ("Got empty: " ++ show (pretty x) ++ " " ++ show (pretty y)) $ m
   | otherwise = m
   where m = meet' x y
@@ -911,15 +915,6 @@ deleteRange l h m
         | k <= h ->
           deleteRange (k+1) h (Map.delete k m)
       _ -> m
-{-
-deleteRange :: (Ord k, Num k) => k -> k -> Map k v -> Map k v
-deleteRange l h m
-  | h < l = m
-  | otherwise =
-    case Map.lookupGE l m of
-      Just (k,_) | k <= h -> deleteRange (k+1) h (Map.delete k m)
-      _ -> m
--}
 
 someValueWidth :: Value tp -> Integer
 someValueWidth v =

@@ -48,6 +48,9 @@ import Reopt.Object.Memory
 
 import Debug.Trace
 
+commas :: [Doc] -> Doc
+commas = hsep . punctuate (char ',')
+
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
 isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
@@ -122,14 +125,20 @@ instance Pretty FnStmt where
       FnComment msg -> text "#" <+> text (Text.unpack msg)
 
 data FnTermStmt
-   = FnTermStmtUndefined
-   | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
+   = FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
+   | FnCall !(FnValue (BVType 64)) [Some FnValue] BlockLabel
+     -- ^ A call statement to the given location with the arguments listed that
+     -- returns to the label.
+   | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
   pretty s =
     case s of
-      FnTermStmtUndefined -> text "undefined term"
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
+      FnCall f args lbl ->
+        let arg_docs = viewSome pretty <$> args
+         in text "call" <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
+      FnTermStmtUndefined -> text "undefined term"
 
 ------------------------------------------------------------------------
 -- StackDelta
@@ -348,6 +357,10 @@ regValuePair :: N.RegisterName cl
              -> Recover (Maybe (MapF.Pair N.RegisterName FnRegValue))
 regValuePair nm v = return $ Just $ MapF.Pair nm (FnRegValue v)
 
+-- | Extract function arguments from state
+stateArgs :: X86State Value -> Recover [Some FnValue]
+stateArgs _ = trace "startArgs not yet implemented" $ return []
+
 recoverBlock :: BlockLabel
              -> Recover FnBlock
 recoverBlock lbl = do
@@ -358,7 +371,6 @@ recoverBlock lbl = do
 
   -- Get original block for address.
   Just b <- uses (rsInterp . blocks) (`lookupBlock` lbl)
-
 
   -- Compute stack height
   computeAllocSize $ do
@@ -400,9 +412,12 @@ recoverBlock lbl = do
               return $ Nothing
         addFrontier (GeneratedBlock ret_addr 0) (MapF.fromList (catMaybes reg_pairs)) stk
         fn_stmts <- uses rsCurStmts Fold.toList
+        call_tgt <- recoverValue "ip" (s^.register N.rip)
+        args <- (++ stackArgs stk) <$> stateArgs s
+        let ret_lbl = GeneratedBlock ret_addr 0
         return $! FnBlock { fbLabel = lbl
                           , fbStmts = fn_stmts
-                          , fbTerm = FnTermStmtUndefined
+                          , fbTerm = FnCall call_tgt args ret_lbl
                           }
     _ -> do
       trace ("recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do

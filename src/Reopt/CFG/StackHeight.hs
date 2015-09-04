@@ -13,6 +13,7 @@ module Reopt.CFG.StackHeight
   , stackOffsetAddr
   , recordCalleeSavedWrite
   , recordStackAlloca
+  , stackArgs
   ) where
 
 import Data.Int
@@ -226,3 +227,7 @@ recordCalleeSavedWrite _ _ s = s
 -- | Record an allocation with the given type to the stack.
 recordStackAlloca :: FnValue (BVType 64) -> FnStack -> FnStack
 recordStackAlloca _ s = s
+
+-- | Get stack arguments
+stackArgs :: FnStack -> [Some FnValue]
+stackArgs _ = trace "stackArgs is not yet implemented." []

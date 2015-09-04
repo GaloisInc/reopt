@@ -559,9 +559,12 @@ refineApp app av regs =
     getAssignApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
     getAssignApp _ = Nothing
 
-refineTrunc :: ((n + 1) <= n') =>
-               Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
-               -> AbsProcessorState -> AbsProcessorState
+refineTrunc :: ((n + 1) <= n')
+            => Value (BVType n')
+            -> NatRepr n
+            -> AbsValue (BVType n)
+            -> AbsProcessorState
+            -> AbsProcessorState
 refineTrunc v sz av regs = refineProcState v (subValue sz av) regs
 
 refineULeqTrue :: Value tp
@@ -767,6 +770,8 @@ transferBlock b regs = do
       -- stores the pc to an address.
       case () of
           -- The last statement was a call.
+          -- Note that in some cases the call is known not to return, and thus
+          -- this code will never jump to the return value.
         _ | Just (prev_stmts, ret) <- identifyCall mem (blockStmts b) s' -> do
             Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             let abst = finalAbsBlockState regs' s'
@@ -783,18 +788,14 @@ transferBlock b regs = do
             rc0 <- use returnCount
             let ip_val = s'^.register N.rip
             case transferValue regs' ip_val of
-              ReturnAddr ->
-                trace ("return_val is correct " ++ show lbl) $
-                  returnCount += 1
-              TopV ->
-                trace ("return_val is top at " ++ show lbl) $
-                  returnCount += 1
+              ReturnAddr -> return ()
               -- The return_val is bad.
-              -- This could indicate that the caller knows that the function does
-              -- not return, and hence will not provide a reutrn value.
+              -- This could indicate an imprecision in analysis or that the
+              -- function will never return, and hence never was provided
+              -- with an address to return to.
               rv ->
                 trace ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
-                  returnCount += 1
+                  return ()
 
           -- Jump to concrete offset.
           | BVValue _ (fromInteger -> tgt_addr) <- s'^.register N.rip -> do
@@ -803,8 +804,8 @@ transferBlock b regs = do
             -- Try to check for a tail call.
             this_fn <- gets $ getFunctionEntryPoint (labelAddr lbl)
             tgt_fn  <- gets $ getFunctionEntryPoint tgt_addr
-            -- When the jump appears to go to another function, assume the
-            -- jump if a tail call.
+            -- When the jump appears to go to another function, this could be a tail
+            -- call or it could be dead code.
             if (this_fn /= tgt_fn) then do
               -- Check that the current stack height is correct so that a
               -- tail call when go to the right place.
@@ -967,7 +968,7 @@ cfgFromAddrs :: Memory Word64
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> FinalCFG
-cfgFromAddrs mem init_addrs = g
+cfgFromAddrs mem init_addrs = trace ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030

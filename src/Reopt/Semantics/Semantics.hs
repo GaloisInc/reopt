@@ -1431,13 +1431,6 @@ exec_movlhps l v = do
 exec_movss :: Semantics m => MLocation m (BVType 32) -> Value m (FloatType SingleFloat) -> m ()
 exec_movss l v = l .= v
 
-exec_movss'
-truncate32Op f = mkBinop $ \loc val -> do
-  l <- (`truncateBVLocation` n32) <$> getSomeBVLocation loc
-  v <- truncateBVValue n32 =<< getSomeBVValue val
-  f l v
-
-
 -- *** SSE Packed Arithmetic Instructions
 
 -- ADDPS Add packed single-precision floating-point values
