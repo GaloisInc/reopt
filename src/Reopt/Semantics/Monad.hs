@@ -119,6 +119,144 @@ nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
 nonLoopingCoerce Refl x = x
 
 ------------------------------------------------------------------------
+-- Sub registers
+
+-- | A view into a register / a subregister.
+--
+-- The read and write operations specify how to read and write a
+-- subregister value based on the current value @v0@ in the full
+-- register. The write operation also depends on the new subregister
+-- value @v@ to be written. See 'defaultRegisterViewRead' and
+-- 'defaultRegisterViewWrite' for how to read and write in the common
+-- case (e.g. for @ax@ as a subregister of @rax@). The special cases
+-- motivating this data type are:
+--
+-- * 32-bit subregisters of 64-bit general purpose registers
+--   (e.g. @eax@ as a subregister of @rax@), where the high-order 32
+--   bits should be zeroed out on writes
+--
+-- * 64-bit mmx subregisters of x87 registers, where the high-order 16
+--   bits should be oned out on writes.
+--
+-- Note that some instructions, such as @movss@ and @movsd@, specify
+-- what appears to be special treatment of subregisters as part of
+-- their semantics. We don't expect these *explicit* instruction
+-- semantics to be implemented using 'RegisterView'. Rather,
+-- 'RegisterView' is intended to implement the *implicit* special
+-- treatment of some aliased registers, namely the two cases mentioned
+-- above.
+--
+-- Note: there is no type-level relationship between the base @b@ and
+-- size @n@ params and the read/write views, but the base and size are
+-- expected to specify which bits are read by read view.
+data RegisterView cl b n =
+  (b + n <= N.RegisterClassBits cl) =>
+  RegisterView
+    { _registerViewBase :: NatRepr b
+    , _registerViewSize :: NatRepr n
+    , _registerViewReg :: RegisterName cl
+    , _registerViewRead :: forall v.
+        IsValue v =>
+        v (N.RegisterType cl) -> v (BVType n)
+    , _registerViewWrite :: forall v.
+        IsValue v =>
+        v (N.RegisterType cl) -> v (BVType n) -> v (N.RegisterType cl)
+    }
+
+-- | Extract 'n' bits starting at base 'b'.
+--
+-- Assumes a big-endian 'IsValue' semantics.
+defaultRegisterViewRead ::
+  ( 1 <= N.RegisterClassBits cl
+  , 1 <= n
+  , n <= N.RegisterClassBits cl
+  , IsValue v
+  ) =>
+  NatRepr b ->
+  NatRepr n ->
+  RegisterName cl ->
+  v (N.RegisterType cl) ->
+  v (BVType n)
+defaultRegisterViewRead b n _rn v0 =
+  bvTrunc n $ v0 `bvShr` bvLit (bv_width v0) (natValue b)
+
+-- | Update the 'n' bits starting at base 'b', leaving other bits
+-- unchanged.
+--
+-- Assumes a big-endian 'IsValue' semantics.
+defaultRegisterViewWrite :: forall b cl n v .
+  ( 1 <= N.RegisterClassBits cl
+  , 1 <= n
+  , n <= N.RegisterClassBits cl
+  , IsValue v
+  ) =>
+  NatRepr b ->
+  NatRepr n ->
+  RegisterName cl ->
+  v (N.RegisterType cl) ->
+  v (BVType n) ->
+  v (N.RegisterType cl)
+defaultRegisterViewWrite b n rn v0 v =
+  -- Truncation 'bvTrunc' requires that the result vector has
+  -- non-zero length, and concatenation 'bvCat' only works for two
+  -- vectors of the same length, so we build the concatenation
+  --
+  --   h ++ m ++ l
+  --
+  -- using bitwise OR:
+  --
+  --   (h ++ 0^|m ++ l|)     ||
+  --   (0^|h| ++ m ++ 0^|l|) ||
+  --   (0^|h ++ m| ++ l)
+  highOrderBits .|. middleOrderBits .|. lowOrderBits
+  where
+    -- | Mask out bits 'i' through 'i + j - 1'.
+    --
+    -- Here 'i' is the number of bits in the low-order third and 'j'
+    -- is the number of bits in the middle-order third.
+    --
+    -- Assumes big-endian representation: left-shift moves bits to
+    -- higher order and right-shift moves bits to lower order.
+    mask :: (1 <= m) => Integer -> Integer -> v (BVType m) -> v (BVType m)
+    mask i j x0 = x3
+      where
+        x1 = x0 `bvShr` bvLit w i
+        x2 = x1 `bvShl` bvLit w (i + k)
+        x3 = x2 `bvShr` bvLit w k
+
+        w = bv_width x0
+        -- | The number of bits in the high-order third.
+        k = (natValue w) - i - j
+
+    cl = N.registerWidth rn
+
+    highOrderBits   = mask (natValue b + natValue n) (natValue cl) v0
+    middleOrderBits = uext cl v `bvShl` bvLit cl (natValue b)
+    lowOrderBits    = mask 0 (natValue b) v0
+
+-- | The view for full registers.
+--
+-- The read view reads all bits and the write view writes all bits.
+identityRegisterView ::
+  (1 <= N.RegisterClassBits cl) =>
+  RegisterName cl -> RegisterView cl 0 (N.RegisterClassBits cl)
+identityRegisterView rn =
+  RegisterView
+    { _registerViewBase = b
+    , _registerViewSize = n
+    , _registerViewReg = rn
+    -- TODO(conathan): replace these with more efficient special cases
+    -- below after testing.
+    , _registerViewRead = defaultRegisterViewRead b n rn
+    , _registerViewWrite = defaultRegisterViewWrite b n rn
+    -- , _registerViewRead  = id
+    -- , _registerViewWrite = \_v0 v -> v
+    }
+  where
+    b = knownNat
+    n = N.registerWidth rn
+
+------------------------------------------------------------------------
 -- Location
 
 -- | This returns the type associated with values that can be read
