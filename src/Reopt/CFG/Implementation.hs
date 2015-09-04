@@ -386,7 +386,7 @@ instance S.IsValue Expr where
   bvSlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
     | x == y = S.false
-    | otherwise = app $ BVUnsignedLt x y
+    | otherwise = app $ BVSignedLt x y
 
   bvBit x y
     | Just xv <- asBVLit x
