@@ -325,7 +325,13 @@ unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
 ------------------------------------------------------------------------
 -- Values
 
--- | @IsValue@ is a class used to define types expressions.
+-- | @IsValue@ is a class used to define expressions.
+--
+-- The @IsValue@ operations have BIG-ENDIAN semantics: the higher
+-- order bits are on the left. So, for example, a left shift makes a
+-- number large (ignoring truncation), a right shift makes a number
+-- smaller, and the first argument to concatenation becomes the
+-- high-order bits in the result.
 class IsValue (v  :: Type -> *) where
 
   -- | Returns the width of a bit-vector value.
@@ -375,7 +381,9 @@ class IsValue (v  :: Type -> *) where
   is_zero :: (1 <= n) => v (BVType n) -> v BoolType
   is_zero x = x .=. bvLit (bv_width x) (0::Integer)
 
-  -- | Concatentates two bit vectors
+  -- | Concatentates two bit vectors.
+  --
+  -- Big-endian, so higher-order bits come from first argument.
   bvCat :: forall n . (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType (n + n))
   bvCat h l =
       case ( leqAdd (leqRefl n) n
@@ -391,7 +399,10 @@ class IsValue (v  :: Type -> *) where
       le_1_n :: LeqProof 1 n
       le_1_n = LeqProof
 
-  -- | Splits a bit vectors into two
+  -- | Splits a bit vectors into two.
+  --
+  -- Big-endian, so higher-order bits make up first component of
+  -- result.
   bvSplit :: (1 <= n) => v (BVType (n + n)) -> (v (BVType n), v (BVType n))
   -- bvSplit v = (bvTrunc:: sz (bvShr (widthVal sz) v), bvTrunc sz v)
   --   where
@@ -438,10 +449,18 @@ class IsValue (v  :: Type -> *) where
     where
       bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
 
-  -- | Shifts, the semantics is undefined for shifts >= the width of the first argument
+  -- | Shifts, the semantics is undefined for shifts >= the width of the first argument.
+  --
+  -- The first argument is the value to shift, and the second argument
+  -- is the number of bits to shift by.
+  --
+  -- Big-endian, so left shift moves bits to higher-order positions
+  -- and right shift moves bits to lower-order positions.
   bvShr, bvSar, bvShl :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
-  -- | Truncate the value
+  -- | Truncate the value.
+  --
+  -- Returns 'm' lower order bits.
   bvTrunc :: (1 <= m, m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
 
   -- | Unsigned less than
@@ -450,7 +469,7 @@ class IsValue (v  :: Type -> *) where
   -- | Signed less than
   bvSlt :: v (BVType n) -> v (BVType n) -> v BoolType
 
-  -- | returns bit n, 0 being lsb
+  -- | Returns bit at index given by second argument, 0 being lsb
   bvBit :: (1 <= log_n) => v (BVType n) -> v (BVType log_n) -> v BoolType
 
   -- | Return most significant bit of number.
