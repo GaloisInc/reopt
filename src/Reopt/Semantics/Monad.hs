@@ -330,7 +330,7 @@ data Location addr (tp :: Type) where
   -- A location in the virtual address space of the process.
   MemoryAddr :: addr -> TypeRepr tp  -> Location addr tp
 
-  Register :: RegisterName cl -> Location addr (N.RegisterType cl)
+  Register :: RegisterView cl b n -> Location addr (BVType n)
 
   TruncLoc :: (1 <= n', n'+1 <= n)
            => Location addr (BVType n)
@@ -351,12 +351,49 @@ data Location addr (tp :: Type) where
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
 
+-- | Full register location.
+fullRegister ::
+  (1 <= N.RegisterClassBits cl) =>
+  N.RegisterName cl -> Location addr (N.RegisterType cl)
+fullRegister = Register . identityRegisterView
+
+-- | Subregister location for simple subregisters.
+--
+-- I.e., a subregister which reads and writes @n@ bits at offset @b@,
+-- and preserves remaining bits on writes.
+subRegister ::
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  , b + n <= N.RegisterClassBits cl
+  ) =>
+  NatRepr b -> NatRepr n -> RegisterName cl -> Location addr (BVType n)
+subRegister b n = Register . sliceRegisterView b n
+
+-- | The view for 32-bit general purpose and mmx registers.
+--
+-- These are the special / weird sub registers where the upper bits of
+-- the underlying full register are implicitly set to a constant on
+-- writes.
+constUpperBitsOnWriteRegister ::
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , 1 <= N.RegisterClassBits cl - n
+  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  ) =>
+  NatRepr n ->
+  (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
+  RegisterName cl ->
+  Location addr (BVType n)
+constUpperBitsOnWriteRegister n c = Register . constUpperBitsOnWriteRegisterView n c
+
 ------------------------------------------------------------------------
 -- Operations on locations.
 
 loc_type :: Location addr tp -> TypeRepr tp
 loc_type (MemoryAddr _ tp) = tp
-loc_type (Register r)      = N.registerType r
+loc_type (Register rv)     = BVTypeRepr $ _registerViewSize rv
 loc_type (TruncLoc _ n)    = BVTypeRepr n
 loc_type (LowerHalf l)     = BVTypeRepr $ halfNat (loc_width l)
 loc_type (UpperHalf l)     = BVTypeRepr $ halfNat (loc_width l)
@@ -419,46 +456,46 @@ xmm_low64 l = LowerHalf l
 
 -- | CF flag
 cf_loc :: Location addr BoolType
-cf_loc = Register N.cf
+cf_loc = fullRegister N.cf
 
 -- | PF flag
 pf_loc :: Location addr BoolType
-pf_loc = Register N.pf
+pf_loc = fullRegister N.pf
 
 -- | AF flag
 af_loc :: Location addr BoolType
-af_loc = Register N.af
+af_loc = fullRegister N.af
 
 -- | ZF flag
 zf_loc :: Location addr BoolType
-zf_loc = Register N.zf
+zf_loc = fullRegister N.zf
 
 -- | SF flag
 sf_loc :: Location addr BoolType
-sf_loc = Register N.sf
+sf_loc = fullRegister N.sf
 
 -- | TF flag
 tf_loc :: Location addr BoolType
-tf_loc = Register N.tf
+tf_loc = fullRegister N.tf
 
 -- | IF flag
 if_loc :: Location addr BoolType
-if_loc = Register N.iflag
+if_loc = fullRegister N.iflag
 
 -- | DF flag
 df_loc :: Location addr BoolType
-df_loc = Register N.df
+df_loc = fullRegister N.df
 
 -- | OF flag
 of_loc :: Location addr BoolType
-of_loc = Register N.oflag
+of_loc = fullRegister N.oflag
 
 -- | x87 flags
 c0_loc, c1_loc, c2_loc, c3_loc :: Location addr BoolType
-c0_loc = Register N.x87c0
-c1_loc = Register N.x87c1
-c2_loc = Register N.x87c2
-c3_loc = Register N.x87c3
+c0_loc = fullRegister N.x87c0
+c1_loc = fullRegister N.x87c1
+c2_loc = fullRegister N.x87c2
+c3_loc = fullRegister N.x87c3
 
 -- | Tuen an address into a location of size @n
 mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
@@ -469,29 +506,32 @@ mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
 mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
 
 -- | Return low 32-bits of register e.g. rax -> eax
+--
+-- These subregisters have special semantics, defined in Volume 1 of
+-- the Intel x86 manual: on write, the upper 32 bits are zeroed out!
 reg_low32 :: RegisterName 'GP -> Location addr (BVType 32)
-reg_low32 r = LowerHalf (Register r)
+reg_low32 r = constUpperBitsOnWriteRegister n32 (bvLit n32 (0::Integer)) r
 
 -- | Return low 16-bits of register e.g. rax -> ax
 reg_low16 :: RegisterName 'GP -> Location addr (BVType 16)
-reg_low16 r = LowerHalf (LowerHalf (Register r))
+reg_low16 r = subRegister n0 n16 r
 
 -- | Return low 8-bits of register e.g. rax -> al
 reg_low8 :: RegisterName 'GP -> Location addr (BVType 8)
-reg_low8 r = LowerHalf (reg_low16 r)
+reg_low8 r = subRegister n0 n8 r
 
 -- | Return bits 8-15 of the register e.g. rax -> ah
 reg_high8 :: RegisterName 'GP -> Location addr (BVType 8)
-reg_high8 r = UpperHalf (reg_low16 r)
+reg_high8 r = subRegister n8 n8 r
 
 rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)
-rax = Register N.rax
-rsp = Register N.rsp
-rbp = Register N.rbp
-rdx = Register N.rdx
-rsi = Register N.rsi
-rdi = Register N.rdi
-rcx = Register N.rcx
+rax = fullRegister N.rax
+rsp = fullRegister N.rsp
+rbp = fullRegister N.rbp
+rdx = fullRegister N.rdx
+rsi = fullRegister N.rsi
+rdi = fullRegister N.rdi
+rcx = fullRegister N.rcx
 
 cx :: Location addr (BVType 16)
 cx = reg_low16 N.rcx
@@ -500,7 +540,7 @@ ecx :: Location addr (BVType 32)
 ecx = reg_low32 N.rcx
 
 rip :: Location addr (BVType 64)
-rip = Register N.IPReg
+rip = fullRegister N.IPReg
 
 ------------------------------------------------------------------------
 
@@ -513,7 +553,7 @@ packWord (N.BitPacking sz bits) =
     getMoveBits (N.ConstantBit b off)
       = return $ bvLit sz (if b then 1 `shiftL` widthVal off else (0 :: Integer))
     getMoveBits (N.RegisterBit reg off)
-      = do v <- uext sz <$> get (Register reg)
+      = do v <- uext sz <$> get (fullRegister reg)
            return $ v `bvShl` bvLit sz (widthVal off)
 
 unpackWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> Value m (BVType n) -> m ()
@@ -523,7 +563,7 @@ unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
     unpackOne N.ConstantBit{}         = return ()
     unpackOne (N.RegisterBit reg off) = do
       let res_w = N.registerWidth reg
-      Register reg .= bvTrunc res_w (v `bvShr` bvLit sz (widthVal off))
+      fullRegister reg .= bvTrunc res_w (v `bvShr` bvLit sz (widthVal off))
 
 ------------------------------------------------------------------------
 -- Values
