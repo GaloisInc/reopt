@@ -226,13 +226,36 @@ defaultRegisterViewWrite b n rn v0 v =
 
         w = bv_width x0
         -- | The number of bits in the high-order third.
-        k = (natValue w) - i - j
+        k = natValue w - i - j
 
     cl = N.registerWidth rn
 
     highOrderBits   = mask (natValue b + natValue n) (natValue cl) v0
     middleOrderBits = uext cl v `bvShl` bvLit cl (natValue b)
     lowOrderBits    = mask 0 (natValue b) v0
+
+-- | Update the lower 'n' bits and set the upper bits to a constant.
+--
+-- Assumes a big-endian 'IsValue' semantics.
+constUpperBitsRegisterViewWrite :: forall cl n v .
+  ( 1 <= N.RegisterClassBits cl
+  , 1 <= N.RegisterClassBits cl - n
+  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , IsValue v
+  ) =>
+  NatRepr n ->
+  v (BVType (N.RegisterClassBits cl - n)) -> -- ^ Constant bits.
+  RegisterName cl ->
+  v (N.RegisterType cl) ->
+  v (BVType n) ->
+  v (N.RegisterType cl)
+constUpperBitsRegisterViewWrite n c rn v0 _v =
+  highOrderBits .|. lowOrderBits
+  where
+    cl = N.registerWidth rn
+
+    highOrderBits = uext cl c `bvShl` bvLit cl (natValue n)
+    lowOrderBits = uext cl v0
 
 -- | The view for full registers.
 --
@@ -255,6 +278,48 @@ identityRegisterView rn =
   where
     b = knownNat
     n = N.registerWidth rn
+
+-- | The view for subregisters which are a slice of a full register.
+sliceRegisterView ::
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  , b + n <= N.RegisterClassBits cl
+  ) =>
+  NatRepr b -> NatRepr n -> RegisterName cl -> RegisterView cl b n
+sliceRegisterView b n rn =
+  RegisterView
+    { _registerViewBase = b
+    , _registerViewSize = n
+    , _registerViewReg = rn
+    , _registerViewRead = defaultRegisterViewRead b n rn
+    , _registerViewWrite = defaultRegisterViewWrite b n rn
+    }
+
+-- | The view for 32-bit general purpose and mmx registers.
+--
+-- These are the special / weird sub registers where the upper bits of
+-- the underlying full register are implicitly set to a constant on
+-- writes.
+constUpperBitsOnWriteRegisterView ::
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , 1 <= N.RegisterClassBits cl - n
+  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  ) =>
+  NatRepr n ->
+  (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
+  RegisterName cl ->
+  RegisterView cl 0 n
+constUpperBitsOnWriteRegisterView n c rn =
+  RegisterView
+    { _registerViewBase = n0
+    , _registerViewSize = n
+    , _registerViewReg = rn
+    , _registerViewRead = defaultRegisterViewRead n0 n rn
+    , _registerViewWrite = constUpperBitsRegisterViewWrite n c rn
+    }
 
 ------------------------------------------------------------------------
 -- Location
