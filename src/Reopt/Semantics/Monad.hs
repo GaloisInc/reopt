@@ -101,7 +101,6 @@ module Reopt.Semantics.Monad
 
 import           Data.Bits (shiftL)
 import           Data.Char (toLower)
-import           Data.Proxy
 import           GHC.TypeLits as TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
@@ -605,20 +604,40 @@ class IsValue (v  :: Type -> *) where
   -- | Concatentates two bit vectors.
   --
   -- Big-endian, so higher-order bits come from first argument.
-  bvCat :: forall n . (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType (n + n))
+  bvCat :: forall m n . (1 <= m, 1 <= n) => v (BVType m) -> v (BVType n) -> v (BVType (m + n))
   bvCat h l =
-      case ( leqAdd (leqRefl n) n
-           , dblPosIsPos le_1_n
-           ) of
-        (LeqProof, LeqProof) ->
-          (uext n_plus_n h `bvShl` bvLit n_plus_n (widthVal $ bv_width l))
-          .|. (uext n_plus_n l)
+    case _1_le_m_plus_n of
+      LeqProof -> go
     where
-      n_plus_n = addNat (bv_width l) (bv_width l)
-      n :: Proxy n
-      n = Proxy
-      le_1_n :: LeqProof 1 n
-      le_1_n = LeqProof
+      -- GHC 7.10 has a context stack overflow related to @1 <= m + n@
+      -- which goes away when we factor the body out like this.
+      go :: (1 <= m + n) => v (BVType (m + n))
+      go =
+        case ( m_le_m_plus_n , n_le_m_plus_n , _1_le_m_plus_n ) of
+          (LeqProof, LeqProof, LeqProof) ->
+            let highOrderBits =
+                  uext m_plus_n h `bvShl` bvLit m_plus_n (widthVal $ n)
+                lowOrderBits = uext m_plus_n l
+            in highOrderBits .|. lowOrderBits
+
+      m :: NatRepr m
+      m = bv_width h
+
+      n :: NatRepr n
+      n = bv_width l
+
+      m_plus_n :: NatRepr (m + n)
+      m_plus_n = addNat m n
+
+      m_le_m_plus_n :: LeqProof m (m + n)
+      m_le_m_plus_n = addIsLeq m n
+
+      n_le_m_plus_n :: LeqProof n (m + n)
+      n_le_m_plus_n = addPrefixIsLeq m n
+
+      _1_le_m_plus_n :: LeqProof 1 (m + n)
+      _1_le_m_plus_n =
+        leqAdd (LeqProof :: LeqProof 1 m) n
 
   -- | Splits a bit vectors into two.
   --
