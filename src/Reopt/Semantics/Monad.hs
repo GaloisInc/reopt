@@ -39,18 +39,19 @@ module Reopt.Semantics.Monad
   , floatInfoBits
     -- * Location
   , Location(..)
-  , elimLocation
+  , RegisterView(..)
   , loc_type
   , loc_width
 
   , xmm_low64
+  , x87reg_mmx
+
+  , fullRegister
   , reg_low8
   , reg_high8
   , reg_low16
   , reg_low32
 
---  , reg_low
---  , reg_high
   , cf_loc
   , pf_loc
   , af_loc
@@ -332,20 +333,6 @@ data Location addr (tp :: Type) where
 
   Register :: RegisterView cl b n -> Location addr (BVType n)
 
-  TruncLoc :: (1 <= n', n'+1 <= n)
-           => Location addr (BVType n)
-           -> NatRepr n'
-           -> Location addr (BVType n')
-
-  -- Refers to the least significant half of the bitvector.
-  LowerHalf :: (1 <= n)
-            => Location addr (BVType (n+n))
-            -> Location addr (BVType n)
-  -- Refers to the most significant half of the bitvector.
-  UpperHalf :: (1 <= n)
-            => Location addr (BVType (n+n))
-            -> Location addr (BVType n)
-
   -- The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
@@ -394,59 +381,10 @@ constUpperBitsOnWriteRegister n c = Register . constUpperBitsOnWriteRegisterView
 loc_type :: Location addr tp -> TypeRepr tp
 loc_type (MemoryAddr _ tp) = tp
 loc_type (Register rv)     = BVTypeRepr $ _registerViewSize rv
-loc_type (TruncLoc _ n)    = BVTypeRepr n
-loc_type (LowerHalf l)     = BVTypeRepr $ halfNat (loc_width l)
-loc_type (UpperHalf l)     = BVTypeRepr $ halfNat (loc_width l)
 loc_type (X87StackRegister _) = knownType
 
 loc_width :: Location addr (BVType n) -> NatRepr n
 loc_width (loc_type -> BVTypeRepr nr) = nr
-
--- | Eliminate a 'Location' after normalizing subrange transforms.
---
--- The arguments are continuations for the location base cases,
--- 'S.MemoryAddr', 'S.Register', and 'S.X87StackRegister', which take
--- the @[low bit, high bit)@ subrange, full width, and arguments to
--- the corresponding base case.
-elimLocation :: forall addr tp a i.
-                Integral i
-             => (forall tp'. (i, i) -> i -> (addr, TypeRepr tp') -> a)
-             -> (forall cl.  (i, i) -> i -> N.RegisterName cl    -> a)
-             -> (            (i, i) -> i -> Int                  -> a)
-             -> Location addr tp -> a
-elimLocation memCont regCont x87Cont l = go id l
-  where
-    -- | Compute subrange and call continuation.
-    --
-    -- In the recursive cases we build a subrange transformation.  In
-    -- the base cases we use the subrange transformation to compute
-    -- the subrange, by applying it to the full range @(0, w)@ of the
-    -- base location, and then call the continutation corresponding to
-    -- the base location.
-    go :: forall tp'. ((i, i) -> (i, i)) -> Location addr tp' -> a
-    go t l' = case l' of
-      -- Recursive cases.
-      TruncLoc l'' n -> go (t . truncLoc n) l''
-      LowerHalf l'' -> go (t . lowerHalf) l''
-      UpperHalf l'' -> go (t . upperHalf) l''
-      -- Base cases.
-      Register r -> regCont (t (0, w)) w r
-      MemoryAddr addr tr -> memCont (t (0, w)) w (addr, tr)
-      X87StackRegister i -> x87Cont (t (0, w)) w i
-      where
-        -- The width of the base location.
-        w :: i
-        w = case loc_type l' of
-          BVTypeRepr nr -> fromIntegral $ natValue nr
-
-    -- Transformations on subranges.
-    truncLoc :: NatRepr n -> (i, i) -> (i, i)
-    truncLoc n (low, _high) = (low, low + fromIntegral (natValue n))
-    lowerHalf, upperHalf :: (i, i) -> (i, i)
-    lowerHalf (low, high) = (low, (low + high) `div` 2)
-    upperHalf (low, high) = ((low + high) `div` 2, high)
-
-
 
 ------------------------------------------------------------------------
 -- Specific locations.
@@ -504,6 +442,16 @@ mkBVAddr sz addr = MemoryAddr addr (BVTypeRepr sz)
 -- | Tuen an address into a location of size @n
 mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
 mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
+
+-- | Return MMX register corresponding to x87 register.
+--
+-- An MMX register is the low 64-bits of an x87 register. These
+-- registers have special semantics, defined in Volume 1 of the Intel
+-- x86 manual: on write,the upper 16 bits of the underlying x87
+-- register are oned out!
+x87reg_mmx :: RegisterName 'X87_FPU -> Location addr (BVType 64)
+x87reg_mmx r =
+  constUpperBitsOnWriteRegister n64 (complement (bvLit n16 (0::Integer))) r
 
 -- | Return low 32-bits of register e.g. rax -> eax
 --
