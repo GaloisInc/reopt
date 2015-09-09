@@ -46,11 +46,11 @@ data SomeBV v where
 getSomeBVValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
 getSomeBVValue v =
   case v of
-    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
-    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        -> mk64 (Register $ N.mmxFromFlexdis mmx)
-    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
-    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
+    F.ControlReg cr     -> mk (fullRegister $ N.controlFromFlexdis cr)
+    F.DebugReg dr       -> mk (fullRegister $ N.debugFromFlexdis dr)
+    F.MMXReg mmx        -> mk (x87reg_mmx $ N.mmxFromFlexdis mmx)
+    F.XMMReg xmm        -> mk (fullRegister $ N.xmmFromFlexdis xmm)
+    F.SegmentValue s    -> mk (fullRegister $ N.segmentFromFlexdis s)
     F.X87Register n     -> mk (X87StackRegister n)
     F.FarPointer _      -> fail "FarPointer"
     -- If an instruction can take a VoidMem, it needs to get it explicitly
@@ -71,7 +71,7 @@ getSomeBVValue v =
       | otherwise                   -> fail "unknown r8"
     F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
     F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-    F.QWordReg r                    -> mk (Register $ N.gpFromFlexdis r)
+    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
     F.ByteImm  w                    -> return (SomeBV $ bvLit n8  w) -- FIXME: should we cast here?
     F.WordImm  w                    -> return (SomeBV $ bvLit n16 w)
     F.DWordImm w                    -> return (SomeBV $ bvLit n32 w)
@@ -81,10 +81,6 @@ getSomeBVValue v =
     -- FIXME: what happens with signs etc?
     mk :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
     mk l = SomeBV <$> get l
-
-    mk64 :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
-    mk64 l
-      | Just LeqProof <- testLeq n64 (loc_width l) = SomeBV <$> bvTrunc n64 <$> get l
 
 -- | Calculates the address corresponding to an AddrRef
 getBVAddress :: forall m. FullSemantics m => F.AddrRef -> m (Value m (BVType 64))
@@ -107,14 +103,14 @@ getBVAddress ar =
                                                  mk_absolute seg offset
     F.Addr_64      seg m_r64 m_int_r64 i32 -> do base <- case m_r64 of
                                                            Nothing -> return v0_64
-                                                           Just r  -> get (Register $ N.gpFromFlexdis r)
+                                                           Just r  -> get (fullRegister $ N.gpFromFlexdis r)
                                                  scale <- case m_int_r64 of
                                                             Nothing     -> return v0_64
                                                             Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
-                                                                           <$> get (Register $ N.gpFromFlexdis r)
+                                                                           <$> get (fullRegister $ N.gpFromFlexdis r)
                                                  let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
                                                  mk_absolute seg offset
-    F.IP_Offset_64 seg i32                 -> do offset <- bvAdd (bvLit n64 i32) <$> get (Register N.rip)
+    F.IP_Offset_64 seg i32                 -> do offset <- bvAdd (bvLit n64 i32) <$> get (fullRegister N.rip)
                                                  mk_absolute seg offset
   where
     v0_64 = bvLit n64 (0 :: Int)
@@ -137,12 +133,11 @@ getBVAddress ar =
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getSomeBVLocation v =
   case v of
-    F.ControlReg cr     -> mk (Register $ N.controlFromFlexdis cr)
-    F.DebugReg dr       -> mk (Register $ N.debugFromFlexdis dr)
-    F.MMXReg mmx        ->
-      return $ SomeBV $ TruncLoc (Register $ N.mmxFromFlexdis mmx) n64
-    F.XMMReg xmm        -> mk (Register $ N.xmmFromFlexdis xmm)
-    F.SegmentValue s    -> mk (Register $ N.segmentFromFlexdis s)
+    F.ControlReg cr     -> mk (fullRegister $ N.controlFromFlexdis cr)
+    F.DebugReg dr       -> mk (fullRegister $ N.debugFromFlexdis dr)
+    F.MMXReg mmx        -> mk (x87reg_mmx $ N.mmxFromFlexdis mmx)
+    F.XMMReg xmm        -> mk (fullRegister $ N.xmmFromFlexdis xmm)
+    F.SegmentValue s    -> mk (fullRegister $ N.segmentFromFlexdis s)
     F.FarPointer _      -> fail "FarPointer"
     F.VoidMem ar        -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
     F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8
@@ -156,7 +151,7 @@ getSomeBVLocation v =
       | otherwise                   -> fail "unknown r8"
     F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
     F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-    F.QWordReg r                    -> mk (Register $ N.gpFromFlexdis r)
+    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
     F.ByteImm  _ -> noImm
     F.WordImm  _ -> noImm
     F.DWordImm _ -> noImm
@@ -173,15 +168,6 @@ getSomeBVLocation v =
        => MLocation m (BVType n)
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
-
-{-
-    mk64 :: forall m n. (FullSemantics m, SupportedBVWidth n)
-       => MLocation m (BVType n)
-       -> m (SomeBV (MLocation m))
-    mk64 l
-      | Just LeqProof <- testLeq (addNat n1 n64) (loc_width l) =
-        return $ SomeBV $ TruncLoc l n64
--}
 
 checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
 checkEqBV getW n v
@@ -236,10 +222,6 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
        -> (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
        -> (String, SemanticsOp)
     mk s f = (s, SemanticsOp $ \ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
-    mk' :: String
-       -> (forall m. Semantics m => F.InstructionInstance -> m ())
-       -> (String, SemanticsOp)
-    mk' s f = (s, SemanticsOp f)
 
     instrs :: [(String, SemanticsOp)]
     instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) ->
@@ -530,7 +512,7 @@ maybe_ip_relative :: Semantics m =>
                      -> (t, [F.Value]) -> m b
 maybe_ip_relative f (_, vs)
   | [F.JumpOffset off] <- vs
-       = do next_ip <- bvAdd (bvLit n64 off) <$> get (Register N.rip)
+       = do next_ip <- bvAdd (bvLit n64 off) <$> get (fullRegister N.rip)
             f next_ip
   | [v]                <- vs
        = getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= f
