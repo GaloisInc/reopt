@@ -3,6 +3,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
   ( Function(..)
   , FnBlock(..)
@@ -48,8 +49,6 @@ import Reopt.Object.Memory
 
 import Debug.Trace
 
-commas :: [Doc] -> Doc
-commas = hsep . punctuate (char ',')
 
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
@@ -86,59 +85,6 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
                 Just (prev, ret)
               | Write{} <- stmt -> Nothing
               | otherwise -> go prev
-
-------------------------------------------------------------------------
--- Function definitions
-
-data Function = Function { fnAddr :: CodeAddr
-                         , fnBlocks :: [FnBlock]
-                         }
-
-instance Pretty Function where
-  pretty fn =
-    pretty (showHex (fnAddr fn) "") <$$>
-    vcat (pretty <$> fnBlocks fn)
-
-data FnBlock
-   = FnBlock { fbLabel :: !BlockLabel
-             , fbStmts :: ![FnStmt]
-             , fbTerm :: !(FnTermStmt)
-             }
-
-instance Pretty FnBlock where
-  pretty b =
-    pretty (fbLabel b) <$$>
-    indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
-
-data FnStmt
-  = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
-    -- | A comment
-  | FnComment !Text
-    -- | An assignment statement
-  | forall tp . FnAssignStmt !(FnAssignment tp)
-
-
-instance Pretty FnStmt where
-  pretty s =
-    case s of
-      FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
-      FnComment msg -> text "#" <+> text (Text.unpack msg)
-
-data FnTermStmt
-   = FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
-   | FnCall !(FnValue (BVType 64)) [Some FnValue] BlockLabel
-     -- ^ A call statement to the given location with the arguments listed that
-     -- returns to the label.
-   | FnTermStmtUndefined
-
-instance Pretty FnTermStmt where
-  pretty s =
-    case s of
-      FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
-      FnCall f args lbl ->
-        let arg_docs = viewSome pretty <$> args
-         in text "call" <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
-      FnTermStmtUndefined -> text "undefined term"
 
 ------------------------------------------------------------------------
 -- StackDelta
@@ -380,7 +326,8 @@ recoverBlock lbl = do
     Fold.traverse_ recoverStmtStackDelta (blockStmts b)
     recoverTermStmtStackDelta (blockTerm b)
 
-  mem <- uses rsInterp memory
+  interp_state <- use rsInterp
+  let mem = memory interp_state
   case blockTerm b of
     Branch c x y -> do
       computeAllocSize $ do
@@ -397,13 +344,13 @@ recoverBlock lbl = do
                         , fbStmts = stmts
                         , fbTerm = FnBranch cv x y
                         }
-    FetchAndExecute s
+    FetchAndExecute proc_state
         -- The last statement was a call.
-      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) s -> do
+      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state -> do
         -- Compute any allocations that need to occur.
         computeAllocSize $ do
           Fold.traverse_ recoverStmtStackDelta prev_stmts
-          modify $ mergeStackDelta (s ^. register N.rsp) 8 True
+          modify $ mergeStackDelta (proc_state ^. register N.rsp) 8 True
 
         Fold.traverse_ recoverStmt prev_stmts
         stk <- getCurStack
@@ -415,15 +362,37 @@ recoverBlock lbl = do
               return $ Nothing
         addFrontier (GeneratedBlock ret_addr 0) (MapF.fromList (catMaybes reg_pairs)) stk
         fn_stmts <- uses rsCurStmts Fold.toList
-        call_tgt <- recoverValue "ip" (s^.register N.rip)
-        args <- (++ stackArgs stk) <$> stateArgs s
+        call_tgt <- recoverValue "ip" (proc_state^.register N.rip)
+        args <- (++ stackArgs stk) <$> stateArgs proc_state
         let ret_lbl = GeneratedBlock ret_addr 0
         return $! FnBlock { fbLabel = lbl
                           , fbStmts = fn_stmts
                           , fbTerm = FnCall call_tgt args ret_lbl
                           }
+      -- Jump to concrete offset.
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
+        -- Check that we are in the same function
+      , let this_fn = getFunctionEntryPoint (labelAddr lbl) interp_state
+      , let tgt_fn  = getFunctionEntryPoint tgt_addr interp_state
+      , this_fn == tgt_fn -> do
+
+        -- Compute amount to allocate.
+        computeAllocSize $ do
+          Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+          recoverTermStmtStackDelta (blockTerm b)
+        -- Recover statements
+        Fold.traverse_ recoverStmt (blockStmts b)
+        stmts <- uses rsCurStmts Fold.toList
+        let tgt_lbl = GeneratedBlock tgt_addr 0
+        regs <- getCurRegs
+        stk  <- getCurStack
+        addFrontier tgt_lbl regs stk
+        return $! FnBlock { fbLabel = lbl
+                          , fbStmts = stmts
+                          , fbTerm = FnJump tgt_lbl
+                          }
     _ -> do
-      trace ("recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do
+      trace ("WARNING: recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do
       computeAllocSize $ do
         Fold.traverse_ recoverStmtStackDelta (blockStmts b)
         recoverTermStmtStackDelta (blockTerm b)
@@ -497,7 +466,7 @@ recoverValue nm v = do
         case () of
           _ | memFlags seg `hasPermissions` pf_x
             , Set.member addr (interpState^.functionEntries) -> do
-              return $ FnFunctionEntryValue addr
+              return $! FnFunctionEntryValue addr
 
             | memFlags seg `hasPermissions` pf_x
             , Map.member addr (interpState^.blocks) -> do
@@ -505,11 +474,14 @@ recoverValue nm v = do
               when (not (inSameFunction cur_addr addr interpState)) $ do
                 trace ("Cross function jump " ++ showHex cur_addr " to " ++ showHex addr ".") $
                   return ()
-              return $ FnBlockValue addr
+              return $! FnBlockValue addr
+
+            | memFlags seg `hasPermissions` pf_w -> do
+              return $! FnGlobalDataAddr addr
 
             | otherwise -> do
-              trace ("recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
-                return $ FnValueUnsupported
+              trace ("WARNING: recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
+              return $! FnValueUnsupported
       | otherwise -> do
         return $ FnConstantValue w i
 

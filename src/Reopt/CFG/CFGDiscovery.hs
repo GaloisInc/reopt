@@ -867,7 +867,6 @@ transferBlock b regs = do
                       | isCodeAddr mem tgt_addr
                       , inSameFunction (labelAddr lbl) tgt_addr interpState -> do
 
-                        trace ("Trying IP " ++ showHex tgt_addr ".") $ do
                         mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
                         resolveJump (tgt_addr:prev) (idx+1)
                     _ -> do
