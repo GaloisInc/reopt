@@ -1429,9 +1429,55 @@ exec_movlhps l v = do
         f = snd . bvSplit
 
 -- MOVMSKPS Extract sign mask from four packed single-precision floating-point values
--- | MOVSS Move scalar single-precision floating-point value between XMM registers or between an XMM register and memory
-exec_movss :: Semantics m => MLocation m (BVType 32) -> Value m (FloatType SingleFloat) -> m ()
-exec_movss l v = l .= v
+
+-- MOVSS/MOVSD Move scalar single/double-precision floating-point value between XMM registers or between an XMM register and memory
+--
+-- These helper functions implement the three variations of the
+-- @movss@ and @movsd@ instructions.
+--
+-- The @movss@ and @movsd@ instructions are strange: when the
+-- destination is an XMM register and the source is memory, the
+-- high-order bits of the destination get zeroed out; when the source
+-- is also an XMM register, the high-order bits of the destination are
+-- preserved.
+
+-- | Preserve high-order bits.
+exec_movsX_xmm_xmm ::
+  ( Semantics m
+  , 1 <= n
+  , n <= 128
+  , ((128 - n) + n) ~ 128
+  , 1 <= 128 - n
+  , 128 - n <= 128
+  ) => NatRepr n -> MLocation m XMMType -> MLocation m XMMType -> m ()
+exec_movsX_xmm_xmm n l v = do
+  vLow <- bvTrunc n <$> get v
+  set_low l vLow
+
+exec_movsX_mem_xmm ::
+  ( Semantics m
+  , 1 <= n
+  , n <= 128
+  , ((128 - n) + n) ~ 128
+  , 1 <= 128 - n
+  , 128 - n <= 128
+  ) => MLocation m (BVType n) -> MLocation m XMMType -> m ()
+exec_movsX_mem_xmm l v = do
+  vLow <- bvTrunc (loc_width l) <$> get v
+  l .= vLow
+
+-- | Zero-out high-order bits.
+exec_movsX_xmm_mem ::
+  ( Semantics m
+  , 1 <= n
+  , n <= 128
+  , ((128 - n) + n) ~ 128
+  , 1 <= 128 - n
+  , 128 - n <= 128
+  ) => MLocation m XMMType -> MLocation m (BVType n) -> m ()
+exec_movsX_xmm_mem l v = do
+  v' <- get v
+  l .= uext (loc_width l) v'
 
 -- *** SSE Packed Arithmetic Instructions
 
@@ -1588,11 +1634,6 @@ exec_movlpd l v = do
   l .= bvUnvectorize (loc_width l) rPieces
 
 -- MOVMSKPD Extract sign mask from two packed double-precision floating-point values
-
--- | MOVSD Move scalar double-precision floating-point value between XMM
--- registers or between an XMM register and memory
-exec_movsd :: Semantics m => MLocation m (BVType 64) -> Value m (FloatType DoubleFloat) -> m ()
-exec_movsd l v = l .= v
 
 -- *** SSE2 Packed Arithmetic Instructions
 

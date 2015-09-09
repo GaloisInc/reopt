@@ -21,17 +21,16 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ImpredicativeTypes #-}
+
 module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
   ) where
 
-import           Control.Exception (assert)
 import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import           Data.Maybe (isJust)
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
-import           GHC.TypeLits (KnownNat)
+import           GHC.TypeLits (KnownNat, type (<=))
 import           Debug.Trace
 
 import           Data.Parameterized.NatRepr
@@ -220,52 +219,16 @@ truncateBVValue n (SomeBV v)
       return (bvTrunc n v)
   | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
--- | Given a bitvector
-truncateBVLocation :: forall addr n
-                    . (1 <= n)
-                   => SomeBV (Location addr)
-                      -- ^ The location to truncate
-                   -> NatRepr n
-                      -- ^ The width of the resulting type.
-                   -> Location addr (BVType n)
-truncateBVLocation (SomeBV l) tgt_width = truncateBVLocation' l tgt_width
-
--- | Given a bitvector
-truncateBVLocation' :: forall addr m n
-                    . (1 <= n)
-                    => Location addr (BVType m)
-                       -- ^ The location to truncate
-                    -> NatRepr n
-                       -- ^ The width of the resulting type.
-                    -> Location addr (BVType n)
-truncateBVLocation' (MemoryAddr a (BVTypeRepr src_width)) tgt_width =
-  assert (isJust (testLeq tgt_width src_width)) $
-    MemoryAddr a (BVTypeRepr tgt_width)
-truncateBVLocation' (TruncLoc l w) tgt_width =
-  truncateBVLocation' l tgt_width
-truncateBVLocation' (LowerHalf l) tgt_width =
-  truncateBVLocation' l tgt_width
-truncateBVLocation' l tgt
-  | Just Refl <- testEquality tgt (loc_width l) = l
-  | Just LeqProof <- testLeq (incNat tgt) (loc_width l) =
-    TruncLoc l tgt
-  | otherwise = error "truncateBVLocation given bad width."
-
-unimplemented :: Monad m => m ()
-unimplemented = fail "UNIMPLEMENTED"
-
 newtype SemanticsOp
       = SemanticsOp { unSemanticsOp :: forall m. Semantics m
                                     => F.InstructionInstance
                                     -> m () }
-
 
 mapNoDupFromList :: (Ord k, Show k) => String -> [(k,v)] -> Map k v
 mapNoDupFromList nm = foldl' ins M.empty
   where ins m (k,v) = M.insertWith (\_ _ -> error (e_msg k)) k v m
         e_msg k = nm ++ " contains duplicate entries for " ++ show k ++ "."
 
--- semanticsMap :: forall m. Semantics m => Map String ((F.LockPrefix, [F.Value]) -> m ())
 semanticsMap :: Map String SemanticsOp
 semanticsMap = mapNoDupFromList "semanticsMap" instrs
   where
@@ -327,14 +290,14 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
               , mk "subsd"   $ truncateKnownBinop exec_subsd
-              , mk "movsd"   $ truncate64Op exec_movsd
+              , mk "movsd"   $ mkBinop (movsX n64)
               , mk "movapd"  $ truncateKnownBinop exec_movapd
               , mk "movaps"  $ truncateKnownBinop exec_movaps
               , mk "movups"  $ truncateKnownBinop exec_movups
               , mk "movdqa"  $ truncateKnownBinop exec_movdqa
               , mk "movdqu"  $ truncateKnownBinop exec_movdqa
-              , mk "movsd_sse" $ truncate64Op exec_movsd
-              , mk "movss"   $ truncate32Op exec_movss
+              , mk "movsd_sse" $ mkBinop (movsX n64)
+              , mk "movss"   $ mkBinop (movsX n32)
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
@@ -484,6 +447,44 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
 x87fir :: FloatInfoRepr X86_80Float
 x87fir = X86_80FloatRepr
 
+-- | Call the appropriate @movss@ or @movsd@ variant.
+--
+-- The @movss@ and @movsd@ instructions have different semantics
+-- depending on the argument type.
+movsX ::
+  ( Semantics m
+  , 1 <= n
+  , n <= 128
+  , ((128 - n) + n) ~ 128
+  , 1 <= 128 - n
+  , 128 - n <= 128
+  ) =>
+  NatRepr n -> F.Value -> F.Value -> m ()
+movsX n v1 v2 = do
+  case (v1, v2) of
+    (F.XMMReg {}, F.XMMReg {}) -> do
+      l1 <- getBVLocation v1 n128
+      l2 <- getBVLocation v2 n128
+      exec_movsX_xmm_xmm n l1 l2
+    (F.Mem64 {},  F.XMMReg {}) | natValue n == 64 -> do
+      l1 <- getBVLocation v1 n64
+      l2 <- getBVLocation v2 n128
+      exec_movsX_mem_xmm l1 l2
+    (F.XMMReg {}, F.Mem64 {}) | natValue n == 64 -> do
+      l1 <- getBVLocation v1 n128
+      l2 <- getBVLocation v2 n64
+      exec_movsX_xmm_mem l1 l2
+    (F.Mem32 {},  F.XMMReg {}) | natValue n == 32 -> do
+      l1 <- getBVLocation v1 n32
+      l2 <- getBVLocation v2 n128
+      exec_movsX_mem_xmm l1 l2
+    (F.XMMReg {}, F.Mem32 {}) | natValue n == 32 -> do
+      l1 <- getBVLocation v1 n128
+      l2 <- getBVLocation v2 n32
+      exec_movsX_xmm_mem l1 l2
+    _ -> fail $ "Unexpected arguments in FlexdisMatcher.movsX: " ++
+                show v1 ++ ", " ++ show v2
+
 semanticsOp :: (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
             -> SemanticsOp
 semanticsOp f = SemanticsOp (\ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
@@ -604,23 +605,6 @@ truncateKnownBinop f = mkBinop $ \loc val -> do
   l <- getBVLocation loc n128
   v <- truncateBVValue knownNat =<< getSomeBVValue val
   f l v
-
-truncate32Op :: (FullSemantics m)
-             => (MLocation m (BVType 32) -> Value m (BVType 32) -> m ())
-             -> (F.LockPrefix, [F.Value]) -> m ()
-truncate32Op f = mkBinop $ \loc val -> do
-  l <- (`truncateBVLocation` n32) <$> getSomeBVLocation loc
-  v <- truncateBVValue n32 =<< getSomeBVValue val
-  f l v
-
-truncate64Op :: (FullSemantics m)
-             => (MLocation m (BVType 64) -> Value m (BVType 64) -> m ())
-             -> (F.LockPrefix, [F.Value]) -> m ()
-truncate64Op f = mkBinop $ \loc val -> do
-  l <- (`truncateBVLocation` n64) <$> getSomeBVLocation loc
-  v <- truncateBVValue n64 =<< getSomeBVValue val
-  f l v
-
 
 knownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
               -> (F.LockPrefix, [F.Value]) -> m ()
