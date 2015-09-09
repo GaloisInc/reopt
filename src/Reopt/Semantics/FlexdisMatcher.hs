@@ -30,7 +30,7 @@ import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
-import           GHC.TypeLits (KnownNat, type (<=))
+import           GHC.TypeLits (KnownNat)
 import           Debug.Trace
 
 import           Data.Parameterized.NatRepr
@@ -461,29 +461,35 @@ movsX ::
   ) =>
   NatRepr n -> F.Value -> F.Value -> m ()
 movsX n v1 v2 = do
+  -- The memory addresses below are supposed to point to 64 or 32
+  -- bits, but flexdis always produces 128 ??? This appears to be a
+  -- bug, but Simon did not feel that it was worth fixing; the
+  -- workaround is easy: just adjust the number of bits pointed to.
   case (v1, v2) of
     (F.XMMReg {}, F.XMMReg {}) -> do
       l1 <- getBVLocation v1 n128
       l2 <- getBVLocation v2 n128
       exec_movsX_xmm_xmm n l1 l2
-    (F.Mem64 {},  F.XMMReg {}) | natValue n == 64 -> do
-      l1 <- getBVLocation v1 n64
-      l2 <- getBVLocation v2 n128
-      exec_movsX_mem_xmm l1 l2
-    (F.XMMReg {}, F.Mem64 {}) | natValue n == 64 -> do
+    (F.Mem128 {},  F.XMMReg {}) -> do
       l1 <- getBVLocation v1 n128
-      l2 <- getBVLocation v2 n64
-      exec_movsX_xmm_mem l1 l2
-    (F.Mem32 {},  F.XMMReg {}) | natValue n == 32 -> do
-      l1 <- getBVLocation v1 n32
       l2 <- getBVLocation v2 n128
-      exec_movsX_mem_xmm l1 l2
-    (F.XMMReg {}, F.Mem32 {}) | natValue n == 32 -> do
+      let l1' = adjustMemoryAddr l1 n
+      exec_movsX_mem_xmm l1' l2
+    (F.XMMReg {}, F.Mem128 {}) -> do
       l1 <- getBVLocation v1 n128
-      l2 <- getBVLocation v2 n32
-      exec_movsX_xmm_mem l1 l2
+      l2 <- getBVLocation v2 n128
+      let l2' = adjustMemoryAddr l2 n
+      exec_movsX_xmm_mem l1 l2'
     _ -> fail $ "Unexpected arguments in FlexdisMatcher.movsX: " ++
-                show v1 ++ ", " ++ show v2
+                show n ++ ", " ++ show v1 ++ ", " ++ show v2
+  where
+    -- | Change the number of bits pointed to by an address.
+    adjustMemoryAddr ::
+      Location addr (BVType src) -> NatRepr tgt -> Location addr (BVType tgt)
+    adjustMemoryAddr (MemoryAddr a _) tgt_width =
+      MemoryAddr a (BVTypeRepr tgt_width)
+    adjustMemoryAddr _ _ =
+      error "FlexdisMatcher.movsX.adjustMemoryAddr: non addr argument!"
 
 semanticsOp :: (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
             -> SemanticsOp
