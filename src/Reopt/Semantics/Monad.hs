@@ -703,6 +703,17 @@ class IsValue (v  :: Type -> *) where
   -- Returns 'm' lower order bits.
   bvTrunc :: (1 <= m, m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
 
+  -- | Truncate the value.
+  --
+  -- Drops the 'm' low order bits.
+  bvDrop :: forall m n.
+    (1 <= n, 1 <= n - m, n - m <= n, m <= n) =>
+    NatRepr m -> v (BVType n) -> v (BVType (n - m))
+  bvDrop m v = bvTrunc (subNat n m) $ v `bvShr` (bvLit n (natValue m))
+    where
+      n :: NatRepr n
+      n = bv_width v
+
   -- | Unsigned less than
   bvUlt :: v (BVType n) -> v (BVType n) -> v BoolType
 
