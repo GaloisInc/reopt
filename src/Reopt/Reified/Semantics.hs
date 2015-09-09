@@ -49,6 +49,8 @@ import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
   ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
+import           Reopt.Concrete.MachineState (Value)
+import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
@@ -102,6 +104,8 @@ instance Eq (Variable tp) where
 
 -- | A pure expression for isValue.
 data Expr tp where
+  -- A embedded value.
+  ValueExpr :: !(Value tp) -> Expr tp
   -- An expression obtained from some value.
   LitExpr :: !(NatRepr n) -> Integer -> Expr (BVType n)
   -- An expression that is computed from evaluating subexpressions.
@@ -120,6 +124,7 @@ app :: R.App Expr tp -> Expr tp
 app = AppExpr
 
 exprType :: Expr tp -> S.TypeRepr tp
+exprType (ValueExpr v) = CS.asTypeRepr v
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
@@ -371,6 +376,7 @@ instance S.Semantics Semantics where
 
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
+  ValueExpr v -> pretty v
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app' -> R.ppApp ppExpr app'
   VarExpr (Variable _ x) -> text x

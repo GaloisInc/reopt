@@ -67,6 +67,8 @@ type Env = MapF Variable CS.Value
 
 -- `c` in this context means `concrete value`.
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
+evalExpr (ValueExpr v) = return v
+
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec
   where
     bVec = CS.bitVector nr (BV.bitVec bitWidth i)
@@ -669,13 +671,13 @@ convertBVtoFP c fr = CS.liftValue wrap nr c
     wrap :: BV -> BV
     wrap bv = case width of
       32 -> let toBV :: Float -> BV
-                toBV = BV.bitVec width . fromIntegral . floatToWord
+                toBV = BV.bitVec width . toInteger . floatToWord
                 mkFP :: BV -> Float
                 mkFP = fromInteger . BV.int
              in toBV $ mkFP bv
 
       64 -> let toBV :: Double -> BV
-                toBV = BV.bitVec width . fromIntegral . doubleToWord
+                toBV = BV.bitVec width . toInteger . doubleToWord
                 mkFP :: BV -> Double
                 mkFP = fromInteger . BV.int
              in toBV $ mkFP bv
