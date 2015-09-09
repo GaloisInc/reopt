@@ -162,7 +162,7 @@ exec_mov l v = l .= v
 exec_cqo :: Semantics m => m ()
 exec_cqo = do
   v <- get rax
-  set_reg_pair Register N.rdx N.rax (sext n128 v)
+  set_reg_pair fullRegister N.rdx N.rax (sext n128 v)
 
 exec_cmpxchg :: forall m n
               . (IsLocationBV m n)
@@ -440,7 +440,7 @@ exec_mul v
   | Just Refl <- testEquality (bv_width v) n32 =
     go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair Register N.rdx N.rax) rax
+    go (set_reg_pair fullRegister N.rdx N.rax) rax
   | otherwise =
     fail "mul: Unknown bit width"
   where
@@ -494,7 +494,7 @@ exec_imul1 v
   | Just Refl <- testEquality (bv_width v) n32 =
     go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair Register N.rdx N.rax) rax
+    go (set_reg_pair fullRegister N.rdx N.rax) rax
   | otherwise =
     fail "imul: Unknown bit width"
   where
@@ -738,10 +738,8 @@ exec_ror l count = do
 
 isRegister :: Location addr tp -> Bool
 isRegister (Register _)   = True
-isRegister (TruncLoc l _) = isRegister l
-isRegister (LowerHalf l)  = isRegister l
-isRegister (UpperHalf l)  = isRegister l
-isRegister _ = False
+isRegister (MemoryAddr {}) = False
+isRegister (X87StackRegister {}) = False
 
 -- return val modulo the size of the register at loc iff loc is a register, otherwise return val
 moduloRegSize :: (IsValue v, 1 <= n) => Location addr (BVType n') -> v (BVType n) -> v (BVType n)
@@ -866,7 +864,7 @@ regLocation sz
   | Just Refl <- testEquality sz n8  = reg_low8
   | Just Refl <- testEquality sz n16 = reg_low16
   | Just Refl <- testEquality sz n32 = reg_low32
-  | Just Refl <- testEquality sz n64 = Register
+  | Just Refl <- testEquality sz n64 = fullRegister
   | otherwise = fail "regLocation: Unknown bit width"
 
 -- FIXME: probably doesn't work for 32 bit address sizes
@@ -1598,29 +1596,50 @@ exec_movsd l v = l .= v
 
 -- *** SSE2 Packed Arithmetic Instructions
 
+-- | Update the low 64 bits of a 128-bit location.
+--
+-- Used to implement "*sd" arith ops below.
+modify_xmm_low64 ::
+  (Semantics m, 1 <= n) =>
+  (Value m (BVType n) -> Value m (BVType n)) ->
+  MLocation m (BVType (n + n)) ->
+  m ()
+modify_xmm_low64 f r = do
+  v0 <- get r
+  let (v0High, v0Low) = bvSplit v0
+  let v1Low = f v0Low
+  r .= bvCat v0High v1Low
+
+set_xmm_low64 ::
+  (Semantics m, 1 <= n) =>
+  MLocation m (BVType (n + n)) ->
+  Value m (BVType n) ->
+  m ()
+set_xmm_low64 r c = modify_xmm_low64 (const c) r
+
 -- ADDPD Add packed double-precision floating-point values
 -- | ADDSD Add scalar double precision floating-point values
 exec_addsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
 -- FIXME: Overflow, Underflow, Invalid, Precision, Denormal.
-exec_addsd r y = modify (\x -> fpAdd DoubleFloatRepr x y) (xmm_low64 r)
+exec_addsd r y = modify_xmm_low64 (\x -> fpAdd DoubleFloatRepr x y) r
 
 -- SUBPD Subtract scalar double-precision floating-point values
 
 -- | SUBSD Subtract scalar double-precision floating-point values
 exec_subsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
-exec_subsd r y = modify (\x -> fpSub DoubleFloatRepr x y) (xmm_low64 r)
+exec_subsd r y = modify_xmm_low64 (\x -> fpSub DoubleFloatRepr x y) r
 
 -- MULPD Multiply packed double-precision floating-point values
 
 -- | MULSD Multiply scalar double-precision floating-point values
 exec_mulsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
-exec_mulsd r y = modify (\x -> fpMul DoubleFloatRepr x y) (xmm_low64 r)
+exec_mulsd r y = modify_xmm_low64 (\x -> fpMul DoubleFloatRepr x y) r
 
 -- DIVPD Divide packed double-precision floating-point values
 
 -- | DIVSD Divide scalar double-precision floating-point values
 exec_divsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
-exec_divsd r y = modify (\x -> fpDiv DoubleFloatRepr x y) (xmm_low64 r)
+exec_divsd r y = modify_xmm_low64 (\x -> fpDiv DoubleFloatRepr x y) r
 
 -- SQRTPD Compute packed square roots of packed double-precision floating-point values
 -- SQRTSD Compute scalar square root of scalar double-precision floating-point values
@@ -1645,7 +1664,7 @@ exec_divsd r y = modify (\x -> fpDiv DoubleFloatRepr x y) (xmm_low64 r)
 -- | UCOMISD Perform unordered comparison of scalar double-precision floating-point values and set flags in EFLAGS register.
 exec_ucomisd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
 -- Invalid (if SNaN operands), Denormal.
-exec_ucomisd l v = do v' <- get lower_l
+exec_ucomisd l v = do v' <- bvTrunc knownNat <$> get l
                       let unordered = (isNaN fir v .|. isNaN fir v')
                           lt        = fpLt fir v' v
                           eq        = fpEq fir v' v
@@ -1659,7 +1678,6 @@ exec_ucomisd l v = do v' <- get lower_l
                       sf_loc .= false
   where
   fir = DoubleFloatRepr
-  lower_l = xmm_low64 l
 
 -- *** SSE2 Shuffle and Unpack Instructions
 
@@ -1682,7 +1700,7 @@ exec_ucomisd l v = do v' <- get lower_l
 -- | CVTSS2SD  Convert scalar single-precision floating-point values to
 -- scalar double-precision floating-point values
 exec_cvtss2sd :: Semantics m => MLocation m (BVType 128) -> Value m (FloatType SingleFloat) -> m ()
-exec_cvtss2sd l v = xmm_low64 l .= fpCvt SingleFloatRepr DoubleFloatRepr v
+exec_cvtss2sd l v = set_xmm_low64 l (fpCvt SingleFloatRepr DoubleFloatRepr v)
 
 -- CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values
 -- CVTSD2SI  Convert scalar double-precision floating-point values to a doubleword integer
@@ -1701,7 +1719,7 @@ exec_cvttsd2si l v =
 exec_cvtsi2sd :: (IsLocationBV m n)
               => MLocation m (BVType 128) -> Value m (BVType n) -> m ()
 exec_cvtsi2sd l v = do
-  xmm_low64 l .= fpFromBV DoubleFloatRepr v
+  set_xmm_low64 l (fpFromBV DoubleFloatRepr v)
 
 -- ** SSE2 Packed Single-Precision Floating-Point Instructions
 

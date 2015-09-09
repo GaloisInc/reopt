@@ -44,7 +44,6 @@ module Reopt.Semantics.Monad
   , loc_width
   , ppLocation
 
-  , xmm_low64
   , x87reg_mmx
 
   , fullRegister
@@ -422,9 +421,6 @@ loc_width (loc_type -> BVTypeRepr nr) = nr
 
 ------------------------------------------------------------------------
 -- Specific locations.
-
-xmm_low64 :: Location addr XMMType -> Location addr (BVType 64)
-xmm_low64 l = LowerHalf l
 
 -- | CF flag
 cf_loc :: Location addr BoolType
