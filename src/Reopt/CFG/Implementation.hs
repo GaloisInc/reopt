@@ -16,6 +16,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -51,8 +52,6 @@ import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
-import           Unsafe.Coerce -- Only required to work around a ghc crash
-
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
@@ -60,7 +59,6 @@ import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types (TypeBits)
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -754,36 +752,30 @@ getLoc l0 =
     S.MemoryAddr w tp -> do
       addr <- eval w
       readLoc (MemLoc addr tp)
-    S.Register r ->
+    S.Register (S.RegisterView {..}) -> do
+      let readLoc' l = _registerViewRead <$> readLoc l
+      let r = _registerViewReg
       case r of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
        N.SegmentReg {}
-         | r == N.fs -> readLoc FS
-         | r == N.gs -> readLoc GS
+         | r == N.fs -> readLoc' FS
+         | r == N.gs -> readLoc' GS
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
        -- S.MMXReg {} -> do
        --   e <- modState $ ValueExpr <$> use (register r)
        --   ValueExpr <$> eval (S.bvTrunc knownNat e)
-       N.X87PC ->  readLoc X87_PC
-       N.X87RC ->  readLoc X87_RC
-       _ -> modState $ ValueExpr <$> use (register r)
-
-    S.LowerHalf l -> lowerHalf <$> getLoc l
-    S.UpperHalf l -> upperHalf <$> getLoc l
-    S.TruncLoc l w -> do
-      withLeqProof (ltProof w (S.loc_width l)) $
-        S.bvTrunc w <$> getLoc l
-
+       N.X87PC -> readLoc' X87_PC
+       N.X87RC -> readLoc' X87_RC
+       _ -> modState $ _registerViewRead . ValueExpr <$> use (register r)
     -- TODO
     S.X87StackRegister i -> do
       v <- modState $ use $ x87Regs
       idx <- getX87Offset i
       -- TODO: Check tag register is assigned.
       return $! ValueExpr (v V.! idx)
-
 
 lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
@@ -819,73 +811,38 @@ upperHalf e =
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
-
-bvConcat :: (1 <= n) => Expr (BVType n) -> Expr (BVType n) -> Expr (BVType (n+n))
-bvConcat l h
-    | Just 0 <- asBVLit h =
-        withLeqProof (addIsLeq w w) $ do
-          S.uext (addNat w w) l
-    | otherwise = app (ConcatV (exprWidth l) l h)
-  where w = exprWidth l
-
 -- | Assign a value to a location
 setLoc :: forall tp. ImpLocation tp -> Value tp -> X86Generator ()
-setLoc loc v0 =
-  -- So x86 says that when you assign a 32 bit register, the upper bits
-  -- are set to zero, which is different to the 16- and 8-bit cases.  This
-  -- bit of special code checks when you are updating a 32bit register and
-  -- zeroes accordingly.
+setLoc loc v =
   case loc of
-   S.LowerHalf (S.Register r@(N.GPReg _))
-     -> do -- hack to infer that n + n ~ 64 ==> n < 64
-           (LeqProof :: LeqProof (TypeBits tp) 64) <- return (unsafeCoerce (LeqProof :: LeqProof 0 0)) -- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
-           zext_v <- eval $ S.uext n64 (ValueExpr v0)
-           modState $ register r .= zext_v
-   _ -> go loc v0
-  where
-    go :: forall tp'. ImpLocation tp' -> Value tp' -> X86Generator ()
-    go l0 v =
-      case l0 of
-       S.MemoryAddr w _ -> do
-         addr <- eval w
-         addStmt $ Write (MemLoc addr (valueType v)) v
+   S.MemoryAddr w _ -> do
+     addr <- eval w
+     addStmt $ Write (MemLoc addr (valueType v)) v
 
-       S.Register r ->
-         case r of
-           N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
-           N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
-           N.SegmentReg {}
-             | r == N.fs -> addStmt $ Write FS v
-             | r == N.gs -> addStmt $ Write GS v
-             -- Otherwise registers are 0.
-             | otherwise ->
-                 fail $ "On x86-64 registers other than fs and gs may not be set."
-           N.X87PC -> addStmt $ Write X87_PC v
-           N.X87RC -> addStmt $ Write X87_RC v
-           -- FIXME: sort this out
-           -- S.MMXReg {} -> do
-           --   ext_v <- evalApp (MMXExtend v)
-           --   modState $ register r .= ext_v
-           _ -> modState $ register r .= v
-       S.TruncLoc l w -> do
-         b <- getLoc l
-         let lw = S.loc_width l
-         -- Build mask containing only upper most lw - w bits
-         case isPosNat lw of
-           Nothing -> fail "Illegal width to TruncLoc"
-           Just LeqProof -> do
-             let mask = bvLit lw (complement (maxUnsigned w))
-             let old_part = mask S..&. b
-             go l =<< eval (old_part S..|. S.uext' lw (ValueExpr v))
-       S.LowerHalf l -> do
-         b <- getLoc l
-         go l =<< eval (bvConcat (ValueExpr v) (upperHalf b))
-       S.UpperHalf l -> do
-         b <- getLoc l
-         go l =<< eval (bvConcat (lowerHalf b) (ValueExpr v))
-       S.X87StackRegister i -> do
-         off <- getX87Offset i
-         modState $ x87Regs . ix off .= v
+   S.Register (S.RegisterView {..}) -> do
+     let writeReg reg = do
+           v0 <- readLoc reg
+           v1 <- eval $ _registerViewWrite v0 (ValueExpr v)
+           addStmt $ Write reg v1
+     let r = _registerViewReg
+     case r of
+       N.ControlReg {} -> writeReg (ControlLoc r)
+       N.DebugReg {}   -> writeReg (DebugLoc r)
+       N.SegmentReg {}
+         | r == N.fs -> writeReg FS
+         | r == N.gs -> writeReg GS
+         -- Otherwise registers are 0.
+         | otherwise ->
+             fail $ "On x86-64 registers other than fs and gs may not be set."
+       N.X87PC -> writeReg X87_PC
+       N.X87RC -> writeReg X87_RC
+       _ -> do
+         v0 <- modState $ ValueExpr <$> use (register r)
+         v1 <- eval $ _registerViewWrite v0 (ValueExpr v)
+         modState $ register r .= v1
+   S.X87StackRegister i -> do
+     off <- getX87Offset i
+     modState $ x87Regs . ix off .= v
 
 mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel, GenState any)
 mkBlockLabel a s0 = (lbl, s1)
