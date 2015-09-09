@@ -42,6 +42,7 @@ module Reopt.Semantics.Monad
   , RegisterView(..)
   , loc_type
   , loc_width
+  , ppLocation
 
   , xmm_low64
   , x87reg_mmx
@@ -337,6 +338,39 @@ data Location addr (tp :: Type) where
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
+
+-- | Pretty print 'S.Location'.
+--
+-- Note: this pretty printer ignores the embedded view functions in
+-- 'RegisterView's, so the pretty printed value only indicates which
+-- bits are in the view, not how the view is actually defined
+--
+-- Going back to pretty names for subregisters is pretty ad hoc;
+-- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
+-- instead of @%ah@, we produce @%rax[8:16]@.
+ppLocation :: forall addr tp. (addr -> Doc) -> Location addr tp -> Doc
+ppLocation ppAddr loc = case loc of
+  MemoryAddr addr _tr -> ppAddr addr
+  Register rv -> ppReg rv
+  X87StackRegister i -> text $ "x87_stack@" ++ show i
+  where
+    -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
+    --
+    -- The low bit is inclusive and the high bit is exclusive, but I
+    -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
+    ppReg :: RegisterView b n cl -> Doc
+    ppReg rv =
+      text $ "%" ++ show (_registerViewReg rv) ++
+        if b == 0 && s == width'
+        then ""
+        else "[" ++ show b ++ ":" ++ show s ++ "]"
+      where
+        b = natValue $ _registerViewBase rv
+        s = natValue $ _registerViewSize rv
+
+    width' :: Integer
+    width' = case loc_type loc of
+      BVTypeRepr nr -> fromIntegral $ natValue nr
 
 -- | Full register location.
 fullRegister ::
