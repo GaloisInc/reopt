@@ -238,9 +238,11 @@ defaultRegisterViewWrite b n rn v0 v =
 --
 -- Assumes a big-endian 'IsValue' semantics.
 constUpperBitsRegisterViewWrite :: forall cl n v .
-  ( 1 <= N.RegisterClassBits cl
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
   , 1 <= N.RegisterClassBits cl - n
   , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   , IsValue v
   ) =>
   NatRepr n ->
@@ -249,13 +251,7 @@ constUpperBitsRegisterViewWrite :: forall cl n v .
   v (N.RegisterType cl) ->
   v (BVType n) ->
   v (N.RegisterType cl)
-constUpperBitsRegisterViewWrite n c rn v0 _v =
-  highOrderBits .|. lowOrderBits
-  where
-    cl = N.registerWidth rn
-
-    highOrderBits = uext cl c `bvShl` bvLit cl (natValue n)
-    lowOrderBits = uext cl v0
+constUpperBitsRegisterViewWrite _n c _rn _v0 v = bvCat c v
 
 -- | The view for full registers.
 --
@@ -307,6 +303,7 @@ constUpperBitsOnWriteRegisterView ::
   , 1 <= N.RegisterClassBits cl - n
   , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , n <= N.RegisterClassBits cl
+  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
   (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
@@ -400,6 +397,7 @@ constUpperBitsOnWriteRegister ::
   , 1 <= N.RegisterClassBits cl - n
   , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , n <= N.RegisterClassBits cl
+  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
   (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
