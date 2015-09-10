@@ -15,6 +15,7 @@ module Reopt.CFG.Recovery
 
   , recoverFunction
   , identifyCall
+  , identifyReturn
   ) where
 
 import Control.Lens
@@ -85,6 +86,20 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
                 Just (prev, ret)
               | Write{} <- stmt -> Nothing
               | otherwise -> go prev
+
+-- | This is designed to detect returns from the X86 representation.
+-- It pattern matches on a X86State to detect if it read its instruction
+-- pointer from an address that is 8 below the stack pointer.
+identifyReturn :: X86State Value -> Bool
+identifyReturn s = do
+  let next_ip = s^.register N.rip
+      next_sp = s^.register N.rsp
+  case next_ip of
+    AssignedValue (Assignment _ (Read (MemLoc ip_addr _))) ->
+      let (ip_base, ip_off) = asBaseOffset ip_addr
+          (sp_base, sp_off) = asBaseOffset next_sp
+       in (ip_base, ip_off + 8) == (sp_base, sp_off)
+    _ -> False
 
 ------------------------------------------------------------------------
 -- StackDelta
@@ -390,6 +405,13 @@ recoverBlock lbl = do
         return $! FnBlock { fbLabel = lbl
                           , fbStmts = stmts
                           , fbTerm = FnJump tgt_lbl
+                          }
+       -- Return
+      | identifyReturn proc_state -> do
+        stmts <- uses rsCurStmts Fold.toList          
+        return $! FnBlock { fbLabel = lbl
+                          , fbStmts = stmts
+                          , fbTerm = FnRet
                           }
     _ -> do
       trace ("WARNING: recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do

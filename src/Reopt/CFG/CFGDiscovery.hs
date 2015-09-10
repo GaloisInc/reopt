@@ -716,28 +716,12 @@ getJumpTableBounds _ _ _ _ = Nothing
   --      else Nothing
   -- | otherwise = Nothing
 
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-recoverIsReturnStmt :: X86State Value -> Bool
-recoverIsReturnStmt s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
-  case next_ip of
-    AssignedValue (Assignment _ (Read (MemLoc ip_addr _))) ->
-      let (ip_base, ip_off) = asBaseOffset ip_addr
-          (sp_base, sp_off) = asBaseOffset next_sp
-       in (ip_base, ip_off + 8) == (sp_base, sp_off)
-    _ -> False
-
-
-
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsProcessorState -- ^ Registers at this block.
               -> State InterpState ()
 transferBlock b regs = do
   let lbl = blockLabel b
-  trace ("transferBlock " ++ show lbl) $ do
+  -- trace ("transferBlock " ++ show lbl) $ do
   mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
@@ -782,7 +766,7 @@ transferBlock b regs = do
             recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
           -- This block ends with a return.
-          | recoverIsReturnStmt s' -> do
+          | identifyReturn s' -> do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
             rc0 <- use returnCount

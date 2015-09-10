@@ -2,6 +2,8 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE RankNTypes #-}
+
 module Reopt.CFG.FnRep
    ( FnAssignment(..)
    , FnAssignRhs(..)
@@ -20,7 +22,8 @@ import Numeric (showHex)
 import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 
-import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr)
+import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
+                               , ppApp, ppLit, ppAssignId, sexpr)
 import Reopt.Machine.Types
 
 commas :: [Doc] -> Doc
@@ -30,6 +33,9 @@ data FnAssignment tp
    = FnAssignment { fnAssignId :: !AssignId
                   , fnAssignRhs :: !(FnAssignRhs tp)
                   }
+
+instance Pretty (FnAssignment tp) where
+  pretty (FnAssignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
 -- | The right-hand side of a function assingment statement.
 data FnAssignRhs (tp :: Type) where
@@ -43,6 +49,17 @@ data FnAssignRhs (tp :: Type) where
             -> FnAssignRhs tp
   FnAlloca :: !(FnValue (BVType 64))
            -> FnAssignRhs (BVType 64)
+
+ppFnAssignRhs :: (forall u . FnValue u -> Doc)
+                 -> FnAssignRhs tp
+                 -> Doc
+ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w))
+ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
+ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
+ppFnAssignRhs _pp (FnAlloca sz) = sexpr "alloca" [pretty sz]
+
+instance Pretty (FnAssignRhs tp) where
+  pretty = ppFnAssignRhs pretty
 
 -- | A function value.
 data FnValue (tp :: Type) where
@@ -62,9 +79,18 @@ data FnValue (tp :: Type) where
   -- A global address
   FnGlobalDataAddr :: !Word64 -> FnValue (BVType 64)
 
-
 instance Pretty (FnValue tp) where
-  pretty FnValueUnsupported = text "unsupported"
+  pretty FnValueUnsupported       = text "unsupported"
+  pretty (FnConstantValue sz n)   = ppLit sz n
+  pretty (FnAssignedValue assign)   = ppAssignId (fnAssignId assign)
+  pretty (FnFunctionEntryValue n) = text "FunctionEntry"
+                                    <> parens (pretty $ showHex n "")
+  pretty (FnBlockValue n)         = text "BlockValue"
+                                    <> parens (pretty $ showHex n "")
+  pretty (FnIntArg n)             = text "arg" <> int n
+  pretty (FnFloatArg n)           = text "fparg" <> int n
+  pretty (FnGlobalDataAddr addr)  = text "data@"
+                                    <> parens (pretty $ showHex addr "")
 
 ------------------------------------------------------------------------
 -- Function definitions
@@ -75,8 +101,14 @@ data Function = Function { fnAddr :: CodeAddr
 
 instance Pretty Function where
   pretty fn =
-    pretty (showHex (fnAddr fn) "") <$$>
-    vcat (pretty <$> fnBlocks fn)
+    text "function " <+> pretty (showHex (fnAddr fn) "")
+    <$$>
+    lbrace
+    <$$>
+    (nest 4 $ vcat (pretty <$> fnBlocks fn))
+    <$$>
+    rbrace
+
 
 data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
@@ -102,10 +134,11 @@ instance Pretty FnStmt where
     case s of
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
+      FnAssignStmt assign -> pretty assign
 
 data FnTermStmt
    = FnJump !BlockLabel
-
+   | FnRet      
    | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
      -- ^ A branch to a block within the function
    | FnCall !(FnValue (BVType 64)) [Some FnValue] BlockLabel
@@ -117,6 +150,8 @@ instance Pretty FnTermStmt where
   pretty s =
     case s of
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
+      FnJump lbl -> text "jump" <+> pretty lbl
+      FnRet -> text "return"
       FnCall f args lbl ->
         let arg_docs = viewSome pretty <$> args
          in text "call" <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
