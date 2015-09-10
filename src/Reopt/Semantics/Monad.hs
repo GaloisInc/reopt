@@ -197,9 +197,8 @@ defaultRegisterViewWrite :: forall b cl n v .
   v (BVType n) ->
   v (N.RegisterType cl)
 defaultRegisterViewWrite b n rn v0 v =
-  -- Truncation 'bvTrunc' requires that the result vector has
-  -- non-zero length, and concatenation 'bvCat' only works for two
-  -- vectors of the same length, so we build the concatenation
+  -- Truncation 'bvTrunc' requires that the result vector has non-zero
+  -- length, so we build the concatenation
   --
   --   h ++ m ++ l
   --
@@ -230,9 +229,14 @@ defaultRegisterViewWrite b n rn v0 v =
 
     cl = N.registerWidth rn
 
-    highOrderBits   = mask (natValue b + natValue n) (natValue cl) v0
-    middleOrderBits = uext cl v `bvShl` bvLit cl (natValue b)
-    lowOrderBits    = mask 0 (natValue b) v0
+    n', b', cl' :: Integer
+    n' = natValue n
+    b' = natValue b
+    cl' = natValue cl
+
+    highOrderBits   = mask (b' + n') (cl' - b' - n') v0
+    middleOrderBits = uext cl v `bvShl` bvLit cl b'
+    lowOrderBits    = mask 0 b' v0
 
 -- | Update the lower 'n' bits and set the upper bits to a constant.
 --
