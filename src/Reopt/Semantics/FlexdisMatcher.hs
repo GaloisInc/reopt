@@ -206,7 +206,7 @@ truncateBVValue n (SomeBV v)
   | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
 newtype SemanticsOp
-      = SemanticsOp { unSemanticsOp :: forall m. Semantics m
+      = SemanticsOp { _unSemanticsOp :: forall m. Semantics m
                                     => F.InstructionInstance
                                     -> m () }
 
@@ -532,7 +532,7 @@ mkTernopPfx :: FullSemantics m
 mkTernopPfx f (pfx, vs) =
   case vs of
     [v, v', v''] -> f pfx v v' v''
-    vs           -> fail $ "expecting 3 arguments, got " ++ show (length vs)
+    _            -> fail $ "expecting 3 arguments, got " ++ show (length vs)
 
 mkBinop :: FullSemantics m
         => (F.Value -> F.Value -> m a)
@@ -547,7 +547,7 @@ mkBinopPfx :: FullSemantics m
 mkBinopPfx f (pfx, vs) =
   case vs of
     [v, v']   -> f pfx v v'
-    vs        -> fail $ "expecting 2 arguments, got " ++ show (length vs)
+    _         -> fail $ "expecting 2 arguments, got " ++ show (length vs)
 
 mkUnop :: FullSemantics m
           => (F.Value -> m a)
@@ -555,7 +555,7 @@ mkUnop :: FullSemantics m
           -> m a
 mkUnop f (_, vs) = case vs of
                      [v]   -> f v
-                     vs    -> fail $ "expecting 1 arguments, got " ++ show (length vs)
+                     _     -> fail $ "expecting 1 arguments, got " ++ show (length vs)
 
 mkBinopLV ::  Semantics m
         => (forall n n'. (IsLocationBV m n, 1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
