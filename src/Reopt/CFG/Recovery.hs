@@ -431,6 +431,13 @@ recoverWrite addr val = do
   r_val  <- recoverValue "write_val" val
   addFnStmt $ FnWriteMem r_addr r_val
 
+emitAssign :: Assignment tp -> FnAssignRhs tp -> Recover (FnAssignment tp)
+emitAssign assign rhs = do
+  fnAssign <- mkFnAssign rhs
+  rsAssignMap %= MapF.insert assign fnAssign
+  addFnStmt $ FnAssignStmt fnAssign
+  return fnAssign
+
 -- | This should add code as needed to support the statement.
 recoverStmt :: Stmt -> Recover ()
 recoverStmt s =
@@ -438,16 +445,12 @@ recoverStmt s =
     AssignStmt assign -> do
       let lhs = assignId assign
       case assignRhs assign of
-        EvalApp _ -> return ()
-        SetUndefined w -> do
-          fnAssign <- mkFnAssign (FnSetUndefined w)
-          rsAssignMap %= MapF.insert assign fnAssign
-          addFnStmt $ FnAssignStmt fnAssign
+        -- Apps are handled in recoverValue (lazily).
+        EvalApp _ -> return () 
+        SetUndefined w -> void $ emitAssign assign (FnSetUndefined w)
         Read (MemLoc addr tp) -> do
           fn_addr <- recoverAddr addr
-          fnAssign <- mkFnAssign (FnReadMem fn_addr tp)
-          rsAssignMap %= MapF.insert assign fnAssign
-          addFnStmt $ FnAssignStmt fnAssign
+          void $ emitAssign assign (FnReadMem fn_addr tp)
         _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
           return ()
     Write (MemLoc addr _) val
@@ -516,8 +519,7 @@ recoverValue nm v = do
           case assignRhs assign of
             EvalApp app -> do
               app' <- traverseApp (recoverValue ('r':nm)) app
-              fnAssign <- mkFnAssign (FnEvalApp app')
-              rsAssignMap %= MapF.insert assign fnAssign
+              fnAssign <- emitAssign assign (FnEvalApp app')
               return $! FnAssignedValue fnAssign
             _ -> do
               trace ("recoverValue does not yet support assignment " ++ show (pretty assign)) $
