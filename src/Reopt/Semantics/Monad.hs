@@ -19,10 +19,12 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+
 module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
@@ -37,9 +39,17 @@ module Reopt.Semantics.Monad
   , FloatInfoRepr(..)
   , FloatInfoBits
   , floatInfoBits
+    -- * RegisterView
+  , RegisterView
+  , RegisterViewType(..)
+  , registerViewRead
+  , registerViewWrite
+  , registerViewBase
+  , registerViewSize
+  , registerViewReg
+  , registerViewType
     -- * Location
   , Location(..)
-  , RegisterView(..)
   , loc_type
   , loc_width
   , ppLocation
@@ -120,16 +130,87 @@ nonLoopingCoerce Refl x = x
 
 ------------------------------------------------------------------------
 -- Sub registers
+--
+-- See comments above 'registerViewRead'.
 
 -- | A view into a register / a subregister.
+data RegisterView cl b n =
+  (b + n <= N.RegisterClassBits cl) =>
+  RegisterView
+    { _registerViewBase :: NatRepr b
+    , _registerViewSize :: NatRepr n
+    , _registerViewReg :: RegisterName cl
+    , _registerViewType :: RegisterViewType cl b n
+    }
+
+-- TODO(conathan) use constraint kinds and constraint aliases to name
+-- the read and write constraints, instead of repeating them over and
+-- over. Or better, eliminate the pointless (?) @1 <= n@ contraints
+-- from 'IsValue' ...
+
+-- | The different kinds of register views.
+--
+-- We introduce this "tag" type, vs embedding the read and write
+-- functions directly in the 'RegisterView', in order to reify the
+-- read and write functions: these tags can be inspected at run time,
+-- but the corresponding read and write functions cannot. The
+-- 'registerViewRead' and 'registerViewWrite' functions below map a
+-- 'RegisterView' to it's corresponding read and write functions,
+-- using the constraints embedded in the 'RegisterViewType' tag.
+--
+-- We could optimize the common case of full registers by introducing
+-- a @IdentityView@ of type @RegisterViewType cl 0
+-- (N.registerclassbits cl)@ whose read view is @\x -> x@ and write
+-- view is @\x y -> y@.
+data RegisterViewType cl (b :: Nat) (n :: Nat) =
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  ) =>
+  DefaultView |
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  , 1 <= N.RegisterClassBits cl - n
+  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
+  , b ~ 0
+  ) =>
+  OneExtendOnWrite |
+  ( 1 <= n
+  , 1 <= N.RegisterClassBits cl
+  , n <= N.RegisterClassBits cl
+  , 1 <= N.RegisterClassBits cl - n
+  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
+  , b ~ 0
+  ) => ZeroExtendOnWrite
+
+registerViewBase :: RegisterView cl b n -> NatRepr b
+registerViewBase = _registerViewBase
+
+registerViewSize :: RegisterView cl b n -> NatRepr n
+registerViewSize = _registerViewSize
+
+registerViewReg :: RegisterView cl b n -> RegisterName cl
+registerViewReg = _registerViewReg
+
+registerViewType :: RegisterView cl b n -> RegisterViewType cl b n
+registerViewType = _registerViewType
+
+-- | Read a register via a view.
 --
 -- The read and write operations specify how to read and write a
 -- subregister value based on the current value @v0@ in the full
 -- register. The write operation also depends on the new subregister
--- value @v@ to be written. See 'defaultRegisterViewRead' and
--- 'defaultRegisterViewWrite' for how to read and write in the common
--- case (e.g. for @ax@ as a subregister of @rax@). The special cases
--- motivating this data type are:
+-- value @v@ to be written.
+--
+-- See 'defaultRegisterViewRead' and 'defaultRegisterViewWrite'
+-- implement the common case (e.g. for @ax@ as a subregister of
+-- @rax@).
+--
+-- The special cases motivating introduction of the 'RegisterView'
+-- data type are:
 --
 -- * 32-bit subregisters of 64-bit general purpose registers
 --   (e.g. @eax@ as a subregister of @rax@), where the high-order 32
@@ -144,24 +225,47 @@ nonLoopingCoerce Refl x = x
 -- semantics to be implemented using 'RegisterView'. Rather,
 -- 'RegisterView' is intended to implement the *implicit* special
 -- treatment of some aliased registers, namely the two cases mentioned
--- above.
+-- above. (But this distinction is arbitrary, and we could simplify
+-- some semantic implementations by treating the lower-half of an XMM
+-- register as a named subregister, using a 'RegisterView').
 --
 -- Note: there is no type-level relationship between the base @b@ and
 -- size @n@ params and the read/write views, but the base and size are
 -- expected to specify which bits are read by read view.
-data RegisterView cl b n =
-  (b + n <= N.RegisterClassBits cl) =>
-  RegisterView
-    { _registerViewBase :: NatRepr b
-    , _registerViewSize :: NatRepr n
-    , _registerViewReg :: RegisterName cl
-    , _registerViewRead :: forall v.
-        IsValue v =>
-        v (N.RegisterType cl) -> v (BVType n)
-    , _registerViewWrite :: forall v.
-        IsValue v =>
-        v (N.RegisterType cl) -> v (BVType n) -> v (N.RegisterType cl)
-    }
+registerViewRead ::
+  IsValue v =>
+  RegisterView cl b n -> v (N.RegisterType cl) -> v (BVType n)
+registerViewRead (RegisterView {..}) =
+  case _registerViewType of
+    DefaultView -> defaultRegisterViewRead b n rn
+    OneExtendOnWrite -> defaultRegisterViewRead b n rn
+    ZeroExtendOnWrite -> defaultRegisterViewRead b n rn
+  where
+    b = _registerViewBase
+    n = _registerViewSize
+    rn = _registerViewReg
+
+-- | Write a register via a view.
+registerViewWrite ::
+  IsValue v =>
+  RegisterView cl b n ->
+  v (N.RegisterType cl) ->
+  v (BVType n) ->
+  v (N.RegisterType cl)
+registerViewWrite (RegisterView {..}) =
+  case _registerViewType of
+    DefaultView -> defaultRegisterViewWrite b n rn
+    OneExtendOnWrite ->
+      let ones = complement (bvLit (cl `subNat` n) (0::Integer)) in
+      constUpperBitsRegisterViewWrite n ones rn
+    ZeroExtendOnWrite ->
+      let zeros = bvLit (cl `subNat` n) (0::Integer) in
+      constUpperBitsRegisterViewWrite n zeros rn
+  where
+    b = _registerViewBase
+    n = _registerViewSize
+    rn = _registerViewReg
+    cl = N.registerWidth rn
 
 -- | Extract 'n' bits starting at base 'b'.
 --
@@ -268,12 +372,7 @@ identityRegisterView rn =
     { _registerViewBase = b
     , _registerViewSize = n
     , _registerViewReg = rn
-    -- TODO(conathan): replace these with more efficient special cases
-    -- below after testing.
-    , _registerViewRead = defaultRegisterViewRead b n rn
-    , _registerViewWrite = defaultRegisterViewWrite b n rn
-    -- , _registerViewRead  = id
-    -- , _registerViewWrite = \_v0 v -> v
+    , _registerViewType = DefaultView
     }
   where
     b = knownNat
@@ -292,8 +391,7 @@ sliceRegisterView b n rn =
     { _registerViewBase = b
     , _registerViewSize = n
     , _registerViewReg = rn
-    , _registerViewRead = defaultRegisterViewRead b n rn
-    , _registerViewWrite = defaultRegisterViewWrite b n rn
+    , _registerViewType = DefaultView
     }
 
 -- | The view for 32-bit general purpose and mmx registers.
@@ -310,16 +408,15 @@ constUpperBitsOnWriteRegisterView ::
   , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
-  (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
+  RegisterViewType cl 0 n ->
   RegisterName cl ->
   RegisterView cl 0 n
-constUpperBitsOnWriteRegisterView n c rn =
+constUpperBitsOnWriteRegisterView n rt rn  =
   RegisterView
     { _registerViewBase = n0
     , _registerViewSize = n
     , _registerViewReg = rn
-    , _registerViewRead = defaultRegisterViewRead n0 n rn
-    , _registerViewWrite = constUpperBitsRegisterViewWrite n c rn
+    , _registerViewType = rt
     }
 
 ------------------------------------------------------------------------
@@ -404,10 +501,11 @@ constUpperBitsOnWriteRegister ::
   , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
-  (forall v. IsValue v => v (BVType (N.RegisterClassBits cl - n))) ->
+  RegisterViewType cl 0 n ->
   RegisterName cl ->
   Location addr (BVType n)
-constUpperBitsOnWriteRegister n c = Register . constUpperBitsOnWriteRegisterView n c
+constUpperBitsOnWriteRegister n rt =
+  Register . constUpperBitsOnWriteRegisterView n rt
 
 ------------------------------------------------------------------------
 -- Operations on locations.
@@ -481,15 +579,14 @@ mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
 -- x86 manual: on write,the upper 16 bits of the underlying x87
 -- register are oned out!
 x87reg_mmx :: RegisterName 'X87_FPU -> Location addr (BVType 64)
-x87reg_mmx r =
-  constUpperBitsOnWriteRegister n64 (complement (bvLit n16 (0::Integer))) r
+x87reg_mmx r = constUpperBitsOnWriteRegister n64 OneExtendOnWrite r
 
 -- | Return low 32-bits of register e.g. rax -> eax
 --
 -- These subregisters have special semantics, defined in Volume 1 of
 -- the Intel x86 manual: on write, the upper 32 bits are zeroed out!
 reg_low32 :: RegisterName 'GP -> Location addr (BVType 32)
-reg_low32 r = constUpperBitsOnWriteRegister n32 (bvLit n32 (0::Integer)) r
+reg_low32 r = constUpperBitsOnWriteRegister n32 ZeroExtendOnWrite r
 
 -- | Return low 16-bits of register e.g. rax -> ax
 reg_low16 :: RegisterName 'GP -> Location addr (BVType 16)
