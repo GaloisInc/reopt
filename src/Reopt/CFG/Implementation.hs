@@ -752,9 +752,9 @@ getLoc l0 =
     S.MemoryAddr w tp -> do
       addr <- eval w
       readLoc (MemLoc addr tp)
-    S.Register (S.RegisterView {..}) -> do
-      let readLoc' l = _registerViewRead <$> readLoc l
-      let r = _registerViewReg
+    S.Register rv -> do
+      let readLoc' l = S.registerViewRead rv <$> readLoc l
+      let r = S.registerViewReg rv
       case r of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
@@ -764,12 +764,11 @@ getLoc l0 =
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
-       -- S.MMXReg {} -> do
-       --   e <- modState $ ValueExpr <$> use (register r)
-       --   ValueExpr <$> eval (S.bvTrunc knownNat e)
        N.X87PC -> readLoc' X87_PC
        N.X87RC -> readLoc' X87_RC
-       _ -> modState $ _registerViewRead . ValueExpr <$> use (register r)
+       _ -> modState $
+            S.registerViewRead rv . ValueExpr <$>
+            use (register r)
     -- TODO
     S.X87StackRegister i -> do
       v <- modState $ use $ x87Regs
@@ -819,12 +818,12 @@ setLoc loc v =
      addr <- eval w
      addStmt $ Write (MemLoc addr (valueType v)) v
 
-   S.Register (S.RegisterView {..}) -> do
+   S.Register rv -> do
      let writeReg reg = do
            v0 <- readLoc reg
-           v1 <- eval $ _registerViewWrite v0 (ValueExpr v)
+           v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
            addStmt $ Write reg v1
-     let r = _registerViewReg
+     let r = S.registerViewReg rv
      case r of
        N.ControlReg {} -> writeReg (ControlLoc r)
        N.DebugReg {}   -> writeReg (DebugLoc r)
@@ -838,7 +837,7 @@ setLoc loc v =
        N.X87RC -> writeReg X87_RC
        _ -> do
          v0 <- modState $ ValueExpr <$> use (register r)
-         v1 <- eval $ _registerViewWrite v0 (ValueExpr v)
+         v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
          modState $ register r .= v1
    S.X87StackRegister i -> do
      off <- getX87Offset i

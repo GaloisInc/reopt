@@ -251,9 +251,9 @@ evalStmt (Get x l) =
           let a = CS.Address nr0 bvaddr
           v0 <- CS.getMem a
           extendEnv x v0
-    S.Register (S.RegisterView {..}) -> do
-      v0 <- CS.getReg _registerViewReg
-      v1 <- evalExpr' $ _registerViewRead (ValueExpr v0)
+    S.Register rv -> do
+      v0 <- CS.getReg $ S.registerViewReg rv
+      v1 <- evalExpr' $ S.registerViewRead rv (ValueExpr v0)
       extendEnv x v1
     S.X87StackRegister i -> do
       topReg <- CS.getReg N.X87TopReg
@@ -316,10 +316,11 @@ evalStmt (l := e) =
         CS.Literal bvaddr -> do
           let a = CS.Address nr bvaddr
           CS.setMem a ve
-    S.Register (S.RegisterView {..}) -> do
-      v0 <- CS.getReg _registerViewReg
-      v1 <- evalExpr' $ _registerViewWrite (ValueExpr v0) (ValueExpr ve)
-      CS.setReg _registerViewReg v1
+    S.Register rv -> do
+      let r = S.registerViewReg rv
+      v0 <- CS.getReg r
+      v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
+      CS.setReg r v1
     S.X87StackRegister i -> do
       topReg <- CS.getReg N.X87TopReg
       case CS.asBV topReg of
