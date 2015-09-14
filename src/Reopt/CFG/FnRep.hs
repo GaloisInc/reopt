@@ -37,6 +37,22 @@ data FnAssignment tp
 instance Pretty (FnAssignment tp) where
   pretty (FnAssignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
+-- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
+
+-- In theory a phi node can refer to previous phi nodes via this
+-- FnPhiValue constructor.  In practice this is probably undesirable.
+data FnPhiNode tp
+   = FnPhiNode { fnPhiAssignId :: !AssignId
+                 -- The value is in the scope of the block referenced by the label
+               , fnPhis :: [(BlockLabel, FnValue tp)]
+               }
+
+instance Pretty (FnPhiNode tp) where
+  pretty (FnPhiNode lhs rhs) = ppAssignId lhs <+> text "::="
+                               <+> sep (punctuate comma (map go rhs))
+    where
+      go (lbl, v) = parens (pretty lbl <> comma <+> pretty v)
+
 -- | The right-hand side of a function assingment statement.
 data FnAssignRhs (tp :: Type) where
   -- An expression with an undefined value.
@@ -67,6 +83,8 @@ data FnValue (tp :: Type) where
   FnConstantValue :: !(NatRepr n) -> !Integer -> FnValue (BVType n)
   -- Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
+  -- Value from a phi node
+  FnPhiValue :: !(FnPhiNode tp) -> FnValue tp
   -- The entry pointer to a function.
   FnFunctionEntryValue :: !Word64 -> FnValue (BVType 64)
   -- A pointer to an internal block at the given address.
@@ -82,7 +100,8 @@ data FnValue (tp :: Type) where
 instance Pretty (FnValue tp) where
   pretty FnValueUnsupported       = text "unsupported"
   pretty (FnConstantValue sz n)   = ppLit sz n
-  pretty (FnAssignedValue assign)   = ppAssignId (fnAssignId assign)
+  pretty (FnAssignedValue assign) = ppAssignId (fnAssignId assign)
+  pretty (FnPhiValue assign)      = ppAssignId (fnPhiAssignId assign)
   pretty (FnFunctionEntryValue n) = text "FunctionEntry"
                                     <> parens (pretty $ showHex n "")
   pretty (FnBlockValue n)         = text "BlockValue"
@@ -109,17 +128,19 @@ instance Pretty Function where
     <$$>
     rbrace
 
-
 data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
+             , fbPhis  :: ![Some FnPhiNode]
              , fbStmts :: ![FnStmt]
-             , fbTerm :: !(FnTermStmt)
+             , fbTerm  :: !(FnTermStmt)
              }
 
 instance Pretty FnBlock where
   pretty b =
     pretty (fbLabel b) <$$>
-    indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
+    indent 2 (vcat (map (viewSome pretty) $ fbPhis b)
+              <$$> vcat (pretty <$> fbStmts b)
+              <$$> pretty (fbTerm b))
 
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)

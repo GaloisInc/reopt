@@ -244,7 +244,7 @@ addFrontier :: BlockLabel
 addFrontier lbl regs stk = do
   mr <- uses rsBlocks (Map.lookup lbl)
   case mr of
-    Nothing -> do
+    Nothing -> trace ("Adding block to frontier: " ++ show (pretty lbl)) $ do      
       rsFrontier %= Set.insert lbl
       rsRegMap   %= Map.insert lbl regs
       rsStackMap %= Map.insert lbl stk
@@ -315,6 +315,7 @@ recoverIter = do
       b <- recoverBlock lbl
       rsFrontier %= Set.delete lbl
       rsBlocks   %= Map.insert lbl b
+      recoverIter
 
 regValuePair :: N.RegisterName cl
              -> FnValue (BVType (N.RegisterClassBits cl))
@@ -337,9 +338,9 @@ recoverBlock lbl = do
   Just b <- uses (rsInterp . blocks) (`lookupBlock` lbl)
 
   -- Compute stack height
-  computeAllocSize $ do
-    Fold.traverse_ recoverStmtStackDelta (blockStmts b)
-    recoverTermStmtStackDelta (blockTerm b)
+  -- computeAllocSize $ do
+  --   Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+  --   recoverTermStmtStackDelta (blockTerm b)
 
   interp_state <- use rsInterp
   let mem = memory interp_state
@@ -356,6 +357,7 @@ recoverBlock lbl = do
       addFrontier y regs stk
       stmts <- uses rsCurStmts Fold.toList
       return $! FnBlock { fbLabel = lbl
+                        , fbPhis = [] -- FIXME
                         , fbStmts = stmts
                         , fbTerm = FnBranch cv x y
                         }
@@ -381,6 +383,7 @@ recoverBlock lbl = do
         args <- (++ stackArgs stk) <$> stateArgs proc_state
         let ret_lbl = GeneratedBlock ret_addr 0
         return $! FnBlock { fbLabel = lbl
+                          , fbPhis = [] -- FIXME
                           , fbStmts = fn_stmts
                           , fbTerm = FnCall call_tgt args ret_lbl
                           }
@@ -403,13 +406,21 @@ recoverBlock lbl = do
         stk  <- getCurStack
         addFrontier tgt_lbl regs stk
         return $! FnBlock { fbLabel = lbl
+                          , fbPhis = [] -- FIXME
                           , fbStmts = stmts
                           , fbTerm = FnJump tgt_lbl
                           }
        -- Return
       | identifyReturn proc_state -> do
-        stmts <- uses rsCurStmts Fold.toList          
+        -- Compute amount to allocate.
+        computeAllocSize $ do
+          Fold.traverse_ recoverStmtStackDelta (blockStmts b)
+          recoverTermStmtStackDelta (blockTerm b)
+        -- Recover statements
+        Fold.traverse_ recoverStmt (blockStmts b)
+        stmts <- uses rsCurStmts Fold.toList   
         return $! FnBlock { fbLabel = lbl
+                          , fbPhis = [] -- FIXME
                           , fbStmts = stmts
                           , fbTerm = FnRet
                           }
@@ -421,6 +432,7 @@ recoverBlock lbl = do
       Fold.traverse_ recoverStmt (blockStmts b)
       stmts <- uses rsCurStmts Fold.toList
       return $! FnBlock { fbLabel = lbl
+                        , fbPhis  = []
                         , fbStmts = stmts
                         , fbTerm = FnTermStmtUndefined
                         }

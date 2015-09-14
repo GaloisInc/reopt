@@ -670,7 +670,7 @@ abstractULt tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
+    -- trace' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
@@ -687,7 +687,7 @@ abstractULeq tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    trace' ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
+    -- trace' ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
