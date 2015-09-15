@@ -26,7 +26,6 @@ test_PMAXUB_XMMdq_XMMdq_0
 test_PUSH_GPRv_FFr6_0
 test_PSUBB_XMMdq_XMMdq_0
 test_JMP_RELBRb_0
-test_ROL_GPRv_ONE_0
 test_CMP_GPR8_GPR8_3A_0
 test_ADC_GPR8_IMMb_80r2_0
 test_PUNPCKHBW_XMMdq_XMMq_0
@@ -73,7 +72,6 @@ test_JS_RELBRd_0
 test_JLE_RELBRz_0
 test_PMINUB_XMMdq_XMMdq_0
 test_SETNB_GPR8_0
-test_JMP_GPRv_0
 test_SETNLE_GPR8_0
 test_JNB_RELBRz_0
 test_SETS_GPR8_0
@@ -198,7 +196,6 @@ test_XORPS_XMMps_XMMps_0
 test_SETZ_GPR8_0
 test_TEST_AL_IMMb_0
 test_PAND_XMMdq_XMMdq_0
-test_RET_NEAR_IMMw_0
 test_ADD_GPRv_GPRv_03_0
 test_SETNO_GPR8_0
 test_STD_0
@@ -248,7 +245,6 @@ test_SYSCALL_0
 test_MOVAPS_XMMps_XMMps_0F29_0
 test_AND_GPRv_IMMb_0
 test_XOR_GPR8_GPR8_30_0
-test_RET_NEAR_0
 test_JB_RELBRz_0
 test_JNS_RELBRd_0
 test_NOT_GPR8_0
