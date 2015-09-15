@@ -43,8 +43,11 @@ match" warnings before and after your change:
 
 ## Testing with `run-tests.sh`
 
-`reopt_test` can also be run with `run-tests.sh`. The script will generate
-single instruction tests using the [fuzzer](https://github.com/GaloisInc/fuzz64)
-and then execute them. Called with no arguments, the script will generate 1 test
-of each iform and run `reopt_test` over all of them. There is also the `-s` flag
-which takes the name of a test to run, for testing a single iform only.
+`reopt_test` can also be run with `run-tests.sh`. The script will generate single
+instruction tests using the [fuzzer](https://github.com/GaloisInc/fuzz64) and then
+execute them.
+
+- `run-tests.sh` will run a list of tests that should pass (`passers.txt`). This is intended to provide a regression test.
+- `run-tests.sh -s test_ADD_GPRv_IMMz_0` is an example of running a single test.
+- `run-tests.sh -a` will run tests of all possible iforms.
+- `run-tests.sh -n` will run only the tests which aren't in `passers.txt`.

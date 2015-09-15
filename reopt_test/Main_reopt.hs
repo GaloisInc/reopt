@@ -32,7 +32,7 @@ import           Data.Word
 import           Debug.Trace
 import           System.Console.CmdArgs.Explicit as CmdArgs
 import           System.Environment (getArgs)
-import           System.Exit (exitFailure)
+import           System.Exit (exitFailure, exitWith, ExitCode(..))
 import           System.IO
 
 import           Numeric (readHex)
@@ -40,7 +40,7 @@ import           Numeric (readHex)
 import           System.Posix.Waitpid as W
 import           System.Posix.Types
 import           System.Posix.Process
-import           System.Posix.Signals (Signal, sigFPE, sigTRAP)
+import           System.Posix.Signals (Signal, sigFPE, sigTRAP, sigSEGV)
 import           System.Linux.Ptrace.Syscall
 import           System.Linux.Ptrace.Types
 import           System.Linux.Ptrace.X86_64Regs
@@ -239,6 +239,7 @@ data MessageType
    | Impossible String
    | UnexpectedStatus String String
    | SuccessfulExecution InstructionInstance
+   | Segfault
    | Info String
 
 instance Show MessageType where
@@ -248,6 +249,7 @@ instance Show MessageType where
   show (Impossible msg) = "Impossible: " ++ msg
   show (UnexpectedStatus name status) = name ++ ": unexpected status: " ++ status
   show (SuccessfulExecution ii) = "Instruction " ++ show ii ++ " executed successfully"
+  show (Segfault) = "Test executable segfaulted"
   show (Info msg) = "Info: " ++ msg
 
 -- | Test builder.
@@ -265,12 +267,17 @@ mkTest args test = do
   let isMismatch m = case m of
                        FailureRecord _ _ -> True
                        _                 -> False
+      isSegfault m = case m of
+                       Segfault -> True
+                       _        -> False
       numMismatches = length (filter isMismatch out)
-  if numMismatches == 0
-     then putStrLn "No mismatches!"
-     else do
-       putStrLn (show numMismatches ++ " mismatches!")
-       exitFailure
+      numSegfaults  = length (filter isSegfault out)
+  case (numMismatches, numSegfaults) of
+    (0,0) -> putStrLn "No mismatches!"
+    (0,_) -> do putStrLn "Segfault was observed."
+                exitWith (ExitFailure 2)
+    (_,_) -> do putStrLn (show numMismatches ++ " mismatches were found.")
+                exitFailure
   --
   where
     openChildProcMem :: CPid -> IO Handle
@@ -558,7 +565,7 @@ stepConcrete = do
                                   MapF.empty
          case eitherExceptionUnit of
            Right () -> return (Right True, ii)
-           Left exception -> do tell [Impossible (show exception)]
+           Left exception -> do tell [Info $ "Got an exception: " ++ (show exception)]
                                 return (Left exception, ii)
        Nothing -> do tell [UnknownInstruction ii]
                      return (Right False, ii)
@@ -735,6 +742,9 @@ checkAndClear sig (eitherExceptionBool, ii) = do
                   then Nothing
                   else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
              x86StateRegisters
+    checkBool True | sig == sigSEGV = do
+      tell [Segfault]
+      return (False, [])
     checkBool _ = do
       sig' <- liftIO' $ signalToString sig
       -- XXX: this should be an error? But we still want to see the

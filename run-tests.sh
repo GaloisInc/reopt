@@ -22,11 +22,6 @@ mk_test_dirs() {
   fi
 }
 
-generate_fuzz() {
-  ${PROOT}/deps/fuzz64/fuzz_gen_list_tests 1 ${FUZZ_C_DIR} > ${LOG_DIR}/fuzz_gen_list_tests.log 2>&1
-  echo "Generated test .c files."
-}
-
 get_xed() {
   if ! [ -e deps/fuzz64/deps/xed-intel64 ]; then
     wget -O /tmp/xed-pin.tar.gz http://software.intel.com/sites/landingpage/pintool/downloads/pin-2.14-71313-gcc.4.4.7-linux.tar.gz
@@ -42,58 +37,92 @@ prepare_run() {
   get_xed
   make_fuzz64
   mk_test_dirs
-  generate_fuzz
+  ${PROOT}/deps/fuzz64/fuzz_gen_list_tests 1 ${FUZZ_C_DIR} > ${LOG_DIR}/fuzz_gen_list_tests.log 2>&1
+  echo "Generated test .c files."
 }
 
 run_one() {
-  prepare_run
   file=$1
-  if ! gcc -o ${FUZZ_BIN_DIR}/${file} ${FUZZ_C_DIR}/${file}.c > ${GEN_LOG_DIR}/${file}.log 2>&1; then
-    echo "Test \`$file\` was not found" >&2
+  if ! [ -e ${FUZZ_C_DIR}/$file.c ] ; then
+    echo "Test \`${FUZZ_C_DIR}/$file.c\` was not found" >&2
     echo "Possible candidates include:" >&2
-    find /tmp/fuzz_bin/ -name "*CVTSI2SD*" -exec basename {} \; >&2
+    find /tmp/fuzz_bin/ -name "*$file*" -exec basename {} \; >&2
     exit 1
   fi
-  echo "Generated test executable."
-  echo "Running reopt_test over executable."
 
-  echo -n "Running $file..."
-  if ${REOPT_TEST_BIN} -t ${FUZZ_BIN_DIR}/${file} > ${RUN_LOG_DIR}/${file}.log 2>&1; then
-    echo "passed."
-  else
-    FAILS=$((FAILS+1))
-    echo "failed."
-  fi
+  echo -n "$file..."
 
-  exit 0
+  SEGFAULT_RESULT=2
+  RUN_LIMIT=100
+  for ((i = 0; i < $RUN_LIMIT; ++i)); do
+    gcc -o ${FUZZ_BIN_DIR}/${file} ${FUZZ_C_DIR}/${file}.c > ${GEN_LOG_DIR}/${file}.log 2>&1
+    ${REOPT_TEST_BIN} -t ${FUZZ_BIN_DIR}/${file} > ${RUN_LOG_DIR}/${file}.log 2>&1;
+    result=$?
+    if [ $result -ne $SEGFAULT_RESULT ]; then
+      break
+    else
+      echo -n "segfaulted..."
+      # FIXME fuzz_iform is the right way to do this, but it doesn't seem to output a .c file. This regenerates all
+      # tests and moves just the desired one, which is a waste of computation.
+      mkdir -p /tmp/fuzz_scratch
+      ${PROOT}/deps/fuzz64/fuzz_gen_list_tests 1 /tmp/fuzz_scratch > ${LOG_DIR}/fuzz_gen_list_tests.$i.log 2>&1
+      mv /tmp/fuzz_scratch/${file}.c ${FUZZ_C_DIR}
+    fi
+  done
+
+  case $result in
+    2) # Segfault
+      echo "Maxed out segfaults."
+      ;;
+    1) # Fail
+      echo "failed."
+      ;;
+    0) # Pass
+      echo "passed."
+      ;;
+    *)
+      echo "Unexpected return code: $result"
+      exit 1
+      ;;
+  esac
+
+  return $result
 }
 
 run_all() {
-  prepare_run
-  BIN_NAMES=`find ${FUZZ_C_DIR} -name "*.c" -exec basename {} .c \;`
-
-  for file in ${BIN_NAMES}; do
-    gcc -o ${FUZZ_BIN_DIR}/${file} ${FUZZ_C_DIR}/${file}.c > ${GEN_LOG_DIR}/${file}.log 2>&1
-  done
-  echo "Generated test executables."
-  echo "Running reopt_test over executables."
+  BIN_NAMES=$1
 
   PASSES=0
   FAILS=0
+  SEG_MAXS=0
+
   for file in ${BIN_NAMES}; do
-    echo -n "${file}..."
-    if ${REOPT_TEST_BIN} -t ${FUZZ_BIN_DIR}/${file} > ${RUN_LOG_DIR}/${file}.log 2>&1; then
-      PASSES=$((PASSES+1))
-      echo "passed."
-    else
-      FAILS=$((FAILS+1))
-      echo "failed."
-    fi
+    run_one $file
+    case $? in
+      2) # Segfault
+        SEG_MAXS=$((SEG_MAXS+1))
+        ;;
+      1) # Fail
+        FAILS=$((FAILS+1))
+        ;;
+      0) # Pass
+        PASSES=$((PASSES+1))
+        ;;
+      *)
+        echo "Unexpected return code: $result"
+        exit 1
+        ;;
+    esac
   done
 
   echo "${PASSES} tests passed."
   echo "${FAILS} tests failed."
-  exit 0
+  echo "${SEG_MAXS} tests segfaulted $RUN_LIMIT times (the allowed limit)."
+  if [ $FAILS -eq 0 ] && [ $SEG_MAXS -eq 0 ]; then
+    exit 0
+  else
+    exit 1
+  fi
 }
 
 usage() {
@@ -102,13 +131,27 @@ usage() {
 
 ########################################################################
 
-(( $# )) || run_all
+# Run all tests if no arguments are passed
+(( $# )) || prepare_run
+(( $# )) || run_all "`cat passers.txt`"
 
-
-while getopts ":s:" opt; do
+# Run single test if a name is passed in.
+while getopts "s:an" opt; do
   case $opt in
     s)
+      prepare_run
       run_one $OPTARG
+      exit $?
+      ;;
+
+    a)
+      prepare_run
+      run_all "`find ${FUZZ_C_DIR} -type f -exec basename {} .c \;`"
+      exit $?
+      ;;
+
+    n)
+      run_all "`comm -13 <(sort <(cat passers.txt)) <(sort <(find ${FUZZ_BIN_DIR} -type f -exec basename {} \;))`"
       ;;
 
     \?)
