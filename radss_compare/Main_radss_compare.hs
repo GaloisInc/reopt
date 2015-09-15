@@ -53,10 +53,10 @@ import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunction
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
-import           Lang.Crucible.Simulator.PartExpr
 import           Lang.Crucible.Simulator.RegMap
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
+import           Lang.Crucible.Solver.PartExpr
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Utils.MonadST
@@ -381,21 +381,21 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
     flags  <- I.emptyWordMap sym n5
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
-    pc     <- I.freshConstant sym (I.BVVarType n64)
+    pc     <- I.freshConstant sym (C.BaseBVRepr n64)
     let struct1 = Ctx.empty %> (RV initGprs1) %> (RV flags') %> (RV pc)
         struct2 = Ctx.empty %> (RV initGprs2) %> (RV flags') %> (RV pc)
         initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
         initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
     -- Run cfg1
-    rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
+    rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
       callCFG cfg1 initialRegMap1
     -- Run cfg2
-    rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
+    rr2 <-trace "Second:" $ MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
       callCFG cfg2 initialRegMap2
     -- Compare
     case (rr1,rr2) of
-      (FinishedExecution _ (TotalRes xs1),
-       FinishedExecution _ (TotalRes xs2)) -> do
+      (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
+       FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
         let gprs1 = unRV $ xs1^._1
             gprs2 = unRV $ xs2^._1
             flags1 = xs1^._2
@@ -422,7 +422,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
   where
     initWordMap sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
-      val <- I.freshConstant sym (I.BVVarType nrVal)
+      val <- I.freshConstant sym (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey idx val acc
 
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
@@ -435,12 +435,12 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
 
 
     withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
-    withSimpleBackend' halloc action =
-      withSimpleBackend $ \sym -> do
-        cfg <- initialConfig 0 []
-        matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
-        action ctx
+    withSimpleBackend' halloc action = do
+      sym <- newSimpleBackend
+      cfg <- initialConfig 0 []
+      matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+      let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
+      action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
 
@@ -481,12 +481,12 @@ mkInitialGPRs :: (I.IsExprBuilder sym, I.IsSymInterface sym, 1 <= nKey, 1 <= nVa
               -> NatRepr nKey
               -> NatRepr nVal
               -> [Integer]
-              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)))
+              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)))
 mkInitialGPRs map sym nrKey nrVal range = do 
   regs1Empty <- I.emptyWordMap sym nrKey
   (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
     idx <- I.bvLit sym nrKey entry
-    val <- I.freshConstant sym (I.BVVarType nrVal)
+    val <- I.freshConstant sym (C.BaseBVRepr nrVal)
     regs' <- I.insertWordMap sym nrKey idx val regs
     return (regs', case M.lookup entry map of 
                     Just inv -> M.insert inv val invMap
@@ -496,7 +496,7 @@ mkInitialGPRs map sym nrKey nrVal range = do
     idx <- I.bvLit sym nrKey entry
     val <- case M.lookup entry invMap of
             Just val -> return val
-            Nothing -> I.freshConstant sym (I.BVVarType nrVal)
+            Nothing -> I.freshConstant sym (C.BaseBVRepr nrVal)
     I.insertWordMap sym nrKey idx val regs) regs2Empty range
   return (regs1, regs2)
 
@@ -504,13 +504,13 @@ mkInitialGPRs map sym nrKey nrVal range = do
 -- they are equivalent according to the relation in map.
 -- TODO: generalize this and integrate it with mkRipRel to handle cases where
 -- the relation varies at different control points within a function.
-mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym (I.SymExpr sym C.BoolType), 1 <= nKey, 1 <= nVal)
+mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym (I.SymExpr sym C.BaseBoolType), 1 <= nKey, 1 <= nVal)
             => Map Integer Integer
             -> sym
             -> NatRepr nKey
             -> NatRepr nVal
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
             -> IO (I.Pred sym)
 mkGPRsCheck map sym nrKey nrVal regs1 regs2 =
   M.foldlWithKey (\pred idx1 idx2 -> do

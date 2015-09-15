@@ -230,19 +230,19 @@ test args = do
     (Just Refl, Just Refl, Just Refl, Just Refl) ->
       withSimpleBackend' halloc $ \ctx -> do
         let sym = ctx^.ctxSymInterface
-        arg <- I.freshConstant sym (I.BVVarType knownNat)
+        arg <- I.freshConstant sym (C.BaseBVRepr knownNat)
         -- Run cfg1
-        rr1 <- MSS.run ctx defaultErrorHandler retType $ do
+        rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
           callCFG cfg1 rMap
         -- Run cfg2
-        rr2 <- MSS.run ctx defaultErrorHandler retType $ do
+        rr2 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
           callCFG cfg2 rMap
         -- Compare
         case (rr1,rr2) of
-          (FinishedExecution _ (TotalRes xs1),
-           FinishedExecution _ (TotalRes xs2)) -> do
+          (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
+           FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
             putStrLn $ unwords ["Execution finished!:", show (xs1,xs2)]
             pred <- I.notPred sym =<< I.bvEq sym xs1 xs2
             solver_adapter_write_smt2 cvc4Adapter out pred
@@ -251,12 +251,12 @@ test args = do
 
 
 withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
-withSimpleBackend' halloc action =
-  withSimpleBackend $ \sym -> do
-    cfg <- initialConfig 0 []
-    matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
-    action ctx
+withSimpleBackend' halloc action = do
+  sym <- newSimpleBackend
+  cfg <- initialConfig 0 []
+  matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+  let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
+  action ctx
 
 defaultErrorHandler = MSS.EH $ \_ _ -> error "Error which I don't know how to handle!"
 
