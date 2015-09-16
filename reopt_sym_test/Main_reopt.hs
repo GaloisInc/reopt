@@ -11,6 +11,12 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
+-- | This is a Crucible symbolic evaluation study, meant to be a minimal example.
+--
+-- It was a stepping stone on the way to @radss_compare@, and can be
+-- deleted when it's no longer considered useful. However, there may
+-- not be any other minimal Crucible examples, so it might be best to
+-- incorporate it into Crucible as documentation.
 module Main (main) where
 
 import Control.Applicative

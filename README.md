@@ -40,3 +40,10 @@ match" warnings before and after your change:
 ```
  reopt_test examples/thttpd 2>&1 | grep 'did not match' | wc -l
 ```
+
+## Executables
+
+- `reopt`: the REOPTimizer
+- `reopt_test`: a concrete instance of the Reopt x86 semantics
+- `reopt_sym_test`: a minimal example of using Crucible (may have been obsoleted by `radss_compare`)
+- `radss_compare`: for proving the equivalence between variants (CFAR/RADSS) using Crucible
