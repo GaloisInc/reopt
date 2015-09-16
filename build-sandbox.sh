@@ -2,7 +2,7 @@
 
 # Install reopt in a Cabal sandbox.
 
-PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils linux-ptrace posix-waitpid mss llvm-pretty)
+PRIVATE_GITHUB_REPOS=(elf flexdis86 parameterized-utils linux-ptrace posix-waitpid mss llvm-pretty fuzz64)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 sandbox=$(pwd)/sandbox
 
@@ -15,10 +15,13 @@ else
     exit 1
 fi
 
-while getopts "p" opt; do
+while getopts "ps" opt; do
   case $opt in
     p)
       dopull="true"
+      ;;
+    s)
+      dosetup="true"
       ;;
     \?)
       echo "Invalid option: -$OPTARG" >&2
@@ -36,6 +39,10 @@ for dep in "${PRIVATE_GITHUB_REPOS[@]}"; do
     (cd deps/"$dep" && git pull)
   fi
 done
+
+if [ "$dosetup" == true ]; then
+  stack setup
+fi
 
 echo "Building"
 stack build

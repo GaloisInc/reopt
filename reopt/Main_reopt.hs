@@ -55,6 +55,7 @@ data Action
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
    | ShowLLVM        -- ^ Print out generated LLVM
+   | ShowFunctions   -- ^ Print out generated functions
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
@@ -114,6 +115,11 @@ llvmFlag = flagNone [ "llvm", "l" ] upd help
   where upd  = reoptAction .~ ShowLLVM
         help = "Print out generated LLVM."
 
+funFlag :: Flag Args
+funFlag = flagNone [ "functions", "f" ] upd help
+  where upd  = reoptAction .~ ShowFunctions
+        help = "Print out generated functions."
+
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
@@ -136,6 +142,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , cfgAIFlag
                 , llvmFlag
+                , funFlag
                 , gapFlag
                 , segmentFlag
                 , sectionFlag
@@ -263,6 +270,14 @@ showCFG loadSty e = do
   let fg = mkFinalCFG mem e
   let g = eliminateDeadRegisters (finalCFG fg)
   print (pretty g)
+
+showFunctions :: LoadStyle -> Elf Word64 -> IO ()
+showFunctions loadSty e = do
+  -- Create memory for elf
+  mem <- mkElfMem loadSty e
+  let fg = mkFinalCFG mem e
+  -- let g = eliminateDeadRegisters (finalCFG fg)
+  mapM_ (print . pretty) (finalFunctions fg)
 
 ------------------------------------------------------------------------
 -- Function determination
@@ -587,6 +602,9 @@ main = do
     ShowLLVM -> do
       e <- readStaticElf (args^.programPath)
       showLLVM (args^.loadStyle) e
+    ShowFunctions -> do
+      e <- readStaticElf (args^.programPath)
+      showFunctions (args^.loadStyle) e
     ShowGaps -> do
       e <- readStaticElf (args^.programPath)
       showGaps (args^.loadStyle) e

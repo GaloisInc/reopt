@@ -18,9 +18,8 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TypeOperators #-}
-
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.CFGDiscovery
        ( FinalCFG(..)
        , cfgFromAddrs
@@ -295,7 +294,6 @@ recordWriteStmt lbl regs (Write (MemLoc addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v = do
     mem <- gets memory
-    trace ("Found escaped code pointers via write of " ++ show addr ++ " to memory.") $ do
     recordFunctionAddrs mem av
 recordWriteStmt _ _ _ = return ()
 
@@ -362,6 +360,9 @@ mergeIntraJump'  :: BlockLabel
                     -- ^ Address we are trying to reach.
                  -> InterpState
                  -> InterpState
+mergeIntraJump' src ab tgt s0
+  | not (absStackHasReturnAddr ab)
+  , trace ("WARNING: Missing return value in jump from " ++ show src ++ " to\n" ++ show ab) False = error "Unexpected mergeIntraJump'"
 mergeIntraJump' src ab tgt s0 = do
   -- Associate a new abstract state with the code region.
   let upd new s = do
@@ -431,9 +432,6 @@ mergeCallerReturn lbl ab0 addr = do
           -- We set IPReg
         | Just Refl <- testEquality r N.IPReg =
           CodePointers (Set.singleton addr)
-          -- We don't know anything about rax as it is the return value.
-        | Just Refl <- testEquality r N.rax =
-          TopV
         | Just Refl <- testEquality r N.rsp =
           bvadd n64 (ab0^.absX86State^.register r) (abstractSingleton mem n64 8)
           -- TODO: Transmit no value to first floating point register.
@@ -445,6 +443,9 @@ mergeCallerReturn lbl ab0 addr = do
           -- Copy callee saved registers
         | Set.member (Some r) x86CalleeSavedRegisters =
           ab0^.absX86State^.register r
+          -- We don't know anything about rax as it is the return value.
+        | Just Refl <- testEquality r N.rax =
+          TopV
           -- We know nothing about other registers.
         | otherwise =
           TopV
@@ -457,8 +458,6 @@ mergeCallerReturn lbl ab0 addr = do
 
   let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
 
-
---  s <- get
   put $ mergeIntraJump' lbl ab addr s
 
 _showAbsDiff :: AbsBlockState -> AbsBlockState -> Doc
@@ -472,24 +471,6 @@ getAbsX87Top abst =
   case asConcreteSingleton (abst^.absX86State^. x87TopReg) of
     Just v -> return (fromInteger v)
     _ -> fail "x87top is not concrete"
-
--- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
--- with a write having the given type.
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
-  | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
-    Just val
-isWriteTo _ _ _ = Nothing
-
--- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
--- a single address to a marked executable in @mem@ to @addr@.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
 
 -- -----------------------------------------------------------------------------
 -- Refining an abstract state based upon a condition
@@ -521,9 +502,9 @@ refineProcState (AssignedValue ass@(Assignment _ rhs)) av regs
     av_old = regs ^. absAssignments ^. assignLens ass
 
 refineApp :: App Value tp
-             -> AbsValue tp
-             -> AbsProcessorState
-             -> AbsProcessorState
+          -> AbsValue tp
+          -> AbsProcessorState
+          -> AbsProcessorState
 refineApp app av regs =
   case app of
    -- We specialise these to booleans for the moment
@@ -578,9 +559,12 @@ refineApp app av regs =
     getAssignApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
     getAssignApp _ = Nothing
 
-refineTrunc :: ((n + 1) <= n') =>
-               Value (BVType n') -> NatRepr n -> AbsValue (BVType n)
-               -> AbsProcessorState -> AbsProcessorState
+refineTrunc :: ((n + 1) <= n')
+            => Value (BVType n')
+            -> NatRepr n
+            -> AbsValue (BVType n)
+            -> AbsProcessorState
+            -> AbsProcessorState
 refineTrunc v sz av regs = refineProcState v (subValue sz av) regs
 
 refineULeqTrue :: Value tp
@@ -643,24 +627,6 @@ refineLt x y b regs
 --     abs_l  = regs ^. l
 --     abs_r  = regs ^. absInitialRegs ^. assignLens ass
 --     new_v  = meet abs_l abs_r
-
-
--- | Attempt to identify the write to a stack return address, returning
--- instructions prior to that write and return  values.
-identifyCall :: Memory Word64
-             -> [Stmt]
-             -> X86State Value
-             -> Maybe (Seq Stmt, Word64)
-identifyCall mem stmts0 s = go (Seq.fromList stmts0)
-  where next_sp = s^.register N.rsp
-        go stmts =
-          case Seq.viewr stmts of
-            Seq.EmptyR -> Nothing
-            prev Seq.:> stmt
-              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret)
-              | Write{} <- stmt -> Nothing
-              | otherwise -> go prev
 
 -- | List of registers that a callee must save.
 x86CalleeSavedRegisters :: Set (Some N.RegisterName)
@@ -750,28 +716,12 @@ getJumpTableBounds _ _ _ _ = Nothing
   --      else Nothing
   -- | otherwise = Nothing
 
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-recoverIsReturnStmt :: X86State Value -> Bool
-recoverIsReturnStmt s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
-  case next_ip of
-    AssignedValue (Assignment _ (Read (MemLoc ip_addr _))) ->
-      let (ip_base, ip_off) = asBaseOffset ip_addr
-          (sp_base, sp_off) = asBaseOffset next_sp
-       in (ip_base, ip_off + 8) == (sp_base, sp_off)
-    _ -> False
-
-
-
 transferBlock :: Block   -- ^ Block to start from.
               -> AbsProcessorState -- ^ Registers at this block.
               -> State InterpState ()
 transferBlock b regs = do
   let lbl = blockLabel b
-  trace ("transferBlock " ++ show lbl) $ do
+  -- trace ("transferBlock " ++ show lbl) $ do
   mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
@@ -804,8 +754,9 @@ transferBlock b regs = do
       -- stores the pc to an address.
       case () of
           -- The last statement was a call.
+          -- Note that in some cases the call is known not to return, and thus
+          -- this code will never jump to the return value.
         _ | Just (prev_stmts, ret) <- identifyCall mem (blockStmts b) s' -> do
-            trace ("Call statement") $ do
             Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
@@ -815,37 +766,30 @@ transferBlock b regs = do
             recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
           -- This block ends with a return.
-          | recoverIsReturnStmt s' -> do
-            trace ("Return statement") $ do
+          | identifyReturn s' -> do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
             rc0 <- use returnCount
             let ip_val = s'^.register N.rip
             case transferValue regs' ip_val of
-              ReturnAddr ->
-                trace ("return_val is correct " ++ show lbl) $
-                  returnCount += 1
-              TopV ->
-                trace ("return_val is top at " ++ show lbl) $
-                  returnCount += 1
+              ReturnAddr -> return ()
               -- The return_val is bad.
-              -- This could indicate that the caller knows that the function does
-              -- not return, and hence will not provide a reutrn value.
+              -- This could indicate an imprecision in analysis or that the
+              -- function will never return, and hence never was provided
+              -- with an address to return to.
               rv ->
                 trace ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
-                  returnCount += 1
+                  return ()
 
           -- Jump to concrete offset.
-          | BVValue _ (fromInteger -> tgt_addr) <- s'^.register N.rip ->
-            trace ("Concrete jump") $ do
-
+          | BVValue _ (fromInteger -> tgt_addr) <- s'^.register N.rip -> do
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
             -- Try to check for a tail call.
             this_fn <- gets $ getFunctionEntryPoint (labelAddr lbl)
             tgt_fn  <- gets $ getFunctionEntryPoint tgt_addr
-            -- When the jump appears to go to another function, assume the
-            -- jump if a tail call.
+            -- When the jump appears to go to another function, this could be a tail
+            -- call or it could be dead code.
             if (this_fn /= tgt_fn) then do
               -- Check that the current stack height is correct so that a
               -- tail call when go to the right place.
@@ -870,7 +814,6 @@ transferBlock b regs = do
                     returnCount += 1
 
             else do
-              trace "mergeIntraJump" $ do
               -- Merge block state.
               modify $ mergeIntraJump' lbl (abst & setAbsIP mem tgt_addr) tgt_addr
 
@@ -908,7 +851,6 @@ transferBlock b regs = do
                       | isCodeAddr mem tgt_addr
                       , inSameFunction (labelAddr lbl) tgt_addr interpState -> do
 
-                        trace ("Trying IP " ++ showHex tgt_addr ".") $ do
                         mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
                         resolveJump (tgt_addr:prev) (idx+1)
                     _ -> do
@@ -927,7 +869,7 @@ transferBlock b regs = do
             recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
 transfer :: CodeAddr -> State InterpState ()
-transfer addr = trace ("transfer " ++ showHex addr ".") $ do
+transfer addr = do
   mem <- gets memory
 
   doMaybe (getBlock addr) () $ \root -> do
@@ -1009,7 +951,7 @@ cfgFromAddrs :: Memory Word64
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> FinalCFG
-cfgFromAddrs mem init_addrs = g
+cfgFromAddrs mem init_addrs = trace ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030

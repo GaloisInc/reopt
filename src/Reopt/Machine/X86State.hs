@@ -268,7 +268,11 @@ cmpX86State r s s' =
 ------------------------------------------------------------------------
 -- Pretty printing
 
+-- | This class provides a way of optionallly pretty printing the contents
+-- of a register or omitting them.
 class PrettyRegValue (f :: Type -> *) where
+  -- | ppValueEq should return a doc if the contents of the given register
+  -- should be printed, and Nothing if the contents should be ignored.
   ppValueEq :: N.RegisterName cl -> f (N.RegisterType cl) -> Maybe Doc
 
 recv :: PrettyRegValue f
@@ -277,7 +281,6 @@ recv :: PrettyRegValue f
      -> [Maybe Doc]
 recv mkR v = f <$> [0..V.length v - 1]
   where f i = ppValueEq (mkR i) (v V.! i)
-
 
 instance PrettyRegValue f => Pretty (X86State f) where
   pretty s =

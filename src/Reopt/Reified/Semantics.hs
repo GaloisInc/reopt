@@ -58,10 +58,10 @@ import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrderi
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
+  ((<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
-import           GHC.Float (float2Double, double2Float)
-
+import           Reopt.Concrete.MachineState (Value)
+import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
@@ -70,11 +70,7 @@ import           Reopt.Semantics.Monad
   )
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
-import qualified Reopt.Machine.StateNames as N
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n80
-                                     )
+import           Reopt.Machine.Types (FloatInfo(..))
 
 ------------------------------------------------------------------------
 -- Expr
@@ -118,6 +114,8 @@ instance Eq (Variable tp) where
 
 -- | A pure expression for isValue.
 data Expr tp where
+  -- A embedded value.
+  ValueExpr :: !(Value tp) -> Expr tp
   -- An expression obtained from some value.
   LitExpr :: (1 <= n) => !(NatRepr n) -> Integer -> Expr (BVType n)
 
@@ -170,6 +168,7 @@ app :: R.App Expr tp -> Expr tp
 app = AppExpr
 
 exprType :: Expr tp -> S.TypeRepr tp
+exprType (ValueExpr v) = CS.asTypeRepr v
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
@@ -454,28 +453,6 @@ instance S.Semantics Semantics where
     tell [Get var l]
     return $ VarExpr var
 
-  -- sjw: This is a huge hack, but then again, so is the fact that it
-  -- happens at all.  According to the ISA, assigning a 32 bit value
-  -- to a 64 bit register performs a zero extension so the upper 32
-  -- bits are zero.  This may not be the best place for this, but I
-  -- can't think of a nicer one ...
-  --
-  -- TODO(conathan): verify that this is sufficient. E.g., what is
-  -- supposed to happen for @UpperHalf (LowerHalf (Register _))@? That
-  -- won't get special treatment here, but maybe it also needs the
-  -- upper 32 bits to be zeroed?
-  (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
-    -- FIXME: doing this the obvious way breaks GHC
-    --     case addIsLeqLeft1' LeqProof v S.n64 of ...
-    --
-    -- ghc: panic! (the 'impossible' happened)
-    --     (GHC version 7.8.4 for x86_64-apple-darwin):
-    --   	tcIfaceCoAxiomRule Sub0R
-    --
-    case testLeq (S.bv_width v) S.n64 of
-     Just LeqProof -> tell [loc := S.uext knownNat v]
-     Nothing -> error "impossible"
-
   l .= v = tell [l := v]
 
   ifte_ c trueBranch falseBranch = do
@@ -529,35 +506,13 @@ instance S.Semantics Semantics where
 
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
+  ValueExpr v -> pretty v
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app' -> R.ppApp ppExpr app'
   VarExpr (Variable _ x) -> text x
 
--- | Pretty print 'S.Location'.
---
--- Going back to pretty names for subregisters is pretty ad hoc;
--- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
--- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
-ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
-ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
-  where
-    ppMemCont :: forall tp'.
-                 (Integer, Integer) -> Integer -> (addr, TypeRepr tp') -> Doc
-    ppMemCont = ppSubrange (ppAddr . fst)
-    ppRegCont :: (Integer, Integer) -> Integer -> N.RegisterName cl -> Doc
-    ppRegCont = ppSubrange (\r -> text $ "%" ++ show r)
-    ppX87Cont = ppSubrange (\i -> text $ "x87_stack@" ++ show i)
-    -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
-    --
-    -- The low bit is inclusive and the high bit is exclusive, but I
-    -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubrange pp (low, high) width x =
-      if width == high
-      then pp x
-      else pp x <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
-
 ppMLocation :: MLocation tp -> Doc
-ppMLocation = ppLocation ppExpr
+ppMLocation = S.ppLocation ppExpr
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt

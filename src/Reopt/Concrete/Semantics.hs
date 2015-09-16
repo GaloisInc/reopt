@@ -12,18 +12,15 @@
 -- uninterpreted functions.
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
-{-# LANGUAGE EmptyDataDecls #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE KindSignatures #-} -- MaybeF
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -32,18 +29,19 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Reopt.Concrete.Semantics
-       ( evalStmt
+       ( evalStmts
        , module Reopt.Reified.Semantics
        ) where
 
 import           Control.Exception (assert)
 import           Control.Monad.Cont
+import           Control.Monad.Except (MonadError, throwError)
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Data.Binary.IEEE754
-import           Data.Bits
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
+import           Data.Bits
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -71,6 +69,8 @@ type Env = MapF Variable CS.Value
 
 -- `c` in this context means `concrete value`.
 evalExpr :: (MonadReader Env m, Applicative m) => Expr tp -> m (CS.Value tp)
+evalExpr (ValueExpr v) = return v
+
 evalExpr (LitExpr nr i) = return $ CS.Literal bVec
   where
     bVec = CS.bitVector nr (BV.bitVec bitWidth i)
@@ -113,7 +113,8 @@ evalExpr (AppExpr a) = do
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.liftValue2 (predBV (BV.<.)) boolNatRepr c1 c2
     R.BVSignedLt c1 c2 -> CS.liftValue2 (predBV (BV.slt)) boolNatRepr c1 c2
-
+    R.BVUnsignedLe c1 c2 -> CS.liftValue2 (predBV (BV.<=.)) boolNatRepr c1 c2
+    R.BVSignedLe c1 c2 -> CS.liftValue2 (predBV BV.sle) boolNatRepr c1 c2
     R.BVTestBit c1 c2 -> CS.liftValue2 bitIdx boolNatRepr c1 c2
 
     -- Bit vector ops
@@ -196,18 +197,6 @@ evalExpr' e = runReader (evalExpr e) <$> get
 extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
--- | Slice a subrange from a 'BV'.
---
--- This is a wrapper around 'BV.@@' which differs by supporting empty
--- slices.
-(@@) :: Integral ix => BV -> (ix, ix) -> BV
-bv @@ (high, low) =
-  if high >= low
-  then bv BV.@@ (high, low)
-  else empty
-  where
-    empty = BV.zeros 0
-
 -- | Helper for division ops in 'evalStmt' below.
 bvDivOp :: (Applicative m, CS.MonadMachineState m, MonadState Env m)
     => (BV -> BV -> BV)
@@ -228,7 +217,24 @@ bvDivOp op var ns1 ns2 = do
             _ -> CS.Undefined tr
   extendEnv var q
 
-evalStmt :: forall m. (Applicative m, CS.MonadMachineState m, MonadState Env m) => Stmt -> m ()
+type EvalStmtConstraint m =
+  ( CS.MonadMachineState m
+  , MonadError S.ExceptionClass m
+  , MonadState Env m
+  )
+
+-- | Eval the 'Stmt's giving the semantics of a *single* instruction.
+--
+-- The 'Stmt's should give the semantics to a single instruction,
+-- because any embedded exceptions will terminate execution. So,
+-- evaluating the concatenated semantics of multiple instructions
+-- would wrongly discard the semantics of any instruction after the
+-- instruction responsible for the first exception. This could matter
+-- if the exception was handled and the program did not terminate.
+evalStmts :: EvalStmtConstraint m => [Stmt] -> m ()
+evalStmts = mapM_ evalStmt
+
+evalStmt :: forall m. EvalStmtConstraint m => Stmt -> m ()
 evalStmt (MakeUndefined x tr) =
   extendEnv x (CS.Undefined tr)
 evalStmt (Get x l) =
@@ -237,48 +243,28 @@ evalStmt (Get x l) =
   BVTypeRepr _ -> do
 
   let nr = S.loc_width l
-
-  let memCont :: forall tp0 i.
-                 Integer ~ i
-              => (i, i) -> i -> (Expr (BVType 64), TypeRepr tp0) -> m ()
-      memCont (low, high) _width (addr, BVTypeRepr nr0) = do
-        vaddr <- evalExpr' addr
-        case vaddr of
-          CS.Undefined _ -> error "evalStmt: undefined address in 'Get'!"
-          CS.Literal bvaddr -> do
-            let a = CS.Address nr0 bvaddr
-            v0 <- CS.getMem a
-            let v1 = CS.liftValue (sliceBV (low, high)) nr v0
-            extendEnv x v1
-
-  let regCont :: forall cl i.
-                 Integer ~ i
-              => (i, i) -> i -> N.RegisterName cl -> m ()
-      regCont (low, high) _width rn =
-        -- Force 'tp' to be a 'BVType n'.
-        case S.loc_type l of
-        BVTypeRepr _ -> do
-        v0 <- CS.getReg rn
-        let v1 = CS.liftValue (sliceBV (low, high)) nr v0
-        extendEnv x v1
-
-  let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i =
-        case S.loc_type l
-          of BVTypeRepr n -> do
-             topReg <- CS.getReg N.X87TopReg
-             case topReg
-               of CS.Literal bv -> do
-                    let top = BV.nat $ snd $ CS.unBitVector bv
-                    regCont (low, high) width (N.X87FPUReg (
-                     (fromIntegral top + i) `mod` 8))
-                  CS.Undefined _ -> extendEnv x $ CS.Undefined $ BVTypeRepr n
-
-  S.elimLocation memCont regCont x87Cont l
-  where
-    sliceBV :: Integer ~ i
-            => (i, i) -> BV -> BV
-    sliceBV (low, high) super = super @@ (high - 1, low)
+  case l of
+    S.MemoryAddr addr (BVTypeRepr nr0) -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        CS.Undefined _ -> error "evalStmt: undefined address in 'Get'!"
+        CS.Literal bvaddr -> do
+          let a = CS.Address nr0 bvaddr
+          v0 <- CS.getMem a
+          extendEnv x v0
+    S.Register rv -> do
+      v0 <- CS.getReg $ S.registerViewReg rv
+      v1 <- evalExpr' $ S.registerViewRead rv (ValueExpr v0)
+      extendEnv x v1
+    S.X87StackRegister i -> do
+      topReg <- CS.getReg N.X87TopReg
+      case CS.asBV topReg of
+        Just bv -> do
+          let top = fromIntegral $ BV.nat bv
+          let reg = N.X87FPUReg ((top + i) `mod` 8)
+          v0 <- CS.getReg reg
+          extendEnv x v0
+        Nothing -> extendEnv x $ CS.Undefined $ BVTypeRepr nr
 evalStmt (BVQuot x ns1 ns2) = bvDivOp div x ns1 ns2
 evalStmt (BVRem x ns1 ns2) = bvDivOp mod x ns1 ns2
 -- TODO(conathan): BUG: We use @sdiv@ and @smod@ here, but they round
@@ -314,75 +300,38 @@ evalStmt (MemCmp x bytes compares src dst reversed) = do
 evalStmt (GetSegmentBase x seg) = do
   base <- CS.getSegmentBase seg
   extendEnv x base
-
--- Strategy for handling subregion writes: read the current value of
--- the full memory or register underlying the subregion in 'l',
--- redefine the subregion 'l' of the current value with the given
--- value in 'e', write back the updated value.
---
--- For example, the subregister write
---
---   %rax[8:16] := e
---
--- is effected by
---
---   v0 <- getReg %rax
---   let v1 = v0[0:8] ++ e ++ v0[16:64]
---   setReg %rax v1
---
 evalStmt (l := e) =
   -- Force 'tp' to be a 'BVType n'.
   case S.loc_type l of
   BVTypeRepr _ -> do
 
+  let nr = S.loc_width l
   ve <- evalExpr' e
-  let memCont :: forall tp i.
-                 Integer ~ i
-              => (i, i) -> i -> (Expr (BVType 64), TypeRepr tp) -> m ()
-      memCont (low, high) width (addr, BVTypeRepr nr) = do
-        vaddr <- evalExpr' addr
-        case vaddr of
-          -- Alternatively, we could mark memory values known to
-          -- the machine state monad 'm' as 'Undefined' here.
-          CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
-          CS.Literal bvaddr -> do
-            let a = CS.Address nr bvaddr
-            v0 <- CS.getMem a
-            let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
-            CS.setMem a v1
-  let regCont :: forall cl i.
-                 Integer ~ i
-              => (i, i) -> i -> N.RegisterName cl -> m ()
-      regCont (low, high) width rn = do
-        let nr = N.registerWidth rn
-        v0 <- CS.getReg rn
-        let v1 = CS.liftValue2 (combineBV (low, high) width) nr v0 ve
-        CS.setReg rn v1
-  let x87Cont :: forall i. Integer ~ i => (i, i) -> i -> Int -> m()
-      x87Cont (low, high) width i =
-        case S.loc_type l
-          of BVTypeRepr _n -> do
-             topReg <- CS.getReg N.X87TopReg
-             case topReg
-               of CS.Literal bv -> do
-                    let top = BV.nat $ snd $ CS.unBitVector bv
-                    regCont (low, high) width (N.X87FPUReg (
-                     (fromIntegral top + i) `mod` 8))
-                  CS.Undefined _ -> do
-                    -- undefine all the floating point registers, I guess?
-                    mapM_
-                      (\reg -> CS.setReg reg
-                               (CS.Undefined $ N.registerType reg))
-                      N.x87FPURegs
-  S.elimLocation memCont regCont x87Cont l
-  where
-    combineBV :: Integer ~ i
-              => (i, i) -> i -> BV -> BV -> BV
-    combineBV (low, high) width super sub =
-      (super @@ (width - 1, high)) BV.#
-      sub BV.#
-      (super @@ (low - 1, 0))
-
+  case l of
+    S.MemoryAddr addr _tp -> do
+      vaddr <- evalExpr' addr
+      case vaddr of
+        -- Alternatively, we could mark memory values known to
+        -- the machine state monad 'm' as 'Undefined' here.
+        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+        CS.Literal bvaddr -> do
+          let a = CS.Address nr bvaddr
+          CS.setMem a ve
+    S.Register rv -> do
+      let r = S.registerViewReg rv
+      v0 <- CS.getReg r
+      v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
+      CS.setReg r v1
+    S.X87StackRegister i -> do
+      topReg <- CS.getReg N.X87TopReg
+      case CS.asBV topReg of
+        Just bv -> do
+          let top = fromIntegral $ BV.nat bv
+          let reg = N.X87FPUReg ((top + i) `mod` 8)
+          CS.setReg reg ve
+        Nothing ->
+          forM_ N.x87FPURegs $ \reg -> do
+            CS.setReg reg (CS.Undefined $ N.registerType reg)
 evalStmt (Ifte_ c t f) = do
   vc <- evalExpr' c
   case vc of
@@ -394,8 +343,8 @@ evalStmt (Ifte_ c t f) = do
       -- environment here should be technically unnecessary.
       env0 <- get
       if BV.nat bv /= 0
-      then mapM_ evalStmt t
-      else mapM_ evalStmt f
+      then evalStmts t
+      else evalStmts f
       put env0
 evalStmt (MemCopy bytes copies src dst reversed) = do
   case bytes of
@@ -423,12 +372,21 @@ evalStmt (MemSet n v a) = do
   vn <- evalExpr' n
   vv <- evalExpr' v
   va <- evalExpr' a
-  let addrs = addressSequence va (CS.width vv) vn (CS.Literal CS.false)
+  let addrs = addressSequence va (CS.width vv) vn CS.false
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
 evalStmt (Primitive p) = CS.primitive p
--- TODO(conathan): implement exception handling.
-evalStmt (Exception _s1 _s2 _s3) = return ()
+-- | The exception is raised if the @mask@ is false and the
+-- @predicate@ is true.
+--
+-- When @mask@ or @predicate@ are undefined, we raise the
+-- exception. We may want to revisit this decision later, but it seems
+-- like the conservative thing to do.
+evalStmt (Exception mask predicate exception) = do
+  let cond = S.complement mask S..&. predicate
+  vCond <- evalExpr' cond
+  when (vCond  `CS.equalOrUndef` CS.true) $
+    throwError exception
 evalStmt (X87Push s) = do
   let top = N.X87TopReg
   vTop <- CS.getReg top
@@ -645,8 +603,17 @@ convertBVtoFP c fr = CS.liftValue wrap nr c
     --
     wrap :: BV -> BV
     wrap bv = case width of
-      32 -> floatToBV width $ bvToFloat bv
-      64 -> doubleToBV width $ bvToDouble bv
+      32 -> let toBV :: Float -> BV
+                toBV = BV.bitVec width . toInteger . floatToWord
+                mkFP :: BV -> Float
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
+
+      64 -> let toBV :: Double -> BV
+                toBV = BV.bitVec width . toInteger . doubleToWord
+                mkFP :: BV -> Double
+                mkFP = fromInteger . BV.int
+             in toBV $ mkFP bv
       _  -> error "Sorry, 32 or 64 bit floats only"
 
 convertFP :: FloatInfoRepr flt1
