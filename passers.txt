@@ -1,6 +1,5 @@
 test_OR_GPRv_GPRv_09_0
 test_PUSH_IMMb_0
-test_SBB_GPR8_IMMb_80r3_0
 test_AND_GPRv_GPRv_21_0
 test_BT_GPRv_IMMb_0
 test_PMAXSW_XMMdq_XMMdq_0
@@ -12,7 +11,6 @@ test_PUSH_GPRv_50_0
 test_XCHG_GPR8_GPR8_0
 test_ADC_GPR8_GPR8_10_0
 test_XOR_GPRv_IMMb_0
-test_ROR_GPRv_ONE_0
 test_JNO_RELBRd_0
 test_CMOVB_GPRv_GPRv_0
 test_RDTSC_0
@@ -47,7 +45,6 @@ test_AND_GPR8_GPR8_20_0
 test_BSR_GPRv_GPRv_0
 test_JLE_RELBRd_0
 test_JO_RELBRb_0
-test_PMOVMSKB_GPR32_MMXq_0
 test_JO_RELBRd_0
 test_SUB_GPRv_IMMz_0
 test_JNB_RELBRd_0
@@ -115,7 +112,6 @@ test_JNL_RELBRd_0
 test_AND_GPR8_IMMb_80r4_0
 test_CMP_GPRv_GPRv_3B_0
 test_MOVDQA_XMMdq_XMMdq_0F6F_0
-test_ADC_GPR8_IMMb_82r2_0
 test_ADD_GPR8_IMMb_80r0_0
 test_MUL_GPR8_0
 test_XORPD_XMMpd_XMMpd_0
@@ -146,7 +142,6 @@ test_UCOMISD_XMMsd_XMMsd_0
 test_PMAXUD_XMMdq_XMMdq_0
 test_JNLE_RELBRb_0
 test_MOV_GPRv_IMMz_0
-test_MOVSS_XMMss_XMMss_0F11_0
 test_SUB_GPRv_GPRv_29_0
 test_CMOVNP_GPRv_GPRv_0
 test_CMPXCHG_GPR8_GPR8_0
@@ -160,7 +155,6 @@ test_AND_GPR8_GPR8_22_0
 test_JNZ_RELBRd_0
 test_MOVAPS_XMMps_XMMps_0F28_0
 test_CMOVNBE_GPRv_GPRv_0
-test_MOVQ_GPR64_MMXq_0
 test_MOV_GPRv_GPRv_89_0
 test_PADDW_XMMdq_XMMdq_0
 test_JZ_RELBRz_0
@@ -267,7 +261,6 @@ test_NEG_GPR8_0
 test_XOR_GPRv_GPRv_33_0
 test_DIV_GPR8_0
 test_SETO_GPR8_0
-test_SBB_GPR8_GPR8_18_0
 test_CMOVL_GPRv_GPRv_0
 test_SETNP_GPR8_0
 test_PSLLDQ_XMMdq_IMMb_0
