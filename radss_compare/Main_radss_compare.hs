@@ -194,13 +194,28 @@ addr2Flag = flagReq [ "addr2" ] upd "Hex String" help
 ripFlag :: Flag Args
 ripFlag = flagReq [ "rip" ] upd "File Path" help
   where upd s old  = Right $ (ripFile .~ s) old
-        help = "Address to start from in the first executable."
+        -- The @--help@ pretty printer reformats this, which might be
+        -- helpful, except it doesn't preserve the empty lines :P
+        help = unlines [ "File containing a mapping between control points in the two variants."
+                       , ""
+                       , "Example content of file argument:"
+                       , ""
+                       , "    'fromList [(4198515,[4198520]),(4198454,[4198468]),(4198427,[4198437])]'"
+                       ]
 
 gprsFlag :: Flag Args
 gprsFlag = flagReq [ "gprs" ] upd "File Path" help
   where upd s old  = Right $ (gprsFile .~ s) old
-        help = "Address to start from in the first executable."
-
+        help = unlines [ "File containing a mapping between related registers between registers."
+                       , ""
+                       , "The same mapping is used at all related control points (as identified"
+                       , "by the '--rip RIP_FILE' option), although in some cases this is not"
+                       , "general enough."
+                       , ""
+                       , "Example content of file argument:"
+                       , ""
+                       , "    'fromList [(0,0),(8,9),(6,6),(7,7),(2,8),(1,2),(4,4),(5,5)]'"
+                       ]
 
 arguments :: Mode Args
 arguments = mode "radss_compare" defaultArgs help filenameArg flags
