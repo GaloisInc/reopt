@@ -766,7 +766,7 @@ transferBlock b regs = do
             recordFunctionAddrs mem (abst^.absX86State^.curIP)
 
           -- This block ends with a return.
-          | identifyReturn s' -> do
+          | Just _ <- identifyReturn s' -> do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
             rc0 <- use returnCount

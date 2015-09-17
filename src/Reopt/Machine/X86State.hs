@@ -22,6 +22,8 @@ module Reopt.Machine.X86State
   , foldX86StateValue
   , zipWithX86State
   , mapX86State
+  , mapX86StateM
+  , mapX86StateWithM    
   , cmpX86State
     -- * Equality
   , EqF(..)
@@ -244,6 +246,20 @@ mapX86State :: (forall u. f u -> g u)
             -> X86State f
             -> X86State g
 mapX86State f x = mkX86State (\r -> f (x ^. register r))
+
+mapX86StateM :: Monad m =>
+                (forall u. f u -> m (g u))
+             -> X86State f
+             -> m (X86State g)
+mapX86StateM f x = mkX86StateM (\r -> f (x ^. register r))
+
+
+mapX86StateWithM :: Monad m =>
+                   (forall cl. N.RegisterName cl -> f (N.RegisterType cl)
+                    -> m (g (N.RegisterType cl)))
+                 -> X86State f
+                 -> m (X86State g)
+mapX86StateWithM f x = mkX86StateM (\r -> f r (x ^. register r))
 
 vectorCompare :: (a -> b -> Bool) -> V.Vector a -> V.Vector b -> Bool
 vectorCompare f x y = V.and $ V.zipWith f x y
