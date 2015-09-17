@@ -185,7 +185,8 @@ data RegisterViewType cl (b :: Nat) (n :: Nat) =
   , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   , b ~ 0
-  ) => ZeroExtendOnWrite
+  ) =>
+  ZeroExtendOnWrite
 
 registerViewBase :: RegisterView cl b n -> NatRepr b
 registerViewBase = _registerViewBase
@@ -436,76 +437,91 @@ data Location addr (tp :: Type) where
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
 
-instance TestEquality (Location addr) where
-  testEquality l l' 
-    | Just Refl <- testEquality (loc_type l) (loc_type l') = Just Refl
+-- Equality and ordering.
+
+compareRegisterViewType :: RegisterViewType cl b n -> RegisterViewType cl' b' n' -> Ordering
+DefaultView `compareRegisterViewType` DefaultView = EQ
+DefaultView `compareRegisterViewType` _ = LT
+_ `compareRegisterViewType` DefaultView = GT
+OneExtendOnWrite `compareRegisterViewType` OneExtendOnWrite = EQ
+OneExtendOnWrite `compareRegisterViewType` _ = LT
+_ `compareRegisterViewType` OneExtendOnWrite = GT
+ZeroExtendOnWrite `compareRegisterViewType` ZeroExtendOnWrite = EQ
+
+compareRegisterView :: RegisterView cl b n -> RegisterView cl' b' n' -> Ordering
+compareRegisterView rv rv' =
+  case ( _registerViewBase rv `compareF` _registerViewBase rv'
+       , _registerViewSize rv `compareF` _registerViewSize rv'
+       , _registerViewReg rv `compareF` _registerViewReg rv'
+       ) of
+    (LTF, _, _) -> LT
+    (GTF, _, _) -> GT
+    (EQF, LTF, _) -> LT
+    (EQF, GTF, _) -> GT
+    (EQF, EQF, LTF) -> LT
+    (EQF, EQF, GTF) -> GT
+    (EQF, EQF, EQF) ->
+      _registerViewType rv `compareRegisterViewType` _registerViewType rv'
+
+instance Ord addr => TestEquality (Location addr) where
+  testEquality l l'
+    | EQF <- l `compareF` l' = Just Refl
     | otherwise = Nothing
 
 instance Eq addr => EqF (Location addr) where 
   MemoryAddr addr tp `eqF` MemoryAddr addr' tp'
     | Just Refl <- testEquality tp tp' = addr == addr'
-  Register nm `eqF` Register nm' 
-    | Just Refl <- testEquality nm nm' = True
-  TruncLoc l nr `eqF` TruncLoc l' nr' 
-    | Just Refl <- testEquality l l' = l `eqF` l'
-  LowerHalf l `eqF` LowerHalf l' = l `eqF` l'
-  UpperHalf l `eqF` UpperHalf l' = l `eqF` l'
+  Register rv `eqF` Register rv'
+    | EQ <- rv `compareRegisterView` rv' = True
   X87StackRegister i `eqF` X87StackRegister i' = i == i'
+  _ `eqF` _ = False
 
 instance Eq addr => Eq (Location addr tp) where 
   l == l' = l `eqF` l'
+
+instance Ord (RegisterViewType cl b n) where
+  compare = compareRegisterViewType
+
+instance Ord (RegisterView cl b n) where
+  compare = compareRegisterView
+
+instance Eq (RegisterViewType cl b n) where
+  rvt == rvt'
+    | EQ <- rvt `compareRegisterViewType` rvt' = True
+    | otherwise = False
+
+instance Eq (RegisterView cl b n) where
+  rv == rv'
+    | EQ <- rv `compareRegisterView` rv' = True
+    | otherwise = False
 
 instance Ord addr => OrdF (Location addr) where
   MemoryAddr addr tp `compareF` MemoryAddr addr' tp' =
     case tp `compareF` tp' of
       LTF -> LTF
-      EQF -> case addr `compare` addr' of
-        LT -> LTF
-        EQ -> EQF
-        GT -> GTF
+      EQF -> fromOrdering $ addr `compare` addr'
       GTF -> GTF
   MemoryAddr _ _ `compareF` _ = GTF
   _ `compareF` MemoryAddr _ _ = LTF
-  Register nm `compareF` Register nm' = 
-    case nm `compareF` nm' of
-      LTF -> LTF
-      EQF -> EQF
-      GTF -> GTF
+  Register rv `compareF` Register rv'
+    | Just Refl <-
+        _registerViewBase rv `testEquality` _registerViewBase rv'
+    , Just Refl <-
+        _registerViewSize rv `testEquality` _registerViewSize rv'
+    , Just Refl <-
+        _registerViewReg rv `testEquality` _registerViewReg rv'
+    , EQ <- _registerViewType rv `compare` _registerViewType rv'
+    = EQF
+    | otherwise = case rv `compareRegisterView` rv' of
+        GT -> GTF
+        LT -> LTF
+        -- This case is impossible since we already checked for
+        -- equality above.
+        EQ -> error "Reopt.Semantics.Monad.OrdF (Location addr).compareF: impossible!"
   Register _ `compareF` _ = GTF
   _ `compareF` Register _ = LTF
-  TruncLoc l nr `compareF` TruncLoc l' nr' =
-    case l `compareF` l' of
-      LTF -> LTF
-      EQF -> case nr `compareF` nr' of
-        LTF -> LTF
-        EQF -> EQF
-        GTF -> GTF
-      GTF -> GTF
-  TruncLoc _ _ `compareF` _ = GTF
-  _ `compareF` TruncLoc _ _ = LTF
-  lh@(LowerHalf l) `compareF` lh'@(LowerHalf l') =
-    case l `compareF` l' of
-      LTF -> LTF
-      EQF -> case lh `testEquality` lh' of
-        Just Refl -> EQF -- this is a hack, but I don't see a better way?
-        Nothing -> error "Lower halves of equal-width registers were not equal-width"
-      GTF -> GTF
-  LowerHalf _ `compareF` _ = GTF
-  _ `compareF` LowerHalf _ = LTF
-  uh@(UpperHalf l) `compareF` uh'@(UpperHalf l') =
-    case l `compareF` l' of
-      LTF -> LTF
-      EQF -> case uh `testEquality` uh' of
-        Just Refl -> EQF
-        Nothing -> error "Upper halves of equal-width registers were not equal-width"
-      GTF -> GTF
-  UpperHalf _ `compareF` _ = GTF
-  _ `compareF` UpperHalf _ = LTF
   X87StackRegister i `compareF` X87StackRegister i' = 
-    case compare i  i' of
-      LT -> LTF
-      EQ -> EQF
-      GT -> GTF
+    fromOrdering $ compare i i'
 
 -- | Pretty print 'S.Location'.
 --
@@ -539,6 +555,9 @@ ppLocation ppAddr loc = case loc of
     width' :: Integer
     width' = case loc_type loc of
       BVTypeRepr nr -> fromIntegral $ natValue nr
+
+------------------------------------------------------------------------
+-- Register-location smart constructors.
 
 -- | Full register location.
 fullRegister ::
