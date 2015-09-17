@@ -48,6 +48,7 @@ module Reopt.Semantics.Monad
   , registerViewSize
   , registerViewReg
   , registerViewType
+  , registerViewAsFullRegister
     -- * Location
   , Location(..)
   , loc_type
@@ -188,6 +189,8 @@ data RegisterViewType cl (b :: Nat) (n :: Nat) =
   ) =>
   ZeroExtendOnWrite
 
+-- * Destructors for 'RegisterView's.
+
 registerViewBase :: RegisterView cl b n -> NatRepr b
 registerViewBase = _registerViewBase
 
@@ -199,6 +202,23 @@ registerViewReg = _registerViewReg
 
 registerViewType :: RegisterView cl b n -> RegisterViewType cl b n
 registerViewType = _registerViewType
+
+-- | View a 'RegisterView' as a full register.
+--
+-- The returned equalities help with type checking, e.g. by
+-- constraining the type indices of the 'Location' in which the
+-- 'RegisterView' is embedded.
+registerViewAsFullRegister ::
+  RegisterView cl b n -> Maybe (RegisterName cl, b :~: 0, n :~: N.RegisterClassBits cl)
+registerViewAsFullRegister (RegisterView {..})
+  | Just Refl <- _registerViewBase `testEquality` n0
+  , Just Refl <- _registerViewSize `testEquality` N.registerWidth _registerViewReg
+  , DefaultView <- _registerViewType
+  = Just (_registerViewReg, Refl, Refl)
+  | otherwise = Nothing
+
+
+-- * Read and write views for 'RegisterView's.
 
 -- | Read a register via a view.
 --

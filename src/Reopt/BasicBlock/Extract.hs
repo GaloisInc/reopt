@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving#-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Reopt.BasicBlock.Extract (extractBlock, Next(..))
 where
@@ -66,16 +66,19 @@ instance ByteReader r => ByteReader (WrappedByteReader r) where
 nexts :: Map (Variable (S.BVType 64)) [Next] -> [Next] -> Maybe Word64 ->
   [CS.Stmt] -> ([Next], Maybe Word64)
 nexts _ addrs ret [] = (addrs, ret)
-nexts vars addrs ret (((S.Register N.IPReg) := expr) : rest) =
-  nexts vars (staticExpr vars expr) ret rest
+nexts vars addrs ret (((S.Register rv) := expr) : rest)
+  | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = nexts vars (staticExpr vars expr) ret rest
 nexts vars addrs ret ((Ifte_ expr as bs) : rest) =
   let (aAddrs, _) = nexts vars addrs ret as
       (bAddrs, _) = nexts vars addrs ret bs
   in nexts vars (L.union aAddrs bAddrs) ret rest
-nexts vars addrs ret ((Get v (S.Register N.IPReg)) : rest) =
-  nexts (M.insert v addrs vars) addrs ret rest
-nexts vars addrs ret ((Get v (S.Register (N.GPReg i))) : rest) =
-  nexts (M.insert v [NIndirect (N.GPReg i)] vars) addrs ret rest
+nexts vars addrs ret ((Get v (S.Register rv)) : rest)
+  | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = nexts (M.insert v addrs vars) addrs ret rest
+nexts vars addrs ret ((Get v (S.Register rv)) : rest)
+  | Just (N.GPReg i, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = nexts (M.insert v [NIndirect (N.GPReg i)] vars) addrs ret rest
 nexts vars addrs ret ((Get v (S.MemoryAddr (VarExpr _ ) (S.BVTypeRepr n))) : rest)
   | Just Refl <- testEquality n S.n64 = 
       nexts (M.insert v [NRet] vars) addrs ret rest
