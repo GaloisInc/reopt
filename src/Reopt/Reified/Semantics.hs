@@ -71,6 +71,7 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import           Reopt.Machine.Types (FloatInfo(..))
+import qualified Reopt.Utils.GHCBug as GHCBug
 
 ------------------------------------------------------------------------
 -- Expr
@@ -207,14 +208,14 @@ instance S.IsValue Expr where
   bvTrunc (w :: NatRepr m) (x :: Expr (BVType n)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
     case testStrictLeq w (exprWidth x) of
       Left LeqProof -> app $ R.Trunc x w
-      Right r -> nonLoopingCoerce' r x
+      Right r -> GHCBug.nonLoopingCoerce' r x
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
   sext (w :: NatRepr n) (x :: Expr (BVType m)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
     case testStrictLeq (exprWidth x) w of
       Left LeqProof -> app $ R.SExt x w
-      Right r -> nonLoopingCoerce r x
+      Right r -> GHCBug.nonLoopingCoerce r x
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
   reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x
@@ -239,12 +240,6 @@ instance S.IsValue Expr where
   fpCvtRoundsUp src tgt x = app $ R.FPCvtRoundsUp src x tgt
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
-
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
-
-nonLoopingCoerce' :: (x :~: y) -> v (BVType y) -> v (BVType x)
-nonLoopingCoerce' Refl y = y
 
 ------------------------------------------------------------------------
 -- Statements.

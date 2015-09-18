@@ -110,6 +110,7 @@ import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
                                      , n32, n64, type_width
                                      )
 import           Reopt.Reified.Semantics
+import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Debug.Trace
 
@@ -393,19 +394,6 @@ newtype GExpr s tp = GExpr { unGExpr :: G.Expr s (F tp) }
 translateExpr' :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (G.Expr s (F tp))
 translateExpr' e = trace (show $ ppExpr e) (fmap unGExpr $ translateExpr e)
 
--- This is an identity function intended to be a workaround for GHC bug #10507
---   https://ghc.haskell.org/trac/ghc/ticket/10507
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
-
-nonLoopingCoerce' :: (y :~: x) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce' Refl x = x
-
--- This is an identity function intended to be a workaround for GHC bug #10742
---   https://ghc.haskell.org/trac/ghc/ticket/10742
-ghcBugWorkAround :: proxy n -> ((1 <=? n) ~ (1 <=? n) => a) -> a
-ghcBugWorkAround _ x = x
-  
 translateExpr :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (GExpr s tp) -- m (G.Expr s (F tp))
 -- FIXME: I'm specializing to BVType because I know that's the only (currently)
 -- possible `tp`. But that could change.
@@ -532,10 +520,10 @@ instance S.IsValue (GExpr s) where
     = GExpr . G.App $ C.BVLshr nr e1 e2
   bvTrunc nr2 (GExpr e1)
     | Cr.BVRepr nr1 <- G.exprType e1
-    = ghcBugWorkAround nr1 $
+    = GHCBug.ghcBugWorkAround nr1 $
       case testStrictLeq nr2 nr1 of
         Left LeqProof -> GExpr . G.App $ C.BVTrunc nr2 nr1 e1
-        Right refl -> nonLoopingCoerce' refl $ GExpr e1
+        Right refl -> GHCBug.nonLoopingCoerce' refl $ GExpr e1
   bv_width (GExpr e1)
     | Cr.BVRepr nr <- G.exprType e1
     = nr

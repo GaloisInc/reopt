@@ -67,11 +67,7 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-
--- This is an identity function intended to be a workaround for GHC bug #10507
---   https://ghc.haskell.org/trac/ghc/ticket/10507
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
+import qualified Reopt.Utils.GHCBug as GHCBug
 
 ------------------------------------------------------------------------
 -- Expr
@@ -140,7 +136,7 @@ sext_impl p_1m p_mn w e0
   , LeqProof <- leqTrans p_1m p_mn =
       case testStrictLeq (exprWidth e0) w of
         Left LeqProof | LeqProof <- p_1m -> app (SExt e0 w)
-        Right eq -> nonLoopingCoerce eq e0
+        Right eq -> GHCBug.nonLoopingCoerce eq e0
 
 -- | Truncate the value
 bvTrunc_impl :: forall m n

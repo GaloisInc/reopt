@@ -120,15 +120,10 @@ import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Flexdis86.OpTable (SizeConstraint(..))
 import           Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
-
-
--- This is an identity function intended to be a workaround for GHC bug #10507
---   https://ghc.haskell.org/trac/ghc/ticket/10507
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
 
 ------------------------------------------------------------------------
 -- Sub registers
@@ -980,11 +975,10 @@ class IsValue (v  :: Type -> *) where
         => NatRepr n
         -> v (BVType m)
         -> v (BVType n)
-  uext w e | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) =
+  uext w e = GHCBug.elimReflexiveTrans w $
     case testStrictLeq (bv_width e) w of
-      Left LeqProof ->
-          uext' w e
-      Right r -> nonLoopingCoerce r e
+      Left LeqProof -> uext' w e
+      Right r -> GHCBug.nonLoopingCoerce r e
 
   -- | Return least-significant nibble (4 bits).
   least_nibble :: forall n . (4 <= n) => v (BVType n) -> v (BVType 4)
