@@ -14,6 +14,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FlexibleInstances #-} -- for Eq
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE PatternGuards #-}
@@ -242,6 +243,18 @@ instance OrdF RegisterName where
 
   -- compareF DebugReg{}        _                  = LTF
   -- compareF _                 DebugReg{}         = GTF
+
+instance Eq (RegisterName cl) where
+  a == b = case a `compareF` b of
+    GTF -> False
+    EQF -> True
+    LTF -> False
+
+instance Ord (RegisterName cl) where
+  a `compare` b = case a `compareF` b of
+    GTF -> GT
+    EQF -> EQ
+    LTF -> LT
 
 registerWidth :: RegisterName cl -> NatRepr (RegisterClassBits cl)
 registerWidth IPReg           = knownNat

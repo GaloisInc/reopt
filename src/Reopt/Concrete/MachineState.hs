@@ -22,6 +22,8 @@ import           Data.Maybe (mapMaybe)
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Classes
+import           Debug.Trace
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -42,6 +44,12 @@ instance Eq (Value tp) where
   Literal x == Literal y     = x == y
   Undefined _ == Undefined _ = True
   _ == _                     = False
+
+instance EqF Value where
+  Literal x `eqF` Literal y | Just Refl <- testEquality (B.width x) (B.width y)    = x == y
+  Undefined tr1 `eqF` Undefined tr2 | Just Refl <- testEquality tr1 tr2 = True
+  _ `eqF` _                     = False
+
 
 -- | Equal or at least one side undefined.
 --
@@ -372,3 +380,29 @@ instance MonadMachineState m => FoldableMachineState (ConcreteStateT m) where
   foldMem8 f x = do
     (mem, _) <- get
     M.foldrWithKey (\k v m -> do m' <- m; f k v m') (return x) mem
+
+newtype NullMachineState a = NullMachineState {unNullMachineState :: Identity a}
+ deriving (Functor, Applicative, Monad)
+
+runNullMachineState :: NullMachineState a -> a
+runNullMachineState (NullMachineState {unNullMachineState = Identity x}) = x
+
+instance MonadMachineState NullMachineState where
+  -- | Get a byte.
+  getMem (Address w _) = NullMachineState {unNullMachineState = Identity $
+    Literal $ bitVector w $ BV.bitVec (fromIntegral $ natValue w) (0 :: Int)}
+  -- | Set a byte.
+  setMem _ _ = NullMachineState {unNullMachineState = (Identity ())}
+  -- | Get the value of a register.
+  getReg reg = NullMachineState {unNullMachineState = Identity $
+    Literal $ bitVector w $ BV.bitVec (fromIntegral $ natValue w) (0 :: Int)}
+    where w = N.registerWidth reg
+  -- | Set the value of a register.
+  setReg _ _ = NullMachineState {unNullMachineState = (Identity ())}
+  -- | Get the value of all registers.
+  dumpRegs = NullMachineState {unNullMachineState = (Identity $
+    X.mkX86State (Undefined . BVTypeRepr . N.registerWidth))}
+  -- | Update the state for a primitive.
+  primitive _ = NullMachineState {unNullMachineState = (Identity ())}
+  -- | Return the base address of the given segment.
+  getSegmentBase _ = NullMachineState {unNullMachineState = (Identity (Undefined knownType))}

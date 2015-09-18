@@ -48,6 +48,7 @@ module Reopt.Semantics.Monad
   , registerViewSize
   , registerViewReg
   , registerViewType
+  , registerViewAsFullRegister
     -- * Location
   , Location(..)
   , loc_type
@@ -114,6 +115,7 @@ import           Data.Char (toLower)
 import           GHC.TypeLits as TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
@@ -184,7 +186,10 @@ data RegisterViewType cl (b :: Nat) (n :: Nat) =
   , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   , b ~ 0
-  ) => ZeroExtendOnWrite
+  ) =>
+  ZeroExtendOnWrite
+
+-- * Destructors for 'RegisterView's.
 
 registerViewBase :: RegisterView cl b n -> NatRepr b
 registerViewBase = _registerViewBase
@@ -197,6 +202,23 @@ registerViewReg = _registerViewReg
 
 registerViewType :: RegisterView cl b n -> RegisterViewType cl b n
 registerViewType = _registerViewType
+
+-- | View a 'RegisterView' as a full register.
+--
+-- The returned equalities help with type checking, e.g. by
+-- constraining the type indices of the 'Location' in which the
+-- 'RegisterView' is embedded.
+registerViewAsFullRegister ::
+  RegisterView cl b n -> Maybe (RegisterName cl, b :~: 0, n :~: N.RegisterClassBits cl)
+registerViewAsFullRegister (RegisterView {..})
+  | Just Refl <- _registerViewBase `testEquality` n0
+  , Just Refl <- _registerViewSize `testEquality` N.registerWidth _registerViewReg
+  , DefaultView <- _registerViewType
+  = Just (_registerViewReg, Refl, Refl)
+  | otherwise = Nothing
+
+
+-- * Read and write views for 'RegisterView's.
 
 -- | Read a register via a view.
 --
@@ -232,6 +254,32 @@ registerViewType = _registerViewType
 -- Note: there is no type-level relationship between the base @b@ and
 -- size @n@ params and the read/write views, but the base and size are
 -- expected to specify which bits are read by read view.
+--
+-- MAYBE TODO: the read and write views have an @IsValue v@
+-- constraint, but the implementations only rely on a small subset of
+-- the 'IsValue' operations. So, it might make sense to factor these
+-- operations out into a separate class. The operations we need for
+-- reads and writes are subset of the the basic bitvector operations;
+-- we need:
+--
+-- - 'bvLit': create a literal representing a number
+-- - 'bvShl', 'bvShr': logical shifts
+-- - 'bvTrunc': truncation
+-- - 'bv_width': number of bits in the vector
+-- - 'complement': complement the bits
+-- - 'uext'': zero extension
+-- - '(.|.)': bit-wise OR
+--
+-- If we factored this out into a separate class, it would probably
+-- make sense to include a few more "basic bitvector operations" in
+-- the new class:
+--
+-- - bit-wise AND
+-- - arithmetic shift
+-- - signed extension
+--
+-- Note that we don't need arithmetic on bit vectors, neither as ints
+-- nor as floats.
 registerViewRead ::
   IsValue v =>
   RegisterView cl b n -> v (N.RegisterType cl) -> v (BVType n)
@@ -435,6 +483,92 @@ data Location addr (tp :: Type) where
   -- and so forth.
   X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
 
+-- Equality and ordering.
+
+compareRegisterViewType :: RegisterViewType cl b n -> RegisterViewType cl' b' n' -> Ordering
+DefaultView `compareRegisterViewType` DefaultView = EQ
+DefaultView `compareRegisterViewType` _ = LT
+_ `compareRegisterViewType` DefaultView = GT
+OneExtendOnWrite `compareRegisterViewType` OneExtendOnWrite = EQ
+OneExtendOnWrite `compareRegisterViewType` _ = LT
+_ `compareRegisterViewType` OneExtendOnWrite = GT
+ZeroExtendOnWrite `compareRegisterViewType` ZeroExtendOnWrite = EQ
+
+compareRegisterView :: RegisterView cl b n -> RegisterView cl' b' n' -> Ordering
+compareRegisterView rv rv' =
+  case ( _registerViewBase rv `compareF` _registerViewBase rv'
+       , _registerViewSize rv `compareF` _registerViewSize rv'
+       , _registerViewReg rv `compareF` _registerViewReg rv'
+       ) of
+    (LTF, _, _) -> LT
+    (GTF, _, _) -> GT
+    (EQF, LTF, _) -> LT
+    (EQF, GTF, _) -> GT
+    (EQF, EQF, LTF) -> LT
+    (EQF, EQF, GTF) -> GT
+    (EQF, EQF, EQF) ->
+      _registerViewType rv `compareRegisterViewType` _registerViewType rv'
+
+instance Ord addr => TestEquality (Location addr) where
+  testEquality l l'
+    | EQF <- l `compareF` l' = Just Refl
+    | otherwise = Nothing
+
+instance Eq addr => EqF (Location addr) where 
+  MemoryAddr addr tp `eqF` MemoryAddr addr' tp'
+    | Just Refl <- testEquality tp tp' = addr == addr'
+  Register rv `eqF` Register rv'
+    | EQ <- rv `compareRegisterView` rv' = True
+  X87StackRegister i `eqF` X87StackRegister i' = i == i'
+  _ `eqF` _ = False
+
+instance Eq addr => Eq (Location addr tp) where 
+  l == l' = l `eqF` l'
+
+instance Ord (RegisterViewType cl b n) where
+  compare = compareRegisterViewType
+
+instance Ord (RegisterView cl b n) where
+  compare = compareRegisterView
+
+instance Eq (RegisterViewType cl b n) where
+  rvt == rvt'
+    | EQ <- rvt `compareRegisterViewType` rvt' = True
+    | otherwise = False
+
+instance Eq (RegisterView cl b n) where
+  rv == rv'
+    | EQ <- rv `compareRegisterView` rv' = True
+    | otherwise = False
+
+instance Ord addr => OrdF (Location addr) where
+  MemoryAddr addr tp `compareF` MemoryAddr addr' tp' =
+    case tp `compareF` tp' of
+      LTF -> LTF
+      EQF -> fromOrdering $ addr `compare` addr'
+      GTF -> GTF
+  MemoryAddr _ _ `compareF` _ = GTF
+  _ `compareF` MemoryAddr _ _ = LTF
+  Register rv `compareF` Register rv'
+    | Just Refl <-
+        _registerViewBase rv `testEquality` _registerViewBase rv'
+    , Just Refl <-
+        _registerViewSize rv `testEquality` _registerViewSize rv'
+    , Just Refl <-
+        _registerViewReg rv `testEquality` _registerViewReg rv'
+    , EQ <- _registerViewType rv `compare` _registerViewType rv'
+    = EQF
+    | otherwise = case rv `compareRegisterView` rv' of
+        GT -> GTF
+        LT -> LTF
+        -- This case is impossible since we already checked for
+        -- equality above.
+        EQ -> error "Reopt.Semantics.Monad.OrdF (Location addr).compareF: impossible!"
+  Register _ `compareF` _ = GTF
+  _ `compareF` Register _ = LTF
+  X87StackRegister i `compareF` X87StackRegister i' = 
+    fromOrdering $ compare i i'
+
 -- | Pretty print 'S.Location'.
 --
 -- Note: this pretty printer ignores the embedded view functions in
@@ -467,6 +601,9 @@ ppLocation ppAddr loc = case loc of
     width' :: Integer
     width' = case loc_type loc of
       BVTypeRepr nr -> fromIntegral $ natValue nr
+
+------------------------------------------------------------------------
+-- Register-location smart constructors.
 
 -- | Full register location.
 fullRegister ::
@@ -1071,7 +1208,7 @@ data ExceptionClass
    | FloatingPointError
    | SIMDFloatingPointException
      -- -- | AlignmentCheck
-  deriving Show
+  deriving (Eq, Ord, Show)
 
 -- | Primitive instructions.
 --
@@ -1083,7 +1220,7 @@ data Primitive
    | RDTSC
    -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
    | XGetBV
-   deriving Show
+   deriving (Eq, Ord, Show)
 
 ppPrimitive :: Primitive -> Doc
 ppPrimitive = text . map toLower . show
