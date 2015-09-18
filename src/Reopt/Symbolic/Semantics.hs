@@ -288,18 +288,21 @@ generateStmt :: (G.Reg s MachineState)
              -> Stmt
              -> G.Generator s Env MachineState ()
 
-generateStmt ms getLabel (S.Register N.IPReg := LitExpr nr i) = do
+generateStmt ms getLabel (S.Register rv := LitExpr nr i)
+  | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = do
   G.modifyReg ms (curIP .~ G.App (C.BVLit nr i))
   modify $ \env -> env {trackedRip = fromIntegral i}
 --
 generateStmt ms getLabel (l := e) = case l of
-  S.Register reg -> do
+  S.Register rv
+    | Just (reg, Refl, Refl) <- S.registerViewAsFullRegister rv -> do
     e' <- fmap (runReader (translateExpr' e)) get
     G.modifyReg ms (register reg .~ e')
 
-  S.MemoryAddr _ _ -> return () -- error "assign meem addr unimplemented"
+  S.MemoryAddr _ _ -> return () -- error "assign mem addr unimplemented"
 
-  _ -> return ()
+  _ -> return () -- error "assign subregister unimplemented"
 --
 generateStmt ms getLabel (Get v l) = do
   a <- G.mkAtom =<< translateLocGet ms l
@@ -314,7 +317,10 @@ generateStmt _ms getLabel (Ifte_ e s1s s2s) =
   case (s1s, s2s) of
     -- This is the pattern we generate for Jcc, so we know that it's the end of
     -- a block... it's a bit of a hack
-    ([Get v (S.Register N.IPReg), S.Register N.IPReg := AppExpr (R.BVAdd _ (VarExpr v') (LitExpr nr i))], []) | v == v' -> do
+    ([Get v (S.Register rv1), S.Register rv2 := AppExpr (R.BVAdd _ (VarExpr v') (LitExpr nr i))], [])
+      | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv1
+      , Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv2
+      , v == v' -> do
       e' <- fmap (G.App . C.BVNonzero n1 . runReader (translateExpr' e)) get
       a <- G.mkAtom e'
       G.endNow $ \c -> do
@@ -339,27 +345,18 @@ generateStmt _ _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case
                                       , show (ppStmt stmt)
                                       ]
 
-
-translateLocGet :: G.Reg s MachineState -> S.Location (Expr (S.BVType 64))tp -> G.Generator s Env MachineState (G.Expr s (F tp))
-translateLocGet ms (S.Register reg) = do
+-- TODO: implement translation for x87 stack register reads
+translateLocGet ::
+  G.Reg s MachineState ->
+  S.Location (Expr (S.BVType 64))tp ->
+  G.Generator s Env MachineState (G.Expr s (F tp))
+translateLocGet ms (S.Register rv) = do
+  let reg = S.registerViewReg rv
   regs <- G.readReg ms
-  return $ regs ^. register reg
+  let v = regs ^. register reg
+  return $ unGExpr . S.registerViewRead rv . GExpr $ v
 translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = 
   return $ G.App $ asPosNat nr (C.BVLit nr 0)
-translateLocGet ms (S.TruncLoc l nr) = do
-  e <- translateLocGet ms l
-  return $ G.App $ C.BVTrunc nr (S.loc_width l) e
-translateLocGet ms ll@(S.LowerHalf l) = do
-  e <- translateLocGet ms l
-  let w = S.loc_width l
-  let hw = S.loc_width ll
-  withLeqProof (leqAdd2 (leqRefl hw) (leqProof (knownNat::NatRepr 1) hw)) $
-      return $ G.App $ C.BVTrunc hw w e
-translateLocGet ms ll@(S.UpperHalf l) = do
-  e <- translateLocGet ms l
-  let w = S.loc_width l
-  let hw = S.loc_width ll
-  withLeqProof (leqAdd (leqProof (knownNat::NatRepr 1) hw) hw) $ return $ G.App $ C.BVSelect hw hw w e
 
 generateTerm :: (G.Reg s MachineState)
              -> (Word64 -> G.End s Env init MachineState (G.Label s))
@@ -455,12 +452,8 @@ translateApp a = case a of
   R.Trunc x w
     | Cr.BVRepr nr <- G.exprType (unGExpr x) -> unop nr x (C.BVTrunc w)
 
-  R.UExt (GExpr e1) nr ->
-    GExpr . G.App $ C.BVZext nr 
-      (case e1 of 
-        G.App a'' | C.BVRepr n <- C.appType a'' -> n 
-        G.AtomExpr a'' | C.BVRepr n <- G.typeOfAtom a'' -> n 
-        _ -> error $ "Type of expression " ++ show e1 ++ " being translated from Reified to Crucible was not BVType") e1
+  R.UExt (GExpr e1) nr2
+    | Cr.BVRepr nr1 <- G.exprType e1 -> GExpr . G.App $ C.BVZext nr2 nr1 e1
 
   -- TODO: Actually implement this
   R.EvenParity e ->
@@ -521,6 +514,40 @@ translateApp a = case a of
     unop nr (GExpr e1) f =
           GExpr . G.App $ asPosNat nr (f nr e1)
 
+-- | An 'S.IsValue' instance for interpreting the 'S.RegisterView'
+-- reads and writes.
+--
+-- We only implement the operations we need for the reads and writes.
+--
+-- See documentation on 'Reopt.Semantics.Monad.registerViewRead' for
+-- ideas about factoring these ops out into a separate class of "basic
+-- bitvector operations".
+instance S.IsValue (GExpr s) where
+  bvLit nr i = GExpr . G.App $ C.BVLit nr (fromIntegral i)
+  bvShl (GExpr e1) (GExpr e2)
+    | Cr.BVRepr nr <- G.exprType e1
+    = GExpr . G.App $ C.BVShl nr e1 e2
+  bvShr (GExpr e1) (GExpr e2)
+    | Cr.BVRepr nr <- G.exprType e1
+    = GExpr . G.App $ C.BVLshr nr e1 e2
+  bvTrunc nr2 (GExpr e1)
+    | Cr.BVRepr nr1 <- G.exprType e1
+    = ghcBugWorkAround nr1 $
+      case testStrictLeq nr2 nr1 of
+        Left LeqProof -> GExpr . G.App $ C.BVTrunc nr2 nr1 e1
+        Right refl -> nonLoopingCoerce' refl $ GExpr e1
+  bv_width (GExpr e1)
+    | Cr.BVRepr nr <- G.exprType e1
+    = nr
+  complement (GExpr e1)
+    | Cr.BVRepr nr <- G.exprType e1
+    = GExpr . G.App $ C.BVNot nr e1
+  uext' nr2 (GExpr e1)
+    | Cr.BVRepr nr1 <- G.exprType e1
+    = GExpr . G.App $ C.BVZext nr2 nr1 e1
+  GExpr e1 .|. GExpr e2
+    | Cr.BVRepr nr <- G.exprType e1
+    = GExpr . G.App $ C.BVOr nr e1 e2
 
 asPosNat :: forall n s a
            . NatRepr n

@@ -254,6 +254,32 @@ registerViewAsFullRegister (RegisterView {..})
 -- Note: there is no type-level relationship between the base @b@ and
 -- size @n@ params and the read/write views, but the base and size are
 -- expected to specify which bits are read by read view.
+--
+-- MAYBE TODO: the read and write views have an @IsValue v@
+-- constraint, but the implementations only rely on a small subset of
+-- the 'IsValue' operations. So, it might make sense to factor these
+-- operations out into a separate class. The operations we need for
+-- reads and writes are subset of the the basic bitvector operations;
+-- we need:
+--
+-- - 'bvLit': create a literal representing a number
+-- - 'bvShl', 'bvShr': logical shifts
+-- - 'bvTrunc': truncation
+-- - 'bv_width': number of bits in the vector
+-- - 'complement': complement the bits
+-- - 'uext'': zero extension
+-- - '(.|.)': bit-wise OR
+--
+-- If we factored this out into a separate class, it would probably
+-- make sense to include a few more "basic bitvector operations" in
+-- the new class:
+--
+-- - bit-wise AND
+-- - arithmetic shift
+-- - signed extension
+--
+-- Note that we don't need arithmetic on bit vectors, neither as ints
+-- nor as floats.
 registerViewRead ::
   IsValue v =>
   RegisterView cl b n -> v (N.RegisterType cl) -> v (BVType n)
