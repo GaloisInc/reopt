@@ -244,12 +244,6 @@ instance OrdF RegisterName where
   -- compareF DebugReg{}        _                  = LTF
   -- compareF _                 DebugReg{}         = GTF
 
-instance Eq (RegisterName cl) where
-  a == b = case a `compareF` b of
-    GTF -> False
-    EQF -> True
-    LTF -> False
-
 instance Ord (RegisterName cl) where
   a `compare` b = case a `compareF` b of
     GTF -> GT
