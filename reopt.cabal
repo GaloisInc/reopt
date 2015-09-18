@@ -63,6 +63,7 @@ library
     Reopt.Symbolic.Semantics
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
+    Reopt.Utils.GHCBug
 
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
