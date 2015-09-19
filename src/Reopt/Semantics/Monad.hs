@@ -933,6 +933,14 @@ class IsValue (v  :: Type -> *) where
   --
   -- Returns 'm' lower order bits.
   bvTrunc :: (1 <= m, m <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
+  bvTrunc w e = GHCBug.elimReflexiveTrans (bv_width e) $
+    case testStrictLeq w (bv_width e) of
+      Left LeqProof -> bvTrunc' w e
+      Right r -> GHCBug.nonLoopingCoerce' r e
+
+  -- | Version of 'bvTrunc' that precludes trivial truncations; see
+  -- 'uext'' docs.
+  bvTrunc' :: (1 <= m, m+1 <= n) => NatRepr m -> v (BVType n) -> v (BVType m)
 
   -- | Truncate the value.
   --
@@ -962,11 +970,23 @@ class IsValue (v  :: Type -> *) where
 
   -- | Perform a signed extension of a bitvector.
   sext :: (1 <= m, m <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
+  sext w e = GHCBug.elimReflexiveTrans w $
+    case testStrictLeq (bv_width e) w of
+      Left LeqProof -> sext' w e
+      Right r -> GHCBug.nonLoopingCoerce r e
+
+  -- | Version of 'sext' that precludes trivial extensions; see
+  -- 'uext'' docs.
+  sext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
   --
   -- Unlike 'uext' below, this is a strict extension: the 'm+1 <= n'
   -- means 'm < n'.
+  --
+  -- We have this strict version because constructors which reify
+  -- these ops, e.g. @App@ in Reopt and Crucible, are strict in this
+  -- sense.
   uext' :: (1 <= m, m+1 <= n) => NatRepr n -> v (BVType m) -> v (BVType n)
 
   -- | Perform a unsigned extension of a bitvector.
