@@ -71,7 +71,6 @@ import           Reopt.Semantics.Monad
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import           Reopt.Machine.Types (FloatInfo(..))
-import qualified Reopt.Utils.GHCBug as GHCBug
 
 ------------------------------------------------------------------------
 -- Expr
@@ -205,17 +204,11 @@ instance S.IsValue Expr where
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
-  bvTrunc (w :: NatRepr m) (x :: Expr (BVType n)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
-    case testStrictLeq w (exprWidth x) of
-      Left LeqProof -> app $ R.Trunc x w
-      Right r -> GHCBug.nonLoopingCoerce' r x
+  bvTrunc' w x = app $ R.Trunc x w
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
-  sext (w :: NatRepr n) (x :: Expr (BVType m)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
-    case testStrictLeq (exprWidth x) w of
-      Left LeqProof -> app $ R.SExt x w
-      Right r -> GHCBug.nonLoopingCoerce r x
+  sext' w x = app $ R.SExt x w
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
   reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x

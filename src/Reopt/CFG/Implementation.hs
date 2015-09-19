@@ -67,7 +67,6 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-import qualified Reopt.Utils.GHCBug as GHCBug
 
 ------------------------------------------------------------------------
 -- Expr
@@ -116,85 +115,6 @@ ltProof :: forall f n m . (n+1 <= m) => f n -> f m -> LeqProof n m
 ltProof _ _ = leqTrans lt LeqProof
   where lt :: LeqProof n (n+1)
         lt = leqAdd LeqProof S.n1
-
-
--- | Perform a signed extension of a bitvector.
--- This uses explicit LeqProofs to work around GHC bugs.
-sext_impl :: forall m n
-          .  LeqProof 1 m
-          -> LeqProof m n
-          -> NatRepr n
-          -> Expr (BVType m)
-          -> Expr (BVType n)
-sext_impl p_1m p_mn w e0
-  | Just (SExt e w0) <- asApp e0
-  , we <- S.bv_width e
-  , p_mnn <- leqTrans (addIsLeq we (knownNat :: NatRepr 1))
-                      (leqTrans (leqProof (incNat we) w0) p_mn) =
-    sext_impl LeqProof p_mnn w e
-  | LeqProof <- p_mn
-  , LeqProof <- leqTrans p_1m p_mn =
-      case testStrictLeq (exprWidth e0) w of
-        Left LeqProof | LeqProof <- p_1m -> app (SExt e0 w)
-        Right eq -> GHCBug.nonLoopingCoerce eq e0
-
--- | Truncate the value
-bvTrunc_impl :: forall m n
-              . LeqProof 1 m
-             -> LeqProof m n
-             -> NatRepr m
-             -> Expr (BVType n)
-             -> Expr (BVType m)
-bvTrunc_impl p_1m _ w e0
-    -- Constant propagation
-  | LeqProof <- p_1m
-  , Just v <- asBVLit e0 =
-    bvLit w v
-bvTrunc_impl _ _ w e0
-    -- Eliminate redundant trunc
-  | Just Refl <- testEquality (exprWidth e0) w =
-    e0
-bvTrunc_impl _ _ w e0
-    -- Eliminate MMXExtend
-  | Just (MMXExtend e) <- asApp e0
-  , Just Refl <- testEquality w n64 =
-    e
-
-bvTrunc_impl p_1m _p_mn w e0
-  | Just (ConcatV lw l _) <- asApp e0
-  , Just p_w_lw <- testLeq w lw =
-    bvTrunc_impl p_1m p_w_lw w l
-bvTrunc_impl p_1m _ w e0
-  | Just (UExt e _) <- asApp e0 =
-    case testLeq w (S.bv_width e) of
-      -- Check if original value width is less than new width.
-      Just p_we -> bvTrunc_impl p_1m p_we w e
-      Nothing ->
-        -- Runtime check to wordaround GHC typechecker
-        case testLeq (S.bv_width e) w of
-          Just LeqProof -> S.uext w e
-          Nothing -> error "bvTrunc internal error"
-
-bvTrunc_impl p_1m p_mn w e0
-    -- Trunc (x .&. y) w = trunc x w .&. trunc y w
-  | LeqProof <- p_1m
-  , Just (BVAnd _ x y) <- asApp e0 =
-    let x' = bvTrunc_impl p_1m p_mn w x
-        y' = bvTrunc_impl p_1m p_mn w y
-     in x' S..&. y'
-    -- trunc (Trunc e w1) w2 = trunc e w2
-  | Just (Trunc e _) <- asApp e0 =
-    -- Runtime check to workaround GHC typechecker.
-    case testLeq w (exprWidth e) of
-      Just p_we -> bvTrunc_impl p_1m p_we w e
-      Nothing -> error "bvTrunc given bad width"
-    -- Default case
-  | LeqProof <- p_1m
-  , LeqProof <- p_mn
-  , LeqProof <- leqTrans p_1m p_mn =
-    case testStrictLeq w (exprWidth e0) of
-      Left LeqProof -> app (Trunc e0 w)
-      Right Refl -> e0
 
 bvSle :: Expr (BVType n) -> Expr (BVType n) -> Expr BoolType
 bvSle x y = app (BVSignedLe x y)
@@ -370,7 +290,41 @@ instance S.IsValue Expr where
 
     | otherwise = app $ BVShl (exprWidth x) x y
 
-  bvTrunc = bvTrunc_impl LeqProof LeqProof
+  bvTrunc' w e0
+    | Just v <- asBVLit e0 =
+      bvLit w v
+    | Just Refl <- testEquality (exprWidth e0) w =
+      e0
+    | Just (MMXExtend e) <- asApp e0
+    , Just Refl <- testEquality w n64 =
+      e
+    -- WARNING: the 'ConcatV' here appears to be little endian,
+    -- whereas 'bvCat' in 'IsValue' is big endian. Is this a bug?
+    | Just (ConcatV lw l _) <- asApp e0
+    , Just LeqProof <- testLeq w lw =
+      S.bvTrunc w l
+    | Just (UExt e _) <- asApp e0 =
+      case testLeq w (S.bv_width e) of
+        -- Check if original value width is less than new width.
+        Just LeqProof -> S.bvTrunc w e
+        Nothing ->
+          -- Runtime check to wordaround GHC typechecker
+          case testLeq (S.bv_width e) w of
+            Just LeqProof -> S.uext w e
+            Nothing -> error "bvTrunc internal error"
+      -- Trunc (x .&. y) w = trunc x w .&. trunc y w
+    | Just (BVAnd _ x y) <- asApp e0 =
+      let x' = S.bvTrunc' w x
+          y' = S.bvTrunc' w y
+       in x' S..&. y'
+      -- trunc (Trunc e w1) w2 = trunc e w2
+    | Just (Trunc e _) <- asApp e0 =
+      -- Runtime check to workaround GHC typechecker.
+      case testLeq w (exprWidth e) of
+        Just LeqProof -> S.bvTrunc w e
+        Nothing -> error "bvTrunc given bad width"
+      -- Default case
+    | otherwise = app (Trunc e0 w)
 
   bvUlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
@@ -400,7 +354,13 @@ instance S.IsValue Expr where
     | otherwise =
       app $ BVTestBit x y
 
-  sext = sext_impl LeqProof LeqProof
+  sext' w e0
+      -- Collapse duplicate extensions.
+    | Just (SExt e w0) <- asApp e0 = do
+      let we = S.bv_width e
+      withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
+        S.sext w e
+    | otherwise = app (SExt e0 w)
 
   uext' w e0
       -- Literal case

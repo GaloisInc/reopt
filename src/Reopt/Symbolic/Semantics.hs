@@ -110,7 +110,6 @@ import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
                                      , n32, n64, type_width
                                      )
 import           Reopt.Reified.Semantics
-import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Debug.Trace
 
@@ -518,12 +517,9 @@ instance S.IsValue (GExpr s) where
   bvShr (GExpr e1) (GExpr e2)
     | Cr.BVRepr nr <- G.exprType e1
     = GExpr . G.App $ C.BVLshr nr e1 e2
-  bvTrunc nr2 (GExpr e1)
+  bvTrunc' nr2 (GExpr e1)
     | Cr.BVRepr nr1 <- G.exprType e1
-    = GHCBug.ghcBugWorkAround nr1 $
-      case testStrictLeq nr2 nr1 of
-        Left LeqProof -> GExpr . G.App $ C.BVTrunc nr2 nr1 e1
-        Right refl -> GHCBug.nonLoopingCoerce' refl $ GExpr e1
+    = GExpr . G.App $ C.BVTrunc nr2 nr1 e1
   bv_width (GExpr e1)
     | Cr.BVRepr nr <- G.exprType e1
     = nr
