@@ -154,7 +154,7 @@ instance Eq (Var tp) where
 type GPRs = C.WordMapType 4 (C.BVType 64)
 type Flags = C.WordMapType 5 (C.BVType 1)
 type PC = C.BVType 64
-type Heap = C.ArrayType (C.BVType 64) (C.BVType 8)
+type Heap = C.SymbolicArrayType (C.BVIndexType 64) (C.BaseBVType 8)
 
 type MachineCtx = EmptyCtx ::> Heap ::> GPRs ::> Flags ::> PC
 type MachineState = C.StructType MachineCtx
@@ -312,7 +312,7 @@ generateStmt ms getLabel (l := e) = case l of
       Just Refl -> do
         e' <- fmap (runReader (translateExpr' e)) get
         addr' <- fmap (runReader (translateExpr' addr)) get
-        let upd hp = G.App $ C.SymArrayUpdate C.typeRepr C.typeRepr hp addr' e'
+        let upd hp = G.App $ C.SymArrayUpdate C.indexTypeRepr C.baseTypeRepr hp addr' e'
         G.modifyReg ms (heap %~ upd)
 
   _ -> return ()
@@ -369,7 +369,7 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
   h <- (^. heap) <$> G.readReg ms
   addr' <- fmap (runReader (translateExpr' addr)) get
   asPosNat nr $ do
-     let v  = C.SymArrayLookup C.typeRepr C.typeRepr h addr'
+     let v  = C.SymArrayLookup C.indexTypeRepr C.baseTypeRepr h addr'
          v' = case testNatCases nr n8 of
                 NatCaseLT LeqProof -> (C.BVTrunc nr n8 (G.App v))
                 NatCaseEQ     -> v

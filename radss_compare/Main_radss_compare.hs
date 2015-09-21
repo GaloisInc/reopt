@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -52,10 +53,10 @@ import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunction
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
-import           Lang.Crucible.Simulator.PartExpr
 import           Lang.Crucible.Simulator.RegMap
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
+import           Lang.Crucible.Solver.PartExpr
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Utils.MonadST
@@ -82,7 +83,6 @@ import           Reopt.Symbolic.Semantics
 -- | Action to perform when running
 data Action
    = FindBlocks      -- ^ Display a cfg for a function
-   | CompareBlocks   -- ^ Compare basic blocks in two programs
    | MatchBlocks     -- ^ Match basic blocks in two programs
    | ShowSingleBlock -- ^ Print out concrete semantics of a basic block
    | SymExec         -- ^ Symbolically execute a block
@@ -158,11 +158,6 @@ functionCFGFlag = flagNone [ "function-cfg", "f" ] upd help
   where upd  = reoptAction .~ FindBlocks
         help = "Print out control flow graph of a function."
 
-compareBlocksFlag :: Flag Args
-compareBlocksFlag = flagNone [ "compare-blocks", "c" ] upd help
-  where upd  = reoptAction .~ CompareBlocks
-        help = "Print out concrete semantics for basic blocks of executable."
-
 symExecFlag :: Flag Args
 symExecFlag = flagNone [ "sym-exec", "s" ] upd help
   where upd  = reoptAction .~ SymExec
@@ -199,13 +194,28 @@ addr2Flag = flagReq [ "addr2" ] upd "Hex String" help
 ripFlag :: Flag Args
 ripFlag = flagReq [ "rip" ] upd "File Path" help
   where upd s old  = Right $ (ripFile .~ s) old
-        help = "Address to start from in the first executable."
+        -- The @--help@ pretty printer reformats this, which might be
+        -- helpful, except it doesn't preserve the empty lines :P
+        help = unlines [ "File containing a mapping between control points in the two variants."
+                       , ""
+                       , "Example content of file argument:"
+                       , ""
+                       , "    'fromList [(4198515,[4198520]),(4198454,[4198468]),(4198427,[4198437])]'"
+                       ]
 
 gprsFlag :: Flag Args
 gprsFlag = flagReq [ "gprs" ] upd "File Path" help
   where upd s old  = Right $ (gprsFile .~ s) old
-        help = "Address to start from in the first executable."
-
+        help = unlines [ "File containing a mapping between related registers between registers."
+                       , ""
+                       , "The same mapping is used at all related control points (as identified"
+                       , "by the '--rip RIP_FILE' option), although in some cases this is not"
+                       , "general enough."
+                       , ""
+                       , "Example content of file argument:"
+                       , ""
+                       , "    'fromList [(0,0),(8,9),(6,6),(7,7),(2,8),(1,2),(4,4),(5,5)]'"
+                       ]
 
 arguments :: Mode Args
 arguments = mode "radss_compare" defaultArgs help filenameArg flags
@@ -213,7 +223,6 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
         flags = [ segmentFlag
                 , sectionFlag
                 , singleBlockFlag
-                , compareBlocksFlag
                 , symExecFlag
                 , matchBlocksFlag
                 , functionCFGFlag
@@ -326,6 +335,8 @@ simulateCFGs entry1 reifcfg1 entry2 reifcfg2 ripRel gprRel = do
       putStrLn "second subcfg found"
       simulate (showHex k "") subCFG1 subCFG2 halloc ripRel gprRel) (return ()) ripRel
 
+-- Finds the set of matched basic blocks that we will use as endpoints of
+-- subgraphs
 findCuts :: Set Word64 -> C.CFG blocks init MachineState -> Set (C.BlockID blocks MachineStateCtx)
 findCuts tags C.CFG{C.cfgBlockMap = blockMap} =
   S.fromList $ catMaybes $ Ctx.toList (\block ->
@@ -335,6 +346,9 @@ findCuts tags C.CFG{C.cfgBlockMap = blockMap} =
         _ -> Nothing
       Nothing -> Nothing) blockMap
 
+-- find a particular block in the subgraph - if there are multiple copies, pick
+-- the first one (the multiple copies case is related to Lang.Crucible.Generator
+-- state handling)
 findBlock :: Word64 -> C.CFG blocks init MachineState -> C.BlockID blocks MachineStateCtx
 findBlock tag C.CFG{C.cfgBlockMap = blockMap} = 
   case catMaybes $ Ctx.toList (\block ->
@@ -361,6 +375,13 @@ simulateBlocks block1 block2 ripRel gprRel = do
   cfg2 <- liftST $ translateSingleBlock halloc block2
   simulate "0" cfg1 cfg2 halloc ripRel gprRel
 
+-- Given two Crucible CFGs, a relation of control points, and a relation of
+-- registers, construct an SMT term asserting that there is some set of
+-- assignments of registers that is related such that the resulting assignment
+-- and control flow points are unrelated.
+-- TODO: generatlize the gprRel to differ at different control points - an
+-- initial relation, plus a mapping from pairs of related control points to the
+-- relation on states at those control points.
 simulate :: String
          -> C.SomeCFG MachineStateCtx MachineState
          -> C.SomeCFG MachineStateCtx MachineState
@@ -375,22 +396,22 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
     flags  <- I.emptyWordMap sym n5
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
-    pc     <- I.freshConstant sym (I.BVVarType n64)
-    heap   <- I.uninterpArray sym C.typeRepr C.typeRepr
+    pc     <- I.freshConstant sym (C.BaseBVRepr n64)
+    heap   <- I.freshConstant sym (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
     let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
         struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
         initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
         initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
     -- Run cfg1
-    rr1 <- MSS.run ctx defaultErrorHandler machineState $ do
+    rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
       callCFG cfg1 initialRegMap1
     -- Run cfg2
-    rr2 <-trace "Second:" $ MSS.run ctx defaultErrorHandler machineState $ do
+    rr2 <-trace "Second:" $ MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
       callCFG cfg2 initialRegMap2
     -- Compare
     case (rr1,rr2) of
-      (FinishedExecution _ (TotalRes xs1),
-       FinishedExecution _ (TotalRes xs2)) -> do
+      (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
+       FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
         let gprs1 = unRV $ xs1^._2
             gprs2 = unRV $ xs2^._2
             flags1 = xs1^._3
@@ -417,28 +438,31 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
   where
     initWordMap sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
-      val <- I.freshConstant sym (I.BVVarType nrVal)
+      val <- I.freshConstant sym (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey idx val acc
 
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
       idx <- I.bvLit sym nrKey i
       val1Part <- I.lookupWordMap sym nrKey idx wm1
       val2Part <- I.lookupWordMap sym nrKey idx wm2
-      val1 <- readPartExpr sym val1Part $ unwords ["Comparison at index", show i, "failed"]
-      val2 <- readPartExpr sym val2Part $ unwords ["Comparison at index", show i, "failed"]
+      val1 <- readPartExpr sym val1Part $ GenericSimError $ unwords ["Comparison at index", show i, "failed"]
+      val2 <- readPartExpr sym val2Part $ GenericSimError $ unwords ["Comparison at index", show i, "failed"]
       I.andPred sym acc =<< I.bvEq sym val1 val2
 
 
     withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
-    withSimpleBackend' halloc action =
-      withSimpleBackend $ \sym -> do
-        cfg <- initialConfig 0 []
-        matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
-        action ctx
+    withSimpleBackend' halloc action = do
+      sym <- newSimpleBackend
+      cfg <- initialConfig 0 []
+      matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+      let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
+      action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
 
+-- given a relation of control points in two variants, expressed as a Map,and
+-- the final values of %rip in the two variants, vreate an SMT term asserting
+-- that the two final values are related
 mkRipRelation :: I.IsExprBuilder sym 
               => Map Word64 [Word64]
               -> sym
@@ -448,7 +472,7 @@ mkRipRelation :: I.IsExprBuilder sym
 mkRipRelation map sym reg1 reg2 = do
   in1 <- foldM mkInCase (I.falsePred sym) (M.keys map)
   match <- M.foldlWithKey mkMatchCase (return $ I.truePred sym) map
-  return match
+  I.andPred sym in1 match
   where
   mkInCase rest entry = do
     lit <- I.bvLit sym (knownNat :: NatRepr 64) (fromIntegral entry)
@@ -464,18 +488,21 @@ mkRipRelation map sym reg1 reg2 = do
       keyValImp <- I.impliesPred sym keyEq valEq
       I.andPred sym restPred' keyValImp) restPred vals
 
+-- Constructs a pair of initial register states such that, if reg a in the left
+-- variant is related to reg b in the right variant, reg a in the left WordMap
+-- has the same fresh value as reg b in the right WordMap.
 mkInitialGPRs :: (I.IsExprBuilder sym, I.IsSymInterface sym, 1 <= nKey, 1 <= nVal)
               => Map Integer Integer
               -> sym
               -> NatRepr nKey
               -> NatRepr nVal
               -> [Integer]
-              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal)))
+              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)))
 mkInitialGPRs map sym nrKey nrVal range = do 
   regs1Empty <- I.emptyWordMap sym nrKey
   (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
     idx <- I.bvLit sym nrKey entry
-    val <- I.freshConstant sym (I.BVVarType nrVal)
+    val <- I.freshConstant sym (C.BaseBVRepr nrVal)
     regs' <- I.insertWordMap sym nrKey idx val regs
     return (regs', case M.lookup entry map of 
                     Just inv -> M.insert inv val invMap
@@ -485,17 +512,21 @@ mkInitialGPRs map sym nrKey nrVal range = do
     idx <- I.bvLit sym nrKey entry
     val <- case M.lookup entry invMap of
             Just val -> return val
-            Nothing -> I.freshConstant sym (I.BVVarType nrVal)
+            Nothing -> I.freshConstant sym (C.BaseBVRepr nrVal)
     I.insertWordMap sym nrKey idx val regs) regs2Empty range
   return (regs1, regs2)
 
-mkGPRsCheck :: (I.IsExprBuilder sym, 1 <= nKey, 1 <= nVal)
+-- Given the final values of registers in after two executions, asserts that
+-- they are equivalent according to the relation in map.
+-- TODO: generalize this and integrate it with mkRipRel to handle cases where
+-- the relation varies at different control points within a function.
+mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym (I.SymExpr sym C.BaseBoolType), 1 <= nKey, 1 <= nVal)
             => Map Integer Integer
             -> sym
             -> NatRepr nKey
             -> NatRepr nVal
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BVType nVal))
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
+            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
             -> IO (I.Pred sym)
 mkGPRsCheck map sym nrKey nrVal regs1 regs2 =
   M.foldlWithKey (\pred idx1 idx2 -> do
@@ -504,11 +535,12 @@ mkGPRsCheck map sym nrKey nrVal regs1 regs2 =
     idx2' <- I.bvLit sym nrKey idx2
     val1Part <- I.lookupWordMap sym nrKey idx1' regs1
     val2Part <- I.lookupWordMap sym nrKey idx2' regs2
-    val1 <- readPartExpr sym val1Part $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
-    val2 <- readPartExpr sym val2Part $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
+    val1 <- readPartExpr sym val1Part $ GenericSimError $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
+    val2 <- readPartExpr sym val2Part $ GenericSimError $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
     I.andPred sym pred' =<< I.bvEq sym val1 val2
     ) (return $ I.truePred sym) map
 
+-- testing code - finds and prints a single basic block
 showSingleBlock :: Memory Word64 -> Word64 -> IO ()
 showSingleBlock mem start =
   case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
@@ -519,49 +551,7 @@ showSingleBlock mem start =
       putStrLn $ show nexts
       putStrLn $ show $ CS.ppStmts stmts
 
-
-compareBlocks :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
-compareBlocks mem1 start1 mem2 start2 = do
-  (nexts1, stmts1) <- getBlock mem1 start1
-  (nexts2, stmts2) <- getBlock mem2 start2
-  let (_, (cmem1, regs1)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts1) MapF.empty) M.empty emptyX86State
-  let (_, (cmem2, regs2)) = runNullMachineState $ runConcreteState (evalStateT (mapM_ CS.evalStmt stmts2) MapF.empty) M.empty emptyX86State
-  let regCmp = compareRegs regs1 regs2
-  let memCmp1 = M.foldrWithKey (\k v l -> case M.lookup k cmem2 of
-                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++
-                                                                 ":   1: " ++ show v ++ "   2:" ++ show v') : l
-                              Nothing -> ("1 had a value at address " ++ show k ++ " but 2 did not") : l)
-                  [] cmem1
-  let memCmp2 = M.foldrWithKey (\k v l -> case M.lookup k cmem1 of
-                              Just v' -> if v == v' then l else ("different values at address " ++ show k ++
-                                                                 ":   1: " ++ show v' ++ "   2:" ++ show v) : l
-                              Nothing -> ("2 had a value at address " ++ show k ++ " but 1 did not") : l)
-                  [] cmem1
-  let allCmp = regCmp ++ memCmp1 ++ memCmp2
-  case allCmp of [] -> putStrLn "all matched!"
-                 _ -> mapM_ putStrLn allCmp
-
-  where
-  getBlock mem start = case runMemoryByteReader pf_x mem start $ extractBlock start S.empty of
-    Left err -> fail $ show err
-    Right (Left err, _) -> fail $ "Could not disassemble instruction at 0x" ++
-                                    showHex err ""
-    Right (Right (nexts, stmts), _) -> return (nexts, stmts)
-  emptyX86State = mkX86State (\reg ->
-    Literal $ bitVector (N.registerWidth reg)
-      (BV.bitVec (fromIntegral $ natValue $ N.registerWidth reg) (0 :: Integer)))
-
-compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
-compareRegs rs1 rs2 =
-  catMaybes $ map (viewSome (\reg ->
-    let lens = register reg
-        r1Val = rs1^.lens
-        r2Val = rs2^.lens
-    in if r1Val `equalOrUndef` r2Val
-        then Nothing
-        else Just $ show reg ++ " did not match.  1: " ++ show r1Val ++ "   2:" ++ show r2Val))
-    x86StateRegisters
-
+-- testing code - prints a CFG from mem, starting at entry 
 extractCFG :: Memory Word64 -> Word64 -> IO ()
 extractCFG mem entry =
   case findBlocks mem entry of
@@ -571,6 +561,11 @@ extractCFG mem entry =
       (return ())
       cfg
 
+------------------------------------------------------------------------------
+-- An early cut at control flow graphing - made several assumptions that don't
+-- seem to be correct (DWARF info seems to be more reliable than we expected,
+-- but blocks may not be unique given some of the changes UCI has mentioned...)
+-- We might just get rid of this.
 matchCFGs :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
 matchCFGs mem1 entry1 mem2 entry2 
   | Right cfg1 <- findBlocks mem1 entry1
@@ -688,6 +683,8 @@ blockTermFuzzyMatches (Block _ Ret) (Block _ Ret) = True
 blockTermFuzzyMatches (Block _ (Cond _ _)) (Block _ (Cond _ _)) = True
 blockTermFuzzyMatches (Block _ Indirect) (Block _ Indirect) = True
 blockTermFuzzyMatches _ _ = False
+-- end of the early block-matching attempt
+----------------------------------------------------------------------------
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
 mkElfMem LoadBySection e = memoryForElfSections e
@@ -740,22 +737,6 @@ main = do
       let a = case args^.addr1 of 0 -> elfEntry e
                                   a' -> a'
       extractCFG mem a
-    CompareBlocks -> do
-      (e1, e2) <- case args^.programPaths of
-        [] -> fail "Two file names are required\n"
-        [_] -> fail "Two file names are required\n"
-        [f1,f2] -> do
-          e1' <- readStaticElf f1
-          e2' <- readStaticElf f2
-          return (e1', e2')
-        _ : _ : _ : _ -> fail "Exactly two file names for comparison"
-      mem1 <- mkElfMem (args^.loadStyle) e1
-      mem2 <- mkElfMem (args^.loadStyle) e2
-      let a1 = case args^.addr1 of 0 -> elfEntry e1
-                                   a -> a
-      let a2 = case args^.addr2 of 0 -> elfEntry e2
-                                   a -> a
-      compareBlocks mem1 a1 mem2 a2
     MatchBlocks -> do
       (e1, e2) <- case args^.programPaths of
         [] -> fail "Two file names are required\n"
