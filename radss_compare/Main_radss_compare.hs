@@ -412,7 +412,9 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     case (rr1,rr2) of
       (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
        FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
-        let gprs1 = unRV $ xs1^._2
+        let heap1 = unRV $ xs1^._1
+            heap2 = unRV $ xs2^._1
+            gprs1 = unRV $ xs1^._2
             gprs2 = unRV $ xs2^._2
             flags1 = xs1^._3
             flags2 = xs2^._3
@@ -421,6 +423,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
             pc2 = xs2^._4
             -- flagIdxs = [0,2,4,6,7,8,9,10,11]
             true = I.truePred sym
+        -- heapUnEq <- I.notPred sym =<< I.bvEq sym heap1 heap2
         gprsUnRel  <- I.notPred sym =<< mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
         flagsUnEq <- I.notPred sym =<< foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
         pcsUnRel <- I.notPred sym =<< mkRipRelation ripRel sym pc1 pc2

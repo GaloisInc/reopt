@@ -232,6 +232,9 @@ translateSingleBlock :: HandleAllocator s
 translateSingleBlock halloc block = do
   fnH <- mkHandle' halloc "testBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkDefn block
+  traceM "**** <<<<<<<< ****"
+  traceM (show (pretty g))
+  traceM "**** >>>>>>>> ****"
   return $ toSSA g
 
 mkDefn :: Block -> G.FunctionDef Env MachineStateCtx MachineState
@@ -254,6 +257,9 @@ translateFunction :: HandleAllocator s
 translateFunction halloc blockMap entry = do
   fnH <- mkHandle' halloc "entryBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkFunctionDefn entry blockMap
+  traceM "**** <<<<<<<< ****"
+  traceM (show (pretty g))
+  traceM "**** >>>>>>>> ****"
   return $ toSSA g
 
 mkFunctionDefn :: Word64
