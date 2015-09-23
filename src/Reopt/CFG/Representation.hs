@@ -56,6 +56,7 @@ module Reopt.CFG.Representation
   , asStackAddrOffset
   , mkLit
   , bvValue
+  , ppValueAssignments
   , App(..)
   -- * App
   , appType
@@ -75,13 +76,16 @@ module Reopt.CFG.Representation
   ) where
 
 import           Control.Applicative
+import           Control.Exception (assert)
 import           Control.Lens
+import           Control.Monad.Identity
 import           Control.Monad.State.Strict
 import           Data.Bits
 import           Data.Int (Int64)
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe (isNothing)
 import           Data.Monoid as Monoid
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.TH.GADT
@@ -344,13 +348,18 @@ instance Pretty (Assignment tp) where
 ------------------------------------------------------------------------
 -- AssignRhs
 
+ppAssignRhs :: Applicative m
+            => (forall u . Value u -> m Doc)
+            -> AssignRhs tp
+            -> m Doc
+ppAssignRhs pp (EvalApp a) = ppAppA pp a
+ppAssignRhs _  (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
+ppAssignRhs _  (Read loc) = pure $ pretty loc
+ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
+  where args = [pure (pretty sz), pp cnt, pp src, pp dest, pp rev]
+
 instance Pretty (AssignRhs tp) where
-  pretty (EvalApp a) = ppApp (ppValue 10) a
-  pretty (SetUndefined w) = text "undef ::" <+> brackets (text (show w))
-  pretty (Read loc) = pretty loc
-  pretty (MemCmp sz cnt src dest rev) =
-      text "memcmp" <+> parens (hcat $ punctuate comma args)
-    where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
+  pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) v
 
 -- | Returns the type of an assignment rhs.
 assignRhsType :: AssignRhs tp -> TypeRepr tp
@@ -425,11 +434,11 @@ asInt64Constant _ = Nothing
 
 asStackAddrOffset :: Value tp -> Maybe (Value (BVType 64))
 asStackAddrOffset addr
-  | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr = do
-    Refl <- testEquality base N.rsp
+  | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr
+  , Just Refl <- testEquality base N.rsp = do
     Just offset
-  | Initial base <- addr = do
-    Refl <- testEquality base N.rsp
+  | Initial base <- addr
+  , Just Refl <- testEquality base N.rsp = do
     Just (BVValue knownNat 0)
   | otherwise =
     Nothing
@@ -449,11 +458,11 @@ bvValue i = mkLit knownNat i
 instance PrettyPrec (Value tp) where
   prettyPrec = ppValue
 
+-- | Pretty print a value.
 ppValue :: Prec -> Value tp -> Doc
-ppValue p (BVValue w i) | i >= 0 = parenIf (p > colonPrec) $ ppLit w i
+ppValue p (BVValue w i) = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) PP.<> text "_0"
-ppValue _ _                 = error "ppValue"
 
 ppLit :: NatRepr n -> Integer -> Doc
 ppLit w i =
@@ -469,6 +478,29 @@ instance PrettyRegValue Value where
   ppValueEq r v
     | Just _ <- testEquality v (Initial r) = Nothing
     | otherwise   = Just $ text (show r) <+> text "=" <+> pretty v
+
+
+collectValueRep :: Prec -> Value tp -> State (Map AssignId Doc) Doc
+collectValueRep _ (AssignedValue a) = do
+  let lhs = assignId a
+  mr <- gets $ Map.lookup lhs
+  when (isNothing mr) $ do
+    rhs <- ppAssignRhs (collectValueRep 10) (assignRhs a)
+    let d = ppAssignId lhs <+> text ":=" <+> rhs
+    modify $ Map.insert lhs d
+  return $! ppAssignId lhs
+collectValueRep p v = return $ ppValue p v
+
+-- | This pretty prints all the history used to create a value.
+ppValueAssignments :: Value tp -> Doc
+ppValueAssignments v
+   | Map.null bindings = rhs
+   | otherwise =
+     text "let" PP.<+> vcat (Map.elems bindings) <$$>
+     text " in" PP.<+> rhs
+
+  where (rhs, bindings) = flip runState Map.empty $
+          collectValueRep 0 v
 
 -----------------------------------------------------------------------
 -- App
@@ -719,69 +751,81 @@ data App (f :: Type -> *) (tp :: Type) where
 sexpr :: String -> [Doc] -> Doc
 sexpr nm d = parens (hsep (text nm : d))
 
-ppNat :: NatRepr n -> Doc
-ppNat n = text (show n)
+sexprA :: Applicative m => String -> [m Doc] -> m Doc
+sexprA nm d = sexpr nm <$> sequenceA d
+
+ppNat :: Applicative m => NatRepr n -> m Doc
+ppNat n = pure (text (show n))
+
+prettyPure :: (Applicative m, Pretty v) => v -> m Doc
+prettyPure = pure . pretty
 
 ppApp :: (forall u . f u -> Doc)
       -> App f tp
       -> Doc
-ppApp pp a0 =
+ppApp pp a0 = runIdentity $ ppAppA (Identity . pp) a0
+
+ppAppA :: Applicative m
+      => (forall u . f u -> m Doc)
+      -> App f tp
+      -> m Doc
+ppAppA pp a0 =
   case a0 of
-    Mux _ c x y -> sexpr "mux" [ pp c, pp x, pp y ]
-    MMXExtend e -> sexpr "mmx_extend" [ pp e ]
-    ConcatV _ _ x y -> sexpr "concat" [ pp x, pp y ]
-    UpperHalf _ x -> sexpr "upper_half" [ pp x ]
-    Trunc x w -> sexpr "trunc" [ pp x, ppNat w ]
-    SExt x w -> sexpr "sext" [ pp x, ppNat w ]
-    UExt x w -> sexpr "uext" [ pp x, ppNat w ]
-    AndApp x y -> sexpr "and" [ pp x, pp y ]
-    OrApp  x y -> sexpr "or"  [ pp x, pp y ]
-    NotApp x   -> sexpr "not" [ pp x ]
-    BVAdd _ x y -> sexpr "bv_add" [ pp x, pp y ]
-    BVSub _ x y -> sexpr "bv_sub" [ pp x, pp y ]
-    BVMul _ x y -> sexpr "bv_mul" [ pp x, pp y ]
-    BVQuot _ x y      -> sexpr "bv_uquot" [ pp x, pp y ]
-    BVSignedQuot _ x y -> sexpr "bv_squot" [ pp x, pp y ]
-    BVRem _ x y       -> sexpr "bv_urem" [ pp x, pp y ]
-    BVSignedRem _ x y -> sexpr "bv_srem" [ pp x, pp y ]
-    BVUnsignedLt x y  -> sexpr "bv_ult"  [ pp x, pp y ]
-    BVUnsignedLe x y  -> sexpr "bv_ule"  [ pp x, pp y ]
-    BVSignedLt x y    -> sexpr "bv_slt"  [ pp x, pp y ]
-    BVSignedLe x y    -> sexpr "bv_sle"  [ pp x, pp y ]
-    BVTestBit x i -> sexpr "bv_testbit" [ pp x, pp i]
-    BVComplement _ x -> sexpr "bv_complement" [ pp x ]
-    BVAnd _ x y -> sexpr "bv_and" [ pp x, pp y ]
-    BVOr  _ x y -> sexpr "bv_or"  [ pp x, pp y ]
-    BVXor _ x y -> sexpr "bv_xor" [ pp x, pp y ]
-    BVShl _ x y -> sexpr "bv_shl" [ pp x, pp y ]
-    BVShr _ x y -> sexpr "bv_shr" [ pp x, pp y ]
-    BVSar _ x y -> sexpr "bv_sar" [ pp x, pp y ]
-    BVEq x y    -> sexpr "bv_eq" [ pp x, pp y ]
-    EvenParity x -> sexpr "even_parity" [ pp x ]
-    ReverseBytes _ x -> sexpr "reverse_bytes" [ pp x ]
-    UadcOverflows _ x y c -> sexpr "uadc_overflows" [ pp x, pp y, pp c ]
-    SadcOverflows _ x y c -> sexpr "sadc_overflows" [ pp x, pp y, pp c ]
-    UsbbOverflows _ x y c -> sexpr "usbb_overflows" [ pp x, pp y, pp c ]
-    SsbbOverflows _ x y c -> sexpr "ssbb_overflows" [ pp x, pp y, pp c ]
-    Bsf _ x -> sexpr "bsf" [ pp x ]
-    Bsr _ x -> sexpr "bsr" [ pp x ]
+    Mux _ c x y -> sexprA "mux" [ pp c, pp x, pp y ]
+    MMXExtend e -> sexprA "mmx_extend" [ pp e ]
+    ConcatV _ _ x y -> sexprA "concat" [ pp x, pp y ]
+    UpperHalf _ x -> sexprA "upper_half" [ pp x ]
+    Trunc x w -> sexprA "trunc" [ pp x, ppNat w ]
+    SExt x w -> sexprA "sext" [ pp x, ppNat w ]
+    UExt x w -> sexprA "uext" [ pp x, ppNat w ]
+    AndApp x y -> sexprA "and" [ pp x, pp y ]
+    OrApp  x y -> sexprA "or"  [ pp x, pp y ]
+    NotApp x   -> sexprA "not" [ pp x ]
+    BVAdd _ x y -> sexprA "bv_add" [ pp x, pp y ]
+    BVSub _ x y -> sexprA "bv_sub" [ pp x, pp y ]
+    BVMul _ x y -> sexprA "bv_mul" [ pp x, pp y ]
+    BVQuot _ x y      -> sexprA "bv_uquot" [ pp x, pp y ]
+    BVSignedQuot _ x y -> sexprA "bv_squot" [ pp x, pp y ]
+    BVRem _ x y       -> sexprA "bv_urem" [ pp x, pp y ]
+    BVSignedRem _ x y -> sexprA "bv_srem" [ pp x, pp y ]
+    BVUnsignedLt x y  -> sexprA "bv_ult"  [ pp x, pp y ]
+    BVUnsignedLe x y  -> sexprA "bv_ule"  [ pp x, pp y ]
+    BVSignedLt x y    -> sexprA "bv_slt"  [ pp x, pp y ]
+    BVSignedLe x y    -> sexprA "bv_sle"  [ pp x, pp y ]
+    BVTestBit x i -> sexprA "bv_testbit" [ pp x, pp i]
+    BVComplement _ x -> sexprA "bv_complement" [ pp x ]
+    BVAnd _ x y -> sexprA "bv_and" [ pp x, pp y ]
+    BVOr  _ x y -> sexprA "bv_or"  [ pp x, pp y ]
+    BVXor _ x y -> sexprA "bv_xor" [ pp x, pp y ]
+    BVShl _ x y -> sexprA "bv_shl" [ pp x, pp y ]
+    BVShr _ x y -> sexprA "bv_shr" [ pp x, pp y ]
+    BVSar _ x y -> sexprA "bv_sar" [ pp x, pp y ]
+    BVEq x y    -> sexprA "bv_eq" [ pp x, pp y ]
+    EvenParity x -> sexprA "even_parity" [ pp x ]
+    ReverseBytes _ x -> sexprA "reverse_bytes" [ pp x ]
+    UadcOverflows _ x y c -> sexprA "uadc_overflows" [ pp x, pp y, pp c ]
+    SadcOverflows _ x y c -> sexprA "sadc_overflows" [ pp x, pp y, pp c ]
+    UsbbOverflows _ x y c -> sexprA "usbb_overflows" [ pp x, pp y, pp c ]
+    SsbbOverflows _ x y c -> sexprA "ssbb_overflows" [ pp x, pp y, pp c ]
+    Bsf _ x -> sexprA "bsf" [ pp x ]
+    Bsr _ x -> sexprA "bsr" [ pp x ]
 
     -- Floating point
-    FPIsQNaN rep x          -> sexpr "fpIsQNaN" [ pretty rep, pp x ]
-    FPIsSNaN rep x          -> sexpr "fpIsSNaN" [ pretty rep, pp x ]
-    FPAdd rep x y           -> sexpr "fpAdd" [ pretty rep, pp x, pp y ]
-    FPAddRoundedUp rep x y  -> sexpr "fpAddRoundedUp" [ pretty rep, pp x, pp y ]
-    FPSub rep x y           -> sexpr "fpSub" [ pretty rep, pp x, pp y ]
-    FPSubRoundedUp rep x y  -> sexpr "fpSubRoundedUp" [ pretty rep, pp x, pp y ]
-    FPMul rep x y           -> sexpr "fpMul" [ pretty rep, pp x, pp y ]
-    FPMulRoundedUp rep x y  -> sexpr "fpMulRoundedUp" [ pretty rep, pp x, pp y ]
-    FPDiv rep x y           -> sexpr "fpDiv" [ pretty rep, pp x, pp y ]
-    FPLt rep x y            -> sexpr "fpLt" [ pretty rep, pp x, pp y ]
-    FPEq rep x y            -> sexpr "fpEq" [ pretty rep, pp x, pp y ]
-    FPCvt src x tgt         -> sexpr "fpCvt" [ pretty src, pp x, pretty tgt ]
-    FPCvtRoundsUp src x tgt -> sexpr "fpCvtRoundsUp" [ pretty src, pp x, pretty tgt ]
-    FPFromBV x tgt          -> sexpr "fpFromBV" [ pp x, pretty tgt ]
-    TruncFPToSignedBV _ x w -> sexpr "truncFP_sbv" [ pp x, ppNat w]
+    FPIsQNaN rep x          -> sexprA "fpIsQNaN" [ prettyPure rep, pp x ]
+    FPIsSNaN rep x          -> sexprA "fpIsSNaN" [ prettyPure rep, pp x ]
+    FPAdd rep x y           -> sexprA "fpAdd" [ prettyPure rep, pp x, pp y ]
+    FPAddRoundedUp rep x y  -> sexprA "fpAddRoundedUp" [ prettyPure rep, pp x, pp y ]
+    FPSub rep x y           -> sexprA "fpSub" [ prettyPure rep, pp x, pp y ]
+    FPSubRoundedUp rep x y  -> sexprA "fpSubRoundedUp" [ prettyPure rep, pp x, pp y ]
+    FPMul rep x y           -> sexprA "fpMul" [ prettyPure rep, pp x, pp y ]
+    FPMulRoundedUp rep x y  -> sexprA "fpMulRoundedUp" [ prettyPure rep, pp x, pp y ]
+    FPDiv rep x y           -> sexprA "fpDiv" [ prettyPure rep, pp x, pp y ]
+    FPLt rep x y            -> sexprA "fpLt" [ prettyPure rep, pp x, pp y ]
+    FPEq rep x y            -> sexprA "fpEq" [ prettyPure rep, pp x, pp y ]
+    FPCvt src x tgt         -> sexprA "fpCvt" [ prettyPure src, pp x, prettyPure tgt ]
+    FPCvtRoundsUp src x tgt -> sexprA "fpCvtRoundsUp" [ prettyPure src, pp x, prettyPure tgt ]
+    FPFromBV x tgt          -> sexprA "fpFromBV" [ pp x, prettyPure tgt ]
+    TruncFPToSignedBV _ x w -> sexprA "truncFP_sbv" [ pp x, ppNat w]
 
 appWidth :: App f (BVType n) -> NatRepr n
 appWidth a =

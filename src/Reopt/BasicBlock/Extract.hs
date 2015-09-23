@@ -1,7 +1,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving#-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Reopt.BasicBlock.Extract (extractBlock, Next(..))
 where
@@ -64,14 +64,16 @@ instance ByteReader r => ByteReader (WrappedByteReader r) where
 
 nexts :: Map (Some Variable) [Next] -> [Next] -> [CS.Stmt] -> [Next]
 nexts _ addrs [] = addrs
-nexts vars addrs (((S.Register N.IPReg) := expr) : rest) =
-  nexts vars (staticExpr vars expr) rest
+nexts vars addrs (((S.Register rv) := expr) : rest)
+  | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = nexts vars (staticExpr vars expr) rest
 nexts vars addrs ((Ifte_ expr as bs) : rest) =
   let aAddrs = nexts vars addrs as
       bAddrs = nexts vars addrs bs
   in nexts vars (L.union aAddrs bAddrs) rest
-nexts vars addrs ((Get v (S.Register N.IPReg)) : rest) =
-  nexts (M.insert (Some v) addrs vars) addrs rest
+nexts vars addrs ((Get v (S.Register rv)) : rest)
+  | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
+  = nexts (M.insert (Some v) addrs vars) addrs rest
 nexts vars addrs ((Get v _) : rest) =
   nexts (M.insert (Some v) [NIndirect] vars) addrs rest
 nexts vars addrs ((Let v expr) : rest) =

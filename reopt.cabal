@@ -40,11 +40,13 @@ library
     Reopt.BasicBlock.Extract
     Reopt.BasicBlock.FunctionCFG
     Reopt.CFG.CFGDiscovery
+    Reopt.CFG.FnRep
     Reopt.CFG.Implementation
     Reopt.CFG.InterpState
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.Representation
+    Reopt.CFG.StackHeight
     Reopt.Machine.StateNames
     Reopt.Machine.Types
     Reopt.Machine.X86State
@@ -61,6 +63,7 @@ library
     Reopt.Symbolic.Semantics
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
+    Reopt.Utils.GHCBug
 
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
@@ -85,6 +88,9 @@ executable reopt
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
+
+  other-modules:
+    Paths_reopt
 
   if flag(enable-hpc)
     ghc-options: -fhpc
@@ -113,6 +119,10 @@ executable reopt_test
 
   hs-source-dirs: reopt_test
   main-is: Main_reopt.hs
+
+  other-modules:
+    SignalUtils
+    Paths_reopt
 
   if flag(enable-hpc)
     ghc-options: -fhpc

@@ -58,10 +58,10 @@ import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrderi
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
-  ((<>), (<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
+  ((<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
-import           GHC.Float (float2Double, double2Float)
-
+import           Reopt.Concrete.MachineState (Value)
+import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
@@ -70,11 +70,7 @@ import           Reopt.Semantics.Monad
   )
 import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
-import qualified Reopt.Machine.StateNames as N
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfo(..), FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n8, n80
-                                     )
+import           Reopt.Machine.Types (FloatInfo(..))
 
 import Debug.Trace
 
@@ -121,6 +117,8 @@ instance Eq (Variable tp) where
 
 -- | A pure expression for isValue.
 data Expr tp where
+  -- A embedded value.
+  ValueExpr :: !(Value tp) -> Expr tp
   -- An expression obtained from some value.
   LitExpr :: (1 <= n) => !(NatRepr n) -> Integer -> Expr (BVType n)
 
@@ -173,6 +171,7 @@ app :: R.App Expr tp -> Expr tp
 app = AppExpr
 
 exprType :: Expr tp -> S.TypeRepr tp
+exprType (ValueExpr v) = CS.asTypeRepr v
 exprType (LitExpr r _) = S.BVTypeRepr r
 exprType (AppExpr a) = R.appType a
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
@@ -208,17 +207,11 @@ instance S.IsValue Expr where
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
-  bvTrunc (w :: NatRepr m) (x :: Expr (BVType n)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
-    case testStrictLeq w (exprWidth x) of
-      Left LeqProof -> app $ R.Trunc x w
-      Right r -> nonLoopingCoerce' r x
+  bvTrunc' w x = app $ R.Trunc x w
   bvUlt x y = app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
-  sext (w :: NatRepr n) (x :: Expr (BVType m)) | LeqProof <- leqTrans (LeqProof :: LeqProof 1 m) (LeqProof :: LeqProof m n) = 
-    case testStrictLeq (exprWidth x) w of
-      Left LeqProof -> app $ R.SExt x w
-      Right r -> nonLoopingCoerce r x
+  sext' w x = app $ R.SExt x w
   uext' w x = app $ R.UExt x w
   even_parity x = app $ R.EvenParity x
   reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x
@@ -243,12 +236,6 @@ instance S.IsValue Expr where
   fpCvtRoundsUp src tgt x = app $ R.FPCvtRoundsUp src x tgt
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
-
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
-
-nonLoopingCoerce' :: (x :~: y) -> v (BVType y) -> v (BVType x)
-nonLoopingCoerce' Refl y = y
 
 ------------------------------------------------------------------------
 -- Statements.
@@ -468,29 +455,7 @@ instance S.Semantics Semantics where
     -- tell [Get var l]
     return $ VarExpr var
 
-  -- sjw: This is a huge hack, but then again, so is the fact that it
-  -- happens at all.  According to the ISA, assigning a 32 bit value
-  -- to a 64 bit register performs a zero extension so the upper 32
-  -- bits are zero.  This may not be the best place for this, but I
-  -- can't think of a nicer one ...
-  --
-  -- TODO(conathan): verify that this is sufficient. E.g., what is
-  -- supposed to happen for @UpperHalf (LowerHalf (Register _))@? That
-  -- won't get special treatment here, but maybe it also needs the
-  -- upper 32 bits to be zeroed?
-  (S.LowerHalf loc@(S.Register (N.GPReg _))) .= v =
-    -- FIXME: doing this the obvious way breaks GHC
-    --     case addIsLeqLeft1' LeqProof v S.n64 of ...
-    --
-    -- ghc: panic! (the 'impossible' happened)
-    --     (GHC version 7.8.4 for x86_64-apple-darwin):
-    --   	tcIfaceCoAxiomRule Sub0R
-    --
-    case testLeq (S.bv_width v) S.n64 of
-     Just LeqProof -> tell [loc := S.uext knownNat v]
-     Nothing -> error "impossible"
-
-  l .= v = expandMemOps (l := v)
+  l .= v = tell [l := v]
 
   ifte_ c trueBranch falseBranch = do
     trueStmts <- collectAndForget trueBranch
@@ -562,7 +527,7 @@ offsetAddr bits addr
 expandRead :: Variable tp -> Expr (BVType 64) -> TypeRepr tp
            -> Semantics ()
 expandRead v addr (BVTypeRepr nr) =
-  withDivModNat nr n8 $ \divn modn ->
+  withDivModNat nr S.n8 $ \divn modn ->
     case testEquality modn (knownNat :: NatRepr 0) of
       Nothing   -> error "Addr width not a multiple of 8"
       Just Refl -> 
@@ -581,13 +546,13 @@ expandRead v addr (BVTypeRepr nr) =
     go :: forall n'. NatRepr n' -> P n' -> P (n' + 1)
     go nr ZeroCase  = NonZeroCase $ getOne (natValue nr)
     go nr (NonZeroCase m) =
-        withAddPrefixLeq nr n1 $
-        withAddMulDistribRight nr n1 n8 $
+        withAddPrefixLeq nr S.n1 $
+        withAddMulDistribRight nr S.n1 S.n8 $
         NonZeroCase $ do
           v <- m
           v'  <- getOne (natValue nr)
-          let sz = natMultiply nr n8
-              e  = AppExpr (R.ConcatV sz n8 v v')
+          let sz = natMultiply nr S.n8
+              e  = AppExpr (R.ConcatV sz S.n8 v v')
           res_v <- freshVar "expandRead" (exprType e)
           tell [Let res_v e]
           return $ VarExpr res_v
@@ -596,7 +561,7 @@ expandWrite :: forall n. (9 <= n) =>
                Expr (BVType 64) -> TypeRepr (BVType n) -> Expr (BVType n)
             -> Semantics ()
 expandWrite addr (BVTypeRepr nr) v =
-  withDivModNat nr n8 $ \divn modn ->
+  withDivModNat nr S.n8 $ \divn modn ->
     case ( testEquality modn (knownNat :: NatRepr 0)
          , isZeroNat divn)  of
       (Nothing, _) -> error "Addr width not a multiple of 8"
@@ -618,29 +583,24 @@ expandMemOps :: Stmt -> Semantics ()
 expandMemOps stmt@(Get v l)
   | S.BVTypeRepr nr <- (S.loc_type l)
   , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr =
-      S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
-  where
-    memCase :: forall tp'. (Integer, Integer) -> Integer
-               -> (Expr (BVType 64), TypeRepr tp') -> Semantics ()
-    memCase (low, _high) _width (addr, _) = do
-        addrv <- freshVar "addr" S.knownType
-        tell [Let addrv (offsetAddr low addr)]
-        expandRead v (VarExpr addrv) (S.loc_type l)
+      case l of
+        S.MemoryAddr addr _tp ->  do
+          addrv <- freshVar "addr" S.knownType
+          tell [Let addrv addr]
+          expandRead v (VarExpr addrv) (S.loc_type l)
+        _ -> tell [stmt]
 
-expandMemOps stmt@(l := e) = 
-    S.elimLocation memCase (\_ _ _ -> tell [stmt]) (\_ _ _ -> tell [stmt]) l
-  where
-    memCase :: forall tp'. (Integer, Integer) -> Integer
-               -> (Expr (BVType 64), TypeRepr tp') -> Semantics ()
-    memCase (low, _high) _width (addr, _)
+expandMemOps stmt@(l := e) =
+  case l of
+    S.MemoryAddr addr _tp 
       | S.BVTypeRepr nr <- S.loc_type l
-      , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr = do
+      , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr -> do
         addrv <- freshVar "addr" S.knownType
         valv  <- freshVar "val" (S.BVTypeRepr nr)
-        tell [ Let addrv (offsetAddr low addr)
+        tell [ Let addrv addr
              , Let valv e ]
         expandWrite (VarExpr addrv) (BVTypeRepr nr) (VarExpr valv)
-      | otherwise = tell [stmt]
+    _ -> tell [stmt]
 
 expandMemOps stmt = tell [stmt]      
 
@@ -649,35 +609,13 @@ expandMemOps stmt = tell [stmt]
 
 ppExpr :: Expr a -> Doc
 ppExpr e = case e of
+  ValueExpr v -> pretty v
   LitExpr n i -> parens $ R.ppLit n i
   AppExpr app' -> R.ppApp ppExpr app'
   VarExpr (Variable _ x) -> text x
 
--- | Pretty print 'S.Location'.
---
--- Going back to pretty names for subregisters is pretty ad hoc;
--- see table at http://stackoverflow.com/a/1753627/470844. E.g.,
--- instead of @%ah@, we produce @(upper_half (lower_half (lower_half %rax)))@.
-ppLocation :: forall addr tp. (addr -> Doc) -> S.Location addr tp -> Doc
-ppLocation ppAddr l = S.elimLocation ppMemCont ppRegCont ppX87Cont l
-  where
-    ppMemCont :: forall tp'.
-                 (Integer, Integer) -> Integer -> (addr, TypeRepr tp') -> Doc
-    ppMemCont = ppSubrange (ppAddr . fst)
-    ppRegCont :: (Integer, Integer) -> Integer -> N.RegisterName cl -> Doc
-    ppRegCont = ppSubrange (\r -> text $ "%" ++ show r)
-    ppX87Cont = ppSubrange (\i -> text $ "x87_stack@" ++ show i)
-    -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
-    --
-    -- The low bit is inclusive and the high bit is exclusive, but I
-    -- can't bring myself to generate @<reg>[<low>:<high>)@ :)
-    ppSubrange pp (low, high) width x =
-      if width == high
-      then pp x
-      else pp x <> text ("[" ++ show low ++ ":" ++ show high ++ "]")
-
 ppMLocation :: MLocation tp -> Doc
-ppMLocation = ppLocation ppExpr
+ppMLocation = S.ppLocation ppExpr
 
 ppStmts :: [Stmt] -> Doc
 ppStmts = vsep . map ppStmt

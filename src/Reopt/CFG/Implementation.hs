@@ -16,6 +16,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -51,8 +52,6 @@ import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
 
-import           Unsafe.Coerce -- Only required to work around a ghc crash
-
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
@@ -60,7 +59,6 @@ import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types (TypeBits)
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -69,11 +67,6 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-
--- This is an identity function intended to be a workaround for GHC bug #10507
---   https://ghc.haskell.org/trac/ghc/ticket/10507
-nonLoopingCoerce :: (x :~: y) -> v (BVType x) -> v (BVType y)
-nonLoopingCoerce Refl x = x
 
 ------------------------------------------------------------------------
 -- Expr
@@ -122,85 +115,6 @@ ltProof :: forall f n m . (n+1 <= m) => f n -> f m -> LeqProof n m
 ltProof _ _ = leqTrans lt LeqProof
   where lt :: LeqProof n (n+1)
         lt = leqAdd LeqProof S.n1
-
-
--- | Perform a signed extension of a bitvector.
--- This uses explicit LeqProofs to work around GHC bugs.
-sext_impl :: forall m n
-          .  LeqProof 1 m
-          -> LeqProof m n
-          -> NatRepr n
-          -> Expr (BVType m)
-          -> Expr (BVType n)
-sext_impl p_1m p_mn w e0
-  | Just (SExt e w0) <- asApp e0
-  , we <- S.bv_width e
-  , p_mnn <- leqTrans (addIsLeq we (knownNat :: NatRepr 1))
-                      (leqTrans (leqProof (incNat we) w0) p_mn) =
-    sext_impl LeqProof p_mnn w e
-  | LeqProof <- p_mn
-  , LeqProof <- leqTrans p_1m p_mn =
-      case testStrictLeq (exprWidth e0) w of
-        Left LeqProof | LeqProof <- p_1m -> app (SExt e0 w)
-        Right eq -> nonLoopingCoerce eq e0
-
--- | Truncate the value
-bvTrunc_impl :: forall m n
-              . LeqProof 1 m
-             -> LeqProof m n
-             -> NatRepr m
-             -> Expr (BVType n)
-             -> Expr (BVType m)
-bvTrunc_impl p_1m _ w e0
-    -- Constant propagation
-  | LeqProof <- p_1m
-  , Just v <- asBVLit e0 =
-    bvLit w v
-bvTrunc_impl _ _ w e0
-    -- Eliminate redundant trunc
-  | Just Refl <- testEquality (exprWidth e0) w =
-    e0
-bvTrunc_impl _ _ w e0
-    -- Eliminate MMXExtend
-  | Just (MMXExtend e) <- asApp e0
-  , Just Refl <- testEquality w n64 =
-    e
-
-bvTrunc_impl p_1m _p_mn w e0
-  | Just (ConcatV lw lw' l _) <- asApp e0
-  , Just p_w_lw <- testLeq w lw =
-    bvTrunc_impl p_1m p_w_lw w l
-bvTrunc_impl p_1m _ w e0
-  | Just (UExt e _) <- asApp e0 =
-    case testLeq w (S.bv_width e) of
-      -- Check if original value width is less than new width.
-      Just p_we -> bvTrunc_impl p_1m p_we w e
-      Nothing ->
-        -- Runtime check to wordaround GHC typechecker
-        case testLeq (S.bv_width e) w of
-          Just LeqProof -> S.uext w e
-          Nothing -> error "bvTrunc internal error"
-
-bvTrunc_impl p_1m p_mn w e0
-    -- Trunc (x .&. y) w = trunc x w .&. trunc y w
-  | LeqProof <- p_1m
-  , Just (BVAnd _ x y) <- asApp e0 =
-    let x' = bvTrunc_impl p_1m p_mn w x
-        y' = bvTrunc_impl p_1m p_mn w y
-     in x' S..&. y'
-    -- trunc (Trunc e w1) w2 = trunc e w2
-  | Just (Trunc e _) <- asApp e0 =
-    -- Runtime check to workaround GHC typechecker.
-    case testLeq w (exprWidth e) of
-      Just p_we -> bvTrunc_impl p_1m p_we w e
-      Nothing -> error "bvTrunc given bad width"
-    -- Default case
-  | LeqProof <- p_1m
-  , LeqProof <- p_mn
-  , LeqProof <- leqTrans p_1m p_mn =
-    case testStrictLeq w (exprWidth e0) of
-      Left LeqProof -> app (Trunc e0 w)
-      Right Refl -> e0
 
 bvSle :: Expr (BVType n) -> Expr (BVType n) -> Expr BoolType
 bvSle x y = app (BVSignedLe x y)
@@ -376,7 +290,41 @@ instance S.IsValue Expr where
 
     | otherwise = app $ BVShl (exprWidth x) x y
 
-  bvTrunc = bvTrunc_impl LeqProof LeqProof
+  bvTrunc' w e0
+    | Just v <- asBVLit e0 =
+      bvLit w v
+    | Just Refl <- testEquality (exprWidth e0) w =
+      e0
+    | Just (MMXExtend e) <- asApp e0
+    , Just Refl <- testEquality w n64 =
+      e
+    -- WARNING: the 'ConcatV' here appears to be little endian,
+    -- whereas 'bvCat' in 'IsValue' is big endian. Is this a bug?
+    | Just (ConcatV lw _ l _) <- asApp e0
+    , Just LeqProof <- testLeq w lw =
+      S.bvTrunc w l
+    | Just (UExt e _) <- asApp e0 =
+      case testLeq w (S.bv_width e) of
+        -- Check if original value width is less than new width.
+        Just LeqProof -> S.bvTrunc w e
+        Nothing ->
+          -- Runtime check to wordaround GHC typechecker
+          case testLeq (S.bv_width e) w of
+            Just LeqProof -> S.uext w e
+            Nothing -> error "bvTrunc internal error"
+      -- Trunc (x .&. y) w = trunc x w .&. trunc y w
+    | Just (BVAnd _ x y) <- asApp e0 =
+      let x' = S.bvTrunc' w x
+          y' = S.bvTrunc' w y
+       in x' S..&. y'
+      -- trunc (Trunc e w1) w2 = trunc e w2
+    | Just (Trunc e _) <- asApp e0 =
+      -- Runtime check to workaround GHC typechecker.
+      case testLeq w (exprWidth e) of
+        Just LeqProof -> S.bvTrunc w e
+        Nothing -> error "bvTrunc given bad width"
+      -- Default case
+    | otherwise = app (Trunc e0 w)
 
   bvUlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
@@ -386,7 +334,7 @@ instance S.IsValue Expr where
   bvSlt x y
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv < yv)
     | x == y = S.false
-    | otherwise = app $ BVUnsignedLt x y
+    | otherwise = app $ BVSignedLt x y
 
   bvBit x y
     | Just xv <- asBVLit x
@@ -406,7 +354,13 @@ instance S.IsValue Expr where
     | otherwise =
       app $ BVTestBit x y
 
-  sext = sext_impl LeqProof LeqProof
+  sext' w e0
+      -- Collapse duplicate extensions.
+    | Just (SExt e w0) <- asApp e0 = do
+      let we = S.bv_width e
+      withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
+        S.sext w e
+    | otherwise = app (SExt e0 w)
 
   uext' w e0
       -- Literal case
@@ -529,13 +483,14 @@ _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 
 -- | Local to block discovery.
 data GenState tag = GenState
-       { -- | The global state
-         _globalGenState :: !GlobalGenState
-         -- | Index of next block
+       { _globalGenState :: !GlobalGenState
+         -- ^ The global state
        , _nextBlockID  :: !Word64
-         -- | Blocks added to CFG.
+         -- ^ Index of next block
        , _frontierBlocks :: !(Seq Block)
+         -- ^ Blocks added to CFG
        , _blockState     :: !(MaybeF tag PreBlock)
+         -- ^ Blocks generated so far
        }
 
 globalGenState :: Simple Lens (GenState tag) GlobalGenState
@@ -728,13 +683,21 @@ type AddrExpr = Expr (BVType 64)
 
 type ImpLocation tp = S.Location AddrExpr tp
 
-getX87Offset :: Int -> X86Generator Int
-getX87Offset i = do
+getX87Top :: X86Generator Int
+getX87Top = do
   top_val <- modState $ use $ x87TopReg
   case top_val of
-    BVValue _ (fromInteger -> top) | i <= top, top <= i + 7 -> do
-      return (top - i)
+    -- Validate that i is less than top and top +
+    BVValue _ (fromInteger -> top) ->
+      return top
     _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
+
+getX87Offset :: Int -> X86Generator Int
+getX87Offset i = do
+  top <- getX87Top
+  unless (0 <= top + i && top + i <= 7) $ do
+    fail $ "Illegal floating point index"
+  return $! top + i
 
 readLoc :: StmtLoc (Value (BVType 64)) tp -> X86Generator (Expr tp)
 readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
@@ -745,35 +708,29 @@ getLoc l0 =
     S.MemoryAddr w tp -> do
       addr <- eval w
       readLoc (MemLoc addr tp)
-    S.Register r ->
+    S.Register rv -> do
+      let readLoc' l = S.registerViewRead rv <$> readLoc l
+      let r = S.registerViewReg rv
       case r of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
        N.SegmentReg {}
-         | r == N.fs -> readLoc FS
-         | r == N.gs -> readLoc GS
+         | r == N.fs -> readLoc' FS
+         | r == N.gs -> readLoc' GS
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
-       -- S.MMXReg {} -> do
-       --   e <- modState $ ValueExpr <$> use (register r)
-       --   ValueExpr <$> eval (S.bvTrunc knownNat e)
-       N.X87PC ->  readLoc X87_PC
-       N.X87RC ->  readLoc X87_RC
-       _ -> modState $ ValueExpr <$> use (register r)
-
-    S.LowerHalf l -> lowerHalf <$> getLoc l
-    S.UpperHalf l -> upperHalf <$> getLoc l
-    S.TruncLoc l w -> do
-      withLeqProof (ltProof w (S.loc_width l)) $
-        S.bvTrunc w <$> getLoc l
-
+       N.X87PC -> readLoc' X87_PC
+       N.X87RC -> readLoc' X87_RC
+       _ -> modState $
+            S.registerViewRead rv . ValueExpr <$>
+            use (register r)
     -- TODO
     S.X87StackRegister i -> do
       v <- modState $ use $ x87Regs
-      off <- getX87Offset i
-      return (ValueExpr (v V.! off))
-
+      idx <- getX87Offset i
+      -- TODO: Check tag register is assigned.
+      return $! ValueExpr (v V.! idx)
 
 lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
@@ -810,73 +767,38 @@ upperHalf e =
   where half_width :: NatRepr n
         half_width = halfNat (exprWidth e)
 
-
-bvConcat :: (1 <= n) => Expr (BVType n) -> Expr (BVType n) -> Expr (BVType (n+n))
-bvConcat l h
-    | Just 0 <- asBVLit h =
-        withLeqProof (addIsLeq w w) $ do
-          S.uext (addNat w w) l
-    | otherwise = app (ConcatV (exprWidth l) (exprWidth l) l h)
-  where w = exprWidth l
-
 -- | Assign a value to a location
 setLoc :: forall tp. ImpLocation tp -> Value tp -> X86Generator ()
-setLoc loc v0 =
-  -- So x86 says that when you assign a 32 bit register, the upper bits
-  -- are set to zero, which is different to the 16- and 8-bit cases.  This
-  -- bit of special code checks when you are updating a 32bit register and
-  -- zeroes accordingly.
+setLoc loc v =
   case loc of
-   S.LowerHalf (S.Register r@(N.GPReg _))
-     -> do -- hack to infer that n + n ~ 64 ==> n < 64
-           (LeqProof :: LeqProof (TypeBits tp) 64) <- return (unsafeCoerce (LeqProof :: LeqProof 0 0)) -- return (addIsLeqLeft1 (LeqProof :: LeqProof (TypeBits tp + TypeBits tp) 64))
-           zext_v <- eval $ S.uext n64 (ValueExpr v0)
-           modState $ register r .= zext_v
-   _ -> go loc v0
-  where
-    go :: forall tp'. ImpLocation tp' -> Value tp' -> X86Generator ()
-    go l0 v =
-      case l0 of
-       S.MemoryAddr w _ -> do
-         addr <- eval w
-         addStmt $ Write (MemLoc addr (valueType v)) v
+   S.MemoryAddr w _ -> do
+     addr <- eval w
+     addStmt $ Write (MemLoc addr (valueType v)) v
 
-       S.Register r ->
-         case r of
-           N.ControlReg {} -> addStmt $ Write (ControlLoc r) v
-           N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
-           N.SegmentReg {}
-             | r == N.fs -> addStmt $ Write FS v
-             | r == N.gs -> addStmt $ Write GS v
-             -- Otherwise registers are 0.
-             | otherwise ->
-                 fail $ "On x86-64 registers other than fs and gs may not be set."
-           N.X87PC -> addStmt $ Write X87_PC v
-           N.X87RC -> addStmt $ Write X87_RC v
-           -- FIXME: sort this out
-           -- S.MMXReg {} -> do
-           --   ext_v <- evalApp (MMXExtend v)
-           --   modState $ register r .= ext_v
-           _ -> modState $ register r .= v
-       S.TruncLoc l w -> do
-         b <- getLoc l
-         let lw = S.loc_width l
-         -- Build mask containing only upper most lw - w bits
-         case isPosNat lw of
-           Nothing -> fail "Illegal width to TruncLoc"
-           Just LeqProof -> do
-             let mask = bvLit lw (complement (maxUnsigned w))
-             let old_part = mask S..&. b
-             go l =<< eval (old_part S..|. S.uext' lw (ValueExpr v))
-       S.LowerHalf l -> do
-         b <- getLoc l
-         go l =<< eval (bvConcat (ValueExpr v) (upperHalf b))
-       S.UpperHalf l -> do
-         b <- getLoc l
-         go l =<< eval (bvConcat (lowerHalf b) (ValueExpr v))
-       S.X87StackRegister i -> do
-         off <- getX87Offset i
-         modState $ x87Regs . ix off .= v
+   S.Register rv -> do
+     let writeReg reg = do
+           v0 <- readLoc reg
+           v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
+           addStmt $ Write reg v1
+     let r = S.registerViewReg rv
+     case r of
+       N.ControlReg {} -> writeReg (ControlLoc r)
+       N.DebugReg {}   -> writeReg (DebugLoc r)
+       N.SegmentReg {}
+         | r == N.fs -> writeReg FS
+         | r == N.gs -> writeReg GS
+         -- Otherwise registers are 0.
+         | otherwise ->
+             fail $ "On x86-64 registers other than fs and gs may not be set."
+       N.X87PC -> writeReg X87_PC
+       N.X87RC -> writeReg X87_RC
+       _ -> do
+         v0 <- modState $ ValueExpr <$> use (register r)
+         v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
+         modState $ register r .= v1
+   S.X87StackRegister i -> do
+     off <- getX87Offset i
+     modState $ x87Regs . ix off .= v
 
 mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel, GenState any)
 mkBlockLabel a s0 = (lbl, s1)
@@ -899,7 +821,7 @@ instance S.Semantics X86Generator where
     ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
 
   -- Get value of a location.
-  get l = getLoc l
+  get = getLoc
 
   l .= e = setLoc l =<< eval e
 
@@ -994,8 +916,24 @@ instance S.Semantics X86Generator where
             (addStmt (PlaceHolderStmt [] $ "Exception " ++ (show c)))
             (return ())
 
-  x87Push _ = return ()
-  x87Pop = return ()
+  x87Push e = do
+    v <- eval e
+    top <- getX87Top
+    let new_top = (top - 1) .&. 0x7
+    modState $ do
+      -- TODO: Update tagWords
+      -- Store value at new top
+      x87Regs . ix new_top .= v
+      -- Update top
+      x87TopReg .= BVValue knownNat (toInteger new_top)
+  x87Pop = do
+    top <- getX87Top
+    let new_top = (top + 1) .&. 0x7
+    modState $ do
+      -- Update top
+      x87TopReg .= BVValue knownNat (toInteger new_top)
+
+    return ()
 
 -- | A location to explore
 data ExploreLoc
@@ -1011,7 +949,7 @@ instance Pretty ExploreLoc where
 
 rootLoc :: CodeAddr -> ExploreLoc
 rootLoc ip = ExploreLoc { loc_ip = ip
-                        , loc_x87_top = 7
+                        , loc_x87_top = 0
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.

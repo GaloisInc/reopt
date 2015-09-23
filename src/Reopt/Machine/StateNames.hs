@@ -17,6 +17,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FlexibleInstances #-} -- for Eq
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE PatternGuards #-}
 
 module Reopt.Machine.StateNames where
 
@@ -181,6 +182,11 @@ instance TestEquality RegisterName where
          EQF -> Just Refl
          GTF -> Nothing
 
+instance Eq (RegisterName cl) where
+  r == r'
+    | Just _ <- testEquality r r' = True
+    | otherwise = False
+
 instance OrdF RegisterName where
   compareF IPReg             IPReg              = EQF
   compareF (GPReg n)         (GPReg n')         = fromOrdering (compare n n')
@@ -237,12 +243,6 @@ instance OrdF RegisterName where
 
   -- compareF DebugReg{}        _                  = LTF
   -- compareF _                 DebugReg{}         = GTF
-
-instance Eq (RegisterName cl) where
-  a == b = case a `compareF` b of
-    GTF -> False
-    EQF -> True
-    LTF -> False
 
 instance Ord (RegisterName cl) where
   a `compare` b = case a `compareF` b of
@@ -371,6 +371,7 @@ flagNames :: V.Vector String
 flagNames = V.fromList
   [ "cf", "RESERVED", "pf", "RESERVED", "af", "RESERVED"
   , "zf", "sf",       "tf", "if",       "df", "of"
+  , "iopl", "nt", "SBZ", "rf", "vm", "ac", "vif", "vip", "id"
   ]
 
 -- FIXME: missing the system flags
@@ -450,8 +451,9 @@ x87StatusBitPacking = BitPacking knownNat $ flags
 x87ControlNames :: V.Vector String
 x87ControlNames = V.fromList $
   ["im", "dm", "zm", "om", "um", "pm"]
-  ++ replicate 6 "RESERVED"
+  ++ replicate 6 "RESERVED" -- includes rc and pc
   ++ ["x"]
+  ++ replicate 3 "RESERVED"
 
 x87im, x87dm, x87zm, x87om, x87um, x87pm, x87x :: RegisterName 'X87_ControlMask
 x87im = X87ControlReg 0

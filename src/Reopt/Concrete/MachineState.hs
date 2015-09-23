@@ -17,6 +17,7 @@ module Reopt.Concrete.MachineState
 import           Control.Lens
 import           Control.Monad.State
 import           Control.Monad.Reader
+import           Control.Monad.Except (ExceptT)
 import           Control.Monad.Writer.Strict
 import qualified Data.Map as M
 import           Data.Maybe (mapMaybe)
@@ -29,7 +30,7 @@ import           Debug.Trace
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Machine.X86State as X
-import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, false, nat, true, unBitVector)
+import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
 import           Reopt.Semantics.Monad (Primitive, Segment)
 import qualified Data.BitVector as BV
@@ -77,6 +78,13 @@ instance X.PrettyRegValue Value where
   ppValueEq (N.FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
   ppValueEq (N.X87ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
   ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
+
+------------------------------------------------------------------------
+-- Constants
+
+true, false :: Value BoolType
+true = Literal B.true
+false = Literal B.false
 
 ------------------------------------------------------------------------
 -- 'Value' combinators
@@ -237,10 +245,10 @@ class MonadMachineState m => FoldableMachineState m where
   foldMem8 :: (Address8 -> Value8 -> a -> m a) -> a -> m a
 
 type ConcreteMemory = M.Map Address8 Value8
-newtype ConcreteState m a = ConcreteState {unConcreteState :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative, Monad)
+newtype ConcreteStateT m a = ConcreteStateT {unConcreteStateT :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative, Monad)
 
-runConcreteState :: ConcreteState m a -> ConcreteMemory -> X.X86State Value -> m (a, (ConcreteMemory,X.X86State Value))
-runConcreteState (ConcreteState{unConcreteState = m}) mem regs = 
+runConcreteStateT :: ConcreteStateT m a -> ConcreteMemory -> X.X86State Value -> m (a, (ConcreteMemory,X.X86State Value))
+runConcreteStateT (ConcreteStateT{unConcreteStateT = m}) mem regs =
   runStateT m (mem, regs)
 
 -- | Convert address of 'n*8' bits into 'n' sequential byte addresses.
@@ -259,7 +267,25 @@ byteAddresses (Address nr bv) = addrs
       then error "byteAddresses: requested number of bits is not a multiple of 8!"
       else natValue nr `div` 8
 
-getMem8 :: MonadMachineState m => Address8 -> ConcreteState m Value8
+-- TODO(conathan): weaken the constraint to @MonadReadMachineState m
+-- =>@, where @MonadReadMachineState@ is a new class that only
+-- includes the read operations. This eliminates the unimplemented
+-- write operations in @PTraceMachineState@.
+--
+-- Also, rename this function to make it clear that it reads the
+-- underlying state when its cache does not include the requested
+-- value.
+--
+-- Also, this looks buggy: if we have an undefined value in our map,
+-- then @val mem@ returns @Undefined@, and so we call @lift $ getMem
+-- addr8@ on the underlying monad. But if we have @Undefined@ in our
+-- map, then we probably want to keep it that way: it's undefined for
+-- a reason. But this reraises the issue of conflating undefined
+-- values with unknown values, which is also happening in my treatment
+-- of primitives (I think I noted elsewhere that what I should really
+-- do is give the register state a separate "needs to be reread
+-- value").
+getMem8 :: MonadMachineState m => Address8 -> ConcreteStateT m Value8
 getMem8 addr8 = do
   (mem,_) <- get
   case val mem of Undefined _ -> lift $ getMem addr8
@@ -269,7 +295,7 @@ getMem8 addr8 = do
       Just x -> x
       Nothing -> Undefined (BVTypeRepr knownNat)
 
-instance MonadMachineState m => MonadMachineState (ConcreteState m) where
+instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
   getMem a@(Address nr _) = do
     vs <- mapM getMem8 $ byteAddresses a
     
@@ -292,7 +318,9 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
       addrs = byteAddresses addr
 
   getReg reg = liftM (^.(X.register reg)) dumpRegs
-      
+
+  -- TODO(conathan): make the concrete state a record with a lens and
+  -- eliminate the tuple mapping stuff.
   setReg reg val = modify $ mapSnd $ X.register reg .~ val
     where mapSnd f (a,b) = (a, f b)
 
@@ -312,6 +340,15 @@ instance MonadMachineState m => MonadMachineState (ConcreteState m) where
     let mem = M.empty
     put (mem, regs)
 
+  getSegmentBase = lift . getSegmentBase
+
+instance MonadMachineState m => MonadMachineState (ExceptT e m) where
+  getMem = lift . getMem
+  setMem addr val = lift $ setMem addr val
+  getReg = lift . getReg
+  setReg reg val = lift $ setReg reg val
+  dumpRegs = lift dumpRegs
+  primitive = lift . primitive
   getSegmentBase = lift . getSegmentBase
 
 instance (MonadMachineState m) => MonadMachineState (StateT s m) where
@@ -341,9 +378,9 @@ instance (Monoid w, MonadMachineState m) => MonadMachineState (WriterT w m) wher
   primitive = lift . primitive
   getSegmentBase = lift . getSegmentBase
 
-instance MonadMachineState m => FoldableMachineState (ConcreteState m) where
+instance MonadMachineState m => FoldableMachineState (ConcreteStateT m) where
   foldMem8 f x = do
-    (mem, _) <- get 
+    (mem, _) <- get
     M.foldrWithKey (\k v m -> do m' <- m; f k v m') (return x) mem
 
 newtype NullMachineState a = NullMachineState {unNullMachineState :: Identity a}
