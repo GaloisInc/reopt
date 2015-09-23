@@ -54,6 +54,7 @@ import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
 import           Lang.Crucible.Simulator.RegMap
+import           Lang.Crucible.Simulator.SimError
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
 import           Lang.Crucible.Solver.PartExpr
