@@ -41,19 +41,20 @@ import           Data.Parameterized.Some
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
-import Debug.Trace
+import           Debug.Trace
 
 import           Flexdis86 (InstructionInstance(..))
 
 import           Lang.Crucible.Config (initialConfig)
 import qualified Lang.Crucible.Core as C
 import           Lang.Crucible.ExtractSubgraph
-import           Lang.Crucible.ProgramLoc
 import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
+import           Lang.Crucible.ProgramLoc
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
 import           Lang.Crucible.Simulator.RegMap
+import           Lang.Crucible.Simulator.SimError
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
 import           Lang.Crucible.Solver.PartExpr
@@ -304,7 +305,7 @@ extractFirstBlock mem start =
                                 ++ showHex err ""
     Right (Right (nexts, stmts), _) -> return (Block stmts Ret)
 
-simulateCFGs :: Word64 
+simulateCFGs :: Word64
             -> Map Word64 Block
             -> Word64
             -> Map Word64 Block
@@ -320,14 +321,14 @@ simulateCFGs entry1 reifcfg1 entry2 reifcfg2 ripRel gprRel = do
   M.foldlWithKey (\ res k v -> do
       res
       putStrLn $ "carving first subcfg starting at 0x" ++ showHex k ""
-      Just subCFG1 <- case cfg1 of 
+      Just subCFG1 <- case cfg1 of
         C.SomeCFG cfg1' -> do
           let cuts = findCuts (M.keysSet ripRel) cfg1'
           putStrLn $ show cuts
           liftST $ extractSubgraph cfg1' cuts (findBlock k cfg1') halloc
       putStrLn "first subcfg found"
-      Just subCFG2 <- case v of 
-        [v'] -> case cfg2 of 
+      Just subCFG2 <- case v of
+        [v'] -> case cfg2 of
           C.SomeCFG cfg2' -> do
             let cuts = findCuts (S.fromList $ concat $ M.elems ripRel) cfg2'
             putStrLn $ show cuts
@@ -350,7 +351,7 @@ findCuts tags C.CFG{C.cfgBlockMap = blockMap} =
 -- the first one (the multiple copies case is related to Lang.Crucible.Generator
 -- state handling)
 findBlock :: Word64 -> C.CFG blocks init MachineState -> C.BlockID blocks MachineStateCtx
-findBlock tag C.CFG{C.cfgBlockMap = blockMap} = 
+findBlock tag C.CFG{C.cfgBlockMap = blockMap} =
   case catMaybes $ Ctx.toList (\block ->
     case testEquality machineStateCtx $ C.blockInputs block of
       Just Refl -> case getBlockStartPos block of
@@ -359,7 +360,7 @@ findBlock tag C.CFG{C.cfgBlockMap = blockMap} =
       Nothing -> Nothing) blockMap of
     (blockID : _) -> blockID
     [] -> error $ "no block found for address 0x" ++ showHex tag ""
-  
+
 getBlockStartPos :: C.Block blocks init ret -> Maybe Word64
 getBlockStartPos block =
   case plSourceLoc (case block of
@@ -470,11 +471,11 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
 -- given a relation of control points in two variants, expressed as a Map,and
 -- the final values of %rip in the two variants, vreate an SMT term asserting
 -- that the two final values are related
-mkRipRelation :: I.IsExprBuilder sym 
+mkRipRelation :: I.IsExprBuilder sym
               => Map Word64 [Word64]
               -> sym
-              -> RegValue' sym (C.BVType 64) 
-              -> RegValue' sym (C.BVType 64) 
+              -> RegValue' sym (C.BVType 64)
+              -> RegValue' sym (C.BVType 64)
               -> IO (I.Pred sym)
 mkRipRelation map sym reg1 reg2 = do
   in1 <- foldM mkInCase (I.falsePred sym) (M.keys map)
@@ -505,13 +506,13 @@ mkInitialGPRs :: (I.IsExprBuilder sym, I.IsSymInterface sym, 1 <= nKey, 1 <= nVa
               -> NatRepr nVal
               -> [Integer]
               -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)))
-mkInitialGPRs map sym nrKey nrVal range = do 
+mkInitialGPRs map sym nrKey nrVal range = do
   regs1Empty <- I.emptyWordMap sym nrKey
   (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
     idx <- I.bvLit sym nrKey entry
     val <- I.freshConstant sym (C.BaseBVRepr nrVal)
     regs' <- I.insertWordMap sym nrKey idx val regs
-    return (regs', case M.lookup entry map of 
+    return (regs', case M.lookup entry map of
                     Just inv -> M.insert inv val invMap
                     Nothing -> invMap)) (regs1Empty, M.empty) range
   regs2Empty <- I.emptyWordMap sym nrKey
@@ -558,7 +559,7 @@ showSingleBlock mem start =
       putStrLn $ show nexts
       putStrLn $ show $ CS.ppStmts stmts
 
--- testing code - prints a CFG from mem, starting at entry 
+-- testing code - prints a CFG from mem, starting at entry
 extractCFG :: Memory Word64 -> Word64 -> IO ()
 extractCFG mem entry =
   case findBlocks mem entry of
@@ -574,7 +575,7 @@ extractCFG mem entry =
 -- but blocks may not be unique given some of the changes UCI has mentioned...)
 -- We might just get rid of this.
 matchCFGs :: Memory Word64 -> Word64 -> Memory Word64 -> Word64 -> IO ()
-matchCFGs mem1 entry1 mem2 entry2 
+matchCFGs mem1 entry1 mem2 entry2
   | Right cfg1 <- findBlocks mem1 entry1
   , Right cfg2 <- findBlocks mem2 entry2 = do
       let Just initBlock1 = M.lookup entry1 cfg1
@@ -584,7 +585,7 @@ matchCFGs mem1 entry1 mem2 entry2
       M.foldlWithKey (\m k v -> m >> (putStrLn $ "0x" ++ showHex k " <--> 0x" ++ showHex v "" )) (return ())  matched
       S.foldl (\m k -> m >> (putStrLn $ "Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg1) (M.keysSet matched))
       S.foldl (\m k -> m >> (putStrLn $ "              Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg2) (M.foldr S.insert S.empty matched))
-     
+
      -- TODO: more fixed-points
       -- TODO: backwards chain as well
       -- TODO: unique parent of unique child chain shrinking
@@ -601,7 +602,7 @@ globalMatch cfg1 cfg2 mapping (sel : sels) =
       unmatched2 = S.difference s2 $ S.foldl (\s v -> case M.lookup v mapping of
                                               Just v' -> S.insert v' s
                                               Nothing -> s) S.empty matched1
-      newMap = snd $ S.foldl (\ (others, newMap) p1 -> case sel cfg1 cfg2 p1 others of 
+      newMap = snd $ S.foldl (\ (others, newMap) p1 -> case sel cfg1 cfg2 p1 others of
                                         Just (p2, newOthers) -> (newOthers, M.insert p1 p2 newMap)
                                         Nothing -> (others, newMap)) (unmatched2, mapping) unmatched1
   in if newMap == mapping then globalMatch cfg1 cfg2 mapping sels
@@ -617,16 +618,16 @@ matchChildSets sel cfg1 cfg2 mapping k1 k2
 
   | Just (Block _ (Direct c1)) <- M.lookup k1 cfg1
   , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
-  
+
   | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
   , Just (Block _ (Direct c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
-  
+
   | Just (Block _ (Fallthrough c1)) <- M.lookup k1 cfg1
   , Just (Block _ (Fallthrough c2)) <- M.lookup k2 cfg2 = M.insert c1 c2 mapping
   | Just (Block _ (Call callee1 ret1 )) <- M.lookup k1 cfg1
   , Just (Block _ (Call callee2 ret2)) <- M.lookup k2 cfg2 = M.insert ret1 ret2 mapping
   | Just (Block _ (Cond c1 c1')) <- M.lookup k1 cfg1
-  , Just (Block _ (Cond c2 c2')) <- M.lookup k2 cfg2 = 
+  , Just (Block _ (Cond c2 c2')) <- M.lookup k2 cfg2 =
       case sel cfg1 cfg2 c1 (S.fromList [c2, c2']) of
         Just (m, s) -> M.insert c1' ( trace "matchChildSets" $ S.findMin s) (M.insert c1 m mapping)
         Nothing -> case sel cfg1 cfg2 c1' (S.fromList [c2, c2']) of
@@ -643,7 +644,7 @@ singletonSelector _ _ a as
   | otherwise = Nothing
 
 termFuzzyMatchSelector :: CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64)
-termFuzzyMatchSelector cfg1 cfg2 a as = do 
+termFuzzyMatchSelector cfg1 cfg2 a as = do
   b <- M.lookup a cfg1
   let bs = S.map (\(Just b', a') -> (b', a')) $ S.filter (isJust . fst) $ S.map (\a' -> (M.lookup a' cfg2, a')) as
   let matches = S.map snd $ S.filter (blockTermFuzzyMatches b . fst) bs
@@ -651,19 +652,19 @@ termFuzzyMatchSelector cfg1 cfg2 a as = do
   Just (match, S.delete match as)
 
 getParentMap :: CFG -> Map Word64 (Set Word64)
-getParentMap = 
-  M.foldlWithKey (\m p (Block _ t) -> 
+getParentMap =
+  M.foldlWithKey (\m p (Block _ t) ->
                       foldl (\m' c -> M.insertWith (S.union) c (S.singleton p) m')
                             m (termChildren t)) M.empty
 
 matchParentSets :: (CFG -> CFG -> Word64 -> Set Word64 -> Maybe (Word64, Set Word64))
-                -> CFG 
-                -> CFG 
-                -> Map Word64  (Set Word64) 
-                -> Map Word64  (Set Word64) 
-                -> Map Word64 Word64 
-                -> Word64 
-                -> Word64 
+                -> CFG
+                -> CFG
+                -> Map Word64  (Set Word64)
+                -> Map Word64  (Set Word64)
+                -> Map Word64 Word64
+                -> Word64
+                -> Word64
                 -> Map Word64 Word64
 matchParentSets selector cfg1 cfg2 parentMap1 parentMap2 mapping k1 k2
   | Just p1s <- M.lookup k1 parentMap1
@@ -672,7 +673,7 @@ matchParentSets selector cfg1 cfg2 parentMap1 parentMap2 mapping k1 k2
   , unmatched2 <- S.difference p2s $ S.foldl (\s v -> case M.lookup v mapping of
                                               Just v' -> S.insert v' s
                                               Nothing -> s) S.empty matched1 =
-      snd $ S.foldl (\ (others, newMap) p1 -> case selector cfg1 cfg2 p1 others of 
+      snd $ S.foldl (\ (others, newMap) p1 -> case selector cfg1 cfg2 p1 others of
                                         Just (p2, newOthers) -> (newOthers, M.insert p1 p2 newMap)
                                         Nothing -> (others, newMap)) (unmatched2, mapping) unmatched1
   | otherwise = mapping
@@ -731,7 +732,7 @@ main = do
 
 --        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
 --        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
-        ripMap <- fmap read $ readFile $ args^.ripFile 
+        ripMap <- fmap read $ readFile $ args^.ripFile
         gprMap <- fmap read $ readFile $ args^.gprsFile
         simulateCFGs entry1 cfg1 entry2 cfg2 ripMap gprMap
       _      -> fail "usage: filename1 filename2"
