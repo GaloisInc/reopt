@@ -455,7 +455,7 @@ instance S.Semantics Semantics where
     -- tell [Get var l]
     return $ VarExpr var
 
-  l .= v = tell [l := v]
+  l .= v = expandMemOps (l := v)
 
   ifte_ c trueBranch falseBranch = do
     trueStmts <- collectAndForget trueBranch

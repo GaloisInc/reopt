@@ -433,6 +433,10 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
+        print $ "XXXX <<< " ++ name
+        print $ pretty $ unRV pc1
+        print $ pretty $ unRV pc2
+        print $ "XXXX >>> " ++ name
         solver_adapter_write_smt2 cvc4Adapter out pred
         putStrLn $ "Wrote to file " ++ show out
         return ()

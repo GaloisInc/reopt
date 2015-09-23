@@ -257,10 +257,13 @@ translateFunction :: HandleAllocator s
 translateFunction halloc blockMap entry = do
   fnH <- mkHandle' halloc "entryBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkFunctionDefn entry blockMap
-  traceM "**** <<<<<<<< ****"
-  traceM (show (pretty g))
-  traceM "**** >>>>>>>> ****"
-  return $ toSSA g
+  let g' = toSSA g
+  case g' of
+    (C.SomeCFG cfg) -> do
+      traceM "**** <<<<<<<< ****"
+      traceM (show cfg)
+      traceM "**** >>>>>>>> ****"  
+  return $ g'
 
 mkFunctionDefn :: Word64
                -> Map Word64 Block
@@ -309,13 +312,20 @@ generateStmt ms getLabel (S.Register rv := LitExpr nr i)
   G.modifyReg ms (curIP .~ G.App (C.BVLit nr i))
   modify $ \env -> env {trackedRip = fromIntegral i}
 --
-generateStmt ms getLabel (l := e) = case l of
+generateStmt ms getLabel stmt@(l := e) = case l of
   S.Register rv
     | Just (reg, Refl, Refl) <- S.registerViewAsFullRegister rv -> do
     e' <- fmap (runReader (translateExpr' e)) get
     G.modifyReg ms (register reg .~ e')
 
-  S.MemoryAddr _ _ -> return () -- error "assign mem addr unimplemented"
+  S.MemoryAddr addr (BVTypeRepr nr) ->
+    case testEquality nr S.n8 of
+      Nothing -> error $ "not a byte write! "  ++ show (pretty stmt)
+      Just Refl -> do
+        e' <- fmap (runReader (translateExpr' e)) get
+        addr' <- fmap (runReader (translateExpr' addr)) get
+        let upd hp = G.App $ C.SymArrayUpdate C.indexTypeRepr C.baseTypeRepr hp addr' e'
+        G.modifyReg ms (heap %~ upd)
 
   _ -> return () -- error "assign subregister unimplemented"
 --
@@ -374,8 +384,16 @@ translateLocGet ms (S.Register rv) = do
   regs <- G.readReg ms
   let v = regs ^. register reg
   return $ unGExpr . S.registerViewRead rv . GExpr $ v
-translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = 
-  return $ G.App $ asPosNat nr (C.BVLit nr 0)
+translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
+  h <- (^. heap) <$> G.readReg ms
+  addr' <- fmap (runReader (translateExpr' addr)) get
+  asPosNat nr $ do
+     let v  = C.SymArrayLookup C.indexTypeRepr C.baseTypeRepr h addr'
+         v' = case testNatCases nr n8 of
+                NatCaseLT LeqProof -> (C.BVTrunc nr n8 (G.App v))
+                NatCaseEQ     -> v
+                NatCaseGT LeqProof -> (C.BVZext nr n8 (G.App v))
+     return $ G.App v'
 
 generateTerm :: (G.Reg s MachineState)
              -> (Word64 -> G.End s Env init MachineState (G.Label s))
@@ -416,7 +434,8 @@ type family F (tp :: Type) :: C.CrucibleType where
 newtype GExpr s tp = GExpr { unGExpr :: G.Expr s (F tp) }
 
 translateExpr' :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (G.Expr s (F tp))
-translateExpr' e = trace (show $ ppExpr e) (fmap unGExpr $ translateExpr e)
+translateExpr' e = -- trace (show $ ppExpr e)
+                   (fmap unGExpr $ translateExpr e)
 
 translateExpr :: (MonadReader (Env s) m, Applicative m) => Expr tp -> m (GExpr s tp) -- m (G.Expr s (F tp))
 -- FIXME: I'm specializing to BVType because I know that's the only (currently)
