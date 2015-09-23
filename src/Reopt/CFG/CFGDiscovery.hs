@@ -1,13 +1,11 @@
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.CFGDiscovery
--- Description      : Control Flow Graph discovery support
 -- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Simon Winwood <sjw@galois.com>
--- Stability        : provisional
+-- Maintainer       : Joe Hendrix <jhendrix@galois.com>, Simon Winwood <sjw@galois.com>
 --
 -- This contains an implementation of a CFG discovery algorithm based
--- upon an interleaved abstract interpretation (currently unsound)
+-- upon an interleaved abstract interpretation.
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -44,7 +42,6 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
-
 import           Data.Word
 import           Debug.Trace
 import           Numeric
@@ -716,8 +713,8 @@ getJumpTableBounds _ _ _ _ = Nothing
   --      else Nothing
   -- | otherwise = Nothing
 
-transferBlock :: Block   -- ^ Block to start from.
-              -> AbsProcessorState -- ^ Registers at this block.
+transferBlock :: Block             -- ^ Block to start from
+              -> AbsProcessorState -- ^ Registers at this block
               -> State InterpState ()
 transferBlock b regs = do
   let lbl = blockLabel b
