@@ -97,7 +97,8 @@ data Args = Args { _reoptAction  :: !Action
                  , _addr2        :: !Word64
                  , _loadStyle    :: !LoadStyle
                  , _ripFile      :: !FilePath
-                 , _gprsFile      :: !FilePath
+                 , _bcFile       :: !FilePath
+                 , _gprsFile     :: !FilePath
                  }
 
 -- | How to load Elf file.
@@ -127,6 +128,10 @@ addr2 = lens _addr2 (\s v -> s { _addr2 = v })
 ripFile :: Simple Lens Args FilePath
 ripFile = lens _ripFile (\s v -> s { _ripFile = v })
 
+-- | file to load breadcrumb mapping from
+bcFile :: Simple Lens Args FilePath
+bcFile = lens _bcFile (\s v -> s { _bcFile = v })
+
 -- | file to load gpr mapping from
 gprsFile :: Simple Lens Args FilePath
 gprsFile = lens _gprsFile (\s v -> s { _gprsFile = v })
@@ -143,6 +148,7 @@ defaultArgs = Args { _reoptAction = ShowSingleBlock
                    , _addr2 = 0
                    , _loadStyle = LoadBySection
                    , _ripFile = ""
+                   , _bcFile = ""
                    , _gprsFile = ""
                    }
 
@@ -204,6 +210,11 @@ ripFlag = flagReq [ "rip" ] upd "File Path" help
                        , "    'fromList [(4198515,[4198520]),(4198454,[4198468]),(4198427,[4198437])]'"
                        ]
 
+bcFlag :: Flag Args
+bcFlag = flagReq [ "bc" ] upd "File Path" help
+  where upd s old  = Right $ (bcFile .~ s) old
+        help = "File containing a mapping of breadcrumb addresses across two variants"
+
 gprsFlag :: Flag Args
 gprsFlag = flagReq [ "gprs" ] upd "File Path" help
   where upd s old  = Right $ (gprsFile .~ s) old
@@ -230,6 +241,7 @@ arguments = mode "radss_compare" defaultArgs help filenameArg flags
                 , addr1Flag
                 , addr2Flag
                 , ripFlag
+                , bcFlag
                 , gprsFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
@@ -708,6 +720,25 @@ getMemAndEntry args path addrL = do
              a' -> a'
   return (mem, a)
 
+
+
+-- Generates a RIP mapping of blocks in one CFG to another using breadcrumbs.
+--
+-- A breadcrumb is a pair of instruction addresses - one in each
+-- variant - that each correspond to the same source location. Here we
+-- assume that corresponding breadcrumb locations mean their
+-- containing blocks also correspond. This function determines the
+-- start of the blocks containing each breadcrumb, and uses those
+-- (starts of) blocks to generate a RIP mapping between variants.
+--
+-- This won't always be correct, but it's a start while we decide our
+-- general approch for modeling rip mappings and determine what we can
+-- guarantee vs. what requires heuristics.
+matchByBCs :: CFG -> CFG -> Map Word64 Word64 -> Map Word64 [Word64]
+matchByBCs cfg1 cfg2 = M.foldWithKey insertParents M.empty
+  where blockStart cfg addr = last $ takeWhile (<= addr) (sort $ M.keys cfg)
+        insertParents v1 v2 = M.insert (blockStart cfg1 v1) [blockStart cfg2 v2]
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs
@@ -734,7 +765,12 @@ main = do
 
 --        block1 <- uncurry extractFirstBlock =<< getMemAndEntry args path1 addr1
 --        block2 <- uncurry extractFirstBlock =<< getMemAndEntry args path2 addr2
-        ripMap <- fmap read $ readFile $ args^.ripFile
+        ripMap <- case (args^.ripFile, args^.bcFile) of
+                   ("", "") -> fail "You must specify either a breadcrumb or rip map file"
+                   (rf, "") -> read <$> readFile rf
+                   ("", bc) -> matchByBCs cfg1 cfg2 . read <$> readFile bc
+                   (_, _) -> fail "You must specify EITHER a breadcrumb or rip map file, but not both"
+        putStrLn $ "using ripMap = " ++ show ripMap
         gprMap <- fmap read $ readFile $ args^.gprsFile
         simulateCFGs entry1 cfg1 entry2 cfg2 ripMap gprMap
       _      -> fail "usage: filename1 filename2"
