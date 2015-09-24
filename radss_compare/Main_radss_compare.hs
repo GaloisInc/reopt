@@ -424,20 +424,21 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
             pc2 = xs2^._4
             -- flagIdxs = [0,2,4,6,7,8,9,10,11]
             true = I.truePred sym
-        -- heapUnEq <- I.notPred sym =<< I.bvEq sym heap1 heap2
-        gprsUnRel  <- I.notPred sym =<< mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
-        flagsUnEq <- I.notPred sym =<< foldM (compareWordMapIdx sym n5 n1 flagPair) true [] -- [0,2,4,6,7]
-        pcsUnRel <- I.notPred sym =<< mkRipRelation ripRel sym pc1 pc2
-        pred    <- I.orPred sym gprsUnRel =<< I.orPred sym flagsUnEq pcsUnRel
+        rels <- sequence [ I.arrayEq sym C.indexTypeRepr C.baseTypeRepr heap1 heap2
+                         , mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
+                         , foldM (compareWordMapIdx sym n5 n1 flagPair) true []
+                         , mkRipRelation ripRel sym pc1 pc2 ]
+        pred <- I.notPred sym =<< foldM (I.andPred sym) true rels
+        -- heapUnEq <- I.notPred sym =<< 
+        -- gprsUnRel  <- I.notPred sym =<< 
+        -- flagsUnEq <- I.notPred sym =<<  -- [0,2,4,6,7]
+        -- pcsUnRel <- I.notPred sym =<< 
+        -- pred    <- I.orPred sym gprsUnRel =<< I.orPred sym flagsUnEq pcsUnRel
         -- let pred = flagsEq
         -- satisfied if there is some assignment of registers such that
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
-        print $ "XXXX <<< " ++ name
-        print $ pretty $ unRV pc1
-        print $ pretty $ unRV pc2
-        print $ "XXXX >>> " ++ name
         solver_adapter_write_smt2 cvc4Adapter out pred
         putStrLn $ "Wrote to file " ++ show out
         return ()
@@ -478,10 +479,11 @@ mkRipRelation :: I.IsExprBuilder sym
               -> RegValue' sym (C.BVType 64)
               -> IO (I.Pred sym)
 mkRipRelation map sym reg1 reg2 = do
-  in1 <- foldM mkInCase (I.falsePred sym) (M.keys map)
-  match <- M.foldlWithKey mkMatchCase (return $ I.truePred sym) map
+  in1 <- foldM mkInCase (I.falsePred sym) (M.keys map')
+  match <- M.foldlWithKey mkMatchCase (return $ I.truePred sym) map'
   I.andPred sym in1 match
   where
+  map' = M.insert 0 [0] map
   mkInCase rest entry = do
     lit <- I.bvLit sym (knownNat :: NatRepr 64) (fromIntegral entry)
     myEq <- I.bvEq sym lit $ unRV reg1

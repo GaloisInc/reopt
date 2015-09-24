@@ -232,9 +232,6 @@ translateSingleBlock :: HandleAllocator s
 translateSingleBlock halloc block = do
   fnH <- mkHandle' halloc "testBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkDefn block
-  traceM "**** <<<<<<<< ****"
-  traceM (show (pretty g))
-  traceM "**** >>>>>>>> ****"
   return $ toSSA g
 
 mkDefn :: Block -> G.FunctionDef Env MachineStateCtx MachineState
@@ -258,11 +255,6 @@ translateFunction halloc blockMap entry = do
   fnH <- mkHandle' halloc "entryBlock" machineStateCtx machineState
   (g,[]) <- G.defineFunction halloc InternalPos fnH $ mkFunctionDefn entry blockMap
   let g' = toSSA g
-  case g' of
-    (C.SomeCFG cfg) -> do
-      traceM "**** <<<<<<<< ****"
-      traceM (show cfg)
-      traceM "**** >>>>>>>> ****"  
   return $ g'
 
 mkFunctionDefn :: Word64
@@ -395,12 +387,18 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
                 NatCaseGT LeqProof -> (C.BVZext nr n8 (G.App v))
      return $ G.App v'
 
+-- FIXME: we fake a pc of 0 for a return.
+generateReturn :: G.Reg s MachineState 
+               -> G.Generator s Env MachineState ()
+generateReturn ms = do
+  G.modifyReg ms (curIP .~ G.App (C.BVLit knownNat 0))
+  G.returnFromFunction =<< G.readReg ms
+
 generateTerm :: (G.Reg s MachineState)
              -> (Word64 -> G.End s Env init MachineState (G.Label s))
              -> Term
              -> G.Generator s Env MachineState ()
-generateTerm ms getLabel Ret = do
-  G.returnFromFunction =<< G.readReg ms
+generateTerm ms getLabel Ret = generateReturn ms
 generateTerm ms getLabel (Cond _ _) = return () -- handled in a special case for Ifte
 generateTerm ms getLabel (Fallthrough w) = do
   G.endNow $ \c -> do
@@ -416,7 +414,7 @@ generateTerm ms getLabel (Call _ ret) = do
     G.endCurrentBlock (G.Jump l)
 generateTerm ms getLabel (Indirect) = do
   traceM $ "Assuming indirect is a return"
-  G.returnFromFunction =<< G.readReg ms
+  generateReturn ms
 
   -- G.endNow $ \c -> do
   --   G.endCurrentBlock (G.Return )
