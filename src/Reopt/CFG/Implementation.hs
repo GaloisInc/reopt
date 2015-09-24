@@ -271,6 +271,7 @@ instance S.IsValue Expr where
   -- bvShr, bvSar, bvShl :: v (BVType n) -> v (BVType log_n) -> v (BVType n)
   bvShr x y
     | Just 0 <- asBVLit y = x
+    | Just 0 <- asBVLit x = x
     | otherwise = app $ BVShr (exprWidth x) x y
   bvSar x y = app $ BVSar (exprWidth x) x y
 

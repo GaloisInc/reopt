@@ -295,9 +295,11 @@ registerViewWrite ::
   v (N.RegisterType cl) ->
   v (BVType n) ->
   v (N.RegisterType cl)
-registerViewWrite (RegisterView {..}) =
+registerViewWrite r@(RegisterView {..}) =
   case _registerViewType of
-    DefaultView -> defaultRegisterViewWrite b n rn
+    DefaultView 
+      | Just (_, Refl, Refl) <- registerViewAsFullRegister r -> \ _v0 v -> v
+      | otherwise -> defaultRegisterViewWrite b n rn
     OneExtendOnWrite ->
       let ones = complement (bvLit (cl `subNat` n) (0::Integer)) in
       constUpperBitsRegisterViewWrite n ones rn
