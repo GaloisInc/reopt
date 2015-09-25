@@ -599,6 +599,8 @@ matchCFGs mem1 entry1 mem2 entry2
       M.foldlWithKey (\m k v -> m >> (putStrLn $ "0x" ++ showHex k " <--> 0x" ++ showHex v "" )) (return ())  matched
       S.foldl (\m k -> m >> (putStrLn $ "Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg1) (M.keysSet matched))
       S.foldl (\m k -> m >> (putStrLn $ "              Ox" ++ showHex k "")) (return ()) (S.difference (M.keysSet cfg2) (M.foldr S.insert S.empty matched))
+      putStrLn "--- in rip_map format ---"
+      print $ M.map (: []) matched
 
      -- TODO: more fixed-points
       -- TODO: backwards chain as well
