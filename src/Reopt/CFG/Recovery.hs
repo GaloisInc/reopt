@@ -364,22 +364,22 @@ recoverFunction s a = do
   runRecover rs $ do
     -- The first block is special as it has no predecessors, and hence no
     -- phi nodes
-    recoverIter Nothing initRegs MapF.empty lbl
+    recoverIter Map.empty initRegs MapF.empty lbl
     block_map <- use rsBlocks
     return $! Function { fnAddr = a
                        , fnIntArgTypes   = map (Some . N.registerType) argumentRegisters -- FIXME
                        , fnFloatArgTypes = map (Some . N.registerType) floatArgumentRegisters -- FIXME
-                       , fnBlocks = Map.elems block_map
+                       , fnBlocks = Map.elems (filterUsedPhis block_map)
                        }
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: Maybe (X86State FnPhiVar)
+recoverIter :: Map AssignId (Some N.RegisterName)
             -> X86State FnRegValue
             ->  MapF Assignment FnAssignment
             -> BlockLabel
             -> Recover ()
-recoverIter m_phis regs assigns lbl = trace ("Exploring " ++ show lbl) $ do
-  b <- recoverBlock m_phis regs assigns lbl
+recoverIter phivs regs assigns lbl = do
+  b <- recoverBlock phivs regs assigns lbl
   rsFrontier %= Set.delete lbl
   rsBlocks   %= Map.insert lbl b
   f <- use rsFrontier
@@ -389,16 +389,19 @@ recoverIter m_phis regs assigns lbl = trace ("Exploring " ++ show lbl) $ do
       (phis, regs', assigns') <-
          if isRootBlockLabel lbl then do          
             (phis', regs') <- makePhis
-            return (Just phis', regs', MapF.empty)
+            return (phis', regs', MapF.empty)
          else do
             Just (regs', assigns') <- uses rsSubBlockState (Map.lookup lbl)
-            return (Nothing, regs', assigns')
+            return (Map.empty, regs', assigns')
       recoverIter phis regs' assigns' lbl
 
-makePhis :: Recover (X86State FnPhiVar, X86State FnRegValue)
+makePhis :: Recover ( Map AssignId (Some N.RegisterName)
+                    , X86State FnRegValue)
 makePhis = do
   phis <- mkX86StateM (mkPhiVar . N.registerType)
-  return (phis, mapX86State (FnRegValue . FnPhiValue) phis)
+  let varMap = Map.fromList [ (viewSome (\r' -> unFnPhiVar $ phis ^. register r') r, r)
+                            | r <- x86StateRegisters ]
+  return (varMap, mapX86State (FnRegValue . FnPhiValue) phis)
 
 -- regValuePair :: N.RegisterName cl
 --              -> FnValue (BVType (N.RegisterClassBits cl))
@@ -409,7 +412,7 @@ makePhis = do
 stateArgs :: X86State Value -> Recover [Some FnValue]
 stateArgs _ = trace "startArgs not yet implemented" $ return []
 
-recoverBlock :: Maybe (X86State FnPhiVar)
+recoverBlock :: Map AssignId (Some N.RegisterName)
              -> X86State FnRegValue
              -> MapF Assignment FnAssignment
              -> BlockLabel
@@ -673,3 +676,98 @@ resolveEdges bounds (lbl:rest) = do
       put $ Map.insert lbl next
     Nothing -> do
 -}
+
+
+--------------------------------------------------------------------------------
+-- Phi node uses
+--------------------------------------------------------------------------------
+
+data PhiState = PhiState { phiWorkList  :: !(Set BlockLabel)
+                         , phiBlockData :: Map BlockLabel (Set AssignId) }
+
+filterUsedPhis :: Map BlockLabel FnBlock -> Map BlockLabel FnBlock
+filterUsedPhis blocks = Map.intersectionWith filterVars blocks used 
+  where
+    used = phiUses blocks
+    filterVars b phis =
+      let phisAsMap = Map.fromSet (const ()) phis
+      in  b { fbPhiVars = Map.intersection (fbPhiVars b) phisAsMap }
+
+phiUses :: Map BlockLabel FnBlock -> Map BlockLabel (Set AssignId)
+phiUses blocks = phiBlockData $ execState (iteratePhi blocks) s0
+  where
+    phis0 = fmap phis blocks
+    s0 = PhiState { phiWorkList = Map.keysSet phis0
+                  , phiBlockData = phis0 }
+    phis b = Set.unions (map stmtPhis (fbStmts b))
+             `Set.union` termStmtPhis (fbTerm b)
+    
+iteratePhi :: Map BlockLabel FnBlock -> State PhiState ()
+iteratePhi bs = go
+  where
+    go = do
+      wl <- gets (Set.maxView . phiWorkList) 
+      case wl of
+        Nothing -> return ()
+        Just (lbl, rest) -> do
+          modify (\s -> s {phiWorkList = rest})
+          m_phis <- gets (Map.lookup lbl . phiBlockData)
+          case (m_phis, Map.lookup lbl bs) of
+            (Just phis, Just b) -> phisPhis phis b
+            _ -> error "IMPOSSIBLE"
+          go
+
+-- FIXME: this could be a bit more efficient I think
+mergePhis :: Map BlockLabel (Set AssignId) -> State PhiState ()
+mergePhis newPhis = do
+  prePBD <- gets phiBlockData
+  let diff new old
+        | new `Set.isProperSubsetOf` old = Nothing
+        | otherwise = Just new
+      frontier = Map.keysSet $ Map.differenceWith diff newPhis prePBD
+  modify (\s -> s { phiWorkList = phiWorkList s `Set.union` frontier
+                  , phiBlockData = Map.unionWith Set.union newPhis prePBD })
+
+-- Calculate the backward phis for a block, given a set of used phi vars
+phisPhis :: Set AssignId -> FnBlock -> State PhiState ()
+phisPhis used b = mergePhis predPhis
+  where
+    -- FIXME: we really just want Map restriction here.
+    regs = [ r | (aid, r) <- Map.assocs (fbPhiVars b)
+               , aid `Set.member` used ]
+    predPhis :: Map BlockLabel (Set AssignId)
+    predPhis   = fmap go (fbPhiNodes b)
+    go phiNode = Set.unions
+                 $ map (\(Some r) -> valuePhis $ phiNode ^. register r) regs
+    
+stmtPhis :: FnStmt -> Set AssignId
+stmtPhis stmt =
+  case stmt of
+    FnWriteMem addr v -> valuePhis addr `Set.union` valuePhis v
+    FnComment _ -> Set.empty
+    FnAssignStmt (FnAssignment lhs rhs) -> assignRhsPhis rhs
+
+termStmtPhis :: FnTermStmt -> Set AssignId
+termStmtPhis term =
+  case term of
+    FnJump _ -> Set.empty
+    FnRet iret fret -> valuePhis iret `Set.union` valuePhis fret
+    FnBranch cond _ _ -> valuePhis cond
+    FnCall fn args _ _ _ ->
+      valuePhis fn `Set.union`
+      (Set.unions $ map (viewSome valuePhis) args)
+    FnTermStmtUndefined -> Set.empty
+
+assignRhsPhis :: FnAssignRhs to -> Set AssignId
+assignRhsPhis rhs =
+  case rhs of
+    FnSetUndefined _ -> Set.empty
+    FnReadMem addr _ -> valuePhis addr
+    FnEvalApp app    -> foldApp valuePhis app
+    FnAlloca bytes   -> valuePhis bytes
+
+valuePhis :: FnValue tp -> Set AssignId
+valuePhis v =
+  case v of
+    FnPhiValue phi -> Set.singleton (unFnPhiVar phi)
+    _              -> Set.empty

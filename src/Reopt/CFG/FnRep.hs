@@ -187,7 +187,7 @@ data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
                -- We do this to decouple block translation from
                -- cfg/phi construction.
-             , fbPhiVars  :: Maybe (X86State FnPhiVar)
+             , fbPhiVars  :: Map AssignId (Some N.RegisterName)
                -- Maps predecessor label onto the reg value at that
                -- block
              , fbPhiNodes :: Map BlockLabel (X86State FnValue)
@@ -205,11 +205,9 @@ instance Pretty FnBlock where
               <$$> vcat (pretty <$> fbStmts b)
               <$$> pretty (fbTerm b))
     where
-      ppPhis = case fbPhiVars b of
-        Nothing -> mempty
-        Just vs -> vcat (map (go vs) x86StateRegisters)
-      go vs (Some r) =
-        pretty (vs ^. register r) <+> text ":= phi "
+      ppPhis = vcat (map go (Map.assocs $ fbPhiVars b))
+      go (aid, Some r) =
+        ppAssignId aid <+> text ":= phi "
         <+> hsep (punctuate comma $ map (goLbl r) (Map.assocs $ fbPhiNodes b))
       goLbl r (lbl, node) =
                 parens (pretty lbl <> comma <+> pretty (node ^. register r))

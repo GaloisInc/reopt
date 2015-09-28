@@ -19,10 +19,16 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Reopt.CFG.LLVM where
+module Reopt.CFG.LLVM (functionToLLVM) where
 
+import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
+import           Control.Monad.State
+import           Data.Map (Map)
+import qualified Data.Map as Map
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
@@ -32,6 +38,7 @@ import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 --------------------------------------------------------------------------------
@@ -138,8 +145,15 @@ functionToLLVM f = L.define' L.emptyFunAttrs funReturnType symbol argTypes False
 
 blockToLLVM :: FnBlock -> ToLLVM () -- L.BasicBlock
 blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
+                   mapM_ phiToLLVM (Map.assocs $ fbPhiVars b)
                    mapM_ stmtToLLVM $ fbStmts b -- ++ [termStmtToLLVM $ blockTerm b]
                    termStmtToLLVM (fbTerm b)
+  where
+    phiToLLVM (aid, Some r) = 
+      liftBBF (L.assign (assignIdToLLVMIdent aid))
+              (liftBB . L.phi (typeToLLVMType $ N.registerType r) =<< mapM (goLbl r) (Map.assocs $ fbPhiNodes b))
+    goLbl r (lbl, node) = do v <- valueToLLVM (node ^. register r)
+                             return (L.from v (L.Named $ blockName lbl))
 
 termStmtToLLVM :: FnTermStmt -> ToLLVM ()
 termStmtToLLVM tm =
@@ -164,6 +178,7 @@ termStmtToLLVM tm =
                                 (L.extractValue rvar 0)
        void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId fretv)
                                 (L.extractValue rvar 1)
+       liftBB $ L.jump (blockName contlbl)
      FnTermStmtUndefined -> void $ unimplementedInstr    
 
 stmtToLLVM :: FnStmt -> ToLLVM ()

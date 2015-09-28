@@ -938,8 +938,8 @@ mapApp :: (forall u . f u -> g u)
        -> App g tp
 mapApp f m = runIdentity $ traverseApp (return . f) m
 
-foldApp :: Monoid m => (forall u. f u -> (b -> m)) -> b -> App f tp -> m
-foldApp f v m = getConst (traverseApp (\f_u -> Const $ \b -> f f_u b) m) v
+foldApp :: Monoid m => (forall u. f u -> m) -> App f tp -> m
+foldApp f m = getConst (traverseApp (\f_u -> Const $ f f_u) m)
 
 ------------------------------------------------------------------------
 -- Block

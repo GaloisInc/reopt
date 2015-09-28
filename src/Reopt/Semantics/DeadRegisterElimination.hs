@@ -92,7 +92,7 @@ refsInAssignRhs rhs = case rhs of
                                   , refsInValue dir ]
 
 refsInApp :: App Value tp -> Set AssignId
-refsInApp app = foldApp (\v s -> refsInValue v `S.union` s) S.empty app
+refsInApp app = foldApp refsInValue app
 
 refsInLoc :: StmtLoc (Value (BVType 64)) tp -> Set AssignId
 refsInLoc (MemLoc v _) = refsInValue v
