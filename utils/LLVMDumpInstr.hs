@@ -14,7 +14,7 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Flexdis86
--- import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.CFGDiscovery 
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.Representation
 import           Reopt.CFG.Recovery
@@ -44,14 +44,12 @@ main = do
       -- cfg = cfgFromAddress mem base
       b   = evalStateT (disassembleBlock mem (const True) (rootLoc base))
                        emptyGlobalGenState
-  --  mapM_ (print . pretty) (finalFunctions cfg)
-      mkF = snd . L.runLLVM
-            . L.defineFresh L.emptyFunAttrs L.voidT ()
-            . mapM_ blockToLLVM
+
   case b of
    Left err       -> print err
-   Right (bs, end)  ->
-     let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
-         bs' = Map.elems (cfg^.cfgBlocks)
-     in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF bs')
+   Right (bs, end)  -> error "UNIMPLEMENTED"
+     -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
+     --     bs' = Map.elems (cfg^.cfgBlocks)
+     --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
+     -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
   return ()

@@ -15,6 +15,8 @@ module Reopt.CFG.FnRep
    , FnRegValue(..)
    , FnPhiVar(..)
    , FnReturnVar(..)
+   , fnAssignRHSType
+   , fnValueType
    ) where
 
 import           Control.Lens
@@ -31,7 +33,7 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
-                               , ppApp, ppLit, ppAssignId, sexpr)
+                               , ppApp, ppLit, ppAssignId, sexpr, appType)
 import           Reopt.Machine.Types
 
 commas :: [Doc] -> Doc
@@ -47,7 +49,9 @@ instance Pretty (FnAssignment tp) where
 
 -- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
 
-newtype FnPhiVar (tp :: Type) = FnPhiVar { unFnPhiVar :: AssignId }
+data FnPhiVar (tp :: Type) =
+  FnPhiVar { unFnPhiVar :: !AssignId
+           , fnPhiVarType :: !(TypeRepr tp) }
 
 instance Pretty (FnPhiVar tp) where
   pretty = ppAssignId . unFnPhiVar
@@ -76,6 +80,14 @@ ppFnAssignRhs _pp (FnAlloca sz) = sexpr "alloca" [pretty sz]
 instance Pretty (FnAssignRhs tp) where
   pretty = ppFnAssignRhs pretty
 
+fnAssignRHSType :: FnAssignRhs tp -> TypeRepr tp
+fnAssignRHSType rhs =
+  case rhs of 
+    FnSetUndefined sz -> BVTypeRepr sz
+    FnReadMem _ tp -> tp
+    FnEvalApp a    -> appType a
+    FnAlloca _ -> knownType
+
 -- tp <- {BVType 64, BVType 128}
 data FnReturnVar tp = FnReturnVar { frAssignId :: !AssignId
                                   , frReturnType :: !(TypeRepr tp) }
@@ -85,10 +97,10 @@ instance Pretty (FnReturnVar tp) where
 
 -- | A function value.
 data FnValue (tp :: Type) where
-  FnValueUnsupported :: FnValue tp
+  FnValueUnsupported :: !(TypeRepr tp) -> FnValue tp
   -- A value that is actually undefined, like a non-argument register at
   -- the start of a function.
-  FnUndefined :: FnValue tp
+  FnUndefined :: !(TypeRepr tp) -> FnValue tp
   FnConstantValue :: !(NatRepr n) -> !Integer -> FnValue (BVType n)
   -- Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
@@ -109,8 +121,8 @@ data FnValue (tp :: Type) where
   FnGlobalDataAddr :: !Word64 -> FnValue (BVType 64)
 
 instance Pretty (FnValue tp) where
-  pretty FnValueUnsupported       = text "unsupported"
-  pretty FnUndefined              = text "undef"
+  pretty (FnValueUnsupported {})  = text "unsupported"
+  pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantValue sz n)   = ppLit sz n
   pretty (FnAssignedValue assign) = ppAssignId (fnAssignId assign)
   pretty (FnPhiValue phi)         = ppAssignId (unFnPhiVar phi)
@@ -124,10 +136,27 @@ instance Pretty (FnValue tp) where
   pretty (FnGlobalDataAddr addr)  = text "data@"
                                     <> parens (pretty $ showHex addr "")
 
+fnValueType :: FnValue tp -> TypeRepr tp
+fnValueType v =
+  case v of
+    FnValueUnsupported tp -> tp
+    FnUndefined tp -> tp
+    FnConstantValue sz _ -> BVTypeRepr sz
+    FnAssignedValue (FnAssignment _ rhs) -> fnAssignRHSType rhs
+    FnPhiValue phi -> fnPhiVarType phi
+    FnReturn ret   -> frReturnType ret
+    FnFunctionEntryValue _ -> knownType
+    FnBlockValue _ -> knownType
+    FnIntArg _ -> knownType
+    FnFloatArg _ -> knownType
+    FnGlobalDataAddr _ -> knownType
+
 ------------------------------------------------------------------------
 -- Function definitions
 
 data Function = Function { fnAddr :: CodeAddr
+                         , fnIntArgTypes :: [Some TypeRepr]
+                         , fnFloatArgTypes :: [Some TypeRepr]                           
                          , fnBlocks :: [FnBlock]
                          }
 

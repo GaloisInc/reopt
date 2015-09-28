@@ -495,14 +495,10 @@ showLLVM :: LoadStyle -> Elf Word64 -> IO ()
 showLLVM loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let fg = mkFinalCFG mem e
-  let g = eliminateDeadRegisters (finalCFG fg)
-  let bs' = Map.elems (g^.cfgBlocks)
-      mkF = snd . L.runLLVM
-            . L.defineFresh L.emptyFunAttrs L.voidT ()
-            . mapM_ blockToLLVM
+  let cfg = mkFinalCFG mem e
+  let mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
 
-  print (L.ppModule $ mkF bs')
+  print (L.ppModule mkF )
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction

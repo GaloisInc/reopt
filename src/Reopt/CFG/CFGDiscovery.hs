@@ -753,7 +753,7 @@ transferBlock b regs = do
           -- The last statement was a call.
           -- Note that in some cases the call is known not to return, and thus
           -- this code will never jump to the return value.
-        _ | Just (prev_stmts, ret) <- identifyCall mem (blockStmts b) s' -> do
+        _ | Just (prev_stmts, ret, _) <- identifyCall mem (blockStmts b) s' -> do
             Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             let abst = finalAbsBlockState regs' s'
             seq abst $ do

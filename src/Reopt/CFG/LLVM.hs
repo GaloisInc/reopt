@@ -17,16 +17,22 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Reopt.CFG.LLVM where
 
 import           Control.Monad
-import           Text.LLVM (BB)
+import           Control.Monad.Reader
+import           Numeric (showHex)
+import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
-import           Reopt.Machine.Types
+import           Data.Parameterized.Some
+
+import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
+import           Reopt.Machine.Types
 
 --------------------------------------------------------------------------------
 -- reopt intrinsics
@@ -96,121 +102,184 @@ reoptIntrinsics = [ iEvenParity
 -- conversion to LLVM 
 --------------------------------------------------------------------------------
 
-blockToLLVM :: Block -> BB () -- L.BasicBlock
-blockToLLVM b = do L.label (L.Ident . show $ blockLabel b)
-                   mapM_ stmtToLLVM $ blockStmts b -- ++ [termStmtToLLVM $ blockTerm b]
+data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
+                           , llvmFloatArgs :: [L.Typed L.Value] }
 
-stmtToLLVM :: Stmt -> BB ()
-stmtToLLVM stmt = do
-  L.comment (show $ pretty stmt)
-  case stmt of
-   AssignStmt (Assignment lhs rhs) ->
-     void $ L.assign (assignIdToLLVMIdent lhs) (rhsToLLVM rhs)
-   Write loc v -> do
-     v' <- valueToLLVM v
-     case loc of 
-       MemLoc ptr typ -> do
-         p <- valueToLLVM ptr
-         p' <- L.inttoptr p (L.ptrT (typeToLLVMType typ))
-         v'' <- L.bitcast v' (typeToLLVMType typ)
-         let align = Nothing                           
-         L.store v' p' align
-       FS     -> L.call_ iWrite_FS [v']
-       GS     -> L.call_ iWrite_GS [v']
-       X87_PC -> L.call_ iWrite_X87_PC [v'] 
-       X87_RC -> L.call_ iWrite_X87_RC [v']
-       ControlLoc {} -> void $ unimplementedInstr
-       DebugLoc {}   -> void $ unimplementedInstr
+newtype ToLLVM a  = ToLLVM { runToLLVM :: ReaderT LLVMState BB a }
+                    deriving (Applicative, Functor, Monad, MonadReader LLVMState)
+
+liftBB :: BB a -> ToLLVM a
+liftBB = ToLLVM . lift
+
+liftBBF :: (BB a -> BB b) -> ToLLVM a -> ToLLVM b
+liftBBF f v = ToLLVM $ mapReaderT f (runToLLVM v)
+
+functionName :: CodeAddr -> L.Symbol
+functionName addr = L.Symbol $ "F" ++ showHex addr ""
+
+blockName :: BlockLabel -> L.Ident
+blockName = L.Ident . show 
+
+funReturnType :: L.Type
+funReturnType = L.Struct [ L.PrimType (L.Integer 64)
+                         , L.PrimType (L.FloatType L.Fp128) ]
+
+functionToLLVM :: Function -> LLVM (L.Typed L.Value)
+functionToLLVM f = L.define' L.emptyFunAttrs funReturnType symbol argTypes False go
+  where
+    argTypes      = map (viewSome typeToLLVMType) (fnIntArgTypes f)
+                    ++ map (viewSome typeToLLVMType) (fnFloatArgTypes f)
+    symbol        = functionName (fnAddr f)
+    go args =
+      let nint = length (fnIntArgTypes f)
+          st   = LLVMState { llvmIntArgs   = take nint args
+                           , llvmFloatArgs = drop nint args }
+      in runReaderT (runToLLVM (mapM_ blockToLLVM (fnBlocks f))) st
+
+blockToLLVM :: FnBlock -> ToLLVM () -- L.BasicBlock
+blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
+                   mapM_ stmtToLLVM $ fbStmts b -- ++ [termStmtToLLVM $ blockTerm b]
+                   termStmtToLLVM (fbTerm b)
+
+termStmtToLLVM :: FnTermStmt -> ToLLVM ()
+termStmtToLLVM tm =
+  case tm of
+     FnJump lbl -> liftBB $ L.jump (blockName lbl)
+     FnRet iret fret -> do
+       iret' <- valueToLLVM iret
+       fret' <- valueToLLVM fret
+       liftBB $ L.ret (L.struct False [iret', fret'])
+     FnBranch cond tlbl flbl -> do
+       cond' <- valueToLLVM cond
+       liftBB $ L.br cond' (blockName tlbl) (blockName flbl)
        
-   MemCopy bytesPerCopy nValues src dest direction -> do
-     nValues' <- valueToLLVM nValues
-     src'     <- valueToLLVM src
-     dest'    <- valueToLLVM dest
-     case direction of
-      BVValue _ 0 -> do
-        let typ = L.iT (fromIntegral $ 8 * bytesPerCopy)
-            op = intrinsic ("llvm.memcpy.p0"
-                            ++ show (L.ppType typ)
-                            ++ ".p0" ++ show (L.ppType typ)
-                            ++ ".i64") L.voidT
-                 [L.ptrT typ, L.ptrT typ, L.iT 64, L.iT 32, L.iT 1]
-        src_ptr  <- L.bitcast src'  (L.ptrT typ)
-        dest_ptr <- L.bitcast dest' (L.ptrT typ)
-        L.call_ op [dest_ptr, src_ptr, nValues'
-                   , L.iT 32 L.-: L.int 0
-                   , L.iT 1  L.-: L.int 0 ]
-      _ -> do
-        direction' <- valueToLLVM direction
-        L.call_ iMemCopy [ L.iT 64 L.-: L.integer bytesPerCopy
-                         , nValues', src', dest', direction' ]
+     FnCall dest args iretv fretv contlbl -> do
+       dest' <- valueToLLVM dest
+       let arg_tys = map (viewSome (typeToLLVMType . fnValueType)) args
+           fun_ty = L.ptrT (L.FunTy funReturnType arg_tys False)
+       dest_f <- liftBB $ L.bitcast dest' fun_ty 
+       args' <- mapM (viewSome valueToLLVM) args
+       rvar  <- liftBB $ L.call dest_f args'
+       void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId iretv)
+                                (L.extractValue rvar 0)
+       void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId fretv)
+                                (L.extractValue rvar 1)
+     FnTermStmtUndefined -> void $ unimplementedInstr    
 
-   MemSet count v ptr -> do
-     count' <- valueToLLVM count
-     v'     <- valueToLLVM v
-     ptr'   <- valueToLLVM ptr
-     let typ = typeToLLVMType $ valueType v
-         op = intrinsic ("llvm.memset.p0"
-                            ++ show (L.ppType typ)
-                            ++ ".i64") L.voidT
-              [L.ptrT typ, typ, L.iT 64, L.iT 32, L.iT 1]
-     ptr_ptr <- L.bitcast ptr' (L.ptrT typ)
-     L.call_ op [ptr_ptr, v', count', L.iT 32 L.-: L.int 0, L.iT 1 L.-: L.int 0]
+stmtToLLVM :: FnStmt -> ToLLVM ()
+stmtToLLVM stmt = do
+  liftBB $ L.comment (show $ pretty stmt)
+  case stmt of
+   FnAssignStmt (FnAssignment lhs rhs) ->
+     void $ liftBBF (L.assign (assignIdToLLVMIdent lhs)) (rhsToLLVM rhs)
+   FnWriteMem ptr v -> do
+     v' <- valueToLLVM v
+     p  <- valueToLLVM ptr
+     liftBB $ do 
+       -- FIXME: this should be the same as using typeToLLVMType on v
+       p' <- L.inttoptr p (L.ptrT (L.typedType v'))
+       let align = Nothing                           
+       L.store v' p' align
+       -- FS     -> L.call_ iWrite_FS [v']
+       -- GS     -> L.call_ iWrite_GS [v']
+       -- X87_PC -> L.call_ iWrite_X87_PC [v'] 
+       -- X87_RC -> L.call_ iWrite_X87_RC [v']
+       -- ControlLoc {} -> void $ unimplementedInstr
+       -- DebugLoc {}   -> void $ unimplementedInstr
+      
+   -- MemCopy bytesPerCopy nValues src dest direction -> do
+   --   nValues' <- valueToLLVM nValues
+   --   src'     <- valueToLLVM src
+   --   dest'    <- valueToLLVM dest
+   --   case direction of
+   --    BVValue _ 0 -> do
+   --      let typ = L.iT (fromIntegral $ 8 * bytesPerCopy)
+   --          op = intrinsic ("llvm.memcpy.p0"
+   --                          ++ show (L.ppType typ)
+   --                          ++ ".p0" ++ show (L.ppType typ)
+   --                          ++ ".i64") L.voidT
+   --               [L.ptrT typ, L.ptrT typ, L.iT 64, L.iT 32, L.iT 1]
+   --      src_ptr  <- L.bitcast src'  (L.ptrT typ)
+   --      dest_ptr <- L.bitcast dest' (L.ptrT typ)
+   --      L.call_ op [dest_ptr, src_ptr, nValues'
+   --                 , L.iT 32 L.-: L.int 0
+   --                 , L.iT 1  L.-: L.int 0 ]
+   --    _ -> do
+   --      direction' <- valueToLLVM direction
+   --      L.call_ iMemCopy [ L.iT 64 L.-: L.integer bytesPerCopy
+   --                       , nValues', src', dest', direction' ]
 
-   Comment str -> return () -- L.comment $ Text.unpack str
-   PlaceHolderStmt {} -> void $ unimplementedInstr
-   _           -> void $ unimplementedInstr
+   -- MemSet count v ptr -> do
+   --   count' <- valueToLLVM count
+   --   v'     <- valueToLLVM v
+   --   ptr'   <- valueToLLVM ptr
+   --   let typ = typeToLLVMType $ valueType v
+   --       op = intrinsic ("llvm.memset.p0"
+   --                          ++ show (L.ppType typ)
+   --                          ++ ".i64") L.voidT
+   --            [L.ptrT typ, typ, L.iT 64, L.iT 32, L.iT 1]
+   --   ptr_ptr <- L.bitcast ptr' (L.ptrT typ)
+   --   L.call_ op [ptr_ptr, v', count', L.iT 32 L.-: L.int 0, L.iT 1 L.-: L.int 0]
+
+   FnComment str -> return () -- L.comment $ Text.unpack str
+   -- PlaceHolderStmt {} -> void $ unimplementedInstr
+   -- _           -> void $ unimplementedInstr
 
 assignIdToLLVMIdent :: AssignId -> L.Ident
 assignIdToLLVMIdent aid = L.Ident $ "R" ++ show aid
 
-unimplementedInstr :: BB (L.Typed L.Value)
-unimplementedInstr = do L.comment "UNIMPLEMENTED"
+unimplementedInstr :: ToLLVM (L.Typed L.Value)
+unimplementedInstr = do liftBB $ L.comment "UNIMPLEMENTED"
                         return (L.Typed L.voidT L.ValUndef)
 
-rhsToLLVM :: AssignRhs tp -> BB (L.Typed L.Value)
+rhsToLLVM :: FnAssignRhs tp -> ToLLVM (L.Typed L.Value)
 rhsToLLVM rhs =
   case rhs of
-   EvalApp app -> appToLLVM app
-   SetUndefined sz -> let typ = natReprToLLVMType sz
-                      in  return (L.Typed typ L.ValUndef)
-   Read loc ->
-     case loc of
-       MemLoc ptr typ -> do
-         p <- valueToLLVM ptr
-         p' <- L.inttoptr p (L.ptrT (typeToLLVMType typ))
-         let align = Nothing                                    
-         L.load p' align
-       FS     -> L.call iRead_FS []
-       GS     -> L.call iRead_GS []
-       X87_PC -> L.call iRead_X87_PC [] 
-       X87_RC -> L.call iRead_X87_RC [] 
-       _      -> unimplementedInstr
-   -- there doesn't seem to be a llvm.memcmp.* intrinsic
-   MemCmp bytesPerCopy nValues src dest direction -> do
-     nValues'   <- valueToLLVM nValues
-     src'       <- valueToLLVM src
-     dest'      <- valueToLLVM dest
-     direction' <- valueToLLVM direction
-     L.call iMemCmp [ L.iT 64 L.-: L.integer bytesPerCopy
-                    , nValues', src', dest', direction' ]
+   FnEvalApp app -> appToLLVM app
+   FnSetUndefined sz -> let typ = natReprToLLVMType sz
+                        in  return (L.Typed typ L.ValUndef)
+   FnReadMem ptr typ -> do
+     p <- valueToLLVM ptr
+     p' <- liftBB $ L.inttoptr p (L.ptrT (typeToLLVMType typ))
+     let align = Nothing                                    
+     liftBB $ L.load p' align
+   FnAlloca v -> do
+     v' <- valueToLLVM v
+     liftBB $ L.alloca (L.iT 8) (Just v') Nothing
+   --     FS     -> L.call iRead_FS []
+   --     GS     -> L.call iRead_GS []
+   --     X87_PC -> L.call iRead_X87_PC [] 
+   --     X87_RC -> L.call iRead_X87_RC [] 
+   --     _      -> unimplementedInstr
+   -- -- there doesn't seem to be a llvm.memcmp.* intrinsic
+   -- MemCmp bytesPerCopy nValues src dest direction -> do
+   --   nValues'   <- valueToLLVM nValues
+   --   src'       <- valueToLLVM src
+   --   dest'      <- valueToLLVM dest
+   --   direction' <- valueToLLVM direction
+   --   L.call iMemCmp [ L.iT 64 L.-: L.integer bytesPerCopy
+   --                  , nValues', src', dest', direction' ]
 
-appToLLVM :: App Value tp -> BB (L.Typed L.Value)
+appToLLVM :: App FnValue tp -> ToLLVM (L.Typed L.Value)
 appToLLVM app =
   case app of
-   Mux _sz b l r ->
-     join $ L.select <$> valueToLLVM b <*> valueToLLVM l <*> valueToLLVM r
+   Mux _sz b l r -> do
+     b' <- valueToLLVM b
+     l' <- valueToLLVM l
+     r' <- valueToLLVM r
+     liftBB $ L.select b' l' r'
    MMXExtend _v -> unimplementedInstr
    ConcatV sz _sz' low high -> do
-     low'  <- join $ flip L.zext typ <$> valueToLLVM low
-     high' <- join $ flip L.zext typ <$> valueToLLVM high
-     s_high <- L.shl high' (natValue sz)
-     L.bor low' s_high
+     low'  <- liftBB . flip L.zext typ =<< valueToLLVM low
+     high' <- liftBB . flip L.zext typ =<< valueToLLVM high
+     s_high <- liftBB $ L.shl high' (natValue sz)
+     liftBB $ L.bor low' s_high
    UpperHalf sz v -> do
-     v' <- join $ flip L.lshr (natValue sz) <$> valueToLLVM v
-     L.trunc v' (natReprToLLVMType sz)
-   Trunc v sz -> join $ flip L.trunc (natReprToLLVMType sz) <$> valueToLLVM v
-   SExt v sz -> join $ flip L.sext (natReprToLLVMType sz) <$> valueToLLVM v
-   UExt v sz -> join $ flip L.zext (natReprToLLVMType sz) <$> valueToLLVM v
+     v' <- liftBB . flip L.lshr (natValue sz) =<< valueToLLVM v
+     liftBB $ L.trunc v' (natReprToLLVMType sz)
+   Trunc v sz -> liftBB . flip L.trunc (natReprToLLVMType sz) =<< valueToLLVM v
+   SExt v sz -> liftBB . flip L.sext (natReprToLLVMType sz) =<< valueToLLVM v
+   UExt v sz -> liftBB . flip L.zext (natReprToLLVMType sz) =<< valueToLLVM v
    AndApp{}     -> unimplementedInstr  
    OrApp{}      -> unimplementedInstr
    NotApp{}     -> unimplementedInstr
@@ -238,15 +307,16 @@ appToLLVM app =
    BVSignedLt x y    -> binop (L.icmp L.Islt) x y
    BVSignedLe x y    -> binop (L.icmp L.Isle) x y
    BVTestBit v n     -> do -- FIXME
-     let in_typ = typeToLLVMType $ valueType v
      v' <- valueToLLVM v
+     let in_typ = L.typedType v'
      n' <- valueToLLVM n
-     mask <- L.shl (in_typ L.-: (1 :: Int)) n'
-     r <- L.band v' mask
-     L.icmp L.Ine r (0 :: Int)
+     liftBB $ do 
+       mask <- L.shl (in_typ L.-: (1 :: Int)) n'
+       r <- L.band v' mask
+       L.icmp L.Ine r (0 :: Int)
    BVComplement _sz v ->
      -- xor x -1 == complement x, according to LLVM manual.
-     join $ flip L.bxor (-1 :: Int) <$> valueToLLVM v
+     liftBB . flip L.bxor (-1 :: Int) =<< valueToLLVM v
    BVAnd _sz x y -> binop L.band x y
    BVOr _sz x y -> binop L.bor x y
    BVXor _sz x y -> binop L.bxor x y
@@ -255,7 +325,7 @@ appToLLVM app =
    BVSar _sz x y -> binop L.ashr x y
    BVEq x y      -> binop (L.icmp L.Ieq) x y
    EvenParity v  -> do v' <- valueToLLVM v
-                       L.call iEvenParity [v']
+                       liftBB $ L.call iEvenParity [v']
    ReverseBytes{} -> unimplementedInstr
    -- FIXME: do something more efficient?
    -- Basically does let (r, over)  = llvm.add.with.overflow(x,y)
@@ -270,21 +340,21 @@ appToLLVM app =
    Bsf sz v -> do
      let op = intrinsic ("llvm.cttz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
      v' <- valueToLLVM v
-     L.call op [v', L.iT 1 L.-: L.int 1]
+     liftBB $ L.call op [v', L.iT 1 L.-: L.int 1]
    Bsr _sz v -> do
      let op = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
      v' <- valueToLLVM v
-     L.call op [v', L.iT 1 L.-: L.int 1]
+     liftBB $ L.call op [v', L.iT 1 L.-: L.int 1]
 
    FPIsQNaN frep v -> do
      let op = intrinsic ("reopt.isQNaN." ++ show (pretty frep)) (L.iT 1) [typ]
      v' <- valueToLLVM v         
-     L.call op [v']
+     liftBB $ L.call op [v']
 
    FPIsSNaN frep v -> do
      let op = intrinsic ("reopt.isSNaN." ++ show (pretty frep)) (L.iT 1) [typ]
      v' <- valueToLLVM v         
-     L.call op [v']
+     liftBB $ L.call op [v']
 
    FPAdd frep x y -> fpbinop L.fadd frep x y
    FPAddRoundedUp _frep _x _y -> unimplementedInstr   
@@ -304,48 +374,50 @@ appToLLVM app =
          to_typ    = floatReprToLLVMType to_rep
          from_bits = natValue $ floatInfoBits from_rep
          to_bits   = natValue $ floatInfoBits to_rep         
-     fp_x <- L.bitcast x' from_typ
+     fp_x <- liftBB $ L.bitcast x' from_typ
      case compare from_bits to_bits of
-      LT -> L.fpext fp_x to_typ
+      LT -> liftBB $ L.fpext fp_x to_typ
       EQ -> return fp_x
-      GT -> L.fptrunc fp_x to_typ
+      GT -> liftBB $ L.fptrunc fp_x to_typ
    -- FIXME
    FPCvtRoundsUp _from_rep _x _to_rep -> unimplementedInstr
    FPFromBV v frepr -> do
      v' <- valueToLLVM v
-     L.sitofp v' (floatReprToLLVMType frepr)
+     liftBB $ L.sitofp v' (floatReprToLLVMType frepr)
    -- FIXME: side-conditions here
    TruncFPToSignedBV frepr v sz -> do
      v' <- valueToLLVM v
      let typ = floatReprToLLVMType frepr
-     flt_v <- L.bitcast v' typ
-     L.fptosi flt_v (natReprToLLVMType sz)
+     flt_v <- liftBB $ L.bitcast v' typ
+     liftBB $ L.fptosi flt_v (natReprToLLVMType sz)
   where
     intrinsicOverflows op _sz x y c = do
-      let in_typ = typeToLLVMType $ valueType x
+      x' <- valueToLLVM x
+      y' <- valueToLLVM y
+      let in_typ = L.typedType x'
           op_with_overflow =
             intrinsic ("llvm." ++ op ++ ".with.overflow." ++ show (L.ppType in_typ))
             (L.Struct [in_typ, L.iT 1]) [in_typ, in_typ]
-      x' <- valueToLLVM x
-      y' <- valueToLLVM y
-      c' <- join $ flip L.zext in_typ <$> valueToLLVM c
-      r_tuple  <- L.call op_with_overflow [x', y']
-      r    <- L.extractValue r_tuple 0
-      over <- L.extractValue r_tuple 1
-      r_tuple' <- L.call op_with_overflow [r, c']
-      over' <- L.extractValue r_tuple' 1
-      L.bor over over'
+      c' <- liftBB . flip L.zext in_typ =<< valueToLLVM c
+      liftBB $ do
+        r_tuple  <- L.call op_with_overflow [x', y']
+        r        <- L.extractValue r_tuple 0
+        over     <- L.extractValue r_tuple 1
+        r_tuple' <- L.call op_with_overflow [r, c']
+        over'    <- L.extractValue r_tuple' 1
+        L.bor over over'
 
     fpbinop :: (L.Typed L.Value -> L.Typed L.Value -> BB (L.Typed L.Value))
-             -> FloatInfoRepr flt -> Value (FloatType flt) -> Value (FloatType flt)
-             -> BB (L.Typed L.Value)
+             -> FloatInfoRepr flt -> FnValue (FloatType flt) -> FnValue (FloatType flt)
+             -> ToLLVM (L.Typed L.Value)
     fpbinop f frepr x y = do
       x' <- valueToLLVM x
       y' <- valueToLLVM y
       let typ = floatReprToLLVMType frepr
-      flt_x <- L.bitcast x' typ
-      flt_y <- L.bitcast y' typ
-      f flt_x flt_y
+      liftBB $ do
+        flt_x <- L.bitcast x' typ
+        flt_y <- L.bitcast y' typ
+        f flt_x flt_y
 
     -- unop :: (L.Typed L.Value -> BB (L.Typed L.Value))
     --         -> Value (BVType n)
@@ -353,9 +425,13 @@ appToLLVM app =
     -- unop f x = join $ f <$> valueToLLVM x
     
     binop :: (L.Typed L.Value -> L.Typed L.Value -> BB (L.Typed L.Value))
-             -> Value (BVType n) -> Value (BVType m)
-             -> BB (L.Typed L.Value)
-    binop f x y = join $ f <$> valueToLLVM x <*> valueToLLVM y
+             -> FnValue (BVType n) -> FnValue (BVType m)
+             -> ToLLVM (L.Typed L.Value)
+    binop f x y = do
+      x' <- valueToLLVM x
+      y' <- valueToLLVM y
+      liftBB $ f x' y'
+
     typ = typeToLLVMType $ appType app
 
 natReprToLLVMType :: NatRepr n -> L.Type
@@ -381,14 +457,41 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
 --                         L.inttoptr p (L.ptrT (typeToLLVMType typ))
 --    _ -> unimplementedInstr
 
-valueToLLVM :: Value tp -> BB (L.Typed L.Value)
-valueToLLVM val =
+valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
+valueToLLVM val =  
   case val of
-   BVValue _sz n -> mk $ L.integer n
-   AssignedValue (Assignment lhs _rhs) ->
-     mk $ L.ValIdent $ assignIdToLLVMIdent lhs
-   Initial reg   -> mk . L.ValIdent . L.Ident . show $ reg     
+    FnValueUnsupported _  -> unimplementedInstr
+    -- A value that is actually undefined, like a non-argument register at
+    -- the start of a function.
+    FnUndefined _ -> mk L.ValUndef
+    FnConstantValue _sz n -> mk $ L.integer n
+    -- Value from an assignment statement.
+    FnAssignedValue (FnAssignment lhs _rhs) ->
+      mk $ L.ValIdent $ assignIdToLLVMIdent lhs
+    -- Value from a phi node
+    FnPhiValue (FnPhiVar lhs _tp) ->
+      mk $ L.ValIdent $ assignIdToLLVMIdent lhs      
+    -- A value returned by a function call (rax/xmm0)
+    FnReturn (FnReturnVar lhs _tp) ->
+      mk $ L.ValIdent $ assignIdToLLVMIdent lhs
+
+    -- The entry pointer to a function.
+    FnFunctionEntryValue addr ->
+      mk $ L.ValSymbol (functionName addr)
+      
+    -- A pointer to an internal block at the given address.
+    FnBlockValue addr ->
+      mk $ L.ValLabel $ L.Named $ blockName $ GeneratedBlock addr 0
+      
+    -- Value is an interget argument passed via a register.
+    FnIntArg n -> asks ((!! n) . llvmIntArgs)
+                     
+    -- Value is a function argument passed via a floating point XMM
+    -- register.
+    FnFloatArg n -> asks ((!! n) . llvmFloatArgs)
+    -- A global address
+    FnGlobalDataAddr addr -> mk $ L.integer (fromIntegral addr)
   where
-    mk :: L.Value -> BB (L.Typed L.Value)
+    mk :: L.Value -> ToLLVM (L.Typed L.Value)
     mk  = return . L.Typed typ
-    typ = typeToLLVMType $ valueType val
+    typ = typeToLLVMType $ fnValueType val

@@ -76,15 +76,17 @@ isCodeAddrWriteTo _ _ _ = Nothing
 identifyCall :: Memory Word64
              -> [Stmt]
              -> X86State Value
-             -> Maybe (Seq Stmt, Word64)
+             -> Maybe (Seq Stmt, Word64, [Some Value])
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
+        defaultArgs = map (\r -> Some $ s ^. register r) argumentRegisters
+                      ++ map (\r -> Some $ s ^. register r) floatArgumentRegisters
         go stmts =
           case Seq.viewr stmts of
             Seq.EmptyR -> Nothing
             prev Seq.:> stmt
               | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret)
+                Just (prev, ret, defaultArgs)
               | Write{} <- stmt -> Nothing
               | otherwise -> go prev
 
@@ -254,8 +256,8 @@ mkId f = do
 mkFnAssign :: FnAssignRhs tp -> Recover (FnAssignment tp)
 mkFnAssign rhs = mkId (\next_id -> FnAssignment next_id rhs)
 
-mkPhiVar :: Recover (FnPhiVar tp)
-mkPhiVar = mkId FnPhiVar
+mkPhiVar :: TypeRepr tp -> Recover (FnPhiVar tp)
+mkPhiVar tp = mkId (flip FnPhiVar tp)
 
 mkReturnVar :: TypeRepr tp -> Recover (FnReturnVar tp)
 mkReturnVar tp = mkId (\next_id -> FnReturnVar next_id tp)
@@ -326,6 +328,9 @@ regMapFromState s =
 argumentRegisters :: [N.RegisterName 'N.GP]
 argumentRegisters = [N.rdi, N.rsi, N.rdx, N.rcx, N.r8, N.r9]
 
+floatArgumentRegisters :: [N.RegisterName 'N.XMM]
+floatArgumentRegisters = map N.XMMReg [0..7]
+
 calleeSavedRegisters :: [N.RegisterName 'N.GP]
 calleeSavedRegisters = [N.rbx, N.r12, N.r13, N.r14, N.r15, N.rbp]
                       
@@ -338,7 +343,10 @@ recoverFunction s a = do
             | Just i <- elemIndex r argumentRegisters -> 
               FnRegValue (FnIntArg i)
             | r `elem` calleeSavedRegisters -> CalleeSaved r
-          N.XMMReg i | i < 8 -> FnRegValue (FnFloatArg i)                           
+          -- FIXME: actually just N.XMMReg i | i < 8 -> ..., but this
+          -- is more consistent
+          N.XMMReg {} | Just i <- elemIndex r floatArgumentRegisters -> 
+              FnRegValue (FnFloatArg i)                           
           _ -> FnRegUninitialized
   let lbl = GeneratedBlock a 0
   let rs = RS { _rsInterp = s
@@ -359,6 +367,8 @@ recoverFunction s a = do
     recoverIter Nothing initRegs MapF.empty lbl
     block_map <- use rsBlocks
     return $! Function { fnAddr = a
+                       , fnIntArgTypes   = map (Some . N.registerType) argumentRegisters -- FIXME
+                       , fnFloatArgTypes = map (Some . N.registerType) floatArgumentRegisters -- FIXME
                        , fnBlocks = Map.elems block_map
                        }
 
@@ -387,7 +397,7 @@ recoverIter m_phis regs assigns lbl = trace ("Exploring " ++ show lbl) $ do
 
 makePhis :: Recover (X86State FnPhiVar, X86State FnRegValue)
 makePhis = do
-  phis <- mkX86StateM (\_ -> mkPhiVar)
+  phis <- mkX86StateM (mkPhiVar . N.registerType)
   return (phis, mapX86State (FnRegValue . FnPhiValue) phis)
 
 -- regValuePair :: N.RegisterName cl
@@ -445,7 +455,7 @@ recoverBlock phivs regs assigns lbl = do
       return $! mkBlock stmts (FnBranch cv x y)
     FetchAndExecute proc_state
         -- The last statement was a call.
-      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state -> do
+      | Just (prev_stmts, ret_addr, args) <- identifyCall mem (blockStmts b) proc_state -> do
         -- Compute any allocations that need to occur.
         computeAllocSize $ do
           Fold.traverse_ recoverStmtStackDelta prev_stmts
@@ -466,15 +476,16 @@ recoverBlock phivs regs assigns lbl = do
                   | Just _ <- testEquality r N.rax -> return (FnReturn intr)
                   | r `elem` calleeSavedRegisters -> recoverValue "callee_saved" v
                 N.XMMReg 0 -> return (FnReturn floatr)
-                _ -> return FnUndefined
+                _ -> return $ FnUndefined (N.registerType r)
         regs' <- mapX86StateWithM go proc_state
 
         let ret_lbl = GeneratedBlock ret_addr 0
         addFrontier lbl ret_lbl regs' stk
         fn_stmts <- uses rsCurStmts Fold.toList
         call_tgt <- recoverValue "ip" (proc_state^.register N.rip)
-        args <- (++ stackArgs stk) <$> stateArgs proc_state
-        return $! mkBlock fn_stmts (FnCall call_tgt args intr floatr ret_lbl)
+        args'  <- mapM (viewSome (fmap Some . recoverValue "arguments")) args
+        -- args <- (++ stackArgs stk) <$> stateArgs proc_state
+        return $! mkBlock fn_stmts (FnCall call_tgt args' intr floatr ret_lbl)
 
       -- Jump to concrete offset.
       | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
@@ -583,7 +594,7 @@ recoverValue nm v = do
   case v of
     _ | Just int_addr_off <- asStackAddrOffset v -> do
       trace ("recoverValue encountered stack offset: " ++ show int_addr_off) $ do
-      return $ FnValueUnsupported
+      return $ FnValueUnsupported (valueType v)
 
     BVValue w i
       | Just Refl <- testEquality w n64
@@ -607,7 +618,7 @@ recoverValue nm v = do
 
             | otherwise -> do
               trace ("WARNING: recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
-              return $! FnValueUnsupported
+              return $! FnValueUnsupported (valueType v)
       | otherwise -> do
         return $ FnConstantValue w i
 
@@ -624,15 +635,15 @@ recoverValue nm v = do
               return $! FnAssignedValue fnAssign
             _ -> do
               trace ("recoverValue does not yet support assignment " ++ show (pretty assign)) $
-                return $ FnValueUnsupported
+                return $ FnValueUnsupported (assignmentType assign)
     Initial reg -> do
       regs <- use rsCurRegs
       case regs ^. register reg of
         CalleeSaved _ -> do
           -- trace ("recoverValue unexpectedly encountered callee saved register: " ++ show reg) $ do
-          return FnUndefined
+          return (FnUndefined (N.registerType reg))
         FnRegValue v -> return v
-        FnRegUninitialized -> return FnUndefined
+        FnRegUninitialized -> return (FnUndefined (N.registerType reg))
 
 {-
 edgeRelation :: InterpState

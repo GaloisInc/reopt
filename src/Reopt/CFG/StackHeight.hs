@@ -215,7 +215,7 @@ initFnStack = UndefinedFnStack
 -- a function value denoting the given location.
 stackOffsetAddr :: FnStack -> Value (BVType 64) -> FnValue (BVType 64)
 stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
- FnValueUnsupported
+ FnValueUnsupported knownType
 
 -- | Record a register as being callee saved.
 recordCalleeSavedWrite :: Value (BVType 64) -- ^ Offset in stack
