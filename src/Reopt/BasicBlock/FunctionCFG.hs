@@ -39,6 +39,7 @@ termChildren (Cond w1 w2) = [w1, w2]
 termChildren (Call _ w) = [w]
 termChildren (Direct w) = [w]
 termChildren (Fallthrough w) = [w]
+termChildren Indirect = []
 termChildren Ret = []
 
 -- FIXME: fancy data structures could do this better - keep instruction
