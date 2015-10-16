@@ -407,7 +407,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
   withSimpleBackend' halloc $ \ctx -> do
     let sym = ctx^.ctxSymInterface
     (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
-    flags  <- I.emptyWordMap sym n5
+    flags  <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
     pc     <- I.freshConstant sym (C.BaseBVRepr n64)
     heap   <- I.freshConstant sym (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
@@ -436,7 +436,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
             pc2 = xs2^._4
             -- flagIdxs = [0,2,4,6,7,8,9,10,11]
             true = I.truePred sym
-        rels <- sequence [ I.arrayEq sym C.indexTypeRepr C.baseTypeRepr heap1 heap2
+        rels <- sequence [ I.arrayEq sym heap1 heap2
                          , mkGPRsCheck gprRel sym n4 n64 gprs1 gprs2
                          , foldM (compareWordMapIdx sym n5 n1 flagPair) true []
                          , mkRipRelation ripRel sym pc1 pc2 ]
@@ -460,12 +460,12 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     initWordMap sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
       val <- I.freshConstant sym (C.BaseBVRepr nrVal)
-      I.insertWordMap sym nrKey idx val acc
+      I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val acc
 
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
       idx <- I.bvLit sym nrKey i
-      val1Part <- I.lookupWordMap sym nrKey idx wm1
-      val2Part <- I.lookupWordMap sym nrKey idx wm2
+      val1Part <- I.lookupWordMap sym nrKey (C.BaseBVRepr nrVal) idx wm1
+      val2Part <- I.lookupWordMap sym nrKey (C.BaseBVRepr nrVal) idx wm2
       val1 <- readPartExpr sym val1Part $ GenericSimError $ unwords ["Comparison at index", show i, "failed"]
       val2 <- readPartExpr sym val2Part $ GenericSimError $ unwords ["Comparison at index", show i, "failed"]
       I.andPred sym acc =<< I.bvEq sym val1 val2
@@ -519,23 +519,23 @@ mkInitialGPRs :: (I.IsExprBuilder sym, I.IsSymInterface sym, 1 <= nKey, 1 <= nVa
               -> NatRepr nKey
               -> NatRepr nVal
               -> [Integer]
-              -> IO (I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)), I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal)))
+              -> IO (I.WordMap sym nKey (C.BaseBVType nVal), I.WordMap sym nKey (C.BaseBVType nVal))
 mkInitialGPRs map sym nrKey nrVal range = do
-  regs1Empty <- I.emptyWordMap sym nrKey
+  regs1Empty <- I.emptyWordMap sym nrKey (C.BaseBVRepr nrVal)
   (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
     idx <- I.bvLit sym nrKey entry
     val <- I.freshConstant sym (C.BaseBVRepr nrVal)
-    regs' <- I.insertWordMap sym nrKey idx val regs
+    regs' <- I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val regs
     return (regs', case M.lookup entry map of
                     Just inv -> M.insert inv val invMap
                     Nothing -> invMap)) (regs1Empty, M.empty) range
-  regs2Empty <- I.emptyWordMap sym nrKey
+  regs2Empty <- I.emptyWordMap sym nrKey (C.BaseBVRepr nrVal)
   regs2 <- foldM (\regs entry -> do
     idx <- I.bvLit sym nrKey entry
     val <- case M.lookup entry invMap of
             Just val -> return val
             Nothing -> I.freshConstant sym (C.BaseBVRepr nrVal)
-    I.insertWordMap sym nrKey idx val regs) regs2Empty range
+    I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val regs) regs2Empty range
   return (regs1, regs2)
 
 -- Given the final values of registers in after two executions, asserts that
@@ -547,16 +547,16 @@ mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym (I.SymExpr sym C.BaseBoo
             -> sym
             -> NatRepr nKey
             -> NatRepr nVal
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
-            -> I.WordMap sym nKey (I.SymExpr sym (C.BaseBVType nVal))
+            -> I.WordMap sym nKey (C.BaseBVType nVal)
+            -> I.WordMap sym nKey (C.BaseBVType nVal)
             -> IO (I.Pred sym)
 mkGPRsCheck map sym nrKey nrVal regs1 regs2 =
   M.foldlWithKey (\pred idx1 idx2 -> do
     pred' <- pred
     idx1' <- I.bvLit sym nrKey idx1
     idx2' <- I.bvLit sym nrKey idx2
-    val1Part <- I.lookupWordMap sym nrKey idx1' regs1
-    val2Part <- I.lookupWordMap sym nrKey idx2' regs2
+    val1Part <- I.lookupWordMap sym nrKey (C.BaseBVRepr nrVal) idx1' regs1
+    val2Part <- I.lookupWordMap sym nrKey (C.BaseBVRepr nrVal) idx2' regs2
     val1 <- readPartExpr sym val1Part $ GenericSimError $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
     val2 <- readPartExpr sym val2Part $ GenericSimError $ unwords ["Comparison at indexes", show idx1, "and", show idx2,"failed"]
     I.andPred sym pred' =<< I.bvEq sym val1 val2

@@ -151,8 +151,8 @@ instance Eq (Var tp) where
 ------------------------------------------------------------------------
 -- Stmt -> RegCFG translation
 ------------------------------------------------------------------------
-type GPRs = C.WordMapType 4 (C.BVType 64)
-type Flags = C.WordMapType 5 (C.BVType 1)
+type GPRs = C.WordMapType 4 (C.BaseBVType 64)
+type Flags = C.WordMapType 5 (C.BaseBVType 1)
 type PC = C.BVType 64
 type Heap = C.SymbolicArrayType (C.BVIndexType 64) (C.BaseBVType 8)
 
@@ -177,7 +177,7 @@ curIP = lens getter setter
 flagRegs :: Simple Lens (G.Expr s MachineState) (G.Expr s Flags)
 flagRegs = lens getter setter
   where
-    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n5 (C.BVRepr n1))
+    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n5 (C.BaseBVRepr n1))
     setter st val = G.App $ C.SetStruct machineCtx st idx val
     idx :: Ctx.Index MachineCtx Flags
     idx = skip $ nextIndex $ incSize . incSize $ zeroSize
@@ -186,7 +186,7 @@ flagRegs = lens getter setter
 reg64Regs :: Simple Lens (G.Expr s MachineState) (G.Expr s GPRs)
 reg64Regs = lens getter setter
   where
-    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n4 (C.BVRepr n64))
+    getter st     = G.App $ C.GetStruct st idx (C.WordMapRepr n4 (C.BaseBVRepr n64))
     setter st val = G.App $ C.SetStruct machineCtx st idx val
     idx :: Ctx.Index MachineCtx GPRs
     idx = skip . skip $ nextIndex $ incSize zeroSize
@@ -202,13 +202,13 @@ heap = lens getter setter
 
 -- | Lens for WordMaps
 wordMap :: forall s w n
-         . (1 <= w, KnownNat w, KnownNat n)
+         . (1 <= w, 1 <= n, KnownNat w, KnownNat n)
         => Int
-        -> Simple Lens (G.Expr s (C.WordMapType w (C.BVType n))) (G.Expr s (C.BVType n))
+        -> Simple Lens (G.Expr s (C.WordMapType w (C.BaseBVType n))) (G.Expr s (C.BVType n))
 wordMap i = lens getter setter
   where
-    getter st     = G.App $ C.LookupWordMap (C.BVRepr nr_n) idx st
-    setter st val = G.App $ C.InsertWordMap nr_w (C.BVRepr nr_n) idx val st
+    getter st     = G.App $ C.LookupWordMap (C.BaseBVRepr nr_n) idx st
+    setter st val = G.App $ C.InsertWordMap nr_w (C.BaseBVRepr nr_n) idx val st
     idx = G.App $ C.BVLit nr_w (fromIntegral i)
     nr_w = knownNat :: NatRepr w
     nr_n = knownNat :: NatRepr n
@@ -484,12 +484,13 @@ translateApp a = case a of
   -- FIXME: crucible swaps the order of the bytes ...
   R.ConcatV n1 n2 (GExpr e1) (GExpr e2) ->
     case plusComm n1 n2 of
-      Refl -> GExpr . G.App $ asPosNat n1 $ asPosNat n2 $ C.BVConcat n2 n1 e2 e1
+      Refl -> GExpr . G.App $ asPosNat n1 $ asPosNat n2 $ asPosNat (addNat n1 n2)
+                            $ C.BVConcat n2 n1 e2 e1
   R.UExt e w
-    | Cr.BVRepr nr <- G.exprType (unGExpr e) -> unop nr e (C.BVZext w)
+    | Cr.BVRepr nr <- G.exprType (unGExpr e) -> asPosNat w $ unop nr e (C.BVZext w)
 
   R.UExt (GExpr e1) nr2
-    | Cr.BVRepr nr1 <- G.exprType e1 -> GExpr . G.App $ C.BVZext nr2 nr1 e1
+    | Cr.BVRepr nr1 <- G.exprType e1 -> GExpr . G.App $ asPosNat nr2 $ C.BVZext nr2 nr1 e1
 
   -- TODO: Actually implement this
   R.EvenParity e ->
@@ -577,7 +578,7 @@ instance S.IsValue (GExpr s) where
     = GExpr . G.App $ C.BVNot nr e1
   uext' nr2 (GExpr e1)
     | Cr.BVRepr nr1 <- G.exprType e1
-    = GExpr . G.App $ C.BVZext nr2 nr1 e1
+    = GExpr . G.App $ asPosNat nr2 $ C.BVZext nr2 nr1 e1
   GExpr e1 .|. GExpr e2
     | Cr.BVRepr nr <- G.exprType e1
     = GExpr . G.App $ C.BVOr nr e1 e2
@@ -609,7 +610,7 @@ bvBit nr1 nr2 val idx =
     idx' :: G.Expr s (C.BVType n)
     idx' = case testNatCases nr2 nr1 of
       NatCaseLT prf ->
-        withLeqProof prf (asPosNat nr2 (G.App $ C.BVZext nr1 nr2 idx))
+        withLeqProof prf (asPosNat nr1 $ asPosNat nr2 (G.App $ C.BVZext nr1 nr2 idx))
       NatCaseEQ -> idx
       NatCaseGT prf ->
         withLeqProof prf (asPosNat nr1 (G.App $ tracer nr1 nr2 $ C.BVTrunc nr1 nr2 idx))
@@ -618,7 +619,7 @@ bvBit nr1 nr2 val idx =
 translateVar :: Variable tp -> Var (F tp)
 translateVar (Variable tr name) =
   case tr of
-    BVTypeRepr nr -> Var (Cr.BVRepr nr) name
+    BVTypeRepr nr -> asPosNat nr $ Var (Cr.BVRepr nr) name
 
 
 ------------------------------------------------------------------------
