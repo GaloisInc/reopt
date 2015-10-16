@@ -25,7 +25,7 @@ import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Classes
-import           Debug.Trace
+-- import           Debug.Trace
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -51,6 +51,29 @@ instance EqF Value where
   Literal x `eqF` Literal y | Just Refl <- testEquality (B.width x) (B.width y)    = x == y
   Undefined tr1 `eqF` Undefined tr2 | Just Refl <- testEquality tr1 tr2 = True
   _ `eqF` _                     = False
+
+instance TestEquality Value where
+  Literal x `testEquality` Literal y = do
+    Refl <- testEquality x y
+    return Refl
+  Undefined x `testEquality` Undefined y = do
+    Refl <- testEquality x y
+    return Refl
+  _ `testEquality` _                     = Nothing
+
+instance OrdF Value where
+  compareF (Literal x) (Literal y) =
+    case compareF x y of
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF    
+  compareF (Undefined _) (Literal _) = LTF
+  compareF (Literal _) (Undefined _) = GTF
+  compareF (Undefined x) (Undefined y) = 
+    case compareF x y of
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF    
 
 
 -- | Equal or at least one side undefined.

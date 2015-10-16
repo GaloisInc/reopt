@@ -237,6 +237,8 @@ evalStmts = mapM_ evalStmt
 evalStmt :: forall m. EvalStmtConstraint m => Stmt -> m ()
 evalStmt (MakeUndefined x tr) =
   extendEnv x (CS.Undefined tr)
+evalStmt (Let x e) =
+  extendEnv x =<< evalExpr' e
 evalStmt (Get x l) =
   -- Force 'tp' to be a 'BVType n'.
   case S.loc_type l of

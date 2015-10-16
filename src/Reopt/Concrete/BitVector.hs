@@ -25,8 +25,11 @@ module Reopt.Concrete.BitVector
 
 import           Data.BitVector (BV)
 import qualified Data.BitVector as BV
-import Data.Parameterized.NatRepr
-import GHC.TypeLits
+import           Data.Parameterized.Classes (OrdF(..), OrderingF(..), fromOrdering)
+import           Data.Parameterized.NatRepr
+
+import           Control.Monad (guard)
+import           GHC.TypeLits
 
 ------------------------------------------------------------------------
 -- Bitvector type
@@ -80,6 +83,19 @@ instance Show (BitVector n) where
 instance Ord (BitVector n) where
   compare (BitVector _ x) (BitVector _ y) = compare x y
 
+instance TestEquality BitVector where
+  (BitVector sz1 n1) `testEquality` (BitVector sz2 n2) = do
+    Refl <- testEquality sz1 sz2
+    guard (n1 == n2)
+    return Refl
+
+instance OrdF BitVector where
+  compareF (BitVector szx x) (BitVector szy y) =
+    case (szx `compareF` szy, x `compare` y) of
+      (LTF,_) -> LTF
+      (GTF,_) -> GTF
+      (EQF,o) -> fromOrdering o
+
 ------------------------------------------------------------------------
 -- Operations on 'BitVector's
 
@@ -111,5 +127,5 @@ nat (BitVector _ bv) = BV.nat bv
 
 -- | Booleans.
 true, false :: BitVector 1
-true = bitVector knownNat (BV.bitVec 1 1)
-false = bitVector knownNat (BV.bitVec 1 0)
+true = bitVector knownNat (BV.bitVec 1 (1::Int))
+false = bitVector knownNat (BV.bitVec 1 (0::Int))

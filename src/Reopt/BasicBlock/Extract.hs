@@ -6,7 +6,6 @@
 module Reopt.BasicBlock.Extract (extractBlock, Next(..))
 where
 import           Control.Monad.State
-import           Control.Applicative
 import           Reopt.Concrete.Semantics as CS
 import           Reopt.CFG.Representation as R
 import qualified Reopt.Semantics.Monad as S

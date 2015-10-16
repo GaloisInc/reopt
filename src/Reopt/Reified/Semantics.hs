@@ -41,18 +41,10 @@ module Reopt.Reified.Semantics
        ) where
 
 import           Control.Monad.Cont
-import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
-import           Data.Binary.IEEE754
-import           Data.BitVector (BV)
-import qualified Data.BitVector as BV
 import           Data.Bits
-import           Data.Functor
-import           Data.Monoid (mempty)
-import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
-import           Data.Parameterized.Map (MapF)
 
 import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
 import qualified Data.Parameterized.Map as MapF
@@ -72,7 +64,7 @@ import qualified Reopt.Semantics.Monad as S
 import qualified Reopt.CFG.Representation as R
 import           Reopt.Machine.Types (FloatInfo(..))
 
-import Debug.Trace
+-- import Debug.Trace
 
 ------------------------------------------------------------------------
 -- Expr
@@ -134,9 +126,10 @@ instance TestEquality Expr where
   testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
 
 instance MapF.EqF Expr where
-  LitExpr nr1 i1 `eqF` LitExpr nr2 i2 = i1 == i2
+  LitExpr _nr1 i1 `eqF` LitExpr _nr2 i2 = i1 == i2
   AppExpr app1 `eqF` AppExpr app2 = app1 == app2
   VarExpr v1 `eqF` VarExpr v2 = v1 == v2
+  ValueExpr v1 `eqF` ValueExpr v2 = v1 == v2
   _ `eqF` _ = False
 
 instance Eq (Expr tp) where
@@ -159,7 +152,10 @@ instance MapF.OrdF Expr where
   AppExpr _ `compareF` _ = GTF
   _ `compareF` AppExpr _ = LTF
   VarExpr v1 `compareF` VarExpr v2 = v1 `compareF` v2
-
+  _ `compareF` VarExpr _ = LTF
+  ValueExpr v1 `compareF` ValueExpr v2 = v1 `compareF` v2  
+  _ `compareF` ValueExpr _ = LTF
+  
 instance Ord (Expr tp) where
   e1 `compare` e2 = compareFin e1 e2
 
@@ -283,7 +279,7 @@ data Stmt where
   X87Pop  :: Stmt
 
 instance Eq Stmt where
-  MakeUndefined v1 tp1 == MakeUndefined v2 tp2 
+  MakeUndefined v1 _tp1 == MakeUndefined v2 _tp2 
     | Just Refl <- testEquality v1 v2 = v1 == v2
   Get v1 l1 == Get v2 l2
     | Just Refl <- testEquality v1 v2 = l1 == l2
@@ -332,7 +328,7 @@ compare' a b def = case compare a b of
   LT -> LT
 
 instance Ord Stmt where  
-  MakeUndefined v1 tp1 `compare` MakeUndefined v2 tp2 = compareFin v1 v2
+  MakeUndefined v1 _tp1 `compare` MakeUndefined v2 _tp2 = compareFin v1 v2
   MakeUndefined _ _ `compare` _ = GT
   _ `compare` MakeUndefined _ _ = LT
   Get v1 l1 `compare` Get v2 l2 = compareF' v1 v2 $ compareFin l1 l2
@@ -507,11 +503,13 @@ instance S.Semantics Semantics where
 
 -- This doesn't exactly interleave, although it could ...
 
+{-
 wrapSemantics :: Semantics a -> (Stmt -> Semantics ()) -> Semantics a
 wrapSemantics m f = do
   (v, r) <- censor (const mempty) . listen $ m
   mapM_ f r
   return v
+-}
 
 data P n where
   ZeroCase    :: P 0
@@ -538,21 +536,21 @@ expandRead v addr (BVTypeRepr nr) =
   where
     getOne :: Integer -> Semantics (Expr (BVType 8))
     getOne n = do
-      v <- freshVar "expandRead" S.knownType
+      v' <- freshVar "expandRead" S.knownType
       let addr' = offsetAddr (n * 8) addr
-      tell [Get v (S.MemoryAddr addr' S.knownType)]
-      return $ VarExpr v
+      tell [Get v' (S.MemoryAddr addr' S.knownType)]
+      return $ VarExpr v'
 
     go :: forall n'. NatRepr n' -> P n' -> P (n' + 1)
-    go nr ZeroCase  = NonZeroCase $ getOne (natValue nr)
-    go nr (NonZeroCase m) =
-        withAddPrefixLeq nr S.n1 $
-        withAddMulDistribRight nr S.n1 S.n8 $
+    go nr' ZeroCase  = NonZeroCase $ getOne (natValue nr')
+    go nr' (NonZeroCase m) =
+        withAddPrefixLeq nr' S.n1 $
+        withAddMulDistribRight nr' S.n1 S.n8 $
         NonZeroCase $ do
-          v <- m
-          v'  <- getOne (natValue nr)
-          let sz = natMultiply nr S.n8
-              e  = AppExpr (R.ConcatV sz S.n8 v v')
+          mv <- m
+          v'  <- getOne (natValue nr')
+          let sz = natMultiply nr' S.n8
+              e  = AppExpr (R.ConcatV sz S.n8 mv v')
           res_v <- freshVar "expandRead" (exprType e)
           tell [Let res_v e]
           return $ VarExpr res_v

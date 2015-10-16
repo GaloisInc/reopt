@@ -253,6 +253,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "ret"    $ \(_, vs) -> case vs of
                                             []              -> exec_ret Nothing
                                             [F.WordImm imm] -> exec_ret (Just imm)
+                                            _               -> error "Unexpected number of args to ret"
 
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
 

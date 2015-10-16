@@ -42,7 +42,7 @@ module Reopt.Object.Memory
   ) where
 
 import           Control.Exception (assert)
-import           Control.Monad.Error
+import           Control.Monad.Except
 import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
@@ -277,15 +277,15 @@ data MemoryError w
      -- | Memory could not be read due to insufficient permissions.
    | PermissionsError w
 
-instance Error (MemoryError w) where
-  strMsg = UserMemoryError
+-- instance Error (MemoryError w) where
+--   strMsg = UserMemoryError
 
 instance (Integral w, Show w) => Show (MemoryError w) where
   show (UserMemoryError msg) = msg
   show (AccessViolation a)   = "Access violation at " ++ showHex a ""
   show (PermissionsError a)  = "Insufficient permissions at " ++ showHex a ""
 
-newtype MemoryByteReader w a = MBR (ErrorT (MemoryError w) (State (MemStream w)) a)
+newtype MemoryByteReader w a = MBR (ExceptT (MemoryError w) (State (MemStream w)) a)
   deriving (Functor, Applicative, Monad)
 
 instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
@@ -328,7 +328,7 @@ runMemoryByteReader :: ElfSegmentFlags
                     -> MemoryByteReader w a -- ^ Byte reader to read values from.
                     -> (Either (MemoryError w) (a, w))
 runMemoryByteReader reqPerm mem addr (MBR m) =
-  case runState (runErrorT m) (MS BS.empty mem addr reqPerm) of
+  case runState (runExceptT m) (MS BS.empty mem addr reqPerm) of
     (Left e, _) -> Left e
     (Right v, s) -> Right (v,msAddr s)
 

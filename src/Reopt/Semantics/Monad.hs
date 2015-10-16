@@ -893,6 +893,7 @@ class IsValue (v  :: Type -> *) where
         let bvs2n :: [v (BVType (k+k))] -- solve for size (n+n), then split into size n
             bvs2n = withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 k)) $ bvVectorize (addNat sz sz) bv
         in concatMap (\v -> let (a, b) = bvSplit v in [a, b]) bvs2n
+  bvVectorize _ _ = error "Unhandled case"
 
   bvUnvectorize :: forall k n. (1 <= k) => NatRepr n -> [v (BVType k)] -> v (BVType n)
   bvUnvectorize sz [x]
