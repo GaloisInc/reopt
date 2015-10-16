@@ -90,7 +90,7 @@ evalExpr (AppExpr a) = do
     -- Resize ops
     R.MMXExtend c -> let ones = BV.ones 16
                       in CS.liftValue (BV.# ones) extPrecisionNatRepr c
-    R.ConcatV nr nr' c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr') c1 c2
+    R.ConcatV nr nr' c1 c2 -> CS.liftValue2 (BV.#) (addNat nr nr') c2 c1
     R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
