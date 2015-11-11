@@ -33,6 +33,7 @@ module Reopt.CFG.Representation
     -- * Block level declarations
   , BlockLabel(..)
   , isRootBlockLabel
+  , rootBlockLabel
   , Block(..)
   , CodeAddr
   , hasCallComment
@@ -135,6 +136,9 @@ data BlockLabel
 
 isRootBlockLabel :: BlockLabel -> Bool
 isRootBlockLabel (GeneratedBlock _ w) = w == 0
+
+rootBlockLabel :: BlockLabel -> BlockLabel
+rootBlockLabel (GeneratedBlock p _) = GeneratedBlock p 0
 
 instance Ord BlockLabel where
   compare (GeneratedBlock p v) (GeneratedBlock p' v') =
