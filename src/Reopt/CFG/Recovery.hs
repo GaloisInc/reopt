@@ -79,8 +79,8 @@ identifyCall :: Memory Word64
              -> Maybe (Seq Stmt, Word64, [Some Value])
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
-        defaultArgs = map (\r -> Some $ s ^. register r) argumentRegisters
-                      ++ map (\r -> Some $ s ^. register r) floatArgumentRegisters
+        defaultArgs = map (\r -> Some $ s ^. register r) x86ArgumentRegisters
+                      ++ map (\r -> Some $ s ^. register r) x86FloatArgumentRegisters
         go stmts =
           case Seq.viewr stmts of
             Seq.EmptyR -> Nothing
@@ -324,15 +324,6 @@ regMapFromState s =
 
 ------------------------------------------------------------------------
 -- recoverFunction
-
-argumentRegisters :: [N.RegisterName 'N.GP]
-argumentRegisters = [N.rdi, N.rsi, N.rdx, N.rcx, N.r8, N.r9]
-
-floatArgumentRegisters :: [N.RegisterName 'N.XMM]
-floatArgumentRegisters = map N.XMMReg [0..7]
-
-calleeSavedRegisters :: [N.RegisterName 'N.GP]
-calleeSavedRegisters = [N.rbx, N.r12, N.r13, N.r14, N.r15, N.rbp]
                       
 -- | Recover the function at a given address.
 recoverFunction :: InterpState -> CodeAddr -> Either String Function
@@ -340,12 +331,12 @@ recoverFunction s a = do
   let initRegs = mkX86State $ \r ->
         case r of
           N.GPReg {}
-            | Just i <- elemIndex r argumentRegisters -> 
+            | Just i <- elemIndex r x86ArgumentRegisters -> 
               FnRegValue (FnIntArg i)
-            | r `elem` calleeSavedRegisters -> CalleeSaved r
+            | Some r `Set.member` x86CalleeSavedRegisters -> CalleeSaved r
           -- FIXME: actually just N.XMMReg i | i < 8 -> ..., but this
           -- is more consistent
-          N.XMMReg {} | Just i <- elemIndex r floatArgumentRegisters -> 
+          N.XMMReg {} | Just i <- elemIndex r x86FloatArgumentRegisters -> 
               FnRegValue (FnFloatArg i)                           
           _ -> FnRegUninitialized
   let lbl = GeneratedBlock a 0
@@ -367,15 +358,15 @@ recoverFunction s a = do
     recoverIter Map.empty initRegs MapF.empty lbl
     block_map <- use rsBlocks
     return $! Function { fnAddr = a
-                       , fnIntArgTypes   = map (Some . N.registerType) argumentRegisters -- FIXME
-                       , fnFloatArgTypes = map (Some . N.registerType) floatArgumentRegisters -- FIXME
+                       , fnIntArgTypes   = map (Some . N.registerType) x86ArgumentRegisters   -- FIXME
+                       , fnFloatArgTypes = map (Some . N.registerType) x86FloatArgumentRegisters -- FIXME
                        , fnBlocks = Map.elems (filterUsedPhis block_map)
                        }
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: Map AssignId (Some N.RegisterName)
             -> X86State FnRegValue
-            ->  MapF Assignment FnAssignment
+            -> MapF Assignment FnAssignment
             -> BlockLabel
             -> Recover ()
 recoverIter phivs regs assigns lbl = do
@@ -477,7 +468,7 @@ recoverBlock phivs regs assigns lbl = do
                 N.IPReg -> return $ FnConstantValue knownNat (toInteger ret_addr)
                 N.GPReg {}
                   | Just _ <- testEquality r N.rax -> return (FnReturn intr)
-                  | r `elem` calleeSavedRegisters -> recoverValue "callee_saved" v
+                  | Some r `Set.member` x86CalleeSavedRegisters -> recoverValue "callee_saved" v
                 N.XMMReg 0 -> return (FnReturn floatr)
                 _ -> return $ FnUndefined (N.registerType r)
         regs' <- mapX86StateWithM go proc_state

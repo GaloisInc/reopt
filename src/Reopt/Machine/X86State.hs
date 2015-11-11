@@ -32,15 +32,21 @@ module Reopt.Machine.X86State
   , X87StatusWord
     -- * Utilities
   , x86StateRegisters
+  , x86CalleeSavedRegisters
+  , x86ArgumentRegisters
+  , x86FloatArgumentRegisters
+  , x86ResultRegisters
   ) where
 
 import           Control.Lens
 import           Data.Maybe
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import qualified Data.Vector as V
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Parameterized.Classes (EqF(..))
 import           Data.Parameterized.Some
-import qualified Data.Vector as V
-import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -102,6 +108,7 @@ x87_busy = lens _x87_busy (\s v -> s { _x87_busy = v })
 type X87StatusWord f = V.Vector (f BoolType)
 
 
+-- FIXME: should these be in StateNames?
 -- | List of registers stored in X86State
 x86StateRegisters :: [Some N.RegisterName]
 x86StateRegisters
@@ -114,6 +121,28 @@ x86StateRegisters
   ++ (Some <$> N.x87TagRegs)
   ++ (Some <$> N.x87FPURegs)
   ++ (Some <$> N.xmmRegs)
+
+-- | List of registers that a callee must save.
+x86CalleeSavedRegisters :: Set (Some N.RegisterName)
+x86CalleeSavedRegisters = Set.fromList $
+  [ -- Some N.rsp sjw: rsp is special
+  Some N.rbp
+  , Some N.rbx
+  , Some N.r12
+  , Some N.r13
+  , Some N.r14
+  , Some N.r15
+  ]
+
+x86ArgumentRegisters :: [N.RegisterName 'N.GP]
+x86ArgumentRegisters = [N.rdi, N.rsi, N.rdx, N.rcx, N.r8, N.r9]
+
+x86FloatArgumentRegisters :: [N.RegisterName 'N.XMM]
+x86FloatArgumentRegisters = map N.XMMReg [0..7]
+
+x86ResultRegisters :: [Some N.RegisterName]
+x86ResultRegisters = [ Some N.rax, Some N.rdx, Some (N.XMMReg 0) ]
+
 
 ------------------------------------------------------------------------
 -- X86State
