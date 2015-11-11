@@ -42,6 +42,7 @@ module Reopt.Analysis.AbsState
   , addAssignment
   , addMemWrite
   , transferValue
+  , transferValue'    
   , transferRHS
   , abstractULt
   , abstractULeq
@@ -1001,23 +1002,33 @@ setAbsIP mem a b
 ------------------------------------------------------------------------
 -- Transfer functions
 
--- | Compute abstract value from value and current registers.
-transferValue :: AbsProcessorState
-              -> Value tp
-              -> AbsValue tp
-transferValue c v =
+
+
+transferValue' :: Memory Word64
+               -> MapF Assignment AbsValue
+               -> X86State AbsValue
+               -> Value tp
+               -> AbsValue tp
+transferValue' mem amap aregs v =
   case v of
    BVValue w i
-     | 0 <= i && i <= maxUnsigned w -> abstractSingleton (absMem c) w i
+     | 0 <= i && i <= maxUnsigned w -> abstractSingleton mem w i
      | otherwise -> error $ "transferValue given illegal value " ++ show (pretty v)
    -- Invariant: v is in m
    AssignedValue a ->
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
-               (MapF.lookup a (c^.absAssignments))
+               (MapF.lookup a amap)
    Initial r
 --     | Just Refl <- testEquality r N.rsp -> do
 --       StackOffset (Set.singleton 0)
-     | otherwise -> c ^. absInitialRegs ^. register r
+     | otherwise -> aregs ^. register r
+
+
+-- | Compute abstract value from value and current registers.
+transferValue :: AbsProcessorState
+              -> Value tp
+              -> AbsValue tp
+transferValue c v = transferValue' (absMem c) (c^.absAssignments) (c ^. absInitialRegs) v
 
 transferApp :: AbsProcessorState
             -> App Value tp
