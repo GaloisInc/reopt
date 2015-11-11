@@ -52,7 +52,10 @@ import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Recovery
+import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.Representation
+import           Reopt.CFG.StackArgs
+import           Reopt.CFG.StackDepth
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
@@ -625,18 +628,6 @@ refineLt x y b regs
 --     abs_r  = regs ^. absInitialRegs ^. assignLens ass
 --     new_v  = meet abs_l abs_r
 
--- | List of registers that a callee must save.
-x86CalleeSavedRegisters :: Set (Some N.RegisterName)
-x86CalleeSavedRegisters = Set.fromList $
-  [ Some N.rsp
-  , Some N.rbp
-  , Some N.rbx
-  , Some N.r12
-  , Some N.r13
-  , Some N.r14
-  , Some N.r15
-  ]
-
 intervalForSegment :: MemSegment Word64 -> SI.StridedInterval (BVType 64)
 intervalForSegment roseg =
   let base = fromIntegral $ memBase roseg
@@ -889,6 +880,19 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
           where l = Map.elems (brBlocks br)
         go g addr Nothing = g
 
+ppSet :: (w -> Doc) -> Set w -> Doc
+ppSet ppv vs =
+  lbrace
+  <> fillCat (punctuate (text ", ") (map ppv (Set.toList vs)))
+  <> rbrace 
+  -- encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
+
+ppMap :: (k -> Doc) -> (a -> Doc) -> Map k a -> Doc
+ppMap ppk ppv vs = encloseSep lbrace rbrace comma (map pp (Map.toList vs))
+  where
+    pp (k, v) = ppk k <+> text "->" <+> ppv v
+
+
 ppFunctionEntries :: [CodeAddr] -> String
 ppFunctionEntries l = unlines (pp <$> l)
   where pp a = "discovered function entry " ++ showHex a ""
@@ -901,6 +905,28 @@ ppReverseEdges :: [(CodeAddr, Set CodeAddr)] -> String
 ppReverseEdges l = unlines (pp <$> l)
   where pp (a,s) = "reverse " ++ showHex a (" -> " ++ show (Hex . toInteger <$> Set.toList s))
 
+ppStackDepth :: [(CodeAddr, Set StackDepthValue)] -> String
+ppStackDepth l = unlines (pp <$> l)
+  where pp (a,s) = "stack depth " ++ showHex a (" -> " ++ show (vcat $ map pretty (Set.toList s)))
+
+ppStackHeight :: [(CodeAddr, Int64)] -> String
+ppStackHeight l = unlines (pp <$> l)
+  where pp (a,s) = "stack args " ++ showHex a (" -> " ++ show s)
+
+ppRegisterUse :: [(CodeAddr, (Set (Some Assignment)
+                             , Map BlockLabel (Set (Some N.RegisterName))))]
+                 -> String
+ppRegisterUse l = unlines (pp <$> l)
+  where
+    pp :: (CodeAddr, (Set (Some Assignment)
+                             , Map BlockLabel (Set (Some N.RegisterName)))) -> String
+    pp (a, (assigns, regs)) =
+          flip displayS "" $ renderPretty 0.8 100
+          $ text "block uses"
+            <+> text (showHex a (" -> "))
+            <+> vcat [ hang 4 $ ppSet (\(Some (Assignment l _)) -> ppAssignId l) assigns
+                     , ppMap pretty (ppSet (viewSome (text . show))) regs ]
+
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
@@ -909,13 +935,18 @@ mkFinalCFG s =
       trace (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
       trace (ppReverseEdges (Map.toList (s^.reverseEdges))) $
-      FinalCFG { finalCFG = mkCFG (s^.blocks)
-               , finalAbsState = s^.absState
-               , finalCodePointersInMem = s^.functionEntries
-               , finalFailedAddrs = Set.empty
-               , finalFunctions = fns
-               }
-
+      trace (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
+      trace (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
+      let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
+                        , finalAbsState = s^.absState
+                        , finalCodePointersInMem = s^.functionEntries
+                        , finalFailedAddrs = Set.empty
+                        , finalFunctions = fns
+                        }
+          amap = assignmentAbsValues (memory s) fg
+          stacks = map (\x -> (x, maximumStackArg amap s x)) (Set.toList (s^.functionEntries))
+      in trace (ppStackHeight stacks) fg
+        
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =
   case Map.minViewWithKey (st^.frontier) of
