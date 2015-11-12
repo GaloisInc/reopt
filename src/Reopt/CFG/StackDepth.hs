@@ -8,6 +8,7 @@
 module Reopt.CFG.StackDepth
   ( maximumStackDepth
   , StackDepthValue(..)
+  , StackDepthOffset(..)
   ) where
 
 import           Control.Lens
@@ -60,6 +61,10 @@ negateStackDepthOffset :: StackDepthOffset -> StackDepthOffset
 negateStackDepthOffset (Pos x) = Neg x
 negateStackDepthOffset (Neg x) = Pos x
 
+isNegativeDepth :: StackDepthOffset -> Bool
+isNegativeDepth (Neg _) = True
+isNegativeDepth _ = False
+
 -- One stack expression, basically staticPart + \Sigma dynamicPart
 data StackDepthValue = SDV { staticPart :: !Int64, dynamicPart :: !(Set StackDepthOffset) } 
                        deriving (Eq, Ord, Show)
@@ -93,14 +98,15 @@ negateStackDepthValue sdv = SDV { staticPart  = - (staticPart sdv)
 -- primarily.
 subsumes :: StackDepthValue -> StackDepthValue -> Bool
 subsumes v1 v2
-  | dynamicPart v1 == dynamicPart v2 = staticPart v1 < staticPart v2
+  | dynamicPart v2 `Set.isSubsetOf` dynamicPart v1 = staticPart v1 <= staticPart v2
   -- FIXME: subsets etc.                                       
   | otherwise = False
 
 -- could do this online, this helps with debugging though.
 minimizeStackDepthValues :: Set StackDepthValue -> Set StackDepthValue
-minimizeStackDepthValues = Set.fromList . Set.fold go []
+minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositive
   where
+    discardPositive v = v { dynamicPart = Set.filter isNegativeDepth (dynamicPart v) }
     -- FIXME: can we use ordering to simplify this?
     go v xs = let (subs, xs') = partition (subsumes v) xs
                   dominated   = any (`subsumes` v) xs'

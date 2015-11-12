@@ -14,26 +14,25 @@ module Reopt.CFG.FnRep
    , FnTermStmt(..)
    , FnRegValue(..)
    , FnPhiVar(..)
+   , FnPhiNodeInfo(..)
    , FnReturnVar(..)
    , fnAssignRHSType
    , fnValueType
    ) where
 
-import           Control.Lens
-import           Data.Map (Map)
-import qualified Data.Map as Map
-import           Data.Parameterized.Some
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.X86State
+import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
                                , ppApp, ppLit, ppAssignId, sexpr, appType)
+import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 commas :: [Doc] -> Doc
@@ -124,7 +123,7 @@ instance Pretty (FnValue tp) where
   pretty (FnValueUnsupported {})  = text "unsupported"
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantValue sz n)   = ppLit sz n
-  pretty (FnAssignedValue assign) = ppAssignId (fnAssignId assign)
+  pretty (FnAssignedValue ass)    = ppAssignId (fnAssignId ass)
   pretty (FnPhiValue phi)         = ppAssignId (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue n) = text "FunctionEntry"
@@ -170,33 +169,29 @@ instance Pretty Function where
     <$$>
     rbrace
 
-data FnRegValue tp where
+data FnRegValue cl where
   -- This is a callee saved register.
-  CalleeSaved :: N.RegisterName 'N.GP -> FnRegValue (N.RegisterType 'N.GP)
+  CalleeSaved :: N.RegisterName cl -> FnRegValue cl
   -- A value assigned to a register
-  FnRegValue :: !(FnValue tp) -> FnRegValue tp
-  -- An uninitialized value
-  FnRegUninitialized :: FnRegValue tp
+  FnRegValue :: !(FnValue (N.RegisterType cl)) -> FnRegValue cl
 
 instance Pretty (FnRegValue tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
   pretty (FnRegValue v)      = pretty v
-  pretty FnRegUninitialized  = text "uninitialized"
+
+newtype FnPhiNodeInfo tp = FnPhiNodeInfo { unFnPhiNodeInfo ::  [(BlockLabel, FnValue tp)] }
 
 data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
-               -- We do this to decouple block translation from
-               -- cfg/phi construction.
-             , fbPhiVars  :: Map AssignId (Some N.RegisterName)
                -- Maps predecessor label onto the reg value at that
-               -- block
-             , fbPhiNodes :: Map BlockLabel (X86State FnValue)
+               -- block               
+             , fbPhiNodes  :: MapF FnPhiVar FnPhiNodeInfo
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
              }
 
-instance PrettyRegValue FnRegValue where
-  ppValueEq _ v = Just $ pretty v
+-- instance PrettyRegValue FnRegValue where
+--   ppValueEq _ v = Just $ pretty v
 
 instance Pretty FnBlock where
   pretty b =
@@ -205,13 +200,12 @@ instance Pretty FnBlock where
               <$$> vcat (pretty <$> fbStmts b)
               <$$> pretty (fbTerm b))
     where
-      ppPhis = vcat (map go (Map.assocs $ fbPhiVars b))
-      go (aid, Some r) =
-        ppAssignId aid <+> text ":= phi "
-        <+> hsep (punctuate comma $ map (goLbl r) (Map.assocs $ fbPhiNodes b))
-      goLbl r (lbl, node) =
-                parens (pretty lbl <> comma <+> pretty (node ^. register r))
-
+      ppPhis = vcat $ MapF.foldrWithKey go mempty (fbPhiNodes b)
+      go :: FnPhiVar tp -> FnPhiNodeInfo tp -> [Doc] -> [Doc]
+      go aid vs d =
+        (pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl (unFnPhiNodeInfo vs))) : d
+      goLbl :: (BlockLabel, FnValue tp) -> Doc
+      goLbl (lbl, node) = parens (pretty lbl <> comma <+> pretty node)
 
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
@@ -233,6 +227,7 @@ data FnTermStmt
    | FnRet !(FnValue (BVType 64)) !(FnValue (BVType 128))
    | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
      -- ^ A branch to a block within the function, along with the return vars.
+     -- FIXME: need to add rdx and extra stack arg.
    | FnCall !(FnValue (BVType 64)) [Some FnValue]
             !(FnReturnVar (BVType 64))
             !(FnReturnVar XMMType)

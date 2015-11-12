@@ -73,9 +73,12 @@ data RegisterUseState = RUS {
   -- | Holds the set of registers that we need.  This is the final
   -- output of the algorithm, along with the _blockRegUses below.
   _assignmentUses     :: !(Set (Some Assignment))  
-  -- | Holds intermediate state about the set of registers that a
-  -- block uses
+  -- | Holds state about the set of registers that a block uses
+  -- (required by this block or a successor).
   , _blockRegUses :: !(Map BlockLabel (Set (Some N.RegisterName)))
+  -- | Holds the set of registers a blocm should define (used by a successor).
+  , _blockRegProvides :: !(Map BlockLabel (Set (Some N.RegisterName)))
+
   -- | Maps defined registers to their deps.  Not defined for all
   -- variables, hence use of Map instead of X86State
   , _blockInitDeps  :: !(Map BlockLabel (Map (Some N.RegisterName) RegDeps))
@@ -91,6 +94,7 @@ initRegisterUseState :: RegisterUseState
 initRegisterUseState =
   RUS { _assignmentUses  = Set.empty
       , _blockRegUses    = Map.empty
+      , _blockRegProvides = Map.empty
       , _blockInitDeps   = Map.empty
       , _blockPreds      = Map.empty
       , _assignmentCache = Map.empty
@@ -101,6 +105,9 @@ assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
 
 blockRegUses :: Simple Lens RegisterUseState (Map BlockLabel (Set (Some N.RegisterName)))
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
+
+blockRegProvides :: Simple Lens RegisterUseState (Map BlockLabel (Set (Some N.RegisterName)))
+blockRegProvides = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
 blockInitDeps :: Simple Lens RegisterUseState (Map BlockLabel (Map (Some N.RegisterName) RegDeps))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
@@ -199,7 +206,6 @@ addEdge source dest =
      blockPreds    %= Map.insertWith mappend dest [source]
      blockFrontier %= Set.insert dest
 
--- FIXME: cache results.
 valueUses :: Value tp -> RegisterUseM RegDeps
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
@@ -269,7 +275,9 @@ identifyReturn s = do
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 registerUse :: InterpState -> CodeAddr -> (Set (Some Assignment)
-                                          , Map BlockLabel (Set (Some N.RegisterName)))
+                                          , Map BlockLabel (Set (Some N.RegisterName))
+                                          , Map BlockLabel (Set (Some N.RegisterName))                                            
+                                          , Map BlockLabel [BlockLabel])
 registerUse ist addr = 
   flip evalState initRegisterUseState $ do
     -- Run the first phase (block summarization)
@@ -277,7 +285,10 @@ registerUse ist addr =
     -- propagate back uses
     new <- use blockRegUses
     calculateFixpoint new
-    (,) <$> use assignmentUses <*> use blockRegUses
+    (,,,) <$> use assignmentUses
+          <*> use blockRegUses
+          <*> use blockRegProvides
+          <*> use blockPreds
   where
     lbl0 = GeneratedBlock addr 0
 
@@ -285,19 +296,23 @@ registerUse ist addr =
 -- the right behavior here.
 calculateFixpoint :: Map BlockLabel (Set (Some N.RegisterName)) -> RegisterUseM ()
 calculateFixpoint new
-  | Just ((lbl, newRegs), rest) <- Map.maxViewWithKey new =
+  | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =
       -- propagate backwards any new registers in the predecessors
-      do preds <- use (blockPreds . ix lbl) 
+      do preds <- use (blockPreds . ix currLbl) 
          nexts <- filter (not . Set.null . snd) <$> mapM (doOne newRegs) preds
          calculateFixpoint (Map.unionWith Set.union rest (Map.fromList nexts))
   | otherwise = return ()
   where
     doOne :: Set (Some N.RegisterName) -> BlockLabel
              -> RegisterUseM (BlockLabel, Set (Some N.RegisterName))
-    doOne newRegs lbl = do
-      depMap   <- use (blockInitDeps . ix lbl)
+    doOne newRegs predLbl = do
+      depMap   <- use (blockInitDeps . ix predLbl)
+
+      -- record that predLbl provides newRegs
+      blockRegProvides %= Map.insertWith Set.union predLbl newRegs
+
       let (assigns, regs) = mconcat [ depMap ^. ix r | r <- Set.toList newRegs ]
-          lbl' = rootBlockLabel lbl
+          lbl' = rootBlockLabel predLbl
 
       assignmentUses %= Set.union assigns
       -- update uses, returning value before this iteration

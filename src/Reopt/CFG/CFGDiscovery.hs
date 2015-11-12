@@ -914,13 +914,16 @@ ppStackHeight l = unlines (pp <$> l)
   where pp (a,s) = "stack args " ++ showHex a (" -> " ++ show s)
 
 ppRegisterUse :: [(CodeAddr, (Set (Some Assignment)
-                             , Map BlockLabel (Set (Some N.RegisterName))))]
+                             , Map BlockLabel (Set (Some N.RegisterName))
+                             , a))]
                  -> String
 ppRegisterUse l = unlines (pp <$> l)
   where
     pp :: (CodeAddr, (Set (Some Assignment)
-                             , Map BlockLabel (Set (Some N.RegisterName)))) -> String
-    pp (a, (assigns, regs)) =
+                     , Map BlockLabel (Set (Some N.RegisterName))
+                     , a))
+          -> String
+    pp (a, (assigns, regs, _)) =
           flip displayS "" $ renderPretty 0.8 100
           $ text "block uses"
             <+> text (showHex a (" -> "))
@@ -936,7 +939,7 @@ mkFinalCFG s =
       trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
       trace (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       trace (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      trace (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
+      -- trace (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState
                         , finalCodePointersInMem = s^.functionEntries

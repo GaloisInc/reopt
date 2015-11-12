@@ -34,6 +34,8 @@ import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
+import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
@@ -145,15 +147,18 @@ functionToLLVM f = L.define' L.emptyFunAttrs funReturnType symbol argTypes False
 
 blockToLLVM :: FnBlock -> ToLLVM () -- L.BasicBlock
 blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
-                   mapM_ phiToLLVM (Map.assocs $ fbPhiVars b)
+                   MapF.foldrWithKey phiToLLVM (return ()) (fbPhiNodes b)
                    mapM_ stmtToLLVM $ fbStmts b -- ++ [termStmtToLLVM $ blockTerm b]
                    termStmtToLLVM (fbTerm b)
   where
-    phiToLLVM (aid, Some r) = 
-      liftBBF (L.assign (assignIdToLLVMIdent aid))
-              (liftBB . L.phi (typeToLLVMType $ N.registerType r) =<< mapM (goLbl r) (Map.assocs $ fbPhiNodes b))
-    goLbl r (lbl, node) = do v <- valueToLLVM (node ^. register r)
-                             return (L.from v (L.Named $ blockName lbl))
+    phiToLLVM phi ni l =
+      do l
+         void $ liftBBF (L.assign (assignIdToLLVMIdent $ unFnPhiVar phi))
+                        (liftBB . L.phi (typeToLLVMType $ fnPhiVarType phi) =<< mapM goLbl (unFnPhiNodeInfo ni))
+         return ()
+
+    goLbl (lbl, node) = do v <- valueToLLVM node
+                           return (L.from v (L.Named $ blockName lbl))
 
 termStmtToLLVM :: FnTermStmt -> ToLLVM ()
 termStmtToLLVM tm =
