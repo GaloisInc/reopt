@@ -73,7 +73,7 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Utils.Hex
 
-import           Debug.Trace
+import           Reopt.Utils.Debug
 
 ------------------------------------------------------------------------
 -- Abstract states
@@ -148,7 +148,7 @@ asFinSet :: String -> AbsValue tp -> SomeFinSet tp
 asFinSet _ (FinSet s) = IsFin s
 asFinSet nm (CodePointers s)
   | s == Set.singleton 0 = IsFin (Set.singleton 0)
-  | otherwise = trace ("dropping Codeptr " ++ nm) $
+  | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $
       IsFin (Set.mapMonotonic toInteger s)
 asFinSet _ _ = NotFin
 
@@ -156,7 +156,7 @@ asFinSet64 :: String -> AbsValue (BVType 64) -> Maybe (Set Word64)
 asFinSet64 _ (FinSet s) = Just $! (Set.mapMonotonic fromInteger s)
 asFinSet64 nm (CodePointers s)
   | isZeroPtr s = Just s
-  | otherwise = trace ("dropping Codeptr " ++ nm) $ Just s
+  | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $ Just s
 asFinSet64 _ _ = Nothing
 
 codePointerSet :: AbsValue tp -> Set Word64
@@ -229,7 +229,7 @@ concretize (FinSet s) = Just s
 concretize (CodePointers s) = Just (Set.mapMonotonic toInteger s)
 concretize (SubValue _ _) = Nothing -- we know nothing about _all_ values
 concretize (StridedInterval s) =
-  trace ("Concretizing " ++ show (pretty s)) $
+  debug DAbsInt ("Concretizing " ++ show (pretty s)) $
   Just (Set.fromList (SI.toList s))
 concretize _ = Nothing
 
@@ -285,7 +285,7 @@ isZeroPtr s = Set.size s == 1 && Set.findMin s == 0
 joinAbsValue :: AbsValue tp -> AbsValue tp -> Maybe (AbsValue tp)
 joinAbsValue x y
     | Set.null s = r
-    | otherwise = trace ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
+    | otherwise = debug DAbsInt ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
   where (r,s) = runState (joinAbsValue' x y) Set.empty
 
 addWords :: Set Word64 -> State (Set Word64) ()
@@ -421,7 +421,7 @@ meet x y
   | isBottom m
   , not (isBottom x)
   , not (isBottom y) =
-      trace ("Got empty: " ++ show (pretty x) ++ " " ++ show (pretty y)) $ m
+      debug DAbsInt ("Got empty: " ++ show (pretty x) ++ " " ++ show (pretty y)) $ m
   | otherwise = m
   where m = meet' x y
 
@@ -550,7 +550,7 @@ bvsub mem w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
     | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
     | otherwise = error "Losing code pointers due to bvsub."
       -- TODO: Fix this.
---      trace ("drooping " ++ show (ppIntegerSet s) ++ " " ++ show (ppIntegerSet t)) $
+--      debug DAbsInt ("drooping " ++ show (ppIntegerSet s) ++ " " ++ show (ppIntegerSet t)) $
 --        setL (stridedInterval . SI.fromFoldable w) FinSet (toInteger <$> vals)
   where vals :: [Word64]
         vals = do
@@ -671,11 +671,11 @@ abstractULt tp x y
   | Just u_y <- hasMaximum tp y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
-    -- trace' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
+    -- debug DAbsInt' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
-    where trace' m x = trace (m ++ show x) x
+    where trace' m x = debug DAbsInt (m ++ show x) x
 
 abstractULt _tp x y = (x, y)
 
@@ -692,7 +692,7 @@ abstractULeq tp x y
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
-    where trace' m x = trace (m ++ show x) x
+    where trace' m x = debug DAbsInt (m ++ show x) x
 
 abstractULeq _tp x y = (x, y)
 
@@ -742,7 +742,7 @@ absStackJoinD y x = do
               -- Otherwise merging returned a new value.
               (Just z_v, s') -> do
                 case y_v of
-                  ReturnAddr -> trace ("absStackJoinD dropping return value:\n"
+                  ReturnAddr -> debug DAbsInt ("absStackJoinD dropping return value:\n"
                                     ++ "Old state: " ++ show (ppAbsStack y)
                                     ++ "New state: " ++ show (ppAbsStack x)) $
                     return ()
@@ -752,7 +752,7 @@ absStackJoinD y x = do
                 return $ Just (o, StackEntry y_tp z_v)
           _ -> do
             case y_v of
-              ReturnAddr -> trace ("absStackJoinD dropping return value:\nOld state: " ++ show (ppAbsStack y) ++ "\nNew state: " ++ show (ppAbsStack x)) $ return ()
+              ReturnAddr -> debug DAbsInt ("absStackJoinD dropping return value:\nOld state: " ++ show (ppAbsStack y) ++ "\nNew state: " ++ show (ppAbsStack x)) $ return ()
               _ -> return ()
             _1 .= True
             _2 %= Set.union (Set.delete 0 (codePointerSet y_v))
@@ -795,7 +795,7 @@ startAbsStack = lens _startAbsStack (\s v -> s { _startAbsStack = v })
 
 traceUnless :: Bool -> String -> a -> a
 traceUnless True _ = id
-traceUnless False msg = trace msg
+traceUnless False msg = debug DAbsInt msg
 
 instance AbsDomain AbsBlockState where
   top = AbsBlockState { _absX86State = mkX86State (\_ -> TopV)
@@ -911,7 +911,7 @@ deleteRange l h m
       Just (k,v)
         | k <= h
         , StackEntry _ ReturnAddr <- v ->
-          trace ("Deleting return address at offset " ++ show (k,l,h))
+          debug DAbsInt ("Deleting return address at offset " ++ show (k,l,h))
                 (deleteRange (k+1) h (Map.delete k m))
         | k <= h ->
           deleteRange (k+1) h (Map.delete k m)
@@ -941,7 +941,7 @@ addMemWrite a v r =
     -- We overwrite _some_ stack location.  An alternative would be to
     -- update everything with v.
     (SomeStackOffset _, _) ->
-      trace ("addMemWrite: dropping stack at "
+      debug DAbsInt ("addMemWrite: dropping stack at "
              ++ show (pretty $ r ^. absInitialRegs ^. curIP)
              ++ " via " ++ show (pretty a)
              ++" in SomeStackOffset case") $

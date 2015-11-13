@@ -43,7 +43,6 @@ import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
-import           Debug.Trace
 import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
@@ -59,6 +58,7 @@ import           Reopt.CFG.StackDepth
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
+import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex
 
 ------------------------------------------------------------------------
@@ -274,7 +274,7 @@ markAddrAsFunction :: Word64 -> InterpState -> InterpState
 markAddrAsFunction addr s
   | addr == 0 = s
   | Set.member addr (s^.functionEntries) = s
-  | otherwise = trace ("Found function entry " ++ showHex addr ".") $ do
+  | otherwise = debug DCFG ("Found function entry " ++ showHex addr ".") $ do
      let mem = memory s
      let low = Set.lookupLT addr (s^.functionEntries)
      let high = Set.lookupGT addr (s^.functionEntries)
@@ -362,7 +362,7 @@ mergeIntraJump'  :: BlockLabel
                  -> InterpState
 mergeIntraJump' src ab tgt s0
   | not (absStackHasReturnAddr ab)
-  , trace ("WARNING: Missing return value in jump from " ++ show src ++ " to\n" ++ show ab) False = error "Unexpected mergeIntraJump'"
+  , debug DCFG ("WARNING: Missing return value in jump from " ++ show src ++ " to\n" ++ show ab) False = error "Unexpected mergeIntraJump'"
 mergeIntraJump' src ab tgt s0 = do
   -- Associate a new abstract state with the code region.
   let upd new s = do
@@ -677,13 +677,13 @@ getJumpTableBounds mem regs base index
     -- Check that relevant interval is completely contained within a read-only
     -- read only range in the memory.
   , SI.StridedInterval _ index_base index_range index_stride <-
-        trace "getJumpTable3" $ index_interval
+        debug DCFG "getJumpTable3" $ index_interval
   , index_end <- index_base + (index_range + 1) * index_stride
   , read_end <- toInteger base + 8 * index_end
   , rangeInReadonlySegment base (fromInteger read_end) mem =
 
     -- Get the addresses associated.
-    trace ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
+    debug DCFG ("Fixed table " ++ showHex base (" [" ++ shows index "]")) $
       Just $! fromInteger index_end
 getJumpTableBounds _ _ _ _ = Nothing
 
@@ -766,7 +766,7 @@ transferBlock b regs = do
               -- function will never return, and hence never was provided
               -- with an address to return to.
               rv ->
-                trace ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
+                debug DCFG ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
                   return ()
 
           -- Jump to concrete offset.
@@ -782,23 +782,23 @@ transferBlock b regs = do
               -- Check that the current stack height is correct so that a
               -- tail call when go to the right place.
               -- TODO: Add check to ensure stack height is correct.
-              trace ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
+              debug DCFG ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               modify $ markAddrAsFunction tgt_addr
               -- Check top of stack points to return value.
               let sp_val = s'^.register N.rsp
               let ret_val = transferRHS regs' (Read (MemLoc sp_val (BVTypeRepr n64)))
               case ret_val of
                 ReturnAddr ->
-                  trace ("tail_ret_val is correct " ++ show lbl) $
+                  debug DCFG ("tail_ret_val is correct " ++ show lbl) $
                     returnCount += 1
                 TopV ->
-                  trace ("tail_ret_val is top at " ++ show lbl) $
+                  debug DCFG ("tail_ret_val is top at " ++ show lbl) $
                     returnCount += 1
                 rv ->
                   -- The return_val is bad.
                   -- This could indicate that the caller knows that the function does
                   -- not return, and hence will not provide a reutrn value.
-                  trace ("tail_ret_val is bad at " ++ show lbl ++ ": " ++ show rv) $
+                  debug DCFG ("tail_ret_val is bad at " ++ show lbl ++ ": " ++ show rv) $
                     returnCount += 1
 
             else do
@@ -808,10 +808,10 @@ transferBlock b regs = do
 
           -- Block ends with what looks like a jump table.
           | AssignedValue (Assignment _ (Read (MemLoc ptr _)))
-                <- trace "try jump table" $ s'^.curIP
+                <- debug DCFG "try jump table" $ s'^.curIP
             -- Attempt to compute interval of addresses interval is over.
           , Just (base, index) <- matchJumpTable mem ptr -> do
-            trace ("Found jump table at " ++ show lbl) $ do
+            debug DCFG ("Found jump table at " ++ show lbl) $ do
 
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
@@ -842,7 +842,7 @@ transferBlock b regs = do
                         mergeIntraJump lbl (abst & setAbsIP mem tgt_addr) tgt_addr
                         resolveJump (tgt_addr:prev) (idx+1)
                     _ -> do
-                      trace ("Stop jump table: " ++ show idx ++ " " ++ show mread_end) $ do
+                      debug DCFG ("Stop jump table: " ++ show idx ++ " " ++ show mread_end) $ do
                       return (reverse prev)
             read_addrs <- resolveJump [] 0
             let last_index = fromIntegral (length read_addrs)
@@ -850,7 +850,7 @@ transferBlock b regs = do
 
           -- We have a jump that we do not understand.
           -- This could be a tail call.
-          | otherwise -> trace "Uninterpretable jump" $ do
+          | otherwise -> debug DCFG "Uninterpretable jump" $ do
             Just br <- Map.lookup (labelAddr lbl) <$> use blocks
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             let abst = finalAbsBlockState regs' s'
@@ -935,11 +935,11 @@ mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
-      trace (ppFunctionEntries (Set.toList (s^.functionEntries))) $
-      trace (ppGlobalData (Map.toList (s^.globalDataMap))) $
-      trace (ppReverseEdges (Map.toList (s^.reverseEdges))) $
-      trace (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      -- trace (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
+      debug DCFG (ppFunctionEntries (Set.toList (s^.functionEntries))) $
+      debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
+      debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
+      debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
+      -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState
                         , finalCodePointersInMem = s^.functionEntries
@@ -948,7 +948,7 @@ mkFinalCFG s =
                         }
           amap = assignmentAbsValues (memory s) fg
           stacks = map (\x -> (x, maximumStackArg amap s x)) (Set.toList (s^.functionEntries))
-      in trace (ppStackHeight stacks) fg
+      in debug DCFG (ppStackHeight stacks) fg
         
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =
@@ -982,7 +982,7 @@ cfgFromAddrs :: Memory Word64
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> FinalCFG
-cfgFromAddrs mem init_addrs = trace ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
+cfgFromAddrs mem init_addrs = debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
@@ -1025,11 +1025,11 @@ cfgFromAddrs mem init_addrs = trace ("Starting addrs " ++ show (Hex <$> init_add
       | isReadonlyAddr mem a = s
         -- Check if we already found this
       | Map.member v (s^.blocks) =
-        trace ("Identified function entry "
+        debug DCFG ("Identified function entry "
                 ++ showHex v (" due to global store at " ++ showHex a ".")) $
         markAddrAsFunction v s
       | otherwise =
-        trace ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
+        debug DCFG ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
         markAddrAsFunction v s
 
     -- Explore data values

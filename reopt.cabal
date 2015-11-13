@@ -64,6 +64,7 @@ library
     Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
     Reopt.Symbolic.Semantics
+    Reopt.Utils.Debug
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
     Reopt.Utils.GHCBug

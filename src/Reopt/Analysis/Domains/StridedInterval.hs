@@ -31,7 +31,7 @@ module Reopt.Analysis.Domains.StridedInterval
          -- Debugging
        ) where
 
-import           Debug.Trace
+import           Reopt.Utils.Debug
 
 import           Control.Applicative ( (<$>), (<*>) )
 import           Control.Exception (assert)
@@ -437,7 +437,7 @@ leastMod b m q n
   | b + n * q < m  = b -- no wrap
   | m `mod` q == 0 = b -- assumes q <= m
   | otherwise =
-      trace (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` m_div_q))) $
+      debug DAbsInt (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` m_div_q))) $
       leastMod next_b m' q'
                 -- FIXME: we sometimes miss a +1 here, we do this to
                 -- be conservative (overapprox.)
@@ -476,7 +476,7 @@ trunc si sz
                   `mod` modulus
       in si' { base = base', range = (modulus `ceilDiv` stride si) - 1 }
    -- We wrap at least once
-  | otherwise     = trace ("trunc failing: " ++ show (pretty si) ++ " " ++ show sz) $
+  | otherwise     = debug DAbsInt ("trunc failing: " ++ show (pretty si) ++ " " ++ show sz) $
                     top'
   where
     modulus = 2 ^ (natValue sz)
