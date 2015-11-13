@@ -29,6 +29,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
+import           Data.Parameterized.Classes
 
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
                                , ppApp, ppLit, ppAssignId, sexpr, appType)
@@ -51,6 +52,19 @@ instance Pretty (FnAssignment tp) where
 data FnPhiVar (tp :: Type) =
   FnPhiVar { unFnPhiVar :: !AssignId
            , fnPhiVarType :: !(TypeRepr tp) }
+
+instance TestEquality FnPhiVar where
+  testEquality x y = orderingF_refl (compareF x y)
+
+instance OrdF FnPhiVar where
+  compareF x y = 
+    case compare (unFnPhiVar x) (unFnPhiVar y) of
+      LT -> LTF
+      GT -> GTF
+      EQ ->
+        case testEquality (fnPhiVarType x) (fnPhiVarType y) of
+          Just Refl -> EQF
+          Nothing -> error "mismatched types"
 
 instance Pretty (FnPhiVar tp) where
   pretty = ppAssignId . unFnPhiVar
@@ -96,7 +110,7 @@ instance Pretty (FnReturnVar tp) where
 
 -- | A function value.
 data FnValue (tp :: Type) where
-  FnValueUnsupported :: !(TypeRepr tp) -> FnValue tp
+  FnValueUnsupported :: String -> !(TypeRepr tp) -> FnValue tp
   -- A value that is actually undefined, like a non-argument register at
   -- the start of a function.
   FnUndefined :: !(TypeRepr tp) -> FnValue tp
@@ -120,7 +134,8 @@ data FnValue (tp :: Type) where
   FnGlobalDataAddr :: !Word64 -> FnValue (BVType 64)
 
 instance Pretty (FnValue tp) where
-  pretty (FnValueUnsupported {})  = text "unsupported"
+  pretty (FnValueUnsupported reason _)
+                                  = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantValue sz n)   = ppLit sz n
   pretty (FnAssignedValue ass)    = ppAssignId (fnAssignId ass)
@@ -138,7 +153,7 @@ instance Pretty (FnValue tp) where
 fnValueType :: FnValue tp -> TypeRepr tp
 fnValueType v =
   case v of
-    FnValueUnsupported tp -> tp
+    FnValueUnsupported _ tp -> tp
     FnUndefined tp -> tp
     FnConstantValue sz _ -> BVTypeRepr sz
     FnAssignedValue (FnAssignment _ rhs) -> fnAssignRHSType rhs

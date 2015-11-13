@@ -480,7 +480,7 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
 valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
 valueToLLVM val =  
   case val of
-    FnValueUnsupported _  -> unimplementedInstr
+    FnValueUnsupported _ _  -> unimplementedInstr
     -- A value that is actually undefined, like a non-argument register at
     -- the start of a function.
     FnUndefined _ -> mk L.ValUndef
