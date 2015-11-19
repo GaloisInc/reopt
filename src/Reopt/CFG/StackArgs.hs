@@ -61,51 +61,6 @@ nextBlock = _2 %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 addOffset :: Int64 -> StackArgs ()
 addOffset v = _1 %= max v
 
--- -----------------------------------------------------------------------------
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
-  | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
-    Just val
-isWriteTo _ _ _ = Nothing
-
-
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
-
-identifyCall :: Memory Word64
-             -> [Stmt]
-             -> X86State Value
-             -> Maybe (Seq Stmt, Word64, [Some Value])
-identifyCall mem stmts0 s = go (Seq.fromList stmts0)
-  where next_sp = s^.register N.rsp
-        go stmts =
-          case Seq.viewr stmts of
-            Seq.EmptyR -> Nothing
-            prev Seq.:> stmt
-              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret, [])
-              | Write{} <- stmt -> Nothing
-              | otherwise -> go prev
-
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-identifyReturn :: X86State Value -> Maybe (Assignment (BVType 64))
-identifyReturn s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
-  case next_ip of
-    AssignedValue assign@(Assignment _ (Read (MemLoc ip_addr _)))
-      | let (ip_base, ip_off) = asBaseOffset ip_addr
-      , let (sp_base, sp_off) = asBaseOffset next_sp
-      , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just assign
-    _ -> Nothing
-
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackArg :: MapF Assignment AbsValue
@@ -155,7 +110,7 @@ recoverBlock amap aregs interp_state lbl = do
 
     FetchAndExecute proc_state
         -- The last statement was a call.
-      | Just (_, ret_addr, _) <- identifyCall (memory interp_state) (blockStmts b) proc_state -> do
+      | Just (_, ret_addr) <- identifyCall (memory interp_state) (blockStmts b) proc_state -> do
 
         let lbl' = GeneratedBlock ret_addr 0
         addBlock lbl'

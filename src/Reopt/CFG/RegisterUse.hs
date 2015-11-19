@@ -11,56 +11,21 @@ module Reopt.CFG.RegisterUse
   ) where
 
 import           Control.Lens
-import           Control.Monad (join)
-import           Control.Monad.Error
 import           Control.Monad.State.Strict
-import           Data.Foldable as Fold (toList, traverse_)
-import           Data.Int
-import           Data.Int (Int64)
-import           Data.List (elemIndex, elem, partition, any)
+import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (catMaybes, maybeToList)
-import           Data.Monoid (mconcat, mempty, Any(..))
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
-import           Data.Set (Set)
-import qualified Data.Set as Set
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import           Data.Type.Equality
-import           Data.Word
-import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
-
 import           Data.Set (Set)
 import qualified Data.Set as Set
 
-import           Data.Maybe (catMaybes)
-
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-
-import           Reopt.Analysis.AbsState
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Object.Memory
 
-import           Debug.Trace
 
 -- -----------------------------------------------------------------------------
--- Helpers
-
-subState :: Lens s s a a -> State a v -> State s v
-subState l m = l %%= runState m
-
--- -----------------------------------------------------------------------------
-
 
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
@@ -126,29 +91,29 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 -- FIXME: move
 
 -- Unwraps all Apps etc, might visit an app twice (Add x x, for example)
-foldValue :: forall m tp. Monoid m 
-             => (forall n.  NatRepr n -> Integer -> m)
-             -> (forall cl. N.RegisterName cl -> m)
-             -> (forall tp. Assignment tp -> m -> m)
-             -> Value tp -> m
-foldValue litf initf assignf val = go val
-  where
-    go :: forall tp. Value tp -> m
-    go v = case v of
-             BVValue sz i -> litf sz i
-             Initial r    -> initf r 
-             AssignedValue assign@(Assignment _ rhs) ->
-               assignf assign (goAssignRHS rhs)
+-- foldValue :: forall m tp. Monoid m 
+--              => (forall n.  NatRepr n -> Integer -> m)
+--              -> (forall cl. N.RegisterName cl -> m)
+--              -> (forall tp. Assignment tp -> m -> m)
+--              -> Value tp -> m
+-- foldValue litf initf assignf val = go val
+--   where
+--     go :: forall tp'. Value tp' -> m
+--     go v = case v of
+--              BVValue sz i -> litf sz i
+--              Initial r    -> initf r 
+--              AssignedValue asgn@(Assignment _ rhs) ->
+--                assignf asgn (goAssignRHS rhs)
 
-    goAssignRHS :: forall tp. AssignRhs tp -> m
-    goAssignRHS v =
-      case v of
-        EvalApp a -> foldApp go a
-        SetUndefined w -> mempty
-        Read loc
-         | MemLoc addr _ <- loc -> go addr
-         | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
-        MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
+--     goAssignRHS :: forall tp'. AssignRhs tp' -> m
+--     goAssignRHS v =
+--       case v of
+--         EvalApp a -> foldApp go a
+--         SetUndefined _w -> mempty
+--         Read loc
+--          | MemLoc addr _ <- loc -> go addr
+--          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
+--         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
 
 -- helper type to make a monad a monoid in the obvious way
 newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
@@ -163,29 +128,29 @@ instance Monoid m => Monoid (StateMonadMonoid s m) where
 foldValueCached :: forall m tp. (Monoid m)
                    => (forall n.  NatRepr n -> Integer -> m)
                    -> (forall cl. N.RegisterName cl -> m)
-                   -> (forall tp. Assignment tp -> m -> m)
+                   -> (forall tp'. Assignment tp' -> m -> m)
                    -> Value tp -> State (Map (Some Assignment) m) m
 foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
   where
-    go :: forall tp. Value tp -> StateMonadMonoid (Map (Some Assignment) m) m 
+    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m 
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
         Initial r    -> return $ initf r 
-        AssignedValue assign@(Assignment _ rhs) ->
-          do m_v <- use (at (Some assign))
+        AssignedValue asgn@(Assignment _ rhs) ->
+          do m_v <- use (at (Some asgn))
              case m_v of
-               Just v -> return $ assignf assign v
+               Just v' -> return $ assignf asgn v'
                Nothing -> 
-                  do v <- goAssignRHS rhs
-                     at (Some assign) .= Just v
-                     return (assignf assign v)
+                  do rhs_v <- goAssignRHS rhs
+                     at (Some asgn) .= Just rhs_v
+                     return (assignf asgn rhs_v)
 
-    goAssignRHS :: forall tp. AssignRhs tp -> StateMonadMonoid (Map (Some Assignment) m) m 
+    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m 
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
-        SetUndefined w -> mempty
+        SetUndefined _w -> mempty
         Read loc
          | MemLoc addr _ <- loc -> go addr
          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
@@ -210,7 +175,7 @@ valueUses :: Value tp -> RegisterUseM RegDeps
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
-                            (\assign (assigns, regs) -> (Set.insert (Some assign) assigns, regs))
+                            (\asgn (assigns, regs) -> (Set.insert (Some asgn) assigns, regs))
 
 demandValue :: BlockLabel -> Value tp -> RegisterUseM ()
 demandValue lbl v =
@@ -226,51 +191,6 @@ demandValue lbl v =
 
 nextBlock :: RegisterUseM (Maybe BlockLabel)
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
-
--- -----------------------------------------------------------------------------
-
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
-  | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
-    Just val
-isWriteTo _ _ _ = Nothing
-
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
-
-identifyCall :: Memory Word64
-             -> [Stmt]
-             -> X86State Value
-             -> Maybe (Seq Stmt, Word64, [Some Value])
-identifyCall mem stmts0 s = go (Seq.fromList stmts0)
-  where next_sp = s^.register N.rsp
-        go stmts =
-          case Seq.viewr stmts of
-            Seq.EmptyR -> Nothing
-            prev Seq.:> stmt
-              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret, [])
-              | Write{} <- stmt -> Nothing
-              | otherwise -> go prev
-
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-identifyReturn :: X86State Value -> Maybe (Assignment (BVType 64))
-identifyReturn s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
-  case next_ip of
-    AssignedValue assign@(Assignment _ (Read (MemLoc ip_addr _)))
-      | let (ip_base, ip_off) = asBaseOffset ip_addr
-      , let (sp_base, sp_off) = asBaseOffset next_sp
-      , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just assign
-    _ -> Nothing
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
@@ -344,7 +264,7 @@ summarizeBlock interp_state root_label = go root_label
   where
     go :: BlockLabel -> RegisterUseM ()
     go lbl = do
-      Just b       <- return $ lookupBlock (interp_state ^. blocks) lbl
+      Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
       let goStmt (Write (MemLoc addr _tp) v)
             = do demandValue lbl addr
@@ -367,46 +287,40 @@ summarizeBlock interp_state root_label = go root_label
              vs <- mapM (\(Some r) -> (,) (Some r) <$> valueUses (s ^. register r)) rs
              blockInitDeps %= Map.insertWith Map.union lbl (Map.fromList vs)
 
-      case blockTerm b of
-        Branch c x y -> do
-          demandValue lbl c
+      case m_pterm of
+        Just (ParsedBranch c x y) -> do
           traverse_ goStmt (blockStmts b)
+          demandValue lbl c
           go x
           go y
 
-        FetchAndExecute proc_state
-          -- The last statement was a call.
-          | Just (stmts', ret_addr, _) <- identifyCall (memory interp_state) (blockStmts b) proc_state -> do
+        Just (ParsedCall proc_state stmts' _fn m_ret_addr) -> do 
+          traverse_ goStmt stmts'
 
-            traverse_ goStmt stmts'
+          demandRegisters proc_state [Some N.rip]
+          demandRegisters proc_state (Some <$> x86ArgumentRegisters)
+          demandRegisters proc_state (Some <$> x86FloatArgumentRegisters) -- FIXME: required?
 
-            demandRegisters proc_state [Some N.rip]
-            demandRegisters proc_state (Some <$> x86ArgumentRegisters)
-            demandRegisters proc_state (Some <$> x86FloatArgumentRegisters) -- FIXME: required?
+          case m_ret_addr of
+            Nothing       -> return ()
+            Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
 
-            let lbl' = GeneratedBlock ret_addr 0
-            addEdge lbl lbl'
-            addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
-            -- Ensure that result registers are defined, but do not have any deps.
-            traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) x86ResultRegisters
-     
-          -- Jump to concrete offset.
-          | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
-            -- Check that we are in the same function
-          , inSameFunction (labelAddr lbl) tgt_addr interp_state -> do
+          -- FIXME: rsp here?
+          addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+          -- Ensure that result registers are defined, but do not have any deps.
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) x86ResultRegisters
 
+        Just (ParsedJump proc_state tgt_addr) -> do 
             traverse_ goStmt (blockStmts b)
             addRegisterUses proc_state x86StateRegisters
+            addEdge lbl (mkRootBlockLabel tgt_addr)
 
-            let lbl'     = GeneratedBlock tgt_addr 0
-            
-            addEdge lbl lbl'
-     
-           -- Return
-          | Just assign <- identifyReturn proc_state -> do
-            traverse_ goStmt (blockStmts b)
+        Just (ParsedReturn proc_state stmts') -> do
+            traverse_ goStmt stmts'
             demandRegisters proc_state x86ResultRegisters
 
-        _ -> return () -- ???
+        Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
+
+        Nothing -> return () -- ???
 
 

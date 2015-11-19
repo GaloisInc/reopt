@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
@@ -9,6 +11,7 @@ module Reopt.CFG.InterpState
   , BlockRegion(..)
   , lookupBlock
   , GlobalDataInfo(..)
+  , ParsedTermStmt(..)
     -- * The interpreter state
   , InterpState(..)
   , emptyInterpState
@@ -24,25 +27,33 @@ module Reopt.CFG.InterpState
   , getFunctionEntryPoint
   , inSameFunction
   , returnCount
+  , identifyCall
+  , identifyReturn
+  , classifyBlock
+  , getClassifyBlock
   )  where
 
-import Control.Lens
-import Control.Monad (join)
-import Data.Map.Strict (Map)
+import           Control.Lens
+import           Control.Monad (join)
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe
-import Data.Parameterized.Some
-import Data.Set (Set)
+import           Data.Maybe
+import           Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
+import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Type.Equality
 import qualified Data.Vector as V
-import Data.Word
-import GHC.TypeLits
-import Numeric (showHex)
+import           Data.Word
+import           GHC.TypeLits
+import           Numeric (showHex)
 
-import Reopt.Analysis.AbsState
-import Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
-import Reopt.CFG.Representation
-import Reopt.Object.Memory
+import           Reopt.Analysis.AbsState
+import           Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
+import           Reopt.CFG.Representation
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types
+import           Reopt.Object.Memory
 
 ------------------------------------------------------------------------
 -- AbsStateMap
@@ -111,43 +122,22 @@ instance Show GlobalDataInfo where
 -- of how block ending with a a FetchAndExecute statement should be
 -- interpreted.
 data ParsedTermStmt
-   = ParsedCall !(BVValue 64)
-                -- ^ Function to call
-                !([BVValue 64])
-                -- ^ Integer arguments to function
-                !([BVValue 128])
-                -- ^ Floating point values passed via XMM registers
-                !([Some Value])
-                -- ^ Values passed in the stack in order.
-                -- i.e.,The first argument is at the top of the stack
-                -- When calling these should be pushed to the stack in
-                -- reverse order.
-                !Word64 -- ^ Return location.
+   = ParsedCall !(X86State Value)
+                !(Seq Stmt)
+                -- ^ Statements less the pushed return value, if any
+                !(Either Word64 (BVValue 64))
+                -- ^ Function to call.  If it is statically known,
+                -- then we get Left, otherwise Right
+                !(Maybe Word64) -- ^ Return location, Nothing if a tail call.
      -- | A jump within a block
-   | ParsedJump !Word64
+   | ParsedJump !(X86State Value) !Word64
      -- | A lookup table that branches to the given locations.
    | forall n . (1 <= n) =>
-       ParsedLookupTable (BVValue n) (V.Vector Word64)
+       ParsedLookupTable !(X86State Value) (BVValue n) (V.Vector Word64)
      -- | A tail cthat branches to the given locations.
-   | ParsedTailCall !(BVValue 64)
-                    -- ^ Function to call
-                    !([BVValue 64])
-                    -- ^ Integer arguments to function
-                    !([BVValue 128])
-                    -- ^ Floating point values passed via XMM registers
-                    !([Some Value])
-                    -- ^ Values passed in the stack in order.
-                    -- i.e.,The first argument is at the top of the stack
-                    -- When calling these should be pushed to the stack in
-                    -- reverse order.
-
-   | ParsedReturn !(BVValue 64)
-                  -- ^ The integer return value (in RAX)
-                  !(BVValue 128)
-
-
-
-
+   | ParsedReturn !(X86State Value) !(Seq Stmt)
+     -- | A branch (i.e., BlockTerm is Branch)
+   | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -171,7 +161,7 @@ data InterpState
                  , _globalDataMap :: !(Map CodeAddr GlobalDataInfo)
                    -- | Information about the next state for blocks that end with
                    -- @FetchAndExecute@ statements.
-                 , _parsedTermStmts :: !(Map CodeAddr ParsedTermStmt)
+                 -- , _parsedTermStmts :: !(Map CodeAddr ParsedTermStmt)
                    -- | Set of addresses to explore next.
                    -- This is a map so that we can associate a reason why a code address
                    -- was added to the frontier.
@@ -193,7 +183,7 @@ emptyInterpState mem = InterpState
       , _functionEntries = Set.empty
       , _reverseEdges    = Map.empty
       , _globalDataMap   = Map.empty
-      , _parsedTermStmts = Map.empty
+      -- , _parsedTermStmts = Map.empty
       , _frontier        = Map.empty
       , _function_frontier = Set.empty
       , _absState        = Map.empty
@@ -219,8 +209,8 @@ globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
 -- | Information about the next state for blocks that end with
 -- @FetchAndExecute@ statements.
-parsedTermStmts :: Simple Lens InterpState (Map CodeAddr ParsedTermStmt)
-parsedTermStmts = lens _parsedTermStmts (\s v -> s { _parsedTermStmts = v })
+-- parsedTermStmts :: Simple Lens InterpState (Map CodeAddr ParsedTermStmt)
+-- parsedTermStmts = lens _parsedTermStmts (\s v -> s { _parsedTermStmts = v })
 
 frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })
@@ -247,3 +237,90 @@ getFunctionEntryPoint addr s = do
 inSameFunction :: CodeAddr -> CodeAddr -> InterpState -> Bool
 inSameFunction x y s =
   getFunctionEntryPoint x s == getFunctionEntryPoint y s
+
+-- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
+-- with a write having the given type.
+isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
+isWriteTo (Write (MemLoc a _) val) expected tp
+  | Just _ <- testEquality a expected
+  , Just Refl <- testEquality (valueType val) tp =
+    Just val
+isWriteTo _ _ _ = Nothing
+
+-- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
+-- a single address to a marked executable in @mem@ to @addr@.
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo mem s sp
+  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
+  , isCodeAddr mem (fromInteger val)
+  = Just (fromInteger val)
+isCodeAddrWriteTo _ _ _ = Nothing
+
+-- | Attempt to identify the write to a stack return address, returning
+-- instructions prior to that write and return  values.
+identifyCall :: Memory Word64
+             -> [Stmt]
+             -> X86State Value
+             -> Maybe (Seq Stmt, Word64)
+identifyCall mem stmts0 s = go (Seq.fromList stmts0)
+  where next_sp = s^.register N.rsp
+        go stmts =
+          case Seq.viewr stmts of
+            Seq.EmptyR -> Nothing
+            prev Seq.:> stmt
+              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
+                Just (prev, ret)
+              | Write{} <- stmt -> Nothing
+              | otherwise -> go prev
+
+-- | This is designed to detect returns from the X86 representation.
+-- It pattern matches on a X86State to detect if it read its instruction
+-- pointer from an address that is 8 below the stack pointer.
+identifyReturn :: X86State Value -> Maybe (Assignment (BVType 64))
+identifyReturn s = do
+  let next_ip = s^.register N.rip
+      next_sp = s^.register N.rsp
+  case next_ip of
+    AssignedValue asgn@(Assignment _ (Read (MemLoc ip_addr _)))
+      | let (ip_base, ip_off) = asBaseOffset ip_addr
+      , let (sp_base, sp_off) = asBaseOffset next_sp
+      , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just asgn
+    _ -> Nothing
+
+classifyBlock :: Block -> InterpState -> Maybe ParsedTermStmt
+classifyBlock b interp_state = 
+  case blockTerm b of
+    Branch c x y -> Just (ParsedBranch c x y)
+    FetchAndExecute proc_state
+        -- The last statement was a call.
+      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state ->
+          let fptr = case proc_state ^. register N.rip of
+                       BVValue _ v -> Left (fromInteger v)
+                       ip          -> Right ip
+          in Just (ParsedCall proc_state prev_stmts fptr (Just ret_addr))
+
+      -- Jump to concrete offset.
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
+      , inSameFunction (labelAddr (blockLabel b)) tgt_addr interp_state ->
+           Just (ParsedJump proc_state tgt_addr)
+
+      -- Return
+      | Just assign <- identifyReturn proc_state ->
+        let isRetLoad s =
+              case s of
+                AssignStmt assign' | Just Refl <- testEquality assign assign' -> True
+                _ -> False
+            nonret_stmts = Seq.fromList $ filter (not . isRetLoad) (blockStmts b)
+
+        in Just (ParsedReturn proc_state nonret_stmts)
+
+    -- FIXME: jump table and tail calls?
+    _ -> Nothing
+  where
+    mem = memory interp_state
+
+getClassifyBlock :: BlockLabel -> InterpState ->  Maybe (Block, Maybe ParsedTermStmt)
+getClassifyBlock lbl interp_state = do
+  b <- lookupBlock (interp_state ^. blocks) lbl
+  return (b, classifyBlock b interp_state)
+  

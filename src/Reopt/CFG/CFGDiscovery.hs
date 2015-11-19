@@ -55,6 +55,7 @@ import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.Representation
 import           Reopt.CFG.StackArgs
 import           Reopt.CFG.StackDepth
+import           Reopt.CFG.FunctionArgs
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
@@ -744,7 +745,7 @@ transferBlock b regs = do
           -- The last statement was a call.
           -- Note that in some cases the call is known not to return, and thus
           -- this code will never jump to the return value.
-        _ | Just (prev_stmts, ret, _) <- identifyCall mem (blockStmts b) s' -> do
+        _ | Just (prev_stmts, ret) <- identifyCall mem (blockStmts b) s' -> do
             Fold.mapM_ (recordWriteStmt lbl regs') prev_stmts
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
@@ -930,15 +931,32 @@ ppRegisterUse l = unlines (pp <$> l)
             <+> vcat [ hang 4 $ ppSet (\(Some (Assignment l _)) -> ppAssignId l) assigns
                      , ppMap pretty (ppSet (viewSome (text . show))) regs ]
 
+ppFunctionArgs :: [( CodeAddr
+                   , (Set (Some N.RegisterName), Set (Some N.RegisterName)))]
+                  -> String
+ppFunctionArgs l = unlines (pp <$> l)
+  where
+    pp :: ( CodeAddr
+          , (Set (Some N.RegisterName), Set (Some N.RegisterName)))
+       -> String
+    pp (a, (args, rets)) =
+      flip displayS "" $ renderPretty 0.8 100
+      $ text "fun args "
+        <+> text (showHex a (":"))
+        <+> ppSet (text . viewSome show) args
+        <+> text "->"
+        <+> ppSet (text . viewSome show) rets
+
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
   case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
-      debug DCFG (ppFunctionEntries (Set.toList (s^.functionEntries))) $
-      debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
-      debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
-      debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
+      -- debug DCFG (ppFunctionEntries (Set.toList (s^.functionEntries))) $
+      -- debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
+      -- debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
+      -- debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
+      debug DFunctionArgs (ppFunctionArgs (Map.toList (functionArgs s))) $
       -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState

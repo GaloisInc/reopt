@@ -12,45 +12,22 @@ module Reopt.CFG.StackDepth
   ) where
 
 import           Control.Lens
-import           Control.Monad (join)
-import           Control.Monad.Error
 import           Control.Monad.State.Strict
-import           Data.Foldable as Fold (toList, traverse_)
+import           Data.Foldable as Fold (traverse_)
 import           Data.Int
-import           Data.Int (Int64)
-import           Data.List (elemIndex, elem, partition, any)
+import           Data.List (partition)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (catMaybes)
-import           Data.Monoid (mconcat, mempty, Any(..))
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
+import           Data.Monoid (Any(..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
-import qualified Data.Text as Text
 import           Data.Type.Equality
-import           Data.Word
-import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Set (Set)
-import qualified Data.Set as Set
-
-import           Data.Maybe (catMaybes)
-
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-
-import           Reopt.Analysis.AbsState
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Object.Memory
 
 import           Debug.Trace
 
@@ -77,10 +54,10 @@ instance Pretty StackDepthValue where
       go (Pos x : xs) = text "+" <+> pretty x <+> go xs
       go (Neg x : xs) = text "-" <+> pretty x <+> go xs
 
-isConstantDepthValue :: StackDepthValue -> Maybe Int64
-isConstantDepthValue sv
-  | Set.null (dynamicPart sv) = Just (staticPart sv)
-  | otherwise                 = Nothing
+-- isConstantDepthValue :: StackDepthValue -> Maybe Int64
+-- isConstantDepthValue sv
+--   | Set.null (dynamicPart sv) = Just (staticPart sv)
+--   | otherwise                 = Nothing
 
 constantDepthValue :: Int64 -> StackDepthValue
 constantDepthValue c = SDV c Set.empty
@@ -108,7 +85,7 @@ minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositi
   where
     discardPositive v = v { dynamicPart = Set.filter isNegativeDepth (dynamicPart v) }
     -- FIXME: can we use ordering to simplify this?
-    go v xs = let (subs, xs') = partition (subsumes v) xs
+    go v xs = let (_subs, xs') = partition (subsumes v) xs
                   dominated   = any (`subsumes` v) xs'
               in if not dominated then v : xs' else xs'
       
@@ -141,27 +118,27 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 -- FIXME: move
 
 -- Unwraps all Apps etc, might visit an app twice (Add x x, for example)
-foldValue :: forall m tp. Monoid m 
-             => (forall n.  NatRepr n -> Integer -> m)
-             -> (forall cl. N.RegisterName cl -> m)
-             -> Value tp -> m
-foldValue litf initf val = go val
-  where
-    go :: forall tp. Value tp -> m
-    go v = case v of
-             BVValue sz i -> litf sz i
-             Initial r    -> initf r 
-             AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
+-- foldValue :: forall m tp. Monoid m 
+--              => (forall n.  NatRepr n -> Integer -> m)
+--              -> (forall cl. N.RegisterName cl -> m)
+--              -> Value tp -> m
+-- foldValue litf initf val = go val
+--   where
+--     go :: forall tp. Value tp -> m
+--     go v = case v of
+--              BVValue sz i -> litf sz i
+--              Initial r    -> initf r 
+--              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
-    goAssignRHS :: forall tp. AssignRhs tp -> m
-    goAssignRHS v =
-      case v of
-        EvalApp a -> foldApp go a
-        SetUndefined w -> mempty
-        Read loc
-         | MemLoc addr _ <- loc -> go addr
-         | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
-        MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
+--     goAssignRHS :: forall tp. AssignRhs tp -> m
+--     goAssignRHS v =
+--       case v of
+--         EvalApp a -> foldApp go a
+--         SetUndefined w -> mempty
+--         Read loc
+--          | MemLoc addr _ <- loc -> go addr
+--          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
+--         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
 
 -- ----------------------------------------------------------------------------------------
 
@@ -200,70 +177,27 @@ valueHasSP val = go val
         _ -> False
 
 parseStackPointer' :: StackDepthValue -> Value (BVType 64) -> StackDepthValue
-parseStackPointer' init addr
+parseStackPointer' sp0 addr
   -- assert sp occurs in at most once in either x and y  
   | Just (BVAdd _ x y) <- valueAsApp addr =
-      addStackDepthValue (parseStackPointer' init x)
-                         (parseStackPointer' init y)
+      addStackDepthValue (parseStackPointer' sp0 x)
+                         (parseStackPointer' sp0 y)
  
   | Just (BVSub _ x y) <- valueAsApp addr =
-      addStackDepthValue (parseStackPointer' init x)
-                         (negateStackDepthValue (parseStackPointer' init y))      
+      addStackDepthValue (parseStackPointer' sp0 x)
+                         (negateStackDepthValue (parseStackPointer' sp0 y))      
   | BVValue _ i <- addr = constantDepthValue (fromIntegral i)
-  | Initial n <- addr, Just Refl <- testEquality n N.rsp = init
+  | Initial n <- addr, Just Refl <- testEquality n N.rsp = sp0
   | otherwise = SDV 0 (Set.singleton (Pos addr))
 
 
 -- FIXME: performance
 parseStackPointer :: StackDepthValue -> Value (BVType 64) -> Set StackDepthValue
-parseStackPointer init addr0
-  | valueHasSP addr0 = Set.singleton (parseStackPointer' init addr0)
+parseStackPointer sp0 addr0
+  | valueHasSP addr0 = Set.singleton (parseStackPointer' sp0 addr0)
   | otherwise        = Set.empty
 
 -- -----------------------------------------------------------------------------
-
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
-  | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
-    Just val
-isWriteTo _ _ _ = Nothing
-
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
-
-identifyCall :: Memory Word64
-             -> [Stmt]
-             -> X86State Value
-             -> Maybe (Seq Stmt, Word64, [Some Value])
-identifyCall mem stmts0 s = go (Seq.fromList stmts0)
-  where next_sp = s^.register N.rsp
-        go stmts =
-          case Seq.viewr stmts of
-            Seq.EmptyR -> Nothing
-            prev Seq.:> stmt
-              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret, [])
-              | Write{} <- stmt -> Nothing
-              | otherwise -> go prev
-
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-identifyReturn :: X86State Value -> Maybe (Assignment (BVType 64))
-identifyReturn s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
-  case next_ip of
-    AssignedValue assign@(Assignment _ (Read (MemLoc ip_addr _)))
-      | let (ip_base, ip_off) = asBaseOffset ip_addr
-      , let (sp_base, sp_off) = asBaseOffset next_sp
-      , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just assign
-    _ -> Nothing
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
@@ -297,7 +231,7 @@ recoverBlock interp_state root_label = do
   go init_sp root_label
   where
     go init_sp lbl = do
-      Just b       <- return $ lookupBlock (interp_state ^. blocks) lbl
+      Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
       let goStmt (AssignStmt (Assignment _ (Read (MemLoc addr _))))
             = addDepth $ parseStackPointer init_sp addr
@@ -315,40 +249,35 @@ recoverBlock interp_state root_label = do
             addDepth $ Set.unions [ parseStackPointer init_sp (s ^. register r)
                                   | r <- N.gpRegs ]
           
-      
-      case blockTerm b of
-        Branch _c x y -> do
+      case m_pterm of
+        Just (ParsedBranch _c x y) -> do
           traverse_ goStmt (blockStmts b)
           go init_sp x 
           go init_sp y
 
-        FetchAndExecute proc_state
-          -- The last statement was a call.
-          | Just (stmts', ret_addr, _) <- identifyCall (memory interp_state) (blockStmts b) proc_state -> do
-
+        Just (ParsedCall proc_state stmts' _fn m_ret_addr) -> do 
             traverse_ goStmt stmts'
             addStateVars proc_state
 
-            let lbl' = GeneratedBlock ret_addr 0
-                sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
-            addBlock lbl' (addStackDepthValue sp' $ constantDepthValue 8)
-     
-          -- Jump to concrete offset.
-          | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
-            -- Check that we are in the same function
-          , inSameFunction (labelAddr lbl) tgt_addr interp_state -> do
+            let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+            case m_ret_addr of
+              Nothing -> return ()
+              Just ret_addr ->  addBlock (mkRootBlockLabel ret_addr) (addStackDepthValue sp' $ constantDepthValue 8)
 
+        Just (ParsedJump proc_state tgt_addr) -> do 
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
             
-            let lbl'     = GeneratedBlock tgt_addr 0
+            let lbl'     = mkRootBlockLabel tgt_addr
                 sp' = parseStackPointer' init_sp (proc_state ^. register N.rsp)
             
             addBlock lbl' sp'
-     
-           -- Return
-          | Just assign <- identifyReturn proc_state -> traverse_ goStmt (blockStmts b)
 
-        _ -> return () -- ???
+        Just (ParsedReturn _proc_state stmts') -> do
+            traverse_ goStmt stmts'
+
+        Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
+
+        Nothing -> return () -- ???
 
 

@@ -34,6 +34,7 @@ module Reopt.CFG.Representation
   , BlockLabel(..)
   , isRootBlockLabel
   , rootBlockLabel
+  , mkRootBlockLabel
   , Block(..)
   , CodeAddr
   , hasCallComment
@@ -139,6 +140,9 @@ isRootBlockLabel (GeneratedBlock _ w) = w == 0
 
 rootBlockLabel :: BlockLabel -> BlockLabel
 rootBlockLabel (GeneratedBlock p _) = GeneratedBlock p 0
+
+mkRootBlockLabel :: Word64 -> BlockLabel
+mkRootBlockLabel p = GeneratedBlock p 0
 
 instance Ord BlockLabel where
   compare (GeneratedBlock p v) (GeneratedBlock p' v') =

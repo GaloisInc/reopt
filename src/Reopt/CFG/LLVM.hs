@@ -27,6 +27,7 @@ import           Control.Monad.Reader
 import           Control.Monad.State
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import           Data.Maybe (fromJust)
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Numeric (showHex)
@@ -183,7 +184,7 @@ termStmtToLLVM tm =
                                 (L.extractValue rvar 0)
        void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId fretv)
                                 (L.extractValue rvar 1)
-       liftBB $ L.jump (blockName contlbl)
+       liftBB $ L.jump (blockName (fromJust contlbl)) -- FIXME: hack, will break tailcalls
      FnTermStmtUndefined -> void $ unimplementedInstr    
 
 stmtToLLVM :: FnStmt -> ToLLVM ()

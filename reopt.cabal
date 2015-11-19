@@ -41,6 +41,7 @@ library
     Reopt.BasicBlock.FunctionCFG
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.FnRep
+    Reopt.CFG.FunctionArgs
     Reopt.CFG.Implementation
     Reopt.CFG.InterpState
     Reopt.CFG.LLVM

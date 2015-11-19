@@ -246,7 +246,7 @@ data FnTermStmt
    | FnCall !(FnValue (BVType 64)) [Some FnValue]
             !(FnReturnVar (BVType 64))
             !(FnReturnVar XMMType)
-            BlockLabel
+            !(Maybe BlockLabel)
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
    | FnTermStmtUndefined
