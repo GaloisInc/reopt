@@ -258,7 +258,7 @@ test args = do
 
 withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
 withSimpleBackend' halloc action = do
-  sym <- newSimpleBackend
+  sym <- newSimpleBackend MapF.empty
   cfg <- initialConfig 0 []
   matlabFns <- liftST $ newMatlabUtilityFunctions halloc
   let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
