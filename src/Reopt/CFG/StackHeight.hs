@@ -1,3 +1,11 @@
+{-|
+Module      : Reopt.CFG.StackHeight
+Copyright   : (c) Galois Inc, 2015
+Maintainer  : jhendrix@galois.com
+
+This module provides methods for representing the layout of the stack
+within a function, and is used in function recovery.
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
@@ -5,8 +13,7 @@
 module Reopt.CFG.StackHeight
   ( StackDelta
   , initStackDelta
-  , valueAsStackDelta
-  , mergeStackDelta
+  , recordPotentialStackOffset
   , stackDeltaAllocSize
   , FnStack
   , initFnStack
@@ -16,22 +23,26 @@ module Reopt.CFG.StackHeight
   , stackArgs
   ) where
 
-import Data.Int
+import           Control.Exception (assert)
+import           Data.Bits
+import           Data.Int
 import qualified Data.Map.Strict as Map
-import Data.Parameterized.NatRepr
-import Data.Set (Set)
+import           Data.Parameterized.NatRepr
+import           Data.Set (Set)
 import qualified Data.Set as Set
---import Data.Type.Equality
 
-import Reopt.CFG.FnRep
-import Reopt.CFG.Representation
-import Reopt.Machine.Types
-import Reopt.Machine.StateNames (RegisterName, RegisterClass(..), rsp)
-import Debug.Trace
+import           Reopt.CFG.FnRep
+import           Reopt.CFG.Representation
+import           Reopt.Machine.Types
+import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..), rsp)
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- WeightedValueMap
 
+-- | A data structured used to describe values that can be expressed as a
+-- sum where each subterm is either a concrete value, or a concrete value
+-- times a value with type @Value (BVType 64)@.
 type WeightedValueMap = (Map.Map (Value (BVType 64)) Integer, Integer)
 
 concreteMap :: Integer -> WeightedValueMap
@@ -59,23 +70,7 @@ mulMap (toSigned n64 -> i) (m,c) = (g <$> m, g c)
 --minMap
 
 ------------------------------------------------------------------------
--- StackDelta
-
--- | Describe the amount of space needed to allocate for the stack.
--- The first parameter is a constant, the remaining values are the
--- set of stack locations accessed.  The height of the stack must be
--- at least as large as each value in the set.
-data StackDelta = StackDelta Int64 (Set (Value (BVType 64)))
-  deriving (Show)
-
-initStackDelta :: FnStack -> StackDelta
-initStackDelta _ = StackDelta 0 Set.empty
-
--- | Create a stack height from a single value.
-valueAsStackDelta :: Value (BVType 64) -> StackDelta
-valueAsStackDelta x
-  | Just xc <- asInt64Constant x = StackDelta (min xc 0) Set.empty
-  | otherwise = StackDelta 0 (Set.singleton x)
+-- StackDiff
 
 data StackDiff
    = StackDiff WeightedValueMap
@@ -99,7 +94,7 @@ parseStackPointer :: Value (BVType 64) -> StackDiff
 parseStackPointer addr
   | Just (BVAdd _ x y) <- valueAsApp addr =
      case (parseStackPointer x, parseStackPointer y) of
-       (StackDiff _, StackDiff _) -> trace "Adding two stack offsets" $
+       (StackDiff _, StackDiff _) -> trace "WARNING: Adding two stack offsets" $
          NoStackDiff $ singleMap addr
        (StackDiff xd, NoStackDiff yd) ->
          StackDiff $ sumMap2 xd yd
@@ -109,7 +104,7 @@ parseStackPointer addr
          NoStackDiff $ sumMap2 xd yd
   | Just (BVSub _ x y) <- valueAsApp addr =
      case (parseStackPointer x, parseStackPointer y) of
-       (_, StackDiff _) -> trace "Subtracting stack diff" $
+       (_, StackDiff _) -> trace "WARNING: Subtracting stack diff" $
          NoStackDiff $ singleMap addr
        (StackDiff xd, NoStackDiff yd) ->
          StackDiff $ xd `diffMap2` yd
@@ -154,6 +149,66 @@ parseStackPointer addr
       StackDiff (concreteMap 0)
   | otherwise = NoStackDiff $ singleMap addr
 
+------------------------------------------------------------------------
+-- SallocBase
+
+-- | This is a list that represents the
+data SallocBase = SallocBase [BVValue 64]
+
+instance Show SallocBase where
+  show (SallocBase x) = show (ppValueAssignmentList x)
+
+
+asSallocBase :: Value (BVType 64) -> Maybe SallocBase
+asSallocBase (valueAsApp -> Just (BVAdd _ x (BVValue w o))) = do
+  SallocBase r <- asSallocBase x
+  let neg_o = BVValue w (negate o .&. (2^64 - 1))
+  return $! SallocBase (neg_o:r)
+asSallocBase (valueAsApp -> Just (BVSub _ x y)) = do
+  SallocBase r <- asSallocBase x
+  return $! SallocBase (y:r)
+asSallocBase (Initial r) | Just Refl <- testEquality r rsp =
+  return $! SallocBase []
+asSallocBase _ = Nothing
+
+
+stackIncrementBound :: SallocBase -> SallocBase -> SallocBase
+stackIncrementBound (SallocBase x) (SallocBase y)
+   | yl >= xl = f (yl - xl) x y
+   | otherwise = assert (xl > yl) $ f (xl - yl) y x
+  where xl = length x
+        yl = length y
+        f l u v
+          | BVValue w uc : ur <- u
+          , BVValue _ vc : vr <- drop l v
+          , ur == vr =
+            SallocBase (BVValue w (max uc vc) : ur)
+
+          | u == drop l v = SallocBase v
+          | otherwise = trace ("stackIncrementBound unsupported:\n"
+                               ++ show (ppValueAssignmentList x) ++ "\n"
+                               ++ show (ppValueAssignmentList y)) $
+                        SallocBase v
+
+subSallocBaseOffset :: SallocBase -> Int64 -> SallocBase
+subSallocBaseOffset d 0 = d
+subSallocBaseOffset (SallocBase (BVValue w o:r)) c | o >= toInteger c =
+  SallocBase $ BVValue w (o-toInteger c) : r
+subSallocBaseOffset d _ = trace "subSallocBaseOffset undefined" d
+
+------------------------------------------------------------------------
+-- StackDelta
+
+-- | Describe the amount of space needed to allocate for the stack.
+-- The first parameter is a constant, the remaining values are the
+-- set of stack locations accessed.  The height of the stack must be
+-- at least as large as each value in the set.
+data StackDelta = StackDelta !SallocBase
+  deriving (Show)
+
+initStackDelta :: FnStack -> StackDelta
+initStackDelta _ = StackDelta (SallocBase [])
+
 {-
 -- | This is called to update the state whenever there is an assignment.
 updateStackDeltaAssign :: Assignment tp
@@ -162,25 +217,27 @@ updateStackDeltaAssign :: Assignment tp
 updateStackDeltaAssign _ = id
 -}
 
--- | Conjoin two stack heights to compute the maximum height.
-mergeStackDelta :: Value (BVType 64)
-                -> Int64 -- ^ Offset for value (added to v
-                -> Bool
-                -> StackDelta
-                -> StackDelta
-mergeStackDelta v offset knownStackPointer d@(StackDelta xc xs) =
-  case parseStackPointer v `addStackDiffOffset` offset of
-    StackDiff (m,yc)
-      | Map.null m -> StackDelta (min xc (fromInteger yc)) xs
-    StackDiff _ ->
-      trace ("Symbolic stack pointer:\n" ++ show (ppValueAssignments v)) $ d
-    _
+-- | The Conjoin two stack heights to compute the maximum height.
+recordPotentialStackOffset :: Value (BVType 64)
+                              -- ^ The value
+                           -> Int64 -- ^ A concrete offset added to value.
+                           -> Bool -- ^ A Boolean flag that indicates if this should be astack offset.
+                           -> StackDelta
+                              -- ^ The current stack deltaa
+                           -> StackDelta
+recordPotentialStackOffset v offset knownStackPointer (StackDelta d) =
+  case asSallocBase v of
+    Just i ->
+      let u = stackIncrementBound d (subSallocBaseOffset i offset)
+       in trace ("Stack increment pointer:\n" ++ show (ppValueAssignments v)) $ (StackDelta u)
+    Nothing
       | knownStackPointer ->
-        trace ("Could not interpret stack pointer:\n" ++ show (ppValueAssignments v)) $ d
-      | otherwise -> d
+        trace ("Could not interpret stack pointer:\n" ++ show (ppValueAssignments v)) $
+        StackDelta d
+      | otherwise -> StackDelta d
 
 {-
-mergeStackDelta v knownStackPointer d@(StackDelta xc xs) =
+recordPotentialStackOffset v knownStackPointer d@(StackDelta xc xs) =
   case asStackAddrOffset v of
     Just offset ->
       case asInt64Constant offset of
@@ -194,10 +251,10 @@ mergeStackDelta v knownStackPointer d@(StackDelta xc xs) =
 -}
 
 stackDeltaAllocSize :: StackDelta -> Maybe (FnValue (BVType 64))
-stackDeltaAllocSize h@(StackDelta c s)
-  | c == 0 && Set.null s = Nothing
-  | Set.null s =
-    Just $! FnConstantValue n64 (toInteger (negate c))
+stackDeltaAllocSize h@(StackDelta (SallocBase d))
+  | length d == 0 = Nothing
+  | [ BVValue _ c ] <- d =
+    Just $! FnConstantValue n64 c
   | otherwise =
     trace ("Unsupported stack delta\n" ++ show h)  $ Nothing
 
