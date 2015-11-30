@@ -49,7 +49,7 @@ library
     Reopt.CFG.RegisterUse
     Reopt.CFG.Representation
     Reopt.CFG.StackArgs
-    Reopt.CFG.StackDepth                  
+    Reopt.CFG.StackDepth
     Reopt.CFG.StackHeight
     Reopt.Machine.StateNames
     Reopt.Machine.Types
@@ -153,6 +153,9 @@ executable radss_compare
     unix,
     reopt
 
+  other-modules:
+    Paths_reopt
+
   hs-source-dirs: radss_compare
   main-is: Main_radss_compare.hs
 
@@ -178,6 +181,9 @@ executable reopt_sym_test
     parameterized-utils >= 0.1.6,
     unix,
     reopt
+
+  other-modules:
+    Paths_reopt
 
   hs-source-dirs: reopt_sym_test
   main-is: Main_reopt.hs
