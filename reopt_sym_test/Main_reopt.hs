@@ -8,6 +8,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -52,6 +53,7 @@ import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Nonce
 import           Data.Parameterized.Some
 
 -- import Reopt.Semantics.BitVector
@@ -253,18 +255,21 @@ test args = do
            FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
             putStrLn $ unwords ["Execution finished!:", show (xs1,xs2)]
             pred <- I.notPred sym =<< I.bvEq sym xs1 xs2
-            solver_adapter_write_smt2 cvc4Adapter out emptySymbolVarBimap pred
+            solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
             putStrLn $ "Wrote to file " ++ show out
           _ -> fail "Execution not finished"
 
 
-withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
+withSimpleBackend' :: HandleAllocator RealWorld
+                   -> (forall t . SimContext (SimpleBackend t) -> IO a)
+                   -> IO a
 withSimpleBackend' halloc action = do
-  sym <- newSimpleBackend MapF.empty
-  cfg <- initialConfig 0 []
-  matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-  let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
-  action ctx
+  withIONonceGenerator $ \gen -> do
+    sym <- newSimpleBackend gen MapF.empty
+    cfg <- initialConfig 0 []
+    matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
+    action ctx
 
 defaultErrorHandler = MSS.EH $ \_ _ -> error "Error which I don't know how to handle!"
 

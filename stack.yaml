@@ -12,4 +12,4 @@ packages:
 extra-deps:
 - bimap-0.3.1
 - bv-0.3.0
-resolver: lts-3.3
+resolver: lts-3.16

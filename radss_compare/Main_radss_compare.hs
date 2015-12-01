@@ -4,6 +4,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
@@ -37,6 +38,7 @@ import           Data.Parameterized.Context ((%>))
 import qualified Data.Parameterized.Context as Ctx
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Nonce
 import           Data.Parameterized.Some
 
 import           Paths_reopt (version)
@@ -453,7 +455,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
-        solver_adapter_write_smt2 cvc4Adapter out emptySymbolVarBimap pred
+        solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
         putStrLn $ "Wrote to file " ++ show out
         return ()
       _ -> fail "Execution not finished"
@@ -473,13 +475,16 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
       I.andPred sym acc =<< I.bvEq sym val1 val2
 
 
-    withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
+    withSimpleBackend' :: HandleAllocator RealWorld
+                       -> (forall t . SimContext (SimpleBackend t) -> IO a)
+                       -> IO a
     withSimpleBackend' halloc action = do
-      sym <- newSimpleBackend MapF.empty
-      cfg <- initialConfig 0 []
-      matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-      let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
-      action ctx
+      withIONonceGenerator $ \gen -> do
+        sym <- newSimpleBackend gen MapF.empty
+        cfg <- initialConfig 0 []
+        matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
+        action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
 
