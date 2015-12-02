@@ -54,6 +54,9 @@ library
     Reopt.Machine.StateNames
     Reopt.Machine.Types
     Reopt.Machine.X86State
+    Reopt.Machine.SysDeps.FreeBSD
+    Reopt.Machine.SysDeps.FreeBSDGenerated
+    Reopt.Machine.SysDeps.Types
     Reopt.Object.Loader
     Reopt.Object.Memory
     Reopt.Concrete.BitVector
@@ -211,3 +214,16 @@ executable LLVMDumpInstr
 
   hs-source-dirs: utils
   main-is: LLVMDumpInstr.hs
+
+executable make_bsd_syscalls
+ build-depends:
+    base >= 4,
+    bytestring,     
+    language-c,
+    lens,
+    pretty,
+    containers,
+    pretty-show,
+    attoparsec                             
+ hs-source-dirs: make_bsd_syscalls
+ main-is: Main.hs

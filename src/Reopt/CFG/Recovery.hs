@@ -475,6 +475,37 @@ recoverBlock blockRegProvides phis lbl = do
         floatr <- recoverValue "float_result" (proc_state ^. register (N.XMMReg 0))
         flip (,) Map.empty <$> mkBlock (FnRet intr floatr)
 
+    Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
+      Fold.traverse_ recoverStmt (blockStmts b)
+      
+      -- Figure out what is preserved across the function call.
+      let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
+                -> Recover (MapF N.RegisterName FnRegValue)
+          go m (Some r) = do 
+             v <- case r of
+               N.GPReg {}
+                 -- | Just Refl <- testEquality r N.rax ->
+                 --     return (FnReturn intr)
+                 | Just _ <- testEquality r N.rsp -> do
+                     recoverValue "callee_saved" (proc_state ^. register N.rsp)
+                 | Some r `Set.member` x86CalleeSavedRegisters ->
+                     recoverValue "callee_saved" (proc_state ^. register r)
+               -- N.XMMReg 0 -> return (FnReturn floatr)
+               _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r) $
+                    return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
+             return $ MapF.insert r (FnRegValue v) m
+
+      let Just provides = Map.lookup lbl blockRegProvides
+      regs' <- foldM go MapF.empty provides 
+      
+      let args = [ Some (proc_state ^. register r) | r <- argRegs ]
+
+      _args'  <- mapM (viewSome (fmap Some . recoverValue "arguments")) args
+      -- args <- (++ stackArgs stk) <$> stateArgs proc_state
+      
+      fb <- mkBlock FnTermStmtUndefined
+      return $! (fb, Map.singleton lbl regs')
+
     Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
     
     Nothing -> do

@@ -52,8 +52,11 @@ import           Reopt.Analysis.AbsState
 import           Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.SysDeps.FreeBSD
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
+
+import           Reopt.Utils.Debug
 
 ------------------------------------------------------------------------
 -- AbsStateMap
@@ -138,6 +141,7 @@ data ParsedTermStmt
    | ParsedReturn !(X86State Value) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
+   | ParsedSyscall !(X86State Value) !Word64 !String ![N.RegisterName 'N.GP]
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -313,6 +317,18 @@ classifyBlock b interp_state =
             nonret_stmts = Seq.fromList $ filter (not . isRetLoad) (blockStmts b)
 
         in Just (ParsedReturn proc_state nonret_stmts)
+
+    Syscall proc_state
+      | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
+      , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
+      , Just (name, _rettype, argtypes) <- syscallTypeInfo call_no ->
+         let result = Just (ParsedSyscall proc_state next_addr name
+                        (take (length argtypes) x86ArgumentRegisters))        
+         in case () of
+              _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
+              _ | length argtypes > length x86ArgumentRegisters -> 
+                  debug DUrgent ("Got more than register args calling " ++ name ++ " in block " ++ show (blockLabel b)) result 
+              _ -> result
 
     -- FIXME: jump table and tail calls?
     _ -> Nothing

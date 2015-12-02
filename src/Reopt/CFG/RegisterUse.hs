@@ -319,6 +319,14 @@ summarizeBlock interp_state root_label = go root_label
             traverse_ goStmt stmts'
             demandRegisters proc_state x86ResultRegisters
 
+        Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
+          -- FIXME: clagged from call above
+          traverse_ goStmt (blockStmts b)
+          demandRegisters proc_state (Some <$> argRegs)
+          addEdge lbl (mkRootBlockLabel next_addr)
+          addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) x86ResultRegisters
+
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
 
         Nothing -> return () -- ???

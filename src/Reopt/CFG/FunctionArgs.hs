@@ -478,6 +478,11 @@ summarizeBlock interp_state root_label = go root_label
 
           goStmt _ = return ()
 
+          -- FIXME: rsp here?
+          recordSyscallPropagation proc_state = 
+            recordPropagation blockTransfer lbl proc_state Some 
+                              (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+
       case m_pterm of
         Just (ParsedBranch c x y) -> do
           traverse_ goStmt (blockStmts b)
@@ -494,9 +499,7 @@ summarizeBlock interp_state root_label = go root_label
             Nothing       -> return ()
             Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
 
-           -- FIXME: rsp here?
-          recordPropagation blockTransfer lbl proc_state Some 
-                           (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+          recordSyscallPropagation proc_state
 
         Just (ParsedJump proc_state tgt_addr) -> do 
           traverse_ goStmt (blockStmts b)
@@ -509,10 +512,20 @@ summarizeBlock interp_state root_label = go root_label
           recordPropagation blockDemandMap lbl proc_state DemandFunctionResult
                             x86ResultRegisters
 
+        -- FreeBSD follows the C ABI for function calls, except that
+        -- rax contains the system call no.
+        Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
+            -- FIXME: we ignore the return type for now.
+            traverse_ goStmt (blockStmts b)
+ 
+            recordPropagation blockDemandMap lbl proc_state (const DemandAlways) (Some <$> argRegs)
+
+            recordSyscallPropagation proc_state
+            addEdge lbl (mkRootBlockLabel next_addr)
+
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
 
-        Nothing -> return () -- ???
-
+        Nothing -> debugM DFunctionArgs ("WARNING: No parsed block type at " ++ show lbl) >> return ()
 
 -- -----------------------------------------------------------------------------
 -- debug

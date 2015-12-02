@@ -276,6 +276,13 @@ recoverBlock interp_state root_label = do
         Just (ParsedReturn _proc_state stmts') -> do
             traverse_ goStmt stmts'
 
+        Just (ParsedSyscall proc_state next_addr _name _argRegs) -> do 
+            traverse_ goStmt (blockStmts b)
+            addStateVars proc_state
+
+            let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+            addBlock (mkRootBlockLabel next_addr) sp'
+
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
 
         Nothing -> return () -- ???
