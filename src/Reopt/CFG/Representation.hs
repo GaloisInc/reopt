@@ -1,10 +1,8 @@
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.CFG.Representation
--- Description      : Defines basic data types used for representing Reopt CFG.
 -- Copyright        : (c) Galois, Inc 2015
 -- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
 --
 -- This defines the data types needed to represent X86 control flow graps.
 ------------------------------------------------------------------------
@@ -59,6 +57,7 @@ module Reopt.CFG.Representation
   , mkLit
   , bvValue
   , ppValueAssignments
+  , ppValueAssignmentList
   , App(..)
   -- * App
   , appType
@@ -362,6 +361,7 @@ ppAssignRhs :: Applicative m
             -> m Doc
 ppAssignRhs pp (EvalApp a) = ppAppA pp a
 ppAssignRhs _  (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
+ppAssignRhs pp (Read (MemLoc a _)) = (\d -> text "*" PP.<> d) <$> pp a
 ppAssignRhs _  (Read loc) = pure $ pretty loc
 ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
   where args = [pure (pretty sz), pp cnt, pp src, pp dest, pp rev]
@@ -500,15 +500,27 @@ collectValueRep _ (AssignedValue a) = do
 collectValueRep p v = return $ ppValue p v
 
 -- | This pretty prints all the history used to create a value.
-ppValueAssignments :: Value tp -> Doc
-ppValueAssignments v
-   | Map.null bindings = rhs
-   | otherwise =
-     text "let" PP.<+> vcat (Map.elems bindings) <$$>
-     text " in" PP.<+> rhs
+ppValueAssignments' :: State (Map AssignId Doc) Doc -> Doc
+ppValueAssignments' m =
+  case Map.elems bindings of
+    [] -> rhs
+    (h:r) ->
+      let first = text "let" PP.<+> h
+          f b   = text "    " PP.<> b
+       in vcat (first:fmap f r) <$$>
+          text " in" PP.<+> rhs
+  where (rhs, bindings) = runState m Map.empty
 
-  where (rhs, bindings) = flip runState Map.empty $
-          collectValueRep 0 v
+-- | This pretty prints all the history used to create a value.
+ppValueAssignments :: Value tp -> Doc
+ppValueAssignments v = ppValueAssignments' (collectValueRep 0 v)
+
+
+ppValueAssignmentList :: [Value tp] -> Doc
+ppValueAssignmentList vals =
+  ppValueAssignments' $ do
+    docs <- mapM (collectValueRep 0) vals
+    return $ brackets $ hcat (punctuate comma docs)
 
 -----------------------------------------------------------------------
 -- App

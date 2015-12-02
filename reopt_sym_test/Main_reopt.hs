@@ -1,15 +1,17 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DoAndIfThenElse #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- | This is a Crucible symbolic evaluation study, meant to be a minimal example.
 --
@@ -19,7 +21,7 @@
 -- incorporate it into Crucible as documentation.
 module Main (main) where
 
-import Control.Applicative
+import           Control.Applicative
 import           Control.Concurrent
 import           Control.Lens
 import           Control.Monad
@@ -43,15 +45,16 @@ import           Numeric (showHex)
 import           System.Console.CmdArgs.Explicit as CmdArgs
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
-import System.IO
+import           System.IO
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
-import Debug.Trace
+import           Debug.Trace
 
-import Data.Parameterized.NatRepr
-import Data.Parameterized.Some
-import Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Context as Ctx
+import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Nonce
+import           Data.Parameterized.Some
 
 -- import Reopt.Semantics.BitVector
 import           Numeric (readHex)
@@ -72,6 +75,7 @@ import qualified Lang.Crucible.Solver.Interface as I
 import           Lang.Crucible.Solver.SatResult
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
+import           Lang.Crucible.Solver.SimpleBuilder
 import           Lang.Crucible.Utils.MonadST
 import           Reopt
 import           Reopt.Analysis.AbsState
@@ -236,7 +240,7 @@ test args = do
     (Just Refl, Just Refl, Just Refl, Just Refl) ->
       withSimpleBackend' halloc $ \ctx -> do
         let sym = ctx^.ctxSymInterface
-        arg <- I.freshConstant sym (C.BaseBVRepr knownNat)
+        arg <- I.freshConstant sym "" (C.BaseBVRepr knownNat)
         -- Run cfg1
         rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
@@ -251,18 +255,21 @@ test args = do
            FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
             putStrLn $ unwords ["Execution finished!:", show (xs1,xs2)]
             pred <- I.notPred sym =<< I.bvEq sym xs1 xs2
-            solver_adapter_write_smt2 cvc4Adapter out pred
+            solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
             putStrLn $ "Wrote to file " ++ show out
           _ -> fail "Execution not finished"
 
 
-withSimpleBackend' :: HandleAllocator RealWorld -> (SimContext SimpleBackend -> IO a) -> IO a
+withSimpleBackend' :: HandleAllocator RealWorld
+                   -> (forall t . SimContext (SimpleBackend t) -> IO a)
+                   -> IO a
 withSimpleBackend' halloc action = do
-  sym <- newSimpleBackend MapF.empty
-  cfg <- initialConfig 0 []
-  matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-  let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
-  action ctx
+  withIONonceGenerator $ \gen -> do
+    sym <- newSimpleBackend gen MapF.empty
+    cfg <- initialConfig 0 []
+    matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
+    action ctx
 
 defaultErrorHandler = MSS.EH $ \_ _ -> error "Error which I don't know how to handle!"
 

@@ -1,10 +1,8 @@
 ------------------------------------------------------------------------
 -- |
 -- Module           : Reopt.Semantics.StateNames
--- Description      : Defines basic data types used for naming x86 state
 -- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
+-- Maintainer       : Joe Hendrix <jhendrix@galois.com>, Simon Winwood <sjw@galois.com>
 --
 -- This defines the data types needed to names the various x86 registers
 ------------------------------------------------------------------------
