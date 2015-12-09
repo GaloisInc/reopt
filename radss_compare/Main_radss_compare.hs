@@ -549,7 +549,7 @@ mkInitialGPRs map sym nrKey nrVal range = do
 -- they are equivalent according to the relation in map.
 -- TODO: generalize this and integrate it with mkRipRel to handle cases where
 -- the relation varies at different control points within a function.
-mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym (I.SymExpr sym C.BaseBoolType), 1 <= nKey, 1 <= nVal)
+mkGPRsCheck :: (I.IsExprBuilder sym, I.IsBoolSolver sym, 1 <= nKey, 1 <= nVal)
             => Map Integer Integer
             -> sym
             -> NatRepr nKey
