@@ -52,6 +52,8 @@ run_one() {
 
   echo -n "$file..."
 
+  # HACK: reopt_test returns exit code 2 if the binary it is stepping segfaults. So if we see an exit code
+  # of 2, we regenerate the segfaulting test and try again.
   SEGFAULT_RESULT=2
   RUN_LIMIT=100
   for ((i = 0; i < $RUN_LIMIT; ++i)); do
