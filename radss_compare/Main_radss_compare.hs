@@ -51,7 +51,7 @@ import           Flexdis86 (InstructionInstance(..))
 import           Lang.Crucible.Config (initialConfig)
 import qualified Lang.Crucible.Core as C
 import           Lang.Crucible.ExtractSubgraph
-import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
+import           Lang.Crucible.MATLAB.Intrinsics (newMatlabUtilityFunctions)
 import           Lang.Crucible.ProgramLoc
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
@@ -482,8 +482,8 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
       withIONonceGenerator $ \gen -> do
         sym <- newSimpleBackend gen MapF.empty
         cfg <- initialConfig 0 []
-        matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns M.empty []
+        -- (matlabFns, _) <- liftST $ newMatlabUtilityFunctions halloc
+        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap M.empty []
         action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)

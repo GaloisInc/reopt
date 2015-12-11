@@ -65,7 +65,7 @@ import           Data.Type.Equality as Equality
 import           Flexdis86 (InstructionInstance(..), ppInstruction, ByteReader(..), defaultX64Disassembler, disassembleInstruction)
 import           Lang.Crucible.Config (initialConfig)
 import qualified Lang.Crucible.Core as C
-import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
+-- import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)
 import           Lang.Crucible.Simulator.CallFns
 import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
@@ -267,8 +267,8 @@ withSimpleBackend' halloc action = do
   withIONonceGenerator $ \gen -> do
     sym <- newSimpleBackend gen MapF.empty
     cfg <- initialConfig 0 []
-    matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap matlabFns Map.empty []
+    -- matlabFns <- liftST $ newMatlabUtilityFunctions halloc
+    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap Map.empty []
     action ctx
 
 defaultErrorHandler = MSS.EH $ \_ _ -> error "Error which I don't know how to handle!"

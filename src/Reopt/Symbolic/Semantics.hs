@@ -391,7 +391,7 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
 generateReturn :: G.Reg s MachineState 
                -> G.Generator s Env MachineState ()
 generateReturn ms = do
-  G.modifyReg ms (curIP .~ G.App (C.BVLit knownNat 0))
+  -- G.modifyReg ms (curIP .~ G.App (C.BVLit knownNat 0))
   G.returnFromFunction =<< G.readReg ms
 
 generateTerm :: (G.Reg s MachineState)
