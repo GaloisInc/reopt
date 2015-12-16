@@ -265,10 +265,10 @@ withSimpleBackend' :: HandleAllocator RealWorld
                    -> IO a
 withSimpleBackend' halloc action = do
   withIONonceGenerator $ \gen -> do
-    sym <- newSimpleBackend gen MapF.empty
+    sym <- newSimpleBackend gen
     cfg <- initialConfig 0 []
     -- matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-    let ctx = initSimContext sym cfg halloc stdout emptyHandleMap Map.empty []
+    let ctx = initSimContext sym MapF.empty cfg halloc stdout emptyHandleMap Map.empty []
     action ctx
 
 defaultErrorHandler = MSS.EH $ \_ _ -> error "Error which I don't know how to handle!"

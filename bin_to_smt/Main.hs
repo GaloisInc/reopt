@@ -263,10 +263,10 @@ simulate name (C.SomeCFG cfg) halloc = do
     dummyFlags <- foldM (initWordMap sym n5 n1) flags [0..31]
     
     pc     <- I.freshConstant sym "pc" (C.BaseBVRepr n64)
-    dummyPC <- I.freshConstant sym "" (C.BaseBVRepr n64)
+    dummyPC <- I.freshConstant sym "dummyPC" (C.BaseBVRepr n64)
     
     heap      <- I.freshConstant sym "heap" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
-    dummyHeap <- I.freshConstant sym "" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
+    dummyHeap <- I.freshConstant sym "dummyHeap" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
     
     let struct        = Ctx.empty %> (RV heap) %> (RV initGprs) %> (RV flags') %> (RV pc)
         initialRegMap = assignReg C.typeRepr struct emptyRegMap
@@ -292,13 +292,14 @@ simulate name (C.SomeCFG cfg) halloc = do
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
-        solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
+        bindings <- getSymbolVarBimap sym
+        solver_adapter_write_smt2 cvc4Adapter sym out bindings pred
         putStrLn $ "Wrote to file " ++ show out
         return ()
   where
     initWordMap sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
-      val <- I.freshConstant sym "" (C.BaseBVRepr nrVal)
+      val <- I.freshConstant sym "word" (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val acc
       
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
@@ -314,10 +315,10 @@ simulate name (C.SomeCFG cfg) halloc = do
                        -> IO a
     withSimpleBackend' halloc action = do
       withIONonceGenerator $ \gen -> do
-        sym <- newSimpleBackend gen MapF.empty
+        sym <- newSimpleBackend gen
         cfg <- initialConfig 0 []
         -- matlabFns <- liftST $ newMatlabUtilityFunctions halloc
-        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap M.empty []
+        let ctx = initSimContext sym MapF.empty cfg halloc stdout emptyHandleMap M.empty []
         action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)

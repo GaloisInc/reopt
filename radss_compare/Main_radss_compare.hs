@@ -480,10 +480,10 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
                        -> IO a
     withSimpleBackend' halloc action = do
       withIONonceGenerator $ \gen -> do
-        sym <- newSimpleBackend gen MapF.empty
+        sym <- newSimpleBackend gen
         cfg <- initialConfig 0 []
         -- (matlabFns, _) <- liftST $ newMatlabUtilityFunctions halloc
-        let ctx = initSimContext sym cfg halloc stdout emptyHandleMap M.empty []
+        let ctx = initSimContext sym MapF.empty cfg halloc stdout emptyHandleMap M.empty []
         action ctx
 
     defaultErrorHandler = MSS.EH $ \simErr mssState -> error (show simErr)
