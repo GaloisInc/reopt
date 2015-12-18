@@ -28,8 +28,6 @@ import           Data.Bits
 import           Data.Int
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.NatRepr
-import           Data.Set (Set)
-import qualified Data.Set as Set
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation

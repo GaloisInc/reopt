@@ -27,10 +27,8 @@ module Reopt.CFG.Recovery
 
 import           Control.Lens
 import           Control.Monad.Error
-import           Control.Monad.Fix
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (toList, traverse_)
-import           Data.Int (Int64)
 import           Data.List (elemIndex, elem)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map

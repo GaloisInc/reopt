@@ -59,6 +59,7 @@ import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.Types (BVType)
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -345,7 +346,7 @@ instance S.IsValue Expr where
     , Just yv <- asBVLit y = assert (0 <= yv && yv < natValue w) $
       S.bvBit xe y
 
-    | Just (ConcatV lw lw' x_low x_high) <- asApp x
+    | Just (ConcatV lw _lw' x_low x_high) <- asApp x
     , Just yv <- asBVLit y = assert (0 <= yv && yv < 2*natValue lw) $
       if yv >= natValue lw then
         S.bvBit x_high (S.bvLit (exprWidth y) (yv - natValue lw))
@@ -899,6 +900,10 @@ instance S.Semantics X86Generator where
       -- Return early
       Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
                 & blockState .~ NothingF
+  
+  primitive S.CPUID = error "CPUID"
+  primitive S.RDTSC = error "RDTSC"
+  primitive S.XGetBV = error "XGetBV"
 
   getSegmentBase _seg =
     error "Reopt.Semantics.Implementation.getSegmentBase: unimplemented!"

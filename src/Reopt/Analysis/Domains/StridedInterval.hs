@@ -33,15 +33,11 @@ module Reopt.Analysis.Domains.StridedInterval
 
 import           Reopt.Utils.Debug
 
-import           Control.Applicative ( (<$>), (<*>) )
 import           Control.Exception (assert)
 import qualified Data.Foldable as Fold
-import           Data.Maybe (isNothing)
-import qualified Data.Set as S
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
 import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Some
 import           Reopt.Machine.Types
 
 import           Test.QuickCheck
@@ -65,7 +61,6 @@ instance Eq (StridedInterval tp) where
 --  EmptyInterval == EmptyInterval = True
   si1@StridedInterval{} == si2@StridedInterval{} =
     base si1 == base si2 && range si1 == range si2 && stride si1 == stride si2
-  _ == _ = False
 
 instance Show (StridedInterval tp) where
   show = show . pretty
@@ -118,13 +113,13 @@ mkStridedInterval tp roundUp start end s
 fromFoldable :: Fold.Foldable t =>
                 NatRepr n -> t Integer -> StridedInterval (BVType n)
 fromFoldable sz vs
-  | isEmpty vs  = empty tp
-  | otherwise  = mkStridedInterval tp True start end s
+  | isEmptyV vs  = empty tp
+  | otherwise    = mkStridedInterval tp True start end s
   where
-    tp      = BVTypeRepr sz
-    isEmpty = not . Fold.any (const True)
-    start   = Fold.minimum vs
-    end     = Fold.maximum vs
+    tp       = BVTypeRepr sz
+    isEmptyV = not . Fold.any (const True)
+    start    = Fold.minimum vs
+    end      = Fold.maximum vs
     -- This is a bit of a hack, relying on the fact that gcd 0 v == v
     s       = Fold.foldl' (\g v -> gcd g (v - start)) 0 vs
 
@@ -143,7 +138,6 @@ isTop :: StridedInterval tp -> Bool
 isTop si@StridedInterval{} =
   case typ si of
     BVTypeRepr sz -> si == top sz
-isTop _  = False
 
 member :: Integer -> StridedInterval tp -> Bool
 member _ si | isEmpty si = False
@@ -184,11 +178,11 @@ lub si1 si2
     lower = min (base si1) (base si2)
     upper = max (intervalEnd si1) (intervalEnd si2)
 
-prop_lub :: StridedInterval (BVType 64)
-            -> StridedInterval (BVType 64)
-            -> Bool
-prop_lub x y = x `isSubsetOf` (x `lub` y)
-               && y `isSubsetOf` (x `lub` y)
+-- prop_lub :: StridedInterval (BVType 64)
+--             -> StridedInterval (BVType 64)
+--             -> Bool
+-- prop_lub x y = x `isSubsetOf` (x `lub` y)
+--                && y `isSubsetOf` (x `lub` y)
 
 lubSingleton :: Integer
                 -> StridedInterval (BVType n)
@@ -208,11 +202,11 @@ lubSingleton s si
       mkStridedInterval (typ si) True lower upper
                         (gcd (stride si) (to_contain - lower))
 
-prop_glb :: StridedInterval (BVType 64)
-            -> StridedInterval (BVType 64)
-            -> Bool
-prop_glb x y = (x `glb` y) `isSubsetOf` x
-               && (x `glb` y) `isSubsetOf` y
+-- prop_glb :: StridedInterval (BVType 64)
+--             -> StridedInterval (BVType 64)
+--             -> Bool
+-- prop_glb x y = (x `glb` y) `isSubsetOf` x
+--                && (x `glb` y) `isSubsetOf` y
 
 -- | Greatest lower bound.  @glb si1 si2@ contains only those values
 -- which are in @si1@ and @si2@.
@@ -222,10 +216,10 @@ glb :: StridedInterval (BVType n)
 --glb EmptyInterval _ = EmptyInterval
 --glb _ EmptyInterval = EmptyInterval
 glb si1 si2
-  | Just s <- isSingleton si1 =
-      if s `member` si2 then si1 else empty (typ si1)
-  | Just s <- isSingleton si2 =
-      if s `member` si1 then si2 else empty (typ si1)
+  | Just s' <- isSingleton si1 =
+      if s' `member` si2 then si1 else empty (typ si1)
+  | Just s' <- isSingleton si2 =
+      if s' `member` si1 then si2 else empty (typ si1)
   | base si1 == base si2 =
       mkStridedInterval (typ si1) False (base si1) upper
                         (lcm (stride si1) (stride si2))
@@ -285,19 +279,19 @@ floor_quot :: Integral a => a -> a -> a
 floor_quot _ 0 = error "floor_quot div by 0"
 floor_quot x y = x `div` y
 
-prop_sld :: Positive Integer -> Positive Integer
-            -> NonZero Integer -> Positive Integer -> Positive Integer
-            -> Property
-prop_sld a b c d e = not (isNothing v) ==> p
-  where
-    p = case v of
-         Just (x, y) -> x >= 0 && y >= 0
-                        && x <= getPositive d
-                        && y <= getPositive e
-                        && (getPositive a) * x - (getPositive b) * y == (getNonZero c)
-         _ -> True
-    v = solveLinearDiophantine (getPositive a) (getPositive b) (getNonZero c)
-                               (getPositive d) (getPositive e)
+-- prop_sld :: Positive Integer -> Positive Integer
+--             -> NonZero Integer -> Positive Integer -> Positive Integer
+--             -> Property
+-- prop_sld a b c d e = not (isNothing v) ==> p
+--   where
+--     p = case v of
+--          Just (x, y) -> x >= 0 && y >= 0
+--                         && x <= getPositive d
+--                         && y <= getPositive e
+--                         && (getPositive a) * x - (getPositive b) * y == (getNonZero c)
+--          _ -> True
+--     v = solveLinearDiophantine (getPositive a) (getPositive b) (getNonZero c)
+--                                (getPositive d) (getPositive e)
 
 
 -- | Returns the gcd, and n and m s.t. n * a + m * b = g
@@ -311,8 +305,8 @@ eGCD a0 b0 = let (g, m, n) = go a0 b0
     go a b = let (g, x, y) = go b $ rem a b
              in (g, y, x - (a `quot` b) * y)
 
-prop_eGCD :: Integer -> Integer -> Bool
-prop_eGCD x y = let (g, a, b) = eGCD x y in x * a + y * b == g
+-- prop_eGCD :: Integer -> Integer -> Bool
+-- prop_eGCD x y = let (g, a, b) = eGCD x y in x * a + y * b == g
 
 -- -----------------------------------------------------------------------------
 -- Operations
@@ -357,10 +351,10 @@ bvadd sz si1 si2 =
     r | m == 0 = error "bvadd given 0 stride"
       | otherwise = (range si1 * (stride si1 `div` m)) + (range si2 * (stride si2 `div` m))
 
-prop_bvadd ::  StridedInterval (BVType 64)
-            -> StridedInterval (BVType 64)
-            -> Bool
-prop_bvadd = mk_prop (+) bvadd
+-- prop_bvadd ::  StridedInterval (BVType 64)
+--             -> StridedInterval (BVType 64)
+--             -> Bool
+-- prop_bvadd = mk_prop (+) bvadd
 
 -- We have (x + [0..a] * b) * (y + [0 .. d] * e)
 -- = (x * y) + [0..a] * b * y + [0 .. d] * e * x + ([0..a] * b * [0..d] * e)
@@ -386,10 +380,10 @@ bvmul sz si1 si2 =
       | s == 0    = singleton (typ si1) b
       | otherwise = StridedInterval { typ = typ si1, base = b, range = r, stride = s }
 
-prop_bvmul ::  StridedInterval (BVType 64)
-            -> StridedInterval (BVType 64)
-            -> Bool
-prop_bvmul = mk_prop (*) bvmul
+-- prop_bvmul ::  StridedInterval (BVType 64)
+--             -> StridedInterval (BVType 64)
+--             -> Bool
+-- prop_bvmul = mk_prop (*) bvmul
 
 -- filterLeq :: TypeRepr tp -> StridedInterval tp -> Integer -> StridedInterval tp
 -- filterLeq tp@(BVTypeRepr _) si x = glb si (mkStridedInterval tp False 0 x 1)
@@ -430,30 +424,30 @@ prop_bvmul = mk_prop (*) bvmul
 
 -- Assumes b < q (?)
 -- currently broken :(
-leastMod :: Integer -> Integer -> Integer -> Integer -> Integer
-leastMod _ 0 _ _ = error "leastMod given m = 0"
-leastMod _ _ 0 _ = error "leastMod given q = 0"
-leastMod b m q n
-  | b + n * q < m  = b -- no wrap
-  | m `mod` q == 0 = b -- assumes q <= m
-  | otherwise =
-      debug DAbsInt (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` m_div_q))) $
-      leastMod next_b m' q'
-                -- FIXME: we sometimes miss a +1 here, we do this to
-                -- be conservative (overapprox.)
-      (next_n `div` m_div_q)
-  where
-    m_div_q | q == 0 = error "leastMod given q == 0"
-            | r == 0 = error "leastMod given m `div` q == 0"
-            | otherwise = r
-      where r = m `div` q
-    m' = q
-    q' | q == 0 = error "leastMod given q == 0"
-       | otherwise = q - m `mod` q
-    (next_b, next_n)
-      | b < q'    = (b, n)
-      | otherwise = let i = m_div_q + 1
-                    in (((b + i * q) `mod` m) `mod` q, n - i)
+-- leastMod :: Integer -> Integer -> Integer -> Integer -> Integer
+-- leastMod _ 0 _ _ = error "leastMod given m = 0"
+-- leastMod _ _ 0 _ = error "leastMod given q = 0"
+-- leastMod b m q n
+--   | b + n * q < m  = b -- no wrap
+--   | m `mod` q == 0 = b -- assumes q <= m
+--   | otherwise =
+--       debug DAbsInt (show ((b, m, q, n), (next_b, m', q', next_n, next_n `div` m_div_q))) $
+--       leastMod next_b m' q'
+--                 -- FIXME: we sometimes miss a +1 here, we do this to
+--                 -- be conservative (overapprox.)
+--       (next_n `div` m_div_q)
+--   where
+--     m_div_q | q == 0 = error "leastMod given q == 0"
+--             | r == 0 = error "leastMod given m `div` q == 0"
+--             | otherwise = r
+--       where r = m `div` q
+--     m' = q
+--     q' | q == 0 = error "leastMod given q == 0"
+--        | otherwise = q - m `mod` q
+--     (next_b, next_n)
+--       | b < q'    = (b, n)
+--       | otherwise = let i = m_div_q + 1
+--                     in (((b + i * q) `mod` m) `mod` q, n - i)
 
 -- | Truncate an interval.
 
@@ -485,38 +479,38 @@ trunc si sz
     top' = top sz
     base_mod_sz = base si'
     -- positive only
-    ceilDiv x 0 = error "SI.trunc given 0 stride."
+    ceilDiv _ 0 = error "SI.trunc given 0 stride."
     ceilDiv x y = (x + y - 1) `div` y
 
-prop_trunc :: StridedInterval (BVType 64)
-              -> Positive (Small Integer)
-              -> Property
-prop_trunc si sz
-  | Just (Some n) <- someNat sz' = sz' < 64 ==> p n
-  | otherwise = True ==> True
-  where
-    p :: NatRepr n -> Bool
-    p n = S.fromList (map (toUnsigned n) (toList si))
-          `S.isSubsetOf`
-          S.fromList (toList (trunc si n))
-    sz' = getSmall (getPositive sz)
+-- prop_trunc :: StridedInterval (BVType 64)
+--               -> Positive (Small Integer)
+--               -> Property
+-- prop_trunc si sz
+--   | Just (Some n) <- someNat sz' = sz' < 64 ==> p n
+--   | otherwise = True ==> True
+--   where
+--     p :: NatRepr n -> Bool
+--     p n = S.fromList (map (toUnsigned n) (toList si))
+--           `S.isSubsetOf`
+--           S.fromList (toList (trunc si n))
+--     sz' = getSmall (getPositive sz)
 
 -- -----------------------------------------------------------------------------
 -- Testing
 
-mk_prop :: (Integer -> Integer -> Integer)
-           -> (NatRepr 64
-               -> StridedInterval (BVType 64)
-               -> StridedInterval (BVType 64)
-               -> StridedInterval (BVType 64))
-           -> StridedInterval (BVType 64)
-           -> StridedInterval (BVType 64)
-           -> Bool
-mk_prop int_f si_f x y = and [ (toUnsigned n64 (int_f v v'))
-                               `member`
-                               (si_f n64 x y)
-                             | v  <- toList x
-                             , v' <- toList y ]
+-- mk_prop :: (Integer -> Integer -> Integer)
+--            -> (NatRepr 64
+--                -> StridedInterval (BVType 64)
+--                -> StridedInterval (BVType 64)
+--                -> StridedInterval (BVType 64))
+--            -> StridedInterval (BVType 64)
+--            -> StridedInterval (BVType 64)
+--            -> Bool
+-- mk_prop int_f si_f x y = and [ (toUnsigned n64 (int_f v v'))
+--                                `member`
+--                                (si_f n64 x y)
+--                              | v  <- toList x
+--                              , v' <- toList y ]
 
 toList :: StridedInterval (BVType sz) -> [Integer]
 --toList EmptyInterval        = []

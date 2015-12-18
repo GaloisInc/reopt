@@ -309,10 +309,10 @@ classifyBlock b interp_state =
            Just (ParsedJump proc_state tgt_addr)
 
       -- Return
-      | Just assign <- identifyReturn proc_state ->
+      | Just asgn <- identifyReturn proc_state ->
         let isRetLoad s =
               case s of
-                AssignStmt assign' | Just Refl <- testEquality assign assign' -> True
+                AssignStmt asgn' | Just Refl <- testEquality asgn asgn' -> True
                 _ -> False
             nonret_stmts = Seq.fromList $ filter (not . isRetLoad) (blockStmts b)
 

@@ -21,8 +21,7 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+-- import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
@@ -266,12 +265,6 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 
 -- -----------------------------------------------------------------------------
 -- Entry point
-ppSet :: (w -> Doc) -> Set w -> Doc
-ppSet ppv vs =
-  lbrace
-  <> fillCat (punctuate (text ", ") (map ppv (Set.toList vs)))
-  <> rbrace 
-  -- encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
@@ -529,8 +522,3 @@ summarizeBlock interp_state root_label = go root_label
 
 -- -----------------------------------------------------------------------------
 -- debug
-
-ppMap :: (k -> Doc) -> (a -> Doc) -> Map k a -> Doc
-ppMap ppk ppv vs = encloseSep lbrace rbrace comma (map pp (Map.toList vs))
-  where
-    pp (k, v) = ppk k <+> text "->" <+> ppv v

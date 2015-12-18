@@ -152,12 +152,12 @@ asFinSet nm (CodePointers s)
       IsFin (Set.mapMonotonic toInteger s)
 asFinSet _ _ = NotFin
 
-asFinSet64 :: String -> AbsValue (BVType 64) -> Maybe (Set Word64)
-asFinSet64 _ (FinSet s) = Just $! (Set.mapMonotonic fromInteger s)
-asFinSet64 nm (CodePointers s)
-  | isZeroPtr s = Just s
-  | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $ Just s
-asFinSet64 _ _ = Nothing
+-- asFinSet64 :: String -> AbsValue (BVType 64) -> Maybe (Set Word64)
+-- asFinSet64 _ (FinSet s) = Just $! (Set.mapMonotonic fromInteger s)
+-- asFinSet64 nm (CodePointers s)
+--   | isZeroPtr s = Just s
+--   | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $ Just s
+-- asFinSet64 _ _ = Nothing
 
 codePointerSet :: AbsValue tp -> Set Word64
 codePointerSet (CodePointers s) = s
@@ -390,7 +390,7 @@ joinAbsValue' x y = do
   return $! Just TopV
 
 member :: Integer -> AbsValue tp -> Bool
-member n TopV = True
+member _ TopV = True
 member n (FinSet s) = Set.member n s
 member n (CodePointers s) | 0 <= n && n <= toInteger (maxBound :: Word64) =
   Set.member (fromInteger n) s
@@ -458,8 +458,8 @@ meet' v v'
       FinSet $ Set.filter (\x -> (toUnsigned n x) `member` av) s
   | SubValue n av <- v', IsFin s <- asFinSet "meet" v =
       FinSet $ Set.filter (\x -> (toUnsigned n x) `member` av) s
-  | SubValue n av <- v, StridedInterval si <- v' = v' -- FIXME: ?
-  | StridedInterval si <- v, SubValue n av <- v' = v -- FIXME: ?
+  | SubValue _ _ <- v, StridedInterval _ <- v' = v' -- FIXME: ?
+  | StridedInterval _ <- v, SubValue _ _ <- v' = v -- FIXME: ?
 
 -- Join addresses
 meet' (SomeStackOffset ax) s@(StackOffset ay _) = assert (ax == ay) s
@@ -482,6 +482,7 @@ trunc (SubValue n av) w =
    NatCaseGT LeqProof -> trunc av w
 trunc (StackOffset _ _)   _ = TopV
 trunc (SomeStackOffset _) _ = TopV
+trunc ReturnAddr _ = TopV
 trunc TopV _ = TopV
 
 uext :: forall u v.
@@ -490,7 +491,7 @@ uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
 uext (StridedInterval si) w =
   StridedInterval $ si { SI.typ = BVTypeRepr w }
-uext (SubValue (n :: NatRepr n) av) w =
+uext (SubValue (n :: NatRepr n) av) _ =
   -- u + 1 <= v, n + 1 <= u, need n + 1 <= v
   -- proof: n + 1 <= u + 1 by addIsLeq
   --        u + 1 <= v     by assumption
@@ -502,6 +503,7 @@ uext (SubValue (n :: NatRepr n) av) w =
     proof = leqTrans (leqAdd (LeqProof :: LeqProof (n+1) u) n1) (LeqProof :: LeqProof (u + 1) v)
 uext (StackOffset _ _) _ = TopV
 uext (SomeStackOffset _) _ = TopV
+uext ReturnAddr _ = TopV
 uext TopV _ = TopV
 
 bvadd :: NatRepr u
@@ -675,7 +677,6 @@ abstractULt tp x y
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
                                                      (maxUnsigned n) 1))
-    where trace' m x = debug DAbsInt (m ++ show x) x
 
 abstractULt _tp x y = (x, y)
 
@@ -692,7 +693,6 @@ abstractULeq tp x y
     ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
     , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
                                                      (maxUnsigned n) 1))
-    where trace' m x = debug DAbsInt (m ++ show x) x
 
 abstractULeq _tp x y = (x, y)
 
@@ -713,13 +713,13 @@ instance Eq StackEntry where
 -- rsp.
 type AbsBlockStack = Map Int64 StackEntry
 
-absStackLeq :: AbsBlockStack -> AbsBlockStack -> Bool
-absStackLeq x y = all entryLeq (Map.toList y)
-  where entryLeq (o, StackEntry y_tp y_v) =
-          case Map.lookup o x of
-            Just (StackEntry x_tp x_v) | Just Refl <- testEquality x_tp y_tp ->
-              isNothing (joinAbsValue y_v x_v)
-            _ -> False
+-- absStackLeq :: AbsBlockStack -> AbsBlockStack -> Bool
+-- absStackLeq x y = all entryLeq (Map.toList y)
+--   where entryLeq (o, StackEntry y_tp y_v) =
+--           case Map.lookup o x of
+--             Just (StackEntry x_tp x_v) | Just Refl <- testEquality x_tp y_tp ->
+--               isNothing (joinAbsValue y_v x_v)
+--             _ -> False
 
 -- | @absStackJoinD y x@ returns the stack containing the union @z@ of the
 -- values in @y@ and @x@.  It sets the first state parameter to true if @z@
@@ -761,19 +761,19 @@ absStackJoinD y x = do
   return $! Map.fromList (catMaybes z)
 
 
-absStackLub :: AbsBlockStack -> AbsBlockStack -> AbsBlockStack
-absStackLub = Map.mergeWithKey merge (\_ -> Map.empty) (\_ -> Map.empty)
-  where merge :: Int64 -> StackEntry -> StackEntry -> Maybe StackEntry
-        merge _ (StackEntry x_tp x_v) (StackEntry y_tp y_v) =
-          case testEquality x_tp y_tp of
-            Just Refl ->
-              case joinAbsValue x_v y_v of
-                Nothing | x_v == TopV -> Nothing
+-- absStackLub :: AbsBlockStack -> AbsBlockStack -> AbsBlockStack
+-- absStackLub = Map.mergeWithKey merge (\_ -> Map.empty) (\_ -> Map.empty)
+--   where merge :: Int64 -> StackEntry -> StackEntry -> Maybe StackEntry
+--         merge _ (StackEntry x_tp x_v) (StackEntry y_tp y_v) =
+--           case testEquality x_tp y_tp of
+--             Just Refl ->
+--               case joinAbsValue x_v y_v of
+--                 Nothing | x_v == TopV -> Nothing
 
-                        | otherwise -> Just (StackEntry x_tp x_v)
-                Just TopV -> Nothing
-                Just v -> Just (StackEntry x_tp v)
-            Nothing -> Nothing
+--                         | otherwise -> Just (StackEntry x_tp x_v)
+--                 Just TopV -> Nothing
+--                 Just v -> Just (StackEntry x_tp v)
+--             Nothing -> Nothing
 
 ppAbsStack :: AbsBlockStack -> Doc
 ppAbsStack m = vcat (pp <$> Map.toDescList m)
@@ -946,7 +946,7 @@ addMemWrite a v r =
              ++ " via " ++ show (pretty a)
              ++" in SomeStackOffset case") $
       r & curAbsStack %~ pruneStack
-    (st@(StackOffset _ s), _) | Set.size s > 1 ->
+    (StackOffset _ s, _) | Set.size s > 1 ->
       let w = valueByteSize v
       in  r & curAbsStack %~ flip (Set.fold (\o m -> deleteRange o (o+w-1) m)) s
     (StackOffset _ s, TopV) | [o] <- Set.toList s ->
@@ -962,8 +962,8 @@ addMemWrite a v r =
 addOff :: NatRepr w -> Integer -> Integer -> Integer
 addOff w o v = toUnsigned w (o + v)
 
-subOff :: NatRepr w -> Integer -> Integer -> Integer
-subOff w o v = toUnsigned w (o - v)
+-- subOff :: NatRepr w -> Integer -> Integer -> Integer
+-- subOff w o v = toUnsigned w (o - v)
 
 mkAbsBlockState :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
                 -> AbsBlockStack
