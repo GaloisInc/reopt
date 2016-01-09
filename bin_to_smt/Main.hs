@@ -89,7 +89,7 @@ import           Reopt.Symbolic.Semantics
 data Action = SymExec -- ^ Symbolically execute all blocks in the file.
               | ShowHelp
               | ShowVersion
-                
+
 -- | Command line arguments.
 data Args = Args { _reoptAction  :: !Action
                  , _programPath  :: !FilePath
@@ -150,7 +150,7 @@ sectionFlag = flagNone [ "load-sections" ] upd help
 entryPointFlag :: Flag Args
 entryPointFlag = flagReq [ "entry", "e" ] upd "Entry point" help
   where
-    upd :: String -> Args -> Either String Args 
+    upd :: String -> Args -> Either String Args
     upd s old = case readMaybe s of
           Just addr -> Right $ (entryPoint .~ Just addr) old
           _         -> Left "Could not parse entry point"
@@ -242,7 +242,7 @@ simulateCFG entry reifcfg = do
   let simOne (k, b) = do
         cfg <- liftST $ translateSingleBlock halloc b
         simulate (showHex k "") cfg halloc
-            
+
   mapM_ simOne (M.assocs reifcfg)
 
 simulate :: String
@@ -253,27 +253,30 @@ simulate name (C.SomeCFG cfg) halloc = do
   out <- openFile ("/tmp/sat_trans_" ++ name) WriteMode
   withSimpleBackend' halloc $ \ctx -> do
     let sym = ctx^.ctxSymInterface
-    
+
     initGprs0  <- I.emptyWordMap sym n4 (C.BaseBVRepr n64)
     initGprs   <- foldM (initWordMap sym n4 n64) initGprs0 [0..15]
     dummyGprs  <- foldM (initWordMap sym n4 n64) initGprs0 [0..15]
-    
+
     flags      <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
     flags'     <- foldM (initWordMap sym n5 n1) flags [0..31]
     dummyFlags <- foldM (initWordMap sym n5 n1) flags [0..31]
-    
+
     pc     <- I.freshConstant sym "pc" (C.BaseBVRepr n64)
     dummyPC <- I.freshConstant sym "dummyPC" (C.BaseBVRepr n64)
-    
-    heap      <- I.freshConstant sym "heap" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
-    dummyHeap <- I.freshConstant sym "dummyHeap" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
-    
+
+    heap      <- I.freshConstant sym "heap" $
+      C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
+    dummyHeap <- I.freshConstant sym "dummyHeap" $
+      C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
+
     let struct        = Ctx.empty %> (RV heap) %> (RV initGprs) %> (RV flags') %> (RV pc)
         initialRegMap = assignReg C.typeRepr struct emptyRegMap
     -- Run cfg1
-    rr <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ callCFG cfg initialRegMap
+    rr <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
+         regValue <$> callCFG cfg initialRegMap
     case rr of
-      FinishedExecution _ (TotalRes (view gpValue -> xs)) -> do
+      FinishedExecution _ (TotalRes (view gpValue -> RegEntry _ xs)) -> do
         let heap   = unRV $ xs ^. _1
             gprs   = unRV $ xs ^. _2
             flags  = unRV $ xs ^. _3
@@ -281,7 +284,7 @@ simulate name (C.SomeCFG cfg) halloc = do
             true = I.truePred sym
 
         -- Force all the output elements to be used so we don't simplify them away.
-        
+
         rels <- sequence [ I.arrayEq sym heap dummyHeap
                          , foldM (compareWordMapIdx sym n4 n64 (gprs, dummyGprs)) true [0..15]
                          , foldM (compareWordMapIdx sym n5 n1 (flags, dummyFlags)) true [0..31]
@@ -292,8 +295,7 @@ simulate name (C.SomeCFG cfg) halloc = do
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
-        bindings <- getSymbolVarBimap sym
-        solver_adapter_write_smt2 cvc4Adapter sym out bindings pred
+        solver_adapter_write_smt2 cvc4Adapter sym out pred
         putStrLn $ "Wrote to file " ++ show out
         return ()
   where
@@ -301,7 +303,7 @@ simulate name (C.SomeCFG cfg) halloc = do
       idx <- I.bvLit sym nrKey i
       val <- I.freshConstant sym "word" (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val acc
-      
+
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
       idx <- I.bvLit sym nrKey i
       val1Part <- I.lookupWordMap sym nrKey (C.BaseBVRepr nrVal) idx wm1
@@ -365,7 +367,7 @@ main :: IO ()
 main = do
   args <- getCommandLineArgs
   case args^.reoptAction of
-    SymExec -> do 
+    SymExec -> do
         (mem, entry) <- getMemAndEntry args
         let cfg = case findBlocks mem entry of
                      Left err -> error err

@@ -379,11 +379,9 @@ findBlock tag C.CFG{C.cfgBlockMap = blockMap} =
 
 getBlockStartPos :: C.Block blocks init ret -> Maybe Word64
 getBlockStartPos block =
-  case plSourceLoc (case block of
-    C.Block{C.blockDiffStmts = C.ConsStmt loc _ _} -> loc
-    C.Block{C.blockDiffStmts = C.TermStmt loc _} -> loc) of
-      BinaryPos _ w -> Just w
-      _ -> Nothing
+  case plSourceLoc (C.blockLoc block) of
+    BinaryPos _ w -> Just w
+    _ -> Nothing
 
 simulateBlocks :: Block -> Block -> Map Word64 [Word64] -> Map Integer Integer -> IO ()
 simulateBlocks block1 block2 ripRel gprRel = do
@@ -414,21 +412,21 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     flags  <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
     pc     <- I.freshConstant sym "" (C.BaseBVRepr n64)
-    heap   <- I.freshConstant sym "" (C.BaseArrayRepr C.indexTypeRepr C.baseTypeRepr)
+    heap   <- I.freshConstant sym "" C.baseTypeRepr
     let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
         struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
         initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
         initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
     -- Run cfg1
     rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
-      callCFG cfg1 initialRegMap1
+      regValue <$> callCFG cfg1 initialRegMap1
     -- Run cfg2
     rr2 <-trace "Second:" $ MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
-      callCFG cfg2 initialRegMap2
+      regValue <$> callCFG cfg2 initialRegMap2
     -- Compare
     case (rr1,rr2) of
-      (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
-       FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
+      (FinishedExecution _ (TotalRes (view gpValue -> RegEntry _ xs1)),
+       FinishedExecution _ (TotalRes (view gpValue -> RegEntry _ xs2))) -> do
         let heap1 = unRV $ xs1^._1
             heap2 = unRV $ xs2^._1
             gprs1 = unRV $ xs1^._2
@@ -455,7 +453,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
         -- relations at the end don't hold.  We don't have forall on
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
-        solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
+        solver_adapter_write_smt2 cvc4Adapter sym out pred
         putStrLn $ "Wrote to file " ++ show out
         return ()
       _ -> fail "Execution not finished"

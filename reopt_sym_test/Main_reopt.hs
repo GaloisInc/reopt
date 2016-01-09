@@ -244,18 +244,18 @@ test args = do
         -- Run cfg1
         rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
-          callCFG cfg1 rMap
+          regValue <$> callCFG cfg1 rMap
         -- Run cfg2
         rr2 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
-          callCFG cfg2 rMap
+          regValue <$> callCFG cfg2 rMap
         -- Compare
         case (rr1,rr2) of
-          (FinishedExecution _ (TotalRes (view gpValue -> xs1)),
-           FinishedExecution _ (TotalRes (view gpValue -> xs2))) -> do
+          (FinishedExecution _ (TotalRes (view gpValue -> RegEntry _ xs1)),
+           FinishedExecution _ (TotalRes (view gpValue -> RegEntry _ xs2))) -> do
             putStrLn $ unwords ["Execution finished!:", show (xs1,xs2)]
             pred <- I.notPred sym =<< I.bvEq sym xs1 xs2
-            solver_adapter_write_smt2 cvc4Adapter sym out emptySymbolVarBimap pred
+            solver_adapter_write_smt2 cvc4Adapter sym out pred
             putStrLn $ "Wrote to file " ++ show out
           _ -> fail "Execution not finished"
 

@@ -154,7 +154,7 @@ instance Eq (Var tp) where
 type GPRs = C.WordMapType 4 (C.BaseBVType 64)
 type Flags = C.WordMapType 5 (C.BaseBVType 1)
 type PC = C.BVType 64
-type Heap = C.SymbolicArrayType (C.BVIndexType 64) (C.BaseBVType 8)
+type Heap = C.SymbolicArrayType (Ctx.EmptyCtx Ctx.::> (C.BVIndexType 64)) (C.BaseBVType 8)
 
 type MachineCtx = EmptyCtx ::> Heap ::> GPRs ::> Flags ::> PC
 type MachineState = C.StructType MachineCtx
@@ -291,19 +291,16 @@ generateBlock :: (G.Reg s MachineState)
 generateBlock ms getLabel (Block stmts term) = do
   mapM_ (generateStmt ms getLabel) stmts
   generateTerm ms getLabel term
-  
 
 generateStmt :: (G.Reg s MachineState)
              -> (Word64 -> G.End s Env init MachineState (G.Label s))
              -> Stmt
              -> G.Generator s Env MachineState ()
-
 generateStmt ms getLabel (S.Register rv := LitExpr nr i)
   | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
   = do
   G.modifyReg ms (curIP .~ G.App (C.BVLit nr i))
   modify $ \env -> env {trackedRip = fromIntegral i}
---
 generateStmt ms getLabel stmt@(l := e) = case l of
   S.Register rv
     | Just (reg, Refl, Refl) <- S.registerViewAsFullRegister rv -> do
@@ -316,7 +313,8 @@ generateStmt ms getLabel stmt@(l := e) = case l of
       Just Refl -> do
         e' <- fmap (runReader (translateExpr' e)) get
         addr' <- fmap (runReader (translateExpr' addr)) get
-        let upd hp = G.App $ C.SymArrayUpdate C.indexTypeRepr C.baseTypeRepr hp addr' e'
+        let idx = Ctx.singleton (C.IndexTerm C.indexTypeRepr addr')
+        let upd hp = G.App $ C.SymArrayUpdate C.baseTypeRepr hp idx e'
         G.modifyReg ms (heap %~ upd)
 
   _ -> return () -- error "assign subregister unimplemented"
@@ -326,7 +324,7 @@ generateStmt ms getLabel (Get v l) = do
   modify $ insertVar (translateVar v) a
 --
 generateStmt _ms getLabel (Let v e) = do
-  e' <- G.mkAtom =<< fmap (runReader (translateExpr' e)) get  
+  e' <- G.mkAtom =<< fmap (runReader (translateExpr' e)) get
   modify $ insertVar (translateVar v) e'
 --
 generateStmt _ms getLabel (MakeUndefined v tr) = case tr of
@@ -356,7 +354,7 @@ generateStmt _ms getLabel (Ifte_ e s1s s2s) =
             branchLabel <- getLabel $ nextRip + fromIntegral i
             G.endCurrentBlock (G.Jump branchLabel)
 
-    _ -> do 
+    _ -> do
       e' <- fmap (G.App . C.BVNonzero n1 . runReader (translateExpr' e)) get
       G.setPosition InternalPos
       G.ifte_ e' (mapM_ (generateStmt _ms getLabel) s1s) (mapM_ (generateStmt _ms getLabel) s2s)
@@ -367,7 +365,7 @@ generateStmt _ _ stmt = error $ unwords [ "generateStmt: unimplemented Stmt case
                                       ]
 
 -- TODO: implement translation for x87 stack register reads
-translateLocGet ::
+translateLocGet :: forall s tp .
   G.Reg s MachineState ->
   S.Location (Expr (S.BVType 64))tp ->
   G.Generator s Env MachineState (G.Expr s (F tp))
@@ -380,7 +378,9 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
   h <- (^. heap) <$> G.readReg ms
   addr' <- fmap (runReader (translateExpr' addr)) get
   asPosNat nr $ do
-     let v  = C.SymArrayLookup C.indexTypeRepr C.baseTypeRepr h addr'
+     let idx = Ctx.singleton (C.IndexTerm C.indexTypeRepr addr')
+         v :: C.App (G.Expr s) (C.BVType 8)
+         v  = C.SymArrayLookup C.baseTypeRepr h idx
          v' = case testNatCases nr n8 of
                 NatCaseLT LeqProof -> (C.BVTrunc nr n8 (G.App v))
                 NatCaseEQ     -> v
@@ -388,7 +388,7 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
      return $ G.App v'
 
 -- FIXME: we fake a pc of 0 for a return.
-generateReturn :: G.Reg s MachineState 
+generateReturn :: G.Reg s MachineState
                -> G.Generator s Env MachineState ()
 generateReturn ms = do
   -- G.modifyReg ms (curIP .~ G.App (C.BVLit knownNat 0))
@@ -409,17 +409,12 @@ generateTerm ms getLabel (Direct w) = do
     l <- getLabel w
     G.endCurrentBlock (G.Jump l)
 generateTerm ms getLabel (Call _ ret) = do
-  G.endNow $ \c -> do 
+  G.endNow $ \c -> do
     l <- getLabel ret
     G.endCurrentBlock (G.Jump l)
 generateTerm ms getLabel (Indirect) = do
   traceM $ "Assuming indirect is a return"
   generateReturn ms
-
-  -- G.endNow $ \c -> do
-  --   G.endCurrentBlock (G.Return )
-  
---
 generateTerm ms getLabel t = error $ "generateTerm: unimplemented case: " ++ show t
 
 
