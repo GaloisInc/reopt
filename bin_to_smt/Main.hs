@@ -8,6 +8,7 @@
 {-# LANGUAGE ViewPatterns #-}
 module Main (main) where
 
+
 import           Control.Applicative
 import           Control.Lens
 import           Control.Monad
@@ -22,6 +23,7 @@ import qualified Data.Map as M
 import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as S
+import           Data.String (fromString)
 import           Data.Version
 import           Data.Word
 import           GHC.TypeLits
@@ -95,6 +97,7 @@ data Args = Args { _reoptAction  :: !Action
                  , _programPath  :: !FilePath
                  , _entryPoint   :: !(Maybe Word64)
                  , _loadStyle    :: !LoadStyle
+                 , _symbolPrefix :: !String
                  }
 
 -- | How to load Elf file.
@@ -121,12 +124,16 @@ entryPoint = lens _entryPoint (\s v -> s { _entryPoint = v })
 loadStyle :: Simple Lens Args LoadStyle
 loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
+symbolPrefix :: Simple Lens Args String
+symbolPrefix = lens _symbolPrefix (\s v -> s { _symbolPrefix = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = SymExec
                    , _programPath = ""
                    , _entryPoint  = Nothing
                    , _loadStyle = LoadBySection
+                   , _symbolPrefix = ""
                    }
 
 ------------------------------------------------------------------------
@@ -156,6 +163,13 @@ entryPointFlag = flagReq [ "entry", "e" ] upd "Entry point" help
           _         -> Left "Could not parse entry point"
     help = "Address to start from (default is entry point)."
 
+prefixFlag :: Flag Args
+prefixFlag = flagReq [ "prefix", "p" ] upd "Symbol Prefix" help
+  where
+    upd :: String -> Args -> Either String Args 
+    upd pfx old = Right $ (symbolPrefix .~ pfx) old
+    help = "Optional prefix for smt symbols."
+
 arguments :: Mode Args
 arguments = mode "bin_to_smt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -163,6 +177,7 @@ arguments = mode "bin_to_smt" defaultArgs help filenameArg flags
                 , sectionFlag
                 , symExecFlag
                 , entryPointFlag
+                , prefixFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -236,40 +251,40 @@ extractFirstBlock mem start =
                                 ++ showHex err ""
     Right (Right (nexts, stmts), _) -> return (Block stmts Ret)
 
-simulateCFG :: Word64 -> Map Word64 Block -> IO ()
-simulateCFG entry reifcfg = do
+simulateCFG :: String -> Word64 -> Map Word64 Block -> IO ()
+simulateCFG pfx entry reifcfg = do
   halloc <- liftST newHandleAllocator
   let simOne (k, b) = do
         cfg <- liftST $ translateSingleBlock halloc b
-        simulate (showHex k "") cfg halloc
+        simulate pfx (showHex k "") cfg halloc
 
   mapM_ simOne (M.assocs reifcfg)
 
-simulate :: String
+simulate :: String -> String
          -> C.SomeCFG MachineStateCtx MachineState
          -> HandleAllocator RealWorld
          -> IO ()
-simulate name (C.SomeCFG cfg) halloc = do
+simulate pfx name (C.SomeCFG cfg) halloc = do
   out <- openFile ("/tmp/sat_trans_" ++ name) WriteMode
   withSimpleBackend' halloc $ \ctx -> do
     let sym = ctx^.ctxSymInterface
 
     initGprs0  <- I.emptyWordMap sym n4 (C.BaseBVRepr n64)
-    initGprs   <- foldM (initWordMap sym n4 n64) initGprs0 [0..15]
-    dummyGprs  <- foldM (initWordMap sym n4 n64) initGprs0 [0..15]
+    initGprs   <- foldM (initWordMap (mkN . show . N.GPReg . fromInteger) sym n4 n64) initGprs0 [0..15]
+    dummyGprs  <- foldM (initWordMap (mkNI "dummygpr") sym n4 n64) initGprs0 [0..15]
 
     flags      <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
-    flags'     <- foldM (initWordMap sym n5 n1) flags [0..31]
-    dummyFlags <- foldM (initWordMap sym n5 n1) flags [0..31]
+    flags'     <- foldM (initWordMap (mkNI "flag") sym n5 n1) flags [0..31]
+    dummyFlags <- foldM (initWordMap (mkNI "dummyFlag") sym n5 n1) flags [0..31]
 
-    pc     <- I.freshConstant sym "pc" (C.BaseBVRepr n64)
-    dummyPC <- I.freshConstant sym "dummyPC" (C.BaseBVRepr n64)
+    pc     <- I.freshConstant sym (mkN "pc") (C.BaseBVRepr n64)
+    dummyPC <- I.freshConstant sym (mkN "dummyPC") (C.BaseBVRepr n64)
 
-    heap      <- I.freshConstant sym "heap" $
+    heap      <- I.freshConstant sym (mkN "heap") $
       C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
-    dummyHeap <- I.freshConstant sym "dummyHeap" $
+    dummyHeap <- I.freshConstant sym (mkN "dummyHeap") $
       C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
-
+      
     let struct        = Ctx.empty %> (RV heap) %> (RV initGprs) %> (RV flags') %> (RV pc)
         initialRegMap = assignReg C.typeRepr struct emptyRegMap
     -- Run cfg1
@@ -299,9 +314,11 @@ simulate name (C.SomeCFG cfg) halloc = do
         putStrLn $ "Wrote to file " ++ show out
         return ()
   where
-    initWordMap sym nrKey nrVal acc i = do
+    mkN s = fromString (pfx ++ s)
+    mkNI s i = mkN (s ++ show i)
+    initWordMap nmF sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
-      val <- I.freshConstant sym "word" (C.BaseBVRepr nrVal)
+      val <- I.freshConstant sym (nmF i) (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val acc
 
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
@@ -372,7 +389,7 @@ main = do
         let cfg = case findBlocks mem entry of
                      Left err -> error err
                      Right res -> res
-        simulateCFG entry cfg
+        simulateCFG (args ^. symbolPrefix) entry cfg
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->
