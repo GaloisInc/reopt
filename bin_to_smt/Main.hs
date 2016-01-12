@@ -98,6 +98,7 @@ data Args = Args { _reoptAction  :: !Action
                  , _entryPoint   :: !(Maybe Word64)
                  , _loadStyle    :: !LoadStyle
                  , _symbolPrefix :: !String
+                 , _outFile      :: !(Maybe String)
                  }
 
 -- | How to load Elf file.
@@ -127,6 +128,9 @@ loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 symbolPrefix :: Simple Lens Args String
 symbolPrefix = lens _symbolPrefix (\s v -> s { _symbolPrefix = v })
 
+outFile :: Simple Lens Args (Maybe String)
+outFile = lens _outFile (\s v -> s { _outFile = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = SymExec
@@ -134,15 +138,11 @@ defaultArgs = Args { _reoptAction = SymExec
                    , _entryPoint  = Nothing
                    , _loadStyle = LoadBySection
                    , _symbolPrefix = ""
+                   , _outFile = Nothing
                    }
 
 ------------------------------------------------------------------------
 -- Argument processing
-
-symExecFlag :: Flag Args
-symExecFlag = flagNone [ "sym-exec", "s" ] upd help
-  where upd  = reoptAction .~ SymExec
-        help = "Symbolically execute a block."
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
@@ -163,6 +163,15 @@ entryPointFlag = flagReq [ "entry", "e" ] upd "Entry point" help
           _         -> Left "Could not parse entry point"
     help = "Address to start from (default is entry point)."
 
+outFileFlag :: Flag Args
+outFileFlag = flagReq [ "entry", "e" ] upd "Entry point" help
+  where
+    upd :: String -> Args -> Either String Args
+    upd s old = case readMaybe s of
+          Just addr -> Right $ (entryPoint .~ Just addr) old
+          _         -> Left "Could not parse entry point"
+    help = "Address to start from (default is entry point)."
+
 prefixFlag :: Flag Args
 prefixFlag = flagReq [ "prefix", "p" ] upd "Symbol Prefix" help
   where
@@ -175,7 +184,6 @@ arguments = mode "bin_to_smt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
         flags = [ segmentFlag
                 , sectionFlag
-                , symExecFlag
                 , entryPointFlag
                 , prefixFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
@@ -251,21 +259,22 @@ extractFirstBlock mem start =
                                 ++ showHex err ""
     Right (Right (nexts, stmts), _) -> return (Block stmts Ret)
 
-simulateCFG :: String -> Word64 -> Map Word64 Block -> IO ()
-simulateCFG pfx entry reifcfg = do
+simulateCFG :: String -> Maybe String -> Word64 -> Map Word64 Block -> IO ()
+simulateCFG pfx m_out entry reifcfg = do
   halloc <- liftST newHandleAllocator
   let simOne (k, b) = do
         cfg <- liftST $ translateSingleBlock halloc b
-        simulate pfx (showHex k "") cfg halloc
+        simulate pfx m_out (showHex k "") cfg halloc
 
+  -- FIXME: assocs should be a singleton list.
   mapM_ simOne (M.assocs reifcfg)
 
-simulate :: String -> String
+simulate :: String -> Maybe String -> String
          -> C.SomeCFG MachineStateCtx MachineState
          -> HandleAllocator RealWorld
          -> IO ()
-simulate pfx name (C.SomeCFG cfg) halloc = do
-  out <- openFile ("/tmp/sat_trans_" ++ name) WriteMode
+simulate pfx m_out name (C.SomeCFG cfg) halloc = do
+  out <- maybe (return stdout) (flip openFile WriteMode) m_out
   withSimpleBackend' halloc $ \ctx -> do
     let sym = ctx^.ctxSymInterface
 
@@ -311,7 +320,6 @@ simulate pfx name (C.SomeCFG cfg) halloc = do
         -- bitvectors, so we express it as an implicit exists with
         -- negation...
         solver_adapter_write_smt2 cvc4Adapter sym out pred
-        putStrLn $ "Wrote to file " ++ show out
         return ()
   where
     mkN s = fromString (pfx ++ s)
@@ -386,10 +394,10 @@ main = do
   case args^.reoptAction of
     SymExec -> do
         (mem, entry) <- getMemAndEntry args
-        let cfg = case findBlocks mem entry of
+        let cfg = case findBlock mem entry of
                      Left err -> error err
                      Right res -> res
-        simulateCFG (args ^. symbolPrefix) entry cfg
+        simulateCFG (args ^. symbolPrefix) (args ^. outFile) entry cfg
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->
