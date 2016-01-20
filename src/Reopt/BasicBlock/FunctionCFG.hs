@@ -1,7 +1,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
 
-module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks,
+module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks, findBlock,
                                      termChildren)
 where
 import           Reopt.BasicBlock.Extract
@@ -42,6 +42,22 @@ termChildren (Fallthrough w) = [w]
 termChildren Indirect = []
 termChildren Ret = []
 
+-- FIXME: clag
+findBlock :: Memory Word64 -> Word64 -> Either String CFG
+findBlock mem entry =
+  M.singleton entry <$>
+  case runMemoryByteReader pf_x mem entry $ extractBlock entry S.empty of
+    Left err -> Left $ show err
+    Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
+    Right (Right ([Absolute next], stmts), _) ->
+      Right (Block stmts $ Direct next)
+    Right (Right ([NFallthrough next], stmts), _) -> 
+      Right (Block stmts $ Fallthrough next)
+    Right (Right ([Absolute branch, Absolute fallthrough], stmts), _) -> 
+      Right (Block stmts $ Cond branch fallthrough)
+    Right (Right ([NIndirect], stmts), _) -> 
+      Right (Block stmts $ Indirect)
+  
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...
 findBlocks :: Memory Word64 -> Word64 -> Either String CFG

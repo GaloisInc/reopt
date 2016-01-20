@@ -341,14 +341,14 @@ simulateCFGs entry1 reifcfg1 entry2 reifcfg2 ripRel gprRel = do
         C.SomeCFG cfg1' -> do
           let cuts = findCuts (M.keysSet ripRel) cfg1'
           putStrLn $ show cuts
-          liftST $ extractSubgraph cfg1' cuts (findBlock k cfg1') halloc
+          liftST $ extractSubgraph cfg1' cuts (findBlock' k cfg1') halloc
       putStrLn "first subcfg found"
       Just subCFG2 <- case v of
         [v'] -> case cfg2 of
           C.SomeCFG cfg2' -> do
             let cuts = findCuts (S.fromList $ concat $ M.elems ripRel) cfg2'
             putStrLn $ show cuts
-            liftST $ extractSubgraph cfg2' cuts (findBlock v' cfg2') halloc
+            liftST $ extractSubgraph cfg2' cuts (findBlock' v' cfg2') halloc
       putStrLn "second subcfg found"
       simulate (showHex k "") subCFG1 subCFG2 halloc ripRel gprRel) (return ()) ripRel
 
@@ -366,8 +366,8 @@ findCuts tags C.CFG{C.cfgBlockMap = blockMap} =
 -- find a particular block in the subgraph - if there are multiple copies, pick
 -- the first one (the multiple copies case is related to Lang.Crucible.Generator
 -- state handling)
-findBlock :: Word64 -> C.CFG blocks init MachineState -> C.BlockID blocks MachineStateCtx
-findBlock tag C.CFG{C.cfgBlockMap = blockMap} =
+findBlock' :: Word64 -> C.CFG blocks init MachineState -> C.BlockID blocks MachineStateCtx
+findBlock' tag C.CFG{C.cfgBlockMap = blockMap} =
   case catMaybes $ Ctx.toList (\block ->
     case testEquality machineStateCtx $ C.blockInputs block of
       Just Refl -> case getBlockStartPos block of
