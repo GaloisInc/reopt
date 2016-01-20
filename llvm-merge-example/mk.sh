@@ -1,4 +1,4 @@
-#!/usr/local/bin/bash
+#!/bin/bash
 
 set -e
 
@@ -16,7 +16,7 @@ function make_original_cflags () {
         cflags="$cflags -D$name=$i"
     done
     echo $cflags
-}    
+}
 
 
 original_cflags=$(make_original_cflags)
@@ -33,8 +33,7 @@ function make_cflags () {
         cflags="$cflags -D$name='(*((typeof($i) *) (0x$v)))'"
     done
     echo $cflags
-}    
+}
 
 cflags=$(make_cflags)
 make CFLAGS="${cflags}"
-

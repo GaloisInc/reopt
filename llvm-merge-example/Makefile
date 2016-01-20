@@ -1,13 +1,31 @@
 
 all: tree tree.ll
 
-tree: tree.c
-	clang35 $(CFLAGS) -static -o tree tree.c
 
-tree.ll: tree.c
-	clang35 $(CFLAGS) -c -emit-llvm tree.c
-	llvm-dis35 tree.bc
-	rm tree.bc
+CLANG=clang-3.5
+LLVM-DIS=llvm-dis35
+LLC=llc
+LLC_FLAGS=-mtriple=x86_64-unknown-freebsd
+
+LD=x86_64-unknown-freebsd-ld
+
+tree: tree.o data.o
+	$(LD) -o tree tree.o data.o
+
+data.bc: tree.c data.h
+	$(CLANG) $(CFLAGS) -c -emit-llvm -static tree.c
+
+tree.bc: tree.c data.h
+	$(CLANG) $(CFLAGS) -c -emit-llvm -static tree.c
+
+%.o : %.s
+	$(AS) $<
+
+%.s : %.bc
+	$(LLC) $(LLC_FLAGS) $<
+
+%.ll: %.bc
+	$(LLVM-DIS) $<
 
 clean:
-	rm tree tree.ll
+	rm -f tree tree.ll tree.bc
