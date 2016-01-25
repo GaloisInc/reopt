@@ -340,6 +340,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "push"    $ unopV exec_push
               , mk "rol"     $ geBinop exec_rol
               , mk "ror"     $ geBinop exec_ror
+              , mk "sahf"    $ const exec_sahf
               , mk "sbb"     $ binop exec_sbb
               , mk "sar"     $ geBinop exec_sar
               , mk "shl"     $ geBinop exec_shl
