@@ -30,6 +30,7 @@ import           Data.Maybe
 import           Data.Version
 import           Data.Word
 import           Debug.Trace
+import           System.CPUTime
 import           System.Console.CmdArgs.Explicit as CmdArgs
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitWith, ExitCode(..))
@@ -653,10 +654,19 @@ makeHumanReadable n
                            
 -- | Run an application in lock step with the concrete semantics.
 fullApplicationTest :: Args -> TestM PTraceMachineState ()
-fullApplicationTest args = fullApplicationTest' args 0 sigTRAP
+fullApplicationTest args = do start <- lift . liftIO $ getCPUTime
+                              ninstruction <- fullApplicationTest' args 0 sigTRAP
+                              end <- lift . liftIO $ getCPUTime
+                              let diff = (fromIntegral (end - start)) / (10^12)
+                                  instrsPerSecond = fromIntegral ninstruction / diff
+                              lift . liftIO $ printf "Simulated %d instructions in %0.3f seconds (%0.3f instructions/second)\n"
+                                                     ninstruction
+                                                     diff
+                                                     (instrsPerSecond :: Double)
+
 -- | The signal, if not equal to 'sigTRAP', is passed to the
 -- traced process on resumption.
-fullApplicationTest' :: Args -> Integer -> Signal -> TestM PTraceMachineState ()
+fullApplicationTest' :: Args -> Integer -> Signal -> TestM PTraceMachineState Integer
 fullApplicationTest' args ninstructions sig = do
   (execSuccess, ii) <-  stepConcrete
 
@@ -671,19 +681,22 @@ fullApplicationTest' args ninstructions sig = do
     Just RepNZPrefix -> step_to_next_inst pid
     Just NoLockPrefix -> single_step pid
     Just LockPrefix -> single_step pid
-  case status of        W.Exited _ -> return ()
+  case status of        W.Exited _ -> return ninstructions
                         W.Stopped sig' -> do
                           canContinue <- checkAndClear sig' (execSuccess, ii)
                           if canContinue
                           then fullApplicationTest' args (ninstructions + 1) sig'
-                          else logMessage $ Impossible "Main_reopt.fullApplicationTest: 'checkAndClear' failed!"
+                          else do logMessage $ Impossible "Main_reopt.fullApplicationTest: 'checkAndClear' failed!"
+                                  return ninstructions
+
                         W.Signaled sig' -> do
                           str <- liftIO' $ signalToString sig'
                           logMessage $ Info $ "Application terminated by signal: " ++ str
+                          return ninstructions
                         _ -> do
                           str <- liftIO' $ statusToString status
                           logMessage $ UnexpectedStatus "Main_reopt.runInParallel" str -- ["Main_reopt.runInParallel: unexpected status: " ++ str]
-                          return ()
+                          return ninstructions
   where
     -- | Single step a "rep" instruction until the IP changes.
     --
