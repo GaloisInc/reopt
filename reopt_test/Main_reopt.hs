@@ -16,9 +16,9 @@ module Main (main) where
 
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.Except (ExceptT, runExceptT, throwError, MonadError)
 import           Control.Monad.Reader
 import           Control.Monad.State
-import           Control.Monad.Except (runExceptT)
 import           Control.Monad.Writer.Strict
 import qualified Data.BitVector as BV
 import           Data.Bits
@@ -34,17 +34,20 @@ import           System.Console.CmdArgs.Explicit as CmdArgs
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitWith, ExitCode(..))
 import           System.IO
+import           Text.Read (readMaybe)
 
-import           Numeric (readHex)
+import           Numeric (readHex, showHex)
 
-import           System.Posix.Waitpid as W
-import           System.Posix.Types
-import           System.Posix.Process
-import           System.Posix.Signals (Signal, sigFPE, sigTRAP, sigSEGV)
+import qualified System.Console.Terminal.Size as Terminal
 import           System.Linux.Ptrace.Syscall
 import           System.Linux.Ptrace.Types
-import           System.Linux.Ptrace.X86_64Regs
 import           System.Linux.Ptrace.X86_64FPRegs
+import           System.Linux.Ptrace.X86_64Regs
+import           System.Posix.Process
+import           System.Posix.Signals (Signal, sigFPE, sigTRAP, sigSEGV)
+import           System.Posix.Types
+import           System.Posix.Waitpid as W
+import           Text.Printf
 
 import           Paths_reopt (version)
 
@@ -56,9 +59,10 @@ import           Flexdis86 (InstructionInstance(..), ppInstruction,
                   disassembleInstruction, LockPrefix(..))
 
 import           Reopt.CFG.Representation
-import           Reopt.Concrete.BitVector
-import           Reopt.Concrete.MachineState as MS
-import           Reopt.Concrete.MachineState ()
+import           Reopt.Concrete.BitVector hiding (modify)
+import qualified Reopt.Concrete.MachineState as MS
+import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMachineState(..)
+                                             , Address8, modifyAddr, asBV, ConcreteStateT)
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
@@ -84,6 +88,7 @@ data Action
 data Args = Args { _reoptAction :: !Action
                  , _programPath :: !FilePath
                  , _loadStyle   :: !LoadStyle
+                 , _reoptTrace  :: !(Maybe Integer)
                  }
 
 -- | How to load Elf file.
@@ -105,11 +110,17 @@ programPath = lens _programPath (\s v -> s { _programPath = v })
 loadStyle :: Simple Lens Args LoadStyle
 loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
+-- | Whether to trace execution (print a '.' for each n instructions)
+reoptTrace :: Simple Lens Args (Maybe Integer)
+reoptTrace = lens _reoptTrace (\s v -> s { _reoptTrace = v })
+
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Application
                    , _programPath = ""
                    , _loadStyle = LoadBySection
+                   , _reoptTrace = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -121,6 +132,7 @@ arguments = mode "reopt_test" defaultArgs help filenameArg flags
         flags = [ instrFlag
                 , testFlag
                 , applicationFlag
+                , traceFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -139,6 +151,13 @@ instrFlag :: CmdArgs.Flag Args
 instrFlag = flagNone [ "instructions", "i"] upd help
   where upd = reoptAction .~ Instr
         help = "Print disassembly of executed instructions in a binary"
+
+traceFlag :: CmdArgs.Flag Args
+traceFlag = flagOpt "100" [ "trace", "T"] upd "N" help
+  where upd s old = case readMaybe s of
+          Just n -> Right $ (reoptTrace .~ Just n) old
+          _      -> Left "Could not parse trace number"
+        help = "Trace execution by printing a '.' for each N instructions"
 
 reoptVersion :: String
 reoptVersion = "Reopt semantics verifier (reopt_test) "
@@ -236,9 +255,10 @@ traceInner act pid = do
 data MessageType
    = FailureRecord InstructionInstance [String]
    | UnknownInstruction InstructionInstance
+   | NoDecode
    | Impossible String
    | UnexpectedStatus String String
-   | SuccessfulExecution InstructionInstance
+   | SuccessfulExecution (Maybe InstructionInstance)
    | Segfault
    | Info String
 
@@ -246,24 +266,34 @@ instance Show MessageType where
   show (FailureRecord ii msgs) =
     unlines (["Mismatch after executing instruction " ++ show ii] ++ map (" - " ++) msgs)
   show (UnknownInstruction ii) = "Unknown instruction: " ++ show ii
+  show NoDecode = "Unable to decode instruction"
   show (Impossible msg) = "Impossible: " ++ msg
   show (UnexpectedStatus name status) = name ++ ": unexpected status: " ++ status
   show (SuccessfulExecution ii) = "Instruction " ++ show ii ++ " executed successfully"
   show (Segfault) = "Test executable segfaulted"
   show (Info msg) = "Info: " ++ msg
 
+type TestM m a = ConcreteStateT (StateT [MessageType] m) a
+
+runTestM :: Monad m => TestM m a -> X86State MS.Value
+            -> m ([MessageType], a, MS.ConcreteMemory, X86State MS.Value)
+runTestM m regs = do ((a, (mem, regs')), logs) <- runStateT (MS.runConcreteStateT m Map.empty regs) []
+                     return (logs, a, mem, regs')
+
+logMessage :: Monad m => MessageType -> TestM m ()
+logMessage msg = lift (modify ((:) msg))
+
 -- | Test builder.
 mkTest :: Args
-  -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
+  -> (Args -> TestM PTraceMachineState ()) 
   -> IO ()
 mkTest args test = do
   child <- traceFile $ args^.programPath
   procMem <- openChildProcMem child
   procMaps <- openChildProcMaps child
-  (((), out), _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
+  (out, _, _, _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
     regs <- dumpRegs
-    runConcreteStateT (runWriterT test) Map.empty regs
-  mapM_ print out
+    runTestM (test args) regs
   let isMismatch m = case m of
                        FailureRecord _ _ -> True
                        _                 -> False
@@ -272,6 +302,9 @@ mkTest args test = do
                        _        -> False
       numMismatches = length (filter isMismatch out)
       numSegfaults  = length (filter isSegfault out)
+      
+  mapM_ print (filter isMismatch $ reverse out) -- only print mis-matches
+  
   case (numMismatches, numSegfaults) of
     (0,0) -> putStrLn "No mismatches!"
     (0,_) -> do putStrLn "Segfault was observed."
@@ -298,7 +331,7 @@ testSingleInstruction args = mkTest args singleInstructionTest
 
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
-  e <- readStaticElf (args^.programPath)
+  e <- readElf64 (args^.programPath)
   let Identity mem = mkElfMem (args^.loadStyle) e
   child <- traceFile $ args^.programPath
   runStateT (traceInner (printInstr mem) child) ()
@@ -350,16 +383,16 @@ translatePtraceRegs ptraceRegs ptraceFPRegs =
     fillReg (N.FlagReg n) = if testBit (eflags ptraceRegs) n
                             then MS.true
                             else MS.false
-    fillReg (N.ControlReg _) = Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87ControlReg n) = Literal $ bitVector knownNat $ BV.extract n n cwd'
-    fillReg (N.X87StatusReg n) = Literal $ bitVector knownNat $ BV.extract n n swd'
-    fillReg N.X87TopReg = Literal $ bitVector knownNat $
+    fillReg (N.ControlReg _) = MS.Undefined $ BVTypeRepr  knownNat
+    fillReg (N.X87ControlReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n cwd'
+    fillReg (N.X87StatusReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n swd'
+    fillReg N.X87TopReg = MS.Literal $ bitVector knownNat $
                             BV.extract (13 :: Int) 11 swd'
-    fillReg N.X87PC =  Literal $ bitVector knownNat $ bitVec 2 $
+    fillReg N.X87PC =  MS.Literal $ bitVector knownNat $ bitVec 2 $
                             BV.extract (9 :: Int) 8 $ cwd'
-    fillReg N.X87RC =  Literal $ bitVector knownNat $ bitVec 2 $
+    fillReg N.X87RC =  MS.Literal $ bitVector knownNat $ bitVec 2 $
                             BV.extract (11 :: Int) 10 $ cwd'
-    fillReg (N.X87TagReg _) = Undefined $ BVTypeRepr  knownNat
+    fillReg (N.X87TagReg _) = MS.Undefined $ BVTypeRepr  knownNat
     fillReg (N.X87FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
     fillReg (N.X87FPUReg 1) = mkLit80 $ st1 ptraceFPRegs
     fillReg (N.X87FPUReg 2) = mkLit80 $ st2 ptraceFPRegs
@@ -384,23 +417,23 @@ translatePtraceRegs ptraceRegs ptraceFPRegs =
     fillReg (N.XMMReg 13) = mkLit128 (xmm13 ptraceFPRegs)
     fillReg (N.XMMReg 14) = mkLit128 (xmm14 ptraceFPRegs)
     fillReg (N.XMMReg 15) = mkLit128 (xmm15 ptraceFPRegs)
-    fillReg (N.DebugReg _) = Undefined $ BVTypeRepr  knownNat
+    fillReg (N.DebugReg _) = MS.Undefined $ BVTypeRepr  knownNat
 
     mkLit16 :: Word64 -> MS.Value (BVType 16)
-    mkLit16 = Literal . bitVector knownNat . bitVec 16
+    mkLit16 = MS.Literal . bitVector knownNat . bitVec 16
 
     mkLit128 :: (Word64, Word64) -> MS.Value (BVType 128)
-    mkLit128 (high, low) = Literal $ bitVector knownNat $ bitVec 128 $
+    mkLit128 (high, low) = MS.Literal $ bitVector knownNat $ bitVec 128 $
       ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
 
     mkLit80 :: (Word16, Word64) -> MS.Value (BVType 80)
-    mkLit80 (high, low) = Literal $ bitVector knownNat $ bitVec 80 $
+    mkLit80 (high, low) = MS.Literal $ bitVector knownNat $ bitVec 80 $
       ((fromIntegral high) :: Integer) * 2^64 + fromIntegral low
     cwd' = bitVec 16 $ cwd ptraceFPRegs
     swd' = bitVec 16 $ swd ptraceFPRegs
 
 mkLit64 :: Word64 -> MS.Value (BVType 64)
-mkLit64 = Literal . bitVector knownNat . bitVec 64
+mkLit64 = MS.Literal . bitVector knownNat . bitVec 64
 
 ------------------------------------------------------------------------
 -- The 'PTraceMachineState' monad.
@@ -416,10 +449,10 @@ data PTraceInfo = PTraceInfo {cpid :: CPid, memHandle :: Handle, mapHandle :: Ha
 -- define any of the write operations, primitives, or exceptions.
 instance MonadMachineState PTraceMachineState where
   setMem = fail "setMem unimplemented for PTraceMachineState"
-  getMem (Address width bv) = do
+  getMem (MS.Address width bv) = do
     memH <- asks memHandle
     bs <- liftIO $ readFileOffset memH  (fromIntegral $ nat bv) (fromIntegral (widthVal width) `div` 8)
-    return $ Literal $ toBitVector width bs
+    return $ MS.Literal $ toBitVector width bs
     where
       readFileOffset :: Handle -> Word64 -> Word64 -> IO B.ByteString
       readFileOffset h addr width = do
@@ -500,8 +533,8 @@ instance FoldableMachineState PTraceMachineState where
             then map
             else populateMap
                    (Map.insert
-                     (Address n8 $ bitVector n64 $ bitVec 64 start)
-                     (Literal $ bitVector n8 $ bitVec 8 (B.head buf))
+                     (MS.Address n8 $ bitVector n64 $ bitVec 64 start)
+                     (MS.Literal $ bitVector n8 $ bitVec 8 (B.head buf))
                      map)
                    (start + 1)
                    (B.tail buf)
@@ -514,8 +547,17 @@ runPTraceMachineState info (PTraceMachineState {unPTraceMachineState = m}) = run
 --
 -- We need a 'ByteReader' to run 'disassembleInstruction'.
 
-newtype MachineByteReader m a = MachineByteReader (StateT (Address8, Int) m a) deriving (MonadTrans, MonadState (Address8, Int), Functor, Applicative, Monad)
+newtype MachineByteReader m a = MachineByteReader (StateT (Address8, Int) (ExceptT String m) a)
+                              deriving (MonadError String, MonadState (Address8, Int), Functor, Applicative)
 
+instance MonadTrans MachineByteReader where
+  lift m = MachineByteReader (lift (lift m))
+
+instance Monad m => Monad (MachineByteReader m) where
+  return  = MachineByteReader . return
+  MachineByteReader m >>= f = MachineByteReader $ m >>= \x -> case f x of MachineByteReader m' -> m'
+  fail = MachineByteReader . throwError
+  
 instance (Functor m, MonadMachineState m) =>
   ByteReader (MachineByteReader m) where
     readByte = do
@@ -525,17 +567,25 @@ instance (Functor m, MonadMachineState m) =>
       case asBV val of Nothing -> fail $ "Could not read byte at " ++ show addr
                        Just bv -> return $ fromIntegral bv
 
-runMachineByteReader :: Monad m => MachineByteReader m a -> Address8 ->  m (Int, a)
-runMachineByteReader (MachineByteReader s) addr = do
-  (v, (_, l)) <- runStateT s (addr, 0)
-  return (l,v)
+runMachineByteReader :: Monad m => MachineByteReader m a -> Address8 ->  m (Either String (Int, a))
+runMachineByteReader (MachineByteReader s) addr = 
+  runExceptT (runStateT s (addr, 0)) >>= return . (fmap $ \(v, (_, l)) -> (l,v))
 
 -- | Disassemble, from HW, the instruction at the given address.
 getInstruction :: MonadMachineState m
-  => Address8 -> m (Int, InstructionInstance)
-getInstruction instrAddr =
-  runMachineByteReader (disassembleInstruction defaultX64Disassembler)
-                       instrAddr
+  => Address8 -> m (Maybe (Int, InstructionInstance))
+getInstruction instrAddr = do
+  r <- runMachineByteReader (disassembleInstruction defaultX64Disassembler)
+                            instrAddr
+  case r of
+    Left _e -> return Nothing
+    -- Left e -> do r' <- runMachineByteReader (sequence $ replicate 10 readByte) instrAddr
+    --              case r' of
+    --                Left e'  -> -- fail $ "Really couldn't decode bytes (" ++ e ++ " and " ++ e' ++ ") " ++ show instrAddr
+                     
+    --                Right (_, bs) -> fail $ "Couldn't decode bytes (" ++ e ++ ") " ++ show instrAddr ++ ": "
+    --                                 ++ concat (map (flip showHex " ") bs)
+    Right v -> return (Just v)
 
 ------------------------------------------------------------------------
 
@@ -548,56 +598,91 @@ getInstruction instrAddr =
 -- Returns a bool indicating whether the instruction's semantics were
 -- defined or not.
 stepConcrete :: (Functor m, MonadMachineState m)
-             => WriterT [MessageType] (ConcreteStateT m)
-                        (Either SM.ExceptionClass Bool, InstructionInstance)
+             => TestM m (Either SM.ExceptionClass Bool, Maybe InstructionInstance)
 stepConcrete = do
   rip' <- getReg N.rip
-  bv <- case rip' of Literal bv -> return bv
-                     Undefined _ -> fail "Undefined rip!"
+  bv <- case rip' of MS.Literal bv -> return bv
+                     MS.Undefined _ -> fail "MS.Undefined rip!"
 
-  let instrAddr = Address knownNat bv
-  (w, ii) <- getInstruction instrAddr
-  case execInstruction (fromIntegral $ (nat bv) +
+  let instrAddr = MS.Address knownNat bv
+  m_r <- getInstruction instrAddr
+  case m_r of
+    Nothing -> return (Right False, Nothing)
+    Just (w, ii) -> 
+      case execInstruction (fromIntegral $ (nat bv) +
                         fromIntegral w) ii
-    of Just s -> do
-         let stmts = execSemantics s
-         eitherExceptionUnit <- evalStateT (runExceptT $ evalStmts stmts)
+      of Just s -> do
+           let stmts = execSemantics s
+           eitherExceptionUnit <- evalStateT (runExceptT $ evalStmts stmts)
                                   MapF.empty
-         case eitherExceptionUnit of
-           Right () -> return (Right True, ii)
-           Left exception -> do tell [Info $ "Got an exception: " ++ (show exception)]
-                                return (Left exception, ii)
-       Nothing -> do tell [UnknownInstruction ii]
-                     return (Right False, ii)
+           case eitherExceptionUnit of
+             Right () -> return (Right True, Just ii)
+             Left exception -> do logMessage $ Info $ "Got an exception: " ++ (show exception)
+                                  return (Left exception, Just ii)
+         Nothing -> do logMessage $ UnknownInstruction ii
+                       return (Right False, Just ii)
 
+reportProgress :: Maybe Integer -> Integer -> IO ()
+reportProgress Nothing _              = return ()
+reportProgress (Just n) ninstructions
+  | (ninstructions + 1) `mod` n /= 0  = return ()
+reportProgress (Just n) ninstructions = do
+  sz <- Terminal.size
+  let ndots = ninstructions `div` n
+      countBarWidth = fromIntegral $ length "[XXX.XXS] "
+  case sz of
+    Nothing  -> return ()
+    Just (Terminal.Window { Terminal.width = w }) -> do
+      let rowWidth = ndots `mod` (w - countBarWidth - 10) -- 10 for a margin
+      if rowWidth == 0
+        then
+           let (digits, suffix) = makeHumanReadable ninstructions
+           in printf "\n[%6.2f%s] ." digits suffix
+         else
+           printf "."
+      hFlush stdout 
+  
+-- up to 999 tera is probably enough
+makeHumanReadable :: Integer -> (Float, String)
+makeHumanReadable n
+  | n < 1000             = (fromIntegral n, "")
+  | n < 1000000          = (fromIntegral n / 1000, "k")
+  | n < 1000000000       = (fromIntegral n / 1000000, "M")
+  | n < 1000000000000    = (fromIntegral n / 1000000000, "G")
+  | otherwise            = (fromIntegral n / 1000000000000, "T")
+                           
 -- | Run an application in lock step with the concrete semantics.
-fullApplicationTest :: WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
-fullApplicationTest = fullApplicationTest' sigTRAP
+fullApplicationTest :: Args -> TestM PTraceMachineState ()
+fullApplicationTest args = fullApplicationTest' args 0 sigTRAP
 -- | The signal, if not equal to 'sigTRAP', is passed to the
 -- traced process on resumption.
-fullApplicationTest' :: Signal
-  -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
-fullApplicationTest' sig = do
+fullApplicationTest' :: Args -> Integer -> Signal -> TestM PTraceMachineState ()
+fullApplicationTest' args ninstructions sig = do
   (execSuccess, ii) <-  stepConcrete
-  pid <-lift $ lift $ asks cpid
-  status <- case (iiLockPrefix ii)
-    of RepPrefix -> step_to_next_inst pid
-       RepZPrefix -> step_to_next_inst pid
-       RepNZPrefix -> step_to_next_inst pid
-       NoLockPrefix -> single_step pid
-       LockPrefix -> single_step pid
+
+  -- Trace that we executed another instruction
+  liftIO' $ reportProgress (args ^. reoptTrace) ninstructions
+    
+  pid <- {- lift $ -} lift $ asks cpid
+  status <- case iiLockPrefix <$> ii of
+    Nothing -> single_step pid
+    Just RepPrefix -> step_to_next_inst pid
+    Just RepZPrefix -> step_to_next_inst pid
+    Just RepNZPrefix -> step_to_next_inst pid
+    Just NoLockPrefix -> single_step pid
+    Just LockPrefix -> single_step pid
   case status of        W.Exited _ -> return ()
                         W.Stopped sig' -> do
                           canContinue <- checkAndClear sig' (execSuccess, ii)
                           if canContinue
-                          then fullApplicationTest' sig'
-                          else tell [Impossible "Main_reopt.fullApplicationTest: 'checkAndClear' failed!"]
+                          then fullApplicationTest' args (ninstructions + 1) sig'
+                          else logMessage $ Impossible "Main_reopt.fullApplicationTest: 'checkAndClear' failed!"
                         W.Signaled sig' -> do
                           str <- liftIO' $ signalToString sig'
-                          tell [Info $ "Application terminated by signal: " ++ str]
+                          logMessage $ Info $ "Application terminated by signal: " ++ str
                         _ -> do
                           str <- liftIO' $ statusToString status
-                          tell [UnexpectedStatus "Main_reopt.runInParallel" str] -- ["Main_reopt.runInParallel: unexpected status: " ++ str]
+                          logMessage $ UnexpectedStatus "Main_reopt.runInParallel" str -- ["Main_reopt.runInParallel: unexpected status: " ++ str]
                           return ()
   where
     -- | Single step a "rep" instruction until the IP changes.
@@ -627,7 +712,7 @@ fullApplicationTest' sig = do
                     else return status
                 _ -> do
                   str <- liftIO' $ statusToString status
-                  tell [UnexpectedStatus "Main_reopt.runInParallel.step_while_inst" str]
+                  logMessage $ UnexpectedStatus "Main_reopt.runInParallel.step_while_inst" str
                   return status
         get_addr = liftIO' $ do
           X86_64 regs <- ptrace_getregs pid
@@ -642,43 +727,43 @@ fullApplicationTest' sig = do
                         else Just sig
       ptrace_singlestep pid maybeSignal
       waitForRes pid
-    liftIO' = lift . lift . liftIO
+    liftIO' = {- lift . -} lift . liftIO
 
 -- | Test a single instruction.
 --
 -- TODO: could we make this a special case of testing a whole
 -- application? I.e., can we make this a special case of
 -- 'fullApplicationtest'?
-singleInstructionTest :: WriterT [MessageType] (ConcreteStateT PTraceMachineState) ()
-singleInstructionTest = do
-  pid <- lift $ lift $ asks cpid
-  lift $ lift $ liftIO $ ptrace_cont pid Nothing
-  status <- lift $ lift $ liftIO $ waitForRes pid
+singleInstructionTest :: Args -> TestM PTraceMachineState ()
+singleInstructionTest args = do
+  pid <- {- lift $ -} lift  $ asks cpid
+  lift $ {- lift $ -} liftIO $ ptrace_cont pid Nothing
+  status <- {- lift $ -} lift $ liftIO $ waitForRes pid
   case status
       of W.Exited _ -> return ()
          W.Stopped sig | sig == sigTRAP -> do
-           trapRegs <- lift $ lift $ liftIO $ ptrace_getregs pid
-           trapFPRegs <- lift $ lift $ liftIO $ ptrace_getfpregs pid
+           trapRegs <-  liftIO' $ ptrace_getregs pid
+           trapFPRegs <- liftIO' $ ptrace_getfpregs pid
            (modRegs, modFPRegs) <- case (trapRegs, trapFPRegs) of
              (X86_64 regs', X86_64FP fpregs')-> return (regs', fpregs')
              _ -> fail "64-bit only!"
            --lift $ liftIO $ ptrace_setregs pid $ X86_64 modRegs
            put (Map.empty, translatePtraceRegs modRegs modFPRegs)
            (execSuccess, ii) <- trace "instTest stepping concrete semantics" stepConcrete
-           lift $ lift $ liftIO $ ptrace_singlestep pid Nothing
-           status' <- lift $ lift $ liftIO $ waitForRes pid
+           liftIO' $ ptrace_singlestep pid Nothing
+           status' <- liftIO' $ waitForRes pid
            case status'
                of W.Exited _ -> return ()
                   W.Stopped sig' -> do
                     canContinue <- checkAndClear sig' (execSuccess, ii)
                     unless canContinue $
-                      tell [Impossible "Main_reopt.singleInsructionTest: 'checkAndClear' failed!"]
+                      logMessage $ Impossible "Main_reopt.singleInsructionTest: 'checkAndClear' failed!"
                   _ -> do str <- liftIO' $ statusToString status'
-                          tell [UnexpectedStatus "Main_reopt.instTest" str]
+                          logMessage $ UnexpectedStatus "Main_reopt.instTest" str
          _ -> do
-           tell [Impossible $ "child stopped: " ++ show status]
+           logMessage $ Impossible $ "child stopped: " ++ show status
   where
-    liftIO' = lift . lift . liftIO
+    liftIO' = {- lift . -} lift . liftIO
 
 
 -- | Check that emulated and real states agree and then clear state.
@@ -690,8 +775,8 @@ singleInstructionTest = do
 -- or not (would like to simply raise an error, but then all the
 -- 'tell' messages get lost, which makes debugging harder).
 checkAndClear :: Signal
-  -> (Either SM.ExceptionClass Bool, InstructionInstance)
-  -> WriterT [MessageType] (ConcreteStateT PTraceMachineState) Bool
+  -> (Either SM.ExceptionClass Bool, Maybe InstructionInstance)
+  -> TestM PTraceMachineState Bool
 checkAndClear sig (eitherExceptionBool, ii) = do
   (canContinue, disagreements) <- check eitherExceptionBool
   report ii disagreements
@@ -721,15 +806,15 @@ checkAndClear sig (eitherExceptionBool, ii) = do
       rip' <- getReg N.rip
       return (True, ["No concrete semantics for instruction at " ++ show rip'])
     checkBool True | sig == sigTRAP = do
-      realRegs <- lift $ lift dumpRegs
+      realRegs <- {- lift $ -} lift dumpRegs
       emuRegs <- dumpRegs
       let regCmp = compareRegs realRegs emuRegs
       memCmp <- compareMems
       return (True, regCmp ++ memCmp)
       where
-        compareMems = lift $ foldMem8 (\addr val errs -> do
-          realVal <- lift $ getMem addr
-          if realVal `equalOrUndef` val
+        compareMems = {- lift $ -} foldMem8 (\addr val errs -> do
+          realVal <- {- lift $ -} getMem addr
+          if realVal `MS.equalOrUndef` val
             then return errs
             else return $ errs ++ [show addr ++ " did not match"]) []
         compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
@@ -738,12 +823,12 @@ checkAndClear sig (eitherExceptionBool, ii) = do
             let lens = register reg
                 realVal = real^.lens
                 emuVal = emu^.lens
-             in if realVal `equalOrUndef` emuVal
+             in if realVal `MS.equalOrUndef` emuVal
                   then Nothing
                   else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
              x86StateRegisters
     checkBool True | sig == sigSEGV = do
-      tell [Segfault]
+      logMessage Segfault
       return (False, [])
     checkBool _ = do
       sig' <- liftIO' $ signalToString sig
@@ -753,14 +838,16 @@ checkAndClear sig (eitherExceptionBool, ii) = do
 
     -- | Clear the simulator state.
     clear = do
-      realRegs <- lift $ lift dumpRegs
+      realRegs <- {- lift $ -} lift dumpRegs
       put (Map.empty, realRegs)
-
-    report ii [] = tell [SuccessfulExecution ii]
-    report ii ls = tell [FailureRecord ii ls]
+    
+    report ii [] = return () -- tell [SuccessfulExecution ii]
+    report Nothing    _ = logMessage NoDecode
+    report (Just ii) ls = logMessage $ FailureRecord ii ls
 
     -- TODO(conathan): make 'WriterT ...' an instance of 'MonadIO'?
-    liftIO' = lift . lift . liftIO
+    liftIO' :: MonadIO m => IO a -> TestM m a
+    liftIO' = {- lift . -} lift . liftIO
 
 -- | Do @waitpid@ on child with given PID and return status.
 --
