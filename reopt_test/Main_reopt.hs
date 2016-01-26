@@ -49,6 +49,7 @@ import           System.Posix.Signals (Signal, sigFPE, sigTRAP, sigSEGV)
 import           System.Posix.Types
 import           System.Posix.Waitpid as W
 import           Text.Printf
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Paths_reopt (version)
 
@@ -90,6 +91,7 @@ data Args = Args { _reoptAction :: !Action
                  , _programPath :: !FilePath
                  , _loadStyle   :: !LoadStyle
                  , _reoptTrace  :: !(Maybe Integer)
+                 , _reoptFragile  :: !Bool
                  }
 
 -- | How to load Elf file.
@@ -115,6 +117,9 @@ loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 reoptTrace :: Simple Lens Args (Maybe Integer)
 reoptTrace = lens _reoptTrace (\s v -> s { _reoptTrace = v })
 
+-- | Whether to stop when we get an error
+reoptFragile :: Simple Lens Args Bool
+reoptFragile = lens _reoptFragile (\s v -> s { _reoptFragile = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -122,6 +127,7 @@ defaultArgs = Args { _reoptAction = Application
                    , _programPath = ""
                    , _loadStyle = LoadBySection
                    , _reoptTrace = Nothing
+                   , _reoptFragile = False
                    }
 
 ------------------------------------------------------------------------
@@ -134,6 +140,7 @@ arguments = mode "reopt_test" defaultArgs help filenameArg flags
                 , testFlag
                 , applicationFlag
                 , traceFlag
+                , fragileFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -152,6 +159,12 @@ instrFlag :: CmdArgs.Flag Args
 instrFlag = flagNone [ "instructions", "i"] upd help
   where upd = reoptAction .~ Instr
         help = "Print disassembly of executed instructions in a binary"
+
+
+fragileFlag :: CmdArgs.Flag Args
+fragileFlag = flagNone [ "fragile", "f"] upd help
+  where upd = reoptFragile .~ True
+        help = "Stop execution at the first mismatch"
 
 traceFlag :: CmdArgs.Flag Args
 traceFlag = flagOpt "100" [ "trace", "T"] upd "N" help
@@ -254,7 +267,7 @@ traceInner act pid = do
 ------------------------------------------------------------------------
 -- Tests.
 data MessageType
-   = FailureRecord InstructionInstance [String]
+   = FailureRecord (Maybe (X86State MS.Value)) InstructionInstance [String]
    | UnknownInstruction InstructionInstance
    | NoDecode
    | Impossible String
@@ -264,8 +277,10 @@ data MessageType
    | Info String
 
 instance Show MessageType where
-  show (FailureRecord ii msgs) =
-    unlines (["Mismatch after executing instruction " ++ show ii] ++ map (" - " ++) msgs)
+  show (FailureRecord m_regs ii msgs) =
+    unlines (["Mismatch after executing instruction " ++ show ii]
+             ++ [show (pretty m_regs)]
+             ++ map (" - " ++) msgs)
   show (UnknownInstruction ii) = "Unknown instruction: " ++ show ii
   show NoDecode = "Unable to decode instruction"
   show (Impossible msg) = "Impossible: " ++ msg
@@ -296,7 +311,7 @@ mkTest args test = do
     regs <- dumpRegs
     runTestM (test args) regs
   let isMismatch m = case m of
-                       FailureRecord _ _ -> True
+                       FailureRecord {} -> True
                        _                 -> False
       isSegfault m = case m of
                        Segfault -> True
@@ -674,6 +689,7 @@ fullApplicationTest' args ninstructions sig = do
   liftIO' $ reportProgress (args ^. reoptTrace) ninstructions
     
   pid <- {- lift $ -} lift $ asks cpid
+  preRegs <- lift dumpRegs
   status <- case iiLockPrefix <$> ii of
     Nothing -> single_step pid
     Just RepPrefix -> step_to_next_inst pid
@@ -683,7 +699,7 @@ fullApplicationTest' args ninstructions sig = do
     Just LockPrefix -> single_step pid
   case status of        W.Exited _ -> return ninstructions
                         W.Stopped sig' -> do
-                          canContinue <- checkAndClear sig' (execSuccess, ii)
+                          canContinue <- checkAndClear (args ^. reoptFragile) (Just preRegs) sig' (execSuccess, ii)
                           if canContinue
                           then fullApplicationTest' args (ninstructions + 1) sig'
                           else do logMessage $ Impossible "Main_reopt.fullApplicationTest: 'checkAndClear' failed!"
@@ -768,7 +784,7 @@ singleInstructionTest args = do
            case status'
                of W.Exited _ -> return ()
                   W.Stopped sig' -> do
-                    canContinue <- checkAndClear sig' (execSuccess, ii)
+                    canContinue <- checkAndClear (args ^. reoptFragile) Nothing sig' (execSuccess, ii)
                     unless canContinue $
                       logMessage $ Impossible "Main_reopt.singleInsructionTest: 'checkAndClear' failed!"
                   _ -> do str <- liftIO' $ statusToString status'
@@ -787,14 +803,14 @@ singleInstructionTest args = do
 -- Return value indicates whether the enclosing test should continue
 -- or not (would like to simply raise an error, but then all the
 -- 'tell' messages get lost, which makes debugging harder).
-checkAndClear :: Signal
+checkAndClear :: Bool -> Maybe (X86State MS.Value) -> Signal
   -> (Either SM.ExceptionClass Bool, Maybe InstructionInstance)
   -> TestM PTraceMachineState Bool
-checkAndClear sig (eitherExceptionBool, ii) = do
+checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
   (canContinue, disagreements) <- check eitherExceptionBool
-  report ii disagreements
+  sawError <- report ii disagreements
   clear
-  return canContinue
+  return (canContinue && not (sawError && fragile))
   where
     check (Left exception) = checkException exception
     check (Right bool) = checkBool bool
@@ -854,9 +870,11 @@ checkAndClear sig (eitherExceptionBool, ii) = do
       realRegs <- {- lift $ -} lift dumpRegs
       put (Map.empty, realRegs)
     
-    report ii [] = return () -- tell [SuccessfulExecution ii]
-    report Nothing    _ = logMessage NoDecode
-    report (Just ii) ls = logMessage $ FailureRecord ii ls
+    report ii [] = return False -- tell [SuccessfulExecution ii]
+    report Nothing    _ = do logMessage NoDecode
+                             return False -- keep going even if we can't decode
+    report (Just ii) ls = do logMessage $ FailureRecord m_regs ii ls
+                             return True
 
     -- TODO(conathan): make 'WriterT ...' an instance of 'MonadIO'?
     liftIO' :: MonadIO m => IO a -> TestM m a
