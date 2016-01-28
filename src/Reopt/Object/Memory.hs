@@ -285,8 +285,13 @@ instance (Integral w, Show w) => Show (MemoryError w) where
   show (AccessViolation a)   = "Access violation at " ++ showHex a ""
   show (PermissionsError a)  = "Insufficient permissions at " ++ showHex a ""
 
-newtype MemoryByteReader w a = MBR (ExceptT (MemoryError w) (State (MemStream w)) a)
-  deriving (Functor, Applicative, Monad)
+newtype MemoryByteReader w a = MBR { unMBR :: ExceptT (MemoryError w) (State (MemStream w)) a }
+  deriving (Functor, Applicative, MonadError (MemoryError w))
+
+instance Monad (MemoryByteReader w) where
+  return  = MBR . return
+  MBR m >>= f = MBR $ m >>= unMBR . f
+  fail    = throwError . UserMemoryError
 
 instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
   readByte = do

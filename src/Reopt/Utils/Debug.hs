@@ -13,11 +13,12 @@ import Debug.Trace
 
 debugKeys :: [DebugClass]
 debugKeys = [DUrgent, DFunctionArgs]
+-- debugKeys = [toEnum 0 .. ]
 
 -- Basically a tag we can use to turn on/off debug messages (only at
 -- compile time though).
 data DebugClass = DUrgent | DAbsInt | DCFG | DFunRecover | DFunctionArgs
-                deriving (Eq, Ord, Show)
+                deriving (Eq, Ord, Show, Enum)
 
 debug :: DebugClass -> String -> a -> a
 debug cl msg x
