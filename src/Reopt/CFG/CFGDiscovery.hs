@@ -969,7 +969,9 @@ mkFinalCFG s =
           amap = assignmentAbsValues (memory s) fg
           stacks = map (\x -> (x, maximumStackArg amap s x)) (Set.toList (s^.functionEntries))
       in debug DCFG (ppStackHeight stacks) fg
-        
+
+
+         
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =
   case Map.minViewWithKey (st^.frontier) of
