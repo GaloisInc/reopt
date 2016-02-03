@@ -76,6 +76,7 @@ import           Lang.Crucible.Solver.SatResult
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Solver.SimpleBuilder
+import           Lang.Crucible.Solver.Symbol
 import           Lang.Crucible.Utils.MonadST
 import           Reopt
 import           Reopt.Analysis.AbsState
@@ -240,7 +241,7 @@ test args = do
     (Just Refl, Just Refl, Just Refl, Just Refl) ->
       withSimpleBackend' halloc $ \ctx -> do
         let sym = ctx^.ctxSymInterface
-        arg <- I.freshConstant sym "" (C.BaseBVRepr knownNat)
+        arg <- I.freshConstant sym emptySymbol (C.BaseBVRepr knownNat)
         -- Run cfg1
         rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
           let rMap = assignReg C.typeRepr arg emptyRegMap
