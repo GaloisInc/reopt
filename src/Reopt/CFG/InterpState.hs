@@ -318,6 +318,10 @@ classifyBlock b interp_state =
 
         in Just (ParsedReturn proc_state nonret_stmts)
 
+      -- Tail calls to a concrete address (or, nop pads after a non-returning call)
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip ->
+        Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
+
     Syscall proc_state
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
