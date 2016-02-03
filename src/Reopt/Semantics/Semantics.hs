@@ -522,6 +522,16 @@ exec_neg l = do
   af_loc .= usub4_overflows zero v
   set_result_value l r
 
+exec_sahf :: Semantics m => m ()
+exec_sahf =
+  do v <- get (reg_high8 N.rax)
+     let mk (n :: Int) = bvBit v (bvLit n8 n)
+     cf_loc .= mk 0
+     pf_loc .= mk 2
+     af_loc .= mk 4
+     zf_loc .= mk 6
+     sf_loc .= mk 7
+
 exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_sbb l v = do cf <- get cf_loc
                   v0 <- get l

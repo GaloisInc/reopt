@@ -964,7 +964,7 @@ initX86State loc = mkX86State Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
-data GenError = DecodeError (MemoryError Word64)
+data GenError = DecodeError CodeAddr (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
 
@@ -1015,7 +1015,7 @@ disassembleBlock' :: Memory Word64
                   -> Either GenError (GenState 'False, CodeAddr)
 disassembleBlock' mem gs contFn addr = do
   (i, next_ip) <- readInstruction mem addr
-                  & _Left %~ DecodeError
+                  & _Left %~ DecodeError addr
   let next_ip_val = mkLit n64 (toInteger next_ip)
 
   let line = text (showHex addr "") <> colon

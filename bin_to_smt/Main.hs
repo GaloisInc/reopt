@@ -60,12 +60,14 @@ import           Lang.Crucible.Simulator.ExecutionTree
 import           Lang.Crucible.Simulator.MSSim as MSS
 import           Lang.Crucible.Simulator.RegMap
 import           Lang.Crucible.Simulator.SimError
+
 import           Lang.Crucible.Solver.Adapter
 import qualified Lang.Crucible.Solver.Interface as I
 import           Lang.Crucible.Solver.PartExpr
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Solver.SimpleBuilder
+import           Lang.Crucible.Solver.Symbol
 import           Lang.Crucible.Utils.MonadST
 
 import           Reopt
@@ -322,7 +324,8 @@ simulate pfx m_out name (C.SomeCFG cfg) halloc = do
         solver_adapter_write_smt2 cvc4Adapter sym out pred
         return ()
   where
-    mkN s = fromString (pfx ++ s)
+    mkN s = sym
+      where Right sym = userSymbol (pfx ++ s)
     mkNI s i = mkN (s ++ show i)
     initWordMap nmF sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i

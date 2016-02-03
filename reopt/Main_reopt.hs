@@ -9,6 +9,7 @@ import           Control.Lens
 import           Control.Monad
 import qualified Data.ByteString as B
 import           Data.Elf
+import           Data.List ((\\), nub, stripPrefix, intercalate)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Version
@@ -39,6 +40,7 @@ import           Reopt.Machine.Types
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Semantics.DeadRegisterElimination
+import           Reopt.Utils.Debug
 
 ------------------------------------------------------------------------
 -- Args
@@ -58,6 +60,7 @@ data Action
 data Args = Args { _reoptAction :: !Action
                  , _programPath :: !FilePath
                  , _loadStyle   :: !LoadStyle
+                 , _debugKeys   :: [DebugClass]
                  }
 
 -- | How to load Elf file.
@@ -79,11 +82,16 @@ programPath = lens _programPath (\s v -> s { _programPath = v })
 loadStyle :: Simple Lens Args LoadStyle
 loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
+-- | Which debug keys (if any) to output
+debugKeys :: Simple Lens Args [DebugClass]
+debugKeys = lens _debugKeys (\s v -> s { _debugKeys = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = ShowCFG
                    , _programPath = ""
                    , _loadStyle = LoadBySection
+                   , _debugKeys = []
                    }
 
 ------------------------------------------------------------------------
@@ -129,6 +137,35 @@ sectionFlag = flagNone [ "load-sections" ] upd help
   where upd  = loadStyle .~ LoadBySection
         help = "Load the Elf file using section information (default)."
 
+parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
+parseDebugFlags oldKeys cl =
+  case cl of
+    '-' : cl' -> do ks <- getKeys cl'
+                    return (oldKeys \\ ks)
+    cl'       -> do ks <- getKeys cl'
+                    return (nub $ oldKeys ++ ks)
+  where
+    getKeys "all" = Right allDebugKeys
+    getKeys str = case parseDebugKey str of
+                    Nothing -> Left $ "Unknown debug key `" ++ str ++ "'"
+                    Just k  -> Right [k]
+
+unintercalate :: String -> String -> [String]
+unintercalate punct str = reverse $ go [] "" str
+  where
+    go acc "" [] = acc
+    go acc thisAcc [] = (reverse thisAcc) : acc
+    go acc thisAcc str'@(x : xs)
+      | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
+      | otherwise = go acc (x : thisAcc) xs
+                    
+debugFlag :: Flag Args
+debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
+  where upd s old = do let ks = unintercalate "," s
+                       new <- foldM parseDebugFlags (old ^. debugKeys) ks
+                       Right $ (debugKeys .~ new) old
+        help = "Debug keys to enable.  This flag may be used multiple times, with comma-separated keys.  Keys may be preceded by a '-' which means disable that key.  Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
+          
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -140,6 +177,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , gapFlag
                 , segmentFlag
                 , sectionFlag
+                , debugFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -550,6 +588,8 @@ mkElfMem LoadBySegment e = memoryForElfSegments e
 main :: IO ()
 main = do
   args <- getCommandLineArgs
+  print (args ^. debugKeys)
+  setDebugKeys (args ^. debugKeys)
   case args^.reoptAction of
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)

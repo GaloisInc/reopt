@@ -197,9 +197,11 @@ tryDisassembleAddr addr ab s0 = do
   let mem = memory s0
   let gs0 = s0^.genState
   case runStateT (disassembleBlock mem not_at_block loc) gs0 of
-    Left _e ->
+    Left e ->
+      debug DCFG ("Failed to disassemble block at " ++ showHex addr " " ++ show e) $      
       s0 & blocks %~ Map.insert addr Nothing
     Right ((bs, next_ip), gs) -> assert (next_ip > addr) $ do
+      debug DCFG (show $ vcat $ map pretty bs) $ do
       let block_map = Map.fromList [ (labelIndex (blockLabel b), b) | b <- bs ]
       -- Add block region to blocks.
       let br = BlockRegion { brEnd = next_ip
@@ -710,7 +712,7 @@ transferBlock :: Block             -- ^ Block to start from
               -> State InterpState ()
 transferBlock b regs = do
   let lbl = blockLabel b
-  -- trace ("transferBlock " ++ show lbl) $ do
+  debugM DCFG ("transferBlock " ++ show lbl) 
   mem <- gets memory
   regs' <- transferStmts regs (blockStmts b)
   -- FIXME: we should propagate c back to the initial block, not just b
@@ -949,14 +951,15 @@ ppFunctionArgs l = unlines (pp <$> l)
 
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
-  case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
+  let fArgs = functionArgs s in
+  case traverse (recoverFunction fArgs s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
       -- debug DCFG (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       -- debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
       -- debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       -- debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      debug DFunctionArgs (ppFunctionArgs (Map.toList (functionArgs s))) $
+      debug DFunctionArgs (ppFunctionArgs (Map.toList fArgs)) $
       -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState
@@ -967,7 +970,9 @@ mkFinalCFG s =
           amap = assignmentAbsValues (memory s) fg
           stacks = map (\x -> (x, maximumStackArg amap s x)) (Set.toList (s^.functionEntries))
       in debug DCFG (ppStackHeight stacks) fg
-        
+
+
+         
 explore_frontier :: InterpState -> InterpState
 explore_frontier st =
   case Map.minViewWithKey (st^.frontier) of

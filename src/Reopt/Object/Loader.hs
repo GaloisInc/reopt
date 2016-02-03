@@ -17,7 +17,7 @@ import Data.Monoid (mappend)
 
 import Reopt.Object.Memory
 
-readElf :: FilePath -> IO SomeElf
+readElf :: FilePath -> IO (SomeElf Elf)
 readElf path = do
   bs <- BS.readFile path
   case parseElf bs of
@@ -37,11 +37,11 @@ memoryForElfSegments e = execStateT (mapM_ insertElfSegment (renderedElfSegments
 
 -- | Load an elf file into memory.
 insertElfSegment :: (ElfWidth w, MonadState (Memory w) m) => RenderedElfSegment w -> m ()
-insertElfSegment elf_seg = do
+insertElfSegment s@(elf_seg, _) = do
   -- Load PT_LOAD elefSegments
   case elfSegmentType elf_seg of
     PT_LOAD -> do
-      insertMemSegment (memSegmentForElfSegment elf_seg)
+      insertMemSegment (memSegmentForElfSegment s)
     PT_DYNAMIC -> do
       fail "Dynamic elf files are not yet supported."
     _ -> return ()
@@ -50,8 +50,8 @@ insertElfSegment elf_seg = do
 memSegmentForElfSegment :: Integral w
                         => RenderedElfSegment w
                         -> MemSegment w
-memSegmentForElfSegment seg = mseg
-  where dta = seg^.elfSegmentData
+memSegmentForElfSegment s@(seg, dta) = mseg
+  where -- dta = seg^.elfSegmentData
         sz = fromIntegral $ elfSegmentMemSize seg
         fixedData
           | BS.length dta > sz = BS.take sz dta

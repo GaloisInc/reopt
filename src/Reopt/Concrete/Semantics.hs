@@ -500,7 +500,7 @@ checkSadcOverflow a b carry = BV.fromBool didUnderOverflow
   where
     didUnderOverflow = total >= (2 ^ (bitWidth-1)) || total < (- (2 ^ (bitWidth-1)))
     bitWidth = max (BV.width a) (BV.width b)
-    total = sum $ map BV.int [a,b,carry]
+    total = BV.int a + BV.int b + BV.uint carry
 
 checkUsbbOverflow :: BV -> BV -> BV -> BV
 checkUsbbOverflow a b borrow = BV.fromBool didUnderflow
@@ -513,7 +513,7 @@ checkSsbbOverflow a b borrow = BV.fromBool didUnderOverflow
   where
     didUnderOverflow = total >= (2 ^ (bitWidth-1)) || total < (- (2 ^ (bitWidth-1)))
     bitWidth = max (BV.width a) (BV.width b)
-    total = foldl1 (-) $ map BV.int [a,b,borrow]
+    total = BV.int a - (BV.int b + BV.uint borrow)
 
 -- Index of least significant non-zero bit
 bsf :: NatRepr n -> BV -> Maybe BV

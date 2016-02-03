@@ -113,6 +113,7 @@ data RecoverState = RS { _rsInterp :: !InterpState
                        , _rsCurRegs   :: !(InitRegsMap)
                          -- read only
                        , rsAssignmentsUsed :: !(Set (Some Assignment))
+                       , rsFunctionArgs    :: !FunctionArgs
                        }
 
 rsInterp :: Simple Lens RecoverState InterpState
@@ -268,11 +269,13 @@ regMapFromState s =
 ------------------------------------------------------------------------
 -- recoverFunction
 
+type FunctionArgs = Map CodeAddr (Set (Some N.RegisterName), Set (Some N.RegisterName))
+
 -- | Recover the function at a given address.
-recoverFunction :: InterpState -> CodeAddr -> Either String Function
-recoverFunction s a = do
+recoverFunction :: FunctionArgs -> InterpState -> CodeAddr -> Either String Function
+recoverFunction fArgs s a = do
   let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
-        = registerUse s a
+        = registerUse fArgs s a
 
   let initRegs = MapF.empty
                  & flip (ifoldr (\i r     -> MapF.insert r (FnRegValue (FnIntArg i)))) x86ArgumentRegisters
@@ -287,6 +290,7 @@ recoverFunction s a = do
               , _rsAssignMap = MapF.empty
               , _rsCurRegs   = initRegs
               , rsAssignmentsUsed = usedAssigns
+              , rsFunctionArgs    = fArgs
               }
 
   let recoverInnerBlock blockRegMap lbl = do
@@ -300,7 +304,8 @@ recoverFunction s a = do
          allocateStackFrame (maximumStackDepth s a)
          r0 <- recoverBlock blockRegProvides MapF.empty lbl
          rs <- mapM (recoverInnerBlock blockRegMap) (Map.keys blockPreds)
-         return (mconcat $ r0 : rs)
+         -- disjoint maps here, so mconcat is OK         
+         return (mconcat (r0 : rs)) 
 
   runRecover rs $ do
     -- The first block is special as it needs to allocate space for
@@ -320,7 +325,7 @@ makePhis :: Map BlockLabel (Set (Some N.RegisterName))
             -> BlockLabel
             -> Recover (MapF FnPhiVar FnPhiNodeInfo, InitRegsMap)
 makePhis blockRegs blockPreds blockRegMap lbl = do
-  regs <- foldM (\m (Some r) -> mkId (addReg m r)) MapF.empty regs
+  regs <- foldM (\m (Some r) -> mkId (addReg m r)) MapF.empty regs0
   let nodes = MapF.foldrWithKey go MapF.empty regs
   return (nodes, regs)
   where
@@ -346,9 +351,9 @@ makePhis blockRegs blockPreds blockRegMap lbl = do
       in FnPhiNodeInfo (map doOne preds)
 
     Just preds = Map.lookup lbl blockPreds
-    regs = case Set.toList <$> Map.lookup lbl blockRegs of
-             Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show (pretty lbl)) []
-             Just x  -> x
+    regs0 = case Set.toList <$> Map.lookup lbl blockRegs of
+              Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show (pretty lbl)) []
+              Just x  -> x
 
 mkAddAssign :: FnAssignRhs tp -> Recover (FnValue tp)
 mkAddAssign rhs = do
@@ -386,6 +391,23 @@ allocateStackFrame sd
 stateArgs :: X86State Value -> Recover [Some FnValue]
 stateArgs _ = debug DFunRecover "startArgs not yet implemented" $ return []
 
+-- FIXME: clag from RegisterUse.hs
+lookupFunctionArgs :: Either CodeAddr (Value (BVType 64))
+                   -> Recover (Set (Some N.RegisterName), Set (Some N.RegisterName))
+lookupFunctionArgs fn = 
+  case fn of
+    Right _dynaddr -> return nothingKnown
+    Left faddr -> do 
+      fArgs <- gets (Map.lookup faddr . rsFunctionArgs)
+      case fArgs of
+        Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
+                      return nothingKnown
+        Just v  -> return v
+  where
+    nothingKnown = (Set.fromList (( Some <$> x86ArgumentRegisters) ++
+                                  ( Some <$> x86FloatArgumentRegisters ))
+                   , Set.fromList x86ResultRegisters)
+
 recoverBlock :: Map BlockLabel (Set (Some N.RegisterName))
              -> MapF FnPhiVar FnPhiNodeInfo
              -> BlockLabel
@@ -417,12 +439,17 @@ recoverBlock blockRegProvides phis lbl = do
       yr <- recoverBlock blockRegProvides MapF.empty y
       return $! mconcat [(fb, Map.empty), xr, yr]
 
-    Just (ParsedCall proc_state prev_stmts _fn m_ret_addr) -> do
+    Just (ParsedCall proc_state prev_stmts fn m_ret_addr) -> do
       Fold.traverse_ recoverStmt prev_stmts
+
+      (args, rets) <- lookupFunctionArgs fn
+
+      -- May not be used (only if called function returns at these types)
       intr   <- mkReturnVar (knownType :: TypeRepr (BVType 64))
       floatr <- mkReturnVar (knownType :: TypeRepr XMMType)
 
       -- Figure out what is preserved across the function call.
+      -- FIXME: use rets
       let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
                 -> Recover (MapF N.RegisterName FnRegValue)
           go m (Some r) = do
@@ -446,10 +473,8 @@ recoverBlock blockRegProvides phis lbl = do
       let ret_lbl = mkRootBlockLabel <$> m_ret_addr
       call_tgt <- recoverValue "ip" (proc_state ^. register N.rip)
 
-      let args = [ Some (proc_state ^. register r)
-                 | Some r <- (Some <$> x86ArgumentRegisters)
-                             ++ (Some <$> x86FloatArgumentRegisters) ]
-      args'  <- mapM (viewSome (fmap Some . recoverValue "arguments")) args
+      let argVs = [ Some (proc_state ^. register r) | Some r <- Set.toList args ]
+      args'  <- mapM (viewSome (fmap Some . recoverValue "arguments")) argVs
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
       fb <- mkBlock (FnCall call_tgt args' intr floatr ret_lbl)
@@ -460,7 +485,6 @@ recoverBlock blockRegProvides phis lbl = do
         -- Recover statements
         Fold.traverse_ recoverStmt (blockStmts b)
 
-        -- Figure out what is preserved across the function call.
         let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
                   -> Recover (MapF N.RegisterName FnRegValue)
             go m (Some r) = do

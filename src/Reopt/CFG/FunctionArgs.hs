@@ -266,8 +266,7 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- -----------------------------------------------------------------------------
 -- Entry point
 
--- | Returns the maximum stack argument used by the function, that is,
--- the highest index above sp0 that is read or written.
+-- | Returns the set of argument registers and result registers for each function.
 functionArgs :: InterpState -> Map CodeAddr (RegisterSet, RegisterSet) -- (args, results)
 functionArgs ist =
   -- debug' DFunctionArgs (ppSet (text . flip showHex "") seenFuns) $
@@ -305,6 +304,14 @@ functionArgs ist =
       where
         lbl0 = mkRootBlockLabel addr
 
+    -- A function may demand a callee saved register as it will store
+    -- it onto the stack in order to use it later.  This will get
+    -- recorded as a use, which is erroneous, so we strip out any
+    -- reference to them here.
+    calleeDemandSet = DemandSet { registerDemands = Set.insert (Some N.rsp)
+                                                    x86CalleeSavedRegisters
+                                , functionResultDemands = mempty }
+                                 
     decomposeMap :: CodeAddr
                  -> (Map CodeAddr (Map (Some N.RegisterName)
                                    (Map CodeAddr DemandSet))
@@ -322,8 +329,9 @@ functionArgs ist =
     decomposeMap addr acc (DemandFunctionResult r) v =
       acc & _2 %~ Map.insertWith (Map.unionWith mappend) addr
                         (Map.singleton (Some r) v)
+    -- Strip out callee saved registers as well.
     decomposeMap addr acc DemandAlways v =
-      acc & _3 %~ Map.insertWith mappend addr v
+      acc & _3 %~ Map.insertWith mappend addr (v `demandSetDifference` calleeDemandSet)
 
     finalizeMap :: Map CodeAddr DemandSet -> Map CodeAddr (RegisterSet, RegisterSet)
     finalizeMap dm = 
