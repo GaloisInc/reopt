@@ -951,14 +951,15 @@ ppFunctionArgs l = unlines (pp <$> l)
 
 mkFinalCFG :: InterpState -> FinalCFG
 mkFinalCFG s =
-  case traverse (recoverFunction s) (Set.toList (s^.functionEntries)) of
+  let fArgs = functionArgs s in
+  case traverse (recoverFunction fArgs s) (Set.toList (s^.functionEntries)) of
     Left msg -> error msg
     Right fns ->
       -- debug DCFG (ppFunctionEntries (Set.toList (s^.functionEntries))) $
       -- debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
       -- debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       -- debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      debug DFunctionArgs (ppFunctionArgs (Map.toList (functionArgs s))) $
+      debug DFunctionArgs (ppFunctionArgs (Map.toList fArgs)) $
       -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState
