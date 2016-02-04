@@ -8,7 +8,6 @@ module Reopt
   , slice
   ) where
 
-import Control.Applicative
 import Control.Exception
 import Control.Lens
 import Control.Monad
@@ -154,6 +153,6 @@ printExecutableAddressesInGlobalData e = do
         let (n,mi) = tryDisassemble defaultX64Disassembler (B.drop offset buffer)
         let da = DAddr offset n mi
         printDisassemblyLine base buffer da
-        
+
       Nothing -> do
         putStrLn $ showHex o " not found in segment."

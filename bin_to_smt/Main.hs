@@ -177,7 +177,7 @@ outFileFlag = flagReq [ "entry", "e" ] upd "Entry point" help
 prefixFlag :: Flag Args
 prefixFlag = flagReq [ "prefix", "p" ] upd "Symbol Prefix" help
   where
-    upd :: String -> Args -> Either String Args 
+    upd :: String -> Args -> Either String Args
     upd pfx old = Right $ (symbolPrefix .~ pfx) old
     help = "Optional prefix for smt symbols."
 
@@ -295,7 +295,7 @@ simulate pfx m_out name (C.SomeCFG cfg) halloc = do
       C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
     dummyHeap <- I.freshConstant sym (mkN "dummyHeap") $
       C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
-      
+
     let struct        = Ctx.empty %> (RV heap) %> (RV initGprs) %> (RV flags') %> (RV pc)
         initialRegMap = assignReg C.typeRepr struct emptyRegMap
     -- Run cfg1
@@ -325,7 +325,7 @@ simulate pfx m_out name (C.SomeCFG cfg) halloc = do
         return ()
   where
     mkN s = sym
-      where Right sym = userSymbol (pfx ++ s)
+      where Right sym =  Lang.Crucible.Solver.Symbol.userSymbol (pfx ++ s)
     mkNI s i = mkN (s ++ show i)
     initWordMap nmF sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i

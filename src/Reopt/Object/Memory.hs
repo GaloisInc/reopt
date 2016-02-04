@@ -69,20 +69,23 @@ import           Flexdis86.ByteReader
 -- Utilities
 
 bsWord16 :: BS.ByteString -> Word16
-bsWord16 bs = w0 .|. w1
+bsWord16 bs | BS.length bs /= 2 = error "bsWord16 given bytestring with bad length."
+            | otherwise         = w0 .|. w1
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL` 8
 
 
 bsWord32 :: BS.ByteString -> Word32
-bsWord32 bs = w0 .|. w1 .|. w2 .|. w3
+bsWord32 bs | BS.length bs /= 4 = error "bsWord32 given bytestring with bad length."
+            | otherwise = w0 .|. w1 .|. w2 .|. w3
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL`  8
         w2 = fromIntegral (BS.index bs 2) `shiftL` 16
         w3 = fromIntegral (BS.index bs 3) `shiftL` 24
 
 bsWord64 :: BS.ByteString -> Word64
-bsWord64 bs = w0 .|. w1 .|. w2 .|. w3 .|. w4 .|. w5 .|. w6 .|. w7
+bsWord64 bs | BS.length bs /= 8 = error "bsWord64 given bytestring with bad length."
+            | otherwise = w0 .|. w1 .|. w2 .|. w3 .|. w4 .|. w5 .|. w6 .|. w7
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL`  8
         w2 = fromIntegral (BS.index bs 2) `shiftL` 16
@@ -126,12 +129,14 @@ segmentSize seg = fromIntegral (BS.length (memBytes seg))
 
 -- | Return list of aligned word 64s in the memory segments.
 segmentAsWord64le :: Integral w => MemSegment w -> [Word64]
-segmentAsWord64le s = go (memBytes s) cnt
+segmentAsWord64le s | len <= base = [] -- Degenerate case to handle very small segments.
+                    | otherwise = go (memBytes s) cnt
   where base :: Int
         base = fromIntegral (memBase s) .&. 0x7
-        cnt = (BS.length (memBytes s) - base) `shiftR` 3
+        len = BS.length (memBytes s)
+        cnt = (len - base) `shiftR` 3
         go _ 0 = []
-        go b c = bsWord64 s' : go b' (c-1)
+        go b c = assert (BS.length s' == 8) $ bsWord64 s' : go b' (c-1)
           where (s',b') = BS.splitAt 8 b
 
 -- | Returns an interval representing the range of addresses for the segment
@@ -257,7 +262,11 @@ memLookupWord32 m reqPerm addr = do
 -- | Return a word64 at given address (assume little-endian encoding)
 memLookupWord64 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word64
 memLookupWord64 m reqPerm addr = do
-  bsWord64 <$> memSubsegment m reqPerm addr 8
+  b <- memSubsegment m reqPerm addr 8
+  when (BS.length b /= 8) $ do
+    error "internal error in memSubsegment detected by memLookupWord64"
+  return $! bsWord64 b
+
 
 ------------------------------------------------------------------------
 -- MemStream

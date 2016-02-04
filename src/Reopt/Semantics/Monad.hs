@@ -18,6 +18,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -123,7 +124,15 @@ import           Reopt.Machine.Types
 import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Flexdis86.OpTable (SizeConstraint(..))
-import           Flexdis86.InstructionSet (Segment, es, cs, ss, ds, fs, gs)
+import           Flexdis86.InstructionSet
+  ( Segment
+  , pattern ES
+  , pattern CS
+  , pattern SS
+  , pattern DS
+  , pattern FS
+  , pattern GS
+  )
 
 ------------------------------------------------------------------------
 -- Sub registers
@@ -297,7 +306,7 @@ registerViewWrite ::
   v (N.RegisterType cl)
 registerViewWrite r@(RegisterView {..}) =
   case _registerViewType of
-    DefaultView 
+    DefaultView
       | Just (_, Refl, Refl) <- registerViewAsFullRegister r -> \ _v0 v -> v
       | otherwise -> defaultRegisterViewWrite b n rn
     OneExtendOnWrite ->
@@ -511,7 +520,7 @@ instance Ord addr => TestEquality (Location addr) where
     | EQF <- l `compareF` l' = Just Refl
     | otherwise = Nothing
 
-instance Eq addr => EqF (Location addr) where 
+instance Eq addr => EqF (Location addr) where
   MemoryAddr addr tp `eqF` MemoryAddr addr' tp'
     | Just Refl <- testEquality tp tp' = addr == addr'
   Register rv `eqF` Register rv'
@@ -519,8 +528,8 @@ instance Eq addr => EqF (Location addr) where
   X87StackRegister i `eqF` X87StackRegister i' = i == i'
   _ `eqF` _ = False
 
-instance Eq addr => Eq (Location addr tp) where 
-  l == l' = l `eqF` l'
+instance Eq addr => Eq (Location addr tp) where
+  (==) = eqF
 
 instance Ord (RegisterViewType cl b n) where
   compare = compareRegisterViewType
@@ -563,7 +572,7 @@ instance Ord addr => OrdF (Location addr) where
         EQ -> error "Reopt.Semantics.Monad.OrdF (Location addr).compareF: impossible!"
   Register _ `compareF` _ = GTF
   _ `compareF` Register _ = LTF
-  X87StackRegister i `compareF` X87StackRegister i' = 
+  X87StackRegister i `compareF` X87StackRegister i' =
     fromOrdering $ compare i i'
 
 -- | Pretty print 'S.Location'.

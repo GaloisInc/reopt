@@ -301,7 +301,7 @@ logMessage msg = lift (modify ((:) msg))
 
 -- | Test builder.
 mkTest :: Args
-  -> (Args -> TestM PTraceMachineState ()) 
+  -> (Args -> TestM PTraceMachineState ())
   -> IO ()
 mkTest args test = do
   child <- traceFile $ args^.programPath
@@ -318,9 +318,9 @@ mkTest args test = do
                        _        -> False
       numMismatches = length (filter isMismatch out)
       numSegfaults  = length (filter isSegfault out)
-      
+
   mapM_ print (filter isMismatch $ reverse out) -- only print mis-matches
-  
+
   case (numMismatches, numSegfaults) of
     (0,0) -> putStrLn "No mismatches!"
     (0,_) -> do putStrLn "Segfault was observed."
@@ -496,8 +496,8 @@ instance MonadMachineState PTraceMachineState where
     regs <- liftIO $ ptrace_getregs pid
     case regs of
       X86_64 regs'
-        | seg == SM.fs -> return $ mkLit64 (fs_base regs')
-        | seg == SM.gs -> return $ mkLit64 (gs_base regs')
+        | seg == SM.FS -> return $ mkLit64 (fs_base regs')
+        | seg == SM.GS -> return $ mkLit64 (gs_base regs')
         -- We already treated the (trivial) segments other than FS and
         -- GS in 'Reopt.Semantics.FlexdisMatcher.getBVAddress'.
         | otherwise -> fail $ "getSegmentBase: bug: unexpected segment: " ++
@@ -573,7 +573,7 @@ instance Monad m => Monad (MachineByteReader m) where
   return  = MachineByteReader . return
   MachineByteReader m >>= f = MachineByteReader $ m >>= \x -> case f x of MachineByteReader m' -> m'
   fail = MachineByteReader . throwError
-  
+
 instance (Functor m, MonadMachineState m) =>
   ByteReader (MachineByteReader m) where
     readByte = do
@@ -584,7 +584,7 @@ instance (Functor m, MonadMachineState m) =>
                        Just bv -> return $ fromIntegral bv
 
 runMachineByteReader :: Monad m => MachineByteReader m a -> Address8 ->  m (Either String (Int, a))
-runMachineByteReader (MachineByteReader s) addr = 
+runMachineByteReader (MachineByteReader s) addr =
   runExceptT (runStateT s (addr, 0)) >>= return . (fmap $ \(v, (_, l)) -> (l,v))
 
 -- | Disassemble, from HW, the instruction at the given address.
@@ -598,7 +598,7 @@ getInstruction instrAddr = do
     -- Left e -> do r' <- runMachineByteReader (sequence $ replicate 10 readByte) instrAddr
     --              case r' of
     --                Left e'  -> -- fail $ "Really couldn't decode bytes (" ++ e ++ " and " ++ e' ++ ") " ++ show instrAddr
-                     
+
     --                Right (_, bs) -> fail $ "Couldn't decode bytes (" ++ e ++ ") " ++ show instrAddr ++ ": "
     --                                 ++ concat (map (flip showHex " ") bs)
     Right v -> return (Just v)
@@ -624,7 +624,7 @@ stepConcrete = do
   m_r <- getInstruction instrAddr
   case m_r of
     Nothing -> return (Right False, Nothing)
-    Just (w, ii) -> 
+    Just (w, ii) ->
       case execInstruction (fromIntegral $ (nat bv) +
                         fromIntegral w) ii
       of Just s -> do
@@ -656,8 +656,8 @@ reportProgress (Just n) ninstructions = do
            in printf "\n[%6.2f%s] ." digits suffix
          else
            printf "."
-      hFlush stdout 
-  
+      hFlush stdout
+
 -- up to 999 tera is probably enough
 makeHumanReadable :: Integer -> (Float, String)
 makeHumanReadable n
@@ -666,7 +666,7 @@ makeHumanReadable n
   | n < 1000000000       = (fromIntegral n / 1000000, "M")
   | n < 1000000000000    = (fromIntegral n / 1000000000, "G")
   | otherwise            = (fromIntegral n / 1000000000000, "T")
-                           
+
 -- | Run an application in lock step with the concrete semantics.
 fullApplicationTest :: Args -> TestM PTraceMachineState ()
 fullApplicationTest args = do start <- lift . liftIO $ getCPUTime
@@ -687,7 +687,7 @@ fullApplicationTest' args ninstructions sig = do
 
   -- Trace that we executed another instruction
   liftIO' $ reportProgress (args ^. reoptTrace) ninstructions
-    
+
   pid <- {- lift $ -} lift $ asks cpid
   preRegs <- lift dumpRegs
   status <- case iiLockPrefix <$> ii of
@@ -869,7 +869,7 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
     clear = do
       realRegs <- {- lift $ -} lift dumpRegs
       put (Map.empty, realRegs)
-    
+
     report ii [] = return False -- tell [SuccessfulExecution ii]
     report Nothing    _ = do logMessage NoDecode
                              return False -- keep going even if we can't decode
