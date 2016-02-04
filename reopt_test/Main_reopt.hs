@@ -11,7 +11,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
+{-# OPTIONS_GHC -w #-} -- Disable warnings
 module Main (main) where
 
 import           Control.Lens

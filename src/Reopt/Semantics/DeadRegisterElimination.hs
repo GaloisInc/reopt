@@ -17,7 +17,10 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-module Reopt.Semantics.DeadRegisterElimination (eliminateDeadRegisters) where
+{-# OPTIONS_GHC -Werror #-}
+module Reopt.Semantics.DeadRegisterElimination
+  ( eliminateDeadRegisters
+  ) where
 
 import           Control.Lens
 import           Control.Monad.State (State, evalState, gets, modify)
@@ -85,6 +88,8 @@ refsInAssignRhs rhs = case rhs of
                        EvalApp v      -> refsInApp v
                        SetUndefined _ -> S.empty
                        Read loc       -> refsInLoc loc
+                       ReadFSBase -> S.empty
+                       ReadGSBase -> S.empty
                        MemCmp _ cnt src dest dir ->
                          S.unions [ refsInValue cnt
                                   , refsInValue src

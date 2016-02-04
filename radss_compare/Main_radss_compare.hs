@@ -6,6 +6,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -w #-}
 module Main (main) where
 
 import           Control.Applicative

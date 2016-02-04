@@ -334,10 +334,11 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "cwde"    $ const exec_cwde
               , mk "cdqe"    $ const exec_cdqe
               , mk "clc"     $ const exec_clc
-              , mk "cld"     $ const exec_cld
+              , mk "cld"     $ \_ -> exec_cld
               , mk "cmp"     $ binop exec_cmp
               , mk "dec"     $ unop exec_dec
               , mk "div"     $ unopV exec_div
+              , mk "hlt"     $ \_ -> exec_hlt
               , mk "idiv"    $ unopV exec_idiv
               , mk "inc"     $ unop exec_inc
               , mk "leave"   $ const exec_leave
@@ -600,7 +601,8 @@ mkBinopPfxLL f = mkBinopPfx $ \pfx loc loc' -> do
 geBinop :: FullSemantics m
         => (forall n n'. (IsLocationBV m n, 1 <= n', n' <= n)
                        => MLocation m (BVType n) -> Value m (BVType n') -> m ())
-        -> (F.LockPrefix, [F.Value]) -> m ()
+        -> (F.LockPrefix, [F.Value])
+        -> m ()
 geBinop f = mkBinopLV $ \l v -> do
               Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
               f l v
