@@ -29,7 +29,7 @@ import           Control.Lens
 import           Control.Monad.Error
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (toList, traverse_)
-import           Data.List (elemIndex, elem)
+import           Data.List (elemIndex, elem, intercalate)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (catMaybes, fromMaybe)
@@ -276,7 +276,7 @@ recoverFunction :: FunctionArgs -> InterpState -> CodeAddr -> Either String Func
 recoverFunction fArgs s a = do
   let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
         = registerUse fArgs s a
-
+  
   let initRegs = MapF.empty
                  & flip (ifoldr (\i r     -> MapF.insert r (FnRegValue (FnIntArg i)))) x86ArgumentRegisters
                  & flip (ifoldr (\i r     -> MapF.insert r (FnRegValue (FnFloatArg i)))) x86FloatArgumentRegisters
@@ -344,7 +344,7 @@ makePhis blockRegs blockPreds blockRegMap lbl = do
     collate r =
       let undef lbl = (lbl, FnValueUnsupported ("makePhis " ++ show r ++ " at " ++ show (pretty lbl)) (N.registerType r))
           doOne lbl =
-            fromMaybe (debug DFunRecover ("WARNING: missing at " ++ show (pretty lbl)) (undef lbl)) $
+            fromMaybe (debug DFunRecover ("WARNING: missing blockRegMap/register for " ++ show (pretty lbl)) (undef lbl)) $
             do rm <- Map.lookup lbl blockRegMap
                FnRegValue rv <- MapF.lookup r rm
                return (lbl, rv)
@@ -446,6 +446,7 @@ recoverBlock blockRegProvides phis lbl = do
 
       -- May not be used (only if called function returns at these types)
       intr   <- mkReturnVar (knownType :: TypeRepr (BVType 64))
+      intr2  <- mkReturnVar (knownType :: TypeRepr (BVType 64))      
       floatr <- mkReturnVar (knownType :: TypeRepr XMMType)
 
       -- Figure out what is preserved across the function call.
@@ -457,17 +458,19 @@ recoverBlock blockRegProvides phis lbl = do
                N.GPReg {}
                  | Just Refl <- testEquality r N.rax ->
                      return (FnReturn intr)
+                 | Just Refl <- testEquality r N.rdx ->
+                     return (FnReturn intr2)                     
                  | Just _ <- testEquality r N.rsp -> do
                      spv <- recoverValue "callee_saved" (proc_state ^. register N.rsp)
                      mkAddAssign $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverValue "callee_saved" (proc_state ^. register r)
                N.XMMReg 0 -> return (FnReturn floatr)
-               _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r) $
+               _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-call register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
 
-      let Just provides = Map.lookup lbl blockRegProvides
+      let provides = blockRegProvides ^. ix lbl -- maybe mempty
       regs' <- foldM go MapF.empty provides
 
       let ret_lbl = mkRootBlockLabel <$> m_ret_addr
@@ -520,7 +523,7 @@ recoverBlock blockRegProvides phis lbl = do
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverValue "callee_saved" (proc_state ^. register r)
                -- N.XMMReg 0 -> return (FnReturn floatr)
-               _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r) $
+               _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
 

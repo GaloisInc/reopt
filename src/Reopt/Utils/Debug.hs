@@ -43,7 +43,7 @@ allDebugKeys = [toEnum 0 .. ]
 
 -- Basically a tag we can use to turn on/off debug messages (only at
 -- compile time though).
-data DebugClass = DUrgent | DAbsInt | DCFG | DFunRecover | DFunctionArgs
+data DebugClass = DUrgent | DAbsInt | DCFG | DFunRecover | DFunctionArgs | DRegisterUse
                 deriving (Eq, Ord, Enum, Show)
 
 supportedKeys :: [(String, DebugClass, String)]
@@ -51,6 +51,7 @@ supportedKeys = [ ("urgent", DUrgent, "High priority warnings")
                 , ("absint", DAbsInt, "Abstract interpretation phase")
                 , ("cfg", DCFG, "CFG discovery phase")
                 , ("recover", DFunRecover, "Function recovery phase")
+                , ("reguse", DRegisterUse, "Register use")
                 , ("funargs", DFunctionArgs, "Function argument discovery phase") ]
 
 debugKeyDescription :: DebugClass -> String
