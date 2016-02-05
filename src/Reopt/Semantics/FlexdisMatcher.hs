@@ -79,7 +79,10 @@ getSomeBVValue v =
     F.JumpOffset off                -> return (SomeBV $ bvLit n64 off)
   where
     -- FIXME: what happens with signs etc?
-    mk :: forall m n'. (Semantics m, SupportedBVWidth n') => MLocation m (BVType n') -> m (SomeBV (Value m))
+    mk :: forall m n'
+       . (Semantics m, SupportedBVWidth n')
+       => MLocation m (BVType n')
+       -> m (SomeBV (Value m))
     mk l = SomeBV <$> get l
 
 -- | Calculates the address corresponding to an AddrRef
@@ -99,19 +102,21 @@ getBVAddress ar =
       mk_absolute seg offset
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
-    F.Offset_64    seg w64                 -> do let offset = bvLit n64 w64
-                                                 mk_absolute seg offset
-    F.Addr_64      seg m_r64 m_int_r64 i32 -> do base <- case m_r64 of
-                                                           Nothing -> return v0_64
-                                                           Just r  -> get (fullRegister $ N.gpFromFlexdis r)
-                                                 scale <- case m_int_r64 of
-                                                            Nothing     -> return v0_64
-                                                            Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
-                                                                           <$> get (fullRegister $ N.gpFromFlexdis r)
-                                                 let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
-                                                 mk_absolute seg offset
-    F.IP_Offset_64 seg i32                 -> do offset <- bvAdd (bvLit n64 i32) <$> get (fullRegister N.rip)
-                                                 mk_absolute seg offset
+    F.Offset_64    seg w64 -> do
+      mk_absolute seg (bvLit n64 w64)
+    F.Addr_64      seg m_r64 m_int_r64 i32 -> do
+      base <- case m_r64 of
+                Nothing -> return v0_64
+                Just r  -> get (fullRegister $ N.gpFromFlexdis r)
+      scale <- case m_int_r64 of
+                 Nothing     -> return v0_64
+                 Just (i, r) -> bvTrunc n64 . bvMul (bvLit n64 i)
+                                 <$> get (fullRegister $ N.gpFromFlexdis r)
+      let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
+      mk_absolute seg offset
+    F.IP_Offset_64 seg i32                 -> do
+      ip_val <- get (fullRegister N.rip)
+      mk_absolute seg (bvAdd (bvLit n64 i32) ip_val)
   where
     v0_64 = bvLit n64 (0 :: Int)
     -- | Add the segment base to compute an absolute address.
@@ -123,7 +128,7 @@ getBVAddress ar =
       -- We could nevertheless call 'getSegmentBase' in all cases
       -- here, but that adds a lot of noise to the AST in the common
       -- case of segments other than FS or GS.
-      | seg == F.cs || seg == F.ds || seg == F.es || seg == F.ss = return offset
+      | seg == F.CS || seg == F.DS || seg == F.ES || seg == F.SS = return offset
       -- The FS and GS segments can be non-zero based in 64-bit mode.
       | otherwise = do
         base <- getSegmentBase seg
@@ -169,10 +174,14 @@ getSomeBVLocation v =
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
 
-checkEqBV :: Monad m  => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n -> f (BVType p) -> m (f (BVType n))
+checkEqBV :: Monad m
+          => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n
+          -> f (BVType p)
+          -> m (f (BVType n))
 checkEqBV getW n v
   | Just Refl <- testEquality (getW v) n = return v
-  | otherwise = traceStack "WIDTH_ERROR" $ fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
+  | otherwise = traceStack "WIDTH_ERROR" $
+     fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
 
 checkSomeBV :: Monad m
             => (forall n'. f (BVType n') -> NatRepr n')
@@ -203,7 +212,8 @@ truncateBVValue :: (Monad m, IsValue v, 1 <= n)
 truncateBVValue n (SomeBV v)
   | Just LeqProof <- testLeq n (bv_width v) = do
       return (bvTrunc n v)
-  | otherwise                               = fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
+  | otherwise =
+    fail $ "Widths isn't >=: " ++ show (bv_width v) ++ " and " ++ show n
 
 newtype SemanticsOp
       = SemanticsOp { _unSemanticsOp :: forall m. Semantics m
@@ -224,22 +234,27 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
     mk s f = (s, SemanticsOp $ \ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
 
     instrs :: [(String, SemanticsOp)]
-    instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) ->
-                                       do SomeBV l <- getSomeBVLocation loc
-                                          -- ensure that the location is at most 64 bits
-                                          Just LeqProof <- return $ testLeq (loc_width l) n64
-                                          v <- getBVAddress ar
-                                          exec_lea l (bvTrunc (loc_width l) v)
+    instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) -> do
+                 SomeBV l <- getSomeBVLocation loc
+                 -- ensure that the location is at most 64 bits
+                 Just LeqProof <- return $ testLeq (loc_width l) n64
+                 v <- getBVAddress ar
+                 exec_lea l (bvTrunc (loc_width l) v)
               , mk "call"   $ maybe_ip_relative really_exec_call
-              , mk "imul"   $ \arg@(_, vs) -> case vs of
-                                            [_]              -> unopV exec_imul1 arg
-                                            [_, _]           -> binop (\l v' -> do { v <- get l; exec_imul2_3 l v v' }) arg
-                                            [loc, val, val'] -> do SomeBV l <- getSomeBVLocation loc
-                                                                   v  <- getSomeBVValue val  >>= checkSomeBV bv_width (loc_width l)
-                                                                   SomeBV v' <- getSomeBVValue val'
-                                                                   Just LeqProof <- return $ testLeq (bv_width v') (bv_width v)
-                                                                   exec_imul2_3 l v v'
-                                            _                 -> fail "Impossible number of argument in imul"
+              , mk "imul"   $ \arg@(_, vs) ->
+                 case vs of
+                   [_] ->
+                     unopV exec_imul1 arg
+                   [_, _] ->
+                     binop (\l v' -> do { v <- get l; exec_imul2_3 l v v' }) arg
+                   [loc, val, val'] -> do
+                     SomeBV l <- getSomeBVLocation loc
+                     v  <- getSomeBVValue val  >>= checkSomeBV bv_width (loc_width l)
+                     SomeBV v' <- getSomeBVValue val'
+                     Just LeqProof <- return $ testLeq (bv_width v') (bv_width v)
+                     exec_imul2_3 l v v'
+                   _ ->
+                     fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
               , mk "cqo"    $ \_ -> exec_cqo
               , mk "movsx"  $ geBinop exec_movsx_d
@@ -250,11 +265,11 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
                   exec_xchg l l'
 
-              , mk "ret"    $ \(_, vs) -> case vs of
-                                            []              -> exec_ret Nothing
-                                            [F.WordImm imm] -> exec_ret (Just imm)
-                                            _               -> error "Unexpected number of args to ret"
-
+              , mk "ret"    $ \(_, vs) ->
+                  case vs of
+                    []              -> exec_ret Nothing
+                    [F.WordImm imm] -> exec_ret (Just imm)
+                    _               -> error "Unexpected number of args to ret"
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
 
               , mk "movs"  $ mkBinopPfxLL
@@ -319,10 +334,11 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "cwde"    $ const exec_cwde
               , mk "cdqe"    $ const exec_cdqe
               , mk "clc"     $ const exec_clc
-              , mk "cld"     $ const exec_cld
+              , mk "cld"     $ \_ -> exec_cld
               , mk "cmp"     $ binop exec_cmp
               , mk "dec"     $ unop exec_dec
               , mk "div"     $ unopV exec_div
+              , mk "hlt"     $ \_ -> exec_hlt
               , mk "idiv"    $ unopV exec_idiv
               , mk "inc"     $ unop exec_inc
               , mk "leave"   $ const exec_leave
@@ -423,9 +439,12 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "fsubr"   $ fpUnopOrRegBinop exec_fsubr
               , mk "fsubrp"  $ fpUnopOrRegBinop exec_fsubrp
              ] ++ mkConditionals "cmov" (\f -> binop (exec_cmovcc f))
-               ++ mkConditionals "j"    (\f -> mkUnop $ \v -> getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= exec_jcc f)
-               ++ mkConditionals "set"  (\f -> mkUnop $ \v -> getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f)
-
+               ++ mkConditionals "j"    (\f ->
+                    mkUnop $ \v ->
+                      getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= exec_jcc f)
+               ++ mkConditionals "set"  (\f ->
+                    mkUnop $ \v ->
+                      getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f)
 
 -- Helpers
 x87fir :: FloatInfoRepr X86_80Float
@@ -560,8 +579,10 @@ mkUnop f (_, vs) = case vs of
                      _     -> fail $ "expecting 1 arguments, got " ++ show (length vs)
 
 mkBinopLV ::  Semantics m
-        => (forall n n'. (IsLocationBV m n, 1 <= n') => MLocation m (BVType n) -> Value m (BVType n') -> m a)
-        -> (F.LockPrefix, [F.Value]) -> m a
+        => (forall n n'. (IsLocationBV m n, 1 <= n')
+            => MLocation m (BVType n) -> Value m (BVType n') -> m a)
+        -> (F.LockPrefix, [F.Value])
+        -> m a
 mkBinopLV f = mkBinop $ \loc val -> do
   SomeBV l <- getSomeBVLocation loc
   SomeBV v <- getSomeBVValue val
@@ -580,7 +601,8 @@ mkBinopPfxLL f = mkBinopPfx $ \pfx loc loc' -> do
 geBinop :: FullSemantics m
         => (forall n n'. (IsLocationBV m n, 1 <= n', n' <= n)
                        => MLocation m (BVType n) -> Value m (BVType n') -> m ())
-        -> (F.LockPrefix, [F.Value]) -> m ()
+        -> (F.LockPrefix, [F.Value])
+        -> m ()
 geBinop f = mkBinopLV $ \l v -> do
               Just LeqProof <- return $ testLeq (bv_width v) (loc_width l)
               f l v
@@ -596,16 +618,20 @@ truncateKnownBinop f = mkBinop $ \loc val -> do
   v <- truncateBVValue knownNat =<< getSomeBVValue val
   f l v
 
-knownBinop :: (KnownNat n, KnownNat n', FullSemantics m) => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
-              -> (F.LockPrefix, [F.Value]) -> m ()
-knownBinop f = mkBinop $ \loc val -> do l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
-                                        v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
-                                        f l v
+knownBinop :: (KnownNat n, KnownNat n', FullSemantics m)
+           => (MLocation m (BVType n) -> Value m (BVType n') -> m ())
+           -> (F.LockPrefix, [F.Value])
+           -> m ()
+knownBinop f = mkBinop $ \loc val -> do
+  l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
+  v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
+  f l v
 
 knownUnop :: (KnownNat n, FullSemantics m) => (MLocation m (BVType n) -> m ())
              -> (F.LockPrefix, [F.Value]) -> m ()
-knownUnop f = mkUnop $ \loc -> do l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
-                                  f l
+knownUnop f = mkUnop $ \loc -> do
+  l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
+  f l
 
 unopV :: FullSemantics m => (forall n. IsLocationBV m n => Value m (BVType n) -> m ())
          -> (F.LockPrefix, [F.Value]) -> m ()
@@ -638,8 +664,11 @@ ternop f = mkTernop $ \loc val1 val2 -> do
   Just LeqProof <- return $ testLeq (bv_width v2) (bv_width v1)
   f l v1 v2
 
-fpUnopV :: forall m. Semantics m => (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> m ())
-           -> (F.LockPrefix, [F.Value]) -> m ()
+fpUnopV :: forall m
+        . Semantics m
+        => (forall flt. FloatInfoRepr flt -> Value m (FloatType flt) -> m ())
+        -> (F.LockPrefix, [F.Value])
+        -> m ()
 fpUnopV f (_, vs)
   | [F.FPMem32 ar]     <- vs = go SingleFloatRepr ar
   | [F.FPMem64 ar]     <- vs = go DoubleFloatRepr ar
@@ -666,9 +695,15 @@ fpUnop f (_, vs)
     go sz ar = do l <- mkFPAddr sz <$> getBVAddress ar
                   f sz l
 
-fpUnopOrRegBinop :: forall m. Semantics m =>
-                    (forall flt_d flt_s. FloatInfoRepr flt_d -> MLocation m (FloatType flt_d) -> FloatInfoRepr flt_s -> Value m (FloatType flt_s) -> m ())
-                    -> (F.LockPrefix, [F.Value]) -> m ()
+fpUnopOrRegBinop :: forall m. Semantics m
+                 => (forall flt_d flt_s
+                     . FloatInfoRepr flt_d
+                     -> MLocation m (FloatType flt_d)
+                     -> FloatInfoRepr flt_s
+                     -> Value m (FloatType flt_s)
+                     -> m ())
+                    -> (F.LockPrefix, [F.Value])
+                 -> m ()
 fpUnopOrRegBinop f args@(_, vs)
   | length vs == 1     = fpUnopV (f x87fir (X87StackRegister 0)) args
   | otherwise          = knownBinop (\r r' -> f x87fir r x87fir r') args

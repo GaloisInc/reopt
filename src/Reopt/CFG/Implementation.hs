@@ -23,8 +23,8 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE KindSignatures #-} -- MaybeF
-
+{-# LANGUAGE KindSignatures #-}
+{-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.Implementation
        ( -- Threaded global state
          GlobalGenState
@@ -721,7 +721,7 @@ getLoc l0 =
          | r == N.gs -> readLoc' GS
          -- Otherwise registers are 0.
          | otherwise ->
-             fail $ "On x86-64 registers other than fs and gs may not be set."
+           fail $ "On x86-64 registers other than fs and gs may not be read."
        N.X87PC -> readLoc' X87_PC
        N.X87RC -> readLoc' X87_RC
        _ -> modState $
@@ -900,13 +900,17 @@ instance S.Semantics X86Generator where
       -- Return early
       Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
                 & blockState .~ NothingF
-  
+
   primitive S.CPUID = error "CPUID"
   primitive S.RDTSC = error "RDTSC"
   primitive S.XGetBV = error "XGetBV"
 
-  getSegmentBase _seg =
-    error "Reopt.Semantics.Implementation.getSegmentBase: unimplemented!"
+  getSegmentBase seg =
+    case seg of
+      Flexdis.FS -> ValueExpr . AssignedValue <$> addAssignment ReadFSBase
+      Flexdis.GS -> ValueExpr . AssignedValue <$> addAssignment ReadGSBase
+      _ ->
+        error $ "Reopt.CFG.Implementation.getSegmentBase " ++ show seg ++ ": unimplemented!"
 
   bvQuot       = bvBinOp BVQuot
   bvSignedQuot = bvBinOp BVSignedQuot

@@ -39,7 +39,7 @@ type FunctionArgs = Map CodeAddr (Set (Some N.RegisterName), Set (Some N.Registe
 data RegisterUseState = RUS {
   -- | Holds the set of registers that we need.  This is the final
   -- output of the algorithm, along with the _blockRegUses below.
-  _assignmentUses     :: !(Set (Some Assignment))  
+  _assignmentUses     :: !(Set (Some Assignment))
   -- | Holds state about the set of registers that a block uses
   -- (required by this block or a successor).
   , _blockRegUses :: !(Map BlockLabel (Set (Some N.RegisterName)))
@@ -54,7 +54,7 @@ data RegisterUseState = RUS {
   -- | A cache of the registers and their deps.  The key is not included
   -- in the set of deps (but probably should be).
   , _assignmentCache :: !AssignmentCache
-  -- | The set of blocks we need to consider.    
+  -- | The set of blocks we need to consider.
   , _blockFrontier  :: !(Set BlockLabel)
   -- | Function arguments derived from FunctionArgs
   , functionArgs    :: !FunctionArgs
@@ -97,7 +97,7 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 -- FIXME: move
 
 -- Unwraps all Apps etc, might visit an app twice (Add x x, for example)
--- foldValue :: forall m tp. Monoid m 
+-- foldValue :: forall m tp. Monoid m
 --              => (forall n.  NatRepr n -> Integer -> m)
 --              -> (forall cl. N.RegisterName cl -> m)
 --              -> (forall tp. Assignment tp -> m -> m)
@@ -107,7 +107,7 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 --     go :: forall tp'. Value tp' -> m
 --     go v = case v of
 --              BVValue sz i -> litf sz i
---              Initial r    -> initf r 
+--              Initial r    -> initf r
 --              AssignedValue asgn@(Assignment _ rhs) ->
 --                assignf asgn (goAssignRHS rhs)
 
@@ -138,21 +138,21 @@ foldValueCached :: forall m tp. (Monoid m)
                    -> Value tp -> State (Map (Some Assignment) m) m
 foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
   where
-    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m 
+    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
-        Initial r    -> return $ initf r 
+        Initial r    -> return $ initf r
         AssignedValue asgn@(Assignment _ rhs) ->
           do m_v <- use (at (Some asgn))
              case m_v of
                Just v' -> return $ assignf asgn v'
-               Nothing -> 
+               Nothing ->
                   do rhs_v <- goAssignRHS rhs
                      at (Some asgn) .= Just rhs_v
                      return (assignf asgn rhs_v)
 
-    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m 
+    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
@@ -160,6 +160,8 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
         Read loc
          | MemLoc addr _ <- loc -> go addr
          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
+        ReadFSBase -> mempty
+        ReadGSBase -> mempty
         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
 
 -- ----------------------------------------------------------------------------------------
@@ -172,7 +174,7 @@ type RegisterUseM a = State RegisterUseState a
 
 -- | This registers a block in the first phase (block discovery).
 addEdge :: BlockLabel -> BlockLabel -> RegisterUseM ()
-addEdge source dest = 
+addEdge source dest =
   do -- record the edge
      debugM DRegisterUse ("Adding edge " ++ show source ++ " -> " ++ show dest)
      blockPreds    %= Map.insertWith mappend dest [source]
@@ -204,9 +206,9 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 registerUse :: FunctionArgs -> InterpState -> CodeAddr ->
                (Set (Some Assignment)
                , Map BlockLabel (Set (Some N.RegisterName))
-               , Map BlockLabel (Set (Some N.RegisterName))                                            
+               , Map BlockLabel (Set (Some N.RegisterName))
                , Map BlockLabel [BlockLabel])
-registerUse fArgs ist addr = 
+registerUse fArgs ist addr =
   flip evalState (initRegisterUseState fArgs) $ do
     -- Run the first phase (block summarization)
     summarizeIter ist Set.empty (Just lbl0)
@@ -229,8 +231,6 @@ calculateFixpoint new
   | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =      
       -- propagate backwards any new registers in the predecessors
       do preds <- use (blockPreds . ix currLbl)
-         bru <- use blockRegUses
-         debugM DRegisterUse (show currLbl ++ " adding " ++ show newRegs ++ " to " ++ show preds)
          nexts <- filter (not . Set.null . snd) <$> mapM (doOne newRegs) preds
          calculateFixpoint (Map.unionWith Set.union rest (Map.fromList nexts))
   | otherwise = return ()
@@ -269,10 +269,10 @@ summarizeIter ist seen (Just lbl)
 
 lookupFunctionArgs :: Either CodeAddr (Value (BVType 64))
                    -> RegisterUseM (Set (Some N.RegisterName), Set (Some N.RegisterName))
-lookupFunctionArgs fn = 
+lookupFunctionArgs fn =
   case fn of
     Right _dynaddr -> return nothingKnown
-    Left faddr -> do 
+    Left faddr -> do
       fArgs <- gets (Map.lookup faddr . functionArgs)
       case fArgs of
         Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
@@ -284,11 +284,11 @@ lookupFunctionArgs fn =
                    , Set.fromList x86ResultRegisters)
 
 
--- | This function figures out what the block requires 
+-- | This function figures out what the block requires
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: InterpState 
+summarizeBlock :: InterpState
                   -> BlockLabel
                   -> RegisterUseM ()
 summarizeBlock interp_state root_label = go root_label
@@ -315,7 +315,7 @@ summarizeBlock interp_state root_label = go root_label
           addRegisterUses :: X86State Value
                              -> [Some N.RegisterName]
                              -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
-          addRegisterUses s rs = do 
+          addRegisterUses s rs = do
              vs <- mapM (\(Some r) -> (,) (Some r) <$> valueUses (s ^. register r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
@@ -326,23 +326,23 @@ summarizeBlock interp_state root_label = go root_label
           go x
           go y
 
-        Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do 
+        Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
           traverse_ goStmt stmts'
-          
+
           (args, rets) <- lookupFunctionArgs fn
-          
+
           demandRegisters proc_state [Some N.rip]
           demandRegisters proc_state args
-                
+
           case m_ret_addr of
             Nothing       -> return ()
             Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
-                
+
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
           -- Ensure that result registers are defined, but do not have any deps.
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) rets
 
-        Just (ParsedJump proc_state tgt_addr) -> do 
+        Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)
             addRegisterUses proc_state x86StateRegisters
             addEdge lbl (mkRootBlockLabel tgt_addr)
@@ -362,5 +362,3 @@ summarizeBlock interp_state root_label = go root_label
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
 
         Nothing -> return () -- ???
-
-

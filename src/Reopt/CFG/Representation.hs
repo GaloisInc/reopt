@@ -161,7 +161,10 @@ data StmtLoc a tp where
   MemLoc     :: !a -> TypeRepr tp -> StmtLoc a tp
   ControlLoc :: !(N.RegisterName 'N.Control) -> StmtLoc a (BVType 64)
   DebugLoc   :: !(N.RegisterName 'N.Debug)   -> StmtLoc a (BVType 64)
+
+  -- | This refers to the selector of the 'FS' register.
   FS :: StmtLoc a (BVType 16)
+  -- | This refers to the selector of the 'GS' register.
   GS :: StmtLoc a (BVType 16)
 
   -- X87 precision control field.  Values are:
@@ -308,14 +311,25 @@ data AssignRhs tp where
           -> AssignRhs tp
 
   -- An expression with an undefined value.
-  SetUndefined :: !(NatRepr n) -- Width of undefined value.
-               -> AssignRhs (BVType n)
+  SetUndefined :: (tp ~ BVType n)
+               => !(NatRepr n) -- Width of undefined value.
+               -> AssignRhs tp
 
+  -- Read vlaue at given location.
   Read :: !(StmtLoc (Value (BVType 64)) tp)
        -> AssignRhs tp
 
+  -- Read the 'FS' base address
+  ReadFSBase :: (tp ~ BVType 64)
+             => AssignRhs tp
+
+  -- Read the 'GS' base address
+  ReadGSBase :: (tp ~ BVType 64)
+             => AssignRhs tp
+
   -- Compares to memory regions
-  MemCmp :: !Integer
+  MemCmp :: (tp ~ BVType 64)
+         => !Integer
          -- ^ Number of bytes per value.
          -> !(BVValue 64)
          -- ^ Number of values to compare
@@ -325,7 +339,7 @@ data AssignRhs tp where
          -- ^ Pointer to second buffer.
          -> !(BVValue 1)
          -- ^ Direction flag, False means increasing
-         -> AssignRhs (BVType 64)
+         -> AssignRhs tp
 
 ------------------------------------------------------------------------
 -- Assignment
@@ -357,12 +371,15 @@ instance Pretty (Assignment tp) where
 
 ppAssignRhs :: Applicative m
             => (forall u . Value u -> m Doc)
+               -- ^ Function for pretty printing vlaue.
             -> AssignRhs tp
             -> m Doc
 ppAssignRhs pp (EvalApp a) = ppAppA pp a
 ppAssignRhs _  (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
 ppAssignRhs pp (Read (MemLoc a _)) = (\d -> text "*" PP.<> d) <$> pp a
 ppAssignRhs _  (Read loc) = pure $ pretty loc
+ppAssignRhs _  ReadFSBase = pure $ text "fs.base"
+ppAssignRhs _  ReadGSBase = pure $ text "gs.base"
 ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
   where args = [pure (pretty sz), pp cnt, pp src, pp dest, pp rev]
 
@@ -376,6 +393,8 @@ assignRhsType rhs =
     EvalApp a -> appType a
     SetUndefined w -> BVTypeRepr w
     Read loc  -> stmtLocType loc
+    ReadFSBase -> knownType
+    ReadGSBase -> knownType
     MemCmp _sz _cnt _src _dest _rev -> knownType
 
 ------------------------------------------------------------------------

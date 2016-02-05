@@ -6,6 +6,7 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -w #-}
 module Main (main) where
 
 import           Control.Applicative
@@ -64,6 +65,7 @@ import           Lang.Crucible.Solver.PartExpr
 import           Lang.Crucible.Solver.SimpleBackend
 import           Lang.Crucible.Solver.SimpleBackend.CVC4
 import           Lang.Crucible.Solver.SimpleBuilder
+import           Lang.Crucible.Solver.Symbol
 import           Lang.Crucible.Utils.MonadST
 
 import           Reopt
@@ -411,8 +413,8 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
     flags  <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
-    pc     <- I.freshConstant sym "" (C.BaseBVRepr n64)
-    heap   <- I.freshConstant sym "" C.baseTypeRepr
+    pc     <- I.freshConstant sym emptySymbol (C.BaseBVRepr n64)
+    heap   <- I.freshConstant sym emptySymbol C.baseTypeRepr
     let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
         struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
         initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
@@ -461,7 +463,7 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
   where
     initWordMap sym nrKey nrVal acc i = do
       idx <- I.bvLit sym nrKey i
-      val <- I.freshConstant sym "" (C.BaseBVRepr nrVal)
+      val <- I.freshConstant sym emptySymbol (C.BaseBVRepr nrVal)
       I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val acc
 
     compareWordMapIdx sym nrKey nrVal (wm1,wm2) acc i = do
@@ -529,7 +531,7 @@ mkInitialGPRs map sym nrKey nrVal range = do
   regs1Empty <- I.emptyWordMap sym nrKey (C.BaseBVRepr nrVal)
   (regs1, invMap) <- foldM (\(regs, invMap) entry -> do
     idx <- I.bvLit sym nrKey entry
-    val <- I.freshConstant sym "" (C.BaseBVRepr nrVal)
+    val <- I.freshConstant sym emptySymbol (C.BaseBVRepr nrVal)
     regs' <- I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val regs
     return (regs', case M.lookup entry map of
                     Just inv -> M.insert inv val invMap
@@ -539,7 +541,7 @@ mkInitialGPRs map sym nrKey nrVal range = do
     idx <- I.bvLit sym nrKey entry
     val <- case M.lookup entry invMap of
             Just val -> return val
-            Nothing -> I.freshConstant sym "" (C.BaseBVRepr nrVal)
+            Nothing -> I.freshConstant sym emptySymbol (C.BaseBVRepr nrVal)
     I.insertWordMap sym nrKey (C.BaseBVRepr nrVal) idx val regs) regs2Empty range
   return (regs1, regs2)
 

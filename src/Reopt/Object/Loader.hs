@@ -17,7 +17,7 @@ import Data.Monoid (mappend)
 
 import Reopt.Object.Memory
 
-readElf :: FilePath -> IO SomeElf
+readElf :: FilePath -> IO (SomeElf Elf)
 readElf path = do
   bs <- BS.readFile path
   case parseElf bs of

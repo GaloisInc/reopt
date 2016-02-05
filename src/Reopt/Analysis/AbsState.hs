@@ -6,12 +6,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Werror #-}
 module Reopt.Analysis.AbsState
   ( AbsBlockState
   , mkAbsBlockState
   , absX86State
   , absBlockDiff
---  , shiftSpecificOffset
   , setAbsIP
   , absStackHasReturnAddr
   , AbsBlockStack
@@ -42,7 +42,7 @@ module Reopt.Analysis.AbsState
   , addAssignment
   , addMemWrite
   , transferValue
-  , transferValue'    
+  , transferValue'
   , transferRHS
   , abstractULt
   , abstractULeq
@@ -1058,6 +1058,10 @@ transferRHS r rhs =
          v
     Read _ -> TopV
     -- We know only that it will return up to (and including(?)) cnt
+    ReadFSBase ->
+      TopV
+    ReadGSBase ->
+      TopV
     MemCmp _sz cnt _src _dest _rev
       | Just upper <- hasMaximum knownType (transferValue r cnt)
         -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1

@@ -404,6 +404,13 @@ exec_div, exec_idiv :: forall m n
 exec_div = exec_div_helper False
 exec_idiv = exec_div_helper True
 
+--  | Execute the halt instruction
+--
+-- This code assumes that we are not running in kernel mode.
+exec_hlt :: Semantics m => m ()
+exec_hlt = do
+  exception false true (GeneralProtectionException 0)
+
 exec_inc :: IsLocationBV m n => MLocation m (BVType n) -> m ()
 exec_inc dst = do
   -- Get current value stored in destination.
