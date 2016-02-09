@@ -11,7 +11,7 @@ module Reopt.CFG.RegisterUse
   ) where
 
 import           Control.Lens
-import           Control.Monad.State.Strict
+import           Control.Monad.State -- .Strict
 import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -78,7 +78,7 @@ blockRegUses :: Simple Lens RegisterUseState (Map BlockLabel (Set (Some N.Regist
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
 blockRegProvides :: Simple Lens RegisterUseState (Map BlockLabel (Set (Some N.RegisterName)))
-blockRegProvides = lens _blockRegUses (\s v -> s { _blockRegUses = v })
+blockRegProvides = lens _blockRegProvides (\s v -> s { _blockRegProvides = v })
 
 blockInitDeps :: Simple Lens RegisterUseState (Map BlockLabel (Map (Some N.RegisterName) RegDeps))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
@@ -176,6 +176,7 @@ type RegisterUseM a = State RegisterUseState a
 addEdge :: BlockLabel -> BlockLabel -> RegisterUseM ()
 addEdge source dest =
   do -- record the edge
+     debugM DRegisterUse ("Adding edge " ++ show source ++ " -> " ++ show dest)
      blockPreds    %= Map.insertWith mappend dest [source]
      blockFrontier %= Set.insert dest
 
@@ -213,6 +214,8 @@ registerUse fArgs ist addr =
     summarizeIter ist Set.empty (Just lbl0)
     -- propagate back uses
     new <- use blockRegUses
+    -- debugM DRegisterUse ("0x40018d ==> " ++ show (Map.lookup (GeneratedBlock 0x40018d 0) new))
+    -- let new' = Map.singleton (GeneratedBlock 0x40018d 0) (Set.fromList (Some <$> [N.rax, N.rdx]))
     calculateFixpoint new
     (,,,) <$> use assignmentUses
           <*> use blockRegUses
@@ -225,7 +228,7 @@ registerUse fArgs ist addr =
 -- the right behavior here.
 calculateFixpoint :: Map BlockLabel (Set (Some N.RegisterName)) -> RegisterUseM ()
 calculateFixpoint new
-  | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =
+  | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =      
       -- propagate backwards any new registers in the predecessors
       do preds <- use (blockPreds . ix currLbl)
          nexts <- filter (not . Set.null . snd) <$> mapM (doOne newRegs) preds
@@ -237,6 +240,8 @@ calculateFixpoint new
     doOne newRegs predLbl = do
       depMap   <- use (blockInitDeps . ix predLbl)
 
+      debugM DRegisterUse (show predLbl ++ " -> " ++ show newRegs)
+      
       -- record that predLbl provides newRegs
       blockRegProvides %= Map.insertWith Set.union predLbl newRegs
 
@@ -245,7 +250,8 @@ calculateFixpoint new
 
       assignmentUses %= Set.union assigns
       -- update uses, returning value before this iteration
-      seenRegs <- blockRegUses  . ix lbl' <<%= Set.union regs
+      seenRegs <- uses blockRegUses (maybe Set.empty id . Map.lookup lbl')
+      blockRegUses  %= Map.insertWith Set.union lbl' regs
 
       return (lbl', regs `Set.difference` seenRegs)
 
@@ -289,6 +295,7 @@ summarizeBlock interp_state root_label = go root_label
   where
     go :: BlockLabel -> RegisterUseM ()
     go lbl = do
+      debugM DRegisterUse ("Summarizing " ++ show lbl)
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
       let goStmt (Write (MemLoc addr _tp) v)
@@ -310,7 +317,7 @@ summarizeBlock interp_state root_label = go root_label
                              -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
           addRegisterUses s rs = do
              vs <- mapM (\(Some r) -> (,) (Some r) <$> valueUses (s ^. register r)) rs
-             blockInitDeps %= Map.insertWith Map.union lbl (Map.fromList vs)
+             blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
       case m_pterm of
         Just (ParsedBranch c x y) -> do

@@ -55,9 +55,7 @@ module Reopt.Semantics.Monad
   , loc_type
   , loc_width
   , ppLocation
-
   , x87reg_mmx
-
   , fullRegister
   , reg_low8
   , reg_high8
