@@ -150,6 +150,8 @@ data ParsedTermStmt
 data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
+                   -- | The set of symbol names (not necessarily complete)
+                 , symbolNames :: Map CodeAddr String
                    -- | State used for generating blocks.
                  , _genState :: !GlobalGenState
                    -- | Intervals maps code addresses to blocks at address
@@ -179,9 +181,10 @@ data InterpState
                  }
 
 -- | Empty interpreter state.
-emptyInterpState :: Memory Word64 -> InterpState
-emptyInterpState mem = InterpState
+emptyInterpState :: Memory Word64 -> Map CodeAddr String -> InterpState
+emptyInterpState mem symbols = InterpState
       { memory        = mem
+      , symbolNames   = symbols
       , _genState     = emptyGlobalGenState
       , _blocks       = Map.empty
       , _functionEntries = Set.empty

@@ -462,16 +462,8 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
-mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
-mkFinalCFG mem e = cfgFromAddrs mem (elfEntry e:sym_addrs)
-        -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  where sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
-                                   , steType ste == STT_FUNC
-                                   , isCodeAddr mem (steValue ste)
-                                   ]
-
 mkFinalCFGWithSyms :: Memory Word64 -> Elf Word64 -> (FinalCFG, Map CodeAddr String)
-mkFinalCFGWithSyms mem e = (cfgFromAddrs mem (elfEntry e:sym_addrs), sym_map)
+mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map (elfEntry e:sym_addrs), sym_map)
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   where sym_assocs = [ (steValue ste, steName ste)
                      | ste <- concat (parseSymbolTables e)
@@ -481,7 +473,8 @@ mkFinalCFGWithSyms mem e = (cfgFromAddrs mem (elfEntry e:sym_addrs), sym_map)
         sym_addrs = map fst sym_assocs
         sym_map   = Map.fromList sym_assocs
 
-
+mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
+mkFinalCFG mem e = fst (mkFinalCFGWithSyms mem e)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
