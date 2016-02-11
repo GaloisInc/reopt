@@ -89,6 +89,8 @@ executable reopt
     flexdis86,
     lens,
     mtl,
+    directory,
+    filepath,
     parameterized-utils >= 0.1.6,
     reopt,
     llvm-pretty

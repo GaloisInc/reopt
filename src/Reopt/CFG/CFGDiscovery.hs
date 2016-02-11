@@ -959,7 +959,7 @@ mkFinalCFG s =
       -- debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
       -- debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       -- debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      debug DFunctionArgs (ppFunctionArgs (Map.toList fArgs)) $
+      -- debug DFunctionArgs (ppFunctionArgs (Map.toList fArgs)) $
       -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState

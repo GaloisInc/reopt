@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
@@ -119,7 +120,7 @@ data FnValue (tp :: Type) where
   FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
   -- Value from a phi node
   FnPhiValue :: !(FnPhiVar tp) -> FnValue tp
-  -- A value returned by a function call (rax/xmm0)
+  -- A value returned by a function call (rax/rdx/xmm0)
   FnReturn :: FnReturnVar tp -> FnValue tp
   -- The entry pointer to a function.
   FnFunctionEntryValue :: !Word64 -> FnValue (BVType 64)
@@ -170,7 +171,9 @@ fnValueType v =
 
 data Function = Function { fnAddr :: CodeAddr
                          , fnIntArgTypes :: [Some TypeRepr]
-                         , fnFloatArgTypes :: [Some TypeRepr]                           
+                         , fnFloatArgTypes :: [Some TypeRepr]
+                         , fnIntRetTypes :: [Some TypeRepr]
+                         , fnFloatRetTypes :: [Some TypeRepr]                           
                          , fnBlocks :: [FnBlock]
                          }
 
@@ -239,13 +242,11 @@ instance Pretty FnStmt where
 
 data FnTermStmt
    = FnJump !BlockLabel
-   | FnRet !(FnValue (BVType 64)) !(FnValue (BVType 128))
+   | FnRet ![Some FnValue] 
    | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
      -- ^ A branch to a block within the function, along with the return vars.
-     -- FIXME: need to add rdx and extra stack arg.
-   | FnCall !(FnValue (BVType 64)) [Some FnValue]
-            !(FnReturnVar (BVType 64))
-            !(FnReturnVar XMMType)
+     -- FIXME: need to add extra stack arg.
+   | FnCall !(FnValue (BVType 64)) ![Some FnValue] ![Some FnReturnVar]  
             !(Maybe BlockLabel)
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
@@ -256,10 +257,11 @@ instance Pretty FnTermStmt where
     case s of
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnJump lbl -> text "jump" <+> pretty lbl
-      FnRet intr floatr -> text "return" <+> pretty intr <+> pretty floatr
-      FnCall f args intr floatr lbl ->
+      FnRet rets -> text "return" <+> parens (commas $ viewSome pretty <$> rets)
+      FnCall f args rets lbl ->
         let arg_docs = viewSome pretty <$> args
-         in parens (pretty intr <> comma <+> pretty floatr)
+            ret_docs = viewSome pretty <$> rets
+         in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
       FnTermStmtUndefined -> text "undefined term"

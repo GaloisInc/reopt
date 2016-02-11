@@ -32,7 +32,8 @@ import           Reopt.Utils.Debug
 type RegDeps = (Set (Some Assignment), Set (Some N.RegisterName))
 type AssignmentCache = Map (Some Assignment) RegDeps
 
-type FunctionArgs = Map CodeAddr (Set (Some N.RegisterName), Set (Some N.RegisterName))
+type FunctionArgs = Map CodeAddr ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
+                                 , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
@@ -58,10 +59,12 @@ data RegisterUseState = RUS {
   , _blockFrontier  :: !(Set BlockLabel)
   -- | Function arguments derived from FunctionArgs
   , functionArgs    :: !FunctionArgs
+  , currentFunctionType :: !( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
+                            , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
   }
 
-initRegisterUseState :: FunctionArgs -> RegisterUseState
-initRegisterUseState fArgs =
+initRegisterUseState :: FunctionArgs -> CodeAddr -> RegisterUseState
+initRegisterUseState fArgs fn =
   RUS { _assignmentUses  = Set.empty
       , _blockRegUses    = Map.empty
       , _blockRegProvides = Map.empty
@@ -69,7 +72,10 @@ initRegisterUseState fArgs =
       , _blockPreds      = Map.empty
       , _assignmentCache = Map.empty
       , _blockFrontier   = Set.empty
-      , functionArgs     = fArgs}
+      , functionArgs     = fArgs
+      , currentFunctionType = cft }
+  where
+    cft = fArgs ^. ix fn 
 
 assignmentUses :: Simple Lens RegisterUseState (Set (Some Assignment))
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
@@ -209,7 +215,7 @@ registerUse :: FunctionArgs -> InterpState -> CodeAddr ->
                , Map BlockLabel (Set (Some N.RegisterName))
                , Map BlockLabel [BlockLabel])
 registerUse fArgs ist addr =
-  flip evalState (initRegisterUseState fArgs) $ do
+  flip evalState (initRegisterUseState fArgs addr) $ do
     -- Run the first phase (block summarization)
     summarizeIter ist Set.empty (Just lbl0)
     -- propagate back uses
@@ -268,7 +274,8 @@ summarizeIter ist seen (Just lbl)
                    summarizeIter ist (Set.insert lbl seen) lbl'
 
 lookupFunctionArgs :: Either CodeAddr (Value (BVType 64))
-                   -> RegisterUseM (Set (Some N.RegisterName), Set (Some N.RegisterName))
+                   -> RegisterUseM  ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
+                                    , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
 lookupFunctionArgs fn =
   case fn of
     Right _dynaddr -> return nothingKnown
@@ -279,9 +286,8 @@ lookupFunctionArgs fn =
                       return nothingKnown
         Just v  -> return v
   where
-    nothingKnown = (Set.fromList (( Some <$> x86ArgumentRegisters) `mappend`
-                                  ( Some <$> x86FloatArgumentRegisters ))
-                   , Set.fromList x86ResultRegisters)
+    nothingKnown = ( ( x86ArgumentRegisters, x86FloatArgumentRegisters )
+                   , ( x86ResultRegisters, x86FloatResultRegisters ))
 
 
 -- | This function figures out what the block requires
@@ -329,18 +335,20 @@ summarizeBlock interp_state root_label = go root_label
         Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
           traverse_ goStmt stmts'
 
-          (args, rets) <- lookupFunctionArgs fn
+          ((gargs, fargs), (grets, frets)) <- lookupFunctionArgs fn
 
           demandRegisters proc_state [Some N.rip]
-          demandRegisters proc_state args
-
+          demandRegisters proc_state (Some <$> gargs)
+          demandRegisters proc_state (Some <$> fargs)
+          
           case m_ret_addr of
             Nothing       -> return ()
             Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
 
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
           -- Ensure that result registers are defined, but do not have any deps.
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) rets
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty))
+                    ((Some <$> grets) ++ (Some <$> frets))
 
         Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)
@@ -349,7 +357,8 @@ summarizeBlock interp_state root_label = go root_label
 
         Just (ParsedReturn proc_state stmts') -> do
             traverse_ goStmt stmts'
-            demandRegisters proc_state x86ResultRegisters
+            (_, (grets, frets)) <- gets currentFunctionType
+            demandRegisters proc_state ((Some <$> grets) ++ (Some <$> frets))
 
         Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
           -- FIXME: clagged from call above
@@ -357,7 +366,9 @@ summarizeBlock interp_state root_label = go root_label
           demandRegisters proc_state (Some <$> argRegs)
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) x86ResultRegisters
+          
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) (Some <$> x86ResultRegisters)
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) (Some <$> x86FloatResultRegisters)
 
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
 

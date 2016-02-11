@@ -36,6 +36,7 @@ module Reopt.Machine.X86State
   , x86ArgumentRegisters
   , x86FloatArgumentRegisters
   , x86ResultRegisters
+  , x86FloatResultRegisters    
   ) where
 
 import           Control.Lens
@@ -140,8 +141,11 @@ x86ArgumentRegisters = [N.rdi, N.rsi, N.rdx, N.rcx, N.r8, N.r9]
 x86FloatArgumentRegisters :: [N.RegisterName 'N.XMM]
 x86FloatArgumentRegisters = map N.XMMReg [0..7]
 
-x86ResultRegisters :: [Some N.RegisterName]
-x86ResultRegisters = [ Some N.rax, Some N.rdx, Some (N.XMMReg 0) ]
+x86ResultRegisters :: [N.RegisterName 'N.GP]
+x86ResultRegisters = [ N.rax, N.rdx ]
+
+x86FloatResultRegisters :: [N.RegisterName 'N.XMM]
+x86FloatResultRegisters = [ (N.XMMReg 0) ]
 
 
 ------------------------------------------------------------------------

@@ -24,24 +24,18 @@ module Reopt.CFG.LLVM (functionToLLVM) where
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
-import           Control.Monad.State
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (fromJust)
-import           Data.Set (Set)
-import qualified Data.Set as Set
 import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
-import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 --------------------------------------------------------------------------------
@@ -130,21 +124,35 @@ functionName addr = L.Symbol $ "F" ++ showHex addr ""
 blockName :: BlockLabel -> L.Ident
 blockName = L.Ident . show 
 
-funReturnType :: L.Type
-funReturnType = L.Struct [ L.PrimType (L.Integer 64)
-                         , L.PrimType (L.FloatType L.Fp128) ]
-
 functionToLLVM :: Function -> LLVM (L.Typed L.Value)
-functionToLLVM f = L.define' L.emptyFunAttrs funReturnType symbol argTypes False go
+functionToLLVM f = do
+  let refs = Map.unions (map findReferencedFunctions (fnBlocks f))
+  itraverse_ (\addr (arg_tys, ret_ty) -> L.declare ret_ty (functionName addr) arg_tys False) refs
+  L.define' L.emptyFunAttrs funReturnType symbol argTypes False go
   where
     argTypes      = map (viewSome typeToLLVMType) (fnIntArgTypes f)
                     ++ map (viewSome typeToLLVMType) (fnFloatArgTypes f)
+
+    funReturnType = makeNonSingletonStructType
+                    $ map (viewSome typeToLLVMType) (fnIntRetTypes f)
+                      ++ map (viewSome typeToLLVMType) (fnFloatRetTypes f)
+                    
     symbol        = functionName (fnAddr f)
     go args =
       let nint = length (fnIntArgTypes f)
           st   = LLVMState { llvmIntArgs   = take nint args
                            , llvmFloatArgs = drop nint args }
       in runReaderT (runToLLVM (mapM_ blockToLLVM (fnBlocks f))) st
+
+findReferencedFunctions :: FnBlock -> Map CodeAddr ([L.Type], L.Type)
+findReferencedFunctions b
+  | FnCall (FnFunctionEntryValue addr) args retvs contlbl <- fbTerm b =
+         -- FIXME: clag from termStmtToLLVM
+      let arg_tys = map (viewSome (typeToLLVMType . fnValueType)) args
+          ret_ty  = makeNonSingletonStructType $ map (viewSome (typeToLLVMType . frReturnType)) retvs
+      in Map.singleton addr (arg_tys, ret_ty)
+         
+  | otherwise = Map.empty
 
 blockToLLVM :: FnBlock -> ToLLVM () -- L.BasicBlock
 blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
@@ -153,7 +161,7 @@ blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
                    termStmtToLLVM (fbTerm b)
   where
     phiToLLVM phi ni l =
-      do l
+      do void l
          void $ liftBBF (L.assign (assignIdToLLVMIdent $ unFnPhiVar phi))
                         (liftBB . L.phi (typeToLLVMType $ fnPhiVarType phi) =<< mapM goLbl (unFnPhiNodeInfo ni))
          return ()
@@ -161,31 +169,68 @@ blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
     goLbl (lbl, node) = do v <- valueToLLVM node
                            return (L.from v (L.Named $ blockName lbl))
 
+makeNonSingletonStruct :: [ L.Typed L.Value ] -> L.Typed L.Value
+makeNonSingletonStruct [v] = v
+makeNonSingletonStruct vs  = L.struct False vs
+
+makeNonSingletonStructType :: [ L.Type ] -> L.Type
+makeNonSingletonStructType []  = L.voidT
+makeNonSingletonStructType [v] = v
+makeNonSingletonStructType vs  = L.Struct vs
+
+makeRet :: [ L.Typed L.Value ] -> ToLLVM ()
+makeRet []  = liftBB $ L.retVoid
+makeRet [v] = liftBB $ L.ret v
+makeRet vs  = do -- clang constructs something like
+                 -- %3 = insertvalue { i64, i64 } undef, i64 %1, 0
+                 -- %4 = insertvalue { i64, i64 } %3, i64 %2, 1
+                 -- ret { i64, i64 } %4
+                 -- which we will duplicate
+                 let retT  = L.Struct (map L.typedType vs)
+                     undef = L.Typed retT L.ValUndef
+                 v <- foldM (\acc (fld, n) -> liftBB $ L.insertValue acc fld n) undef (zip vs [0..])
+                 liftBB $ L.ret v
+
 termStmtToLLVM :: FnTermStmt -> ToLLVM ()
 termStmtToLLVM tm =
   case tm of
      FnJump lbl -> liftBB $ L.jump (blockName lbl)
-     FnRet iret fret -> do
-       iret' <- valueToLLVM iret
-       fret' <- valueToLLVM fret
-       liftBB $ L.ret (L.struct False [iret', fret'])
+     FnRet rets -> do
+       rets' <- mapM (viewSome valueToLLVM) rets
+       makeRet rets'
      FnBranch cond tlbl flbl -> do
        cond' <- valueToLLVM cond
        liftBB $ L.br cond' (blockName tlbl) (blockName flbl)
        
-     FnCall dest args iretv fretv contlbl -> do
-       dest' <- valueToLLVM dest
+     FnCall dest args retvs contlbl -> do
        let arg_tys = map (viewSome (typeToLLVMType . fnValueType)) args
-           fun_ty = L.ptrT (L.FunTy funReturnType arg_tys False)
-       dest_f <- liftBB $ L.bitcast dest' fun_ty 
-       args' <- mapM (viewSome valueToLLVM) args
-       rvar  <- liftBB $ L.call dest_f args'
-       void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId iretv)
-                                (L.extractValue rvar 0)
-       void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId fretv)
-                                (L.extractValue rvar 1)
-       liftBB $ L.jump (blockName (fromJust contlbl)) -- FIXME: hack, will break tailcalls
-     FnTermStmtUndefined -> void $ unimplementedInstr    
+           ret_tys = makeNonSingletonStructType $ map (viewSome (typeToLLVMType . frReturnType)) retvs
+           fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
+           
+       dest_f <- case dest of
+                   FnFunctionEntryValue addr ->
+                     return $ L.Typed fun_ty (L.ValSymbol (functionName addr))
+                          
+                   _ -> do dest' <- valueToLLVM dest
+                           liftBB $ L.inttoptr dest' fun_ty
+                 
+       args'  <- mapM (viewSome valueToLLVM) args
+
+       case length retvs of
+         0  -> void $ liftBB $ L.call_ dest_f args'
+         _  -> do rvar   <- liftBB $ L.call dest_f args'
+                  case retvs of
+                    [Some v] -> void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId v) (return rvar)
+                    _   -> zipWithM_ (\(Some v) i -> liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId v)
+                                                     (L.extractValue rvar i))
+                           retvs [0..]
+         
+       case contlbl of
+         Just lbl -> liftBB $ L.jump (blockName lbl)
+         Nothing  -> do retvs' <- mapM (viewSome (valueToLLVM . FnReturn)) retvs
+                        makeRet retvs'
+         
+     FnTermStmtUndefined -> void $ unimplementedInstr "FnTermStmtUndefined"
 
 stmtToLLVM :: FnStmt -> ToLLVM ()
 stmtToLLVM stmt = do
@@ -249,9 +294,9 @@ stmtToLLVM stmt = do
 assignIdToLLVMIdent :: AssignId -> L.Ident
 assignIdToLLVMIdent aid = L.Ident $ "R" ++ show aid
 
-unimplementedInstr :: ToLLVM (L.Typed L.Value)
-unimplementedInstr = do liftBB $ L.comment "UNIMPLEMENTED"
-                        return (L.Typed L.voidT L.ValUndef)
+unimplementedInstr :: String -> ToLLVM (L.Typed L.Value)
+unimplementedInstr reason = do liftBB $ L.comment ("UNIMPLEMENTED: " ++ reason)
+                               return (L.Typed L.voidT L.ValUndef)
 
 rhsToLLVM :: FnAssignRhs tp -> ToLLVM (L.Typed L.Value)
 rhsToLLVM rhs =
@@ -266,7 +311,9 @@ rhsToLLVM rhs =
      liftBB $ L.load p' align
    FnAlloca v -> do
      v' <- valueToLLVM v
-     liftBB $ L.alloca (L.iT 8) (Just v') Nothing
+     alloc_ptr <- liftBB $ L.alloca (L.iT 8) (Just v') Nothing
+     liftBB $ L.ptrtoint alloc_ptr (L.iT 64)
+     
    --     FS     -> L.call iRead_FS []
    --     GS     -> L.call iRead_GS []
    --     X87_PC -> L.call iRead_X87_PC [] 
@@ -289,7 +336,7 @@ appToLLVM app =
      l' <- valueToLLVM l
      r' <- valueToLLVM r
      liftBB $ L.select b' l' r'
-   MMXExtend _v -> unimplementedInstr
+   MMXExtend _v -> unimplementedInstr "MMXExtend"
    ConcatV sz _sz' low high -> do
      low'  <- liftBB . flip L.zext typ =<< valueToLLVM low
      high' <- liftBB . flip L.zext typ =<< valueToLLVM high
@@ -301,9 +348,9 @@ appToLLVM app =
    Trunc v sz -> liftBB . flip L.trunc (natReprToLLVMType sz) =<< valueToLLVM v
    SExt v sz -> liftBB . flip L.sext (natReprToLLVMType sz) =<< valueToLLVM v
    UExt v sz -> liftBB . flip L.zext (natReprToLLVMType sz) =<< valueToLLVM v
-   AndApp{}     -> unimplementedInstr  
-   OrApp{}      -> unimplementedInstr
-   NotApp{}     -> unimplementedInstr
+   AndApp{}     -> unimplementedInstr "AndApp"
+   OrApp{}      -> unimplementedInstr "OrApp"
+   NotApp{}     -> unimplementedInstr "NotApp"
    BVAdd _sz x y -> binop L.add x y
    BVSub _sz x y -> binop L.sub x y
    BVMul _sz x y -> binop L.mul x y
@@ -347,7 +394,7 @@ appToLLVM app =
    BVEq x y      -> binop (L.icmp L.Ieq) x y
    EvenParity v  -> do v' <- valueToLLVM v
                        liftBB $ L.call iEvenParity [v']
-   ReverseBytes{} -> unimplementedInstr
+   ReverseBytes{} -> unimplementedInstr "ReverseBytes"
    -- FIXME: do something more efficient?
    -- Basically does let (r, over)  = llvm.add.with.overflow(x,y)
    --                    (_, over') = llvm.add.with.overflow(r,c)
@@ -378,11 +425,11 @@ appToLLVM app =
      liftBB $ L.call op [v']
 
    FPAdd frep x y -> fpbinop L.fadd frep x y
-   FPAddRoundedUp _frep _x _y -> unimplementedInstr   
+   FPAddRoundedUp _frep _x _y -> unimplementedInstr "FPAddRoundedUp"   
    FPSub frep x y -> fpbinop L.fsub frep x y
-   FPSubRoundedUp _frep _x _y -> unimplementedInstr
+   FPSubRoundedUp _frep _x _y -> unimplementedInstr "FPSubRoundedUp"
    FPMul frep x y -> fpbinop L.fmul frep x y
-   FPMulRoundedUp _frep _x _y -> unimplementedInstr
+   FPMulRoundedUp _frep _x _y -> unimplementedInstr "FPMulRoundedUp"
    FPDiv frep x y -> fpbinop L.fdiv frep x y
    -- FIXME: do we want ordered or unordered here?  The differ in how
    -- they treat QNaN
@@ -401,7 +448,7 @@ appToLLVM app =
       EQ -> return fp_x
       GT -> liftBB $ L.fptrunc fp_x to_typ
    -- FIXME
-   FPCvtRoundsUp _from_rep _x _to_rep -> unimplementedInstr
+   FPCvtRoundsUp _from_rep _x _to_rep -> unimplementedInstr "FPCvtRoundsUp"
    FPFromBV v frepr -> do
      v' <- valueToLLVM v
      liftBB $ L.sitofp v' (floatReprToLLVMType frepr)
@@ -434,10 +481,10 @@ appToLLVM app =
     fpbinop f frepr x y = do
       x' <- valueToLLVM x
       y' <- valueToLLVM y
-      let typ = floatReprToLLVMType frepr
+      let typ' = floatReprToLLVMType frepr
       liftBB $ do
-        flt_x <- L.bitcast x' typ
-        flt_y <- L.bitcast y' typ
+        flt_x <- L.bitcast x' typ'
+        flt_y <- L.bitcast y' typ'
         f flt_x flt_y
 
     -- unop :: (L.Typed L.Value -> BB (L.Typed L.Value))
@@ -481,7 +528,7 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
 valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
 valueToLLVM val =  
   case val of
-    FnValueUnsupported _ _  -> unimplementedInstr
+    FnValueUnsupported reason _  -> unimplementedInstr $ "FnValueUnsupported: " ++ reason
     -- A value that is actually undefined, like a non-argument register at
     -- the start of a function.
     FnUndefined _ -> mk L.ValUndef
