@@ -7,15 +7,17 @@ module Reopt.Object.Loader
   , memoryForElfSections
   ) where
 
-import Control.Applicative
-import Control.Lens
-import Control.Monad.State
-import Data.Bits
+import           Control.Applicative
+import           Control.Lens
+import           Control.Monad.State
+import           Data.Bits
 import qualified Data.ByteString as BS
-import Data.Elf
-import Data.Monoid (mappend)
+import qualified Data.ByteString.Lazy as L
+import           Data.Elf
+import qualified Data.Foldable as F
+import           Data.Monoid (mappend)
 
-import Reopt.Object.Memory
+import           Reopt.Object.Memory
 
 readElf :: FilePath -> IO (SomeElf Elf)
 readElf path = do
@@ -31,28 +33,40 @@ loadExecutable path = do
     Elf64 e -> Memory64 <$> memoryForElfSegments e
     Elf32 e -> Memory32 <$> memoryForElfSegments e
 
+slice :: Integral w => Range w -> BS.ByteString -> BS.ByteString
+slice (i,c) = BS.take (fromIntegral c) . BS.drop (fromIntegral i)
+
 -- | Load an elf file into memory.  This uses the Elf segments for loading.
 memoryForElfSegments :: (ElfWidth w, Monad m) => Elf w -> m (Memory w)
-memoryForElfSegments e = execStateT (mapM_ insertElfSegment (renderedElfSegments e)) emptyMemory
+memoryForElfSegments e =
+    execStateT (mapM_ (insertElfSegment contents) phdrs) emptyMemory
+  where l = elfLayout e
+        contents = L.toStrict (elfLayoutBytes l)
+        phdrs    = F.toList (allPhdrs l)
 
 -- | Load an elf file into memory.
-insertElfSegment :: (ElfWidth w, MonadState (Memory w) m) => RenderedElfSegment w -> m ()
-insertElfSegment s@(elf_seg, _) = do
-  -- Load PT_LOAD elefSegments
-  case elfSegmentType elf_seg of
+insertElfSegment :: (ElfWidth w, MonadState (Memory w) m)
+                 => BS.ByteString
+                 -> Phdr w
+                 -> m ()
+insertElfSegment contents phdr = do
+  case elfSegmentType (phdrSegment phdr) of
     PT_LOAD -> do
-      insertMemSegment (memSegmentForElfSegment s)
+      insertMemSegment (memSegmentForElfSegment contents phdr)
     PT_DYNAMIC -> do
       fail "Dynamic elf files are not yet supported."
     _ -> return ()
 
 -- | Return a memory segment for elf segment if it loadable.
 memSegmentForElfSegment :: Integral w
-                        => RenderedElfSegment w
+                        => BS.ByteString
+                           -- ^ Complete contents of Elf file.
+                        -> Phdr w
                         -> MemSegment w
-memSegmentForElfSegment s@(seg, dta) = mseg
-  where -- dta = seg^.elfSegmentData
-        sz = fromIntegral $ elfSegmentMemSize seg
+memSegmentForElfSegment contents phdr = mseg
+  where seg = phdrSegment phdr
+        dta = slice (phdrFileRange phdr) contents
+        sz = fromIntegral $ phdrMemSize phdr
         fixedData
           | BS.length dta > sz = BS.take sz dta
           | otherwise = dta `mappend` BS.replicate (sz - BS.length dta) 0
