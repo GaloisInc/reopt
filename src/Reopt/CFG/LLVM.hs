@@ -32,7 +32,6 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
@@ -104,13 +103,13 @@ reoptIntrinsics = [ iEvenParity
 --------------------------------------------------------------------------------
 
 llvmIntrinsics :: [L.Typed L.Value]
-llvmIntrinsics = [ intrinsic ("llvm." ++ op ++ ".with.overflow." ++ show (L.ppType in_typ))
+llvmIntrinsics = [ intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
                    (L.Struct [in_typ, L.iT 1]) [in_typ, in_typ]
-                   | op <- [ "uadd", "sadd", "usub", "ssub" ]
+                   | bop <- [ "uadd", "sadd", "usub", "ssub" ]
                    , in_typ <- map L.iT [8, 16, 32, 64] ]
                  ++
-                 [ intrinsic ("llvm." ++ op ++ "." ++ show (L.ppType typ)) typ [typ, L.iT 1]
-                 | op  <- ["cttz", "ctlz"]
+                 [ intrinsic ("llvm." ++ uop ++ "." ++ show (L.ppType typ)) typ [typ, L.iT 1]
+                 | uop  <- ["cttz", "ctlz"]
                  , typ <- map L.iT [8, 16, 32, 64] ]
 
 declareIntrinsic :: L.Typed L.Value -> LLVM ()
@@ -196,15 +195,6 @@ blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
     goLbl (lbl, node) = do v <- valueToLLVM node
                            return (L.from v (L.Named $ blockName lbl))
 
-makeNonSingletonStruct :: [ L.Typed L.Value ] -> L.Typed L.Value
-makeNonSingletonStruct [v] = v
-makeNonSingletonStruct vs  = L.struct False vs
-
-makeNonSingletonStructType :: [ L.Type ] -> L.Type
-makeNonSingletonStructType []  = L.voidT
-makeNonSingletonStructType [v] = v
-makeNonSingletonStructType vs  = L.Struct vs
-
 makeRet :: [ L.Typed L.Value ] -> [ L.Typed L.Value ] -> ToLLVM ()
 makeRet grets frets = do
   -- clang constructs something like
@@ -216,7 +206,7 @@ makeRet grets frets = do
   liftBB $ L.ret v
   where
     initUndef = L.Typed funReturnType L.ValUndef
-    padUndef typ to xs = xs ++ (replicate (to - length xs) (L.Typed typ L.ValUndef))
+    padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef))
     grets'    = padUndef (L.iT 64) (length x86ResultRegisters) grets
     frets'    = padUndef (L.iT 128) (length x86FloatResultRegisters) frets
   
@@ -340,7 +330,7 @@ stmtToLLVM stmt = do
    --   ptr_ptr <- L.bitcast ptr' (L.ptrT typ)
    --   L.call_ op [ptr_ptr, v', count', L.iT 32 L.-: L.int 0, L.iT 1 L.-: L.int 0]
 
-   FnComment str -> return () -- L.comment $ Text.unpack str
+   FnComment _str -> return () -- L.comment $ Text.unpack str
    -- PlaceHolderStmt {} -> void $ unimplementedInstr
    -- _           -> void $ unimplementedInstr
 
@@ -458,24 +448,24 @@ appToLLVM app =
    SadcOverflows sz x y c -> intrinsicOverflows "sadd" sz x y c
    UsbbOverflows sz x y c -> intrinsicOverflows "usub" sz x y c
    SsbbOverflows sz x y c -> intrinsicOverflows "ssub" sz x y c
-   Bsf sz v -> do
-     let op = intrinsic ("llvm.cttz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
+   Bsf _sz v -> do
+     let cttz = intrinsic ("llvm.cttz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
      v' <- valueToLLVM v
-     liftBB $ L.call op [v', L.iT 1 L.-: L.int 1]
+     liftBB $ L.call cttz [v', L.iT 1 L.-: L.int 1]
    Bsr _sz v -> do
-     let op = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
+     let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
      v' <- valueToLLVM v
-     liftBB $ L.call op [v', L.iT 1 L.-: L.int 1]
+     liftBB $ L.call ctlz [v', L.iT 1 L.-: L.int 1]
 
    FPIsQNaN frep v -> do
-     let op = intrinsic ("reopt.isQNaN." ++ show (pretty frep)) (L.iT 1) [typ]
+     let isQNaN = intrinsic ("reopt.isQNaN." ++ show (pretty frep)) (L.iT 1) [typ]
      v' <- valueToLLVM v         
-     liftBB $ L.call op [v']
+     liftBB $ L.call isQNaN [v']
 
    FPIsSNaN frep v -> do
-     let op = intrinsic ("reopt.isSNaN." ++ show (pretty frep)) (L.iT 1) [typ]
+     let isSNaN = intrinsic ("reopt.isSNaN." ++ show (pretty frep)) (L.iT 1) [typ]
      v' <- valueToLLVM v         
-     liftBB $ L.call op [v']
+     liftBB $ L.call isSNaN [v']
 
    FPAdd frep x y -> fpbinop L.fadd frep x y
    FPAddRoundedUp _frep _x _y -> unimplementedInstr typ "FPAddRoundedUp"   
@@ -508,25 +498,25 @@ appToLLVM app =
    -- FIXME: side-conditions here
    TruncFPToSignedBV frepr v sz -> do
      v' <- valueToLLVM v
-     let typ = floatReprToLLVMType frepr
-     flt_v <- liftBB $ L.bitcast v' typ
+     let ftyp = floatReprToLLVMType frepr
+     flt_v <- liftBB $ L.bitcast v' ftyp
      liftBB $ L.fptosi flt_v (natReprToLLVMType sz)
   where
-    intrinsicOverflows op _sz x y c = do
+    intrinsicOverflows bop _sz x y c = do
       x' <- valueToLLVM x
       y' <- valueToLLVM y
       let in_typ = L.typedType x'
           op_with_overflow =
-            intrinsic ("llvm." ++ op ++ ".with.overflow." ++ show (L.ppType in_typ))
+            intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
             (L.Struct [in_typ, L.iT 1]) [in_typ, in_typ]
       c' <- liftBB . flip L.zext in_typ =<< valueToLLVM c
       liftBB $ do
-        r_tuple  <- L.call op_with_overflow [x', y']
-        r        <- L.extractValue r_tuple 0
-        over     <- L.extractValue r_tuple 1
-        r_tuple' <- L.call op_with_overflow [r, c']
-        over'    <- L.extractValue r_tuple' 1
-        L.bor over over'
+        r_tuple    <- L.call op_with_overflow [x', y']
+        r          <- L.extractValue r_tuple 0
+        overflows  <- L.extractValue r_tuple 1
+        r_tuple'   <- L.call op_with_overflow [r, c']
+        overflows' <- L.extractValue r_tuple' 1
+        L.bor overflows overflows'
 
     fpbinop :: (L.Typed L.Value -> L.Typed L.Value -> BB (L.Typed L.Value))
              -> FloatInfoRepr flt -> FnValue (FloatType flt) -> FnValue (FloatType flt)
