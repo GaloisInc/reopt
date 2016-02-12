@@ -15,15 +15,22 @@ import           Control.Monad.State -- .Strict
 import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
+import           Reopt.CFG.FnRep (FunctionType(..)
+                                  , ftMaximumFunctionType
+                                  , ftMinimumFunctionType                                    
+                                  , ftIntArgRegs , ftFloatArgRegs
+                                  , ftIntRetRegs , ftFloatRetRegs)
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Utils.Debug
+
 
 -- -----------------------------------------------------------------------------
 
@@ -32,8 +39,7 @@ import           Reopt.Utils.Debug
 type RegDeps = (Set (Some Assignment), Set (Some N.RegisterName))
 type AssignmentCache = Map (Some Assignment) RegDeps
 
-type FunctionArgs = Map CodeAddr ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
-                                 , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
+type FunctionArgs = Map CodeAddr FunctionType
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
@@ -59,8 +65,7 @@ data RegisterUseState = RUS {
   , _blockFrontier  :: !(Set BlockLabel)
   -- | Function arguments derived from FunctionArgs
   , functionArgs    :: !FunctionArgs
-  , currentFunctionType :: !( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
-                            , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
+  , currentFunctionType :: !FunctionType
   }
 
 initRegisterUseState :: FunctionArgs -> CodeAddr -> RegisterUseState
@@ -75,7 +80,7 @@ initRegisterUseState fArgs fn =
       , functionArgs     = fArgs
       , currentFunctionType = cft }
   where
-    cft = fArgs ^. ix fn 
+    cft = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
 
 assignmentUses :: Simple Lens RegisterUseState (Set (Some Assignment))
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
@@ -274,21 +279,16 @@ summarizeIter ist seen (Just lbl)
                    summarizeIter ist (Set.insert lbl seen) lbl'
 
 lookupFunctionArgs :: Either CodeAddr (Value (BVType 64))
-                   -> RegisterUseM  ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])
-                                    , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM]) )
+                   -> RegisterUseM FunctionType
 lookupFunctionArgs fn =
   case fn of
-    Right _dynaddr -> return nothingKnown
+    Right _dynaddr -> return ftMaximumFunctionType
     Left faddr -> do
       fArgs <- gets (Map.lookup faddr . functionArgs)
       case fArgs of
         Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
-                      return nothingKnown
+                      return ftMaximumFunctionType
         Just v  -> return v
-  where
-    nothingKnown = ( ( x86ArgumentRegisters, x86FloatArgumentRegisters )
-                   , ( x86ResultRegisters, x86FloatResultRegisters ))
-
 
 -- | This function figures out what the block requires
 -- (i.e., addresses that are stored to, and the value stored), along
@@ -335,11 +335,11 @@ summarizeBlock interp_state root_label = go root_label
         Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
           traverse_ goStmt stmts'
 
-          ((gargs, fargs), (grets, frets)) <- lookupFunctionArgs fn
+          ft <- lookupFunctionArgs fn
 
           demandRegisters proc_state [Some N.rip]
-          demandRegisters proc_state (Some <$> gargs)
-          demandRegisters proc_state (Some <$> fargs)
+          demandRegisters proc_state (Some <$> ftIntArgRegs ft)
+          demandRegisters proc_state (Some <$> ftFloatArgRegs ft)
           
           case m_ret_addr of
             Nothing       -> return ()
@@ -348,7 +348,7 @@ summarizeBlock interp_state root_label = go root_label
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
           -- Ensure that result registers are defined, but do not have any deps.
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty))
-                    ((Some <$> grets) ++ (Some <$> frets))
+                    ((Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft))
 
         Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)
@@ -357,8 +357,9 @@ summarizeBlock interp_state root_label = go root_label
 
         Just (ParsedReturn proc_state stmts') -> do
             traverse_ goStmt stmts'
-            (_, (grets, frets)) <- gets currentFunctionType
-            demandRegisters proc_state ((Some <$> grets) ++ (Some <$> frets))
+            ft <- gets currentFunctionType
+            demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegisters)
+                                        ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegisters))
 
         Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
           -- FIXME: clagged from call above

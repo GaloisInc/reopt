@@ -22,8 +22,9 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
--- import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
@@ -269,8 +270,8 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- -----------------------------------------------------------------------------
 -- Entry point
 
-type FunctionType = ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])  -- args
-                    , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])) -- results
+-- type FunctionType = ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])  -- args
+--                     , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])) -- results
 
 -- | Returns the set of argument registers and result registers for each function.
 functionArgs :: InterpState -> Map CodeAddr FunctionType
@@ -352,25 +353,24 @@ functionArgs ist =
 
     -- drop the suffix which isn't a member of the arg set.  This
     -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
-    maximumArgPrefix :: [N.RegisterName a] -> RegisterSet -> [N.RegisterName a]
+    maximumArgPrefix :: [N.RegisterName a] -> RegisterSet -> Int
     maximumArgPrefix regs rs = 
-      reverse $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
+      length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
       
     -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
     orderPadArgs :: (RegisterSet, RegisterSet) -> FunctionType
     orderPadArgs (args, rets) =
-      ( ( maximumArgPrefix x86ArgumentRegisters args
-        , maximumArgPrefix x86FloatArgumentRegisters args)
-        -- FIXME
-      , ( maximumArgPrefix [N.rax, N.rdx] rets
-        , maximumArgPrefix [N.XMMReg 0] rets) )
+      FunctionType (maximumArgPrefix x86ArgumentRegisters args)
+                   (maximumArgPrefix x86FloatArgumentRegisters args)
+                   (maximumArgPrefix x86ResultRegisters rets)
+                   (maximumArgPrefix x86FloatResultRegisters rets)
 
     debugPrintMap :: Map CodeAddr FunctionType -> Map CodeAddr FunctionType
     debugPrintMap m = debug DFunctionArgs ("Arguments: \n\t" ++ (intercalate "\n\t" (Map.elems comb))) m
       where
         -- FIXME: ignores those functions we don't have names for.
         comb = Map.intersectionWith doOne (symbolNames ist) m
-        doOne n (args, rets) = n ++ ": " ++ show args ++ " -> " ++ show rets
+        doOne n ft = n ++ ": " ++ show (pretty ft)
     
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).
@@ -554,10 +554,8 @@ summarizeBlock interp_state root_label = go root_label
           recordPropagation blockDemandMap lbl proc_state DemandFunctionResult
                             ((Some <$> x86ResultRegisters) ++ (Some <$> x86FloatResultRegisters))
 
-        -- FreeBSD follows the C ABI for function calls, except that
-        -- rax contains the system call no.
         Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
-            -- FIXME: we ignore the return type for now.
+            -- FIXME: we ignore the return type for now, probably not a problem.
             traverse_ goStmt (blockStmts b)
 
             recordPropagation blockDemandMap lbl proc_state (const DemandAlways) (Some <$> argRegs)

@@ -33,6 +33,8 @@ module Reopt.Machine.X86State
     -- * Utilities
   , x86StateRegisters
   , x86CalleeSavedRegisters
+  , x86SyscallArgumentRegisters    
+  , x86SyscallNoRegister    
   , x86ArgumentRegisters
   , x86FloatArgumentRegisters
   , x86ResultRegisters
@@ -137,6 +139,15 @@ x86CalleeSavedRegisters = Set.fromList $
 
 x86ArgumentRegisters :: [N.RegisterName 'N.GP]
 x86ArgumentRegisters = [N.rdi, N.rsi, N.rdx, N.rcx, N.r8, N.r9]
+
+-- The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
+-- Syscalls clobber rcx and r11, but we don't really care about these
+-- anyway.
+x86SyscallArgumentRegisters :: [N.RegisterName 'N.GP]
+x86SyscallArgumentRegisters = [N.rdi, N.rsi, N.rdx, N.r10, N.r8, N.r9]
+
+x86SyscallNoRegister :: N.RegisterName 'N.GP
+x86SyscallNoRegister = N.rax
 
 x86FloatArgumentRegisters :: [N.RegisterName 'N.XMM]
 x86FloatArgumentRegisters = map N.XMMReg [0..7]

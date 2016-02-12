@@ -325,12 +325,13 @@ classifyBlock b interp_state =
       | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
+    -- rax isn't exactly an argument here, but we pretend that it is
     Syscall proc_state
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
       , Just (name, _rettype, argtypes) <- syscallTypeInfo call_no ->
          let result = Just (ParsedSyscall proc_state next_addr name
-                        (take (length argtypes) x86ArgumentRegisters))        
+                            (x86SyscallNoRegister : (take (length argtypes) x86SyscallArgumentRegisters)))
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
               _ | length argtypes > length x86ArgumentRegisters -> 
