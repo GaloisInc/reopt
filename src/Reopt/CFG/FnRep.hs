@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
@@ -9,6 +10,7 @@ module Reopt.CFG.FnRep
    , FnAssignRhs(..)
    , FnValue(..)
    , Function(..)
+   , FunctionType(..)
    , FnBlock(..)
    , FnStmt(..)
    , FnTermStmt(..)
@@ -16,8 +18,15 @@ module Reopt.CFG.FnRep
    , FnPhiVar(..)
    , FnPhiNodeInfo(..)
    , FnReturnVar(..)
+   , FoldFnValue(..)
    , fnAssignRHSType
    , fnValueType
+   , ftMaximumFunctionType
+   , ftMinimumFunctionType
+   , ftIntArgRegs
+   , ftFloatArgRegs
+   , ftIntRetRegs
+   , ftFloatRetRegs
    ) where
 
 import           Data.Text (Text)
@@ -28,13 +37,15 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
+import           Data.Parameterized.TraversableF
 
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
-                               , ppApp, ppLit, ppAssignId, sexpr, appType)
+                               , ppApp, ppLit, ppAssignId, sexpr, appType
+                               , foldApp)
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
@@ -46,6 +57,41 @@ data FnAssignment tp
 
 instance Pretty (FnAssignment tp) where
   pretty (FnAssignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
+
+data FunctionType =
+  FunctionType { fnNIntArgs   :: !Int
+               , fnNFloatArgs :: !Int
+               , fnNIntRets   :: !Int
+               , fnNFloatRets :: !Int
+               }
+  deriving (Ord, Eq, Show)
+
+instance Pretty FunctionType where
+  pretty f = parens (int (fnNIntArgs f) <> comma <+> int (fnNFloatArgs f))
+             <+> text "->"
+             <+> parens (int (fnNIntRets f) <> comma <+> int (fnNFloatRets f))
+
+-- Convenience functions
+ftMaximumFunctionType :: FunctionType
+ftMaximumFunctionType = FunctionType (length x86ArgumentRegisters)
+                                     (length x86FloatArgumentRegisters)
+                                     (length x86ResultRegisters)
+                                     (length x86FloatResultRegisters)
+
+ftMinimumFunctionType :: FunctionType
+ftMinimumFunctionType = FunctionType 0 0 0 0
+
+ftIntArgRegs :: FunctionType -> [N.RegisterName 'N.GP]
+ftIntArgRegs ft = take (fnNIntArgs ft) x86ArgumentRegisters
+
+ftFloatArgRegs :: FunctionType -> [N.RegisterName 'N.XMM]
+ftFloatArgRegs ft = take (fnNFloatArgs ft) x86FloatArgumentRegisters
+
+ftIntRetRegs :: FunctionType -> [N.RegisterName 'N.GP]
+ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegisters
+
+ftFloatRetRegs :: FunctionType -> [N.RegisterName 'N.XMM]
+ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegisters
 
 -- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
 
@@ -101,6 +147,13 @@ fnAssignRHSType rhs =
     FnEvalApp a    -> appType a
     FnAlloca _ -> knownType
 
+
+instance FoldFnValue (FnAssignRhs tp) where
+  foldFnValue _f (FnSetUndefined {}) = mempty
+  foldFnValue f (FnReadMem loc _)   = f loc
+  foldFnValue f (FnEvalApp a)       = foldApp f a
+  foldFnValue f (FnAlloca sz)       = f sz
+
 -- tp <- {BVType 64, BVType 128}
 data FnReturnVar tp = FnReturnVar { frAssignId :: !AssignId
                                   , frReturnType :: !(TypeRepr tp) }
@@ -119,10 +172,10 @@ data FnValue (tp :: Type) where
   FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
   -- Value from a phi node
   FnPhiValue :: !(FnPhiVar tp) -> FnValue tp
-  -- A value returned by a function call (rax/xmm0)
+  -- A value returned by a function call (rax/rdx/xmm0)
   FnReturn :: FnReturnVar tp -> FnValue tp
   -- The entry pointer to a function.
-  FnFunctionEntryValue :: !Word64 -> FnValue (BVType 64)
+  FnFunctionEntryValue :: !FunctionType -> !Word64 -> FnValue (BVType 64)
   -- A pointer to an internal block at the given address.
   FnBlockValue :: !Word64 -> FnValue (BVType 64)
   -- Value is an interget argument passed via a register.
@@ -141,7 +194,7 @@ instance Pretty (FnValue tp) where
   pretty (FnAssignedValue ass)    = ppAssignId (fnAssignId ass)
   pretty (FnPhiValue phi)         = ppAssignId (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
-  pretty (FnFunctionEntryValue n) = text "FunctionEntry"
+  pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
                                     <> parens (pretty $ showHex n "")
   pretty (FnBlockValue n)         = text "BlockValue"
                                     <> parens (pretty $ showHex n "")
@@ -149,6 +202,8 @@ instance Pretty (FnValue tp) where
   pretty (FnFloatArg n)           = text "fparg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@"
                                     <> parens (pretty $ showHex addr "")
+class FoldFnValue a where
+  foldFnValue :: Monoid m => (forall u . FnValue u -> m) -> a -> m
 
 fnValueType :: FnValue tp -> TypeRepr tp
 fnValueType v =
@@ -159,7 +214,7 @@ fnValueType v =
     FnAssignedValue (FnAssignment _ rhs) -> fnAssignRHSType rhs
     FnPhiValue phi -> fnPhiVarType phi
     FnReturn ret   -> frReturnType ret
-    FnFunctionEntryValue _ -> knownType
+    FnFunctionEntryValue {} -> knownType
     FnBlockValue _ -> knownType
     FnIntArg _ -> knownType
     FnFloatArg _ -> knownType
@@ -169,8 +224,7 @@ fnValueType v =
 -- Function definitions
 
 data Function = Function { fnAddr :: CodeAddr
-                         , fnIntArgTypes :: [Some TypeRepr]
-                         , fnFloatArgTypes :: [Some TypeRepr]                           
+                         , fnType :: FunctionType
                          , fnBlocks :: [FnBlock]
                          }
 
@@ -184,6 +238,9 @@ instance Pretty Function where
     <$$>
     rbrace
 
+instance FoldFnValue Function where
+  foldFnValue f fn = mconcat (map (foldFnValue f) (fnBlocks fn))
+
 data FnRegValue cl where
   -- This is a callee saved register.
   CalleeSaved :: N.RegisterName cl -> FnRegValue cl
@@ -195,6 +252,9 @@ instance Pretty (FnRegValue tp) where
   pretty (FnRegValue v)      = pretty v
 
 newtype FnPhiNodeInfo tp = FnPhiNodeInfo { unFnPhiNodeInfo ::  [(BlockLabel, FnValue tp)] }
+
+instance FoldFnValue (FnPhiNodeInfo tp) where
+  foldFnValue f (FnPhiNodeInfo vs) = mconcat (map (f . snd) vs)
 
 data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
@@ -222,13 +282,18 @@ instance Pretty FnBlock where
       goLbl :: (BlockLabel, FnValue tp) -> Doc
       goLbl (lbl, node) = parens (pretty lbl <> comma <+> pretty node)
 
+instance FoldFnValue FnBlock where
+  foldFnValue f b =
+    mconcat (toListF (foldFnValue f) (fbPhiNodes b)
+             ++ map (foldFnValue f) (fbStmts b)
+             ++ [ foldFnValue f (fbTerm b) ])
+  
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
     -- | A comment
   | FnComment !Text
     -- | An assignment statement
   | forall tp . FnAssignStmt !(FnAssignment tp)
-
 
 instance Pretty FnStmt where
   pretty s =
@@ -237,18 +302,24 @@ instance Pretty FnStmt where
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
 
+instance FoldFnValue FnStmt where
+  foldFnValue f (FnWriteMem addr v) = f addr `mappend` f v
+  foldFnValue _f (FnComment {})     = mempty
+  foldFnValue f (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f rhs
+
 data FnTermStmt
    = FnJump !BlockLabel
-   | FnRet !(FnValue (BVType 64)) !(FnValue (BVType 128))
+   | FnRet !([FnValue (BVType 64)], [FnValue XMMType])
    | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
      -- ^ A branch to a block within the function, along with the return vars.
-     -- FIXME: need to add rdx and extra stack arg.
-   | FnCall !(FnValue (BVType 64)) [Some FnValue]
-            !(FnReturnVar (BVType 64))
-            !(FnReturnVar XMMType)
+     -- FIXME: need to add extra stack arg.
+   | FnCall !(FnValue (BVType 64))
+            !([FnValue (BVType 64)], [FnValue XMMType])
+            !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
             !(Maybe BlockLabel)
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
+   -- | FnSystemCall !(FnValue (BVType 64)) [!(FnValue (BVType 64))] ![Some FnReturnVar]  
    | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
@@ -256,10 +327,19 @@ instance Pretty FnTermStmt where
     case s of
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnJump lbl -> text "jump" <+> pretty lbl
-      FnRet intr floatr -> text "return" <+> pretty intr <+> pretty floatr
-      FnCall f args intr floatr lbl ->
-        let arg_docs = viewSome pretty <$> args
-         in parens (pretty intr <> comma <+> pretty floatr)
+      FnRet (grets, frets) -> text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
+      FnCall f (gargs, fargs) (grets, frets) lbl ->
+        let arg_docs = (pretty <$> gargs) ++ (pretty <$> fargs)
+            ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
+         in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
       FnTermStmtUndefined -> text "undefined term"
+
+instance FoldFnValue FnTermStmt where
+  foldFnValue _f (FnJump {})           = mempty
+  foldFnValue f (FnBranch c _ _)       = f c
+  foldFnValue f (FnRet (grets, frets)) = mconcat (map f grets ++ map f frets)
+  foldFnValue f (FnCall fn (gargs, fargs) _ _) =
+    f fn `mappend` mconcat (map f gargs ++ map f fargs)
+  foldFnValue _f (FnTermStmtUndefined {}) = mempty

@@ -15,14 +15,16 @@ module Reopt.CFG.FunctionArgs
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (traverse_)
+import           Data.List (intercalate)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
--- import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
@@ -268,11 +270,14 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- -----------------------------------------------------------------------------
 -- Entry point
 
+-- type FunctionType = ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])  -- args
+--                     , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])) -- results
+
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: InterpState -> Map CodeAddr (RegisterSet, RegisterSet) -- (args, results)
+functionArgs :: InterpState -> Map CodeAddr FunctionType
 functionArgs ist =
   -- debug' DFunctionArgs (ppSet (text . flip showHex "") seenFuns) $
-  finalizeMap $ calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
+  debugPrintMap $ finalizeMap $ calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
   where
     (argDemandsMap, resultDemandsMap, argsMap)
       = foldl doOneFunction mempty (ist ^. functionEntries)
@@ -284,7 +289,7 @@ functionArgs ist =
     doOneFunction acc addr =
       flip evalState initFunctionArgsState $ do
         -- Run the first phase (block summarization)
-        summarizeIter ist Set.empty (Just $ mkRootBlockLabel addr)
+        summarizeIter ist Set.empty (Just lbl0)
         -- propagate back uses
         new <- use blockDemandMap
 
@@ -300,7 +305,7 @@ functionArgs ist =
         -- debugM DFunctionArgs ("*************************"  ++ (showHex addr "" ))
         -- debugM' DFunctionArgs (ppMap (text . show) (text . show) m)
         -- debugM DFunctionArgs ("<<<<<<<<<<<<<<<<<<<<<<<<<" ++ (showHex addr "" ))
-
+       
         funDemands <- use (blockDemandMap . ix lbl0)
         return (Map.foldlWithKey' (decomposeMap addr) acc funDemands)
       where
@@ -335,15 +340,38 @@ functionArgs ist =
     decomposeMap addr acc DemandAlways v =
       acc & _3 %~ Map.insertWith mappend addr (v `demandSetDifference` calleeDemandSet)
 
-    finalizeMap :: Map CodeAddr DemandSet -> Map CodeAddr (RegisterSet, RegisterSet)
+    finalizeMap :: Map CodeAddr DemandSet
+                -> Map CodeAddr FunctionType
     finalizeMap dm =
       let go ds = Map.unionWith Set.union (functionResultDemands ds)
           retDemands = foldr go Map.empty dm
-      in Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
-                          (fmap (\ds ->  (registerDemands ds, mempty)))
-                          (fmap ((,) mempty))
-                          dm retDemands
+      in fmap orderPadArgs
+         $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
+                            (fmap (\ds ->  (registerDemands ds, mempty)))
+                            (fmap ((,) mempty))
+                            dm retDemands
 
+    -- drop the suffix which isn't a member of the arg set.  This
+    -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
+    maximumArgPrefix :: [N.RegisterName a] -> RegisterSet -> Int
+    maximumArgPrefix regs rs = 
+      length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
+      
+    -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
+    orderPadArgs :: (RegisterSet, RegisterSet) -> FunctionType
+    orderPadArgs (args, rets) =
+      FunctionType (maximumArgPrefix x86ArgumentRegisters args)
+                   (maximumArgPrefix x86FloatArgumentRegisters args)
+                   (maximumArgPrefix x86ResultRegisters rets)
+                   (maximumArgPrefix x86FloatResultRegisters rets)
+
+    debugPrintMap :: Map CodeAddr FunctionType -> Map CodeAddr FunctionType
+    debugPrintMap m = debug DFunctionArgs ("Arguments: \n\t" ++ (intercalate "\n\t" (Map.elems comb))) m
+      where
+        -- FIXME: ignores those functions we don't have names for.
+        comb = Map.intersectionWith doOne (symbolNames ist) m
+        doOne n ft = n ++ ": " ++ show (pretty ft)
+    
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).
 calculateGlobalFixpoint :: Map CodeAddr (Map (Some N.RegisterName)
@@ -431,13 +459,22 @@ summarizeIter ist seen (Just lbl)
 -- A function call is the only block type that results in the
 -- generation of function call demands, so we split that aspect out
 -- (callee saved are handled in summarizeBlock).
-summarizeCall :: BlockLabel -> X86State Value -> Either CodeAddr (Value (BVType 64))
+summarizeCall :: BlockLabel -> X86State Value
+                 -> Either CodeAddr (Value (BVType 64))
+                 -> Bool
                  -> FunctionArgsM ()
-summarizeCall lbl proc_state (Left faddr) = do
+summarizeCall lbl proc_state (Left faddr) isTailCall = do
   -- If a subsequent block demands r, then we note that we want r from
   -- function faddr
-  traverse_ propResult x86ResultRegisters
+  -- FIXME: refactor out Some s
+  let retRegs = ((Some <$> x86ResultRegisters) ++ (Some <$> x86FloatResultRegisters))
+  if isTailCall
+     -- tail call, propagate demands for our return regs to the called function
+     then let propMap = map (\(Some r) -> (DemandFunctionResult r, demandSet (Some r))) retRegs
+          in  blockDemandMap %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList propMap)
+     else  traverse_ propResult retRegs
 
+  
   -- If a function wants argument register r, then we note that this
   -- block needs the corresponding state values.  Note that we could
   -- do this for _all_ registers, but this should make the summaries somewhat smaller.
@@ -455,7 +492,7 @@ summarizeCall lbl proc_state (Left faddr) = do
     propArgument rs = recordPropagation blockDemandMap lbl proc_state (DemandFunctionArg faddr) rs
 
 -- In the dynamic case, we just assume all arguments (FIXME: results?)
-summarizeCall lbl proc_state (Right _dynaddr) = do
+summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
   demandRegisters [Some N.rip]
   demandRegisters (Some <$> x86ArgumentRegisters)
   demandRegisters (Some <$> x86FloatArgumentRegisters) -- FIXME: required?
@@ -473,6 +510,9 @@ summarizeBlock interp_state root_label = go root_label
   where
     go :: BlockLabel -> FunctionArgsM ()
     go lbl = do
+      -- By default we have no arguments, return nothing
+      blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
+      
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
       let goStmt (Write (MemLoc addr _tp) v)
@@ -482,7 +522,7 @@ summarizeBlock interp_state root_label = go root_label
           goStmt _ = return ()
 
           -- FIXME: rsp here?
-          recordSyscallPropagation proc_state =
+          recordCallPropagation proc_state =
             recordPropagation blockTransfer lbl proc_state Some
                               (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
 
@@ -496,13 +536,12 @@ summarizeBlock interp_state root_label = go root_label
         Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
           traverse_ goStmt stmts'
 
-          summarizeCall lbl proc_state fn
+          summarizeCall lbl proc_state fn (not $ isJust m_ret_addr)
 
           case m_ret_addr of
             Nothing       -> return ()
-            Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
-
-          recordSyscallPropagation proc_state
+            Just ret_addr -> do addEdge lbl (mkRootBlockLabel ret_addr)
+                                recordCallPropagation proc_state
 
         Just (ParsedJump proc_state tgt_addr) -> do
           traverse_ goStmt (blockStmts b)
@@ -513,17 +552,15 @@ summarizeBlock interp_state root_label = go root_label
         Just (ParsedReturn proc_state stmts') -> do
           traverse_ goStmt stmts'
           recordPropagation blockDemandMap lbl proc_state DemandFunctionResult
-                            x86ResultRegisters
+                            ((Some <$> x86ResultRegisters) ++ (Some <$> x86FloatResultRegisters))
 
-        -- FreeBSD follows the C ABI for function calls, except that
-        -- rax contains the system call no.
         Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
-            -- FIXME: we ignore the return type for now.
+            -- FIXME: we ignore the return type for now, probably not a problem.
             traverse_ goStmt (blockStmts b)
 
             recordPropagation blockDemandMap lbl proc_state (const DemandAlways) (Some <$> argRegs)
 
-            recordSyscallPropagation proc_state
+            recordCallPropagation proc_state
             addEdge lbl (mkRootBlockLabel next_addr)
 
         Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"

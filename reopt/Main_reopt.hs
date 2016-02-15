@@ -10,6 +10,7 @@ import           Control.Monad
 import qualified Data.ByteString as B
 import           Data.Elf
 import           Data.List ((\\), nub, stripPrefix, intercalate)
+import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Version
@@ -17,11 +18,13 @@ import           Data.Word
 import           Numeric (showHex)
 import           Reopt.Analysis.AbsState
 import           System.Console.CmdArgs.Explicit
+import           System.Directory (createDirectoryIfMissing)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
+import           System.FilePath ((</>))
 import           System.IO
 import qualified Text.LLVM as L
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
@@ -33,6 +36,7 @@ import           Data.Type.Equality as Equality
 import           Flexdis86 (InstructionInstance(..))
 import           Reopt
 import           Reopt.CFG.CFGDiscovery
+import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
@@ -50,7 +54,7 @@ data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
-   | ShowLLVM        -- ^ Print out generated LLVM
+   | ShowLLVM String -- ^ Write out the LLVM into the argument path
    | ShowFunctions   -- ^ Print out generated functions
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
@@ -113,9 +117,9 @@ cfgAIFlag = flagNone [ "ai", "a" ] upd help
         help = "Print out recovered control flow graph + AI of executable."
 
 llvmFlag :: Flag Args
-llvmFlag = flagNone [ "llvm", "l" ] upd help
-  where upd  = reoptAction .~ ShowLLVM
-        help = "Print out generated LLVM."
+llvmFlag = flagReq [ "llvm", "l" ] upd "DIR" help
+  where upd s old = Right $ old & reoptAction .~ ShowLLVM s
+        help = "Write out generated LLVM."
 
 funFlag :: Flag Args
 funFlag = flagNone [ "functions", "f" ] upd help
@@ -309,6 +313,7 @@ showFunctions :: LoadStyle -> Elf Word64 -> IO ()
 showFunctions loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
+  print mem
   let fg = mkFinalCFG mem e
   -- let g = eliminateDeadRegisters (finalCFG fg)
   mapM_ (print . pretty) (finalFunctions fg)
@@ -457,13 +462,19 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
-mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
-mkFinalCFG mem e = cfgFromAddrs mem (elfEntry e:sym_addrs)
+mkFinalCFGWithSyms :: Memory Word64 -> Elf Word64 -> (FinalCFG, Map CodeAddr String)
+mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map (elfEntry e:sym_addrs), sym_map)
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  where sym_addrs = [ steValue ste | ste <- concat (parseSymbolTables e)
-                                   , steType ste == STT_FUNC
-                                   , isCodeAddr mem (steValue ste)
-                                   ]
+  where sym_assocs = [ (steValue ste, steName ste)
+                     | ste <- concat (parseSymbolTables e)
+                     , steType ste == STT_FUNC
+                     , isCodeAddr mem (steValue ste)
+                     ]
+        sym_addrs = map fst sym_assocs
+        sym_map   = Map.fromList sym_assocs
+
+mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
+mkFinalCFG mem e = fst (mkFinalCFGWithSyms mem e)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
@@ -493,14 +504,24 @@ showCFGAndAI loadSty e = do
         checkCallsIdentified mem g b
       _ -> return ()
 
-showLLVM :: LoadStyle -> Elf Word64 -> IO ()
-showLLVM loadSty e = do
+showLLVM :: LoadStyle -> Elf Word64 -> String -> IO ()
+showLLVM loadSty e dir = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let cfg = mkFinalCFG mem e
-  let mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
+  let (cfg, symMap) = mkFinalCFGWithSyms mem e
+  
+  let mkName f = dir </> (name ++ "_" ++ showHex addr ".ll")
+        where
+          name = case Map.lookup addr symMap of
+                   Nothing -> "unknown"
+                   Just s  -> s
+          addr = fnAddr f
+          
+  let mkF f = (,) (mkName f) . snd $ L.runLLVM (functionToLLVM f)
+  let writeF (n, m) = writeFile n (show $ L.ppModule m)
 
-  print (L.ppModule mkF )
+  createDirectoryIfMissing True dir
+  mapM_ (writeF . mkF) (finalFunctions cfg)
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -588,7 +609,6 @@ mkElfMem LoadBySegment e = memoryForElfSegments e
 main :: IO ()
 main = do
   args <- getCommandLineArgs
-  print (args ^. debugKeys)
   setDebugKeys (args ^. debugKeys)
   case args^.reoptAction of
     DumpDisassembly -> do
@@ -599,9 +619,9 @@ main = do
     ShowCFGAI -> do
       e <- readStaticElf (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
-    ShowLLVM -> do
+    ShowLLVM path -> do
       e <- readStaticElf (args^.programPath)
-      showLLVM (args^.loadStyle) e
+      showLLVM (args^.loadStyle) e path
     ShowFunctions -> do
       e <- readStaticElf (args^.programPath)
       showFunctions (args^.loadStyle) e

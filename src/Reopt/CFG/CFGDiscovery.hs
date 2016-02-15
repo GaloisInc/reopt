@@ -959,7 +959,7 @@ mkFinalCFG s =
       -- debug DCFG (ppGlobalData (Map.toList (s^.globalDataMap))) $
       -- debug DCFG (ppReverseEdges (Map.toList (s^.reverseEdges))) $
       -- debug DCFG (ppStackDepth (map (\p -> (p, maximumStackDepth s p)) (Set.toList (s^.functionEntries)))) $
-      debug DFunctionArgs (ppFunctionArgs (Map.toList fArgs)) $
+      -- debug DCFG (ppFunctionArgs (Map.toList fArgs)) $
       -- debug DCFG (ppRegisterUse (map (\p -> (p, registerUse s p)) (Set.toList (s^.functionEntries)))) $
       let fg = FinalCFG { finalCFG = mkCFG (s^.blocks)
                         , finalAbsState = s^.absState
@@ -1001,11 +1001,12 @@ addrInJumpTable s a =
     _ -> False
 
 cfgFromAddrs :: Memory Word64
+             -> Map CodeAddr String
                 -- ^ Memory to use when decoding instructions.
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> FinalCFG
-cfgFromAddrs mem init_addrs = debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
+cfgFromAddrs mem symbols init_addrs = debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
@@ -1028,7 +1029,7 @@ cfgFromAddrs mem init_addrs = debug DCFG ("Starting addrs " ++ show (Hex <$> ini
                      ]
 
 
-    s0 = emptyInterpState mem
+    s0 = emptyInterpState mem symbols
        & functionEntries .~ Set.fromList init_addrs
        & absState .~ init_abs_state
        & function_frontier .~ Set.fromList init_addrs

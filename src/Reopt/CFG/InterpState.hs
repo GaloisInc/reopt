@@ -150,6 +150,8 @@ data ParsedTermStmt
 data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
+                   -- | The set of symbol names (not necessarily complete)
+                 , symbolNames :: Map CodeAddr String
                    -- | State used for generating blocks.
                  , _genState :: !GlobalGenState
                    -- | Intervals maps code addresses to blocks at address
@@ -179,9 +181,10 @@ data InterpState
                  }
 
 -- | Empty interpreter state.
-emptyInterpState :: Memory Word64 -> InterpState
-emptyInterpState mem = InterpState
+emptyInterpState :: Memory Word64 -> Map CodeAddr String -> InterpState
+emptyInterpState mem symbols = InterpState
       { memory        = mem
+      , symbolNames   = symbols
       , _genState     = emptyGlobalGenState
       , _blocks       = Map.empty
       , _functionEntries = Set.empty
@@ -322,12 +325,13 @@ classifyBlock b interp_state =
       | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
+    -- rax isn't exactly an argument here, but we pretend that it is
     Syscall proc_state
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
       , Just (name, _rettype, argtypes) <- syscallTypeInfo call_no ->
          let result = Just (ParsedSyscall proc_state next_addr name
-                        (take (length argtypes) x86ArgumentRegisters))        
+                            (x86SyscallNoRegister : (take (length argtypes) x86SyscallArgumentRegisters)))
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
               _ | length argtypes > length x86ArgumentRegisters -> 
