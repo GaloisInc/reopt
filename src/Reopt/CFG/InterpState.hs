@@ -45,9 +45,8 @@ import qualified Data.Set as Set
 import           Data.Type.Equality
 import qualified Data.Vector as V
 import           Data.Word
-import           GHC.TypeLits
 import           Numeric (showHex)
-
+                 
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
 import           Reopt.CFG.Representation
@@ -135,13 +134,13 @@ data ParsedTermStmt
      -- | A jump within a block
    | ParsedJump !(X86State Value) !Word64
      -- | A lookup table that branches to the given locations.
-   | forall n . (1 <= n) =>
-       ParsedLookupTable !(X86State Value) (BVValue n) (V.Vector Word64)
+   | -- forall n . (1 <= n) =>
+       ParsedLookupTable !(X86State Value) (BVValue 64) (V.Vector Word64)
      -- | A tail cthat branches to the given locations.
    | ParsedReturn !(X86State Value) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
-   | ParsedSyscall !(X86State Value) !Word64 !String ![N.RegisterName 'N.GP]
+   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String ![N.RegisterName 'N.GP]
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -241,6 +240,9 @@ getFunctionEntryPoint addr s = do
     Just a -> a
     Nothing -> error $ "Could not find address of " ++ showHex addr "."
 
+getFunctionEntryPoint' :: CodeAddr -> InterpState -> Maybe CodeAddr
+getFunctionEntryPoint' addr s = Set.lookupLE addr (s^.functionEntries) 
+
 inSameFunction :: CodeAddr -> CodeAddr -> InterpState -> Bool
 inSameFunction x y s =
   getFunctionEntryPoint x s == getFunctionEntryPoint y s
@@ -294,6 +296,29 @@ identifyReturn s = do
       , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just asgn
     _ -> Nothing
 
+identifyJumpTable :: InterpState
+                  -> BlockLabel
+                      -- | Memory address that IP is read from.
+                  -> Value (BVType 64)
+                  -- Returns the (symbolic) index and concrete next blocks
+                  -> Maybe (Value (BVType 64), V.Vector CodeAddr) 
+identifyJumpTable s lbl (AssignedValue (Assignment _ (Read (MemLoc ptr _))))
+    -- Turn the read address into base + offset.
+   | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp ptr
+    -- Turn the offset into a multiple by an index.
+   , Just (BVMul _ (BVValue _ 8) idx) <- valueAsApp offset
+   , isReadonlyAddr mem (fromInteger base) =
+       Just (idx, V.unfoldr nextWord (fromInteger base))
+  where
+    enclosingFun    = getFunctionEntryPoint (labelAddr lbl) s
+    nextWord tblPtr
+      | Right codePtr <- memLookupWord64 mem pf_r tblPtr
+      , isReadonlyAddr mem tblPtr
+      , getFunctionEntryPoint' codePtr s == Just enclosingFun = Just (codePtr, tblPtr + 8)
+      | otherwise = Nothing
+    mem = memory s
+identifyJumpTable _ _ _ = Nothing
+
 classifyBlock :: Block -> InterpState -> Maybe ParsedTermStmt
 classifyBlock b interp_state = 
   case blockTerm b of
@@ -325,21 +350,31 @@ classifyBlock b interp_state =
       | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
-    -- rax isn't exactly an argument here, but we pretend that it is
+      | Just (idx, nexts) <- identifyJumpTable interp_state (blockLabel b)
+                                               (proc_state ^. register N.rip) ->
+          Just (ParsedLookupTable proc_state idx nexts)
+
+      -- Finally, we just assume that this is a tail call through a pointer
+      -- FIXME: probably unsound.
+      | otherwise -> Just (ParsedCall proc_state
+                                      (Seq.fromList $ blockStmts b)
+                                      (Right $ proc_state^.register N.rip) Nothing)
+
+    -- rax is concrete in the first case, so we don't need to propagate it etc.
     Syscall proc_state
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
       , Just (name, _rettype, argtypes) <- syscallTypeInfo call_no ->
-         let result = Just (ParsedSyscall proc_state next_addr name
-                            (x86SyscallNoRegister : (take (length argtypes) x86SyscallArgumentRegisters)))
+         let result = Just (ParsedSyscall proc_state next_addr call_no name
+                            (take (length argtypes) x86SyscallArgumentRegisters))
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
-              _ | length argtypes > length x86ArgumentRegisters -> 
-                  debug DUrgent ("Got more than register args calling " ++ name ++ " in block " ++ show (blockLabel b)) result 
+              _ | length argtypes > length x86SyscallArgumentRegisters -> 
+                  debug DUrgent ("Got more than register args calling " ++ name
+                                 ++ " in block " ++ show (blockLabel b))
+                                result 
               _ -> result
-
-    -- FIXME: jump table and tail calls?
-    _ -> Nothing
+      | otherwise -> debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)) Nothing
   where
     mem = memory interp_state
 

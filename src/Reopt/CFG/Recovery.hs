@@ -500,22 +500,27 @@ recoverBlock blockRegProvides phis lbl = do
         
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    Just (ParsedSyscall proc_state _next_addr _name _argRegs) -> do
+    Just (ParsedSyscall proc_state next_addr call_no name args) -> do
       Fold.traverse_ recoverStmt (blockStmts b)
+
+      intr     <- mkReturnVar (knownType :: TypeRepr (BVType 64))
+      -- BSD (only freebsd?) uses the cf to indicate whether there was
+      -- an error in the system call.
+      cfr     <- mkReturnVar (knownType :: TypeRepr BoolType)
       
-      -- Figure out what is preserved across the function call.
+      -- Figure out what is preserved across the system call.  Subtly
+      -- different to that for function calls :(
       let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
                 -> Recover (MapF N.RegisterName FnRegValue)
           go m (Some r) = do 
              v <- case r of
                N.GPReg {}
-                 -- | Just Refl <- testEquality r N.rax ->
-                 --     return (FnReturn intr)
+                 | Just Refl <- testEquality r N.rax -> return (FnReturn intr)
                  | Just _ <- testEquality r N.rsp -> do
-                     recoverRegister proc_state N.rsp
+                     recoverRegister proc_state N.rsp                     
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverRegister proc_state r
-               -- N.XMMReg 0 -> return (FnReturn floatr)
+               _ | Just Refl <- testEquality r N.cf -> return (FnReturn cfr)
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
@@ -523,13 +528,28 @@ recoverBlock blockRegProvides phis lbl = do
       let Just provides = Map.lookup lbl blockRegProvides
       regs' <- foldM go MapF.empty provides 
       
-      -- _args'  <- mapM (viewSome (fmap Some . recoverValue "arguments")) args
+      args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
       
-      fb <- mkBlock FnTermStmtUndefined
+      fb <- mkBlock (FnSystemCall call_no name args' intr cfr (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
-    Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
+    Just (ParsedLookupTable proc_state idx vec) -> do
+        -- Recover statements
+        Fold.traverse_ recoverStmt (blockStmts b)
+
+        let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
+                  -> Recover (MapF N.RegisterName FnRegValue)
+            go m (Some r) = do
+               v <- recoverRegister proc_state r
+               return $ MapF.insert r (FnRegValue v) m
+
+        let provides = blockRegProvides ^. ix lbl
+        regs' <- foldM go MapF.empty provides
+
+        idx'   <- recoverValue "jump_index" idx
+
+        flip (,) (Map.singleton lbl regs') <$> mkBlock (FnLookupTable idx' vec)
 
     Nothing -> do
       debug DFunRecover ("WARNING: recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do

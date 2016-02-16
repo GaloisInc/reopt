@@ -19,6 +19,7 @@ import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Vector as V ()
 
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
@@ -361,16 +362,20 @@ summarizeBlock interp_state root_label = go root_label
             demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegisters)
                                         ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegisters))
 
-        Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
+        Just (ParsedSyscall proc_state next_addr _call_no _name argRegs) -> do
           -- FIXME: clagged from call above
           traverse_ goStmt (blockStmts b)
           demandRegisters proc_state (Some <$> argRegs)
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
           
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) (Some <$> x86ResultRegisters)
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) (Some <$> x86FloatResultRegisters)
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) [Some N.rax, Some N.cf]
 
-        Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
+        Just (ParsedLookupTable proc_state _idx vec) -> do
+          traverse_ goStmt (blockStmts b)
+          
+          demandRegisters proc_state [Some N.rip]
+          addRegisterUses proc_state x86StateRegisters
+          traverse_ (addEdge lbl . mkRootBlockLabel) vec
 
         Nothing -> return () -- ???

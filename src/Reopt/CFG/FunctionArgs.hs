@@ -554,7 +554,7 @@ summarizeBlock interp_state root_label = go root_label
           recordPropagation blockDemandMap lbl proc_state DemandFunctionResult
                             ((Some <$> x86ResultRegisters) ++ (Some <$> x86FloatResultRegisters))
 
-        Just (ParsedSyscall proc_state next_addr _name argRegs) -> do
+        Just (ParsedSyscall proc_state next_addr _call_no _name argRegs) -> do
             -- FIXME: we ignore the return type for now, probably not a problem.
             traverse_ goStmt (blockStmts b)
 
@@ -563,7 +563,14 @@ summarizeBlock interp_state root_label = go root_label
             recordCallPropagation proc_state
             addEdge lbl (mkRootBlockLabel next_addr)
 
-        Just (ParsedLookupTable _proc_state _idx _vec) -> error "LookupTable"
+        Just (ParsedLookupTable proc_state idx vec) -> do 
+            traverse_ goStmt (blockStmts b)
+
+            demandValue lbl idx
+            
+            -- record all propagations            
+            recordPropagation blockTransfer lbl proc_state Some x86StateRegisters
+            traverse_ (addEdge lbl . mkRootBlockLabel) vec
 
         Nothing -> debugM DFunctionArgs ("WARNING: No parsed block type at " ++ show lbl) >> return ()
 

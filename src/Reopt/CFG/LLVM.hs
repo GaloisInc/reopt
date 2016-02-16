@@ -26,6 +26,7 @@ import           Control.Monad
 import           Control.Monad.Reader
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.Vector as V 
 import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
@@ -39,7 +40,7 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 
 --------------------------------------------------------------------------------
--- reopt intrinsics
+-- reopt runtime
 --------------------------------------------------------------------------------   
 
 -- FIXME: is False ok here??
@@ -84,6 +85,13 @@ iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
                                              , L.iT 64, L.iT 64
                                              , L.iT 1]
 
+iSystemCall :: L.Typed L.Value
+iSystemCall = intrinsic "reopt.SystemCall" (L.Struct [L.iT 64, L.iT 1]) argTypes
+  where
+    -- the +1 is for the additional syscall no. register, which is
+    -- passed via the stack.
+    argTypes = replicate (length x86SyscallArgumentRegisters + 1) (L.iT 64)
+
 reoptIntrinsics :: [L.Typed L.Value]
 reoptIntrinsics = [ iEvenParity
                   , iRead_X87_RC
@@ -95,7 +103,8 @@ reoptIntrinsics = [ iEvenParity
                   , iRead_GS
                   , iWrite_GS
                   , iMemCopy
-                  , iMemCmp                    
+                  , iMemCmp
+                  , iSystemCall
                   ]
                   
 --------------------------------------------------------------------------------
@@ -153,6 +162,14 @@ funReturnType :: L.Type
 funReturnType = L.Struct $ (map (typeToLLVMType . N.registerType) x86ResultRegisters)
                             ++ (map (typeToLLVMType . N.registerType) x86FloatResultRegisters)
 
+-- | This is a special label used for e.g. table lookup defaults (where we should never reach).
+-- For now it will just loop.
+failLabel :: L.Ident
+failLabel = L.Ident "failure"
+
+makeFailBlock :: BB ()
+makeFailBlock = do L.label failLabel
+                   L.jump  failLabel
 
 -- We have each function return all possible results, although only the ones that are actually
 -- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
@@ -174,7 +191,9 @@ functionToLLVM f = do
           st   = LLVMState { llvmIntArgs   = take nint args
                            , llvmFloatArgs = drop nint args
                            }
-      in runReaderT (runToLLVM (mapM_ blockToLLVM (fnBlocks f))) st
+          makeBlocks = do mapM_ blockToLLVM (fnBlocks f)
+                          liftBB makeFailBlock 
+      in runReaderT (runToLLVM makeBlocks) st
 
 findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
 findReferencedFunctions (FnFunctionEntryValue ft addr) = Map.singleton addr ft
@@ -195,6 +214,10 @@ blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
     goLbl (lbl, node) = do v <- valueToLLVM node
                            return (L.from v (L.Named $ blockName lbl))
 
+-- Pads the given list of values to be the target lenght using undefs
+padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
+padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef))
+
 makeRet :: [ L.Typed L.Value ] -> [ L.Typed L.Value ] -> ToLLVM ()
 makeRet grets frets = do
   -- clang constructs something like
@@ -206,7 +229,6 @@ makeRet grets frets = do
   liftBB $ L.ret v
   where
     initUndef = L.Typed funReturnType L.ValUndef
-    padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef))
     grets'    = padUndef (L.iT 64) (length x86ResultRegisters) grets
     frets'    = padUndef (L.iT 128) (length x86FloatResultRegisters) frets
   
@@ -272,6 +294,24 @@ termStmtToLLVM tm =
                                         (L.extractValue retv (fromIntegral (i + length x86ResultRegisters))))
                                         fretvs
            L.jump (blockName lbl)
+
+     FnSystemCall call_no name args retv cfretv lbl -> do
+       args'  <- mapM valueToLLVM args
+     -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.       
+       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
+                     ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
+       liftBB $ do
+           L.comment name
+           rvar <- L.call iSystemCall allArgs
+           -- Assign all return variables to the extracted result
+           void $ L.assign (assignIdToLLVMIdent $ frAssignId retv)   (L.extractValue rvar 0)
+           void $ L.assign (assignIdToLLVMIdent $ frAssignId cfretv) (L.extractValue rvar 1)
+           L.jump (blockName lbl)
+
+     FnLookupTable idx vec -> do
+         idx' <- valueToLLVM idx
+         let dests = map (blockName . mkRootBlockLabel) $ V.toList vec
+         liftBB $ L.switch idx' failLabel (zip [0..] dests)
          
      FnTermStmtUndefined -> void $ unimplementedInstr L.voidT "FnTermStmtUndefined"
 
@@ -587,15 +627,17 @@ valueToLLVM val =
     FnReturn (FnReturnVar lhs _tp) ->
       mk $ L.ValIdent $ assignIdToLLVMIdent lhs
 
-    -- The entry pointer to a function.
+    -- The entry pointer to a function.  We do the cast as a const
+    -- expr as function addresses appear as constants in e.g. phi
+    -- nodes
     FnFunctionEntryValue ft addr ->
       let fptr :: L.Typed L.Value
           fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol (functionName addr))
-      in liftBB $ L.ptrtoint fptr typ
-      
+      in mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
+         
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->
-      mk $ L.ValLabel $ L.Named $ blockName $ GeneratedBlock addr 0
+      mk $ L.ValLabel $ L.Named $ blockName $ mkRootBlockLabel addr
       
     -- Value is an interget argument passed via a register.
     FnIntArg n -> asks ((!! n) . llvmIntArgs)
