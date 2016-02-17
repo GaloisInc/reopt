@@ -24,6 +24,7 @@ module Reopt.CFG.LLVM (functionToLLVM) where
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
+import           Control.Monad.State
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Vector as V 
@@ -134,14 +135,14 @@ data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
                            , llvmFloatArgs :: [L.Typed L.Value]
                            }
 
-newtype ToLLVM a  = ToLLVM { runToLLVM :: ReaderT LLVMState BB a }
-                    deriving (Applicative, Functor, Monad, MonadReader LLVMState)
+newtype ToLLVM a  = ToLLVM { runToLLVM :: StateT LLVMState BB a }
+                    deriving (Applicative, Functor, Monad, MonadState LLVMState)
 
 liftBB :: BB a -> ToLLVM a
 liftBB = ToLLVM . lift
 
 liftBBF :: (BB a -> BB b) -> ToLLVM a -> ToLLVM b
-liftBBF f v = ToLLVM $ mapReaderT f (runToLLVM v)
+liftBBF f v = ToLLVM $ mapStateT (\bb -> do { (a, s) <- bb; b <- f (return a); return (b, s) }) (runToLLVM v)
 
 functionName :: CodeAddr -> L.Symbol
 functionName addr = L.Symbol $ "F" ++ showHex addr ""
@@ -149,8 +150,20 @@ functionName addr = L.Symbol $ "F" ++ showHex addr ""
 blockName :: BlockLabel -> L.Ident
 blockName = L.Ident . show 
 
+-- The type of FP arguments and results.  We actually want fp128, but
+-- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
+-- into xmm0 on a return, whereas it does for <2 x double>
+
+functionFloatType :: L.Type
+functionFloatType = L.Vector 2 (L.PrimType $ L.FloatType L.Double)
+
+castFromFunctionFloatType, castToFunctionFloatType :: L.Typed L.Value -> BB (L.Typed L.Value)
+castToFunctionFloatType v = L.bitcast v functionFloatType
+castFromFunctionFloatType v = L.bitcast v (L.iT 128)
+
 functionTypeArgTypes :: FunctionType -> [L.Type]
-functionTypeArgTypes ft = replicate (fnNIntArgs ft) (L.iT 64) ++ replicate (fnNFloatArgs ft) (L.iT 128)
+functionTypeArgTypes ft = replicate (fnNIntArgs ft) (L.iT 64)
+                          ++ replicate (fnNFloatArgs ft) functionFloatType
 
 functionTypeReturnType :: FunctionType -> L.Type
 functionTypeReturnType _ = funReturnType
@@ -160,7 +173,7 @@ functionTypeToLLVM ft = L.ptrT (L.FunTy (functionTypeReturnType ft) (functionTyp
 
 funReturnType :: L.Type
 funReturnType = L.Struct $ (map (typeToLLVMType . N.registerType) x86ResultRegisters)
-                            ++ (map (typeToLLVMType . N.registerType) x86FloatResultRegisters)
+                            ++ (replicate (length x86FloatResultRegisters) functionFloatType)
 
 -- | This is a special label used for e.g. table lookup defaults (where we should never reach).
 -- For now it will just loop.
@@ -171,6 +184,18 @@ makeFailBlock :: BB ()
 makeFailBlock = do L.label failLabel
                    L.jump  failLabel
 
+entryLabel :: L.Ident
+entryLabel = L.Ident "entry"
+
+makeEntryBlock :: [FnBlock] -> [L.Typed L.Value] -> ToLLVM ()
+-- No blocks, do nothing (should we return?)
+makeEntryBlock [] _ = return ()
+makeEntryBlock (first:_) fargs = do
+  liftBB $ L.label entryLabel
+  fargs' <- mapM (liftBB . castFromFunctionFloatType) fargs
+  modify (\s -> s { llvmFloatArgs = fargs' })
+  liftBB $ L.jump (blockName $ fbLabel first)
+  
 -- We have each function return all possible results, although only the ones that are actually
 -- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
 functionToLLVM :: Function -> LLVM (L.Typed L.Value)
@@ -189,11 +214,12 @@ functionToLLVM f = do
     go args =
       let nint = fnNIntArgs $ fnType f
           st   = LLVMState { llvmIntArgs   = take nint args
-                           , llvmFloatArgs = drop nint args
+                           , llvmFloatArgs = error "uninitialised float args"
                            }
-          makeBlocks = do mapM_ blockToLLVM (fnBlocks f)
+          makeBlocks = do makeEntryBlock (fnBlocks f) (drop nint args)
+                          mapM_ blockToLLVM (fnBlocks f)
                           liftBB makeFailBlock 
-      in runReaderT (runToLLVM makeBlocks) st
+      in evalStateT (runToLLVM makeBlocks) st
 
 findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
 findReferencedFunctions (FnFunctionEntryValue ft addr) = Map.singleton addr ft
@@ -225,24 +251,16 @@ makeRet grets frets = do
   -- %4 = insertvalue { i64, i64 } %3, i64 %2, 1
   -- ret { i64, i64 } %4
   -- which we will duplicate, with undef padding where required.
+
+  -- cast fp results to the required type
+  cfrets <- mapM (liftBB . castToFunctionFloatType) frets
+  let frets' = padUndef functionFloatType (length x86FloatResultRegisters) cfrets
+  -- construct the return result struct
   v <- ifoldlM (\n acc fld -> liftBB $ L.insertValue acc fld (fromIntegral n)) initUndef (grets' ++ frets')
   liftBB $ L.ret v
   where
     initUndef = L.Typed funReturnType L.ValUndef
     grets'    = padUndef (L.iT 64) (length x86ResultRegisters) grets
-    frets'    = padUndef (L.iT 128) (length x86FloatResultRegisters) frets
-  
--- makeRet []  = liftBB $ L.retVoid
--- makeRet [v] = liftBB $ L.ret v
--- makeRet vs  = do -- clang constructs something like
---                  -- %3 = insertvalue { i64, i64 } undef, i64 %1, 0
---                  -- %4 = insertvalue { i64, i64 } %3, i64 %2, 1
---                  -- ret { i64, i64 } %4
---                  -- which we will duplicate
---                  let retT  = L.Struct (map L.typedType vs)
---                      undef = L.Typed retT L.ValUndef
---                  v <- foldM (\acc (fld, n) -> liftBB $ L.insertValue acc fld n) undef (zip vs [0..])
---                  liftBB $ L.ret v
 
 termStmtToLLVM :: FnTermStmt -> ToLLVM ()
 termStmtToLLVM tm =
@@ -269,17 +287,10 @@ termStmtToLLVM tm =
                           
                    _ -> do dest' <- valueToLLVM dest
                            liftBB $ L.inttoptr dest' fun_ty
-                 
-       args'  <- (++) <$> mapM valueToLLVM gargs <*> mapM valueToLLVM fargs
 
-       -- case length retvs of
-       --   0  -> void $ liftBB $ L.call_ dest_f args'
-       --   _  -> do rvar   <- liftBB $ L.call dest_f args'
-       --            case retvs of
-       --              [Some v] -> void $ liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId v) (return rvar)
-       --              _   -> zipWithM_ (\(Some v) i -> liftBB $ L.assign (assignIdToLLVMIdent $ frAssignId v)
-       --                                               (L.extractValue rvar i))
-       --                     retvs [0..]
+       gargs' <- mapM valueToLLVM gargs
+       fargs' <- mapM (\x -> valueToLLVM x >>= liftBB . castToFunctionFloatType) fargs
+       let args' = gargs' ++ fargs'
 
        retv <- liftBB $ L.call dest_f args'
                  
@@ -289,10 +300,12 @@ termStmtToLLVM tm =
            -- Assign all return variables to the extracted result
            itraverse_ (\i v -> L.assign (assignIdToLLVMIdent $ frAssignId v)
                                         (L.extractValue retv (fromIntegral i)))
-                                        gretvs
-           itraverse_ (\i v -> L.assign (assignIdToLLVMIdent $ frAssignId v)
-                                        (L.extractValue retv (fromIntegral (i + length x86ResultRegisters))))
-                                        fretvs
+                      gretvs
+           itraverse_ (\i v -> do retv' <- L.extractValue retv
+                                              (fromIntegral (i + length x86ResultRegisters))
+                                  L.assign (assignIdToLLVMIdent $ frAssignId v)
+                                           (castFromFunctionFloatType retv'))
+                      fretvs
            L.jump (blockName lbl)
 
      FnSystemCall call_no name args retv cfretv lbl -> do
@@ -640,11 +653,11 @@ valueToLLVM val =
       mk $ L.ValLabel $ L.Named $ blockName $ mkRootBlockLabel addr
       
     -- Value is an interget argument passed via a register.
-    FnIntArg n -> asks ((!! n) . llvmIntArgs)
+    FnIntArg n -> gets ((!! n) . llvmIntArgs)
                      
     -- Value is a function argument passed via a floating point XMM
     -- register.
-    FnFloatArg n -> asks ((!! n) . llvmFloatArgs)
+    FnFloatArg n -> gets ((!! n) . llvmFloatArgs)
     -- A global address
     FnGlobalDataAddr addr -> mk $ L.integer (fromIntegral addr)
   where
