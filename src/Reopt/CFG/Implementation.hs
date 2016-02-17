@@ -412,7 +412,7 @@ instance S.IsValue Expr where
   ssbb_overflows x y c
     | Just 0 <- asBVLit y, Just 0 <- asBVLit c = S.false
       -- If the borrow bit is zero, this is equivalent to signed x < y.
-    | Just 0 <- asBVLit c = app $ BVSignedLt x y
+      -- FIXME: not true? | Just 0 <- asBVLit c = app $ BVSignedLt x y
     | otherwise = app $ SsbbOverflows (exprWidth x) x y c
 
   bsf x = app $ Bsf (exprWidth x) x
@@ -890,6 +890,14 @@ instance S.Semantics X86Generator where
     val_v   <- eval val
     dest_v  <- eval dest
     addStmt (MemSet count_v val_v dest_v)
+
+  find_element sz findEq count buf val is_reverse = do
+    count_v <- eval count
+    buf_v   <- eval buf
+    val_v   <- eval val
+    is_reverse_v <- eval is_reverse
+    ValueExpr . AssignedValue
+      <$> addAssignment (FindElement sz findEq count_v buf_v val_v is_reverse_v)
 
   primitive S.Syscall = do
     X86G $ \_ s0 -> do

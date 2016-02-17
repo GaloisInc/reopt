@@ -263,3 +263,17 @@ executable make_bsd_syscalls
     attoparsec                             
  hs-source-dirs: make_bsd_syscalls
  main-is: Main.hs
+
+executable make_linux_syscalls
+ build-depends:
+    base >= 4,
+    bytestring,     
+    language-c,
+    lens,
+    pretty,
+    containers,
+    pretty-show,
+    attoparsec                             
+ hs-source-dirs: make_linux_syscalls
+ main-is: Main.hs
+ 

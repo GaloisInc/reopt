@@ -1,4 +1,3 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PatternGuards #-}
@@ -11,7 +10,7 @@ module Reopt.CFG.RegisterUse
   ) where
 
 import           Control.Lens
-import           Control.Monad.State -- .Strict
+import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -133,49 +132,7 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 --          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
 --         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
 
--- helper type to make a monad a monoid in the obvious way
-newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
-                               deriving (Functor, Applicative, Monad, MonadState s)
-
-instance Monoid m => Monoid (StateMonadMonoid s m) where
-  mempty = return mempty
-  mappend m m' = do mv <- m
-                    mv' <- m'
-                    return (mappend mv mv')
-
-foldValueCached :: forall m tp. (Monoid m)
-                   => (forall n.  NatRepr n -> Integer -> m)
-                   -> (forall cl. N.RegisterName cl -> m)
-                   -> (forall tp'. Assignment tp' -> m -> m)
-                   -> Value tp -> State (Map (Some Assignment) m) m
-foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
-  where
-    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m
-    go v =
-      case v of
-        BVValue sz i -> return $ litf sz i
-        Initial r    -> return $ initf r
-        AssignedValue asgn@(Assignment _ rhs) ->
-          do m_v <- use (at (Some asgn))
-             case m_v of
-               Just v' -> return $ assignf asgn v'
-               Nothing ->
-                  do rhs_v <- goAssignRHS rhs
-                     at (Some asgn) .= Just rhs_v
-                     return (assignf asgn rhs_v)
-
-    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m
-    goAssignRHS v =
-      case v of
-        EvalApp a -> foldApp go a
-        SetUndefined _w -> mempty
-        Read loc
-         | MemLoc addr _ <- loc -> go addr
-         | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
-        ReadFSBase -> mempty
-        ReadGSBase -> mempty
-        MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
-
+        
 -- ----------------------------------------------------------------------------------------
 
 type RegisterUseM a = State RegisterUseState a

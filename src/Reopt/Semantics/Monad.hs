@@ -1379,6 +1379,26 @@ class ( Applicative m
             -- ^ Pointer to buffer to set
             -> m ()
 
+  -- | Compare the contents of a memory region against a value.  Returns the number of elements which are
+  -- identical (resp. different).  If the direction is 0 then it is
+  -- increasing, otherwise decreasing.
+  find_element :: (1 <= n) =>
+                  Integer
+                  -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+                  -> Bool
+                  -- ^ Find first matching (True) or not matching (False)
+                  -> Value m (BVType 64)
+                  -- ^ Number of elementes to compare
+                  -> Value m (BVType 64)
+                  -- ^ Pointer to first buffer
+                  -> Value m (BVType n)
+                  -- ^ Value to compare
+                  -> Value m BoolType
+                  -- ^ Flag indicates direction of copy:
+                  -- True means we should decrement buffer pointers after each copy.
+                  -- False means we should increment the buffer pointers after each copy.
+                  -> m (Value m (BVType 64))
+
   -- | execute a primitive instruction.
   primitive :: Primitive -> m ()
 

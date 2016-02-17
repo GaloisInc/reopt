@@ -6,6 +6,7 @@
 --
 -- This defines the data types needed to represent X86 control flow graps.
 ------------------------------------------------------------------------
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -51,6 +52,7 @@ module Reopt.CFG.Representation
   , valueAsApp
   , valueType
   , valueWidth
+  , foldValueCached
   , asBaseOffset
   , asInt64Constant
   , asStackAddrOffset
@@ -341,6 +343,23 @@ data AssignRhs tp where
          -- ^ Direction flag, False means increasing
          -> AssignRhs tp
 
+  FindElement :: (tp ~ BVType 64, 1 <= n)
+              => ! Integer
+              -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+              -> !Bool
+              -- ^ Find first matching (True) or not matching (False)
+              -> !(BVValue 64)
+              -- ^ Number of elementes to compare
+              -> !(BVValue 64)
+              -- ^ Pointer to first buffer
+              -> !(BVValue n)
+              -- ^ Value to compare
+              -> !(BVValue 1)
+              -- ^ Flag indicates direction of copy:
+              -- True means we should decrement buffer pointers after each copy.
+              -- False means we should increment the buffer pointers after each copy.
+              -> AssignRhs tp
+
 ------------------------------------------------------------------------
 -- Assignment
 
@@ -381,7 +400,9 @@ ppAssignRhs _  (Read loc) = pure $ pretty loc
 ppAssignRhs _  ReadFSBase = pure $ text "fs.base"
 ppAssignRhs _  ReadGSBase = pure $ text "gs.base"
 ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
-  where args = [pure (pretty sz), pp cnt, pp src, pp dest, pp rev]
+  where args = [pure (pretty sz), pp cnt, pp dest, pp src, pp rev]
+ppAssignRhs pp (FindElement sz fndeq cnt buf val rev) = sexprA "find_element" args
+  where args = [pure (pretty sz), pure (pretty fndeq), pp cnt, pp buf, pp val, pp rev]
 
 instance Pretty (AssignRhs tp) where
   pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) v
@@ -396,6 +417,7 @@ assignRhsType rhs =
     ReadFSBase -> knownType
     ReadGSBase -> knownType
     MemCmp _sz _cnt _src _dest _rev -> knownType
+    FindElement {} -> knownType
 
 ------------------------------------------------------------------------
 -- Value
@@ -979,6 +1001,53 @@ mapApp f m = runIdentity $ traverseApp (return . f) m
 
 foldApp :: Monoid m => (forall u. f u -> m) -> App f tp -> m
 foldApp f m = getConst (traverseApp (\f_u -> Const $ f f_u) m)
+
+
+-- helper type to make a monad a monoid in the obvious way
+newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
+                               deriving (Functor, Applicative, Monad, MonadState s)
+
+instance Monoid m => Monoid (StateMonadMonoid s m) where
+  mempty = return mempty
+  mappend m m' = do mv <- m
+                    mv' <- m'
+                    return (mappend mv mv')
+
+foldValueCached :: forall m tp. (Monoid m)
+                   => (forall n.  NatRepr n -> Integer -> m)
+                   -> (forall cl. N.RegisterName cl -> m)
+                   -> (forall tp'. Assignment tp' -> m -> m)
+                   -> Value tp -> State (Map (Some Assignment) m) m
+foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
+  where
+    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m
+    go v =
+      case v of
+        BVValue sz i -> return $ litf sz i
+        Initial r    -> return $ initf r
+        AssignedValue asgn@(Assignment _ rhs) ->
+          do m_v <- use (at (Some asgn))
+             case m_v of
+               Just v' -> return $ assignf asgn v'
+               Nothing ->
+                  do rhs_v <- goAssignRHS rhs
+                     at (Some asgn) .= Just rhs_v
+                     return (assignf asgn rhs_v)
+
+    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m
+    goAssignRHS v =
+      case v of
+        EvalApp a -> foldApp go a
+        SetUndefined _w -> mempty
+        Read loc
+         | MemLoc addr _ <- loc -> go addr
+         | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
+        ReadFSBase -> mempty
+        ReadGSBase -> mempty
+        MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
+        FindElement _sz _findEq cnt buf val' rev -> mconcat [ go cnt, go buf, go val', go rev ]
+
+
 
 ------------------------------------------------------------------------
 -- Block

@@ -898,28 +898,30 @@ exec_movs False dest_loc _src_loc = do
   dest <- get rdi
   v' <- get $ mkBVAddr sz dest
   exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
-  let szv = bvLit n64 (natValue sz)
-  rsi .= mux df (src  .- szv) (src  .+ szv)
-  rdi .= mux df (dest .- szv) (dest .+ szv)
+  rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
+  rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
   where
     sz = loc_width dest_loc
+    bytesPerOp = bvLit n64 (natValue sz `div` 8)
+    
 exec_movs True dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  let nbytesv = bvLit n64 nbytes
   count <- uext n64 <$> get count_reg
-  let total_bytes = count .* nbytesv
+  let total_bytes = count .* bytesPerOpv
   -- FIXME: we might need direction for overlapping regions
   count_reg .= bvLit (loc_width count_reg) (0::Integer)
-  memcopy nbytes count src dest df
+  memcopy bytesPerOp count src dest df
   rsi .= mux df (src  .- total_bytes) (src  .+ total_bytes)
   rdi .= mux df (dest  .- total_bytes) (dest  .+ total_bytes)
   where
-    count_reg = regLocation sz N.rcx
+    -- FIXME: aso modifies this
+    count_reg = regLocation n64 N.rcx
     sz = loc_width dest_loc
-    nbytes = natValue sz `div` 8
+    bytesPerOp = natValue sz `div` 8
+    bytesPerOpv = bvLit n64 bytesPerOp
 
 -- FIXME: can also take rep prefix
 -- FIXME: we ignore the aso here.
@@ -936,26 +938,28 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
   v_rsi <- get rsi
   v_rdi <- get rdi
   if repz_pfx
-    then do count <- get rcx
+    then do count <- uext n64 <$> get count_reg
             ifte_ (count .=. bvKLit 0)
               (return ())
               (do_memcmp df v_rsi v_rdi count)
     else do v' <- get $ mkBVAddr sz v_rdi
             exec_cmp (mkBVAddr sz v_rsi) v' -- FIXME: right way around?
-            rsi .= mux df (v_rsi  `bvSub` szv) (v_rsi `bvAdd` szv)
-            rdi .= mux df (v_rdi  `bvSub` szv) (v_rdi `bvAdd` szv)
+            rsi .= mux df (v_rsi  `bvSub` bytesPerOp') (v_rsi `bvAdd` bytesPerOp')
+            rdi .= mux df (v_rdi  `bvSub` bytesPerOp') (v_rdi `bvAdd` bytesPerOp')
   where
+    -- FIXME: aso modifies this
+    count_reg = regLocation n64 N.rcx    
     sz  = loc_width loc_rsi
-    szv = bvLit n64 $ natValue sz
-    nbytes = natValue sz `div` 8
+    bytesPerOp' = bvLit n64 bytesPerOp
+    bytesPerOp = natValue sz `div` 8
 
     do_memcmp df src dest count = do
-      nsame <- memcmp nbytes count src dest df
+      nsame <- memcmp bytesPerOp count src dest df
       let equal = (nsame .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
       -- we need to set the flags as if the last comparison was done, hence this.
-      let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` szv
+      let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` bytesPerOp'
           lastSrc  = mux df (src  `bvSub` lastWordBytes) (src  `bvAdd` lastWordBytes)
           lastDest = mux df (dest `bvSub` lastWordBytes) (dest `bvAdd` lastWordBytes)
 
@@ -964,15 +968,72 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 
       -- we do this to make it obvious so repz cmpsb ; jz ... is clear
       zf_loc .= equal
-      let nbytes' = nwordsSeen `bvMul` (bvLit n64 $ natValue sz `div` 8)
+      let nbytesSeen = nwordsSeen `bvMul` bytesPerOp'
 
-      rsi .= mux df (src  `bvSub` nbytes') (src  `bvAdd` nbytes')
-      rdi .= mux df (dest `bvSub` nbytes') (dest `bvAdd` nbytes')
+      rsi .= mux df (src  `bvSub` nbytesSeen) (src  `bvAdd` nbytesSeen)
+      rdi .= mux df (dest `bvSub` nbytesSeen) (dest `bvAdd` nbytesSeen)
       rcx .= (count .- nwordsSeen)
 
 -- SCAS/SCASB Scan string/Scan byte string
 -- SCAS/SCASW Scan string/Scan word string
 -- SCAS/SCASD Scan string/Scan doubleword string
+
+-- The arguments to this are always rax/QWORD PTR es:[rdi], so we only
+-- need the args for the size.
+exec_scas :: (IsLocationBV m n, n <= 64)
+          => Bool -- Flag indicating if RepZPrefix appeared before instruction
+          -> Bool -- Flag indicating if RepNZPrefix appeared before instruction             
+          -> MLocation m (BVType n)
+          -> MLocation m (BVType n)
+          -> m ()
+exec_scas True True _val_loc _cmp_loc = error "Can't have both Z and NZ prefix"
+
+-- single operation case
+exec_scas False False val_loc _cmp_loc = do
+  df <- get df_loc  
+  v_rdi <- get rdi
+  v_rax <- get val_loc
+  exec_cmp (mkBVAddr sz v_rdi) v_rax  -- FIXME: right way around?
+  rdi   .= mux df (v_rdi  `bvSub` bytesPerOp) (v_rdi `bvAdd` bytesPerOp)
+  where
+    sz = loc_width val_loc
+    bytesPerOp = bvLit n64 $ natValue sz `div` 8
+  
+-- repz or repnz prefix set
+exec_scas _repz_pfx repnz_pfx val_loc _cmp_loc = do
+  -- The direction flag indicates post decrement or post increment.
+  df    <- get df_loc
+  v_rdi <- get rdi
+  v_rax <- get val_loc
+
+  count <- uext n64 <$> get count_reg
+  ifte_ (count .=. bvKLit 0)
+    (return ())
+    (do_scas df v_rdi v_rax count)
+  where
+    sz = loc_width val_loc
+    -- FIXME: aso modifies this
+    count_reg = regLocation n64 N.rcx
+    bytesPerOp' = bvLit n64 bytesPerOp
+    bytesPerOp  = natValue sz `div` 8
+    
+    do_scas df v_rdi val count = do
+      nseen <- find_element bytesPerOp repnz_pfx count v_rdi val df
+                                
+      let equal = (nseen .=. count)
+          nwordsSeen = mux equal count (count `bvSub` (nseen `bvAdd` bvKLit 1))
+
+      -- we need to set the flags as if the last comparison was done, hence this.
+      let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` bytesPerOp'
+          lastRdi  = mux df (v_rdi  `bvSub` lastWordBytes) (v_rdi  `bvAdd` lastWordBytes)
+          
+      exec_cmp (mkBVAddr sz lastRdi) val
+      
+      let nbytesSeen = nwordsSeen `bvMul` bytesPerOp'
+      
+      rdi .= mux df (v_rdi  `bvSub` nbytesSeen) (v_rdi `bvAdd` nbytesSeen)
+      rcx .= (count .- nwordsSeen)
+
 -- LODS/LODSB Load string/Load byte string
 -- LODS/LODSW Load string/Load word string
 -- LODS/LODSD Load string/Load doubleword string
@@ -1014,6 +1075,7 @@ exec_stos True _dest_loc val_loc = do
             rcx .= bvKLit 0)
   where
     sz = loc_width val_loc
+    -- FIXME: aso modifies this
     count_reg = regLocation n64 N.rcx
 
 

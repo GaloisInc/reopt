@@ -282,8 +282,14 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                 $ \pfx dest_loc src_loc ->
                    case testLeq (loc_width dest_loc) n64 of
                     Just LeqProof -> exec_stos (pfx == F.RepPrefix) dest_loc src_loc
-                    Nothing       -> fail "Argument to movs is too large"
+                    Nothing       -> fail "Argument to stos is too large"
 
+              , mk "scas" $ mkBinopPfxLL
+                $ \pfx val_loc buf_loc ->
+                   case testLeq (loc_width val_loc) n64 of
+                    Just LeqProof -> exec_scas (pfx == F.RepZPrefix ) (pfx == F.RepNZPrefix) val_loc buf_loc
+                    Nothing       -> fail "Argument to scass is too large"
+                   
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
@@ -574,9 +580,23 @@ mkUnop :: FullSemantics m
           => (F.Value -> m a)
           -> (F.LockPrefix, [F.Value])
           -> m a
-mkUnop f (_, vs) = case vs of
-                     [v]   -> f v
-                     _     -> fail $ "expecting 1 arguments, got " ++ show (length vs)
+mkUnop f = mkUnopPfx (\_ -> f)
+
+mkUnopPfx :: FullSemantics m
+          => (F.LockPrefix -> F.Value -> m a)
+          -> (F.LockPrefix, [F.Value])
+          -> m a
+mkUnopPfx f (pfx, vs) = case vs of
+                       [v]   -> f pfx v
+                       _     -> fail $ "expecting 1 arguments, got " ++ show (length vs)
+
+_mkUnopPfxL ::  Semantics m
+           => (forall n. (IsLocationBV m n, 1 <= n) =>
+               F.LockPrefix -> MLocation m (BVType n) -> m a)
+           -> (F.LockPrefix, [F.Value]) -> m a
+_mkUnopPfxL f = mkUnopPfx $ \pfx loc -> do
+  SomeBV l <- getSomeBVLocation loc
+  f pfx l
 
 mkBinopLV ::  Semantics m
         => (forall n n'. (IsLocationBV m n, 1 <= n')

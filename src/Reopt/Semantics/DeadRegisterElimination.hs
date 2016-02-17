@@ -95,6 +95,11 @@ refsInAssignRhs rhs = case rhs of
                                   , refsInValue src
                                   , refsInValue dest
                                   , refsInValue dir ]
+                       FindElement _ _ cnt buf val dir ->
+                         S.unions [ refsInValue cnt
+                                  , refsInValue buf
+                                  , refsInValue val
+                                  , refsInValue dir ]
 
 refsInApp :: App Value tp -> Set AssignId
 refsInApp app = foldApp refsInValue app

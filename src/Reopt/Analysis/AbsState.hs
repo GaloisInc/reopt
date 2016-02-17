@@ -1066,3 +1066,7 @@ transferRHS r rhs =
       | Just upper <- hasMaximum knownType (transferValue r cnt)
         -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
       | otherwise -> TopV
+    FindElement _sz _findEq cnt _buf _val _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt)
+        -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+      | otherwise -> TopV
