@@ -160,9 +160,9 @@ type MachineCtx = EmptyCtx ::> Heap ::> GPRs ::> Flags ::> PC
 type MachineState = C.StructType MachineCtx
 type MachineStateCtx = EmptyCtx ::> MachineState
 
-machineCtx = C.ctxRepr :: C.CtxRepr MachineCtx
+machineCtx = C.knownRepr :: C.CtxRepr MachineCtx
 machineState = C.StructRepr machineCtx :: C.TypeRepr MachineState
-machineStateCtx = C.ctxRepr :: C.CtxRepr MachineStateCtx
+machineStateCtx = C.knownRepr :: C.CtxRepr MachineStateCtx
 
 -- | Instruction pointer / program counter
 curIP :: Simple Lens (G.Expr s MachineState) (G.Expr s PC)
@@ -195,7 +195,7 @@ reg64Regs = lens getter setter
 heap :: Simple Lens (G.Expr s MachineState) (G.Expr s Heap)
 heap = lens getter setter
   where
-    getter st     = G.App $ C.GetStruct st idx (Cr.typeRepr :: Cr.TypeRepr Heap) --  (C.ArrayRepr (C.BVRepr n64) (C.BVRepr n8))
+    getter st     = G.App $ C.GetStruct st idx (Cr.knownRepr :: Cr.TypeRepr Heap) --  (C.ArrayRepr (C.BVRepr n64) (C.BVRepr n8))
     setter st val = G.App $ C.SetStruct machineCtx st idx val
     idx :: Ctx.Index MachineCtx Heap
     idx = skip . skip . skip $ nextIndex $ zeroSize
@@ -313,8 +313,8 @@ generateStmt ms getLabel stmt@(l := e) = case l of
       Just Refl -> do
         e' <- fmap (runReader (translateExpr' e)) get
         addr' <- fmap (runReader (translateExpr' addr)) get
-        let idx = Ctx.singleton (C.IndexTerm C.indexTypeRepr addr')
-        let upd hp = G.App $ C.SymArrayUpdate C.baseTypeRepr hp idx e'
+        let idx = Ctx.singleton (C.BaseTerm C.knownRepr addr')
+        let upd hp = G.App $ C.SymArrayUpdate C.knownRepr hp idx e'
         G.modifyReg ms (heap %~ upd)
 
   _ -> return () -- error "assign subregister unimplemented"
@@ -378,9 +378,9 @@ translateLocGet ms (S.MemoryAddr addr (S.BVTypeRepr nr)) = do
   h <- (^. heap) <$> G.readReg ms
   addr' <- fmap (runReader (translateExpr' addr)) get
   asPosNat nr $ do
-     let idx = Ctx.singleton (C.IndexTerm C.indexTypeRepr addr')
+     let idx = Ctx.singleton (C.BaseTerm C.knownRepr addr')
          v :: C.App (G.Expr s) (C.BVType 8)
-         v  = C.SymArrayLookup C.baseTypeRepr h idx
+         v  = C.SymArrayLookup C.knownRepr h idx
          v' = case testNatCases nr n8 of
                 NatCaseLT LeqProof -> (C.BVTrunc nr n8 (G.App v))
                 NatCaseEQ     -> v
@@ -624,7 +624,7 @@ translateVar (Variable tr name) =
 type ArgTys = EmptyCtx ::> C.BVType 32
 type RetTy = C.BVType 32
 
-argTypes = C.ctxRepr :: C.CtxRepr ArgTys
+argTypes = C.knownRepr :: C.CtxRepr ArgTys
 retType  = C.BVRepr n32 :: C.TypeRepr RetTy
 
 gen1 :: Assignment (G.Atom s) ArgTys -> G.Generator s t RetTy a

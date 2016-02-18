@@ -770,7 +770,7 @@ mergeObject orig_binary obj_header redirs mkJump = do
   let new_data_seg_file_size =
         case mbss_section_index of
           Nothing -> post_data_sec_size
-          Just i -> post_data_sec_size `fixAlignment` elfSectionAddrAlign s
+          Just i -> post_data_sec_size `fixAlignment` elfSectionAddrAlign
             where s = (sections V.! i)
 
 
