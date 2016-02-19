@@ -1,18 +1,18 @@
 
 module Reopt.Machine.SysDeps.FreeBSD
-       ( syscallTypeInfo
-       , SyscallArgType (..)
-       , module Reopt.Machine.SysDeps.Types
+       ( syscallPersonality
        ) where
 
-import qualified Data.Map as Map
-import           Data.Word
+import           Data.Parameterized.Some
 
 import           Reopt.Machine.SysDeps.FreeBSDGenerated (syscallInfo)
 import           Reopt.Machine.SysDeps.Types
+import qualified Reopt.Machine.StateNames as N
 
--- We might want to export more later, hence we export this function
--- instead of just the map
-syscallTypeInfo :: Word64 -> Maybe SyscallTypeInfo
-syscallTypeInfo k = Map.lookup k syscallInfo
+syscallPersonality :: SyscallPersonality
+syscallPersonality =
+  SyscallPersonality { spName = "FreeBSD"
+                     , spTypeInfo = syscallInfo
+                     , spResultRegisters = [ Some N.rax, Some N.cf ]
+                     }
 

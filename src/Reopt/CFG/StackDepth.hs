@@ -276,7 +276,7 @@ recoverBlock interp_state root_label = do
         Just (ParsedReturn _proc_state stmts') -> do
             traverse_ goStmt stmts'
 
-        Just (ParsedSyscall proc_state next_addr _call_no _name _argRegs) -> do 
+        Just (ParsedSyscall proc_state next_addr _call_no _name _argRegs _rregs) -> do 
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 

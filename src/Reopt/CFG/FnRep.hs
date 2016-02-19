@@ -36,9 +36,10 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import qualified Data.Vector as V
 
+import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Classes
+import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
@@ -322,7 +323,7 @@ data FnTermStmt
      -- returns to the label.
      
      -- FIXME: specialized to BSD's (broken) calling convention     
-   | FnSystemCall !Word64 !String [(FnValue (BVType 64))] !(FnReturnVar (BVType 64)) !(FnReturnVar BoolType) BlockLabel
+   | FnSystemCall !Word64 !String [(FnValue (BVType 64))] ![ Some FnReturnVar ] BlockLabel
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector CodeAddr)
    | FnTermStmtUndefined
 
@@ -338,9 +339,9 @@ instance Pretty FnTermStmt where
          in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
-      FnSystemCall _call_no name args ret cfret lbl ->
+      FnSystemCall _call_no name args rets lbl ->
         let arg_docs = (pretty <$> args)
-            ret_docs = [pretty ret, pretty cfret]
+            ret_docs = viewSome pretty <$> rets
          in parens (commas ret_docs)
             <+> text ":=" <+> text "syscall"
             <+> text name <> parens (commas arg_docs) <+> pretty lbl                       
@@ -354,7 +355,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f (FnRet (grets, frets)) = mconcat (map f grets ++ map f frets)
   foldFnValue f (FnCall fn (gargs, fargs) _ _) =
     f fn `mappend` mconcat (map f gargs ++ map f fargs)
-  foldFnValue f (FnSystemCall _call_no _name args _ret _cfret _lbl) =
+  foldFnValue f (FnSystemCall _call_no _name args _rets _lbl) =
     mconcat (map f args)
   foldFnValue f (FnLookupTable idx _) = f idx
   foldFnValue _f (FnTermStmtUndefined {}) = mempty

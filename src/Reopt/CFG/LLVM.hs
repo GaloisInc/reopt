@@ -34,6 +34,7 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
@@ -86,6 +87,7 @@ iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
                                              , L.iT 64, L.iT 64
                                              , L.iT 1]
 
+-- FIXME: use personalities
 iSystemCall :: L.Typed L.Value
 iSystemCall = intrinsic "reopt.SystemCall" (L.Struct [L.iT 64, L.iT 1]) argTypes
   where
@@ -275,8 +277,8 @@ termStmtToLLVM tm =
        liftBB $ L.br cond' (blockName tlbl) (blockName flbl)
        
      FnCall dest (gargs, fargs) (gretvs, fretvs) contlbl -> do
-       let arg_tys = (map (typeToLLVMType . fnValueType) gargs)
-                     ++ (map (typeToLLVMType . fnValueType) fargs)
+       let arg_tys = replicate (length gargs) (L.iT 64)
+                     ++ replicate (length fargs) functionFloatType
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
            
@@ -308,17 +310,20 @@ termStmtToLLVM tm =
                       fretvs
            L.jump (blockName lbl)
 
-     FnSystemCall call_no name args retv cfretv lbl -> do
+     FnSystemCall call_no name args rets lbl -> do
        args'  <- mapM valueToLLVM args
      -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.       
        let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
                      ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
+                     
        liftBB $ do
            L.comment name
            rvar <- L.call iSystemCall allArgs
            -- Assign all return variables to the extracted result
-           void $ L.assign (assignIdToLLVMIdent $ frAssignId retv)   (L.extractValue rvar 0)
-           void $ L.assign (assignIdToLLVMIdent $ frAssignId cfretv) (L.extractValue rvar 1)
+           itraverse_ (\i (Some v) ->
+                        void $ L.assign (assignIdToLLVMIdent $ frAssignId v)
+                                        (L.extractValue rvar $ fromIntegral i))
+                      rets
            L.jump (blockName lbl)
 
      FnLookupTable idx vec -> do

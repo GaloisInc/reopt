@@ -46,12 +46,15 @@ import           Data.Type.Equality
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
+import           Text.PrettyPrint.ANSI.Leijen (pretty)
                  
+import           Data.Parameterized.Some
+
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.SysDeps.FreeBSD
+import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
 
@@ -140,7 +143,7 @@ data ParsedTermStmt
    | ParsedReturn !(X86State Value) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
-   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String ![N.RegisterName 'N.GP]
+   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String ![N.RegisterName 'N.GP] ![Some N.RegisterName]
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -151,6 +154,8 @@ data InterpState
                    memory   :: !(Memory Word64)
                    -- | The set of symbol names (not necessarily complete)
                  , symbolNames :: Map CodeAddr String
+                   -- | Syscall personailty, mainly used by getClassifyBlock etc.
+                 , syscallPersonality :: SyscallPersonality
                    -- | State used for generating blocks.
                  , _genState :: !GlobalGenState
                    -- | Intervals maps code addresses to blocks at address
@@ -180,10 +185,14 @@ data InterpState
                  }
 
 -- | Empty interpreter state.
-emptyInterpState :: Memory Word64 -> Map CodeAddr String -> InterpState
-emptyInterpState mem symbols = InterpState
+emptyInterpState :: Memory Word64
+                 -> Map CodeAddr String
+                 -> SyscallPersonality
+                 -> InterpState
+emptyInterpState mem symbols sysp = InterpState
       { memory        = mem
       , symbolNames   = symbols
+      , syscallPersonality = sysp
       , _genState     = emptyGlobalGenState
       , _blocks       = Map.empty
       , _functionEntries = Set.empty
@@ -364,9 +373,11 @@ classifyBlock b interp_state =
     Syscall proc_state
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
-      , Just (name, _rettype, argtypes) <- syscallTypeInfo call_no ->
+      , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
          let result = Just (ParsedSyscall proc_state next_addr call_no name
-                            (take (length argtypes) x86SyscallArgumentRegisters))
+                            (take (length argtypes) x86SyscallArgumentRegisters)
+                            (spResultRegisters sysp)
+                           )
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
               _ | length argtypes > length x86SyscallArgumentRegisters -> 
@@ -374,9 +385,18 @@ classifyBlock b interp_state =
                                  ++ " in block " ++ show (blockLabel b))
                                 result 
               _ -> result
-      | otherwise -> debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)) Nothing
+      | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip ->
+          debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
+                         ++ " rax is " ++ show (pretty $ proc_state^.register N.rax)
+                        )
+          Just (ParsedSyscall proc_state next_addr 0 "unknown"
+                             x86SyscallArgumentRegisters
+                             (spResultRegisters sysp)
+               )
+      | otherwise -> error "shouldn't get here"          
   where
     mem = memory interp_state
+    sysp = syscallPersonality interp_state
 
 getClassifyBlock :: BlockLabel -> InterpState ->  Maybe (Block, Maybe ParsedTermStmt)
 getClassifyBlock lbl interp_state = do

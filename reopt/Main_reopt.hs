@@ -40,6 +40,7 @@ import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.SysDeps
 import           Reopt.Machine.Types
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
@@ -463,7 +464,7 @@ ppBlockAndAbs m b =
             pretty (blockTerm b))
 
 mkFinalCFGWithSyms :: Memory Word64 -> Elf Word64 -> (FinalCFG, Map CodeAddr String)
-mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map (elfEntry e:sym_addrs), sym_map)
+mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs), sym_map)
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   where sym_assocs = [ (steValue ste, steName ste)
                      | ste <- concat (parseSymbolTables e)
@@ -473,6 +474,14 @@ mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map (elfEntry e:sym_addrs), sym
         sym_addrs = map fst sym_assocs
         sym_map   = Map.fromList sym_assocs
 
+        -- FIXME: just everything.
+        Just sysp =
+          case elfOSABI e of
+            ELFOSABI_LINUX   -> Map.lookup "linux" sysDeps            
+            ELFOSABI_SYSV    -> Map.lookup "linux" sysDeps
+            ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
+            abi                -> error $ "Unknown OSABI: " ++ show abi
+            
 mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
 mkFinalCFG mem e = fst (mkFinalCFGWithSyms mem e)
 

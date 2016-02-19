@@ -56,7 +56,10 @@ library
     Reopt.Machine.X86State
     Reopt.Machine.SysDeps.FreeBSD
     Reopt.Machine.SysDeps.FreeBSDGenerated
+    Reopt.Machine.SysDeps.Linux
+    Reopt.Machine.SysDeps.LinuxGenerated                  
     Reopt.Machine.SysDeps.Types
+    Reopt.Machine.SysDeps                  
     Reopt.Object.Loader
     Reopt.Object.Memory
     Reopt.Concrete.BitVector

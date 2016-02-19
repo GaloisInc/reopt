@@ -57,6 +57,7 @@ import           Reopt.CFG.StackArgs
 import           Reopt.CFG.StackDepth
 import           Reopt.CFG.FunctionArgs
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug
@@ -1001,12 +1002,16 @@ addrInJumpTable s a =
     _ -> False
 
 cfgFromAddrs :: Memory Word64
-             -> Map CodeAddr String
                 -- ^ Memory to use when decoding instructions.
+             -> Map CodeAddr String
+                -- ^ Names for (some) function entry points
+             -> SyscallPersonality
+                -- ^ Syscall personality
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> FinalCFG
-cfgFromAddrs mem symbols init_addrs = debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
+cfgFromAddrs mem symbols sysp init_addrs =
+  debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ g
   where
 --    fn = recoverFunction s3 0x422b10
 --    0x422030
@@ -1029,7 +1034,7 @@ cfgFromAddrs mem symbols init_addrs = debug DCFG ("Starting addrs " ++ show (Hex
                      ]
 
 
-    s0 = emptyInterpState mem symbols
+    s0 = emptyInterpState mem symbols sysp
        & functionEntries .~ Set.fromList init_addrs
        & absState .~ init_abs_state
        & function_frontier .~ Set.fromList init_addrs

@@ -29,7 +29,6 @@ import           Control.Lens
 import           Control.Monad.Error
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (toList, traverse_)
-import           Data.List (elemIndex, elemIndex)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe)
@@ -53,7 +52,6 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug
-
 
 ------------------------------------------------------------------------
 -- StackDelta
@@ -282,7 +280,9 @@ recoverFunction fArgs s a = do
                  & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnIntArg i)))) (ftIntArgRegs cft)
                  & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnFloatArg i)))) (ftFloatArgRegs cft)
                  & flip (foldr (\(Some r) -> MapF.insert r (CalleeSaved r))) x86CalleeSavedRegisters
-
+                 -- FIXME: check this somehow? Also true on function exit.
+                 & MapF.insert (N.df) (FnRegValue (FnConstantValue n1 0)) -- df is 0 at function start ...
+  
   let rs = RS { _rsInterp = s
               , _rsNextAssignId = 0
               , _rsCurLabel  = lbl
@@ -444,15 +444,15 @@ recoverBlock blockRegProvides phis lbl = do
           go m (Some r) = do
              v <- case r of
                N.GPReg {}
-                 | Just i <- elemIndex r x86ResultRegisters
-                 , i < fnNIntRets ft -> return $ FnReturn $ intrs !! i
+                 | Just rv <- lookup r (zip x86ArgumentRegisters intrs)
+                   -> return $ FnReturn rv
                  | Just _ <- testEquality r N.rsp -> do
                      spv <- recoverRegister proc_state N.rsp
                      mkAddAssign $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
 
                N.XMMReg {}
-                 | Just i <- elemIndex r x86FloatResultRegisters
-                 , i < fnNFloatRets ft -> return $ FnReturn $ floatrs !! i
+                 | Just rv <- lookup r (zip x86FloatResultRegisters floatrs)
+                   -> return $ FnReturn rv
                                                   
                _ | Some r `Set.member` x86CalleeSavedRegisters -> recoverRegister proc_state r
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
@@ -500,14 +500,26 @@ recoverBlock blockRegProvides phis lbl = do
         
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    Just (ParsedSyscall proc_state next_addr call_no name args) -> do
+    Just (ParsedSyscall proc_state next_addr call_no name args rregs) -> do
       Fold.traverse_ recoverStmt (blockStmts b)
-
-      intr     <- mkReturnVar (knownType :: TypeRepr (BVType 64))
-      -- BSD (only freebsd?) uses the cf to indicate whether there was
-      -- an error in the system call.
-      cfr     <- mkReturnVar (knownType :: TypeRepr BoolType)
       
+      let mkRet :: MapF N.RegisterName FnRegValue
+                -> Some N.RegisterName
+                -> Recover (MapF N.RegisterName FnRegValue)
+          mkRet m (Some r) = do
+            rv <- mkReturnVar (N.registerType r)
+            return $ MapF.insert r (FnRegValue $ FnReturn rv) m
+
+      initMap <- foldM mkRet MapF.empty rregs
+
+      -- pull the return variables out of initMap (in order of rregs)
+      let getVar :: Maybe (FnRegValue cl) -> FnReturnVar (N.RegisterType cl)
+          getVar (Just (FnRegValue (FnReturn rv))) = rv
+          getVar _ = error "impossible"
+
+      let rets :: [Some FnReturnVar]
+          rets = map (\(Some r) -> Some $ getVar $ MapF.lookup r initMap) rregs
+
       -- Figure out what is preserved across the system call.  Subtly
       -- different to that for function calls :(
       let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
@@ -515,23 +527,26 @@ recoverBlock blockRegProvides phis lbl = do
           go m (Some r) = do 
              v <- case r of
                N.GPReg {}
-                 | Just Refl <- testEquality r N.rax -> return (FnReturn intr)
                  | Just _ <- testEquality r N.rsp -> do
                      recoverRegister proc_state N.rsp                     
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverRegister proc_state r
-               _ | Just Refl <- testEquality r N.cf -> return (FnReturn cfr)
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
 
-      let Just provides = Map.lookup lbl blockRegProvides
-      regs' <- foldM go MapF.empty provides 
+          
+      let m_provides = Map.lookup lbl blockRegProvides
+          provides   = case m_provides of
+                         Just p -> p
+                         Nothing -> debug DFunRecover ("No blockRegProvides at " ++ show lbl) mempty
+                         
+      regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
       
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
-      
-      fb <- mkBlock (FnSystemCall call_no name args' intr cfr (mkRootBlockLabel next_addr))
+                
+      fb <- mkBlock (FnSystemCall call_no name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
     Just (ParsedLookupTable proc_state idx vec) -> do
