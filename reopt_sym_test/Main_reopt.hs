@@ -244,11 +244,11 @@ test args = do
         arg <- I.freshConstant sym emptySymbol (C.BaseBVRepr knownNat)
         -- Run cfg1
         rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
-          let rMap = assignReg C.typeRepr arg emptyRegMap
+          let rMap = assignReg C.knownRepr arg emptyRegMap
           regValue <$> callCFG cfg1 rMap
         -- Run cfg2
         rr2 <- MSS.run ctx emptyGlobals defaultErrorHandler retType $ do
-          let rMap = assignReg C.typeRepr arg emptyRegMap
+          let rMap = assignReg C.knownRepr arg emptyRegMap
           regValue <$> callCFG cfg2 rMap
         -- Compare
         case (rr1,rr2) of

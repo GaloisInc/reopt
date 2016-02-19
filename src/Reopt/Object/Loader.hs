@@ -42,7 +42,7 @@ memoryForElfSegments e =
     execStateT (mapM_ (insertElfSegment contents) phdrs) emptyMemory
   where l = elfLayout e
         contents = L.toStrict (elfLayoutBytes l)
-        phdrs    = F.toList (allPhdrs l)
+        phdrs    = allPhdrs l
 
 -- | Load an elf file into memory.
 insertElfSegment :: (ElfWidth w, MonadState (Memory w) m)

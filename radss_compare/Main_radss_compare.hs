@@ -413,12 +413,12 @@ simulate name (C.SomeCFG cfg1) (C.SomeCFG cfg2) halloc ripRel gprRel = do
     (initGprs1, initGprs2) <- mkInitialGPRs gprRel sym n4 n64 [0..15]
     flags  <- I.emptyWordMap sym n5 (C.BaseBVRepr n1)
     flags' <- foldM (initWordMap sym n5 n1) flags [0..31]
-    pc     <- I.freshConstant sym emptySymbol (C.BaseBVRepr n64)
-    heap   <- I.freshConstant sym emptySymbol C.baseTypeRepr
+    pc     <- I.freshConstant sym emptySymbol C.knownRepr
+    heap   <- I.freshConstant sym emptySymbol C.knownRepr
     let struct1 = Ctx.empty %> (RV heap) %> (RV initGprs1) %> (RV flags') %> (RV pc)
         struct2 = Ctx.empty %> (RV heap) %> (RV initGprs2) %> (RV flags') %> (RV pc)
-        initialRegMap1 = assignReg C.typeRepr struct1 emptyRegMap
-        initialRegMap2 = assignReg C.typeRepr struct2 emptyRegMap
+        initialRegMap1 = assignReg C.knownRepr struct1 emptyRegMap
+        initialRegMap2 = assignReg C.knownRepr struct2 emptyRegMap
     -- Run cfg1
     rr1 <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
       regValue <$> callCFG cfg1 initialRegMap1

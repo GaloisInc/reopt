@@ -292,12 +292,12 @@ simulate pfx m_out name (C.SomeCFG cfg) halloc = do
     dummyPC <- I.freshConstant sym (mkN "dummyPC") (C.BaseBVRepr n64)
 
     heap      <- I.freshConstant sym (mkN "heap") $
-      C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
+      C.BaseArrayRepr (Ctx.singleton C.knownRepr) C.knownRepr
     dummyHeap <- I.freshConstant sym (mkN "dummyHeap") $
-      C.BaseArrayRepr (Ctx.singleton C.indexTypeRepr) C.baseTypeRepr
+      C.BaseArrayRepr (Ctx.singleton C.knownRepr) C.knownRepr
 
     let struct        = Ctx.empty %> (RV heap) %> (RV initGprs) %> (RV flags') %> (RV pc)
-        initialRegMap = assignReg C.typeRepr struct emptyRegMap
+        initialRegMap = assignReg C.knownRepr struct emptyRegMap
     -- Run cfg1
     rr <- MSS.run ctx emptyGlobals defaultErrorHandler machineState $ do
          regValue <$> callCFG cfg initialRegMap

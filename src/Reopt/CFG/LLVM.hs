@@ -27,7 +27,7 @@ import           Control.Monad.Reader
 import           Control.Monad.State
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import qualified Data.Vector as V 
+import qualified Data.Vector as V
 import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
@@ -43,13 +43,13 @@ import           Reopt.Machine.Types
 
 --------------------------------------------------------------------------------
 -- reopt runtime
---------------------------------------------------------------------------------   
+--------------------------------------------------------------------------------
 
 -- FIXME: is False ok here??
-intrinsic :: String -> L.Type -> [L.Type] -> L.Typed L.Value 
+intrinsic :: String -> L.Type -> [L.Type] -> L.Typed L.Value
 intrinsic name res args =
   (L.ptrT $ L.FunTy res args False) L.-: L.Symbol name
-  
+
 iEvenParity :: L.Typed L.Value
 iEvenParity = intrinsic "reopt.EvenParity" (L.iT 1) [L.iT 8]
 
@@ -109,7 +109,7 @@ reoptIntrinsics = [ iEvenParity
                   , iMemCmp
                   , iSystemCall
                   ]
-                  
+
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
 --------------------------------------------------------------------------------
@@ -127,10 +127,10 @@ llvmIntrinsics = [ intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppT
 declareIntrinsic :: L.Typed L.Value -> LLVM ()
 declareIntrinsic (L.Typed (L.PtrTo (L.FunTy rty argtys _)) (L.ValSymbol sym))
   = void $ L.declare rty sym argtys False
-declareIntrinsic _ = error "Not an intrinsic"    
+declareIntrinsic _ = error "Not an intrinsic"
 
 --------------------------------------------------------------------------------
--- conversion to LLVM 
+-- conversion to LLVM
 --------------------------------------------------------------------------------
 
 data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
@@ -150,7 +150,7 @@ functionName :: CodeAddr -> L.Symbol
 functionName addr = L.Symbol $ "F" ++ showHex addr ""
 
 blockName :: BlockLabel -> L.Ident
-blockName = L.Ident . show 
+blockName = L.Ident . show
 
 -- The type of FP arguments and results.  We actually want fp128, but
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
@@ -197,7 +197,7 @@ makeEntryBlock (first:_) fargs = do
   fargs' <- mapM (liftBB . castFromFunctionFloatType) fargs
   modify (\s -> s { llvmFloatArgs = fargs' })
   liftBB $ L.jump (blockName $ fbLabel first)
-  
+
 -- We have each function return all possible results, although only the ones that are actually
 -- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
 functionToLLVM :: Function -> LLVM (L.Typed L.Value)
@@ -211,7 +211,7 @@ functionToLLVM f = do
   where
     argTypes      = functionTypeArgTypes (fnType f)
     retType       = functionTypeReturnType (fnType f)
-    
+
     symbol        = functionName (fnAddr f)
     go args =
       let nint = fnNIntArgs $ fnType f
@@ -220,7 +220,7 @@ functionToLLVM f = do
                            }
           makeBlocks = do makeEntryBlock (fnBlocks f) (drop nint args)
                           mapM_ blockToLLVM (fnBlocks f)
-                          liftBB makeFailBlock 
+                          liftBB makeFailBlock
       in evalStateT (runToLLVM makeBlocks) st
 
 findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
@@ -275,18 +275,18 @@ termStmtToLLVM tm =
      FnBranch cond tlbl flbl -> do
        cond' <- valueToLLVM cond
        liftBB $ L.br cond' (blockName tlbl) (blockName flbl)
-       
+
      FnCall dest (gargs, fargs) (gretvs, fretvs) contlbl -> do
        let arg_tys = replicate (length gargs) (L.iT 64)
                      ++ replicate (length fargs) functionFloatType
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
-           
+
        dest_f <- case dest of
                    -- FIXME: use ft here instead?
-                   FnFunctionEntryValue _ft addr -> 
+                   FnFunctionEntryValue _ft addr ->
                      return $ L.Typed fun_ty (L.ValSymbol (functionName addr))
-                          
+
                    _ -> do dest' <- valueToLLVM dest
                            liftBB $ L.inttoptr dest' fun_ty
 
@@ -295,7 +295,7 @@ termStmtToLLVM tm =
        let args' = gargs' ++ fargs'
 
        retv <- liftBB $ L.call dest_f args'
-                 
+
        case contlbl of
          Nothing -> liftBB $ L.ret retv
          Just lbl -> liftBB $ do
@@ -312,7 +312,7 @@ termStmtToLLVM tm =
 
      FnSystemCall call_no name args rets lbl -> do
        args'  <- mapM valueToLLVM args
-     -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.       
+     -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
        let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
                      ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
                      
@@ -330,7 +330,7 @@ termStmtToLLVM tm =
          idx' <- valueToLLVM idx
          let dests = map (blockName . mkRootBlockLabel) $ V.toList vec
          liftBB $ L.switch idx' failLabel (zip [0..] dests)
-         
+
      FnTermStmtUndefined -> void $ unimplementedInstr L.voidT "FnTermStmtUndefined"
 
 stmtToLLVM :: FnStmt -> ToLLVM ()
@@ -342,18 +342,18 @@ stmtToLLVM stmt = do
    FnWriteMem ptr v -> do
      v' <- valueToLLVM v
      p  <- valueToLLVM ptr
-     liftBB $ do 
+     liftBB $ do
        -- FIXME: this should be the same as using typeToLLVMType on v
        p' <- L.inttoptr p (L.ptrT (L.typedType v'))
-       let align = Nothing                           
+       let align = Nothing
        L.store v' p' align
        -- FS     -> L.call_ iWrite_FS [v']
        -- GS     -> L.call_ iWrite_GS [v']
-       -- X87_PC -> L.call_ iWrite_X87_PC [v'] 
+       -- X87_PC -> L.call_ iWrite_X87_PC [v']
        -- X87_RC -> L.call_ iWrite_X87_RC [v']
        -- ControlLoc {} -> void $ unimplementedInstr
        -- DebugLoc {}   -> void $ unimplementedInstr
-      
+
    -- MemCopy bytesPerCopy nValues src dest direction -> do
    --   nValues' <- valueToLLVM nValues
    --   src'     <- valueToLLVM src
@@ -408,17 +408,17 @@ rhsToLLVM rhs =
    FnReadMem ptr typ -> do
      p <- valueToLLVM ptr
      p' <- liftBB $ L.inttoptr p (L.ptrT (typeToLLVMType typ))
-     let align = Nothing                                    
+     let align = Nothing
      liftBB $ L.load p' align
    FnAlloca v -> do
      v' <- valueToLLVM v
      alloc_ptr <- liftBB $ L.alloca (L.iT 8) (Just v') Nothing
      liftBB $ L.ptrtoint alloc_ptr (L.iT 64)
-     
+
    --     FS     -> L.call iRead_FS []
    --     GS     -> L.call iRead_GS []
-   --     X87_PC -> L.call iRead_X87_PC [] 
-   --     X87_RC -> L.call iRead_X87_RC [] 
+   --     X87_PC -> L.call iRead_X87_PC []
+   --     X87_RC -> L.call iRead_X87_RC []
    --     _      -> unimplementedInstr
    -- -- there doesn't seem to be a llvm.memcmp.* intrinsic
    -- MemCmp bytesPerCopy nValues src dest direction -> do
@@ -479,7 +479,7 @@ appToLLVM app =
      v' <- valueToLLVM v
      let in_typ = L.typedType v'
      n' <- valueToLLVM n
-     liftBB $ do 
+     liftBB $ do
        mask <- L.shl (in_typ L.-: (1 :: Int)) n'
        r <- L.band v' mask
        L.icmp L.Ine r (0 :: Int)
@@ -517,16 +517,16 @@ appToLLVM app =
 
    FPIsQNaN frep v -> do
      let isQNaN = intrinsic ("reopt.isQNaN." ++ show (pretty frep)) (L.iT 1) [typ]
-     v' <- valueToLLVM v         
+     v' <- valueToLLVM v
      liftBB $ L.call isQNaN [v']
 
    FPIsSNaN frep v -> do
      let isSNaN = intrinsic ("reopt.isSNaN." ++ show (pretty frep)) (L.iT 1) [typ]
-     v' <- valueToLLVM v         
+     v' <- valueToLLVM v
      liftBB $ L.call isSNaN [v']
 
    FPAdd frep x y -> fpbinop L.fadd frep x y
-   FPAddRoundedUp _frep _x _y -> unimplementedInstr typ "FPAddRoundedUp"   
+   FPAddRoundedUp _frep _x _y -> unimplementedInstr typ "FPAddRoundedUp"
    FPSub frep x y -> fpbinop L.fsub frep x y
    FPSubRoundedUp _frep _x _y -> unimplementedInstr typ "FPSubRoundedUp"
    FPMul frep x y -> fpbinop L.fmul frep x y
@@ -542,7 +542,7 @@ appToLLVM app =
      let from_typ  = floatReprToLLVMType from_rep
          to_typ    = floatReprToLLVMType to_rep
          from_bits = natValue $ floatInfoBits from_rep
-         to_bits   = natValue $ floatInfoBits to_rep         
+         to_bits   = natValue $ floatInfoBits to_rep
      fp_x <- liftBB $ L.bitcast x' from_typ
      case compare from_bits to_bits of
       LT -> liftBB $ L.fpext fp_x to_typ
@@ -592,7 +592,7 @@ appToLLVM app =
     --         -> Value (BVType n)
     --         -> BB (L.Typed L.Value)
     -- unop f x = join $ f <$> valueToLLVM x
-    
+
     binop :: (L.Typed L.Value -> L.Typed L.Value -> BB (L.Typed L.Value))
              -> FnValue (BVType n) -> FnValue (BVType m)
              -> ToLLVM (L.Typed L.Value)
@@ -617,7 +617,7 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
     DoubleFloatRepr       -> L.Double
     QuadFloatRepr         -> L.Fp128
     X86_80FloatRepr       -> L.X86_fp80
-   
+
 
 -- stmtLocToLLVM :: StmtLoc (Value (BVType 64)) tp -> BB (L.Typed L.Value)
 -- stmtLocToLLVM sloc =
@@ -627,7 +627,7 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
 --    _ -> unimplementedInstr
 
 valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
-valueToLLVM val =  
+valueToLLVM val =
   case val of
     FnValueUnsupported reason _
       -> unimplementedInstr typ ("FnValueUnsupported: " ++ reason)
@@ -640,7 +640,7 @@ valueToLLVM val =
       mk $ L.ValIdent $ assignIdToLLVMIdent lhs
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp) ->
-      mk $ L.ValIdent $ assignIdToLLVMIdent lhs      
+      mk $ L.ValIdent $ assignIdToLLVMIdent lhs
     -- A value returned by a function call (rax/xmm0)
     FnReturn (FnReturnVar lhs _tp) ->
       mk $ L.ValIdent $ assignIdToLLVMIdent lhs
@@ -652,14 +652,14 @@ valueToLLVM val =
       let fptr :: L.Typed L.Value
           fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol (functionName addr))
       in mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
-         
+
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->
       mk $ L.ValLabel $ L.Named $ blockName $ mkRootBlockLabel addr
-      
+
     -- Value is an interget argument passed via a register.
     FnIntArg n -> gets ((!! n) . llvmIntArgs)
-                     
+
     -- Value is a function argument passed via a floating point XMM
     -- register.
     FnFloatArg n -> gets ((!! n) . llvmFloatArgs)
