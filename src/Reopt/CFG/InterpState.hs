@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DataKinds #-}
@@ -385,6 +386,27 @@ classifyBlock b interp_state =
                                  ++ " in block " ++ show (blockLabel b))
                                 result 
               _ -> result
+              
+        -- FIXME: Should subsume the above ...
+        -- FIXME: only works if rax is an initial register
+      | BVValue _ (fromInteger -> (next_addr :: Word64)) <- proc_state^.register N.rip
+      , Initial r <- proc_state ^. register N.rax 
+      , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
+      , Just (fromInteger -> call_no) <- asConcreteSingleton (absSt ^. absX86State ^. register r)
+      , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
+         let result = Just (ParsedSyscall proc_state next_addr call_no name
+                            (take (length argtypes) x86SyscallArgumentRegisters)
+                            (spResultRegisters sysp)
+                           )
+         in case () of
+              _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
+              _ | length argtypes > length x86SyscallArgumentRegisters -> 
+                  debug DUrgent ("Got more than register args calling " ++ name
+                                 ++ " in block " ++ show (blockLabel b))
+                                result 
+              _ -> result
+
+          
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip ->
           debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
                          ++ " rax is " ++ show (pretty $ proc_state^.register N.rax)

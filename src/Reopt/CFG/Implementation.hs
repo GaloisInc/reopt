@@ -290,6 +290,9 @@ instance S.IsValue Expr where
     , x_shft == yv =
       x_base S..&. bvLit w (negate (2^x_shft) ::Integer)
 
+    | Just yv <- asBVLit y
+    , yv >= natValue (exprWidth x) = bvLit (exprWidth x) (0 :: Integer)
+
     | otherwise = app $ BVShl (exprWidth x) x y
 
   bvTrunc' w e0

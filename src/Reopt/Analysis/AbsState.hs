@@ -52,6 +52,7 @@ module Reopt.Analysis.AbsState
 import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.State.Strict
+import           Data.Bits
 import           Data.Int
 import           Data.List (find)
 import           Data.Map (Map)
@@ -63,7 +64,7 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Word
+import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
@@ -609,6 +610,18 @@ bvmul w v v'
 
 bvmul _ _ _ = TopV
 
+-- FIXME: generalise
+bitop :: (Integer -> Integer -> Integer)
+      -> NatRepr u
+      -> AbsValue (BVType u)
+      -> AbsValue (BVType u)
+      -> AbsValue (BVType u)
+bitop doOp _w (asFinSet "bvand" -> IsFin s) (asConcreteSingleton -> Just v)
+  = FinSet (Set.map (flip doOp v) s)
+bitop doOp _w (asConcreteSingleton -> Just v) (asFinSet "bvand" -> IsFin s) 
+  = FinSet (Set.map (doOp v) s)
+bitop _ _ _ _ = TopV
+
 ppAbsValue :: AbsValue tp -> Maybe Doc
 ppAbsValue TopV = Nothing
 ppAbsValue v = Just (pretty v)
@@ -1040,6 +1053,8 @@ transferApp r a =
     BVAdd w x y -> bvadd w (transferValue r x) (transferValue r y)
     BVSub w x y -> bvsub (absMem r) w (transferValue r x) (transferValue r y)
     BVMul w x y -> bvmul w (transferValue r x) (transferValue r y)
+    BVAnd w x y -> bitop (.&.) w (transferValue r x) (transferValue r y)
+    BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)    
     _ -> TopV
 
 transferRHS :: forall tp
