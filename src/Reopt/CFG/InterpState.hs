@@ -144,7 +144,7 @@ data ParsedTermStmt
    | ParsedReturn !(X86State Value) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
-   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String ![N.RegisterName 'N.GP] ![Some N.RegisterName]
+   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String !String ![N.RegisterName 'N.GP] ![Some N.RegisterName]
 
 ------------------------------------------------------------------------
 -- InterpState
@@ -375,7 +375,7 @@ classifyBlock b interp_state =
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
       , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
-         let result = Just (ParsedSyscall proc_state next_addr call_no name
+         let result = Just (ParsedSyscall proc_state next_addr call_no (spName sysp) name
                             (take (length argtypes) x86SyscallArgumentRegisters)
                             (spResultRegisters sysp)
                            )
@@ -394,7 +394,7 @@ classifyBlock b interp_state =
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
       , Just (fromInteger -> call_no) <- asConcreteSingleton (absSt ^. absX86State ^. register r)
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
-         let result = Just (ParsedSyscall proc_state next_addr call_no name
+         let result = Just (ParsedSyscall proc_state next_addr call_no (spName sysp) name
                             (take (length argtypes) x86SyscallArgumentRegisters)
                             (spResultRegisters sysp)
                            )
@@ -411,7 +411,7 @@ classifyBlock b interp_state =
           debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
                          ++ " rax is " ++ show (pretty $ proc_state^.register N.rax)
                         )
-          Just (ParsedSyscall proc_state next_addr 0 "unknown"
+          Just (ParsedSyscall proc_state next_addr 0 (spName sysp) "unknown"
                              x86SyscallArgumentRegisters
                              (spResultRegisters sysp)
                )

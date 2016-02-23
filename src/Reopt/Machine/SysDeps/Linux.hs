@@ -11,7 +11,7 @@ import qualified Reopt.Machine.StateNames as N
 
 syscallPersonality :: SyscallPersonality
 syscallPersonality =
-  SyscallPersonality { spName = "linux"
+  SyscallPersonality { spName = "Linux"
                      , spTypeInfo = syscallInfo
                      , spResultRegisters = [Some N.rax]
                      }

@@ -88,8 +88,8 @@ iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
                                              , L.iT 1]
 
 -- FIXME: use personalities
-iSystemCall :: L.Typed L.Value
-iSystemCall = intrinsic "reopt.SystemCall" (L.Struct [L.iT 64, L.iT 1]) argTypes
+iSystemCall :: String -> L.Typed L.Value
+iSystemCall pname = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
   where
     -- the +1 is for the additional syscall no. register, which is
     -- passed via the stack.
@@ -107,7 +107,8 @@ reoptIntrinsics = [ iEvenParity
                   , iWrite_GS
                   , iMemCopy
                   , iMemCmp
-                  , iSystemCall
+                  , iSystemCall "Linux"
+                  , iSystemCall "FreeBSD"                    
                   ]
 
 --------------------------------------------------------------------------------
@@ -310,7 +311,7 @@ termStmtToLLVM tm =
                       fretvs
            L.jump (blockName lbl)
 
-     FnSystemCall call_no name args rets lbl -> do
+     FnSystemCall call_no pname name args rets lbl -> do
        args'  <- mapM valueToLLVM args
      -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
        let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
@@ -318,7 +319,7 @@ termStmtToLLVM tm =
                      
        liftBB $ do
            L.comment name
-           rvar <- L.call iSystemCall allArgs
+           rvar <- L.call (iSystemCall pname) allArgs
            -- Assign all return variables to the extracted result
            itraverse_ (\i (Some v) ->
                         void $ L.assign (assignIdToLLVMIdent $ frAssignId v)

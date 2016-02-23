@@ -500,7 +500,7 @@ recoverBlock blockRegProvides phis lbl = do
         
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    Just (ParsedSyscall proc_state next_addr call_no name args rregs) -> do
+    Just (ParsedSyscall proc_state next_addr call_no pname name args rregs) -> do
       Fold.traverse_ recoverStmt (blockStmts b)
       
       let mkRet :: MapF N.RegisterName FnRegValue
@@ -546,7 +546,7 @@ recoverBlock blockRegProvides phis lbl = do
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
                 
-      fb <- mkBlock (FnSystemCall call_no name args' rets (mkRootBlockLabel next_addr))
+      fb <- mkBlock (FnSystemCall call_no pname name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
     Just (ParsedLookupTable proc_state idx vec) -> do

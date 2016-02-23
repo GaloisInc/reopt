@@ -319,7 +319,7 @@ summarizeBlock interp_state root_label = go root_label
             demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegisters)
                                         ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegisters))
 
-        Just (ParsedSyscall proc_state next_addr _call_no _name argRegs rregs) -> do
+        Just (ParsedSyscall proc_state next_addr _call_no _pname _name argRegs rregs) -> do
           -- FIXME: clagged from call above
           traverse_ goStmt (blockStmts b)
           demandRegisters proc_state (Some <$> argRegs)

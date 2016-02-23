@@ -509,7 +509,7 @@ summarizeBlock interp_state root_label = go root_label
           recordPropagation blockDemandMap lbl proc_state DemandFunctionResult
                             ((Some <$> x86ResultRegisters) ++ (Some <$> x86FloatResultRegisters))
 
-        Just (ParsedSyscall proc_state next_addr _call_no _name argRegs _retRegs) -> do
+        Just (ParsedSyscall proc_state next_addr _call_no _pname _name argRegs _retRegs) -> do
             -- FIXME: we ignore the return type for now, probably not a problem.
             traverse_ goStmt (blockStmts b)
 

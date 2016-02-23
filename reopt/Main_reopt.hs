@@ -477,8 +477,8 @@ mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
         -- FIXME: just everything.
         Just sysp =
           case elfOSABI e of
-            ELFOSABI_LINUX   -> Map.lookup "linux" sysDeps            
-            ELFOSABI_SYSV    -> Map.lookup "linux" sysDeps
+            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps            
+            ELFOSABI_SYSV    -> Map.lookup "Linux" sysDeps
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
             
