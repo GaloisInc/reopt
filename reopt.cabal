@@ -26,7 +26,6 @@ library
     text,
     vector,
     QuickCheck >= 2.7,
-    crucible >= 0.1,
     data-binary-ieee754,
     llvm-pretty
 
@@ -70,7 +69,6 @@ library
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
-    Reopt.Symbolic.Semantics
     Reopt.Utils.Debug
     Reopt.Utils.Hex
     Reopt.Utils.PrettyPrint
@@ -144,86 +142,6 @@ executable reopt_test
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
-
-executable radss_compare
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    bv,
-    bytestring,
-    cmdargs,
-    containers,
-    crucible,
-    elf-galois,
-    flexdis86,
-    lens,
-    mtl,
-    parameterized-utils >= 0.1.6,
-    unix,
-    reopt
-
-  other-modules:
-    Paths_reopt
-
-  hs-source-dirs: radss_compare
-  main-is: Main_radss_compare.hs
-
-  if flag(enable-hpc)
-    ghc-options: -fhpc
-
-  ghc-options: -Wall
-  ghc-prof-options: -O0 -fprof-auto-top
-
-executable bin_to_smt
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    bytestring,
-    cmdargs,
-    containers,
-    crucible,
-    elf-galois,
-    flexdis86,
-    lens,
-    mtl,
-    parameterized-utils >= 0.1.6,
-    unix,
-    reopt
-
-  other-modules:
-    Paths_reopt
-
-  hs-source-dirs: bin_to_smt
-  main-is: Main.hs
-
-  if flag(enable-hpc)
-    ghc-options: -fhpc
-
-  ghc-options: -Wall
-  ghc-prof-options: -O0 -fprof-auto-top
-  
-executable reopt_sym_test
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    bytestring,
-    cmdargs,
-    containers,
-    crucible,
-    elf-galois,
-    flexdis86,
-    lens,
-    mtl,
-    parameterized-utils >= 0.1.6,
-    unix,
-    reopt
-
-  other-modules:
-    Paths_reopt
-
-  hs-source-dirs: reopt_sym_test
-  main-is: Main_reopt.hs
-
 
 executable ConcreteDumpInstr
   build-depends:

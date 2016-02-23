@@ -6,8 +6,6 @@ packages:
 - deps/parameterized-utils
 - deps/linux-ptrace
 - deps/posix-waitpid
-- deps/mss/crucible
-- deps/mss/galois-matlab
 - deps/llvm-pretty
 extra-deps:
 - bimap-0.3.1
