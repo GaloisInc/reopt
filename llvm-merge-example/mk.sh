@@ -20,6 +20,7 @@ function make_original_cflags () {
 
 
 original_cflags=$(make_original_cflags)
+echo make CFLAGS="${original_cflags}"
 make CFLAGS="${original_cflags}"
 mv tree original-tree
 mv tree.ll original-tree.ll
@@ -36,4 +37,5 @@ function make_cflags () {
 }
 
 cflags=$(make_cflags)
+echo make CFLAGS="${cflags}"
 make CFLAGS="${cflags}"

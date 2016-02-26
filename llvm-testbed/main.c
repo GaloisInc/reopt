@@ -1,4 +1,4 @@
-
+// Compare original 'memcmp' to reopted 'memcmp'.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,16 +8,20 @@ int F4004ec(const char *b1, const char *b2, uint64_t sz);
 
 int main(void)
 {
+    printf("All output pairs should be equal:\n");
+
     char b1[] = "Hello World";
     char b2[] = "hello world";
 
-    int r = F4004ec(b1, b2, strlen(b1));
+    int r1 = F4004ec(b1, b2, strlen(b1));
+    int s1 = memcmp(b1, b2, strlen(b1));
 
-    printf("Result (if we get here) is %d\n", r);
+    printf("%d %d\n", r1, s1);
     
     int r2 = F4004ec(b1, b1, strlen(b1));
+    int s2 = memcmp(b1, b1, strlen(b1));
 
-    printf("Result (if we get here) is %d\n", r2);
+    printf("%d %d\n", r2, s2);
 
     return 0;
 }
