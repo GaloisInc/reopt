@@ -1,8 +1,8 @@
 .PHONY: all
 all: tmp/main
 
-tmp/main: main.c tmp/memcmp_F4004ec.s | tmp
-	gcc -o $@ $^
+tmp/main: main.c tmp/memcpy_400a28.s tmp/strlen_4009b0.s | tmp
+	gcc -Wall -o $@ $^
 
 tmp/%.s: %.ll | tmp
 	llc -o $@ $^
