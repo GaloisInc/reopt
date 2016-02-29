@@ -14,6 +14,7 @@ module Reopt.CFG.FunctionArgs
 
 import           Control.Lens
 import           Control.Monad.State.Strict
+import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable as Fold (traverse_)
 import           Data.List (intercalate)
 import           Data.Map.Strict (Map)
@@ -325,7 +326,7 @@ functionArgs ist =
       where
         -- FIXME: ignores those functions we don't have names for.
         comb = Map.intersectionWith doOne (symbolNames ist) m
-        doOne n ft = n ++ ": " ++ show (pretty ft)
+        doOne n ft = BSC.unpack n ++ ": " ++ show (pretty ft)
     
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).

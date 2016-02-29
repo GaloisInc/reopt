@@ -1003,7 +1003,7 @@ addrInJumpTable s a =
 
 cfgFromAddrs :: Memory Word64
                 -- ^ Memory to use when decoding instructions.
-             -> Map CodeAddr String
+             -> Map CodeAddr BS.ByteString
                 -- ^ Names for (some) function entry points
              -> SyscallPersonality
                 -- ^ Syscall personality

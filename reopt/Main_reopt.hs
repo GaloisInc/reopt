@@ -7,34 +7,37 @@ module Main (main) where
 
 import           Control.Lens
 import           Control.Monad
-import qualified Data.ByteString as B
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as BSL
 import           Data.Elf
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import qualified Data.Set as Set
+import           Data.Type.Equality as Equality
 import           Data.Version
 import           Data.Word
+import qualified Data.Yaml as Yaml
 import           Numeric (showHex)
-import           Reopt.Analysis.AbsState
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (createDirectoryIfMissing)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.FilePath ((</>))
 import           System.IO
+import           System.Random
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-
 import           Paths_reopt (version)
 
-import           Data.Type.Equality as Equality
-
 import           Flexdis86 (InstructionInstance(..))
+
 import           Reopt
+import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.LLVM
@@ -44,6 +47,7 @@ import           Reopt.Machine.SysDeps
 import           Reopt.Machine.Types
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
+import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Utils.Debug
 
@@ -60,12 +64,16 @@ data Action
    | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
+   | Relink          -- ^ Link an existing binary and new code together.
 
 -- | Command line arguments.
 data Args = Args { _reoptAction :: !Action
                  , _programPath :: !FilePath
                  , _loadStyle   :: !LoadStyle
                  , _debugKeys   :: [DebugClass]
+                 , _newobjPath  :: !FilePath
+                 , _redirPath   :: !FilePath
+                 , _outputPath  :: !FilePath
                  }
 
 -- | How to load Elf file.
@@ -79,7 +87,7 @@ data LoadStyle
 reoptAction :: Simple Lens Args Action
 reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 
--- | Path to load
+-- | Path for main executable.
 programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
@@ -91,16 +99,31 @@ loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 debugKeys :: Simple Lens Args [DebugClass]
 debugKeys = lens _debugKeys (\s v -> s { _debugKeys = v })
 
+-- | Path to new object code for relinker.
+newobjPath :: Simple Lens Args FilePath
+newobjPath = lens _newobjPath (\s v -> s { _newobjPath = v })
+
+-- | Path to JSON file describing the redirections.
+redirPath :: Simple Lens Args FilePath
+redirPath = lens _redirPath (\s v -> s { _redirPath = v })
+
+-- | Path to JSON file describing the outputections.
+outputPath :: Simple Lens Args FilePath
+outputPath = lens _outputPath (\s v -> s { _outputPath = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = ShowCFG
                    , _programPath = ""
                    , _loadStyle = LoadBySection
                    , _debugKeys = []
+                   , _newobjPath = ""
+                   , _redirPath  = ""
+                   , _outputPath = "a.out"
                    }
 
 ------------------------------------------------------------------------
--- Argument processing
+-- Flags
 
 disassembleFlag :: Flag Args
 disassembleFlag = flagNone [ "disassemble", "d" ] upd help
@@ -130,7 +153,12 @@ funFlag = flagNone [ "functions", "f" ] upd help
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
-        help = "Print out gaps in the recovered  control flow graph of executable."
+        help = "Print out gaps in the recovered control flow graph of executable."
+
+relinkFlag :: Flag Args
+relinkFlag = flagNone [ "relink" ] upd help
+  where upd  = reoptAction .~ Relink
+        help = "Link a binary with new object code."
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
@@ -163,14 +191,32 @@ unintercalate punct str = reverse $ go [] "" str
     go acc thisAcc str'@(x : xs)
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
-                    
+
 debugFlag :: Flag Args
 debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
   where upd s old = do let ks = unintercalate "," s
                        new <- foldM parseDebugFlags (old ^. debugKeys) ks
                        Right $ (debugKeys .~ new) old
-        help = "Debug keys to enable.  This flag may be used multiple times, with comma-separated keys.  Keys may be preceded by a '-' which means disable that key.  Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
-          
+        help = "Debug keys to enable.  This flag may be used multiple times, "
+            ++ "with comma-separated keys.  Keys may be preceded by a '-' which "
+            ++ "means disable that key.\n"
+            ++ "Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
+
+newobjFlag :: Flag Args
+newobjFlag = flagReq [ "new" ] upd "PATH" help
+  where upd s old = Right $ old & newobjPath .~ s
+        help = "Path to new object code to link into existing binary."
+
+redirFlag :: Flag Args
+redirFlag = flagReq [ "r", "redirections" ] upd "PATH" help
+  where upd s old = Right $ old & redirPath .~ s
+        help = "Path to redirections JSON file that specifies where to patch existing code."
+
+outputFlag :: Flag Args
+outputFlag = flagReq [ "o", "output" ] upd "PATH" help
+  where upd s old = Right $ old & outputPath .~ s
+        help = "Path to write new binary."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -183,6 +229,10 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , segmentFlag
                 , sectionFlag
                 , debugFlag
+                , relinkFlag
+                , newobjFlag
+                , redirFlag
+                , outputFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -220,14 +270,18 @@ showUsage :: IO ()
 showUsage = do
   putStrLn "For help on using reopt, run \"reopt --help\"."
 
-readElf64 :: FilePath -> IO (Elf Word64)
-readElf64 path = do
+readElf64 :: (BS.ByteString -> Either (ByteOffset, String) (SomeElf f))
+             -- ^ Function for reading value.
+          -> FilePath
+             -- ^ Filepath to rad.
+          -> IO (f Word64)
+readElf64 parseFn path = do
   when (null path) $ do
     putStrLn "Please specify a binary."
     showUsage
     exitFailure
-  bs <- B.readFile path
-  case parseElf bs of
+  bs <- BS.readFile path
+  case parseFn bs of
     Left (_,msg) -> do
       putStrLn $ "Error reading " ++ path ++ ":"
       putStrLn $ "  " ++ msg
@@ -240,24 +294,13 @@ readElf64 path = do
 
 dumpDisassembly :: FilePath -> IO ()
 dumpDisassembly path = do
-  e <- readElf64 path
+  e <- readElf64 parseElf path
   let sections = filter isCodeSection $ e^..elfSections
   when (null sections) $ do
     putStrLn "Binary contains no executable sections."
   mapM_ printSectionDisassembly sections
   -- print $ Set.size $ instructionNames sections
   --print $ Set.toList $ instructionNames sections
-
-readStaticElf :: FilePath -> IO (Elf Word64)
-readStaticElf path = do
-  e <- readElf64 path
-  mi <- elfInterpreter e
-  case mi of
-    Nothing ->
-      return ()
-    Just{} ->
-      fail "reopt does not yet support generating CFGs from dynamically linked executables."
-  return e
 
 isInterestingCode :: Memory Word64 -> (CodeAddr, Maybe CodeAddr) -> Bool
 isInterestingCode mem (start, Just end) = go start end
@@ -270,18 +313,18 @@ isInterestingCode mem (start, Just end) = go start end
 
     go b e | b < e = case readInstruction mem b of
                       Left _           -> False -- FIXME: ignore illegal sequences?
-                      Right (ii, next) -> not (isNop ii) || go next e
+                      Right (ii, next_i) -> not (isNop ii) || go next_i e
            | otherwise = False
 
 isInterestingCode _ _ = True -- Last bit
 
 -- | This prints out code that is stored in the elf file, but is not part of any
 -- block generated by the CFG.
-showGaps :: LoadStyle -> Elf Word64 -> IO ()
-showGaps loadSty elf = do
+showGaps :: LoadStyle -> ElfHeaderInfo Word64 -> IO ()
+showGaps loadSty hdr = do
     -- Create memory for elf
-    mem <- mkElfMem loadSty elf
-    let cfg = finalCFG (mkFinalCFG mem elf)
+    mem <- mkElfMem loadSty (getElf hdr)
+    let cfg = finalCFG (mkFinalCFG mem hdr)
     let ends = cfgBlockEnds cfg
     let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -302,148 +345,25 @@ showGaps loadSty elf = do
     out_gap bs (e:es') = in_gap e bs es'
     out_gap _ _        = []
 
-showCFG :: LoadStyle -> Elf Word64 -> IO ()
-showCFG loadSty e = do
+showCFG :: LoadStyle -> ElfHeaderInfo Word64 -> IO ()
+showCFG loadSty hdr = do
   -- Create memory for elf
-  mem <- mkElfMem loadSty e
-  let fg = mkFinalCFG mem e
+  mem <- mkElfMem loadSty (getElf hdr)
+  let fg = mkFinalCFG mem hdr
   let g = eliminateDeadRegisters (finalCFG fg)
   print (pretty g)
 
-showFunctions :: LoadStyle -> Elf Word64 -> IO ()
-showFunctions loadSty e = do
+showFunctions :: LoadStyle -> ElfHeaderInfo Word64 -> IO ()
+showFunctions loadSty hdr = do
   -- Create memory for elf
-  mem <- mkElfMem loadSty e
+  mem <- mkElfMem loadSty (getElf hdr)
   print mem
-  let fg = mkFinalCFG mem e
+  let fg = mkFinalCFG mem hdr
   -- let g = eliminateDeadRegisters (finalCFG fg)
   mapM_ (print . pretty) (finalFunctions fg)
 
 ------------------------------------------------------------------------
--- Function determination
-
-{-
-
-type AbsStack = Map Int64 Word64
-
-emptyAbsStack :: AbsStack
-emptyAbsStack = Map.empty
--}
-
-------------------------------------------------------------------------
--- Call detection
-{-
-
-
--- | @v `asOffsetOf` b@ returns @Just o@ if @v@ can be interpreted
--- as a constant offset from a term at base @b@, and @Nothing@
--- otherwise.
-asOffsetOf :: Value tp -> Value tp -> Maybe Integer
-asOffsetOf v base
-  | v == base = Just 0
-  | Just (BVAdd _ v' (BVValue _ o)) <- valueAsApp v
-  , v' == base = Just o
-  | otherwise = Nothing
-
-runStmt :: Stmt -> State AbsStack ()
-runStmt (Write (MemLoc a _) (BVValue _ v))
-  | Just o <- a `asOffsetOf` (Initial N.rsp) = do
-    modify $ Map.insert (fromInteger o) (fromInteger v)
-runStmt _ = return ()
-
-lookupStack :: Int64 -> AbsStack -> Maybe Word64
-lookupStack o s = Map.lookup o s
-
-decompiledBlocks :: CFG -> [Block]
-decompiledBlocks g =
-  [ b | b <- Map.elems (g^.cfgBlocks)
-      , GeneratedBlock _ 0 <- [blockLabel b]
-      ]
-
--- | Maps blocks to set of concrete addresses they may call.
-type CallState = Map CodeAddr (Set CodeAddr)
-
-addAddrs :: CodeAddr -> Value (BVType 64) -> State CallState ()
-addAddrs b (BVValue _ o) =
-  modify $ Map.insertWith Set.union b (Set.singleton (fromInteger o))
-addAddrs _ _ = return ()
-
-detectCalls :: CFG -> Block -> AbsStack -> State CallState ()
-detectCalls g b initStack = do
-  let finStack = flip execState initStack $
-                   traverse_ runStmt (blockStmts b)
-  case blockTerm b of
-    FetchAndExecute x86_state -> do
-      let rsp = x86_state^.register N.rsp
-      case rsp `asOffsetOf` (Initial N.rsp) of
-        Just o | Just _ <- lookupStack (fromInteger o) finStack -> do
-          addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
-        _ -> return ()
-    Branch _ x y -> do
-      let Just xb = findBlock g x
-          Just yb = findBlock g y
-      detectCalls g xb finStack
-      detectCalls g yb finStack
-
-cfgCalls :: CFG -> CallState
-cfgCalls g = flip execState Map.empty $ do
-  traverse_ (\b -> detectCalls g b emptyAbsStack) (decompiledBlocks g)
-
-detectSuccessors :: CFG -> Block -> State CallState ()
-detectSuccessors g b = do
-  case blockTerm b of
-    FetchAndExecute x86_state -> do
-      addAddrs (labelAddr (blockLabel b)) (x86_state^.curIP)
-    Branch _ x y -> do
-      let Just xb = findBlock g x
-          Just yb = findBlock g y
-      detectSuccessors g xb
-      detectSuccessors g yb
-
-cfgSuccessors :: CFG -> CallState
-cfgSuccessors g = flip execState Map.empty $ do
-  traverse_ (detectSuccessors g) (decompiledBlocks g)
-
-toAllList :: Map a (Set b) -> [(a,b)]
-toAllList m = do
-  (k,s) <- Map.toList m
-  v <- Set.toList s
-  return (k,v)
-
-reverseEdges :: Ord a => Map a (Set a) -> Map a (Set a)
-reverseEdges m = flip execState Map.empty $ do
-  forM_ (toAllList m) $ \(k,v) -> do
-    modify $ Map.insertWith Set.union v (Set.singleton k)
-
-getTargets :: (Ord a, Ord b) => [a] -> Map a (Set b) -> Set b
-getTargets l m = foldl' Set.union Set.empty $
-  fmap (fromMaybe Set.empty . (`Map.lookup` m)) l
--}
-
-------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
-
-{-
-printSP :: CFG -> Block -> IO ()
-printSP g b = do
-  let next = fmap (view (register N.rsp)) $ blockNextStates g b
-  case nub next of
-    [] -> hPutStrLn stderr $ "No rsp values for " ++ show (blockLabel b)
-    _:_:_ -> hPutStrLn stderr $ "Multiple rsp values for " ++ show (blockLabel b)
-    [rsp_val]
-      | Initial v <- rsp_val
-      , Just Refl <- testEquality v N.rsp ->
-        return ()
-      | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
-      , Just Refl <- testEquality r N.rsp -> do
-        return ()
-      | Just (BVAdd _ (Initial r) BVValue{}) <- valueAsApp rsp_val
-      , Just Refl <- testEquality r N.rbp -> do
-        return ()
-      | otherwise -> do
-        hPutStrLn stderr $ "Block " ++ show (pretty (blockLabel b))
-        hPutStrLn stderr $ "RSP = " ++ show (pretty rsp_val)
--}
 
 ppStmtAndAbs :: MapF Assignment AbsValue -> Stmt -> Doc
 ppStmtAndAbs m stmt =
@@ -463,11 +383,14 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
-mkFinalCFGWithSyms :: Memory Word64 -> Elf Word64 -> (FinalCFG, Map CodeAddr String)
-mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs), sym_map)
+mkFinalCFGWithSyms :: Memory Word64
+                   -> ElfHeaderInfo Word64
+                   -> (FinalCFG, Map CodeAddr BS.ByteString)
+mkFinalCFGWithSyms mem hdr = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs), sym_map)
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  where sym_assocs = [ (steValue ste, steName ste)
-                     | ste <- concat (parseSymbolTables e)
+  where e = getElf hdr
+        sym_assocs = [ (steValue ste, steName ste)
+                     | ste <- concat (parseSymbolTables hdr)
                      , steType ste == STT_FUNC
                      , isCodeAddr mem (steValue ste)
                      ]
@@ -482,14 +405,14 @@ mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
             
-mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
-mkFinalCFG mem e = fst (mkFinalCFGWithSyms mem e)
+mkFinalCFG :: Memory Word64 -> ElfHeaderInfo Word64 -> FinalCFG
+mkFinalCFG mem hdr = fst (mkFinalCFGWithSyms mem hdr)
 
-showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
-showCFGAndAI loadSty e = do
+showCFGAndAI :: LoadStyle -> ElfHeaderInfo Word64 -> IO ()
+showCFGAndAI loadSty hdr = do
   -- Create memory for elf
-  mem <- mkElfMem loadSty e
-  let fg = mkFinalCFG mem e
+  mem <- mkElfMem loadSty (getElf hdr)
+  let fg = mkFinalCFG mem hdr
   let abst = finalAbsState fg
       amap = assignmentAbsValues mem fg
   let g  = eliminateDeadRegisters (finalCFG fg)
@@ -513,17 +436,17 @@ showCFGAndAI loadSty e = do
         checkCallsIdentified mem g b
       _ -> return ()
 
-showLLVM :: LoadStyle -> Elf Word64 -> String -> IO ()
+showLLVM :: LoadStyle -> ElfHeaderInfo Word64 -> String -> IO ()
 showLLVM loadSty e dir = do
   -- Create memory for elf
-  mem <- mkElfMem loadSty e
+  mem <- mkElfMem loadSty (getElf e)
   let (cfg, symMap) = mkFinalCFGWithSyms mem e
   
   let mkName f = dir </> (name ++ "_" ++ showHex addr ".ll")
         where
           name = case Map.lookup addr symMap of
                    Nothing -> "unknown"
-                   Just s  -> s
+                   Just s  -> BSC.unpack s
           addr = fnAddr f
           
   let mkF f = (,) (mkName f) . snd $ L.runLLVM (functionToLLVM f)
@@ -612,8 +535,48 @@ checkCallsIdentified mem g b = do
     _ -> return ()
 
 mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
-mkElfMem LoadBySection e = memoryForElfSections e
-mkElfMem LoadBySegment e = memoryForElfSegments e
+mkElfMem sty e = do
+  mi <- elfInterpreter e
+  case mi of
+    Nothing ->
+      return ()
+    Just{} ->
+      fail "reopt does not yet support generating CFGs from dynamically linked executables."
+  case sty of
+    LoadBySection -> memoryForElfSections e
+    LoadBySegment -> memoryForElfSegments e
+
+performRedir :: Args -> IO ()
+performRedir args = do
+  -- Get original binary
+  orig_binary_header <- readElf64 parseElfHeaderInfo (args^.programPath)
+
+  let output_path = args^.outputPath
+  case args^.newobjPath of
+    -- When no new object is provided, we just copy the input
+    -- file to test out Elf decoder/encoder.
+    "" -> do
+      putStrLn $ "Copying binary to: " ++ output_path
+      BSL.writeFile output_path $ renderElf (getElf orig_binary_header)
+    -- When a non-empty new obj is provided we test
+    new_obj_path -> do
+      new_obj <- readElf64 parseElfHeaderInfo new_obj_path
+      redirs <-
+        case args^.redirPath of
+          "" -> return []
+          redir_path -> do
+            mredirs <- Yaml.decodeFileEither redir_path
+            case mredirs of
+              Left e -> fail $ show e
+              Right r -> return r
+      gen <- getStdGen
+      case mergeObject orig_binary_header new_obj redirs gen of
+        Left msg -> fail msg
+        Right (new_binary, gen') -> do
+          setStdGen gen'
+          putStrLn $ "Writing new binary: " ++ output_path
+          print $ elfType new_binary
+          BSL.writeFile output_path $ renderElf new_binary  
 
 main :: IO ()
 main = do
@@ -623,21 +586,23 @@ main = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      e <- readStaticElf (args^.programPath)
+      e <- readElf64 parseElfHeaderInfo (args^.programPath)
       showCFG (args^.loadStyle) e
     ShowCFGAI -> do
-      e <- readStaticElf (args^.programPath)
+      e <- readElf64 parseElfHeaderInfo (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
     ShowLLVM path -> do
-      e <- readStaticElf (args^.programPath)
+      e <- readElf64 parseElfHeaderInfo (args^.programPath)
       showLLVM (args^.loadStyle) e path
     ShowFunctions -> do
-      e <- readStaticElf (args^.programPath)
+      e <- readElf64 parseElfHeaderInfo (args^.programPath)
       showFunctions (args^.loadStyle) e
     ShowGaps -> do
-      e <- readStaticElf (args^.programPath)
+      e <- readElf64 parseElfHeaderInfo (args^.programPath)
       showGaps (args^.loadStyle) e
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->
       putStrLn (modeHelp arguments)
+    Relink -> do
+      performRedir args

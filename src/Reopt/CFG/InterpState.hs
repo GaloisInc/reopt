@@ -36,6 +36,7 @@ module Reopt.CFG.InterpState
 
 import           Control.Lens
 import           Control.Monad (join)
+import qualified Data.ByteString as BS
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -154,7 +155,7 @@ data InterpState
    = InterpState { -- | The initial memory when disassembly started.
                    memory   :: !(Memory Word64)
                    -- | The set of symbol names (not necessarily complete)
-                 , symbolNames :: Map CodeAddr String
+                 , symbolNames :: Map CodeAddr BS.ByteString
                    -- | Syscall personailty, mainly used by getClassifyBlock etc.
                  , syscallPersonality :: SyscallPersonality
                    -- | State used for generating blocks.
@@ -187,7 +188,7 @@ data InterpState
 
 -- | Empty interpreter state.
 emptyInterpState :: Memory Word64
-                 -> Map CodeAddr String
+                 -> Map CodeAddr BS.ByteString
                  -> SyscallPersonality
                  -> InterpState
 emptyInterpState mem symbols sysp = InterpState

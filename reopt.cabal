@@ -12,6 +12,7 @@ flag enable-hpc
 library
   build-depends:
     base >= 4,
+    aeson,
     ansi-wl-pprint,
     binary,
     bv,
@@ -23,6 +24,7 @@ library
     lens >= 4.7,
     mtl,
     parameterized-utils >= 0.1.6,
+    random,
     text,
     vector,
     QuickCheck >= 2.7,
@@ -50,21 +52,24 @@ library
     Reopt.CFG.StackArgs
     Reopt.CFG.StackDepth
     Reopt.CFG.StackHeight
+    Reopt.Concrete.BitVector
+    Reopt.Concrete.Semantics
+    Reopt.Concrete.MachineState
     Reopt.Machine.StateNames
     Reopt.Machine.Types
     Reopt.Machine.X86State
     Reopt.Machine.SysDeps.FreeBSD
     Reopt.Machine.SysDeps.FreeBSDGenerated
     Reopt.Machine.SysDeps.Linux
-    Reopt.Machine.SysDeps.LinuxGenerated                  
+    Reopt.Machine.SysDeps.LinuxGenerated
     Reopt.Machine.SysDeps.Types
-    Reopt.Machine.SysDeps                  
+    Reopt.Machine.SysDeps
     Reopt.Object.Loader
     Reopt.Object.Memory
-    Reopt.Concrete.BitVector
-    Reopt.Concrete.Semantics
-    Reopt.Concrete.MachineState
     Reopt.Reified.Semantics
+    Reopt.Relinker
+    Reopt.Relinker.RangeSet
+    Reopt.Relinker.Redirection
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
@@ -86,16 +91,17 @@ executable reopt
     bytestring,
     cmdargs,
     containers,
+    directory,
     elf-galois,
+    filepath,
     flexdis86,
     lens,
+    llvm-pretty,
     mtl,
-    directory,
-    filepath,
     parameterized-utils >= 0.1.6,
+    random,
     reopt,
-    llvm-pretty
-
+    yaml
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
@@ -126,7 +132,7 @@ executable reopt_test
     parameterized-utils >= 0.1.6,
     posix-waitpid >= 0.1.0.1,
     unix,
-    terminal-size,            
+    terminal-size,
     reopt
 
   hs-source-dirs: reopt_test
@@ -175,26 +181,25 @@ executable LLVMDumpInstr
 executable make_bsd_syscalls
  build-depends:
     base >= 4,
-    bytestring,     
+    bytestring,
     language-c,
     lens,
     pretty,
     containers,
     pretty-show,
-    attoparsec                             
+    attoparsec
  hs-source-dirs: make_bsd_syscalls
  main-is: Main.hs
 
 executable make_linux_syscalls
  build-depends:
     base >= 4,
-    bytestring,     
+    bytestring,
     language-c,
     lens,
     pretty,
     containers,
     pretty-show,
-    attoparsec                             
+    attoparsec
  hs-source-dirs: make_linux_syscalls
  main-is: Main.hs
- 
