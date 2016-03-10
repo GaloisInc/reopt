@@ -262,10 +262,21 @@ summarizeBlock interp_state root_label = go root_label
       debugM DRegisterUse ("Summarizing " ++ show lbl)
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
-      let goStmt (Write (MemLoc addr _tp) v)
-            = do demandValue lbl addr
-                 demandValue lbl v
+      let goStmt (Write (MemLoc addr _tp) v) = do
+            demandValue lbl addr
+            demandValue lbl v
 
+          goStmt (MemCopy _sz cnt src dest rev) = do
+            demandValue lbl cnt
+            demandValue lbl src
+            demandValue lbl dest
+            demandValue lbl rev            
+
+          goStmt (MemSet cnt v ptr) = do
+            demandValue lbl cnt
+            demandValue lbl v
+            demandValue lbl ptr
+      
           goStmt _ = return ()
 
           -- Demand the values from the state at the given registers
@@ -306,7 +317,7 @@ summarizeBlock interp_state root_label = go root_label
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
           -- Ensure that result registers are defined, but do not have any deps.
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty))
-                    ((Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft))
+                    ((Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ ([Some N.df]))
 
         Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)

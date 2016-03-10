@@ -296,6 +296,25 @@ data FnStmt
   | FnComment !Text
     -- | An assignment statement
   | forall tp . FnAssignStmt !(FnAssignment tp)
+    -- FIXME: can we share these with the front-end?
+  | FnMemCopy !Integer
+             -- ^ Number of bytes to copy at a time (1,2,4,8)
+             !(FnValue (BVType 64))
+              -- ^ Number of values to move.
+             !(FnValue (BVType 64))
+              -- ^ Start of source buffer.
+             !(FnValue (BVType 64))
+              -- ^ Start of destination buffer.
+             !(FnValue (BVType 1))
+              -- ^ Flag indicates whether direction of move:
+              -- True means we should decrement buffer pointers after each copy.
+              -- False means we should increment the buffer pointers after each copy.
+  | forall n. FnMemSet (FnValue (BVType 64))
+                        -- ^ Number of values to assign
+                       (FnValue (BVType n))
+                        -- ^ Value to assign
+                       (FnValue (BVType 64))
+                        -- ^ Address to start assigning from.
 
 instance Pretty FnStmt where
   pretty s =
@@ -303,11 +322,21 @@ instance Pretty FnStmt where
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
+      FnMemCopy  sz cnt src dest rev ->
+        text "memcopy" <+> parens (hcat $ punctuate comma args)
+        where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
+      FnMemSet cnt val dest -> 
+        text "memset" <+> parens (hcat $ punctuate comma args)
+        where args = [pretty cnt, pretty val, pretty dest]
 
 instance FoldFnValue FnStmt where
   foldFnValue f (FnWriteMem addr v) = f addr `mappend` f v
   foldFnValue _f (FnComment {})     = mempty
   foldFnValue f (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f rhs
+  foldFnValue f (FnMemCopy _sz cnt src dest rev) =
+    f cnt `mappend` f src `mappend` f dest `mappend` f rev
+  foldFnValue f (FnMemSet cnt v ptr) =
+    f cnt `mappend` f v `mappend` f ptr
 
 data FnTermStmt
    = FnJump !BlockLabel
