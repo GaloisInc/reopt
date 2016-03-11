@@ -888,11 +888,12 @@ instance S.Semantics X86Generator where
     ValueExpr . AssignedValue
       <$> addAssignment (MemCmp sz count_v src_v dest_v is_reverse_v)
 
-  memset count val dest = do
+  memset count val dest df = do
     count_v <- eval count
     val_v   <- eval val
     dest_v  <- eval dest
-    addStmt (MemSet count_v val_v dest_v)
+    df_v    <- eval df    
+    addStmt (MemSet count_v val_v dest_v df_v)
 
   find_element sz findEq count buf val is_reverse = do
     count_v <- eval count

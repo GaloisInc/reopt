@@ -315,7 +315,9 @@ data FnStmt
                         -- ^ Value to assign
                        (FnValue (BVType 64))
                         -- ^ Address to start assigning from.
-
+                       (FnValue (BVType 1))
+                        -- ^ Direction flag
+    
 instance Pretty FnStmt where
   pretty s =
     case s of
@@ -325,9 +327,9 @@ instance Pretty FnStmt where
       FnMemCopy  sz cnt src dest rev ->
         text "memcopy" <+> parens (hcat $ punctuate comma args)
         where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-      FnMemSet cnt val dest -> 
+      FnMemSet cnt val dest df -> 
         text "memset" <+> parens (hcat $ punctuate comma args)
-        where args = [pretty cnt, pretty val, pretty dest]
+        where args = [pretty cnt, pretty val, pretty dest, pretty df]
 
 instance FoldFnValue FnStmt where
   foldFnValue f (FnWriteMem addr v) = f addr `mappend` f v
@@ -335,8 +337,8 @@ instance FoldFnValue FnStmt where
   foldFnValue f (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f rhs
   foldFnValue f (FnMemCopy _sz cnt src dest rev) =
     f cnt `mappend` f src `mappend` f dest `mappend` f rev
-  foldFnValue f (FnMemSet cnt v ptr) =
-    f cnt `mappend` f v `mappend` f ptr
+  foldFnValue f (FnMemSet cnt v ptr df) =
+    f cnt `mappend` f v `mappend` f ptr `mappend` f df
 
 data FnTermStmt
    = FnJump !BlockLabel

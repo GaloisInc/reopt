@@ -370,11 +370,12 @@ evalStmt (MemCopy bytes copies src dst reversed) = do
 
       forM_ (zip srcAddrs dstAddrs) $ \(s, d) -> do
         CS.setMem d =<< CS.getMem s
-evalStmt (MemSet n v a) = do
+evalStmt (MemSet n v a df) = do
   vn <- evalExpr' n
   vv <- evalExpr' v
   va <- evalExpr' a
-  let addrs = addressSequence va (CS.width vv) vn CS.false
+  vdf <- evalExpr' df  
+  let addrs = addressSequence va (CS.width vv) vn vdf
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
 evalStmt (Primitive p) = CS.primitive p

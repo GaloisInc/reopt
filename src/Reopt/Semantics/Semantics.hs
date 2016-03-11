@@ -1057,6 +1057,7 @@ exec_stos False _dest_loc val_loc = do
   rdi .= dest .+ (mux df neg_szv szv)
   where
     sz = loc_width val_loc
+    
 exec_stos True _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
@@ -1064,15 +1065,10 @@ exec_stos True _dest_loc val_loc = do
   v    <- get val_loc
   let szv = bvLit n64 (natValue sz `div` 8)
   count <- uext n64 <$> get count_reg
-  let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
-      nbytes     = count `bvMul` szv
-  ifte_ df
-        (do memset count v (dest .- nbytes_off)
-            rdi .= dest .- nbytes
-            rcx .= bvKLit 0)
-        (do memset count v dest
-            rdi .= dest .+ nbytes
-            rcx .= bvKLit 0)
+  let nbytes     = count `bvMul` szv
+  memset count v dest df
+  rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
+  rcx .= bvKLit 0
   where
     sz = loc_width val_loc
     -- FIXME: aso modifies this

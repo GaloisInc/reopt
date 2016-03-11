@@ -80,6 +80,10 @@ iWrite_GS = intrinsic "reopt.Write_GS" L.voidT [L.iT 16]
 iMemCopy :: Integer -> L.Typed L.Value
 iMemCopy n = intrinsic ("reopt.MemCopy.i" ++ show n) L.voidT [ L.iT 64, L.iT 64, L.iT 64, L.iT 1]
 
+iMemSet :: L.Type -> L.Typed L.Value
+iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT
+                         [L.ptrT typ, typ, L.iT 64, L.iT 1]
+
 iMemCmp :: L.Typed L.Value
 iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
                                              , L.iT 64, L.iT 64
@@ -106,8 +110,10 @@ reoptIntrinsics = [ iEvenParity
                   , iMemCmp
                   , iSystemCall "Linux"
                   , iSystemCall "FreeBSD"                    
-                  ] ++ [ iMemCopy n | n <- [8, 16, 32, 64] ]
-
+                  ]
+                  ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
+                  ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
+  
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -122,14 +128,6 @@ llvmIntrinsics = [ intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppT
                  [ intrinsic ("llvm." ++ uop ++ "." ++ show (L.ppType typ)) typ [typ, L.iT 1]
                  | uop  <- ["cttz", "ctlz"]
                  , typ <- map L.iT [8, 16, 32, 64] ]
-                 ++
-                 [ llvmMemSet typ | typ <- map L.iT [8, 16, 32, 64] ]
-
-llvmMemSet :: L.Type -> L.Typed L.Value
-llvmMemSet typ = intrinsic ("llvm.memset.p0"
-                            ++ show (L.ppType typ)
-                            ++ ".i64") L.voidT
-                            [L.ptrT typ, typ, L.iT 64, L.iT 32, L.iT 1]
 
 declareIntrinsic :: L.Typed L.Value -> LLVM ()
 declareIntrinsic (L.Typed (L.PtrTo (L.FunTy rty argtys _)) (L.ValSymbol sym))
@@ -383,13 +381,14 @@ stmtToLLVM stmt = do
      --               , L.iT 1  L.-: L.int 0 ]
      --   _ -> do
 
-   FnMemSet count v ptr -> do
+   FnMemSet count v ptr df -> do
      count' <- valueToLLVM count
      v'     <- valueToLLVM v
      ptr'   <- valueToLLVM ptr
+     df'    <- valueToLLVM df
      let typ = typeToLLVMType $ fnValueType v
-     ptr_ptr <- liftBB $ L.bitcast ptr' (L.ptrT typ)
-     liftBB $ L.call_ (llvmMemSet typ) [ptr_ptr, v', count', L.iT 32 L.-: L.int 0, L.iT 1 L.-: L.int 0]
+     ptr_ptr <- liftBB $ L.inttoptr ptr' (L.ptrT typ)
+     liftBB $ L.call_ (iMemSet typ) [ptr_ptr, v', count', df']
 
    FnComment _str -> return () -- L.comment $ Text.unpack str
    -- PlaceHolderStmt {} -> void $ unimplementedInstr

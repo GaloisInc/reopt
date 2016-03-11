@@ -262,7 +262,7 @@ data Stmt where
          -> Expr (BVType 64)
          -> Expr BoolType
          -> Stmt
-  MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Stmt
+  MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Expr (BVType 1) -> Stmt
   Primitive :: S.Primitive -> Stmt
   GetSegmentBase :: Variable (BVType 64) -> S.Segment -> Stmt
   BVQuot, BVRem, BVSignedQuot, BVSignedRem ::
@@ -293,8 +293,8 @@ instance Eq Stmt where
   MemCmp v i e1 e2 e3 e4 == MemCmp v' i' e1' e2' e3' e4' 
     | Just Refl <- testEquality v v' = v == v' && i == i' && e1 == e1' &&
                                        e2 == e2' &&  e3 == e3' && e4 == e4'
-  MemSet e1 e2 e3 == MemSet e1' e2' e3' 
-    | Just Refl <- testEquality e2 e2' = e1 == e1' && e2 == e2' && e3 == e3'
+  MemSet e1 e2 e3 e4 == MemSet e1' e2' e3' e4'
+    | Just Refl <- testEquality e2 e2' = e1 == e1' && e2 == e2' && e3 == e3' && e4 == e4'
   Primitive p1 == Primitive p2 = p1 == p2
   GetSegmentBase v s == GetSegmentBase v' s' = v == v' && s == s'
   BVQuot v1 e1 e2 == BVQuot v1' e1' e2'
@@ -356,8 +356,8 @@ instance Ord Stmt where
       compareF' e3 e3' $ compareFin e4 e4'
   MemCmp{} `compare` _ = GT
   _ `compare` MemCmp{} = LT
-  MemSet e1 e2 e3 `compare` MemSet e1' e2' e3' =
-    compareF' e1 e1' $ compareF' e2 e2' $ compareFin e3 e3'
+  MemSet e1 e2 e3 e4 `compare` MemSet e1' e2' e3' e4' =
+    compareF' e1 e1' $ compareF' e2 e2' $ compareF' e3 e3' $ compareFin e4 e4'
   MemSet{} `compare` _ = GT
   _ `compare` MemSet{} = LT
   Primitive p1 `compare` Primitive p2 = p1 `compare` p2
@@ -472,7 +472,7 @@ instance S.Semantics Semantics where
 
   memcopy i v1 v2 v3 b = tell [MemCopy i v1 v2 v3 b]
 
-  memset v1 v2 v3 = tell [MemSet v1 v2 v3]
+  memset v1 v2 v3 v4 = tell [MemSet v1 v2 v3 v4]
 
   memcmp r v1 v2 v3 v4 = do
     var <- freshVar "memcmp" S.knownType
@@ -644,7 +644,7 @@ ppStmt s = case s of
     ,   indent 2 (ppStmts f)
     ]
   MemCopy i v1 v2 v3 b -> R.sexpr "memcopy" [ pretty i, ppExpr v1, ppExpr v2, ppExpr v3, ppExpr b ]
-  MemSet v1 v2 v3 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3 ]
+  MemSet v1 v2 v3 v4 -> R.sexpr "memset" [ ppExpr v1, ppExpr v2, ppExpr v3, ppExpr v4 ]
   Primitive p -> pretty p
   Exception v1 v2 e -> R.sexpr "exception" [ ppExpr v1, ppExpr v2, text $ show e ]
   X87Push v -> R.sexpr "x87_push" [ ppExpr v ]

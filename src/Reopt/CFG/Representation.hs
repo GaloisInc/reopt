@@ -244,6 +244,8 @@ data Stmt where
             -- ^ Value to assign
          -> BVValue 64
             -- ^ Address to start assigning from.
+         -> BVValue 1
+            -- ^ Direction flag
          -> Stmt
 
   PlaceHolderStmt :: [Some Value] -> String -> Stmt
@@ -258,9 +260,9 @@ instance Pretty Stmt where
   pretty (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-  pretty (MemSet cnt val dest) =
+  pretty (MemSet cnt val dest df) =
       text "memset" <+> parens (hcat $ punctuate comma args)
-    where args = [pretty cnt, pretty val, pretty dest]
+    where args = [pretty cnt, pretty val, pretty dest, pretty df]
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)

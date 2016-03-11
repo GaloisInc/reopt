@@ -625,10 +625,11 @@ recoverStmt s = do
                                      <*> recoverValue "memcopy" dest
                                      <*> recoverValue "memcopy" direction
       addFnStmt stmt
-    MemSet count v ptr -> do
+    MemSet count v ptr df -> do
       stmt <- FnMemSet <$> recoverValue "memset" count
-                       <*> recoverValue "memcopy" v
-                       <*> recoverValue "memcopy" ptr
+                       <*> recoverValue "memset" v
+                       <*> recoverValue "memset" ptr
+                       <*> recoverValue "memset" df
       addFnStmt stmt      
     _ -> debug DFunRecover ("recoverStmt undefined for " ++ show (pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))

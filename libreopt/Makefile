@@ -2,7 +2,8 @@
 BUILDDIR=build
 
 LLFILES=reopt.SystemCall.FreeBSD.ll reopt.SystemCall.Linux.ll
-GENFILES=reopt.MemCopy.i8.ll reopt.MemCopy.i16.ll reopt.MemCopy.i32.ll reopt.MemCopy.i64.ll 
+GENFILES=reopt.MemCopy.i8.ll reopt.MemCopy.i16.ll reopt.MemCopy.i32.ll reopt.MemCopy.i64.ll \
+         reopt.MemSet.i8.ll reopt.MemSet.i16.ll reopt.MemSet.i32.ll reopt.MemSet.i64.ll
 
 #FIXME: this puts the gen files in the src dir, which is a little ugly
 OBJECTS=$(patsubst %.ll,${BUILDDIR}/%.o,${LLFILES}) $(patsubst %.ll,${BUILDDIR}/%.o,${GENFILES})

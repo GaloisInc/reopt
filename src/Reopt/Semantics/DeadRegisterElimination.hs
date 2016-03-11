@@ -73,10 +73,11 @@ blockLiveRegisters b = do addIDs terminalIds
       addIDs (refsInValue dest)
       addIDs (refsInValue df)
       return (stmt : ss)
-    noteAndFilter stmt@(MemSet cnt val dest) ss = do
+    noteAndFilter stmt@(MemSet cnt val dest df) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue val)
       addIDs (refsInValue dest)
+      addIDs (refsInValue df)      
       return (stmt : ss)
     noteAndFilter stmt@(PlaceHolderStmt vals _) ss
       = do mapM_ (addIDs . viewSome refsInValue) vals

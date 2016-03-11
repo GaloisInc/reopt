@@ -272,11 +272,12 @@ summarizeBlock interp_state root_label = go root_label
             demandValue lbl dest
             demandValue lbl rev            
 
-          goStmt (MemSet cnt v ptr) = do
+          goStmt (MemSet cnt v ptr df) = do
             demandValue lbl cnt
             demandValue lbl v
             demandValue lbl ptr
-      
+            demandValue lbl df
+            
           goStmt _ = return ()
 
           -- Demand the values from the state at the given registers
