@@ -704,22 +704,15 @@ exec_rol l count = do
       effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
       effective = uext (bv_width v) count .&. effectiveMASK
       r = bvRol v effective
-
-  -- When the count is zero, nothing happens, in particular, no flags change
-  ifte_ (complement $ is_zero low_count)
-        -- In the case of a zero count, we still do the assignment.
-        -- This is relevant only for 32 bit ops where this will
-        -- zero-extend.
-    (l .= v)
-    $ do let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
-      
-         cf_loc .= new_cf
-      
-         ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-           (of_loc .= (msb r `bvXor` new_cf))
-           (set_undefined of_loc)
-      
-         l .= r
+  
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
 
 -- FIXME: use really_exec_shift above?
 exec_ror :: (1 <= n', n' <= n, IsLocationBV m n)
@@ -742,21 +735,14 @@ exec_ror l count = do
       effective = uext (bv_width v) count .&. effectiveMASK
       r = bvRor v effective
 
-  -- When the count is zero, nothing happens, in particular, no flags change
-  ifte_ (is_zero low_count) 
-        -- In the case of a zero count, we still do the assignment.
-        -- This is relevant only for 32 bit ops where this will
-        -- zero-extend.
-    (l .= v)
-    $ do let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
-         cf_loc .= new_cf
-      
-         ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-           (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
-           (set_undefined of_loc)
-      
-         l .= r
-
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
 
 -- ** Bit and Byte Instructions
 

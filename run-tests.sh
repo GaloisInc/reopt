@@ -139,6 +139,7 @@ run_all() {
   if [ $FAILS -eq 0 ] && [ $SEG_MAXS -eq 0 ]; then
     exit 0
   else
+    echo "Failing cases in ${SAVE_DIR}"
     exit 1
   fi
 }
