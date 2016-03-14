@@ -85,7 +85,7 @@ run_one() {
   # Save binaries in failure cases
   case $result in
       0) ;;
-      *) save_failure($file) ;;
+      *) save_failure "$file" ;;
   esac
   
   case $result in
