@@ -116,10 +116,40 @@ tryFindSectionIndex :: V.Vector (ElfSection w) -> String -> [Int]
 tryFindSectionIndex sections nm =
   V.toList (V.findIndices (`hasSectionName` nm) sections)
 
-findSectionIndex ::V.Vector (ElfSection w) -> String -> Except String (Maybe Int)
-findSectionIndex sections nm =
+-- | Information about section in objhect needed for computing layout
+-- and performing relocations.
+data SectionInfo w = SectionInfo { sectionIndex :: !Int
+                                   -- ^ Index of section in binary
+                                 , sectionVal   :: (ElfSection w)
+                                   -- ^ Actual section
+                                 , sectionReloc :: !String
+                                 }
+
+-- | Find a section with the given name and flags.
+--
+-- This returns 'Nothing' if no section with those flags exists, but throws
+-- an error if multiple do.
+findSectionInfo :: Eq w
+                => V.Vector (ElfSection w)
+                -> String
+                   -- ^ Expected name of section
+                -> ElfSectionType
+                   -- ^ Expected section type.
+                -> ElfSectionFlags w
+                   -- ^ Expected section flags
+                -> String
+                    -- ^ Name of relocation section (or "" if no relocations associateD)
+                 -> Except String (Maybe (SectionInfo w))
+findSectionInfo sections nm tp flags reloc =
   case tryFindSectionIndex sections nm of
-    [i] -> return $! Just i
+    [i] -> do
+      let sec = sections V.! i
+      when (elfSectionType sec /= tp) $ do
+        throwE $ elfSectionName sec ++ " section has unexpected permissions."
+      when (elfSectionFlags sec /= flags) $ do
+        throwE $ elfSectionName sec ++ " section has unexpected permissions."
+      let info = SectionInfo i sec reloc
+      seq info $ (return $! Just info)
     []  -> return Nothing
     _   -> throwE $ "Multiple " ++ nm ++ " sections in object file."
 
@@ -726,41 +756,30 @@ data NewObjectInfo w
 -- | Create region for section in new object.
 relocateObjectSection :: NewObjectInfo Word64
                            -- ^ Information about new object
-                        -> ElfSectionFlags Word64
-                           -- ^ Expected flags
-                        -> NewSectionBounds Word64
-                           -- ^ Section if we need to.
-                        -> String
-                           -- ^ Name of relocation section.
                         -> Word64
                            -- ^ Base address of segment
+                        -> NewSectionBounds Word64
+                           -- ^ Section if we need to.
                         -> Except String [ElfDataRegion Word64]
-relocateObjectSection _         _     NSBUndefined{} _ _ = return []
-relocateObjectSection obj_info flags (NSBDefined _ sec pad off _) rela_name base_seg_addr = do
-  let obj        = noiElf       obj_info
-      reloc_info = noiRelocInfo obj_info
-      syms       = noiSymbols   obj_info
-  when (elfSectionType sec /= SHT_PROGBITS) $ do
-    throwE $ elfSectionName sec ++ " section has unexpected type."
-  when (not (elfSectionFlags sec `hasBits` flags)) $ do
-    throwE $ elfSectionName sec ++ " section has unexpected permissions."
-  -- Find text relocations section
-  relocs <- findRelaEntries obj rela_name
-  -- Perform relocations
-  let addr = base_seg_addr + off
-  let reloc_sec = performRelocs reloc_info syms sec addr relocs
-  -- Get padding to add between end of header and start of code section.
-  return $! dataPadding pad ++ [ ElfDataSection reloc_sec ]
-
-copyObjectSection :: (Integral w)
-                  => NewSectionBounds w
-                  -> w
-                     -- ^ Base address of segment this belongs to.
-                  -> [ElfDataRegion w]
-copyObjectSection NSBUndefined{} _ = []
-copyObjectSection (NSBDefined _ s pad off _) base_seg_addr = reg
-  where s'  = s { elfSectionAddr = base_seg_addr + off }
-        reg = dataPadding pad ++ [ ElfDataSection s' ]
+relocateObjectSection _        _             NSBUndefined{} =
+  return []
+relocateObjectSection obj_info base_seg_addr (NSBDefined info pad off _)
+  | sectionReloc info == "" = do
+      let s = sectionVal info
+          s'  = s { elfSectionAddr = base_seg_addr + off }
+      return $! dataPadding pad ++ [ ElfDataSection s' ]
+  | otherwise = do
+      let sec        = sectionVal info
+          obj        = noiElf       obj_info
+          reloc_info = noiRelocInfo obj_info
+          syms       = noiSymbols   obj_info
+      -- Find text relocations section
+      relocs <- findRelaEntries obj (sectionReloc info)
+      -- Perform relocations
+      let addr = base_seg_addr + off
+      let reloc_sec = performRelocs reloc_info syms sec addr relocs
+      -- Get padding to add between end of header and start of code section.
+      return $! dataPadding pad ++ [ ElfDataSection reloc_sec ]
 
 -- | Create a bytestring with a jump to the immediate address.
 x86_64_immediate_jmp :: Word64 -> BS.ByteString
@@ -780,50 +799,42 @@ mergeObject :: ElfHeaderInfo Word64
             -> ElfHeaderInfo Word64
                -- ^ Object file to insert
             -> [CodeRedirection Word64]
-               -- ^ Redirections to apply to original file for new file.
+               -- ^ Redirections from original file for new file.
             -> Either String (Elf Word64)
 mergeObject orig_binary new_obj redirs =
   runExcept $ mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
 
 data NewSectionBounds w
-  = NSBDefined !Int (ElfSection w) !w !w !w
+  = NSBDefined !(SectionInfo w) !w !w !w
     -- ^ Section index, index, amount of padding, file start, and file end.
     -- File offset is relative to new segment.
   | NSBUndefined !w
     -- ^ Offset where section would have started/ended.
 
 nsb_end :: NewSectionBounds w -> w
-nsb_end (NSBDefined _ _ _ _ e) = e
+nsb_end (NSBDefined _ _ _ e) = e
 nsb_end (NSBUndefined o) = o
 
 
 nsb_entries :: Integral w => NewSectionBounds w -> w -> [(ElfSectionIndex, w)]
 nsb_entries NSBUndefined{} _ = []
-nsb_entries (NSBDefined idx _ _ start _) base =
-  [ (,) (fromIntegral idx) (base + start)
+nsb_entries (NSBDefined info _ start _) base =
+  [ (fromIntegral (sectionIndex info), base + start)
   ]
 
 -- | Returns the file start and end of a section given an index of
 -- the section or nothing if it is not defined.
 get_section_bounds :: Integral w
-                   => V.Vector (ElfSection w) -- ^ List of sections
-                   -> w -- ^ File offset for end of last section
-                   -> Maybe Int -- ^ Index of Section (or nothing) if we don't add section.
+                   => w -- ^ File offset for end of last section
+                   -> Maybe (SectionInfo w)
+                      -- ^ Information about section (or nothing) if we don't add section.
                    -> NewSectionBounds w
-get_section_bounds _ off Nothing  = NSBUndefined off
-get_section_bounds sections off (Just idx) = NSBDefined idx s pad off' (off' + sz)
-  where s = sections V.! idx
+get_section_bounds off Nothing  = NSBUndefined off
+get_section_bounds off (Just info) = NSBDefined info pad off' (off' + sz)
+  where s   = sectionVal info
         pad  = fromIntegral (off' - off)
         off' = off `fixAlignment` elfSectionAddrAlign s
         sz   = elfSectionFileSize s
-
-findSectionBounds :: Integral w
-                  => V.Vector (ElfSection w) -- ^ List of sections
-                  -> w -- ^ File offset for end of last section
-                  -> String -- ^ Name of section
-                  -> Except String (NewSectionBounds w)
-findSectionBounds sections off nm = do
-  get_section_bounds sections off <$> findSectionIndex sections nm
 
 mergeObject' :: ElfHeaderInfo Word64 -- ^ Existing binary
              -> ElfHeaderInfo Word64 -- ^ Information about object file to insert
@@ -846,6 +857,17 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
   -- Find address for new code.
   let elf_align = elfAlignment orig_binary
 
+  -- First build what we want to create
+
+  data_sec_index <-
+    findSectionInfo sections ".data" SHT_PROGBITS (shf_alloc .|. shf_write) ".rela.data"
+  bss_sec_index  <-
+    findSectionInfo sections ".bss"  SHT_NOBITS   (shf_alloc .|. shf_write) ""
+
+  ----------------------------------------------------------------------
+  -- First we determine the number of program headers as this is needed
+  -- for layout
+
   -- Flag indicating whether to add GNU stack segment.
   let add_gnu_stack = elfHasGNUStackSegment orig_binary
                    && elfHasGNUStackSection obj
@@ -855,18 +877,13 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
 
   when (elfHasTLSSection obj) $ do
     throwE $ "TLS section is not allowed in new code object."
-
-  data_sec_index <- findSectionIndex sections ".data"
-  bss_sec_index  <- findSectionIndex sections ".bss"
-
-  let add_new_data_seg = isJust data_sec_index
-                      || isJust bss_sec_index
-
   let phdr_count = loadableSegmentCount orig_binary
                  + 1 -- We always add new code segment
                  + (if add_new_data_seg then 1 else 0)
                  + (if add_gnu_stack then 1 else 0)
                  + (if add_tls       then 1 else 0)
+        where add_new_data_seg = isJust data_sec_index
+                              || isJust bss_sec_index
 
   let orig_layout = elfLayout orig_binary
   orig_binary_info <-
@@ -880,10 +897,18 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
       exec_seg_header_size = fromIntegral phdr_count * fromIntegral (phdrEntrySize elf_class)
 
   -- Find text section
-  text_sec_bounds     <- findSectionBounds sections exec_seg_header_size ".text"
-  rodata_sec_bounds   <- findSectionBounds sections (nsb_end text_sec_bounds)   ".rodata"
-  eh_frame_sec_bounds <- findSectionBounds sections (nsb_end rodata_sec_bounds) ".eh_frame"
-
+  text_sec_bounds     <- do
+    let flags = shf_alloc .|. shf_execinstr
+    get_section_bounds exec_seg_header_size
+      <$> findSectionInfo sections ".text"     SHT_PROGBITS flags ".rela.text"
+  rodata_sec_bounds   <- do
+    let flags = shf_alloc
+    get_section_bounds (nsb_end text_sec_bounds)
+      <$> findSectionInfo sections ".rodata"   SHT_PROGBITS flags ".rela.rodata"
+  eh_frame_sec_bounds <- do
+    let flags = shf_alloc
+    get_section_bounds (nsb_end rodata_sec_bounds)
+      <$> findSectionInfo sections ".eh_frame" SHT_PROGBITS flags ".rela.eh_frame"
 
   let new_code_seg_filesize = nsb_end eh_frame_sec_bounds
   let new_code_file_offset = orig_binary_file_end
@@ -891,10 +916,10 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
 
   -- Compute offset for new data and ensure it is aligned.
   -- Get bounds of ".data" section.
-  let data_sec_bounds = get_section_bounds sections 0 data_sec_index
+  let data_sec_bounds = get_section_bounds 0 data_sec_index
   let post_data_sec_size = nsb_end data_sec_bounds
   -- Compute bounds of ".bss" section.
-  let bss_sec_bounds = get_section_bounds sections post_data_sec_size bss_sec_index
+  let bss_sec_bounds = get_section_bounds post_data_sec_size bss_sec_index
 
   let new_data_file_offset = new_code_file_end
 
@@ -941,19 +966,10 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
                                , noiSymbols = symbols
                                }
 
-  new_code_regions <- do
-    let flags = shf_alloc .|. shf_execinstr
-    relocateObjectSection obj_info flags text_sec_bounds ".rela.text" new_code_seg_addr
-
-  new_rodata_regions <- do
-    let flags = shf_alloc
-    relocateObjectSection obj_info flags rodata_sec_bounds ".rela.rodata" new_code_seg_addr
-
-  new_ehframe_regions <- do
-    let flags = shf_alloc
-    relocateObjectSection obj_info flags eh_frame_sec_bounds ".rela.eh_frame" new_code_seg_addr
-
   -- Create Elf segment
+  new_exec_regions <- do
+     concat <$> traverse (relocateObjectSection obj_info new_code_seg_addr)
+                         [ text_sec_bounds, rodata_sec_bounds, eh_frame_sec_bounds ]
 
   let exec_seg = ElfSegment
         { elfSegmentType     = PT_LOAD
@@ -965,23 +981,16 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
         , elfSegmentMemSize  = ElfRelativeSize 0
         , elfSegmentData     = Seq.fromList $
             [ ElfDataSegmentHeaders ]
-            ++ new_code_regions
-            ++ new_rodata_regions
-            ++ new_ehframe_regions
+            ++ new_exec_regions
         }
 
-  new_data_regions <- do
-    let flags = shf_alloc .|. shf_write
-    relocateObjectSection obj_info flags data_sec_bounds ".rela.data" new_data_seg_addr
-
-  let new_bss_regions = copyObjectSection bss_sec_bounds new_data_seg_addr
+  data_regions <-
+    concat <$> traverse (relocateObjectSection obj_info new_data_seg_addr)
+                        [ data_sec_bounds, bss_sec_bounds ]
   let new_bss_size =
         case bss_sec_bounds of
           NSBUndefined{} -> 0
-          NSBDefined _ s _ _ _ -> elfSectionSize s
-
-  let data_regions = new_data_regions
-                  ++ new_bss_regions
+          NSBDefined info _ _ _ -> elfSectionSize (sectionVal info)
 
   -- List of new load segments
   let (new_data_segs, seg_index')
