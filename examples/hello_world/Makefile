@@ -27,6 +27,9 @@ DIET_LIBS=$(DIET_LIB)/start.o $(DIET_LIB)/dietlibc.a
 hello_world_diet.o : hello_world.c Makefile
 	$(GCC) -static -nostdinc $(DIET_CPP_FLAGS) -c -o $@ $<
 
+goodbye_world_diet.o : goodbye_world.c Makefile
+	$(GCC) -static -nostdinc $(DIET_CPP_FLAGS) -c -o $@ $<
+
 hello_world_diet : hello_world_diet.o Makefile $(DIET_LIBS)
 	ld -static -nostdlib -o $@ $< $(DIET_LIBS)
 
