@@ -889,8 +889,9 @@ exec_movs False dest_loc _src_loc = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  v' <- get $ mkBVAddr sz dest
-  exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
+  v' <- get $ mkBVAddr sz src
+  mkBVAddr sz dest .= v'
+  
   rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
   rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
   where
