@@ -4,7 +4,6 @@
 -- Description      : A strided interval domain x + [a .. b] * c
 -- Copyright        : (c) Galois, Inc 2015
 -- Maintainer       : Simon Winwood <sjw@galois.com>
--- Stability        : provisional
 --
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
@@ -31,16 +30,15 @@ module Reopt.Analysis.Domains.StridedInterval
          -- Debugging
        ) where
 
-import           Reopt.Utils.Debug
 
 import           Control.Exception (assert)
 import qualified Data.Foldable as Fold
+import           Data.Parameterized.NatRepr
+import           Test.QuickCheck
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
-import           Data.Parameterized.NatRepr
 import           Reopt.Machine.Types
-
-import           Test.QuickCheck
+import           Reopt.Utils.Debug
 
 -- -----------------------------------------------------------------------------
 -- Data type decl and instances
@@ -55,10 +53,8 @@ data StridedInterval (tp :: Type) =
                   , base :: Integer
                   , range :: Integer -- ^ This is the number of elements in the interval + 1
                   , stride :: Integer }
---  | EmptyInterval
 
 instance Eq (StridedInterval tp) where
---  EmptyInterval == EmptyInterval = True
   si1@StridedInterval{} == si2@StridedInterval{} =
     base si1 == base si2 && range si1 == range si2 && stride si1 == stride si2
 

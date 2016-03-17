@@ -28,7 +28,6 @@ import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.FilePath ((</>))
 import           System.IO
-import           System.Random
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
@@ -400,11 +399,11 @@ mkFinalCFGWithSyms mem hdr = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addr
         -- FIXME: just everything.
         Just sysp =
           case elfOSABI e of
-            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps            
+            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps
             ELFOSABI_SYSV    -> Map.lookup "Linux" sysDeps
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
-            
+
 mkFinalCFG :: Memory Word64 -> ElfHeaderInfo Word64 -> FinalCFG
 mkFinalCFG mem hdr = fst (mkFinalCFGWithSyms mem hdr)
 
@@ -441,14 +440,14 @@ showLLVM loadSty e dir = do
   -- Create memory for elf
   mem <- mkElfMem loadSty (getElf e)
   let (cfg, symMap) = mkFinalCFGWithSyms mem e
-  
+
   let mkName f = dir </> (name ++ "_" ++ showHex addr ".ll")
         where
           name = case Map.lookup addr symMap of
                    Nothing -> "unknown"
                    Just s  -> BSC.unpack s
           addr = fnAddr f
-          
+
   let mkF f = (,) (mkName f) . snd $ L.runLLVM (functionToLLVM f)
   let writeF (n, m) = writeFile n (show $ L.ppModule m)
 
@@ -569,14 +568,12 @@ performRedir args = do
             case mredirs of
               Left e -> fail $ show e
               Right r -> return r
-      gen <- getStdGen
-      case mergeObject orig_binary_header new_obj redirs gen of
+      case mergeObject orig_binary_header new_obj redirs of
         Left msg -> fail msg
-        Right (new_binary, gen') -> do
-          setStdGen gen'
+        Right new_binary -> do
           putStrLn $ "Writing new binary: " ++ output_path
           print $ elfType new_binary
-          BSL.writeFile output_path $ renderElf new_binary  
+          BSL.writeFile output_path $ renderElf new_binary
 
 main :: IO ()
 main = do

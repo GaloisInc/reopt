@@ -1,7 +1,7 @@
 {-|
 Module      : Reopt.Relinker
 Copyright   : (c) Galois Inc, 2016
-License     : None
+License     : AllRightsReserved
 Maintainer  : jhendrix@galois.com
 
 This module is a start towards a binary and object merging tool.
@@ -15,8 +15,11 @@ module Reopt.Relinker
 
 import           Control.Exception (assert)
 import           Control.Lens
+import           Control.Monad (when)
 import           Control.Monad.ST
-import           Control.Monad.State
+import           Control.Monad.Trans.Class
+import           Control.Monad.Trans.Except
+import           Control.Monad.Trans.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Bld
@@ -37,12 +40,8 @@ import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
 import           Numeric (showHex)
-import           System.Random
 
-import qualified Reopt.Relinker.RangeSet as RS
 import           Reopt.Relinker.Redirection
-
-import Debug.Trace
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -61,11 +60,6 @@ fixAlignment v a0
 mapFromList :: Ord k => (a -> k) -> [a] -> Map k [a]
 mapFromList proj = foldr' ins Map.empty
   where ins e = Map.insertWith (++) (proj e) [e]
-
--- | Returns true if this is a power of two or zero.
-isPowerOf2 :: Word64 -> Bool
-isPowerOf2 w = w .&. (w-1) == 0
-
 
 hasBits :: Bits x => x -> x -> Bool
 x `hasBits` b = (x .&. b) == b
@@ -92,42 +86,27 @@ write32_lsb v a c = do
 ------------------------------------------------------------------------
 -- Elf specific utilities
 
--- | Size of page on system 
+-- | Size of page on system
 page_size :: Word64
 page_size = 0x1000
 
 -- | Get the alignment that loadable segments seem to respect in a binary.
-elfAlignment :: Num w => Elf w -> w
+--
+-- We ensure that this is at least 'page_size', but try to compute it from
+-- the first loadable segment otherwise.
+elfAlignment :: (Num w, Ord w) => Elf w -> w
 elfAlignment e =
     case loadableSegments of
-      [] -> 0
-      (s:_) -> elfSegmentAlign s
+      [] -> fromIntegral page_size
+      (s:_) -> max (elfSegmentAlign s) (fromIntegral page_size)
   where isLoadable s = elfSegmentType s == PT_LOAD
         loadableSegments = filter isLoadable $ elfSegments e
-
 
 -- | Return the name of a symbol as a string (or <unamed symbol> if not defined).
 steStringName :: ElfSymbolTableEntry w -> String
 steStringName sym
   | BS.null (steName sym) = "<unnamed symbol>"
-  | otherwise = BSC.unpack (steName sym)            
-
-
-reservedAddrs :: ElfLayout Word64 -> Either String (RS.RangeSet Word64)
-reservedAddrs l = foldl' f (Right RS.empty) (allPhdrs l)
-  where
-        f :: Either String (RS.RangeSet Word64)
-          -> Phdr Word64
-          -> Either String (RS.RangeSet Word64)
-        f (Left msg) _ = Left msg
-        f (Right m) p = do
-          let seg = phdrSegment p
-          case elfSegmentType seg of
-             PT_LOAD -> Right $ RS.insert low high m
-               where low = elfSegmentVirtAddr seg
-                     high = low + phdrMemSize p - 1
-             PT_DYNAMIC -> Left "Dynamic elf files not yet supported."
-             _ -> Right m
+  | otherwise = BSC.unpack (steName sym)
 
 hasSectionName :: ElfSection w -> String -> Bool
 s `hasSectionName` nm = elfSectionName s == nm
@@ -137,12 +116,12 @@ tryFindSectionIndex :: V.Vector (ElfSection w) -> String -> [Int]
 tryFindSectionIndex sections nm =
   V.toList (V.findIndices (`hasSectionName` nm) sections)
 
-findSectionIndex :: Monad m => V.Vector (ElfSection w) -> String -> m (Maybe Int)
+findSectionIndex ::V.Vector (ElfSection w) -> String -> Except String (Maybe Int)
 findSectionIndex sections nm =
   case tryFindSectionIndex sections nm of
     [i] -> return $! Just i
     []  -> return Nothing
-    _   -> fail $ "Multiple " ++ nm ++ " sections in object file."
+    _   -> throwE $ "Multiple " ++ nm ++ " sections in object file."
 
 -- | Return segment used to indicate the stack can be non-executable.
 gnuStackSegment :: Num w => PhdrIndex -> ElfSegment w
@@ -183,7 +162,6 @@ elfHasGNUStackSection :: Elf w -> Bool
 elfHasGNUStackSection e =
   any (\s -> elfSectionName s == ".note.GNU-stack") (e^..elfSections)
 
-
 findSectionFromHeaders :: String -> ElfHeaderInfo w -> [ElfSection w]
 findSectionFromHeaders nm info =
   filter (\s -> elfSectionName s == nm) $ V.toList $ getSectionTable info
@@ -191,7 +169,6 @@ findSectionFromHeaders nm info =
 ------------------------------------------------------------------------
 -- SymbolTable
 
-  
 type SymbolTable w = V.Vector (ElfSymbolTableEntry w)
 
 -- | Offset of entry in symbol table.
@@ -212,16 +189,11 @@ getSymbolByIndex sym_table sym_index
 -- loaded into binary.
 type SectionMap w = Map ElfSectionIndex w
 
--- | Return address that
-getSectionBase :: SectionMap w -> ElfSectionIndex -> w
-getSectionBase m i = fromMaybe (error msg) $ Map.lookup i m
-  where msg = "Symbol table points to section " ++ show i ++ " not being mapped to binary."
-
 ------------------------------------------------------------------------
 -- BinarySymbolMap
 
 -- | Maps symbol names in binaries to their virtual address when loaded.
-type BinarySymbolMap w = Map BS.ByteString w 
+type BinarySymbolMap w = Map BS.ByteString w
 
 
 symbolNameAddr :: ElfSymbolTableEntry w -> Maybe (BS.ByteString, w)
@@ -255,7 +227,7 @@ objectSectionAddr :: String
                   -> ElfSectionIndex
                   -> ObjectRelocationInfo w
                   -> Either String w
-objectSectionAddr src idx info = 
+objectSectionAddr src idx info =
   case Map.lookup idx (objectSectionMap info) of
     Nothing ->
       Left $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
@@ -291,7 +263,7 @@ symbolAddr reloc_info src sym =
         case Map.lookup (steName sym) (binarySymbolMap reloc_info) of
           Nothing -> Left $ "Could not resolve symbol " ++ BSC.unpack (steName sym) ++ "."
           Just addr -> Right addr
-    tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "." 
+    tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
 ------------------------------------------------------------------------
 -- Code for performing relocations in new object.
@@ -302,7 +274,7 @@ performReloc :: ObjectRelocationInfo Word64
                 -- addresses.
              -> SymbolTable Word64
                 -- ^ A vector listing the elf symbols in the object.
-                -- 
+                --
                 -- This allows one to find the symbol associated with a
                 -- given relocation.
              -> Word64
@@ -321,7 +293,6 @@ performReloc reloc_info sym_table this_vaddr mv reloc = do
           case symbolAddr reloc_info "A relocation entry" sym of
             Right v -> v
             Left msg -> error msg
-        where sym  = getSymbolByIndex sym_table (r_sym reloc)
   -- Relocation addend
   let addend = r_addend reloc :: Int64
   -- Get PC offset
@@ -403,8 +374,6 @@ data ResolvedRedirs w = CR { crMkJump :: !(w -> BS.ByteString)
                              -- in the binary.
                            , crSymbols :: !(NameToSymbolMap w)
                              -- ^ Maps symbol names in the object to the associated symbol.
-                           , crPhdrBase :: !PhdrIndex
-                             -- ^ Offset to add to phds.
                            , crEntries :: !(Map PhdrIndex [CodeRedirection w])
                              -- ^ Get the list of redirections to apply.
                            }
@@ -442,8 +411,7 @@ remapBytes redirs redir_list base bs = runST $ do
   let SMV.MVector _ fp = mv
   return $! Data.ByteString.Internal.fromForeignPtr fp 0 len
 
-
-
+-- | Append a raw segment to the list segments
 rawSegmentFromBuilder :: (Bits w, Integral w)
                       => ElfLayout w
                       -> ResolvedRedirs w
@@ -452,7 +420,7 @@ rawSegmentFromBuilder :: (Bits w, Integral w)
                       -> w -- ^ Offset in segment for this data
                       -> BS.ByteString
                       -> [ElfDataRegion w]
-                      -> Either String (w, [ElfDataRegion w])
+                      -> MapMonad (w, [ElfDataRegion w])
 rawSegmentFromBuilder orig_layout redirs entries off bs rest = do
   let off' = off + fromIntegral (BS.length bs)
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
@@ -465,7 +433,7 @@ mapLoadableSection :: (Bits w, Integral w)
                    -> w -- ^ Offset in segment for this section
                    -> ElfSection w
                    -> [ElfDataRegion w]
-                   -> Either String (w, [ElfDataRegion w])
+                   -> MapMonad (w, [ElfDataRegion w])
 mapLoadableSection orig_layout redirs entries off sec rest = do
   let bs = elfSectionData sec
   let off' = off + fromIntegral (BS.length bs)
@@ -476,6 +444,24 @@ mapLoadableSection orig_layout redirs entries off sec rest = do
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
   return (off2, ElfDataSection sec' : prev)
 
+newtype MapState = MapState { _nextSegmentIndex :: Word16 }
+
+nextSegmentIndex :: Simple Lens MapState Word16
+nextSegmentIndex = lens _nextSegmentIndex (\s v -> s { _nextSegmentIndex = v })
+
+getSegmentIndex :: MapMonad Word16
+getSegmentIndex = do
+  i <- use nextSegmentIndex
+  nextSegmentIndex += 1
+  return $! i
+
+type MapMonad = StateT MapState (Except String)
+
+runMapMonad :: MapState -> MapMonad a -> Either String (a, MapState)
+runMapMonad s m = runExcept (runStateT m s)
+
+mapError :: String -> MapMonad a
+mapError = lift . throwE
 
 -- | This traverses elf data regions in an loadable elf segment.
 mapOrigLoadableRegions :: (Bits w, Integral w)
@@ -486,14 +472,17 @@ mapOrigLoadableRegions :: (Bits w, Integral w)
                           -- ^ Redirections for segment.
                        -> w -- ^ Offset in segment for region
                        -> [ElfDataRegion w]
-                       -> Either String (w, [ElfDataRegion w])
+                       -> MapMonad (w, [ElfDataRegion w])
 mapOrigLoadableRegions _ _ _ off [] =
   return (off, [])
 mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
   case reg of
     ElfDataElfHeader -> do
-      let b = BSL.toStrict $ Bld.toLazyByteString $ buildElfHeader orig_layout
-      rawSegmentFromBuilder orig_layout redirs entries off b rest
+      when (off /= 0) $ do
+        mapError $ "Elf header appeared at unexpected offset: " ++ showHex (toInteger off) "."
+      let off' = off + fromIntegral (ehdrSize (elfLayoutClass orig_layout))
+      (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
+      return (off2, ElfDataElfHeader : prev)
     ElfDataSegmentHeaders -> do
       let b = BSL.toStrict $ Bld.toLazyByteString $
                 buildElfSegmentHeaderTable orig_layout
@@ -501,11 +490,12 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
     -- Flatten special segments
     ElfDataSegment seg  ->
       case elfSegmentType seg of
-        -- Copy TLS segment
+        -- Copy TLS segments.
         PT_TLS -> do
           let subseg = toList (elfSegmentData seg)
           (off2, subseg1) <- mapOrigLoadableRegions orig_layout redirs entries off subseg
-          let tls_seg = seg { elfSegmentIndex = crPhdrBase redirs + elfSegmentIndex seg
+          idx <- getSegmentIndex
+          let tls_seg = seg { elfSegmentIndex = idx
                             , elfSegmentData  = Seq.fromList subseg1
                             }
 
@@ -517,9 +507,9 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
           mapOrigLoadableRegions orig_layout redirs entries off (subseg ++ rest)
 
     ElfDataSectionHeaders ->
-      Left "Did not expect section headers in loadable region"
+      lift $ throwE "Did not expect section headers in loadable region"
     ElfDataSectionNameTable ->
-      Left "Did not expect section name table in loadable region"
+      lift $ throwE "Did not expect section name table in loadable region"
     ElfDataGOT g ->
       mapLoadableSection orig_layout redirs entries off (elfGotSection g) rest
     ElfDataSection s -> do
@@ -528,100 +518,31 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
       rawSegmentFromBuilder orig_layout redirs entries off b rest
 
 ------------------------------------------------------------------------
--- MergerState
-
-data MergerState = MS { _mergerGen :: !StdGen
-                      , _mergerReserved :: !(RS.RangeSet Word64)
-                      }
-
-mergerGen :: Simple Lens MergerState StdGen
-mergerGen = lens _mergerGen (\s v -> s { _mergerGen = v})
-
-mergerReserved :: Simple Lens MergerState (RS.RangeSet Word64)
-mergerReserved = lens _mergerReserved (\s v -> s { _mergerReserved = v })
-
-------------------------------------------------------------------------
 -- Merger
 
-type Merger = State MergerState
-
-runMerger :: ElfHeaderInfo Word64
-          -> StdGen
-          -> Merger a
-          -> Either String (a, StdGen)
-runMerger e gen m = do
-  case reservedAddrs (elfLayout (getElf e)) of
-    Left msg -> Left msg
-    Right s -> Right $! (a,ms'^.mergerGen)
-      where ms = MS { _mergerGen = gen
-                    , _mergerReserved = s
-                    }
-            (a,ms') = runState m ms
-      
--- | Given a region this finds a new random address to store this.
-findNewAddress :: Word64
-                  -- ^ A power of two that is the modulus used in alignment
-                  -- calculations
-               -> Word64
-                  -- ^ Size of space to reserve
-               -> Word64
-                  -- ^ The offset in the file where this will be added.
-               -> Merger Word64
-findNewAddress 0 size file_offset = do
-  findNewAddress 1 size file_offset
-findNewAddress align size file_offset = do
-  reserved <- use mergerReserved
-  when (not (isPowerOf2 align)) $ do
-    fail $ "Elf alignment should be power of two."
-  let page_mask = page_size - 1
-  -- Round up to next multiple of a page.
-  let adjusted_offset = (file_offset + page_mask) .&. complement page_mask
-  -- Get regions currently loaded.
-  g <- use mergerGen
-  -- Mask to restrict addresses to be less than 2^30
-  let low_mask = 2^(30::Word64) - 1
-
-  let (r,g') = random g
-  mergerGen .= g'
-  -- The 
-  let addr = (r .&. low_mask .&. complement (align - 1))
-           .|. (adjusted_offset  .&. (align - 1))
-  let isGood = addr /= 0 && not (RS.overlaps addr (addr + size) reserved)
-  if isGood then do
-    -- Add to reserved.
-    mergerReserved %= RS.insert addr (addr + size)
-    return addr
-   else
-    -- Try again
-    findNewAddress align size file_offset
-
-
 -- | Find relocation entries in section with given name.
-findRelaEntries :: Monad m
-                => Elf Word64
+findRelaEntries :: Elf Word64
                    -- ^ Object with relocations
                 -> String
                    -- ^ Name of section containing relocation entries.
-                -> m [RelaEntry X86_64_RelocationType]
+                -> Except String [RelaEntry X86_64_RelocationType]
 findRelaEntries obj nm = do
   case nm `findSectionByName` obj of
     -- Assume that no section means no relocations
     [] -> return []
-    [s] ->
-      return $! elfRelaEntries (elfData obj) (elfSectionData s)
-    _ -> fail$  "Multple " ++ show nm ++ " sections in object file."
+    [s] -> return $! elfRelaEntries (elfData obj) (elfSectionData s)
+    _ -> throwE $  "Multple " ++ show nm ++ " sections in object file."
 
 -- | Find relocation entries in section with given name.
-findSymbolTable :: Monad m
-                => ElfHeaderInfo Word64
+findSymbolTable :: ElfHeaderInfo Word64
                    -- ^ Object with relocations
-                -> m (V.Vector (ElfSymbolTableEntry Word64))
+                -> Except String (V.Vector (ElfSymbolTableEntry Word64))
 findSymbolTable obj = do
   case ".symtab" `findSectionFromHeaders` obj of
     -- Assume that no section means no relocations
-    []  -> fail $ "Could not find symbol table."
+    []  -> throwE $ "Could not find symbol table."
     [s] -> return $! V.fromList $ getSymbolTableEntries obj s
-    _   -> fail $ "Multple .symtab sections in object file."
+    _   -> throwE $ "Multiple .symtab sections in object file."
 
 checkOriginalBinaryAssumptions :: Monad m => Elf Word64 -> m ()
 checkOriginalBinaryAssumptions binary = do
@@ -662,98 +583,136 @@ didNotExpectOriginalRegion :: String -> Either String a
 didNotExpectOriginalRegion region_name =
   Left $ "Did not expect " ++ region_name ++ " in original binary."
 
-data OriginalBinaryInfo w = OBI { _obiRegions :: !(Seq (ElfDataRegion w))
+data OrigSegment w = OrigSegment { origSegPadding :: !w
+                                   -- ^ Number of bytes of padding before segment
+                                 , origSegFileOffset :: !w
+                                   -- ^ File offset of new region
+                                 , origSegData :: !(ElfSegment w)
+                                 }
+
+-- | Resovlv
+regionsForOrigSegment :: (Bits w, Integral w)
+                      => ElfLayout w
+                      -> ResolvedRedirs w
+                      -> OrigSegment w
+                      -> MapMonad [ElfDataRegion w]
+regionsForOrigSegment orig_layout redirs oseg = do
+  let padding     = origSegPadding oseg
+  let seg         = origSegData oseg
+  seg' <- copyOrigLoadableSegment orig_layout redirs seg
+  return $! dataPadding padding ++ [ ElfDataSegment seg' ]
+
+data OriginalBinaryInfo w = OBI { _obiFileOffset  :: !w
+                                , _obiSegments :: !(Seq (OrigSegment w))
+                                , _obiLastVirtAddr :: !w
                                 }
 
-obiRegions :: Simple Lens (OriginalBinaryInfo w) (Seq (ElfDataRegion w))
-obiRegions = lens _obiRegions (\s v -> s { _obiRegions = v })
+-- | Current offset in file as we are parsing data.
+obiFileOffset :: Simple Lens (OriginalBinaryInfo w) w
+obiFileOffset = lens _obiFileOffset (\s v -> s { _obiFileOffset = v })
 
-initOriginalBinaryInfo :: OriginalBinaryInfo w
-initOriginalBinaryInfo =
-  OBI { _obiRegions = Seq.empty
+-- | Information about segments in the original binary that will be
+-- copied into new binary.
+obiSegments :: Simple Lens (OriginalBinaryInfo w) (Seq (OrigSegment w))
+obiSegments = lens _obiSegments (\s v -> s { _obiSegments = v })
+
+-- | End of last virtual address of a loadable segment in the binary.
+obiLastVirtAddr :: Simple Lens (OriginalBinaryInfo w) w
+obiLastVirtAddr = lens _obiLastVirtAddr (\s v -> s { _obiLastVirtAddr = v })
+
+initOriginalBinaryInfo :: Num w => w -> OriginalBinaryInfo w
+initOriginalBinaryInfo o =
+  OBI { _obiFileOffset = o
+      , _obiSegments = Seq.empty
+      , _obiLastVirtAddr = 0
       }
 
+copyOrigLoadableSegment :: forall w
+                        .  (Bits w, Integral w)
+                        => ElfLayout w
+                           -- ^ Layout of original bianry
+                        -> ResolvedRedirs w
+                           -- ^ Redirections in code
+                        -> ElfSegment w
+                        -> MapMonad (ElfSegment w)
+copyOrigLoadableSegment orig_layout redirs seg = do
+  let sub_reg = toList (elfSegmentData seg)
+  let idx = elfSegmentIndex seg
+  let entries = fromMaybe [] $! Map.lookup idx (crEntries redirs)
+  (_,sub_reg') <- mapOrigLoadableRegions orig_layout redirs entries 0 sub_reg
+  new_idx <- getSegmentIndex
+  return $! seg { elfSegmentIndex = new_idx
+                , elfSegmentData = Seq.fromList sub_reg'
+                }
 
 copyOriginalBinaryRegion :: forall w
                           . (Bits w, Integral w, Show w)
                          => ElfLayout w
-                         -> ResolvedRedirs w
-                            -- ^ Redirections in code
-                         -> (w, OriginalBinaryInfo w)
+                         -> OriginalBinaryInfo w
                          -> ElfDataRegion w
-                         -> Either String (w,OriginalBinaryInfo w)
-copyOriginalBinaryRegion orig_layout redirs (file_offset, info) reg =
+                         -> Either String (OriginalBinaryInfo w)
+copyOriginalBinaryRegion orig_layout info reg =
   case reg of
-    -- Drop elf data header.
-    ElfDataElfHeader ->
-      return (file_offset, info)
-    -- Drop segment headers
+    ElfDataElfHeader -> do
+      didNotExpectOriginalRegion "Elf header outside loadable segment."
     ElfDataSegmentHeaders ->
-      return (file_offset, info)
+      didNotExpectOriginalRegion "Elf segment table outside loadable segment."
     ElfDataSegment seg ->
       case elfSegmentType seg of
         PT_LOAD -> do
-          let sub_reg = toList (elfSegmentData seg)
-          let idx = elfSegmentIndex seg
-          let entries = fromMaybe [] $! Map.lookup idx (crEntries redirs)
-          (_,sub_reg') <- mapOrigLoadableRegions orig_layout redirs entries 0 sub_reg
-          let seg' = seg { elfSegmentIndex = crPhdrBase redirs + elfSegmentIndex seg
-                         , elfSegmentData = Seq.fromList sub_reg'
-                         }
           let a  = elfSegmentAlign seg
               mask = a  - 1
               req_align = elfSegmentVirtAddr seg .&. mask
-              act_align = file_offset .&. mask
-          trace ("Computing padding " ++ show (showHex a "", showHex act_align "", showHex req_align "")) $ do
+              act_align = (info^.obiFileOffset) .&. mask
           -- Compute amount of padding to get alignment correct.
           let padding :: w
               padding | a <= 1 = 0
                       | act_align <= req_align = req_align - act_align
                         -- Need to insert padding to wrap around.
                       | otherwise = (a - act_align) + req_align
-
-          let new_segs = dataPadding padding ++ [ ElfDataSegment seg' ]
-          let file_offset' = file_offset + padding + elfRegionFileSize orig_layout reg
-          let info' = info & obiRegions %~ (Seq.>< Seq.fromList new_segs)
-          return $! (file_offset', info')
+          let oseg = OrigSegment { origSegPadding = padding
+                                 , origSegFileOffset = info^.obiFileOffset
+                                 , origSegData = seg
+                                 }
+          return $! info & obiFileOffset   +~ padding + elfRegionFileSize orig_layout reg
+                         & obiSegments     %~ (Seq.|> oseg)
+                         & obiLastVirtAddr %~ max (elfSegmentVirtAddr seg)
         -- Drop non-loaded segments
         _ ->
-          return (file_offset, info)
+          return info
     -- Drop section headers
     ElfDataSectionHeaders ->
-      return (file_offset, info)
+      return info
     -- Drop section name table
     ElfDataSectionNameTable ->
-      return (file_offset, info)
+      return info
     ElfDataGOT _ ->
       didNotExpectOriginalRegion "top-level .got table"
     -- Drop unloaded sections
     ElfDataSection _ -> do
-      return (file_offset, info)
+      return info
     -- Drop bytes outside a loadable segment.
     ElfDataRaw _ -> do
-      return (file_offset, info)
+      return info
 
 copyOriginalBinaryRegions :: forall w
                            . (Bits w, Integral w, Show w)
                           => Elf w
-                          -> ResolvedRedirs w
+                          -> ElfLayout w
                           -> w  -- ^ Offset of file.
                           -> Either String (OriginalBinaryInfo w)
-copyOriginalBinaryRegions orig_binary redirs base_offset = do
-  let orig_layout = elfLayout orig_binary
-  let f :: (w, OriginalBinaryInfo w)
+copyOriginalBinaryRegions orig_binary orig_layout base_offset = do
+  let f :: OriginalBinaryInfo w
         -> ElfDataRegion w
-        -> Either String (w, OriginalBinaryInfo w)
-      f = copyOriginalBinaryRegion orig_layout redirs
-        
-  snd <$> foldlM f (base_offset, initOriginalBinaryInfo) (orig_binary^.elfFileData)
+        -> Either String (OriginalBinaryInfo w)
+      f = copyOriginalBinaryRegion orig_layout
+
+  foldlM f (initOriginalBinaryInfo base_offset) (orig_binary^.elfFileData)
 
 -- | Make padding region if number of bytes is non-zero.
 dataPadding :: Integral w => w -> [ElfDataRegion w]
 dataPadding 0 = []
 dataPadding z = [ ElfDataRaw (BS.replicate (fromIntegral z) 0) ]
-
 
 data NewObjectInfo w
   = NewObjectInfo { noiElf :: !(Elf w)
@@ -765,8 +724,7 @@ data NewObjectInfo w
                   }
 
 -- | Create region for section in new object.
-createRegionsForSection :: Monad m
-                        => NewObjectInfo Word64
+relocateObjectSection :: NewObjectInfo Word64
                            -- ^ Information about new object
                         -> ElfSectionFlags Word64
                            -- ^ Expected flags
@@ -776,27 +734,33 @@ createRegionsForSection :: Monad m
                            -- ^ Name of relocation section.
                         -> Word64
                            -- ^ Base address of segment
-                        -> m [ElfDataRegion Word64]
-createRegionsForSection _         _     NSBUndefined{} _ _ = return []
-createRegionsForSection obj_info flags (NSBDefined sec_idx pad prev_size _) rela_name base_seg_addr = do
-  let obj        = noiElf        obj_info
-      sections   = noiSections   obj_info
+                        -> Except String [ElfDataRegion Word64]
+relocateObjectSection _         _     NSBUndefined{} _ _ = return []
+relocateObjectSection obj_info flags (NSBDefined _ sec pad off _) rela_name base_seg_addr = do
+  let obj        = noiElf       obj_info
       reloc_info = noiRelocInfo obj_info
-      syms       = noiSymbols    obj_info
-  let sec = sections V.! sec_idx
+      syms       = noiSymbols   obj_info
   when (elfSectionType sec /= SHT_PROGBITS) $ do
-    fail $ elfSectionName sec ++ " section has unexpected type."
+    throwE $ elfSectionName sec ++ " section has unexpected type."
   when (not (elfSectionFlags sec `hasBits` flags)) $ do
-    fail $ elfSectionName sec ++ " section has unexpected permissions."
+    throwE $ elfSectionName sec ++ " section has unexpected permissions."
   -- Find text relocations section
   relocs <- findRelaEntries obj rela_name
   -- Perform relocations
-  let off = prev_size `fixAlignment` elfSectionAddrAlign sec
-
   let addr = base_seg_addr + off
   let reloc_sec = performRelocs reloc_info syms sec addr relocs
   -- Get padding to add between end of header and start of code section.
   return $! dataPadding pad ++ [ ElfDataSection reloc_sec ]
+
+copyObjectSection :: (Integral w)
+                  => NewSectionBounds w
+                  -> w
+                     -- ^ Base address of segment this belongs to.
+                  -> [ElfDataRegion w]
+copyObjectSection NSBUndefined{} _ = []
+copyObjectSection (NSBDefined _ s pad off _) base_seg_addr = reg
+  where s'  = s { elfSectionAddr = base_seg_addr + off }
+        reg = dataPadding pad ++ [ ElfDataSection s' ]
 
 -- | Create a bytestring with a jump to the immediate address.
 x86_64_immediate_jmp :: Word64 -> BS.ByteString
@@ -809,7 +773,6 @@ x86_64_immediate_jmp addr = BSL.toStrict $ Bld.toLazyByteString $ mov_addr_to_r1
           =  Bld.word8 0x41
           <> Bld.word8 0xFF
           <> Bld.word8 0xE3
-   
 
 -- | This merges an existing elf binary and new header with a list of redirections.
 mergeObject :: ElfHeaderInfo Word64
@@ -818,28 +781,25 @@ mergeObject :: ElfHeaderInfo Word64
                -- ^ Object file to insert
             -> [CodeRedirection Word64]
                -- ^ Redirections to apply to original file for new file.
-            -> StdGen
-               -- ^ generator for getting offset
-            -> Either String (Elf Word64, StdGen)
-mergeObject orig_binary new_obj redirs gen =
-  runMerger orig_binary gen $
-    mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
+            -> Either String (Elf Word64)
+mergeObject orig_binary new_obj redirs =
+  runExcept $ mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
 
 data NewSectionBounds w
-  = NSBDefined !Int !w !w !w
-    -- ^ Section index, amount of padding, file start, and file end.
+  = NSBDefined !Int (ElfSection w) !w !w !w
+    -- ^ Section index, index, amount of padding, file start, and file end.
     -- File offset is relative to new segment.
   | NSBUndefined !w
     -- ^ Offset where section would have started/ended.
 
 nsb_end :: NewSectionBounds w -> w
-nsb_end (NSBDefined _ _ _ e) = e
-nsb_end (NSBUndefined o) = o        
+nsb_end (NSBDefined _ _ _ _ e) = e
+nsb_end (NSBUndefined o) = o
 
 
 nsb_entries :: Integral w => NewSectionBounds w -> w -> [(ElfSectionIndex, w)]
 nsb_entries NSBUndefined{} _ = []
-nsb_entries (NSBDefined idx _ start _) base =
+nsb_entries (NSBDefined idx _ _ start _) base =
   [ (,) (fromIntegral idx) (base + start)
   ]
 
@@ -847,34 +807,31 @@ nsb_entries (NSBDefined idx _ start _) base =
 -- the section or nothing if it is not defined.
 get_section_bounds :: Integral w
                    => V.Vector (ElfSection w) -- ^ List of sections
-                   -> w -- ^ End of last section
+                   -> w -- ^ File offset for end of last section
                    -> Maybe Int -- ^ Index of Section (or nothing) if we don't add section.
                    -> NewSectionBounds w
 get_section_bounds _ off Nothing  = NSBUndefined off
-get_section_bounds sections off (Just idx) = NSBDefined idx pad off' (off' + sz)
+get_section_bounds sections off (Just idx) = NSBDefined idx s pad off' (off' + sz)
   where s = sections V.! idx
         pad  = fromIntegral (off' - off)
         off' = off `fixAlignment` elfSectionAddrAlign s
         sz   = elfSectionFileSize s
 
-findSectionBounds :: (Monad m, Integral w)
+findSectionBounds :: Integral w
                   => V.Vector (ElfSection w) -- ^ List of sections
-                  -> w -- ^ Enf of last section
+                  -> w -- ^ File offset for end of last section
                   -> String -- ^ Name of section
-                  -> m (NewSectionBounds w)
+                  -> Except String (NewSectionBounds w)
 findSectionBounds sections off nm = do
   get_section_bounds sections off <$> findSectionIndex sections nm
-
-
 
 mergeObject' :: ElfHeaderInfo Word64 -- ^ Existing binary
              -> ElfHeaderInfo Word64 -- ^ Information about object file to insert
              -> [CodeRedirection Word64] -- ^ Redirections
              -> (Word64 -> BS.ByteString)
                 -- ^ Function for creating jump to given offset.
-             -> Merger (Elf Word64)
+             -> Except String (Elf Word64)
 mergeObject' orig_binary_header obj_header redirs mkJump = do
-  trace "mergObject'0" $ do
   let orig_binary = getElf orig_binary_header
   let elf_class = ELFCLASS64
 
@@ -897,58 +854,55 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
   let add_tls = elfHasTLSSegment orig_binary
 
   when (elfHasTLSSection obj) $ do
-    fail $ "TLS section is not allowed in new code object."
+    throwE $ "TLS section is not allowed in new code object."
 
-  let gnu_stack_index = 2
+  data_sec_index <- findSectionIndex sections ".data"
+  bss_sec_index  <- findSectionIndex sections ".bss"
 
-  let new_phdr_count :: Word16
-      new_phdr_count = 2 -- One for executable and one for data.
-                    + (if add_gnu_stack then 1 else 0)
+  let add_new_data_seg = isJust data_sec_index
+                      || isJust bss_sec_index
 
-  let phdr_count = fromIntegral new_phdr_count
+  let phdr_count = loadableSegmentCount orig_binary
+                 + 1 -- We always add new code segment
+                 + (if add_new_data_seg then 1 else 0)
+                 + (if add_gnu_stack then 1 else 0)
                  + (if add_tls       then 1 else 0)
-                 + loadableSegmentCount orig_binary
 
+  let orig_layout = elfLayout orig_binary
+  orig_binary_info <-
+    case copyOriginalBinaryRegions orig_binary orig_layout 0 of
+      Left msg -> throwE msg
+      Right obi -> return obi
+
+  let orig_binary_file_end = orig_binary_info^.obiFileOffset
 
   let exec_seg_header_size :: Word64
-      exec_seg_header_size = fromIntegral (ehdrSize elf_class)
-                           + fromIntegral phdr_count * fromIntegral (phdrEntrySize elf_class)
+      exec_seg_header_size = fromIntegral phdr_count * fromIntegral (phdrEntrySize elf_class)
 
   -- Find text section
   text_sec_bounds     <- findSectionBounds sections exec_seg_header_size ".text"
-
-  trace (".textbounds    " ++ showHex (nsb_end text_sec_bounds) ".") $ do
-
   rodata_sec_bounds   <- findSectionBounds sections (nsb_end text_sec_bounds)   ".rodata"
-
-  trace (".rodata bounds " ++ showHex (nsb_end rodata_sec_bounds) ".") $ do
-  
   eh_frame_sec_bounds <- findSectionBounds sections (nsb_end rodata_sec_bounds) ".eh_frame"
 
-  trace (".eh_frame bounds " ++ showHex (nsb_end eh_frame_sec_bounds) ".") $ do
 
   let new_code_seg_filesize = nsb_end eh_frame_sec_bounds
-              -- Get size of just new code section
-  
+  let new_code_file_offset = orig_binary_file_end
+  let new_code_file_end    = new_code_file_offset + new_code_seg_filesize
+
   -- Compute offset for new data and ensure it is aligned.
-  let new_data_file_offset = new_code_seg_filesize `fixAlignment` page_size
-  trace ("data file offset " ++ showHex new_data_file_offset ".") $ do
-  
   -- Get bounds of ".data" section.
-  data_sec_bounds <- findSectionBounds sections 0                  ".data"
+  let data_sec_bounds = get_section_bounds sections 0 data_sec_index
   let post_data_sec_size = nsb_end data_sec_bounds
   -- Compute bounds of ".bss" section.
-  bss_sec_bounds  <- findSectionBounds sections post_data_sec_size ".bss"
+  let bss_sec_bounds = get_section_bounds sections post_data_sec_size bss_sec_index
 
-  let new_data_seg_filesize = nsb_end bss_sec_bounds
+  let new_data_file_offset = new_code_file_end
 
-
-  new_code_seg_addr <- findNewAddress elf_align new_code_seg_filesize 0
-  new_data_seg_addr <- findNewAddress elf_align new_data_seg_filesize new_data_file_offset
-
-  trace ("Data segment alignment "
-         ++ show (showHex new_data_file_offset "", showHex new_data_seg_addr "")) $ do
-  -- Map sections to be mapped to
+  let new_code_seg_addr = (orig_binary_info^.obiLastVirtAddr) `fixAlignment` elf_align
+                        + new_code_file_offset .&. (elf_align - 1)
+  let new_code_seg_virt_end = new_code_seg_addr + new_code_seg_filesize
+  let new_data_seg_addr = new_code_seg_virt_end `fixAlignment` elf_align
+                         + new_data_file_offset .&. (elf_align - 1)
 
   let reloc_info = ObjectRelocationInfo { objectSectionMap = section_map
                                         , binarySymbolMap = sym_map
@@ -964,6 +918,23 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
   -- Get symbols in object.
   symbols     <- findSymbolTable obj_header
 
+  let resolved_redirs =
+        CR { crMkJump    = mkJump
+           , crRelocInfo = reloc_info
+           , crSymbols   = mapFromList steName (V.toList symbols)
+           , crEntries   = mapFromList redirSourcePhdr redirs
+           }
+
+  (orig_binary_regions,seg_index) <- do
+    let s0 = MapState { _nextSegmentIndex = 0 }
+    let regions = orig_binary_info^.obiSegments
+    let remapSeg = regionsForOrigSegment orig_layout resolved_redirs
+    let doRemap = concat <$> traverse remapSeg (toList regions)
+
+    case runMapMonad s0 doRemap of
+      Left msg -> throwE msg
+      Right (r,s) -> return (r,s^.nextSegmentIndex)
+
   let obj_info = NewObjectInfo { noiElf = obj
                                , noiSections = sections
                                , noiRelocInfo = reloc_info
@@ -972,34 +943,28 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
 
   new_code_regions <- do
     let flags = shf_alloc .|. shf_execinstr
-    createRegionsForSection obj_info flags text_sec_bounds ".rela.text" new_code_seg_addr
+    relocateObjectSection obj_info flags text_sec_bounds ".rela.text" new_code_seg_addr
 
   new_rodata_regions <- do
     let flags = shf_alloc
-    createRegionsForSection obj_info flags rodata_sec_bounds ".rela.rodata" new_code_seg_addr
-    
+    relocateObjectSection obj_info flags rodata_sec_bounds ".rela.rodata" new_code_seg_addr
+
   new_ehframe_regions <- do
     let flags = shf_alloc
-    createRegionsForSection obj_info flags eh_frame_sec_bounds ".rela.eh_frame" new_code_seg_addr
+    relocateObjectSection obj_info flags eh_frame_sec_bounds ".rela.eh_frame" new_code_seg_addr
 
   -- Create Elf segment
-
-  let gnu_stack_segment_headers
-          | add_gnu_stack = [ ElfDataSegment (gnuStackSegment gnu_stack_index) ]
-          | otherwise = []
-
 
   let exec_seg = ElfSegment
         { elfSegmentType     = PT_LOAD
         , elfSegmentFlags    = pf_r .|. pf_x
-        , elfSegmentIndex    = 0
+        , elfSegmentIndex    = seg_index
         , elfSegmentVirtAddr = new_code_seg_addr
         , elfSegmentPhysAddr = new_code_seg_addr
         , elfSegmentAlign    = elf_align
         , elfSegmentMemSize  = ElfRelativeSize 0
         , elfSegmentData     = Seq.fromList $
-            gnu_stack_segment_headers
-            ++ [ ElfDataElfHeader, ElfDataSegmentHeaders ]
+            [ ElfDataSegmentHeaders ]
             ++ new_code_regions
             ++ new_rodata_regions
             ++ new_ehframe_regions
@@ -1007,38 +972,28 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
 
   new_data_regions <- do
     let flags = shf_alloc .|. shf_write
-    createRegionsForSection obj_info flags data_sec_bounds ".rela.data" new_data_seg_addr
+    relocateObjectSection obj_info flags data_sec_bounds ".rela.data" new_data_seg_addr
 
-  let new_bss_regions =
-        case bss_sec_bounds of
-          NSBUndefined{} -> []
-          NSBDefined i _ _ _ -> reg
-            where s   = (sections V.! i)
-                  s'  = s { elfSectionAddr = new_data_seg_addr + new_data_seg_filesize }
-                  reg = dataPadding (new_data_seg_filesize - post_data_sec_size)
-                        ++ [ ElfDataSection s'
-                           ]
+  let new_bss_regions = copyObjectSection bss_sec_bounds new_data_seg_addr
   let new_bss_size =
         case bss_sec_bounds of
           NSBUndefined{} -> 0
-          NSBDefined i _ _ _ -> elfSectionSize s
-            where s   = sections V.! i
+          NSBDefined _ s _ _ _ -> elfSectionSize s
 
+  let data_regions = new_data_regions
+                  ++ new_bss_regions
 
-  trace ("Data padding " ++ show (new_data_file_offset, new_code_seg_filesize)) $ do
-  
   -- List of new load segments
-  let new_data_segs
-          | null data_regions = []
+  let (new_data_segs, seg_index')
+          | null data_regions = ([], seg_index + 1)
           | otherwise =
-             dataPadding (new_data_file_offset - new_code_seg_filesize)
-             ++ [ ElfDataSegment seg ]
-        where data_regions = new_data_regions
-                           ++ new_bss_regions
-              seg = ElfSegment
+             ( [ ElfDataSegment seg ]
+             , seg_index + 2
+             )
+        where seg = ElfSegment
                 { elfSegmentType     = PT_LOAD
                 , elfSegmentFlags    = pf_r .|. pf_w
-                , elfSegmentIndex    = 1
+                , elfSegmentIndex    = seg_index + 1
                 , elfSegmentVirtAddr = new_data_seg_addr
                 , elfSegmentPhysAddr = new_data_seg_addr
                 , elfSegmentAlign    = elf_align
@@ -1046,29 +1001,10 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
                 , elfSegmentData     = Seq.fromList data_regions
                 }
 
-  let new_regions_end = new_data_file_offset + new_data_seg_filesize
-  
-  let resolved_redirs =
-        CR { crMkJump    = mkJump
-           , crRelocInfo = reloc_info
-           , crSymbols   = mapFromList steName (V.toList symbols)
-           , crPhdrBase  = new_phdr_count
-           , crEntries   = mapFromList redirSourcePhdr redirs
-           }
+  let gnu_stack_segment_headers
+          | add_gnu_stack = [ ElfDataSegment (gnuStackSegment seg_index') ]
+          | otherwise = []
 
-  orig_binary_info <-
-    case copyOriginalBinaryRegions orig_binary resolved_redirs new_regions_end of
-      Left msg -> fail msg
-      Right obi -> return obi
-
-
-  let orig_binary_regions = toList $ orig_binary_info^.obiRegions
-
-  -- Find space for data.
-  -- Create new section and segment for data as needed.
-  -- Extend bss if needed.
-  -- Redirect binary to start execution in new_code.
-  -- Find space for eh_frame
   return $! Elf { elfData       = ELFDATA2LSB
                 , elfClass      = elf_class
                 , elfOSABI      = elfOSABI orig_binary
@@ -1078,10 +1014,11 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
                 , elfEntry      = elfEntry orig_binary
                 , elfFlags      = 0
                 , _elfFileData  = Seq.fromList $
-                   [ ElfDataSegment exec_seg
-                   ]
+                   orig_binary_regions
+                   ++ dataPadding (new_code_file_offset - orig_binary_file_end)
+                   ++ [ ElfDataSegment exec_seg ]
                    ++ new_data_segs
-                   ++ orig_binary_regions
+                   ++ gnu_stack_segment_headers
                    ++ [ ElfDataSectionNameTable
                       , ElfDataSectionHeaders
                       ]
