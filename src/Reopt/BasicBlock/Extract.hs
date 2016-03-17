@@ -32,7 +32,7 @@ data Next =
   deriving (Show, Eq)
 
 extractBlock :: (F.ByteReader r) => Word64 -> Set Word64
-             -> r (Either Word64 ([Next], [CS.Stmt]))
+             -> r (Either Word64 ([Next], Word64, [CS.Stmt]))
 extractBlock startAddr breakAddrs =
   extractBlockInner startAddr breakAddrs []
 extractBlockInner startAddr breakAddrs prevStmts =
@@ -42,13 +42,13 @@ extractBlockInner startAddr breakAddrs prevStmts =
             case nexts M.empty [Absolute startAddr] stmts
               of [Absolute addr]
                    | addr == startAddr + w && S.member addr breakAddrs ->
-                        return $ Right ([NFallthrough addr], prevStmts ++ stmts)
+                        return $ Right ([NFallthrough addr], startAddr + w, prevStmts ++ stmts)
                    | addr == startAddr + w ->
                        extractBlockInner addr breakAddrs $ prevStmts ++ stmts
                    | otherwise ->
-                       return $ Right ([Absolute addr], prevStmts ++ stmts)
+                       return $ Right ([Absolute addr], startAddr + w, prevStmts ++ stmts)
                  []    -> trace "extractBlockInner: empty" $ return $ Left startAddr
-                 addrs -> return $ Right (addrs, prevStmts ++ stmts)
+                 addrs -> return $ Right (addrs, startAddr + w, prevStmts ++ stmts)
           Nothing -> return $ Left startAddr
 
 newtype WrappedByteReader r a = WrappedByteReader 

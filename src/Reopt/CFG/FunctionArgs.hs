@@ -471,10 +471,22 @@ summarizeBlock interp_state root_label = go root_label
       
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
-      let goStmt (Write (MemLoc addr _tp) v)
-            = do demandValue lbl addr
-                 demandValue lbl v
+      let goStmt (Write (MemLoc addr _tp) v) = do
+            demandValue lbl addr
+            demandValue lbl v
+                 
+          goStmt (MemCopy _sz cnt src dest rev) = do
+            demandValue lbl cnt
+            demandValue lbl src
+            demandValue lbl dest
+            demandValue lbl rev            
 
+          goStmt (MemSet cnt v ptr df) = do
+            demandValue lbl cnt
+            demandValue lbl v
+            demandValue lbl ptr
+            demandValue lbl df            
+            
           goStmt _ = return ()
 
           -- FIXME: rsp here?

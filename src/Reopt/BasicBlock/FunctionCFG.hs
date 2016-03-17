@@ -2,7 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 
 module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks, findBlock,
-                                     termChildren)
+                                     termChildren, FunBounds(..), inFunBounds)
 where
 import           Reopt.BasicBlock.Extract
 import           Data.Map (Map)
@@ -15,9 +15,29 @@ import           Reopt.Concrete.Semantics as CS
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Object.Memory
 
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+
 type CFG = Map Word64 Block
 
-data Block = Block [Stmt] Term deriving (Eq, Ord)
+data FunBounds = FunBounds { funBase  :: Word64
+                           , funSize  :: Word64
+                           }  
+
+instance Pretty FunBounds where
+  pretty fb = braces (text (showHex (funBase fb) "")
+                      <+> text ".."
+                      <+> text (showHex (funBase fb + funSize fb ) ""))
+
+inFunBounds :: FunBounds -> Word64 -> Bool
+inFunBounds fb addr = funBase fb <= addr
+                      && fromIntegral addr < upper
+  where
+    upper :: Integer -- in case of wrap around, super unlikely though
+    upper = fromIntegral (funBase fb) + fromIntegral (funSize fb)
+
+data Block = Block { blockStmts :: [Stmt]
+                   , blockTerm :: Term
+                   } deriving (Eq, Ord)
 
 data Term = Cond Word64 Word64 -- true, false
           | Call Word64 Word64 -- call, ret
@@ -25,6 +45,21 @@ data Term = Cond Word64 Word64 -- true, false
           | Fallthrough Word64
           | Indirect
           | Ret deriving (Eq, Ord, Show)
+
+
+ppHex = text . flip showHex ""
+
+instance Pretty Term where
+  pretty t = case t of
+    Cond t f -> text "Cond" <+> ppHex t <+> ppHex f
+    Call f r -> text "Call" <+> ppHex f <+> ppHex r
+    Direct p -> text "Direct" <+> ppHex p
+    Fallthrough p -> text "Fallthrough" <+> ppHex p
+    Indirect     -> text "Indirect"
+    Ret         -> text "Ret"
+
+instance Pretty Block where
+  pretty (Block stmts term) = vcat [ppStmts stmts,  pretty term]
 
 -- instance Show Term where
 --   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
@@ -49,60 +84,59 @@ findBlock mem entry =
   case runMemoryByteReader pf_x mem entry $ extractBlock entry S.empty of
     Left err -> Left $ show err
     Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
-    Right (Right ([Absolute next], stmts), _) ->
+    Right (Right ([Absolute next], _, stmts), _) ->
       Right (Block stmts $ Direct next)
-    Right (Right ([NFallthrough next], stmts), _) -> 
+    Right (Right ([NFallthrough next], _, stmts), _) -> 
       Right (Block stmts $ Fallthrough next)
-    Right (Right ([Absolute branch, Absolute fallthrough], stmts), _) -> 
+    Right (Right ([Absolute branch, Absolute fallthrough], _, stmts), _) -> 
       Right (Block stmts $ Cond branch fallthrough)
-    Right (Right ([NIndirect], stmts), _) -> 
+    Right (Right ([NIndirect], _, stmts), _) -> 
       Right (Block stmts $ Indirect)
   
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...
-findBlocks :: Memory Word64 -> Word64 -> Either String CFG
-findBlocks mem entry = do
-  cfg1 <- findBlocks' mem (S.empty) (S.singleton entry) M.empty
-  findBlocks' mem (M.keysSet cfg1) (S.singleton entry) M.empty
+findBlocks :: Memory Word64 -> FunBounds -> Word64 -> Either String CFG
+findBlocks mem funBounds entry = calcFixpoint M.empty
+  where
+    calcFixpoint cfg = do
+      cfg' <- findBlocks' mem funBounds (M.keysSet cfg) (S.singleton entry) cfg
+      if (M.keysSet cfg' /= M.keysSet cfg)
+        then calcFixpoint cfg'
+        else return cfg'
 
 findBlocks' :: Memory Word64 
-            -> Set Word64 
+            -> FunBounds
+            -> Set Word64
             -> Set Word64 
             -> CFG 
             -> Either String CFG
-findBlocks' mem breaks queue cfg
-  | Just (entry, queue') <- S.minView queue = 
+findBlocks' mem funBounds breaks queue cfg
+  | Just (entry, queue') <- S.minView queue =    
+    let finishBlock :: [Stmt] -> Term -> [Word64] -> Either String CFG
+        finishBlock stmts term nexts =
+          let cfg'   = M.insert entry (Block stmts term) cfg
+              addQ q next
+                | inFunBounds funBounds next
+                  && not (M.member next cfg) = S.insert next q
+                | otherwise = q                  
+              queue'' = foldl addQ queue' nexts
+          in findBlocks' mem funBounds breaks queue'' cfg'
+    in
     case runMemoryByteReader pf_x mem entry $ extractBlock entry breaks of
       Left err -> Left $ show err
       Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
-      -- Right (Right ([Absolute callee], Just ret, stmts), _) -> 
-      --   if M.member ret cfg
-      --     then findBlocks' mem breaks queue' $ 
-      --       M.insert entry (Block stmts $ Call callee ret) cfg
-      --     else findBlocks' mem breaks (S.insert ret queue') 
-      --       (M.insert entry (Block stmts $ Call callee ret) cfg)
-      Right (Right ([Absolute next], stmts), _) -> 
-        if M.member next cfg
-          then findBlocks' mem breaks queue' $
-            M.insert entry (Block stmts $ Direct next) cfg
-          else findBlocks' mem breaks (S.insert next queue')
-            (M.insert entry (Block stmts $ Direct next) cfg)
-      Right (Right ([NFallthrough next], stmts), _) -> 
-        if M.member next cfg
-          then findBlocks' mem breaks queue' $
-            M.insert entry (Block stmts $ Fallthrough next) cfg
-          else findBlocks' mem breaks (S.insert next queue')
-            (M.insert entry (Block stmts $ Fallthrough next) cfg)
-      Right (Right ([Absolute branch, Absolute fallthrough], stmts), _) -> 
-        let queue'' = if M.member branch cfg 
-                        then queue'
-                        else S.insert branch queue' 
-            queue''' = if M.member fallthrough cfg
-                        then queue''
-                        else S.insert fallthrough queue''
-        in findBlocks' mem breaks queue''' $ 
-            M.insert entry (Block stmts $ Cond branch fallthrough) cfg
-      Right (Right ([NIndirect], stmts), _) -> 
-        findBlocks' mem breaks queue' $ M.insert entry (Block stmts $ Indirect) cfg
+      Right (Right ([Absolute callee], nextAddr, stmts), _)
+        | not (inFunBounds funBounds callee) -> finishBlock stmts (Call callee nextAddr) [nextAddr]
+      -- Does this case happen?
+      Right (Right ([Absolute next], nextAddr, stmts), _)
+        -> finishBlock stmts (Direct next) [next, nextAddr]
+      Right (Right ([NFallthrough next], nextAddr, stmts), _)
+        -> finishBlock stmts (Fallthrough next) [next, nextAddr]
+      -- FIXME: hacky
+      Right (Right ([Absolute branch, Absolute fallthrough], nextAddr, stmts), _)
+        -> finishBlock stmts (Cond branch fallthrough) [branch, fallthrough, nextAddr]
+      Right (Right ([NIndirect], nextAddr, stmts), _)
+        -> finishBlock stmts Indirect [nextAddr]
 
   | otherwise = Right cfg
+   where

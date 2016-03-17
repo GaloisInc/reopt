@@ -704,18 +704,15 @@ exec_rol l count = do
       effectiveMASK = bvLit (bv_width v) (widthVal (bv_width v) - 1)
       effective = uext (bv_width v) count .&. effectiveMASK
       r = bvRol v effective
-
-  -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero low_count) $ do
-    let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
-
-    cf_loc .= new_cf
-
-    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-      (of_loc .= (msb r `bvXor` new_cf))
-      (set_undefined of_loc)
-
-    l .= r
+  
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
 
 -- FIXME: use really_exec_shift above?
 exec_ror :: (1 <= n', n' <= n, IsLocationBV m n)
@@ -738,18 +735,14 @@ exec_ror l count = do
       effective = uext (bv_width v) count .&. effectiveMASK
       r = bvRor v effective
 
-  -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero low_count) $ do
-    let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
-
-    cf_loc .= new_cf
-
-    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-      (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
-      (set_undefined of_loc)
-
-    l .= r
-
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
 
 -- ** Bit and Byte Instructions
 
@@ -896,8 +889,9 @@ exec_movs False dest_loc _src_loc = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  v' <- get $ mkBVAddr sz dest
-  exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
+  v' <- get $ mkBVAddr sz src
+  mkBVAddr sz dest .= v'
+  
   rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
   rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
   where
@@ -1057,6 +1051,7 @@ exec_stos False _dest_loc val_loc = do
   rdi .= dest .+ (mux df neg_szv szv)
   where
     sz = loc_width val_loc
+    
 exec_stos True _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
@@ -1064,15 +1059,10 @@ exec_stos True _dest_loc val_loc = do
   v    <- get val_loc
   let szv = bvLit n64 (natValue sz `div` 8)
   count <- uext n64 <$> get count_reg
-  let nbytes_off = (count `bvSub` bvKLit 1) `bvMul` szv
-      nbytes     = count `bvMul` szv
-  ifte_ df
-        (do memset count v (dest .- nbytes_off)
-            rdi .= dest .- nbytes
-            rcx .= bvKLit 0)
-        (do memset count v dest
-            rdi .= dest .+ nbytes
-            rcx .= bvKLit 0)
+  let nbytes     = count `bvMul` szv
+  memset count v dest df
+  rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
+  rcx .= bvKLit 0
   where
     sz = loc_width val_loc
     -- FIXME: aso modifies this

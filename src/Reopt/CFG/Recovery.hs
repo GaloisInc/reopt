@@ -43,6 +43,7 @@ import           Data.Type.Equality
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.String (fromString)
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.RegisterUse
@@ -453,7 +454,10 @@ recoverBlock blockRegProvides phis lbl = do
                N.XMMReg {}
                  | Just rv <- lookup r (zip x86FloatResultRegisters floatrs)
                    -> return $ FnReturn rv
-                                                  
+
+               -- df is 0 after a function call.
+               _ | Just Refl <- testEquality r N.df -> return $ FnConstantValue knownNat 0
+                   
                _ | Some r `Set.member` x86CalleeSavedRegisters -> recoverRegister proc_state r
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-call register " ++ show r) (N.registerType r))
@@ -502,7 +506,7 @@ recoverBlock blockRegProvides phis lbl = do
 
     Just (ParsedSyscall proc_state next_addr call_no pname name args rregs) -> do
       Fold.traverse_ recoverStmt (blockStmts b)
-      
+
       let mkRet :: MapF N.RegisterName FnRegValue
                 -> Some N.RegisterName
                 -> Recover (MapF N.RegisterName FnRegValue)
@@ -531,6 +535,9 @@ recoverBlock blockRegProvides phis lbl = do
                      recoverRegister proc_state N.rsp                     
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverRegister proc_state r
+                     
+               _ | Just Refl <- testEquality r N.df -> return $ FnConstantValue knownNat 0
+               
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
@@ -612,7 +619,20 @@ recoverStmt s = do
         recoverWrite addr val
     Comment msg -> do
       addFnStmt $ FnComment msg
+    MemCopy bytesPerCopy nValues src dest direction -> do
+      stmt <- FnMemCopy bytesPerCopy <$> recoverValue "memcopy" nValues
+                                     <*> recoverValue "memcopy" src
+                                     <*> recoverValue "memcopy" dest
+                                     <*> recoverValue "memcopy" direction
+      addFnStmt stmt
+    MemSet count v ptr df -> do
+      stmt <- FnMemSet <$> recoverValue "memset" count
+                       <*> recoverValue "memset" v
+                       <*> recoverValue "memset" ptr
+                       <*> recoverValue "memset" df
+      addFnStmt stmt      
     _ -> debug DFunRecover ("recoverStmt undefined for " ++ show (pretty s)) $ do
+      addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
       return ()
 
 recoverAddr :: Value (BVType 64) -> Recover (FnValue (BVType 64))

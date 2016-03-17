@@ -79,8 +79,10 @@ concretizeAbsCodePointers mem (FinSet s) =
   filter (isCodeAddr mem) $ fromInteger <$> Set.toList s
 concretizeAbsCodePointers mem (CodePointers s) =
   filter (isCodeAddr mem) $ Set.toList s
-concretizeAbsCodePointers mem (StridedInterval s) =
-  filter (isCodeAddr mem) $ fromInteger <$> SI.toList s
+  -- FIXME: this is dangerous !!
+concretizeAbsCodePointers mem (StridedInterval s) = [] -- FIXME: this case doesn't make sense
+  -- debug DCFG ("I think these are code pointers!: " ++ show s) $ []
+  -- filter (isCodeAddr mem) $ fromInteger <$> SI.toList s
 concretizeAbsCodePointers mem _ = []
 
 -- | Insert keys into map with given value, keeping old value if they are alread there.
@@ -288,9 +290,10 @@ markAddrAsFunction addr s
                 & function_frontier %~ maybeSetInsert low . Set.insert addr
      s'
 
-recordFunctionAddrs :: Memory Word64 -> AbsValue (BVType 64) -> State InterpState ()
-recordFunctionAddrs mem av = do
+recordFunctionAddrs :: BlockLabel -> Memory Word64 -> AbsValue (BVType 64) -> State InterpState ()
+recordFunctionAddrs lbl mem av = do
   let addrs = concretizeAbsCodePointers mem av
+  debugM DCFG (show lbl ++ ": Adding function entries " ++ intercalate ", " (map (flip showHex "") addrs))
   modify $ \s0 -> foldl' (flip markAddrAsFunction) s0 addrs
 
 recordWriteStmt :: BlockLabel -> AbsProcessorState -> Stmt -> State InterpState ()
@@ -298,7 +301,7 @@ recordWriteStmt lbl regs (Write (MemLoc addr _) v)
   | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v = do
     mem <- gets memory
-    recordFunctionAddrs mem av
+    recordFunctionAddrs lbl mem av
 recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m => AbsProcessorState -> [Stmt] -> m AbsProcessorState
@@ -755,7 +758,7 @@ transferBlock b regs = do
             -- Merge caller return information
             mergeCallerReturn lbl abst ret
             -- Look for new ips.
-            recordFunctionAddrs mem (abst^.absX86State^.curIP)
+            recordFunctionAddrs lbl mem (abst^.absX86State^.curIP)
 
           -- This block ends with a return.
           | Just _ <- identifyReturn s' -> do
@@ -858,7 +861,7 @@ transferBlock b regs = do
             Just br <- Map.lookup (labelAddr lbl) <$> use blocks
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
             let abst = finalAbsBlockState regs' s'
-            recordFunctionAddrs mem (abst^.absX86State^.curIP)
+            recordFunctionAddrs lbl mem (abst^.absX86State^.curIP)
 
 transfer :: CodeAddr -> State InterpState ()
 transfer addr = do

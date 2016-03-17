@@ -1377,6 +1377,8 @@ class ( Applicative m
             -- ^ Value to set
             -> Value m (BVType 64)
             -- ^ Pointer to buffer to set
+            -> Value m (BVType 1)
+            -- ^ Direction flag
             -> m ()
 
   -- | Compare the contents of a memory region against a value.  Returns the number of elements which are

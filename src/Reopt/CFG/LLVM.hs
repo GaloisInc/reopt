@@ -77,10 +77,12 @@ iRead_GS = intrinsic "reopt.Read_GS" (L.iT 16) []
 iWrite_GS :: L.Typed L.Value
 iWrite_GS = intrinsic "reopt.Write_GS" L.voidT [L.iT 16]
 
-iMemCopy :: L.Typed L.Value
-iMemCopy = intrinsic "reopt.MemCopy" L.voidT [L.iT 64, L.iT 64
-                                             , L.iT 64, L.iT 64
-                                             , L.iT 1]
+iMemCopy :: Integer -> L.Typed L.Value
+iMemCopy n = intrinsic ("reopt.MemCopy.i" ++ show n) L.voidT [ L.iT 64, L.iT 64, L.iT 64, L.iT 1]
+
+iMemSet :: L.Type -> L.Typed L.Value
+iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT
+                         [L.ptrT typ, typ, L.iT 64, L.iT 1]
 
 iMemCmp :: L.Typed L.Value
 iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
@@ -105,11 +107,13 @@ reoptIntrinsics = [ iEvenParity
                   , iWrite_FS
                   , iRead_GS
                   , iWrite_GS
-                  , iMemCopy
                   , iMemCmp
                   , iSystemCall "Linux"
                   , iSystemCall "FreeBSD"                    
                   ]
+                  ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
+                  ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
+  
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -355,39 +359,36 @@ stmtToLLVM stmt = do
        -- ControlLoc {} -> void $ unimplementedInstr
        -- DebugLoc {}   -> void $ unimplementedInstr
 
-   -- MemCopy bytesPerCopy nValues src dest direction -> do
-   --   nValues' <- valueToLLVM nValues
-   --   src'     <- valueToLLVM src
-   --   dest'    <- valueToLLVM dest
-   --   case direction of
-   --    BVValue _ 0 -> do
-   --      let typ = L.iT (fromIntegral $ 8 * bytesPerCopy)
-   --          op = intrinsic ("llvm.memcpy.p0"
-   --                          ++ show (L.ppType typ)
-   --                          ++ ".p0" ++ show (L.ppType typ)
-   --                          ++ ".i64") L.voidT
-   --               [L.ptrT typ, L.ptrT typ, L.iT 64, L.iT 32, L.iT 1]
-   --      src_ptr  <- L.bitcast src'  (L.ptrT typ)
-   --      dest_ptr <- L.bitcast dest' (L.ptrT typ)
-   --      L.call_ op [dest_ptr, src_ptr, nValues'
-   --                 , L.iT 32 L.-: L.int 0
-   --                 , L.iT 1  L.-: L.int 0 ]
-   --    _ -> do
-   --      direction' <- valueToLLVM direction
-   --      L.call_ iMemCopy [ L.iT 64 L.-: L.integer bytesPerCopy
-   --                       , nValues', src', dest', direction' ]
+   FnMemCopy bytesPerCopy nValues src dest direction -> do
+     nValues' <- valueToLLVM nValues
+     src'     <- valueToLLVM src
+     dest'    <- valueToLLVM dest
+     direction' <- valueToLLVM direction
+     liftBB $ L.call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
 
-   -- MemSet count v ptr -> do
-   --   count' <- valueToLLVM count
-   --   v'     <- valueToLLVM v
-   --   ptr'   <- valueToLLVM ptr
-   --   let typ = typeToLLVMType $ valueType v
-   --       op = intrinsic ("llvm.memset.p0"
-   --                          ++ show (L.ppType typ)
-   --                          ++ ".i64") L.voidT
-   --            [L.ptrT typ, typ, L.iT 64, L.iT 32, L.iT 1]
-   --   ptr_ptr <- L.bitcast ptr' (L.ptrT typ)
-   --   L.call_ op [ptr_ptr, v', count', L.iT 32 L.-: L.int 0, L.iT 1 L.-: L.int 0]
+     -- case direction of
+     --   FnConstantValue _ 0 -> liftBB $ do
+     --    let typ = L.iT (fromIntegral $ 8 * bytesPerCopy)
+     --        fn = intrinsic ("llvm.memcpy.p0"
+     --                        ++ show (L.ppType typ)
+     --                        ++ ".p0" ++ show (L.ppType typ)
+     --                        ++ ".i64") L.voidT
+     --             [L.ptrT typ, L.ptrT typ, L.iT 64, L.iT 32, L.iT 1]
+     --    src_ptr  <- L.bitcast src'  (L.ptrT typ)
+     --    dest_ptr <- L.bitcast dest' (L.ptrT typ)
+     --    L.call_ fn [dest_ptr, src_ptr, nValues'
+     --               , L.iT 32 L.-: L.int 0
+     --               , L.iT 1  L.-: L.int 0 ]
+     --   _ -> do
+
+   FnMemSet count v ptr df -> do
+     count' <- valueToLLVM count
+     v'     <- valueToLLVM v
+     ptr'   <- valueToLLVM ptr
+     df'    <- valueToLLVM df
+     let typ = typeToLLVMType $ fnValueType v
+     ptr_ptr <- liftBB $ L.inttoptr ptr' (L.ptrT typ)
+     liftBB $ L.call_ (iMemSet typ) [ptr_ptr, v', count', df']
 
    FnComment _str -> return () -- L.comment $ Text.unpack str
    -- PlaceHolderStmt {} -> void $ unimplementedInstr

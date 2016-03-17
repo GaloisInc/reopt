@@ -30,8 +30,9 @@ import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
-import           GHC.TypeLits (KnownNat)
 import           Debug.Trace
+import           GHC.TypeLits (KnownNat)
+import           Numeric (showHex)
 
 import           Data.Parameterized.NatRepr
 import qualified Flexdis86 as F
@@ -742,4 +743,4 @@ execInstruction next ii =
     Just (SemanticsOp f) -> Just $ do
       rip .= bvLit knownNat next
       f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
-    _                    -> trace ("Unsupported instruction: " ++ show ii) Nothing
+    _                    -> trace ("Unsupported instruction (" ++ showHex next "): " ++ show ii) Nothing
