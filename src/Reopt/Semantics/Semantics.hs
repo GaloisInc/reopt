@@ -706,7 +706,7 @@ exec_rol l count = do
       r = bvRol v effective
 
   -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero low_count) $ do
+  ifte_ (is_zero low_count) (l .= v) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
 
     cf_loc .= new_cf
