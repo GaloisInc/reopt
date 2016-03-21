@@ -1593,6 +1593,9 @@ exec_movsX_xmm_mem l v = do
 
 -- CVTPI2PS Convert packed doubleword integers to packed single-precision floating-point values
 -- CVTSI2SS Convert doubleword integer to scalar single-precision floating-point value
+exec_cvtsi2ss :: (IsLocationBV m n) => MLocation m XMMType -> Value m (BVType n) -> m ()
+exec_cvtsi2ss xmm v = set_low xmm (fpFromBV SingleFloatRepr v)
+
 -- CVTPS2PI Convert packed single-precision floating-point values to packed doubleword integers
 -- CVTTPS2PI Convert with truncation packed single-precision floating-point values to packed doubleword integers
 -- CVTSS2SI Convert a scalar single-precision floating-point value to a doubleword integer
