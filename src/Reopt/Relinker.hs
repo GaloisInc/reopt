@@ -11,6 +11,10 @@ This module is a start towards a binary and object merging tool.
 module Reopt.Relinker
   ( CodeRedirection(..)
   , mergeObject
+    -- * Warnings
+  , RelinkWarnings
+  , unresolvedSymbols
+  , hasRelinkWarnings
   ) where
 
 import           Control.Exception (assert)
@@ -35,11 +39,14 @@ import           Data.Maybe
 import           Data.Monoid
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
 import           Numeric (showHex)
+import qualified Text.PrettyPrint.ANSI.Leijen as PP
 
 import           Reopt.Relinker.Redirection
 
@@ -139,7 +146,7 @@ findSectionInfo :: Eq w
                    -- ^ Expected section flags
                 -> String
                     -- ^ Name of relocation section (or "" if no relocations associateD)
-                 -> Except String (Maybe (SectionInfo w))
+                -> Except String (Maybe (SectionInfo w))
 findSectionInfo sections nm tp flags reloc =
   case tryFindSectionIndex sections nm of
     [i] -> do
@@ -195,6 +202,32 @@ elfHasGNUStackSection e =
 findSectionFromHeaders :: String -> ElfHeaderInfo w -> [ElfSection w]
 findSectionFromHeaders nm info =
   filter (\s -> elfSectionName s == nm) $ V.toList $ getSectionTable info
+
+------------------------------------------------------------------------
+-- RelinkWarning
+
+-- | Warnings from relinking
+newtype RelinkWarnings = RelinkWarnings
+  { _unresolvedSymbols :: (Set BS.ByteString)
+    -- ^ Unresolved symbols in relocations.
+  }
+
+emptyRelinkWarnings :: RelinkWarnings
+emptyRelinkWarnings = RelinkWarnings { _unresolvedSymbols = Set.empty }
+
+-- | Unresolved symbols in relocations.
+unresolvedSymbols :: Simple Lens RelinkWarnings (Set BS.ByteString)
+unresolvedSymbols = lens _unresolvedSymbols (\s v -> s { _unresolvedSymbols = v })
+
+hasRelinkWarnings :: RelinkWarnings -> Bool
+hasRelinkWarnings w = not (Set.null (w^.unresolvedSymbols))
+
+
+instance PP.Pretty RelinkWarnings where
+  pretty w = PP.vcat (ppUnresolvedSymbol <$> Set.toList (w^.unresolvedSymbols))
+    where ppUnresolvedSymbol s =
+            PP.text "Skipping relocations of unresolved symbol"
+            PP.<+> PP.text (BSC.unpack s) PP.<> PP.text "."
 
 ------------------------------------------------------------------------
 -- SymbolTable
@@ -256,13 +289,12 @@ data ObjectRelocationInfo w
 objectSectionAddr :: String
                   -> ElfSectionIndex
                   -> ObjectRelocationInfo w
-                  -> Either String w
+                  -> w
 objectSectionAddr src idx info =
   case Map.lookup idx (objectSectionMap info) of
     Nothing ->
-      Left $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
-    Just r ->
-      Right r
+      error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
+    Just r -> r
 
 -- | Get the address of a symbol table if it is mapped in the section map.
 symbolAddr :: (Eq w, Num w)
@@ -271,32 +303,35 @@ symbolAddr :: (Eq w, Num w)
            -> String
               -- ^ Name of reference to a symbol
            -> ElfSymbolTableEntry w
-           -> Either String w
+           -> Maybe w
 symbolAddr reloc_info src sym =
   case steType sym of
     STT_SECTION
       | steValue sym /= 0 ->
-        Left "symbolAddr expects section names to have 0 offset."
+        error "symbolAddr expects section names to have 0 offset."
       | steIndex sym == SHN_UNDEF ->
-        Left "Reference to undefined section."
+        error "Reference to undefined section."
       | otherwise ->
-          objectSectionAddr src (steIndex sym) reloc_info
+         Just (objectSectionAddr src (steIndex sym) reloc_info)
     STT_FUNC
       | steIndex sym == SHN_UNDEF ->
-        Left "Function symbol has undefined section."
+        error "Function symbol has undefined section."
       | otherwise ->
-          objectSectionAddr src (steIndex sym) reloc_info
+        Just (objectSectionAddr src (steIndex sym) reloc_info)
     STT_NOTYPE
       | steIndex sym /= SHN_UNDEF ->
-          Left "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
+          error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
       | otherwise ->
         case Map.lookup (steName sym) (binarySymbolMap reloc_info) of
-          Nothing -> Left $ "Could not resolve symbol " ++ BSC.unpack (steName sym) ++ "."
-          Just addr -> Right addr
+          Nothing -> Nothing
+          Just addr -> Just addr
     tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
 ------------------------------------------------------------------------
 -- Code for performing relocations in new object.
+
+
+type ObjRelocM s = StateT RelinkWarnings (ST s)
 
 -- | Perform a relocation listed in the new object.
 performReloc :: ObjectRelocationInfo Word64
@@ -313,46 +348,45 @@ performReloc :: ObjectRelocationInfo Word64
                 -- ^ Contents of elf section we are apply this to.
              -> RelaEntry X86_64_RelocationType
                 -- ^ The relocation entry.
-             -> ST s ()
+             -> ObjRelocM s ()
 performReloc reloc_info sym_table this_vaddr mv reloc = do
   -- Offset to modify.
   let off = r_offset reloc :: Word64
   let sym = getSymbolByIndex sym_table (r_sym reloc)
   -- Get the address of a symbol
-  let sym_val =
-          case symbolAddr reloc_info "A relocation entry" sym of
-            Right v -> v
-            Left msg -> error msg
-  -- Relocation addend
-  let addend = r_addend reloc :: Int64
-  -- Get PC offset
-  let pc_offset = this_vaddr + off
-  -- Parse on type
-  case r_type reloc of
-    R_X86_64_PC32 ->
-          write32_lsb mv off res32
-      where res64 = sym_val + fromIntegral addend - pc_offset :: Word64
-            res32 = fromIntegral res64 :: Word32
-    R_X86_64_32
-        | fromIntegral res32 /= res64 ->
-          error $ "Relocation of " ++ steStringName sym
+  case symbolAddr reloc_info "A relocation entry" sym of
+    Nothing -> unresolvedSymbols %= Set.insert (steName sym)
+    Just sym_val -> do
+      -- Relocation addend
+      let addend = r_addend reloc :: Int64
+      -- Get PC offset
+      let pc_offset = this_vaddr + off
+      -- Parse on type
+      case r_type reloc of
+        R_X86_64_PC32 ->
+            lift $ write32_lsb mv off res32
+          where res64 = sym_val + fromIntegral addend - pc_offset :: Word64
+                res32 = fromIntegral res64 :: Word32
+        R_X86_64_32
+          | fromIntegral res32 /= res64 ->
+            error $ "Relocation of " ++ steStringName sym
              ++ " at " ++ showHex sym_val " + " ++ show addend
              ++ " does not safely zero extend."
-        | otherwise ->
-          write32_lsb mv off res32
-      where res64 = sym_val + fromIntegral addend :: Word64
-            res32 = fromIntegral res64 :: Word32
-    R_X86_64_32S
-        | fromIntegral res32 /= res64 ->
-          error $ "Relocation of " ++ steStringName sym
+          | otherwise ->
+            lift $ write32_lsb mv off res32
+          where res64 = sym_val + fromIntegral addend :: Word64
+                res32 = fromIntegral res64 :: Word32
+        R_X86_64_32S
+          | fromIntegral res32 /= res64 ->
+            error $ "Relocation of " ++ steStringName sym
              ++ " at " ++ showHex sym_val " + " ++ show addend
              ++ " does not safely sign extend."
-        | otherwise ->
-          write32_lsb mv off (fromIntegral res32)
-      where res64 = fromIntegral sym_val + addend :: Int64
-            res32 = fromIntegral res64 :: Int32
-    _ -> do
-      error "Relocation not supported"
+          | otherwise ->
+            lift $ write32_lsb mv off (fromIntegral res32)
+          where res64 = fromIntegral sym_val + addend :: Int64
+                res32 = fromIntegral res64 :: Int32
+        _ -> do
+          error "Relocation not supported"
 
 performRelocs :: ObjectRelocationInfo Word64
                 -- ^ Maps elf section indices in object to the base virtual address
@@ -363,13 +397,13 @@ performRelocs :: ObjectRelocationInfo Word64
                  -- ^ Section that we are applying relocation to.
               -> Word64 -- ^ Base address of this section.
               -> [RelaEntry X86_64_RelocationType]
-              -> ElfSection Word64
-performRelocs reloc_info sym_table section this_vaddr relocs = runST $ do
+              -> ObjRelocM s (ElfSection Word64)
+performRelocs reloc_info sym_table section this_vaddr relocs = do
   let dta = elfSectionData section
   let len = BS.length dta
   mv <- SMV.new len
   -- Copy original bytes into bytestring
-  writeBS mv 0 dta
+  lift $ writeBS mv 0 dta
   -- Updpate using relocations
   mapM_ (performReloc reloc_info sym_table this_vaddr mv) relocs
 
@@ -434,8 +468,8 @@ remapBytes redirs redir_list base bs = runST $ do
     when (base <= off && off < base + fromIntegral len) $ do
       let tgt =
             case symbolAddr reloc_info "A user defined relocation" sym of
-              Right r -> r
-              Left msg -> error msg
+              Just r -> r
+              Nothing -> error $ "Could not find symbol " ++ show (steName sym) ++ "."
       writeBS mv (fromIntegral (off - base)) (crMkJump redirs tgt)
 
   let SMV.MVector _ fp = mv
@@ -753,6 +787,14 @@ data NewObjectInfo w
                   , noiSymbols :: !(V.Vector (ElfSymbolTableEntry w))
                   }
 
+type RelinkM = ExceptT String (State RelinkWarnings)
+
+liftS :: Except String a -> RelinkM a
+liftS m =
+  case runExcept m of
+    Left e -> throwE e
+    Right v -> return v
+
 -- | Create region for section in new object.
 relocateObjectSection :: NewObjectInfo Word64
                            -- ^ Information about new object
@@ -760,7 +802,7 @@ relocateObjectSection :: NewObjectInfo Word64
                            -- ^ Base address of segment
                         -> NewSectionBounds Word64
                            -- ^ Section if we need to.
-                        -> Except String [ElfDataRegion Word64]
+                        -> RelinkM [ElfDataRegion Word64]
 relocateObjectSection _        _             NSBUndefined{} =
   return []
 relocateObjectSection obj_info base_seg_addr (NSBDefined info pad off _)
@@ -774,10 +816,13 @@ relocateObjectSection obj_info base_seg_addr (NSBDefined info pad off _)
           reloc_info = noiRelocInfo obj_info
           syms       = noiSymbols   obj_info
       -- Find text relocations section
-      relocs <- findRelaEntries obj (sectionReloc info)
+      relocs <- liftS $ findRelaEntries obj (sectionReloc info)
       -- Perform relocations
       let addr = base_seg_addr + off
-      let reloc_sec = performRelocs reloc_info syms sec addr relocs
+      s <- lift $ get
+      let (reloc_sec, s') = runST $ flip runStateT s $
+            performRelocs reloc_info syms sec addr relocs
+      lift $ put s'
       -- Get padding to add between end of header and start of code section.
       return $! dataPadding pad ++ [ ElfDataSection reloc_sec ]
 
@@ -800,9 +845,10 @@ mergeObject :: ElfHeaderInfo Word64
                -- ^ Object file to insert
             -> [CodeRedirection Word64]
                -- ^ Redirections from original file for new file.
-            -> Either String (Elf Word64)
-mergeObject orig_binary new_obj redirs =
-  runExcept $ mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
+            -> (Either String (Elf Word64), RelinkWarnings)
+mergeObject orig_binary new_obj redirs = do
+  let action = mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
+  runState (runExceptT action) emptyRelinkWarnings
 
 data NewSectionBounds w
   = NSBDefined !(SectionInfo w) !w !w !w
@@ -841,7 +887,7 @@ mergeObject' :: ElfHeaderInfo Word64 -- ^ Existing binary
              -> [CodeRedirection Word64] -- ^ Redirections
              -> (Word64 -> BS.ByteString)
                 -- ^ Function for creating jump to given offset.
-             -> Except String (Elf Word64)
+             -> RelinkM (Elf Word64)
 mergeObject' orig_binary_header obj_header redirs mkJump = do
   let orig_binary = getElf orig_binary_header
   let elf_class = ELFCLASS64
@@ -859,9 +905,9 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
 
   -- First build what we want to create
 
-  data_sec_index <-
+  data_sec_index <- liftS $
     findSectionInfo sections ".data" SHT_PROGBITS (shf_alloc .|. shf_write) ".rela.data"
-  bss_sec_index  <-
+  bss_sec_index  <- liftS $
     findSectionInfo sections ".bss"  SHT_NOBITS   (shf_alloc .|. shf_write) ""
 
   ----------------------------------------------------------------------
@@ -899,15 +945,15 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
   -- Find text section
   text_sec_bounds     <- do
     let flags = shf_alloc .|. shf_execinstr
-    get_section_bounds exec_seg_header_size
+    liftS $ get_section_bounds exec_seg_header_size
       <$> findSectionInfo sections ".text"     SHT_PROGBITS flags ".rela.text"
   rodata_sec_bounds   <- do
     let flags = shf_alloc
-    get_section_bounds (nsb_end text_sec_bounds)
+    liftS $ get_section_bounds (nsb_end text_sec_bounds)
       <$> findSectionInfo sections ".rodata"   SHT_PROGBITS flags ".rela.rodata"
   eh_frame_sec_bounds <- do
     let flags = shf_alloc
-    get_section_bounds (nsb_end rodata_sec_bounds)
+    liftS $ get_section_bounds (nsb_end rodata_sec_bounds)
       <$> findSectionInfo sections ".eh_frame" SHT_PROGBITS flags ".rela.eh_frame"
 
   let new_code_seg_filesize = nsb_end eh_frame_sec_bounds
@@ -941,7 +987,7 @@ mergeObject' orig_binary_header obj_header redirs mkJump = do
               sym_map = createBinarySymbolMap orig_binary_header
 
   -- Get symbols in object.
-  symbols     <- findSymbolTable obj_header
+  symbols     <- liftS $ findSymbolTable obj_header
 
   let resolved_redirs =
         CR { crMkJump    = mkJump

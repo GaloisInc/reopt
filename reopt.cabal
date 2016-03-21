@@ -100,14 +100,20 @@ executable reopt
     llvm-pretty,
     mtl,
     parameterized-utils >= 0.1.6,
+    process,
     random,
     reopt,
+    temporary,
+    transformers,
+    utf8-string,
     yaml
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs
 
+
   other-modules:
+    Assembler
     Paths_reopt
 
   if flag(enable-hpc)

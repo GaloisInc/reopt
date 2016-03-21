@@ -105,7 +105,7 @@ instance TestEquality FnPhiVar where
   testEquality x y = orderingF_refl (compareF x y)
 
 instance OrdF FnPhiVar where
-  compareF x y = 
+  compareF x y =
     case compare (unFnPhiVar x) (unFnPhiVar y) of
       LT -> LTF
       GT -> GTF
@@ -116,7 +116,7 @@ instance OrdF FnPhiVar where
 
 instance Pretty (FnPhiVar tp) where
   pretty = ppAssignId . unFnPhiVar
-  
+
 -- | The right-hand side of a function assingment statement.
 data FnAssignRhs (tp :: Type) where
   -- An expression with an undefined value.
@@ -143,7 +143,7 @@ instance Pretty (FnAssignRhs tp) where
 
 fnAssignRHSType :: FnAssignRhs tp -> TypeRepr tp
 fnAssignRHSType rhs =
-  case rhs of 
+  case rhs of
     FnSetUndefined sz -> BVTypeRepr sz
     FnReadMem _ tp -> tp
     FnEvalApp a    -> appType a
@@ -226,6 +226,7 @@ fnValueType v =
 -- Function definitions
 
 data Function = Function { fnAddr :: CodeAddr
+                           -- ^ In memory address of function
                          , fnType :: FunctionType
                          , fnBlocks :: [FnBlock]
                          }
@@ -261,7 +262,7 @@ instance FoldFnValue (FnPhiNodeInfo tp) where
 data FnBlock
    = FnBlock { fbLabel :: !BlockLabel
                -- Maps predecessor label onto the reg value at that
-               -- block               
+               -- block
              , fbPhiNodes  :: MapF FnPhiVar FnPhiNodeInfo
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
@@ -289,7 +290,7 @@ instance FoldFnValue FnBlock where
     mconcat (toListF (foldFnValue f) (fbPhiNodes b)
              ++ map (foldFnValue f) (fbStmts b)
              ++ [ foldFnValue f (fbTerm b) ])
-  
+
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
     -- | A comment
@@ -317,7 +318,7 @@ data FnStmt
                         -- ^ Address to start assigning from.
                        (FnValue (BVType 1))
                         -- ^ Direction flag
-    
+
 instance Pretty FnStmt where
   pretty s =
     case s of
@@ -327,7 +328,7 @@ instance Pretty FnStmt where
       FnMemCopy  sz cnt src dest rev ->
         text "memcopy" <+> parens (hcat $ punctuate comma args)
         where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-      FnMemSet cnt val dest df -> 
+      FnMemSet cnt val dest df ->
         text "memset" <+> parens (hcat $ punctuate comma args)
         where args = [pretty cnt, pretty val, pretty dest, pretty df]
 
@@ -352,8 +353,8 @@ data FnTermStmt
             !(Maybe BlockLabel)
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
-     
-     -- FIXME: specialized to BSD's (broken) calling convention     
+
+     -- FIXME: specialized to BSD's (broken) calling convention
    | FnSystemCall !Word64 !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ] BlockLabel
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector CodeAddr)
    | FnTermStmtUndefined
@@ -375,7 +376,7 @@ instance Pretty FnTermStmt where
             ret_docs = viewSome pretty <$> rets
          in parens (commas ret_docs)
             <+> text ":=" <+> text "syscall"
-            <+> text name <> parens (commas arg_docs) <+> pretty lbl                       
+            <+> text name <> parens (commas arg_docs) <+> pretty lbl
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ map (text . flip showHex "") (V.toList vec))
       FnTermStmtUndefined -> text "undefined term"
