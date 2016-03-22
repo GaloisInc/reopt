@@ -8,6 +8,10 @@ LOG_DIR=/tmp/fuzz_logs
 RUN_LOG_DIR=${LOG_DIR}/run
 GEN_LOG_DIR=${LOG_DIR}/gen
 
+TIMESTAMP=`date +%Y-%m-%d-%H:%M:%S`
+
+SAVE_DIR=$HOME/saved/$TIMESTAMP
+
 make_fuzz64() {
   (cd deps/fuzz64 && make)
 }
@@ -41,6 +45,12 @@ prepare_run() {
   echo "Generated test .c files."
 }
 
+save_failure() {
+    local file=$1
+    mkdir -p ${SAVE_DIR}
+    cp ${FUZZ_BIN_DIR}/${file} ${RUN_LOG_DIR}/${file}.log ${SAVE_DIR}/
+}
+
 run_one() {
   file=$1
   if ! [ -e ${FUZZ_C_DIR}/$file.c ] ; then
@@ -72,6 +82,12 @@ run_one() {
     fi
   done
 
+  # Save binaries in failure cases
+  case $result in
+      0) ;;
+      *) save_failure "$file" ;;
+  esac
+  
   case $result in
     2) # Segfault
       echo "Maxed out segfaults."
@@ -123,6 +139,7 @@ run_all() {
   if [ $FAILS -eq 0 ] && [ $SEG_MAXS -eq 0 ]; then
     exit 0
   else
+    echo "Failing cases in ${SAVE_DIR}"
     exit 1
   fi
 }

@@ -1,16 +1,22 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Werror #-}
 module Main (main) where
 
+import           Control.Exception
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.Trans.Except
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.UTF8 as UTF8
+import           Data.Either
 import           Data.Elf
+import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -23,16 +29,17 @@ import           Data.Word
 import qualified Data.Yaml as Yaml
 import           Numeric (showHex)
 import           System.Console.CmdArgs.Explicit
-import           System.Directory (createDirectoryIfMissing)
+import           System.Directory (createDirectoryIfMissing, doesFileExist)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
-import           System.FilePath ((</>))
+import           System.FilePath
 import           System.IO
-import           System.Random
+import           System.IO.Error
+import           System.IO.Temp
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
-import           Paths_reopt (version)
+import           Paths_reopt (getLibDir, version)
 
 import           Flexdis86 (InstructionInstance(..))
 
@@ -40,7 +47,7 @@ import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.FnRep (Function(..))
-import           Reopt.CFG.LLVM
+import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps
@@ -50,6 +57,10 @@ import           Reopt.Object.Memory
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Utils.Debug
+
+import qualified Assembler
+
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- Args
@@ -65,6 +76,7 @@ data Action
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
    | Relink          -- ^ Link an existing binary and new code together.
+   | Reopt           -- ^ Perform a full reoptimization
 
 -- | Command line arguments.
 data Args = Args { _reoptAction :: !Action
@@ -74,6 +86,10 @@ data Args = Args { _reoptAction :: !Action
                  , _newobjPath  :: !FilePath
                  , _redirPath   :: !FilePath
                  , _outputPath  :: !FilePath
+                 , _gasPath     :: !FilePath
+                 , _llcPath     :: !FilePath
+                 , _llvmLinkPath :: !FilePath
+                 , _libreoptPath :: !(Maybe FilePath)
                  }
 
 -- | How to load Elf file.
@@ -111,15 +127,35 @@ redirPath = lens _redirPath (\s v -> s { _redirPath = v })
 outputPath :: Simple Lens Args FilePath
 outputPath = lens _outputPath (\s v -> s { _outputPath = v })
 
+-- | Path to GNU assembler.
+gasPath :: Simple Lens Args FilePath
+gasPath = lens _gasPath (\s v -> s { _gasPath = v })
+
+-- | Path to llc
+llcPath :: Simple Lens Args FilePath
+llcPath = lens _llcPath (\s v -> s { _llcPath = v })
+
+-- | Path to llvm-link
+llvmLinkPath :: Simple Lens Args FilePath
+llvmLinkPath = lens _llvmLinkPath (\s v -> s { _llvmLinkPath = v })
+
+-- | Path to llvm-link
+libreoptPath :: Simple Lens Args (Maybe FilePath)
+libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
-defaultArgs = Args { _reoptAction = ShowCFG
+defaultArgs = Args { _reoptAction = Reopt
                    , _programPath = ""
                    , _loadStyle = LoadBySection
                    , _debugKeys = []
                    , _newobjPath = ""
                    , _redirPath  = ""
                    , _outputPath = "a.out"
+                   , _gasPath = "gas"
+                   , _llcPath = "llc"
+                   , _llvmLinkPath = "llvm-link"
+                   , _libreoptPath = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -170,6 +206,7 @@ sectionFlag = flagNone [ "load-sections" ] upd help
   where upd  = loadStyle .~ LoadBySection
         help = "Load the Elf file using section information (default)."
 
+
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
   case cl of
@@ -217,6 +254,26 @@ outputFlag = flagReq [ "o", "output" ] upd "PATH" help
   where upd s old = Right $ old & outputPath .~ s
         help = "Path to write new binary."
 
+gasFlag :: Flag Args
+gasFlag = flagReq [ "gas" ] upd "PATH" help
+  where upd s old = Right $ old & gasPath .~ s
+        help = "Path to GNU assembler."
+
+llcFlag :: Flag Args
+llcFlag = flagReq [ "llc" ] upd "PATH" help
+  where upd s old = Right $ old & llcPath .~ s
+        help = "Path to llc."
+
+llvmLinkFlag :: Flag Args
+llvmLinkFlag = flagReq [ "llvm-link" ] upd "PATH" help
+  where upd s old = Right $ old & llvmLinkPath .~ s
+        help = "Path to llvm-link."
+
+libreoptFlag :: Flag Args
+libreoptFlag = flagReq [ "lib" ] upd "PATH" help
+  where upd s old = Right $ old & libreoptPath .~ Just s
+        help = "Path to libreopt.bc."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -233,6 +290,10 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , newobjFlag
                 , redirFlag
                 , outputFlag
+                , gasFlag
+                , llcFlag
+                , llvmLinkFlag
+                , libreoptFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -277,17 +338,29 @@ readElf64 :: (BS.ByteString -> Either (ByteOffset, String) (SomeElf f))
           -> IO (f Word64)
 readElf64 parseFn path = do
   when (null path) $ do
-    putStrLn "Please specify a binary."
+    putStrLn "Please specify a path."
     showUsage
     exitFailure
-  bs <- BS.readFile path
+  let h e | isDoesNotExistError e = fail $ path ++ " does not exist."
+          | otherwise = throwIO e
+  bs <- BS.readFile path `catch` h
+  parseElf64 parseFn path bs
+
+parseElf64 :: (BS.ByteString -> Either (ByteOffset, String) (SomeElf f))
+             -- ^ Function for reading value.
+           -> String
+              -- ^ Name of output for error messages
+           -> BS.ByteString
+              -- ^ Data to read
+           -> IO (f Word64)
+parseElf64 parseFn nm bs = do
   case parseFn bs of
     Left (_,msg) -> do
-      putStrLn $ "Error reading " ++ path ++ ":"
+      putStrLn $ "Error reading " ++ nm ++ ":"
       putStrLn $ "  " ++ msg
       exitFailure
     Right (Elf32 _) -> do
-      putStrLn "32-bit executables are not yet supported."
+      putStrLn "32-bit elf files are not yet supported."
       exitFailure
     Right (Elf64 e) ->
       return e
@@ -383,8 +456,9 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
-mkFinalCFGWithSyms :: Memory Word64
-                   -> ElfHeaderInfo Word64
+-- | Create a final CFG
+mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
+                   -> ElfHeaderInfo Word64 -- ^ Elf file to create CFG for.
                    -> (FinalCFG, Map CodeAddr BS.ByteString)
 mkFinalCFGWithSyms mem hdr = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs), sym_map)
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
@@ -400,11 +474,11 @@ mkFinalCFGWithSyms mem hdr = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addr
         -- FIXME: just everything.
         Just sysp =
           case elfOSABI e of
-            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps            
+            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps
             ELFOSABI_SYSV    -> Map.lookup "Linux" sysDeps
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
-            
+
 mkFinalCFG :: Memory Word64 -> ElfHeaderInfo Word64 -> FinalCFG
 mkFinalCFG mem hdr = fst (mkFinalCFGWithSyms mem hdr)
 
@@ -441,19 +515,24 @@ showLLVM loadSty e dir = do
   -- Create memory for elf
   mem <- mkElfMem loadSty (getElf e)
   let (cfg, symMap) = mkFinalCFGWithSyms mem e
-  
+
   let mkName f = dir </> (name ++ "_" ++ showHex addr ".ll")
         where
           name = case Map.lookup addr symMap of
                    Nothing -> "unknown"
                    Just s  -> BSC.unpack s
           addr = fnAddr f
-          
-  let mkF f = (,) (mkName f) . snd $ L.runLLVM (functionToLLVM f)
-  let writeF (n, m) = writeFile n (show $ L.ppModule m)
+  let writeF :: Function -> IO ()
+      writeF f  = do
+        let (_,m) = L.runLLVM $ do
+              LLVM.declareIntrinsics
+              let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
+              itraverse_ LLVM.declareFunction refs
+              LLVM.defineFunction f
+        writeFile (mkName f) (show $ L.ppModule m)
 
   createDirectoryIfMissing True dir
-  mapM_ (writeF . mkF) (finalFunctions cfg)
+  mapM_ (writeF) (finalFunctions cfg)
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -546,6 +625,22 @@ mkElfMem sty e = do
     LoadBySection -> memoryForElfSections e
     LoadBySegment -> memoryForElfSegments e
 
+-- | Merge a binary and new object
+mergeAndWrite :: FilePath
+              -> ElfHeaderInfo Word64 -- ^ Original binary
+              -> ElfHeaderInfo Word64 -- ^ New object
+              -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
+              -> IO ()
+mergeAndWrite output_path orig_binary new_obj redirs = do
+  putStrLn $ "Performing final relinking."
+  let (mres, warnings) = mergeObject orig_binary new_obj redirs
+  when (hasRelinkWarnings warnings) $ do
+    hPrint stderr (pretty warnings)
+  case mres of
+    Left e -> fail e
+    Right new_binary -> do
+      BSL.writeFile output_path $ renderElf new_binary
+
 performRedir :: Args -> IO ()
 performRedir args = do
   -- Get original binary
@@ -569,17 +664,130 @@ performRedir args = do
             case mredirs of
               Left e -> fail $ show e
               Right r -> return r
-      gen <- getStdGen
-      case mergeObject orig_binary_header new_obj redirs gen of
-        Left msg -> fail msg
-        Right (new_binary, gen') -> do
-          setStdGen gen'
-          putStrLn $ "Writing new binary: " ++ output_path
-          print $ elfType new_binary
-          BSL.writeFile output_path $ renderElf new_binary  
+      mergeAndWrite output_path orig_binary_header new_obj redirs
+
+
+llvmAssembly :: L.Module -> BS.ByteString
+llvmAssembly m = UTF8.fromString (show (L.ppModule m))
+
+-- | Maps virtual addresses to the phdr at them.
+type ElfSegmentMap w = Map w (Phdr w)
+
+-- | Create an elf segment map from a layout.
+elfSegmentMap :: forall w . (Integral w, Show w) => ElfLayout w -> ElfSegmentMap w
+elfSegmentMap l = foldl' insertElfSegment Map.empty (allPhdrs l)
+  where insertElfSegment ::  ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
+        insertElfSegment m p
+          | elfSegmentType seg == PT_LOAD =
+            trace ("Insert segment " ++ showHex a ".") $ Map.insert a p m
+          | otherwise = m
+          where seg = phdrSegment p
+                a = elfSegmentVirtAddr (phdrSegment p)
+
+-- | Lookup an address in the segment map, returning the index of the phdr
+-- and the offset.
+lookupElfOffset :: (Num w, Ord w) => ElfSegmentMap w -> w -> Maybe (Word16, w)
+lookupElfOffset m a =
+  case Map.lookupLE a m of
+    Just (base, phdr) | a < base + phdrFileSize phdr ->
+        Just (elfSegmentIndex seg, a - base)
+      where seg = phdrSegment phdr
+    _ -> Nothing
+
+-- | This creates a code redirection
+addrRedirection :: ElfSegmentMap Word64 -> Word64 -> Either Word64 (CodeRedirection Word64)
+addrRedirection m a = do
+  case lookupElfOffset m a of
+    Nothing -> Left a
+    Just (idx,off) -> Right redir
+      where L.Symbol sym_name = LLVM.functionName a
+            redir = CodeRedirection { redirSourcePhdr   = idx
+                                    , redirSourceOffset = off
+                                    , redirTarget       = UTF8.fromString sym_name
+                                    }
+
+
+targetArch :: ElfOSABI -> IO String
+targetArch abi =
+  case abi of
+    ELFOSABI_SYSV   -> return "x86_64-unknown-linux-elf"
+    ELFOSABI_NETBSD -> return "x86_64-unknown-freebsd-elf"
+    _ -> fail $ "Do not support architecture " ++ show abi ++ "."
+
+-- | Compile a bytestring containing LLVM assembly or bitcode into an object.
+--
+-- This takses the
+compile_llvm_to_obj :: Args -> String -> BS.ByteString -> FilePath -> IO ()
+compile_llvm_to_obj args arch llvm obj_path = do
+  -- Run llvm on resulting binary
+  putStrLn "Compiling new code"
+  mres <- runExceptT $ do
+    Assembler.llvm_to_object (args^.llcPath) (args^.gasPath) arch llvm obj_path
+  case mres of
+    Left f -> fail $ show f
+    Right () -> return ()
+
+performReopt :: Args -> IO ()
+performReopt args =
+  withSystemTempDirectory "reopt." $ \obj_dir -> do
+    -- Get original binary
+    orig_binary_header <- readElf64 parseElfHeaderInfo (args^.programPath)
+    -- Construct CFG from binary
+    mem <- mkElfMem (args^.loadStyle) (getElf orig_binary_header)
+    let cfg = mkFinalCFG mem orig_binary_header
+    let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions (finalFunctions cfg)
+    let output_path = args^.outputPath
+
+    let obj_llvm_path = obj_dir </> "obj.ll"
+    BS.writeFile obj_llvm_path obj_llvm
+
+    arch <- targetArch (headerOSABI (header orig_binary_header))
+    libreopt_path <-
+      case args^.libreoptPath of
+        Just s -> return s
+        Nothing -> (</> arch </> "libreopt.bc") <$> getLibDir
+
+    do exists <- doesFileExist libreopt_path
+       when (not exists) $ do
+         fail "Could not find path to libreopt.bc needed to link object."
+
+    mllvm <- runExceptT $
+      Assembler.llvm_link (args^.llvmLinkPath) [ obj_llvm_path, libreopt_path ]
+    llvm <- either (fail . show) return mllvm
+
+    case takeExtension output_path of
+      ".ll" -> do
+        BS.writeFile output_path llvm
+      ".o" -> do
+        compile_llvm_to_obj args arch llvm output_path
+      _ -> do
+        let obj_path = obj_dir </> "obj.o"
+        compile_llvm_to_obj args arch llvm obj_path
+
+        new_obj <- parseElf64 parseElfHeaderInfo "new object" =<< BS.readFile obj_path
+
+        putStrLn "Start merge and write"
+        -- Convert binary to LLVM
+        let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> finalFunctions cfg
+              where m = elfSegmentMap (elfLayout (getElf orig_binary_header))
+                    mkRedir f = addrRedirection m (fnAddr f)
+        unless (null bad_addrs) $ do
+          error $ "Found functions outside program headers:\n  "
+            ++ unwords ((`showHex` "") <$> bad_addrs)
+        -- Merge and write out
+        mergeAndWrite (args^.outputPath) orig_binary_header new_obj redirs
 
 main :: IO ()
-main = do
+main = main' `catch` h
+  where h e
+          | isUserError e =
+            hPutStrLn stderr (ioeGetErrorString e)
+          | otherwise = do
+            hPutStrLn stderr (show e)
+            hPutStrLn stderr (show (ioeGetErrorType e))
+
+main' :: IO ()
+main' = do
   args <- getCommandLineArgs
   setDebugKeys (args ^. debugKeys)
   case args^.reoptAction of
@@ -606,3 +814,5 @@ main = do
       putStrLn (modeHelp arguments)
     Relink -> do
       performRedir args
+    Reopt -> do
+      performReopt args

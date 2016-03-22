@@ -190,7 +190,7 @@ data RegisterViewType cl (b :: Nat) (n :: Nat) =
   , b ~ 0
   ) =>
   ZeroExtendOnWrite
-
+           
 -- * Destructors for 'RegisterView's.
 
 registerViewBase :: RegisterView cl b n -> NatRepr b
@@ -595,7 +595,7 @@ ppLocation ppAddr loc = case loc of
     ppReg :: RegisterView b n cl -> Doc
     ppReg rv =
       text $ "%" ++ show (_registerViewReg rv) ++
-        if b == 0 && s == width'
+        if b == 0 && s == (fromIntegral $ natValue (N.registerWidth $ _registerViewReg rv))
         then ""
         else "[" ++ show b ++ ":" ++ show s ++ "]"
       where

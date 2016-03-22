@@ -706,16 +706,26 @@ exec_rol l count = do
       r = bvRol v effective
 
   -- When the count is zero, nothing happens, in particular, no flags change
-  ifte_ (is_zero low_count) (l .= v) $ do
-    let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  -- ifte_ (is_zero low_count) (l .= v) $ do
+  --   let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
 
-    cf_loc .= new_cf
+  --   cf_loc .= new_cf
 
-    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-      (of_loc .= (msb r `bvXor` new_cf))
-      (set_undefined of_loc)
+  --   ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+  --     (of_loc .= (msb r `bvXor` new_cf))
+  --     (set_undefined of_loc)
 
-    l .= r
+  --   l .= r
+  
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
+
 
 -- FIXME: use really_exec_shift above?
 exec_ror :: (1 <= n', n' <= n, IsLocationBV m n)
@@ -738,18 +748,14 @@ exec_ror l count = do
       effective = uext (bv_width v) count .&. effectiveMASK
       r = bvRor v effective
 
-  -- When the count is zero, nothing happens, in particular, no flags change
-  when_ (complement $ is_zero low_count) $ do
-    let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
-
-    cf_loc .= new_cf
-
-    ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
-      (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
-      (set_undefined of_loc)
-
-    l .= r
-
+  l .= r
+  
+  let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
+  cf_loc .= new_cf
+  
+  ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
+    (of_loc .= (msb r `bvXor` new_cf))
+    (set_undefined of_loc)
 
 -- ** Bit and Byte Instructions
 
@@ -896,8 +902,9 @@ exec_movs False dest_loc _src_loc = do
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  v' <- get $ mkBVAddr sz dest
-  exec_cmp (mkBVAddr sz src) v' -- FIXME: right way around?
+  v' <- get $ mkBVAddr sz src
+  mkBVAddr sz dest .= v'
+  
   rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
   rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
   where
@@ -1599,6 +1606,9 @@ exec_movsX_xmm_mem l v = do
 
 -- CVTPI2PS Convert packed doubleword integers to packed single-precision floating-point values
 -- CVTSI2SS Convert doubleword integer to scalar single-precision floating-point value
+exec_cvtsi2ss :: (IsLocationBV m n) => MLocation m XMMType -> Value m (BVType n) -> m ()
+exec_cvtsi2ss xmm v = set_low xmm (fpFromBV SingleFloatRepr v)
+
 -- CVTPS2PI Convert packed single-precision floating-point values to packed doubleword integers
 -- CVTTPS2PI Convert with truncation packed single-precision floating-point values to packed doubleword integers
 -- CVTSS2SI Convert a scalar single-precision floating-point value to a doubleword integer

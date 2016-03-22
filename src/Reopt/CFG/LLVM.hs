@@ -19,12 +19,20 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Reopt.CFG.LLVM (functionToLLVM) where
+module Reopt.CFG.LLVM
+  ( functionName
+  , declareIntrinsics
+  , declareFunction
+  , defineFunction
+  , getReferencedFunctions
+  , moduleForFunctions
+  ) where
 
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
 import           Control.Monad.State
+import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Vector as V
@@ -91,7 +99,9 @@ iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
 
 -- FIXME: use personalities
 iSystemCall :: String -> L.Typed L.Value
-iSystemCall pname = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
+iSystemCall pname
+     | null pname = error "empty string given to iSystemCall"
+     | otherwise = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
   where
     -- the +1 is for the additional syscall no. register, which is
     -- passed via the stack.
@@ -109,11 +119,11 @@ reoptIntrinsics = [ iEvenParity
                   , iWrite_GS
                   , iMemCmp
                   , iSystemCall "Linux"
-                  , iSystemCall "FreeBSD"                    
+                  , iSystemCall "FreeBSD"
                   ]
                   ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
                   ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
-  
+
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -130,9 +140,14 @@ llvmIntrinsics = [ intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppT
                  , typ <- map L.iT [8, 16, 32, 64] ]
 
 declareIntrinsic :: L.Typed L.Value -> LLVM ()
-declareIntrinsic (L.Typed (L.PtrTo (L.FunTy rty argtys _)) (L.ValSymbol sym))
-  = void $ L.declare rty sym argtys False
+declareIntrinsic (L.Typed (L.PtrTo (L.FunTy rty argtys _)) (L.ValSymbol sym)) =
+  void $ L.declare rty sym argtys False
 declareIntrinsic _ = error "Not an intrinsic"
+
+-- | Declare all LLVM and reopt-specific intrinsics
+declareIntrinsics :: LLVM ()
+declareIntrinsics =
+  mapM_ declareIntrinsic (reoptIntrinsics ++ llvmIntrinsics)
 
 --------------------------------------------------------------------------------
 -- conversion to LLVM
@@ -203,15 +218,39 @@ makeEntryBlock (first:_) fargs = do
   modify (\s -> s { llvmFloatArgs = fargs' })
   liftBB $ L.jump (blockName $ fbLabel first)
 
+declareFunction :: CodeAddr -> FunctionType -> LLVM ()
+declareFunction addr ft = do
+  void $ L.declare (functionTypeReturnType ft) (functionName addr) (functionTypeArgTypes ft) False
+
+
+getReferencedFunctions :: Function -> Map CodeAddr FunctionType
+getReferencedFunctions f = foldFnValue findReferencedFunctions f
+  where findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
+        findReferencedFunctions (FnFunctionEntryValue ft addr) = Map.singleton addr ft
+        findReferencedFunctions _ = mempty
+
+-- | Get module for functions
+moduleForFunctions :: [Function] -> L.Module
+moduleForFunctions fns = snd $ L.runLLVM $ do
+  declareIntrinsics
+  -- Get all function references
+  let all_refs = mconcat (getReferencedFunctions <$> fns)
+  -- Delete references for functions we will declare
+  let refs = foldr' (Map.delete . fnAddr) all_refs fns
+  -- Declare functions thaat aren't defined
+  itraverse_ declareFunction refs
+  -- Define all functions
+  mapM_ defineFunction fns
+
+-- | This writes a function to LLVM, and returns the value corresponding to the function.
+--
 -- We have each function return all possible results, although only the ones that are actually
 -- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
-functionToLLVM :: Function -> LLVM (L.Typed L.Value)
-functionToLLVM f = do
-  mapM_ declareIntrinsic reoptIntrinsics
-  mapM_ declareIntrinsic llvmIntrinsics
-  let refs = Map.delete (fnAddr f) (foldFnValue findReferencedFunctions f)
-  itraverse_ (\addr ft ->
-               L.declare (functionTypeReturnType ft) (functionName addr) (functionTypeArgTypes ft) False) refs
+--
+-- Users should declare intrinsics via 'declareIntrinsics' before using this function.
+-- They should also add any referenced functions.
+defineFunction :: Function -> LLVM (L.Typed L.Value)
+defineFunction f = do
   L.define' L.emptyFunAttrs retType symbol argTypes False go
   where
     argTypes      = functionTypeArgTypes (fnType f)
@@ -227,10 +266,6 @@ functionToLLVM f = do
                           mapM_ blockToLLVM (fnBlocks f)
                           liftBB makeFailBlock
       in evalStateT (runToLLVM makeBlocks) st
-
-findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
-findReferencedFunctions (FnFunctionEntryValue ft addr) = Map.singleton addr ft
-findReferencedFunctions _ = mempty
 
 blockToLLVM :: FnBlock -> ToLLVM () -- L.BasicBlock
 blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
@@ -320,7 +355,7 @@ termStmtToLLVM tm =
      -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
        let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
                      ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
-                     
+
        liftBB $ do
            L.comment name
            rvar <- L.call (iSystemCall pname) allArgs

@@ -1,7 +1,6 @@
 
 all: tree tree.ll
 
-
 CLANG=clang-3.5
 LLVM-DIS=llvm-dis35
 LLC=llc
