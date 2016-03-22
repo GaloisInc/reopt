@@ -155,7 +155,7 @@ usage() {
 (( $# )) || run_all "`cat passers.txt`"
 
 # Run single test if a name is passed in.
-while getopts "s:an" opt; do
+while getopts "s:p:an" opt; do
   case $opt in
     s)
       prepare_run
@@ -173,6 +173,11 @@ while getopts "s:an" opt; do
       run_all "`comm -13 <(sort <(cat passers.txt)) <(sort <(find ${FUZZ_BIN_DIR} -type f -exec basename {} \;))`"
       ;;
 
+
+    p)
+      run_all "`find /tmp/fuzz_bin/ -name "*${OPTARG}*" -exec basename {} \;`"
+      ;; 
+    
     \?)
       echo "Invalid option: -$OPTARG" >&2
       usage
