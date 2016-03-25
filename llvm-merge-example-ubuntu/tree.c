@@ -12,6 +12,12 @@ struct tree root = { .left = &g_left, .right = &g_right, .payload = "root" };
 
 // Var-arg no-op.
 #define NOP(...) ;
+
+// Reopt doesn't extract variables.
+#define ROOT root
+#define R_STR r_str
+#define W_STR w_str
+
 // This file is full of undefined UPPER_CASE names. The names without
 // leading underscores are meant to defined with '-DNAME=value' when
 // calling 'gcc', but defining the names with leading underscores is

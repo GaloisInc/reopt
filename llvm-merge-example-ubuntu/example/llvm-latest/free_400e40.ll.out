@@ -1,0 +1,3 @@
+llc: free_400e40.ll:371:20: error: '%R133' defined with type 'float'
+  %R134 = zext i32 %R133 to i128
+                   ^

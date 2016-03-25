@@ -1,0 +1,979 @@
+src/Reopt/CFG/FunctionArgs.hs:325: [funargs] Arguments: 
+	exit: (3, 1) -> (2, 1)
+	_start_c: (1, 1) -> (1, 1)
+	deregister_tm_clones: (3, 1) -> (2, 1)
+	register_tm_clones: (0, 0) -> (0, 0)
+	__do_global_dtors_aux: (3, 1) -> (0, 0)
+	frame_dummy: (0, 0) -> (0, 0)
+	print_tree: (2, 1) -> (0, 1)
+	tree_equal: (2, 0) -> (1, 0)
+	really_write_tree: (6, 8) -> (2, 1)
+	write_tree: (4, 1) -> (0, 1)
+	read_tree_payload: (6, 1) -> (2, 1)
+	really_read_tree: (6, 1) -> (2, 1)
+	read_tree: (4, 1) -> (1, 1)
+	main: (3, 1) -> (0, 0)
+	__init_ssp: (3, 1) -> (2, 1)
+	__init_libc: (2, 1) -> (2, 1)
+	__libc_start_init: (3, 1) -> (0, 1)
+	__libc_start_main: (3, 1) -> (2, 1)
+	__funcs_on_exit: (3, 1) -> (2, 1)
+	__libc_exit_fini: (6, 8) -> (2, 1)
+	__simple_malloc: (3, 1) -> (0, 0)
+	alloc_fwd: (5, 1) -> (1, 1)
+	alloc_rev: (5, 1) -> (1, 1)
+	free: (6, 1) -> (2, 1)
+	malloc: (6, 1) -> (2, 1)
+	__malloc0: (6, 1) -> (0, 0)
+	realloc: (6, 1) -> (2, 1)
+	__madvise: (3, 0) -> (2, 1)
+	mmap64: (6, 1) -> (2, 1)
+	__mremap: (5, 1) -> (2, 1)
+	__munmap: (2, 0) -> (2, 1)
+	__unlist_locked_file: (3, 1) -> (2, 1)
+	fclose: (4, 1) -> (0, 1)
+	_IO_feof_unlocked: (6, 1) -> (2, 1)
+	fflush_unlocked: (6, 8) -> (2, 1)
+	fflush: (6, 8) -> (2, 1)
+	fgetc: (6, 8) -> (2, 1)
+	fopen64: (4, 1) -> (2, 1)
+	fputc: (6, 8) -> (2, 1)
+	fputs: (2, 1) -> (0, 1)
+	__fwritex: (6, 8) -> (1, 1)
+	fwrite: (6, 8) -> (0, 1)
+	__ofl_lock: (3, 1) -> (2, 1)
+	__ofl_unlock: (6, 1) -> (2, 1)
+	strchr: (2, 1) -> (2, 1)
+	strchrnul: (2, 1) -> (1, 1)
+	strcmp: (2, 0) -> (1, 0)
+	strlen: (1, 1) -> (1, 1)
+	memcpy: (3, 1) -> (2, 1)
+	__lock: (3, 1) -> (0, 1)
+	__unlock: (6, 1) -> (2, 1)
+	__wait: (4, 1) -> (0, 1)
+	__init_tp: (1, 0) -> (2, 1)
+	__copy_tls: (4, 1) -> (1, 0)
+	__init_tls: (1, 1) -> (2, 1)
+	__errno_location: (3, 1) -> (2, 1)
+	_Exit: (1, 0) -> (1, 1)
+	__syscall_ret: (3, 1) -> (2, 1)
+	__expand_heap: (1, 1) -> (2, 1)
+	__fdopen: (2, 1) -> (1, 1)
+	__fmodeflags: (4, 1) -> (1, 0)
+	__lockfile: (1, 1) -> (2, 1)
+	__unlockfile: (6, 1) -> (2, 1)
+	__overflow: (6, 8) -> (2, 1)
+	__aio_close: (1, 0) -> (1, 0)
+	__stdio_close: (1, 0) -> (0, 0)
+	__stdio_read: (3, 0) -> (0, 0)
+	__stdio_seek: (3, 0) -> (0, 0)
+	__stdio_write: (3, 0) -> (0, 0)
+	__towrite: (1, 1) -> (2, 1)
+	__towrite_needs_stdio_exit: (3, 1) -> (0, 0)
+	__uflow: (6, 8) -> (2, 1)
+	__ofl_add: (3, 1) -> (1, 1)
+	memset: (3, 1) -> (0, 1)
+	__set_thread_area: (1, 0) -> (1, 1)
+	close_file: (6, 8) -> (0, 1)
+	__stdio_exit_needed: (3, 1) -> (0, 0)
+	__toread: (6, 8) -> (2, 1)
+	__toread_needs_stdio_exit: (3, 1) -> (0, 0)
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_400130
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40013f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400154
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40016a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400154
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40016a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40016a
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_4001f3
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_400208
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_40022a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4002cb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4002ea
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400307
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_40034c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_400363
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_400379
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40038f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40038f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4003a8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4003a8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_4003c1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_4003f2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4003fc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4003fc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40041e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40041e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40041e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40041e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40041e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400450
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400450
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400450
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400450
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_40046e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_400490
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40049a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40049a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40049a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40049a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40049a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4004af
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4004af
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4004af
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4004af
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_4004dc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4004f9
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400522
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400522
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400522
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400522
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400522
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40054c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40054c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40054c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40054c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40054c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400561
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400561
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400561
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40056b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40056b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40056b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40056b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400583
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4005aa
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4005aa
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4005aa
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4005aa
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4005aa
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4005d7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4005d7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4005d7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4005d7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4005e1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4005e1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4005e1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400622
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400622
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40063d
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40063d
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_40063d
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40064e
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_400680
+src/Reopt/CFG/Recovery.hs:367: [recover] WARNING: no stack use detected
+src/Reopt/CFG/Recovery.hs:277: [recover] Missing type for label block_40068a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40070f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400719
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400772
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400772
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400772
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4007bc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_4007bc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_4007bc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_4007bc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4007bc
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_4007e2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_4007f6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400802
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_400825
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40082a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40082a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400835
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400835
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_40084c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400896
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_400896
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400896
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400896
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_4008ed
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_4008f0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400900
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_400900
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400900
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400900
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400927
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400927
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400927
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400927
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400927
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400964
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_400964
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400964
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_400964
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_40098a
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400a76
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400a98
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400a98
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400a98
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400ae0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_400ae0
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400b70
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400b8e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400cc5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400ce7
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400ce7
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400ce7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400d30
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_400d30
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400dc6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400de4
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400f74
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400f94
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400fba
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_400fd8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_400fd8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_400fd8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_400fd8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_400fd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_400fe0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_400fe0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_400fe0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_400fe0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_400fe0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401027
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_401027
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4010c8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4010c8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_4010c8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4010c8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4010c8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_4010c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40114f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_40116f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_40116f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40116f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4011c8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4011e6
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4011e6
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_401220
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401255
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401255
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_401255
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401345
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401367
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401367
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_401367
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401367
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4013a4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_4013a4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4013a4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_4013a4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_4013a4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_4013a4
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401428
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_401443
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401443
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401443
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401443
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401443
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401459
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401459
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401459
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4014ba
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4014ba
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401530
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401530
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r10 at block_401530
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401615
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401615
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401615
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_401615
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401615
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401633
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401633
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401633
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401651
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4017be
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4017be
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401818
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401833
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401833
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401860
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_40189f
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401937
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401937
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4019e0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401a10
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a10
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401a10
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401a21
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a21
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401a21
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401a21
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401a50
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401a81
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a81
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401a92
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401a92
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401a92
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401a92
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401aa2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401af8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401af8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401b0a
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401b0a
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401b0a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401b15
+src/Reopt/CFG/Recovery.hs:277: [recover] Missing type for label block_401b1f
+src/Reopt/CFG/RegisterUse.hs:247: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401b2f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401b2f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401b4b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401b4b
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401b8c
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401b8c
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401b8c
+src/Reopt/CFG/Recovery.hs:277: [recover] Missing type for label block_401bb5
+src/Reopt/CFG/RegisterUse.hs:247: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401bcf
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401bcf
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401c31
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401c31
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401c31
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401c3b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401c3b
+src/Reopt/CFG/Recovery.hs:277: [recover] Missing type for label block_401c49
+src/Reopt/CFG/RegisterUse.hs:247: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:400: [urgent] Warning: no args for function 4201247
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401c5c
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401c5c
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401c5c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401c6c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401c6c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401c91
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401c91
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401c99
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401ca8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401ca8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401ca8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401cd3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401cd8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401ce0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401ce0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401ce0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401ce0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401cf8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401cf8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401cf8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401cf8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401d35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401d35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401d35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401d35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401d35
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401d70
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401d80
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401ddb
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401de2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401de2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401de2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401de2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401de2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401df2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401e12
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e12
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401e20
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401e3a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401e4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401e5e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401e6c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401ea3
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401ee8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401ee8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_401ee8
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401f07
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401f16
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_401f24
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401f24
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401f24
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401f37
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401f51
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401f63
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_401f75
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_401f75
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_401fb1
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402007
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402007
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402007
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402007
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402007
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402014
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402023
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402093
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4020e0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402139
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402144
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402144
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402144
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_402144
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402144
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402144
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception DivideError ()
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception DivideError ()
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception DivideError ()
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4021a0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4022a8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4023f8
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402413
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402413
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40246e
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_40247f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_40247f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_40247f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_40247f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40247f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402496
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4024b5
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rcx at block_40264f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_40264f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_40264f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40264f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40266d
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402672
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402672
+src/Reopt/CFG/Recovery.hs:634: [recover] recoverStmt undefined for PLACEHOLDER: Exception GeneralProtectionException 0 ()
+src/Reopt/CFG/Recovery.hs:657: [recover] recoverAssign does not yet support assignment r301 := fs.base
+src/Reopt/CFG/Recovery.hs:657: [recover] recoverAssign does not yet support assignment r301 := fs.base
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_40268f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_40269e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4026c0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4026c0
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_40271a
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_40271a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40275b
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40275b
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4027fc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4027fc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402830
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402830
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40284f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_40284f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_40284f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_40284f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_40284f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40286e
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402880
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4028a7
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4028cc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_4028cc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4028de
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_4028de
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4028de
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_4028f9
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_4028f9
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_4028f9
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_4028f9
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402911
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402911
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402911
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402949
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402949
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402949
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_40299c
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4029ad
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4029d0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_4029dd
+src/Reopt/CFG/Recovery.hs:657: [recover] recoverAssign does not yet support assignment r230 := fs.base
+src/Reopt/CFG/Recovery.hs:657: [recover] recoverAssign does not yet support assignment r230 := fs.base
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdi at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r8 at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r9 at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register r10 at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402aa1
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402abc
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402abc
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402ae5
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402b0f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402b0f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402b32
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402b3b
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402b3b
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402b3b
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_402b4d
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402b4f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402b4f
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402b4f
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402b9c
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_402bea
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402bf3
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402bf3
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402bf3
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rdx at block_402c4d
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register rsi at block_402c4d
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402c4d
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402c5c
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_402cad
+src/Reopt/CFG/Recovery.hs:356: [recover] WARNING: No regs for block_402cd9
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402d34
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402d4a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402d4a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402d6a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402d6a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402d6a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402d6a
+src/Reopt/CFG/Recovery.hs:541: [recover] WARNING: Nothing known about register xmm0 at block_402e57
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402e7a
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402e89
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rax at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402eb4
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402ec2
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rcx at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rsi at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r8 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register r9 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm1 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm2 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm3 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm4 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm5 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm6 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register xmm7 at block_402ed0
+src/Reopt/CFG/Recovery.hs:462: [recover] WARNING: Nothing known about register rdx at block_402f08
+alloc_fwd_4009a0.ll
+alloc_rev_400bf0.ll
+free_400e40.ll
+malloc_401280.ll

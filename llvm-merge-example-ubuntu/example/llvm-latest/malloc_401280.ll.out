@@ -1,0 +1,3 @@
+llc: malloc_401280.ll:1782:20: error: '%R692' defined with type 'float'
+  %R693 = zext i32 %R692 to i128
+                   ^

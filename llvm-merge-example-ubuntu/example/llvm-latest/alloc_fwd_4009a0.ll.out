@@ -1,0 +1,3 @@
+llc: alloc_fwd_4009a0.ll:184:19: error: '%R50' defined with type 'float'
+  %R51 = zext i32 %R50 to i128
+                  ^
