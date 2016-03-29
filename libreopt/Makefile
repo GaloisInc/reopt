@@ -36,7 +36,10 @@ LLVM_LINK=llvm-link
 ARCH_TRIPLES:=x86_64-unknown-linux-gnu x86_64-unknown-freebsd
 
 .PHONY: all
-all: ${ARCHIVE}(${OBJECTS}) libreopt
+all: ${ARCHIVE}(${OBJECTS}) bitcode
+
+# Path to libreopt.bc files to generate
+LIBREOPT_BC:=$(patsubst %, build/%/libreopt.bc, ${ARCH_TRIPLES})
 
 # This target builds the OS-specific libreopt.bc files.
 .PHONY: bitcode
@@ -46,13 +49,6 @@ bitcode: $(LIBREOPT_BC)
 .PHONY: clean
 clean:
 	-rm -rf ${BUILDDIR}
-
-
-
-# Path to libreopt.bc files to generate
-LIBREOPT_BC:=$(patsubst %, build/%/libreopt.bc, ${ARCH_TRIPLES})
-
-
 
 # Build rule for libreopt.bc files
 build/%/libreopt.bc: ${GENFILES}
