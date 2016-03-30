@@ -1,0 +1,169 @@
+mkdir -p tmp reopt_tmp
+gcc-4.9 -static -o tmp/empty_main_args_gnu_gcc empty_main_args.c
+gcc-4.9 -static -o tmp/empty_main_no_args_gnu_gcc empty_main_no_args.c
+clang-3.5 -static -o tmp/empty_main_args_gnu_clang empty_main_args.c
+clang-3.5 -static -o tmp/empty_main_no_args_gnu_clang empty_main_no_args.c
+diet gcc-4.9 -static -o tmp/empty_main_args_diet_gcc empty_main_args.c
+diet gcc-4.9 -static -o tmp/empty_main_no_args_diet_gcc empty_main_no_args.c
+diet clang-3.5 -static -o tmp/empty_main_args_diet_clang empty_main_args.c
+diet clang-3.5 -static -o tmp/empty_main_no_args_diet_clang empty_main_no_args.c
+musl-gcc -static -o tmp/empty_main_args_musl_gcc empty_main_args.c
+musl-gcc -static -o tmp/empty_main_no_args_musl_gcc empty_main_no_args.c
+clang-3.5 -static -nostdlib -nostdinc -I/home/conathan/local/opt/musl/include -L/home/conathan/local/opt/musl/lib -o tmp/empty_main_args_musl_clang empty_main_args.c /home/conathan/local/opt/musl/lib/crt1.o /home/conathan/local/opt/musl/lib/crti.o /home/conathan/local/opt/musl/lib/crtn.o -lc
+clang-3.5 -static -nostdlib -nostdinc -I/home/conathan/local/opt/musl/include -L/home/conathan/local/opt/musl/lib -o tmp/empty_main_no_args_musl_clang empty_main_no_args.c /home/conathan/local/opt/musl/lib/crt1.o /home/conathan/local/opt/musl/lib/crti.o /home/conathan/local/opt/musl/lib/crtn.o -lc
+for f in    tmp/empty_main_args_gnu_gcc   tmp/empty_main_no_args_gnu_gcc    tmp/empty_main_args_gnu_clang   tmp/empty_main_no_args_gnu_clang     tmp/empty_main_args_diet_gcc   tmp/empty_main_no_args_diet_gcc    tmp/empty_main_args_diet_clang   tmp/empty_main_no_args_diet_clang     tmp/empty_main_args_musl_gcc   tmp/empty_main_no_args_musl_gcc    tmp/empty_main_args_musl_clang   tmp/empty_main_no_args_musl_clang ; do \
+  out=reopt_tmp/$(basename $f).reopt; \
+	echo "################################################################"; \
+  echo "Running reopt on $f ..."; \
+  stack exec -- reopt -o $out \
+    --lib ../../libreopt/build/x86_64-unknown-linux-gnu/libreopt.bc \
+    --gas as \
+    $f; \
+  echo "... exited $?."; \
+  echo; \
+  if [ -e $out ]; then \
+    echo "Running $f ..."; \
+    ./$f; \
+    echo "... exited $?."; \
+    echo; \
+	  echo "Running $out ..."; \
+    chmod +x $out; \
+    ./$out; \
+		echo "... exited $?."; \
+  fi; \
+  echo; \
+done
+################################################################
+Running reopt on tmp/empty_main_args_gnu_gcc ...
+Unsupported instruction (487cd7): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "movhps", iiArgs = [XMMReg xmm0,VoidMem (Addr_64 ss (Just rsp) Nothing 8)]}
+Unsupported instruction (4463dd): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "fldcw", iiArgs = [Mem16 (Addr_64 ss (Just rsp) Nothing (-2))]}
+reopt: CPUID
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_no_args_gnu_gcc ...
+Unsupported instruction (487cd7): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "movhps", iiArgs = [XMMReg xmm0,VoidMem (Addr_64 ss (Just rsp) Nothing 8)]}
+Unsupported instruction (4463dd): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "fldcw", iiArgs = [Mem16 (Addr_64 ss (Just rsp) Nothing (-2))]}
+reopt: CPUID
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_args_gnu_clang ...
+Unsupported instruction (487c87): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "movhps", iiArgs = [XMMReg xmm0,VoidMem (Addr_64 ss (Just rsp) Nothing 8)]}
+Unsupported instruction (44638d): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "fldcw", iiArgs = [Mem16 (Addr_64 ss (Just rsp) Nothing (-2))]}
+reopt: CPUID
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_no_args_gnu_clang ...
+Unsupported instruction (487c87): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "movhps", iiArgs = [XMMReg xmm0,VoidMem (Addr_64 ss (Just rsp) Nothing 8)]}
+Unsupported instruction (44638d): II {iiLockPrefix = NoLockPrefix, iiAddrSize = Size64, iiOp = "fldcw", iiArgs = [Mem16 (Addr_64 ss (Just rsp) Nothing (-2))]}
+reopt: CPUID
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_args_diet_gcc ...
+Block stack depth mismatch at block_400356: -40 - r691  and -40 
+Insert segment 400000.
+Insert segment 601000.
+Compiling new code
+Start merge and write
+Performing final relinking.
+... exited 0.
+
+Running tmp/empty_main_args_diet_gcc ...
+... exited 0.
+
+Running reopt_tmp/empty_main_args_diet_gcc.reopt ...
+Segmentation fault (core dumped)
+... exited 139.
+
+################################################################
+Running reopt on tmp/empty_main_no_args_diet_gcc ...
+Block stack depth mismatch at block_40034f: -40 - r688  and -40 
+Insert segment 400000.
+Insert segment 601000.
+Compiling new code
+Start merge and write
+Performing final relinking.
+... exited 0.
+
+Running tmp/empty_main_no_args_diet_gcc ...
+... exited 0.
+
+Running reopt_tmp/empty_main_no_args_diet_gcc.reopt ...
+Segmentation fault (core dumped)
+... exited 139.
+
+################################################################
+Running reopt on tmp/empty_main_args_diet_clang ...
+Block stack depth mismatch at block_40030a: -40 - r692  and -40 
+Insert segment 400000.
+Insert segment 600560.
+Compiling new code
+Start merge and write
+Performing final relinking.
+... exited 0.
+
+Running tmp/empty_main_args_diet_clang ...
+... exited 0.
+
+Running reopt_tmp/empty_main_args_diet_clang.reopt ...
+Segmentation fault (core dumped)
+... exited 139.
+
+################################################################
+Running reopt on tmp/empty_main_no_args_diet_clang ...
+Block stack depth mismatch at block_400303: -40 - r689  and -40 
+Insert segment 400000.
+Insert segment 600558.
+Compiling new code
+Start merge and write
+Performing final relinking.
+... exited 0.
+
+Running tmp/empty_main_no_args_diet_clang ...
+... exited 0.
+
+Running reopt_tmp/empty_main_no_args_diet_clang.reopt ...
+Segmentation fault (core dumped)
+... exited 139.
+
+################################################################
+Running reopt on tmp/empty_main_args_musl_gcc ...
+Insert segment 400000.
+Insert segment 600fe8.
+Compiling new code
+Start merge and write
+Performing final relinking.
+reopt: Expected no PT_GNU_RELO segment in binary.
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_no_args_musl_gcc ...
+Insert segment 400000.
+Insert segment 600fe8.
+Compiling new code
+Start merge and write
+Performing final relinking.
+reopt: Expected no PT_GNU_RELO segment in binary.
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_args_musl_clang ...
+reopt: insertSpecialRegion: attempt to insert .bss overlapping Elf region into .comment.
+... exited 1.
+
+
+################################################################
+Running reopt on tmp/empty_main_no_args_musl_clang ...
+reopt: insertSpecialRegion: attempt to insert .bss overlapping Elf region into .comment.
+... exited 1.
+
+
