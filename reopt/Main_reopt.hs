@@ -756,8 +756,12 @@ performReopt args =
     llvm <- either (fail . show) return mllvm
 
     case takeExtension output_path of
-      ".ll" -> do
+      ".bc" -> do
         BS.writeFile output_path llvm
+      ".ll" -> error $
+          "Generating '.ll' (LLVM ASCII assembly) is not supported!\n" ++
+          "Use '.bc' extension to get assembled LLVM bitcode, and then " ++
+          "use 'llvm-dis out.bc' to generate an 'out.ll' file."
       ".o" -> do
         compile_llvm_to_obj args arch llvm output_path
       _ -> do
