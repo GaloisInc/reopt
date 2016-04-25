@@ -4,7 +4,7 @@ Copyright   : (c) Galois Inc, 2015
 Maintainer  : jhendrix@galois.com
 
 This module defines the 'CodeRedirection' datatype and its
-JSON format.  This is used by the 
+JSON format.  This is used by the
 -}
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.Relinker.Redirection
@@ -30,9 +30,8 @@ import           Data.Word
 -- | Index of program header in an elf file.
 type PhdrIndex = Word16
 
--- | A code redirection used during relinking that
--- maps a code location in a binary to the replacement code in
--- the new object code.
+-- | A code redirection used during relinking that maps a code location in a
+-- binary to the replacement code in the new object code.
 --
 -- The original location is identified by the index of the loadable program
 -- header that it resides in along with the file offset.
@@ -40,8 +39,12 @@ type PhdrIndex = Word16
 -- The target location is identified by the name of the symbol.
 data CodeRedirection w
    = CodeRedirection { redirSourcePhdr :: !PhdrIndex
+                       -- ^ Index of program header where relocation should occur.
                      , redirSourceOffset :: !w
                        -- ^ Offset in phdr where we should write file.
+                     , redirSourceSize :: !Int
+                       -- ^ Number of bytes we have in source to use for writing
+                       -- redirection.
                      , redirTarget :: !BS.ByteString
                        -- ^ Target symbol table name.
                      } deriving (Show)
@@ -49,9 +52,10 @@ data CodeRedirection w
 instance Integral w => ToJSON (CodeRedirection w) where
   toJSON redir =
     object
-      [ "phdr"   .= redirSourcePhdr redir
-      , "offset" .= toInteger (redirSourceOffset redir)
-      , "target" .= unpack (redirTarget redir)
+      [ "phdr"            .= redirSourcePhdr redir
+      , "offset"          .= toInteger (redirSourceOffset redir)
+      , "bytes_available" .= (redirSourceSize redir)
+      , "target"          .= unpack (redirTarget redir)
       ]
 
 instance Num w => FromJSON (CodeRedirection w) where
@@ -59,5 +63,6 @@ instance Num w => FromJSON (CodeRedirection w) where
     CodeRedirection
       <$> o .: "phdr"
       <*> (fromIntegral <$> (o .: "offset" :: Parser Integer))
+      <*> (o .: "bytes_available")
       <*> (fromString <$> (o .: "target"))
   parseJSON v = typeMismatch "CodeRedirection" v

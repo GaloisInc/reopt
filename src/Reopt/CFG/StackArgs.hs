@@ -8,52 +8,49 @@ module Reopt.CFG.StackArgs
   ) where
 
 import           Control.Lens
-import           Control.Monad (join)
-import           Control.Monad.Error
+--import           Control.Monad (join)
+--import           Control.Monad.Error
 import           Control.Monad.State.Strict
-import           Data.Foldable as Fold (toList, traverse_)
+--import           Data.Foldable as Fold (toList, traverse_)
 import           Data.Int
-import           Data.Int (Int64)
-import           Data.List (elemIndex, elem)
-import           Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import           Data.Maybe (catMaybes)
+--import           Data.Int (Int64)
+--import           Data.List (elemIndex, elem)
+--import           Data.Map.Strict (Map)
+--import qualified Data.Map.Strict as Map
+--import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
+--import qualified Data.Parameterized.Map as MapF
+--import           Data.Parameterized.Some
+--import           Data.Sequence (Seq)
+--import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import           Data.Type.Equality
-import           Data.Word
-import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+--import           Data.Text (Text)
+--import qualified Data.Text as Text
+--import           Data.Type.Equality
+--import           Data.Word
+--import           Numeric (showHex)
+--import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Set (Set)
-import qualified Data.Set as Set
+--import           Data.Set (Set)
+--import qualified Data.Set as Set
 
 import           Data.Maybe (catMaybes)
 
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
+--import           Data.Parameterized.Map (MapF)
+--import qualified Data.Parameterized.Map as MapF
 
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.InterpState
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
-import           Reopt.Object.Memory
-
-
-import           Debug.Trace
+--import           Reopt.Machine.Types
+--import           Reopt.Object.Memory
 
 type StackArgs a = State (Int64, Set BlockLabel) a
 
 addBlock :: BlockLabel -> StackArgs ()
-addBlock lbl = _2 %= Set.insert lbl 
+addBlock lbl = _2 %= Set.insert lbl
 
 nextBlock :: StackArgs (Maybe BlockLabel)
 nextBlock = _2 %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
@@ -87,7 +84,7 @@ recoverIter amap aregs ist seen (Just lbl)
 
 recoverBlock :: MapF Assignment AbsValue
                 -> X86State AbsValue
-                -> InterpState 
+                -> InterpState
                 -> BlockLabel
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
@@ -104,7 +101,7 @@ recoverBlock amap aregs interp_state lbl = do
     xs  -> addOffset (maximum xs)
 
   case blockTerm b of
-    Branch c x y -> do
+    Branch _c x y -> do
       addBlock x
       addBlock y
 
@@ -124,8 +121,6 @@ recoverBlock amap aregs interp_state lbl = do
         addBlock lbl'
 
        -- Return
-      | Just assign <- identifyReturn proc_state -> return ()
+      | Just _assign <- identifyReturn proc_state -> return ()
 
     _ -> return () -- ???
-
-

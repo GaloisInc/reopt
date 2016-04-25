@@ -25,6 +25,7 @@ module Reopt.CFG.Recovery
   , recoverFunction
   ) where
 
+import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.Error
 import           Control.Monad.State.Strict
@@ -266,6 +267,21 @@ regMapFromState s =
 
 type FunctionArgs = Map CodeAddr FunctionType
 
+-- | This returns how much space there is before start of next function,
+-- or the end of the memory segment if code address is undefined.
+--
+-- Note: Calls error if code addr is not in a valid memory location.
+functionEnd :: InterpState -> CodeAddr -> CodeAddr
+functionEnd s a =
+  case findSegment a (memory s) of
+    Just seg -> assert (memFlags seg `hasPermissions` pf_x) $
+      let end = memBase seg + segmentSize seg
+       in case Set.lookupGT a (s^.functionEntries) of
+            Just next | next < end -> next
+            _ -> end
+    Nothing -> error $ "Could not find memory segment for " ++ showHex a "."
+
+
 -- | Recover the function at a given address.
 recoverFunction :: FunctionArgs -> InterpState -> CodeAddr -> Either String Function
 recoverFunction fArgs s a = do
@@ -273,17 +289,18 @@ recoverFunction fArgs s a = do
         = registerUse fArgs s a
 
   let lbl = GeneratedBlock a 0
-  
-  let cft = fromMaybe (debug DFunRecover ("Missing type for label " ++ show lbl) ftMinimumFunctionType) $
-            Map.lookup a fArgs
+
+  let cft = fromMaybe
+              (debug DFunRecover ("Missing type for label " ++ show lbl) ftMinimumFunctionType) $
+              Map.lookup a fArgs
 
   let initRegs = MapF.empty
-                 & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnIntArg i)))) (ftIntArgRegs cft)
-                 & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnFloatArg i)))) (ftFloatArgRegs cft)
-                 & flip (foldr (\(Some r) -> MapF.insert r (CalleeSaved r))) x86CalleeSavedRegisters
-                 -- FIXME: check this somehow? Also true on function exit.
-                 & MapF.insert (N.df) (FnRegValue (FnConstantValue n1 0)) -- df is 0 at function start ...
-  
+        & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnIntArg i)))) (ftIntArgRegs cft)
+        & flip (ifoldr (\i r -> MapF.insert r (FnRegValue (FnFloatArg i)))) (ftFloatArgRegs cft)
+        & flip (foldr (\(Some r) -> MapF.insert r (CalleeSaved r))) x86CalleeSavedRegisters
+          -- FIXME: check this somehow? Also true on function exit.
+        & MapF.insert (N.df) (FnRegValue (FnConstantValue n1 0)) -- df is 0 at function start ...
+
   let rs = RS { _rsInterp = s
               , _rsNextAssignId = 0
               , _rsCurLabel  = lbl
@@ -306,8 +323,8 @@ recoverFunction fArgs s a = do
          allocateStackFrame (maximumStackDepth s a)
          r0 <- recoverBlock blockRegProvides MapF.empty lbl
          rets <- mapM (recoverInnerBlock blockRegMap) (Map.keys blockPreds)
-         -- disjoint maps here, so mconcat is OK         
-         return (mconcat (r0 : rets)) 
+         -- disjoint maps here, so mconcat is OK
+         return (mconcat (r0 : rets))
 
   runRecover rs $ do
     -- The first block is special as it needs to allocate space for
@@ -316,6 +333,7 @@ recoverFunction fArgs s a = do
     (block_map, _) <- mfix go
 
     return $! Function { fnAddr = a
+                       , fnSize = functionEnd s a - a
                        , fnType = cft
                        , fnBlocks = Map.elems block_map
                        }
@@ -438,7 +456,7 @@ recoverBlock blockRegProvides phis lbl = do
       -- May not be used (only if called function returns at these types)
       intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownType :: TypeRepr (BVType 64))
       floatrs <- replicateM (fnNFloatRets ft ) $ mkReturnVar (knownType :: TypeRepr XMMType)
-      
+
       -- Figure out what is preserved across the function call.
       let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
                 -> Recover (MapF N.RegisterName FnRegValue)
@@ -457,7 +475,7 @@ recoverBlock blockRegProvides phis lbl = do
 
                -- df is 0 after a function call.
                _ | Just Refl <- testEquality r N.df -> return $ FnConstantValue knownNat 0
-                   
+
                _ | Some r `Set.member` x86CalleeSavedRegisters -> recoverRegister proc_state r
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-call register " ++ show r) (N.registerType r))
@@ -501,7 +519,7 @@ recoverBlock blockRegProvides phis lbl = do
 
         grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
         frets' <- mapM (recoverRegister proc_state) (ftFloatRetRegs ft)
-        
+
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
     Just (ParsedSyscall proc_state next_addr call_no pname name args rregs) -> do
@@ -528,31 +546,31 @@ recoverBlock blockRegProvides phis lbl = do
       -- different to that for function calls :(
       let go ::  MapF N.RegisterName FnRegValue -> Some N.RegisterName
                 -> Recover (MapF N.RegisterName FnRegValue)
-          go m (Some r) = do 
+          go m (Some r) = do
              v <- case r of
                N.GPReg {}
                  | Just _ <- testEquality r N.rsp -> do
-                     recoverRegister proc_state N.rsp                     
+                     recoverRegister proc_state N.rsp
                  | Some r `Set.member` x86CalleeSavedRegisters ->
                      recoverRegister proc_state r
-                     
+
                _ | Just Refl <- testEquality r N.df -> return $ FnConstantValue knownNat 0
-               
+
                _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
                     return (FnValueUnsupported ("post-syscall register " ++ show r) (N.registerType r))
              return $ MapF.insert r (FnRegValue v) m
 
-          
+
       let m_provides = Map.lookup lbl blockRegProvides
           provides   = case m_provides of
                          Just p -> p
                          Nothing -> debug DFunRecover ("No blockRegProvides at " ++ show lbl) mempty
-                         
+
       regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
-      
+
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
-                
+
       fb <- mkBlock (FnSystemCall call_no pname name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
@@ -630,7 +648,7 @@ recoverStmt s = do
                        <*> recoverValue "memset" v
                        <*> recoverValue "memset" ptr
                        <*> recoverValue "memset" df
-      addFnStmt stmt      
+      addFnStmt stmt
     _ -> debug DFunRecover ("recoverStmt undefined for " ++ show (pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
       return ()

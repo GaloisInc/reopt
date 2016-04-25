@@ -190,7 +190,7 @@ data RegisterViewType cl (b :: Nat) (n :: Nat) =
   , b ~ 0
   ) =>
   ZeroExtendOnWrite
-           
+
 -- * Destructors for 'RegisterView's.
 
 registerViewBase :: RegisterView cl b n -> NatRepr b
@@ -601,10 +601,6 @@ ppLocation ppAddr loc = case loc of
       where
         b = natValue $ _registerViewBase rv
         s = natValue $ _registerViewSize rv
-
-    width' :: Integer
-    width' = case loc_type loc of
-      BVTypeRepr nr -> fromIntegral $ natValue nr
 
 ------------------------------------------------------------------------
 -- Register-location smart constructors.

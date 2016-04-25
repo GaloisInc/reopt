@@ -7,15 +7,12 @@ module Reopt.Object.Loader
   , memoryForElfSections
   ) where
 
-import           Control.Applicative
 import           Control.Lens
 import           Control.Monad.State
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
 import           Data.Elf
-import qualified Data.Foldable as F
-import           Data.Monoid (mappend)
 
 import           Reopt.Object.Memory
 

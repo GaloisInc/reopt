@@ -1,3 +1,10 @@
+{-|
+Module      : Reopt.Object.Memory
+Copyright   : (c) Galois Inc, 2015-2016
+Maintainer  : jhendrix@galois.com
+
+Declares 'Memory', a type for representing segmented memory with permissions.
+-}
 {-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
@@ -169,7 +176,7 @@ emptyMemory = Memory IMap.empty
 memSegments :: Memory w -> [MemSegment w]
 memSegments (Memory m) = Fold.toList m
 
--- | Return list of words in the memory
+-- | Return list of 64-bit words in memory
 memAsWord64le_withAddr :: (Bits w, Integral w) => Memory w -> [(w, Word64)]
 memAsWord64le_withAddr m = do
   s <- memSegments m

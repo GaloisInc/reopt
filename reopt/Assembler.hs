@@ -143,7 +143,7 @@ assembleFile gas_command asm obj_path = do
   -- Wait for process to end.
   waitForEnd Gas err_handle ph
 
--- | Use LLVM link to combine several BC files into one.
+-- | Use LLVM link to combine several ll or bc files into one.
 llvm_link :: FilePath -- ^ Path to llvm-link
           -> [FilePath]
           -> ExceptT Failure IO BS.ByteString
@@ -154,8 +154,6 @@ llvm_link llvm_link_command paths = do
   res <- liftIO $ readContents out_handle
   waitForEnd LLVM_LINK err_handle ph
   return res
-
-
 
 -- | Generate an Elf file from LLVM using 'llc' and 'gas', and store it in the path.
 --

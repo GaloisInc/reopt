@@ -105,7 +105,9 @@ executable reopt
     reopt,
     temporary,
     transformers,
+    unix,
     utf8-string,
+    vector,
     yaml
 
   hs-source-dirs: reopt

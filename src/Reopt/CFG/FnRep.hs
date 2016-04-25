@@ -60,6 +60,7 @@ data FnAssignment tp
 instance Pretty (FnAssignment tp) where
   pretty (FnAssignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
+-- | This describes the expected arguments and return types of the function.
 data FunctionType =
   FunctionType { fnNIntArgs   :: !Int
                , fnNFloatArgs :: !Int
@@ -225,9 +226,11 @@ fnValueType v =
 ------------------------------------------------------------------------
 -- Function definitions
 
-data Function = Function { fnAddr :: CodeAddr
+data Function = Function { fnAddr :: !CodeAddr
                            -- ^ In memory address of function
-                         , fnType :: FunctionType
+                         , fnSize :: !CodeAddr
+                           -- ^ Number of bytes that function takes up.
+                         , fnType :: !FunctionType
                          , fnBlocks :: [FnBlock]
                          }
 
