@@ -578,27 +578,27 @@ expandWrite addr (BVTypeRepr nr) v =
     sz = exprWidth v
 
 expandMemOps :: Stmt -> Semantics ()
-expandMemOps stmt@(Get v l)
-  | S.BVTypeRepr nr <- (S.loc_type l)
-  , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr =
-      case l of
-        S.MemoryAddr addr _tp ->  do
-          addrv <- freshVar "addr" S.knownType
-          tell [Let addrv addr]
-          expandRead v (VarExpr addrv) (S.loc_type l)
-        _ -> tell [stmt]
+-- expandMemOps stmt@(Get v l)
+--   | S.BVTypeRepr nr <- (S.loc_type l)
+--   , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr =
+--       case l of
+--         S.MemoryAddr addr _tp ->  do
+--           addrv <- freshVar "addr" S.knownType
+--           tell [Let addrv addr]
+--           expandRead v (VarExpr addrv) (S.loc_type l)
+--         _ -> tell [stmt]
 
-expandMemOps stmt@(l := e) =
-  case l of
-    S.MemoryAddr addr _tp 
-      | S.BVTypeRepr nr <- S.loc_type l
-      , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr -> do
-        addrv <- freshVar "addr" S.knownType
-        valv  <- freshVar "val" (S.BVTypeRepr nr)
-        tell [ Let addrv addr
-             , Let valv e ]
-        expandWrite (VarExpr addrv) (BVTypeRepr nr) (VarExpr valv)
-    _ -> tell [stmt]
+-- expandMemOps stmt@(l := e) =
+--   case l of
+--     S.MemoryAddr addr _tp 
+--       | S.BVTypeRepr nr <- S.loc_type l
+--       , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr -> do
+--         addrv <- freshVar "addr" S.knownType
+--         valv  <- freshVar "val" (S.BVTypeRepr nr)
+--         tell [ Let addrv addr
+--              , Let valv e ]
+--         expandWrite (VarExpr addrv) (BVTypeRepr nr) (VarExpr valv)
+--     _ -> tell [stmt]
 
 expandMemOps stmt = tell [stmt]      
 

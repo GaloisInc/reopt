@@ -82,7 +82,7 @@ findBlock :: Memory Word64 -> Word64 -> Either String CFG
 findBlock mem entry =
   M.singleton entry <$>
   case runMemoryByteReader pf_x mem entry $ extractBlock entry S.empty of
-    Left err -> Left $ show err
+    Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err    
     Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
     Right (Right ([Absolute next], _, stmts), _) ->
       Right (Block stmts $ Direct next)
@@ -95,11 +95,11 @@ findBlock mem entry =
   
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...
-findBlocks :: Memory Word64 -> FunBounds -> Word64 -> Either String CFG
-findBlocks mem funBounds entry = calcFixpoint M.empty
+findBlocks :: Memory Word64 -> FunBounds -> Set Word64 -> Word64 -> Either String CFG
+findBlocks mem funBounds breaks entry = calcFixpoint M.empty
   where
     calcFixpoint cfg = do
-      cfg' <- findBlocks' mem funBounds (M.keysSet cfg) (S.singleton entry) cfg
+      cfg' <- findBlocks' mem funBounds (breaks `S.union` M.keysSet cfg) (S.singleton entry) cfg
       if (M.keysSet cfg' /= M.keysSet cfg)
         then calcFixpoint cfg'
         else return cfg'
@@ -123,7 +123,7 @@ findBlocks' mem funBounds breaks queue cfg
           in findBlocks' mem funBounds breaks queue'' cfg'
     in
     case runMemoryByteReader pf_x mem entry $ extractBlock entry breaks of
-      Left err -> Left $ show err
+      Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
       Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
       Right (Right ([Absolute callee], nextAddr, stmts), _)
         | not (inFunBounds funBounds callee) -> finishBlock stmts (Call callee nextAddr) [nextAddr]

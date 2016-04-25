@@ -780,8 +780,10 @@ performReopt args =
     let output_path = args^.outputPath
 
     case takeExtension output_path of
-      ".bc" -> do
-        error "Reopt does not support generating binary bitcode files directly."
+      ".bc" -> error $
+          "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
+          "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
+          "use 'llvm-as out.ll' to generate an 'out.bc' file."
       ".ll" -> do
         BS.writeFile output_path obj_llvm
       ".o" -> do
