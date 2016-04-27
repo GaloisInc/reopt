@@ -122,10 +122,10 @@ data SectionInfo w = SectionInfo { sectionVal   :: (ElfSection w)
                                  , sectionReloc :: !String
                                  }
 
--- | Find a section with the given name and flags.
+-- | Find a section with the given name, type, and flags.
 --
--- This returns 'Nothing' if no section with those flags exists, but throws
--- an error if multiple do.
+-- This returns 'Nothing' if no matching section exists, but throws an error if
+-- multiple do.
 findSectionInfo :: Eq w
                 => Elf w
                 -> String
@@ -141,26 +141,42 @@ findSectionInfo e nm tp flags reloc =
   case nm `findSectionByName` e of
     [sec] -> do
       when (elfSectionType sec /= tp) $ do
-        throwE $ elfSectionName sec ++ " section has unexpected permissions."
+        throwE $ nm ++ " section has an unexpected type."
       when (elfSectionFlags sec /= flags) $ do
-        throwE $ elfSectionName sec ++ " section has unexpected permissions."
+        throwE $ nm ++ " section has an unexpected flags."
       let info = SectionInfo sec reloc
       seq info $ (return $! Just info)
     []  -> return Nothing
     _   -> throwE $ "Multiple " ++ nm ++ " sections in object file."
 
 -- | Return segment used to indicate the stack can be non-executable.
-gnuStackSegment :: Num w => PhdrIndex -> ElfSegment w
-gnuStackSegment idx =
-  ElfSegment { elfSegmentType     = PT_GNU_STACK
-             , elfSegmentFlags    = pf_r .|. pf_w
-             , elfSegmentIndex    = idx
-             , elfSegmentVirtAddr = 0
-             , elfSegmentPhysAddr = 0
-             , elfSegmentAlign    = 0
-             , elfSegmentMemSize  = ElfRelativeSize 0
-             , elfSegmentData     = Seq.empty
-             }
+gnuStackSegment :: Num w => Word16 -> RelinkM (ElfSegment w)
+gnuStackSegment obj_idx = do
+  seg_idx <- freshSegmentIndex
+  sec_idx <- remapObjSectionIndex obj_idx 0
+
+  let sec = ElfSection { elfSectionIndex     = sec_idx
+                       , elfSectionName      = ".note.GNU-stack"
+                       , elfSectionType      = SHT_PROGBITS
+                       , elfSectionFlags     = shf_merge
+                       , elfSectionAddr      = 0
+                       , elfSectionSize      = 0
+                       , elfSectionLink      = 0
+                       , elfSectionInfo      = 0
+                       , elfSectionAddrAlign = 1
+                       , elfSectionEntSize   = 0
+                       , elfSectionData      = BS.empty
+                       }
+
+  return $! ElfSegment { elfSegmentType     = PT_GNU_STACK
+                       , elfSegmentFlags    = pf_r .|. pf_w
+                       , elfSegmentIndex    = seg_idx
+                       , elfSegmentVirtAddr = 0
+                       , elfSegmentPhysAddr = 0
+                       , elfSegmentAlign    = 0
+                       , elfSegmentMemSize  = ElfRelativeSize 0
+                       , elfSegmentData     = Seq.fromList [ ElfDataSection sec ]
+                       }
 
 elfHasTLSSegment :: Elf w -> Bool
 elfHasTLSSegment e =
@@ -184,9 +200,11 @@ elfHasGNUStackSegment :: Elf w -> Bool
 elfHasGNUStackSegment e =
   any (`segmentHasType` PT_GNU_STACK) (elfSegments e)
 
-elfHasGNUStackSection :: Elf w -> Bool
-elfHasGNUStackSection e =
-  any (\s -> elfSectionName s == ".note.GNU-stack") (e^..elfSections)
+elfGNUStackSection :: Elf w -> Maybe (ElfSection w)
+elfGNUStackSection e =
+  case filter (\s -> elfSectionName s == ".note.GNU-stack") (e^..elfSections) of
+    [] -> Nothing
+    (s:_) -> Just s
 
 ------------------------------------------------------------------------
 -- RelinkWarning
@@ -277,10 +295,10 @@ data ObjectRelocationInfo w
 
 objectSectionAddr :: String
                   -> ElfSectionIndex
-                  -> ObjectRelocationInfo w
+                  -> SectionMap w
                   -> w
-objectSectionAddr src idx info =
-  case Map.lookup idx (objectSectionMap info) of
+objectSectionAddr src idx m =
+  case Map.lookup idx m of
     Nothing ->
       error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
     Just r -> r
@@ -301,12 +319,12 @@ symbolAddr reloc_info src sym =
       | steIndex sym == SHN_UNDEF ->
         error "Reference to undefined section."
       | otherwise ->
-         Just (objectSectionAddr src (steIndex sym) reloc_info)
+         Just (objectSectionAddr src (steIndex sym) (objectSectionMap reloc_info))
     STT_FUNC
       | steIndex sym == SHN_UNDEF ->
         error "Function symbol has undefined section."
       | otherwise ->
-        Just (objectSectionAddr src (steIndex sym) reloc_info)
+        Just (objectSectionAddr src (steIndex sym) (objectSectionMap reloc_info))
     STT_NOTYPE
       | steIndex sym /= SHN_UNDEF ->
           error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
@@ -319,28 +337,51 @@ symbolAddr reloc_info src sym =
 ------------------------------------------------------------------------
 -- Code for performing relocations in new object.
 
-data ObjRelocState = ObjRelinkState { _warnings :: RelinkWarnings
-                                    , _nextSectionIndex :: Word16
-                                    }
+data ObjRelocState w = ObjRelinkState { _warnings :: !RelinkWarnings
+                                      , _nextSectionIndex :: !Word16
+                                      , _nextSegmentIndex :: !Word16
+                                      , _objSectionMap    :: !(Map Word16 (Word16, w))
+                                      }
 
-emptyObjRelocState :: ObjRelocState
-emptyObjRelocState = ObjRelinkState { _warnings = emptyRelinkWarnings
+emptyObjRelocState :: ObjRelocState w
+emptyObjRelocState = ObjRelinkState { _warnings         = emptyRelinkWarnings
                                     , _nextSectionIndex = 1
+                                    , _nextSegmentIndex = 0
+                                    , _objSectionMap    = Map.empty
                                     }
 
-warnings :: Simple Lens ObjRelocState RelinkWarnings
+warnings :: Simple Lens (ObjRelocState w) RelinkWarnings
 warnings = lens _warnings (\s v -> s { _warnings = v })
 
-nextSectionIndex :: Simple Lens ObjRelocState Word16
+nextSectionIndex :: Simple Lens (ObjRelocState w) Word16
 nextSectionIndex = lens _nextSectionIndex (\s v -> s { _nextSectionIndex = v })
 
-getSectionIndex :: MonadState ObjRelocState m => m Word16
-getSectionIndex  = do
+nextSegmentIndex :: Simple Lens (ObjRelocState w) Word16
+nextSegmentIndex = lens _nextSegmentIndex (\s v -> s { _nextSegmentIndex = v })
+
+objSectionMap :: Simple Lens (ObjRelocState w) (Map Word16 (Word16, w))
+objSectionMap = lens _objSectionMap (\s v -> s { _objSectionMap = v })
+
+-- | Create a fresh section index.
+freshSectionIndex :: MonadState (ObjRelocState w) m => m Word16
+freshSectionIndex  = do
   idx <- use nextSectionIndex
   nextSectionIndex += 1
   return idx
 
-type ObjRelocM s = StateT ObjRelocState (ST s)
+remapObjSectionIndex :: MonadState (ObjRelocState w) m => Word16 -> w -> m Word16
+remapObjSectionIndex obj_idx addr = do
+  new_idx <- freshSectionIndex
+  objSectionMap %= Map.insert obj_idx (new_idx, addr)
+  return $! new_idx
+
+freshSegmentIndex :: MonadState (ObjRelocState w) m => m Word16
+freshSegmentIndex  = do
+  idx <- use nextSegmentIndex
+  nextSegmentIndex += 1
+  return idx
+
+type ObjRelocM s = StateT (ObjRelocState Word64) (ST s)
 
 -- | Perform a relocation listed in the new object.
 performReloc :: ObjectRelocationInfo Word64
@@ -416,7 +457,8 @@ performRelocs reloc_info sym_table section this_vaddr relocs = do
   -- Updpate using relocations
   mapM_ (performReloc reloc_info sym_table this_vaddr mv) relocs
 
-  idx <- getSectionIndex
+
+  idx <- remapObjSectionIndex (elfSectionIndex section) this_vaddr
   let SMV.MVector _ fp = mv
   let reloc_data = Data.ByteString.Internal.fromForeignPtr fp 0 len
   return $! section { elfSectionIndex = idx
@@ -500,21 +542,11 @@ rawSegmentFromBuilder :: (Bits w, Integral w)
                       -> w -- ^ Offset in segment for this data
                       -> BS.ByteString
                       -> [ElfDataRegion w]
-                      -> MapMonad (w, [ElfDataRegion w])
+                      -> RelinkM (w, [ElfDataRegion w])
 rawSegmentFromBuilder orig_layout redirs entries off bs rest = do
   let off' = off + fromIntegral (BS.length bs)
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
   return (off2, ElfDataRaw (remapBytes redirs entries off bs) : prev)
-
-data MapState = MapState { _nextSegmentIndex :: !Word16
-                         , _mapStateSectionIndex :: !Word16
-                         }
-
-nextSegmentIndex :: Simple Lens MapState Word16
-nextSegmentIndex = lens _nextSegmentIndex (\s v -> s { _nextSegmentIndex = v })
-
-mapStateSectionIndex :: Simple Lens MapState Word16
-mapStateSectionIndex = lens _mapStateSectionIndex (\s v -> s { _mapStateSectionIndex = v })
 
 mapLoadableSection :: (Bits w, Integral w)
                    => ElfLayout w
@@ -523,12 +555,12 @@ mapLoadableSection :: (Bits w, Integral w)
                    -> w -- ^ Offset in segment for this section
                    -> ElfSection w
                    -> [ElfDataRegion w]
-                   -> MapMonad (w, [ElfDataRegion w])
+                   -> RelinkM (w, [ElfDataRegion w])
 mapLoadableSection orig_layout redirs entries off sec rest = do
   let bs = elfSectionData sec
   let off' = off + fromIntegral (BS.length bs)
-  idx <- use mapStateSectionIndex
-  mapStateSectionIndex += 1
+  idx <- use nextSectionIndex
+  nextSectionIndex += 1
   let sec' = sec { elfSectionIndex = idx
                  , elfSectionName = ".orig" ++ elfSectionName sec
                  , elfSectionData = remapBytes redirs entries off bs
@@ -536,20 +568,6 @@ mapLoadableSection orig_layout redirs entries off sec rest = do
   seq sec' $ do
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
   return (off2, ElfDataSection sec' : prev)
-
-getSegmentIndex :: MapMonad Word16
-getSegmentIndex = do
-  i <- use nextSegmentIndex
-  nextSegmentIndex += 1
-  return $! i
-
-type MapMonad = StateT MapState (Except String)
-
-runMapMonad :: MapState -> MapMonad a -> Either String (a, MapState)
-runMapMonad s m = runExcept (runStateT m s)
-
-mapError :: String -> MapMonad a
-mapError = lift . throwE
 
 -- | This traverses elf data regions in an loadable elf segment.
 mapOrigLoadableRegions :: (Bits w, Integral w)
@@ -560,14 +578,14 @@ mapOrigLoadableRegions :: (Bits w, Integral w)
                           -- ^ Redirections for segment.
                        -> w -- ^ Offset in segment for region
                        -> [ElfDataRegion w]
-                       -> MapMonad (w, [ElfDataRegion w])
+                       -> RelinkM (w, [ElfDataRegion w])
 mapOrigLoadableRegions _ _ _ off [] =
   return (off, [])
 mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
   case reg of
     ElfDataElfHeader -> do
       when (off /= 0) $ do
-        mapError $ "Elf header appeared at unexpected offset: " ++ showHex (toInteger off) "."
+        throwE $ "Elf header appeared at unexpected offset: " ++ showHex (toInteger off) "."
       let off' = off + fromIntegral (ehdrSize (elfLayoutClass orig_layout))
       (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
       return (off2, ElfDataElfHeader : prev)
@@ -582,7 +600,7 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
         PT_TLS -> do
           let subseg = toList (elfSegmentData seg)
           (off2, subseg1) <- mapOrigLoadableRegions orig_layout redirs entries off subseg
-          idx <- getSegmentIndex
+          idx <- freshSegmentIndex
           let tls_seg = seg { elfSegmentIndex = idx
                             , elfSegmentData  = Seq.fromList subseg1
                             }
@@ -595,15 +613,15 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
           mapOrigLoadableRegions orig_layout redirs entries off (subseg ++ rest)
 
     ElfDataSectionHeaders ->
-      lift $ throwE "Did not expect section headers in loadable region"
+      throwE "Did not expect section headers in loadable region"
     ElfDataSectionNameTable _ ->
-      lift $ throwE "Did not expect section name table in loadable region"
+      throwE "Did not expect section name table in loadable region"
     ElfDataGOT g ->
       mapLoadableSection orig_layout redirs entries off (elfGotSection g) rest
     ElfDataStrtab _ -> do
-      lift $ throwE "Did not expect .strtab in loadable region"
+      throwE "Did not expect .strtab in loadable region"
     ElfDataSymtab _ -> do
-      lift $ throwE "Did not expect .strtab in loadable region"
+      throwE "Did not expect .strtab in loadable region"
     ElfDataSection s -> do
       mapLoadableSection orig_layout redirs entries off s rest
     ElfDataRaw b ->
@@ -626,14 +644,14 @@ findRelaEntries obj nm = do
     _ -> throwE $  "Multple " ++ show nm ++ " sections in object file."
 
 -- | Find the symbol table in the elf.
-findSymbolTable :: Elf Word64
+findSymbolTable :: Elf w
                     -- ^ Object with relocations
-                 -> Except String (V.Vector (ElfSymbolTableEntry Word64))
+                 -> Except String (ElfSymbolTable w)
 findSymbolTable obj = do
   case elfSymtab obj of
     -- Assume that no section means no relocations
     []  -> throwE $ "Could not find symbol table."
-    [tbl] -> return $! elfSymbolTableEntries tbl
+    [tbl] -> return tbl
     _   -> throwE $ "Multiple .symtab sections in object file."
 
 checkOriginalBinaryAssumptions :: Monad m => Elf Word64 -> m ()
@@ -687,7 +705,7 @@ regionsForOrigSegment :: (Bits w, Integral w)
                       => ElfLayout w
                       -> ResolvedRedirs w
                       -> OrigSegment w
-                      -> MapMonad [ElfDataRegion w]
+                      -> RelinkM [ElfDataRegion w]
 regionsForOrigSegment orig_layout redirs oseg = do
   let padding     = origSegPadding oseg
   let seg         = origSegData oseg
@@ -726,13 +744,13 @@ copyOrigLoadableSegment :: forall w
                         -> ResolvedRedirs w
                            -- ^ Redirections in code
                         -> ElfSegment w
-                        -> MapMonad (ElfSegment w)
+                        -> RelinkM (ElfSegment w)
 copyOrigLoadableSegment orig_layout redirs seg = do
   let sub_reg = toList (elfSegmentData seg)
   let idx = elfSegmentIndex seg
   let entries = fromMaybe [] $! Map.lookup idx (crEntries redirs)
   (_,sub_reg') <- mapOrigLoadableRegions orig_layout redirs entries 0 sub_reg
-  new_idx <- getSegmentIndex
+  new_idx <- freshSegmentIndex
   return $! seg { elfSegmentIndex = new_idx
                 , elfSegmentData = Seq.fromList sub_reg'
                 }
@@ -820,7 +838,7 @@ data NewObjectInfo w
                    , noiSymbols :: !(V.Vector (ElfSymbolTableEntry w))
                    }
 
-type RelinkM = ExceptT String (State ObjRelocState)
+type RelinkM = ExceptT String (State (ObjRelocState Word64))
 
 liftS :: Except String a -> RelinkM a
 liftS m =
@@ -840,10 +858,11 @@ relocateObjectSection _        _             NSBUndefined{} =
   return []
 relocateObjectSection obj_info base_seg_addr (NSBDefined info pad off _)
   | sectionReloc info == "" = do
-      idx <- getSectionIndex
       let s = sectionVal info
-          s'  = s { elfSectionIndex = idx
-                  , elfSectionAddr = base_seg_addr + off
+      let sec_addr = base_seg_addr + off
+      idx <- remapObjSectionIndex (elfSectionIndex s) sec_addr
+      let s'  = s { elfSectionIndex = idx
+                  , elfSectionAddr = sec_addr
                   }
       return $! dataPadding pad ++ [ ElfDataSection s' ]
   | otherwise = do
@@ -918,6 +937,85 @@ get_section_bounds off (Just info) = NSBDefined info pad off' (off' + sz)
         off' = off `fixAlignment` elfSectionAddrAlign s
         sz   = elfSectionFileSize s
 
+-- | Returns the file start and end of a section given an index of
+-- the section or nothing if it is not defined.
+get_all_section_bounds :: Integral w
+                          => w -- ^ File offset for end of last section
+                       -> [Maybe (SectionInfo w)]
+                       -- ^ Information about sections.
+                       -> ([NewSectionBounds w], w)
+get_all_section_bounds off [] = ([], off)
+get_all_section_bounds off (i:l) =
+  let bounds = get_section_bounds off i
+   in over _1 (bounds:) $ get_all_section_bounds (nsb_end bounds) l
+
+
+-- | Identifies errors that occur when
+data RelocateSymbolError
+   = CommonSymbolUnsupported
+   | SymbolNameNotFound   !BS.ByteString
+   | SectionIndexNotFound !Word16
+
+elfLocalEntryCount :: V.Vector (ElfSymbolTableEntry w) -> Word32
+elfLocalEntryCount v = fromIntegral $ fromMaybe (V.length v) $ V.findIndex isNotLocal v
+  where isNotLocal e = steBind e /= STB_LOCAL
+
+-- | This maps a
+relocateSymbolTableEntry :: Num w
+                         => Map Word16 (Word16, w)
+                            -- ^ Maps section index in object to new section index
+                            -- and base address of section
+                         -> Map BS.ByteString (Word16, w)
+                            -- ^ Maps symbol names to index plus absolute address.
+                         -> ElfSymbolTableEntry w
+                         -> Either RelocateSymbolError (Maybe (ElfSymbolTableEntry w))
+relocateSymbolTableEntry section_idx_map symbol_name_map ste
+  | steType ste == STT_NOTYPE = Right (Just ste)
+  | steType ste == STT_SECTION = Right Nothing
+  | otherwise = do
+      (idx, val) <-
+        case steIndex ste of
+          SHN_ABS    -> Right (SHN_ABS, steValue ste)
+          SHN_COMMON -> error "CommonSymbolUnsupported"
+          SHN_UNDEF  ->
+            case Map.lookup (steName ste) symbol_name_map of
+              Nothing         -> Left $ SymbolNameNotFound (steName ste)
+              Just (idx,addr) -> Right (ElfSectionIndex idx, addr)
+          ElfSectionIndex obj_sec_idx ->
+            case Map.lookup obj_sec_idx section_idx_map of
+              Nothing -> Left $ SectionIndexNotFound obj_sec_idx
+              Just (idx, base) -> Right (ElfSectionIndex idx, base + steValue ste)
+      let ste' = EST { steName  = steName ste
+                     , steType  = steType ste
+                     , steBind  = STB_LOCAL
+                     , steOther = steOther ste
+                     , steIndex = idx
+                     , steValue = val
+                     , steSize  = steSize ste
+                     }
+      Right $! Just ste'
+
+relocateSymbolTable :: Num w
+                    => Map Word16 (Word16, w)
+                    -> Map BS.ByteString (Word16, w)
+                    -> Word16
+                       -- ^ Index of new symbol table
+                    -> ElfSymbolTable w
+                    -> ([(ElfSymbolTableEntry w, RelocateSymbolError)], ElfSymbolTable w)
+relocateSymbolTable section_idx_map symbol_name_map idx tbl = (fin_errs, tbl')
+  where (fin_errs,fin_syms) = foldr resolveEntry ([], []) (elfSymbolTableEntries tbl)
+        sym_v = V.fromList fin_syms
+        resolveEntry ste (errs, syms) =
+          case relocateSymbolTableEntry section_idx_map symbol_name_map ste of
+            Left e -> ((ste,e):errs, syms)
+            Right Nothing  -> (errs, syms)
+            Right (Just e) -> (errs, e:syms)
+        tbl' = ElfSymbolTable { elfSymbolTableIndex        = idx
+                              , elfSymbolTableEntries      = sym_v
+                              , elfSymbolTableLocalEntries = elfLocalEntryCount sym_v
+                              }
+
+
 mergeObject' :: Elf Word64 -- ^ Existing binary
              -> Elf Word64 -- ^ Information about object file to insert
              -> [CodeRedirection Word64] -- ^ Redirections
@@ -937,9 +1035,9 @@ mergeObject' orig_binary obj redirs mkJump = do
 
   -- First build what we want to create
 
-  data_sec_index <- liftS $
+  data_sec_info <- liftS $
     findSectionInfo obj ".data" SHT_PROGBITS (shf_alloc .|. shf_write) ".rela.data"
-  bss_sec_index  <- liftS $
+  bss_sec_info  <- liftS $
     findSectionInfo obj ".bss"  SHT_NOBITS   (shf_alloc .|. shf_write) ""
 
   ----------------------------------------------------------------------
@@ -948,7 +1046,7 @@ mergeObject' orig_binary obj redirs mkJump = do
 
   -- Flag indicating whether to add GNU stack segment.
   let add_gnu_stack = elfHasGNUStackSegment orig_binary
-                   && elfHasGNUStackSection obj
+                   && isJust (elfGNUStackSection obj)
 
   -- Flag indicating whether to add TLS segment
   let add_tls = elfHasTLSSegment orig_binary
@@ -960,8 +1058,8 @@ mergeObject' orig_binary obj redirs mkJump = do
                  + (if add_new_data_seg then 1 else 0)
                  + (if add_gnu_stack then 1 else 0)
                  + (if add_tls       then 1 else 0)
-        where add_new_data_seg = isJust data_sec_index
-                              || isJust bss_sec_index
+        where add_new_data_seg = isJust data_sec_info
+                              || isJust  bss_sec_info
 
   let orig_layout = elfLayout orig_binary
   orig_binary_info <-
@@ -975,29 +1073,31 @@ mergeObject' orig_binary obj redirs mkJump = do
       exec_seg_header_size = fromIntegral phdr_count * fromIntegral (phdrEntrySize elf_class)
 
   -- Find text section
-  text_sec_bounds     <- do
+  text_sec_info     <- do
     let flags = shf_alloc .|. shf_execinstr
-    liftS $ get_section_bounds exec_seg_header_size
-      <$> findSectionInfo obj ".text"     SHT_PROGBITS flags ".rela.text"
-  rodata_sec_bounds   <- do
+    liftS $ findSectionInfo obj ".text"     SHT_PROGBITS flags ".rela.text"
+  rodata_sec_info   <- do
     let flags = shf_alloc
-    liftS $ get_section_bounds (nsb_end text_sec_bounds)
-      <$> findSectionInfo obj ".rodata"   SHT_PROGBITS flags ".rela.rodata"
-  eh_frame_sec_bounds <- do
+    liftS $ findSectionInfo obj ".rodata"   SHT_PROGBITS flags ".rela.rodata"
+  eh_frame_sec_info <- do
     let flags = shf_alloc
-    liftS $ get_section_bounds (nsb_end rodata_sec_bounds)
-      <$> findSectionInfo obj ".eh_frame" SHT_PROGBITS flags ".rela.eh_frame"
+    liftS $ findSectionInfo obj ".eh_frame" SHT_PROGBITS flags ".rela.eh_frame"
 
-  let new_code_seg_filesize = nsb_end eh_frame_sec_bounds
+  -- Bounds for all sections in code segment.
+  let (code_sec_bounds, new_code_seg_filesize) =
+        get_all_section_bounds exec_seg_header_size
+          [ text_sec_info, rodata_sec_info, eh_frame_sec_info ]
+
   let new_code_file_offset = orig_binary_file_end
   let new_code_file_end    = new_code_file_offset + new_code_seg_filesize
 
   -- Compute offset for new data and ensure it is aligned.
   -- Get bounds of ".data" section.
-  let data_sec_bounds = get_section_bounds 0 data_sec_index
-  let post_data_sec_size = nsb_end data_sec_bounds
+  let data_sec_bounds = get_section_bounds 0 data_sec_info
   -- Compute bounds of ".bss" section.
-  let bss_sec_bounds = get_section_bounds post_data_sec_size bss_sec_index
+  let bss_sec_bounds = get_section_bounds (nsb_end data_sec_bounds) bss_sec_info
+
+  let data_seg_bounds = [ data_sec_bounds, bss_sec_bounds ]
 
   let new_data_file_offset = new_code_file_end
 
@@ -1005,99 +1105,102 @@ mergeObject' orig_binary obj redirs mkJump = do
                         + new_code_file_offset .&. (elf_align - 1)
   let new_code_seg_virt_end = new_code_seg_addr + new_code_seg_filesize
   let new_data_seg_addr = new_code_seg_virt_end `fixAlignment` elf_align
-                         + new_data_file_offset .&. (elf_align - 1)
+                        + new_data_file_offset .&. (elf_align - 1)
+
+  -- Get symbols in object.
+  obj_symbols <- liftS $ findSymbolTable obj
 
   let reloc_info = ObjectRelocationInfo { objectSectionMap = section_map
                                         , binarySymbolMap = sym_map
                                         }
         where section_map = Map.fromList $
-                nsb_entries    text_sec_bounds     new_code_seg_addr
-                ++ nsb_entries rodata_sec_bounds   new_code_seg_addr
-                ++ nsb_entries eh_frame_sec_bounds new_code_seg_addr
-                ++ nsb_entries data_sec_bounds     new_data_seg_addr
-                ++ nsb_entries bss_sec_bounds      new_data_seg_addr
+                concatMap    (`nsb_entries` new_code_seg_addr) code_sec_bounds
+                ++ concatMap (`nsb_entries` new_data_seg_addr) data_seg_bounds
               sym_map = createBinarySymbolMap orig_binary
-
-  -- Get symbols in object.
-  symbols     <- liftS $ findSymbolTable obj
 
   let resolved_redirs =
         CR { crMkJump    = mkJump
            , crRelocInfo = reloc_info
-           , crSymbols   = mapFromList steName (V.toList symbols)
+           , crSymbols   = mapFromList steName (V.toList (elfSymbolTableEntries obj_symbols))
            , crEntries   = mapFromList redirSourcePhdr redirs
            }
 
-  (orig_binary_regions,seg_index) <- do
-    idx <- use nextSectionIndex
-    let s0 = MapState { _nextSegmentIndex = 0
-                      , _mapStateSectionIndex = idx
-                      }
+  orig_binary_regions <- do
     let regions = orig_binary_info^.obiSegments
     let remapSeg = regionsForOrigSegment orig_layout resolved_redirs
-    let doRemap = concat <$> traverse remapSeg (toList regions)
-
-    case runMapMonad s0 doRemap of
-      Left msg -> throwE msg
-      Right (r,s) -> do
-        nextSectionIndex .= s^.mapStateSectionIndex
-        return (r,s^.nextSegmentIndex)
+    concat <$> traverse remapSeg (toList regions)
 
   let obj_info = NewObjectInfo { noiElf = obj
                                , noiRelocInfo = reloc_info
-                               , noiSymbols = symbols
+                               , noiSymbols = elfSymbolTableEntries obj_symbols
                                }
 
   -- Create Elf segment
   new_exec_regions <- do
      concat <$> traverse (relocateObjectSection obj_info new_code_seg_addr)
-                         [ text_sec_bounds, rodata_sec_bounds, eh_frame_sec_bounds ]
+                         code_sec_bounds
 
-  let exec_seg = ElfSegment
-        { elfSegmentType     = PT_LOAD
-        , elfSegmentFlags    = pf_r .|. pf_x
-        , elfSegmentIndex    = seg_index
-        , elfSegmentVirtAddr = new_code_seg_addr
-        , elfSegmentPhysAddr = new_code_seg_addr
-        , elfSegmentAlign    = elf_align
-        , elfSegmentMemSize  = ElfRelativeSize 0
-        , elfSegmentData     = Seq.fromList $
-            [ ElfDataSegmentHeaders ]
-            ++ new_exec_regions
-        }
+
+  exec_seg <- do
+    seg_index <- freshSegmentIndex
+    pure $! ElfSegment
+      { elfSegmentType     = PT_LOAD
+      , elfSegmentFlags    = pf_r .|. pf_x
+      , elfSegmentIndex    = seg_index
+      , elfSegmentVirtAddr = new_code_seg_addr
+      , elfSegmentPhysAddr = new_code_seg_addr
+      , elfSegmentAlign    = elf_align
+      , elfSegmentMemSize  = ElfRelativeSize 0
+      , elfSegmentData     = Seq.fromList $
+        [ ElfDataSegmentHeaders ]
+        ++ new_exec_regions
+      }
 
   data_regions <-
     concat <$> traverse (relocateObjectSection obj_info new_data_seg_addr)
-                        [ data_sec_bounds, bss_sec_bounds ]
+                        data_seg_bounds
+
   let new_bss_size =
         case bss_sec_bounds of
           NSBUndefined{} -> 0
           NSBDefined info _ _ _ -> elfSectionSize (sectionVal info)
 
+  nextSegmentIndex += 1
+
   -- List of new load segments
-  let (new_data_segs, seg_index')
-          | null data_regions = ([], seg_index + 1)
-          | otherwise =
-             ( [ ElfDataSegment seg ]
-             , seg_index + 2
-             )
-        where seg = ElfSegment
-                { elfSegmentType     = PT_LOAD
-                , elfSegmentFlags    = pf_r .|. pf_w
-                , elfSegmentIndex    = seg_index + 1
-                , elfSegmentVirtAddr = new_data_seg_addr
-                , elfSegmentPhysAddr = new_data_seg_addr
-                , elfSegmentAlign    = elf_align
-                , elfSegmentMemSize  = ElfRelativeSize new_bss_size
-                , elfSegmentData     = Seq.fromList data_regions
-                }
+  new_data_segs <- do
+    case () of
+      _ | null data_regions -> return []
+        | otherwise -> do
+            seg_index <- freshSegmentIndex
+            let seg = ElfSegment
+                  { elfSegmentType     = PT_LOAD
+                  , elfSegmentFlags    = pf_r .|. pf_w
+                  , elfSegmentIndex    = seg_index
+                  , elfSegmentVirtAddr = new_data_seg_addr
+                  , elfSegmentPhysAddr = new_data_seg_addr
+                  , elfSegmentAlign    = elf_align
+                  , elfSegmentMemSize  = ElfRelativeSize new_bss_size
+                  , elfSegmentData     = Seq.fromList data_regions
+                  }
+            return [ ElfDataSegment seg ]
 
-  let gnu_stack_segment_headers
-          | add_gnu_stack = [ ElfDataSegment (gnuStackSegment seg_index') ]
-          | otherwise = []
+  gnu_stack_segment_headers <-
+    case elfGNUStackSection obj of
+      Just s | add_gnu_stack -> do
+        seg <- gnuStackSegment (elfSectionIndex s)
+        pure [ ElfDataSegment seg ]
+      _ -> pure []
 
+  new_shstrtab_index <- freshSectionIndex
+  new_symtab_index   <- freshSectionIndex
+  new_strtab_index   <- freshSectionIndex
 
-  section_name_table_index <- getSectionIndex
+  section_idx_map <- use objSectionMap
+
+  let (_symtab_errs, symtab) =
+         relocateSymbolTable section_idx_map symbol_name_map new_symtab_index obj_symbols
+        where symbol_name_map = Map.empty
 
   return $! Elf { elfData       = ELFDATA2LSB
                 , elfClass      = elf_class
@@ -1113,7 +1216,9 @@ mergeObject' orig_binary obj redirs mkJump = do
                    ++ [ ElfDataSegment exec_seg ]
                    ++ new_data_segs
                    ++ gnu_stack_segment_headers
-                   ++ [ ElfDataSectionNameTable section_name_table_index
+                   ++ [ ElfDataSectionNameTable new_shstrtab_index
+                      , ElfDataSymtab symtab
+                      , ElfDataStrtab new_strtab_index
                       , ElfDataSectionHeaders
                       ]
                 , elfRelroRange = Nothing
