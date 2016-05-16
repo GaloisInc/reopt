@@ -36,6 +36,8 @@ stringToFixedBuffer g s | g == n = s
 slice :: Int -> Int -> B.ByteString -> B.ByteString
 slice i n b = B.take n (B.drop i b)
 
+-- | Show a given hexideimal number with a fixed width, adding
+-- zeros as needed.
 showPaddedHex :: (Integral a, Show a) => Int -> a -> String
 showPaddedHex l v = assert (l >= n) $ replicate (l-n) '0' ++ s
   where s = showHex v ""
@@ -51,7 +53,7 @@ showAddr64 = showPaddedHex 16
 showBytes :: B.ByteString -> String
 showBytes b = unwords (word8AsHex <$> B.unpack b)
 
--- | Digits required to show
+-- | Retun number of digits required to show a given unsigned number in hex.
 hexDigitsReq :: Bits a => a -> Int
 hexDigitsReq b = go 1 (b `shiftR` 4)
   where go r v | popCount v == 0 = r
@@ -93,6 +95,7 @@ instructionNames :: [ElfSection Word64] -> Set String
 instructionNames l = Set.fromList $ concatMap resolve l
   where resolve s = iiOp <$> sectionInstructions s
 
+-- | Return all instructions in the given section.
 sectionInstructions :: ElfSection Word64 -> [InstructionInstance]
 sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ]
   where buffer = elfSectionData s

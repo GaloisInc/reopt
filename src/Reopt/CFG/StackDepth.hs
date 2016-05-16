@@ -24,10 +24,11 @@ import qualified Data.Set as Set
 import           Data.Type.Equality
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Reopt.CFG.InterpState
+import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 
 import           Debug.Trace
 
@@ -43,7 +44,7 @@ isNegativeDepth (Neg _) = True
 isNegativeDepth _ = False
 
 -- One stack expression, basically staticPart + \Sigma dynamicPart
-data StackDepthValue = SDV { staticPart :: !Int64, dynamicPart :: !(Set StackDepthOffset) } 
+data StackDepthValue = SDV { staticPart :: !Int64, dynamicPart :: !(Set StackDepthOffset) }
                        deriving (Eq, Ord, Show)
 
 instance Pretty StackDepthValue where
@@ -76,7 +77,7 @@ negateStackDepthValue sdv = SDV { staticPart  = - (staticPart sdv)
 subsumes :: StackDepthValue -> StackDepthValue -> Bool
 subsumes v1 v2
   | dynamicPart v2 `Set.isSubsetOf` dynamicPart v1 = staticPart v1 <= staticPart v2
-  -- FIXME: subsets etc.                                       
+  -- FIXME: subsets etc.
   | otherwise = False
 
 -- could do this online, this helps with debugging though.
@@ -88,7 +89,7 @@ minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositi
     go v xs = let (_subs, xs') = partition (subsumes v) xs
                   dominated   = any (`subsumes` v) xs'
               in if not dominated then v : xs' else xs'
-      
+
 -- -----------------------------------------------------------------------------
 
 -- For now we assume that the stack pointer a the start of a block is path-independent
@@ -100,7 +101,7 @@ type BlockStackStart = StackDepthValue
 type BlockStackDepths = Set StackDepthValue
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
-data StackDepthState = SDS { _blockInitStackPointers :: !(Map BlockLabel BlockStackStart) 
+data StackDepthState = SDS { _blockInitStackPointers :: !(Map BlockLabel BlockStackStart)
                            , _blockStackRefs :: !(BlockStackDepths)
                            , _blockFrontier  :: !(Set BlockLabel)  }
 
@@ -118,7 +119,7 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 -- FIXME: move
 
 -- Unwraps all Apps etc, might visit an app twice (Add x x, for example)
--- foldValue :: forall m tp. Monoid m 
+-- foldValue :: forall m tp. Monoid m
 --              => (forall n.  NatRepr n -> Integer -> m)
 --              -> (forall cl. N.RegisterName cl -> m)
 --              -> Value tp -> m
@@ -127,7 +128,7 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 --     go :: forall tp. Value tp -> m
 --     go v = case v of
 --              BVValue sz i -> litf sz i
---              Initial r    -> initf r 
+--              Initial r    -> initf r
 --              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
 --     goAssignRHS :: forall tp. AssignRhs tp -> m
@@ -152,7 +153,7 @@ addBlock lbl start =
                          blockFrontier %= Set.insert lbl
        Just start'
         | start == start' -> return ()
-        | otherwise       -> traceM ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start'))) 
+        | otherwise       -> traceM ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start')))
 
 nextBlock :: StackDepthM (Maybe BlockLabel)
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
@@ -178,14 +179,14 @@ valueHasSP val = go val
 
 parseStackPointer' :: StackDepthValue -> Value (BVType 64) -> StackDepthValue
 parseStackPointer' sp0 addr
-  -- assert sp occurs in at most once in either x and y  
+  -- assert sp occurs in at most once in either x and y
   | Just (BVAdd _ x y) <- valueAsApp addr =
       addStackDepthValue (parseStackPointer' sp0 x)
                          (parseStackPointer' sp0 y)
- 
+
   | Just (BVSub _ x y) <- valueAsApp addr =
       addStackDepthValue (parseStackPointer' sp0 x)
-                         (negateStackDepthValue (parseStackPointer' sp0 y))      
+                         (negateStackDepthValue (parseStackPointer' sp0 y))
   | BVValue _ i <- addr = constantDepthValue (fromIntegral i)
   | Initial n <- addr, Just Refl <- testEquality n N.rsp = sp0
   | otherwise = SDV 0 (Set.singleton (Pos addr))
@@ -201,9 +202,9 @@ parseStackPointer sp0 addr0
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackDepth :: InterpState -> CodeAddr -> BlockStackDepths
+maximumStackDepth :: DiscoveryInfo -> CodeAddr -> BlockStackDepths
 maximumStackDepth ist addr =
-  minimizeStackDepthValues $ (^. blockStackRefs) $ execState (recoverIter ist Set.empty (Just lbl0)) s0                         
+  minimizeStackDepthValues $ (^. blockStackRefs) $ execState (recoverIter ist Set.empty (Just lbl0)) s0
   where
     s0   = SDS { _blockInitStackPointers = Map.singleton lbl0 sdv0
                , _blockStackRefs         = Set.empty
@@ -212,7 +213,7 @@ maximumStackDepth ist addr =
     sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: InterpState
+recoverIter :: DiscoveryInfo
                -> Set BlockLabel
                -> Maybe BlockLabel
                -> StackDepthM ()
@@ -223,7 +224,7 @@ recoverIter ist seen (Just lbl)
                    lbl' <- nextBlock
                    recoverIter ist (Set.insert lbl seen) lbl'
 
-recoverBlock :: InterpState 
+recoverBlock :: DiscoveryInfo
                 -> BlockLabel
                 -> StackDepthM ()
 recoverBlock interp_state root_label = do
@@ -235,9 +236,9 @@ recoverBlock interp_state root_label = do
 
       let goStmt (AssignStmt (Assignment _ (Read (MemLoc addr _))))
             = addDepth $ parseStackPointer init_sp addr
-          goStmt (Write (MemLoc addr tp) v) 
+          goStmt (Write (MemLoc addr tp) v)
             = do addDepth $ parseStackPointer init_sp addr
-                 case testEquality tp (knownType :: TypeRepr (BVType 64)) of 
+                 case testEquality tp (knownType :: TypeRepr (BVType 64)) of
                    Just Refl -> addDepth $ parseStackPointer init_sp v
                    _ -> return ()
 
@@ -245,17 +246,17 @@ recoverBlock interp_state root_label = do
 
           -- overapproximates by viewing all registers as uses of the
           -- sp between blocks
-          addStateVars s = 
+          addStateVars s =
             addDepth $ Set.unions [ parseStackPointer init_sp (s ^. register r)
                                   | r <- N.gpRegs ]
-          
+
       case m_pterm of
         Just (ParsedBranch _c x y) -> do
           traverse_ goStmt (blockStmts b)
-          go init_sp x 
+          go init_sp x
           go init_sp y
 
-        Just (ParsedCall proc_state stmts' _fn m_ret_addr) -> do 
+        Just (ParsedCall proc_state stmts' _fn m_ret_addr) -> do
             traverse_ goStmt stmts'
             addStateVars proc_state
 
@@ -264,19 +265,19 @@ recoverBlock interp_state root_label = do
               Nothing -> return ()
               Just ret_addr ->  addBlock (mkRootBlockLabel ret_addr) (addStackDepthValue sp' $ constantDepthValue 8)
 
-        Just (ParsedJump proc_state tgt_addr) -> do 
+        Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
-            
+
             let lbl'     = mkRootBlockLabel tgt_addr
                 sp' = parseStackPointer' init_sp (proc_state ^. register N.rsp)
-            
+
             addBlock lbl' sp'
 
         Just (ParsedReturn _proc_state stmts') -> do
             traverse_ goStmt stmts'
 
-        Just (ParsedSyscall proc_state next_addr _call_no _pname _name _argRegs _rregs) -> do 
+        Just (ParsedSyscall proc_state next_addr _call_no _pname _name _argRegs _rregs) -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
@@ -286,11 +287,9 @@ recoverBlock interp_state root_label = do
         Just (ParsedLookupTable proc_state _idx vec) -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
-            
+
             let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
 
             traverse_ (flip addBlock sp' . mkRootBlockLabel) vec
 
         Nothing -> return () -- ???
-
-

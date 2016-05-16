@@ -45,7 +45,7 @@ library
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs
     Reopt.CFG.Implementation
-    Reopt.CFG.InterpState
+    Reopt.CFG.DiscoveryInfo
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
@@ -115,7 +115,7 @@ executable reopt
 
 
   other-modules:
-    Assembler
+    Reopt.ExternalTools
     Paths_reopt
 
   if flag(enable-hpc)

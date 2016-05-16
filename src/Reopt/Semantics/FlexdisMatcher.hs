@@ -24,6 +24,7 @@
 
 module Reopt.Semantics.FlexdisMatcher
   ( execInstruction
+  , semanticsMap
   ) where
 
 import           Data.List (foldl')
@@ -43,6 +44,45 @@ import qualified Reopt.Machine.StateNames as N
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
 
+-- | Get a value with the given width, sign extending as necessary.
+getSignExtendedValue :: forall m w
+                     .  (FullSemantics m, 1 <= w)
+                     => F.Value
+                     -> NatRepr w
+                     -> m (Value m (BVType w))
+getSignExtendedValue v out_w =
+  case v of
+    -- If an instruction can take a VoidMem, it needs to get it explicitly
+    F.VoidMem _ar       -> fail "VoidMem"
+    F.Mem8  ar           -> mk . mkBVAddr n8   =<< getBVAddress ar
+    F.Mem16 ar           -> mk . mkBVAddr n16  =<< getBVAddress ar
+    F.Mem32 ar           -> mk . mkBVAddr n32  =<< getBVAddress ar
+    F.Mem64 ar           -> mk . mkBVAddr n64  =<< getBVAddress ar
+    F.Mem128 ar          -> mk . mkBVAddr n128 =<< getBVAddress ar
+
+    F.ByteReg  r
+      | Just r64 <- F.is_low_reg r  -> mk (reg_low8  $ N.gpFromFlexdis r64)
+      | Just r64 <- F.is_high_reg r -> mk (reg_high8 $ N.gpFromFlexdis r64)
+      | otherwise                   -> fail "unknown r8"
+    F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
+    F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
+    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
+    F.ByteImm  i                    -> return $! bvLit out_w i
+    F.WordImm  i                    -> return $! bvLit out_w i
+    F.DWordImm i                    -> return $! bvLit out_w i
+    F.QWordImm i                    -> return $! bvLit out_w i
+    _ -> fail $ "getSignExtendedValue given unexpected width."
+  where
+    -- FIXME: what happens with signs etc?
+    mk :: Location (Value m (BVType 64)) (BVType u)
+       -> m (Value m (BVType w))
+    mk l
+      | Just LeqProof <- testLeq n1 (loc_width l)
+      , Just LeqProof <- testLeq (loc_width l) out_w =
+        sext out_w <$> get l
+      | otherwise =
+        fail $ "getSignExtendedValue given bad value."
+
 -- | Extracts the value, truncating as required
 getSomeBVValue :: FullSemantics m => F.Value -> m (SomeBV (Value m))
 getSomeBVValue v =
@@ -56,10 +96,10 @@ getSomeBVValue v =
     F.FarPointer _      -> fail "FarPointer"
     -- If an instruction can take a VoidMem, it needs to get it explicitly
     F.VoidMem _ar       -> fail "VoidMem"
-    F.Mem8  ar          -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
-    F.Mem16 ar          -> getBVAddress ar >>= mk . mkBVAddr n16
-    F.Mem32 ar          -> getBVAddress ar >>= mk . mkBVAddr n32
-    F.Mem64 ar          -> getBVAddress ar >>= mk . mkBVAddr n64
+    F.Mem8  ar           -> getBVAddress ar >>= mk . mkBVAddr n8 -- FIXME: what size here?
+    F.Mem16 ar           -> getBVAddress ar >>= mk . mkBVAddr n16
+    F.Mem32 ar           -> getBVAddress ar >>= mk . mkBVAddr n32
+    F.Mem64 ar           -> getBVAddress ar >>= mk . mkBVAddr n64
     F.Mem128 ar          -> getBVAddress ar >>= mk . mkBVAddr n128
     -- Floating point memory
     F.FPMem32 ar          -> getBVAddress ar >>= mk . mkFPAddr SingleFloatRepr
@@ -74,10 +114,10 @@ getSomeBVValue v =
     F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
     F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
     F.ByteImm  w                    -> return (SomeBV $ bvLit n8  w) -- FIXME: should we cast here?
-    F.WordImm  w                    -> return (SomeBV $ bvLit n16 w)
-    F.DWordImm w                    -> return (SomeBV $ bvLit n32 w)
-    F.QWordImm w                    -> return (SomeBV $ bvLit n64 w)
-    F.JumpOffset off                -> return (SomeBV $ bvLit n64 off)
+    F.WordImm  w                    -> return $ SomeBV $ bvLit n16 w
+    F.DWordImm w                    -> return $ SomeBV $ bvLit n32 w
+    F.QWordImm w                    -> return $ SomeBV $ bvLit n64 w
+    F.JumpOffset _ off              -> return $ SomeBV $ bvLit n64 off
   where
     -- FIXME: what happens with signs etc?
     mk :: forall m n'
@@ -99,7 +139,7 @@ getBVAddress ar =
                  Nothing     -> return $! bvKLit 0
                  Just (i, r) -> bvTrunc n32 . bvMul (bvLit n32 i)
                                 <$> get (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-      let offset = uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 i32)
+      let offset = uext n64 (base `bvAdd` scale `bvAdd` bvLit n32 (F.displacementInt i32))
       mk_absolute seg offset
     F.IP_Offset_32 _seg _i32                 -> fail "IP_Offset_32"
     F.Offset_32    _seg _w32                 -> fail "Offset_32"
@@ -115,7 +155,7 @@ getBVAddress ar =
                                  <$> get (fullRegister $ N.gpFromFlexdis r)
       let offset = base `bvAdd` scale `bvAdd` bvLit n64 i32
       mk_absolute seg offset
-    F.IP_Offset_64 seg i32                 -> do
+    F.IP_Offset_64 seg i32 -> do
       ip_val <- get (fullRegister N.rip)
       mk_absolute seg (bvAdd (bvLit n64 i32) ip_val)
   where
@@ -162,7 +202,7 @@ getSomeBVLocation v =
     F.WordImm  _ -> noImm
     F.DWordImm _ -> noImm
     F.QWordImm _ -> noImm
-    F.JumpOffset _ -> error "Jump Offset is not a location."
+    F.JumpOffset{} -> error "Jump Offset is not a location."
     F.X87Register i -> mk (X87StackRegister i)
     F.FPMem32 ar -> getBVAddress ar >>= mk . mkBVAddr n32
     F.FPMem64 ar -> getBVAddress ar >>= mk . mkBVAddr n64
@@ -175,38 +215,46 @@ getSomeBVLocation v =
        -> m (SomeBV (MLocation m))
     mk = return . SomeBV
 
-checkEqBV :: Monad m
-          => (forall n'. f (BVType n') -> NatRepr n') -> NatRepr n
-          -> f (BVType p)
-          -> m (f (BVType n))
-checkEqBV getW n v
-  | Just Refl <- testEquality (getW v) n = return v
-  | otherwise = traceStack "WIDTH_ERROR" $
-     fail $ "Widths aren't equal: " ++ show (getW v) ++ " and " ++ show n
+castSomeLocToWidth :: Monad m
+                   => NatRepr w
+                   -> SomeBV (Location addr)
+                   -> m (Location addr (BVType w))
+castSomeLocToWidth expected (SomeBV v)
+  | Just Refl <- testEquality (loc_width v) expected = do
+      return v
+  | otherwise = traceStack "LOC_WIDTH_ERROR" $
+     fail $ "Widths aren't equal: " ++ show (loc_width v) ++ " and " ++ show expected
 
-checkSomeBV :: Monad m
-            => (forall n'. f (BVType n') -> NatRepr n')
-            -> NatRepr n
-            -> SomeBV f
-            -> m (f (BVType n))
-checkSomeBV getW n (SomeBV v) = checkEqBV getW n v
+-- | Given a bitvector value with some width this attempts to interpret it
+-- at a specific width, and calls 'fail' if it cannot.
+castSomeBVToWidth :: (Monad m, IsValue f)
+                  => NatRepr w
+                  -> SomeBV f
+                  -> m (f (BVType w))
+castSomeBVToWidth expected (SomeBV v)
+  | Just Refl <- testEquality (bv_width v) expected = return v
+  | otherwise = traceStack "VALUE_WIDTH_ERROR" $
+     fail $ "Widths aren't equal: " ++ show (bv_width v) ++ " and " ++ show expected
+
 
 readBVAddress :: FullSemantics m => F.AddrRef -> NatRepr n -> m (Value m (BVType n))
 readBVAddress ar w =
   get . mkBVAddr w =<< getBVAddress ar
 
-getBVValue :: FullSemantics m => F.Value -> NatRepr n -> m (Value m (BVType n))
-getBVValue (F.VoidMem ar) w = readBVAddress ar w
-getBVValue (F.Mem8    ar) w = readBVAddress ar w
-getBVValue (F.Mem16   ar) w = readBVAddress ar w
-getBVValue (F.Mem32   ar) w = readBVAddress ar w
-getBVValue (F.Mem64   ar) w = readBVAddress ar w
-getBVValue (F.Mem128  ar) w = readBVAddress ar w
-getBVValue v w = checkSomeBV bv_width w =<< getSomeBVValue v
+-- | Get a XMM value
+readXMMValue :: FullSemantics m => F.Value -> m (Value m (BVType 128))
+readXMMValue (F.XMMReg r) = get $ fullRegister $ N.xmmFromFlexdis r
+readXMMValue (F.Mem128 a) = readBVAddress a n128
+readXMMValue _ = fail "XMM Instruction given unexpected value."
+
+-- | Read a value expected to be a void memory value.
+readVoidMemValue :: FullSemantics m => F.Value -> NatRepr n -> m (Value m (BVType n))
+readVoidMemValue (F.VoidMem a) w = readBVAddress a w
+readVoidMemValue _ _ = fail "readVoidMem given bad address."
 
 getBVLocation :: FullSemantics m => F.Value -> NatRepr n -> m (MLocation m (BVType n))
 getBVLocation l w = do
-  checkSomeBV loc_width w =<< getSomeBVLocation l
+  castSomeLocToWidth w =<< getSomeBVLocation l
 
 truncateBVValue :: (Monad m, IsValue v, 1 <= n)
                 => NatRepr n -> SomeBV v -> m (v (BVType n))
@@ -232,7 +280,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
     mk :: String
        -> (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
        -> (String, SemanticsOp)
-    mk s f = (s, SemanticsOp $ \ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
+    mk s f = (s, semanticsOp f)
 
     instrs :: [(String, SemanticsOp)]
     instrs = [ mk "lea"  $ mkBinop $ \loc (F.VoidMem ar) -> do
@@ -250,7 +298,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                      binop (\l v' -> do { v <- get l; exec_imul2_3 l v v' }) arg
                    [loc, val, val'] -> do
                      SomeBV l <- getSomeBVLocation loc
-                     v  <- getSomeBVValue val  >>= checkSomeBV bv_width (loc_width l)
+                     v  <- castSomeBVToWidth (loc_width l) =<< getSomeBVValue val
                      SomeBV v' <- getSomeBVValue val'
                      Just LeqProof <- return $ testLeq (bv_width v') (bv_width v)
                      exec_imul2_3 l v v'
@@ -263,13 +311,13 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movzx"  $ geBinop exec_movzx
               , mk "xchg"   $ mkBinop $ \v v' -> do
                   SomeBV l <- getSomeBVLocation v
-                  l' <- getSomeBVLocation v' >>= checkSomeBV loc_width (loc_width l)
+                  l' <- getSomeBVLocation v' >>= castSomeLocToWidth (loc_width l)
                   exec_xchg l l'
 
               , mk "ret"    $ \(_, vs) ->
                   case vs of
                     []              -> exec_ret Nothing
-                    [F.WordImm imm] -> exec_ret (Just imm)
+                    [F.WordImm imm] -> exec_ret (Just (fromIntegral imm))
                     _               -> error "Unexpected number of args to ret"
               , mk "cmps"   $ mkBinopPfxLL $ \pfx -> exec_cmps (pfx == F.RepZPrefix)
 
@@ -290,7 +338,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                    case testLeq (loc_width val_loc) n64 of
                     Just LeqProof -> exec_scas (pfx == F.RepZPrefix ) (pfx == F.RepNZPrefix) val_loc buf_loc
                     Nothing       -> fail "Argument to scass is too large"
-                   
+
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
@@ -308,18 +356,18 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ mkBinop $ \loc val -> do
                   l <- getBVLocation loc n128
-                  v <- getBVValue val n128
+                  v <- readXMMValue val
                   modify (`bvXor` v) l
               , mk "xorps"   $ mkBinop $ \loc val -> do
                   l <- getBVLocation loc n128
-                  v <- getBVValue val n128
+                  v <- readXMMValue val
                   modify (`bvXor` v) l
-                  
+
               , mk "cvtsi2ss" $ mkBinop $ \loc val -> do
                 l <- getBVLocation loc n128
                 SomeBV v <- getSomeBVValue val
                 exec_cvtsi2ss l v
-                  
+
               , mk "cvttsd2si" $ mkBinop $ \loc val -> do
                   SomeBV l  <- getSomeBVLocation loc
                   v <- truncateBVValue knownNat =<< getSomeBVValue val
@@ -434,10 +482,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movlpd"  $ mkBinopLV exec_movlpd
               , mk "pshufd"  $ ternop exec_pshufd
               , mk "pslldq"  $ geBinop exec_pslldq
-              , mk "lddqu"   $ mkBinop $ \loc val ->
-                                          do l <- getBVLocation loc n128
-                                             v <- getBVValue val n128
-                                             exec_lddqu l v
+              , mk "lddqu"   $ mkBinop $ \loc val -> do
+                  l <- getBVLocation loc n128
+                  v <- readVoidMemValue val n128
+                  exec_lddqu l v
               , mk "palignr" $ ternop exec_palignr
 
               -- X87 FP instructions
@@ -454,10 +502,10 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
              ] ++ mkConditionals "cmov" (\f -> binop (exec_cmovcc f))
                ++ mkConditionals "j"    (\f ->
                     mkUnop $ \v ->
-                      getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= exec_jcc f)
+                      exec_jcc f =<< castSomeBVToWidth knownNat =<< getSomeBVValue v)
                ++ mkConditionals "set"  (\f ->
                     mkUnop $ \v ->
-                      getSomeBVLocation v >>= checkSomeBV loc_width knownNat >>= exec_setcc f)
+                      exec_setcc f =<< castSomeLocToWidth knownNat =<< getSomeBVLocation v)
 
 -- Helpers
 x87fir :: FloatInfoRepr X86_80Float
@@ -509,8 +557,7 @@ movsX n v1 v2 = do
 
 semanticsOp :: (forall m. Semantics m => (F.LockPrefix, [F.Value]) -> m ())
             -> SemanticsOp
-semanticsOp f = SemanticsOp (\ii -> f (F.iiLockPrefix ii, F.iiArgs ii))
-
+semanticsOp f = SemanticsOp (\ii -> f (F.iiLockPrefix ii, fmap fst (F.iiArgs ii)))
 
 mkConditionals :: String
                -> (forall m. Semantics m
@@ -545,11 +592,11 @@ maybe_ip_relative :: Semantics m =>
                      (Value m (BVType 64) -> m b)
                      -> (t, [F.Value]) -> m b
 maybe_ip_relative f (_, vs)
-  | [F.JumpOffset off] <- vs
-       = do next_ip <- bvAdd (bvLit n64 off) <$> get (fullRegister N.rip)
-            f next_ip
-  | [v]                <- vs
-       = getSomeBVValue v >>= checkSomeBV bv_width knownNat >>= f
+  | [F.JumpOffset _ off] <- vs = do
+      next_ip <- bvAdd (bvLit n64 off) <$> get (fullRegister N.rip)
+      f next_ip
+  | [v] <- vs =
+     f =<< castSomeBVToWidth knownNat =<< getSomeBVValue v
 
   | otherwise  = fail "wrong number of operands"
 
@@ -621,7 +668,7 @@ mkBinopPfxLL ::  Semantics m
         -> (F.LockPrefix, [F.Value]) -> m a
 mkBinopPfxLL f = mkBinopPfx $ \pfx loc loc' -> do
   SomeBV l <- getSomeBVLocation loc
-  l'       <- getSomeBVLocation loc' >>= checkSomeBV loc_width (loc_width l)
+  l'       <- getSomeBVLocation loc' >>= castSomeLocToWidth (loc_width l)
   f pfx l l'
 
 -- The location size must be >= the value size.
@@ -650,14 +697,14 @@ knownBinop :: (KnownNat n, KnownNat n', FullSemantics m)
            -> (F.LockPrefix, [F.Value])
            -> m ()
 knownBinop f = mkBinop $ \loc val -> do
-  l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
-  v  <- getSomeBVValue val >>= checkSomeBV bv_width knownNat
+  l  <- getSomeBVLocation loc >>= castSomeLocToWidth knownNat
+  v  <- castSomeBVToWidth knownNat =<< getSomeBVValue val
   f l v
 
 knownUnop :: (KnownNat n, FullSemantics m) => (MLocation m (BVType n) -> m ())
              -> (F.LockPrefix, [F.Value]) -> m ()
 knownUnop f = mkUnop $ \loc -> do
-  l  <- getSomeBVLocation loc >>= checkSomeBV loc_width knownNat
+  l  <- getSomeBVLocation loc >>= castSomeLocToWidth knownNat
   f l
 
 unopV :: FullSemantics m => (forall n. IsLocationBV m n => Value m (BVType n) -> m ())
@@ -675,7 +722,7 @@ binop :: FullSemantics m
       -> (F.LockPrefix, [F.Value]) -> m ()
 binop f = mkBinop $ \loc val -> do
   SomeBV l <- getSomeBVLocation loc
-  v <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val
+  v <- getSignExtendedValue val (loc_width l)
   f l v
 
 ternop :: FullSemantics m
@@ -686,7 +733,7 @@ ternop :: FullSemantics m
        -> (F.LockPrefix, [F.Value]) -> m ()
 ternop f = mkTernop $ \loc val1 val2 -> do
   SomeBV l <- getSomeBVLocation loc
-  v1 <- checkSomeBV bv_width (loc_width l) =<< getSomeBVValue val1
+  v1 <- castSomeBVToWidth (loc_width l) =<< getSomeBVValue val1
   SomeBV v2 <- getSomeBVValue val2
   Just LeqProof <- return $ testLeq (bv_width v2) (bv_width v1)
   f l v1 v2
@@ -749,4 +796,4 @@ execInstruction next ii =
     Just (SemanticsOp f) -> Just $ do
       rip .= bvLit knownNat next
       f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
-    _                    -> trace ("Unsupported instruction (" ++ showHex next "): " ++ show ii) Nothing
+    Nothing -> trace ("Unsupported instruction (" ++ showHex next "): " ++ show ii) Nothing

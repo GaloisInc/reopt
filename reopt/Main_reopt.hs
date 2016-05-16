@@ -21,15 +21,20 @@ import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import           Data.Maybe (mapMaybe)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.String (fromString)
+import           Data.Tuple (swap)
 import           Data.Type.Equality as Equality
 import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
-import           Numeric (showHex)
+import           Flexdis86 (InstructionInstanceF(..))
+import           Numeric (readHex, showHex)
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (createDirectoryIfMissing, doesFileExist)
 import           System.Environment (getArgs)
@@ -38,32 +43,53 @@ import           System.FilePath
 import           System.IO
 import           System.IO.Error
 import           System.IO.Temp
+import           System.Posix.Files
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
 
-import           Flexdis86 (InstructionInstance(..))
 
 import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.FnRep (Function(..))
+import           Reopt.CFG.FunctionArgs (functionArgs)
+import           Reopt.CFG.DiscoveryInfo
+                 ( DiscoveryInfo
+                 , absState
+                 , blocks
+                 , functionEntries
+                 )
 import qualified Reopt.CFG.LLVM as LLVM
+import           Reopt.CFG.Recovery (recoverFunction)
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Utils.Debug
-import           System.Posix.Files
 
-import qualified Assembler
+import qualified Reopt.ExternalTools as Ext
 
 import           Debug.Trace
+
+------------------------------------------------------------------------
+-- Utilities
+
+unintercalate :: String -> String -> [String]
+unintercalate punct str = reverse $ go [] "" str
+  where
+    go acc "" [] = acc
+    go acc thisAcc [] = (reverse thisAcc) : acc
+    go acc thisAcc str'@(x : xs)
+      | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
+      | otherwise = go acc (x : thisAcc) xs
+
 
 ------------------------------------------------------------------------
 -- Args
@@ -82,17 +108,20 @@ data Action
    | Reopt           -- ^ Perform a full reoptimization
 
 -- | Command line arguments.
-data Args = Args { _reoptAction :: !Action
-                 , _programPath :: !FilePath
-                 , _loadStyle   :: !LoadStyle
-                 , _debugKeys   :: [DebugClass]
-                 , _newobjPath  :: !FilePath
-                 , _redirPath   :: !FilePath
-                 , _outputPath  :: !FilePath
-                 , _gasPath     :: !FilePath
-                 , _llcPath     :: !FilePath
+data Args = Args { _reoptAction  :: !Action
+                 , _programPath  :: !FilePath
+                 , _loadStyle    :: !LoadStyle
+                 , _debugKeys    :: [DebugClass]
+                 , _newobjPath   :: !FilePath
+                 , _redirPath    :: !FilePath
+                 , _outputPath   :: !FilePath
+                 , _gasPath      :: !FilePath
+                 , _llcPath      :: !FilePath
+                 , _llcOptLevel  :: !Int
                  , _llvmLinkPath :: !FilePath
                  , _libreoptPath :: !(Maybe FilePath)
+                 , _notransAddrs :: !(Set String)
+                   -- ^ Set of function entry points that we ignore for translation.
                  }
 
 -- | How to load Elf file.
@@ -102,15 +131,15 @@ data LoadStyle
    | LoadBySegment
      -- ^ Load segments in Elf file.
 
--- | Action to perform when running.
+-- | Action to perform when running
 reoptAction :: Simple Lens Args Action
 reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 
--- | Path for main executable.
+-- | Path for main executable
 programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
--- | Whether to load file by segment or sections.
+-- | Whether to load file by segment or sections
 loadStyle :: Simple Lens Args LoadStyle
 loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 
@@ -118,19 +147,19 @@ loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
 debugKeys :: Simple Lens Args [DebugClass]
 debugKeys = lens _debugKeys (\s v -> s { _debugKeys = v })
 
--- | Path to new object code for relinker.
+-- | Path to new object code for relinker
 newobjPath :: Simple Lens Args FilePath
 newobjPath = lens _newobjPath (\s v -> s { _newobjPath = v })
 
--- | Path to JSON file describing the redirections.
+-- | Path to JSON file describing the redirections
 redirPath :: Simple Lens Args FilePath
 redirPath = lens _redirPath (\s v -> s { _redirPath = v })
 
--- | Path to JSON file describing the outputections.
+-- | Path to JSON file describing the output
 outputPath :: Simple Lens Args FilePath
 outputPath = lens _outputPath (\s v -> s { _outputPath = v })
 
--- | Path to GNU assembler.
+-- | Path to GNU assembler
 gasPath :: Simple Lens Args FilePath
 gasPath = lens _gasPath (\s v -> s { _gasPath = v })
 
@@ -138,13 +167,21 @@ gasPath = lens _gasPath (\s v -> s { _gasPath = v })
 llcPath :: Simple Lens Args FilePath
 llcPath = lens _llcPath (\s v -> s { _llcPath = v })
 
+-- | Optimization level to pass to llc
+llcOptLevel :: Simple Lens Args Int
+llcOptLevel = lens _llcOptLevel (\s v -> s { _llcOptLevel = v })
+
 -- | Path to llvm-link
 llvmLinkPath :: Simple Lens Args FilePath
 llvmLinkPath = lens _llvmLinkPath (\s v -> s { _llvmLinkPath = v })
 
--- | Path to llvm-link
+-- | Path to libreopt
 libreoptPath :: Simple Lens Args (Maybe FilePath)
 libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
+
+-- | Set of function entry points that we ignore for translation.
+notransAddrs :: Simple Lens Args (Set String)
+notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -157,8 +194,10 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _outputPath = "a.out"
                    , _gasPath = "gas"
                    , _llcPath = "llc"
+                   , _llcOptLevel  = 2
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
+                   , _notransAddrs = Set.empty
                    }
 
 ------------------------------------------------------------------------
@@ -223,15 +262,6 @@ parseDebugFlags oldKeys cl =
                     Nothing -> Left $ "Unknown debug key `" ++ str ++ "'"
                     Just k  -> Right [k]
 
-unintercalate :: String -> String -> [String]
-unintercalate punct str = reverse $ go [] "" str
-  where
-    go acc "" [] = acc
-    go acc thisAcc [] = (reverse thisAcc) : acc
-    go acc thisAcc str'@(x : xs)
-      | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
-      | otherwise = go acc (x : thisAcc) xs
-
 debugFlag :: Flag Args
 debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
   where upd s old = do let ks = unintercalate "," s
@@ -262,9 +292,19 @@ gasFlag = flagReq [ "gas" ] upd "PATH" help
   where upd s old = Right $ old & gasPath .~ s
         help = "Path to GNU assembler."
 
-llcFlag :: Flag Args
-llcFlag = flagReq [ "llc" ] upd "PATH" help
+-- | Flag to set llc path.
+llcPathFlag :: Flag Args
+llcPathFlag = flagReq [ "llc" ] upd "PATH" help
   where upd s old = Right $ old & llcPath .~ s
+        help = "Path to llc."
+
+-- | Flag to set llc optimization level.
+llcOptLevelFlag :: Flag Args
+llcOptLevelFlag = flagReq [ "opt" ] upd "PATH" help
+  where upd s old =
+          case reads s of
+            [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & llcOptLevel .~ lvl
+            _ -> Left "Expected optimization level to be a number between 0 and 3."
         help = "Path to llc."
 
 llvmLinkFlag :: Flag Args
@@ -276,6 +316,12 @@ libreoptFlag :: Flag Args
 libreoptFlag = flagReq [ "lib" ] upd "PATH" help
   where upd s old = Right $ old & libreoptPath .~ Just s
         help = "Path to libreopt.bc."
+
+-- | Used to add a new no-translate add
+notransFlag :: Flag Args
+notransFlag = flagReq [ "notrans" ] upd "ADDR" help
+  where upd s old = Right $ old & notransAddrs %~ Set.insert s
+        help = "Address of function to omit from translation (may be repeated)."
 
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
@@ -294,9 +340,11 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , redirFlag
                 , outputFlag
                 , gasFlag
-                , llcFlag
+                , llcPathFlag
+                , llcOptLevelFlag
                 , llvmLinkFlag
                 , libreoptFlag
+                , notransFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 ]
@@ -323,7 +371,7 @@ getCommandLineArgs = do
   argStrings <- getArgs
   case process arguments argStrings of
     Left msg -> do
-      putStrLn msg
+      hPutStrLn stderr msg
       exitFailure
     Right v -> return v
 
@@ -391,7 +439,6 @@ isInterestingCode mem (start, Just end) = go start end
                       Left _           -> False -- FIXME: ignore illegal sequences?
                       Right (ii, next_i) -> not (isNop ii) || go next_i e
            | otherwise = False
-
 isInterestingCode _ _ = True -- Last bit
 
 -- | This prints out code that is stored in the elf file, but is not part of any
@@ -400,11 +447,11 @@ showGaps :: LoadStyle -> Elf Word64 -> IO ()
 showGaps loadSty binary = do
     -- Create memory for elf
     mem <- mkElfMem loadSty binary
-    let cfg = finalCFG (mkFinalCFG mem binary)
+    let cfg = mkCFG $ cfgFromMemAndBinary mem binary ^.blocks
     let ends = cfgBlockEnds cfg
-    let blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
+    let cfg_blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
-             $ out_gap blocks (Set.elems ends)
+             $ out_gap cfg_blocks (Set.elems ends)
     mapM_ (print . pretty . ppOne) gaps
   where
     ppOne (start, m_end) = text ("[" ++ showHex start "..") <>
@@ -425,18 +472,50 @@ showCFG :: LoadStyle -> Elf Word64 -> IO ()
 showCFG loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let fg = mkFinalCFG mem e
-  let g = eliminateDeadRegisters (finalCFG fg)
+  let fg = mkCFG (cfgFromMemAndBinary mem e^.blocks)
+  let g = eliminateDeadRegisters fg
   print (pretty g)
 
-showFunctions :: LoadStyle -> Elf Word64 -> IO ()
-showFunctions loadSty e = do
+{-
+getEntries :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
+           -> Set String  -- ^ Name of symbols/addresses to exclude
+-}
+
+-- | Try to recover function information from the information recovered during
+-- code discovery.
+getFns :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
+       -> Set String    -- ^ Name of symbols/addresses to exclude
+       -> DiscoveryInfo -- ^ Information about original binary recovered from static analysis.
+       -> IO [Function]
+getFns symMap excludedNames s = do
+
+  -- Compute which functions to compute by looking at the binary
+  let nms = Set.toList excludedNames
+  let (bad, excludedAddrs) = partitionEithers $
+        resolveSymAddr symMap . resolveSymName <$> nms
+
+  when (not (null bad)) $ do
+    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
+
+  let excludeSet = Set.fromList excludedAddrs
+  let include addr = Set.notMember addr excludeSet
+  let entries = filter include $ Set.toList (s^.functionEntries)
+
+  let fArgs = functionArgs s
+  case traverse (recoverFunction fArgs s) entries of
+    Left msg -> do
+      hPutStrLn stderr msg
+      exitFailure
+    Right fns -> return fns
+
+showFunctions :: Args -> IO ()
+showFunctions args = do
+  e <- readElf64 parseElf (args^.programPath)
   -- Create memory for elf
-  mem <- mkElfMem loadSty e
-  print mem
-  let fg = mkFinalCFG mem e
-  -- let g = eliminateDeadRegisters (finalCFG fg)
-  mapM_ (print . pretty) (finalFunctions fg)
+  mem <- mkElfMem (args^.loadStyle) e
+  let s = cfgFromMemAndBinary mem e
+  fns <- getFns (elfSymAddrMap e) (args^.notransAddrs) s
+  mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
@@ -462,8 +541,10 @@ ppBlockAndAbs m b =
 -- | Create a final CFG
 mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
                    -> Elf Word64 -- ^ Elf file to create CFG for.
-                   -> (FinalCFG, Map CodeAddr BS.ByteString)
-mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs), sym_map)
+                   -> (DiscoveryInfo, Map CodeAddr BS.ByteString)
+mkFinalCFGWithSyms mem e = ( cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
+                           , sym_map
+                           )
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   where entries =
           case elfSymtab e of
@@ -486,17 +567,18 @@ mkFinalCFGWithSyms mem e = (cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
 
-mkFinalCFG :: Memory Word64 -> Elf Word64 -> FinalCFG
-mkFinalCFG mem e = fst (mkFinalCFGWithSyms mem e)
+cfgFromMemAndBinary :: Memory Word64 -> Elf Word64 -> DiscoveryInfo
+cfgFromMemAndBinary mem e = fst (mkFinalCFGWithSyms mem e)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let fg = mkFinalCFG mem e
-  let abst = finalAbsState fg
-      amap = assignmentAbsValues mem fg
-  let g  = eliminateDeadRegisters (finalCFG fg)
+  let s = cfgFromMemAndBinary mem e
+      fg = mkCFG (s^.blocks)
+  let abst = s^.absState
+      amap = assignmentAbsValues mem fg abst
+  let g  = eliminateDeadRegisters fg
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty ab
@@ -517,8 +599,44 @@ showCFGAndAI loadSty e = do
         checkCallsIdentified mem g b
       _ -> return ()
 
-showLLVM :: LoadStyle -> Elf Word64 -> String -> IO ()
-showLLVM loadSty e dir = do
+
+-- | Extract list containing symbol names and addresses.
+elfAddrSymEntries :: Elf Word64 -> [(BS.ByteString, Word64)]
+elfAddrSymEntries binary =
+  case elfSymtab binary of
+     -- Assume that no section means no relocations
+    []  -> []
+    [tbl] ->
+      let entries = V.toList $ elfSymbolTableEntries tbl
+          f s =  (\v -> (steName s, v)) <$> symAddr s
+       in mapMaybe f entries
+    _   -> []
+
+-- | Create map from symbol names to address.
+elfSymAddrMap  :: Elf Word64 -> Map BS.ByteString CodeAddr
+elfSymAddrMap binary = Map.fromList $ elfAddrSymEntries binary
+
+-- | Create map from addresses to symbol name.
+--
+-- Used for naming functions.
+elfAddrSymMap :: Elf Word64 -> LLVM.AddrSymMap
+elfAddrSymMap binary = Map.fromList $ swap <$> elfAddrSymEntries binary
+
+-- | Returns binary symbol addr
+symAddr :: Num w
+        => ElfSymbolTableEntry w
+        -> Maybe w
+symAddr entry
+  | steType entry `elem` [ STT_FUNC, STT_NOTYPE ]  =
+    Just (steValue entry)
+  | otherwise = Nothing
+
+showLLVM :: Args -> String -> IO ()
+showLLVM args dir = do
+  e <- readElf64 parseElf (args^.programPath)
+
+  let loadSty = args^.loadStyle
+
   -- Create memory for elf
   mem <- mkElfMem loadSty e
   let (cfg, symMap) = mkFinalCFGWithSyms mem e
@@ -529,17 +647,19 @@ showLLVM loadSty e dir = do
                    Nothing -> "unknown"
                    Just s  -> BSC.unpack s
           addr = fnAddr f
+  let addrSymMap = elfAddrSymMap e
   let writeF :: Function -> IO ()
       writeF f  = do
         let (_,m) = L.runLLVM $ do
               LLVM.declareIntrinsics
               let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
-              itraverse_ LLVM.declareFunction refs
-              LLVM.defineFunction f
+              itraverse_ (LLVM.declareFunction addrSymMap) refs
+              LLVM.defineFunction addrSymMap f
         writeFile (mkName f) (show $ L.ppModule m)
 
   createDirectoryIfMissing True dir
-  mapM_ (writeF) (finalFunctions cfg)
+  fns <- getFns (elfSymAddrMap e) (args^.notransAddrs) cfg
+  mapM_ writeF fns
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
@@ -636,11 +756,12 @@ mkElfMem sty e = do
 mergeAndWrite :: FilePath
               -> Elf Word64 -- ^ Original binary
               -> Elf Word64 -- ^ New object
+              -> SymbolNameToAddrMap Word64 -- ^ Extra rdictions
               -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
               -> IO ()
-mergeAndWrite output_path orig_binary new_obj redirs = do
+mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
   putStrLn $ "Performing final relinking."
-  let (mres, warnings) = mergeObject orig_binary new_obj redirs
+  let (mres, warnings) = mergeObject orig_binary new_obj extra_syms redirs
   when (hasRelinkWarnings warnings) $ do
     hPrint stderr (pretty warnings)
   case mres of
@@ -677,7 +798,7 @@ performRedir args = do
             case mredirs of
               Left e -> fail $ show e
               Right r -> return r
-      mergeAndWrite output_path orig_binary new_obj redirs
+      mergeAndWrite output_path orig_binary new_obj Map.empty redirs
 
 
 llvmAssembly :: L.Module -> BS.ByteString
@@ -708,12 +829,15 @@ lookupElfOffset m a =
     _ -> Nothing
 
 -- | This creates a code redirection or returns the address as failing.
-addrRedirection :: ElfSegmentMap Word64 -> Function -> Either Word64 (CodeRedirection Word64)
-addrRedirection m f = do
+addrRedirection :: LLVM.AddrSymMap
+                -> ElfSegmentMap Word64
+                -> Function
+                -> Either Word64 (CodeRedirection Word64)
+addrRedirection addrSymMap m f = do
   case lookupElfOffset m (fnAddr f) of
     Nothing -> Left (fnAddr f)
     Just (idx,off) -> Right redir
-      where L.Symbol sym_name = LLVM.functionName (fnAddr f)
+      where L.Symbol sym_name = LLVM.functionName addrSymMap (fnAddr f)
             redir = CodeRedirection { redirSourcePhdr   = idx
                                     , redirSourceOffset = off
                                     , redirSourceSize   = fromIntegral (fnSize f)
@@ -736,7 +860,12 @@ compile_llvm_to_obj args arch llvm obj_path = do
   -- Run llvm on resulting binary
   putStrLn "Compiling new code"
   mres <- runExceptT $ do
-    Assembler.llvm_to_object (args^.llcPath) (args^.gasPath) arch llvm obj_path
+    let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
+                                  , Ext.llc_opt_level = 3
+                                  }
+    asm <- Ext.run_llc (args^.llcPath) llc_opts llvm
+    Ext.run_gas (args^.gasPath) asm obj_path
+
   case mres of
     Left f -> fail $ show f
     Right () -> return ()
@@ -761,22 +890,36 @@ link_with_libreopt obj_dir args arch obj_llvm = do
   BS.writeFile obj_llvm_path obj_llvm
 
   mllvm <- runExceptT $
-    Assembler.llvm_link (args^.llvmLinkPath) [ obj_llvm_path, libreopt_path ]
+    Ext.run_llvm_link (args^.llvmLinkPath) [ obj_llvm_path, libreopt_path ]
   either (fail . show) return mllvm
+
+
+resolveSymName :: String -> Either CodeAddr String
+resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
+resolveSymName nm = Right nm
+
+-- | Attempt to find the address of a string identifying a symbol name, and
+-- return either the string if it cannot be resolved or the address.
+resolveSymAddr :: Map BS.ByteString CodeAddr
+                  -- ^ Map from symbol names in binary to their address.
+               -> Either CodeAddr String
+                  -- ^ The name of a symbol as a string.
+               -> Either String CodeAddr
+resolveSymAddr _ (Left w) = Right w
+resolveSymAddr symMap (Right nm) =
+  case Map.lookup (fromString nm) symMap of
+    Just w -> Right w
+    Nothing -> Left nm
 
 performReopt :: Args -> IO ()
 performReopt args =
   withSystemTempDirectory "reopt." $ \obj_dir -> do
     -- Get original binary
-    orig_binary_header <- readElf64 parseElfHeaderInfo (args^.programPath)
-    orig_binary <-
-      case getElf orig_binary_header of
-        Left e -> fail $ "Error parsing original binary: " ++ show e
-        Right e -> return e
+    orig_binary <- readElf64 parseElf (args^.programPath)
     -- Construct CFG from binary
     mem <- mkElfMem (args^.loadStyle) orig_binary
-    let cfg = mkFinalCFG mem orig_binary
-    let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions (finalFunctions cfg)
+    let cfg = cfgFromMemAndBinary mem orig_binary
+    let addrSymMap = elfAddrSymMap orig_binary
     let output_path = args^.outputPath
 
     case takeExtension output_path of
@@ -784,15 +927,30 @@ performReopt args =
           "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
           "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
+      ".blocks" -> do
+        let g = eliminateDeadRegisters (mkCFG $ cfg^.blocks)
+        writeFile output_path $ show (pretty g)
+      ".fns" -> do
+        fns <- getFns (elfSymAddrMap orig_binary) (args^.notransAddrs) cfg
+        writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
+        fns <- getFns (elfSymAddrMap orig_binary) (args^.notransAddrs) cfg
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
         BS.writeFile output_path obj_llvm
       ".o" -> do
+        fns <- getFns (elfSymAddrMap orig_binary)  (args^.notransAddrs) cfg
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         compile_llvm_to_obj args arch llvm output_path
       ".s" -> do
         error "Reopt does not support generating asm files for relinker directly."
       _ -> do
+        let notrans = args^.notransAddrs
+        let symAddrMap = elfSymAddrMap orig_binary
+        fns <- getFns symAddrMap notrans cfg
+
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         let obj_path = obj_dir </> "obj.o"
@@ -802,14 +960,21 @@ performReopt args =
 
         putStrLn "Start merge and write"
         -- Convert binary to LLVM
-        let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> finalFunctions cfg
+        let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
               where m = elfSegmentMap (elfLayout orig_binary)
-                    mkRedir f = addrRedirection m f
+                    mkRedir f = addrRedirection addrSymMap m f
         unless (null bad_addrs) $ do
           error $ "Found functions outside program headers:\n  "
             ++ unwords ((`showHex` "") <$> bad_addrs)
         -- Merge and write out
-        mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
+        let extra_addrs = Map.fromList
+              [ (fromString "reopt_gen_" `BS.append` nm, w)
+              | Right binary_nm <- resolveSymName <$> Set.toList notrans
+              , Just w <- [Map.lookup (fromString binary_nm) symAddrMap]
+                -- Get symbol name used in object.
+              , Just nm <- [Map.lookup w addrSymMap]
+              ]
+        mergeAndWrite (args^.outputPath) orig_binary new_obj extra_addrs redirs
 
 main :: IO ()
 main = main' `catch` h
@@ -834,11 +999,9 @@ main' = do
       e <- readElf64 parseElf (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
     ShowLLVM path -> do
-      e <- readElf64 parseElf (args^.programPath)
-      showLLVM (args^.loadStyle) e path
+      showLLVM args path
     ShowFunctions -> do
-      e <- readElf64 parseElf (args^.programPath)
-      showFunctions (args^.loadStyle) e
+      showFunctions args
     ShowGaps -> do
       e <- readElf64 parseElf (args^.programPath)
       showGaps (args^.loadStyle) e

@@ -7,15 +7,20 @@ Maintainer  : jhendrix@galois.com
 This module performs the merging between the binary and new object.
 -}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wall #-}
 module Reopt.Relinker
   ( Reopt.Relinker.Redirection.CodeRedirection(..)
+  , SymbolNameToAddrMap
   , mergeObject
     -- * Warnings
   , RelinkWarnings
   , unresolvedSymbols
   , hasRelinkWarnings
+    -- * Utilities
+  , SectionAddrMap
+  , objectSectionAddr
   ) where
 
 import           Control.Exception (assert)
@@ -71,6 +76,7 @@ mapFromList proj = foldr' ins Map.empty
 hasBits :: Bits x => x -> x -> Bool
 x `hasBits` b = (x .&. b) == b
 
+-- | Write bytestring to bitvector at given offset.
 writeBS :: SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
 writeBS mv base bs = do
   let len = BS.length bs
@@ -149,11 +155,80 @@ findSectionInfo e nm tp flags reloc =
     []  -> return Nothing
     _   -> throwE $ "Multiple " ++ nm ++ " sections in object file."
 
+
+------------------------------------------------------------------------
+-- Code for performing relocations in new object.
+
+data ObjRelocState w
+  = ObjRelinkState { _warnings :: !RelinkWarnings
+                   , _nextSectionIndex :: !Word16
+                   , _nextSegmentIndex :: !Word16
+                   , _binarySectionMap :: !(Map Word16 (Word16, w))
+                     -- ^ Maps section index in original binary to its section
+                     -- in output and base address of section.
+                   , _objSectionMap    :: !(Map Word16 (Word16, w))
+                     -- ^ Maps section index in object to its section in output
+                     -- and base address of section.
+                   }
+
+emptyObjRelocState :: ObjRelocState w
+emptyObjRelocState = ObjRelinkState { _warnings         = emptyRelinkWarnings
+                                    , _nextSectionIndex = 1
+                                    , _nextSegmentIndex = 0
+                                    , _binarySectionMap = Map.empty
+                                    , _objSectionMap    = Map.empty
+                                    }
+
+warnings :: Simple Lens (ObjRelocState w) RelinkWarnings
+warnings = lens _warnings (\s v -> s { _warnings = v })
+
+nextSectionIndex :: Simple Lens (ObjRelocState w) Word16
+nextSectionIndex = lens _nextSectionIndex (\s v -> s { _nextSectionIndex = v })
+
+nextSegmentIndex :: Simple Lens (ObjRelocState w) Word16
+nextSegmentIndex = lens _nextSegmentIndex (\s v -> s { _nextSegmentIndex = v })
+
+-- | Maps section index in object to its section in output and base address of
+-- section.
+objSectionMap :: Simple Lens (ObjRelocState w) (Map Word16 (Word16, w))
+objSectionMap = lens _objSectionMap (\s v -> s { _objSectionMap = v })
+
+-- | Maps section index in original binary to its section in output and base
+-- address of section.
+binarySectionMap :: Simple Lens (ObjRelocState w) (Map Word16 (Word16, w))
+binarySectionMap = lens _binarySectionMap (\s v -> s { _binarySectionMap = v })
+
+-- | Create a fresh section index.
+freshSectionIndex :: MonadState (ObjRelocState w) m => m Word16
+freshSectionIndex  = do
+  idx <- use nextSectionIndex
+  nextSectionIndex += 1
+  return idx
+
+-- | Create a new section index for a section in the object and record the original
+-- index and virtual address of the section.
+bindObjSectionIndex :: MonadState (ObjRelocState w) m
+                    => Word16
+                    -> w
+                    -> m Word16
+bindObjSectionIndex obj_idx addr = do
+  new_idx <- freshSectionIndex
+  objSectionMap %= Map.insert obj_idx (new_idx, addr)
+  return $! new_idx
+
+freshSegmentIndex :: MonadState (ObjRelocState w) m => m Word16
+freshSegmentIndex  = do
+  idx <- use nextSegmentIndex
+  nextSegmentIndex += 1
+  return idx
+
+type RelinkM w = ExceptT String (State (ObjRelocState w))
+
 -- | Return segment used to indicate the stack can be non-executable.
-gnuStackSegment :: Num w => Word16 -> RelinkM (ElfSegment w)
+gnuStackSegment :: Num w => Word16 -> RelinkM w (ElfSegment w)
 gnuStackSegment obj_idx = do
   seg_idx <- freshSegmentIndex
-  sec_idx <- remapObjSectionIndex obj_idx 0
+  sec_idx <- bindObjSectionIndex obj_idx 0
 
   let sec = ElfSection { elfSectionIndex     = sec_idx
                        , elfSectionName      = ".note.GNU-stack"
@@ -215,11 +290,11 @@ newtype RelinkWarnings = RelinkWarnings
     -- ^ Unresolved symbols in relocations.
   }
 
--- | Empty relinker warnings collection.Na
+-- | Empty relinker warnings collection.
 emptyRelinkWarnings :: RelinkWarnings
 emptyRelinkWarnings = RelinkWarnings { _unresolvedSymbols = Set.empty }
 
--- | Unresolved symbols in relocations.
+-- | Unresolved symbols in relocations from object file.
 unresolvedSymbols :: Simple Lens RelinkWarnings (Set BS.ByteString)
 unresolvedSymbols = lens _unresolvedSymbols (\s v -> s { _unresolvedSymbols = v })
 
@@ -255,14 +330,13 @@ getSymbolByIndex sym_table sym_index
 
 -- | Map from section indices in object to virtual address where it will be
 -- loaded into binary.
-type SectionMap w = Map ElfSectionIndex w
+type SectionAddrMap w = Map Word16 w
 
 ------------------------------------------------------------------------
--- BinarySymbolMap
+-- SymbolNameToAddrMap
 
 -- | Maps symbol names in binaries to their virtual address when loaded.
-type BinarySymbolMap w = Map BS.ByteString w
-
+type SymbolNameToAddrMap w = Map BS.ByteString w
 
 symbolNameAddr :: ElfSymbolTableEntry w -> Maybe (BS.ByteString, w)
 symbolNameAddr sym =
@@ -272,7 +346,7 @@ symbolNameAddr sym =
     Nothing
 
 -- | Create a binary symbol map from the symbol table of the elf file if it exists.
-createBinarySymbolMap :: Elf w -> BinarySymbolMap w
+createBinarySymbolMap :: Elf w -> SymbolNameToAddrMap w
 createBinarySymbolMap binary = do
   case elfSymtab binary of
      -- Assume that no section means no relocations
@@ -288,19 +362,19 @@ createBinarySymbolMap binary = do
 -- | Information needed to perform relocations in the new binary.
 data ObjectRelocationInfo w
    = ObjectRelocationInfo
-     { objectSectionMap :: !(SectionMap w)
+     { objectSectionMap :: !(SectionAddrMap w)
        -- ^ Maps loaded sections in the new object to their address.
-     , binarySymbolMap :: !(BinarySymbolMap w)
+     , binarySymbolMap :: !(SymbolNameToAddrMap w)
      }
 
+-- | This returns the base address of a section in the file.
 objectSectionAddr :: String
-                  -> ElfSectionIndex
-                  -> SectionMap w
+                  -> Word16
+                  -> SectionAddrMap w
                   -> w
 objectSectionAddr src idx m =
   case Map.lookup idx m of
-    Nothing ->
-      error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
+    Nothing -> error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
     Just r -> r
 
 -- | Get the address of a symbol table if it is mapped in the section map.
@@ -319,12 +393,16 @@ symbolAddr reloc_info src sym =
       | steIndex sym == SHN_UNDEF ->
         error "Reference to undefined section."
       | otherwise ->
-         Just (objectSectionAddr src (steIndex sym) (objectSectionMap reloc_info))
+        case steIndex sym of
+          ElfSectionIndex sec_idx ->
+            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info))
     STT_FUNC
       | steIndex sym == SHN_UNDEF ->
         error "Function symbol has undefined section."
       | otherwise ->
-        Just (objectSectionAddr src (steIndex sym) (objectSectionMap reloc_info))
+        case steIndex sym of
+          ElfSectionIndex sec_idx ->
+            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info) + steValue sym)
     STT_NOTYPE
       | steIndex sym /= SHN_UNDEF ->
           error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
@@ -334,58 +412,11 @@ symbolAddr reloc_info src sym =
           Just addr -> Just addr
     tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
-------------------------------------------------------------------------
--- Code for performing relocations in new object.
-
-data ObjRelocState w = ObjRelinkState { _warnings :: !RelinkWarnings
-                                      , _nextSectionIndex :: !Word16
-                                      , _nextSegmentIndex :: !Word16
-                                      , _objSectionMap    :: !(Map Word16 (Word16, w))
-                                      }
-
-emptyObjRelocState :: ObjRelocState w
-emptyObjRelocState = ObjRelinkState { _warnings         = emptyRelinkWarnings
-                                    , _nextSectionIndex = 1
-                                    , _nextSegmentIndex = 0
-                                    , _objSectionMap    = Map.empty
-                                    }
-
-warnings :: Simple Lens (ObjRelocState w) RelinkWarnings
-warnings = lens _warnings (\s v -> s { _warnings = v })
-
-nextSectionIndex :: Simple Lens (ObjRelocState w) Word16
-nextSectionIndex = lens _nextSectionIndex (\s v -> s { _nextSectionIndex = v })
-
-nextSegmentIndex :: Simple Lens (ObjRelocState w) Word16
-nextSegmentIndex = lens _nextSegmentIndex (\s v -> s { _nextSegmentIndex = v })
-
-objSectionMap :: Simple Lens (ObjRelocState w) (Map Word16 (Word16, w))
-objSectionMap = lens _objSectionMap (\s v -> s { _objSectionMap = v })
-
--- | Create a fresh section index.
-freshSectionIndex :: MonadState (ObjRelocState w) m => m Word16
-freshSectionIndex  = do
-  idx <- use nextSectionIndex
-  nextSectionIndex += 1
-  return idx
-
-remapObjSectionIndex :: MonadState (ObjRelocState w) m => Word16 -> w -> m Word16
-remapObjSectionIndex obj_idx addr = do
-  new_idx <- freshSectionIndex
-  objSectionMap %= Map.insert obj_idx (new_idx, addr)
-  return $! new_idx
-
-freshSegmentIndex :: MonadState (ObjRelocState w) m => m Word16
-freshSegmentIndex  = do
-  idx <- use nextSegmentIndex
-  nextSegmentIndex += 1
-  return idx
-
-type ObjRelocM s = StateT (ObjRelocState Word64) (ST s)
+type ObjRelocM s w = StateT (ObjRelocState w) (ST s)
 
 -- | Perform a relocation listed in the new object.
 performReloc :: ObjectRelocationInfo Word64
-                -- ^ Inforation about the object and binary needed to resolve symbol
+                -- ^ Information about the object and binary needed to resolve symbol
                 -- addresses.
              -> SymbolTable Word64
                 -- ^ A vector listing the elf symbols in the object.
@@ -398,7 +429,7 @@ performReloc :: ObjectRelocationInfo Word64
                 -- ^ Contents of elf section we are apply this to.
              -> RelaEntry X86_64_RelocationType
                 -- ^ The relocation entry.
-             -> ObjRelocM s ()
+             -> ObjRelocM s Word64 ()
 performReloc reloc_info sym_table this_vaddr mv reloc = do
   -- Offset to modify.
   let off = r_offset reloc :: Word64
@@ -447,7 +478,7 @@ performRelocs :: ObjectRelocationInfo Word64
                  -- ^ Section that we are applying relocation to.
               -> Word64 -- ^ Base address of this section.
               -> [RelaEntry X86_64_RelocationType]
-              -> ObjRelocM s (ElfSection Word64)
+              -> ObjRelocM s Word64 (ElfSection Word64)
 performRelocs reloc_info sym_table section this_vaddr relocs = do
   let dta = elfSectionData section
   let len = BS.length dta
@@ -458,7 +489,7 @@ performRelocs reloc_info sym_table section this_vaddr relocs = do
   mapM_ (performReloc reloc_info sym_table this_vaddr mv) relocs
 
 
-  idx <- remapObjSectionIndex (elfSectionIndex section) this_vaddr
+  idx <- bindObjSectionIndex (elfSectionIndex section) this_vaddr
   let SMV.MVector _ fp = mv
   let reloc_data = Data.ByteString.Internal.fromForeignPtr fp 0 len
   return $! section { elfSectionIndex = idx
@@ -542,7 +573,7 @@ rawSegmentFromBuilder :: (Bits w, Integral w)
                       -> w -- ^ Offset in segment for this data
                       -> BS.ByteString
                       -> [ElfDataRegion w]
-                      -> RelinkM (w, [ElfDataRegion w])
+                      -> RelinkM w (w, [ElfDataRegion w])
 rawSegmentFromBuilder orig_layout redirs entries off bs rest = do
   let off' = off + fromIntegral (BS.length bs)
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
@@ -555,12 +586,14 @@ mapLoadableSection :: (Bits w, Integral w)
                    -> w -- ^ Offset in segment for this section
                    -> ElfSection w
                    -> [ElfDataRegion w]
-                   -> RelinkM (w, [ElfDataRegion w])
+                   -> RelinkM w (w, [ElfDataRegion w])
 mapLoadableSection orig_layout redirs entries off sec rest = do
   let bs = elfSectionData sec
   let off' = off + fromIntegral (BS.length bs)
-  idx <- use nextSectionIndex
-  nextSectionIndex += 1
+
+  idx <- freshSectionIndex
+  binarySectionMap %= Map.insert (elfSectionIndex sec) (idx, elfSectionAddr sec)
+
   let sec' = sec { elfSectionIndex = idx
                  , elfSectionName = ".orig" ++ elfSectionName sec
                  , elfSectionData = remapBytes redirs entries off bs
@@ -578,7 +611,7 @@ mapOrigLoadableRegions :: (Bits w, Integral w)
                           -- ^ Redirections for segment.
                        -> w -- ^ Offset in segment for region
                        -> [ElfDataRegion w]
-                       -> RelinkM (w, [ElfDataRegion w])
+                       -> RelinkM w (w, [ElfDataRegion w])
 mapOrigLoadableRegions _ _ _ off [] =
   return (off, [])
 mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
@@ -621,7 +654,7 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
     ElfDataStrtab _ -> do
       throwE "Did not expect .strtab in loadable region"
     ElfDataSymtab _ -> do
-      throwE "Did not expect .strtab in loadable region"
+      throwE "Did not expect .symtab in loadable region"
     ElfDataSection s -> do
       mapLoadableSection orig_layout redirs entries off s rest
     ElfDataRaw b ->
@@ -644,15 +677,30 @@ findRelaEntries obj nm = do
     _ -> throwE $  "Multple " ++ show nm ++ " sections in object file."
 
 -- | Find the symbol table in the elf.
-findSymbolTable :: Elf w
+findSymbolTableEntries :: String
+                   -- ^ Type of file for error reporting.
+                -> Elf w
                     -- ^ Object with relocations
-                 -> Except String (ElfSymbolTable w)
-findSymbolTable obj = do
+                -> Except String (V.Vector (ElfSymbolTableEntry w))
+findSymbolTableEntries nm obj = do
+  case elfSymtab obj of
+    -- Assume that no section means no relocations
+    []  -> return V.empty
+    [tbl] -> return (elfSymbolTableEntries tbl)
+    _   -> throwE $ "Multiple .symtab sections in " ++ nm ++ " file."
+
+-- | Find the symbol table in the elf.
+findSymbolTable :: String
+                   -- ^ Type of file for error reporting.
+                -> Elf w
+                    -- ^ Object with relocations
+                -> Except String (ElfSymbolTable w)
+findSymbolTable nm obj = do
   case elfSymtab obj of
     -- Assume that no section means no relocations
     []  -> throwE $ "Could not find symbol table."
     [tbl] -> return tbl
-    _   -> throwE $ "Multiple .symtab sections in object file."
+    _   -> throwE $ "Multiple .symtab sections in " ++ nm ++ " file."
 
 checkOriginalBinaryAssumptions :: Monad m => Elf Word64 -> m ()
 checkOriginalBinaryAssumptions binary = do
@@ -705,7 +753,7 @@ regionsForOrigSegment :: (Bits w, Integral w)
                       => ElfLayout w
                       -> ResolvedRedirs w
                       -> OrigSegment w
-                      -> RelinkM [ElfDataRegion w]
+                      -> RelinkM w [ElfDataRegion w]
 regionsForOrigSegment orig_layout redirs oseg = do
   let padding     = origSegPadding oseg
   let seg         = origSegData oseg
@@ -744,7 +792,7 @@ copyOrigLoadableSegment :: forall w
                         -> ResolvedRedirs w
                            -- ^ Redirections in code
                         -> ElfSegment w
-                        -> RelinkM (ElfSegment w)
+                        -> RelinkM w (ElfSegment w)
 copyOrigLoadableSegment orig_layout redirs seg = do
   let sub_reg = toList (elfSegmentData seg)
   let idx = elfSegmentIndex seg
@@ -838,9 +886,7 @@ data NewObjectInfo w
                    , noiSymbols :: !(V.Vector (ElfSymbolTableEntry w))
                    }
 
-type RelinkM = ExceptT String (State (ObjRelocState Word64))
-
-liftS :: Except String a -> RelinkM a
+liftS :: Except String a -> RelinkM w a
 liftS m =
   case runExcept m of
     Left e -> throwE e
@@ -853,14 +899,14 @@ relocateObjectSection :: NewObjectInfo Word64
                          -- ^ Base address of segment
                       -> NewSectionBounds Word64
                          -- ^ Section if we need to.
-                      -> RelinkM [ElfDataRegion Word64]
+                      -> RelinkM Word64 [ElfDataRegion Word64]
 relocateObjectSection _        _             NSBUndefined{} =
   return []
 relocateObjectSection obj_info base_seg_addr (NSBDefined info pad off _)
   | sectionReloc info == "" = do
       let s = sectionVal info
       let sec_addr = base_seg_addr + off
-      idx <- remapObjSectionIndex (elfSectionIndex s) sec_addr
+      idx <- bindObjSectionIndex (elfSectionIndex s) sec_addr
       let s'  = s { elfSectionIndex = idx
                   , elfSectionAddr = sec_addr
                   }
@@ -898,11 +944,14 @@ mergeObject :: Elf Word64
                -- ^ Existing binary
             -> Elf Word64
                -- ^ Object file to insert
+             -> SymbolNameToAddrMap Word64
+                -- ^ Extra symbols to use for mapping old code to new.
             -> [CodeRedirection Word64]
                -- ^ Redirections from original file for new file.
             -> (Either String (Elf Word64), RelinkWarnings)
-mergeObject orig_binary new_obj redirs = over _2 _warnings $ runState (runExceptT action) s
-  where action = mergeObject' orig_binary new_obj redirs x86_64_immediate_jmp
+mergeObject orig_binary new_obj extra_syms redirs =
+    over _2 _warnings $ runState (runExceptT action) s
+  where action = mergeObject' orig_binary new_obj extra_syms redirs x86_64_immediate_jmp
         s = emptyObjRelocState
 
 data NewSectionBounds w
@@ -917,11 +966,11 @@ nsb_end (NSBDefined _ _ _ e) = e
 nsb_end (NSBUndefined o) = o
 
 
-nsb_entries :: Integral w => NewSectionBounds w -> w -> [(ElfSectionIndex, w)]
+nsb_entries :: Integral w => NewSectionBounds w -> w -> [(Word16, w)]
 nsb_entries NSBUndefined{} _ = []
 nsb_entries (NSBDefined info _ start _) base =
   let idx = elfSectionIndex (sectionVal info)
-   in [ (ElfSectionIndex idx, base + start) ]
+   in [ (idx, base + start) ]
 
 -- | Returns the file start and end of a section given an index of
 -- the section or nothing if it is not defined.
@@ -956,27 +1005,25 @@ data RelocateSymbolError
    | SymbolNameNotFound   !BS.ByteString
    | SectionIndexNotFound !Word16
 
-elfLocalEntryCount :: V.Vector (ElfSymbolTableEntry w) -> Word32
-elfLocalEntryCount v = fromIntegral $ fromMaybe (V.length v) $ V.findIndex isNotLocal v
-  where isNotLocal e = steBind e /= STB_LOCAL
-
--- | This maps a
+-- | This maps a symbol entry to the new address.
 relocateSymbolTableEntry :: Num w
                          => Map Word16 (Word16, w)
                             -- ^ Maps section index in object to new section index
                             -- and base address of section
                          -> Map BS.ByteString (Word16, w)
                             -- ^ Maps symbol names to index plus absolute address.
+                         -> Bool
+                            -- ^ Indicates if we should relocate address.
                          -> ElfSymbolTableEntry w
                          -> Either RelocateSymbolError (Maybe (ElfSymbolTableEntry w))
-relocateSymbolTableEntry section_idx_map symbol_name_map ste
-  | steType ste == STT_NOTYPE = Right (Just ste)
-  | steType ste == STT_SECTION = Right Nothing
+relocateSymbolTableEntry section_idx_map symbol_name_map reloc_addr ste
+  | steType ste == STT_NOTYPE  = Right $! Just ste
+  | steType ste == STT_SECTION = Right $! Nothing
   | otherwise = do
       (idx, val) <-
         case steIndex ste of
           SHN_ABS    -> Right (SHN_ABS, steValue ste)
-          SHN_COMMON -> error "CommonSymbolUnsupported"
+          SHN_COMMON -> Left CommonSymbolUnsupported
           SHN_UNDEF  ->
             case Map.lookup (steName ste) symbol_name_map of
               Nothing         -> Left $ SymbolNameNotFound (steName ste)
@@ -990,39 +1037,49 @@ relocateSymbolTableEntry section_idx_map symbol_name_map ste
                      , steBind  = STB_LOCAL
                      , steOther = steOther ste
                      , steIndex = idx
-                     , steValue = val
+                     , steValue = if reloc_addr then val else steValue ste
                      , steSize  = steSize ste
                      }
       Right $! Just ste'
 
+mkElfSymbolTable :: Word16 -> V.Vector (ElfSymbolTableEntry w) -> ElfSymbolTable w
+mkElfSymbolTable idx v =
+    ElfSymbolTable { elfSymbolTableIndex = idx
+                   , elfSymbolTableEntries = local_v V.++ global_v
+                   , elfSymbolTableLocalEntries = fromIntegral (V.length local_v)
+                   }
+  where (local_v, global_v) = V.partition isLocal v
+        isLocal e = steBind e == STB_LOCAL
+
 relocateSymbolTable :: Num w
                     => Map Word16 (Word16, w)
                     -> Map BS.ByteString (Word16, w)
-                    -> Word16
-                       -- ^ Index of new symbol table
-                    -> ElfSymbolTable w
-                    -> ([(ElfSymbolTableEntry w, RelocateSymbolError)], ElfSymbolTable w)
-relocateSymbolTable section_idx_map symbol_name_map idx tbl = (fin_errs, tbl')
-  where (fin_errs,fin_syms) = foldr resolveEntry ([], []) (elfSymbolTableEntries tbl)
+                    -> Bool
+                    -- ^ Indicates if we should relocate address.
+                    -> V.Vector (ElfSymbolTableEntry w)
+                    -> ( [(ElfSymbolTableEntry w, RelocateSymbolError)]
+                       , V.Vector (ElfSymbolTableEntry w)
+                       )
+relocateSymbolTable section_idx_map symbol_name_map reloc_addr entries = (fin_errs, sym_v)
+  where (fin_errs,fin_syms) = foldr resolveEntry ([], []) entries
         sym_v = V.fromList fin_syms
         resolveEntry ste (errs, syms) =
-          case relocateSymbolTableEntry section_idx_map symbol_name_map ste of
+          case relocateSymbolTableEntry section_idx_map symbol_name_map reloc_addr ste of
             Left e -> ((ste,e):errs, syms)
             Right Nothing  -> (errs, syms)
             Right (Just e) -> (errs, e:syms)
-        tbl' = ElfSymbolTable { elfSymbolTableIndex        = idx
-                              , elfSymbolTableEntries      = sym_v
-                              , elfSymbolTableLocalEntries = elfLocalEntryCount sym_v
-                              }
 
-
-mergeObject' :: Elf Word64 -- ^ Existing binary
-             -> Elf Word64 -- ^ Information about object file to insert
-             -> [CodeRedirection Word64] -- ^ Redirections
-             -> (Word64 -> BS.ByteString)
+mergeObject' :: (Num w, w ~ Word64)
+             => Elf w -- ^ Existing binary
+             -> Elf w -- ^ Object file to merge into existing binary.
+             -> SymbolNameToAddrMap w
+                -- ^ Extra symbols to use for mapping old code to new.
+             -> [CodeRedirection w]
+                -- ^ Redirections from old binary to new code.
+             -> (w -> BS.ByteString)
                 -- ^ Function for creating jump to given offset.
-             -> RelinkM (Elf Word64)
-mergeObject' orig_binary obj redirs mkJump = do
+             -> RelinkM w (Elf w)
+mergeObject' orig_binary obj extra_syms redirs mkJump = do
   let elf_class = ELFCLASS64
 
   -- Check original binary properties
@@ -1108,7 +1165,8 @@ mergeObject' orig_binary obj redirs mkJump = do
                         + new_data_file_offset .&. (elf_align - 1)
 
   -- Get symbols in object.
-  obj_symbols <- liftS $ findSymbolTable obj
+  bin_symbols <- liftS $ findSymbolTableEntries "binary" orig_binary
+  obj_symbols <- liftS $ elfSymbolTableEntries <$> findSymbolTable "object" obj
 
   let reloc_info = ObjectRelocationInfo { objectSectionMap = section_map
                                         , binarySymbolMap = sym_map
@@ -1116,12 +1174,13 @@ mergeObject' orig_binary obj redirs mkJump = do
         where section_map = Map.fromList $
                 concatMap    (`nsb_entries` new_code_seg_addr) code_sec_bounds
                 ++ concatMap (`nsb_entries` new_data_seg_addr) data_seg_bounds
-              sym_map = createBinarySymbolMap orig_binary
+              -- Add in extra binary symbols from sym_map
+              sym_map = extra_syms `Map.union` createBinarySymbolMap orig_binary
 
   let resolved_redirs =
         CR { crMkJump    = mkJump
            , crRelocInfo = reloc_info
-           , crSymbols   = mapFromList steName (V.toList (elfSymbolTableEntries obj_symbols))
+           , crSymbols   = mapFromList steName (V.toList obj_symbols)
            , crEntries   = mapFromList redirSourcePhdr redirs
            }
 
@@ -1130,16 +1189,15 @@ mergeObject' orig_binary obj redirs mkJump = do
     let remapSeg = regionsForOrigSegment orig_layout resolved_redirs
     concat <$> traverse remapSeg (toList regions)
 
-  let obj_info = NewObjectInfo { noiElf = obj
+  let obj_info = NewObjectInfo { noiElf       = obj
                                , noiRelocInfo = reloc_info
-                               , noiSymbols = elfSymbolTableEntries obj_symbols
+                               , noiSymbols   = obj_symbols
                                }
 
   -- Create Elf segment
   new_exec_regions <- do
      concat <$> traverse (relocateObjectSection obj_info new_code_seg_addr)
                          code_sec_bounds
-
 
   exec_seg <- do
     seg_index <- freshSegmentIndex
@@ -1196,11 +1254,15 @@ mergeObject' orig_binary obj redirs mkJump = do
   new_symtab_index   <- freshSectionIndex
   new_strtab_index   <- freshSectionIndex
 
-  section_idx_map <- use objSectionMap
+  bin_section_idx_map <- use binarySectionMap
+  obj_section_idx_map <- use objSectionMap
 
-  let (_symtab_errs, symtab) =
-         relocateSymbolTable section_idx_map symbol_name_map new_symtab_index obj_symbols
-        where symbol_name_map = Map.empty
+  let symtab = mkElfSymbolTable new_symtab_index (bin_entries V.++ obj_entries)
+         where symbol_name_map = Map.empty
+               (_, obj_entries) =
+                 relocateSymbolTable obj_section_idx_map symbol_name_map True  obj_symbols
+               (_, bin_entries) =
+                 relocateSymbolTable bin_section_idx_map symbol_name_map False bin_symbols
 
   return $! Elf { elfData       = ELFDATA2LSB
                 , elfClass      = elf_class

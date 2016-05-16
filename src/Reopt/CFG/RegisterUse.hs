@@ -1,9 +1,10 @@
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Reopt.CFG.RegisterUse
   ( registerUse
@@ -20,23 +21,25 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V ()
 
-import           Reopt.CFG.InterpState
+import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
 import           Reopt.CFG.FnRep (FunctionType(..)
                                   , ftMaximumFunctionType
-                                  , ftMinimumFunctionType                                    
+                                  , ftMinimumFunctionType
                                   , ftIntArgRegs , ftFloatArgRegs
                                   , ftIntRetRegs , ftFloatRetRegs)
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 
+import Debug.Trace
 
 -- -----------------------------------------------------------------------------
 
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
-type RegDeps = (Set (Some Assignment), Set (Some N.RegisterName))
+type RegDeps = (Set AssignId, Set (Some N.RegisterName))
 type AssignmentCache = Map (Some Assignment) RegDeps
 
 type FunctionArgs = Map CodeAddr FunctionType
@@ -44,13 +47,13 @@ type FunctionArgs = Map CodeAddr FunctionType
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
 data RegisterUseState = RUS {
-  -- | Holds the set of registers that we need.  This is the final
-  -- output of the algorithm, along with the _blockRegUses below.
-  _assignmentUses     :: !(Set (Some Assignment))
-  -- | Holds state about the set of registers that a block uses
-  -- (required by this block or a successor).
+    -- | Holds the set of registers that we need.  This is the final
+    -- output of the algorithm, along with the _blockRegUses below.
+  _assignmentUses     :: !(Set AssignId)
+    -- | Holds state about the set of registers that a block uses
+    -- (required by this block or a successor).
   , _blockRegUses :: !(Map BlockLabel (Set (Some N.RegisterName)))
-  -- | Holds the set of registers a blocm should define (used by a successor).
+    -- | Holds the set of registers a block should define (used by a successor).
   , _blockRegProvides :: !(Map BlockLabel (Set (Some N.RegisterName)))
 
   -- | Maps defined registers to their deps.  Not defined for all
@@ -82,7 +85,7 @@ initRegisterUseState fArgs fn =
   where
     cft = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
 
-assignmentUses :: Simple Lens RegisterUseState (Set (Some Assignment))
+assignmentUses :: Simple Lens RegisterUseState (Set AssignId)
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
 
 blockRegUses :: Simple Lens RegisterUseState (Map BlockLabel (Set (Some N.RegisterName)))
@@ -132,7 +135,7 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 --          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
 --         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
 
-        
+
 -- ----------------------------------------------------------------------------------------
 
 type RegisterUseM a = State RegisterUseState a
@@ -153,7 +156,7 @@ valueUses :: Value tp -> RegisterUseM RegDeps
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
-                            (\asgn (assigns, regs) -> (Set.insert (Some asgn) assigns, regs))
+                            (\asgn (assigns, regs) -> (Set.insert (assignId asgn) assigns, regs))
 
 demandValue :: BlockLabel -> Value tp -> RegisterUseM ()
 demandValue lbl v =
@@ -172,11 +175,14 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-registerUse :: FunctionArgs -> InterpState -> CodeAddr ->
-               (Set (Some Assignment)
+registerUse :: FunctionArgs
+            -> DiscoveryInfo
+            -> CodeAddr
+            -> ( Set AssignId
                , Map BlockLabel (Set (Some N.RegisterName))
                , Map BlockLabel (Set (Some N.RegisterName))
-               , Map BlockLabel [BlockLabel])
+               , Map BlockLabel [BlockLabel]
+               )
 registerUse fArgs ist addr =
   flip evalState (initRegisterUseState fArgs addr) $ do
     -- Run the first phase (block summarization)
@@ -197,7 +203,7 @@ registerUse fArgs ist addr =
 -- the right behavior here.
 calculateFixpoint :: Map BlockLabel (Set (Some N.RegisterName)) -> RegisterUseM ()
 calculateFixpoint new
-  | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =      
+  | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =
       -- propagate backwards any new registers in the predecessors
       do preds <- use (blockPreds . ix currLbl)
          nexts <- filter (not . Set.null . snd) <$> mapM (doOne newRegs) preds
@@ -210,7 +216,7 @@ calculateFixpoint new
       depMap   <- use (blockInitDeps . ix predLbl)
 
       debugM DRegisterUse (show predLbl ++ " -> " ++ show newRegs)
-      
+
       -- record that predLbl provides newRegs
       blockRegProvides %= Map.insertWith Set.union predLbl newRegs
 
@@ -225,7 +231,7 @@ calculateFixpoint new
       return (lbl', regs `Set.difference` seenRegs)
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: InterpState
+summarizeIter :: DiscoveryInfo
                -> Set BlockLabel
                -> Maybe BlockLabel
                -> RegisterUseM ()
@@ -236,6 +242,7 @@ summarizeIter ist seen (Just lbl)
                    lbl' <- nextBlock
                    summarizeIter ist (Set.insert lbl seen) lbl'
 
+-- | This returns the arguments associated with a particular function.
 lookupFunctionArgs :: Either CodeAddr (Value (BVType 64))
                    -> RegisterUseM FunctionType
 lookupFunctionArgs fn =
@@ -252,7 +259,7 @@ lookupFunctionArgs fn =
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: InterpState
+summarizeBlock :: DiscoveryInfo
                   -> BlockLabel
                   -> RegisterUseM ()
 summarizeBlock interp_state root_label = go root_label
@@ -270,21 +277,21 @@ summarizeBlock interp_state root_label = go root_label
             demandValue lbl cnt
             demandValue lbl src
             demandValue lbl dest
-            demandValue lbl rev            
+            demandValue lbl rev
 
           goStmt (MemSet cnt v ptr df) = do
             demandValue lbl cnt
             demandValue lbl v
             demandValue lbl ptr
             demandValue lbl df
-            
+
           goStmt _ = return ()
 
           -- Demand the values from the state at the given registers
-          demandRegisters :: forall t. Foldable t =>
-                             X86State Value
-                             -> t (Some N.RegisterName)
-                             -> RegisterUseM ()
+          demandRegisters :: forall t. Foldable t
+                          => X86State Value
+                          -> t (Some N.RegisterName)
+                          -> RegisterUseM ()
           demandRegisters s rs = traverse_ (\(Some r) -> demandValue lbl (s ^. register r)) rs
 
           -- Figure out the deps of the given registers and update the state for the current label
@@ -292,8 +299,12 @@ summarizeBlock interp_state root_label = go root_label
                              -> [Some N.RegisterName]
                              -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
           addRegisterUses s rs = do
-             vs <- mapM (\(Some r) -> (,) (Some r) <$> valueUses (s ^. register r)) rs
+             vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. register r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
+
+      when (labelAddr lbl == 0x400128) $ do
+        trace ("Computing registers uses for block " ++ show m_pterm) $ do
+          return ()
 
       case m_pterm of
         Just (ParsedBranch c x y) -> do
@@ -306,11 +317,14 @@ summarizeBlock interp_state root_label = go root_label
           traverse_ goStmt stmts'
 
           ft <- lookupFunctionArgs fn
+          when (labelAddr lbl == 0x400128) $ do
+            trace ("Computing registers uses for call " ++ show ft) $ do
+              return ()
 
           demandRegisters proc_state [Some N.rip]
           demandRegisters proc_state (Some <$> ftIntArgRegs ft)
           demandRegisters proc_state (Some <$> ftFloatArgRegs ft)
-          
+
           case m_ret_addr of
             Nothing       -> return ()
             Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
@@ -337,12 +351,12 @@ summarizeBlock interp_state root_label = go root_label
           demandRegisters proc_state (Some <$> argRegs)
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
-          
+
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) rregs
 
         Just (ParsedLookupTable proc_state _idx vec) -> do
           traverse_ goStmt (blockStmts b)
-          
+
           demandRegisters proc_state [Some N.rip]
           addRegisterUses proc_state x86StateRegisters
           traverse_ (addEdge lbl . mkRootBlockLabel) vec

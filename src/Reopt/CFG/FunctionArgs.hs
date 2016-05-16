@@ -26,10 +26,11 @@ import qualified Data.Set as Set
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.FnRep (FunctionType(..))
-import           Reopt.CFG.InterpState
+import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 
 -- -----------------------------------------------------------------------------
@@ -226,11 +227,8 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- -----------------------------------------------------------------------------
 -- Entry point
 
--- type FunctionType = ( ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])  -- args
---                     , ([N.RegisterName 'N.GP], [N.RegisterName 'N.XMM])) -- results
-
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: InterpState -> Map CodeAddr FunctionType
+functionArgs :: DiscoveryInfo -> Map CodeAddr FunctionType
 functionArgs ist =
   -- debug' DFunctionArgs (ppSet (text . flip showHex "") seenFuns) $
   debugPrintMap $ finalizeMap $ calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
@@ -261,7 +259,7 @@ functionArgs ist =
         -- debugM DFunctionArgs ("*************************"  ++ (showHex addr "" ))
         -- debugM' DFunctionArgs (ppMap (text . show) (text . show) m)
         -- debugM DFunctionArgs ("<<<<<<<<<<<<<<<<<<<<<<<<<" ++ (showHex addr "" ))
-       
+
         funDemands <- use (blockDemandMap . ix lbl0)
         return (Map.foldlWithKey' (decomposeMap addr) acc funDemands)
       where
@@ -310,9 +308,9 @@ functionArgs ist =
     -- drop the suffix which isn't a member of the arg set.  This
     -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
     maximumArgPrefix :: [N.RegisterName a] -> RegisterSet -> Int
-    maximumArgPrefix regs rs = 
+    maximumArgPrefix regs rs =
       length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
-      
+
     -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
     orderPadArgs :: (RegisterSet, RegisterSet) -> FunctionType
     orderPadArgs (args, rets) =
@@ -327,7 +325,7 @@ functionArgs ist =
         -- FIXME: ignores those functions we don't have names for.
         comb = Map.intersectionWith doOne (symbolNames ist) m
         doOne n ft = BSC.unpack n ++ ": " ++ show (pretty ft)
-    
+
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).
 calculateGlobalFixpoint :: Map CodeAddr (Map (Some N.RegisterName)
@@ -401,7 +399,7 @@ calculateLocalFixpoint new
         if ds' == mempty then Nothing else Just ds'
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: InterpState
+summarizeIter :: DiscoveryInfo
                  -> Set BlockLabel
                  -> Maybe BlockLabel
                  -> FunctionArgsM ()
@@ -430,7 +428,7 @@ summarizeCall lbl proc_state (Left faddr) isTailCall = do
           in  blockDemandMap %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList propMap)
      else  traverse_ propResult retRegs
 
-  
+
   -- If a function wants argument register r, then we note that this
   -- block needs the corresponding state values.  Note that we could
   -- do this for _all_ registers, but this should make the summaries somewhat smaller.
@@ -459,7 +457,7 @@ summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: InterpState
+summarizeBlock :: DiscoveryInfo
                   -> BlockLabel
                   -> FunctionArgsM ()
 summarizeBlock interp_state root_label = go root_label
@@ -468,25 +466,25 @@ summarizeBlock interp_state root_label = go root_label
     go lbl = do
       -- By default we have no arguments, return nothing
       blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
-      
+
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
       let goStmt (Write (MemLoc addr _tp) v) = do
             demandValue lbl addr
             demandValue lbl v
-                 
+
           goStmt (MemCopy _sz cnt src dest rev) = do
             demandValue lbl cnt
             demandValue lbl src
             demandValue lbl dest
-            demandValue lbl rev            
+            demandValue lbl rev
 
           goStmt (MemSet cnt v ptr df) = do
             demandValue lbl cnt
             demandValue lbl v
             demandValue lbl ptr
-            demandValue lbl df            
-            
+            demandValue lbl df
+
           goStmt _ = return ()
 
           -- FIXME: rsp here?
@@ -531,12 +529,12 @@ summarizeBlock interp_state root_label = go root_label
             recordCallPropagation proc_state
             addEdge lbl (mkRootBlockLabel next_addr)
 
-        Just (ParsedLookupTable proc_state idx vec) -> do 
+        Just (ParsedLookupTable proc_state idx vec) -> do
             traverse_ goStmt (blockStmts b)
 
             demandValue lbl idx
-            
-            -- record all propagations            
+
+            -- record all propagations
             recordPropagation blockTransfer lbl proc_state Some x86StateRegisters
             traverse_ (addEdge lbl . mkRootBlockLabel) vec
 

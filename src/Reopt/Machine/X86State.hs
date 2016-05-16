@@ -23,7 +23,7 @@ module Reopt.Machine.X86State
   , zipWithX86State
   , mapX86State
   , mapX86StateM
-  , mapX86StateWithM    
+  , mapX86StateWithM
   , cmpX86State
     -- * Equality
   , EqF(..)
@@ -33,12 +33,12 @@ module Reopt.Machine.X86State
     -- * Utilities
   , x86StateRegisters
   , x86CalleeSavedRegisters
-  , x86SyscallArgumentRegisters    
-  , x86SyscallNoRegister    
+  , x86SyscallArgumentRegisters
+  , x86SyscallNoRegister
   , x86ArgumentRegisters
   , x86FloatArgumentRegisters
   , x86ResultRegisters
-  , x86FloatResultRegisters    
+  , x86FloatResultRegisters
   ) where
 
 import           Control.Lens
@@ -352,3 +352,6 @@ instance PrettyRegValue f => Pretty (X86State f) where
                             ++ recv N.X87TagReg (s^.x87TagWords)
                             ++ recv N.X87FPUReg (s^.x87Regs)
                             ++ recv N.XMMReg (s^.xmmRegs))
+
+instance PrettyRegValue f => Show (X86State f) where
+  show s = show (pretty s)

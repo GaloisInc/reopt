@@ -8,44 +8,20 @@ module Reopt.CFG.StackArgs
   ) where
 
 import           Control.Lens
---import           Control.Monad (join)
---import           Control.Monad.Error
 import           Control.Monad.State.Strict
---import           Data.Foldable as Fold (toList, traverse_)
 import           Data.Int
---import           Data.Int (Int64)
---import           Data.List (elemIndex, elem)
---import           Data.Map.Strict (Map)
---import qualified Data.Map.Strict as Map
---import           Data.Maybe (catMaybes)
+import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Map (MapF)
---import qualified Data.Parameterized.Map as MapF
---import           Data.Parameterized.Some
---import           Data.Sequence (Seq)
---import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
---import           Data.Text (Text)
---import qualified Data.Text as Text
---import           Data.Type.Equality
---import           Data.Word
---import           Numeric (showHex)
---import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
---import           Data.Set (Set)
---import qualified Data.Set as Set
-
-import           Data.Maybe (catMaybes)
-
---import           Data.Parameterized.Map (MapF)
---import qualified Data.Parameterized.Map as MapF
 
 import           Reopt.Analysis.AbsState
-import           Reopt.CFG.InterpState
+import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
---import           Reopt.Machine.Types
---import           Reopt.Object.Memory
+import           Reopt.Machine.X86State
+import           Reopt.Object.Memory
 
 type StackArgs a = State (Int64, Set BlockLabel) a
 
@@ -61,7 +37,7 @@ addOffset v = _1 %= max v
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackArg :: MapF Assignment AbsValue
-                   -> InterpState -> CodeAddr -> Int64
+                   -> DiscoveryInfo -> CodeAddr -> Int64
 maximumStackArg amap ist addr =
   fst $ execState (recoverIter amap aregs ist Set.empty (Just $ GeneratedBlock addr 0))
                   (0, Set.empty)
@@ -71,7 +47,7 @@ maximumStackArg amap ist addr =
 -- | Explore states until we have reached end of frontier.
 recoverIter :: MapF Assignment AbsValue
                -> X86State AbsValue
-               -> InterpState
+               -> DiscoveryInfo
                -> Set BlockLabel
                -> Maybe BlockLabel
                -> StackArgs ()
@@ -84,13 +60,13 @@ recoverIter amap aregs ist seen (Just lbl)
 
 recoverBlock :: MapF Assignment AbsValue
                 -> X86State AbsValue
-                -> InterpState
+                -> DiscoveryInfo
                 -> BlockLabel
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
   Just b <- return $ lookupBlock (interp_state ^. blocks) lbl
 
-  let xfer = transferValue' (memory interp_state) amap aregs
+  let xfer = transferValue' (isCodeAddrOrNull (memory interp_state)) amap aregs
       go = map goStmt . blockStmts
       goStmt (AssignStmt (Assignment _ (Read (MemLoc addr _))))
         | StackOffset _ s <- xfer addr = Just $ Set.findMax s

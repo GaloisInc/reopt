@@ -21,7 +21,8 @@ module Reopt.Analysis.AbsState
   , emptyAbsValue
   , joinAbsValue
   , ppAbsValue
-  , abstractSingleton
+  , absTrue
+  , absFalse
   , subValue
   , concreteStackOffset
   , concretize
@@ -68,16 +69,16 @@ import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.Object.Memory
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Utils.Hex
 
 import           Reopt.Utils.Debug
 
 ------------------------------------------------------------------------
--- Abstract states
+-- AbsDomain
 
 class Eq d => AbsDomain d where
   -- | The top element
@@ -105,36 +106,31 @@ class Eq d => AbsDomain d where
 
   {-# MINIMAL (top, ((leq,lub) | joinD)) #-}
 
-type ValueSet = Set Integer
-
 ------------------------------------------------------------------------
 -- AbsValue
 
-data AbsValue (tp :: Type) where
-  -- | An absolute value.
-  FinSet :: !ValueSet -> AbsValue (BVType n)
-  -- A possibly empty set of values that either point to a code segment or 0.
-  CodePointers :: !(Set Word64) -> AbsValue (BVType 64)
-
-  -- Offset of stack from the beginning of the block at the given address.
-  -- First argument is address of block.
-  StackOffset :: Word64 -> !(Set Int64) -> AbsValue (BVType 64)
-  -- An offset to the stack at some offset.
-  SomeStackOffset :: Word64 -> AbsValue (BVType 64)
-  -- | A strided interval
-  StridedInterval :: !(SI.StridedInterval (BVType n)) -> AbsValue (BVType n)
-
-  -- | A sub-value about which we know only some bits.
-  -- (e.g., we know that the lower 8 bits are < 10)
-  SubValue :: ((n + 1) <= n')
-           => !(NatRepr n)
-           -> !(AbsValue (BVType n))
-           ->  AbsValue (BVType n')
-  -- | Any value
-  TopV :: AbsValue tp
-
-  -- | Denotes a return address in the body of a function.
-  ReturnAddr :: AbsValue (BVType 64)
+-- | The abstract information that is associated with values of a given type.
+data AbsValue (tp :: Type)
+  = forall n . (tp ~ BVType n) => FinSet !(Set Integer)
+    -- ^ Denotes that this value can take any one of the  absolute value.
+  | (tp ~ BVType 64) => CodePointers !(Set Word64)
+     -- ^ A possibly empty set of values that either point to a code segment or 0.
+  | (tp ~ BVType 64) => StackOffset !Word64 !(Set Int64)
+    -- ^ Offset of stack from the beginning of the block at the given address.
+    --  First argument is address of block.
+  | (tp ~ BVType 64) => SomeStackOffset !Word64
+    -- ^ An offset to the stack at some offset.
+  | forall n . (tp ~ BVType n) => StridedInterval !(SI.StridedInterval (BVType n))
+    -- ^ A strided interval
+  | forall n n'
+    . ((n + 1) <= n', tp ~ BVType n')
+    => SubValue !(NatRepr n) !(AbsValue (BVType n))
+    -- ^ A sub-value about which we know only some bits.
+    -- (e.g., we know that the lower 8 bits are < 10)
+  | TopV
+    -- ^ Any value
+  | (tp ~ BVType 64) => ReturnAddr
+    -- ^ Denotes a return address in the body of a function.
 
 -- | Denotes that we do not know of any value that could be in set.
 emptyAbsValue :: AbsValue (BVType 64)
@@ -142,7 +138,7 @@ emptyAbsValue = CodePointers Set.empty
 
 -- | Returns a finite set of values with some width.
 data SomeFinSet tp where
-  IsFin :: ValueSet -> SomeFinSet (BVType n)
+  IsFin :: !(Set Integer) -> SomeFinSet (BVType n)
   NotFin :: SomeFinSet tp
 
 asFinSet :: String -> AbsValue tp -> SomeFinSet tp
@@ -164,17 +160,7 @@ codePointerSet :: AbsValue tp -> Set Word64
 codePointerSet (CodePointers s) = s
 codePointerSet _ = Set.empty
 
--- prop_SubValue :: AbsValue tp -> Bool
--- prop_SubValue (SubValue n v v') =
---   case (concretize v, concretize v') of
---    (_, Nothing)         -> True
---    -- FIXME: maybe? this just says all lower bits are set.  We could
---    -- expand out the Top, but that might be expensive for large n.
---    (Nothing, _)         -> False
---    (Just vs, Just vs')  -> vs `Set.isSubsetOf` (Set.map (toUnsigned n) vs')
--- prop_SubValue _ = True
-
--- | The maximum number of values we hold in a ValueSet, after which
+-- | The maximum number of values we hold in a value set, after which
 -- we move to intervals
 maxSetSize :: Int
 maxSetSize = 5
@@ -543,13 +529,14 @@ setL :: Ord a
 setL def c l | length l > maxSetSize = def l
              | otherwise = c (Set.fromList l)
 
-bvsub :: Memory Word64
+bvsub :: (Word64 -> Bool)
+         -- ^ Predicate that returns true if value should be considered a code pointer.
       -> NatRepr u
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
       -> AbsValue (BVType u)
-bvsub mem w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
-    | all (isCodeAddrOrNull mem) vals = CodePointers (Set.fromList vals)
+bvsub is_code w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
+    | all is_code vals = CodePointers (Set.fromList vals)
     | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
     | otherwise = error "Losing code pointers due to bvsub."
       -- TODO: Fix this.
@@ -586,8 +573,6 @@ bvsub _ _ _ (StackOffset _ _) = TopV
 bvsub _ _ (SomeStackOffset ax) _ = SomeStackOffset ax
 bvsub _ _ _ (SomeStackOffset _) = TopV
 bvsub _ _ _ _ = TopV -- Keep the pattern checker happy
--- bvsub _ TopV _ = TopV
--- bvsub _ _ TopV = TopV
 
 bvmul :: NatRepr u
       -> AbsValue (BVType u)
@@ -618,7 +603,7 @@ bitop :: (Integer -> Integer -> Integer)
       -> AbsValue (BVType u)
 bitop doOp _w (asFinSet "bvand" -> IsFin s) (asConcreteSingleton -> Just v)
   = FinSet (Set.map (flip doOp v) s)
-bitop doOp _w (asConcreteSingleton -> Just v) (asFinSet "bvand" -> IsFin s) 
+bitop doOp _w (asConcreteSingleton -> Just v) (asFinSet "bvand" -> IsFin s)
   = FinSet (Set.map (doOp v) s)
 bitop _ _ _ _ = TopV
 
@@ -631,16 +616,25 @@ instance PrettyRegValue AbsValue where
   ppValueEq _ TopV = Nothing
   ppValueEq r v = Just (text (show r) <+> text "=" <+> pretty v)
 
--- | Indicates if address is an address in code segment or null.
-isCodeAddrOrNull :: Memory Word64 -> Word64 -> Bool
-isCodeAddrOrNull _ 0 = True
-isCodeAddrOrNull mem a = isCodeAddr mem a
 
-abstractSingleton :: Memory Word64 -> NatRepr n -> Integer -> AbsValue (BVType n)
-abstractSingleton mem w i
+absTrue :: AbsValue BoolType
+absTrue = FinSet (Set.singleton 1)
+
+absFalse :: AbsValue BoolType
+absFalse = FinSet (Set.singleton 0)
+
+-- | This returns the smallest abstract value that contains the
+-- given unsigned integer.
+abstractSingleton :: (Word64 -> Bool)
+                     -- ^ Predicate that recognizes if the given value is a code
+                     -- pointer.
+                  -> NatRepr n
+                  -> Integer
+                  -> AbsValue (BVType n)
+abstractSingleton is_code w i
   | Just Refl <- testEquality w n64
   , 0 <= i && i <= maxUnsigned w
-  , isCodeAddrOrNull mem (fromIntegral i) =
+  , is_code (fromIntegral i) =
     CodePointers (Set.singleton (fromIntegral i))
   | 0 <= i && i <= maxUnsigned w = FinSet (Set.singleton i)
   | otherwise = error $ "abstractSingleton given bad value: " ++ show i ++ " " ++ show w
@@ -773,21 +767,6 @@ absStackJoinD y x = do
   z <- mapM entryLeq (Map.toList y)
   return $! Map.fromList (catMaybes z)
 
-
--- absStackLub :: AbsBlockStack -> AbsBlockStack -> AbsBlockStack
--- absStackLub = Map.mergeWithKey merge (\_ -> Map.empty) (\_ -> Map.empty)
---   where merge :: Int64 -> StackEntry -> StackEntry -> Maybe StackEntry
---         merge _ (StackEntry x_tp x_v) (StackEntry y_tp y_v) =
---           case testEquality x_tp y_tp of
---             Just Refl ->
---               case joinAbsValue x_v y_v of
---                 Nothing | x_v == TopV -> Nothing
-
---                         | otherwise -> Just (StackEntry x_tp x_v)
---                 Just TopV -> Nothing
---                 Just v -> Just (StackEntry x_tp v)
---             Nothing -> Nothing
-
 ppAbsStack :: AbsBlockStack -> Doc
 ppAbsStack m = vcat (pp <$> Map.toDescList m)
   where pp (o,StackEntry _ v) = text (show (Hex o)) <+> text ":=" <+> pretty v
@@ -867,8 +846,8 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
 
 -- | this stores the abstract state of the system at a given point in time.
 data AbsProcessorState
-   = AbsProcessorState { absMem :: !(Memory Word64)
-                         -- ^ The state of memory.
+   = AbsProcessorState { absIsCode :: !(Word64 -> Bool)
+                         -- ^ Recognizer for code addresses.
                        , _absInitialRegs :: !(X86State AbsValue)
                        , _absAssignments :: !(MapF Assignment AbsValue)
                        , _curAbsStack :: !AbsBlockStack
@@ -886,9 +865,12 @@ instance Pretty AbsProcessorState where
 
 
 
-initAbsProcessorState :: Memory Word64 -> AbsBlockState -> AbsProcessorState
-initAbsProcessorState mem s =
-  AbsProcessorState { absMem = mem
+initAbsProcessorState :: (Word64 -> Bool)
+                         -- ^ Predicate that recognizes when a value is a code pointer.
+                      -> AbsBlockState
+                      -> AbsProcessorState
+initAbsProcessorState is_code s =
+  AbsProcessorState { absIsCode = is_code
                     , _absInitialRegs = s^.absX86State
                     , _absAssignments = MapF.empty
                     , _curAbsStack = s^.startAbsStack
@@ -1000,32 +982,36 @@ finalAbsBlockState c s =
    in mkAbsBlockState transferReg (c^.curAbsStack)
 
 -- | Update the block state to point to a specific IP address.
-setAbsIP :: Memory Word64 -> CodeAddr -> AbsBlockState -> AbsBlockState
-setAbsIP mem a b
-  | not (isCodeAddrOrNull mem a) =
-    error "setAbsIP given address that is not a code pointer."
+setAbsIP :: (Word64 -> Bool)
+            -- ^ Predicate to check that given IP is a code pointer.
+         -> CodeAddr
+         -> AbsBlockState
+         -> Maybe AbsBlockState
+setAbsIP is_code a b
+  | is_code a == False =
+    Nothing
     -- Check to avoid reassigning next IP if it is not needed.
   | CodePointers s <- b^.absX86State^.curIP
   , Set.size s == 1
   , Set.member a s =
-    b
+    Just b
   | otherwise =
-    b & absX86State . curIP .~ CodePointers (Set.singleton a)
+    Just $ b & absX86State . curIP .~ CodePointers (Set.singleton a)
 
 ------------------------------------------------------------------------
 -- Transfer functions
 
 
-
-transferValue' :: Memory Word64
+transferValue' :: (Word64 -> Bool)
+                  -- ^ Predicate that recognizes if address is code addreess.
                -> MapF Assignment AbsValue
                -> X86State AbsValue
                -> Value tp
                -> AbsValue tp
-transferValue' mem amap aregs v =
+transferValue' is_code amap aregs v =
   case v of
    BVValue w i
-     | 0 <= i && i <= maxUnsigned w -> abstractSingleton mem w i
+     | 0 <= i && i <= maxUnsigned w -> abstractSingleton is_code w i
      | otherwise -> error $ "transferValue given illegal value " ++ show (pretty v)
    -- Invariant: v is in m
    AssignedValue a ->
@@ -1041,7 +1027,7 @@ transferValue' mem amap aregs v =
 transferValue :: AbsProcessorState
               -> Value tp
               -> AbsValue tp
-transferValue c v = transferValue' (absMem c) (c^.absAssignments) (c ^. absInitialRegs) v
+transferValue c v = transferValue' (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
 
 transferApp :: AbsProcessorState
             -> App Value tp
@@ -1051,10 +1037,10 @@ transferApp r a =
     Trunc v w -> trunc (transferValue r v) w
     UExt  v w -> uext  (transferValue r v) w
     BVAdd w x y -> bvadd w (transferValue r x) (transferValue r y)
-    BVSub w x y -> bvsub (absMem r) w (transferValue r x) (transferValue r y)
+    BVSub w x y -> bvsub (absIsCode r) w (transferValue r x) (transferValue r y)
     BVMul w x y -> bvmul w (transferValue r x) (transferValue r y)
     BVAnd w x y -> bitop (.&.) w (transferValue r x) (transferValue r y)
-    BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)    
+    BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)
     _ -> TopV
 
 transferRHS :: forall tp

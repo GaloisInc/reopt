@@ -22,6 +22,7 @@ module Reopt.Object.Memory
   , addrPermissions
   , addrHasPermissions
   , isCodeAddr
+  , isCodeAddrOrNull
   , isReadonlyAddr
   , findSegment
   , MemSegment(..)
@@ -222,6 +223,11 @@ addrHasPermissions w req m = addrPermissions w m `hasPermissions` req
 -- | Indicates if address is a code pointer.
 isCodeAddr :: Memory Word64 -> Word64 -> Bool
 isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
+
+-- | Indicates if address is an address in code segment or null.
+isCodeAddrOrNull :: Memory Word64 -> Word64 -> Bool
+isCodeAddrOrNull _ 0 = True
+isCodeAddrOrNull mem a = isCodeAddr mem a
 
 -- | Return true if this is a read only address.
 isReadonlyAddr :: Memory Word64 -> Word64 -> Bool

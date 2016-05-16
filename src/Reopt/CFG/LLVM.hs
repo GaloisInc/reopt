@@ -25,6 +25,7 @@ module Reopt.CFG.LLVM
   , declareFunction
   , defineFunction
   , getReferencedFunctions
+  , AddrSymMap
   , moduleForFunctions
   ) where
 
@@ -32,6 +33,7 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
 import           Control.Monad.State
+import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -48,6 +50,7 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 
 --------------------------------------------------------------------------------
 -- reopt runtime
@@ -153,12 +156,16 @@ declareIntrinsics =
 -- conversion to LLVM
 --------------------------------------------------------------------------------
 
+-- | Maps code addresses in the LLVM state to the associated symbol name if any.
+type AddrSymMap = Map CodeAddr BSC.ByteString
+
 data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
                            , llvmFloatArgs :: [L.Typed L.Value]
+                           , llvmAddrSymMap :: !AddrSymMap
                            }
 
 newtype ToLLVM a  = ToLLVM { runToLLVM :: StateT LLVMState BB a }
-                    deriving (Applicative, Functor, Monad, MonadState LLVMState)
+  deriving (Applicative, Functor, Monad, MonadState LLVMState)
 
 liftBB :: BB a -> ToLLVM a
 liftBB = ToLLVM . lift
@@ -166,8 +173,14 @@ liftBB = ToLLVM . lift
 liftBBF :: (BB a -> BB b) -> ToLLVM a -> ToLLVM b
 liftBBF f v = ToLLVM $ mapStateT (\bb -> do { (a, s) <- bb; b <- f (return a); return (b, s) }) (runToLLVM v)
 
-functionName :: CodeAddr -> L.Symbol
-functionName addr = L.Symbol $ "F" ++ showHex addr ""
+functionName :: AddrSymMap
+                -- ^ Maps addresses of symbols to the associated symbol name.
+             -> CodeAddr
+             -> L.Symbol
+functionName m addr =
+  case Map.lookup addr m of
+    Nothing -> L.Symbol $ "reopt_gen_" ++ showHex addr ""
+    Just nm -> L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
 
 blockName :: BlockLabel -> L.Ident
 blockName = L.Ident . show
@@ -218,10 +231,13 @@ makeEntryBlock (first:_) fargs = do
   modify (\s -> s { llvmFloatArgs = fargs' })
   liftBB $ L.jump (blockName $ fbLabel first)
 
-declareFunction :: CodeAddr -> FunctionType -> LLVM ()
-declareFunction addr ft = do
-  void $ L.declare (functionTypeReturnType ft) (functionName addr) (functionTypeArgTypes ft) False
-
+declareFunction :: AddrSymMap
+                -> CodeAddr
+                -> FunctionType
+                -> LLVM ()
+declareFunction addrSymMap addr ft = do
+  let nm = functionName addrSymMap addr
+  void $ L.declare (functionTypeReturnType ft) nm (functionTypeArgTypes ft) False
 
 getReferencedFunctions :: Function -> Map CodeAddr FunctionType
 getReferencedFunctions f = foldFnValue findReferencedFunctions f
@@ -230,17 +246,17 @@ getReferencedFunctions f = foldFnValue findReferencedFunctions f
         findReferencedFunctions _ = mempty
 
 -- | Get module for functions
-moduleForFunctions :: [Function] -> L.Module
-moduleForFunctions fns = snd $ L.runLLVM $ do
+moduleForFunctions :: AddrSymMap -> [Function] -> L.Module
+moduleForFunctions addrSymMap fns = snd $ L.runLLVM $ do
   declareIntrinsics
   -- Get all function references
   let all_refs = mconcat (getReferencedFunctions <$> fns)
   -- Delete references for functions we will declare
   let refs = foldr' (Map.delete . fnAddr) all_refs fns
   -- Declare functions thaat aren't defined
-  itraverse_ declareFunction refs
+  itraverse_ (declareFunction addrSymMap) refs
   -- Define all functions
-  mapM_ defineFunction fns
+  mapM_ (defineFunction addrSymMap) fns
 
 -- | This writes a function to LLVM, and returns the value corresponding to the function.
 --
@@ -249,18 +265,19 @@ moduleForFunctions fns = snd $ L.runLLVM $ do
 --
 -- Users should declare intrinsics via 'declareIntrinsics' before using this function.
 -- They should also add any referenced functions.
-defineFunction :: Function -> LLVM (L.Typed L.Value)
-defineFunction f = do
+defineFunction :: AddrSymMap -> Function -> LLVM (L.Typed L.Value)
+defineFunction addrSymMap f = do
   L.define' L.emptyFunAttrs retType symbol argTypes False go
   where
     argTypes      = functionTypeArgTypes (fnType f)
     retType       = functionTypeReturnType (fnType f)
 
-    symbol        = functionName (fnAddr f)
+    symbol        = functionName addrSymMap (fnAddr f)
     go args =
       let nint = fnNIntArgs $ fnType f
           st   = LLVMState { llvmIntArgs   = take nint args
                            , llvmFloatArgs = error "uninitialised float args"
+                           , llvmAddrSymMap = addrSymMap
                            }
           makeBlocks = do makeEntryBlock (fnBlocks f) (drop nint args)
                           mapM_ blockToLLVM (fnBlocks f)
@@ -322,13 +339,15 @@ termStmtToLLVM tm =
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
 
-       dest_f <- case dest of
-                   -- FIXME: use ft here instead?
-                   FnFunctionEntryValue _ft addr ->
-                     return $ L.Typed fun_ty (L.ValSymbol (functionName addr))
+       dest_f <-
+         case dest of
+           -- FIXME: use ft here instead?
+           FnFunctionEntryValue _ft addr -> do
+             addrSymMap <- gets llvmAddrSymMap
+             return $ L.Typed fun_ty (L.ValSymbol (functionName addrSymMap addr))
 
-                   _ -> do dest' <- valueToLLVM dest
-                           liftBB $ L.inttoptr dest' fun_ty
+           _ -> do dest' <- valueToLLVM dest
+                   liftBB $ L.inttoptr dest' fun_ty
 
        gargs' <- mapM valueToLLVM gargs
        fargs' <- mapM (\x -> valueToLLVM x >>= liftBB . castToFunctionFloatType) fargs
@@ -685,10 +704,11 @@ valueToLLVM val =
     -- The entry pointer to a function.  We do the cast as a const
     -- expr as function addresses appear as constants in e.g. phi
     -- nodes
-    FnFunctionEntryValue ft addr ->
+    FnFunctionEntryValue ft addr -> do
+      addrSymMap <- gets llvmAddrSymMap
       let fptr :: L.Typed L.Value
-          fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol (functionName addr))
-      in mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
+          fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol (functionName addrSymMap addr))
+      mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
 
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->

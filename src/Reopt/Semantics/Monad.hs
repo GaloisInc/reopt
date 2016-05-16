@@ -105,8 +105,8 @@ module Reopt.Semantics.Monad
   , Primitive(..)
     -- * Re-exports
   , type (TypeLits.<=)
-  , type Flexdis86.OpTable.SizeConstraint(..)
-  , module Flexdis86.InstructionSet
+  , type Flexdis86.Sizes.SizeConstraint(..)
+  , module Flexdis86.Segment
   ) where
 
 import           Data.Bits (shiftL)
@@ -121,8 +121,8 @@ import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import qualified Reopt.Utils.GHCBug as GHCBug
 
-import           Flexdis86.OpTable (SizeConstraint(..))
-import           Flexdis86.InstructionSet
+import           Flexdis86.Sizes (SizeConstraint(..))
+import           Flexdis86.Segment
   ( Segment
   , pattern ES
   , pattern CS
@@ -1202,17 +1202,6 @@ infixl 7 .*
 infixl 6 .+
 infixl 6 .-
 infix  4 .=
-{-
--- Basically so I can get fromInteger, but the others might be handy too ...
-instance (IsValue v, KnownNat n, 1 <= n) => Num (v (BVType n)) where
-  (+) = bvAdd
-  (*) = bvMul
-  (-) = bvSub
-  negate = bvNeg
-  abs    = error "abs is unimplemented for Values"
-  signum = error "signum is unimplemented for Values"
-  fromInteger = bvLit knownNat
--}
 
 ------------------------------------------------------------------------
 -- Monadic definition

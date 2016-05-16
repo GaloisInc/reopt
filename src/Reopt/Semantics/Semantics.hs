@@ -1,23 +1,19 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Semantics
--- Description      : Defines the semantics of x86 instructions.
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
---
--- This is the top-level module containing the definitions for x86
--- instructions.
-------------------------------------------------------------------------
+{-
+Module           : Reopt.Semantics
+Copyright        : (c) Galois, Inc 2015
+Maintainer       : Joe Hendrix <jhendrix@galois.com>
+
+This is the top-level module containing the definitions for x86
+instructions.
+-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module Reopt.Semantics.Semantics where
 
 import           Data.Type.Equality
@@ -220,8 +216,9 @@ exec_movzx :: (Semantics m, 1 <= n', n' <= n)
 exec_movzx l v = l .= uext (loc_width l) v
 
 exec_pop :: Unop
-exec_pop l = do v <- pop (loc_width l)
-                l .= v
+exec_pop l = do
+  v <- pop (loc_width l)
+  l .= v
 
 exec_push :: UnopV
 exec_push v = push v
@@ -267,23 +264,25 @@ exec_add dst y = do
 
 -- FIXME: we don't need a location, just a value.
 exec_cmp :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
-exec_cmp dst y = do dst_val <- get dst
-                    -- Set overflow and arithmetic flags
-                    of_loc .= ssub_overflows  dst_val y
-                    af_loc .= usub4_overflows dst_val y
-                    cf_loc .= usub_overflows  dst_val y
-                    -- Set result value.
-                    set_result_flags (dst_val `bvSub` y)
+exec_cmp dst y = do
+  dst_val <- get dst
+  -- Set overflow and arithmetic flags
+  of_loc .= ssub_overflows  dst_val y
+  af_loc .= usub4_overflows dst_val y
+  cf_loc .= usub_overflows  dst_val y
+  -- Set result value.
+  set_result_flags (dst_val `bvSub` y)
 
 exec_dec :: IsLocationBV m n => MLocation m (BVType n) -> m ()
-exec_dec dst = do dst_val <- get dst
-                  let v1 = bvLit (bv_width dst_val) (1 :: Int)
-                  -- Set overflow and arithmetic flags
-                  of_loc .= ssub_overflows  dst_val v1
-                  af_loc .= usub4_overflows dst_val v1
-                  -- no carry flag
-                  -- Set result value.
-                  set_result_value dst (dst_val `bvSub` v1)
+exec_dec dst = do
+  dst_val <- get dst
+  let v1 = bvLit (bv_width dst_val) (1 :: Int)
+  -- Set overflow and arithmetic flags
+  of_loc .= ssub_overflows  dst_val v1
+  af_loc .= usub4_overflows dst_val v1
+  -- no carry flag
+  -- Set result value.
+  set_result_value dst (dst_val `bvSub` v1)
 
   -- Steps:
   --
@@ -706,7 +705,7 @@ exec_rol l count = do
       r = bvRol v effective
 
   l .= r
- 
+
   -- When the count is zero only the assignment happens (cf is not changed)
   when_ (complement $ is_zero low_count) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (0 :: Int))
@@ -738,11 +737,11 @@ exec_ror l count = do
       r = bvRor v effective
 
   l .= r
-  
+
   when_ (complement $ is_zero low_count) $ do
     let new_cf = bvBit r (bvLit (bv_width r) (widthVal (bv_width r) - 1))
     cf_loc .= new_cf
-      
+
     ifte_ (low_count .=. bvLit (bv_width low_count) (1 :: Int))
       (of_loc .= (msb r `bvXor` bvBit r (bvLit (bv_width r) (widthVal (bv_width v) - 2))))
       (set_undefined of_loc)
@@ -894,13 +893,13 @@ exec_movs False dest_loc _src_loc = do
   dest <- get rdi
   v' <- get $ mkBVAddr sz src
   mkBVAddr sz dest .= v'
-  
+
   rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
   rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
   where
     sz = loc_width dest_loc
     bytesPerOp = bvLit n64 (natValue sz `div` 8)
-    
+
 exec_movs True dest_loc _src_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
@@ -945,7 +944,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
             rdi .= mux df (v_rdi  `bvSub` bytesPerOp') (v_rdi `bvAdd` bytesPerOp')
   where
     -- FIXME: aso modifies this
-    count_reg = regLocation n64 N.rcx    
+    count_reg = regLocation n64 N.rcx
     sz  = loc_width loc_rsi
     bytesPerOp' = bvLit n64 bytesPerOp
     bytesPerOp = natValue sz `div` 8
@@ -979,7 +978,7 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 -- need the args for the size.
 exec_scas :: (IsLocationBV m n, n <= 64)
           => Bool -- Flag indicating if RepZPrefix appeared before instruction
-          -> Bool -- Flag indicating if RepNZPrefix appeared before instruction             
+          -> Bool -- Flag indicating if RepNZPrefix appeared before instruction
           -> MLocation m (BVType n)
           -> MLocation m (BVType n)
           -> m ()
@@ -987,7 +986,7 @@ exec_scas True True _val_loc _cmp_loc = error "Can't have both Z and NZ prefix"
 
 -- single operation case
 exec_scas False False val_loc _cmp_loc = do
-  df <- get df_loc  
+  df <- get df_loc
   v_rdi <- get rdi
   v_rax <- get val_loc
   exec_cmp (mkBVAddr sz v_rdi) v_rax  -- FIXME: right way around?
@@ -995,7 +994,7 @@ exec_scas False False val_loc _cmp_loc = do
   where
     sz = loc_width val_loc
     bytesPerOp = bvLit n64 $ natValue sz `div` 8
-  
+
 -- repz or repnz prefix set
 exec_scas _repz_pfx repnz_pfx val_loc _cmp_loc = do
   -- The direction flag indicates post decrement or post increment.
@@ -1013,21 +1012,21 @@ exec_scas _repz_pfx repnz_pfx val_loc _cmp_loc = do
     count_reg = regLocation n64 N.rcx
     bytesPerOp' = bvLit n64 bytesPerOp
     bytesPerOp  = natValue sz `div` 8
-    
+
     do_scas df v_rdi val count = do
       nseen <- find_element bytesPerOp repnz_pfx count v_rdi val df
-                                
+
       let equal = (nseen .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nseen `bvAdd` bvKLit 1))
 
       -- we need to set the flags as if the last comparison was done, hence this.
       let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` bytesPerOp'
           lastRdi  = mux df (v_rdi  `bvSub` lastWordBytes) (v_rdi  `bvAdd` lastWordBytes)
-          
+
       exec_cmp (mkBVAddr sz lastRdi) val
-      
+
       let nbytesSeen = nwordsSeen `bvMul` bytesPerOp'
-      
+
       rdi .= mux df (v_rdi  `bvSub` nbytesSeen) (v_rdi `bvAdd` nbytesSeen)
       rcx .= (count .- nwordsSeen)
 
@@ -1054,7 +1053,7 @@ exec_stos False _dest_loc val_loc = do
   rdi .= dest .+ (mux df neg_szv szv)
   where
     sz = loc_width val_loc
-    
+
 exec_stos True _dest_loc val_loc = do
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc

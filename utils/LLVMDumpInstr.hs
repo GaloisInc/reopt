@@ -14,7 +14,7 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Flexdis86
-import           Reopt.CFG.CFGDiscovery 
+import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.Representation
 import           Reopt.CFG.Recovery
@@ -33,7 +33,7 @@ main = do
   when (args == []) usageExit
 
   let nums = map readHex args
-              
+
   when (any (\v -> length v /= 1 || any ((/=) 0 . length . snd) v) nums) usageExit
 
   let retBytes = [0xc3] -- terminate block
@@ -42,12 +42,11 @@ main = do
       seg = MemSegment base pf_x bs
       mem = execState (insertMemSegment seg) emptyMemory
       -- cfg = cfgFromAddress mem base
-      b   = evalStateT (disassembleBlock mem (const True) (rootLoc base))
-                       emptyGlobalGenState
+      b   = disassembleBlock 0 mem (const True) (rootLoc base)
 
   case b of
    Left err       -> print err
-   Right (bs, end)  -> error "UNIMPLEMENTED"
+   Right (bs, end, _)  -> error "UNIMPLEMENTED"
      -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
      --     bs' = Map.elems (cfg^.cfgBlocks)
      --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)

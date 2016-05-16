@@ -1,10 +1,25 @@
+{-|
+Module     : Reopt.ExternalTools
+Copyright  : (c) Galois, Inc 2016
+Maintainer : jhendrix@galois.com
+
+This defines operations that require external tools installed on the system.
+-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -Werror #-}
-module Assembler
-  ( Failure(..)
-  , llvm_to_object
-  , llvm_link
+module Reopt.ExternalTools
+  ( -- * Running llc
+    LLCOptions(..)
+  , defaultLLCOptions
+  , run_llc
+    -- * Running gas
+  , run_gas
+    -- * Running llvm-link
+  , run_llvm_link
+    -- * Failure information
+  , Failure(..)
+  , Tool(..)
   , Control.Monad.Trans.Except.ExceptT(..)
   ) where
 
@@ -24,6 +39,7 @@ instance Show Tool where
   show LLC = "llc"
   show LLVM_LINK = "llvm-link"
 
+-- |  Type of failure from running tools.
 data Failure
    = ProgramError !Tool !String
      -- ^ gas returned some error.
@@ -34,7 +50,6 @@ instance Show Failure where
   show (ProgramError _ msg)     = msg
   show (ProgramNotFound _ path) = "Could not find " ++ path ++ "."
   show (PermissionError _ path) = "Do not have permissions to execute " ++ path ++ "."
-
 
 -- | Try to create a process, and return handles for 'stdin', 'stdout', 'stderr', and
 -- the process itself if it succeeds.
@@ -107,19 +122,40 @@ readContents out_handle = do
   hSetBinaryMode out_handle True
   BS.hGetContents out_handle
 
--- | Create assembly from LLVM bitcode.
+-- | Options to pass to 'llc'
+data LLCOptions
+  = LLCOptions { llc_triple :: !(Maybe String)
+               , llc_opt_level :: !Int
+               }
+
+-- | Default LLC options
+defaultLLCOptions :: LLCOptions
+defaultLLCOptions = LLCOptions { llc_triple = Nothing
+                               , llc_opt_level = 0
+                               }
+
+-- | Use 'llc' to create assembly from LLVM bitcode.
 --
 -- The contents of the input file may be either an assembly (.ll) file or a
 -- bitcode (.bc) file.  This returns assembled output as a bytestring, or the reason
 -- the conversion failed.
-llvmAssemble :: FilePath -- ^ Path to llc
-             -> String
-                -- ^ Tripple for LLC
-             -> BS.ByteString
-                -- ^ Contents of input file.
-             -> ExceptT Failure IO BS.ByteString
-llvmAssemble llc_command triple input_file = do
-  let llc_args = [ "-o", "-", "-mtriple=" ++ triple ]
+run_llc :: FilePath      -- ^ Path to llc
+        -> LLCOptions    -- ^ Triple for LLC
+        -> BS.ByteString -- ^ Contents of input file.
+        -> ExceptT Failure IO BS.ByteString
+run_llc llc_command opts input_file = do
+  let llc_triple_args =
+        case llc_triple opts of
+          Just arch -> [ "-mtriple=" ++ arch ]
+          Nothing   -> []
+  let llc_opt_args
+          | 0 <= lvl && lvl <= 3 = [ "-O=" ++ show lvl ]
+          | otherwise            = error "run_llc given bad optimization level."
+        where lvl = llc_opt_level opts
+  let llc_args
+        = [ "-o", "-" ]
+        ++ llc_triple_args
+        ++ llc_opt_args
   (in_handle, out_handle, err_handle, ph) <-
     tryCreateProcess LLC llc_command llc_args
   tryWriteContents LLC in_handle err_handle input_file
@@ -128,11 +164,14 @@ llvmAssemble llc_command triple input_file = do
   return res
 
 -- | Use GNU assembler to generate an object file from assembly.
-assembleFile :: FilePath -- ^ Path to gas
+--
+-- The assembler file should be text, and the output is written to the given
+-- path.
+run_gas :: FilePath      -- ^ Path to gas
              -> BS.ByteString -- ^ Assembler file
              -> FilePath      -- ^ Path for object file.
              -> ExceptT Failure IO ()
-assembleFile gas_command asm obj_path = do
+run_gas gas_command asm obj_path = do
   -- Run GNU asssembler
   let args= [ "-o", obj_path, "--fatal-warnings" ]
   (in_handle, out_handle, err_handle, ph) <- tryCreateProcess Gas gas_command args
@@ -144,29 +183,13 @@ assembleFile gas_command asm obj_path = do
   waitForEnd Gas err_handle ph
 
 -- | Use LLVM link to combine several ll or bc files into one.
-llvm_link :: FilePath -- ^ Path to llvm-link
-          -> [FilePath]
-          -> ExceptT Failure IO BS.ByteString
-llvm_link llvm_link_command paths = do
+run_llvm_link :: FilePath -- ^ Path to llvm-link
+              -> [FilePath]
+              -> ExceptT Failure IO BS.ByteString
+run_llvm_link llvm_link_command paths = do
   let args = [ "-o=-" ] ++ paths
   (in_handle, out_handle, err_handle, ph) <- tryCreateProcess LLVM_LINK llvm_link_command args
   liftIO $ hClose in_handle
   res <- liftIO $ readContents out_handle
   waitForEnd LLVM_LINK err_handle ph
   return res
-
--- | Generate an Elf file from LLVM using 'llc' and 'gas', and store it in the path.
---
--- The contents of the input file may be either an assembly (.ll) file or a
--- bitcode (.bc) file.
---
--- This returns a 'Failure object if either command fails.
-llvm_to_object :: FilePath      -- ^ Path to llc
-                  -> FilePath      -- ^ Path to gas
-                  -> String        -- ^ "triple" string describing architecture for llc
-                  -> BS.ByteString -- ^ Input llvm as bitcode or ll file.
-                  -> FilePath      -- ^ Path to write object to
-                  -> ExceptT Failure IO ()
-llvm_to_object llc_path gas_command triple bc obj_path = do
-  asm <- llvmAssemble llc_path triple bc
-  assembleFile gas_command asm obj_path

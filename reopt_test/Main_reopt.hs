@@ -30,16 +30,13 @@ import           Data.Maybe
 import           Data.Version
 import           Data.Word
 import           Debug.Trace
+import           Numeric (readHex, showHex)
 import           System.CPUTime
 import           System.Console.CmdArgs.Explicit as CmdArgs
+import qualified System.Console.Terminal.Size as Terminal
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitWith, ExitCode(..))
 import           System.IO
-import           Text.Read (readMaybe)
-
-import           Numeric (readHex, showHex)
-
-import qualified System.Console.Terminal.Size as Terminal
 import           System.Linux.Ptrace.Syscall
 import           System.Linux.Ptrace.Types
 import           System.Linux.Ptrace.X86_64FPRegs
@@ -48,17 +45,23 @@ import           System.Posix.Process
 import           System.Posix.Signals (Signal, sigFPE, sigTRAP, sigSEGV)
 import           System.Posix.Types
 import           System.Posix.Waitpid as W
-import           Text.Printf
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
+import           Text.Printf
+import           Text.Read (readMaybe)
 
 import           Paths_reopt (version)
 
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.Map as MapF
-import           Flexdis86 (InstructionInstance(..), ppInstruction,
-                  ByteReader(..), defaultX64Disassembler,
-                  disassembleInstruction, LockPrefix(..))
+import           Flexdis86 ( InstructionInstance
+                           , InstructionInstanceF(..)
+                           , ppInstruction
+                           , ByteReader(..)
+                           , defaultX64Disassembler
+                           , disassembleInstruction
+                           , LockPrefix(..)
+                           )
 
 import           Reopt.CFG.Representation
 import           Reopt.Concrete.BitVector hiding (modify)
@@ -68,6 +71,7 @@ import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMac
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Object.Loader
 import           Reopt.Semantics.FlexdisMatcher

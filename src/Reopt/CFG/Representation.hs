@@ -74,8 +74,6 @@ module Reopt.CFG.Representation
   , ppNat
   , ppValue
   , sexpr
-    -- * X86State
-  , module Reopt.Machine.X86State
   ) where
 
 import           Control.Applicative
@@ -351,7 +349,7 @@ data AssignRhs tp where
               -> !Bool
               -- ^ Find first matching (True) or not matching (False)
               -> !(BVValue 64)
-              -- ^ Number of elementes to compare
+              -- ^ Number of elements to compare
               -> !(BVValue 64)
               -- ^ Pointer to first buffer
               -> !(BVValue n)

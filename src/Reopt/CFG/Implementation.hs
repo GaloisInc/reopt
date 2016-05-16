@@ -1,14 +1,12 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Semantics.Implementation
--- Description      : Control Flow Graph extraction definitions
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
---
--- This contains an implementation of the classes defined in Reopt.Semantics.Monad
--- that extract a control flow graph from a program using the semantics.
-------------------------------------------------------------------------
+{-
+
+Module           : Reopt.Semantics.Implementation
+Copyright        : (c) Galois, Inc 2015
+Maintainer       : Joe Hendrix <jhendrix@galois.com>
+
+This contains an implementation of the classes defined in Reopt.Semantics.Monad
+that map  a control flow graph from a program using the semantics.
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -26,11 +24,8 @@
 {-# LANGUAGE KindSignatures #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.Implementation
-       ( -- Threaded global state
-         GlobalGenState
-       , emptyGlobalGenState
-         -- The main disassemble function
-       , disassembleBlock
+       ( -- * The main disassemble function
+         disassembleBlock
        , ExploreLoc(..)
        , rootLoc
        ) where
@@ -60,6 +55,7 @@ import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types (BVType)
+import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -68,6 +64,8 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
+
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- Expr
@@ -447,21 +445,6 @@ instance S.IsValue Expr where
 ------------------------------------------------------------------------
 -- GenState
 
--- | Global for the entire program.
-data GlobalGenState = GlobalGenState
-       { -- | Index of next assignment identifier to use.
-         -- (all used assignment indices must be less than this).
-         _nextAssignId :: !AssignId
-       }
-
-emptyGlobalGenState :: GlobalGenState
-emptyGlobalGenState = GlobalGenState { _nextAssignId = 0
-                                     }
-
--- | Number of assignments so far.
-nextAssignId :: Simple Lens GlobalGenState AssignId
-nextAssignId = lens _nextAssignId (\s v -> s { _nextAssignId = v })
-
 -- | A block that we have not yet finished.
 data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
                          , _pBlockStmts :: !(Seq Stmt)
@@ -488,8 +471,8 @@ _JustF = lens (\(JustF v) -> v) (\_ v -> JustF v)
 
 -- | Local to block discovery.
 data GenState tag = GenState
-       { _globalGenState :: !GlobalGenState
-         -- ^ The global state
+       { _nextAssignID :: !AssignId
+         -- ^ The next id to use for assignments
        , _nextBlockID  :: !Word64
          -- ^ Index of next block
        , _frontierBlocks :: !(Seq Block)
@@ -498,8 +481,9 @@ data GenState tag = GenState
          -- ^ Blocks generated so far
        }
 
-globalGenState :: Simple Lens (GenState tag) GlobalGenState
-globalGenState = lens _globalGenState (\s v -> s { _globalGenState = v })
+-- | Next identifier to use for assignments.
+nextAssignID :: Simple Lens (GenState tag) AssignId
+nextAssignID = lens _nextAssignID (\s v -> s { _nextAssignID = v })
 
 -- | Control flow blocs generated so far.
 nextBlockID :: Simple Lens (GenState tag) Word64
@@ -525,9 +509,9 @@ emptyPreBlock s lbl =
            , _pBlockState = s
            }
 
-emptyGenState :: GlobalGenState -> GenState 'False
-emptyGenState st =
-  GenState { _globalGenState = st
+emptyGenState :: AssignId -> GenState 'False
+emptyGenState n =
+  GenState { _nextAssignID   = n
            , _nextBlockID    = 1
            , _frontierBlocks = Seq.empty
            , _blockState     = NothingF
@@ -572,9 +556,11 @@ startBlock s lbl st =
 --
 -- It is implemented as a state monad in a continuation passing style so that
 -- we can perform symbolic branches.
-newtype X86Generator a = X86G { unX86G :: (a -> GenState 'True -> Some GenState)
+--
+-- This returns either a failure message or the next state.
+newtype X86Generator a = X86G { unX86G :: (a -> GenState 'True -> Either String (Some GenState))
                                        -> GenState 'True
-                                       -> Some GenState
+                                       -> Either String (Some GenState)
                               }
 
 instance Functor X86Generator where
@@ -587,13 +573,13 @@ instance Applicative X86Generator where
 instance Monad X86Generator where
   return v = X86G $ \c -> c v
   m >>= h = X86G $ \c -> unX86G m (\mv -> unX86G (h mv) c)
-  fail = error
+  fail msg = X86G $ \_ _ -> Left msg
 
 type instance S.Value X86Generator = Expr
 
 -- | Run X86Generator starting from the given state.
-runX86Generator :: GenState 'True -> X86Generator () -> Some GenState
-runX86Generator st m = unX86G m (\() -> Some) st
+runX86Generator :: GenState 'True -> X86Generator () -> Either String (Some GenState)
+runX86Generator st m = unX86G m (\() -> Right . Some) st
 
 modGenState :: State (GenState 'True) a -> X86Generator a
 modGenState m = X86G $ \c s -> uncurry c (runState m s)
@@ -605,16 +591,16 @@ modState m = modGenState $ do
   curX86State .= s'
   return r
 
--- | Create a new identity for
-newAssignId :: X86Generator AssignId
-newAssignId = modGenState $ globalGenState . nextAssignId <<+= 1
+-- | Create a new assignment identifier.
+newAssignID :: X86Generator AssignId
+newAssignID = modGenState $ nextAssignID <<+= 1
 
 addStmt :: Stmt -> X86Generator ()
 addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
 
 addAssignment :: AssignRhs tp -> X86Generator (Assignment tp)
 addAssignment rhs = do
-  l <- newAssignId
+  l <- newAssignID
   let a = Assignment l rhs
   addStmt $ AssignStmt a
   return a
@@ -858,20 +844,19 @@ instance S.Semantics X86Generator where
           let s2 = s1 & blockState .~ JustF (emptyPreBlock st t_block_label)
                       & frontierBlocks .~ Seq.empty
           -- Run true block.
-          case unX86G t c s2 of
-            Some (finishBlock FetchAndExecute -> s3)
-             | otherwise -> do
-              -- Run false block
-              let (f_block_label, s4) = mkBlockLabel a s3
-              let s5 = s4 & blockState .~ JustF (emptyPreBlock st f_block_label)
-                          & frontierBlocks .~ Seq.empty
-              case unX86G f c s5 of
-                Some (finishBlock FetchAndExecute -> s6) -> do
-                  let fin_b = finishBlock' p_b (\_ -> Branch cond t_block_label f_block_label)
-                  Some $ s6 & frontierBlocks .~ (s0^.frontierBlocks Seq.|> fin_b)
-                                         Seq.>< s3^.frontierBlocks
-                                         Seq.>< s6^.frontierBlocks
-                            & blockState .~ NothingF
+          Some (finishBlock FetchAndExecute -> s3) <- unX86G t c s2
+          -- Run false block
+          let (f_block_label, s4) = mkBlockLabel a s3
+          let s5 = s4 & blockState .~ JustF (emptyPreBlock st f_block_label)
+                      & frontierBlocks .~ Seq.empty
+          Some (finishBlock FetchAndExecute -> s6) <- unX86G f c s5
+
+          -- Join results together.
+          let fin_b = finishBlock' p_b (\_ -> Branch cond t_block_label f_block_label)
+          pure $ Some $ s6 & frontierBlocks .~ (s0^.frontierBlocks Seq.|> fin_b)
+                                               Seq.>< s3^.frontierBlocks
+                                               Seq.>< s6^.frontierBlocks
+                           & blockState .~ NothingF
 
   memcopy val_sz count src dest is_reverse = do
     count_v <- eval count
@@ -892,7 +877,7 @@ instance S.Semantics X86Generator where
     count_v <- eval count
     val_v   <- eval val
     dest_v  <- eval dest
-    df_v    <- eval df    
+    df_v    <- eval df
     addStmt (MemSet count_v val_v dest_v df_v)
 
   find_element sz findEq count buf val is_reverse = do
@@ -910,8 +895,8 @@ instance S.Semantics X86Generator where
       -- Create finished block.
       let fin_b = finishBlock' p_b Syscall
       -- Return early
-      Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
-                & blockState .~ NothingF
+      pure $ Some $ s0 & frontierBlocks %~ (Seq.|> fin_b)
+                       & blockState .~ NothingF
 
   primitive S.CPUID = error "CPUID"
   primitive S.RDTSC = error "RDTSC"
@@ -984,19 +969,24 @@ data GenError = DecodeError CodeAddr (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
 
+initGenState :: AssignId -> CodeAddr -> X86State Value -> GenState 'True
+initGenState a_id ip s = startBlock s lbl (emptyGenState a_id)
+  where lbl = GeneratedBlock ip 0
+
 -- | Disassemble block, returning either an error, or a list of blocks
 -- and ending PC.
-disassembleBlock :: Memory Word64
+disassembleBlock :: AssignId
+                    -- ^ Index to use for next assignment
+                 -> Memory Word64
                  -> (CodeAddr -> Bool)
+                    -- ^ PRedicate that tells when to continue.
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> StateT GlobalGenState (Either GenError)
-                           ([Block], CodeAddr)
-disassembleBlock mem contFn loc = do
-  let lbl = GeneratedBlock (loc_ip loc) 0
-  gs <- gets (startBlock (initX86State loc) lbl . emptyGenState)
-  (gs', ip) <- lift $ disassembleBlock' mem gs contFn (loc_ip loc)
-  put (gs' ^. globalGenState)
-  return (Fold.toList (gs'^.frontierBlocks), ip)
+                 -> Either GenError ([Block], CodeAddr, AssignId)
+disassembleBlock next_id mem contFn loc = do
+  let gs = initGenState next_id (loc_ip loc) (initX86State loc)
+  (gs', ip) <- disassembleBlock' mem gs contFn (loc_ip loc)
+  return (Fold.toList (gs'^.frontierBlocks), ip, gs' ^.nextAssignID)
+
 
 {-
 getExploreLocs :: X86State -> [ExploreLoc]
@@ -1044,7 +1034,10 @@ disassembleBlock' mem gs contFn addr = do
                   addStmt (Comment (Text.pack (show line)))
                   exec
       case res of
-        Some gs2 -> do
+        Left msg -> do
+          trace ("Error during dissassembly: " ++ msg ++ "\n" ++ show i) $
+            Left (DisassembleError i)
+        Right (Some gs2) -> do
           case gs2 ^. blockState of
             -- If next ip is exactly the next_ip_val then keep running.
             JustF p_b | Seq.null (gs2^.frontierBlocks)

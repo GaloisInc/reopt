@@ -46,7 +46,7 @@ import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
 
-import           Data.Parameterized.Classes (OrderingF(..), compareF, fromOrdering)
+import           Data.Parameterized.Classes (EqF(..), OrderingF(..), compareF, fromOrdering)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
@@ -133,11 +133,11 @@ instance MapF.EqF Expr where
   _ `eqF` _ = False
 
 instance Eq (Expr tp) where
-  e1 == e2 = e1 `R.eqF` e2
+  e1 == e2 = e1 `eqF` e2
 
 instance MapF.OrdF Expr where
   LitExpr nr1 i1 `compareF` LitExpr nr2 i2
-    | Just Refl <- nr1 `testEquality` nr2 = 
+    | Just Refl <- nr1 `testEquality` nr2 =
       case i1 `compare` i2 of
         LT -> LTF
         EQ -> EQF
@@ -153,9 +153,9 @@ instance MapF.OrdF Expr where
   _ `compareF` AppExpr _ = LTF
   VarExpr v1 `compareF` VarExpr v2 = v1 `compareF` v2
   _ `compareF` VarExpr _ = LTF
-  ValueExpr v1 `compareF` ValueExpr v2 = v1 `compareF` v2  
+  ValueExpr v1 `compareF` ValueExpr v2 = v1 `compareF` v2
   _ `compareF` ValueExpr _ = LTF
-  
+
 instance Ord (Expr tp) where
   e1 `compare` e2 = compareFin e1 e2
 
@@ -196,7 +196,7 @@ instance S.IsValue Expr where
   bvSplit :: forall n. (1 <= n)
           => Expr (BVType (n + n))
           -> (Expr (BVType n), Expr (BVType n))
-  bvSplit v = withLeqProof (leqAdd2 (leqRefl hn) (LeqProof :: LeqProof 1 n)) 
+  bvSplit v = withLeqProof (leqAdd2 (leqRefl hn) (LeqProof :: LeqProof 1 n))
                             ( app (R.UpperHalf hn v)
                             , app (R.Trunc     v hn))
     where hn = halfNat (exprWidth v) :: NatRepr n
@@ -279,18 +279,18 @@ data Stmt where
   X87Pop  :: Stmt
 
 instance Eq Stmt where
-  MakeUndefined v1 _tp1 == MakeUndefined v2 _tp2 
+  MakeUndefined v1 _tp1 == MakeUndefined v2 _tp2
     | Just Refl <- testEquality v1 v2 = v1 == v2
   Get v1 l1 == Get v2 l2
     | Just Refl <- testEquality v1 v2 = l1 == l2
   Let v1 e1 == Let v2 e2
     | Just Refl <- testEquality v1 v2 = e1 == e2
-  (l1 := e1) == (l2 := e2) 
+  (l1 := e1) == (l2 := e2)
     | Just Refl <- testEquality e1 e2 = l1 == l2 && e1 == e2
   Ifte_ e1 s1 s1' == Ifte_ e2 s2 s2' = e1 == e2 && s1 == s2 && s1' == s2'
   MemCopy i e1 e2 e3 e4 == MemCopy i' e1' e2' e3' e4' =
     i == i' && e1 == e1' && e2 == e2' && e3 == e3' && e4 == e4'
-  MemCmp v i e1 e2 e3 e4 == MemCmp v' i' e1' e2' e3' e4' 
+  MemCmp v i e1 e2 e3 e4 == MemCmp v' i' e1' e2' e3' e4'
     | Just Refl <- testEquality v v' = v == v' && i == i' && e1 == e1' &&
                                        e2 == e2' &&  e3 == e3' && e4 == e4'
   MemSet e1 e2 e3 e4 == MemSet e1' e2' e3' e4'
@@ -298,13 +298,13 @@ instance Eq Stmt where
   Primitive p1 == Primitive p2 = p1 == p2
   GetSegmentBase v s == GetSegmentBase v' s' = v == v' && s == s'
   BVQuot v1 e1 e2 == BVQuot v1' e1' e2'
-    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2' 
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2'
   BVRem v1 e1 e2 == BVRem v1' e1' e2'
-    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2' 
-  BVSignedQuot v1 e1 e2 == BVSignedQuot v1' e1' e2' 
+    | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' && e2 == e2'
+  BVSignedQuot v1 e1 e2 == BVSignedQuot v1' e1' e2'
     | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' &&
                                          e2 == e2'
-  BVSignedRem v1 e1 e2 == BVSignedRem v1' e1' e2' 
+  BVSignedRem v1 e1 e2 == BVSignedRem v1' e1' e2'
     | Just Refl <- testEquality e2 e2' = v1 == v1' && e1 == e1' &&
                                          e2 == e2'
   Exception e1 e2 ec == Exception e1' e2' ec' = e1 == e1' && e2 == e2' && ec == ec'
@@ -327,7 +327,7 @@ compare' a b def = case compare a b of
   EQ -> def
   LT -> LT
 
-instance Ord Stmt where  
+instance Ord Stmt where
   MakeUndefined v1 _tp1 `compare` MakeUndefined v2 _tp2 = compareFin v1 v2
   MakeUndefined _ _ `compare` _ = GT
   _ `compare` MakeUndefined _ _ = LT
@@ -363,7 +363,7 @@ instance Ord Stmt where
   Primitive p1 `compare` Primitive p2 = p1 `compare` p2
   Primitive _ `compare` _ = GT
   _ `compare` Primitive _ = LT
-  GetSegmentBase v s `compare` GetSegmentBase v' s' = 
+  GetSegmentBase v s `compare` GetSegmentBase v' s' =
     compare' v v' $ compare s s'
   GetSegmentBase{} `compare` _ = GT
   _ `compare` GetSegmentBase{} = LT
@@ -383,7 +383,7 @@ instance Ord Stmt where
     compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
   BVSignedRem{} `compare` _ = GT
   _ `compare` BVSignedRem{} = LT
-  Exception e1 e2 ec `compare` Exception e1' e2' ec' = 
+  Exception e1 e2 ec `compare` Exception e1' e2' ec' =
     compareF' e1 e1' $ compareF' e2 e2' $ compare ec ec'
   Exception{} `compare` _ = GT
   _ `compare` Exception{} = LT
@@ -528,7 +528,7 @@ expandRead v addr (BVTypeRepr nr) =
   withDivModNat nr S.n8 $ \divn modn ->
     case testEquality modn (knownNat :: NatRepr 0) of
       Nothing   -> error "Addr width not a multiple of 8"
-      Just Refl -> 
+      Just Refl ->
         case natRec divn ZeroCase go of
           ZeroCase      -> error "Zero case"
           NonZeroCase m -> do e <- m
@@ -590,7 +590,7 @@ expandMemOps :: Stmt -> Semantics ()
 
 -- expandMemOps stmt@(l := e) =
 --   case l of
---     S.MemoryAddr addr _tp 
+--     S.MemoryAddr addr _tp
 --       | S.BVTypeRepr nr <- S.loc_type l
 --       , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr -> do
 --         addrv <- freshVar "addr" S.knownType
@@ -600,7 +600,7 @@ expandMemOps :: Stmt -> Semantics ()
 --         expandWrite (VarExpr addrv) (BVTypeRepr nr) (VarExpr valv)
 --     _ -> tell [stmt]
 
-expandMemOps stmt = tell [stmt]      
+expandMemOps stmt = tell [stmt]
 
 ------------------------------------------------------------------------
 -- Pretty printing.

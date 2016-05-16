@@ -33,6 +33,8 @@ import qualified Data.Set as S
 import           Data.Parameterized.Some
 import           Reopt.CFG.Representation
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
+
 
 eliminateDeadRegisters :: CFG -> CFG
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
@@ -77,7 +79,7 @@ blockLiveRegisters b = do addIDs terminalIds
       addIDs (refsInValue cnt)
       addIDs (refsInValue val)
       addIDs (refsInValue dest)
-      addIDs (refsInValue df)      
+      addIDs (refsInValue df)
       return (stmt : ss)
     noteAndFilter stmt@(PlaceHolderStmt vals _) ss
       = do mapM_ (addIDs . viewSome refsInValue) vals

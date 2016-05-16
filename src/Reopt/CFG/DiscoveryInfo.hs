@@ -1,3 +1,10 @@
+{-|
+Module     : Reopt.CFG.DiscoveryInfo
+Copyright  : (c) Galois, Inc 2016
+Maintainer : jhendrix@galois.com
+
+This defines the information learned during the code discovery phase of Reopt.
+-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -5,26 +12,30 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeOperators #-}
-module Reopt.CFG.InterpState
-  ( AbsStateMap
-  , lookupAbsBlock
-  , FrontierReason(..)
-  , BlockRegion(..)
+module Reopt.CFG.DiscoveryInfo
+  ( BlockRegion(..)
   , lookupBlock
   , GlobalDataInfo(..)
   , ParsedTermStmt(..)
     -- * The interpreter state
-  , InterpState(..)
-  , emptyInterpState
+  , DiscoveryInfo
+  , emptyDiscoveryInfo
+  , memory
+  , symbolNames
   , genState
   , blocks
   , functionEntries
   , reverseEdges
   , globalDataMap
+    -- * Frontier
+  , FrontierReason(..)
   , frontier
   , function_frontier
+    -- ** Abstract state information
   , absState
-    -- ** InterpState utilities
+  , AbsStateMap
+  , lookupAbsBlock
+    -- ** DiscoveryInfo utilities
   , getFunctionEntryPoint
   , inSameFunction
   , returnCount
@@ -49,15 +60,15 @@ import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
-                 
+
 import           Data.Parameterized.Some
 
 import           Reopt.Analysis.AbsState
-import           Reopt.CFG.Implementation (GlobalGenState, emptyGlobalGenState)
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 
 import           Reopt.Utils.Debug
@@ -145,57 +156,57 @@ data ParsedTermStmt
    | ParsedReturn !(X86State Value) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
-   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String !String ![N.RegisterName 'N.GP] ![Some N.RegisterName]
+   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String !String ![N.RegisterName 'N.GP]
+                   ![Some N.RegisterName]
+  deriving (Show)
 
 ------------------------------------------------------------------------
--- InterpState
+-- DiscoveryInfo
 
 -- | The state of the interpreter
-data InterpState
-   = InterpState { -- | The initial memory when disassembly started.
-                   memory   :: !(Memory Word64)
-                   -- | The set of symbol names (not necessarily complete)
-                 , symbolNames :: Map CodeAddr BS.ByteString
-                   -- | Syscall personailty, mainly used by getClassifyBlock etc.
-                 , syscallPersonality :: SyscallPersonality
-                   -- | State used for generating blocks.
-                 , _genState :: !GlobalGenState
+data DiscoveryInfo
+   = DiscoveryInfo { memory   :: !(Memory Word64)
+                     -- ^ The initial memory when disassembly started.
+                   , symbolNames :: Map CodeAddr BS.ByteString
+                     -- ^ The set of symbol names (not necessarily complete)
+                   , syscallPersonality :: SyscallPersonality
+                   -- ^ Syscall personailty, mainly used by getClassifyBlock etc.
+                   , _genState :: !AssignId
+                   -- ^ Next index to use for generating an assignment.
                    -- | Intervals maps code addresses to blocks at address
                    -- or nothing if disassembly failed.
-                 , _blocks   :: !(Map CodeAddr (Maybe BlockRegion))
-                   -- | Maps addresses that are marked as the start of a function
-                 , _functionEntries :: !(Set CodeAddr)
-                   -- | Maps each code address to the list of predecessors that
-                   -- affected its abstract state.
-                 , _reverseEdges :: !(Map CodeAddr (Set CodeAddr))
-                   -- | Maps each address that appears to be global data to information
-                   -- inferred about it.
-                 , _globalDataMap :: !(Map CodeAddr GlobalDataInfo)
-                   -- | Information about the next state for blocks that end with
-                   -- @FetchAndExecute@ statements.
-                 -- , _parsedTermStmts :: !(Map CodeAddr ParsedTermStmt)
-                   -- | Set of addresses to explore next.
-                   -- This is a map so that we can associate a reason why a code address
-                   -- was added to the frontier.
-                 , _frontier :: !(Map CodeAddr FrontierReason)
-                   -- | Set of functions to explore next.
-                 , _function_frontier :: !(Set CodeAddr)
-                   -- | Map from code addresses to the abstract state at the start of
-                   -- the block.
-                 , _absState :: !AbsStateMap
-                 , _returnCount :: !Int
-                 }
+                   , _blocks   :: !(Map CodeAddr (Maybe BlockRegion))
+                   , _functionEntries :: !(Set CodeAddr)
+                      -- ^ Maps addresses that are marked as the start of a function
+                   , _reverseEdges :: !(Map CodeAddr (Set CodeAddr))
+                     -- ^ Maps each code address to the list of predecessors that
+                     -- affected its abstract state.
+                   , _globalDataMap :: !(Map CodeAddr GlobalDataInfo)
+                     -- ^ Maps each address that appears to be global data to information
+                     -- inferred about it.
+                   , _frontier :: !(Map CodeAddr FrontierReason)
+                     -- ^ Set of addresses to explore next.
+                     --
+                     -- This is a map so that we can associate a reason why a code address
+                     -- was added to the frontier.
+                   , _function_frontier :: !(Set CodeAddr)
+                     -- ^ Set of functions to explore next.
+                   , _absState :: !AbsStateMap
+                     -- ^ Map from code addresses to the abstract state at the start of
+                     -- the block.
+                   , _returnCount :: !Int
+                   }
 
 -- | Empty interpreter state.
-emptyInterpState :: Memory Word64
+emptyDiscoveryInfo :: Memory Word64
                  -> Map CodeAddr BS.ByteString
                  -> SyscallPersonality
-                 -> InterpState
-emptyInterpState mem symbols sysp = InterpState
+                 -> DiscoveryInfo
+emptyDiscoveryInfo mem symbols sysp = DiscoveryInfo
       { memory        = mem
       , symbolNames   = symbols
       , syscallPersonality = sysp
-      , _genState     = emptyGlobalGenState
+      , _genState     = 0
       , _blocks       = Map.empty
       , _functionEntries = Set.empty
       , _reverseEdges    = Map.empty
@@ -207,54 +218,55 @@ emptyInterpState mem symbols sysp = InterpState
       , _returnCount     = 0
       }
 
-genState :: Simple Lens InterpState GlobalGenState
+-- | Next id to use for generating assignments
+genState :: Simple Lens DiscoveryInfo AssignId
 genState = lens _genState (\s v -> s { _genState = v })
 
-blocks :: Simple Lens InterpState (Map CodeAddr (Maybe BlockRegion))
+blocks :: Simple Lens DiscoveryInfo (Map CodeAddr (Maybe BlockRegion))
 blocks = lens _blocks (\s v -> s { _blocks = v })
 
 -- | Addresses that start each function.
-functionEntries :: Simple Lens InterpState (Set CodeAddr)
+functionEntries :: Simple Lens DiscoveryInfo (Set CodeAddr)
 functionEntries = lens _functionEntries (\s v -> s { _functionEntries = v })
 
-reverseEdges :: Simple Lens InterpState (Map CodeAddr (Set CodeAddr))
+reverseEdges :: Simple Lens DiscoveryInfo (Map CodeAddr (Set CodeAddr))
 reverseEdges = lens _reverseEdges (\s v -> s { _reverseEdges = v })
 
 -- | Map each jump table start to the address just after the end.
-globalDataMap :: Simple Lens InterpState (Map CodeAddr GlobalDataInfo)
+globalDataMap :: Simple Lens DiscoveryInfo (Map CodeAddr GlobalDataInfo)
 globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
 -- | Information about the next state for blocks that end with
 -- @FetchAndExecute@ statements.
--- parsedTermStmts :: Simple Lens InterpState (Map CodeAddr ParsedTermStmt)
+-- parsedTermStmts :: Simple Lens DiscoveryInfo (Map CodeAddr ParsedTermStmt)
 -- parsedTermStmts = lens _parsedTermStmts (\s v -> s { _parsedTermStmts = v })
 
-frontier :: Simple Lens InterpState (Map CodeAddr FrontierReason)
+frontier :: Simple Lens DiscoveryInfo (Map CodeAddr FrontierReason)
 frontier = lens _frontier (\s v -> s { _frontier = v })
 
-function_frontier :: Simple Lens InterpState (Set CodeAddr)
+function_frontier :: Simple Lens DiscoveryInfo (Set CodeAddr)
 function_frontier = lens _function_frontier (\s v -> s { _function_frontier = v })
 
-absState :: Simple Lens InterpState AbsStateMap
+absState :: Simple Lens DiscoveryInfo AbsStateMap
 absState = lens _absState (\s v -> s { _absState = v })
 
-returnCount :: Simple Lens InterpState Int
+returnCount :: Simple Lens DiscoveryInfo Int
 returnCount = lens _returnCount (\s v -> s { _returnCount = v })
 
 ------------------------------------------------------------------------
--- InterpState utilities
+-- DiscoveryInfo utilities
 
 -- | Returns the guess on the entry point of the given function.
-getFunctionEntryPoint :: CodeAddr -> InterpState -> CodeAddr
+getFunctionEntryPoint :: CodeAddr -> DiscoveryInfo -> CodeAddr
 getFunctionEntryPoint addr s = do
   case Set.lookupLE addr (s^.functionEntries) of
     Just a -> a
     Nothing -> error $ "Could not find address of " ++ showHex addr "."
 
-getFunctionEntryPoint' :: CodeAddr -> InterpState -> Maybe CodeAddr
-getFunctionEntryPoint' addr s = Set.lookupLE addr (s^.functionEntries) 
+getFunctionEntryPoint' :: CodeAddr -> DiscoveryInfo -> Maybe CodeAddr
+getFunctionEntryPoint' addr s = Set.lookupLE addr (s^.functionEntries)
 
-inSameFunction :: CodeAddr -> CodeAddr -> InterpState -> Bool
+inSameFunction :: CodeAddr -> CodeAddr -> DiscoveryInfo -> Bool
 inSameFunction x y s =
   getFunctionEntryPoint x s == getFunctionEntryPoint y s
 
@@ -307,12 +319,12 @@ identifyReturn s = do
       , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just asgn
     _ -> Nothing
 
-identifyJumpTable :: InterpState
+identifyJumpTable :: DiscoveryInfo
                   -> BlockLabel
                       -- | Memory address that IP is read from.
                   -> Value (BVType 64)
                   -- Returns the (symbolic) index and concrete next blocks
-                  -> Maybe (Value (BVType 64), V.Vector CodeAddr) 
+                  -> Maybe (Value (BVType 64), V.Vector CodeAddr)
 identifyJumpTable s lbl (AssignedValue (Assignment _ (Read (MemLoc ptr _))))
     -- Turn the read address into base + offset.
    | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp ptr
@@ -330,8 +342,8 @@ identifyJumpTable s lbl (AssignedValue (Assignment _ (Read (MemLoc ptr _))))
     mem = memory s
 identifyJumpTable _ _ _ = Nothing
 
-classifyBlock :: Block -> InterpState -> Maybe ParsedTermStmt
-classifyBlock b interp_state = 
+classifyBlock :: Block -> DiscoveryInfo -> Maybe ParsedTermStmt
+classifyBlock b interp_state =
   case blockTerm b of
     Branch c x y -> Just (ParsedBranch c x y)
     FetchAndExecute proc_state
@@ -382,16 +394,16 @@ classifyBlock b interp_state =
                            )
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
-              _ | length argtypes > length x86SyscallArgumentRegisters -> 
+              _ | length argtypes > length x86SyscallArgumentRegisters ->
                   debug DUrgent ("Got more than register args calling " ++ name
                                  ++ " in block " ++ show (blockLabel b))
-                                result 
+                                result
               _ -> result
-              
+
         -- FIXME: Should subsume the above ...
         -- FIXME: only works if rax is an initial register
       | BVValue _ (fromInteger -> (next_addr :: Word64)) <- proc_state^.register N.rip
-      , Initial r <- proc_state ^. register N.rax 
+      , Initial r <- proc_state ^. register N.rax
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
       , Just (fromInteger -> call_no) <- asConcreteSingleton (absSt ^. absX86State ^. register r)
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
@@ -401,13 +413,13 @@ classifyBlock b interp_state =
                            )
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
-              _ | length argtypes > length x86SyscallArgumentRegisters -> 
+              _ | length argtypes > length x86SyscallArgumentRegisters ->
                   debug DUrgent ("Got more than register args calling " ++ name
                                  ++ " in block " ++ show (blockLabel b))
-                                result 
+                                result
               _ -> result
 
-          
+
       | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip ->
           debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
                          ++ " rax is " ++ show (pretty $ proc_state^.register N.rax)
@@ -416,13 +428,12 @@ classifyBlock b interp_state =
                              x86SyscallArgumentRegisters
                              (spResultRegisters sysp)
                )
-      | otherwise -> error "shouldn't get here"          
+      | otherwise -> error "shouldn't get here"
   where
     mem = memory interp_state
     sysp = syscallPersonality interp_state
 
-getClassifyBlock :: BlockLabel -> InterpState ->  Maybe (Block, Maybe ParsedTermStmt)
+getClassifyBlock :: BlockLabel -> DiscoveryInfo ->  Maybe (Block, Maybe ParsedTermStmt)
 getClassifyBlock lbl interp_state = do
   b <- lookupBlock (interp_state ^. blocks) lbl
   return (b, classifyBlock b interp_state)
-  
