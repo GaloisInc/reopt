@@ -67,16 +67,18 @@ type RegisterSet = Set (Some N.RegisterName)
 -- this results in both direct argument register demands and function
 -- result demands.
 data DemandSet = DemandSet { registerDemands       :: !RegisterSet
-                           , functionResultDemands :: Map CodeAddr RegisterSet
+                           , functionResultDemands :: !(Map CodeAddr RegisterSet)
                            }
                  deriving (Eq, Ord, Show)
 
 instance Monoid DemandSet where
   mempty = DemandSet mempty mempty
   mappend ds1 ds2 =
-    DemandSet (registerDemands ds1 `mappend` registerDemands ds2)
-              (Map.unionWith Set.union (functionResultDemands ds1)
-                                       (functionResultDemands ds2))
+    DemandSet { registerDemands = registerDemands ds1 `mappend` registerDemands ds2
+              , functionResultDemands =
+                  Map.unionWith Set.union (functionResultDemands ds1)
+                                          (functionResultDemands ds2)
+              }
 
 demandSetDifference :: DemandSet -> DemandSet -> DemandSet
 demandSetDifference ds1 ds2 =

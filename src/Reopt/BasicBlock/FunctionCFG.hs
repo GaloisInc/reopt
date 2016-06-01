@@ -1,7 +1,8 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
 
-module Reopt.BasicBlock.FunctionCFG (CFG(..), Block(..), Term(..), findBlocks, findBlock,
+module Reopt.BasicBlock.FunctionCFG
+       (CFG(..), Block(..), Term(..), findBlocks, findBlock,
                                      termChildren, FunBounds(..), inFunBounds)
 where
 import           Reopt.BasicBlock.Extract
@@ -21,7 +22,7 @@ type CFG = Map Word64 Block
 
 data FunBounds = FunBounds { funBase  :: Word64
                            , funSize  :: Word64
-                           }  
+                           }
 
 instance Pretty FunBounds where
   pretty fb = braces (text (showHex (funBase fb) "")
@@ -62,8 +63,8 @@ instance Pretty Block where
   pretty (Block stmts term) = vcat [ppStmts stmts,  pretty term]
 
 -- instance Show Term where
---   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 "" 
---   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 "" 
+--   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 ""
+--   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 ""
 --   show (Direct w) = "Direct " ++ showHex w ""
 --   show (Fallthrough w) = "Fallthrough " ++ showHex w ""
 --   show (Indirect reg) = "Indirect " ++ show reg
@@ -82,17 +83,17 @@ findBlock :: Memory Word64 -> Word64 -> Either String CFG
 findBlock mem entry =
   M.singleton entry <$>
   case runMemoryByteReader pf_x mem entry $ extractBlock entry S.empty of
-    Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err    
+    Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
     Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
     Right (Right ([Absolute next], _, stmts), _) ->
       Right (Block stmts $ Direct next)
-    Right (Right ([NFallthrough next], _, stmts), _) -> 
+    Right (Right ([NFallthrough next], _, stmts), _) ->
       Right (Block stmts $ Fallthrough next)
-    Right (Right ([Absolute branch, Absolute fallthrough], _, stmts), _) -> 
+    Right (Right ([Absolute branch, Absolute fallthrough], _, stmts), _) ->
       Right (Block stmts $ Cond branch fallthrough)
-    Right (Right ([NIndirect], _, stmts), _) -> 
+    Right (Right ([NIndirect], _, stmts), _) ->
       Right (Block stmts $ Indirect)
-  
+
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...
 findBlocks :: Memory Word64 -> FunBounds -> Set Word64 -> Word64 -> Either String CFG
@@ -104,21 +105,21 @@ findBlocks mem funBounds breaks entry = calcFixpoint M.empty
         then calcFixpoint cfg'
         else return cfg'
 
-findBlocks' :: Memory Word64 
+findBlocks' :: Memory Word64
             -> FunBounds
             -> Set Word64
-            -> Set Word64 
-            -> CFG 
+            -> Set Word64
+            -> CFG
             -> Either String CFG
 findBlocks' mem funBounds breaks queue cfg
-  | Just (entry, queue') <- S.minView queue =    
+  | Just (entry, queue') <- S.minView queue =
     let finishBlock :: [Stmt] -> Term -> [Word64] -> Either String CFG
         finishBlock stmts term nexts =
           let cfg'   = M.insert entry (Block stmts term) cfg
               addQ q next
                 | inFunBounds funBounds next
                   && not (M.member next cfg) = S.insert next q
-                | otherwise = q                  
+                | otherwise = q
               queue'' = foldl addQ queue' nexts
           in findBlocks' mem funBounds breaks queue'' cfg'
     in

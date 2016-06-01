@@ -15,6 +15,8 @@ module Reopt.ExternalTools
   , run_llc
     -- * Running gas
   , run_gas
+    -- * Running opt
+  , run_opt
     -- * Running llvm-link
   , run_llvm_link
     -- * Failure information
@@ -24,6 +26,7 @@ module Reopt.ExternalTools
   ) where
 
 import           Control.Exception
+import           Control.Monad (when)
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Except
 import qualified Data.ByteString as BS
@@ -32,12 +35,13 @@ import           System.IO
 import           System.IO.Error
 import           System.Process
 
-data Tool = Gas | LLC | LLVM_LINK
+data Tool = Gas | LLC | LLVM_LINK | OPT
 
 instance Show Tool where
   show Gas = "GNU assembler (as)"
   show LLC = "llc"
   show LLVM_LINK = "llvm-link"
+  show OPT = "opt"
 
 -- |  Type of failure from running tools.
 data Failure
@@ -181,6 +185,22 @@ run_gas gas_command asm obj_path = do
   liftIO $ hClose out_handle
   -- Wait for process to end.
   waitForEnd Gas err_handle ph
+
+-- | Use opt on a bitcode file and return bitcode file.
+run_opt :: FilePath -- ^ Path to opt
+        -> Int -- ^ Optimization level (must be between 0 and 3)
+        -> BS.ByteString -- ^ LLVM ll or bitcode file
+        -> ExceptT Failure IO BS.ByteString
+run_opt opt_command lvl input = do
+  when (lvl < 0 || lvl > 3) $ do
+    error $ "Optimization level is out of range."
+  let opt_args = [ "-O" ++ show lvl ]
+  (in_handle, out_handle, err_handle, ph) <-
+    tryCreateProcess OPT opt_command opt_args
+  tryWriteContents OPT in_handle err_handle input
+  res <- liftIO $ readContents out_handle
+  waitForEnd OPT err_handle ph
+  return res
 
 -- | Use LLVM link to combine several ll or bc files into one.
 run_llvm_link :: FilePath -- ^ Path to llvm-link

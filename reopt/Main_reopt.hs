@@ -117,7 +117,8 @@ data Args = Args { _reoptAction  :: !Action
                  , _outputPath   :: !FilePath
                  , _gasPath      :: !FilePath
                  , _llcPath      :: !FilePath
-                 , _llcOptLevel  :: !Int
+                 , _optPath      :: !FilePath
+                 , _optLevel     :: !Int
                  , _llvmLinkPath :: !FilePath
                  , _libreoptPath :: !(Maybe FilePath)
                  , _notransAddrs :: !(Set String)
@@ -167,9 +168,13 @@ gasPath = lens _gasPath (\s v -> s { _gasPath = v })
 llcPath :: Simple Lens Args FilePath
 llcPath = lens _llcPath (\s v -> s { _llcPath = v })
 
--- | Optimization level to pass to llc
-llcOptLevel :: Simple Lens Args Int
-llcOptLevel = lens _llcOptLevel (\s v -> s { _llcOptLevel = v })
+-- | Path to opt
+optPath :: Simple Lens Args FilePath
+optPath = lens _optPath (\s v -> s { _optPath = v })
+
+-- | Optimization level to pass to llc and opt
+optLevel :: Simple Lens Args Int
+optLevel = lens _optLevel (\s v -> s { _optLevel = v })
 
 -- | Path to llvm-link
 llvmLinkPath :: Simple Lens Args FilePath
@@ -194,7 +199,8 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _outputPath = "a.out"
                    , _gasPath = "gas"
                    , _llcPath = "llc"
-                   , _llcOptLevel  = 2
+                   , _optPath = "opt"
+                   , _optLevel  = 2
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
                    , _notransAddrs = Set.empty
@@ -299,11 +305,11 @@ llcPathFlag = flagReq [ "llc" ] upd "PATH" help
         help = "Path to llc."
 
 -- | Flag to set llc optimization level.
-llcOptLevelFlag :: Flag Args
-llcOptLevelFlag = flagReq [ "opt" ] upd "PATH" help
+optLevelFlag :: Flag Args
+optLevelFlag = flagReq [ "opt" ] upd "PATH" help
   where upd s old =
           case reads s of
-            [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & llcOptLevel .~ lvl
+            [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & optLevel .~ lvl
             _ -> Left "Expected optimization level to be a number between 0 and 3."
         help = "Path to llc."
 
@@ -341,7 +347,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , outputFlag
                 , gasFlag
                 , llcPathFlag
-                , llcOptLevelFlag
+                , optLevelFlag
                 , llvmLinkFlag
                 , libreoptFlag
                 , notransFlag
@@ -860,10 +866,11 @@ compile_llvm_to_obj args arch llvm obj_path = do
   -- Run llvm on resulting binary
   putStrLn "Compiling new code"
   mres <- runExceptT $ do
+    llvm_opt <- Ext.run_opt (args^.optPath) (args^.optLevel) llvm
     let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
-                                  , Ext.llc_opt_level = 3
+                                  , Ext.llc_opt_level = args^.optLevel
                                   }
-    asm <- Ext.run_llc (args^.llcPath) llc_opts llvm
+    asm <- Ext.run_llc (args^.llcPath) llc_opts llvm_opt
     Ext.run_gas (args^.gasPath) asm obj_path
 
   case mres of
