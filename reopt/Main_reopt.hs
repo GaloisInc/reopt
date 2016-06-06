@@ -10,13 +10,14 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Trans.Except
+import           Data.Binary.Get (ByteOffset)
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
-import           Data.Elf
+import           Data.ElfEdit
 import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)

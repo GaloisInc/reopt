@@ -30,16 +30,16 @@ module Reopt.Semantics.FlexdisMatcher
 import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import           Data.Type.Equality -- (testEquality, castWith, :~:(..) )
+import           Data.Parameterized.NatRepr
+import           Data.Word
 import           Debug.Trace
+import qualified Flexdis86 as F
 import           GHC.TypeLits (KnownNat)
 import           Numeric (showHex)
 
-import           Data.Parameterized.NatRepr
-import qualified Flexdis86 as F
-import           Reopt.Semantics.Semantics
-import           Reopt.Semantics.Monad
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Semantics.Monad
+import           Reopt.Semantics.Semantics
 
 data SomeBV v where
   SomeBV :: SupportedBVWidth n => v (BVType n) -> SomeBV v
@@ -790,7 +790,7 @@ fpUnopOrRegBinop f args@(_, vs)
 --   * fixed:     those which have exact sizes known
 
 -- FIXME: do something more interesting here than 'Maybe'
-execInstruction :: FullSemantics m => F.Word64 -> F.InstructionInstance -> Maybe (m ())
+execInstruction :: FullSemantics m => Word64 -> F.InstructionInstance -> Maybe (m ())
 execInstruction next ii =
   case M.lookup (F.iiOp ii) semanticsMap of
     Just (SemanticsOp f) -> Just $ do

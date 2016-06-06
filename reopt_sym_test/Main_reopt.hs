@@ -29,7 +29,7 @@ import           Control.Monad.State
 import           Control.Monad.Reader
 import           Data.Bits
 import qualified Data.ByteString as B
-import           Data.Elf
+import           Data.ElfEdit
 import           Data.Foldable (traverse_)
 import           Data.Int
 import           Data.List
@@ -62,7 +62,7 @@ import           Numeric (readHex)
 import           Paths_reopt (version)
 import           Data.Type.Equality as Equality
 
-import           Flexdis86 (InstructionInstance(..), ppInstruction, ByteReader(..), defaultX64Disassembler, disassembleInstruction)
+import           Flexdis86 (InstructionInstance(..), ppInstruction, ByteReader(..), disassembleInstruction)
 import           Lang.Crucible.Config (initialConfig)
 import qualified Lang.Crucible.Core as C
 -- import           Lang.Crucible.MATLAB.UtilityFunctions (newMatlabUtilityFunctions)

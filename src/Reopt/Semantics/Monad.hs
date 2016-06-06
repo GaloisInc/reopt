@@ -1,14 +1,11 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Semantics.Monad
--- Description      : This defines the typeclasses that must be implemented
---                    to obtain semantics from x86 instructions.
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
---
--- Defines typeclasses used to implement x86 instruction semantics.
-------------------------------------------------------------------------
+{-|
+Module           : Reopt.Semantics.Monad
+Copyright        : (c) Galois, Inc 2015-2016
+Maintainer       : Joe Hendrix <jhendrix@galois.com>
+
+This defines the typeclasses that must be implemented to obtain semantics from
+x86 instructions.
+-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE EmptyDataDecls #-}

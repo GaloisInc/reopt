@@ -12,7 +12,7 @@ import           Control.Monad.State
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
-import           Data.Elf
+import           Data.ElfEdit
 
 import           Reopt.Object.Memory
 

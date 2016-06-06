@@ -7,13 +7,14 @@ import           Control.Monad.State.Strict (execState, evalStateT)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (catMaybes)
+import           Data.Word
+import           Flexdis86
 import           Numeric (readHex)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Flexdis86
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.Representation

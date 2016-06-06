@@ -23,7 +23,7 @@ import           Control.Monad.Writer.Strict
 import qualified Data.BitVector as BV
 import           Data.Bits
 import qualified Data.ByteString as B
-import           Data.Elf
+import           Data.ElfEdit
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
@@ -58,7 +58,6 @@ import           Flexdis86 ( InstructionInstance
                            , InstructionInstanceF(..)
                            , ppInstruction
                            , ByteReader(..)
-                           , defaultX64Disassembler
                            , disassembleInstruction
                            , LockPrefix(..)
                            )
@@ -595,8 +594,7 @@ runMachineByteReader (MachineByteReader s) addr =
 getInstruction :: MonadMachineState m
   => Address8 -> m (Maybe (Int, InstructionInstance))
 getInstruction instrAddr = do
-  r <- runMachineByteReader (disassembleInstruction defaultX64Disassembler)
-                            instrAddr
+  r <- runMachineByteReader disassembleInstruction instrAddr
   case r of
     Left _e -> return Nothing
     -- Left e -> do r' <- runMachineByteReader (sequence $ replicate 10 readByte) instrAddr

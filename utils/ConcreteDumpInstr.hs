@@ -22,18 +22,18 @@ main = do args <- getArgs
           when (args == []) usageExit
 
           let nums = map readHex args
-              
+
           when (any (\v -> length v /= 1 || any ((/=) 0 . length . snd) v) nums) usageExit
 
           let bs = BS.pack $ map (fst . head) nums
 
-          let diss = disassembleBuffer defaultX64Disassembler bs
+          let diss = disassembleBuffer bs
           forM_ diss $ \dis -> do
             case disInstruction dis
-              of Just i -> 
+              of Just i ->
                    do putStrLn $ "Semantics for " ++ show i ++ ":"
                       case execInstruction (fromIntegral $ disLen dis) i of
                         Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
                         Just result -> print . C.ppStmts . C.execSemantics $ result
-           
+
                  Nothing ->return ()

@@ -1,7 +1,7 @@
 flags: {}
 packages:
 - '.'
-- deps/elf
+- deps/elf-edit
 - deps/flexdis86
 - deps/parameterized-utils
 - deps/linux-ptrace

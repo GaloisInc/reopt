@@ -13,7 +13,7 @@ import Control.Lens
 import Control.Monad
 import Data.Bits
 import qualified Data.ByteString as B
-import Data.Elf
+import Data.ElfEdit
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word
@@ -99,7 +99,7 @@ instructionNames l = Set.fromList $ concatMap resolve l
 sectionInstructions :: ElfSection Word64 -> [InstructionInstance]
 sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ]
   where buffer = elfSectionData s
-        dta = disassembleBuffer defaultX64Disassembler buffer
+        dta = disassembleBuffer buffer
 
 -- | Elf sections
 printSectionDisassembly :: ElfSection Word64 -> IO ()
@@ -110,7 +110,7 @@ printSectionDisassembly s = do
   putStrLn ""
   putStrLn $ (showPaddedHex 16 addr) ++ " <" ++ nm ++ ">:"
   let buffer = elfSectionData s
-  let dta = disassembleBuffer defaultX64Disassembler buffer
+  let dta = disassembleBuffer buffer
   let pp da = do
         let base = elfSectionAddr s
         printDisassemblyLine base buffer da
@@ -135,7 +135,7 @@ printExecutableAddressesInGlobalData e = do
                      | s <- sections
                      , let addr = elfSectionAddr s
                      , let buffer = elfSectionData s
-                     , let dta = disassembleBuffer defaultX64Disassembler buffer
+                     , let dta = disassembleBuffer buffer
                      , DAddr i _ Just{} <- dta
                      ]
   let found_set = Set.fromList found_points
@@ -153,7 +153,7 @@ printExecutableAddressesInGlobalData e = do
         let base = memBase s
         let buffer = memBytes s
         let offset = fromIntegral (o - base)
-        let (n,mi) = tryDisassemble defaultX64Disassembler (B.drop offset buffer)
+        let (n,mi) = tryDisassemble (B.drop offset buffer)
         let da = DAddr offset n mi
         printDisassemblyLine base buffer da
 

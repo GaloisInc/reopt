@@ -3,8 +3,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving#-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Reopt.BasicBlock.Extract (extractBlock, Next(..))
-where
+module Reopt.BasicBlock.Extract
+  ( extractBlock
+  , Next(..)
+  ) where
+
 import           Control.Monad.State
 import           Reopt.Concrete.Semantics as CS
 import           Reopt.CFG.Representation as R
@@ -27,7 +30,7 @@ import Debug.Trace
 
 data Next =
     Absolute Word64
-  | NIndirect 
+  | NIndirect
   | NFallthrough Word64
   deriving (Show, Eq)
 
@@ -36,7 +39,7 @@ extractBlock :: (F.ByteReader r) => Word64 -> Set Word64
 extractBlock startAddr breakAddrs =
   extractBlockInner startAddr breakAddrs []
 extractBlockInner startAddr breakAddrs prevStmts =
-  do (ii, w) <- runStateT (unWrappedByteReader $ disassembleInstruction defaultX64Disassembler) 0
+  do (ii, w) <- runStateT (unWrappedByteReader $ disassembleInstruction) 0
      case execInstruction (startAddr + w) ii
        of Just m | stmts <- execSemantics m ->
             case nexts M.empty [Absolute startAddr] stmts
@@ -51,7 +54,7 @@ extractBlockInner startAddr breakAddrs prevStmts =
                  addrs -> return $ Right (addrs, startAddr + w, prevStmts ++ stmts)
           Nothing -> return $ Left startAddr
 
-newtype WrappedByteReader r a = WrappedByteReader 
+newtype WrappedByteReader r a = WrappedByteReader
   {unWrappedByteReader :: StateT Word64 r a} deriving (Functor, MonadTrans, Applicative, Monad)
 
 instance ByteReader r => ByteReader (WrappedByteReader r) where
@@ -79,7 +82,7 @@ nexts vars addrs ((Let v expr) : rest) =
   nexts (M.insert (Some v) (staticExpr vars expr) vars) addrs rest
 -- nexts vars addrs ret ((S.MemoryAddr _ (S.BVTypeRepr n) := expr) : rest)
 --   | Just Refl <- testEquality n S.n64
---   , [Absolute addr] <- staticExpr vars expr = 
+--   , [Absolute addr] <- staticExpr vars expr =
 --       nexts vars addrs (Just addr) rest
 nexts vars addrs (_ : rest) = nexts vars addrs rest
 
@@ -93,7 +96,7 @@ staticExpr vars (AppExpr (BVAdd _ a b))
     bvs = staticExpr vars b
     isAbsolute (Absolute _) = True
     isAbsolute _            = False
-staticExpr vars (VarExpr v) 
+staticExpr vars (VarExpr v)
   | Just l <- M.lookup (Some v) vars = l
 staticExpr _ _ = [NIndirect] -- an overapproximation of what actually happens, but ...
 

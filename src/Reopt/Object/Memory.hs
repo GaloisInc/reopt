@@ -54,7 +54,7 @@ import           Control.Monad.Except
 import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
-import           Data.Elf as Elf
+import           Data.ElfEdit as Elf
   ( ElfSegmentFlags
   , pf_none
   , pf_r
@@ -364,4 +364,4 @@ readInstruction :: Memory Word64 -- Memory to read.
                 -> Word64 -- Address to read from.
                 -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
 readInstruction mem addr = runMemoryByteReader pf_x mem addr m
-  where m = Flexdis.disassembleInstruction Flexdis.defaultX64Disassembler
+  where m = Flexdis.disassembleInstruction
