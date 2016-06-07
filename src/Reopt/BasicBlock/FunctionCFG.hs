@@ -1,22 +1,25 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
-
+{-# OPTIONS_GHC -w #-}
 module Reopt.BasicBlock.FunctionCFG
-       (CFG(..), Block(..), Term(..), findBlocks, findBlock,
+       ( CFG
+       , Block(..)
+       , Term(..), findBlocks, findBlock,
                                      termChildren, FunBounds(..), inFunBounds)
 where
-import           Reopt.BasicBlock.Extract
+
 import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Word
 import           Numeric
+import           Reopt.BasicBlock.Extract
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+
 import           Reopt.Concrete.Semantics as CS
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Object.Memory
-
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 type CFG = Map Word64 Block
 

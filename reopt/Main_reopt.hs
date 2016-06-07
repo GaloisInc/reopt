@@ -527,7 +527,7 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-ppStmtAndAbs :: MapF Assignment AbsValue -> Stmt -> Doc
+ppStmtAndAbs :: MapF (Assignment X86_64) AbsValue -> Stmt -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
     AssignStmt a ->
@@ -539,7 +539,7 @@ ppStmtAndAbs m stmt =
     _ -> pretty stmt
 
 
-ppBlockAndAbs :: MapF Assignment AbsValue -> Block -> Doc
+ppBlockAndAbs :: MapF (Assignment X86_64) AbsValue -> Block -> Doc
 ppBlockAndAbs m b =
   pretty (blockLabel b) <> text ":" <$$>
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
@@ -671,12 +671,12 @@ showLLVM args dir = do
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
 -- pointer from an address that is 8 below the stack pointer.
-stateEndsWithRet :: X86State Value -> Bool
+stateEndsWithRet :: X86State (Value X86_64) -> Bool
 stateEndsWithRet s = do
   let next_ip = s^.register N.rip
       next_sp = s^.register N.rsp
   case () of
-    _ | AssignedValue (Assignment _ (Read (MemLoc a _))) <- next_ip
+    _ | AssignedValue (Assignment _ (ReadMem a _)) <- next_ip
       , (ip_base, ip_off) <- asBaseOffset a
       , (sp_base, sp_off) <- asBaseOffset next_sp ->
         ip_base == sp_base && ip_off + 8 == sp_off
@@ -684,8 +684,8 @@ stateEndsWithRet s = do
 
 -- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
+isWriteTo :: Stmt -> BVValue X86_64 64 -> TypeRepr tp -> Maybe (Value X86_64 tp)
+isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
   , Just Refl <- testEquality (valueType val) tp =
     Just val
@@ -693,7 +693,7 @@ isWriteTo _ _ _ = Nothing
 
 -- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes to @addr@ and
 -- @addr@ is a code pointer.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> BVValue X86_64 64 -> Maybe Word64
 isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
   , isCodeAddr mem (fromInteger val)
@@ -701,7 +701,7 @@ isCodeAddrWriteTo mem s sp
 isCodeAddrWriteTo _ _ _ = Nothing
 
 -- | Returns true if it looks like block ends with a call.
-blockContainsCall :: Memory Word64 -> Block -> X86State Value -> Bool
+blockContainsCall :: Memory Word64 -> Block -> X86State (Value X86_64) -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.register N.rsp
       go [] = False
@@ -711,7 +711,7 @@ blockContainsCall mem b s =
    in go (reverse (blockStmts b))
 
 -- | Return next states for block.
-blockNextStates :: CFG -> Block -> [X86State Value]
+blockNextStates :: CFG -> Block -> [X86State (Value X86_64)]
 blockNextStates g b =
   case blockTerm b of
     FetchAndExecute s -> [s]

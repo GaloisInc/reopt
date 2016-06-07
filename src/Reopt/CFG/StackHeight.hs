@@ -26,8 +26,9 @@ module Reopt.CFG.StackHeight
 import           Control.Exception (assert)
 import           Data.Bits
 import           Data.Int
-import qualified Data.Map.Strict as Map
+--import qualified Data.Map.Strict as Map
 import           Data.Parameterized.NatRepr
+import           Data.Word
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
@@ -35,18 +36,19 @@ import           Reopt.Machine.Types
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..), rsp)
 import           Debug.Trace
 
+{-
 ------------------------------------------------------------------------
 -- WeightedValueMap
 
 -- | A data structured used to describe values that can be expressed as a
 -- sum where each subterm is either a concrete value, or a concrete value
 -- times a value with type @Value (BVType 64)@.
-type WeightedValueMap = (Map.Map (Value (BVType 64)) Integer, Integer)
+type WeightedValueMap = (Map.Map (Value X86_64 (BVType 64)) Integer, Integer)
 
 concreteMap :: Integer -> WeightedValueMap
 concreteMap v = (Map.empty, v)
 
-singleMap :: Value (BVType 64) -> WeightedValueMap
+singleMap :: Value X86_64 (BVType 64) -> WeightedValueMap
 singleMap v = (Map.singleton v 1, 0)
 
 addN64 :: Integer -> Integer -> Integer
@@ -64,9 +66,9 @@ mulMap :: Integer -> WeightedValueMap -> WeightedValueMap
 mulMap (toSigned n64 -> i) (m,c) = (g <$> m, g c)
   where g v = toSigned n64 (i * v)
 
---minMap :: WeightedValueMap -> WeightedValueMap -> WeightedValueMap
---minMap
+-}
 
+{-
 ------------------------------------------------------------------------
 -- StackDiff
 
@@ -76,7 +78,7 @@ data StackDiff
    | NoStackDiff WeightedValueMap
      -- ^ A list of values that are not sums.
 
-mulStackDiff :: Integer -> Value (BVType 64) -> StackDiff
+mulStackDiff :: Integer -> Value X86_64 (BVType 64) -> StackDiff
 mulStackDiff 0 _ = NoStackDiff (concreteMap 0)
 mulStackDiff 1 v = parseStackPointer v
 mulStackDiff c v =
@@ -88,7 +90,7 @@ addStackDiffOffset :: StackDiff -> Int64 -> StackDiff
 addStackDiffOffset (StackDiff (m,o))   p = StackDiff (m,o+toInteger p)
 addStackDiffOffset (NoStackDiff (m,o)) p = NoStackDiff (m,o+toInteger p)
 
-parseStackPointer :: Value (BVType 64) -> StackDiff
+parseStackPointer :: Value X86_64 (BVType 64) -> StackDiff
 parseStackPointer addr
   | Just (BVAdd _ x y) <- valueAsApp addr =
      case (parseStackPointer x, parseStackPointer y) of
@@ -117,50 +119,22 @@ parseStackPointer addr
   | Initial n <- addr, Just Refl <- testEquality n rsp =
       StackDiff (concreteMap 0)
   | otherwise = NoStackDiff $ singleMap addr
-
-parseStackPointer addr
-  | Just (BVAdd _ x y) <- valueAsApp addr =
-     case (parseStackPointer x, parseStackPointer y) of
-       (StackDiff _, StackDiff _) -> trace "Adding two stack offsets" $
-         NoStackDiff $ singleMap addr
-       (StackDiff xd, NoStackDiff yd) ->
-         StackDiff $ sumMap2 xd yd
-       (NoStackDiff xd, StackDiff yd) ->
-         StackDiff $ sumMap2 xd yd
-       (NoStackDiff xd, NoStackDiff yd) ->
-         NoStackDiff $ sumMap2 xd yd
-  | Just (BVSub _ x y) <- valueAsApp addr =
-     case (parseStackPointer x, parseStackPointer y) of
-       (_, StackDiff _) -> trace "Subtracting stack diff" $
-         NoStackDiff $ singleMap addr
-       (StackDiff xd, NoStackDiff yd) ->
-         StackDiff $ xd `diffMap2` yd
-       (NoStackDiff xd, NoStackDiff yd) ->
-         NoStackDiff $ xd `diffMap2` yd
-  | Just (BVMul _ (BVValue _ x) y) <- valueAsApp addr =
-      mulStackDiff x y
-  | Just (BVMul _ x (BVValue _ y)) <- valueAsApp addr =
-      mulStackDiff y x
-  | BVValue _ i <- addr =
-      NoStackDiff $ concreteMap i
-  | Initial n <- addr, Just Refl <- testEquality n rsp =
-      StackDiff (concreteMap 0)
-  | otherwise = NoStackDiff $ singleMap addr
+-}
 
 ------------------------------------------------------------------------
 -- SallocBase
 
 -- | This is a list that represents the
-data SallocBase = SallocBase [BVValue 64]
+data SallocBase = SallocBase [BVValue X86_64 64]
 
 instance Show SallocBase where
   show (SallocBase x) = show (ppValueAssignmentList x)
 
 
-asSallocBase :: Value (BVType 64) -> Maybe SallocBase
+asSallocBase :: BVValue X86_64 64 -> Maybe SallocBase
 asSallocBase (valueAsApp -> Just (BVAdd _ x (BVValue w o))) = do
   SallocBase r <- asSallocBase x
-  let neg_o = BVValue w (negate o .&. (2^64 - 1))
+  let neg_o = BVValue w (negate o .&. (toInteger (maxBound :: Word64)))
   return $! SallocBase (neg_o:r)
 asSallocBase (valueAsApp -> Just (BVSub _ x y)) = do
   SallocBase r <- asSallocBase x
@@ -216,7 +190,7 @@ updateStackDeltaAssign _ = id
 -}
 
 -- | The Conjoin two stack heights to compute the maximum height.
-recordPotentialStackOffset :: Value (BVType 64)
+recordPotentialStackOffset :: BVValue X86_64 64
                               -- ^ The value
                            -> Int64 -- ^ A concrete offset added to value.
                            -> Bool -- ^ A Boolean flag that indicates if this should be astack offset.
@@ -268,12 +242,12 @@ initFnStack = UndefinedFnStack
 
 -- | Given information about the stack and a offset into the stack, return
 -- a function value denoting the given location.
-stackOffsetAddr :: FnStack -> Value (BVType 64) -> FnValue (BVType 64)
+stackOffsetAddr :: FnStack -> BVValue X86_64 64 -> FnValue (BVType 64)
 stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
  FnValueUnsupported "stackOffsetAddr unsupported" knownType
 
 -- | Record a register as being callee saved.
-recordCalleeSavedWrite :: Value (BVType 64) -- ^ Offset in stack
+recordCalleeSavedWrite :: BVValue X86_64 64 -- ^ Offset in stack
                        -> RegisterName 'GP  -- ^ Register that is saved.
                        -> FnStack -- ^ Current stack
                        -> FnStack

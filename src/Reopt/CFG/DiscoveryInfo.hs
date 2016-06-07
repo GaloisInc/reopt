@@ -93,7 +93,7 @@ data BlockRegion = BlockRegion { brEnd :: !CodeAddr
                                }
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
-lookupBlock :: Map CodeAddr (Maybe BlockRegion) -> BlockLabel -> Maybe Block
+lookupBlock :: Map CodeAddr (Maybe BlockRegion) -> BlockLabel Word64 -> Maybe Block
 lookupBlock m lbl = do
   br <- join $ Map.lookup (labelAddr lbl) m
   Map.lookup (labelIndex lbl) (brBlocks br)
@@ -107,12 +107,12 @@ data FrontierReason
      -- memory.
    = InInitialData
      -- | Exploring because the given block writes it to memory.
-   | InWrite       !BlockLabel
+   | InWrite       !(BlockLabel Word64)
      -- | Exploring because the given block stores address as a
      -- return address.
-   | ReturnAddress !BlockLabel
+   | ReturnAddress !(BlockLabel Word64)
      -- | Exploring because the given block jumps here.
-   | NextIP !BlockLabel
+   | NextIP !(BlockLabel Word64)
      -- | Added as the initial start state.
    | StartAddr
      -- | Added because a previous block split this block.
@@ -140,23 +140,28 @@ instance Show GlobalDataInfo where
 -- of how block ending with a a FetchAndExecute statement should be
 -- interpreted.
 data ParsedTermStmt
-   = ParsedCall !(X86State Value)
+   = ParsedCall !(X86State (Value X86_64))
                 !(Seq Stmt)
                 -- ^ Statements less the pushed return value, if any
-                !(Either Word64 (BVValue 64))
+                !(Either Word64 (BVValue X86_64 64))
                 -- ^ Function to call.  If it is statically known,
                 -- then we get Left, otherwise Right
                 !(Maybe Word64) -- ^ Return location, Nothing if a tail call.
      -- | A jump within a block
-   | ParsedJump !(X86State Value) !Word64
+   | ParsedJump !(X86State (Value X86_64)) !Word64
      -- | A lookup table that branches to the given locations.
    | -- forall n . (1 <= n) =>
-       ParsedLookupTable !(X86State Value) (BVValue 64) (V.Vector Word64)
+       ParsedLookupTable !(X86State (Value X86_64)) (BVValue X86_64 64) (V.Vector Word64)
      -- | A tail cthat branches to the given locations.
-   | ParsedReturn !(X86State Value) !(Seq Stmt)
+   | ParsedReturn !(X86State (Value X86_64)) !(Seq Stmt)
      -- | A branch (i.e., BlockTerm is Branch)
-   | ParsedBranch !(Value BoolType) !(BlockLabel) !(BlockLabel)
-   | ParsedSyscall !(X86State Value) !Word64 !Word64 !String !String ![N.RegisterName 'N.GP]
+   | ParsedBranch !(Value X86_64 BoolType) !(BlockLabel Word64) !(BlockLabel Word64)
+   | ParsedSyscall !(X86State (Value X86_64))
+                   !Word64
+                   !Word64
+                   !String
+                   !String
+                   ![N.RegisterName 'N.GP]
                    ![Some N.RegisterName]
   deriving (Show)
 
@@ -272,8 +277,11 @@ inSameFunction x y s =
 
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
-isWriteTo :: Stmt -> Value (BVType 64) -> TypeRepr tp -> Maybe (Value tp)
-isWriteTo (Write (MemLoc a _) val) expected tp
+isWriteTo :: Stmt
+          -> BVValue X86_64 64
+          -> TypeRepr tp
+          -> Maybe (Value X86_64 tp)
+isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
   , Just Refl <- testEquality (valueType val) tp =
     Just val
@@ -281,7 +289,7 @@ isWriteTo _ _ _ = Nothing
 
 -- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
 -- a single address to a marked executable in @mem@ to @addr@.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> Value (BVType 64) -> Maybe Word64
+isCodeAddrWriteTo :: Memory Word64 -> Stmt -> BVValue X86_64 64 -> Maybe Word64
 isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
   , isCodeAddr mem (fromInteger val)
@@ -292,7 +300,7 @@ isCodeAddrWriteTo _ _ _ = Nothing
 -- instructions prior to that write and return  values.
 identifyCall :: Memory Word64
              -> [Stmt]
-             -> X86State Value
+             -> X86State (Value X86_64)
              -> Maybe (Seq Stmt, Word64)
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
@@ -308,24 +316,24 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
 -- pointer from an address that is 8 below the stack pointer.
-identifyReturn :: X86State Value -> Maybe (Assignment (BVType 64))
+identifyReturn :: X86State (Value X86_64) -> Maybe (Assignment X86_64 (BVType 64))
 identifyReturn s = do
   let next_ip = s^.register N.rip
       next_sp = s^.register N.rsp
   case next_ip of
-    AssignedValue asgn@(Assignment _ (Read (MemLoc ip_addr _)))
+    AssignedValue asgn@(Assignment _ (ReadMem ip_addr _))
       | let (ip_base, ip_off) = asBaseOffset ip_addr
       , let (sp_base, sp_off) = asBaseOffset next_sp
       , (ip_base, ip_off + 8) == (sp_base, sp_off) -> Just asgn
     _ -> Nothing
 
 identifyJumpTable :: DiscoveryInfo
-                  -> BlockLabel
+                  -> BlockLabel Word64
                       -- | Memory address that IP is read from.
-                  -> Value (BVType 64)
+                  -> BVValue X86_64 64
                   -- Returns the (symbolic) index and concrete next blocks
-                  -> Maybe (Value (BVType 64), V.Vector CodeAddr)
-identifyJumpTable s lbl (AssignedValue (Assignment _ (Read (MemLoc ptr _))))
+                  -> Maybe (BVValue X86_64 64, V.Vector Word64)
+identifyJumpTable s lbl (AssignedValue (Assignment _ (ReadMem ptr _)))
     -- Turn the read address into base + offset.
    | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp ptr
     -- Turn the offset into a multiple by an index.
@@ -342,6 +350,7 @@ identifyJumpTable s lbl (AssignedValue (Assignment _ (Read (MemLoc ptr _))))
     mem = memory s
 identifyJumpTable _ _ _ = Nothing
 
+-- | Classifies the terminal statement in a block using discovered information.
 classifyBlock :: Block -> DiscoveryInfo -> Maybe ParsedTermStmt
 classifyBlock b interp_state =
   case blockTerm b of
@@ -433,7 +442,7 @@ classifyBlock b interp_state =
     mem = memory interp_state
     sysp = syscallPersonality interp_state
 
-getClassifyBlock :: BlockLabel -> DiscoveryInfo ->  Maybe (Block, Maybe ParsedTermStmt)
+getClassifyBlock :: BlockLabel Word64 -> DiscoveryInfo ->  Maybe (Block, Maybe ParsedTermStmt)
 getClassifyBlock lbl interp_state = do
   b <- lookupBlock (interp_state ^. blocks) lbl
   return (b, classifyBlock b interp_state)

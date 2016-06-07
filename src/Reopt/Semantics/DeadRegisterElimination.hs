@@ -29,10 +29,10 @@ import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Set (Set)
 import qualified Data.Set as S
+import           Data.Word
 
 import           Data.Parameterized.Some
 import           Reopt.CFG.Representation
-import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
 
 
@@ -44,12 +44,12 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
-liveRegisters :: CFG -> BlockLabel -> Map BlockLabel Block
+liveRegisters :: CFG -> BlockLabel Word64 -> Map (BlockLabel Word64) Block
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v
 
-blockLiveRegisters :: Block -> State (Set AssignId) (Map BlockLabel Block)
+blockLiveRegisters :: Block -> State (Set AssignId) (Map (BlockLabel Word64) Block)
 blockLiveRegisters b = do addIDs terminalIds
                           stmts' <- foldrM noteAndFilter [] (blockStmts b)
                           return $ M.singleton (blockLabel b) (b { blockStmts = stmts' })
@@ -65,8 +65,11 @@ blockLiveRegisters b = do addIDs terminalIds
              do addIDs (refsInAssignRhs rhs)
                 return (stmt : ss)
              else return ss
-    noteAndFilter stmt@(Write loc rhs) ss
-      = do addIDs (refsInLoc loc)
+    noteAndFilter stmt@(Write _ rhs) ss
+      = do addIDs (refsInValue rhs)
+           return (stmt : ss)
+    noteAndFilter stmt@(WriteMem loc rhs) ss
+      = do addIDs (refsInValue loc)
            addIDs (refsInValue rhs)
            return (stmt : ss)
     noteAndFilter stmt@(MemCopy _ cnt src dest df) ss = do
@@ -85,32 +88,3 @@ blockLiveRegisters b = do addIDs terminalIds
       = do mapM_ (addIDs . viewSome refsInValue) vals
            return (stmt : ss)
     noteAndFilter stmt@Comment{} ss = return (stmt : ss)
-
-refsInAssignRhs :: AssignRhs tp -> Set AssignId
-refsInAssignRhs rhs = case rhs of
-                       EvalApp v      -> refsInApp v
-                       SetUndefined _ -> S.empty
-                       Read loc       -> refsInLoc loc
-                       ReadFSBase -> S.empty
-                       ReadGSBase -> S.empty
-                       MemCmp _ cnt src dest dir ->
-                         S.unions [ refsInValue cnt
-                                  , refsInValue src
-                                  , refsInValue dest
-                                  , refsInValue dir ]
-                       FindElement _ _ cnt buf val dir ->
-                         S.unions [ refsInValue cnt
-                                  , refsInValue buf
-                                  , refsInValue val
-                                  , refsInValue dir ]
-
-refsInApp :: App Value tp -> Set AssignId
-refsInApp app = foldApp refsInValue app
-
-refsInLoc :: StmtLoc (Value (BVType 64)) tp -> Set AssignId
-refsInLoc (MemLoc v _) = refsInValue v
-refsInLoc _            = S.empty
-
-refsInValue :: Value tp -> Set AssignId
-refsInValue (AssignedValue (Assignment v _)) = S.singleton v
-refsInValue _                                = S.empty

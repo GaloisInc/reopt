@@ -182,7 +182,7 @@ functionName m addr =
     Nothing -> L.Symbol $ "reopt_gen_" ++ showHex addr ""
     Just nm -> L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
 
-blockName :: BlockLabel -> L.Ident
+blockName :: (Integral w, Show w) => BlockLabel w -> L.Ident
 blockName = L.Ident . show
 
 -- The type of FP arguments and results.  We actually want fp128, but

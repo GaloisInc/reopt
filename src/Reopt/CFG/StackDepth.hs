@@ -22,6 +22,7 @@ import           Data.Monoid (Any(..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Type.Equality
+import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.DiscoveryInfo
@@ -32,8 +33,10 @@ import           Reopt.Machine.X86State
 
 import           Debug.Trace
 
-data StackDepthOffset = Pos (Value (BVType 64)) | Neg (Value (BVType 64))
-                      deriving (Eq, Ord, Show)
+data StackDepthOffset
+   = Pos (BVValue X86_64 64)
+   | Neg (BVValue X86_64 64)
+ deriving (Eq, Ord, Show)
 
 negateStackDepthOffset :: StackDepthOffset -> StackDepthOffset
 negateStackDepthOffset (Pos x) = Neg x
@@ -101,17 +104,19 @@ type BlockStackStart = StackDepthValue
 type BlockStackDepths = Set StackDepthValue
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
-data StackDepthState = SDS { _blockInitStackPointers :: !(Map BlockLabel BlockStackStart)
-                           , _blockStackRefs :: !(BlockStackDepths)
-                           , _blockFrontier  :: !(Set BlockLabel)  }
+data StackDepthState
+   = SDS { _blockInitStackPointers :: !(Map (BlockLabel Word64) BlockStackStart)
+         , _blockStackRefs :: !(BlockStackDepths)
+         , _blockFrontier  :: !(Set (BlockLabel Word64))
+         }
 
-blockInitStackPointers :: Simple Lens StackDepthState (Map BlockLabel BlockStackStart)
+blockInitStackPointers :: Simple Lens StackDepthState (Map (BlockLabel Word64) BlockStackStart)
 blockInitStackPointers = lens _blockInitStackPointers (\s v -> s { _blockInitStackPointers = v })
 
 blockStackRefs :: Simple Lens StackDepthState (BlockStackDepths)
 blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 
-blockFrontier :: Simple Lens StackDepthState (Set BlockLabel)
+blockFrontier :: Simple Lens StackDepthState (Set (BlockLabel Word64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -145,7 +150,7 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 type StackDepthM a = State StackDepthState a
 
-addBlock :: BlockLabel -> BlockStackStart -> StackDepthM ()
+addBlock :: BlockLabel Word64 -> BlockStackStart -> StackDepthM ()
 addBlock lbl start =
   do x <- use (blockInitStackPointers . at lbl)
      case x of
@@ -155,29 +160,29 @@ addBlock lbl start =
         | start == start' -> return ()
         | otherwise       -> traceM ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start')))
 
-nextBlock :: StackDepthM (Maybe BlockLabel)
+nextBlock :: StackDepthM (Maybe (BlockLabel Word64))
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
 addDepth :: Set StackDepthValue -> StackDepthM ()
 addDepth v = blockStackRefs %= Set.union v
 
-valueHasSP :: Value (BVType 64) -> Bool
+valueHasSP :: BVValue X86_64 64 -> Bool
 valueHasSP val = go val
   where
-    go :: forall tp. Value tp -> Bool
+    go :: forall tp . Value X86_64 tp -> Bool
     go v = case v of
              BVValue _sz _i -> False
              Initial r      -> testEquality r N.rsp /= Nothing
              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
-    goAssignRHS :: forall tp. AssignRhs tp -> Bool
+    goAssignRHS :: forall tp. AssignRhs X86_64 tp -> Bool
     goAssignRHS v =
       case v of
         EvalApp a -> getAny $ foldApp (Any . go)  a
         MemCmp _sz cnt src dest rev -> or [ go cnt, go src, go dest, go rev ]
         _ -> False
 
-parseStackPointer' :: StackDepthValue -> Value (BVType 64) -> StackDepthValue
+parseStackPointer' :: StackDepthValue -> BVValue X86_64 64 -> StackDepthValue
 parseStackPointer' sp0 addr
   -- assert sp occurs in at most once in either x and y
   | Just (BVAdd _ x y) <- valueAsApp addr =
@@ -193,7 +198,7 @@ parseStackPointer' sp0 addr
 
 
 -- FIXME: performance
-parseStackPointer :: StackDepthValue -> Value (BVType 64) -> Set StackDepthValue
+parseStackPointer :: StackDepthValue -> BVValue X86_64 64 -> Set StackDepthValue
 parseStackPointer sp0 addr0
   | valueHasSP addr0 = Set.singleton (parseStackPointer' sp0 addr0)
   | otherwise        = Set.empty
@@ -214,8 +219,8 @@ maximumStackDepth ist addr =
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: DiscoveryInfo
-               -> Set BlockLabel
-               -> Maybe BlockLabel
+               -> Set (BlockLabel Word64)
+               -> Maybe (BlockLabel Word64)
                -> StackDepthM ()
 recoverIter _   _     Nothing = return ()
 recoverIter ist seen (Just lbl)
@@ -225,7 +230,7 @@ recoverIter ist seen (Just lbl)
                    recoverIter ist (Set.insert lbl seen) lbl'
 
 recoverBlock :: DiscoveryInfo
-                -> BlockLabel
+                -> BlockLabel Word64
                 -> StackDepthM ()
 recoverBlock interp_state root_label = do
   Just init_sp <- use (blockInitStackPointers . at root_label)
@@ -234,11 +239,11 @@ recoverBlock interp_state root_label = do
     go init_sp lbl = do
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
 
-      let goStmt (AssignStmt (Assignment _ (Read (MemLoc addr _))))
+      let goStmt (AssignStmt (Assignment _ (ReadMem addr _)))
             = addDepth $ parseStackPointer init_sp addr
-          goStmt (Write (MemLoc addr tp) v)
+          goStmt (WriteMem addr v)
             = do addDepth $ parseStackPointer init_sp addr
-                 case testEquality tp (knownType :: TypeRepr (BVType 64)) of
+                 case testEquality (valueType v) (knownType :: TypeRepr (BVType 64)) of
                    Just Refl -> addDepth $ parseStackPointer init_sp v
                    _ -> return ()
 

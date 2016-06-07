@@ -58,56 +58,6 @@ import           Reopt.Utils.PrettyPrint
 ------------------------------------------------------------------------
 -- X87StatusWord
 
-{-
-vec :: Simple Lens
-
-x87_ie :: Simple Lens X87StatusWord (Value BoolType)
-x87_ie = vec 0
-
-x87_ie :: Simple Lens X87StatusWord (Value BoolType)
-x87_ie = vec 0
-
-
-x87_de :: Simple Lens X87StatusWord (Value BoolType)
-x87_de = lens _x87_de (\s v -> s { _x87_de = v })
-
-x87_ze :: Simple Lens X87StatusWord (Value BoolType)
-x87_ze = lens _x87_ze (\s v -> s { _x87_ze = v })
-
-x87_oe :: Simple Lens X87StatusWord (Value BoolType)
-x87_oe = lens _x87_oe (\s v -> s { _x87_oe = v })
-
-x87_ue :: Simple Lens X87StatusWord (Value BoolType)
-x87_ue = lens _x87_ue (\s v -> s { _x87_ue = v })
-
-x87_pe :: Simple Lens X87StatusWord (Value BoolType)
-x87_pe = lens _x87_pe (\s v -> s { _x87_pe = v })
-
-x87_ef :: Simple Lens X87StatusWord (Value BoolType)
-x87_ef = lens _x87_ef (\s v -> s { _x87_ef = v })
-
-x87_es :: Simple Lens X87StatusWord (Value BoolType)
-x87_es = lens _x87_es (\s v -> s { _x87_es = v })
-
-x87_c0 :: Simple Lens X87StatusWord (Value BoolType)
-x87_c0 = lens _x87_c0 (\s v -> s { _x87_c0 = v })
-
-x87_c1 :: Simple Lens X87StatusWord (Value BoolType)
-x87_c1 = lens _x87_c1 (\s v -> s { _x87_c1 = v })
-
-x87_c2 :: Simple Lens X87StatusWord (Value BoolType)
-x87_c2 = lens _x87_c2 (\s v -> s { _x87_c2 = v })
-
-x87_c3 :: Simple Lens X87StatusWord (Value BoolType)
-x87_c3 = lens _x87_c3 (\s v -> s { _x87_c3 = v })
-
-x87_top :: Simple Lens X87StatusWord (Value (BVType 3))
-x87_top = lens _x87_top (\s v -> s { _x87_top = v })
-
-x87_busy :: Simple Lens X87StatusWord (Value BoolType)
-x87_busy = lens _x87_busy (\s v -> s { _x87_busy = v })
--}
-
 type X87StatusWord f = V.Vector (f BoolType)
 
 
@@ -157,7 +107,6 @@ x86ResultRegisters = [ N.rax, N.rdx ]
 
 x86FloatResultRegisters :: [N.RegisterName 'N.XMM]
 x86FloatResultRegisters = [ (N.XMMReg 0) ]
-
 
 ------------------------------------------------------------------------
 -- X86State

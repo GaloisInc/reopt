@@ -27,11 +27,12 @@ import GHC.TypeLits
 import qualified Flexdis86 as F
 import Reopt.Machine.Types
 
-data RegisterClass = ProgramCounter
-                   | GP | Flag | Segment | Control
-                   | Debug
-                   | X87_Tag | X87_FPU | X87_Status | X87_Control | X87_Top | X87_ControlMask
-                   | XMM
+data RegisterClass
+   = ProgramCounter
+   | GP | Flag | Segment | Control
+   | Debug
+   | X87_Tag | X87_FPU | X87_Status | X87_Control | X87_Top | X87_ControlMask
+   | XMM
 
 data RegisterClassRepr (r :: RegisterClass) where
   ProgramCounterRepr  :: RegisterClassRepr 'ProgramCounter
@@ -47,32 +48,6 @@ data RegisterClassRepr (r :: RegisterClass) where
   X87_ControlRepr     :: RegisterClassRepr 'X87_Control
   X87_ControlMaskRepr :: RegisterClassRepr 'X87_ControlMask
   XMMRepr             :: RegisterClassRepr 'XMM
-
-{-
-type family NRegisters (r :: RegisterClass) :: Nat where
-  NRegisters ProgramCounter = 1
-  NRegisters GP             = 16
-  NRegisters Flag           = 64
-  NRegisters Segment        = 6
-  NRegisters Debug          = 8
-  NRegisters X87_FPU        = 8
-  NRegisters X87_Status     = 16
-  NRegisters X87_Tag        = 8
-  NRegisters X87_Control    = 16
-  NRegisters XMM            = 16
-
-nRegisters :: RegisterClassRepr r -> NatRepr (NRegisters r)
-nRegisters ProgramCounterRepr = knownNat
-nRegisters GPRepr             = knownNat
-nRegisters FlagRepr           = knownNat
-nRegisters SegmentRepr        = knownNat
-nRegisters DebugRepr          = knownNat
-nRegisters X87_FPURepr        = knownNat
-nRegisters X87_FlagRepr       = knownNat
-nRegisters X87_TagRepr        = knownNat
-nRegisters X87_ControlRepr    = knownNat
-nRegisters XMMRepr            = knownNat
--}
 
 type family RegisterClassBits (cl :: RegisterClass) :: Nat where
   RegisterClassBits 'ProgramCounter = 64
@@ -92,37 +67,28 @@ type family RegisterClassBits (cl :: RegisterClass) :: Nat where
 
 type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 
-data RegisterName cl where
-  IPReg      :: RegisterName 'ProgramCounter
+data RegisterName cl
+   = (cl ~ 'ProgramCounter) => IPReg
+   | (cl ~ 'GP) => GPReg !Int
+     -- ^ One of 16 general purpose registers
+   | (cl ~ 'Segment) => SegmentReg !Int
+   | (cl ~ 'Flag)    => FlagReg !Int
+     -- ^ One of 32 initial flag registers.
+   | (cl ~ 'Control) => ControlReg !Int
+   | (cl ~ 'X87_Status) => X87StatusReg !Int
+   | (cl ~ 'X87_Top)    => X87TopReg
+      -- FIXME: These are currently read-only
+   | (cl ~  X87_ControlMask) => X87ControlReg !Int
+   | (cl ~ 'X87_Control) => X87PC
+   | (cl ~ 'X87_Control) => X87RC
+     -- X87 tag register.
+   | (cl ~ 'X87_Tag) => X87TagReg !Int
+      -- One of 8 fpu/mmx registers.
+   | (cl ~ 'X87_FPU) => X87FPUReg !Int
 
-  GPReg      :: !Int -> RegisterName 'GP
-
-  SegmentReg :: !Int -> RegisterName 'Segment
-
-  -- One of 32 initial flag registers.
-  FlagReg    :: !Int -> RegisterName 'Flag
-
-  ControlReg :: !Int -> RegisterName 'Control
-
-  X87StatusReg :: !Int -> RegisterName 'X87_Status
-  X87TopReg    :: RegisterName 'X87_Top
-
-  -- FIXME: These are currently read-only
-  X87ControlReg :: !Int -> RegisterName 'X87_ControlMask
-
-  X87PC      :: RegisterName 'X87_Control
-  X87RC      :: RegisterName 'X87_Control
-
-  -- X87 tag register.
-  X87TagReg :: !Int -> RegisterName 'X87_Tag
-
-  -- One of 8 fpu/mmx registers.
-  X87FPUReg :: !Int -> RegisterName 'X87_FPU
-
-  -- One of 8 XMM registers
-  XMMReg :: !Int -> RegisterName 'XMM
-
-  DebugReg :: !Int -> RegisterName 'Debug
+     -- One of 8 XMM registers
+   | (cl ~ 'XMM) => XMMReg !Int
+   | (cl ~ 'Debug) => DebugReg !Int
 
 gpRegs :: [RegisterName 'GP]
 gpRegs = [GPReg i | i <- [0..15]]

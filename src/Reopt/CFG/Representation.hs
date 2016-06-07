@@ -46,6 +46,7 @@ module Reopt.CFG.Representation
   , assignmentType
   , AssignId
   , AssignRhs(..)
+  , refsInAssignRhs
     -- * Value
   , Value(..)
   , BVValue
@@ -60,6 +61,7 @@ module Reopt.CFG.Representation
   , bvValue
   , ppValueAssignments
   , ppValueAssignmentList
+  , refsInValue
   , App(..)
   -- * App
   , appType
@@ -74,6 +76,8 @@ module Reopt.CFG.Representation
   , ppNat
   , ppValue
   , sexpr
+  -- * Architectures
+  , X86_64
   ) where
 
 import           Control.Applicative
@@ -126,39 +130,41 @@ type CodeAddr = Word64
 -- BlockLabel
 
 -- | A label used to identify a block.
-data BlockLabel
+--
+-- The field is the address width.
+data BlockLabel w
      -- | A block that came from an address in the code.
-   = GeneratedBlock { labelAddr   :: {-# UNPACK #-} !CodeAddr
+   = GeneratedBlock { labelAddr   :: !w
                     , labelIndex  :: {-# UNPACK #-} !Word64
                     -- ^ A unique identifier for a generated block.
                     }
   deriving Eq
 
-isRootBlockLabel :: BlockLabel -> Bool
+isRootBlockLabel :: BlockLabel w -> Bool
 isRootBlockLabel (GeneratedBlock _ w) = w == 0
 
-rootBlockLabel :: BlockLabel -> BlockLabel
+rootBlockLabel :: BlockLabel w -> BlockLabel w
 rootBlockLabel (GeneratedBlock p _) = GeneratedBlock p 0
 
-mkRootBlockLabel :: Word64 -> BlockLabel
+mkRootBlockLabel :: w -> BlockLabel w
 mkRootBlockLabel p = GeneratedBlock p 0
 
-instance Ord BlockLabel where
+instance Ord w => Ord (BlockLabel w) where
   compare (GeneratedBlock p v) (GeneratedBlock p' v') =
     compare p p' Monoid.<> compare v v'
 
-instance Show BlockLabel where
+instance (Integral w, Show w) => Show (BlockLabel w) where
   showsPrec _ (GeneratedBlock a 0) s = "block_" ++ showHex a s
   showsPrec _ (GeneratedBlock a w) s = "subblock_" ++ showHex a ("_" ++ shows w s)
+  {-# INLINABLE showsPrec #-}
 
-instance Pretty BlockLabel where
+instance (Integral w, Show w) => Pretty (BlockLabel w) where
   pretty l = text (show l)
 
 ------------------------------------------------------------------------
 -- Loctions a statement may need to read or write to.
 
 data StmtLoc a tp where
-  MemLoc     :: !a -> TypeRepr tp -> StmtLoc a tp
   ControlLoc :: !(N.RegisterName 'N.Control) -> StmtLoc a (BVType 64)
   DebugLoc   :: !(N.RegisterName 'N.Debug)   -> StmtLoc a (BVType 64)
 
@@ -194,7 +200,6 @@ data StmtLoc a tp where
 
 
 stmtLocType :: StmtLoc a tp -> TypeRepr tp
-stmtLocType (MemLoc _ tp) = tp
 stmtLocType ControlLoc{} = knownType
 stmtLocType DebugLoc{}   = knownType
 stmtLocType FS = knownType
@@ -206,7 +211,6 @@ class PrettyPrec v where
   prettyPrec :: Int -> v -> Doc
 
 instance PrettyPrec a => Pretty (StmtLoc a tp) where
-  pretty (MemLoc a _) = text "*" PP.<> prettyPrec 11 a
   pretty (ControlLoc r) = text (show r)
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
@@ -215,39 +219,125 @@ instance PrettyPrec a => Pretty (StmtLoc a tp) where
   pretty X87_RC = text "x87_rc"
 
 ------------------------------------------------------------------------
+-- Assignment and AssignRhs declarations.
+
+type X86_64 = "x86_64"
+
+
+-- | This should be an identifier that can be used to identify the
+-- assignment statement uniquely within the CFG.
+type AssignId = Word64
+
+-- | An assignment consists of a unique location identifier and a right-
+-- hand side that returns a value.
+data Assignment arch tp = Assignment { assignId :: !AssignId
+                                     , assignRhs :: !(AssignRhs arch tp)
+                                     }
+
+-- | The right hand side of an assignment is an expression that
+-- returns a value.
+data AssignRhs (arch :: Symbol) tp where
+  -- An expression that is computed from evaluating subexpressions.
+  EvalApp :: !(App (Value arch) tp)
+          -> AssignRhs arch tp
+
+  -- An expression with an undefined value.
+  SetUndefined :: (tp ~ BVType n)
+               => !(NatRepr n) -- Width of undefined value.
+               -> AssignRhs arch tp
+
+  -- Read memory at given location.
+  ReadMem :: !(Value arch (BVType 64))
+          -> !(TypeRepr tp)
+          -> AssignRhs arch tp
+
+  -- Read value at given location.
+  Read :: !(StmtLoc (Value arch (BVType 64)) tp)
+       -> AssignRhs X86_64 tp
+
+  -- Read the 'FS' base address
+  ReadFSBase :: (tp ~ BVType 64)
+             => AssignRhs X86_64 tp
+
+  -- Read the 'GS' base address
+  ReadGSBase :: (tp ~ BVType 64)
+             => AssignRhs X86_64 tp
+
+  -- Compares to memory regions
+  MemCmp :: (tp ~ BVType 64)
+         => !Integer
+         -- ^ Number of bytes per value.
+         -> !(BVValue X86_64 64)
+         -- ^ Number of values to compare
+         -> !(BVValue X86_64 64)
+         -- ^ Pointer to first buffer.
+         -> !(BVValue X86_64 64)
+         -- ^ Pointer to second buffer.
+         -> !(BVValue X86_64 1)
+         -- ^ Direction flag, False means increasing
+         -> AssignRhs X86_64 tp
+
+  FindElement :: (tp ~ BVType 64, 1 <= n)
+              => ! Integer
+              -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+              -> !Bool
+              -- ^ Find first matching (True) or not matching (False)
+              -> !(BVValue X86_64 64)
+              -- ^ Number of elements to compare
+              -> !(BVValue X86_64 64)
+              -- ^ Pointer to first buffer
+              -> !(BVValue X86_64 n)
+              -- ^ Value to compare
+              -> !(BVValue X86_64 1)
+              -- ^ Flag indicates direction of copy:
+              -- True means we should decrement buffer pointers after each copy.
+              -- False means we should increment the buffer pointers after each copy.
+              -> AssignRhs X86_64 tp
+
+-- | A value at runtime.
+data Value arch tp where
+  -- Bitvector value.
+  BVValue :: !(NatRepr n) -> Integer -> Value arch (BVType n)
+
+  -- Value from an assignment statement.
+  AssignedValue :: !(Assignment arch tp) -> Value arch tp
+
+  Initial :: !(N.RegisterName cl) -> Value arch (N.RegisterType cl)
+
+type BVValue arch w = Value arch (BVType w)
+
+------------------------------------------------------------------------
 -- Stmt
 
-type BVValue n = Value (BVType n)
 
-data Stmt where
-  AssignStmt :: !(Assignment tp) -> Stmt
-  Write :: !(StmtLoc (BVValue 64) tp) -> Value tp -> Stmt
-  MemCopy :: !Integer
+data Stmt
+   = forall tp . AssignStmt !(Assignment X86_64 tp)
+   | forall tp . Write    !(StmtLoc (BVValue X86_64 64) tp) !(Value X86_64 tp)
+    -- | Write to memory at the given location
+   | forall tp . WriteMem !(BVValue X86_64 64) !(Value X86_64 tp)
+   | MemCopy !Integer
              -- ^ Number of bytes to copy at a time (1,2,4,8)
-          -> !(BVValue 64)
+             !(BVValue X86_64 64)
              -- ^ Number of values to move.
-          -> !(BVValue 64)
+             !(BVValue X86_64 64)
              -- ^ Start of source buffer.
-          -> !(BVValue 64)
+             !(BVValue X86_64 64)
              -- ^ Start of destination buffer.
-          -> !(BVValue 1)
+             !(BVValue X86_64 1)
              -- ^ Flag indicates whether direction of move:
              -- True means we should decrement buffer pointers after each copy.
              -- False means we should increment the buffer pointers after each copy.
-          -> Stmt
-
-  MemSet :: BVValue 64
+   | forall n .
+     MemSet !(BVValue X86_64 64)
             -- ^ Number of values to assign
-         -> BVValue n
+            !(BVValue X86_64 n)
             -- ^ Value to assign
-         -> BVValue 64
+            !(BVValue X86_64 64)
             -- ^ Address to start assigning from.
-         -> BVValue 1
+            !(BVValue X86_64 1)
             -- ^ Direction flag
-         -> Stmt
-
-  PlaceHolderStmt :: [Some Value] -> String -> Stmt
-  Comment :: !Text -> Stmt
+  | PlaceHolderStmt !([Some (Value X86_64)]) !String
+  | Comment !Text
 
 instance Show Stmt where
   show = show . pretty
@@ -255,6 +345,7 @@ instance Show Stmt where
 instance Pretty Stmt where
   pretty (AssignStmt a) = pretty a
   pretty (Write loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
+  pretty (WriteMem a rhs) = text "*" PP.<> prettyPrec 11 a <+> text ":=" <+> ppValue 0 rhs
   pretty (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
@@ -272,14 +363,14 @@ instance Pretty Stmt where
 -- A terminal statement in a block
 data TermStmt
      -- | Fetch and execute the next instruction from the given processor state.
-  = FetchAndExecute !(X86State Value)
+  = FetchAndExecute !(X86State (Value X86_64))
     -- | Branch and execute one block or another.
-  | Branch !(Value BoolType) !BlockLabel !BlockLabel
+  | Branch !(Value X86_64 BoolType) !(BlockLabel Word64) !(BlockLabel Word64)
     -- | The syscall instruction.
     -- We model system calls as terminal instructions because from the
     -- application perspective, the semantics will depend on the operating
     -- system.
-  | Syscall !(X86State Value)
+  | Syscall !(X86State (Value X86_64))
 
 
 instance Pretty TermStmt where
@@ -293,86 +384,18 @@ instance Pretty TermStmt where
     indent 2 (pretty s)
 
 ------------------------------------------------------------------------
--- Assignment and AssignRhs declarations.
-
--- | This should be an identifier that can be used to identify the
--- assignment statement uniquely within the CFG.
-type AssignId = Word64
-
--- | An assignment consists of a unique location identifier and a right-
--- hand side that returns a value.
-data Assignment tp = Assignment { assignId :: !AssignId
-                                , assignRhs :: !(AssignRhs tp)
-                                }
-
--- | The right hand side of an assignment is an expression that
--- returns a value.
-data AssignRhs tp where
-  -- An expression that is computed from evaluating subexpressions.
-  EvalApp :: !(App Value tp)
-          -> AssignRhs tp
-
-  -- An expression with an undefined value.
-  SetUndefined :: (tp ~ BVType n)
-               => !(NatRepr n) -- Width of undefined value.
-               -> AssignRhs tp
-
-  -- Read vlaue at given location.
-  Read :: !(StmtLoc (Value (BVType 64)) tp)
-       -> AssignRhs tp
-
-  -- Read the 'FS' base address
-  ReadFSBase :: (tp ~ BVType 64)
-             => AssignRhs tp
-
-  -- Read the 'GS' base address
-  ReadGSBase :: (tp ~ BVType 64)
-             => AssignRhs tp
-
-  -- Compares to memory regions
-  MemCmp :: (tp ~ BVType 64)
-         => !Integer
-         -- ^ Number of bytes per value.
-         -> !(BVValue 64)
-         -- ^ Number of values to compare
-         -> !(BVValue 64)
-         -- ^ Pointer to first buffer.
-         -> !(BVValue 64)
-         -- ^ Pointer to second buffer.
-         -> !(BVValue 1)
-         -- ^ Direction flag, False means increasing
-         -> AssignRhs tp
-
-  FindElement :: (tp ~ BVType 64, 1 <= n)
-              => ! Integer
-              -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
-              -> !Bool
-              -- ^ Find first matching (True) or not matching (False)
-              -> !(BVValue 64)
-              -- ^ Number of elements to compare
-              -> !(BVValue 64)
-              -- ^ Pointer to first buffer
-              -> !(BVValue n)
-              -- ^ Value to compare
-              -> !(BVValue 1)
-              -- ^ Flag indicates direction of copy:
-              -- True means we should decrement buffer pointers after each copy.
-              -- False means we should increment the buffer pointers after each copy.
-              -> AssignRhs tp
-
-------------------------------------------------------------------------
--- Assignment
+-- Assignment operations
 
 ppAssignId :: AssignId -> Doc
 ppAssignId w = text ("r" ++ show w)
 
-assignmentType :: Assignment tp -> TypeRepr tp
+assignmentType :: Assignment arch tp -> TypeRepr tp
 assignmentType (Assignment _ rhs) = assignRhsType rhs
 
-instance TestEquality Assignment where
+instance TestEquality (Assignment arch) where
   testEquality x y = orderingF_refl (compareF x y)
 
-instance OrdF Assignment where
+instance OrdF (Assignment arch) where
   compareF x y =
     case compare (assignId x) (assignId y) of
       LT -> LTF
@@ -382,21 +405,21 @@ instance OrdF Assignment where
           Just Refl -> EQF
           Nothing -> error "mismatched types"
 
-instance Pretty (Assignment tp) where
+instance Pretty (Assignment arch tp) where
   pretty (Assignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
 ------------------------------------------------------------------------
--- AssignRhs
+-- AssignRhs operations
 
 ppAssignRhs :: Applicative m
-            => (forall u . Value u -> m Doc)
+            => (forall u . Value arch u -> m Doc)
                -- ^ Function for pretty printing vlaue.
-            -> AssignRhs tp
+            -> AssignRhs arch tp
             -> m Doc
 ppAssignRhs pp (EvalApp a) = ppAppA pp a
 ppAssignRhs _  (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
-ppAssignRhs pp (Read (MemLoc a _)) = (\d -> text "*" PP.<> d) <$> pp a
 ppAssignRhs _  (Read loc) = pure $ pretty loc
+ppAssignRhs pp (ReadMem a _) = (\d -> text "*" PP.<> d) <$> pp a
 ppAssignRhs _  ReadFSBase = pure $ text "fs.base"
 ppAssignRhs _  ReadGSBase = pure $ text "gs.base"
 ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
@@ -404,47 +427,38 @@ ppAssignRhs pp (MemCmp sz cnt src dest rev) = sexprA "memcmp" args
 ppAssignRhs pp (FindElement sz fndeq cnt buf val rev) = sexprA "find_element" args
   where args = [pure (pretty sz), pure (pretty fndeq), pp cnt, pp buf, pp val, pp rev]
 
-instance Pretty (AssignRhs tp) where
+instance Pretty (AssignRhs arch tp) where
   pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) v
 
 -- | Returns the type of an assignment rhs.
-assignRhsType :: AssignRhs tp -> TypeRepr tp
+assignRhsType :: AssignRhs arch tp -> TypeRepr tp
 assignRhsType rhs =
   case rhs of
     EvalApp a -> appType a
     SetUndefined w -> BVTypeRepr w
     Read loc  -> stmtLocType loc
+    ReadMem _ tp -> tp
     ReadFSBase -> knownType
     ReadGSBase -> knownType
     MemCmp _sz _cnt _src _dest _rev -> knownType
     FindElement {} -> knownType
 
 ------------------------------------------------------------------------
--- Value
+-- Value operations
 
--- | A value at runtime.
-data Value tp where
-  -- Bitvector value.
-  BVValue :: !(NatRepr n) -> Integer -> Value (BVType n)
-
-  -- Value from an assignment statement.
-  AssignedValue :: !(Assignment tp) -> Value tp
-
-  Initial :: !(N.RegisterName cl) -> Value (N.RegisterType cl)
-
-instance Eq (Value tp) where
+instance Eq  (Value arch tp) where
   x == y = isJust (testEquality x y)
 
-instance Ord (Value tp) where
+instance Ord (Value arch tp) where
   compare x y = toOrdering (compareF x y)
 
-instance TestEquality Value where
+instance TestEquality (Value arch) where
   testEquality x y = orderingF_refl (compareF x y)
 
-instance EqF Value where
+instance EqF (Value arch) where
   eqF = (==)
 
-instance OrdF Value where
+instance OrdF (Value arch) where
   compareF (BVValue wx vx) (BVValue wy vy) =
     case compareF wx wy of
       LTF -> LTF
@@ -463,25 +477,25 @@ instance OrdF Value where
       EQF -> EQF
       GTF -> GTF
 
-valueType :: Value tp -> TypeRepr tp
+valueType :: Value arch tp -> TypeRepr tp
 valueType (BVValue n _) = BVTypeRepr n
 valueType (AssignedValue a) = assignmentType a
 valueType (Initial r)       = N.registerType r
 
-valueWidth :: Value (BVType n) -> NatRepr n
+valueWidth :: Value arch (BVType n) -> NatRepr n
 valueWidth v =
   case valueType v of
     BVTypeRepr n -> n
 
-valueAsApp :: Value tp -> Maybe (App Value tp)
+valueAsApp :: Value arch tp -> Maybe (App (Value arch) tp)
 valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
 valueAsApp _ = Nothing
 
-asInt64Constant :: Value (BVType 64) -> Maybe Int64
+asInt64Constant :: Value arch (BVType 64) -> Maybe Int64
 asInt64Constant (BVValue _ o) = Just (fromInteger o)
 asInt64Constant _ = Nothing
 
-asStackAddrOffset :: Value tp -> Maybe (Value (BVType 64))
+asStackAddrOffset :: Value arch tp -> Maybe (Value arch (BVType 64))
 asStackAddrOffset addr
   | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr
   , Just Refl <- testEquality base N.rsp = do
@@ -492,23 +506,23 @@ asStackAddrOffset addr
   | otherwise =
     Nothing
 
-asBaseOffset :: Value (BVType 64) -> (Value (BVType 64), Integer)
+asBaseOffset :: Value arch (BVType 64) -> (Value arch (BVType 64), Integer)
 asBaseOffset x
   | Just (BVAdd _ x_base (BVValue _  x_off)) <- valueAsApp x = (x_base, x_off)
   | otherwise = (x,0)
 
-mkLit :: NatRepr n -> Integer -> Value (BVType n)
+mkLit :: NatRepr n -> Integer -> Value arch (BVType n)
 mkLit n v = BVValue n (v .&. mask)
   where mask = maxUnsigned n
 
-bvValue :: KnownNat n => Integer -> Value (BVType n)
+bvValue :: KnownNat n => Integer -> Value arch (BVType n)
 bvValue i = mkLit knownNat i
 
-instance PrettyPrec (Value tp) where
+instance PrettyPrec (Value arch tp) where
   prettyPrec = ppValue
 
 -- | Pretty print a value.
-ppValue :: Prec -> Value tp -> Doc
+ppValue :: Prec -> Value arch tp -> Doc
 ppValue p (BVValue w i) = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (show r) PP.<> text "_0"
@@ -517,19 +531,19 @@ ppLit :: NatRepr n -> Integer -> Doc
 ppLit w i =
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 
-instance Show (Value tp) where
+instance Show (Value arch tp) where
   show = show . pretty
 
-instance Pretty (Value tp) where
+instance Pretty (Value arch tp) where
   pretty = ppValue 0
 
-instance PrettyRegValue Value where
+instance PrettyRegValue (Value arch) where
   ppValueEq r v
     | Just _ <- testEquality v (Initial r) = Nothing
     | otherwise   = Just $ text (show r) <+> text "=" <+> pretty v
 
 
-collectValueRep :: Prec -> Value tp -> State (Map AssignId Doc) Doc
+collectValueRep :: Prec -> Value arch tp -> State (Map AssignId Doc) Doc
 collectValueRep _ (AssignedValue a) = do
   let lhs = assignId a
   mr <- gets $ Map.lookup lhs
@@ -553,11 +567,11 @@ ppValueAssignments' m =
   where (rhs, bindings) = runState m Map.empty
 
 -- | This pretty prints all the history used to create a value.
-ppValueAssignments :: Value tp -> Doc
+ppValueAssignments :: Value arch tp -> Doc
 ppValueAssignments v = ppValueAssignments' (collectValueRep 0 v)
 
 
-ppValueAssignmentList :: [Value tp] -> Doc
+ppValueAssignmentList :: [Value arch tp] -> Doc
 ppValueAssignmentList vals =
   ppValueAssignments' $ do
     docs <- mapM (collectValueRep 0) vals
@@ -1003,6 +1017,40 @@ foldApp :: Monoid m => (forall u. f u -> m) -> App f tp -> m
 foldApp f m = getConst (traverseApp (\f_u -> Const $ f f_u) m)
 
 
+------------------------------------------------------------------------
+-- Compute set of assignIds in values.
+
+refsInAssignRhs :: AssignRhs arch tp -> Set AssignId
+refsInAssignRhs rhs =
+  case rhs of
+    EvalApp v      -> refsInApp v
+    SetUndefined _ -> Set.empty
+    Read _         -> Set.empty
+    ReadMem v _    -> refsInValue v
+    ReadFSBase -> Set.empty
+    ReadGSBase -> Set.empty
+    MemCmp _ cnt src dest dir ->
+      Set.unions [ refsInValue cnt
+                  , refsInValue src
+                  , refsInValue dest
+                  , refsInValue dir ]
+    FindElement _ _ cnt buf val dir ->
+      Set.unions [ refsInValue cnt
+               , refsInValue buf
+               , refsInValue val
+               , refsInValue dir ]
+
+refsInApp :: App (Value arch) tp -> Set AssignId
+refsInApp app = foldApp refsInValue app
+
+refsInValue :: Value arch tp -> Set AssignId
+refsInValue (AssignedValue (Assignment v _)) = Set.singleton v
+refsInValue _                                = Set.empty
+
+
+------------------------------------------------------------------------
+-- StateMonadMonoid
+
 -- helper type to make a monad a monoid in the obvious way
 newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
                                deriving (Functor, Applicative, Monad, MonadState s)
@@ -1014,13 +1062,16 @@ instance Monoid m => Monoid (StateMonadMonoid s m) where
                     return (mappend mv mv')
 
 foldValueCached :: forall m tp. (Monoid m)
-                   => (forall n.  NatRepr n -> Integer -> m)
-                   -> (forall cl. N.RegisterName cl -> m)
-                   -> (forall tp'. Assignment tp' -> m -> m)
-                   -> Value tp -> State (Map (Some Assignment) m) m
+                => (forall n.  NatRepr n -> Integer -> m)
+                -> (forall cl. N.RegisterName cl -> m)
+                -> (forall tp' . Assignment X86_64 tp' -> m -> m)
+                -> Value X86_64 tp
+                -> State (Map (Some (Assignment X86_64)) m) m
 foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
   where
-    go :: forall tp'. Value tp' -> StateMonadMonoid (Map (Some Assignment) m) m
+    go :: forall tp'
+       .  Value X86_64 tp'
+       -> StateMonadMonoid (Map (Some (Assignment X86_64)) m) m
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
@@ -1034,14 +1085,15 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
                      at (Some asgn) .= Just rhs_v
                      return (assignf asgn rhs_v)
 
-    goAssignRHS :: forall tp'. AssignRhs tp' -> StateMonadMonoid (Map (Some Assignment) m) m
+    goAssignRHS :: forall tp'
+                .  AssignRhs X86_64 tp'
+                -> StateMonadMonoid (Map (Some (Assignment X86_64)) m) m
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
         SetUndefined _w -> mempty
-        Read loc
-         | MemLoc addr _ <- loc -> go addr
-         | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
+        Read _         -> mempty -- FIXME: what about ControlLoc etc.
+        ReadMem addr _ -> go addr
         ReadFSBase -> mempty
         ReadGSBase -> mempty
         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
@@ -1055,11 +1107,11 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
 -- | A basic block in a control flow graph.
 -- Consists of:
 -- 1. A label that should uniquely identify the block, equence of
-data Block = Block { blockLabel :: !BlockLabel
+data Block = Block { blockLabel :: !(BlockLabel Word64)
                      -- | List of statements in the block.
                    , blockStmts :: !([Stmt])
                      -- | This maps applications to the associated assignment.
-                   , blockCache :: !(MapF (App Value) Assignment)
+                   , blockCache :: !(MapF (App (Value X86_64)) (Assignment X86_64))
                      -- | The last statement in the block.
                    , blockTerm :: !TermStmt
                    }
@@ -1086,7 +1138,7 @@ hasRetComment b = any isRetComment (blockStmts b)
 
 -- | A CFG is a map from all reachable code locations
 -- to the block for that code location.
-data CFG = CFG { _cfgBlocks :: !(Map BlockLabel Block)
+data CFG = CFG { _cfgBlocks :: !(Map (BlockLabel Word64) Block)
                  -- | Maps each address that is the start of a block
                  -- to the address just past the end of that block.
                  -- Blocks are expected to be contiguous.
@@ -1099,7 +1151,7 @@ emptyCFG = CFG { _cfgBlocks = Map.empty
                , _cfgBlockRanges = Map.empty
                }
 
-cfgBlocks :: Simple Lens CFG (Map BlockLabel Block)
+cfgBlocks :: Simple Lens CFG (Map (BlockLabel Word64) Block)
 cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
 
 cfgBlockRanges :: Simple Lens CFG (Map CodeAddr CodeAddr)
@@ -1122,7 +1174,7 @@ insertBlocksForCode start end bs = execState $ do
   cfgBlockRanges %= Map.insert start end
 
 -- | Return block with given label.
-findBlock :: CFG -> BlockLabel -> Maybe Block
+findBlock :: CFG -> BlockLabel Word64 -> Maybe Block
 findBlock g l = Map.lookup l (g^.cfgBlocks)
 
 instance Pretty CFG where
@@ -1131,7 +1183,7 @@ instance Pretty CFG where
 -- FIXME: refactor to be more efficient
 -- FIXME: not a Traversal, more like a map+fold
 traverseBlocks :: CFG
-               -> BlockLabel
+               -> BlockLabel Word64
                -> (Block -> a)
                -> (a -> a -> a -> a)
                -> a

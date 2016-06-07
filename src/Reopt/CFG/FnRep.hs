@@ -257,16 +257,17 @@ instance Pretty (FnRegValue tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
   pretty (FnRegValue v)      = pretty v
 
-newtype FnPhiNodeInfo tp = FnPhiNodeInfo { unFnPhiNodeInfo ::  [(BlockLabel, FnValue tp)] }
+newtype FnPhiNodeInfo tp
+      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel Word64, FnValue tp)] }
 
 instance FoldFnValue (FnPhiNodeInfo tp) where
   foldFnValue f (FnPhiNodeInfo vs) = mconcat (map (f . snd) vs)
 
 data FnBlock
-   = FnBlock { fbLabel :: !BlockLabel
+   = FnBlock { fbLabel :: !(BlockLabel Word64)
                -- Maps predecessor label onto the reg value at that
                -- block
-             , fbPhiNodes  :: MapF FnPhiVar FnPhiNodeInfo
+             , fbPhiNodes  :: !(MapF FnPhiVar FnPhiNodeInfo)
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
              }
@@ -285,7 +286,7 @@ instance Pretty FnBlock where
       go :: FnPhiVar tp -> FnPhiNodeInfo tp -> [Doc] -> [Doc]
       go aid vs d =
         (pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl (unFnPhiNodeInfo vs))) : d
-      goLbl :: (BlockLabel, FnValue tp) -> Doc
+      goLbl :: (BlockLabel Word64, FnValue tp) -> Doc
       goLbl (lbl, node) = parens (pretty lbl <> comma <+> pretty node)
 
 instance FoldFnValue FnBlock where
@@ -345,20 +346,21 @@ instance FoldFnValue FnStmt where
     f cnt `mappend` f v `mappend` f ptr `mappend` f df
 
 data FnTermStmt
-   = FnJump !BlockLabel
+   = FnJump !(BlockLabel Word64)
    | FnRet !([FnValue (BVType 64)], [FnValue XMMType])
-   | FnBranch !(FnValue BoolType) !BlockLabel !BlockLabel
+   | FnBranch !(FnValue BoolType) !(BlockLabel Word64) !(BlockLabel Word64)
      -- ^ A branch to a block within the function, along with the return vars.
      -- FIXME: need to add extra stack arg.
    | FnCall !(FnValue (BVType 64))
             !([FnValue (BVType 64)], [FnValue XMMType])
             !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
-            !(Maybe BlockLabel)
+            !(Maybe (BlockLabel Word64))
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
 
      -- FIXME: specialized to BSD's (broken) calling convention
-   | FnSystemCall !Word64 !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ] BlockLabel
+   | FnSystemCall !Word64 !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ]
+        (BlockLabel Word64)
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector CodeAddr)
    | FnTermStmtUndefined
 

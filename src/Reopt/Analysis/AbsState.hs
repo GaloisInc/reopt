@@ -849,7 +849,7 @@ data AbsProcessorState
    = AbsProcessorState { absIsCode :: !(Word64 -> Bool)
                          -- ^ Recognizer for code addresses.
                        , _absInitialRegs :: !(X86State AbsValue)
-                       , _absAssignments :: !(MapF Assignment AbsValue)
+                       , _absAssignments :: !(MapF (Assignment X86_64) AbsValue)
                        , _curAbsStack :: !AbsBlockStack
 --                       , _apsEquations :: !(DiffEquations (BVValue 64) (Sum Word64))
 --                       , _stackWrites ::
@@ -879,7 +879,7 @@ initAbsProcessorState is_code s =
 absInitialRegs :: Simple Lens AbsProcessorState (X86State AbsValue)
 absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
 
-absAssignments :: Simple Lens AbsProcessorState (MapF Assignment AbsValue)
+absAssignments :: Simple Lens AbsProcessorState (MapF (Assignment X86_64) AbsValue)
 absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 
 curAbsStack :: Simple Lens AbsProcessorState AbsBlockStack
@@ -887,14 +887,14 @@ curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
 -- | A lens that allows one to lookup and update the value of an assignment in
 -- map from assignments to abstract values.
-assignLens :: Assignment tp
-           -> Simple Lens (MapF Assignment AbsValue) (AbsValue tp)
+assignLens :: Assignment arch tp
+           -> Simple Lens (MapF (Assignment arch) AbsValue) (AbsValue tp)
 assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
                       (\s v -> MapF.insert ass v s)
 
 -- | Merge in the value of the assignment.  If we have already seen a
 -- value, this will combine with meet.
-addAssignment :: Assignment tp -> AbsProcessorState -> AbsProcessorState
+addAssignment :: Assignment X86_64 tp -> AbsProcessorState -> AbsProcessorState
 addAssignment a c =
   c & (absAssignments . assignLens a) %~ flip meet (transferRHS c (assignRhs a))
 
@@ -912,12 +912,12 @@ deleteRange l h m
           deleteRange (k+1) h (Map.delete k m)
       _ -> m
 
-someValueWidth :: Value tp -> Integer
+someValueWidth :: Value X86_64 tp -> Integer
 someValueWidth v =
   case valueType v of
     BVTypeRepr w -> natValue w
 
-valueByteSize :: Value tp -> Int64
+valueByteSize :: Value X86_64 tp -> Int64
 valueByteSize v = fromInteger $ (someValueWidth v + 7) `div` 8
 
 -- | Prune stack based on write that may modify stack.
@@ -926,8 +926,8 @@ pruneStack = Map.filter f
   where f (StackEntry _ ReturnAddr) = True
         f _ = False
 
-addMemWrite :: Value (BVType 64)
-            -> Value tp
+addMemWrite :: BVValue X86_64 64
+            -> Value X86_64 tp
             -> AbsProcessorState
             -> AbsProcessorState
 addMemWrite a v r =
@@ -975,7 +975,7 @@ absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStac
 
 
 -- | Return state for after value has run.
-finalAbsBlockState :: AbsProcessorState -> X86State Value -> AbsBlockState
+finalAbsBlockState :: AbsProcessorState -> X86State (Value X86_64) -> AbsBlockState
 finalAbsBlockState c s =
   let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
       transferReg r = transferValue c (s^.register r)
@@ -1004,9 +1004,9 @@ setAbsIP is_code a b
 
 transferValue' :: (Word64 -> Bool)
                   -- ^ Predicate that recognizes if address is code addreess.
-               -> MapF Assignment AbsValue
+               -> MapF (Assignment X86_64) AbsValue
                -> X86State AbsValue
-               -> Value tp
+               -> Value X86_64 tp
                -> AbsValue tp
 transferValue' is_code amap aregs v =
   case v of
@@ -1025,12 +1025,12 @@ transferValue' is_code amap aregs v =
 
 -- | Compute abstract value from value and current registers.
 transferValue :: AbsProcessorState
-              -> Value tp
+              -> Value X86_64 tp
               -> AbsValue tp
 transferValue c v = transferValue' (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
 
 transferApp :: AbsProcessorState
-            -> App Value tp
+            -> App (Value X86_64) tp
             -> AbsValue tp
 transferApp r a =
   case a of
@@ -1045,18 +1045,19 @@ transferApp r a =
 
 transferRHS :: forall tp
             .  AbsProcessorState
-            -> AssignRhs tp
+            -> AssignRhs X86_64 tp
             -> AbsValue tp
 transferRHS r rhs =
   case rhs of
     EvalApp app    -> transferApp r app
     SetUndefined _ -> TopV
-    Read (MemLoc a tp)
+    ReadMem a tp
       | StackOffset _ s <- transferValue r a
       , [o] <- Set.toList s
       , Just (StackEntry v_tp v) <- Map.lookup o (r^.curAbsStack)
       , Just Refl <- testEquality tp v_tp ->
          v
+      | otherwise -> TopV
     Read _ -> TopV
     -- We know only that it will return up to (and including(?)) cnt
     ReadFSBase ->
@@ -1064,10 +1065,10 @@ transferRHS r rhs =
     ReadGSBase ->
       TopV
     MemCmp _sz cnt _src _dest _rev
-      | Just upper <- hasMaximum knownType (transferValue r cnt)
-        -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
       | otherwise -> TopV
     FindElement _sz _findEq cnt _buf _val _rev
-      | Just upper <- hasMaximum knownType (transferValue r cnt)
-        -> stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
       | otherwise -> TopV

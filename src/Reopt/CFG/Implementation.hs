@@ -59,8 +59,7 @@ import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
-  ( Type(..)
-  , BoolType
+  ( BoolType
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
@@ -73,7 +72,7 @@ import           Debug.Trace
 -- | A pure expression for isValue.
 data Expr tp where
   -- An expression obtained from some value.
-  ValueExpr :: !(Value tp) -> Expr tp
+  ValueExpr :: !(Value X86_64 tp) -> Expr tp
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(App Expr tp) -> Expr tp
 
@@ -446,19 +445,19 @@ instance S.IsValue Expr where
 -- GenState
 
 -- | A block that we have not yet finished.
-data PreBlock = PreBlock { pBlockLabel :: !BlockLabel
+data PreBlock = PreBlock { pBlockLabel  :: !(BlockLabel Word64)
                          , _pBlockStmts :: !(Seq Stmt)
-                         , _pBlockState :: !(X86State Value)
-                         , _pBlockApps  :: !(MapF (App Value) Assignment)
+                         , _pBlockState :: !(X86State (Value X86_64))
+                         , _pBlockApps  :: !(MapF (App (Value X86_64)) (Assignment X86_64))
                          }
 
 pBlockStmts :: Simple Lens PreBlock (Seq Stmt)
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
 
-pBlockState :: Simple Lens PreBlock (X86State Value)
+pBlockState :: Simple Lens PreBlock (X86State (Value X86_64))
 pBlockState = lens _pBlockState (\s v -> s { _pBlockState = v })
 
-pBlockApps  :: Simple Lens PreBlock (MapF (App Value) Assignment)
+pBlockApps  :: Simple Lens PreBlock (MapF (App (Value X86_64)) (Assignment X86_64))
 pBlockApps = lens _pBlockApps (\s v -> s { _pBlockApps = v })
 
 -- | A tagged maybe
@@ -499,8 +498,8 @@ frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
 blockState :: Lens (GenState a) (GenState b) (MaybeF a PreBlock) (MaybeF b PreBlock)
 blockState = lens _blockState (\s v -> s { _blockState = v })
 
-emptyPreBlock :: X86State Value
-              -> BlockLabel
+emptyPreBlock :: X86State (Value X86_64)
+              -> BlockLabel Word64
               -> PreBlock
 emptyPreBlock s lbl =
   PreBlock { pBlockLabel = lbl
@@ -517,12 +516,12 @@ emptyGenState n =
            , _blockState     = NothingF
            }
 
-curX86State :: Simple Lens (GenState 'True) (X86State Value)
+curX86State :: Simple Lens (GenState 'True) (X86State (Value X86_64))
 curX86State = blockState . _JustF . pBlockState
 
 -- | Finishes the current block, if it is started.
 finishBlock' :: PreBlock
-             -> (X86State Value -> TermStmt)
+             -> (X86State (Value X86_64) -> TermStmt)
              -> Block
 finishBlock' pre_b term =
   Block { blockLabel = pBlockLabel pre_b
@@ -532,7 +531,7 @@ finishBlock' pre_b term =
         }
 
 -- | Finishes the current block, if it is started.
-finishBlock :: (X86State Value -> TermStmt)
+finishBlock :: (X86State (Value X86_64) -> TermStmt)
             -> (GenState a -> GenState 'False)
 finishBlock term st =
   case st^.blockState of
@@ -544,7 +543,7 @@ finishBlock term st =
 
 -- | Starts a new block.  If there is a current block it will finish
 -- it with FetchAndExecute
-startBlock :: X86State Value -> BlockLabel -> (GenState a -> GenState 'True)
+startBlock :: X86State (Value X86_64) -> BlockLabel Word64 -> (GenState a -> GenState 'True)
 startBlock s lbl st =
   finishBlock FetchAndExecute st & blockState .~ JustF (emptyPreBlock s lbl)
 
@@ -584,7 +583,7 @@ runX86Generator st m = unX86G m (\() -> Right . Some) st
 modGenState :: State (GenState 'True) a -> X86Generator a
 modGenState m = X86G $ \c s -> uncurry c (runState m s)
 
-modState :: State (X86State Value) a -> X86Generator a
+modState :: State (X86State (Value X86_64)) a -> X86Generator a
 modState m = modGenState $ do
   s <- use curX86State
   let (r,s') = runState m s
@@ -598,7 +597,7 @@ newAssignID = modGenState $ nextAssignID <<+= 1
 addStmt :: Stmt -> X86Generator ()
 addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
 
-addAssignment :: AssignRhs tp -> X86Generator (Assignment tp)
+addAssignment :: AssignRhs X86_64 tp -> X86Generator (Assignment X86_64 tp)
 addAssignment rhs = do
   l <- newAssignID
   let a = Assignment l rhs
@@ -610,7 +609,7 @@ addAssignment rhs = do
 -- at the outermost term)
 
 -- FIXME: make less ad-hoc
-constPropagate :: forall tp. App Value tp -> Maybe (Value tp)
+constPropagate :: forall tp. App (Value X86_64) tp -> Maybe (Value X86_64 tp)
 constPropagate v =
   case v of
    BVAnd _ l r
@@ -634,22 +633,27 @@ constPropagate v =
    BVComplement sz x              -> unop complement sz x
    _                              -> Nothing
   where
-    boolop :: (tp ~ BoolType) => (Integer -> Integer -> Bool)
-              -> Value n -> Value n -> Maybe (Value BoolType)
+    boolop :: (tp ~ BoolType)
+           => (Integer -> Integer -> Bool)
+           -> Value X86_64 utp -> Value X86_64 utp -> Maybe (Value X86_64 BoolType)
     boolop f (BVValue _ l) (BVValue _ r) = Just $ mkLit knownNat (if f l r then 1 else 0)
     boolop _ _ _ = Nothing
 
-    unop :: (tp ~ BVType n) => (Integer -> Integer)
-             -> NatRepr n -> Value tp -> Maybe (Value tp)
+    unop :: (tp ~ BVType n)
+         => (Integer -> Integer)
+         -> NatRepr n -> Value X86_64 tp -> Maybe (Value X86_64 tp)
     unop f sz (BVValue _ l)  = Just $ mkLit sz (f l)
     unop _ _ _               = Nothing
 
     binop :: (tp ~ BVType n) => (Integer -> Integer -> Integer)
-             -> NatRepr n -> Value tp -> Value tp -> Maybe (Value tp)
+          -> NatRepr n
+          -> Value X86_64 tp
+          -> Value X86_64 tp
+          -> Maybe (Value X86_64 tp)
     binop f sz (BVValue _ l) (BVValue _ r) = Just $ mkLit sz (f l r)
     binop _ _ _ _                          = Nothing
 
-evalApp :: App Value tp  -> X86Generator (Value tp)
+evalApp :: App (Value X86_64) tp  -> X86Generator (Value X86_64 tp)
 evalApp a = do
   case constPropagate a of
     Nothing -> do
@@ -662,7 +666,7 @@ evalApp a = do
         Just r -> return (AssignedValue r)
     Just v  -> return v
 
-eval :: Expr tp -> X86Generator (Value tp)
+eval :: Expr tp -> X86Generator (Value X86_64 tp)
 eval (ValueExpr v) = return v
 eval (AppExpr a) = evalApp =<< traverseApp eval a
 
@@ -690,7 +694,7 @@ getX87Offset i = do
     fail $ "Illegal floating point index"
   return $! top + i
 
-readLoc :: StmtLoc (Value (BVType 64)) tp -> X86Generator (Expr tp)
+readLoc :: StmtLoc (BVValue X86_64 64) tp -> X86Generator (Expr tp)
 readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
 
 getLoc :: ImpLocation tp -> X86Generator (Expr tp)
@@ -698,7 +702,7 @@ getLoc l0 =
   case l0 of
     S.MemoryAddr w tp -> do
       addr <- eval w
-      readLoc (MemLoc addr tp)
+      ValueExpr . AssignedValue <$> addAssignment (ReadMem addr tp)
     S.Register rv -> do
       let readLoc' l = S.registerViewRead rv <$> readLoc l
       let r = S.registerViewReg rv
@@ -759,12 +763,12 @@ upperHalf e =
         half_width = halfNat (exprWidth e)
 
 -- | Assign a value to a location
-setLoc :: forall tp. ImpLocation tp -> Value tp -> X86Generator ()
+setLoc :: forall tp. ImpLocation tp -> Value X86_64 tp -> X86Generator ()
 setLoc loc v =
   case loc of
    S.MemoryAddr w _ -> do
      addr <- eval w
-     addStmt $ Write (MemLoc addr (valueType v)) v
+     addStmt $ WriteMem addr v
 
    S.Register rv -> do
      let writeReg reg = do
@@ -791,15 +795,14 @@ setLoc loc v =
      off <- getX87Offset i
      modState $ x87Regs . ix off .= v
 
-mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel, GenState any)
+mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel Word64, GenState any)
 mkBlockLabel a s0 = (lbl, s1)
   where (b_id, s1) = s0 & nextBlockID <<+~ 1
         lbl = GeneratedBlock a b_id
 
 -- | Helper function for 'S.Semantics' instance below.
-bvBinOp ::
-     (NatRepr n -> Value tp -> Value ('BVType n) -> App Value tp1)
-  -> Expr tp -> Expr ('BVType n) -> X86Generator (Expr tp1)
+bvBinOp :: (NatRepr n -> Value X86_64 tp -> BVValue X86_64 n -> App (Value X86_64) tp1)
+        -> Expr tp -> Expr (BVType n) -> X86Generator (Expr tp1)
 bvBinOp op' x y = do
   let w = exprWidth y
   xv <- eval x
@@ -960,7 +963,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> X86State Value
+             -> X86State (Value X86_64)
 initX86State loc = mkX86State Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
@@ -969,7 +972,7 @@ data GenError = DecodeError CodeAddr (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
 
-initGenState :: AssignId -> CodeAddr -> X86State Value -> GenState 'True
+initGenState :: AssignId -> Word64 -> X86State (Value X86_64) -> GenState 'True
 initGenState a_id ip s = startBlock s lbl (emptyGenState a_id)
   where lbl = GeneratedBlock ip 0
 
@@ -1022,7 +1025,8 @@ disassembleBlock' :: Memory Word64
 disassembleBlock' mem gs contFn addr = do
   (i, next_ip) <- readInstruction mem addr
                   & _Left %~ DecodeError addr
-  let next_ip_val = mkLit n64 (toInteger next_ip)
+  let next_ip_val :: BVValue X86_64 64
+      next_ip_val = mkLit n64 (toInteger next_ip)
 
   let line = text (showHex addr "") <> colon
              <+> Flexdis.ppInstruction next_ip i
