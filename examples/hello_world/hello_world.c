@@ -1,5 +1,6 @@
 
-#include <stdio.h>
+int puts(const char *s);
+
 
 void h() {
     puts("Hello World!");

@@ -40,3 +40,14 @@ goodbye_world_diet.o : goodbye_world.c Makefile
 
 hello_world_diet : hello_world_diet.o Makefile $(DIET_LIBS)
 	ld -static -nostdlib -o $@ $< $(DIET_LIBS)
+
+#####################################################################
+# CLANG arm tests
+
+ARM_ABI=armv7a-none-eabi
+
+hello_world_arm.s : hello_world.c Makefile
+	$(CLANG) -static -nostdlib -target $(ARM_ABI) -S -o $@ $<
+
+hello_world_arm.o : hello_world.c Makefile
+	$(CLANG) -static -nostdlib -target $(ARM_ABI) -c -o $@ $<
