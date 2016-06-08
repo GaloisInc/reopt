@@ -527,7 +527,7 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-ppStmtAndAbs :: MapF (Assignment X86_64) AbsValue -> Stmt -> Doc
+ppStmtAndAbs :: MapF (Assignment X86_64) AbsValue -> Stmt X86_64 -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
     AssignStmt a ->
@@ -684,7 +684,7 @@ stateEndsWithRet s = do
 
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
-isWriteTo :: Stmt -> BVValue X86_64 64 -> TypeRepr tp -> Maybe (Value X86_64 tp)
+isWriteTo :: Stmt X86_64 -> BVValue X86_64 64 -> TypeRepr tp -> Maybe (Value X86_64 tp)
 isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
   , Just Refl <- testEquality (typeRepr val) tp =
@@ -693,7 +693,7 @@ isWriteTo _ _ _ = Nothing
 
 -- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes to @addr@ and
 -- @addr@ is a code pointer.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> BVValue X86_64 64 -> Maybe Word64
+isCodeAddrWriteTo :: Memory Word64 -> Stmt X86_64 -> BVValue X86_64 64 -> Maybe Word64
 isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
   , isCodeAddr mem (fromInteger val)
@@ -706,7 +706,7 @@ blockContainsCall mem b s =
   let next_sp = s^.register N.rsp
       go [] = False
       go (stmt:_) | Just _ <- isCodeAddrWriteTo mem stmt next_sp = True
-      go (Write _ _:_) = False
+      go (ExecArchStmt WriteLoc{}:_) = False
       go (_:r) = go r
    in go (reverse (blockStmts b))
 

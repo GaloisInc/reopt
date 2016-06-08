@@ -65,26 +65,26 @@ blockLiveRegisters b = do addIDs terminalIds
              do addIDs (refsInAssignRhs rhs)
                 return (stmt : ss)
              else return ss
-    noteAndFilter stmt@(Write _ rhs) ss
-      = do addIDs (refsInValue rhs)
-           return (stmt : ss)
     noteAndFilter stmt@(WriteMem loc rhs) ss
       = do addIDs (refsInValue loc)
            addIDs (refsInValue rhs)
            return (stmt : ss)
-    noteAndFilter stmt@(MemCopy _ cnt src dest df) ss = do
+    noteAndFilter stmt@(PlaceHolderStmt vals _) ss
+      = do mapM_ (addIDs . viewSome refsInValue) vals
+           return (stmt : ss)
+    noteAndFilter stmt@Comment{} ss = return (stmt : ss)
+    noteAndFilter stmt@(ExecArchStmt (WriteLoc _ rhs)) ss
+      = do addIDs (refsInValue rhs)
+           return (stmt : ss)
+    noteAndFilter stmt@(ExecArchStmt (MemCopy _ cnt src dest df)) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue src)
       addIDs (refsInValue dest)
       addIDs (refsInValue df)
       return (stmt : ss)
-    noteAndFilter stmt@(MemSet cnt val dest df) ss = do
+    noteAndFilter stmt@(ExecArchStmt (MemSet cnt val dest df)) ss = do
       addIDs (refsInValue cnt)
       addIDs (refsInValue val)
       addIDs (refsInValue dest)
       addIDs (refsInValue df)
       return (stmt : ss)
-    noteAndFilter stmt@(PlaceHolderStmt vals _) ss
-      = do mapM_ (addIDs . viewSome refsInValue) vals
-           return (stmt : ss)
-    noteAndFilter stmt@Comment{} ss = return (stmt : ss)

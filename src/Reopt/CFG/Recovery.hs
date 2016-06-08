@@ -594,7 +594,7 @@ emitAssign asgn rhs = do
   return fnAssign
 
 -- | This should add code as needed to support the statement.
-recoverStmt :: Stmt -> Recover ()
+recoverStmt :: Stmt X86_64 -> Recover ()
 recoverStmt s = do
   case s of
     AssignStmt asgn -> do
@@ -624,13 +624,13 @@ recoverStmt s = do
         recoverWrite addr val
     Comment msg -> do
       addFnStmt $ FnComment msg
-    MemCopy bytesPerCopy nValues src dest direction -> do
+    ExecArchStmt (MemCopy bytesPerCopy nValues src dest direction) -> do
       stmt <- FnMemCopy bytesPerCopy <$> recoverValue "memcopy" nValues
                                      <*> recoverValue "memcopy" src
                                      <*> recoverValue "memcopy" dest
                                      <*> recoverValue "memcopy" direction
       addFnStmt stmt
-    MemSet count v ptr df -> do
+    ExecArchStmt (MemSet count v ptr df) -> do
       stmt <- FnMemSet <$> recoverValue "memset" count
                        <*> recoverValue "memset" v
                        <*> recoverValue "memset" ptr

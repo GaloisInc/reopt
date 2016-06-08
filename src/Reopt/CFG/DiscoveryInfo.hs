@@ -141,7 +141,7 @@ instance Show GlobalDataInfo where
 -- interpreted.
 data ParsedTermStmt
    = ParsedCall !(X86State (Value X86_64))
-                !(Seq Stmt)
+                !(Seq (Stmt X86_64))
                 -- ^ Statements less the pushed return value, if any
                 !(Either Word64 (BVValue X86_64 64))
                 -- ^ Function to call.  If it is statically known,
@@ -153,7 +153,7 @@ data ParsedTermStmt
    | -- forall n . (1 <= n) =>
        ParsedLookupTable !(X86State (Value X86_64)) (BVValue X86_64 64) (V.Vector Word64)
      -- | A tail cthat branches to the given locations.
-   | ParsedReturn !(X86State (Value X86_64)) !(Seq Stmt)
+   | ParsedReturn !(X86State (Value X86_64)) !(Seq (Stmt X86_64))
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value X86_64 BoolType) !(BlockLabel Word64) !(BlockLabel Word64)
    | ParsedSyscall !(X86State (Value X86_64))
@@ -277,7 +277,7 @@ inSameFunction x y s =
 
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
-isWriteTo :: Stmt
+isWriteTo :: Stmt X86_64
           -> BVValue X86_64 64
           -> TypeRepr tp
           -> Maybe (Value X86_64 tp)
@@ -289,7 +289,7 @@ isWriteTo _ _ _ = Nothing
 
 -- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
 -- a single address to a marked executable in @mem@ to @addr@.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt -> BVValue X86_64 64 -> Maybe Word64
+isCodeAddrWriteTo :: Memory Word64 -> Stmt X86_64 -> BVValue X86_64 64 -> Maybe Word64
 isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
   , isCodeAddr mem (fromInteger val)
@@ -299,9 +299,9 @@ isCodeAddrWriteTo _ _ _ = Nothing
 -- | Attempt to identify the write to a stack return address, returning
 -- instructions prior to that write and return  values.
 identifyCall :: Memory Word64
-             -> [Stmt]
+             -> [Stmt X86_64]
              -> X86State (Value X86_64)
-             -> Maybe (Seq Stmt, Word64)
+             -> Maybe (Seq (Stmt X86_64), Word64)
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where next_sp = s^.register N.rsp
         go stmts =
@@ -310,7 +310,7 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
             prev Seq.:> stmt
               | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
                 Just (prev, ret)
-              | Write{} <- stmt -> Nothing
+              | ExecArchStmt WriteLoc{} <- stmt -> Nothing
               | otherwise -> go prev
 
 -- | This is designed to detect returns from the X86 representation.

@@ -481,13 +481,13 @@ summarizeBlock interp_state root_label = go root_label
             demandValue lbl addr
             demandValue lbl v
 
-          goStmt (MemCopy _sz cnt src dest rev) = do
+          goStmt (ExecArchStmt (MemCopy _sz cnt src dest rev)) = do
             demandValue lbl cnt
             demandValue lbl src
             demandValue lbl dest
             demandValue lbl rev
 
-          goStmt (MemSet cnt v ptr df) = do
+          goStmt (ExecArchStmt (MemSet cnt v ptr df)) = do
             demandValue lbl cnt
             demandValue lbl v
             demandValue lbl ptr

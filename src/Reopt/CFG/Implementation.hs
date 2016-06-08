@@ -446,12 +446,12 @@ instance S.IsValue Expr where
 
 -- | A block that we have not yet finished.
 data PreBlock = PreBlock { pBlockLabel  :: !(BlockLabel Word64)
-                         , _pBlockStmts :: !(Seq Stmt)
+                         , _pBlockStmts :: !(Seq (Stmt X86_64))
                          , _pBlockState :: !(X86State (Value X86_64))
                          , _pBlockApps  :: !(MapF (App (Value X86_64)) (Assignment X86_64))
                          }
 
-pBlockStmts :: Simple Lens PreBlock (Seq Stmt)
+pBlockStmts :: Simple Lens PreBlock (Seq (Stmt X86_64))
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
 
 pBlockState :: Simple Lens PreBlock (X86State (Value X86_64))
@@ -594,7 +594,7 @@ modState m = modGenState $ do
 newAssignID :: X86Generator AssignId
 newAssignID = modGenState $ nextAssignID <<+= 1
 
-addStmt :: Stmt -> X86Generator ()
+addStmt :: Stmt X86_64 -> X86Generator ()
 addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
 
 addAssignment :: AssignRhs X86_64 tp -> X86Generator (Assignment X86_64 tp)
@@ -774,7 +774,7 @@ setLoc loc v =
      let writeReg reg = do
            v0 <- readLoc reg
            v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
-           addStmt $ Write reg v1
+           addStmt $ ExecArchStmt $ WriteLoc reg v1
      let r = S.registerViewReg rv
      case r of
        N.ControlReg {} -> writeReg (ControlLoc r)
@@ -866,7 +866,7 @@ instance S.Semantics X86Generator where
     src_v   <- eval src
     dest_v  <- eval dest
     is_reverse_v <- eval is_reverse
-    addStmt (MemCopy val_sz count_v src_v dest_v is_reverse_v)
+    addStmt $ ExecArchStmt $ MemCopy val_sz count_v src_v dest_v is_reverse_v
 
   memcmp sz count src dest is_reverse = do
     count_v <- eval count
@@ -881,7 +881,7 @@ instance S.Semantics X86Generator where
     val_v   <- eval val
     dest_v  <- eval dest
     df_v    <- eval df
-    addStmt (MemSet count_v val_v dest_v df_v)
+    addStmt $ ExecArchStmt $ MemSet count_v val_v dest_v df_v
 
   find_element sz findEq count buf val is_reverse = do
     count_v <- eval count

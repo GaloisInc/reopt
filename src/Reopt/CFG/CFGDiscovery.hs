@@ -235,7 +235,7 @@ getBlock addr = do
 -- Transfer stmts
 
 transferStmt :: Monad m
-             => Stmt
+             => Stmt X86_64
              -> StateT AbsProcessorState m ()
 transferStmt stmt =
   case stmt of
@@ -303,7 +303,10 @@ recordFunctionAddrs lbl mem av = do
   debugM DCFG (show lbl ++ ": Adding function entries " ++ intercalate ", " (map (flip showHex "") addrs))
   modify $ \s0 -> foldl' (flip markAddrAsFunction) s0 addrs
 
-recordWriteStmt :: BlockLabel Word64 -> AbsProcessorState -> Stmt -> State DiscoveryInfo ()
+recordWriteStmt :: BlockLabel Word64
+                -> AbsProcessorState
+                -> Stmt X86_64
+                -> State DiscoveryInfo ()
 recordWriteStmt lbl regs (WriteMem _addr v)
   | Just Refl <- testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v = do
@@ -311,7 +314,10 @@ recordWriteStmt lbl regs (WriteMem _addr v)
     recordFunctionAddrs lbl mem av
 recordWriteStmt _ _ _ = return ()
 
-transferStmts :: Monad m => AbsProcessorState -> [Stmt] -> m AbsProcessorState
+transferStmts :: Monad m
+              => AbsProcessorState
+              -> [Stmt X86_64]
+              -> m AbsProcessorState
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
 -- | Generate map that maps each assignment in the CFG to the abstract value
