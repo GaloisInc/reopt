@@ -139,7 +139,7 @@ asSallocBase (valueAsApp -> Just (BVAdd _ x (BVValue w o))) = do
 asSallocBase (valueAsApp -> Just (BVSub _ x y)) = do
   SallocBase r <- asSallocBase x
   return $! SallocBase (y:r)
-asSallocBase (Initial r) | Just Refl <- testEquality r rsp =
+asSallocBase (Initial r) | Just Refl <- testEquality r (X86Reg rsp) =
   return $! SallocBase []
 asSallocBase _ = Nothing
 

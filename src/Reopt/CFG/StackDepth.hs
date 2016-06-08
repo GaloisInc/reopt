@@ -172,14 +172,14 @@ valueHasSP val = go val
     go :: forall tp . Value X86_64 tp -> Bool
     go v = case v of
              BVValue _sz _i -> False
-             Initial r      -> testEquality r N.rsp /= Nothing
+             Initial r      -> testEquality r (X86Reg N.rsp) /= Nothing
              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
     goAssignRHS :: forall tp. AssignRhs X86_64 tp -> Bool
     goAssignRHS v =
       case v of
         EvalApp a -> getAny $ foldApp (Any . go)  a
-        MemCmp _sz cnt src dest rev -> or [ go cnt, go src, go dest, go rev ]
+        EvalArchFn (MemCmp _sz cnt src dest rev) -> or [ go cnt, go src, go dest, go rev ]
         _ -> False
 
 parseStackPointer' :: StackDepthValue -> BVValue X86_64 64 -> StackDepthValue
@@ -193,7 +193,8 @@ parseStackPointer' sp0 addr
       addStackDepthValue (parseStackPointer' sp0 x)
                          (negateStackDepthValue (parseStackPointer' sp0 y))
   | BVValue _ i <- addr = constantDepthValue (fromIntegral i)
-  | Initial n <- addr, Just Refl <- testEquality n N.rsp = sp0
+  | Initial n <- addr
+  , Just Refl <- testEquality n (X86Reg N.rsp) = sp0
   | otherwise = SDV 0 (Set.singleton (Pos addr))
 
 
@@ -243,7 +244,7 @@ recoverBlock interp_state root_label = do
             = addDepth $ parseStackPointer init_sp addr
           goStmt (WriteMem addr v)
             = do addDepth $ parseStackPointer init_sp addr
-                 case testEquality (valueType v) (knownType :: TypeRepr (BVType 64)) of
+                 case testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64)) of
                    Just Refl -> addDepth $ parseStackPointer init_sp v
                    _ -> return ()
 

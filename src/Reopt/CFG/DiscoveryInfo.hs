@@ -283,7 +283,7 @@ isWriteTo :: Stmt
           -> Maybe (Value X86_64 tp)
 isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
+  , Just Refl <- testEquality (typeRepr val) tp =
     Just val
 isWriteTo _ _ _ = Nothing
 
@@ -412,7 +412,7 @@ classifyBlock b interp_state =
         -- FIXME: Should subsume the above ...
         -- FIXME: only works if rax is an initial register
       | BVValue _ (fromInteger -> (next_addr :: Word64)) <- proc_state^.register N.rip
-      , Initial r <- proc_state ^. register N.rax
+      , Initial (X86Reg r) <- proc_state ^. register N.rax
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
       , Just (fromInteger -> call_no) <- asConcreteSingleton (absSt ^. absX86State ^. register r)
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->

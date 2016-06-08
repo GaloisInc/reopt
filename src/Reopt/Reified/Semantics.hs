@@ -474,6 +474,8 @@ instance S.Semantics Semantics where
 
   memset v1 v2 v3 v4 = tell [MemSet v1 v2 v3 v4]
 
+  find_element _ = error "find_element is not yet implemented."
+
   memcmp r v1 v2 v3 v4 = do
     var <- freshVar "memcmp" S.knownType
     tell [MemCmp var r v1 v2 v3 v4]
@@ -511,10 +513,13 @@ wrapSemantics m f = do
   return v
 -}
 
+{-
 data P n where
   ZeroCase    :: P 0
   NonZeroCase :: (1 <= n) => Semantics (Expr (BVType (n * 8))) -> P n
+-}
 
+{-
 offsetAddr :: Integer -> Expr (BVType 64) -> Expr (BVType 64)
 offsetAddr bits addr
   | bits `mod` 8 == 0 = AppExpr (R.BVAdd knownNat addr
@@ -576,6 +581,7 @@ expandWrite addr (BVTypeRepr nr) v =
            in
               tell [ S.MemoryAddr addr' S.knownType := v' ]
     sz = exprWidth v
+-}
 
 expandMemOps :: Stmt -> Semantics ()
 -- expandMemOps stmt@(Get v l)

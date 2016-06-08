@@ -675,13 +675,6 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
     X86_80FloatRepr       -> L.X86_fp80
 
 
--- stmtLocToLLVM :: StmtLoc (Value (BVType 64)) tp -> BB (L.Typed L.Value)
--- stmtLocToLLVM sloc =
---   case sloc of
---    MemLoc ptr typ -> do p <- valueToLLVM ptr
---                         L.inttoptr p (L.ptrT (typeToLLVMType typ))
---    _ -> unimplementedInstr
-
 valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
 valueToLLVM val =
   case val of

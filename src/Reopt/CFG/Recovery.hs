@@ -608,7 +608,7 @@ recoverStmt s = do
       when (assignId asgn `Set.member` usedAssigns) $ do
         void $ recoverAssign asgn
     WriteMem addr val
-      | Initial reg <- val -> do
+      | Initial (X86Reg reg) <- val -> do
         reg_v <- uses rsCurRegs (MapF.lookup reg)
         case reg_v of
           Just (CalleeSaved _saved_reg) -> do
@@ -660,7 +660,7 @@ recoverAssign asgn = do
           FnAssignedValue <$> emitAssign asgn (FnReadMem fn_addr tp)
         _ -> do
           debug DFunRecover ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $
-            return $ FnValueUnsupported ("assignment " ++ show (pretty asgn)) (assignmentType asgn)
+            return $ FnValueUnsupported ("assignment " ++ show (pretty asgn)) (typeRepr asgn)
 
 recoverRegister :: X86State (Value X86_64)
                 -> N.RegisterName cl
@@ -699,19 +699,20 @@ recoverValue nm v = do
 
             | otherwise -> do
               debug DFunRecover ("WARNING: recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
-              return $! FnValueUnsupported ("segment pointer " ++ showHex i "") (valueType v)
+              return $! FnValueUnsupported ("segment pointer " ++ showHex i "") (typeRepr v)
       | otherwise -> do
         return $ FnConstantValue w i
 
     AssignedValue assign' -> recoverAssign assign'
 
-    Initial reg -> do
+    Initial (X86Reg reg) -> do
       reg_v <- uses rsCurRegs (MapF.lookup reg)
       case reg_v of
         Nothing -> return (FnValueUnsupported ("Initial register " ++ show reg) (N.registerType reg))
         Just (CalleeSaved _) -> do
           -- trace ("recoverValue unexpectedly encountered callee saved register: " ++ show reg) $ do
-          return (FnValueUnsupported ("Initial (callee) register " ++ show reg) (N.registerType reg))
+          return $! FnValueUnsupported ("Initial (callee) register " ++ show reg)
+                                       (N.registerType reg)
         Just (FnRegValue v') -> return v'
 
 recoverFunctions :: DiscoveryInfo -> Either String [Function]

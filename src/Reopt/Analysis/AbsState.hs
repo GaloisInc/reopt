@@ -846,13 +846,11 @@ absBlockDiff x y = filter isDifferent x86StateRegisters
 
 -- | this stores the abstract state of the system at a given point in time.
 data AbsProcessorState
-   = AbsProcessorState { absIsCode :: !(Word64 -> Bool)
+   = AbsProcessorState { absIsCode       :: !(Word64 -> Bool)
                          -- ^ Recognizer for code addresses.
                        , _absInitialRegs :: !(X86State AbsValue)
                        , _absAssignments :: !(MapF (Assignment X86_64) AbsValue)
-                       , _curAbsStack :: !AbsBlockStack
---                       , _apsEquations :: !(DiffEquations (BVValue 64) (Sum Word64))
---                       , _stackWrites ::
+                       , _curAbsStack    :: !AbsBlockStack
                        }
 
 instance Show AbsProcessorState where
@@ -887,8 +885,8 @@ curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
 -- | A lens that allows one to lookup and update the value of an assignment in
 -- map from assignments to abstract values.
-assignLens :: Assignment arch tp
-           -> Simple Lens (MapF (Assignment arch) AbsValue) (AbsValue tp)
+assignLens :: Assignment X86_64 tp
+           -> Simple Lens (MapF (Assignment X86_64) AbsValue) (AbsValue tp)
 assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
                       (\s v -> MapF.insert ass v s)
 
@@ -914,7 +912,7 @@ deleteRange l h m
 
 someValueWidth :: Value X86_64 tp -> Integer
 someValueWidth v =
-  case valueType v of
+  case typeRepr v of
     BVTypeRepr w -> natValue w
 
 valueByteSize :: Value X86_64 tp -> Int64
@@ -949,7 +947,7 @@ addMemWrite a v r =
        in r & curAbsStack %~ deleteRange o (o+w-1)
     (StackOffset _ s, v_abs) | [o] <- Set.toList s ->
       let w = valueByteSize v
-          e = StackEntry (valueType v) v_abs
+          e = StackEntry (typeRepr v) v_abs
        in r & curAbsStack %~ Map.insert o e . deleteRange o (o+w-1)
     -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
@@ -1017,7 +1015,7 @@ transferValue' is_code amap aregs v =
    AssignedValue a ->
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
                (MapF.lookup a amap)
-   Initial r
+   Initial (X86Reg r)
 --     | Just Refl <- testEquality r N.rsp -> do
 --       StackOffset (Set.singleton 0)
      | otherwise -> aregs ^. register r
@@ -1058,17 +1056,17 @@ transferRHS r rhs =
       , Just Refl <- testEquality tp v_tp ->
          v
       | otherwise -> TopV
-    Read _ -> TopV
-    -- We know only that it will return up to (and including(?)) cnt
-    ReadFSBase ->
-      TopV
-    ReadGSBase ->
-      TopV
-    MemCmp _sz cnt _src _dest _rev
-      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-          stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
-      | otherwise -> TopV
-    FindElement _sz _findEq cnt _buf _val _rev
-      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-          stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
-      | otherwise -> TopV
+    EvalArchFn f ->
+      case f of
+        ReadLoc _ -> TopV
+        ReadFSBase -> TopV
+        ReadGSBase -> TopV
+        -- We know only that it will return up to (and including(?)) cnt
+        MemCmp _sz cnt _src _dest _rev
+          | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+            stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+          | otherwise -> TopV
+        FindElement _sz _findEq cnt _buf _val _rev
+          | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+            stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+          | otherwise -> TopV

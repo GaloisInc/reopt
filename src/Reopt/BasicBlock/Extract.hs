@@ -38,6 +38,12 @@ extractBlock :: (F.ByteReader r) => Word64 -> Set Word64
              -> r (Either Word64 ([Next], Word64, [CS.Stmt]))
 extractBlock startAddr breakAddrs =
   extractBlockInner startAddr breakAddrs []
+
+extractBlockInner :: ByteReader m
+                  => Word64
+                  -> Set Word64
+                  -> [CS.Stmt]
+                  -> m (Either Word64 ([Next], Word64, [CS.Stmt]))
 extractBlockInner startAddr breakAddrs prevStmts =
   do (ii, w) <- runStateT (unWrappedByteReader $ disassembleInstruction) 0
      case execInstruction (startAddr + w) ii
@@ -66,10 +72,10 @@ instance ByteReader r => ByteReader (WrappedByteReader r) where
 
 nexts :: Map (Some Variable) [Next] -> [Next] -> [CS.Stmt] -> [Next]
 nexts _ addrs [] = addrs
-nexts vars addrs (((S.Register rv) := expr) : rest)
+nexts vars _addrs (((S.Register rv) := expr) : rest)
   | Just (N.IPReg, Refl, Refl) <- S.registerViewAsFullRegister rv
   = nexts vars (staticExpr vars expr) rest
-nexts vars addrs ((Ifte_ expr as bs) : rest) =
+nexts vars addrs ((Ifte_ _expr as bs) : rest) =
   let aAddrs = nexts vars addrs as
       bAddrs = nexts vars addrs bs
   in nexts vars (L.union aAddrs bAddrs) rest
@@ -87,7 +93,7 @@ nexts vars addrs ((Let v expr) : rest) =
 nexts vars addrs (_ : rest) = nexts vars addrs rest
 
 staticExpr :: Map (Some Variable) [Next] -> Expr a -> [Next]
-staticExpr _ (LitExpr nr i) = [Absolute $ fromIntegral i]
+staticExpr _ (LitExpr _nr i) = [Absolute $ fromIntegral i]
 staticExpr vars (AppExpr (BVAdd _ a b))
   | all isAbsolute avs && all isAbsolute bvs =
       [ Absolute (av + bv) | Absolute av <- avs, Absolute bv <- bvs ]

@@ -54,7 +54,7 @@ import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
 import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types (BVType)
+import           Reopt.Machine.Types (BVType, typeRepr)
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
@@ -96,7 +96,7 @@ app :: App Expr tp -> Expr tp
 app = AppExpr
 
 exprType :: Expr tp -> S.TypeRepr tp
-exprType (ValueExpr v) = valueType v
+exprType (ValueExpr v) = typeRepr v
 exprType (AppExpr a) = appType a
 
 -- | Return width of expression.
@@ -694,8 +694,8 @@ getX87Offset i = do
     fail $ "Illegal floating point index"
   return $! top + i
 
-readLoc :: StmtLoc (BVValue X86_64 64) tp -> X86Generator (Expr tp)
-readLoc l = ValueExpr . AssignedValue <$> addAssignment (Read l)
+readLoc :: X86PrimLoc tp -> X86Generator (Expr tp)
+readLoc l = ValueExpr . AssignedValue <$> addAssignment (EvalArchFn (ReadLoc l))
 
 getLoc :: ImpLocation tp -> X86Generator (Expr tp)
 getLoc l0 =
@@ -874,7 +874,7 @@ instance S.Semantics X86Generator where
     src_v   <- eval src
     dest_v  <- eval dest
     ValueExpr . AssignedValue
-      <$> addAssignment (MemCmp sz count_v src_v dest_v is_reverse_v)
+      <$> addAssignment (EvalArchFn (MemCmp sz count_v src_v dest_v is_reverse_v))
 
   memset count val dest df = do
     count_v <- eval count
@@ -889,7 +889,7 @@ instance S.Semantics X86Generator where
     val_v   <- eval val
     is_reverse_v <- eval is_reverse
     ValueExpr . AssignedValue
-      <$> addAssignment (FindElement sz findEq count_v buf_v val_v is_reverse_v)
+      <$> addAssignment (EvalArchFn (FindElement sz findEq count_v buf_v val_v is_reverse_v))
 
   primitive S.Syscall = do
     X86G $ \_ s0 -> do
@@ -907,8 +907,8 @@ instance S.Semantics X86Generator where
 
   getSegmentBase seg =
     case seg of
-      Flexdis.FS -> ValueExpr . AssignedValue <$> addAssignment ReadFSBase
-      Flexdis.GS -> ValueExpr . AssignedValue <$> addAssignment ReadGSBase
+      Flexdis.FS -> ValueExpr . AssignedValue <$> addAssignment (EvalArchFn ReadFSBase)
+      Flexdis.GS -> ValueExpr . AssignedValue <$> addAssignment (EvalArchFn ReadGSBase)
       _ ->
         error $ "Reopt.CFG.Implementation.getSegmentBase " ++ show seg ++ ": unimplemented!"
 
@@ -964,7 +964,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State (Value X86_64)
-initX86State loc = mkX86State Initial
+initX86State loc = mkX86State (Initial . X86Reg)
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 

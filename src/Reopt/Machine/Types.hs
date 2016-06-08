@@ -8,9 +8,12 @@
 -- The type of machine words, including bit vectors and floating point
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -22,12 +25,9 @@ module Reopt.Machine.Types
 import Data.Parameterized.Classes
 import Data.Parameterized.NatRepr
 import Data.Parameterized.NatRepr as Exports (NatRepr (..), knownNat)
-import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
-
-import GHC.TypeLits as TypeLits
-
 import GHC.TypeLits as Exports (Nat)
-
+import GHC.TypeLits as TypeLits
+import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 -- FIXME: move
 n0 :: NatRepr 0
@@ -185,3 +185,11 @@ floatInfoBits fir =
 
 floatTypeRepr :: FloatInfoRepr flt -> TypeRepr (BVType (FloatInfoBits flt))
 floatTypeRepr fir = BVTypeRepr (floatInfoBits fir)
+
+------------------------------------------------------------------------
+--
+
+-- | A multi-parameter type class that allows one to represent that a
+-- parameterized type value has some representative type such as a TypeRepr.
+class HasRepr (f :: k -> *) (v :: k -> *)  | f -> v where
+  typeRepr :: f tp -> v tp

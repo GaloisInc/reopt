@@ -682,12 +682,12 @@ stateEndsWithRet s = do
         ip_base == sp_base && ip_off + 8 == sp_off
     _ -> False
 
--- | @isrWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
+-- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
 isWriteTo :: Stmt -> BVValue X86_64 64 -> TypeRepr tp -> Maybe (Value X86_64 tp)
 isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (valueType val) tp =
+  , Just Refl <- testEquality (typeRepr val) tp =
     Just val
 isWriteTo _ _ _ = Nothing
 
@@ -721,7 +721,7 @@ blockNextStates g b =
     Syscall _ -> []
 
 checkReturnsIdentified :: CFG -> Block -> IO ()
-checkReturnsIdentified g b = do
+checkReturnsIdentified g b =
   case blockNextStates g b of
     [s] -> do
       let lbl = blockLabel b

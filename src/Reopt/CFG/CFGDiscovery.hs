@@ -305,7 +305,7 @@ recordFunctionAddrs lbl mem av = do
 
 recordWriteStmt :: BlockLabel Word64 -> AbsProcessorState -> Stmt -> State DiscoveryInfo ()
 recordWriteStmt lbl regs (WriteMem _addr v)
-  | Just Refl <- testEquality (valueType v) (knownType :: TypeRepr (BVType 64))
+  | Just Refl <- testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v = do
     mem <- gets memory
     recordFunctionAddrs lbl mem av
@@ -496,7 +496,7 @@ refineProcState :: Value X86_64 tp -- ^ Value in processor state
                 -> AbsProcessorState
                 -> AbsProcessorState
 refineProcState (BVValue _n _val) _av regs = regs
-refineProcState (Initial r) av regs =
+refineProcState (Initial (X86Reg r)) av regs =
   regs & (absInitialRegs . register r) %~ flip meet av
 refineProcState (AssignedValue ass@(Assignment _ rhs)) av regs
   -- av is not a subset.
@@ -586,7 +586,7 @@ refineULeqTrue :: Value X86_64 tp
                -> AbsProcessorState
 refineULeqTrue x y regs = refineProcState x x_leq (refineProcState y y_leq regs)
   where
-    (x_leq, y_leq) = abstractULeq (valueType x) (transferValue regs x) (transferValue regs y)
+    (x_leq, y_leq) = abstractULeq (typeRepr x) (transferValue regs x) (transferValue regs y)
     -- check r@(a, b)
     --   | isBottom a = flip trace r $ "Bottom in refineLeq: "
     --                  ++ show (pretty regs)
@@ -600,7 +600,7 @@ refineULtTrue :: Value X86_64 tp
               -> AbsProcessorState
 refineULtTrue x y regs = refineProcState x x_lt (refineProcState y y_lt regs)
   where
-    (x_lt, y_lt) = abstractULt (valueType x) (transferValue regs x) (transferValue regs y)
+    (x_lt, y_lt) = abstractULt (typeRepr x) (transferValue regs x) (transferValue regs y)
 
 refineLeq :: Value X86_64 tp
           -> Value X86_64 tp
