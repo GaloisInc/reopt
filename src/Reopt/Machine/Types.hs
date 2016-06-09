@@ -19,14 +19,14 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Reopt.Machine.Types
   ( module Reopt.Machine.Types -- export everything
-  , module Exports
+  , GHC.TypeLits.Nat
+  , Data.Parameterized.NatRepr.NatRepr(..)
+  , Data.Parameterized.NatRepr.knownNat
   ) where
 
 import Data.Parameterized.Classes
 import Data.Parameterized.NatRepr
-import Data.Parameterized.NatRepr as Exports (NatRepr (..), knownNat)
-import GHC.TypeLits as Exports (Nat)
-import GHC.TypeLits as TypeLits
+import GHC.TypeLits
 import Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 -- FIXME: move

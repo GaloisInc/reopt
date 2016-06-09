@@ -27,16 +27,16 @@ import           Control.Monad.State (State, evalState, gets, modify)
 import           Data.Foldable (foldrM)
 import           Data.Map (Map)
 import qualified Data.Map as M
+import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Word
 
-import           Data.Parameterized.Some
 import           Reopt.CFG.Representation
 import           Reopt.Machine.X86State
 
 
-eliminateDeadRegisters :: CFG -> CFG
+eliminateDeadRegisters :: CFG X86_64 -> CFG X86_64
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
   where
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
@@ -44,7 +44,7 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
-liveRegisters :: CFG -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64)
+liveRegisters :: CFG X86_64 -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64)
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v

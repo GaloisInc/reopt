@@ -28,6 +28,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 
 import           Debug.Trace
 

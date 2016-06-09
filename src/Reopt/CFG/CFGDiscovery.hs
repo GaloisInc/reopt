@@ -322,7 +322,7 @@ transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 -- | Generate map that maps each assignment in the CFG to the abstract value
 -- associated with it.
 assignmentAbsValues :: Memory Word64
-                    -> CFG
+                    -> CFG X86_64
                     -> AbsStateMap
                     -> MapF (Assignment X86_64) AbsValue
 assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
@@ -856,7 +856,7 @@ transfer addr = do
 ------------------------------------------------------------------------
 -- Main loop
 
-mkCFG :: Map CodeAddr (Maybe BlockRegion) -> CFG
+mkCFG :: Map CodeAddr (Maybe BlockRegion) -> CFG X86_64
 mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr (Just br) = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)

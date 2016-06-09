@@ -67,6 +67,7 @@ import           Reopt.CFG.Representation
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
 import           Reopt.Machine.Types
+import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Relinker
@@ -707,7 +708,7 @@ blockContainsCall mem b s =
    in go (reverse (blockStmts b))
 
 -- | Return next states for block.
-blockNextStates :: CFG -> Block X86_64 -> [X86State (Value X86_64)]
+blockNextStates :: CFG X86_64 -> Block X86_64 -> [X86State (Value X86_64)]
 blockNextStates g b =
   case blockTerm b of
     FetchAndExecute s -> [s]
@@ -716,7 +717,7 @@ blockNextStates g b =
             Just y = findBlock g y_lbl
     Syscall _ -> []
 
-checkReturnsIdentified :: CFG -> Block X86_64 -> IO ()
+checkReturnsIdentified :: CFG X86_64 -> Block X86_64 -> IO ()
 checkReturnsIdentified g b =
   case blockNextStates g b of
     [s] -> do
@@ -730,7 +731,7 @@ checkReturnsIdentified g b =
         _ -> return ()
     _ -> return ()
 
-checkCallsIdentified :: Memory Word64 -> CFG -> Block X86_64 -> IO ()
+checkCallsIdentified :: Memory Word64 -> CFG X86_64 -> Block X86_64 -> IO ()
 checkCallsIdentified mem g b = do
   let lbl = blockLabel b
   case blockNextStates g b of

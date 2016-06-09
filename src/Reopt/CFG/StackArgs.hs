@@ -19,6 +19,7 @@ import           Data.Word
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
+import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 
 type StackArgs a = State (Int64, Set (BlockLabel Word64)) a

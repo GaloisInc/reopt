@@ -21,9 +21,10 @@ module Reopt.Machine.StateNames where
 
 
 import           Data.Parameterized.Classes
+import           Data.Parameterized.NatRepr
 import qualified Data.Vector as V
-import           GHC.TypeLits
 import qualified Flexdis86 as F
+import           GHC.TypeLits
 
 import           Reopt.Machine.Types
 
@@ -64,7 +65,6 @@ type family RegisterClassBits (cl :: RegisterClass) :: Nat where
   RegisterClassBits 'X87_Control     = 2
   RegisterClassBits 'XMM             = 128
 
-type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 
 data RegisterName cl
    = (cl ~ 'ProgramCounter) => IPReg
@@ -229,6 +229,8 @@ registerWidth XMMReg{}        = knownNat
 registerWidth SegmentReg{}    = knownNat
 registerWidth DebugReg{}      = knownNat
 
+type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
+
 registerType :: RegisterName cl -> TypeRepr (RegisterType cl)
 registerType IPReg           = knownType
 registerType GPReg{}         = knownType
@@ -254,7 +256,7 @@ data BitPacking (n :: Nat) = BitPacking (NatRepr n) [BitConversion n]
 -- | A description of how a sub-word may be extracted from a word. If a bit isn't
 -- constant or from a register it is reserved.
 data BitConversion n = -- forall cl m. (m + TypeBits (RegisterType cl) <= n)
-                      forall cl m n'. (RegisterType cl ~ BVType n', 1 <= n', n' <= n)
+                      forall cl m n'. (RegisterClassBits cl ~ n', 1 <= n', n' <= n)
                        => RegisterBit (RegisterName cl) (NatRepr m)
                      | forall m. (m + 1 <= n) => ConstantBit Bool (NatRepr m)
 

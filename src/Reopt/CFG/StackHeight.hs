@@ -29,11 +29,12 @@ import Data.Int
 import Data.Parameterized.NatRepr
 import Data.Word
 
+import Debug.Trace
 import Reopt.CFG.FnRep
 import Reopt.CFG.Representation
 import Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import Reopt.Machine.Types
-import Debug.Trace
+import Reopt.Machine.X86State
 
 {-
 ------------------------------------------------------------------------
