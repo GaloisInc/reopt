@@ -1630,28 +1630,28 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
 -- | A basic block in a control flow graph.
 -- Consists of:
 -- 1. A label that should uniquely identify the block, equence of
-data Block = Block { blockLabel :: !(BlockLabel Word64)
-                     -- | List of statements in the block.
-                   , blockStmts :: !([Stmt X86_64])
-                     -- | This maps applications to the associated assignment.
-                   , blockCache :: !(MapF (App (Value X86_64)) (Assignment X86_64))
-                     -- | The last statement in the block.
-                   , blockTerm :: !(TermStmt X86_64)
-                   }
+data Block arch = Block { blockLabel :: !(ArchLabel arch)
+                        , blockStmts :: !([Stmt arch])
+                          -- ^ List of statements in the block.
+                        , blockCache :: !(MapF (App (Value X86_64)) (Assignment X86_64))
+                          -- ^ This maps applications to the associated assignment.
+                        , blockTerm :: !(TermStmt X86_64)
+                          -- ^ The last statement in the block.
+                        }
 
-instance Pretty Block where
+instance Pretty (Block X86_64) where
   pretty b = do
     pretty (blockLabel b) PP.<> text ":" <$$>
       indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
 
 -- | Returns true if block has a call comment.
-hasCallComment :: Block -> Bool
+hasCallComment :: Block X86_64 -> Bool
 hasCallComment b = any isCallComment (blockStmts b)
   where isCallComment (Comment s) = "call" `Text.isInfixOf` s
         isCallComment _ = False
 
 -- | Returns true if block has a ret comment.
-hasRetComment :: Block -> Bool
+hasRetComment :: Block X86_64 -> Bool
 hasRetComment b = any isRetComment (blockStmts b)
   where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
         isRetComment _ = False
@@ -1661,7 +1661,7 @@ hasRetComment b = any isRetComment (blockStmts b)
 
 -- | A CFG is a map from all reachable code locations
 -- to the block for that code location.
-data CFG = CFG { _cfgBlocks :: !(Map (BlockLabel Word64) Block)
+data CFG = CFG { _cfgBlocks :: !(Map (BlockLabel Word64) (Block X86_64))
                  -- | Maps each address that is the start of a block
                  -- to the address just past the end of that block.
                  -- Blocks are expected to be contiguous.
@@ -1674,16 +1674,16 @@ emptyCFG = CFG { _cfgBlocks = Map.empty
                , _cfgBlockRanges = Map.empty
                }
 
-cfgBlocks :: Simple Lens CFG (Map (BlockLabel Word64) Block)
+cfgBlocks :: Simple Lens CFG (Map (BlockLabel Word64) (Block X86_64))
 cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
 
-cfgBlockRanges :: Simple Lens CFG (Map CodeAddr CodeAddr)
+cfgBlockRanges :: Simple Lens CFG (Map Word64 Word64)
 cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
 
-cfgBlockEnds :: CFG -> Set CodeAddr
+cfgBlockEnds :: CFG -> Set Word64
 cfgBlockEnds g = Set.fromList (Map.elems (g^.cfgBlockRanges))
 
-insertBlock :: Block -> CFG -> CFG
+insertBlock :: Block X86_64 -> CFG -> CFG
 insertBlock b c = do
   let lbl = blockLabel b
   case Map.lookup lbl (c^.cfgBlocks) of
@@ -1691,13 +1691,13 @@ insertBlock b c = do
     Nothing -> c & cfgBlocks %~ Map.insert (blockLabel b) b
 
 -- | Inserts blocks for a contiguous region of code.
-insertBlocksForCode :: CodeAddr -> CodeAddr -> [Block] -> CFG -> CFG
+insertBlocksForCode :: CodeAddr -> CodeAddr -> [Block X86_64] -> CFG -> CFG
 insertBlocksForCode start end bs = execState $ do
   modify $ \cfg -> foldl' (flip insertBlock) cfg bs
   cfgBlockRanges %= Map.insert start end
 
 -- | Return block with given label.
-findBlock :: CFG -> BlockLabel Word64 -> Maybe Block
+findBlock :: CFG -> BlockLabel Word64 -> Maybe (Block X86_64)
 findBlock g l = Map.lookup l (g^.cfgBlocks)
 
 instance Pretty CFG where
@@ -1707,7 +1707,7 @@ instance Pretty CFG where
 -- FIXME: not a Traversal, more like a map+fold
 traverseBlocks :: CFG
                -> BlockLabel Word64
-               -> (Block -> a)
+               -> (Block X86_64 -> a)
                -> (a -> a -> a -> a)
                -> a
 traverseBlocks cfg root f merge = go root
@@ -1722,10 +1722,10 @@ traverseBlocks cfg root f merge = go root
 -- | As for traverseBlocks but starting from a block in the cfg, not
 -- an address
 traverseBlockAndChildren :: CFG
-                         -> Block
-                         -> (Block -> a)
+                         -> Block X86_64
+                         -> (Block X86_64 -> a)
                             -- Maps a block to a value
-                         -> (Block -> a -> a -> a)
+                         -> (Block X86_64 -> a -> a -> a)
                             -- Maps results from to sub-blocks together.
                          -> a
 traverseBlockAndChildren cfg b0 f merge = goBlock b0

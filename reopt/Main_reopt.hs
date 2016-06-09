@@ -535,7 +535,7 @@ ppStmtAndAbs m stmt =
     _ -> pretty stmt
 
 
-ppBlockAndAbs :: MapF (Assignment X86_64) AbsValue -> Block -> Doc
+ppBlockAndAbs :: MapF (Assignment X86_64) AbsValue -> Block X86_64 -> Doc
 ppBlockAndAbs m b =
   pretty (blockLabel b) <> text ":" <$$>
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
@@ -697,7 +697,7 @@ isCodeAddrWriteTo mem s sp
 isCodeAddrWriteTo _ _ _ = Nothing
 
 -- | Returns true if it looks like block ends with a call.
-blockContainsCall :: Memory Word64 -> Block -> X86State (Value X86_64) -> Bool
+blockContainsCall :: Memory Word64 -> Block X86_64 -> X86State (Value X86_64) -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.boundValue sp_reg
       go [] = False
@@ -707,7 +707,7 @@ blockContainsCall mem b s =
    in go (reverse (blockStmts b))
 
 -- | Return next states for block.
-blockNextStates :: CFG -> Block -> [X86State (Value X86_64)]
+blockNextStates :: CFG -> Block X86_64 -> [X86State (Value X86_64)]
 blockNextStates g b =
   case blockTerm b of
     FetchAndExecute s -> [s]
@@ -716,7 +716,7 @@ blockNextStates g b =
             Just y = findBlock g y_lbl
     Syscall _ -> []
 
-checkReturnsIdentified :: CFG -> Block -> IO ()
+checkReturnsIdentified :: CFG -> Block X86_64 -> IO ()
 checkReturnsIdentified g b =
   case blockNextStates g b of
     [s] -> do
@@ -730,7 +730,7 @@ checkReturnsIdentified g b =
         _ -> return ()
     _ -> return ()
 
-checkCallsIdentified :: Memory Word64 -> CFG -> Block -> IO ()
+checkCallsIdentified :: Memory Word64 -> CFG -> Block X86_64 -> IO ()
 checkCallsIdentified mem g b = do
   let lbl = blockLabel b
   case blockNextStates g b of

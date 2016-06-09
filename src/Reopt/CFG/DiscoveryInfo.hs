@@ -89,11 +89,13 @@ lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
 -- | The blocks contained in a single contiguous region of instructions.
 data BlockRegion = BlockRegion { brEnd :: !CodeAddr
                                  -- | Map from labelIndex to associated block.
-                               , brBlocks :: !(Map Word64 Block)
+                               , brBlocks :: !(Map Word64 (Block X86_64))
                                }
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
-lookupBlock :: Map CodeAddr (Maybe BlockRegion) -> BlockLabel Word64 -> Maybe Block
+lookupBlock :: Map CodeAddr (Maybe BlockRegion)
+            -> BlockLabel Word64
+            -> Maybe (Block X86_64)
 lookupBlock m lbl = do
   br <- join $ Map.lookup (labelAddr lbl) m
   Map.lookup (labelIndex lbl) (brBlocks br)
@@ -351,7 +353,7 @@ identifyJumpTable s lbl (AssignedValue (Assignment _ (ReadMem ptr _)))
 identifyJumpTable _ _ _ = Nothing
 
 -- | Classifies the terminal statement in a block using discovered information.
-classifyBlock :: Block -> DiscoveryInfo -> Maybe ParsedTermStmt
+classifyBlock :: Block X86_64 -> DiscoveryInfo -> Maybe ParsedTermStmt
 classifyBlock b interp_state =
   case blockTerm b of
     Branch c x y -> Just (ParsedBranch c x y)
@@ -442,7 +444,9 @@ classifyBlock b interp_state =
     mem = memory interp_state
     sysp = syscallPersonality interp_state
 
-getClassifyBlock :: BlockLabel Word64 -> DiscoveryInfo ->  Maybe (Block, Maybe ParsedTermStmt)
+getClassifyBlock :: BlockLabel Word64
+                 -> DiscoveryInfo
+                 ->  Maybe (Block X86_64, Maybe ParsedTermStmt)
 getClassifyBlock lbl interp_state = do
   b <- lookupBlock (interp_state ^. blocks) lbl
   return (b, classifyBlock b interp_state)

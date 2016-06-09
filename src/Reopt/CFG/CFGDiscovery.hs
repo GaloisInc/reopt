@@ -140,7 +140,7 @@ deleteSetLessThan k m =
 -- Block discovery
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
-lookupBlock' :: MonadState DiscoveryInfo m => BlockLabel Word64 -> m (Maybe Block)
+lookupBlock' :: MonadState DiscoveryInfo m => BlockLabel Word64 -> m (Maybe (Block X86_64))
 lookupBlock' lbl = uses blocks (`lookupBlock` lbl)
 
 getAbsBlockState :: CodeAddr -> State DiscoveryInfo AbsBlockState
@@ -220,7 +220,7 @@ reallyGetBlockList m s0 = Map.foldrWithKey' tryDisassembleAddr s0 m
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all it's children are
 -- present in the cfg (assuming successful disassembly)
-getBlock :: CodeAddr -> State DiscoveryInfo (Maybe Block)
+getBlock :: CodeAddr -> State DiscoveryInfo (Maybe (Block X86_64))
 getBlock addr = do
   m_b <- use blocks
   case Map.lookup addr m_b of
@@ -327,7 +327,7 @@ assignmentAbsValues :: Memory Word64
                     -> MapF (Assignment X86_64) AbsValue
 assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
   where go :: MapF (Assignment X86_64) AbsValue
-           -> Block
+           -> Block X86_64
            -> MapF (Assignment X86_64) AbsValue
         go m0 b =
           case blockLabel b of
@@ -337,7 +337,7 @@ assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
               insBlock b abs_state m0
             _ -> m0
 
-        insBlock :: Block
+        insBlock :: Block X86_64
                  -> AbsProcessorState
                  -> MapF (Assignment X86_64) AbsValue
                  -> MapF (Assignment X86_64) AbsValue
@@ -694,7 +694,7 @@ getJumpTableBounds _ _ _ _ = Nothing
   --      else Nothing
   -- | otherwise = Nothing
 
-transferBlock :: Block             -- ^ Block to start from
+transferBlock :: Block X86_64      -- ^ Block to start from
               -> AbsProcessorState -- ^ Registers at this block
               -> State DiscoveryInfo ()
 transferBlock b regs = do

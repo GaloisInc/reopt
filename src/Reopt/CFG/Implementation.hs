@@ -470,7 +470,7 @@ data GenState tag = GenState
          -- ^ The next id to use for assignments
        , _nextBlockID  :: !Word64
          -- ^ Index of next block
-       , _frontierBlocks :: !(Seq Block)
+       , _frontierBlocks :: !(Seq (Block X86_64))
          -- ^ Blocks added to CFG
        , _blockState     :: !(MaybeF tag PreBlock)
          -- ^ Blocks generated so far
@@ -486,7 +486,7 @@ nextBlockID = lens _nextBlockID (\s v -> s { _nextBlockID = v })
 
 -- | Blocks that are not in CFG that end with a FetchAndExecute,
 -- which we need to analyze to compute new potential branch targets.
-frontierBlocks :: Simple Lens (GenState tag) (Seq Block)
+frontierBlocks :: Simple Lens (GenState tag) (Seq (Block X86_64))
 frontierBlocks = lens _frontierBlocks (\s v -> s { _frontierBlocks = v })
 
 -- | Blocks that are not in CFG that end with a FetchAndExecute,
@@ -518,7 +518,7 @@ curX86State = blockState . _JustF . pBlockState
 -- | Finishes the current block, if it is started.
 finishBlock' :: PreBlock
              -> (X86State (Value X86_64) -> TermStmt X86_64)
-             -> Block
+             -> Block X86_64
 finishBlock' pre_b term =
   Block { blockLabel = pBlockLabel pre_b
         , blockStmts = Fold.toList (pre_b^.pBlockStmts)
@@ -982,7 +982,7 @@ disassembleBlock :: AssignId
                  -> (CodeAddr -> Bool)
                     -- ^ PRedicate that tells when to continue.
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> Either GenError ([Block], CodeAddr, AssignId)
+                 -> Either GenError ([Block X86_64], CodeAddr, AssignId)
 disassembleBlock next_id mem contFn loc = do
   let gs = initGenState next_id (loc_ip loc) (initX86State loc)
   (gs', ip) <- disassembleBlock' mem gs contFn (loc_ip loc)

@@ -44,15 +44,17 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
-liveRegisters :: CFG -> BlockLabel Word64 -> Map (BlockLabel Word64) Block
+liveRegisters :: CFG -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64)
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v
 
-blockLiveRegisters :: Block -> State (Set AssignId) (Map (BlockLabel Word64) Block)
-blockLiveRegisters b = do addIDs terminalIds
-                          stmts' <- foldrM noteAndFilter [] (blockStmts b)
-                          return $ M.singleton (blockLabel b) (b { blockStmts = stmts' })
+blockLiveRegisters :: Block X86_64
+                   -> State (Set AssignId) (Map (BlockLabel Word64) (Block X86_64))
+blockLiveRegisters b = do
+    addIDs terminalIds
+    stmts' <- foldrM noteAndFilter [] (blockStmts b)
+    return $ M.singleton (blockLabel b) (b { blockStmts = stmts' })
   where
     terminalIds = case blockTerm b of
                    Branch v _ _      -> refsInValue v
