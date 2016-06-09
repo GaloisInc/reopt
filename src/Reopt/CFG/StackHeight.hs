@@ -23,18 +23,17 @@ module Reopt.CFG.StackHeight
   , stackArgs
   ) where
 
-import           Control.Exception (assert)
-import           Data.Bits
-import           Data.Int
---import qualified Data.Map.Strict as Map
-import           Data.Parameterized.NatRepr
-import           Data.Word
+import Control.Exception (assert)
+import Data.Bits
+import Data.Int
+import Data.Parameterized.NatRepr
+import Data.Word
 
-import           Reopt.CFG.FnRep
-import           Reopt.CFG.Representation
-import           Reopt.Machine.Types
-import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..), rsp)
-import           Debug.Trace
+import Reopt.CFG.FnRep
+import Reopt.CFG.Representation
+import Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
+import Reopt.Machine.Types
+import Debug.Trace
 
 {-
 ------------------------------------------------------------------------
@@ -139,7 +138,7 @@ asSallocBase (valueAsApp -> Just (BVAdd _ x (BVValue w o))) = do
 asSallocBase (valueAsApp -> Just (BVSub _ x y)) = do
   SallocBase r <- asSallocBase x
   return $! SallocBase (y:r)
-asSallocBase (Initial r) | Just Refl <- testEquality r (X86Reg rsp) =
+asSallocBase (Initial r) | Just Refl <- testEquality r sp_reg  =
   return $! SallocBase []
 asSallocBase _ = Nothing
 

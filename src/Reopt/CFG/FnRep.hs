@@ -45,7 +45,6 @@ import           Data.Parameterized.TraversableF
 import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
                                , ppApp, ppLit, ppAssignId, sexpr, appType
                                , foldApp)
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
 
@@ -76,25 +75,25 @@ instance Pretty FunctionType where
 
 -- Convenience functions
 ftMaximumFunctionType :: FunctionType
-ftMaximumFunctionType = FunctionType (length x86ArgumentRegisters)
-                                     (length x86FloatArgumentRegisters)
-                                     (length x86ResultRegisters)
-                                     (length x86FloatResultRegisters)
+ftMaximumFunctionType = FunctionType (length x86ArgumentRegs)
+                                     (length x86FloatArgumentRegs)
+                                     (length x86ResultRegs)
+                                     (length x86FloatResultRegs)
 
 ftMinimumFunctionType :: FunctionType
 ftMinimumFunctionType = FunctionType 0 0 0 0
 
-ftIntArgRegs :: FunctionType -> [N.RegisterName 'N.GP]
-ftIntArgRegs ft = take (fnNIntArgs ft) x86ArgumentRegisters
+ftIntArgRegs :: FunctionType -> [X86Reg (BVType 64)]
+ftIntArgRegs ft = take (fnNIntArgs ft) x86ArgumentRegs
 
-ftFloatArgRegs :: FunctionType -> [N.RegisterName 'N.XMM]
-ftFloatArgRegs ft = take (fnNFloatArgs ft) x86FloatArgumentRegisters
+ftFloatArgRegs :: FunctionType -> [X86Reg (BVType 128)]
+ftFloatArgRegs ft = take (fnNFloatArgs ft) x86FloatArgumentRegs
 
-ftIntRetRegs :: FunctionType -> [N.RegisterName 'N.GP]
-ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegisters
+ftIntRetRegs :: FunctionType -> [X86Reg (BVType 64)]
+ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs
 
-ftFloatRetRegs :: FunctionType -> [N.RegisterName 'N.XMM]
-ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegisters
+ftFloatRetRegs :: FunctionType -> [X86Reg (BVType 128)]
+ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
 
 -- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
 
@@ -247,11 +246,11 @@ instance Pretty Function where
 instance FoldFnValue Function where
   foldFnValue f fn = mconcat (map (foldFnValue f) (fnBlocks fn))
 
-data FnRegValue cl where
-  -- This is a callee saved register.
-  CalleeSaved :: N.RegisterName cl -> FnRegValue cl
-  -- A value assigned to a register
-  FnRegValue :: !(FnValue (N.RegisterType cl)) -> FnRegValue cl
+data FnRegValue tp
+   = CalleeSaved !(X86Reg tp)
+     -- ^ This is a callee saved register.
+   | FnRegValue !(FnValue tp)
+     -- ^ A value assigned to a register
 
 instance Pretty (FnRegValue tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
@@ -271,9 +270,6 @@ data FnBlock
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
              }
-
--- instance PrettyRegValue FnRegValue where
---   ppValueEq _ v = Just $ pretty v
 
 instance Pretty FnBlock where
   pretty b =

@@ -27,9 +27,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
-import           Reopt.Machine.X86State
 
 import           Debug.Trace
 
@@ -172,7 +170,7 @@ valueHasSP val = go val
     go :: forall tp . Value X86_64 tp -> Bool
     go v = case v of
              BVValue _sz _i -> False
-             Initial r      -> testEquality r (X86Reg N.rsp) /= Nothing
+             Initial r      -> testEquality r sp_reg /= Nothing
              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
     goAssignRHS :: forall tp. AssignRhs X86_64 tp -> Bool
@@ -194,7 +192,7 @@ parseStackPointer' sp0 addr
                          (negateStackDepthValue (parseStackPointer' sp0 y))
   | BVValue _ i <- addr = constantDepthValue (fromIntegral i)
   | Initial n <- addr
-  , Just Refl <- testEquality n (X86Reg N.rsp) = sp0
+  , Just Refl <- testEquality n sp_reg = sp0
   | otherwise = SDV 0 (Set.singleton (Pos addr))
 
 
@@ -253,8 +251,8 @@ recoverBlock interp_state root_label = do
           -- overapproximates by viewing all registers as uses of the
           -- sp between blocks
           addStateVars s =
-            addDepth $ Set.unions [ parseStackPointer init_sp (s ^. register r)
-                                  | r <- N.gpRegs ]
+            addDepth $ Set.unions [ parseStackPointer init_sp (s ^. boundValue r)
+                                  | r <- gpRegList ]
 
       case m_pterm of
         Just (ParsedBranch _c x y) -> do
@@ -266,7 +264,7 @@ recoverBlock interp_state root_label = do
             traverse_ goStmt stmts'
             addStateVars proc_state
 
-            let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+            let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
             case m_ret_addr of
               Nothing -> return ()
               Just ret_addr ->  addBlock (mkRootBlockLabel ret_addr) (addStackDepthValue sp' $ constantDepthValue 8)
@@ -276,7 +274,7 @@ recoverBlock interp_state root_label = do
             addStateVars proc_state
 
             let lbl'     = mkRootBlockLabel tgt_addr
-                sp' = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+                sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
             addBlock lbl' sp'
 
@@ -287,14 +285,14 @@ recoverBlock interp_state root_label = do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
-            let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+            let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
             addBlock (mkRootBlockLabel next_addr) sp'
 
         Just (ParsedLookupTable proc_state _idx vec) -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
-            let sp'  = parseStackPointer' init_sp (proc_state ^. register N.rsp)
+            let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
             traverse_ (flip addBlock sp' . mkRootBlockLabel) vec
 

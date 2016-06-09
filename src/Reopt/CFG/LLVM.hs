@@ -48,7 +48,6 @@ import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
 
@@ -108,7 +107,7 @@ iSystemCall pname
   where
     -- the +1 is for the additional syscall no. register, which is
     -- passed via the stack.
-    argTypes = replicate (length x86SyscallArgumentRegisters + 1) (L.iT 64)
+    argTypes = replicate (length x86SyscallArgumentRegs + 1) (L.iT 64)
 
 reoptIntrinsics :: [L.Typed L.Value]
 reoptIntrinsics = [ iEvenParity
@@ -207,8 +206,8 @@ functionTypeToLLVM :: FunctionType -> L.Type
 functionTypeToLLVM ft = L.ptrT (L.FunTy (functionTypeReturnType ft) (functionTypeArgTypes ft) False)
 
 funReturnType :: L.Type
-funReturnType = L.Struct $ (map (typeToLLVMType . N.registerType) x86ResultRegisters)
-                            ++ (replicate (length x86FloatResultRegisters) functionFloatType)
+funReturnType = L.Struct $ (map (typeToLLVMType . typeRepr) x86ResultRegs)
+                            ++ (replicate (length x86FloatResultRegs) functionFloatType)
 
 -- | This is a special label used for e.g. table lookup defaults (where we should never reach).
 -- For now it will just loop.
@@ -313,13 +312,13 @@ makeRet grets frets = do
 
   -- cast fp results to the required type
   cfrets <- mapM (liftBB . castToFunctionFloatType) frets
-  let frets' = padUndef functionFloatType (length x86FloatResultRegisters) cfrets
+  let frets' = padUndef functionFloatType (length x86FloatResultRegs) cfrets
   -- construct the return result struct
   v <- ifoldlM (\n acc fld -> liftBB $ L.insertValue acc fld (fromIntegral n)) initUndef (grets' ++ frets')
   liftBB $ L.ret v
   where
     initUndef = L.Typed funReturnType L.ValUndef
-    grets'    = padUndef (L.iT 64) (length x86ResultRegisters) grets
+    grets'    = padUndef (L.iT 64) (length x86ResultRegs) grets
 
 termStmtToLLVM :: FnTermStmt -> ToLLVM ()
 termStmtToLLVM tm =
@@ -363,7 +362,7 @@ termStmtToLLVM tm =
                                         (L.extractValue retv (fromIntegral i)))
                       gretvs
            itraverse_ (\i v -> do retv' <- L.extractValue retv
-                                              (fromIntegral (i + length x86ResultRegisters))
+                                              (fromIntegral (i + length x86ResultRegs))
                                   L.assign (assignIdToLLVMIdent $ frAssignId v)
                                            (castFromFunctionFloatType retv'))
                       fretvs
@@ -372,7 +371,7 @@ termStmtToLLVM tm =
      FnSystemCall call_no pname name args rets lbl -> do
        args'  <- mapM valueToLLVM args
      -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
-       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegisters) args'
+       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegs) args'
                      ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
 
        liftBB $ do

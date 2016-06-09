@@ -19,8 +19,6 @@ import           Data.Word
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 
 type StackArgs a = State (Int64, Set (BlockLabel Word64)) a
@@ -89,7 +87,7 @@ recoverBlock amap aregs interp_state lbl = do
         addBlock lbl'
 
       -- Jump to concrete offset.
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg
         -- Check that we are in the same function
       , inSameFunction (labelAddr lbl) tgt_addr interp_state -> do
 

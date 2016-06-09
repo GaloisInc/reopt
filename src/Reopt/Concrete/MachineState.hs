@@ -1,39 +1,36 @@
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 module Reopt.Concrete.MachineState
     ( module Reopt.Concrete.MachineState
     , module Reopt.Concrete.BitVector
     ) where
 
 import           Control.Lens
-import           Control.Monad.State
-import           Control.Monad.Reader
 import           Control.Monad.Except (ExceptT)
+import           Control.Monad.Reader
+import           Control.Monad.State
 import           Control.Monad.Writer.Strict
 import qualified Data.Map as M
 import           Data.Maybe (mapMaybe)
+import           Data.Parameterized.Classes
+import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
-import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Classes
--- import           Debug.Trace
 
-import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
-import qualified Reopt.Machine.X86State as X
+import qualified Data.BitVector as BV
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
+import           Reopt.Machine.Types
+import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.Monad (Primitive, Segment)
-import qualified Data.BitVector as BV
 
 ------------------------------------------------------------------------
 -- Concrete values
@@ -66,14 +63,14 @@ instance OrdF Value where
     case compareF x y of
       LTF -> LTF
       EQF -> EQF
-      GTF -> GTF    
+      GTF -> GTF
   compareF (Undefined _) (Literal _) = LTF
   compareF (Literal _) (Undefined _) = GTF
-  compareF (Undefined x) (Undefined y) = 
+  compareF (Undefined x) (Undefined y) =
     case compareF x y of
       LTF -> LTF
       EQF -> EQF
-      GTF -> GTF    
+      GTF -> GTF
 
 
 -- | Equal or at least one side undefined.
@@ -97,10 +94,10 @@ instance Pretty (Value tp) where
   pretty (Literal x)    = text $ show x
   pretty (Undefined _) = text $ "Undefined"
 
-instance X.PrettyRegValue Value where
-  ppValueEq (N.FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
-  ppValueEq (N.X87ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
-  ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
+instance X.PrettyRegValue X.X86_64 Value where
+  ppValueEq _ (X.X86_FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
+  ppValueEq _ (X.X87_ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
+  ppValueEq _ r v = Just $ text (show r) <+> text "=" <+> pretty v
 
 ------------------------------------------------------------------------
 -- Constants
@@ -253,9 +250,9 @@ class Monad m => MonadMachineState m where
   -- | Set a byte.
   setMem :: Address tp -> Value tp -> m ()
   -- | Get the value of a register.
-  getReg :: N.RegisterName cl -> m (Value (N.RegisterType cl))
+  getReg :: X.X86Reg tp -> m (Value tp)
   -- | Set the value of a register.
-  setReg :: N.RegisterName cl -> Value (N.RegisterType cl) -> m ()
+  setReg :: X.X86Reg tp -> Value tp -> m ()
   -- | Get the value of all registers.
   dumpRegs :: m (X.X86State Value)
   -- | Update the state for a primitive.
@@ -321,7 +318,7 @@ getMem8 addr8 = do
 instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
   getMem a@(Address nr _) = do
     vs <- mapM getMem8 $ byteAddresses a
-    
+
     let bvs = mapMaybe asBV vs
     -- We can't directly concat 'vs' since we can't type the
     -- intermediate concatenations.
@@ -335,16 +332,16 @@ instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
              then Undefined (BVTypeRepr nr)
              else Literal (bitVector nr bv)
 
-  setMem addr@Address{} val = 
+  setMem addr@Address{} val =
     foldM (\_ (a,v) -> modify $ mapFst $ M.insert a v)  () (zip addrs $ reverse $ group (knownNat :: NatRepr 8) val) where
       mapFst f (a,b) = (f a, b)
       addrs = byteAddresses addr
 
-  getReg reg = liftM (^.(X.register reg)) dumpRegs
+  getReg reg = liftM (^.(X.boundValue reg)) dumpRegs
 
   -- TODO(conathan): make the concrete state a record with a lens and
   -- eliminate the tuple mapping stuff.
-  setReg reg val = modify $ mapSnd $ X.register reg .~ val
+  setReg reg val = modify $ mapSnd $ X.boundValue reg .~ val
     where mapSnd f (a,b) = (a, f b)
 
   dumpRegs = liftM snd get
@@ -359,7 +356,7 @@ instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
   -- be reread. I removed some other code that caused 'Undefined' in a
   -- reg to turn into a read of the hardware.
   primitive _ = do
-    let regs = X.mkX86State (\rn -> Undefined (N.registerType rn))
+    let regs = X.mkX86State (\rn -> Undefined (typeRepr rn))
     let mem = M.empty
     put (mem, regs)
 
@@ -419,14 +416,19 @@ instance MonadMachineState NullMachineState where
   -- | Set a byte.
   setMem _ _ = NullMachineState {unNullMachineState = (Identity ())}
   -- | Get the value of a register.
-  getReg reg = NullMachineState {unNullMachineState = Identity $
-    Literal $ bitVector w $ BV.bitVec (fromIntegral $ natValue w) (0 :: Int)}
-    where w = N.registerWidth reg
+  getReg reg =
+    case typeRepr reg of
+      BVTypeRepr w ->
+        NullMachineState
+        { unNullMachineState = Identity $
+            Literal $ bitVector w $ BV.bitVec (fromIntegral $ natValue w) (0 :: Int)
+        }
   -- | Set the value of a register.
   setReg _ _ = NullMachineState {unNullMachineState = (Identity ())}
   -- | Get the value of all registers.
-  dumpRegs = NullMachineState {unNullMachineState = (Identity $
-    X.mkX86State (Undefined . BVTypeRepr . N.registerWidth))}
+  dumpRegs = NullMachineState
+    { unNullMachineState = Identity $ X.mkX86State $ Undefined . typeRepr
+    }
   -- | Update the state for a primitive.
   primitive _ = NullMachineState {unNullMachineState = (Identity ())}
   -- | Return the base address of the given segment.

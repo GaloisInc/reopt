@@ -375,68 +375,56 @@ translatePtraceRegs :: X86_64Regs -> X86_64FPRegs -> X86State MS.Value
 translatePtraceRegs ptraceRegs ptraceFPRegs =
   mkX86State fillReg
   where
-    fillReg :: N.RegisterName cl -> MS.Value (N.RegisterType cl)
-    fillReg N.IPReg = mkLit64 (rip ptraceRegs)
-    fillReg (N.GPReg 0)  = mkLit64 (rax ptraceRegs)
-    fillReg (N.GPReg 1)  = mkLit64 (rcx ptraceRegs)
-    fillReg (N.GPReg 2)  = mkLit64 (rdx ptraceRegs)
-    fillReg (N.GPReg 3)  = mkLit64 (rbx ptraceRegs)
-    fillReg (N.GPReg 4)  = mkLit64 (rsp ptraceRegs)
-    fillReg (N.GPReg 5)  = mkLit64 (rbp ptraceRegs)
-    fillReg (N.GPReg 6)  = mkLit64 (rsi ptraceRegs)
-    fillReg (N.GPReg 7)  = mkLit64 (rdi ptraceRegs)
-    fillReg (N.GPReg 8)  = mkLit64 (r8 ptraceRegs)
-    fillReg (N.GPReg 9)  = mkLit64 (r9 ptraceRegs)
-    fillReg (N.GPReg 10) = mkLit64 (r10 ptraceRegs)
-    fillReg (N.GPReg 11) = mkLit64 (r11 ptraceRegs)
-    fillReg (N.GPReg 12) = mkLit64 (r12 ptraceRegs)
-    fillReg (N.GPReg 13) = mkLit64 (r13 ptraceRegs)
-    fillReg (N.GPReg 14) = mkLit64 (r14 ptraceRegs)
-    fillReg (N.GPReg 15) = mkLit64 (r15 ptraceRegs)
-    fillReg (N.SegmentReg 0) = mkLit16 (es ptraceRegs)
-    fillReg (N.SegmentReg 1) = mkLit16 (cs ptraceRegs)
-    fillReg (N.SegmentReg 2) = mkLit16 (ds ptraceRegs)
-    fillReg (N.SegmentReg 3) = mkLit16 (ss ptraceRegs)
-    fillReg (N.SegmentReg 4) = mkLit16 (fs ptraceRegs)
-    fillReg (N.SegmentReg 5) = mkLit16 (gs ptraceRegs)
-    fillReg (N.FlagReg n) = if testBit (eflags ptraceRegs) n
-                            then MS.true
-                            else MS.false
-    fillReg (N.ControlReg _) = MS.Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87ControlReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n cwd'
-    fillReg (N.X87StatusReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n swd'
-    fillReg N.X87TopReg = MS.Literal $ bitVector knownNat $
+    fillReg :: X86Reg tp -> MS.Value tp
+    fillReg X86_IP = mkLit64 (rip ptraceRegs)
+    fillReg (X86_GP  0) = mkLit64 (rax ptraceRegs)
+    fillReg (X86_GP  1) = mkLit64 (rcx ptraceRegs)
+    fillReg (X86_GP  2) = mkLit64 (rdx ptraceRegs)
+    fillReg (X86_GP  3) = mkLit64 (rbx ptraceRegs)
+    fillReg (X86_GP  4) = mkLit64 (rsp ptraceRegs)
+    fillReg (X86_GP  5) = mkLit64 (rbp ptraceRegs)
+    fillReg (X86_GP  6) = mkLit64 (rsi ptraceRegs)
+    fillReg (X86_GP  7) = mkLit64 (rdi ptraceRegs)
+    fillReg (X86_GP  8) = mkLit64 ( r8 ptraceRegs)
+    fillReg (X86_GP  9) = mkLit64 ( r9 ptraceRegs)
+    fillReg (X86_GP 10) = mkLit64 (r10 ptraceRegs)
+    fillReg (X86_GP 11) = mkLit64 (r11 ptraceRegs)
+    fillReg (X86_GP 12) = mkLit64 (r12 ptraceRegs)
+    fillReg (X86_GP 13) = mkLit64 (r13 ptraceRegs)
+    fillReg (X86_GP 14) = mkLit64 (r14 ptraceRegs)
+    fillReg (X86_GP 15) = mkLit64 (r15 ptraceRegs)
+    fillReg (X86_FlagReg n) = if testBit (eflags ptraceRegs) n
+                              then MS.true
+                              else MS.false
+    fillReg (X87_ControlReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n cwd'
+    fillReg (X87_StatusReg  n) = MS.Literal $ bitVector knownNat $ BV.extract n n swd'
+    fillReg X87_TopReg = MS.Literal $ bitVector knownNat $
                             BV.extract (13 :: Int) 11 swd'
-    fillReg N.X87PC =  MS.Literal $ bitVector knownNat $ bitVec 2 $
-                            BV.extract (9 :: Int) 8 $ cwd'
-    fillReg N.X87RC =  MS.Literal $ bitVector knownNat $ bitVec 2 $
-                            BV.extract (11 :: Int) 10 $ cwd'
-    fillReg (N.X87TagReg _) = MS.Undefined $ BVTypeRepr  knownNat
-    fillReg (N.X87FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
-    fillReg (N.X87FPUReg 1) = mkLit80 $ st1 ptraceFPRegs
-    fillReg (N.X87FPUReg 2) = mkLit80 $ st2 ptraceFPRegs
-    fillReg (N.X87FPUReg 3) = mkLit80 $ st3 ptraceFPRegs
-    fillReg (N.X87FPUReg 4) = mkLit80 $ st4 ptraceFPRegs
-    fillReg (N.X87FPUReg 5) = mkLit80 $ st5 ptraceFPRegs
-    fillReg (N.X87FPUReg 6) = mkLit80 $ st6 ptraceFPRegs
-    fillReg (N.X87FPUReg 7) = mkLit80 $ st7 ptraceFPRegs
-    fillReg (N.XMMReg 0) = mkLit128 (xmm0 ptraceFPRegs)
-    fillReg (N.XMMReg 1) = mkLit128 (xmm1 ptraceFPRegs)
-    fillReg (N.XMMReg 2) = mkLit128 (xmm2 ptraceFPRegs)
-    fillReg (N.XMMReg 3) = mkLit128 (xmm3 ptraceFPRegs)
-    fillReg (N.XMMReg 4) = mkLit128 (xmm4 ptraceFPRegs)
-    fillReg (N.XMMReg 5) = mkLit128 (xmm5 ptraceFPRegs)
-    fillReg (N.XMMReg 6) = mkLit128 (xmm6 ptraceFPRegs)
-    fillReg (N.XMMReg 7) = mkLit128 (xmm7 ptraceFPRegs)
-    fillReg (N.XMMReg 8) = mkLit128 (xmm8 ptraceFPRegs)
-    fillReg (N.XMMReg 9) = mkLit128 (xmm9 ptraceFPRegs)
-    fillReg (N.XMMReg 10) = mkLit128 (xmm10 ptraceFPRegs)
-    fillReg (N.XMMReg 11) = mkLit128 (xmm11 ptraceFPRegs)
-    fillReg (N.XMMReg 12) = mkLit128 (xmm12 ptraceFPRegs)
-    fillReg (N.XMMReg 13) = mkLit128 (xmm13 ptraceFPRegs)
-    fillReg (N.XMMReg 14) = mkLit128 (xmm14 ptraceFPRegs)
-    fillReg (N.XMMReg 15) = mkLit128 (xmm15 ptraceFPRegs)
-    fillReg (N.DebugReg _) = MS.Undefined $ BVTypeRepr  knownNat
+    fillReg (X87_TagReg _) = MS.Undefined $ BVTypeRepr  knownNat
+    fillReg (X87_FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
+    fillReg (X87_FPUReg 1) = mkLit80 $ st1 ptraceFPRegs
+    fillReg (X87_FPUReg 2) = mkLit80 $ st2 ptraceFPRegs
+    fillReg (X87_FPUReg 3) = mkLit80 $ st3 ptraceFPRegs
+    fillReg (X87_FPUReg 4) = mkLit80 $ st4 ptraceFPRegs
+    fillReg (X87_FPUReg 5) = mkLit80 $ st5 ptraceFPRegs
+    fillReg (X87_FPUReg 6) = mkLit80 $ st6 ptraceFPRegs
+    fillReg (X87_FPUReg 7) = mkLit80 $ st7 ptraceFPRegs
+    fillReg (X86_XMMReg  0) = mkLit128 (xmm0 ptraceFPRegs)
+    fillReg (X86_XMMReg  1) = mkLit128 (xmm1 ptraceFPRegs)
+    fillReg (X86_XMMReg  2) = mkLit128 (xmm2 ptraceFPRegs)
+    fillReg (X86_XMMReg  3) = mkLit128 (xmm3 ptraceFPRegs)
+    fillReg (X86_XMMReg  4) = mkLit128 (xmm4 ptraceFPRegs)
+    fillReg (X86_XMMReg  5) = mkLit128 (xmm5 ptraceFPRegs)
+    fillReg (X86_XMMReg  6) = mkLit128 (xmm6 ptraceFPRegs)
+    fillReg (X86_XMMReg  7) = mkLit128 (xmm7 ptraceFPRegs)
+    fillReg (X86_XMMReg  8) = mkLit128 (xmm8 ptraceFPRegs)
+    fillReg (X86_XMMReg  9) = mkLit128 (xmm9 ptraceFPRegs)
+    fillReg (X86_XMMReg 10) = mkLit128 (xmm10 ptraceFPRegs)
+    fillReg (X86_XMMReg 11) = mkLit128 (xmm11 ptraceFPRegs)
+    fillReg (X86_XMMReg 12) = mkLit128 (xmm12 ptraceFPRegs)
+    fillReg (X86_XMMReg 13) = mkLit128 (xmm13 ptraceFPRegs)
+    fillReg (X86_XMMReg 14) = mkLit128 (xmm14 ptraceFPRegs)
+    fillReg (X86_XMMReg 15) = mkLit128 (xmm15 ptraceFPRegs)
 
     mkLit16 :: Word64 -> MS.Value (BVType 16)
     mkLit16 = MS.Literal . bitVector knownNat . bitVec 16
@@ -482,9 +470,9 @@ instance MonadMachineState PTraceMachineState where
       toBitVector n bs =
         bitVector n $ bitVec (widthVal n) (B.foldl (\acc b -> acc*(2^(8::Integer)) + fromIntegral b) (0::Integer) bs)
 
-  getReg regname = do
+  getReg r = do
     regs <- dumpRegs
-    return $ regs^.(register regname)
+    return $ regs^.boundValue r
   setReg = fail "setReg unimplemented for PTraceMachineState"
   dumpRegs = do
      pid <- asks cpid
@@ -618,7 +606,7 @@ getInstruction instrAddr = do
 stepConcrete :: (Functor m, MonadMachineState m)
              => TestM m (Either SM.ExceptionClass Bool, Maybe InstructionInstance)
 stepConcrete = do
-  rip' <- getReg N.rip
+  rip' <- getReg ip_reg
   bv <- case rip' of MS.Literal bv -> return bv
                      MS.Undefined _ -> fail "MS.Undefined rip!"
 
@@ -834,7 +822,7 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
     -- The bool arg is false for instructions that not have concrete
     -- semantics.
     checkBool False | sig == sigTRAP = do
-      rip' <- getReg N.rip
+      rip' <- getReg ip_reg
       return (True, ["No concrete semantics for instruction at " ++ show rip'])
     checkBool True | sig == sigTRAP = do
       realRegs <- {- lift $ -} lift dumpRegs
@@ -851,13 +839,13 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
         compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
         compareRegs real emu =
           catMaybes $ map (viewSome (\reg ->
-            let lens = register reg
+            let lens = boundValue reg
                 realVal = real^.lens
                 emuVal = emu^.lens
              in if realVal `MS.equalOrUndef` emuVal
                   then Nothing
                   else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
-             x86StateRegisters
+             x86StateRegs
     checkBool True | sig == sigSEGV = do
       logMessage Segfault
       return (False, [])

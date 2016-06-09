@@ -1,10 +1,13 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.Analysis.AbsState
@@ -70,12 +73,10 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
-import           Reopt.Utils.Hex
-
 import           Reopt.Utils.Debug
+import           Reopt.Utils.Hex
 
 ------------------------------------------------------------------------
 -- AbsDomain
@@ -612,9 +613,9 @@ ppAbsValue TopV = Nothing
 ppAbsValue v = Just (pretty v)
 
 -- | Print a list of Docs vertically separated.
-instance PrettyRegValue AbsValue where
-  ppValueEq _ TopV = Nothing
-  ppValueEq r v = Just (text (show r) <+> text "=" <+> pretty v)
+instance PrettyRegValue X86_64 AbsValue where
+  ppValueEq _ _ TopV = Nothing
+  ppValueEq _ r v = Just (text (show r) <+> text "=" <+> pretty v)
 
 
 absTrue :: AbsValue BoolType
@@ -804,9 +805,9 @@ instance AbsDomain AbsBlockState where
 
           (zs,(regs_changed,dropped)) = flip runState (False, Set.empty) $ do
             z_regs <- mkX86StateM $ \r -> do
-              let xr = xs^.register r
+              let xr = xs^.boundValue r
               (c,s) <- get
-              case runState (joinAbsValue' xr (ys^.register r)) s of
+              case runState (joinAbsValue' xr (ys^.boundValue r)) s of
                 (Nothing,s') -> do
                   seq s' $ put $ (c,s')
                   return $! xr
@@ -837,9 +838,9 @@ instance Show AbsBlockState where
   show s = show (pretty s)
 
 
-absBlockDiff :: AbsBlockState -> AbsBlockState -> [Some N.RegisterName]
-absBlockDiff x y = filter isDifferent x86StateRegisters
-  where isDifferent (Some n) = x^.absX86State^.register n /= y^.absX86State^.register n
+absBlockDiff :: AbsBlockState -> AbsBlockState -> [Some X86Reg]
+absBlockDiff x y = filter isDifferent x86StateRegs
+  where isDifferent (Some n) = x^.absX86State^.boundValue n /= y^.absX86State^.boundValue n
 
 ------------------------------------------------------------------------
 -- AbsProcessorState
@@ -958,7 +959,7 @@ addOff w o v = toUnsigned w (o + v)
 -- subOff :: NatRepr w -> Integer -> Integer -> Integer
 -- subOff w o v = toUnsigned w (o - v)
 
-mkAbsBlockState :: (forall cl . N.RegisterName cl -> AbsValue (N.RegisterType cl))
+mkAbsBlockState :: (forall tp . X86Reg tp -> AbsValue tp)
                 -> AbsBlockStack
                 -> AbsBlockState
 mkAbsBlockState trans newStack =
@@ -975,8 +976,8 @@ absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStac
 -- | Return state for after value has run.
 finalAbsBlockState :: AbsProcessorState -> X86State (Value X86_64) -> AbsBlockState
 finalAbsBlockState c s =
-  let transferReg :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
-      transferReg r = transferValue c (s^.register r)
+  let transferReg :: X86Reg tp -> AbsValue tp
+      transferReg r = transferValue c (s^.boundValue r)
    in mkAbsBlockState transferReg (c^.curAbsStack)
 
 -- | Update the block state to point to a specific IP address.
@@ -1015,10 +1016,10 @@ transferValue' is_code amap aregs v =
    AssignedValue a ->
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
                (MapF.lookup a amap)
-   Initial (X86Reg r)
+   Initial r
 --     | Just Refl <- testEquality r N.rsp -> do
 --       StackOffset (Set.singleton 0)
-     | otherwise -> aregs ^. register r
+     | otherwise -> aregs ^. boundValue r
 
 
 -- | Compute abstract value from value and current registers.

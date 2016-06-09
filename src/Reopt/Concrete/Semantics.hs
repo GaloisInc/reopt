@@ -27,7 +27,6 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
-
 module Reopt.Concrete.Semantics
        ( evalStmts
        , module Reopt.Reified.Semantics
@@ -48,19 +47,20 @@ import           Data.Parameterized.NatRepr
 
 import           GHC.Float (float2Double, double2Float)
 
+import qualified Reopt.CFG.Representation as R
+import qualified Reopt.Concrete.MachineState as CS
+import           Reopt.Machine.Types ( FloatInfoRepr, FloatType
+                                     , floatInfoBits, n1, n80
+                                     , typeRepr
+                                     )
+import qualified Reopt.Machine.X86State as X
+import           Reopt.Reified.Semantics
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
   , BoolType
   )
 import qualified Reopt.Semantics.Monad as S
-import           Reopt.Reified.Semantics
-import qualified Reopt.CFG.Representation as R
-import qualified Reopt.Machine.StateNames as N
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n80
-                                     )
 
 ------------------------------------------------------------------------
 -- Expression evaluation
@@ -255,15 +255,16 @@ evalStmt (Get x l) =
           v0 <- CS.getMem a
           extendEnv x v0
     S.Register rv -> do
-      v0 <- CS.getReg $ S.registerViewReg rv
+      let Just r = X.x86Reg (S.registerViewReg rv)
+      v0 <- CS.getReg r
       v1 <- evalExpr' $ S.registerViewRead rv (ValueExpr v0)
       extendEnv x v1
     S.X87StackRegister i -> do
-      topReg <- CS.getReg N.X87TopReg
+      topReg <- CS.getReg X.X87_TopReg
       case CS.asBV topReg of
         Just bv -> do
           let top = fromIntegral $ BV.nat bv
-          let reg = N.X87FPUReg ((top + i) `mod` 8)
+          let reg = X.X87_FPUReg ((top + i) `mod` 8)
           v0 <- CS.getReg reg
           extendEnv x v0
         Nothing -> extendEnv x $ CS.Undefined $ BVTypeRepr nr
@@ -320,20 +321,20 @@ evalStmt (l := e) =
           let a = CS.Address nr bvaddr
           CS.setMem a ve
     S.Register rv -> do
-      let r = S.registerViewReg rv
+      let Just r = X.x86Reg $ S.registerViewReg rv
       v0 <- CS.getReg r
       v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
       CS.setReg r v1
     S.X87StackRegister i -> do
-      topReg <- CS.getReg N.X87TopReg
+      topReg <- CS.getReg X.X87_TopReg
       case CS.asBV topReg of
         Just bv -> do
           let top = fromIntegral $ BV.nat bv
-          let reg = N.X87FPUReg ((top + i) `mod` 8)
+          let reg = X.X87_FPUReg ((top + i) `mod` 8)
           CS.setReg reg ve
         Nothing ->
-          forM_ N.x87FPURegs $ \reg -> do
-            CS.setReg reg (CS.Undefined $ N.registerType reg)
+          forM_ X.x87FPURegList $ \reg -> do
+            CS.setReg reg (CS.Undefined $ typeRepr reg)
 evalStmt (Ifte_ c t f) = do
   vc <- evalExpr' c
   case vc of
@@ -374,7 +375,7 @@ evalStmt (MemSet n v a df) = do
   vn <- evalExpr' n
   vv <- evalExpr' v
   va <- evalExpr' a
-  vdf <- evalExpr' df  
+  vdf <- evalExpr' df
   let addrs = addressSequence va (CS.width vv) vn vdf
   forM_ addrs $ \addr -> do
     CS.setMem addr vv
@@ -391,21 +392,19 @@ evalStmt (Exception mask predicate exception) = do
   when (vCond  `CS.equalOrUndef` CS.true) $
     throwError exception
 evalStmt (X87Push s) = do
-  let top = N.X87TopReg
-  vTop <- CS.getReg top
+  vTop <- CS.getReg X.X87_TopReg
   let vTop' = CS.liftValueSame ((-) 1) vTop
-  CS.setReg top vTop'
+  CS.setReg X.X87_TopReg vTop'
   case vTop' of
     CS.Undefined _ -> error "evalStmt: X87Push: Undefined Top index"
     CS.Literal (CS.unBitVector -> (_, bv)) -> do
       let idx = fromIntegral $ BV.uint bv
       if idx > 7
          then error "evalStmt: X87Push: index out of bounds"
-         else CS.setReg (N.X87FPUReg idx) =<< evalExpr' s
+         else CS.setReg (X.X87_FPUReg idx) =<< evalExpr' s
 evalStmt X87Pop = do
-  let top = N.X87TopReg
-  vTop <- CS.getReg top
-  CS.setReg top $ CS.liftValueSame (+1) vTop
+  vTop <- CS.getReg X.X87_TopReg
+  CS.setReg X.X87_TopReg $ CS.liftValueSame (+1) vTop
 
 -- | Convert a base address, increment (in bits), and count, into a sequence of
 -- addresses.

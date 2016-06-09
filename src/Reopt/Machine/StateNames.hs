@@ -20,12 +20,12 @@
 module Reopt.Machine.StateNames where
 
 
-import Data.Parameterized.Classes
+import           Data.Parameterized.Classes
 import qualified Data.Vector as V
-import GHC.TypeLits
-
+import           GHC.TypeLits
 import qualified Flexdis86 as F
-import Reopt.Machine.Types
+
+import           Reopt.Machine.Types
 
 data RegisterClass
    = ProgramCounter
@@ -50,12 +50,12 @@ data RegisterClassRepr (r :: RegisterClass) where
   XMMRepr             :: RegisterClassRepr 'XMM
 
 type family RegisterClassBits (cl :: RegisterClass) :: Nat where
-  RegisterClassBits 'ProgramCounter = 64
-  RegisterClassBits 'GP             = 64
-  RegisterClassBits 'Flag           = 1
-  RegisterClassBits 'Segment        = 16
-  RegisterClassBits 'Debug          = 64
-  RegisterClassBits 'Control        = 64
+  RegisterClassBits 'ProgramCounter  = 64
+  RegisterClassBits 'GP              = 64
+  RegisterClassBits 'Flag            = 1
+  RegisterClassBits 'Segment         = 16
+  RegisterClassBits 'Debug           = 64
+  RegisterClassBits 'Control         = 64
   RegisterClassBits 'X87_FPU         = 80
   RegisterClassBits 'X87_Status      = 1
   RegisterClassBits 'X87_Top         = 3
@@ -63,7 +63,6 @@ type family RegisterClassBits (cl :: RegisterClass) :: Nat where
   RegisterClassBits 'X87_ControlMask = 1
   RegisterClassBits 'X87_Control     = 2
   RegisterClassBits 'XMM             = 128
-
 
 type RegisterType (cl :: RegisterClass) = BVType (RegisterClassBits cl)
 

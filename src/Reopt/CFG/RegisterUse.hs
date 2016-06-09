@@ -29,7 +29,6 @@ import           Reopt.CFG.FnRep (FunctionType(..)
                                   , ftMinimumFunctionType
                                   , ftIntArgRegs , ftFloatArgRegs
                                   , ftIntRetRegs , ftFloatRetRegs)
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 
@@ -39,7 +38,7 @@ import           Debug.Trace
 
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
-type RegDeps = (Set AssignId, Set (Some N.RegisterName))
+type RegDeps = (Set AssignId, Set (Some X86Reg))
 type AssignmentCache = Map (Some (Assignment X86_64)) RegDeps
 
 type FunctionArgs = Map CodeAddr FunctionType
@@ -52,13 +51,13 @@ data RegisterUseState = RUS {
   _assignmentUses     :: !(Set AssignId)
     -- | Holds state about the set of registers that a block uses
     -- (required by this block or a successor).
-  , _blockRegUses :: !(Map (BlockLabel Word64) (Set (Some N.RegisterName)))
+  , _blockRegUses :: !(Map (BlockLabel Word64) (Set (Some X86Reg)))
     -- | Holds the set of registers a block should define (used by a successor).
-  , _blockRegProvides :: !(Map (BlockLabel Word64) (Set (Some N.RegisterName)))
+  , _blockRegProvides :: !(Map (BlockLabel Word64) (Set (Some X86Reg)))
 
   -- | Maps defined registers to their deps.  Not defined for all
   -- variables, hence use of Map instead of X86State
-  , _blockInitDeps  :: !(Map (BlockLabel Word64) (Map (Some N.RegisterName) RegDeps))
+  , _blockInitDeps  :: !(Map (BlockLabel Word64) (Map (Some X86Reg) RegDeps))
   -- | The list of predecessors for a given block
   , _blockPreds     :: !(Map (BlockLabel Word64) [BlockLabel Word64])
   -- | A cache of the registers and their deps.  The key is not included
@@ -73,28 +72,32 @@ data RegisterUseState = RUS {
 
 initRegisterUseState :: FunctionArgs -> CodeAddr -> RegisterUseState
 initRegisterUseState fArgs fn =
-  RUS { _assignmentUses  = Set.empty
-      , _blockRegUses    = Map.empty
-      , _blockRegProvides = Map.empty
-      , _blockInitDeps   = Map.empty
-      , _blockPreds      = Map.empty
-      , _assignmentCache = Map.empty
-      , _blockFrontier   = Set.empty
-      , functionArgs     = fArgs
-      , currentFunctionType = cft }
+  RUS { _assignmentUses     = Set.empty
+      , _blockRegUses       = Map.empty
+      , _blockRegProvides   = Map.empty
+      , _blockInitDeps      = Map.empty
+      , _blockPreds         = Map.empty
+      , _assignmentCache    = Map.empty
+      , _blockFrontier      = Set.empty
+      , functionArgs        = fArgs
+      , currentFunctionType = cft
+      }
   where
     cft = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
 
 assignmentUses :: Simple Lens RegisterUseState (Set AssignId)
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
 
-blockRegUses :: Simple Lens RegisterUseState (Map (BlockLabel Word64) (Set (Some N.RegisterName)))
+blockRegUses :: Simple Lens RegisterUseState
+                  (Map (BlockLabel Word64) (Set (Some X86Reg)))
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
-blockRegProvides :: Simple Lens RegisterUseState (Map (BlockLabel Word64) (Set (Some N.RegisterName)))
+blockRegProvides :: Simple Lens RegisterUseState
+                      (Map (BlockLabel Word64) (Set (Some X86Reg)))
 blockRegProvides = lens _blockRegProvides (\s v -> s { _blockRegProvides = v })
 
-blockInitDeps :: Simple Lens RegisterUseState (Map (BlockLabel Word64) (Map (Some N.RegisterName) RegDeps))
+blockInitDeps :: Simple Lens RegisterUseState
+                   (Map (BlockLabel Word64) (Map (Some X86Reg) RegDeps))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
 blockFrontier :: Simple Lens RegisterUseState (Set (BlockLabel Word64))
@@ -179,8 +182,8 @@ registerUse :: FunctionArgs
             -> DiscoveryInfo
             -> CodeAddr
             -> ( Set AssignId
-               , Map (BlockLabel Word64) (Set (Some N.RegisterName))
-               , Map (BlockLabel Word64) (Set (Some N.RegisterName))
+               , Map (BlockLabel Word64) (Set (Some X86Reg))
+               , Map (BlockLabel Word64) (Set (Some X86Reg))
                , Map (BlockLabel Word64) [BlockLabel Word64]
                )
 registerUse fArgs ist addr =
@@ -201,7 +204,7 @@ registerUse fArgs ist addr =
 
 -- We use ix here as it returns mempty if there is no key, which is
 -- the right behavior here.
-calculateFixpoint :: Map (BlockLabel Word64) (Set (Some N.RegisterName)) -> RegisterUseM ()
+calculateFixpoint :: Map (BlockLabel Word64) (Set (Some X86Reg)) -> RegisterUseM ()
 calculateFixpoint new
   | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =
       -- propagate backwards any new registers in the predecessors
@@ -210,9 +213,9 @@ calculateFixpoint new
          calculateFixpoint (Map.unionWith Set.union rest (Map.fromList nexts))
   | otherwise = return ()
   where
-    doOne :: Set (Some N.RegisterName)
+    doOne :: Set (Some X86Reg)
              -> BlockLabel Word64
-             -> RegisterUseM (BlockLabel Word64, Set (Some N.RegisterName))
+             -> RegisterUseM (BlockLabel Word64, Set (Some X86Reg))
     doOne newRegs predLbl = do
       depMap   <- use (blockInitDeps . ix predLbl)
 
@@ -291,16 +294,16 @@ summarizeBlock interp_state root_label = go root_label
           -- Demand the values from the state at the given registers
           demandRegisters :: forall t. Foldable t
                           => X86State (Value X86_64)
-                          -> t (Some N.RegisterName)
+                          -> t (Some X86Reg)
                           -> RegisterUseM ()
-          demandRegisters s rs = traverse_ (\(Some r) -> demandValue lbl (s ^. register r)) rs
+          demandRegisters s rs = traverse_ (\(Some r) -> demandValue lbl (s^.boundValue r)) rs
 
           -- Figure out the deps of the given registers and update the state for the current label
           addRegisterUses :: X86State (Value X86_64)
-                             -> [Some N.RegisterName]
-                             -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
+                          -> [Some X86Reg]
+                          -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
           addRegisterUses s rs = do
-             vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. register r)) rs
+             vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
       when (labelAddr lbl == 0x400128) $ do
@@ -318,48 +321,53 @@ summarizeBlock interp_state root_label = go root_label
           traverse_ goStmt stmts'
 
           ft <- lookupFunctionArgs fn
-          when (labelAddr lbl == 0x400128) $ do
-            trace ("Computing registers uses for call " ++ show ft) $ do
-              return ()
 
-          demandRegisters proc_state [Some N.rip]
-          demandRegisters proc_state (Some <$> ftIntArgRegs ft)
-          demandRegisters proc_state (Some <$> ftFloatArgRegs ft)
+          demandRegisters proc_state [Some ip_reg]
+
+          demandRegisters proc_state $ Some <$> ftIntArgRegs ft
+          demandRegisters proc_state $ Some <$> ftFloatArgRegs ft
 
           case m_ret_addr of
             Nothing       -> return ()
             Just ret_addr -> addEdge lbl (mkRootBlockLabel ret_addr)
 
-          addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+          addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
           -- Ensure that result registers are defined, but do not have any deps.
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty))
-                    ((Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ ([Some N.df]))
+          let
+          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
+                    (Some <$> ftIntRetRegs ft)
+                    ++ (Some <$> ftFloatRetRegs ft)
+                    ++ [Some df_reg]
 
         Just (ParsedJump proc_state tgt_addr) -> do
             traverse_ goStmt (blockStmts b)
-            addRegisterUses proc_state x86StateRegisters
+            addRegisterUses proc_state x86StateRegs
             addEdge lbl (mkRootBlockLabel tgt_addr)
 
         Just (ParsedReturn proc_state stmts') -> do
             traverse_ goStmt stmts'
             ft <- gets currentFunctionType
-            demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegisters)
-                                        ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegisters))
+            demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegs)
+                                        ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegs))
 
         Just (ParsedSyscall proc_state next_addr _call_no _pname _name argRegs rregs) -> do
           -- FIXME: clagged from call above
           traverse_ goStmt (blockStmts b)
           demandRegisters proc_state (Some <$> argRegs)
           addEdge lbl (mkRootBlockLabel next_addr)
-          addRegisterUses proc_state (Some N.rsp : (Set.toList x86CalleeSavedRegisters))
+          addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
 
-          traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) rregs
+          let insReg (Some nm) =
+                  blockInitDeps . ix lbl %= Map.insert (Some r) (Set.empty, Set.empty)
+                where Just r = x86Reg nm
+
+          traverse_ insReg rregs
 
         Just (ParsedLookupTable proc_state _idx vec) -> do
           traverse_ goStmt (blockStmts b)
 
-          demandRegisters proc_state [Some N.rip]
-          addRegisterUses proc_state x86StateRegisters
+          demandRegisters proc_state [Some ip_reg]
+          addRegisterUses proc_state x86StateRegs
           traverse_ (addEdge lbl . mkRootBlockLabel) vec
 
         Nothing -> return () -- ???

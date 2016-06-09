@@ -50,32 +50,28 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
 
-
 import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
-import           Reopt.CFG.FnRep (Function(..))
-import           Reopt.CFG.FunctionArgs (functionArgs)
 import           Reopt.CFG.DiscoveryInfo
                  ( DiscoveryInfo
                  , absState
                  , blocks
                  , functionEntries
                  )
+import           Reopt.CFG.FnRep (Function(..))
+import           Reopt.CFG.FunctionArgs (functionArgs)
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
+import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
 import           Reopt.Machine.Types
-import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Utils.Debug
-
-import qualified Reopt.ExternalTools as Ext
 
 import           Debug.Trace
 
@@ -673,8 +669,8 @@ showLLVM args dir = do
 -- pointer from an address that is 8 below the stack pointer.
 stateEndsWithRet :: X86State (Value X86_64) -> Bool
 stateEndsWithRet s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
+  let next_ip = s^.boundValue ip_reg
+      next_sp = s^.boundValue sp_reg
   case () of
     _ | AssignedValue (Assignment _ (ReadMem a _)) <- next_ip
       , (ip_base, ip_off) <- asBaseOffset a
@@ -703,7 +699,7 @@ isCodeAddrWriteTo _ _ _ = Nothing
 -- | Returns true if it looks like block ends with a call.
 blockContainsCall :: Memory Word64 -> Block -> X86State (Value X86_64) -> Bool
 blockContainsCall mem b s =
-  let next_sp = s^.register N.rsp
+  let next_sp = s^.boundValue sp_reg
       go [] = False
       go (stmt:_) | Just _ <- isCodeAddrWriteTo mem stmt next_sp = True
       go (ExecArchStmt WriteLoc{}:_) = False

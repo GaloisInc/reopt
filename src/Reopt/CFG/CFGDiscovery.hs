@@ -47,7 +47,6 @@ import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.Representation
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.Types
 import           Reopt.Machine.X86State
@@ -263,10 +262,10 @@ fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState
 fnBlockState mem addr = do
   let Just abst' = top & setAbsIP (isCodeAddrOrNull mem) addr
    in abst'
-      & absX86State . register N.rsp .~ concreteStackOffset addr 0
+      & absX86State . boundValue sp_reg .~ concreteStackOffset addr 0
         -- x87 top registe points to top of stack.
-      & absX86State . x87TopReg .~ FinSet (Set.singleton 7)
-      & absX86State . register N.df .~ FinSet (Set.singleton 0)
+      & absX86State . x87TopReg         .~ FinSet (Set.singleton 7)
+      & absX86State . boundValue df_reg .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (BVTypeRepr n64) ReturnAddr)
 
 newtype HexWord = HexWord Word64
@@ -411,24 +410,24 @@ mergeFreeBSDSyscall :: BlockLabel Word64
                        -- We think this belongs to the same function.
                     -> State DiscoveryInfo ()
 mergeFreeBSDSyscall src_lbl ab0 addr = do
-  let regFn :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
+  let regFn :: X86Reg tp -> AbsValue tp
       regFn r
           -- Set IPReg
-        | N.IPReg <- r =
+        | Just Refl <- testEquality r ip_reg =
           CodePointers (Set.singleton addr)
           -- Two pointers that are modified by syscalls
-        | Just Refl <- testEquality r N.rcx =
+        | Just Refl <- testEquality r rcx_reg =
           TopV
-        | Just Refl <- testEquality r N.r11 =
+        | Just Refl <- testEquality r r11_reg =
           TopV
           -- Carry flag and rax is used by BSD for return values.
-        | Just Refl <- testEquality r N.cf =
+        | Just Refl <- testEquality r cf_reg =
           TopV
-        | Just Refl <- testEquality r N.rax =
+        | Just Refl <- testEquality r rax_reg =
           TopV
           -- Keep other registers the same.
         | otherwise =
-          ab0^.absX86State^.register r
+          ab0^.absX86State^.boundValue r
   let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
 
   -- Merge the new abstract
@@ -446,24 +445,24 @@ mergeCallerReturn :: BlockLabel Word64
                   -> State DiscoveryInfo ()
 mergeCallerReturn lbl ab0 addr = do
   s <- get
-  let regFn :: N.RegisterName cl -> AbsValue (N.RegisterType cl)
+  let regFn :: X86Reg tp -> AbsValue tp
       regFn r
           -- We set IPReg
-        | Just Refl <- testEquality r N.IPReg =
+        | Just Refl <- testEquality r ip_reg =
           CodePointers (Set.singleton addr)
-        | Just Refl <- testEquality r N.rsp = do
-            bvadd n64 (ab0^.absX86State^.register r) (FinSet (Set.singleton 8))
+        | Just Refl <- testEquality r sp_reg = do
+            bvadd n64 (ab0^.absX86State^.boundValue r) (FinSet (Set.singleton 8))
           -- TODO: Transmit no value to first floating point register.
-        | N.XMMReg 0 <- r =
-          ab0^.absX86State^.register r
+        | X86_XMMReg 0 <- r =
+          ab0^.absX86State^.boundValue r
           -- TODO: Fix this (can we prove detect whether a floating point value was read)?
-        | N.X87TopReg <- r =
-          ab0^.absX86State^.register r
+        | X87_TopReg <- r =
+          ab0^.absX86State^.boundValue r
           -- Copy callee saved registers
-        | Set.member (Some r) x86CalleeSavedRegisters =
-          ab0^.absX86State^.register r
+        | Set.member (Some r) x86CalleeSavedRegs =
+          ab0^.absX86State^.boundValue r
           -- We don't know anything about rax as it is the return value.
-        | Just Refl <- testEquality r N.rax =
+        | Just Refl <- testEquality r rax_reg =
           TopV
           -- We know nothing about other registers.
         | otherwise =
@@ -481,8 +480,8 @@ mergeCallerReturn lbl ab0 addr = do
 
 _showAbsDiff :: AbsBlockState -> AbsBlockState -> Doc
 _showAbsDiff x y = vcat (pp <$> absBlockDiff x y)
-  where pp (Some n) = pretty (show n) <+> pretty (x^.absX86State^.register n)
-                                      <+> pretty (x^.absX86State^.register n)
+  where pp (Some n) = pretty (show n) <+> pretty (x^.absX86State^.boundValue n)
+                                      <+> pretty (x^.absX86State^.boundValue n)
 
 -- Check floating point top.
 getAbsX87Top :: Monad m => AbsBlockState -> m Int
@@ -502,8 +501,8 @@ refineProcState :: Value X86_64 tp -- ^ Value in processor state
                 -> AbsProcessorState
                 -> AbsProcessorState
 refineProcState (BVValue _n _val) _av regs = regs
-refineProcState (Initial (X86Reg r)) av regs =
-  regs & (absInitialRegs . register r) %~ flip meet av
+refineProcState (Initial r) av regs =
+  regs & (absInitialRegs . boundValue r) %~ flip meet av
 refineProcState (AssignedValue ass@(Assignment _ rhs)) av regs
   -- av is not a subset.
   | Nothing <- joinAbsValue av av_old = regs
@@ -748,7 +747,7 @@ transferBlock b regs = do
           | Just _ <- identifyReturn s' -> do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
-            let ip_val = s'^.register N.rip
+            let ip_val = s'^.boundValue ip_reg
             case transferValue regs' ip_val of
               ReturnAddr -> return ()
               -- The return_val is bad.
@@ -760,7 +759,7 @@ transferBlock b regs = do
                   return ()
 
           -- Jump to concrete offset.
-          | BVValue _ (fromInteger -> tgt_addr) <- s'^.register N.rip -> do
+          | BVValue _ (fromInteger -> tgt_addr) <- s'^.boundValue ip_reg -> do
             let abst = finalAbsBlockState regs' s'
             seq abst $ do
             -- Try to check for a tail call.
@@ -775,7 +774,7 @@ transferBlock b regs = do
               debug DCFG ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
               modify $ markAddrAsFunction tgt_addr
               -- Check top of stack points to return value.
-              let sp_val = s'^.register N.rsp
+              let sp_val = s'^.boundValue sp_reg
               let ret_val = transferRHS regs' (ReadMem sp_val (BVTypeRepr n64))
               case ret_val of
                 ReturnAddr ->

@@ -44,18 +44,14 @@ import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
-import qualified Data.Vector as V
-import           Text.PrettyPrint.ANSI.Leijen (pretty, Pretty(..))
-
 import           Data.Word
 import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen (text, colon, (<>), (<+>))
+import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
 import qualified Flexdis86 as Flexdis
 import           Reopt.CFG.Representation
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.Types (BVType, typeRepr)
-import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -521,7 +517,7 @@ curX86State = blockState . _JustF . pBlockState
 
 -- | Finishes the current block, if it is started.
 finishBlock' :: PreBlock
-             -> (X86State (Value X86_64) -> TermStmt)
+             -> (X86State (Value X86_64) -> TermStmt X86_64)
              -> Block
 finishBlock' pre_b term =
   Block { blockLabel = pBlockLabel pre_b
@@ -531,7 +527,7 @@ finishBlock' pre_b term =
         }
 
 -- | Finishes the current block, if it is started.
-finishBlock :: (X86State (Value X86_64) -> TermStmt)
+finishBlock :: (X86State (Value X86_64) -> TermStmt X86_64)
             -> (GenState a -> GenState 'False)
 finishBlock term st =
   case st^.blockState of
@@ -705,27 +701,28 @@ getLoc l0 =
       ValueExpr . AssignedValue <$> addAssignment (ReadMem addr tp)
     S.Register rv -> do
       let readLoc' l = S.registerViewRead rv <$> readLoc l
-      let r = S.registerViewReg rv
-      case r of
+      let r_nm = S.registerViewReg rv
+      case r_nm of
        -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
        -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
        N.SegmentReg {}
-         | r == N.fs -> readLoc' FS
-         | r == N.gs -> readLoc' GS
+         | r_nm == N.fs -> readLoc' FS
+         | r_nm == N.gs -> readLoc' GS
          -- Otherwise registers are 0.
          | otherwise ->
            fail $ "On x86-64 registers other than fs and gs may not be read."
        N.X87PC -> readLoc' X87_PC
        N.X87RC -> readLoc' X87_RC
-       _ -> modState $
-            S.registerViewRead rv . ValueExpr <$>
-            use (register r)
+       _ -> do
+         let Just r = x86Reg r_nm
+         modState $
+            S.registerViewRead rv . ValueExpr <$> use (boundValue r)
     -- TODO
     S.X87StackRegister i -> do
-      v <- modState $ use $ x87Regs
       idx <- getX87Offset i
+      e <- modState $ use $ boundValue (X87_FPUReg idx)
       -- TODO: Check tag register is assigned.
-      return $! ValueExpr (v V.! idx)
+      return $! ValueExpr e
 
 lowerHalf :: forall n . (1 <= n) => Expr (BVType (n+n)) -> Expr (BVType n)
 lowerHalf e =
@@ -775,25 +772,26 @@ setLoc loc v =
            v0 <- readLoc reg
            v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
            addStmt $ ExecArchStmt $ WriteLoc reg v1
-     let r = S.registerViewReg rv
-     case r of
-       N.ControlReg {} -> writeReg (ControlLoc r)
-       N.DebugReg {}   -> writeReg (DebugLoc r)
+     let r_nm = S.registerViewReg rv
+     case r_nm of
+       N.ControlReg {} -> writeReg (ControlLoc r_nm)
+       N.DebugReg {}   -> writeReg (DebugLoc r_nm)
        N.SegmentReg {}
-         | r == N.fs -> writeReg FS
-         | r == N.gs -> writeReg GS
+         | r_nm == N.fs -> writeReg FS
+         | r_nm == N.gs -> writeReg GS
          -- Otherwise registers are 0.
          | otherwise ->
              fail $ "On x86-64 registers other than fs and gs may not be set."
        N.X87PC -> writeReg X87_PC
        N.X87RC -> writeReg X87_RC
        _ -> do
-         v0 <- modState $ ValueExpr <$> use (register r)
+         let Just r = x86Reg r_nm
+         v0 <- modState $ ValueExpr <$> use (boundValue r)
          v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
-         modState $ register r .= v1
+         modState $ boundValue r .= v1
    S.X87StackRegister i -> do
      off <- getX87Offset i
-     modState $ x87Regs . ix off .= v
+     modState $ boundValue (X87_FPUReg off) .= v
 
 mkBlockLabel :: CodeAddr -> GenState any -> (BlockLabel Word64, GenState any)
 mkBlockLabel a s0 = (lbl, s1)
@@ -933,7 +931,7 @@ instance S.Semantics X86Generator where
     modState $ do
       -- TODO: Update tagWords
       -- Store value at new top
-      x87Regs . ix new_top .= v
+      boundValue (X87_FPUReg new_top) .= v
       -- Update top
       x87TopReg .= BVValue knownNat (toInteger new_top)
   x87Pop = do
@@ -964,7 +962,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State (Value X86_64)
-initX86State loc = mkX86State (Initial . X86Reg)
+initX86State loc = mkX86State Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 

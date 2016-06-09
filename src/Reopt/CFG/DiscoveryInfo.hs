@@ -161,7 +161,7 @@ data ParsedTermStmt
                    !Word64
                    !String
                    !String
-                   ![N.RegisterName 'N.GP]
+                   ![X86Reg (BVType 64)]
                    ![Some N.RegisterName]
   deriving (Show)
 
@@ -303,7 +303,7 @@ identifyCall :: Memory Word64
              -> X86State (Value X86_64)
              -> Maybe (Seq (Stmt X86_64), Word64)
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
-  where next_sp = s^.register N.rsp
+  where next_sp = s^.boundValue sp_reg
         go stmts =
           case Seq.viewr stmts of
             Seq.EmptyR -> Nothing
@@ -318,8 +318,8 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
 -- pointer from an address that is 8 below the stack pointer.
 identifyReturn :: X86State (Value X86_64) -> Maybe (Assignment X86_64 (BVType 64))
 identifyReturn s = do
-  let next_ip = s^.register N.rip
-      next_sp = s^.register N.rsp
+  let next_ip = s^.boundValue ip_reg
+      next_sp = s^.boundValue sp_reg
   case next_ip of
     AssignedValue asgn@(Assignment _ (ReadMem ip_addr _))
       | let (ip_base, ip_off) = asBaseOffset ip_addr
@@ -358,13 +358,13 @@ classifyBlock b interp_state =
     FetchAndExecute proc_state
         -- The last statement was a call.
       | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state ->
-          let fptr = case proc_state ^. register N.rip of
+          let fptr = case proc_state^.boundValue ip_reg of
                        BVValue _ v -> Left (fromInteger v)
                        ip          -> Right ip
           in Just (ParsedCall proc_state prev_stmts fptr (Just ret_addr))
 
       -- Jump to concrete offset.
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg
       , inSameFunction (labelAddr (blockLabel b)) tgt_addr interp_state ->
            Just (ParsedJump proc_state tgt_addr)
 
@@ -379,31 +379,31 @@ classifyBlock b interp_state =
         in Just (ParsedReturn proc_state nonret_stmts)
 
       -- Tail calls to a concrete address (or, nop pads after a non-returning call)
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.register N.rip ->
+      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
       | Just (idx, nexts) <- identifyJumpTable interp_state (blockLabel b)
-                                               (proc_state ^. register N.rip) ->
+                                               (proc_state^.boundValue ip_reg) ->
           Just (ParsedLookupTable proc_state idx nexts)
 
       -- Finally, we just assume that this is a tail call through a pointer
       -- FIXME: probably unsound.
       | otherwise -> Just (ParsedCall proc_state
                                       (Seq.fromList $ blockStmts b)
-                                      (Right $ proc_state^.register N.rip) Nothing)
+                                      (Right $ proc_state^.boundValue ip_reg) Nothing)
 
     -- rax is concrete in the first case, so we don't need to propagate it etc.
     Syscall proc_state
-      | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip
-      , BVValue _ (fromInteger -> call_no) <- proc_state^.register N.rax
+      | BVValue _ (fromInteger -> next_addr) <- proc_state^.boundValue ip_reg
+      , BVValue _ (fromInteger -> call_no)   <- proc_state^.boundValue rax_reg
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
          let result = Just (ParsedSyscall proc_state next_addr call_no (spName sysp) name
-                            (take (length argtypes) x86SyscallArgumentRegisters)
+                            (take (length argtypes) x86SyscallArgumentRegs)
                             (spResultRegisters sysp)
                            )
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
-              _ | length argtypes > length x86SyscallArgumentRegisters ->
+              _ | length argtypes > length x86SyscallArgumentRegs ->
                   debug DUrgent ("Got more than register args calling " ++ name
                                  ++ " in block " ++ show (blockLabel b))
                                 result
@@ -411,32 +411,32 @@ classifyBlock b interp_state =
 
         -- FIXME: Should subsume the above ...
         -- FIXME: only works if rax is an initial register
-      | BVValue _ (fromInteger -> (next_addr :: Word64)) <- proc_state^.register N.rip
-      , Initial (X86Reg r) <- proc_state ^. register N.rax
+      | BVValue _ (fromInteger -> (next_addr :: Word64)) <- proc_state^.boundValue ip_reg
+      , Initial r <- proc_state^.boundValue rax_reg
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
-      , Just (fromInteger -> call_no) <- asConcreteSingleton (absSt ^. absX86State ^. register r)
+      , Just (fromInteger -> call_no) <-
+          asConcreteSingleton (absSt ^. absX86State ^. boundValue r)
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
-         let result = Just (ParsedSyscall proc_state next_addr call_no (spName sysp) name
-                            (take (length argtypes) x86SyscallArgumentRegisters)
-                            (spResultRegisters sysp)
-                           )
+         let result = Just $
+               ParsedSyscall proc_state next_addr call_no (spName sysp) name
+                             (take (length argtypes) x86SyscallArgumentRegs)
+                             (spResultRegisters sysp)
          in case () of
               _ | any ((/=) WordArgType) argtypes -> error "Got a non-word arg type"
-              _ | length argtypes > length x86SyscallArgumentRegisters ->
+              _ | length argtypes > length x86SyscallArgumentRegs ->
                   debug DUrgent ("Got more than register args calling " ++ name
                                  ++ " in block " ++ show (blockLabel b))
                                 result
               _ -> result
 
 
-      | BVValue _ (fromInteger -> next_addr) <- proc_state^.register N.rip ->
+      | BVValue _ (fromInteger -> next_addr) <- proc_state^.boundValue ip_reg ->
           debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
-                         ++ " rax is " ++ show (pretty $ proc_state^.register N.rax)
+                         ++ " rax is " ++ show (pretty $ proc_state^.boundValue rax_reg)
                         )
-          Just (ParsedSyscall proc_state next_addr 0 (spName sysp) "unknown"
-                             x86SyscallArgumentRegisters
-                             (spResultRegisters sysp)
-               )
+          Just $ ParsedSyscall proc_state next_addr 0 (spName sysp) "unknown"
+                               x86SyscallArgumentRegs
+                               (spResultRegisters sysp)
       | otherwise -> error "shouldn't get here"
   where
     mem = memory interp_state
