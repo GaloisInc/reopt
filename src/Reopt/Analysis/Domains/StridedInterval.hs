@@ -34,10 +34,10 @@ module Reopt.Analysis.Domains.StridedInterval
 import           Control.Exception (assert)
 import qualified Data.Foldable as Fold
 import           Data.Parameterized.NatRepr
+import           GHC.TypeLits (Nat)
 import           Test.QuickCheck
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
-import           Data.Macaw.Types
 import           Reopt.Utils.Debug
 
 -- -----------------------------------------------------------------------------
@@ -46,11 +46,11 @@ import           Reopt.Utils.Debug
 -- This is a canonical (and more compact) representation, basically we
 -- turn x + [a .. b] * c into (x + a * c) + [0 .. b - a] * c
 
-data StridedInterval (tp :: Type) =
-  StridedInterval { typ :: TypeRepr tp -- maybe not needed?
-                  , base :: Integer
-                  , range :: Integer -- ^ This is the number of elements in the interval + 1
-                  , stride :: Integer
+data StridedInterval (w :: Nat) =
+  StridedInterval { typ    :: !(NatRepr w) -- ^ number of bits in type.
+                  , base   :: !Integer
+                  , range  :: !Integer -- ^ This is the number of elements in the interval + 1
+                  , stride :: !Integer
                   }
 
 instance Eq (StridedInterval tp) where
@@ -72,13 +72,14 @@ size si = range si + 1
 -- Constructors
 
 -- | Construct a singleton value
-singleton :: TypeRepr tp -> Integer -> StridedInterval tp
+singleton :: NatRepr w -> Integer -> StridedInterval w
 singleton tp v = StridedInterval { typ = tp
                                  , base = v
                                  , range = 0
-                                 , stride = 1 }
+                                 , stride = 1
+                                 }
 
-empty :: TypeRepr tp -> StridedInterval tp
+empty :: NatRepr w -> StridedInterval w
 empty tp =
   StridedInterval { typ = tp
                   , base = 0
@@ -89,9 +90,9 @@ empty tp =
 -- | Make an interval given the start, end, and stride. Note that this
 -- will round up if (start - end) is not a multiple of the stride,
 -- i.e., @mkStr
-mkStridedInterval :: TypeRepr tp -> Bool
+mkStridedInterval :: NatRepr w -> Bool
                   -> Integer -> Integer -> Integer
-                  -> StridedInterval tp
+                  -> StridedInterval w
 mkStridedInterval tp roundUp start end s
   | end < start = empty tp
   | s == 0          = singleton tp start
@@ -106,12 +107,11 @@ mkStridedInterval tp roundUp start end s
       | otherwise = (end - start) `div` s
 
 fromFoldable :: Fold.Foldable t =>
-                NatRepr n -> t Integer -> StridedInterval (BVType n)
+                NatRepr n -> t Integer -> StridedInterval n
 fromFoldable sz vs
-  | isEmptyV vs  = empty tp
-  | otherwise    = mkStridedInterval tp True start end s
+  | isEmptyV vs  = empty sz
+  | otherwise    = mkStridedInterval sz True start end s
   where
-    tp       = BVTypeRepr sz
     isEmptyV = not . Fold.any (const True)
     start    = Fold.minimum vs
     end      = Fold.maximum vs
@@ -122,19 +122,17 @@ fromFoldable sz vs
 -- -----------------------------------------------------------------------------
 -- Predicates
 
-isEmpty :: StridedInterval tp -> Bool
+isEmpty :: StridedInterval w -> Bool
 isEmpty s = range s < 0
 
-isSingleton :: StridedInterval tp -> Maybe Integer
+isSingleton :: StridedInterval w -> Maybe Integer
 isSingleton StridedInterval { base = b, range = 0 } = Just b
 isSingleton _  = Nothing
 
-isTop :: StridedInterval tp -> Bool
-isTop si@StridedInterval{} =
-  case typ si of
-    BVTypeRepr sz -> si == top sz
+isTop :: StridedInterval w -> Bool
+isTop si = si == top (typ si)
 
-member :: Integer -> StridedInterval tp -> Bool
+member :: Integer -> StridedInterval w -> Bool
 member _ si | isEmpty si = False
 member n si = assert (stride si /= 0) $
               base si <= n
@@ -142,8 +140,8 @@ member n si = assert (stride si /= 0) $
               && n <= base si + stride si * range si
 
 -- is the set represented by si1 contained in si2?
-isSubsetOf :: StridedInterval (BVType n)
-       -> StridedInterval (BVType n)
+isSubsetOf :: StridedInterval w
+       -> StridedInterval w
        -> Bool
 isSubsetOf si1 _ | isEmpty si1 = True
 isSubsetOf si1 si2
@@ -156,9 +154,9 @@ isSubsetOf si1 si2
 -- -----------------------------------------------------------------------------
 -- Domain operations
 
-lub :: StridedInterval (BVType n)
-       -> StridedInterval (BVType n)
-       -> StridedInterval (BVType n)
+lub :: StridedInterval w
+       -> StridedInterval w
+       -> StridedInterval w
 lub s t | isEmpty s = t
 lub s t | isEmpty t = s
 -- FIXME: make more precise?
@@ -180,8 +178,8 @@ lub si1 si2
 --                && y `isSubsetOf` (x `lub` y)
 
 lubSingleton :: Integer
-                -> StridedInterval (BVType n)
-                -> StridedInterval (BVType n)
+                -> StridedInterval w
+                -> StridedInterval w
 lubSingleton s si
   | member s si  = si
   | Just s' <- isSingleton si =
@@ -205,9 +203,9 @@ lubSingleton s si
 
 -- | Greatest lower bound.  @glb si1 si2@ contains only those values
 -- which are in @si1@ and @si2@.
-glb :: StridedInterval (BVType n)
-       -> StridedInterval (BVType n)
-       -> StridedInterval (BVType n)
+glb :: StridedInterval w
+       -> StridedInterval w
+       -> StridedInterval w
 --glb EmptyInterval _ = EmptyInterval
 --glb _ EmptyInterval = EmptyInterval
 glb si1 si2
@@ -316,19 +314,19 @@ eGCD a0 b0 = let (g, m, n) = go a0 b0
 -- `subsetOf` let m = gcd(b, e)
 --            in (x + y) + [0 .. (a * b / m) + (d * e / m) ] * m
 
-top :: NatRepr u -> StridedInterval (BVType u)
-top sz = StridedInterval { typ = BVTypeRepr sz
+top :: NatRepr u -> StridedInterval u
+top sz = StridedInterval { typ = sz
                          , base = 0
                          , range = maxUnsigned sz
                          , stride = 1 }
 
-clamp :: NatRepr u -> StridedInterval (BVType u) -> StridedInterval (BVType u)
+clamp :: NatRepr u -> StridedInterval u -> StridedInterval u
 clamp sz v = trunc v sz
 
 bvadd :: NatRepr u
-      -> StridedInterval (BVType u)
-      -> StridedInterval (BVType u)
-      -> StridedInterval (BVType u)
+      -> StridedInterval u
+      -> StridedInterval u
+      -> StridedInterval u
 --bvadd _ EmptyInterval{} _ = EmptyInterval
 --bvadd _ _ EmptyInterval{} = EmptyInterval
 bvadd sz si1 si2
@@ -359,9 +357,9 @@ bvadd sz si1 si2 =
 --           + 0       + ([0..a*d] * (b * e)
 
 bvmul :: NatRepr u
-      -> StridedInterval (BVType u)
-      -> StridedInterval (BVType u)
-      -> StridedInterval (BVType u)
+      -> StridedInterval u
+      -> StridedInterval u
+      -> StridedInterval u
 --bvmul _ EmptyInterval{} _ = EmptyInterval
 --bvmul _ _ EmptyInterval{} = EmptyInterval
 -- bvmul sz si1 si2 = top sz -- FIXME: this blows up with the trunc, unfortunately
@@ -381,10 +379,10 @@ bvmul sz si1 si2 =
 --             -> Bool
 -- prop_bvmul = mk_prop (*) bvmul
 
--- filterLeq :: TypeRepr tp -> StridedInterval tp -> Integer -> StridedInterval tp
+-- filterLeq :: NatRepr w -> StridedInterval w -> Integer -> StridedInterval w
 -- filterLeq tp@(BVTypeRepr _) si x = glb si (mkStridedInterval tp False 0 x 1)
 
--- filterGeq :: TypeRepr tp -> StridedInterval tp -> Integer -> StridedInterval tp
+-- filterGeq :: NatRepr w -> StridedInterval w -> Integer -> StridedInterval w
 -- filterGeq tp@(BVTypeRepr _) si x = glb si (mkStridedInterval tp False x u 1)
 --   where
 --     u = case tp of BVTypeRepr n -> maxUnsigned n
@@ -448,10 +446,9 @@ bvmul sz si1 si2 =
 -- | Truncate an interval.
 
 -- OPT: this could be made much more efficient I think.
-trunc :: -- (v+1 <= u) =>
-  StridedInterval (BVType u)
-  -> NatRepr v
-  -> StridedInterval (BVType v)
+trunc :: StridedInterval u
+      -> NatRepr v
+      -> StridedInterval v
 --trunc EmptyInterval _ = EmptyInterval
 trunc si sz
   | isTop si              = top'
@@ -481,11 +478,11 @@ trunc si sz
 -- -----------------------------------------------------------------------------
 -- Testing
 
-toList :: StridedInterval (BVType sz) -> [Integer]
+toList :: StridedInterval w -> [Integer]
 --toList EmptyInterval        = []
 toList si@StridedInterval{} = map (\v -> base si + stride si * v) [0 .. range si]
 
-instance Pretty (StridedInterval tp) where
+instance Pretty (StridedInterval w) where
 --  pretty EmptyInterval        = brackets empty
   pretty si | isEmpty si = text "[]"
   pretty si | Just s <- isSingleton si = brackets (integer s)
@@ -494,11 +491,11 @@ instance Pretty (StridedInterval tp) where
                                           <+> text ".."
                                           <+> integer (base si + range si * stride si))
 
-instance Arbitrary (StridedInterval (BVType 64)) where
-  arbitrary = frequency [ (1, return (empty (BVTypeRepr n64)))
+instance Arbitrary (StridedInterval 64) where
+  arbitrary = frequency [ (1, return (empty knownNat))
                         , (9, si) ]
     where
       si = do lower <- sized $ \n -> choose (0, toInteger n)
               upper <- sized $ \n -> choose (lower, toInteger n)
               s     <- sized $ \n -> choose (1, toInteger n)
-              return $ mkStridedInterval (BVTypeRepr n64) True lower upper s
+              return $ mkStridedInterval knownNat True lower upper s

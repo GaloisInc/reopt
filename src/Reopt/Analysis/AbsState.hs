@@ -71,9 +71,10 @@ import qualified Data.Set as Set
 import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
+
+import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex
@@ -121,7 +122,7 @@ data AbsValue (tp :: Type)
     --  First argument is address of block.
   | (tp ~ BVType 64) => SomeStackOffset !Word64
     -- ^ An offset to the stack at some offset.
-  | forall n . (tp ~ BVType n) => StridedInterval !(SI.StridedInterval (BVType n))
+  | forall n . (tp ~ BVType n) => StridedInterval !(SI.StridedInterval n)
     -- ^ A strided interval
   | forall n n'
     . ((n + 1) <= n', tp ~ BVType n')
@@ -241,7 +242,7 @@ asConcreteSingleton v = do
 -- Smart constructors
 
 -- | Smart constructor for strided intervals which takes care of top
-stridedInterval :: SI.StridedInterval (BVType tp) -> AbsValue (BVType tp)
+stridedInterval :: SI.StridedInterval w -> AbsValue (BVType w)
 stridedInterval si
   | SI.isTop si = TopV
   | otherwise   = StridedInterval si
@@ -342,15 +343,15 @@ joinAbsValue' v v'
     | StridedInterval si_old <- v, StridedInterval si_new <- v' =
       return $ go si_old si_new
     | StridedInterval si <- v,  FinSet s <- v' =
-      return $ go si (SI.fromFoldable (type_width (SI.typ si)) s)
+      return $ go si (SI.fromFoldable (SI.typ si) s)
     | StridedInterval si <- v,  CodePointers s <- v' = do
       addWords s
-      return $ go si (SI.fromFoldable (type_width (SI.typ si)) (Set.mapMonotonic toInteger s))
+      return $ go si (SI.fromFoldable (SI.typ si) (Set.mapMonotonic toInteger s))
     | StridedInterval si <- v', FinSet s <- v =
-      return $ go si (SI.fromFoldable (type_width (SI.typ si)) s)
+      return $ go si (SI.fromFoldable (SI.typ si) s)
     | StridedInterval si <- v', CodePointers s <- v = do
       addWords s
-      return $ go si (SI.fromFoldable (type_width (SI.typ si)) (Set.mapMonotonic toInteger s))
+      return $ go si (SI.fromFoldable (SI.typ si) (Set.mapMonotonic toInteger s))
   where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
 
 -- Sub values
@@ -478,7 +479,7 @@ uext :: forall u v.
 uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
 uext (StridedInterval si) w =
-  StridedInterval $ si { SI.typ = BVTypeRepr w }
+  StridedInterval $ si { SI.typ = w }
 uext (SubValue (n :: NatRepr n) av) _ =
   -- u + 1 <= v, n + 1 <= u, need n + 1 <= v
   -- proof: n + 1 <= u + 1 by addIsLeq
@@ -682,8 +683,8 @@ abstractULt tp x y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
     -- debug DAbsInt' ("abstractLt " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
-    ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 (u_y - 1) 1)
-    , meet y (stridedInterval $ SI.mkStridedInterval tp False (l_x + 1)
+    ( meet x (stridedInterval $ SI.mkStridedInterval n False 0 (u_y - 1) 1)
+    , meet y (stridedInterval $ SI.mkStridedInterval n False (l_x + 1)
                                                      (maxUnsigned n) 1))
 
 abstractULt _tp x y = (x, y)
@@ -698,8 +699,8 @@ abstractULeq tp x y
   , Just l_x <- hasMinimum tp x
   , BVTypeRepr n <- tp =
     -- trace' ("abstractLeq " ++ show (pretty x) ++ " " ++ show (pretty y) ++ " -> ")
-    ( meet x (stridedInterval $ SI.mkStridedInterval tp False 0 u_y 1)
-    , meet y (stridedInterval $ SI.mkStridedInterval tp False l_x
+    ( meet x (stridedInterval $ SI.mkStridedInterval n False 0 u_y 1)
+    , meet y (stridedInterval $ SI.mkStridedInterval n False l_x
                                                      (maxUnsigned n) 1))
 
 abstractULeq _tp x y = (x, y)
@@ -1065,9 +1066,9 @@ transferRHS r rhs =
         -- We know only that it will return up to (and including(?)) cnt
         MemCmp _sz cnt _src _dest _rev
           | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-            stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+            stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
           | otherwise -> TopV
         FindElement _sz _findEq cnt _buf _val _rev
           | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-            stridedInterval $ SI.mkStridedInterval knownType False 0 upper 1
+            stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
           | otherwise -> TopV
