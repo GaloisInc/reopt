@@ -62,14 +62,14 @@ import           Flexdis86 ( InstructionInstance
                            , LockPrefix(..)
                            )
 
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.Concrete.BitVector hiding (modify)
 import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMachineState(..)
                                              , Address8, modifyAddr, asBV, ConcreteStateT)
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Object.Loader

@@ -64,10 +64,10 @@ import           Text.PrettyPrint.ANSI.Leijen (pretty)
 import           Data.Parameterized.Some
 
 import           Reopt.Analysis.AbsState
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.Types
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 

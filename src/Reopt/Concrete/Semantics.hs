@@ -47,9 +47,9 @@ import           Data.Parameterized.NatRepr
 
 import           GHC.Float (float2Double, double2Float)
 
-import qualified Reopt.CFG.Representation as R
+import qualified Data.Macaw.CFG as R
 import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Machine.Types ( FloatInfoRepr, FloatType
+import           Data.Macaw.Types ( FloatInfoRepr, FloatType
                                      , floatInfoBits, n1, n80
                                      , typeRepr
                                      )

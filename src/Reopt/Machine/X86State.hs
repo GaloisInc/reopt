@@ -82,9 +82,9 @@ import           Data.Word
 import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 
 ------------------------------------------------------------------------
 -- X86_64 specific declarations

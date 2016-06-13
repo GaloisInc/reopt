@@ -26,7 +26,7 @@ import qualified Data.Vector as V
 import qualified Flexdis86 as F
 import           GHC.TypeLits
 
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 
 data RegisterClass
    = ProgramCounter

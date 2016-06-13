@@ -31,9 +31,9 @@ import Data.Word
 
 import Debug.Trace
 import Reopt.CFG.FnRep
-import Reopt.CFG.Representation
+import Data.Macaw.CFG
 import Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
-import Reopt.Machine.Types
+import Data.Macaw.Types
 import Reopt.Machine.X86State
 
 {-

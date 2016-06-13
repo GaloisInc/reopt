@@ -1,5 +1,5 @@
 {-|
-Module           : Reopt.CFG.Representation
+Module           : Data.Macaw.CFG
 Copyright        : (c) Galois, Inc 2015-2016
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
 
@@ -20,7 +20,7 @@ machine code.
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-module Reopt.CFG.Representation
+module Data.Macaw.CFG
   ( CFG
   , emptyCFG
   , cfgBlocks
@@ -81,53 +81,6 @@ module Reopt.CFG.Representation
   , ArchFn
   , ArchReg
   , ArchStmt
-  -- * X86 specific
-    {-
-  , X86_64
-  , X86PrimFn(..)
-  , X86PrimLoc(..)
-  , X86Stmt(..)
-    -}
-  -- ** X86Reg
-    {-
-  , X86Reg(..)
-  , x86Reg
-  , rax_reg
-  , rbx_reg
-  , rcx_reg
-  , rdx_reg
-  , rdi_reg
-  , rsi_reg
-  , rbp_reg
-  , r8_reg
-  , r9_reg
-  , r10_reg
-  , r11_reg
-  , r12_reg
-  , r13_reg
-  , r14_reg
-  , r15_reg
-  , ip_reg
-  , x87TopReg
-  , sp_reg
-  , cf_reg
-  , df_reg
--}
-  -- ** X86State
---  , X86State
---  , mkX86State
---  , mkX86StateM
---  , x86StateRegs
---  , gpRegList
---  , x87FPURegList
---  , curIP
---  , cmpX86State
---  , foldValueCached
---  , hasCallComment
---  , hasRetComment
---  , asStackAddrOffset
---  , refsInAssignRhs
---  , refsInValue
   ) where
 
 import           Control.Applicative
@@ -158,8 +111,7 @@ import           GHC.TypeLits
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Reopt.Machine.Types
-import           Reopt.Utils.PrettyPrint
+import           Data.Macaw.Types
 
 -- Note:
 -- The declarations in this file follow a top-down order, so the top-level
@@ -183,6 +135,18 @@ class PrettyPrec v where
 -- | Pretty print over all instances of a type.
 class PrettyF (f :: k -> *) where
   prettyF :: f tp -> Doc
+
+-- | Pretty print a document with parens if condition is true
+parenIf :: Bool -> Doc -> Doc
+parenIf True d = parens d
+parenIf False d = d
+
+bracketsep :: [Doc] -> Doc
+bracketsep [] = text "{}"
+bracketsep (h:l) = vcat $
+  [text "{" <+> h]
+  ++ fmap (text "," <+>) l
+  ++ [text "}"]
 
 ------------------------------------------------------------------------
 -- BlockLabel
@@ -509,8 +473,6 @@ mapApp f m = runIdentity $ traverseApp (return . f) m
 foldApp :: Monoid m => (forall u. f u -> m) -> App f tp -> m
 foldApp f m = getConst (traverseApp (\f_u -> Const $ f f_u) m)
 
-$(pure [])
-
 ------------------------------------------------------------------------
 -- App pretty printing
 
@@ -592,9 +554,6 @@ ppAppA pp a0 =
     FPCvtRoundsUp src x tgt -> sexprA "fpCvtRoundsUp" [ prettyPure src, pp x, prettyPure tgt ]
     FPFromBV x tgt          -> sexprA "fpFromBV" [ pp x, prettyPure tgt ]
     TruncFPToSignedBV _ x w -> sexprA "truncFP_sbv" [ pp x, ppNat w]
-
--- Force app to be in template-haskell context.
-$(pure [])
 
 ------------------------------------------------------------------------
 -- appType
@@ -788,8 +747,6 @@ valueWidth v =
   case typeRepr v of
     BVTypeRepr n -> n
 
-$(pure [])
-
 instance HasRepr (AssignRhs arch) TypeRepr
       => TestEquality (Assignment arch) where
   testEquality x y = orderingF_refl (compareF x y)
@@ -810,14 +767,13 @@ $(pure [])
 ------------------------------------------------------------------------
 -- Pretty print Assign, AssignRhs, Value operations
 
-
 ppLit :: NatRepr n -> Integer -> Doc
 ppLit w i =
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 
 -- | Pretty print a value.
 ppValue :: ShowF (ArchReg arch) => Prec -> Value arch tp -> Doc
-ppValue p (BVValue w i) = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
+ppValue p (BVValue w i) | p > colonPrec =  assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (showF r) PP.<> text "_0"
 
@@ -1012,8 +968,6 @@ cmpRegState p (RegState x) (RegState y) = go (MapF.toList x) (MapF.toList y)
             Nothing -> False
             Just Refl -> p xv yv && go xr yr
 
-$(pure [])
-
 ------------------------------------------------------------------------
 -- Pretty printing RegState
 
@@ -1080,8 +1034,6 @@ instance ( ShowF (ArchReg arch)
          )
          => Show (Stmt arch) where
   show = show . pretty
-
-$(pure [])
 
 ------------------------------------------------------------------------
 -- TermStmt
@@ -1249,6 +1201,3 @@ traverseBlockAndChildren cfg b0 f merge = goBlock b0
     go l = case _cfgBlocks cfg ^. at l of
             Nothing -> error $ "label not found"
             Just b  -> goBlock b
-
-
-$(pure [])

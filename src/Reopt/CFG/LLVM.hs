@@ -47,8 +47,8 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
-import           Reopt.CFG.Representation
-import           Reopt.Machine.Types
+import           Data.Macaw.CFG
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 
 --------------------------------------------------------------------------------

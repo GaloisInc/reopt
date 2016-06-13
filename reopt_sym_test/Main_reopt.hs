@@ -81,9 +81,9 @@ import           Lang.Crucible.Utils.MonadST
 import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 --import           Reopt.Semantics.ConcreteState
 import           Reopt.Object.Memory

@@ -46,9 +46,9 @@ import           Reopt.Analysis.AbsState
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.Implementation
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.Machine.SysDeps.Types
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug

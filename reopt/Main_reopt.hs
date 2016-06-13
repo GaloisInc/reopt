@@ -63,10 +63,10 @@ import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (functionArgs)
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory

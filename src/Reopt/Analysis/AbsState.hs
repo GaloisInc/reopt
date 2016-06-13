@@ -72,8 +72,8 @@ import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.CFG.Representation
-import           Reopt.Machine.Types
+import           Data.Macaw.CFG
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex

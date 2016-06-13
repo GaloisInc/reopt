@@ -10,7 +10,7 @@ module Reopt.BasicBlock.Extract
 
 import           Control.Monad.State
 import           Reopt.Concrete.Semantics as CS
-import           Reopt.CFG.Representation as R
+import           Data.Macaw.CFG as R
 import qualified Reopt.Semantics.Monad as S
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Machine.StateNames as N

@@ -32,7 +32,7 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Word
 
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
 
 

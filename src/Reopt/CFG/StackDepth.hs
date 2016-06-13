@@ -26,8 +26,8 @@ import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.Representation
-import           Reopt.Machine.Types
+import           Data.Macaw.CFG
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 
 import           Debug.Trace

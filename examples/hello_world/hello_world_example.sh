@@ -45,6 +45,5 @@ reopt hello_world_ubuntu_64_lts_12_04_diet \
       $reopt_notrans \
       -o "$relink_output"
 
-
 echo "Written relinked output to $relink_output"
 exit 0

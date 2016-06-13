@@ -28,7 +28,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 

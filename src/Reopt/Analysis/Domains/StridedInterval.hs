@@ -37,7 +37,7 @@ import           Data.Parameterized.NatRepr
 import           Test.QuickCheck
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Utils.Debug
 
 -- -----------------------------------------------------------------------------
@@ -46,13 +46,12 @@ import           Reopt.Utils.Debug
 -- This is a canonical (and more compact) representation, basically we
 -- turn x + [a .. b] * c into (x + a * c) + [0 .. b - a] * c
 
--- FIXME: we might not need EmptyInterval (we could also just say that
--- stride == 0 is empty)
 data StridedInterval (tp :: Type) =
   StridedInterval { typ :: TypeRepr tp -- maybe not needed?
                   , base :: Integer
                   , range :: Integer -- ^ This is the number of elements in the interval + 1
-                  , stride :: Integer }
+                  , stride :: Integer
+                  }
 
 instance Eq (StridedInterval tp) where
   si1@StridedInterval{} == si2@StridedInterval{} =
@@ -291,7 +290,8 @@ floor_quot x y = x `div` y
 
 
 -- | Returns the gcd, and n and m s.t. n * a + m * b = g
--- clagged, fixed, from http://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm
+-- clagged, fixed, from
+--    http://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm
 -- this is presumably going to be slower than the gmp version :(
 eGCD :: Integral a => a -> a -> (a,a,a)
 eGCD a0 b0 = let (g, m, n) = go a0 b0
@@ -478,35 +478,8 @@ trunc si sz
     ceilDiv _ 0 = error "SI.trunc given 0 stride."
     ceilDiv x y = (x + y - 1) `div` y
 
--- prop_trunc :: StridedInterval (BVType 64)
---               -> Positive (Small Integer)
---               -> Property
--- prop_trunc si sz
---   | Just (Some n) <- someNat sz' = sz' < 64 ==> p n
---   | otherwise = True ==> True
---   where
---     p :: NatRepr n -> Bool
---     p n = S.fromList (map (toUnsigned n) (toList si))
---           `S.isSubsetOf`
---           S.fromList (toList (trunc si n))
---     sz' = getSmall (getPositive sz)
-
 -- -----------------------------------------------------------------------------
 -- Testing
-
--- mk_prop :: (Integer -> Integer -> Integer)
---            -> (NatRepr 64
---                -> StridedInterval (BVType 64)
---                -> StridedInterval (BVType 64)
---                -> StridedInterval (BVType 64))
---            -> StridedInterval (BVType 64)
---            -> StridedInterval (BVType 64)
---            -> Bool
--- mk_prop int_f si_f x y = and [ (toUnsigned n64 (int_f v v'))
---                                `member`
---                                (si_f n64 x y)
---                              | v  <- toList x
---                              , v' <- toList y ]
 
 toList :: StridedInterval (BVType sz) -> [Integer]
 --toList EmptyInterval        = []

@@ -23,7 +23,7 @@ import qualified Data.Vector as V ()
 import           Data.Word
 
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.CFG.FnRep (FunctionType(..)
                                   , ftMaximumFunctionType
                                   , ftMinimumFunctionType

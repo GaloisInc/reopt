@@ -18,7 +18,7 @@ import           Data.Word
 
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 

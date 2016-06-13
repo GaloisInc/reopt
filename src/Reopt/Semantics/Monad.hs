@@ -115,7 +115,7 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Flexdis86.Sizes (SizeConstraint(..))

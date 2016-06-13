@@ -49,9 +49,9 @@ import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionArgs ( functionArgs )
 import           Reopt.CFG.RegisterUse
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.CFG.StackDepth
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug

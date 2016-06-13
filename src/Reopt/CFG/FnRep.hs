@@ -42,10 +42,10 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 
-import Reopt.CFG.Representation(App(..), AssignId, BlockLabel, CodeAddr
+import Data.Macaw.CFG(App(..), AssignId, BlockLabel, CodeAddr
                                , ppApp, ppLit, ppAssignId, sexpr, appType
                                , foldApp)
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 
 commas :: [Doc] -> Doc

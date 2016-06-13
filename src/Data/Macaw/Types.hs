@@ -17,8 +17,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
-module Reopt.Machine.Types
-  ( module Reopt.Machine.Types -- export everything
+module Data.Macaw.Types
+  ( module Data.Macaw.Types -- export everything
   , GHC.TypeLits.Nat
   , Data.Parameterized.NatRepr.NatRepr(..)
   , Data.Parameterized.NatRepr.knownNat

@@ -61,8 +61,8 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-import qualified Reopt.CFG.Representation as R
-import           Reopt.Machine.Types (FloatInfo(..))
+import qualified Data.Macaw.CFG as R
+import           Data.Macaw.Types (FloatInfo(..))
 
 -- import Debug.Trace
 
@@ -246,7 +246,7 @@ data Stmt where
   Let :: Variable tp -> Expr tp -> Stmt
   -- The remaining constructors correspond to the 'S.Semantics'
   -- operations; the arguments are documented there and in
-  -- 'Reopt.CFG.Representation.Stmt'.
+  -- 'Data.Macaw.CFG.Stmt'.
   (:=) :: MLocation tp -> Expr tp -> Stmt
   Ifte_ :: Expr BoolType -> [Stmt] -> [Stmt] -> Stmt
   MemCopy :: Integer

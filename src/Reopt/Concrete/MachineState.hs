@@ -28,7 +28,7 @@ import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 import qualified Data.BitVector as BV
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
-import           Reopt.Machine.Types
+import           Data.Macaw.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.Monad (Primitive, Segment)
 

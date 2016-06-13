@@ -49,9 +49,9 @@ import qualified Flexdis86 as Flexdis
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.Types (BVType, typeRepr)
+import           Data.Macaw.Types (BVType, typeRepr)
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)

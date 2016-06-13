@@ -17,7 +17,7 @@ import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
-import           Reopt.CFG.Representation
+import           Data.Macaw.CFG
 import           Reopt.CFG.Recovery
 import           Reopt.CFG.LLVM
 import           Reopt.Object.Memory
