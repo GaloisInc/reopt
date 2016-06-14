@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -6,16 +7,17 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.Analysis.AbsState
   ( AbsBlockState
   , mkAbsBlockState
-  , absX86State
-  , absBlockDiff
-  , setAbsIP
+  , absRegState
   , absStackHasReturnAddr
   , AbsBlockStack
   , StackEntry(..)
@@ -51,6 +53,10 @@ module Reopt.Analysis.AbsState
   , abstractULt
   , abstractULeq
   , isBottom
+  , AbsRegState(..)
+  , SupportAbsEvaluation(..)
+    -- * Utilities
+  , hasMaximum
   ) where
 
 import           Control.Exception (assert)
@@ -62,10 +68,10 @@ import           Data.List (find)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
+import           Data.Parameterized.Classes (EqF(..), OrdF(..), ShowF(..))
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
@@ -75,9 +81,15 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex
+
+------------------------------------------------------------------------
+-- Utilities
+
+addOff :: NatRepr w -> Integer -> Integer -> Integer
+addOff w o v = toUnsigned w (o + v)
+
 
 ------------------------------------------------------------------------
 -- AbsDomain
@@ -112,38 +124,42 @@ class Eq d => AbsDomain d where
 -- AbsValue
 
 -- | The abstract information that is associated with values of a given type.
-data AbsValue (tp :: Type)
+--
+-- The first parameter is the width of pointers on the value.  It is expected
+-- to be at most 64 bits.
+data AbsValue w (tp :: Type)
   = forall n . (tp ~ BVType n) => FinSet !(Set Integer)
     -- ^ Denotes that this value can take any one of the  absolute value.
-  | (tp ~ BVType 64) => CodePointers !(Set Word64)
+  | (tp ~ BVType w) => CodePointers !(Set Word64)
      -- ^ A possibly empty set of values that either point to a code segment or 0.
-  | (tp ~ BVType 64) => StackOffset !Word64 !(Set Int64)
+  | (tp ~ BVType w) => StackOffset !Word64 !(Set Int64)
     -- ^ Offset of stack from the beginning of the block at the given address.
     --  First argument is address of block.
-  | (tp ~ BVType 64) => SomeStackOffset !Word64
+  | (tp ~ BVType w) => SomeStackOffset !Word64
     -- ^ An offset to the stack at some offset.
   | forall n . (tp ~ BVType n) => StridedInterval !(SI.StridedInterval n)
     -- ^ A strided interval
   | forall n n'
     . ((n + 1) <= n', tp ~ BVType n')
-    => SubValue !(NatRepr n) !(AbsValue (BVType n))
+    => SubValue !(NatRepr n) !(AbsValue w (BVType n))
     -- ^ A sub-value about which we know only some bits.
     -- (e.g., we know that the lower 8 bits are < 10)
   | TopV
     -- ^ Any value
-  | (tp ~ BVType 64) => ReturnAddr
+  | (tp ~ BVType w) => ReturnAddr
     -- ^ Denotes a return address in the body of a function.
 
 -- | Denotes that we do not know of any value that could be in set.
-emptyAbsValue :: AbsValue (BVType 64)
+emptyAbsValue :: AbsValue w (BVType w)
 emptyAbsValue = CodePointers Set.empty
+
 
 -- | Returns a finite set of values with some width.
 data SomeFinSet tp where
   IsFin :: !(Set Integer) -> SomeFinSet (BVType n)
   NotFin :: SomeFinSet tp
 
-asFinSet :: String -> AbsValue tp -> SomeFinSet tp
+asFinSet :: String -> AbsValue w tp -> SomeFinSet tp
 asFinSet _ (FinSet s) = IsFin s
 asFinSet nm (CodePointers s)
   | s == Set.singleton 0 = IsFin (Set.singleton 0)
@@ -158,7 +174,7 @@ asFinSet _ _ = NotFin
 --   | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $ Just s
 -- asFinSet64 _ _ = Nothing
 
-codePointerSet :: AbsValue tp -> Set Word64
+codePointerSet :: AbsValue w tp -> Set Word64
 codePointerSet (CodePointers s) = s
 codePointerSet _ = Set.empty
 
@@ -168,7 +184,7 @@ maxSetSize :: Int
 maxSetSize = 5
 
 -- Note that this is syntactic equality only.
-instance Eq (AbsValue tp) where
+instance Eq (AbsValue w tp) where
   FinSet x    == FinSet y      = x == y
   CodePointers x == CodePointers y = x == y
   StackOffset ax ox  == StackOffset ay oy   = (ax,ox) == (ay,oy)
@@ -181,13 +197,13 @@ instance Eq (AbsValue tp) where
   ReturnAddr == ReturnAddr = True
   _    == _    = False
 
-instance EqF AbsValue where
+instance EqF (AbsValue w) where
   eqF = (==)
 
-instance Show (AbsValue tp) where
+instance Show (AbsValue w tp) where
   show = show . pretty
 
-instance Pretty (AbsValue tp) where
+instance Pretty (AbsValue w tp) where
   pretty (FinSet s) = text "finset" <+> ppIntegerSet s
   pretty (CodePointers s) = text "code" <+> ppIntegerSet s
 
@@ -213,7 +229,7 @@ ppIntegerSet = ppSet ppv
 -- | Returns a set of concrete integers that this value may be.
 -- This function will neither return the complete set or an
 -- known under-approximation.
-concretize :: AbsValue tp -> Maybe (Set Integer)
+concretize :: AbsValue w tp -> Maybe (Set Integer)
 concretize (FinSet s) = Just s
 concretize (CodePointers s) = Just (Set.mapMonotonic toInteger s)
 concretize (SubValue _ _) = Nothing -- we know nothing about _all_ values
@@ -223,7 +239,7 @@ concretize (StridedInterval s) =
 concretize _ = Nothing
 
 -- FIXME: make total, we would need to carry around tp
-size :: AbsValue tp -> Maybe Integer
+size :: AbsValue w tp -> Maybe Integer
 size (FinSet s) = Just $ fromIntegral (Set.size s)
 size (CodePointers s) = Just $ fromIntegral (Set.size s)
 size (StridedInterval s) = Just $ SI.size s
@@ -231,7 +247,7 @@ size (StackOffset _ s) = Just $ fromIntegral (Set.size s)
 size _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
-asConcreteSingleton :: AbsValue tp -> Maybe Integer
+asConcreteSingleton :: AbsValue w tp -> Maybe Integer
 asConcreteSingleton v = do
   sz <- size v
   guard (sz == 1)
@@ -242,21 +258,22 @@ asConcreteSingleton v = do
 -- Smart constructors
 
 -- | Smart constructor for strided intervals which takes care of top
-stridedInterval :: SI.StridedInterval w -> AbsValue (BVType w)
+stridedInterval :: SI.StridedInterval n -> AbsValue w (BVType n)
 stridedInterval si
   | SI.isTop si = TopV
   | otherwise   = StridedInterval si
 
 -- | Smart constructor for sub-values.  This ensures that the
 -- subvalues are sorted on size.
-subValue :: ((n + 1) <= n') =>
-            NatRepr n -> AbsValue (BVType n)
-            -> AbsValue (BVType n')
+subValue :: ((n + 1) <= n')
+         => NatRepr n
+         -> AbsValue w (BVType n)
+         -> AbsValue w (BVType n')
 subValue n v
   | TopV <- v = TopV
   | otherwise = SubValue n v
 
-isEmpty :: AbsValue tp -> Bool
+isEmpty :: AbsValue w tp -> Bool
 isEmpty (CodePointers s) = Set.null s
 isEmpty (FinSet s) = Set.null s
 isEmpty _ = False
@@ -268,10 +285,13 @@ isEmpty _ = False
 isZeroPtr :: Set Word64 -> Bool
 isZeroPtr s = Set.size s == 1 && Set.findMin s == 0
 
+-------------------------------------------------------------------------------
+-- Joining abstract values
+
 -- | Join the old and new states and return the updated state iff
 -- the result is larger than the old state.
 -- This also returns any addresses that are discarded during joining.
-joinAbsValue :: AbsValue tp -> AbsValue tp -> Maybe (AbsValue tp)
+joinAbsValue :: AbsValue 64 tp -> AbsValue 64 tp -> Maybe (AbsValue 64 tp)
 joinAbsValue x y
     | Set.null s = r
     | otherwise = debug DAbsInt ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
@@ -280,11 +300,14 @@ joinAbsValue x y
 addWords :: Set Word64 -> State (Set Word64) ()
 addWords s = modify $ Set.union (Set.delete 0 s)
 
+
+
 -- | Join the old and new states and return the updated state iff
 -- the result is larger than the old state.
 -- This also returns any addresses that are discarded during joining.
-joinAbsValue' :: AbsValue tp -> AbsValue tp -> State (Set Word64) (Maybe (AbsValue tp))
-
+joinAbsValue' :: AbsValue w tp
+              -> AbsValue w tp
+              -> State (Set Word64) (Maybe (AbsValue w tp))
 joinAbsValue' TopV x = do
   addWords (codePointerSet x)
   return $! Nothing
@@ -378,7 +401,10 @@ joinAbsValue' x y = do
   addWords (codePointerSet y)
   return $! Just TopV
 
-member :: Integer -> AbsValue tp -> Bool
+-------------------------------------------------------------------------------
+-- Abstract value operations
+
+member :: Integer -> AbsValue w tp -> Bool
 member _ TopV = True
 member n (FinSet s) = Set.member n s
 member n (CodePointers s) | 0 <= n && n <= toInteger (maxBound :: Word64) =
@@ -388,7 +414,7 @@ member n (SubValue _n' v) = member n v
 member _n _v = False
 
 -- | Returns true if this value represents the empty set.
-isBottom :: AbsValue tp -> Bool
+isBottom :: AbsValue w tp -> Bool
 isBottom (FinSet v)       = Set.null v
 isBottom (CodePointers v) = Set.null v
 isBottom (StackOffset _ v) = Set.null v
@@ -398,6 +424,9 @@ isBottom (SubValue _ v) = isBottom v
 isBottom TopV = False
 isBottom ReturnAddr = False
 
+-------------------------------------------------------------------------------
+-- Intersection abstract values
+
 -- meet is probably the wrong word here --- we are really refining the
 -- abstract value based upon some new information.  Thus, we want to
 -- return an overapproximation rather than an underapproximation of
@@ -405,7 +434,7 @@ isBottom ReturnAddr = False
 -- Currently the only case we care about is where v' is an interval
 
 -- @meet x y@ returns an over-approximation of the values in @x@ and @y@.
-meet :: AbsValue tp -> AbsValue tp -> AbsValue tp
+meet :: AbsValue w tp -> AbsValue w tp -> AbsValue w tp
 meet x y
   | isBottom m
   , not (isBottom x)
@@ -414,7 +443,7 @@ meet x y
   | otherwise = m
   where m = meet' x y
 
-meet' :: AbsValue tp -> AbsValue tp -> AbsValue tp
+meet' :: AbsValue w tp -> AbsValue w tp -> AbsValue w tp
 meet' TopV x = x
 meet' x TopV = x
 -- FIXME: reuse an old value if possible?
@@ -457,10 +486,13 @@ meet' (SomeStackOffset ax) (SomeStackOffset ay) = assert (ax == ay) $ SomeStackO
 meet' x _ = x -- Arbitrarily pick one.
 -- meet x y = error $ "meet: impossible" ++ show (x,y)
 
+-------------------------------------------------------------------------------
+-- Operations
+
 trunc :: (v+1 <= u)
-      => AbsValue (BVType u)
+      => AbsValue w (BVType u)
       -> NatRepr v
-      -> AbsValue (BVType v)
+      -> AbsValue w (BVType v)
 trunc (FinSet s) w       = FinSet (Set.map (toUnsigned w) s)
 trunc (CodePointers s) w = FinSet (Set.map (toUnsigned w . toInteger) s)
 trunc (StridedInterval s) w = stridedInterval (SI.trunc s w)
@@ -474,8 +506,8 @@ trunc (SomeStackOffset _) _ = TopV
 trunc ReturnAddr _ = TopV
 trunc TopV _ = TopV
 
-uext :: forall u v.
-        (u+1 <= v) => AbsValue (BVType u) -> NatRepr v -> AbsValue (BVType v)
+uext :: forall u v w .
+        (u+1 <= v) => AbsValue w (BVType u) -> NatRepr v -> AbsValue w (BVType v)
 uext (FinSet s) _ = FinSet s
 uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
 uext (StridedInterval si) w =
@@ -495,10 +527,11 @@ uext (SomeStackOffset _) _ = TopV
 uext ReturnAddr _ = TopV
 uext TopV _ = TopV
 
-bvadd :: NatRepr u
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
+bvadd :: forall w u
+      .  NatRepr u
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
 -- Stacks
 bvadd w (StackOffset a s) (FinSet t) | [o] <- Set.toList t = do
   StackOffset a $ Set.map (fromInteger . addOff w o . toInteger) s
@@ -510,6 +543,7 @@ bvadd w v v'
   | StridedInterval si <- v,  IsFin s <- asFinSet "bvadd" v' = go si (SI.fromFoldable w s)
   | StridedInterval si <- v', IsFin s <- asFinSet "bvadd" v  = go si (SI.fromFoldable w s)
   where
+    go :: SI.StridedInterval u -> SI.StridedInterval u -> AbsValue w (BVType u)
     go si1 si2 = stridedInterval $ SI.bvadd w si1 si2
 
 -- subvalues
@@ -524,19 +558,19 @@ bvadd _ _ (SomeStackOffset ax) = SomeStackOffset ax
 bvadd _ _ _ = TopV
 
 setL :: Ord a
-     => ([a] -> AbsValue (BVType n))
-     -> (Set a -> AbsValue (BVType n))
+     => ([a] -> AbsValue w (BVType n))
+     -> (Set a -> AbsValue w (BVType n))
      -> [a]
-     -> AbsValue (BVType n)
+     -> AbsValue w (BVType n)
 setL def c l | length l > maxSetSize = def l
              | otherwise = c (Set.fromList l)
 
 bvsub :: (Word64 -> Bool)
          -- ^ Predicate that returns true if value should be considered a code pointer.
       -> NatRepr u
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
 bvsub is_code w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
     | all is_code vals = CodePointers (Set.fromList vals)
     | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
@@ -565,21 +599,17 @@ bvsub _ w (StackOffset ax s) (asFinSet "bvsub6" -> IsFin t) =
     x <- toInteger <$> Set.toList s
     y <- Set.toList t
     return $! fromInteger (toUnsigned w (x - y))
-
--- subvalues
--- bvsub w (SubValue _n _av c) v' = bvsub w c v'
--- bvsub w v (SubValue _n _av c)  = bvsub w v c
-
 bvsub _ _ (StackOffset ax _) _ = SomeStackOffset ax
 bvsub _ _ _ (StackOffset _ _) = TopV
 bvsub _ _ (SomeStackOffset ax) _ = SomeStackOffset ax
 bvsub _ _ _ (SomeStackOffset _) = TopV
 bvsub _ _ _ _ = TopV -- Keep the pattern checker happy
 
-bvmul :: NatRepr u
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
+bvmul :: forall w u
+      .  NatRepr u
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
+      -> AbsValue w (BVType u)
 bvmul w (asFinSet "bvmul" -> IsFin s) (asFinSet "bvmul" -> IsFin t) =
   setL (stridedInterval . SI.fromFoldable w) FinSet $ do
   x <- Set.toList s
@@ -590,6 +620,7 @@ bvmul w v v'
   | StridedInterval si <- v,  IsFin s <- asFinSet "bvmul" v' = go si (SI.fromFoldable w s)
   | StridedInterval si <- v', IsFin s <- asFinSet "bvmul" v  = go si (SI.fromFoldable w s)
   where
+    go :: SI.StridedInterval u -> SI.StridedInterval u -> AbsValue w (BVType u)
     go si1 si2 = stridedInterval $ SI.bvmul w si1 si2
 
 -- bvmul w (SubValue _n _av c) v' = bvmul w c v'
@@ -600,54 +631,56 @@ bvmul _ _ _ = TopV
 -- FIXME: generalise
 bitop :: (Integer -> Integer -> Integer)
       -> NatRepr u
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
-      -> AbsValue (BVType u)
+      -> AbsValue w (BVType u)
+      -> AbsValue w  (BVType u)
+      -> AbsValue w (BVType u)
 bitop doOp _w (asFinSet "bvand" -> IsFin s) (asConcreteSingleton -> Just v)
   = FinSet (Set.map (flip doOp v) s)
 bitop doOp _w (asConcreteSingleton -> Just v) (asFinSet "bvand" -> IsFin s)
   = FinSet (Set.map (doOp v) s)
 bitop _ _ _ _ = TopV
 
-ppAbsValue :: AbsValue tp -> Maybe Doc
+ppAbsValue :: AbsValue w tp -> Maybe Doc
 ppAbsValue TopV = Nothing
 ppAbsValue v = Just (pretty v)
 
 -- | Print a list of Docs vertically separated.
-instance PrettyRegValue X86_64 AbsValue where
+instance ShowF (ArchReg arch) => PrettyRegValue arch (AbsValue w) where
   ppValueEq _ _ TopV = Nothing
-  ppValueEq _ r v = Just (text (show r) <+> text "=" <+> pretty v)
+  ppValueEq _ r v = Just (text (showF r) <+> text "=" <+> pretty v)
 
 
-absTrue :: AbsValue BoolType
+absTrue :: AbsValue w BoolType
 absTrue = FinSet (Set.singleton 1)
 
-absFalse :: AbsValue BoolType
+absFalse :: AbsValue w BoolType
 absFalse = FinSet (Set.singleton 0)
 
 -- | This returns the smallest abstract value that contains the
 -- given unsigned integer.
-abstractSingleton :: (Word64 -> Bool)
+abstractSingleton :: NatRepr w
+                     -- ^ Width of code pointer
+                  -> (Word64 -> Bool)
                      -- ^ Predicate that recognizes if the given value is a code
                      -- pointer.
                   -> NatRepr n
                   -> Integer
-                  -> AbsValue (BVType n)
-abstractSingleton is_code w i
-  | Just Refl <- testEquality w n64
+                  -> AbsValue w (BVType n)
+abstractSingleton code_w is_code w i
+  | Just Refl <- testEquality w code_w
   , 0 <= i && i <= maxUnsigned w
   , is_code (fromIntegral i) =
     CodePointers (Set.singleton (fromIntegral i))
   | 0 <= i && i <= maxUnsigned w = FinSet (Set.singleton i)
   | otherwise = error $ "abstractSingleton given bad value: " ++ show i ++ " " ++ show w
 
-concreteStackOffset :: Word64 -> Integer -> AbsValue (BVType 64)
+concreteStackOffset :: Word64 -> Integer -> AbsValue w (BVType w)
 concreteStackOffset a o = StackOffset a (Set.singleton (fromInteger o))
 
 ------------------------------------------------------------------------
 -- Restrictions
 
-hasMaximum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
+hasMaximum :: TypeRepr tp -> AbsValue w tp -> Maybe Integer
 hasMaximum tp v =
   case v of
    FinSet s | Set.null s -> Nothing
@@ -659,7 +692,7 @@ hasMaximum tp v =
    _                  -> Nothing
 
 
-hasMinimum :: TypeRepr tp -> AbsValue tp -> Maybe Integer
+hasMinimum :: TypeRepr tp -> AbsValue w tp -> Maybe Integer
 hasMinimum _tp v =
   case v of
    FinSet s       | Set.null s -> Nothing
@@ -675,8 +708,8 @@ hasMinimum _tp v =
 -- {2, 3} and {3, 4} because we may pick any element from either set.
 
 abstractULt :: TypeRepr tp
-              -> AbsValue tp -> AbsValue tp
-              -> (AbsValue tp, AbsValue tp)
+              -> AbsValue w tp -> AbsValue w tp
+              -> (AbsValue w tp, AbsValue w tp)
 abstractULt _tp TopV TopV = (TopV, TopV)
 abstractULt tp x y
   | Just u_y <- hasMaximum tp y
@@ -691,8 +724,9 @@ abstractULt _tp x y = (x, y)
 
 -- | @abstractULeq x y@ refines x and y with the knowledge that @x <= y@
 abstractULeq :: TypeRepr tp
-               -> AbsValue tp -> AbsValue tp
-               -> (AbsValue tp, AbsValue tp)
+               -> AbsValue w tp
+               -> AbsValue w tp
+               -> (AbsValue w tp, AbsValue w tp)
 abstractULeq _tp TopV TopV = (TopV, TopV)
 abstractULeq tp x y
   | Just u_y <- hasMaximum tp y
@@ -706,12 +740,12 @@ abstractULeq tp x y
 abstractULeq _tp x y = (x, y)
 
 ------------------------------------------------------------------------
--- AbsBlockState
+-- AbsBlockStack
 
-data StackEntry where
-  StackEntry :: TypeRepr tp -> AbsValue tp -> StackEntry
+data StackEntry w
+   = forall tp . StackEntry !(TypeRepr tp) !(AbsValue w tp)
 
-instance Eq StackEntry where
+instance Eq (StackEntry w) where
   StackEntry x_tp x_v == StackEntry y_tp y_v
     | Just Refl <- testEquality x_tp y_tp = x_v == y_v
     | otherwise = False
@@ -720,7 +754,7 @@ instance Eq StackEntry where
 -- Values that are not in the map may denote any values.
 -- The stack grows down, so nonegative keys are those within
 -- rsp.
-type AbsBlockStack = Map Int64 StackEntry
+type AbsBlockStack w = Map Int64 (StackEntry w)
 
 -- absStackLeq :: AbsBlockStack -> AbsBlockStack -> Bool
 -- absStackLeq x y = all entryLeq (Map.toList y)
@@ -734,7 +768,9 @@ type AbsBlockStack = Map Int64 StackEntry
 -- values in @y@ and @x@.  It sets the first state parameter to true if @z@
 -- is different from @y@ and adds and escaped code pointers to the second
 -- parameter.
-absStackJoinD :: AbsBlockStack -> AbsBlockStack -> State (Bool,Set Word64) AbsBlockStack
+absStackJoinD :: AbsBlockStack w
+              -> AbsBlockStack w
+              -> State (Bool,Set Word64) (AbsBlockStack w)
 absStackJoinD y x = do
   -- This attempts to merge information from the new state into the old state.
   let entryLeq (o, StackEntry y_tp y_v) =
@@ -769,43 +805,60 @@ absStackJoinD y x = do
   z <- mapM entryLeq (Map.toList y)
   return $! Map.fromList (catMaybes z)
 
-ppAbsStack :: AbsBlockStack -> Doc
+ppAbsStack :: AbsBlockStack w -> Doc
 ppAbsStack m = vcat (pp <$> Map.toDescList m)
   where pp (o,StackEntry _ v) = text (show (Hex o)) <+> text ":=" <+> pretty v
 
+------------------------------------------------------------------------
+-- AbsBlockState
+
 -- | State at beginning of a block.
-data AbsBlockState
-      = AbsBlockState { _absX86State :: !(X86State AbsValue)
-                      , _startAbsStack :: !AbsBlockStack
+data AbsBlockState arch
+      = AbsBlockState { _absRegState :: !(RegState arch (AbsValue (ArchAddrWidth arch)))
+                      , _startAbsStack :: !(AbsBlockStack (ArchAddrWidth arch))
                       }
-  deriving Eq
+
+deriving instance MapF.OrdF (ArchReg arch) => (Eq (AbsBlockState arch))
 
 
-absX86State :: Simple Lens AbsBlockState (X86State AbsValue)
-absX86State = lens _absX86State (\s v -> s { _absX86State = v })
+absRegState :: Simple Lens (AbsBlockState arch)
+                           (RegState arch (AbsValue (ArchAddrWidth arch)))
+absRegState = lens _absRegState (\s v -> s { _absRegState = v })
 
-startAbsStack :: Simple Lens AbsBlockState AbsBlockStack
+startAbsStack :: Simple Lens (AbsBlockState arch) (AbsBlockStack (ArchAddrWidth arch))
 startAbsStack = lens _startAbsStack (\s v -> s { _startAbsStack = v })
 
 traceUnless :: Bool -> String -> a -> a
 traceUnless True _ = id
 traceUnless False msg = debug DAbsInt msg
 
-instance AbsDomain AbsBlockState where
-  top = AbsBlockState { _absX86State = mkX86State (\_ -> TopV)
+class AbsRegState arch where
+  mkRegStateM :: Applicative m
+              => (forall tp . ArchReg arch tp -> m (f tp))
+              -> m (RegState arch f)
+  mkRegState :: (forall tp . ArchReg arch tp -> f tp)
+             -> RegState arch f
+
+instance ( AbsRegState arch
+         , Show (AbsBlockState arch)
+         , MapF.OrdF (ArchReg arch)
+         )
+      => AbsDomain (AbsBlockState arch) where
+
+  top = AbsBlockState { _absRegState = mkRegState (\_ -> TopV)
                       , _startAbsStack = Map.empty
                       }
 
   joinD x y | regs_changed = Just $! z
             | otherwise = Nothing
-    where xs = x^.absX86State
-          ys = y^.absX86State
+    where xs = x^.absRegState
+          ys = y^.absRegState
 
           x_stk = x^.startAbsStack
           y_stk = y^.startAbsStack
 
           (zs,(regs_changed,dropped)) = flip runState (False, Set.empty) $ do
-            z_regs <- mkX86StateM $ \r -> do
+            z_regs <- mkRegStateM $ \r -> do
               let xr = xs^.boundValue r
               (c,s) <- get
               case runState (joinAbsValue' xr (ys^.boundValue r)) s of
@@ -816,7 +869,7 @@ instance AbsDomain AbsBlockState where
                   seq s' $ put $ (True,s')
                   return $! zr
             z_stk <- absStackJoinD x_stk y_stk
-            return $ AbsBlockState { _absX86State   = z_regs
+            return $ AbsBlockState { _absRegState   = z_regs
                                    , _startAbsStack = z_stk
                                    }
 
@@ -825,80 +878,77 @@ instance AbsDomain AbsBlockState where
                                 ++ show x ++ "\n" ++ show y) $
               zs
 
-instance Pretty AbsBlockState where
+instance (OrdF (ArchReg arch), ShowF (ArchReg arch)) => Pretty (AbsBlockState arch) where
   pretty s =
       text "registers:" <$$>
-      indent 2 (pretty (s^.absX86State)) <$$>
+      indent 2 (pretty (s^.absRegState)) <$$>
       stack_d
     where stack = s^.startAbsStack
           stack_d | Map.null stack = empty
                   | otherwise = text "stack:" <$$>
                                 indent 2 (ppAbsStack stack)
 
-instance Show AbsBlockState where
+instance (OrdF (ArchReg arch), ShowF (ArchReg arch)) => Show (AbsBlockState arch) where
   show s = show (pretty s)
-
-
-absBlockDiff :: AbsBlockState -> AbsBlockState -> [Some X86Reg]
-absBlockDiff x y = filter isDifferent x86StateRegs
-  where isDifferent (Some n) = x^.absX86State^.boundValue n /= y^.absX86State^.boundValue n
 
 ------------------------------------------------------------------------
 -- AbsProcessorState
 
+type ArchAbsValue arch = AbsValue (ArchAddrWidth arch)
+
 -- | this stores the abstract state of the system at a given point in time.
-data AbsProcessorState
-   = AbsProcessorState { absIsCode       :: !(Word64 -> Bool)
+data AbsProcessorState arch
+   = AbsProcessorState { absCodeWidth    :: !(NatRepr (ArchAddrWidth arch))
+                       , absIsCode       :: !(Word64 -> Bool)
                          -- ^ Recognizer for code addresses.
-                       , _absInitialRegs :: !(X86State AbsValue)
-                       , _absAssignments :: !(MapF (Assignment X86_64) AbsValue)
-                       , _curAbsStack    :: !AbsBlockStack
+                       , _absInitialRegs :: !(RegState arch (ArchAbsValue arch))
+                       , _absAssignments :: !(MapF (Assignment arch) (ArchAbsValue arch))
+                       , _curAbsStack    :: !(AbsBlockStack (ArchAddrWidth arch))
                        }
 
-instance Show AbsProcessorState where
+
+absInitialRegs :: Simple Lens (AbsProcessorState arch) (RegState arch (ArchAbsValue arch))
+absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
+
+absAssignments :: Simple Lens (AbsProcessorState arch)
+                    (MapF (Assignment arch) (ArchAbsValue arch))
+absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
+
+curAbsStack :: Simple Lens (AbsProcessorState arch) (AbsBlockStack (ArchAddrWidth arch))
+curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
+
+instance (OrdF (ArchReg arch), ShowF (ArchReg arch))
+      => Show (AbsProcessorState arch) where
   show = show . pretty
 
 -- FIXME
-instance Pretty AbsProcessorState where
-  pretty regs = pretty (AbsBlockState { _absX86State   = regs ^. absInitialRegs
+instance (OrdF (ArchReg arch), ShowF (ArchReg arch))
+      => Pretty (AbsProcessorState arch) where
+  pretty regs = pretty (AbsBlockState { _absRegState   = regs ^. absInitialRegs
                                       , _startAbsStack = regs ^. curAbsStack })
 
-
-
-initAbsProcessorState :: (Word64 -> Bool)
+initAbsProcessorState :: NatRepr (ArchAddrWidth arch)
+                      -> (Word64 -> Bool)
                          -- ^ Predicate that recognizes when a value is a code pointer.
-                      -> AbsBlockState
-                      -> AbsProcessorState
-initAbsProcessorState is_code s =
-  AbsProcessorState { absIsCode = is_code
-                    , _absInitialRegs = s^.absX86State
+                      -> AbsBlockState arch
+                      -> AbsProcessorState arch
+initAbsProcessorState code_width is_code s =
+  AbsProcessorState { absCodeWidth = code_width
+                    , absIsCode = is_code
+                    , _absInitialRegs = s^.absRegState
                     , _absAssignments = MapF.empty
                     , _curAbsStack = s^.startAbsStack
                     }
 
-absInitialRegs :: Simple Lens AbsProcessorState (X86State AbsValue)
-absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
-
-absAssignments :: Simple Lens AbsProcessorState (MapF (Assignment X86_64) AbsValue)
-absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
-
-curAbsStack :: Simple Lens AbsProcessorState AbsBlockStack
-curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
-
 -- | A lens that allows one to lookup and update the value of an assignment in
 -- map from assignments to abstract values.
-assignLens :: Assignment X86_64 tp
-           -> Simple Lens (MapF (Assignment X86_64) AbsValue) (AbsValue tp)
+assignLens :: (HasRepr (ArchFn a) TypeRepr)
+           => Assignment a tp
+           -> Simple Lens (MapF (Assignment a) (ArchAbsValue a)) (ArchAbsValue a tp)
 assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
                       (\s v -> MapF.insert ass v s)
 
--- | Merge in the value of the assignment.  If we have already seen a
--- value, this will combine with meet.
-addAssignment :: Assignment X86_64 tp -> AbsProcessorState -> AbsProcessorState
-addAssignment a c =
-  c & (absAssignments . assignLens a) %~ flip meet (transferRHS c (assignRhs a))
-
-deleteRange :: Int64 -> Int64 -> AbsBlockStack -> AbsBlockStack
+deleteRange :: Int64 -> Int64 -> AbsBlockStack w -> AbsBlockStack w
 deleteRange l h m
   | h < l = m
   | otherwise =
@@ -912,32 +962,94 @@ deleteRange l h m
           deleteRange (k+1) h (Map.delete k m)
       _ -> m
 
-someValueWidth :: Value X86_64 tp -> Integer
+-- Return the width of a value.
+someValueWidth :: ( HasRepr (ArchFn arch) TypeRepr
+                  , HasRepr (ArchReg arch) TypeRepr
+                  )
+               => Value arch tp
+               -> Integer
 someValueWidth v =
   case typeRepr v of
     BVTypeRepr w -> natValue w
 
-valueByteSize :: Value X86_64 tp -> Int64
+valueByteSize :: ( HasRepr (ArchFn arch) TypeRepr
+                 , HasRepr (ArchReg arch) TypeRepr
+                 )
+              => Value arch tp
+              -> Int64
 valueByteSize v = fromInteger $ (someValueWidth v + 7) `div` 8
 
 -- | Prune stack based on write that may modify stack.
-pruneStack :: AbsBlockStack -> AbsBlockStack
+pruneStack :: AbsBlockStack w -> AbsBlockStack w
 pruneStack = Map.filter f
   where f (StackEntry _ ReturnAddr) = True
         f _ = False
 
-addMemWrite :: BVValue X86_64 64
-            -> Value X86_64 tp
-            -> AbsProcessorState
-            -> AbsProcessorState
-addMemWrite a v r =
+------------------------------------------------------------------------
+-- Transfer Value
+
+transferValue' :: ( HasRepr (ArchFn a) TypeRepr
+                  , OrdF (ArchReg a)
+                  , ShowF (ArchReg a)
+                  )
+               => NatRepr (ArchAddrWidth a)
+                  -- ^ Width of a code pointer
+               -> (Word64 -> Bool)
+                  -- ^ Predicate that recognizes if address is code addreess.
+               -> MapF (Assignment a) (ArchAbsValue a)
+               -> RegState a (ArchAbsValue a)
+               -> Value a tp
+               -> ArchAbsValue a tp
+transferValue' code_width is_code amap aregs v =
+  case v of
+   BVValue w i
+     | 0 <= i && i <= maxUnsigned w -> abstractSingleton code_width is_code w i
+     | otherwise -> error $ "transferValue given illegal value " ++ show (pretty v)
+   -- Invariant: v is in m
+   AssignedValue a ->
+     fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
+               (MapF.lookup a amap)
+   Initial r
+--     | Just Refl <- testEquality r N.rsp -> do
+--       StackOffset (Set.singleton 0)
+     | otherwise -> aregs ^. boundValue r
+
+-- | Compute abstract value from value and current registers.
+transferValue :: ( HasRepr (ArchFn a) TypeRepr
+                 , OrdF (ArchReg a)
+                 , ShowF (ArchReg a)
+                 )
+              => AbsProcessorState a
+              -> Value a tp
+              -> ArchAbsValue a tp
+transferValue c v =
+  transferValue' (absCodeWidth c) (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
+
+------------------------------------------------------------------------
+-- Operations
+
+addMemWrite :: ( HasRepr (ArchFn  arch) TypeRepr
+               , HasRepr (ArchReg arch) TypeRepr
+               , ShowF (ArchReg arch)
+               , OrdF (ArchReg arch)
+               , PrettyF (ArchReg arch)
+               )
+            => ArchAbsValue arch (BVType (ArchAddrWidth arch))
+               -- ^ Current instruction pointer
+               --
+               -- Used for pretty printing
+            -> BVValue arch (ArchAddrWidth arch)
+            -> Value arch tp
+            -> AbsProcessorState arch
+            -> AbsProcessorState arch
+addMemWrite cur_ip a v r =
   case (transferValue r a, transferValue r v) of
     -- (_,TopV) -> r
     -- We overwrite _some_ stack location.  An alternative would be to
     -- update everything with v.
     (SomeStackOffset _, _) ->
       debug DAbsInt ("addMemWrite: dropping stack at "
-             ++ show (pretty $ r ^. absInitialRegs ^. curIP)
+             ++ show (pretty cur_ip)
              ++ " via " ++ show (pretty a)
              ++" in SomeStackOffset case") $
       r & curAbsStack %~ pruneStack
@@ -954,84 +1066,49 @@ addMemWrite a v r =
     -- FIXME: nuke stack on an unknown address or Top?
     _ -> r
 
-addOff :: NatRepr w -> Integer -> Integer -> Integer
-addOff w o v = toUnsigned w (o + v)
-
 -- subOff :: NatRepr w -> Integer -> Integer -> Integer
 -- subOff w o v = toUnsigned w (o - v)
 
-mkAbsBlockState :: (forall tp . X86Reg tp -> AbsValue tp)
-                -> AbsBlockStack
-                -> AbsBlockState
+mkAbsBlockState :: AbsRegState a
+                => (forall tp . ArchReg a tp -> ArchAbsValue a tp)
+                -> AbsBlockStack (ArchAddrWidth a)
+                -> AbsBlockState a
 mkAbsBlockState trans newStack =
-  AbsBlockState { _absX86State = mkX86State trans
+  AbsBlockState { _absRegState = mkRegState trans
                 , _startAbsStack = newStack
                 }
 
-absStackHasReturnAddr :: AbsBlockState -> Bool
+absStackHasReturnAddr :: AbsBlockState a -> Bool
 absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStack))
   where isReturnAddr (StackEntry _ ReturnAddr) = True
         isReturnAddr _ = False
 
 
 -- | Return state for after value has run.
-finalAbsBlockState :: AbsProcessorState -> X86State (Value X86_64) -> AbsBlockState
+finalAbsBlockState :: forall a
+                   .  ( AbsRegState a
+                      , OrdF (ArchReg a)
+                      , ShowF (ArchReg a)
+                      , HasRepr (ArchFn a) TypeRepr
+                      )
+                   => AbsProcessorState a
+                   -> RegState a (Value a)
+                   -> AbsBlockState a
 finalAbsBlockState c s =
-  let transferReg :: X86Reg tp -> AbsValue tp
+  let transferReg :: ArchReg a tp -> ArchAbsValue a tp
       transferReg r = transferValue c (s^.boundValue r)
    in mkAbsBlockState transferReg (c^.curAbsStack)
-
--- | Update the block state to point to a specific IP address.
-setAbsIP :: (Word64 -> Bool)
-            -- ^ Predicate to check that given IP is a code pointer.
-         -> CodeAddr
-         -> AbsBlockState
-         -> Maybe AbsBlockState
-setAbsIP is_code a b
-  | is_code a == False =
-    Nothing
-    -- Check to avoid reassigning next IP if it is not needed.
-  | CodePointers s <- b^.absX86State^.curIP
-  , Set.size s == 1
-  , Set.member a s =
-    Just b
-  | otherwise =
-    Just $ b & absX86State . curIP .~ CodePointers (Set.singleton a)
 
 ------------------------------------------------------------------------
 -- Transfer functions
 
-
-transferValue' :: (Word64 -> Bool)
-                  -- ^ Predicate that recognizes if address is code addreess.
-               -> MapF (Assignment X86_64) AbsValue
-               -> X86State AbsValue
-               -> Value X86_64 tp
-               -> AbsValue tp
-transferValue' is_code amap aregs v =
-  case v of
-   BVValue w i
-     | 0 <= i && i <= maxUnsigned w -> abstractSingleton is_code w i
-     | otherwise -> error $ "transferValue given illegal value " ++ show (pretty v)
-   -- Invariant: v is in m
-   AssignedValue a ->
-     fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
-               (MapF.lookup a amap)
-   Initial r
---     | Just Refl <- testEquality r N.rsp -> do
---       StackOffset (Set.singleton 0)
-     | otherwise -> aregs ^. boundValue r
-
-
--- | Compute abstract value from value and current registers.
-transferValue :: AbsProcessorState
-              -> Value X86_64 tp
-              -> AbsValue tp
-transferValue c v = transferValue' (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
-
-transferApp :: AbsProcessorState
-            -> App (Value X86_64) tp
-            -> AbsValue tp
+transferApp :: ( HasRepr (ArchFn a) TypeRepr
+               , OrdF (ArchReg a)
+               , ShowF (ArchReg a)
+               )
+            => AbsProcessorState a
+            -> App (Value a) tp
+            -> ArchAbsValue a tp
 transferApp r a =
   case a of
     Trunc v w -> trunc (transferValue r v) w
@@ -1043,10 +1120,19 @@ transferApp r a =
     BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)
     _ -> TopV
 
-transferRHS :: forall tp
-            .  AbsProcessorState
-            -> AssignRhs X86_64 tp
-            -> AbsValue tp
+class SupportAbsEvaluation a f where
+  -- Transfer some type into an abstract value given a processor state.
+  transferAbsValue :: AbsProcessorState a -> f tp -> ArchAbsValue a tp
+
+transferRHS :: forall a tp
+            .  ( HasRepr (ArchFn a) TypeRepr
+               , OrdF (ArchReg a)
+               , ShowF (ArchReg a)
+               , SupportAbsEvaluation a (ArchFn a)
+               )
+            => AbsProcessorState a
+            -> AssignRhs a tp
+            -> ArchAbsValue a tp
 transferRHS r rhs =
   case rhs of
     EvalApp app    -> transferApp r app
@@ -1058,17 +1144,18 @@ transferRHS r rhs =
       , Just Refl <- testEquality tp v_tp ->
          v
       | otherwise -> TopV
-    EvalArchFn f ->
-      case f of
-        ReadLoc _ -> TopV
-        ReadFSBase -> TopV
-        ReadGSBase -> TopV
-        -- We know only that it will return up to (and including(?)) cnt
-        MemCmp _sz cnt _src _dest _rev
-          | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-            stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
-          | otherwise -> TopV
-        FindElement _sz _findEq cnt _buf _val _rev
-          | Just upper <- hasMaximum knownType (transferValue r cnt) ->
-            stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
-          | otherwise -> TopV
+    EvalArchFn f -> transferAbsValue r f
+
+-- | Merge in the value of the assignment.  If we have already seen a
+-- value, this will combine with meet.
+addAssignment :: ( HasRepr (ArchFn a) TypeRepr
+                 , OrdF (ArchReg a)
+                 , ShowF (ArchReg a)
+                 , SupportAbsEvaluation a (ArchFn a)
+                 )
+              => Assignment a tp
+              -> AbsProcessorState a
+              -> AbsProcessorState a
+addAssignment a c =
+  c & (absAssignments . assignLens a)
+    %~ flip meet (transferRHS c (assignRhs a))

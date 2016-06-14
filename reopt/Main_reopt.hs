@@ -524,7 +524,7 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-ppStmtAndAbs :: MapF (Assignment X86_64) AbsValue -> Stmt X86_64 -> Doc
+ppStmtAndAbs :: MapF (Assignment X86_64) (AbsValue 64) -> Stmt X86_64 -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
     AssignStmt a ->
@@ -536,7 +536,7 @@ ppStmtAndAbs m stmt =
     _ -> pretty stmt
 
 
-ppBlockAndAbs :: MapF (Assignment X86_64) AbsValue -> Block X86_64 -> Doc
+ppBlockAndAbs :: MapF (Assignment X86_64) (AbsValue 64) -> Block X86_64 -> Doc
 ppBlockAndAbs m b =
   pretty (blockLabel b) <> text ":" <$$>
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>

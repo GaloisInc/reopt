@@ -1,5 +1,4 @@
 {-
-
 Module           : Reopt.Semantics.Implementation
 Copyright        : (c) Galois, Inc 2015
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
@@ -50,8 +49,9 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
 import           Data.Macaw.CFG
-import qualified Reopt.Machine.StateNames as N
 import           Data.Macaw.Types (BVType, typeRepr)
+
+import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)

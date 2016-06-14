@@ -39,8 +39,6 @@ module Reopt.Machine.X86State
   , cf_reg
   , df_reg
   , boundValue
-    -- * Equality
-  , EqF(..)
     -- * Pretty printing
   , PrettyRegValue(..)
     -- * Architecture
@@ -443,6 +441,9 @@ instance Show (X86Reg tp) where
   show (X87_TagReg n)  = "tag" ++ show n
   show (X87_FPUReg n)  = "fpu" ++ show n
   show (X86_XMMReg n)  = "xmm" ++ show n
+
+instance PrettyF X86Reg where
+  prettyF = text . show
 
 instance ShowF X86Reg where
   showF = show

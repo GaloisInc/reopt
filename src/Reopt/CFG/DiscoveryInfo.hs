@@ -5,13 +5,15 @@ Maintainer : jhendrix@galois.com
 
 This defines the information learned during the code discovery phase of Reopt.
 -}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Reopt.CFG.DiscoveryInfo
   ( BlockRegion(..)
   , lookupBlock
@@ -43,6 +45,7 @@ module Reopt.CFG.DiscoveryInfo
   , identifyReturn
   , classifyBlock
   , getClassifyBlock
+  , setAbsIP
   )  where
 
 import           Control.Lens
@@ -51,6 +54,7 @@ import qualified Data.ByteString as BS
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
+import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
@@ -61,25 +65,69 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
-import           Data.Parameterized.Some
+import           Data.Macaw.CFG
+import           Data.Macaw.Types
 
 import           Reopt.Analysis.AbsState
-import           Data.Macaw.CFG
+import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.Types
-import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 
 import           Reopt.Utils.Debug
 
 ------------------------------------------------------------------------
+-- X86 Specific Abstract methods.
+
+instance AbsRegState X86_64 where
+  mkRegStateM = mkX86StateM
+  mkRegState  = mkX86State
+
+instance SupportAbsEvaluation X86_64 X86PrimFn where
+  transferAbsValue = transferX86PrimFn
+
+transferX86PrimFn :: AbsProcessorState X86_64 -> X86PrimFn tp -> AbsValue 64 tp
+transferX86PrimFn r f =
+  case f of
+    ReadLoc _ -> TopV
+    ReadFSBase -> TopV
+    ReadGSBase -> TopV
+      -- We know only that it will return up to (and including(?)) cnt
+    MemCmp _sz cnt _src _dest _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
+      | otherwise -> TopV
+    FindElement _sz _findEq cnt _buf _val _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
+      | otherwise -> TopV
+
+-- | Update the block state to point to a specific IP address.
+setAbsIP :: (Word64 -> Bool)
+            -- ^ Predicate to check that given IP is a code pointer.
+         -> Word64
+            -- ^ The width of a code pointer.
+         -> AbsBlockState X86_64
+         -> Maybe (AbsBlockState X86_64)
+setAbsIP is_code a b
+  | is_code a == False =
+    Nothing
+    -- Check to avoid reassigning next IP if it is not needed.
+  | CodePointers s <- b^.absRegState^.curIP
+  , Set.size s == 1
+  , Set.member a s =
+    Just b
+  | otherwise =
+    Just $ b & absRegState . curIP .~ CodePointers (Set.singleton a)
+
+------------------------------------------------------------------------
 -- AbsStateMap
 
 -- | Maps each code address to a set of abstract states
-type AbsStateMap = Map CodeAddr AbsBlockState
+type AbsStateMap = Map CodeAddr (AbsBlockState X86_64)
 
-lookupAbsBlock :: CodeAddr -> AbsStateMap -> AbsBlockState
+lookupAbsBlock :: CodeAddr -> AbsStateMap -> AbsBlockState X86_64
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
   where msg = "Could not find block " ++ showHex addr "."
 
@@ -417,7 +465,7 @@ classifyBlock b interp_state =
       , Initial r <- proc_state^.boundValue rax_reg
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
       , Just (fromInteger -> call_no) <-
-          asConcreteSingleton (absSt ^. absX86State ^. boundValue r)
+          asConcreteSingleton (absSt ^. absRegState ^. boundValue r)
       , Just (name, _rettype, argtypes) <- Map.lookup call_no (spTypeInfo sysp) ->
          let result = Just $
                ParsedSyscall proc_state next_addr call_no (spName sysp) name

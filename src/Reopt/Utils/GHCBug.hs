@@ -17,9 +17,8 @@
 
 module Reopt.Utils.GHCBug where
 
-import           GHC.TypeLits
-
-import           Data.Parameterized.Classes
+import Data.Parameterized.Classes
+import GHC.TypeLits
 
 ------------------------------------------------------------------------
 

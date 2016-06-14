@@ -16,9 +16,11 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
 
+import           Data.Macaw.CFG
+import           Data.Macaw.Types (n64)
+
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.DiscoveryInfo
-import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 
@@ -35,17 +37,17 @@ addOffset v = _1 %= max v
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackArg :: MapF (Assignment X86_64) AbsValue
+maximumStackArg :: MapF (Assignment X86_64) (AbsValue 64)
                    -> DiscoveryInfo -> CodeAddr -> Int64
 maximumStackArg amap ist addr =
   fst $ execState (recoverIter amap aregs ist Set.empty (Just $ GeneratedBlock addr 0))
                   (0, Set.empty)
   where
-    aregs = (lookupAbsBlock addr (ist ^. absState)) ^. absX86State
+    aregs = (lookupAbsBlock addr (ist ^. absState)) ^. absRegState
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: MapF (Assignment X86_64) AbsValue
-               -> X86State AbsValue
+recoverIter :: MapF (Assignment X86_64) (AbsValue 64)
+               -> X86State (AbsValue 64)
                -> DiscoveryInfo
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
@@ -57,15 +59,15 @@ recoverIter amap aregs ist seen (Just lbl)
                    lbl' <- nextBlock
                    recoverIter amap aregs ist (Set.insert lbl seen) lbl'
 
-recoverBlock :: MapF (Assignment X86_64) AbsValue
-                -> X86State AbsValue
+recoverBlock :: MapF (Assignment X86_64) (AbsValue 64)
+                -> X86State (AbsValue 64)
                 -> DiscoveryInfo
                 -> BlockLabel Word64
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
   Just b <- return $ lookupBlock (interp_state ^. blocks) lbl
 
-  let xfer = transferValue' (isCodeAddrOrNull (memory interp_state)) amap aregs
+  let xfer = transferValue' n64 (isCodeAddrOrNull (memory interp_state)) amap aregs
       go = map goStmt . blockStmts
       goStmt (AssignStmt (Assignment _ (ReadMem addr _)))
         | StackOffset _ s <- xfer addr = Just $ Set.findMax s
