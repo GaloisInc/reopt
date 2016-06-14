@@ -42,11 +42,26 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 
-import Data.Macaw.CFG(App(..), AssignId, BlockLabel, CodeAddr
-                               , ppApp, ppLit, ppAssignId, sexpr, appType
-                               , foldApp)
+import Data.Macaw.CFG
+   ( App(..)
+   , AssignId
+   , BlockLabel
+   , CodeAddr
+   , ppApp
+   , ppLit
+   , ppAssignId
+   , sexpr
+   , appType
+   , foldApp
+   )
 import           Data.Macaw.Types
 import           Reopt.Machine.X86State
+  ( X86Reg
+  , x86ArgumentRegs
+  , x86ResultRegs
+  , x86FloatArgumentRegs
+  , x86FloatResultRegs
+  )
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
@@ -164,29 +179,29 @@ instance Pretty (FnReturnVar tp) where
   pretty = ppAssignId . frAssignId
 
 -- | A function value.
-data FnValue (tp :: Type) where
-  FnValueUnsupported :: String -> !(TypeRepr tp) -> FnValue tp
-  -- A value that is actually undefined, like a non-argument register at
-  -- the start of a function.
-  FnUndefined :: !(TypeRepr tp) -> FnValue tp
-  FnConstantValue :: !(NatRepr n) -> !Integer -> FnValue (BVType n)
-  -- Value from an assignment statement.
-  FnAssignedValue :: !(FnAssignment tp) -> FnValue tp
-  -- Value from a phi node
-  FnPhiValue :: !(FnPhiVar tp) -> FnValue tp
-  -- A value returned by a function call (rax/rdx/xmm0)
-  FnReturn :: FnReturnVar tp -> FnValue tp
-  -- The entry pointer to a function.
-  FnFunctionEntryValue :: !FunctionType -> !Word64 -> FnValue (BVType 64)
-  -- A pointer to an internal block at the given address.
-  FnBlockValue :: !Word64 -> FnValue (BVType 64)
-  -- Value is an interget argument passed via a register.
-  FnIntArg   :: !Int -> FnValue (BVType 64)
-  -- Value is a function argument passed via a floating point XMM
-  -- register.
-  FnFloatArg :: !Int -> FnValue (BVType 128)
-  -- A global address
-  FnGlobalDataAddr :: !Word64 -> FnValue (BVType 64)
+data FnValue (tp :: Type)
+   =  FnValueUnsupported !String !(TypeRepr tp)
+      -- | A value that is actually undefined, like a non-argument register at
+      -- the start of a function.
+   | FnUndefined !(TypeRepr tp)
+   | forall n . (tp ~ BVType n) => FnConstantValue !(NatRepr n) !Integer
+     -- | Value from an assignment statement.
+   | FnAssignedValue !(FnAssignment tp)
+     -- | Value from a phi node
+   | FnPhiValue !(FnPhiVar tp)
+     -- | A value returned by a function call (rax/rdx/xmm0)
+   | FnReturn !(FnReturnVar tp)
+     -- | The entry pointer to a function.
+   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !Word64
+     -- | A pointer to an internal block at the given address.
+   | (tp ~ BVType 64) => FnBlockValue !Word64
+     -- | Value is an interget argument passed via a register.
+   | (tp ~ BVType 64) => FnIntArg !Int
+     -- | Value is a function argument passed via a floating point XMM
+     -- register.
+   | (tp ~ BVType 128) => FnFloatArg !Int
+     -- | A global address
+   | (tp ~ BVType 64) => FnGlobalDataAddr !Word64
 
 instance Pretty (FnValue tp) where
   pretty (FnValueUnsupported reason _)

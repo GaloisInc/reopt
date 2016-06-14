@@ -17,7 +17,6 @@ module Reopt.Machine.X86State
   ( X86State
   , mkX86State
   , mkX86StateM
-  , curIP
   , x87TopReg
   , initX86State
     -- * Combinators
@@ -85,8 +84,8 @@ import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
-import qualified Reopt.Machine.StateNames as N
 import           Data.Macaw.Types
+import qualified Reopt.Machine.StateNames as N
 
 ------------------------------------------------------------------------
 -- X86_64 specific declarations
@@ -524,9 +523,6 @@ x86StateRegs
 -- execution.
 type X86State = RegState X86_64
 
--- | the value of the current instruction pointer.
-curIP :: Simple Lens (X86State f) (f (BVType 64))
-curIP = boundValue ip_reg
 
 -- | the value oDebugReg{}  f the current instruction pointer.
 x87TopReg :: Simple Lens (X86State f) (f (BVType 3))

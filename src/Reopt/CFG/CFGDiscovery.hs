@@ -54,13 +54,24 @@ import           Reopt.CFG.ArchitectureInfo
 import           Reopt.CFG.DiscoveryInfo
 import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.X86State
+  ( X86_64
+  , rax_reg
+  , rcx_reg
+  , r11_reg
+  , cf_reg
+  , df_reg
+  , ExploreLoc(..)
+  , x86CalleeSavedRegs
+  , x86StackDelta
+  , x87TopReg
+  , X86Reg(..)
+  , X86PrimFn(..)
+  , mkX86State
+  , mkX86StateM
+  )
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex
-
-
-------------------------------------------------------------------------
--- X86 specific information.
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -105,31 +116,6 @@ deleteMapLessThan k m =
 maybeSetInsert :: Ord a => Maybe a -> Set a -> Set a
 maybeSetInsert (Just k) s = Set.insert k s
 maybeSetInsert Nothing  s = s
-
-{-
-deleteSetRange :: Ord a => Maybe a -> Maybe a -> Set a -> Set a
-deleteSetRange (Just l) (Just h) s =
-  case Set.splitMember l s of
-    (ls, False, hs) -> Set.union ls                (deleteSetLessThan h hs)
-    (ls, True,  hs) -> Set.union (Set.insert l ls) (deleteSetLessThan h hs)
-deleteSetRange (Just l) Nothing  s = deleteSetGreaterThan l s
-deleteSetRange Nothing  (Just h) s = deleteSetLessThan    h s
-deleteSetRange Nothing  Nothing  s = s
-
--- | @deleteSetGreaterThan k m@ returns a set with all keys greater than @k@ in @m@ deleted.
-deleteSetGreaterThan :: Ord k => k -> Set k -> Set k
-deleteSetGreaterThan k m =
-  case Set.splitMember k m of
-    (lm, False, _) -> lm
-    (lm, True,  _) -> Set.insert k lm
-
--- | @deleteSetLessThan k m@ returns a map with all keys less than @k@ in @m@ deleted.
-deleteSetLessThan :: Ord k => k -> Set k -> Set k
-deleteSetLessThan k m =
-  case Set.splitMember k m of
-    (_, False, hm) -> hm
-    (_, True,  hm) -> Set.insert k hm
--}
 
 -- | Update the block state to point to a specific IP address.
 setAbsIP :: (Word64 -> Bool)
@@ -423,14 +409,16 @@ mergeIntraJump' src ab tgt s0 = do
     Nothing -> s0 & upd ab
                   & markBlockStart tgt ab
 
--- | This updates the state of a function when returning from a function.
+-- | This updates the state of a function when returning from a system call.
 mergeFreeBSDSyscall :: BlockLabel Word64
                        -- ^ Label for callee block that is making this call.
                     -> AbsBlockState X86_64
                        -- ^ Block state just before this call.
                     -> CodeAddr
                        -- ^ Address that system call should return to.
-                       -- We think this belongs to the same function.
+                       --
+                       -- This code assumes that the return address belongs
+                       -- to the same function.
                     -> State (DiscoveryInfo X86_64) ()
 mergeFreeBSDSyscall src_lbl ab0 addr = do
   let regFn :: X86Reg tp -> AbsValue 64 tp
@@ -538,20 +526,6 @@ refineApp :: App (Value X86_64) tp
           -> AbsProcessorState X86_64
 refineApp app av regs =
   case app of
-   -- We specialise these to booleans for the moment
-   -- BVComplement sz v
-   --   | Just Refl <- testEquality sz n1
-   --   , Just b    <- asConcreteSingleton av ->
-   --     refineProcState v (abstractSingleton n1 (1 - b)) regs
-   -- BVAnd sz l r
-   --   | Just Refl <- testEquality sz n1
-   --   , Just b    <- asConcreteSingleton av ->
-   --     let l_regs = refineProcState l av regs
-   --         r_regs = refineProcState r av regs
-   --     in if b == 1 then  -- both are true, so we do a meet
-   --          glb l_regs r_regs
-   --        else -- one is false, so we do a join
-   --          lub l_regs r_regs
 
    -- If we know something about the result of a trunc, we can
    -- propagate back a subvalue.

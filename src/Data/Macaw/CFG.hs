@@ -64,6 +64,7 @@ module Data.Macaw.CFG
   , RegState(..)
   , boundValue
   , cmpRegState
+  , curIP
   -- * Pretty printing
   , ppApp
   , ppAssignId
@@ -998,6 +999,11 @@ cmpRegState p (RegState x) (RegState y) = go (MapF.toList x) (MapF.toList y)
           case testEquality xk yk of
             Nothing -> False
             Just Refl -> p xv yv && go xr yr
+
+--  Tthe value of the current instruction pointer.
+curIP :: (OrdF (ArchReg a), RegisterInfo (ArchReg a))
+      => Simple Lens (RegState a f) (f (BVType (ArchAddrWidth a)))
+curIP = boundValue ip_reg
 
 ------------------------------------------------------------------------
 -- Pretty printing RegState
