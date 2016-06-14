@@ -23,10 +23,8 @@ that map  a control flow graph from a program using the semantics.
 {-# LANGUAGE KindSignatures #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.Implementation
-       ( -- * The main disassemble function
-         disassembleBlock
-       , ExploreLoc(..)
-       , rootLoc
+       ( x86ArchitectureInfo
+       , disassembleBlock
        ) where
 
 import           Control.Exception (assert)
@@ -51,6 +49,7 @@ import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<
 import           Data.Macaw.CFG
 import           Data.Macaw.Types (BVType, typeRepr)
 
+import           Reopt.CFG.ArchitectureInfo (ArchitectureInfo(..))
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
@@ -944,29 +943,6 @@ instance S.Semantics X86Generator where
 
     return ()
 
--- | A location to explore
-data ExploreLoc
-   = ExploreLoc { loc_ip :: CodeAddr
-                  -- ^ IP address.
-                , loc_x87_top :: Int
-                  -- ^ Top of x86 address.
-                }
- deriving (Eq, Ord)
-
-instance Pretty ExploreLoc where
-  pretty loc = text $ showHex (loc_ip loc) ""
-
-rootLoc :: CodeAddr -> ExploreLoc
-rootLoc ip = ExploreLoc { loc_ip = ip
-                        , loc_x87_top = 0
-                        }
-
-initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> X86State (Value X86_64)
-initX86State loc = mkX86State Initial
-                 & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
-                 & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
-
 data GenError = DecodeError CodeAddr (MemoryError Word64)
               | DisassembleError Flexdis.InstructionInstance
                 deriving Show
@@ -983,11 +959,13 @@ disassembleBlock :: AssignId
                  -> (CodeAddr -> Bool)
                     -- ^ PRedicate that tells when to continue.
                  -> ExploreLoc -- ^ Location to explore from.
-                 -> Either GenError ([Block X86_64], CodeAddr, AssignId)
+                 -> Either String ([Block X86_64], CodeAddr, AssignId)
 disassembleBlock next_id mem contFn loc = do
   let gs = initGenState next_id (loc_ip loc) (initX86State loc)
-  (gs', ip) <- disassembleBlock' mem gs contFn (loc_ip loc)
-  return (Fold.toList (gs'^.frontierBlocks), ip, gs' ^.nextAssignID)
+  case disassembleBlock' mem gs contFn (loc_ip loc) of
+    Left e -> Left (show e)
+    Right (gs', ip) ->
+      Right (Fold.toList (gs'^.frontierBlocks), ip, gs' ^.nextAssignID)
 
 
 {-
@@ -1049,3 +1027,12 @@ disassembleBlock' mem gs contFn addr = do
                       , contFn next_ip ->
               disassembleBlock' mem gs2 contFn next_ip
             _ -> return (finishBlock FetchAndExecute gs2, next_ip)
+
+-- | Architecture information for X86_64.
+x86ArchitectureInfo :: ArchitectureInfo X86_64
+x86ArchitectureInfo =
+  ArchitectureInfo { stackDelta = x86StackDelta
+                   , jumpTableEntrySize = 8
+                   , readAddrInMemory = memLookupWord64
+                   , disassembleFn = disassembleBlock
+                   }

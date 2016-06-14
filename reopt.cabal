@@ -43,6 +43,7 @@ library
     Reopt.Analysis.Domains.StridedInterval
     Reopt.BasicBlock.Extract
     Reopt.BasicBlock.FunctionCFG
+    Reopt.CFG.ArchitectureInfo
     Reopt.CFG.CFGDiscovery
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs

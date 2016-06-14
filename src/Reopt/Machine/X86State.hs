@@ -19,6 +19,7 @@ module Reopt.Machine.X86State
   , mkX86StateM
   , curIP
   , x87TopReg
+  , initX86State
     -- * Combinators
   , foldX86StateValue
   , zipWithX86State
@@ -37,8 +38,11 @@ module Reopt.Machine.X86State
   , cf_reg
   , df_reg
   , boundValue
-    -- * Pretty printing
+    -- ** Pretty printing
   , PrettyRegValue(..)
+    -- * ExploreLoc
+  , ExploreLoc(..)
+  , rootLoc
     -- * Architecture
   , X86_64
   , X86PrimFn(..)
@@ -76,6 +80,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
+import           Numeric (showHex)
 import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
@@ -93,6 +98,7 @@ type instance RegAddrWidth X86Reg = 64
 type instance ArchFn   X86_64 = X86PrimFn
 type instance ArchStmt X86_64 = X86Stmt
 type instance ArchAddr X86_64 = Word64
+type instance ArchCFLocation X86_64 = ExploreLoc
 
 ------------------------------------------------------------------------
 -- X86PrimLoc
@@ -560,6 +566,33 @@ mapX86StateWithM :: Monad m
                  -> X86State f
                  -> m (X86State g)
 mapX86StateWithM f (RegState m) = RegState <$> MapF.traverseWithKey f m
+
+------------------------------------------------------------------------
+-- ExploreLoc
+
+-- | This represents the control-flow information needed to build basic blocks
+-- for a code location.
+data ExploreLoc
+   = ExploreLoc { loc_ip :: CodeAddr
+                  -- ^ IP address.
+                , loc_x87_top :: Int
+                  -- ^ Top of x86 address.
+                }
+ deriving (Eq, Ord)
+
+instance Pretty ExploreLoc where
+  pretty loc = text $ showHex (loc_ip loc) ""
+
+rootLoc :: CodeAddr -> ExploreLoc
+rootLoc ip = ExploreLoc { loc_ip = ip
+                        , loc_x87_top = 0
+                        }
+
+initX86State :: ExploreLoc -- ^ Location to explore from.
+             -> X86State (Value X86_64)
+initX86State loc = mkX86State Initial
+                 & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
+                 & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
 ------------------------------------------------------------------------
 -- Compute set of assignIds in values.

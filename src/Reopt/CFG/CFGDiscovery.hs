@@ -50,16 +50,17 @@ import           Data.Macaw.Types
 
 import           Reopt.Analysis.AbsState
 import qualified Reopt.Analysis.Domains.StridedInterval as SI
+import           Reopt.CFG.ArchitectureInfo
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.Implementation
-  ( ExploreLoc(..)
-  , disassembleBlock
-  )
 import           Reopt.Machine.SysDeps.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug
 import           Reopt.Utils.Hex
+
+
+------------------------------------------------------------------------
+-- X86 specific information.
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -216,8 +217,8 @@ markBlockStart addr ab s = do
 -- read the block.
 tryDisassembleAddr :: CodeAddr
                    -> AbsBlockState X86_64
-                   -> (DiscoveryInfo X86_64)
-                   -> (DiscoveryInfo X86_64)
+                   -> DiscoveryInfo X86_64
+                   -> DiscoveryInfo X86_64
 tryDisassembleAddr addr ab s0 = do
   -- Get FPU top
   let Just t = getAbsX87Top ab
@@ -235,7 +236,7 @@ tryDisassembleAddr addr ab s0 = do
   let mem = memory s0
   let global_state = s0^.genState
   -- Build state for exploring this.
-  case disassembleBlock global_state mem not_at_block loc of
+  case disassembleFn (archInfo s0) global_state mem not_at_block loc of
     Left e ->
       debug DCFG ("Failed to disassemble block at " ++ showHex addr " " ++ show e) $
       s0 & blocks %~ Map.insert addr Nothing
@@ -896,15 +897,9 @@ explore_frontier st =
           st_post = flip execState st_pre $ transfer addr
        in explore_frontier st_post
 
--- | Architecture information for X86_64.
-x86ArchitectureInfo :: ArchitectureInfo X86_64
-x86ArchitectureInfo =
-  ArchitectureInfo { stackDelta = x86StackDelta
-                   , jumpTableEntrySize = 8
-                   , readAddrInMemory = memLookupWord64
-                   }
-
-cfgFromAddrs :: Memory Word64
+cfgFromAddrs :: ArchitectureInfo X86_64
+                -- ^ Architecture-specific information needed for doing control-flow exploration.
+             -> Memory Word64
                 -- ^ Memory to use when decoding instructions.
              -> Map CodeAddr BS.ByteString
                 -- ^ Names for (some) function entry points
@@ -913,7 +908,7 @@ cfgFromAddrs :: Memory Word64
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
              -> DiscoveryInfo X86_64
-cfgFromAddrs mem symbols sysp init_addrs =
+cfgFromAddrs arch_info mem symbols sysp init_addrs =
   debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ s3
   where
     global_data = Map.fromList
@@ -928,7 +923,7 @@ cfgFromAddrs mem symbols sysp init_addrs =
                      ]
 
 
-    s0 = emptyDiscoveryInfo mem symbols sysp x86ArchitectureInfo
+    s0 = emptyDiscoveryInfo mem symbols sysp arch_info
        & functionEntries .~ Set.fromList init_addrs
        & absState .~ init_abs_state
        & function_frontier .~ Set.fromList init_addrs

@@ -80,6 +80,7 @@ module Data.Macaw.CFG
   , ArchFn
   , ArchReg
   , ArchStmt
+  , ArchCFLocation
   , RegAddrWidth
     -- ** Classes
   , RegisterInfo(..)
@@ -654,11 +655,18 @@ type family RegAddrWidth (r :: Type -> *) :: Nat
 -- part of the language.
 type family ArchStmt (arch :: *) :: *
 
--- | Number of bits in addreses for architecture.
-type ArchAddrWidth arch = RegAddrWidth (ArchReg arch)
-
 -- | The type to use for addresses on the architecutre.
 type family ArchAddr (arch :: *) :: *
+
+-- | This represents the information needed to disassemble a control flow location.
+--
+-- It includes the program counter, but may also include additional information
+-- (such as the height of the X87 stack).
+type family ArchCFLocation (arch :: *) :: *
+
+
+-- | Number of bits in addreses for architecture.
+type ArchAddrWidth arch = RegAddrWidth (ArchReg arch)
 
 type ArchLabel arch = BlockLabel (ArchAddr arch)
 
@@ -685,7 +693,6 @@ class RegisterInfo r where
 
   -- | Registers used for passing system call arguments
   syscallArgumentRegs :: [r (BVType (RegAddrWidth r))]
-
 
 ------------------------------------------------------------------------
 -- AssignId

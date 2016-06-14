@@ -15,14 +15,15 @@ import           System.Exit (exitFailure)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Macaw.CFG
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
-import           Data.Macaw.CFG
-import           Reopt.CFG.Recovery
 import           Reopt.CFG.LLVM
+import           Reopt.CFG.Recovery
+import           Reopt.Machine.X86State (rootLoc)
 import           Reopt.Object.Memory
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.DeadRegisterElimination
+import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 
 usageExit :: IO ()
 usageExit = do putStrLn "LLVMDumpInstr aa bb cc dd ee ff ..."
@@ -46,7 +47,7 @@ main = do
       b   = disassembleBlock 0 mem (const True) (rootLoc base)
 
   case b of
-   Left err       -> print err
+   Left err       -> putStrLn err
    Right (bs, end, _)  -> error "UNIMPLEMENTED"
      -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
      --     bs' = Map.elems (cfg^.cfgBlocks)

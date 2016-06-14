@@ -20,10 +20,10 @@ module Reopt.CFG.DiscoveryInfo
   , lookupBlock
   , GlobalDataInfo(..)
   , ParsedTermStmt(..)
-  , ArchitectureInfo(..)
     -- * The interpreter state
   , DiscoveryInfo
   , emptyDiscoveryInfo
+  , archInfo
   , memory
   , symbolNames
   , genState
@@ -69,6 +69,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import           Reopt.Analysis.AbsState
+import           Reopt.CFG.ArchitectureInfo
 import           Reopt.Machine.SysDeps.Types
 import           Reopt.Object.Memory
 import           Reopt.Utils.Debug
@@ -188,26 +189,6 @@ deriving instance
   )
   => Show (ParsedTermStmt arch)
 
-------------------------------------------------------------------------
--- ArchitectureInfo
-
--- | A function for reading an address from memory
-type ReadAddrFn w = Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) w
-
--- | This records architecture specific functions for analysis.
-data ArchitectureInfo arch
-   = ArchitectureInfo
-     { stackDelta :: !Integer
-       -- ^ Identifies how the stack pointer changes when a call is made.
-       --
-       -- e.g., On X86_64, a call instruction decrements the stack
-       -- pointer by 8 after pushing the return address, so this
-       -- is -8 on X86_64.
-     , jumpTableEntrySize :: !(ArchAddr arch)
-       -- ^ The size of each entry in a jump table.
-    , readAddrInMemory :: !(ReadAddrFn (ArchAddr arch))
-      -- ^ Return an address at given address.
-     }
 ------------------------------------------------------------------------
 -- DiscoveryInfo
 

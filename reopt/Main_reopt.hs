@@ -64,6 +64,7 @@ import           Reopt.CFG.DiscoveryInfo
                  )
 import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (functionArgs)
+import           Reopt.CFG.Implementation
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
@@ -547,9 +548,10 @@ ppBlockAndAbs m b =
 mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
                    -> Elf Word64 -- ^ Elf file to create CFG for.
                    -> (DiscoveryInfo X86_64, Map CodeAddr BS.ByteString)
-mkFinalCFGWithSyms mem e = ( cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
-                           , sym_map
-                           )
+mkFinalCFGWithSyms mem e =
+    ( cfgFromAddrs x86ArchitectureInfo mem sym_map sysp (elfEntry e:sym_addrs)
+    , sym_map
+    )
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
   where entries =
           case elfSymtab e of
