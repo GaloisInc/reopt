@@ -50,6 +50,9 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
 
+import           Data.Macaw.CFG
+import           Data.Macaw.Types
+
 import           Reopt
 import           Reopt.Analysis.AbsState
 import           Reopt.CFG.CFGDiscovery
@@ -63,10 +66,8 @@ import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (functionArgs)
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
-import           Data.Macaw.CFG
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
-import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 import           Reopt.Object.Loader
 import           Reopt.Object.Memory
@@ -489,7 +490,7 @@ getEntries :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
 -- code discovery.
 getFns :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
        -> Set String    -- ^ Name of symbols/addresses to exclude
-       -> DiscoveryInfo -- ^ Information about original binary recovered from static analysis.
+       -> DiscoveryInfo X86_64 -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
 getFns symMap excludedNames s = do
 
@@ -545,7 +546,7 @@ ppBlockAndAbs m b =
 -- | Create a final CFG
 mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
                    -> Elf Word64 -- ^ Elf file to create CFG for.
-                   -> (DiscoveryInfo, Map CodeAddr BS.ByteString)
+                   -> (DiscoveryInfo X86_64, Map CodeAddr BS.ByteString)
 mkFinalCFGWithSyms mem e = ( cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs)
                            , sym_map
                            )
@@ -571,7 +572,7 @@ mkFinalCFGWithSyms mem e = ( cfgFromAddrs mem sym_map sysp (elfEntry e:sym_addrs
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
 
-cfgFromMemAndBinary :: Memory Word64 -> Elf Word64 -> DiscoveryInfo
+cfgFromMemAndBinary :: Memory Word64 -> Elf Word64 -> DiscoveryInfo X86_64
 cfgFromMemAndBinary mem e = fst (mkFinalCFGWithSyms mem e)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()

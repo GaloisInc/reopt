@@ -63,7 +63,7 @@ import           Debug.Trace (trace)
 
 type FnRegValueMap = MapF X86Reg FnRegValue
 
-data RecoverState = RS { _rsInterp :: !DiscoveryInfo
+data RecoverState = RS { _rsInterp :: !(DiscoveryInfo X86_64)
                        , _rsNextAssignId :: !AssignId
                        , _rsAssignMap :: !(MapF (Assignment X86_64) FnAssignment)
 
@@ -81,7 +81,7 @@ data RecoverState = RS { _rsInterp :: !DiscoveryInfo
                        , rsFunctionArgs    :: !FunctionArgs
                        }
 
-rsInterp :: Simple Lens RecoverState DiscoveryInfo
+rsInterp :: Simple Lens RecoverState (DiscoveryInfo X86_64)
 rsInterp = lens _rsInterp (\s v -> s { _rsInterp = v })
 
 rsNextAssignId :: Simple Lens RecoverState AssignId
@@ -222,7 +222,7 @@ type FunctionArgs = Map CodeAddr FunctionType
 -- or the end of the memory segment if code address is undefined.
 --
 -- Note: Calls error if code addr is not in a valid memory location.
-functionEnd :: DiscoveryInfo -> CodeAddr -> CodeAddr
+functionEnd :: DiscoveryInfo X86_64 -> CodeAddr -> CodeAddr
 functionEnd s a =
   case findSegment a (memory s) of
     Just seg -> assert (memFlags seg `hasPermissions` pf_x) $
@@ -234,7 +234,7 @@ functionEnd s a =
 
 
 -- | Recover the function at a given address.
-recoverFunction :: FunctionArgs -> DiscoveryInfo -> CodeAddr -> Either String Function
+recoverFunction :: FunctionArgs -> DiscoveryInfo X86_64 -> CodeAddr -> Either String Function
 recoverFunction fArgs s a = do
   let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
         = registerUse fArgs s a
@@ -531,10 +531,8 @@ recoverBlock blockRegProvides phis lbl = do
 
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    Just (ParsedSyscall proc_state next_addr call_no pname name args rreg_names) -> do
+    Just (ParsedSyscall proc_state next_addr call_no pname name args rregs) -> do
       Fold.traverse_ recoverStmt (blockStmts b)
-
-      let Just rregs = traverse (\(Some nm) -> Some <$> x86Reg nm) rreg_names
 
       let mkRet :: MapF X86Reg FnRegValue
                 -> Some X86Reg
@@ -735,7 +733,7 @@ recoverValue nm v = do
                                        (typeRepr reg)
         Just (FnRegValue v') -> return v'
 
-recoverFunctions :: DiscoveryInfo -> Either String [Function]
+recoverFunctions :: DiscoveryInfo X86_64 -> Either String [Function]
 recoverFunctions s =
   let fArgs = functionArgs s
    in traverse (recoverFunction fArgs s) (Set.toList (s^.functionEntries))

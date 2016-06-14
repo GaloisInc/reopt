@@ -1,14 +1,12 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.CFG.LLVM
--- Description      : Defines basic data types used for representing Reopt CFG.
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
---
--- Functions which convert the types in Representaiton to their
--- analogues in LLVM
-------------------------------------------------------------------------
+{-|
+
+Module           : Reopt.CFG.LLVM
+Copyright        : (c) Galois, Inc 2015-2016
+Maintainer       : Simon Winwood <sjw@galois.com>
+
+Functions which convert the types in Representaiton to their
+analogues in LLVM
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -18,7 +16,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 module Reopt.CFG.LLVM
   ( functionName
   , declareIntrinsics

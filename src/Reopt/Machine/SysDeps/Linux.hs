@@ -7,12 +7,11 @@ import           Data.Parameterized.Some
 
 import           Reopt.Machine.SysDeps.LinuxGenerated (syscallInfo)
 import           Reopt.Machine.SysDeps.Types
-import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.X86State
 
-syscallPersonality :: SyscallPersonality
+syscallPersonality :: SyscallPersonality X86_64
 syscallPersonality =
   SyscallPersonality { spName = "Linux"
                      , spTypeInfo = syscallInfo
-                     , spResultRegisters = [Some N.rax]
+                     , spResultRegisters = [Some rax_reg]
                      }
-  

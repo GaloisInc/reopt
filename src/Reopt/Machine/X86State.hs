@@ -29,8 +29,6 @@ module Reopt.Machine.X86State
     -- * X86Reg
   , X86Reg(..)
   , x86Reg
-  , ip_reg
-  , sp_reg
   , rax_reg
   , rbx_reg
   , rcx_reg
@@ -52,6 +50,7 @@ module Reopt.Machine.X86State
   , hasCallComment
   , hasRetComment
   , asStackAddrOffset
+  , x86StackDelta
     -- * Lists of X86 Registers
   , gpRegList
   , x87FPURegList
@@ -88,8 +87,9 @@ import           Data.Macaw.Types
 -- X86_64 specific declarations
 
 data X86_64
-type instance ArchAddrWidth X86_64 = 64
 type instance ArchReg  X86_64 = X86Reg
+type instance RegAddrWidth X86Reg = 64
+
 type instance ArchFn   X86_64 = X86PrimFn
 type instance ArchStmt X86_64 = X86Stmt
 type instance ArchAddr X86_64 = Word64
@@ -99,39 +99,38 @@ type instance ArchAddr X86_64 = Word64
 
 -- | This describes a primitive location that can be read or written to in the
 -- X86 architecture model.
-data X86PrimLoc tp where
-  ControlLoc :: !(N.RegisterName 'N.Control) -> X86PrimLoc (BVType 64)
-  DebugLoc   :: !(N.RegisterName 'N.Debug)   -> X86PrimLoc (BVType 64)
-
-  -- | This refers to the selector of the 'FS' register.
-  FS :: X86PrimLoc (BVType 16)
-  -- | This refers to the selector of the 'GS' register.
-  GS :: X86PrimLoc (BVType 16)
-
-  -- X87 precision control field.  Values are:
-  -- 00 Single Precision (24 bits)
-  -- 01 Reserved
-  -- 10 Double Precision (53 bits)
-  -- 11 Double Extended Precision (64 bits)
-  X87_PC :: X86PrimLoc (BVType 2)
-
-  -- X87 rounding control field.  Values are:
-  --
-  -- 00 Round to nearest (even)
-  -- Rounded result is the closest to the infinitely precise result. If two
-  -- values are equally close, the result is the even value (that is, the one
-  -- with the least-significant bit of zero). Default
-  --
-  -- 01 Round down (toward −∞)
-  -- Rounded result is closest to but no greater than the infinitely precise result.
-  --
-  -- 10 Round up (toward +∞)
-  -- Rounded result is closest to but no less than the infinitely precise result.
-  --
-  -- 11 Round toward zero (Truncate)
-  -- Rounded result is closest to but no greater in absolute value than the
-  -- infinitely precise result.
-  X87_RC :: X86PrimLoc (BVType 2)
+data X86PrimLoc tp
+   = (tp ~ BVType 64) => ControlLoc !(N.RegisterName 'N.Control)
+   | (tp ~ BVType 64) => DebugLoc   !(N.RegisterName 'N.Debug)
+   | (tp ~ BVType 16) => FS
+     -- ^ This refers to the selector of the 'FS' register.
+   | (tp ~ BVType 16) => GS
+     -- ^ This refers to the selector of the 'GS' register.
+   | (tp ~ BVType 2)  => X87_PC
+     -- ^ X87 precision control field.
+     --
+     -- Values are:
+     -- 00 Single Precision (24 bits)
+     -- 01 Reserved
+     -- 10 Double Precision (53 bits)
+     -- 11 Double Extended Precision (64 bits)
+   | (tp ~ BVType 2) => X87_RC
+     -- ^ X87 rounding control field.  Values are:
+     --
+     -- 00 Round to nearest (even)
+     -- Rounded result is the closest to the infinitely precise result. If two
+     -- values are equally close, the result is the even value (that is, the one
+     -- with the least-significant bit of zero). Default
+     --
+     -- 01 Round down (toward −∞)
+     -- Rounded result is closest to but no greater than the infinitely precise result.
+     --
+     -- 10 Round up (toward +∞)
+     -- Rounded result is closest to but no less than the infinitely precise result.
+     --
+     -- 11 Round toward zero (Truncate)
+     -- Rounded result is closest to but no greater in absolute value than the
+     -- infinitely precise result.
 
 instance HasRepr X86PrimLoc TypeRepr where
   typeRepr ControlLoc{} = knownType
@@ -369,9 +368,6 @@ x86Reg nm =
     N.XMMReg n        -> Just $! X86_XMMReg n
     _ -> Nothing
 
-ip_reg :: X86Reg (BVType 64)
-ip_reg = X86_IP
-
 rax_reg :: X86Reg (BVType 64)
 rax_reg = X86_GP 0
 
@@ -385,8 +381,8 @@ rbx_reg :: X86Reg (BVType 64)
 rbx_reg = X86_GP 3
 
 -- | The stack pointer
-sp_reg :: X86Reg (BVType 64)
-sp_reg  = X86_GP  4
+x86_sp_reg :: X86Reg (BVType 64)
+x86_sp_reg  = X86_GP  4
 
 rbp_reg :: X86Reg (BVType 64)
 rbp_reg = X86_GP  5
@@ -426,6 +422,23 @@ cf_reg = X86_FlagReg 0
 
 df_reg :: X86Reg (BVType 1)
 df_reg = X86_FlagReg 10
+
+instance RegisterInfo X86Reg where
+  ip_reg = X86_IP
+  sp_reg = x86_sp_reg
+
+  -- The register used to store system call numbers.
+  syscall_num_reg = rax_reg
+
+  -- The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
+  -- Syscalls clobber rcx and r11, but we don't really care about these
+  -- anyway.
+  syscallArgumentRegs = x86SyscallArgumentRegs
+
+-- | The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
+-- Syscalls clobber rcx and r11, but we don't really care about these anyway.
+x86SyscallArgumentRegs :: [ X86Reg (BVType 64) ]
+x86SyscallArgumentRegs = [rdi_reg, rsi_reg, rdx_reg, r10_reg, r8_reg, r9_reg ]
 
 instance Show (X86Reg tp) where
   show X86_IP          = "rip"
@@ -680,8 +693,6 @@ x86ResultRegs = [ rax_reg, rdx_reg ]
 x86FloatResultRegs :: [X86Reg (BVType 128)]
 x86FloatResultRegs = [ X86_XMMReg 0 ]
 
--- The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
--- Syscalls clobber rcx and r11, but we don't really care about these
--- anyway.
-x86SyscallArgumentRegs :: [X86Reg (BVType 64)]
-x86SyscallArgumentRegs = [rdi_reg, rsi_reg, rdx_reg, r10_reg, r8_reg, r9_reg ]
+-- | How the stack pointer moves when a call is made.
+x86StackDelta :: Integer
+x86StackDelta = -8

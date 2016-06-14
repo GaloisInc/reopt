@@ -394,20 +394,22 @@ defaultRegisterViewWrite b n rn v0 v =
 -- | Update the lower 'n' bits and set the upper bits to a constant.
 --
 -- Assumes a big-endian 'IsValue' semantics.
-constUpperBitsRegisterViewWrite :: forall cl n v .
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , 1 <= N.RegisterClassBits cl - n
-  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
-  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
-  , IsValue v
-  ) =>
-  NatRepr n ->
-  v (BVType (N.RegisterClassBits cl - n)) -> -- ^ Constant bits.
-  RegisterName cl ->
-  v (N.RegisterType cl) ->
-  v (BVType n) ->
-  v (N.RegisterType cl)
+constUpperBitsRegisterViewWrite
+  :: forall cl n v .
+     ( 1 <= n
+     , 1 <= N.RegisterClassBits cl
+     , 1 <= N.RegisterClassBits cl - n
+     , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
+     , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
+     , IsValue v
+     )
+     => NatRepr n
+     -> v (BVType (N.RegisterClassBits cl - n))
+     -- ^ Constant bits.
+     -> RegisterName cl
+     -> v (N.RegisterType cl)
+     -> v (BVType n)
+     -> v (N.RegisterType cl)
 constUpperBitsRegisterViewWrite _n c _rn _v0 v = bvCat c v
 
 -- | The view for full registers.

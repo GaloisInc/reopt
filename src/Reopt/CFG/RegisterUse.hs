@@ -22,8 +22,8 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V ()
 import           Data.Word
 
-import           Reopt.CFG.DiscoveryInfo
 import           Data.Macaw.CFG
+import           Reopt.CFG.DiscoveryInfo
 import           Reopt.CFG.FnRep (FunctionType(..)
                                   , ftMaximumFunctionType
                                   , ftMinimumFunctionType
@@ -179,7 +179,7 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 registerUse :: FunctionArgs
-            -> DiscoveryInfo
+            -> DiscoveryInfo X86_64
             -> CodeAddr
             -> ( Set AssignId
                , Map (BlockLabel Word64) (Set (Some X86Reg))
@@ -235,7 +235,7 @@ calculateFixpoint new
       return (lbl', regs `Set.difference` seenRegs)
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: DiscoveryInfo
+summarizeIter :: DiscoveryInfo X86_64
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
                -> RegisterUseM ()
@@ -263,7 +263,7 @@ lookupFunctionArgs fn =
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: DiscoveryInfo
+summarizeBlock :: DiscoveryInfo X86_64
                   -> BlockLabel Word64
                   -> RegisterUseM ()
 summarizeBlock interp_state root_label = go root_label
@@ -357,9 +357,8 @@ summarizeBlock interp_state root_label = go root_label
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
 
-          let insReg (Some nm) =
-                  blockInitDeps . ix lbl %= Map.insert (Some r) (Set.empty, Set.empty)
-                where Just r = x86Reg nm
+          let insReg sr =
+                blockInitDeps . ix lbl %= Map.insert sr (Set.empty, Set.empty)
 
           traverse_ insReg rregs
 

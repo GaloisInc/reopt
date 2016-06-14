@@ -38,7 +38,7 @@ addOffset v = _1 %= max v
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackArg :: MapF (Assignment X86_64) (AbsValue 64)
-                   -> DiscoveryInfo -> CodeAddr -> Int64
+                   -> DiscoveryInfo X86_64 -> CodeAddr -> Int64
 maximumStackArg amap ist addr =
   fst $ execState (recoverIter amap aregs ist Set.empty (Just $ GeneratedBlock addr 0))
                   (0, Set.empty)
@@ -48,7 +48,7 @@ maximumStackArg amap ist addr =
 -- | Explore states until we have reached end of frontier.
 recoverIter :: MapF (Assignment X86_64) (AbsValue 64)
                -> X86State (AbsValue 64)
-               -> DiscoveryInfo
+               -> DiscoveryInfo X86_64
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
                -> StackArgs ()
@@ -61,7 +61,7 @@ recoverIter amap aregs ist seen (Just lbl)
 
 recoverBlock :: MapF (Assignment X86_64) (AbsValue 64)
                 -> X86State (AbsValue 64)
-                -> DiscoveryInfo
+                -> DiscoveryInfo X86_64
                 -> BlockLabel Word64
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
@@ -98,6 +98,6 @@ recoverBlock amap aregs interp_state lbl = do
         addBlock lbl'
 
        -- Return
-      | Just _assign <- identifyReturn proc_state -> return ()
+      | Just _assign <- identifyReturn proc_state x86StackDelta -> return ()
 
     _ -> return () -- ???

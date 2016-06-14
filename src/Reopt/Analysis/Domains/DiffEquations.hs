@@ -29,7 +29,7 @@ intersectSame = Map.mergeWithKey f (\_ -> Map.empty) (\_ -> Map.empty)
 -- Diff
 
 -- | @Diff v c@ denotes the value v + c
-data Diff v = Diff { diffVar :: !v
+data Diff v = Diff { _diffVar :: !v
                    , _diffOffset :: !Integer
                    }
   deriving (Eq, Ord, Show)
@@ -38,8 +38,8 @@ diffOffset :: Simple Lens (Diff v) Integer
 diffOffset = lens _diffOffset (\s v -> s { _diffOffset = v })
 
 
-addDiffc :: Integer -> Diff v -> Diff v
-addDiffc c = diffOffset +~ c
+--addDiffc :: Integer -> Diff v -> Diff v
+--addDiffc c = diffOffset +~ c
 
 ------------------------------------------------------------------------
 -- DiffEquations
@@ -152,8 +152,8 @@ ccSet v p = Map.delete v (ccSet' [Diff vr vo] p (Map.singleton vr vo))
 
 ccSet' :: Ord v => [Diff v] -> DiffEquations v -> Map v Integer -> Map v Integer
 ccSet' [] _ m = m
-ccSet' (Diff h o:r) p m =
-  let l0 = Map.findWithDefault [] h (p^.eqRevMap)
+ccSet' (Diff _h o:r) p m =
+  let -- l0 = Map.findWithDefault [] h (p^.eqRevMap)
       -- Add offset o to differences.
       l = (diffOffset +~ o) <$> l
    in ccSet' (l ++ r) p (foldl' (\s (Diff v d) -> Map.insert v d s) m l)

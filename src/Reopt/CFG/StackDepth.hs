@@ -207,7 +207,7 @@ parseStackPointer sp0 addr0
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackDepth :: DiscoveryInfo -> CodeAddr -> BlockStackDepths
+maximumStackDepth :: DiscoveryInfo X86_64 -> CodeAddr -> BlockStackDepths
 maximumStackDepth ist addr =
   minimizeStackDepthValues $ (^. blockStackRefs) $ execState (recoverIter ist Set.empty (Just lbl0)) s0
   where
@@ -218,7 +218,7 @@ maximumStackDepth ist addr =
     sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: DiscoveryInfo
+recoverIter :: DiscoveryInfo X86_64
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
                -> StackDepthM ()
@@ -229,7 +229,7 @@ recoverIter ist seen (Just lbl)
                    lbl' <- nextBlock
                    recoverIter ist (Set.insert lbl seen) lbl'
 
-recoverBlock :: DiscoveryInfo
+recoverBlock :: DiscoveryInfo X86_64
                 -> BlockLabel Word64
                 -> StackDepthM ()
 recoverBlock interp_state root_label = do

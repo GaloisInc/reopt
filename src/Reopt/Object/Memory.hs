@@ -221,7 +221,7 @@ addrHasPermissions :: Ord w => w -> ElfSegmentFlags -> Memory w -> Bool
 addrHasPermissions w req m = addrPermissions w m `hasPermissions` req
 
 -- | Indicates if address is a code pointer.
-isCodeAddr :: Memory Word64 -> Word64 -> Bool
+isCodeAddr :: Ord w => Memory w -> w -> Bool
 isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
 
 -- | Indicates if address is an address in code segment or null.
@@ -230,7 +230,7 @@ isCodeAddrOrNull _ 0 = True
 isCodeAddrOrNull mem a = isCodeAddr mem a
 
 -- | Return true if this is a read only address.
-isReadonlyAddr :: Memory Word64 -> Word64 -> Bool
+isReadonlyAddr :: Ord w => Memory w -> w -> Bool
 isReadonlyAddr mem val = addrPermissions val mem .&. (pf_r .|. pf_w) == pf_r
 
 -- | Attempt to read a contiguous string of bytes from a single segment.
@@ -273,13 +273,16 @@ memLookupWord32 m reqPerm addr = do
   bsWord32 <$> memSubsegment m reqPerm addr 4
 
 -- | Return a word64 at given address (assume little-endian encoding)
-memLookupWord64 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word64
+memLookupWord64 :: Integral w
+                => Memory w
+                -> ElfSegmentFlags
+                -> w
+                -> Either (MemoryError w) Word64
 memLookupWord64 m reqPerm addr = do
   b <- memSubsegment m reqPerm addr 8
   when (BS.length b /= 8) $ do
     error "internal error in memSubsegment detected by memLookupWord64"
   return $! bsWord64 b
-
 
 ------------------------------------------------------------------------
 -- MemStream

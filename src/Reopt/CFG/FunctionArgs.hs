@@ -26,9 +26,9 @@ import qualified Data.Set as Set
 import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Reopt.CFG.FnRep (FunctionType(..))
-import           Reopt.CFG.DiscoveryInfo
 import           Data.Macaw.CFG
+import           Reopt.CFG.DiscoveryInfo
+import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 
@@ -232,7 +232,7 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- Entry point
 
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: DiscoveryInfo -> Map CodeAddr FunctionType
+functionArgs :: DiscoveryInfo X86_64 -> Map CodeAddr FunctionType
 functionArgs ist =
   -- debug' DFunctionArgs (ppSet (text . flip showHex "") seenFuns) $
   debugPrintMap $ finalizeMap $ calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
@@ -404,7 +404,7 @@ calculateLocalFixpoint new
         if ds' == mempty then Nothing else Just ds'
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: DiscoveryInfo
+summarizeIter :: DiscoveryInfo X86_64
               -> Set (BlockLabel Word64)
               -> Maybe (BlockLabel Word64)
               -> FunctionArgsM ()
@@ -464,7 +464,7 @@ summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: DiscoveryInfo
+summarizeBlock :: DiscoveryInfo X86_64
                -> BlockLabel Word64
                -> FunctionArgsM ()
 summarizeBlock interp_state root_label = go root_label

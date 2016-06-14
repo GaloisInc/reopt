@@ -75,12 +75,17 @@ module Data.Macaw.CFG
   , PrettyF(..)
   , PrettyArch(..)
   , PrettyRegValue(..)
-  -- * Architecture classes
+    -- * Architecture type families
   , ArchAddr
-  , ArchAddrWidth
   , ArchFn
   , ArchReg
   , ArchStmt
+  , RegAddrWidth
+    -- ** Classes
+  , RegisterInfo(..)
+    -- ** Synonyms
+  , ArchAddrWidth
+  , ArchLabel
   ) where
 
 import           Control.Applicative
@@ -642,12 +647,15 @@ type family ArchFn (arch :: *) :: Type -> *
 -- assigned as part of the language.
 type family ArchReg (arch :: *) :: Type -> *
 
+-- | Width of register used to store addresses.
+type family RegAddrWidth (r :: Type -> *) :: Nat
+
 -- | A type family for defining architecture specici statements that are
 -- part of the language.
 type family ArchStmt (arch :: *) :: *
 
 -- | Number of bits in addreses for architecture.
-type family ArchAddrWidth (arch :: *) :: Nat
+type ArchAddrWidth arch = RegAddrWidth (ArchReg arch)
 
 -- | The type to use for addresses on the architecutre.
 type family ArchAddr (arch :: *) :: *
@@ -662,6 +670,22 @@ class ShowF (ArchReg arch) => PrettyArch arch where
               -- ^ Function for pretty printing vlaue.
            -> ArchFn arch tp
            -> m Doc
+
+-- | This class provides access to information about registers.
+class RegisterInfo r where
+
+  -- | The stack pointer register
+  sp_reg :: r (BVType (RegAddrWidth r))
+
+  -- | The instruction pointer register
+  ip_reg :: r (BVType (RegAddrWidth r))
+
+  -- | The register used to store system call numbers.
+  syscall_num_reg :: r (BVType (RegAddrWidth r))
+
+  -- | Registers used for passing system call arguments
+  syscallArgumentRegs :: [r (BVType (RegAddrWidth r))]
+
 
 ------------------------------------------------------------------------
 -- AssignId
@@ -773,7 +797,7 @@ ppLit w i =
 
 -- | Pretty print a value.
 ppValue :: ShowF (ArchReg arch) => Prec -> Value arch tp -> Doc
-ppValue p (BVValue w i) | p > colonPrec =  assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
+ppValue p (BVValue w i)     = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (showF r) PP.<> text "_0"
 

@@ -5,16 +5,15 @@ import qualified Data.Map as Map
 import           Data.Parameterized.Some
 import           Data.Word
 
-import qualified Reopt.Machine.StateNames as N
+import           Data.Macaw.CFG (ArchReg)
 
 data SyscallArgType = VoidArgType | WordArgType | XMMFloatType
                     deriving (Eq, Show, Read)
 
 type SyscallTypeInfo = (String, SyscallArgType, [SyscallArgType])
 
-data SyscallPersonality =
+data SyscallPersonality arch =
   SyscallPersonality { spName     :: String
                      , spTypeInfo :: Map.Map Word64 SyscallTypeInfo
-                     , spResultRegisters :: [Some N.RegisterName]
+                     , spResultRegisters :: [Some (ArchReg arch)]
                      }
-                       

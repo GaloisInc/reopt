@@ -187,19 +187,12 @@ lubSingleton s si
           u = (max s s')
       in mkStridedInterval (typ si) True l u (u - l)
   | s < base si  = go s si_upper (base si)
-  -- | si_upper < s = go (base si) s si_upper
   | otherwise    = go (base si) (max s si_upper) s
   where
     si_upper = intervalEnd si
     go lower upper to_contain =
       mkStridedInterval (typ si) True lower upper
                         (gcd (stride si) (to_contain - lower))
-
--- prop_glb :: StridedInterval (BVType 64)
---             -> StridedInterval (BVType 64)
---             -> Bool
--- prop_glb x y = (x `glb` y) `isSubsetOf` x
---                && (x `glb` y) `isSubsetOf` y
 
 -- | Greatest lower bound.  @glb si1 si2@ contains only those values
 -- which are in @si1@ and @si2@.
