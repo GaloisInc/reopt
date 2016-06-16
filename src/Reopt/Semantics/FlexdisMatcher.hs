@@ -66,12 +66,15 @@ getSignExtendedValue v out_w =
       | otherwise                   -> fail "unknown r8"
     F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
     F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
+    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)    
+    F.XMMReg r                      -> mk (fullRegister $ N.xmmFromFlexdis r)
+    
     F.ByteImm  i                    -> return $! bvLit out_w i
     F.WordImm  i                    -> return $! bvLit out_w i
     F.DWordImm i                    -> return $! bvLit out_w i
     F.QWordImm i                    -> return $! bvLit out_w i
-    _ -> fail $ "getSignExtendedValue given unexpected width."
+    
+    _ -> fail $ "getSignExtendedValue given unexpected width: " ++ show v
   where
     -- FIXME: what happens with signs etc?
     mk :: Location (Value m (BVType 64)) (BVType u)
