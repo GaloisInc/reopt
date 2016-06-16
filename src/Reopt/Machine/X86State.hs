@@ -501,7 +501,7 @@ x87FPURegList :: [X86Reg (BVType 80)]
 x87FPURegList = [X87_FPUReg i | i <- [0..7]]
 
 xmmRegList :: [X86Reg (BVType 128)]
-xmmRegList = [X86_XMMReg i | i <- [0..7]]
+xmmRegList = [X86_XMMReg i | i <- [0..15]]
 
 -- | List of registers stored in X86State
 x86StateRegs :: [Some X86Reg]
