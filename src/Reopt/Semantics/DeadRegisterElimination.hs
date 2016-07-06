@@ -36,7 +36,7 @@ import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
 
 
-eliminateDeadRegisters :: CFG X86_64 -> CFG X86_64
+eliminateDeadRegisters :: CFG X86_64 ids -> CFG X86_64 ids
 eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
   where
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
@@ -44,13 +44,13 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
-liveRegisters :: CFG X86_64 -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64)
+liveRegisters :: CFG X86_64 ids -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64 ids)
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v
 
-blockLiveRegisters :: Block X86_64
-                   -> State (Set AssignId) (Map (BlockLabel Word64) (Block X86_64))
+blockLiveRegisters :: Block X86_64 ids
+                   -> State (Set (Some (AssignId ids))) (Map (BlockLabel Word64) (Block X86_64 ids))
 blockLiveRegisters b = do
     addIDs terminalIds
     stmts' <- foldrM noteAndFilter [] (blockStmts b)
@@ -62,7 +62,7 @@ blockLiveRegisters b = do
                    Syscall s     -> foldX86StateValue refsInValue s
     addIDs ids = modify (S.union ids)
     noteAndFilter stmt@(AssignStmt (Assignment v rhs)) ss
-      = do v_in <- gets (S.member v)
+      = do v_in <- gets (S.member (Some v))
            if v_in then
              do addIDs (refsInAssignRhs rhs)
                 return (stmt : ss)

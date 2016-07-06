@@ -94,8 +94,8 @@ data X86_64
 type instance ArchReg  X86_64 = X86Reg
 type instance RegAddrWidth X86Reg = 64
 
-type instance ArchFn   X86_64 = X86PrimFn
-type instance ArchStmt X86_64 = X86Stmt
+type instance ArchFn   X86_64 ids = X86PrimFn ids
+type instance ArchStmt X86_64 ids = X86Stmt ids
 type instance ArchAddr X86_64 = Word64
 type instance ArchCFLocation X86_64 = ExploreLoc
 
@@ -157,7 +157,7 @@ instance Pretty (X86PrimLoc tp) where
 -- X86PrimFn
 
 -- | Defines primitive functions in the X86 format.
-data X86PrimFn tp
+data X86PrimFn ids tp
    = ReadLoc !(X86PrimLoc tp)
      -- ^ Read from a primitive X86 location
    | (tp ~ BVType 64) => ReadFSBase
@@ -167,13 +167,13 @@ data X86PrimFn tp
    | (tp ~ BVType 64)
      => MemCmp !Integer
                -- ^ Number of bytes per value.
-               !(BVValue X86_64 64)
+               !(BVValue X86_64 ids 64)
                -- ^ Number of values to compare
-               !(BVValue X86_64 64)
+               !(BVValue X86_64 ids 64)
                -- ^ Pointer to first buffer.
-               !(BVValue X86_64 64)
+               !(BVValue X86_64 ids 64)
                -- ^ Pointer to second buffer.
-               !(BVValue X86_64 1)
+               !(BVValue X86_64 ids 1)
                -- ^ Direction flag, False means increasing
      -- ^ Compares to memory regions
    | forall n
@@ -182,18 +182,18 @@ data X86PrimFn tp
                     -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
                     !Bool
                     -- ^ Find first matching (True) or not matching (False)
-                    !(BVValue X86_64 64)
+                    !(BVValue X86_64 ids 64)
                     -- ^ Number of elements to compare
-                    !(BVValue X86_64 64)
+                    !(BVValue X86_64 ids 64)
                     -- ^ Pointer to first buffer
-                    !(BVValue X86_64 n)
+                    !(BVValue X86_64 ids n)
                     -- ^ Value to compare
-                    !(BVValue X86_64 1)
+                    !(BVValue X86_64 ids 1)
                     -- ^ Flag indicates direction of copy:
                     -- True means we should decrement buffer pointers after each copy.
                     -- False means we should increment the buffer pointers after each copy.
 
-instance HasRepr X86PrimFn TypeRepr where
+instance HasRepr (X86PrimFn ids) TypeRepr where
   typeRepr f =
     case f of
       ReadLoc loc   -> typeRepr loc
@@ -202,7 +202,7 @@ instance HasRepr X86PrimFn TypeRepr where
       MemCmp{}      -> knownType
       FindElement{} -> knownType
 
-instance PrettyF X86PrimFn where
+instance PrettyF (X86PrimFn ids) where
   prettyF = runIdentity . ppX86PrimFn (Identity . ppValue 10)
 
 instance PrettyArch X86_64 where
@@ -212,9 +212,9 @@ instance PrettyArch X86_64 where
 -- for values that is implemented as a 'Applicative' action to allow side
 -- effects.
 ppX86PrimFn :: Applicative m
-            => (forall u . Value X86_64 u -> m Doc)
+            => (forall u . Value X86_64 ids u -> m Doc)
                -- ^ Function for pretty printing vlaue.
-            -> X86PrimFn tp
+            -> X86PrimFn ids tp
             -> m Doc
 ppX86PrimFn pp f =
   case f of
@@ -230,32 +230,32 @@ ppX86PrimFn pp f =
 -- X86Stmt
 
 -- | An X86 specific statement
-data X86Stmt
+data X86Stmt ids
    = forall tp .
-     WriteLoc !(X86PrimLoc tp) !(Value X86_64 tp)
+     WriteLoc !(X86PrimLoc tp) !(Value X86_64 ids tp)
    | MemCopy !Integer
              -- ^ Number of bytes to copy at a time (1,2,4,8)
-             !(BVValue X86_64 64)
+             !(BVValue X86_64 ids 64)
              -- ^ Number of values to move.
-             !(BVValue X86_64 64)
+             !(BVValue X86_64 ids 64)
              -- ^ Start of source buffer.
-             !(BVValue X86_64 64)
+             !(BVValue X86_64 ids 64)
              -- ^ Start of destination buffer.
-             !(BVValue X86_64 1)
+             !(BVValue X86_64 ids 1)
              -- ^ Flag indicates whether direction of move:
              -- True means we should decrement buffer pointers after each copy.
              -- False means we should increment the buffer pointers after each copy.
    | forall n .
-     MemSet !(BVValue X86_64 64)
+     MemSet !(BVValue X86_64 ids 64)
             -- ^ Number of values to assign
-            !(BVValue X86_64 n)
+            !(BVValue X86_64 ids n)
             -- ^ Value to assign
-            !(BVValue X86_64 64)
+            !(BVValue X86_64 ids 64)
             -- ^ Address to start assigning from.
-            !(BVValue X86_64 1)
+            !(BVValue X86_64 ids 1)
             -- ^ Direction flag
 
-instance Pretty X86Stmt where
+instance Pretty (X86Stmt ids) where
   pretty (WriteLoc loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
   pretty (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
@@ -267,7 +267,7 @@ instance Pretty X86Stmt where
 ------------------------------------------------------------------------
 -- Architecture-specific Value operations
 
-asStackAddrOffset :: Value X86_64 tp -> Maybe (BVValue X86_64 64)
+asStackAddrOffset :: Value X86_64 ids tp -> Maybe (BVValue X86_64 ids 64)
 asStackAddrOffset addr
   | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr
   , Just Refl <- testEquality base sp_reg = do
@@ -585,7 +585,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> X86State (Value X86_64)
+             -> X86State (Value X86_64 ids)
 initX86State loc = mkX86State Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
@@ -593,14 +593,14 @@ initX86State loc = mkX86State Initial
 ------------------------------------------------------------------------
 -- Compute set of assignIds in values.
 
-refsInApp :: App (Value arch) tp -> Set AssignId
+refsInApp :: App (Value arch ids) tp -> Set (Some (AssignId ids))
 refsInApp app = foldApp refsInValue app
 
-refsInValue :: Value arch tp -> Set AssignId
-refsInValue (AssignedValue (Assignment v _)) = Set.singleton v
+refsInValue :: Value arch ids tp -> Set (Some (AssignId ids))
+refsInValue (AssignedValue (Assignment v _)) = Set.singleton (Some v)
 refsInValue _                                = Set.empty
 
-refsInAssignRhs :: AssignRhs X86_64 tp -> Set AssignId
+refsInAssignRhs :: AssignRhs X86_64 ids tp -> Set (Some (AssignId ids))
 refsInAssignRhs rhs =
   case rhs of
     EvalApp v      -> refsInApp v
@@ -637,18 +637,18 @@ instance Monoid m => Monoid (StateMonadMonoid s m) where
                     mv' <- m'
                     return (mappend mv mv')
 
-foldValueCached :: forall m tp
+foldValueCached :: forall m ids tp
                 .  (Monoid m)
                 => (forall n.  NatRepr n -> Integer -> m)
                 -> (forall utp . ArchReg X86_64 utp -> m)
-                -> (forall utp . Assignment X86_64 utp -> m -> m)
-                -> Value X86_64 tp
-                -> State (Map (Some (Assignment X86_64)) m) m
+                -> (forall utp . Assignment X86_64 ids utp -> m -> m)
+                -> Value X86_64 ids tp
+                -> State (Map (Some (Assignment X86_64 ids)) m) m
 foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
   where
     go :: forall tp'
-       .  Value X86_64 tp'
-       -> StateMonadMonoid (Map (Some (Assignment X86_64)) m) m
+       .  Value X86_64 ids tp'
+       -> StateMonadMonoid (Map (Some (Assignment X86_64 ids)) m) m
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
@@ -663,8 +663,8 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
                      return (assignf asgn rhs_v)
 
     goAssignRHS :: forall tp'
-                .  AssignRhs X86_64 tp'
-                -> StateMonadMonoid (Map (Some (Assignment X86_64)) m) m
+                .  AssignRhs X86_64 ids tp'
+                -> StateMonadMonoid (Map (Some (Assignment X86_64 ids)) m) m
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
@@ -684,13 +684,13 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
 -- X86_64 specific block operations.
 
 -- | Returns true if block has a call comment.
-hasCallComment :: Block X86_64 -> Bool
+hasCallComment :: Block X86_64 ids -> Bool
 hasCallComment b = any isCallComment (blockStmts b)
   where isCallComment (Comment s) = "call" `Text.isInfixOf` s
         isCallComment _ = False
 
 -- | Returns true if block has a ret comment.
-hasRetComment :: Block X86_64 -> Bool
+hasRetComment :: Block X86_64 ids -> Bool
 hasRetComment b = any isRetComment (blockStmts b)
   where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
         isRetComment _ = False

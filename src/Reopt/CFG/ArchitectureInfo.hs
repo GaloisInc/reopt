@@ -5,6 +5,7 @@ Maintainer : jhendrix@galois.com
 
 This defines the architecture-specific information needed for code discovery.
 -}
+{-# LANGUAGE RankNTypes #-}
 module Reopt.CFG.ArchitectureInfo
   ( ArchitectureInfo(..)
   , ReadAddrFn
@@ -13,6 +14,7 @@ module Reopt.CFG.ArchitectureInfo
 
 import Data.Macaw.CFG
 import Reopt.Object.Memory
+import Data.Parameterized.Nonce
 
 ------------------------------------------------------------------------
 -- ArchitectureInfo
@@ -21,14 +23,13 @@ import Reopt.Object.Memory
 type ReadAddrFn w = Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) w
 
 -- | Function for disassembling a block
-type DisassembleFn a
-   = AssignId
-     -- ^ Index to use for next assignment
-   -> Memory (ArchAddr a)
-   -> (ArchAddr a -> Bool)
+type DisassembleFn arch
+   = forall st_s ids.
+     Memory (ArchAddr arch)
+   -> (ArchAddr arch -> Bool)
    -- ^ Predicate that tells when to continue.
-   -> ArchCFLocation a -- ^ Location to explore from.
-   -> Either String ([Block a], ArchAddr a, AssignId)
+   -> ArchCFLocation arch -- ^ Location to explore from.
+   -> NonceST st_s ids (Either String ([Block arch ids], ArchAddr arch))
 
 -- | This records architecture specific functions for analysis.
 data ArchitectureInfo arch

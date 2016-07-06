@@ -125,13 +125,13 @@ parseStackPointer addr
 -- SallocBase
 
 -- | This is a list that represents the
-data SallocBase = SallocBase [BVValue X86_64 64]
+data SallocBase ids = SallocBase [BVValue X86_64 ids 64]
 
-instance Show SallocBase where
+instance Show (SallocBase ids) where
   show (SallocBase x) = show (ppValueAssignmentList x)
 
 
-asSallocBase :: BVValue X86_64 64 -> Maybe SallocBase
+asSallocBase :: BVValue X86_64 ids 64 -> Maybe (SallocBase ids)
 asSallocBase (valueAsApp -> Just (BVAdd _ x (BVValue w o))) = do
   SallocBase r <- asSallocBase x
   let neg_o = BVValue w (negate o .&. (toInteger (maxBound :: Word64)))
@@ -144,7 +144,7 @@ asSallocBase (Initial r) | Just Refl <- testEquality r sp_reg  =
 asSallocBase _ = Nothing
 
 
-stackIncrementBound :: SallocBase -> SallocBase -> SallocBase
+stackIncrementBound :: SallocBase ids -> SallocBase ids -> SallocBase ids
 stackIncrementBound (SallocBase x) (SallocBase y)
    | yl >= xl = f (yl - xl) x y
    | otherwise = assert (xl > yl) $ f (xl - yl) y x
@@ -162,7 +162,7 @@ stackIncrementBound (SallocBase x) (SallocBase y)
                                ++ show (ppValueAssignmentList y)) $
                         SallocBase v
 
-subSallocBaseOffset :: SallocBase -> Int64 -> SallocBase
+subSallocBaseOffset :: SallocBase ids -> Int64 -> SallocBase ids
 subSallocBaseOffset d 0 = d
 subSallocBaseOffset (SallocBase (BVValue w o:r)) c | o >= toInteger c =
   SallocBase $ BVValue w (o-toInteger c) : r
@@ -175,10 +175,10 @@ subSallocBaseOffset d _ = trace "subSallocBaseOffset undefined" d
 -- The first parameter is a constant, the remaining values are the
 -- set of stack locations accessed.  The height of the stack must be
 -- at least as large as each value in the set.
-data StackDelta = StackDelta !SallocBase
+data StackDelta ids = StackDelta !(SallocBase ids)
   deriving (Show)
 
-initStackDelta :: FnStack -> StackDelta
+initStackDelta :: FnStack -> StackDelta ids
 initStackDelta _ = StackDelta (SallocBase [])
 
 {-
@@ -190,13 +190,13 @@ updateStackDeltaAssign _ = id
 -}
 
 -- | The Conjoin two stack heights to compute the maximum height.
-recordPotentialStackOffset :: BVValue X86_64 64
+recordPotentialStackOffset :: BVValue X86_64 ids 64
                               -- ^ The value
                            -> Int64 -- ^ A concrete offset added to value.
                            -> Bool -- ^ A Boolean flag that indicates if this should be astack offset.
-                           -> StackDelta
+                           -> StackDelta ids
                               -- ^ The current stack deltaa
-                           -> StackDelta
+                           -> StackDelta ids
 recordPotentialStackOffset v offset knownStackPointer (StackDelta d) =
   case asSallocBase v of
     Just i ->
@@ -222,7 +222,7 @@ recordPotentialStackOffset v knownStackPointer d@(StackDelta xc xs) =
       | otherwise -> d
 -}
 
-stackDeltaAllocSize :: StackDelta -> Maybe (FnValue (BVType 64))
+stackDeltaAllocSize :: StackDelta ids -> Maybe (FnValue (BVType 64))
 stackDeltaAllocSize h@(StackDelta (SallocBase d))
   | length d == 0 = Nothing
   | [ BVValue _ c ] <- d =
@@ -242,12 +242,12 @@ initFnStack = UndefinedFnStack
 
 -- | Given information about the stack and a offset into the stack, return
 -- a function value denoting the given location.
-stackOffsetAddr :: FnStack -> BVValue X86_64 64 -> FnValue (BVType 64)
+stackOffsetAddr :: FnStack -> BVValue X86_64 ids 64 -> FnValue (BVType 64)
 stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
  FnValueUnsupported "stackOffsetAddr unsupported" knownType
 
 -- | Record a register as being callee saved.
-recordCalleeSavedWrite :: BVValue X86_64 64 -- ^ Offset in stack
+recordCalleeSavedWrite :: BVValue X86_64 ids 64 -- ^ Offset in stack
                        -> RegisterName 'GP  -- ^ Register that is saved.
                        -> FnStack -- ^ Current stack
                        -> FnStack
