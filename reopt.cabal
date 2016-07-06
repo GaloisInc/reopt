@@ -185,6 +185,7 @@ executable LLVMDumpInstr
     reopt,
     mtl,
     llvm-pretty,
+    parameterized-utils,
     lens
 
   hs-source-dirs: utils

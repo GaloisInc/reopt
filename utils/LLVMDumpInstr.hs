@@ -16,6 +16,7 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
+import           Data.Parameterized.Nonce
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.LLVM
@@ -44,13 +45,16 @@ main = do
       seg = MemSegment base pf_x bs
       mem = execState (insertMemSegment seg) emptyMemory
       -- cfg = cfgFromAddress mem base
-      b   = disassembleBlock 0 mem (const True) (rootLoc base)
-
-  case b of
-   Left err       -> putStrLn err
-   Right (bs, end, _)  -> error "UNIMPLEMENTED"
-     -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
-     --     bs' = Map.elems (cfg^.cfgBlocks)
-     --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
-     -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
-  return ()
+      res = runNonceST $ do
+        b <- disassembleBlock mem (const True) (rootLoc base)
+        case b of
+          Left err -> return $ Left err
+          Right (bs, end) ->
+            error "UNIMPLEMENTED"
+            -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
+            --     bs' = Map.elems (cfg^.cfgBlocks)
+            --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
+            -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
+  case res of
+    Left err -> putStrLn err
+    Right _ -> error "UNIMPLEMENTED"

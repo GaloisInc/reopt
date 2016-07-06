@@ -18,6 +18,8 @@ interleaved abstract interpretation.
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Reopt.CFG.CFGDiscovery
        ( mkCFG
@@ -28,6 +30,8 @@ module Reopt.CFG.CFGDiscovery
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad.State.Strict
+import           Control.Monad.Reader
+import           Control.Monad.ST
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as Fold
@@ -38,6 +42,7 @@ import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
+import           Data.Parameterized.Nonce
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
@@ -142,7 +147,7 @@ instance AbsRegState X86_64 where
   mkRegStateM = mkX86StateM
   mkRegState  = mkX86State
 
-instance SupportAbsEvaluation X86_64 X86PrimFn where
+instance SupportAbsEvaluation X86_64 ids (X86PrimFn ids) where
   transferAbsValue r f =
     case f of
       ReadLoc _ -> TopV
@@ -161,25 +166,65 @@ instance SupportAbsEvaluation X86_64 X86PrimFn where
 ------------------------------------------------------------------------
 -- Block discovery
 
+-- | The CFG-building monad: includes a state component with a 'DiscoveryInfo'
+-- and a 'NonceGenerator', layered on top of the 'ST' monad
+newtype CFGM st_s ids a =
+  CFGM { unCFGM ::
+           StateT (DiscoveryInfo X86_64 ids,
+                   NonceGenerator (ST st_s) ids) (ST st_s) a }
+  deriving (Functor, Applicative, Monad)
+
+-- | Run a CFGM at the top level
+runCFGM :: (forall ids. DiscoveryInfo X86_64 ids) ->
+           (forall st_s ids. CFGM st_s ids ()) ->
+           Some (DiscoveryInfo X86_64)
+runCFGM init_info m =
+  runNonceST $ do
+  nonce_gen <- getNonceSTGen
+  liftM (\(_,(final_info,_)) -> Some final_info) $
+    lift $ runStateT (unCFGM m) (init_info, nonce_gen)
+
+-- We only use the 'DiscoveryInfo' component as a state component, i.e., we only
+-- modify that piece of the state, leaving the 'NonceGenerator' constant
+instance MonadState (DiscoveryInfo X86_64 ids) (CFGM st_s ids) where
+  get = liftM fst $ CFGM $ get
+  put i = CFGM $ do (_,gen) <- get
+                    put (i,gen)
+
+-- MonadReader instance to read the current 'NonceGenerator'
+instance MonadReader (NonceGenerator (ST st_s) ids) (CFGM st_s ids) where
+  ask = liftM snd $ CFGM $ get
+  local f (CFGM m) = CFGM $ do
+    (i, gen_in) <- get
+    put (i, f gen_in)
+    ret <- m
+    (i', _) <- get
+    put (i', gen_in)
+    return ret
+
+-- We can generator fresh names in a 'CFGM'
+instance MonadNonce (CFGM st_s ids) where
+  type NonceSet (CFGM st_s ids) = ids
+  freshNonceM = CFGM $ lift . freshNonce =<< liftM snd get
+
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
-lookupBlock' :: MonadState (DiscoveryInfo X86_64) m
-             => BlockLabel Word64
-             -> m (Maybe (Block X86_64))
+lookupBlock' :: BlockLabel Word64
+             -> CFGM st_s ids (Maybe (Block X86_64 ids))
 lookupBlock' lbl = uses blocks (`lookupBlock` lbl)
 
-getAbsBlockState :: CodeAddr -> State (DiscoveryInfo X86_64) (AbsBlockState X86_64)
+getAbsBlockState :: CodeAddr -> CFGM st_s ids (AbsBlockState X86_64)
 getAbsBlockState a = uses absState $ lookupAbsBlock a
 
-blockOverlaps :: CodeAddr -> Maybe (BlockRegion X86_64) -> Bool
+blockOverlaps :: CodeAddr -> Maybe (BlockRegion X86_64 ids) -> Bool
 blockOverlaps _ Nothing = True
 blockOverlaps a (Just br) = a < brEnd br
 
 -- | Mark address as the start of a block.
 markBlockStart :: CodeAddr
                -> AbsBlockState X86_64
-               -> DiscoveryInfo X86_64
-               -> DiscoveryInfo X86_64
-markBlockStart addr ab s = do
+               -> CFGM st_s ids ()
+markBlockStart addr ab = do
+  s <- get
   -- Lookup block just before this address
   case Map.lookupLT addr (s^.blocks) of
     -- If that block overlaps with the address
@@ -188,24 +233,24 @@ markBlockStart addr ab s = do
           a_start = getFunctionEntryPoint addr s
 --          l_high  = Set.lookupGT addr (s^.functionEntries)
 --          a_high  = Set.lookupGT addr (s^.functionEntries)
-          -- Get block for addr
-      s & tryDisassembleAddr addr ab
-          -- Get block for old block
-        & tryDisassembleAddr l    (lookupAbsBlock l (s^.absState))
-          -- Add function starts to split to frontier
-          -- This will result in us re-exploring l_start and a_start
-          -- once the current function is done.
-        & function_frontier %~ Set.insert l_start . Set.insert a_start
+      -- Get block for addr
+      tryDisassembleAddr addr ab
+      -- Get block for old block
+      tryDisassembleAddr l (lookupAbsBlock l (s^.absState))
+      -- Add function starts to split to frontier
+      -- This will result in us re-exploring l_start and a_start
+      -- once the current function is done.
+      modify $ \s0 -> s0 & function_frontier %~ Set.insert l_start . Set.insert a_start
     _ ->
-      s & tryDisassembleAddr addr ab
+      tryDisassembleAddr addr ab
 
 -- | This is the worker for getBlock, in the case that we have not already
 -- read the block.
 tryDisassembleAddr :: CodeAddr
                    -> AbsBlockState X86_64
-                   -> DiscoveryInfo X86_64
-                   -> DiscoveryInfo X86_64
-tryDisassembleAddr addr ab s0 = do
+                   -> CFGM st_s ids ()
+tryDisassembleAddr addr ab = do
+  s0 <- get
   -- Get FPU top
   let Just t = getAbsX87Top ab
   -- Create explore loc
@@ -220,34 +265,36 @@ tryDisassembleAddr addr ab s0 = do
   -- that is part of a new block.
   let not_at_block = (`Map.notMember` block_addrs)
   let mem = memory s0
-  let global_state = s0^.genState
+  nonce_gen <- ask
+  res <- CFGM $ lift $
+    runReaderT (runNonceT $ disassembleFn (archInfo s0) mem not_at_block loc)
+    nonce_gen
   -- Build state for exploring this.
-  case disassembleFn (archInfo s0) global_state mem not_at_block loc of
+  case res of
     Left e ->
-      debug DCFG ("Failed to disassemble block at " ++ showHex addr " " ++ show e) $
-      s0 & blocks %~ Map.insert addr Nothing
-    Right (bs, next_ip, gs) -> assert (next_ip > addr) $ do
-      debug DCFG (show $ vcat $ map pretty bs) $ do
+      debugM DCFG ("Failed to disassemble block at " ++ showHex addr " " ++ show e) >>
+      put $ (s0 & blocks %~ Map.insert addr Nothing)
+    Right (bs, next_ip) -> assert (next_ip > addr) $ do
+      debugM DCFG (show $ vcat $ map pretty bs)
       let block_map = Map.fromList [ (labelIndex (blockLabel b), b) | b <- bs ]
       -- Add block region to blocks.
       let br = BlockRegion { brEnd = next_ip
                            , brBlocks = block_map
                            }
-      s0 & genState .~ gs
-         & blocks   %~ Map.insert addr (Just $! br)
+      put $ (s0 & blocks %~ Map.insert addr (Just $! br))
 
 -- | This is the worker for getBlock, in the case that we have not already
 -- read the block.
 reallyGetBlockList :: AbsStateMap X86_64
-                   -> (DiscoveryInfo X86_64)
-                   -> (DiscoveryInfo X86_64)
-reallyGetBlockList m s0 = Map.foldrWithKey' tryDisassembleAddr s0 m
+                   -> CFGM st_s ids ()
+reallyGetBlockList m =
+  mapM_ (\(k,v) -> tryDisassembleAddr k v) $ Map.toAscList m
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all it's children are
 -- present in the cfg (assuming successful disassembly)
-getBlock :: CodeAddr -> State (DiscoveryInfo X86_64) (Maybe (Block X86_64))
+getBlock :: CodeAddr -> CFGM st_s ids (Maybe (Block X86_64 ids))
 getBlock addr = do
   m_b <- use blocks
   case Map.lookup addr m_b of
@@ -261,8 +308,8 @@ getBlock addr = do
 -- Transfer stmts
 
 transferStmt :: Monad m
-             => Stmt X86_64
-             -> StateT (AbsProcessorState X86_64) m ()
+             => Stmt X86_64 ids
+             -> StateT (AbsProcessorState X86_64 ids) m ()
 transferStmt stmt =
   case stmt of
     AssignStmt a -> do
@@ -288,33 +335,35 @@ instance Show HexWord where
   showsPrec _ (HexWord w) = showHex w
 
 -- | Mark a escaped code pointer as a function entry.
-markAddrAsFunction :: Word64 -> (DiscoveryInfo X86_64) -> (DiscoveryInfo X86_64)
-markAddrAsFunction addr s
-  | addr == 0 = s
-  | Set.member addr (s^.functionEntries) = s
-  | otherwise = debug DCFG ("Found function entry " ++ showHex addr ".") $ do
-     let mem = memory s
-     let low = Set.lookupLT addr (s^.functionEntries)
-     let _high = Set.lookupGT addr (s^.functionEntries)
-     let s' = s & markBlockStart addr (fnBlockState mem addr)
-                & absState %~ Map.insert addr (fnBlockState mem addr)
-                & functionEntries %~ Set.insert addr
-                & function_frontier %~ maybeSetInsert low . Set.insert addr
-     s'
+markAddrAsFunction :: Word64 -> CFGM st_s ids ()
+markAddrAsFunction addr = do
+  s <- get
+  if addr == 0 || Set.member addr (s^.functionEntries)
+    then return ()
+    else do
+    debugM DCFG ("Found function entry " ++ showHex addr ".")
+    let mem = memory s
+    let low = Set.lookupLT addr (s^.functionEntries)
+    let _high = Set.lookupGT addr (s^.functionEntries)
+    markBlockStart addr (fnBlockState mem addr)
+    modify $ \s0 -> s0 & absState %~ Map.insert addr (fnBlockState mem addr)
+                       & functionEntries %~ Set.insert addr
+                       & function_frontier %~ maybeSetInsert low . Set.insert addr
 
 recordFunctionAddrs :: BlockLabel Word64
                     -> Memory Word64
                     -> AbsValue 64 (BVType 64)
-                    -> State (DiscoveryInfo X86_64) ()
+                    -> CFGM st_s ids ()
 recordFunctionAddrs lbl mem av = do
   let addrs = concretizeAbsCodePointers mem av
-  debugM DCFG (show lbl ++ ": Adding function entries " ++ intercalate ", " (map (flip showHex "") addrs))
-  modify $ \s0 -> foldl' (flip markAddrAsFunction) s0 addrs
+  debugM DCFG (show lbl ++ ": Adding function entries "
+               ++ intercalate ", " (map (flip showHex "") addrs))
+  mapM_ markAddrAsFunction addrs
 
 recordWriteStmt :: BlockLabel Word64
-                -> AbsProcessorState X86_64
-                -> Stmt X86_64
-                -> State (DiscoveryInfo X86_64) ()
+                -> AbsProcessorState X86_64 ids
+                -> Stmt X86_64 ids
+                -> CFGM st_s ids ()
 recordWriteStmt lbl regs (WriteMem _addr v)
   | Just Refl <- testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64))
   , av <- transferValue regs v = do
@@ -323,21 +372,21 @@ recordWriteStmt lbl regs (WriteMem _addr v)
 recordWriteStmt _ _ _ = return ()
 
 transferStmts :: Monad m
-              => AbsProcessorState X86_64
-              -> [Stmt X86_64]
-              -> m (AbsProcessorState X86_64)
+              => AbsProcessorState X86_64 ids
+              -> [Stmt X86_64 ids]
+              -> m (AbsProcessorState X86_64 ids)
 transferStmts r stmts = execStateT (mapM_ transferStmt stmts) r
 
 -- | Generate map that maps each assignment in the CFG to the abstract value
 -- associated with it.
 assignmentAbsValues :: Memory Word64
-                    -> CFG X86_64
+                    -> CFG X86_64 ids
                     -> AbsStateMap X86_64
-                    -> MapF (Assignment X86_64) (AbsValue 64)
-assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
-  where go :: MapF (Assignment X86_64) (AbsValue 64)
-           -> Block X86_64
-           -> MapF (Assignment X86_64) (AbsValue 64)
+                    -> MapF (Assignment X86_64 ids) (AbsValue 64)
+assignmentAbsValues mem (g :: CFG X86_64 ids) absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
+  where go :: MapF (Assignment X86_64 ids) (AbsValue 64)
+           -> Block X86_64 ids
+           -> MapF (Assignment X86_64 ids) (AbsValue 64)
         go m0 b =
           case blockLabel b of
             GeneratedBlock a 0 -> do
@@ -346,11 +395,13 @@ assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
               insBlock b abs_state m0
             _ -> m0
 
-        insBlock :: Block X86_64
-                 -> AbsProcessorState X86_64
-                 -> MapF (Assignment X86_64) (AbsValue 64)
-                 -> MapF (Assignment X86_64) (AbsValue 64)
+        insBlock :: Block X86_64 ids
+                 -> AbsProcessorState X86_64 ids
+                 -> MapF (Assignment X86_64 ids) (AbsValue 64)
+                 -> MapF (Assignment X86_64 ids) (AbsValue 64)
         insBlock b r0 m0 =
+          let final = runIdentity $ transferStmts r0 (blockStmts b)
+              m = MapF.union (final^.absAssignments) m0 in
           case blockTerm b of
             Branch _ lb rb -> do
               let Just l = findBlock g lb
@@ -361,8 +412,6 @@ assignmentAbsValues mem g absm = foldl' go MapF.empty (Map.elems (g^.cfgBlocks))
             FetchAndExecute _ -> m
             Syscall _ -> m
 
-          where final = runIdentity $ transferStmts r0 (blockStmts b)
-                m = MapF.union (final^.absAssignments) m0
 
 ------------------------------------------------------------------------
 -- Transfer functions
@@ -375,39 +424,29 @@ mergeIntraJump  :: BlockLabel Word64
                    -- ^ Block state after executing instructions.
                 -> CodeAddr
                    -- ^ Address we are trying to reach.
-                -> State (DiscoveryInfo X86_64) ()
-mergeIntraJump src ab tgt = modify $ mergeIntraJump' src ab tgt
-
--- | Joins in the new abstract state and returns the locations for
--- which the new state is changed.
-mergeIntraJump'  :: BlockLabel Word64
-                    -- ^ Source label that we are jumping from.
-                 -> AbsBlockState X86_64
-                    -- ^ Block state after executing instructions.
-                 -> CodeAddr
-                    -- ^ Address we are trying to reach.
-                 -> DiscoveryInfo X86_64
-                 -> DiscoveryInfo X86_64
-mergeIntraJump' src ab _tgt _s0
+                -> CFGM st_s ids ()
+mergeIntraJump src ab _tgt
   | not (absStackHasReturnAddr ab)
-  , debug DCFG ("WARNING: Missing return value in jump from " ++ show src ++ " to\n" ++ show ab) False = error "Unexpected mergeIntraJump'"
-mergeIntraJump' src ab tgt s0 = do
+  , debug DCFG ("WARNING: Missing return value in jump from " ++ show src ++ " to\n" ++ show ab) False
+  = error "Unexpected mergeIntraJump"
+mergeIntraJump src ab tgt = do
   -- Associate a new abstract state with the code region.
   let upd new s = do
         -- Add reverse edge
         s & reverseEdges %~ Map.insertWith Set.union tgt (Set.singleton (labelAddr src))
           & absState %~ Map.insert tgt new
           & frontier %~ Map.insert tgt (NextIP src)
+  s0 <- get
   case Map.lookup tgt (s0^.absState) of
     -- We have seen this block before, so need to join and see if
     -- the results is changed.
     Just ab_old ->
       case joinD ab_old ab of
-        Nothing  -> s0
-        Just new -> upd new s0
+        Nothing  -> return ()
+        Just new -> modify $ upd new
     -- We haven't seen this block before
-    Nothing -> s0 & upd ab
-                  & markBlockStart tgt ab
+    Nothing -> do modify $ upd ab
+                  markBlockStart tgt ab
 
 -- | This updates the state of a function when returning from a system call.
 mergeFreeBSDSyscall :: BlockLabel Word64
@@ -419,7 +458,7 @@ mergeFreeBSDSyscall :: BlockLabel Word64
                        --
                        -- This code assumes that the return address belongs
                        -- to the same function.
-                    -> State (DiscoveryInfo X86_64) ()
+                    -> CFGM st_s ids ()
 mergeFreeBSDSyscall src_lbl ab0 addr = do
   let regFn :: X86Reg tp -> AbsValue 64 tp
       regFn r
@@ -453,9 +492,8 @@ mergeCallerReturn :: BlockLabel Word64
                      -- ^ Block state just before call.
                   -> CodeAddr
                      -- ^ Address we will return to.
-                  -> State (DiscoveryInfo X86_64) ()
+                  -> CFGM st_s ids ()
 mergeCallerReturn lbl ab0 addr = do
-  s <- get
   let regFn :: X86Reg tp -> AbsValue 64 tp
       regFn r
           -- We set IPReg
@@ -482,7 +520,7 @@ mergeCallerReturn lbl ab0 addr = do
 
   let ab = mkAbsBlockState regFn (ab0^.startAbsStack)
 
-  put $ mergeIntraJump' lbl ab addr s
+  mergeIntraJump lbl ab addr
 
 -- Check floating point top.
 getAbsX87Top :: Monad m => AbsBlockState X86_64 -> m Int
@@ -497,10 +535,10 @@ getAbsX87Top abst =
 -- FIXME: if val \notin av then we should return bottom
 -- @refineProcState v av s@ returns a processor state after we have
 -- asserted that @v@ is contained in the set @AbsValue@.
-refineProcState :: Value X86_64 tp -- ^ Value in processor state
+refineProcState :: Value X86_64 ids tp -- ^ Value in processor state
                 -> AbsValue 64 tp -- ^ Abstract value to assign value.
-                -> AbsProcessorState X86_64
-                -> AbsProcessorState X86_64
+                -> AbsProcessorState X86_64 ids
+                -> AbsProcessorState X86_64 ids
 refineProcState (BVValue _n _val) _av regs = regs
 refineProcState (Initial r) av regs =
   regs & (absInitialRegs . boundValue r) %~ flip meet av
@@ -520,10 +558,10 @@ refineProcState (AssignedValue ass@(Assignment _ rhs)) av regs
   where
     av_old = regs ^. absAssignments ^. assignLens ass
 
-refineApp :: App (Value X86_64) tp
+refineApp :: App (Value X86_64 ids) tp
           -> AbsValue 64 tp
-          -> AbsProcessorState X86_64
-          -> AbsProcessorState X86_64
+          -> AbsProcessorState X86_64 ids
+          -> AbsProcessorState X86_64 ids
 refineApp app av regs =
   case app of
 
@@ -565,17 +603,17 @@ refineApp app av regs =
     getAssignApp _ = Nothing
 
 refineTrunc :: ((n + 1) <= n')
-            => BVValue X86_64 n'
+            => BVValue X86_64 ids n'
             -> NatRepr n
             -> AbsValue 64 (BVType n)
-            -> AbsProcessorState X86_64
-            -> AbsProcessorState X86_64
+            -> AbsProcessorState X86_64 ids
+            -> AbsProcessorState X86_64 ids
 refineTrunc v sz av regs = refineProcState v (subValue sz av) regs
 
-refineULeqTrue :: Value X86_64 tp
-               -> Value X86_64 tp
-               -> AbsProcessorState X86_64
-               -> AbsProcessorState X86_64
+refineULeqTrue :: Value X86_64 ids tp
+               -> Value X86_64 ids tp
+               -> AbsProcessorState X86_64 ids
+               -> AbsProcessorState X86_64 ids
 refineULeqTrue x y regs = refineProcState x x_leq (refineProcState y y_leq regs)
   where
     (x_leq, y_leq) = abstractULeq (typeRepr x) (transferValue regs x) (transferValue regs y)
@@ -586,30 +624,30 @@ refineULeqTrue x y regs = refineProcState x x_leq (refineProcState y y_leq regs)
     --                  ++ show (pretty regs)
     --   | otherwise  = r
 
-refineULtTrue :: Value X86_64 tp
-              -> Value X86_64 tp
-              -> AbsProcessorState X86_64
-              -> AbsProcessorState X86_64
+refineULtTrue :: Value X86_64 ids tp
+              -> Value X86_64 ids tp
+              -> AbsProcessorState X86_64 ids
+              -> AbsProcessorState X86_64 ids
 refineULtTrue x y regs = refineProcState x x_lt (refineProcState y y_lt regs)
   where
     (x_lt, y_lt) = abstractULt (typeRepr x) (transferValue regs x) (transferValue regs y)
 
-refineLeq :: Value X86_64 tp
-          -> Value X86_64 tp
+refineLeq :: Value X86_64 ids tp
+          -> Value X86_64 ids tp
           -> Integer
-          -> AbsProcessorState X86_64
-          -> AbsProcessorState X86_64
+          -> AbsProcessorState X86_64 ids
+          -> AbsProcessorState X86_64 ids
 refineLeq x y b regs
      -- y < x
     | b == 0     = refineULtTrue y x regs
     -- x <= y
     | otherwise  = refineULeqTrue x y regs
 
-refineLt :: Value X86_64 tp
-         -> Value X86_64 tp
+refineLt :: Value X86_64 ids tp
+         -> Value X86_64 ids tp
          -> Integer
-         -> AbsProcessorState X86_64
-         -> AbsProcessorState X86_64
+         -> AbsProcessorState X86_64 ids
+         -> AbsProcessorState X86_64 ids
 refineLt x y b regs
   -- y <= x
   | b == 0     = refineULeqTrue y x regs
@@ -627,8 +665,8 @@ rangeInReadonlySegment base end mem =
 
 -- See if expression matches form expected by jump tables
 matchJumpTable :: Memory Word64
-               -> BVValue X86_64 64 -- ^ Memory address that IP is read from.
-               -> Maybe (Word64, BVValue X86_64 64)
+               -> BVValue X86_64 ids 64 -- ^ Memory address that IP is read from.
+               -> Maybe (Word64, BVValue X86_64 ids 64)
 matchJumpTable mem read_addr
     -- Turn the read address into base + offset.
   | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp read_addr
@@ -642,9 +680,9 @@ matchJumpTable _ _ =
 -- Returns the index bounds for a jump table of 'Nothing' if this is not a block
 -- table.
 getJumpTableBounds :: Memory Word64 -- ^ State of memory
-                   -> AbsProcessorState X86_64 -- ^ Current processor registers.
+                   -> AbsProcessorState X86_64 ids -- ^ Current processor registers.
                    -> Word64 -- ^ Base
-                   -> BVValue X86_64 64 -- ^ Index in jump table
+                   -> BVValue X86_64 ids 64 -- ^ Index in jump table
                    -> Maybe Word64
                    -- ^ One past last index in jump table or nothing
 getJumpTableBounds mem regs base jump_index
@@ -681,9 +719,9 @@ getJumpTableBounds _ _ _ _ = Nothing
   --      else Nothing
   -- | otherwise = Nothing
 
-transferBlock :: Block X86_64      -- ^ Block to start from
-              -> AbsProcessorState X86_64 -- ^ Registers at this block
-              -> State (DiscoveryInfo X86_64) ()
+transferBlock :: Block X86_64 ids -- ^ Block to start from
+              -> AbsProcessorState X86_64 ids -- ^ Registers at this block
+              -> CFGM st_s ids ()
 transferBlock b regs = do
   let lbl = blockLabel b
   debugM DCFG ("transferBlock " ++ show lbl)
@@ -759,7 +797,7 @@ transferBlock b regs = do
               -- tail call when go to the right place.
               -- TODO: Add check to ensure stack height is correct.
               debug DCFG ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
-              modify $ markAddrAsFunction tgt_addr
+              markAddrAsFunction tgt_addr
               -- Check top of stack points to return value.
               let sp_val = s'^.boundValue sp_reg
               let ret_val = transferRHS regs' (ReadMem sp_val (BVTypeRepr n64))
@@ -780,7 +818,7 @@ transferBlock b regs = do
             else do
               -- Merge block state.
               let Just abst' = abst & setAbsIP (isCodeAddrOrNull mem) tgt_addr
-              modify $ mergeIntraJump' lbl abst' tgt_addr
+              mergeIntraJump lbl abst' tgt_addr
 
 
           -- Block ends with what looks like a jump table.
@@ -804,7 +842,7 @@ transferBlock b regs = do
             -- This returns the last address read.
             let resolveJump :: [Word64] -- ^ Addresses in jump table in reverse order
                             -> Word64 -- ^ Current index
-                            -> State (DiscoveryInfo X86_64) [Word64]
+                            -> CFGM st_s ids [Word64]
                 resolveJump prev idx | Just idx == mread_end = do
                   -- Stop jump table when we have reached computed bounds.
                   return (reverse prev)
@@ -832,7 +870,7 @@ transferBlock b regs = do
             let abst = finalAbsBlockState regs' s'
             recordFunctionAddrs lbl mem (abst^.absRegState^.curIP)
 
-transfer :: CodeAddr -> State (DiscoveryInfo X86_64) ()
+transfer :: CodeAddr -> CFGM st_s ids ()
 transfer addr = do
   mem <- gets memory
   mroot <- getBlock addr
@@ -845,18 +883,19 @@ transfer addr = do
 ------------------------------------------------------------------------
 -- Main loop
 
-mkCFG :: Map CodeAddr (Maybe (BlockRegion X86_64)) -> CFG X86_64
+mkCFG :: Map CodeAddr (Maybe (BlockRegion X86_64 ids)) -> CFG X86_64 ids
 mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr (Just br) = insertBlocksForCode addr (brEnd br) l g
           where l = Map.elems (brBlocks br)
         go g _ Nothing = g
 
-explore_frontier :: DiscoveryInfo X86_64 -> DiscoveryInfo X86_64
-explore_frontier st =
+explore_frontier :: CFGM st_s ids ()
+explore_frontier = do
+  st <- get
   case Map.minViewWithKey (st^.frontier) of
     Nothing ->
       case Set.minView (st^.function_frontier) of
-        Nothing -> st
+        Nothing -> return ()
         Just (addr, next_roots) -> do
           let high = Set.lookupGT addr (st^.functionEntries)
               st' = st & function_frontier .~ next_roots
@@ -865,11 +904,12 @@ explore_frontier st =
                        & reverseEdges    %~ deleteMapRange (Just addr) high
                          -- Delete any entries we previously discovered for function.
                        & absState        %~ deleteMapRange (Just addr) high
-           in explore_frontier st'
+          put st'
+          explore_frontier
     Just ((addr,_rsn), next_roots) ->
-      let st_pre = st & frontier .~ next_roots
-          st_post = flip execState st_pre $ transfer addr
-       in explore_frontier st_post
+      do put $ st & frontier .~ next_roots
+         transfer addr
+         explore_frontier
 
 cfgFromAddrs :: ArchitectureInfo X86_64
                 -- ^ Architecture-specific information needed for doing control-flow exploration.
@@ -881,9 +921,18 @@ cfgFromAddrs :: ArchitectureInfo X86_64
                 -- ^ Syscall personality
              -> [CodeAddr]
                 -- ^ Location to start disassembler form.
-             -> DiscoveryInfo X86_64
+             -> Some (DiscoveryInfo X86_64)
 cfgFromAddrs arch_info mem symbols sysp init_addrs =
-  debug DCFG ("Starting addrs " ++ show (Hex <$> init_addrs)) $ s3
+  runCFGM (emptyDiscoveryInfo mem symbols sysp arch_info
+           & functionEntries .~ Set.fromList init_addrs
+           & absState .~ init_abs_state
+           & function_frontier .~ Set.fromList init_addrs
+           & globalDataMap .~ global_data) $ do
+    debugM DCFG ("Starting addrs " ++ show (Hex <$> init_addrs))
+    reallyGetBlockList init_abs_state
+    explore_frontier
+    mapM_ go (memAsWord64le_withAddr mem)
+    explore_frontier
   where
     global_data = Map.fromList
       [ (v, ReferencedValue)
@@ -897,33 +946,24 @@ cfgFromAddrs arch_info mem symbols sysp init_addrs =
                      ]
 
 
-    s0 = emptyDiscoveryInfo mem symbols sysp arch_info
-       & functionEntries .~ Set.fromList init_addrs
-       & absState .~ init_abs_state
-       & function_frontier .~ Set.fromList init_addrs
-       & globalDataMap .~ global_data
-       & reallyGetBlockList init_abs_state
-
-    s1 = explore_frontier s0
-
     -- Add in code pointers from memory.
-    go s (a,v)
+    go :: forall st_s ids. (Word64, Word64) -> CFGM st_s ids ()
+    go (a,v) = get >>= \s -> go_s s (a,v)
+    go_s :: forall st_s ids. DiscoveryInfo X86_64 ids -> (Word64, Word64) ->
+            CFGM st_s ids ()
+    go_s s (a,v)
         -- Skip values not in memory.
-      | not (isCodeAddr mem v) = s
+      | not (isCodeAddr mem v) = return ()
         -- Skip this if it is already a known function.
-      | Set.member v (s^.functionEntries) = s
+      | Set.member v (s^.functionEntries) = return ()
         -- Ignore entries found in read only segments.
         -- They have a high liklyhood of being elements of jump tables
-      | isReadonlyAddr mem a = s
+      | isReadonlyAddr mem a = return ()
         -- Check if we already found this
       | Map.member v (s^.blocks) =
-        debug DCFG ("Identified function entry "
-                ++ showHex v (" due to global store at " ++ showHex a ".")) $
-        markAddrAsFunction v s
+        debugM DCFG ("Identified function entry "
+                ++ showHex v (" due to global store at " ++ showHex a ".")) >>
+        markAddrAsFunction v
       | otherwise =
-        debug DCFG ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") $
-        markAddrAsFunction v s
-
-    -- Explore data values
-    s2  = foldl' go s1 (memAsWord64le_withAddr mem)
-    s3 = explore_frontier s2
+        debugM DCFG ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".") >>
+        markAddrAsFunction v

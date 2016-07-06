@@ -896,33 +896,33 @@ instance (OrdF (ArchReg arch), ShowF (ArchReg arch)) => Show (AbsBlockState arch
 type ArchAbsValue arch = AbsValue (ArchAddrWidth arch)
 
 -- | this stores the abstract state of the system at a given point in time.
-data AbsProcessorState arch
+data AbsProcessorState arch ids
    = AbsProcessorState { absCodeWidth    :: !(NatRepr (ArchAddrWidth arch))
                        , absIsCode       :: !(Word64 -> Bool)
                          -- ^ Recognizer for code addresses.
                        , _absInitialRegs :: !(RegState arch (ArchAbsValue arch))
-                       , _absAssignments :: !(MapF (Assignment arch) (ArchAbsValue arch))
+                       , _absAssignments :: !(MapF (Assignment arch ids) (ArchAbsValue arch))
                        , _curAbsStack    :: !(AbsBlockStack (ArchAddrWidth arch))
                        }
 
 
-absInitialRegs :: Simple Lens (AbsProcessorState arch) (RegState arch (ArchAbsValue arch))
+absInitialRegs :: Simple Lens (AbsProcessorState arch ids) (RegState arch (ArchAbsValue arch))
 absInitialRegs = lens _absInitialRegs (\s v -> s { _absInitialRegs = v })
 
-absAssignments :: Simple Lens (AbsProcessorState arch)
-                    (MapF (Assignment arch) (ArchAbsValue arch))
+absAssignments :: Simple Lens (AbsProcessorState arch ids)
+                    (MapF (Assignment arch ids) (ArchAbsValue arch))
 absAssignments = lens _absAssignments (\s v -> s { _absAssignments = v })
 
-curAbsStack :: Simple Lens (AbsProcessorState arch) (AbsBlockStack (ArchAddrWidth arch))
+curAbsStack :: Simple Lens (AbsProcessorState arch ids) (AbsBlockStack (ArchAddrWidth arch))
 curAbsStack = lens _curAbsStack (\s v -> s { _curAbsStack = v })
 
 instance (OrdF (ArchReg arch), ShowF (ArchReg arch))
-      => Show (AbsProcessorState arch) where
+      => Show (AbsProcessorState arch ids) where
   show = show . pretty
 
 -- FIXME
 instance (OrdF (ArchReg arch), ShowF (ArchReg arch))
-      => Pretty (AbsProcessorState arch) where
+      => Pretty (AbsProcessorState arch ids) where
   pretty regs = pretty (AbsBlockState { _absRegState   = regs ^. absInitialRegs
                                       , _startAbsStack = regs ^. curAbsStack })
 
@@ -930,7 +930,7 @@ initAbsProcessorState :: NatRepr (ArchAddrWidth arch)
                       -> (Word64 -> Bool)
                          -- ^ Predicate that recognizes when a value is a code pointer.
                       -> AbsBlockState arch
-                      -> AbsProcessorState arch
+                      -> AbsProcessorState arch ids
 initAbsProcessorState code_width is_code s =
   AbsProcessorState { absCodeWidth = code_width
                     , absIsCode = is_code
@@ -941,9 +941,9 @@ initAbsProcessorState code_width is_code s =
 
 -- | A lens that allows one to lookup and update the value of an assignment in
 -- map from assignments to abstract values.
-assignLens :: (HasRepr (ArchFn a) TypeRepr)
-           => Assignment a tp
-           -> Simple Lens (MapF (Assignment a) (ArchAbsValue a)) (ArchAbsValue a tp)
+assignLens :: (HasRepr (ArchFn a ids) TypeRepr)
+           => Assignment a ids tp
+           -> Simple Lens (MapF (Assignment a ids) (ArchAbsValue a)) (ArchAbsValue a tp)
 assignLens ass = lens (fromMaybe TopV . MapF.lookup ass)
                       (\s v -> MapF.insert ass v s)
 
@@ -962,19 +962,19 @@ deleteRange l h m
       _ -> m
 
 -- Return the width of a value.
-someValueWidth :: ( HasRepr (ArchFn arch) TypeRepr
+someValueWidth :: ( HasRepr (ArchFn arch ids) TypeRepr
                   , HasRepr (ArchReg arch) TypeRepr
                   )
-               => Value arch tp
+               => Value arch ids tp
                -> Integer
 someValueWidth v =
   case typeRepr v of
     BVTypeRepr w -> natValue w
 
-valueByteSize :: ( HasRepr (ArchFn arch) TypeRepr
+valueByteSize :: ( HasRepr (ArchFn arch ids) TypeRepr
                  , HasRepr (ArchReg arch) TypeRepr
                  )
-              => Value arch tp
+              => Value arch ids tp
               -> Int64
 valueByteSize v = fromInteger $ (someValueWidth v + 7) `div` 8
 
@@ -987,7 +987,7 @@ pruneStack = Map.filter f
 ------------------------------------------------------------------------
 -- Transfer Value
 
-transferValue' :: ( HasRepr (ArchFn a) TypeRepr
+transferValue' :: ( HasRepr (ArchFn a ids) TypeRepr
                   , OrdF (ArchReg a)
                   , ShowF (ArchReg a)
                   )
@@ -995,9 +995,9 @@ transferValue' :: ( HasRepr (ArchFn a) TypeRepr
                   -- ^ Width of a code pointer
                -> (Word64 -> Bool)
                   -- ^ Predicate that recognizes if address is code addreess.
-               -> MapF (Assignment a) (ArchAbsValue a)
+               -> MapF (Assignment a ids) (ArchAbsValue a)
                -> RegState a (ArchAbsValue a)
-               -> Value a tp
+               -> Value a ids tp
                -> ArchAbsValue a tp
 transferValue' code_width is_code amap aregs v =
   case v of
@@ -1014,12 +1014,12 @@ transferValue' code_width is_code amap aregs v =
      | otherwise -> aregs ^. boundValue r
 
 -- | Compute abstract value from value and current registers.
-transferValue :: ( HasRepr (ArchFn a) TypeRepr
+transferValue :: ( HasRepr (ArchFn a ids) TypeRepr
                  , OrdF (ArchReg a)
                  , ShowF (ArchReg a)
                  )
-              => AbsProcessorState a
-              -> Value a tp
+              => AbsProcessorState a ids
+              -> Value a ids tp
               -> ArchAbsValue a tp
 transferValue c v =
   transferValue' (absCodeWidth c) (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
@@ -1027,7 +1027,7 @@ transferValue c v =
 ------------------------------------------------------------------------
 -- Operations
 
-addMemWrite :: ( HasRepr (ArchFn  arch) TypeRepr
+addMemWrite :: ( HasRepr (ArchFn arch ids) TypeRepr
                , HasRepr (ArchReg arch) TypeRepr
                , ShowF (ArchReg arch)
                , OrdF (ArchReg arch)
@@ -1037,10 +1037,10 @@ addMemWrite :: ( HasRepr (ArchFn  arch) TypeRepr
                -- ^ Current instruction pointer
                --
                -- Used for pretty printing
-            -> BVValue arch (ArchAddrWidth arch)
-            -> Value arch tp
-            -> AbsProcessorState arch
-            -> AbsProcessorState arch
+            -> BVValue arch ids (ArchAddrWidth arch)
+            -> Value arch ids tp
+            -> AbsProcessorState arch ids
+            -> AbsProcessorState arch ids
 addMemWrite cur_ip a v r =
   case (transferValue r a, transferValue r v) of
     -- (_,TopV) -> r
@@ -1084,14 +1084,14 @@ absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStac
 
 
 -- | Return state for after value has run.
-finalAbsBlockState :: forall a
+finalAbsBlockState :: forall a ids
                    .  ( AbsRegState a
                       , OrdF (ArchReg a)
                       , ShowF (ArchReg a)
-                      , HasRepr (ArchFn a) TypeRepr
+                      , HasRepr (ArchFn a ids) TypeRepr
                       )
-                   => AbsProcessorState a
-                   -> RegState a (Value a)
+                   => AbsProcessorState a ids
+                   -> RegState a (Value a ids)
                    -> AbsBlockState a
 finalAbsBlockState c s =
   let transferReg :: ArchReg a tp -> ArchAbsValue a tp
@@ -1101,12 +1101,12 @@ finalAbsBlockState c s =
 ------------------------------------------------------------------------
 -- Transfer functions
 
-transferApp :: ( HasRepr (ArchFn a) TypeRepr
+transferApp :: ( HasRepr (ArchFn a ids) TypeRepr
                , OrdF (ArchReg a)
                , ShowF (ArchReg a)
                )
-            => AbsProcessorState a
-            -> App (Value a) tp
+            => AbsProcessorState a ids
+            -> App (Value a ids) tp
             -> ArchAbsValue a tp
 transferApp r a =
   case a of
@@ -1119,18 +1119,18 @@ transferApp r a =
     BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)
     _ -> TopV
 
-class SupportAbsEvaluation a f where
+class SupportAbsEvaluation a ids f where
   -- Transfer some type into an abstract value given a processor state.
-  transferAbsValue :: AbsProcessorState a -> f tp -> ArchAbsValue a tp
+  transferAbsValue :: AbsProcessorState a ids -> f tp -> ArchAbsValue a tp
 
-transferRHS :: forall a tp
-            .  ( HasRepr (ArchFn a) TypeRepr
+transferRHS :: forall a ids tp
+            .  ( HasRepr (ArchFn a ids) TypeRepr
                , OrdF (ArchReg a)
                , ShowF (ArchReg a)
-               , SupportAbsEvaluation a (ArchFn a)
+               , SupportAbsEvaluation a ids (ArchFn a ids)
                )
-            => AbsProcessorState a
-            -> AssignRhs a tp
+            => AbsProcessorState a ids
+            -> AssignRhs a ids tp
             -> ArchAbsValue a tp
 transferRHS r rhs =
   case rhs of
@@ -1147,14 +1147,14 @@ transferRHS r rhs =
 
 -- | Merge in the value of the assignment.  If we have already seen a
 -- value, this will combine with meet.
-addAssignment :: ( HasRepr (ArchFn a) TypeRepr
+addAssignment :: ( HasRepr (ArchFn a ids) TypeRepr
                  , OrdF (ArchReg a)
                  , ShowF (ArchReg a)
-                 , SupportAbsEvaluation a (ArchFn a)
+                 , SupportAbsEvaluation a ids (ArchFn a ids)
                  )
-              => Assignment a tp
-              -> AbsProcessorState a
-              -> AbsProcessorState a
+              => Assignment a ids tp
+              -> AbsProcessorState a ids
+              -> AbsProcessorState a ids
 addAssignment a c =
   c & (absAssignments . assignLens a)
     %~ flip meet (transferRHS c (assignRhs a))

@@ -25,6 +25,7 @@ import qualified Data.Map as Map
 import           Data.Maybe (mapMaybe)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
@@ -453,7 +454,8 @@ showGaps :: LoadStyle -> Elf Word64 -> IO ()
 showGaps loadSty binary = do
     -- Create memory for elf
     mem <- mkElfMem loadSty binary
-    let cfg = mkCFG $ cfgFromMemAndBinary mem binary ^.blocks
+    Some disc_info <- return $ cfgFromMemAndBinary mem binary
+    let cfg = mkCFG (disc_info^.blocks)
     let ends = cfgBlockEnds cfg
     let cfg_blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
     let gaps = filter (isInterestingCode mem)
@@ -478,7 +480,8 @@ showCFG :: LoadStyle -> Elf Word64 -> IO ()
 showCFG loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let fg = mkCFG (cfgFromMemAndBinary mem e^.blocks)
+  Some disc_info <- return $ cfgFromMemAndBinary mem e
+  let fg = mkCFG (disc_info^.blocks)
   let g = eliminateDeadRegisters fg
   print (pretty g)
 
@@ -491,7 +494,7 @@ getEntries :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
 -- code discovery.
 getFns :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
        -> Set String    -- ^ Name of symbols/addresses to exclude
-       -> DiscoveryInfo X86_64 -- ^ Information about original binary recovered from static analysis.
+       -> DiscoveryInfo X86_64 ids -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
 getFns symMap excludedNames s = do
 
@@ -519,14 +522,14 @@ showFunctions args = do
   e <- readElf64 parseElf (args^.programPath)
   -- Create memory for elf
   mem <- mkElfMem (args^.loadStyle) e
-  let s = cfgFromMemAndBinary mem e
+  Some s <- return $ cfgFromMemAndBinary mem e
   fns <- getFns (elfSymAddrMap e) (args^.notransAddrs) s
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-ppStmtAndAbs :: MapF (Assignment X86_64) (AbsValue 64) -> Stmt X86_64 -> Doc
+ppStmtAndAbs :: MapF (Assignment X86_64 ids) (AbsValue 64) -> Stmt X86_64 ids -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
     AssignStmt a ->
@@ -538,7 +541,7 @@ ppStmtAndAbs m stmt =
     _ -> pretty stmt
 
 
-ppBlockAndAbs :: MapF (Assignment X86_64) (AbsValue 64) -> Block X86_64 -> Doc
+ppBlockAndAbs :: MapF (Assignment X86_64 ids) (AbsValue 64) -> Block X86_64 ids -> Doc
 ppBlockAndAbs m b =
   pretty (blockLabel b) <> text ":" <$$>
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
@@ -547,7 +550,7 @@ ppBlockAndAbs m b =
 -- | Create a final CFG
 mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
                    -> Elf Word64 -- ^ Elf file to create CFG for.
-                   -> (DiscoveryInfo X86_64, Map CodeAddr BS.ByteString)
+                   -> (Some (DiscoveryInfo X86_64), Map CodeAddr BS.ByteString)
 mkFinalCFGWithSyms mem e =
     ( cfgFromAddrs x86ArchitectureInfo mem sym_map sysp (elfEntry e:sym_addrs)
     , sym_map
@@ -574,15 +577,15 @@ mkFinalCFGWithSyms mem e =
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
 
-cfgFromMemAndBinary :: Memory Word64 -> Elf Word64 -> DiscoveryInfo X86_64
+cfgFromMemAndBinary :: Memory Word64 -> Elf Word64 -> Some (DiscoveryInfo X86_64)
 cfgFromMemAndBinary mem e = fst (mkFinalCFGWithSyms mem e)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let s = cfgFromMemAndBinary mem e
-      fg = mkCFG (s^.blocks)
+  Some s <- return $ cfgFromMemAndBinary mem e
+  let fg = mkCFG (s^.blocks)
   let abst = s^.absState
       amap = assignmentAbsValues mem fg abst
   let g  = eliminateDeadRegisters fg
@@ -646,7 +649,7 @@ showLLVM args dir = do
 
   -- Create memory for elf
   mem <- mkElfMem loadSty e
-  let (cfg, symMap) = mkFinalCFGWithSyms mem e
+  (Some cfg, symMap) <- return $ mkFinalCFGWithSyms mem e
 
   let mkName f = dir </> (name ++ "_" ++ showHex addr ".ll")
         where
@@ -671,7 +674,7 @@ showLLVM args dir = do
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a X86State to detect if it read its instruction
 -- pointer from an address that is 8 below the stack pointer.
-stateEndsWithRet :: X86State (Value X86_64) -> Bool
+stateEndsWithRet :: X86State (Value X86_64 ids) -> Bool
 stateEndsWithRet s = do
   let next_ip = s^.boundValue ip_reg
       next_sp = s^.boundValue sp_reg
@@ -684,7 +687,7 @@ stateEndsWithRet s = do
 
 -- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
 -- with a write having the given type.
-isWriteTo :: Stmt X86_64 -> BVValue X86_64 64 -> TypeRepr tp -> Maybe (Value X86_64 tp)
+isWriteTo :: Stmt X86_64 ids -> BVValue X86_64 ids 64 -> TypeRepr tp -> Maybe (Value X86_64 ids tp)
 isWriteTo (WriteMem a val) expected tp
   | Just _ <- testEquality a expected
   , Just Refl <- testEquality (typeRepr val) tp =
@@ -693,7 +696,7 @@ isWriteTo _ _ _ = Nothing
 
 -- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes to @addr@ and
 -- @addr@ is a code pointer.
-isCodeAddrWriteTo :: Memory Word64 -> Stmt X86_64 -> BVValue X86_64 64 -> Maybe Word64
+isCodeAddrWriteTo :: Memory Word64 -> Stmt X86_64 ids -> BVValue X86_64 ids 64 -> Maybe Word64
 isCodeAddrWriteTo mem s sp
   | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
   , isCodeAddr mem (fromInteger val)
@@ -701,7 +704,7 @@ isCodeAddrWriteTo mem s sp
 isCodeAddrWriteTo _ _ _ = Nothing
 
 -- | Returns true if it looks like block ends with a call.
-blockContainsCall :: Memory Word64 -> Block X86_64 -> X86State (Value X86_64) -> Bool
+blockContainsCall :: Memory Word64 -> Block X86_64 ids -> X86State (Value X86_64 ids) -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.boundValue sp_reg
       go [] = False
@@ -711,7 +714,7 @@ blockContainsCall mem b s =
    in go (reverse (blockStmts b))
 
 -- | Return next states for block.
-blockNextStates :: CFG X86_64 -> Block X86_64 -> [X86State (Value X86_64)]
+blockNextStates :: CFG X86_64 ids -> Block X86_64 ids -> [X86State (Value X86_64 ids)]
 blockNextStates g b =
   case blockTerm b of
     FetchAndExecute s -> [s]
@@ -720,7 +723,7 @@ blockNextStates g b =
             Just y = findBlock g y_lbl
     Syscall _ -> []
 
-checkReturnsIdentified :: CFG X86_64 -> Block X86_64 -> IO ()
+checkReturnsIdentified :: CFG X86_64 ids -> Block X86_64 ids -> IO ()
 checkReturnsIdentified g b =
   case blockNextStates g b of
     [s] -> do
@@ -734,7 +737,7 @@ checkReturnsIdentified g b =
         _ -> return ()
     _ -> return ()
 
-checkCallsIdentified :: Memory Word64 -> CFG X86_64 -> Block X86_64 -> IO ()
+checkCallsIdentified :: Memory Word64 -> CFG X86_64 ids -> Block X86_64 ids -> IO ()
 checkCallsIdentified mem g b = do
   let lbl = blockLabel b
   case blockNextStates g b of
@@ -926,7 +929,7 @@ performReopt args =
     orig_binary <- readElf64 parseElf (args^.programPath)
     -- Construct CFG from binary
     mem <- mkElfMem (args^.loadStyle) orig_binary
-    let cfg = cfgFromMemAndBinary mem orig_binary
+    Some cfg <- return $ cfgFromMemAndBinary mem orig_binary
     let addrSymMap = elfAddrSymMap orig_binary
     let output_path = args^.outputPath
 

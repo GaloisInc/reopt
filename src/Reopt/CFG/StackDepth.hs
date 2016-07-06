@@ -32,24 +32,24 @@ import           Reopt.Machine.X86State
 
 import           Debug.Trace
 
-data StackDepthOffset
-   = Pos (BVValue X86_64 64)
-   | Neg (BVValue X86_64 64)
+data StackDepthOffset ids
+   = Pos (BVValue X86_64 ids 64)
+   | Neg (BVValue X86_64 ids 64)
  deriving (Eq, Ord, Show)
 
-negateStackDepthOffset :: StackDepthOffset -> StackDepthOffset
+negateStackDepthOffset :: StackDepthOffset ids -> StackDepthOffset ids
 negateStackDepthOffset (Pos x) = Neg x
 negateStackDepthOffset (Neg x) = Pos x
 
-isNegativeDepth :: StackDepthOffset -> Bool
+isNegativeDepth :: StackDepthOffset ids -> Bool
 isNegativeDepth (Neg _) = True
 isNegativeDepth _ = False
 
 -- One stack expression, basically staticPart + \Sigma dynamicPart
-data StackDepthValue = SDV { staticPart :: !Int64, dynamicPart :: !(Set StackDepthOffset) }
-                       deriving (Eq, Ord, Show)
+data StackDepthValue ids = SDV { staticPart :: !Int64, dynamicPart :: !(Set (StackDepthOffset ids)) }
+                         deriving (Eq, Ord, Show)
 
-instance Pretty StackDepthValue where
+instance Pretty (StackDepthValue ids) where
   pretty sdv = integer (fromIntegral $ staticPart sdv)
                <+> go (Set.toList $ dynamicPart sdv)
     where
@@ -62,28 +62,28 @@ instance Pretty StackDepthValue where
 --   | Set.null (dynamicPart sv) = Just (staticPart sv)
 --   | otherwise                 = Nothing
 
-constantDepthValue :: Int64 -> StackDepthValue
+constantDepthValue :: Int64 -> StackDepthValue ids
 constantDepthValue c = SDV c Set.empty
 
-addStackDepthValue :: StackDepthValue -> StackDepthValue -> StackDepthValue
+addStackDepthValue :: StackDepthValue ids -> StackDepthValue ids -> StackDepthValue ids
 addStackDepthValue sdv1 sdv2  = SDV (staticPart sdv1 + staticPart sdv2)
                                     (dynamicPart sdv1 `Set.union` dynamicPart sdv2)
 
-negateStackDepthValue :: StackDepthValue -> StackDepthValue
+negateStackDepthValue :: StackDepthValue ids -> StackDepthValue ids
 negateStackDepthValue sdv = SDV { staticPart  = - (staticPart sdv)
                                 , dynamicPart = Set.map negateStackDepthOffset (dynamicPart sdv) }
 
 -- | v1 `subsumes` v2 if a stack of depth v1 is always larger than a
 -- stack of depth v2.  Note that we are interested in negative values
 -- primarily.
-subsumes :: StackDepthValue -> StackDepthValue -> Bool
+subsumes :: StackDepthValue ids -> StackDepthValue ids -> Bool
 subsumes v1 v2
   | dynamicPart v2 `Set.isSubsetOf` dynamicPart v1 = staticPart v1 <= staticPart v2
   -- FIXME: subsets etc.
   | otherwise = False
 
 -- could do this online, this helps with debugging though.
-minimizeStackDepthValues :: Set StackDepthValue -> Set StackDepthValue
+minimizeStackDepthValues :: Set (StackDepthValue ids) -> Set (StackDepthValue ids)
 minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositive
   where
     discardPositive v = v { dynamicPart = Set.filter isNegativeDepth (dynamicPart v) }
@@ -95,27 +95,27 @@ minimizeStackDepthValues = Set.fromList . Set.fold go [] . Set.map discardPositi
 -- -----------------------------------------------------------------------------
 
 -- For now we assume that the stack pointer a the start of a block is path-independent
-type BlockStackStart = StackDepthValue
+type BlockStackStart ids = StackDepthValue ids
 
 -- For now this is just the set of stack addresses referenced by the
 -- program --- note that as it is partially symbolic, we can't always
 -- statically determine the stack depth (might depend on arguments, for example).
-type BlockStackDepths = Set StackDepthValue
+type BlockStackDepths ids = Set (StackDepthValue ids)
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
-data StackDepthState
-   = SDS { _blockInitStackPointers :: !(Map (BlockLabel Word64) BlockStackStart)
-         , _blockStackRefs :: !(BlockStackDepths)
+data StackDepthState ids
+   = SDS { _blockInitStackPointers :: !(Map (BlockLabel Word64) (BlockStackStart ids))
+         , _blockStackRefs :: !(BlockStackDepths ids)
          , _blockFrontier  :: !(Set (BlockLabel Word64))
          }
 
-blockInitStackPointers :: Simple Lens StackDepthState (Map (BlockLabel Word64) BlockStackStart)
+blockInitStackPointers :: Simple Lens (StackDepthState ids) (Map (BlockLabel Word64) (BlockStackStart ids))
 blockInitStackPointers = lens _blockInitStackPointers (\s v -> s { _blockInitStackPointers = v })
 
-blockStackRefs :: Simple Lens StackDepthState (BlockStackDepths)
+blockStackRefs :: Simple Lens (StackDepthState ids) (BlockStackDepths ids)
 blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 
-blockFrontier :: Simple Lens StackDepthState (Set (BlockLabel Word64))
+blockFrontier :: Simple Lens (StackDepthState ids) (Set (BlockLabel Word64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -147,9 +147,9 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
 
-type StackDepthM a = State StackDepthState a
+type StackDepthM ids a = State (StackDepthState ids) a
 
-addBlock :: BlockLabel Word64 -> BlockStackStart -> StackDepthM ()
+addBlock :: BlockLabel Word64 -> BlockStackStart ids -> StackDepthM ids ()
 addBlock lbl start =
   do x <- use (blockInitStackPointers . at lbl)
      case x of
@@ -159,29 +159,29 @@ addBlock lbl start =
         | start == start' -> return ()
         | otherwise       -> traceM ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start')))
 
-nextBlock :: StackDepthM (Maybe (BlockLabel Word64))
+nextBlock :: StackDepthM ids (Maybe (BlockLabel Word64))
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
-addDepth :: Set StackDepthValue -> StackDepthM ()
+addDepth :: Set (StackDepthValue ids) -> StackDepthM ids ()
 addDepth v = blockStackRefs %= Set.union v
 
-valueHasSP :: BVValue X86_64 64 -> Bool
-valueHasSP val = go val
+valueHasSP :: BVValue X86_64 ids 64 -> Bool
+valueHasSP (val :: BVValue X86_64 ids 64) = go val
   where
-    go :: forall tp . Value X86_64 tp -> Bool
+    go :: forall tp . Value X86_64 ids tp -> Bool
     go v = case v of
              BVValue _sz _i -> False
              Initial r      -> testEquality r sp_reg /= Nothing
              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
-    goAssignRHS :: forall tp. AssignRhs X86_64 tp -> Bool
+    goAssignRHS :: forall tp. AssignRhs X86_64 ids tp -> Bool
     goAssignRHS v =
       case v of
         EvalApp a -> getAny $ foldApp (Any . go)  a
         EvalArchFn (MemCmp _sz cnt src dest rev) -> or [ go cnt, go src, go dest, go rev ]
         _ -> False
 
-parseStackPointer' :: StackDepthValue -> BVValue X86_64 64 -> StackDepthValue
+parseStackPointer' :: StackDepthValue ids -> BVValue X86_64 ids 64 -> StackDepthValue ids
 parseStackPointer' sp0 addr
   -- assert sp occurs in at most once in either x and y
   | Just (BVAdd _ x y) <- valueAsApp addr =
@@ -198,7 +198,7 @@ parseStackPointer' sp0 addr
 
 
 -- FIXME: performance
-parseStackPointer :: StackDepthValue -> BVValue X86_64 64 -> Set StackDepthValue
+parseStackPointer :: StackDepthValue ids -> BVValue X86_64 ids 64 -> Set (StackDepthValue ids)
 parseStackPointer sp0 addr0
   | valueHasSP addr0 = Set.singleton (parseStackPointer' sp0 addr0)
   | otherwise        = Set.empty
@@ -207,7 +207,7 @@ parseStackPointer sp0 addr0
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackDepth :: DiscoveryInfo X86_64 -> CodeAddr -> BlockStackDepths
+maximumStackDepth :: DiscoveryInfo X86_64 ids -> CodeAddr -> BlockStackDepths ids
 maximumStackDepth ist addr =
   minimizeStackDepthValues $ (^. blockStackRefs) $ execState (recoverIter ist Set.empty (Just lbl0)) s0
   where
@@ -218,10 +218,10 @@ maximumStackDepth ist addr =
     sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: DiscoveryInfo X86_64
+recoverIter :: DiscoveryInfo X86_64 ids
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
-               -> StackDepthM ()
+               -> StackDepthM ids ()
 recoverIter _   _     Nothing = return ()
 recoverIter ist seen (Just lbl)
   | lbl `Set.member` seen = nextBlock >>= recoverIter ist seen
@@ -229,9 +229,9 @@ recoverIter ist seen (Just lbl)
                    lbl' <- nextBlock
                    recoverIter ist (Set.insert lbl seen) lbl'
 
-recoverBlock :: DiscoveryInfo X86_64
+recoverBlock :: DiscoveryInfo X86_64 ids
                 -> BlockLabel Word64
-                -> StackDepthM ()
+                -> StackDepthM ids ()
 recoverBlock interp_state root_label = do
   Just init_sp <- use (blockInitStackPointers . at root_label)
   go init_sp root_label

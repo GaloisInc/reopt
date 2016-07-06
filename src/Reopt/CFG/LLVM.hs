@@ -444,7 +444,7 @@ stmtToLLVM stmt = do
    -- PlaceHolderStmt {} -> void $ unimplementedInstr
    -- _           -> void $ unimplementedInstr
 
-assignIdToLLVMIdent :: AssignId -> L.Ident
+assignIdToLLVMIdent :: FnAssignId -> L.Ident
 assignIdToLLVMIdent aid = L.Ident $ "R" ++ show aid
 
 unimplementedInstr :: L.Type -> String -> ToLLVM (L.Typed L.Value)

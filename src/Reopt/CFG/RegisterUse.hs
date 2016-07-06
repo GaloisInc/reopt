@@ -24,7 +24,8 @@ import           Data.Word
 
 import           Data.Macaw.CFG
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.FnRep (FunctionType(..)
+import           Reopt.CFG.FnRep (FnAssignId(..)
+                                  , FunctionType(..)
                                   , ftMaximumFunctionType
                                   , ftMinimumFunctionType
                                   , ftIntArgRegs , ftFloatArgRegs
@@ -38,17 +39,17 @@ import           Debug.Trace
 
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
-type RegDeps = (Set AssignId, Set (Some X86Reg))
-type AssignmentCache = Map (Some (Assignment X86_64)) RegDeps
+type RegDeps ids = (Set (Some (AssignId ids)), Set (Some X86Reg))
+type AssignmentCache ids = Map (Some (Assignment X86_64 ids)) (RegDeps ids)
 
 type FunctionArgs = Map CodeAddr FunctionType
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
-data RegisterUseState = RUS {
+data RegisterUseState ids = RUS {
     -- | Holds the set of registers that we need.  This is the final
     -- output of the algorithm, along with the _blockRegUses below.
-  _assignmentUses     :: !(Set AssignId)
+  _assignmentUses     :: !(Set (Some (AssignId ids)))
     -- | Holds state about the set of registers that a block uses
     -- (required by this block or a successor).
   , _blockRegUses :: !(Map (BlockLabel Word64) (Set (Some X86Reg)))
@@ -57,12 +58,12 @@ data RegisterUseState = RUS {
 
   -- | Maps defined registers to their deps.  Not defined for all
   -- variables, hence use of Map instead of X86State
-  , _blockInitDeps  :: !(Map (BlockLabel Word64) (Map (Some X86Reg) RegDeps))
+  , _blockInitDeps  :: !(Map (BlockLabel Word64) (Map (Some X86Reg) (RegDeps ids)))
   -- | The list of predecessors for a given block
   , _blockPreds     :: !(Map (BlockLabel Word64) [BlockLabel Word64])
   -- | A cache of the registers and their deps.  The key is not included
   -- in the set of deps (but probably should be).
-  , _assignmentCache :: !AssignmentCache
+  , _assignmentCache :: !(AssignmentCache ids)
   -- | The set of blocks we need to consider.
   , _blockFrontier  :: !(Set (BlockLabel Word64))
   -- | Function arguments derived from FunctionArgs
@@ -70,7 +71,7 @@ data RegisterUseState = RUS {
   , currentFunctionType :: !FunctionType
   }
 
-initRegisterUseState :: FunctionArgs -> CodeAddr -> RegisterUseState
+initRegisterUseState :: FunctionArgs -> CodeAddr -> RegisterUseState ids
 initRegisterUseState fArgs fn =
   RUS { _assignmentUses     = Set.empty
       , _blockRegUses       = Map.empty
@@ -85,28 +86,29 @@ initRegisterUseState fArgs fn =
   where
     cft = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
 
-assignmentUses :: Simple Lens RegisterUseState (Set AssignId)
+assignmentUses :: Simple Lens (RegisterUseState ids) (Set (Some (AssignId ids)))
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
 
-blockRegUses :: Simple Lens RegisterUseState
+blockRegUses :: Simple Lens (RegisterUseState ids)
                   (Map (BlockLabel Word64) (Set (Some X86Reg)))
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
-blockRegProvides :: Simple Lens RegisterUseState
+blockRegProvides :: Simple Lens (RegisterUseState ids)
                       (Map (BlockLabel Word64) (Set (Some X86Reg)))
 blockRegProvides = lens _blockRegProvides (\s v -> s { _blockRegProvides = v })
 
-blockInitDeps :: Simple Lens RegisterUseState
-                   (Map (BlockLabel Word64) (Map (Some X86Reg) RegDeps))
+blockInitDeps :: Simple Lens (RegisterUseState ids)
+                   (Map (BlockLabel Word64) (Map (Some X86Reg) (RegDeps ids)))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
-blockFrontier :: Simple Lens RegisterUseState (Set (BlockLabel Word64))
+blockFrontier :: Simple Lens (RegisterUseState ids) (Set (BlockLabel Word64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
-blockPreds :: Simple Lens RegisterUseState (Map (BlockLabel Word64) [BlockLabel Word64])
+blockPreds :: Simple Lens (RegisterUseState ids)
+              (Map (BlockLabel Word64) [BlockLabel Word64])
 blockPreds = lens _blockPreds (\s v -> s { _blockPreds = v })
 
-assignmentCache :: Simple Lens RegisterUseState AssignmentCache
+assignmentCache :: Simple Lens (RegisterUseState ids) (AssignmentCache ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -141,27 +143,28 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
 -- ----------------------------------------------------------------------------------------
 
-type RegisterUseM a = State RegisterUseState a
+type RegisterUseM ids a = State (RegisterUseState ids) a
 
 -- ----------------------------------------------------------------------------------------
 -- Phase one functions
 -- ----------------------------------------------------------------------------------------
 
 -- | This registers a block in the first phase (block discovery).
-addEdge :: BlockLabel Word64 -> BlockLabel Word64 -> RegisterUseM ()
+addEdge :: BlockLabel Word64 -> BlockLabel Word64 -> RegisterUseM ids ()
 addEdge source dest =
   do -- record the edge
      debugM DRegisterUse ("Adding edge " ++ show source ++ " -> " ++ show dest)
      blockPreds    %= Map.insertWith mappend dest [source]
      blockFrontier %= Set.insert dest
 
-valueUses :: Value X86_64 tp -> RegisterUseM RegDeps
+valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps ids)
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
-                            (\asgn (assigns, regs) -> (Set.insert (assignId asgn) assigns, regs))
+                            (\asgn (assigns, regs) ->
+                              (Set.insert (Some (assignId asgn)) assigns, regs))
 
-demandValue :: BlockLabel Word64 -> Value X86_64 tp -> RegisterUseM ()
+demandValue :: BlockLabel Word64 -> Value X86_64 ids tp -> RegisterUseM ids ()
 demandValue lbl v =
   do (assigns, regs) <- valueUses v
      assignmentUses %= Set.union assigns
@@ -173,15 +176,15 @@ demandValue lbl v =
     -- FIXME: just use CodeAddr instead of BlockLabel?
     lbl' = rootBlockLabel lbl
 
-nextBlock :: RegisterUseM (Maybe (BlockLabel Word64))
+nextBlock :: RegisterUseM ids (Maybe (BlockLabel Word64))
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 registerUse :: FunctionArgs
-            -> DiscoveryInfo X86_64
+            -> DiscoveryInfo X86_64 ids
             -> CodeAddr
-            -> ( Set AssignId
+            -> ( Set (Some (AssignId ids))
                , Map (BlockLabel Word64) (Set (Some X86Reg))
                , Map (BlockLabel Word64) (Set (Some X86Reg))
                , Map (BlockLabel Word64) [BlockLabel Word64]
@@ -204,7 +207,8 @@ registerUse fArgs ist addr =
 
 -- We use ix here as it returns mempty if there is no key, which is
 -- the right behavior here.
-calculateFixpoint :: Map (BlockLabel Word64) (Set (Some X86Reg)) -> RegisterUseM ()
+calculateFixpoint :: Map (BlockLabel Word64) (Set (Some X86Reg)) ->
+                     RegisterUseM ids ()
 calculateFixpoint new
   | Just ((currLbl, newRegs), rest) <- Map.maxViewWithKey new =
       -- propagate backwards any new registers in the predecessors
@@ -215,7 +219,7 @@ calculateFixpoint new
   where
     doOne :: Set (Some X86Reg)
              -> BlockLabel Word64
-             -> RegisterUseM (BlockLabel Word64, Set (Some X86Reg))
+             -> RegisterUseM ids (BlockLabel Word64, Set (Some X86Reg))
     doOne newRegs predLbl = do
       depMap   <- use (blockInitDeps . ix predLbl)
 
@@ -235,10 +239,10 @@ calculateFixpoint new
       return (lbl', regs `Set.difference` seenRegs)
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: DiscoveryInfo X86_64
+summarizeIter :: DiscoveryInfo X86_64 ids
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
-               -> RegisterUseM ()
+               -> RegisterUseM ids ()
 summarizeIter _   _     Nothing = return ()
 summarizeIter ist seen (Just lbl)
   | lbl `Set.member` seen = nextBlock >>= summarizeIter ist seen
@@ -247,8 +251,8 @@ summarizeIter ist seen (Just lbl)
                    summarizeIter ist (Set.insert lbl seen) lbl'
 
 -- | This returns the arguments associated with a particular function.
-lookupFunctionArgs :: Either Word64 (BVValue X86_64 64)
-                   -> RegisterUseM FunctionType
+lookupFunctionArgs :: Either Word64 (BVValue X86_64 ids 64)
+                   -> RegisterUseM ids FunctionType
 lookupFunctionArgs fn =
   case fn of
     Right _dynaddr -> return ftMaximumFunctionType
@@ -263,12 +267,13 @@ lookupFunctionArgs fn =
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: DiscoveryInfo X86_64
+summarizeBlock :: DiscoveryInfo X86_64 ids
                   -> BlockLabel Word64
-                  -> RegisterUseM ()
-summarizeBlock interp_state root_label = go root_label
+                  -> RegisterUseM ids ()
+summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
+  go root_label
   where
-    go :: BlockLabel Word64 -> RegisterUseM ()
+    go :: BlockLabel Word64 -> RegisterUseM ids ()
     go lbl = do
       debugM DRegisterUse ("Summarizing " ++ show lbl)
       Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
@@ -293,15 +298,15 @@ summarizeBlock interp_state root_label = go root_label
 
           -- Demand the values from the state at the given registers
           demandRegisters :: forall t. Foldable t
-                          => X86State (Value X86_64)
+                          => X86State (Value X86_64 ids)
                           -> t (Some X86Reg)
-                          -> RegisterUseM ()
+                          -> RegisterUseM ids ()
           demandRegisters s rs = traverse_ (\(Some r) -> demandValue lbl (s^.boundValue r)) rs
 
           -- Figure out the deps of the given registers and update the state for the current label
-          addRegisterUses :: X86State (Value X86_64)
+          addRegisterUses :: X86State (Value X86_64 ids)
                           -> [Some X86Reg]
-                          -> RegisterUseM () -- Map (Some N.RegisterName) RegDeps
+                          -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
           addRegisterUses s rs = do
              vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)

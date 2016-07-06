@@ -40,7 +40,7 @@ module Data.Macaw.CFG
   , Stmt(..)
   , TermStmt(..)
   , Assignment(..)
-  , AssignId
+  , AssignId(..)
   , AssignRhs(..)
     -- * Value
   , Value(..)
@@ -103,6 +103,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe (isNothing, catMaybes)
 import           Data.Monoid as Monoid
 import           Data.Parameterized.Classes
+import           Data.Parameterized.Nonce
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -643,7 +644,7 @@ $(pure [])
 --
 -- These function may return a value.  They may depend on the current state of
 -- the heap, but should not affect the processor in any way.
-type family ArchFn (arch :: *) :: Type -> *
+type family ArchFn (arch :: *) (ids :: *) :: Type -> *
 
 -- | A type family for defining architecture specific registers that are
 -- assigned as part of the language.
@@ -652,9 +653,9 @@ type family ArchReg (arch :: *) :: Type -> *
 -- | Width of register used to store addresses.
 type family RegAddrWidth (r :: Type -> *) :: Nat
 
--- | A type family for defining architecture specici statements that are
+-- | A type family for defining architecture-specific statements that are
 -- part of the language.
-type family ArchStmt (arch :: *) :: *
+type family ArchStmt (arch :: *) (ids :: *) :: *
 
 -- | The type to use for addresses on the architecutre.
 type family ArchAddr (arch :: *) :: *
@@ -675,9 +676,9 @@ type ArchLabel arch = BlockLabel (ArchAddr arch)
 class ShowF (ArchReg arch) => PrettyArch arch where
   -- | A function for pretty printing an archFn of a given type.
   ppArchFn :: Applicative m
-           => (forall u . Value arch u -> m Doc)
+           => (forall u . Value arch ids u -> m Doc)
               -- ^ Function for pretty printing vlaue.
-           -> ArchFn arch tp
+           -> ArchFn arch ids tp
            -> m Doc
 
 -- | This class provides access to information about registers.
@@ -698,63 +699,78 @@ class RegisterInfo r where
 ------------------------------------------------------------------------
 -- AssignId
 
--- | This should be an identifier that can be used to identify the
--- assignment statement uniquely within the CFG.
-type AssignId = Word64
+-- | An 'AssignId' is a unique identifier used to identify assignment
+-- statements, in a manner similar to SSA (single static assignment)
+-- form. 'AssignId's are typed, and also include a type variable @ids@ that
+-- intuitively denotes the set of identifiers from which they are drawn.
+newtype AssignId (ids :: *) (tp :: Type) = AssignId (Nonce ids tp)
 
-ppAssignId :: AssignId -> Doc
-ppAssignId w = text ("r" ++ show w)
+ppAssignId :: AssignId ids tp -> Doc
+ppAssignId (AssignId w) = text ("r" ++ show w)
+
+instance TestEquality (AssignId ids) where
+  testEquality (AssignId id1) (AssignId id2) = testEquality id1 id2
+
+instance OrdF (AssignId ids) where
+  compareF (AssignId id1) (AssignId id2) = compareF id1 id2
+
+instance ShowF (AssignId ids) where
+  showF (AssignId n) = show n
+
+instance Show (AssignId ids tp) where
+  show (AssignId n) = show n
 
 ------------------------------------------------------------------------
 -- Value, Assignment, AssignRhs declarations.
 
 -- | A value at runtime.
-data Value arch tp
+data Value arch ids tp
    = forall n . (tp ~ BVType n) => BVValue !(NatRepr n) !Integer
      -- ^ Bitvector value.
-   | AssignedValue !(Assignment arch tp)
+   | AssignedValue !(Assignment arch ids tp)
      -- ^ Value from an assignment statement.
    | Initial !(ArchReg arch tp)
      -- ^ Denotes the value for an initial register
 
-type BVValue arch w = Value arch (BVType w)
+type BVValue arch ids w = Value arch ids (BVType w)
 
 -- | An assignment consists of a unique location identifier and a right-
 -- hand side that returns a value.
-data Assignment arch tp = Assignment { assignId :: !AssignId
-                                     , assignRhs :: !(AssignRhs arch tp)
-                                     }
+data Assignment arch ids tp =
+  Assignment { assignId :: !(AssignId ids tp)
+             , assignRhs :: !(AssignRhs arch ids tp)
+             }
 
 -- | The right hand side of an assignment is an expression that
 -- returns a value.
-data AssignRhs (arch :: *) tp where
+data AssignRhs (arch :: *) ids tp where
   -- An expression that is computed from evaluating subexpressions.
-  EvalApp :: !(App (Value arch) tp)
-          -> AssignRhs arch tp
+  EvalApp :: !(App (Value arch ids) tp)
+          -> AssignRhs arch ids tp
 
   -- An expression with an undefined value.
   SetUndefined :: (tp ~ BVType n)
                => !(NatRepr n) -- Width of undefined value.
-               -> AssignRhs arch tp
+               -> AssignRhs arch ids tp
 
   -- Read memory at given location.
-  ReadMem :: !(Value arch (BVType (ArchAddrWidth arch)))
+  ReadMem :: !(Value arch ids (BVType (ArchAddrWidth arch)))
           -> !(TypeRepr tp)
-          -> AssignRhs arch tp
+          -> AssignRhs arch ids tp
 
   -- Call an architecture specific function that returns some result.
-  EvalArchFn :: !(ArchFn arch tp)
-             -> AssignRhs arch tp
+  EvalArchFn :: !(ArchFn arch ids tp)
+             -> AssignRhs arch ids tp
 
 ------------------------------------------------------------------------
 -- Type operations on assignment AssignRhs, and Value
 
-instance HasRepr (ArchFn arch) TypeRepr
-      => HasRepr (Assignment arch) TypeRepr where
+instance HasRepr (ArchFn arch ids) TypeRepr
+      => HasRepr (Assignment arch ids) TypeRepr where
   typeRepr = typeRepr . assignRhs
 
-instance HasRepr (ArchFn arch) TypeRepr
-      => HasRepr (AssignRhs arch) TypeRepr where
+instance HasRepr (ArchFn arch ids) TypeRepr
+      => HasRepr (AssignRhs arch ids) TypeRepr where
   typeRepr rhs =
     case rhs of
       EvalApp a -> appType a
@@ -762,37 +778,30 @@ instance HasRepr (ArchFn arch) TypeRepr
       ReadMem _ tp -> tp
       EvalArchFn f -> typeRepr f
 
-instance ( HasRepr (ArchFn arch) TypeRepr
+instance ( HasRepr (ArchFn arch ids) TypeRepr
          , HasRepr (ArchReg arch) TypeRepr
          )
-      => HasRepr (Value arch) TypeRepr where
+      => HasRepr (Value arch ids) TypeRepr where
 
   typeRepr (BVValue n _) = BVTypeRepr n
   typeRepr (AssignedValue a) = typeRepr a
   typeRepr (Initial r) = typeRepr r
 
-valueWidth :: ( HasRepr (ArchFn arch) TypeRepr
+valueWidth :: ( HasRepr (ArchFn arch ids) TypeRepr
               , HasRepr (ArchReg arch) TypeRepr
               )
-           => Value arch (BVType n) -> NatRepr n
+           => Value arch ids (BVType n) -> NatRepr n
 valueWidth v =
   case typeRepr v of
     BVTypeRepr n -> n
 
-instance HasRepr (AssignRhs arch) TypeRepr
-      => TestEquality (Assignment arch) where
+instance HasRepr (AssignRhs arch ids) TypeRepr
+      => TestEquality (Assignment arch ids) where
   testEquality x y = orderingF_refl (compareF x y)
 
-instance HasRepr (AssignRhs arch) TypeRepr
-      => OrdF (Assignment arch) where
-  compareF x y =
-    case compare (assignId x) (assignId y) of
-      LT -> LTF
-      GT -> GTF
-      EQ ->
-        case testEquality (typeRepr (assignRhs x)) (typeRepr (assignRhs y)) of
-          Just Refl -> EQF
-          Nothing -> error "mismatched types"
+instance HasRepr (AssignRhs arch ids) TypeRepr
+      => OrdF (Assignment arch ids) where
+  compareF x y = compareF (assignId x) (assignId y)
 
 $(pure [])
 
@@ -804,28 +813,28 @@ ppLit w i =
   text ("0x" ++ showHex i "") <+> text "::" <+> brackets (text (show w))
 
 -- | Pretty print a value.
-ppValue :: ShowF (ArchReg arch) => Prec -> Value arch tp -> Doc
+ppValue :: ShowF (ArchReg arch) => Prec -> Value arch ids tp -> Doc
 ppValue p (BVValue w i)     = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (showF r) PP.<> text "_0"
 
-instance ShowF (ArchReg arch) => PrettyPrec (Value arch tp) where
+instance ShowF (ArchReg arch) => PrettyPrec (Value arch ids tp) where
   prettyPrec = ppValue
 
-instance ShowF (ArchReg arch) => Pretty (Value arch tp) where
+instance ShowF (ArchReg arch) => Pretty (Value arch ids tp) where
   pretty = ppValue 0
 
-instance ShowF (ArchReg arch) => Show (Value arch tp) where
+instance ShowF (ArchReg arch) => Show (Value arch ids tp) where
   show = show . pretty
 
 -- | Pretty print an assignment right-hand side using operations parameterized
 -- over an application to allow side effects.
 ppAssignRhs :: Applicative m
-            => (forall u . Value arch u -> m Doc)
+            => (forall u . Value arch ids u -> m Doc)
                -- ^ Function for pretty printing value.
-            -> (forall u . ArchFn arch u -> m Doc)
+            -> (forall u . ArchFn arch ids u -> m Doc)
                -- ^ Function for pretty printing an architecture-specific function
-            -> AssignRhs arch tp
+            -> AssignRhs arch ids tp
             -> m Doc
 ppAssignRhs pp _ (EvalApp a) = ppAppA pp a
 ppAssignRhs _  _ (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
@@ -833,15 +842,15 @@ ppAssignRhs pp _ (ReadMem a _) = (\d -> text "*" PP.<> d) <$> pp a
 ppAssignRhs _ pp (EvalArchFn f) = pp f
 
 instance ( ShowF (ArchReg arch)
-         , PrettyF (ArchFn arch)
+         , PrettyF (ArchFn arch ids)
          ) =>
-         Pretty (AssignRhs arch tp) where
+         Pretty (AssignRhs arch ids tp) where
   pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) (Identity . prettyF) v
 
 instance ( ShowF (ArchReg arch)
-         , PrettyF (ArchFn arch)
+         , PrettyF (ArchFn arch ids)
          ) =>
-         Pretty (Assignment arch tp) where
+         Pretty (Assignment arch ids tp) where
   pretty (Assignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
 
 $(pure [])
@@ -849,42 +858,48 @@ $(pure [])
 ------------------------------------------------------------------------
 -- Pretty print a value assignment
 
+-- | Helper type to wrap up a 'Doc' with a dummy type argument; used to put
+-- 'Doc's into heterogenous maps in the below
+newtype DocF (a :: Type) = DocF Doc
+
 -- | This pretty prints a value's representation while saving the pretty
 -- printed repreentation of subvalues in a map.
-collectValueRep :: forall arch tp
+collectValueRep :: forall arch ids tp
                 .  PrettyArch arch
                 => Prec
-                -> Value arch tp
-                -> State (Map AssignId Doc) Doc
-collectValueRep _ (AssignedValue a) = do
+                -> Value arch ids tp
+                -> State (MapF (AssignId ids) DocF) Doc
+collectValueRep _ (AssignedValue a :: Value arch ids tp) = do
   let lhs = assignId a
-  mr <- gets $ Map.lookup lhs
+  mr <- gets $ MapF.lookup lhs
   when (isNothing mr) $ do
-    let ppVal :: forall u . Value arch u -> State (Map AssignId Doc) Doc
+    let ppVal :: forall u . Value arch ids u ->
+                 State (MapF (AssignId ids) DocF) Doc
         ppVal = collectValueRep 10
     rhs <- ppAssignRhs ppVal (ppArchFn ppVal) (assignRhs a)
     let d = ppAssignId lhs <+> text ":=" <+> rhs
-    modify $ Map.insert lhs d
+    modify $ MapF.insert lhs (DocF d)
+    return ()
   return $! ppAssignId lhs
 collectValueRep p v = return $ ppValue p v
 
 -- | This pretty prints all the history used to create a value.
-ppValueAssignments' :: State (Map AssignId Doc) Doc -> Doc
+ppValueAssignments' :: State (MapF (AssignId ids) DocF) Doc -> Doc
 ppValueAssignments' m =
-  case Map.elems bindings of
+  case MapF.elems bindings of
     [] -> rhs
-    (h:r) ->
-      let first = text "let" PP.<+> h
-          f b   = text "    " PP.<> b
+    (Some (DocF h):r) ->
+      let first               = text "let" PP.<+> h
+          f (Some (DocF b))   = text "    " PP.<> b
        in vcat (first:fmap f r) <$$>
           text " in" PP.<+> rhs
-  where (rhs, bindings) = runState m Map.empty
+  where (rhs, bindings) = runState m MapF.empty
 
 -- | This pretty prints all the history used to create a value.
-ppValueAssignments :: PrettyArch arch => Value arch tp -> Doc
+ppValueAssignments :: PrettyArch arch => Value arch ids tp -> Doc
 ppValueAssignments v = ppValueAssignments' (collectValueRep 0 v)
 
-ppValueAssignmentList :: PrettyArch arch => [Value arch tp] -> Doc
+ppValueAssignmentList :: PrettyArch arch => [Value arch ids tp] -> Doc
 ppValueAssignmentList vals =
   ppValueAssignments' $ do
     docs <- mapM (collectValueRep 0) vals
@@ -896,33 +911,33 @@ $(pure [])
 -- Value equality
 
 instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => Eq  (Value arch tp) where
+      => Eq  (Value arch ids tp) where
   x == y = isJust (testEquality x y)
 
 instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => Ord (Value arch tp) where
+      => Ord (Value arch ids tp) where
   compare x y = toOrdering (compareF x y)
 
 instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => EqF (Value arch) where
+      => EqF (Value arch ids) where
   eqF = (==)
 
 instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => TestEquality (Value arch) where
+      => TestEquality (Value arch ids) where
   testEquality x y = orderingF_refl (compareF x y)
 
 instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => OrdF (Value arch) where
+      => OrdF (Value arch ids) where
   compareF (BVValue wx vx) (BVValue wy vy) =
     case compareF wx wy of
       LTF -> LTF
@@ -944,22 +959,22 @@ instance ( OrdF (ArchReg arch)
 ------------------------------------------------------------------------
 -- Value operations
 
-mkLit :: NatRepr n -> Integer -> Value arch (BVType n)
+mkLit :: NatRepr n -> Integer -> Value arch ids (BVType n)
 mkLit n v = BVValue n (v .&. mask)
   where mask = maxUnsigned n
 
-bvValue :: KnownNat n => Integer -> Value arch (BVType n)
+bvValue :: KnownNat n => Integer -> Value arch ids (BVType n)
 bvValue i = mkLit knownNat i
 
-valueAsApp :: Value arch tp -> Maybe (App (Value arch) tp)
+valueAsApp :: Value arch ids tp -> Maybe (App (Value arch ids) tp)
 valueAsApp (AssignedValue (Assignment _ (EvalApp a))) = Just a
 valueAsApp _ = Nothing
 
-asInt64Constant :: Value arch (BVType 64) -> Maybe Int64
+asInt64Constant :: Value arch ids (BVType 64) -> Maybe Int64
 asInt64Constant (BVValue _ o) = Just (fromInteger o)
 asInt64Constant _ = Nothing
 
-asBaseOffset :: Value arch (BVType w) -> (Value arch (BVType w), Integer)
+asBaseOffset :: Value arch ids (BVType w) -> (Value arch ids (BVType w), Integer)
 asBaseOffset x
   | Just (BVAdd _ x_base (BVValue _  x_off)) <- valueAsApp x = (x_base, x_off)
   | otherwise = (x,0)
@@ -1031,9 +1046,9 @@ instance ( OrdF (ArchReg arch)
 
 instance ( OrdF (ArchReg arch)
          , ShowF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          )
-      => PrettyRegValue arch (Value arch) where
+      => PrettyRegValue arch (Value arch ids) where
   ppValueEq _ r v
     | Just _ <- testEquality v (Initial r) = Nothing
     | otherwise   = Just $ text (showF r) <+> text "=" <+> pretty v
@@ -1042,20 +1057,20 @@ instance ( OrdF (ArchReg arch)
 -- Stmt
 
 -- | A statement in our control flow graph language.
-data Stmt arch
-   = forall tp . AssignStmt !(Assignment arch tp)
-   | forall tp . WriteMem !(BVValue arch (ArchAddrWidth arch)) !(Value arch tp)
+data Stmt arch ids
+   = forall tp . AssignStmt !(Assignment arch ids tp)
+   | forall tp . WriteMem !(BVValue arch ids (ArchAddrWidth arch)) !(Value arch ids tp)
     -- ^ Write to memory at the given location
-   | PlaceHolderStmt !([Some (Value arch)]) !String
+   | PlaceHolderStmt !([Some (Value arch ids)]) !String
    | Comment !Text
-   | ExecArchStmt (ArchStmt arch)
+   | ExecArchStmt (ArchStmt arch ids)
      -- ^ Execute an architecture specific statement
 
 instance ( ShowF (ArchReg arch)
-         , Pretty (ArchStmt arch)
-         , PrettyF (ArchFn arch)
+         , Pretty (ArchStmt arch ids)
+         , PrettyF (ArchFn arch ids)
          )
-         => Pretty (Stmt arch) where
+         => Pretty (Stmt arch ids) where
   pretty (AssignStmt a) = pretty a
   pretty (WriteMem a rhs) = text "*" PP.<> prettyPrec 11 a <+> text ":=" <+> ppValue 0 rhs
   pretty (PlaceHolderStmt vals name) = text ("PLACEHOLDER: " ++ name)
@@ -1066,34 +1081,34 @@ instance ( ShowF (ArchReg arch)
 
 
 instance ( ShowF (ArchReg arch)
-         , Pretty (ArchStmt arch)
-         , PrettyF (ArchFn arch)
+         , Pretty (ArchStmt arch ids)
+         , PrettyF (ArchFn arch ids)
          )
-         => Show (Stmt arch) where
+         => Show (Stmt arch ids) where
   show = show . pretty
 
 ------------------------------------------------------------------------
 -- TermStmt
 
 -- A terminal statement in a block
-data TermStmt arch
+data TermStmt arch ids
      -- | Fetch and execute the next instruction from the given processor state.
-  = FetchAndExecute !(RegState arch (Value arch))
+  = FetchAndExecute !(RegState arch (Value arch ids))
     -- | Branch and execute one block or another.
-  | Branch !(Value arch BoolType) !(ArchLabel arch) !(ArchLabel arch)
+  | Branch !(Value arch ids BoolType) !(ArchLabel arch) !(ArchLabel arch)
     -- | The syscall instruction.
     -- We model system calls as terminal instructions because from the
     -- application perspective, the semantics will depend on the operating
     -- system.
-  | Syscall !(RegState arch (Value arch))
+  | Syscall !(RegState arch (Value arch ids))
 
 instance ( OrdF (ArchReg arch)
          , ShowF (ArchReg arch)
-         , HasRepr (ArchFn arch) TypeRepr
+         , HasRepr (ArchFn arch ids) TypeRepr
          , Integral (ArchAddr arch)
          , Show (ArchAddr arch)
          )
-      => Pretty (TermStmt arch) where
+      => Pretty (TermStmt arch ids) where
   pretty (FetchAndExecute s) =
     text "fetch_and_execute" <$$>
     indent 2 (pretty s)
@@ -1109,24 +1124,25 @@ instance ( OrdF (ArchReg arch)
 -- | A basic block in a control flow graph.
 -- Consists of:
 -- 1. A label that should uniquely identify the block, equence of
-data Block arch = Block { blockLabel :: !(ArchLabel arch)
-                        , blockStmts :: !([Stmt arch])
-                          -- ^ List of statements in the block.
-                        , blockCache :: !(MapF (App (Value arch)) (Assignment arch))
-                          -- ^ This maps applications to the associated assignment.
-                        , blockTerm :: !(TermStmt arch)
-                          -- ^ The last statement in the block.
-                        }
+data Block arch ids =
+  Block { blockLabel :: !(ArchLabel arch)
+        , blockStmts :: !([Stmt arch ids])
+          -- ^ List of statements in the block.
+        , blockCache :: !(MapF (App (Value arch ids)) (Assignment arch ids))
+          -- ^ This maps applications to the associated assignment.
+        , blockTerm :: !(TermStmt arch ids)
+          -- ^ The last statement in the block.
+        }
 
 instance ( OrdF  (ArchReg arch)
          , ShowF (ArchReg arch)
          , Integral (ArchAddr arch)
          , Show     (ArchAddr arch)
-         , PrettyF  (ArchFn arch)
-         , HasRepr  (ArchFn arch) TypeRepr
-         , Pretty   (ArchStmt arch)
+         , PrettyF  (ArchFn arch ids)
+         , HasRepr  (ArchFn arch ids) TypeRepr
+         , Pretty   (ArchStmt arch ids)
          )
-      => Pretty (Block arch) where
+      => Pretty (Block arch ids) where
   pretty b = do
     pretty (blockLabel b) PP.<> text ":" <$$>
       indent 2 (vcat (pretty <$> blockStmts b) <$$> pretty (blockTerm b))
@@ -1136,8 +1152,8 @@ instance ( OrdF  (ArchReg arch)
 
 -- | A CFG is a map from all reachable code locations
 -- to the block for that code location.
-data CFG arch
-   = CFG { _cfgBlocks :: !(Map (ArchLabel arch) (Block arch))
+data CFG arch ids
+   = CFG { _cfgBlocks :: !(Map (ArchLabel arch) (Block arch ids))
          , _cfgBlockRanges :: !(Map (ArchAddr arch) (ArchAddr arch))
            -- ^ Maps each address that is the start of a block
            -- to the address just past the end of that block.
@@ -1145,31 +1161,32 @@ data CFG arch
          }
 
 -- | Create empty CFG
-emptyCFG :: CFG addr
+emptyCFG :: CFG addr ids
 emptyCFG = CFG { _cfgBlocks = Map.empty
                , _cfgBlockRanges = Map.empty
                }
 
-cfgBlocks :: Simple Lens (CFG arch) (Map (ArchLabel arch) (Block arch))
+cfgBlocks :: Simple Lens (CFG arch ids) (Map (ArchLabel arch) (Block arch ids))
 cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
 
-cfgBlockRanges :: Simple Lens (CFG arch) (Map (ArchAddr arch) (ArchAddr arch))
+cfgBlockRanges :: Simple Lens (CFG arch ids) (Map (ArchAddr arch) (ArchAddr arch))
 cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
 
-cfgBlockEnds :: Ord (ArchAddr arch) => CFG arch -> Set (ArchAddr arch)
+cfgBlockEnds :: Ord (ArchAddr arch) => CFG arch ids -> Set (ArchAddr arch)
 cfgBlockEnds g = Set.fromList (Map.elems (_cfgBlockRanges g))
 
 -- | Return block with given label.
-findBlock :: Ord (ArchAddr arch) => CFG arch -> ArchLabel arch -> Maybe (Block arch)
+findBlock :: Ord (ArchAddr arch) => CFG arch ids -> ArchLabel arch ->
+             Maybe (Block arch ids)
 findBlock g l = _cfgBlocks g ^. at l
 
 insertBlock :: ( Integral (ArchAddr arch)
                , Ord (ArchAddr arch)
                , Show (ArchAddr arch)
                )
-            => Block arch
-            -> CFG arch
-            -> CFG arch
+            => Block arch ids
+            -> CFG arch ids
+            -> CFG arch ids
 insertBlock b c = do
   let lbl = blockLabel b
   case findBlock c lbl of
@@ -1183,9 +1200,9 @@ insertBlocksForCode :: ( Ord (ArchAddr arch)
                        )
                     => ArchAddr arch
                     -> ArchAddr arch
-                    -> [Block arch]
-                    -> CFG arch
-                    -> CFG arch
+                    -> [Block arch ids]
+                    -> CFG arch ids
+                    -> CFG arch ids
 insertBlocksForCode start end bs cfg =
   let cfg' = cfg & cfgBlockRanges %~ Map.insert start end
    in foldl' (flip insertBlock) cfg' bs
@@ -1194,19 +1211,19 @@ instance ( OrdF (ArchReg arch)
          , ShowF (ArchReg arch)
          , Integral (ArchAddr arch)
          , Show     (ArchAddr arch)
-         , Pretty   (ArchStmt arch)
-         , HasRepr (ArchFn arch) TypeRepr
-         , PrettyF (ArchFn arch)
+         , Pretty   (ArchStmt arch ids)
+         , HasRepr (ArchFn arch ids) TypeRepr
+         , PrettyF (ArchFn arch ids)
          )
-      => Pretty (CFG arch) where
+      => Pretty (CFG arch ids) where
   pretty g = vcat (pretty <$> Map.elems (_cfgBlocks g))
 
 -- FIXME: refactor to be more efficient
 -- FIXME: not a Traversal, more like a map+fold
 traverseBlocks :: Ord (ArchAddr arch)
-               => CFG arch
+               => CFG arch ids
                -> ArchLabel arch
-               -> (Block arch -> a)
+               -> (Block arch ids -> a)
                -> (a -> a -> a -> a)
                -> a
 traverseBlocks cfg root f merge = go root
@@ -1222,11 +1239,11 @@ traverseBlocks cfg root f merge = go root
 -- | As for traverseBlocks but starting from a block in the cfg, not
 -- an address
 traverseBlockAndChildren :: Ord (ArchAddr arch)
-                         => CFG arch
-                         -> Block arch
-                         -> (Block arch -> a)
+                         => CFG arch ids
+                         -> Block arch ids
+                         -> (Block arch ids -> a)
                             -- Maps a block to a value
-                         -> (Block arch -> a -> a -> a)
+                         -> (Block arch ids -> a -> a -> a)
                             -- Maps results from to sub-blocks together.
                          -> a
 traverseBlockAndChildren cfg b0 f merge = goBlock b0

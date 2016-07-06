@@ -6,7 +6,8 @@
 {-# LANGUAGE RankNTypes #-}
 
 module Reopt.CFG.FnRep
-   ( FnAssignment(..)
+   ( FnAssignId(..)
+   , FnAssignment(..)
    , FnAssignRhs(..)
    , FnValue(..)
    , Function(..)
@@ -44,12 +45,10 @@ import           Data.Parameterized.TraversableF
 
 import Data.Macaw.CFG
    ( App(..)
-   , AssignId
    , BlockLabel
    , CodeAddr
    , ppApp
    , ppLit
-   , ppAssignId
    , sexpr
    , appType
    , foldApp
@@ -66,13 +65,22 @@ import           Reopt.Machine.X86State
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
 
+newtype FnAssignId = FnAssignId Word64
+                   deriving (Eq, Ord)
+
+instance Show FnAssignId where
+  show (FnAssignId w) = show w
+
+ppFnAssignId :: FnAssignId -> Doc
+ppFnAssignId (FnAssignId w) = text ("r" ++ show w)
+
 data FnAssignment tp
-   = FnAssignment { fnAssignId :: !AssignId
+   = FnAssignment { fnAssignId :: !FnAssignId
                   , fnAssignRhs :: !(FnAssignRhs tp)
                   }
 
 instance Pretty (FnAssignment tp) where
-  pretty (FnAssignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
+  pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
 
 -- | This describes the expected arguments and return types of the function.
 data FunctionType =
@@ -113,7 +121,7 @@ ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
 -- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
 
 data FnPhiVar (tp :: Type) =
-  FnPhiVar { unFnPhiVar :: !AssignId
+  FnPhiVar { unFnPhiVar :: !FnAssignId
            , fnPhiVarType :: !(TypeRepr tp) }
 
 instance TestEquality FnPhiVar where
@@ -130,7 +138,7 @@ instance OrdF FnPhiVar where
           Nothing -> error "mismatched types"
 
 instance Pretty (FnPhiVar tp) where
-  pretty = ppAssignId . unFnPhiVar
+  pretty = ppFnAssignId . unFnPhiVar
 
 -- | The right-hand side of a function assingment statement.
 data FnAssignRhs (tp :: Type) where
@@ -172,11 +180,11 @@ instance FoldFnValue (FnAssignRhs tp) where
   foldFnValue f (FnAlloca sz)       = f sz
 
 -- tp <- {BVType 64, BVType 128}
-data FnReturnVar tp = FnReturnVar { frAssignId :: !AssignId
+data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
                                   , frReturnType :: !(TypeRepr tp) }
 
 instance Pretty (FnReturnVar tp) where
-  pretty = ppAssignId . frAssignId
+  pretty = ppFnAssignId . frAssignId
 
 -- | A function value.
 data FnValue (tp :: Type)
@@ -208,8 +216,8 @@ instance Pretty (FnValue tp) where
                                   = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantValue sz n)   = ppLit sz n
-  pretty (FnAssignedValue ass)    = ppAssignId (fnAssignId ass)
-  pretty (FnPhiValue phi)         = ppAssignId (unFnPhiVar phi)
+  pretty (FnAssignedValue ass)    = ppFnAssignId (fnAssignId ass)
+  pretty (FnPhiValue phi)         = ppFnAssignId (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
                                     <> parens (pretty $ showHex n "")
