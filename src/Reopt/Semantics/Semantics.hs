@@ -1554,12 +1554,18 @@ exec_movsX_xmm_mem l v = do
 
 -- ADDPS Add packed single-precision floating-point values
 -- ADDSS Add scalar single-precision floating-point values
+exec_addss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
+exec_addss r y = modify_low knownNat (\x -> fpAdd SingleFloatRepr x y) r
+
 -- SUBPS Subtract packed single-precision floating-point values
 -- SUBSS Subtract scalar single-precision floating-point values
 -- MULPS Multiply packed single-precision floating-point values
 -- MULSS Multiply scalar single-precision floating-point values
 -- DIVPS Divide packed single-precision floating-point values
 -- DIVSS Divide scalar single-precision floating-point values
+exec_divss :: Semantics m => MLocation m XMMType -> Value m (FloatType 'SingleFloat) -> m ()
+exec_divss r y = modify_low knownNat (\x -> fpDiv SingleFloatRepr x y) r
+
 -- RCPPS Compute reciprocals of packed single-precision floating-point values
 -- RCPSS Compute reciprocal of scalar single-precision floating-point values
 -- SQRTPS Compute square roots of packed single-precision floating-point values

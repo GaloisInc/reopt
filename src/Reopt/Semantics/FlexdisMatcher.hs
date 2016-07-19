@@ -345,6 +345,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
+              , mk "addss"   $ truncateKnownBinop exec_addss              
               , mk "subsd"   $ truncateKnownBinop exec_subsd
               , mk "movsd"   $ mkBinop (movsX n64)
               , mk "movapd"  $ truncateKnownBinop exec_movapd
@@ -356,6 +357,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movss"   $ mkBinop (movsX n32)
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
               , mk "divsd"   $ truncateKnownBinop exec_divsd
+              , mk "divss"   $ truncateKnownBinop exec_divss
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "xorpd"   $ mkBinop $ \loc val -> do
                   l <- getBVLocation loc n128

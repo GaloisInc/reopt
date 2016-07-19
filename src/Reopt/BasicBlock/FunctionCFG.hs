@@ -124,7 +124,7 @@ findBlocks' mem funBounds breaks queue cfg
                   && not (M.member next cfg) = S.insert next q
                 | otherwise = q
               queue'' = foldl addQ queue' nexts
-          in findBlocks' mem funBounds breaks queue'' cfg'
+          in findBlocks' mem funBounds (breaks `S.union` queue'' `S.union` M.keysSet cfg') queue'' cfg' -- FIXME: performance
     in
     case runMemoryByteReader pf_x mem entry $ extractBlock entry breaks of
       Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
