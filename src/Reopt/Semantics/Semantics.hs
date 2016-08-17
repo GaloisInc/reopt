@@ -149,16 +149,21 @@ exec_cwde = do v <- get (reg_low16 N.rax)
 exec_cdqe = do v <- get (reg_low32 N.rax)
                rax .= sext n64 v
 
+-- | Sign extend ax -> dx:ax, eax -> edx:eax, rax -> rdx:rax, resp.
+exec_cwd, exec_cdq, exec_cqo :: Semantics m => m ()
+exec_cwd = do v <- get (reg_low16 N.rax)
+              set_reg_pair reg_low16 N.rdx N.rax (sext knownNat v)
+              
+exec_cdq = do v <- get (reg_low32 N.rax)
+              set_reg_pair reg_low32 N.rdx N.rax (sext knownNat v)
+              
+exec_cqo = do v <- get rax
+              set_reg_pair fullRegister N.rdx N.rax (sext knownNat v)
+
 -- FIXME: special segment stuff?
 -- FIXME: CR and debug regs?
 exec_mov :: Semantics m =>  MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_mov l v = l .= v
-
--- FIXME: this just sets rdx to be the sign of rax, but this is maybe better symbolically?
-exec_cqo :: Semantics m => m ()
-exec_cqo = do
-  v <- get rax
-  set_reg_pair fullRegister N.rdx N.rax (sext n128 v)
 
 exec_cmpxchg :: forall m n
               . (IsLocationBV m n)
@@ -1559,8 +1564,14 @@ exec_addss r y = modify_low knownNat (\x -> fpAdd SingleFloatRepr x y) r
 
 -- SUBPS Subtract packed single-precision floating-point values
 -- SUBSS Subtract scalar single-precision floating-point values
+exec_subss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
+exec_subss r y = modify_low knownNat (\x -> fpSub SingleFloatRepr x y) r
+
 -- MULPS Multiply packed single-precision floating-point values
 -- MULSS Multiply scalar single-precision floating-point values
+exec_mulss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
+exec_mulss r y = modify_low knownNat (\x -> fpMul SingleFloatRepr x y) r
+
 -- DIVPS Divide packed single-precision floating-point values
 -- DIVSS Divide scalar single-precision floating-point values
 exec_divss :: Semantics m => MLocation m XMMType -> Value m (FloatType 'SingleFloat) -> m ()
@@ -1582,7 +1593,23 @@ exec_divss r y = modify_low knownNat (\x -> fpDiv SingleFloatRepr x y) r
 -- CMPPS Compare packed single-precision floating-point values
 -- CMPSS Compare scalar single-precision floating-point values
 -- COMISS Perform ordered comparison of scalar single-precision floating-point values and set flags in EFLAGS register
--- UCOMISS Perform unordered comparison of scalar single-precision floating-point values and set flags in EFLAGS register
+-- | UCOMISS Perform unordered comparison of scalar single-precision floating-point values and set flags in EFLAGS register
+exec_ucomiss :: Semantics m => MLocation m XMMType -> Value m (FloatType 'SingleFloat) -> m ()
+-- Invalid (if SNaN operands), Denormal.
+exec_ucomiss l v = do v' <- bvTrunc knownNat <$> get l
+                      let unordered = (isNaN fir v .|. isNaN fir v')
+                          lt        = fpLt fir v' v
+                          eq        = fpEq fir v' v
+
+                      zf_loc .= (unordered .|. eq)
+                      pf_loc .= unordered
+                      cf_loc .= (unordered .|. lt)
+
+                      of_loc .= false
+                      af_loc .= false
+                      sf_loc .= false
+  where
+  fir = SingleFloatRepr
 
 -- *** SSE Logical Instructions
 
@@ -1607,7 +1634,16 @@ exec_cvtsi2ss xmm v = set_low xmm (fpFromBV SingleFloatRepr v)
 -- CVTPS2PI Convert packed single-precision floating-point values to packed doubleword integers
 -- CVTTPS2PI Convert with truncation packed single-precision floating-point values to packed doubleword integers
 -- CVTSS2SI Convert a scalar single-precision floating-point value to a doubleword integer
--- CVTTSS2SI Convert with truncation a scalar single-precision floating-point value to a scalar doubleword integer
+
+-- | CVTTSS2SI Convert with truncation a scalar single-precision floating-point value to a scalar doubleword integer
+exec_cvttss2si :: (IsLocationBV m n)
+               => MLocation m (BVType n)
+               -> Value m (FloatType SingleFloat)
+               -> m ()
+-- Invalid, Precision.  Returns 80000000 if exception is masked
+exec_cvttss2si l v =
+  -- TODO:
+  l .= truncFPToSignedBV (loc_width l) SingleFloatRepr v
 
 -- ** SSE MXCSR State Management Instructions
 
@@ -1844,7 +1880,10 @@ exec_ucomisd l v = do v' <- bvTrunc knownNat <$> get l
 exec_cvtss2sd :: Semantics m => MLocation m (BVType 128) -> Value m (FloatType SingleFloat) -> m ()
 exec_cvtss2sd l v = set_low l (fpCvt SingleFloatRepr DoubleFloatRepr v)
 
--- CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values
+-- | CVTSD2SS  Convert scalar double-precision floating-point values to scalar single-precision floating-point values
+exec_cvtsd2ss :: Semantics m => MLocation m (BVType 128) -> Value m (FloatType DoubleFloat) -> m ()
+exec_cvtsd2ss l v = set_low l (fpCvt DoubleFloatRepr SingleFloatRepr v)
+
 -- CVTSD2SI  Convert scalar double-precision floating-point values to a doubleword integer
 
 -- | CVTTSD2SI Convert with truncation scalar double-precision floating-point values to scalar doubleword integers
@@ -1886,7 +1925,13 @@ exec_movdqu l v = l .= v
 -- MOVQ2DQ Move quadword integer from MMX to XMM registers
 -- MOVDQ2Q Move quadword integer from XMM to MMX registers
 -- PMULUDQ Multiply packed unsigned doubleword integers
--- PADDQ Add packed quadword integers
+-- | PADDQ Add packed quadword integers
+-- FIXME: this can also take 64 bit values?
+exec_paddq :: Binop
+exec_paddq l v = do
+  v0 <- get l
+  l .= vectorize2 n64 bvAdd v0 v
+
 -- PSUBQ Subtract packed quadword integers
 -- PSHUFLW Shuffle packed low words
 -- PSHUFHW Shuffle packed high words

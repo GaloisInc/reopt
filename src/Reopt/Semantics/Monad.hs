@@ -1218,6 +1218,7 @@ data ExceptionClass
    | FloatingPointError
    | SIMDFloatingPointException
    | GeneralProtectionException Int
+   | UndefinedInstructionError -- basically for ud2
      -- ^ A general protection exception with the given error code.
      -- -- | AlignmentCheck
   deriving (Eq, Ord, Show)
