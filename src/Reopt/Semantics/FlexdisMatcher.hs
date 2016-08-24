@@ -308,6 +308,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                    _ ->
                      fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
+              , mk "cwd"    $ \_ -> exec_cwd
+              , mk "cdq"    $ \_ -> exec_cdq              
               , mk "cqo"    $ \_ -> exec_cqo
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
@@ -345,7 +347,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
               , mk "addsd"   $ truncateKnownBinop exec_addsd
-              , mk "addss"   $ truncateKnownBinop exec_addss              
+              , mk "addss"   $ truncateKnownBinop exec_addss
+              , mk "subss"   $ truncateKnownBinop exec_subss              
               , mk "subsd"   $ truncateKnownBinop exec_subsd
               , mk "movsd"   $ mkBinop (movsX n64)
               , mk "movapd"  $ truncateKnownBinop exec_movapd
@@ -356,9 +359,11 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movsd_sse" $ mkBinop (movsX n64)
               , mk "movss"   $ mkBinop (movsX n32)
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
+              , mk "mulss"   $ truncateKnownBinop exec_mulss              
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "divss"   $ truncateKnownBinop exec_divss
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
+              , mk "ucomiss" $ truncateKnownBinop exec_ucomiss
               , mk "xorpd"   $ mkBinop $ \loc val -> do
                   l <- getBVLocation loc n128
                   v <- readXMMValue val
@@ -377,13 +382,19 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   SomeBV l  <- getSomeBVLocation loc
                   v <- truncateBVValue knownNat =<< getSomeBVValue val
                   exec_cvttsd2si l v
-
+                  
+              , mk "cvttss2si" $ mkBinop $ \loc val -> do
+                  SomeBV l  <- getSomeBVLocation loc
+                  v <- truncateBVValue knownNat =<< getSomeBVValue val
+                  exec_cvttsd2si l v
+              
               , mk "cvtsi2sd" $ mkBinop $ \loc val -> do
                 l <- getBVLocation loc n128
                 SomeBV v <- getSomeBVValue val
                 exec_cvtsi2sd l v
 
               , mk "cvtss2sd" $ truncateKnownBinop exec_cvtss2sd
+              , mk "cvtsd2ss" $ truncateKnownBinop exec_cvtsd2ss
 
               -- regular instructions
               , mk "add"     $ binop exec_add
@@ -417,6 +428,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pause"   $ const (return ())
               , mk "pop"     $ unop exec_pop
 
+              
               , mk "cmpxchg" $ binop exec_cmpxchg
               , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
@@ -433,6 +445,8 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "xadd"    $ mkBinopPfxLL (\_ -> exec_xadd)
               , mk "xor"     $ binop exec_xor
 
+              , mk "ud2"     $ \_ -> exception false true UndefinedInstructionError
+              
               -- Primitive instructions
               , mk "syscall" $ const (primitive Syscall)
               , mk "cpuid"   $ const (primitive CPUID)
@@ -452,6 +466,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "punpcklqdq" $ binop exec_punpcklqdq
               , mk "paddb"   $ binop exec_paddb
               , mk "paddw"   $ binop exec_paddw
+              , mk "paddq"   $ binop exec_paddq
               , mk "paddd"   $ binop exec_paddd
               , mk "psubb"   $ binop exec_psubb
               , mk "psubw"   $ binop exec_psubw

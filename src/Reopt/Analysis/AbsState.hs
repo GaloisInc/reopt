@@ -898,11 +898,17 @@ type ArchAbsValue arch = AbsValue (ArchAddrWidth arch)
 -- | this stores the abstract state of the system at a given point in time.
 data AbsProcessorState arch ids
    = AbsProcessorState { absCodeWidth    :: !(NatRepr (ArchAddrWidth arch))
+                         -- ^ The width of a code pointer; the 'NatRepr' type
+                         -- connects the type-level nat with the value
                        , absIsCode       :: !(Word64 -> Bool)
                          -- ^ Recognizer for code addresses.
                        , _absInitialRegs :: !(RegState arch (ArchAbsValue arch))
+                         -- ^ Default values of registers
                        , _absAssignments :: !(MapF (Assignment arch ids) (ArchAbsValue arch))
+                         -- ^ The assignments that have been seen, and the
+                         -- symbolic values associated with them
                        , _curAbsStack    :: !(AbsBlockStack (ArchAddrWidth arch))
+                         -- ^ The current symbolic state of the stack
                        }
 
 
