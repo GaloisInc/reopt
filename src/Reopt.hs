@@ -6,22 +6,30 @@ module Reopt
   , printExecutableAddressesInGlobalData
   , showBytes
   , slice
+    -- * File reading
+  , parseElf64
+  , readElf64
+  , readStaticElf
   ) where
 
-import Control.Exception
-import Control.Lens
-import Control.Monad
-import Data.Bits
+import           Control.Exception
+import           Control.Lens
+import           Control.Monad
+import           Data.Bits
 import qualified Data.ByteString as B
-import Data.ElfEdit
-import Data.Set (Set)
+import           Data.ElfEdit
+import           Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Word
-import Numeric
-import Reopt.Object.Loader
-import Reopt.Object.Memory
+import           Data.Word
+import           Flexdis86
+import           Numeric
+import           System.Exit
+import           System.IO
+import           System.IO.Error
 
-import Flexdis86
+import           Reopt.Object.Loader
+import           Reopt.Object.Memory
+
 
 -- | @stringToFixedBuffer n s@ returns a string with length @n@ containing
 -- @s@ or a prefix of @s@.  If @n@ exceeds the length of @s@, then additional
@@ -122,7 +130,7 @@ printSectionDisassembly s = do
 -- identifying possible entry points via global data.
 printExecutableAddressesInGlobalData :: Elf Word64 -> IO ()
 printExecutableAddressesInGlobalData e = do
-  mem <- memoryForElfSegments e
+  mem <- either fail return $ memoryForElfSegments e
   let exec_words :: [Word64]
       exec_words = [ w | w <- segmentAsWord64le =<< memSegments mem
                    , mem & addrHasPermissions w pf_x
@@ -159,3 +167,59 @@ printExecutableAddressesInGlobalData e = do
 
       Nothing -> do
         putStrLn $ showHex o " not found in segment."
+
+--------------------------------------------------------------------------------
+-- Reading elf utilities
+
+parseElf64 :: String
+              -- ^ Name of output for error messages
+           -> B.ByteString
+              -- ^ Data to read
+           -> IO (Elf Word64)
+parseElf64 nm bs = do
+  case parseElf bs of
+    ElfHeaderError _ msg -> do
+      hPutStrLn stderr $ "Error reading " ++ nm ++ ":"
+      hPutStrLn stderr $ "  " ++ msg
+      exitFailure
+    Elf32Res{} -> do
+      hPutStrLn stderr "32-bit elf files are not yet supported."
+      exitFailure
+    Elf64Res l e -> do
+      when (not (null l)) $ do
+        hPutStrLn stderr $ "Recoverable errors occurred in reading elf file:"
+      forM_ l $ \emsg -> do
+        hPutStrLn stderr (show emsg)
+      return e
+
+showUsage :: IO ()
+showUsage = do
+  putStrLn "For help on using reopt, run \"reopt --help\"."
+
+readElf64 :: FilePath
+             -- ^ Filepath to rad.
+          -> IO (Elf Word64)
+readElf64 path = do
+  when (null path) $ do
+    hPutStrLn stderr "Please specify a path."
+    showUsage
+    exitFailure
+  let h e | isDoesNotExistError e = do
+            hPutStrLn stderr $ path ++ " does not exist."
+            showUsage
+            exitFailure
+          | otherwise = throwIO e
+  bs <- B.readFile path `catch` h
+  parseElf64 path bs
+
+
+readStaticElf :: FilePath -> IO (Elf Word64)
+readStaticElf path = do
+  e <- readElf64 path
+  mi <- elfInterpreter e
+  case mi of
+    Nothing ->
+      return ()
+    Just{} ->
+      fail "reopt does not yet support generating CFGs from dynamically linked executables."
+  return e

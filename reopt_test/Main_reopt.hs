@@ -63,16 +63,17 @@ import           Flexdis86 ( InstructionInstance
                            )
 
 import           Data.Macaw.CFG
+import           Data.Macaw.Types
+import           Reopt (readElf64)
 import           Reopt.Concrete.BitVector hiding (modify)
-import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMachineState(..)
                                              , Address8, modifyAddr, asBV, ConcreteStateT)
+import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
-import           Data.Macaw.Types
 import           Reopt.Machine.X86State
-import           Reopt.Object.Memory
 import           Reopt.Object.Loader
+import           Reopt.Object.Memory
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
 
@@ -205,42 +206,9 @@ getCommandLineArgs = do
 ------------------------------------------------------------------------
 -- Execution
 
-showUsage :: IO ()
-showUsage = do
-  putStrLn "For help on using reopt, run \"reopt --help\"."
-
-readElf64 :: FilePath -> IO (Elf Word64)
-readElf64 path = do
-  when (null path) $ do
-    putStrLn "Please specify a binary."
-    showUsage
-    exitFailure
-  bs <- B.readFile path
-  case parseElf bs of
-    Left (_,msg) -> do
-      putStrLn $ "Error reading " ++ path ++ ":"
-      putStrLn $ "  " ++ msg
-      exitFailure
-    Right (Elf32 _) -> do
-      putStrLn "32-bit executables are not yet supported."
-      exitFailure
-    Right (Elf64 e) ->
-      return e
-
-readStaticElf :: FilePath -> IO (Elf Word64)
-readStaticElf path = do
-  e <- readElf64 path
-  mi <- elfInterpreter e
-  case mi of
-    Nothing ->
-      return ()
-    Just{} ->
-      fail "reopt does not yet support generating CFGs from dynamically linked executables."
-  return e
-
-mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
-mkElfMem LoadBySection e = memoryForElfSections e
-mkElfMem LoadBySegment e = memoryForElfSegments e
+mkElfMem :: (Bits w, Integral w, Monad m) => LoadStyle -> Elf w -> m (Memory w)
+mkElfMem LoadBySection e = either fail return $ memoryForElfSections e
+mkElfMem LoadBySegment e = either fail return $ memoryForElfSegments e
 
 ------------------------------------------------------------------------
 -- Tracers.

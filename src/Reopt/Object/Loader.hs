@@ -3,56 +3,55 @@ module Reopt.Object.Loader
   ( readElf
   , loadExecutable
   , loadElfBySection
+
   , memoryForElfSegments
   , memoryForElfSections
   ) where
 
 import           Control.Lens
-import           Control.Monad.State
+import           Control.Monad.Except
+import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
 import           Data.ElfEdit
+import           System.IO
 
 import           Reopt.Object.Memory
 
+ppErrors :: FilePath -> [ElfParseError w] -> IO ()
+ppErrors path errl = do
+  when (not (null errl)) $ do
+    hPutStrLn stderr $ "Non-fatal errors during parsing " ++ path
+  forM_ errl $ \e -> do
+    hPutStrLn stderr $ "  " ++ show errl
+
+-- | This reads the elf file from the given path.
+--
+-- As a side effect it may print warnings for errors encountered during parsing
+-- to stderr.
 readElf :: FilePath -> IO (SomeElf Elf)
 readElf path = do
   bs <- BS.readFile path
   case parseElf bs of
-    Left (_,msg) -> fail $ "Parse error: " ++ msg
-    Right e -> return e
+    ElfHeaderError _ msg -> do
+      fail $ "Could not parse Elf header: " ++ msg
+    Elf32Res errl e -> do
+      ppErrors path errl
+      return (Elf32 e)
+    Elf64Res errl e -> do
+      ppErrors path errl
+      return (Elf64 e)
 
 loadExecutable :: FilePath -> IO SomeMemory
 loadExecutable path = do
   se <- readElf path
   case se of
-    Elf64 e -> Memory64 <$> memoryForElfSegments e
-    Elf32 e -> Memory32 <$> memoryForElfSegments e
+    Elf64 e -> either fail (return . Memory64) $ memoryForElfSegments e
+    Elf32 e -> either fail (return . Memory32) $ memoryForElfSegments e
 
 slice :: Integral w => Range w -> BS.ByteString -> BS.ByteString
 slice (i,c) = BS.take (fromIntegral c) . BS.drop (fromIntegral i)
-
--- | Load an elf file into memory.  This uses the Elf segments for loading.
-memoryForElfSegments :: (ElfWidth w, Monad m) => Elf w -> m (Memory w)
-memoryForElfSegments e =
-    execStateT (mapM_ (insertElfSegment contents) phdrs) emptyMemory
-  where l = elfLayout e
-        contents = L.toStrict (elfLayoutBytes l)
-        phdrs    = allPhdrs l
-
--- | Load an elf file into memory.
-insertElfSegment :: (ElfWidth w, MonadState (Memory w) m)
-                 => BS.ByteString
-                 -> Phdr w
-                 -> m ()
-insertElfSegment contents phdr = do
-  case elfSegmentType (phdrSegment phdr) of
-    PT_LOAD -> do
-      insertMemSegment (memSegmentForElfSegment contents phdr)
-    PT_DYNAMIC -> do
-      fail "Dynamic elf files are not yet supported."
-    _ -> return ()
 
 -- | Return a memory segment for elf segment if it loadable.
 memSegmentForElfSegment :: Integral w
@@ -72,29 +71,56 @@ memSegmentForElfSegment contents phdr = mseg
                           , memBytes = fixedData
                           }
 
+type MemLoader w = StateT (Memory w) (Except String)
+
+-- | Load an elf file into memory.
+insertElfSegment :: Integral w
+                 => BS.ByteString
+                 -> Phdr w
+                 -> MemLoader w ()
+insertElfSegment contents phdr = do
+  case elfSegmentType (phdrSegment phdr) of
+    PT_LOAD -> do
+      insertMemSegment (memSegmentForElfSegment contents phdr)
+    PT_DYNAMIC -> do
+      throwError "Dynamic elf files are not yet supported."
+    _ -> return ()
+
+-- | Load an elf file into memory.  This uses the Elf segments for loading.
+memoryForElfSegments :: Integral w => Elf w -> Either String (Memory w)
+memoryForElfSegments e =
+    runExcept $ execStateT (mapM_ (insertElfSegment contents) phdrs) emptyMemory
+  where l = elfLayout e
+        contents = L.toStrict (elfLayoutBytes l)
+        phdrs    = allPhdrs l
+
 loadElfBySection :: FilePath -> IO SomeMemory
 loadElfBySection path = do
   se <- readElf path
   case se of
-    Elf64 e -> Memory64 <$> memoryForElfSections e
-    Elf32 e -> Memory32 <$> memoryForElfSections e
-
-
--- | Load allocated Elf sections into memory.
--- Normally, Elf uses segments for loading, but the segment information
--- tends to be more precise.
-memoryForElfSections :: (ElfWidth w, Functor m, Monad m) => Elf w -> m (Memory w)
-memoryForElfSections e = flip execStateT emptyMemory $ do
-  traverseOf_ elfSections insertElfSection e
+    Elf64 e -> either fail (return . Memory64) $ memoryForElfSections e
+    Elf32 e -> either fail (return . Memory32) $ memoryForElfSections e
 
 -- | Load an elf file into memory.
-insertElfSection :: (ElfWidth w, MonadState (Memory w) m) => ElfSection w -> m ()
+insertElfSection :: (Bits w, Num w, Ord w)
+                 => ElfSection w
+                 -> MemLoader w ()
 insertElfSection s =
   when (elfSectionFlags s `hasPermissions` shf_alloc) $ do
     insertMemSegment (memSegmentForElfSection s)
 
+-- | Load allocated Elf sections into memory.
+-- Normally, Elf uses segments for loading, but the segment information
+-- tends to be more precise.
+memoryForElfSections :: (Bits w, Num w, Ord w) => Elf w -> Either String (Memory w)
+memoryForElfSections e = runExcept $ flip execStateT emptyMemory $ do
+  traverseOf_ elfSections insertElfSection e
+
+
 -- | Convert elf section flags to a segment flags.
-flagsForSectionFlags :: ElfWidth w => ElfSectionFlags w -> ElfSegmentFlags
+flagsForSectionFlags :: (Bits w, Num w)
+                     => ElfSectionFlags w
+                     -> ElfSegmentFlags
 flagsForSectionFlags f = pf_r .|. write_flag .|. exec_flag
   where can_write = f `hasPermissions` shf_write
         write_flag | can_write = pf_w
@@ -105,7 +131,7 @@ flagsForSectionFlags f = pf_r .|. write_flag .|. exec_flag
 
 
 -- | Create memory segment from elf section.
-memSegmentForElfSection :: ElfWidth w => ElfSection w -> MemSegment w
+memSegmentForElfSection :: (Bits w, Num w) => ElfSection w -> MemSegment w
 memSegmentForElfSection s = mseg
   where mseg = MemSegment { memBase  = elfSectionAddr s
                           , memFlags = flagsForSectionFlags (elfSectionFlags s)

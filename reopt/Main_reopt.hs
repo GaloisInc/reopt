@@ -10,7 +10,6 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Trans.Except
-import           Data.Binary.Get (ByteOffset)
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -91,6 +90,32 @@ unintercalate punct str = reverse $ go [] "" str
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
 
+------------------------------------------------------------------------
+-- LoadStyle
+
+-- | How to load Elf file.
+data LoadStyle
+   = LoadBySection
+     -- ^ Load loadable sections in Elf file.
+   | LoadBySegment
+     -- ^ Load segments in Elf file.
+
+-- | Create a memory from a load style.
+mkElfMem :: (Bits w, Integral w,  Monad m)
+         => LoadStyle
+         -> Elf w
+         -> m (Memory w)
+mkElfMem sty e = do
+  case elfInterpreter e of
+    Nothing ->
+      fail "Could not parse elf interpreter."
+    Just Nothing ->
+      return ()
+    Just (Just{}) ->
+      fail "reopt does not yet support generating CFGs from dynamically linked executables."
+  case sty of
+    LoadBySection -> either fail return $ memoryForElfSections e
+    LoadBySegment -> either fail return $ memoryForElfSegments e
 
 ------------------------------------------------------------------------
 -- Args
@@ -125,13 +150,6 @@ data Args = Args { _reoptAction  :: !Action
                  , _notransAddrs :: !(Set String)
                    -- ^ Set of function entry points that we ignore for translation.
                  }
-
--- | How to load Elf file.
-data LoadStyle
-   = LoadBySection
-     -- ^ Load loadable sections in Elf file.
-   | LoadBySegment
-     -- ^ Load segments in Elf file.
 
 -- | Action to perform when running
 reoptAction :: Simple Lens Args Action
@@ -385,47 +403,9 @@ getCommandLineArgs = do
 ------------------------------------------------------------------------
 -- Execution
 
-showUsage :: IO ()
-showUsage = do
-  putStrLn "For help on using reopt, run \"reopt --help\"."
-
-readElf64 :: (BS.ByteString -> Either (ByteOffset, String) (SomeElf f))
-             -- ^ Function for reading value.
-          -> FilePath
-             -- ^ Filepath to rad.
-          -> IO (f Word64)
-readElf64 parseFn path = do
-  when (null path) $ do
-    putStrLn "Please specify a path."
-    showUsage
-    exitFailure
-  let h e | isDoesNotExistError e = fail $ path ++ " does not exist."
-          | otherwise = throwIO e
-  bs <- BS.readFile path `catch` h
-  parseElf64 parseFn path bs
-
-parseElf64 :: (BS.ByteString -> Either (ByteOffset, String) (SomeElf f))
-             -- ^ Function for reading value.
-           -> String
-              -- ^ Name of output for error messages
-           -> BS.ByteString
-              -- ^ Data to read
-           -> IO (f Word64)
-parseElf64 parseFn nm bs = do
-  case parseFn bs of
-    Left (_,msg) -> do
-      putStrLn $ "Error reading " ++ nm ++ ":"
-      putStrLn $ "  " ++ msg
-      exitFailure
-    Right (Elf32 _) -> do
-      putStrLn "32-bit elf files are not yet supported."
-      exitFailure
-    Right (Elf64 e) ->
-      return e
-
 dumpDisassembly :: FilePath -> IO ()
 dumpDisassembly path = do
-  e <- readElf64 parseElf path
+  e <- readElf64 path
   let sections = filter isCodeSection $ e^..elfSections
   when (null sections) $ do
     putStrLn "Binary contains no executable sections."
@@ -519,7 +499,7 @@ getFns symMap excludedNames s = do
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  e <- readElf64 parseElf (args^.programPath)
+  e <- readElf64 (args^.programPath)
   -- Create memory for elf
   mem <- mkElfMem (args^.loadStyle) e
   Some s <- return $ cfgFromMemAndBinary mem e
@@ -643,7 +623,7 @@ symAddr entry
 
 showLLVM :: Args -> String -> IO ()
 showLLVM args dir = do
-  e <- readElf64 parseElf (args^.programPath)
+  e <- readElf64 (args^.programPath)
 
   let loadSty = args^.loadStyle
 
@@ -750,18 +730,6 @@ checkCallsIdentified mem g b = do
         _ -> return ()
     _ -> return ()
 
-mkElfMem :: (ElfWidth w, Functor m, Monad m) => LoadStyle -> Elf w -> m (Memory w)
-mkElfMem sty e = do
-  mi <- elfInterpreter e
-  case mi of
-    Nothing ->
-      return ()
-    Just{} ->
-      fail "reopt does not yet support generating CFGs from dynamically linked executables."
-  case sty of
-    LoadBySection -> memoryForElfSections e
-    LoadBySegment -> memoryForElfSegments e
-
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
               -> Elf Word64 -- ^ Original binary
@@ -788,7 +756,7 @@ mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
 performRedir :: Args -> IO ()
 performRedir args = do
   -- Get original binary
-  orig_binary <- readElf64 parseElf (args^.programPath)
+  orig_binary <- readElf64 (args^.programPath)
 
   let output_path = args^.outputPath
   case args^.newobjPath of
@@ -799,7 +767,7 @@ performRedir args = do
       BSL.writeFile output_path $ renderElf orig_binary
     -- When a non-empty new obj is provided we test
     new_obj_path -> do
-      new_obj <- readElf64 parseElf new_obj_path
+      new_obj <- readElf64 new_obj_path
       redirs <-
         case args^.redirPath of
           "" -> return []
@@ -926,7 +894,7 @@ performReopt :: Args -> IO ()
 performReopt args =
   withSystemTempDirectory "reopt." $ \obj_dir -> do
     -- Get original binary
-    orig_binary <- readElf64 parseElf (args^.programPath)
+    orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
     mem <- mkElfMem (args^.loadStyle) orig_binary
     Some cfg <- return $ cfgFromMemAndBinary mem orig_binary
@@ -967,7 +935,7 @@ performReopt args =
         let obj_path = obj_dir </> "obj.o"
         compile_llvm_to_obj args arch llvm obj_path
 
-        new_obj <- parseElf64 parseElf "new object" =<< BS.readFile obj_path
+        new_obj <- parseElf64 "new object" =<< BS.readFile obj_path
 
         putStrLn "Start merge and write"
         -- Convert binary to LLVM
@@ -1004,17 +972,17 @@ main' = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      e <- readElf64 parseElf (args^.programPath)
+      e <- readElf64 (args^.programPath)
       showCFG (args^.loadStyle) e
     ShowCFGAI -> do
-      e <- readElf64 parseElf (args^.programPath)
+      e <- readElf64 (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
     ShowLLVM path -> do
       showLLVM args path
     ShowFunctions -> do
       showFunctions args
     ShowGaps -> do
-      e <- readElf64 parseElf (args^.programPath)
+      e <- readElf64 (args^.programPath)
       showGaps (args^.loadStyle) e
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
