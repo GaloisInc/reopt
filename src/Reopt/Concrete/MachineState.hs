@@ -25,7 +25,7 @@ import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import qualified Data.BitVector as BV
-import           Data.Macaw.CFG (mkRegState, PrettyRegValue(..))
+import           Data.Macaw.CFG (RegState, mkRegState, PrettyRegValue(..))
 import           Data.Macaw.Types
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
@@ -254,7 +254,7 @@ class Monad m => MonadMachineState m where
   -- | Set the value of a register.
   setReg :: X.X86Reg tp -> Value tp -> m ()
   -- | Get the value of all registers.
-  dumpRegs :: m (X.X86State Value)
+  dumpRegs :: m (RegState X.X86Reg Value)
   -- | Update the state for a primitive.
   primitive :: Primitive -> m ()
   -- | Return the base address of the given segment.
@@ -265,9 +265,21 @@ class MonadMachineState m => FoldableMachineState m where
   foldMem8 :: (Address8 -> Value8 -> a -> m a) -> a -> m a
 
 type ConcreteMemory = M.Map Address8 Value8
-newtype ConcreteStateT m a = ConcreteStateT {unConcreteStateT :: StateT (ConcreteMemory, X.X86State Value) m a} deriving (MonadState (ConcreteMemory, X.X86State Value), Functor, MonadTrans, Applicative, Monad)
 
-runConcreteStateT :: ConcreteStateT m a -> ConcreteMemory -> X.X86State Value -> m (a, (ConcreteMemory,X.X86State Value))
+newtype ConcreteStateT m a =
+  ConcreteStateT {
+    unConcreteStateT :: StateT (ConcreteMemory, RegState X.X86Reg Value) m a}
+  deriving ( MonadState (ConcreteMemory, RegState X.X86Reg Value)
+           , Functor
+           , MonadTrans
+           , Applicative
+           , Monad
+           )
+
+runConcreteStateT :: ConcreteStateT m a
+                  -> ConcreteMemory
+                  -> RegState X.X86Reg Value
+                  -> m (a, (ConcreteMemory ,RegState X.X86Reg Value))
 runConcreteStateT (ConcreteStateT{unConcreteStateT = m}) mem regs =
   runStateT m (mem, regs)
 

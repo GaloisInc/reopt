@@ -1,5 +1,4 @@
 {-# LANGUAGE ImplicitParams #-}
-
 module Reopt.Utils.Debug
        ( DebugClass(..)
        , setDebugKeys
@@ -11,7 +10,7 @@ module Reopt.Utils.Debug
        , unsetDebugKeys
        -- , debugKeys
        , debug
-       , debug'         
+       , debug'
        , debugM
        , debugM'
        ) where
@@ -56,18 +55,18 @@ supportedKeys = [ ("urgent", DUrgent, "High priority warnings")
 
 debugKeyDescription :: DebugClass -> String
 debugKeyDescription k =
-  case find (\(_, k', _) -> k == k') supportedKeys of 
+  case find (\(_, k', _) -> k == k') supportedKeys of
     Nothing -> error "Missing debug key"
     Just (_, _, descr) -> descr
 
 debugKeyName :: DebugClass -> String
-debugKeyName k = 
-  case find (\(_, k', _) -> k == k') supportedKeys of 
+debugKeyName k =
+  case find (\(_, k', _) -> k == k') supportedKeys of
     Nothing -> error "Missing debug key"
     Just (n, _, _) -> n
 
 parseDebugKey :: String -> Maybe DebugClass
-parseDebugKey n = 
+parseDebugKey n =
   (\(_, k, _) -> k) <$> find (\(n', _, _) -> n' == n) supportedKeys
 
 {-# INLINE debug #-}
@@ -82,20 +81,20 @@ debug cl msg x
   | otherwise = x
   where
     -- fn = show (getCallStack ?loc)
-    
+
 debug' :: DebugClass -> Doc -> a -> a
 debug' cl msg x = debug cl (displayS (renderPretty 0.8 100 msg) "") x
 
 {-# INLINE debugM #-}
-debugM :: (?loc :: CallStack, Monad m) => DebugClass -> String -> m () 
-debugM cl msg 
+debugM :: (?loc :: CallStack, Monad m) => DebugClass -> String -> m ()
+debugM cl msg
   | cl `elem` getDebugKeys =
       -- let doesn't work here, it seems to break the magic that is ?loc
       traceM (srcLocFile (snd (last (getCallStack ?loc))) ++ ":"
               ++ show (srcLocStartLine (snd (last (getCallStack ?loc)))) ++ ": ["
               ++ debugKeyName cl ++ "] "
-              ++ msg) 
+              ++ msg)
   | otherwise = return ()
 
-debugM' :: Monad m => DebugClass -> Doc -> m () 
+debugM' :: Monad m => DebugClass -> Doc -> m ()
 debugM' cl msg = debugM cl (displayS (renderPretty 0.8 100 msg) "")

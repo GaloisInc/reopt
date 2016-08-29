@@ -470,7 +470,7 @@ instance S.IsValue (Expr ids) where
 -- | A block that we have not yet finished.
 data PreBlock ids = PreBlock { pBlockLabel  :: !(BlockLabel Word64)
                              , _pBlockStmts :: !(Seq (Stmt X86_64 ids))
-                             , _pBlockState :: !(X86State (Value X86_64 ids))
+                             , _pBlockState :: !(RegState X86Reg (Value X86_64 ids))
                              , _pBlockApps  :: !(MapF (App (Value X86_64 ids))
                                                  (Assignment X86_64 ids))
                          }
@@ -478,7 +478,7 @@ data PreBlock ids = PreBlock { pBlockLabel  :: !(BlockLabel Word64)
 pBlockStmts :: Simple Lens (PreBlock ids) (Seq (Stmt X86_64 ids))
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
 
-pBlockState :: Simple Lens (PreBlock ids) (X86State (Value X86_64 ids))
+pBlockState :: Simple Lens (PreBlock ids) (RegState X86Reg (Value X86_64 ids))
 pBlockState = lens _pBlockState (\s v -> s { _pBlockState = v })
 
 pBlockApps  :: Simple Lens (PreBlock ids) (MapF (App (Value X86_64 ids)) (Assignment X86_64 ids))
@@ -519,7 +519,7 @@ blockState :: Lens (GenState st_s ids a) (GenState st_s ids b)
               (MaybeF a (PreBlock ids)) (MaybeF b (PreBlock ids))
 blockState = lens _blockState (\s v -> s { _blockState = v })
 
-emptyPreBlock :: X86State (Value X86_64 ids)
+emptyPreBlock :: RegState X86Reg (Value X86_64 ids)
               -> BlockLabel Word64
               -> PreBlock ids
 emptyPreBlock s lbl =
@@ -537,12 +537,12 @@ emptyGenState nonce_gen =
            , _blockState     = NothingF
            }
 
-curX86State :: Simple Lens (GenState st_s ids 'True) (X86State (Value X86_64 ids))
+curX86State :: Simple Lens (GenState st_s ids 'True) (RegState X86Reg (Value X86_64 ids))
 curX86State = blockState . _JustF . pBlockState
 
 -- | Finishes the current block, if it is started.
 finishBlock' :: PreBlock ids
-             -> (X86State (Value X86_64 ids) -> TermStmt X86_64 ids)
+             -> (RegState X86Reg (Value X86_64 ids) -> TermStmt X86_64 ids)
              -> Block X86_64 ids
 finishBlock' pre_b term =
   Block { blockLabel = pBlockLabel pre_b
@@ -552,7 +552,7 @@ finishBlock' pre_b term =
         }
 
 -- | Finishes the current block, if it is started.
-finishBlock :: (X86State (Value X86_64 ids) -> TermStmt X86_64 ids)
+finishBlock :: (RegState X86Reg (Value X86_64 ids) -> TermStmt X86_64 ids)
             -> (GenState st_s ids a -> GenState st_s ids 'False)
 finishBlock term st =
   case st^.blockState of
@@ -564,7 +564,7 @@ finishBlock term st =
 
 -- | Starts a new block.  If there is a current block it will finish
 -- it with FetchAndExecute
-startBlock :: X86State (Value X86_64 ids) -> BlockLabel Word64 ->
+startBlock :: RegState X86Reg (Value X86_64 ids) -> BlockLabel Word64 ->
               (GenState st_s ids a -> GenState st_s ids 'True)
 startBlock s lbl st =
   finishBlock FetchAndExecute st & blockState .~ JustF (emptyPreBlock s lbl)
@@ -618,7 +618,7 @@ shiftX86GCont f =
 modGenState :: State (GenState st_s ids 'True) a -> X86Generator st_s ids a
 modGenState m = X86G $ ContT $ \c -> ReaderT $ \s -> uncurry (runReaderT . c) (runState m s)
 
-modState :: State (X86State (Value X86_64 ids)) a -> X86Generator st_s ids a
+modState :: State (RegState X86Reg (Value X86_64 ids)) a -> X86Generator st_s ids a
 modState m = modGenState $ do
   s <- use curX86State
   let (r,s') = runState m s
@@ -1003,8 +1003,10 @@ data TranslateError = DecodeError CodeAddr (MemoryError Word64)
                     | DisassembleError Flexdis.InstructionInstance
   deriving Show
 
-initGenState :: NonceGenerator (ST st_s) ids -> Word64 ->
-                X86State (Value X86_64 ids) -> GenState st_s ids 'True
+initGenState :: NonceGenerator (ST st_s) ids
+             -> Word64
+             -> RegState X86Reg (Value X86_64 ids)
+             -> GenState st_s ids 'True
 initGenState nonce_gen ip s = startBlock s lbl (emptyGenState nonce_gen)
   where lbl = GeneratedBlock ip 0
 

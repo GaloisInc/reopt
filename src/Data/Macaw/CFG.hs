@@ -11,12 +11,14 @@ machine code.
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -68,6 +70,8 @@ module Data.Macaw.CFG
   , curIP
   , mkRegState
   , mkRegStateM
+  , traverseRegsWith
+  , zipWithRegState
   -- * Pretty printing
   , ppApp
   , ppAssignId
@@ -106,12 +110,13 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe (isNothing, catMaybes)
 import           Data.Monoid as Monoid
 import           Data.Parameterized.Classes
-import           Data.Parameterized.Nonce
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Nonce
 import           Data.Parameterized.Some
 import           Data.Parameterized.TH.GADT
+import           Data.Parameterized.TraversableF
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Text (Text)
@@ -966,7 +971,20 @@ asBaseOffset x
 
 -- | This represents the state of the processor registers after some
 -- execution.
-newtype RegState r f = RegState (MapF.MapF r f)
+newtype RegState (r :: k -> *) (f :: k -> *)   = RegState (MapF.MapF r f)
+--  deriving (FunctorF, FoldableF)
+
+deriving instance FunctorF (RegState r)
+deriving instance FoldableF (RegState r)
+instance TraversableF (RegState r) where
+  traverseF f (RegState m) = RegState <$> traverseF f m
+
+-- | Traverse the register state with the name of each register and value.
+traverseRegsWith :: Applicative m
+                 => (forall tp. r tp -> f tp -> m (g tp))
+                 -> RegState r f
+                 -> m (RegState r g)
+traverseRegsWith f (RegState m) = RegState <$> MapF.traverseWithKey f m
 
 -- | Get a register out of the state.
 boundValue :: forall r f tp
@@ -1014,10 +1032,17 @@ mkRegState :: RegisterInfo r -- AbsRegState r
            -> RegState r f
 mkRegState f = runIdentity (mkRegStateM (return . f))
 
+zipWithRegState :: RegisterInfo r
+                => (forall u. f u -> g u -> h u)
+                -> RegState r f
+                -> RegState r g
+                -> RegState r h
+zipWithRegState f x y = mkRegState (\r -> f (x ^. boundValue r) (y ^. boundValue r))
+
 ------------------------------------------------------------------------
 -- Pretty printing RegState
 
--- | This class provides a way of optionallly pretty printing the contents
+-- | This class provides a way of optionally pretty printing the contents
 -- of a register or omitting them.
 class PrettyRegValue r (f :: Type -> *) where
   -- | ppValueEq should return a doc if the contents of the given register

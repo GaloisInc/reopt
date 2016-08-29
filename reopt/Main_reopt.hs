@@ -652,9 +652,9 @@ showLLVM args dir = do
   mapM_ writeF fns
 
 -- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a X86State to detect if it read its instruction
+-- It pattern matches on a RegState to detect if it read its instruction
 -- pointer from an address that is 8 below the stack pointer.
-stateEndsWithRet :: X86State (Value X86_64 ids) -> Bool
+stateEndsWithRet :: RegState X86Reg (Value X86_64 ids) -> Bool
 stateEndsWithRet s = do
   let next_ip = s^.boundValue ip_reg
       next_sp = s^.boundValue sp_reg
@@ -684,7 +684,10 @@ isCodeAddrWriteTo mem s sp
 isCodeAddrWriteTo _ _ _ = Nothing
 
 -- | Returns true if it looks like block ends with a call.
-blockContainsCall :: Memory Word64 -> Block X86_64 ids -> X86State (Value X86_64 ids) -> Bool
+blockContainsCall :: Memory Word64
+                  -> Block X86_64 ids
+                  -> RegState X86Reg (Value X86_64 ids)
+                  -> Bool
 blockContainsCall mem b s =
   let next_sp = s^.boundValue sp_reg
       go [] = False
@@ -694,7 +697,9 @@ blockContainsCall mem b s =
    in go (reverse (blockStmts b))
 
 -- | Return next states for block.
-blockNextStates :: CFG X86_64 ids -> Block X86_64 ids -> [X86State (Value X86_64 ids)]
+blockNextStates :: CFG X86_64 ids
+                -> Block X86_64 ids
+                -> [RegState X86Reg (Value X86_64 ids)]
 blockNextStates g b =
   case blockTerm b of
     FetchAndExecute s -> [s]

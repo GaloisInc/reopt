@@ -238,7 +238,7 @@ traceInner act pid = do
 ------------------------------------------------------------------------
 -- Tests.
 data MessageType
-   = FailureRecord (Maybe (X86State MS.Value)) InstructionInstance [String]
+   = FailureRecord (Maybe (RegState X86Reg MS.Value)) InstructionInstance [String]
    | UnknownInstruction InstructionInstance
    | NoDecode
    | Impossible String
@@ -262,8 +262,8 @@ instance Show MessageType where
 
 type TestM m a = ConcreteStateT (StateT [MessageType] m) a
 
-runTestM :: Monad m => TestM m a -> X86State MS.Value
-            -> m ([MessageType], a, MS.ConcreteMemory, X86State MS.Value)
+runTestM :: Monad m => TestM m a -> RegState X86Reg MS.Value
+            -> m ([MessageType], a, MS.ConcreteMemory, RegState X86Reg MS.Value)
 runTestM m regs = do ((a, (mem, regs')), logs) <- runStateT (MS.runConcreteStateT m Map.empty regs) []
                      return (logs, a, mem, regs')
 
@@ -339,7 +339,7 @@ printExecutedInstructions args = do
 -- Register translation.
 
 -- | Translate PTrace register format to Reopt register format.
-translatePtraceRegs :: X86_64Regs -> X86_64FPRegs -> X86State MS.Value
+translatePtraceRegs :: X86_64Regs -> X86_64FPRegs -> RegState X86Reg MS.Value
 translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
   where
     fillReg :: X86Reg tp -> MS.Value tp
@@ -760,7 +760,7 @@ singleInstructionTest args = do
 -- Return value indicates whether the enclosing test should continue
 -- or not (would like to simply raise an error, but then all the
 -- 'tell' messages get lost, which makes debugging harder).
-checkAndClear :: Bool -> Maybe (X86State MS.Value) -> Signal
+checkAndClear :: Bool -> Maybe (RegState X86Reg MS.Value) -> Signal
   -> (Either SM.ExceptionClass Bool, Maybe InstructionInstance)
   -> TestM PTraceMachineState Bool
 checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
@@ -803,7 +803,7 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
           if realVal `MS.equalOrUndef` val
             then return errs
             else return $ errs ++ [show addr ++ " did not match"]) []
-        compareRegs :: X86State MS.Value -> X86State MS.Value -> [String]
+        compareRegs :: RegState X86Reg MS.Value -> RegState X86Reg MS.Value -> [String]
         compareRegs real emu =
           catMaybes $ map (viewSome (\reg ->
             let lens = boundValue reg

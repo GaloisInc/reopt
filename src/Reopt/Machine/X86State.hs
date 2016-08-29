@@ -14,15 +14,9 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Machine.X86State
-  ( X86State
+  ( initX86State
   , x87TopReg
-  , initX86State
     -- * Combinators
-  , foldX86StateValue
-  , zipWithX86State
-  , mapX86State
-  , mapX86StateM
-  , mapX86StateWithM
   , foldValueCached
     -- * X86Reg
   , X86Reg(..)
@@ -68,9 +62,7 @@ import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Map.Strict (Map)
 import           Data.Parameterized.Classes
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -526,38 +518,11 @@ x86StateRegs
 
 -- | This represents the state of the processor registers after some
 -- execution.
-type X86State = RegState X86Reg
-
+-- type X86State = RegState X86Reg
 
 -- | the value oDebugReg{}  f the current instruction pointer.
-x87TopReg :: Simple Lens (X86State f) (f (BVType 3))
+x87TopReg :: Simple Lens (RegState X86Reg f) (f (BVType 3))
 x87TopReg = boundValue X87_TopReg
-
-foldX86StateValue :: Monoid a => (forall u. f u -> a) -> X86State f -> a
-foldX86StateValue f (RegState m) = foldMapF f m
-
-zipWithX86State :: (forall u. f u -> g u -> h u)
-                -> X86State f
-                -> X86State g
-                -> X86State h
-zipWithX86State f x y = mkRegState (\r -> f (x ^. boundValue r) (y ^. boundValue r))
-
-mapX86State :: (forall u. f u -> g u)
-            -> X86State f
-            -> X86State g
-mapX86State f (RegState x) = RegState (fmapF f x)
-
-mapX86StateM :: Monad m
-             => (forall u. f u -> m (g u))
-             -> X86State f
-             -> m (X86State g)
-mapX86StateM f (RegState x) = RegState <$> traverseF f x
-
-mapX86StateWithM :: Monad m
-                 => (forall tp. X86Reg tp -> f tp -> m (g tp))
-                 -> X86State f
-                 -> m (X86State g)
-mapX86StateWithM f (RegState m) = RegState <$> MapF.traverseWithKey f m
 
 ------------------------------------------------------------------------
 -- ExploreLoc
@@ -581,7 +546,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> X86State (Value X86_64 ids)
+             -> RegState X86Reg (Value X86_64 ids)
 initX86State loc = mkRegState Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
@@ -625,16 +590,14 @@ refsInAssignRhs rhs =
 
 -- helper type to make a monad a monoid in the obvious way
 newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
-                               deriving (Functor, Applicative, Monad, MonadState s)
+   deriving (Functor, Applicative, Monad, MonadState s)
 
 instance Monoid m => Monoid (StateMonadMonoid s m) where
   mempty = return mempty
-  mappend m m' = do mv <- m
-                    mv' <- m'
-                    return (mappend mv mv')
+  mappend m m' = mappend <$> m <*> m'
 
 foldValueCached :: forall m ids tp
-                .  (Monoid m)
+                .  Monoid m
                 => (forall n.  NatRepr n -> Integer -> m)
                 -> (forall utp . ArchReg X86_64 utp -> m)
                 -> (forall utp . Assignment X86_64 ids utp -> m -> m)
@@ -649,14 +612,14 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
       case v of
         BVValue sz i -> return $ litf sz i
         Initial r    -> return $ initf r
-        AssignedValue asgn@(Assignment a_id rhs) ->
-          do m_v <- use (at (Some a_id))
-             case m_v of
-               Just v' -> return $ assignf asgn v'
-               Nothing ->
-                  do rhs_v <- goAssignRHS rhs
-                     at (Some (assignId asgn)) .= Just rhs_v
-                     return (assignf asgn rhs_v)
+        AssignedValue asgn@(Assignment a_id rhs) -> do
+          m_v <- use (at (Some a_id))
+          case m_v of
+            Just v' -> return $ assignf asgn v'
+            Nothing -> do
+              rhs_v <- goAssignRHS rhs
+              at (Some a_id) .= Just rhs_v
+              return (assignf asgn rhs_v)
 
     goAssignRHS :: forall tp'
                 .  AssignRhs X86_64 ids tp'

@@ -57,7 +57,7 @@ data RegisterUseState ids = RUS {
   , _blockRegProvides :: !(Map (BlockLabel Word64) (Set (Some X86Reg)))
 
   -- | Maps defined registers to their deps.  Not defined for all
-  -- variables, hence use of Map instead of X86State
+  -- variables, hence use of Map instead of RegState X86Reg
   , _blockInitDeps  :: !(Map (BlockLabel Word64) (Map (Some X86Reg) (RegDeps ids)))
   -- | The list of predecessors for a given block
   , _blockPreds     :: !(Map (BlockLabel Word64) [BlockLabel Word64])
@@ -298,13 +298,13 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
 
           -- Demand the values from the state at the given registers
           demandRegisters :: forall t. Foldable t
-                          => X86State (Value X86_64 ids)
+                          => RegState X86Reg (Value X86_64 ids)
                           -> t (Some X86Reg)
                           -> RegisterUseM ids ()
           demandRegisters s rs = traverse_ (\(Some r) -> demandValue lbl (s^.boundValue r)) rs
 
           -- Figure out the deps of the given registers and update the state for the current label
-          addRegisterUses :: X86State (Value X86_64 ids)
+          addRegisterUses :: RegState X86Reg (Value X86_64 ids)
                           -> [Some X86Reg]
                           -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
           addRegisterUses s rs = do

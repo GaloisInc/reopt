@@ -206,7 +206,7 @@ valueUses = zoom assignmentCache .
 recordPropagation :: Ord a
                   => Simple Lens (FunctionArgsState ids) (Map (BlockLabel Word64) (Map a DemandSet))
                   -> BlockLabel Word64
-                  -> X86State (Value X86_64 ids)
+                  -> RegState X86Reg (Value X86_64 ids)
                   -> (forall tp . X86Reg tp -> a)
                   -> [Some X86Reg]
                   -> FunctionArgsM ids () -- Map (Some N.RegisterName) RegDeps
@@ -419,7 +419,7 @@ summarizeIter ist seen (Just lbl)
 -- generation of function call demands, so we split that aspect out
 -- (callee saved are handled in summarizeBlock).
 summarizeCall :: BlockLabel Word64
-              -> X86State (Value X86_64 ids)
+              -> RegState X86Reg (Value X86_64 ids)
               -> Either CodeAddr (BVValue X86_64 ids 64)
               -> Bool
               -> FunctionArgsM ids ()

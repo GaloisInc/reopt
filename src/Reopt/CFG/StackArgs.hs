@@ -47,7 +47,7 @@ maximumStackArg amap ist addr =
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: MapF (AssignId ids) (AbsValue 64)
-               -> X86State (AbsValue 64)
+               -> RegState X86Reg (AbsValue 64)
                -> DiscoveryInfo X86_64 ids
                -> Set (BlockLabel Word64)
                -> Maybe (BlockLabel Word64)
@@ -60,7 +60,7 @@ recoverIter amap aregs ist seen (Just lbl)
                    recoverIter amap aregs ist (Set.insert lbl seen) lbl'
 
 recoverBlock :: MapF (AssignId ids) (AbsValue 64)
-                -> X86State (AbsValue 64)
+                -> RegState X86Reg (AbsValue 64)
                 -> DiscoveryInfo X86_64 ids
                 -> BlockLabel Word64
                 -> StackArgs ()

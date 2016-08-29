@@ -392,7 +392,7 @@ lookupFunctionArgs fn =
 
       -- Figure out what is preserved across the function call.
 getPostCallValue :: BlockLabel Word64
-                 -> X86State (Value X86_64 ids)
+                 -> RegState X86Reg (Value X86_64 ids)
                      -- ^ Value of registers before syscall
                  -> [FnReturnVar (BVType 64)] -- ^ Integer values returned by function.
                  -> [FnReturnVar XMMType]     -- ^ Floating point values returned by function.
@@ -427,7 +427,7 @@ getPostCallValue lbl proc_state intrs floatrs r = do
 -- This is subtly different to that for function calls.
 getPostSyscallValue :: BlockLabel Word64
                        -- ^ Label of block where we syscall occurred.
-                    -> X86State (Value X86_64 ids)
+                    -> RegState X86Reg (Value X86_64 ids)
                        -- ^ Value of registers before syscall
                     -> X86Reg tp
                     -> Recover ids (FnValue tp)
@@ -682,7 +682,7 @@ recoverAssign asgn = do
             return $ FnValueUnsupported ("assignment " ++ show (pretty asgn))
                                         (typeRepr (assignRhs asgn))
 
-recoverRegister :: X86State (Value X86_64 ids)
+recoverRegister :: RegState X86Reg (Value X86_64 ids)
                 -> X86Reg tp
                 -> Recover ids (FnValue tp)
 recoverRegister proc_state r = recoverValue ("register " ++ show r) (proc_state ^. boundValue r)

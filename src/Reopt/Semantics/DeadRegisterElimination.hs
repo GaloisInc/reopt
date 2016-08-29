@@ -28,6 +28,7 @@ import           Data.Foldable (foldrM)
 import           Data.Map (Map)
 import qualified Data.Map as M
 import           Data.Parameterized.Some
+import           Data.Parameterized.TraversableF
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Word
@@ -58,8 +59,8 @@ blockLiveRegisters b = do
   where
     terminalIds = case blockTerm b of
                    Branch v _ _      -> refsInValue v
-                   FetchAndExecute s -> foldX86StateValue refsInValue s
-                   Syscall s     -> foldX86StateValue refsInValue s
+                   FetchAndExecute s -> foldMapF refsInValue s
+                   Syscall s     -> foldMapF refsInValue s
     addIDs ids = modify (S.union ids)
     noteAndFilter stmt@(AssignStmt (Assignment v rhs)) ss
       = do v_in <- gets (S.member (Some v))
