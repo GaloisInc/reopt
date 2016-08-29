@@ -53,7 +53,6 @@ library
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
-    Reopt.CFG.Representation
     Reopt.CFG.StackArgs
     Reopt.CFG.StackDepth
     Reopt.CFG.StackHeight
@@ -68,12 +67,10 @@ library
     Reopt.Machine.SysDeps.LinuxGenerated
     Reopt.Machine.SysDeps.Types
     Reopt.Machine.SysDeps
-    Reopt.Machine.Types
     Reopt.Object.Loader
     Reopt.Object.Memory
     Reopt.Reified.Semantics
     Reopt.Relinker
-    Reopt.Relinker.RangeSet
     Reopt.Relinker.Redirection
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
