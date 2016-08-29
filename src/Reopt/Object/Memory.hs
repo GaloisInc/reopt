@@ -25,6 +25,7 @@ module Reopt.Object.Memory
   , isCodeAddrOrNull
   , isReadonlyAddr
   , findSegment
+  , segmentOfRange
   , MemSegment(..)
   , ppMemSegment
   , segmentAsWord64le
@@ -212,6 +213,18 @@ insertMemSegment mseg = seq mseg $ do
 findSegment :: Ord w => w -> Memory w -> Maybe (MemSegment w)
 findSegment w (Memory m) = snd <$> listToMaybe (IMap.search w m)
 
+-- | Return segment if range is entirely contained within a single segment
+-- and 'Nothing' otherwise.
+segmentOfRange :: (Num w, Ord w)
+               => w -- ^ Start of range
+               -> w -- ^ One past last index in range.
+               -> Memory w
+               -> Maybe (MemSegment w)
+segmentOfRange base end mem =
+  case findSegment base mem of
+    Just seg | end <= memBase seg + segmentSize seg -> Just seg
+    _ -> Nothing
+
 -- | Return true if address satisfies permissions check.
 addrPermissions :: Ord w => w -> Memory w -> ElfSegmentFlags
 addrPermissions w m = maybe pf_none memFlags (findSegment w m)
@@ -225,7 +238,7 @@ isCodeAddr :: Ord w => Memory w -> w -> Bool
 isCodeAddr mem val = addrPermissions val mem `hasPermissions` pf_x
 
 -- | Indicates if address is an address in code segment or null.
-isCodeAddrOrNull :: Memory Word64 -> Word64 -> Bool
+isCodeAddrOrNull :: (Num w, Ord w) => Memory w -> w -> Bool
 isCodeAddrOrNull _ 0 = True
 isCodeAddrOrNull mem a = isCodeAddr mem a
 

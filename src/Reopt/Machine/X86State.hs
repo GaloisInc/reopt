@@ -15,8 +15,6 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Machine.X86State
   ( X86State
-  , mkX86State
-  , mkX86StateM
   , x87TopReg
   , initX86State
     -- * Combinators
@@ -37,8 +35,6 @@ module Reopt.Machine.X86State
   , cf_reg
   , df_reg
   , boundValue
-    -- ** Pretty printing
-  , PrettyRegValue(..)
     -- * ExploreLoc
   , ExploreLoc(..)
   , rootLoc
@@ -65,6 +61,7 @@ module Reopt.Machine.X86State
   , x86ResultRegs
   , x86FloatResultRegs
   , x86SyscallArgumentRegs
+  , CodeAddr
   ) where
 
 import           Control.Lens
@@ -87,17 +84,23 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import qualified Reopt.Machine.StateNames as N
 
+-- | An address of a code location.
+--
+-- This is currently just a Word64, but we may need to switch to a
+-- structured representation once dynamic libraries are supported.
+type CodeAddr = Word64
+
 ------------------------------------------------------------------------
 -- X86_64 specific declarations
 
-data X86_64
-type instance ArchReg  X86_64 = X86Reg
 type instance RegAddrWidth X86Reg = 64
 
-type instance ArchFn   X86_64 ids = X86PrimFn ids
-type instance ArchStmt X86_64 ids = X86Stmt ids
+data X86_64
+type instance ArchReg  X86_64 = X86Reg
+
+type instance ArchFn   X86_64 = X86PrimFn
+type instance ArchStmt X86_64 = X86Stmt
 type instance ArchAddr X86_64 = Word64
-type instance ArchCFLocation X86_64 = ExploreLoc
 
 ------------------------------------------------------------------------
 -- X86PrimLoc
@@ -166,30 +169,30 @@ data X86PrimFn ids tp
      -- ^ Read the 'GS' base address
    | (tp ~ BVType 64)
      => MemCmp !Integer
-               -- ^ Number of bytes per value.
+               -- /\ Number of bytes per value.
                !(BVValue X86_64 ids 64)
-               -- ^ Number of values to compare
+               -- /\ Number of values to compare
                !(BVValue X86_64 ids 64)
-               -- ^ Pointer to first buffer.
+               -- /\ Pointer to first buffer.
                !(BVValue X86_64 ids 64)
-               -- ^ Pointer to second buffer.
+               -- /\ Pointer to second buffer.
                !(BVValue X86_64 ids 1)
-               -- ^ Direction flag, False means increasing
+               -- /\ Direction flag, False means increasing
      -- ^ Compares to memory regions
    | forall n
      . (tp ~ BVType 64, 1 <= n)
      => FindElement !Integer
-                    -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+                    -- /\ Number of bytes to compare at a time {1, 2, 4, 8}
                     !Bool
-                    -- ^ Find first matching (True) or not matching (False)
+                    -- /\ Find first matching (True) or not matching (False)
                     !(BVValue X86_64 ids 64)
-                    -- ^ Number of elements to compare
+                    -- /\Number of elements to compare
                     !(BVValue X86_64 ids 64)
-                    -- ^ Pointer to first buffer
+                    -- /\ Pointer to first buffer
                     !(BVValue X86_64 ids n)
-                    -- ^ Value to compare
+                    -- /\ Value to compare
                     !(BVValue X86_64 ids 1)
-                    -- ^ Flag indicates direction of copy:
+                    -- /\ Flag indicates direction of copy:
                     -- True means we should decrement buffer pointers after each copy.
                     -- False means we should increment the buffer pointers after each copy.
 
@@ -202,8 +205,8 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       MemCmp{}      -> knownType
       FindElement{} -> knownType
 
-instance PrettyF (X86PrimFn ids) where
-  prettyF = runIdentity . ppX86PrimFn (Identity . ppValue 10)
+instance PrettyFF X86PrimFn where
+  prettyFF = runIdentity . ppX86PrimFn (Identity . ppValue 10)
 
 instance PrettyArch X86_64 where
   ppArchFn = ppX86PrimFn
@@ -255,12 +258,12 @@ data X86Stmt ids
             !(BVValue X86_64 ids 1)
             -- ^ Direction flag
 
-instance Pretty (X86Stmt ids) where
-  pretty (WriteLoc loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
-  pretty (MemCopy sz cnt src dest rev) =
+instance PrettyF X86Stmt where
+  prettyF (WriteLoc loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
+  prettyF (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-  pretty (MemSet cnt val dest df) =
+  prettyF (MemSet cnt val dest df) =
       text "memset" <+> parens (hcat $ punctuate comma args)
     where args = [pretty cnt, pretty val, pretty dest, pretty df]
 
@@ -429,6 +432,8 @@ df_reg :: X86Reg (BVType 1)
 df_reg = X86_FlagReg 10
 
 instance RegisterInfo X86Reg where
+  archRegs = x86StateRegs
+
   ip_reg = X86_IP
   sp_reg = x86_sp_reg
 
@@ -521,21 +526,12 @@ x86StateRegs
 
 -- | This represents the state of the processor registers after some
 -- execution.
-type X86State = RegState X86_64
+type X86State = RegState X86Reg
 
 
 -- | the value oDebugReg{}  f the current instruction pointer.
 x87TopReg :: Simple Lens (X86State f) (f (BVType 3))
 x87TopReg = boundValue X87_TopReg
-
-mkX86StateM :: Applicative m
-            => (forall tp . X86Reg tp -> m (f tp))
-            -> m (X86State f)
-mkX86StateM f = RegState . MapF.fromList <$> traverse g x86StateRegs
-  where g (Some r) = MapF.Pair r <$> f r
-
-mkX86State :: (forall tp . X86Reg tp -> f tp) -> X86State f
-mkX86State f = runIdentity (mkX86StateM (return . f))
 
 foldX86StateValue :: Monoid a => (forall u. f u -> a) -> X86State f -> a
 foldX86StateValue f (RegState m) = foldMapF f m
@@ -544,7 +540,7 @@ zipWithX86State :: (forall u. f u -> g u -> h u)
                 -> X86State f
                 -> X86State g
                 -> X86State h
-zipWithX86State f x y = mkX86State (\r -> f (x ^. boundValue r) (y ^. boundValue r))
+zipWithX86State f x y = mkRegState (\r -> f (x ^. boundValue r) (y ^. boundValue r))
 
 mapX86State :: (forall u. f u -> g u)
             -> X86State f
@@ -586,7 +582,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> X86State (Value X86_64 ids)
-initX86State loc = mkX86State Initial
+initX86State loc = mkRegState Initial
                  & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
@@ -606,7 +602,7 @@ refsInAssignRhs rhs =
     EvalApp v      -> refsInApp v
     SetUndefined _ -> Set.empty
     ReadMem v _    -> refsInValue v
-    EvalArchFn f ->
+    EvalArchFn f _ ->
       case f of
         ReadLoc _ -> Set.empty
         ReadFSBase -> Set.empty
@@ -643,34 +639,34 @@ foldValueCached :: forall m ids tp
                 -> (forall utp . ArchReg X86_64 utp -> m)
                 -> (forall utp . Assignment X86_64 ids utp -> m -> m)
                 -> Value X86_64 ids tp
-                -> State (Map (Some (Assignment X86_64 ids)) m) m
+                -> State (Map (Some (AssignId ids)) m) m
 foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
   where
     go :: forall tp'
        .  Value X86_64 ids tp'
-       -> StateMonadMonoid (Map (Some (Assignment X86_64 ids)) m) m
+       -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
         Initial r    -> return $ initf r
-        AssignedValue asgn@(Assignment _ rhs) ->
-          do m_v <- use (at (Some asgn))
+        AssignedValue asgn@(Assignment a_id rhs) ->
+          do m_v <- use (at (Some a_id))
              case m_v of
                Just v' -> return $ assignf asgn v'
                Nothing ->
                   do rhs_v <- goAssignRHS rhs
-                     at (Some asgn) .= Just rhs_v
+                     at (Some (assignId asgn)) .= Just rhs_v
                      return (assignf asgn rhs_v)
 
     goAssignRHS :: forall tp'
                 .  AssignRhs X86_64 ids tp'
-                -> StateMonadMonoid (Map (Some (Assignment X86_64 ids)) m) m
+                -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
         SetUndefined _w -> mempty
         ReadMem addr _ -> go addr
-        EvalArchFn f ->
+        EvalArchFn f _ ->
           case f of
             ReadLoc _ -> mempty
             ReadFSBase -> mempty

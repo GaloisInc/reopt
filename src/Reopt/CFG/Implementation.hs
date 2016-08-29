@@ -25,6 +25,8 @@ that map  a control flow graph from a program using the semantics.
 module Reopt.CFG.Implementation
        ( x86ArchitectureInfo
        , disassembleBlock
+       , disassembleBlock'
+       , TranslateError(..)
        ) where
 
 import           Control.Exception (assert)
@@ -36,14 +38,16 @@ import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Data.Bits
 import qualified Data.Foldable as Fold
+import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import           Data.Parameterized.Nonce
+import           Data.Parameterized.Nonce -- .Transformers
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import           Data.Word
 import qualified Flexdis86 as Flexdis
@@ -51,8 +55,9 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
 import           Data.Macaw.CFG
-import           Data.Macaw.Types (BVType, typeRepr)
+import           Data.Macaw.Types (BVType, knownType, typeRepr)
 
+import qualified Reopt.Analysis.Domains.StridedInterval as SI
 import           Reopt.CFG.ArchitectureInfo (ArchitectureInfo(..))
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
@@ -63,7 +68,25 @@ import           Reopt.Semantics.Monad
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
+import Reopt.Analysis.AbsState
+       ( AbsBlockState
+       , mkAbsBlockState
+       , setAbsIP
 
+       , absRegState
+       , StackEntry(..)
+       , concreteStackOffset
+       , AbsValue(..)
+       , top
+       , bvadd
+       , stridedInterval
+       , asConcreteSingleton
+       , startAbsStack
+       , hasMaximum
+       , AbsProcessorState
+       , transferValue
+       ,
+       )
 import           Debug.Trace
 
 ------------------------------------------------------------------------
@@ -611,13 +634,17 @@ newAssignID =
 addStmt :: Stmt X86_64 ids -> X86Generator st_s ids ()
 addStmt stmt = modGenState $ blockState . _JustF . pBlockStmts %= (Seq.|> stmt)
 
-addAssignment :: AssignRhs X86_64 ids tp ->
-                 X86Generator st_s ids (Assignment X86_64 ids tp)
+addAssignment :: AssignRhs X86_64 ids tp
+              -> X86Generator st_s ids (Assignment X86_64 ids tp)
 addAssignment rhs = do
   l <- newAssignID
   let a = Assignment l rhs
   addStmt $ AssignStmt a
   return a
+
+addArchFn :: ArchFn X86_64 ids tp
+          -> X86Generator st_s ids (Assignment X86_64 ids tp)
+addArchFn fn = addAssignment (EvalArchFn fn (typeRepr fn))
 
 -- | This function does a top-level constant propagation/constant reduction.
 -- We assume that the leaf nodes have also been propagated (i.e., we only operate
@@ -698,19 +725,19 @@ getX87Top = do
   top_val <- modState $ use $ x87TopReg
   case top_val of
     -- Validate that i is less than top and top +
-    BVValue _ (fromInteger -> top) ->
-      return top
+    BVValue _ (fromInteger -> topv) ->
+      return topv
     _ -> fail $ "Unsupported value for top register " ++ show (pretty top_val)
 
 getX87Offset :: Int -> X86Generator st_s ids Int
 getX87Offset i = do
-  top <- getX87Top
-  unless (0 <= top + i && top + i <= 7) $ do
+  topv <- getX87Top
+  unless (0 <= topv + i && topv + i <= 7) $ do
     fail $ "Illegal floating point index"
-  return $! top + i
+  return $! topv + i
 
 readLoc :: X86PrimLoc tp -> X86Generator st_s ids (Expr ids tp)
-readLoc l = ValueExpr . AssignedValue <$> addAssignment (EvalArchFn (ReadLoc l))
+readLoc l = ValueExpr . AssignedValue <$> addArchFn (ReadLoc l)
 
 getLoc :: ImpLocation ids tp -> X86Generator st_s ids (Expr ids tp)
 getLoc (l0 :: ImpLocation ids tp) =
@@ -835,6 +862,7 @@ bvBinOp op' x y = do
   zv <- evalApp (op' w xv yv)
   return $ ValueExpr zv
 
+
 instance S.Semantics (X86Generator st_s ids) where
   make_undefined (S.BVTypeRepr n) =
     ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
@@ -900,7 +928,7 @@ instance S.Semantics (X86Generator st_s ids) where
     src_v   <- eval src
     dest_v  <- eval dest
     ValueExpr . AssignedValue
-      <$> addAssignment (EvalArchFn (MemCmp sz count_v src_v dest_v is_reverse_v))
+      <$> addArchFn (MemCmp sz count_v src_v dest_v is_reverse_v)
 
   memset count val dest df = do
     count_v <- eval count
@@ -915,7 +943,7 @@ instance S.Semantics (X86Generator st_s ids) where
     val_v   <- eval val
     is_reverse_v <- eval is_reverse
     ValueExpr . AssignedValue
-      <$> addAssignment (EvalArchFn (FindElement sz findEq count_v buf_v val_v is_reverse_v))
+      <$> addArchFn (FindElement sz findEq count_v buf_v val_v is_reverse_v)
 
   primitive S.Syscall = do
     shiftX86GCont $ \_ s0 -> do
@@ -933,8 +961,8 @@ instance S.Semantics (X86Generator st_s ids) where
 
   getSegmentBase seg =
     case seg of
-      Flexdis.FS -> ValueExpr . AssignedValue <$> addAssignment (EvalArchFn ReadFSBase)
-      Flexdis.GS -> ValueExpr . AssignedValue <$> addAssignment (EvalArchFn ReadGSBase)
+      Flexdis.FS -> ValueExpr . AssignedValue <$> addArchFn ReadFSBase
+      Flexdis.GS -> ValueExpr . AssignedValue <$> addArchFn ReadGSBase
       _ ->
         error $ "Reopt.CFG.Implementation.getSegmentBase " ++ show seg ++ ": unimplemented!"
 
@@ -954,8 +982,8 @@ instance S.Semantics (X86Generator st_s ids) where
 
   x87Push e = do
     v <- eval e
-    top <- getX87Top
-    let new_top = (top - 1) .&. 0x7
+    topv <- getX87Top
+    let new_top = (topv - 1) .&. 0x7
     modState $ do
       -- TODO: Update tagWords
       -- Store value at new top
@@ -963,17 +991,17 @@ instance S.Semantics (X86Generator st_s ids) where
       -- Update top
       x87TopReg .= BVValue knownNat (toInteger new_top)
   x87Pop = do
-    top <- getX87Top
-    let new_top = (top + 1) .&. 0x7
+    topv <- getX87Top
+    let new_top = (topv + 1) .&. 0x7
     modState $ do
       -- Update top
       x87TopReg .= BVValue knownNat (toInteger new_top)
 
     return ()
 
-data GenError = DecodeError CodeAddr (MemoryError Word64)
-              | DisassembleError Flexdis.InstructionInstance
-                deriving Show
+data TranslateError = DecodeError CodeAddr (MemoryError Word64)
+                    | DisassembleError Flexdis.InstructionInstance
+  deriving Show
 
 initGenState :: NonceGenerator (ST st_s) ids -> Word64 ->
                 X86State (Value X86_64 ids) -> GenState st_s ids 'True
@@ -982,22 +1010,43 @@ initGenState nonce_gen ip s = startBlock s lbl (emptyGenState nonce_gen)
 
 -- | Disassemble block, returning either an error, or a list of blocks
 -- and ending PC.
-disassembleBlock :: forall st_s ids.
-                       Memory Word64
-                    -> (CodeAddr -> Bool)
-                    -- ^ PRedicate that tells when to continue.
-                    -> ExploreLoc -- ^ Location to explore from.
-                    -> NonceST st_s ids (Either String ([Block X86_64 ids], CodeAddr))
-disassembleBlock mem contFn loc = do
-  nonce_gen <- getNonceSTGen
-  let gs = initGenState nonce_gen (loc_ip loc) (initX86State loc)
-  res <- lift $ runExceptT $ disassembleBlock' mem gs contFn (loc_ip loc)
-  return $
-    case res of
-      Left e -> Left (show e)
-      Right (gs', ip) ->
-        Right (Fold.toList (gs'^.frontierBlocks), ip)
+disassembleBlock :: forall s
+                 .  NonceGenerator (ST s) s
+                 -> Memory Word64
+                 -> (CodeAddr -> Bool)
+                    -- ^ Predicate that tells when to continue.
+                 -> CodeAddr
+                 -> AbsBlockState X86Reg
+                 -> ST s (Either String ([Block X86_64 s], CodeAddr))
+disassembleBlock nonce_gen mem contFn addr ab = do
+  case mkExploreLoc addr ab of
+    Left msg -> pure (Left msg)
+    Right loc -> do
+      either (Left . show) Right <$> disassembleBlock' nonce_gen mem contFn loc
 
+mkExploreLoc :: CodeAddr
+             -> AbsBlockState X86Reg
+             -> Either String ExploreLoc
+mkExploreLoc addr ab =
+  case asConcreteSingleton (ab^.absRegState^.x87TopReg) of
+    Nothing -> Left $! "Could not determine height of X87 stack."
+    Just t -> Right $! ExploreLoc { loc_ip = addr
+                                  , loc_x87_top = fromInteger t
+                                  }
+
+-- | Disassemble block, returning either an error, or a list of blocks
+-- and ending PC.
+disassembleBlock' :: forall s
+                 .  NonceGenerator (ST s) s
+                 -> Memory Word64
+                 -> (CodeAddr -> Bool)
+                    -- ^ Predicate that tells when to continue.
+                 -> ExploreLoc
+                 -> ST s (Either TranslateError ([Block X86_64 s], CodeAddr))
+disassembleBlock' nonce_gen mem contFn loc = runExceptT $ do
+  let gs = initGenState nonce_gen (loc_ip loc) (initX86State loc)
+  (gs', ip) <- disassembleBlockImpl mem gs contFn (loc_ip loc)
+  pure $! (Fold.toList (gs'^.frontierBlocks), ip)
 
 {-
 getExploreLocs :: X86State -> [ExploreLoc]
@@ -1019,20 +1068,19 @@ getFrontierNext = Fold.foldl' f Set.empty
 
 -- | Disassemble block, returning either an error, or a list of blocks
 -- and ending PC.
-disassembleBlock' :: forall st_s ids.
-                     Memory Word64
+disassembleBlockImpl :: forall st_s ids
+                     .  Memory Word64
                      -- ^ Memory to use for disassembling block
-                  -> GenState st_s ids 'True
+                     -> GenState st_s ids 'True
                      -- ^ State information for disassembling.
-                  -> (CodeAddr -> Bool)
+                     -> (CodeAddr -> Bool)
                      -- ^ This function should return true if
                      -- we should keep disassembling when we step
                      -- to the given address with the functions.
-                  -> CodeAddr
+                     -> CodeAddr
                      -- ^ Address to disassemble from.
-                  -> ExceptT GenError (ST st_s) (GenState st_s ids 'False,
-                                                 CodeAddr)
-disassembleBlock' mem (gs :: GenState st_s ids 'True) contFn addr = do
+                     -> ExceptT TranslateError (ST st_s) (GenState st_s ids 'False, CodeAddr)
+disassembleBlockImpl mem (gs :: GenState st_s ids 'True) contFn addr = do
   (i, next_ip) <-
     either (throwError . DecodeError addr) return $
     readInstruction mem addr
@@ -1058,14 +1106,111 @@ disassembleBlock' mem (gs :: GenState st_s ids 'True) contFn addr = do
                   , v <- p_b^.(pBlockState . curIP)
                   , v == next_ip_val
                   , contFn next_ip ->
-                      disassembleBlock' mem gs2 contFn next_ip
+                      disassembleBlockImpl mem gs2 contFn next_ip
         _ -> return (finishBlock FetchAndExecute gs2, next_ip)
+
+-- | The abstract state for a function begining at a given address.
+fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState X86Reg
+fnBlockState mem addr = do
+  let Just abst' = top & setAbsIP mem addr
+   in abst'
+      & absRegState . boundValue sp_reg .~ concreteStackOffset addr 0
+        -- x87 top registe points to top of stack.
+      & absRegState . x87TopReg         .~ FinSet (Set.singleton 7)
+      & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
+      & startAbsStack .~ Map.singleton 0 (StackEntry (S.BVTypeRepr n64) ReturnAddr)
+
+  -- | This updates the state of a function when returning from a system call.
+updateStatePostFreeBSDSyscall :: AbsBlockState X86Reg
+                                 -- ^ Block state just before this call.
+                              -> CodeAddr
+                              -- ^ Address that system call should return to.
+                              --
+                              -- This code assumes that the return address belongs
+                              -- to the same function.
+                              -> AbsBlockState X86Reg
+updateStatePostFreeBSDSyscall ab0 addr = mkAbsBlockState regFn (ab0^.startAbsStack)
+  where regFn :: X86Reg tp -> AbsValue 64 tp
+        regFn r
+            -- Set IPReg
+          | Just Refl <- testEquality r ip_reg =
+          CodePointers (Set.singleton addr)
+            -- Two pointers that are modified by syscalls
+          | Just Refl <- testEquality r rcx_reg =
+            TopV
+          | Just Refl <- testEquality r r11_reg =
+            TopV
+            -- Carry flag and rax is used by BSD for return values.
+          | Just Refl <- testEquality r cf_reg =
+            TopV
+          | Just Refl <- testEquality r rax_reg =
+            TopV
+            -- Keep other registers the same.
+          | otherwise =
+            ab0^.absRegState^.boundValue r
+
+-- | This updates the abstract information based on the assumption that
+-- a called method will return to the return address, and will follow
+-- x86_64 ABI.
+callerReturnAbsState :: AbsBlockState X86Reg
+                     -- ^ Block state just before call.
+                     -> CodeAddr
+                     -- ^ Address we will return to.
+                     -> AbsBlockState X86Reg
+callerReturnAbsState ab0 addr =  mkAbsBlockState regFn (ab0^.startAbsStack)
+  where regFn :: X86Reg tp -> AbsValue 64 tp
+        regFn r
+          -- We set IPReg
+          | Just Refl <- testEquality r ip_reg =
+              CodePointers (Set.singleton addr)
+          | Just Refl <- testEquality r sp_reg = do
+              bvadd n64 (ab0^.absRegState^.boundValue r) (FinSet (Set.singleton 8))
+              -- TODO: Transmit no value to first floating point register.
+          | X86_XMMReg 0 <- r =
+            ab0^.absRegState^.boundValue r
+            -- TODO: Fix this (can we prove detect whether a floating point value was read)?
+          | X87_TopReg <- r =
+            ab0^.absRegState^.boundValue r
+            -- Copy callee saved registers
+          | Set.member (Some r) x86CalleeSavedRegs =
+            ab0^.absRegState^.boundValue r
+            -- We don't know anything about rax as it is the return value.
+          | Just Refl <- testEquality r rax_reg =
+            TopV
+            -- We know nothing about other registers.
+          | otherwise =
+            TopV
+
+-- Transfer some type into an abstract value given a processor state.
+transferAbsValue :: AbsProcessorState X86Reg ids
+                 -> X86PrimFn ids tp
+                 -> AbsValue 64 tp
+transferAbsValue r f =
+  case f of
+    ReadLoc _ -> TopV
+    ReadFSBase -> TopV
+    ReadGSBase -> TopV
+      -- We know only that it will return up to (and including(?)) cnt
+    MemCmp _sz cnt _src _dest _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
+      | otherwise -> TopV
+    FindElement _sz _findEq cnt _buf _val _rev
+      | Just upper <- hasMaximum knownType (transferValue r cnt) ->
+          stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
+      | otherwise -> TopV
 
 -- | Architecture information for X86_64.
 x86ArchitectureInfo :: ArchitectureInfo X86_64
 x86ArchitectureInfo =
-  ArchitectureInfo { stackDelta = x86StackDelta
+  ArchitectureInfo { archAddrWidth      = knownNat
                    , jumpTableEntrySize = 8
-                   , readAddrInMemory = memLookupWord64
-                   , disassembleFn = disassembleBlock
+                   , readAddrInMemory   = memLookupWord64
+                   , memoryAlignedWords = memAsWord64le_withAddr
+                   , disassembleFn      = disassembleBlock
+                   , fnBlockStateFn     = fnBlockState
+                   , postSyscallFn      = updateStatePostFreeBSDSyscall
+                   , postCallAbsStateFn = callerReturnAbsState
+                   , callStackDelta     = x86StackDelta
+                   , absEvalArchFn      = transferAbsValue
                    }

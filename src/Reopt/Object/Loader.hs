@@ -1,3 +1,10 @@
+{-|
+Module      : Reopt.Object.Loader
+Copyright   : (c) Galois Inc, 2016
+Maintainer  : jhendrix@galois.com
+
+Operations for creating a view of memory from an elf file.
+-}
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.Object.Loader
   ( readElf
@@ -24,7 +31,7 @@ ppErrors path errl = do
   when (not (null errl)) $ do
     hPutStrLn stderr $ "Non-fatal errors during parsing " ++ path
   forM_ errl $ \e -> do
-    hPutStrLn stderr $ "  " ++ show errl
+    hPutStrLn stderr $ "  " ++ show e
 
 -- | This reads the elf file from the given path.
 --

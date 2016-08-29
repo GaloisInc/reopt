@@ -16,7 +16,7 @@ import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
-import           Data.Parameterized.Nonce
+import           Data.Parameterized.Nonce.Transformers
 import           Reopt.CFG.CFGDiscovery
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.LLVM
@@ -45,8 +45,8 @@ main = do
       seg = MemSegment base pf_x bs
       mem = execState (insertMemSegment seg) emptyMemory
       -- cfg = cfgFromAddress mem base
-      res = runNonceST $ do
-        b <- disassembleBlock mem (const True) (rootLoc base)
+      res = withGlobalSTNonceGenerator $ \gen -> do
+        b <- disassembleBlock' gen mem (const True) (rootLoc base)
         case b of
           Left err -> return $ Left err
           Right (bs, end) ->
@@ -56,5 +56,5 @@ main = do
             --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
             -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
   case res of
-    Left err -> putStrLn err
+    Left err -> putStrLn (show err)
     Right _ -> error "UNIMPLEMENTED"

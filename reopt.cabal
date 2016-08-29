@@ -38,6 +38,7 @@ library
     Data.Macaw.CFG
     Data.Macaw.Types
     Reopt
+    Reopt.Analysis.AbsRefine
     Reopt.Analysis.AbsState
     Reopt.Analysis.Domains.DiffEquations
     Reopt.Analysis.Domains.StridedInterval

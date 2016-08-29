@@ -46,7 +46,6 @@ import           Data.Parameterized.TraversableF
 import Data.Macaw.CFG
    ( App(..)
    , BlockLabel
-   , CodeAddr
    , ppApp
    , ppLit
    , sexpr
@@ -60,6 +59,7 @@ import           Reopt.Machine.X86State
   , x86ResultRegs
   , x86FloatArgumentRegs
   , x86FloatResultRegs
+  , CodeAddr
   )
 
 commas :: [Doc] -> Doc

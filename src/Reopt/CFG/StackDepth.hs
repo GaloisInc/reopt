@@ -178,7 +178,7 @@ valueHasSP (val :: BVValue X86_64 ids 64) = go val
     goAssignRHS v =
       case v of
         EvalApp a -> getAny $ foldApp (Any . go)  a
-        EvalArchFn (MemCmp _sz cnt src dest rev) -> or [ go cnt, go src, go dest, go rev ]
+        EvalArchFn (MemCmp _sz cnt src dest rev) _ -> or [ go cnt, go src, go dest, go rev ]
         _ -> False
 
 parseStackPointer' :: StackDepthValue ids -> BVValue X86_64 ids 64 -> StackDepthValue ids

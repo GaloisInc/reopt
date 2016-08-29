@@ -6,6 +6,7 @@ Maintainer       : Joe Hendrix <jhendrix@galois.com>
 Defines data types needed to represent control flow graphs from
 machine code.
 -}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -29,13 +30,13 @@ module Data.Macaw.CFG
   , traverseBlocks
   , traverseBlockAndChildren
   , findBlock
+  , PrettyCFGConstraints
     -- * Block level declarations
   , BlockLabel(..)
   , isRootBlockLabel
   , rootBlockLabel
   , mkRootBlockLabel
   , Block(..)
-  , CodeAddr
     -- * Stmt level declarations
   , Stmt(..)
   , TermStmt(..)
@@ -65,6 +66,8 @@ module Data.Macaw.CFG
   , boundValue
   , cmpRegState
   , curIP
+  , mkRegState
+  , mkRegStateM
   -- * Pretty printing
   , ppApp
   , ppAssignId
@@ -74,6 +77,7 @@ module Data.Macaw.CFG
   , sexpr
   , sexprA
   , PrettyF(..)
+  , PrettyFF(..)
   , PrettyArch(..)
   , PrettyRegValue(..)
     -- * Architecture type families
@@ -81,7 +85,6 @@ module Data.Macaw.CFG
   , ArchFn
   , ArchReg
   , ArchStmt
-  , ArchCFLocation
   , RegAddrWidth
     -- ** Classes
   , RegisterInfo(..)
@@ -109,7 +112,6 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Parameterized.TH.GADT
-import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Text (Text)
@@ -130,12 +132,6 @@ type Prec = Int
 colonPrec :: Prec
 colonPrec = 5
 
--- | An address of a code location.
---
--- This is currently just a Word64, but we may need to switch to a
--- structured representation once dynamic libraries are supported.
-type CodeAddr = Word64
-
 -- | Class for pretty printing with a precedence field.
 class PrettyPrec v where
   prettyPrec :: Int -> v -> Doc
@@ -143,6 +139,10 @@ class PrettyPrec v where
 -- | Pretty print over all instances of a type.
 class PrettyF (f :: k -> *) where
   prettyF :: f tp -> Doc
+
+-- | Pretty print over a pair of instances
+class PrettyFF (f :: j -> k -> *) where
+  prettyFF :: f a b -> Doc
 
 -- | Pretty print a document with parens if condition is true
 parenIf :: Bool -> Doc -> Doc
@@ -644,7 +644,7 @@ $(pure [])
 --
 -- These function may return a value.  They may depend on the current state of
 -- the heap, but should not affect the processor in any way.
-type family ArchFn (arch :: *) (ids :: *) :: Type -> *
+type family ArchFn (arch :: *) :: * -> Type -> *
 
 -- | A type family for defining architecture specific registers that are
 -- assigned as part of the language.
@@ -655,17 +655,10 @@ type family RegAddrWidth (r :: Type -> *) :: Nat
 
 -- | A type family for defining architecture-specific statements that are
 -- part of the language.
-type family ArchStmt (arch :: *) (ids :: *) :: *
+type family ArchStmt (arch :: *) :: * -> *
 
 -- | The type to use for addresses on the architecutre.
 type family ArchAddr (arch :: *) :: *
-
--- | This represents the information needed to disassemble a control flow location.
---
--- It includes the program counter, but may also include additional information
--- (such as the height of the X87 stack).
-type family ArchCFLocation (arch :: *) :: *
-
 
 -- | Number of bits in addreses for architecture.
 type ArchAddrWidth arch = RegAddrWidth (ArchReg arch)
@@ -682,7 +675,9 @@ class ShowF (ArchReg arch) => PrettyArch arch where
            -> m Doc
 
 -- | This class provides access to information about registers.
-class RegisterInfo r where
+class (OrdF r, ShowF r) => RegisterInfo r where
+  -- | List of all arch registers.
+  archRegs :: [Some r]
 
   -- | The stack pointer register
   sp_reg :: r (BVType (RegAddrWidth r))
@@ -760,41 +755,36 @@ data AssignRhs (arch :: *) ids tp where
 
   -- Call an architecture specific function that returns some result.
   EvalArchFn :: !(ArchFn arch ids tp)
+             -> !(TypeRepr tp)
              -> AssignRhs arch ids tp
 
 ------------------------------------------------------------------------
 -- Type operations on assignment AssignRhs, and Value
 
-instance HasRepr (ArchFn arch ids) TypeRepr
-      => HasRepr (Assignment arch ids) TypeRepr where
-  typeRepr = typeRepr . assignRhs
-
-instance HasRepr (ArchFn arch ids) TypeRepr
-      => HasRepr (AssignRhs arch ids) TypeRepr where
+instance HasRepr (AssignRhs arch ids) TypeRepr where
   typeRepr rhs =
     case rhs of
       EvalApp a -> appType a
       SetUndefined w -> BVTypeRepr w
       ReadMem _ tp -> tp
-      EvalArchFn f -> typeRepr f
+      EvalArchFn _ rtp -> rtp
 
-instance ( HasRepr (ArchFn arch ids) TypeRepr
-         , HasRepr (ArchReg arch) TypeRepr
+instance ( HasRepr (ArchReg arch) TypeRepr
          )
       => HasRepr (Value arch ids) TypeRepr where
 
   typeRepr (BVValue n _) = BVTypeRepr n
-  typeRepr (AssignedValue a) = typeRepr a
+  typeRepr (AssignedValue a) = typeRepr (assignRhs a)
   typeRepr (Initial r) = typeRepr r
 
-valueWidth :: ( HasRepr (ArchFn arch ids) TypeRepr
-              , HasRepr (ArchReg arch) TypeRepr
+valueWidth :: ( HasRepr (ArchReg arch) TypeRepr
               )
            => Value arch ids (BVType n) -> NatRepr n
 valueWidth v =
   case typeRepr v of
     BVTypeRepr n -> n
 
+{-
 instance HasRepr (AssignRhs arch ids) TypeRepr
       => TestEquality (Assignment arch ids) where
   testEquality x y = orderingF_refl (compareF x y)
@@ -802,6 +792,7 @@ instance HasRepr (AssignRhs arch ids) TypeRepr
 instance HasRepr (AssignRhs arch ids) TypeRepr
       => OrdF (Assignment arch ids) where
   compareF x y = compareF (assignId x) (assignId y)
+-}
 
 $(pure [])
 
@@ -839,16 +830,16 @@ ppAssignRhs :: Applicative m
 ppAssignRhs pp _ (EvalApp a) = ppAppA pp a
 ppAssignRhs _  _ (SetUndefined w) = pure $ text "undef ::" <+> brackets (text (show w))
 ppAssignRhs pp _ (ReadMem a _) = (\d -> text "*" PP.<> d) <$> pp a
-ppAssignRhs _ pp (EvalArchFn f) = pp f
+ppAssignRhs _ pp (EvalArchFn f _) = pp f
 
 instance ( ShowF (ArchReg arch)
-         , PrettyF (ArchFn arch ids)
+         , PrettyFF (ArchFn arch)
          ) =>
          Pretty (AssignRhs arch ids tp) where
-  pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) (Identity . prettyF) v
+  pretty v = runIdentity $ ppAssignRhs (Identity . ppValue 10) (Identity . prettyFF) v
 
-instance ( ShowF (ArchReg arch)
-         , PrettyF (ArchFn arch ids)
+instance ( ShowF    (ArchReg arch)
+         , PrettyFF (ArchFn arch)
          ) =>
          Pretty (Assignment arch ids tp) where
   pretty (Assignment lhs rhs) = ppAssignId lhs <+> text ":=" <+> pretty rhs
@@ -910,33 +901,7 @@ $(pure [])
 ------------------------------------------------------------------------
 -- Value equality
 
-instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         )
-      => Eq  (Value arch ids tp) where
-  x == y = isJust (testEquality x y)
-
-instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         )
-      => Ord (Value arch ids tp) where
-  compare x y = toOrdering (compareF x y)
-
-instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         )
-      => EqF (Value arch ids) where
-  eqF = (==)
-
-instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         )
-      => TestEquality (Value arch ids) where
-  testEquality x y = orderingF_refl (compareF x y)
-
-instance ( OrdF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         )
+instance OrdF (ArchReg arch)
       => OrdF (Value arch ids) where
   compareF (BVValue wx vx) (BVValue wy vy) =
     case compareF wx wy of
@@ -946,7 +911,8 @@ instance ( OrdF (ArchReg arch)
   compareF BVValue{} _ = LTF
   compareF _ BVValue{} = GTF
 
-  compareF (AssignedValue a1) (AssignedValue a2) = compareF a1 a2
+  compareF (AssignedValue x) (AssignedValue y) =
+    compareF (assignId x) (assignId y)
   compareF AssignedValue{} _ = LTF
   compareF _ AssignedValue{} = GTF
 
@@ -955,6 +921,22 @@ instance ( OrdF (ArchReg arch)
       LTF -> LTF
       EQF -> EQF
       GTF -> GTF
+
+instance OrdF (ArchReg arch)
+      => TestEquality (Value arch ids) where
+  testEquality x y = orderingF_refl (compareF x y)
+
+instance OrdF (ArchReg arch)
+      => Eq  (Value arch ids tp) where
+  x == y = isJust (testEquality x y)
+
+instance OrdF (ArchReg arch)
+      => Ord (Value arch ids tp) where
+  compare x y = toOrdering (compareF x y)
+
+instance OrdF (ArchReg arch)
+      => EqF (Value arch ids) where
+  eqF = (==)
 
 ------------------------------------------------------------------------
 -- Value operations
@@ -984,13 +966,13 @@ asBaseOffset x
 
 -- | This represents the state of the processor registers after some
 -- execution.
-newtype RegState arch f = RegState (MapF.MapF (ArchReg arch) f)
+newtype RegState r f = RegState (MapF.MapF r f)
 
 -- | Get a register out of the state.
-boundValue :: forall arch f tp
-           . OrdF (ArchReg arch)
-           => ArchReg arch tp
-           -> Simple Lens (RegState arch f) (f tp)
+boundValue :: forall r f tp
+           .  OrdF r
+           => r tp
+           -> Simple Lens (RegState r f) (f tp)
 boundValue r = lens getter setter
   where getter (RegState m) =
           case MapF.lookup r m of
@@ -998,13 +980,13 @@ boundValue r = lens getter setter
             Nothing -> error "internal error in boundValue given unexpected reg"
         setter (RegState m) v = RegState (MapF.insert r v m)
 
-instance (OrdF (ArchReg arch), EqF f) => Eq (RegState arch f) where
+instance (OrdF r, EqF f) => Eq (RegState r f) where
   s == s' = cmpRegState eqF s s'
 
-cmpRegState :: OrdF (ArchReg arch)
+cmpRegState :: OrdF r
             => (forall u. f u -> g u -> Bool)
-            -> RegState arch f
-            -> RegState arch g
+            -> RegState r f
+            -> RegState r g
             -> Bool
 cmpRegState p (RegState x) (RegState y) = go (MapF.toList x) (MapF.toList y)
   where go [] [] = True
@@ -1015,42 +997,55 @@ cmpRegState p (RegState x) (RegState y) = go (MapF.toList x) (MapF.toList y)
             Nothing -> False
             Just Refl -> p xv yv && go xr yr
 
---  Tthe value of the current instruction pointer.
-curIP :: (OrdF (ArchReg a), RegisterInfo (ArchReg a))
-      => Simple Lens (RegState a f) (f (BVType (ArchAddrWidth a)))
+--  The value of the current instruction pointer.
+curIP :: RegisterInfo r
+      => Simple Lens (RegState r f) (f (BVType (RegAddrWidth r)))
 curIP = boundValue ip_reg
+
+mkRegStateM :: (RegisterInfo r, Applicative m)
+            => (forall tp . r tp -> m (f tp))
+            -> m (RegState r f)
+mkRegStateM f = RegState . MapF.fromList <$> traverse g archRegs
+  where g (Some r) = MapF.Pair r <$> f r
+
+-- Create a pure register state
+mkRegState :: RegisterInfo r -- AbsRegState r
+           => (forall tp . r tp -> f tp)
+           -> RegState r f
+mkRegState f = runIdentity (mkRegStateM (return . f))
 
 ------------------------------------------------------------------------
 -- Pretty printing RegState
 
 -- | This class provides a way of optionallly pretty printing the contents
 -- of a register or omitting them.
-class PrettyRegValue arch (f :: Type -> *) where
+class PrettyRegValue r (f :: Type -> *) where
   -- | ppValueEq should return a doc if the contents of the given register
   -- should be printed, and Nothing if the contents should be ignored.
-  ppValueEq :: p arch -> ArchReg arch tp -> f tp -> Maybe Doc
+  ppValueEq :: r tp -> f tp -> Maybe Doc
 
-instance ( OrdF (ArchReg arch)
-         , PrettyRegValue arch f
+instance ( OrdF r
+         , PrettyRegValue r f
          )
-      => Pretty (RegState arch f) where
-  pretty (RegState m) = bracketsep $ catMaybes (f Proxy <$> MapF.toList m)
-    where f :: Proxy arch -> MapF.Pair (ArchReg arch) f -> Maybe Doc
-          f pxy (MapF.Pair r v) = ppValueEq pxy r v
+      => Pretty (RegState r f) where
+  pretty (RegState m) = bracketsep $ catMaybes (f <$> MapF.toList m)
+    where f :: MapF.Pair r f -> Maybe Doc
+          f (MapF.Pair r v) = ppValueEq r v
 
-instance ( OrdF (ArchReg arch)
-         , PrettyRegValue arch f
+instance ( OrdF r
+         , PrettyRegValue r f
          )
-      => Show (RegState arch f) where
+      => Show (RegState r f) where
   show s = show (pretty s)
 
-instance ( OrdF (ArchReg arch)
-         , ShowF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
+instance ( OrdF r
+         , ShowF r
+         , r ~ ArchReg arch
          )
-      => PrettyRegValue arch (Value arch ids) where
-  ppValueEq _ r v
-    | Just _ <- testEquality v (Initial r) = Nothing
+      => PrettyRegValue r (Value arch ids) where
+  ppValueEq r (Initial r')
+    | Just _ <- testEquality r r' = Nothing
+  ppValueEq r v
     | otherwise   = Just $ text (showF r) <+> text "=" <+> pretty v
 
 ------------------------------------------------------------------------
@@ -1066,9 +1061,9 @@ data Stmt arch ids
    | ExecArchStmt (ArchStmt arch ids)
      -- ^ Execute an architecture specific statement
 
-instance ( ShowF (ArchReg arch)
-         , Pretty (ArchStmt arch ids)
-         , PrettyF (ArchFn arch ids)
+instance ( ShowF    (ArchReg arch)
+         , PrettyF  (ArchStmt arch)
+         , PrettyFF (ArchFn arch)
          )
          => Pretty (Stmt arch ids) where
   pretty (AssignStmt a) = pretty a
@@ -1077,12 +1072,12 @@ instance ( ShowF (ArchReg arch)
                                        <+> parens (hcat $ punctuate comma
                                                    $ map (viewSome (ppValue 0)) vals)
   pretty (Comment s) = text $ "# " ++ Text.unpack s
-  pretty (ExecArchStmt s) = pretty s
+  pretty (ExecArchStmt s) = prettyF s
 
 
 instance ( ShowF (ArchReg arch)
-         , Pretty (ArchStmt arch ids)
-         , PrettyF (ArchFn arch ids)
+         , PrettyF (ArchStmt arch)
+         , PrettyFF (ArchFn arch)
          )
          => Show (Stmt arch ids) where
   show = show . pretty
@@ -1093,18 +1088,17 @@ instance ( ShowF (ArchReg arch)
 -- A terminal statement in a block
 data TermStmt arch ids
      -- | Fetch and execute the next instruction from the given processor state.
-  = FetchAndExecute !(RegState arch (Value arch ids))
+  = FetchAndExecute !(RegState (ArchReg arch) (Value arch ids))
     -- | Branch and execute one block or another.
   | Branch !(Value arch ids BoolType) !(ArchLabel arch) !(ArchLabel arch)
     -- | The syscall instruction.
     -- We model system calls as terminal instructions because from the
     -- application perspective, the semantics will depend on the operating
     -- system.
-  | Syscall !(RegState arch (Value arch ids))
+  | Syscall !(RegState (ArchReg arch) (Value arch ids))
 
 instance ( OrdF (ArchReg arch)
          , ShowF (ArchReg arch)
-         , HasRepr (ArchFn arch ids) TypeRepr
          , Integral (ArchAddr arch)
          , Show (ArchAddr arch)
          )
@@ -1138,9 +1132,8 @@ instance ( OrdF  (ArchReg arch)
          , ShowF (ArchReg arch)
          , Integral (ArchAddr arch)
          , Show     (ArchAddr arch)
-         , PrettyF  (ArchFn arch ids)
-         , HasRepr  (ArchFn arch ids) TypeRepr
-         , Pretty   (ArchStmt arch ids)
+         , PrettyFF  (ArchFn arch)
+         , PrettyF   (ArchStmt arch)
          )
       => Pretty (Block arch ids) where
   pretty b = do
@@ -1207,14 +1200,17 @@ insertBlocksForCode start end bs cfg =
   let cfg' = cfg & cfgBlockRanges %~ Map.insert start end
    in foldl' (flip insertBlock) cfg' bs
 
-instance ( OrdF (ArchReg arch)
-         , ShowF (ArchReg arch)
-         , Integral (ArchAddr arch)
-         , Show     (ArchAddr arch)
-         , Pretty   (ArchStmt arch ids)
-         , HasRepr (ArchFn arch ids) TypeRepr
-         , PrettyF (ArchFn arch ids)
-         )
+-- | Constraints for pretty printing a 'CFG'.
+type PrettyCFGConstraints arch
+   = ( OrdF (ArchReg arch)
+     , ShowF (ArchReg arch)
+     , Integral (ArchAddr arch)
+     , Show     (ArchAddr arch)
+     , PrettyF  (ArchStmt arch)
+     , PrettyFF (ArchFn arch)
+     )
+
+instance PrettyCFGConstraints arch
       => Pretty (CFG arch ids) where
   pretty g = vcat (pretty <$> Map.elems (_cfgBlocks g))
 

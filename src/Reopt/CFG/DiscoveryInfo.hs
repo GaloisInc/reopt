@@ -23,6 +23,7 @@ module Reopt.CFG.DiscoveryInfo
     -- * The interpreter state
   , DiscoveryInfo
   , emptyDiscoveryInfo
+  , nonceGen
   , archInfo
   , memory
   , symbolNames
@@ -41,6 +42,7 @@ module Reopt.CFG.DiscoveryInfo
     -- ** DiscoveryInfo utilities
   , getFunctionEntryPoint
   , inSameFunction
+  , ArchConstraint
   , identifyCall
   , identifyReturn
   , classifyBlock
@@ -49,11 +51,13 @@ module Reopt.CFG.DiscoveryInfo
 
 import           Control.Lens
 import           Control.Monad (join)
+import           Control.Monad.ST
 import qualified Data.ByteString as BS
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import           Data.Parameterized.Classes
+import           Data.Parameterized.Nonce
 import           Data.Parameterized.Some
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -77,15 +81,15 @@ import           Reopt.Utils.Debug
 -- AbsStateMap
 
 -- | Maps each code address to a set of abstract states
-type AbsStateMap arch = Map (ArchAddr arch) (AbsBlockState arch)
+type AbsStateMap arch = Map (ArchAddr arch) (AbsBlockState (ArchReg arch))
 
-lookupAbsBlock :: ( Ord (ArchAddr arch)
-                  , Integral (ArchAddr arch)
-                  , Show (ArchAddr arch)
+lookupAbsBlock :: ( Ord addr
+                  , Integral addr
+                  , Show addr
                   )
-                  => ArchAddr arch
-                  -> AbsStateMap arch
-                  -> AbsBlockState arch
+                  => addr
+                  -> Map addr (AbsBlockState r)
+                  -> AbsBlockState r
 lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
   where msg = "Could not find block " ++ showHex addr "."
 
@@ -135,7 +139,7 @@ data FrontierReason w
 data GlobalDataInfo w
      -- | A jump table that appears to end just before the given address.
    = JumpTable !(Maybe w)
-     -- | Some value that appears in the program text.
+     -- | A value that appears in the program text.
    | ReferencedValue
 
 instance (Integral w, Show w) => Show (GlobalDataInfo w) where
@@ -150,25 +154,25 @@ instance (Integral w, Show w) => Show (GlobalDataInfo w) where
 -- of how block ending with a a FetchAndExecute statement should be
 -- interpreted.
 data ParsedTermStmt arch ids
-   = ParsedCall !(RegState arch (Value arch ids))
+   = ParsedCall !(RegState (ArchReg arch) (Value arch ids))
                 !(Seq (Stmt arch ids))
-                -- ^ Statements less the pushed return value, if any
+                -- /\ Statements less the pushed return value, if any
                 !(Either (ArchAddr arch) (BVValue arch ids (ArchAddrWidth arch)))
-                -- ^ Function to call.  If it is statically known,
+                -- /\ Function to call.  If it is statically known,
                 -- then we get Left, otherwise Right
                 !(Maybe (ArchAddr arch))
                 -- ^ Return location, Nothing if a tail call.
      -- | A jump within a block
-   | ParsedJump !(RegState arch (Value arch ids)) !(ArchAddr arch)
+   | ParsedJump !(RegState (ArchReg arch) (Value arch ids)) !(ArchAddr arch)
      -- | A lookup table that branches to the given locations.
-   | ParsedLookupTable !(RegState arch (Value arch ids))
+   | ParsedLookupTable !(RegState (ArchReg arch) (Value arch ids))
                        !(BVValue arch ids (ArchAddrWidth arch))
                        !(V.Vector (ArchAddr arch))
      -- | A tail cthat branches to the given locations.
-   | ParsedReturn !(RegState arch (Value arch ids)) !(Seq (Stmt arch ids))
+   | ParsedReturn !(RegState (ArchReg arch) (Value arch ids)) !(Seq (Stmt arch ids))
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value arch ids BoolType) !(ArchLabel arch) !(ArchLabel arch)
-   | ParsedSyscall !(RegState arch (Value arch ids))
+   | ParsedSyscall !(RegState (ArchReg arch) (Value arch ids))
                    !(ArchAddr arch)
                    !(ArchAddr arch)
                    !String
@@ -177,14 +181,8 @@ data ParsedTermStmt arch ids
                    ![Some (ArchReg arch)]
 
 deriving instance
-  ( Integral (ArchAddr arch)
-  , Show (ArchAddr arch)
-  , HasRepr (ArchFn arch ids) TypeRepr
-  , PrettyF (ArchFn arch ids)
+  ( PrettyCFGConstraints arch
   , Show (ArchReg arch (BVType (ArchAddrWidth arch)))
-  , OrdF (ArchReg arch)
-  , ShowF (ArchReg arch)
-  , Pretty (ArchStmt arch ids)
   )
   => Show (ParsedTermStmt arch ids)
 
@@ -193,7 +191,9 @@ deriving instance
 
 -- | The state of the interpreter
 data DiscoveryInfo arch ids
-   = DiscoveryInfo { memory   :: !(Memory (ArchAddr arch))
+   = DiscoveryInfo { nonceGen :: !(NonceGenerator (ST ids) ids)
+                     -- ^ Generator for creating fresh ids.
+                   , memory   :: !(Memory (ArchAddr arch))
                      -- ^ The initial memory when disassembly started.
                    , symbolNames :: Map (ArchAddr arch) BS.ByteString
                      -- ^ The set of symbol names (not necessarily complete)
@@ -225,14 +225,16 @@ data DiscoveryInfo arch ids
                    }
 
 -- | Empty interpreter state.
-emptyDiscoveryInfo :: Memory (ArchAddr arch)
+emptyDiscoveryInfo :: NonceGenerator (ST ids) ids
+                   -> Memory (ArchAddr arch)
                    -> Map (ArchAddr arch) BS.ByteString
                    -> SyscallPersonality arch
                    -> ArchitectureInfo arch
                       -- ^ Stack delta
                    -> DiscoveryInfo arch ids
-emptyDiscoveryInfo mem symbols sysp info = DiscoveryInfo
-      { memory             = mem
+emptyDiscoveryInfo ng mem symbols sysp info = DiscoveryInfo
+      { nonceGen           = ng
+      , memory             = mem
       , symbolNames        = symbols
       , syscallPersonality = sysp
       , archInfo           = info
@@ -245,7 +247,8 @@ emptyDiscoveryInfo mem symbols sysp info = DiscoveryInfo
       , _absState          = Map.empty
       }
 
-blocks :: Simple Lens (DiscoveryInfo arch ids) (Map (ArchAddr arch) (Maybe (BlockRegion arch ids)))
+blocks :: Simple Lens (DiscoveryInfo arch ids)
+                      (Map (ArchAddr arch) (Maybe (BlockRegion arch ids)))
 blocks = lens _blocks (\s v -> s { _blocks = v })
 
 -- | Addresses that start each function.
@@ -309,7 +312,7 @@ type RegConstraint r = (OrdF r, HasRepr r TypeRepr, RegisterInfo r, ShowF r)
 -- | Constraint on architecture so that we can do code exploration.
 type ArchConstraint a ids = ( AddrConstraint (ArchAddr a)
                             , RegConstraint (ArchReg a)
-                            , HasRepr (ArchFn a ids) TypeRepr
+--                            , HasRepr (ArchFn a ids) TypeRepr
                             )
 
 -- | @isWriteTo stmt add tpr@ returns 'Just v' if @stmt@ writes 'v'
@@ -354,7 +357,7 @@ isCodeAddrWriteTo _ _ _ = Nothing
 identifyCall :: (ArchConstraint a ids, RegisterInfo (ArchReg a))
              => Memory (ArchAddr a)
              -> [Stmt a ids]
-             -> RegState a (Value a ids)
+             -> RegState (ArchReg a) (Value a ids)
              -> Maybe (Seq (Stmt a ids), (ArchAddr a))
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where -- Get value of stack pointer
@@ -382,7 +385,7 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
 -- Note that this assumes the stack decrements as values are pushed, so we will
 -- need to fix this on other architectures.
 identifyReturn :: ArchConstraint arch ids
-               => RegState arch (Value arch ids)
+               => RegState (ArchReg arch) (Value arch ids)
                -> Integer
                   -- ^ How stack pointer moves when a call is made
                -> Maybe (Assignment arch ids (BVType (ArchAddrWidth arch)))
@@ -400,7 +403,7 @@ identifyJumpTable :: forall arch ids
                   .  (AddrConstraint (ArchAddr arch))
                   => DiscoveryInfo arch ids
                   -> ArchLabel arch
-                      -- | Memory address that IP is read from.
+                      -- Memory address that IP is read from.
                   -> BVValue arch ids (ArchAddrWidth arch)
                   -- Returns the (symbolic) index and concrete next blocks
                   -> Maybe (BVValue arch ids (ArchAddrWidth arch), V.Vector (ArchAddr arch))
@@ -448,10 +451,11 @@ classifyBlock b interp_state =
            Just (ParsedJump proc_state tgt_addr)
 
       -- Return
-      | Just asgn <- identifyReturn proc_state (stackDelta (archInfo interp_state)) ->
+      | Just asgn <- identifyReturn proc_state (callStackDelta (archInfo interp_state)) ->
         let isRetLoad s =
               case s of
-                AssignStmt asgn' | Just Refl <- testEquality asgn asgn' -> True
+                AssignStmt asgn'
+                  | Just Refl <- testEquality (assignId asgn) (assignId  asgn') -> True
                 _ -> False
             nonret_stmts = Seq.fromList $ filter (not . isRetLoad) (blockStmts b)
 

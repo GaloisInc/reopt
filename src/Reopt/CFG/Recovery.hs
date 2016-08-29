@@ -66,7 +66,7 @@ type FnRegValueMap = MapF X86Reg FnRegValue
 
 data RecoverState ids = RS { _rsInterp :: !(DiscoveryInfo X86_64 ids)
                            , _rsNextAssignId :: !FnAssignId
-                           , _rsAssignMap :: !(MapF (Assignment X86_64 ids) FnAssignment)
+                           , _rsAssignMap :: !(MapF (AssignId ids) FnAssignment)
 
                              -- Local state
                            , _rsCurLabel  :: !(BlockLabel Word64)
@@ -96,7 +96,7 @@ rsCurStmts :: Simple Lens (RecoverState ids) (Seq FnStmt)
 rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments in original block to assignment in
-rsAssignMap :: Simple Lens (RecoverState ids) (MapF (Assignment X86_64 ids) FnAssignment)
+rsAssignMap :: Simple Lens (RecoverState ids) (MapF (AssignId ids) FnAssignment)
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
 
 -- | This maps registers to the associated value at the start of the block after
@@ -604,7 +604,7 @@ recoverWrite addr val = do
   r_val  <- recoverValue "write_val" val
   addFnStmt $ FnWriteMem r_addr r_val
 
-emitAssign :: Assignment X86_64 ids tp -> FnAssignRhs tp -> Recover ids (FnAssignment tp)
+emitAssign :: AssignId ids tp -> FnAssignRhs tp -> Recover ids (FnAssignment tp)
 emitAssign asgn rhs = do
   fnAssign <- mkFnAssign rhs
   rsAssignMap %= MapF.insert asgn fnAssign
@@ -663,22 +663,24 @@ recoverAddr v = recoverValue "addr" v
 
 recoverAssign :: Assignment X86_64 ids tp -> Recover ids (FnValue tp)
 recoverAssign asgn = do
-  m_seen <- uses rsAssignMap (MapF.lookup asgn)
+  m_seen <- uses rsAssignMap (MapF.lookup (assignId asgn))
   case m_seen of
     Just fnAssign -> return $! FnAssignedValue fnAssign
     Nothing -> do
       case assignRhs asgn of
         EvalApp app -> do
           app' <- traverseApp (recoverValue "recoverAssign") app
-          fnAssign <- emitAssign asgn (FnEvalApp app')
+          fnAssign <- emitAssign (assignId asgn) (FnEvalApp app')
           return $! FnAssignedValue fnAssign
-        SetUndefined w -> FnAssignedValue <$> emitAssign asgn (FnSetUndefined w)
+        SetUndefined w ->
+          FnAssignedValue <$> emitAssign (assignId asgn) (FnSetUndefined w)
         ReadMem addr tp -> do
           fn_addr <- recoverAddr addr
-          FnAssignedValue <$> emitAssign asgn (FnReadMem fn_addr tp)
+          FnAssignedValue <$> emitAssign (assignId asgn) (FnReadMem fn_addr tp)
         _ -> do
           debug DFunRecover ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $
-            return $ FnValueUnsupported ("assignment " ++ show (pretty asgn)) (typeRepr asgn)
+            return $ FnValueUnsupported ("assignment " ++ show (pretty asgn))
+                                        (typeRepr (assignRhs asgn))
 
 recoverRegister :: X86State (Value X86_64 ids)
                 -> X86Reg tp

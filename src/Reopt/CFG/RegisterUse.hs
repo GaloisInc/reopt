@@ -24,12 +24,12 @@ import           Data.Word
 
 import           Data.Macaw.CFG
 import           Reopt.CFG.DiscoveryInfo
-import           Reopt.CFG.FnRep (FnAssignId(..)
-                                  , FunctionType(..)
-                                  , ftMaximumFunctionType
-                                  , ftMinimumFunctionType
-                                  , ftIntArgRegs , ftFloatArgRegs
-                                  , ftIntRetRegs , ftFloatRetRegs)
+import           Reopt.CFG.FnRep ( FunctionType(..)
+                                 , ftMaximumFunctionType
+                                 , ftMinimumFunctionType
+                                 , ftIntArgRegs , ftFloatArgRegs
+                                 , ftIntRetRegs , ftFloatRetRegs
+                                 )
 import           Reopt.Machine.X86State
 import           Reopt.Utils.Debug
 
@@ -40,7 +40,7 @@ import           Debug.Trace
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
 type RegDeps ids = (Set (Some (AssignId ids)), Set (Some X86Reg))
-type AssignmentCache ids = Map (Some (Assignment X86_64 ids)) (RegDeps ids)
+type AssignmentCache ids = Map (Some (AssignId ids)) (RegDeps ids)
 
 type FunctionArgs = Map CodeAddr FunctionType
 

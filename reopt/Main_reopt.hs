@@ -509,11 +509,11 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-ppStmtAndAbs :: MapF (Assignment X86_64 ids) (AbsValue 64) -> Stmt X86_64 ids -> Doc
+ppStmtAndAbs :: MapF (AssignId ids) (AbsValue 64) -> Stmt X86_64 ids -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
     AssignStmt a ->
-      case ppAbsValue =<< MapF.lookup a m of
+      case ppAbsValue =<< MapF.lookup (assignId a) m of
         Just d -> vcat [ text "#" <+> ppAssignId (assignId a) <+> text ":=" <+> d
                        , pretty a
                        ]
@@ -521,7 +521,7 @@ ppStmtAndAbs m stmt =
     _ -> pretty stmt
 
 
-ppBlockAndAbs :: MapF (Assignment X86_64 ids) (AbsValue 64) -> Block X86_64 ids -> Doc
+ppBlockAndAbs :: MapF (AssignId ids) (AbsValue 64) -> Block X86_64 ids -> Doc
 ppBlockAndAbs m b =
   pretty (blockLabel b) <> text ":" <$$>
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
@@ -567,7 +567,7 @@ showCFGAndAI loadSty e = do
   Some s <- return $ cfgFromMemAndBinary mem e
   let fg = mkCFG (s^.blocks)
   let abst = s^.absState
-      amap = assignmentAbsValues mem fg abst
+      amap = assignmentAbsValues x86ArchitectureInfo mem fg abst
   let g  = eliminateDeadRegisters fg
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of

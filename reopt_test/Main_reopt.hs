@@ -331,17 +331,16 @@ printExecutedInstructions args = do
         of X86 _ -> fail "X86Regs! only 64 bit is handled"
            X86_64 regs64 -> do
              let rip_val = rip regs64
-             case readInstruction mem rip_val
-               of Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
-                  Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
+             case readInstruction mem rip_val of
+               Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
+               Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
 
 ------------------------------------------------------------------------
 -- Register translation.
 
 -- | Translate PTrace register format to Reopt register format.
 translatePtraceRegs :: X86_64Regs -> X86_64FPRegs -> X86State MS.Value
-translatePtraceRegs ptraceRegs ptraceFPRegs =
-  mkX86State fillReg
+translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
   where
     fillReg :: X86Reg tp -> MS.Value tp
     fillReg X86_IP = mkLit64 (rip ptraceRegs)

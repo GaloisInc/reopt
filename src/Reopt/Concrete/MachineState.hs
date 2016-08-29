@@ -24,11 +24,11 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
-
 import qualified Data.BitVector as BV
+import           Data.Macaw.CFG (mkRegState, PrettyRegValue(..))
+import           Data.Macaw.Types
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
-import           Data.Macaw.Types
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Semantics.Monad (Primitive, Segment)
 
@@ -94,10 +94,10 @@ instance Pretty (Value tp) where
   pretty (Literal x)    = text $ show x
   pretty (Undefined _) = text $ "Undefined"
 
-instance X.PrettyRegValue X.X86_64 Value where
-  ppValueEq _ (X.X86_FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
-  ppValueEq _ (X.X87_ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
-  ppValueEq _ r v = Just $ text (show r) <+> text "=" <+> pretty v
+instance PrettyRegValue X.X86Reg Value where
+  ppValueEq (X.X86_FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
+  ppValueEq (X.X87_ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
+  ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
 
 ------------------------------------------------------------------------
 -- Constants
@@ -356,7 +356,7 @@ instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
   -- be reread. I removed some other code that caused 'Undefined' in a
   -- reg to turn into a read of the hardware.
   primitive _ = do
-    let regs = X.mkX86State (\rn -> Undefined (typeRepr rn))
+    let regs = mkRegState (\rn -> Undefined (typeRepr rn))
     let mem = M.empty
     put (mem, regs)
 
@@ -427,7 +427,7 @@ instance MonadMachineState NullMachineState where
   setReg _ _ = NullMachineState {unNullMachineState = (Identity ())}
   -- | Get the value of all registers.
   dumpRegs = NullMachineState
-    { unNullMachineState = Identity $ X.mkX86State $ Undefined . typeRepr
+    { unNullMachineState = Identity $ mkRegState $ Undefined . typeRepr
     }
   -- | Update the state for a primitive.
   primitive _ = NullMachineState {unNullMachineState = (Identity ())}

@@ -12,9 +12,14 @@ module Reopt.CFG.ArchitectureInfo
   , DisassembleFn
   ) where
 
-import Data.Macaw.CFG
-import Reopt.Object.Memory
+import Control.Monad.ST
+import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
+
+import Data.Macaw.CFG
+import Reopt.Analysis.AbsState
+import Reopt.Object.Memory
+
 
 ------------------------------------------------------------------------
 -- ArchitectureInfo
@@ -24,26 +29,50 @@ type ReadAddrFn w = Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) w
 
 -- | Function for disassembling a block
 type DisassembleFn arch
-   = forall st_s ids.
-     Memory (ArchAddr arch)
+   = forall ids
+   .  NonceGenerator (ST ids) ids
+   -> Memory (ArchAddr arch)
    -> (ArchAddr arch -> Bool)
    -- ^ Predicate that tells when to continue.
-   -> ArchCFLocation arch -- ^ Location to explore from.
-   -> NonceST st_s ids (Either String ([Block arch ids], ArchAddr arch))
+   -> ArchAddr arch -- ^ Address that we are disassembling from
+   -> AbsBlockState (ArchReg arch)
+      -- ^ Abstract state associated with address.
+      --
+      -- This is used for things like the height of the x87 stack.
+   -> ST ids (Either String ([Block arch ids], ArchAddr arch))
 
 -- | This records architecture specific functions for analysis.
 data ArchitectureInfo arch
    = ArchitectureInfo
-     { stackDelta :: !Integer
-       -- ^ Identifies how the stack pointer changes when a call is made.
-       --
-       -- e.g., On X86_64, a call instruction decrements the stack
-       -- pointer by 8 after pushing the return address, so this
-       -- is -8 on X86_64.
+     { archAddrWidth :: !(NatRepr (RegAddrWidth (ArchReg arch)))
+       -- ^ Architecture address width.
      , jumpTableEntrySize :: !(ArchAddr arch)
        -- ^ The size of each entry in a jump table.
      , readAddrInMemory :: !(ReadAddrFn (ArchAddr arch))
       -- ^ Return an address at given address.
+     , memoryAlignedWords :: !(Memory (ArchAddr arch) -> [(ArchAddr arch, ArchAddr arch)])
+       -- ^ Return list of aligned words in memory.
      , disassembleFn :: !(DisassembleFn arch)
        -- ^ Function for disasembling a block.
+     , fnBlockStateFn :: !(Memory (ArchAddr arch)
+                           -> ArchAddr arch
+                           -> AbsBlockState (ArchReg arch))
+       -- ^ Creates an abstract block state for representing the beginning of a
+       -- function.
+     , postSyscallFn :: !(AbsBlockState (ArchReg arch)
+                          -> ArchAddr arch
+                          -> AbsBlockState (ArchReg arch))
+       -- ^ Abstract state after a system call
+     , postCallAbsStateFn :: !(AbsBlockState (ArchReg arch)
+                               -> ArchAddr arch
+                               -> AbsBlockState (ArchReg arch))
+       -- ^ Abstract state after a function call.
+     , callStackDelta :: !Integer
+       -- ^ The direction that the stack moves with a call.
+     , absEvalArchFn :: !(forall ids tp
+                          .  AbsProcessorState (ArchReg arch) ids
+                          -> ArchFn arch ids tp
+                          -> AbsValue (RegAddrWidth (ArchReg arch)) tp)
+       -- ^ Evaluates an architecture function
+
      }
