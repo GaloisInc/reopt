@@ -16,10 +16,9 @@ import Control.Monad.ST
 import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 
-import Data.Macaw.CFG
 import Data.Macaw.AbsDomain.AbsState
+import Data.Macaw.CFG
 import Data.Macaw.Memory
-
 
 ------------------------------------------------------------------------
 -- ArchitectureInfo

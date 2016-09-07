@@ -85,9 +85,10 @@ transferRHS info r rhs =
       | otherwise -> TopV
     EvalArchFn f _ -> absEvalArchFn info r f
 
--- | Merge in the value of the assignment.  If we have already seen a
--- value, this will combine with meet.
-addAssignment :: ( OrdF (ArchReg a)
+-- | Merge in the value of the assignment.
+--
+-- If we have already seen a value, this will combine with meet.
+addAssignment :: ( OrdF  (ArchReg a)
                  , ShowF (ArchReg a)
                  )
               => ArchitectureInfo a
@@ -734,7 +735,7 @@ cfgFromAddrs :: forall arch
              -> SyscallPersonality arch
                 -- ^ Syscall personality
              -> [ArchAddr arch]
-                -- ^ Location to start disassembler form.
+                -- ^ Locations to start disassembler form.
              -> Some (DiscoveryInfo arch)
 cfgFromAddrs arch_info mem symbols sysp init_addrs =
     runCFGM arch_info mem symbols sysp $ do

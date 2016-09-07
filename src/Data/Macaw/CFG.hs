@@ -645,18 +645,21 @@ $(pure [])
 ------------------------------------------------------------------------
 -- Type families for architecture specific components.
 
+-- | Width of register used to store addresses.
+type family RegAddrWidth (r :: Type -> *) :: Nat
+
 -- | A type family for architecture specific functions.
 --
 -- These function may return a value.  They may depend on the current state of
--- the heap, but should not affect the processor in any way.
+-- the heap, but should not affect the processor state.
+--
+-- The function may depend on the set of registers defined so far, and the type
+-- of the result.
 type family ArchFn (arch :: *) :: * -> Type -> *
 
 -- | A type family for defining architecture specific registers that are
 -- assigned as part of the language.
 type family ArchReg (arch :: *) :: Type -> *
-
--- | Width of register used to store addresses.
-type family RegAddrWidth (r :: Type -> *) :: Nat
 
 -- | A type family for defining architecture-specific statements that are
 -- part of the language.
