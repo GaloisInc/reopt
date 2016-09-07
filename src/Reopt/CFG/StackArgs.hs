@@ -19,10 +19,10 @@ import           Data.Word
 import           Data.Macaw.CFG
 import           Data.Macaw.Types (n64)
 
-import           Reopt.Analysis.AbsState
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Discovery.Info
 import           Reopt.Machine.X86State
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory
 
 type StackArgs a = State (Int64, Set (BlockLabel Word64)) a
 

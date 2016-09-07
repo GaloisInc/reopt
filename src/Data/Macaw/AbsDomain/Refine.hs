@@ -1,5 +1,5 @@
 {-|
-Module     : Reopt.Analysis.AbsRefine
+Module     : Data.Macaw.AbsDomain.Refine
 Copyright  : (c) Galois, Inc 2016
 Maintainer : jhendrix@galois.com
 
@@ -12,7 +12,7 @@ This defines operations that use assertions to refine state.
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-module Reopt.Analysis.AbsRefine
+module Data.Macaw.AbsDomain.Refine
   ( RefineConstraints
   , refineProcState
   ) where
@@ -25,7 +25,7 @@ import           Data.Parameterized.NatRepr
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
-import           Reopt.Analysis.AbsState
+import           Data.Macaw.AbsDomain.AbsState
 
 -- | Constraints needed for refinement on abstract states.
 type RefineConstraints arch

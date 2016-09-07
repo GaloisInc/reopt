@@ -24,8 +24,8 @@ import           Text.Show.Pretty
 
 import           Debug.Trace
 
--- FIXME: clag from Reopt.Machine.SysDeps.Types
-data SyscallArgType = VoidArgType | WordArgType | XMMFloatType
+-- FIXME: clag from Data.Macaw.Architecture.Syscall
+data SyscallArgType = VoidArgType | WordArgType
                     deriving (Eq, Show, Read)
 
 
@@ -63,9 +63,9 @@ generateHSFile :: CTranslUnit -> [SyscallInfo] -> Doc
 generateHSFile tunit sis =
   vcat [ text "-- DO NOT EDIT.  Generated from make_bsd_syscalls/Main.hs"
        , text "module Reopt.Machine.SysDeps.FreeBSDGenerated where"
-       , text "import           Reopt.Machine.SysDeps.Types"
+       , text "import           Data.Macaw.Architecture.Syscall"
        , text "import           Data.Map (Map, fromList)"
-       , text "import           Data.Word"         
+       , text "import           Data.Word"
        , text ""
        , text "syscallInfo :: Map Word64 SyscallTypeInfo"
        , text "syscallInfo =" <+> ppDoc syscallMap ]
@@ -84,7 +84,7 @@ generateHSFile tunit sis =
         getUserState
 
     -- summariseDeclEvent idecl = pretty idecl
-    
+
     summariseDeclEvent (getVarDecl -> VarDecl vname _ (FunctionType (FunType rettyp params _) _)) =
       ( identToString (identOfVarName vname)
       , typeToArgType rettyp
@@ -92,9 +92,9 @@ generateHSFile tunit sis =
 
     -- syscallInfo (CDeclExt (CDecl [CTypeSpec spec] [(Just declr, _, _)] _))
     --   | CDeclr (Just ident) [CFunDeclr (Right (decls, _)) _ _] _ _ _ <- declr
-    --   = Just (identToString ident, typeSpecToArgType spec, map declToArgType decls)              
+    --   = Just (identToString ident, typeSpecToArgType spec, map declToArgType decls)
     -- syscallInfo d = error ("unhandled decl" ++ show d)
-    
+
     -- declToArgType (CDecl [CTypeSpec spec]  _) = typeSpecToArgType spec
     -- declToArgType d = error ("unhandled decl (in type) " ++ show d)
 
@@ -102,11 +102,11 @@ typeToArgType :: Type -> SyscallArgType
 typeToArgType typ =
   case typ of
     DirectType typ' _ _ ->
-      case typ' of 
+      case typ' of
         TyVoid               -> VoidArgType
         TyIntegral _         -> WordArgType
         TyFloating TyLDouble -> unhandled
-        TyFloating _         -> XMMFloatType
+        TyFloating _         -> unhandled -- XMMFloatType
         TyComplex _          -> unhandled
         TyComp comp          -> unhandled -- compTypeToArgType comp
         TyEnum _             -> WordArgType -- FIXME: ???
@@ -131,7 +131,7 @@ compTypeToArgType ctyp = trace ("Comp type: " ++ show (pretty ctyp)) WordArgType
 --     CIntType _    -> WordArgType
 --     CLongType _   -> WordArgType
 --     CFloatType _  -> XMMFloatType
---     CDoubleType _ -> XMMFloatType 
+--     CDoubleType _ -> XMMFloatType
 --     CSignedType _ -> WordArgType
 --     CUnsigType _  -> WordArgType
 --     CBoolType _   -> WordArgType
@@ -202,7 +202,7 @@ syscallLine idents =
       num   <- P.decimal
       P.skipSpace
       audit <- P.decimal
-      P.skipSpace       
+      P.skipSpace
       cl    <- P.takeWhile (not . P.isSpace)
       P.skipSpace
       cdecl <- P.choice [ P.char '{' >> P.takeTill ((==) '}') >>= return . parseDecl

@@ -1,6 +1,6 @@
 -- DO NOT EDIT.  Generated from make_linux_syscalls/Main.hs
 module Reopt.Machine.SysDeps.LinuxGenerated where
-import           Reopt.Machine.SysDeps.Types
+import           Data.Macaw.Architecture.Syscall
 import           Data.Map (Map, fromList)
 import           Data.Word
 
@@ -1617,7 +1617,7 @@ syscallInfo = fromList
                     )
                   )
                 ]
--- Unknown system calls: 
+-- Unknown system calls:
 -- 134 uselib
 -- 174 create_module
 -- 177 get_kernel_syms

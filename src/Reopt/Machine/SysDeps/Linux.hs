@@ -6,7 +6,7 @@ module Reopt.Machine.SysDeps.Linux
 import           Data.Parameterized.Some
 
 import           Reopt.Machine.SysDeps.LinuxGenerated (syscallInfo)
-import           Reopt.Machine.SysDeps.Types
+import           Data.Macaw.Architecture.Syscall
 import           Reopt.Machine.X86State
 
 syscallPersonality :: SyscallPersonality X86_64

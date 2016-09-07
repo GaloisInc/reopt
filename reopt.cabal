@@ -35,21 +35,25 @@ library
   hs-source-dirs: src
 
   exposed-modules:
+    Data.Macaw.AbsDomain.AbsState
+    Data.Macaw.AbsDomain.Refine
+    Data.Macaw.AbsDomain.StridedInterval
+    Data.Macaw.Architecture.Info
+    Data.Macaw.Architecture.Syscall
     Data.Macaw.CFG
+    Data.Macaw.DebugLogging
+    Data.Macaw.Discovery
+    Data.Macaw.Discovery.Info
+    Data.Macaw.Memory
+    Data.Macaw.Memory.ElfLoader
     Data.Macaw.Types
     Reopt
-    Reopt.Analysis.AbsRefine
-    Reopt.Analysis.AbsState
     Reopt.Analysis.Domains.DiffEquations
-    Reopt.Analysis.Domains.StridedInterval
     Reopt.BasicBlock.Extract
     Reopt.BasicBlock.FunctionCFG
-    Reopt.CFG.ArchitectureInfo
-    Reopt.CFG.CFGDiscovery
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs
     Reopt.CFG.Implementation
-    Reopt.CFG.DiscoveryInfo
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
@@ -65,10 +69,7 @@ library
     Reopt.Machine.SysDeps.FreeBSDGenerated
     Reopt.Machine.SysDeps.Linux
     Reopt.Machine.SysDeps.LinuxGenerated
-    Reopt.Machine.SysDeps.Types
     Reopt.Machine.SysDeps
-    Reopt.Object.Loader
-    Reopt.Object.Memory
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
@@ -76,7 +77,6 @@ library
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
-    Reopt.Utils.Debug
     Reopt.Utils.Hex
     Reopt.Utils.GHCBug
 

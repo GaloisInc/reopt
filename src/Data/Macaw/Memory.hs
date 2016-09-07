@@ -1,5 +1,4 @@
 {-|
-Module      : Reopt.Object.Memory
 Copyright   : (c) Galois Inc, 2015-2016
 Maintainer  : jhendrix@galois.com
 
@@ -9,7 +8,7 @@ Declares 'Memory', a type for representing segmented memory with permissions.
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TupleSections #-}
-module Reopt.Object.Memory
+module Data.Macaw.Memory
   ( SomeMemory(..)
   , Memory
   , emptyMemory

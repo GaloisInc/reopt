@@ -54,21 +54,21 @@ import qualified Flexdis86 as Flexdis
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
+import qualified Data.Macaw.AbsDomain.StridedInterval as SI
 import           Data.Macaw.CFG
 import           Data.Macaw.Types (BVType, knownType, typeRepr)
 
-import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.CFG.ArchitectureInfo (ArchitectureInfo(..))
+import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
   ( BoolType
   , bvLit
   )
 import qualified Reopt.Semantics.Monad as S
-import Reopt.Analysis.AbsState
+import Data.Macaw.AbsDomain.AbsState
        ( AbsBlockState
        , mkAbsBlockState
        , setAbsIP

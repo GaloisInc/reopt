@@ -54,9 +54,9 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import           Reopt
-import           Reopt.Analysis.AbsState
-import           Reopt.CFG.CFGDiscovery
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Discovery
+import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
                  , absState
                  , blocks
@@ -70,11 +70,11 @@ import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
 import           Reopt.Machine.X86State
-import           Reopt.Object.Loader
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
-import           Reopt.Utils.Debug
+import           Data.Macaw.DebugLogging
 
 import           Debug.Trace
 

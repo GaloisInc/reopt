@@ -23,7 +23,7 @@ import qualified Data.Vector as V ()
 import           Data.Word
 
 import           Data.Macaw.CFG
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.Discovery.Info
 import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftMaximumFunctionType
                                  , ftMinimumFunctionType
@@ -31,7 +31,7 @@ import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftIntRetRegs , ftFloatRetRegs
                                  )
 import           Reopt.Machine.X86State
-import           Reopt.Utils.Debug
+import           Data.Macaw.DebugLogging
 
 import           Debug.Trace
 

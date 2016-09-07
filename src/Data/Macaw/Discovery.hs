@@ -23,7 +23,7 @@ interleaved abstract interpretation.
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module Reopt.CFG.CFGDiscovery
+module Data.Macaw.Discovery
        ( mkCFG
        , cfgFromAddrs
        , assignmentAbsValues
@@ -51,19 +51,18 @@ import           Data.Word
 import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-
+import qualified Data.Macaw.AbsDomain.StridedInterval as SI
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
+import           Data.Macaw.DebugLogging
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Reopt.Analysis.AbsRefine
-import           Reopt.Analysis.AbsState
-import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.CFG.ArchitectureInfo
-import           Reopt.CFG.DiscoveryInfo
-import           Reopt.Machine.SysDeps.Types
-import           Reopt.Object.Memory
-import           Reopt.Utils.Debug
-import           Reopt.Utils.Hex
+import           Data.Macaw.AbsDomain.Refine
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Architecture.Info
+import           Data.Macaw.Discovery.Info
+--import           Reopt.Utils.Hex
 
 transferRHS :: forall a ids tp
             .  ( OrdF (ArchReg a)
@@ -496,23 +495,7 @@ getJumpTableBounds mem regs base jump_index
       Just $! fromInteger index_end
 getJumpTableBounds _ _ _ _ = Nothing
 
-  -- -- basically, (8 * x) + addr
-  -- | AssignedValue (Assignment _ (Read (MemLoc ptr _))) <- conc^.curIP
-  -- , AssignedValue (Assignment _ (EvalApp (BVAdd _ lhs (BVValue _ base)))) <- ptr
-  -- , AssignedValue (Assignment _ (EvalApp (BVMul _ (BVValue _ 8) xv))) <- lhs
-  -- , AssignedValue x <- xv
-  -- , Just vs <- concretize (regs^.absAssignments^.assignLens x) =
-  --   let addrs = Set.map (\off -> fromIntegral $ base + off * 8) vs
-  --       bptrs = Set.map (\addr -> fromIntegral $ fromJust
-  --                                 $ Map.lookup addr wordMap) addrs
-  --   in
-  --   if all (isRODataPointer mem) $ Set.toList addrs
-  --      then trace ("getJumpTable: " ++ show (pretty x)
-  --                  ++ " " ++ show (Set.map (flip showHex "") bptrs)) $
-  --           Just bptrs
-  --      else Nothing
-  -- | otherwise = Nothing
-
+-- | This
 fetchAndExecute :: forall arch ids
                 .  ( RegisterInfo (ArchReg arch)
                    , ArchConstraint arch ids
@@ -649,7 +632,7 @@ fetchAndExecute b regs' s' = do
 type TransferConstraints arch
    = ( PrettyCFGConstraints arch
      , RegisterInfo (ArchReg arch)
-     , HasRepr (ArchReg arch)    TypeRepr
+     , HasRepr (ArchReg arch)  TypeRepr
      )
 
 transferBlock :: TransferConstraints arch
@@ -773,7 +756,7 @@ cfgFromAddrs arch_info mem symbols sysp init_addrs =
         ]
 
       init_abs_state <- use absState
-      debugM DCFG ("Starting addrs " ++ show (Hex <$> init_addrs))
+      debugM DCFG ("Starting addrs " ++ show ((`showHex` "") <$> init_addrs))
       reallyGetBlockList init_abs_state
       explore_frontier
       -- Add in code pointers from memory.

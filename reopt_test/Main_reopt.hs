@@ -72,8 +72,8 @@ import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
-import           Reopt.Object.Loader
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
 

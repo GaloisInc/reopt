@@ -4,7 +4,7 @@ Copyright   : (c) Galois Inc, 2015
 Maintainer  : jhendrix@galois.com
 
 This module provides methods for constructing functions from the basic
-blocks discovered by 'Reopt.CFG.CFGDiscovery'.
+blocks discovered by 'Data.Macaw.Discovery'.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
@@ -46,7 +46,7 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.String (fromString)
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.Discovery.Info
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionArgs ( functionArgs )
 import           Reopt.CFG.RegisterUse
@@ -54,8 +54,8 @@ import           Data.Macaw.CFG
 import           Reopt.CFG.StackDepth
 import           Data.Macaw.Types
 import           Reopt.Machine.X86State
-import           Reopt.Object.Memory
-import           Reopt.Utils.Debug
+import           Data.Macaw.Memory
+import           Data.Macaw.DebugLogging
 
 import           Debug.Trace (trace)
 

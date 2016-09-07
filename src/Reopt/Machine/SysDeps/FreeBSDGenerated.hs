@@ -1,6 +1,6 @@
 -- DO NOT EDIT.  Generated from make_bsd_syscalls/Main.hs
 module Reopt.Machine.SysDeps.FreeBSDGenerated where
-import           Reopt.Machine.SysDeps.Types
+import           Data.Macaw.Architecture.Syscall
 import           Data.Map (Map, fromList)
 import           Data.Word
 

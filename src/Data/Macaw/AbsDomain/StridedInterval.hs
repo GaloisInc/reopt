@@ -1,11 +1,9 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Domains.StridedInterval
--- Description      : A strided interval domain x + [a .. b] * c
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Simon Winwood <sjw@galois.com>
---
-------------------------------------------------------------------------
+{-|
+Copyright        : (c) Galois, Inc 2015
+Maintainer       : Simon Winwood <sjw@galois.com>
+
+A strided interval domain x + [a .. b] * c
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
@@ -15,7 +13,7 @@
 
 -- FIXME: take rounding/number of bits/etc. into consideration
 -- FIXME: only really useful for unsigned?
-module Reopt.Analysis.Domains.StridedInterval
+module Data.Macaw.AbsDomain.StridedInterval
        ( StridedInterval(..)
          -- Constructors
        , singleton, mkStridedInterval, fromFoldable
@@ -38,7 +36,7 @@ import           GHC.TypeLits (Nat)
 import           Test.QuickCheck
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), empty)
 
-import           Reopt.Utils.Debug
+-- import           Data.Macaw.DebugLogging
 
 -- -----------------------------------------------------------------------------
 -- Data type decl and instances
@@ -442,7 +440,6 @@ bvmul sz si1 si2 =
 trunc :: StridedInterval u
       -> NatRepr v
       -> StridedInterval v
---trunc EmptyInterval _ = EmptyInterval
 trunc si sz
   | isTop si              = top'
   -- No change/complete wrap case --- happens when we add
@@ -456,8 +453,7 @@ trunc si sz
                   `mod` modulus
       in si' { base = base', range = (modulus `ceilDiv` stride si) - 1 }
    -- We wrap at least once
-  | otherwise     = debug DAbsInt ("trunc failing: " ++ show (pretty si) ++ " " ++ show sz) $
-                    top'
+  | otherwise     = top'
   where
     modulus = 2 ^ (natValue sz)
     si'  = si { typ = typ top'
@@ -472,11 +468,9 @@ trunc si sz
 -- Testing
 
 toList :: StridedInterval w -> [Integer]
---toList EmptyInterval        = []
 toList si@StridedInterval{} = map (\v -> base si + stride si * v) [0 .. range si]
 
 instance Pretty (StridedInterval w) where
---  pretty EmptyInterval        = brackets empty
   pretty si | isEmpty si = text "[]"
   pretty si | Just s <- isSingleton si = brackets (integer s)
   pretty si@StridedInterval{} = brackets (integer (base si) <> comma

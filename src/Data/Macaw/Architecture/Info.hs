@@ -1,12 +1,12 @@
 {-|
-Module     : Reopt.CFG.ArchitectureInfo
+Module     : Data.Macaw.Architecture.Info
 Copyright  : (c) Galois, Inc 2016
 Maintainer : jhendrix@galois.com
 
 This defines the architecture-specific information needed for code discovery.
 -}
 {-# LANGUAGE RankNTypes #-}
-module Reopt.CFG.ArchitectureInfo
+module Data.Macaw.Architecture.Info
   ( ArchitectureInfo(..)
   , ReadAddrFn
   , DisassembleFn
@@ -17,8 +17,8 @@ import Data.Parameterized.NatRepr
 import Data.Parameterized.Nonce
 
 import Data.Macaw.CFG
-import Reopt.Analysis.AbsState
-import Reopt.Object.Memory
+import Data.Macaw.AbsDomain.AbsState
+import Data.Macaw.Memory
 
 
 ------------------------------------------------------------------------

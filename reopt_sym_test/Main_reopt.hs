@@ -79,15 +79,15 @@ import           Lang.Crucible.Solver.SimpleBuilder
 import           Lang.Crucible.Solver.Symbol
 import           Lang.Crucible.Utils.MonadST
 import           Reopt
-import           Reopt.Analysis.AbsState
-import           Reopt.CFG.CFGDiscovery
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Discovery
 import           Data.Macaw.CFG
 import qualified Reopt.Machine.StateNames as N
 import           Data.Macaw.Types
 import           Reopt.Machine.X86State
 --import           Reopt.Semantics.ConcreteState
-import           Reopt.Object.Memory
-import           Reopt.Object.Loader
+import           Data.Macaw.Memory
+import           Data.Macaw.Memory.ElfLoader
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
 import           Reopt.Semantics.Monad (Type(..), bvLit)

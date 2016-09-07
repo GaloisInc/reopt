@@ -25,7 +25,7 @@ import           Data.Type.Equality
 import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.Discovery.Info
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import           Reopt.Machine.X86State

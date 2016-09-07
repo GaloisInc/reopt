@@ -1,12 +1,12 @@
 {-|
-Module      : Reopt.Object.Loader
+Module      : Data.Macaw.Memory.ElfLoader
 Copyright   : (c) Galois Inc, 2016
 Maintainer  : jhendrix@galois.com
 
 Operations for creating a view of memory from an elf file.
 -}
 {-# LANGUAGE FlexibleContexts #-}
-module Reopt.Object.Loader
+module Data.Macaw.Memory.ElfLoader
   ( readElf
   , loadExecutable
   , loadElfBySection
@@ -24,7 +24,7 @@ import qualified Data.ByteString.Lazy as L
 import           Data.ElfEdit
 import           System.IO
 
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory
 
 ppErrors :: FilePath -> [ElfParseError w] -> IO ()
 ppErrors path errl = do

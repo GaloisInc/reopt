@@ -27,8 +27,8 @@ import           System.Exit
 import           System.IO
 import           System.IO.Error
 
-import           Reopt.Object.Loader
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory
 
 
 -- | @stringToFixedBuffer n s@ returns a string with length @n@ containing

@@ -1,9 +1,9 @@
 {-|
-Module     : Reopt.CFG.DiscoveryInfo
 Copyright  : (c) Galois, Inc 2016
 Maintainer : jhendrix@galois.com
 
-This defines the information learned during the code discovery phase of Reopt.
+This defines the main data structure for storing information learned from code
+discovery.
 -}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -15,7 +15,7 @@ This defines the information learned during the code discovery phase of Reopt.
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
-module Reopt.CFG.DiscoveryInfo
+module Data.Macaw.Discovery.Info
   ( BlockRegion(..)
   , lookupBlock
   , GlobalDataInfo(..)
@@ -68,14 +68,14 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..))
 
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Reopt.Analysis.AbsState
-import           Reopt.CFG.ArchitectureInfo
-import           Reopt.Machine.SysDeps.Types
-import           Reopt.Object.Memory
-import           Reopt.Utils.Debug
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Architecture.Info
+import           Data.Macaw.DebugLogging
 
 ------------------------------------------------------------------------
 -- AbsStateMap

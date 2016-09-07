@@ -27,10 +27,10 @@ import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
-import           Reopt.CFG.DiscoveryInfo
+import           Data.Macaw.Discovery.Info
 import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.Machine.X86State
-import           Reopt.Utils.Debug
+import           Data.Macaw.DebugLogging
 
 -- -----------------------------------------------------------------------------
 

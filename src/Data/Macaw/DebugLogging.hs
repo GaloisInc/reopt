@@ -1,5 +1,11 @@
+{-|
+Copyright        : (c) Galois, Inc 2015
+Maintainer       : Simon Winwood <sjw@galois.com>
+
+Provides utilities for logging debug messages to stderr.
+-}
 {-# LANGUAGE ImplicitParams #-}
-module Reopt.Utils.Debug
+module Data.Macaw.DebugLogging
        ( DebugClass(..)
        , setDebugKeys
        , getDebugKeys

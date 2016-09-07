@@ -28,7 +28,7 @@ import           Text.Show.Pretty
 
 import           Debug.Trace
 
--- FIXME: clag from Reopt.Machine.SysDeps.Types
+-- FIXME: clag from Data.Macaw.Architecture.Syscall
 data SyscallArgType = VoidArgType | WordArgType | XMMFloatType
                     deriving (Eq, Show, Read)
 
@@ -63,9 +63,9 @@ generateHSFile :: [SyscallInfo] -> Doc
 generateHSFile sis =
   vcat $ [ text "-- DO NOT EDIT.  Generated from make_linux_syscalls/Main.hs"
          , text "module Reopt.Machine.SysDeps.LinuxGenerated where"
-         , text "import           Reopt.Machine.SysDeps.Types"
+         , text "import           Data.Macaw.Architecture.Syscall"
          , text "import           Data.Map (Map, fromList)"
-         , text "import           Data.Word"         
+         , text "import           Data.Word"
          , text ""
          , text "syscallInfo :: Map Word64 SyscallTypeInfo"
          , text "syscallInfo =" <+> ppDoc syscallMap ]
@@ -79,7 +79,7 @@ generateHSFile sis =
       [ text "--" <+> integer (syscallNo si) <+> text (BS.unpack str)
       | si <- sis
       , Left str <- [ syscallProto si ]  ]
-                      
+
     -- syscallInfo :: CExtDecl -> Maybe (String, SyscallArgType, [SyscallArgType])
     syscallInfo (getVarDecl -> VarDecl vname _ (FunctionType (FunType rettyp params _) _)) =
       ( identToString (identOfVarName vname)
@@ -88,9 +88,9 @@ generateHSFile sis =
 
     -- syscallInfo (CDeclExt (CDecl [CTypeSpec spec] [(Just declr, _, _)] _))
     --   | CDeclr (Just ident) [CFunDeclr (Right (decls, _)) _ _] _ _ _ <- declr
-    --   = Just (identToString ident, typeSpecToArgType spec, map declToArgType decls)              
+    --   = Just (identToString ident, typeSpecToArgType spec, map declToArgType decls)
     -- syscallInfo d = error ("unhandled decl" ++ show d)
-    
+
     -- declToArgType (CDecl [CTypeSpec spec]  _) = typeSpecToArgType spec
     -- declToArgType d = error ("unhandled decl (in type) " ++ show d)
 
@@ -98,7 +98,7 @@ typeToArgType :: Type -> SyscallArgType
 typeToArgType typ =
   case typ of
     DirectType typ' _ _ ->
-      case typ' of 
+      case typ' of
         TyVoid               -> VoidArgType
         TyIntegral _         -> WordArgType
         TyFloating TyLDouble -> unhandled
@@ -127,7 +127,7 @@ compTypeToArgType ctyp = trace ("Comp type: " ++ show (pretty ctyp)) WordArgType
 --     CIntType _    -> WordArgType
 --     CLongType _   -> WordArgType
 --     CFloatType _  -> XMMFloatType
---     CDoubleType _ -> XMMFloatType 
+--     CDoubleType _ -> XMMFloatType
 --     CSignedType _ -> WordArgType
 --     CUnsigType _  -> WordArgType
 --     CBoolType _   -> WordArgType
@@ -159,11 +159,11 @@ readOneCFile f = do
   tunit <- case r of
              Right v  -> return v
              Left err -> error (show err)
-  
+
   let gdecls = case runTrav_ (analyseAST tunit) of
                  Left err -> error $ "Error: " ++ (show err)
                  Right (gdecls, _) -> gdecls
-                 
+
   return (Map.mapKeys (\(Ident name _ _) -> BS.pack name) $ gObjs gdecls)
 
 syscallLine :: Map ByteString IdentDecl -> Parser (Maybe SyscallInfo)
@@ -184,7 +184,7 @@ syscallLine idents = do
       ident <- P.choice [ P.takeWhile1 (not . P.isSpace)
                         , return name ]
       if abi == "x32"
-        then return Nothing 
+        then return Nothing
         else return (Just (SyscallInfo num abi name (findIdent ident)))
 
     findIdent bytes =

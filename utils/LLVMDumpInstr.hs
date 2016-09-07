@@ -17,12 +17,12 @@ import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
 import           Data.Parameterized.Nonce.Transformers
-import           Reopt.CFG.CFGDiscovery
+import           Data.Macaw.Discovery
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Recovery
 import           Reopt.Machine.X86State (rootLoc)
-import           Reopt.Object.Memory
+import           Data.Macaw.Memory
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 

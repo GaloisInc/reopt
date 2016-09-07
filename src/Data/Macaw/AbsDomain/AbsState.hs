@@ -13,7 +13,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Werror #-}
-module Reopt.Analysis.AbsState
+module Data.Macaw.AbsDomain.AbsState
   ( AbsBlockState
   , setAbsIP
   , mkAbsBlockState
@@ -73,15 +73,16 @@ import           Data.Parameterized.NatRepr
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
+import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import qualified Data.Macaw.AbsDomain.StridedInterval as SI
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
-import qualified Reopt.Analysis.Domains.StridedInterval as SI
-import           Reopt.Object.Memory ( Memory, isCodeAddrOrNull)
-import           Reopt.Utils.Debug
-import           Reopt.Utils.Hex
+import           Data.Macaw.Memory ( Memory, isCodeAddrOrNull)
+import           Data.Macaw.DebugLogging
+--import           Reopt.Utils.Hex
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -213,10 +214,10 @@ instance Pretty (AbsValue w tp) where
   pretty (SubValue n av) =
     text "sub" <> parens (integer (natValue n) <> comma <+> pretty av)
   pretty (StackOffset a    s) = ppSet ppv s
-    where ppv v' | v' >= 0   = text ("rsp_" ++ shows (Hex a) " + " ++ show (Hex v'))
-                 | otherwise = text ("rsp_" ++ shows (Hex a) " - " ++ show (Hex (negate v')))
+    where ppv v' | v' >= 0   = text $ "rsp_" ++ showHex a " + " ++ showHex v' ""
+                 | otherwise = text $ "rsp_" ++ showHex a " - " ++ showHex (negate v') ""
 
-  pretty (SomeStackOffset a) = text ("rsp_" ++ shows (Hex a) " + ?")
+  pretty (SomeStackOffset a) = text $ "rsp_" ++ showHex a " + ?"
   pretty TopV = text "top"
   pretty ReturnAddr = text "return_addr"
 
@@ -225,7 +226,7 @@ ppSet ppv vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
 
 ppIntegerSet :: (Integral w, Show w) => Set w -> Doc
 ppIntegerSet = ppSet ppv
-  where ppv v' = assert (v' >= 0) $ text (show (Hex v'))
+  where ppv v' = assert (v' >= 0) $ text (showHex v' "")
 
 -- | Returns a set of concrete integers that this value may be.
 -- This function will neither return the complete set or an
@@ -808,7 +809,7 @@ absStackJoinD y x = do
 
 ppAbsStack :: AbsBlockStack w -> Doc
 ppAbsStack m = vcat (pp <$> Map.toDescList m)
-  where pp (o,StackEntry _ v) = text (show (Hex o)) <+> text ":=" <+> pretty v
+  where pp (o,StackEntry _ v) = text (showHex o " :=") <+> pretty v
 
 ------------------------------------------------------------------------
 -- AbsBlockState
