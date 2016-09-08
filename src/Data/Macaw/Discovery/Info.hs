@@ -45,7 +45,6 @@ module Data.Macaw.Discovery.Info
   , ArchConstraint
   , identifyCall
   , identifyReturn
-  , classifyBlock
   , getClassifyBlock
   )  where
 
@@ -295,16 +294,21 @@ getFunctionEntryPoint addr s = do
     Just a -> a
     Nothing -> error $ "Could not find address of " ++ showHex addr "."
 
-getFunctionEntryPoint' :: Ord (ArchAddr a) => ArchAddr a -> DiscoveryInfo a ids -> Maybe (ArchAddr a)
+getFunctionEntryPoint' :: Ord (ArchAddr a)
+                       => ArchAddr a
+                       -> DiscoveryInfo a ids
+                       -> Maybe (ArchAddr a)
 getFunctionEntryPoint' addr s = Set.lookupLE addr (s^.functionEntries)
 
+-- | Return true if the two addresses look like they are in the same
 inSameFunction :: AddrConstraint (ArchAddr a)
-                  => ArchAddr a
-                  -> ArchAddr a
-                  -> DiscoveryInfo a ids
-                  -> Bool
-inSameFunction x y s =
-  getFunctionEntryPoint x s == getFunctionEntryPoint y s
+               => ArchAddr a
+               -> ArchAddr a
+               -> DiscoveryInfo a ids
+               -> Bool
+inSameFunction x y s = xf == yf
+  where Just xf = Set.lookupLE x (s^.functionEntries)
+        Just yf = Set.lookupLE y (s^.functionEntries)
 
 -- | Constraint on architecture register values needed by code exploration.
 type RegConstraint r = (OrdF r, HasRepr r TypeRepr, RegisterInfo r, ShowF r)
@@ -416,17 +420,17 @@ identifyJumpTable s lbl (AssignedValue (Assignment _ (ReadMem ptr _)))
    , isReadonlyAddr mem (fromInteger base) =
        Just (idx, V.unfoldr nextWord (fromInteger base))
   where
+    info = archInfo s
+    mem  = memory   s
     enclosingFun    = getFunctionEntryPoint (labelAddr lbl) s
     nextWord :: ArchAddr arch -> Maybe (ArchAddr arch, ArchAddr arch)
     nextWord tblPtr
-      | Right codePtr <- readAddrInMemory info mem pf_r tblPtr
+      | Right codePtr <- readJumpTableEntry info mem tblPtr
       , isReadonlyAddr mem tblPtr
       , getFunctionEntryPoint' codePtr s == Just enclosingFun =
         Just (codePtr, tblPtr + jumpTableEntrySize info)
       | otherwise = Nothing
-    info = archInfo s
-    mem = memory s
-identifyJumpTable _ _ _ = Nothing
+identifyJumpTable _s _ _ = Nothing
 
 -- | Classifies the terminal statement in a block using discovered information.
 classifyBlock :: forall arch ids
@@ -465,7 +469,8 @@ classifyBlock b interp_state =
       | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
-      | Just (idx, nexts) <- identifyJumpTable interp_state (blockLabel b)
+      | Just (idx, nexts) <- identifyJumpTable interp_state
+                                               (blockLabel b)
                                                (proc_state^.boundValue ip_reg) ->
           Just (ParsedLookupTable proc_state idx nexts)
 

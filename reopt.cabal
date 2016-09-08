@@ -46,6 +46,7 @@ library
     Data.Macaw.Discovery.Info
     Data.Macaw.Memory
     Data.Macaw.Memory.ElfLoader
+    Data.Macaw.Memory.Flexdis86
     Data.Macaw.Types
     Reopt
     Reopt.Analysis.Domains.DiffEquations

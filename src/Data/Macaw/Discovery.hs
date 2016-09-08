@@ -1,6 +1,6 @@
 {- |
 Module           : Reopt.Semantics.CFGDiscovery
-Copyright        : (c) Galois, Inc 2015
+Copyright        : (c) Galois, Inc 2015-2016
 Maintainer       : Joe Hendrix <jhendrix@galois.com>, Simon Winwood <sjw@galois.com>
 
 This contains an implementation of a CFG discovery algorithm based upon an
@@ -33,7 +33,6 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad.ST
 import           Control.Monad.State.Strict
-import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.Foldable as Fold
 import           Data.List
@@ -62,7 +61,6 @@ import           Data.Macaw.AbsDomain.Refine
 import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Architecture.Info
 import           Data.Macaw.Discovery.Info
---import           Reopt.Utils.Hex
 
 transferRHS :: forall a ids tp
             .  ( OrdF (ArchReg a)
@@ -185,13 +183,13 @@ runCFGM :: ArchitectureInfo arch
            -- ^ Names for (some) function entry points
         -> SyscallPersonality arch
            -- ^ Syscall personality
-        -> (forall ids . CFGM arch ids r)
+        -> (forall ids . CFGM arch ids ())
            -- ^ Computation to run.
-        -> r
+        -> Some (DiscoveryInfo arch)
 runCFGM arch_info mem symbols sysp m = do
   withGlobalSTNonceGenerator $ \nonce_gen -> do
     let init_info = emptyDiscoveryInfo nonce_gen mem symbols sysp arch_info
-    evalStateT (unCFGM m) init_info
+    Some <$> execStateT (unCFGM m) init_info
 
 blockOverlaps :: Ord (ArchAddr arch)
               => ArchAddr arch
@@ -255,14 +253,6 @@ markBlockStart addr ab = do
       modify $ \s0 -> s0 & function_frontier %~ Set.insert l_start . Set.insert a_start
     _ ->
       tryDisassembleAddr addr ab
-
--- | This is the worker for getBlock, in the case that we have not already
--- read the block.
-reallyGetBlockList :: PrettyCFGConstraints arch
-                   => AbsStateMap arch
-                   -> CFGM arch ids ()
-reallyGetBlockList m =
-  mapM_ (uncurry tryDisassembleAddr) $ Map.toAscList m
 
 -- | Returns a block at the given location, if at all possible.  This
 -- will disassemble the binary if the block hasn't been seen before.
@@ -344,7 +334,7 @@ recordWriteStmt :: ( PrettyCFGConstraints arch
                 -> Stmt arch ids
                 -> CFGM arch ids ()
 recordWriteStmt lbl regs stmt = do
-  addrWidth <- gets $ archAddrWidth . archInfo
+  addrWidth <- gets $ addrWidthNatRepr . archAddrWidth . archInfo
   case stmt of
     WriteMem _addr v
       | Just Refl <- testEquality (typeRepr v) (BVTypeRepr addrWidth) -> do
@@ -383,7 +373,7 @@ assignmentAbsValues info mem g absm =
         go m0 b =
           case blockLabel b of
             GeneratedBlock a 0 -> do
-              let w = archAddrWidth info
+              let w = addrWidthNatRepr (archAddrWidth info)
               let isCode = isCodeAddrOrNull mem . fromIntegral
               let abs_state =
                     initAbsProcessorState w isCode (lookupAbsBlock a absm)
@@ -559,7 +549,7 @@ fetchAndExecute b regs' s' = do
             markAddrAsFunction tgt_addr
             -- Check top of stack points to return value.
             let sp_val = s'^.boundValue sp_reg
-            let ptrType = BVTypeRepr (archAddrWidth arch_info)
+            let ptrType = BVTypeRepr (addrWidthNatRepr (archAddrWidth arch_info))
             let ret_val = transferRHS arch_info regs' (ReadMem sp_val ptrType)
             case ret_val of
               ReturnAddr ->
@@ -591,7 +581,8 @@ fetchAndExecute b regs' s' = do
             -- Try to compute jump table bounds
             let mread_end = getJumpTableBounds mem regs' base jump_idx
 
-            let abst = finalAbsBlockState regs' s'
+            let abst :: AbsBlockState (ArchReg arch)
+                abst = finalAbsBlockState regs' s'
             seq abst $ do
             -- This function resolves jump table entries.
             -- It is a recursive function that has an index into the jump table.
@@ -609,7 +600,7 @@ fetchAndExecute b regs' s' = do
                 resolveJump prev idx = do
                   let read_addr = base + 8 * idx
                   interpState <- get
-                  case readAddrInMemory arch_info mem pf_r read_addr of
+                  case readJumpTableEntry arch_info mem read_addr of
                     Right tgt_addr
                       | isCodeAddr mem tgt_addr
                       , inSameFunction (labelAddr lbl) tgt_addr interpState -> do
@@ -682,7 +673,7 @@ transfer addr = do
   case mroot of
     Nothing -> return ()
     Just root -> do
-      addrWidth <- gets $ archAddrWidth . archInfo
+      addrWidth <- gets $ addrWidthNatRepr . archAddrWidth . archInfo
       ab <- uses absState $ lookupAbsBlock addr
       transferBlock root $
          initAbsProcessorState addrWidth (isCodeAddrOrNull mem . fromIntegral) ab
@@ -724,6 +715,18 @@ explore_frontier = do
       transfer addr
       explore_frontier
 
+-- | This returns true if the address is not readonly, and points to code.
+memIsDataCodePointer :: Ord w => Memory w -> w -> w -> Bool
+memIsDataCodePointer mem a v = isCodeAddr mem v && not (isReadonlyAddr mem a)
+
+markFunctionAddrs :: TransferConstraints arch
+                  => [ArchAddr arch] -> CFGM arch ids ()
+markFunctionAddrs addrs = do
+  mapM_ markAddrAsFunction addrs
+  explore_frontier
+
+-- | Construct a discovery info by starting with exploring from a given set of
+-- function entry points.
 cfgFromAddrs :: forall arch
              .  TransferConstraints arch
              => ArchitectureInfo arch
@@ -735,55 +738,30 @@ cfgFromAddrs :: forall arch
              -> SyscallPersonality arch
                 -- ^ Syscall personality
              -> [ArchAddr arch]
-                -- ^ Locations to start disassembler form.
+                -- ^ Initial function entry points.
+             -> [(ArchAddr arch, ArchAddr arch)]
+                -- ^ Function entry points in memory to be explored
+                -- after exploring function entry points.
+                --
+                -- Each entry contains an address and the value stored in it.
              -> Some (DiscoveryInfo arch)
-cfgFromAddrs arch_info mem symbols sysp init_addrs =
-    runCFGM arch_info mem symbols sysp $ do
-      -- Set abstract state for initial functions
-      functionEntries .= Set.fromList init_addrs
-      absState .= Map.fromList
-        [ (a, fnBlockStateFn arch_info mem a)
-        | a <- init_addrs
-        ]
-      -- Set function frontier
-      function_frontier .= Set.fromList init_addrs
-      -- Set referenced values for global data.
-      globalDataMap .= Map.fromList
-        [ (v, ReferencedValue)
-        | (_,v) <- memoryAlignedWords arch_info mem
---        | (_,v) <- memAsWord64le_withAddr mem
-          -- Check this is readable, non-executable data
-        , addrPermissions v mem .&. (pf_r .|. pf_x) == pf_r
-        ]
-
-      init_abs_state <- use absState
-      debugM DCFG ("Starting addrs " ++ show ((`showHex` "") <$> init_addrs))
-      reallyGetBlockList init_abs_state
-      explore_frontier
-      -- Add in code pointers from memory.
-      let go_s :: forall ids
-               .  DiscoveryInfo arch ids
-               -> (ArchAddr arch, ArchAddr arch)
-               -> CFGM arch ids ()
-          go_s s (a,v)
-            -- Skip values not in memory.
-            | not (isCodeAddr mem v) = return ()
-              -- Skip this if it is already a known function.
-            | Set.member v (s^.functionEntries) = return ()
-              -- Ignore entries found in read only segments.
-              -- They have a high liklyhood of being elements of jump tables
-            | isReadonlyAddr mem a = return ()
-              -- Check if we already found this
-            | Map.member v (s^.blocks) = do
-                debugM DCFG ("Identified function entry "
-                             ++ showHex v (" due to global store at " ++ showHex a "."))
-                markAddrAsFunction v
-            | otherwise = do
-                debugM DCFG
-                       ("Found function entry from memory" ++ showHex v " at " ++ showHex a ".")
-                markAddrAsFunction v
-      let go :: forall ids. (ArchAddr arch, ArchAddr arch) -> CFGM arch ids ()
-          go (a,v) = get >>= \s -> go_s s (a,v)
-      mapM_ go (memoryAlignedWords arch_info mem)
-      explore_frontier
-      Some <$> get
+cfgFromAddrs arch_info mem symbols sysp init_addrs mem_words =
+  runCFGM arch_info mem symbols sysp $ do
+    -- Set abstract state for initial functions
+    markFunctionAddrs init_addrs
+    -- Add in code pointers from memory.
+    let notAlreadyFunction s a v
+            | Set.member v (s^.functionEntries) = False
+            | otherwise = debug DCFG msg True
+          where msg | Map.member v (s^.blocks) =
+                        "Identified function entry "
+                        ++ showHex v (" due to global store at " ++ showHex a ".")
+                    | otherwise =
+                        "Found function entry from memory" ++ showHex v " at " ++ showHex a "."
+    s <- get
+    let mem_addrs =
+          fmap snd $
+          filter (uncurry (notAlreadyFunction s)) $
+          filter (uncurry (memIsDataCodePointer mem)) $
+          mem_words
+    markFunctionAddrs mem_addrs

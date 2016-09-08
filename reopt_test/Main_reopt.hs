@@ -63,7 +63,11 @@ import           Flexdis86 ( InstructionInstance
                            )
 
 import           Data.Macaw.CFG
+import           Data.Macaw.Memory
+import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory.Flexdis86
 import           Data.Macaw.Types
+
 import           Reopt (readElf64)
 import           Reopt.Concrete.BitVector hiding (modify)
 import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMachineState(..)
@@ -72,8 +76,6 @@ import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
-import           Data.Macaw.Memory.ElfLoader
-import           Data.Macaw.Memory
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
 

@@ -5,9 +5,13 @@ Maintainer : jhendrix@galois.com
 
 This defines the architecture-specific information needed for code discovery.
 -}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 module Data.Macaw.Architecture.Info
-  ( ArchitectureInfo(..)
+  ( AddrWidthRepr(..)
+  , addrWidthNatRepr
+  , ArchitectureInfo(..)
   , ReadAddrFn
   , DisassembleFn
   ) where
@@ -24,9 +28,18 @@ import Data.Macaw.Memory
 -- ArchitectureInfo
 
 -- | A function for reading an address from memory
-type ReadAddrFn w = Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) w
+type ReadAddrFn w
+   = Memory w
+   -> w
+   -> Either (MemoryError w) w
 
--- | Function for disassembling a block
+-- | Function for disassembling a block.
+--
+-- A block is defined as a contiguous region of code with a single known
+-- entrance and potentially multiple exits.
+--
+-- This returns either an error or the disassembled blocks and the address
+-- one past the end of the block.
 type DisassembleFn arch
    = forall ids
    .  NonceGenerator (ST ids) ids
@@ -35,22 +48,33 @@ type DisassembleFn arch
    -- ^ Predicate that tells when to continue.
    -> ArchAddr arch -- ^ Address that we are disassembling from
    -> AbsBlockState (ArchReg arch)
-      -- ^ Abstract state associated with address.
+      -- ^ Abstract state associated with address that we are disassembling
+      -- from.
       --
       -- This is used for things like the height of the x87 stack.
    -> ST ids (Either String ([Block arch ids], ArchAddr arch))
 
+data AddrWidthRepr w
+   = (w ~ 32) => Addr32
+   | (w ~ 64) => Addr64
+
+addrWidthNatRepr :: AddrWidthRepr w -> NatRepr w
+addrWidthNatRepr Addr32 = knownNat
+addrWidthNatRepr Addr64 = knownNat
+
 -- | This records architecture specific functions for analysis.
 data ArchitectureInfo arch
    = ArchitectureInfo
-     { archAddrWidth :: !(NatRepr (RegAddrWidth (ArchReg arch)))
+     { archAddrWidth :: !(AddrWidthRepr (RegAddrWidth (ArchReg arch)))
        -- ^ Architecture address width.
      , jumpTableEntrySize :: !(ArchAddr arch)
        -- ^ The size of each entry in a jump table.
-     , readAddrInMemory :: !(ReadAddrFn (ArchAddr arch))
-      -- ^ Return an address at given address.
-     , memoryAlignedWords :: !(Memory (ArchAddr arch) -> [(ArchAddr arch, ArchAddr arch)])
-       -- ^ Return list of aligned words in memory.
+     , callStackDelta :: !Integer
+       -- ^ The shift that the stack moves with a call.
+     , readJumpTableEntry :: !(ReadAddrFn (ArchAddr arch))
+       -- ^ This reads a value in memory that appears to be a jump table entry.
+       --
+       -- This function does not allow the endianess to be changed dynamically as ARM allows.
      , disassembleFn :: !(DisassembleFn arch)
        -- ^ Function for disasembling a block.
      , fnBlockStateFn :: !(Memory (ArchAddr arch)
@@ -61,17 +85,18 @@ data ArchitectureInfo arch
      , postSyscallFn :: !(AbsBlockState (ArchReg arch)
                           -> ArchAddr arch
                           -> AbsBlockState (ArchReg arch))
-       -- ^ Abstract state after a system call
+       -- ^ Transfer function that maps abstract state before system call to
+       -- abstract state after system call.
+       --
+       -- The first argument contains the first abstract state, and the
+       -- second contains the address that we are jumping to.
      , postCallAbsStateFn :: !(AbsBlockState (ArchReg arch)
                                -> ArchAddr arch
                                -> AbsBlockState (ArchReg arch))
        -- ^ Abstract state after a function call.
-     , callStackDelta :: !Integer
-       -- ^ The direction that the stack moves with a call.
      , absEvalArchFn :: !(forall ids tp
                           .  AbsProcessorState (ArchReg arch) ids
                           -> ArchFn arch ids tp
                           -> AbsValue (RegAddrWidth (ArchReg arch)) tp)
-       -- ^ Evaluates an architecture function
-
+       -- ^ Evaluates an architecture-specific function
      }

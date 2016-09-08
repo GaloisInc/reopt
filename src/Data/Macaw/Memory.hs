@@ -29,15 +29,11 @@ module Data.Macaw.Memory
   , ppMemSegment
   , segmentAsWord64le
   , segmentSize
-  , MemoryByteReader
-  , runMemoryByteReader
   , MemoryError(..)
   , memLookupWord8
-  , memLookupWord16
-  , memLookupWord32
-  , memLookupWord64
-  , readInstruction
-
+  , memLookupWord16le
+  , memLookupWord32le
+  , memLookupWord64le
     -- * Re-exports
   , Elf.ElfSegmentFlags
   , Elf.pf_none
@@ -50,7 +46,6 @@ module Data.Macaw.Memory
   ) where
 
 import           Control.Exception (assert)
-import           Control.Monad.Except
 import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
@@ -70,29 +65,26 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import qualified Flexdis86 as Flexdis
-import           Flexdis86.ByteReader
-
 ------------------------------------------------------------------------
 -- Utilities
 
-bsWord16 :: BS.ByteString -> Word16
-bsWord16 bs | BS.length bs /= 2 = error "bsWord16 given bytestring with bad length."
-            | otherwise         = w0 .|. w1
+bsWord16le :: BS.ByteString -> Word16
+bsWord16le bs | BS.length bs /= 2 = error "bsWord16le given bytestring with bad length."
+              | otherwise         = w0 .|. w1
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL` 8
 
 
-bsWord32 :: BS.ByteString -> Word32
-bsWord32 bs | BS.length bs /= 4 = error "bsWord32 given bytestring with bad length."
+bsWord32le :: BS.ByteString -> Word32
+bsWord32le bs | BS.length bs /= 4 = error "bsWord32le given bytestring with bad length."
             | otherwise = w0 .|. w1 .|. w2 .|. w3
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL`  8
         w2 = fromIntegral (BS.index bs 2) `shiftL` 16
         w3 = fromIntegral (BS.index bs 3) `shiftL` 24
 
-bsWord64 :: BS.ByteString -> Word64
-bsWord64 bs | BS.length bs /= 8 = error "bsWord64 given bytestring with bad length."
+bsWord64le :: BS.ByteString -> Word64
+bsWord64le bs | BS.length bs /= 8 = error "bsWord64le given bytestring with bad length."
             | otherwise = w0 .|. w1 .|. w2 .|. w3 .|. w4 .|. w5 .|. w6 .|. w7
   where w0 = fromIntegral (BS.index bs 0)
         w1 = fromIntegral (BS.index bs 1) `shiftL`  8
@@ -144,7 +136,7 @@ segmentAsWord64le s | len <= base = [] -- Degenerate case to handle very small s
         len = BS.length (memBytes s)
         cnt = (len - base) `shiftR` 3
         go _ 0 = []
-        go b c = assert (BS.length s' == 8) $ bsWord64 s' : go b' (c-1)
+        go b c = assert (BS.length s' == 8) $ bsWord64le s' : go b' (c-1)
           where (s',b') = BS.splitAt 8 b
 
 -- | Returns an interval representing the range of addresses for the segment
@@ -243,68 +235,10 @@ isCodeAddrOrNull mem a = isCodeAddr mem a
 
 -- | Return true if this is a read only address.
 isReadonlyAddr :: Ord w => Memory w -> w -> Bool
-isReadonlyAddr mem val = addrPermissions val mem .&. (pf_r .|. pf_w) == pf_r
-
--- | Attempt to read a contiguous string of bytes from a single segment.
-memSubsegment :: Integral w
-              => Memory w
-                 -- ^ Memory to read form
-              -> ElfSegmentFlags
-                 -- ^ Permissions expected during reading.
-              -> w
-                 -- ^ Address to read
-              -> Int
-                 -- ^ Number of bytes to read.
-              -> Either (MemoryError w) BS.ByteString
-memSubsegment m reqPerm addr n =
-  case findSegment addr m of
-    Nothing -> Left $! AccessViolation addr
-    Just s -> assert (memBase s <= addr) $ do
-      -- Let d be number of bytes to drop from start of segment.
-      let d = fromIntegral (addr - memBase s)
-      -- Throw error when permissions check fails.
-      if (memFlags s .&. reqPerm) /= reqPerm then
-        Left $! PermissionsError addr
-      else if n >= BS.length (memBytes s) - d then
-        Left $! AccessViolation addr
-      else
-        Right $! BS.take n (BS.drop d (memBytes s))
-
-memLookupWord8 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word8
-memLookupWord8 m reqPerm addr =
-  BS.head <$> memSubsegment m reqPerm addr 1
-
--- | Return a word16 at given address (assume little-endian encoding)
-memLookupWord16 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word16
-memLookupWord16 m reqPerm addr = do
-  bsWord16 <$> memSubsegment m reqPerm addr 2
-
--- | Return a word32 at given address (assume little-endian encoding)
-memLookupWord32 :: Integral w => Memory w -> ElfSegmentFlags -> w -> Either (MemoryError w) Word32
-memLookupWord32 m reqPerm addr = do
-  bsWord32 <$> memSubsegment m reqPerm addr 4
-
--- | Return a word64 at given address (assume little-endian encoding)
-memLookupWord64 :: Integral w
-                => Memory w
-                -> ElfSegmentFlags
-                -> w
-                -> Either (MemoryError w) Word64
-memLookupWord64 m reqPerm addr = do
-  b <- memSubsegment m reqPerm addr 8
-  when (BS.length b /= 8) $ do
-    error "internal error in memSubsegment detected by memLookupWord64"
-  return $! bsWord64 b
+isReadonlyAddr mem val = isReadonly (addrPermissions val mem)
 
 ------------------------------------------------------------------------
--- MemStream
-
-data MemStream w = MS { msNext :: !BS.ByteString
-                      , msMem  :: !(Memory w)
-                      , msAddr :: !w
-                      , msPerm :: !ElfSegmentFlags
-                        -- ^ Permissions that memory accesses are expected to satisfy.
-                      }
+-- MemoryError
 
 -- | Type of errors that may occur when reading memory.
 data MemoryError w
@@ -322,61 +256,66 @@ instance (Integral w, Show w) => Show (MemoryError w) where
   show (AccessViolation a)   = "Access violation at " ++ showHex a ""
   show (PermissionsError a)  = "Insufficient permissions at " ++ showHex a ""
 
-newtype MemoryByteReader w a = MBR { unMBR :: ExceptT (MemoryError w) (State (MemStream w)) a }
-  deriving (Functor, Applicative, MonadError (MemoryError w))
+------------------------------------------------------------------------
+-- memSubsegment
 
-instance Monad (MemoryByteReader w) where
-  return  = MBR . return
-  MBR m >>= f = MBR $ m >>= unMBR . f
-  fail    = throwError . UserMemoryError
+-- | Attempt to read a contiguous string of bytes from a single segment.
+memSubsegment :: Integral w
+              => Memory w
+                 -- ^ Memory to read form
+              -> (ElfSegmentFlags -> Bool)
+                 -- ^ Predicate to check permissions
+              -> w
+                 -- ^ Address to read
+              -> Int
+                 -- ^ Number of bytes to read.
+              -> Either (MemoryError w) BS.ByteString
+memSubsegment m permPred addr n =
+  case findSegment addr m of
+    Nothing -> Left $! AccessViolation addr
+    Just s -> assert (memBase s <= addr) $ do
+      -- Let d be number of bytes to drop from start of segment.
+      let d = fromIntegral (addr - memBase s)
+      -- Throw error when permissions check fails.
+      if permPred (memFlags s) then
+        Left $! PermissionsError addr
+      else if n >= BS.length (memBytes s) - d then
+        Left $! AccessViolation addr
+      else
+        Right $! BS.take n (BS.drop d (memBytes s))
 
-instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
-  readByte = do
-    MS b m w reqPerm <- MBR get
-    if BS.null b then
-      case findSegment w m of
-        Nothing -> MBR $ throwError $ AccessViolation w
-        Just s -> assert (memBase s <= w) $ do
-          MBR $ do
-            -- Throw error when permissions check fails.
-            when ((memFlags s .&. reqPerm) /= reqPerm) $ do
-              throwError $ PermissionsError w
-            -- Let d be number of bytes to drop from start of segment.
-            let d = fromIntegral (w - memBase s)
-            put MS { msNext = BS.drop d (memBytes s)
-                   , msMem = m
-                   , msAddr = w
-                   , msPerm = reqPerm
-                   }
-          readByte
-    else do
-      let v = BS.head b
-      let ms = MS { msNext = BS.tail b
-                  , msMem = m
-                  , msAddr = w+1
-                  , msPerm = reqPerm
-                  }
-      MBR $ v <$ put ms
+-- | Return a word8 at given address encoded in little-endian.
+memLookupWord8 :: Integral w
+               => Memory w
+               -> (ElfSegmentFlags -> Bool)
+               -> w
+               -> Either (MemoryError w) Word8
+memLookupWord8 m permPred addr =
+  BS.head <$> memSubsegment m permPred addr 1
 
--- | Create a memory stream pointing to given address, and return pair whose
--- first element is the value read or an error, and whose second element is
--- the address of the next value to read.
-runMemoryByteReader :: ElfSegmentFlags
-                       -- ^ Permissions that memory accesses are expected to
-                       -- satisfy.
-                       -- Added so we can check for read and/or execute permission.
-                    -> Memory w -- ^ Memory to read from.
-                    -> w -- ^ Starting address.
-                    -> MemoryByteReader w a -- ^ Byte reader to read values from.
-                    -> (Either (MemoryError w) (a, w))
-runMemoryByteReader reqPerm mem addr (MBR m) =
-  case runState (runExceptT m) (MS BS.empty mem addr reqPerm) of
-    (Left e, _) -> Left e
-    (Right v, s) -> Right (v,msAddr s)
+-- | Return a word16 at given address encoded in little-endian.
+memLookupWord16le :: Integral w
+                  => Memory w
+                  -> (ElfSegmentFlags -> Bool)
+                  -> w
+                  -> Either (MemoryError w) Word16
+memLookupWord16le m permPred addr = do
+  bsWord16le <$> memSubsegment m permPred addr 2
 
--- | Read instruction at a given memory address.
-readInstruction :: Memory Word64 -- Memory to read.
-                -> Word64 -- Address to read from.
-                -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
-readInstruction mem addr = runMemoryByteReader pf_x mem addr m
-  where m = Flexdis.disassembleInstruction
+-- | Return a word32 at given address encoded in little-endian.
+memLookupWord32le :: Integral w
+                  => Memory w
+                  -> (ElfSegmentFlags -> Bool)
+                  -> w
+                  -> Either (MemoryError w) Word32
+memLookupWord32le m permPred addr = do
+  bsWord32le <$> memSubsegment m permPred addr 4
+
+-- | Return a word64 at given address encoded in little-endian.
+memLookupWord64le :: Integral w
+                  => Memory w
+                  -> (ElfSegmentFlags -> Bool)
+                  -> w
+                  -> Either (MemoryError w) Word64
+memLookupWord64le m permPred addr = do
+  bsWord64le <$> memSubsegment m permPred addr 8

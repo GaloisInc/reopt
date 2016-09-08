@@ -44,7 +44,7 @@ import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import           Data.Parameterized.Nonce -- .Transformers
+import           Data.Parameterized.Nonce
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -58,17 +58,7 @@ import qualified Data.Macaw.AbsDomain.StridedInterval as SI
 import           Data.Macaw.CFG
 import           Data.Macaw.Types (BVType, knownType, typeRepr)
 
-import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
-import qualified Reopt.Machine.StateNames as N
-import           Reopt.Machine.X86State
-import           Data.Macaw.Memory
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
-import           Reopt.Semantics.Monad
-  ( BoolType
-  , bvLit
-  )
-import qualified Reopt.Semantics.Monad as S
-import Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.AbsDomain.AbsState
        ( AbsBlockState
        , mkAbsBlockState
        , setAbsIP
@@ -87,7 +77,18 @@ import Data.Macaw.AbsDomain.AbsState
        , transferValue
        ,
        )
+import           Data.Macaw.Architecture.Info (AddrWidthRepr(..), ArchitectureInfo(..))
+import           Data.Macaw.Memory
+import           Data.Macaw.Memory.Flexdis86
 import           Debug.Trace
+import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.X86State
+import           Reopt.Semantics.FlexdisMatcher (execInstruction)
+import           Reopt.Semantics.Monad
+  ( BoolType
+  , bvLit
+  )
+import qualified Reopt.Semantics.Monad as S
 
 ------------------------------------------------------------------------
 -- Expr
@@ -1113,7 +1114,7 @@ disassembleBlockImpl mem (gs :: GenState st_s ids 'True) contFn addr = do
 
 -- | The abstract state for a function begining at a given address.
 fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState X86Reg
-fnBlockState mem addr = do
+fnBlockState mem addr =
   let Just abst' = top & setAbsIP mem addr
    in abst'
       & absRegState . boundValue sp_reg .~ concreteStackOffset addr 0
@@ -1205,10 +1206,10 @@ transferAbsValue r f =
 -- | Architecture information for X86_64.
 x86ArchitectureInfo :: ArchitectureInfo X86_64
 x86ArchitectureInfo =
-  ArchitectureInfo { archAddrWidth      = knownNat
+  ArchitectureInfo { archAddrWidth      = Addr64
                    , jumpTableEntrySize = 8
-                   , readAddrInMemory   = memLookupWord64
-                   , memoryAlignedWords = memAsWord64le_withAddr
+                   , readJumpTableEntry = \m a ->
+                       memLookupWord64le m isReadonly a
                    , disassembleFn      = disassembleBlock
                    , fnBlockStateFn     = fnBlockState
                    , postSyscallFn      = updateStatePostFreeBSDSyscall

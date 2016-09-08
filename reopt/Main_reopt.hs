@@ -53,8 +53,8 @@ import           Paths_reopt (getLibDir, version)
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
-import           Reopt
 import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
@@ -62,6 +62,10 @@ import           Data.Macaw.Discovery.Info
                  , blocks
                  , functionEntries
                  )
+import           Data.Macaw.Memory
+import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory.Flexdis86
+import           Reopt
 import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (functionArgs)
 import           Reopt.CFG.Implementation
@@ -70,11 +74,8 @@ import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.SysDeps
 import           Reopt.Machine.X86State
-import           Data.Macaw.Memory.ElfLoader
-import           Data.Macaw.Memory
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
-import           Data.Macaw.DebugLogging
 
 import           Debug.Trace
 
@@ -532,7 +533,9 @@ mkFinalCFGWithSyms :: Memory Word64 -- ^ Layout in memory of file
                    -> Elf Word64 -- ^ Elf file to create CFG for.
                    -> (Some (DiscoveryInfo X86_64), Map CodeAddr BS.ByteString)
 mkFinalCFGWithSyms mem e =
-    ( cfgFromAddrs x86ArchitectureInfo mem sym_map sysp (elfEntry e:sym_addrs)
+    ( cfgFromAddrs x86ArchitectureInfo mem sym_map sysp
+         (elfEntry e:sym_addrs)
+         (memAsWord64le_withAddr mem)
     , sym_map
     )
         -- Get list of code locations to explore starting from entry points (i.e., eltEntry)

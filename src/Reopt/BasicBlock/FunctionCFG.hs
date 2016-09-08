@@ -20,6 +20,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Reopt.Concrete.Semantics as CS
 import qualified Reopt.Machine.StateNames as N
 import           Data.Macaw.Memory
+import           Data.Macaw.Memory.Flexdis86
 
 type CFG = Map Word64 Block
 
