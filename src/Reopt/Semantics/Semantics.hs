@@ -51,6 +51,11 @@ uadc4_overflows :: ( IsLeq 4 n
                 => v (BVType n) -> v (BVType n) -> v BoolType -> v BoolType
 uadc4_overflows x y c = uadc_overflows (least_nibble x) (least_nibble y) c
 
+fmap_loc :: Semantics m => MLocation m (BVType n) -> (Value m (BVType n) -> Value m (BVType n)) -> m ()
+fmap_loc l f = do
+  lv <- get l
+  l .= f lv
+
 -- | Update flags with given result value.
 set_result_flags :: IsLocationBV m n => Value m (BVType n) -> m ()
 set_result_flags res = do
@@ -1458,9 +1463,29 @@ exec_pxor l v = do
 
 -- ** MMX Shift and Rotate Instructions
 
--- PSLLW Shift packed words left logical
+-- | PSLLW Shift packed words left logical
 -- PSLLD Shift packed doublewords left logical
 -- PSLLQ Shift packed quadword left logical
+
+exec_psllx :: (IsLocationBV m n, 1 <= elsz, 1 <= n') =>
+              NatRepr elsz -> MLocation m (BVType n) -> Value m (BVType n') -> m ()
+exec_psllx elsz l count = do
+  lv <- get l
+  let ls  = bvVectorize elsz lv
+      -- This is somewhat tedious: we want to make sure that we don't
+      -- truncate e.g. 2^31 to 0, so we saturate if the size is over
+      -- the number of bits we want to shift.  We can always fit the
+      -- width into count bits (assuming we are passed 16, 32, or 64).
+      nbits   = bvLit (bv_width count) (natValue elsz)
+      countsz = case testNatCases (bv_width count) elsz of
+                  NatCaseLT LeqProof -> uext' elsz count
+                  NatCaseEQ          -> count
+                  NatCaseGT LeqProof -> bvTrunc' elsz count
+      
+      ls' = map (\y -> mux (bvUlt count nbits) (bvShl y countsz) (bvLit elsz (0::Int))) ls
+      
+  l .= bvUnvectorize (loc_width l) ls'
+
 -- PSRLW Shift packed words right logical
 -- PSRLD Shift packed doublewords right logical
 -- PSRLQ Shift packed quadword right logical
@@ -1557,17 +1582,26 @@ exec_movsX_xmm_mem l v = do
 
 -- *** SSE Packed Arithmetic Instructions
 
--- ADDPS Add packed single-precision floating-point values
+-- | ADDPS Add packed single-precision floating-point values
+exec_addps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_addps l v = fmap_loc l $ \lv -> vectorize2 n32 (fpAdd SingleFloatRepr) lv v
+
 -- ADDSS Add scalar single-precision floating-point values
 exec_addss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
 exec_addss r y = modify_low knownNat (\x -> fpAdd SingleFloatRepr x y) r
 
 -- SUBPS Subtract packed single-precision floating-point values
+exec_subps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_subps l v = fmap_loc l $ \lv -> vectorize2 n32 (fpSub SingleFloatRepr) lv v
+
 -- SUBSS Subtract scalar single-precision floating-point values
 exec_subss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
 exec_subss r y = modify_low knownNat (\x -> fpSub SingleFloatRepr x y) r
 
--- MULPS Multiply packed single-precision floating-point values
+-- | MULPS Multiply packed single-precision floating-point values
+exec_mulps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_mulps l v = fmap_loc l $ \lv -> vectorize2 n64 (fpMul DoubleFloatRepr) lv v
+
 -- MULSS Multiply scalar single-precision floating-point values
 exec_mulss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
 exec_mulss r y = modify_low knownNat (\x -> fpMul SingleFloatRepr x y) r
@@ -1613,16 +1647,37 @@ exec_ucomiss l v = do v' <- bvTrunc knownNat <$> get l
 
 -- *** SSE Logical Instructions
 
--- ANDPS Perform bitwise logical AND of packed single-precision floating-point values
+-- | ANDPS Perform bitwise logical AND of packed single-precision floating-point values
+exec_andpx :: (Semantics m, 1 <= elsz) => NatRepr elsz -> MLocation m XMMType -> Value m XMMType -> m ()
+exec_andpx elsz l v = fmap_loc l $ \lv -> vectorize2 elsz (.&.) lv v
+
+exec_andps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_andps = exec_andpx n32
+  
 -- ANDNPS Perform bitwise logical AND NOT of packed single-precision floating-point values
 -- ORPS Perform bitwise logical OR of packed single-precision floating-point values
+exec_orpx :: (Semantics m, 1 <= elsz) => NatRepr elsz -> MLocation m XMMType -> Value m XMMType -> m ()
+exec_orpx elsz l v = fmap_loc l $ \lv -> vectorize2 elsz (.|.) lv v
+
+exec_orps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_orps = exec_orpx n32
+
 -- XORPS Perform bitwise logical XOR of packed single-precision floating-point values
 
 -- *** SSE Shuffle and Unpack Instructions
 
 -- SHUFPS Shuffles values in packed single-precision floating-point operands
 -- UNPCKHPS Unpacks and interleaves the two high-order values from two single-precision floating-point operands
--- UNPCKLPS Unpacks and interleaves the two low-order values from two single-precision floating-point operands
+-- | UNPCKLPS Unpacks and interleaves the two low-order values from two single-precision floating-point operands
+
+interleave :: [a] -> [a] -> [a]
+interleave xs ys = concat (zipWith (\x y -> [x, y]) xs ys)
+
+exec_unpcklps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_unpcklps l v = fmap_loc l $ \lv ->
+  let lsd = drop 2 $ bvVectorize n32 lv
+      lss = drop 2 $ bvVectorize n32 v
+  in bvUnvectorize (loc_width l) (interleave lss lsd)
 
 -- *** SSE Conversion Instructions
 
@@ -1665,7 +1720,16 @@ pselect op sz l v = do
 -- PAVGB Compute average of packed unsigned byte integers
 -- PAVGW Compute average of packed unsigned word integers
 -- PEXTRW Extract word
--- PINSRW Insert word
+
+-- | PINSRW Insert word
+exec_pinsrw :: Semantics m => MLocation m XMMType -> Value m (BVType 16) -> Int8 -> m ()
+exec_pinsrw l v off = do
+  lv <- get l
+  -- FIXME: is this the right way around?
+  let ls = bvVectorize n16 lv
+      (lower, _ : upper) = splitAt (fromIntegral off - 1) ls
+      ls' = lower ++ [v] ++ upper
+  l .= bvUnvectorize knownNat ls'
 
 -- PMAXUB Maximum of packed unsigned byte integers
 -- PMAXSW Maximum of packed signed word integers
@@ -1729,8 +1793,10 @@ exec_pmovmskb l v
 exec_movapd :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
 exec_movapd l v = l .= v
 
--- MOVUPD Move two unaligned packed double-precision floating-point values
+-- | MOVUPD Move two unaligned packed double-precision floating-point values
 --   between XMM registers or between and XMM register and memory
+exec_movupd :: Semantics m =>  MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_movupd l v = l .= v
 
 exec_movhpd, exec_movlpd :: forall m n n'. (IsLocationBV m n, 1 <= n')
                          => MLocation m (BVType n)
@@ -1781,6 +1847,21 @@ modify_low n1' f r = do
   let v1Low = f v0Low
   r .= bvCat v0High v1Low
 
+modify_low' ::
+  ( Semantics m
+  , 1 <= n1
+  , 1 <= n2
+  , n1 <= n2 -- The only constraint that matters mathematically.
+  , 1 <= n2 - n1
+  , n2 - n1 <= n2
+  , n2 ~ ((n2 - n1) + n1)
+  ) =>
+  NatRepr n1 ->
+  MLocation m (BVType n2) ->
+  (Value m (BVType n1) -> Value m (BVType n1)) ->
+  m ()
+modify_low' sz l f = modify_low sz f l
+
 set_low ::
   ( Semantics m
   , ((n2 - n1) + n1) ~ n2
@@ -1828,15 +1909,39 @@ exec_divsd r y = modify_low knownNat (\x -> fpDiv DoubleFloatRepr x y) r
 
 -- *** SSE2 Logical Instructions
 
--- ANDPD  Perform bitwise logical AND of packed double-precision floating-point values
+-- | ANDPD  Perform bitwise logical AND of packed double-precision floating-point values
+exec_andpd :: Semantics m => MLocation m (BVType 128) -> Value m (BVType 128) -> m ()
+exec_andpd = exec_andpx n64
+
 -- ANDNPD Perform bitwise logical AND NOT of packed double-precision floating-point values
--- ORPD   Perform bitwise logical OR of packed double-precision floating-point values
+-- | ORPD   Perform bitwise logical OR of packed double-precision floating-point values
+exec_orpd :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
+exec_orpd = exec_orpx n64
+
 -- XORPD  Perform bitwise logical XOR of packed double-precision floating-point values
 
 -- *** SSE2 Compare Instructions
 
 -- CMPPD Compare packed double-precision floating-point values
--- CMPSD Compare scalar double-precision floating-point values
+-- | CMPSD Compare scalar double-precision floating-point values
+exec_cmpsd :: Semantics m => MLocation m XMMType -> Value m (BVType 64) -> Int8 -> m ()
+exec_cmpsd l v opcode = do
+  f <- case opcode of
+         0 -> return $ fpEq DoubleFloatRepr
+         1 -> return $ fpLt DoubleFloatRepr
+         2 -> fail "exec_cmpsd: CMPLESD case unimplemented" -- FIXME
+         3 -> fail "exec_cmpsd: CMPUNORDSD case unimplemented" -- FIXME
+         4 -> fail "exec_cmpsd: CMPNEWSD case unimplemented" -- FIXME
+         5 -> return $ \x y -> bvNeg (fpLt DoubleFloatRepr x y)
+         6 -> fail "exec_cmpsd: CMPNLESD case unimplemented" -- FIXME
+         7 -> fail "exec_cmpsd: CMPORDSD case unimplemented" -- FIXME
+         _ -> fail ("exec_cmpsd: unexpected opcode " ++ show opcode)
+  modify_low' knownNat l $ \lv ->
+    let res = f lv v
+        allOnes  = bvLit knownNat (-1 :: Int) -- FIXME: use ~0?
+        allZeros = bvLit knownNat (0 :: Int) -- FIXME: use ~0?
+    in mux res allOnes allZeros
+
 -- COMISD Perform ordered comparison of scalar double-precision floating-point values and set flags in EFLAGS register
 
 -- | UCOMISD Perform unordered comparison of scalar double-precision floating-point values and set flags in EFLAGS register.
