@@ -46,6 +46,7 @@ import           System.IO.Error
 import           System.IO.Temp
 import           System.Posix.Files
 import qualified Text.LLVM as L
+import qualified Text.LLVM.PP as L (ppLLVM, ppModule)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
@@ -648,7 +649,7 @@ showLLVM args dir = do
               let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
               itraverse_ (LLVM.declareFunction addrSymMap) refs
               LLVM.defineFunction addrSymMap f
-        writeFile (mkName f) (show $ L.ppModule m)
+        writeFile (mkName f) (show (L.ppLLVM $ L.ppModule m))
 
   createDirectoryIfMissing True dir
   fns <- getFns (elfSymAddrMap e) (args^.notransAddrs) cfg
@@ -788,7 +789,7 @@ performRedir args = do
 
 
 llvmAssembly :: L.Module -> BS.ByteString
-llvmAssembly m = UTF8.fromString (show (L.ppModule m))
+llvmAssembly m = UTF8.fromString (show (L.ppLLVM $ L.ppModule m))
 
 -- | Maps virtual addresses to the phdr at them.
 type ElfSegmentMap w = Map w (Phdr w)

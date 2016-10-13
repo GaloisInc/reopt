@@ -38,6 +38,7 @@ import qualified Data.Vector as V
 import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
+import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import qualified Data.Parameterized.Map as MapF
