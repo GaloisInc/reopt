@@ -1,5 +1,4 @@
 test_OR_GPRv_GPRv_09_0
-test_PUSH_IMMb_0
 test_AND_GPRv_GPRv_21_0
 test_BT_GPRv_IMMb_0
 test_PMAXSW_XMMdq_XMMdq_0
