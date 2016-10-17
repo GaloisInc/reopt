@@ -4,7 +4,6 @@ test_BT_GPRv_IMMb_0
 test_PMAXSW_XMMdq_XMMdq_0
 test_JNS_RELBRb_0
 test_PMINSW_XMMdq_XMMdq_0
-test_PUSH_IMMz_0
 test_MOVUPS_XMMps_XMMps_0F11_0
 test_PUSH_GPRv_50_0
 test_XCHG_GPR8_GPR8_0
