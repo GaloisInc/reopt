@@ -35,7 +35,6 @@ import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Vector as V
-import           Numeric (showHex)
 import           Text.LLVM (BB, LLVM)
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
@@ -44,9 +43,11 @@ import           Text.PrettyPrint.ANSI.Leijen (pretty)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
-import           Reopt.CFG.FnRep
 import           Data.Macaw.CFG
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
+
+import           Reopt.CFG.FnRep
 import           Reopt.Machine.X86State
 
 --------------------------------------------------------------------------------
@@ -154,7 +155,7 @@ declareIntrinsics =
 --------------------------------------------------------------------------------
 
 -- | Maps code addresses in the LLVM state to the associated symbol name if any.
-type AddrSymMap = Map CodeAddr BSC.ByteString
+type AddrSymMap = Map (SegmentedAddr 64) BSC.ByteString
 
 data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
                            , llvmFloatArgs :: [L.Typed L.Value]
@@ -172,14 +173,26 @@ liftBBF f v = ToLLVM $ mapStateT (\bb -> do { (a, s) <- bb; b <- f (return a); r
 
 functionName :: AddrSymMap
                 -- ^ Maps addresses of symbols to the associated symbol name.
-             -> CodeAddr
+             -> SegmentedAddr 64
              -> L.Symbol
-functionName m addr =
-  case Map.lookup addr m of
-    Nothing -> L.Symbol $ "reopt_gen_" ++ showHex addr ""
-    Just nm -> L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
+functionName m addr
+    | Just nm <- Map.lookup addr m =
+      L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
+    | Just base <- segmentBase seg =
+      L.Symbol $ "reopt_gen_" ++ show (base + addr^.addrOffset)
+    | otherwise =
+      L.Symbol $ "reopt_gen_" ++ show (segmentIndex seg) ++ "_" ++ show (addr^.addrOffset)
+  where seg = addrSegment addr
 
-blockName :: (Integral w, Show w) => BlockLabel w -> L.Ident
+blockWordName :: SegmentedAddr 64 -> L.Ident
+blockWordName p = L.Ident ("block_" ++ nm)
+  where seg = addrSegment p
+        offset = p^.addrOffset
+        nm = case segmentBase seg of
+               Just base -> show (base + offset)
+               Nothing -> show (segmentIndex seg) ++ "_" ++ show offset
+
+blockName :: BlockLabel w -> L.Ident
 blockName = L.Ident . show
 
 -- The type of FP arguments and results.  We actually want fp128, but
@@ -229,16 +242,16 @@ makeEntryBlock (first:_) fargs = do
   liftBB $ L.jump (blockName $ fbLabel first)
 
 declareFunction :: AddrSymMap
-                -> CodeAddr
+                -> SegmentedAddr 64
                 -> FunctionType
                 -> LLVM ()
 declareFunction addrSymMap addr ft = do
   let nm = functionName addrSymMap addr
   void $ L.declare (functionTypeReturnType ft) nm (functionTypeArgTypes ft) False
 
-getReferencedFunctions :: Function -> Map CodeAddr FunctionType
+getReferencedFunctions :: Function -> Map (SegmentedAddr 64) FunctionType
 getReferencedFunctions f = foldFnValue findReferencedFunctions f
-  where findReferencedFunctions :: FnValue tp -> Map CodeAddr FunctionType
+  where findReferencedFunctions :: FnValue tp -> Map (SegmentedAddr 64) FunctionType
         findReferencedFunctions (FnFunctionEntryValue ft addr) = Map.singleton addr ft
         findReferencedFunctions _ = mempty
 
@@ -384,7 +397,7 @@ termStmtToLLVM tm =
 
      FnLookupTable idx vec -> do
          idx' <- valueToLLVM idx
-         let dests = map (blockName . mkRootBlockLabel) $ V.toList vec
+         let dests = map blockWordName $ V.toList vec
          liftBB $ L.switch idx' failLabel (zip [0..] dests)
 
      FnTermStmtUndefined -> void $ unimplementedInstr L.voidT "FnTermStmtUndefined"
@@ -702,7 +715,7 @@ valueToLLVM val =
 
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->
-      mk $ L.ValLabel $ L.Named $ blockName $ mkRootBlockLabel addr
+      mk $ L.ValLabel $ L.Named $ blockWordName addr
 
     -- Value is an interget argument passed via a register.
     FnIntArg n -> gets ((!! n) . llvmIntArgs)
@@ -711,7 +724,10 @@ valueToLLVM val =
     -- register.
     FnFloatArg n -> gets ((!! n) . llvmFloatArgs)
     -- A global address
-    FnGlobalDataAddr addr -> mk $ L.integer (fromIntegral addr)
+    FnGlobalDataAddr addr ->
+      case segmentBase (addrSegment addr) of
+        Just base -> mk $ L.integer $ fromIntegral $ base + addr^.addrOffset
+        Nothing -> error $ "FnGlobalDataAddr only supports global values."
   where
     mk :: L.Value -> ToLLVM (L.Typed L.Value)
     mk  = return . L.Typed typ

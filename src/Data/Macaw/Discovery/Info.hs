@@ -45,6 +45,7 @@ module Data.Macaw.Discovery.Info
   , ArchConstraint
   , identifyCall
   , identifyReturn
+  , asLiteralAddr
   , getClassifyBlock
   )  where
 
@@ -67,23 +68,23 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..))
 
-import           Data.Macaw.Architecture.Syscall
-import           Data.Macaw.CFG
-import           Data.Macaw.Memory
-import           Data.Macaw.Types
-
 import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Architecture.Info
+import           Data.Macaw.Architecture.Syscall
+import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
+import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.Types
 
 ------------------------------------------------------------------------
 -- AbsStateMap
 
 -- | Maps each code address to a set of abstract states
-type AbsStateMap arch = Map (ArchAddr arch) (AbsBlockState (ArchReg arch))
+type AbsStateMap arch = Map (ArchSegmentedAddr arch) (AbsBlockState (ArchReg arch))
 
-lookupAbsBlock :: ( Ord addr
-                  , Integral addr
+lookupAbsBlock :: ( Integral addr
+                  , Ord addr
                   , Show addr
                   )
                   => addr
@@ -97,14 +98,14 @@ lookupAbsBlock addr s = fromMaybe (error msg) (Map.lookup addr s)
 
 -- | The blocks contained in a single contiguous region of instructions.
 data BlockRegion arch ids
-   = BlockRegion { brEnd :: !(ArchAddr arch)
+   = BlockRegion { brSize :: !(ArchAddr arch)
                  , brBlocks :: !(Map Word64 (Block arch ids))
                    -- ^ Map from labelIndex to associated block.
                  }
 
 -- | Does a simple lookup in the cfg at a given DecompiledBlock address.
 lookupBlock :: Ord (ArchAddr arch)
-            => Map (ArchAddr arch) (Maybe (BlockRegion arch ids))
+            => Map (ArchSegmentedAddr arch) (Maybe (BlockRegion arch ids))
             -> ArchLabel arch
             -> Maybe (Block arch ids)
 lookupBlock m lbl = do
@@ -156,23 +157,23 @@ data ParsedTermStmt arch ids
    = ParsedCall !(RegState (ArchReg arch) (Value arch ids))
                 !(Seq (Stmt arch ids))
                 -- /\ Statements less the pushed return value, if any
-                !(Either (ArchAddr arch) (BVValue arch ids (ArchAddrWidth arch)))
+                !(Either (ArchSegmentedAddr arch) (BVValue arch ids (ArchAddrWidth arch)))
                 -- /\ Function to call.  If it is statically known,
                 -- then we get Left, otherwise Right
-                !(Maybe (ArchAddr arch))
+                !(Maybe (ArchSegmentedAddr arch))
                 -- ^ Return location, Nothing if a tail call.
      -- | A jump within a block
-   | ParsedJump !(RegState (ArchReg arch) (Value arch ids)) !(ArchAddr arch)
+   | ParsedJump !(RegState (ArchReg arch) (Value arch ids)) !(ArchSegmentedAddr arch)
      -- | A lookup table that branches to the given locations.
    | ParsedLookupTable !(RegState (ArchReg arch) (Value arch ids))
                        !(BVValue arch ids (ArchAddrWidth arch))
-                       !(V.Vector (ArchAddr arch))
+                       !(V.Vector (ArchSegmentedAddr arch))
      -- | A tail cthat branches to the given locations.
    | ParsedReturn !(RegState (ArchReg arch) (Value arch ids)) !(Seq (Stmt arch ids))
      -- | A branch (i.e., BlockTerm is Branch)
    | ParsedBranch !(Value arch ids BoolType) !(ArchLabel arch) !(ArchLabel arch)
    | ParsedSyscall !(RegState (ArchReg arch) (Value arch ids))
-                   !(ArchAddr arch)
+                   !(ArchSegmentedAddr arch)
                    !(ArchAddr arch)
                    !String
                    !String
@@ -192,9 +193,9 @@ deriving instance
 data DiscoveryInfo arch ids
    = DiscoveryInfo { nonceGen :: !(NonceGenerator (ST ids) ids)
                      -- ^ Generator for creating fresh ids.
-                   , memory   :: !(Memory (ArchAddr arch))
+                   , memory   :: !(Memory (ArchAddrWidth arch))
                      -- ^ The initial memory when disassembly started.
-                   , symbolNames :: Map (ArchAddr arch) BS.ByteString
+                   , symbolNames :: !(Map (ArchSegmentedAddr arch) BS.ByteString)
                      -- ^ The set of symbol names (not necessarily complete)
                    , syscallPersonality :: !(SyscallPersonality arch)
                      -- ^ Syscall personailty, mainly used by getClassifyBlock etc.
@@ -202,21 +203,25 @@ data DiscoveryInfo arch ids
                      -- ^ Architecture-specific information needed for discovery.
                    -- | Intervals maps code addresses to blocks at address
                    -- or nothing if disassembly failed.
-                   , _blocks   :: !(Map (ArchAddr arch) (Maybe (BlockRegion arch ids)))
-                   , _functionEntries :: !(Set (ArchAddr arch))
+                   , _blocks   :: !(Map (ArchSegmentedAddr arch)
+                                        (Maybe (BlockRegion arch ids)))
+                   , _functionEntries :: !(Set (ArchSegmentedAddr arch))
                       -- ^ Maps addresses that are marked as the start of a function
-                   , _reverseEdges :: !(Map (ArchAddr arch) (Set (ArchAddr arch)))
+                   , _reverseEdges :: !(Map (ArchSegmentedAddr arch)
+                                            (Set (ArchSegmentedAddr arch)))
                      -- ^ Maps each code address to the list of predecessors that
                      -- affected its abstract state.
-                   , _globalDataMap :: !(Map (ArchAddr arch) (GlobalDataInfo (ArchAddr arch)))
+                   , _globalDataMap :: !(Map (ArchSegmentedAddr arch)
+                                             (GlobalDataInfo (ArchSegmentedAddr arch)))
                      -- ^ Maps each address that appears to be global data to information
                      -- inferred about it.
-                   , _frontier :: !(Map (ArchAddr arch) (FrontierReason (ArchAddr arch)))
+                   , _frontier :: !(Map (ArchSegmentedAddr arch)
+                                        (FrontierReason (ArchAddrWidth arch)))
                      -- ^ Set of addresses to explore next.
                      --
                      -- This is a map so that we can associate a reason why a code address
                      -- was added to the frontier.
-                   , _function_frontier :: !(Set (ArchAddr arch))
+                   , _function_frontier :: !(Set (ArchSegmentedAddr arch))
                      -- ^ Set of functions to explore next.
                    , _absState :: !(AbsStateMap arch)
                      -- ^ Map from code addresses to the abstract state at the start of
@@ -225,8 +230,8 @@ data DiscoveryInfo arch ids
 
 -- | Empty interpreter state.
 emptyDiscoveryInfo :: NonceGenerator (ST ids) ids
-                   -> Memory (ArchAddr arch)
-                   -> Map (ArchAddr arch) BS.ByteString
+                   -> Memory (ArchAddrWidth arch)
+                   -> Map (ArchSegmentedAddr arch) BS.ByteString
                    -> SyscallPersonality arch
                    -> ArchitectureInfo arch
                       -- ^ Stack delta
@@ -247,20 +252,21 @@ emptyDiscoveryInfo ng mem symbols sysp info = DiscoveryInfo
       }
 
 blocks :: Simple Lens (DiscoveryInfo arch ids)
-                      (Map (ArchAddr arch) (Maybe (BlockRegion arch ids)))
+                      (Map (ArchSegmentedAddr arch) (Maybe (BlockRegion arch ids)))
 blocks = lens _blocks (\s v -> s { _blocks = v })
 
 -- | Addresses that start each function.
-functionEntries :: Simple Lens (DiscoveryInfo arch ids) (Set (ArchAddr arch))
+functionEntries :: Simple Lens (DiscoveryInfo arch ids) (Set (ArchSegmentedAddr arch))
 functionEntries = lens _functionEntries (\s v -> s { _functionEntries = v })
 
 reverseEdges :: Simple Lens (DiscoveryInfo arch ids)
-                            (Map (ArchAddr arch) (Set (ArchAddr arch)))
+                            (Map (ArchSegmentedAddr arch) (Set (ArchSegmentedAddr arch)))
 reverseEdges = lens _reverseEdges (\s v -> s { _reverseEdges = v })
 
 -- | Map each jump table start to the address just after the end.
 globalDataMap :: Simple Lens (DiscoveryInfo arch ids)
-                             (Map (ArchAddr arch) (GlobalDataInfo (ArchAddr arch)))
+                             (Map (ArchSegmentedAddr arch)
+                                  (GlobalDataInfo (ArchSegmentedAddr arch)))
 globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 
 -- | Set of addresses to explore next.
@@ -268,11 +274,12 @@ globalDataMap = lens _globalDataMap (\s v -> s { _globalDataMap = v })
 -- This is a map so that we can associate a reason why a code address
 -- was added to the frontier.
 frontier :: Simple Lens (DiscoveryInfo arch ids)
-                        (Map (ArchAddr arch) (FrontierReason (ArchAddr arch)))
+                        (Map (ArchSegmentedAddr arch) (FrontierReason (ArchAddrWidth arch)))
 frontier = lens _frontier (\s v -> s { _frontier = v })
 
 -- | Set of functions to explore next.
-function_frontier :: Simple Lens (DiscoveryInfo arch ids) (Set (ArchAddr arch))
+function_frontier :: Simple Lens (DiscoveryInfo arch ids)
+                                 (Set (ArchSegmentedAddr arch))
 function_frontier = lens _function_frontier (\s v -> s { _function_frontier = v })
 
 absState :: Simple Lens (DiscoveryInfo arch ids) (AbsStateMap arch)
@@ -281,29 +288,34 @@ absState = lens _absState (\s v -> s { _absState = v })
 ------------------------------------------------------------------------
 -- DiscoveryInfo utilities
 
+{-
 -- | Constraint on architecture addresses needed by code exploration.
 type AddrConstraint a = (Ord a, Integral a, Show a, Num a)
+-}
 
 -- | Returns the guess on the entry point of the given function.
-getFunctionEntryPoint :: AddrConstraint (ArchAddr a)
-                      => ArchAddr a
+--
+-- Note. This code assumes that a block address is associated with at most one function.
+getFunctionEntryPoint :: ArchSegmentedAddr a
                       -> DiscoveryInfo a ids
-                      -> ArchAddr a
+                      -> ArchSegmentedAddr a
 getFunctionEntryPoint addr s = do
   case Set.lookupLE addr (s^.functionEntries) of
     Just a -> a
-    Nothing -> error $ "Could not find address of " ++ showHex addr "."
+    Nothing -> error $ "Could not find address of " ++ show addr ++ "."
 
+-- | Returns the guess on the entry point of the given function.
+--
+-- Note. This code assumes that a block address is associated with at most one function.
 getFunctionEntryPoint' :: Ord (ArchAddr a)
-                       => ArchAddr a
+                       => ArchSegmentedAddr a
                        -> DiscoveryInfo a ids
-                       -> Maybe (ArchAddr a)
+                       -> Maybe (ArchSegmentedAddr a)
 getFunctionEntryPoint' addr s = Set.lookupLE addr (s^.functionEntries)
 
 -- | Return true if the two addresses look like they are in the same
-inSameFunction :: AddrConstraint (ArchAddr a)
-               => ArchAddr a
-               -> ArchAddr a
+inSameFunction :: ArchSegmentedAddr a
+               -> ArchSegmentedAddr a
                -> DiscoveryInfo a ids
                -> Bool
 inSameFunction x y s = xf == yf
@@ -314,11 +326,11 @@ inSameFunction x y s = xf == yf
 type RegConstraint r = (OrdF r, HasRepr r TypeRepr, RegisterInfo r, ShowF r)
 
 -- | Constraint on architecture so that we can do code exploration.
-type ArchConstraint a ids = ( AddrConstraint (ArchAddr a)
-                            , RegConstraint (ArchReg a)
+type ArchConstraint a ids = ( RegConstraint (ArchReg a)
 --                            , HasRepr (ArchFn a ids) TypeRepr
                             )
 
+{-
 -- | @isWriteTo stmt add tpr@ returns 'Just v' if @stmt@ writes 'v'
 -- to @addr@ with a write having the given type 'tpr',  and 'Nothing' otherwise.
 isWriteTo :: ArchConstraint a ids
@@ -331,38 +343,31 @@ isWriteTo (WriteMem a val) expected tp
   , Just Refl <- testEquality (typeRepr val) tp =
     Just val
 isWriteTo _ _ _ = Nothing
+-}
 
--- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes
--- a single address to a marked executable in @mem@ to @addr@.
-isCodeAddrWriteTo :: ArchConstraint a ids
-                  => Memory (ArchAddr a)
-                  -> Stmt a ids
-                  -> BVValue a ids (ArchAddrWidth a)
-                  -> Maybe (ArchAddr a)
-isCodeAddrWriteTo mem (WriteMem a (BVValue w val)) sp
-  |  -- Check that address written matches expected
-    Just _ <- testEquality a sp
-    -- Check that write size matches the width of addresses
-    -- in the architecture.
-  , Just Refl <- testEquality w (valueWidth sp)
-    -- Check that value written is in code.
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
+-- | This returns a segmented address if the value can be interpreted as a literal memory
+-- address, and returns nothing otherwise.
+asLiteralAddr :: MemWidth (ArchAddrWidth arch)
+              => Memory (ArchAddrWidth arch)
+              -> BVValue arch ids (ArchAddrWidth arch)
+              -> Maybe (ArchSegmentedAddr arch)
+asLiteralAddr mem (BVValue _ val) =
+  absoluteAddrSegment mem (fromInteger val)
+asLiteralAddr _   (RelocatableValue _ a) = Just a
+asLiteralAddr _ _ = Nothing
 
 -- | Attempt to identify the write to a stack return address, returning
 -- instructions prior to that write and return  values.
 --
 -- This can also return Nothing if the call is not supported.
-identifyCall :: (ArchConstraint a ids, RegisterInfo (ArchReg a))
-             => Memory (ArchAddr a)
+identifyCall :: ( ArchConstraint a ids
+                , RegisterInfo (ArchReg a)
+                , MemWidth (ArchAddrWidth a)
+                )
+             => Memory (ArchAddrWidth a)
              -> [Stmt a ids]
              -> RegState (ArchReg a) (Value a ids)
-             -> Maybe (Seq (Stmt a ids), (ArchAddr a))
+             -> Maybe (Seq (Stmt a ids), ArchSegmentedAddr a)
 identifyCall mem stmts0 s = go (Seq.fromList stmts0)
   where -- Get value of stack pointer
         next_sp = s^.boundValue sp_reg
@@ -371,10 +376,18 @@ identifyCall mem stmts0 s = go (Seq.fromList stmts0)
           case Seq.viewr stmts of
             Seq.EmptyR -> Nothing
             prev Seq.:> stmt
-                -- Check if we have reached the write of the return address to the
-                -- stack pointer.
-              | Just ret <- isCodeAddrWriteTo mem stmt next_sp ->
-                Just (prev, ret)
+              -- Check for a call statement by determining if the last statement
+              -- writes an executable address to the stack pointer.
+              | WriteMem a val <- stmt
+              , Just _ <- testEquality a next_sp
+                -- Check this is the right length.
+              , Just Refl <- testEquality (typeRepr next_sp) (typeRepr val)
+                -- Check if value is a valid literal address
+              , Just val_a <- asLiteralAddr mem val
+                -- Check if segment of address is marked as executable.
+              , Perm.isExecutable (segmentFlags (addrSegment val_a)) ->
+
+                Just (prev, val_a)
                 -- Stop if we hit any architecture specific instructions prior to
                 -- identifying return address since they may have side effects.
               | ExecArchStmt _ <- stmt -> Nothing
@@ -403,38 +416,54 @@ identifyReturn s stack_adj = do
       , (ip_base, ip_off) == (sp_base, sp_off + stack_adj) -> Just asgn
     _ -> Nothing
 
+-- | This identifies a jump table
+--
+-- A jump table consists of a contiguous sequence of jump targets laid out in
+-- memory.  Each potential jump target is in the same function as the calling
+-- function.
 identifyJumpTable :: forall arch ids
-                  .  (AddrConstraint (ArchAddr arch))
+                  .  MemWidth (ArchAddrWidth arch)
                   => DiscoveryInfo arch ids
-                  -> ArchLabel arch
-                      -- Memory address that IP is read from.
+                  -> ArchSegmentedAddr arch
+                      -- ^ Address of enclosing function.
                   -> BVValue arch ids (ArchAddrWidth arch)
-                  -- Returns the (symbolic) index and concrete next blocks
-                  -> Maybe (BVValue arch ids (ArchAddrWidth arch), V.Vector (ArchAddr arch))
-identifyJumpTable s lbl (AssignedValue (Assignment _ (ReadMem ptr _)))
+                     -- ^ The location we are jumping to
+                     --
+                     -- This is parsed to be of the form:
+                     --   (mult * idx) + base
+                     -- base is expected to be an integer.
+                  -> Maybe ( BVValue arch ids (ArchAddrWidth arch)
+                           , V.Vector (ArchSegmentedAddr arch)
+                           )
+identifyJumpTable s enclosingFun (AssignedValue (Assignment _ (ReadMem ptr _)))
     -- Turn the read address into base + offset.
-   | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp ptr
+   | Just (BVAdd _ offset base_val) <- valueAsApp ptr
+   , Just base <- asLiteralAddr mem base_val
     -- Turn the offset into a multiple by an index.
    , Just (BVMul _ (BVValue _ mult) idx) <- valueAsApp offset
    , mult == toInteger (jumpTableEntrySize info)
-   , isReadonlyAddr mem (fromInteger base) =
-       Just (idx, V.unfoldr nextWord (fromInteger base))
+    -- Find segment associated with base(if any)
+    -- Check if it read only
+    --
+    -- The convention seems to be to store jump tables in read only memory.
+  , Perm.isReadonly (segmentFlags (addrSegment base)) =
+       Just (idx, V.unfoldr nextWord base)
   where
     info = archInfo s
     mem  = memory   s
-    enclosingFun    = getFunctionEntryPoint (labelAddr lbl) s
-    nextWord :: ArchAddr arch -> Maybe (ArchAddr arch, ArchAddr arch)
-    nextWord tblPtr
-      | Right codePtr <- readJumpTableEntry info mem tblPtr
-      , isReadonlyAddr mem tblPtr
+
+    nextWord :: ArchSegmentedAddr arch
+             -> Maybe (ArchSegmentedAddr arch, ArchSegmentedAddr arch)
+    nextWord base
+      | Right codePtr <- readAddr mem LittleEndian base
       , getFunctionEntryPoint' codePtr s == Just enclosingFun =
-        Just (codePtr, tblPtr + jumpTableEntrySize info)
+        Just (codePtr, base & addrOffset +~ jumpTableEntrySize info)
       | otherwise = Nothing
-identifyJumpTable _s _ _ = Nothing
+identifyJumpTable _ _ _ = Nothing
 
 -- | Classifies the terminal statement in a block using discovered information.
 classifyBlock :: forall arch ids
-              .  ArchConstraint arch ids
+              .  (ArchConstraint arch ids, MemWidth (ArchAddrWidth arch))
               => Block arch ids
               -> DiscoveryInfo arch ids
               -> Maybe (ParsedTermStmt arch ids)
@@ -443,14 +472,15 @@ classifyBlock b interp_state =
     Branch c x y -> Just (ParsedBranch c x y)
     FetchAndExecute proc_state
         -- The last statement was a call.
-      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state ->
-          let fptr = case proc_state^.boundValue ip_reg of
-                       BVValue _ v -> Left (fromInteger v)
-                       ip          -> Right ip
-          in Just (ParsedCall proc_state prev_stmts fptr (Just ret_addr))
+      | Just (prev_stmts, ret_addr) <- identifyCall mem (blockStmts b) proc_state -> do
+          let ip = proc_state^.boundValue ip_reg
+          let fptr = case asLiteralAddr mem ip of
+                       Just ip_addr -> Left ip_addr
+                       Nothing      -> Right ip
+          Just (ParsedCall proc_state prev_stmts fptr (Just ret_addr))
 
       -- Jump to concrete offset.
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg
+      | Just tgt_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
       , inSameFunction (labelAddr (blockLabel b)) tgt_addr interp_state ->
            Just (ParsedJump proc_state tgt_addr)
 
@@ -466,11 +496,13 @@ classifyBlock b interp_state =
         in Just (ParsedReturn proc_state nonret_stmts)
 
       -- Tail calls to a concrete address (or, nop pads after a non-returning call)
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg ->
+      | Just tgt_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg) ->
         Just (ParsedCall proc_state (Seq.fromList $ blockStmts b) (Left tgt_addr) Nothing)
 
       | Just (idx, nexts) <- identifyJumpTable interp_state
-                                               (blockLabel b)
+                                               (getFunctionEntryPoint
+                                                (labelAddr (blockLabel b))
+                                                interp_state)
                                                (proc_state^.boundValue ip_reg) ->
           Just (ParsedLookupTable proc_state idx nexts)
 
@@ -482,7 +514,7 @@ classifyBlock b interp_state =
 
     -- rax is concrete in the first case, so we don't need to propagate it etc.
     Syscall proc_state
-      | BVValue _ next_addr <- proc_state^.boundValue ip_reg
+      | Just next_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
       , BVValue _ call_no   <- proc_state^.boundValue syscall_num_reg
       , Just (name, _rettype, argtypes) <-
           Map.lookup (fromInteger call_no) (spTypeInfo sysp) -> do
@@ -491,7 +523,7 @@ classifyBlock b interp_state =
          let result = Just $
                ParsedSyscall
                  proc_state
-                 (fromInteger next_addr)
+                 next_addr
                  (fromInteger call_no)
                  (spName sysp)
                  name
@@ -507,7 +539,7 @@ classifyBlock b interp_state =
 
         -- FIXME: Should subsume the above ...
         -- FIXME: only works if rax is an initial register
-      | BVValue _ next_addr <- proc_state^.boundValue ip_reg
+      | Just next_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
       , Initial r <- proc_state^.boundValue syscall_num_reg
       , Just absSt <- Map.lookup (labelAddr $ blockLabel b) (interp_state ^. absState)
       , Just call_no <-
@@ -519,7 +551,7 @@ classifyBlock b interp_state =
          let result = Just $
                ParsedSyscall
                  proc_state
-                 (fromInteger next_addr)
+                 next_addr
                  (fromInteger call_no)
                  (spName sysp)
                  name
@@ -534,7 +566,7 @@ classifyBlock b interp_state =
            _ -> result
 
 
-      | BVValue _ (fromInteger -> next_addr) <- proc_state^.boundValue ip_reg ->
+      | Just next_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg) ->
           debug DUrgent ("Unknown syscall in block " ++ show (blockLabel b)
                          ++ " syscall number is "
                          ++ show (pretty $ proc_state^.boundValue syscall_num_reg)
@@ -547,7 +579,7 @@ classifyBlock b interp_state =
     mem = memory interp_state
     sysp = syscallPersonality interp_state
 
-getClassifyBlock :: ArchConstraint arch ids
+getClassifyBlock :: (ArchConstraint arch ids, MemWidth (ArchAddrWidth arch))
                  => ArchLabel arch
                  -> DiscoveryInfo arch ids
                  -> Maybe (Block arch ids, Maybe (ParsedTermStmt arch ids))

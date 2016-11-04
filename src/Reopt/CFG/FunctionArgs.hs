@@ -23,7 +23,6 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
@@ -66,7 +65,7 @@ type RegisterSet = Set (Some X86Reg)
 -- this results in both direct argument register demands and function
 -- result demands.
 data DemandSet = DemandSet { registerDemands       :: !RegisterSet
-                           , functionResultDemands :: !(Map CodeAddr RegisterSet)
+                           , functionResultDemands :: !(Map (SegmentedAddr 64) RegisterSet)
                            }
                  deriving (Eq, Ord, Show)
 
@@ -95,7 +94,7 @@ data DemandType =
   -- register rax)
   DemandAlways
   -- | A function requires an additional argument
-  | forall tp. DemandFunctionArg CodeAddr (X86Reg tp)
+  | forall tp. DemandFunctionArg (SegmentedAddr 64) (X86Reg tp)
   -- | The result of the current function.
   | forall tp. DemandFunctionResult (X86Reg tp)
 
@@ -139,21 +138,21 @@ type AssignmentCache ids = Map (Some (AssignId ids)) RegisterSet
 data FunctionArgsState ids = FAS {
   -- | Holds state about the set of registers that a block uses
   -- (required by this block).
-  _blockTransfer :: !(Map (BlockLabel Word64) (Map (Some X86Reg) DemandSet))
+  _blockTransfer :: !(Map (BlockLabel 64) (Map (Some X86Reg) DemandSet))
 
   -- | If a demand d is demanded of block lbl then the block demands S, s.t.
   -- blockDemandMap ^. at lbl ^. at d = Just S
-  , _blockDemandMap    :: !(Map (BlockLabel Word64) DemandMap)
+  , _blockDemandMap    :: !(Map (BlockLabel 64) DemandMap)
 
   -- | The list of predecessors for a given block
-  , _blockPreds     :: !(Map (BlockLabel Word64) [BlockLabel Word64])
+  , _blockPreds     :: !(Map (BlockLabel 64) [BlockLabel 64])
 
   -- | A cache of the assignments and their deps.  The key is not included
   -- in the set of deps (but probably should be).
   , _assignmentCache :: !(AssignmentCache ids)
 
   -- | The set of blocks we need to consider.
-  , _blockFrontier  :: !(Set (BlockLabel Word64))
+  , _blockFrontier  :: !(Set (BlockLabel 64))
   }
 
 initFunctionArgsState :: FunctionArgsState ids
@@ -165,20 +164,20 @@ initFunctionArgsState =
       , _blockFrontier     = Set.empty }
 
 blockTransfer :: Simple Lens (FunctionArgsState ids)
-                   (Map (BlockLabel Word64) (Map (Some X86Reg) DemandSet))
+                   (Map (BlockLabel 64) (Map (Some X86Reg) DemandSet))
 blockTransfer = lens _blockTransfer (\s v -> s { _blockTransfer = v })
 
 blockDemandMap :: Simple Lens (FunctionArgsState ids)
-                    (Map (BlockLabel Word64) DemandMap)
+                    (Map (BlockLabel 64) DemandMap)
 blockDemandMap = lens _blockDemandMap (\s v -> s { _blockDemandMap = v })
 
-blockPreds :: Simple Lens (FunctionArgsState ids) (Map (BlockLabel Word64) [BlockLabel Word64])
+blockPreds :: Simple Lens (FunctionArgsState ids) (Map (BlockLabel 64) [BlockLabel 64])
 blockPreds = lens _blockPreds (\s v -> s { _blockPreds = v })
 
 assignmentCache :: Simple Lens (FunctionArgsState ids) (AssignmentCache ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
-blockFrontier :: Simple Lens (FunctionArgsState ids) (Set (BlockLabel Word64))
+blockFrontier :: Simple Lens (FunctionArgsState ids) (Set (BlockLabel 64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -189,23 +188,24 @@ type FunctionArgsM ids a = State (FunctionArgsState ids) a
 -- Phase one functions
 
 -- | This registers a block in the first phase (block discovery).
-addEdge :: BlockLabel Word64 -> BlockLabel Word64 -> FunctionArgsM ids ()
-addEdge source dest =
-  do -- record the edge
-     blockPreds    %= Map.insertWith mappend dest [source]
-     blockFrontier %= Set.insert dest
+addEdge :: BlockLabel 64 -> BlockLabel 64 -> FunctionArgsM ids ()
+addEdge source dest = do
+  -- record the edge
+  blockPreds    %= Map.insertWith mappend dest [source]
+  blockFrontier %= Set.insert dest
 
 valueUses :: Value X86_64 ids tp -> FunctionArgsM ids RegisterSet
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _    -> mempty)
+                            (\_      -> mempty)
                             (\r      -> Set.singleton (Some r))
                             (\_ regs -> regs)
 
 
 -- Figure out the deps of the given registers and update the state for the current label
 recordPropagation :: Ord a
-                  => Simple Lens (FunctionArgsState ids) (Map (BlockLabel Word64) (Map a DemandSet))
-                  -> BlockLabel Word64
+                  => Simple Lens (FunctionArgsState ids) (Map (BlockLabel 64) (Map a DemandSet))
+                  -> BlockLabel 64
                   -> RegState X86Reg (Value X86_64 ids)
                   -> (forall tp . X86Reg tp -> a)
                   -> [Some X86Reg]
@@ -219,20 +219,20 @@ recordPropagation l lbl s mk rs = do
 
 -- | A block requires a value, and so we need to remember which
 -- registers are required.
-demandValue :: BlockLabel Word64 -> Value X86_64 ids tp -> FunctionArgsM ids ()
+demandValue :: BlockLabel 64 -> Value X86_64 ids tp -> FunctionArgsM ids ()
 demandValue lbl v = do
   regs <- valueUses v
   blockDemandMap %= Map.insertWith demandMapUnion lbl
                         (Map.singleton DemandAlways (DemandSet regs mempty))
 
-nextBlock :: FunctionArgsM ids (Maybe (BlockLabel Word64))
+nextBlock :: FunctionArgsM ids (Maybe (BlockLabel 64))
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
 -- -----------------------------------------------------------------------------
 -- Entry point
 
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: DiscoveryInfo X86_64 ids -> Map CodeAddr FunctionType
+functionArgs :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType
 functionArgs ist =
   -- debug' DFunctionArgs (ppSet (text . flip showHex "") seenFuns) $
   debugPrintMap $ finalizeMap $ calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
@@ -277,14 +277,14 @@ functionArgs ist =
                                                     x86CalleeSavedRegs
                                 , functionResultDemands = mempty }
 
-    decomposeMap :: CodeAddr
-                 -> ( Map CodeAddr (Map (Some X86Reg) (Map CodeAddr DemandSet))
-                    , Map CodeAddr (Map (Some X86Reg) DemandSet)
-                    , Map CodeAddr DemandSet)
+    decomposeMap :: SegmentedAddr 64
+                 -> ( Map (SegmentedAddr 64) (Map (Some X86Reg) (Map (SegmentedAddr 64) DemandSet))
+                    , Map (SegmentedAddr 64) (Map (Some X86Reg) DemandSet)
+                    , Map (SegmentedAddr 64) DemandSet)
                  -> DemandType -> DemandSet
-                 -> ( Map CodeAddr (Map (Some X86Reg) (Map CodeAddr DemandSet))
-                    , Map CodeAddr (Map (Some X86Reg) DemandSet)
-                    , Map CodeAddr DemandSet
+                 -> ( Map (SegmentedAddr 64) (Map (Some X86Reg) (Map (SegmentedAddr 64) DemandSet))
+                    , Map (SegmentedAddr 64) (Map (Some X86Reg) DemandSet)
+                    , Map (SegmentedAddr 64) DemandSet
                     )
     decomposeMap addr acc (DemandFunctionArg f r) v =
       -- FIXME: A bit of an awkward datatype ...
@@ -297,8 +297,8 @@ functionArgs ist =
     decomposeMap addr acc DemandAlways v =
       acc & _3 %~ Map.insertWith mappend addr (v `demandSetDifference` calleeDemandSet)
 
-    finalizeMap :: Map CodeAddr DemandSet
-                -> Map CodeAddr FunctionType
+    finalizeMap :: Map (SegmentedAddr 64) DemandSet
+                -> Map (SegmentedAddr 64) FunctionType
     finalizeMap dm =
       let go ds = Map.unionWith Set.union (functionResultDemands ds)
           retDemands = foldr go Map.empty dm
@@ -322,7 +322,7 @@ functionArgs ist =
                    (maximumArgPrefix x86ResultRegs rets)
                    (maximumArgPrefix x86FloatResultRegs rets)
 
-    debugPrintMap :: Map CodeAddr FunctionType -> Map CodeAddr FunctionType
+    debugPrintMap :: Map (SegmentedAddr 64) FunctionType -> Map (SegmentedAddr 64) FunctionType
     debugPrintMap m = debug DFunctionArgs ("Arguments: \n\t" ++ (intercalate "\n\t" (Map.elems comb))) m
       where
         -- FIXME: ignores those functions we don't have names for.
@@ -331,11 +331,11 @@ functionArgs ist =
 
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).
-calculateGlobalFixpoint :: Map CodeAddr (Map (Some X86Reg)
-                                             (Map CodeAddr DemandSet))
-                        -> Map CodeAddr (Map (Some X86Reg) DemandSet)
-                        -> Map CodeAddr DemandSet
-                        -> Map CodeAddr DemandSet
+calculateGlobalFixpoint :: Map (SegmentedAddr 64)
+                               (Map (Some X86Reg) (Map (SegmentedAddr 64) DemandSet))
+                        -> Map (SegmentedAddr 64) (Map (Some X86Reg) DemandSet)
+                        -> Map (SegmentedAddr 64) DemandSet
+                        -> Map (SegmentedAddr 64) DemandSet
 calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
   = go argsMap argsMap
   where
@@ -373,7 +373,7 @@ transferDemands xfer (DemandSet regs funs) =
   -- FIXME: is this the correct behavior?
   mconcat (DemandSet mempty funs : [ xfer ^. ix r | r <- Set.toList regs ])
 
-calculateLocalFixpoint :: Map (BlockLabel Word64) DemandMap -> FunctionArgsM ids ()
+calculateLocalFixpoint :: Map (BlockLabel 64) DemandMap -> FunctionArgsM ids ()
 calculateLocalFixpoint new
   | Just ((currLbl, newDemands), rest) <- Map.maxViewWithKey new =
       -- propagate backwards any new demands to the predecessors
@@ -384,8 +384,8 @@ calculateLocalFixpoint new
   | otherwise = return ()
   where
     doOne :: DemandMap
-          -> BlockLabel Word64
-          -> FunctionArgsM ids (BlockLabel Word64, DemandMap)
+          -> BlockLabel 64
+          -> FunctionArgsM ids (BlockLabel 64, DemandMap)
     doOne newDemands predLbl = do
       xfer   <- use (blockTransfer . ix predLbl)
 
@@ -405,8 +405,8 @@ calculateLocalFixpoint new
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: DiscoveryInfo X86_64 ids
-              -> Set (BlockLabel Word64)
-              -> Maybe (BlockLabel Word64)
+              -> Set (BlockLabel 64)
+              -> Maybe (BlockLabel 64)
               -> FunctionArgsM ids ()
 summarizeIter _   _     Nothing = return ()
 summarizeIter ist seen (Just lbl)
@@ -418,9 +418,9 @@ summarizeIter ist seen (Just lbl)
 -- A function call is the only block type that results in the
 -- generation of function call demands, so we split that aspect out
 -- (callee saved are handled in summarizeBlock).
-summarizeCall :: BlockLabel Word64
+summarizeCall :: BlockLabel 64
               -> RegState X86Reg (Value X86_64 ids)
-              -> Either CodeAddr (BVValue X86_64 ids 64)
+              -> Either (SegmentedAddr 64) (BVValue X86_64 ids 64)
               -> Bool
               -> FunctionArgsM ids ()
 summarizeCall lbl proc_state (Left faddr) isTailCall = do
@@ -465,11 +465,11 @@ summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
 summarizeBlock :: DiscoveryInfo X86_64 ids
-               -> BlockLabel Word64
+               -> BlockLabel 64
                -> FunctionArgsM ids ()
 summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label = go root_label
   where
-    go :: BlockLabel Word64 -> FunctionArgsM ids ()
+    go :: BlockLabel 64 -> FunctionArgsM ids ()
     go lbl = do
       -- By default we have no arguments, return nothing
       blockDemandMap %= Map.insertWith demandMapUnion lbl mempty

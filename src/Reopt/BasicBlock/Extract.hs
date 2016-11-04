@@ -19,14 +19,16 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.List as L
 import qualified Data.Map as M
-import           Data.Map(Map)
+import           Data.Map (Map)
 import qualified Data.Set as S
-import           Data.Set(Set)
-
+import           Data.Set (Set)
 
 import           Flexdis86 as F
 
-import Debug.Trace
+import           Reopt.Concrete.BitVector (bitVector)
+import           Reopt.Concrete.MachineState (Value(..))
+
+import           Debug.Trace
 
 data Next =
     Absolute Word64
@@ -46,7 +48,8 @@ extractBlockInner :: ByteReader m
                   -> m (Either Word64 ([Next], Word64, [CS.Stmt]))
 extractBlockInner startAddr breakAddrs prevStmts =
   do (ii, w) <- runStateT (unWrappedByteReader $ disassembleInstruction) 0
-     case execInstruction (startAddr + w) ii
+     let iaddr = ValueExpr (Literal (bitVector S.n64 (fromIntegral (startAddr + w))))
+     case execInstruction iaddr ii
        of Just m | stmts <- execSemantics m ->
             case nexts M.empty [Absolute startAddr] stmts
               of [Absolute addr]

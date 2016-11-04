@@ -27,6 +27,9 @@ import           Data.ElfEdit
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
+import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Some
 import           Data.Version
 import           Data.Word
 import           Debug.Trace
@@ -51,9 +54,6 @@ import           Text.Read (readMaybe)
 
 import           Paths_reopt (version)
 
-import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Some
-import qualified Data.Parameterized.Map as MapF
 import           Flexdis86 ( InstructionInstance
                            , InstructionInstanceF(..)
                            , ppInstruction
@@ -208,9 +208,9 @@ getCommandLineArgs = do
 ------------------------------------------------------------------------
 -- Execution
 
-mkElfMem :: (Bits w, Integral w, Monad m) => LoadStyle -> Elf w -> m (Memory w)
-mkElfMem LoadBySection e = either fail return $ memoryForElfSections e
-mkElfMem LoadBySegment e = either fail return $ memoryForElfSegments e
+mkElfMem :: Monad m => LoadStyle -> Elf Word64 -> m (Memory 64)
+mkElfMem LoadBySection e = either fail (return . snd) $ memoryForElfSections knownNat e
+mkElfMem LoadBySegment e = either fail (return . snd) $ memoryForElfSegments knownNat e
 
 ------------------------------------------------------------------------
 -- Tracers.
@@ -326,16 +326,18 @@ printExecutedInstructions args = do
   runStateT (traceInner (printInstr mem) child) ()
   return ()
   where
-    printInstr :: Memory Word64 -> CPid -> StateT s IO ()
+    printInstr :: Memory 64 -> CPid -> StateT s IO ()
     printInstr mem pid = do
       regs <- lift $ ptrace_getregs pid
-      case regs
-        of X86 _ -> fail "X86Regs! only 64 bit is handled"
-           X86_64 regs64 -> do
-             let rip_val = rip regs64
-             case readInstruction mem rip_val of
-               Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
-               Right (ii, nextAddr) -> lift $ putStrLn $ show $ ppInstruction nextAddr ii
+      case regs of
+        X86 _ -> fail "X86Regs! only 64 bit is handled"
+        X86_64 regs64 -> do
+          let Just rip_val = absoluteAddrSegment mem (fromIntegral (rip regs64))
+          case readInstruction mem rip_val of
+            Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
+            Right (ii, nextAddr) -> do
+              let addr_word = fromIntegral (addrValue nextAddr)
+              lift $ putStrLn $ show $ ppInstruction addr_word ii
 
 ------------------------------------------------------------------------
 -- Register translation.
@@ -583,19 +585,20 @@ stepConcrete = do
   m_r <- getInstruction instrAddr
   case m_r of
     Nothing -> return (Right False, Nothing)
-    Just (w, ii) ->
-      case execInstruction (fromIntegral $ (nat bv) +
-                        fromIntegral w) ii
-      of Just s -> do
+    Just (w, ii) -> do
+      let inst_addr = ValueExpr (MS.Literal (bitVector n64 (fromIntegral $ nat bv + fromIntegral w)))
+      case execInstruction inst_addr ii of
+        Just s -> do
            let stmts = execSemantics s
-           eitherExceptionUnit <- evalStateT (runExceptT $ evalStmts stmts)
-                                  MapF.empty
+           eitherExceptionUnit <- evalStateT (runExceptT $ evalStmts stmts) MapF.empty
            case eitherExceptionUnit of
              Right () -> return (Right True, Just ii)
-             Left exception -> do logMessage $ Info $ "Got an exception: " ++ (show exception)
-                                  return (Left exception, Just ii)
-         Nothing -> do logMessage $ UnknownInstruction ii
-                       return (Right False, Just ii)
+             Left exception -> do
+               logMessage $ Info $ "Got an exception: " ++ (show exception)
+               return (Left exception, Just ii)
+        Nothing -> do
+          logMessage $ UnknownInstruction ii
+          return (Right False, Just ii)
 
 reportProgress :: Maybe Integer -> Integer -> IO ()
 reportProgress Nothing _              = return ()

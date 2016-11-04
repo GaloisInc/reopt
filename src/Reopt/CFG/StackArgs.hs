@@ -10,26 +10,27 @@ module Reopt.CFG.StackArgs
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Int
+import qualified Data.Map.Strict as Map
 import           Data.Maybe (catMaybes)
 import           Data.Parameterized.Map (MapF)
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
-
-import           Data.Macaw.CFG
-import           Data.Macaw.Types (n64)
 
 import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.Info
-import           Reopt.Machine.X86State
 import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.Types (n64)
 
-type StackArgs a = State (Int64, Set (BlockLabel Word64)) a
+import           Reopt.Machine.X86State
 
-addBlock :: BlockLabel Word64 -> StackArgs ()
+type StackArgs a = State (Int64, Set (BlockLabel 64)) a
+
+addBlock :: BlockLabel 64 -> StackArgs ()
 addBlock lbl = _2 %= Set.insert lbl
 
-nextBlock :: StackArgs (Maybe (BlockLabel Word64))
+nextBlock :: StackArgs (Maybe (BlockLabel 64))
 nextBlock = _2 %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
 addOffset :: Int64 -> StackArgs ()
@@ -38,19 +39,24 @@ addOffset v = _1 %= max v
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackArg :: MapF (AssignId ids) (AbsValue 64)
-                   -> DiscoveryInfo X86_64 ids -> CodeAddr -> Int64
+                -> DiscoveryInfo X86_64 ids
+                -> SegmentedAddr 64
+                -> Int64
 maximumStackArg amap ist addr =
   fst $ execState (recoverIter amap aregs ist Set.empty (Just $ GeneratedBlock addr 0))
                   (0, Set.empty)
   where
-    aregs = (lookupAbsBlock addr (ist ^. absState)) ^. absRegState
+    aregs =
+      case Map.lookup addr (ist ^. absState) of
+        Just s -> s^.absRegState
+        Nothing -> error "maximumStackArg could not find value."
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: MapF (AssignId ids) (AbsValue 64)
                -> RegState X86Reg (AbsValue 64)
                -> DiscoveryInfo X86_64 ids
-               -> Set (BlockLabel Word64)
-               -> Maybe (BlockLabel Word64)
+               -> Set (BlockLabel 64)
+               -> Maybe (BlockLabel 64)
                -> StackArgs ()
 recoverIter _     _    _   _ Nothing = return ()
 recoverIter amap aregs ist seen (Just lbl)
@@ -62,12 +68,20 @@ recoverIter amap aregs ist seen (Just lbl)
 recoverBlock :: MapF (AssignId ids) (AbsValue 64)
                 -> RegState X86Reg (AbsValue 64)
                 -> DiscoveryInfo X86_64 ids
-                -> BlockLabel Word64
+                -> BlockLabel 64
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
   Just b <- return $ lookupBlock (interp_state ^. blocks) lbl
+  let mem = memory interp_state
 
-  let xfer = transferValue' n64 (isCodeAddrOrNull (memory interp_state)) amap aregs
+  let is_code addr = do
+        sa <- absoluteAddrSegment mem addr
+        if segmentFlags (addrSegment sa) `Perm.hasPerm` Perm.execute then
+          Just $! sa
+         else
+          Nothing
+
+  let xfer = transferValue' n64 is_code amap aregs
       go = map goStmt . blockStmts
       goStmt (AssignStmt (Assignment _ (ReadMem addr _)))
         | StackOffset _ s <- xfer addr = Just $ Set.findMax s
@@ -90,7 +104,7 @@ recoverBlock amap aregs interp_state lbl = do
         addBlock lbl'
 
       -- Jump to concrete offset.
-      | BVValue _ (fromInteger -> tgt_addr) <- proc_state^.boundValue ip_reg
+      | Just tgt_addr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
         -- Check that we are in the same function
       , inSameFunction (labelAddr lbl) tgt_addr interp_state -> do
 

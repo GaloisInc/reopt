@@ -68,13 +68,14 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
-import           Numeric (showHex)
 import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
+
 import qualified Reopt.Machine.StateNames as N
+
 
 -- | An address of a code location.
 --
@@ -92,7 +93,6 @@ type instance ArchReg  X86_64 = X86Reg
 
 type instance ArchFn   X86_64 = X86PrimFn
 type instance ArchStmt X86_64 = X86Stmt
-type instance ArchAddr X86_64 = Word64
 
 ------------------------------------------------------------------------
 -- X86PrimLoc
@@ -530,7 +530,7 @@ x87TopReg = boundValue X87_TopReg
 -- | This represents the control-flow information needed to build basic blocks
 -- for a code location.
 data ExploreLoc
-   = ExploreLoc { loc_ip :: CodeAddr
+   = ExploreLoc { loc_ip :: SegmentedAddr 64
                   -- ^ IP address.
                 , loc_x87_top :: Int
                   -- ^ Top of x86 address.
@@ -538,9 +538,9 @@ data ExploreLoc
  deriving (Eq, Ord)
 
 instance Pretty ExploreLoc where
-  pretty loc = text $ showHex (loc_ip loc) ""
+  pretty loc = text $ show (loc_ip loc)
 
-rootLoc :: CodeAddr -> ExploreLoc
+rootLoc :: SegmentedAddr 64 -> ExploreLoc
 rootLoc ip = ExploreLoc { loc_ip = ip
                         , loc_x87_top = 0
                         }
@@ -548,7 +548,7 @@ rootLoc ip = ExploreLoc { loc_ip = ip
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> RegState X86Reg (Value X86_64 ids)
 initX86State loc = mkRegState Initial
-                 & curIP     .~ mkLit knownNat (toInteger (loc_ip loc))
+                 & curIP     .~ RelocatableValue knownNat (loc_ip loc)
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
 
 ------------------------------------------------------------------------
@@ -596,14 +596,23 @@ instance Monoid m => Monoid (StateMonadMonoid s m) where
   mempty = return mempty
   mappend m m' = mappend <$> m <*> m'
 
+-- | This folds over a values.
+--
+-- It memoizes values so that it only evaluates assignments with the same id
+-- once.
 foldValueCached :: forall m ids tp
                 .  Monoid m
                 => (forall n.  NatRepr n -> Integer -> m)
+                   -- ^ Function for literals
+                -> (SegmentedAddr 64 -> m)
+                   -- ^ Function for global addresses
                 -> (forall utp . ArchReg X86_64 utp -> m)
+                   -- ^ Function for input registers
                 -> (forall utp . Assignment X86_64 ids utp -> m -> m)
+                   -- ^ Function for assignments
                 -> Value X86_64 ids tp
                 -> State (Map (Some (AssignId ids)) m) m
-foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
+foldValueCached litf addrf initf assignf val = getStateMonadMonoid (go val)
   where
     go :: forall tp'
        .  Value X86_64 ids tp'
@@ -611,6 +620,7 @@ foldValueCached litf initf assignf val = getStateMonadMonoid (go val)
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
+        RelocatableValue _ a -> pure $ addrf a
         Initial r    -> return $ initf r
         AssignedValue asgn@(Assignment a_id rhs) -> do
           m_v <- use (at (Some a_id))

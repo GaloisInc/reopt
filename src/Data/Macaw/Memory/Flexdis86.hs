@@ -1,17 +1,20 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Data.Macaw.Memory.Flexdis86
   ( MemoryByteReader
   , runMemoryByteReader
   , readInstruction
   ) where
 
-import           Control.Exception (assert)
+import           Control.Lens
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
-import           Data.Bits
 import qualified Data.ByteString as BS
+
 import           Data.Macaw.Memory
-import           Data.Word
+import qualified Data.Macaw.Memory.Permissions as Perm
 
 import qualified Flexdis86 as Flexdis
 import           Flexdis86.ByteReader
@@ -19,10 +22,10 @@ import           Flexdis86.ByteReader
 ------------------------------------------------------------------------
 -- MemStream
 
-data MemStream w = MS { msNext :: !BS.ByteString
+data MemStream w = MS { msNext :: ![SegmentRange w]
                       , msMem  :: !(Memory w)
-                      , msAddr :: !w
-                      , msPerm :: !ElfSegmentFlags
+                      , msAddr :: !(SegmentedAddr w)
+                      , msPerm :: !Perm.Flags
                         -- ^ Permissions that memory accesses are expected to satisfy.
                       }
 
@@ -40,53 +43,55 @@ instance Monad (MemoryByteReader w) where
 -- | Create a memory stream pointing to given address, and return pair whose
 -- first element is the value read or an error, and whose second element is
 -- the address of the next value to read.
-runMemoryByteReader :: ElfSegmentFlags
+runMemoryByteReader :: Integral (MemWord w)
+                    => Perm.Flags
                        -- ^ Permissions that memory accesses are expected to
                        -- satisfy.
                        -- Added so we can check for read and/or execute permission.
                     -> Memory w -- ^ Memory to read from.
-                    -> w -- ^ Starting address.
+                    -> SegmentedAddr w -- ^ Starting address.
                     -> MemoryByteReader w a -- ^ Byte reader to read values from.
-                    -> (Either (MemoryError w) (a, w))
-runMemoryByteReader reqPerm mem addr (MBR m) =
-  case runState (runExceptT m) (MS BS.empty mem addr reqPerm) of
-    (Left e, _) -> Left e
-    (Right v, s) -> Right (v,msAddr s)
+                    -> Either (MemoryError w) (a, SegmentedAddr w)
+runMemoryByteReader reqPerm mem addr (MBR m) = do
+  let seg = addrSegment addr
+  if not (segmentFlags seg `Perm.hasPerm` reqPerm) then
+    Left $ PermissionsError addr
+   else do
+    contents <- addrContentsAfter addr
+    let ms0 = MS { msNext = contents
+                 , msMem  = mem
+                 , msAddr = addr
+                 , msPerm = reqPerm
+                 }
+    case runState (runExceptT m) ms0 of
+      (Left e, _) -> Left e
+      (Right v, s) -> Right (v,msAddr s)
 
-instance (Integral w, Show w) => ByteReader (MemoryByteReader w) where
+instance Num (MemWord w) => ByteReader (MemoryByteReader w) where
   readByte = do
-    MS b m w reqPerm <- MBR get
-    if BS.null b then
-      case findSegment w m of
-        Nothing -> MBR $ throwError $ AccessViolation w
-        Just s -> assert (memBase s <= w) $ do
-          MBR $ do
-            -- Throw error when permissions check fails.
-            when ((memFlags s .&. reqPerm) /= reqPerm) $ do
-              throwError $ PermissionsError w
-            -- Let d be number of bytes to drop from start of segment.
-            let d = fromIntegral (w - memBase s)
-            put MS { msNext = BS.drop d (memBytes s)
-                   , msMem = m
-                   , msAddr = w
-                   , msPerm = reqPerm
-                   }
-          readByte
-     else do
-      let v = BS.head b
-      let ms = MS { msNext = BS.tail b
-                  , msMem = m
-                  , msAddr = w+1
-                  , msPerm = reqPerm
-                  }
-      MBR $ v <$ put ms
+    ms <- MBR get
+    -- If remaining bytes are empty
+    case msNext ms of
+      [] -> MBR $ throwError $ AccessViolation (msAddr ms)
+      RelocatableAddr{}:_ -> do
+        MBR $ throwError $ UnalignedRelocation (msAddr ms)
+      ByteRegion bs:rest -> do
+        if BS.null bs then do
+          MBR $ throwError $ AccessViolation (msAddr ms)
+         else do
+          let v = BS.head bs
+          let ms' = ms { msNext = ByteRegion (BS.tail bs) : rest
+                       , msAddr = msAddr ms & addrOffset +~ 1
+                       }
+          MBR $ v <$ put ms'
 
 ------------------------------------------------------------------------
 -- readInstruction
 
 -- | Read instruction at a given memory address.
-readInstruction :: Memory Word64 -- Memory to read.
-                -> Word64 -- Address to read from.
-                -> Either (MemoryError Word64) (Flexdis.InstructionInstance, Word64)
-readInstruction mem addr = runMemoryByteReader pf_x mem addr m
+readInstruction :: Memory 64 -- Memory to read.
+                -> SegmentedAddr 64 -- Address to read from.
+                -> Either (MemoryError 64)
+                          (Flexdis.InstructionInstance, SegmentedAddr 64)
+readInstruction mem addr = runMemoryByteReader Perm.execute mem addr m
   where m = Flexdis.disassembleInstruction

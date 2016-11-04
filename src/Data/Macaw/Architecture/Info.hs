@@ -1,5 +1,4 @@
 {-|
-Module     : Data.Macaw.Architecture.Info
 Copyright  : (c) Galois, Inc 2016
 Maintainer : jhendrix@galois.com
 
@@ -29,9 +28,11 @@ import Data.Macaw.Memory
 
 -- | A function for reading an address from memory
 type ReadAddrFn w
-   = Memory w
-   -> w
-   -> Either (MemoryError w) w
+   = MemSegment w
+     -- ^ Segment to read from
+   -> MemWord w
+     -- Offset to read from.
+   -> Either (MemoryError w) (MemWord w)
 
 -- | Function for disassembling a block.
 --
@@ -43,16 +44,19 @@ type ReadAddrFn w
 type DisassembleFn arch
    = forall ids
    .  NonceGenerator (ST ids) ids
-   -> Memory (ArchAddr arch)
-   -> (ArchAddr arch -> Bool)
-   -- ^ Predicate that tells when to continue.
-   -> ArchAddr arch -- ^ Address that we are disassembling from
+   -> Memory (ArchAddrWidth arch)
+     -- ^ Segment to read from.
+   -> (SegmentedAddr (ArchAddrWidth arch) -> Bool)
+      -- ^ Predicate that given an offset, tells whether to continue reading given
+      -- and offset in the segment.
+   -> SegmentedAddr (ArchAddrWidth arch)
+      -- ^ Segment that we are disassembling from
    -> AbsBlockState (ArchReg arch)
       -- ^ Abstract state associated with address that we are disassembling
       -- from.
       --
       -- This is used for things like the height of the x87 stack.
-   -> ST ids (Either String ([Block arch ids], ArchAddr arch))
+   -> ST ids (Either String ([Block arch ids], SegmentedAddr (ArchAddrWidth arch)))
 
 data AddrWidthRepr w
    = (w ~ 32) => Addr32
@@ -67,23 +71,19 @@ data ArchitectureInfo arch
    = ArchitectureInfo
      { archAddrWidth :: !(AddrWidthRepr (RegAddrWidth (ArchReg arch)))
        -- ^ Architecture address width.
-     , jumpTableEntrySize :: !(ArchAddr arch)
+     , jumpTableEntrySize :: !(MemWord (ArchAddrWidth arch))
        -- ^ The size of each entry in a jump table.
      , callStackDelta :: !Integer
        -- ^ The shift that the stack moves with a call.
-     , readJumpTableEntry :: !(ReadAddrFn (ArchAddr arch))
-       -- ^ This reads a value in memory that appears to be a jump table entry.
-       --
-       -- This function does not allow the endianess to be changed dynamically as ARM allows.
      , disassembleFn :: !(DisassembleFn arch)
        -- ^ Function for disasembling a block.
-     , fnBlockStateFn :: !(Memory (ArchAddr arch)
-                           -> ArchAddr arch
+     , fnBlockStateFn :: !(Memory (RegAddrWidth (ArchReg arch))
+                           -> SegmentedAddr (RegAddrWidth (ArchReg arch))
                            -> AbsBlockState (ArchReg arch))
        -- ^ Creates an abstract block state for representing the beginning of a
        -- function.
      , postSyscallFn :: !(AbsBlockState (ArchReg arch)
-                          -> ArchAddr arch
+                          -> ArchSegmentedAddr arch
                           -> AbsBlockState (ArchReg arch))
        -- ^ Transfer function that maps abstract state before system call to
        -- abstract state after system call.
@@ -91,7 +91,7 @@ data ArchitectureInfo arch
        -- The first argument contains the first abstract state, and the
        -- second contains the address that we are jumping to.
      , postCallAbsStateFn :: !(AbsBlockState (ArchReg arch)
-                               -> ArchAddr arch
+                               -> ArchSegmentedAddr arch
                                -> AbsBlockState (ArchReg arch))
        -- ^ Abstract state after a function call.
      , absEvalArchFn :: !(forall ids tp

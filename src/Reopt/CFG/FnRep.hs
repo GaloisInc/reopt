@@ -33,7 +33,6 @@ module Reopt.CFG.FnRep
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
-import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import qualified Data.Vector as V
 
@@ -43,7 +42,7 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 
-import Data.Macaw.CFG
+import           Data.Macaw.CFG
    ( App(..)
    , BlockLabel
    , ppApp
@@ -52,14 +51,15 @@ import Data.Macaw.CFG
    , appType
    , foldApp
    )
+import           Data.Macaw.Memory (MemWord, SegmentedAddr)
 import           Data.Macaw.Types
+
 import           Reopt.Machine.X86State
   ( X86Reg
   , x86ArgumentRegs
   , x86ResultRegs
   , x86FloatArgumentRegs
   , x86FloatResultRegs
-  , CodeAddr
   )
 
 commas :: [Doc] -> Doc
@@ -200,16 +200,16 @@ data FnValue (tp :: Type)
      -- | A value returned by a function call (rax/rdx/xmm0)
    | FnReturn !(FnReturnVar tp)
      -- | The entry pointer to a function.
-   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !Word64
+   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(SegmentedAddr 64)
      -- | A pointer to an internal block at the given address.
-   | (tp ~ BVType 64) => FnBlockValue !Word64
+   | (tp ~ BVType 64) => FnBlockValue !(SegmentedAddr 64)
      -- | Value is an interget argument passed via a register.
    | (tp ~ BVType 64) => FnIntArg !Int
      -- | Value is a function argument passed via a floating point XMM
      -- register.
    | (tp ~ BVType 128) => FnFloatArg !Int
      -- | A global address
-   | (tp ~ BVType 64) => FnGlobalDataAddr !Word64
+   | (tp ~ BVType 64) => FnGlobalDataAddr !(SegmentedAddr 64)
 
 instance Pretty (FnValue tp) where
   pretty (FnValueUnsupported reason _)
@@ -220,13 +220,13 @@ instance Pretty (FnValue tp) where
   pretty (FnPhiValue phi)         = ppFnAssignId (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
-                                    <> parens (pretty $ showHex n "")
+                                    <> parens (pretty $ show n)
   pretty (FnBlockValue n)         = text "BlockValue"
-                                    <> parens (pretty $ showHex n "")
+                                    <> parens (pretty $ show n)
   pretty (FnIntArg n)             = text "arg" <> int n
   pretty (FnFloatArg n)           = text "fparg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@"
-                                    <> parens (pretty $ showHex addr "")
+                                    <> parens (pretty $ show addr)
 class FoldFnValue a where
   foldFnValue :: Monoid m => (forall u . FnValue u -> m) -> a -> m
 
@@ -248,9 +248,9 @@ fnValueType v =
 ------------------------------------------------------------------------
 -- Function definitions
 
-data Function = Function { fnAddr :: !CodeAddr
+data Function = Function { fnAddr :: !(SegmentedAddr 64)
                            -- ^ In memory address of function
-                         , fnSize :: !CodeAddr
+                         , fnSize :: !(MemWord 64)
                            -- ^ Number of bytes that function takes up.
                          , fnType :: !FunctionType
                          , fnBlocks :: [FnBlock]
@@ -258,7 +258,7 @@ data Function = Function { fnAddr :: !CodeAddr
 
 instance Pretty Function where
   pretty fn =
-    text "function " <+> pretty (showHex (fnAddr fn) "")
+    text "function " <+> pretty (show (fnAddr fn))
     <$$>
     lbrace
     <$$>
@@ -280,13 +280,13 @@ instance Pretty (FnRegValue tp) where
   pretty (FnRegValue v)      = pretty v
 
 newtype FnPhiNodeInfo tp
-      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel Word64, FnValue tp)] }
+      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel 64, FnValue tp)] }
 
 instance FoldFnValue (FnPhiNodeInfo tp) where
   foldFnValue f (FnPhiNodeInfo vs) = mconcat (map (f . snd) vs)
 
 data FnBlock
-   = FnBlock { fbLabel :: !(BlockLabel Word64)
+   = FnBlock { fbLabel :: !(BlockLabel 64)
                -- Maps predecessor label onto the reg value at that
                -- block
              , fbPhiNodes  :: !(MapF FnPhiVar FnPhiNodeInfo)
@@ -305,7 +305,7 @@ instance Pretty FnBlock where
       go :: FnPhiVar tp -> FnPhiNodeInfo tp -> [Doc] -> [Doc]
       go aid vs d =
         (pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl (unFnPhiNodeInfo vs))) : d
-      goLbl :: (BlockLabel Word64, FnValue tp) -> Doc
+      goLbl :: (BlockLabel 64, FnValue tp) -> Doc
       goLbl (lbl, node) = parens (pretty lbl <> comma <+> pretty node)
 
 instance FoldFnValue FnBlock where
@@ -365,22 +365,22 @@ instance FoldFnValue FnStmt where
     f cnt `mappend` f v `mappend` f ptr `mappend` f df
 
 data FnTermStmt
-   = FnJump !(BlockLabel Word64)
+   = FnJump !(BlockLabel 64)
    | FnRet !([FnValue (BVType 64)], [FnValue XMMType])
-   | FnBranch !(FnValue BoolType) !(BlockLabel Word64) !(BlockLabel Word64)
+   | FnBranch !(FnValue BoolType) !(BlockLabel 64) !(BlockLabel 64)
      -- ^ A branch to a block within the function, along with the return vars.
      -- FIXME: need to add extra stack arg.
    | FnCall !(FnValue (BVType 64))
             !([FnValue (BVType 64)], [FnValue XMMType])
             !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
-            !(Maybe (BlockLabel Word64))
+            !(Maybe (BlockLabel 64))
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
 
      -- FIXME: specialized to BSD's (broken) calling convention
-   | FnSystemCall !Word64 !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ]
-        (BlockLabel Word64)
-   | FnLookupTable !(FnValue (BVType 64)) !(V.Vector CodeAddr)
+   | FnSystemCall !(MemWord 64) !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ]
+        (BlockLabel 64)
+   | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (SegmentedAddr 64))
    | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
@@ -402,7 +402,7 @@ instance Pretty FnTermStmt where
             <+> text ":=" <+> text "syscall"
             <+> text name <> parens (commas arg_docs) <+> pretty lbl
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ map (text . flip showHex "") (V.toList vec))
+                               <+> parens (commas $ map (text . show) (V.toList vec))
       FnTermStmtUndefined -> text "undefined term"
 
 instance FoldFnValue FnTermStmt where
