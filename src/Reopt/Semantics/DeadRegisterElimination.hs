@@ -31,7 +31,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Set (Set)
 import qualified Data.Set as S
-import           Data.Word
 
 import           Data.Macaw.CFG
 import           Reopt.Machine.X86State
@@ -45,13 +44,13 @@ eliminateDeadRegisters cfg = (cfgBlocks .~ newCFG) cfg
 
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
-liveRegisters :: CFG X86_64 ids -> BlockLabel Word64 -> Map (BlockLabel Word64) (Block X86_64 ids)
+liveRegisters :: CFG X86_64 ids -> BlockLabel 64 -> Map (BlockLabel 64) (Block X86_64 ids)
 liveRegisters cfg root = evalState (traverseBlocks cfg root blockLiveRegisters merge) S.empty
   where
     merge l v r = M.union <$> (M.union <$> l <*> r) <*> v
 
 blockLiveRegisters :: Block X86_64 ids
-                   -> State (Set (Some (AssignId ids))) (Map (BlockLabel Word64) (Block X86_64 ids))
+                   -> State (Set (Some (AssignId ids))) (Map (BlockLabel 64) (Block X86_64 ids))
 blockLiveRegisters b = do
     addIDs terminalIds
     stmts' <- foldrM noteAndFilter [] (blockStmts b)

@@ -22,7 +22,6 @@ import           Data.Monoid (Any(..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Type.Equality
-import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Discovery.Info
@@ -104,18 +103,18 @@ type BlockStackDepths ids = Set (StackDepthValue ids)
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
 data StackDepthState ids
-   = SDS { _blockInitStackPointers :: !(Map (BlockLabel Word64) (BlockStackStart ids))
+   = SDS { _blockInitStackPointers :: !(Map (BlockLabel 64) (BlockStackStart ids))
          , _blockStackRefs :: !(BlockStackDepths ids)
-         , _blockFrontier  :: !(Set (BlockLabel Word64))
+         , _blockFrontier  :: !(Set (BlockLabel 64))
          }
 
-blockInitStackPointers :: Simple Lens (StackDepthState ids) (Map (BlockLabel Word64) (BlockStackStart ids))
+blockInitStackPointers :: Simple Lens (StackDepthState ids) (Map (BlockLabel 64) (BlockStackStart ids))
 blockInitStackPointers = lens _blockInitStackPointers (\s v -> s { _blockInitStackPointers = v })
 
 blockStackRefs :: Simple Lens (StackDepthState ids) (BlockStackDepths ids)
 blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 
-blockFrontier :: Simple Lens (StackDepthState ids) (Set (BlockLabel Word64))
+blockFrontier :: Simple Lens (StackDepthState ids) (Set (BlockLabel 64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -149,7 +148,7 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 type StackDepthM ids a = State (StackDepthState ids) a
 
-addBlock :: BlockLabel Word64 -> BlockStackStart ids -> StackDepthM ids ()
+addBlock :: BlockLabel 64 -> BlockStackStart ids -> StackDepthM ids ()
 addBlock lbl start =
   do x <- use (blockInitStackPointers . at lbl)
      case x of
@@ -159,18 +158,20 @@ addBlock lbl start =
         | start == start' -> return ()
         | otherwise       -> traceM ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start')))
 
-nextBlock :: StackDepthM ids (Maybe (BlockLabel Word64))
+nextBlock :: StackDepthM ids (Maybe (BlockLabel 64))
 nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
 
 addDepth :: Set (StackDepthValue ids) -> StackDepthM ids ()
 addDepth v = blockStackRefs %= Set.union v
 
-valueHasSP :: BVValue X86_64 ids 64 -> Bool
-valueHasSP (val :: BVValue X86_64 ids 64) = go val
+-- | Return true if value references stack pointer
+valueHasSP :: forall ids . BVValue X86_64 ids 64 -> Bool
+valueHasSP = go
   where
     go :: forall tp . Value X86_64 ids tp -> Bool
     go v = case v of
              BVValue _sz _i -> False
+             RelocatableValue{} -> False
              Initial r      -> testEquality r sp_reg /= Nothing
              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
 
@@ -207,7 +208,7 @@ parseStackPointer sp0 addr0
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackDepth :: DiscoveryInfo X86_64 ids -> CodeAddr -> BlockStackDepths ids
+maximumStackDepth :: DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> BlockStackDepths ids
 maximumStackDepth ist addr =
   minimizeStackDepthValues $ (^. blockStackRefs) $ execState (recoverIter ist Set.empty (Just lbl0)) s0
   where
@@ -219,8 +220,8 @@ maximumStackDepth ist addr =
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: DiscoveryInfo X86_64 ids
-               -> Set (BlockLabel Word64)
-               -> Maybe (BlockLabel Word64)
+               -> Set (BlockLabel 64)
+               -> Maybe (BlockLabel 64)
                -> StackDepthM ids ()
 recoverIter _   _     Nothing = return ()
 recoverIter ist seen (Just lbl)
@@ -230,7 +231,7 @@ recoverIter ist seen (Just lbl)
                    recoverIter ist (Set.insert lbl seen) lbl'
 
 recoverBlock :: DiscoveryInfo X86_64 ids
-                -> BlockLabel Word64
+                -> BlockLabel 64
                 -> StackDepthM ids ()
 recoverBlock interp_state root_label = do
   Just init_sp <- use (blockInitStackPointers . at root_label)

@@ -1,6 +1,5 @@
 {-|
-Module      : Reopt.CFG.Recovery
-Copyright   : (c) Galois Inc, 2015
+Copyright   : (c) Galois Inc, 2015-2016
 Maintainer  : jhendrix@galois.com
 
 This module provides methods for constructing functions from the basic
@@ -8,11 +7,13 @@ blocks discovered by 'Data.Macaw.Discovery'.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
 module Reopt.CFG.Recovery
   ( Function(..)
   , FnBlock(..)
@@ -40,24 +41,22 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.String (fromString)
 import           Data.Type.Equality
-import           Data.Word
-import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.String (fromString)
+import           Data.Macaw.CFG
+import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.Types
+
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionArgs ( functionArgs )
 import           Reopt.CFG.RegisterUse
-import           Data.Macaw.CFG
 import           Reopt.CFG.StackDepth
-import           Data.Macaw.Types
 import           Reopt.Machine.X86State
-import           Data.Macaw.Memory
-import           Data.Macaw.DebugLogging
-
-import           Debug.Trace (trace)
 
 ------------------------------------------------------------------------
 -- RecoverState
@@ -69,7 +68,7 @@ data RecoverState ids = RS { _rsInterp :: !(DiscoveryInfo X86_64 ids)
                            , _rsAssignMap :: !(MapF (AssignId ids) FnAssignment)
 
                              -- Local state
-                           , _rsCurLabel  :: !(BlockLabel Word64)
+                           , _rsCurLabel  :: !(BlockLabel 64)
                            , _rsCurStmts  :: !(Seq FnStmt)
 
                            , _rsCurRegs   :: !(FnRegValueMap)
@@ -88,7 +87,7 @@ rsInterp = lens _rsInterp (\s v -> s { _rsInterp = v })
 rsNextAssignId :: Simple Lens (RecoverState ids) FnAssignId
 rsNextAssignId = lens _rsNextAssignId (\s v -> s { _rsNextAssignId = v })
 
-rsCurLabel :: Simple Lens (RecoverState ids) (BlockLabel Word64)
+rsCurLabel :: Simple Lens (RecoverState ids) (BlockLabel 64)
 rsCurLabel = lens _rsCurLabel (\s v -> s { _rsCurLabel = v })
 
 -- | List of statements accumulated so far.
@@ -217,25 +216,21 @@ regMapFromState s =
 ------------------------------------------------------------------------
 -- recoverFunction
 
-type FunctionArgs = Map CodeAddr FunctionType
-
 -- | This returns how much space there is before start of next function,
 -- or the end of the memory segment if code address is undefined.
 --
 -- Note: Calls error if code addr is not in a valid memory location.
-functionEnd :: DiscoveryInfo X86_64 ids -> CodeAddr -> CodeAddr
-functionEnd s a =
-  case findSegment a (memory s) of
-    Just seg -> assert (memFlags seg `hasPermissions` pf_x) $
-      let end = memBase seg + segmentSize seg
-       in case Set.lookupGT a (s^.functionEntries) of
-            Just next | next < end -> next
-            _ -> end
-    Nothing -> error $ "Could not find memory segment for " ++ showHex a "."
-
+functionSize :: DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> MemWord 64
+functionSize s a = do
+  let seg = addrSegment a
+  assert (segmentFlags seg `Perm.hasPerm` Perm.execute) $ do
+    case Set.lookupGT a (s^.functionEntries) of
+      Just next | segmentIndex (addrSegment next) == segmentIndex seg ->
+        next^.addrOffset - a^.addrOffset
+      _ -> segmentSize seg - a^.addrOffset
 
 -- | Recover the function at a given address.
-recoverFunction :: FunctionArgs -> DiscoveryInfo X86_64 ids -> CodeAddr -> Either String Function
+recoverFunction :: FunctionArgs -> DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> Either String Function
 recoverFunction fArgs s a = do
   let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
         = registerUse fArgs s a
@@ -292,15 +287,15 @@ recoverFunction fArgs s a = do
     (block_map, _) <- mfix go
 
     return $! Function { fnAddr = a
-                       , fnSize = functionEnd s a - a
+                       , fnSize = functionSize s a
                        , fnType = cft
                        , fnBlocks = Map.elems block_map
                        }
 
-makePhis :: Map (BlockLabel Word64) (Set (Some X86Reg))
-         -> Map (BlockLabel Word64) [BlockLabel Word64]
-         -> Map (BlockLabel Word64) (MapF X86Reg FnRegValue)
-         -> BlockLabel Word64
+makePhis :: Map (BlockLabel 64) (Set (Some X86Reg))
+         -> Map (BlockLabel 64) [BlockLabel 64]
+         -> Map (BlockLabel 64) (MapF X86Reg FnRegValue)
+         -> BlockLabel 64
          -> Recover ids (MapF FnPhiVar FnPhiNodeInfo, FnRegValueMap)
 makePhis blockRegs blockPreds blockRegMap lbl = do
   let mkIdFromReg :: MapF X86Reg FnRegValue
@@ -378,7 +373,7 @@ allocateStackFrame (sd :: Set (StackDepthValue ids))
 -- regValuePair nm v = return $ Just $ MapF.Pair nm (FnRegValue v)
 
 -- FIXME: clag from RegisterUse.hs
-lookupFunctionArgs :: Either CodeAddr (BVValue X86_64 ids 64)
+lookupFunctionArgs :: Either (SegmentedAddr 64) (BVValue X86_64 ids 64)
                    -> Recover ids FunctionType
 lookupFunctionArgs fn =
   case fn of
@@ -391,7 +386,7 @@ lookupFunctionArgs fn =
         Just v  -> return v
 
       -- Figure out what is preserved across the function call.
-getPostCallValue :: BlockLabel Word64
+getPostCallValue :: BlockLabel 64
                  -> RegState X86Reg (Value X86_64 ids)
                      -- ^ Value of registers before syscall
                  -> [FnReturnVar (BVType 64)] -- ^ Integer values returned by function.
@@ -425,7 +420,7 @@ getPostCallValue lbl proc_state intrs floatrs r = do
 -- | Get value for register after a system call.
 --
 -- This is subtly different to that for function calls.
-getPostSyscallValue :: BlockLabel Word64
+getPostSyscallValue :: BlockLabel 64
                        -- ^ Label of block where we syscall occurred.
                     -> RegState X86Reg (Value X86_64 ids)
                        -- ^ Value of registers before syscall
@@ -443,11 +438,11 @@ getPostSyscallValue lbl proc_state r =
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
-recoverBlock :: Map (BlockLabel Word64) (Set (Some X86Reg))
+recoverBlock :: Map (BlockLabel 64) (Set (Some X86Reg))
              -> MapF FnPhiVar FnPhiNodeInfo
-             -> BlockLabel Word64
-             -> Recover ids ( Map (BlockLabel Word64) FnBlock
-                            , Map (BlockLabel Word64) (MapF X86Reg FnRegValue)
+             -> BlockLabel 64
+             -> Recover ids ( Map (BlockLabel 64) FnBlock
+                            , Map (BlockLabel 64) (MapF X86Reg FnRegValue)
                             )
 recoverBlock blockRegProvides phis lbl = do
   -- Clear stack offsets
@@ -617,11 +612,6 @@ recoverStmt s = do
   case s of
     AssignStmt asgn -> do
       usedAssigns <- gets rsAssignmentsUsed
-      do lbl <- use rsCurLabel
-         when (labelAddr lbl == 0x400128) $ do
-           trace ("At block " ++ showHex (labelAddr lbl) ".") $ do
-           trace ("Used " ++ show usedAssigns) $ do
-             return ()
       -- Only add assignment if it is used.
       when (Some (assignId asgn) `Set.member` usedAssigns) $ do
         void $ recoverAssign asgn
@@ -687,41 +677,49 @@ recoverRegister :: RegState X86Reg (Value X86_64 ids)
                 -> Recover ids (FnValue tp)
 recoverRegister proc_state r = recoverValue ("register " ++ show r) (proc_state ^. boundValue r)
 
+hasWidth :: HasRepr f TypeRepr => f tp -> NatRepr w -> Maybe (tp :~: BVType w)
+hasWidth f w =
+  case typeRepr f of
+    BVTypeRepr n -> do
+      Refl <- testEquality n w
+      pure Refl
+
+
 recoverValue :: String -> Value X86_64 ids tp -> Recover ids (FnValue tp)
 recoverValue nm v = do
   interpState <- use rsInterp
   mem <- uses rsInterp memory
   case v of
-    BVValue w i
-      | Just Refl <- testEquality w n64
-      , let addr = fromInteger i
-      , Just seg <- findSegment addr mem -> do
+    _ | Just Refl <- hasWidth v (memWidth mem)
+      , Just addr <- asLiteralAddr mem v -> do
+        let seg = addrSegment addr
         case () of
-          _ | memFlags seg `hasPermissions` pf_x
+          _ | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Set.member addr (interpState^.functionEntries) -> do
               ft <- lookupFunctionArgs (Left addr)
               return $! FnFunctionEntryValue ft addr
 
-            | memFlags seg `hasPermissions` pf_x
+            | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Map.member addr (interpState^.blocks) -> do
               cur_addr <- uses rsCurLabel labelAddr
               when (not (inSameFunction cur_addr addr interpState)) $ do
-                debug DFunRecover ("Cross function jump " ++ showHex cur_addr " to " ++ showHex addr ".") $
+                debug DFunRecover ("Cross function jump " ++ show cur_addr ++ " to " ++ show addr ++ ".") $
                   return ()
               return $! FnBlockValue addr
 
-            | memFlags seg `hasPermissions` pf_w -> do
+            | segmentFlags seg `Perm.hasPerm` Perm.write -> do
               return $! FnGlobalDataAddr addr
 
             -- FIXME: do something more intelligent with rodata?
-            | memFlags seg `hasPermissions` pf_r -> do
+            | segmentFlags seg `Perm.hasPerm` Perm.read -> do
               return $! FnGlobalDataAddr addr
 
             | otherwise -> do
-              debug DFunRecover ("WARNING: recoverValue " ++ nm ++ " given segment pointer: " ++ showHex i "") $ do
-              return $! FnValueUnsupported ("segment pointer " ++ showHex i "") (typeRepr v)
-      | otherwise -> do
-        return $ FnConstantValue w i
+              debug DFunRecover ("WARNING: recoverValue " ++ nm ++ " given segment pointer: " ++ show addr) $ do
+              return $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
+    RelocatableValue{} -> error "Expected relocatable value to be covered by previous case."
+    BVValue w i ->
+      return $ FnConstantValue w i
 
     AssignedValue assign' -> recoverAssign assign'
 

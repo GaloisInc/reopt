@@ -31,11 +31,9 @@ import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Parameterized.NatRepr
-import           Data.Word
 import           Debug.Trace
 import qualified Flexdis86 as F
 import           GHC.TypeLits (KnownNat)
-import           Numeric (showHex)
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Semantics.Monad
@@ -66,14 +64,14 @@ getSignExtendedValue v out_w =
       | otherwise                   -> fail "unknown r8"
     F.WordReg  r                    -> mk (reg_low16 (N.gpFromFlexdis $ F.reg16_reg r))
     F.DWordReg r                    -> mk (reg_low32 (N.gpFromFlexdis $ F.reg32_reg r))
-    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)    
+    F.QWordReg r                    -> mk (fullRegister $ N.gpFromFlexdis r)
     F.XMMReg r                      -> mk (fullRegister $ N.xmmFromFlexdis r)
-    
+
     F.ByteImm  i                    -> return $! bvLit out_w i
     F.WordImm  i                    -> return $! bvLit out_w i
     F.DWordImm i                    -> return $! bvLit out_w i
     F.QWordImm i                    -> return $! bvLit out_w i
-    
+
     _ -> fail $ "getSignExtendedValue given unexpected width: " ++ show v
   where
     -- FIXME: what happens with signs etc?
@@ -312,7 +310,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                      fail "Impossible number of argument in imul"
               , mk "jmp"    $ maybe_ip_relative exec_jmp_absolute
               , mk "cwd"    $ \_ -> exec_cwd
-              , mk "cdq"    $ \_ -> exec_cdq              
+              , mk "cdq"    $ \_ -> exec_cdq
               , mk "cqo"    $ \_ -> exec_cqo
               , mk "movsx"  $ geBinop exec_movsx_d
               , mk "movsxd" $ geBinop exec_movsx_d
@@ -352,7 +350,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "addsd"   $ truncateKnownBinop exec_addsd
               , mk "addps"   $ truncateKnownBinop exec_addps
               , mk "addss"   $ truncateKnownBinop exec_addss
-              , mk "subss"   $ truncateKnownBinop exec_subss              
+              , mk "subss"   $ truncateKnownBinop exec_subss
               , mk "subsd"   $ truncateKnownBinop exec_subsd
               , mk "movsd"   $ mkBinop (movsX n64)
               , mk "movapd"  $ truncateKnownBinop exec_movapd
@@ -364,12 +362,12 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "movsd_sse" $ mkBinop (movsX n64)
               , mk "movss"   $ mkBinop (movsX n32)
               , mk "mulsd"   $ truncateKnownBinop exec_mulsd
-              , mk "mulss"   $ truncateKnownBinop exec_mulss              
+              , mk "mulss"   $ truncateKnownBinop exec_mulss
               , mk "divsd"   $ truncateKnownBinop exec_divsd
               , mk "divss"   $ truncateKnownBinop exec_divss
               , mk "psllw"   $ mkBinopLV (exec_psllx n16)
               , mk "pslld"   $ mkBinopLV (exec_psllx n32)
-              , mk "psllq"   $ mkBinopLV (exec_psllx n64)        
+              , mk "psllq"   $ mkBinopLV (exec_psllx n64)
               , mk "ucomisd" $ truncateKnownBinop exec_ucomisd
               , mk "ucomiss" $ truncateKnownBinop exec_ucomiss
               , mk "xorpd"   $ mkBinop $ \loc val -> do
@@ -390,12 +388,12 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                   SomeBV l  <- getSomeBVLocation loc
                   v <- truncateBVValue knownNat =<< getSomeBVValue val
                   exec_cvttsd2si l v
-                  
+
               , mk "cvttss2si" $ mkBinop $ \loc val -> do
                   SomeBV l  <- getSomeBVLocation loc
                   v <- truncateBVValue knownNat =<< getSomeBVValue val
                   exec_cvttsd2si l v
-              
+
               , mk "cvtsi2sd" $ mkBinop $ \loc val -> do
                 l <- getBVLocation loc n128
                 SomeBV v <- getSomeBVValue val
@@ -420,16 +418,16 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                      v  <- truncateBVValue knownNat =<< getSomeBVValue val
                      exec_cmpsd l v opcode
                    _ -> fail "Impossible number of argument in cmpsd"
-                     
+
               , mk "andps"   $ knownBinop exec_andps
               , mk "andpd"   $ knownBinop exec_andpd
               , mk "orps"    $ knownBinop exec_orps
               , mk "orpd"    $ knownBinop exec_orpd
               , mk "mulps"   $ knownBinop exec_mulps
-              
+
               , mk "subps"     $ knownBinop exec_andps
               , mk "unpcklps"  $ knownBinop exec_unpcklps
-              
+
               -- regular instructions
               , mk "add"     $ binop exec_add
               , mk "adc"     $ binop exec_adc
@@ -462,7 +460,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pause"   $ const (return ())
               , mk "pop"     $ unop exec_pop
 
-              
+
               , mk "cmpxchg" $ binop exec_cmpxchg
               , mk "cmpxchg8b" $ knownUnop exec_cmpxchg8b
               , mk "push"    $ unopV exec_push
@@ -480,7 +478,7 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "xor"     $ binop exec_xor
 
               , mk "ud2"     $ \_ -> exception false true UndefinedInstructionError
-              
+
               -- Primitive instructions
               , mk "syscall" $ const (primitive Syscall)
               , mk "cpuid"   $ const (primitive CPUID)
@@ -644,7 +642,7 @@ mkConditionals pfx mkop = map (\(sfx, f) -> (pfx ++ sfx, f)) conditionals
                    , mk "nz" $ mkop cond_nz ]
     mk :: String -> (forall m. Semantics m => SemanticsArgs -> m ()) -> (String, SemanticsOp)
     mk suffix sop = (suffix, semanticsOp ("conditional-" ++ suffix) sop)
-      
+
 maybe_ip_relative :: Semantics m =>
                      (Value m (BVType 64) -> m b)
                      -> SemanticsArgs -> m b
@@ -848,10 +846,14 @@ fpUnopOrRegBinop f args@(_, vs, _mnemonic)
 --   * fixed:     those which have exact sizes known
 
 -- FIXME: do something more interesting here than 'Maybe'
-execInstruction :: FullSemantics m => Word64 -> F.InstructionInstance -> Maybe (m ())
+execInstruction :: (FullSemantics m, Show (Value m (BVType 64)))
+                => Value m (BVType 64)
+                   -- ^ Next ip address
+                -> F.InstructionInstance
+                -> Maybe (m ())
 execInstruction next ii =
   case M.lookup (F.iiOp ii) semanticsMap of
     Just (SemanticsOp f) -> Just $ do
-      rip .= bvLit knownNat next
+      rip .= next
       f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
-    Nothing -> trace ("Unsupported instruction (" ++ showHex next "): " ++ show ii) Nothing
+    Nothing -> trace ("Unsupported instruction (" ++ show next ++ "): " ++ show ii) Nothing

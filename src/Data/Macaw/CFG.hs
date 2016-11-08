@@ -27,7 +27,7 @@ module Data.Macaw.CFG
   ( CFG
   , emptyCFG
   , cfgBlocks
-  , cfgBlockEnds
+--  , cfgBlockEnds
   , insertBlocksForCode
   , traverseBlocks
   , traverseBlockAndChildren
@@ -86,15 +86,18 @@ module Data.Macaw.CFG
   , PrettyRegValue(..)
     -- * Architecture type families
   , ArchAddr
+  , ArchSegmentedAddr
   , ArchFn
   , ArchReg
   , ArchStmt
+  , RegAddr
   , RegAddrWidth
     -- ** Classes
   , RegisterInfo(..)
     -- ** Synonyms
   , ArchAddrWidth
   , ArchLabel
+  , Data.Macaw.Memory.SegmentedAddr
   ) where
 
 import           Control.Applicative
@@ -117,8 +120,6 @@ import           Data.Parameterized.Nonce
 import           Data.Parameterized.Some
 import           Data.Parameterized.TH.GADT
 import           Data.Parameterized.TraversableF
-import           Data.Set (Set)
-import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
@@ -126,6 +127,7 @@ import           GHC.TypeLits
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Macaw.Memory (MemWord, SegmentedAddr(..))
 import           Data.Macaw.Types
 
 -- Note:
@@ -135,7 +137,11 @@ import           Data.Macaw.Types
 type Prec = Int
 
 colonPrec :: Prec
-colonPrec = 5
+colonPrec = 7
+
+plusPrec :: Prec
+plusPrec = 6
+
 
 -- | Class for pretty printing with a precedence field.
 class PrettyPrec v where
@@ -169,7 +175,7 @@ bracketsep (h:l) = vcat $
 -- The field is the address width.
 data BlockLabel w
      -- | A block that came from an address in the code.
-   = GeneratedBlock { labelAddr   :: !w
+   = GeneratedBlock { labelAddr   :: !(SegmentedAddr w)
                     , labelIndex  :: {-# UNPACK #-} !Word64
                     -- ^ A unique identifier for a generated block.
                     }
@@ -181,19 +187,19 @@ isRootBlockLabel (GeneratedBlock _ w) = w == 0
 rootBlockLabel :: BlockLabel w -> BlockLabel w
 rootBlockLabel (GeneratedBlock p _) = GeneratedBlock p 0
 
-mkRootBlockLabel :: w -> BlockLabel w
+mkRootBlockLabel :: SegmentedAddr w -> BlockLabel w
 mkRootBlockLabel p = GeneratedBlock p 0
 
-instance Ord w => Ord (BlockLabel w) where
+instance Ord (BlockLabel w) where
   compare (GeneratedBlock p v) (GeneratedBlock p' v') =
     compare p p' Monoid.<> compare v v'
 
-instance (Integral w, Show w) => Show (BlockLabel w) where
-  showsPrec _ (GeneratedBlock a 0) s = "block_" ++ showHex a s
-  showsPrec _ (GeneratedBlock a w) s = "subblock_" ++ showHex a ("_" ++ shows w s)
+instance Show (BlockLabel w) where
+  showsPrec _ (GeneratedBlock a 0) s = "block_" ++ shows a s
+  showsPrec _ (GeneratedBlock a w) s = "subblock_" ++ shows a ("_" ++ shows w s)
   {-# INLINABLE showsPrec #-}
 
-instance (Integral w, Show w) => Pretty (BlockLabel w) where
+instance Pretty (BlockLabel w) where
   pretty l = text (show l)
 
 -----------------------------------------------------------------------
@@ -648,6 +654,9 @@ $(pure [])
 -- | Width of register used to store addresses.
 type family RegAddrWidth (r :: Type -> *) :: Nat
 
+-- | The value used to store
+type RegAddr r = MemWord (RegAddrWidth r)
+
 -- | A type family for architecture specific functions.
 --
 -- These function may return a value.  They may depend on the current state of
@@ -666,12 +675,15 @@ type family ArchReg (arch :: *) :: Type -> *
 type family ArchStmt (arch :: *) :: * -> *
 
 -- | The type to use for addresses on the architecutre.
-type family ArchAddr (arch :: *) :: *
+type ArchAddr arch = RegAddr (ArchReg arch)
+
+-- | A segmented addr for a given architecture.
+type ArchSegmentedAddr arch = SegmentedAddr (ArchAddrWidth arch)
 
 -- | Number of bits in addreses for architecture.
 type ArchAddrWidth arch = RegAddrWidth (ArchReg arch)
 
-type ArchLabel arch = BlockLabel (ArchAddr arch)
+type ArchLabel arch = BlockLabel (ArchAddrWidth arch)
 
 -- | Operations on a Arch
 class ShowF (ArchReg arch) => PrettyArch arch where
@@ -683,7 +695,11 @@ class ShowF (ArchReg arch) => PrettyArch arch where
            -> m Doc
 
 -- | This class provides access to information about registers.
-class (OrdF r, ShowF r) => RegisterInfo r where
+class ( OrdF r
+      , ShowF r
+      , Integral (MemWord (RegAddrWidth r))
+      ) => RegisterInfo r where
+
   -- | List of all arch registers.
   archRegs :: [Some r]
 
@@ -728,12 +744,17 @@ instance Show (AssignId ids tp) where
 
 -- | A value at runtime.
 data Value arch ids tp
-   = forall n . (tp ~ BVType n) => BVValue !(NatRepr n) !Integer
-     -- ^ Bitvector value.
+   = forall n
+   .  (tp ~ BVType n)
+   => BVValue !(NatRepr n) !Integer
+     -- ^ A constant bitvector
+   | ( tp ~ BVType (ArchAddrWidth arch))
+   => RelocatableValue !(NatRepr (ArchAddrWidth arch)) !(ArchSegmentedAddr arch)
+     -- ^ A value that can be relocated.
    | AssignedValue !(Assignment arch ids tp)
      -- ^ Value from an assignment statement.
    | Initial !(ArchReg arch tp)
-     -- ^ Denotes the value for an initial register
+     -- ^ Represents the value assigned to the register when the block started.
 
 type BVValue arch ids w = Value arch ids (BVType w)
 
@@ -781,7 +802,8 @@ instance ( HasRepr (ArchReg arch) TypeRepr
          )
       => HasRepr (Value arch ids) TypeRepr where
 
-  typeRepr (BVValue n _) = BVTypeRepr n
+  typeRepr (BVValue w _) = BVTypeRepr w
+  typeRepr (RelocatableValue w _) = BVTypeRepr w
   typeRepr (AssignedValue a) = typeRepr (assignRhs a)
   typeRepr (Initial r) = typeRepr r
 
@@ -791,16 +813,6 @@ valueWidth :: ( HasRepr (ArchReg arch) TypeRepr
 valueWidth v =
   case typeRepr v of
     BVTypeRepr n -> n
-
-{-
-instance HasRepr (AssignRhs arch ids) TypeRepr
-      => TestEquality (Assignment arch ids) where
-  testEquality x y = orderingF_refl (compareF x y)
-
-instance HasRepr (AssignRhs arch ids) TypeRepr
-      => OrdF (Assignment arch ids) where
-  compareF x y = compareF (assignId x) (assignId y)
--}
 
 $(pure [])
 
@@ -814,6 +826,7 @@ ppLit w i =
 -- | Pretty print a value.
 ppValue :: ShowF (ArchReg arch) => Prec -> Value arch ids tp -> Doc
 ppValue p (BVValue w i)     = assert (i >= 0) $ parenIf (p > colonPrec) $ ppLit w i
+ppValue p (RelocatableValue _ a) = parenIf (p > plusPrec) $ text (show a)
 ppValue _ (AssignedValue a) = ppAssignId (assignId a)
 ppValue _ (Initial r)       = text (showF r) PP.<> text "_0"
 
@@ -918,6 +931,11 @@ instance OrdF (ArchReg arch)
       GTF -> GTF
   compareF BVValue{} _ = LTF
   compareF _ BVValue{} = GTF
+
+  compareF (RelocatableValue _ x) (RelocatableValue _ y) =
+    fromOrdering (compare x y)
+  compareF RelocatableValue{} _ = LTF
+  compareF _ RelocatableValue{} = GTF
 
   compareF (AssignedValue x) (AssignedValue y) =
     compareF (assignId x) (assignId y)
@@ -1175,10 +1193,9 @@ instance ( OrdF  (ArchReg arch)
 -- to the block for that code location.
 data CFG arch ids
    = CFG { _cfgBlocks :: !(Map (ArchLabel arch) (Block arch ids))
-         , _cfgBlockRanges :: !(Map (ArchAddr arch) (ArchAddr arch))
+         , _cfgBlockRanges :: !(Map (ArchSegmentedAddr arch) (ArchAddr arch))
            -- ^ Maps each address that is the start of a block
-           -- to the address just past the end of that block.
-           -- Blocks are expected to be contiguous.
+           -- to the size of the block.
          }
 
 -- | Create empty CFG
@@ -1190,11 +1207,13 @@ emptyCFG = CFG { _cfgBlocks = Map.empty
 cfgBlocks :: Simple Lens (CFG arch ids) (Map (ArchLabel arch) (Block arch ids))
 cfgBlocks = lens _cfgBlocks (\s v -> s { _cfgBlocks = v })
 
-cfgBlockRanges :: Simple Lens (CFG arch ids) (Map (ArchAddr arch) (ArchAddr arch))
+cfgBlockRanges :: Simple Lens (CFG arch ids) (Map (ArchSegmentedAddr arch) (ArchAddr arch))
 cfgBlockRanges = lens _cfgBlockRanges (\s v -> s { _cfgBlockRanges = v })
 
-cfgBlockEnds :: Ord (ArchAddr arch) => CFG arch ids -> Set (ArchAddr arch)
+{-
+cfgBlockEnds :: CFG arch ids -> Set (ArchAddr arch)
 cfgBlockEnds g = Set.fromList (Map.elems (_cfgBlockRanges g))
+-}
 
 -- | Return block with given label.
 findBlock :: Ord (ArchAddr arch) => CFG arch ids -> ArchLabel arch ->
@@ -1219,13 +1238,13 @@ insertBlocksForCode :: ( Ord (ArchAddr arch)
                        , Integral (ArchAddr arch)
                        , Show     (ArchAddr arch)
                        )
-                    => ArchAddr arch
-                    -> ArchAddr arch
+                    => ArchSegmentedAddr arch -- ^ Start of block
+                    -> ArchAddr arch -- ^ Size of block
                     -> [Block arch ids]
                     -> CFG arch ids
                     -> CFG arch ids
-insertBlocksForCode start end bs cfg =
-  let cfg' = cfg & cfgBlockRanges %~ Map.insert start end
+insertBlocksForCode start size bs cfg =
+  let cfg' = cfg & cfgBlockRanges %~ Map.insert start size
    in foldl' (flip insertBlock) cfg' bs
 
 -- | Constraints for pretty printing a 'CFG'.

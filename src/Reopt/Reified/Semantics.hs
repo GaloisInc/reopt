@@ -122,6 +122,12 @@ data Expr tp where
   -- later.
   VarExpr :: Variable tp -> Expr tp
 
+instance Show (Expr tp) where
+  show (ValueExpr v) = show v
+  show (LitExpr _ i) = show i
+  show (AppExpr _) = "app"
+  show (VarExpr _) = "variable"
+
 instance TestEquality Expr where
   testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
 

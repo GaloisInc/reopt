@@ -7,7 +7,11 @@ packages:
 - deps/linux-ptrace
 - deps/posix-waitpid
 - deps/llvm-pretty
+- deps/crucible
+- deps/galois-dwarf
+- deps/reopt-crucible
+- deps/matlab-data
 extra-deps:
 - bimap-0.3.1
 - bv-0.4.0
-resolver: lts-5.17
+resolver: lts-6.22

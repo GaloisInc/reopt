@@ -34,7 +34,7 @@ module Data.Macaw.AbsDomain.AbsState
   , concretize
   , asConcreteSingleton
   , meet
-  , size
+  , absValueSize
   , codePointerSet
   , AbsDomain(..)
   , AbsProcessorState
@@ -61,8 +61,8 @@ import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Bits
+import           Data.Foldable
 import           Data.Int
-import           Data.List (find)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -72,26 +72,21 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import qualified Data.Macaw.AbsDomain.StridedInterval as SI
 import           Data.Macaw.CFG
-import           Data.Macaw.Types
-
-import           Data.Macaw.Memory ( Memory, isCodeAddrOrNull)
 import           Data.Macaw.DebugLogging
---import           Reopt.Utils.Hex
+import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.Types
 
 ------------------------------------------------------------------------
 -- Utilities
 
 addOff :: NatRepr w -> Integer -> Integer -> Integer
 addOff w o v = toUnsigned w (o + v)
-
-
-
 
 ------------------------------------------------------------------------
 -- AbsDomain
@@ -131,13 +126,14 @@ class Eq d => AbsDomain d where
 -- to be at most 64 bits.
 data AbsValue w (tp :: Type)
   = forall n . (tp ~ BVType n) => FinSet !(Set Integer)
-    -- ^ Denotes that this value can take any one of the  absolute value.
-  | (tp ~ BVType w) => CodePointers !(Set Word64)
-     -- ^ A possibly empty set of values that either point to a code segment or 0.
-  | (tp ~ BVType w) => StackOffset !Word64 !(Set Int64)
+    -- ^ Denotes that this value can take any one of the fixed set.
+  | (tp ~ BVType w) => CodePointers !(Set (SegmentedAddr w)) !Bool
+     -- ^ A possibly empty set of values that either point to a code segment.
+     -- This Boolean indicates whether this set contains the address 0.
+  | (tp ~ BVType w) => StackOffset !(SegmentedAddr w) !(Set Int64)
     -- ^ Offset of stack from the beginning of the block at the given address.
     --  First argument is address of block.
-  | (tp ~ BVType w) => SomeStackOffset !Word64
+  | (tp ~ BVType w) => SomeStackOffset !(SegmentedAddr w)
     -- ^ An offset to the stack at some offset.
   | forall n . (tp ~ BVType n) => StridedInterval !(SI.StridedInterval n)
     -- ^ A strided interval
@@ -153,20 +149,49 @@ data AbsValue w (tp :: Type)
 
 -- | Denotes that we do not know of any value that could be in set.
 emptyAbsValue :: AbsValue w (BVType w)
-emptyAbsValue = CodePointers Set.empty
-
+emptyAbsValue = CodePointers Set.empty False
 
 -- | Returns a finite set of values with some width.
 data SomeFinSet tp where
   IsFin :: !(Set Integer) -> SomeFinSet (BVType n)
   NotFin :: SomeFinSet tp
 
-asFinSet :: String -> AbsValue w tp -> SomeFinSet tp
+-- | Given a segmented addr and flag indicating if zero is contained return the underlying
+-- integer set and the set of addresses that had no base.
+partitionAbsoluteAddrs :: Integral (MemWord w)
+                        => Set (SegmentedAddr w)
+                        -> Bool
+                        -> (Set Integer, Set (SegmentedAddr w))
+partitionAbsoluteAddrs addrSet b = foldl' f (s0, Set.empty) addrSet
+   where s0 = if b then Set.singleton 0 else Set.empty
+         f (intSet,badSet) addr =
+           case segmentBase (addrSegment addr) of
+             Just base -> seq intSet' $ (intSet', badSet)
+               where intSet' = Set.insert w intSet
+                     w = toInteger base + toInteger (addr^.addrOffset)
+             Nothing -> seq badSet' $ (intSet, badSet')
+               where badSet' = Set.insert addr badSet
+
+asFinSet :: forall w tp
+         .  Integral (MemWord w)
+         => String
+         -> AbsValue w tp
+         -> SomeFinSet tp
 asFinSet _ (FinSet s) = IsFin s
-asFinSet nm (CodePointers s)
-  | s == Set.singleton 0 = IsFin (Set.singleton 0)
-  | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $
-      IsFin (Set.mapMonotonic toInteger s)
+asFinSet _ (CodePointers s False)
+  | Set.null s = IsFin Set.empty
+asFinSet _ (CodePointers s True)
+  | Set.null s = IsFin (Set.singleton 0)
+asFinSet nm (CodePointers addrSet b) = go (Set.toList addrSet) $! s0
+  where s0 = if b then Set.singleton 0 else Set.empty
+        go :: [SegmentedAddr w] -> Set Integer -> SomeFinSet (BVType w)
+        go [] s = debug DAbsInt ("dropping Codeptr " ++ nm) $ IsFin s
+        go (a:r) s =
+          case segmentBase (addrSegment a) of
+            Just base -> go r $! s'
+              where v = toInteger base + toInteger (a^.addrOffset)
+                    s' = Set.insert v s
+            Nothing -> NotFin
 asFinSet _ _ = NotFin
 
 -- asFinSet64 :: String -> AbsValue (BVType 64) -> Maybe (Set Word64)
@@ -176,19 +201,19 @@ asFinSet _ _ = NotFin
 --   | otherwise = debug DAbsInt ("dropping Codeptr " ++ nm) $ Just s
 -- asFinSet64 _ _ = Nothing
 
-codePointerSet :: AbsValue w tp -> Set Word64
-codePointerSet (CodePointers s) = s
+codePointerSet :: AbsValue w tp -> Set (SegmentedAddr w)
+codePointerSet (CodePointers s _) = s
 codePointerSet _ = Set.empty
 
--- | The maximum number of values we hold in a value set, after which
--- we move to intervals
+-- | The maximum number of values we hold in a value set, after which we move to
+-- intervals
 maxSetSize :: Int
 maxSetSize = 5
 
 -- Note that this is syntactic equality only.
 instance Eq (AbsValue w tp) where
   FinSet x    == FinSet y      = x == y
-  CodePointers x == CodePointers y = x == y
+  CodePointers x xb == CodePointers y yb = x == y && xb == yb
   StackOffset ax ox  == StackOffset ay oy   = (ax,ox) == (ay,oy)
   SomeStackOffset ax == SomeStackOffset ay = ax == ay
   StridedInterval si1 == StridedInterval si2 = si1 == si2
@@ -207,33 +232,41 @@ instance Show (AbsValue w tp) where
 
 instance Pretty (AbsValue w tp) where
   pretty (FinSet s) = text "finset" <+> ppIntegerSet s
-  pretty (CodePointers s) = text "code" <+> ppIntegerSet s
+  pretty (CodePointers s b) = text "code" <+> ppSet (s0 ++ sd)
+    where s0 = if b then [text "0"] else []
+          sd = f <$> Set.toList s
+          f segAddr = text (show segAddr)
 
   pretty (StridedInterval s) =
     text "strided" <> parens (pretty s)
   pretty (SubValue n av) =
     text "sub" <> parens (integer (natValue n) <> comma <+> pretty av)
-  pretty (StackOffset a    s) = ppSet ppv s
-    where ppv v' | v' >= 0   = text $ "rsp_" ++ showHex a " + " ++ showHex v' ""
-                 | otherwise = text $ "rsp_" ++ showHex a " - " ++ showHex (negate v') ""
+  pretty (StackOffset a s) = ppSet (ppv <$> Set.toList s)
+    where ppv v' | v' >= 0   = text $ "rsp_" ++ show a ++ " + " ++ showHex v' ""
+                 | otherwise = text $ "rsp_" ++ show a ++ " - " ++ showHex (negate v') ""
 
-  pretty (SomeStackOffset a) = text $ "rsp_" ++ showHex a " + ?"
+  pretty (SomeStackOffset a) = text $ "rsp_" ++ show a ++ " + ?"
   pretty TopV = text "top"
   pretty ReturnAddr = text "return_addr"
 
-ppSet :: (w -> Doc) -> Set w -> Doc
-ppSet ppv vs = encloseSep lbrace rbrace comma (map ppv (Set.toList vs))
+ppSet :: [Doc] -> Doc
+ppSet = encloseSep lbrace rbrace comma
 
 ppIntegerSet :: (Integral w, Show w) => Set w -> Doc
-ppIntegerSet = ppSet ppv
+ppIntegerSet s = ppSet (ppv <$> Set.toList s)
   where ppv v' = assert (v' >= 0) $ text (showHex v' "")
 
 -- | Returns a set of concrete integers that this value may be.
 -- This function will neither return the complete set or an
 -- known under-approximation.
-concretize :: AbsValue w tp -> Maybe (Set Integer)
+concretize :: Integral (MemWord w) => AbsValue w tp -> Maybe (Set Integer)
 concretize (FinSet s) = Just s
-concretize (CodePointers s) = Just (Set.mapMonotonic toInteger s)
+concretize (CodePointers s b) = Just $ Set.fromList $
+  [ toInteger base + toInteger (addr^.addrOffset)
+  | addr <- Set.toList s
+  , base <- maybeToList (segmentBase (addrSegment addr))
+  ]
+  ++ (if b then [0] else [])
 concretize (SubValue _ _) = Nothing -- we know nothing about _all_ values
 concretize (StridedInterval s) =
   debug DAbsInt ("Concretizing " ++ show (pretty s)) $
@@ -241,17 +274,17 @@ concretize (StridedInterval s) =
 concretize _ = Nothing
 
 -- FIXME: make total, we would need to carry around tp
-size :: AbsValue w tp -> Maybe Integer
-size (FinSet s) = Just $ fromIntegral (Set.size s)
-size (CodePointers s) = Just $ fromIntegral (Set.size s)
-size (StridedInterval s) = Just $ SI.size s
-size (StackOffset _ s) = Just $ fromIntegral (Set.size s)
-size _ = Nothing
+absValueSize :: AbsValue w tp -> Maybe Integer
+absValueSize (FinSet s) = Just $ fromIntegral (Set.size s)
+absValueSize (CodePointers s b) = Just $ fromIntegral (Set.size s) + (if b then 1 else 0)
+absValueSize (StridedInterval s) = Just $ SI.size s
+absValueSize (StackOffset _ s) = Just $ fromIntegral (Set.size s)
+absValueSize _ = Nothing
 
 -- | Return single value is the abstract value can only take on one value.
-asConcreteSingleton :: AbsValue w tp -> Maybe Integer
+asConcreteSingleton :: Integral (MemWord w) => AbsValue w tp -> Maybe Integer
 asConcreteSingleton v = do
-  sz <- size v
+  sz <- absValueSize v
   guard (sz == 1)
   [i] <- Set.toList <$> concretize v
   return i
@@ -276,78 +309,80 @@ subValue n v
   | otherwise = SubValue n v
 
 isEmpty :: AbsValue w tp -> Bool
-isEmpty (CodePointers s) = Set.null s
+isEmpty (CodePointers s b) = Set.null s && not b
 isEmpty (FinSet s) = Set.null s
 isEmpty _ = False
 
 -- -----------------------------------------------------------------------------
 -- Instances
 
+{-
 -- | Returns true if set just contains 0.
 isZeroPtr :: Set Word64 -> Bool
 isZeroPtr s = Set.size s == 1 && Set.findMin s == 0
+-}
 
 -------------------------------------------------------------------------------
 -- Joining abstract values
 
+ppSegAddrSet :: Set (SegmentedAddr w) -> Doc
+ppSegAddrSet s =  ppSet (text . show <$> Set.toList s)
+
 -- | Join the old and new states and return the updated state iff
 -- the result is larger than the old state.
 -- This also returns any addresses that are discarded during joining.
-joinAbsValue :: AbsValue w tp -> AbsValue w tp -> Maybe (AbsValue w tp)
+joinAbsValue :: Integral (MemWord w)
+             => AbsValue w tp
+             -> AbsValue w tp
+             -> Maybe (AbsValue w tp)
 joinAbsValue x y
     | Set.null s = r
-    | otherwise = debug DAbsInt ("dropping " ++ show (ppIntegerSet s) ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
+    | otherwise = debug DAbsInt ("dropping " ++ show dropped ++ "\n" ++ show x ++ "\n" ++ show y ++ "\n") r
   where (r,s) = runState (joinAbsValue' x y) Set.empty
+        dropped = ppSegAddrSet s
 
-addWords :: Set Word64 -> State (Set Word64) ()
-addWords s = modify $ Set.union (Set.delete 0 s)
-
-
+addWords :: Set (SegmentedAddr w) -> State (Set (SegmentedAddr w)) ()
+addWords s = modify $ Set.union s
 
 -- | Join the old and new states and return the updated state iff
 -- the result is larger than the old state.
 -- This also returns any addresses that are discarded during joining.
-joinAbsValue' :: AbsValue w tp
+joinAbsValue' :: Integral (MemWord w)
+              => AbsValue w tp
               -> AbsValue w tp
-              -> State (Set Word64) (Maybe (AbsValue w tp))
+              -> State (Set (SegmentedAddr w)) (Maybe (AbsValue w tp))
 joinAbsValue' TopV x = do
   addWords (codePointerSet x)
   return $! Nothing
 joinAbsValue' x y | isEmpty y = return $ Nothing
                   | isEmpty x = return $ (Just $! y)
-joinAbsValue' (CodePointers old) (CodePointers new)
-    | new `Set.isSubsetOf` old = return $ Nothing
-    | otherwise = return $ (Just $! CodePointers r)
+joinAbsValue' (CodePointers old old_b) (CodePointers new new_b)
+    | new `Set.isSubsetOf` old && (not new_b || old_b) = return $ Nothing
+    | otherwise = return $ (Just $! CodePointers r (old_b || new_b))
   where r = Set.union old new
-joinAbsValue' (FinSet old) (CodePointers new0)
-    | isZeroPtr new0 =
-      if Set.member 0 old then
-        return $ Nothing
-      else
-        return $ (Just $! FinSet $ Set.insert 0 old)
-    | new `Set.isSubsetOf` old = do
-      addWords new0
+joinAbsValue' (FinSet old) (CodePointers new_set new_zero)
+    | wordSet `Set.isSubsetOf` old = do
+      addWords new_set
       return $ Nothing
     | Set.size r > maxSetSize = do
-      addWords new0
+      addWords new_set
       return $ Just TopV
     | otherwise = do
-      addWords new0
+      addWords new_set
       return $ Just (FinSet r)
 
-  where r = Set.union old new
-        new = Set.mapMonotonic toInteger new0
+  where (wordSet,_) = partitionAbsoluteAddrs new_set new_zero
+        r = Set.union old wordSet
 
-joinAbsValue' (CodePointers old) (FinSet new)
-    | isZeroPtr old = do
-      return $ (Just $! FinSet (Set.insert 0 new))
+joinAbsValue' (CodePointers old old_zero) (FinSet new)
     | Set.size r > maxSetSize = do
       addWords old
       return $ Just TopV
     | otherwise = do
       addWords old
       return $ Just (FinSet r)
-  where r = Set.union (Set.mapMonotonic toInteger old) new
+  where (wordSet,_) = partitionAbsoluteAddrs old old_zero
+        r = Set.union wordSet new
 joinAbsValue' (FinSet old) (FinSet new)
     | new `Set.isSubsetOf` old = return $ Nothing
     | Set.size r > maxSetSize = return $ Just TopV
@@ -369,14 +404,16 @@ joinAbsValue' v v'
       return $ go si_old si_new
     | StridedInterval si <- v,  FinSet s <- v' =
       return $ go si (SI.fromFoldable (SI.typ si) s)
-    | StridedInterval si <- v,  CodePointers s <- v' = do
+    | StridedInterval si <- v,  CodePointers s b <- v' = do
       addWords s
-      return $ go si (SI.fromFoldable (SI.typ si) (Set.mapMonotonic toInteger s))
+      let (wordSet, _) = partitionAbsoluteAddrs s b
+      return $ go si (SI.fromFoldable (SI.typ si) wordSet)
     | StridedInterval si <- v', FinSet s <- v =
       return $ go si (SI.fromFoldable (SI.typ si) s)
-    | StridedInterval si <- v', CodePointers s <- v = do
+    | StridedInterval si <- v', CodePointers s b <- v = do
       addWords s
-      return $ go si (SI.fromFoldable (SI.typ si) (Set.mapMonotonic toInteger s))
+      let (wordSet, _) = partitionAbsoluteAddrs s b
+      return $ go si (SI.fromFoldable (SI.typ si) wordSet)
   where go si1 si2 = Just $ stridedInterval (SI.lub si1 si2)
 
 -- Sub values
@@ -407,18 +444,21 @@ joinAbsValue' x y = do
 -- Abstract value operations
 
 member :: Integer -> AbsValue w tp -> Bool
+member = undefined
+{-
 member _ TopV = True
 member n (FinSet s) = Set.member n s
-member n (CodePointers s) | 0 <= n && n <= toInteger (maxBound :: Word64) =
-  Set.member (fromInteger n) s
+member n (CodePointers s b) | 0 <= n && n <= toInteger (maxBound :: Word64) =
+  b && (n == 0) || Set.member (fromInteger n) s
 member n (StridedInterval si) = SI.member n si
 member n (SubValue _n' v) = member n v
 member _n _v = False
+-}
 
 -- | Returns true if this value represents the empty set.
 isBottom :: AbsValue w tp -> Bool
 isBottom (FinSet v)       = Set.null v
-isBottom (CodePointers v) = Set.null v
+isBottom (CodePointers v b) = Set.null v && not b
 isBottom (StackOffset _ v) = Set.null v
 isBottom (SomeStackOffset _) = False
 isBottom (StridedInterval v) = SI.size v == 0
@@ -436,7 +476,10 @@ isBottom ReturnAddr = False
 -- Currently the only case we care about is where v' is an interval
 
 -- @meet x y@ returns an over-approximation of the values in @x@ and @y@.
-meet :: AbsValue w tp -> AbsValue w tp -> AbsValue w tp
+meet :: Integral (MemWord w)
+     => AbsValue w tp
+     -> AbsValue w tp
+     -> AbsValue w tp
 meet x y
   | isBottom m
   , not (isBottom x)
@@ -445,11 +488,12 @@ meet x y
   | otherwise = m
   where m = meet' x y
 
-meet' :: AbsValue w tp -> AbsValue w tp -> AbsValue w tp
+meet' :: Integral (MemWord w) => AbsValue w tp -> AbsValue w tp -> AbsValue w tp
 meet' TopV x = x
 meet' x TopV = x
 -- FIXME: reuse an old value if possible?
-meet' (CodePointers old) (CodePointers new) = CodePointers $ Set.intersection old new
+meet' (CodePointers old old_zero) (CodePointers new new_zero) =
+  CodePointers (Set.intersection old new) (old_zero && new_zero)
 --TODO: Fix below
 meet' (asFinSet "meet" -> IsFin old) (asFinSet "meet" -> IsFin new) =
   FinSet $ Set.intersection old new
@@ -491,12 +535,13 @@ meet' x _ = x -- Arbitrarily pick one.
 -------------------------------------------------------------------------------
 -- Operations
 
-trunc :: (v+1 <= u)
+trunc :: (Integral (MemWord w), v+1 <= u)
       => AbsValue w (BVType u)
       -> NatRepr v
       -> AbsValue w (BVType v)
 trunc (FinSet s) w       = FinSet (Set.map (toUnsigned w) s)
-trunc (CodePointers s) w = FinSet (Set.map (toUnsigned w . toInteger) s)
+trunc (CodePointers s b) _ = FinSet sf
+  where (sf,_) = partitionAbsoluteAddrs s b
 trunc (StridedInterval s) w = stridedInterval (SI.trunc s w)
 trunc (SubValue n av) w =
   case testNatCases n w of
@@ -508,10 +553,12 @@ trunc (SomeStackOffset _) _ = TopV
 trunc ReturnAddr _ = TopV
 trunc TopV _ = TopV
 
-uext :: forall u v w .
-        (u+1 <= v) => AbsValue w (BVType u) -> NatRepr v -> AbsValue w (BVType v)
+uext :: forall u v w
+     .  (u+1 <= v, Integral (MemWord w))
+     => AbsValue w (BVType u) -> NatRepr v -> AbsValue w (BVType v)
 uext (FinSet s) _ = FinSet s
-uext (CodePointers s) _ = FinSet (Set.mapMonotonic toInteger s)
+uext (CodePointers s b) _ = FinSet wordSet
+  where (wordSet, _) = partitionAbsoluteAddrs s b
 uext (StridedInterval si) w =
   StridedInterval $ si { SI.typ = w }
 uext (SubValue (n :: NatRepr n) av) _ =
@@ -530,7 +577,8 @@ uext ReturnAddr _ = TopV
 uext TopV _ = TopV
 
 bvadd :: forall w u
-      .  NatRepr u
+      .  Integral (MemWord w)
+      => NatRepr u
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
@@ -567,24 +615,54 @@ setL :: Ord a
 setL def c l | length l > maxSetSize = def l
              | otherwise = c (Set.fromList l)
 
-bvsub :: (Word64 -> Bool)
-         -- ^ Predicate that returns true if value should be considered a code pointer.
+-- | Subtracting
+bvsub :: forall w u
+      .  MemWidth w
+      => Memory w
+         -- ^ Memory used for checking code pointers.
       -> NatRepr u
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
-bvsub is_code w (CodePointers s) (asFinSet "bvsub2" -> IsFin t)
-    | all is_code vals = CodePointers (Set.fromList vals)
-    | isZeroPtr s = FinSet (Set.map (toUnsigned w . negate) t)
+bvsub _mem w (CodePointers s b) (FinSet t)
+      -- If we just have zero.
+    | Set.null s && b = FinSet (Set.map (toUnsigned w . negate) t)
+    | all isJust vals && (not b || Set.singleton 0 == t) =
+      CodePointers (Set.fromList (catMaybes vals)) b
     | otherwise = error "Losing code pointers due to bvsub."
       -- TODO: Fix this.
 --      debug DAbsInt ("drooping " ++ show (ppIntegerSet s) ++ " " ++ show (ppIntegerSet t)) $
 --        setL (stridedInterval . SI.fromFoldable w) FinSet (toInteger <$> vals)
-  where vals :: [Word64]
+  where vals :: [Maybe (SegmentedAddr w)]
         vals = do
           x <- Set.toList s
           y <- Set.toList t
-          return $! x - fromInteger y
+          if toInteger (x^.addrOffset) >= y then
+            return $ Just $ x & addrOffset -~ fromInteger y
+           else
+            return $ Nothing
+
+bvsub _ _ xv@(CodePointers xs xb) (CodePointers ys yb)
+      -- If we just have zero.
+    | Set.null ys && yb = xv
+      --
+    | all isJust vals && xb == yb =
+        if xb then
+          FinSet (Set.insert 0 (Set.fromList (catMaybes vals)))
+         else
+          FinSet (Set.fromList (catMaybes vals))
+    | otherwise = error "Losing code pointers due to bvsub."
+      -- TODO: Fix this.
+--      debug DAbsInt ("drooping " ++ show (ppIntegerSet s) ++ " " ++ show (ppIntegerSet t)) $
+--        setL (stridedInterval . SI.fromFoldable w) FinSet (toInteger <$> vals)
+  where vals :: [Maybe Integer]
+        vals = do
+          x <- Set.toList xs
+          y <- Set.toList ys
+          if segmentIndex (addrSegment x) == segmentIndex (addrSegment y) then
+            pure $ Just $ toInteger (x^.addrOffset) - toInteger (y^.addrOffset)
+           else do
+            pure $ Nothing
 bvsub _ w (FinSet s) (asFinSet "bvsub3" -> IsFin t) =
   setL (stridedInterval . SI.fromFoldable w) FinSet $ do
   x <- Set.toList s
@@ -608,7 +686,8 @@ bvsub _ _ _ (SomeStackOffset _) = TopV
 bvsub _ _ _ _ = TopV -- Keep the pattern checker happy
 
 bvmul :: forall w u
-      .  NatRepr u
+      .  Integral (MemWord w)
+      => NatRepr u
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
       -> AbsValue w (BVType u)
@@ -631,7 +710,8 @@ bvmul w v v'
 bvmul _ _ _ = TopV
 
 -- FIXME: generalise
-bitop :: (Integer -> Integer -> Integer)
+bitop :: Integral (MemWord w)
+      => (Integer -> Integer -> Integer)
       -> NatRepr u
       -> AbsValue w (BVType u)
       -> AbsValue w  (BVType u)
@@ -660,9 +740,10 @@ absFalse = FinSet (Set.singleton 0)
 
 -- | This returns the smallest abstract value that contains the
 -- given unsigned integer.
-abstractSingleton :: NatRepr w
+abstractSingleton :: (Num (MemWord w))
+                  => NatRepr w
                      -- ^ Width of code pointer
-                  -> (Word64 -> Bool)
+                  -> (MemWord w -> Maybe (SegmentedAddr w))
                      -- ^ Predicate that recognizes if the given value is a code
                      -- pointer.
                   -> NatRepr n
@@ -671,12 +752,12 @@ abstractSingleton :: NatRepr w
 abstractSingleton code_w is_code w i
   | Just Refl <- testEquality w code_w
   , 0 <= i && i <= maxUnsigned w
-  , is_code (fromIntegral i) =
-    CodePointers (Set.singleton (fromIntegral i))
+  , Just sa <- is_code (fromInteger i) =
+    CodePointers (Set.singleton sa) False
   | 0 <= i && i <= maxUnsigned w = FinSet (Set.singleton i)
   | otherwise = error $ "abstractSingleton given bad value: " ++ show i ++ " " ++ show w
 
-concreteStackOffset :: Word64 -> Integer -> AbsValue w (BVType w)
+concreteStackOffset :: SegmentedAddr w -> Integer -> AbsValue w (BVType w)
 concreteStackOffset a o = StackOffset a (Set.singleton (fromInteger o))
 
 ------------------------------------------------------------------------
@@ -687,8 +768,8 @@ hasMaximum tp v =
   case v of
    FinSet s | Set.null s -> Nothing
             | otherwise  -> Just $! Set.findMax s
-   CodePointers s | Set.null s -> Nothing
-                  | otherwise  -> Just $! (toInteger (Set.findMax s))
+   CodePointers s b | Set.null s -> if b then Just 0 else Nothing
+                    | otherwise  -> Just $ case tp of BVTypeRepr n -> maxUnsigned n
    StridedInterval si -> Just (SI.intervalEnd si)
    TopV               -> Just $ case tp of BVTypeRepr n -> maxUnsigned n
    _                  -> Nothing
@@ -699,8 +780,7 @@ hasMinimum _tp v =
   case v of
    FinSet s       | Set.null s -> Nothing
                   | otherwise  -> Just $! Set.findMin s
-   CodePointers s | Set.null s -> Nothing
-                  | otherwise  -> Just $! toInteger (Set.findMin s)
+   CodePointers s b | Set.null s -> if b then Just 0 else Nothing
    StridedInterval si -> Just $! SI.base si
    _                  -> Just 0
 
@@ -709,9 +789,11 @@ hasMinimum _tp v =
 -- For example, given {2, 3} and {2, 3, 4}, we know (only) that
 -- {2, 3} and {3, 4} because we may pick any element from either set.
 
-abstractULt :: TypeRepr tp
-              -> AbsValue w tp -> AbsValue w tp
-              -> (AbsValue w tp, AbsValue w tp)
+abstractULt :: Integral (MemWord w)
+            => TypeRepr tp
+            -> AbsValue w tp
+            -> AbsValue w tp
+            -> (AbsValue w tp, AbsValue w tp)
 abstractULt _tp TopV TopV = (TopV, TopV)
 abstractULt tp x y
   | Just u_y <- hasMaximum tp y
@@ -725,7 +807,8 @@ abstractULt tp x y
 abstractULt _tp x y = (x, y)
 
 -- | @abstractULeq x y@ refines x and y with the knowledge that @x <= y@
-abstractULeq :: TypeRepr tp
+abstractULeq :: Integral (MemWord w)
+             => TypeRepr tp
                -> AbsValue w tp
                -> AbsValue w tp
                -> (AbsValue w tp, AbsValue w tp)
@@ -770,9 +853,10 @@ type AbsBlockStack w = Map Int64 (StackEntry w)
 -- values in @y@ and @x@.  It sets the first state parameter to true if @z@
 -- is different from @y@ and adds and escaped code pointers to the second
 -- parameter.
-absStackJoinD :: AbsBlockStack w
+absStackJoinD :: Integral (MemWord w)
+              => AbsBlockStack w
               -> AbsBlockStack w
-              -> State (Bool,Set Word64) (AbsBlockStack w)
+              -> State (Bool,Set (SegmentedAddr w)) (AbsBlockStack w)
 absStackJoinD y x = do
   -- This attempts to merge information from the new state into the old state.
   let entryLeq (o, StackEntry y_tp y_v) =
@@ -802,7 +886,7 @@ absStackJoinD y x = do
               ReturnAddr -> debug DAbsInt ("absStackJoinD dropping return value:\nOld state: " ++ show (ppAbsStack y) ++ "\nNew state: " ++ show (ppAbsStack x)) $ return ()
               _ -> return ()
             _1 .= True
-            _2 %= Set.union (Set.delete 0 (codePointerSet y_v))
+            _2 %= Set.union (codePointerSet y_v)
             return Nothing
   z <- mapM entryLeq (Map.toList y)
   return $! Map.fromList (catMaybes z)
@@ -868,7 +952,7 @@ instance ( RegisterInfo r
                                    }
 
           z = traceUnless (Set.null dropped)
-                ("dropped abs " ++ show (ppIntegerSet dropped) ++ "\n"
+                ("dropped abs " ++ show (ppSegAddrSet dropped) ++ "\n"
                                 ++ show x ++ "\n" ++ show y) $
               zs
 
@@ -888,23 +972,19 @@ instance (OrdF r, ShowF r) => Show (AbsBlockState r) where
   show s = show (pretty s)
 
 -- | Update the block state to point to a specific IP address.
-setAbsIP :: (RegisterInfo r, Integral w)
-         => Memory w
-            -- ^ Predicate to check that given IP is a code pointer.
-         -> w
-            -- ^ The width of a code pointer.
+setAbsIP :: RegisterInfo r
+         => SegmentedAddr (RegAddrWidth r)
+            -- ^ The address to set.
          -> AbsBlockState r
-         -> Maybe (AbsBlockState r)
-setAbsIP mem a b
-  | isCodeAddrOrNull mem a == False =
-    Nothing
+         -> AbsBlockState r
+setAbsIP a b
     -- Check to avoid reassigning next IP if it is not needed.
-  | CodePointers s <- b^.absRegState^.curIP
+  | CodePointers s False <- b^.absRegState^.curIP
   , Set.size s == 1
-  , Set.member (fromIntegral a) s =
-    Just b
+  , Set.member a s =
+    b
   | otherwise =
-    Just $ b & absRegState . curIP .~ CodePointers (Set.singleton (fromIntegral a))
+    b & absRegState . curIP .~ CodePointers (Set.singleton a) False
 
 ------------------------------------------------------------------------
 -- AbsProcessorState
@@ -914,12 +994,12 @@ setAbsIP mem a b
 -- This is only a function of the address width.
 type ArchAbsValue arch = AbsValue (RegAddrWidth (ArchReg arch))
 
--- | this stores the abstract state of the system at a given point in time.
+-- | This stores the abstract state of the system at a given point in time.
 data AbsProcessorState r ids
    = AbsProcessorState { absCodeWidth    :: !(NatRepr (RegAddrWidth r))
                          -- ^ The width of a code pointer; the 'NatRepr' type
                          -- connects the type-level nat with the value
-                       , absIsCode       :: !(Word64 -> Bool)
+                       , absMem       :: !(Memory (RegAddrWidth r))
                          -- ^ Recognizer for code addresses.
                        , _absInitialRegs
                          :: !(RegState r (AbsValue (RegAddrWidth r)))
@@ -930,7 +1010,6 @@ data AbsProcessorState r ids
                        , _curAbsStack    :: !(AbsBlockStack (RegAddrWidth r))
                          -- ^ The current symbolic state of the stack
                        }
-
 
 absInitialRegs :: Simple Lens (AbsProcessorState r ids)
                               (RegState r (AbsValue (RegAddrWidth r)))
@@ -953,14 +1032,17 @@ instance (OrdF r, ShowF r)
   pretty regs = pretty (AbsBlockState { _absRegState   = regs ^. absInitialRegs
                                       , _startAbsStack = regs ^. curAbsStack })
 
-initAbsProcessorState :: NatRepr (RegAddrWidth r)
-                      -> (Word64 -> Bool)
-                         -- ^ Predicate that recognizes when a value is a code pointer.
+initAbsProcessorState :: (Num (RegAddr r), Ord (RegAddr r))
+                      => NatRepr (RegAddrWidth r)
+                      -> Memory (RegAddrWidth r)
+                         -- ^ Current state of memory in the processor.
+                         --
+                         -- Used for checking code segment status.
                       -> AbsBlockState r
                       -> AbsProcessorState r ids
-initAbsProcessorState code_width is_code s =
+initAbsProcessorState code_width mem s =
   AbsProcessorState { absCodeWidth = code_width
-                    , absIsCode = is_code
+                    , absMem = mem
                     , _absInitialRegs = s^.absRegState
                     , _absAssignments = MapF.empty
                     , _curAbsStack = s^.startAbsStack
@@ -1013,10 +1095,11 @@ pruneStack = Map.filter f
 
 transferValue' :: ( OrdF (ArchReg a)
                   , ShowF (ArchReg a)
+                  , Num (ArchAddr a)
                   )
                => NatRepr (ArchAddrWidth a)
                   -- ^ Width of a code pointer
-               -> (Word64 -> Bool)
+               -> (MemWord (ArchAddrWidth a) -> Maybe (SegmentedAddr (ArchAddrWidth a)))
                   -- ^ Predicate that recognizes if address is code addreess.
                -> MapF (AssignId ids) (ArchAbsValue a)
                -> RegState (ArchReg a) (ArchAbsValue a)
@@ -1027,6 +1110,7 @@ transferValue' code_width is_code amap aregs v =
    BVValue w i
      | 0 <= i && i <= maxUnsigned w -> abstractSingleton code_width is_code w i
      | otherwise -> error $ "transferValue given illegal value " ++ show (pretty v)
+   RelocatableValue{} -> error $ "Relocatable values are not supported."
    -- Invariant: v is in m
    AssignedValue a ->
      fromMaybe (error $ "Missing assignment for " ++ show (assignId a))
@@ -1039,12 +1123,19 @@ transferValue' code_width is_code amap aregs v =
 -- | Compute abstract value from value and current registers.
 transferValue :: ( OrdF (ArchReg a)
                  , ShowF (ArchReg a)
+                 , MemWidth (ArchAddrWidth a)
                  )
               => AbsProcessorState (ArchReg a) ids
               -> Value a ids tp
               -> ArchAbsValue a tp
 transferValue c v =
-  transferValue' (absCodeWidth c) (absIsCode c) (c^.absAssignments) (c^.absInitialRegs) v
+  let is_code addr = do
+        sa <- absoluteAddrSegment (absMem c) addr
+        if segmentFlags (addrSegment sa) `Perm.hasPerm` Perm.execute then
+          Just $! sa
+         else
+          Nothing
+   in transferValue' (absCodeWidth c) is_code (c^.absAssignments) (c^.absInitialRegs) v
 
 ------------------------------------------------------------------------
 -- Operations
@@ -1052,6 +1143,7 @@ transferValue c v =
 addMemWrite :: ( HasRepr (ArchReg arch) TypeRepr
                , OrdF    (ArchReg arch)
                , ShowF   (ArchReg arch)
+               , MemWidth (ArchAddrWidth arch)
                )
             => ArchAbsValue arch (BVType (ArchAddrWidth arch))
                -- ^ Current instruction pointer
@@ -1106,6 +1198,7 @@ absStackHasReturnAddr s = isJust $ find isReturnAddr (Map.elems (s^.startAbsStac
 -- | Return state for after value has run.
 finalAbsBlockState :: forall a ids
                    .  ( RegisterInfo (ArchReg a)
+                      , MemWidth (ArchAddrWidth a)
                       )
                    => AbsProcessorState (ArchReg a) ids
                    -> RegState (ArchReg a) (Value a ids)
@@ -1120,6 +1213,7 @@ finalAbsBlockState c s =
 
 transferApp :: ( OrdF (ArchReg a)
                , ShowF (ArchReg a)
+               , MemWidth (ArchAddrWidth a)
                )
             => AbsProcessorState (ArchReg a) ids
             -> App (Value a ids) tp
@@ -1129,7 +1223,7 @@ transferApp r a =
     Trunc v w -> trunc (transferValue r v) w
     UExt  v w -> uext  (transferValue r v) w
     BVAdd w x y -> bvadd w (transferValue r x) (transferValue r y)
-    BVSub w x y -> bvsub (absIsCode r) w (transferValue r x) (transferValue r y)
+    BVSub w x y -> bvsub (absMem r) w (transferValue r x) (transferValue r y)
     BVMul w x y -> bvmul w (transferValue r x) (transferValue r y)
     BVAnd w x y -> bitop (.&.) w (transferValue r x) (transferValue r y)
     BVOr w x y  -> bitop (.|.) w (transferValue r x) (transferValue r y)

@@ -1,9 +1,10 @@
+{-# LANGUAGE DataKinds #-}
 module Reopt
   ( printDisassemblyLine
   , isCodeSection
   , instructionNames
   , printSectionDisassembly
-  , printExecutableAddressesInGlobalData
+--  , printExecutableAddressesInGlobalData
   , showBytes
   , slice
     -- * File reading
@@ -13,7 +14,6 @@ module Reopt
   ) where
 
 import           Control.Exception
-import           Control.Lens
 import           Control.Monad
 import           Data.Bits
 import qualified Data.ByteString as B
@@ -26,9 +26,6 @@ import           Numeric
 import           System.Exit
 import           System.IO
 import           System.IO.Error
-
-import           Data.Macaw.Memory.ElfLoader
-import           Data.Macaw.Memory
 
 
 -- | @stringToFixedBuffer n s@ returns a string with length @n@ containing
@@ -125,12 +122,13 @@ printSectionDisassembly s = do
   mapM_ pp dta
   putStrLn ""
 
+{-
 -- | This function prints out executable addresses found in global data
 -- that are not obtained by traversing the code segments.  Useful for
 -- identifying possible entry points via global data.
 printExecutableAddressesInGlobalData :: Elf Word64 -> IO ()
 printExecutableAddressesInGlobalData e = do
-  mem <- either fail return $ memoryForElfSegments e
+  mem <- either fail return $ memoryForElfSegments (knownNat :: NatRepr 64) e
   let exec_words :: [Word64]
       exec_words = [ w | w <- segmentAsWord64le =<< memSegments mem
                    , mem & addrHasPermissions w pf_x
@@ -167,6 +165,7 @@ printExecutableAddressesInGlobalData e = do
 
       Nothing -> do
         putStrLn $ showHex o " not found in segment."
+-}
 
 --------------------------------------------------------------------------------
 -- Reading elf utilities

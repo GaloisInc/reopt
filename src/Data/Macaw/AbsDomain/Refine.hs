@@ -18,20 +18,21 @@ module Data.Macaw.AbsDomain.Refine
   ) where
 
 
-import           Control.Lens
-import           Data.Parameterized.Classes
-import           Data.Parameterized.NatRepr
+import Control.Lens
+import Data.Parameterized.Classes
+import Data.Parameterized.NatRepr
 
-import           Data.Macaw.CFG
-import           Data.Macaw.Types
-
-import           Data.Macaw.AbsDomain.AbsState
+import Data.Macaw.AbsDomain.AbsState
+import Data.Macaw.CFG
+import Data.Macaw.Memory (MemWidth)
+import Data.Macaw.Types
 
 -- | Constraints needed for refinement on abstract states.
 type RefineConstraints arch
    = ( OrdF  (ArchReg arch)
      , ShowF (ArchReg arch)
      , HasRepr (ArchReg arch) TypeRepr
+     , MemWidth (ArchAddrWidth arch)
      )
 
 -- FIXME: if val \notin av then we should return bottom
@@ -42,7 +43,8 @@ refineProcState :: RefineConstraints arch
                 -> AbsValue (ArchAddrWidth arch) tp -- ^ Abstract value to assign value.
                 -> AbsProcessorState (ArchReg arch) ids
                 -> AbsProcessorState (ArchReg arch) ids
-refineProcState (BVValue _n _val) _av regs = regs
+refineProcState (BVValue _n _val) _av regs      = regs -- Skip refinment for literal values
+refineProcState (RelocatableValue _ _) _av regs = regs -- Skip refinment for relocatable values
 refineProcState (Initial r) av regs =
   regs & (absInitialRegs . boundValue r) %~ flip meet av
 refineProcState (AssignedValue (Assignment a_id rhs)) av regs

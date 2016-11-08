@@ -50,21 +50,22 @@ import           Data.Word
 import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.AbsDomain.Refine
 import qualified Data.Macaw.AbsDomain.StridedInterval as SI
+import           Data.Macaw.Architecture.Info
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
-import           Data.Macaw.Memory
-import           Data.Macaw.Types
-
-import           Data.Macaw.AbsDomain.Refine
-import           Data.Macaw.AbsDomain.AbsState
-import           Data.Macaw.Architecture.Info
 import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.Types
 
 transferRHS :: forall a ids tp
             .  ( OrdF (ArchReg a)
                , ShowF (ArchReg a)
+               , MemWidth (ArchAddrWidth a)
                )
             => ArchitectureInfo a
             -> AbsProcessorState (ArchReg a) ids
@@ -88,6 +89,7 @@ transferRHS info r rhs =
 -- If we have already seen a value, this will combine with meet.
 addAssignment :: ( OrdF  (ArchReg a)
                  , ShowF (ArchReg a)
+                 , MemWidth (ArchAddrWidth a)
                  )
               => ArchitectureInfo a
               -> Assignment a ids tp
@@ -101,14 +103,21 @@ addAssignment info a c =
 -- Utilities
 
 -- | Get code pointers out of a abstract value.
-concretizeAbsCodePointers :: (Num w, Ord w)
+concretizeAbsCodePointers :: MemWidth w
                           => Memory w
-                          -> AbsValue n (BVType n)
-                          -> [w]
+                          -> AbsValue w (BVType w)
+                          -> [SegmentedAddr w]
 concretizeAbsCodePointers mem (FinSet s) =
-  filter (isCodeAddr mem) $ fromInteger <$> Set.toList s
-concretizeAbsCodePointers mem (CodePointers s) =
-  filter (isCodeAddr mem) $ fromIntegral <$> Set.toList s
+  [ sa
+  | a <- Set.toList s
+  , Just sa <- [absoluteAddrSegment mem (fromInteger a)]
+  , Perm.isExecutable (segmentFlags (addrSegment sa))
+  ]
+concretizeAbsCodePointers _ (CodePointers s _) =
+  [ sa
+  | sa <- Set.toList s
+  , Perm.isExecutable (segmentFlags (addrSegment sa))
+  ]
   -- FIXME: this is dangerous !!
 concretizeAbsCodePointers _mem StridedInterval{} = [] -- FIXME: this case doesn't make sense
   -- debug DCFG ("I think these are code pointers!: " ++ show s) $ []
@@ -148,15 +157,15 @@ maybeSetInsert Nothing  s = s
 -- Memory utilities
 
 -- | Return true if range is entirely contained within a single read only segment.Q
-rangeInReadonlySegment :: (Num w, Ord w)
-                       => w -- ^ Start of range
-                       -> w -- ^ One past last index in range.
-                       -> Memory w
+rangeInReadonlySegment :: MemWidth w
+                       => SegmentedAddr w -- ^ Start of range
+                       -> MemWord w -- ^ The size of the range
                        -> Bool
-rangeInReadonlySegment base end mem =
-  case segmentOfRange base end mem of
-    Just seg -> isReadonly (memFlags seg)
-    Nothing -> False
+rangeInReadonlySegment base size
+    = base^.addrOffset + size <= segmentSize seg
+    && Perm.isReadonly (segmentFlags seg)
+  where seg = addrSegment base
+
 
 ------------------------------------------------------------------------
 -- Block discovery
@@ -177,9 +186,9 @@ liftST = CFGM . lift
 -- | Run a CFGM at the top level
 runCFGM :: ArchitectureInfo arch
            -- ^ Architecture-specific information needed for doing control-flow exploration.
-        -> Memory (ArchAddr arch)
+        -> Memory (ArchAddrWidth arch)
            -- ^ Memory to use when decoding instructions.
-        -> Map (ArchAddr arch) BS.ByteString
+        -> Map (ArchSegmentedAddr arch) BS.ByteString
            -- ^ Names for (some) function entry points
         -> SyscallPersonality arch
            -- ^ Syscall personality
@@ -191,17 +200,19 @@ runCFGM arch_info mem symbols sysp m = do
     let init_info = emptyDiscoveryInfo nonce_gen mem symbols sysp arch_info
     Some <$> execStateT (unCFGM m) init_info
 
-blockOverlaps :: Ord (ArchAddr arch)
-              => ArchAddr arch
+{-
+blockOverlaps :: ArchSegmentedAddr arch
+              -> ArchSegmentedAddr arch
               -> Maybe (BlockRegion arch ids)
               -> Bool
-blockOverlaps _ Nothing = True
+blockOverlaps _ start Nothing = segmentIndex (addrSegment a) == segmentIndex (addrSegment a)
 blockOverlaps a (Just br) = a < brEnd br
+-}
 
 -- | This is the worker for getBlock, in the case that we have not already
 -- read the block.
 tryDisassembleAddr :: PrettyCFGConstraints arch
-                   => ArchAddr arch
+                   => ArchSegmentedAddr arch
                    -> AbsBlockState (ArchReg arch)
                    -> CFGM arch ids ()
 tryDisassembleAddr addr ab = do
@@ -219,20 +230,22 @@ tryDisassembleAddr addr ab = do
   -- Build state for exploring this.
   case res of
     Left e ->
-      debugM DCFG ("Failed to disassemble block at " ++ showHex addr " " ++ show e) >>
+      debugM DCFG ("Failed to disassemble block at " ++ show addr ++ " " ++ show e) >>
       put $ (s0 & blocks %~ Map.insert addr Nothing)
-    Right (bs, next_ip) -> assert (next_ip > addr) $ do
+    Right (bs, next_ip) -> do
+      assert (segmentIndex (addrSegment next_ip) == segmentIndex (addrSegment addr)) $ do
+      assert (next_ip^.addrOffset > addr^.addrOffset) $ do
       debugM DCFG (show $ vcat $ map pretty bs)
       let block_map = Map.fromList [ (labelIndex (blockLabel b), b) | b <- bs ]
       -- Add block region to blocks.
-      let br = BlockRegion { brEnd = next_ip
+      let br = BlockRegion { brSize = next_ip^.addrOffset - addr^.addrOffset
                            , brBlocks = block_map
                            }
       put $ (s0 & blocks %~ Map.insert addr (Just $! br))
 
 -- | Mark address as the start of a block.
 markBlockStart :: PrettyCFGConstraints arch
-               => ArchAddr arch
+               => ArchSegmentedAddr arch
                -> AbsBlockState (ArchReg arch)
                -> CFGM arch ids ()
 markBlockStart addr ab = do
@@ -240,13 +253,18 @@ markBlockStart addr ab = do
   -- Lookup block just before this address
   case Map.lookupLT addr (s^.blocks) of
     -- If that block overlaps with the address
-    Just (l,br) | addr `blockOverlaps` br -> do
+    Just (l,mbr)
+      | segmentIndex (addrSegment addr) == segmentIndex (addrSegment l)
+      , case mbr of
+          Nothing -> True
+          Just br -> addr^.addrOffset < l^.addrOffset + brSize br -> do
       let l_start = getFunctionEntryPoint l s
           a_start = getFunctionEntryPoint addr s
       -- Get block for addr
       tryDisassembleAddr addr ab
       -- Get block for old block
-      tryDisassembleAddr l (lookupAbsBlock l (s^.absState))
+      let Just old_ab = Map.lookup l (s^.absState)
+      tryDisassembleAddr l old_ab
       -- Add function starts to split to frontier
       -- This will result in us re-exploring l_start and a_start
       -- once the current function is done.
@@ -258,10 +276,7 @@ markBlockStart addr ab = do
 -- will disassemble the binary if the block hasn't been seen before.
 -- In particular, this ensures that a block and all its children are
 -- present in the cfg (assuming successful disassembly)
-getBlock :: ( Integral (ArchAddr arch)
-            , Show (ArchAddr arch)
-            )
-         => ArchAddr arch
+getBlock :: ArchSegmentedAddr arch
          -> CFGM arch ids (Maybe (Block arch ids))
 getBlock addr = do
   m_b <- use blocks
@@ -269,14 +284,14 @@ getBlock addr = do
     Just mbr ->
       return $! Map.lookup 0 . brBlocks =<< mbr
     -- We haven't tried to get this block.
-    Nothing -> error $ "getBlock called on block " ++ showHex addr " we have not seen."
-
+    Nothing -> error $ "getBlock called on block " ++ show addr ++ " we have not seen."
 
 ------------------------------------------------------------------------
 -- Transfer stmts
 
 transferStmt :: ( RegisterInfo (ArchReg arch)
                 , HasRepr (ArchReg arch) TypeRepr
+                , MemWidth (ArchAddrWidth arch)
                 )
              => ArchitectureInfo arch
              -> Stmt arch ids
@@ -297,14 +312,12 @@ instance Show HexWord where
 
 -- | Mark a escaped code pointer as a function entry.
 markAddrAsFunction :: PrettyCFGConstraints arch
-                   => ArchAddr arch
+                   => ArchSegmentedAddr arch
                    -> CFGM arch ids ()
 markAddrAsFunction addr = do
   s <- get
-  if addr == 0 || Set.member addr (s^.functionEntries) then
-    return ()
-   else do
-    debugM DCFG ("Found function entry " ++ showHex addr ".")
+  when (not (Set.member addr (s^.functionEntries))) $ do
+    debugM DCFG ("Found function entry " ++ show addr ++ ".")
     let mem = memory s
     let low = Set.lookupLT addr (s^.functionEntries)
     let _high = Set.lookupGT addr (s^.functionEntries)
@@ -315,21 +328,24 @@ markAddrAsFunction addr = do
                        & functionEntries   %~ Set.insert addr
                        & function_frontier %~ maybeSetInsert low . Set.insert addr
 
-recordFunctionAddrs :: PrettyCFGConstraints arch
-                    => BlockLabel (ArchAddr arch)
-                    -> Memory (ArchAddr arch)
+recordFunctionAddrs :: ( PrettyCFGConstraints arch
+                       , MemWidth (ArchAddrWidth arch)
+                       )
+                    => BlockLabel (ArchAddrWidth arch)
+                    -> Memory (ArchAddrWidth arch)
                     -> ArchAbsValue arch (BVType (ArchAddrWidth arch))
                     -> CFGM arch ids ()
 recordFunctionAddrs lbl mem av = do
   let addrs = concretizeAbsCodePointers mem av
   debugM DCFG (show lbl ++ ": Adding function entries "
-               ++ intercalate ", " (map (flip showHex "") addrs))
+               ++ intercalate ", " (map show addrs))
   mapM_ markAddrAsFunction addrs
 
 recordWriteStmt :: ( PrettyCFGConstraints arch
                    , HasRepr (ArchReg arch) TypeRepr
+                   , MemWidth (ArchAddrWidth arch)
                    )
-                => BlockLabel (ArchAddr arch)
+                => BlockLabel (ArchAddrWidth arch)
                 -> AbsProcessorState (ArchReg arch) ids
                 -> Stmt arch ids
                 -> CFGM arch ids ()
@@ -345,6 +361,7 @@ recordWriteStmt lbl regs stmt = do
 
 transferStmts :: ( HasRepr      (ArchReg arch) TypeRepr
                  , RegisterInfo (ArchReg arch)
+                 , MemWidth (ArchAddrWidth arch)
                  )
               => ArchitectureInfo arch
               -> AbsProcessorState (ArchReg arch) ids
@@ -355,13 +372,12 @@ transferStmts info r stmts = execState (mapM_ (transferStmt info) stmts) r
 -- | Generate map that maps each assignment in the CFG to the abstract value
 -- associated with it.
 assignmentAbsValues :: forall arch ids
-                    .  ( Integral (ArchAddr arch)
-                       , Show     (ArchAddr arch)
-                       , HasRepr      (ArchReg arch) TypeRepr
+                    .  ( HasRepr      (ArchReg arch) TypeRepr
                        , RegisterInfo (ArchReg arch)
+                       , MemWidth (ArchAddrWidth arch)
                        )
                     => ArchitectureInfo arch
-                    -> Memory (ArchAddr arch)
+                    -> Memory (ArchAddrWidth arch)
                     -> CFG arch ids
                     -> AbsStateMap arch
                     -> MapF (AssignId ids) (ArchAbsValue arch)
@@ -374,9 +390,8 @@ assignmentAbsValues info mem g absm =
           case blockLabel b of
             GeneratedBlock a 0 -> do
               let w = addrWidthNatRepr (archAddrWidth info)
-              let isCode = isCodeAddrOrNull mem . fromIntegral
-              let abs_state =
-                    initAbsProcessorState w isCode (lookupAbsBlock a absm)
+              let Just ab = Map.lookup a absm
+              let abs_state = initAbsProcessorState w mem ab
               insBlock b abs_state m0
             _ -> m0
 
@@ -405,11 +420,11 @@ assignmentAbsValues info mem g absm =
 mergeIntraJump  :: ( PrettyCFGConstraints arch
                    , RegisterInfo (ArchReg arch)
                    )
-                => BlockLabel (ArchAddr arch)
+                => BlockLabel (ArchAddrWidth arch)
                   -- ^ Source label that we are jumping from.
                 -> AbsBlockState (ArchReg arch)
                    -- ^ Block state after executing instructions.
-                -> ArchAddr arch
+                -> ArchSegmentedAddr arch
                    -- ^ Address we are trying to reach.
                 -> CFGM arch ids ()
 mergeIntraJump src ab _tgt
@@ -440,19 +455,19 @@ mergeIntraJump src ab tgt = do
 
 
 -- See if expression matches form expected by jump tables
-matchJumpTable :: ( Num (ArchAddr arch)
-                  , Ord (ArchAddr arch)
-                  )
-               => Memory (ArchAddr arch)
+-- TODO: Fixme, this uses a fixed multiple of 8 for the jump table
+matchJumpTable :: MemWidth (ArchAddrWidth arch)
+               => Memory (ArchAddrWidth arch)
                -> BVValue arch ids (ArchAddrWidth arch) -- ^ Memory address that IP is read from.
-               -> Maybe (ArchAddr arch, BVValue arch ids (ArchAddrWidth arch))
+               -> Maybe (ArchSegmentedAddr arch, BVValue arch ids (ArchAddrWidth arch))
 matchJumpTable mem read_addr
     -- Turn the read address into base + offset.
-  | Just (BVAdd _ offset (BVValue _ base)) <- valueAsApp read_addr
+  | Just (BVAdd _ offset base_val) <- valueAsApp read_addr
+  , Just base <- asLiteralAddr mem base_val
     -- Turn the offset into a multiple by an index.
   , Just (BVMul _ (BVValue _ 8) jump_index) <- valueAsApp offset
-  , isReadonlyAddr mem (fromInteger base) = do
-    Just (fromInteger base, jump_index)
+  , Perm.isReadonly (segmentFlags (addrSegment base)) = do
+    Just (base, jump_index)
 matchJumpTable _ _ =
     Nothing
 
@@ -460,16 +475,14 @@ matchJumpTable _ _ =
 -- table.
 getJumpTableBounds :: ( OrdF (ArchReg a)
                       , ShowF (ArchReg a)
-                      , Integral w
-                      , Show w
+                      , MemWidth (ArchAddrWidth a)
                       )
-                   => Memory w -- ^ State of memory
-                   -> AbsProcessorState (ArchReg a) ids -- ^ Current processor registers.
-                   -> w -- ^ Base
+                   => AbsProcessorState (ArchReg a) ids -- ^ Current processor registers.
+                   -> ArchSegmentedAddr a -- ^ Base
                    -> BVValue a ids (ArchAddrWidth a) -- ^ Index in jump table
-                   -> Maybe w
+                   -> Maybe (ArchAddr a)
                    -- ^ One past last index in jump table or nothing
-getJumpTableBounds mem regs base jump_index
+getJumpTableBounds regs base jump_index
     -- Get range for the index.
   | let abs_value = transferValue regs jump_index
   , StridedInterval index_interval  <- abs_value
@@ -478,19 +491,18 @@ getJumpTableBounds mem regs base jump_index
   , SI.StridedInterval _ index_base index_range index_stride <-
         debug DCFG "getJumpTable3" $ index_interval
   , index_end <- index_base + (index_range + 1) * index_stride
-  , read_end <- toInteger base + 8 * index_end
-  , rangeInReadonlySegment base (fromInteger read_end) mem =
-
+  , rangeInReadonlySegment base (8 * fromInteger index_end) =
     -- Get the addresses associated.
-    debug DCFG ("Fixed table " ++ showHex base (" [" ++ shows jump_index "]")) $
+    debug DCFG ("Fixed table " ++ show base ++ " [" ++ shows jump_index "]") $
       Just $! fromInteger index_end
-getJumpTableBounds _ _ _ _ = Nothing
+getJumpTableBounds _ _ _ = Nothing
 
 -- | This
 fetchAndExecute :: forall arch ids
                 .  ( RegisterInfo (ArchReg arch)
                    , ArchConstraint arch ids
                    , PrettyCFGConstraints arch
+                   , MemWidth (ArchAddrWidth arch)
                    )
                 => Block arch ids
                 -> AbsProcessorState (ArchReg arch) ids
@@ -499,7 +511,7 @@ fetchAndExecute :: forall arch ids
                 -> CFGM arch ids ()
 fetchAndExecute b regs' s' = do
   let lbl = blockLabel b
-  mem <- gets memory :: CFGM arch ids (Memory (ArchAddr arch))
+  mem <- gets memory :: CFGM arch ids (Memory (ArchAddrWidth arch))
   arch_info <- gets archInfo
   -- See if next statement appears to end with a call.
   -- We define calls as statements that end with a write that
@@ -531,9 +543,7 @@ fetchAndExecute b regs' s' = do
                 debug DCFG ("return_val is bad at " ++ show lbl ++ ": " ++ show rv) $
                   return ()
       -- Jump to concrete offset.
-      | BVValue _ tgt_addr0 <- s'^.boundValue ip_reg -> do
-          let tgt_addr :: ArchAddr arch
-              tgt_addr = fromInteger tgt_addr0
+      | Just tgt_addr <- asLiteralAddr mem (s'^.boundValue ip_reg) -> do
           let abst = finalAbsBlockState regs' s'
           seq abst $ do
           -- Try to check for a tail call.
@@ -545,7 +555,7 @@ fetchAndExecute b regs' s' = do
             -- Check that the current stack height is correct so that a
             -- tail call when go to the right place.
             -- TODO: Add check to ensure stack height is correct.
-            debug DCFG ("Found jump to concrete address after function " ++ showHex tgt_fn ".") $ do
+            debug DCFG ("Found jump to concrete address after function " ++ show tgt_fn ++ ".") $ do
             markAddrAsFunction tgt_addr
             -- Check top of stack points to return value.
             let sp_val = s'^.boundValue sp_reg
@@ -565,8 +575,9 @@ fetchAndExecute b regs' s' = do
                 debug DCFG ("tail_ret_val is bad at " ++ show lbl ++ ": " ++ show rv) $
                   return ()
            else do
+              assert (segmentFlags (addrSegment tgt_addr) `Perm.hasPerm` Perm.execute) $ do
               -- Merge block state.
-              let Just abst' = abst & setAbsIP mem tgt_addr
+              let abst' = abst & setAbsIP tgt_addr
               mergeIntraJump lbl abst' tgt_addr
 
       -- Block ends with what looks like a jump table.
@@ -579,7 +590,7 @@ fetchAndExecute b regs' s' = do
             mapM_ (recordWriteStmt lbl regs') (blockStmts b)
 
             -- Try to compute jump table bounds
-            let mread_end = getJumpTableBounds mem regs' base jump_idx
+            let mread_end = getJumpTableBounds regs' base jump_idx
 
             let abst :: AbsBlockState (ArchReg arch)
                 abst = finalAbsBlockState regs' s'
@@ -589,22 +600,24 @@ fetchAndExecute b regs' s' = do
             -- If the current index can be interpreted as a intra-procedural jump,
             -- then it will add that to the current procedure.
             -- This returns the last address read.
-            let resolveJump :: [ArchAddr arch]
+            let resolveJump :: [ArchSegmentedAddr arch]
                                -- /\ Addresses in jump table in reverse order
                             -> ArchAddr arch
                                -- /\ Current index
-                            -> CFGM arch ids [ArchAddr arch]
+                            -> CFGM arch ids [ArchSegmentedAddr arch]
                 resolveJump prev idx | Just idx == mread_end = do
                   -- Stop jump table when we have reached computed bounds.
                   return (reverse prev)
                 resolveJump prev idx = do
-                  let read_addr = base + 8 * idx
+                  let read_addr = base & addrOffset +~ 8 * idx
                   interpState <- get
-                  case readJumpTableEntry arch_info mem read_addr of
+                  case readAddr mem LittleEndian read_addr of
                     Right tgt_addr
-                      | isCodeAddr mem tgt_addr
+                      | Perm.isReadonly (segmentFlags (addrSegment read_addr))
                       , inSameFunction (labelAddr lbl) tgt_addr interpState -> do
-                        let Just abst' = abst & setAbsIP mem tgt_addr
+                        let flags = segmentFlags (addrSegment tgt_addr)
+                        assert (flags `Perm.hasPerm` Perm.execute) $ do
+                        let abst' = abst & setAbsIP tgt_addr
                         mergeIntraJump lbl abst' tgt_addr
                         resolveJump (tgt_addr:prev) (idx+1)
                     _ -> do
@@ -612,7 +625,8 @@ fetchAndExecute b regs' s' = do
                       return (reverse prev)
             read_addrs <- resolveJump [] 0
             let last_index = fromIntegral (length read_addrs)
-            globalDataMap %= Map.insert base (JumpTable $! (Just $! base + 8 * last_index))
+            let last_addr = Just $! base & addrOffset +~ 8 * last_index
+            globalDataMap %= Map.insert base (JumpTable $! last_addr)
 
           -- We have a jump that we do not understand.
           -- This could be a tail call.
@@ -625,6 +639,7 @@ type TransferConstraints arch
    = ( PrettyCFGConstraints arch
      , RegisterInfo (ArchReg arch)
      , HasRepr (ArchReg arch)  TypeRepr
+     , MemWidth (ArchAddrWidth arch)
      )
 
 transferBlock :: TransferConstraints arch
@@ -665,7 +680,7 @@ transferBlock b regs = do
       fetchAndExecute b regs' s'
 
 transfer :: TransferConstraints arch
-         => ArchAddr arch
+         => ArchSegmentedAddr arch
          -> CFGM arch ids ()
 transfer addr = do
   mem <- gets memory
@@ -674,21 +689,21 @@ transfer addr = do
     Nothing -> return ()
     Just root -> do
       addrWidth <- gets $ addrWidthNatRepr . archAddrWidth . archInfo
-      ab <- uses absState $ lookupAbsBlock addr
-      transferBlock root $
-         initAbsProcessorState addrWidth (isCodeAddrOrNull mem . fromIntegral) ab
+      mab <- uses absState $ Map.lookup addr
+      case mab of
+        Nothing -> error $ "Could not find block " ++ show addr ++ "."
+        Just ab -> do
+          transferBlock root $
+            initAbsProcessorState addrWidth mem ab
 
 ------------------------------------------------------------------------
 -- Main loop
 
-mkCFG :: ( Integral (ArchAddr arch)
-         , Ord      (ArchAddr arch)
-         , Show     (ArchAddr arch)
-         )
-      => Map (ArchAddr arch) (Maybe (BlockRegion arch ids))
+mkCFG :: Integral (ArchAddr arch)
+      => Map (ArchSegmentedAddr arch) (Maybe (BlockRegion arch ids))
       -> CFG arch ids
 mkCFG m = Map.foldlWithKey' go emptyCFG m
-  where go g addr (Just br) = insertBlocksForCode addr (brEnd br) l g
+  where go g addr (Just br) = insertBlocksForCode addr (brSize br) l g
           where l = Map.elems (brBlocks br)
         go g _ Nothing = g
 
@@ -715,12 +730,15 @@ explore_frontier = do
       transfer addr
       explore_frontier
 
--- | This returns true if the address is not readonly, and points to code.
-memIsDataCodePointer :: Ord w => Memory w -> w -> w -> Bool
-memIsDataCodePointer mem a v = isCodeAddr mem v && not (isReadonlyAddr mem a)
+-- | This returns true if the address is writable and value, and points to code.
+memIsDataCodePointer :: Memory w -> SegmentedAddr w -> SegmentedAddr w -> Bool
+memIsDataCodePointer _ a v
+  =  segmentFlags (addrSegment v) `Perm.hasPerm` Perm.execute
+  && segmentFlags (addrSegment a) `Perm.hasPerm` Perm.write
 
 markFunctionAddrs :: TransferConstraints arch
-                  => [ArchAddr arch] -> CFGM arch ids ()
+                  => [ArchSegmentedAddr arch]
+                  -> CFGM arch ids ()
 markFunctionAddrs addrs = do
   mapM_ markAddrAsFunction addrs
   explore_frontier
@@ -731,15 +749,15 @@ cfgFromAddrs :: forall arch
              .  TransferConstraints arch
              => ArchitectureInfo arch
                 -- ^ Architecture-specific information needed for doing control-flow exploration.
-             -> Memory (ArchAddr arch)
+             -> Memory (ArchAddrWidth arch)
                 -- ^ Memory to use when decoding instructions.
-             -> Map (ArchAddr arch) BS.ByteString
+             -> Map (ArchSegmentedAddr arch) BS.ByteString
                 -- ^ Names for (some) function entry points
              -> SyscallPersonality arch
                 -- ^ Syscall personality
-             -> [ArchAddr arch]
+             -> [ArchSegmentedAddr arch]
                 -- ^ Initial function entry points.
-             -> [(ArchAddr arch, ArchAddr arch)]
+             -> [(ArchSegmentedAddr arch, ArchSegmentedAddr arch)]
                 -- ^ Function entry points in memory to be explored
                 -- after exploring function entry points.
                 --
@@ -755,9 +773,9 @@ cfgFromAddrs arch_info mem symbols sysp init_addrs mem_words =
             | otherwise = debug DCFG msg True
           where msg | Map.member v (s^.blocks) =
                         "Identified function entry "
-                        ++ showHex v (" due to global store at " ++ showHex a ".")
+                        ++ show v ++ " due to global store at " ++ show a ++ "."
                     | otherwise =
-                        "Found function entry from memory" ++ showHex v " at " ++ showHex a "."
+                        "Found function entry from memory" ++ show v ++ " at " ++ show a ++ "."
     s <- get
     let mem_addrs =
           fmap snd $

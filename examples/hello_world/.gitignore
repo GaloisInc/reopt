@@ -3,3 +3,9 @@ goodbye_world_diet.o
 goodbye_world
 hello_world_arm.o
 hello_world_arm.s
+hello_world_musl.o
+reopt_diet
+reopt_diet.blocks
+reopt_diet.fns
+reopt_diet.ll
+reopt_diet.o

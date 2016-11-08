@@ -51,12 +51,9 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import           Data.Word
 import qualified Flexdis86 as Flexdis
-import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text, colon, (<>), (<+>))
 
-import qualified Data.Macaw.AbsDomain.StridedInterval as SI
-import           Data.Macaw.CFG
-import           Data.Macaw.Types (BVType, knownType, typeRepr)
+import           Debug.Trace
 
 import           Data.Macaw.AbsDomain.AbsState
        ( AbsBlockState
@@ -77,10 +74,14 @@ import           Data.Macaw.AbsDomain.AbsState
        , transferValue
        ,
        )
-import           Data.Macaw.Architecture.Info (AddrWidthRepr(..), ArchitectureInfo(..))
+import qualified Data.Macaw.AbsDomain.StridedInterval as SI
+import           Data.Macaw.Architecture.Info
+  (AddrWidthRepr(..), ArchitectureInfo(..))
+import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
-import           Debug.Trace
+import           Data.Macaw.Types (BVType, knownType, typeRepr)
+
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
@@ -99,6 +100,14 @@ data Expr ids tp where
   ValueExpr :: !(Value X86_64 ids tp) -> Expr ids tp
   -- An expression that is computed from evaluating subexpressions.
   AppExpr :: !(App (Expr ids) tp) -> Expr ids tp
+
+instance Show (Expr ids tp) where
+  show (ValueExpr v) = show v
+  show AppExpr{} = "app"
+
+instance MapF.ShowF (Expr ids) where
+  showF = show
+
 
 instance Eq (Expr ids tp) where
   (==) = \x y -> isJust (testEquality x y)
@@ -469,7 +478,7 @@ instance S.IsValue (Expr ids) where
 -- GenState
 
 -- | A block that we have not yet finished.
-data PreBlock ids = PreBlock { pBlockLabel  :: !(BlockLabel Word64)
+data PreBlock ids = PreBlock { pBlockLabel  :: !(BlockLabel 64)
                              , _pBlockStmts :: !(Seq (Stmt X86_64 ids))
                              , _pBlockState :: !(RegState X86Reg (Value X86_64 ids))
                              , _pBlockApps  :: !(MapF (App (Value X86_64 ids))
@@ -521,7 +530,7 @@ blockState :: Lens (GenState st_s ids a) (GenState st_s ids b)
 blockState = lens _blockState (\s v -> s { _blockState = v })
 
 emptyPreBlock :: RegState X86Reg (Value X86_64 ids)
-              -> BlockLabel Word64
+              -> BlockLabel 64
               -> PreBlock ids
 emptyPreBlock s lbl =
   PreBlock { pBlockLabel = lbl
@@ -565,7 +574,7 @@ finishBlock term st =
 
 -- | Starts a new block.  If there is a current block it will finish
 -- it with FetchAndExecute
-startBlock :: RegState X86Reg (Value X86_64 ids) -> BlockLabel Word64 ->
+startBlock :: RegState X86Reg (Value X86_64 ids) -> BlockLabel 64 ->
               (GenState st_s ids a -> GenState st_s ids 'True)
 startBlock s lbl st =
   finishBlock FetchAndExecute st & blockState .~ JustF (emptyPreBlock s lbl)
@@ -845,16 +854,20 @@ setLoc (loc :: ImpLocation ids tp) v =
      off <- getX87Offset i
      modState $ boundValue (X87_FPUReg off) .= v
 
-mkBlockLabel :: CodeAddr -> GenState st_s ids any ->
-                (BlockLabel Word64, GenState st_s ids any)
+mkBlockLabel :: SegmentedAddr 64
+             -> GenState st_s ids any
+             -> (BlockLabel 64, GenState st_s ids any)
 mkBlockLabel a s0 = (lbl, s1)
   where (b_id, s1) = s0 & nextBlockID <<+~ 1
         lbl = GeneratedBlock a b_id
 
 -- | Helper function for 'S.Semantics' instance below.
-bvBinOp :: (NatRepr n -> Value X86_64 ids tp -> BVValue X86_64 ids n ->
-            App (Value X86_64 ids) tp1)
-        -> Expr ids tp -> Expr ids (BVType n)
+bvBinOp :: (NatRepr n
+            -> Value X86_64 ids tp
+            -> BVValue X86_64 ids n
+            -> App (Value X86_64 ids) tp1)
+        -> Expr ids tp
+        -> Expr ids (BVType n)
         -> X86Generator st_s ids (Expr ids tp1)
 bvBinOp op' x y = do
   let w = exprWidth y
@@ -1000,12 +1013,12 @@ instance S.Semantics (X86Generator st_s ids) where
 
     return ()
 
-data TranslateError = DecodeError CodeAddr (MemoryError Word64)
+data TranslateError = DecodeError (SegmentedAddr 64) (MemoryError 64)
                     | DisassembleError Flexdis.InstructionInstance
   deriving Show
 
 initGenState :: NonceGenerator (ST st_s) ids
-             -> Word64
+             -> SegmentedAddr 64
              -> RegState X86Reg (Value X86_64 ids)
              -> GenState st_s ids 'True
 initGenState nonce_gen ip s = startBlock s lbl (emptyGenState nonce_gen)
@@ -1015,19 +1028,19 @@ initGenState nonce_gen ip s = startBlock s lbl (emptyGenState nonce_gen)
 -- and ending PC.
 disassembleBlock :: forall s
                  .  NonceGenerator (ST s) s
-                 -> Memory Word64
-                 -> (CodeAddr -> Bool)
+                 -> Memory 64
+                 -> (SegmentedAddr 64 -> Bool)
                     -- ^ Predicate that tells when to continue.
-                 -> CodeAddr
+                 -> SegmentedAddr 64
                  -> AbsBlockState X86Reg
-                 -> ST s (Either String ([Block X86_64 s], CodeAddr))
+                 -> ST s (Either String ([Block X86_64 s], SegmentedAddr 64))
 disassembleBlock nonce_gen mem contFn addr ab = do
   case mkExploreLoc addr ab of
     Left msg -> pure (Left msg)
     Right loc -> do
       either (Left . show) Right <$> disassembleBlock' nonce_gen mem contFn loc
 
-mkExploreLoc :: CodeAddr
+mkExploreLoc :: SegmentedAddr 64
              -> AbsBlockState X86Reg
              -> Either String ExploreLoc
 mkExploreLoc addr ab =
@@ -1036,20 +1049,6 @@ mkExploreLoc addr ab =
     Just t -> Right $! ExploreLoc { loc_ip = addr
                                   , loc_x87_top = fromInteger t
                                   }
-
--- | Disassemble block, returning either an error, or a list of blocks
--- and ending PC.
-disassembleBlock' :: forall s
-                 .  NonceGenerator (ST s) s
-                 -> Memory Word64
-                 -> (CodeAddr -> Bool)
-                    -- ^ Predicate that tells when to continue.
-                 -> ExploreLoc
-                 -> ST s (Either TranslateError ([Block X86_64 s], CodeAddr))
-disassembleBlock' nonce_gen mem contFn loc = runExceptT $ do
-  let gs = initGenState nonce_gen (loc_ip loc) (initX86State loc)
-  (gs', ip) <- disassembleBlockImpl mem gs contFn (loc_ip loc)
-  pure $! (Fold.toList (gs'^.frontierBlocks), ip)
 
 {-
 getExploreLocs :: X86State -> [ExploreLoc]
@@ -1072,28 +1071,29 @@ getFrontierNext = Fold.foldl' f Set.empty
 -- | Disassemble block, returning either an error, or a list of blocks
 -- and ending PC.
 disassembleBlockImpl :: forall st_s ids
-                     .  Memory Word64
+                     .  Memory 64
                      -- ^ Memory to use for disassembling block
                      -> GenState st_s ids 'True
                      -- ^ State information for disassembling.
-                     -> (CodeAddr -> Bool)
+                     -> (SegmentedAddr 64 -> Bool)
                      -- ^ This function should return true if
                      -- we should keep disassembling when we step
                      -- to the given address with the functions.
-                     -> CodeAddr
+                     -> SegmentedAddr 64
                      -- ^ Address to disassemble from.
-                     -> ExceptT TranslateError (ST st_s) (GenState st_s ids 'False, CodeAddr)
+                     -> ExceptT TranslateError (ST st_s)
+                                (GenState st_s ids 'False, SegmentedAddr 64)
 disassembleBlockImpl mem (gs :: GenState st_s ids 'True) contFn addr = do
   (i, next_ip) <-
     either (throwError . DecodeError addr) return $
     readInstruction mem addr
   let next_ip_val :: BVValue X86_64 ids 64
-      next_ip_val = mkLit n64 (toInteger next_ip)
+      next_ip_val = RelocatableValue n64 next_ip
 
-  let line = text (showHex addr "") <> colon
-             <+> Flexdis.ppInstruction next_ip i
+  let next_ip_word = fromIntegral (addrValue next_ip)
 
-  case execInstruction next_ip i of
+  let line = text (show addr) <> colon <+> Flexdis.ppInstruction next_ip_word i
+  case execInstruction (ValueExpr next_ip_val) i of
     Nothing -> throwError (DisassembleError i)
     Just exec -> do
       Some gs2 <-
@@ -1112,13 +1112,27 @@ disassembleBlockImpl mem (gs :: GenState st_s ids 'True) contFn addr = do
                       disassembleBlockImpl mem gs2 contFn next_ip
         _ -> return (finishBlock FetchAndExecute gs2, next_ip)
 
+-- | Disassemble block, returning either an error, or a list of blocks
+-- and ending PC.
+disassembleBlock' :: forall s
+                 .  NonceGenerator (ST s) s
+                 -> Memory 64
+                 -> (SegmentedAddr 64 -> Bool)
+                    -- ^ Predicate that tells when to continue.
+                 -> ExploreLoc
+                 -> ST s (Either TranslateError ([Block X86_64 s], SegmentedAddr 64))
+disassembleBlock' nonce_gen mem contFn loc = runExceptT $ do
+  let gs = initGenState nonce_gen (loc_ip loc) (initX86State loc)
+  (gs', ip) <- disassembleBlockImpl mem gs contFn (loc_ip loc)
+  pure $! (Fold.toList (gs'^.frontierBlocks), ip)
+
+
 -- | The abstract state for a function begining at a given address.
-fnBlockState :: Memory Word64 -> CodeAddr -> AbsBlockState X86Reg
-fnBlockState mem addr =
-  let Just abst' = top & setAbsIP mem addr
-   in abst'
+fnBlockState :: SegmentedAddr 64 -> AbsBlockState X86Reg
+fnBlockState addr =
+  top & setAbsIP addr
       & absRegState . boundValue sp_reg .~ concreteStackOffset addr 0
-        -- x87 top registe points to top of stack.
+        -- x87 top register points to top of stack.
       & absRegState . x87TopReg         .~ FinSet (Set.singleton 7)
       & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (S.BVTypeRepr n64) ReturnAddr)
@@ -1126,7 +1140,7 @@ fnBlockState mem addr =
   -- | This updates the state of a function when returning from a system call.
 updateStatePostFreeBSDSyscall :: AbsBlockState X86Reg
                                  -- ^ Block state just before this call.
-                              -> CodeAddr
+                              -> SegmentedAddr 64
                               -- ^ Address that system call should return to.
                               --
                               -- This code assumes that the return address belongs
@@ -1137,7 +1151,7 @@ updateStatePostFreeBSDSyscall ab0 addr = mkAbsBlockState regFn (ab0^.startAbsSta
         regFn r
             -- Set IPReg
           | Just Refl <- testEquality r ip_reg =
-          CodePointers (Set.singleton addr)
+          CodePointers (Set.singleton addr) False
             -- Two pointers that are modified by syscalls
           | Just Refl <- testEquality r rcx_reg =
             TopV
@@ -1157,7 +1171,7 @@ updateStatePostFreeBSDSyscall ab0 addr = mkAbsBlockState regFn (ab0^.startAbsSta
 -- x86_64 ABI.
 callerReturnAbsState :: AbsBlockState X86Reg
                      -- ^ Block state just before call.
-                     -> CodeAddr
+                     -> SegmentedAddr 64
                      -- ^ Address we will return to.
                      -> AbsBlockState X86Reg
 callerReturnAbsState ab0 addr =  mkAbsBlockState regFn (ab0^.startAbsStack)
@@ -1165,7 +1179,7 @@ callerReturnAbsState ab0 addr =  mkAbsBlockState regFn (ab0^.startAbsStack)
         regFn r
           -- We set IPReg
           | Just Refl <- testEquality r ip_reg =
-              CodePointers (Set.singleton addr)
+              CodePointers (Set.singleton addr) False
           | Just Refl <- testEquality r sp_reg = do
               bvadd n64 (ab0^.absRegState^.boundValue r) (FinSet (Set.singleton 8))
               -- TODO: Transmit no value to first floating point register.
@@ -1208,10 +1222,8 @@ x86ArchitectureInfo :: ArchitectureInfo X86_64
 x86ArchitectureInfo =
   ArchitectureInfo { archAddrWidth      = Addr64
                    , jumpTableEntrySize = 8
-                   , readJumpTableEntry = \m a ->
-                       memLookupWord64le m isReadonly a
                    , disassembleFn      = disassembleBlock
-                   , fnBlockStateFn     = fnBlockState
+                   , fnBlockStateFn     = \_ -> fnBlockState
                    , postSyscallFn      = updateStatePostFreeBSDSyscall
                    , postCallAbsStateFn = callerReturnAbsState
                    , callStackDelta     = x86StackDelta

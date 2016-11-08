@@ -9,9 +9,13 @@ import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 
 import           Flexdis86
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
-import           Reopt.Concrete.Semantics as C
 
+import           Data.Macaw.CFG (Value(..))
+import           Data.Parameterized.NatRepr
+
+import           Reopt.Concrete.MachineState
+import           Reopt.Concrete.Semantics as C
+import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 
 usageExit :: IO ()
 usageExit = do putStrLn "DumpInstr aa bb cc dd ee ff ..."
@@ -29,11 +33,10 @@ main = do args <- getArgs
 
           let diss = disassembleBuffer bs
           forM_ diss $ \dis -> do
-            case disInstruction dis
-              of Just i ->
-                   do putStrLn $ "Semantics for " ++ show i ++ ":"
-                      case execInstruction (fromIntegral $ disLen dis) i of
-                        Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
-                        Just result -> print . C.ppStmts . C.execSemantics $ result
-
-                 Nothing ->return ()
+            case disInstruction dis of
+              Nothing ->return ()
+              Just i -> do
+                putStrLn $ "Semantics for " ++ show i ++ ":"
+                case execInstruction (ValueExpr (Literal (bitVector knownNat (fromIntegral (disLen dis))))) i of
+                  Nothing -> error "Reopt.Semantics.FlexdisMatcher.execInstruction returned 'Nothing'!"
+                  Just result -> print . C.ppStmts . C.execSemantics $ result

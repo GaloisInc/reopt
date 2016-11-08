@@ -1,4 +1,4 @@
-MUSL_ROOT=$(HOME)/opt/musl
+MUSL_ROOT=$(HOME)/opt/musl-freebsd
 CLANG=clang-3.5
 GCC=gcc-4.8
 

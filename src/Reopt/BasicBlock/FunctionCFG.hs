@@ -14,13 +14,14 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Word
 import           Numeric
-import           Reopt.BasicBlock.Extract
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Reopt.Concrete.Semantics as CS
-import qualified Reopt.Machine.StateNames as N
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
+import qualified Data.Macaw.Memory.Permissions as Perm
+import           Reopt.BasicBlock.Extract
+import           Reopt.Concrete.Semantics as CS
+import qualified Reopt.Machine.StateNames as N
 
 type CFG = Map Word64 Block
 
@@ -83,10 +84,11 @@ termChildren Indirect = []
 termChildren Ret = []
 
 -- FIXME: clag
-findBlock :: Memory Word64 -> Word64 -> Either String CFG
-findBlock mem entry =
+findBlock :: Memory 64 -> Word64 -> Either String CFG
+findBlock mem entry = do
+  let Just addr = absoluteAddrSegment mem (fromIntegral entry)
   M.singleton entry <$>
-  case runMemoryByteReader pf_x mem entry $ extractBlock entry S.empty of
+   case runMemoryByteReader Perm.read mem addr $ extractBlock entry S.empty of
     Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
     Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
     Right (Right ([Absolute next], _, stmts), _) ->
@@ -100,7 +102,7 @@ findBlock mem entry =
 
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...
-findBlocks :: Memory Word64 -> FunBounds -> Set Word64 -> Word64 -> Either String CFG
+findBlocks :: Memory 64 -> FunBounds -> Set Word64 -> Word64 -> Either String CFG
 findBlocks mem funBounds breaks entry = calcFixpoint M.empty
   where
     calcFixpoint cfg = do
@@ -109,7 +111,7 @@ findBlocks mem funBounds breaks entry = calcFixpoint M.empty
         then calcFixpoint cfg'
         else return cfg'
 
-findBlocks' :: Memory Word64
+findBlocks' :: Memory 64
             -> FunBounds
             -> Set Word64
             -> Set Word64
@@ -126,8 +128,9 @@ findBlocks' mem funBounds breaks queue cfg
                 | otherwise = q
               queue'' = foldl addQ queue' nexts
           in findBlocks' mem funBounds (breaks `S.union` queue'' `S.union` M.keysSet cfg') queue'' cfg' -- FIXME: performance
+        Just entryAddr = absoluteAddrSegment mem (fromIntegral entry)
     in
-    case runMemoryByteReader pf_x mem entry $ extractBlock entry breaks of
+    case runMemoryByteReader Perm.execute mem entryAddr $ extractBlock entry breaks of
       Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
       Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
       Right (Right ([Absolute callee], nextAddr, stmts), _)

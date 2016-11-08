@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 -- Based on flexdis86.git/utils/DumpInstr.hs.
 module Main where
 
@@ -15,14 +16,17 @@ import           System.Exit (exitFailure)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Nonce
+
 import           Data.Macaw.CFG
-import           Data.Parameterized.Nonce.Transformers
 import           Data.Macaw.Discovery
+import           Data.Macaw.Memory
+import qualified Data.Macaw.Memory.Permissions as Perm
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Recovery
 import           Reopt.Machine.X86State (rootLoc)
-import           Data.Macaw.Memory
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 
@@ -41,9 +45,9 @@ main = do
 
   let retBytes = [0xc3] -- terminate block
       bs = BS.pack $ (map (fst . head) nums) ++ retBytes
-      base = (0 :: Word64)
-      seg = MemSegment base pf_x bs
-      mem = execState (insertMemSegment seg) emptyMemory
+      seg = memSegment 0 (Just 0) Perm.execute [ByteRegion bs]
+      mem = execState (insertMemSegment seg) (emptyMemory knownNat)
+      base = SegmentedAddr seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do
         b <- disassembleBlock' gen mem (const True) (rootLoc base)
