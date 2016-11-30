@@ -19,9 +19,11 @@ library
     bytestring,
     containers,
     data-binary-ieee754,
+    dwarf-tools,
     elf-edit >= 0.28,
     fingertree,
     flexdis86 >= 0.1.1,
+    galois-dwarf,
     IntervalMap,
     lens >= 4.7,
     llvm-pretty,
@@ -45,6 +47,7 @@ library
     Data.Macaw.DebugLogging
     Data.Macaw.Discovery
     Data.Macaw.Discovery.Info
+    Data.Macaw.Dwarf
     Data.Macaw.Memory
     Data.Macaw.Memory.ElfLoader
     Data.Macaw.Memory.Flexdis86
@@ -218,3 +221,11 @@ executable make_linux_syscalls
     attoparsec
  hs-source-dirs: make_linux_syscalls
  main-is: Main.hs
+
+executable dump_debug_data
+  build-depends:
+    base >= 4,
+    elf-edit,
+    reopt
+  hs-source-dirs: dump_debug_data
+  main-is: Main.hs

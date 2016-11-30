@@ -557,7 +557,7 @@ finishBlock' :: PreBlock ids
 finishBlock' pre_b term =
   Block { blockLabel = pBlockLabel pre_b
         , blockStmts = Fold.toList (pre_b^.pBlockStmts)
-        , blockCache = pre_b^.pBlockApps
+--        , blockCache = pre_b^.pBlockApps
         , blockTerm  = term (pre_b^.pBlockState)
         }
 

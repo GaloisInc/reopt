@@ -23,8 +23,8 @@ import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
 import           Data.ElfEdit
-import qualified Data.IntervalMap.Strict as IMap
 import           Data.IntervalMap.Strict (Interval(..), IntervalMap)
+import qualified Data.IntervalMap.Strict as IMap
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.NatRepr

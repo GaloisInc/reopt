@@ -1168,7 +1168,7 @@ data Block arch ids =
   Block { blockLabel :: !(ArchLabel arch)
         , blockStmts :: !([Stmt arch ids])
           -- ^ List of statements in the block.
-        , blockCache :: !(MapF (App (Value arch ids)) (Assignment arch ids))
+--        , blockCache :: !(MapF (App (Value arch ids)) (Assignment arch ids))
           -- ^ This maps applications to the associated assignment.
         , blockTerm :: !(TermStmt arch ids)
           -- ^ The last statement in the block.
