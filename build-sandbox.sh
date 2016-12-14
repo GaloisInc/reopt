@@ -30,15 +30,24 @@ while getopts "ps" opt; do
   esac
 done
 
+update_repo()
+{
+    local repo=$1
+    local dir=$2
+    if ! [ -e deps/"$dir" ]; then
+        git clone $repo deps/"$dir"
+    elif [ "$dopull" == true ]; then
+        echo ">> Pulling repo $dir"
+        (cd deps/"$dir" && git pull)
+    fi
+}
+
 mkdir -p deps
 for dep in "${PRIVATE_GITHUB_REPOS[@]}"; do
-  if ! [ -e deps/"$dep" ]; then
-    git clone git@github.com:GaloisInc/"$dep".git deps/"$dep"
-  elif [ "$dopull" == true ]; then
-    echo ">> Pulling repo $dep"
-    (cd deps/"$dep" && git pull)
-  fi
+  update_repo "git@github.com:GaloisInc/$dep.git" "$dep"
 done
+
+update_repo "git@gitlab-ext.galois.com:macaw/macaw.git" "$dep"
 
 if [ "$dosetup" == true ]; then
   stack setup
