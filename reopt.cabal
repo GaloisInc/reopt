@@ -27,6 +27,7 @@ library
     IntervalMap,
     lens >= 4.7,
     llvm-pretty,
+    macaw,
     mtl,
     parameterized-utils >= 0.1.6,
     random,
@@ -38,21 +39,6 @@ library
   hs-source-dirs: src
 
   exposed-modules:
-    Data.Macaw.AbsDomain.AbsState
-    Data.Macaw.AbsDomain.Refine
-    Data.Macaw.AbsDomain.StridedInterval
-    Data.Macaw.Architecture.Info
-    Data.Macaw.Architecture.Syscall
-    Data.Macaw.CFG
-    Data.Macaw.DebugLogging
-    Data.Macaw.Discovery
-    Data.Macaw.Discovery.Info
-    Data.Macaw.Dwarf
-    Data.Macaw.Memory
-    Data.Macaw.Memory.ElfLoader
-    Data.Macaw.Memory.Flexdis86
-    Data.Macaw.Memory.Permissions
-    Data.Macaw.Types
     Reopt
     Reopt.Analysis.Domains.DiffEquations
     Reopt.BasicBlock.Extract
@@ -105,6 +91,7 @@ executable reopt
     flexdis86,
     lens,
     llvm-pretty,
+    macaw,
     mtl,
     parameterized-utils >= 0.1.6,
     process,
@@ -144,6 +131,7 @@ executable reopt_test
     flexdis86,
     lens,
     linux-ptrace >= 0.1.2.1,
+    macaw,
     mtl,
     parameterized-utils >= 0.1.6,
     posix-waitpid >= 0.1.0.1,
@@ -173,6 +161,7 @@ executable ConcreteDumpInstr
     bytestring,
     containers,
     flexdis86,
+    macaw,
     parameterized-utils,
     reopt
 
@@ -187,11 +176,12 @@ executable LLVMDumpInstr
     bytestring,
     containers,
     flexdis86,
-    reopt,
-    mtl,
+    lens,
     llvm-pretty,
+    macaw,
+    mtl,
     parameterized-utils,
-    lens
+    reopt
 
   hs-source-dirs: utils
   main-is: LLVMDumpInstr.hs
@@ -226,6 +216,7 @@ executable dump_debug_data
   build-depends:
     base >= 4,
     elf-edit,
+    macaw,
     reopt
   hs-source-dirs: dump_debug_data
   main-is: Main.hs

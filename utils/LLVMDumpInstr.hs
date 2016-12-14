@@ -46,7 +46,10 @@ main = do
   let retBytes = [0xc3] -- terminate block
       bs = BS.pack $ (map (fst . head) nums) ++ retBytes
       seg = memSegment 0 (Just 0) Perm.execute [ByteRegion bs]
-      mem = execState (insertMemSegment seg) (emptyMemory knownNat)
+      mem =
+        case insertMemSegment seg (emptyMemory knownNat) of
+          Left e -> error $ "Segment " ++ showInsertError e
+          Right mem' -> mem'
       base = SegmentedAddr seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do

@@ -9,12 +9,9 @@ import System.IO
 
 run :: Elf v -> IO ()
 run e = do
-  case loadDwarf e of
-    Left msg -> do
-      hPutStrLn stderr "Fatal error:"
-      hPutStrLn stderr $ "  " ++ msg
-    Right (nonFatalErrors, cunits) -> do
-      hPutStrLn stderr "Non fatal errors:"
+  case dwarfInfoFromElf e of
+    (nonFatalErrors, cunits) -> do
+      hPutStrLn stderr "Errors:"
       mapM_ (hPutStrLn stderr . ("  " ++)) nonFatalErrors
       mapM_ print cunits
 

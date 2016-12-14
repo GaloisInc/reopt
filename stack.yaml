@@ -8,6 +8,7 @@ packages:
 - deps/galois-dwarf
 - deps/linux-ptrace
 - deps/llvm-pretty
+- deps/macaw
 - deps/matlab-data
 - deps/parameterized-utils
 - deps/posix-waitpid
