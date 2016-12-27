@@ -158,10 +158,10 @@ exec_cdqe = do v <- get (reg_low32 N.rax)
 exec_cwd, exec_cdq, exec_cqo :: Semantics m => m ()
 exec_cwd = do v <- get (reg_low16 N.rax)
               set_reg_pair reg_low16 N.rdx N.rax (sext knownNat v)
-              
+
 exec_cdq = do v <- get (reg_low32 N.rax)
               set_reg_pair reg_low32 N.rdx N.rax (sext knownNat v)
-              
+
 exec_cqo = do v <- get rax
               set_reg_pair fullRegister N.rdx N.rax (sext knownNat v)
 
@@ -514,8 +514,7 @@ exec_imul1 v
   | otherwise =
     fail "imul: Unknown bit width"
   where
-    go :: (1 <= n + n, n <= n + n)
-       => (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
+    go :: (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
     go f l = do v' <- get l
                 really_exec_imul v v' f
 
@@ -891,7 +890,7 @@ regLocation sz
 
 -- FIXME: probably doesn't work for 32 bit address sizes
 -- arguments are only for the size, they are fixed at rsi/rdi
-exec_movs :: (IsLocationBV m n, n <= 64)
+exec_movs :: (IsLocationBV m n)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
           -> MLocation m (BVType n)
@@ -1047,7 +1046,7 @@ exec_scas _repz_pfx repnz_pfx val_loc _cmp_loc = do
 -- | STOS/STOSB Store string/Store byte string
 -- STOS/STOSW Store string/Store word string
 -- STOS/STOSD Store string/Store doubleword string
-exec_stos :: (IsLocationBV m n, n <= 64)
+exec_stos :: (IsLocationBV m n)
           => Bool -- Flag indicating if RepPrefix appeared before instruction
           -> MLocation m (BVType n)
           -> MLocation m (BVType n)
@@ -1481,9 +1480,9 @@ exec_psllx elsz l count = do
                   NatCaseLT LeqProof -> uext' elsz count
                   NatCaseEQ          -> count
                   NatCaseGT LeqProof -> bvTrunc' elsz count
-      
+
       ls' = map (\y -> mux (bvUlt count nbits) (bvShl y countsz) (bvLit elsz (0::Int))) ls
-      
+
   l .= bvUnvectorize (loc_width l) ls'
 
 -- PSRLW Shift packed words right logical
@@ -1559,9 +1558,6 @@ exec_movsX_mem_xmm ::
   ( Semantics m
   , 1 <= n
   , n <= 128
-  , ((128 - n) + n) ~ 128
-  , 1 <= 128 - n
-  , 128 - n <= 128
   ) => MLocation m (BVType n) -> MLocation m XMMType -> m ()
 exec_movsX_mem_xmm l v = do
   vLow <- bvTrunc (loc_width l) <$> get v
@@ -1572,9 +1568,6 @@ exec_movsX_xmm_mem ::
   ( Semantics m
   , 1 <= n
   , n <= 128
-  , ((128 - n) + n) ~ 128
-  , 1 <= 128 - n
-  , 128 - n <= 128
   ) => MLocation m XMMType -> MLocation m (BVType n) -> m ()
 exec_movsX_xmm_mem l v = do
   v' <- get v
@@ -1653,7 +1646,7 @@ exec_andpx elsz l v = fmap_loc l $ \lv -> vectorize2 elsz (.&.) lv v
 
 exec_andps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
 exec_andps = exec_andpx n32
-  
+
 -- ANDNPS Perform bitwise logical AND NOT of packed single-precision floating-point values
 -- ORPS Perform bitwise logical OR of packed single-precision floating-point values
 exec_orpx :: (Semantics m, 1 <= elsz) => NatRepr elsz -> MLocation m XMMType -> Value m XMMType -> m ()
@@ -1755,7 +1748,7 @@ exec_pminsb = pselect bvSlt n8
 exec_pminsw = pselect bvSlt n16
 exec_pminsd = pselect bvSlt n32
 
-exec_pmovmskb :: forall m n n'. (IsLocationBV m n, 1 <= n')
+exec_pmovmskb :: forall m n n'. (IsLocationBV m n)
               => MLocation m (BVType n)
               -> Value m (BVType n')
               -> m ()
@@ -2041,7 +2034,7 @@ exec_paddq l v = do
 -- PSHUFLW Shuffle packed low words
 -- PSHUFHW Shuffle packed high words
 
-exec_pshufd :: forall m n k. (IsLocationBV m n, 1 <= k, k <= n)
+exec_pshufd :: forall m n k. (IsLocationBV m n, 1 <= k)
             => MLocation m (BVType n)
             -> Value m (BVType n)
             -> Value m (BVType k)

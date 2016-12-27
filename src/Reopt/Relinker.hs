@@ -8,6 +8,7 @@ This module performs the merging between the binary and new object.
 -}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wall #-}
 module Reopt.Relinker
@@ -125,7 +126,7 @@ steStringName sym
 -- and performing relocations.
 data SectionInfo w = SectionInfo { sectionVal   :: (ElfSection w)
                                    -- ^ Actual section
-                                 , sectionReloc :: !String
+                                 , sectionReloc :: !BS.ByteString
                                  }
 
 -- | Find a section with the given name, type, and flags.
@@ -134,27 +135,26 @@ data SectionInfo w = SectionInfo { sectionVal   :: (ElfSection w)
 -- multiple do.
 findSectionInfo :: Eq w
                 => Elf w
-                -> String
+                -> BS.ByteString
                    -- ^ Expected name of section
                 -> ElfSectionType
                    -- ^ Expected section type.
                 -> ElfSectionFlags w
                    -- ^ Expected section flags
-                -> String
+                -> BS.ByteString
                     -- ^ Name of relocation section (or "" if no relocations associateD)
                 -> Except String (Maybe (SectionInfo w))
 findSectionInfo e nm tp flags reloc =
   case nm `findSectionByName` e of
     [sec] -> do
       when (elfSectionType sec /= tp) $ do
-        throwE $ nm ++ " section has an unexpected type."
+        throwE $ BSC.unpack nm ++ " section has an unexpected type."
       when (elfSectionFlags sec /= flags) $ do
-        throwE $ nm ++ " section has an unexpected flags."
+        throwE $ BSC.unpack nm ++ " section has an unexpected flags."
       let info = SectionInfo sec reloc
       seq info $ (return $! Just info)
     []  -> return Nothing
-    _   -> throwE $ "Multiple " ++ nm ++ " sections in object file."
-
+    _   -> throwE $ "Multiple " ++ BSC.unpack nm ++ " sections in object file."
 
 ------------------------------------------------------------------------
 -- Code for performing relocations in new object.
@@ -438,6 +438,7 @@ performReloc reloc_info sym_table this_vaddr mv reloc = do
   case symbolAddr reloc_info "A relocation entry" sym of
     Nothing -> warnings . unresolvedSymbols %= Set.insert (steName sym)
     Just sym_val -> do
+      when (sym_val < 0) $ error "performReloc given negative value"
       -- Relocation addend
       let addend = r_addend reloc :: Int64
       -- Get PC offset
@@ -595,7 +596,7 @@ mapLoadableSection orig_layout redirs entries off sec rest = do
   binarySectionMap %= Map.insert (elfSectionIndex sec) (idx, elfSectionAddr sec)
 
   let sec' = sec { elfSectionIndex = idx
-                 , elfSectionName = ".orig" ++ elfSectionName sec
+                 , elfSectionName = ".orig" <> elfSectionName sec
                  , elfSectionData = remapBytes redirs entries off bs
                  }
   seq sec' $ do
@@ -618,7 +619,10 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
   case reg of
     ElfDataElfHeader -> do
       when (off /= 0) $ do
-        throwE $ "Elf header appeared at unexpected offset: " ++ showHex (toInteger off) "."
+        if off >= 0 then
+          throwE $ "Elf header appeared at unexpected offset: " ++ showHex (toInteger off) "."
+         else
+          error "mapOrigLoadableRegions negative offset"
       let off' = off + fromIntegral (ehdrSize (elfLayoutClass orig_layout))
       (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
       return (off2, ElfDataElfHeader : prev)
@@ -666,15 +670,15 @@ mapOrigLoadableRegions orig_layout redirs entries off (reg:rest) =
 -- | Find relocation entries in section with given name.
 findRelaEntries :: Elf Word64
                    -- ^ Object with relocations
-                -> String
+                -> BS.ByteString
                    -- ^ Name of section containing relocation entries.
                 -> Except String [RelaEntry X86_64_RelocationType]
 findRelaEntries obj nm = do
   case nm `findSectionByName` obj of
     -- Assume that no section means no relocations
     [] -> return []
-    [s] -> return $! elfRelaEntries (elfData obj) (elfSectionData s)
-    _ -> throwE $  "Multple " ++ show nm ++ " sections in object file."
+    [s] -> except $ elfRelaEntries (elfData obj) (BSL.fromStrict (elfSectionData s))
+    _ -> throwE $  "Multiple " ++ show nm ++ " sections in object file."
 
 -- | Find the symbol table in the elf.
 findSymbolTableEntries :: String
@@ -804,7 +808,7 @@ copyOrigLoadableSegment orig_layout redirs seg = do
                 }
 
 copyOriginalBinaryRegion :: forall w
-                          . (Bits w, Integral w, Show w)
+                          . (Bits w, Integral w)
                          => ElfLayout w
                          -> OriginalBinaryInfo w
                          -> ElfDataRegion w
@@ -860,7 +864,7 @@ copyOriginalBinaryRegion orig_layout info reg =
       return info
 
 copyOriginalBinaryRegions :: forall w
-                           . (Bits w, Integral w, Show w)
+                           . (Bits w, Integral w)
                           => Elf w
                           -> ElfLayout w
                           -> w  -- ^ Offset of file.

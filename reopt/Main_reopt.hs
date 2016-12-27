@@ -104,16 +104,9 @@ mkElfMem :: Monad m
          -> Elf Word64
          -> m (SectionIndexMap Word64 64, Memory 64)
 mkElfMem sty e = do
-  case elfInterpreter e of
-    Nothing ->
-      fail "Could not parse elf interpreter."
-    Just Nothing ->
-      return ()
-    Just (Just{}) ->
-      fail "reopt does not yet support generating CFGs from dynamically linked executables."
   case sty of
-    LoadBySection -> either fail return $ memoryForElfSections knownNat e
-    LoadBySegment -> either fail return $ memoryForElfSegments knownNat e
+    LoadBySection -> either fail return $ memoryForElfSections Rela64 e
+    LoadBySegment -> either fail return $ memoryForElfSegments Rela64 e
 
 ------------------------------------------------------------------------
 -- Args
@@ -209,7 +202,7 @@ notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
                    , _programPath = ""
-                   , _loadStyle = LoadBySection
+                   , _loadStyle = LoadBySegment
                    , _debugKeys = []
                    , _newobjPath = ""
                    , _redirPath  = ""
@@ -264,12 +257,12 @@ relinkFlag = flagNone [ "relink" ] upd help
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
   where upd  = loadStyle .~ LoadBySegment
-        help = "Load the Elf file using segment information."
+        help = "Load the Elf file using segment information (default)."
 
 sectionFlag :: Flag Args
 sectionFlag = flagNone [ "load-sections" ] upd help
   where upd  = loadStyle .~ LoadBySection
-        help = "Load the Elf file using section information (default)."
+        help = "Load the Elf file using section information."
 
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
@@ -433,7 +426,7 @@ showGaps :: LoadStyle -> Elf Word64 -> IO ()
 showGaps loadSty binary = do
     -- Create memory for elf
     mem <- mkElfMem loadSty binary
-    Some disc_info <- return $ cfgFromMemAndBinary mem binary
+    (Some disc_info,_) <- return $ mkFinalCFGWithSyms mem binary
     let cfg = mkCFG (disc_info^.blocks)
     let ends = cfgBlockEnds cfg
     let cfg_blocks = [ addr | GeneratedBlock addr 0 <- Map.keys (cfg ^. cfgBlocks) ]
@@ -460,9 +453,12 @@ showCFG :: LoadStyle -> Elf Word64 -> IO ()
 showCFG loadSty e = do
   -- Create memory for elf
   (_,mem) <- mkElfMem loadSty e
-  Some disc_info <- return $ cfgFromMemAndBinary mem e
+  putStrLn "mkElfMem"
+  (Some disc_info, _) <- return $ mkFinalCFGWithSyms mem e
+  putStrLn "post cfgFromMemAndBinary"
   let fg = mkCFG (disc_info^.blocks)
   let g = eliminateDeadRegisters fg
+  putStrLn "Pretty graph"
   print (pretty g)
 
 {-
@@ -490,7 +486,8 @@ getFns symMap excludedNames s = do
     hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
 
   let excludeSet = Set.fromList excludedAddrs
-  let include addr = do
+  let include :: SegmentedAddr 64 -> Bool
+      include addr = do
         case segmentBase (addrSegment addr) of
           Just base -> Set.notMember word excludeSet
             where word = fromIntegral (base + addr^.addrOffset)
@@ -509,7 +506,7 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (secMap, mem) <- mkElfMem (args^.loadStyle) e
-  Some s <- return $ cfgFromMemAndBinary mem e
+  (Some s,_) <- return $ mkFinalCFGWithSyms mem e
   fns <- getFns (elfSymAddrMap secMap e) (args^.notransAddrs) s
   mapM_ (print . pretty) fns
 
@@ -571,14 +568,11 @@ mkFinalCFGWithSyms mem e =
             ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
             abi                -> error $ "Unknown OSABI: " ++ show abi
 
-cfgFromMemAndBinary :: Memory 64 -> Elf Word64 -> Some (DiscoveryInfo X86_64)
-cfgFromMemAndBinary mem e = fst (mkFinalCFGWithSyms mem e)
-
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   (_,mem) <- mkElfMem loadSty e
-  Some s <- return $ cfgFromMemAndBinary mem e
+  (Some s,_) <- return $ mkFinalCFGWithSyms mem e
   let fg = mkCFG (s^.blocks)
   let abst = s^.absState
       amap = assignmentAbsValues x86ArchitectureInfo mem fg abst
@@ -814,7 +808,7 @@ llvmAssembly m = UTF8.fromString (show (L.ppLLVM $ L.ppModule m))
 type ElfSegmentMap w = Map w (Phdr w)
 
 -- | Create an elf segment map from a layout.
-elfSegmentMap :: forall w . (Integral w, Show w) => ElfLayout w -> ElfSegmentMap w
+elfSegmentMap :: forall w . Integral w => ElfLayout w -> ElfSegmentMap w
 elfSegmentMap l = foldl' insertElfSegment Map.empty (allPhdrs l)
   where insertElfSegment ::  ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
         insertElfSegment m p
@@ -931,7 +925,7 @@ performReopt args =
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
     (secMap, mem) <- mkElfMem (args^.loadStyle) orig_binary
-    Some cfg <- return $ cfgFromMemAndBinary mem orig_binary
+    (Some cfg,_) <- return $ mkFinalCFGWithSyms mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
 

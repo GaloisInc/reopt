@@ -17,6 +17,7 @@ import           Control.Exception
 import           Control.Monad
 import           Data.Bits
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BSC
 import           Data.ElfEdit
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -45,7 +46,8 @@ slice i n b = B.take n (B.drop i b)
 -- zeros as needed.
 showPaddedHex :: (Integral a, Show a) => Int -> a -> String
 showPaddedHex l v = assert (l >= n) $ replicate (l-n) '0' ++ s
-  where s = showHex v ""
+  where s | v >= 0 = showHex v ""
+          | otherwise = error "showPaddedHex given negtive number"
         n = length s
 
 word8AsHex :: Word8 -> String
@@ -92,7 +94,7 @@ printDisassemblyLine base buffer (DAddr i n mi) = do
     then printDisassemblyLine base buffer $ DAddr (i+7) (n-7) Nothing
     else return ()
 
-isCodeSection :: (Bits w, Eq w, Num w) => ElfSection w -> Bool
+isCodeSection :: (Bits w, Num w) => ElfSection w -> Bool
 isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
 
 -- | Return name of instructions in section.
@@ -109,7 +111,7 @@ sectionInstructions s = [ i | DAddr _ _ (Just i) <- dta ]
 -- | Elf sections
 printSectionDisassembly :: ElfSection Word64 -> IO ()
 printSectionDisassembly s = do
-  let nm = elfSectionName s
+  let nm = BSC.unpack $ elfSectionName s
   let addr = elfSectionAddr s
   putStrLn $ "Disassembly of section " ++ nm ++ ":"
   putStrLn ""
@@ -121,51 +123,6 @@ printSectionDisassembly s = do
         printDisassemblyLine base buffer da
   mapM_ pp dta
   putStrLn ""
-
-{-
--- | This function prints out executable addresses found in global data
--- that are not obtained by traversing the code segments.  Useful for
--- identifying possible entry points via global data.
-printExecutableAddressesInGlobalData :: Elf Word64 -> IO ()
-printExecutableAddressesInGlobalData e = do
-  mem <- either fail return $ memoryForElfSegments (knownNat :: NatRepr 64) e
-  let exec_words :: [Word64]
-      exec_words = [ w | w <- segmentAsWord64le =<< memSegments mem
-                   , mem & addrHasPermissions w pf_x
-                   ]
-  -- Get list of assembly
-  let entry_points = Set.fromList exec_words
-
-  let sections = filter isCodeSection $ e^..elfSections
-  let found_points = [ addr + fromIntegral i
-                     | s <- sections
-                     , let addr = elfSectionAddr s
-                     , let buffer = elfSectionData s
-                     , let dta = disassembleBuffer buffer
-                     , DAddr i _ Just{} <- dta
-                     ]
-  let found_set = Set.fromList found_points
-  let missing_entries :: [Word64]
-      missing_entries = Set.toList $ entry_points `Set.difference` found_set
-  print missing_entries
-  print (length missing_entries)
-  let cnt = length missing_entries
-  putStrLn $ show cnt  ++ " possible jump targets found via address search, but"
-  putStrLn $ "not found during when disassembling sections."
-  putStrLn ""
-  forM_ missing_entries $ \o -> do
-    case findSegment o mem of
-      Just s -> do
-        let base = memBase s
-        let buffer = memBytes s
-        let offset = fromIntegral (o - base)
-        let (n,mi) = tryDisassemble (B.drop offset buffer)
-        let da = DAddr offset n mi
-        printDisassemblyLine base buffer da
-
-      Nothing -> do
-        putStrLn $ showHex o " not found in segment."
--}
 
 --------------------------------------------------------------------------------
 -- Reading elf utilities

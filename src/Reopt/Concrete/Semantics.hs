@@ -198,7 +198,7 @@ extendEnv :: MonadState Env m => Variable tp -> CS.Value tp -> m ()
 extendEnv x v = modify (MapF.insert x v)
 
 -- | Helper for division ops in 'evalStmt' below.
-bvDivOp :: (Applicative m, CS.MonadMachineState m, MonadState Env m)
+bvDivOp :: (CS.MonadMachineState m, MonadState Env m)
     => (BV -> BV -> BV)
     -> Variable (BVType n)
     -> Expr (BVType n)

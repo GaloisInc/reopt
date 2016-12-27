@@ -16,4 +16,8 @@ packages:
 extra-deps:
 - bimap-0.3.1
 - bv-0.4.0
-resolver: lts-6.22
+# Add containers and updated versions of lens and kan-extensions to support macaw
+- containers-0.5.8.1
+- lens-4.15.1
+- kan-extensions-5.0.1
+resolver: lts-6.27

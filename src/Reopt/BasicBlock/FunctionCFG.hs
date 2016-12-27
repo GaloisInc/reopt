@@ -52,8 +52,8 @@ data Term = Cond Word64 Word64 -- true, false
           | Indirect
           | Ret deriving (Eq, Ord, Show)
 
-
-ppHex = text . flip showHex ""
+ppHex :: Word64 -> Doc
+ppHex v = text (showHex v "")
 
 instance Pretty Term where
   pretty t = case t of
@@ -66,14 +66,6 @@ instance Pretty Term where
 
 instance Pretty Block where
   pretty (Block stmts term) = vcat [ppStmts stmts,  pretty term]
-
--- instance Show Term where
---   show (Cond w1 w2) = "Cond " ++ showHex w1 " " ++ showHex w2 ""
---   show (Call w1 w2) = "Call " ++ showHex w1 " " ++ showHex w2 ""
---   show (Direct w) = "Direct " ++ showHex w ""
---   show (Fallthrough w) = "Fallthrough " ++ showHex w ""
---   show (Indirect reg) = "Indirect " ++ show reg
---   show Ret = "Ret"
 
 termChildren :: Term -> [Word64]
 termChildren (Cond w1 w2) = [w1, w2]
@@ -90,7 +82,7 @@ findBlock mem entry = do
   M.singleton entry <$>
    case runMemoryByteReader Perm.read mem addr $ extractBlock entry S.empty of
     Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
-    Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
+    Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
     Right (Right ([Absolute next], _, stmts), _) ->
       Right (Block stmts $ Direct next)
     Right (Right ([NFallthrough next], _, stmts), _) ->
@@ -132,7 +124,7 @@ findBlocks' mem funBounds breaks queue cfg
     in
     case runMemoryByteReader Perm.execute mem entryAddr $ extractBlock entry breaks of
       Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
-      Right (Left err, _) -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
+      Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
       Right (Right ([Absolute callee], nextAddr, stmts), _)
         | not (inFunBounds funBounds callee) -> finishBlock stmts (Call callee nextAddr) [nextAddr]
       -- Does this case happen?

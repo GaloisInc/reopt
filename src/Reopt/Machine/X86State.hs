@@ -159,6 +159,14 @@ data X86PrimFn ids tp
      -- ^ Read the 'FS' base address
    | (tp ~ BVType 64) => ReadGSBase
      -- ^ Read the 'GS' base address
+   | (tp ~ BVType 128) => CPUID (BVValue X86_64 ids 32)
+     -- ^ The CPUID instruction
+     --
+     -- Given value in eax register, this returns the concatenation of eax:ebx:ecx:edx.
+   | (tp ~ BVType 64) => RDTSC
+     -- ^ The RDTSC instruction
+     --
+     --  This returns the concatenation of edx:eax
    | (tp ~ BVType 64)
      => MemCmp !Integer
                -- /\ Number of bytes per value.
@@ -194,6 +202,8 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       ReadLoc loc   -> typeRepr loc
       ReadFSBase    -> knownType
       ReadGSBase    -> knownType
+      CPUID{}       -> knownType
+      RDTSC{}       -> knownType
       MemCmp{}      -> knownType
       FindElement{} -> knownType
 
@@ -216,6 +226,8 @@ ppX86PrimFn pp f =
     ReadLoc loc -> pure $ pretty loc
     ReadFSBase  -> pure $ text "fs.base"
     ReadGSBase  -> pure $ text "gs.base"
+    CPUID code  -> sexprA "cpuid" [ pp code ]
+    RDTSC       -> pure $ text "rdtsc"
     MemCmp sz cnt src dest rev -> sexprA "memcmp" args
       where args = [pure (pretty sz), pp cnt, pp dest, pp src, pp rev]
     FindElement sz fndeq cnt buf val rev -> sexprA "find_element" args
@@ -567,23 +579,28 @@ refsInAssignRhs rhs =
     EvalApp v      -> refsInApp v
     SetUndefined _ -> Set.empty
     ReadMem v _    -> refsInValue v
-    EvalArchFn f _ ->
-      case f of
-        ReadLoc _ -> Set.empty
-        ReadFSBase -> Set.empty
-        ReadGSBase -> Set.empty
-        MemCmp _ cnt src dest dir ->
-          Set.unions [ refsInValue cnt
-                     , refsInValue src
-                     , refsInValue dest
-                     , refsInValue dir
-                     ]
-        FindElement _ _ cnt buf val dir ->
-          Set.unions [ refsInValue cnt
-                     , refsInValue buf
-                     , refsInValue val
-                     , refsInValue dir
-                     ]
+    EvalArchFn f _ -> refsInX86PrimFn f
+
+refsInX86PrimFn :: X86PrimFn ids tp -> Set (Some (AssignId ids))
+refsInX86PrimFn f =
+  case f of
+    ReadLoc _  -> Set.empty
+    ReadFSBase -> Set.empty
+    ReadGSBase -> Set.empty
+    CPUID v    -> refsInValue v
+    RDTSC      -> Set.empty
+    MemCmp _ cnt src dest dir ->
+      Set.unions [ refsInValue cnt
+                 , refsInValue src
+                 , refsInValue dest
+                 , refsInValue dir
+                 ]
+    FindElement _ _ cnt buf val dir ->
+      Set.unions [ refsInValue cnt
+                 , refsInValue buf
+                 , refsInValue val
+                 , refsInValue dir
+                 ]
 
 ------------------------------------------------------------------------
 -- StateMonadMonoid
@@ -639,15 +656,22 @@ foldValueCached litf addrf initf assignf val = getStateMonadMonoid (go val)
         EvalApp a -> foldApp go a
         SetUndefined _w -> mempty
         ReadMem addr _ -> go addr
-        EvalArchFn f _ ->
-          case f of
-            ReadLoc _ -> mempty
-            ReadFSBase -> mempty
-            ReadGSBase -> mempty
-            MemCmp _sz cnt src dest rev ->
-              mconcat [ go cnt, go src, go dest, go rev ]
-            FindElement _sz _findEq cnt buf val' rev ->
-              mconcat [ go cnt, go buf, go val', go rev ]
+        EvalArchFn f _ -> goX86PrimFn f
+
+    goX86PrimFn :: forall tp'
+                .  X86PrimFn ids tp'
+                -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
+    goX86PrimFn f =
+      case f of
+        ReadLoc _ -> mempty
+        ReadFSBase -> mempty
+        ReadGSBase -> mempty
+        CPUID v -> go v
+        RDTSC   -> mempty
+        MemCmp _sz cnt src dest rev ->
+          mconcat [ go cnt, go src, go dest, go rev ]
+        FindElement _sz _findEq cnt buf val' rev ->
+          mconcat [ go cnt, go buf, go val', go rev ]
 
 ------------------------------------------------------------------------
 -- X86_64 specific block operations.

@@ -22,7 +22,6 @@ x86 instructions.
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-
 module Reopt.Semantics.Monad
   ( -- * Type
     Type(..)
@@ -397,9 +396,7 @@ defaultRegisterViewWrite b n rn v0 v =
 constUpperBitsRegisterViewWrite
   :: forall cl n v .
      ( 1 <= n
-     , 1 <= N.RegisterClassBits cl
      , 1 <= N.RegisterClassBits cl - n
-     , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
      , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
      , IsValue v
      )
@@ -452,11 +449,7 @@ sliceRegisterView b n rn =
 -- writes.
 constUpperBitsOnWriteRegisterView ::
   ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , 1 <= N.RegisterClassBits cl - n
-  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , n <= N.RegisterClassBits cl
-  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
   RegisterViewType cl 0 n ->
@@ -630,11 +623,7 @@ subRegister b n = Register . sliceRegisterView b n
 -- writes.
 constUpperBitsOnWriteRegister ::
   ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , 1 <= N.RegisterClassBits cl - n
-  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
   , n <= N.RegisterClassBits cl
-  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
   ) =>
   NatRepr n ->
   RegisterViewType cl 0 n ->
