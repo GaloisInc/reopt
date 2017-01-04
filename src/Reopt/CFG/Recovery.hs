@@ -438,7 +438,8 @@ getPostSyscallValue lbl proc_state r =
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
-recoverBlock :: Map (BlockLabel 64) (Set (Some X86Reg))
+recoverBlock :: forall ids
+             .  Map (BlockLabel 64) (Set (Some X86Reg))
              -> MapF FnPhiVar FnPhiNodeInfo
              -> BlockLabel 64
              -> Recover ids ( Map (BlockLabel 64) FnBlock
@@ -456,10 +457,13 @@ recoverBlock blockRegProvides phis lbl = do
                                             , fbTerm = tm
                                             }
 
-  Just (b, m_pterm :: Maybe (ParsedTermStmt X86_64 ids)) <- uses rsInterp (getClassifyBlock lbl)
+  Just (b, m_pterm) <- uses rsInterp (getClassifyBlock lbl)
 
   case m_pterm of
-    Just (ParsedBranch c x y) -> do
+    ParsedTranslateError _ -> do
+      error "Cannot recover function in blocks where translation error occurs."
+
+    ParsedBranch c x y -> do
       Fold.traverse_ recoverStmt (blockStmts b)
       cv <- recoverValue "branch_cond" c
       fb <- mkBlock (FnBranch cv x y)
@@ -468,7 +472,7 @@ recoverBlock blockRegProvides phis lbl = do
       yr <- recoverBlock blockRegProvides MapF.empty y
       return $! mconcat [(fb, Map.empty), xr, yr]
 
-    Just (ParsedCall proc_state prev_stmts fn m_ret_addr) -> do
+    ParsedCall proc_state prev_stmts fn m_ret_addr -> do
       Fold.traverse_ recoverStmt prev_stmts
 
       ft <- lookupFunctionArgs fn
@@ -498,7 +502,7 @@ recoverBlock blockRegProvides phis lbl = do
       fb <- mkBlock (FnCall call_tgt (gargs', fargs') (intrs, floatrs) ret_lbl)
       return $! (fb, Map.singleton lbl regs')
 
-    Just (ParsedJump proc_state tgt_addr) -> do
+    ParsedJump proc_state tgt_addr -> do
 
         -- Recover statements
         Fold.traverse_ recoverStmt (blockStmts b)
@@ -516,7 +520,7 @@ recoverBlock blockRegProvides phis lbl = do
         let tgt_lbl = mkRootBlockLabel tgt_addr
         flip (,) (Map.singleton lbl regs') <$> mkBlock (FnJump tgt_lbl)
 
-    Just (ParsedReturn proc_state nonret_stmts) -> do
+    ParsedReturn proc_state nonret_stmts -> do
         -- Recover statements
         Fold.traverse_ recoverStmt nonret_stmts
 
@@ -527,7 +531,7 @@ recoverBlock blockRegProvides phis lbl = do
 
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    Just (ParsedSyscall proc_state next_addr call_no pname name args rregs) -> do
+    ParsedSyscall proc_state next_addr call_no pname name args rregs -> do
       Fold.traverse_ recoverStmt (blockStmts b)
 
       let mkRet :: MapF X86Reg FnRegValue
@@ -569,7 +573,7 @@ recoverBlock blockRegProvides phis lbl = do
       fb <- mkBlock (FnSystemCall call_no pname name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
-    Just (ParsedLookupTable proc_state idx vec) -> do
+    ParsedLookupTable proc_state idx vec -> do
         -- Recover statements
         Fold.traverse_ recoverStmt (blockStmts b)
 
@@ -586,12 +590,6 @@ recoverBlock blockRegProvides phis lbl = do
         idx'   <- recoverValue "jump_index" idx
 
         flip (,) (Map.singleton lbl regs') <$> mkBlock (FnLookupTable idx' vec)
-
-    Nothing -> do
-      debug DFunRecover ("WARNING: recoverTermStmt undefined for " ++ show (pretty (blockTerm b))) $ do
-
-      Fold.traverse_ recoverStmt (blockStmts b)
-      flip (,) Map.empty <$> mkBlock FnTermStmtUndefined
 
 recoverWrite :: BVValue X86_64 ids 64 -> Value X86_64 ids tp -> Recover ids ()
 recoverWrite addr val = do

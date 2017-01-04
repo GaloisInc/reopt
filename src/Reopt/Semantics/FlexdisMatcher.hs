@@ -31,7 +31,6 @@ import           Data.List (foldl')
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Parameterized.NatRepr
-import           Debug.Trace
 import qualified Flexdis86 as F
 import           GHC.TypeLits (KnownNat)
 
@@ -223,8 +222,8 @@ castSomeLocToWidth :: Monad m
 castSomeLocToWidth expected (SomeBV v)
   | Just Refl <- testEquality (loc_width v) expected = do
       return v
-  | otherwise = traceStack "LOC_WIDTH_ERROR" $
-     fail $ "Widths aren't equal: " ++ show (loc_width v) ++ " and " ++ show expected
+  | otherwise =
+      fail $ "Widths aren't equal: " ++ show (loc_width v) ++ " and " ++ show expected
 
 -- | Given a bitvector value with some width this attempts to interpret it
 -- at a specific width, and calls 'fail' if it cannot.
@@ -234,7 +233,7 @@ castSomeBVToWidth :: (Monad m, IsValue f)
                   -> m (f (BVType w))
 castSomeBVToWidth expected (SomeBV v)
   | Just Refl <- testEquality (bv_width v) expected = return v
-  | otherwise = traceStack "VALUE_WIDTH_ERROR" $
+  | otherwise =
      fail $ "Widths aren't equal: " ++ show (bv_width v) ++ " and " ++ show expected
 
 
@@ -532,6 +531,16 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
               , mk "pmovmskb" $ mkBinopLV exec_pmovmskb
               , mk "movhpd"  $ mkBinopLV exec_movhpd
               , mk "movlpd"  $ mkBinopLV exec_movlpd
+              , (,) "pshufb" $ SemanticsOp $ \ii -> do
+                  case fmap fst (F.iiArgs ii) of
+                    [F.XMMReg d, F.XMMReg s2] -> do
+                      let d_loc = fullRegister (N.xmmFromFlexdis d)
+                      d_val  <- get d_loc
+                      s2_val <- get (fullRegister (N.xmmFromFlexdis s2))
+                      (d_loc .=) =<< pshufb SIMD_128 d_val s2_val
+                    _ -> do
+                      fail $ "pshufb only supports 2 XMM registers as arguments.  Found:\n"
+                             ++ show ii
               , mk "pshufd"  $ ternop exec_pshufd
               , mk "pslldq"  $ geBinop exec_pslldq
               , mk "lddqu"   $ mkBinop $ \loc val -> do
@@ -782,10 +791,12 @@ binop f = mkBinop $ \loc val -> do
   f l v
 
 ternop :: FullSemantics m
-       => (forall k n. (IsLocationBV m n, 1 <= k, k <= n) => MLocation m (BVType n)
-                                                          -> Value m (BVType n)
-                                                          -> Value m (BVType k)
-                                                          -> m ())
+       => (forall k n
+           .  (IsLocationBV m n, 1 <= k, k <= n)
+           => MLocation m (BVType n)
+           -> Value m (BVType n)
+           -> Value m (BVType k)
+           -> m ())
        -> SemanticsArgs -> m ()
 ternop f = mkTernop $ \loc val1 val2 -> do
   SomeBV l <- getSomeBVLocation loc
@@ -856,4 +867,4 @@ execInstruction next ii =
     Just (SemanticsOp f) -> Just $ do
       rip .= next
       f ii -- (F.iiLockPrefix ii) (F.iiAddrSize ii) (F.iiArgs ii)
-    Nothing -> trace ("Unsupported instruction (" ++ show next ++ "): " ++ show ii) Nothing
+    Nothing -> Nothing

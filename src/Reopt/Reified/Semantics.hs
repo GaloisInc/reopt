@@ -489,6 +489,8 @@ instance S.Semantics Semantics where
 
   primitive p = tell [Primitive p]
 
+  pshufb = error "pshufb is not yet implemented."
+
   getSegmentBase seg = do
     var <- freshVar (show seg ++ "_base") S.knownType
     tell [GetSegmentBase var seg]

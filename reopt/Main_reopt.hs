@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -56,6 +57,7 @@ import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
+                 , BlockRegion(..)
                  , absState
                  , blocks
                  , functionEntries
@@ -449,22 +451,21 @@ showGaps loadSty binary = do
     out_gap _ _        = []
 -}
 
+mkCFG :: Integral (ArchAddr arch)
+      => Map (ArchSegmentedAddr arch) (BlockRegion arch ids)
+      -> CFG arch ids
+mkCFG m = Map.foldlWithKey' go emptyCFG m
+  where go g addr br = insertBlocksForCode addr (brSize br) l g
+          where l = Map.elems (brBlocks br)
+
 showCFG :: LoadStyle -> Elf Word64 -> IO ()
 showCFG loadSty e = do
   -- Create memory for elf
   (_,mem) <- mkElfMem loadSty e
-  putStrLn "mkElfMem"
   (Some disc_info, _) <- return $ mkFinalCFGWithSyms mem e
-  putStrLn "post cfgFromMemAndBinary"
   let fg = mkCFG (disc_info^.blocks)
   let g = eliminateDeadRegisters fg
-  putStrLn "Pretty graph"
   print (pretty g)
-
-{-
-getEntries :: Map BS.ByteString CodeAddr -- ^ Maps symbol names to addresses
-           -> Set String  -- ^ Name of symbols/addresses to exclude
--}
 
 -- | Try to recover function information from the information recovered during
 -- code discovery.
@@ -591,11 +592,8 @@ showCFGAndAI loadSty e = do
       GeneratedBlock _ 0 -> do
         checkReturnsIdentified g b
       _ -> return ()
-  forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
-    case blockLabel b of
-      GeneratedBlock _ 0 -> do
-        checkCallsIdentified mem g b
-      _ -> return ()
+  -- Check that the CFG correctly identifies call statements.
+  checkCallsIdentified mem g
 
 
 -- | Extract list containing symbol names and addresses.
@@ -723,7 +721,8 @@ blockNextStates g b =
     Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
       where Just x = findBlock g x_lbl
             Just y = findBlock g y_lbl
-    Syscall _ -> []
+    Syscall{} -> []
+    TranslateError{} -> []
 
 checkReturnsIdentified :: CFG X86_64 ids -> Block X86_64 ids -> IO ()
 checkReturnsIdentified g b =
@@ -739,18 +738,34 @@ checkReturnsIdentified g b =
         _ -> return ()
     _ -> return ()
 
-checkCallsIdentified :: Memory 64 -> CFG X86_64 ids -> Block X86_64 ids -> IO ()
-checkCallsIdentified mem g b = do
-  let lbl = blockLabel b
-  case blockNextStates g b of
-    [s] -> do
-      case (blockContainsCall mem b s, hasCallComment b) of
-        (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED call Block " ++ show (labelAddr lbl)
-        (False, True) -> do
-          hPutStrLn stderr $ "MISSING call Block " ++ show (labelAddr lbl)
-        _ -> return ()
-    _ -> return ()
+-- | This prints a report summarizing where calls are found that do not have
+-- call instructions
+checkCallsIdentified :: Memory 64 -> CFG X86_64 ids -> IO ()
+checkCallsIdentified mem g = do
+  let g_blocks = Map.elems (g^.cfgBlocks)
+  -- Check to see if block contains a call
+  let checkBlockForCall b =
+        case blockNextStates g b of
+          [s] -> blockContainsCall mem b s
+          _ -> False
+  let blocksWithCallDetected = Set.fromList $ fmap blockLabel $ filter checkBlockForCall g_blocks
+
+  let blocksWithCallComment  = Set.fromList $ fmap blockLabel $ filter hasCallComment g_blocks
+
+  let blocksWithSpuriousCall = blocksWithCallDetected `Set.difference` blocksWithCallComment
+  let blocksWithMissedCall   = blocksWithCallComment  `Set.difference` blocksWithCallDetected
+
+  when (not (Set.null blocksWithSpuriousCall)) $ do
+    hPutStrLn stderr $
+         "WARNING: Some blocks were interpreted as having a call, but no call instruction\n"
+      ++ "was found.  The address for the start of each block is listed below:"
+    mapM_ (\a -> hPutStrLn stderr $ "  " ++ show a) (Set.toList blocksWithSpuriousCall)
+
+  when (not (Set.null blocksWithMissedCall)) $ do
+    hPutStrLn stderr $
+         "WARNING: Some blocks contained a call comment, but were not interpreted as\n"
+      ++ "having a call.  The address for the start of each block is listed below:"
+    mapM_ (\a -> hPutStrLn stderr $ "  " ++ show a) (Set.toList blocksWithMissedCall)
 
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath

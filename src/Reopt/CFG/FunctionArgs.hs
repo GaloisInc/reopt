@@ -19,6 +19,7 @@ import           Data.Foldable as Fold (traverse_)
 import           Data.List (intercalate)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
@@ -151,8 +152,11 @@ data FunctionArgsState ids = FAS {
   -- in the set of deps (but probably should be).
   , _assignmentCache :: !(AssignmentCache ids)
 
-  -- | The set of blocks we need to consider.
-  , _blockFrontier  :: !(Set (BlockLabel 64))
+  -- | The set of blocks that we have already visited.
+  , _visitedBlocks  :: !(Set (BlockLabel 64))
+
+  -- | The set of blocks we need to consider (should be disjoint from visitedBlocks)
+  , _blockFrontier  :: ![Block X86_64 ids]
   }
 
 initFunctionArgsState :: FunctionArgsState ids
@@ -161,7 +165,9 @@ initFunctionArgsState =
       , _blockDemandMap    = Map.empty
       , _blockPreds        = Map.empty
       , _assignmentCache   = Map.empty
-      , _blockFrontier     = Set.empty }
+      , _visitedBlocks     = Set.empty
+      , _blockFrontier     = []
+      }
 
 blockTransfer :: Simple Lens (FunctionArgsState ids)
                    (Map (BlockLabel 64) (Map (Some X86Reg) DemandSet))
@@ -177,7 +183,11 @@ blockPreds = lens _blockPreds (\s v -> s { _blockPreds = v })
 assignmentCache :: Simple Lens (FunctionArgsState ids) (AssignmentCache ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
-blockFrontier :: Simple Lens (FunctionArgsState ids) (Set (BlockLabel 64))
+-- |The set of blocks that we have alreader visited
+visitedBlocks :: Simple Lens (FunctionArgsState ids) (Set (BlockLabel 64))
+visitedBlocks = lens _visitedBlocks (\s v -> s { _visitedBlocks = v })
+
+blockFrontier :: Simple Lens (FunctionArgsState ids) [Block X86_64 ids]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -188,11 +198,19 @@ type FunctionArgsM ids a = State (FunctionArgsState ids) a
 -- Phase one functions
 
 -- | This registers a block in the first phase (block discovery).
-addEdge :: BlockLabel 64 -> BlockLabel 64 -> FunctionArgsM ids ()
-addEdge source dest = do
-  -- record the edge
-  blockPreds    %= Map.insertWith mappend dest [source]
-  blockFrontier %= Set.insert dest
+addEdge :: DiscoveryInfo X86_64 ids -> Block X86_64 ids -> SegmentedAddr 64  -> FunctionArgsM ids ()
+addEdge interp_state src_block dest_addr = do  -- record the edge
+  let source = blockLabel src_block
+  let dest = mkRootBlockLabel dest_addr
+  blockPreds %= Map.insertWith mappend dest [source]
+  visited <- use visitedBlocks
+  when (Set.notMember dest visited) $ do
+    visitedBlocks %= Set.insert dest
+    case lookupBlock (interp_state^.blocks) dest of
+      Just dest_block -> blockFrontier %= (dest_block:)
+      Nothing -> error $ show $
+        text "Could not find target block" <+> text (show dest_addr) <$$>
+        indent 2 (text "Source:" <$$> pretty src_block)
 
 valueUses :: Value X86_64 ids tp -> FunctionArgsM ids RegisterSet
 valueUses = zoom assignmentCache .
@@ -225,9 +243,6 @@ demandValue lbl v = do
   blockDemandMap %= Map.insertWith demandMapUnion lbl
                         (Map.singleton DemandAlways (DemandSet regs mempty))
 
-nextBlock :: FunctionArgsM ids (Maybe (BlockLabel 64))
-nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe s snd x)
-
 -- -----------------------------------------------------------------------------
 -- Entry point
 
@@ -246,8 +261,14 @@ functionArgs ist =
     -- 3. Function results to function arguments.
     doOneFunction acc addr =
       flip evalState initFunctionArgsState $ do
+        let lbl0 = mkRootBlockLabel addr
         -- Run the first phase (block summarization)
-        summarizeIter ist Set.empty (Just lbl0)
+        visitedBlocks .= Set.singleton lbl0
+        case lookupBlock (ist^.blocks) lbl0 of
+          Just b -> blockFrontier .= [b]
+          Nothing -> error $ "Could not find initial block for " ++ show addr
+
+        summarizeIter ist
         -- propagate back uses
         new <- use blockDemandMap
 
@@ -266,8 +287,6 @@ functionArgs ist =
 
         funDemands <- use (blockDemandMap . ix lbl0)
         return (Map.foldlWithKey' (decomposeMap addr) acc funDemands)
-      where
-        lbl0 = mkRootBlockLabel addr
 
     -- A function may demand a callee saved register as it will store
     -- it onto the stack in order to use it later.  This will get
@@ -405,15 +424,16 @@ calculateLocalFixpoint new
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: DiscoveryInfo X86_64 ids
-              -> Set (BlockLabel 64)
-              -> Maybe (BlockLabel 64)
               -> FunctionArgsM ids ()
-summarizeIter _   _     Nothing = return ()
-summarizeIter ist seen (Just lbl)
-  | lbl `Set.member` seen = nextBlock >>= summarizeIter ist seen
-  | otherwise = do summarizeBlock ist lbl
-                   lbl' <- nextBlock
-                   summarizeIter ist (Set.insert lbl seen) lbl'
+summarizeIter ist = do
+  fnFrontier <- use blockFrontier
+  case fnFrontier of
+    [] ->
+      return ()
+    b : frontier' -> do
+      blockFrontier .= frontier'
+      summarizeBlock ist b
+      summarizeIter ist
 
 -- A function call is the only block type that results in the
 -- generation of function call demands, so we split that aspect out
@@ -465,88 +485,86 @@ summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
 summarizeBlock :: DiscoveryInfo X86_64 ids
-               -> BlockLabel 64
+               -> Block X86_64 ids
                -> FunctionArgsM ids ()
-summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label = go root_label
-  where
-    go :: BlockLabel 64 -> FunctionArgsM ids ()
-    go lbl = do
-      -- By default we have no arguments, return nothing
-      blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
+summarizeBlock interp_state b = do
 
-      Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
+  let lbl = blockLabel b
+  -- By default we have no arguments, return nothing
+  blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
 
-      let goStmt (WriteMem addr v) = do
-            demandValue lbl addr
-            demandValue lbl v
+  let goStmt (WriteMem addr v) = do
+        demandValue lbl addr
+        demandValue lbl v
+      goStmt (ExecArchStmt (MemCopy _sz cnt src dest rev)) = do
+        demandValue lbl cnt
+        demandValue lbl src
+        demandValue lbl dest
+        demandValue lbl rev
+      goStmt (ExecArchStmt (MemSet cnt v ptr df)) = do
+        demandValue lbl cnt
+        demandValue lbl v
+        demandValue lbl ptr
+        demandValue lbl df
+      goStmt _ = return ()
+  let m_pterm = classifyBlock b interp_state
+        -- FIXME: rsp here?
+  let recordCallPropagation proc_state =
+        recordPropagation blockTransfer lbl proc_state Some
+                          (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+  case m_pterm of
+    ParsedTranslateError _ ->
+      error "Cannot identify arguments in code where translation error occurs"
+    ParsedBranch c x y -> do
+      traverse_ goStmt (blockStmts b)
+      demandValue lbl c
+      let go l =
+            case lookupBlock (interp_state^.blocks) l of
+              Just b' -> summarizeBlock interp_state b'
+              Nothing -> error "summarizeBlock given unvisited block"
+      go x
+      go y
 
-          goStmt (ExecArchStmt (MemCopy _sz cnt src dest rev)) = do
-            demandValue lbl cnt
-            demandValue lbl src
-            demandValue lbl dest
-            demandValue lbl rev
+    ParsedCall proc_state stmts' fn m_ret_addr -> do
+      traverse_ goStmt stmts'
 
-          goStmt (ExecArchStmt (MemSet cnt v ptr df)) = do
-            demandValue lbl cnt
-            demandValue lbl v
-            demandValue lbl ptr
-            demandValue lbl df
+      summarizeCall lbl proc_state fn (not $ isJust m_ret_addr)
 
-          goStmt _ = return ()
+      case m_ret_addr of
+        Nothing       -> return ()
+        Just ret_addr -> do
+          addEdge interp_state b ret_addr
+          recordCallPropagation proc_state
 
-          -- FIXME: rsp here?
-          recordCallPropagation proc_state =
-            recordPropagation blockTransfer lbl proc_state Some
-                              (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+    ParsedJump proc_state tgt_addr -> do
+      traverse_ goStmt (blockStmts b)
+      -- record all propagations
+      recordPropagation blockTransfer lbl proc_state Some x86StateRegs
+      addEdge interp_state b tgt_addr
 
-      case m_pterm of
-        Just (ParsedBranch c x y) -> do
-          traverse_ goStmt (blockStmts b)
-          demandValue lbl c
-          go x
-          go y
+    ParsedReturn proc_state stmts' -> do
+      traverse_ goStmt stmts'
+      recordPropagation blockDemandMap lbl proc_state DemandFunctionResult $
+          fmap Some x86ResultRegs ++ fmap Some x86FloatResultRegs
 
-        Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
-          traverse_ goStmt stmts'
+    ParsedSyscall proc_state next_addr _call_no _pname _name argRegs _retRegs -> do
+      -- FIXME: we ignore the return type for now, probably not a problem.
+      traverse_ goStmt (blockStmts b)
 
-          summarizeCall lbl proc_state fn (not $ isJust m_ret_addr)
+      recordPropagation blockDemandMap lbl proc_state (const DemandAlways)
+                        (Some <$> argRegs)
 
-          case m_ret_addr of
-            Nothing       -> return ()
-            Just ret_addr -> do addEdge lbl (mkRootBlockLabel ret_addr)
-                                recordCallPropagation proc_state
+      recordCallPropagation proc_state
+      addEdge interp_state b next_addr
 
-        Just (ParsedJump proc_state tgt_addr) -> do
-          traverse_ goStmt (blockStmts b)
-          -- record all propagations
-          recordPropagation blockTransfer lbl proc_state Some x86StateRegs
-          addEdge lbl (mkRootBlockLabel tgt_addr)
+    ParsedLookupTable proc_state idx vec -> do
+      traverse_ goStmt (blockStmts b)
 
-        Just (ParsedReturn proc_state stmts') -> do
-          traverse_ goStmt stmts'
-          recordPropagation blockDemandMap lbl proc_state DemandFunctionResult $
-            fmap Some x86ResultRegs ++ fmap Some x86FloatResultRegs
+      demandValue lbl idx
 
-        Just (ParsedSyscall proc_state next_addr _call_no _pname _name argRegs _retRegs) -> do
-            -- FIXME: we ignore the return type for now, probably not a problem.
-            traverse_ goStmt (blockStmts b)
-
-            recordPropagation blockDemandMap lbl proc_state (const DemandAlways)
-               (Some <$> argRegs)
-
-            recordCallPropagation proc_state
-            addEdge lbl (mkRootBlockLabel next_addr)
-
-        Just (ParsedLookupTable proc_state idx vec) -> do
-            traverse_ goStmt (blockStmts b)
-
-            demandValue lbl idx
-
-            -- record all propagations
-            recordPropagation blockTransfer lbl proc_state Some x86StateRegs
-            traverse_ (addEdge lbl . mkRootBlockLabel) vec
-
-        Nothing -> debugM DFunctionArgs ("WARNING: No parsed block type at " ++ show lbl) >> return ()
+      -- record all propagations
+      recordPropagation blockTransfer lbl proc_state Some x86StateRegs
+      traverse_ (addEdge interp_state b) vec
 
 -- -----------------------------------------------------------------------------
 -- debug

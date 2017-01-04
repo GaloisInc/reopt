@@ -82,7 +82,13 @@ module Reopt.Semantics.Monad
   , cx,  ecx
     -- * IsLeq utility
   , IsLeq
-  , n1, n8, n16, n32, n64, n80, n128
+  , Data.Macaw.Types.n1
+  , Data.Macaw.Types.n8
+  , Data.Macaw.Types.n16
+  , Data.Macaw.Types.n32
+  , Data.Macaw.Types.n64
+  , Data.Macaw.Types.n80
+  , Data.Macaw.Types.n128
     -- * Value operations
   , IsValue(..)
   , bvKLit
@@ -91,6 +97,7 @@ module Reopt.Semantics.Monad
   , (.*)
   , Pred
     -- * Semantics
+  , SIMDWidth(..)
   , Semantics(..)
   , Value
   , MLocation
@@ -1230,6 +1237,19 @@ ppPrimitive = text . map toLower . show
 instance Pretty Primitive where
   pretty = ppPrimitive
 
+------------------------------------------------------------------------
+-- SIMDWidth
+
+-- | Defines a width of a register associated with SIMD operations
+-- (e.g., MMX, XMM, AVX)
+data SIMDWidth w
+   = (w ~  64) => SIMD_64
+   | (w ~ 128) => SIMD_128
+   | (w ~ 256) => SIMD_256
+
+------------------------------------------------------------------------
+-- Semantics
+
 -- | The Semantics Monad defines all the operations needed for the x86
 -- semantics.
 class ( Applicative m
@@ -1377,6 +1397,16 @@ class ( Applicative m
 
   -- | execute a primitive instruction.
   primitive :: Primitive -> m ()
+
+  -- | @pshufb w x s@ returns a value @res@ generated from the bytes of @x@
+  -- based on indices defined in the corresponding bytes of @s@.
+  --
+  -- Let @n@ be the number of bytes in the width @w@, and let @l = log2(n)@.
+  -- Given a byte index @i@, the value of byte @res[i]@, is defined by
+  --   @res[i] = 0 if msb(s[i]) == 1@
+  --   @res[i] = x[j] where j = s[i](0..l)
+  -- where @msb(y)@ returns the most-significant bit in byte @y@.
+  pshufb :: SIMDWidth w -> Value m (BVType w) -> Value m (BVType w) -> m (Value m (BVType w))
 
   -- | Return the base address of the given segment.
   getSegmentBase :: Segment -> m (Value m (BVType 64))

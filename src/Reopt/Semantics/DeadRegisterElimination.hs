@@ -60,6 +60,7 @@ blockLiveRegisters b = do
                    Branch v _ _      -> refsInValue v
                    FetchAndExecute s -> foldMapF refsInValue s
                    Syscall s     -> foldMapF refsInValue s
+                   TranslateError s _ -> foldMapF refsInValue s
     addIDs ids = modify (S.union ids)
     noteAndFilter stmt@(AssignStmt (Assignment v rhs)) ss
       = do v_in <- gets (S.member (Some v))

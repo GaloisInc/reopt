@@ -311,13 +311,15 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
       case m_pterm of
-        Just (ParsedBranch c x y) -> do
+        ParsedTranslateError _ ->
+          error "Cannot identify register use in code where translation error occurs"
+        ParsedBranch c x y -> do
           traverse_ goStmt (blockStmts b)
           demandValue lbl c
           go x
           go y
 
-        Just (ParsedCall proc_state stmts' fn m_ret_addr) -> do
+        ParsedCall proc_state stmts' fn m_ret_addr -> do
           traverse_ goStmt stmts'
 
           ft <- lookupFunctionArgs fn
@@ -333,24 +335,23 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
 
           addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
           -- Ensure that result registers are defined, but do not have any deps.
-          let
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
                     (Some <$> ftIntRetRegs ft)
                     ++ (Some <$> ftFloatRetRegs ft)
                     ++ [Some df_reg]
 
-        Just (ParsedJump proc_state tgt_addr) -> do
+        ParsedJump proc_state tgt_addr -> do
             traverse_ goStmt (blockStmts b)
             addRegisterUses proc_state x86StateRegs
             addEdge lbl (mkRootBlockLabel tgt_addr)
 
-        Just (ParsedReturn proc_state stmts') -> do
+        ParsedReturn proc_state stmts' -> do
             traverse_ goStmt stmts'
             ft <- gets currentFunctionType
             demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegs)
                                         ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegs))
 
-        Just (ParsedSyscall proc_state next_addr _call_no _pname _name argRegs rregs) -> do
+        ParsedSyscall proc_state next_addr _call_no _pname _name argRegs rregs -> do
           -- FIXME: clagged from call above
           traverse_ goStmt (blockStmts b)
           demandRegisters proc_state (Some <$> argRegs)
@@ -362,11 +363,9 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
 
           traverse_ insReg rregs
 
-        Just (ParsedLookupTable proc_state _idx vec) -> do
+        ParsedLookupTable proc_state _idx vec -> do
           traverse_ goStmt (blockStmts b)
 
           demandRegisters proc_state [Some ip_reg]
           addRegisterUses proc_state x86StateRegs
           traverse_ (addEdge lbl . mkRootBlockLabel) vec
-
-        Nothing -> return () -- ???

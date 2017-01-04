@@ -35,6 +35,7 @@ module Reopt.Machine.X86State
     -- * Architecture
   , X86_64
   , X86PrimFn(..)
+  , SIMDWidth(..)
   , X86PrimLoc(..)
   , X86Stmt(..)
     -- * X86-64 Specific functions
@@ -75,6 +76,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Semantics.Monad (SIMDWidth(..))
 
 
 -- | An address of a code location.
@@ -151,6 +153,12 @@ instance Pretty (X86PrimLoc tp) where
 ------------------------------------------------------------------------
 -- X86PrimFn
 
+-- | Return the 'NatRepr' associated with the given width.
+simdWidthNatRepr :: SIMDWidth w -> NatRepr w
+simdWidthNatRepr SIMD_64  = knownNat
+simdWidthNatRepr SIMD_128 = knownNat
+simdWidthNatRepr SIMD_256 = knownNat
+
 -- | Defines primitive functions in the X86 format.
 data X86PrimFn ids tp
    = ReadLoc !(X86PrimLoc tp)
@@ -166,7 +174,25 @@ data X86PrimFn ids tp
    | (tp ~ BVType 64) => RDTSC
      -- ^ The RDTSC instruction
      --
-     --  This returns the concatenation of edx:eax
+     -- This returns the current time stamp counter a 64-bit value that will
+     -- be stored in edx:eax
+   | (tp ~ BVType 64) => XGetBV (BVValue X86_64 ids 32)
+     -- ^ The XGetBV instruction primitive
+     --
+     -- This returns the extended control register defined in the given value
+     -- as a 64-bit value that will be stored in edx:eax
+   | forall w
+     .  (tp ~ BVType w)
+     => PShufb !(SIMDWidth w) !(BVValue X86_64 ids w) !(BVValue X86_64 ids w)
+     -- ^ @PShufb w x s@ returns a value @res@ generated from the bytes of @x@
+     -- based on indices defined in the corresponding bytes of @s@.
+     --
+     -- Let @n@ be the number of bytes in the width @w@, and let @l = log2(n)@.
+     -- Given a byte index @i@, the value of byte @res[i]@, is defined by
+     --   @res[i] = 0 if msb(s[i]) == 1@
+     --   @res[i] = x[j] where j = s[i](0..l)
+     -- where @msb(y)@ returns the most-significant bit in byte @y@.
+
    | (tp ~ BVType 64)
      => MemCmp !Integer
                -- /\ Number of bytes per value.
@@ -204,6 +230,8 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       ReadGSBase    -> knownType
       CPUID{}       -> knownType
       RDTSC{}       -> knownType
+      XGetBV{}      -> knownType
+      PShufb w _ _  -> BVTypeRepr (simdWidthNatRepr w)
       MemCmp{}      -> knownType
       FindElement{} -> knownType
 
@@ -228,6 +256,8 @@ ppX86PrimFn pp f =
     ReadGSBase  -> pure $ text "gs.base"
     CPUID code  -> sexprA "cpuid" [ pp code ]
     RDTSC       -> pure $ text "rdtsc"
+    XGetBV code -> sexprA "xgetbv" [ pp code ]
+    PShufb _ x s -> sexprA "pshufb" [ pp x, pp s ]
     MemCmp sz cnt src dest rev -> sexprA "memcmp" args
       where args = [pure (pretty sz), pp cnt, pp dest, pp src, pp rev]
     FindElement sz fndeq cnt buf val rev -> sexprA "find_element" args
@@ -241,26 +271,29 @@ data X86Stmt ids
    = forall tp .
      WriteLoc !(X86PrimLoc tp) !(Value X86_64 ids tp)
    | MemCopy !Integer
-             -- ^ Number of bytes to copy at a time (1,2,4,8)
              !(BVValue X86_64 ids 64)
-             -- ^ Number of values to move.
              !(BVValue X86_64 ids 64)
-             -- ^ Start of source buffer.
              !(BVValue X86_64 ids 64)
-             -- ^ Start of destination buffer.
              !(BVValue X86_64 ids 1)
-             -- ^ Flag indicates whether direction of move:
-             -- True means we should decrement buffer pointers after each copy.
-             -- False means we should increment the buffer pointers after each copy.
+     -- ^ Copy a region of memory from a source buffer to a destination buffer.
+     --
+     -- In an expression @MemCopy bc v src dest dir@
+     -- * @bc@ is the number of bytes to copy at a time (1,2,4,8)
+     -- * @v@ is the number of values to move.
+     -- * @src@ is the start of source buffer.
+     -- * @dest@ is the start of destination buffer.
+     -- * @dir@ is a flag that indicates whether direction of move:
+     --   * 'True' means we should decrement buffer pointers after each copy.
+     --   * 'False' means we should increment the buffer pointers after each copy.
    | forall n .
      MemSet !(BVValue X86_64 ids 64)
-            -- ^ Number of values to assign
+            -- /\ Number of values to assign
             !(BVValue X86_64 ids n)
-            -- ^ Value to assign
+            -- /\ Value to assign
             !(BVValue X86_64 ids 64)
-            -- ^ Address to start assigning from.
+            -- /\ Address to start assigning from.
             !(BVValue X86_64 ids 1)
-            -- ^ Direction flag
+            -- /\ Direction flag
 
 instance PrettyF X86Stmt where
   prettyF (WriteLoc loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
@@ -589,6 +622,8 @@ refsInX86PrimFn f =
     ReadGSBase -> Set.empty
     CPUID v    -> refsInValue v
     RDTSC      -> Set.empty
+    XGetBV v   -> refsInValue v
+    PShufb _ x y -> Set.union (refsInValue x) (refsInValue y)
     MemCmp _ cnt src dest dir ->
       Set.unions [ refsInValue cnt
                  , refsInValue src
@@ -666,8 +701,10 @@ foldValueCached litf addrf initf assignf val = getStateMonadMonoid (go val)
         ReadLoc _ -> mempty
         ReadFSBase -> mempty
         ReadGSBase -> mempty
-        CPUID v -> go v
-        RDTSC   -> mempty
+        CPUID v    -> go v
+        RDTSC      -> mempty
+        XGetBV v   -> go v
+        PShufb _ x y -> mconcat [ go x, go y ]
         MemCmp _sz cnt src dest rev ->
           mconcat [ go cnt, go src, go dest, go rev ]
         FindElement _sz _findEq cnt buf val' rev ->

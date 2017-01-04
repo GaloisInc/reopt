@@ -53,10 +53,10 @@ main = do
       base = SegmentedAddr seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do
-        b <- disassembleBlock' gen mem (const True) (rootLoc base)
-        case b of
-          Left err -> return $ Left err
-          Right (bs, end) ->
+        (bs, end, maybeError) <- disassembleBlock gen mem (const True) (rootLoc base)
+        case maybeError of
+          Just err -> return $ Left err
+          Nothing ->
             error "UNIMPLEMENTED"
             -- let cfg = eliminateDeadRegisters $ insertBlocksForCode base end bs emptyCFG
             --     bs' = Map.elems (cfg^.cfgBlocks)

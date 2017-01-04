@@ -211,8 +211,8 @@ modifyValue _ v@(Undefined _) = v
 -- Machine state monad
 
 data Address tp where
-  Address :: NatRepr n         -- ^ Number of bits.
-          -> BitVector 64      -- ^ Address of first byte.
+  Address :: NatRepr n         -- /\ Number of bits.
+          -> BitVector 64      -- /\ Address of first byte.
           -> Address (BVType n)
 type Address8 = Address (BVType 8)
 type Value8 = Value (BVType 8)

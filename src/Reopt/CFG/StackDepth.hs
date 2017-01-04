@@ -257,12 +257,14 @@ recoverBlock interp_state root_label = do
                                   | r <- gpRegList ]
 
       case m_pterm of
-        Just (ParsedBranch _c x y) -> do
+        ParsedTranslateError _ ->
+          error "Cannot identify stack depth in code where translation error occurs"
+        ParsedBranch _c x y -> do
           traverse_ goStmt (blockStmts b)
           go init_sp x
           go init_sp y
 
-        Just (ParsedCall proc_state stmts' _fn m_ret_addr) -> do
+        ParsedCall proc_state stmts' _fn m_ret_addr -> do
             traverse_ goStmt stmts'
             addStateVars proc_state
 
@@ -271,7 +273,7 @@ recoverBlock interp_state root_label = do
               Nothing -> return ()
               Just ret_addr ->  addBlock (mkRootBlockLabel ret_addr) (addStackDepthValue sp' $ constantDepthValue 8)
 
-        Just (ParsedJump proc_state tgt_addr) -> do
+        ParsedJump proc_state tgt_addr -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
@@ -280,22 +282,20 @@ recoverBlock interp_state root_label = do
 
             addBlock lbl' sp'
 
-        Just (ParsedReturn _proc_state stmts') -> do
+        ParsedReturn _proc_state stmts' -> do
             traverse_ goStmt stmts'
 
-        Just (ParsedSyscall proc_state next_addr _call_no _pname _name _argRegs _rregs) -> do
+        ParsedSyscall proc_state next_addr _call_no _pname _name _argRegs _rregs -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
             let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
             addBlock (mkRootBlockLabel next_addr) sp'
 
-        Just (ParsedLookupTable proc_state _idx vec) -> do
+        ParsedLookupTable proc_state _idx vec -> do
             traverse_ goStmt (blockStmts b)
             addStateVars proc_state
 
             let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
             traverse_ (flip addBlock sp' . mkRootBlockLabel) vec
-
-        Nothing -> return () -- ???

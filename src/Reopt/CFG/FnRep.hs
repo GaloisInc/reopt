@@ -322,25 +322,25 @@ data FnStmt
   | forall tp . FnAssignStmt !(FnAssignment tp)
     -- FIXME: can we share these with the front-end?
   | FnMemCopy !Integer
-             -- ^ Number of bytes to copy at a time (1,2,4,8)
+             -- /\ Number of bytes to copy at a time (1,2,4,8)
              !(FnValue (BVType 64))
-              -- ^ Number of values to move.
+              -- /\ Number of values to move.
              !(FnValue (BVType 64))
-              -- ^ Start of source buffer.
+              -- /\ Start of source buffer.
              !(FnValue (BVType 64))
-              -- ^ Start of destination buffer.
+              -- /\ Start of destination buffer.
              !(FnValue (BVType 1))
-              -- ^ Flag indicates whether direction of move:
+              -- /\ Flag indicates whether direction of move:
               -- True means we should decrement buffer pointers after each copy.
               -- False means we should increment the buffer pointers after each copy.
   | forall n. FnMemSet (FnValue (BVType 64))
-                        -- ^ Number of values to assign
+                        -- /\ Number of values to assign
                        (FnValue (BVType n))
-                        -- ^ Value to assign
+                        -- /\ Value to assign
                        (FnValue (BVType 64))
-                        -- ^ Address to start assigning from.
+                        -- /\ Address to start assigning from.
                        (FnValue (BVType 1))
-                        -- ^ Direction flag
+                        -- /\ Direction flag
 
 instance Pretty FnStmt where
   pretty s =
