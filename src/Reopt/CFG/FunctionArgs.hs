@@ -32,6 +32,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory (MemWidth)
 import           Data.Macaw.Types
@@ -223,9 +224,8 @@ addEdge :: ArchConstraints arch
         -> ArchSegmentedAddr arch
         -> FunctionArgsM arch ids ()
 addEdge interp_state src_block dest_addr = do  -- record the edge
-  let source = blockLabel src_block
   let dest = mkRootBlockLabel dest_addr
-  blockPreds %= Map.insertWith mappend dest [source]
+  blockPreds %= Map.insertWith (++) dest [blockLabel src_block]
   visited <- use visitedBlocks
   when (Set.notMember dest visited) $ do
     visitedBlocks %= Set.insert dest
@@ -238,12 +238,13 @@ addEdge interp_state src_block dest_addr = do  -- record the edge
 valueUses :: (OrdF (ArchReg arch), CanFoldValues arch)
           => Value arch ids tp
           -> FunctionArgsM arch ids (RegisterSet (ArchReg arch))
-valueUses = zoom assignmentCache .
+valueUses v =
+  zoom assignmentCache $
             foldValueCached (\_ _    -> mempty)
                             (\_      -> mempty)
                             (\r      -> Set.singleton (Some r))
                             (\_ regs -> regs)
-
+                            v
 
 -- Figure out the deps of the given registers and update the state for the current label
 recordPropagation :: ( Ord a
@@ -465,12 +466,22 @@ summarizeBlock interp_state b = do
       recordPropagation blockDemandMap lbl proc_state DemandFunctionResult $
           (functionRetRegs (Proxy :: Proxy arch))
 
-    ParsedSyscall proc_state next_addr _call_no _pname _name argRegs _retRegs -> do
+    ParsedSyscall proc_state next_addr -> do
+      let sysp = syscallPersonality interp_state
+
       -- FIXME: we ignore the return type for now, probably not a problem.
       traverse_ (demandStmtValues lbl) (blockStmts b)
 
-      recordPropagation blockDemandMap lbl proc_state (const DemandAlways)
-                        (Some <$> argRegs)
+      do let syscallRegs :: [ArchReg arch (BVType (ArchAddrWidth arch))]
+             syscallRegs = syscallArgumentRegs
+         let argRegs
+               | Just call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
+               , Just (_,_,argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
+                   take (length argtypes) syscallRegs
+               | otherwise =
+                   syscallRegs
+
+         recordPropagation blockDemandMap lbl proc_state (\_ -> DemandAlways) (Some <$> argRegs)
 
       recordCallPropagation proc_state
       addEdge interp_state b next_addr

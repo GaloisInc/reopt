@@ -281,17 +281,15 @@ recoverBlock interp_state root_label = do
   Just init_sp <- use (blockInitStackPointers . at root_label)
   go init_sp root_label
   where
+    addStateVars init_sp s = do
+      forM_ gpRegList $ \r -> do
+        addDepth $ parseStackPointer init_sp (s ^. boundValue r)
     go init_sp lbl = do
-      Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
-
-
+      Just b <- return $ lookupBlock (interp_state^.blocks) lbl
           -- overapproximates by viewing all registers as uses of the
           -- sp between blocks
-      let addStateVars s = do
-            forM_ gpRegList $ \r -> do
-              addDepth $ parseStackPointer init_sp (s ^. boundValue r)
 
-      case m_pterm of
+      case classifyBlock b interp_state of
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
         ParsedBranch _c x y -> do
@@ -301,7 +299,7 @@ recoverBlock interp_state root_label = do
 
         ParsedCall proc_state stmts' _fn m_ret_addr -> do
           traverse_ (goStmt init_sp) stmts'
-          addStateVars proc_state
+          addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
           case m_ret_addr of
@@ -311,7 +309,7 @@ recoverBlock interp_state root_label = do
 
         ParsedJump proc_state tgt_addr -> do
           traverse_ (goStmt init_sp) (blockStmts b)
-          addStateVars proc_state
+          addStateVars init_sp proc_state
 
           let lbl'     = mkRootBlockLabel tgt_addr
               sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
@@ -321,16 +319,16 @@ recoverBlock interp_state root_label = do
         ParsedReturn _proc_state stmts' -> do
           traverse_ (goStmt init_sp) stmts'
 
-        ParsedSyscall proc_state next_addr _call_no _pname _name _argRegs _rregs -> do
+        ParsedSyscall proc_state next_addr -> do
           traverse_ (goStmt init_sp) (blockStmts b)
-          addStateVars proc_state
+          addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
           addBlock (mkRootBlockLabel next_addr) sp'
 
         ParsedLookupTable proc_state _idx vec -> do
           traverse_ (goStmt init_sp) (blockStmts b)
-          addStateVars proc_state
+          addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 

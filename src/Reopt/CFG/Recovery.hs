@@ -44,6 +44,7 @@ import           Data.String (fromString)
 import           Data.Type.Equality
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.Info
@@ -457,9 +458,9 @@ recoverBlock blockRegProvides phis lbl = do
                                             , fbTerm = tm
                                             }
 
-  Just (b, m_pterm) <- uses rsInterp (getClassifyBlock lbl)
-
-  case m_pterm of
+  interp_state <- use rsInterp
+  Just b <- pure $ lookupBlock (interp_state^.blocks) lbl
+  case classifyBlock b interp_state of
     ParsedTranslateError _ -> do
       error "Cannot recover function in blocks where translation error occurs."
 
@@ -531,7 +532,21 @@ recoverBlock blockRegProvides phis lbl = do
 
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
-    ParsedSyscall proc_state next_addr call_no pname name args rregs -> do
+    ParsedSyscall proc_state next_addr -> do
+      let sysp = syscallPersonality interp_state
+
+      let syscallRegs :: [ArchReg X86_64 (BVType 64)]
+          syscallRegs = syscallArgumentRegs
+
+      let (name, call_no, args)
+            | Just this_call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
+            , Just (call_name,_,argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
+              (call_name, fromInteger this_call_no, take (length argtypes) syscallRegs)
+            | otherwise =
+              ("unknown", 0, syscallRegs)
+
+      let rregs = spResultRegisters sysp
+
       Fold.traverse_ recoverStmt (blockStmts b)
 
       let mkRet :: MapF X86Reg FnRegValue
@@ -570,7 +585,7 @@ recoverBlock blockRegProvides phis lbl = do
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-      fb <- mkBlock (FnSystemCall call_no pname name args' rets (mkRootBlockLabel next_addr))
+      fb <- mkBlock (FnSystemCall call_no (spName sysp) name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
     ParsedLookupTable proc_state idx vec -> do

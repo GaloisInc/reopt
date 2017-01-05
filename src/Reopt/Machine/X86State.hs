@@ -658,7 +658,18 @@ class CanFoldValues arch where
                -> ArchFn arch ids tp
                -> r
 
--- | This folds over a values.
+foldAssignRHSValues :: (Monoid r, CanFoldValues arch)
+                    => (forall vtp . Value arch ids vtp -> r)
+                    -> AssignRhs arch ids tp
+                    -> r
+foldAssignRHSValues go v =
+  case v of
+    EvalApp a -> foldApp go a
+    SetUndefined _w -> mempty
+    ReadMem addr _ -> go addr
+    EvalArchFn f _ -> foldFnValues go f
+
+-- | This folds over elements of a values in a  values.
 --
 -- It memoizes values so that it only evaluates assignments with the same id
 -- once.
@@ -670,7 +681,7 @@ foldValueCached :: forall m arch ids tp
                    -- ^ Function for global addresses
                 -> (forall utp . ArchReg arch utp -> m)
                    -- ^ Function for input registers
-                -> (forall utp . Assignment arch ids utp -> m -> m)
+                -> (forall utp . AssignId ids utp -> m -> m)
                    -- ^ Function for assignments
                 -> Value arch ids tp
                 -> State (Map (Some (AssignId ids)) m) m
@@ -684,24 +695,15 @@ foldValueCached litf addrf initf assignf = getStateMonadMonoid . go
         BVValue sz i -> return $ litf sz i
         RelocatableValue _ a -> pure $ addrf a
         Initial r    -> return $ initf r
-        AssignedValue asgn@(Assignment a_id rhs) -> do
+        AssignedValue (Assignment a_id rhs) -> do
           m_v <- use (at (Some a_id))
           case m_v of
-            Just v' -> return $ assignf asgn v'
+            Just v' ->
+              return $ assignf a_id v'
             Nothing -> do
-              rhs_v <- goAssignRHS rhs
+              rhs_v <- foldAssignRHSValues go rhs
               at (Some a_id) .= Just rhs_v
-              return (assignf asgn rhs_v)
-
-    goAssignRHS :: forall tp'
-                .  AssignRhs arch ids tp'
-                -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
-    goAssignRHS v =
-      case v of
-        EvalApp a -> foldApp go a
-        SetUndefined _w -> mempty
-        ReadMem addr _ -> go addr
-        EvalArchFn f _ -> foldFnValues go f
+              return (assignf a_id rhs_v)
 
 instance CanFoldValues X86_64 where
   foldFnValues go f =

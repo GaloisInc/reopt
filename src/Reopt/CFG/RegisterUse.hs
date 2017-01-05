@@ -22,16 +22,21 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V ()
 
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
+import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Types
+
 import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftMaximumFunctionType
                                  , ftMinimumFunctionType
-                                 , ftIntArgRegs , ftFloatArgRegs
-                                 , ftIntRetRegs , ftFloatRetRegs
+                                 , ftIntArgRegs
+                                 , ftFloatArgRegs
+                                 , ftIntRetRegs
+                                 , ftFloatRetRegs
                                  )
 import           Reopt.Machine.X86State
-import           Data.Macaw.DebugLogging
 
 -- -----------------------------------------------------------------------------
 
@@ -149,11 +154,10 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 
 -- | This registers a block in the first phase (block discovery).
 addEdge :: BlockLabel 64 -> BlockLabel 64 -> RegisterUseM ids ()
-addEdge source dest =
-  do -- record the edge
-     debugM DRegisterUse ("Adding edge " ++ show source ++ " -> " ++ show dest)
-     blockPreds    %= Map.insertWith mappend dest [source]
-     blockFrontier %= Set.insert dest
+addEdge source dest = do
+  -- record the edge
+  blockPreds    %= Map.insertWith mappend dest [source]
+  blockFrontier %= Set.insert dest
 
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps ids)
 valueUses = zoom assignmentCache .
@@ -161,7 +165,7 @@ valueUses = zoom assignmentCache .
                             (const (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
                             (\asgn (assigns, regs) ->
-                              (Set.insert (Some (assignId asgn)) assigns, regs))
+                              (Set.insert (Some asgn) assigns, regs))
 
 demandValue :: BlockLabel 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
 demandValue lbl v =
@@ -275,7 +279,7 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
     go :: BlockLabel 64 -> RegisterUseM ids ()
     go lbl = do
       debugM DRegisterUse ("Summarizing " ++ show lbl)
-      Just (b, m_pterm) <- return $ getClassifyBlock lbl interp_state
+      Just b <- return $ lookupBlock (interp_state^.blocks) lbl
 
       let goStmt (WriteMem addr v) = do
             demandValue lbl addr
@@ -310,7 +314,7 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
              vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
-      case m_pterm of
+      case classifyBlock b interp_state of
         ParsedTranslateError _ ->
           error "Cannot identify register use in code where translation error occurs"
         ParsedBranch c x y -> do
@@ -351,10 +355,24 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
             demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegs)
                                         ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegs))
 
-        ParsedSyscall proc_state next_addr _call_no _pname _name argRegs rregs -> do
+        ParsedSyscall proc_state next_addr -> do
+
+          let sysp = syscallPersonality interp_state
+          let rregs = spResultRegisters sysp
+
+          do let syscallRegs :: [ArchReg X86_64 (BVType 64)]
+                 syscallRegs = syscallArgumentRegs
+             let argRegs
+                   | Just call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
+                   , Just (_,_,argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
+                     take (length argtypes) syscallRegs
+                   | otherwise =
+                     syscallRegs
+             demandRegisters proc_state (Some <$> argRegs)
+
+
           -- FIXME: clagged from call above
           traverse_ goStmt (blockStmts b)
-          demandRegisters proc_state (Some <$> argRegs)
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
 
