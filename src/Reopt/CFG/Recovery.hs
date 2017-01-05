@@ -23,7 +23,6 @@ module Reopt.CFG.Recovery
   , FnAssignment(..)
   , FnAssignRhs(..)
   , recoverFunction
-  , recoverFunctions
   ) where
 
 import           Control.Exception (assert)
@@ -53,7 +52,6 @@ import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
-import           Reopt.CFG.FunctionArgs ( functionArgs )
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
 import           Reopt.Machine.X86State
@@ -274,7 +272,9 @@ recoverFunction fArgs s a = do
   let go ~(_, blockRegMap) = do
          -- Make the alloca and init rsp.  This is the only reason we
          -- need rsCurStmts
-         allocateStackFrame (maximumStackDepth s a)
+         case maximumStackDepth s a of
+           Right depths -> allocateStackFrame depths
+           Left msg -> throwError $ "maximumStackDepth: " ++ msg
          r0 <- recoverBlock blockRegProvides MapF.empty lbl
          rets <- mapM (recoverInnerBlock blockRegMap) (Map.keys blockPreds)
          -- disjoint maps here, so mconcat is OK
@@ -346,8 +346,8 @@ mkAddAssign rhs = do
   addFnStmt $ FnAssignStmt fnAssign
   return $ FnAssignedValue fnAssign
 
-allocateStackFrame :: Set (StackDepthValue ids) -> Recover ids ()
-allocateStackFrame (sd :: Set (StackDepthValue ids))
+allocateStackFrame :: Set (StackDepthValue X86_64 ids) -> Recover ids ()
+allocateStackFrame (sd :: Set (StackDepthValue X86_64 ids))
   | Set.null sd          = debug DFunRecover "WARNING: no stack use detected" $ return ()
   | [s] <- Set.toList sd = do
       let sz0 = FnConstantValue n64 (toInteger (negate $ staticPart s))
@@ -358,7 +358,7 @@ allocateStackFrame (sd :: Set (StackDepthValue ids))
 
   | otherwise            = debug DFunRecover "WARNING: non-singleton stack depth" $ return ()
   where
-    doOneDelta :: StackDepthOffset ids
+    doOneDelta :: StackDepthOffset X86_64 ids
                   -> Recover ids (FnValue (BVType 64))
                   -> Recover ids (FnValue (BVType 64))
     doOneDelta (Pos _) _   = error "Saw positive stack delta"
@@ -731,8 +731,3 @@ recoverValue nm v = do
           return $! FnValueUnsupported ("Initial (callee) register " ++ show reg)
                                        (typeRepr reg)
         Just (FnRegValue v') -> return v'
-
-recoverFunctions :: DiscoveryInfo X86_64 ids -> Either String [Function]
-recoverFunctions s =
-  let fArgs = functionArgs s
-   in traverse (recoverFunction fArgs s) (Set.toList (s^.functionEntries))

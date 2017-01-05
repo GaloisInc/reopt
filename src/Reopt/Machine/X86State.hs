@@ -35,6 +35,7 @@ module Reopt.Machine.X86State
     -- * Architecture
   , X86_64
   , X86PrimFn(..)
+  , CanFoldValues(..)
   , SIMDWidth(..)
   , X86PrimLoc(..)
   , X86Stmt(..)
@@ -644,30 +645,39 @@ refsInX86PrimFn f =
 newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
    deriving (Functor, Applicative, Monad, MonadState s)
 
+
 instance Monoid m => Monoid (StateMonadMonoid s m) where
   mempty = return mempty
   mappend m m' = mappend <$> m <*> m'
+
+-- | Typeclass for folding over architecture-specific values.
+class CanFoldValues arch where
+  -- | Folding over ArchFn values
+  foldFnValues :: Monoid r
+               => (forall vtp . Value arch ids vtp -> r)
+               -> ArchFn arch ids tp
+               -> r
 
 -- | This folds over a values.
 --
 -- It memoizes values so that it only evaluates assignments with the same id
 -- once.
-foldValueCached :: forall m ids tp
-                .  Monoid m
+foldValueCached :: forall m arch ids tp
+                .  (Monoid m, CanFoldValues arch)
                 => (forall n.  NatRepr n -> Integer -> m)
                    -- ^ Function for literals
-                -> (SegmentedAddr 64 -> m)
+                -> (ArchSegmentedAddr arch -> m)
                    -- ^ Function for global addresses
-                -> (forall utp . ArchReg X86_64 utp -> m)
+                -> (forall utp . ArchReg arch utp -> m)
                    -- ^ Function for input registers
-                -> (forall utp . Assignment X86_64 ids utp -> m -> m)
+                -> (forall utp . Assignment arch ids utp -> m -> m)
                    -- ^ Function for assignments
-                -> Value X86_64 ids tp
+                -> Value arch ids tp
                 -> State (Map (Some (AssignId ids)) m) m
-foldValueCached litf addrf initf assignf val = getStateMonadMonoid (go val)
+foldValueCached litf addrf initf assignf = getStateMonadMonoid . go
   where
     go :: forall tp'
-       .  Value X86_64 ids tp'
+       .  Value arch ids tp'
        -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
     go v =
       case v of
@@ -684,31 +694,29 @@ foldValueCached litf addrf initf assignf val = getStateMonadMonoid (go val)
               return (assignf asgn rhs_v)
 
     goAssignRHS :: forall tp'
-                .  AssignRhs X86_64 ids tp'
+                .  AssignRhs arch ids tp'
                 -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
     goAssignRHS v =
       case v of
         EvalApp a -> foldApp go a
         SetUndefined _w -> mempty
         ReadMem addr _ -> go addr
-        EvalArchFn f _ -> goX86PrimFn f
+        EvalArchFn f _ -> foldFnValues go f
 
-    goX86PrimFn :: forall tp'
-                .  X86PrimFn ids tp'
-                -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
-    goX86PrimFn f =
-      case f of
-        ReadLoc _ -> mempty
-        ReadFSBase -> mempty
-        ReadGSBase -> mempty
-        CPUID v    -> go v
-        RDTSC      -> mempty
-        XGetBV v   -> go v
-        PShufb _ x y -> mconcat [ go x, go y ]
-        MemCmp _sz cnt src dest rev ->
-          mconcat [ go cnt, go src, go dest, go rev ]
-        FindElement _sz _findEq cnt buf val' rev ->
-          mconcat [ go cnt, go buf, go val', go rev ]
+instance CanFoldValues X86_64 where
+  foldFnValues go f =
+    case f of
+      ReadLoc _  -> mempty
+      ReadFSBase -> mempty
+      ReadGSBase -> mempty
+      CPUID v    -> go v
+      RDTSC      -> mempty
+      XGetBV v   -> go v
+      PShufb _ x y -> mconcat [ go x, go y ]
+      MemCmp _sz cnt src dest rev ->
+        mconcat [ go cnt, go src, go dest, go rev ]
+      FindElement _sz _findEq cnt buf val' rev ->
+        mconcat [ go cnt, go buf, go val', go rev ]
 
 ------------------------------------------------------------------------
 -- X86_64 specific block operations.
