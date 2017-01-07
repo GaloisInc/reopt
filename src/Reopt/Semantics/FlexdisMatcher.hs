@@ -857,7 +857,7 @@ fpUnopOrRegBinop f args@(_, vs, _mnemonic)
 --   * fixed:     those which have exact sizes known
 
 -- FIXME: do something more interesting here than 'Maybe'
-execInstruction :: (FullSemantics m, Show (Value m (BVType 64)))
+execInstruction :: (FullSemantics m)
                 => Value m (BVType 64)
                    -- ^ Next ip address
                 -> F.InstructionInstance
