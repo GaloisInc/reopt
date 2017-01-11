@@ -9,7 +9,7 @@ packages:
 - deps/linux-ptrace
 - deps/llvm-pretty
 - deps/macaw
-- deps/matlab-data
+- deps/mss/matlab-data
 - deps/parameterized-utils
 - deps/posix-waitpid
 - deps/reopt-crucible
