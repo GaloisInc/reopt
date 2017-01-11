@@ -77,7 +77,10 @@ data DemandSet (r :: Type -> *) =
     DemandSet { registerDemands       :: !(RegisterSet r)
               , functionResultDemands :: !(Map (SegmentedAddr (RegAddrWidth r)) (RegisterSet r))
               }
-  deriving (Eq, Ord, Show)
+
+deriving instance (ShowF r) => Show (DemandSet r)
+deriving instance (TestEquality r) => Eq (DemandSet r)
+deriving instance (OrdF r) => Ord (DemandSet r)
 
 instance OrdF r => Monoid (DemandSet r) where
   mempty = DemandSet { registerDemands = Set.empty
