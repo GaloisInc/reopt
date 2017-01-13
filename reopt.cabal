@@ -19,7 +19,6 @@ library
     bytestring,
     containers,
     data-binary-ieee754,
-    dwarf-tools,
     elf-edit >= 0.28,
     fingertree,
     flexdis86 >= 0.1.1,
