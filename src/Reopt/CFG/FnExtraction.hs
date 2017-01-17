@@ -25,15 +25,8 @@ data FunTermStmt arch ids
    | ParsedReturn !(RegState (ArchReg arch) (Value arch ids)) !(Seq (Stmt arch ids))
    | ParsedSyscall !(RegState (ArchReg arch) (Value arch ids))
                    !(ArchSegmentedAddr arch)
-                   !(ArchAddr arch)
-                   !String
-                   !String
-                   ![ArchReg arch (BVType (ArchAddrWidth arch))]
-                   ![Some (ArchReg arch)]
    | ParsedTranslateError !Text
      -- ^ An error occured in translating the block
-
-
 
 data FunBlock arch ids =
   FunBlock { funblockLabel :: !(ArchLabel arch)

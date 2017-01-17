@@ -374,17 +374,14 @@ allocateStackFrame (sd :: Set (StackDepthValue X86_64 ids))
 -- regValuePair nm v = return $ Just $ MapF.Pair nm (FnRegValue v)
 
 -- FIXME: clag from RegisterUse.hs
-lookupFunctionArgs :: Either (SegmentedAddr 64) (BVValue X86_64 ids 64)
+lookupFunctionArgs :: SegmentedAddr 64
                    -> Recover ids FunctionType
-lookupFunctionArgs fn =
-  case fn of
-    Right _dynaddr -> return ftMaximumFunctionType
-    Left faddr -> do
-      fArgs <- gets (Map.lookup faddr . rsFunctionArgs)
-      case fArgs of
-        Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
-                      return ftMaximumFunctionType
-        Just v  -> return v
+lookupFunctionArgs faddr = do
+  fArgs <- gets (Map.lookup faddr . rsFunctionArgs)
+  case fArgs of
+    Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
+                  return ftMaximumFunctionType
+    Just v  -> return v
 
       -- Figure out what is preserved across the function call.
 getPostCallValue :: BlockLabel 64
@@ -463,7 +460,8 @@ recoverBlock blockRegProvides phis lbl = do
   case classifyBlock b interp_state of
     ParsedTranslateError _ -> do
       error "Cannot recover function in blocks where translation error occurs."
-
+    ClassifyFailure msg ->
+      error $ "Classification failed: " ++ msg
     ParsedBranch c x y -> do
       Fold.traverse_ recoverStmt (blockStmts b)
       cv <- recoverValue "branch_cond" c
@@ -473,10 +471,13 @@ recoverBlock blockRegProvides phis lbl = do
       yr <- recoverBlock blockRegProvides MapF.empty y
       return $! mconcat [(fb, Map.empty), xr, yr]
 
-    ParsedCall proc_state prev_stmts fn m_ret_addr -> do
+    ParsedCall proc_state prev_stmts m_ret_addr -> do
       Fold.traverse_ recoverStmt prev_stmts
 
-      ft <- lookupFunctionArgs fn
+      ft <-
+        case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
+          Nothing   -> return ftMaximumFunctionType
+          Just addr -> lookupFunctionArgs addr
 
       -- May not be used (only if called function returns at these types)
       intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownType :: TypeRepr (BVType 64))
@@ -709,7 +710,7 @@ recoverValue nm v = do
         case () of
           _ | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Set.member addr (interpState^.functionEntries) -> do
-              ft <- lookupFunctionArgs (Left addr)
+              ft <- lookupFunctionArgs addr
               return $! FnFunctionEntryValue ft addr
 
             | segmentFlags seg `Perm.hasPerm` Perm.execute

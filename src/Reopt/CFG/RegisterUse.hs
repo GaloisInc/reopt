@@ -254,17 +254,14 @@ summarizeIter ist seen (Just lbl)
                    summarizeIter ist (Set.insert lbl seen) lbl'
 
 -- | This returns the arguments associated with a particular function.
-lookupFunctionArgs :: Either (SegmentedAddr 64) (BVValue X86_64 ids 64)
+lookupFunctionArgs :: SegmentedAddr 64
                    -> RegisterUseM ids FunctionType
-lookupFunctionArgs fn =
-  case fn of
-    Right _dynaddr -> return ftMaximumFunctionType
-    Left faddr -> do
-      fArgs <- gets (Map.lookup faddr . functionArgs)
-      case fArgs of
-        Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
-                      return ftMaximumFunctionType
-        Just v  -> return v
+lookupFunctionArgs faddr = do
+  fArgs <- gets (Map.lookup faddr . functionArgs)
+  case fArgs of
+    Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
+                  return ftMaximumFunctionType
+    Just v  -> return v
 
 -- | This function figures out what the block requires
 -- (i.e., addresses that are stored to, and the value stored), along
@@ -317,16 +314,21 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
       case classifyBlock b interp_state of
         ParsedTranslateError _ ->
           error "Cannot identify register use in code where translation error occurs"
+        ClassifyFailure msg ->
+          error $ "Classification failed: " ++ msg
         ParsedBranch c x y -> do
           traverse_ goStmt (blockStmts b)
           demandValue lbl c
           go x
           go y
 
-        ParsedCall proc_state stmts' fn m_ret_addr -> do
+        ParsedCall proc_state stmts' m_ret_addr -> do
           traverse_ goStmt stmts'
 
-          ft <- lookupFunctionArgs fn
+          ft <-
+            case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
+              Nothing -> pure ftMaximumFunctionType
+              Just faddr -> lookupFunctionArgs faddr
 
           demandRegisters proc_state [Some ip_reg]
 

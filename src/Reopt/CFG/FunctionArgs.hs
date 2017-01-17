@@ -34,7 +34,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
-import           Data.Macaw.Memory (MemWidth)
+import           Data.Macaw.Memory (Memory, MemWidth, IsAddr(..))
 import           Data.Macaw.Types
 import           Data.Macaw.Discovery.Info
 import           Reopt.CFG.FnRep (FunctionType(..))
@@ -356,41 +356,45 @@ class CanDemandValues arch where
 -- generation of function call demands, so we split that aspect out
 -- (callee saved are handled in summarizeBlock).
 summarizeCall :: forall arch ids
-              .  (CanDemandValues arch, CanFoldValues arch, RegisterInfo (ArchReg arch))
-              => ArchLabel arch
+              .  ( CanDemandValues arch
+                 , CanFoldValues arch
+                 , RegisterInfo (ArchReg arch)
+                 , IsAddr (ArchAddrWidth arch)
+                 )
+              => Memory (ArchAddrWidth arch)
+              -> ArchLabel arch
               -> RegState (ArchReg arch) (Value arch ids)
-              -> Either (ArchSegmentedAddr arch) (BVValue arch ids (ArchAddrWidth arch))
               -> Bool
               -> FunctionArgsM arch ids ()
-summarizeCall lbl proc_state (Left faddr) isTailCall = do
-  -- If a subsequent block demands r, then we note that we want r from
-  -- function faddr
-  -- FIXME: refactor out Some s
-    let retRegs = functionRetRegs (Proxy :: Proxy arch)
-    if isTailCall then
-       -- tail call, propagate demands for our return regs to the called function
-      let propMap = map (\(Some r) -> (DemandFunctionResult r, demandSet (Some r))) retRegs
-       in  blockDemandMap %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList propMap)
-     else
-      traverse_ propResult retRegs
+summarizeCall mem lbl proc_state isTailCall = do
+  case asLiteralAddr mem (proc_state^.boundValue ip_reg) of
+    Just faddr -> do
+      -- If a subsequent block demands r, then we note that we want r from
+      -- function faddr
+      -- FIXME: refactor out Some s
+      let retRegs = functionRetRegs (Proxy :: Proxy arch)
+      -- singleton for now, but propagating back will introduce more deps.
+      let demandSet sr         = DemandSet mempty (Map.singleton faddr (Set.singleton sr))
+      if isTailCall then
+        -- tail call, propagate demands for our return regs to the called function
+        let propMap = map (\(Some r) -> (DemandFunctionResult r, demandSet (Some r))) retRegs
+         in  blockDemandMap %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList propMap)
+       else do
+        let propResult :: Some (ArchReg arch) -> FunctionArgsM arch ids ()
+            propResult sr = do
+              let srDemandSet = Map.singleton sr (demandSet sr)
+              blockTransfer %= Map.insertWith (Map.unionWith mappend) lbl srDemandSet
+        traverse_ propResult retRegs
 
-    -- If a function wants argument register r, then we note that this
-    -- block needs the corresponding state values.  Note that we could
-    -- do this for _all_ registers, but this should make the summaries somewhat smaller.
-    let argRegs = functionArgRegs (Proxy :: Proxy arch)
-    recordPropagation blockDemandMap lbl proc_state (DemandFunctionArg faddr) argRegs
-  where
-    -- singleton for now, but propagating back will introduce more deps.
-    demandSet sr         = DemandSet mempty (Map.singleton faddr (Set.singleton sr))
-
-    propResult :: Some (ArchReg arch) -> FunctionArgsM arch ids ()
-    propResult sr =
-      blockTransfer %= Map.insertWith (Map.unionWith mappend) lbl
-                                      (Map.singleton sr (demandSet sr))
--- In the dynamic case, we just assume all arguments (FIXME: results?)
-summarizeCall lbl proc_state (Right _dynaddr) _isTailCall = do
-  let argRegs = [Some ip_reg] ++ functionArgRegs (Proxy :: Proxy arch)
-  recordPropagation blockDemandMap lbl proc_state (\_ -> DemandAlways) argRegs
+      -- If a function wants argument register r, then we note that this
+      -- block needs the corresponding state values.  Note that we could
+      -- do this for _all_ registers, but this should make the summaries somewhat smaller.
+      let argRegs = functionArgRegs (Proxy :: Proxy arch)
+      recordPropagation blockDemandMap lbl proc_state (DemandFunctionArg faddr) argRegs
+    Nothing -> do
+      -- In the dynamic case, we just assume all arguments (FIXME: results?)
+      let argRegs = [Some ip_reg] ++ functionArgRegs (Proxy :: Proxy arch)
+      recordPropagation blockDemandMap lbl proc_state (\_ -> DemandAlways) argRegs
 
 
 demandStmtValues :: (OrdF (ArchReg arch), CanDemandValues arch, CanFoldValues arch)
@@ -437,6 +441,8 @@ summarizeBlock interp_state b = do
   case m_pterm of
     ParsedTranslateError _ ->
       error "Cannot identify arguments in code where translation error occurs"
+    ClassifyFailure msg ->
+      error $ "Classification failed: " ++ msg
     ParsedBranch c x y -> do
       traverse_ (demandStmtValues lbl) (blockStmts b)
       demandValue lbl c
@@ -447,11 +453,9 @@ summarizeBlock interp_state b = do
       go x
       go y
 
-    ParsedCall proc_state stmts' fn m_ret_addr -> do
+    ParsedCall proc_state stmts' m_ret_addr -> do
       traverse_ (demandStmtValues lbl) stmts'
-
-      summarizeCall lbl proc_state fn (not $ isJust m_ret_addr)
-
+      summarizeCall (memory interp_state) lbl proc_state (not $ isJust m_ret_addr)
       case m_ret_addr of
         Nothing       -> return ()
         Just ret_addr -> do

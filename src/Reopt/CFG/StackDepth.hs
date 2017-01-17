@@ -292,12 +292,14 @@ recoverBlock interp_state root_label = do
       case classifyBlock b interp_state of
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
+        ClassifyFailure msg ->
+          throwError $ "Classification failed: " ++ msg
         ParsedBranch _c x y -> do
           traverse_ (goStmt init_sp) (blockStmts b)
           go init_sp x
           go init_sp y
 
-        ParsedCall proc_state stmts' _fn m_ret_addr -> do
+        ParsedCall proc_state stmts' m_ret_addr -> do
           traverse_ (goStmt init_sp) stmts'
           addStateVars init_sp proc_state
 
