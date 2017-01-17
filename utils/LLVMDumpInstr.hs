@@ -47,7 +47,7 @@ main = do
       bs = BS.pack $ (map (fst . head) nums) ++ retBytes
       seg = memSegment 0 (Just 0) Perm.execute [ByteRegion bs]
       mem =
-        case insertMemSegment seg (emptyMemory knownNat) of
+        case insertMemSegment seg (emptyMemory Addr64) of
           Left e -> error $ "Segment " ++ showInsertError e
           Right mem' -> mem'
       base = SegmentedAddr seg 0

@@ -17,7 +17,7 @@ data FunTermStmt arch ids
     -- ^ A function call that jumps to the address given, and returns to the given address.
   | FunTailCall !(RegMap arch ids) !(ArchSegentedAddr arch ids)
     -- ^ A function call that jumps to the address given, and doesn't return
-     -- | A lookup table that branches to the given locations.
+
    | ParsedLookupTable !(RegState (ArchReg arch) (Value arch ids))
                        !(BVValue arch ids (ArchAddrWidth arch))
                        !(V.Vector (ArchSegmentedAddr arch))

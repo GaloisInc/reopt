@@ -107,8 +107,8 @@ mkElfMem :: Monad m
          -> m (SectionIndexMap Word64 64, Memory 64)
 mkElfMem sty e = do
   case sty of
-    LoadBySection -> either fail return $ memoryForElfSections Rela64 e
-    LoadBySegment -> either fail return $ memoryForElfSegments Rela64 e
+    LoadBySection -> either fail return $ memoryForElfSections Addr64 e
+    LoadBySegment -> either fail return $ memoryForElfSegments Addr64 e
 
 ------------------------------------------------------------------------
 -- Args

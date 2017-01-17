@@ -73,8 +73,7 @@ import           Data.Macaw.AbsDomain.AbsState
        ,
        )
 import qualified Data.Macaw.AbsDomain.StridedInterval as SI
-import           Data.Macaw.Architecture.Info
-  (AddrWidthRepr(..), ArchitectureInfo(..))
+import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
