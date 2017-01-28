@@ -56,11 +56,8 @@ library
     Reopt.Concrete.MachineState
     Reopt.Machine.StateNames
     Reopt.Machine.X86State
-    Reopt.Machine.SysDeps.FreeBSD
     Reopt.Machine.SysDeps.FreeBSDGenerated
-    Reopt.Machine.SysDeps.Linux
     Reopt.Machine.SysDeps.LinuxGenerated
-    Reopt.Machine.SysDeps
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection

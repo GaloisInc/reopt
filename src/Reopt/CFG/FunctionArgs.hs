@@ -173,6 +173,7 @@ data FunctionArgsState arch ids = FAS
 
   -- | The set of blocks we need to consider (should be disjoint from visitedBlocks)
   , _blockFrontier  :: ![Block arch ids]
+  , funSyscallPersonality :: !(SyscallPersonality arch)
   }
 
 blockTransfer :: Simple Lens (FunctionArgsState arch ids)
@@ -196,14 +197,15 @@ visitedBlocks = lens _visitedBlocks (\s v -> s { _visitedBlocks = v })
 blockFrontier :: Simple Lens (FunctionArgsState arch ids) [Block arch ids]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
-initFunctionArgsState :: FunctionArgsState arch ids
-initFunctionArgsState =
+initFunctionArgsState :: SyscallPersonality arch -> FunctionArgsState arch ids
+initFunctionArgsState sysp =
   FAS { _blockTransfer     = Map.empty
       , _blockDemandMap    = Map.empty
       , _blockPreds        = Map.empty
       , _assignmentCache   = Map.empty
       , _visitedBlocks     = Set.empty
       , _blockFrontier     = []
+      , funSyscallPersonality = sysp
       }
 
 -- ----------------------------------------------------------------------------------------
@@ -474,8 +476,7 @@ summarizeBlock interp_state b = do
           (functionRetRegs (Proxy :: Proxy arch))
 
     ParsedSyscall proc_state next_addr -> do
-      let sysp = syscallPersonality interp_state
-
+      sysp <- gets funSyscallPersonality
       -- FIXME: we ignore the return type for now, probably not a problem.
       traverse_ (demandStmtValues lbl) (blockStmts b)
 
@@ -553,9 +554,10 @@ calculateLocalFixpoint new
 -- | Returns the set of argument registers and result registers for each function.
 functionDemands :: forall arch ids
                 .  SummarizeConstraints arch ids
-                => DiscoveryInfo arch ids
+                => SyscallPersonality arch
+                -> DiscoveryInfo arch ids
                 -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
-functionDemands ist =
+functionDemands sysp ist =
     calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
   where
     (argDemandsMap, resultDemandsMap, argsMap)
@@ -569,7 +571,7 @@ functionDemands ist =
                   -> SegmentedAddr (ArchAddrWidth arch)
                   -> FunctionArgState (ArchReg arch)
     doOneFunction acc addr =
-      flip evalState initFunctionArgsState $ do
+      flip evalState (initFunctionArgsState sysp) $ do
         let lbl0 = mkRootBlockLabel addr
         -- Run the first phase (block summarization)
         visitedBlocks .= Set.singleton lbl0
@@ -670,8 +672,11 @@ inferFunctionTypeFromDemands dm =
                         retDemands
 
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: forall ids . DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType
-functionArgs = inferFunctionTypeFromDemands . functionDemands
+functionArgs :: forall ids
+             .  SyscallPersonality X86_64
+             -> DiscoveryInfo X86_64 ids
+             -> Map (SegmentedAddr 64) FunctionType
+functionArgs sysp = inferFunctionTypeFromDemands . functionDemands sysp
 
 debugPrintMap :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)

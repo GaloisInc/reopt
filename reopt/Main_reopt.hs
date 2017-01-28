@@ -35,7 +35,7 @@ import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
-import           Numeric (readHex)
+import           Numeric (readHex, showHex)
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (createDirectoryIfMissing, doesFileExist)
 import           System.Environment (getArgs)
@@ -52,19 +52,23 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 import           Paths_reopt (getLibDir, version)
 
 import           Data.Macaw.AbsDomain.AbsState
+import           Data.Macaw.Architecture.Info (ArchitectureInfo)
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
                  , BlockRegion(..)
-                 , absState
+                 , codeInfoMap
+                 , addrAbsBlockState
                  , blocks
                  , functionEntries
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 import           Data.Macaw.Types
+
 
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..))
@@ -73,7 +77,6 @@ import           Reopt.CFG.Implementation
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
-import           Reopt.Machine.SysDeps
 import           Reopt.Machine.X86State
 import           Reopt.Relinker
 import           Reopt.Semantics.DeadRegisterElimination
@@ -411,25 +414,61 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brSize br) l g
           where l = Map.elems (brBlocks br)
 
+-- | Create a final CFG
+mkFinalCFGWithSyms :: ArchitectureInfo X86_64
+                   -> Memory 64 -- ^ Layout in memory of file
+                   -> Elf Word64 -- ^ Elf file to create CFG for.
+                   -> IO (Some (DiscoveryInfo X86_64), Map (SegmentedAddr 64) BS.ByteString)
+mkFinalCFGWithSyms archInfo mem e = do
+  entries <-
+    case elfSymtab e of
+      [] -> pure $ []
+      [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
+      _ -> fail "Elf contains multiple symbol tables."
+
+  let (unresolved, resolved) = resolvedSegmentedElfFuncSymbols mem entries
+  -- Check for unresolved symbols
+  when (not (Map.null unresolved)) $ do
+    fail $ show $ ppElfUnresolvedSymbols unresolved
+  let sym_map = fmap head resolved
+  entry <- case absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
+             Nothing -> fail "Could not resolve entry"
+             Just v  -> pure v
+  let sym_addrs = entry : Map.keys resolved
+
+  pure ( cfgFromAddrs archInfo mem sym_map sym_addrs (memAsAddrPairs mem LittleEndian)
+       , sym_map
+       )
+
+getElfArchInfo :: Elf Word64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
+getElfArchInfo e =
+  case elfOSABI e of
+    ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality, "Linux")
+    ELFOSABI_SYSV    -> pure (x86_64_linux_info,   linux_syscallPersonality, "Linux")
+    ELFOSABI_FREEBSD -> pure (x86_64_freeBSD_info, freeBSD_syscallPersonality, "FreeBSD")
+    abi              -> fail $ "Unknown OSABI: " ++ show abi
+
 showCFG :: LoadStyle -> Elf Word64 -> IO ()
 showCFG loadSty e = do
   -- Create memory for elf
   (_,mem) <- mkElfMem loadSty e
-  (Some disc_info, _) <- return $ mkFinalCFGWithSyms mem e
+  (archInfo,_,_) <- getElfArchInfo e
+  (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
   let fg = mkCFG (disc_info^.blocks)
   let g = eliminateDeadRegisters fg
   print (pretty g)
 
 -- | Try to recover function information from the information recovered during
 -- code discovery.
-getFns :: Map BS.ByteString (SegmentedAddr 64)
+getFns :: SyscallPersonality X86_64
+       -> Map BS.ByteString (SegmentedAddr 64)
           -- ^ Maps symbol names to addresses
        -> Set String
           -- ^ Name of symbols/addresses to exclude
        -> DiscoveryInfo X86_64 ids
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
-getFns symMap excludedNames s = do
+getFns sysp symMap excludedNames s = do
 
   -- Compute which functions to compute by looking at the binary
   let nms = Set.toList excludedNames
@@ -448,10 +487,10 @@ getFns symMap excludedNames s = do
           _ -> True
   let entries = filter include $ Set.toList (s^.functionEntries)
 
-  let fArgs = functionArgs s
+  let fArgs = functionArgs sysp s
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \entry -> do
-    case recoverFunction fArgs s entry of
+    case recoverFunction sysp fArgs s entry of
       Left msg -> do
         hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
         pure Nothing
@@ -462,8 +501,9 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (secMap, mem) <- mkElfMem (args^.loadStyle) e
-  (Some s,_) <- return $ mkFinalCFGWithSyms mem e
-  fns <- getFns (elfSymAddrMap secMap e) (args^.notransAddrs) s
+  (archInfo,sysp,_) <- getElfArchInfo e
+  (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
+  fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
@@ -487,55 +527,48 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
--- | Create a final CFG
-mkFinalCFGWithSyms :: Memory 64 -- ^ Layout in memory of file
-                   -> Elf Word64 -- ^ Elf file to create CFG for.
-                   -> (Some (DiscoveryInfo X86_64), Map (SegmentedAddr 64) BS.ByteString)
-mkFinalCFGWithSyms mem e =
-    ( cfgFromAddrs x86ArchitectureInfo mem sym_map sysp
-         sym_addrs
-         (memAsAddrPairs mem LittleEndian)
-    , sym_map
-    )
-        -- Get list of code locations to explore starting from entry points (i.e., eltEntry)
-  where entries =
-          case elfSymtab e of
-            [] -> []
-            [tbl] -> V.toList (elfSymbolTableEntries tbl)
-            _ -> error "Elf contains multiple symbol tables."
-        resolveAddr :: MemWord 64 -> SegmentedAddr 64
-        resolveAddr v =
-          case absoluteAddrSegment mem (fromIntegral v) of
-            Just a -> a
-            Nothing -> error $ "Could not resolve address " ++ show v  ++ "."
-        sym_assocs = [ (resolveAddr (fromIntegral (steValue ste)), steName ste)
-                     | ste <- entries
-                     , steType ste == STT_FUNC
-                     , isCodeAddr mem (fromIntegral (steValue ste))
-                     ]
-        sym_addrs = resolveAddr (fromIntegral (elfEntry e)) : fmap fst sym_assocs
-        sym_map   = Map.fromList sym_assocs
+-- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
+--
+-- It returns a two maps, the first contains entries that could not be resolved; the second
+-- contains those that could.
+resolvedSegmentedElfFuncSymbols :: Memory 64
+                                -> [ElfSymbolTableEntry Word64]
+                                -> (Map (MemWord 64)  [BS.ByteString], Map (SegmentedAddr 64) [BS.ByteString])
+resolvedSegmentedElfFuncSymbols mem entries = (Map.fromList u, Map.fromList r)
+  where -- Filter out just function entries
+        isCodeFuncSymbol ste = steType ste == STT_FUNC
+                            && isCodeAddr mem (fromIntegral (steValue ste))
+        func_entries = filter isCodeFuncSymbol entries
+        -- Build absolute address map
+        absAddrMap :: Map (MemWord 64) [BS.ByteString]
+        absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
+        -- Resolve addresses
+        resolve (v,nms) =
+          case absoluteAddrSegment mem v of
+            Nothing -> Left  (v,  nms)
+            Just sv -> Right (sv, nms)
+        (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
 
-        -- FIXME: just everything.
-        Just sysp =
-          case elfOSABI e of
-            ELFOSABI_LINUX   -> Map.lookup "Linux" sysDeps
-            ELFOSABI_SYSV    -> Map.lookup "Linux" sysDeps
-            ELFOSABI_FREEBSD -> Map.lookup "FreeBSD" sysDeps
-            abi                -> error $ "Unknown OSABI: " ++ show abi
+ppElfUnresolvedSymbols :: Map (MemWord 64) [BS.ByteString] -> Doc
+ppElfUnresolvedSymbols m =
+    text "Could not resolve addresses of ELF symbols" <$$>
+    indent 2 (vcat $ pp <$> Map.toList m)
+  where pp :: (MemWord 64, [BS.ByteString]) -> Doc
+        pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
 
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   (_,mem) <- mkElfMem loadSty e
-  (Some s,_) <- return $ mkFinalCFGWithSyms mem e
+  (archInfo,_, _) <- getElfArchInfo e
+  (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
   let fg = mkCFG (s^.blocks)
-  let abst = s^.absState
-      amap = assignmentAbsValues x86ArchitectureInfo mem fg abst
+  let abst = s^.codeInfoMap
+      amap = assignmentAbsValues x86_64_freeBSD_info mem fg abst
   let g  = eliminateDeadRegisters fg
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
-                  (GeneratedBlock _ 0, Just ab) -> pretty ab
+                  (GeneratedBlock _ 0, Just ab) -> pretty (ab^.addrAbsBlockState)
                   (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
 
@@ -595,7 +628,8 @@ showLLVM args dir = do
 
   -- Create memory for elf
   (secMap, mem) <- mkElfMem loadSty e
-  (Some cfg, symMap) <- return $ mkFinalCFGWithSyms mem e
+  (archInfo, sysp, syscallPostfix) <- getElfArchInfo e
+  (Some cfg, symMap) <- mkFinalCFGWithSyms archInfo mem e
 
   let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
         where
@@ -614,11 +648,11 @@ showLLVM args dir = do
               LLVM.declareIntrinsics
               let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
               itraverse_ (LLVM.declareFunction addrSymMap) refs
-              LLVM.defineFunction addrSymMap f
+              LLVM.defineFunction syscallPostfix addrSymMap f
         writeFile (mkName f) (show (L.ppLLVM $ L.ppModule m))
 
   createDirectoryIfMissing True dir
-  fns <- getFns (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
+  fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
   mapM_ writeF fns
 
 -- | This is designed to detect returns from the X86 representation.
@@ -895,7 +929,8 @@ performReopt args =
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
     (secMap, mem) <- mkElfMem (args^.loadStyle) orig_binary
-    (Some cfg,_) <- return $ mkFinalCFGWithSyms mem orig_binary
+    (archInfo, sysp, syscallPostfix) <- getElfArchInfo orig_binary
+    (Some cfg,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
 
@@ -908,15 +943,15 @@ performReopt args =
         let g = eliminateDeadRegisters (mkCFG $ cfg^.blocks)
         writeFile output_path $ show (pretty g)
       ".fns" -> do
-        fns <- getFns (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
-        fns <- getFns (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         BS.writeFile output_path obj_llvm
       ".o" -> do
-        fns <- getFns (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) cfg
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) cfg
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         compile_llvm_to_obj args arch llvm output_path
@@ -925,9 +960,9 @@ performReopt args =
       _ -> do
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
-        fns <- getFns symAddrMap notrans cfg
+        fns <- getFns sysp symAddrMap notrans cfg
 
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions addrSymMap fns
+        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         let obj_path = obj_dir </> "obj.o"

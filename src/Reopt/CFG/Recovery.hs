@@ -74,7 +74,8 @@ data RecoverState ids = RS { _rsInterp :: !(DiscoveryInfo X86_64 ids)
                              -- ^ This maps registers to the associated value
                              -- at the start of the block after any stack allocations have
                              -- been performed.
-
+                           , rsSyscallPersonality :: !(SyscallPersonality X86_64)
+                             -- ^ System call personality
                            , rsAssignmentsUsed :: !(Set (Some (AssignId ids)))
                            , rsCurrentFunctionType :: !FunctionType
                            , rsFunctionArgs    :: !FunctionArgs
@@ -229,10 +230,14 @@ functionSize s a = do
       _ -> segmentSize seg - a^.addrOffset
 
 -- | Recover the function at a given address.
-recoverFunction :: FunctionArgs -> DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> Either String Function
-recoverFunction fArgs s a = do
+recoverFunction :: SyscallPersonality X86_64
+                -> FunctionArgs
+                -> DiscoveryInfo X86_64 ids
+                -> SegmentedAddr 64
+                -> Either String Function
+recoverFunction sysp fArgs s a = do
   let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
-        = registerUse fArgs s a
+        = registerUse sysp fArgs s a
 
   let lbl = GeneratedBlock a 0
 
@@ -260,6 +265,7 @@ recoverFunction fArgs s a = do
               , _rsCurStmts  = Seq.empty
               , _rsAssignMap = MapF.empty
               , _rsCurRegs   = initRegs
+              , rsSyscallPersonality = sysp
               , rsAssignmentsUsed = usedAssigns
               , rsCurrentFunctionType = cft
               , rsFunctionArgs    = fArgs
@@ -534,7 +540,7 @@ recoverBlock blockRegProvides phis lbl = do
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
     ParsedSyscall proc_state next_addr -> do
-      let sysp = syscallPersonality interp_state
+      sysp <- gets rsSyscallPersonality
 
       let syscallRegs :: [ArchReg X86_64 (BVType 64)]
           syscallRegs = syscallArgumentRegs
@@ -586,7 +592,7 @@ recoverBlock blockRegProvides phis lbl = do
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-      fb <- mkBlock (FnSystemCall call_no (spName sysp) name args' rets (mkRootBlockLabel next_addr))
+      fb <- mkBlock (FnSystemCall call_no name args' rets (mkRootBlockLabel next_addr))
       return $! (fb, Map.singleton lbl regs')
 
     ParsedLookupTable proc_state idx vec -> do

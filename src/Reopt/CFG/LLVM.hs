@@ -157,7 +157,9 @@ declareIntrinsics =
 -- | Maps code addresses in the LLVM state to the associated symbol name if any.
 type AddrSymMap = Map (SegmentedAddr 64) BSC.ByteString
 
-data LLVMState = LLVMState { llvmIntArgs   :: [L.Typed L.Value]
+data LLVMState = LLVMState { llvmSyscallIntrinsicPostfix :: !String
+                             -- ^ Name to append to system call personalities
+                           , llvmIntArgs   :: [L.Typed L.Value]
                            , llvmFloatArgs :: [L.Typed L.Value]
                            , llvmAddrSymMap :: !AddrSymMap
                            }
@@ -256,8 +258,12 @@ getReferencedFunctions f = foldFnValue findReferencedFunctions f
         findReferencedFunctions _ = mempty
 
 -- | Get module for functions
-moduleForFunctions :: AddrSymMap -> [Function] -> L.Module
-moduleForFunctions addrSymMap fns = snd $ L.runLLVM $ do
+moduleForFunctions :: String
+                      -- ^ Name to append to system calls
+                   -> AddrSymMap
+                   -> [Function]
+                   -> L.Module
+moduleForFunctions syscallPostfix addrSymMap fns = snd $ L.runLLVM $ do
   declareIntrinsics
   -- Get all function references
   let all_refs = mconcat (getReferencedFunctions <$> fns)
@@ -266,7 +272,7 @@ moduleForFunctions addrSymMap fns = snd $ L.runLLVM $ do
   -- Declare functions thaat aren't defined
   itraverse_ (declareFunction addrSymMap) refs
   -- Define all functions
-  mapM_ (defineFunction addrSymMap) fns
+  mapM_ (defineFunction syscallPostfix addrSymMap) fns
 
 -- | This writes a function to LLVM, and returns the value corresponding to the function.
 --
@@ -275,8 +281,12 @@ moduleForFunctions addrSymMap fns = snd $ L.runLLVM $ do
 --
 -- Users should declare intrinsics via 'declareIntrinsics' before using this function.
 -- They should also add any referenced functions.
-defineFunction :: AddrSymMap -> Function -> LLVM (L.Typed L.Value)
-defineFunction addrSymMap f = do
+defineFunction :: String
+                  -- ^ Name to append to system call
+               -> AddrSymMap
+               -> Function
+               -> LLVM (L.Typed L.Value)
+defineFunction syscallPostfix addrSymMap f = do
   L.define' L.emptyFunAttrs retType symbol argTypes False go
   where
     argTypes      = functionTypeArgTypes (fnType f)
@@ -285,7 +295,8 @@ defineFunction addrSymMap f = do
     symbol        = functionName addrSymMap (fnAddr f)
     go args =
       let nint = fnNIntArgs $ fnType f
-          st   = LLVMState { llvmIntArgs   = take nint args
+          st   = LLVMState { llvmSyscallIntrinsicPostfix = syscallPostfix
+                           , llvmIntArgs   = take nint args
                            , llvmFloatArgs = error "uninitialised float args"
                            , llvmAddrSymMap = addrSymMap
                            }
@@ -379,9 +390,10 @@ termStmtToLLVM tm =
                       fretvs
            L.jump (blockName lbl)
 
-     FnSystemCall call_no pname name args rets lbl -> do
+     FnSystemCall call_no name args rets lbl -> do
+       pname <- gets llvmSyscallIntrinsicPostfix
        args'  <- mapM valueToLLVM args
-     -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
+       -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
        let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegs) args'
                      ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
 

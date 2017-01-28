@@ -748,6 +748,7 @@ x86CalleeSavedRegs = Set.fromList $
   , Some r13_reg
   , Some r14_reg
   , Some r15_reg
+  , Some X87_TopReg
   ]
 
 x86ArgumentRegs :: [X86Reg (BVType 64)]

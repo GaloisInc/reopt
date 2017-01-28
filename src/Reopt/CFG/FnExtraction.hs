@@ -12,12 +12,13 @@ data FunTermStmt arch ids
   | FunBranch   !(Value arch ids BoolType) !(ArchLabel arch) !(ArchLabel arch)
     -- ^ A Boolean condition that branches to one label or the other.
   | FunSyscall  !(RegMap arch ids) !(ArchSegmentedAddr arch)
-    -- ^ A system call that invokes the given arguments, and returns to the given address.
+    -- ^ A system call that invokes the given arguments, and returns to the given
+    -- address.
   | FunCall     !(RegMap arch ids) !(ArchSegentedAddr arch ids)
-    -- ^ A function call that jumps to the address given, and returns to the given address.
+    -- ^ A function call that jumps to the address given, and returns to the given
+    -- address.
   | FunTailCall !(RegMap arch ids) !(ArchSegentedAddr arch ids)
     -- ^ A function call that jumps to the address given, and doesn't return
-
    | ParsedLookupTable !(RegState (ArchReg arch) (Value arch ids))
                        !(BVValue arch ids (ArchAddrWidth arch))
                        !(V.Vector (ArchSegmentedAddr arch))

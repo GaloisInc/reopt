@@ -378,8 +378,7 @@ data FnTermStmt
      -- returns to the label.
 
      -- FIXME: specialized to BSD's (broken) calling convention
-   | FnSystemCall !(MemWord 64) !String !String [(FnValue (BVType 64))] ![ Some FnReturnVar ]
-        (BlockLabel 64)
+   | FnSystemCall !(MemWord 64) !String [(FnValue (BVType 64))] ![ Some FnReturnVar ] (BlockLabel 64)
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (SegmentedAddr 64))
    | FnTermStmtUndefined
 
@@ -395,7 +394,7 @@ instance Pretty FnTermStmt where
          in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
-      FnSystemCall _call_no _pname name args rets lbl ->
+      FnSystemCall _call_no name args rets lbl ->
         let arg_docs = (pretty <$> args)
             ret_docs = viewSome pretty <$> rets
          in parens (commas ret_docs)
@@ -411,7 +410,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f (FnRet (grets, frets)) = mconcat (map f grets ++ map f frets)
   foldFnValue f (FnCall fn (gargs, fargs) _ _) =
     f fn `mappend` mconcat (map f gargs ++ map f fargs)
-  foldFnValue f (FnSystemCall _call_no _pname _name args _rets _lbl) =
+  foldFnValue f (FnSystemCall _call_no _name args _rets _lbl) =
     mconcat (map f args)
   foldFnValue f (FnLookupTable idx _) = f idx
   foldFnValue _f (FnTermStmtUndefined {}) = mempty

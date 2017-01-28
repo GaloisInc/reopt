@@ -58,24 +58,25 @@ data RegisterUseState ids = RUS {
   , _blockRegUses :: !(Map (BlockLabel 64) (Set (Some X86Reg)))
     -- | Holds the set of registers a block should define (used by a successor).
   , _blockRegProvides :: !(Map (BlockLabel 64) (Set (Some X86Reg)))
-
-  -- | Maps defined registers to their deps.  Not defined for all
-  -- variables, hence use of Map instead of RegState X86Reg
+    -- | Maps defined registers to their deps.  Not defined for all
+    -- variables, hence use of Map instead of RegState X86Reg
   , _blockInitDeps  :: !(Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids)))
-  -- | The list of predecessors for a given block
+    -- | The list of predecessors for a given block
   , _blockPreds     :: !(Map (BlockLabel 64) [BlockLabel 64])
-  -- | A cache of the registers and their deps.  The key is not included
-  -- in the set of deps (but probably should be).
+    -- | A cache of the registers and their deps.  The key is not included
+    -- in the set of deps (but probably should be).
   , _assignmentCache :: !(AssignmentCache ids)
-  -- | The set of blocks we need to consider.
+    -- | The set of blocks we need to consider.
   , _blockFrontier  :: !(Set (BlockLabel 64))
-  -- | Function arguments derived from FunctionArgs
+    -- | Function arguments derived from FunctionArgs
   , functionArgs    :: !FunctionArgs
   , currentFunctionType :: !FunctionType
+  , thisSyscallPersonality :: !(SyscallPersonality X86_64)
+    -- ^ System call personality
   }
 
-initRegisterUseState :: FunctionArgs -> SegmentedAddr 64 -> RegisterUseState ids
-initRegisterUseState fArgs fn =
+initRegisterUseState :: SyscallPersonality X86_64 -> FunctionArgs -> SegmentedAddr 64 -> RegisterUseState ids
+initRegisterUseState sysp fArgs fn =
   RUS { _assignmentUses     = Set.empty
       , _blockRegUses       = Map.empty
       , _blockRegProvides   = Map.empty
@@ -84,10 +85,9 @@ initRegisterUseState fArgs fn =
       , _assignmentCache    = Map.empty
       , _blockFrontier      = Set.empty
       , functionArgs        = fArgs
-      , currentFunctionType = cft
+      , currentFunctionType = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
+      , thisSyscallPersonality = sysp
       }
-  where
-    cft = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
 
 assignmentUses :: Simple Lens (RegisterUseState ids) (Set (Some (AssignId ids)))
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
@@ -184,7 +184,8 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-registerUse :: FunctionArgs
+registerUse :: SyscallPersonality X86_64
+            -> FunctionArgs
             -> DiscoveryInfo X86_64 ids
             -> SegmentedAddr 64
             -> ( Set (Some (AssignId ids))
@@ -192,8 +193,8 @@ registerUse :: FunctionArgs
                , Map (BlockLabel 64) (Set (Some X86Reg))
                , Map (BlockLabel 64) [BlockLabel 64]
                )
-registerUse fArgs ist addr =
-  flip evalState (initRegisterUseState fArgs addr) $ do
+registerUse sysp fArgs ist addr =
+  flip evalState (initRegisterUseState sysp fArgs addr) $ do
     -- Run the first phase (block summarization)
     summarizeIter ist Set.empty (Just lbl0)
     -- propagate back uses
@@ -359,7 +360,7 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
 
         ParsedSyscall proc_state next_addr -> do
 
-          let sysp = syscallPersonality interp_state
+          sysp <- gets thisSyscallPersonality
           let rregs = spResultRegisters sysp
 
           do let syscallRegs :: [ArchReg X86_64 (BVType 64)]

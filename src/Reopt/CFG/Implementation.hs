@@ -23,7 +23,10 @@ that map  a control flow graph from a program using the semantics.
 {-# LANGUAGE KindSignatures #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.Implementation
-       ( x86ArchitectureInfo
+       ( x86_64_freeBSD_info
+       , x86_64_linux_info
+       , freeBSD_syscallPersonality
+       , linux_syscallPersonality
        , disassembleBlock
        , X86TranslateError(..)
        ) where
@@ -55,7 +58,6 @@ import           Text.PrettyPrint.ANSI.Leijen (Pretty(..))
 
 import           Data.Macaw.AbsDomain.AbsState
        ( AbsBlockState
-       , mkAbsBlockState
        , setAbsIP
 
        , absRegState
@@ -63,7 +65,6 @@ import           Data.Macaw.AbsDomain.AbsState
        , concreteStackOffset
        , AbsValue(..)
        , top
-       , bvadd
        , stridedInterval
        , asConcreteSingleton
        , startAbsStack
@@ -74,12 +75,15 @@ import           Data.Macaw.AbsDomain.AbsState
        )
 import qualified Data.Macaw.AbsDomain.StridedInterval as SI
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
+import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
 import           Data.Macaw.Types (BVType, knownType, typeRepr)
 
 import qualified Reopt.Machine.StateNames as N
+import           Reopt.Machine.SysDeps.FreeBSDGenerated as FreeBSD
+import           Reopt.Machine.SysDeps.LinuxGenerated as Linux
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
@@ -104,7 +108,6 @@ instance Show (Expr ids tp) where
 
 instance MapF.ShowF (Expr ids) where
   showF = show
-
 
 instance Eq (Expr ids tp) where
   (==) = \x y -> isJust (testEquality x y)
@@ -478,9 +481,8 @@ instance S.IsValue (Expr ids) where
 data PreBlock ids = PreBlock { pBlockLabel  :: !(BlockLabel 64)
                              , _pBlockStmts :: !(Seq (Stmt X86_64 ids))
                              , _pBlockState :: !(RegState X86Reg (Value X86_64 ids))
-                             , _pBlockApps  :: !(MapF (App (Value X86_64 ids))
-                                                 (Assignment X86_64 ids))
-                         }
+                             , _pBlockApps  :: !(MapF (App (Value X86_64 ids)) (Assignment X86_64 ids))
+                             }
 
 pBlockStmts :: Simple Lens (PreBlock ids) (Seq (Stmt X86_64 ids))
 pBlockStmts = lens _pBlockStmts (\s v -> s { _pBlockStmts = v })
@@ -1044,24 +1046,6 @@ initGenState nonce_gen ip s
   where lbl = GeneratedBlock ip 0
         st = emptyGenState nonce_gen
 
-{-
-getExploreLocs :: X86State -> [ExploreLoc]
-getExploreLocs s =
-  case (s^.curIP, s^.x87TopReg) of
-    (BVValue _ ip, BVValue _ top) -> [loc]
-      where loc = ExploreLoc { loc_ip = fromInteger ip
-                             , loc_x87_top = fromInteger top
-                             }
-    _ -> []
-
-getFrontierNext :: [Block] -> Set ExploreLoc
-getFrontierNext = Fold.foldl' f Set.empty
-  where f locs b =
-          case blockTerm b of
-            FetchAndExecute s -> Fold.foldl' (flip Set.insert) locs (getExploreLocs s)
-            _ -> locs
--}
-
 -- | Describes the reason the translation error occured.
 data X86TranslateErrorReason
    = DecodeError (MemoryError 64)
@@ -1167,68 +1151,18 @@ fnBlockState addr =
       & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (S.BVTypeRepr n64) ReturnAddr)
 
--- | This updates the state of a function when returning from a system call.
-updateStatePostFreeBSDSyscall :: AbsBlockState X86Reg
-                              -- ^ Block state just before this call.
-                              -> SegmentedAddr 64
-                              -- ^ Address that system call should return to.
-                              --
-                              -- This code assumes that the return address belongs
-                              -- to the same function.
-                              -> AbsBlockState X86Reg
-updateStatePostFreeBSDSyscall ab0 addr = mkAbsBlockState regFn (ab0^.startAbsStack)
-  where regFn :: X86Reg tp -> AbsValue 64 tp
-        regFn r
-            -- Set IPReg
-          | Just Refl <- testEquality r ip_reg =
-          CodePointers (Set.singleton addr) False
-            -- Two pointers that are modified by syscalls
-          | Just Refl <- testEquality r rcx_reg =
-            TopV
-          | Just Refl <- testEquality r r11_reg =
-            TopV
-            -- Carry flag and rax is used by BSD for return values.
-          | Just Refl <- testEquality r cf_reg =
-            TopV
-          | Just Refl <- testEquality r rax_reg =
-            TopV
-            -- Keep other registers the same.
-          | otherwise =
-            ab0^.absRegState^.boundValue r
+preserveFreeBSDSyscallReg :: X86Reg tp -> Bool
+preserveFreeBSDSyscallReg r
+  | Just Refl <- testEquality r cf_reg  = False
+  | Just Refl <- testEquality r rax_reg = False
+  | otherwise = True
 
--- | This updates the abstract information based on the assumption that
--- a called method will return to the return address, and will follow
--- x86_64 ABI.
-callerReturnAbsState :: AbsBlockState X86Reg
-                     -- ^ Block state just before call.
-                     -> SegmentedAddr 64
-                     -- ^ Address we will return to.
-                     -> AbsBlockState X86Reg
-callerReturnAbsState ab0 addr =  mkAbsBlockState regFn (ab0^.startAbsStack)
-  where regFn :: X86Reg tp -> AbsValue 64 tp
-        regFn r
-          -- We set IPReg
-          | Just Refl <- testEquality r ip_reg =
-              CodePointers (Set.singleton addr) False
-          | Just Refl <- testEquality r sp_reg = do
-              bvadd n64 (ab0^.absRegState^.boundValue r) (FinSet (Set.singleton 8))
-              -- TODO: Transmit no value to first floating point register.
-          | X86_XMMReg 0 <- r =
-            ab0^.absRegState^.boundValue r
-            -- TODO: Fix this (can we prove detect whether a floating point value was read)?
-          | X87_TopReg <- r =
-            ab0^.absRegState^.boundValue r
-            -- Copy callee saved registers
-          | Set.member (Some r) x86CalleeSavedRegs =
-            ab0^.absRegState^.boundValue r
-            -- We don't know anything about rax as it is the return value.
-          | Just Refl <- testEquality r rax_reg =
-            TopV
-            -- We know nothing about other registers.
-          | otherwise =
-            TopV
+-- | Linux preserves the same registers the x86_64 ABI does
+linuxSystemCallPreservedRegisters :: Set.Set (Some X86Reg)
+linuxSystemCallPreservedRegisters = x86CalleeSavedRegs
 
--- Transfer some type into an abstract value given a processor state.
+
+-- | Transfer some type into an abstract value given a processor state.
 transferAbsValue :: AbsProcessorState X86Reg ids
                  -> X86PrimFn ids tp
                  -> AbsValue 64 tp
@@ -1275,15 +1209,40 @@ disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
       (blocks, addr', maybeError) <- disassembleBlock nonce_gen mem contFn loc
       pure $! (blocks, addr', show <$> maybeError)
 
+freeBSD_syscallPersonality :: SyscallPersonality X86_64
+freeBSD_syscallPersonality =
+  SyscallPersonality { spTypeInfo = FreeBSD.syscallInfo
+                     , spResultRegisters = [ Some rax_reg, Some cf_reg ]
+                     }
+
 -- | Architecture information for X86_64.
-x86ArchitectureInfo :: ArchitectureInfo X86_64
-x86ArchitectureInfo =
+x86_64_freeBSD_info :: ArchitectureInfo X86_64
+x86_64_freeBSD_info =
   ArchitectureInfo { archAddrWidth      = Addr64
                    , jumpTableEntrySize = 8
                    , disassembleFn      = disassembleBlockFromAbsState
                    , fnBlockStateFn     = \_ -> fnBlockState
-                   , postSyscallFn      = updateStatePostFreeBSDSyscall
-                   , postCallAbsStateFn = callerReturnAbsState
+                   , preserveRegAcrossCall    = \r -> Set.member (Some r) x86CalleeSavedRegs
+                   , preserveRegAcrossSyscall = preserveFreeBSDSyscallReg
+                   , callStackDelta     = x86StackDelta
+                   , absEvalArchFn      = transferAbsValue
+                   }
+
+linux_syscallPersonality :: SyscallPersonality X86_64
+linux_syscallPersonality =
+  SyscallPersonality { spTypeInfo = Linux.syscallInfo
+                     , spResultRegisters = [Some rax_reg]
+                     }
+
+-- | Architecture information for X86_64.
+x86_64_linux_info :: ArchitectureInfo X86_64
+x86_64_linux_info =
+  ArchitectureInfo { archAddrWidth      = Addr64
+                   , jumpTableEntrySize = 8
+                   , disassembleFn      = disassembleBlockFromAbsState
+                   , fnBlockStateFn     = \_ -> fnBlockState
+                   , preserveRegAcrossCall    = \r -> Set.member (Some r) x86CalleeSavedRegs
+                   , preserveRegAcrossSyscall = \r -> Set.member (Some r) linuxSystemCallPreservedRegisters
                    , callStackDelta     = x86StackDelta
                    , absEvalArchFn      = transferAbsValue
                    }

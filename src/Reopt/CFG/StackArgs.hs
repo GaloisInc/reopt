@@ -47,8 +47,8 @@ maximumStackArg amap ist addr =
                   (0, Set.empty)
   where
     aregs =
-      case Map.lookup addr (ist ^. absState) of
-        Just s -> s^.absRegState
+      case Map.lookup addr (ist ^. codeInfoMap) of
+        Just s -> s^.addrAbsBlockState^.absRegState
         Nothing -> error "maximumStackArg could not find value."
 
 -- | Explore states until we have reached end of frontier.
