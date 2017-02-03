@@ -149,8 +149,7 @@ parseElf64 nm bs = do
       return e
 
 showUsage :: IO ()
-showUsage = do
-  putStrLn "For help on using reopt, run \"reopt --help\"."
+showUsage = hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
 
 readElf64 :: FilePath
              -- ^ Filepath to rad.

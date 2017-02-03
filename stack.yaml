@@ -3,6 +3,8 @@ packages:
 - '.'
 - deps/elf-edit
 - deps/flexdis86
+- deps/disarm/hvex
+- deps/disarm/mcexplore
 - deps/dwarf
 - deps/linux-ptrace
 - deps/llvm-pretty

@@ -42,6 +42,7 @@ module Reopt.Machine.X86State
     -- * X86-64 Specific functions
   , refsInAssignRhs
   , refsInValue
+  , refsInApp
   , hasCallComment
   , hasRetComment
   , asStackAddrOffset
@@ -49,7 +50,7 @@ module Reopt.Machine.X86State
     -- * Lists of X86 Registers
   , gpRegList
   , x87FPURegList
-
+  , refsInX86PrimFn
   , x86StateRegs
   , x86CalleeSavedRegs
   , x86ArgumentRegs
@@ -600,21 +601,6 @@ initX86State loc = mkRegState Initial
 ------------------------------------------------------------------------
 -- Compute set of assignIds in values.
 
-refsInApp :: App (Value arch ids) tp -> Set (Some (AssignId ids))
-refsInApp app = foldApp refsInValue app
-
-refsInValue :: Value arch ids tp -> Set (Some (AssignId ids))
-refsInValue (AssignedValue (Assignment v _)) = Set.singleton (Some v)
-refsInValue _                                = Set.empty
-
-refsInAssignRhs :: AssignRhs X86_64 ids tp -> Set (Some (AssignId ids))
-refsInAssignRhs rhs =
-  case rhs of
-    EvalApp v      -> refsInApp v
-    SetUndefined _ -> Set.empty
-    ReadMem v _    -> refsInValue v
-    EvalArchFn f _ -> refsInX86PrimFn f
-
 refsInX86PrimFn :: X86PrimFn ids tp -> Set (Some (AssignId ids))
 refsInX86PrimFn f =
   case f of
@@ -637,6 +623,27 @@ refsInX86PrimFn f =
                  , refsInValue val
                  , refsInValue dir
                  ]
+
+refsInX86Stmt :: X86Stmt ids -> Set (Some (AssignId ids))
+refsInX86Stmt (WriteLoc _ rhs) = refsInValue rhs
+refsInX86Stmt (MemCopy _ cnt src dest df) =
+  Set.unions [ refsInValue cnt
+             , refsInValue src
+             , refsInValue dest
+             , refsInValue df
+             ]
+refsInX86Stmt (MemSet cnt val dest df) =
+  Set.unions [ refsInValue cnt
+             , refsInValue val
+             , refsInValue dest
+             , refsInValue df
+             ]
+
+instance StmtHasRefs X86Stmt where
+  refsInStmt = refsInX86Stmt
+
+instance FnHasRefs X86PrimFn where
+  refsInFn = refsInX86PrimFn
 
 ------------------------------------------------------------------------
 -- StateMonadMonoid

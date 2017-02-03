@@ -51,9 +51,13 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
 
+import qualified Data.VEX.FFI
+
+
 import           Data.Macaw.AbsDomain.AbsState
-import           Data.Macaw.Architecture.Info (ArchitectureInfo)
+import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.Architecture.Syscall
+import           Data.Macaw.ARM
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
@@ -104,14 +108,15 @@ data LoadStyle
      -- ^ Load segments in Elf file.
 
 -- | Create a memory from a load style.
-mkElfMem :: Monad m
+mkElfMem :: (Monad m, Integral (ElfWordType w), Bits (ElfWordType w), Integral (MemWord w), IsAddr w)
          => LoadStyle
-         -> Elf Word64
-         -> m (SectionIndexMap Word64 64, Memory 64)
-mkElfMem sty e = do
+         -> AddrWidthRepr w
+         -> Elf (ElfWordType w)
+         -> m (SectionIndexMap (ElfWordType w) w, Memory w)
+mkElfMem sty w e = do
   case sty of
-    LoadBySection -> either fail return $ memoryForElfSections Addr64 e
-    LoadBySegment -> either fail return $ memoryForElfSegments Addr64 e
+    LoadBySection -> either fail return $ memoryForElfSections w e
+    LoadBySegment -> either fail return $ memoryForElfSegments w e
 
 ------------------------------------------------------------------------
 -- Args
@@ -414,11 +419,46 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brSize br) l g
           where l = Map.elems (brBlocks br)
 
+-- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
+--
+-- It returns a two maps, the first contains entries that could not be resolved; the second
+-- contains those that could.
+resolvedSegmentedElfFuncSymbols :: forall w v
+                                .  (Integral v, Integral (MemWord w), IsAddr w)
+                                => Memory w
+                                -> [ElfSymbolTableEntry v]
+                                -> (Map (MemWord w)  [BS.ByteString], Map (SegmentedAddr w) [BS.ByteString])
+resolvedSegmentedElfFuncSymbols mem entries = (Map.fromList u, Map.fromList r)
+  where -- Filter out just function entries
+        isCodeFuncSymbol ste = steType ste == STT_FUNC
+                            && isCodeAddr mem (fromIntegral (steValue ste))
+        func_entries = filter isCodeFuncSymbol entries
+        -- Build absolute address map
+        absAddrMap :: Map (MemWord w) [BS.ByteString]
+        absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
+        -- Resolve addresses
+        resolve (v,nms) =
+          case absoluteAddrSegment mem v of
+            Nothing -> Left  (v,  nms)
+            Just sv -> Right (sv, nms)
+        (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
+
+ppElfUnresolvedSymbols :: forall w
+                       .  Integral (MemWord w)
+                       => Map (MemWord w) [BS.ByteString]
+                       -> Doc
+ppElfUnresolvedSymbols m =
+    text "Could not resolve addresses of ELF symbols" <$$>
+    indent 2 (vcat $ pp <$> Map.toList m)
+  where pp :: (MemWord w, [BS.ByteString]) -> Doc
+        pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
+
 -- | Create a final CFG
-mkFinalCFGWithSyms :: ArchitectureInfo X86_64
-                   -> Memory 64 -- ^ Layout in memory of file
-                   -> Elf Word64 -- ^ Elf file to create CFG for.
-                   -> IO (Some (DiscoveryInfo X86_64), Map (SegmentedAddr 64) BS.ByteString)
+mkFinalCFGWithSyms :: (DiscoveryConstraints arch, Integral v)
+                   => ArchitectureInfo arch
+                   -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
+                   -> Elf v -- ^ Elf file to create CFG for.
+                   -> IO (Some (DiscoveryInfo arch), Map (SegmentedAddr (ArchAddrWidth arch)) BS.ByteString)
 mkFinalCFGWithSyms archInfo mem e = do
   entries <-
     case elfSymtab e of
@@ -440,19 +480,80 @@ mkFinalCFGWithSyms archInfo mem e = do
        , sym_map
        )
 
-getElfArchInfo :: Elf Word64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
+data SomeArchitectureInfo v =
+  forall arch
+  . ( PrettyCFGConstraints arch
+    , FnHasRefs (ArchFn arch)
+    , StmtHasRefs (ArchStmt arch)
+    , IsAddr (ArchAddrWidth arch)
+    , v ~ ElfWordType (ArchAddrWidth arch)
+    , Bits v
+    , Integral v
+    , HasRepr (ArchReg arch) TypeRepr
+    , RegisterInfo (ArchReg arch)
+    )
+   => SomeArch (ArchitectureInfo arch)
+
+getElfArchInfo :: Elf v -> IO (SomeArchitectureInfo v)
 getElfArchInfo e =
+  case (elfClass e, elfMachine e, elfOSABI e) of
+    (ELFCLASS64, EM_X86_64, ELFOSABI_LINUX)   -> pure (SomeArch x86_64_linux_info)
+    (ELFCLASS64, EM_X86_64, ELFOSABI_SYSV)    -> pure (SomeArch x86_64_linux_info)
+    (ELFCLASS64, EM_X86_64, ELFOSABI_FREEBSD) -> pure (SomeArch x86_64_freeBSD_info)
+    (ELFCLASS32, EM_ARM, ELFOSABI_SYSV) -> do
+      Data.VEX.FFI.init Data.VEX.FFI.stdOptions
+      pure (SomeArch armArchle)
+    (_,_,abi)              -> fail $ "Unknown OSABI: " ++ show abi
+
+getX86ElfArchInfo :: Elf Word64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
+getX86ElfArchInfo e =
   case elfOSABI e of
-    ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality, "Linux")
-    ELFOSABI_SYSV    -> pure (x86_64_linux_info,   linux_syscallPersonality, "Linux")
+    ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
+    ELFOSABI_SYSV    -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
     ELFOSABI_FREEBSD -> pure (x86_64_freeBSD_info, freeBSD_syscallPersonality, "FreeBSD")
     abi              -> fail $ "Unknown OSABI: " ++ show abi
 
-showCFG :: LoadStyle -> Elf Word64 -> IO ()
-showCFG loadSty e = do
-  -- Create memory for elf
-  (_,mem) <- mkElfMem loadSty e
-  (archInfo,_,_) <- getElfArchInfo e
+showNonfatalErrors :: [ElfParseError w] -> IO ()
+showNonfatalErrors l = do
+  when (not (null l)) $ do
+    hPutStrLn stderr $ "Recoverable errors occurred in reading elf file:"
+    forM_ l $ \emsg -> do
+      hPutStrLn stderr (show emsg)
+
+showCFG :: LoadStyle -> String -> IO ()
+showCFG loadSty path = do
+  when (null path) $ do
+    hPutStrLn stderr "Please specify a path."
+    hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
+    exitFailure
+  let h e | isDoesNotExistError e = do
+            hPutStrLn stderr $ path ++ " does not exist."
+            hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
+            exitFailure
+          | isUserError e = do
+            hPutStrLn stderr (ioeGetErrorString e)
+            exitFailure
+          | otherwise = do
+            hPutStrLn stderr (show e)
+            hPutStrLn stderr (show (ioeGetErrorType e))
+            exitFailure
+  bs <- BS.readFile path `catch` h
+
+  Some e <-
+    case parseElf bs of
+      ElfHeaderError _ msg -> do
+        hPutStrLn stderr $ "Error reading " ++ path ++ ":"
+        hPutStrLn stderr $ "  " ++ msg
+        exitFailure
+      Elf32Res l e -> do
+        showNonfatalErrors l
+        return (Some e)
+      Elf64Res l e -> do
+        showNonfatalErrors l
+        return (Some e)
+  -- Get architecture information for elf
+  SomeArch archInfo <- getElfArchInfo e
+  (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
   (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
   let fg = mkCFG (disc_info^.blocks)
   let g = eliminateDeadRegisters fg
@@ -500,8 +601,8 @@ showFunctions :: Args -> IO ()
 showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
-  (secMap, mem) <- mkElfMem (args^.loadStyle) e
-  (archInfo,sysp,_) <- getElfArchInfo e
+  (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
+  (archInfo, sysp,_) <- getX86ElfArchInfo e
   (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   mapM_ (print . pretty) fns
@@ -527,40 +628,11 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
--- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
---
--- It returns a two maps, the first contains entries that could not be resolved; the second
--- contains those that could.
-resolvedSegmentedElfFuncSymbols :: Memory 64
-                                -> [ElfSymbolTableEntry Word64]
-                                -> (Map (MemWord 64)  [BS.ByteString], Map (SegmentedAddr 64) [BS.ByteString])
-resolvedSegmentedElfFuncSymbols mem entries = (Map.fromList u, Map.fromList r)
-  where -- Filter out just function entries
-        isCodeFuncSymbol ste = steType ste == STT_FUNC
-                            && isCodeAddr mem (fromIntegral (steValue ste))
-        func_entries = filter isCodeFuncSymbol entries
-        -- Build absolute address map
-        absAddrMap :: Map (MemWord 64) [BS.ByteString]
-        absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
-        -- Resolve addresses
-        resolve (v,nms) =
-          case absoluteAddrSegment mem v of
-            Nothing -> Left  (v,  nms)
-            Just sv -> Right (sv, nms)
-        (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
-
-ppElfUnresolvedSymbols :: Map (MemWord 64) [BS.ByteString] -> Doc
-ppElfUnresolvedSymbols m =
-    text "Could not resolve addresses of ELF symbols" <$$>
-    indent 2 (vcat $ pp <$> Map.toList m)
-  where pp :: (MemWord 64, [BS.ByteString]) -> Doc
-        pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
-
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
-  (_,mem) <- mkElfMem loadSty e
-  (archInfo,_, _) <- getElfArchInfo e
+  (_,mem) <- mkElfMem loadSty Addr64 e
+  (archInfo,_, _) <- getX86ElfArchInfo e
   (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
   let fg = mkCFG (s^.blocks)
   let abst = s^.codeInfoMap
@@ -627,8 +699,8 @@ showLLVM args dir = do
   let loadSty = args^.loadStyle
 
   -- Create memory for elf
-  (secMap, mem) <- mkElfMem loadSty e
-  (archInfo, sysp, syscallPostfix) <- getElfArchInfo e
+  (secMap, mem) <- mkElfMem loadSty Addr64 e
+  (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
   (Some cfg, symMap) <- mkFinalCFGWithSyms archInfo mem e
 
   let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
@@ -928,8 +1000,8 @@ performReopt args =
     -- Get original binary
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
-    (secMap, mem) <- mkElfMem (args^.loadStyle) orig_binary
-    (archInfo, sysp, syscallPostfix) <- getElfArchInfo orig_binary
+    (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
+    (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
     (Some cfg,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
@@ -1010,8 +1082,8 @@ main' = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      e <- readElf64 (args^.programPath)
-      showCFG (args^.loadStyle) e
+      showCFG (args^.loadStyle) (args^.programPath)
+
     ShowCFGAI -> do
       e <- readElf64 (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
