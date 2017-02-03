@@ -16,6 +16,7 @@ clone ()
     fi
 }
 
+mkdir -p deps
 
 clone dwarf               git@github.com:GaloisInc/dwarf.git
 clone elf-edit            git@github.com:GaloisInc/elf-edit.git
