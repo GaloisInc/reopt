@@ -27,5 +27,5 @@ clone parameterized-utils git@github.com:GaloisInc/parameterized-utils.git
 clone posix-waitpid       git@github.com:GaloisInc/posix-waitpid.git
 
 clone macaw               git@gitlab-ext.galois.com:macaw/macaw.git
-
+clone disarm              git@gitlab-ext.galois.com:ABCD/disarm.git
 clone reopt-crucible      git@gitlab-int.galois.com:radss/reopt-crucible.git
