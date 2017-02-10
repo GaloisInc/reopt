@@ -1,4 +1,7 @@
-flags: {}
+flags:
+  reopt:
+    enable-arm: true
+
 packages:
 - '.'
 - deps/elf-edit

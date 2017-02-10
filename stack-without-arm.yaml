@@ -1,0 +1,21 @@
+flags: {}
+packages:
+- '.'
+- deps/elf-edit
+- deps/flexdis86
+- deps/dwarf
+- deps/linux-ptrace
+- deps/llvm-pretty
+- deps/macaw
+- deps/mss/crucible
+- deps/mss/matlab-data
+- deps/parameterized-utils
+- deps/posix-waitpid
+- deps/reopt-crucible
+extra-deps:
+- bv-0.4.1
+# Add containers and updated versions of lens and kan-extensions to support macaw
+- containers-0.5.8.1
+- lens-4.15.1
+- kan-extensions-5.0.1
+resolver: lts-6.27
