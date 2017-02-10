@@ -9,6 +9,10 @@ flag enable-hpc
   Description: Collect HPC coverage information.
   Default: False
 
+flag enable-arm
+  Description: Enable support for ARM binaries
+  Default: False
+
 library
   build-depends:
     base >= 4,
@@ -85,11 +89,9 @@ executable reopt
     elf-edit,
     filepath,
     flexdis86,
-    hvex,
     lens,
     llvm-pretty,
     macaw,
-    mcexplore,
     mtl,
     parameterized-utils >= 0.1.6,
     process,
@@ -109,6 +111,12 @@ executable reopt
   other-modules:
     Reopt.ExternalTools
     Paths_reopt
+
+  if flag(enable-arm)
+    cpp-options: -DSUPPORT_ARM
+    build-depends:
+      hvex,
+      mcexplore
 
   if flag(enable-hpc)
     ghc-options: -fhpc

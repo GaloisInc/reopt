@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -51,13 +52,14 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
 
+#ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
-
+import           Data.Macaw.ARM
+#endif
 
 import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.Architecture.Syscall
-import           Data.Macaw.ARM
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
@@ -500,9 +502,11 @@ getElfArchInfo e =
     (ELFCLASS64, EM_X86_64, ELFOSABI_LINUX)   -> pure (SomeArch x86_64_linux_info)
     (ELFCLASS64, EM_X86_64, ELFOSABI_SYSV)    -> pure (SomeArch x86_64_linux_info)
     (ELFCLASS64, EM_X86_64, ELFOSABI_FREEBSD) -> pure (SomeArch x86_64_freeBSD_info)
+#ifdef SUPPORT_ARM
     (ELFCLASS32, EM_ARM, ELFOSABI_SYSV) -> do
       Data.VEX.FFI.init Data.VEX.FFI.stdOptions
       pure (SomeArch armArchle)
+#endif
     (_,_,abi)              -> fail $ "Unknown OSABI: " ++ show abi
 
 getX86ElfArchInfo :: Elf Word64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
