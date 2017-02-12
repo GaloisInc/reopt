@@ -66,8 +66,6 @@ import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
                  , BlockRegion(..)
-                 , codeInfoMap
-                 , addrAbsBlockState
                  , blocks
                  , functionEntries
                  )
@@ -637,12 +635,12 @@ showCFGAndAI loadSty e = do
   (archInfo,_, _) <- getX86ElfArchInfo e
   (_,mem) <- mkElfMem loadSty Addr64 e
   (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem e
-  let abst = disc_info^.codeInfoMap
+  let abst = fmap brAbsInitState $ disc_info^.blocks
   let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
   let amap = assignmentAbsValues archInfo mem g abst
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
-                  (GeneratedBlock _ 0, Just ab) -> pretty (ab^.addrAbsBlockState)
+                  (GeneratedBlock _ 0, Just ab) -> pretty ab
                   (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
 
