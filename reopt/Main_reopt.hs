@@ -559,8 +559,7 @@ showCFG loadSty path = do
   SomeArch archInfo <- getElfArchInfo e
   (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
   (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
-  let fg = mkCFG (disc_info^.blocks)
-  let g = eliminateDeadRegisters fg
+  let g = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
   print (pretty g)
 
 -- | Try to recover function information from the information recovered during
@@ -605,8 +604,8 @@ showFunctions :: Args -> IO ()
 showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
-  (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
   (archInfo, sysp,_) <- getX86ElfArchInfo e
+  (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
   (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   mapM_ (print . pretty) fns
@@ -635,13 +634,12 @@ ppBlockAndAbs m b =
 showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
-  (_,mem) <- mkElfMem loadSty Addr64 e
   (archInfo,_, _) <- getX86ElfArchInfo e
-  (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
-  let fg = mkCFG (s^.blocks)
-  let abst = s^.codeInfoMap
-      amap = assignmentAbsValues x86_64_freeBSD_info mem fg abst
-  let g  = eliminateDeadRegisters fg
+  (_,mem) <- mkElfMem loadSty Addr64 e
+  (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem e
+  let abst = disc_info^.codeInfoMap
+  let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
+  let amap = assignmentAbsValues archInfo mem g abst
       ppOne b =
          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty (ab^.addrAbsBlockState)
@@ -703,8 +701,8 @@ showLLVM args dir = do
   let loadSty = args^.loadStyle
 
   -- Create memory for elf
-  (secMap, mem) <- mkElfMem loadSty Addr64 e
   (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
+  (secMap, mem) <- mkElfMem loadSty Addr64 e
   (Some cfg, symMap) <- mkFinalCFGWithSyms archInfo mem e
 
   let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
@@ -1004,8 +1002,8 @@ performReopt args =
     -- Get original binary
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
-    (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
     (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+    (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
     (Some cfg,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
