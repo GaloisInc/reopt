@@ -462,24 +462,23 @@ recoverBlock blockRegProvides phis lbl = do
                                             }
 
   interp_state <- use rsInterp
-  Just b <- pure $ lookupBlock (interp_state^.blocks) lbl
-  case classifyBlock b interp_state of
+  Just b <- pure $ lookupParsedBlock interp_state lbl
+  -- Recover statements
+  Fold.traverse_ recoverStmt (pblockStmts b)
+  case pblockTerm b of
     ParsedTranslateError _ -> do
       error "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure msg ->
       error $ "Classification failed: " ++ msg
     ParsedBranch c x y -> do
-      Fold.traverse_ recoverStmt (blockStmts b)
       cv <- recoverValue "branch_cond" c
-      fb <- mkBlock (FnBranch cv x y)
+      fb <- mkBlock (FnBranch cv (lbl { labelIndex = x }) (lbl { labelIndex = y }))
 
-      xr <- recoverBlock blockRegProvides MapF.empty x
-      yr <- recoverBlock blockRegProvides MapF.empty y
+      xr <- recoverBlock blockRegProvides MapF.empty (lbl { labelIndex = x })
+      yr <- recoverBlock blockRegProvides MapF.empty (lbl { labelIndex = y })
       return $! mconcat [(fb, Map.empty), xr, yr]
 
-    ParsedCall proc_state prev_stmts m_ret_addr -> do
-      Fold.traverse_ recoverStmt prev_stmts
-
+    ParsedCall proc_state m_ret_addr -> do
       ft <-
         case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
           Nothing   -> return ftMaximumFunctionType
@@ -511,10 +510,6 @@ recoverBlock blockRegProvides phis lbl = do
       return $! (fb, Map.singleton lbl regs')
 
     ParsedJump proc_state tgt_addr -> do
-
-        -- Recover statements
-        Fold.traverse_ recoverStmt (blockStmts b)
-
         let go :: MapF X86Reg FnRegValue
                -> Some X86Reg
                -> Recover ids (MapF X86Reg FnRegValue)
@@ -528,15 +523,10 @@ recoverBlock blockRegProvides phis lbl = do
         let tgt_lbl = mkRootBlockLabel tgt_addr
         flip (,) (Map.singleton lbl regs') <$> mkBlock (FnJump tgt_lbl)
 
-    ParsedReturn proc_state nonret_stmts -> do
-        -- Recover statements
-        Fold.traverse_ recoverStmt nonret_stmts
-
+    ParsedReturn proc_state -> do
         ft <- gets rsCurrentFunctionType
-
         grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
         frets' <- mapM (recoverRegister proc_state) (ftFloatRetRegs ft)
-
         flip (,) Map.empty <$> mkBlock (FnRet (grets', frets'))
 
     ParsedSyscall proc_state next_addr -> do
@@ -554,7 +544,6 @@ recoverBlock blockRegProvides phis lbl = do
 
       let rregs = spResultRegisters sysp
 
-      Fold.traverse_ recoverStmt (blockStmts b)
 
       let mkRet :: MapF X86Reg FnRegValue
                 -> Some X86Reg
@@ -596,8 +585,6 @@ recoverBlock blockRegProvides phis lbl = do
       return $! (fb, Map.singleton lbl regs')
 
     ParsedLookupTable proc_state idx vec -> do
-        -- Recover statements
-        Fold.traverse_ recoverStmt (blockStmts b)
 
         let go :: MapF X86Reg FnRegValue
                -> Some X86Reg

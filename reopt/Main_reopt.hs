@@ -68,6 +68,8 @@ import           Data.Macaw.Discovery.Info
                  , BlockRegion(..)
                  , blocks
                  , functionEntries
+                 , foundAbstractState
+                 , foundAddrs
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
@@ -635,7 +637,7 @@ showCFGAndAI loadSty e = do
   (archInfo,_, _) <- getX86ElfArchInfo e
   (_,mem) <- mkElfMem loadSty Addr64 e
   (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem e
-  let abst = fmap brAbsInitState $ disc_info^.blocks
+  let abst = foundAbstractState <$> disc_info^.foundAddrs
   let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
   let amap = assignmentAbsValues archInfo mem g abst
       ppOne b =
@@ -1007,10 +1009,12 @@ performReopt args =
     let output_path = args^.outputPath
 
     case takeExtension output_path of
-      ".bc" -> error $
+      ".bc" -> do
+        hPutStrLn stderr $
           "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
           "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
+        exitFailure
       ".blocks" -> do
         let g = eliminateDeadRegisters (mkCFG $ cfg^.blocks)
         writeFile output_path $ show (pretty g)
@@ -1028,7 +1032,11 @@ performReopt args =
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         compile_llvm_to_obj args arch llvm output_path
       ".s" -> do
-        error "Reopt does not support generating asm files for relinker directly."
+        hPutStrLn stderr $
+          "Generating '.s' (LLVM ASCII assembly) is not supported!\n" ++
+          "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
+          "compile to generate a .s file."
+        exitFailure
       _ -> do
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
@@ -1042,7 +1050,7 @@ performReopt args =
 
         new_obj <- parseElf64 "new object" =<< BS.readFile obj_path
 
-        putStrLn "Start merge and write"
+        hPutStrLn stderr "Start merge and write"
         -- Convert binary to LLVM
         let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
               where m = elfSegmentMap (elfLayout orig_binary)

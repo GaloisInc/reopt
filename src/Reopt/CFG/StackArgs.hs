@@ -47,8 +47,8 @@ maximumStackArg amap ist addr =
                   (0, Set.empty)
   where
     aregs =
-      case Map.lookup addr (ist ^. blocks) of
-        Just br -> brAbsInitState br^.absRegState
+      case Map.lookup addr (ist ^. foundAddrs) of
+        Just info -> foundAbstractState info^.absRegState
         Nothing -> error "maximumStackArg could not find value."
 
 -- | Explore states until we have reached end of frontier.
@@ -61,9 +61,10 @@ recoverIter :: MapF (AssignId ids) (AbsValue 64)
 recoverIter _     _    _   _ Nothing = return ()
 recoverIter amap aregs ist seen (Just lbl)
   | lbl `Set.member` seen = nextBlock >>= recoverIter amap aregs ist seen
-  | otherwise = do recoverBlock amap aregs ist lbl
-                   lbl' <- nextBlock
-                   recoverIter amap aregs ist (Set.insert lbl seen) lbl'
+  | otherwise = do
+      recoverBlock amap aregs ist lbl
+      lbl' <- nextBlock
+      recoverIter amap aregs ist (Set.insert lbl seen) lbl'
 
 recoverBlock :: MapF (AssignId ids) (AbsValue 64)
                 -> RegState X86Reg (AbsValue 64)
@@ -71,7 +72,7 @@ recoverBlock :: MapF (AssignId ids) (AbsValue 64)
                 -> BlockLabel 64
                 -> StackArgs ()
 recoverBlock amap aregs interp_state lbl = do
-  Just b <- return $ lookupBlock (interp_state ^. blocks) lbl
+  Just b <- return $ lookupBlock interp_state lbl
   let mem = memory interp_state
 
   let is_code addr = do

@@ -30,6 +30,7 @@ import           Data.Parameterized.Some
 import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
@@ -169,10 +170,10 @@ data FunctionArgsState arch ids = FAS
   , _assignmentCache :: !(AssignmentCache (ArchReg arch) ids)
 
   -- | The set of blocks that we have already visited.
-  , _visitedBlocks  :: !(Set (ArchLabel arch))
+  , _visitedBlocks  :: !(Set (ArchSegmentedAddr arch))
 
   -- | The set of blocks we need to consider (should be disjoint from visitedBlocks)
-  , _blockFrontier  :: ![Block arch ids]
+  , _blockFrontier  :: ![ParsedBlockRegion arch ids]
   , funSyscallPersonality :: !(SyscallPersonality arch)
   }
 
@@ -191,10 +192,10 @@ assignmentCache :: Simple Lens (FunctionArgsState arch ids) (AssignmentCache (Ar
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
 -- |The set of blocks that we have already visited or added to frontier
-visitedBlocks :: Simple Lens (FunctionArgsState arch ids) (Set (ArchLabel arch))
+visitedBlocks :: Simple Lens (FunctionArgsState arch ids) (Set (ArchSegmentedAddr arch))
 visitedBlocks = lens _visitedBlocks (\s v -> s { _visitedBlocks = v })
 
-blockFrontier :: Simple Lens (FunctionArgsState arch ids) [Block arch ids]
+blockFrontier :: Simple Lens (FunctionArgsState arch ids) [ParsedBlockRegion arch ids]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 initFunctionArgsState :: SyscallPersonality arch -> FunctionArgsState arch ids
@@ -218,24 +219,23 @@ type FunctionArgsM arch ids a = State (FunctionArgsState arch ids) a
 type ArchConstraints arch =
   ( OrdF (ArchReg arch)
   , ShowF (ArchReg arch)
-  , PrettyFF (ArchFn arch)
-  , PrettyF (ArchStmt arch)
+  , PrettyArch arch
   )
 
 -- | This registers a block in the first phase (block discovery).
 addEdge :: ArchConstraints arch
         => DiscoveryInfo arch ids
-        -> Block arch ids
+        -> ArchLabel arch
         -> ArchSegmentedAddr arch
         -> FunctionArgsM arch ids ()
 addEdge interp_state src_block dest_addr = do  -- record the edge
   let dest = mkRootBlockLabel dest_addr
-  blockPreds %= Map.insertWith (++) dest [blockLabel src_block]
+  blockPreds %= Map.insertWith (++) dest [src_block]
   visited <- use visitedBlocks
-  when (Set.notMember dest visited) $ do
-    visitedBlocks %= Set.insert dest
-    case lookupBlock (interp_state^.blocks) dest of
-      Just dest_block -> blockFrontier %= (dest_block:)
+  when (Set.notMember dest_addr visited) $ do
+    visitedBlocks %= Set.insert dest_addr
+    case Map.lookup dest_addr (interp_state^.parsedBlocks) of
+      Just dest_reg -> blockFrontier %= (dest_reg:)
       Nothing -> error $ show $
         text "Could not find target block" <+> text (show dest_addr) <$$>
         indent 2 (text "Source:" <$$> pretty src_block)
@@ -343,15 +343,15 @@ transferDemands xfer (DemandSet regs funs) =
 class CanDemandValues arch where
 
   -- | Return the arguments expected by a function
-  functionArgRegs :: Proxy arch -> [Some (ArchReg arch)]
+  functionArgRegs :: p arch -> [Some (ArchReg arch)]
 
   -- | Return the registers returned by a function
-  functionRetRegs :: Proxy arch -> [Some (ArchReg arch)]
+  functionRetRegs :: p arch -> [Some (ArchReg arch)]
 
   -- | List of callee saved registers in function calls.
-  calleeSavedRegs :: Proxy arch -> Set (Some (ArchReg arch))
+  calleeSavedRegs :: p arch -> Set (Some (ArchReg arch))
 
-  -- | Return the values that must e demanded by this statement
+  -- | Return values that must be evaluated to execute this statement
   demandedArchStmtValues :: ArchStmt arch ids -> [Some (Value arch ids)]
 
 -- A function call is the only block type that results in the
@@ -413,8 +413,7 @@ demandStmtValues _ _ = return ()
 type SummarizeConstraints arch ids
   = ( CanDemandValues arch
     , CanFoldValues arch
-    , PrettyFF (ArchFn arch)
-    , PrettyF (ArchStmt arch)
+    , PrettyArch arch
     , ArchConstraint arch ids
     , MemWidth (ArchAddrWidth arch)
     )
@@ -426,60 +425,56 @@ type SummarizeConstraints arch ids
 summarizeBlock :: forall arch ids
                .  SummarizeConstraints arch ids
                => DiscoveryInfo arch ids
-               -> Block arch ids
+               -> ParsedBlockRegion arch ids
+               -> Word64 -- ^ Index of region
                -> FunctionArgsM arch ids ()
-summarizeBlock interp_state b = do
+summarizeBlock interp_state reg idx = do
+  let addr = regionAddr reg
+  b <-
+    case Map.lookup idx (regionBlockMap reg) of
+      Just b -> pure b
+      Nothing -> error $ "summarizeBlock asked to find block with bad index " ++ show idx ++ " in " ++ show addr
 
-  let lbl = blockLabel b
+  let lbl = GeneratedBlock addr idx
   -- By default we have no arguments, return nothing
   blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
 
-  let m_pterm = classifyBlock b interp_state
         -- FIXME: rsp here?
   let callRegs = [Some sp_reg]
-              ++ Set.toList (calleeSavedRegs (Proxy :: Proxy arch))
+                 ++ Set.toList (calleeSavedRegs (Proxy :: Proxy arch))
   let recordCallPropagation proc_state =
         recordPropagation blockTransfer lbl proc_state Some callRegs
-  case m_pterm of
+  traverse_ (demandStmtValues lbl) (pblockStmts b)
+  case pblockTerm b of
     ParsedTranslateError _ ->
       error "Cannot identify arguments in code where translation error occurs"
     ClassifyFailure msg ->
       error $ "Classification failed: " ++ msg
     ParsedBranch c x y -> do
-      traverse_ (demandStmtValues lbl) (blockStmts b)
       demandValue lbl c
-      let go l =
-            case lookupBlock (interp_state^.blocks) l of
-              Just b' -> summarizeBlock interp_state b'
-              Nothing -> error "summarizeBlock given unvisited block"
-      go x
-      go y
+      summarizeBlock interp_state reg x
+      summarizeBlock interp_state reg y
 
-    ParsedCall proc_state stmts' m_ret_addr -> do
-      traverse_ (demandStmtValues lbl) stmts'
+    ParsedCall proc_state m_ret_addr -> do
       summarizeCall (memory interp_state) lbl proc_state (not $ isJust m_ret_addr)
       case m_ret_addr of
         Nothing       -> return ()
         Just ret_addr -> do
-          addEdge interp_state b ret_addr
+          addEdge interp_state lbl ret_addr
           recordCallPropagation proc_state
 
     ParsedJump proc_state tgt_addr -> do
-      traverse_ (demandStmtValues lbl) (blockStmts b)
       -- record all propagations
       recordPropagation blockTransfer lbl proc_state Some archRegs
-      addEdge interp_state b tgt_addr
+      addEdge interp_state lbl tgt_addr
 
-    ParsedReturn proc_state stmts' -> do
-      traverse_ (demandStmtValues lbl) stmts'
+    ParsedReturn proc_state -> do
       recordPropagation blockDemandMap lbl proc_state DemandFunctionResult $
           (functionRetRegs (Proxy :: Proxy arch))
 
     ParsedSyscall proc_state next_addr -> do
       sysp <- gets funSyscallPersonality
       -- FIXME: we ignore the return type for now, probably not a problem.
-      traverse_ (demandStmtValues lbl) (blockStmts b)
-
       do let syscallRegs :: [ArchReg arch (BVType (ArchAddrWidth arch))]
              syscallRegs = syscallArgumentRegs
          let argRegs
@@ -492,16 +487,13 @@ summarizeBlock interp_state b = do
          recordPropagation blockDemandMap lbl proc_state (\_ -> DemandAlways) (Some <$> argRegs)
 
       recordCallPropagation proc_state
-      addEdge interp_state b next_addr
+      addEdge interp_state lbl next_addr
 
-    ParsedLookupTable proc_state idx vec -> do
-      traverse_ (demandStmtValues lbl) (blockStmts b)
-
-      demandValue lbl idx
-
+    ParsedLookupTable proc_state lookup_idx vec -> do
+      demandValue lbl lookup_idx
       -- record all propagations
       recordPropagation blockTransfer lbl proc_state Some archRegs
-      traverse_ (addEdge interp_state b) vec
+      traverse_ (addEdge interp_state lbl) vec
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: SummarizeConstraints arch ids
@@ -512,9 +504,9 @@ summarizeIter ist = do
   case fnFrontier of
     [] ->
       return ()
-    b : frontier' -> do
+    reg : frontier' -> do
       blockFrontier .= frontier'
-      summarizeBlock ist b
+      summarizeBlock ist reg 0
       summarizeIter ist
 
 calculateLocalFixpoint :: forall arch ids
@@ -574,8 +566,8 @@ functionDemands sysp ist =
       flip evalState (initFunctionArgsState sysp) $ do
         let lbl0 = mkRootBlockLabel addr
         -- Run the first phase (block summarization)
-        visitedBlocks .= Set.singleton lbl0
-        case lookupBlock (ist^.blocks) lbl0 of
+        visitedBlocks .= Set.singleton addr
+        case Map.lookup addr (ist^.parsedBlocks) of
           Just b -> blockFrontier .= [b]
           Nothing -> error $ "Could not find initial block for " ++ show addr
 

@@ -237,9 +237,6 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       MemCmp{}      -> knownType
       FindElement{} -> knownType
 
-instance PrettyFF X86PrimFn where
-  prettyFF = runIdentity . ppX86PrimFn (Identity . ppValue 10)
-
 instance PrettyArch X86_64 where
   ppArchFn = ppX86PrimFn
 

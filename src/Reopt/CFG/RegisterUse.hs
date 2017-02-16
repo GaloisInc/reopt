@@ -250,9 +250,10 @@ summarizeIter :: DiscoveryInfo X86_64 ids
 summarizeIter _   _     Nothing = return ()
 summarizeIter ist seen (Just lbl)
   | lbl `Set.member` seen = nextBlock >>= summarizeIter ist seen
-  | otherwise = do summarizeBlock ist lbl
-                   lbl' <- nextBlock
-                   summarizeIter ist (Set.insert lbl seen) lbl'
+  | otherwise = do
+      summarizeBlock ist lbl
+      lbl' <- nextBlock
+      summarizeIter ist (Set.insert lbl seen) lbl'
 
 -- | This returns the arguments associated with a particular function.
 lookupFunctionArgs :: SegmentedAddr 64
@@ -268,16 +269,16 @@ lookupFunctionArgs faddr = do
 -- (i.e., addresses that are stored to, and the value stored), along
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
-summarizeBlock :: DiscoveryInfo X86_64 ids
-                  -> BlockLabel 64
-                  -> RegisterUseM ids ()
-summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
-  go root_label
+summarizeBlock :: forall ids
+               .  DiscoveryInfo X86_64 ids
+               -> BlockLabel 64
+               -> RegisterUseM ids ()
+summarizeBlock interp_state root_label = go root_label
   where
     go :: BlockLabel 64 -> RegisterUseM ids ()
     go lbl = do
       debugM DRegisterUse ("Summarizing " ++ show lbl)
-      Just b <- return $ lookupBlock (interp_state^.blocks) lbl
+      Just b <- return $ lookupParsedBlock interp_state lbl
 
       let goStmt (WriteMem addr v) = do
             demandValue lbl addr
@@ -312,19 +313,18 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
              vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
-      case classifyBlock b interp_state of
+      traverse_ goStmt (pblockStmts b)
+      case pblockTerm b of
         ParsedTranslateError _ ->
           error "Cannot identify register use in code where translation error occurs"
         ClassifyFailure msg ->
           error $ "Classification failed: " ++ msg
         ParsedBranch c x y -> do
-          traverse_ goStmt (blockStmts b)
           demandValue lbl c
-          go x
-          go y
+          go (lbl { labelIndex = x })
+          go (lbl { labelIndex = y })
 
-        ParsedCall proc_state stmts' m_ret_addr -> do
-          traverse_ goStmt stmts'
+        ParsedCall proc_state m_ret_addr -> do
 
           ft <-
             case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
@@ -348,12 +348,10 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
                     ++ [Some df_reg]
 
         ParsedJump proc_state tgt_addr -> do
-            traverse_ goStmt (blockStmts b)
             addRegisterUses proc_state x86StateRegs
             addEdge lbl (mkRootBlockLabel tgt_addr)
 
-        ParsedReturn proc_state stmts' -> do
-            traverse_ goStmt stmts'
+        ParsedReturn proc_state -> do
             ft <- gets currentFunctionType
             demandRegisters proc_state ((Some <$> take (fnNIntRets ft) x86ResultRegs)
                                         ++ (Some <$> take (fnNFloatRets ft) x86FloatResultRegs))
@@ -375,7 +373,6 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
 
 
           -- FIXME: clagged from call above
-          traverse_ goStmt (blockStmts b)
           addEdge lbl (mkRootBlockLabel next_addr)
           addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
 
@@ -385,8 +382,6 @@ summarizeBlock (interp_state :: DiscoveryInfo X86_64 ids) root_label =
           traverse_ insReg rregs
 
         ParsedLookupTable proc_state _idx vec -> do
-          traverse_ goStmt (blockStmts b)
-
           demandRegisters proc_state [Some ip_reg]
           addRegisterUses proc_state x86StateRegs
           traverse_ (addEdge lbl . mkRootBlockLabel) vec
