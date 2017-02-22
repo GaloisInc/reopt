@@ -1,4 +1,7 @@
 #!/bin/bash
+#
+# Use --with-arm to also clone disarm for ARM support
+
 set -e
 
 clone ()
@@ -6,13 +9,13 @@ clone ()
     local path=$1
     local url=$2
     if [ -d deps/$1 ]; then
-	pushd deps > /dev/null
-	git pull > /dev/null
-	popd > /dev/null
+        pushd deps > /dev/null
+        git pull > /dev/null
+        popd > /dev/null
     else
-	pushd deps > /dev/null
-	git clone $url
-	popd > /dev/null
+        pushd deps > /dev/null
+        git clone $url
+        popd > /dev/null
     fi
 }
 
@@ -28,5 +31,8 @@ clone parameterized-utils git@github.com:GaloisInc/parameterized-utils.git
 clone posix-waitpid       git@github.com:GaloisInc/posix-waitpid.git
 
 clone macaw               git@gitlab-ext.galois.com:macaw/macaw.git
-clone disarm              git@gitlab-ext.galois.com:ABCD/disarm.git
 clone reopt-crucible      git@gitlab-int.galois.com:radss/reopt-crucible.git
+
+if [[ $* == *--with-arm* ]]; then
+    clone disarm              git@gitlab-ext.galois.com:ABCD/disarm.git
+fi
