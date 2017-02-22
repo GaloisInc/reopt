@@ -52,7 +52,6 @@ library
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
-    Reopt.CFG.StackArgs
     Reopt.CFG.StackDepth
     Reopt.CFG.StackHeight
     Reopt.Concrete.BitVector
