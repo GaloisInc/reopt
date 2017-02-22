@@ -708,10 +708,6 @@ recoverValue nm v = do
 
             | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Map.member addr (interpState^.blocks) -> do
-              cur_addr <- uses rsCurLabel labelAddr
-              when (not (inSameFunction cur_addr addr interpState)) $ do
-                debug DFunRecover ("Cross function jump " ++ show cur_addr ++ " to " ++ show addr ++ ".") $
-                  return ()
               return $! FnBlockValue addr
 
             | segmentFlags seg `Perm.hasPerm` Perm.write -> do
