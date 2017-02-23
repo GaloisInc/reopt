@@ -448,8 +448,8 @@ summarizeBlock interp_state reg idx = do
   case pblockTerm b of
     ParsedTranslateError _ ->
       error "Cannot identify arguments in code where translation error occurs"
-    ClassifyFailure msg ->
-      error $ "Classification failed: " ++ msg
+    ClassifyFailure _ ->
+      error $ "Classification failed: " ++ show addr
     ParsedBranch c x y -> do
       demandValue lbl c
       summarizeBlock interp_state reg x

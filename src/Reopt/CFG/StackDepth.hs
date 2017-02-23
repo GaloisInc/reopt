@@ -292,8 +292,8 @@ recoverBlock interp_state root_label = do
       case pblockTerm b of
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
-        ClassifyFailure msg ->
-          throwError $ "Classification failed: " ++ msg
+        ClassifyFailure _ ->
+          throwError $ "Classification failed: " ++ show (labelAddr root_label)
         ParsedBranch _c x y -> do
           go init_sp (lbl { labelIndex = x })
           go init_sp (lbl { labelIndex = y })

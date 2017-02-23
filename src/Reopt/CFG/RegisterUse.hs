@@ -317,8 +317,8 @@ summarizeBlock interp_state root_label = go root_label
       case pblockTerm b of
         ParsedTranslateError _ ->
           error "Cannot identify register use in code where translation error occurs"
-        ClassifyFailure msg ->
-          error $ "Classification failed: " ++ msg
+        ClassifyFailure _ ->
+          error $ "Classification failed: " ++ show (labelAddr root_label)
         ParsedBranch c x y -> do
           demandValue lbl c
           go (lbl { labelIndex = x })

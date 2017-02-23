@@ -1,5 +1,4 @@
 dist
-deps
 cabal.sandbox.config
 .cabal-sandbox
 tmp

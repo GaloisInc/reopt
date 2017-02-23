@@ -468,8 +468,8 @@ recoverBlock blockRegProvides phis lbl = do
   case pblockTerm b of
     ParsedTranslateError _ -> do
       error "Cannot recover function in blocks where translation error occurs."
-    ClassifyFailure msg ->
-      error $ "Classification failed: " ++ msg
+    ClassifyFailure _ ->
+      error $ "Classification failed: " ++ show (labelAddr lbl)
     ParsedBranch c x y -> do
       cv <- recoverValue "branch_cond" c
       fb <- mkBlock (FnBranch cv (lbl { labelIndex = x }) (lbl { labelIndex = y }))
