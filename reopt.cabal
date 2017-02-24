@@ -48,6 +48,7 @@ library
     Reopt.BasicBlock.FunctionCFG
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs
+    Reopt.CFG.FunctionCheck
     Reopt.CFG.Implementation
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery

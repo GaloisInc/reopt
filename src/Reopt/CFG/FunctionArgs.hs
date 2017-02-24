@@ -416,6 +416,7 @@ type SummarizeConstraints arch ids
     , PrettyArch arch
     , ArchConstraint arch ids
     , MemWidth (ArchAddrWidth arch)
+    , Show (ArchReg arch (BVType (ArchAddrWidth arch)))
     )
 
 -- | This function figures out what the block requires
@@ -433,7 +434,11 @@ summarizeBlock interp_state reg idx = do
   b <-
     case Map.lookup idx (regionBlockMap reg) of
       Just b -> pure b
-      Nothing -> error $ "summarizeBlock asked to find block with bad index " ++ show idx ++ " in " ++ show addr
+      Nothing ->
+        error $ "summarizeBlock asked to find block with bad index " ++ show idx
+          ++ " in " ++ show addr ++ "\n"
+          ++ show reg
+
 
   let lbl = GeneratedBlock addr idx
   -- By default we have no arguments, return nothing
@@ -543,81 +548,91 @@ calculateLocalFixpoint new
         if ds' == mempty then Nothing else Just ds'
 
 
--- | Returns the set of argument registers and result registers for each function.
-functionDemands :: forall arch ids
-                .  SummarizeConstraints arch ids
-                => SyscallPersonality arch
-                -> DiscoveryInfo arch ids
-                -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
-functionDemands sysp ist =
-    calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
-  where
-    (argDemandsMap, resultDemandsMap, argsMap)
-      = foldl doOneFunction mempty (ist ^. functionEntries)
+decomposeMap :: OrdF r
+             => DemandSet r
+             -> SegmentedAddr (RegAddrWidth r)
+             -> FunctionArgState r
+             -> DemandType r
+             -> DemandSet r
+             -> FunctionArgState r
+decomposeMap _ addr acc (DemandFunctionArg f r) v =
+  -- FIXME: A bit of an awkward datatype ...
+  let m = Map.singleton (Some r) (Map.singleton addr v)
+   in acc & _1 %~ Map.insertWith (Map.unionWith (Map.unionWith mappend)) f m
+decomposeMap _ addr acc (DemandFunctionResult r) v =
+  acc & _2 %~ Map.insertWith (Map.unionWith mappend) addr (Map.singleton (Some r) v)
+-- Strip out callee saved registers as well.
+decomposeMap ds addr acc DemandAlways v =
+  acc & _3 %~ Map.insertWith mappend addr (v `demandSetDifference` ds)
 
-    -- This function computes the following 3 pieces of information:
-    -- 1. Initial function arguments (ignoring function calls)
-    -- 2. Function arguments to function arguments
-    -- 3. Function results to function arguments.
-    doOneFunction :: FunctionArgState (ArchReg arch)
-                  -> SegmentedAddr (ArchAddrWidth arch)
-                  -> FunctionArgState (ArchReg arch)
-    doOneFunction acc addr =
-      flip evalState (initFunctionArgsState sysp) $ do
-        let lbl0 = mkRootBlockLabel addr
-        -- Run the first phase (block summarization)
-        visitedBlocks .= Set.singleton addr
-        case Map.lookup addr (ist^.parsedBlocks) of
-          Just b -> blockFrontier .= [b]
-          Nothing -> error $ "Could not find initial block for " ++ show addr
+-- This function computes the following 3 pieces of information:
+-- 1. Initial function arguments (ignoring function calls)
+-- 2. Function arguments to function arguments
+-- 3. Function results to function arguments.
+doOneFunction :: forall arch ids
+              .  SummarizeConstraints arch ids
+              => SyscallPersonality arch
+              -> DiscoveryInfo arch ids
+              -> FunctionArgState (ArchReg arch)
+              -> SegmentedAddr (ArchAddrWidth arch)
+              -> FunctionArgState (ArchReg arch)
+doOneFunction sysp ist acc addr =
+  flip evalState (initFunctionArgsState sysp) $ do
+    let lbl0 = mkRootBlockLabel addr
+    -- Run the first phase (block summarization)
+    visitedBlocks .= Set.singleton addr
+    case Map.lookup addr (ist^.parsedBlocks) of
+      Just b -> blockFrontier .= [b]
+      Nothing -> error $ "Could not find initial block for " ++ show addr
 
-        summarizeIter ist
-        -- propagate back uses
-        new <- use blockDemandMap
+    summarizeIter ist
+    -- propagate back uses
+    new <- use blockDemandMap
 
-        -- debugM DFunctionArgs (">>>>>>>>>>>>>>>>>>>>>>>>" ++ (showHex addr "" ))
-        -- debugM' DFunctionArgs (ppMap (text . show) (ppMap (text . show) (text . show)) new)
-        -- debugM DFunctionArgs ("------------------------" ++ (showHex addr "" ))
-        -- xfer <- use blockTransfer
-        -- debugM' DFunctionArgs (ppMap (text . show) (ppMap (text . show) (text . show)) xfer)
+    -- debugM DFunctionArgs (">>>>>>>>>>>>>>>>>>>>>>>>" ++ (showHex addr "" ))
+    -- debugM' DFunctionArgs (ppMap (text . show) (ppMap (text . show) (text . show)) new)
+    -- debugM DFunctionArgs ("------------------------" ++ (showHex addr "" ))
+    -- xfer <- use blockTransfer
+    -- debugM' DFunctionArgs (ppMap (text . show) (ppMap (text . show) (text . show)) xfer)
 
-        calculateLocalFixpoint new
-        -- summary for entry block has what we want.
-        -- m <- use (blockDemandMap . ix lbl0)
-        -- debugM DFunctionArgs ("*************************"  ++ (showHex addr "" ))
-        -- debugM' DFunctionArgs (ppMap (text . show) (text . show) m)
-        -- debugM DFunctionArgs ("<<<<<<<<<<<<<<<<<<<<<<<<<" ++ (showHex addr "" ))
+    calculateLocalFixpoint new
+    -- summary for entry block has what we want.
+    -- m <- use (blockDemandMap . ix lbl0)
+    -- debugM DFunctionArgs ("*************************"  ++ (showHex addr "" ))
+    -- debugM' DFunctionArgs (ppMap (text . show) (text . show) m)
+    -- debugM DFunctionArgs ("<<<<<<<<<<<<<<<<<<<<<<<<<" ++ (showHex addr "" ))
 
-        funDemands <- use (blockDemandMap . ix lbl0)
-        return (Map.foldlWithKey' (decomposeMap addr) acc funDemands)
+    funDemands <- use (blockDemandMap . ix lbl0)
 
-    proxy :: Proxy arch
-    proxy = Proxy
+    let proxy :: Proxy arch
+        proxy = Proxy
 
     -- A function may demand a callee saved register as it will store
     -- it onto the stack in order to use it later.  This will get
     -- recorded as a use, which is erroneous, so we strip out any
     -- reference to them here.
-    calleeDemandSet = DemandSet { registerDemands =
-                                    Set.insert (Some sp_reg) (calleeSavedRegs proxy)
-                                , functionResultDemands = mempty
-                                }
+    let calleeDemandSet = DemandSet { registerDemands =
+                                        Set.insert (Some sp_reg) (calleeSavedRegs proxy)
+                                    , functionResultDemands = mempty
+                                    }
 
-    decomposeMap :: ArchSegmentedAddr arch
-                 -> FunctionArgState (ArchReg arch)
-                 -> DemandType (ArchReg arch)
-                 -> DemandSet (ArchReg arch)
-                 -> FunctionArgState (ArchReg arch)
-    decomposeMap addr acc (DemandFunctionArg f r) v =
-      -- FIXME: A bit of an awkward datatype ...
-      acc & _1 %~ Map.insertWith (Map.unionWith (Map.unionWith mappend)) f
-                        (Map.singleton (Some r) (Map.singleton addr v))
-    decomposeMap addr acc (DemandFunctionResult r) v =
-      acc & _2 %~ Map.insertWith (Map.unionWith mappend) addr
-                        (Map.singleton (Some r) v)
-    -- Strip out callee saved registers as well.
-    decomposeMap addr acc DemandAlways v =
-      acc & _3 %~ Map.insertWith mappend addr (v `demandSetDifference` calleeDemandSet)
+    return (Map.foldlWithKey' (decomposeMap calleeDemandSet addr) acc funDemands)
+
+
+-- | Returns the set of argument registers and result registers for each function.
+functionDemands :: forall arch ids
+                .  SummarizeConstraints arch ids
+                => SyscallPersonality arch
+                -> DiscoveryInfo arch ids
+                -> [ArchSegmentedAddr arch]
+                -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
+functionDemands sysp ist entries =
+    calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
+  where
+    (argDemandsMap, resultDemandsMap, argsMap)
+      = foldl (doOneFunction sysp ist) mempty entries
+
+
 
 
 instance CanDemandValues X86_64 where
@@ -664,11 +679,11 @@ inferFunctionTypeFromDemands dm =
                         retDemands
 
 -- | Returns the set of argument registers and result registers for each function.
-functionArgs :: forall ids
-             .  SyscallPersonality X86_64
+functionArgs :: SyscallPersonality X86_64
              -> DiscoveryInfo X86_64 ids
+             -> [SegmentedAddr 64]
              -> Map (SegmentedAddr 64) FunctionType
-functionArgs sysp = inferFunctionTypeFromDemands . functionDemands sysp
+functionArgs sysp info = inferFunctionTypeFromDemands . functionDemands sysp info
 
 debugPrintMap :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)

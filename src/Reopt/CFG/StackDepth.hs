@@ -175,11 +175,12 @@ addBlock lbl start = do
     Nothing     -> do
       blockInitStackPointers %= Map.insert lbl start
       blockFrontier %= (lbl:)
-    Just start'
-      | start == start' ->
+    Just old_start
+      | start == old_start ->
         return ()
       | otherwise       ->
-        error ("Block stack depth mismatch at " ++ show (pretty lbl) ++ ": " ++ (show (pretty start)) ++ " and " ++ (show (pretty start')))
+        throwError $ "Block stack depth mismatch at " ++ show (pretty lbl) ++ ": "
+             ++ show (pretty start) ++ " and " ++ show (pretty old_start)
 
 addDepth :: OrdF (ArchReg arch) => Set (StackDepthValue arch ids) -> StackDepthM arch ids ()
 addDepth v = blockStackRefs %= Set.union v
@@ -293,7 +294,7 @@ recoverBlock interp_state root_label = do
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
         ClassifyFailure _ ->
-          throwError $ "Classification failed: " ++ show (labelAddr root_label)
+          throwError $ "Classification failed in StackDepth: " ++ show (labelAddr root_label)
         ParsedBranch _c x y -> do
           go init_sp (lbl { labelIndex = x })
           go init_sp (lbl { labelIndex = y })

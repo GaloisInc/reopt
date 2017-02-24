@@ -30,17 +30,17 @@ module Reopt.CFG.FnRep
    , ftFloatRetRegs
    ) where
 
+import           Data.Map.Strict (Map)
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import qualified Data.Vector as V
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF
 
 import           Data.Macaw.CFG
    ( App(..)
@@ -50,6 +50,7 @@ import           Data.Macaw.CFG
    , sexpr
    , appType
    , foldApp
+   , prettyF
    )
 import           Data.Macaw.Memory (MemWord, SegmentedAddr)
 import           Data.Macaw.Types
@@ -172,6 +173,8 @@ fnAssignRHSType rhs =
     FnEvalApp a    -> appType a
     FnAlloca _ -> knownType
 
+class FoldFnValue a where
+  foldFnValue :: Monoid m => (forall u . FnValue u -> m) -> a -> m
 
 instance FoldFnValue (FnAssignRhs tp) where
   foldFnValue _f (FnSetUndefined {}) = mempty
@@ -227,8 +230,6 @@ instance Pretty (FnValue tp) where
   pretty (FnFloatArg n)           = text "fparg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@"
                                     <> parens (pretty $ show addr)
-class FoldFnValue a where
-  foldFnValue :: Monoid m => (forall u . FnValue u -> m) -> a -> m
 
 fnValueType :: FnValue tp -> TypeRepr tp
 fnValueType v =
@@ -254,6 +255,8 @@ data Function = Function { fnAddr :: !(SegmentedAddr 64)
                            -- ^ Number of bytes that function takes up.
                          , fnType :: !FunctionType
                          , fnBlocks :: [FnBlock]
+                         , fnLabelRegMap :: !(Map (BlockLabel 64) (MapF X86Reg FnRegValue))
+                           -- ^ Map for resolving phi nodes
                          }
 
 instance Pretty Function where
@@ -280,10 +283,12 @@ instance Pretty (FnRegValue tp) where
   pretty (FnRegValue v)      = pretty v
 
 newtype FnPhiNodeInfo tp
-      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel 64, FnValue tp)] }
+      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel 64, X86Reg tp)] }
 
+{-
 instance FoldFnValue (FnPhiNodeInfo tp) where
   foldFnValue f (FnPhiNodeInfo vs) = mconcat (map (f . snd) vs)
+-}
 
 data FnBlock
    = FnBlock { fbLabel :: !(BlockLabel 64)
@@ -305,14 +310,15 @@ instance Pretty FnBlock where
       go :: FnPhiVar tp -> FnPhiNodeInfo tp -> [Doc] -> [Doc]
       go aid vs d =
         (pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl (unFnPhiNodeInfo vs))) : d
-      goLbl :: (BlockLabel 64, FnValue tp) -> Doc
-      goLbl (lbl, node) = parens (pretty lbl <> comma <+> pretty node)
+      goLbl :: (BlockLabel 64, X86Reg tp) -> Doc
+      goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
 
 instance FoldFnValue FnBlock where
   foldFnValue f b =
-    mconcat (toListF (foldFnValue f) (fbPhiNodes b)
-             ++ map (foldFnValue f) (fbStmts b)
-             ++ [ foldFnValue f (fbTerm b) ])
+    mconcat (map (foldFnValue f) (fbStmts b)
+             ++ [ foldFnValue f (fbTerm b) ]
+            -- ++ toListF (foldFnValue f) (fbPhiNodes b)
+            )
 
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
@@ -330,6 +336,7 @@ data FnStmt
              !(FnValue (BVType 64))
               -- /\ Start of destination buffer.
              !(FnValue (BVType 1))
+
               -- /\ Flag indicates whether direction of move:
               -- True means we should decrement buffer pointers after each copy.
               -- False means we should increment the buffer pointers after each copy.

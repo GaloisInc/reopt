@@ -79,6 +79,7 @@ import           Data.Macaw.Types
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (functionArgs)
+import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.Implementation
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
@@ -589,16 +590,21 @@ getFns sysp symMap excludedNames s = do
           Just base -> Set.notMember word excludeSet
             where word = fromIntegral (base + addr^.addrOffset)
           _ -> True
-  let entries = filter include $ Set.toList (s^.functionEntries)
+  let entries = filter include $ filter (checkFunction s) $ Set.toList $ s^.functionEntries
 
-  let fArgs = functionArgs sysp s
+  hPutStrLn stderr "Start fArgs"
+  let fArgs = functionArgs sysp s entries
   seq fArgs $ do
+  hPutStrLn stderr "Done fArgs"
   fmap catMaybes $ forM entries $ \entry -> do
+    hPutStrLn stderr $ "Started " ++ show entry
     case recoverFunction sysp fArgs s entry of
       Left msg -> do
         hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
         pure Nothing
-      Right fn -> pure (Just fn)
+      Right fn -> do
+        hPutStrLn stderr $ "Completed " ++ show entry
+        pure (Just fn)
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
@@ -608,6 +614,7 @@ showFunctions args = do
   (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
   (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
+  hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
@@ -929,8 +936,9 @@ addrRedirection addrSymMap m f = do
 targetArch :: ElfOSABI -> IO String
 targetArch abi =
   case abi of
-    ELFOSABI_SYSV   -> return "x86_64-unknown-linux-elf"
-    ELFOSABI_NETBSD -> return "x86_64-unknown-freebsd-elf"
+    ELFOSABI_SYSV    -> return "x86_64-unknown-linux-elf"
+    ELFOSABI_NETBSD  -> return "x86_64-unknown-freebsd-elf"
+    ELFOSABI_FREEBSD -> return "x86_64-unknown-linux-elf"
     _ -> fail $ "Do not support architecture " ++ show abi ++ "."
 
 -- | Compile a bytestring containing LLVM assembly or bitcode into an object.

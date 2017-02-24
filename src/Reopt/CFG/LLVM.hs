@@ -162,6 +162,7 @@ data LLVMState = LLVMState { llvmSyscallIntrinsicPostfix :: !String
                            , llvmIntArgs   :: [L.Typed L.Value]
                            , llvmFloatArgs :: [L.Typed L.Value]
                            , llvmAddrSymMap :: !AddrSymMap
+                           , llvmPhiNodeRef :: !(Map (BlockLabel 64) (MapF.MapF X86Reg FnRegValue))
                            }
 
 newtype ToLLVM a  = ToLLVM { runToLLVM :: StateT LLVMState BB a }
@@ -299,6 +300,7 @@ defineFunction syscallPostfix addrSymMap f = do
                            , llvmIntArgs   = take nint args
                            , llvmFloatArgs = error "uninitialised float args"
                            , llvmAddrSymMap = addrSymMap
+                           , llvmPhiNodeRef = fnLabelRegMap f
                            }
           makeBlocks = do makeEntryBlock (fnBlocks f) (drop nint args)
                           mapM_ blockToLLVM (fnBlocks f)
@@ -317,8 +319,16 @@ blockToLLVM b = do liftBB $ L.label (blockName $ fbLabel b)
                         (liftBB . L.phi (typeToLLVMType $ fnPhiVarType phi) =<< mapM goLbl (unFnPhiNodeInfo ni))
          return ()
 
-    goLbl (lbl, node) = do v <- valueToLLVM node
-                           return (L.from v (L.Named $ blockName lbl))
+    goLbl (lbl, r) = do
+      phiMap <- gets llvmPhiNodeRef
+      case Map.lookup lbl phiMap of
+        Nothing -> error $ "Could not find label " ++ show lbl ++ " in blockToLLVM"
+        Just m -> do
+          case MapF.lookup r m of
+            Just (FnRegValue node) -> do
+              v <- valueToLLVM node
+              return (L.from v (L.Named $ blockName lbl))
+            _ -> error $ "Could not find register " ++ show r ++ " in blockToLLVM"
 
 -- Pads the given list of values to be the target lenght using undefs
 padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
