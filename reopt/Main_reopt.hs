@@ -47,7 +47,7 @@ import           System.IO.Error
 import           System.IO.Temp
 import           System.Posix.Files
 import qualified Text.LLVM as L
-import qualified Text.LLVM.PP as L (ppLLVM, ppModule)
+import qualified Text.LLVM.PP as LPP
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
 
 import           Paths_reopt (getLibDir, version)
@@ -122,6 +122,33 @@ mkElfMem sty w e = do
     LoadBySegment -> either fail return $ memoryForElfSegments w e
 
 ------------------------------------------------------------------------
+-- LLVMVersion
+
+-- | Version of LLVM to generate
+data LLVMVersion
+   = LLVM35
+   | LLVM36
+   | LLVM37
+   | LLVM38
+
+-- | Convert a string to the LLVM version identifier.
+asLLVMVersion :: String -> Maybe LLVMVersion
+asLLVMVersion s =
+  case s of
+    "llvm35" -> Just LLVM35
+    "llvm36" -> Just LLVM36
+    "llvm37" -> Just LLVM37
+    "llvm38" -> Just LLVM38
+    _ -> Nothing
+
+-- | Pretty print an LLVM module using the format expected by the given LLVM version.
+ppLLVM :: LLVMVersion -> L.Module -> String
+ppLLVM LLVM35 m = show $ LPP.ppLLVM35 $ LPP.ppModule m
+ppLLVM LLVM36 m = show $ LPP.ppLLVM36 $ LPP.ppModule m
+ppLLVM LLVM37 m = show $ LPP.ppLLVM37 $ LPP.ppModule m
+ppLLVM LLVM38 m = show $ LPP.ppLLVM38 $ LPP.ppModule m
+
+------------------------------------------------------------------------
 -- Args
 
 -- | Action to perform when running
@@ -137,6 +164,7 @@ data Action
    | Relink          -- ^ Link an existing binary and new code together.
    | Reopt           -- ^ Perform a full reoptimization
 
+
 -- | Command line arguments.
 data Args = Args { _reoptAction  :: !Action
                  , _programPath  :: !FilePath
@@ -146,6 +174,8 @@ data Args = Args { _reoptAction  :: !Action
                  , _redirPath    :: !FilePath
                  , _outputPath   :: !FilePath
                  , _gasPath      :: !FilePath
+                 , _llvmVersion  :: !LLVMVersion
+                   -- ^ Version to use when printing LLVM.
                  , _llcPath      :: !FilePath
                  , _optPath      :: !FilePath
                  , _optLevel     :: !Int
@@ -211,6 +241,10 @@ libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
 notransAddrs :: Simple Lens Args (Set String)
 notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
 
+-- | Version to use when printing LLVM.
+llvmVersion :: Simple Lens Args LLVMVersion
+llvmVersion = lens _llvmVersion (\s v -> s { _llvmVersion = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
@@ -221,6 +255,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _redirPath  = ""
                    , _outputPath = "a.out"
                    , _gasPath = "gas"
+                   , _llvmVersion = LLVM35
                    , _llcPath = "llc"
                    , _optPath = "opt"
                    , _optLevel  = 2
@@ -251,6 +286,21 @@ llvmFlag :: Flag Args
 llvmFlag = flagReq [ "llvm", "l" ] upd "DIR" help
   where upd s old = Right $ old & reoptAction .~ ShowLLVM s
         help = "Write out generated LLVM."
+
+llvmVersionFlag :: Flag Args
+llvmVersionFlag = flagReq [ "llvm-version" ] upd "VERSION" help
+  where upd :: String -> Args -> Either String Args
+        upd s old =
+          case asLLVMVersion s of
+            Just v -> Right $ old & llvmVersion .~ v
+            Nothing -> Left $
+              unlines [ "Could not interpret llvm version " ++  s
+                      , "  Expects one of: llvm35, llvm36, llvm37, llvm38"
+                      ]
+        help = unlines
+          [ "Specify LLVM version."
+          , "  Expects one of: llvm35, llvm36, llvm37, llvm38"
+          ]
 
 funFlag :: Flag Args
 funFlag = flagNone [ "functions", "f" ] upd help
@@ -359,6 +409,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , cfgAIFlag
                 , llvmFlag
+                , llvmVersionFlag
                 , funFlag
                 , gapFlag
                 , segmentFlag
@@ -592,18 +643,14 @@ getFns sysp symMap excludedNames s = do
           _ -> True
   let entries = filter include $ filter (checkFunction s) $ Set.toList $ s^.functionEntries
 
-  hPutStrLn stderr "Start fArgs"
   let fArgs = functionArgs sysp s entries
   seq fArgs $ do
-  hPutStrLn stderr "Done fArgs"
   fmap catMaybes $ forM entries $ \entry -> do
-    hPutStrLn stderr $ "Started " ++ show entry
     case recoverFunction sysp fArgs s entry of
       Left msg -> do
         hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
         pure Nothing
       Right fn -> do
-        hPutStrLn stderr $ "Completed " ++ show entry
         pure (Just fn)
 
 showFunctions :: Args -> IO ()
@@ -730,7 +777,7 @@ showLLVM args dir = do
               let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
               itraverse_ (LLVM.declareFunction addrSymMap) refs
               LLVM.defineFunction syscallPostfix addrSymMap f
-        writeFile (mkName f) (show (L.ppLLVM $ L.ppModule m))
+        writeFile (mkName f) $ ppLLVM (args^.llvmVersion) m
 
   createDirectoryIfMissing True dir
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
@@ -886,8 +933,8 @@ performRedir args = do
       mergeAndWrite output_path orig_binary new_obj Map.empty redirs
 
 
-llvmAssembly :: L.Module -> BS.ByteString
-llvmAssembly m = UTF8.fromString (show (L.ppLLVM $ L.ppModule m))
+llvmAssembly :: LLVMVersion -> L.Module -> BS.ByteString
+llvmAssembly v m = UTF8.fromString (ppLLVM v m)
 
 -- | Maps virtual addresses to the phdr at them.
 type ElfSegmentMap w = Map w (Phdr w)
@@ -1015,6 +1062,7 @@ performReopt args =
     (Some cfg,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
+    let llvmVer = args^.llvmVersion
 
     case takeExtension output_path of
       ".bc" -> do
@@ -1030,12 +1078,13 @@ performReopt args =
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
+        hPutStrLn stderr "Generating LLVM"
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         BS.writeFile output_path obj_llvm
       ".o" -> do
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) cfg
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         compile_llvm_to_obj args arch llvm output_path
@@ -1050,7 +1099,7 @@ performReopt args =
         let symAddrMap = elfSymAddrMap secMap orig_binary
         fns <- getFns sysp symAddrMap notrans cfg
 
-        let obj_llvm = llvmAssembly $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
         let obj_path = obj_dir </> "obj.o"
