@@ -97,6 +97,43 @@ pop sz = do
   rsp .= new_sp
   return v
 
+modify_low ::
+  ( Semantics m
+  , 1 <= n1
+  , 1 <= n2
+  , n1 <= n2 -- The only constraint that matters mathematically.
+  , 1 <= n2 - n1
+  , n2 - n1 <= n2
+  , n2 ~ ((n2 - n1) + n1)
+  )
+  => NatRepr n1
+  -> MLocation m (BVType n2)
+  -> (Value m (BVType n1) -> Value m (BVType n1))
+  -> m ()
+modify_low w l f = do
+  v0 <- get l
+  let n = loc_width l
+  let low_mask  = bvLit n (maxUnsigned w)
+  let high_mask = complement low_mask
+  let v0high = v0 .&. high_mask
+  let v1Low = uext n (f (bvTrunc w v0))
+  l .= v0high .|. v1Low
+
+set_low ::
+  ( Semantics m
+  , ((n2 - n1) + n1) ~ n2
+  , 1 <= n1
+  , 1 <= n2
+  , n1 <= n2
+  , 1 <= n2 - n1
+  , n2 - n1 <= n2
+  )
+  => MLocation m (BVType n2)
+  -> Value m (BVType n1)
+  -> m ()
+set_low r c = modify_low (bv_width c) r (\_ -> c)
+
+
 -- ** Condition codes
 
 cond_a, cond_ae, cond_b, cond_be, cond_g, cond_ge, cond_l, cond_le, cond_o, cond_p, cond_s, cond_z,
@@ -120,7 +157,6 @@ cond_nz  = complement <$> cond_z
 
 -- * General Purpose Instructions
 -- ** Data Transfer Instructions
-
 
 -- FIXME: has the side effect of reading r, but this should be safe because r can only be a register.
 exec_cmovcc :: Semantics m => m (Value m BoolType) -> MLocation m (BVType n) -> Value m (BVType n) -> m ()
@@ -1581,7 +1617,7 @@ exec_addps l v = fmap_loc l $ \lv -> vectorize2 n32 (fpAdd SingleFloatRepr) lv v
 
 -- ADDSS Add scalar single-precision floating-point values
 exec_addss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
-exec_addss r y = modify_low knownNat (\x -> fpAdd SingleFloatRepr x y) r
+exec_addss r y = modify_low knownNat r (\x -> fpAdd SingleFloatRepr x y)
 
 -- SUBPS Subtract packed single-precision floating-point values
 exec_subps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
@@ -1589,7 +1625,7 @@ exec_subps l v = fmap_loc l $ \lv -> vectorize2 n32 (fpSub SingleFloatRepr) lv v
 
 -- SUBSS Subtract scalar single-precision floating-point values
 exec_subss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
-exec_subss r y = modify_low knownNat (\x -> fpSub SingleFloatRepr x y) r
+exec_subss r y = modify_low knownNat r (\x -> fpSub SingleFloatRepr x y)
 
 -- | MULPS Multiply packed single-precision floating-point values
 exec_mulps :: Semantics m => MLocation m XMMType -> Value m XMMType -> m ()
@@ -1597,12 +1633,12 @@ exec_mulps l v = fmap_loc l $ \lv -> vectorize2 n64 (fpMul DoubleFloatRepr) lv v
 
 -- MULSS Multiply scalar single-precision floating-point values
 exec_mulss :: Semantics m => MLocation m XMMType -> Value m (FloatType SingleFloat) -> m ()
-exec_mulss r y = modify_low knownNat (\x -> fpMul SingleFloatRepr x y) r
+exec_mulss r y = modify_low knownNat r (\x -> fpMul SingleFloatRepr x y)
 
 -- DIVPS Divide packed single-precision floating-point values
 -- DIVSS Divide scalar single-precision floating-point values
 exec_divss :: Semantics m => MLocation m XMMType -> Value m (FloatType 'SingleFloat) -> m ()
-exec_divss r y = modify_low knownNat (\x -> fpDiv SingleFloatRepr x y) r
+exec_divss r y = modify_low knownNat r (\x -> fpDiv SingleFloatRepr x y)
 
 -- RCPPS Compute reciprocals of packed single-precision floating-point values
 -- RCPSS Compute reciprocal of scalar single-precision floating-point values
@@ -1812,86 +1848,29 @@ exec_movlpd l v = do
 
 -- *** SSE2 Packed Arithmetic Instructions
 
--- | Update the low bits of a location.
---
--- Used to implement "*sd" arith ops and "movs*" ops; could be used to
--- implement "*ss" arith ops.
---
--- The constraints here are pretty annoying. We could eliminate most
--- of them using lemmas in 'Data.Parameterized.NatRepr', but most of
--- them seem irrelevant anyway: they come from 'IsValue' operations,
--- where they also seem irrelevant ...
-modify_low ::
-  ( Semantics m
-  , 1 <= n1
-  , 1 <= n2
-  , n1 <= n2 -- The only constraint that matters mathematically.
-  , 1 <= n2 - n1
-  , n2 - n1 <= n2
-  , n2 ~ ((n2 - n1) + n1)
-  ) =>
-  NatRepr n1 ->
-  (Value m (BVType n1) -> Value m (BVType n1)) ->
-  MLocation m (BVType n2) ->
-  m ()
-modify_low n1' f r = do
-  v0 <- get r
-  let (v0High, v0Low) = (bvDrop n1' v0, bvTrunc n1' v0)
-  let v1Low = f v0Low
-  r .= bvCat v0High v1Low
-
-modify_low' ::
-  ( Semantics m
-  , 1 <= n1
-  , 1 <= n2
-  , n1 <= n2 -- The only constraint that matters mathematically.
-  , 1 <= n2 - n1
-  , n2 - n1 <= n2
-  , n2 ~ ((n2 - n1) + n1)
-  ) =>
-  NatRepr n1 ->
-  MLocation m (BVType n2) ->
-  (Value m (BVType n1) -> Value m (BVType n1)) ->
-  m ()
-modify_low' sz l f = modify_low sz f l
-
-set_low ::
-  ( Semantics m
-  , ((n2 - n1) + n1) ~ n2
-  , 1 <= n1
-  , 1 <= n2
-  , n1 <= n2
-  , 1 <= n2 - n1
-  , n2 - n1 <= n2
-  ) =>
-  MLocation m (BVType n2) ->
-  Value m (BVType n1) ->
-  m ()
-set_low r c = modify_low (bv_width c) (const c) r
-
 -- ADDPD Add packed double-precision floating-point values
 -- | ADDSD Add scalar double precision floating-point values
 exec_addsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
 -- FIXME: Overflow, Underflow, Invalid, Precision, Denormal.
-exec_addsd r y = modify_low knownNat (\x -> fpAdd DoubleFloatRepr x y) r
+exec_addsd r y = modify_low knownNat r (\x -> fpAdd DoubleFloatRepr x y)
 
 -- SUBPD Subtract scalar double-precision floating-point values
 
 -- | SUBSD Subtract scalar double-precision floating-point values
 exec_subsd :: Semantics m => MLocation m XMMType -> Value m (FloatType DoubleFloat) -> m ()
-exec_subsd r y = modify_low knownNat (\x -> fpSub DoubleFloatRepr x y) r
+exec_subsd r y = modify_low knownNat r (\x -> fpSub DoubleFloatRepr x y)
 
 -- MULPD Multiply packed double-precision floating-point values
 
 -- | MULSD Multiply scalar double-precision floating-point values
 exec_mulsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
-exec_mulsd r y = modify_low knownNat (\x -> fpMul DoubleFloatRepr x y) r
+exec_mulsd r y = modify_low knownNat r (\x -> fpMul DoubleFloatRepr x y)
 
 -- DIVPD Divide packed double-precision floating-point values
 
 -- | DIVSD Divide scalar double-precision floating-point values
 exec_divsd :: Semantics m => MLocation m XMMType -> Value m (FloatType 'DoubleFloat) -> m ()
-exec_divsd r y = modify_low knownNat (\x -> fpDiv DoubleFloatRepr x y) r
+exec_divsd r y = modify_low knownNat r (\x -> fpDiv DoubleFloatRepr x y)
 
 -- SQRTPD Compute packed square roots of packed double-precision floating-point values
 -- SQRTSD Compute scalar square root of scalar double-precision floating-point values
@@ -1929,7 +1908,7 @@ exec_cmpsd l v opcode = do
          6 -> fail "exec_cmpsd: CMPNLESD case unimplemented" -- FIXME
          7 -> fail "exec_cmpsd: CMPORDSD case unimplemented" -- FIXME
          _ -> fail ("exec_cmpsd: unexpected opcode " ++ show opcode)
-  modify_low' knownNat l $ \lv ->
+  modify_low knownNat l $ \lv ->
     let res = f lv v
         allOnes  = bvLit knownNat (-1 :: Int) -- FIXME: use ~0?
         allZeros = bvLit knownNat (0 :: Int) -- FIXME: use ~0?

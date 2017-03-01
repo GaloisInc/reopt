@@ -524,6 +524,8 @@ appToLLVM app =
      b' <- valueToLLVM b
      l' <- valueToLLVM l
      r' <- valueToLLVM r
+     when (L.typedType l' /= L.typedType r') $ do
+       error "Internal: expected compatible types to mux"
      liftBB $ L.select b' l' r'
    MMXExtend _v -> unimplementedInstr typ "MMXExtend"
    ConcatV sz _sz' low high -> do
@@ -581,8 +583,9 @@ appToLLVM app =
    BVShr _sz x y -> binop L.lshr x y
    BVSar _sz x y -> binop L.ashr x y
    BVEq x y      -> binop (L.icmp L.Ieq) x y
-   EvenParity v  -> do v' <- valueToLLVM v
-                       liftBB $ L.call iEvenParity [v']
+   EvenParity v  -> do
+     v' <- valueToLLVM v
+     liftBB $ L.call iEvenParity [v']
    ReverseBytes{} -> unimplementedInstr typ "ReverseBytes"
    -- FIXME: do something more efficient?
    -- Basically does let (r, over)  = llvm.add.with.overflow(x,y)
@@ -640,13 +643,16 @@ appToLLVM app =
    FPCvtRoundsUp _from_rep _x _to_rep -> unimplementedInstr typ "FPCvtRoundsUp"
    FPFromBV v frepr -> do
      v' <- valueToLLVM v
-     liftBB $ L.sitofp v' (floatReprToLLVMType frepr)
+     liftBB $ do
+       flt_r <- L.sitofp v' (floatReprToLLVMType frepr)
+       L.bitcast flt_r (natReprToLLVMType (floatInfoBits frepr))
    -- FIXME: side-conditions here
    TruncFPToSignedBV frepr v sz -> do
      v' <- valueToLLVM v
      let ftyp = floatReprToLLVMType frepr
-     flt_v <- liftBB $ L.bitcast v' ftyp
-     liftBB $ L.fptosi flt_v (natReprToLLVMType sz)
+     liftBB $ do
+       flt_v <- L.bitcast v' ftyp
+       L.fptosi flt_v (natReprToLLVMType sz)
   where
     intrinsicOverflows bop _sz x y c = do
       x' <- valueToLLVM x
@@ -664,17 +670,22 @@ appToLLVM app =
         overflows' <- L.extractValue r_tuple' 1
         L.bor overflows overflows'
 
+    -- A Value that expects to FP bitvectors
     fpbinop :: (L.Typed L.Value -> L.Typed L.Value -> BB (L.Typed L.Value))
-             -> FloatInfoRepr flt -> FnValue (FloatType flt) -> FnValue (FloatType flt)
-             -> ToLLVM (L.Typed L.Value)
+            -> FloatInfoRepr flt
+            -> FnValue (FloatType flt)
+            -> FnValue (FloatType flt)
+            -> ToLLVM (L.Typed L.Value)
     fpbinop f frepr x y = do
       x' <- valueToLLVM x
       y' <- valueToLLVM y
       let typ' = floatReprToLLVMType frepr
+      let w = floatInfoBits frepr
       liftBB $ do
         flt_x <- L.bitcast x' typ'
         flt_y <- L.bitcast y' typ'
-        f flt_x flt_y
+        flt_z <- f flt_x flt_y
+        L.bitcast flt_z (natReprToLLVMType w)
 
     -- unop :: (L.Typed L.Value -> BB (L.Typed L.Value))
     --         -> Value (BVType n)
@@ -705,7 +716,6 @@ floatReprToLLVMType fir = L.PrimType . L.FloatType $
     DoubleFloatRepr       -> L.Double
     QuadFloatRepr         -> L.Fp128
     X86_80FloatRepr       -> L.X86_fp80
-
 
 valueToLLVM :: FnValue tp -> ToLLVM (L.Typed L.Value)
 valueToLLVM val =
