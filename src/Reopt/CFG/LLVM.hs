@@ -656,12 +656,16 @@ appToLLVM' app = do
     BVSignedLt x y       -> binop (icmpop L.Islt) x y
     BVSignedLe x y       -> binop (icmpop L.Isle) x y
     BVTestBit v n     -> do -- FIXME
-      v' <- mkLLVMValue v
-      let in_typ = L.typedType v'
+      llvm_v <- mkLLVMValue v
+      let in_typ = L.typedType llvm_v
       n' <- mkLLVMValue n
-      n_ext <-zext n' in_typ
+      n_ext <-
+        case compare (natValue (fnValueWidth v)) (natValue (fnValueWidth n)) of
+          LT -> error "BVTestBit expected second argument to be at least first"
+          EQ -> pure n'
+          GT -> zext n' in_typ
       mask <- shl (L.Typed in_typ (L.ValInteger 1)) (L.typedValue n_ext)
-      r <- bitop L.And v' (L.typedValue mask)
+      r <- bitop L.And llvm_v (L.typedValue mask)
       icmpop L.Ine r (L.ValInteger 0)
     BVComplement _sz v -> do
       -- xor x -1 == complement x, according to LLVM manual.
@@ -1064,8 +1068,7 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
     fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 128) (fltbvArg i)
 
     initBlock :: L.BasicBlock
-    initBlock = mkInitBlock (blockName (fbLabel b)) (fnNFloatArgs ft)
-       where (b:_) = fnBlocks f
+    initBlock = mkInitBlock (blockName (mkRootBlockLabel (fnAddr f))) (fnNFloatArgs ft)
 
     args :: [L.Typed L.Ident]
     args = V.toList intArgs ++ V.toList fltArgs

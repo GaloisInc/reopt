@@ -22,6 +22,7 @@ module Reopt.CFG.FnRep
    , PhiBinding(..)
    , fnAssignRHSType
    , fnValueType
+   , fnValueWidth
    , ftMaximumFunctionType
    , ftMinimumFunctionType
    , ftIntArgRegs
@@ -245,6 +246,9 @@ fnValueType v =
     FnIntArg _ -> knownType
     FnFloatArg _ -> knownType
     FnGlobalDataAddr _ -> knownType
+
+fnValueWidth :: FnValue (BVType w) -> NatRepr w
+fnValueWidth = type_width . fnValueType
 
 ------------------------------------------------------------------------
 -- Function definitions
