@@ -27,10 +27,10 @@ LLFILES=reopt.SystemCall.FreeBSD.ll reopt.SystemCall.Linux.ll
 OBJECTS=$(patsubst %.ll,${BUILDDIR}/%.o,${LLFILES}) $(patsubst %.ll,%.o,${GENFILES})
 
 ARCHIVE:=${BUILDDIR}/libreopt.a
-CLANG:=clang
-CFLAGS:=-O3
+CLANG ?= clang
+CFLAGS ?= -O3
 
-LLVM_LINK=llvm-link
+LLVM_LINK ?= llvm-link
 
 # List of architectures we build standard library for.
 ARCH_TRIPLES:=x86_64-unknown-linux-gnu x86_64-unknown-freebsd
