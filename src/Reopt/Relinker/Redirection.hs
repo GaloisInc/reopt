@@ -43,8 +43,7 @@ data CodeRedirection w
                      , redirSourceOffset :: !w
                        -- ^ Offset in phdr where we should write file.
                      , redirSourceSize :: !Int
-                       -- ^ Number of bytes we have in source to use for writing
-                       -- redirection.
+                       -- ^ Number of bytes available at source offset to write redirection.
                      , redirTarget :: !BS.ByteString
                        -- ^ Target symbol table name.
                      } deriving (Show)

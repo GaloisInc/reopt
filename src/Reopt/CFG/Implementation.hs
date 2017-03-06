@@ -476,7 +476,10 @@ instance S.IsValue (Expr ids) where
   fpLt rep x y = app $ FPLt rep x y
   fpEq rep x y = app $ FPEq rep x y
 
-  fpCvt src tgt x = app $ FPCvt src x tgt
+  fpCvt src tgt x =
+    case testEquality src tgt of
+      Just Refl -> x
+      _ -> app $ FPCvt src x tgt
   fpCvtRoundsUp src tgt x = app $ FPCvtRoundsUp src x tgt
 
   fpFromBV tgt x = app $ FPFromBV x tgt

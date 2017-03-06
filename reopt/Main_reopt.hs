@@ -38,7 +38,7 @@ import           Data.Word
 import qualified Data.Yaml as Yaml
 import           Numeric (readHex, showHex)
 import           System.Console.CmdArgs.Explicit
-import           System.Directory (createDirectoryIfMissing, doesFileExist)
+import           System.Directory (doesFileExist)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.FilePath
@@ -73,6 +73,7 @@ import           Data.Macaw.Discovery.Info
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
+import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
 
@@ -99,6 +100,19 @@ unintercalate punct str = reverse $ go [] "" str
     go acc thisAcc str'@(x : xs)
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
+
+-- | This returns how much space there is before start of next function,
+-- or the end of the memory segment if code address is undefined.
+--
+-- Note: Calls error if code addr is not in a valid memory location.
+functionSize :: DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> MemWord 64
+functionSize s a = do
+  let seg = addrSegment a
+  assert (segmentFlags seg `Perm.hasPerm` Perm.execute) $ do
+    case Set.lookupGT a (s^.functionEntries) of
+      Just next | segmentIndex (addrSegment next) == segmentIndex seg ->
+           next^.addrOffset - a^.addrOffset
+      _ -> segmentSize seg - a^.addrOffset
 
 ------------------------------------------------------------------------
 -- LoadStyle
@@ -748,6 +762,7 @@ elfAddrSymMap :: SectionIndexMap Word64 64
               -> LLVM.AddrSymMap
 elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
 
+{-
 showLLVM :: Args -> String -> IO ()
 showLLVM args dir = do
   e <- readElf64 (args^.programPath)
@@ -782,6 +797,7 @@ showLLVM args dir = do
   createDirectoryIfMissing True dir
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
   mapM_ writeF fns
+-}
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a RegState to detect if it read its instruction
@@ -960,11 +976,12 @@ lookupElfOffset m a =
     _ -> Nothing
 
 -- | This creates a code redirection or returns the address as failing.
-addrRedirection :: LLVM.AddrSymMap
+addrRedirection :: DiscoveryInfo X86_64 ids
+                -> LLVM.AddrSymMap
                 -> ElfSegmentMap Word64
                 -> Function
                 -> Either (SegmentedAddr 64) (CodeRedirection Word64)
-addrRedirection addrSymMap m f = do
+addrRedirection info addrSymMap m f = do
   let a = fnAddr f
   let w = case segmentBase (addrSegment a) of
             Just b -> fromIntegral (b + a^.addrOffset)
@@ -975,7 +992,7 @@ addrRedirection addrSymMap m f = do
       where L.Symbol sym_name = LLVM.functionName addrSymMap (fnAddr f)
             redir = CodeRedirection { redirSourcePhdr   = idx
                                     , redirSourceOffset = off
-                                    , redirSourceSize   = fromIntegral (fnSize f)
+                                    , redirSourceSize   = fromIntegral (functionSize info (fnAddr f))
                                     , redirTarget       = UTF8.fromString sym_name
                                     }
 
@@ -1111,7 +1128,7 @@ performReopt args =
         -- Convert binary to LLVM
         let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
               where m = elfSegmentMap (elfLayout orig_binary)
-                    mkRedir f = addrRedirection addrSymMap m f
+                    mkRedir f = addrRedirection cfg addrSymMap m f
         unless (null bad_addrs) $ do
           error $ "Found functions outside program headers:\n  "
             ++ unwords (show <$> bad_addrs)
@@ -1152,8 +1169,9 @@ main' = do
     ShowCFGAI -> do
       e <- readElf64 (args^.programPath)
       showCFGAndAI (args^.loadStyle) e
-    ShowLLVM path -> do
-      showLLVM args path
+    ShowLLVM _path -> do
+--      showLLVM args path
+      error $ "ShowLLVM not supported"
     ShowFunctions -> do
       showFunctions args
     ShowGaps -> do

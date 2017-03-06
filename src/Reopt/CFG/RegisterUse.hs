@@ -7,7 +7,7 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Reopt.CFG.RegisterUse
-  ( FunctionArgs
+  ( AddrToFunctionTypeMap
   , registerUse
   ) where
 
@@ -45,7 +45,8 @@ import           Reopt.Machine.X86State
 type RegDeps ids = (Set (Some (AssignId ids)), Set (Some X86Reg))
 type AssignmentCache ids = Map (Some (AssignId ids)) (RegDeps ids)
 
-type FunctionArgs = Map (SegmentedAddr 64) FunctionType
+-- | Map from address to type of function at that address
+type AddrToFunctionTypeMap = Map (SegmentedAddr 64) FunctionType
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
@@ -68,14 +69,14 @@ data RegisterUseState ids = RUS {
   , _assignmentCache :: !(AssignmentCache ids)
     -- | The set of blocks we need to consider.
   , _blockFrontier  :: !(Set (BlockLabel 64))
-    -- | Function arguments derived from FunctionArgs
-  , functionArgs    :: !FunctionArgs
+    -- | Function arguments derived from AddrToFunctionTypeMap
+  , functionArgs    :: !AddrToFunctionTypeMap
   , currentFunctionType :: !FunctionType
   , thisSyscallPersonality :: !(SyscallPersonality X86_64)
     -- ^ System call personality
   }
 
-initRegisterUseState :: SyscallPersonality X86_64 -> FunctionArgs -> SegmentedAddr 64 -> RegisterUseState ids
+initRegisterUseState :: SyscallPersonality X86_64 -> AddrToFunctionTypeMap -> SegmentedAddr 64 -> RegisterUseState ids
 initRegisterUseState sysp fArgs fn =
   RUS { _assignmentUses     = Set.empty
       , _blockRegUses       = Map.empty
@@ -185,7 +186,7 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 registerUse :: SyscallPersonality X86_64
-            -> FunctionArgs
+            -> AddrToFunctionTypeMap
             -> DiscoveryInfo X86_64 ids
             -> SegmentedAddr 64
             -> ( Set (Some (AssignId ids))
@@ -255,14 +256,15 @@ summarizeIter ist seen (Just lbl)
       lbl' <- nextBlock
       summarizeIter ist (Set.insert lbl seen) lbl'
 
--- | This returns the arguments associated with a particular function.
-lookupFunctionArgs :: SegmentedAddr 64
-                   -> RegisterUseM ids FunctionType
-lookupFunctionArgs faddr = do
-  fArgs <- gets (Map.lookup faddr . functionArgs)
+-- | Returns the type of the function at the given address
+lookupFunctionTypeAtAddr :: SegmentedAddr 64
+                         -> RegisterUseM ids FunctionType
+lookupFunctionTypeAtAddr faddr = do
+  fArgs <- gets $ Map.lookup faddr . functionArgs
   case fArgs of
-    Nothing -> do debugM DUrgent ("Warning: no args for function " ++ show faddr)
-                  return ftMaximumFunctionType
+    Nothing -> do
+      debugM DUrgent ("Warning: no args for function " ++ show faddr)
+      return ftMaximumFunctionType
     Just v  -> return v
 
 -- | This function figures out what the block requires
@@ -329,7 +331,7 @@ summarizeBlock interp_state root_label = go root_label
           ft <-
             case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
               Nothing -> pure ftMaximumFunctionType
-              Just faddr -> lookupFunctionArgs faddr
+              Just faddr -> lookupFunctionTypeAtAddr faddr
 
           demandRegisters proc_state [Some ip_reg]
 

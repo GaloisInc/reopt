@@ -10,6 +10,7 @@ module Reopt.CFG.StackDepth
   ( maximumStackDepth
   , StackDepthValue(..)
   , StackDepthOffset(..)
+  , stackDepthOffsetValue
   ) where
 
 import           Control.Lens
@@ -38,6 +39,10 @@ data StackDepthOffset arch ids
 deriving instance OrdF  (ArchReg arch) => Eq (StackDepthOffset arch ids)
 deriving instance OrdF  (ArchReg arch) => Ord (StackDepthOffset arch ids)
 deriving instance ShowF (ArchReg arch) => Show (StackDepthOffset arch ids)
+
+stackDepthOffsetValue :: StackDepthOffset arch ids -> BVValue arch ids (ArchAddrWidth arch)
+stackDepthOffsetValue (Pos v) = v
+stackDepthOffsetValue (Neg v) = v
 
 negateStackDepthOffset :: StackDepthOffset arch ids -> StackDepthOffset arch ids
 negateStackDepthOffset (Pos x) = Neg x

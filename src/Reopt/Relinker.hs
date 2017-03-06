@@ -558,7 +558,7 @@ remapBytes redirs redir_list base bs = runST $ do
               Just r -> r
               Nothing -> error $ "Could not find symbol " ++ show (steName sym) ++ "."
       let jmp = crMkJump redirs tgt
-      -- Only apply redirection when there is enough space in size.
+      -- Only apply redirection when there is enough space to write the code.
       when (BS.length jmp < redirSourceSize entry) $ do
         writeBS mv (fromIntegral (off - base)) jmp
 

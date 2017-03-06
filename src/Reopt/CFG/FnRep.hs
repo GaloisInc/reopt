@@ -17,9 +17,9 @@ module Reopt.CFG.FnRep
    , FnTermStmt(..)
    , FnRegValue(..)
    , FnPhiVar(..)
-   , FnPhiNodeInfo(..)
    , FnReturnVar(..)
    , FoldFnValue(..)
+   , PhiBinding(..)
    , fnAssignRHSType
    , fnValueType
    , ftMaximumFunctionType
@@ -30,7 +30,7 @@ module Reopt.CFG.FnRep
    , ftFloatRetRegs
    ) where
 
-import           Data.Map.Strict (Map)
+import           Data.Foldable
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
@@ -39,7 +39,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           Data.Macaw.CFG
@@ -49,7 +48,7 @@ import           Data.Macaw.CFG
    , ppLit
    , sexpr
    , appType
-   , foldApp
+   , foldAppl
    , prettyF
    )
 import           Data.Macaw.Memory (MemWord, SegmentedAddr)
@@ -174,17 +173,18 @@ fnAssignRHSType rhs =
     FnAlloca _ -> knownType
 
 class FoldFnValue a where
-  foldFnValue :: Monoid m => (forall u . FnValue u -> m) -> a -> m
+  foldFnValue :: (forall u . s -> FnValue u -> s) -> s -> a -> s
 
 instance FoldFnValue (FnAssignRhs tp) where
-  foldFnValue _f (FnSetUndefined {}) = mempty
-  foldFnValue f (FnReadMem loc _)   = f loc
-  foldFnValue f (FnEvalApp a)       = foldApp f a
-  foldFnValue f (FnAlloca sz)       = f sz
+  foldFnValue _ s (FnSetUndefined {}) = s
+  foldFnValue f s (FnReadMem loc _)   = f s loc
+  foldFnValue f s (FnEvalApp a)       = foldAppl f s a
+  foldFnValue f s (FnAlloca sz)       = f s sz
 
 -- tp <- {BVType 64, BVType 128}
 data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
-                                  , frReturnType :: !(TypeRepr tp) }
+                                  , frReturnType :: !(TypeRepr tp)
+                                  }
 
 instance Pretty (FnReturnVar tp) where
   pretty = ppFnAssignId . frAssignId
@@ -202,7 +202,7 @@ data FnValue (tp :: Type)
    | FnPhiValue !(FnPhiVar tp)
      -- | A value returned by a function call (rax/rdx/xmm0)
    | FnReturn !(FnReturnVar tp)
-     -- | The entry pointer to a function.
+     -- | The pointer to a function.
    | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(SegmentedAddr 64)
      -- | A pointer to an internal block at the given address.
    | (tp ~ BVType 64) => FnBlockValue !(SegmentedAddr 64)
@@ -251,12 +251,8 @@ fnValueType v =
 
 data Function = Function { fnAddr :: !(SegmentedAddr 64)
                            -- ^ In memory address of function
-                         , fnSize :: !(MemWord 64)
-                           -- ^ Number of bytes that function takes up.
                          , fnType :: !FunctionType
                          , fnBlocks :: [FnBlock]
-                         , fnLabelRegMap :: !(Map (BlockLabel 64) (MapF X86Reg FnRegValue))
-                           -- ^ Map for resolving phi nodes
                          }
 
 instance Pretty Function where
@@ -270,7 +266,7 @@ instance Pretty Function where
     rbrace
 
 instance FoldFnValue Function where
-  foldFnValue f fn = mconcat (map (foldFnValue f) (fnBlocks fn))
+  foldFnValue f s0 fn = foldl' (foldFnValue f) s0 (fnBlocks fn)
 
 data FnRegValue tp
    = CalleeSaved !(X86Reg tp)
@@ -282,21 +278,18 @@ instance Pretty (FnRegValue tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
   pretty (FnRegValue v)      = pretty v
 
-newtype FnPhiNodeInfo tp
-      = FnPhiNodeInfo { unFnPhiNodeInfo :: [(BlockLabel 64, X86Reg tp)] }
+data PhiBinding tp
+   = PhiBinding (FnPhiVar tp) [(BlockLabel 64, X86Reg tp)]
 
-{-
-instance FoldFnValue (FnPhiNodeInfo tp) where
-  foldFnValue f (FnPhiNodeInfo vs) = mconcat (map (f . snd) vs)
--}
-
+-- | A block in the function
 data FnBlock
    = FnBlock { fbLabel :: !(BlockLabel 64)
                -- Maps predecessor label onto the reg value at that
                -- block
-             , fbPhiNodes  :: !(MapF FnPhiVar FnPhiNodeInfo)
+             , fbPhiNodes  :: ![Some PhiBinding]
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
+             , fbRegMap :: !(MapF X86Reg FnRegValue)
              }
 
 instance Pretty FnBlock where
@@ -306,19 +299,15 @@ instance Pretty FnBlock where
               <$$> vcat (pretty <$> fbStmts b)
               <$$> pretty (fbTerm b))
     where
-      ppPhis = vcat $ MapF.foldrWithKey go mempty (fbPhiNodes b)
-      go :: FnPhiVar tp -> FnPhiNodeInfo tp -> [Doc] -> [Doc]
-      go aid vs d =
-        (pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl (unFnPhiNodeInfo vs))) : d
+      ppPhis = vcat (go <$> fbPhiNodes b)
+      go :: Some PhiBinding -> Doc
+      go (Some (PhiBinding aid vs)) =
+         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl vs)
       goLbl :: (BlockLabel 64, X86Reg tp) -> Doc
       goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
 
 instance FoldFnValue FnBlock where
-  foldFnValue f b =
-    mconcat (map (foldFnValue f) (fbStmts b)
-             ++ [ foldFnValue f (fbTerm b) ]
-            -- ++ toListF (foldFnValue f) (fbPhiNodes b)
-            )
+  foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
 
 data FnStmt
   = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
@@ -363,13 +352,11 @@ instance Pretty FnStmt where
         where args = [pretty cnt, pretty val, pretty dest, pretty df]
 
 instance FoldFnValue FnStmt where
-  foldFnValue f (FnWriteMem addr v) = f addr `mappend` f v
-  foldFnValue _f (FnComment {})     = mempty
-  foldFnValue f (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f rhs
-  foldFnValue f (FnMemCopy _sz cnt src dest rev) =
-    f cnt `mappend` f src `mappend` f dest `mappend` f rev
-  foldFnValue f (FnMemSet cnt v ptr df) =
-    f cnt `mappend` f v `mappend` f ptr `mappend` f df
+  foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
+  foldFnValue _ s (FnComment {})                      = s
+  foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f s rhs
+  foldFnValue f s (FnMemCopy _sz cnt src dest rev)    = s `f` cnt `f` src `f` dest `f` rev
+  foldFnValue f s (FnMemSet cnt v ptr df)             = s `f` cnt `f` v `f` ptr `f` df
 
 data FnTermStmt
    = FnJump !(BlockLabel 64)
@@ -412,12 +399,11 @@ instance Pretty FnTermStmt where
       FnTermStmtUndefined -> text "undefined term"
 
 instance FoldFnValue FnTermStmt where
-  foldFnValue _f (FnJump {})           = mempty
-  foldFnValue f (FnBranch c _ _)       = f c
-  foldFnValue f (FnRet (grets, frets)) = mconcat (map f grets ++ map f frets)
-  foldFnValue f (FnCall fn (gargs, fargs) _ _) =
-    f fn `mappend` mconcat (map f gargs ++ map f fargs)
-  foldFnValue f (FnSystemCall _call_no _name args _rets _lbl) =
-    mconcat (map f args)
-  foldFnValue f (FnLookupTable idx _) = f idx
-  foldFnValue _f (FnTermStmtUndefined {}) = mempty
+  foldFnValue _ s (FnJump {})          = s
+  foldFnValue f s (FnBranch c _ _)     = f s c
+  foldFnValue f s (FnRet (grets, frets)) = foldl f (foldl f s grets) frets
+  foldFnValue f s (FnCall fn (gargs, fargs) _ _) = foldl f (foldl f (f s fn) fargs) gargs
+  foldFnValue f s (FnSystemCall _call_no _name args _rets _lbl) =
+    foldl f s args
+  foldFnValue f s (FnLookupTable idx _) = s `f` idx
+  foldFnValue _ s (FnTermStmtUndefined {}) = s
