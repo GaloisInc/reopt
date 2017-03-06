@@ -391,14 +391,20 @@ llcPathFlag = flagReq [ "llc" ] upd "PATH" help
   where upd s old = Right $ old & llcPath .~ s
         help = "Path to llc."
 
+-- | Flag to set path to opt.
+optFlag :: Flag Args
+optFlag = flagReq [ "opt" ] upd "PATH" help
+  where upd s old = Right $ old & optPath .~ s
+        help = "Path to opt."
+
 -- | Flag to set llc optimization level.
 optLevelFlag :: Flag Args
-optLevelFlag = flagReq [ "opt" ] upd "PATH" help
+optLevelFlag = flagReq [ "opt-level" ] upd "PATH" help
   where upd s old =
           case reads s of
             [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & optLevel .~ lvl
             _ -> Left "Expected optimization level to be a number between 0 and 3."
-        help = "Path to llc."
+        help = "Optimization level."
 
 llvmLinkFlag :: Flag Args
 llvmLinkFlag = flagReq [ "llvm-link" ] upd "PATH" help
@@ -435,6 +441,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , outputFlag
                 , gasFlag
                 , llcPathFlag
+                , optFlag
                 , optLevelFlag
                 , llvmLinkFlag
                 , libreoptFlag
