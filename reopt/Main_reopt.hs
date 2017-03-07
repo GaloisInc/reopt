@@ -15,6 +15,7 @@ import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
@@ -24,6 +25,7 @@ import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (maybeToList, catMaybes)
+import           Data.Monoid
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
@@ -48,7 +50,8 @@ import           System.IO.Temp
 import           System.Posix.Files
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>))
+import qualified Text.PrettyPrint.HughesPJ as HPJ
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import           Paths_reopt (getLibDir, version)
 
@@ -155,12 +158,13 @@ asLLVMVersion s =
     "llvm38" -> Just LLVM38
     _ -> Nothing
 
+
 -- | Pretty print an LLVM module using the format expected by the given LLVM version.
-ppLLVM :: LLVMVersion -> L.Module -> String
-ppLLVM LLVM35 m = show $ LPP.ppLLVM35 $ LPP.ppModule m
-ppLLVM LLVM36 m = show $ LPP.ppLLVM36 $ LPP.ppModule m
-ppLLVM LLVM37 m = show $ LPP.ppLLVM37 $ LPP.ppModule m
-ppLLVM LLVM38 m = show $ LPP.ppLLVM38 $ LPP.ppModule m
+ppLLVM :: LLVMVersion -> L.Module -> HPJ.Doc
+ppLLVM LLVM35 m = LPP.ppLLVM35 $ LPP.ppModule m
+ppLLVM LLVM36 m = LPP.ppLLVM36 $ LPP.ppModule m
+ppLLVM LLVM37 m = LPP.ppLLVM37 $ LPP.ppModule m
+ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
 
 ------------------------------------------------------------------------
 -- Args
@@ -956,8 +960,12 @@ performRedir args = do
       mergeAndWrite output_path orig_binary new_obj Map.empty redirs
 
 
-llvmAssembly :: LLVMVersion -> L.Module -> BS.ByteString
-llvmAssembly v m = UTF8.fromString (ppLLVM v m)
+llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
+llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
+  where pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
+        pp (HPJ.Chr c)  b = Builder.charUtf8 c <> b
+        pp (HPJ.Str s)  b = Builder.stringUtf8 s <> b
+        pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
 
 -- | Maps virtual addresses to the phdr at them.
 type ElfSegmentMap w = Map w (Phdr w)
@@ -1035,7 +1043,7 @@ compile_llvm_to_obj args arch llvm obj_path = do
 link_with_libreopt :: FilePath -- ^ Path to directory to write temport files to.
                    -> Args -- ^ Arguments to function
                    -> String -- ^ Name of architecture
-                   -> BS.ByteString -- ^ Object file.
+                   -> Builder.Builder -- ^ Object file.
                    -> IO BS.ByteString
 link_with_libreopt obj_dir args arch obj_llvm = do
   libreopt_path <-
@@ -1048,7 +1056,7 @@ link_with_libreopt obj_dir args arch obj_llvm = do
        fail "Could not find path to libreopt.bc needed to link object."
 
   let obj_llvm_path = obj_dir </> "obj.ll"
-  BS.writeFile obj_llvm_path obj_llvm
+  writeFileBuilder obj_llvm_path obj_llvm
 
   mllvm <- runExceptT $
     Ext.run_llvm_link (args^.llvmLinkPath) [ obj_llvm_path, libreopt_path ]
@@ -1074,6 +1082,9 @@ resolveSymAddr symMap (Right nm) =
         Just b -> Right (fromIntegral (b + addr^.addrOffset))
         Nothing -> error "Relocation does not yet support relocatable executables."
     Nothing -> Left nm
+
+writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
+writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
 
 performReopt :: Args -> IO ()
 performReopt args =
@@ -1105,7 +1116,7 @@ performReopt args =
         hPutStrLn stderr "Generating LLVM"
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
-        BS.writeFile output_path obj_llvm
+        writeFileBuilder output_path obj_llvm
       ".o" -> do
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) cfg
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns

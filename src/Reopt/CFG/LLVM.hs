@@ -8,6 +8,7 @@ Functions which convert the types in Representaiton to their
 analogues in LLVM
 -}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -16,6 +17,7 @@ analogues in LLVM
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.LLVM
   ( functionName
   , AddrSymMap
@@ -49,56 +51,82 @@ import           Reopt.Machine.X86State
 
 import           GHC.Stack
 
---------------------------------------------------------------------------------
--- reopt runtime
---------------------------------------------------------------------------------
+------------------------------------------------------------------------
+-- HasValue
 
--- FIXME: is False ok here??
-intrinsic :: String -> L.Type -> [L.Type] -> L.Typed L.Value
-intrinsic name res args =
-  (L.ptrT $ L.FunTy res args False) L.-: L.Symbol name
+class HasValue v where
+  valueOf :: v -> L.Typed L.Value
 
-iEvenParity :: L.Typed L.Value
-iEvenParity = intrinsic "reopt.EvenParity" (L.iT 1) [L.iT 8]
+instance HasValue (L.Typed L.Value) where
+  valueOf = id
 
-iRead_X87_RC :: L.Typed L.Value
-iRead_X87_RC = intrinsic "reopt.Read_X87_RC" (L.iT 2) []
+------------------------------------------------------------------------
+-- Intrinsic
 
-iWrite_X87_RC :: L.Typed L.Value
+data Intrinsic = Intrinsic { intrinsicName :: !L.Symbol
+                           , intrinsicRes  :: L.Type
+                           , intrinsicArgs  :: [L.Type]
+                           , intrinsicAttrs :: [L.FunAttr]
+                           }
+
+instance HasValue Intrinsic where
+  valueOf i = L.Typed tp (L.ValSymbol (intrinsicName i))
+    where tp = L.ptrT $ L.FunTy (intrinsicRes i) (intrinsicArgs i) False
+
+
+-- | Define an intrinsic that has no special attributes
+intrinsic :: String -> L.Type -> [L.Type] -> Intrinsic
+intrinsic name res args = intrinsic' name res args []
+
+-- | Define an intrinsic that has no special attributes
+intrinsic' :: String -> L.Type -> [L.Type] -> [L.FunAttr] -> Intrinsic
+intrinsic' name res args attrs = Intrinsic { intrinsicName = L.Symbol name
+                                           , intrinsicRes  = res
+                                           , intrinsicArgs = args
+                                           , intrinsicAttrs = attrs
+                                           }
+
+------------------------------------------------------------------------
+-- libreopt funtions
+
+iEvenParity :: Intrinsic
+iEvenParity = intrinsic' "reopt.EvenParity" (L.iT 1) [L.iT 8] [L.Readnone, L.Nounwind]
+
+iRead_X87_RC :: Intrinsic
+iRead_X87_RC = intrinsic' "reopt.Read_X87_RC" (L.iT 2) [] [L.Readonly]
+
+iWrite_X87_RC :: Intrinsic
 iWrite_X87_RC = intrinsic "reopt.Write_X87_RC" L.voidT [L.iT 2]
 
-iRead_X87_PC :: L.Typed L.Value
-iRead_X87_PC = intrinsic "reopt.Read_X87_PC" (L.iT 2) []
+iRead_X87_PC :: Intrinsic
+iRead_X87_PC = intrinsic' "reopt.Read_X87_PC" (L.iT 2) [] [L.Readonly]
 
-iWrite_X87_PC :: L.Typed L.Value
+iWrite_X87_PC :: Intrinsic
 iWrite_X87_PC = intrinsic "reopt.Write_X87_PC" L.voidT [L.iT 2]
 
-iRead_FS :: L.Typed L.Value
-iRead_FS = intrinsic "reopt.Read_FS" (L.iT 16) []
+iRead_FS :: Intrinsic
+iRead_FS = intrinsic' "reopt.Read_FS" (L.iT 16) [] [L.Readonly]
 
-iWrite_FS :: L.Typed L.Value
+iWrite_FS :: Intrinsic
 iWrite_FS = intrinsic "reopt.Write_FS" L.voidT [L.iT 16]
 
-iRead_GS :: L.Typed L.Value
-iRead_GS = intrinsic "reopt.Read_GS" (L.iT 16) []
+iRead_GS :: Intrinsic
+iRead_GS = intrinsic' "reopt.Read_GS" (L.iT 16) [] [L.Readonly]
 
-iWrite_GS :: L.Typed L.Value
+iWrite_GS :: Intrinsic
 iWrite_GS = intrinsic "reopt.Write_GS" L.voidT [L.iT 16]
 
-iMemCopy :: Integer -> L.Typed L.Value
+iMemCopy :: Integer -> Intrinsic
 iMemCopy n = intrinsic ("reopt.MemCopy.i" ++ show n) L.voidT [ L.iT 64, L.iT 64, L.iT 64, L.iT 1]
 
-iMemSet :: L.Type -> L.Typed L.Value
-iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT
-                         [L.ptrT typ, typ, L.iT 64, L.iT 1]
+iMemSet :: L.Type -> Intrinsic
+iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
+  where args = [L.ptrT typ, typ, L.iT 64, L.iT 1]
 
-iMemCmp :: L.Typed L.Value
-iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64
-                                             , L.iT 64, L.iT 64
-                                             , L.iT 1]
+iMemCmp :: Intrinsic
+iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1]
 
--- FIXME: use personalities
-iSystemCall :: String -> L.Typed L.Value
+iSystemCall :: String -> Intrinsic
 iSystemCall pname
      | null pname = error "empty string given to iSystemCall"
      | otherwise = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
@@ -107,7 +135,7 @@ iSystemCall pname
     -- passed via the stack.
     argTypes = replicate (length x86SyscallArgumentRegs + 1) (L.iT 64)
 
-reoptIntrinsics :: [L.Typed L.Value]
+reoptIntrinsics :: [Intrinsic]
 reoptIntrinsics = [ iEvenParity
                   , iRead_X87_RC
                   , iWrite_X87_RC
@@ -129,9 +157,14 @@ reoptIntrinsics = [ iEvenParity
 -- LLVM intrinsics
 --------------------------------------------------------------------------------
 
-llvmIntrinsics :: [L.Typed L.Value]
-llvmIntrinsics = [ intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
-                   (L.Struct [in_typ, L.iT 1]) [in_typ, in_typ]
+overflowOp :: String -> L.Type -> Intrinsic
+overflowOp bop in_typ =
+  intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
+            (L.Struct [in_typ, L.iT 1])
+            [in_typ, in_typ]
+
+llvmIntrinsics :: [Intrinsic]
+llvmIntrinsics = [ overflowOp bop in_typ
                    | bop <- [ "uadd", "sadd", "usub", "ssub" ]
                    , in_typ <- map L.iT [4, 8, 16, 32, 64] ]
                  ++
@@ -527,8 +560,8 @@ alloca :: L.Type -> Maybe (L.Typed L.Value) -> Maybe Int -> BBLLVM (L.Typed L.Va
 alloca tp cnt align = fmap (L.Typed (L.PtrTo tp)) $ evalInstr $ L.Alloca tp cnt align
 
 -- | Generate a non-tail call that returns a value
-call :: L.Typed L.Value -> [L.Typed L.Value] -> BBLLVM (L.Typed L.Value)
-call f args =
+call :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM (L.Typed L.Value)
+call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res argTypes varArgs) -> do
       when varArgs $ do
@@ -539,8 +572,8 @@ call f args =
     _ -> error $ "Call given non-function pointer argument:\n" ++ show f
 
 -- | Generate a non-tail call that does not return a value
-call_ :: L.Typed L.Value -> [L.Typed L.Value] -> BBLLVM ()
-call_ f args =
+call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM ()
+call_ (valueOf -> f) args =
   case L.typedType f of
     L.FunTy _ argTypes varArgs -> do
       when varArgs $ do
@@ -562,22 +595,26 @@ mkFloatLLVMValue val frepr = do
     L.PrimType (L.Integer _) -> bitcast llvm_val (floatReprToLLVMType frepr)
     _ -> error $ "internal: mkFloatLLVMValue given unsupported type."
 
-
-
+-- | Handle an intrinsic overflows
 intrinsicOverflows' :: String -> FnValue tp -> FnValue tp -> FnValue (BVType 1) -> BBLLVM (L.Typed L.Value)
+-- Special case where carry/borrow flag is 0.
+intrinsicOverflows' bop x y (FnConstantValue _ 0) = do
+  x' <- mkLLVMValue x
+  y' <- mkLLVMValue y
+  let in_typ = L.typedType x'
+  r_tuple    <- call (overflowOp bop in_typ) [x', y']
+  extractValue r_tuple 1
+-- General case involves two calls
 intrinsicOverflows' bop x y c = do
   x' <- mkLLVMValue x
   y' <- mkLLVMValue y
   let in_typ = L.typedType x'
-      op_with_overflow =
-        intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
-                  (L.Struct [in_typ, L.iT 1]) [in_typ, in_typ]
-  c' <- (`zext` in_typ) =<< mkLLVMValue c
-
-  r_tuple    <- call op_with_overflow [x', y']
+  r_tuple    <- call (overflowOp bop in_typ) [x', y']
   r          <- extractValue r_tuple 0
   overflows  <- extractValue r_tuple 1
-  r_tuple'   <- call op_with_overflow [r, c']
+  -- Check for overflow in carry flat
+  c' <- (`zext` in_typ) =<< mkLLVMValue c
+  r_tuple'   <- call (overflowOp bop in_typ) [r, c']
   overflows' <- extractValue r_tuple' 1
   bor overflows (L.typedValue overflows')
 
@@ -1043,13 +1080,15 @@ defineFunction' :: String
                -> Function
                -> L.Define
 defineFunction' syscallPostfix addrSymMap addrFunMap f =
-    L.Define { L.defAttrs = L.emptyFunAttrs
-             , L.defRetType = funReturnType
-             , L.defName = symbol
-             , L.defArgs = args
-             , L.defVarArgs = False
-             , L.defSection = Nothing
-             , L.defBody    = [initBlock] ++ blocks ++ [failBlock]
+    L.Define { L.defLinkage  = Nothing
+             , L.defRetType  = funReturnType
+             , L.defName     = symbol
+             , L.defArgs     = args
+             , L.defVarArgs  = False
+             , L.defAttrs    = []
+             , L.defSection  = Nothing
+             , L.defGC       = Nothing
+             , L.defBody     = [initBlock] ++ blocks ++ [failBlock]
              , L.defMetadata = Map.empty
              }
   where
@@ -1104,15 +1143,14 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
     blocks :: [L.BasicBlock]
     blocks = toBasicBlock ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
 
-declareIntrinsic :: L.Typed L.Value -> L.Declare
-declareIntrinsic (L.Typed (L.PtrTo (L.FunTy rty argtys _)) (L.ValSymbol sym)) =
-  L.Declare { L.decRetType = rty
-            , L.decName    = sym
-            , L.decArgs    = argtys
+declareIntrinsic :: Intrinsic -> L.Declare
+declareIntrinsic i =
+  L.Declare { L.decRetType = intrinsicRes i
+            , L.decName    = intrinsicName i
+            , L.decArgs    = intrinsicArgs i
             , L.decVarArgs = False
+            , L.decAttrs   = intrinsicAttrs i
             }
-declareIntrinsic _ = error "Not an intrinsic"
-
 
 -- | Declare all LLVM and reopt-specific intrinsics
 intrinsicDecls :: [L.Declare]
@@ -1124,6 +1162,7 @@ declareFunction' (sym, ftp) =
             , L.decName    = sym
             , L.decArgs    = functionTypeArgTypes ftp
             , L.decVarArgs = False
+            , L.decAttrs   = []
             }
 
 -- | Get module for functions
