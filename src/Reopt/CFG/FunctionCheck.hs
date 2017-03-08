@@ -14,12 +14,12 @@ blbl :: SegmentedAddr w -> BlockLabel w
 blbl a = GeneratedBlock a 0
 
 -- | Return true if the function entry point
-checkFunction :: DiscoveryInfo arch ids
+checkFunction :: DiscoveryFunInfo arch ids
               -> ArchSegmentedAddr arch
               -> Bool
 checkFunction info addr = checkFunction' info Set.empty [blbl addr]
 
-checkFunction' :: DiscoveryInfo arch ids
+checkFunction' :: DiscoveryFunInfo arch ids
                -> Set (ArchLabel arch)
                -> [ArchLabel arch]
                -> Bool

@@ -224,7 +224,7 @@ type ArchConstraints arch =
 
 -- | This registers a block in the first phase (block discovery).
 addEdge :: ArchConstraints arch
-        => DiscoveryInfo arch ids
+        => DiscoveryFunInfo arch ids
         -> ArchLabel arch
         -> ArchSegmentedAddr arch
         -> FunctionArgsM arch ids ()
@@ -425,11 +425,12 @@ type SummarizeConstraints arch ids
 -- assignments and registers.
 summarizeBlock :: forall arch ids
                .  SummarizeConstraints arch ids
-               => DiscoveryInfo arch ids
+               => Memory (ArchAddrWidth arch)
+               -> DiscoveryFunInfo arch ids
                -> ParsedBlockRegion arch ids
                -> Word64 -- ^ Index of region
                -> FunctionArgsM arch ids ()
-summarizeBlock interp_state reg idx = do
+summarizeBlock mem interp_state reg idx = do
   let addr = regionAddr reg
   b <-
     case Map.lookup idx (regionBlockMap reg) of
@@ -457,11 +458,11 @@ summarizeBlock interp_state reg idx = do
       error $ "Classification failed: " ++ show addr
     ParsedBranch c x y -> do
       demandValue lbl c
-      summarizeBlock interp_state reg x
-      summarizeBlock interp_state reg y
+      summarizeBlock mem interp_state reg x
+      summarizeBlock mem interp_state reg y
 
     ParsedCall proc_state m_ret_addr -> do
-      summarizeCall (memory interp_state) lbl proc_state (not $ isJust m_ret_addr)
+      summarizeCall mem lbl proc_state (not $ isJust m_ret_addr)
       case m_ret_addr of
         Nothing       -> return ()
         Just ret_addr -> do
@@ -502,17 +503,18 @@ summarizeBlock interp_state reg idx = do
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: SummarizeConstraints arch ids
-              => DiscoveryInfo arch ids
+              => Memory (ArchAddrWidth arch)
+              -> DiscoveryFunInfo arch ids
               -> FunctionArgsM arch ids ()
-summarizeIter ist = do
+summarizeIter mem ist = do
   fnFrontier <- use blockFrontier
   case fnFrontier of
     [] ->
       return ()
     reg : frontier' -> do
       blockFrontier .= frontier'
-      summarizeBlock ist reg 0
-      summarizeIter ist
+      summarizeBlock mem ist reg 0
+      summarizeIter mem ist
 
 calculateLocalFixpoint :: forall arch ids
                        .  OrdF (ArchReg arch)
@@ -576,16 +578,22 @@ doOneFunction :: forall arch ids
               -> FunctionArgState (ArchReg arch)
               -> SegmentedAddr (ArchAddrWidth arch)
               -> FunctionArgState (ArchReg arch)
-doOneFunction sysp ist acc addr =
+doOneFunction sysp ist0 acc addr =
   flip evalState (initFunctionArgsState sysp) $ do
     let lbl0 = mkRootBlockLabel addr
     -- Run the first phase (block summarization)
     visitedBlocks .= Set.singleton addr
+
+    ist <-
+      case Map.lookup addr (ist0^.funInfo) of
+        Just i -> pure i
+        Nothing -> error $ "Could not find info for " ++ show addr
+
     case Map.lookup addr (ist^.parsedBlocks) of
       Just b -> blockFrontier .= [b]
       Nothing -> error $ "Could not find initial block for " ++ show addr
 
-    summarizeIter ist
+    summarizeIter (memory ist0) ist
     -- propagate back uses
     new <- use blockDemandMap
 

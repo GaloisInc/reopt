@@ -26,6 +26,7 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep ( FunctionType(..)
@@ -187,17 +188,18 @@ nextBlock = blockFrontier %%= \s -> let x = Set.maxView s in (fmap fst x, maybe 
 -- the highest index above sp0 that is read or written.
 registerUse :: SyscallPersonality X86_64
             -> AddrToFunctionTypeMap
-            -> DiscoveryInfo X86_64 ids
+            -> Memory 64
+            -> DiscoveryFunInfo X86_64 ids
             -> SegmentedAddr 64
             -> ( Set (Some (AssignId ids))
                , Map (BlockLabel 64) (Set (Some X86Reg))
                , Map (BlockLabel 64) (Set (Some X86Reg))
                , Map (BlockLabel 64) [BlockLabel 64]
                )
-registerUse sysp fArgs ist addr =
+registerUse sysp fArgs mem ist addr =
   flip evalState (initRegisterUseState sysp fArgs addr) $ do
     -- Run the first phase (block summarization)
-    summarizeIter ist Set.empty (Just lbl0)
+    summarizeIter mem ist Set.empty (Just lbl0)
     -- propagate back uses
     new <- use blockRegUses
     -- debugM DRegisterUse ("0x40018d ==> " ++ show (Map.lookup (GeneratedBlock 0x40018d 0) new))
@@ -244,17 +246,18 @@ calculateFixpoint new
       return (lbl', regs `Set.difference` seenRegs)
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: DiscoveryInfo X86_64 ids
-               -> Set (BlockLabel 64)
-               -> Maybe (BlockLabel 64)
-               -> RegisterUseM ids ()
-summarizeIter _   _     Nothing = return ()
-summarizeIter ist seen (Just lbl)
-  | lbl `Set.member` seen = nextBlock >>= summarizeIter ist seen
+summarizeIter :: Memory 64
+              -> DiscoveryFunInfo X86_64 ids
+              -> Set (BlockLabel 64)
+              -> Maybe (BlockLabel 64)
+              -> RegisterUseM ids ()
+summarizeIter _   _   _     Nothing = return ()
+summarizeIter mem ist seen (Just lbl)
+  | lbl `Set.member` seen = nextBlock >>= summarizeIter mem ist seen
   | otherwise = do
-      summarizeBlock ist lbl
+      summarizeBlock mem ist lbl
       lbl' <- nextBlock
-      summarizeIter ist (Set.insert lbl seen) lbl'
+      summarizeIter mem ist (Set.insert lbl seen) lbl'
 
 -- | Returns the type of the function at the given address
 lookupFunctionTypeAtAddr :: SegmentedAddr 64
@@ -272,10 +275,11 @@ lookupFunctionTypeAtAddr faddr = do
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
 summarizeBlock :: forall ids
-               .  DiscoveryInfo X86_64 ids
+               .  Memory 64
+               -> DiscoveryFunInfo X86_64 ids
                -> BlockLabel 64
                -> RegisterUseM ids ()
-summarizeBlock interp_state root_label = go root_label
+summarizeBlock mem interp_state root_label = go root_label
   where
     go :: BlockLabel 64 -> RegisterUseM ids ()
     go lbl = do
@@ -329,7 +333,7 @@ summarizeBlock interp_state root_label = go root_label
         ParsedCall proc_state m_ret_addr -> do
 
           ft <-
-            case asLiteralAddr (memory interp_state) (proc_state^.boundValue ip_reg) of
+            case asLiteralAddr mem (proc_state^.boundValue ip_reg) of
               Nothing -> pure ftMaximumFunctionType
               Just faddr -> lookupFunctionTypeAtAddr faddr
 

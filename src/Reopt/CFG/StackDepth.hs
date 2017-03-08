@@ -242,7 +242,7 @@ parseStackPointer sp0 addr0
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-maximumStackDepth :: DiscoveryInfo X86_64 ids
+maximumStackDepth :: DiscoveryFunInfo X86_64 ids
                   -> SegmentedAddr 64
                   -> Either String (BlockStackDepths X86_64 ids)
 maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist lbl0)) s0
@@ -257,7 +257,7 @@ maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist lbl0
     finish (Left e, _) = Left e
 
 -- | Explore states until we have reached end of frontier.
-recoverIter :: DiscoveryInfo X86_64 ids
+recoverIter :: DiscoveryFunInfo X86_64 ids
             -> BlockLabel 64
             -> StackDepthM X86_64 ids ()
 recoverIter ist lbl = do
@@ -279,7 +279,7 @@ goStmt init_sp (WriteMem addr v) = do
     _ -> return ()
 goStmt _ _ = return ()
 
-recoverBlock :: DiscoveryInfo X86_64 ids
+recoverBlock :: DiscoveryFunInfo X86_64 ids
              -> BlockLabel 64
              -> StackDepthM X86_64 ids ()
 recoverBlock interp_state root_label = do

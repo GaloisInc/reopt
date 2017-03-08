@@ -26,14 +26,13 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (maybeToList, catMaybes)
 import           Data.Monoid
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
+--import           Data.Parameterized.Map (MapF)
+--import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Tuple (swap)
-import           Data.Type.Equality as Equality
 import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
@@ -60,7 +59,7 @@ import qualified Data.VEX.FFI
 import           Data.Macaw.ARM
 #endif
 
-import           Data.Macaw.AbsDomain.AbsState
+--import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
@@ -68,11 +67,13 @@ import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
-                 , BlockRegion(..)
-                 , blocks
+                 , ppDiscoveryInfoBlocks
+--                 , BlockRegion(..)
                  , functionEntries
-                 , foundAbstractState
-                 , foundAddrs
+--                 , foundAbstractState
+--                 , foundAddrs
+                 , funInfo
+                 , memory
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
@@ -90,7 +91,7 @@ import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.X86State
 import           Reopt.Relinker
-import           Reopt.Semantics.DeadRegisterElimination
+--import           Reopt.Semantics.DeadRegisterElimination
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -491,12 +492,14 @@ dumpDisassembly path = do
     putStrLn "Binary contains no executable sections."
   mapM_ printSectionDisassembly sections
 
+{-
 mkCFG :: Integral (ArchAddr arch)
       => Map (ArchSegmentedAddr arch) (BlockRegion arch ids)
       -> CFG arch ids
 mkCFG m = Map.foldlWithKey' go emptyCFG m
   where go g addr br = insertBlocksForCode addr (brSize br) l g
           where l = Map.elems (brBlocks br)
+-}
 
 -- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
 --
@@ -636,8 +639,7 @@ showCFG loadSty path = do
   SomeArch archInfo <- getElfArchInfo e
   (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
   (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
-  let g = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
-  print (pretty g)
+  print $ ppDiscoveryInfoBlocks disc_info
 
 -- | Try to recover function information from the information recovered during
 -- code discovery.
@@ -666,17 +668,31 @@ getFns sysp symMap excludedNames s = do
           Just base -> Set.notMember word excludeSet
             where word = fromIntegral (base + addr^.addrOffset)
           _ -> True
-  let entries = filter include $ filter (checkFunction s) $ Set.toList $ s^.functionEntries
+  let doCheck :: SegmentedAddr 64 -> Bool
+      doCheck a = checkFunction info a
+        where Just info = Map.lookup a (s^.funInfo)
 
-  let fArgs = functionArgs sysp s entries
+  let entries = filter include $ Set.toList $ s^.functionEntries
+
+  let mem = memory s
+  let fArgs = functionArgs sysp s (filter doCheck entries)
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \entry -> do
-    case recoverFunction sysp fArgs s entry of
-      Left msg -> do
-        hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
+    case Map.lookup entry (s^.funInfo) of
+      Nothing -> do
+        hPutStrLn stderr $ "Could not find function info for " ++ show entry
         pure Nothing
-      Right fn -> do
-        pure (Just fn)
+      Just finfo
+        | checkFunction finfo entry -> do
+            case recoverFunction sysp fArgs mem finfo entry of
+              Left msg -> do
+                hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
+                pure Nothing
+              Right fn -> do
+                pure (Just fn)
+        | otherwise -> do
+            hPutStrLn stderr $ "Invalid function at " ++ show entry
+            pure Nothing
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
@@ -692,6 +708,7 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
+{-
 ppStmtAndAbs :: MapF (AssignId ids) (AbsValue 64) -> Stmt X86_64 ids -> Doc
 ppStmtAndAbs m stmt =
   case stmt of
@@ -716,26 +733,27 @@ showCFGAndAI loadSty e = do
   (archInfo,_, _) <- getX86ElfArchInfo e
   (_,mem) <- mkElfMem loadSty Addr64 e
   (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem e
-  let abst = foundAbstractState <$> disc_info^.foundAddrs
-  let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
-  let amap = assignmentAbsValues archInfo mem g abst
-      ppOne b =
-         vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
+  forM_ (Map.elems (disc_info^.funInfo)) $ \finfo -> do
+    let abst = foundAbstractState <$> finfo^.foundAddrs
+    let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
+    let amap = assignmentAbsValues archInfo mem g abst
+        ppOne b =
+          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty ab
                   (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
                   (_,_) -> text ""
 
-              , ppBlockAndAbs amap b
-              ]
-  print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
-  forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
-    case blockLabel b of
-      GeneratedBlock _ 0 -> do
-        checkReturnsIdentified g b
-      _ -> return ()
-  -- Check that the CFG correctly identifies call statements.
-  checkCallsIdentified mem g
-
+               , ppBlockAndAbs amap b
+               ]
+    print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
+--    forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
+--      case blockLabel b of
+--        GeneratedBlock _ 0 -> do
+--          checkReturnsIdentified g b
+--        _ -> return ()
+--    -- Check that the CFG correctly identifies call statements.
+--    checkCallsIdentified mem g
+-}
 
 -- | Extract list containing symbol names and addresses.
 elfAddrSymEntries :: SectionIndexMap Word64 64
@@ -808,7 +826,6 @@ showLLVM args dir = do
   createDirectoryIfMissing True dir
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
   mapM_ writeF fns
--}
 
 -- | This is designed to detect returns from the X86 representation.
 -- It pattern matches on a RegState to detect if it read its instruction
@@ -910,6 +927,7 @@ checkCallsIdentified mem g = do
          "WARNING: Some blocks contained a call comment, but were not interpreted as\n"
       ++ "having a call.  The address for the start of each block is listed below:"
     mapM_ (\a -> hPutStrLn stderr $ "  " ++ show a) (Set.toList blocksWithMissedCall)
+-}
 
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
@@ -1094,7 +1112,7 @@ performReopt args =
     -- Construct CFG from binary
     (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
     (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
-    (Some cfg,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
+    (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
@@ -1107,18 +1125,17 @@ performReopt args =
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
         exitFailure
       ".blocks" -> do
-        let g = eliminateDeadRegisters (mkCFG $ cfg^.blocks)
-        writeFile output_path $ show (pretty g)
+        writeFile output_path $ show $ ppDiscoveryInfoBlocks disc_info
       ".fns" -> do
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) cfg
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) cfg
+        fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
@@ -1132,7 +1149,7 @@ performReopt args =
       _ -> do
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
-        fns <- getFns sysp symAddrMap notrans cfg
+        fns <- getFns sysp symAddrMap notrans disc_info
 
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -1146,7 +1163,7 @@ performReopt args =
         -- Convert binary to LLVM
         let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
               where m = elfSegmentMap (elfLayout orig_binary)
-                    mkRedir f = addrRedirection cfg addrSymMap m f
+                    mkRedir f = addrRedirection disc_info addrSymMap m f
         unless (null bad_addrs) $ do
           error $ "Found functions outside program headers:\n  "
             ++ unwords (show <$> bad_addrs)
@@ -1185,8 +1202,9 @@ main' = do
       showCFG (args^.loadStyle) (args^.programPath)
 
     ShowCFGAI -> do
-      e <- readElf64 (args^.programPath)
-      showCFGAndAI (args^.loadStyle) e
+      error $ "ShowCFGAI not supported"
+--      e <- readElf64 (args^.programPath)
+--      showCFGAndAI (args^.loadStyle) e
     ShowLLVM _path -> do
 --      showLLVM args path
       error $ "ShowLLVM not supported"

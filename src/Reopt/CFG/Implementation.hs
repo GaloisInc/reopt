@@ -153,6 +153,11 @@ bvSle x y = app (BVSignedLe x y)
 bvUle :: Expr ids (BVType n) -> Expr ids (BVType n) -> Expr ids BoolType
 bvUle x y = app (BVUnsignedLe x y)
 
+-- | Negate expression while eliminating double negations
+boolNot :: Expr ids BoolType -> Expr ids BoolType
+boolNot (asApp -> Just (NotApp b)) = b
+boolNot b = app (NotApp b)
+
 instance S.IsValue (Expr ids) where
 
   bv_width = exprWidth
@@ -281,16 +286,23 @@ instance S.IsValue (Expr ids) where
     | Just 0 <- asBVLit y = x
       -- Eliminate xor with self.
     | x == y = bvLit (exprWidth x) (0::Integer)
+      -- If this is a single bit comparison with a constant, resolve to Boolean operation.
+    | ValueExpr (BVValue w v) <- y
+    , Just Refl <- testEquality w S.n1 =
+      if v /= 0 then boolNot x else x
       -- Default case.
     | otherwise = app $ BVXor (exprWidth x) x y
 
   x .=. y
     | x == y = S.true
-      -- Add two literals.
+      -- Statically resolve two literals
     | Just xv <- asBVLit x, Just yv <- asBVLit y = S.boolValue (xv == yv)
-      -- Move constant to second argument
-    | Just _ <- asBVLit x = y S..=. x
-
+      -- Move constant to second argument (We implicitly know both x and y are not a constant due to previous case).
+    | Just _ <- asBVLit x, Nothing <- asBVLit y = y S..=. x
+      -- If this is a single bit comparison with a constant, resolve to Boolean operation.
+    | ValueExpr (BVValue w v) <- y
+    , Just Refl <- testEquality w S.n1 =
+      if v /= 0 then x else boolNot x
       -- Rewrite "base + offset = constant" to "base = constant - offset".
     | Just (BVAdd w x_base (asBVLit -> Just x_off)) <- asApp x
     , Just yv <- asBVLit y =
@@ -299,7 +311,7 @@ instance S.IsValue (Expr ids) where
     | Just (BVSub _ x_1 x_2) <- asApp x = x_1 S..=. S.bvAdd y x_2
       -- Rewrite "c == u - v" to "u = c + v".
     | Just (BVSub _ y_1 y_2) <- asApp y = y_1 S..=. S.bvAdd x y_2
-
+      -- General case
     | otherwise = app $ BVEq x y
 
   -- | Splits a bit vectors into two

@@ -143,9 +143,9 @@ cond_ae  = complement <$> get cf_loc
 cond_b   = get cf_loc
 cond_be  = (.|.) <$> get cf_loc <*> get zf_loc
 cond_g   = (\z s o -> complement z .&. (s .=. o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
-cond_ge  = (\s o   -> s .=. o) <$> get sf_loc <*> get of_loc
-cond_l   = complement <$> cond_ge
-cond_le  = complement <$> cond_g
+cond_le  = (\z s o -> z .|. (s `bvXor` o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
+cond_ge  = (\s o   -> s .=. o)     <$> get sf_loc <*> get of_loc
+cond_l   = (\s o   -> s `bvXor` o) <$> get sf_loc <*> get of_loc
 cond_o   = get of_loc
 cond_p   = get pf_loc
 cond_s   = get sf_loc
