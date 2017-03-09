@@ -26,7 +26,6 @@ module Reopt.CFG.LLVM
 
 import           Control.Lens
 import           Control.Monad
---import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Int
