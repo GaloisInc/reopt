@@ -958,14 +958,12 @@ termStmtToLLVM' tm =
                  setAssignIdValue (frAssignId fr) this_lbl val
            itraverse_ assignFltReturn fretvs
            jump (blockName target_lbl)
-     FnSystemCall call_no name args rets next_lbl -> do
+     FnSystemCall call_num args rets next_lbl -> do
        pname <- gets $ funSyscallIntrinsicPostfix . funContext
+       llvm_call_num <- mkLLVMValue call_num
        args'  <- mapM mkLLVMValue args
        -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
-       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegs) args'
-                     ++ [ L.Typed (L.iT 64) (L.integer $ fromIntegral call_no) ]
-
-       comment name
+       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegs) args' ++ [ llvm_call_num ]
        rvar <- call (iSystemCall pname) allArgs
        -- Assign all return variables to the extracted result
        let assignReturnVar :: Int -> Some FnReturnVar -> BBLLVM ()

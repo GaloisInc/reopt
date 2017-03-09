@@ -52,7 +52,7 @@ import           Data.Macaw.CFG
    , foldAppl
    , prettyF
    )
-import           Data.Macaw.Memory (MemWord, SegmentedAddr)
+import           Data.Macaw.Memory (SegmentedAddr)
 import           Data.Macaw.Types
 
 import           Reopt.Machine.X86State
@@ -379,7 +379,7 @@ data FnTermStmt
      -- returns to the label.
 
      -- FIXME: specialized to BSD's (broken) calling convention
-   | FnSystemCall !(MemWord 64) !String [(FnValue (BVType 64))] ![ Some FnReturnVar ] (BlockLabel 64)
+   | FnSystemCall !(FnValue (BVType 64)) [(FnValue (BVType 64))] ![ Some FnReturnVar ] (BlockLabel 64)
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (SegmentedAddr 64))
    | FnTermStmtUndefined
 
@@ -395,12 +395,12 @@ instance Pretty FnTermStmt where
          in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
-      FnSystemCall _call_no name args rets lbl ->
+      FnSystemCall call_no args rets lbl ->
         let arg_docs = (pretty <$> args)
             ret_docs = viewSome pretty <$> rets
          in parens (commas ret_docs)
             <+> text ":=" <+> text "syscall"
-            <+> text name <> parens (commas arg_docs) <+> pretty lbl
+            <+> pretty call_no <> parens (commas arg_docs) <+> pretty lbl
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ map (text . show) (V.toList vec))
       FnTermStmtUndefined -> text "undefined term"
@@ -410,7 +410,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnRet (grets, frets)) = foldl f (foldl f s grets) frets
   foldFnValue f s (FnCall fn (gargs, fargs) _ _) = foldl f (foldl f (f s fn) fargs) gargs
-  foldFnValue f s (FnSystemCall _call_no _name args _rets _lbl) =
-    foldl f s args
+  foldFnValue f s (FnSystemCall call_no args _rets _lbl) =
+    foldl f (f s call_no) args
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue _ s (FnTermStmtUndefined {}) = s

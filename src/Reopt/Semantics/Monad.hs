@@ -112,16 +112,17 @@ module Reopt.Semantics.Monad
   , module Flexdis86.Segment
   ) where
 
-import           Data.Bits (shiftL)
+import qualified Data.Bits as Bits
 import           Data.Char (toLower)
 import           GHC.TypeLits as TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
+import           Data.Macaw.Types
+
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
 import qualified Reopt.Machine.StateNames as N
-import           Data.Macaw.Types
 import qualified Reopt.Utils.GHCBug as GHCBug
 
 import           Flexdis86.Sizes (SizeConstraint(..))
@@ -225,6 +226,23 @@ registerViewAsFullRegister (RegisterView {..})
 
 -- * Read and write views for 'RegisterView's.
 
+-- | Extract 'n' bits starting at base 'b'.
+--
+-- Assumes a big-endian 'IsValue' semantics.
+defaultRegisterViewRead
+  :: ( 1 <= N.RegisterClassBits cl
+     , 1 <= n
+     , n <= N.RegisterClassBits cl
+     , IsValue v
+     )
+  => NatRepr b
+  -> NatRepr n
+  -> RegisterName cl
+  -> v (N.RegisterType cl)
+  -> v (BVType n)
+defaultRegisterViewRead b n _rn v0 =
+  bvTrunc n $ v0 `bvShr` bvLit (bv_width v0) (natValue b)
+
 -- | Read a register via a view.
 --
 -- The read and write operations specify how to read and write a
@@ -298,6 +316,49 @@ registerViewRead (RegisterView {..}) =
     n = _registerViewSize
     rn = _registerViewReg
 
+-- | Update the 'n' bits starting at base 'b', leaving other bits
+-- unchanged.
+--
+-- Assumes a big-endian 'IsValue' semantics.
+defaultRegisterViewWrite
+  :: forall b cl n v
+  . ( 1 <= N.RegisterClassBits cl
+    , 1 <= n
+    , n <= N.RegisterClassBits cl
+    , IsValue v
+    )
+  => NatRepr b
+  -> NatRepr n
+  -> RegisterName cl
+  -> v (N.RegisterType cl)
+     -- ^ Value being modified
+  -> v (BVType n)
+     -- ^ Value to write
+  -> v (N.RegisterType cl)
+defaultRegisterViewWrite b n rn v0 write_val =
+  -- Truncation 'bvTrunc' requires that the result vector has non-zero
+  -- length, so we build the concatenation
+  --
+  --   h ++ m ++ l
+  --
+  -- using bitwise OR:
+  --
+  --   (h ++ 0^|m ++ l|)     ||
+  --   (0^|h| ++ m ++ 0^|l|) ||
+  --   (0^|h ++ m| ++ l)
+  -- highOrderBits  .|. lowOrderBits
+   prevBits .|. middleOrderBits
+  where
+    -- Generate the mask for the new bits
+    myMask = maxUnsigned n `Bits.shiftL` fromInteger (natValue b)
+    -- Generate max for old bits.
+    notMyMask = Bits.complement myMask
+    prevBits = v0 .&. bvLit w notMyMask
+    w = bv_width v0
+    cl = N.registerWidth rn
+    b' = natValue b
+    middleOrderBits = uext cl write_val `bvShl` bvLit cl b'
+
 -- | Write a register via a view.
 registerViewWrite ::
   IsValue v =>
@@ -305,10 +366,14 @@ registerViewWrite ::
   v (N.RegisterType cl) ->
   v (BVType n) ->
   v (N.RegisterType cl)
-registerViewWrite r@(RegisterView {..}) =
+registerViewWrite (RegisterView {..}) =
   case _registerViewType of
     DefaultView
-      | Just (_, Refl, Refl) <- registerViewAsFullRegister r -> \ _v0 v -> v
+      -- Just write the full register if possible
+      | Just Refl <- _registerViewBase `testEquality` n0
+      , Just Refl <- _registerViewSize `testEquality` N.registerWidth _registerViewReg
+      , DefaultView <- _registerViewType -> \ _v0 v -> v
+      -- Otherwise use the defaultRegisterViewWrite
       | otherwise -> defaultRegisterViewWrite b n rn
     OneExtendOnWrite ->
       let ones = complement (bvLit (cl `subNat` n) (0::Integer)) in
@@ -321,81 +386,6 @@ registerViewWrite r@(RegisterView {..}) =
     n = _registerViewSize
     rn = _registerViewReg
     cl = N.registerWidth rn
-
--- | Extract 'n' bits starting at base 'b'.
---
--- Assumes a big-endian 'IsValue' semantics.
-defaultRegisterViewRead ::
-  ( 1 <= N.RegisterClassBits cl
-  , 1 <= n
-  , n <= N.RegisterClassBits cl
-  , IsValue v
-  ) =>
-  NatRepr b ->
-  NatRepr n ->
-  RegisterName cl ->
-  v (N.RegisterType cl) ->
-  v (BVType n)
-defaultRegisterViewRead b n _rn v0 =
-  bvTrunc n $ v0 `bvShr` bvLit (bv_width v0) (natValue b)
-
--- | Update the 'n' bits starting at base 'b', leaving other bits
--- unchanged.
---
--- Assumes a big-endian 'IsValue' semantics.
-defaultRegisterViewWrite :: forall b cl n v .
-  ( 1 <= N.RegisterClassBits cl
-  , 1 <= n
-  , n <= N.RegisterClassBits cl
-  , IsValue v
-  ) =>
-  NatRepr b ->
-  NatRepr n ->
-  RegisterName cl ->
-  v (N.RegisterType cl) ->
-  v (BVType n) ->
-  v (N.RegisterType cl)
-defaultRegisterViewWrite b n rn v0 v =
-  -- Truncation 'bvTrunc' requires that the result vector has non-zero
-  -- length, so we build the concatenation
-  --
-  --   h ++ m ++ l
-  --
-  -- using bitwise OR:
-  --
-  --   (h ++ 0^|m ++ l|)     ||
-  --   (0^|h| ++ m ++ 0^|l|) ||
-  --   (0^|h ++ m| ++ l)
-  highOrderBits .|. middleOrderBits .|. lowOrderBits
-  where
-    -- | Mask out bits 'i' through 'i + j - 1'.
-    --
-    -- Here 'i' is the number of bits in the low-order third and 'j'
-    -- is the number of bits in the middle-order third.
-    --
-    -- Assumes big-endian representation: left-shift moves bits to
-    -- higher order and right-shift moves bits to lower order.
-    mask :: (1 <= m) => Integer -> Integer -> v (BVType m) -> v (BVType m)
-    mask i j x0 = x3
-      where
-        x1 = x0 `bvShr` bvLit w i
-        x2 = x1 `bvShl` bvLit w (i + k)
-        x3 = x2 `bvShr` bvLit w k
-
-        w = bv_width x0
-        -- | The number of bits in the high-order third.
-        k = natValue w - i - j
-
-    cl = N.registerWidth rn
-
-    n', b', cl' :: Integer
-    n' = natValue n
-    b' = natValue b
-    cl' = natValue cl
-
-    highOrderBits   = mask (b' + n') (cl' - b' - n') v0
-    middleOrderBits = uext cl v `bvShl` bvLit cl b'
-    lowOrderBits    = mask 0 b' v0
 
 -- | Update the lower 'n' bits and set the upper bits to a constant.
 --
@@ -759,7 +749,7 @@ packWord (N.BitPacking sz bits) =
   where
     getMoveBits :: N.BitConversion n -> m (Value m (BVType n))
     getMoveBits (N.ConstantBit b off)
-      = return $ bvLit sz (if b then 1 `shiftL` widthVal off else (0 :: Integer))
+      = return $ bvLit sz (if b then 1 `Bits.shiftL` widthVal off else (0 :: Integer))
     getMoveBits (N.RegisterBit reg off)
       = do v <- uext sz <$> get (fullRegister reg)
            return $ v `bvShl` bvLit sz (widthVal off)

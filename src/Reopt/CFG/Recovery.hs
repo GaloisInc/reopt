@@ -525,12 +525,13 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
       let syscallRegs :: [ArchReg X86_64 (BVType 64)]
           syscallRegs = syscallArgumentRegs
 
-      let (name, call_no, args)
+
+      let args
             | Just this_call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
-            , Just (call_name,_,argtypes) <- Map.lookup (fromIntegral this_call_no) (spTypeInfo sysp) =
-              (call_name, this_call_no, take (length argtypes) syscallRegs)
+            , Just (_,_,argtypes) <- Map.lookup (fromIntegral this_call_no) (spTypeInfo sysp) =
+              take (length argtypes) syscallRegs
             | otherwise =
-              ("unknown", 0, syscallRegs)
+              syscallRegs
 
       let rregs = spResultRegisters sysp
 
@@ -568,10 +569,12 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
 
       regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
 
+      call_num <- recoverRegister proc_state syscall_num_reg
+
       args'  <- mapM (recoverRegister proc_state) args
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-      fb <- mkBlock (FnSystemCall (fromInteger call_no) name args' rets (mkRootBlockLabel next_addr)) regs'
+      fb <- mkBlock (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
       pure $! blockInfo & addFnBlock fb
 
     ParsedLookupTable proc_state idx vec -> do
