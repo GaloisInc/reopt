@@ -25,7 +25,7 @@ module Reopt.CFG.Recovery
 import           Control.Lens
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
-import           Data.Foldable as Fold (toList, traverse_)
+import           Data.Foldable as Fold (toList, traverse_, foldlM)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe)
@@ -251,7 +251,8 @@ recoverValue' s v = do
     AssignedValue asgn -> do
       case MapF.lookup (assignId asgn) assignMap of
         Just fnAssign -> Right $! FnAssignedValue fnAssign
-        Nothing -> Left $ "Encountered uninitialized assignment: " ++ show (assignId asgn)
+        Nothing -> Left $ "Encountered uninitialized assignment: " ++ show (assignId asgn) ++ "\n"
+          ++ show assignMap
     Initial reg -> do
       case MapF.lookup reg curRegs of
         Nothing ->
@@ -266,7 +267,7 @@ recoverValue :: HasCallStack => Value X86_64 ids tp -> Recover ids (FnValue tp)
 recoverValue v = do
   s <- get
   case recoverValue' s v of
-    Left msg -> error msg
+    Left msg -> error $ "Error at " ++ show (s^.rsCurLabel) ++ "\n" ++ msg
     Right fnVal -> pure fnVal
 
 ------------------------------------------------------------------------
@@ -605,14 +606,17 @@ allocateStackFrame lbl sd
           Left msg -> throwError $ "Could not allocate stack frame: " ++ msg
           Right asgns -> do
             -- Resolve each assignment in initial block.
-            let goStmt :: Stmt X86_64 ids -> Recover ids ()
-                goStmt (AssignStmt asgn)
-                  | Set.member (Some (assignId asgn)) asgns =
+            let goStmt :: Set (Some (AssignId ids)) -> Stmt X86_64 ids -> Recover ids (Set (Some (AssignId ids)))
+                goStmt depSet (AssignStmt asgn)
+                  | Set.member (Some (assignId asgn)) depSet = do
                     recoverAssign asgn
-                goStmt _ = return ()
+                    pure $! Set.delete (Some (assignId asgn)) depSet
+                goStmt depSet _ = return depSet
             interp_state <- gets rsInterp
             Just b <- pure $ lookupParsedBlock interp_state lbl
-            mapM_ goStmt (pblockStmts b)
+            remaining_asgns <- foldlM goStmt asgns (pblockStmts b)
+            when (not (Set.null remaining_asgns)) $ do
+              throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
         let doOneDelta :: StackDepthOffset X86_64 ids
                        -> Recover ids (FnValue (BVType 64))
                        -> Recover ids (FnValue (BVType 64))
@@ -627,7 +631,7 @@ allocateStackFrame lbl sd
         spTop <- mkAddAssign $ FnEvalApp $ BVAdd knownNat alloc szv
         rsCurRegs %= MapF.insert sp_reg (FnRegValue spTop)
 
-  | otherwise            = debug DFunRecover "WARNING: non-singleton stack depth" $ return ()
+  | otherwise = debug DFunRecover "WARNING: non-singleton stack depth" $ return ()
 
 ------------------------------------------------------------------------
 -- recoverFunction
