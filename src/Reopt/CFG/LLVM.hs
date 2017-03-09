@@ -325,7 +325,12 @@ data BBLLVMState = BBLLVMState
   }
 
 
-type BBLLVM = State BBLLVMState
+newtype BBLLVM a = BBLLVM { unBBLLVM :: State BBLLVMState a }
+  deriving ( Functor
+           , Applicative
+           , Monad
+           , MonadState BBLLVMState
+           )
 
 -- | Generate a fresh identifier with the name 'rX'
 freshName :: BBLLVM L.Ident
@@ -575,13 +580,13 @@ call (valueOf -> f) args =
 call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM ()
 call_ (valueOf -> f) args =
   case L.typedType f of
-    L.FunTy _ argTypes varArgs -> do
+    L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes varArgs) -> do
       when varArgs $ do
         error $ "Varargs not yet supported."
       when (argTypes /= fmap L.typedType args) $ do
         error $ "Unexpected arguments to " ++ show f
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> error "call_ given non-function pointer argument"
+    _ -> error $ "call_ given non-function pointer argument\n" ++ show f
 
 mkFloatLLVMValue :: HasCallStack
                  => FnValue (BVType (FloatInfoBits flt))
@@ -1058,7 +1063,7 @@ blockToLLVM ctx fs b = (res, funState s)
           mapM_ stmtToLLVM' $ fbStmts b
           -- Add term statement
           termStmtToLLVM' (fbTerm b)
-        s = execState go s0
+        s = execState (unBBLLVM go) s0
 
         res = LLVMBlockResult { regBlock = b
                               , llvmBlockStmts = reverse (bbStmts s)

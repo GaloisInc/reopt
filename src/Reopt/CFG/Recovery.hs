@@ -226,12 +226,13 @@ recoverValue' s v = do
         let seg = addrSegment addr
         case () of
           _ | segmentFlags seg `Perm.hasPerm` Perm.execute
+            , Just ft <- Map.lookup addr (rsFunctionArgs s) -> do
+                Right $! FnFunctionEntryValue ft addr
+
+          _ | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Map.member addr (interpState^.parsedBlocks) -> do
               Right $! FnBlockValue addr
 
-          _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-            , Just ft <- Map.lookup addr (rsFunctionArgs s) -> do
-                Right $! FnFunctionEntryValue ft addr
 
             | segmentFlags seg `Perm.hasPerm` Perm.write -> do
               Right $! FnGlobalDataAddr addr
