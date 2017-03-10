@@ -176,12 +176,12 @@ llvmIntrinsics = [ overflowOp bop in_typ
 --------------------------------------------------------------------------------
 
 -- | Maps code addresses in the LLVM state to the associated symbol name if any.
-type AddrSymMap = Map (SegmentedAddr 64) BSC.ByteString
+type AddrSymMap w = Map (SegmentedAddr w) BSC.ByteString
 
 type AddrFunMap = Map (SegmentedAddr 64) (L.Symbol, FunctionType)
 
 -- | Return the LLVM symbol associated with the given name
-functionName :: AddrSymMap
+functionName :: AddrSymMap 64
                 -- ^ Maps addresses of symbols to the associated symbol name.
              -> SegmentedAddr 64
              -> L.Symbol
@@ -212,9 +212,15 @@ blockName l = L.Named (L.Ident (show l))
 functionFloatType :: L.Type
 functionFloatType = L.Vector 2 (L.PrimType $ L.FloatType L.Double)
 
+functionArgType :: Some X86Reg -> L.Type
+functionArgType (Some r) =
+  case r of
+    X86_GP{} -> L.iT 64
+    X86_XMMReg{} -> functionFloatType
+    _ -> error "Unsupported function type registers"
+
 functionTypeArgTypes :: FunctionType -> [L.Type]
-functionTypeArgTypes ft = replicate (fnNIntArgs ft) (L.iT 64)
-                          ++ replicate (fnNFloatArgs ft) functionFloatType
+functionTypeArgTypes ft = functionArgType <$> ftArgRegs ft
 
 functionTypeToLLVM :: FunctionType -> L.Type
 functionTypeToLLVM ft = L.ptrT (L.FunTy funReturnType (functionTypeArgTypes ft) False)
@@ -240,25 +246,44 @@ floatReprToLLVMType = L.PrimType  . L.FloatType . floatReprToLLVMFloatType
 failLabel :: L.Ident
 failLabel = L.Ident "failure"
 
-fltArg :: Int -> L.Ident
-fltArg i = L.Ident ("farg" ++ show i)
+argIdent :: Int -> L.Ident
+argIdent i = L.Ident ("arg" ++ show i)
 
 fltbvArg :: Int -> L.Ident
 fltbvArg i = L.Ident ("fargbv" ++ show i)
 
+-- | Create init block and post init args
+--
+-- This function is needed so that we coerce floating point input arguments to the expected types.
+mkInitBlock :: FunctionType -- ^ Type of function
+            -> L.BlockLabel -- ^ Label of first block
+            -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
+mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
+  where mkInputReg :: L.Type -> Int -> L.Typed L.Ident
+        mkInputReg tp i = L.Typed tp (argIdent i)
 
-mkInitBlock :: L.BlockLabel
-            -> Int
-            -> L.BasicBlock
-mkInitBlock lbl fltCnt =
-    L.BasicBlock { L.bbLabel = Just (L.Named (L.Ident "init"))
-                 , L.bbStmts = fltStmts
-                            ++ [L.Effect (L.Jump lbl) []]
-                 }
-  where fltStmts = fltStmt <$> [0..fltCnt-1]
+        inputArgs :: [L.Typed L.Ident]
+        inputArgs = zipWith mkInputReg (functionTypeArgTypes ft) [0..]
+
+        fltCnt = fnNFloatArgs ft
+        fltStmts = fltStmt <$> [0..fltCnt-1]
         fltStmt :: Int -> L.Stmt
         fltStmt i = L.Result (fltbvArg i) (L.Conv L.BitCast arg (L.iT 128)) []
-          where arg = L.Typed functionFloatType (L.ValIdent (fltArg i))
+          where arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
+
+        -- Block to generate
+        blk = L.BasicBlock { L.bbLabel = Just (L.Named (L.Ident "init"))
+                           , L.bbStmts = fltStmts ++ [L.Effect (L.Jump lbl) []]
+                           }
+
+        intArgs :: V.Vector (L.Typed L.Value)
+        intArgs = V.generate (fnNIntArgs ft)   $ \i -> L.Typed (L.iT 64) (L.ValIdent (argIdent i))
+
+        fltbvArgs :: V.Vector (L.Typed L.Value)
+        fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 128) (L.ValIdent (fltbvArg i))
+
+        postInitArgs :: V.Vector (L.Typed L.Value)
+        postInitArgs = intArgs V.++ fltbvArgs
 
 failBlock :: L.BasicBlock
 failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
@@ -295,8 +320,7 @@ padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef
 data FunLLVMContext = FunLLVMContext
   { funSyscallIntrinsicPostfix :: !String
   , funAddrFunMap :: !AddrFunMap
-  , funIntArgs   :: V.Vector (L.Typed L.Value)
-  , funFloatArgs :: V.Vector (L.Typed L.Value)
+  , funArgs      :: !(V.Vector (L.Typed L.Value))
   }
 
 -- | Information about a phi node
@@ -447,14 +471,9 @@ valueToLLVM ctx blk m val = do
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->
       mk $ L.ValLabel $ L.Named $ blockWordName addr
-    -- Value is an integer argument passed via a register.
-    FnIntArg n -> r
-      where Just r = funIntArgs ctx V.!? n
-
-    -- Value is a function argument passed via a floating point XMM
-    -- register.
-    FnFloatArg n -> r
-      where Just r = funFloatArgs ctx V.!? n
+    -- Value is an argument passed via a register.
+    FnRegArg _ i -> r
+      where Just r = funArgs ctx V.!? i
     -- A global address
     FnGlobalDataAddr addr ->
       case segmentBase (addrSegment addr) of
@@ -909,9 +928,8 @@ termStmtToLLVM' tm =
      FnBranch cond tlbl flbl -> do
        cond' <- mkLLVMValue cond
        effect $ L.Br cond' (blockName tlbl) (blockName flbl)
-     FnCall dest (gargs, fargs) (gretvs, fretvs) contlbl -> do
-       let arg_tys = replicate (length gargs) (L.iT 64)
-                     ++ replicate (length fargs) functionFloatType
+     FnCall dest ft args (gretvs, fretvs) contlbl -> do
+       let arg_tys = functionTypeArgTypes ft
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
 
@@ -919,22 +937,29 @@ termStmtToLLVM' tm =
        dest_f <-
          case dest of
            -- FIXME: use ft here instead?
-           FnFunctionEntryValue ft addr
+           FnFunctionEntryValue dest_ftp addr
              | Just (sym, tp) <- Map.lookup addr addrFunMap -> do
                when (functionTypeToLLVM tp /= fun_ty) $ do
                  error $ "Mismatch function type with " ++ show sym ++ "\n"
                    ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
                    ++ "Provided: " ++ show fun_ty
-               when (tp /= ft) $ do
+               when (ft /= dest_ftp) $ do
+                 error $ "Mismatch function type in call with " ++ show sym
+               when (tp /= dest_ftp) $ do
                  error $ "Mismatch function type in call with " ++ show sym
                return $ L.Typed fun_ty (L.ValSymbol sym)
            _ -> do
              dest' <- mkLLVMValue dest
              convop L.IntToPtr dest' fun_ty
 
-       gargs' <- mapM mkLLVMValue gargs
-       fargs' <- mapM ((`bitcast` functionFloatType) <=< mkLLVMValue) fargs
-       let args' = gargs' ++ fargs'
+       let evalArg :: Some X86Reg -> Some FnValue -> BBLLVM (L.Typed L.Value)
+           evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
+           evalArg (Some (X86_XMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
+           evalArg _ _ = error "Unsupported register arg"
+
+       args' <- zipWithM evalArg (ftArgRegs ft) args
+
+
 
        retv <- call dest_f args'
 
@@ -1077,7 +1102,7 @@ blockToLLVM ctx fs b = (res, funState s)
 -- They should also add any referenced functions.
 defineFunction' :: String
                   -- ^ Name to append to system call
-               -> AddrSymMap
+               -> AddrSymMap 64
                -> AddrFunMap
                -> Function
                -> L.Define
@@ -1085,7 +1110,7 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  = funReturnType
              , L.defName     = symbol
-             , L.defArgs     = args
+             , L.defArgs     = inputArgs
              , L.defVarArgs  = False
              , L.defAttrs    = []
              , L.defSection  = Nothing
@@ -1096,29 +1121,18 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
   where
     symbol = functionName addrSymMap (fnAddr f)
 
-    ft :: FunctionType
-    ft = fnType f
-
-    intArgs :: V.Vector (L.Typed L.Ident)
-    intArgs = V.generate (fnNIntArgs ft)   $ \i -> L.Typed (L.iT 64) (L.Ident ("iarg" ++ show i))
-
-    fltArgs :: V.Vector (L.Typed L.Ident)
-    fltArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed functionFloatType (fltArg i)
-
-    fltbvArgs :: V.Vector (L.Typed L.Ident)
-    fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 128) (fltbvArg i)
-
+    inputArgs :: [L.Typed L.Ident]
     initBlock :: L.BasicBlock
-    initBlock = mkInitBlock (blockName (mkRootBlockLabel (fnAddr f))) (fnNFloatArgs ft)
+    postInitArgs :: V.Vector (L.Typed L.Value)
+    (inputArgs, initBlock, postInitArgs) =
+      mkInitBlock (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
 
-    args :: [L.Typed L.Ident]
-    args = V.toList intArgs ++ V.toList fltArgs
+
 
     ctx :: FunLLVMContext
     ctx = FunLLVMContext { funSyscallIntrinsicPostfix = syscallPostfix
                          , funAddrFunMap  = addrFunMap
-                         , funIntArgs     = fmap (fmap L.ValIdent) intArgs
-                         , funFloatArgs   = fmap (fmap L.ValIdent) fltbvArgs
+                         , funArgs        = postInitArgs
                          }
 
     mkBlockRes :: (FunState, [LLVMBlockResult])
@@ -1170,7 +1184,7 @@ declareFunction' (sym, ftp) =
 -- | Get module for functions
 moduleForFunctions :: String
                       -- ^ Name to append to system calls
-                   -> AddrSymMap
+                   -> AddrSymMap 64
                    -> [Function]
                    -> L.Module
 moduleForFunctions syscallPostfix addrSymMap fns =

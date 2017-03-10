@@ -32,8 +32,7 @@ import           Data.Macaw.Types
 import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftMaximumFunctionType
                                  , ftMinimumFunctionType
-                                 , ftIntArgRegs
-                                 , ftFloatArgRegs
+                                 , ftArgRegs
                                  , ftIntRetRegs
                                  , ftFloatRetRegs
                                  )
@@ -338,9 +337,7 @@ summarizeBlock mem interp_state root_label = go root_label
               Just faddr -> lookupFunctionTypeAtAddr faddr
 
           demandRegisters proc_state [Some ip_reg]
-
-          demandRegisters proc_state $ Some <$> ftIntArgRegs ft
-          demandRegisters proc_state $ Some <$> ftFloatArgRegs ft
+          demandRegisters proc_state $ ftArgRegs ft
 
           case m_ret_addr of
             Nothing       -> return ()

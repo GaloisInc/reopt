@@ -788,7 +788,7 @@ elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
 -- Used for naming functions.
 elfAddrSymMap :: SectionIndexMap Word64 64
               -> Elf Word64
-              -> LLVM.AddrSymMap
+              -> LLVM.AddrSymMap 64
 elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
 
 {-
@@ -1010,7 +1010,7 @@ lookupElfOffset m a =
 
 -- | This creates a code redirection or returns the address as failing.
 addrRedirection :: DiscoveryInfo X86_64 ids
-                -> LLVM.AddrSymMap
+                -> LLVM.AddrSymMap 64
                 -> ElfSegmentMap Word64
                 -> Function
                 -> Either (SegmentedAddr 64) (CodeRedirection Word64)

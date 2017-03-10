@@ -25,8 +25,7 @@ module Reopt.CFG.FnRep
    , fnValueWidth
    , ftMaximumFunctionType
    , ftMinimumFunctionType
-   , ftIntArgRegs
-   , ftFloatArgRegs
+   , ftArgRegs
    , ftIntRetRegs
    , ftFloatRetRegs
    ) where
@@ -109,6 +108,10 @@ ftMaximumFunctionType = FunctionType (length x86ArgumentRegs)
 
 ftMinimumFunctionType :: FunctionType
 ftMinimumFunctionType = FunctionType 0 0 0 0
+
+-- | Return the registers used to pass arguments.
+ftArgRegs :: FunctionType -> [Some X86Reg]
+ftArgRegs ft = fmap Some (ftIntArgRegs ft) ++ fmap Some (ftFloatArgRegs ft)
 
 ftIntArgRegs :: FunctionType -> [X86Reg (BVType 64)]
 ftIntArgRegs ft = take (fnNIntArgs ft) x86ArgumentRegs
@@ -210,11 +213,9 @@ data FnValue (tp :: Type)
    | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(SegmentedAddr 64)
      -- | A pointer to an internal block at the given address.
    | (tp ~ BVType 64) => FnBlockValue !(SegmentedAddr 64)
-     -- | Value is an interget argument passed via a register.
-   | (tp ~ BVType 64) => FnIntArg !Int
-     -- | Value is a function argument passed via a floating point XMM
-     -- register.
-   | (tp ~ BVType 128) => FnFloatArg !Int
+      -- | Value is a argument passed via a register.
+   | FnRegArg !(X86Reg tp) !Int
+
      -- | A global address
    | (tp ~ BVType 64) => FnGlobalDataAddr !(SegmentedAddr 64)
 
@@ -230,8 +231,7 @@ instance Pretty (FnValue tp) where
                                     <> parens (pretty $ show n)
   pretty (FnBlockValue n)         = text "BlockValue"
                                     <> parens (pretty $ show n)
-  pretty (FnIntArg n)             = text "arg" <> int n
-  pretty (FnFloatArg n)           = text "fparg" <> int n
+  pretty (FnRegArg _ n)           = text "arg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@"
                                     <> parens (pretty $ show addr)
 
@@ -246,8 +246,7 @@ fnValueType v =
     FnReturn ret   -> frReturnType ret
     FnFunctionEntryValue {} -> knownType
     FnBlockValue _ -> knownType
-    FnIntArg _ -> knownType
-    FnFloatArg _ -> knownType
+    FnRegArg r _ -> typeRepr r
     FnGlobalDataAddr _ -> knownType
 
 fnValueWidth :: FnValue (BVType w) -> NatRepr w
@@ -370,9 +369,10 @@ data FnTermStmt
    | FnRet !([FnValue (BVType 64)], [FnValue XMMType])
    | FnBranch !(FnValue BoolType) !(BlockLabel 64) !(BlockLabel 64)
      -- ^ A branch to a block within the function, along with the return vars.
-     -- FIXME: need to add extra stack arg.
    | FnCall !(FnValue (BVType 64))
-            !([FnValue (BVType 64)], [FnValue XMMType])
+            FunctionType
+            -- Arguments
+            [Some FnValue]
             !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
             !(Maybe (BlockLabel 64))
      -- ^ A call statement to the given location with the arguments listed that
@@ -389,8 +389,8 @@ instance Pretty FnTermStmt where
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnJump lbl -> text "jump" <+> pretty lbl
       FnRet (grets, frets) -> text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
-      FnCall f (gargs, fargs) (grets, frets) lbl ->
-        let arg_docs = (pretty <$> gargs) ++ (pretty <$> fargs)
+      FnCall f _ args (grets, frets) lbl ->
+        let arg_docs = (\(Some v) -> pretty v) <$> args
             ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
          in parens (commas ret_docs)
             <+> text ":=" <+> text "call"
@@ -409,7 +409,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnRet (grets, frets)) = foldl f (foldl f s grets) frets
-  foldFnValue f s (FnCall fn (gargs, fargs) _ _) = foldl f (foldl f (f s fn) fargs) gargs
+  foldFnValue f s (FnCall fn _ args _ _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnSystemCall call_no args _rets _lbl) =
     foldl f (f s call_no) args
   foldFnValue f s (FnLookupTable idx _) = s `f` idx

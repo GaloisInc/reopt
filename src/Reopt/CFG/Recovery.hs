@@ -492,11 +492,10 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
 
       let ret_lbl = mkRootBlockLabel <$> m_ret_addr
 
-      gargs' <- mapM (recoverRegister proc_state) (ftIntArgRegs ft)
-      fargs' <- mapM (recoverRegister proc_state) (ftFloatArgRegs ft)
+      args <- mapM (\(Some r) -> Some <$> recoverRegister proc_state r) (ftArgRegs ft)
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-      fb <- mkBlock (FnCall call_tgt (gargs', fargs') (intrs, floatrs) ret_lbl) regs'
+      fb <- mkBlock (FnCall call_tgt ft args (intrs, floatrs) ret_lbl) regs'
       return $! blockInfo & addFnBlock fb
 
     ParsedJump proc_state tgt_addr -> do
@@ -666,13 +665,11 @@ recoverFunction sysp fArgs mem s a = do
               (debug DFunRecover ("Missing type for label " ++ show lbl) ftMaximumFunctionType) $
               Map.lookup a fArgs
 
-  let insIntReg i r = MapF.insert r (FnRegValue (FnIntArg i))
-  let insFloatReg i r = MapF.insert r (FnRegValue (FnFloatArg i))
+  let insReg i (Some r) = MapF.insert r (FnRegValue (FnRegArg r i))
   let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)
 
   let initRegs = MapF.empty
-               & flip (ifoldr insIntReg)     (ftIntArgRegs cft)
-               & flip (ifoldr insFloatReg)   (ftFloatArgRegs cft)
+               & flip (ifoldr insReg)     (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
                  -- FIXME: We may want to check this at function calls and returns to ensure
