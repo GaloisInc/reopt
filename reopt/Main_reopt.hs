@@ -26,8 +26,6 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (maybeToList, catMaybes)
 import           Data.Monoid
---import           Data.Parameterized.Map (MapF)
---import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -67,17 +65,18 @@ import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Discovery.Info
                  ( DiscoveryInfo
+                 , DiscoveryFunInfo
+                 , discoveredFunName
                  , ppDiscoveryInfoBlocks
---                 , BlockRegion(..)
                  , functionEntries
---                 , foundAbstractState
---                 , foundAddrs
                  , funInfo
                  , memory
+                 , symbolNames
+                 , parsedBlocks
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
-import qualified Data.Macaw.Memory.Permissions as Perm
+--import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
 
@@ -105,6 +104,7 @@ unintercalate punct str = reverse $ go [] "" str
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
 
+{-
 -- | This returns how much space there is before start of next function,
 -- or the end of the memory segment if code address is undefined.
 --
@@ -117,6 +117,7 @@ functionSize s a = do
       Just next | segmentIndex (addrSegment next) == segmentIndex seg ->
            next^.addrOffset - a^.addrOffset
       _ -> segmentSize seg - a^.addrOffset
+-}
 
 ------------------------------------------------------------------------
 -- LoadStyle
@@ -1008,13 +1009,68 @@ lookupElfOffset m a =
       where seg = phdrSegment phdr
     _ -> Nothing
 
+--------------------------------------------------------------------------------
+-- ControlFlowTargetMap
+
+-- | A map from all control flow targets in the program to the start address of
+-- functions that may target them.
+--
+-- This is used to compute when it is safe to insert a redirection.  We want to
+-- ensure that adding a redirection will not break unknow
+newtype ControlFlowTargetSet w = CFTS { cfTargets :: Set (SegmentedAddr w)
+                                      }
+
+-- | Return how many bytes of space there are to write after address without
+-- ovewriting another control flow target.
+lookupControlFlowTargetSpace :: (IsAddr w, Integral(MemWord w))
+                             => SegmentedAddr w
+                             -> ControlFlowTargetSet w
+                             -> MemWord w
+lookupControlFlowTargetSpace addr s =
+  case Set.lookupGT addr (cfTargets s) of
+    Just next
+      | addrSegment addr == addrSegment next ->
+          next^.addrOffset - addr^.addrOffset
+    _ ->
+      if segmentSize seg >= addr^.addrOffset then
+        segmentSize seg - addr^.addrOffset
+       else
+        0
+ where seg = addrSegment addr
+
+addControlFlowTarget :: ControlFlowTargetSet w
+                     -> SegmentedAddr w
+                     -> ControlFlowTargetSet w
+addControlFlowTarget m a = m { cfTargets = Set.insert a (cfTargets m) }
+
+
+
+addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
+                                  -> DiscoveryFunInfo arch ids
+                                  -> ControlFlowTargetSet (ArchAddrWidth arch)
+addFunDiscoveryControlFlowTargets m f =
+  foldl' addControlFlowTarget m (Map.keys (f^.parsedBlocks))
+
+
+
+discoveryControlFlowTargets :: DiscoveryInfo arch ids -> ControlFlowTargetSet (ArchAddrWidth arch)
+discoveryControlFlowTargets info =
+  let m0 = CFTS { cfTargets = Set.empty }
+      m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.elems (info^.funInfo))
+   in foldl' addControlFlowTarget m (Map.keys (symbolNames info))
+
+
+--------------------------------------------------------------------------------
+-- Redirections
+
+
 -- | This creates a code redirection or returns the address as failing.
-addrRedirection :: DiscoveryInfo X86_64 ids
+addrRedirection :: ControlFlowTargetSet 64
                 -> LLVM.AddrSymMap 64
                 -> ElfSegmentMap Word64
                 -> Function
                 -> Either (SegmentedAddr 64) (CodeRedirection Word64)
-addrRedirection info addrSymMap m f = do
+addrRedirection tgts addrSymMap m f = do
   let a = fnAddr f
   let w = case segmentBase (addrSegment a) of
             Just b -> fromIntegral (b + a^.addrOffset)
@@ -1025,7 +1081,7 @@ addrRedirection info addrSymMap m f = do
       where L.Symbol sym_name = LLVM.functionName addrSymMap (fnAddr f)
             redir = CodeRedirection { redirSourcePhdr   = idx
                                     , redirSourceOffset = off
-                                    , redirSourceSize   = fromIntegral (functionSize info (fnAddr f))
+                                    , redirSourceSize   = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
                                     , redirTarget       = UTF8.fromString sym_name
                                     }
 
@@ -1126,6 +1182,11 @@ performReopt args =
         exitFailure
       ".blocks" -> do
         writeFile output_path $ show $ ppDiscoveryInfoBlocks disc_info
+        let tgts = discoveryControlFlowTargets disc_info
+        forM_ (Map.toList (disc_info^.funInfo)) $ \(a,f) -> do
+          putStrLn $ BSC.unpack (discoveredFunName f) ++ ": "
+            ++ show (lookupControlFlowTargetSpace a tgts)
+
       ".fns" -> do
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
@@ -1161,9 +1222,10 @@ performReopt args =
 
         hPutStrLn stderr "Start merge and write"
         -- Convert binary to LLVM
-        let (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
+        let tgts = discoveryControlFlowTargets disc_info
+            (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
               where m = elfSegmentMap (elfLayout orig_binary)
-                    mkRedir f = addrRedirection disc_info addrSymMap m f
+                    mkRedir f = addrRedirection tgts addrSymMap m f
         unless (null bad_addrs) $ do
           error $ "Found functions outside program headers:\n  "
             ++ unwords (show <$> bad_addrs)
