@@ -1017,7 +1017,7 @@ lookupElfOffset m a =
 --
 -- This is used to compute when it is safe to insert a redirection.  We want to
 -- ensure that adding a redirection will not break unknow
-newtype ControlFlowTargetSet w = CFTS { cfTargets :: Set (SegmentedAddr w)
+newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (SegmentedAddr w) [SegmentedAddr w]
                                       }
 
 -- | Return how many bytes of space there are to write after address without
@@ -1026,38 +1026,46 @@ lookupControlFlowTargetSpace :: (IsAddr w, Integral(MemWord w))
                              => SegmentedAddr w
                              -> ControlFlowTargetSet w
                              -> MemWord w
-lookupControlFlowTargetSpace addr s =
-  case Set.lookupGT addr (cfTargets s) of
-    Just next
-      | addrSegment addr == addrSegment next ->
-          next^.addrOffset - addr^.addrOffset
-    _ ->
-      if segmentSize seg >= addr^.addrOffset then
-        segmentSize seg - addr^.addrOffset
-       else
-        0
- where seg = addrSegment addr
+lookupControlFlowTargetSpace addr0 = go 0 addr0 addr0
+  where seg = addrSegment addr0
+        go inc base addr s =
+          case Map.lookupGT addr (cfTargets s) of
+            Just (next,fns)
+              | addrSegment addr == addrSegment next ->
+                let d = next^.addrOffset - addr^.addrOffset
+                 in if null (filter (/= base) fns) then
+                      go (inc+d) base next s
+                     else
+                      inc+d
+            _ ->
+              if segmentSize seg >= addr^.addrOffset then
+                segmentSize seg - addr^.addrOffset
+               else
+                0
 
 addControlFlowTarget :: ControlFlowTargetSet w
                      -> SegmentedAddr w
+                     -> SegmentedAddr w -- ^ Function entry point
                      -> ControlFlowTargetSet w
-addControlFlowTarget m a = m { cfTargets = Set.insert a (cfTargets m) }
+addControlFlowTarget m a f = m { cfTargets = Map.insertWith (++) a [f] (cfTargets m) }
 
+addFunctionEntryPoint :: ControlFlowTargetSet w
+                      -> SegmentedAddr w
+                      -> ControlFlowTargetSet w
+addFunctionEntryPoint s a = addControlFlowTarget s a a
 
 
 addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
-                                  -> DiscoveryFunInfo arch ids
+                                  -> (ArchSegmentedAddr arch, DiscoveryFunInfo arch ids)
                                   -> ControlFlowTargetSet (ArchAddrWidth arch)
-addFunDiscoveryControlFlowTargets m f =
-  foldl' addControlFlowTarget m (Map.keys (f^.parsedBlocks))
-
-
+addFunDiscoveryControlFlowTargets m0 (base, f) =
+  foldl' (\m b -> addControlFlowTarget m b base) m0 (Map.keys (f^.parsedBlocks))
 
 discoveryControlFlowTargets :: DiscoveryInfo arch ids -> ControlFlowTargetSet (ArchAddrWidth arch)
 discoveryControlFlowTargets info =
-  let m0 = CFTS { cfTargets = Set.empty }
-      m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.elems (info^.funInfo))
-   in foldl' addControlFlowTarget m (Map.keys (symbolNames info))
+  let m0 = CFTS { cfTargets = Map.empty }
+      m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.toList (info^.funInfo))
+   in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
 
 
 --------------------------------------------------------------------------------
