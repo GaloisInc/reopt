@@ -1067,10 +1067,8 @@ discoveryControlFlowTargets info =
       m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.toList (info^.funInfo))
    in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
 
-
 --------------------------------------------------------------------------------
 -- Redirections
-
 
 -- | This creates a code redirection or returns the address as failing.
 addrRedirection :: ControlFlowTargetSet 64
