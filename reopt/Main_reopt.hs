@@ -676,7 +676,7 @@ getFns sysp symMap excludedNames s = do
   let entries = filter include $ Set.toList $ s^.functionEntries
 
   let mem = memory s
-  let fArgs = functionArgs sysp s (filter doCheck entries)
+  let fArgs = functionArgs sysp s (filter doCheck (Set.toList $ s^.functionEntries))
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \entry -> do
     case Map.lookup entry (s^.funInfo) of
@@ -1110,7 +1110,7 @@ compile_llvm_to_obj args arch llvm obj_path = do
   mres <- runExceptT $ do
     -- Skip optimization if optLevel == 0
     llvm_opt <-
-      if args^.optLevel == 0 then do
+      if args^.optLevel /= 0 then do
         Ext.run_opt (args^.optPath) (args^.optLevel) llvm
        else
         pure llvm
