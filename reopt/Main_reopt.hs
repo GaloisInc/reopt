@@ -1108,7 +1108,12 @@ compile_llvm_to_obj args arch llvm obj_path = do
   -- Run llvm on resulting binary
   putStrLn "Compiling new code"
   mres <- runExceptT $ do
-    llvm_opt <- Ext.run_opt (args^.optPath) (args^.optLevel) llvm
+    -- Skip optimization if optLevel == 0
+    llvm_opt <-
+      if args^.optLevel == 0 then do
+        Ext.run_opt (args^.optPath) (args^.optLevel) llvm
+       else
+        pure llvm
     let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
                                   , Ext.llc_opt_level = args^.optLevel
                                   }
