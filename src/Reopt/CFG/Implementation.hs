@@ -241,6 +241,27 @@ instance S.IsValue (Expr ids) where
     | Just 0 <- asBVLit y = y
       -- Idempotence
     | x == y = x
+
+      -- Make literal the second argument (simplifies later cases)
+    | isJust (asBVLit x) = assert (isNothing (asBVLit y)) $ y S..&. x
+
+      --(x1 .&. x2) .&. y = x1 .&. (x2 .&. y) -- Only apply when x2 and y is a lit
+    | isJust (asBVLit y)
+    , Just (BVAnd _ x1 x2) <- asApp x
+    , isJust (asBVLit x2) =
+      x1 S..&. (x2 S..&. y)
+
+      -- (x1 .|. x2) .&. y = (x1 .&. y) .|. (x2 .&. y) -- Only apply when y and x1 or x2 is a lit.
+    | isJust (asBVLit y)
+    , Just (BVOr _ x1 x2) <- asApp x
+    ,  isJust (asBVLit x2) =
+      (x1 S..&. y) S..|. (x2 S..&. y)
+      -- x .&. (y1 .|. y2) = (y1 .&. x) .|. (y2 .&. x) -- Only apply when x and y1 or y2 is a lit.
+    | isJust (asBVLit x)
+    , Just (BVOr _ y1 y2) <- asApp y
+    , isJust (asBVLit y2) =
+      (y1 S..&. x) S..|. (y2 S..&. x)
+
       -- x1 <= x2 & x1 ~= x2 = x1 < x2
     | Just (BVUnsignedLe x1 x2) <- asApp x
     , Just (BVComplement _ yc) <- asApp y
@@ -248,6 +269,7 @@ instance S.IsValue (Expr ids) where
     , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
     , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
       S.bvUlt x1 x2
+
       -- x1 ~= x2 & x1 <= x2 => x1 < x2
     | Just (BVUnsignedLe y1 y2) <- asApp y
     , Just (BVComplement _ xc) <- asApp x
@@ -255,6 +277,7 @@ instance S.IsValue (Expr ids) where
     , Just Refl <- testEquality (exprWidth x1) (exprWidth y1)
     , ((x1,x2) == (y1,y2) || (x1,x2) == (y2,y1)) =
       S.bvUlt y1 y2
+
       -- Default case
     | otherwise = app $ BVAnd (exprWidth x) x y
 
@@ -372,6 +395,11 @@ instance S.IsValue (Expr ids) where
       let x' = S.bvTrunc' w x
           y' = S.bvTrunc' w y
        in x' S..&. y'
+      -- Trunc (x .|. y) w = trunc x w .|. trunc y w
+    | Just (BVOr _ x y) <- asApp e0 =
+      let x' = S.bvTrunc' w x
+          y' = S.bvTrunc' w y
+       in x' S..|. y'
       -- trunc (Trunc e w1) w2 = trunc e w2
     | Just (Trunc e _) <- asApp e0 =
       -- Runtime check to workaround GHC typechecker.
