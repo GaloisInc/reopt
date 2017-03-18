@@ -37,6 +37,7 @@ library
     text,
     transformers,
     vector,
+    located-base,
     QuickCheck >= 2.7
 
   hs-source-dirs: src
