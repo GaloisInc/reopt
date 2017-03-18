@@ -55,6 +55,8 @@ import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
 import           Reopt.Machine.X86State
 
+import Debug.Trace
+
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -307,8 +309,13 @@ recoverAssign asgn = do
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr tp)
+          EvalArchFn (FirstOffsetOf sz val buf cnt) _ -> do
+            fn_val <- recoverValue val
+            fn_buf <- recoverValue buf
+            fn_cnt <- recoverValue cnt
+            pure (FnFirstOffsetOf sz fn_val fn_buf fn_cnt)
           EvalArchFn _ (BVTypeRepr w) -> do
-            debug DFunRecover ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
+            trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
               pure (FnSetUndefined w)
       void $ emitAssign (assignId asgn) rhs
 
@@ -356,7 +363,7 @@ recoverStmt s = do
                        <*> recoverValue ptr
                        <*> recoverValue df
       addFnStmt stmt
-    _ -> debug DFunRecover ("recoverStmt undefined for " ++ show (pretty s)) $ do
+    _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
       return ()
 
@@ -672,8 +679,6 @@ recoverFunction sysp fArgs mem s a = do
                & flip (ifoldr insReg)     (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
-                 -- FIXME: We may want to check this at function calls and returns to ensure
-                 -- ABI is correctly respected.
                & MapF.insert df_reg (FnRegValue (FnConstantValue n1 0))
 
   let rs = RS { rsMemory        = mem

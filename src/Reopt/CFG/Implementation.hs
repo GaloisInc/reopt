@@ -251,12 +251,12 @@ instance S.IsValue (Expr ids) where
     , isJust (asBVLit x2) =
       x1 S..&. (x2 S..&. y)
 
-      -- (x1 .|. x2) .&. y = (x1 .&. y) .|. (x2 .&. y) -- Only apply when y and x1 or x2 is a lit.
+      -- (x1 .|. x2) .&. y = (x1 .&. y) .|. (x2 .&. y) -- Only apply when y and x2 is a lit.
     | isJust (asBVLit y)
     , Just (BVOr _ x1 x2) <- asApp x
     ,  isJust (asBVLit x2) =
       (x1 S..&. y) S..|. (x2 S..&. y)
-      -- x .&. (y1 .|. y2) = (y1 .&. x) .|. (y2 .&. x) -- Only apply when x and y1 or y2 is a lit.
+      -- x .&. (y1 .|. y2) = (y1 .&. x) .|. (y2 .&. x) -- Only apply when x and y2 is a lit.
     | isJust (asBVLit x)
     , Just (BVOr _ y1 y2) <- asApp y
     , isJust (asBVLit y2) =
@@ -1000,13 +1000,18 @@ instance S.Semantics (X86Generator st_s ids) where
     df_v    <- eval df
     addStmt $ ExecArchStmt $ MemSet count_v val_v dest_v df_v
 
-  find_element sz findEq count buf val is_reverse = do
+  find_element sz True count buf val is_reverse = do
     count_v <- eval count
     buf_v   <- eval buf
     val_v   <- eval val
     is_reverse_v <- eval is_reverse
-    ValueExpr . AssignedValue
-      <$> addArchFn (FindElement sz findEq count_v buf_v val_v is_reverse_v)
+    case is_reverse_v of
+      BVValue _ 0 -> do
+        ValueExpr . AssignedValue <$> addArchFn (FirstOffsetOf sz val_v buf_v count_v)
+      _ -> do
+        fail $ "Unsupported find_element value " ++ show is_reverse_v
+  find_element _s False _count _buf _val _is_reverse = do
+    fail $ "Semantics only currently supports finding elements."
 
   primitive S.Syscall = do
     shiftX86GCont $ \_ s0 -> do
@@ -1199,6 +1204,7 @@ fnBlockState addr =
       & absRegState . boundValue sp_reg .~ concreteStackOffset addr 0
         -- x87 top register points to top of stack.
       & absRegState . x87TopReg         .~ FinSet (Set.singleton 7)
+        -- Direction flag is initially zero.
       & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (S.BVTypeRepr n64) ReturnAddr)
 
@@ -1231,7 +1237,7 @@ transferAbsValue r f =
       | Just upper <- hasMaximum knownType (transferValue r cnt) ->
           stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
       | otherwise -> TopV
-    FindElement _sz _findEq cnt _buf _val _rev
+    FirstOffsetOf _sz _val _buf cnt
       | Just upper <- hasMaximum knownType (transferValue r cnt) ->
           stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
       | otherwise -> TopV
@@ -1254,11 +1260,15 @@ disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
   case asConcreteSingleton (ab^.absRegState^.x87TopReg) of
     Nothing -> pure $ ([], addr, Just "Could not determine height of X87 stack.")
     Just t -> do
-      let loc = ExploreLoc { loc_ip = addr
-                           , loc_x87_top = fromInteger t
-                           }
-      (blocks, addr', maybeError) <- disassembleBlock nonce_gen mem contFn loc
-      pure $! (blocks, addr', show <$> maybeError)
+      case asConcreteSingleton (ab^.absRegState^.boundValue df_reg) of
+        Nothing -> pure $ ([], addr, Just $ "Could not determine df flag " ++ show (ab^.absRegState^.boundValue df_reg))
+        Just d -> do
+          let loc = ExploreLoc { loc_ip = addr
+                               , loc_x87_top = fromInteger t
+                               , loc_df_flag = d /= 0
+                               }
+          (blocks, addr', maybeError) <- disassembleBlock nonce_gen mem contFn loc
+          pure $! (blocks, addr', show <$> maybeError)
 
 freeBSD_syscallPersonality :: SyscallPersonality X86_64
 freeBSD_syscallPersonality =

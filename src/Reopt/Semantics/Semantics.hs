@@ -9,6 +9,7 @@ instructions.
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -806,9 +807,8 @@ moduloRegSize loc val
   | Just Refl <- testEquality (loc_width loc) n32 = go loc val (31 :: Int)
   | Just Refl <- testEquality (loc_width loc) n64 = go loc val (63 :: Int)
   | otherwise = val -- doesn't match any of the register sizes
-  where go l v maskVal = if isRegister l
-                         then v .&. bvLit (bv_width v) maskVal -- v mod maskVal
-                         else v
+  where go l v maskVal | isRegister l = v .&. bvLit (bv_width v) maskVal -- v mod maskVal
+                       | otherwise = v
 
 -- make a bitmask of size 'width' with only the bit at bitPosition set
 singleBitMask :: (IsValue v, 1 <= n, 1 <= log_n, log_n <= n) => NatRepr n -> v (BVType log_n) -> v (BVType n)
@@ -1019,61 +1019,67 @@ exec_cmps repz_pfx loc_rsi _loc_rdi = do
 -- SCAS/SCASW Scan string/Scan word string
 -- SCAS/SCASD Scan string/Scan doubleword string
 
+xaxValLoc :: RepValSize w -> Location a (BVType w)
+xaxValLoc ByteRepVal  = reg_low8  (N.GPReg 0)
+xaxValLoc WordRepVal  = reg_low16 (N.GPReg 0)
+xaxValLoc DWordRepVal = reg_low32 (N.GPReg 0)
+xaxValLoc QWordRepVal = fullRegister (N.GPReg 0)
+
 -- The arguments to this are always rax/QWORD PTR es:[rdi], so we only
 -- need the args for the size.
-exec_scas :: (IsLocationBV m n, n <= 64)
+exec_scas :: (IsLocationBV m n)
           => Bool -- Flag indicating if RepZPrefix appeared before instruction
           -> Bool -- Flag indicating if RepNZPrefix appeared before instruction
-          -> MLocation m (BVType n)
-          -> MLocation m (BVType n)
+          -> RepValSize n
           -> m ()
-exec_scas True True _val_loc _cmp_loc = error "Can't have both Z and NZ prefix"
-
+exec_scas True True _val_loc = error "Can't have both Z and NZ prefix"
 -- single operation case
-exec_scas False False val_loc _cmp_loc = do
+exec_scas False False rep = do
+  let val_loc = xaxValLoc rep
   df <- get df_loc
   v_rdi <- get rdi
   v_rax <- get val_loc
+  let sz = loc_width val_loc
   exec_cmp (mkBVAddr sz v_rdi) v_rax  -- FIXME: right way around?
+  let bytesPerOp = bvLit n64 $ natValue sz `div` 8
   rdi   .= mux df (v_rdi  `bvSub` bytesPerOp) (v_rdi `bvAdd` bytesPerOp)
-  where
-    sz = loc_width val_loc
-    bytesPerOp = bvLit n64 $ natValue sz `div` 8
-
 -- repz or repnz prefix set
-exec_scas _repz_pfx repnz_pfx val_loc _cmp_loc = do
-  -- The direction flag indicates post decrement or post increment.
+exec_scas _repz_pfx repnz_pfx rep = do
+  let val_loc = xaxValLoc rep
+  -- Get the direction flag -- it will be used to determine whether to add or subtract at each step.
+  -- If the flag is zero, then the register is incremented, otherwise it is incremented.
   df    <- get df_loc
-  v_rdi <- get rdi
+
+  -- Get value that we are using in comparison
   v_rax <- get val_loc
 
-  count <- uext n64 <$> get count_reg
-  ifte_ (count .=. bvKLit 0)
-    (return ())
-    (do_scas df v_rdi v_rax count)
-  where
-    sz = loc_width val_loc
-    -- FIXME: aso modifies this
-    count_reg = regLocation n64 N.rcx
-    bytesPerOp' = bvLit n64 bytesPerOp
-    bytesPerOp  = natValue sz `div` 8
+  --  Get the starting address for the comparsions
+  v_rdi <- get rdi
+  -- Get maximum number of times to execute instruction
+  count <- get (regLocation n64 N.rcx)
+  unless_ (count .=. bvKLit 0) $ do
 
-    do_scas df v_rdi val count = do
-      nseen <- find_element bytesPerOp repnz_pfx count v_rdi val df
 
-      let equal = (nseen .=. count)
-          nwordsSeen = mux equal count (count `bvSub` (nseen `bvAdd` bvKLit 1))
+    -- Get number of bytes in value we are checking with (used to determine how much to compare)
+    let sz = loc_width val_loc
+    -- Get number of bytes each comparison will use
+    let bytesPerOp = natValue sz `div` 8
 
-      -- we need to set the flags as if the last comparison was done, hence this.
-      let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` bytesPerOp'
-          lastRdi  = mux df (v_rdi  `bvSub` lastWordBytes) (v_rdi  `bvAdd` lastWordBytes)
 
-      exec_cmp (mkBVAddr sz lastRdi) val
+    nseen <- find_element rep repnz_pfx count v_rdi v_rax df
 
-      let nbytesSeen = nwordsSeen `bvMul` bytesPerOp'
+    let nwordsSeen = mux (nseen .=. count) count (count `bvSub` (nseen `bvAdd` bvKLit 1))
+    let bytePerOpLit = mux df (bvKLit (negate bytesPerOp)) (bvKLit bytesPerOp)
 
-      rdi .= mux df (v_rdi  `bvSub` nbytesSeen) (v_rdi `bvAdd` nbytesSeen)
-      rcx .= (count .- nwordsSeen)
+    -- Count the number of bytes seen.
+    let nbytesSeen    = nwordsSeen `bvMul` bytePerOpLit
+
+    let lastWordBytes = nbytesSeen `bvSub` bytePerOpLit
+
+    exec_cmp (mkBVAddr sz (v_rdi `bvAdd` lastWordBytes)) v_rax
+
+    rdi .= v_rdi `bvAdd` nbytesSeen
+    rcx .= (count .- nwordsSeen)
 
 -- LODS/LODSB Load string/Load byte string
 -- LODS/LODSW Load string/Load word string

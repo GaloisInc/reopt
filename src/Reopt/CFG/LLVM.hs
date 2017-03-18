@@ -47,6 +47,7 @@ import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
 import           Reopt.Machine.X86State
+import           Reopt.Semantics.Monad (repValSizeByteCount)
 
 import           GHC.Stack
 
@@ -123,7 +124,11 @@ iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
   where args = [L.ptrT typ, typ, L.iT 64, L.iT 1]
 
 iMemCmp :: Intrinsic
-iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1]
+iMemCmp = intrinsic' "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1] [L.Readonly]
+
+iFirstOffsetOf :: Integer -> Intrinsic
+iFirstOffsetOf sz =
+  intrinsic' ("reopt.FirstOffsetOf.i" ++ show sz) (L.iT 64) [L.iT (fromInteger sz), L.iT 64, L.iT 64] [L.Readonly]
 
 iSystemCall :: String -> Intrinsic
 iSystemCall pname
@@ -150,6 +155,7 @@ reoptIntrinsics = [ iEvenParity
                   ]
                   ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
                   ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
+                  ++ [ iFirstOffsetOf n | n <- [8, 16, 32, 64] ]
 
 
 --------------------------------------------------------------------------------
@@ -829,19 +835,11 @@ rhsToLLVM' rhs =
      v' <- mkLLVMValue v
      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
      convop L.PtrToInt alloc_ptr (L.iT 64)
-   --     FS     -> L.call iRead_FS []
-   --     GS     -> L.call iRead_GS []
-   --     X87_PC -> L.call iRead_X87_PC []
-   --     X87_RC -> L.call iRead_X87_RC []
-   --     _      -> unimplementedInstr
-   -- -- there doesn't seem to be a llvm.memcmp.* intrinsic
-   -- MemCmp bytesPerCopy nValues src dest direction -> do
-   --   nValues'   <- valueToLLVM nValues
-   --   src'       <- valueToLLVM src
-   --   dest'      <- valueToLLVM dest
-   --   direction' <- valueToLLVM direction
-   --   L.call iMemCmp [ L.iT 64 L.-: L.integer bytesPerCopy
-   --                  , nValues', src', dest', direction' ]
+   FnFirstOffsetOf sz val buf cnt -> do
+     llvm_val <- mkLLVMValue val
+     llvm_buf <- mkLLVMValue buf
+     llvm_cnt <- mkLLVMValue cnt
+     call (iFirstOffsetOf (8 * repValSizeByteCount sz)) [llvm_val, llvm_buf, llvm_cnt]
 
 stmtToLLVM' :: FnStmt -> BBLLVM ()
 stmtToLLVM' stmt = do
