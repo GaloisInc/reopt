@@ -8,6 +8,7 @@ Functions which convert the types in Representaiton to their
 analogues in LLVM
 -}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -48,7 +49,7 @@ import           Data.Macaw.Types
 import           Reopt.CFG.FnRep
 import           Reopt.Machine.X86State
 
-import           GHC.Stack
+import qualified GHC.Err.Located as Loc
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -127,7 +128,7 @@ iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64
 
 iSystemCall :: String -> Intrinsic
 iSystemCall pname
-     | null pname = error "empty string given to iSystemCall"
+     | null pname = Loc.error "empty string given to iSystemCall"
      | otherwise = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
   where
     -- the +1 is for the additional syscall no. register, which is
@@ -217,7 +218,7 @@ functionArgType (Some r) =
   case r of
     X86_GP{} -> L.iT 64
     X86_XMMReg{} -> functionFloatType
-    _ -> error "Unsupported function type registers"
+    _ -> Loc.error "Unsupported function type registers"
 
 functionTypeArgTypes :: FunctionType -> [L.Type]
 functionTypeArgTypes ft = functionArgType <$> ftArgRegs ft
@@ -307,7 +308,7 @@ getReferencedFunctions m0 f = foldFnValue findReferencedFunctions (insertAddr (f
         insertAddr addr ft m =
           case Map.lookup addr m of
             Just ft' | ft /= ft' ->
-                         error $ show addr ++ " has incompatible types:\n"
+                         Loc.error $ show addr ++ " has incompatible types:\n"
                               ++ show ft  ++ "\n"
                               ++ show ft' ++ "\n"
                      | otherwise -> m
@@ -400,7 +401,7 @@ unimplementedInstr' typ reason = do
 -- | Map from assign ID to value.
 type AssignValMap = Map FnAssignId (BlockLabel 64, L.Typed L.Value)
 
-getAssignIdValue :: HasCallStack
+getAssignIdValue :: Loc.HasCallStack
                  => FnBlock
                  -> AssignValMap
                     -- ^ Function id map for block
@@ -409,10 +410,9 @@ getAssignIdValue :: HasCallStack
 getAssignIdValue b m fid = do
   case Map.lookup fid m of
     Nothing ->
-      error $ "Could not find value " ++ show fid ++ "\n"
+      Loc.error $ "Could not find value " ++ show fid ++ "\n"
            ++ show m ++ "\n"
            ++ show (pretty b) ++ "\n"
-           ++ prettyCallStack callStack
     Just (_,v) -> v
 
 setAssignIdValue :: FnAssignId -> BlockLabel 64 -> L.Typed L.Value -> BBLLVM ()
@@ -420,7 +420,7 @@ setAssignIdValue fid blk v = do
   s <- get
   let fs = funState s
   case Map.lookup fid (funAssignValMap fs) of
-    Just{} -> error $ "internal: Assign id " ++ show fid ++ " already assigned."
+    Just{} -> Loc.error $ "internal: Assign id " ++ show fid ++ " already assigned."
     Nothing -> do
       let fs' = fs { funAssignValMap = Map.insert fid (blk,v) (funAssignValMap fs) }
       put $! s { funState = fs' }
@@ -433,7 +433,7 @@ addBoundPhiVar nm tp info = do
   put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
 
 -- | Map a function value to a LLVM value with no change.
-valueToLLVM :: HasCallStack
+valueToLLVM :: Loc.HasCallStack
             => FunLLVMContext
             -> FnBlock
             -> AssignValMap
@@ -461,13 +461,13 @@ valueToLLVM ctx blk m val = do
     FnFunctionEntryValue ft addr -> do
       case Map.lookup addr (funAddrFunMap ctx) of
         Just (sym,tp)
-          | ft /= tp -> error "Mismatch function type"
+          | ft /= tp -> Loc.error "Mismatch function type"
           | otherwise ->
             let fptr :: L.Typed L.Value
                 fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
              in mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
         Nothing -> do
-          error $ "Could not identify " ++ show addr
+          Loc.error $ "Could not identify " ++ show addr
     -- A pointer to an internal block at the given address.
     FnBlockValue addr ->
       mk $ L.ValLabel $ L.Named $ blockWordName addr
@@ -478,7 +478,7 @@ valueToLLVM ctx blk m val = do
     FnGlobalDataAddr addr ->
       case segmentBase (addrSegment addr) of
         Just base -> mk $ L.integer $ fromIntegral $ base + addr^.addrOffset
-        Nothing -> error $ "FnGlobalDataAddr only supports global values."
+        Nothing -> Loc.error $ "FnGlobalDataAddr only supports global values."
 
 -- | Return number of bits and LLVM float type should take
 floatTypeWidth :: L.FloatType -> Int32
@@ -489,10 +489,10 @@ floatTypeWidth l =
     L.Double -> 64
     L.Fp128 -> 128
     L.X86_fp80 -> 80
-    L.PPC_fp128 -> error "PPC floating point types not supported."
+    L.PPC_fp128 -> Loc.error "PPC floating point types not supported."
 
 -- | Map a function value to a LLVM value with no change.
-valueToLLVMBitvec :: HasCallStack
+valueToLLVMBitvec :: Loc.HasCallStack
                   => FunLLVMContext
                   -> FnBlock
                   -> AssignValMap
@@ -505,9 +505,9 @@ valueToLLVMBitvec ctx blk m val = do
     L.PrimType (L.FloatType tp) ->
       let itp = L.iT (floatTypeWidth tp)
        in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
-    _ -> error $ "valueToLLVMBitvec given unsupported type."
+    _ -> Loc.error $ "valueToLLVMBitvec given unsupported type."
 
-mkLLVMValue :: HasCallStack => FnValue tp -> BBLLVM (L.Typed L.Value)
+mkLLVMValue :: Loc.HasCallStack => FnValue tp -> BBLLVM (L.Typed L.Value)
 mkLLVMValue val = do
   s <- get
   let fs = funState s
@@ -541,7 +541,7 @@ extractValue ta i = do
   let etp = case L.typedType ta of
               L.Struct fl -> fl !! fromIntegral i
               L.Array _l etp' -> etp'
-              _ -> error "extractValue not given a struct or array."
+              _ -> Loc.error "extractValue not given a struct or array."
   L.Typed etp <$> evalInstr (L.ExtractValue ta [i])
 
 insertValue :: L.Typed L.Value -> L.Typed L.Value -> Int32 -> BBLLVM (L.Typed L.Value)
@@ -588,11 +588,11 @@ call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res argTypes varArgs) -> do
       when varArgs $ do
-        error $ "Varargs not yet supported."
+        Loc.error $ "Varargs not yet supported."
       when (argTypes /= fmap L.typedType args) $ do
-        error $ "Unexpected arguments to " ++ show f
+        Loc.error $ "Unexpected arguments to " ++ show f
       fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> error $ "Call given non-function pointer argument:\n" ++ show f
+    _ -> Loc.error $ "Call given non-function pointer argument:\n" ++ show f
 
 -- | Generate a non-tail call that does not return a value
 call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM ()
@@ -600,13 +600,13 @@ call_ (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes varArgs) -> do
       when varArgs $ do
-        error $ "Varargs not yet supported."
+        Loc.error $ "Varargs not yet supported."
       when (argTypes /= fmap L.typedType args) $ do
-        error $ "Unexpected arguments to " ++ show f
+        Loc.error $ "Unexpected arguments to " ++ show f
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> error $ "call_ given non-function pointer argument\n" ++ show f
+    _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
 
-mkFloatLLVMValue :: HasCallStack
+mkFloatLLVMValue :: Loc.HasCallStack
                  => FnValue (BVType (FloatInfoBits flt))
                  -> FloatInfoRepr flt
                  -> BBLLVM (L.Typed L.Value)
@@ -616,7 +616,7 @@ mkFloatLLVMValue val frepr = do
   case L.typedType llvm_val of
     L.PrimType (L.FloatType tp) | tp == floatReprToLLVMFloatType frepr -> pure $ llvm_val
     L.PrimType (L.Integer _) -> bitcast llvm_val (floatReprToLLVMType frepr)
-    _ -> error $ "internal: mkFloatLLVMValue given unsupported type."
+    _ -> Loc.error $ "internal: mkFloatLLVMValue given unsupported type."
 
 -- | Handle an intrinsic overflows
 intrinsicOverflows' :: String -> FnValue tp -> FnValue tp -> FnValue (BVType 1) -> BBLLVM (L.Typed L.Value)
@@ -670,7 +670,7 @@ appToLLVM' app = do
       l_f <- mkLLVMValue f
       when (L.typedType l_t /= L.typedType l_f) $ do
         lbl <- gets $ fbLabel . bbBlock
-        error $ "Internal: At " ++ show lbl ++ " expected compatible types to mux:\n"
+        Loc.error $ "Internal: At " ++ show lbl ++ " expected compatible types to mux:\n"
            ++ "Type1: " ++ show (L.typedType l_t) ++ "Value: " ++ show (pretty t) ++ "\n"
            ++ "Type2: " ++ show (L.typedType l_f) ++ "Value: " ++ show (pretty f) ++ "\n"
 
@@ -721,7 +721,7 @@ appToLLVM' app = do
       n' <- mkLLVMValue n
       n_ext <-
         case compare (natValue (fnValueWidth v)) (natValue (fnValueWidth n)) of
-          LT -> error "BVTestBit expected second argument to be at least first"
+          LT -> Loc.error "BVTestBit expected second argument to be at least first"
           EQ -> pure n'
           GT -> zext n' in_typ
       mask <- shl (L.Typed in_typ (L.ValInteger 1)) (L.typedValue n_ext)
@@ -795,7 +795,7 @@ appToLLVM' app = do
           bitcast fp_z (natReprToLLVMType (floatInfoBits to_rep))
         EQ -> do
           when (isNothing (MapF.testEquality from_rep to_rep)) $ do
-            error $ "Incompatible floating point conversion "
+            Loc.error $ "Incompatible floating point conversion "
                     ++ show from_rep ++ " and " ++ show to_rep
           bitcast fp_x (natReprToLLVMType (floatInfoBits to_rep))
         GT -> do
@@ -940,13 +940,13 @@ termStmtToLLVM' tm =
            FnFunctionEntryValue dest_ftp addr
              | Just (sym, tp) <- Map.lookup addr addrFunMap -> do
                when (functionTypeToLLVM tp /= fun_ty) $ do
-                 error $ "Mismatch function type with " ++ show sym ++ "\n"
+                 Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
                    ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
                    ++ "Provided: " ++ show fun_ty
                when (ft /= dest_ftp) $ do
-                 error $ "Mismatch function type in call with " ++ show sym
+                 Loc.error $ "Mismatch function type in call with " ++ show sym
                when (tp /= dest_ftp) $ do
-                 error $ "Mismatch function type in call with " ++ show sym
+                 Loc.error $ "Mismatch function type in call with " ++ show sym
                return $ L.Typed fun_ty (L.ValSymbol sym)
            _ -> do
              dest' <- mkLLVMValue dest
@@ -955,7 +955,7 @@ termStmtToLLVM' tm =
        let evalArg :: Some X86Reg -> Some FnValue -> BBLLVM (L.Typed L.Value)
            evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
            evalArg (Some (X86_XMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
-           evalArg _ _ = error "Unsupported register arg"
+           evalArg _ _ = Loc.error "Unsupported register arg"
 
        args' <- zipWithM evalArg (ftArgRegs ft) args
 
@@ -1030,12 +1030,12 @@ resolvePhiNodeReg :: FunLLVMContext
                   -> (L.Value, L.BlockLabel)
 resolvePhiNodeReg ctx avmap m (lbl, reg) =
   case Map.lookup lbl m of
-    Nothing -> error $ "Could not resolve block " ++ show lbl
+    Nothing -> Loc.error $ "Could not resolve block " ++ show lbl
     Just br -> do
       let b = regBlock br
       case MapF.lookup reg (fbRegMap b) of
-        Nothing -> error $ "Could not resolve register " ++ show reg
-        Just (CalleeSaved _) -> error $ "Resolve callee saved register"
+        Nothing -> Loc.error $ "Could not resolve register " ++ show reg
+        Just (CalleeSaved _) -> Loc.error $ "Resolve callee saved register"
         Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx b avmap v), blockName lbl)
 
 resolvePhiStmt :: FunLLVMContext

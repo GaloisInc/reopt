@@ -39,7 +39,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Type.Equality
-import           GHC.Stack
+import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
@@ -214,7 +214,7 @@ valueDependencies = go Set.empty
 -- recoverValue
 
 -- | Recover a stack value
-recoverValue' :: HasCallStack => RecoverState ids -> Value X86_64 ids tp -> Either String (FnValue tp)
+recoverValue' :: Loc.HasCallStack => RecoverState ids -> Value X86_64 ids tp -> Either String (FnValue tp)
 recoverValue' s v = do
   let interpState = rsInterp s
   let mem = rsMemory s
@@ -244,7 +244,7 @@ recoverValue' s v = do
             | otherwise -> do
               Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
 
-    RelocatableValue{} -> error "Expected relocatable value to be covered by previous case."
+    RelocatableValue{} -> Loc.error "Expected relocatable value to be covered by previous case."
     BVValue w i ->
       Right $ FnConstantValue w i
 
@@ -263,17 +263,17 @@ recoverValue' s v = do
         Just (FnRegValue v') ->
           Right v'
 
-recoverValue :: HasCallStack => Value X86_64 ids tp -> Recover ids (FnValue tp)
+recoverValue :: Loc.HasCallStack => Value X86_64 ids tp -> Recover ids (FnValue tp)
 recoverValue v = do
   s <- get
   case recoverValue' s v of
-    Left msg -> error $ "Error at " ++ show (s^.rsCurLabel) ++ "\n" ++ msg
+    Left msg -> Loc.error $ "Error at " ++ show (s^.rsCurLabel) ++ "\n" ++ msg
     Right fnVal -> pure fnVal
 
 ------------------------------------------------------------------------
 -- recoverRegister
 
-recoverRegister :: HasCallStack
+recoverRegister :: Loc.HasCallStack
                 => RegState X86Reg (Value X86_64 ids)
                 -> X86Reg tp
                 -> Recover ids (FnValue tp)
@@ -282,7 +282,7 @@ recoverRegister proc_state r = do
   case recoverValue' s (proc_state ^. boundValue r) of
     Left msg -> do
       usedAssigns <- gets rsAssignmentsUsed
-      error $ "Unbound register " ++ show r ++ "\n"
+      Loc.error $ "Unbound register " ++ show r ++ "\n"
            ++ msg ++ "\n"
            ++ "Used: " ++ show usedAssigns
     Right fnVal -> pure fnVal
@@ -291,7 +291,7 @@ recoverRegister proc_state r = do
 -- recoverStmt
 
 -- | Add statements for the assignment
-recoverAssign :: HasCallStack => Assignment X86_64 ids tp -> Recover ids ()
+recoverAssign :: Loc.HasCallStack => Assignment X86_64 ids tp -> Recover ids ()
 recoverAssign asgn = do
   m_seen <- uses rsAssignMap (MapF.lookup (assignId asgn))
   case m_seen of
@@ -459,9 +459,9 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
   Fold.traverse_ recoverStmt (pblockStmts b)
   case pblockTerm b of
     ParsedTranslateError _ -> do
-      error "Cannot recover function in blocks where translation error occurs."
+      Loc.error "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure _ ->
-      error $ "Classification failed in Recovery"
+      Loc.error $ "Classification failed in Recovery"
     ParsedBranch c x y -> do
       cv <- recoverValue c
       fb <- mkBlock (FnBranch cv (lbl { labelIndex = x }) (lbl { labelIndex = y })) MapF.empty
@@ -547,7 +547,7 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
       -- pull the return variables out of initMap (in order of rregs)
       let getVar :: Maybe (FnRegValue tp) -> FnReturnVar tp
           getVar (Just (FnRegValue (FnReturn rv))) = rv
-          getVar _ = error "impossible"
+          getVar _ = Loc.error "impossible"
 
       let rets :: [Some FnReturnVar]
           rets = map f rregs
@@ -622,7 +622,7 @@ allocateStackFrame lbl sd
         let doOneDelta :: StackDepthOffset X86_64 ids
                        -> Recover ids (FnValue (BVType 64))
                        -> Recover ids (FnValue (BVType 64))
-            doOneDelta (Pos _) _   = error "Saw positive stack delta"
+            doOneDelta (Pos _) _   = Loc.error "Saw positive stack delta"
             doOneDelta (Neg x) m_v = do
               v0 <- m_v
               v  <- recoverValue x
