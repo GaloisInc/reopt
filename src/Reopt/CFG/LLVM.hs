@@ -48,7 +48,7 @@ import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
 import           Reopt.Machine.X86State
-import           Reopt.Semantics.Monad (repValSizeByteCount)
+import           Reopt.Semantics.Monad (RepValSize(..), repValSizeByteCount)
 
 import qualified GHC.Err.Located as Loc
 
@@ -127,9 +127,12 @@ iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
 iMemCmp :: Intrinsic
 iMemCmp = intrinsic' "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1] [L.Readonly]
 
-iFirstOffsetOf :: Integer -> Intrinsic
-iFirstOffsetOf sz =
-  intrinsic' ("reopt.FirstOffsetOf.i" ++ show sz) (L.iT 64) [L.iT (fromInteger sz), L.iT 64, L.iT 64] [L.Readonly]
+{-
+iRepnzScas :: Integer -> Intrinsic
+iRepnzScas sz =
+    intrinsic' ("reopt_repnz_scas_" ++ show sz) (L.iT 64) [w, L.PtrTo w, L.iT 64] [L.Readonly]
+  where w = L.iT (fromInteger sz)
+-}
 
 iSystemCall :: String -> Intrinsic
 iSystemCall pname
@@ -156,8 +159,7 @@ reoptIntrinsics = [ iEvenParity
                   ]
                   ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
                   ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
-                  ++ [ iFirstOffsetOf n | n <- [8, 16, 32, 64] ]
-
+--                  ++ [ iRepnzScas n | n <- [8, 16, 32, 64] ]
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -835,11 +837,28 @@ rhsToLLVM' rhs =
      v' <- mkLLVMValue v
      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
      convop L.PtrToInt alloc_ptr (L.iT 64)
-   FnFirstOffsetOf sz val buf cnt -> do
+   FnRepnzScas sz val buf cnt -> do
      llvm_val <- mkLLVMValue val
+     -- Make value for buffer
      llvm_buf <- mkLLVMValue buf
+     let bit_count = 8 * repValSizeByteCount sz
+     let w = L.iT (fromInteger bit_count)
+     llvm_ptr <- convop L.IntToPtr llvm_buf (L.PtrTo w)
+     -- Get count
      llvm_cnt <- mkLLVMValue cnt
-     call (iFirstOffsetOf (8 * repValSizeByteCount sz)) [llvm_val, llvm_buf, llvm_cnt]
+     let reg = case sz of
+                 ByteRepVal -> "%al"
+                 WordRepVal -> "%ax"
+                 DWordRepVal -> "%eax"
+                 QWordRepVal -> "%rax"
+     let i = "repnz scas %es:(%rdi)," ++ reg
+     let c = "={cx},={di},{ax},{cx},1,~{dirflag},~{fpsr},~{flags}"
+     let f :: L.Value
+         f = L.ValAsm False False i c
+     let res_tp = L.Struct [L.iT 64, L.PtrTo w]
+     let f_tp = L.ptrT $ L.FunTy res_tp [w, L.iT 64, L.PtrTo w] False
+     res <- call (L.Typed f_tp f) [llvm_val, llvm_cnt, llvm_ptr]
+     extractValue res 0
 
 stmtToLLVM' :: FnStmt -> BBLLVM ()
 stmtToLLVM' stmt = do

@@ -1056,30 +1056,25 @@ exec_scas _repz_pfx repnz_pfx rep = do
   --  Get the starting address for the comparsions
   v_rdi <- get rdi
   -- Get maximum number of times to execute instruction
-  count <- get (regLocation n64 N.rcx)
+  count <- get rcx
   unless_ (count .=. bvKLit 0) $ do
 
+    count' <- rep_scas repnz_pfx df rep v_rax v_rdi count
 
-    -- Get number of bytes in value we are checking with (used to determine how much to compare)
-    let sz = loc_width val_loc
     -- Get number of bytes each comparison will use
-    let bytesPerOp = natValue sz `div` 8
-
-
-    nseen <- find_element rep repnz_pfx count v_rdi v_rax df
-
-    let nwordsSeen = mux (nseen .=. count) count (count `bvSub` (nseen `bvAdd` bvKLit 1))
+    let bytesPerOp = natValue (loc_width val_loc) `div` 8
+    -- Get multiple of each element (negated for direction flag
     let bytePerOpLit = mux df (bvKLit (negate bytesPerOp)) (bvKLit bytesPerOp)
 
     -- Count the number of bytes seen.
-    let nbytesSeen    = nwordsSeen `bvMul` bytePerOpLit
+    let nBytesSeen    = (count `bvSub` count') `bvMul` bytePerOpLit
 
-    let lastWordBytes = nbytesSeen `bvSub` bytePerOpLit
+    let lastWordBytes = nBytesSeen `bvSub` bytePerOpLit
 
-    exec_cmp (mkBVAddr sz (v_rdi `bvAdd` lastWordBytes)) v_rax
+    exec_cmp (mkBVAddr (loc_width val_loc) (v_rdi `bvAdd` lastWordBytes)) v_rax
 
-    rdi .= v_rdi `bvAdd` nbytesSeen
-    rcx .= (count .- nwordsSeen)
+    rdi .= v_rdi `bvAdd` nBytesSeen
+    rcx .= count'
 
 -- LODS/LODSB Load string/Load byte string
 -- LODS/LODSW Load string/Load word string

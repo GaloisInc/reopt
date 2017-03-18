@@ -1000,17 +1000,17 @@ instance S.Semantics (X86Generator st_s ids) where
     df_v    <- eval df
     addStmt $ ExecArchStmt $ MemSet count_v val_v dest_v df_v
 
-  find_element sz True count buf val is_reverse = do
-    count_v <- eval count
-    buf_v   <- eval buf
+  rep_scas True is_reverse sz val buf count = do
     val_v   <- eval val
+    buf_v   <- eval buf
+    count_v <- eval count
     is_reverse_v <- eval is_reverse
     case is_reverse_v of
       BVValue _ 0 -> do
-        ValueExpr . AssignedValue <$> addArchFn (FirstOffsetOf sz val_v buf_v count_v)
+        ValueExpr . AssignedValue <$> addArchFn (RepnzScas sz val_v buf_v count_v)
       _ -> do
-        fail $ "Unsupported find_element value " ++ show is_reverse_v
-  find_element _s False _count _buf _val _is_reverse = do
+        fail $ "Unsupported rep_scas value " ++ show is_reverse_v
+  rep_scas False _is_reverse _sz _val _buf _count = do
     fail $ "Semantics only currently supports finding elements."
 
   primitive S.Syscall = do
@@ -1237,7 +1237,7 @@ transferAbsValue r f =
       | Just upper <- hasMaximum knownType (transferValue r cnt) ->
           stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
       | otherwise -> TopV
-    FirstOffsetOf _sz _val _buf cnt
+    RepnzScas _sz _val _buf cnt
       | Just upper <- hasMaximum knownType (transferValue r cnt) ->
           stridedInterval $ SI.mkStridedInterval knownNat False 0 upper 1
       | otherwise -> TopV

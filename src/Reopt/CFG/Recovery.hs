@@ -309,11 +309,11 @@ recoverAssign asgn = do
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr tp)
-          EvalArchFn (FirstOffsetOf sz val buf cnt) _ -> do
+          EvalArchFn (RepnzScas sz val buf cnt) _ -> do
             fn_val <- recoverValue val
             fn_buf <- recoverValue buf
             fn_cnt <- recoverValue cnt
-            pure (FnFirstOffsetOf sz fn_val fn_buf fn_cnt)
+            pure (FnRepnzScas sz fn_val fn_buf fn_cnt)
           EvalArchFn _ (BVTypeRepr w) -> do
             trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
               pure (FnSetUndefined w)

@@ -208,13 +208,14 @@ data X86PrimFn ids tp
      -- ^ Compares to memory regions
    | forall n
      . (tp ~ BVType 64)
-     => FirstOffsetOf !(RepValSize n)
-                      !(BVValue X86_64 ids n)
-                      !(BVValue X86_64 ids 64)
-                      !(BVValue X86_64 ids 64)
-     -- ^ `FirstOffsetOf sz val base cnt` returns the index of the first element
-     -- `i` such that base[i] = val.  It returns cnt if no such element exists
-     -- and will generate a memory fault if it attempts to reach invalid memory.
+     => RepnzScas !(RepValSize n)
+                  !(BVValue X86_64 ids n)
+                  !(BVValue X86_64 ids 64)
+                  !(BVValue X86_64 ids 64)
+     -- ^ `RepnzScas sz val base cnt` searchs through a buffer starting at
+     -- `base` to find  an element `i` such that base[i] = val.
+     -- Each step it increments `i` by 1 and decrements `cnt` by `1`.  It returns
+     -- the final value of `cnt`.
 
 instance HasRepr (X86PrimFn ids) TypeRepr where
   typeRepr f =
@@ -227,7 +228,7 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       XGetBV{}      -> knownType
       PShufb w _ _  -> BVTypeRepr (simdWidthNatRepr w)
       MemCmp{}      -> knownType
-      FirstOffsetOf{} -> knownType
+      RepnzScas{} -> knownType
 
 instance PrettyArch X86_64 where
   ppArchFn = ppX86PrimFn
@@ -251,7 +252,7 @@ ppX86PrimFn pp f =
     PShufb _ x s -> sexprA "pshufb" [ pp x, pp s ]
     MemCmp sz cnt src dest rev -> sexprA "memcmp" args
       where args = [pure (pretty sz), pp cnt, pp dest, pp src, pp rev]
-    FirstOffsetOf _ val buf cnt  -> sexprA "first_byte_offset" args
+    RepnzScas _ val buf cnt  -> sexprA "first_byte_offset" args
       where args = [pp val, pp buf, pp cnt]
 
 ------------------------------------------------------------------------
@@ -610,7 +611,7 @@ refsInX86PrimFn f =
                  , refsInValue dest
                  , refsInValue dir
                  ]
-    FirstOffsetOf _ val buf cnt ->
+    RepnzScas _ val buf cnt ->
       Set.unions [ refsInValue val
                  , refsInValue buf
                  , refsInValue cnt
@@ -716,7 +717,7 @@ instance CanFoldValues X86_64 where
       PShufb _ x y -> mconcat [ go x, go y ]
       MemCmp _sz cnt src dest rev ->
         mconcat [ go cnt, go src, go dest, go rev ]
-      FirstOffsetOf _sz val buf cnt ->
+      RepnzScas _sz val buf cnt ->
         mconcat [ go val, go buf, go cnt ]
 
 ------------------------------------------------------------------------

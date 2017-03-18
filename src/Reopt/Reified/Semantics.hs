@@ -480,7 +480,7 @@ instance S.Semantics Semantics where
 
   memset v1 v2 v3 v4 = tell [MemSet v1 v2 v3 v4]
 
-  find_element _ = error "find_element is not yet implemented."
+  rep_scas _ = error "rep_scas is not yet implemented."
 
   memcmp r v1 v2 v3 v4 = do
     var <- freshVar "memcmp" S.knownType

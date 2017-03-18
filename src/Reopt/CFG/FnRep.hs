@@ -160,12 +160,12 @@ data FnAssignRhs (tp :: Type) where
             -> FnAssignRhs tp
   FnAlloca :: !(FnValue (BVType 64))
            -> FnAssignRhs (BVType 64)
-  -- Return first offset at a given location
-  FnFirstOffsetOf :: !(RepValSize n)
-                  -> !(FnValue (BVType n))
-                  -> !(FnValue (BVType 64))
-                  -> !(FnValue (BVType 64))
-                  -> FnAssignRhs (BVType 64)
+  -- See `RepnzScas` in `Reopt.Machine.X86State`
+  FnRepnzScas :: !(RepValSize n)
+              -> !(FnValue (BVType n))
+              -> !(FnValue (BVType 64))
+              -> !(FnValue (BVType 64))
+              -> FnAssignRhs (BVType 64)
 
 ppFnAssignRhs :: (forall u . FnValue u -> Doc)
               -> FnAssignRhs tp
@@ -174,7 +174,7 @@ ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w
 ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
 ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
 ppFnAssignRhs pp (FnAlloca sz) = sexpr "alloca" [pp sz]
-ppFnAssignRhs pp (FnFirstOffsetOf _ val base off) = sexpr "first_offset_of" [pp val, pp base, pp off]
+ppFnAssignRhs pp (FnRepnzScas _ val base off) = sexpr "first_offset_of" [pp val, pp base, pp off]
 
 instance Pretty (FnAssignRhs tp) where
   pretty = ppFnAssignRhs pretty
@@ -186,7 +186,7 @@ fnAssignRHSType rhs =
     FnReadMem _ tp -> tp
     FnEvalApp a    -> appType a
     FnAlloca _ -> knownType
-    FnFirstOffsetOf{} -> knownType
+    FnRepnzScas{} -> knownType
 
 class FoldFnValue a where
   foldFnValue :: (forall u . s -> FnValue u -> s) -> s -> a -> s
@@ -196,7 +196,7 @@ instance FoldFnValue (FnAssignRhs tp) where
   foldFnValue f s (FnReadMem loc _)   = f s loc
   foldFnValue f s (FnEvalApp a)       = foldAppl f s a
   foldFnValue f s (FnAlloca sz)       = s `f` sz
-  foldFnValue f s (FnFirstOffsetOf _ val buf cnt) = s `f` val `f` buf `f` cnt
+  foldFnValue f s (FnRepnzScas _ val buf cnt) = s `f` val `f` buf `f` cnt
 
 -- tp <- {BVType 64, BVType 128}
 data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
