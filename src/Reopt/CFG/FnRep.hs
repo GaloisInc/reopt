@@ -300,8 +300,7 @@ data PhiBinding tp
 -- | A block in the function
 data FnBlock
    = FnBlock { fbLabel :: !(BlockLabel 64)
-               -- Maps predecessor label onto the reg value at that
-               -- block
+               -- | List of function bindings.
              , fbPhiNodes  :: ![Some PhiBinding]
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)

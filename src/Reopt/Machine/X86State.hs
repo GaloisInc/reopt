@@ -258,7 +258,9 @@ ppX86PrimFn pp f =
 ------------------------------------------------------------------------
 -- X86Stmt
 
--- | An X86 specific statement
+-- | An X86 specific statement.
+--
+-- Each of these functions
 data X86Stmt ids
    = forall tp .
      WriteLoc !(X86PrimLoc tp) !(Value X86_64 ids tp)

@@ -776,7 +776,8 @@ appToLLVM' app = do
       -- This code calls takes the disjunction of the value with itself to update flags,
       -- then pushes 16-bit flags register to the stack, then pops it to a register.
       let asm_code = "orb $1, $1\0Apushfw\0Apopw $0\0A"
-      let asm_args = "=r,r,~{flags}"
+      let asm_args = "=r,r"
+--      let asm_args = "=r,r,~{dirflag},~{fpsr},~{flags}"
       let arg_types = [L.iT 8]
       let res_type = L.iT 16
       -- Call function
