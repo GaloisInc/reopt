@@ -55,6 +55,8 @@ import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
 import           Reopt.Machine.X86State
 
+import Debug.Trace
+
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -229,8 +231,7 @@ recoverValue' s v = do
             , Just ft <- Map.lookup addr (rsFunctionArgs s) -> do
                 Right $! FnFunctionEntryValue ft addr
 
-          _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-            , Map.member addr (interpState^.parsedBlocks) -> do
+          _ | Map.member addr (interpState^.parsedBlocks) -> do
               Right $! FnBlockValue addr
 
 
@@ -307,8 +308,13 @@ recoverAssign asgn = do
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr tp)
+          EvalArchFn (RepnzScas sz val buf cnt) _ -> do
+            fn_val <- recoverValue val
+            fn_buf <- recoverValue buf
+            fn_cnt <- recoverValue cnt
+            pure (FnRepnzScas sz fn_val fn_buf fn_cnt)
           EvalArchFn _ (BVTypeRepr w) -> do
-            debug DFunRecover ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
+            trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
               pure (FnSetUndefined w)
       void $ emitAssign (assignId asgn) rhs
 
@@ -356,7 +362,7 @@ recoverStmt s = do
                        <*> recoverValue ptr
                        <*> recoverValue df
       addFnStmt stmt
-    _ -> debug DFunRecover ("recoverStmt undefined for " ++ show (pretty s)) $ do
+    _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
       return ()
 
@@ -526,8 +532,8 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
 
 
       let args
-            | Just this_call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
-            , Just (_,_,argtypes) <- Map.lookup (fromIntegral this_call_no) (spTypeInfo sysp) =
+            | BVValue _ this_call_no <- proc_state^.boundValue syscall_num_reg
+            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
               take (length argtypes) syscallRegs
             | otherwise =
               syscallRegs
@@ -653,12 +659,12 @@ recoverFunction :: SyscallPersonality X86_64
                 -> AddrToFunctionTypeMap
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
-                -> SegmentedAddr 64
                 -> Either String Function
-recoverFunction sysp fArgs mem s a = do
-  let (usedAssigns, blockRegs, blockRegProvides, blockPreds)
-        = registerUse sysp fArgs mem s a
-
+recoverFunction sysp fArgs mem fInfo = do
+  let a = discoveredFunAddr fInfo
+  let blockPreds = funBlockPreds fInfo
+  let (usedAssigns, blockRegs, blockRegProvides)
+        = registerUse sysp fArgs mem fInfo blockPreds
   let lbl = GeneratedBlock a 0
 
   let cft = fromMaybe
@@ -669,15 +675,13 @@ recoverFunction sysp fArgs mem s a = do
   let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)
 
   let initRegs = MapF.empty
-               & flip (ifoldr insReg)     (ftArgRegs cft)
+               & flip (ifoldr insReg)        (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
-                 -- FIXME: We may want to check this at function calls and returns to ensure
-                 -- ABI is correctly respected.
                & MapF.insert df_reg (FnRegValue (FnConstantValue n1 0))
 
   let rs = RS { rsMemory        = mem
-              , rsInterp = s
+              , rsInterp = fInfo
               , _rsNextAssignId = FnAssignId 0
               , _rsCurLabel  = lbl
               , _rsCurStmts  = Seq.empty
@@ -694,7 +698,7 @@ recoverFunction sysp fArgs mem s a = do
                         -> Recover ids RecoveredBlockInfo
       recoverInnerBlock blockInfo lbl' = do
         let regs0 :: [Some X86Reg]
-            regs0 = case Map.lookup lbl' blockRegs of
+            regs0 = case Map.lookup (labelAddr lbl') blockRegs of
                       Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show (pretty lbl')) []
                       Just x  -> Set.toList x
         let mkIdFromReg :: MapF X86Reg FnPhiVar
@@ -702,8 +706,7 @@ recoverFunction sysp fArgs mem s a = do
                         -> Recover ids (MapF X86Reg FnPhiVar)
             mkIdFromReg m (Some r) = do
                 next_id <- freshId
-                let phi_var = FnPhiVar next_id (typeRepr r)
-                pure $! MapF.insert r phi_var m
+                pure $! MapF.insert r (FnPhiVar next_id (typeRepr r)) m
 
         regs1 <- foldM mkIdFromReg MapF.empty regs0
 
@@ -723,7 +726,7 @@ recoverFunction sysp fArgs mem s a = do
     -- Make the alloca and init rsp.  This is the only reason we
     -- need rsCurStmts
 
-    case maximumStackDepth s a of
+    case maximumStackDepth fInfo a of
       Right depths -> do
         allocateStackFrame lbl depths
       Left msg -> throwError $ "maximumStackDepth: " ++ msg

@@ -48,6 +48,7 @@ import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
 import           Reopt.Machine.X86State
+import           Reopt.Semantics.Monad (RepValSize(..), repValSizeByteCount)
 
 import qualified GHC.Err.Located as Loc
 
@@ -89,9 +90,6 @@ intrinsic' name res args attrs = Intrinsic { intrinsicName = L.Symbol name
 ------------------------------------------------------------------------
 -- libreopt funtions
 
-iEvenParity :: Intrinsic
-iEvenParity = intrinsic' "reopt.EvenParity" (L.iT 1) [L.iT 8] [L.Readnone, L.Nounwind]
-
 iRead_X87_RC :: Intrinsic
 iRead_X87_RC = intrinsic' "reopt.Read_X87_RC" (L.iT 2) [] [L.Readonly]
 
@@ -124,8 +122,16 @@ iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
   where args = [L.ptrT typ, typ, L.iT 64, L.iT 1]
 
 iMemCmp :: Intrinsic
-iMemCmp = intrinsic "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1]
+iMemCmp = intrinsic' "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1] [L.Readonly]
 
+{-
+iRepnzScas :: Integer -> Intrinsic
+iRepnzScas sz =
+    intrinsic' ("reopt_repnz_scas_" ++ show sz) (L.iT 64) [w, L.PtrTo w, L.iT 64] [L.Readonly]
+  where w = L.iT (fromInteger sz)
+-}
+
+{-
 iSystemCall :: String -> Intrinsic
 iSystemCall pname
      | null pname = Loc.error "empty string given to iSystemCall"
@@ -134,10 +140,10 @@ iSystemCall pname
     -- the +1 is for the additional syscall no. register, which is
     -- passed via the stack.
     argTypes = replicate (length x86SyscallArgumentRegs + 1) (L.iT 64)
+-}
 
 reoptIntrinsics :: [Intrinsic]
-reoptIntrinsics = [ iEvenParity
-                  , iRead_X87_RC
+reoptIntrinsics = [ iRead_X87_RC
                   , iWrite_X87_RC
                   , iRead_X87_PC
                   , iWrite_X87_PC
@@ -146,12 +152,11 @@ reoptIntrinsics = [ iEvenParity
                   , iRead_GS
                   , iWrite_GS
                   , iMemCmp
-                  , iSystemCall "Linux"
-                  , iSystemCall "FreeBSD"
+--                  , iSystemCall "Linux"
+--                  , iSystemCall "FreeBSD"
                   ]
                   ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
                   ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
-
 
 --------------------------------------------------------------------------------
 -- LLVM intrinsics
@@ -641,6 +646,34 @@ intrinsicOverflows' bop x y c = do
   overflows' <- extractValue r_tuple' 1
   bor overflows (L.typedValue overflows')
 
+data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
+
+defaultAsm :: AsmAttrs
+defaultAsm = AsmAttrs { asmSideeffect = False }
+
+sideeffect :: AsmAttrs
+sideeffect = AsmAttrs { asmSideeffect = True }
+
+asmFunction :: AsmAttrs -- ^ Asm attrs
+            -> L.Type   -- ^ Return type
+            -> [L.Type] -- ^ Argument types
+            -> String   -- ^ Code
+            -> String   -- ^ Args code
+            -> L.Typed L.Value
+asmFunction attrs res_type arg_types asm_code asm_args =
+  L.Typed { L.typedType  = L.PtrTo (L.FunTy res_type arg_types False)
+          , L.typedValue = L.ValAsm (asmSideeffect attrs) False asm_code asm_args
+          }
+
+
+linuxSystemCall :: L.Typed L.Value
+linuxSystemCall =
+  asmFunction sideeffect
+              (L.iT 64)
+              (replicate 7 (L.iT 64))
+              "syscall"
+              "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rdi},~{rsi},~{rdx},~{rcx},~{r8},~{r9},~{rcx},~{r11}"
+
 appToLLVM' :: App FnValue tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
   let typ = typeToLLVMType $ appType app
@@ -740,7 +773,20 @@ appToLLVM' app = do
     BVEq x y      -> binop (icmpop L.Ieq) x y
     EvenParity v  -> do
       v' <- mkLLVMValue v
-      call iEvenParity [v']
+      -- This code calls takes the disjunction of the value with itself to update flags,
+      -- then pushes 16-bit flags register to the stack, then pops it to a register.
+      let asm_code = "orb $1, $1\0Apushfw\0Apopw $0\0A"
+      let asm_args = "=r,r"
+--      let asm_args = "=r,r,~{dirflag},~{fpsr},~{flags}"
+      let arg_types = [L.iT 8]
+      let res_type = L.iT 16
+      -- Call function
+      res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v']
+      -- Check parity flag
+      parity_val <- band res (L.ValInteger 4)
+      -- Check result is nonzero
+      icmpop L.Ine parity_val (L.ValInteger 0)
+
     ReverseBytes{} -> unimplementedInstr' typ "ReverseBytes"
     -- FIXME: do something more efficient?
     -- Basically does let (r, over)  = llvm.add.with.overflow(x,y)
@@ -829,19 +875,28 @@ rhsToLLVM' rhs =
      v' <- mkLLVMValue v
      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
      convop L.PtrToInt alloc_ptr (L.iT 64)
-   --     FS     -> L.call iRead_FS []
-   --     GS     -> L.call iRead_GS []
-   --     X87_PC -> L.call iRead_X87_PC []
-   --     X87_RC -> L.call iRead_X87_RC []
-   --     _      -> unimplementedInstr
-   -- -- there doesn't seem to be a llvm.memcmp.* intrinsic
-   -- MemCmp bytesPerCopy nValues src dest direction -> do
-   --   nValues'   <- valueToLLVM nValues
-   --   src'       <- valueToLLVM src
-   --   dest'      <- valueToLLVM dest
-   --   direction' <- valueToLLVM direction
-   --   L.call iMemCmp [ L.iT 64 L.-: L.integer bytesPerCopy
-   --                  , nValues', src', dest', direction' ]
+   FnRepnzScas sz val buf cnt -> do
+     llvm_val <- mkLLVMValue val
+     -- Make value for buffer
+     llvm_buf <- mkLLVMValue buf
+     let bit_count = 8 * repValSizeByteCount sz
+     let w = L.iT (fromInteger bit_count)
+     llvm_ptr <- convop L.IntToPtr llvm_buf (L.PtrTo w)
+     -- Get count
+     llvm_cnt <- mkLLVMValue cnt
+     let reg = case sz of
+                 ByteRepVal  -> "%al"
+                 WordRepVal  -> "%ax"
+                 DWordRepVal -> "%eax"
+                 QWordRepVal -> "%rax"
+     let asm_code = "repnz scas %es:(%rdi)," ++ reg
+     let asm_args = "={cx},={di},{ax},{cx},1,~{flags}"
+     let arg_types = [w, L.iT 64, L.PtrTo w]
+     let res_type  = L.Struct [L.iT 64, L.PtrTo w]
+     -- Call asm
+     res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [llvm_val, llvm_cnt, llvm_ptr]
+     -- Get first result
+     extractValue res 0
 
 stmtToLLVM' :: FnStmt -> BBLLVM ()
 stmtToLLVM' stmt = do
@@ -986,18 +1041,19 @@ termStmtToLLVM' tm =
      FnSystemCall call_num args rets next_lbl -> do
        pname <- gets $ funSyscallIntrinsicPostfix . funContext
        llvm_call_num <- mkLLVMValue call_num
-       args'  <- mapM mkLLVMValue args
-       -- We put the call no at the end (on the stack) so we don't need to shuffle all the args.
-       let allArgs = padUndef (L.iT 64) (length x86SyscallArgumentRegs) args' ++ [ llvm_call_num ]
-       rvar <- call (iSystemCall pname) allArgs
-       -- Assign all return variables to the extracted result
-       let assignReturnVar :: Int -> Some FnReturnVar -> BBLLVM ()
-           assignReturnVar i (Some fr) = do
-             lbl <- gets $ fbLabel . bbBlock
-             val <- extractValue rvar (fromIntegral i)
-             setAssignIdValue (frAssignId fr) lbl val
-       itraverse_ assignReturnVar rets
-       jump (blockName next_lbl)
+       llvm_args  <- mapM mkLLVMValue args
+       case pname of
+         "Linux" -> do
+           let allArgs = llvm_call_num : padUndef (L.iT 64) 6 llvm_args
+           rvar <- call linuxSystemCall allArgs
+           case rets of
+             [Some fr] -> do
+               -- Assign all return variables to the extracted result
+                 lbl <- gets $ fbLabel . bbBlock
+                 setAssignIdValue (frAssignId fr) lbl rvar
+                 jump (blockName next_lbl)
+             _ -> error "Unexpected return values"
+         _ -> error "Unsupported operating system"
 
      FnLookupTable idx vec -> do
        idx' <- mkLLVMValue idx

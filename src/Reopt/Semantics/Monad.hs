@@ -32,6 +32,8 @@ module Reopt.Semantics.Monad
   , TypeRepr(..)
   , type_width
   , KnownType(..)
+  , RepValSize(..)
+  , repValSizeByteCount
   , FloatInfo(..)
   , FloatInfoRepr(..)
   , FloatInfoBits
@@ -1238,6 +1240,24 @@ data SIMDWidth w
    | (w ~ 256) => SIMD_256
 
 ------------------------------------------------------------------------
+-- RepValSize
+
+-- | Rep value
+data RepValSize w
+   = (w ~  8) => ByteRepVal
+   | (w ~ 16) => WordRepVal
+   | (w ~ 32) => DWordRepVal
+   | (w ~ 64) => QWordRepVal
+
+repValSizeByteCount :: RepValSize w -> Integer
+repValSizeByteCount v =
+  case v of
+    ByteRepVal  -> 1
+    WordRepVal  -> 2
+    DWordRepVal -> 4
+    QWordRepVal -> 8
+
+------------------------------------------------------------------------
 -- Semantics
 
 -- | The Semantics Monad defines all the operations needed for the x86
@@ -1365,25 +1385,30 @@ class ( Applicative m
             -- ^ Direction flag
             -> m ()
 
-  -- | Compare the contents of a memory region against a value.  Returns the number of elements which are
-  -- identical (resp. different).  If the direction is 0 then it is
-  -- increasing, otherwise decreasing.
-  find_element :: (1 <= n) =>
-                  Integer
-                  -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
-                  -> Bool
-                  -- ^ Find first matching (True) or not matching (False)
-                  -> Value m (BVType 64)
-                  -- ^ Number of elementes to compare
-                  -> Value m (BVType 64)
-                  -- ^ Pointer to first buffer
-                  -> Value m (BVType n)
-                  -- ^ Value to compare
-                  -> Value m BoolType
-                  -- ^ Flag indicates direction of copy:
-                  -- True means we should decrement buffer pointers after each copy.
-                  -- False means we should increment the buffer pointers after each copy.
-                  -> m (Value m (BVType 64))
+  -- | This will compare a value against the contents of a memory region for equality and/or
+  -- inequality.
+  --
+  -- It accepts the value to compare, a pointer to the start of the region, and
+  -- the maximum number of elements to compare, which is decremented after each comparison.
+  -- It returns the value of the count after it has succeeded, or zero if we reached the
+  -- end without finding a value.   A return value of zero is thus ambiguous on whether
+  -- the value was found in the last iteration, or whether the value was never found.
+  rep_scas :: Bool
+              -- ^ Find first matching (True) or not matching (False)
+           -> Value m BoolType
+              -- ^ Flag indicates direction of search
+              -- True means we should decrement buffer pointers after each copy.
+              -- False means we should increment the buffer pointers after each copy.
+           -> RepValSize w
+              -- ^ Number of bytes to compare at a time {1, 2, 4, 8}
+           -> Value m (BVType w)
+              -- ^ Value to compare
+           -> Value m (BVType 64)
+              -- ^ Pointer to first buffer
+           -> Value m (BVType 64)
+              -- ^ Maximum number of elementes to compare
+           -> m (Value m (BVType 64))
+
 
   -- | execute a primitive instruction.
   primitive :: Primitive -> m ()

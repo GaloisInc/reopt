@@ -15,6 +15,7 @@ module Reopt.CFG.FunctionArgs
   , inferFunctionTypeFromDemands
   , functionArgs
   , debugPrintMap
+  , stmtDemandedValues
   ) where
 
 import           Control.Lens
@@ -425,17 +426,20 @@ summarizeCall mem lbl proc_state isTailCall = do
       let argRegs = [Some ip_reg] ++ functionArgRegs (Proxy :: Proxy arch)
       recordBlockDemand lbl proc_state (\_ -> DemandAlways) argRegs
 
-
-demandStmtValues :: (OrdF (ArchReg arch), CanDemandValues arch, CanFoldValues arch)
-       => ArchLabel arch
-       -> Stmt arch ids
-       -> FunctionArgsM arch ids ()
-demandStmtValues lbl (WriteMem addr v) = do
-  demandValue lbl addr
-  demandValue lbl v
-demandStmtValues lbl (ExecArchStmt stmt) =
-  mapM_ (\(Some v) -> demandValue lbl v) (demandedArchStmtValues stmt)
-demandStmtValues _ _ = return ()
+-- | Return values that must be evaluated to execute side effects.
+stmtDemandedValues :: CanDemandValues arch
+                   => Stmt arch ids
+                   -> [Some (Value arch ids)]
+stmtDemandedValues stmt =
+  case stmt of
+    -- Assignment statements are side effect free so we ignore them.
+    AssignStmt{} -> []
+    WriteMem addr v -> [Some addr, Some v]
+    -- Place holder statements are unknwon
+    PlaceHolderStmt _ _ -> []
+    -- Comment statements have no specific value.
+    Comment _ -> []
+    ExecArchStmt astmt -> demandedArchStmtValues astmt
 
 type SummarizeConstraints arch ids
   = ( CanDemandValues arch
@@ -477,7 +481,8 @@ summarizeBlock mem interp_state reg idx = do
                  ++ Set.toList (calleeSavedRegs (Proxy :: Proxy arch))
   let recordCallPropagation proc_state =
         recordBlockTransfer lbl proc_state callRegs
-  traverse_ (demandStmtValues lbl) (pblockStmts b)
+  mapM_ (\(Some v) -> demandValue lbl v)
+        (concatMap stmtDemandedValues (pblockStmts b))
   case pblockTerm b of
     ParsedTranslateError _ ->
       error "Cannot identify arguments in code where translation error occurs"
@@ -511,7 +516,7 @@ summarizeBlock mem interp_state reg idx = do
       do let syscallRegs :: [ArchReg arch (BVType (ArchAddrWidth arch))]
              syscallRegs = syscallArgumentRegs
          let argRegs
-               | Just call_no <- tryGetStaticSyscallNo interp_state (labelAddr lbl) proc_state
+               | BVValue _ call_no <- proc_state^.boundValue syscall_num_reg
                , Just (_,_,argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
                    take (length argtypes) syscallRegs
                | otherwise =
@@ -707,9 +712,9 @@ instance CanDemandValues X86_64 where
 
   demandedArchStmtValues stmt =
     case stmt of
+      WriteLoc _ v -> [ Some v]
       MemCopy _sz cnt src dest rev -> [ Some cnt, Some src, Some dest, Some rev ]
       MemSet cnt v ptr df -> [ Some cnt, Some v, Some ptr, Some df ]
-      _ -> []
 
 inferFunctionTypeFromDemands :: Map (SegmentedAddr 64) (DemandSet X86Reg)
                              -> Map (SegmentedAddr 64) FunctionType

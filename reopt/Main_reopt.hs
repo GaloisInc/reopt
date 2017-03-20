@@ -685,7 +685,7 @@ getFns sysp symMap excludedNames s = do
         pure Nothing
       Just finfo
         | checkFunction finfo entry -> do
-            case recoverFunction sysp fArgs mem finfo entry of
+            case recoverFunction sysp fArgs mem finfo of
               Left msg -> do
                 hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
                 pure Nothing

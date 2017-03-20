@@ -71,14 +71,13 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
-import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import qualified Reopt.Machine.StateNames as N
-import           Reopt.Semantics.Monad (SIMDWidth(..))
+import           Reopt.Semantics.Monad (SIMDWidth(..), RepValSize(..))
 
 
 -- | An address of a code location.
@@ -208,21 +207,15 @@ data X86PrimFn ids tp
                -- /\ Direction flag, False means increasing
      -- ^ Compares to memory regions
    | forall n
-     . (tp ~ BVType 64, 1 <= n)
-     => FindElement !Integer
-                    -- /\ Number of bytes to compare at a time {1, 2, 4, 8}
-                    !Bool
-                    -- /\ Find first matching (True) or not matching (False)
-                    !(BVValue X86_64 ids 64)
-                    -- /\Number of elements to compare
-                    !(BVValue X86_64 ids 64)
-                    -- /\ Pointer to first buffer
-                    !(BVValue X86_64 ids n)
-                    -- /\ Value to compare
-                    !(BVValue X86_64 ids 1)
-                    -- /\ Flag indicates direction of copy:
-                    -- True means we should decrement buffer pointers after each copy.
-                    -- False means we should increment the buffer pointers after each copy.
+     . (tp ~ BVType 64)
+     => RepnzScas !(RepValSize n)
+                  !(BVValue X86_64 ids n)
+                  !(BVValue X86_64 ids 64)
+                  !(BVValue X86_64 ids 64)
+     -- ^ `RepnzScas sz val base cnt` searchs through a buffer starting at
+     -- `base` to find  an element `i` such that base[i] = val.
+     -- Each step it increments `i` by 1 and decrements `cnt` by `1`.  It returns
+     -- the final value of `cnt`.
 
 instance HasRepr (X86PrimFn ids) TypeRepr where
   typeRepr f =
@@ -235,7 +228,7 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       XGetBV{}      -> knownType
       PShufb w _ _  -> BVTypeRepr (simdWidthNatRepr w)
       MemCmp{}      -> knownType
-      FindElement{} -> knownType
+      RepnzScas{} -> knownType
 
 instance PrettyArch X86_64 where
   ppArchFn = ppX86PrimFn
@@ -259,13 +252,15 @@ ppX86PrimFn pp f =
     PShufb _ x s -> sexprA "pshufb" [ pp x, pp s ]
     MemCmp sz cnt src dest rev -> sexprA "memcmp" args
       where args = [pure (pretty sz), pp cnt, pp dest, pp src, pp rev]
-    FindElement sz fndeq cnt buf val rev -> sexprA "find_element" args
-      where args = [pure (pretty sz), pure (pretty fndeq), pp cnt, pp buf, pp val, pp rev]
+    RepnzScas _ val buf cnt  -> sexprA "first_byte_offset" args
+      where args = [pp val, pp buf, pp cnt]
 
 ------------------------------------------------------------------------
 -- X86Stmt
 
--- | An X86 specific statement
+-- | An X86 specific statement.
+--
+-- Each of these functions
 data X86Stmt ids
    = forall tp .
      WriteLoc !(X86PrimLoc tp) !(Value X86_64 ids tp)
@@ -574,10 +569,12 @@ x87TopReg = boundValue X87_TopReg
 -- | This represents the control-flow information needed to build basic blocks
 -- for a code location.
 data ExploreLoc
-   = ExploreLoc { loc_ip :: SegmentedAddr 64
+   = ExploreLoc { loc_ip      :: !(SegmentedAddr 64)
                   -- ^ IP address.
-                , loc_x87_top :: Int
-                  -- ^ Top of x86 address.
+                , loc_x87_top :: !Int
+                  -- ^ Top register of x87 stack
+                , loc_df_flag :: !Bool
+                  -- ^ Value of DF flag
                 }
  deriving (Eq, Ord)
 
@@ -585,8 +582,9 @@ instance Pretty ExploreLoc where
   pretty loc = text $ show (loc_ip loc)
 
 rootLoc :: SegmentedAddr 64 -> ExploreLoc
-rootLoc ip = ExploreLoc { loc_ip = ip
-                        , loc_x87_top = 0
+rootLoc ip = ExploreLoc { loc_ip      = ip
+                        , loc_x87_top = 7
+                        , loc_df_flag = False
                         }
 
 initX86State :: ExploreLoc -- ^ Location to explore from.
@@ -594,6 +592,7 @@ initX86State :: ExploreLoc -- ^ Location to explore from.
 initX86State loc = mkRegState Initial
                  & curIP     .~ RelocatableValue knownNat (loc_ip loc)
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
+                 & boundValue df_reg .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
 
 ------------------------------------------------------------------------
 -- Compute set of assignIds in values.
@@ -614,11 +613,10 @@ refsInX86PrimFn f =
                  , refsInValue dest
                  , refsInValue dir
                  ]
-    FindElement _ _ cnt buf val dir ->
-      Set.unions [ refsInValue cnt
+    RepnzScas _ val buf cnt ->
+      Set.unions [ refsInValue val
                  , refsInValue buf
-                 , refsInValue val
-                 , refsInValue dir
+                 , refsInValue cnt
                  ]
 
 refsInX86Stmt :: X86Stmt ids -> Set (Some (AssignId ids))
@@ -721,8 +719,8 @@ instance CanFoldValues X86_64 where
       PShufb _ x y -> mconcat [ go x, go y ]
       MemCmp _sz cnt src dest rev ->
         mconcat [ go cnt, go src, go dest, go rev ]
-      FindElement _sz _findEq cnt buf val' rev ->
-        mconcat [ go cnt, go buf, go val', go rev ]
+      RepnzScas _sz val buf cnt ->
+        mconcat [ go val, go buf, go cnt ]
 
 ------------------------------------------------------------------------
 -- X86_64 specific block operations.
@@ -753,6 +751,7 @@ x86CalleeSavedRegs = Set.fromList $
   , Some r14_reg
   , Some r15_reg
   , Some X87_TopReg
+  , Some df_reg
   ]
 
 x86ArgumentRegs :: [X86Reg (BVType 64)]

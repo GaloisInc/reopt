@@ -338,11 +338,17 @@ semanticsMap = mapNoDupFromList "semanticsMap" instrs
                     Just LeqProof -> exec_stos (pfx == F.RepPrefix) dest_loc src_loc
                     Nothing       -> fail "Argument to stos is too large"
 
-              , mk "scas" $ mkBinopPfxLL
-                $ \pfx val_loc buf_loc ->
-                   case testLeq (loc_width val_loc) n64 of
-                    Just LeqProof -> exec_scas (pfx == F.RepZPrefix ) (pfx == F.RepNZPrefix) val_loc buf_loc
-                    Nothing       -> fail "Argument to scass is too large"
+              , mk "scas" $ mkBinopPfx $ \pfx loc loc' -> do
+                  case (loc, loc') of
+                    (F.ByteReg  F.AL,  F.Mem8  (F.Addr_64 F.ES (Just F.RDI) Nothing F.NoDisplacement)) -> do
+                      exec_scas (pfx == F.RepZPrefix) (pfx == F.RepNZPrefix) ByteRepVal
+                    (F.WordReg  F.AX,  F.Mem16 (F.Addr_64 F.ES (Just F.RDI) Nothing F.NoDisplacement)) -> do
+                      exec_scas (pfx == F.RepZPrefix) (pfx == F.RepNZPrefix) WordRepVal
+                    (F.DWordReg F.EAX, F.Mem32 (F.Addr_64 F.ES (Just F.RDI) Nothing F.NoDisplacement)) -> do
+                      exec_scas (pfx == F.RepZPrefix) (pfx == F.RepNZPrefix) DWordRepVal
+                    (F.QWordReg F.RAX, F.Mem64 (F.Addr_64 F.ES (Just F.RDI) Nothing F.NoDisplacement)) -> do
+                      exec_scas (pfx == F.RepZPrefix) (pfx == F.RepNZPrefix) QWordRepVal
+                    _ -> error $ "scas given bad addrs " ++ show (loc, loc')
 
               -- fixed size instructions.  We truncate in the case of
               -- an xmm register, for example
