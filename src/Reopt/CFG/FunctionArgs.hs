@@ -743,7 +743,7 @@ functionArgs :: SyscallPersonality X86_64
              -> DiscoveryInfo X86_64 ids
              -> [SegmentedAddr 64]
              -> Map (SegmentedAddr 64) FunctionType
-functionArgs sysp info args = inferFunctionTypeFromDemands $ functionDemands sysp info args
+functionArgs sysp info = inferFunctionTypeFromDemands . functionDemands sysp info
 
 debugPrintMap :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)
