@@ -228,3 +228,26 @@ executable dump_debug_data
     reopt
   hs-source-dirs: dump_debug_data
   main-is: Main.hs
+
+test-suite reopt-tests
+  type: exitcode-stdio-1.0
+  default-language: Haskell2010
+  ghc-options: -Wall
+  main-is: Main.hs
+  other-modules: ElfX64Linux
+  hs-source-dirs: tests
+  build-depends: reopt,
+                 base,
+                 macaw,
+                 parameterized-utils,
+                 elf-edit,
+                 temporary,
+                 lens,
+                 exceptions,
+                 containers,
+                 process,
+                 filepath,
+                 filemanip,
+                 bytestring,
+                 tasty,
+                 tasty-hunit
