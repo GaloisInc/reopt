@@ -182,11 +182,11 @@ instance S.IsValue (Expr ids) where
 
     | ValueExpr (RelocatableValue w a) <- x
     , Just o <- asBVLit y
-    = ValueExpr (RelocatableValue w (a & addrOffset +~ fromInteger o))
+    = ValueExpr (RelocatableValue w (a + fromInteger o))
 
     | ValueExpr (RelocatableValue w a) <- y
     , Just o <- asBVLit x
-    = ValueExpr (RelocatableValue w (a & addrOffset +~ fromInteger o))
+    = ValueExpr (RelocatableValue w (a + fromInteger o))
 
       -- Shift constants to right-hand-side.
     | Just _ <- asBVLit x = S.bvAdd y x
@@ -1153,7 +1153,7 @@ disassembleBlockImpl mem gs contFn addr = do
 
     Right (i, next_ip) -> do
       let next_ip_val :: BVValue X86_64 ids 64
-          next_ip_val = RelocatableValue n64 next_ip
+          next_ip_val = RelocatableValue n64 (addrValue next_ip)
 
       let next_ip_word = fromIntegral (addrValue next_ip)
 

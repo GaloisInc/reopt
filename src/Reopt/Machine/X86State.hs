@@ -74,6 +74,7 @@ import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
+import           Data.Macaw.Memory ( MemWord, addrValue )
 import           Data.Macaw.Types
 
 import qualified Reopt.Machine.StateNames as N
@@ -590,7 +591,7 @@ rootLoc ip = ExploreLoc { loc_ip      = ip
 initX86State :: ExploreLoc -- ^ Location to explore from.
              -> RegState X86Reg (Value X86_64 ids)
 initX86State loc = mkRegState Initial
-                 & curIP     .~ RelocatableValue knownNat (loc_ip loc)
+                 & curIP     .~ RelocatableValue knownNat (addrValue (loc_ip loc))
                  & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
                  & boundValue df_reg .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
 
@@ -679,15 +680,15 @@ foldValueCached :: forall m arch ids tp
                 .  (Monoid m, CanFoldValues arch)
                 => (forall n.  NatRepr n -> Integer -> m)
                    -- ^ Function for literals
-                -> (ArchSegmentedAddr arch -> m)
-                   -- ^ Function for global addresses
+                -> (forall n.  NatRepr n -> MemWord (RegAddrWidth (ArchReg arch)) -> m)
+                   -- ^ Function for memwords
                 -> (forall utp . ArchReg arch utp -> m)
                    -- ^ Function for input registers
                 -> (forall utp . AssignId ids utp -> m -> m)
                    -- ^ Function for assignments
                 -> Value arch ids tp
                 -> State (Map (Some (AssignId ids)) m) m
-foldValueCached litf addrf initf assignf = getStateMonadMonoid . go
+foldValueCached litf rwf initf assignf = getStateMonadMonoid . go
   where
     go :: forall tp'
        .  Value arch ids tp'
@@ -695,7 +696,7 @@ foldValueCached litf addrf initf assignf = getStateMonadMonoid . go
     go v =
       case v of
         BVValue sz i -> return $ litf sz i
-        RelocatableValue _ a -> pure $ addrf a
+        RelocatableValue w a -> pure $ rwf w a
         Initial r    -> return $ initf r
         AssignedValue (Assignment a_id rhs) -> do
           m_v <- use (at (Some a_id))

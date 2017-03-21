@@ -160,7 +160,7 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps ids)
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
-                            (const (mempty, mempty))
+                            (\_ _      -> (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
                             (\asgn (assigns, regs) ->
                               (Set.insert (Some asgn) assigns, regs))

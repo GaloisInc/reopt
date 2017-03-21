@@ -257,7 +257,7 @@ valueUses :: (OrdF (ArchReg arch), CanFoldValues arch)
 valueUses v =
   zoom assignmentCache $
             foldValueCached (\_ _    -> mempty)
-                            (\_      -> mempty)
+                            (\_ _    -> mempty)
                             (\r      -> Set.singleton (Some r))
                             (\_ regs -> regs)
                             v
