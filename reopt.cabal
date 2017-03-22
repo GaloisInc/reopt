@@ -245,7 +245,6 @@ test-suite reopt-tests
                  lens,
                  exceptions,
                  containers,
-                 process,
                  filepath,
                  filemanip,
                  bytestring,

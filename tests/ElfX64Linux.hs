@@ -13,11 +13,7 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Typeable ( Typeable )
 import Data.Word ( Word64 )
-import qualified System.Exit as IO
-import System.FilePath ( (<.>), dropExtension, takeFileName )
-import qualified System.IO as IO
-import qualified System.IO.Temp as IO
-import qualified System.Process as P
+import System.FilePath ( dropExtension, replaceExtension )
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import Text.Printf ( printf )
@@ -35,16 +31,20 @@ import qualified Reopt.CFG.Implementation as RO
 elfX64LinuxTests :: [FilePath] -> T.TestTree
 elfX64LinuxTests = T.testGroup "ELF x64 Linux" . map mkTest
 
+-- | The type of expected results for test cases
 data ExpectedResult = R { funcs :: [(Word64, [Word64])]
                         , ignoreBlocks :: [Word64]
                         }
                     deriving (Read, Show, Eq)
 
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ withAssembledCode asmFilename (testDiscovery fp)
+mkTest fp = T.testCase fp $ withELF exeFilename (testDiscovery fp)
   where
     asmFilename = dropExtension fp
+    exeFilename = replaceExtension asmFilename "exe"
 
+-- | Run a test over a given expected result filename and the ELF file
+-- associated with it
 testDiscovery :: FilePath -> E.Elf Word64 -> IO ()
 testDiscovery expectedFilename elf =
   withMemory MM.Addr64 elf $ \mem -> do
@@ -67,17 +67,6 @@ testDiscovery expectedFilename elf =
                 (_, Nothing) -> T.assertFailure (printf "Unexpected entry point: 0x%x" actualEntry)
                 (_, Just expectedBlockStarts) ->
                   T.assertEqual (printf "Block starts for 0x%x" actualEntry) expectedBlockStarts (actualBlockStarts `S.difference` ignoredBlocks)
-
-withAssembledCode :: FilePath -> (E.Elf Word64 -> IO ()) -> IO ()
-withAssembledCode asmFile k = do
-  IO.withSystemTempFile (takeFileName asmFile <.> "exe") $ \outfile exeH -> do
-    IO.hClose exeH
-    let p = P.proc "gcc" ["-nostdlib", "-o", outfile, asmFile]
-    (_, _, _, ph) <- P.createProcess p
-    ec <- P.waitForProcess ph
-    case ec of
-      IO.ExitFailure code -> T.assertFailure ("Failed to assemble file " ++ asmFile ++ " with exit code " ++ show code)
-      IO.ExitSuccess -> withELF outfile k
 
 withELF :: FilePath -> (E.Elf Word64 -> IO ()) -> IO ()
 withELF fp k = do
