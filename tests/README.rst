@@ -7,5 +7,7 @@ This directory contains some automated tests for reopt_ and macaw_.  The macaw t
 
 The ``Makefile`` in the tests directory rebuilds the test files from source.  The resulting binaries are checked in to the repository so that Mac OS users can run the tests without having to have a Linux build toolchain available.  Additionally, having the binaries in the repository keeps the code layout stable.  Expected addresses are hard-coded into the expected results of the test suite; regenerating the binaries on a different system or with a different compiler could change the offsets in the test binaries, which would require the expected results to be tweaked.  This is unfortunate, but difficult to avoid in a robust way.
 
+Note that the tests are bare-bones and do not link against libc.  They issue the exit system call directly to terminate.  This lets us get small and comprehensible test cases.
+
 .. _reopt: https://github.com/GaloisInc/reopt
 .. _macaw: https://gitlab-ext.galois.com/macaw/macaw
