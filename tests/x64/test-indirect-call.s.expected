@@ -1,0 +1,5 @@
+R { funcs = [ (0x2b1, [0x2b1])
+            , (0x2bf, [0x2bf, 0x2e2])
+            ]
+  , ignoreBlocks = [0x2f8]
+  }
