@@ -32,10 +32,18 @@ elfX64LinuxTests :: [FilePath] -> T.TestTree
 elfX64LinuxTests = T.testGroup "ELF x64 Linux" . map mkTest
 
 -- | The type of expected results for test cases
-data ExpectedResult = R { funcs :: [(Word64, [Word64])]
-                        , ignoreBlocks :: [Word64]
-                        }
-                    deriving (Read, Show, Eq)
+data ExpectedResult =
+  R { funcs :: [(Word64, [Word64])]
+    -- ^ The first element of the pair is the address of entry point
+    -- of the function.  The list is a list of the addresses of the
+    -- basic blocks in the function (including the first block).
+    , ignoreBlocks :: [Word64]
+    -- ^ This is a list of discovered blocks to ignore.  This is
+    -- basically just the address of the instruction after the exit
+    -- syscall, as macaw doesn't know that exit never returns and
+    -- discovers a false block after exit.
+    }
+  deriving (Read, Show, Eq)
 
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ withELF exeFilename (testDiscovery fp)
