@@ -1,10 +1,10 @@
 all: $(patsubst %c,%exe, $(wildcard *.c))
 
 %.exe: %.s
-	gcc -nostdlib $< -o $@
+	gcc -fno-stack-protector -nostdlib $< -o $@
 
 %.s: %.c
-	gcc -S -c $< -o $@
+	gcc -fno-stack-protector -S -c $< -o $@
 
 .PRECIOUS: %.s
 
