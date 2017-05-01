@@ -19,4 +19,5 @@ extra-deps:
 - lens-4.15.1
 - kan-extensions-5.0.1
 - located-base-0.1.1.0
+- th-abstraction-0.1.0.0
 resolver: lts-6.27
