@@ -31,6 +31,7 @@ clone parameterized-utils git@github.com:GaloisInc/parameterized-utils.git
 clone posix-waitpid       git@github.com:GaloisInc/posix-waitpid.git
 
 clone macaw               git@gitlab-ext.galois.com:macaw/macaw.git
+clone macaw-x86           git@gitlab-ext.galois.com:macaw/macaw-x86.git
 clone reopt-crucible      git@gitlab-int.galois.com:radss/reopt-crucible.git
 
 if [[ $* == *--with-arm* ]]; then
