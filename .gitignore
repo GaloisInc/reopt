@@ -8,4 +8,4 @@ TAGS
 latest.txt
 llvm-latest
 out/
-stack.yaml
+deps
