@@ -231,7 +231,7 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       MemCmp{}      -> knownType
       RepnzScas{} -> knownType
 
-instance PrettyArch X86_64 where
+instance ArchConstraints X86_64 where
   ppArchFn = ppX86PrimFn
 
 -- | An operation for pretty printing a 'X86PrimFn' using a pretty printer

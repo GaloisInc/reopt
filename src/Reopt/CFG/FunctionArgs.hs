@@ -12,8 +12,8 @@
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.FunctionArgs
   ( functionDemands
+  , DemandSet
   , inferFunctionTypeFromDemands
-  , functionArgs
   , debugPrintMap
   , stmtDemandedValues
   ) where
@@ -36,7 +36,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
-import           Data.Macaw.Memory (Memory, MemWidth, IsAddr(..))
+import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
 import           Data.Macaw.Discovery.Info
 import           Reopt.CFG.FnRep (FunctionType(..))
@@ -226,12 +226,6 @@ type FunctionArgsM arch ids a = State (FunctionArgsState arch ids) a
 -- ----------------------------------------------------------------------------------------
 -- Phase one functions
 
-type ArchConstraints arch =
-  ( OrdF (ArchReg arch)
-  , ShowF (ArchReg arch)
-  , PrettyArch arch
-  )
-
 -- | This registers a block in the first phase (block discovery).
 addIntraproceduralJumpTarget :: ArchConstraints arch
                              => DiscoveryFunInfo arch ids
@@ -382,7 +376,6 @@ summarizeCall :: forall arch ids
               .  ( CanDemandValues arch
                  , CanFoldValues arch
                  , RegisterInfo (ArchReg arch)
-                 , IsAddr (ArchAddrWidth arch)
                  )
               => Memory (ArchAddrWidth arch)
               -> ArchLabel arch
@@ -444,10 +437,7 @@ stmtDemandedValues stmt =
 type SummarizeConstraints arch ids
   = ( CanDemandValues arch
     , CanFoldValues arch
-    , PrettyArch arch
-    , ArchConstraint arch ids
-    , MemWidth (ArchAddrWidth arch)
-    , Show (ArchReg arch (BVType (ArchAddrWidth arch)))
+    , ArchConstraints arch
     )
 
 -- | This function figures out what the block requires
@@ -742,13 +732,6 @@ inferFunctionTypeFromDemands dm =
                         (fmap ((,) mempty))
                         dm
                         retDemands
-
--- | Returns the set of argument registers and result registers for each function.
-functionArgs :: SyscallPersonality X86_64
-             -> DiscoveryInfo X86_64 ids
-             -> [SegmentedAddr 64]
-             -> Map (SegmentedAddr 64) FunctionType
-functionArgs sysp info = inferFunctionTypeFromDemands . functionDemands sysp info
 
 debugPrintMap :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)

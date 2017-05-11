@@ -76,13 +76,10 @@ import           Data.Macaw.Discovery.Info
                  )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
---import qualified Data.Macaw.Memory.Permissions as Perm
-import           Data.Macaw.Types
-
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..))
-import           Reopt.CFG.FunctionArgs (functionArgs)
+import           Reopt.CFG.FnRep (Function(..), FunctionType)
+import           Reopt.CFG.FunctionArgs (DemandSet, functionDemands, inferFunctionTypeFromDemands)
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.Implementation
 import qualified Reopt.CFG.LLVM as LLVM
@@ -90,7 +87,6 @@ import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Machine.X86State
 import           Reopt.Relinker
---import           Reopt.Semantics.DeadRegisterElimination
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -130,7 +126,7 @@ data LoadStyle
      -- ^ Load segments in Elf file.
 
 -- | Create a memory from a load style.
-mkElfMem :: (Monad m, Integral (ElfWordType w), Bits (ElfWordType w), Integral (MemWord w), IsAddr w)
+mkElfMem :: (Monad m, Integral (ElfWordType w), Bits (ElfWordType w), MemWidth w)
          => LoadStyle
          -> AddrWidthRepr w
          -> Elf (ElfWordType w)
@@ -507,7 +503,7 @@ mkCFG m = Map.foldlWithKey' go emptyCFG m
 -- It returns a two maps, the first contains entries that could not be resolved; the second
 -- contains those that could.
 resolvedSegmentedElfFuncSymbols :: forall w v
-                                .  (Integral v, Integral (MemWord w), IsAddr w)
+                                .  (Integral v, MemWidth w)
                                 => Memory w
                                 -> [ElfSymbolTableEntry v]
                                 -> (Map (MemWord w)  [BS.ByteString], Map (SegmentedAddr w) [BS.ByteString])
@@ -527,7 +523,7 @@ resolvedSegmentedElfFuncSymbols mem entries = (Map.fromList u, Map.fromList r)
         (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
 
 ppElfUnresolvedSymbols :: forall w
-                       .  Integral (MemWord w)
+                       .  MemWidth w
                        => Map (MemWord w) [BS.ByteString]
                        -> Doc
 ppElfUnresolvedSymbols m =
@@ -537,7 +533,7 @@ ppElfUnresolvedSymbols m =
         pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
 
 -- | Create a final CFG
-mkFinalCFGWithSyms :: (DiscoveryConstraints arch, Integral v)
+mkFinalCFGWithSyms :: (Integral v, ArchConstraints arch)
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf v -- ^ Elf file to create CFG for.
@@ -565,15 +561,12 @@ mkFinalCFGWithSyms archInfo mem e = do
 
 data SomeArchitectureInfo v =
   forall arch
-  . ( PrettyCFGConstraints arch
+  . ( ArchConstraints arch
     , FnHasRefs (ArchFn arch)
     , StmtHasRefs (ArchStmt arch)
-    , IsAddr (ArchAddrWidth arch)
     , v ~ ElfWordType (ArchAddrWidth arch)
     , Bits v
     , Integral v
-    , HasRepr (ArchReg arch) TypeRepr
-    , RegisterInfo (ArchReg arch)
     )
    => SomeArch (ArchitectureInfo arch)
 
@@ -652,7 +645,7 @@ getFns :: SyscallPersonality X86_64
        -> DiscoveryInfo X86_64 ids
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
-getFns sysp symMap excludedNames s = do
+getFns sysp symMap excludedNames info = do
 
   -- Compute which functions to compute by looking at the binary
   let nms = Set.toList excludedNames
@@ -670,16 +663,19 @@ getFns sysp symMap excludedNames s = do
             where word = fromIntegral (base + addr^.addrOffset)
           _ -> True
   let doCheck :: SegmentedAddr 64 -> Bool
-      doCheck a = checkFunction info a
-        where Just info = Map.lookup a (s^.funInfo)
+      doCheck a = checkFunction finfo a
+        where Just finfo = Map.lookup a (info^.funInfo)
 
-  let entries = filter include $ Set.toList $ s^.functionEntries
+  let entries = filter include $ Set.toList $ info^.functionEntries
 
-  let mem = memory s
-  let fArgs = functionArgs sysp s (filter doCheck (Set.toList $ s^.functionEntries))
+  let mem = memory info
+  let fDems :: Map (SegmentedAddr 64) (DemandSet X86Reg)
+      fDems = functionDemands sysp info (filter doCheck (Set.toList $ info^.functionEntries))
+  let fArgs :: Map (SegmentedAddr 64) FunctionType
+      fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \entry -> do
-    case Map.lookup entry (s^.funInfo) of
+    case Map.lookup entry (info^.funInfo) of
       Nothing -> do
         hPutStrLn stderr $ "Could not find function info for " ++ show entry
         pure Nothing
@@ -1022,7 +1018,7 @@ newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (SegmentedAddr w) [Segm
 
 -- | Return how many bytes of space there are to write after address without
 -- ovewriting another control flow target.
-lookupControlFlowTargetSpace :: (IsAddr w, Integral(MemWord w))
+lookupControlFlowTargetSpace :: MemWidth w
                              => SegmentedAddr w
                              -> ControlFlowTargetSet w
                              -> MemWord w
