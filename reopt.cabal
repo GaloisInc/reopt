@@ -119,7 +119,7 @@ executable reopt
     cpp-options: -DSUPPORT_ARM
     build-depends:
       hvex,
-      mcexplore
+      macaw-arm-vex
 
   if flag(enable-hpc)
     ghc-options: -fhpc
