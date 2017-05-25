@@ -70,6 +70,7 @@ library
     Reopt.Semantics.Conditions
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
+    Reopt.Semantics.InstructionDef
     Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
     Reopt.Utils.Hex
