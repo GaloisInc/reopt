@@ -54,6 +54,7 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
 import           Reopt.Machine.X86State
+import           Reopt.Semantics.Monad (XMMType)
 
 import Debug.Trace
 
@@ -307,7 +308,7 @@ recoverAssign asgn = do
             pure (FnSetUndefined w)
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
-            pure (FnReadMem fn_addr tp)
+            pure (FnReadMem fn_addr (typeRepr tp))
           EvalArchFn (RepnzScas sz val buf cnt) _ -> do
             fn_val <- recoverValue val
             fn_buf <- recoverValue buf
@@ -333,7 +334,7 @@ recoverStmt s = do
       -- Only add assignment if it is used.
 --      when (Some (assignId asgn) `Set.member` usedAssigns) $ do
       void $ recoverAssign asgn
-    WriteMem addr val
+    WriteMem addr _ val
       | Initial reg <- val -> do
         reg_v <- uses rsCurRegs (MapF.lookup reg)
         case reg_v of

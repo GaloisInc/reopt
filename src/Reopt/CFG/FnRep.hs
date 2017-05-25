@@ -61,7 +61,7 @@ import           Reopt.Machine.X86State
   , x86FloatArgumentRegs
   , x86FloatResultRegs
   )
-import Reopt.Semantics.Monad (RepValSize(..))
+import Reopt.Semantics.Monad (RepValSize(..), XMMType)
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')

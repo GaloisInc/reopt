@@ -67,6 +67,7 @@ library
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
+    Reopt.Semantics.Conditions
     Reopt.Semantics.DeadRegisterElimination
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Monad

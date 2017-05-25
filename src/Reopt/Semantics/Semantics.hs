@@ -15,15 +15,168 @@ instructions.
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
-module Reopt.Semantics.Semantics where
+module Reopt.Semantics.Semantics
+  ( exec_adc
+  , exec_add
+  , exec_addps
+  , exec_addsd
+  , exec_addss
+  , exec_and
+  , exec_andpd
+  , exec_andps
+  , exec_bsf
+  , exec_bsr
+  , exec_bswap
+  , exec_bt
+  , exec_btc
+  , exec_btr
+  , exec_bts
+  , exec_cbw
+  , exec_cdq
+  , exec_cdqe
+  , exec_clc
+  , exec_cld
+  , exec_cmovcc
+  , exec_cmp
+  , exec_cmps
+  , exec_cmpsd
+  , exec_cmpxchg
+  , exec_cmpxchg8b
+  , exec_cqo
+  , exec_cvtsd2ss
+  , exec_cvtsi2sd
+  , exec_cvtsi2ss
+  , exec_cvtss2sd
+  , exec_cvttsd2si
+  , exec_cvttss2si
+  , exec_cwd
+  , exec_cwde
+  , exec_dec
+  , exec_div
+  , exec_divsd
+  , exec_divss
+  , exec_fadd
+  , exec_fld
+  , exec_fmul
+  , exec_fnstcw
+  , exec_fst
+  , exec_fstp
+  , exec_fsub
+  , exec_fsubp
+  , exec_fsubr
+  , exec_fsubrp
+  , exec_hlt
+  , exec_idiv
+  , exec_imul1
+  , exec_imul2_3
+  , exec_inc
+  , exec_jcc
+  , exec_lddqu
+  , exec_lea
+  , exec_leave
+  , exec_mov
+  , exec_movapd
+  , exec_movaps
+  , exec_movd
+  , exec_movdqa
+  , exec_movdqu
+  , exec_movhlps
+  , exec_movhpd
+  , exec_movlhps
+  , exec_movlpd
+  , exec_movq
+  , exec_movs
+  , exec_movsx_d
+  , exec_movupd
+  , exec_movups
+  , exec_movzx
+  , exec_mul
+  , exec_mulps
+  , exec_mulsd
+  , exec_mulss
+  , exec_neg
+  , exec_not
+  , exec_or
+  , exec_orpd
+  , exec_orps
+  , exec_paddb
+  , exec_paddd
+  , exec_paddq
+  , exec_paddw
+  , exec_palignr
+  , exec_pand
+  , exec_pandn
+  , exec_pcmpeqb
+  , exec_pcmpeqd
+  , exec_pcmpeqw
+  , exec_pcmpgtb
+  , exec_pcmpgtd
+  , exec_pcmpgtw
+  , exec_pinsrw
+  , exec_pmaxsb
+  , exec_pmaxsd
+  , exec_pmaxsw
+  , exec_pmaxub
+  , exec_pmaxud
+  , exec_pmaxuw
+  , exec_pminsb
+  , exec_pminsd
+  , exec_pminsw
+  , exec_pminub
+  , exec_pminud
+  , exec_pminuw
+  , exec_pmovmskb
+  , exec_por
+  , exec_pshufd
+  , exec_pslldq
+  , exec_psllx
+  , exec_psubb
+  , exec_psubd
+  , exec_psubw
+  , exec_punpckhbw
+  , exec_punpckhdq
+  , exec_punpckhqdq
+  , exec_punpckhwd
+  , exec_punpcklbw
+  , exec_punpckldq
+  , exec_punpcklqdq
+  , exec_punpcklwd
+  , exec_pxor
+  , exec_rol
+  , exec_ror
+  , exec_sahf
+  , exec_sar
+  , exec_sbb
+  , exec_scas
+  , exec_setcc
+  , exec_shl
+  , exec_shr
+  , exec_stos
+  , exec_sub
+  , exec_subps
+  , exec_subsd
+  , exec_subss
+  , exec_test
+  , exec_ucomisd
+  , exec_ucomiss
+  , exec_unpcklps
+  , exec_xadd
+  , exec_xchg
+  , exec_xor
+  , addrRepr
+  , pop
+  , push
+  ) where
 
 import           Data.Type.Equality
 import           Data.Int
 import           Data.Proxy
-import           Data.Word
 import           Prelude hiding (isNaN)
 import           GHC.TypeLits
 
+import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
+import           Data.Macaw.Memory (Endianness (LittleEndian))
+import           Data.Macaw.Types (n1, n8, n16, n32, n64, n128)
 import           Data.Parameterized.NatRepr
 
 import qualified Reopt.Machine.StateNames as N
@@ -31,12 +184,12 @@ import           Reopt.Semantics.Monad
 
 -- * Preliminaries
 
+-- The representation for a address
+addrRepr :: MemRepr (BVType 64)
+addrRepr = BVMemRepr n8 LittleEndian
+
 type Binop = forall m n.
   IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
-type Unop  = forall m n.
-  IsLocationBV m n => MLocation m (BVType n) -> m ()
-type UnopV = forall m n.
-  Semantics m => Value m (BVType n) -> m ()
 
 uadd4_overflows :: ( 4 <= n, IsValue v)
                 => v (BVType n) -> v (BVType n) -> v BoolType
@@ -46,7 +199,7 @@ usub4_overflows :: (4 <= n, IsValue v)
                 => v (BVType n) -> v (BVType n) -> v BoolType
 usub4_overflows x y = usub_overflows (least_nibble x) (least_nibble y)
 
-uadc4_overflows :: ( IsLeq 4 n
+uadc4_overflows :: ( 4 <= n
                    , IsValue v
                    )
                 => v (BVType n) -> v (BVType n) -> v BoolType -> v BoolType
@@ -78,24 +231,23 @@ set_bitwise_flags res = do
   set_undefined af_loc
   set_result_flags res
 
-push :: Semantics m => Value m (BVType n) -> m ()
-push v = do old_sp <- get rsp
-            let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
-                new_sp  = old_sp `bvSub` delta
-                sp_addr = mkBVAddr sz new_sp
-            sp_addr .= v
-            rsp     .= new_sp
-     where
-       sz = bv_width v
-
-pop :: IsLocationBV m n => NatRepr n -> m (Value m (BVType n))
-pop sz = do
+push :: Semantics m => MemRepr tp -> Value m tp -> m ()
+push repr v = do
   old_sp <- get rsp
-  let delta   = bvLit n64 $ natValue sz `div` 8 -- delta in bytes
-      new_sp  = old_sp `bvAdd` delta
-      sp_addr = mkBVAddr sz old_sp
-  v   <- get sp_addr
-  rsp .= new_sp
+  let delta   = bvLit n64 $ memReprBytes repr -- delta in bytes
+      new_sp  = old_sp `bvSub` delta
+  MemoryAddr new_sp repr .= v
+  rsp     .= new_sp
+
+pop :: Semantics m => MemRepr tp -> m (Value m tp)
+pop repr = do
+  -- Get current stack pointer value.
+  old_sp <- get rsp
+  -- Get value at stack pointer.
+  v   <- get (MemoryAddr old_sp repr)
+  -- Increment stack pointer
+  rsp .= bvAdd old_sp (bvLit n64 (memReprBytes repr))
+  -- Return value
   return v
 
 modify_low ::
@@ -137,25 +289,6 @@ set_low r c = modify_low (bv_width c) r (\_ -> c)
 
 -- ** Condition codes
 
-cond_a, cond_ae, cond_b, cond_be, cond_g, cond_ge, cond_l, cond_le, cond_o, cond_p, cond_s, cond_z,
-  cond_no, cond_np, cond_ns, cond_nz :: Semantics m => m (Value m BoolType)
-cond_a = (\c z -> complement c .&. complement z) <$> get cf_loc <*> get zf_loc
-cond_ae  = complement <$> get cf_loc
-cond_b   = get cf_loc
-cond_be  = (.|.) <$> get cf_loc <*> get zf_loc
-cond_g   = (\z s o -> complement z .&. (s .=. o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
-cond_le  = (\z s o -> z .|. (s `bvXor` o)) <$> get zf_loc <*> get sf_loc <*> get of_loc
-cond_ge  = (\s o   -> s .=. o)     <$> get sf_loc <*> get of_loc
-cond_l   = (\s o   -> s `bvXor` o) <$> get sf_loc <*> get of_loc
-cond_o   = get of_loc
-cond_p   = get pf_loc
-cond_s   = get sf_loc
-cond_z   = get zf_loc
-cond_no  = complement <$> cond_o
-cond_np  = complement <$> cond_p
-cond_ns  = complement <$> cond_s
-cond_nz  = complement <$> cond_z
-
 -- * General Purpose Instructions
 -- ** Data Transfer Instructions
 
@@ -191,16 +324,30 @@ exec_cwde = do v <- get (reg_low16 N.rax)
 exec_cdqe = do v <- get (reg_low32 N.rax)
                rax .= sext n64 v
 
+set_reg_pair :: (Semantics m, 1 <= n)
+             => (N.RegisterName cl -> MLocation m (BVType n))
+             -> N.RegisterName cl
+             -> N.RegisterName cl
+             -> Value m (BVType (n + n))
+             -> m ()
+set_reg_pair f upperL lowerL v = do
+  let (upper, lower) = bvSplit v
+  f lowerL .= lower
+  f upperL .= upper
+
 -- | Sign extend ax -> dx:ax, eax -> edx:eax, rax -> rdx:rax, resp.
 exec_cwd, exec_cdq, exec_cqo :: Semantics m => m ()
-exec_cwd = do v <- get (reg_low16 N.rax)
-              set_reg_pair reg_low16 N.rdx N.rax (sext knownNat v)
+exec_cwd = do
+  v <- get (reg_low16 N.rax)
+  set_reg_pair reg_low16 N.rdx N.rax (sext knownNat v)
 
-exec_cdq = do v <- get (reg_low32 N.rax)
-              set_reg_pair reg_low32 N.rdx N.rax (sext knownNat v)
+exec_cdq = do
+  v <- get (reg_low32 N.rax)
+  set_reg_pair reg_low32 N.rdx N.rax (sext knownNat v)
 
-exec_cqo = do v <- get rax
-              set_reg_pair fullRegister N.rdx N.rax (sext knownNat v)
+exec_cqo = do
+  v <- get rax
+  set_reg_pair fullRegister N.rdx N.rax (sext knownNat v)
 
 -- FIXME: special segment stuff?
 -- FIXME: CR and debug regs?
@@ -262,19 +409,12 @@ exec_movzx :: (Semantics m, 1 <= n', n' <= n)
            -> Value m (BVType n') -> m ()
 exec_movzx l v = l .= uext (loc_width l) v
 
-exec_pop :: Unop
-exec_pop l = do
-  v <- pop (loc_width l)
-  l .= v
-
-exec_push :: UnopV
-exec_push v = push v
-
 exec_xchg :: IsLocationBV m n => MLocation m (BVType n) -> MLocation m (BVType n) -> m ()
-exec_xchg l l' = do v  <- get l
-                    v' <- get l'
-                    l  .= v'
-                    l' .= v
+exec_xchg l l' = do
+  v  <- get l
+  v' <- get l'
+  l  .= v'
+  l' .= v
 
 -- ** Binary Arithmetic Instructions
 
@@ -469,17 +609,6 @@ exec_inc dst = do
   -- Set result value.
   set_result_value dst (dst_val `bvAdd` y)
 
-set_reg_pair :: (Semantics m, 1 <= n)
-             => (N.RegisterName cl -> MLocation m (BVType n))
-             -> N.RegisterName cl
-             -> N.RegisterName cl
-             -> Value m (BVType (n + n))
-             -> m ()
-set_reg_pair f upperL lowerL v = do
-  let (upper, lower) = bvSplit v
-  f lowerL .= lower
-  f upperL .= upper
-
 -- FIXME: is this the right way around?
 exec_mul :: forall m n
           . (IsLocationBV m n)
@@ -517,9 +646,8 @@ really_exec_imul :: forall m n
                   . (IsLocationBV m n)
                  => Value m (BVType n)
                  -> Value m (BVType n)
-                 -> (Value m (BVType (n + n)) -> m ())
-                 -> m ()
-really_exec_imul v v' f = do
+                 -> m (Value m (BVType (n + n)))
+really_exec_imul v v' = do
   let w = bv_width v
   let sz = addNat w w
   let w_is_pos :: LeqProof 1 n
@@ -536,24 +664,28 @@ really_exec_imul v v' f = do
   let does_overflow = (r .=/=. sext sz lower_r)
   of_loc .= does_overflow
   cf_loc .= does_overflow
-  f r
+  pure r
 
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
-  | Just Refl <- testEquality (bv_width v) n8  =
-    go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
-  | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair reg_low16 N.rdx N.rax) (reg_low16 N.rax)
-  | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
-  | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair fullRegister N.rdx N.rax) rax
+  | Just Refl <- testEquality (bv_width v) n8  = do
+      v' <- get $ reg_low8 N.rax
+      r <- really_exec_imul v v'
+      reg_low16 N.rax .= r
+  | Just Refl <- testEquality (bv_width v) n16 = do
+      v' <- get $ reg_low16 N.rax
+      r <- really_exec_imul v v'
+      set_reg_pair reg_low16 N.rdx N.rax r
+  | Just Refl <- testEquality (bv_width v) n32 = do
+      v' <- get $ reg_low32 N.rax
+      r <- really_exec_imul v v'
+      set_reg_pair reg_low32 N.rdx N.rax r
+  | Just Refl <- testEquality (bv_width v) n64 = do
+      v' <- get rax
+      r <- really_exec_imul v v'
+      set_reg_pair fullRegister N.rdx N.rax r
   | otherwise =
-    fail "imul: Unknown bit width"
-  where
-    go :: (Value m (BVType (n + n)) -> m ()) -> MLocation m (BVType n) -> m ()
-    go f l = do v' <- get l
-                really_exec_imul v v' f
+      fail "imul: Unknown bit width"
 
 -- FIXME: clag from exec_mul, exec_imul
 exec_imul2_3 :: forall m n n'
@@ -561,7 +693,8 @@ exec_imul2_3 :: forall m n n'
              => MLocation m (BVType n) -> Value m (BVType n) -> Value m (BVType n') -> m ()
 exec_imul2_3 l v v' = do
   withLeqProof (dblPosIsPos (LeqProof :: LeqProof 1 n)) $ do
-  really_exec_imul v (sext (bv_width v) v') $ \r -> l .= snd (bvSplit r)
+  r <- really_exec_imul v (sext (bv_width v) v')
+  l .= snd (bvSplit r)
 
 -- | Should be equiv to 0 - *l
 exec_neg :: (IsLocationBV m n) =>  MLocation m (BVType n) -> m ()
@@ -873,21 +1006,6 @@ exec_setcc cc l = do
 
 -- ** Control Transfer Instructions
 
-really_exec_call :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
-really_exec_call next_pc = do
-  old_pc <- get rip
-  push old_pc -- push value of next instruction
-  rip .= next_pc
-
-exec_call_relative :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
-exec_call_relative off = do
-  old_pc <- get rip
-  let next_pc = old_pc `bvAdd` off
-  really_exec_call next_pc
-
-exec_call_absolute :: IsLocationBV m 64 => Value m (BVType 64) -> m ()
-exec_call_absolute = really_exec_call
-
 exec_jcc :: Semantics m => m (Value m BoolType) -> Value m (BVType 64) -> m ()
 exec_jcc cc off = do
   a <- cc
@@ -898,17 +1016,6 @@ jump_off off = do
   old_pc <- get rip
   let next_pc = old_pc `bvAdd` off
   rip .= next_pc
-
-exec_jmp_absolute :: Semantics m => Value m (BVType 64) -> m ()
-exec_jmp_absolute v = rip .= v
-
-exec_ret :: Semantics m => Maybe Word16 -> m ()
-exec_ret m_off = do
-  next_ip <- pop n64
-  case m_off of
-    Nothing  -> return ()
-    Just off -> modify (bvAdd (bvLit n64 off)) rsp
-  rip .= next_ip
 
 -- ** String Instructions
 
@@ -926,94 +1033,87 @@ regLocation sz
 
 -- FIXME: probably doesn't work for 32 bit address sizes
 -- arguments are only for the size, they are fixed at rsi/rdi
-exec_movs :: (IsLocationBV m n)
+exec_movs :: Semantics m
           => Bool -- Flag indicating if RepPrefix appeared before instruction
-          -> MLocation m (BVType n)
-          -> MLocation m (BVType n)
+          -> NatRepr w -- Number of bytes to move at a time.
           -> m ()
-exec_movs False dest_loc _src_loc = do
+exec_movs False w = do
+  let repr = BVMemRepr w LittleEndian
+  let bytesPerOp = bvLit n64 (memReprBytes repr)
+
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   src  <- get rsi
   dest <- get rdi
-  v' <- get $ mkBVAddr sz src
-  mkBVAddr sz dest .= v'
+  v' <- get $ MemoryAddr src repr
+  MemoryAddr dest repr .= v'
 
   rsi .= mux df (src  .- bytesPerOp) (src  .+ bytesPerOp)
   rdi .= mux df (dest .- bytesPerOp) (dest .+ bytesPerOp)
-  where
-    sz = loc_width dest_loc
-    bytesPerOp = bvLit n64 (natValue sz `div` 8)
+exec_movs True w = do
+  let repr = BVMemRepr w LittleEndian
 
-exec_movs True dest_loc _src_loc = do
+    -- FIXME: aso modifies this
+  let count_reg = regLocation n64 N.rcx
+      bytesPerOp = memReprBytes repr
+      bytesPerOpv = bvLit n64 bytesPerOp
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
-  src  <- get rsi
-  dest <- get rdi
-  count <- uext n64 <$> get count_reg
+  src   <- get rsi
+  dest  <- get rdi
+  count <- get count_reg
   let total_bytes = count .* bytesPerOpv
   -- FIXME: we might need direction for overlapping regions
-  count_reg .= bvLit (loc_width count_reg) (0::Integer)
+  count_reg .= bvLit n64 (0::Integer)
   memcopy bytesPerOp count src dest df
-  rsi .= mux df (src  .- total_bytes) (src  .+ total_bytes)
+  rsi .= mux df (src   .- total_bytes) (src   .+ total_bytes)
   rdi .= mux df (dest  .- total_bytes) (dest  .+ total_bytes)
-  where
-    -- FIXME: aso modifies this
-    count_reg = regLocation n64 N.rcx
-    sz = loc_width dest_loc
-    bytesPerOp = natValue sz `div` 8
-    bytesPerOpv = bvLit n64 bytesPerOp
 
 -- FIXME: can also take rep prefix
 -- FIXME: we ignore the aso here.
 -- | CMPS/CMPSB Compare string/Compare byte string
 -- CMPS/CMPSW Compare string/Compare word string
 -- CMPS/CMPSD Compare string/Compare doubleword string
-exec_cmps :: IsLocationBV m n => Bool
-             -> MLocation m (BVType n)
-             -> MLocation m (BVType n)
-             -> m ()
-exec_cmps repz_pfx loc_rsi _loc_rdi = do
+exec_cmps :: IsLocationBV m w
+          => Bool
+          -> RepValSize w
+          -> m ()
+exec_cmps repz_pfx rval = do
+  let repr = repValSizeMemRepr rval
   -- The direction flag indicates post decrement or post increment.
   df <- get df_loc
   v_rsi <- get rsi
   v_rdi <- get rdi
-  if repz_pfx
-    then do count <- uext n64 <$> get count_reg
-            ifte_ (count .=. bvKLit 0)
-              (return ())
-              (do_memcmp df v_rsi v_rdi count)
-    else do v' <- get $ mkBVAddr sz v_rdi
-            exec_cmp (mkBVAddr sz v_rsi) v' -- FIXME: right way around?
-            rsi .= mux df (v_rsi  `bvSub` bytesPerOp') (v_rsi `bvAdd` bytesPerOp')
-            rdi .= mux df (v_rdi  `bvSub` bytesPerOp') (v_rdi `bvAdd` bytesPerOp')
-  where
     -- FIXME: aso modifies this
-    count_reg = regLocation n64 N.rcx
-    sz  = loc_width loc_rsi
-    bytesPerOp' = bvLit n64 bytesPerOp
-    bytesPerOp = natValue sz `div` 8
-
-    do_memcmp df src dest count = do
-      nsame <- memcmp bytesPerOp count src dest df
+  let bytesPerOp = memReprBytes repr
+  let bytesPerOp' = bvLit n64 bytesPerOp
+  if repz_pfx then do
+    count <- get (regLocation n64 N.rcx)
+    unless_ (count .=. bvKLit 0) $ do
+      nsame <- memcmp bytesPerOp count v_rsi v_rdi df
       let equal = (nsame .=. count)
           nwordsSeen = mux equal count (count `bvSub` (nsame `bvAdd` bvKLit 1))
 
       -- we need to set the flags as if the last comparison was done, hence this.
       let lastWordBytes = (nwordsSeen `bvSub` bvKLit 1) `bvMul` bytesPerOp'
-          lastSrc  = mux df (src  `bvSub` lastWordBytes) (src  `bvAdd` lastWordBytes)
-          lastDest = mux df (dest `bvSub` lastWordBytes) (dest `bvAdd` lastWordBytes)
+          lastSrc  = mux df (v_rsi `bvSub` lastWordBytes) (v_rsi `bvAdd` lastWordBytes)
+          lastDest = mux df (v_rdi `bvSub` lastWordBytes) (v_rdi `bvAdd` lastWordBytes)
 
-      v' <- get $ mkBVAddr sz lastDest
-      exec_cmp (mkBVAddr sz lastSrc) v' -- FIXME: right way around?
+      v' <- get $ MemoryAddr lastDest repr
+      exec_cmp (MemoryAddr lastSrc repr) v' -- FIXME: right way around?
 
       -- we do this to make it obvious so repz cmpsb ; jz ... is clear
       zf_loc .= equal
       let nbytesSeen = nwordsSeen `bvMul` bytesPerOp'
 
-      rsi .= mux df (src  `bvSub` nbytesSeen) (src  `bvAdd` nbytesSeen)
-      rdi .= mux df (dest `bvSub` nbytesSeen) (dest `bvAdd` nbytesSeen)
+      rsi .= mux df (v_rsi `bvSub` nbytesSeen) (v_rsi `bvAdd` nbytesSeen)
+      rdi .= mux df (v_rdi `bvSub` nbytesSeen) (v_rdi `bvAdd` nbytesSeen)
       rcx .= (count .- nwordsSeen)
+   else do
+     v' <- get $ MemoryAddr v_rdi repr
+     exec_cmp (MemoryAddr   v_rsi repr) v' -- FIXME: right way around?
+     rsi .= mux df (v_rsi  `bvSub` bytesPerOp') (v_rsi `bvAdd` bytesPerOp')
+     rdi .= mux df (v_rdi  `bvSub` bytesPerOp') (v_rdi `bvAdd` bytesPerOp')
 
 -- SCAS/SCASB Scan string/Scan byte string
 -- SCAS/SCASW Scan string/Scan word string
@@ -1035,16 +1135,17 @@ exec_scas :: (IsLocationBV m n)
 exec_scas True True _val_loc = error "Can't have both Z and NZ prefix"
 -- single operation case
 exec_scas False False rep = do
-  let val_loc = xaxValLoc rep
   df <- get df_loc
   v_rdi <- get rdi
-  v_rax <- get val_loc
-  let sz = loc_width val_loc
-  exec_cmp (mkBVAddr sz v_rdi) v_rax  -- FIXME: right way around?
-  let bytesPerOp = bvLit n64 $ natValue sz `div` 8
-  rdi   .= mux df (v_rdi  `bvSub` bytesPerOp) (v_rdi `bvAdd` bytesPerOp)
+  v_rax <- get (xaxValLoc rep)
+  let memRepr = repValSizeMemRepr rep
+  exec_cmp (MemoryAddr v_rdi memRepr) v_rax  -- FIXME: right way around?
+  let bytesPerOp = mux df (bvLit n64 (negate (memReprBytes memRepr)))
+                          (bvLit n64 (memReprBytes memRepr))
+  rdi   .= v_rdi `bvAdd` bytesPerOp
 -- repz or repnz prefix set
 exec_scas _repz_pfx repnz_pfx rep = do
+  let mrepr = repValSizeMemRepr rep
   let val_loc = xaxValLoc rep
   -- Get the direction flag -- it will be used to determine whether to add or subtract at each step.
   -- If the flag is zero, then the register is incremented, otherwise it is incremented.
@@ -1062,7 +1163,7 @@ exec_scas _repz_pfx repnz_pfx rep = do
     count' <- rep_scas repnz_pfx df rep v_rax v_rdi count
 
     -- Get number of bytes each comparison will use
-    let bytesPerOp = natValue (loc_width val_loc) `div` 8
+    let bytesPerOp = memReprBytes mrepr
     -- Get multiple of each element (negated for direction flag
     let bytePerOpLit = mux df (bvKLit (negate bytesPerOp)) (bvKLit bytesPerOp)
 
@@ -1071,7 +1172,7 @@ exec_scas _repz_pfx repnz_pfx rep = do
 
     let lastWordBytes = nBytesSeen `bvSub` bytePerOpLit
 
-    exec_cmp (mkBVAddr (loc_width val_loc) (v_rdi `bvAdd` lastWordBytes)) v_rax
+    exec_cmp (MemoryAddr (v_rdi `bvAdd` lastWordBytes) mrepr) v_rax
 
     rdi .= v_rdi `bvAdd` nBytesSeen
     rcx .= count'
@@ -1083,40 +1184,32 @@ exec_scas _repz_pfx repnz_pfx rep = do
 -- | STOS/STOSB Store string/Store byte string
 -- STOS/STOSW Store string/Store word string
 -- STOS/STOSD Store string/Store doubleword string
-exec_stos :: (IsLocationBV m n)
+exec_stos :: Semantics m
           => Bool -- Flag indicating if RepPrefix appeared before instruction
-          -> MLocation m (BVType n)
-          -> MLocation m (BVType n)
+          -> RepValSize w
           -> m ()
-exec_stos False _dest_loc val_loc = do
+exec_stos False rep = do
+  let mrepr = repValSizeMemRepr rep
   -- The direction flag indicates post decrement or post increment.
-  df <- get df_loc
+  df   <- get df_loc
   dest <- get rdi
-  v    <- get val_loc
-  let szv = bvLit n64 (natValue sz)
-  let neg_szv = bvLit n64 (negate (natValue sz))
-  mkBVAddr sz dest .= v
-  rdi .= dest .+ (mux df neg_szv szv)
-  where
-    sz = loc_width val_loc
-
-exec_stos True _dest_loc val_loc = do
+  v    <- get (xaxValLoc rep)
+  let neg_szv = bvLit n64 (negate (memReprBytes mrepr))
+  let szv     = bvLit n64 (memReprBytes mrepr)
+  MemoryAddr dest mrepr .= v
+  rdi .= dest .+ mux df neg_szv szv
+exec_stos True rep = do
+  let mrepr = repValSizeMemRepr rep
   -- The direction flag indicates post decrement or post increment.
-  df <- get df_loc
+  df   <- get df_loc
   dest <- get rdi
-  v    <- get val_loc
-  let szv = bvLit n64 (natValue sz `div` 8)
-  count <- uext n64 <$> get count_reg
+  v    <- get (xaxValLoc rep)
+  let szv = bvLit n64 (memReprBytes mrepr)
+  count <- get (regLocation n64 N.rcx)
   let nbytes     = count `bvMul` szv
   memset count v dest df
   rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
   rcx .= bvKLit 0
-  where
-    sz = loc_width val_loc
-    -- FIXME: aso modifies this
-    count_reg = regLocation n64 N.rcx
-
-
 
 -- REP        Repeat while ECX not zero
 -- REPE/REPZ  Repeat while equal/Repeat while zero
@@ -1126,10 +1219,11 @@ exec_stos True _dest_loc val_loc = do
 -- ** Enter and Leave Instructions
 
 exec_leave :: Semantics m => m ()
-exec_leave = do bp_v <- get rbp
-                rsp .= bp_v
-                bp_v' <- pop n64
-                rbp .= bp_v'
+exec_leave = do
+  bp_v <- get rbp
+  rsp .= bp_v
+  bp_v' <- pop addrRepr
+  rbp .= bp_v'
 
 -- ** Flag Control (EFLAG) Instructions
 
@@ -1564,51 +1658,6 @@ exec_movlhps l v = do
   l .= (f v) `bvCat` (f v0)
   where f :: Value m (BVType 128) -> Value m (BVType 64)
         f = snd . bvSplit
-
--- MOVMSKPS Extract sign mask from four packed single-precision floating-point values
-
--- MOVSS/MOVSD Move scalar single/double-precision floating-point value between XMM registers or between an XMM register and memory
---
--- These helper functions implement the three variations of the
--- @movss@ and @movsd@ instructions.
---
--- The @movss@ and @movsd@ instructions are strange: when the
--- destination is an XMM register and the source is memory, the
--- high-order bits of the destination get zeroed out; when the source
--- is also an XMM register, the high-order bits of the destination are
--- preserved.
-
--- | Preserve high-order bits.
-exec_movsX_xmm_xmm ::
-  ( Semantics m
-  , 1 <= n
-  , n <= 128
-  , ((128 - n) + n) ~ 128
-  , 1 <= 128 - n
-  , 128 - n <= 128
-  ) => NatRepr n -> MLocation m XMMType -> MLocation m XMMType -> m ()
-exec_movsX_xmm_xmm n l v = do
-  vLow <- bvTrunc n <$> get v
-  set_low l vLow
-
-exec_movsX_mem_xmm ::
-  ( Semantics m
-  , 1 <= n
-  , n <= 128
-  ) => MLocation m (BVType n) -> MLocation m XMMType -> m ()
-exec_movsX_mem_xmm l v = do
-  vLow <- bvTrunc (loc_width l) <$> get v
-  l .= vLow
-
--- | Zero-out high-order bits.
-exec_movsX_xmm_mem ::
-  ( Semantics m
-  , 1 <= n
-  , n <= 128
-  ) => MLocation m XMMType -> MLocation m (BVType n) -> m ()
-exec_movsX_xmm_mem l v = do
-  v' <- get v
-  l .= uext (loc_width l) v'
 
 -- *** SSE Packed Arithmetic Instructions
 

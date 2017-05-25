@@ -35,6 +35,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import           GHC.TypeLits
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
@@ -612,7 +613,7 @@ call_ (valueOf -> f) args =
     _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
 
 mkFloatLLVMValue :: Loc.HasCallStack
-                 => FnValue (BVType (FloatInfoBits flt))
+                 => FnValue (BVType (8 * TypeBytes flt))
                  -> FloatInfoRepr flt
                  -> BBLLVM (L.Typed L.Value)
 mkFloatLLVMValue val frepr = do

@@ -48,13 +48,14 @@ import           Data.Parameterized.NatRepr
 import           GHC.Float (float2Double, double2Float)
 
 import qualified Data.Macaw.CFG as R
-import qualified Reopt.Concrete.MachineState as CS
 import           Data.Macaw.Types ( FloatInfoRepr, FloatType
-                                     , floatInfoBits, n1, n80
-                                     , typeRepr
-                                     )
+                                  , floatInfoBits
+                                  , n1, n8, n16, n32, n64, n80
+                                  , typeRepr
+                                  )
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Reified.Semantics
+import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Semantics.Monad
   ( Type(..)
   , TypeRepr(..)
@@ -246,12 +247,12 @@ evalStmt (Get x l) =
 
   let nr = S.loc_width l
   case l of
-    S.MemoryAddr addr (BVTypeRepr nr0) -> do
+    S.MemoryAddr addr (R.BVMemRepr nr0 _) -> do
       vaddr <- evalExpr' addr
       case vaddr of
         CS.Undefined _ -> error "evalStmt: undefined address in 'Get'!"
         CS.Literal bvaddr -> do
-          let a = CS.Address nr0 bvaddr
+          let a = CS.Address (natMultiply n8 nr0) bvaddr
           v0 <- CS.getMem a
           extendEnv x v0
     S.Register rv -> do
@@ -279,10 +280,10 @@ evalStmt (BVSignedRem x ns1 ns2) = bvDivOp BV.smod x ns1 ns2
 -- Based on 'MemCopy' eval below.
 evalStmt (MemCmp x bytes compares src dst reversed) = do
   case bytes of
-    1 -> go S.n8
-    2 -> go S.n16
-    4 -> go S.n32
-    8 -> go S.n64
+    1 -> go n8
+    2 -> go n16
+    4 -> go n32
+    8 -> go n64
     _ -> error "evalStmt: MemCmp: unsupported number of bytes!"
   where
     go :: NatRepr n -> m ()
@@ -351,10 +352,10 @@ evalStmt (Ifte_ c t f) = do
       put env0
 evalStmt (MemCopy bytes copies src dst reversed) = do
   case bytes of
-    1 -> go S.n8
-    2 -> go S.n16
-    4 -> go S.n32
-    8 -> go S.n64
+    1 -> go n8
+    2 -> go n16
+    4 -> go n32
+    8 -> go n64
     _ -> error "evalStmt: MemCopy: unsupported number of bytes!"
   where
     -- Construct source and destination address sequences of type

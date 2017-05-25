@@ -1,19 +1,19 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Semantics.DeadRegisterElimination
--- Description      : A CFG pass to remove registers which are not used
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Joe Hendrix <jhendrix@galois.com>
--- Stability        : provisional
---
--- Given a code block like
---    r0 := initial
---    r1 := f(r0)
---    r2 := g(initial)
---    fetch_and_execute { rax := r1 }
---
--- this code will remove the (unused) r2
-------------------------------------------------------------------------
+{-|
+
+Copyright        : (c) Galois, Inc 2015-2017
+Maintainer       : Joe Hendrix <jhendrix@galois.com>
+
+This provides a CFG pass `eliminateDeadRegisters` which removes
+dead registers from a CFG.
+
+Given a code block like
+    r0 := initial
+    r1 := f(r0)
+    r2 := g(initial)
+    fetch_and_execute { rax := r1 }
+
+this code will remove the (unused) r2
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -35,7 +35,9 @@ import qualified Data.Set as Set
 
 import           Data.Macaw.CFG
 
-blockLiveRegisters :: (StmtHasRefs (ArchStmt arch), FnHasRefs (ArchFn arch))
+blockLiveRegisters :: ( StmtHasRefs (ArchStmt arch)
+                      , FnHasRefs (ArchFn arch)
+                      )
                    => Block arch ids
                    -> State (Set (Some (AssignId ids))) (Map (BlockLabel (ArchAddrWidth arch)) (Block arch ids))
 blockLiveRegisters b = do
@@ -56,7 +58,7 @@ blockLiveRegisters b = do
         return (stmt : ss)
        else
         return ss
-    noteAndFilter stmt@(WriteMem loc rhs) ss = do
+    noteAndFilter stmt@(WriteMem loc _ rhs) ss = do
       addIDs (refsInValue loc)
       addIDs (refsInValue rhs)
       return (stmt : ss)

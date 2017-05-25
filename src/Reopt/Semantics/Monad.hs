@@ -1,6 +1,5 @@
 {-|
-Module           : Reopt.Semantics.Monad
-Copyright        : (c) Galois, Inc 2015-2016
+Copyright        : (c) Galois, Inc 2015-2017
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
 
 This defines the typeclasses that must be implemented to obtain semantics from
@@ -33,10 +32,9 @@ module Reopt.Semantics.Monad
   , type_width
   , KnownType(..)
   , RepValSize(..)
+  , repValSizeMemRepr
   , repValSizeByteCount
-  , FloatInfo(..)
   , FloatInfoRepr(..)
-  , FloatInfoBits
   , floatInfoBits
     -- * RegisterView
   , RegisterView
@@ -47,7 +45,6 @@ module Reopt.Semantics.Monad
   , registerViewSize
   , registerViewReg
   , registerViewType
-  , registerViewAsFullRegister
     -- * Location
   , Location(..)
   , loc_type
@@ -55,6 +52,7 @@ module Reopt.Semantics.Monad
   , ppLocation
   , x87reg_mmx
   , fullRegister
+  , subRegister
   , reg_low8
   , reg_high8
   , reg_low16
@@ -75,22 +73,12 @@ module Reopt.Semantics.Monad
   , c2_loc
   , c3_loc
 
-  , mkBVAddr
   , mkFPAddr
   , packWord
   , unpackWord
   -- ** Registers
   , rsp, rbp, rax, rdx, rsi, rdi, rcx, rip
   , cx,  ecx
-    -- * IsLeq utility
-  , IsLeq
-  , Data.Macaw.Types.n1
-  , Data.Macaw.Types.n8
-  , Data.Macaw.Types.n16
-  , Data.Macaw.Types.n32
-  , Data.Macaw.Types.n64
-  , Data.Macaw.Types.n80
-  , Data.Macaw.Types.n128
     -- * Value operations
   , IsValue(..)
   , bvKLit
@@ -121,6 +109,8 @@ import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
+import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
+import           Data.Macaw.Memory (Endianness(..))
 import           Data.Macaw.Types
 
 import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
@@ -137,6 +127,8 @@ import           Flexdis86.Segment
   , pattern FS
   , pattern GS
   )
+
+type XMMType    = BVType 128
 
 ------------------------------------------------------------------------
 -- Sub registers
@@ -210,21 +202,6 @@ registerViewReg = _registerViewReg
 
 registerViewType :: RegisterView cl b n -> RegisterViewType cl b n
 registerViewType = _registerViewType
-
--- | View a 'RegisterView' as a full register.
---
--- The returned equalities help with type checking, e.g. by
--- constraining the type indices of the 'Location' in which the
--- 'RegisterView' is embedded.
-registerViewAsFullRegister ::
-  RegisterView cl b n -> Maybe (RegisterName cl, b :~: 0, n :~: N.RegisterClassBits cl)
-registerViewAsFullRegister (RegisterView {..})
-  | Just Refl <- _registerViewBase `testEquality` n0
-  , Just Refl <- _registerViewSize `testEquality` N.registerWidth _registerViewReg
-  , DefaultView <- _registerViewType
-  = Just (_registerViewReg, Refl, Refl)
-  | otherwise = Nothing
-
 
 -- * Read and write views for 'RegisterView's.
 
@@ -411,9 +388,10 @@ constUpperBitsRegisterViewWrite _n c _rn _v0 v = bvCat c v
 -- | The view for full registers.
 --
 -- The read view reads all bits and the write view writes all bits.
-identityRegisterView ::
-  (1 <= N.RegisterClassBits cl) =>
-  RegisterName cl -> RegisterView cl 0 (N.RegisterClassBits cl)
+identityRegisterView
+  :: (1 <= N.RegisterClassBits cl)
+  => RegisterName cl
+  -> RegisterView cl 0 (N.RegisterClassBits cl)
 identityRegisterView rn =
   RegisterView
     { _registerViewBase = b
@@ -426,13 +404,16 @@ identityRegisterView rn =
     n = N.registerWidth rn
 
 -- | The view for subregisters which are a slice of a full register.
-sliceRegisterView ::
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , n <= N.RegisterClassBits cl
-  , b + n <= N.RegisterClassBits cl
-  ) =>
-  NatRepr b -> NatRepr n -> RegisterName cl -> RegisterView cl b n
+sliceRegisterView
+  :: ( 1     <= n
+     , 1     <= N.RegisterClassBits cl
+     , n     <= N.RegisterClassBits cl
+     , b + n <= N.RegisterClassBits cl
+     )
+  => NatRepr b
+  -> NatRepr n
+  -> RegisterName cl
+  -> RegisterView cl b n
 sliceRegisterView b n rn =
   RegisterView
     { _registerViewBase = b
@@ -446,14 +427,14 @@ sliceRegisterView b n rn =
 -- These are the special / weird sub registers where the upper bits of
 -- the underlying full register are implicitly set to a constant on
 -- writes.
-constUpperBitsOnWriteRegisterView ::
-  ( 1 <= n
-  , n <= N.RegisterClassBits cl
-  ) =>
-  NatRepr n ->
-  RegisterViewType cl 0 n ->
-  RegisterName cl ->
-  RegisterView cl 0 n
+constUpperBitsOnWriteRegisterView
+  :: ( 1 <= n
+     , n <= N.RegisterClassBits cl
+     )
+  => NatRepr n
+  -> RegisterViewType cl 0 n
+  -> RegisterName cl
+  -> RegisterView cl 0 n
 constUpperBitsOnWriteRegisterView n rt rn  =
   RegisterView
     { _registerViewBase = n0
@@ -469,7 +450,7 @@ constUpperBitsOnWriteRegisterView n rt rn  =
 -- or assigned for the semantics monad.
 data Location addr (tp :: Type) where
   -- A location in the virtual address space of the process.
-  MemoryAddr :: addr -> TypeRepr tp  -> Location addr tp
+  MemoryAddr :: addr -> MemRepr tp -> Location addr tp
 
   Register :: RegisterView cl b n -> Location addr (BVType n)
 
@@ -504,11 +485,6 @@ compareRegisterView rv rv' =
     (EQF, EQF, EQF) ->
       _registerViewType rv `compareRegisterViewType` _registerViewType rv'
 
-instance Ord addr => TestEquality (Location addr) where
-  testEquality l l'
-    | EQF <- l `compareF` l' = Just Refl
-    | otherwise = Nothing
-
 instance Eq addr => EqF (Location addr) where
   MemoryAddr addr tp `eqF` MemoryAddr addr' tp'
     | Just Refl <- testEquality tp tp' = addr == addr'
@@ -535,34 +511,6 @@ instance Eq (RegisterView cl b n) where
   rv == rv'
     | EQ <- rv `compareRegisterView` rv' = True
     | otherwise = False
-
-instance Ord addr => OrdF (Location addr) where
-  MemoryAddr addr tp `compareF` MemoryAddr addr' tp' =
-    case tp `compareF` tp' of
-      LTF -> LTF
-      EQF -> fromOrdering $ addr `compare` addr'
-      GTF -> GTF
-  MemoryAddr _ _ `compareF` _ = GTF
-  _ `compareF` MemoryAddr _ _ = LTF
-  Register rv `compareF` Register rv'
-    | Just Refl <-
-        _registerViewBase rv `testEquality` _registerViewBase rv'
-    , Just Refl <-
-        _registerViewSize rv `testEquality` _registerViewSize rv'
-    , Just Refl <-
-        _registerViewReg rv `testEquality` _registerViewReg rv'
-    , EQ <- _registerViewType rv `compare` _registerViewType rv'
-    = EQF
-    | otherwise = case rv `compareRegisterView` rv' of
-        GT -> GTF
-        LT -> LTF
-        -- This case is impossible since we already checked for
-        -- equality above.
-        EQ -> error "Reopt.Semantics.Monad.OrdF (Location addr).compareF: impossible!"
-  Register _ `compareF` _ = GTF
-  _ `compareF` Register _ = LTF
-  X87StackRegister i `compareF` X87StackRegister i' =
-    fromOrdering $ compare i i'
 
 -- | Pretty print 'S.Location'.
 --
@@ -597,22 +545,25 @@ ppLocation ppAddr loc = case loc of
 -- Register-location smart constructors.
 
 -- | Full register location.
-fullRegister ::
-  (1 <= N.RegisterClassBits cl) =>
-  N.RegisterName cl -> Location addr (N.RegisterType cl)
+fullRegister :: (1 <= N.RegisterClassBits cl)
+             => N.RegisterName cl
+             -> Location addr (N.RegisterType cl)
 fullRegister = Register . identityRegisterView
 
 -- | Subregister location for simple subregisters.
 --
 -- I.e., a subregister which reads and writes @n@ bits at offset @b@,
 -- and preserves remaining bits on writes.
-subRegister ::
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , n <= N.RegisterClassBits cl
-  , b + n <= N.RegisterClassBits cl
-  ) =>
-  NatRepr b -> NatRepr n -> RegisterName cl -> Location addr (BVType n)
+subRegister
+  :: ( 1 <= n
+     , 1 <= N.RegisterClassBits cl
+     , n <= N.RegisterClassBits cl
+     , b + n <= N.RegisterClassBits cl
+     )
+  => NatRepr b
+  -> NatRepr n
+  -> RegisterName cl
+  -> Location addr (BVType n)
 subRegister b n = Register . sliceRegisterView b n
 
 -- | The view for 32-bit general purpose and mmx registers.
@@ -635,7 +586,7 @@ constUpperBitsOnWriteRegister n rt =
 -- Operations on locations.
 
 loc_type :: Location addr tp -> TypeRepr tp
-loc_type (MemoryAddr _ tp) = tp
+loc_type (MemoryAddr _ tp) = typeRepr tp
 loc_type (Register rv)     = BVTypeRepr $ _registerViewSize rv
 loc_type (X87StackRegister _) = knownType
 
@@ -689,12 +640,12 @@ c2_loc = fullRegister N.x87c2
 c3_loc = fullRegister N.x87c3
 
 -- | Tuen an address into a location of size @n
-mkBVAddr :: NatRepr n -> addr -> Location addr (BVType n)
-mkBVAddr sz addr = MemoryAddr addr (BVTypeRepr sz)
+floatMemRepr :: FloatInfoRepr flt -> MemRepr (FloatType flt)
+floatMemRepr fir = BVMemRepr (floatInfoBytes fir) LittleEndian
 
 -- | Tuen an address into a location of size @n
 mkFPAddr :: FloatInfoRepr flt -> addr -> Location addr (FloatType flt)
-mkFPAddr fir addr = MemoryAddr addr (BVTypeRepr (floatInfoBits fir))
+mkFPAddr fir addr = MemoryAddr addr (floatMemRepr fir)
 
 -- | Return MMX register corresponding to x87 register.
 --
@@ -1249,13 +1200,16 @@ data RepValSize w
    | (w ~ 32) => DWordRepVal
    | (w ~ 64) => QWordRepVal
 
-repValSizeByteCount :: RepValSize w -> Integer
-repValSizeByteCount v =
+repValSizeMemRepr :: RepValSize w -> MemRepr (BVType w)
+repValSizeMemRepr v =
   case v of
-    ByteRepVal  -> 1
-    WordRepVal  -> 2
-    DWordRepVal -> 4
-    QWordRepVal -> 8
+    ByteRepVal  -> BVMemRepr (knownNat :: NatRepr 1) LittleEndian
+    WordRepVal  -> BVMemRepr (knownNat :: NatRepr 2) LittleEndian
+    DWordRepVal -> BVMemRepr (knownNat :: NatRepr 4) LittleEndian
+    QWordRepVal -> BVMemRepr (knownNat :: NatRepr 8) LittleEndian
+
+repValSizeByteCount :: RepValSize w -> Integer
+repValSizeByteCount = memReprBytes . repValSizeMemRepr
 
 ------------------------------------------------------------------------
 -- Semantics
@@ -1296,7 +1250,7 @@ class ( Applicative m
 
   -- | Run a step if condition is false.
   unless_ :: Value m BoolType -> m () -> m ()
-  unless_ p x = ifte_ p (return ()) x
+  unless_ p = ifte_ p (return ())
 
   -- FIXME: use location instead?
   -- | Move n bits at a time, with count moves
@@ -1486,9 +1440,9 @@ class ( Applicative m
 
 -- | Defines operations that need to be supported at a specific bitwidht.
 type SupportedBVWidth n
-   = ( IsLeq 1 n
-     , IsLeq 4 n
-     , IsLeq 8 n
+   = ( 1 <= n
+     , 4 <= n
+     , 8 <= n
      , KnownNat n
      )
 

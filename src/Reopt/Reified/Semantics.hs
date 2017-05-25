@@ -62,7 +62,6 @@ import           Reopt.Semantics.Monad
   )
 import qualified Reopt.Semantics.Monad as S
 import qualified Data.Macaw.CFG as R
-import           Data.Macaw.Types (FloatInfo(..))
 
 -- import Debug.Trace
 
@@ -326,78 +325,6 @@ compareF' a b def = case compareF a b of
 
 compareFin :: MapF.OrdF f => forall (a :: Type) . forall (b :: Type). f a -> f b -> Ordering
 compareFin a b = compareF' a b EQ
-
-compare' :: Ord o => o -> o -> Ordering -> Ordering
-compare' a b def = case compare a b of
-  GT -> GT
-  EQ -> def
-  LT -> LT
-
-instance Ord Stmt where
-  MakeUndefined v1 _tp1 `compare` MakeUndefined v2 _tp2 = compareFin v1 v2
-  MakeUndefined _ _ `compare` _ = GT
-  _ `compare` MakeUndefined _ _ = LT
-  Get v1 l1 `compare` Get v2 l2 = compareF' v1 v2 $ compareFin l1 l2
-  Get _ _ `compare` _ = GT
-  _ `compare` Get _ _ = LT
-
-  Let v1 e1 `compare` Let v2 e2 = compareF' v1 v2 $ compareFin e1 e2
-  Let _ _ `compare` _ = GT
-  _ `compare` Let _ _ = LT
-
-  (l1 := e1) `compare` (l2 := e2) = compareF' l1 l2 $ compareFin e1 e2
-  (_ := _) `compare` _ = GT
-  _ `compare` (_ := _) = LT
-  Ifte_ e1 s1 s1' `compare` Ifte_ e2 s2 s2' =
-    compareF' e1 e2 $ compare' s1 s2 $ compare s1' s2'
-  Ifte_ _ _ _ `compare` _ = GT
-  _ `compare` Ifte_ _ _ _ = LT
-  MemCopy i e1 e2 e3 e4 `compare` MemCopy i' e1' e2' e3' e4' =
-    compare' i i' $ compareF' e1 e1' $ compareF' e2 e2' $ compareF' e3 e3' $
-      compareFin e4 e4'
-  MemCopy{} `compare` _ = GT
-  _ `compare` MemCopy{} = LT
-  MemCmp v i e1 e2 e3 e4 `compare` MemCmp v' i' e1' e2' e3' e4' =
-    compareF' v v' $ compare' i i' $ compareF' e1 e1' $ compareF' e2 e2' $
-      compareF' e3 e3' $ compareFin e4 e4'
-  MemCmp{} `compare` _ = GT
-  _ `compare` MemCmp{} = LT
-  MemSet e1 e2 e3 e4 `compare` MemSet e1' e2' e3' e4' =
-    compareF' e1 e1' $ compareF' e2 e2' $ compareF' e3 e3' $ compareFin e4 e4'
-  MemSet{} `compare` _ = GT
-  _ `compare` MemSet{} = LT
-  Primitive p1 `compare` Primitive p2 = p1 `compare` p2
-  Primitive _ `compare` _ = GT
-  _ `compare` Primitive _ = LT
-  GetSegmentBase v s `compare` GetSegmentBase v' s' =
-    compare' v v' $ compare s s'
-  GetSegmentBase{} `compare` _ = GT
-  _ `compare` GetSegmentBase{} = LT
-  BVQuot v1 e1 e2 `compare` BVQuot v1' e1' e2' =
-    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVQuot{} `compare` _ = GT
-  _ `compare` BVQuot{} = LT
-  BVRem v1 e1 e2 `compare` BVRem v1' e1' e2' =
-    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVRem{} `compare` _ = GT
-  _ `compare` BVRem{} = LT
-  BVSignedQuot v1 e1 e2 `compare` BVSignedQuot v1' e1' e2' =
-    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVSignedQuot{} `compare` _ = GT
-  _ `compare` BVSignedQuot{} = LT
-  BVSignedRem v1 e1 e2 `compare` BVSignedRem v1' e1' e2' =
-    compareF' v1 v1' $ compareF' e1 e1' $ compareFin e2 e2'
-  BVSignedRem{} `compare` _ = GT
-  _ `compare` BVSignedRem{} = LT
-  Exception e1 e2 ec `compare` Exception e1' e2' ec' =
-    compareF' e1 e1' $ compareF' e2 e2' $ compare ec ec'
-  Exception{} `compare` _ = GT
-  _ `compare` Exception{} = LT
-  X87Push e `compare` X87Push e' = compareFin e e'
-  X87Push{} `compare` _ = GT
-  _ `compare` X87Push{} = LT
-  X87Pop `compare` X87Pop = EQ
-
 
 ------------------------------------------------------------------------
 -- Semantics monad instance.

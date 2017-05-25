@@ -79,7 +79,7 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
-import           Data.Macaw.Types (BVType, knownType, typeRepr)
+import           Data.Macaw.Types (BVType, knownType, n1, n8, typeRepr)
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.FreeBSDGenerated as FreeBSD
@@ -145,7 +145,7 @@ asBVLit _ = Nothing
 ltProof :: forall f n m . (n+1 <= m) => f n -> f m -> LeqProof n m
 ltProof _ _ = leqTrans lt LeqProof
   where lt :: LeqProof n (n+1)
-        lt = leqAdd LeqProof S.n1
+        lt = leqAdd LeqProof n1
 
 bvSle :: Expr ids (BVType n) -> Expr ids (BVType n) -> Expr ids BoolType
 bvSle x y = app (BVSignedLe x y)
@@ -157,6 +157,30 @@ bvUle x y = app (BVUnsignedLe x y)
 boolNot :: Expr ids BoolType -> Expr ids BoolType
 boolNot (asApp -> Just (NotApp b)) = b
 boolNot b = app (NotApp b)
+
+-- | Get the upper half of a bitvector.
+upperHalf :: forall ids n . (1 <= n) => Expr ids (BVType (n+n)) -> Expr ids (BVType n)
+-- Handle concrete values
+upperHalf (ValueExpr (BVValue w i)) = h
+   where half_width = halfNat w
+         h = bvLit half_width (i `shiftR` widthVal half_width)
+upperHalf e =
+   case asApp e of
+      -- Handle expression concatenation.
+      -- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in upperHalf
+      -- to the (n+n) bound in ConcatV.
+      Just (ConcatV lw lw' _ h)
+        | Just Refl <- testEquality lw lw' -> do
+        case testEquality half_width (exprWidth h) of
+          Just Refl -> h
+          Nothing -> error "upper half given illegal widths."
+      -- Introduce split operations
+      _ ->
+        -- Workaround for GHC typechecker
+        withLeqProof (addIsLeq half_width half_width) $
+          app (UpperHalf half_width e)
+  where half_width :: NatRepr n
+        half_width = halfNat (exprWidth e)
 
 instance S.IsValue (Expr ids) where
 
@@ -311,7 +335,7 @@ instance S.IsValue (Expr ids) where
     | x == y = bvLit (exprWidth x) (0::Integer)
       -- If this is a single bit comparison with a constant, resolve to Boolean operation.
     | ValueExpr (BVValue w v) <- y
-    , Just Refl <- testEquality w S.n1 =
+    , Just Refl <- testEquality w n1 =
       if v /= 0 then boolNot x else x
       -- Default case.
     | otherwise = app $ BVXor (exprWidth x) x y
@@ -324,7 +348,7 @@ instance S.IsValue (Expr ids) where
     | Just _ <- asBVLit x, Nothing <- asBVLit y = y S..=. x
       -- If this is a single bit comparison with a constant, resolve to Boolean operation.
     | ValueExpr (BVValue w v) <- y
-    , Just Refl <- testEquality w S.n1 =
+    , Just Refl <- testEquality w n1 =
       if v /= 0 then x else boolNot x
       -- Rewrite "base + offset = constant" to "base = constant - offset".
     | Just (BVAdd w x_base (asBVLit -> Just x_off)) <- asApp x
@@ -449,22 +473,13 @@ instance S.IsValue (Expr ids) where
       -- Literal case
     | Just v <- asBVLit e0 =
       let w0 = S.bv_width e0
-       in withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
+       in withLeqProof (leqTrans (leqProof n1 w0) (ltProof w0 w)) $
             bvLit w v
       -- Collapse duplicate extensions.
     | Just (UExt e w0) <- asApp e0 = do
       let we = S.bv_width e
       withLeqProof (leqTrans (ltProof we w0) (ltProof w0 w)) $
         S.uext w e
-
-{-
-      -- Convert @uext w (trunc w0 e)@ into @e .&. (2^w0 - 1)@
-      -- We have disabled this because our abstract domains are not as precise.
-    | Just (Trunc e w0) <- asApp e0
-    , Just Refl <- testEquality (S.bv_width e) w = do
-      withLeqProof (leqTrans (leqProof S.n1 w0) (ltProof w0 w)) $
-        e S..&. bvLit w (maxUnsigned w0)
--}
 
       -- Default case
     | otherwise = app (UExt e0 w)
@@ -841,38 +856,16 @@ lowerHalf e =
 n64 :: NatRepr 64
 n64 = knownNat
 
--- | Get the upper half of a bitvector.
-upperHalf :: forall ids n . (1 <= n) => Expr ids (BVType (n+n)) -> Expr ids (BVType n)
--- Handle concrete values
-upperHalf (ValueExpr (BVValue w i)) = h
-   where half_width = halfNat w
-         h = bvLit half_width (i `shiftR` widthVal half_width)
-upperHalf e =
-   case asApp e of
-      -- Handle expression concatenation.
-      -- N.B. We use unsafe coerce due to GHC failing to match the (n+n) in upperHalf
-      -- to the (n+n) bound in ConcatV.
-      Just (ConcatV lw lw' _ h)
-        | Just Refl <- testEquality lw lw' -> do
-        case testEquality half_width (exprWidth h) of
-          Just Refl -> h
-          Nothing -> error "upper half given illegal widths."
-      -- Introduce split operations
-      _ ->
-        -- Workaround for GHC typechecker
-        withLeqProof (addIsLeq half_width half_width) $
-          app (UpperHalf half_width e)
-  where half_width :: NatRepr n
-        half_width = halfNat (exprWidth e)
-
 -- | Assign a value to a location
-setLoc :: forall ids st_s tp. ImpLocation ids tp -> Value X86_64 ids tp ->
-          X86Generator st_s ids ()
-setLoc (loc :: ImpLocation ids tp) v =
+setLoc :: forall ids st_s tp
+       .  ImpLocation ids tp
+       -> Value X86_64 ids tp
+       -> X86Generator st_s ids ()
+setLoc loc v =
   case loc of
-   S.MemoryAddr w _ -> do
+   S.MemoryAddr w tp -> do
      addr <- eval w
-     addStmt $ WriteMem addr v
+     addStmt $ WriteMem addr tp v
 
    S.Register (rv :: S.RegisterView cl b n) -> do
      let writeReg :: forall st_s' . X86PrimLoc (N.RegisterType cl) ->
@@ -1206,7 +1199,7 @@ fnBlockState addr =
       & absRegState . x87TopReg         .~ FinSet (Set.singleton 7)
         -- Direction flag is initially zero.
       & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
-      & startAbsStack .~ Map.singleton 0 (StackEntry (S.BVTypeRepr n64) ReturnAddr)
+      & startAbsStack .~ Map.singleton 0 (StackEntry (BVMemRepr n8 LittleEndian) ReturnAddr)
 
 preserveFreeBSDSyscallReg :: X86Reg tp -> Bool
 preserveFreeBSDSyscallReg r
@@ -1280,6 +1273,7 @@ freeBSD_syscallPersonality =
 x86_64_freeBSD_info :: ArchitectureInfo X86_64
 x86_64_freeBSD_info =
   ArchitectureInfo { archAddrWidth      = Addr64
+                   , archEndianness = LittleEndian
                    , jumpTableEntrySize = 8
                    , disassembleFn      = disassembleBlockFromAbsState
                    , fnBlockStateFn     = \_ -> fnBlockState
@@ -1299,6 +1293,7 @@ linux_syscallPersonality =
 x86_64_linux_info :: ArchitectureInfo X86_64
 x86_64_linux_info =
   ArchitectureInfo { archAddrWidth      = Addr64
+                   , archEndianness = LittleEndian
                    , jumpTableEntrySize = 8
                    , disassembleFn      = disassembleBlockFromAbsState
                    , fnBlockStateFn     = \_ -> fnBlockState

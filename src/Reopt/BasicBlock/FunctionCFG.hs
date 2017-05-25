@@ -43,7 +43,7 @@ inFunBounds fb addr = funBase fb <= addr
 
 data Block = Block { blockStmts :: [Stmt]
                    , blockTerm :: Term
-                   } deriving (Eq, Ord)
+                   }-- deriving (Eq, Ord)
 
 data Term = Cond Word64 Word64 -- true, false
           | Call Word64 Word64 -- call, ret
