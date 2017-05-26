@@ -23,14 +23,7 @@ x86 instructions.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.Semantics.Monad
   ( -- * Type
-    Type(..)
-  , type BVType
-  , BoolType
-  , FloatType
-  , XMMType
-  , TypeRepr(..)
-  , type_width
-  , KnownType(..)
+    XMMType
   , RepValSize(..)
   , repValHasSupportedWidth
   , repValSizeMemRepr
@@ -711,7 +704,7 @@ ecx :: Location addr (BVType 32)
 ecx = reg_low32 N.rcx
 
 rip :: Location addr (BVType 64)
-rip = fullRegister N.IPReg
+rip = fullRegister N.X86_IP
 
 ------------------------------------------------------------------------
 

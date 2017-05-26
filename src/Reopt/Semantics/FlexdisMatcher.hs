@@ -23,6 +23,7 @@ module Reopt.Semantics.FlexdisMatcher
   ) where
 
 import           Data.Foldable
+import           Data.Macaw.Types
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Flexdis86 as F

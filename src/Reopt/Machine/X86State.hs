@@ -309,7 +309,7 @@ data X86Reg tp
      -- ^ The floating point top register
    | (BVType   2 ~ tp) => X87_TagReg !Int
       -- ^ One of 8 fpu tag registers.
-   | (BVType  80 ~ tp) => X87_FPUReg !Int
+   | (BVType  80 ~ tp) => X87_FPUReg !F.MMXReg
       -- ^ One of 8 fpu/mmx registers.
    | (BVType 128 ~ tp) => X86_XMMReg !Int
      -- ^ One of 8 XMM registers
@@ -369,14 +369,14 @@ instance OrdF X86Reg where
 x86Reg :: N.RegisterName cl -> X86Reg cl
 x86Reg nm =
   case nm of
-    N.IPReg           -> X86_IP
-    N.GPReg n         -> X86_GP n
-    N.FlagReg n       -> X86_FlagReg n
-    N.X87StatusReg n  -> X87_StatusReg n
-    N.X87TopReg       -> X87_TopReg
-    N.X87TagReg n     -> X87_TagReg n
-    N.X87FPUReg n     -> X87_FPUReg n
-    N.XMMReg n        -> X86_XMMReg n
+    N.X86_IP          -> X86_IP
+    N.X86_GP n        -> X86_GP n
+    N.X86_FlagReg n   -> X86_FlagReg n
+    N.X87_StatusReg n -> X87_StatusReg n
+    N.X87_TopReg      -> X87_TopReg
+    N.X87_TagReg n    -> X87_TagReg n
+    N.X87_FPUReg n    -> X87_FPUReg n
+    N.X86_XMMReg n    -> X86_XMMReg n
 
 rax_reg :: X86Reg (BVType 64)
 rax_reg = X86_GP 0
@@ -499,7 +499,7 @@ x87TagRegList :: [X86Reg (BVType 2)]
 x87TagRegList = [X87_TagReg i | i <- [0..7]]
 
 x87FPURegList :: [X86Reg (BVType 80)]
-x87FPURegList = [X87_FPUReg i | i <- [0..7]]
+x87FPURegList = [X87_FPUReg (F.mmxReg i) | i <- [0..7]]
 
 xmmRegList :: [X86Reg (BVType 128)]
 xmmRegList = [X86_XMMReg i | i <- [0..15]]

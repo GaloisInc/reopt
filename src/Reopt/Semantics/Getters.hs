@@ -41,7 +41,7 @@ module Reopt.Semantics.Getters
 
 import           Data.Macaw.CFG (MemRepr(..))
 import           Data.Macaw.Memory (Endianness(..))
-import           Data.Macaw.Types (n8, n16, n32, n64)
+import           Data.Macaw.Types (FloatType, BVType, n8, n16, n32, n64)
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Flexdis86 as F
@@ -141,7 +141,7 @@ getSomeBVLocation v =
   case v of
     F.ControlReg cr  -> pure $ SomeBV $ ControlReg cr
     F.DebugReg dr    -> pure $ SomeBV $ DebugReg dr
-    F.MMXReg mmx     -> pure $ SomeBV $ x87reg_mmx $ N.mmxFromFlexdis mmx
+    F.MMXReg mmx     -> pure $ SomeBV $ x87reg_mmx $ N.X87_FPUReg mmx
     F.XMMReg xmm     -> pure $ SomeBV $ fullRegister $ N.xmmFromFlexdis xmm
     F.SegmentValue s -> pure $ SomeBV $ SegmentReg s
     F.X87Register i -> mk (X87StackRegister i)

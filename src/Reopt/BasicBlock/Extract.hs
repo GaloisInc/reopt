@@ -91,14 +91,14 @@ instance ByteReader r => ByteReader (WrappedByteReader r) where
 nexts :: Map (Some Variable) [Next] -> [Next] -> [CS.Stmt] -> [Next]
 nexts _ addrs [] = addrs
 nexts vars _addrs (((S.Register rv) := expr) : rest)
-  | Just (N.IPReg, Refl, Refl) <- registerViewAsFullRegister rv
+  | Just (N.X86_IP, Refl, Refl) <- registerViewAsFullRegister rv
   = nexts vars (staticExpr vars expr) rest
 nexts vars addrs ((Ifte_ _expr as bs) : rest) =
   let aAddrs = nexts vars addrs as
       bAddrs = nexts vars addrs bs
   in nexts vars (L.union aAddrs bAddrs) rest
 nexts vars addrs ((Get v (S.Register rv)) : rest)
-  | Just (N.IPReg, Refl, Refl) <- registerViewAsFullRegister rv
+  | Just (N.X86_IP, Refl, Refl) <- registerViewAsFullRegister rv
   = nexts (M.insert (Some v) addrs vars) addrs rest
 nexts vars addrs ((Get v _) : rest) =
   nexts (M.insert (Some v) [NIndirect] vars) addrs rest

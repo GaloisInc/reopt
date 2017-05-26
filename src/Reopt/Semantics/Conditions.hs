@@ -11,6 +11,7 @@ module Reopt.Semantics.Conditions
   ) where
 
 import Reopt.Semantics.Monad
+import Data.Macaw.Types (BoolType)
 
 cond_a, cond_ae, cond_b, cond_be, cond_g, cond_ge, cond_l, cond_le, cond_o, cond_p, cond_s, cond_z,
   cond_no, cond_np, cond_ns, cond_nz :: Semantics m => m (Value m BoolType)

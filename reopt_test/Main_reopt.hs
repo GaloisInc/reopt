@@ -60,6 +60,7 @@ import           Flexdis86 ( InstructionInstance
                            , ByteReader(..)
                            , disassembleInstruction
                            , LockPrefix(..)
+                           , mmxRegNo
                            )
 
 import           Data.Macaw.CFG
@@ -371,14 +372,16 @@ translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
     fillReg X87_TopReg = MS.Literal $ bitVector knownNat $
                             BV.extract (13 :: Int) 11 swd'
     fillReg (X87_TagReg _) = MS.Undefined $ BVTypeRepr  knownNat
-    fillReg (X87_FPUReg 0) = mkLit80 $ st0 ptraceFPRegs
-    fillReg (X87_FPUReg 1) = mkLit80 $ st1 ptraceFPRegs
-    fillReg (X87_FPUReg 2) = mkLit80 $ st2 ptraceFPRegs
-    fillReg (X87_FPUReg 3) = mkLit80 $ st3 ptraceFPRegs
-    fillReg (X87_FPUReg 4) = mkLit80 $ st4 ptraceFPRegs
-    fillReg (X87_FPUReg 5) = mkLit80 $ st5 ptraceFPRegs
-    fillReg (X87_FPUReg 6) = mkLit80 $ st6 ptraceFPRegs
-    fillReg (X87_FPUReg 7) = mkLit80 $ st7 ptraceFPRegs
+    fillReg (X87_FPUReg r) = mkLit80 $ s ptraceFPRegs
+      where s = case mmxRegNo r of
+                  0 -> st0
+                  1 -> st1
+                  2 -> st2
+                  3 -> st3
+                  4 -> st4
+                  5 -> st5
+                  6 -> st6
+                  7 -> st7
     fillReg (X86_XMMReg  0) = mkLit128 (xmm0 ptraceFPRegs)
     fillReg (X86_XMMReg  1) = mkLit128 (xmm1 ptraceFPRegs)
     fillReg (X86_XMMReg  2) = mkLit128 (xmm2 ptraceFPRegs)

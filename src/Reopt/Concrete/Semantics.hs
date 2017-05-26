@@ -44,23 +44,24 @@ import           Data.Bits
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
+import qualified Flexdis86 as F
+
 
 import           GHC.Float (float2Double, double2Float)
 
 import qualified Data.Macaw.CFG as R
-import           Data.Macaw.Types ( FloatInfoRepr, FloatType
+import           Data.Macaw.Types (Type(..)
+                                  , TypeRepr(..)
+                                  , BoolType
+                                  , FloatInfoRepr, FloatType
                                   , floatInfoBits
                                   , n1, n8, n16, n32, n64, n80
                                   , typeRepr
                                   )
+
+import qualified Reopt.Concrete.MachineState as CS
 import qualified Reopt.Machine.X86State as X
 import           Reopt.Reified.Semantics
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Semantics.Monad
-  ( Type(..)
-  , TypeRepr(..)
-  , BoolType
-  )
 import qualified Reopt.Semantics.Monad as S
 
 ------------------------------------------------------------------------
@@ -273,7 +274,7 @@ evalStmt (Get x l) =
       case CS.asBV topReg of
         Just bv -> do
           let top = fromIntegral $ BV.nat bv
-          let reg = X.X87_FPUReg ((top + i) `mod` 8)
+          let reg = X.X87_FPUReg (F.mmxReg ((top + fromIntegral i) `mod` 8))
           v0 <- CS.getReg reg
           extendEnv x v0
         Nothing -> extendEnv x $ CS.Undefined $ BVTypeRepr nr
@@ -347,7 +348,7 @@ evalStmt (l := e) =
           case CS.asBV topReg of
             Just bv -> do
               let top = fromIntegral $ BV.nat bv
-              let reg = X.X87_FPUReg ((top + i) `mod` 8)
+              let reg = X.X87_FPUReg (F.mmxReg ((top + fromIntegral i) `mod` 8))
               CS.setReg reg ve
             Nothing ->
               forM_ X.x87FPURegList $ \reg -> do
@@ -418,7 +419,7 @@ evalStmt (X87Push s) = do
       let idx = fromIntegral $ BV.uint bv
       if idx > 7
          then error "evalStmt: X87Push: index out of bounds"
-         else CS.setReg (X.X87_FPUReg idx) =<< evalExpr' s
+         else CS.setReg (X.X87_FPUReg (F.mmxReg idx)) =<< evalExpr' s
 evalStmt X87Pop = do
   vTop <- CS.getReg X.X87_TopReg
   CS.setReg X.X87_TopReg $ CS.liftValueSame (+1) vTop

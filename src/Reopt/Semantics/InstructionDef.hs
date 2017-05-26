@@ -38,7 +38,7 @@ module Reopt.Semantics.InstructionDef
   ) where
 
 import qualified Flexdis86 as F
-import           Data.Macaw.Types (n128)
+import           Data.Macaw.Types
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           GHC.TypeLits (KnownNat)

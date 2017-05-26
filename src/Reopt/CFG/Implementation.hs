@@ -79,7 +79,7 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
-import           Data.Macaw.Types (BVType, knownType, n1, n8, typeRepr)
+import           Data.Macaw.Types (BoolType, BVType, TypeRepr(..), knownType, n1, n8, typeRepr)
 import qualified Flexdis86 as F
 
 import qualified Reopt.Machine.StateNames as N
@@ -88,8 +88,7 @@ import           Reopt.Machine.SysDeps.LinuxGenerated as Linux
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 import           Reopt.Semantics.Monad
-  ( BoolType
-  , bvLit
+  ( bvLit
   )
 import qualified Reopt.Semantics.Monad as S
 
@@ -129,7 +128,7 @@ asApp (ValueExpr v) = mapApp ValueExpr <$> valueAsApp v
 app :: App (Expr ids) tp -> (Expr ids) tp
 app = AppExpr
 
-exprType :: Expr ids tp -> S.TypeRepr tp
+exprType :: Expr ids tp -> TypeRepr tp
 exprType (ValueExpr v) = typeRepr v
 exprType (AppExpr a) = appType a
 
@@ -137,7 +136,7 @@ exprType (AppExpr a) = appType a
 exprWidth :: Expr ids (BVType n) -> NatRepr n
 exprWidth e =
   case exprType e of
-    S.BVTypeRepr n -> n
+    BVTypeRepr n -> n
 
 asBVLit :: Expr ids tp -> Maybe Integer
 asBVLit (ValueExpr (BVValue _ v)) = Just v
@@ -838,7 +837,7 @@ getLoc (l0 :: ImpLocation ids tp) =
     -- TODO
     S.X87StackRegister i -> do
       idx <- getX87Offset i
-      e <- modState $ use $ boundValue (X87_FPUReg idx)
+      e <- modState $ use $ boundValue (X87_FPUReg (F.mmxReg (fromIntegral idx)))
       -- TODO: Check tag register is assigned.
       return $! ValueExpr e
 
@@ -889,7 +888,7 @@ setLoc loc v =
      modState $ boundValue r .= v1
    S.X87StackRegister i -> do
      off <- getX87Offset i
-     modState $ boundValue (X87_FPUReg off) .= v
+     modState $ boundValue (X87_FPUReg (F.mmxReg (fromIntegral off))) .= v
 
 mkBlockLabel :: SegmentedAddr 64
              -> GenState st_s ids any
@@ -915,7 +914,7 @@ bvBinOp op' x y = do
 
 
 instance S.Semantics (X86Generator st_s ids) where
-  make_undefined (S.BVTypeRepr n) =
+  make_undefined (BVTypeRepr n) =
     ValueExpr . AssignedValue <$> addAssignment (SetUndefined n)
 
   -- Get value of a location.
@@ -1069,11 +1068,11 @@ instance S.Semantics (X86Generator st_s ids) where
   x87Push e = do
     v <- eval e
     topv <- getX87Top
-    let new_top = (topv - 1) .&. 0x7
+    let new_top = fromIntegral $ (topv - 1) .&. 0x7
     modState $ do
       -- TODO: Update tagWords
       -- Store value at new top
-      boundValue (X87_FPUReg new_top) .= v
+      boundValue (X87_FPUReg (F.mmxReg new_top)) .= v
       -- Update top
       x87TopReg .= BVValue knownNat (toInteger new_top)
   x87Pop = do

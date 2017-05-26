@@ -68,7 +68,6 @@ module Reopt.Machine.StateNames
   , flagNames
   , gpNames
   , gpFromFlexdis
-  , mmxFromFlexdis
   , xmmFromFlexdis
   , x87StatusNames
 
@@ -101,7 +100,6 @@ import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
 import qualified Data.Vector as V
 import qualified Flexdis86 as F
-import           GHC.TypeLits
 
 -- Widths of common types
 type ProgramCounter  = BVType 64
@@ -210,49 +208,37 @@ x87_X  = X87_ControlReg 12 n1
 ------------------------------------------------------------------------
 -- RegisterName
 
-data RegisterName cl
-   = (cl ~ ProgramCounter) => IPReg
-   | (cl ~ GP) => GPReg !Int
+data RegisterName tp
+   = (tp ~ BVType 64)  => X86_IP
+   | (tp ~ BVType 64)  => X86_GP !Int
      -- ^ One of 16 general purpose registers
-   | (cl ~ Flag)    => FlagReg !Int
+   | (tp ~ BVType 1)   => X86_FlagReg !Int
      -- ^ One of 32 initial flag registers.
-   | (cl ~ X87_Status) => X87StatusReg !Int
+   | (tp ~ BVType 1)   => X87_StatusReg !Int
      -- ^ One of 16 x87 status registers
-   | (cl ~ X87_Top)    => X87TopReg
+   | (tp ~ BVType 3)   => X87_TopReg
      -- X87 tag register.
-   | (cl ~ X87_Tag) => X87TagReg !Int
+   | (tp ~ BVType 2)   => X87_TagReg !Int
       -- One of 8 fpu/mmx registers.
-   | (cl ~ X87_FPU) => X87FPUReg !Int
+   | (tp ~ BVType 80)  => X87_FPUReg !F.MMXReg
      -- One of 8 XMM registers
-   | (cl ~ XMM)   => XMMReg   !Int
-
-x87StatusRegs :: [RegisterName X87_Status]
-x87StatusRegs = [X87StatusReg i | i <- [0..15]]
-
-x87TagRegs :: [RegisterName X87_Tag]
-x87TagRegs = [X87TagReg i | i <- [0..7]]
-
-x87FPURegs :: [RegisterName X87_FPU]
-x87FPURegs = [X87FPUReg i | i <- [0..7]]
-
-xmmRegs :: [RegisterName XMM]
-xmmRegs = [XMMReg i | i <- [0..7]]
+   | (tp ~ BVType 128) => X86_XMMReg   !Int
 
 instance ShowF RegisterName where
   showF = show
 
 instance Show (RegisterName cl) where
-  show IPReg          = "rip"
-  show (GPReg n)      = nm
+  show X86_IP          = "rip"
+  show (X86_GP n)      = nm
     where Just nm = gpNames V.!? n
-  show (FlagReg n)    = nm
+  show (X86_FlagReg n)    = nm
     where Just nm = flagNames V.!? n
-  show (X87StatusReg n) = nm
+  show (X87_StatusReg n) = nm
     where Just nm = x87StatusNames V.!? n
-  show X87TopReg      = "x87top"
-  show (X87TagReg n)  = "tag" ++ show n
-  show (X87FPUReg n)  = "fpu" ++ show n
-  show (XMMReg n)     = "xmm" ++ show n
+  show X87_TopReg      = "x87top"
+  show (X87_TagReg n)  = "tag" ++ show n
+  show (X87_FPUReg n)  = show n
+  show (X86_XMMReg n)     = "xmm" ++ show n
 
 instance TestEquality RegisterName where
   testEquality x y = orderingIsEqual (compareF x y)
@@ -271,37 +257,35 @@ instance Eq (RegisterName cl) where
     | otherwise = False
 
 instance OrdF RegisterName where
-  compareF IPReg             IPReg              = EQF
-  compareF (GPReg n)         (GPReg n')         = fromOrdering (compare n n')
-  compareF (FlagReg n)       (FlagReg n')       = fromOrdering (compare n n')
-  compareF (X87StatusReg n)  (X87StatusReg n')  = fromOrdering (compare n n')
-  compareF X87TopReg         X87TopReg          = EQF
-  compareF (X87TagReg n)     (X87TagReg n')     = fromOrdering (compare n n')
-  compareF (X87FPUReg n)     (X87FPUReg n')     = fromOrdering (compare n n')
-  compareF (XMMReg n)        (XMMReg n')        = fromOrdering (compare n n')
-  compareF IPReg             _                  = LTF
-  compareF _                 IPReg              = GTF
+  compareF X86_IP            X86_IP            = EQF
+  compareF X86_IP            _                 = LTF
+  compareF _                 X86_IP            = GTF
 
-  compareF GPReg{}           _                  = LTF
-  compareF _                 GPReg{}            = GTF
+  compareF (X86_GP n)        (X86_GP n')        = fromOrdering (compare n n')
+  compareF X86_GP{}           _                 = LTF
+  compareF _                 X86_GP{}           = GTF
 
-  compareF FlagReg{}         _                  = LTF
-  compareF _                 FlagReg{}          = GTF
+  compareF (X86_FlagReg n)   (X86_FlagReg n')   = fromOrdering (compare n n')
+  compareF X86_FlagReg{}         _              = LTF
+  compareF _                 X86_FlagReg{}      = GTF
 
-  compareF X87StatusReg{}    _                  = LTF
-  compareF _                 X87StatusReg{}     = GTF
+  compareF (X87_StatusReg n) (X87_StatusReg n') = fromOrdering (compare n n')
+  compareF X87_StatusReg{}    _                 = LTF
+  compareF _                 X87_StatusReg{}    = GTF
 
-  compareF X87TopReg         _                  = LTF
-  compareF _                 X87TopReg          = GTF
+  compareF X87_TopReg         X87_TopReg        = EQF
+  compareF X87_TopReg         _                 = LTF
+  compareF _                 X87_TopReg         = GTF
 
-  compareF X87TagReg{}       _                  = LTF
-  compareF _                 X87TagReg{}        = GTF
+  compareF (X87_TagReg n)     (X87_TagReg n')     = fromOrdering (compare n n')
+  compareF X87_TagReg{}       _                  = LTF
+  compareF _                 X87_TagReg{}        = GTF
 
-  compareF X87FPUReg{}       _                  = LTF
-  compareF _                 X87FPUReg{}        = GTF
+  compareF (X87_FPUReg n)     (X87_FPUReg n')     = fromOrdering (compare n n')
+  compareF X87_FPUReg{}       _                  = LTF
+  compareF _                 X87_FPUReg{}        = GTF
 
-  compareF XMMReg{}          _                  = LTF
-  compareF _                 XMMReg{}           = GTF
+  compareF (X86_XMMReg n)        (X86_XMMReg n')        = fromOrdering (compare n n')
 
 instance Ord (RegisterName cl) where
   a `compare` b = case a `compareF` b of
@@ -310,26 +294,14 @@ instance Ord (RegisterName cl) where
     LTF -> LT
 
 registerWidth :: RegisterName cl -> NatRepr (TypeBits cl)
-registerWidth IPReg           = knownNat
-registerWidth GPReg{}         = knownNat
-registerWidth FlagReg{}       = knownNat
-registerWidth X87StatusReg{}  = knownNat
-registerWidth X87TopReg       = knownNat
-registerWidth X87TagReg{}     = knownNat
-registerWidth X87FPUReg{}     = knownNat
-registerWidth XMMReg{}        = knownNat
-
---type RegisterType cl = cl
-
-registerType :: RegisterName cl -> TypeRepr cl
-registerType IPReg           = knownType
-registerType GPReg{}         = knownType
-registerType FlagReg{}       = knownType
-registerType X87StatusReg{}  = knownType
-registerType X87TopReg       = knownType
-registerType X87TagReg{}     = knownType
-registerType X87FPUReg{}     = knownType
-registerType XMMReg{}        = knownType
+registerWidth X86_IP           = knownNat
+registerWidth X86_GP{}         = knownNat
+registerWidth X86_FlagReg{}       = knownNat
+registerWidth X87_StatusReg{}  = knownNat
+registerWidth X87_TopReg       = knownNat
+registerWidth X87_TagReg{}     = knownNat
+registerWidth X87_FPUReg{}     = knownNat
+registerWidth X86_XMMReg{}        = knownNat
 
 ------------------------------------------------------------------------
 -- Exported constructors and their conversion to words
@@ -346,42 +318,42 @@ data BitPacking (n :: Nat) = BitPacking (NatRepr n) [BitConversion n]
 
 -- | Instruction Pointer
 rip :: RegisterName ProgramCounter
-rip = IPReg
+rip = X86_IP
 
 -- | GPRs
 rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp :: RegisterName GP
-rax = GPReg 0
-rcx = GPReg 1
-rdx = GPReg 2
-rbx = GPReg 3
-rsp = GPReg 4
-rbp = GPReg 5
-rsi = GPReg 6
-rdi = GPReg 7
+rax = X86_GP 0
+rcx = X86_GP 1
+rdx = X86_GP 2
+rbx = X86_GP 3
+rsp = X86_GP 4
+rbp = X86_GP 5
+rsi = X86_GP 6
+rdi = X86_GP 7
 
 r8 :: RegisterName GP
-r8 = GPReg 8
+r8 = X86_GP 8
 
 r9 :: RegisterName GP
-r9 = GPReg 9
+r9 = X86_GP 9
 
 r10 :: RegisterName GP
-r10 = GPReg 10
+r10 = X86_GP 10
 
 r11 :: RegisterName GP
-r11 = GPReg 11
+r11 = X86_GP 11
 
 r12 :: RegisterName GP
-r12 = GPReg 12
+r12 = X86_GP 12
 
 r13 :: RegisterName GP
-r13 = GPReg 13
+r13 = X86_GP 13
 
 r14 :: RegisterName GP
-r14 = GPReg 14
+r14 = X86_GP 14
 
 r15 :: RegisterName GP
-r15 = GPReg 15
+r15 = X86_GP 15
 
 gpNames :: V.Vector String
 gpNames = V.fromList $
@@ -390,15 +362,15 @@ gpNames = V.fromList $
 
 -- | Flags
 cf, pf, af, zf, sf, tf, iflag, df, oflag :: RegisterName Flag
-cf    = FlagReg 0
-pf    = FlagReg 2
-af    = FlagReg 4
-zf    = FlagReg 6
-sf    = FlagReg 7
-tf    = FlagReg 8
-iflag = FlagReg 9
-df    = FlagReg 10
-oflag = FlagReg 11
+cf    = X86_FlagReg 0
+pf    = X86_FlagReg 2
+af    = X86_FlagReg 4
+zf    = X86_FlagReg 6
+sf    = X86_FlagReg 7
+tf    = X86_FlagReg 8
+iflag = X86_FlagReg 9
+df    = X86_FlagReg 10
+oflag = X86_FlagReg 11
 
 flagNames :: V.Vector String
 flagNames = V.fromList
@@ -407,74 +379,42 @@ flagNames = V.fromList
   , "iopl", "nt", "SBZ", "rf", "vm", "ac", "vif", "vip", "id"
   ]
 
--- FIXME: missing the system flags
-flagBitPacking :: BitPacking 64
-flagBitPacking = BitPacking knownNat $ flagBits ++ constants
-  where
-    -- flags     = [cf, pf, af, zf, sf, tf, iflag, df, oflag]
-    flagBits  = [ RegisterBit cf    (knownNat :: NatRepr 0)
-                , RegisterBit pf    (knownNat :: NatRepr 2)
-                , RegisterBit af    (knownNat :: NatRepr 4)
-                , RegisterBit zf    (knownNat :: NatRepr 6)
-                , RegisterBit sf    (knownNat :: NatRepr 7)
-                , RegisterBit tf    (knownNat :: NatRepr 8)
-                , RegisterBit iflag (knownNat :: NatRepr 9 )
-                , RegisterBit df    (knownNat :: NatRepr 10)
-                , RegisterBit oflag (knownNat :: NatRepr 11)
-                ]
-
-    constants = [ ConstantBit True  (knownNat :: NatRepr 1)
-                , ConstantBit False (knownNat :: NatRepr 3)
-                , ConstantBit False (knownNat :: NatRepr 5)
-                , ConstantBit False (knownNat :: NatRepr 15)
-                , ConstantBit False (knownNat :: NatRepr 22)
-                , ConstantBit False (knownNat :: NatRepr 23)
-                , ConstantBit False (knownNat :: NatRepr 24)
-                , ConstantBit False (knownNat :: NatRepr 25)
-                , ConstantBit False (knownNat :: NatRepr 26)
-                , ConstantBit False (knownNat :: NatRepr 27)
-                , ConstantBit False (knownNat :: NatRepr 28)
-                , ConstantBit False (knownNat :: NatRepr 29)
-                , ConstantBit False (knownNat :: NatRepr 30)
-                , ConstantBit False (knownNat :: NatRepr 31)
-                ]
-
 -- | x87 flags
 pattern X87IE :: RegisterName X87_Status
-pattern X87IE = X87StatusReg 0
+pattern X87IE = X87_StatusReg 0
 
 pattern X87DE :: RegisterName X87_Status
-pattern X87DE = X87StatusReg 1
+pattern X87DE = X87_StatusReg 1
 
 pattern X87ZE :: RegisterName X87_Status
-pattern X87ZE = X87StatusReg 2
+pattern X87ZE = X87_StatusReg 2
 
 pattern X87OE :: RegisterName X87_Status
-pattern X87OE = X87StatusReg 3
+pattern X87OE = X87_StatusReg 3
 
 pattern X87UE :: RegisterName X87_Status
-pattern X87UE = X87StatusReg 4
+pattern X87UE = X87_StatusReg 4
 
 pattern X87PE :: RegisterName X87_Status
-pattern X87PE = X87StatusReg 5
+pattern X87PE = X87_StatusReg 5
 
 pattern X87EF :: RegisterName X87_Status
-pattern X87EF = X87StatusReg 6
+pattern X87EF = X87_StatusReg 6
 
 pattern X87ES :: RegisterName X87_Status
-pattern X87ES = X87StatusReg 7
+pattern X87ES = X87_StatusReg 7
 
 pattern X87C0 :: RegisterName X87_Status
-pattern X87C0 = X87StatusReg 8
+pattern X87C0 = X87_StatusReg 8
 
 pattern X87C1 :: RegisterName X87_Status
-pattern X87C1 = X87StatusReg 9
+pattern X87C1 = X87_StatusReg 9
 
 pattern X87C2 :: RegisterName X87_Status
-pattern X87C2 = X87StatusReg 10
+pattern X87C2 = X87_StatusReg 10
 
 pattern X87C3 :: RegisterName X87_Status
-pattern X87C3 = X87StatusReg 14
+pattern X87C3 = X87_StatusReg 14
 
 x87StatusNames :: V.Vector String
 x87StatusNames = V.fromList $
@@ -482,38 +422,14 @@ x87StatusNames = V.fromList $
   , "c0", "c1", "c2", "RESERVED", "RESERVED", "RESERVED", "c3", "RESERVED"
   ]
 
--- FIXME: what about Busy bit
-x87StatusBitPacking :: BitPacking 16
-x87StatusBitPacking = BitPacking knownNat $ flags
-                      ++ [RegisterBit X87TopReg (knownNat :: NatRepr 11)]
-  where
-    flags = [ RegisterBit X87IE (knownNat :: NatRepr 0 )
-            , RegisterBit X87DE (knownNat :: NatRepr 1 )
-            , RegisterBit X87ZE (knownNat :: NatRepr 2 )
-            , RegisterBit X87OE (knownNat :: NatRepr 3 )
-            , RegisterBit X87UE (knownNat :: NatRepr 4 )
-            , RegisterBit X87PE (knownNat :: NatRepr 5 )
-            , RegisterBit X87EF (knownNat :: NatRepr 6 )
-            , RegisterBit X87ES (knownNat :: NatRepr 7 )
-            , RegisterBit X87C0 (knownNat :: NatRepr 8 )
-            , RegisterBit X87C1 (knownNat :: NatRepr 9 )
-            , RegisterBit X87C2     (knownNat :: NatRepr 10)
-            , RegisterBit X87TopReg (knownNat :: NatRepr 11)
-            , RegisterBit X87C3     (knownNat :: NatRepr 14)
-            ]
-
 ------------------------------------------------------------------------
 -- Conversions from flexdis state names
 
 -- This allows us to perhaps compact the representation so we are not
 -- reliant on the layout of x86 registers/bits
 
--- FIXME: should we expose this?
-mmxFromFlexdis :: F.MMXReg -> RegisterName X87_FPU
-mmxFromFlexdis mmx    = X87FPUReg (fromIntegral $ F.mmxRegNo mmx)
-
 xmmFromFlexdis :: F.XMMReg -> RegisterName XMM
-xmmFromFlexdis xmm    = XMMReg (fromIntegral $ F.xmmRegNo xmm)
+xmmFromFlexdis xmm    = X86_XMMReg (fromIntegral $ F.xmmRegNo xmm)
 
 gpFromFlexdis :: F.Reg64 -> RegisterName GP
-gpFromFlexdis r = GPReg (fromIntegral $ F.reg64No r)
+gpFromFlexdis r = X86_GP (fromIntegral $ F.reg64No r)

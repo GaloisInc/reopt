@@ -45,7 +45,7 @@ import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
-
+import           Data.Macaw.Types
 import           Data.Parameterized.Classes (EqF(..), OrderingF(..), compareF, fromOrdering)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
@@ -55,10 +55,7 @@ import           Text.PrettyPrint.ANSI.Leijen
 import           Reopt.Concrete.MachineState (Value)
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Semantics.Monad
-  ( Type(..)
-  , TypeRepr(..)
-  , BoolType
-  , bvLit
+  ( bvLit
   )
 import qualified Reopt.Semantics.Monad as S
 import qualified Data.Macaw.CFG as R
@@ -86,25 +83,25 @@ data Variable tp = Variable !(TypeRepr tp) !Name
 type Name = String
 
 instance TestEquality Variable where
-  (Variable tp1 n1) `testEquality` (Variable tp2 n2) = do
+  (Variable tp1 nm1) `testEquality` (Variable tp2 nm2) = do
     Refl <- testEquality tp1 tp2
-    guard (n1 == n2)
+    guard (nm1 == nm2)
     return Refl
 
 instance MapF.OrdF Variable where
-  (Variable tp1 n1) `compareF` (Variable tp2 n2) =
-    case (tp1 `compareF` tp2, n1 `compare` n2) of
+  (Variable tp1 nm1) `compareF` (Variable tp2 nm2) =
+    case (tp1 `compareF` tp2, nm1 `compare` nm2) of
       (LTF,_) -> LTF
       (GTF,_) -> GTF
       (EQF,o) -> fromOrdering o
 
 instance Ord (Variable tp) where
-  (Variable _ n1) `compare` (Variable _ n2) =
-    n1 `compare` n2
+  (Variable _ nm1) `compare` (Variable _ nm2) =
+    nm1 `compare` nm2
 
 instance Eq (Variable tp) where
-  (Variable _ n1) == (Variable _ n2) =
-    n1 == n2
+  (Variable _ nm1) == (Variable _ nm2) =
+    nm1 == nm2
 
 -- | A pure expression for isValue.
 data Expr tp where
@@ -174,9 +171,9 @@ mkLit n v = LitExpr n (v .&. mask)
 app :: R.App Expr tp -> Expr tp
 app = AppExpr
 
-exprType :: Expr tp -> S.TypeRepr tp
+exprType :: Expr tp -> TypeRepr tp
 exprType (ValueExpr v) = CS.asTypeRepr v
-exprType (LitExpr r _) = S.BVTypeRepr r
+exprType (LitExpr r _) = BVTypeRepr r
 exprType (AppExpr a) = R.appType a
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
@@ -184,7 +181,7 @@ exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 exprWidth :: Expr (BVType n) -> NatRepr n
 exprWidth e =
   case exprType e of
-    S.BVTypeRepr n -> n
+    BVTypeRepr n -> n
 
 -- In this instance we don't override the default implementations. If
 -- we wanted to, we'd have to extend the 'App' type with the
@@ -283,7 +280,7 @@ data Stmt where
             -> Expr BoolType
             -> S.ExceptionClass
             -> Stmt
-  X87Push :: Expr (S.FloatType X86_80Float) -> Stmt
+  X87Push :: Expr (FloatType X86_80Float) -> Stmt
   X87Pop  :: Stmt
 
 instance Eq Stmt where
@@ -413,7 +410,7 @@ instance S.Semantics Semantics where
   rep_scas _ = error "rep_scas is not yet implemented."
 
   memcmp r v1 v2 v3 v4 = do
-    var <- freshVar "memcmp" S.knownType
+    var <- freshVar "memcmp" knownType
     tell [MemCmp var r v1 v2 v3 v4]
     return $ VarExpr var
 
@@ -424,7 +421,7 @@ instance S.Semantics Semantics where
   pshufb = error "pshufb is not yet implemented."
 
   getSegmentBase seg = do
-    var <- freshVar (show seg ++ "_base") S.knownType
+    var <- freshVar (show seg ++ "_base") knownType
     tell [GetSegmentBase var seg]
     return $ VarExpr var
 
@@ -481,9 +478,9 @@ expandRead v addr (BVTypeRepr nr) =
   where
     getOne :: Integer -> Semantics (Expr (BVType 8))
     getOne n = do
-      v' <- freshVar "expandRead" S.knownType
+      v' <- freshVar "expandRead" knownType
       let addr' = offsetAddr (n * 8) addr
-      tell [Get v' (S.MemoryAddr addr' S.knownType)]
+      tell [Get v' (S.MemoryAddr addr' knownType)]
       return $ VarExpr v'
 
     go :: forall n'. NatRepr n' -> P n' -> P (n' + 1)
@@ -519,7 +516,7 @@ expandWrite addr (BVTypeRepr nr) v =
                v_shift = AppExpr (R.BVShr sz v (LitExpr sz (natValue n * 8)))
                v'      = AppExpr (R.Trunc v_shift S.n8)
            in
-              tell [ S.MemoryAddr addr' S.knownType := v' ]
+              tell [ S.MemoryAddr addr' knownType := v' ]
     sz = exprWidth v
 -}
 
@@ -529,7 +526,7 @@ expandMemOps :: Stmt -> Semantics ()
 --   , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr =
 --       case l of
 --         S.MemoryAddr addr _tp ->  do
---           addrv <- freshVar "addr" S.knownType
+--           addrv <- freshVar "addr" knownType
 --           tell [Let addrv addr]
 --           expandRead v (VarExpr addrv) (S.loc_type l)
 --         _ -> tell [stmt]
@@ -539,7 +536,7 @@ expandMemOps :: Stmt -> Semantics ()
 --     S.MemoryAddr addr _tp
 --       | S.BVTypeRepr nr <- S.loc_type l
 --       , Just LeqProof <- testLeq (knownNat :: NatRepr 9) nr -> do
---         addrv <- freshVar "addr" S.knownType
+--         addrv <- freshVar "addr" knownType
 --         valv  <- freshVar "val" (S.BVTypeRepr nr)
 --         tell [ Let addrv addr
 --              , Let valv e ]

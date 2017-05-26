@@ -22,7 +22,7 @@ import           Data.Bits (shiftL)
 import           Data.Int
 import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
 import           Data.Macaw.Memory (Endianness (LittleEndian))
-import           Data.Macaw.Types (n0, n1, n8, n16, n32, n64, n128)
+import           Data.Macaw.Types
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Proxy
@@ -1078,10 +1078,10 @@ def_cmps = defBinary "cmps" $ \pfx loc loc' -> do
 -- SCAS/SCASD Scan string/Scan doubleword string
 
 xaxValLoc :: RepValSize w -> Location a (BVType w)
-xaxValLoc ByteRepVal  = reg_low8  (N.GPReg 0)
-xaxValLoc WordRepVal  = reg_low16 (N.GPReg 0)
-xaxValLoc DWordRepVal = reg_low32 (N.GPReg 0)
-xaxValLoc QWordRepVal = fullRegister (N.GPReg 0)
+xaxValLoc ByteRepVal  = reg_low8  (N.X86_GP 0)
+xaxValLoc WordRepVal  = reg_low16 (N.X86_GP 0)
+xaxValLoc DWordRepVal = reg_low32 (N.X86_GP 0)
+xaxValLoc QWordRepVal = fullRegister (N.X86_GP 0)
 
 -- The arguments to this are always rax/QWORD PTR es:[rdi], so we only
 -- need the args for the size.
