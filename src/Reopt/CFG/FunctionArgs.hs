@@ -703,6 +703,7 @@ instance CanDemandValues X86_64 where
   demandedArchStmtValues stmt =
     case stmt of
       WriteLoc _ v -> [ Some v]
+      StoreX87Control v -> [ Some v]
       MemCopy _sz cnt src dest rev -> [ Some cnt, Some src, Some dest, Some rev ]
       MemSet cnt v ptr df -> [ Some cnt, Some v, Some ptr, Some df ]
 

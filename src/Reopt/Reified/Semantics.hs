@@ -127,6 +127,9 @@ instance Show (Expr tp) where
   show (AppExpr _) = "app"
   show (VarExpr _) = "variable"
 
+instance MapF.ShowF Expr where
+  showF = show
+
 instance TestEquality Expr where
   testEquality e1 e2 = testEquality (exprType e1) (exprType e2)
 
@@ -415,6 +418,8 @@ instance S.Semantics Semantics where
     return $ VarExpr var
 
   primitive p = tell [Primitive p]
+
+  fnstcw = error "fnstcw is not yet implemented."
 
   pshufb = error "pshufb is not yet implemented."
 

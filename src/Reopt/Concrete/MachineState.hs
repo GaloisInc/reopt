@@ -96,7 +96,6 @@ instance Pretty (Value tp) where
 
 instance PrettyRegValue X.X86Reg Value where
   ppValueEq (X.X86_FlagReg n) _ | not (n `elem` [0,2,4,6,7,8,9,10,11]) = Nothing
-  ppValueEq (X.X87_ControlReg n) _ | not (n `elem` [0,1,2,3,4,5,12]) = Nothing
   ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
 
 ------------------------------------------------------------------------

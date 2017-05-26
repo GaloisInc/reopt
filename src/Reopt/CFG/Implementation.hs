@@ -80,6 +80,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.Flexdis86
 import           Data.Macaw.Types (BVType, knownType, n1, n8, typeRepr)
+import qualified Flexdis86 as F
 
 import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.SysDeps.FreeBSDGenerated as FreeBSD
@@ -818,26 +819,22 @@ getLoc (l0 :: ImpLocation ids tp) =
     S.MemoryAddr w tp -> do
       addr <- eval w
       ValueExpr . AssignedValue <$> addAssignment (ReadMem addr tp)
-    S.Register (rv :: S.RegisterView cl b n) -> do
-      let readLoc' :: forall st_s'. X86PrimLoc (N.RegisterType cl) ->
-                      X86Generator st_s' ids (Expr ids tp)
-          readLoc' l = S.registerViewRead rv <$> readLoc l
+    S.ControlReg _ ->
+      fail $ "Do not support writing to control registers."
+    S.DebugReg _ ->
+      fail $ "Do not support writing to debug registers."
+    S.SegmentReg s
+      | s == F.FS -> readLoc FS
+      | s == F.GS -> readLoc GS
+        -- Otherwise registers are 0.
+      | otherwise ->
+        fail $ "On x86-64 registers other than fs and gs may not be read."
+    S.X87ControlReg r ->
+      readLoc (X87_ControlLoc r)
+    S.Register (rv :: S.RegisterView (BVType m) b n) -> do
       let r_nm = S.registerViewReg rv
-      case r_nm of
-       -- N.ControlReg {} -> addStmt $ Val (ControlLoc r) v
-       -- N.DebugReg {}   -> addStmt $ Write (DebugLoc r)   v
-       N.SegmentReg {}
-         | r_nm == N.fs -> readLoc' FS
-         | r_nm == N.gs -> readLoc' GS
-         -- Otherwise registers are 0.
-         | otherwise ->
-           fail $ "On x86-64 registers other than fs and gs may not be read."
-       N.X87PC -> readLoc' X87_PC
-       N.X87RC -> readLoc' X87_RC
-       _ -> do
-         let Just r = x86Reg r_nm
-         modState $
-            S.registerViewRead rv . ValueExpr <$> use (boundValue r)
+      let r = x86Reg r_nm
+      modState $ S.registerViewRead rv . ValueExpr <$> use (boundValue r)
     -- TODO
     S.X87StackRegister i -> do
       idx <- getX87Offset i
@@ -856,6 +853,9 @@ lowerHalf e =
 n64 :: NatRepr 64
 n64 = knownNat
 
+addWriteLoc :: X86PrimLoc tp -> Value X86_64 ids tp -> X86Generator st_s ids ()
+addWriteLoc l v = addStmt $ ExecArchStmt $ WriteLoc l v
+
 -- | Assign a value to a location
 setLoc :: forall ids st_s tp
        .  ImpLocation ids tp
@@ -867,30 +867,26 @@ setLoc loc v =
      addr <- eval w
      addStmt $ WriteMem addr tp v
 
-   S.Register (rv :: S.RegisterView cl b n) -> do
-     let writeReg :: forall st_s' . X86PrimLoc (N.RegisterType cl) ->
-                     X86Generator st_s' ids ()
-         writeReg reg = do
-           v0 <- readLoc reg
-           v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
-           addStmt $ ExecArchStmt $ WriteLoc reg v1
+   S.ControlReg r -> do
+     addWriteLoc (ControlLoc r) v
+   S.DebugReg r  ->
+     addWriteLoc (DebugLoc r) v
+
+   S.SegmentReg s
+     | s == F.FS -> addWriteLoc FS v
+     | s == F.GS -> addWriteLoc GS v
+       -- Otherwise registers are 0.
+     | otherwise ->
+       fail $ "On x86-64 registers other than fs and gs may not be set."
+
+   S.X87ControlReg r ->
+     addWriteLoc (X87_ControlLoc r) v
+   S.Register (rv :: S.RegisterView (BVType m) b n) -> do
      let r_nm = S.registerViewReg rv
-     case r_nm of
-       N.ControlReg {} -> writeReg (ControlLoc r_nm)
-       N.DebugReg {}   -> writeReg (DebugLoc r_nm)
-       N.SegmentReg {}
-         | r_nm == N.fs -> writeReg FS
-         | r_nm == N.gs -> writeReg GS
-         -- Otherwise registers are 0.
-         | otherwise ->
-             fail $ "On x86-64 registers other than fs and gs may not be set."
-       N.X87PC -> writeReg X87_PC
-       N.X87RC -> writeReg X87_RC
-       _ -> do
-         let Just r = x86Reg r_nm
-         v0 <- modState $ ValueExpr <$> use (boundValue r)
-         v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
-         modState $ boundValue r .= v1
+     let r = x86Reg r_nm
+     v0 <- modState $ ValueExpr <$> use (boundValue r)
+     v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
+     modState $ boundValue r .= v1
    S.X87StackRegister i -> do
      off <- getX87Offset i
      modState $ boundValue (X87_FPUReg off) .= v
@@ -1039,6 +1035,10 @@ instance S.Semantics (X86Generator st_s ids) where
     res <- ValueExpr . AssignedValue <$> addArchFn (XGetBV ecx_val)
     S.reg_low32 N.rdx S..= upperHalf res
     S.reg_low32 N.rax S..= lowerHalf res
+
+  fnstcw addr = do
+    addr_val <- eval addr
+    addStmt $ ExecArchStmt $ StoreX87Control addr_val
 
   pshufb w x y = do
     x_val <- eval x

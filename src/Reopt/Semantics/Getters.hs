@@ -139,11 +139,11 @@ data SomeBV v where
 getSomeBVLocation :: FullSemantics m => F.Value -> m (SomeBV (MLocation m))
 getSomeBVLocation v =
   case v of
-    F.ControlReg cr  -> pure $ SomeBV $ fullRegister $ N.controlFromFlexdis cr
-    F.DebugReg dr    -> pure $ SomeBV $ fullRegister $ N.debugFromFlexdis dr
+    F.ControlReg cr  -> pure $ SomeBV $ ControlReg cr
+    F.DebugReg dr    -> pure $ SomeBV $ DebugReg dr
     F.MMXReg mmx     -> pure $ SomeBV $ x87reg_mmx $ N.mmxFromFlexdis mmx
     F.XMMReg xmm     -> pure $ SomeBV $ fullRegister $ N.xmmFromFlexdis xmm
-    F.SegmentValue s -> pure $ SomeBV $ fullRegister $ N.segmentFromFlexdis s
+    F.SegmentValue s -> pure $ SomeBV $ SegmentReg s
     F.X87Register i -> mk (X87StackRegister i)
     F.FarPointer _      -> fail "FarPointer"
     -- SomeBV . (`MemoryAddr`   byteMemRepr) <$> getBVAddress ar -- FIXME: what size here?
@@ -319,7 +319,7 @@ data HasRepSize f w = HasRepSize { _ppvWidth :: !(RepValSize w)
 getAddrRegOrSegment :: forall m . FullSemantics m => F.Value -> m (Some (HasRepSize (MLocation m)))
 getAddrRegOrSegment v =
   case v of
-    F.SegmentValue s -> pure $ Some $ HasRepSize WordRepVal (fullRegister $ N.segmentFromFlexdis s)
+    F.SegmentValue s -> pure $ Some $ HasRepSize WordRepVal (SegmentReg s)
     F.Mem8  ar -> Some . HasRepSize  ByteRepVal . (`MemoryAddr`  byteMemRepr) <$> getBVAddress ar
     F.Mem16 ar -> Some . HasRepSize  WordRepVal . (`MemoryAddr`  wordMemRepr) <$> getBVAddress ar
     F.Mem32 ar -> Some . HasRepSize DWordRepVal . (`MemoryAddr` dwordMemRepr) <$> getBVAddress ar

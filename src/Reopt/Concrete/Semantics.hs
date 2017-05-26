@@ -256,10 +256,18 @@ evalStmt (Get x l) =
           v0 <- CS.getMem a
           extendEnv x v0
     S.Register rv -> do
-      let Just r = X.x86Reg (S.registerViewReg rv)
+      let r = X.x86Reg (S.registerViewReg rv)
       v0 <- CS.getReg r
       v1 <- evalExpr' $ S.registerViewRead rv (ValueExpr v0)
       extendEnv x v1
+    S.ControlReg _ -> do
+      fail $ "Concrete backend does not support control register."
+    S.DebugReg _ -> do
+      fail $ "Concrete backend does not support debug register."
+    S.SegmentReg _ -> do
+      fail $ "Concrete backend does not support segment register."
+    S.X87ControlReg _ -> do
+      fail $ "Concrete backend does not support x87 control register."
     S.X87StackRegister i -> do
       topReg <- CS.getReg X.X87_TopReg
       case CS.asBV topReg of
@@ -307,35 +315,43 @@ evalStmt (GetSegmentBase x seg) = do
 evalStmt (l := e) =
   -- Force 'tp' to be a 'BVType n'.
   case S.loc_type l of
-  BVTypeRepr _ -> do
+    BVTypeRepr _ -> do
 
-  let nr = S.loc_width l
-  ve <- evalExpr' e
-  case l of
-    S.MemoryAddr addr _tp -> do
-      vaddr <- evalExpr' addr
-      case vaddr of
-        -- Alternatively, we could mark memory values known to
-        -- the machine state monad 'm' as 'Undefined' here.
-        CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
-        CS.Literal bvaddr -> do
-          let a = CS.Address nr bvaddr
-          CS.setMem a ve
-    S.Register rv -> do
-      let Just r = X.x86Reg $ S.registerViewReg rv
-      v0 <- CS.getReg r
-      v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
-      CS.setReg r v1
-    S.X87StackRegister i -> do
-      topReg <- CS.getReg X.X87_TopReg
-      case CS.asBV topReg of
-        Just bv -> do
-          let top = fromIntegral $ BV.nat bv
-          let reg = X.X87_FPUReg ((top + i) `mod` 8)
-          CS.setReg reg ve
-        Nothing ->
-          forM_ X.x87FPURegList $ \reg -> do
-            CS.setReg reg (CS.Undefined $ typeRepr reg)
+      let nr = S.loc_width l
+      ve <- evalExpr' e
+      case l of
+        S.MemoryAddr addr _tp -> do
+          vaddr <- evalExpr' addr
+          case vaddr of
+            -- Alternatively, we could mark memory values known to
+            -- the machine state monad 'm' as 'Undefined' here.
+            CS.Undefined _ -> error "evalStmt: undefined address in (:=)!"
+            CS.Literal bvaddr -> do
+              let a = CS.Address nr bvaddr
+              CS.setMem a ve
+        S.Register rv -> do
+          let r = X.x86Reg $ S.registerViewReg rv
+          v0 <- CS.getReg r
+          v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
+          CS.setReg r v1
+        S.ControlReg _ -> do
+          fail $ "Concrete backend does not support control register."
+        S.DebugReg _ -> do
+          fail $ "Concrete backend does not support debug register."
+        S.SegmentReg _ -> do
+          fail "Concrete semantics does not support segment registers."
+        S.X87ControlReg _ -> do
+          fail $ "Concrete backend does not support x87 control register."
+        S.X87StackRegister i -> do
+          topReg <- CS.getReg X.X87_TopReg
+          case CS.asBV topReg of
+            Just bv -> do
+              let top = fromIntegral $ BV.nat bv
+              let reg = X.X87_FPUReg ((top + i) `mod` 8)
+              CS.setReg reg ve
+            Nothing ->
+              forM_ X.x87FPURegList $ \reg -> do
+                CS.setReg reg (CS.Undefined $ typeRepr reg)
 evalStmt (Ifte_ c t f) = do
   vc <- evalExpr' c
   case vc of

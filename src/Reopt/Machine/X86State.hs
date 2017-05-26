@@ -71,6 +71,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
+import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
@@ -102,55 +103,31 @@ type instance ArchStmt X86_64 = X86Stmt
 -- X86PrimLoc
 
 -- | This describes a primitive location that can be read or written to in the
--- X86 architecture model.
+--  X86 architecture model.
+-- Primitive locations are not modeled as registers, but rather as implicit state.
 data X86PrimLoc tp
-   = (tp ~ BVType 64) => ControlLoc !(N.RegisterName 'N.Control)
-   | (tp ~ BVType 64) => DebugLoc   !(N.RegisterName 'N.Debug)
+   = (tp ~ BVType 64) => ControlLoc !F.ControlReg
+   | (tp ~ BVType 64) => DebugLoc   !F.DebugReg
    | (tp ~ BVType 16) => FS
      -- ^ This refers to the selector of the 'FS' register.
    | (tp ~ BVType 16) => GS
-     -- ^ This refers to the selector of the 'GS' register.
-   | (tp ~ BVType 2)  => X87_PC
-     -- ^ X87 precision control field.
-     --
-     -- Values are:
-     -- 00 Single Precision (24 bits)
-     -- 01 Reserved
-     -- 10 Double Precision (53 bits)
-     -- 11 Double Extended Precision (64 bits)
-   | (tp ~ BVType 2) => X87_RC
-     -- ^ X87 rounding control field.  Values are:
-     --
-     -- 00 Round to nearest (even)
-     -- Rounded result is the closest to the infinitely precise result. If two
-     -- values are equally close, the result is the even value (that is, the one
-     -- with the least-significant bit of zero). Default
-     --
-     -- 01 Round down (toward −∞)
-     -- Rounded result is closest to but no greater than the infinitely precise result.
-     --
-     -- 10 Round up (toward +∞)
-     -- Rounded result is closest to but no less than the infinitely precise result.
-     --
-     -- 11 Round toward zero (Truncate)
-     -- Rounded result is closest to but no greater in absolute value than the
-     -- infinitely precise result.
+     -- ^ This refers to the se lector of the 'GS' register.
+   | forall w . (tp ~ BVType   w) => X87_ControlLoc !(N.X87_ControlReg w)
+     -- ^ One of the x87 control registers
 
 instance HasRepr X86PrimLoc TypeRepr where
   typeRepr ControlLoc{} = knownType
   typeRepr DebugLoc{}   = knownType
   typeRepr FS = knownType
   typeRepr GS = knownType
-  typeRepr X87_PC = knownType
-  typeRepr X87_RC = knownType
+  typeRepr (X87_ControlLoc r) = BVTypeRepr (typeRepr r)
 
 instance Pretty (X86PrimLoc tp) where
   pretty (ControlLoc r) = text (show r)
   pretty (DebugLoc r) = text (show r)
   pretty FS = text "fs"
   pretty GS = text "gs"
-  pretty X87_PC = text "x87_pc"
-  pretty X87_RC = text "x87_rc"
+  pretty (X87_ControlLoc r) = text (show r)
 
 ------------------------------------------------------------------------
 -- X86PrimFn
@@ -260,11 +237,11 @@ ppX86PrimFn pp f =
 -- X86Stmt
 
 -- | An X86 specific statement.
---
--- Each of these functions
 data X86Stmt ids
    = forall tp .
      WriteLoc !(X86PrimLoc tp) !(Value X86_64 ids tp)
+   | StoreX87Control !(BVValue X86_64 ids 64)
+     -- ^ Store the X87 control register in the given location.
    | MemCopy !Integer
              !(BVValue X86_64 ids 64)
              !(BVValue X86_64 ids 64)
@@ -292,6 +269,7 @@ data X86Stmt ids
 
 instance PrettyF X86Stmt where
   prettyF (WriteLoc loc rhs) = pretty loc <+> text ":=" <+> ppValue 0 rhs
+  prettyF (StoreX87Control addr) = pretty addr <+> text ":= x87_control"
   prettyF (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
@@ -325,8 +303,6 @@ data X86Reg tp
      -- ^ One of 16 general purpose registers
    | (BVType   1 ~ tp) => X86_FlagReg !Int
      -- ^ One of 32 flag registers
-   | (BVType   1 ~ tp) => X87_ControlReg !Int
-     -- ^ One of 16 x87 control registers
    | (BVType   1 ~ tp) => X87_StatusReg !Int
      -- ^ One of 16 X87 Status registers
    | (BVType   3 ~ tp) => X87_TopReg
@@ -370,10 +346,6 @@ instance OrdF X86Reg where
   compareF X86_FlagReg{}   _               = LTF
   compareF _               X86_FlagReg{}   = GTF
 
-  compareF (X87_ControlReg i) (X87_ControlReg j) = fromOrdering (compare i j)
-  compareF X87_ControlReg{}   _                  = LTF
-  compareF _                  X87_ControlReg{}   = GTF
-
   compareF (X87_StatusReg i) (X87_StatusReg j) = fromOrdering (compare i j)
   compareF X87_StatusReg{}   _                 = LTF
   compareF _                 X87_StatusReg{}   = GTF
@@ -394,19 +366,17 @@ instance OrdF X86Reg where
 
 -- | Map a register name to a X86Reg if it is treated as an
 -- abstract register in the simulator.
-x86Reg :: N.RegisterName cl -> Maybe (X86Reg (N.RegisterType cl))
+x86Reg :: N.RegisterName cl -> X86Reg cl
 x86Reg nm =
   case nm of
-    N.IPReg           -> Just $! X86_IP
-    N.GPReg n         -> Just $! X86_GP n
-    N.FlagReg n       -> Just $! X86_FlagReg n
-    N.X87ControlReg n -> Just $! X87_ControlReg n
-    N.X87StatusReg n  -> Just $! X87_StatusReg n
-    N.X87TopReg       -> Just $! X87_TopReg
-    N.X87TagReg n     -> Just $! X87_TagReg n
-    N.X87FPUReg n     -> Just $! X87_FPUReg n
-    N.XMMReg n        -> Just $! X86_XMMReg n
-    _ -> Nothing
+    N.IPReg           -> X86_IP
+    N.GPReg n         -> X86_GP n
+    N.FlagReg n       -> X86_FlagReg n
+    N.X87StatusReg n  -> X87_StatusReg n
+    N.X87TopReg       -> X87_TopReg
+    N.X87TagReg n     -> X87_TagReg n
+    N.X87FPUReg n     -> X87_FPUReg n
+    N.XMMReg n        -> X86_XMMReg n
 
 rax_reg :: X86Reg (BVType 64)
 rax_reg = X86_GP 0
@@ -488,8 +458,6 @@ instance Show (X86Reg tp) where
     where Just nm = N.gpNames V.!? n
   show (X86_FlagReg n)    = nm
     where Just nm = N.flagNames V.!? n
-  show (X87_ControlReg n)  = nm
-    where Just nm = N.x87ControlNames V.!? n
   show (X87_StatusReg n) = nm
     where Just nm = N.x87StatusNames V.!? n
   show X87_TopReg      = "x87top"
@@ -509,7 +477,6 @@ instance HasRepr X86Reg TypeRepr where
       X86_IP           -> knownType
       X86_GP{}         -> knownType
       X86_FlagReg{}    -> knownType
-      X87_ControlReg{} -> knownType
       X87_StatusReg{}  -> knownType
       X87_TopReg       -> knownType
       X87_TagReg{}     -> knownType
@@ -524,9 +491,6 @@ gpRegList = [X86_GP i | i <- [0..15]]
 
 flagRegList :: [X86Reg (BVType 1)]
 flagRegList = [X86_FlagReg i | i <- [0,2,4,6,7,8,9,10,11]]
-
-x87ControlRegList :: [X86Reg (BVType 1)]
-x87ControlRegList = [X87_ControlReg i | i <- [0..15]]
 
 x87StatusRegList :: [X86Reg (BVType 1)]
 x87StatusRegList = [X87_StatusReg i | i <- [0..15]]
@@ -546,7 +510,6 @@ x86StateRegs
   =  [Some X86_IP]
   ++ (Some <$> gpRegList)
   ++ (Some <$> flagRegList)
-  ++ (Some <$> x87ControlRegList)
   ++ (Some <$> x87StatusRegList)
   ++ [Some X87_TopReg]
   ++ (Some <$> x87TagRegList)
@@ -622,6 +585,7 @@ refsInX86PrimFn f =
 
 refsInX86Stmt :: X86Stmt ids -> Set (Some (AssignId ids))
 refsInX86Stmt (WriteLoc _ rhs) = refsInValue rhs
+refsInX86Stmt (StoreX87Control addr) = refsInValue addr
 refsInX86Stmt (MemCopy _ cnt src dest df) =
   Set.unions [ refsInValue cnt
              , refsInValue src

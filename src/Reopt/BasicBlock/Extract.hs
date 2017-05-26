@@ -11,7 +11,7 @@ module Reopt.BasicBlock.Extract
 import           Control.Monad.State
 import qualified Data.List as L
 import           Data.Macaw.CFG as R
-import           Data.Macaw.Types (n0, n64)
+import           Data.Macaw.Types (TypeBits, n0, n64)
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Map as M
@@ -36,8 +36,8 @@ import           Debug.Trace
 -- The returned equalities help with type checking, e.g. by
 -- constraining the type indices of the 'Location' in which the
 -- 'RegisterView' is embedded.
-registerViewAsFullRegister :: S.RegisterView cl b n
-                           -> Maybe (N.RegisterName cl, b :~: 0, n :~: N.RegisterClassBits cl)
+registerViewAsFullRegister :: S.RegisterView tp b n
+                           -> Maybe (N.RegisterName tp, b :~: 0, n :~: TypeBits tp)
 registerViewAsFullRegister v
   | Just Refl <- S.registerViewBase v `testEquality` n0
   , Just Refl <- S.registerViewSize v `testEquality` N.registerWidth (S.registerViewReg v)

@@ -114,12 +114,13 @@ import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
 import           Data.Macaw.Memory (Endianness(..))
 import           Data.Macaw.Types
 
-import           Reopt.Machine.StateNames (RegisterName, RegisterClass(..))
+import           Reopt.Machine.StateNames (RegisterName)
 import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Utils.GHCBug as GHCBug
 
+import qualified Flexdis86 as F
 import           Flexdis86.Sizes (SizeConstraint(..))
-import           Flexdis86.Segment
+import Flexdis86.Segment
   ( Segment
   , pattern ES
   , pattern CS
@@ -137,19 +138,14 @@ type XMMType    = BVType 128
 -- See comments above 'registerViewRead'.
 
 -- | A view into a register / a subregister.
-data RegisterView cl b n =
-  (b + n <= N.RegisterClassBits cl) =>
-  RegisterView
+data RegisterView cl b n
+  = (b + n <= TypeBits cl)
+ => RegisterView
     { _registerViewBase :: NatRepr b
     , _registerViewSize :: NatRepr n
     , _registerViewReg :: RegisterName cl
     , _registerViewType :: RegisterViewType cl b n
     }
-
--- TODO(conathan) use constraint kinds and constraint aliases to name
--- the read and write constraints, instead of repeating them over and
--- over. Or better, eliminate the pointless (?) @1 <= n@ contraints
--- from 'IsValue' ...
 
 -- | The different kinds of register views.
 --
@@ -165,30 +161,35 @@ data RegisterView cl b n =
 -- a @IdentityView@ of type @RegisterViewType cl 0
 -- (N.registerclassbits cl)@ whose read view is @\x -> x@ and write
 -- view is @\x y -> y@.
-data RegisterViewType cl (b :: Nat) (n :: Nat) =
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , n <= N.RegisterClassBits cl
-  ) =>
-  DefaultView |
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , n <= N.RegisterClassBits cl
-  , 1 <= N.RegisterClassBits cl - n
-  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
-  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
-  , b ~ 0
-  ) =>
-  OneExtendOnWrite |
-  ( 1 <= n
-  , 1 <= N.RegisterClassBits cl
-  , n <= N.RegisterClassBits cl
-  , 1 <= N.RegisterClassBits cl - n
-  , N.RegisterClassBits cl - n <= N.RegisterClassBits cl
-  , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
-  , b ~ 0
-  ) =>
-  ZeroExtendOnWrite
+data RegisterViewType cl (b :: Nat) (n :: Nat)
+  = forall m
+  . ( cl ~ BVType m
+    , 1 <= n
+    , n <= m
+    )
+    => DefaultView
+  | forall m
+  . ( cl ~ BVType m
+    , 1 <= n
+    , 1 <= m
+    , n <= m
+    , 1 <= m - n
+    , m - n <= m
+    , ((m - n) + n) ~ m
+    , b ~ 0
+    )
+    => OneExtendOnWrite
+  | forall m
+  . ( cl ~ BVType m
+    , 1 <= n
+    , 1 <= m
+    , n <= m
+    , 1 <= m - n
+    , m - n <= m
+    , ((m - n) + n) ~ m
+    , b ~ 0
+    )
+    => ZeroExtendOnWrite
 
 -- * Destructors for 'RegisterView's.
 
@@ -210,18 +211,19 @@ registerViewType = _registerViewType
 --
 -- Assumes a big-endian 'IsValue' semantics.
 defaultRegisterViewRead
-  :: ( 1 <= N.RegisterClassBits cl
-     , 1 <= n
-     , n <= N.RegisterClassBits cl
+  :: forall v b n m
+  .  ( 1 <= n
+     , n <= m
      , IsValue v
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName cl
-  -> v (N.RegisterType cl)
+  -> RegisterName (BVType m)
+  -> v (BVType m)
   -> v (BVType n)
-defaultRegisterViewRead b n _rn v0 =
-  bvTrunc n $ v0 `bvShr` bvLit (bv_width v0) (natValue b)
+defaultRegisterViewRead b n _rn v0
+  | LeqProof <- leqTrans (LeqProof :: LeqProof 1 n) (LeqProof :: LeqProof n m) =
+    bvTrunc n $ v0 `bvShr` bvLit (bv_width v0) (natValue b)
 
 -- | Read a register via a view.
 --
@@ -283,39 +285,41 @@ defaultRegisterViewRead b n _rn v0 =
 --
 -- Note that we don't need arithmetic on bit vectors, neither as ints
 -- nor as floats.
-registerViewRead ::
-  IsValue v =>
-  RegisterView cl b n -> v (N.RegisterType cl) -> v (BVType n)
-registerViewRead (RegisterView {..}) =
-  case _registerViewType of
+registerViewRead
+  :: IsValue v
+  => RegisterView (BVType m) b n
+  -> v (BVType m)
+  -> v (BVType n)
+registerViewRead v =
+  case registerViewType v of
     DefaultView -> defaultRegisterViewRead b n rn
     OneExtendOnWrite -> defaultRegisterViewRead b n rn
     ZeroExtendOnWrite -> defaultRegisterViewRead b n rn
   where
-    b = _registerViewBase
-    n = _registerViewSize
-    rn = _registerViewReg
+    b  = _registerViewBase v
+    n  = _registerViewSize v
+    rn = _registerViewReg v
 
 -- | Update the 'n' bits starting at base 'b', leaving other bits
 -- unchanged.
 --
 -- Assumes a big-endian 'IsValue' semantics.
 defaultRegisterViewWrite
-  :: forall b cl n v
-  . ( 1 <= N.RegisterClassBits cl
-    , 1 <= n
-    , n <= N.RegisterClassBits cl
+  :: forall b m n v
+  . ( 1 <= n
+    , n <= m
     , IsValue v
     )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName cl
-  -> v (N.RegisterType cl)
+  -> RegisterName (BVType m)
+  -> v (BVType m)
      -- ^ Value being modified
   -> v (BVType n)
      -- ^ Value to write
-  -> v (N.RegisterType cl)
-defaultRegisterViewWrite b n rn v0 write_val =
+  -> v (BVType m)
+defaultRegisterViewWrite b n rn v0 write_val
+  | LeqProof <- leqTrans (LeqProof :: LeqProof 1 n) (LeqProof :: LeqProof n m) =
   -- Truncation 'bvTrunc' requires that the result vector has non-zero
   -- length, so we build the concatenation
   --
@@ -327,25 +331,26 @@ defaultRegisterViewWrite b n rn v0 write_val =
   --   (0^|h| ++ m ++ 0^|l|) ||
   --   (0^|h ++ m| ++ l)
   -- highOrderBits  .|. lowOrderBits
-   prevBits .|. middleOrderBits
-  where
-    -- Generate the mask for the new bits
-    myMask = maxUnsigned n `Bits.shiftL` fromInteger (natValue b)
-    -- Generate max for old bits.
-    notMyMask = Bits.complement myMask
-    prevBits = v0 .&. bvLit w notMyMask
-    w = bv_width v0
-    cl = N.registerWidth rn
-    b' = natValue b
-    middleOrderBits = uext cl write_val `bvShl` bvLit cl b'
+  let -- Generate the mask for the new bits
+      myMask = maxUnsigned n `Bits.shiftL` fromInteger (natValue b)
+      -- Generate max for old bits.
+      notMyMask = Bits.complement myMask
+      prevBits = v0 .&. bvLit w notMyMask
+      w = bv_width v0
+      cl = N.registerWidth rn
+      b' = natValue b
+      middleOrderBits = uext cl write_val `bvShl` bvLit cl b'
+   in prevBits .|. middleOrderBits
+
 
 -- | Write a register via a view.
-registerViewWrite ::
-  IsValue v =>
-  RegisterView cl b n ->
-  v (N.RegisterType cl) ->
-  v (BVType n) ->
-  v (N.RegisterType cl)
+registerViewWrite
+  :: ( IsValue v
+     )
+  => RegisterView tp b x1
+  -> v tp
+  -> v (BVType x1)
+  -> v tp
 registerViewWrite (RegisterView {..}) =
   case _registerViewType of
     DefaultView
@@ -356,43 +361,35 @@ registerViewWrite (RegisterView {..}) =
       -- Otherwise use the defaultRegisterViewWrite
       | otherwise -> defaultRegisterViewWrite b n rn
     OneExtendOnWrite ->
-      let ones = complement (bvLit (cl `subNat` n) (0::Integer)) in
-      constUpperBitsRegisterViewWrite n ones rn
+      let ones = complement (bvLit (cl `subNat` n) 0)
+       in constUpperBitsRegisterViewWrite n ones rn
     ZeroExtendOnWrite ->
-      let zeros = bvLit (cl `subNat` n) (0::Integer) in
-      constUpperBitsRegisterViewWrite n zeros rn
+      let zeros = bvLit (cl `subNat` n) 0
+       in constUpperBitsRegisterViewWrite n zeros rn
   where
     b = _registerViewBase
     n = _registerViewSize
     rn = _registerViewReg
     cl = N.registerWidth rn
 
--- | Update the lower 'n' bits and set the upper bits to a constant.
---
--- Assumes a big-endian 'IsValue' semantics.
 constUpperBitsRegisterViewWrite
-  :: forall cl n v .
-     ( 1 <= n
-     , 1 <= N.RegisterClassBits cl - n
-     , ((N.RegisterClassBits cl - n) + n) ~ N.RegisterClassBits cl
-     , IsValue v
-     )
-     => NatRepr n
-     -> v (BVType (N.RegisterClassBits cl - n))
-     -- ^ Constant bits.
-     -> RegisterName cl
-     -> v (N.RegisterType cl)
-     -> v (BVType n)
-     -> v (N.RegisterType cl)
+  :: (IsValue v, 1 <= b, 1 <= e, (b + e) ~ f)
+  => NatRepr a
+  -> v (BVType b)
+  -- ^ Constant bits.
+  -> RegisterName (BVType c)
+  -> v (BVType d)
+  -> v (BVType e)
+  -> v (BVType f)
 constUpperBitsRegisterViewWrite _n c _rn _v0 v = bvCat c v
 
 -- | The view for full registers.
 --
 -- The read view reads all bits and the write view writes all bits.
 identityRegisterView
-  :: (1 <= N.RegisterClassBits cl)
-  => RegisterName cl
-  -> RegisterView cl 0 (N.RegisterClassBits cl)
+  :: (1 <= m)
+  => RegisterName (BVType m)
+  -> RegisterView (BVType m) 0 m
 identityRegisterView rn =
   RegisterView
     { _registerViewBase = b
@@ -407,14 +404,14 @@ identityRegisterView rn =
 -- | The view for subregisters which are a slice of a full register.
 sliceRegisterView
   :: ( 1     <= n
-     , 1     <= N.RegisterClassBits cl
-     , n     <= N.RegisterClassBits cl
-     , b + n <= N.RegisterClassBits cl
+     , 1     <= m
+     , n     <= m
+     , b + n <= m
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName cl
-  -> RegisterView cl b n
+  -> RegisterName (BVType m)
+  -> RegisterView (BVType m) b n
 sliceRegisterView b n rn =
   RegisterView
     { _registerViewBase = b
@@ -430,7 +427,7 @@ sliceRegisterView b n rn =
 -- writes.
 constUpperBitsOnWriteRegisterView
   :: ( 1 <= n
-     , n <= N.RegisterClassBits cl
+     , n <= TypeBits cl
      )
   => NatRepr n
   -> RegisterViewType cl 0 n
@@ -451,14 +448,28 @@ constUpperBitsOnWriteRegisterView n rt rn  =
 -- or assigned for the semantics monad.
 data Location addr (tp :: Type) where
   -- A location in the virtual address space of the process.
-  MemoryAddr :: addr -> MemRepr tp -> Location addr tp
+  MemoryAddr :: !addr -> !(MemRepr tp) -> Location addr tp
 
-  Register :: RegisterView cl b n -> Location addr (BVType n)
+  Register :: !(RegisterView (BVType m) b n)
+           -> Location addr (BVType n)
+
+  ControlReg :: !F.ControlReg
+             -> Location addr (BVType 64)
+
+  DebugReg :: !F.DebugReg
+           -> Location addr (BVType 64)
+
+  SegmentReg :: !Segment
+             -> Location addr (BVType 16)
+
+  X87ControlReg :: !(N.X87_ControlReg w)
+                -> Location addr (BVType w)
 
   -- The register stack: the argument is an offset from the stack
   -- top, so X87Register 0 is the top, X87Register 1 is the second,
   -- and so forth.
-  X87StackRegister :: !Int -> Location addr (FloatType X86_80Float)
+  X87StackRegister :: !Int
+                   -> Location addr (FloatType X86_80Float)
 
 -- Equality and ordering.
 
@@ -526,6 +537,10 @@ ppLocation :: forall addr tp. (addr -> Doc) -> Location addr tp -> Doc
 ppLocation ppAddr loc = case loc of
   MemoryAddr addr _tr -> ppAddr addr
   Register rv -> ppReg rv
+  ControlReg r -> text (show r)
+  DebugReg r -> text (show r)
+  SegmentReg r -> text (show r)
+  X87ControlReg r -> text ("x87_" ++ show r)
   X87StackRegister i -> text $ "x87_stack@" ++ show i
   where
     -- | Print subrange as Python-style slice @<location>[<low>:<high>]@.
@@ -546,9 +561,9 @@ ppLocation ppAddr loc = case loc of
 -- Register-location smart constructors.
 
 -- | Full register location.
-fullRegister :: (1 <= N.RegisterClassBits cl)
-             => N.RegisterName cl
-             -> Location addr (N.RegisterType cl)
+fullRegister :: 1 <= n
+             => N.RegisterName (BVType n)
+             -> Location addr (BVType n)
 fullRegister = Register . identityRegisterView
 
 -- | Subregister location for simple subregisters.
@@ -557,13 +572,13 @@ fullRegister = Register . identityRegisterView
 -- and preserves remaining bits on writes.
 subRegister
   :: ( 1 <= n
-     , 1 <= N.RegisterClassBits cl
-     , n <= N.RegisterClassBits cl
-     , b + n <= N.RegisterClassBits cl
+     , 1 <= m
+     , n <= m
+     , b + n <= m
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName cl
+  -> RegisterName (BVType m)
   -> Location addr (BVType n)
 subRegister b n = Register . sliceRegisterView b n
 
@@ -574,12 +589,12 @@ subRegister b n = Register . sliceRegisterView b n
 -- writes.
 constUpperBitsOnWriteRegister ::
   ( 1 <= n
-  , n <= N.RegisterClassBits cl
-  ) =>
-  NatRepr n ->
-  RegisterViewType cl 0 n ->
-  RegisterName cl ->
-  Location addr (BVType n)
+  , n <= m
+  )
+  => NatRepr n
+  -> RegisterViewType (BVType m) 0 n
+  -> RegisterName (BVType m)
+  -> Location addr (BVType n)
 constUpperBitsOnWriteRegister n rt =
   Register . constUpperBitsOnWriteRegisterView n rt
 
@@ -589,6 +604,10 @@ constUpperBitsOnWriteRegister n rt =
 loc_type :: Location addr tp -> TypeRepr tp
 loc_type (MemoryAddr _ tp) = typeRepr tp
 loc_type (Register rv)     = BVTypeRepr $ _registerViewSize rv
+loc_type (ControlReg _)    = knownType
+loc_type (DebugReg _)    = knownType
+loc_type (SegmentReg _)    = knownType
+loc_type (X87ControlReg r) = BVTypeRepr (typeRepr r)
 loc_type (X87StackRegister _) = knownType
 
 loc_width :: Location addr (BVType n) -> NatRepr n
@@ -635,10 +654,10 @@ of_loc = fullRegister N.oflag
 
 -- | x87 flags
 c0_loc, c1_loc, c2_loc, c3_loc :: Location addr BoolType
-c0_loc = fullRegister N.x87c0
-c1_loc = fullRegister N.x87c1
-c2_loc = fullRegister N.x87c2
-c3_loc = fullRegister N.x87c3
+c0_loc = fullRegister N.X87C0
+c1_loc = fullRegister N.X87C1
+c2_loc = fullRegister N.X87C2
+c3_loc = fullRegister N.X87C3
 
 -- | Tuen an address into a location of size @n
 floatMemRepr :: FloatInfoRepr flt -> MemRepr (FloatType flt)
@@ -654,26 +673,26 @@ mkFPAddr fir addr = MemoryAddr addr (floatMemRepr fir)
 -- registers have special semantics, defined in Volume 1 of the Intel
 -- x86 manual: on write,the upper 16 bits of the underlying x87
 -- register are oned out!
-x87reg_mmx :: RegisterName 'X87_FPU -> Location addr (BVType 64)
+x87reg_mmx :: RegisterName N.X87_FPU -> Location addr (BVType 64)
 x87reg_mmx r = constUpperBitsOnWriteRegister n64 OneExtendOnWrite r
 
 -- | Return low 32-bits of register e.g. rax -> eax
 --
 -- These subregisters have special semantics, defined in Volume 1 of
 -- the Intel x86 manual: on write, the upper 32 bits are zeroed out!
-reg_low32 :: RegisterName 'GP -> Location addr (BVType 32)
+reg_low32 :: RegisterName N.GP -> Location addr (BVType 32)
 reg_low32 r = constUpperBitsOnWriteRegister n32 ZeroExtendOnWrite r
 
 -- | Return low 16-bits of register e.g. rax -> ax
-reg_low16 :: RegisterName 'GP -> Location addr (BVType 16)
+reg_low16 :: RegisterName N.GP -> Location addr (BVType 16)
 reg_low16 r = subRegister n0 n16 r
 
 -- | Return low 8-bits of register e.g. rax -> al
-reg_low8 :: RegisterName 'GP -> Location addr (BVType 8)
+reg_low8 :: RegisterName N.GP -> Location addr (BVType 8)
 reg_low8 r = subRegister n0 n8 r
 
 -- | Return bits 8-15 of the register e.g. rax -> ah
-reg_high8 :: RegisterName 'GP -> Location addr (BVType 8)
+reg_high8 :: RegisterName N.GP -> Location addr (BVType 8)
 reg_high8 r = subRegister n8 n8 r
 
 rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)
@@ -697,16 +716,15 @@ rip = fullRegister N.IPReg
 ------------------------------------------------------------------------
 
 packWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> m (Value m (BVType n))
-packWord (N.BitPacking sz bits) =
-  do injs <- mapM getMoveBits bits
-     return (foldl1 (.|.) injs)
-  where
-    getMoveBits :: N.BitConversion n -> m (Value m (BVType n))
-    getMoveBits (N.ConstantBit b off)
-      = return $ bvLit sz (if b then 1 `Bits.shiftL` widthVal off else (0 :: Integer))
-    getMoveBits (N.RegisterBit reg off)
-      = do v <- uext sz <$> get (fullRegister reg)
-           return $ v `bvShl` bvLit sz (natValue off)
+packWord (N.BitPacking sz bits) = do
+  let getMoveBits :: N.BitConversion n -> m (Value m (BVType n))
+      getMoveBits (N.ConstantBit b off) =
+        return $ bvLit sz (if b then 1 `Bits.shiftL` widthVal off else (0 :: Integer))
+      getMoveBits (N.RegisterBit reg off) = do
+        v <- uext sz <$> get (fullRegister reg)
+        return $ v `bvShl` bvLit sz (natValue off)
+  injs <- mapM getMoveBits bits
+  return (foldl1 (.|.) injs)
 
 unpackWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> Value m (BVType n) -> m ()
 unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
@@ -1173,13 +1191,10 @@ data Primitive
    | RDTSC
    -- | The semantics of @xgetbv@ seems to depend on the semantics of @cpuid@.
    | XGetBV
-   deriving (Eq, Ord, Show)
-
-ppPrimitive :: Primitive -> Doc
-ppPrimitive = text . map toLower . show
+  deriving (Eq, Show)
 
 instance Pretty Primitive where
-  pretty = ppPrimitive
+  pretty = text . map toLower . show
 
 ------------------------------------------------------------------------
 -- SIMDWidth
@@ -1375,6 +1390,11 @@ class ( Applicative m
 
   -- | execute a primitive instruction.
   primitive :: Primitive -> m ()
+
+
+  -- | Store floating point control word in given address.
+  fnstcw :: Value m (BVType 64) -> m ()
+
 
   -- | @pshufb w x s@ returns a value @res@ generated from the bytes of @x@
   -- based on indices defined in the corresponding bytes of @s@.

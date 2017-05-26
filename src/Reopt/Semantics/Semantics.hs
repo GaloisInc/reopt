@@ -1,17 +1,15 @@
 {-
-Module           : Reopt.Semantics
-Copyright        : (c) Galois, Inc 2015
+Copyright        : (c) Galois, Inc 2015-2017
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
 
-This is the top-level module containing the definitions for x86
-instructions.
+This module provides definitions for x86 instructions.
 -}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RankNTypes #-} -- for Binop/Unop type synonyms
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -821,8 +819,12 @@ exec_ror l count = do
 -- ** Bit and Byte Instructions
 
 isRegister :: Location addr tp -> Bool
-isRegister (Register _)   = True
-isRegister (MemoryAddr {}) = False
+isRegister (Register _)      = True
+isRegister (MemoryAddr {})   = False
+isRegister (ControlReg _)    = True
+isRegister (DebugReg _)      = True
+isRegister (SegmentReg _)    = True
+isRegister (X87ControlReg _) = True
 isRegister (X87StackRegister {}) = False
 
 -- return val modulo the size of the register at loc iff loc is a register, otherwise return val
@@ -1411,14 +1413,17 @@ exec_fmul = fparith fpMul fpMulRoundedUp
 -- FSTCW Store FPU control word after checking error conditions
 
 -- | FNSTCW Store FPU control word without checking error conditions
-exec_fnstcw :: Semantics m => MLocation m (BVType 16) -> m ()
-exec_fnstcw l = do
-  v <- packWord N.x87ControlBitPacking
-  set_undefined c0_loc
-  set_undefined c1_loc
-  set_undefined c2_loc
-  set_undefined c3_loc
-  l .= v
+def_fnstcw :: InstructionDef
+def_fnstcw = defUnary "fnstcw" $ \_ loc -> do
+  case loc of
+    F.Mem16 f_addr -> do
+      addr <- getBVAddress f_addr
+      set_undefined c0_loc
+      set_undefined c1_loc
+      set_undefined c2_loc
+      set_undefined c3_loc
+      fnstcw addr
+    _ -> fail $ "fnstcw given bad argument " ++ show loc
 
 -- FLDCW Load FPU control word
 -- FSTENV Store FPU environment after checking error conditions
@@ -2498,7 +2503,7 @@ all_instructions =
   , defFPBinaryImplicit "fadd"   $ exec_fadd
   , defUnaryFPV      "fld"   $ exec_fld
   , defFPBinaryImplicit "fmul"   $ exec_fmul
-  , defUnaryKnown   "fnstcw" $ exec_fnstcw -- stores to bv memory (i.e., not FP)
+  , def_fnstcw -- stores to bv memory (i.e., not FP)
   , defUnaryFPL     "fst"    $ exec_fst
   , defUnaryFPL     "fstp"   $ exec_fstp
   , defFPBinaryImplicit "fsub"   $ exec_fsub

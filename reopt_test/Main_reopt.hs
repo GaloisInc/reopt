@@ -367,7 +367,6 @@ translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
     fillReg (X86_FlagReg n) = if testBit (eflags ptraceRegs) n
                               then MS.true
                               else MS.false
-    fillReg (X87_ControlReg n) = MS.Literal $ bitVector knownNat $ BV.extract n n cwd'
     fillReg (X87_StatusReg  n) = MS.Literal $ bitVector knownNat $ BV.extract n n swd'
     fillReg X87_TopReg = MS.Literal $ bitVector knownNat $
                             BV.extract (13 :: Int) 11 swd'
