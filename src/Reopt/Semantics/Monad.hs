@@ -32,6 +32,7 @@ module Reopt.Semantics.Monad
   , type_width
   , KnownType(..)
   , RepValSize(..)
+  , repValHasSupportedWidth
   , repValSizeMemRepr
   , repValSizeByteCount
   , FloatInfoRepr(..)
@@ -705,7 +706,7 @@ packWord (N.BitPacking sz bits) =
       = return $ bvLit sz (if b then 1 `Bits.shiftL` widthVal off else (0 :: Integer))
     getMoveBits (N.RegisterBit reg off)
       = do v <- uext sz <$> get (fullRegister reg)
-           return $ v `bvShl` bvLit sz (widthVal off)
+           return $ v `bvShl` bvLit sz (natValue off)
 
 unpackWord :: forall m n. (Semantics m, 1 <= n) => N.BitPacking n -> Value m (BVType n) -> m ()
 unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
@@ -714,7 +715,7 @@ unpackWord (N.BitPacking sz bits) v = mapM_ unpackOne bits
     unpackOne N.ConstantBit{}         = return ()
     unpackOne (N.RegisterBit reg off) = do
       let res_w = N.registerWidth reg
-      fullRegister reg .= bvTrunc res_w (v `bvShr` bvLit sz (widthVal off))
+      fullRegister reg .= bvTrunc res_w (v `bvShr` bvLit sz (natValue off))
 
 ------------------------------------------------------------------------
 -- Values
@@ -736,20 +737,20 @@ class IsValue (v  :: Type -> *) where
 
   -- | Construct a literal bit vector.  The result is undefined if the
   -- literal does not fit withint the given number of bits.
-  bvLit :: (Integral a, 1 <= n) => NatRepr n -> a -> v (BVType n)
+  bvLit :: 1 <= n => NatRepr n -> Integer -> v (BVType n)
 
   -- | Add two bitvectors together dropping overflow.
-  bvAdd :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvAdd :: 1 <= n => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Subtract two vectors, ignoring underflow.
-  bvSub :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvSub :: 1 <= n => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Performs a multiplication of two bitvector values.
   bvMul :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | 2's complement
   bvNeg :: (1 <= n) => v (BVType n) -> v (BVType n)
-  bvNeg n = bvLit (bv_width n) (0 :: Int) `bvSub` n
+  bvNeg n = bvLit (bv_width n) 0 `bvSub` n
 
   -- | Bitwise complement
   complement :: (1 <= n) => v (BVType n) -> v (BVType n)
@@ -790,7 +791,7 @@ class IsValue (v  :: Type -> *) where
         case ( m_le_m_plus_n , n_le_m_plus_n , _1_le_m_plus_n ) of
           (LeqProof, LeqProof, LeqProof) ->
             let highOrderBits =
-                  uext m_plus_n h `bvShl` bvLit m_plus_n (widthVal $ n)
+                  uext m_plus_n h `bvShl` bvLit m_plus_n (natValue $ n)
                 lowOrderBits = uext m_plus_n l
             in highOrderBits .|. lowOrderBits
 
@@ -818,7 +819,7 @@ class IsValue (v  :: Type -> *) where
   -- Big-endian, so higher-order bits make up first component of
   -- result.
   bvSplit :: (1 <= n) => v (BVType (n + n)) -> (v (BVType n), v (BVType n))
-  -- bvSplit v = (bvTrunc:: sz (bvShr (widthVal sz) v), bvTrunc sz v)
+  -- bvSplit v = (bvTrunc:: sz (bvShr (natValue sz) v), bvTrunc sz v)
   --   where
   --     sz = halfNat (bv_width v)
 
@@ -859,12 +860,12 @@ class IsValue (v  :: Type -> *) where
   bvRol :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
   bvRol v n = bvShl v n .|. bvShr v bits_less_n
     where
-      bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
+      bits_less_n = bvSub (bvLit (bv_width v) (natValue $ bv_width v)) n
 
   bvRor :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
   bvRor v n = bvShr v n .|. bvShl v bits_less_n
     where
-      bits_less_n = bvSub (bvLit (bv_width v) (widthVal $ bv_width v)) n
+      bits_less_n = bvSub (bvLit (bv_width v) (natValue $ bv_width v)) n
 
   -- | Shifts, the semantics is undefined for shifts >= the width of the first argument.
   --
@@ -873,7 +874,7 @@ class IsValue (v  :: Type -> *) where
   --
   -- Big-endian, so left shift moves bits to higher-order positions
   -- and right shift moves bits to lower-order positions.
-  bvShr, bvSar, bvShl :: (1 <= n) => v (BVType n) -> v (BVType n) -> v (BVType n)
+  bvShr, bvSar, bvShl :: 1 <= n => v (BVType n) -> v (BVType n) -> v (BVType n)
 
   -- | Truncate the value.
   --
@@ -911,7 +912,7 @@ class IsValue (v  :: Type -> *) where
   -- | Return most significant bit of number.
   msb :: (1 <= n) => v (BVType n) -> v BoolType
   msb v = bvSlt v (bvLit (bv_width v) (0::Integer))
---  msb v = bvBit v (bvLit (bv_width v) (widthVal (bv_width v) - 1))
+--  msb v = bvBit v (bvLit (bv_width v) (natValue (bv_width v) - 1))
      -- FIXME: should be log2 (bv_width v) here
 
   -- | Perform a signed extension of a bitvector.
@@ -1199,6 +1200,14 @@ data RepValSize w
    | (w ~ 16) => WordRepVal
    | (w ~ 32) => DWordRepVal
    | (w ~ 64) => QWordRepVal
+
+repValHasSupportedWidth :: RepValSize w -> (SupportedBVWidth w => a) -> a
+repValHasSupportedWidth rval x =
+  case rval of
+    ByteRepVal  -> x
+    WordRepVal  -> x
+    DWordRepVal -> x
+    QWordRepVal -> x
 
 repValSizeMemRepr :: RepValSize w -> MemRepr (BVType w)
 repValSizeMemRepr v =
