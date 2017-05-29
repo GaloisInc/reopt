@@ -1,6 +1,5 @@
 {-
-Module           : Reopt.Semantics.Implementation
-Copyright        : (c) Galois, Inc 2015
+Copyright        : (c) Galois, Inc 2015-2017
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
 
 This contains an implementation of the classes defined in Reopt.Semantics.Monad
@@ -53,7 +52,7 @@ import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
-import qualified Flexdis86 as Flexdis
+import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen (Pretty(..))
 
 import           Data.Macaw.AbsDomain.AbsState
@@ -78,11 +77,11 @@ import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
-import           Data.Macaw.Memory.Flexdis86
 import           Data.Macaw.Types (BoolType, BVType, TypeRepr(..), knownType, n1, n8, typeRepr)
-import qualified Flexdis86 as F
 
-import qualified Reopt.Machine.StateNames as N
+import           Data.Macaw.X86.Flexdis
+import qualified Data.Macaw.X86.X86Reg as N
+
 import           Reopt.Machine.SysDeps.FreeBSDGenerated as FreeBSD
 import           Reopt.Machine.SysDeps.LinuxGenerated as Linux
 import           Reopt.Machine.X86State
@@ -795,7 +794,7 @@ type ImpLocation ids tp = S.Location (AddrExpr ids) tp
 
 getX87Top :: X86Generator st_s ids Int
 getX87Top = do
-  top_val <- modState $ use $ x87TopReg
+  top_val <- modState $ use $ boundValue X87_TopReg
   case top_val of
     -- Validate that i is less than top and top +
     BVValue _ (fromInteger -> topv) ->
@@ -831,8 +830,7 @@ getLoc (l0 :: ImpLocation ids tp) =
     S.X87ControlReg r ->
       readLoc (X87_ControlLoc r)
     S.Register (rv :: S.RegisterView (BVType m) b n) -> do
-      let r_nm = S.registerViewReg rv
-      let r = x86Reg r_nm
+      let r = S.registerViewReg rv
       modState $ S.registerViewRead rv . ValueExpr <$> use (boundValue r)
     -- TODO
     S.X87StackRegister i -> do
@@ -881,8 +879,7 @@ setLoc loc v =
    S.X87ControlReg r ->
      addWriteLoc (X87_ControlLoc r) v
    S.Register (rv :: S.RegisterView (BVType m) b n) -> do
-     let r_nm = S.registerViewReg rv
-     let r = x86Reg r_nm
+     let r = S.registerViewReg rv
      v0 <- modState $ ValueExpr <$> use (boundValue r)
      v1 <- eval $ S.registerViewWrite rv v0 (ValueExpr v)
      modState $ boundValue r .= v1
@@ -1013,7 +1010,7 @@ instance S.Semantics (X86Generator st_s ids) where
                          & blockState .~ NothingF
 
   primitive S.CPUID = do
-    rax_val <- modState $ use $ boundValue rax_reg
+    rax_val <- modState $ use $ boundValue N.rax
     let n32 = knownNat :: NatRepr 32
     eax_val <- eval (S.bvTrunc' n32  (ValueExpr rax_val))
     -- Call CPUID and get a 128-bit value back.
@@ -1028,7 +1025,7 @@ instance S.Semantics (X86Generator st_s ids) where
     S.reg_low32 N.rdx S..= upperHalf res
     S.reg_low32 N.rax S..= lowerHalf res
   primitive S.XGetBV = do
-    rcx_val <- modState $ use $ boundValue rcx_reg
+    rcx_val <- modState $ use $ boundValue N.rcx
     let n32 = knownNat :: NatRepr 32
     ecx_val <- eval (S.bvTrunc' n32  (ValueExpr rcx_val))
     res <- ValueExpr . AssignedValue <$> addArchFn (XGetBV ecx_val)
@@ -1046,8 +1043,8 @@ instance S.Semantics (X86Generator st_s ids) where
 
   getSegmentBase seg =
     case seg of
-      Flexdis.FS -> ValueExpr . AssignedValue <$> addArchFn ReadFSBase
-      Flexdis.GS -> ValueExpr . AssignedValue <$> addArchFn ReadGSBase
+      F.FS -> ValueExpr . AssignedValue <$> addArchFn ReadFSBase
+      F.GS -> ValueExpr . AssignedValue <$> addArchFn ReadGSBase
       _ ->
         error $ "Reopt.CFG.Implementation.getSegmentBase " ++ show seg ++ ": unimplemented!"
 
@@ -1074,13 +1071,13 @@ instance S.Semantics (X86Generator st_s ids) where
       -- Store value at new top
       boundValue (X87_FPUReg (F.mmxReg new_top)) .= v
       -- Update top
-      x87TopReg .= BVValue knownNat (toInteger new_top)
+      boundValue X87_TopReg .= BVValue knownNat (toInteger new_top)
   x87Pop = do
     topv <- getX87Top
     let new_top = (topv + 1) .&. 0x7
     modState $ do
       -- Update top
-      x87TopReg .= BVValue knownNat (toInteger new_top)
+      boundValue X87_TopReg .= BVValue knownNat (toInteger new_top)
 
     return ()
 
@@ -1098,9 +1095,9 @@ initGenState nonce_gen ip s
 data X86TranslateErrorReason
    = DecodeError (MemoryError 64)
      -- ^ A memory error occured in decoding with Flexdis
-   | UnsupportedInstruction Flexdis.InstructionInstance
+   | UnsupportedInstruction F.InstructionInstance
      -- ^ The instruction is not supported by the translator
-   | ExecInstructionError Flexdis.InstructionInstance Text
+   | ExecInstructionError F.InstructionInstance Text
      -- ^ An error occured when trying to translate the instruction
 
 -- | Describes an error that occured in translation
@@ -1155,7 +1152,7 @@ disassembleBlockImpl mem gs contFn addr = do
         Just exec -> do
           gsr <-
             runExceptT $ runX86Generator (\() s -> return (Some s)) gs $ do
-                let line = show addr ++ ": " ++ show (Flexdis.ppInstruction next_ip_word i)
+                let line = show addr ++ ": " ++ show (F.ppInstruction next_ip_word i)
                 addStmt (Comment (Text.pack line))
                 exec
           case gsr of
@@ -1195,15 +1192,15 @@ fnBlockState addr =
   top & setAbsIP addr
       & absRegState . boundValue sp_reg .~ concreteStackOffset addr 0
         -- x87 top register points to top of stack.
-      & absRegState . x87TopReg         .~ FinSet (Set.singleton 7)
+      & absRegState . boundValue X87_TopReg .~ FinSet (Set.singleton 7)
         -- Direction flag is initially zero.
-      & absRegState . boundValue df_reg .~ FinSet (Set.singleton 0)
+      & absRegState . boundValue N.df .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (BVMemRepr n8 LittleEndian) ReturnAddr)
 
 preserveFreeBSDSyscallReg :: X86Reg tp -> Bool
 preserveFreeBSDSyscallReg r
-  | Just Refl <- testEquality r cf_reg  = False
-  | Just Refl <- testEquality r rax_reg = False
+  | Just Refl <- testEquality r N.cf  = False
+  | Just Refl <- testEquality r N.rax = False
   | otherwise = True
 
 -- | Linux preserves the same registers the x86_64 ABI does
@@ -1249,11 +1246,11 @@ disassembleBlockFromAbsState :: forall s
                  -> ST s ([Block X86_64 s], SegmentedAddr 64, Maybe String)
 disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
   -- Parse the x87 state
-  case asConcreteSingleton (ab^.absRegState^.x87TopReg) of
+  case asConcreteSingleton (ab^.absRegState^.boundValue X87_TopReg) of
     Nothing -> pure $ ([], addr, Just "Could not determine height of X87 stack.")
     Just t -> do
-      case asConcreteSingleton (ab^.absRegState^.boundValue df_reg) of
-        Nothing -> pure $ ([], addr, Just $ "Could not determine df flag " ++ show (ab^.absRegState^.boundValue df_reg))
+      case asConcreteSingleton (ab^.absRegState^.boundValue N.df) of
+        Nothing -> pure $ ([], addr, Just $ "Could not determine df flag " ++ show (ab^.absRegState^.boundValue N.df))
         Just d -> do
           let loc = ExploreLoc { loc_ip = addr
                                , loc_x87_top = fromInteger t
@@ -1265,14 +1262,14 @@ disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
 freeBSD_syscallPersonality :: SyscallPersonality X86_64
 freeBSD_syscallPersonality =
   SyscallPersonality { spTypeInfo = FreeBSD.syscallInfo
-                     , spResultRegisters = [ Some rax_reg, Some cf_reg ]
+                     , spResultRegisters = [ Some N.rax, Some N.cf ]
                      }
 
--- | Architecture information for X86_64.
+-- | Architecture information for X86_64 on FreeBSD.
 x86_64_freeBSD_info :: ArchitectureInfo X86_64
 x86_64_freeBSD_info =
   ArchitectureInfo { archAddrWidth      = Addr64
-                   , archEndianness = LittleEndian
+                   , archEndianness     = LittleEndian
                    , jumpTableEntrySize = 8
                    , disassembleFn      = disassembleBlockFromAbsState
                    , fnBlockStateFn     = \_ -> fnBlockState
@@ -1285,7 +1282,7 @@ x86_64_freeBSD_info =
 linux_syscallPersonality :: SyscallPersonality X86_64
 linux_syscallPersonality =
   SyscallPersonality { spTypeInfo = Linux.syscallInfo
-                     , spResultRegisters = [Some rax_reg]
+                     , spResultRegisters = [Some N.rax]
                      }
 
 -- | Architecture information for X86_64.

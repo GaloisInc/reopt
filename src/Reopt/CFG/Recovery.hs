@@ -49,6 +49,7 @@ import           Data.Macaw.Discovery.Info
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
+import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.RegisterUse
@@ -357,11 +358,11 @@ recoverStmt s = do
                                      <*> recoverValue dest
                                      <*> recoverValue direction
       addFnStmt stmt
-    ExecArchStmt (MemSet count v ptr df) -> do
+    ExecArchStmt (MemSet count v ptr mdf) -> do
       stmt <- FnMemSet <$> recoverValue count
                        <*> recoverValue v
                        <*> recoverValue ptr
-                       <*> recoverValue df
+                       <*> recoverValue mdf
       addFnStmt stmt
     _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
@@ -395,7 +396,7 @@ getPostCallValue :: BlockLabel 64
 getPostCallValue lbl proc_state intrs floatrs r = do
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
-      , Just rv <- lookup r ([rax_reg, rdx_reg] `zip` intrs) ->
+      , Just rv <- lookup r ([rax, rdx] `zip` intrs) ->
         return $ FnReturn rv
       | Just Refl <- testEquality r sp_reg -> do
         spv <- recoverRegister proc_state sp_reg
@@ -406,7 +407,7 @@ getPostCallValue lbl proc_state intrs floatrs r = do
         return $ FnReturn rv
 
    -- df is 0 after a function call.
-    _ | Just Refl <- testEquality r df_reg -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r df -> return $ FnConstantValue knownNat 0
 
     _ | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
@@ -432,7 +433,7 @@ getPostSyscallValue lbl proc_state r =
       | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
 
-    _ | Just Refl <- testEquality r df_reg -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r df -> return $ FnConstantValue knownNat 0
 
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
@@ -679,7 +680,7 @@ recoverFunction sysp fArgs mem fInfo = do
                & flip (ifoldr insReg)        (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
-               & MapF.insert df_reg (FnRegValue (FnConstantValue n1 0))
+               & MapF.insert df (FnRegValue (FnConstantValue n1 0))
 
   let rs = RS { rsMemory        = mem
               , rsInterp = fInfo

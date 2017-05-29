@@ -66,8 +66,10 @@ import           Flexdis86 ( InstructionInstance
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
-import           Data.Macaw.Memory.Flexdis86
 import           Data.Macaw.Types
+
+import           Data.Macaw.X86.Flexdis
+import qualified Data.Macaw.X86.X86Reg as N
 
 import           Reopt (readElf64)
 import           Reopt.Concrete.BitVector hiding (modify)
@@ -75,7 +77,6 @@ import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMac
                                              , Address8, modifyAddr, asBV, ConcreteStateT)
 import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher
 import qualified Reopt.Semantics.Monad as SM
@@ -281,9 +282,10 @@ mkTest args test = do
   child <- traceFile $ args^.programPath
   procMem <- openChildProcMem child
   procMaps <- openChildProcMaps child
-  (out, _, _, _) <- runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
-    regs <- dumpRegs
-    runTestM (test args) regs
+  (out, _, _, _) <-
+    runPTraceMachineState (PTraceInfo {cpid = child, memHandle = procMem, mapHandle = procMaps}) $ do
+      regs <- dumpRegs
+      runTestM (test args) regs
   let isMismatch m = case m of
                        FailureRecord {} -> True
                        _                 -> False
@@ -819,7 +821,7 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
              in if realVal `MS.equalOrUndef` emuVal
                   then Nothing
                   else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
-             x86StateRegs
+                          N.x86StateRegs
     checkBool True | sig == sigSEGV = do
       logMessage Segfault
       return (False, [])

@@ -58,9 +58,9 @@ import           Data.Macaw.Types (Type(..)
                                   , n1, n8, n16, n32, n64, n80
                                   , typeRepr
                                   )
+import qualified Data.Macaw.X86.X86Reg as X
 
 import qualified Reopt.Concrete.MachineState as CS
-import qualified Reopt.Machine.X86State as X
 import           Reopt.Reified.Semantics
 import qualified Reopt.Semantics.Monad as S
 
@@ -257,7 +257,7 @@ evalStmt (Get x l) =
           v0 <- CS.getMem a
           extendEnv x v0
     S.Register rv -> do
-      let r = X.x86Reg (S.registerViewReg rv)
+      let r = S.registerViewReg rv
       v0 <- CS.getReg r
       v1 <- evalExpr' $ S.registerViewRead rv (ValueExpr v0)
       extendEnv x v1
@@ -331,7 +331,7 @@ evalStmt (l := e) =
               let a = CS.Address nr bvaddr
               CS.setMem a ve
         S.Register rv -> do
-          let r = X.x86Reg $ S.registerViewReg rv
+          let r = S.registerViewReg rv
           v0 <- CS.getReg r
           v1 <- evalExpr' $ S.registerViewWrite rv (ValueExpr v0) (ValueExpr ve)
           CS.setReg r v1

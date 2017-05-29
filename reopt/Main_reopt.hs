@@ -1144,7 +1144,7 @@ link_with_libreopt obj_dir args arch obj_llvm = do
   either (fail . show) return mllvm
 
 
-resolveSymName :: String -> Either CodeAddr String
+resolveSymName :: String -> Either Word64 String
 resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
 resolveSymName nm = Right nm
 
@@ -1152,9 +1152,9 @@ resolveSymName nm = Right nm
 -- return either the string if it cannot be resolved or the address.
 resolveSymAddr :: Map BS.ByteString (SegmentedAddr 64)
                   -- ^ Map from symbol names in binary to their address.
-               -> Either CodeAddr String
+               -> Either Word64 String
                   -- ^ The name of a symbol as a string.
-               -> Either String CodeAddr
+               -> Either String Word64
 resolveSymAddr _ (Left w) = Right w
 resolveSymAddr symMap (Right nm) =
   case Map.lookup (fromString nm) symMap of

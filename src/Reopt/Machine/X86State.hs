@@ -15,19 +15,10 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Machine.X86State
   ( initX86State
-  , x87TopReg
     -- * Combinators
   , foldValueCached
     -- * X86Reg
   , X86Reg(..)
-  , x86Reg
-  , rax_reg
-  , rbx_reg
-  , rcx_reg
-  , rdx_reg
-  , r11_reg
-  , cf_reg
-  , df_reg
   , boundValue
     -- * ExploreLoc
   , ExploreLoc(..)
@@ -48,17 +39,12 @@ module Reopt.Machine.X86State
   , asStackAddrOffset
   , x86StackDelta
     -- * Lists of X86 Registers
-  , gpRegList
-  , x87FPURegList
   , refsInX86PrimFn
-  , x86StateRegs
   , x86CalleeSavedRegs
   , x86ArgumentRegs
   , x86FloatArgumentRegs
   , x86ResultRegs
   , x86FloatResultRegs
-  , x86SyscallArgumentRegs
-  , CodeAddr
   ) where
 
 import           Control.Lens
@@ -69,33 +55,22 @@ import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import qualified Data.Vector as V
-import           Data.Word
 import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory ( MemWord, addrValue )
 import           Data.Macaw.Types
+import           Data.Macaw.X86.X86Reg
+import           Data.Macaw.X86.X87ControlReg
 
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Semantics.Monad (SIMDWidth(..), RepValSize(..))
-
-
--- | An address of a code location.
---
--- This is currently just a Word64, but we may need to switch to a
--- structured representation once dynamic libraries are supported.
-type CodeAddr = Word64
 
 ------------------------------------------------------------------------
 -- X86_64 specific declarations
 
-type instance RegAddrWidth X86Reg = 64
-
 data X86_64
 type instance ArchReg  X86_64 = X86Reg
-
 type instance ArchFn   X86_64 = X86PrimFn
 type instance ArchStmt X86_64 = X86Stmt
 
@@ -112,7 +87,7 @@ data X86PrimLoc tp
      -- ^ This refers to the selector of the 'FS' register.
    | (tp ~ BVType 16) => GS
      -- ^ This refers to the se lector of the 'GS' register.
-   | forall w . (tp ~ BVType   w) => X87_ControlLoc !(N.X87_ControlReg w)
+   | forall w . (tp ~ BVType   w) => X87_ControlLoc !(X87_ControlReg w)
      -- ^ One of the x87 control registers
 
 instance HasRepr X86PrimLoc TypeRepr where
@@ -273,9 +248,9 @@ instance PrettyF X86Stmt where
   prettyF (MemCopy sz cnt src dest rev) =
       text "memcopy" <+> parens (hcat $ punctuate comma args)
     where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-  prettyF (MemSet cnt val dest df) =
+  prettyF (MemSet cnt val dest d) =
       text "memset" <+> parens (hcat $ punctuate comma args)
-    where args = [pretty cnt, pretty val, pretty dest, pretty df]
+    where args = [pretty cnt, pretty val, pretty dest, pretty d]
 
 ------------------------------------------------------------------------
 -- Architecture-specific Value operations
@@ -290,242 +265,6 @@ asStackAddrOffset addr
     Just (BVValue knownNat 0)
   | otherwise =
     Nothing
-
-------------------------------------------------------------------------
--- X86Reg
-
--- | Defines the set of registers that are modeled as storing values in the
--- semantics for X86_64.
-data X86Reg tp
-   = (BVType 64 ~ tp) => X86_IP
-     -- ^ The current IP register
-   | (BVType  64 ~ tp) => X86_GP !Int
-     -- ^ One of 16 general purpose registers
-   | (BVType   1 ~ tp) => X86_FlagReg !Int
-     -- ^ One of 32 flag registers
-   | (BVType   1 ~ tp) => X87_StatusReg !Int
-     -- ^ One of 16 X87 Status registers
-   | (BVType   3 ~ tp) => X87_TopReg
-     -- ^ The floating point top register
-   | (BVType   2 ~ tp) => X87_TagReg !Int
-      -- ^ One of 8 fpu tag registers.
-   | (BVType  80 ~ tp) => X87_FPUReg !F.MMXReg
-      -- ^ One of 8 fpu/mmx registers.
-   | (BVType 128 ~ tp) => X86_XMMReg !Int
-     -- ^ One of 8 XMM registers
-
-instance Eq (X86Reg tp) where
-  x == y =
-    case compareF x y of
-      EQF -> True
-      _ -> False
-
-instance Ord (X86Reg tp) where
-  compare x y =
-    case compareF x y of
-      EQF -> EQ
-      LTF -> LT
-      GTF -> GT
-
-instance TestEquality X86Reg where
-  testEquality x y =
-    case compareF x y of
-      EQF -> Just Refl
-      _ -> Nothing
-
-instance OrdF X86Reg where
-  compareF X86_IP X86_IP = EQF
-  compareF X86_IP _      = LTF
-  compareF _      X86_IP = GTF
-
-  compareF (X86_GP i) (X86_GP j) = fromOrdering (compare i j)
-  compareF X86_GP{}   _          = LTF
-  compareF _          X86_GP{}   = GTF
-
-  compareF (X86_FlagReg i) (X86_FlagReg j) = fromOrdering (compare i j)
-  compareF X86_FlagReg{}   _               = LTF
-  compareF _               X86_FlagReg{}   = GTF
-
-  compareF (X87_StatusReg i) (X87_StatusReg j) = fromOrdering (compare i j)
-  compareF X87_StatusReg{}   _                 = LTF
-  compareF _                 X87_StatusReg{}   = GTF
-
-  compareF X87_TopReg   X87_TopReg = EQF
-  compareF X87_TopReg   _          = LTF
-  compareF _            X87_TopReg = GTF
-
-  compareF (X87_TagReg i) (X87_TagReg j)   = fromOrdering (compare i j)
-  compareF X87_TagReg{}   _                = LTF
-  compareF _                  X87_TagReg{} = GTF
-
-  compareF (X87_FPUReg i) (X87_FPUReg j) = fromOrdering (compare i j)
-  compareF X87_FPUReg{}   _              = LTF
-  compareF _              X87_FPUReg{}   = GTF
-
-  compareF (X86_XMMReg i) (X86_XMMReg j) = fromOrdering (compare i j)
-
--- | Map a register name to a X86Reg if it is treated as an
--- abstract register in the simulator.
-x86Reg :: N.RegisterName cl -> X86Reg cl
-x86Reg nm =
-  case nm of
-    N.X86_IP          -> X86_IP
-    N.X86_GP n        -> X86_GP n
-    N.X86_FlagReg n   -> X86_FlagReg n
-    N.X87_StatusReg n -> X87_StatusReg n
-    N.X87_TopReg      -> X87_TopReg
-    N.X87_TagReg n    -> X87_TagReg n
-    N.X87_FPUReg n    -> X87_FPUReg n
-    N.X86_XMMReg n    -> X86_XMMReg n
-
-rax_reg :: X86Reg (BVType 64)
-rax_reg = X86_GP 0
-
-rcx_reg :: X86Reg (BVType 64)
-rcx_reg = X86_GP 1
-
-rdx_reg :: X86Reg (BVType 64)
-rdx_reg = X86_GP 2
-
-rbx_reg :: X86Reg (BVType 64)
-rbx_reg = X86_GP 3
-
--- | The stack pointer
-x86_sp_reg :: X86Reg (BVType 64)
-x86_sp_reg  = X86_GP  4
-
-rbp_reg :: X86Reg (BVType 64)
-rbp_reg = X86_GP  5
-
-rsi_reg :: X86Reg (BVType 64)
-rsi_reg = X86_GP  6
-
-rdi_reg :: X86Reg (BVType 64)
-rdi_reg = X86_GP  7
-
-r8_reg :: X86Reg (BVType 64)
-r8_reg = X86_GP  8
-
-r9_reg :: X86Reg (BVType 64)
-r9_reg = X86_GP  9
-
-r10_reg :: X86Reg (BVType 64)
-r10_reg = X86_GP 10
-
-r11_reg :: X86Reg (BVType 64)
-r11_reg = X86_GP 11
-
-r12_reg :: X86Reg (BVType 64)
-r12_reg = X86_GP 12
-
-r13_reg :: X86Reg (BVType 64)
-r13_reg = X86_GP 13
-
-r14_reg :: X86Reg (BVType 64)
-r14_reg = X86_GP 14
-
-r15_reg :: X86Reg (BVType 64)
-r15_reg = X86_GP 15
-
-cf_reg :: X86Reg (BVType 1)
-cf_reg = X86_FlagReg 0
-
-df_reg :: X86Reg (BVType 1)
-df_reg = X86_FlagReg 10
-
-instance RegisterInfo X86Reg where
-  archRegs = x86StateRegs
-
-  ip_reg = X86_IP
-  sp_reg = x86_sp_reg
-
-  -- The register used to store system call numbers.
-  syscall_num_reg = rax_reg
-
-  -- The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
-  -- Syscalls clobber rcx and r11, but we don't really care about these
-  -- anyway.
-  syscallArgumentRegs = x86SyscallArgumentRegs
-
--- | The ABI defines these (http://www.x86-64.org/documentation/abi.pdf)
--- Syscalls clobber rcx and r11, but we don't really care about these anyway.
-x86SyscallArgumentRegs :: [ X86Reg (BVType 64) ]
-x86SyscallArgumentRegs = [rdi_reg, rsi_reg, rdx_reg, r10_reg, r8_reg, r9_reg ]
-
-instance Show (X86Reg tp) where
-  show X86_IP          = "rip"
-  show (X86_GP n)      = nm
-    where Just nm = N.gpNames V.!? n
-  show (X86_FlagReg n)    = nm
-    where Just nm = N.flagNames V.!? n
-  show (X87_StatusReg n) = nm
-    where Just nm = N.x87StatusNames V.!? n
-  show X87_TopReg      = "x87top"
-  show (X87_TagReg n)  = "tag" ++ show n
-  show (X87_FPUReg n)  = "fpu" ++ show n
-  show (X86_XMMReg n)  = "xmm" ++ show n
-
-instance PrettyF X86Reg where
-  prettyF = text . show
-
-instance ShowF X86Reg where
-  showF = show
-
-instance HasRepr X86Reg TypeRepr where
-  typeRepr r =
-    case r of
-      X86_IP           -> knownType
-      X86_GP{}         -> knownType
-      X86_FlagReg{}    -> knownType
-      X87_StatusReg{}  -> knownType
-      X87_TopReg       -> knownType
-      X87_TagReg{}     -> knownType
-      X87_FPUReg{}     -> knownType
-      X86_XMMReg{}     -> knownType
-
-------------------------------------------------------------------------
--- X86Reg lists
-
-gpRegList :: [X86Reg (BVType 64)]
-gpRegList = [X86_GP i | i <- [0..15]]
-
-flagRegList :: [X86Reg (BVType 1)]
-flagRegList = [X86_FlagReg i | i <- [0,2,4,6,7,8,9,10,11]]
-
-x87StatusRegList :: [X86Reg (BVType 1)]
-x87StatusRegList = [X87_StatusReg i | i <- [0..15]]
-
-x87TagRegList :: [X86Reg (BVType 2)]
-x87TagRegList = [X87_TagReg i | i <- [0..7]]
-
-x87FPURegList :: [X86Reg (BVType 80)]
-x87FPURegList = [X87_FPUReg (F.mmxReg i) | i <- [0..7]]
-
-xmmRegList :: [X86Reg (BVType 128)]
-xmmRegList = [X86_XMMReg i | i <- [0..15]]
-
--- | List of registers stored in X86State
-x86StateRegs :: [Some X86Reg]
-x86StateRegs
-  =  [Some X86_IP]
-  ++ (Some <$> gpRegList)
-  ++ (Some <$> flagRegList)
-  ++ (Some <$> x87StatusRegList)
-  ++ [Some X87_TopReg]
-  ++ (Some <$> x87TagRegList)
-  ++ (Some <$> x87FPURegList)
-  ++ (Some <$> xmmRegList)
-
-------------------------------------------------------------------------
--- X86State
-
--- | This represents the state of the processor registers after some
--- execution.
--- type X86State = RegState X86Reg
-
--- | the value oDebugReg{}  f the current instruction pointer.
-x87TopReg :: Simple Lens (RegState X86Reg f) (f (BVType 3))
-x87TopReg = boundValue X87_TopReg
 
 ------------------------------------------------------------------------
 -- ExploreLoc
@@ -555,8 +294,8 @@ initX86State :: ExploreLoc -- ^ Location to explore from.
              -> RegState X86Reg (Value X86_64 ids)
 initX86State loc = mkRegState Initial
                  & curIP     .~ RelocatableValue knownNat (addrValue (loc_ip loc))
-                 & x87TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
-                 & boundValue df_reg .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
+                 & boundValue X87_TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
+                 & boundValue df .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
 
 ------------------------------------------------------------------------
 -- Compute set of assignIds in values.
@@ -586,17 +325,17 @@ refsInX86PrimFn f =
 refsInX86Stmt :: X86Stmt ids -> Set (Some (AssignId ids))
 refsInX86Stmt (WriteLoc _ rhs) = refsInValue rhs
 refsInX86Stmt (StoreX87Control addr) = refsInValue addr
-refsInX86Stmt (MemCopy _ cnt src dest df) =
+refsInX86Stmt (MemCopy _ cnt src dest d) =
   Set.unions [ refsInValue cnt
              , refsInValue src
              , refsInValue dest
-             , refsInValue df
+             , refsInValue d
              ]
-refsInX86Stmt (MemSet cnt val dest df) =
+refsInX86Stmt (MemSet cnt val dest d) =
   Set.unions [ refsInValue cnt
              , refsInValue val
              , refsInValue dest
-             , refsInValue df
+             , refsInValue d
              ]
 
 instance StmtHasRefs X86Stmt where
@@ -708,25 +447,25 @@ hasRetComment b = any isRetComment (blockStmts b)
 -- | List of registers that a callee must save.
 x86CalleeSavedRegs :: Set (Some X86Reg)
 x86CalleeSavedRegs = Set.fromList $
-  [ -- Some N.rsp sjw: rsp is special
-    Some rbp_reg
-  , Some rbx_reg
-  , Some r12_reg
-  , Some r13_reg
-  , Some r14_reg
-  , Some r15_reg
+  [ -- Some rsp sjw: rsp is special
+    Some rbp
+  , Some rbx
+  , Some r12
+  , Some r13
+  , Some r14
+  , Some r15
   , Some X87_TopReg
-  , Some df_reg
+  , Some df
   ]
 
 x86ArgumentRegs :: [X86Reg (BVType 64)]
-x86ArgumentRegs = [rdi_reg, rsi_reg, rdx_reg, rcx_reg, r8_reg, r9_reg]
+x86ArgumentRegs = [rdi, rsi, rdx, rcx, r8, r9]
 
 x86FloatArgumentRegs :: [X86Reg (BVType 128)]
 x86FloatArgumentRegs =  X86_XMMReg <$> [0..7]
 
 x86ResultRegs :: [X86Reg (BVType 64)]
-x86ResultRegs = [ rax_reg, rdx_reg ]
+x86ResultRegs = [ rax, rdx ]
 
 x86FloatResultRegs :: [X86Reg (BVType 128)]
 x86FloatResultRegs = [ X86_XMMReg 0 ]

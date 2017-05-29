@@ -60,7 +60,6 @@ library
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
-    Reopt.Machine.StateNames
     Reopt.Machine.X86State
     Reopt.Machine.SysDeps.FreeBSDGenerated
     Reopt.Machine.SysDeps.LinuxGenerated

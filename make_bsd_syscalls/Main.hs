@@ -1,7 +1,9 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
-module Main where
+module Main
+  ( main
+  ) where
 
 import           Control.Lens
 import           Data.Attoparsec.ByteString.Char8 (Parser)
@@ -19,6 +21,9 @@ import           Language.C.Analysis.TravMonad
 import           Language.C.Data.Ident
 import           Language.C.Data.Name (newNameSupply)
 import           Language.C.Data.Position (position)
+import           System.Environment (getArgs)
+import           System.Exit
+import           System.IO
 import           Text.PrettyPrint
 import           Text.Show.Pretty
 
@@ -55,14 +60,39 @@ data SyscallInfo =
               }
   deriving Show
 
-pp si = print $ integer (syscallNo si) <+> text "->"
-                <+> maybe (text "???") pretty (syscallProto si)
+
+syscallLine :: [Ident] -> Parser (Maybe SyscallInfo)
+syscallLine idents =
+  P.choice [ P.char ';' >> return Nothing
+           , parseLine
+           ]
+  where
+    parseLine = do
+      num   <- P.decimal
+      P.skipSpace
+      audit <- P.decimal
+      P.skipSpace
+      cl    <- P.takeWhile (not . P.isSpace)
+      P.skipSpace
+      cdecl <- P.choice [ P.char '{' >> P.takeTill ((==) '}') >>= return . parseDecl
+                        , P.takeWhile1 (not . P.isSpace)      >>  return Nothing
+                        ]
+      return (Just (SyscallInfo num audit cl cdecl))
+
+    parseDecl bytes =
+      -- FIXME: we should maybe chain through newNameSupply?  I don't think it is ever used ...
+      case execParser extDeclP bytes (position 0 "" 0 0) idents newNameSupply of
+        Left _err                   -> Nothing
+        Right (cdecl, _unusedNames) -> Just cdecl
+
+------------------------------------------------------------------------
+-- Haskell generation
 
 -- A bit hacky, but no less than using TH to read in a text file
 generateHSFile :: CTranslUnit -> [SyscallInfo] -> Doc
 generateHSFile tunit sis =
   vcat [ text "-- DO NOT EDIT.  Generated from make_bsd_syscalls/Main.hs"
-       , text "module Reopt.Machine.SysDeps.FreeBSDGenerated where"
+       , text "module Data.Macaw.X86.FreeBSDGenerated where"
        , text "import           Data.Macaw.Architecture.Syscall"
        , text "import           Data.Map (Map, fromList)"
        , text "import           Data.Word"
@@ -118,68 +148,8 @@ typeToArgType typ =
   where
     unhandled = error ("Unhandled type: " ++ show (pretty typ))
 
-compTypeToArgType :: CompTypeRef -> SyscallArgType
-compTypeToArgType ctyp = trace ("Comp type: " ++ show (pretty ctyp)) WordArgType
-
--- We support as little as possible here ...
--- typeSpecToArgType :: Show a => CTypeSpecifier a -> SyscallArgType
--- typeSpecToArgType tspec =
---   case tspec of
---     CVoidType _   -> VoidArgType
---     CCharType _   -> WordArgType
---     CShortType _  -> WordArgType
---     CIntType _    -> WordArgType
---     CLongType _   -> WordArgType
---     CFloatType _  -> XMMFloatType
---     CDoubleType _ -> XMMFloatType
---     CSignedType _ -> WordArgType
---     CUnsigType _  -> WordArgType
---     CBoolType _   -> WordArgType
---     CSUType _ _ -> unhandled
---     CEnumType _ _ -> WordArgType -- FIXME: does it fit in a word?
---     CComplexType _ -> unhandled
---     CTypeDef __dent _ -> unhandled
---     CTypeOfExpr _ _ -> unhandled
---     CTypeOfType _ _ -> unhandled
---   where
---     unhandled = error ("Unhandled type specifier: " ++ show tspec)
-
-
-
-main = do
-  ls <- BS.split '\n' <$> BS.getContents
-
-  let (split_headers, syscalls) = splitFile (filter (not . BS.null) ls)
-      headers = BS.intercalate "\n" split_headers
-      Right tunit  = parseC headers (position 0 "" 0 0)
-      idents       = translUnitToIdents tunit
-  ms <- case mapM (P.parseOnly (syscallLine idents)) (tail syscalls) of
-          Left err -> error (show err)
-          Right ms -> return ms
-
-  -- mapM_ pp (catMaybes ms)
-  print (generateHSFile tunit $ catMaybes ms)
-
-translUnitToIdents :: CTranslUnit -> [Ident]
-translUnitToIdents (CTranslUnit decls _) =
-  [ ident | CDeclExt (CDecl _ tdecls _) <- decls
-          , (Just (CDeclr (Just ident) _ _ _ _), _, _) <- tdecls ]
-
-splitFile :: [InputStream] -> ([InputStream], [InputStream])
-splitFile = go False mempty
-  where
-    go :: Bool -> ([InputStream], [InputStream]) -> [InputStream] -> ([InputStream], [InputStream])
-    go _ acc [] = acc
-    go inSyscalls acc (l : ls)
-      | Just (_, filename) <- isCPPLinePragma l
-        = go (filename == "syscalls.master") acc ls
-      | otherwise = go inSyscalls (acc & (if inSyscalls then _2 else _1) %~ (++ [l])) ls
-
-isCPPLinePragma :: InputStream -> Maybe (Integer, String)
-isCPPLinePragma str =
-  case P.parseOnly cppLinePragma str of
-    Left _  -> Nothing
-    Right r -> Just r
+------------------------------------------------------------------------
+-- File preprocessing
 
 cppLinePragma :: Parser (Integer, String)
 cppLinePragma = do
@@ -192,26 +162,96 @@ cppLinePragma = do
   -- .. other stuff until end of line, we don't really care though
   return (n, filename)
 
-syscallLine :: [Ident] -> Parser (Maybe SyscallInfo)
-syscallLine idents =
-  P.choice [ P.char ';' >> return Nothing
-           , parseLine
-           ]
-  where
-    parseLine = do
-      num   <- P.decimal
-      P.skipSpace
-      audit <- P.decimal
-      P.skipSpace
-      cl    <- P.takeWhile (not . P.isSpace)
-      P.skipSpace
-      cdecl <- P.choice [ P.char '{' >> P.takeTill ((==) '}') >>= return . parseDecl
-                        , P.takeWhile1 (not . P.isSpace)      >>  return Nothing
-                        ]
-      return (Just (SyscallInfo num audit cl cdecl))
+-- | This attempts to parses a bytestring line of the form:
+--
+--  "# ?decimal "?filename".*
+--
+-- If it matches this, then it returns the decimal value and
+-- filenumber.  If it does not, then it returns nothing.
+isCPPLinePragma :: BS.ByteString
+                -> Maybe (Integer, String)
+isCPPLinePragma str =
+  case P.parseOnly cppLinePragma str of
+    Left _  -> Nothing
+    Right r -> Just r
 
-    parseDecl bytes =
-      -- FIXME: we should maybe chain through newNameSupply?  I don't think it is ever used ...
-      case execParser extDeclP bytes (position 0 "" 0 0) idents newNameSupply of
-        Left _err                   -> Nothing
-        Right (cdecl, _unusedNames) -> Just cdecl
+-- | This takes the lines in a file, and returns a pair of lines.
+-- The first contains those lines between a pragma of the form
+--
+--   # XX  "syscalls.master"
+--
+-- and a pragma with any other filename.
+--
+-- The second contains the other lines.
+splitFile :: [BS.ByteString] -> ([BS.ByteString], [BS.ByteString])
+splitFile = go False mempty
+  where
+    go :: Bool
+          -- ^ This flag is true if the last CPP line pragma had the filemname
+          -- syscalls.master"
+       -> ([BS.ByteString], [BS.ByteString])
+          -- ^ This contains the lines outside the system call
+          -- contents and the lines inside of respectively.
+       -> [BS.ByteString]
+       -> ([BS.ByteString], [BS.ByteString])
+    go _ acc [] = acc
+    go inSyscalls acc (l : ls)
+      | Just (_, filename) <- isCPPLinePragma l
+        = go (filename == "syscalls.master") acc ls
+        -- Add lines in the system
+      | otherwise =
+        go inSyscalls (acc & (if inSyscalls then _1 else _2) %~ (++ [l])) ls
+
+------------------------------------------------------------------------
+-- Parsing
+
+translUnitToIdents :: CTranslUnit -> [Ident]
+translUnitToIdents (CTranslUnit decls _) =
+  [ ident | CDeclExt (CDecl _ tdecls _) <- decls
+          , (Just (CDeclr (Just ident) _ _ _ _), _, _) <- tdecls ]
+
+------------------------------------------------------------------------
+-- Main
+
+parseSyscallLine :: [Ident] -> BS.ByteString -> IO (Maybe SyscallInfo)
+parseSyscallLine idents l =
+  case P.parseOnly (syscallLine idents) l of
+    Left err -> do
+      hPutStrLn stderr $ "Could not parse system call:"
+      hPutStrLn stderr $ "  " ++ show err
+      hPutStrLn stderr $ "  Input: " ++ BS.unpack l
+      exitFailure
+    Right i ->
+      return i
+
+showUsageAndExit :: IO a
+showUsageAndExit = do
+  hPutStrLn stderr $ unlines
+    [ "This program generates the Haskell module that maps system call ids"
+    , "in FreeBSD to the name, argument types, and result type."
+    , ""
+    , "Please specify the system.master.cpp file as the first argument."
+    , "The resulting Haskell module will be written to standard out."
+    ]
+  exitFailure
+
+main :: IO ()
+main = do
+  args <- getArgs
+  input <-
+    case args of
+      [input] -> pure input
+      _ -> showUsageAndExit
+
+      -- Get contents and split into lines.
+  ls <- BS.split '\n' <$> BS.readFile input
+
+  let (syscalls, split_headers) = splitFile (filter (not . BS.null) ls)
+      headers = BS.intercalate "\n" split_headers
+      Right tunit  = parseC headers (position 0 "" 0 0)
+      idents       = translUnitToIdents tunit
+
+  ms <- mapM (parseSyscallLine idents) (tail syscalls)
+  putStrLn "Got ms"
+  -- mapM_ pp (catMaybes ms)
+  print $ generateHSFile tunit $ catMaybes ms

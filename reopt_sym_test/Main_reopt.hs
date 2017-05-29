@@ -82,12 +82,12 @@ import           Reopt
 import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Discovery
 import           Data.Macaw.CFG
-import qualified Reopt.Machine.StateNames as N
-import           Data.Macaw.Types
-import           Reopt.Machine.X86State
---import           Reopt.Semantics.ConcreteState
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Types
+import qualified Data.Macaw.X86.X86Reg as N
+import           Reopt.Machine.X86State
+--import           Reopt.Semantics.ConcreteState
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
 import           Reopt.Semantics.Monad (Type(..), bvLit)

@@ -17,11 +17,12 @@ import           Numeric
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Memory
-import           Data.Macaw.Memory.Flexdis86
 import qualified Data.Macaw.Memory.Permissions as Perm
+import           Data.Macaw.X86.Flexdis
+import qualified Data.Macaw.X86.X86Reg as N
+
 import           Reopt.BasicBlock.Extract
 import           Reopt.Concrete.Semantics as CS
-import qualified Reopt.Machine.StateNames as N
 
 type CFG = Map Word64 Block
 

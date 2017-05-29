@@ -36,9 +36,11 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
+import           Data.Macaw.Discovery.Info
 import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
-import           Data.Macaw.Discovery.Info
+import           Data.Macaw.X86.X86Reg
+
 import           Reopt.CFG.FnRep (FunctionType(..))
 import           Reopt.Machine.X86State
 
@@ -692,7 +694,7 @@ functionDemands sysp ist entries =
 instance CanDemandValues X86_64 where
 
   functionArgRegs _
-    = [Some rax_reg]
+    = [Some rax]
     ++ (Some <$> x86ArgumentRegs)
     ++ (Some <$> x86FloatArgumentRegs)
 
@@ -705,7 +707,7 @@ instance CanDemandValues X86_64 where
       WriteLoc _ v -> [ Some v]
       StoreX87Control v -> [ Some v]
       MemCopy _sz cnt src dest rev -> [ Some cnt, Some src, Some dest, Some rev ]
-      MemSet cnt v ptr df -> [ Some cnt, Some v, Some ptr, Some df ]
+      MemSet cnt v ptr mdf -> [ Some cnt, Some v, Some ptr, Some mdf ]
 
 inferFunctionTypeFromDemands :: Map (SegmentedAddr 64) (DemandSet X86Reg)
                              -> Map (SegmentedAddr 64) FunctionType

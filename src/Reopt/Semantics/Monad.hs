@@ -98,17 +98,17 @@ module Reopt.Semantics.Monad
 
 import qualified Data.Bits as Bits
 import           Data.Char (toLower)
-import           GHC.TypeLits as TypeLits
-import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
-
-import           Data.Parameterized.Classes
-import           Data.Parameterized.NatRepr
 import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
 import           Data.Macaw.Memory (Endianness(..))
 import           Data.Macaw.Types
+import           Data.Macaw.X86.X86Reg (X86Reg)
+import qualified Data.Macaw.X86.X86Reg as N
+import           Data.Macaw.X86.X87ControlReg
+import           Data.Parameterized.Classes
+import           Data.Parameterized.NatRepr
+import           GHC.TypeLits as TypeLits
+import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Reopt.Machine.StateNames (RegisterName)
-import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Utils.GHCBug as GHCBug
 
 import qualified Flexdis86 as F
@@ -136,7 +136,7 @@ data RegisterView cl b n
  => RegisterView
     { _registerViewBase :: NatRepr b
     , _registerViewSize :: NatRepr n
-    , _registerViewReg :: RegisterName cl
+    , _registerViewReg :: X86Reg cl
     , _registerViewType :: RegisterViewType cl b n
     }
 
@@ -192,7 +192,7 @@ registerViewBase = _registerViewBase
 registerViewSize :: RegisterView cl b n -> NatRepr n
 registerViewSize = _registerViewSize
 
-registerViewReg :: RegisterView cl b n -> RegisterName cl
+registerViewReg :: RegisterView cl b n -> X86Reg cl
 registerViewReg = _registerViewReg
 
 registerViewType :: RegisterView cl b n -> RegisterViewType cl b n
@@ -211,7 +211,7 @@ defaultRegisterViewRead
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName (BVType m)
+  -> X86Reg (BVType m)
   -> v (BVType m)
   -> v (BVType n)
 defaultRegisterViewRead b n _rn v0
@@ -305,7 +305,7 @@ defaultRegisterViewWrite
     )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName (BVType m)
+  -> X86Reg (BVType m)
   -> v (BVType m)
      -- ^ Value being modified
   -> v (BVType n)
@@ -370,7 +370,7 @@ constUpperBitsRegisterViewWrite
   => NatRepr a
   -> v (BVType b)
   -- ^ Constant bits.
-  -> RegisterName (BVType c)
+  -> X86Reg (BVType c)
   -> v (BVType d)
   -> v (BVType e)
   -> v (BVType f)
@@ -381,7 +381,7 @@ constUpperBitsRegisterViewWrite _n c _rn _v0 v = bvCat c v
 -- The read view reads all bits and the write view writes all bits.
 identityRegisterView
   :: (1 <= m)
-  => RegisterName (BVType m)
+  => X86Reg (BVType m)
   -> RegisterView (BVType m) 0 m
 identityRegisterView rn =
   RegisterView
@@ -403,7 +403,7 @@ sliceRegisterView
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName (BVType m)
+  -> X86Reg (BVType m)
   -> RegisterView (BVType m) b n
 sliceRegisterView b n rn =
   RegisterView
@@ -424,7 +424,7 @@ constUpperBitsOnWriteRegisterView
      )
   => NatRepr n
   -> RegisterViewType cl 0 n
-  -> RegisterName cl
+  -> X86Reg cl
   -> RegisterView cl 0 n
 constUpperBitsOnWriteRegisterView n rt rn  =
   RegisterView
@@ -455,7 +455,7 @@ data Location addr (tp :: Type) where
   SegmentReg :: !Segment
              -> Location addr (BVType 16)
 
-  X87ControlReg :: !(N.X87_ControlReg w)
+  X87ControlReg :: !(X87_ControlReg w)
                 -> Location addr (BVType w)
 
   -- The register stack: the argument is an offset from the stack
@@ -555,7 +555,7 @@ ppLocation ppAddr loc = case loc of
 
 -- | Full register location.
 fullRegister :: 1 <= n
-             => N.RegisterName (BVType n)
+             => X86Reg (BVType n)
              -> Location addr (BVType n)
 fullRegister = Register . identityRegisterView
 
@@ -571,7 +571,7 @@ subRegister
      )
   => NatRepr b
   -> NatRepr n
-  -> RegisterName (BVType m)
+  -> X86Reg (BVType m)
   -> Location addr (BVType n)
 subRegister b n = Register . sliceRegisterView b n
 
@@ -586,7 +586,7 @@ constUpperBitsOnWriteRegister ::
   )
   => NatRepr n
   -> RegisterViewType (BVType m) 0 n
-  -> RegisterName (BVType m)
+  -> X86Reg (BVType m)
   -> Location addr (BVType n)
 constUpperBitsOnWriteRegister n rt =
   Register . constUpperBitsOnWriteRegisterView n rt
@@ -647,10 +647,10 @@ of_loc = fullRegister N.oflag
 
 -- | x87 flags
 c0_loc, c1_loc, c2_loc, c3_loc :: Location addr BoolType
-c0_loc = fullRegister N.X87C0
-c1_loc = fullRegister N.X87C1
-c2_loc = fullRegister N.X87C2
-c3_loc = fullRegister N.X87C3
+c0_loc = fullRegister N.X87_C0
+c1_loc = fullRegister N.X87_C1
+c2_loc = fullRegister N.X87_C2
+c3_loc = fullRegister N.X87_C3
 
 -- | Tuen an address into a location of size @n
 floatMemRepr :: FloatInfoRepr flt -> MemRepr (FloatType flt)
@@ -666,26 +666,26 @@ mkFPAddr fir addr = MemoryAddr addr (floatMemRepr fir)
 -- registers have special semantics, defined in Volume 1 of the Intel
 -- x86 manual: on write,the upper 16 bits of the underlying x87
 -- register are oned out!
-x87reg_mmx :: RegisterName N.X87_FPU -> Location addr (BVType 64)
+x87reg_mmx :: X86Reg N.X87_FPU -> Location addr (BVType 64)
 x87reg_mmx r = constUpperBitsOnWriteRegister n64 OneExtendOnWrite r
 
 -- | Return low 32-bits of register e.g. rax -> eax
 --
 -- These subregisters have special semantics, defined in Volume 1 of
 -- the Intel x86 manual: on write, the upper 32 bits are zeroed out!
-reg_low32 :: RegisterName N.GP -> Location addr (BVType 32)
+reg_low32 :: X86Reg N.GP -> Location addr (BVType 32)
 reg_low32 r = constUpperBitsOnWriteRegister n32 ZeroExtendOnWrite r
 
 -- | Return low 16-bits of register e.g. rax -> ax
-reg_low16 :: RegisterName N.GP -> Location addr (BVType 16)
+reg_low16 :: X86Reg N.GP -> Location addr (BVType 16)
 reg_low16 r = subRegister n0 n16 r
 
 -- | Return low 8-bits of register e.g. rax -> al
-reg_low8 :: RegisterName N.GP -> Location addr (BVType 8)
+reg_low8 :: X86Reg N.GP -> Location addr (BVType 8)
 reg_low8 r = subRegister n0 n8 r
 
 -- | Return bits 8-15 of the register e.g. rax -> ah
-reg_high8 :: RegisterName N.GP -> Location addr (BVType 8)
+reg_high8 :: X86Reg N.GP -> Location addr (BVType 8)
 reg_high8 r = subRegister n8 n8 r
 
 rsp, rbp, rax, rdx, rsi, rdi, rcx :: Location addr (BVType 64)

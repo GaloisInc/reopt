@@ -30,10 +30,12 @@ import Data.Parameterized.NatRepr
 import Data.Word
 
 import Debug.Trace
-import Reopt.CFG.FnRep
+
 import Data.Macaw.CFG
-import Reopt.Machine.StateNames (RegisterName, GP)
 import Data.Macaw.Types
+import Data.Macaw.X86.X86Reg (X86Reg, GP)
+
+import Reopt.CFG.FnRep
 import Reopt.Machine.X86State
 
 {-
@@ -248,7 +250,7 @@ stackOffsetAddr _ _ = trace "stackOffsetAddr unsupported" $
 
 -- | Record a register as being callee saved.
 recordCalleeSavedWrite :: BVValue X86_64 ids 64 -- ^ Offset in stack
-                       -> RegisterName GP  -- ^ Register that is saved.
+                       -> X86Reg GP  -- ^ Register that is saved.
                        -> FnStack -- ^ Current stack
                        -> FnStack
 recordCalleeSavedWrite _ _ s = s

@@ -12,6 +12,7 @@ import           Control.Monad.State
 import qualified Data.List as L
 import           Data.Macaw.CFG as R
 import           Data.Macaw.Types (TypeBits, n0, n64)
+import qualified Data.Macaw.X86.X86Reg as N
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Map as M
@@ -25,7 +26,6 @@ import           Flexdis86 as F
 import           Reopt.Concrete.BitVector (bitVector)
 import           Reopt.Concrete.MachineState (Value(..))
 import           Reopt.Concrete.Semantics as CS
-import qualified Reopt.Machine.StateNames as N
 import qualified Reopt.Semantics.Monad as S
 import           Reopt.Semantics.FlexdisMatcher
 
@@ -37,7 +37,7 @@ import           Debug.Trace
 -- constraining the type indices of the 'Location' in which the
 -- 'RegisterView' is embedded.
 registerViewAsFullRegister :: S.RegisterView tp b n
-                           -> Maybe (N.RegisterName tp, b :~: 0, n :~: TypeBits tp)
+                           -> Maybe (N.X86Reg tp, b :~: 0, n :~: TypeBits tp)
 registerViewAsFullRegister v
   | Just Refl <- S.registerViewBase v `testEquality` n0
   , Just Refl <- S.registerViewSize v `testEquality` N.registerWidth (S.registerViewReg v)

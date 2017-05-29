@@ -23,12 +23,12 @@ import           Data.Int
 import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
 import           Data.Macaw.Memory (Endianness (LittleEndian))
 import           Data.Macaw.Types
+import qualified Data.Macaw.X86.X86Reg as N
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Proxy
 import qualified Flexdis86 as F
 
-import qualified Reopt.Machine.StateNames as N
 import           Reopt.Semantics.Getters
 import           Reopt.Semantics.InstructionDef
 import           Reopt.Semantics.Monad
@@ -138,9 +138,9 @@ set_low ::
 set_low r c = modify_low (bv_width c) r (\_ -> c)
 
 set_reg_pair :: (Semantics m, 1 <= n)
-             => (N.RegisterName cl -> MLocation m (BVType n))
-             -> N.RegisterName cl
-             -> N.RegisterName cl
+             => (N.X86Reg cl -> MLocation m (BVType n))
+             -> N.X86Reg cl
+             -> N.X86Reg cl
              -> Value m (BVType (n + n))
              -> m ()
 set_reg_pair f upperL lowerL v = do
@@ -248,9 +248,9 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
         )
 
 get_reg_pair :: (Semantics m, 1 <= n)
-             => (N.RegisterName cl -> MLocation m (BVType n))
-             -> N.RegisterName cl
-             -> N.RegisterName cl
+             => (N.X86Reg cl -> MLocation m (BVType n))
+             -> N.X86Reg cl
+             -> N.X86Reg cl
              -> m (Value m (BVType (n+n)))
 get_reg_pair f upperL lowerL = bvCat <$> get (f upperL) <*> get (f lowerL)
 
@@ -951,7 +951,7 @@ def_ret = defVariadic "ret"    $ \_ vs ->
 -- MOVS/MOVSW Move string/Move word string
 -- MOVS/MOVSD Move string/Move doubleword string
 
-regLocation :: NatRepr n -> N.RegisterName N.GP -> Location addr (BVType n)
+regLocation :: NatRepr n -> N.X86Reg N.GP -> Location addr (BVType n)
 regLocation sz
   | Just Refl <- testEquality sz n8  = reg_low8
   | Just Refl <- testEquality sz n16 = reg_low16
