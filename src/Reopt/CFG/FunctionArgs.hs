@@ -37,6 +37,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Fold
 import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
 import           Data.Macaw.X86.X86Reg

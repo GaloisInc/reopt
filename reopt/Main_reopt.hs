@@ -77,6 +77,8 @@ import           Data.Macaw.Discovery.Info
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 
+import           Data.Macaw.X86.X86Reg (X86Reg)
+
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..), FunctionType)
 import           Reopt.CFG.FunctionArgs (DemandSet, functionDemands, inferFunctionTypeFromDemands)
@@ -895,6 +897,18 @@ checkReturnsIdentified g b =
           hPutStrLn stderr $ "MISSING return Block " ++ show (labelAddr lbl)
         _ -> return ()
     _ -> return ()
+
+-- | Returns true if block has a call comment.
+hasCallComment :: Block X86_64 ids -> Bool
+hasCallComment b = any isCallComment (blockStmts b)
+  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
+        isCallComment _ = False
+
+-- | Returns true if block has a ret comment.
+hasRetComment :: Block X86_64 ids -> Bool
+hasRetComment b = any isRetComment (blockStmts b)
+  where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
+        isRetComment _ = False
 
 -- | This prints a report summarizing where calls are found that do not have
 -- call instructions

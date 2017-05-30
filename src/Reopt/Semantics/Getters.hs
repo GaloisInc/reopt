@@ -42,13 +42,13 @@ module Reopt.Semantics.Getters
 import           Data.Macaw.CFG (MemRepr(..))
 import           Data.Macaw.Memory (Endianness(..))
 import           Data.Macaw.Types (FloatType, BVType, n8, n16, n32, n64)
-import qualified Data.Macaw.X86.X86Reg as N
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Flexdis86 as F
 import           GHC.TypeLits (KnownNat)
 
-import           Reopt.Semantics.Monad
+import           Data.Macaw.X86.Monad
+import qualified Data.Macaw.X86.X86Reg as N
 
 byteMemRepr :: MemRepr (BVType 8)
 byteMemRepr = BVMemRepr (knownNat :: NatRepr 1) LittleEndian

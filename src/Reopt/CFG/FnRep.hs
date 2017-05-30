@@ -31,15 +31,14 @@ module Reopt.CFG.FnRep
    ) where
 
 import           Data.Foldable
+import           Data.Parameterized.Classes
+import           Data.Parameterized.Map (MapF)
+import           Data.Parameterized.Some
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
 import qualified Data.Vector as V
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
-
-import           Data.Parameterized.Classes
-import           Data.Parameterized.Map (MapF)
-import           Data.Parameterized.Some
 
 import           Data.Macaw.CFG
    ( App(..)
@@ -54,14 +53,15 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory (SegmentedAddr)
 import           Data.Macaw.Types
 
-import           Reopt.Machine.X86State
+import           Data.Macaw.X86.Monad (RepValSize(..), XMMType)
+
+import           Data.Macaw.X86.X86Reg
   ( X86Reg
   , x86ArgumentRegs
   , x86ResultRegs
   , x86FloatArgumentRegs
   , x86FloatResultRegs
   )
-import Reopt.Semantics.Monad (RepValSize(..), XMMType)
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')

@@ -33,25 +33,24 @@ import           Data.Int
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
+import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Some
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import qualified GHC.Err.Located as Loc
 import           GHC.TypeLits
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
-import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
-
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Reopt.CFG.FnRep
-import           Reopt.Machine.X86State
-import           Reopt.Semantics.Monad (RepValSize(..), repValSizeByteCount)
+import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
+import           Data.Macaw.X86.X86Reg
 
-import qualified GHC.Err.Located as Loc
+import           Reopt.CFG.FnRep
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -943,11 +942,11 @@ stmtToLLVM' stmt = do
      --               , L.iT 1  L.-: L.int 0 ]
      --   _ -> do
 
-   FnMemSet count v ptr df -> do
+   FnMemSet count v ptr dir -> do
      count' <- mkLLVMValue count
      v'     <- mkLLVMValue v
      ptr'   <- mkLLVMValue ptr
-     df'    <- mkLLVMValue df
+     df'    <- mkLLVMValue dir
      let typ = typeToLLVMType $ fnValueType v
      ptr_ptr <- convop L.IntToPtr ptr' (L.PtrTo typ)
      call_ (iMemSet typ) [ptr_ptr, v', count', df']

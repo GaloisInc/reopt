@@ -2,7 +2,7 @@
 Copyright        : (c) Galois, Inc 2015-2017
 Maintainer       : Joe Hendrix <jhendrix@galois.com>
 
-This contains an implementation of the classes defined in Reopt.Semantics.Monad
+This contains an implementation of the classes defined in Data.Macaw.X86.Monad
 that map  a control flow graph from a program using the semantics.
 -}
 {-# LANGUAGE DataKinds #-}
@@ -26,6 +26,8 @@ module Reopt.CFG.Implementation
        , x86_64_linux_info
        , freeBSD_syscallPersonality
        , linux_syscallPersonality
+       , ExploreLoc
+       , rootLoc
        , disassembleBlock
        , X86TranslateError(..)
        ) where
@@ -53,7 +55,7 @@ import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
 import qualified Flexdis86 as F
-import           Text.PrettyPrint.ANSI.Leijen (Pretty(..))
+import           Text.PrettyPrint.ANSI.Leijen (Pretty(..), text)
 
 import           Data.Macaw.AbsDomain.AbsState
        ( AbsBlockState
@@ -80,16 +82,14 @@ import           Data.Macaw.Memory
 import           Data.Macaw.Types (BoolType, BVType, TypeRepr(..), knownType, n1, n8, typeRepr)
 
 import           Data.Macaw.X86.Flexdis
-import qualified Data.Macaw.X86.X86Reg as N
+import           Data.Macaw.X86.Monad ( bvLit )
+import qualified Data.Macaw.X86.Monad as S
+import           Data.Macaw.X86.SyscallInfo.FreeBSD as FreeBSD
+import           Data.Macaw.X86.SyscallInfo.Linux as Linux
+import           Data.Macaw.X86.X86Reg
 
-import           Reopt.Machine.SysDeps.FreeBSDGenerated as FreeBSD
-import           Reopt.Machine.SysDeps.LinuxGenerated as Linux
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
-import           Reopt.Semantics.Monad
-  ( bvLit
-  )
-import qualified Reopt.Semantics.Monad as S
 
 ------------------------------------------------------------------------
 -- Expr
@@ -788,6 +788,37 @@ eval (AppExpr a) = evalApp =<< traverseApp eval a
 type AddrExpr ids = Expr ids (BVType 64)
 
 ------------------------------------------------------------------------
+-- ExploreLoc
+
+-- | This represents the control-flow information needed to build basic blocks
+-- for a code location.
+data ExploreLoc
+   = ExploreLoc { loc_ip      :: !(SegmentedAddr 64)
+                  -- ^ IP address.
+                , loc_x87_top :: !Int
+                  -- ^ Top register of x87 stack
+                , loc_df_flag :: !Bool
+                  -- ^ Value of DF flag
+                }
+ deriving (Eq, Ord)
+
+instance Pretty ExploreLoc where
+  pretty loc = text $ show (loc_ip loc)
+
+rootLoc :: SegmentedAddr 64 -> ExploreLoc
+rootLoc ip = ExploreLoc { loc_ip      = ip
+                        , loc_x87_top = 7
+                        , loc_df_flag = False
+                        }
+
+initX86State :: ExploreLoc -- ^ Location to explore from.
+             -> RegState X86Reg (Value X86_64 ids)
+initX86State loc = mkRegState Initial
+                 & curIP     .~ RelocatableValue knownNat (addrValue (loc_ip loc))
+                 & boundValue X87_TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
+                 & boundValue df .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
+
+------------------------------------------------------------------------
 -- Location
 
 type ImpLocation ids tp = S.Location (AddrExpr ids) tp
@@ -978,11 +1009,11 @@ instance S.Semantics (X86Generator st_s ids) where
     ValueExpr . AssignedValue
       <$> addArchFn (MemCmp sz count_v src_v dest_v is_reverse_v)
 
-  memset count val dest df = do
+  memset count val dest dfl = do
     count_v <- eval count
     val_v   <- eval val
     dest_v  <- eval dest
-    df_v    <- eval df
+    df_v    <- eval dfl
     addStmt $ ExecArchStmt $ MemSet count_v val_v dest_v df_v
 
   rep_scas True is_reverse sz val buf count = do
@@ -1010,27 +1041,27 @@ instance S.Semantics (X86Generator st_s ids) where
                          & blockState .~ NothingF
 
   primitive S.CPUID = do
-    rax_val <- modState $ use $ boundValue N.rax
+    rax_val <- modState $ use $ boundValue rax
     let n32 = knownNat :: NatRepr 32
     eax_val <- eval (S.bvTrunc' n32  (ValueExpr rax_val))
     -- Call CPUID and get a 128-bit value back.
     res <- ValueExpr . AssignedValue <$> addArchFn (CPUID eax_val)
-    S.reg_low32 N.rax S..= lowerHalf (lowerHalf res)
-    S.reg_low32 N.rbx S..= upperHalf (lowerHalf res)
-    S.reg_low32 N.rcx S..= lowerHalf (upperHalf res)
-    S.reg_low32 N.rdx S..= upperHalf (upperHalf res)
+    S.reg_low32 rax S..= lowerHalf (lowerHalf res)
+    S.reg_low32 rbx S..= upperHalf (lowerHalf res)
+    S.reg_low32 rcx S..= lowerHalf (upperHalf res)
+    S.reg_low32 rdx S..= upperHalf (upperHalf res)
 
   primitive S.RDTSC = do
     res <- ValueExpr . AssignedValue <$> addArchFn RDTSC
-    S.reg_low32 N.rdx S..= upperHalf res
-    S.reg_low32 N.rax S..= lowerHalf res
+    S.reg_low32 rdx S..= upperHalf res
+    S.reg_low32 rax S..= lowerHalf res
   primitive S.XGetBV = do
-    rcx_val <- modState $ use $ boundValue N.rcx
+    rcx_val <- modState $ use $ boundValue rcx
     let n32 = knownNat :: NatRepr 32
     ecx_val <- eval (S.bvTrunc' n32  (ValueExpr rcx_val))
     res <- ValueExpr . AssignedValue <$> addArchFn (XGetBV ecx_val)
-    S.reg_low32 N.rdx S..= upperHalf res
-    S.reg_low32 N.rax S..= lowerHalf res
+    S.reg_low32 rdx S..= upperHalf res
+    S.reg_low32 rax S..= lowerHalf res
 
   fnstcw addr = do
     addr_val <- eval addr
@@ -1194,13 +1225,13 @@ fnBlockState addr =
         -- x87 top register points to top of stack.
       & absRegState . boundValue X87_TopReg .~ FinSet (Set.singleton 7)
         -- Direction flag is initially zero.
-      & absRegState . boundValue N.df .~ FinSet (Set.singleton 0)
+      & absRegState . boundValue df .~ FinSet (Set.singleton 0)
       & startAbsStack .~ Map.singleton 0 (StackEntry (BVMemRepr n8 LittleEndian) ReturnAddr)
 
 preserveFreeBSDSyscallReg :: X86Reg tp -> Bool
 preserveFreeBSDSyscallReg r
-  | Just Refl <- testEquality r N.cf  = False
-  | Just Refl <- testEquality r N.rax = False
+  | Just Refl <- testEquality r cf  = False
+  | Just Refl <- testEquality r rax = False
   | otherwise = True
 
 -- | Linux preserves the same registers the x86_64 ABI does
@@ -1249,8 +1280,8 @@ disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
   case asConcreteSingleton (ab^.absRegState^.boundValue X87_TopReg) of
     Nothing -> pure $ ([], addr, Just "Could not determine height of X87 stack.")
     Just t -> do
-      case asConcreteSingleton (ab^.absRegState^.boundValue N.df) of
-        Nothing -> pure $ ([], addr, Just $ "Could not determine df flag " ++ show (ab^.absRegState^.boundValue N.df))
+      case asConcreteSingleton (ab^.absRegState^.boundValue df) of
+        Nothing -> pure $ ([], addr, Just $ "Could not determine df flag " ++ show (ab^.absRegState^.boundValue df))
         Just d -> do
           let loc = ExploreLoc { loc_ip = addr
                                , loc_x87_top = fromInteger t
@@ -1262,7 +1293,7 @@ disassembleBlockFromAbsState nonce_gen mem contFn addr ab =
 freeBSD_syscallPersonality :: SyscallPersonality X86_64
 freeBSD_syscallPersonality =
   SyscallPersonality { spTypeInfo = FreeBSD.syscallInfo
-                     , spResultRegisters = [ Some N.rax, Some N.cf ]
+                     , spResultRegisters = [ Some rax, Some cf ]
                      }
 
 -- | Architecture information for X86_64 on FreeBSD.
@@ -1275,14 +1306,15 @@ x86_64_freeBSD_info =
                    , fnBlockStateFn     = \_ -> fnBlockState
                    , preserveRegAcrossCall    = \r -> Set.member (Some r) x86CalleeSavedRegs
                    , preserveRegAcrossSyscall = preserveFreeBSDSyscallReg
-                   , callStackDelta     = x86StackDelta
+                     -- call stack decrements by 8 in a call.
+                   , callStackDelta     = -8
                    , absEvalArchFn      = transferAbsValue
                    }
 
 linux_syscallPersonality :: SyscallPersonality X86_64
 linux_syscallPersonality =
   SyscallPersonality { spTypeInfo = Linux.syscallInfo
-                     , spResultRegisters = [Some N.rax]
+                     , spResultRegisters = [Some rax]
                      }
 
 -- | Architecture information for X86_64.
@@ -1295,6 +1327,7 @@ x86_64_linux_info =
                    , fnBlockStateFn     = \_ -> fnBlockState
                    , preserveRegAcrossCall    = \r -> Set.member (Some r) x86CalleeSavedRegs
                    , preserveRegAcrossSyscall = \r -> Set.member (Some r) linuxSystemCallPreservedRegisters
-                   , callStackDelta     = x86StackDelta
+                     -- call stack decrements by 8 in a call.
+                   , callStackDelta     = -8
                    , absEvalArchFn      = transferAbsValue
                    }

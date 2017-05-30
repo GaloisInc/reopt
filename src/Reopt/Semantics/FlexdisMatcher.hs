@@ -29,7 +29,7 @@ import qualified Data.Map.Strict as M
 import qualified Flexdis86 as F
 
 import           Reopt.Semantics.InstructionDef
-import           Reopt.Semantics.Monad
+import           Data.Macaw.X86.Monad
 import           Reopt.Semantics.Semantics
 
 ------------------------------------------------------------------------

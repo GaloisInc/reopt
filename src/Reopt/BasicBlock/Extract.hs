@@ -26,7 +26,7 @@ import           Flexdis86 as F
 import           Reopt.Concrete.BitVector (bitVector)
 import           Reopt.Concrete.MachineState (Value(..))
 import           Reopt.Concrete.Semantics as CS
-import qualified Reopt.Semantics.Monad as S
+import qualified Data.Macaw.X86.Monad as S
 import           Reopt.Semantics.FlexdisMatcher
 
 import           Debug.Trace

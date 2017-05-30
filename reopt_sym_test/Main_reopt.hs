@@ -85,14 +85,14 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 import           Data.Macaw.Types
+
+import           Data.Macaw.X86.Monad (Type(..), bvLit)
+import qualified Data.Macaw.X86.Monad as SM
 import qualified Data.Macaw.X86.X86Reg as N
+
 import           Reopt.Machine.X86State
---import           Reopt.Semantics.ConcreteState
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
-import           Reopt.Semantics.Monad (Type(..), bvLit)
-import qualified Reopt.Semantics.Monad as SM
-
 import           Reopt.Symbolic.Semantics
 
 ------------------------------------------------------------------------

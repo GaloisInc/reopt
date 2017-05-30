@@ -45,7 +45,7 @@ import           GHC.TypeLits (KnownNat)
 
 import           Reopt.Semantics.Conditions
 import           Reopt.Semantics.Getters
-import           Reopt.Semantics.Monad
+import           Data.Macaw.X86.Monad
 
 -- This is a wrapper around the semantics of an instruction.
 newtype InstructionSemantics

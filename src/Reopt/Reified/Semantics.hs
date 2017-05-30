@@ -1,15 +1,12 @@
-------------------------------------------------------------------------
--- |
--- Module           : Reopt.Reified.Semantics
--- Description      : Free instance for Reopt.Semantics.Monad.Semantics
--- Copyright        : (c) Galois, Inc 2015
--- Maintainer       : Nathan Collins <conathan@galois.com>
--- Stability        : provisional
---
--- This contains an implementation of the classes defined in
--- Reopt.Semantics.Monad that treat some class methods as
--- uninterpreted functions.
-------------------------------------------------------------------------
+{-|
+Copyright        : (c) Galois, Inc 2015-2017
+Maintainer       : Nathan Collins <conathan@galois.com>
+Stability        : provisional
+
+This contains an implementation of the classes defined in
+Data.Macaw.X86.Monad that treat some class methods as
+uninterpreted functions.
+-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DoAndIfThenElse #-}
@@ -45,6 +42,7 @@ import           Control.Monad.State.Strict
 import           Control.Monad.Writer
   (censor, execWriterT, listen, tell, MonadWriter, WriterT)
 import           Data.Bits
+import qualified Data.Macaw.CFG as R
 import           Data.Macaw.Types
 import           Data.Parameterized.Classes (EqF(..), OrderingF(..), compareF, fromOrdering)
 import qualified Data.Parameterized.Map as MapF
@@ -52,13 +50,15 @@ import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen
   ((<+>), indent, parens, pretty, text, tupled, vsep, Doc, Pretty(..))
 
-import           Reopt.Concrete.MachineState (Value)
-import qualified Reopt.Concrete.MachineState as CS
-import           Reopt.Semantics.Monad
+
+import           Data.Macaw.X86.Monad
   ( bvLit
   )
-import qualified Reopt.Semantics.Monad as S
-import qualified Data.Macaw.CFG as R
+import qualified Data.Macaw.X86.Monad as S
+
+import           Reopt.Concrete.MachineState (Value)
+import qualified Reopt.Concrete.MachineState as CS
+
 
 -- import Debug.Trace
 
@@ -379,7 +379,7 @@ instance S.Semantics Semantics where
     return $ VarExpr var
 
   get l = do
-    var <- freshVar "get" (S.loc_type l)
+    var <- freshVar "get" (typeRepr l)
     expandMemOps (Get var l)
     -- tell [Get var l]
     return $ VarExpr var

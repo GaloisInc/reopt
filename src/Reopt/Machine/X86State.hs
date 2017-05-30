@@ -1,75 +1,43 @@
+{-
+Copyright        : (c) Galois, Inc 2015-2017
+Maintainer       : Joe Hendrix <jhendrix@galois.com>, Simon Winwood <sjw@galois.com>
+
+This defines the X86_64 architecture type and the supporting definitions.
+-}
+
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE EmptyDataDecls #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 module Reopt.Machine.X86State
-  ( initX86State
-    -- * Combinators
-  , foldValueCached
-    -- * X86Reg
-  , X86Reg(..)
-  , boundValue
-    -- * ExploreLoc
-  , ExploreLoc(..)
-  , rootLoc
-    -- * Architecture
-  , X86_64
+  ( -- * Architecture
+    X86_64
   , X86PrimFn(..)
-  , CanFoldValues(..)
-  , SIMDWidth(..)
   , X86PrimLoc(..)
   , X86Stmt(..)
-    -- * X86-64 Specific functions
-  , refsInAssignRhs
-  , refsInValue
-  , refsInApp
-  , hasCallComment
-  , hasRetComment
-  , asStackAddrOffset
-  , x86StackDelta
-    -- * Lists of X86 Registers
-  , refsInX86PrimFn
-  , x86CalleeSavedRegs
-  , x86ArgumentRegs
-  , x86FloatArgumentRegs
-  , x86ResultRegs
-  , x86FloatResultRegs
   ) where
 
-import           Control.Lens
-import           Control.Monad.State.Strict
-import           Data.Map.Strict (Map)
-import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
 import           Data.Macaw.CFG
-import           Data.Macaw.Memory ( MemWord, addrValue )
+import           Data.Macaw.Fold
 import           Data.Macaw.Types
+
+import           Data.Macaw.X86.Monad (SIMDWidth(..), RepValSize(..))
 import           Data.Macaw.X86.X86Reg
 import           Data.Macaw.X86.X87ControlReg
-
-import           Reopt.Semantics.Monad (SIMDWidth(..), RepValSize(..))
 
 ------------------------------------------------------------------------
 -- X86_64 specific declarations
 
 data X86_64
+
 type instance ArchReg  X86_64 = X86Reg
 type instance ArchFn   X86_64 = X86PrimFn
 type instance ArchStmt X86_64 = X86Stmt
@@ -106,12 +74,6 @@ instance Pretty (X86PrimLoc tp) where
 
 ------------------------------------------------------------------------
 -- X86PrimFn
-
--- | Return the 'NatRepr' associated with the given width.
-simdWidthNatRepr :: SIMDWidth w -> NatRepr w
-simdWidthNatRepr SIMD_64  = knownNat
-simdWidthNatRepr SIMD_128 = knownNat
-simdWidthNatRepr SIMD_256 = knownNat
 
 -- | Defines primitive functions in the X86 format.
 data X86PrimFn ids tp
@@ -179,7 +141,7 @@ instance HasRepr (X86PrimFn ids) TypeRepr where
       CPUID{}       -> knownType
       RDTSC{}       -> knownType
       XGetBV{}      -> knownType
-      PShufb w _ _  -> BVTypeRepr (simdWidthNatRepr w)
+      PShufb w _ _  -> BVTypeRepr (typeRepr w)
       MemCmp{}      -> knownType
       RepnzScas{} -> knownType
 
@@ -253,51 +215,6 @@ instance PrettyF X86Stmt where
     where args = [pretty cnt, pretty val, pretty dest, pretty d]
 
 ------------------------------------------------------------------------
--- Architecture-specific Value operations
-
-asStackAddrOffset :: Value X86_64 ids tp -> Maybe (BVValue X86_64 ids 64)
-asStackAddrOffset addr
-  | Just (BVAdd _ (Initial base) offset) <- valueAsApp addr
-  , Just Refl <- testEquality base sp_reg = do
-    Just offset
-  | Initial base <- addr
-  , Just Refl <- testEquality base sp_reg = do
-    Just (BVValue knownNat 0)
-  | otherwise =
-    Nothing
-
-------------------------------------------------------------------------
--- ExploreLoc
-
--- | This represents the control-flow information needed to build basic blocks
--- for a code location.
-data ExploreLoc
-   = ExploreLoc { loc_ip      :: !(SegmentedAddr 64)
-                  -- ^ IP address.
-                , loc_x87_top :: !Int
-                  -- ^ Top register of x87 stack
-                , loc_df_flag :: !Bool
-                  -- ^ Value of DF flag
-                }
- deriving (Eq, Ord)
-
-instance Pretty ExploreLoc where
-  pretty loc = text $ show (loc_ip loc)
-
-rootLoc :: SegmentedAddr 64 -> ExploreLoc
-rootLoc ip = ExploreLoc { loc_ip      = ip
-                        , loc_x87_top = 7
-                        , loc_df_flag = False
-                        }
-
-initX86State :: ExploreLoc -- ^ Location to explore from.
-             -> RegState X86Reg (Value X86_64 ids)
-initX86State loc = mkRegState Initial
-                 & curIP     .~ RelocatableValue knownNat (addrValue (loc_ip loc))
-                 & boundValue X87_TopReg .~ mkLit knownNat (toInteger (loc_x87_top loc))
-                 & boundValue df .~ mkLit knownNat (if (loc_df_flag loc) then 1 else 0)
-
-------------------------------------------------------------------------
 -- Compute set of assignIds in values.
 
 refsInX86PrimFn :: X86PrimFn ids tp -> Set (Some (AssignId ids))
@@ -344,73 +261,6 @@ instance StmtHasRefs X86Stmt where
 instance FnHasRefs X86PrimFn where
   refsInFn = refsInX86PrimFn
 
-------------------------------------------------------------------------
--- StateMonadMonoid
-
--- helper type to make a monad a monoid in the obvious way
-newtype StateMonadMonoid s m = SMM { getStateMonadMonoid :: State s m }
-   deriving (Functor, Applicative, Monad, MonadState s)
-
-
-instance Monoid m => Monoid (StateMonadMonoid s m) where
-  mempty = return mempty
-  mappend m m' = mappend <$> m <*> m'
-
--- | Typeclass for folding over architecture-specific values.
-class CanFoldValues arch where
-  -- | Folding over ArchFn values
-  foldFnValues :: Monoid r
-               => (forall vtp . Value arch ids vtp -> r)
-               -> ArchFn arch ids tp
-               -> r
-
-foldAssignRHSValues :: (Monoid r, CanFoldValues arch)
-                    => (forall vtp . Value arch ids vtp -> r)
-                    -> AssignRhs arch ids tp
-                    -> r
-foldAssignRHSValues go v =
-  case v of
-    EvalApp a -> foldApp go a
-    SetUndefined _w -> mempty
-    ReadMem addr _ -> go addr
-    EvalArchFn f _ -> foldFnValues go f
-
--- | This folds over elements of a values in a  values.
---
--- It memoizes values so that it only evaluates assignments with the same id
--- once.
-foldValueCached :: forall m arch ids tp
-                .  (Monoid m, CanFoldValues arch)
-                => (forall n.  NatRepr n -> Integer -> m)
-                   -- ^ Function for literals
-                -> (forall n.  NatRepr n -> MemWord (RegAddrWidth (ArchReg arch)) -> m)
-                   -- ^ Function for memwords
-                -> (forall utp . ArchReg arch utp -> m)
-                   -- ^ Function for input registers
-                -> (forall utp . AssignId ids utp -> m -> m)
-                   -- ^ Function for assignments
-                -> Value arch ids tp
-                -> State (Map (Some (AssignId ids)) m) m
-foldValueCached litf rwf initf assignf = getStateMonadMonoid . go
-  where
-    go :: forall tp'
-       .  Value arch ids tp'
-       -> StateMonadMonoid (Map (Some (AssignId ids)) m) m
-    go v =
-      case v of
-        BVValue sz i -> return $ litf sz i
-        RelocatableValue w a -> pure $ rwf w a
-        Initial r    -> return $ initf r
-        AssignedValue (Assignment a_id rhs) -> do
-          m_v <- use (at (Some a_id))
-          case m_v of
-            Just v' ->
-              return $ assignf a_id v'
-            Nothing -> do
-              rhs_v <- foldAssignRHSValues go rhs
-              at (Some a_id) .= Just rhs_v
-              return (assignf a_id rhs_v)
-
 instance CanFoldValues X86_64 where
   foldFnValues go f =
     case f of
@@ -425,51 +275,3 @@ instance CanFoldValues X86_64 where
         mconcat [ go cnt, go src, go dest, go rev ]
       RepnzScas _sz val buf cnt ->
         mconcat [ go val, go buf, go cnt ]
-
-------------------------------------------------------------------------
--- X86_64 specific block operations.
-
--- | Returns true if block has a call comment.
-hasCallComment :: Block X86_64 ids -> Bool
-hasCallComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
-        isCallComment _ = False
-
--- | Returns true if block has a ret comment.
-hasRetComment :: Block X86_64 ids -> Bool
-hasRetComment b = any isRetComment (blockStmts b)
-  where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
-        isRetComment _ = False
-
-------------------------------------------------------------------------
--- Register names
-
--- | List of registers that a callee must save.
-x86CalleeSavedRegs :: Set (Some X86Reg)
-x86CalleeSavedRegs = Set.fromList $
-  [ -- Some rsp sjw: rsp is special
-    Some rbp
-  , Some rbx
-  , Some r12
-  , Some r13
-  , Some r14
-  , Some r15
-  , Some X87_TopReg
-  , Some df
-  ]
-
-x86ArgumentRegs :: [X86Reg (BVType 64)]
-x86ArgumentRegs = [rdi, rsi, rdx, rcx, r8, r9]
-
-x86FloatArgumentRegs :: [X86Reg (BVType 128)]
-x86FloatArgumentRegs =  X86_XMMReg <$> [0..7]
-
-x86ResultRegs :: [X86Reg (BVType 64)]
-x86ResultRegs = [ rax, rdx ]
-
-x86FloatResultRegs :: [X86Reg (BVType 128)]
-x86FloatResultRegs = [ X86_XMMReg 0 ]
-
--- | How the stack pointer moves when a call is made.
-x86StackDelta :: Integer
-x86StackDelta = -8

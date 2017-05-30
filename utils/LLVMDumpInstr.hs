@@ -26,7 +26,6 @@ import qualified Data.Macaw.Memory.Permissions as Perm
 import           Reopt.CFG.Implementation
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Recovery
-import           Reopt.Machine.X86State (rootLoc)
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 

@@ -61,7 +61,9 @@ import           Flexdis86 ( InstructionInstance
                            , disassembleInstruction
                            , LockPrefix(..)
                            , mmxRegNo
+                           , xmmRegNo
                            )
+import qualified Flexdis86 as F
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory
@@ -69,7 +71,7 @@ import           Data.Macaw.Memory.ElfLoader
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.Flexdis
-import qualified Data.Macaw.X86.X86Reg as N
+import           Data.Macaw.X86.X86Reg (X86Reg(..), x86StateRegs)
 
 import           Reopt (readElf64)
 import           Reopt.Concrete.BitVector hiding (modify)
@@ -79,7 +81,7 @@ import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
 import           Reopt.Machine.X86State
 import           Reopt.Semantics.FlexdisMatcher
-import qualified Reopt.Semantics.Monad as SM
+import qualified Data.Macaw.X86.Monad as SM
 
 import           SignalUtils (signalToString, statusToString)
 
@@ -351,22 +353,27 @@ translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
   where
     fillReg :: X86Reg tp -> MS.Value tp
     fillReg X86_IP = mkLit64 (rip ptraceRegs)
-    fillReg (X86_GP  0) = mkLit64 (rax ptraceRegs)
-    fillReg (X86_GP  1) = mkLit64 (rcx ptraceRegs)
-    fillReg (X86_GP  2) = mkLit64 (rdx ptraceRegs)
-    fillReg (X86_GP  3) = mkLit64 (rbx ptraceRegs)
-    fillReg (X86_GP  4) = mkLit64 (rsp ptraceRegs)
-    fillReg (X86_GP  5) = mkLit64 (rbp ptraceRegs)
-    fillReg (X86_GP  6) = mkLit64 (rsi ptraceRegs)
-    fillReg (X86_GP  7) = mkLit64 (rdi ptraceRegs)
-    fillReg (X86_GP  8) = mkLit64 ( r8 ptraceRegs)
-    fillReg (X86_GP  9) = mkLit64 ( r9 ptraceRegs)
-    fillReg (X86_GP 10) = mkLit64 (r10 ptraceRegs)
-    fillReg (X86_GP 11) = mkLit64 (r11 ptraceRegs)
-    fillReg (X86_GP 12) = mkLit64 (r12 ptraceRegs)
-    fillReg (X86_GP 13) = mkLit64 (r13 ptraceRegs)
-    fillReg (X86_GP 14) = mkLit64 (r14 ptraceRegs)
-    fillReg (X86_GP 15) = mkLit64 (r15 ptraceRegs)
+
+    fillReg (X86_GP r) = mkLit64 (s ptraceRegs)
+            -- Map between flexdis registers and the ptrace struct
+      where s = case r of
+                  F.RAX -> rax
+                  F.RCX -> rcx
+                  F.RDX -> rdx
+                  F.RBX -> rbx
+                  F.RSP -> rsp
+                  F.RBP -> rbp
+                  F.RSI -> rsi
+                  F.RDI -> rdi
+                  F.R8  -> r8
+                  F.R9  -> r9
+                  F.R10 -> r10
+                  F.R11 -> r11
+                  F.R12 -> r12
+                  F.R13 -> r13
+                  F.R14 -> r14
+                  F.R15 -> r15
+
     fillReg (X86_FlagReg n) = if testBit (eflags ptraceRegs) n
                               then MS.true
                               else MS.false
@@ -384,22 +391,25 @@ translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
                   5 -> st5
                   6 -> st6
                   7 -> st7
-    fillReg (X86_XMMReg  0) = mkLit128 (xmm0 ptraceFPRegs)
-    fillReg (X86_XMMReg  1) = mkLit128 (xmm1 ptraceFPRegs)
-    fillReg (X86_XMMReg  2) = mkLit128 (xmm2 ptraceFPRegs)
-    fillReg (X86_XMMReg  3) = mkLit128 (xmm3 ptraceFPRegs)
-    fillReg (X86_XMMReg  4) = mkLit128 (xmm4 ptraceFPRegs)
-    fillReg (X86_XMMReg  5) = mkLit128 (xmm5 ptraceFPRegs)
-    fillReg (X86_XMMReg  6) = mkLit128 (xmm6 ptraceFPRegs)
-    fillReg (X86_XMMReg  7) = mkLit128 (xmm7 ptraceFPRegs)
-    fillReg (X86_XMMReg  8) = mkLit128 (xmm8 ptraceFPRegs)
-    fillReg (X86_XMMReg  9) = mkLit128 (xmm9 ptraceFPRegs)
-    fillReg (X86_XMMReg 10) = mkLit128 (xmm10 ptraceFPRegs)
-    fillReg (X86_XMMReg 11) = mkLit128 (xmm11 ptraceFPRegs)
-    fillReg (X86_XMMReg 12) = mkLit128 (xmm12 ptraceFPRegs)
-    fillReg (X86_XMMReg 13) = mkLit128 (xmm13 ptraceFPRegs)
-    fillReg (X86_XMMReg 14) = mkLit128 (xmm14 ptraceFPRegs)
-    fillReg (X86_XMMReg 15) = mkLit128 (xmm15 ptraceFPRegs)
+    fillReg (X86_XMMReg i) = mkLit128 $ s ptraceFPRegs
+      where s = case xmmRegNo i of
+                  0  -> xmm0
+                  1  -> xmm1
+                  2  -> xmm2
+                  3  -> xmm3
+                  4  -> xmm4
+                  5  -> xmm5
+                  6  -> xmm6
+                  7  -> xmm7
+                  8  -> xmm8
+                  9  -> xmm9
+                  10 -> xmm10
+                  11 -> xmm11
+                  12 -> xmm12
+                  13 -> xmm13
+                  14 -> xmm15
+                  15 -> xmm15
+                  _ -> error $ "Unexpected XMM reg"
 
     mkLit16 :: Word64 -> MS.Value (BVType 16)
     mkLit16 = MS.Literal . bitVector knownNat . bitVec 16
@@ -821,7 +831,7 @@ checkAndClear fragile m_regs sig (eitherExceptionBool, ii) = do
              in if realVal `MS.equalOrUndef` emuVal
                   then Nothing
                   else Just $ show reg ++ " did not match.  real:  " ++ show realVal ++ "   emulated: " ++ show emuVal))
-                          N.x86StateRegs
+                          x86StateRegs
     checkBool True | sig == sigSEGV = do
       logMessage Segfault
       return (False, [])

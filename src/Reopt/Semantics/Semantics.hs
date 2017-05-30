@@ -23,7 +23,6 @@ import           Data.Int
 import           Data.Macaw.CFG (MemRepr(..), memReprBytes)
 import           Data.Macaw.Memory (Endianness (LittleEndian))
 import           Data.Macaw.Types
-import qualified Data.Macaw.X86.X86Reg as N
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Proxy
@@ -31,7 +30,9 @@ import qualified Flexdis86 as F
 
 import           Reopt.Semantics.Getters
 import           Reopt.Semantics.InstructionDef
-import           Reopt.Semantics.Monad
+import           Data.Macaw.X86.Monad
+import           Data.Macaw.X86.X86Reg (X86Reg)
+import qualified Data.Macaw.X86.X86Reg as R
 
 -- * Preliminaries
 
@@ -138,9 +139,9 @@ set_low ::
 set_low r c = modify_low (bv_width c) r (\_ -> c)
 
 set_reg_pair :: (Semantics m, 1 <= n)
-             => (N.X86Reg cl -> MLocation m (BVType n))
-             -> N.X86Reg cl
-             -> N.X86Reg cl
+             => (X86Reg cl -> MLocation m (BVType n))
+             -> X86Reg cl
+             -> X86Reg cl
              -> Value m (BVType (n + n))
              -> m ()
 set_reg_pair f upperL lowerL v = do
@@ -178,15 +179,20 @@ def_xadd =
     exec_add d s0 -- sets flags
 
 -- | Sign extend al -> ax, ax -> eax, eax -> rax, resp.
-exec_cbw, exec_cwde, exec_cdqe :: Semantics m => m ()
-exec_cbw = do v <- get (reg_low8 N.rax)
-              reg_low16 N.rax .= sext n16 v
+def_cbw :: InstructionDef
+def_cbw = defNullary "cbw" $ do
+  v <- get (reg_low8 R.rax)
+  reg_low16 R.rax .= sext n16 v
 
-exec_cwde = do v <- get (reg_low16 N.rax)
-               reg_low32 N.rax .= sext n32 v
+def_cwde :: InstructionDef
+def_cwde = defNullary "cwde" $ do
+  v <- get (reg_low16 R.rax)
+  reg_low32 R.rax .= sext n32 v
 
-exec_cdqe = do v <- get (reg_low32 N.rax)
-               rax .= sext n64 v
+def_cdqe :: InstructionDef
+def_cdqe = defNullary "cdqe" $ do
+  v <- get (reg_low32 R.rax)
+  rax .= sext n64 v
 
 def_pop :: InstructionDef
 def_pop =
@@ -201,44 +207,42 @@ def_push =
     Some (HasRepSize rep v) <- getAddrRegSegmentOrImm val
     push (repValSizeMemRepr rep) v
 
-
 -- | Sign extend ax -> dx:ax, eax -> edx:eax, rax -> rdx:rax, resp.
 def_cwd :: InstructionDef
 def_cwd = defNullary "cwd" $ do
-  v <- get (reg_low16 N.rax)
-  set_reg_pair reg_low16 N.rdx N.rax (sext knownNat v)
+  v <- get (reg_low16 R.rax)
+  set_reg_pair reg_low16 R.rdx R.rax (sext knownNat v)
 
 def_cdq :: InstructionDef
 def_cdq = defNullary "cdq" $ do
-  v <- get (reg_low32 N.rax)
-  set_reg_pair reg_low32 N.rdx N.rax (sext knownNat v)
+  v <- get (reg_low32 R.rax)
+  set_reg_pair reg_low32 R.rdx R.rax (sext knownNat v)
 
 def_cqo :: InstructionDef
 def_cqo = defNullary "cqo" $ do
   v <- get rax
-  set_reg_pair fullRegister N.rdx N.rax (sext knownNat v)
+  set_reg_pair fullRegister R.rdx R.rax (sext knownNat v)
 
 -- FIXME: special segment stuff?
 -- FIXME: CR and debug regs?
 exec_mov :: Semantics m =>  MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_mov l v = l .= v
 
-exec_cmpxchg :: forall m n
-              . (IsLocationBV m n)
-             => MLocation m (BVType n)
-             -> Value m (BVType n)
-             -> m ()
-exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
-  where
-    go :: MLocation m (BVType n)
-       -> Value m (BVType n)
-       -> MLocation m (BVType n) -- AL/AX/EAX/RAX depending on operand size
-       -> m ()
-    go d s acc = do
-      temp <- get d
-      a  <- get acc
-      exec_cmp acc temp -- set flags
-      ifte_ (a .=. temp)
+regLocation :: NatRepr n -> X86Reg (BVType 64) -> Location addr (BVType n)
+regLocation sz
+  | Just Refl <- testEquality sz n8  = reg_low8
+  | Just Refl <- testEquality sz n16 = reg_low16
+  | Just Refl <- testEquality sz n32 = reg_low32
+  | Just Refl <- testEquality sz n64 = fullRegister
+  | otherwise = fail "regLocation: Unknown bit width"
+
+def_cmpxchg :: InstructionDef
+def_cmpxchg  = defBinaryLV "cmpxchg" $ \d s -> do
+  let acc = regLocation (bv_width s) R.rax
+  temp <- get d
+  a  <- get acc
+  exec_cmp acc temp -- set flags
+  ifte_ (a .=. temp)
         (do zf_loc .= true
             d .= s
         )
@@ -248,23 +252,23 @@ exec_cmpxchg dest src = go dest src $ regLocation (bv_width src) N.rax
         )
 
 get_reg_pair :: (Semantics m, 1 <= n)
-             => (N.X86Reg cl -> MLocation m (BVType n))
-             -> N.X86Reg cl
-             -> N.X86Reg cl
+             => (X86Reg cl -> MLocation m (BVType n))
+             -> X86Reg cl
+             -> X86Reg cl
              -> m (Value m (BVType (n+n)))
 get_reg_pair f upperL lowerL = bvCat <$> get (f upperL) <*> get (f lowerL)
 
 exec_cmpxchg8b :: Semantics m => MLocation m (BVType 64) -> m ()
 exec_cmpxchg8b loc = do
   temp64 <- get loc
-  edx_eax <- get_reg_pair reg_low32 N.rdx N.rax
+  edx_eax <- get_reg_pair reg_low32 R.rdx R.rax
   ifte_ (edx_eax .=. temp64)
     (do zf_loc .= true
-        ecx_ebx <- get_reg_pair reg_low32 N.rcx N.rbx
+        ecx_ebx <- get_reg_pair reg_low32 R.rcx R.rbx
         loc .= ecx_ebx
     )
     (do zf_loc .= false
-        set_reg_pair reg_low32 N.rdx N.rax temp64
+        set_reg_pair reg_low32 R.rdx R.rax temp64
         loc .= edx_eax -- FIXME: this store is redundant, but it is in the ISA, so we do it.
     )
 
@@ -388,11 +392,11 @@ exec_div_helper :: forall m n
   -> m ()
 exec_div_helper signed denominator
   | Just Refl <- testEquality n n8  =
-    go (reg_low8 N.rax) (reg_high8 N.rax)
+    go (reg_low8 R.rax) (reg_high8 R.rax)
   | Just Refl <- testEquality n n16 =
-    go (reg_low16 N.rax) (reg_low16 N.rdx)
+    go (reg_low16 R.rax) (reg_low16 R.rdx)
   | Just Refl <- testEquality n n32 =
-    go (reg_low32 N.rax) (reg_low32 N.rdx)
+    go (reg_low32 R.rax) (reg_low32 R.rdx)
   | Just Refl <- testEquality n n64 =
     go rax rdx
   | otherwise =
@@ -487,13 +491,13 @@ exec_mul :: forall m n
          -> m ()
 exec_mul v
   | Just Refl <- testEquality (bv_width v) n8  =
-    go (\v' -> reg_low16 N.rax .= v') (reg_low8 N.rax)
+    go (\v' -> reg_low16 R.rax .= v') (reg_low8 R.rax)
   | Just Refl <- testEquality (bv_width v) n16 =
-    go (set_reg_pair reg_low16 N.rdx N.rax) (reg_low16 N.rax)
+    go (set_reg_pair reg_low16 R.rdx R.rax) (reg_low16 R.rax)
   | Just Refl <- testEquality (bv_width v) n32 =
-    go (set_reg_pair reg_low32 N.rdx N.rax) (reg_low32 N.rax)
+    go (set_reg_pair reg_low32 R.rdx R.rax) (reg_low32 R.rax)
   | Just Refl <- testEquality (bv_width v) n64 =
-    go (set_reg_pair fullRegister N.rdx N.rax) rax
+    go (set_reg_pair fullRegister R.rdx R.rax) rax
   | otherwise =
     fail "mul: Unknown bit width"
   where
@@ -540,21 +544,21 @@ really_exec_imul v v' = do
 exec_imul1 :: forall m n. IsLocationBV m n => Value m (BVType n) -> m ()
 exec_imul1 v
   | Just Refl <- testEquality (bv_width v) n8  = do
-      v' <- get $ reg_low8 N.rax
+      v' <- get $ reg_low8 R.rax
       r <- really_exec_imul v v'
-      reg_low16 N.rax .= r
+      reg_low16 R.rax .= r
   | Just Refl <- testEquality (bv_width v) n16 = do
-      v' <- get $ reg_low16 N.rax
+      v' <- get $ reg_low16 R.rax
       r <- really_exec_imul v v'
-      set_reg_pair reg_low16 N.rdx N.rax r
+      set_reg_pair reg_low16 R.rdx R.rax r
   | Just Refl <- testEquality (bv_width v) n32 = do
-      v' <- get $ reg_low32 N.rax
+      v' <- get $ reg_low32 R.rax
       r <- really_exec_imul v v'
-      set_reg_pair reg_low32 N.rdx N.rax r
+      set_reg_pair reg_low32 R.rdx R.rax r
   | Just Refl <- testEquality (bv_width v) n64 = do
       v' <- get rax
       r <- really_exec_imul v v'
-      set_reg_pair fullRegister N.rdx N.rax r
+      set_reg_pair fullRegister R.rdx R.rax r
   | otherwise =
       fail "imul: Unknown bit width"
 
@@ -598,15 +602,15 @@ exec_neg l = do
   af_loc .= usub4_overflows zero v
   set_result_value l r
 
-exec_sahf :: Semantics m => m ()
-exec_sahf =
-  do v <- get (reg_high8 N.rax)
-     let mk n = bvBit v (bvLit n8 n)
-     cf_loc .= mk 0
-     pf_loc .= mk 2
-     af_loc .= mk 4
-     zf_loc .= mk 6
-     sf_loc .= mk 7
+def_sahf :: InstructionDef
+def_sahf = defNullary "sahf" $ do
+  v <- get (reg_high8 R.rax)
+  let mk n = bvBit v (bvLit n8 n)
+  cf_loc .= mk 0
+  pf_loc .= mk 2
+  af_loc .= mk 4
+  zf_loc .= mk 6
+  sf_loc .= mk 7
 
 exec_sbb :: IsLocationBV m n => MLocation m (BVType n) -> Value m (BVType n) -> m ()
 exec_sbb l v = do cf <- get cf_loc
@@ -951,14 +955,6 @@ def_ret = defVariadic "ret"    $ \_ vs ->
 -- MOVS/MOVSW Move string/Move word string
 -- MOVS/MOVSD Move string/Move doubleword string
 
-regLocation :: NatRepr n -> N.X86Reg N.GP -> Location addr (BVType n)
-regLocation sz
-  | Just Refl <- testEquality sz n8  = reg_low8
-  | Just Refl <- testEquality sz n16 = reg_low16
-  | Just Refl <- testEquality sz n32 = reg_low32
-  | Just Refl <- testEquality sz n64 = fullRegister
-  | otherwise = fail "regLocation: Unknown bit width"
-
 -- FIXME: probably doesn't work for 32 bit address sizes
 -- arguments are only for the size, they are fixed at rsi/rdi
 exec_movs :: Semantics m
@@ -982,7 +978,7 @@ exec_movs True w = do
   let repr = BVMemRepr w LittleEndian
 
     -- FIXME: aso modifies this
-  let count_reg = regLocation n64 N.rcx
+  let count_reg = rcx
       bytesPerOp = memReprBytes repr
       bytesPerOpv = bvLit n64 bytesPerOp
   -- The direction flag indicates post decrement or post increment.
@@ -1030,7 +1026,7 @@ exec_cmps repz_pfx rval = repValHasSupportedWidth rval $ do
   let bytesPerOp = memReprBytes repr
   let bytesPerOp' = bvLit n64 bytesPerOp
   if repz_pfx then do
-    count <- get (regLocation n64 N.rcx)
+    count <- get rcx
     unless_ (count .=. bvKLit 0) $ do
       nsame <- memcmp bytesPerOp count v_rsi v_rdi df
       let equal = (nsame .=. count)
@@ -1078,10 +1074,10 @@ def_cmps = defBinary "cmps" $ \pfx loc loc' -> do
 -- SCAS/SCASD Scan string/Scan doubleword string
 
 xaxValLoc :: RepValSize w -> Location a (BVType w)
-xaxValLoc ByteRepVal  = reg_low8  (N.X86_GP 0)
-xaxValLoc WordRepVal  = reg_low16 (N.X86_GP 0)
-xaxValLoc DWordRepVal = reg_low32 (N.X86_GP 0)
-xaxValLoc QWordRepVal = fullRegister (N.X86_GP 0)
+xaxValLoc ByteRepVal  = reg_low8  R.rax
+xaxValLoc WordRepVal  = reg_low16 R.rax
+xaxValLoc DWordRepVal = reg_low32 R.rax
+xaxValLoc QWordRepVal = fullRegister R.rax
 
 -- The arguments to this are always rax/QWORD PTR es:[rdi], so we only
 -- need the args for the size.
@@ -1178,7 +1174,7 @@ exec_stos True rep = do
   dest <- get rdi
   v    <- get (xaxValLoc rep)
   let szv = bvLit n64 (memReprBytes mrepr)
-  count <- get (regLocation n64 N.rcx)
+  count <- get rcx
   let nbytes     = count `bvMul` szv
   memset count v dest df
   rdi .= mux df (dest .- nbytes) (dest .+ nbytes)
@@ -1212,14 +1208,6 @@ exec_leave = do
   rbp .= bp_v'
 
 -- ** Flag Control (EFLAG) Instructions
-
--- | Run clc instruction.
-exec_clc :: Semantics m => m ()
-exec_clc = cf_loc .= false
-
--- | Run cld instruction.
-exec_cld :: Semantics m => m ()
-exec_cld = df_loc .= false
 
 -- ** Segment Register Instructions
 -- ** Miscellaneous Instructions
@@ -1635,17 +1623,17 @@ def_movsd = defBinary "movsd" $ \_ v1 v2 -> do
     (_, F.XMMReg src) -> do
       dest <-
         case v1 of
-          F.XMMReg r      -> pure $ subRegister n0 n64 (N.xmmFromFlexdis r)
+          F.XMMReg r      -> pure $ subRegister n0 n64 (R.X86_XMMReg r)
           F.Mem128 f_addr -> (`MemoryAddr` doubleMemRepr) <$> getBVAddress f_addr
           _ -> fail $ "Unexpected dest argument to movsd"
-      vLow <- get (subRegister n0 n64 (N.xmmFromFlexdis src))
+      vLow <- get (subRegister n0 n64 (R.X86_XMMReg src))
       dest .= vLow
     -- If destination is an XMM register and source is memory, then zero out
     -- high order bits.
     (F.XMMReg dest, F.Mem128 src_addr) -> do
       addr <- getBVAddress src_addr
       v' <- get (MemoryAddr addr doubleMemRepr)
-      fullRegister (N.xmmFromFlexdis dest) .= uext n128 v'
+      fullRegister (R.X86_XMMReg dest) .= uext n128 v'
     _ ->
       fail $ "Unexpected arguments in FlexdisMatcher.movsd: " ++ show v1 ++ ", " ++ show v2
 
@@ -1657,28 +1645,28 @@ def_movss = defBinary "movss" $ \_ v1 v2 -> do
     (_, F.XMMReg src) -> do
       dest <-
         case v1 of
-          F.XMMReg r      -> pure $ subRegister n0 n32 (N.xmmFromFlexdis r)
+          F.XMMReg r      -> pure $ subRegister n0 n32 (R.X86_XMMReg r)
           F.Mem128 f_addr -> (`MemoryAddr` floatMemRepr) <$> getBVAddress f_addr
           _ -> fail $ "Unexpected dest argument to movss"
-      vLow <- get (subRegister n0 n32 (N.xmmFromFlexdis src))
+      vLow <- get (subRegister n0 n32 (R.X86_XMMReg src))
       dest .= vLow
     -- If destination is an XMM register and source is memory, then zero out
     -- high order bits.
     (F.XMMReg dest, F.Mem128 src_addr) -> do
       addr <- getBVAddress src_addr
       v' <- get (MemoryAddr addr floatMemRepr)
-      fullRegister (N.xmmFromFlexdis dest) .= uext n128 v'
+      fullRegister (R.X86_XMMReg dest) .= uext n128 v'
     _ ->
       fail $ "Unexpected arguments in FlexdisMatcher.movss: " ++ show v1 ++ ", " ++ show v2
 
 def_pshufb :: InstructionDef
-def_pshufb = defBinary "pshufb" $ \_ f_d f_s2 -> do
-  case (f_d, f_s2) of
-    (F.XMMReg d, F.XMMReg s2) -> do
-      let d_loc = fullRegister (N.xmmFromFlexdis d)
-      d_val  <- get d_loc
-      s2_val <- get (fullRegister (N.xmmFromFlexdis s2))
-      (d_loc .=) =<< pshufb SIMD_128 d_val s2_val
+def_pshufb = defBinary "pshufb" $ \_ f_d f_s -> do
+  case (f_d, f_s) of
+    (F.XMMReg d, F.XMMReg s) -> do
+      d_val  <- get $ fullRegister (R.X86_XMMReg d)
+      s_val  <- get $ fullRegister (R.X86_XMMReg s)
+      r <- pshufb SIMD_128 d_val s_val
+      fullRegister (R.X86_XMMReg d) .= r
     _ -> do
       fail $ "pshufb only supports 2 XMM registers as arguments."
 
@@ -2381,13 +2369,13 @@ all_instructions =
   , defBinaryLV "bsf" exec_bsf
   , defBinaryLV "bsr" exec_bsr
   , defUnaryLoc "bswap" $ exec_bswap
-  , defNullary  "cbw"   $ exec_cbw
-  , defNullary  "cwde"  $ exec_cwde
-  , defNullary  "cdqe"  $ exec_cdqe
-  , defNullary  "clc"   $ exec_clc
-  , defNullary  "cld"   $ exec_cld
-  , defBinaryLV "cmp" exec_cmp
-  , defUnaryLoc  "dec"  $ exec_dec
+  , def_cbw
+  , def_cwde
+  , def_cdqe
+  , defNullary  "clc"  $ cf_loc .= false
+  , defNullary  "cld"  $ df_loc .= false
+  , defBinaryLV "cmp"   exec_cmp
+  , defUnaryLoc  "dec" $ exec_dec
   , def_div
   , def_hlt
   , def_idiv
@@ -2404,12 +2392,12 @@ all_instructions =
   , defNullary "pause" $ return ()
   , def_pop
 
-  , defBinaryLV   "cmpxchg"   exec_cmpxchg
+  , def_cmpxchg
   , defUnaryKnown "cmpxchg8b" exec_cmpxchg8b
   , def_push
   , defBinaryLVge "rol"  exec_rol
   , defBinaryLVge "ror"  exec_ror
-  , defNullary    "sahf" exec_sahf
+  , def_sahf
   , defBinaryLV   "sbb"  exec_sbb
   , defBinaryLVge "sar"  exec_sar
   , defBinaryLVge "shl"  exec_shl

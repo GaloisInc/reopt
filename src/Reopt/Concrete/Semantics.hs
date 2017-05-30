@@ -8,7 +8,7 @@
 -- Stability        : provisional
 --
 -- This contains an implementation of the classes defined in
--- Reopt.Semantics.Monad that treat some class methods as
+-- Data.Macaw.X86.Monad that treat some class methods as
 -- uninterpreted functions.
 ------------------------------------------------------------------------
 {-# LANGUAGE DataKinds #-}
@@ -58,11 +58,12 @@ import           Data.Macaw.Types (Type(..)
                                   , n1, n8, n16, n32, n64, n80
                                   , typeRepr
                                   )
+
+import qualified Data.Macaw.X86.Monad as S
 import qualified Data.Macaw.X86.X86Reg as X
 
 import qualified Reopt.Concrete.MachineState as CS
 import           Reopt.Reified.Semantics
-import qualified Reopt.Semantics.Monad as S
 
 ------------------------------------------------------------------------
 -- Expression evaluation
@@ -243,7 +244,7 @@ evalStmt (Let x e) =
   extendEnv x =<< evalExpr' e
 evalStmt (Get x l) =
   -- Force 'tp' to be a 'BVType n'.
-  case S.loc_type l of
+  case typeRepr l of
   BVTypeRepr _ -> do
 
   let nr = S.loc_width l
@@ -315,7 +316,7 @@ evalStmt (GetSegmentBase x seg) = do
   extendEnv x base
 evalStmt (l := e) =
   -- Force 'tp' to be a 'BVType n'.
-  case S.loc_type l of
+  case typeRepr l of
     BVTypeRepr _ -> do
 
       let nr = S.loc_width l

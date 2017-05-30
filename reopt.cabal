@@ -61,8 +61,6 @@ library
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
     Reopt.Machine.X86State
-    Reopt.Machine.SysDeps.FreeBSDGenerated
-    Reopt.Machine.SysDeps.LinuxGenerated
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
@@ -71,10 +69,8 @@ library
     Reopt.Semantics.FlexdisMatcher
     Reopt.Semantics.Getters
     Reopt.Semantics.InstructionDef
-    Reopt.Semantics.Monad
     Reopt.Semantics.Semantics
     Reopt.Utils.Hex
-    Reopt.Utils.GHCBug
 
   ghc-options: -Wall -Werror
   ghc-options: -fno-warn-unticked-promoted-constructors
@@ -96,6 +92,7 @@ executable reopt
     lens,
     llvm-pretty,
     macaw,
+    macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,
     pretty,
@@ -197,32 +194,6 @@ executable LLVMDumpInstr
 
   hs-source-dirs: utils
   main-is: LLVMDumpInstr.hs
-
-executable make_bsd_syscalls
- build-depends:
-    base >= 4,
-    bytestring,
-    language-c,
-    lens,
-    pretty,
-    containers,
-    pretty-show,
-    attoparsec
- hs-source-dirs: make_bsd_syscalls
- main-is: Main.hs
-
-executable make_linux_syscalls
- build-depends:
-    base >= 4,
-    bytestring,
-    language-c,
-    lens,
-    pretty,
-    containers,
-    pretty-show,
-    attoparsec
- hs-source-dirs: make_linux_syscalls
- main-is: Main.hs
 
 executable dump_debug_data
   build-depends:

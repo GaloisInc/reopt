@@ -25,12 +25,14 @@ import           Data.Parameterized.NatRepr
 import           Text.PrettyPrint.ANSI.Leijen ((<+>), Pretty(..), text)
 
 import qualified Data.BitVector as BV
-import           Data.Macaw.CFG (RegState, mkRegState, PrettyRegValue(..))
+import           Data.Macaw.CFG (RegState, mkRegState, PrettyRegValue(..), boundValue)
 import           Data.Macaw.Types
+
+import           Data.Macaw.X86.Monad (Primitive, Segment)
+import qualified Data.Macaw.X86.X86Reg as X
+
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B
-import qualified Reopt.Machine.X86State as X
-import           Reopt.Semantics.Monad (Primitive, Segment)
 
 ------------------------------------------------------------------------
 -- Concrete values
@@ -348,11 +350,11 @@ instance MonadMachineState m => MonadMachineState (ConcreteStateT m) where
       mapFst f (a,b) = (f a, b)
       addrs = byteAddresses addr
 
-  getReg reg = liftM (^.(X.boundValue reg)) dumpRegs
+  getReg reg = liftM (^.(boundValue reg)) dumpRegs
 
   -- TODO(conathan): make the concrete state a record with a lens and
   -- eliminate the tuple mapping stuff.
-  setReg reg val = modify $ mapSnd $ X.boundValue reg .~ val
+  setReg reg val = modify $ mapSnd $ boundValue reg .~ val
     where mapSnd f (a,b) = (a, f b)
 
   dumpRegs = liftM snd get
