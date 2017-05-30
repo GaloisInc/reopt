@@ -4,6 +4,7 @@ module Main where
 import           Control.Monad (forM_, when)
 import qualified Data.ByteString as BS
 import           Data.Maybe (catMaybes)
+import           Data.Parameterized.NatRepr
 import           Numeric (readHex)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
@@ -11,11 +12,10 @@ import           System.Exit (exitFailure)
 import           Flexdis86
 
 import           Data.Macaw.CFG (Value(..))
-import           Data.Parameterized.NatRepr
+import           Data.Macaw.X86.Semantics (execInstruction)
 
 import           Reopt.Concrete.MachineState
 import           Reopt.Concrete.Semantics as C
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 
 usageExit :: IO ()
 usageExit = do putStrLn "DumpInstr aa bb cc dd ee ff ..."

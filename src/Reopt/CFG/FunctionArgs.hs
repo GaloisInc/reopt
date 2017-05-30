@@ -40,10 +40,11 @@ import           Data.Macaw.Discovery.Info
 import           Data.Macaw.Fold
 import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
+
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep (FunctionType(..))
-import           Reopt.Machine.X86State
 
 -- -----------------------------------------------------------------------------
 

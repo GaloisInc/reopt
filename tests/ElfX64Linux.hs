@@ -26,7 +26,7 @@ import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Memory.ElfLoader as MM
 import qualified Data.Macaw.Discovery as MD
 import qualified Data.Macaw.Discovery.Info as MD
-import qualified Reopt.CFG.Implementation as RO
+import qualified Data.Macaw.X86 as RO
 
 elfX64LinuxTests :: [FilePath] -> T.TestTree
 elfX64LinuxTests = T.testGroup "ELF x64 Linux" . map mkTest

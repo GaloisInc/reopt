@@ -9,6 +9,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (catMaybes)
 import           Data.Word
+import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Nonce
 import           Flexdis86
 import           Numeric (readHex)
 import           System.Environment (getArgs)
@@ -16,18 +18,17 @@ import           System.Exit (exitFailure)
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen as PP hiding ((<$>))
 
-import           Data.Parameterized.NatRepr
-import           Data.Parameterized.Nonce
-
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.Permissions as Perm
-import           Reopt.CFG.Implementation
+
+import           Data.Macaw.X86
+import           Data.Macaw.X86.Semantics (execInstruction)
+
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Recovery
 import           Reopt.Semantics.DeadRegisterElimination
-import           Reopt.Semantics.FlexdisMatcher (execInstruction)
 
 usageExit :: IO ()
 usageExit = do putStrLn "LLVMDumpInstr aa bb cc dd ee ff ..."

@@ -86,11 +86,11 @@ import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 import           Data.Macaw.Types
 
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (Type(..), bvLit)
 import qualified Data.Macaw.X86.Monad as SM
 import qualified Data.Macaw.X86.X86Reg as N
 
-import           Reopt.Machine.X86State
 import           Reopt.Semantics.DeadRegisterElimination
 import           Reopt.Semantics.FlexdisMatcher
 import           Reopt.Symbolic.Semantics

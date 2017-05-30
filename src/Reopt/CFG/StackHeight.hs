@@ -33,10 +33,12 @@ import Debug.Trace
 
 import Data.Macaw.CFG
 import Data.Macaw.Types
+
+import Data.Macaw.X86.ArchTypes
 import Data.Macaw.X86.X86Reg (X86Reg, GP)
 
 import Reopt.CFG.FnRep
-import Reopt.Machine.X86State
+
 
 {-
 ------------------------------------------------------------------------

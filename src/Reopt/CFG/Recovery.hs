@@ -50,13 +50,13 @@ import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
-import           Reopt.Machine.X86State
 
 import Debug.Trace
 

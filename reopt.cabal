@@ -51,7 +51,6 @@ library
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs
     Reopt.CFG.FunctionCheck
-    Reopt.CFG.Implementation
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
@@ -60,16 +59,10 @@ library
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState
-    Reopt.Machine.X86State
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
-    Reopt.Semantics.Conditions
     Reopt.Semantics.DeadRegisterElimination
-    Reopt.Semantics.FlexdisMatcher
-    Reopt.Semantics.Getters
-    Reopt.Semantics.InstructionDef
-    Reopt.Semantics.Semantics
     Reopt.Utils.Hex
 
   ghc-options: -Wall -Werror
@@ -171,6 +164,7 @@ executable ConcreteDumpInstr
     containers,
     flexdis86,
     macaw,
+    macaw-x86,
     parameterized-utils,
     reopt
 
@@ -188,6 +182,7 @@ executable LLVMDumpInstr
     lens,
     llvm-pretty,
     macaw,
+    macaw-x86,
     mtl,
     parameterized-utils,
     reopt

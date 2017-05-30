@@ -54,7 +54,6 @@ import           Data.Macaw.Memory (SegmentedAddr)
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.Monad (RepValSize(..), XMMType)
-
 import           Data.Macaw.X86.X86Reg
   ( X86Reg
   , x86ArgumentRegs
@@ -160,7 +159,7 @@ data FnAssignRhs (tp :: Type) where
             -> FnAssignRhs tp
   FnAlloca :: !(FnValue (BVType 64))
            -> FnAssignRhs (BVType 64)
-  -- See `RepnzScas` in `Reopt.Machine.X86State`
+  -- See `RepnzScas` in `Data.Macaw.X86.ArchTypes`
   FnRepnzScas :: !(RepValSize n)
               -> !(FnValue (BVType n))
               -> !(FnValue (BVType 64))

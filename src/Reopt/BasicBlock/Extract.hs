@@ -27,7 +27,7 @@ import           Reopt.Concrete.BitVector (bitVector)
 import           Reopt.Concrete.MachineState (Value(..))
 import           Reopt.Concrete.Semantics as CS
 import qualified Data.Macaw.X86.Monad as S
-import           Reopt.Semantics.FlexdisMatcher
+import           Data.Macaw.X86.Semantics (execInstruction)
 
 import           Debug.Trace
 

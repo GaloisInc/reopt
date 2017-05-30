@@ -77,17 +77,17 @@ import           Data.Macaw.Discovery.Info
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 
+import           Data.Macaw.X86
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg (X86Reg)
 
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..), FunctionType)
 import           Reopt.CFG.FunctionArgs (DemandSet, functionDemands, inferFunctionTypeFromDemands)
 import           Reopt.CFG.FunctionCheck
-import           Reopt.CFG.Implementation
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery (recoverFunction)
 import qualified Reopt.ExternalTools as Ext
-import           Reopt.Machine.X86State
 import           Reopt.Relinker
 
 ------------------------------------------------------------------------

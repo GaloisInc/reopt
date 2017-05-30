@@ -70,7 +70,10 @@ import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 import           Data.Macaw.Types
 
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Flexdis
+import qualified Data.Macaw.X86.Monad as SM
+import           Data.Macaw.X86.Semantics
 import           Data.Macaw.X86.X86Reg (X86Reg(..), x86StateRegs)
 
 import           Reopt (readElf64)
@@ -79,9 +82,6 @@ import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMac
                                              , Address8, modifyAddr, asBV, ConcreteStateT)
 import qualified Reopt.Concrete.MachineState as MS
 import           Reopt.Concrete.Semantics
-import           Reopt.Machine.X86State
-import           Reopt.Semantics.FlexdisMatcher
-import qualified Data.Macaw.X86.Monad as SM
 
 import           SignalUtils (signalToString, statusToString)
 
