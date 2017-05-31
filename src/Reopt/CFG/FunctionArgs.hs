@@ -696,7 +696,7 @@ functionDemands sysp ist entries =
 instance CanDemandValues X86_64 where
 
   functionArgRegs _
-    = [Some rax]
+    = [Some RAX]
     ++ (Some <$> x86ArgumentRegs)
     ++ (Some <$> x86FloatArgumentRegs)
 

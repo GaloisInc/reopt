@@ -36,6 +36,7 @@ import           Data.Maybe
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           GHC.TypeLits
@@ -396,7 +397,6 @@ ret = effect . L.Ret
 
 jump :: L.BlockLabel -> BBLLVM ()
 jump = effect . L.Jump
-
 
 unimplementedInstr' :: L.Type -> String -> BBLLVM (L.Typed L.Value)
 unimplementedInstr' typ reason = do
@@ -912,36 +912,13 @@ stmtToLLVM' stmt = do
      -- Cast LLVM point to appropriate type
      llvm_ptr <- convop L.IntToPtr llvm_ptr_as_bv (L.PtrTo (L.typedType llvm_v))
      effect $ L.Store llvm_v llvm_ptr Nothing
-
-   -- FS     -> L.call_ iWrite_FS [v']
-   -- GS     -> L.call_ iWrite_GS [v']
-   -- X87_PC -> L.call_ iWrite_X87_PC [v']
-   -- X87_RC -> L.call_ iWrite_X87_RC [v']
-   -- ControlLoc {} -> void $ unimplementedInstr
-   -- DebugLoc {}   -> void $ unimplementedInstr
-   FnComment _str -> return () -- L.comment $ Text.unpack str
+   FnComment str -> comment $ Text.unpack str
    FnMemCopy bytesPerCopy nValues src dest direction -> do
      nValues' <- mkLLVMValue nValues
      src'     <- mkLLVMValue src
      dest'    <- mkLLVMValue dest
      direction' <- mkLLVMValue direction
      call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
-
-     -- case direction of
-     --   FnConstantValue _ 0 -> liftBB $ do
-     --    let typ = L.iT (fromIntegral $ 8 * bytesPerCopy)
-     --        fn = intrinsic ("llvm.memcpy.p0"
-     --                        ++ show (L.ppType typ)
-     --                        ++ ".p0" ++ show (L.ppType typ)
-     --                        ++ ".i64") L.voidT
-     --             [L.ptrT typ, L.ptrT typ, L.iT 64, L.iT 32, L.iT 1]
-     --    src_ptr  <- L.bitcast src'  (L.ptrT typ)
-     --    dest_ptr <- L.bitcast dest' (L.ptrT typ)
-     --    L.call_ fn [dest_ptr, src_ptr, nValues'
-     --               , L.iT 32 L.-: L.int 0
-     --               , L.iT 1  L.-: L.int 0 ]
-     --   _ -> do
-
    FnMemSet count v ptr dir -> do
      count' <- mkLLVMValue count
      v'     <- mkLLVMValue v
@@ -1255,18 +1232,18 @@ moduleForFunctions syscallPostfix addrSymMap fns =
              , L.modInlineAsm  = []
              , L.modAliases    = []
              }
-         -- Get all function references
-  where  all_refs :: Map (SegmentedAddr 64) FunctionType
-         all_refs = foldl getReferencedFunctions Map.empty fns
+  where -- Get all function references
+        all_refs :: Map (SegmentedAddr 64) FunctionType
+        all_refs = foldl getReferencedFunctions Map.empty fns
 
-         addrFunMap :: AddrFunMap
-         addrFunMap = Map.fromList
-           [ (addr, (functionName addrSymMap addr, tp))
-           | (addr, tp) <- Map.toList all_refs
-           ]
+        addrFunMap :: AddrFunMap
+        addrFunMap = Map.fromList
+          [ (addr, (functionName addrSymMap addr, tp))
+          | (addr, tp) <- Map.toList all_refs
+          ]
 
-         declFunMap = addrFunMap `Map.withoutKeys` (Set.fromList (fnAddr <$> fns))
+        declFunMap = addrFunMap `Map.withoutKeys` (Set.fromList (fnAddr <$> fns))
 
-         fnDecls = declareFunction' <$> Map.elems declFunMap
+        fnDecls = declareFunction' <$> Map.elems declFunMap
 
-         defines = defineFunction' syscallPostfix addrSymMap addrFunMap <$> fns
+        defines = defineFunction' syscallPostfix addrSymMap addrFunMap <$> fns

@@ -397,7 +397,7 @@ getPostCallValue :: BlockLabel 64
 getPostCallValue lbl proc_state intrs floatrs r = do
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
-      , Just rv <- lookup r ([rax, rdx] `zip` intrs) ->
+      , Just rv <- lookup r ([RAX, RDX] `zip` intrs) ->
         return $ FnReturn rv
       | Just Refl <- testEquality r sp_reg -> do
         spv <- recoverRegister proc_state sp_reg

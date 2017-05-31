@@ -406,7 +406,7 @@ evalStmt (Primitive p) = CS.primitive p
 -- exception. We may want to revisit this decision later, but it seems
 -- like the conservative thing to do.
 evalStmt (Exception mask predicate exception) = do
-  let cond = S.complement mask S..&. predicate
+  let cond = S.bvComplement mask S..&. predicate
   vCond <- evalExpr' cond
   when (vCond  `CS.equalOrUndef` CS.true) $
     throwError exception

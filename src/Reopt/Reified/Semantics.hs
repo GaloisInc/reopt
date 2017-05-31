@@ -193,7 +193,7 @@ instance S.IsValue Expr where
   bvAdd x y = app $ R.BVAdd (exprWidth x) x y
   bvSub x y = app $ R.BVSub (exprWidth x) x y
   bvMul x y = app $ R.BVMul (exprWidth x) x y
-  complement x = app $ R.BVComplement (exprWidth x) x
+  bvComplement x = app $ R.BVComplement (exprWidth x) x
   x .&. y = app $ R.BVAnd (exprWidth x) x y
   x .|. y = app $ R.BVOr (exprWidth x) x y
   bvXor x y = app $ R.BVXor (exprWidth x) x y
