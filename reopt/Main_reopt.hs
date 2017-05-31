@@ -4,8 +4,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# OPTIONS_GHC -Werror #-}
 module Main (main) where
 
 import           Control.Exception

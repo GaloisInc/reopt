@@ -174,7 +174,6 @@ addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 mkFnAssign :: FnAssignRhs tp -> Recover ids (FnAssignment tp)
 mkFnAssign rhs = (\next_id -> FnAssignment next_id rhs) <$> freshId
 
-
 emitAssign :: AssignId ids tp -> FnAssignRhs tp -> Recover ids (FnAssignment tp)
 emitAssign asgn rhs = do
   fnAssign <- mkFnAssign rhs
