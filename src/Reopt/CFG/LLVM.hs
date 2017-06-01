@@ -455,7 +455,8 @@ valueToLLVM ctx blk m val = do
     FnUndefined _ -> mk L.ValUndef
     FnConstantValue _sz n -> mk $ L.integer n
     -- Value from an assignment statement.
-    FnAssignedValue (FnAssignment lhs _rhs) -> getAssignIdValue blk m lhs
+    FnAssignedValue (FnAssignment lhs _rhs) ->
+      getAssignIdValue blk m lhs
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp)  -> getAssignIdValue blk m lhs
     -- A value returned by a function call (rax/xmm0)
@@ -665,14 +666,18 @@ asmFunction attrs res_type arg_types asm_code asm_args =
           , L.typedValue = L.ValAsm (asmSideeffect attrs) False asm_code asm_args
           }
 
-
-linuxSystemCall :: L.Typed L.Value
-linuxSystemCall =
+-- | This is the assembly for a system call on Linux
+syscallAsm :: L.Typed L.Value
+syscallAsm =
   asmFunction sideeffect
               (L.iT 64)
               (replicate 7 (L.iT 64))
               "syscall"
-              "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rdi},~{rsi},~{rdx},~{rcx},~{r8},~{r9},~{rcx},~{r11}"
+              -- This string marks rax as an output.
+              -- It also marks rax, rdi, rsi, rdx, rcx, r8, r9 as inputs.
+              -- It indicates that the function can make arbitrary
+              -- modifications to memory, flags, rcx, and r11.
+              "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
 
 appToLLVM' :: App FnValue tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
@@ -1022,7 +1027,7 @@ termStmtToLLVM' tm =
        case pname of
          "Linux" -> do
            let allArgs = llvm_call_num : padUndef (L.iT 64) 6 llvm_args
-           rvar <- call linuxSystemCall allArgs
+           rvar <- call syscallAsm allArgs
            case rets of
              [Some fr] -> do
                -- Assign all return variables to the extracted result
@@ -1030,7 +1035,17 @@ termStmtToLLVM' tm =
                  setAssignIdValue (frAssignId fr) lbl rvar
                  jump (blockName next_lbl)
              _ -> error "Unexpected return values"
-         _ -> error "Unsupported operating system"
+         "FreeBSD" -> do
+           let allArgs = llvm_call_num : padUndef (L.iT 64) 6 llvm_args
+           rvar <- call syscallAsm allArgs
+           case rets of
+             [Some fr] -> do
+               -- Assign all return variables to the extracted result
+                 lbl <- gets $ fbLabel . bbBlock
+                 setAssignIdValue (frAssignId fr) lbl rvar
+                 jump (blockName next_lbl)
+             _ -> error "Unexpected return values"
+         _ -> error $ "Unsupported operating system: " ++ show pname
 
      FnLookupTable idx vec -> do
        idx' <- mkLLVMValue idx
@@ -1067,7 +1082,7 @@ resolvePhiNodeReg ctx avmap m (lbl, reg) =
     Just br -> do
       let b = regBlock br
       case MapF.lookup reg (fbRegMap b) of
-        Nothing -> Loc.error $ "Could not resolve register " ++ show reg
+        Nothing -> Loc.error $ "Could not resolve register " ++ show reg ++ " in block " ++ show lbl
         Just (CalleeSaved _) -> Loc.error $ "Resolve callee saved register"
         Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx b avmap v), blockName lbl)
 

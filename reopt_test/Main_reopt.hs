@@ -74,6 +74,7 @@ import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Flexdis
 import qualified Data.Macaw.X86.Monad as SM
 import           Data.Macaw.X86.Semantics
+import           Data.Macaw.X86.X86Flag (flagIndex)
 import           Data.Macaw.X86.X86Reg (X86Reg(..), x86StateRegs)
 
 import           Reopt (readElf64)
@@ -374,7 +375,7 @@ translatePtraceRegs ptraceRegs ptraceFPRegs = mkRegState fillReg
                   F.R14 -> r14
                   F.R15 -> r15
 
-    fillReg (X86_FlagReg n) = if testBit (eflags ptraceRegs) n
+    fillReg (X86_FlagReg r) = if testBit (eflags ptraceRegs) (fromIntegral (flagIndex r))
                               then MS.true
                               else MS.false
     fillReg (X87_StatusReg  n) = MS.Literal $ bitVector knownNat $ BV.extract n n swd'

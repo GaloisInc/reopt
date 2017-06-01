@@ -275,7 +275,7 @@ summarizeBlock mem interp_state root_label = go root_label
           traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
                     (Some <$> ftIntRetRegs ft)
                     ++ (Some <$> ftFloatRetRegs ft)
-                    ++ [Some df]
+                    ++ [Some DF]
 
         ParsedJump proc_state _ ->
           addRegisterUses proc_state x86StateRegs

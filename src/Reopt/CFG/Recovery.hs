@@ -407,7 +407,7 @@ getPostCallValue lbl proc_state intrs floatrs r = do
         return $ FnReturn rv
 
    -- df is 0 after a function call.
-    _ | Just Refl <- testEquality r df -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r DF -> return $ FnConstantValue knownNat 0
 
     _ | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
@@ -433,7 +433,7 @@ getPostSyscallValue lbl proc_state r =
       | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
 
-    _ | Just Refl <- testEquality r df -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r DF -> return $ FnConstantValue knownNat 0
 
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
@@ -680,7 +680,7 @@ recoverFunction sysp fArgs mem fInfo = do
                & flip (ifoldr insReg)        (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
-               & MapF.insert df (FnRegValue (FnConstantValue n1 0))
+               & MapF.insert DF (FnRegValue (FnConstantValue n1 0))
 
   let rs = RS { rsMemory        = mem
               , rsInterp = fInfo
