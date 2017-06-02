@@ -438,7 +438,7 @@ stmtDemandedValues stmt =
     Comment _ -> []
     ExecArchStmt astmt -> demandedArchStmtValues astmt
 
-type SummarizeConstraints arch ids
+type SummarizeConstraints arch
   = ( CanDemandValues arch
     , CanFoldValues arch
     , ArchConstraints arch
@@ -449,7 +449,7 @@ type SummarizeConstraints arch ids
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
 summarizeBlock :: forall arch ids
-               .  SummarizeConstraints arch ids
+               .  SummarizeConstraints arch
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
                -> ParsedBlockRegion arch ids -- Current region to summarize.
@@ -528,7 +528,7 @@ summarizeBlock mem interp_state reg idx = do
       traverse_ (addIntraproceduralJumpTarget interp_state lbl) vec
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: SummarizeConstraints arch ids
+summarizeIter :: SummarizeConstraints arch
               => Memory (ArchAddrWidth arch)
               -> DiscoveryFunInfo arch ids
               -> FunctionArgsM arch ids ()
@@ -620,23 +620,19 @@ decomposeMap ds addr acc DemandAlways v =
 -- 2. Function arguments to function arguments
 -- 3. Function results to function arguments.
 doOneFunction :: forall arch ids
-              .  SummarizeConstraints arch ids
+              .  SummarizeConstraints arch
               => SyscallPersonality arch
               -> Set (ArchSegmentedAddr arch)
-              -> DiscoveryInfo arch ids
+              -> DiscoveryInfo arch
               -> FunctionArgState (ArchReg arch)
-              -> ArchSegmentedAddr arch
+              -> DiscoveryFunInfo arch ids
               -> FunctionArgState (ArchReg arch)
-doOneFunction sysp addrs ist0 acc addr =
+doOneFunction sysp addrs ist0 acc ist = do
   flip evalState (initFunctionArgsState sysp addrs) $ do
+    let addr = discoveredFunAddr ist
     let lbl0 = mkRootBlockLabel addr
     -- Run the first phase (block summarization)
     visitedBlocks .= Set.singleton addr
-
-    ist <-
-      case Map.lookup addr (ist0^.funInfo) of
-        Just i -> pure i
-        Nothing -> error $ "Could not find info for " ++ show addr
 
     case Map.lookup addr (ist^.parsedBlocks) of
       Just b -> blockFrontier .= [b]
@@ -677,10 +673,10 @@ doOneFunction sysp addrs ist0 acc addr =
 
 
 -- | Returns the set of argument registers and result registers for each function.
-functionDemands :: forall arch ids
-                .  SummarizeConstraints arch ids
+functionDemands :: forall arch
+                .  SummarizeConstraints arch
                 => SyscallPersonality arch
-                -> DiscoveryInfo arch ids
+                -> DiscoveryInfo arch
                 -> [ArchSegmentedAddr arch]
                 -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
 functionDemands sysp ist entries =
@@ -688,7 +684,11 @@ functionDemands sysp ist entries =
   where
     addrs = Set.fromList entries
     m0 = FunctionArgState Map.empty Map.empty Map.empty
-    m  = foldl (doOneFunction sysp addrs ist) m0 entries
+    f mi addr =
+      case Map.lookup addr (ist^.funInfo) of
+        Just (Some finfo) -> doOneFunction sysp addrs ist mi finfo
+        Nothing -> error $ "Could not find info for " ++ show addr
+    m  = foldl f m0 entries
 
 
 
@@ -738,7 +738,7 @@ inferFunctionTypeFromDemands dm =
                         dm
                         retDemands
 
-debugPrintMap :: DiscoveryInfo X86_64 ids -> Map (SegmentedAddr 64) FunctionType -> String
+debugPrintMap :: DiscoveryInfo X86_64 -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)
   where -- FIXME: ignores those functions we don't have names for.
         comb = Map.intersectionWith doOne (symbolNames ist) m
