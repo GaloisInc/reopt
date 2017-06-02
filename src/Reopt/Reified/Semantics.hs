@@ -174,7 +174,7 @@ app = AppExpr
 exprType :: Expr tp -> TypeRepr tp
 exprType (ValueExpr v) = CS.asTypeRepr v
 exprType (LitExpr r _) = BVTypeRepr r
-exprType (AppExpr a) = R.appType a
+exprType (AppExpr a) = typeRepr a
 exprType (VarExpr (Variable r _)) = r -- S.BVTypeRepr r
 
 -- | Return width of expression.

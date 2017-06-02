@@ -64,12 +64,10 @@ termSucc addr stmt =
     ParsedTranslateError{} -> []
     ClassifyFailure{} -> []
 
+-- | A map from each block label `l` to the labels of blocks that may jump to `l`.
 type FunPredMap w = Map (BlockLabel w) [BlockLabel w]
 
--- | This function figures out what the block requires
--- (i.e., addresses that are stored to, and the value stored), along
--- with a map of how demands by successor blocks map back to
--- assignments and registers.
+-- | Return the FunPredMap for the discovered block function.
 funBlockPreds :: DiscoveryFunInfo X86_64 ids -> FunPredMap 64
 funBlockPreds info = Map.fromListWith (++)
   [ (next, [prev])

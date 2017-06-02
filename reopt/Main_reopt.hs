@@ -533,12 +533,12 @@ ppElfUnresolvedSymbols m =
         pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
 
 -- | Create a final CFG
-mkFinalCFGWithSyms :: (Integral v, ArchConstraints arch)
+mkFinalCFGWithSyms :: Integral v
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf v -- ^ Elf file to create CFG for.
                    -> IO (Some (DiscoveryInfo arch), Map (SegmentedAddr (ArchAddrWidth arch)) BS.ByteString)
-mkFinalCFGWithSyms archInfo mem e = do
+mkFinalCFGWithSyms archInfo mem e = withArchConstraints archInfo $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
@@ -561,8 +561,7 @@ mkFinalCFGWithSyms archInfo mem e = do
 
 data SomeArchitectureInfo v =
   forall arch
-  . ( ArchConstraints arch
-    , FnHasRefs (ArchFn arch)
+  . ( FnHasRefs (ArchFn arch)
     , StmtHasRefs (ArchStmt arch)
     , v ~ ElfWordType (ArchAddrWidth arch)
     , Bits v
@@ -631,6 +630,7 @@ showCFG loadSty path = do
         return (Some e)
   -- Get architecture information for elf
   SomeArch archInfo <- getElfArchInfo e
+  withArchConstraints archInfo $ do
   (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
   (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
   print $ ppDiscoveryInfoBlocks disc_info

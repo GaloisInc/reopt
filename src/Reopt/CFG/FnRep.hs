@@ -3,8 +3,8 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
-
 module Reopt.CFG.FnRep
    ( FnAssignId(..)
    , FnAssignment(..)
@@ -20,9 +20,6 @@ module Reopt.CFG.FnRep
    , FnReturnVar(..)
    , FoldFnValue(..)
    , PhiBinding(..)
-   , fnAssignRHSType
-   , fnValueType
-   , fnValueWidth
    , ftMaximumFunctionType
    , ftMinimumFunctionType
    , ftArgRegs
@@ -46,7 +43,6 @@ import           Data.Macaw.CFG
    , ppApp
    , ppLit
    , sexpr
-   , appType
    , foldAppl
    , prettyF
    )
@@ -178,14 +174,14 @@ ppFnAssignRhs pp (FnRepnzScas _ val base off) = sexpr "first_offset_of" [pp val,
 instance Pretty (FnAssignRhs tp) where
   pretty = ppFnAssignRhs pretty
 
-fnAssignRHSType :: FnAssignRhs tp -> TypeRepr tp
-fnAssignRHSType rhs =
-  case rhs of
-    FnSetUndefined sz -> BVTypeRepr sz
-    FnReadMem _ tp -> tp
-    FnEvalApp a    -> appType a
-    FnAlloca _ -> knownType
-    FnRepnzScas{} -> knownType
+instance HasRepr FnAssignRhs TypeRepr where
+  typeRepr rhs =
+    case rhs of
+      FnSetUndefined sz -> BVTypeRepr sz
+      FnReadMem _ tp -> tp
+      FnEvalApp a    -> typeRepr a
+      FnAlloca _ -> knownType
+      FnRepnzScas{} -> knownType
 
 class FoldFnValue a where
   foldFnValue :: (forall u . s -> FnValue u -> s) -> s -> a -> s
@@ -243,23 +239,19 @@ instance Pretty (FnValue tp) where
   pretty (FnRegArg _ n)           = text "arg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@"
                                     <> parens (pretty $ show addr)
-
-fnValueType :: FnValue tp -> TypeRepr tp
-fnValueType v =
-  case v of
-    FnValueUnsupported _ tp -> tp
-    FnUndefined tp -> tp
-    FnConstantValue sz _ -> BVTypeRepr sz
-    FnAssignedValue (FnAssignment _ rhs) -> fnAssignRHSType rhs
-    FnPhiValue phi -> fnPhiVarType phi
-    FnReturn ret   -> frReturnType ret
-    FnFunctionEntryValue {} -> knownType
-    FnBlockValue _ -> knownType
-    FnRegArg r _ -> typeRepr r
-    FnGlobalDataAddr _ -> knownType
-
-fnValueWidth :: FnValue (BVType w) -> NatRepr w
-fnValueWidth = type_width . fnValueType
+instance HasRepr FnValue TypeRepr where
+  typeRepr v =
+    case v of
+      FnValueUnsupported _ tp -> tp
+      FnUndefined tp -> tp
+      FnConstantValue sz _ -> BVTypeRepr sz
+      FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
+      FnPhiValue phi -> fnPhiVarType phi
+      FnReturn ret   -> frReturnType ret
+      FnFunctionEntryValue {} -> knownType
+      FnBlockValue _ -> knownType
+      FnRegArg r _ -> typeRepr r
+      FnGlobalDataAddr _ -> knownType
 
 ------------------------------------------------------------------------
 -- Function definitions
@@ -267,18 +259,17 @@ fnValueWidth = type_width . fnValueType
 data Function = Function { fnAddr :: !(SegmentedAddr 64)
                            -- ^ In memory address of function
                          , fnType :: !FunctionType
+                           -- ^ Type of this  function
                          , fnBlocks :: [FnBlock]
+                           -- ^ A list of all function blocks here.
                          }
 
 instance Pretty Function where
   pretty fn =
     text "function " <+> pretty (show (fnAddr fn))
-    <$$>
-    lbrace
-    <$$>
-    (nest 4 $ vcat (pretty <$> fnBlocks fn))
-    <$$>
-    rbrace
+    <$$> lbrace
+    <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
+    <$$> rbrace
 
 instance FoldFnValue Function where
   foldFnValue f s0 fn = foldl' (foldFnValue f) s0 (fnBlocks fn)
@@ -293,13 +284,18 @@ instance Pretty (FnRegValue tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
   pretty (FnRegValue v)      = pretty v
 
+-- | A Phi binding maps a phi variable to a list that contains a label
+-- for each predecessor block, and the register to rad from at the end
+-- of that blcok.
 data PhiBinding tp
    = PhiBinding (FnPhiVar tp) [(BlockLabel 64, X86Reg tp)]
 
 -- | A block in the function
 data FnBlock
    = FnBlock { fbLabel :: !(BlockLabel 64)
-               -- | List of function bindings.
+               -- | List of phi bindings.
+               --
+               -- Only initial blocks -- not subblocks should have phi bindings.
              , fbPhiNodes  :: ![Some PhiBinding]
              , fbStmts :: ![FnStmt]
              , fbTerm  :: !(FnTermStmt)
@@ -374,11 +370,11 @@ instance FoldFnValue FnStmt where
 
 data FnTermStmt
    = FnJump !(BlockLabel 64)
-   | FnRet !([FnValue (BVType 64)], [FnValue XMMType])
+   | FnRet ![FnValue (BVType 64)] ![FnValue XMMType]
    | FnBranch !(FnValue BoolType) !(BlockLabel 64) !(BlockLabel 64)
      -- ^ A branch to a block within the function, along with the return vars.
    | FnCall !(FnValue (BVType 64))
-            FunctionType
+            !FunctionType
             -- Arguments
             [Some FnValue]
             !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
@@ -386,8 +382,9 @@ data FnTermStmt
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
 
-     -- FIXME: specialized to BSD's (broken) calling convention
-   | FnSystemCall !(FnValue (BVType 64)) [(FnValue (BVType 64))] ![ Some FnReturnVar ] (BlockLabel 64)
+   | FnSystemCall !(FnValue (BVType 64))
+                  ![(FnValue (BVType 64))]
+                  ![ Some FnReturnVar ] (BlockLabel 64)
    | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (SegmentedAddr 64))
    | FnTermStmtUndefined
 
@@ -396,7 +393,7 @@ instance Pretty FnTermStmt where
     case s of
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnJump lbl -> text "jump" <+> pretty lbl
-      FnRet (grets, frets) -> text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
+      FnRet grets frets -> text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
       FnCall f _ args (grets, frets) lbl ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
             ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
@@ -416,7 +413,7 @@ instance Pretty FnTermStmt where
 instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
-  foldFnValue f s (FnRet (grets, frets)) = foldl f (foldl f s grets) frets
+  foldFnValue f s (FnRet grets frets) = foldl f (foldl f s grets) frets
   foldFnValue f s (FnCall fn _ args _ _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnSystemCall call_no args _rets _lbl) =
     foldl f (f s call_no) args

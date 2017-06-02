@@ -74,9 +74,9 @@ hasWidth f w =
 -- RecoverState
 
 data RecoverState ids = RS { rsMemory        :: !(Memory 64)
-                           , rsInterp :: !(DiscoveryFunInfo X86_64 ids)
+                           , rsInterp        :: !(DiscoveryFunInfo X86_64 ids)
                            , _rsNextAssignId :: !FnAssignId
-                           , _rsAssignMap :: !(MapF (AssignId ids) FnAssignment)
+                           , _rsAssignMap    :: !(MapF (AssignId ids) FnAssignment)
 
                              -- Local state
                            , _rsCurLabel  :: !(BlockLabel 64)
@@ -447,11 +447,14 @@ recoverBlock :: forall ids
              -> RecoveredBlockInfo
              -> Recover ids RecoveredBlockInfo
 recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
+  when (labelIndex lbl /= 0 &&  not (null phis)) $ do
+    error $ "recoverBlock asked to create a subblock " ++ show lbl ++ " with phi nodes."
   -- Clear stack offsets
   rsCurLabel  .= lbl
 
   let mkBlock :: FnTermStmt
-              -> MapF X86Reg FnRegValue -> Recover ids FnBlock
+              -> MapF X86Reg FnRegValue
+              -> Recover ids FnBlock
       mkBlock tm m = do
         stmts <- use rsCurStmts
         rsCurStmts .= Seq.empty
@@ -507,7 +510,9 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
       return $! blockInfo & addFnBlock fb
 
     ParsedJump proc_state tgt_addr -> do
-      let go :: MapF X86Reg FnRegValue -> Some X86Reg -> Recover ids (MapF X86Reg FnRegValue)
+      let go :: MapF X86Reg FnRegValue
+             -> Some X86Reg
+             -> Recover ids (MapF X86Reg FnRegValue)
           go m (Some r) = do
             v <- recoverRegister proc_state r
             return $ MapF.insert r (FnRegValue v) m
@@ -523,7 +528,7 @@ recoverBlock blockRegProvides phis lbl blockInfo = seq blockInfo $ do
       ft <- gets rsCurrentFunctionType
       grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
       frets' <- mapM (recoverRegister proc_state) (ftFloatRetRegs ft)
-      bl <- mkBlock (FnRet (grets', frets')) MapF.empty
+      bl <- mkBlock (FnRet grets' frets') MapF.empty
       pure $! blockInfo & addFnBlock bl
 
     ParsedSyscall proc_state next_addr -> do
@@ -700,9 +705,13 @@ recoverFunction sysp fArgs mem fInfo = do
                         -> Recover ids RecoveredBlockInfo
       recoverInnerBlock blockInfo lbl' = do
         let regs0 :: [Some X86Reg]
-            regs0 = case Map.lookup (labelAddr lbl') blockRegs of
-                      Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show (pretty lbl')) []
-                      Just x  -> Set.toList x
+            regs0
+              | labelIndex lbl' /= 0 = []
+              | otherwise =
+                  case Map.lookup (labelAddr lbl') blockRegs of
+                    Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show (pretty lbl')) []
+                    Just x  -> Set.toList x
+
         let mkIdFromReg :: MapF X86Reg FnPhiVar
                         -> Some X86Reg
                         -> Recover ids (MapF X86Reg FnPhiVar)
@@ -717,8 +726,10 @@ recoverFunction sysp fArgs mem fInfo = do
         -- Get predecessors for this block.
         let Just preds = Map.lookup lbl' blockPreds
 
-        recoverBlock blockRegProvides (makePhis preds regs1) lbl' blockInfo
+        -- Generate phi nodes from predcessors and registers that this block refers to.
+        let phis = makePhis preds regs1
 
+        recoverBlock blockRegProvides phis lbl' blockInfo
 
   evalRecover rs $ do
     -- The first block is special as it needs to allocate space for

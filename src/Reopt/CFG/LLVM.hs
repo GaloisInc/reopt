@@ -19,6 +19,7 @@ analogues in LLVM
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Reopt.CFG.LLVM
   ( functionName
   , AddrSymMap
@@ -33,6 +34,7 @@ import           Data.Int
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
+import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
@@ -216,6 +218,12 @@ blockName l = L.Named (L.Ident (show l))
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
 -- into xmm0 on a return, whereas it does for <2 x double>
 
+natReprToLLVMType :: NatRepr n -> L.Type
+natReprToLLVMType = L.PrimType . L.Integer . fromIntegral . natValue
+
+typeToLLVMType :: TypeRepr tp -> L.Type
+typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
+
 functionFloatType :: L.Type
 functionFloatType = L.Vector 2 (L.PrimType $ L.FloatType L.Double)
 
@@ -233,7 +241,7 @@ functionTypeToLLVM :: FunctionType -> L.Type
 functionTypeToLLVM ft = L.ptrT (L.FunTy funReturnType (functionTypeArgTypes ft) False)
 
 funReturnType :: L.Type
-funReturnType = L.Struct $ (map (typeToLLVMType . typeRepr) x86ResultRegs)
+funReturnType = L.Struct $ (typeToLLVMType . typeRepr <$> x86ResultRegs)
                             ++ (replicate (length x86FloatResultRegs) functionFloatType)
 
 floatReprToLLVMFloatType :: FloatInfoRepr flt -> L.FloatType
@@ -345,7 +353,7 @@ data BBLLVMState = BBLLVMState
   { funContext :: !FunLLVMContext
     -- ^ Context for function level declarations.
   , bbBlock :: !FnBlock
-    -- ^ Basic block for error reporting purposes.
+    -- ^ Basic block that we are generating the LLVM for.
   , bbStmts :: ![L.Stmt]
     -- ^ Statements in reverse order
   , funState :: !FunState
@@ -406,20 +414,6 @@ unimplementedInstr' typ reason = do
 -- | Map from assign ID to value.
 type AssignValMap = Map FnAssignId (BlockLabel 64, L.Typed L.Value)
 
-getAssignIdValue :: Loc.HasCallStack
-                 => FnBlock
-                 -> AssignValMap
-                    -- ^ Function id map for block
-                 -> FnAssignId
-                 -> L.Typed L.Value
-getAssignIdValue b m fid = do
-  case Map.lookup fid m of
-    Nothing ->
-      Loc.error $ "Could not find value " ++ show fid ++ "\n"
-           ++ show m ++ "\n"
-           ++ show (pretty b) ++ "\n"
-    Just (_,v) -> v
-
 setAssignIdValue :: FnAssignId -> BlockLabel 64 -> L.Typed L.Value -> BBLLVM ()
 setAssignIdValue fid blk v = do
   s <- get
@@ -437,15 +431,18 @@ addBoundPhiVar nm tp info = do
   seq pair $ do
   put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
 
+$(pure [])
+
 -- | Map a function value to a LLVM value with no change.
 valueToLLVM :: Loc.HasCallStack
             => FunLLVMContext
             -> FnBlock
+               -- ^ Block we are generating LLVM for.
             -> AssignValMap
             -> FnValue tp
             -> L.Typed L.Value
 valueToLLVM ctx blk m val = do
-  let typ = typeToLLVMType $ fnValueType val
+  let typ = typeToLLVMType $ typeRepr val
   let  mk :: L.Value -> L.Typed L.Value
        mk  = L.Typed typ
   case val of
@@ -456,11 +453,25 @@ valueToLLVM ctx blk m val = do
     FnConstantValue _sz n -> mk $ L.integer n
     -- Value from an assignment statement.
     FnAssignedValue (FnAssignment lhs _rhs) ->
-      getAssignIdValue blk m lhs
+      case Map.lookup lhs m of
+        Just (_,v) -> v
+        Nothing ->
+          Loc.error $ "Could not find assignment value " ++ show lhs ++ "\n"
+                      ++ show (pretty blk)
     -- Value from a phi node
-    FnPhiValue (FnPhiVar lhs _tp)  -> getAssignIdValue blk m lhs
+    FnPhiValue (FnPhiVar lhs _tp)  -> do
+      case Map.lookup lhs m of
+        Just (_,v) -> v
+        Nothing ->
+          Loc.error $ "Could not find phi value " ++ show lhs ++ "\n"
+                      ++ show (pretty blk)
     -- A value returned by a function call (rax/xmm0)
-    FnReturn (FnReturnVar lhs _tp) -> getAssignIdValue blk m lhs
+    FnReturn (FnReturnVar lhs _tp) ->
+      case Map.lookup lhs m of
+        Just (_,v) -> v
+        Nothing ->
+          Loc.error $ "Could not find return variable " ++ show lhs ++ "\n"
+                      ++ show (pretty blk)
     -- The entry pointer to a function.  We do the cast as a const
     -- expr as function addresses appear as constants in e.g. phi
     -- nodes
@@ -501,6 +512,7 @@ floatTypeWidth l =
 valueToLLVMBitvec :: Loc.HasCallStack
                   => FunLLVMContext
                   -> FnBlock
+                     -- ^ Block that we are generating LLVM for.
                   -> AssignValMap
                   -> FnValue tp
                   -> L.Typed L.Value
@@ -681,7 +693,7 @@ syscallAsm =
 
 appToLLVM' :: App FnValue tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
-  let typ = typeToLLVMType $ appType app
+  let typ = typeToLLVMType $ typeRepr app
   let binop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
             -> FnValue (BVType n)
             -> FnValue (BVType n)
@@ -714,13 +726,6 @@ appToLLVM' app = do
 
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
     MMXExtend _v -> unimplementedInstr' typ "MMXExtend"
-    ConcatV sz _sz' low high -> do
-      llvm_low  <- mkLLVMValue low
-      llvm_high <- mkLLVMValue high
-      low'  <- zext llvm_low  typ
-      high' <- zext llvm_high typ
-      s_high <- shl high' (L.ValInteger (natValue sz))
-      bitop L.Or s_high (L.typedValue low')
     UpperHalf sz v -> do
       llvm_v <- mkLLVMValue v
       v' <- lshr llvm_v (L.ValInteger (natValue sz))
@@ -758,10 +763,10 @@ appToLLVM' app = do
       let in_typ = L.typedType llvm_v
       n' <- mkLLVMValue n
       n_ext <-
-        case compare (natValue (fnValueWidth v)) (natValue (fnValueWidth n)) of
-          LT -> Loc.error "BVTestBit expected second argument to be at least first"
-          EQ -> pure n'
-          GT -> zext n' in_typ
+        case compareF (typeWidth v) (typeWidth n) of
+          LTF -> Loc.error "BVTestBit expected second argument to be at least first"
+          EQF -> pure n'
+          GTF -> zext n' in_typ
       mask <- shl (L.Typed in_typ (L.ValInteger 1)) (L.typedValue n_ext)
       r <- bitop L.And llvm_v (L.typedValue mask)
       icmpop L.Ine r (L.ValInteger 0)
@@ -929,7 +934,7 @@ stmtToLLVM' stmt = do
      v'     <- mkLLVMValue v
      ptr'   <- mkLLVMValue ptr
      df'    <- mkLLVMValue dir
-     let typ = typeToLLVMType $ fnValueType v
+     let typ = typeToLLVMType $ typeRepr v
      ptr_ptr <- convop L.IntToPtr ptr' (L.PtrTo typ)
      call_ (iMemSet typ) [ptr_ptr, v', count', df']
 
@@ -958,7 +963,7 @@ termStmtToLLVM' tm =
   case tm of
      FnJump lbl -> do
        effect $ L.Jump (blockName lbl)
-     FnRet (grets, frets) -> do
+     FnRet grets frets -> do
        grets' <- mapM mkLLVMValue grets
        frets' <- mapM mkLLVMValue frets
        makeRet' grets' frets'
@@ -1055,12 +1060,6 @@ termStmtToLLVM' tm =
      FnTermStmtUndefined ->
        void $ unimplementedInstr' L.voidT "FnTermStmtUndefined"
 
-natReprToLLVMType :: NatRepr n -> L.Type
-natReprToLLVMType = L.PrimType . L.Integer . fromIntegral . natValue
-
-typeToLLVMType :: TypeRepr tp -> L.Type
-typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
-
 -- | Result obtained by printing a block to LLVM
 data LLVMBlockResult = LLVMBlockResult { regBlock   :: !FnBlock
                                        , llvmBlockStmts  :: ![L.Stmt]
@@ -1071,7 +1070,8 @@ data LLVMBlockResult = LLVMBlockResult { regBlock   :: !FnBlock
 type ResolvePhiMap = Map (BlockLabel 64) LLVMBlockResult
 
 -- | Convert a Phi node assignment to the right value
-resolvePhiNodeReg :: FunLLVMContext
+resolvePhiNodeReg :: Loc.HasCallStack
+                  => FunLLVMContext
                   -> AssignValMap
                   -> ResolvePhiMap
                   -> (BlockLabel 64, X86Reg tp)
@@ -1086,7 +1086,8 @@ resolvePhiNodeReg ctx avmap m (lbl, reg) =
         Just (CalleeSaved _) -> Loc.error $ "Resolve callee saved register"
         Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx b avmap v), blockName lbl)
 
-resolvePhiStmt :: FunLLVMContext
+resolvePhiStmt :: Loc.HasCallStack
+               => FunLLVMContext
                -> AssignValMap
                -> ResolvePhiMap
                -> Some PendingPhiNode
@@ -1094,7 +1095,12 @@ resolvePhiStmt :: FunLLVMContext
 resolvePhiStmt ctx avmap m (Some (PendingPhiNode nm tp info)) = L.Result nm i []
   where i = L.Phi tp (resolvePhiNodeReg ctx avmap m <$> info)
 
-toBasicBlock :: FunLLVMContext -> AssignValMap -> ResolvePhiMap -> LLVMBlockResult -> L.BasicBlock
+toBasicBlock :: Loc.HasCallStack
+             => FunLLVMContext
+             -> AssignValMap
+             -> ResolvePhiMap
+             -> LLVMBlockResult
+             -> L.BasicBlock
 toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLabel (regBlock res)))
                                             , L.bbStmts = phiStmts ++ llvmBlockStmts res
                                             }
@@ -1111,7 +1117,6 @@ addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
   setAssignIdValue fid lbl (L.Typed llvm_tp (L.ValIdent nm))
   addBoundPhiVar nm llvm_tp info
 
--- | This converts
 blockToLLVM :: FunLLVMContext
                -- ^ Context for block
             -> FunState
@@ -1174,8 +1179,6 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
     postInitArgs :: V.Vector (L.Typed L.Value)
     (inputArgs, initBlock, postInitArgs) =
       mkInitBlock (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
-
-
 
     ctx :: FunLLVMContext
     ctx = FunLLVMContext { funSyscallIntrinsicPostfix = syscallPostfix
