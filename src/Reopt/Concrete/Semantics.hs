@@ -93,7 +93,6 @@ evalExpr (AppExpr a) = do
     -- Resize ops
     R.MMXExtend c -> let ones = BV.ones 16
                       in CS.liftValue (BV.# ones) extPrecisionNatRepr c
-    R.UpperHalf nr c -> CS.liftValue (upperBV nr) nr c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
     R.UExt c nr -> CS.liftValue (uExtBV nr) nr c
@@ -485,9 +484,6 @@ uExtBV :: NatRepr n -> BV -> BV
 uExtBV nr bv = BV.zeroExtend diff bv
   where
     diff = (fromInteger (natValue nr)) - BV.width bv
-
-upperBV :: NatRepr n -> BV -> BV
-upperBV nr = BV.most (fromInteger (natValue nr) :: Int)
 
 truncBV :: NatRepr n -> BV -> BV
 truncBV nr = BV.least (fromInteger (natValue nr) :: Int)

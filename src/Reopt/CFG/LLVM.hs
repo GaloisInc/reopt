@@ -570,10 +570,6 @@ insertValue ta tv i =
 bitcast :: L.Typed L.Value -> L.Type -> BBLLVM (L.Typed L.Value)
 bitcast = convop L.BitCast
 
--- | Truncation
-trunc :: L.Typed L.Value -> L.Type -> BBLLVM (L.Typed L.Value)
-trunc = convop L.Trunc
-
 -- | Unsigned extension
 zext :: L.Typed L.Value -> L.Type -> BBLLVM (L.Typed L.Value)
 zext = convop L.ZExt
@@ -726,10 +722,6 @@ appToLLVM' app = do
 
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
     MMXExtend _v -> unimplementedInstr' typ "MMXExtend"
-    UpperHalf sz v -> do
-      llvm_v <- mkLLVMValue v
-      v' <- lshr llvm_v (L.ValInteger (natValue sz))
-      trunc v' (natReprToLLVMType sz)
     Trunc v sz -> flip (convop L.Trunc) (natReprToLLVMType sz) =<< mkLLVMValue v
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v

@@ -198,13 +198,6 @@ instance S.IsValue Expr where
   x .|. y = app $ R.BVOr (exprWidth x) x y
   bvXor x y = app $ R.BVXor (exprWidth x) x y
   x .=. y = app $ R.BVEq x y
-  bvSplit :: forall n. (1 <= n)
-          => Expr (BVType (n + n))
-          -> (Expr (BVType n), Expr (BVType n))
-  bvSplit v = withLeqProof (leqAdd2 (leqRefl hn) (LeqProof :: LeqProof 1 n))
-                            ( app (R.UpperHalf hn v)
-                            , app (R.Trunc     v hn))
-    where hn = halfNat (exprWidth v) :: NatRepr n
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
