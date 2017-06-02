@@ -537,7 +537,7 @@ mkFinalCFGWithSyms :: Integral v
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf v -- ^ Elf file to create CFG for.
-                   -> IO (Some (DiscoveryInfo arch), Map (SegmentedAddr (ArchAddrWidth arch)) BS.ByteString)
+                   -> IO (DiscoveryInfo arch, Map (SegmentedAddr (ArchAddrWidth arch)) BS.ByteString)
 mkFinalCFGWithSyms archInfo mem e = withArchConstraints archInfo $ do
   entries <-
     case elfSymtab e of
@@ -632,7 +632,7 @@ showCFG loadSty path = do
   SomeArch archInfo <- getElfArchInfo e
   withArchConstraints archInfo $ do
   (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
-  (Some disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
+  (disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
   print $ ppDiscoveryInfoBlocks disc_info
 
 -- | Try to recover function information from the information recovered during
@@ -642,7 +642,7 @@ getFns :: SyscallPersonality X86_64
           -- ^ Maps symbol names to addresses
        -> Set String
           -- ^ Name of symbols/addresses to exclude
-       -> DiscoveryInfo X86_64 ids
+       -> DiscoveryInfo X86_64
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
 getFns sysp symMap excludedNames info = do
@@ -663,8 +663,10 @@ getFns sysp symMap excludedNames info = do
             where word = fromIntegral (base + addr^.addrOffset)
           _ -> True
   let doCheck :: SegmentedAddr 64 -> Bool
-      doCheck a = checkFunction finfo a
-        where Just finfo = Map.lookup a (info^.funInfo)
+      doCheck a =
+          case Map.lookup a (info^.funInfo) of
+            Nothing -> error "doCheck failed"
+            Just (Some finfo) -> checkFunction finfo a
 
   let entries = filter include $ Set.toList $ info^.functionEntries
 
@@ -679,7 +681,7 @@ getFns sysp symMap excludedNames info = do
       Nothing -> do
         hPutStrLn stderr $ "Could not find function info for " ++ show entry
         pure Nothing
-      Just finfo
+      Just (Some finfo)
         | checkFunction finfo entry -> do
             case recoverFunction sysp fArgs mem finfo of
               Left msg -> do
@@ -697,7 +699,7 @@ showFunctions args = do
   -- Create memory for elf
   (archInfo, sysp,_) <- getX86ElfArchInfo e
   (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
-  (Some s,_) <- mkFinalCFGWithSyms archInfo mem e
+  (s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
@@ -1064,12 +1066,12 @@ addFunctionEntryPoint s a = addControlFlowTarget s a a
 
 
 addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
-                                  -> (ArchSegmentedAddr arch, DiscoveryFunInfo arch ids)
+                                  -> (ArchSegmentedAddr arch, Some (DiscoveryFunInfo arch))
                                   -> ControlFlowTargetSet (ArchAddrWidth arch)
-addFunDiscoveryControlFlowTargets m0 (base, f) =
+addFunDiscoveryControlFlowTargets m0 (base, Some f) =
   foldl' (\m b -> addControlFlowTarget m b base) m0 (Map.keys (f^.parsedBlocks))
 
-discoveryControlFlowTargets :: DiscoveryInfo arch ids -> ControlFlowTargetSet (ArchAddrWidth arch)
+discoveryControlFlowTargets :: DiscoveryInfo arch -> ControlFlowTargetSet (ArchAddrWidth arch)
 discoveryControlFlowTargets info =
   let m0 = CFTS { cfTargets = Map.empty }
       m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.toList (info^.funInfo))
@@ -1187,7 +1189,7 @@ performReopt args =
     -- Construct CFG from binary
     (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
     (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
-    (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
+    (disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
@@ -1202,7 +1204,7 @@ performReopt args =
       ".blocks" -> do
         writeFile output_path $ show $ ppDiscoveryInfoBlocks disc_info
         let tgts = discoveryControlFlowTargets disc_info
-        forM_ (Map.toList (disc_info^.funInfo)) $ \(a,f) -> do
+        forM_ (Map.toList (disc_info^.funInfo)) $ \(a, Some f) -> do
           putStrLn $ BSC.unpack (discoveredFunName f) ++ ": "
             ++ show (lookupControlFlowTargetSpace a tgts)
 
