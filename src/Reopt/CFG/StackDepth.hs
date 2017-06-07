@@ -27,7 +27,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Discovery.State
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 

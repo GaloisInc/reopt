@@ -45,7 +45,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
-import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Discovery.State
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types

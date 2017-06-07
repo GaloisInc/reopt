@@ -8,16 +8,19 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 
 import Data.Macaw.CFG
-import Data.Macaw.Discovery.Info
+import Data.Macaw.Discovery.State
 
 blbl :: SegmentedAddr w -> BlockLabel w
 blbl a = GeneratedBlock a 0
 
--- | Return true if the function entry point
+-- | This returns true if all block terminators reachable from the
+-- function entry point have non-error term stmts.
+--
+-- An error term statement is one of form translation error or
+-- classify error.
 checkFunction :: DiscoveryFunInfo arch ids
-              -> ArchSegmentedAddr arch
               -> Bool
-checkFunction info addr = checkFunction' info Set.empty [blbl addr]
+checkFunction info = checkFunction' info Set.empty [blbl (discoveredFunAddr info)]
 
 checkFunction' :: DiscoveryFunInfo arch ids
                -> Set (ArchLabel arch)

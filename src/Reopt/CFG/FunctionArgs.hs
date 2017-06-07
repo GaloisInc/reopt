@@ -36,7 +36,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
-import           Data.Macaw.Discovery.Info
+import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
 import           Data.Macaw.Memory (Memory)
 import           Data.Macaw.Types
@@ -44,6 +44,7 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg
 
+import           Reopt.CFG.FunctionCheck (checkFunction)
 import           Reopt.CFG.FnRep (FunctionType(..))
 
 -- -----------------------------------------------------------------------------
@@ -623,7 +624,7 @@ doOneFunction :: forall arch ids
               .  SummarizeConstraints arch
               => SyscallPersonality arch
               -> Set (ArchSegmentedAddr arch)
-              -> DiscoveryInfo arch
+              -> DiscoveryState arch
               -> FunctionArgState (ArchReg arch)
               -> DiscoveryFunInfo arch ids
               -> FunctionArgState (ArchReg arch)
@@ -676,22 +677,19 @@ doOneFunction sysp addrs ist0 acc ist = do
 functionDemands :: forall arch
                 .  SummarizeConstraints arch
                 => SyscallPersonality arch
-                -> DiscoveryInfo arch
-                -> [ArchSegmentedAddr arch]
+                -> DiscoveryState arch
                 -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
-functionDemands sysp ist entries =
+functionDemands sysp info =
     calculateGlobalFixpoint (m^.funArgMap) (m^.funResMap) (m^.alwaysDemandMap)
   where
-    addrs = Set.fromList entries
+    entries =  filter (viewSome checkFunction) (exploredFunctions info)
+
+    addrs = Set.fromList $ viewSome discoveredFunAddr <$> entries
+
     m0 = FunctionArgState Map.empty Map.empty Map.empty
-    f mi addr =
-      case Map.lookup addr (ist^.funInfo) of
-        Just (Some finfo) -> doOneFunction sysp addrs ist mi finfo
-        Nothing -> error $ "Could not find info for " ++ show addr
+
+    f mi (Some finfo) = doOneFunction sysp addrs info mi finfo
     m  = foldl f m0 entries
-
-
-
 
 instance CanDemandValues X86_64 where
 
@@ -738,8 +736,8 @@ inferFunctionTypeFromDemands dm =
                         dm
                         retDemands
 
-debugPrintMap :: DiscoveryInfo X86_64 -> Map (SegmentedAddr 64) FunctionType -> String
+debugPrintMap :: DiscoveryState X86_64 -> Map (SegmentedAddr 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)
   where -- FIXME: ignores those functions we don't have names for.
-        comb = Map.intersectionWith doOne (symbolNames ist) m
+        comb = Map.intersectionWith doOne (symbolAddrsAsMap (symbolNames ist)) m
         doOne n ft = BSC.unpack n ++ ": " ++ show (pretty ft)

@@ -214,8 +214,8 @@ getCommandLineArgs = do
 -- Execution
 
 mkElfMem :: Monad m => LoadStyle -> Elf Word64 -> m (Memory 64)
-mkElfMem LoadBySection e = either fail (return . snd) $ memoryForElfSections Addr64 e
-mkElfMem LoadBySegment e = either fail (return . snd) $ memoryForElfSegments Addr64 e
+mkElfMem LoadBySection e = either fail (return . snd) $ memoryForElfSections e
+mkElfMem LoadBySegment e = either fail (return . snd) $ memoryForElfSegments e
 
 ------------------------------------------------------------------------
 -- Tracers.

@@ -61,17 +61,6 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
-import           Data.Macaw.Discovery.Info
-                 ( DiscoveryInfo
-                 , DiscoveryFunInfo
-                 , discoveredFunName
-                 , ppDiscoveryInfoBlocks
-                 , functionEntries
-                 , funInfo
-                 , memory
-                 , symbolNames
-                 , parsedBlocks
-                 )
 import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 
@@ -100,21 +89,6 @@ unintercalate punct str = reverse $ go [] "" str
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
 
-{-
--- | This returns how much space there is before start of next function,
--- or the end of the memory segment if code address is undefined.
---
--- Note: Calls error if code addr is not in a valid memory location.
-functionSize :: DiscoveryInfo X86_64 ids -> SegmentedAddr 64 -> MemWord 64
-functionSize s a = do
-  let seg = addrSegment a
-  assert (segmentFlags seg `Perm.hasPerm` Perm.execute) $ do
-    case Set.lookupGT a (s^.functionEntries) of
-      Just next | segmentIndex (addrSegment next) == segmentIndex seg ->
-           next^.addrOffset - a^.addrOffset
-      _ -> segmentSize seg - a^.addrOffset
--}
-
 ------------------------------------------------------------------------
 -- LoadStyle
 
@@ -126,15 +100,14 @@ data LoadStyle
      -- ^ Load segments in Elf file.
 
 -- | Create a memory from a load style.
-mkElfMem :: (Monad m, Integral (ElfWordType w), Bits (ElfWordType w), MemWidth w)
+mkElfMem :: Monad m
          => LoadStyle
-         -> AddrWidthRepr w
-         -> Elf (ElfWordType w)
-         -> m (SectionIndexMap (ElfWordType w) w, Memory w)
-mkElfMem sty w e = do
+         -> Elf v
+         -> m (SectionIndexMap v (ElfWordWidth v), Memory (ElfWordWidth v))
+mkElfMem sty e = do
   case sty of
-    LoadBySection -> either fail return $ memoryForElfSections w e
-    LoadBySegment -> either fail return $ memoryForElfSegments w e
+    LoadBySection -> either fail return $ memoryForElfSections e
+    LoadBySegment -> either fail return $ memoryForElfSegments e
 
 ------------------------------------------------------------------------
 -- LLVMVersion
@@ -489,38 +462,30 @@ dumpDisassembly path = do
     putStrLn "Binary contains no executable sections."
   mapM_ printSectionDisassembly sections
 
-{-
-mkCFG :: Integral (ArchAddr arch)
-      => Map (ArchSegmentedAddr arch) (BlockRegion arch ids)
-      -> CFG arch ids
-mkCFG m = Map.foldlWithKey' go emptyCFG m
-  where go g addr br = insertBlocksForCode addr (brSize br) l g
-          where l = Map.elems (brBlocks br)
--}
-
 -- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
 --
 -- It returns a two maps, the first contains entries that could not be resolved; the second
 -- contains those that could.
-resolvedSegmentedElfFuncSymbols :: forall w v
-                                .  (Integral v, MemWidth w)
+resolvedSegmentedElfFuncSymbols :: forall w
+                                .  Integral (ElfWordType w)
                                 => Memory w
-                                -> [ElfSymbolTableEntry v]
-                                -> (Map (MemWord w)  [BS.ByteString], Map (SegmentedAddr w) [BS.ByteString])
-resolvedSegmentedElfFuncSymbols mem entries = (Map.fromList u, Map.fromList r)
-  where -- Filter out just function entries
-        isCodeFuncSymbol ste = steType ste == STT_FUNC
-                            && isCodeAddr mem (fromIntegral (steValue ste))
-        func_entries = filter isCodeFuncSymbol entries
-        -- Build absolute address map
-        absAddrMap :: Map (MemWord w) [BS.ByteString]
-        absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
-        -- Resolve addresses
-        resolve (v,nms) =
-          case absoluteAddrSegment mem v of
-            Nothing -> Left  (v,  nms)
-            Just sv -> Right (sv, nms)
-        (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
+                                -> [ElfSymbolTableEntry (ElfWordType w)]
+                                -> (Map (MemWord w) [BS.ByteString], Map (SegmentedAddr w) [BS.ByteString])
+resolvedSegmentedElfFuncSymbols mem entries = addrWidthClass (memAddrWidth mem) $
+  let -- Filter out just function entries
+     isCodeFuncSymbol ste = steType ste == STT_FUNC
+                         && isCodeAddr mem (fromIntegral (steValue ste))
+     func_entries = filter isCodeFuncSymbol entries
+     -- Build absolute address map
+     absAddrMap :: Map (MemWord w) [BS.ByteString]
+     absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
+     -- Resolve addresses
+     resolve (v,nms) =
+       case absoluteAddrSegment mem v of
+         Nothing -> Left  (v,  nms)
+         Just sv -> Right (sv, nms)
+     (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
+  in (Map.fromList u, Map.fromList r)
 
 ppElfUnresolvedSymbols :: forall w
                        .  MemWidth w
@@ -533,41 +498,42 @@ ppElfUnresolvedSymbols m =
         pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
 
 -- | Create a final CFG
-mkFinalCFGWithSyms :: Integral v
+mkFinalCFGWithSyms :: Integral (ElfWordType (ArchAddrWidth arch))
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
-                   -> Elf v -- ^ Elf file to create CFG for.
-                   -> IO (DiscoveryInfo arch, Map (SegmentedAddr (ArchAddrWidth arch)) BS.ByteString)
-mkFinalCFGWithSyms archInfo mem e = withArchConstraints archInfo $ do
+                   -> Elf (ElfWordType (ArchAddrWidth arch)) -- ^ Elf file to create CFG for.
+                   -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
+mkFinalCFGWithSyms archInfo mem e = do -- withArchConstraints archInfo $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
       [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
       _ -> fail "Elf contains multiple symbol tables."
 
-  let (unresolved, resolved) = resolvedSegmentedElfFuncSymbols mem entries
+  let (unresolved, resolved) = withArchConstraints archInfo $ resolvedSegmentedElfFuncSymbols mem entries
   -- Check for unresolved symbols
   when (not (Map.null unresolved)) $ do
-    fail $ show $ ppElfUnresolvedSymbols unresolved
-  let sym_map = fmap head resolved
-  entry <- case absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
+    fail $ show $ withArchConstraints archInfo $ ppElfUnresolvedSymbols unresolved
+  let sym_map =
+        case symbolAddrMap (fmap head resolved) of
+          Left msg -> error msg
+          Right m -> m
+  entry <- case withArchConstraints archInfo $ absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
              Nothing -> fail "Could not resolve entry"
              Just v  -> pure v
   let sym_addrs = entry : Map.keys resolved
-
-  pure ( cfgFromAddrs archInfo mem sym_map sym_addrs (memAsAddrPairs mem LittleEndian)
+  let mem_contents = withArchConstraints archInfo $ memAsAddrPairs mem LittleEndian
+  pure ( cfgFromAddrs archInfo mem sym_map sym_addrs mem_contents
        , sym_map
        )
 
 data SomeArchitectureInfo v =
   forall arch
-  . ( FnHasRefs (ArchFn arch)
-    , StmtHasRefs (ArchStmt arch)
-    , v ~ ElfWordType (ArchAddrWidth arch)
-    , Bits v
-    , Integral v
-    )
-   => SomeArch (ArchitectureInfo arch)
+    . ( v ~ ElfWordType (RegAddrWidth (ArchReg arch))
+      , ElfWordWidth v ~ RegAddrWidth (ArchReg arch)
+      , Integral v
+      )
+    => SomeArch (ArchitectureInfo arch)
 
 getElfArchInfo :: Elf v -> IO (SomeArchitectureInfo v)
 getElfArchInfo e =
@@ -631,18 +597,18 @@ showCFG loadSty path = do
   -- Get architecture information for elf
   SomeArch archInfo <- getElfArchInfo e
   withArchConstraints archInfo $ do
-  (_,mem) <- mkElfMem loadSty (archAddrWidth archInfo) e
+  (_,mem) <- mkElfMem loadSty e
   (disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
-  print $ ppDiscoveryInfoBlocks disc_info
+  print $ ppDiscoveryStateBlocks disc_info
 
--- | Try to recover function information from the information recovered during
--- code discovery.
+-- | Try to recover function information from the information
+-- recovered during code discovery.
 getFns :: SyscallPersonality X86_64
        -> Map BS.ByteString (SegmentedAddr 64)
           -- ^ Maps symbol names to addresses
        -> Set String
           -- ^ Name of symbols/addresses to exclude
-       -> DiscoveryInfo X86_64
+       -> DiscoveryState X86_64
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
 getFns sysp symMap excludedNames info = do
@@ -656,33 +622,27 @@ getFns sysp symMap excludedNames info = do
     hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
 
   let excludeSet = Set.fromList excludedAddrs
-  let include :: SegmentedAddr 64 -> Bool
-      include addr = do
+  -- Check that the address of the function is not one that we are excluding.
+  let include :: Some (DiscoveryFunInfo X86_64) -> Bool
+      include (Some f) = do
+        let addr = discoveredFunAddr f
         case segmentBase (addrSegment addr) of
           Just base -> Set.notMember word excludeSet
             where word = fromIntegral (base + addr^.addrOffset)
           _ -> True
-  let doCheck :: SegmentedAddr 64 -> Bool
-      doCheck a =
-          case Map.lookup a (info^.funInfo) of
-            Nothing -> error "doCheck failed"
-            Just (Some finfo) -> checkFunction finfo a
 
-  let entries = filter include $ Set.toList $ info^.functionEntries
+  let entries = filter include $ exploredFunctions info
 
   let mem = memory info
   let fDems :: Map (SegmentedAddr 64) (DemandSet X86Reg)
-      fDems = functionDemands sysp info (filter doCheck (Set.toList $ info^.functionEntries))
+      fDems = functionDemands sysp info
   let fArgs :: Map (SegmentedAddr 64) FunctionType
       fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
-  fmap catMaybes $ forM entries $ \entry -> do
-    case Map.lookup entry (info^.funInfo) of
-      Nothing -> do
-        hPutStrLn stderr $ "Could not find function info for " ++ show entry
-        pure Nothing
-      Just (Some finfo)
-        | checkFunction finfo entry -> do
+  fmap catMaybes $ forM entries $ \(Some finfo) -> do
+    let entry = discoveredFunAddr finfo
+    case () of
+      _ | checkFunction finfo -> do
             case recoverFunction sysp fArgs mem finfo of
               Left msg -> do
                 hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
@@ -698,7 +658,7 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (archInfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 e
+  (secMap, mem) <- mkElfMem (args^.loadStyle) e
   (s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
@@ -799,7 +759,7 @@ showLLVM args dir = do
 
   -- Create memory for elf
   (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
-  (secMap, mem) <- mkElfMem loadSty Addr64 e
+  (secMap, mem) <- mkElfMem loadSty e
   (Some cfg, symMap) <- mkFinalCFGWithSyms archInfo mem e
 
   let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
@@ -1066,16 +1026,16 @@ addFunctionEntryPoint s a = addControlFlowTarget s a a
 
 
 addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
-                                  -> (ArchSegmentedAddr arch, Some (DiscoveryFunInfo arch))
+                                  -> Some (DiscoveryFunInfo arch)
                                   -> ControlFlowTargetSet (ArchAddrWidth arch)
-addFunDiscoveryControlFlowTargets m0 (base, Some f) =
-  foldl' (\m b -> addControlFlowTarget m b base) m0 (Map.keys (f^.parsedBlocks))
+addFunDiscoveryControlFlowTargets m0 (Some f) =
+  foldl' (\m b -> addControlFlowTarget m b (discoveredFunAddr f)) m0 (Map.keys (f^.parsedBlocks))
 
-discoveryControlFlowTargets :: DiscoveryInfo arch -> ControlFlowTargetSet (ArchAddrWidth arch)
+discoveryControlFlowTargets :: DiscoveryState arch -> ControlFlowTargetSet (ArchAddrWidth arch)
 discoveryControlFlowTargets info =
   let m0 = CFTS { cfTargets = Map.empty }
-      m = foldl' addFunDiscoveryControlFlowTargets m0 (Map.toList (info^.funInfo))
-   in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
+      m = foldl' addFunDiscoveryControlFlowTargets m0 (exploredFunctions info)
+   in foldl' addFunctionEntryPoint m (symbolAddrs (symbolNames info))
 
 --------------------------------------------------------------------------------
 -- Redirections
@@ -1188,7 +1148,7 @@ performReopt args =
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
     (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-    (secMap, mem) <- mkElfMem (args^.loadStyle) Addr64 orig_binary
+    (secMap, mem) <- mkElfMem (args^.loadStyle) orig_binary
     (disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
@@ -1202,12 +1162,12 @@ performReopt args =
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
         exitFailure
       ".blocks" -> do
-        writeFile output_path $ show $ ppDiscoveryInfoBlocks disc_info
+        writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
         let tgts = discoveryControlFlowTargets disc_info
-        forM_ (Map.toList (disc_info^.funInfo)) $ \(a, Some f) -> do
+        forM_ (exploredFunctions disc_info) $ \(Some f) -> do
+          let a = discoveredFunAddr f
           putStrLn $ BSC.unpack (discoveredFunName f) ++ ": "
             ++ show (lookupControlFlowTargetSpace a tgts)
-
       ".fns" -> do
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
