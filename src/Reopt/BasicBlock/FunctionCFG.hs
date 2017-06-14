@@ -81,7 +81,7 @@ findBlock :: Memory 64 -> Word64 -> Either String CFG
 findBlock mem entry = do
   let Just addr = absoluteAddrSegment mem (fromIntegral entry)
   M.singleton entry <$>
-   case runMemoryByteReader Perm.read mem addr $ extractBlock entry S.empty of
+   case runMemoryByteReader Perm.read addr $ extractBlock entry S.empty of
     Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
     Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
     Right (Right ([Absolute next], _, stmts), _) ->
@@ -123,7 +123,7 @@ findBlocks' mem funBounds breaks queue cfg
           in findBlocks' mem funBounds (breaks `S.union` queue'' `S.union` M.keysSet cfg') queue'' cfg' -- FIXME: performance
         Just entryAddr = absoluteAddrSegment mem (fromIntegral entry)
     in
-    case runMemoryByteReader Perm.execute mem entryAddr $ extractBlock entry breaks of
+    case runMemoryByteReader Perm.execute entryAddr $ extractBlock entry breaks of
       Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
       Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
       Right (Right ([Absolute callee], nextAddr, stmts), _)

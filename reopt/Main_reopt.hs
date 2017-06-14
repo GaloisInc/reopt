@@ -33,7 +33,7 @@ import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
-import           Numeric (readHex, showHex)
+import           Numeric (readHex)
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (doesFileExist)
 import           System.Environment (getArgs)
@@ -90,26 +90,6 @@ unintercalate punct str = reverse $ go [] "" str
       | otherwise = go acc (x : thisAcc) xs
 
 ------------------------------------------------------------------------
--- LoadStyle
-
--- | How to load Elf file.
-data LoadStyle
-   = LoadBySection
-     -- ^ Load loadable sections in Elf file.
-   | LoadBySegment
-     -- ^ Load segments in Elf file.
-
--- | Create a memory from a load style.
-mkElfMem :: Monad m
-         => LoadStyle
-         -> Elf v
-         -> m (SectionIndexMap v (ElfWordWidth v), Memory (ElfWordWidth v))
-mkElfMem sty e = do
-  case sty of
-    LoadBySection -> either fail return $ memoryForElfSections e
-    LoadBySegment -> either fail return $ memoryForElfSegments e
-
-------------------------------------------------------------------------
 -- LLVMVersion
 
 -- | Version of LLVM to generate
@@ -157,7 +137,7 @@ data Action
 -- | Command line arguments.
 data Args = Args { _reoptAction  :: !Action
                  , _programPath  :: !FilePath
-                 , _loadStyle    :: !LoadStyle
+                 , _argsLoadStyle    :: !LoadStyle
                  , _debugKeys    :: [DebugClass]
                  , _newobjPath   :: !FilePath
                  , _redirPath    :: !FilePath
@@ -183,8 +163,8 @@ programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
 -- | Whether to load file by segment or sections
-loadStyle :: Simple Lens Args LoadStyle
-loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
+argsLoadStyle :: Simple Lens Args LoadStyle
+argsLoadStyle = lens _argsLoadStyle (\s v -> s { _argsLoadStyle = v })
 
 -- | Which debug keys (if any) to output
 debugKeys :: Simple Lens Args [DebugClass]
@@ -238,7 +218,7 @@ llvmVersion = lens _llvmVersion (\s v -> s { _llvmVersion = v })
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
                    , _programPath = ""
-                   , _loadStyle = LoadBySegment
+                   , _argsLoadStyle = LoadBySegment
                    , _debugKeys = []
                    , _newobjPath = ""
                    , _redirPath  = ""
@@ -252,6 +232,11 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _libreoptPath = Nothing
                    , _notransAddrs = Set.empty
                    }
+
+loadOpt :: Args -> LoadOptions
+loadOpt args =  LoadOptions { loadStyle = args^.argsLoadStyle
+                            , includeBSS = False
+                            }
 
 ------------------------------------------------------------------------
 -- Flags
@@ -308,12 +293,12 @@ relinkFlag = flagNone [ "relink" ] upd help
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
-  where upd  = loadStyle .~ LoadBySegment
+  where upd  = argsLoadStyle .~ LoadBySegment
         help = "Load the Elf file using segment information (default)."
 
 sectionFlag :: Flag Args
 sectionFlag = flagNone [ "load-sections" ] upd help
-  where upd  = loadStyle .~ LoadBySection
+  where upd  = argsLoadStyle .~ LoadBySection
         help = "Load the Elf file using section information."
 
 
@@ -462,46 +447,11 @@ dumpDisassembly path = do
     putStrLn "Binary contains no executable sections."
   mapM_ printSectionDisassembly sections
 
--- | The takes the elf symbol table map and attempts to identify segmented addresses for each one.
---
--- It returns a two maps, the first contains entries that could not be resolved; the second
--- contains those that could.
-resolvedSegmentedElfFuncSymbols :: forall w
-                                .  Integral (ElfWordType w)
-                                => Memory w
-                                -> [ElfSymbolTableEntry (ElfWordType w)]
-                                -> (Map (MemWord w) [BS.ByteString], Map (SegmentedAddr w) [BS.ByteString])
-resolvedSegmentedElfFuncSymbols mem entries = addrWidthClass (memAddrWidth mem) $
-  let -- Filter out just function entries
-     isCodeFuncSymbol ste = steType ste == STT_FUNC
-                         && isCodeAddr mem (fromIntegral (steValue ste))
-     func_entries = filter isCodeFuncSymbol entries
-     -- Build absolute address map
-     absAddrMap :: Map (MemWord w) [BS.ByteString]
-     absAddrMap = Map.fromListWith (++) $ [ (fromIntegral (steValue ste), [steName ste]) | ste <- func_entries ]
-     -- Resolve addresses
-     resolve (v,nms) =
-       case absoluteAddrSegment mem v of
-         Nothing -> Left  (v,  nms)
-         Just sv -> Right (sv, nms)
-     (u,r) = partitionEithers $ resolve <$> Map.toList absAddrMap
-  in (Map.fromList u, Map.fromList r)
-
-ppElfUnresolvedSymbols :: forall w
-                       .  MemWidth w
-                       => Map (MemWord w) [BS.ByteString]
-                       -> Doc
-ppElfUnresolvedSymbols m =
-    text "Could not resolve addresses of ELF symbols" <$$>
-    indent 2 (vcat $ pp <$> Map.toList m)
-  where pp :: (MemWord w, [BS.ByteString]) -> Doc
-        pp (w, nms) = text (showHex w ":") <+> hsep (text . BSC.unpack <$> nms)
-
 -- | Create a final CFG
 mkFinalCFGWithSyms :: Integral (ElfWordType (ArchAddrWidth arch))
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
-                   -> Elf (ElfWordType (ArchAddrWidth arch)) -- ^ Elf file to create CFG for.
+                   -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
 mkFinalCFGWithSyms archInfo mem e = do -- withArchConstraints archInfo $ do
   entries <-
@@ -527,15 +477,13 @@ mkFinalCFGWithSyms archInfo mem e = do -- withArchConstraints archInfo $ do
        , sym_map
        )
 
-data SomeArchitectureInfo v =
+data SomeArchitectureInfo w =
   forall arch
-    . ( v ~ ElfWordType (RegAddrWidth (ArchReg arch))
-      , ElfWordWidth v ~ RegAddrWidth (ArchReg arch)
-      , Integral v
+    . ( w ~ RegAddrWidth (ArchReg arch)
       )
     => SomeArch (ArchitectureInfo arch)
 
-getElfArchInfo :: Elf v -> IO (SomeArchitectureInfo v)
+getElfArchInfo :: Elf w -> IO (SomeArchitectureInfo w)
 getElfArchInfo e =
   case (elfClass e, elfMachine e, elfOSABI e) of
     (ELFCLASS64, EM_X86_64, ELFOSABI_LINUX)   -> pure (SomeArch x86_64_linux_info)
@@ -546,15 +494,18 @@ getElfArchInfo e =
       Data.VEX.FFI.init Data.VEX.FFI.stdOptions
       pure (SomeArch armArchle)
 #endif
-    (_,_,abi)              -> fail $ "Unknown OSABI: " ++ show abi
+    (cl, arch, abi) -> do
+     fail $ "Do not support " ++ show (elfClassBitWidth cl) ++ "-bit "
+            ++ show arch ++ "-" ++ show abi ++ "binaries."
 
-getX86ElfArchInfo :: Elf Word64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
+getX86ElfArchInfo :: Elf 64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
 getX86ElfArchInfo e =
   case elfOSABI e of
     ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
     ELFOSABI_SYSV    -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
     ELFOSABI_FREEBSD -> pure (x86_64_freeBSD_info, freeBSD_syscallPersonality, "FreeBSD")
-    abi              -> fail $ "Unknown OSABI: " ++ show abi
+    abi              ->
+     fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 showNonfatalErrors :: [ElfParseError w] -> IO ()
 showNonfatalErrors l = do
@@ -563,8 +514,8 @@ showNonfatalErrors l = do
     forM_ l $ \emsg -> do
       hPutStrLn stderr (show emsg)
 
-showCFG :: LoadStyle -> String -> IO ()
-showCFG loadSty path = do
+showCFG :: LoadOptions -> String -> IO ()
+showCFG opt path = do
   when (null path) $ do
     hPutStrLn stderr "Please specify a path."
     hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
@@ -596,8 +547,9 @@ showCFG loadSty path = do
         return (Some e)
   -- Get architecture information for elf
   SomeArch archInfo <- getElfArchInfo e
+  elfClassInstances (elfClass e) $ do
   withArchConstraints archInfo $ do
-  (_,mem) <- mkElfMem loadSty e
+  (_,mem) <- either fail return $ memoryForElf opt e
   (disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
   print $ ppDiscoveryStateBlocks disc_info
 
@@ -658,7 +610,7 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (archInfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, mem) <- mkElfMem (args^.loadStyle) e
+  (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) e
   (s,_) <- mkFinalCFGWithSyms archInfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
@@ -686,7 +638,7 @@ ppBlockAndAbs m b =
   indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
             pretty (blockTerm b))
 
-showCFGAndAI :: LoadStyle -> Elf Word64 -> IO ()
+showCFGAndAI :: LoadStyle -> Elf 64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
   (archInfo,_, _) <- getX86ElfArchInfo e
@@ -715,10 +667,10 @@ showCFGAndAI loadSty e = do
 -}
 
 -- | Extract list containing symbol names and addresses.
-elfAddrSymEntries :: SectionIndexMap Word64 64
+elfAddrSymEntries :: SectionIndexMap 64
                      -- ^ Map from elf section indices to base address for section
                      -- and section in Elf file
-                  -> Elf Word64
+                  -> Elf 64
                   -> [(BS.ByteString, SegmentedAddr 64)]
 elfAddrSymEntries m binary =
   [ (steName entry, val)
@@ -735,18 +687,18 @@ elfAddrSymEntries m binary =
   ]
 
 -- | Create map from symbol names to address.
-elfSymAddrMap  :: SectionIndexMap Word64 64
+elfSymAddrMap  :: SectionIndexMap 64
                   -- ^ Map from elf section indices to base address for section
                   -- and section in Elf file
-               -> Elf Word64
+               -> Elf 64
                -> Map BS.ByteString (SegmentedAddr 64)
 elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
 
 -- | Create map from addresses to symbol name.
 --
 -- Used for naming functions.
-elfAddrSymMap :: SectionIndexMap Word64 64
-              -> Elf Word64
+elfAddrSymMap :: SectionIndexMap 64
+              -> Elf 64
               -> LLVM.AddrSymMap 64
 elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
 
@@ -902,8 +854,8 @@ checkCallsIdentified mem g = do
 
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
-              -> Elf Word64 -- ^ Original binary
-              -> Elf Word64 -- ^ New object
+              -> Elf 64 -- ^ Original binary
+              -> Elf 64 -- ^ New object
               -> SymbolNameToAddrMap Word64 -- ^ Extra rdictions
               -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
               -> IO ()
@@ -957,12 +909,12 @@ llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
         pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
 
 -- | Maps virtual addresses to the phdr at them.
-type ElfSegmentMap w = Map w (Phdr w)
+type ElfSegmentMap w = Map (ElfWordType w) (Phdr w)
 
 -- | Create an elf segment map from a layout.
-elfSegmentMap :: forall w . Integral w => ElfLayout w -> ElfSegmentMap w
-elfSegmentMap l = foldl' insertElfSegment Map.empty (allPhdrs l)
-  where insertElfSegment ::  ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
+elfSegmentMap :: forall w . ElfLayout w -> ElfSegmentMap w
+elfSegmentMap l = elfClassInstances (elfLayoutClass l) $ foldl' insertElfSegment Map.empty (allPhdrs l)
+  where insertElfSegment ::  Ord (ElfWordType w) => ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
         insertElfSegment m p
           | elfSegmentType seg == PT_LOAD = Map.insert a p m
           | otherwise = m
@@ -971,7 +923,7 @@ elfSegmentMap l = foldl' insertElfSegment Map.empty (allPhdrs l)
 
 -- | Lookup an address in the segment map, returning the index of the phdr
 -- and the offset.
-lookupElfOffset :: ElfSegmentMap Word64 -> Word64 -> Maybe (Word16, Word64)
+lookupElfOffset :: ElfSegmentMap 64 -> Word64 -> Maybe (Word16, Word64)
 lookupElfOffset m a =
   case Map.lookupLE a m of
     Just (base, phdr) | a < base + phdrFileSize phdr ->
@@ -1043,7 +995,7 @@ discoveryControlFlowTargets info =
 -- | This creates a code redirection or returns the address as failing.
 addrRedirection :: ControlFlowTargetSet 64
                 -> LLVM.AddrSymMap 64
-                -> ElfSegmentMap Word64
+                -> ElfSegmentMap 64
                 -> Function
                 -> Either (SegmentedAddr 64) (CodeRedirection Word64)
 addrRedirection tgts addrSymMap m f = do
@@ -1148,7 +1100,8 @@ performReopt args =
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
     (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-    (secMap, mem) <- mkElfMem (args^.loadStyle) orig_binary
+    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) orig_binary
+
     (disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
@@ -1242,7 +1195,7 @@ main' = do
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
     ShowCFG -> do
-      showCFG (args^.loadStyle) (args^.programPath)
+      showCFG (loadOpt args) (args^.programPath)
 
     ShowCFGAI -> do
       error $ "ShowCFGAI not supported"

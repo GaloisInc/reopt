@@ -131,7 +131,7 @@ parseElf64 :: String
               -- ^ Name of output for error messages
            -> B.ByteString
               -- ^ Data to read
-           -> IO (Elf Word64)
+           -> IO (Elf 64)
 parseElf64 nm bs = do
   case parseElf bs of
     ElfHeaderError _ msg -> do
@@ -153,7 +153,7 @@ showUsage = hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
 
 readElf64 :: FilePath
              -- ^ Filepath to rad.
-          -> IO (Elf Word64)
+          -> IO (Elf 64)
 readElf64 path = do
   when (null path) $ do
     hPutStrLn stderr "Please specify a path."
@@ -168,7 +168,7 @@ readElf64 path = do
   parseElf64 path bs
 
 
-readStaticElf :: FilePath -> IO (Elf Word64)
+readStaticElf :: FilePath -> IO (Elf 64)
 readStaticElf path = do
   e <- readElf64 path
   mi <- elfInterpreter e

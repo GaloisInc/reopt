@@ -100,17 +100,10 @@ data Action
 -- | Command line arguments.
 data Args = Args { _reoptAction :: !Action
                  , _programPath :: !FilePath
-                 , _loadStyle   :: !LoadStyle
+                 , _argsLoadStyle   :: !LoadStyle
                  , _reoptTrace  :: !(Maybe Integer)
                  , _reoptFragile  :: !Bool
                  }
-
--- | How to load Elf file.
-data LoadStyle
-   = LoadBySection
-     -- ^ Load loadable sections in Elf file.
-   | LoadBySegment
-     -- ^ Load segments in Elf file.
 
 -- | Action to perform when running.
 reoptAction :: Simple Lens Args Action
@@ -121,8 +114,8 @@ programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
 -- | Whether to load file by segment or sections.
-loadStyle :: Simple Lens Args LoadStyle
-loadStyle = lens _loadStyle (\s v -> s { _loadStyle = v })
+argsLoadStyle :: Simple Lens Args LoadStyle
+argsLoadStyle = lens _argsLoadStyle (\s v -> s { _argsLoadStyle = v })
 
 -- | Whether to trace execution (print a '.' for each n instructions)
 reoptTrace :: Simple Lens Args (Maybe Integer)
@@ -136,10 +129,15 @@ reoptFragile = lens _reoptFragile (\s v -> s { _reoptFragile = v })
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Application
                    , _programPath = ""
-                   , _loadStyle = LoadBySection
+                   , _argsLoadStyle = LoadBySection
                    , _reoptTrace = Nothing
                    , _reoptFragile = False
                    }
+
+loadOpt :: Args -> LoadOptions
+loadOpt args = LoadOptions { loadStyle = args^.argsLoadStyle
+                           , includeBSS = False
+                           }
 
 ------------------------------------------------------------------------
 -- Argument processing
@@ -209,13 +207,6 @@ getCommandLineArgs = do
       putStrLn msg
       exitFailure
     Right v -> return v
-
-------------------------------------------------------------------------
--- Execution
-
-mkElfMem :: Monad m => LoadStyle -> Elf Word64 -> m (Memory 64)
-mkElfMem LoadBySection e = either fail (return . snd) $ memoryForElfSections e
-mkElfMem LoadBySegment e = either fail (return . snd) $ memoryForElfSegments e
 
 ------------------------------------------------------------------------
 -- Tracers.
@@ -327,7 +318,7 @@ testSingleInstruction args = mkTest args singleInstructionTest
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
   e <- readElf64 (args^.programPath)
-  let Identity mem = mkElfMem (args^.loadStyle) e
+  let Right (_,mem) = memoryForElf (loadOpt args) e
   child <- traceFile $ args^.programPath
   runStateT (traceInner (printInstr mem) child) ()
   return ()
@@ -339,7 +330,7 @@ printExecutedInstructions args = do
         X86 _ -> fail "X86Regs! only 64 bit is handled"
         X86_64 regs64 -> do
           let Just rip_val = absoluteAddrSegment mem (fromIntegral (rip regs64))
-          case readInstruction mem rip_val of
+          case readInstruction rip_val of
             Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
             Right (ii, nextAddr) -> do
               let addr_word = fromIntegral (addrValue nextAddr)
