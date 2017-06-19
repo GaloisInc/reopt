@@ -453,27 +453,27 @@ mkFinalCFGWithSyms :: Integral (ElfWordType (ArchAddrWidth arch))
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
-mkFinalCFGWithSyms archInfo mem e = do -- withArchConstraints archInfo $ do
+mkFinalCFGWithSyms ainfo mem e = do -- withArchConstraints ainfo $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
       [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
       _ -> fail "Elf contains multiple symbol tables."
 
-  let (unresolved, resolved) = withArchConstraints archInfo $ resolvedSegmentedElfFuncSymbols mem entries
+  let (unresolved, resolved) = withArchConstraints ainfo $ resolvedSegmentedElfFuncSymbols mem entries
   -- Check for unresolved symbols
   when (not (Map.null unresolved)) $ do
-    fail $ show $ withArchConstraints archInfo $ ppElfUnresolvedSymbols unresolved
+    fail $ show $ withArchConstraints ainfo $ ppElfUnresolvedSymbols unresolved
   let sym_map =
         case symbolAddrMap (fmap head resolved) of
           Left msg -> error msg
           Right m -> m
-  entry <- case withArchConstraints archInfo $ absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
+  entry <- case withArchConstraints ainfo $ absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
              Nothing -> fail "Could not resolve entry"
              Just v  -> pure v
   let sym_addrs = entry : Map.keys resolved
-  let mem_contents = withArchConstraints archInfo $ memAsAddrPairs mem LittleEndian
-  pure ( cfgFromAddrs archInfo mem sym_map sym_addrs mem_contents
+  let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
+  pure ( cfgFromAddrs ainfo mem sym_map sym_addrs mem_contents
        , sym_map
        )
 
@@ -546,11 +546,11 @@ showCFG opt path = do
         showNonfatalErrors l
         return (Some e)
   -- Get architecture information for elf
-  SomeArch archInfo <- getElfArchInfo e
+  SomeArch ainfo <- getElfArchInfo e
   elfClassInstances (elfClass e) $ do
-  withArchConstraints archInfo $ do
+  withArchConstraints ainfo $ do
   (_,mem) <- either fail return $ memoryForElf opt e
-  (disc_info, _) <- mkFinalCFGWithSyms archInfo mem e
+  (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e
   print $ ppDiscoveryStateBlocks disc_info
 
 -- | Try to recover function information from the information
@@ -609,9 +609,9 @@ showFunctions :: Args -> IO ()
 showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
-  (archInfo, sysp,_) <- getX86ElfArchInfo e
+  (ainfo, sysp,_) <- getX86ElfArchInfo e
   (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) e
-  (s,_) <- mkFinalCFGWithSyms archInfo mem e
+  (s,_) <- mkFinalCFGWithSyms ainfo mem e
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
@@ -641,13 +641,13 @@ ppBlockAndAbs m b =
 showCFGAndAI :: LoadStyle -> Elf 64 -> IO ()
 showCFGAndAI loadSty e = do
   -- Create memory for elf
-  (archInfo,_, _) <- getX86ElfArchInfo e
+  (ainfo,_, _) <- getX86ElfArchInfo e
   (_,mem) <- mkElfMem loadSty Addr64 e
-  (Some disc_info,_) <- mkFinalCFGWithSyms archInfo mem e
+  (Some disc_info,_) <- mkFinalCFGWithSyms ainfo mem e
   forM_ (Map.elems (disc_info^.funInfo)) $ \finfo -> do
     let abst = foundAbstractState <$> finfo^.foundAddrs
     let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
-    let amap = assignmentAbsValues archInfo mem g abst
+    let amap = assignmentAbsValues ainfo mem g abst
         ppOne b =
           vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
                   (GeneratedBlock _ 0, Just ab) -> pretty ab
@@ -710,9 +710,9 @@ showLLVM args dir = do
   let loadSty = args^.loadStyle
 
   -- Create memory for elf
-  (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
+  (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
   (secMap, mem) <- mkElfMem loadSty e
-  (Some cfg, symMap) <- mkFinalCFGWithSyms archInfo mem e
+  (Some cfg, symMap) <- mkFinalCFGWithSyms ainfo mem e
 
   let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
         where
@@ -1099,10 +1099,10 @@ performReopt args =
     -- Get original binary
     orig_binary <- readElf64 (args^.programPath)
     -- Construct CFG from binary
-    (archInfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+    (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
     (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) orig_binary
 
-    (disc_info,_) <- mkFinalCFGWithSyms archInfo mem orig_binary
+    (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
