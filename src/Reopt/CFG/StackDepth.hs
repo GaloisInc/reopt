@@ -124,22 +124,22 @@ type BlockStackDepths arch ids = Set (StackDepthValue arch ids)
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
 data StackDepthState arch ids
-   = SDS { _blockInitStackPointers :: !(Map (ArchLabel arch) (StackDepthValue arch ids))
+   = SDS { _blockInitStackPointers :: !(Map (ArchSegmentedAddr arch) (StackDepthValue arch ids))
          , _blockStackRefs :: !(BlockStackDepths arch ids)
-         , _blockFrontier  :: ![ArchLabel arch]
+         , _blockFrontier  :: ![ArchSegmentedAddr arch]
            -- ^ Set of blocks to explore next.
          }
 
 -- | Maps blocks already seen to the expected depth at the start of the block.
 blockInitStackPointers :: Simple Lens (StackDepthState arch ids)
-                                      (Map (ArchLabel arch) (StackDepthValue arch ids))
+                                      (Map (ArchSegmentedAddr arch) (StackDepthValue arch ids))
 blockInitStackPointers = lens _blockInitStackPointers (\s v -> s { _blockInitStackPointers = v })
 
 blockStackRefs :: Simple Lens (StackDepthState arch ids) (BlockStackDepths arch ids)
 blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 
 -- | Set of blocks to visit next.
-blockFrontier :: Simple Lens (StackDepthState arch ids) [ArchLabel arch]
+blockFrontier :: Simple Lens (StackDepthState arch ids) [ArchSegmentedAddr arch]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -174,15 +174,16 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 type StackDepthM arch ids a = ExceptT String (State (StackDepthState arch ids)) a
 
 addBlock :: (OrdF (ArchReg arch), ShowF (ArchReg arch))
-         => ArchLabel arch
+         => SegmentedAddr (ArchAddrWidth arch)
          -> StackDepthValue arch ids
          -> StackDepthM arch ids ()
-addBlock lbl start = do
-  x <- use (blockInitStackPointers . at lbl)
+addBlock addr start = do
+  let lbl = mkRootBlockLabel addr
+  x <- use $ blockInitStackPointers . at addr
   case x of
-    Nothing     -> do
-      blockInitStackPointers %= Map.insert lbl start
-      blockFrontier %= (lbl:)
+    Nothing -> do
+      blockInitStackPointers %= Map.insert addr start
+      blockFrontier %= (addr:)
     Just old_start
       | start == old_start ->
         return ()
@@ -243,35 +244,6 @@ parseStackPointer sp0 addr0
 
 -- -----------------------------------------------------------------------------
 
--- | Returns the maximum stack argument used by the function, that is,
--- the highest index above sp0 that is read or written.
-maximumStackDepth :: DiscoveryFunInfo X86_64 ids
-                  -> SegmentedAddr 64
-                  -> Either String (BlockStackDepths X86_64 ids)
-maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist lbl0)) s0
-  where
-    s0   = SDS { _blockInitStackPointers = Map.singleton lbl0 sdv0
-               , _blockStackRefs         = Set.empty
-               , _blockFrontier          = []
-               }
-    lbl0 = GeneratedBlock addr 0
-    sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
-    finish (Right (), s) = Right $ minimizeStackDepthValues $ s ^. blockStackRefs
-    finish (Left e, _) = Left e
-
--- | Explore states until we have reached end of frontier.
-recoverIter :: DiscoveryFunInfo X86_64 ids
-            -> BlockLabel 64
-            -> StackDepthM X86_64 ids ()
-recoverIter ist lbl = do
-  recoverBlock ist lbl
-  s <- use blockFrontier
-  case s of
-    [] -> return ()
-    next : s' -> do
-      blockFrontier .= s'
-      recoverIter ist next
-
 goStmt :: StackDepthValue X86_64 ids -> Stmt X86_64 ids -> StackDepthM X86_64 ids ()
 goStmt init_sp (AssignStmt (Assignment _ (ReadMem addr _))) =
   addDepth $ parseStackPointer init_sp addr
@@ -283,12 +255,12 @@ goStmt init_sp (WriteMem addr _ v) = do
 goStmt _ _ = return ()
 
 recoverBlock :: DiscoveryFunInfo X86_64 ids
-             -> BlockLabel 64
+             -> SegmentedAddr 64
              -> StackDepthM X86_64 ids ()
-recoverBlock interp_state root_label = do
-    Just init_sp <- use (blockInitStackPointers . at root_label)
-    Just b <- return $ lookupParsedBlock interp_state root_label
-    go init_sp b
+recoverBlock interp_state root_addr = do
+    Just init_sp <- use $ blockInitStackPointers . at root_addr
+    Just reg <- return $ Map.lookup root_addr (interp_state^.parsedBlocks)
+    go init_sp (regionFirstBlock reg)
   where
     addStateVars init_sp s = do
       forM_ gpRegList $ \r -> do
@@ -302,12 +274,7 @@ recoverBlock interp_state root_label = do
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
         ClassifyFailure _ ->
-          throwError $ "Classification failed in StackDepth: " ++ show (labelAddr root_label)
-        ParsedBranch _c x y -> do
-          Just tblock <- return $ lookupParsedBlock interp_state (root_label { labelIndex = x })
-          go init_sp tblock
-          Just fblock <- return $ lookupParsedBlock interp_state (root_label { labelIndex = y })
-          go init_sp fblock
+          throwError $ "Classification failed in StackDepth: " ++ show root_addr
         ParsedIte _c tblock fblock -> do
           go init_sp tblock
           go init_sp fblock
@@ -319,15 +286,14 @@ recoverBlock interp_state root_label = do
           case m_ret_addr of
             Nothing -> return ()
             Just ret_addr ->
-              addBlock (mkRootBlockLabel ret_addr) (addStackDepthValue sp' $ constantDepthValue 8)
+              addBlock ret_addr (addStackDepthValue sp' $ constantDepthValue 8)
 
         ParsedJump proc_state tgt_addr -> do
           addStateVars init_sp proc_state
 
-          let lbl'     = mkRootBlockLabel tgt_addr
-              sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+          let sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
-          addBlock lbl' sp'
+          addBlock tgt_addr sp'
 
         ParsedReturn _proc_state -> do
           pure ()
@@ -336,11 +302,38 @@ recoverBlock interp_state root_label = do
           addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-          addBlock (mkRootBlockLabel next_addr) sp'
+          addBlock next_addr sp'
 
         ParsedLookupTable proc_state _idx vec -> do
           addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
-          traverse_ (flip addBlock sp' . mkRootBlockLabel) vec
+          traverse_ (\a -> addBlock a sp') vec
+
+-- | Explore states until we have reached end of frontier.
+recoverIter :: DiscoveryFunInfo X86_64 ids
+            -> StackDepthM X86_64 ids ()
+recoverIter ist = do
+  s <- use blockFrontier
+  case s of
+    [] -> return ()
+    next : s' -> do
+      blockFrontier .= s'
+      recoverBlock ist next
+      recoverIter ist
+
+-- | Returns the maximum stack argument used by the function, that is,
+-- the highest index above sp0 that is read or written.
+maximumStackDepth :: DiscoveryFunInfo X86_64 ids
+                  -> SegmentedAddr 64
+                  -> Either String (BlockStackDepths X86_64 ids)
+maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist)) s0
+  where
+    s0   = SDS { _blockInitStackPointers = Map.singleton addr sdv0
+               , _blockStackRefs         = Set.empty
+               , _blockFrontier          = [addr]
+               }
+    sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
+    finish (Right (), s) = Right $ minimizeStackDepthValues $ s ^. blockStackRefs
+    finish (Left e, _) = Left e

@@ -30,13 +30,11 @@ checkFunction' info visited (lbl:rest)
   | otherwise =
     case Map.lookup lbl (info^.parsedBlocks) of
       Nothing -> error $ "Missing block: " ++ show lbl
-      Just reg ->
-        case Map.lookup 0 (regionBlockMap reg) of
-          Nothing -> error $ "Could not find first block in region."
-          Just b ->
-            case checkRegion reg b of
-              Nothing -> False
-              Just next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
+      Just reg -> do
+        let b = regionFirstBlock reg
+        case checkRegion reg b of
+          Nothing -> False
+          Just next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
 
 checkRegion :: ParsedBlockRegion arch ids
             -> ParsedBlock arch ids
@@ -48,11 +46,6 @@ checkRegion reg block =
     ParsedJump _ a          -> Just [a]
     ParsedLookupTable _ _ a -> Just $ V.toList a
     ParsedReturn{}          -> Just []
-    ParsedBranch _ x y      -> do
-      case (Map.lookup x (regionBlockMap reg), Map.lookup y (regionBlockMap reg)) of
-        (Just tblock, Just fblock) ->
-          (++) <$> checkRegion reg tblock <*> checkRegion reg fblock
-        _ -> error "Could not find block."
     ParsedIte _ x y      -> (++) <$> checkRegion reg x <*> checkRegion reg y
     ParsedSyscall _ a       -> Just [a]
     ParsedTranslateError{}  -> Nothing

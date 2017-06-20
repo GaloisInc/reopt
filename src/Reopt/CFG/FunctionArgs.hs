@@ -452,11 +452,10 @@ summarizeBlock :: forall arch ids
                .  SummarizeConstraints arch
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
-               -> ParsedBlockRegion arch ids -- Current region to summarize.
+               -> ArchSegmentedAddr arch -- ^ Address of the code.
                -> ParsedBlock arch ids -- ^ Current block
                -> FunctionArgsM arch ids ()
-summarizeBlock mem interp_state reg b = do
-  let addr = regionAddr reg
+summarizeBlock mem interp_state addr b = do
   let lbl = GeneratedBlock addr (pblockLabel b)
   -- By default we have no arguments, return nothing
   blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
@@ -473,16 +472,10 @@ summarizeBlock mem interp_state reg b = do
       error "Cannot identify arguments in code where translation error occurs"
     ClassifyFailure _ ->
       error $ "Classification failed: " ++ show addr
-    ParsedBranch c x y -> do
-      demandValue lbl c
-      let Just tblock = Map.lookup x (regionBlockMap reg)
-      let Just fblock = Map.lookup y (regionBlockMap reg)
-      summarizeBlock mem interp_state reg tblock
-      summarizeBlock mem interp_state reg fblock
     ParsedIte c tblock fblock -> do
       demandValue lbl c
-      summarizeBlock mem interp_state reg tblock
-      summarizeBlock mem interp_state reg fblock
+      summarizeBlock mem interp_state addr tblock
+      summarizeBlock mem interp_state addr fblock
 
     ParsedCall proc_state m_ret_addr -> do
       summarizeCall mem lbl proc_state (not $ isJust m_ret_addr)
@@ -536,8 +529,7 @@ summarizeIter mem ist = do
       return ()
     reg : frontier' -> do
       blockFrontier .= frontier'
-      let Just b0 = Map.lookup 0 (regionBlockMap reg)
-      summarizeBlock mem ist reg b0
+      summarizeBlock mem ist (regionAddr reg) (regionFirstBlock reg)
       summarizeIter mem ist
 
 calculateOnePred :: (OrdF (ArchReg arch))

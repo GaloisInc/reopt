@@ -25,11 +25,11 @@ import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
---import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
 import           Data.Macaw.Memory (Memory)
@@ -50,53 +50,35 @@ import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 -------------------------------------------------------------------------------
 -- funBlockPreds
 
-{-
--- | Return intra-procedural labels this will jump to.
-termSucc :: SegmentedAddr 64 -> ParsedTermStmt X86_64 ids -> [BlockLabel 64]
-termSucc addr stmt =
-  case stmt of
-    ParsedCall _ (Just ret_addr) -> [mkRootBlockLabel ret_addr]
-    ParsedCall _ Nothing -> []
-    ParsedJump _ tgt -> [mkRootBlockLabel tgt]
-    ParsedLookupTable _ _ v -> V.toList (mkRootBlockLabel <$> v)
-    ParsedReturn{} -> []
-    ParsedBranch _ t_idx f_idx -> [GeneratedBlock addr t_idx, GeneratedBlock addr f_idx]
-    ParsedSyscall _ ret -> [mkRootBlockLabel ret]
-    ParsedTranslateError{} -> []
-    ClassifyFailure{} -> []
--}
-
 -- | A map from each address `l` to the labels of blocks that may jump to `l`.
 type FunPredMap w = Map (SegmentedAddr w) [BlockLabel w]
 
-blockSucc :: ParsedBlock arch ids -> [SegmentedAddr (ArchAddrWidth arch)]
-blockSucc b =
+blockSucc :: ParsedBlock arch ids -> [(ArchSegmentedAddr arch, Word64)]
+blockSucc b = do
+  let idx = pblockLabel b
   case pblockTerm b of
-    ParsedCall _ (Just ret_addr) -> [ret_addr]
+    ParsedCall _ (Just ret_addr) -> [(ret_addr, idx)]
     ParsedCall _ Nothing -> []
-    ParsedJump _ tgt -> [tgt]
-    ParsedLookupTable _ _ v -> V.toList v
+    ParsedJump _ tgt -> [(tgt, idx)]
+    ParsedLookupTable _ _ v -> (,idx) <$> V.toList v
     ParsedReturn{} -> []
-    ParsedBranch _ _ _ -> []
-    ParsedIte _ _ _ -> []
-    ParsedSyscall _ ret -> [ret]
+    ParsedIte _ t f -> blockSucc t ++ blockSucc f
+    ParsedSyscall _ ret -> [(ret, idx)]
     ParsedTranslateError{} -> []
     ClassifyFailure{} -> []
 
 regionSucc :: ParsedBlockRegion arch ids -> [SegmentedAddr (ArchAddrWidth arch)]
-regionSucc reg = concatMap blockSucc (Map.elems (regionBlockMap reg))
+regionSucc reg = fmap fst $ blockSucc (regionFirstBlock reg)
 
 -- | Return the FunPredMap for the discovered block function.
 funBlockPreds :: DiscoveryFunInfo X86_64 ids -> FunPredMap 64
 funBlockPreds info = Map.fromListWith (++)
-  [ (next, [GeneratedBlock addr (pblockLabel block)])
+  [ (next, [GeneratedBlock addr idx])
   | region <- Map.elems (info^.parsedBlocks)
     -- Get address of region
   , let addr = regionAddr region
-    -- Get blocks in region along with index.
-  , block <- Map.elems (regionBlockMap region)
-    -- Create input for next block
-  , next <- blockSucc block
+    -- Get the block successors
+  , (next,idx) <- blockSucc (regionFirstBlock region)
   ]
 
 -------------------------------------------------------------------------------
@@ -219,7 +201,6 @@ termStmtValues sysp mem typeMap curFunType tstmt =
       let regs = (Some <$> take (fnNIntRets curFunType) x86ResultRegs)
               ++ (Some <$> take (fnNFloatRets curFunType) x86FloatResultRegs)
        in registerValues proc_state regs
-    ParsedBranch c _ _ -> [Some c]
     ParsedIte c _ _ -> [Some c]
     ParsedSyscall proc_state _ -> registerValues proc_state (Some <$> (sysReg : argRegs))
       where sysReg ::  ArchReg X86_64 (BVType 64)
@@ -284,11 +265,6 @@ summarizeBlock mem interp_state addr = do
             addRegisterUses proc_state x86StateRegs
           ParsedReturn _ ->
             pure ()
-          ParsedBranch _ x y -> do
-            let Just tblock = Map.lookup x (regionBlockMap reg)
-            let Just fblock = Map.lookup y (regionBlockMap reg)
-            go tblock
-            go fblock
           ParsedIte _ tblock fblock -> do
             go tblock
             go fblock
@@ -302,10 +278,9 @@ summarizeBlock mem interp_state addr = do
             error "Cannot identify register use in code where translation error occurs"
           ClassifyFailure _ ->
             error $ "Classification failed: " ++ show addr
-  let Just b = Map.lookup 0 (regionBlockMap reg)
   -- Update frontier with successor states for region
   blockFrontier %= \s -> foldr Set.insert s (regionSucc reg)
-  go b
+  go (regionFirstBlock reg)
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: Memory 64

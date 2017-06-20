@@ -477,13 +477,6 @@ recoverBlock registerUseMap phis reg b blockInfo = seq blockInfo $ do
       Loc.error "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure _ ->
       Loc.error $ "Classification failed in Recovery"
-    ParsedBranch c x y -> do
-      Just tblock <- pure $ Map.lookup x (regionBlockMap reg)
-      Just fblock <- pure $ Map.lookup y (regionBlockMap reg)
-      cv <- recoverValue c
-      fb <- mkBlock (FnBranch cv (lbl { labelIndex = x }) (lbl { labelIndex = y })) MapF.empty
-      xr <- recoverBlock registerUseMap [] reg tblock (blockInfo & addFnBlock fb)
-      recoverBlock registerUseMap [] reg fblock xr
     ParsedIte c tblock fblock -> do
       cv <- recoverValue c
       fb <- mkBlock (FnBranch cv (lbl { labelIndex = pblockLabel tblock })
@@ -739,8 +732,7 @@ recoverFunction sysp fArgs mem fInfo = do
         let phis = makePhis preds regs1
 
         Just reg <- pure $ Map.lookup addr (fInfo^.parsedBlocks)
-        Just b <- pure $ Map.lookup 0 (regionBlockMap reg)
-        recoverBlock blockRegs phis reg b blockInfo
+        recoverBlock blockRegs phis reg (regionFirstBlock reg) blockInfo
 
   evalRecover rs $ do
     -- The first block is special as it needs to allocate space for
@@ -751,7 +743,7 @@ recoverFunction sysp fArgs mem fInfo = do
     -- need rsCurStmts
 
     Just reg <- pure $ Map.lookup a (fInfo^.parsedBlocks)
-    Just b   <- pure $ Map.lookup 0 (regionBlockMap reg)
+    let b = regionFirstBlock reg
 
     case maximumStackDepth fInfo a of
       Right depths -> allocateStackFrame b depths
