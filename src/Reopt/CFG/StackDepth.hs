@@ -286,14 +286,14 @@ recoverBlock :: DiscoveryFunInfo X86_64 ids
              -> BlockLabel 64
              -> StackDepthM X86_64 ids ()
 recoverBlock interp_state root_label = do
-  Just init_sp <- use (blockInitStackPointers . at root_label)
-  go init_sp root_label
+    Just init_sp <- use (blockInitStackPointers . at root_label)
+    Just b <- return $ lookupParsedBlock interp_state root_label
+    go init_sp b
   where
     addStateVars init_sp s = do
       forM_ gpRegList $ \r -> do
         addDepth $ parseStackPointer init_sp (s ^. boundValue r)
-    go init_sp lbl = do
-      Just b <- return $ lookupParsedBlock interp_state lbl
+    go init_sp b = do
           -- overapproximates by viewing all registers as uses of the
           -- sp between blocks
 
@@ -304,8 +304,13 @@ recoverBlock interp_state root_label = do
         ClassifyFailure _ ->
           throwError $ "Classification failed in StackDepth: " ++ show (labelAddr root_label)
         ParsedBranch _c x y -> do
-          go init_sp (lbl { labelIndex = x })
-          go init_sp (lbl { labelIndex = y })
+          Just tblock <- return $ lookupParsedBlock interp_state (root_label { labelIndex = x })
+          go init_sp tblock
+          Just fblock <- return $ lookupParsedBlock interp_state (root_label { labelIndex = y })
+          go init_sp fblock
+        ParsedIte _c tblock fblock -> do
+          go init_sp tblock
+          go init_sp fblock
 
         ParsedCall proc_state m_ret_addr -> do
           addStateVars init_sp proc_state

@@ -2,16 +2,14 @@ module Reopt.CFG.FunctionCheck
    ( checkFunction
    ) where
 
-
+import           Control.Lens
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 
 import Data.Macaw.CFG
 import Data.Macaw.Discovery.State
-
-blbl :: SegmentedAddr w -> BlockLabel w
-blbl a = GeneratedBlock a 0
 
 -- | This returns true if all block terminators reachable from the
 -- function entry point have non-error term stmts.
@@ -20,27 +18,42 @@ blbl a = GeneratedBlock a 0
 -- classify error.
 checkFunction :: DiscoveryFunInfo arch ids
               -> Bool
-checkFunction info = checkFunction' info Set.empty [blbl (discoveredFunAddr info)]
+checkFunction info = checkFunction' info Set.empty [discoveredFunAddr info]
 
 checkFunction' :: DiscoveryFunInfo arch ids
-               -> Set (ArchLabel arch)
-               -> [ArchLabel arch]
+               -> Set (ArchSegmentedAddr arch)
+               -> [ArchSegmentedAddr arch]
                -> Bool
 checkFunction' _inf _visite [] = True
 checkFunction' info visited (lbl:rest)
   | Set.member lbl visited = checkFunction' info visited rest
   | otherwise =
-    case lookupParsedBlock info lbl of
+    case Map.lookup lbl (info^.parsedBlocks) of
       Nothing -> error $ "Missing block: " ++ show lbl
-      Just block -> do
-        let go = checkFunction' info $! Set.insert lbl visited
-        case pblockTerm block of
-          ParsedCall _ Nothing    -> go rest
-          ParsedCall _ (Just a)   -> go (blbl a:rest)
-          ParsedJump _ a          -> go (blbl a:rest)
-          ParsedLookupTable _ _ a -> go (fmap blbl (V.toList a) ++ rest)
-          ParsedReturn{}          -> go rest
-          ParsedBranch _ x y      -> go (lbl { labelIndex = x }:lbl { labelIndex = y }:rest)
-          ParsedSyscall _ a       -> go (blbl a:rest)
-          ParsedTranslateError{}  -> False
-          ClassifyFailure _       -> False
+      Just reg ->
+        case Map.lookup 0 (regionBlockMap reg) of
+          Nothing -> error $ "Could not find first block in region."
+          Just b ->
+            case checkRegion reg b of
+              Nothing -> False
+              Just next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
+
+checkRegion :: ParsedBlockRegion arch ids
+            -> ParsedBlock arch ids
+            -> Maybe [ArchSegmentedAddr arch]
+checkRegion reg block =
+  case pblockTerm block of
+    ParsedCall _ Nothing    -> Just []
+    ParsedCall _ (Just a)   -> Just [a]
+    ParsedJump _ a          -> Just [a]
+    ParsedLookupTable _ _ a -> Just $ V.toList a
+    ParsedReturn{}          -> Just []
+    ParsedBranch _ x y      -> do
+      case (Map.lookup x (regionBlockMap reg), Map.lookup y (regionBlockMap reg)) of
+        (Just tblock, Just fblock) ->
+          (++) <$> checkRegion reg tblock <*> checkRegion reg fblock
+        _ -> error "Could not find block."
+    ParsedIte _ x y      -> (++) <$> checkRegion reg x <*> checkRegion reg y
+    ParsedSyscall _ a       -> Just [a]
+    ParsedTranslateError{}  -> Nothing
+    ClassifyFailure _       -> Nothing

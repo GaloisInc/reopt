@@ -31,7 +31,6 @@ import           Data.Parameterized.Some
 import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Architecture.Syscall
@@ -47,7 +46,7 @@ import           Data.Macaw.X86.X86Reg
 import           Reopt.CFG.FunctionCheck (checkFunction)
 import           Reopt.CFG.FnRep (FunctionType(..))
 
--- -----------------------------------------------------------------------------
+-------------------------------------------------------------------------------
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.  It
@@ -454,20 +453,11 @@ summarizeBlock :: forall arch ids
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
                -> ParsedBlockRegion arch ids -- Current region to summarize.
-               -> Word64 -- ^ Index of region
+               -> ParsedBlock arch ids -- ^ Current block
                -> FunctionArgsM arch ids ()
-summarizeBlock mem interp_state reg idx = do
+summarizeBlock mem interp_state reg b = do
   let addr = regionAddr reg
-  b <-
-    case Map.lookup idx (regionBlockMap reg) of
-      Just b -> pure b
-      Nothing ->
-        error $ "summarizeBlock asked to find block with bad index " ++ show idx
-          ++ " in " ++ show addr ++ "\n"
-          ++ show reg
-
-
-  let lbl = GeneratedBlock addr idx
+  let lbl = GeneratedBlock addr (pblockLabel b)
   -- By default we have no arguments, return nothing
   blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
 
@@ -485,8 +475,14 @@ summarizeBlock mem interp_state reg idx = do
       error $ "Classification failed: " ++ show addr
     ParsedBranch c x y -> do
       demandValue lbl c
-      summarizeBlock mem interp_state reg x
-      summarizeBlock mem interp_state reg y
+      let Just tblock = Map.lookup x (regionBlockMap reg)
+      let Just fblock = Map.lookup y (regionBlockMap reg)
+      summarizeBlock mem interp_state reg tblock
+      summarizeBlock mem interp_state reg fblock
+    ParsedIte c tblock fblock -> do
+      demandValue lbl c
+      summarizeBlock mem interp_state reg tblock
+      summarizeBlock mem interp_state reg fblock
 
     ParsedCall proc_state m_ret_addr -> do
       summarizeCall mem lbl proc_state (not $ isJust m_ret_addr)
@@ -540,7 +536,8 @@ summarizeIter mem ist = do
       return ()
     reg : frontier' -> do
       blockFrontier .= frontier'
-      summarizeBlock mem ist reg 0
+      let Just b0 = Map.lookup 0 (regionBlockMap reg)
+      summarizeBlock mem ist reg b0
       summarizeIter mem ist
 
 calculateOnePred :: (OrdF (ArchReg arch))
