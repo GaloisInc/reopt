@@ -645,7 +645,7 @@ showCFGAndAI loadSty e = do
   (_,mem) <- mkElfMem loadSty Addr64 e
   (Some disc_info,_) <- mkFinalCFGWithSyms ainfo mem e
   forM_ (Map.elems (disc_info^.funInfo)) $ \finfo -> do
-    let abst = foundAbstractState <$> finfo^.foundAddrs
+    let abst = regionAbstractState <$> finfo^.parsedBlocks
     let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
     let amap = assignmentAbsValues ainfo mem g abst
         ppOne b =
