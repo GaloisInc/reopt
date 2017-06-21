@@ -43,6 +43,7 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg
 
+import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FunctionCheck (checkFunction)
 import           Reopt.CFG.FnRep (FunctionType(..))
 

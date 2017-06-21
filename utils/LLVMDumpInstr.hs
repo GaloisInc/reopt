@@ -28,7 +28,6 @@ import           Data.Macaw.X86.Semantics (execInstruction)
 
 import           Reopt.CFG.LLVM
 import           Reopt.CFG.Recovery
-import           Reopt.Semantics.DeadRegisterElimination
 
 usageExit :: IO ()
 usageExit = do putStrLn "LLVMDumpInstr aa bb cc dd ee ff ..."

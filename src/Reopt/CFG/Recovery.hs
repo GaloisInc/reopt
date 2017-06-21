@@ -55,6 +55,7 @@ import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.X86Reg
 
+import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth

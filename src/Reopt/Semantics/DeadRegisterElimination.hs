@@ -20,7 +20,7 @@ this code will remove the (unused) r2
 {-# LANGUAGE KindSignatures #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.Semantics.DeadRegisterElimination
-  ( eliminateDeadRegisters
+  ( blockLiveRegisters
   ) where
 
 import           Control.Lens
@@ -70,6 +70,7 @@ blockLiveRegisters b = do
       addIDs (refsInStmt stmts')
       return (stmt : ss)
 
+{-
 -- | Find the set of referenced registers, via a post-order traversal of the
 -- CFG.
 liveRegisters :: (StmtHasRefs (ArchStmt arch), FnHasRefs (ArchFn arch))
@@ -86,3 +87,4 @@ eliminateDeadRegisters cfg = cfg & cfgBlocks .~ newCFG
   where
     newCFG = M.unions [ liveRegisters cfg l | l <- M.keys (cfg ^. cfgBlocks)
                                             , isRootBlockLabel l ]
+-}
