@@ -39,7 +39,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
    ( App(..)
-   , BlockLabel
    , ppApp
    , ppLit
    , sexpr
@@ -57,6 +56,8 @@ import           Data.Macaw.X86.X86Reg
   , x86FloatArgumentRegs
   , x86FloatResultRegs
   )
+
+import           Reopt.CFG.BlockLabel
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')

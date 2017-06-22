@@ -48,6 +48,7 @@ library
     Reopt.Analysis.Domains.DiffEquations
     Reopt.BasicBlock.Extract
     Reopt.BasicBlock.FunctionCFG
+    Reopt.CFG.BlockLabel
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionArgs
     Reopt.CFG.FunctionCheck
@@ -62,7 +63,6 @@ library
     Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
-    Reopt.Semantics.DeadRegisterElimination
     Reopt.Utils.Hex
 
   ghc-options: -Wall -Werror

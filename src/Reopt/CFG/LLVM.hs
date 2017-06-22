@@ -53,6 +53,7 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 import           Data.Macaw.X86.X86Reg
 
+import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FnRep
 
 ------------------------------------------------------------------------
