@@ -199,6 +199,22 @@ executable dump_debug_data
   hs-source-dirs: dump_debug_data
   main-is: Main.hs
 
+executable dump_vtables
+  build-depends:
+    ansi-wl-pprint,
+    base >= 4,
+    bytestring,
+    containers,
+    directory,
+    elf-edit,
+    lens,
+    macaw,
+    parameterized-utils,
+    reopt,
+    vector
+  hs-source-dirs: dump_vtables
+  main-is: Main.hs
+
 test-suite reopt-tests
   type: exitcode-stdio-1.0
   default-language: Haskell2010
