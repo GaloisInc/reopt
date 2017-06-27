@@ -6,6 +6,7 @@ module Reopt
   , printSectionDisassembly
 --  , printExecutableAddressesInGlobalData
   , showBytes
+  , showAddr64
   , slice
     -- * File reading
   , parseElf64

@@ -211,6 +211,7 @@ executable dump_vtables
     macaw,
     parameterized-utils,
     reopt,
+    split,
     vector
   hs-source-dirs: dump_vtables
   main-is: Main.hs
