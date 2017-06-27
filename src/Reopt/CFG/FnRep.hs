@@ -79,8 +79,10 @@ data FnAssignment tp
 instance Pretty (FnAssignment tp) where
   pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
 
-instance ShowF FnAssignment where
-  showF = show . pretty
+instance Show (FnAssignment tp) where
+  show = show . pretty
+
+instance ShowF FnAssignment
 
 -- | This describes the expected arguments and return types of the function.
 data FunctionType =
