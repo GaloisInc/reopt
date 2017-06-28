@@ -45,15 +45,22 @@ vTableEntries mem =
 
 -- | RTTI datatype.
 data RTTI = RTTI { rttiAddr :: Word64
-                 , rttiPtr1 :: Word64
+                 , rttiPtr1 :: Word64 -- not sure how I can use this yet, or what it really is
                  , rttiMangledName :: B.ByteString
+                 , rttiMangledNameAddr :: Word64
+                 , rttiParentRTTIAddr :: Maybe Word64
                  } deriving (Eq)
 
 instance Show RTTI where
-  show (RTTI rttiAddr rttiPtr1 rttiMangledName) =
+  show (RTTI rttiAddr _ rttiMangledName _ rttiParentRTTIAddr) =
     "addr = " ++ (trimLeadingZeros . showAddr64) rttiAddr ++ ", " ++
-    "rttiPtr1 = " ++ (trimLeadingZeros . showAddr64) rttiPtr1 ++ ", " ++
-    "name = " ++ show rttiMangledName
+--    "rttiPtr1 = " ++ (trimLeadingZeros . showAddr64) rttiPtr1 ++ ", " ++
+    "name = " ++ show rttiMangledName ++ ", " ++
+--    "nameAddr = " ++ (trimLeadingZeros . showAddr64) rttiMangledNameAddr ++ ", "
+    "parentRTTIAddr = " ++ 
+    case rttiParentRTTIAddr of
+      Just w -> (trimLeadingZeros . showAddr64) w
+      Nothing -> "none"
 
 -- | Read a null-terminated byte string from memory given a 64-bit address.
 readNTBSFromAddr :: Memory 64 -> Word64 -> B.ByteString
@@ -68,13 +75,19 @@ readNTBSFromAddr mem ptr =
 rttiFromVTableAddr :: Memory 64 -> Word64 -> Maybe RTTI
 rttiFromVTableAddr mem ptr = case maybeSegAddr of
   Nothing -> Nothing
-  Just segAddr -> Just $ RTTI ptr rttiPtr1 rttiMangledName
-
---        segAddr = fromJust maybeSegAddr
-    where contents = (\(Right r) -> r) $ readByteString segAddr 16
+  Just segAddr -> Just (RTTI
+                         ptr
+                         rttiPtr1
+                         rttiMangledName
+                         rttiMangledNameAddr
+                         rttiParentRTTIAddr)
+    where contents = (\(Right r) -> r) $ readByteString segAddr 24
           rttiPtr1 = (bsWord64le . B.take 8) contents
-          rttiMangledNamePtr = (bsWord64le . B.take 8 . B.drop 8) contents
-          rttiMangledName = readNTBSFromAddr mem rttiMangledNamePtr
+          rttiMangledNameAddr = (bsWord64le . B.take 8 . B.drop 8) contents
+          rttiMangledName = readNTBSFromAddr mem rttiMangledNameAddr
+          rttiParentRTTIAddr = case (rttiMangledNameAddr - ptr) of
+            16 -> Nothing
+            24 -> Just $ (bsWord64le . B.take 8 . B.drop 16) contents
   where maybeSegAddr = (absoluteAddrSegment mem . memWord) ptr
 
 -- | VTable datatype.
