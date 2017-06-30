@@ -445,16 +445,16 @@ recoverBlock :: forall ids
                 -- ^ Map from address to registers that address will read.
              -> [Some PhiBinding]
                 -- ^ Phi bindings from input block
-             -> ParsedBlockRegion X86_64 ids
-                -- ^ Region
              -> ParsedBlock X86_64 ids
+                -- ^ Region
+             -> StatementList X86_64 ids
                 -- ^ Block to analyze
              -> RecoveredBlockInfo
              -> Recover ids RecoveredBlockInfo
-recoverBlock registerUseMap phis reg b blockInfo = seq blockInfo $ do
-  let addr = regionAddr reg
-  let lbl = GeneratedBlock addr (pblockLabel b)
-  when (pblockLabel b /= 0 &&  not (null phis)) $ do
+recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
+  let addr = blockAddr b
+  let lbl = GeneratedBlock addr (stmtsIdent stmts)
+  when (stmtsIdent stmts /= 0 &&  not (null phis)) $ do
     error $ "recoverBlock asked to create a subblock " ++ show lbl ++ " with phi nodes."
   -- Clear stack offsets
   rsCurLabel  .= lbl
@@ -463,28 +463,28 @@ recoverBlock registerUseMap phis reg b blockInfo = seq blockInfo $ do
               -> MapF X86Reg FnRegValue
               -> Recover ids FnBlock
       mkBlock tm m = do
-        stmts <- use rsCurStmts
+        curStmts <- use rsCurStmts
         rsCurStmts .= Seq.empty
         return $! FnBlock { fbLabel = lbl
                           , fbPhiNodes = phis
-                          , fbStmts  = Fold.toList stmts
+                          , fbStmts  = Fold.toList curStmts
                           , fbTerm   = tm
                           , fbRegMap = m
                           }
   -- Recover statements
-  Fold.traverse_ recoverStmt (pblockStmts b)
-  case pblockTerm b of
+  Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+  case stmtsTerm stmts of
     ParsedTranslateError _ -> do
       Loc.error "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure _ ->
       Loc.error $ "Classification failed in Recovery"
     ParsedIte c tblock fblock -> do
       cv <- recoverValue c
-      fb <- mkBlock (FnBranch cv (lbl { labelIndex = pblockLabel tblock })
-                                 (lbl { labelIndex = pblockLabel fblock }))
+      fb <- mkBlock (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
+                                 (lbl { labelIndex = stmtsIdent fblock }))
                     MapF.empty
-      xr <- recoverBlock registerUseMap [] reg tblock (blockInfo & addFnBlock fb)
-      recoverBlock registerUseMap [] reg fblock xr
+      xr <- recoverBlock registerUseMap [] b tblock (blockInfo & addFnBlock fb)
+      recoverBlock registerUseMap [] b fblock xr
 
     ParsedCall proc_state m_ret_addr -> do
       call_tgt <- recoverRegister proc_state ip_reg
@@ -616,8 +616,8 @@ recoverBlock registerUseMap phis reg b blockInfo = seq blockInfo $ do
 
 ------------------------------------------------------------------------
 -- allocateStackFrame
-allocateStackFrame :: forall ids . ParsedBlock X86_64 ids -> Set (StackDepthValue X86_64 ids) -> Recover ids ()
-allocateStackFrame b sd
+allocateStackFrame :: forall ids . StatementList X86_64 ids -> Set (StackDepthValue X86_64 ids) -> Recover ids ()
+allocateStackFrame stmts sd
   | Set.null sd          =
     debug DFunRecover "WARNING: no stack use detected" $ return ()
   | [s] <- Set.toList sd = do
@@ -635,7 +635,7 @@ allocateStackFrame b sd
                     recoverAssign asgn
                     pure $! Set.delete (Some (assignId asgn)) depSet
                 goStmt depSet _ = return depSet
-            remaining_asgns <- foldlM goStmt asgns (pblockStmts b)
+            remaining_asgns <- foldlM goStmt asgns (stmtsNonterm stmts)
             when (not (Set.null remaining_asgns)) $ do
               throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
         let doOneDelta :: StackDepthOffset X86_64 ids
@@ -733,7 +733,7 @@ recoverFunction sysp fArgs mem fInfo = do
         let phis = makePhis preds regs1
 
         Just reg <- pure $ Map.lookup addr (fInfo^.parsedBlocks)
-        recoverBlock blockRegs phis reg (regionFirstBlock reg) blockInfo
+        recoverBlock blockRegs phis reg (blockStatementList reg) blockInfo
 
   evalRecover rs $ do
     -- The first block is special as it needs to allocate space for
@@ -743,15 +743,14 @@ recoverFunction sysp fArgs mem fInfo = do
     -- Make the alloca and init rsp.  This is the only reason we
     -- need rsCurStmts
 
-    Just reg <- pure $ Map.lookup a (fInfo^.parsedBlocks)
-    let b = regionFirstBlock reg
+    Just b <- pure $ Map.lookup a (fInfo^.parsedBlocks)
+    let stmts = blockStatementList b
 
     case maximumStackDepth fInfo a of
-      Right depths -> allocateStackFrame b depths
+      Right depths -> allocateStackFrame stmts depths
       Left msg -> throwError $ "maximumStackDepth: " ++ msg
 
-
-    r0 <- recoverBlock blockRegs [] reg b emptyRecoveredBlockInfo
+    r0 <- recoverBlock blockRegs [] b stmts emptyRecoveredBlockInfo
     rf <- foldM recoverInnerBlock r0 (Map.keys blockPreds)
 
     pure Function { fnAddr = a

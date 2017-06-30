@@ -31,16 +31,16 @@ checkFunction' info visited (lbl:rest)
     case Map.lookup lbl (info^.parsedBlocks) of
       Nothing -> error $ "Missing block: " ++ show lbl
       Just reg -> do
-        let b = regionFirstBlock reg
+        let b = blockStatementList reg
         case checkRegion reg b of
           Nothing -> False
           Just next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
 
-checkRegion :: ParsedBlockRegion arch ids
-            -> ParsedBlock arch ids
+checkRegion :: ParsedBlock arch ids
+            -> StatementList arch ids
             -> Maybe [ArchSegmentedAddr arch]
-checkRegion reg block =
-  case pblockTerm block of
+checkRegion reg stmts =
+  case stmtsTerm stmts of
     ParsedCall _ Nothing    -> Just []
     ParsedCall _ (Just a)   -> Just [a]
     ParsedJump _ a          -> Just [a]

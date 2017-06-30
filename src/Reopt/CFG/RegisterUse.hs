@@ -54,10 +54,10 @@ import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 -- | A map from each address `l` to the labels of blocks that may jump to `l`.
 type FunPredMap w = Map (SegmentedAddr w) [BlockLabel w]
 
-blockSucc :: ParsedBlock arch ids -> [(ArchSegmentedAddr arch, Word64)]
-blockSucc b = do
-  let idx = pblockLabel b
-  case pblockTerm b of
+blockSucc :: StatementList arch ids -> [(ArchSegmentedAddr arch, Word64)]
+blockSucc stmts = do
+  let idx = stmtsIdent stmts
+  case stmtsTerm stmts of
     ParsedCall _ (Just ret_addr) -> [(ret_addr, idx)]
     ParsedCall _ Nothing -> []
     ParsedJump _ tgt -> [(tgt, idx)]
@@ -68,18 +68,18 @@ blockSucc b = do
     ParsedTranslateError{} -> []
     ClassifyFailure{} -> []
 
-regionSucc :: ParsedBlockRegion arch ids -> [SegmentedAddr (ArchAddrWidth arch)]
-regionSucc reg = fmap fst $ blockSucc (regionFirstBlock reg)
+regionSucc :: ParsedBlock arch ids -> [SegmentedAddr (ArchAddrWidth arch)]
+regionSucc b = fmap fst $ blockSucc (blockStatementList b)
 
 -- | Return the FunPredMap for the discovered block function.
 funBlockPreds :: DiscoveryFunInfo X86_64 ids -> FunPredMap 64
 funBlockPreds info = Map.fromListWith (++)
   [ (next, [GeneratedBlock addr idx])
-  | region <- Map.elems (info^.parsedBlocks)
+  | b <- Map.elems (info^.parsedBlocks)
     -- Get address of region
-  , let addr = regionAddr region
-    -- Get the block successors
-  , (next,idx) <- blockSucc (regionFirstBlock region)
+  , let addr = blockAddr b
+    -- get the block successors
+  , (next,idx) <- blockSucc (blockStatementList b)
   ]
 
 -------------------------------------------------------------------------------
@@ -230,9 +230,9 @@ summarizeBlock :: forall ids
                -> RegisterUseM ids ()
 summarizeBlock mem interp_state addr = do
   let Just reg = Map.lookup addr (interp_state^.parsedBlocks)
-  let go :: ParsedBlock X86_64 ids -> RegisterUseM ids ()
-      go b = do
-        let lbl = GeneratedBlock addr (pblockLabel b)
+  let go :: StatementList X86_64 ids -> RegisterUseM ids ()
+      go stmts = do
+        let lbl = GeneratedBlock addr (stmtsIdent stmts)
         let -- Figure out the deps of the given registers and update the state for the current label
             addRegisterUses :: RegState X86Reg (Value X86_64 ids)
                             -> [Some X86Reg]
@@ -245,11 +245,11 @@ summarizeBlock mem interp_state addr = do
         sysp <- gets thisSyscallPersonality
         typeMap <- gets $ functionArgs
         cur_ft <- gets currentFunctionType
-        let termValues = termStmtValues sysp mem typeMap cur_ft (pblockTerm b)
+        let termValues = termStmtValues sysp mem typeMap cur_ft (stmtsTerm stmts)
         traverse_ (\(Some r) -> demandValue addr r)
-                  (concatMap stmtDemandedValues (pblockStmts b) ++ termValues)
+                  (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
 
-        case pblockTerm b of
+        case stmtsTerm stmts of
           ParsedCall proc_state _ -> do
             -- Get function type associated with function
             let ft | Just faddr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
@@ -281,7 +281,7 @@ summarizeBlock mem interp_state addr = do
             error $ "Classification failed: " ++ show addr
   -- Update frontier with successor states for region
   blockFrontier %= \s -> foldr Set.insert s (regionSucc reg)
-  go (regionFirstBlock reg)
+  go (blockStatementList reg)
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: Memory 64
@@ -337,7 +337,7 @@ calculateProvides :: Map (SegmentedAddr 64) (Set (Some X86Reg))
 calculateProvides demandMap =
 
 regionProvides :: Map (SegmentedAddr 64) (Set (Some X86Reg))
-               -> ParsedBlockRegion X86_64 ids
+               -> ParsedBlock X86_64 ids
                -> Map Word64 (Set (Some X86Reg))
 regionProvides demandMap reg =
 -}

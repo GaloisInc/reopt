@@ -261,7 +261,7 @@ recoverBlock :: DiscoveryFunInfo X86_64 ids
 recoverBlock interp_state root_addr = do
     Just init_sp <- use $ blockInitStackPointers . at root_addr
     Just reg <- return $ Map.lookup root_addr (interp_state^.parsedBlocks)
-    go init_sp (regionFirstBlock reg)
+    go init_sp (blockStatementList reg)
   where
     addStateVars init_sp s = do
       forM_ gpRegList $ \r -> do
@@ -270,8 +270,8 @@ recoverBlock interp_state root_addr = do
           -- overapproximates by viewing all registers as uses of the
           -- sp between blocks
 
-      traverse_ (goStmt init_sp) (pblockStmts b)
-      case pblockTerm b of
+      traverse_ (goStmt init_sp) (stmtsNonterm b)
+      case stmtsTerm b of
         ParsedTranslateError _ ->
           throwError "Cannot identify stack depth in code where translation error occurs"
         ClassifyFailure _ ->

@@ -66,7 +66,7 @@ testDiscovery expectedFilename elf =
                 ignoredBlocks = S.fromList (ignoreBlocks er)
             F.forM_ (M.elems (di ^. MD.funInfo)) $ \dfi -> do
               let actualEntry = fromIntegral (MM.addrValue (MD.discoveredFunAddr dfi))
-                  actualBlockStarts = S.fromList [ fromIntegral (MM.addrValue (MD.regionAddr pbr))
+                  actualBlockStarts = S.fromList [ fromIntegral (MM.addrValue (MD.blockAddr pbr))
                                                  | pbr <- M.elems (dfi ^. MD.parsedBlocks)
                                                  ]
               case (S.member actualEntry ignoredBlocks, M.lookup actualEntry expectedEntries) of

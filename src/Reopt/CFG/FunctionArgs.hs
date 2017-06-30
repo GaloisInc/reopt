@@ -184,7 +184,7 @@ data FunctionArgsState arch ids = FAS
   , _visitedBlocks  :: !(Set (ArchSegmentedAddr arch))
 
   -- | The set of blocks we need to consider (should be disjoint from visitedBlocks)
-  , _blockFrontier  :: ![ParsedBlockRegion arch ids]
+  , _blockFrontier  :: ![ParsedBlock arch ids]
   , funSyscallPersonality :: !(SyscallPersonality arch)
   , computedAddrSet :: !(Set (ArchSegmentedAddr arch))
     -- ^ Set of addresses that are used in function image computation
@@ -209,7 +209,7 @@ assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 visitedBlocks :: Simple Lens (FunctionArgsState arch ids) (Set (ArchSegmentedAddr arch))
 visitedBlocks = lens _visitedBlocks (\s v -> s { _visitedBlocks = v })
 
-blockFrontier :: Simple Lens (FunctionArgsState arch ids) [ParsedBlockRegion arch ids]
+blockFrontier :: Simple Lens (FunctionArgsState arch ids) [ParsedBlock arch ids]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 initFunctionArgsState :: SyscallPersonality arch -> Set (ArchSegmentedAddr arch) -> FunctionArgsState arch ids
@@ -454,10 +454,10 @@ summarizeBlock :: forall arch ids
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
                -> ArchSegmentedAddr arch -- ^ Address of the code.
-               -> ParsedBlock arch ids -- ^ Current block
+               -> StatementList arch ids -- ^ Current block
                -> FunctionArgsM arch ids ()
-summarizeBlock mem interp_state addr b = do
-  let lbl = GeneratedBlock addr (pblockLabel b)
+summarizeBlock mem interp_state addr stmts = do
+  let lbl = GeneratedBlock addr (stmtsIdent stmts)
   -- By default we have no arguments, return nothing
   blockDemandMap %= Map.insertWith demandMapUnion lbl mempty
 
@@ -467,8 +467,8 @@ summarizeBlock mem interp_state addr b = do
   let recordCallPropagation proc_state =
         recordBlockTransfer lbl proc_state callRegs
   mapM_ (\(Some v) -> demandValue lbl v)
-        (concatMap stmtDemandedValues (pblockStmts b))
-  case pblockTerm b of
+        (concatMap stmtDemandedValues (stmtsNonterm stmts))
+  case stmtsTerm stmts of
     ParsedTranslateError _ ->
       error "Cannot identify arguments in code where translation error occurs"
     ClassifyFailure _ ->
@@ -530,7 +530,7 @@ summarizeIter mem ist = do
       return ()
     reg : frontier' -> do
       blockFrontier .= frontier'
-      summarizeBlock mem ist (regionAddr reg) (regionFirstBlock reg)
+      summarizeBlock mem ist (blockAddr reg) (blockStatementList reg)
       summarizeIter mem ist
 
 calculateOnePred :: (OrdF (ArchReg arch))
