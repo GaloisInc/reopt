@@ -68,6 +68,7 @@ import Debug.Trace
 hasWidth :: HasRepr f TypeRepr => f tp -> NatRepr w -> Maybe (tp :~: BVType w)
 hasWidth f w =
   case typeRepr f of
+    BoolTypeRepr -> Nothing
     BVTypeRepr n -> do
       Refl <- testEquality n w
       pure Refl
@@ -204,6 +205,7 @@ valueDependencies = go Set.empty
         go s [] = Right s
         go s (Some v:r) =
           case v of
+            BoolValue{} -> go s r
             BVValue{} -> go s r
             RelocatableValue{} -> go s r
             Initial{} -> go s r
@@ -220,7 +222,10 @@ valueDependencies = go Set.empty
 -- recoverValue
 
 -- | Recover a stack value
-recoverValue' :: Loc.HasCallStack => RecoverState ids -> Value X86_64 ids tp -> Either String (FnValue tp)
+recoverValue' :: Loc.HasCallStack
+              => RecoverState ids
+              -> Value X86_64 ids tp
+              -> Either String (FnValue tp)
 recoverValue' s v = do
   let interpState = rsInterp s
   let mem = rsMemory s
@@ -250,6 +255,8 @@ recoverValue' s v = do
               Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
 
     RelocatableValue{} -> Loc.error "Expected relocatable value to be covered by previous case."
+    BoolValue b ->
+      Right $ FnConstantBool b
     BVValue w i ->
       Right $ FnConstantValue w i
 
@@ -307,8 +314,8 @@ recoverAssign asgn = do
           EvalApp app -> do
             app' <- traverseApp recoverValue app
             pure (FnEvalApp app')
-          SetUndefined w ->
-            pure (FnSetUndefined w)
+          SetUndefined tp ->
+            pure (FnSetUndefined tp)
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr (typeRepr tp))
@@ -317,9 +324,9 @@ recoverAssign asgn = do
             fn_buf <- recoverValue buf
             fn_cnt <- recoverValue cnt
             pure (FnRepnzScas sz fn_val fn_buf fn_cnt)
-          EvalArchFn _ (BVTypeRepr w) -> do
+          EvalArchFn _ tp -> do
             trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
-              pure (FnSetUndefined w)
+              pure (FnSetUndefined tp)
       void $ emitAssign (assignId asgn) rhs
 
 recoverWrite :: BVValue X86_64 ids 64 -> Value X86_64 ids tp -> Recover ids ()
@@ -409,7 +416,7 @@ getPostCallValue lbl proc_state intrs floatrs r = do
         return $ FnReturn rv
 
    -- df is 0 after a function call.
-    _ | Just Refl <- testEquality r DF -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
 
     _ | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
@@ -435,7 +442,7 @@ getPostSyscallValue lbl proc_state r =
       | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
 
-    _ | Just Refl <- testEquality r DF -> return $ FnConstantValue knownNat 0
+    _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
 
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
@@ -690,7 +697,7 @@ recoverFunction sysp fArgs mem fInfo = do
                & flip (ifoldr insReg)        (ftArgRegs cft)
                & flip (foldr insCalleeSaved) x86CalleeSavedRegs
                  -- Set df to 0 at function start.
-               & MapF.insert DF (FnRegValue (FnConstantValue n1 0))
+               & MapF.insert DF (FnRegValue (FnConstantBool False))
 
   let rs = RS { rsMemory        = mem
               , rsInterp = fInfo

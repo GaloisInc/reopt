@@ -5,6 +5,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
 module Reopt.CFG.FnRep
    ( FnAssignId(..)
    , FnAssignment(..)
@@ -35,6 +36,7 @@ import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
 import qualified Data.Vector as V
+import           GHC.TypeLits
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
@@ -149,8 +151,8 @@ instance Pretty (FnPhiVar tp) where
 -- | The right-hand side of a function assingment statement.
 data FnAssignRhs (tp :: Type) where
   -- An expression with an undefined value.
-  FnSetUndefined :: !(NatRepr n) -- Width of undefined value.
-                 -> FnAssignRhs (BVType n)
+  FnSetUndefined :: !(TypeRepr tp) -- Width of undefined value.
+                 -> FnAssignRhs tp
   FnReadMem :: !(FnValue (BVType 64))
             -> !(TypeRepr tp)
             -> FnAssignRhs tp
@@ -180,7 +182,7 @@ instance Pretty (FnAssignRhs tp) where
 instance HasRepr FnAssignRhs TypeRepr where
   typeRepr rhs =
     case rhs of
-      FnSetUndefined sz -> BVTypeRepr sz
+      FnSetUndefined tp -> tp
       FnReadMem _ tp -> tp
       FnEvalApp a    -> typeRepr a
       FnAlloca _ -> knownType
@@ -210,7 +212,10 @@ data FnValue (tp :: Type)
       -- | A value that is actually undefined, like a non-argument register at
       -- the start of a function.
    | FnUndefined !(TypeRepr tp)
-   | forall n . (tp ~ BVType n) => FnConstantValue !(NatRepr n) !Integer
+     -- | A particular Bool value
+   | (tp ~ BoolType) => FnConstantBool !Bool
+     -- | A particular integer value
+   | forall n . (tp ~ BVType n, 1 <= n) => FnConstantValue !(NatRepr n) !Integer
      -- | Value from an assignment statement.
    | FnAssignedValue !(FnAssignment tp)
      -- | Value from a phi node
@@ -231,6 +236,7 @@ instance Pretty (FnValue tp) where
   pretty (FnValueUnsupported reason _)
                                   = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
+  pretty (FnConstantBool b)       = text $ if b then "true" else "false"
   pretty (FnConstantValue sz n)   = ppLit sz n
   pretty (FnAssignedValue ass)    = ppFnAssignId (fnAssignId ass)
   pretty (FnPhiValue phi)         = ppFnAssignId (unFnPhiVar phi)
@@ -247,6 +253,7 @@ instance HasRepr FnValue TypeRepr where
     case v of
       FnValueUnsupported _ tp -> tp
       FnUndefined tp -> tp
+      FnConstantBool _ -> BoolTypeRepr
       FnConstantValue sz _ -> BVTypeRepr sz
       FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
       FnPhiValue phi -> fnPhiVarType phi
@@ -337,7 +344,7 @@ data FnStmt
               -- /\ Start of source buffer.
              !(FnValue (BVType 64))
               -- /\ Start of destination buffer.
-             !(FnValue (BVType 1))
+             !(FnValue BoolType)
 
               -- /\ Flag indicates whether direction of move:
               -- True means we should decrement buffer pointers after each copy.
@@ -348,7 +355,7 @@ data FnStmt
                         -- /\ Value to assign
                        (FnValue (BVType 64))
                         -- /\ Address to start assigning from.
-                       (FnValue (BVType 1))
+                       (FnValue  BoolType)
                         -- /\ Direction flag
 
 instance Pretty FnStmt where

@@ -10,9 +10,6 @@ module Reopt.BasicBlock.Extract
 
 import           Control.Monad.State
 import qualified Data.List as L
-import           Data.Macaw.CFG as R
-import           Data.Macaw.Types (TypeBits, n0, n64)
-import qualified Data.Macaw.X86.X86Reg as N
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import qualified Data.Map as M
@@ -23,11 +20,15 @@ import           Data.Word
 
 import           Flexdis86 as F
 
+import           Data.Macaw.CFG as R
+import           Data.Macaw.Types (n0, n64, BVType, typeWidth)
+import qualified Data.Macaw.X86.Monad as S
+import           Data.Macaw.X86.Semantics (execInstruction)
+import qualified Data.Macaw.X86.X86Reg as N
+
 import           Reopt.Concrete.BitVector (bitVector)
 import           Reopt.Concrete.MachineState (Value(..))
 import           Reopt.Concrete.Semantics as CS
-import qualified Data.Macaw.X86.Monad as S
-import           Data.Macaw.X86.Semantics (execInstruction)
 
 import           Debug.Trace
 
@@ -36,11 +37,11 @@ import           Debug.Trace
 -- The returned equalities help with type checking, e.g. by
 -- constraining the type indices of the 'Location' in which the
 -- 'RegisterView' is embedded.
-registerViewAsFullRegister :: S.RegisterView tp b n
-                           -> Maybe (N.X86Reg tp, b :~: 0, n :~: TypeBits tp)
+registerViewAsFullRegister :: S.RegisterView w b n
+                           -> Maybe (N.X86Reg (BVType w), b :~: 0, n :~: w)
 registerViewAsFullRegister v
   | Just Refl <- S.registerViewBase v `testEquality` n0
-  , Just Refl <- S.registerViewSize v `testEquality` N.registerWidth (S.registerViewReg v)
+  , Just Refl <- S.registerViewSize v `testEquality` typeWidth (S.registerViewReg v)
   , S.DefaultView <- S.registerViewType v
   = Just (S.registerViewReg v, Refl, Refl)
   | otherwise = Nothing

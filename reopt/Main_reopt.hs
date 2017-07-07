@@ -453,14 +453,15 @@ mkFinalCFGWithSyms :: Integral (ElfWordType (ArchAddrWidth arch))
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
-mkFinalCFGWithSyms ainfo mem e = do -- withArchConstraints ainfo $ do
+mkFinalCFGWithSyms ainfo mem e = withArchConstraints ainfo $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
       [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
       _ -> fail "Elf contains multiple symbol tables."
 
-  let (unresolved, resolved) = withArchConstraints ainfo $ resolvedSegmentedElfFuncSymbols mem entries
+  let (unresolved, resolved) = withArchConstraints ainfo $
+         resolvedSegmentedElfFuncSymbols mem entries
   -- Check for unresolved symbols
   when (not (Map.null unresolved)) $ do
     fail $ show $ withArchConstraints ainfo $ ppElfUnresolvedSymbols unresolved

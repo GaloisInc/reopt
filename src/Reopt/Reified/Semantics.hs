@@ -188,7 +188,10 @@ exprWidth e =
 -- corresponding constructors, or add them to 'Expr' above.
 instance S.IsValue Expr where
   bv_width = exprWidth
-  mux c x y = app $ R.Mux (exprWidth x) c x y
+  mux c x y =
+    case exprType x of
+      BoolTypeRepr -> app $ R.BoolMux c x y
+      BVTypeRepr w -> app $ R.Mux w c x y
   bvLit n v = mkLit n (toInteger v)
   bvAdd x y = app $ R.BVAdd (exprWidth x) x y
   bvSub x y = app $ R.BVSub (exprWidth x) x y
@@ -197,12 +200,14 @@ instance S.IsValue Expr where
   x .&. y = app $ R.BVAnd (exprWidth x) x y
   x .|. y = app $ R.BVOr (exprWidth x) x y
   bvXor x y = app $ R.BVXor (exprWidth x) x y
-  x .=. y = app $ R.BVEq x y
+  x .=. y = app $ R.Eq x y
   bvShr x y = app $ R.BVShr (exprWidth x) x y
   bvSar x y = app $ R.BVSar (exprWidth x) x y
   bvShl x y = app $ R.BVShl (exprWidth x) x y
   bvTrunc' w x = app $ R.Trunc x w
-  bvUlt x y = app $ R.BVUnsignedLt x y
+  bvUlt x y =
+    case exprType x of
+      BVTypeRepr _ -> app $ R.BVUnsignedLt x y
   bvSlt x y = app $ R.BVSignedLt x y
   bvBit x y = app $ R.BVTestBit x y
   sext' w x = app $ R.SExt x w
@@ -230,6 +235,13 @@ instance S.IsValue Expr where
   fpCvtRoundsUp src tgt x = app $ R.FPCvtRoundsUp src x tgt
   fpFromBV tgt x = app $ R.FPFromBV x tgt
   truncFPToSignedBV tgt src x = app $ R.TruncFPToSignedBV src x tgt
+
+  boolValue = error "Reified semantics boolValue undefined"
+  boolNot = error "Reified semantics boolNot undefined"
+  boolAnd = error "Reified semantics boolAnd undefined"
+  boolOr = error "Reified semantics boolOr undefined"
+  boolEq = error "Reified semantics boolEq undefined"
+  boolXor = error "Reified semantics boolXor undefined"
 
 ------------------------------------------------------------------------
 -- Statements.
@@ -260,7 +272,8 @@ data Stmt where
          -> Expr (BVType 64)
          -> Expr BoolType
          -> Stmt
-  MemSet :: Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Expr (BVType 1) -> Stmt
+  MemSet :: (1 <= n)
+         => Expr (BVType 64) -> Expr (BVType n) -> Expr (BVType 64) -> Expr BoolType -> Stmt
   Primitive :: S.Primitive -> Stmt
   GetSegmentBase :: Variable (BVType 64) -> S.Segment -> Stmt
   BVQuot, BVRem, BVSignedQuot, BVSignedRem ::

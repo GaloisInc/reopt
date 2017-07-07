@@ -223,6 +223,7 @@ natReprToLLVMType :: NatRepr n -> L.Type
 natReprToLLVMType = L.PrimType . L.Integer . fromIntegral . natValue
 
 typeToLLVMType :: TypeRepr tp -> L.Type
+typeToLLVMType BoolTypeRepr   = L.PrimType (L.Integer 1)
 typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
 
 functionFloatType :: L.Type
@@ -451,6 +452,7 @@ valueToLLVM ctx blk m val = do
     -- A value that is actually undefined, like a non-argument register at
     -- the start of a function.
     FnUndefined _ -> mk L.ValUndef
+    FnConstantBool b -> mk $ L.integer (if b then 1 else 0)
     FnConstantValue _sz n -> mk $ L.integer n
     -- Value from an assignment statement.
     FnAssignedValue (FnAssignment lhs _rhs) ->
@@ -634,9 +636,13 @@ mkFloatLLVMValue val frepr = do
     _ -> Loc.error $ "internal: mkFloatLLVMValue given unsupported type."
 
 -- | Handle an intrinsic overflows
-intrinsicOverflows' :: String -> FnValue tp -> FnValue tp -> FnValue (BVType 1) -> BBLLVM (L.Typed L.Value)
+intrinsicOverflows' :: String
+                    -> FnValue tp
+                    -> FnValue tp
+                    -> FnValue BoolType
+                    -> BBLLVM (L.Typed L.Value)
 -- Special case where carry/borrow flag is 0.
-intrinsicOverflows' bop x y (FnConstantValue _ 0) = do
+intrinsicOverflows' bop x y (FnConstantBool False) = do
   x' <- mkLLVMValue x
   y' <- mkLLVMValue y
   let in_typ = L.typedType x'
@@ -692,8 +698,8 @@ appToLLVM' :: App FnValue tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
   let typ = typeToLLVMType $ typeRepr app
   let binop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
-            -> FnValue (BVType n)
-            -> FnValue (BVType n)
+            -> FnValue tp
+            -> FnValue tp
             -> BBLLVM (L.Typed L.Value)
       binop f x y = do
         x' <- mkLLVMValue x
@@ -711,16 +717,15 @@ appToLLVM' app = do
         flt_z <- f flt_x (L.typedValue flt_y)
         bitcast flt_z (natReprToLLVMType (floatInfoBits frepr))
   case app of
+    BoolMux c t f -> do
+      l_c <- mkLLVMValue c
+      l_t <- mkLLVMValue t
+      l_f <- mkLLVMValue f
+      fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
     Mux _sz c t f -> do
       l_c <- mkLLVMValue c
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
-      when (L.typedType l_t /= L.typedType l_f) $ do
-        lbl <- gets $ fbLabel . bbBlock
-        Loc.error $ "Internal: At " ++ show lbl ++ " expected compatible types to mux:\n"
-           ++ "Type1: " ++ show (L.typedType l_t) ++ "Value: " ++ show (pretty t) ++ "\n"
-           ++ "Type2: " ++ show (L.typedType l_f) ++ "Value: " ++ show (pretty f) ++ "\n"
-
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
     MMXExtend _v -> unimplementedInstr' typ "MMXExtend"
     Trunc v sz -> flip (convop L.Trunc) (natReprToLLVMType sz) =<< mkLLVMValue v
@@ -769,11 +774,12 @@ appToLLVM' app = do
       bitop L.Xor llvm_v (L.ValInteger (-1))
     BVAnd _sz x y -> binop band x y
     BVOr _sz x y  -> binop bor  x y
+    XorApp x y    -> binop bxor x y
     BVXor _sz x y -> binop bxor x y
     BVShl _sz x y -> binop shl  x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    BVEq x y      -> binop (icmpop L.Ieq) x y
+    Eq x y        -> binop (icmpop L.Ieq) x y
     EvenParity v  -> do
       v' <- mkLLVMValue v
       -- This code calls takes the disjunction of the value with itself to update flags,
@@ -866,8 +872,8 @@ rhsToLLVM' rhs =
   case rhs of
    FnEvalApp app ->
      appToLLVM' app
-   FnSetUndefined sz -> do
-     let typ = natReprToLLVMType sz
+   FnSetUndefined tp -> do
+     let typ = typeToLLVMType tp
      return (L.Typed typ L.ValUndef)
    FnReadMem ptr typ -> do
      p <- mkLLVMValue ptr

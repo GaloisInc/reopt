@@ -5,6 +5,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -38,7 +39,8 @@ import qualified Reopt.Concrete.BitVector as B
 -- Concrete values
 
 data Value (tp :: Type) where
-  Literal   :: BitVector n -> Value (BVType n)
+  BoolLiteral  :: Bool -> Value BoolType
+  Literal   :: (1 <= n) => BitVector n -> Value (BVType n)
   Undefined :: TypeRepr tp -> Value tp
 
 instance Eq (Value tp) where
@@ -61,40 +63,44 @@ instance TestEquality Value where
   _ `testEquality` _                     = Nothing
 
 instance OrdF Value where
-  compareF (Literal x) (Literal y) =
-    case compareF x y of
-      LTF -> LTF
-      EQF -> EQF
-      GTF -> GTF
-  compareF (Undefined _) (Literal _) = LTF
-  compareF (Literal _) (Undefined _) = GTF
   compareF (Undefined x) (Undefined y) =
     case compareF x y of
       LTF -> LTF
       EQF -> EQF
       GTF -> GTF
+  compareF Undefined{} _ = LTF
+  compareF _ Undefined{} = GTF
 
+  compareF (Literal x) (Literal y) =
+    case compareF x y of
+      LTF -> LTF
+      EQF -> EQF
+      GTF -> GTF
+  compareF Literal{} _ = LTF
+  compareF _ Literal{} = GTF
+
+  compareF (BoolLiteral x) (BoolLiteral y) =
+    fromOrdering (compare x y)
 
 -- | Equal or at least one side undefined.
 --
 -- This is not transitive, so it doesn't make sense as the 'Eq'
 -- instance.
 equalOrUndef :: Value tp -> Value tp -> Bool
+BoolLiteral x `equalOrUndef` BoolLiteral y = x == y
 Literal x `equalOrUndef` Literal y = x == y
 _ `equalOrUndef` _ = True
 
 instance Ord (Value tp) where
-  compare (Literal x) (Literal y) = compare x y
-  compare (Undefined _) (Literal _) = LT
-  compare (Literal _) (Undefined _) = GT
-  compare (Undefined _) (Undefined _) = EQ
+  compare x y = toOrdering (compareF x y)
 
 instance Show (Value tp) where
   show = show . pretty
 
 instance Pretty (Value tp) where
-  pretty (Literal x)    = text $ show x
-  pretty (Undefined _) = text $ "Undefined"
+  pretty (BoolLiteral x) = text $ show x
+  pretty (Literal x)     = text $ show x
+  pretty (Undefined _)   = text $ "Undefined"
 
 instance PrettyRegValue X.X86Reg Value where
   ppValueEq r v = Just $ text (show r) <+> text "=" <+> pretty v
@@ -103,8 +109,8 @@ instance PrettyRegValue X.X86Reg Value where
 -- Constants
 
 true, false :: Value BoolType
-true = Literal B.true
-false = Literal B.false
+true = BoolLiteral True
+false = BoolLiteral False
 
 ------------------------------------------------------------------------
 -- 'Value' combinators
@@ -113,15 +119,17 @@ false = Literal B.false
 --
 -- The result-type 'NatRepr' is passed separately and used to
 -- construct the result 'Value'.
-liftValue :: (BV -> BV)
-           -> NatRepr n2
-           -> Value (BVType n1)
-           -> Value (BVType n2)
+liftValue :: (1 <= n2)
+          => (BV -> BV)
+          -> NatRepr n2
+          -> Value (BVType n1)
+          -> Value (BVType n2)
 liftValue f nr (asBV -> Just v) =
   Literal $ bitVector nr (f v)
 liftValue _ nr _ = Undefined (BVTypeRepr nr)
 
-liftValue2 :: (BV -> BV -> BV)
+liftValue2 :: (1 <= n3)
+           => (BV -> BV -> BV)
            -> NatRepr n3
            -> Value (BVType n1)
            -> Value (BVType n2)
@@ -130,36 +138,45 @@ liftValue2 f nr (asBV -> Just bv1) (asBV -> Just bv2) =
   Literal $ bitVector nr (f bv1 bv2)
 liftValue2 _ nr _ _ = Undefined (BVTypeRepr nr)
 
-liftValue3 :: (BV -> BV -> BV -> BV)
+evalLit :: TypeRepr tp -> Maybe (Value tp) -> Value tp
+evalLit _ (Just v) = v
+evalLit tp Nothing = Undefined tp
+
+liftValue3 :: (1 <= n4)
+           => (BV -> BV -> BV -> BV)
            -> NatRepr n4
            -> Value (BVType n1)
            -> Value (BVType n2)
            -> Value (BVType n3)
            -> Value (BVType n4)
-liftValue3 f nr (asBV -> Just bv1) (asBV -> Just bv2) (asBV -> Just bv3) =
-  Literal $ bitVector nr (f bv1 bv2 bv3)
-liftValue3 _ nr _ _ _ = Undefined (BVTypeRepr nr)
+liftValue3 f nr v1 v2 v3 = evalLit (BVTypeRepr nr) $ do
+  bv1 <- asBV v1
+  bv2 <- asBV v2
+  bv3 <- asBV v3
+  pure $ Literal $ bitVector nr (f bv1 bv2 bv3)
 
 -- Lift functions with the possibility of an undefined return value
-liftValueMaybe :: (BV -> Maybe BV)
+liftValueMaybe :: (1 <= n2)
+               => (BV -> Maybe BV)
                -> NatRepr n2
                -> Value (BVType n1)
                -> Value (BVType n2)
-liftValueMaybe f nr (asBV -> Just v) = case f v of
-  Nothing -> Undefined (BVTypeRepr nr)
-  Just bv -> Literal $ bitVector nr bv
-liftValueMaybe _ nr _ = Undefined (BVTypeRepr nr)
+liftValueMaybe f nr v = evalLit (BVTypeRepr nr) $ do
+  bv <- asBV v
+  bv' <- f bv
+  pure $ Literal $ bitVector nr bv'
 
-liftValueMaybe2 :: (BV -> BV -> Maybe BV)
+liftValueMaybe2 :: (1 <= n3)
+                => (BV -> BV -> Maybe BV)
                -> NatRepr n3
                -> Value (BVType n1)
                -> Value (BVType n1)
                -> Value (BVType n3)
-liftValueMaybe2 f nr (asBV -> Just v1) (asBV -> Just v2) =
-  case f v1 v2 of
-    Nothing -> Undefined (BVTypeRepr nr)
-    Just bv -> Literal $ bitVector nr bv
-liftValueMaybe2 _ nr _ _ = Undefined (BVTypeRepr nr)
+liftValueMaybe2 f nr v1 v2 = evalLit (BVTypeRepr nr) $ do
+  bv1 <- asBV v1
+  bv2 <- asBV v2
+  bv <- f bv1 bv2
+  pure $ Literal $ bitVector nr bv
 
 liftValueSame :: (BV -> BV)
               -> Value (BVType n)
@@ -168,11 +185,16 @@ liftValueSame f (Literal (unBitVector -> (nr, v))) =
   Literal $ bitVector nr (f v)
 liftValueSame _ u@(Undefined _) = u
 
+asBool :: Value tp -> Maybe Bool
+asBool (BoolLiteral b) = Just b
+asBool _ = Nothing
+
 asBV :: Value tp -> Maybe BV
 asBV (Literal (unBitVector -> (_, bv))) = Just bv
 asBV _ = Nothing
 
 asTypeRepr :: Value tp -> TypeRepr tp
+asTypeRepr (BoolLiteral _)                    = BoolTypeRepr
 asTypeRepr (Literal (unBitVector -> (nr, _))) = BVTypeRepr nr
 asTypeRepr (Undefined tr)                     = tr
 
@@ -185,14 +207,21 @@ width (Undefined tr) = type_width tr
 
 -- | Concatenate two 'Value's.
 (#) :: Value (BVType n1) -> Value (BVType n2) -> Value (BVType (n1 + n2))
-Literal b1 # Literal b2 = Literal (b1 B.# b2)
-v1 # v2 = Undefined (BVTypeRepr $ addNat (width v1) (width v2))
+Literal (b1 :: BitVector n) # Literal b2 =
+  case leqAdd (LeqProof :: LeqProof 1 n) (B.width b2) of
+    LeqProof -> Literal (b1 B.# b2)
+v1 # v2 =
+  case asTypeRepr v1 of
+    BVTypeRepr (w :: NatRepr w) ->
+      case leqAdd (LeqProof :: LeqProof 1 w) (width v2) of
+        LeqProof ->
+          Undefined (BVTypeRepr $ addNat w (width v2))
 
 -- | Group a 'Value' in size 'n1' chunks.
 --
 -- If 'n1' does not divide 'n2', then the first chunk will be
 -- zero-extended.
-group :: NatRepr n1 -> Value (BVType n2) -> [Value (BVType n1)]
+group :: (1 <= n1) => NatRepr n1 -> Value (BVType n2) -> [Value (BVType n1)]
 group nr (Literal b) = [ Literal b' | b' <- B.group nr b ]
 group nr v@(Undefined _) = replicate count (Undefined (BVTypeRepr nr))
   where
@@ -211,7 +240,8 @@ modifyValue _ v@(Undefined _) = v
 -- Machine state monad
 
 data Address tp where
-  Address :: NatRepr n         -- /\ Number of bits.
+  Address :: (1 <= n)
+          => NatRepr n         -- /\ Number of bits.
           -> BitVector 64      -- /\ Address of first byte.
           -> Address (BVType n)
 type Address8 = Address (BVType 8)
@@ -430,6 +460,10 @@ instance MonadMachineState NullMachineState where
   -- | Get the value of a register.
   getReg reg =
     case typeRepr reg of
+      BoolTypeRepr ->
+        NullMachineState
+        { unNullMachineState = Identity $ BoolLiteral False
+        }
       BVTypeRepr w ->
         NullMachineState
         { unNullMachineState = Identity $

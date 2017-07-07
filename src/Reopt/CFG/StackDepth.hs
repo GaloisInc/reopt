@@ -202,6 +202,7 @@ addDepth v = blockStackRefs %= Set.union v
 valueHasSP :: forall ids utp . Value X86_64 ids utp -> Bool
 valueHasSP v0 =
    case v0 of
+     BoolValue{} -> False
      BVValue _sz _i -> False
      RelocatableValue{} -> False
      Initial r      -> testEquality r sp_reg /= Nothing
