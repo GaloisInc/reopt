@@ -329,12 +329,11 @@ printExecutedInstructions args = do
       case regs of
         X86 _ -> fail "X86Regs! only 64 bit is handled"
         X86_64 regs64 -> do
-          let Just rip_val = absoluteAddrSegment mem (fromIntegral (rip regs64))
-          case readInstruction rip_val of
+          let Just rip_val = resolveAbsoluteAddr mem (fromIntegral (rip regs64))
+          case readInstruction mem rip_val of
             Left err -> lift $ putStrLn $ "Couldn't disassemble instruction " ++ show err
-            Right (ii, nextAddr) -> do
-              let addr_word = fromIntegral (addrValue nextAddr)
-              lift $ putStrLn $ show $ ppInstruction addr_word ii
+            Right (ii, nextOff) -> do
+              lift $ putStrLn $ show $ ppInstruction (fromIntegral nextOff) ii
 
 ------------------------------------------------------------------------
 -- Register translation.

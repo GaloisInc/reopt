@@ -47,7 +47,7 @@ import           Data.Macaw.CFG
    , foldAppl
    , prettyF
    )
-import           Data.Macaw.Memory (SegmentedAddr)
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.Monad (RepValSize(..), XMMType)
@@ -223,14 +223,14 @@ data FnValue (tp :: Type)
      -- | A value returned by a function call (rax/rdx/xmm0)
    | FnReturn !(FnReturnVar tp)
      -- | The pointer to a function.
-   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(SegmentedAddr 64)
+   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(MemSegmentOff 64)
      -- | A pointer to an internal block at the given address.
-   | (tp ~ BVType 64) => FnBlockValue !(SegmentedAddr 64)
+   | (tp ~ BVType 64) => FnBlockValue !(MemSegmentOff 64)
       -- | Value is a argument passed via a register.
    | FnRegArg !(X86Reg tp) !Int
 
      -- | A global address
-   | (tp ~ BVType 64) => FnGlobalDataAddr !(SegmentedAddr 64)
+   | (tp ~ BVType 64) => FnGlobalDataAddr !(MemSegmentOff 64)
 
 instance Pretty (FnValue tp) where
   pretty (FnValueUnsupported reason _)
@@ -243,11 +243,9 @@ instance Pretty (FnValue tp) where
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
                                     <> parens (pretty $ show n)
-  pretty (FnBlockValue n)         = text "BlockValue"
-                                    <> parens (pretty $ show n)
+  pretty (FnBlockValue addr)   = text "BlockValue" <> parens (pretty addr)
   pretty (FnRegArg _ n)           = text "arg" <> int n
-  pretty (FnGlobalDataAddr addr)  = text "data@"
-                                    <> parens (pretty $ show addr)
+  pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
 instance HasRepr FnValue TypeRepr where
   typeRepr v =
     case v of
@@ -259,15 +257,15 @@ instance HasRepr FnValue TypeRepr where
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> knownType
-      FnBlockValue _ -> knownType
+      FnBlockValue{} -> knownType
       FnRegArg r _ -> typeRepr r
       FnGlobalDataAddr _ -> knownType
 
 ------------------------------------------------------------------------
 -- Function definitions
 
-data Function = Function { fnAddr :: !(SegmentedAddr 64)
-                           -- ^ In memory address of function
+data Function = Function { fnAddr :: !(MemSegmentOff 64)
+                           -- ^ The address for this function
                          , fnType :: !FunctionType
                            -- ^ Type of this  function
                          , fnBlocks :: [FnBlock]
@@ -395,7 +393,7 @@ data FnTermStmt
    | FnSystemCall !(FnValue (BVType 64))
                   ![(FnValue (BVType 64))]
                   ![ Some FnReturnVar ] (BlockLabel 64)
-   | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (SegmentedAddr 64))
+   | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (MemSegmentOff 64))
    | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
@@ -417,7 +415,8 @@ instance Pretty FnTermStmt where
             <+> text ":=" <+> text "syscall"
             <+> pretty call_no <> parens (commas arg_docs) <+> pretty lbl
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ map (text . show) (V.toList vec))
+                               <+> parens (commas $ map (pretty . relativeSegmentAddr)
+                                                        (V.toList vec))
       FnTermStmtUndefined -> text "undefined term"
 
 instance FoldFnValue FnTermStmt where

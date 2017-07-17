@@ -29,6 +29,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.CFG
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -42,7 +43,7 @@ data StackDepthOffset arch ids
 
 deriving instance OrdF  (ArchReg arch) => Eq (StackDepthOffset arch ids)
 deriving instance OrdF  (ArchReg arch) => Ord (StackDepthOffset arch ids)
-deriving instance ShowF (ArchReg arch) => Show (StackDepthOffset arch ids)
+deriving instance RegisterInfo (ArchReg arch) => Show (StackDepthOffset arch ids)
 
 stackDepthOffsetValue :: StackDepthOffset arch ids -> BVValue arch ids (ArchAddrWidth arch)
 stackDepthOffsetValue (Pos v) = v
@@ -63,9 +64,9 @@ data StackDepthValue arch ids = SDV { staticPart :: !Int64
 
 deriving instance OrdF (ArchReg arch) => Eq (StackDepthValue arch ids)
 deriving instance OrdF (ArchReg arch) => Ord (StackDepthValue arch ids)
-deriving instance ShowF (ArchReg arch) => Show (StackDepthValue arch ids)
+deriving instance RegisterInfo (ArchReg arch) => Show (StackDepthValue arch ids)
 
-instance ShowF (ArchReg arch) => Pretty (StackDepthValue arch ids) where
+instance RegisterInfo (ArchReg arch) => Pretty (StackDepthValue arch ids) where
   pretty sdv = integer (fromIntegral $ staticPart sdv)
                <+> go (Set.toList $ dynamicPart sdv)
     where
@@ -125,22 +126,22 @@ type BlockStackDepths arch ids = Set (StackDepthValue arch ids)
 
 -- We use BlockLabel but only really need CodeAddr (sub-blocks shouldn't appear)
 data StackDepthState arch ids
-   = SDS { _blockInitStackPointers :: !(Map (ArchSegmentedAddr arch) (StackDepthValue arch ids))
+   = SDS { _blockInitStackPointers :: !(Map (ArchSegmentOff arch) (StackDepthValue arch ids))
          , _blockStackRefs :: !(BlockStackDepths arch ids)
-         , _blockFrontier  :: ![ArchSegmentedAddr arch]
+         , _blockFrontier  :: ![ArchSegmentOff arch]
            -- ^ Set of blocks to explore next.
          }
 
 -- | Maps blocks already seen to the expected depth at the start of the block.
 blockInitStackPointers :: Simple Lens (StackDepthState arch ids)
-                                      (Map (ArchSegmentedAddr arch) (StackDepthValue arch ids))
+                                      (Map (ArchSegmentOff arch) (StackDepthValue arch ids))
 blockInitStackPointers = lens _blockInitStackPointers (\s v -> s { _blockInitStackPointers = v })
 
 blockStackRefs :: Simple Lens (StackDepthState arch ids) (BlockStackDepths arch ids)
 blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 
 -- | Set of blocks to visit next.
-blockFrontier :: Simple Lens (StackDepthState arch ids) [ArchSegmentedAddr arch]
+blockFrontier :: Simple Lens (StackDepthState arch ids) [ArchSegmentOff arch]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 -- ----------------------------------------------------------------------------------------
@@ -174,8 +175,8 @@ blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 type StackDepthM arch ids a = ExceptT String (State (StackDepthState arch ids)) a
 
-addBlock :: (OrdF (ArchReg arch), ShowF (ArchReg arch))
-         => SegmentedAddr (ArchAddrWidth arch)
+addBlock :: RegisterInfo (ArchReg arch)
+         => ArchSegmentOff arch
          -> StackDepthValue arch ids
          -> StackDepthM arch ids ()
 addBlock addr start = do
@@ -257,7 +258,7 @@ goStmt init_sp (WriteMem addr _ v) = do
 goStmt _ _ = return ()
 
 recoverBlock :: DiscoveryFunInfo X86_64 ids
-             -> SegmentedAddr 64
+             -> MemSegmentOff 64
              -> StackDepthM X86_64 ids ()
 recoverBlock interp_state root_addr = do
     Just init_sp <- use $ blockInitStackPointers . at root_addr
@@ -328,7 +329,7 @@ recoverIter ist = do
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackDepth :: DiscoveryFunInfo X86_64 ids
-                  -> SegmentedAddr 64
+                  -> MemSegmentOff 64
                   -> Either String (BlockStackDepths X86_64 ids)
 maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist)) s0
   where

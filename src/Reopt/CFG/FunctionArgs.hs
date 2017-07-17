@@ -8,6 +8,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.CFG.FunctionArgs
@@ -37,7 +38,7 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
-import           Data.Macaw.Memory (Memory)
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -78,16 +79,18 @@ import           Reopt.CFG.FnRep (FunctionType(..))
 -- A srt of registrs
 type RegisterSet (r :: Type -> *) = Set (Some r)
 
+type RegSegmentOff r = MemSegmentOff (RegAddrWidth r)
+
 -- | If we demand a register from a function (or block, for phase 1),
 -- this results in both direct argument register demands and function
 -- result demands.
 data DemandSet (r :: Type -> *) =
     DemandSet { registerDemands       :: !(RegisterSet r)
                 -- This maps a function address to a register that depends on its input parameters.
-              , functionResultDemands :: !(Map (SegmentedAddr (RegAddrWidth r)) (RegisterSet r))
+              , functionResultDemands :: !(Map (RegSegmentOff r) (RegisterSet r))
               }
 
-deriving instance (ShowF r) => Show (DemandSet r)
+deriving instance (ShowF r, MemWidth (RegAddrWidth r)) => Show (DemandSet r)
 deriving instance (TestEquality r) => Eq (DemandSet r)
 deriving instance (OrdF r) => Ord (DemandSet r)
 
@@ -119,12 +122,12 @@ data DemandType r
   = DemandAlways
   -- | This type is for registers that are demanded if the function at the given address wants
   -- the given register.
-  | forall tp. DemandFunctionArg (SegmentedAddr (RegAddrWidth r)) (r tp)
+  | forall tp. DemandFunctionArg (RegSegmentOff r) (r tp)
     -- | This is a associated with a set of registers that are demanded if the given register is needed
     -- as a return value.
   | forall tp. DemandFunctionResult (r tp)
 
-instance ShowF r => Show (DemandType r) where
+instance (MemWidth (RegAddrWidth r), ShowF r) => Show (DemandType r) where
   showsPrec _ DemandAlways  = showString "DemandAlways"
   showsPrec p (DemandFunctionArg a r) = showParen (p >= 10) $
     showString "DemandFunctionArg " . shows a . showChar ' ' . showsF r
@@ -181,12 +184,12 @@ data FunctionArgsState arch ids = FAS
   , _assignmentCache :: !(AssignmentCache (ArchReg arch) ids)
 
   -- | The set of blocks that we have already visited.
-  , _visitedBlocks  :: !(Set (ArchSegmentedAddr arch))
+  , _visitedBlocks  :: !(Set (ArchSegmentOff arch))
 
   -- | The set of blocks we need to consider (should be disjoint from visitedBlocks)
   , _blockFrontier  :: ![ParsedBlock arch ids]
   , funSyscallPersonality :: !(SyscallPersonality arch)
-  , computedAddrSet :: !(Set (ArchSegmentedAddr arch))
+  , computedAddrSet :: !(Set (ArchSegmentOff arch))
     -- ^ Set of addresses that are used in function image computation
     -- Other functions are assumed to require all arguments.
   }
@@ -206,13 +209,13 @@ assignmentCache :: Simple Lens (FunctionArgsState arch ids) (AssignmentCache (Ar
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
 -- |The set of blocks that we have already visited or added to frontier
-visitedBlocks :: Simple Lens (FunctionArgsState arch ids) (Set (ArchSegmentedAddr arch))
+visitedBlocks :: Simple Lens (FunctionArgsState arch ids) (Set (ArchSegmentOff arch))
 visitedBlocks = lens _visitedBlocks (\s v -> s { _visitedBlocks = v })
 
 blockFrontier :: Simple Lens (FunctionArgsState arch ids) [ParsedBlock arch ids]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
-initFunctionArgsState :: SyscallPersonality arch -> Set (ArchSegmentedAddr arch) -> FunctionArgsState arch ids
+initFunctionArgsState :: SyscallPersonality arch -> Set (ArchSegmentOff arch) -> FunctionArgsState arch ids
 initFunctionArgsState sysp addrs =
   FAS { _blockTransfer     = Map.empty
       , _blockDemandMap    = Map.empty
@@ -235,7 +238,7 @@ type FunctionArgsM arch ids a = State (FunctionArgsState arch ids) a
 addIntraproceduralJumpTarget :: ArchConstraints arch
                              => DiscoveryFunInfo arch ids
                              -> ArchLabel arch
-                             -> ArchSegmentedAddr arch
+                             -> ArchSegmentOff arch
                              -> FunctionArgsM arch ids ()
 addIntraproceduralJumpTarget fun_info src_block dest_addr = do  -- record the edge
   let dest = mkRootBlockLabel dest_addr
@@ -256,7 +259,7 @@ valueUses :: (OrdF (ArchReg arch), CanFoldValues arch)
 valueUses v =
   zoom assignmentCache $
             foldValueCached (\_ _    -> mempty)
-                            (\_ _    -> mempty)
+                            (\_      -> mempty)
                             (\r      -> Set.singleton (Some r))
                             (\_ regs -> regs)
                             v
@@ -309,34 +312,45 @@ demandValue lbl v = do
 -- -----------------------------------------------------------------------------
 -- Entry point
 
-type ArgDemandsMap r
-   = Map (SegmentedAddr (RegAddrWidth r))
-         (Map (Some r) (Map (SegmentedAddr (RegAddrWidth r)) (DemandSet r)))
 
+type AddrDemandMap r = Map (RegSegmentOff r) (DemandSet r)
+
+type ArgDemandsMap r = Map (RegSegmentOff r) (Map (Some r) (AddrDemandMap r))
 
 -- PERF: we can calculate the return types as we go (instead of doing
 -- so at the end).
-calculateGlobalFixpoint :: OrdF r
+calculateGlobalFixpoint :: forall r
+                        .  OrdF r
                         => ArgDemandsMap r
-                        -> Map (SegmentedAddr (RegAddrWidth r)) (ResultDemandsMap r)
-                        -> Map (SegmentedAddr (RegAddrWidth r)) (DemandSet r)
-                        -> Map (SegmentedAddr (RegAddrWidth r)) (DemandSet r)
-calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap
-  = go argsMap argsMap
+                        -> Map (RegSegmentOff r) (ResultDemandsMap r)
+                        -> AddrDemandMap r
+                        -> AddrDemandMap r
+calculateGlobalFixpoint argDemandsMap resultDemandsMap argsMap = go argsMap argsMap
   where
+    go :: AddrDemandMap r
+       -> AddrDemandMap r
+       -> AddrDemandMap r
     go acc new
       | Just ((fun, newDemands), rest) <- Map.maxViewWithKey new =
           let (nexts, acc') = backPropagate acc fun newDemands
           in go acc' (Map.unionWith mappend rest nexts)
       | otherwise = acc
 
+    backPropagate :: AddrDemandMap r
+                  -> RegSegmentOff r
+                  -> DemandSet r
+                  -> (AddrDemandMap r, AddrDemandMap r)
     backPropagate acc fun (DemandSet regs rets) =
       -- We need to push rets through the corresponding functions, and
       -- notify all functions which call fun regs.
-      let goRet addr retRegs =
+      let goRet :: RegSegmentOff r -> Set (Some r) -> DemandSet r
+          goRet addr retRegs =
             mconcat [ resultDemandsMap ^. ix addr ^. ix r | r <- Set.toList retRegs ]
+
+          retDemands :: AddrDemandMap r
           retDemands = Map.mapWithKey goRet rets
 
+          regsDemands :: AddrDemandMap r
           regsDemands =
             Map.unionsWith mappend [ argDemandsMap ^. ix fun ^. ix r | r <- Set.toList regs ]
 
@@ -392,8 +406,10 @@ summarizeCall :: forall arch ids
               -> FunctionArgsM arch ids ()
 summarizeCall mem lbl proc_state isTailCall = do
   knownAddrs <- gets computedAddrSet
-  case asLiteralAddr mem (proc_state^.boundValue ip_reg) of
-    Just faddr | Set.member faddr knownAddrs -> do
+  case asLiteralAddr (proc_state^.boundValue ip_reg) of
+    Just faddr0
+      | Just faddr <- asSegmentOff mem faddr0
+      , Set.member faddr knownAddrs -> do
       -- If a subsequent block demands r, then we note that we want r from
       -- function faddr
       -- FIXME: refactor out Some s
@@ -435,6 +451,7 @@ stmtDemandedValues stmt =
     WriteMem addr _ v -> [Some addr, Some v]
     -- Place holder statements are unknwon
     PlaceHolderStmt _ _ -> []
+    InstructionStart _ _ -> []
     -- Comment statements have no specific value.
     Comment _ -> []
     ExecArchStmt astmt -> demandedArchStmtValues astmt
@@ -453,7 +470,7 @@ summarizeBlock :: forall arch ids
                .  SummarizeConstraints arch
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
-               -> ArchSegmentedAddr arch -- ^ Address of the code.
+               -> ArchSegmentOff arch -- ^ Address of the code.
                -> StatementList arch ids -- ^ Current block
                -> FunctionArgsM arch ids ()
 summarizeBlock mem interp_state addr stmts = do
@@ -573,25 +590,25 @@ calculateLocalFixpoint new =
 
 
 data FunctionArgState r = FunctionArgState {
-    _funArgMap :: !(ArgDemandsMap r)
-  , _funResMap :: !(Map (SegmentedAddr (RegAddrWidth r)) (ResultDemandsMap r))
-  , _alwaysDemandMap :: !(Map (SegmentedAddr (RegAddrWidth r)) (DemandSet r))
+    _funArgMap       :: !(ArgDemandsMap r)
+  , _funResMap       :: !(Map (RegSegmentOff r) (ResultDemandsMap r))
+  , _alwaysDemandMap :: !(Map (RegSegmentOff r) (DemandSet r))
   }
 
 funArgMap :: Simple Lens (FunctionArgState r) (ArgDemandsMap r)
 funArgMap = lens _funArgMap (\s v -> s { _funArgMap = v })
 
 -- | Get the map from function adderesses to what results are demanded.
-funResMap :: Simple Lens (FunctionArgState r) (Map (SegmentedAddr (RegAddrWidth r)) (ResultDemandsMap r))
+funResMap :: Simple Lens (FunctionArgState r) (Map (RegSegmentOff r) (ResultDemandsMap r))
 funResMap = lens _funResMap (\s v -> s { _funResMap = v })
 
 -- | Get the map from function adderesses to what results are demanded.
-alwaysDemandMap :: Simple Lens (FunctionArgState r) (Map (SegmentedAddr (RegAddrWidth r))  (DemandSet r))
+alwaysDemandMap :: Simple Lens (FunctionArgState r) (Map (RegSegmentOff r)  (DemandSet r))
 alwaysDemandMap = lens _alwaysDemandMap (\s v -> s { _alwaysDemandMap = v })
 
 decomposeMap :: OrdF r
              => DemandSet r
-             -> SegmentedAddr (RegAddrWidth r)
+             -> RegSegmentOff r
              -> FunctionArgState r
              -> DemandType r
              -> DemandSet r
@@ -613,7 +630,7 @@ decomposeMap ds addr acc DemandAlways v =
 doOneFunction :: forall arch ids
               .  SummarizeConstraints arch
               => SyscallPersonality arch
-              -> Set (ArchSegmentedAddr arch)
+              -> Set (ArchSegmentOff arch)
               -> DiscoveryState arch
               -> FunctionArgState (ArchReg arch)
               -> DiscoveryFunInfo arch ids
@@ -668,7 +685,7 @@ functionDemands :: forall arch
                 .  SummarizeConstraints arch
                 => SyscallPersonality arch
                 -> DiscoveryState arch
-                -> Map (SegmentedAddr (ArchAddrWidth arch)) (DemandSet (ArchReg arch))
+                -> Map (ArchSegmentOff arch) (DemandSet (ArchReg arch))
 functionDemands sysp info =
     calculateGlobalFixpoint (m^.funArgMap) (m^.funResMap) (m^.alwaysDemandMap)
   where
@@ -699,11 +716,11 @@ instance CanDemandValues X86_64 where
       MemCopy _sz cnt src dest rev -> [ Some cnt, Some src, Some dest, Some rev ]
       MemSet cnt v ptr mdf -> [ Some cnt, Some v, Some ptr, Some mdf ]
 
-inferFunctionTypeFromDemands :: Map (SegmentedAddr 64) (DemandSet X86Reg)
-                             -> Map (SegmentedAddr 64) FunctionType
+inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
+                             -> Map (MemSegmentOff 64) FunctionType
 inferFunctionTypeFromDemands dm =
   let go ds m = Map.unionWith Set.union (functionResultDemands ds) m
-      retDemands :: Map (SegmentedAddr 64) (Set (Some X86Reg))
+      retDemands :: Map (MemSegmentOff 64) (Set (Some X86Reg))
       retDemands = foldr go Map.empty dm
 
       -- drop the suffix which isn't a member of the arg set.  This
@@ -726,7 +743,7 @@ inferFunctionTypeFromDemands dm =
                         dm
                         retDemands
 
-debugPrintMap :: DiscoveryState X86_64 -> Map (SegmentedAddr 64) FunctionType -> String
+debugPrintMap :: DiscoveryState X86_64 -> Map (MemSegmentOff 64) FunctionType -> String
 debugPrintMap ist m = "Arguments: \n\t" ++ intercalate "\n\t" (Map.elems comb)
   where -- FIXME: ignores those functions we don't have names for.
         comb = Map.intersectionWith doOne (symbolAddrsAsMap (symbolNames ist)) m

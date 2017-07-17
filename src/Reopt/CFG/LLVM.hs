@@ -186,33 +186,31 @@ llvmIntrinsics = [ overflowOp bop in_typ
 --------------------------------------------------------------------------------
 
 -- | Maps code addresses in the LLVM state to the associated symbol name if any.
-type AddrSymMap w = Map (SegmentedAddr w) BSC.ByteString
-
-type AddrFunMap = Map (SegmentedAddr 64) (L.Symbol, FunctionType)
+type AddrSymMap w = Map (MemSegmentOff w) BSC.ByteString
 
 -- | Return the LLVM symbol associated with the given name
 functionName :: AddrSymMap 64
                 -- ^ Maps addresses of symbols to the associated symbol name.
-             -> SegmentedAddr 64
+             -> MemSegmentOff 64
              -> L.Symbol
 functionName m addr
     | Just nm <- Map.lookup addr m =
-      L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
-    | Just base <- segmentBase seg =
-      L.Symbol $ "reopt_gen_" ++ show (base + addr^.addrOffset)
-    | otherwise =
-      L.Symbol $ "reopt_gen_" ++ show (segmentIndex seg) ++ "_" ++ show (addr^.addrOffset)
-  where seg = addrSegment addr
+        L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
+    | Just addr_val <- msegAddr addr =
+      L.Symbol $ "reopt_gen_" ++ show addr_val
+    | otherwise = L.Symbol $ "reopt_gen_" ++ show (segmentIndex seg) ++ "_" ++ show off
+      where seg = msegSegment addr
+            off = msegOffset addr
 
-blockWordName :: SegmentedAddr 64 -> L.Ident
-blockWordName p = L.Ident ("block_" ++ nm)
-  where seg = addrSegment p
-        offset = p^.addrOffset
+blockWordName :: MemSegmentOff 64  -> L.Ident
+blockWordName addr = L.Ident ("block_" ++ nm)
+  where seg = msegSegment addr
+        off = msegOffset addr
         nm = case segmentBase seg of
-               Just base -> show (base + offset)
-               Nothing -> show (segmentIndex seg) ++ "_" ++ show offset
+               Just base -> show (base + off)
+               Nothing -> show (segmentIndex seg) ++ "_" ++ show off
 
-blockName :: BlockLabel w -> L.BlockLabel
+blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
 blockName l = L.Named (L.Ident (show l))
 
 -- The type of FP arguments and results.  We actually want fp128, but
@@ -307,24 +305,28 @@ failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
 
-getReferencedFunctions :: Map (SegmentedAddr 64) FunctionType
+type FunctionTypeMap = Map (MemSegmentOff 64) FunctionType
+
+getReferencedFunctions :: FunctionTypeMap
                        -> Function
-                       -> Map (SegmentedAddr 64) FunctionType
-getReferencedFunctions m0 f = foldFnValue findReferencedFunctions (insertAddr (fnAddr f) (fnType f) m0) f
-  where findReferencedFunctions :: Map (SegmentedAddr 64) FunctionType
+                       -> FunctionTypeMap
+getReferencedFunctions m0 f =
+    foldFnValue findReferencedFunctions (insertAddr (fnAddr f) (fnType f) m0) f
+  where findReferencedFunctions :: FunctionTypeMap
                                 -> FnValue tp
-                                -> Map (SegmentedAddr 64) FunctionType
-        findReferencedFunctions m (FnFunctionEntryValue ft addr) = insertAddr addr ft m
+                                -> FunctionTypeMap
+        findReferencedFunctions m (FnFunctionEntryValue ft addr) =
+          insertAddr addr ft m
         findReferencedFunctions m _ = m
 
-        insertAddr :: SegmentedAddr 64
+        insertAddr :: MemSegmentOff 64
                    -> FunctionType
-                   -> Map (SegmentedAddr 64) FunctionType
-                   -> Map (SegmentedAddr 64) FunctionType
+                   -> FunctionTypeMap
+                   -> FunctionTypeMap
         insertAddr addr ft m =
           case Map.lookup addr m of
             Just ft' | ft /= ft' ->
-                         Loc.error $ show addr ++ " has incompatible types:\n"
+                         Loc.error $ show (relativeSegmentAddr addr) ++ " has incompatible types:\n"
                               ++ show ft  ++ "\n"
                               ++ show ft' ++ "\n"
                      | otherwise -> m
@@ -336,7 +338,8 @@ padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef
 
 data FunLLVMContext = FunLLVMContext
   { funSyscallIntrinsicPostfix :: !String
-  , funAddrFunMap :: !AddrFunMap
+  , funAddrSymMap :: !(AddrSymMap 64)
+  , funAddrTypeMap :: !FunctionTypeMap
   , funArgs      :: !(V.Vector (L.Typed L.Value))
   }
 
@@ -479,13 +482,14 @@ valueToLLVM ctx blk m val = do
     -- expr as function addresses appear as constants in e.g. phi
     -- nodes
     FnFunctionEntryValue ft addr -> do
-      case Map.lookup addr (funAddrFunMap ctx) of
-        Just (sym,tp)
+      case Map.lookup addr (funAddrTypeMap ctx) of
+        Just tp
           | ft /= tp -> Loc.error "Mismatch function type"
-          | otherwise ->
+          | otherwise -> do
+            let sym = functionName (funAddrSymMap ctx) addr
             let fptr :: L.Typed L.Value
                 fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
-             in mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
+            mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
         Nothing -> do
           Loc.error $ "Could not identify " ++ show addr
     -- A pointer to an internal block at the given address.
@@ -496,9 +500,9 @@ valueToLLVM ctx blk m val = do
       where Just r = funArgs ctx V.!? i
     -- A global address
     FnGlobalDataAddr addr ->
-      case segmentBase (addrSegment addr) of
-        Just base -> mk $ L.integer $ fromIntegral $ base + addr^.addrOffset
+      case msegAddr addr of
         Nothing -> Loc.error $ "FnGlobalDataAddr only supports global values."
+        Just fixedAddr -> mk $ L.integer $ fromIntegral fixedAddr
 
 -- | Return number of bits and LLVM float type should take
 floatTypeWidth :: L.FloatType -> Int32
@@ -974,12 +978,14 @@ termStmtToLLVM' tm =
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
 
-       addrFunMap <- gets $ funAddrFunMap . funContext
+       addrSymMap  <- gets $ funAddrSymMap  . funContext
+       addrTypeMap <- gets $ funAddrTypeMap . funContext
        dest_f <-
          case dest of
            -- FIXME: use ft here instead?
            FnFunctionEntryValue dest_ftp addr
-             | Just (sym, tp) <- Map.lookup addr addrFunMap -> do
+             | Just tp <- Map.lookup addr addrTypeMap -> do
+               let sym = functionName addrSymMap addr
                when (functionTypeToLLVM tp /= fun_ty) $ do
                  Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
                    ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
@@ -1155,10 +1161,10 @@ blockToLLVM ctx fs b = (res, funState s)
 defineFunction' :: String
                   -- ^ Name to append to system call
                -> AddrSymMap 64
-               -> AddrFunMap
+               -> FunctionTypeMap
                -> Function
                -> L.Define
-defineFunction' syscallPostfix addrSymMap addrFunMap f =
+defineFunction' syscallPostfix addrSymMap funTypeMap f =
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  = funReturnType
              , L.defName     = symbol
@@ -1181,7 +1187,8 @@ defineFunction' syscallPostfix addrSymMap addrFunMap f =
 
     ctx :: FunLLVMContext
     ctx = FunLLVMContext { funSyscallIntrinsicPostfix = syscallPostfix
-                         , funAddrFunMap  = addrFunMap
+                         , funAddrSymMap  = addrSymMap
+                         , funAddrTypeMap = funTypeMap
                          , funArgs        = postInitArgs
                          }
 
@@ -1222,10 +1229,10 @@ declareIntrinsic i =
 intrinsicDecls :: [L.Declare]
 intrinsicDecls = declareIntrinsic <$> (reoptIntrinsics ++ llvmIntrinsics)
 
-declareFunction' :: (L.Symbol, FunctionType) -> L.Declare
-declareFunction' (sym, ftp) =
+declareFunction' :: AddrSymMap 64 -> (MemSegmentOff 64, FunctionType) -> L.Declare
+declareFunction' addrSymMap (addr, ftp) =
   L.Declare { L.decRetType = funReturnType
-            , L.decName    = sym
+            , L.decName    = functionName addrSymMap addr
             , L.decArgs    = functionTypeArgTypes ftp
             , L.decVarArgs = False
             , L.decAttrs   = []
@@ -1250,17 +1257,18 @@ moduleForFunctions syscallPostfix addrSymMap fns =
              , L.modAliases    = []
              }
   where -- Get all function references
-        all_refs :: Map (SegmentedAddr 64) FunctionType
-        all_refs = foldl getReferencedFunctions Map.empty fns
+        funTypeMap :: FunctionTypeMap
+        funTypeMap = foldl getReferencedFunctions Map.empty fns
 
-        addrFunMap :: AddrFunMap
-        addrFunMap = Map.fromList
-          [ (addr, (functionName addrSymMap addr, tp))
-          | (addr, tp) <- Map.toList all_refs
+
+        excludedSet = Set.fromList $ fnAddr <$> fns
+
+        declFunMap =
+          [ (addr, tp)
+          | (addr, tp) <- Map.toList funTypeMap
+          , Set.notMember addr excludedSet
           ]
 
-        declFunMap = addrFunMap `Map.withoutKeys` (Set.fromList (fnAddr <$> fns))
+        fnDecls = declareFunction' addrSymMap <$> declFunMap
 
-        fnDecls = declareFunction' <$> Map.elems declFunMap
-
-        defines = defineFunction' syscallPostfix addrSymMap addrFunMap <$> fns
+        defines = defineFunction' syscallPostfix addrSymMap funTypeMap <$> fns

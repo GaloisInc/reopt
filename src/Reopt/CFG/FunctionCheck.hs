@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 module Reopt.CFG.FunctionCheck
    ( checkFunction
    ) where
@@ -10,19 +11,22 @@ import qualified Data.Vector as V
 
 import Data.Macaw.CFG
 import Data.Macaw.Discovery.State
+import Data.Macaw.Memory (MemWidth)
 
 -- | This returns true if all block terminators reachable from the
 -- function entry point have non-error term stmts.
 --
 -- An error term statement is one of form translation error or
 -- classify error.
-checkFunction :: DiscoveryFunInfo arch ids
+checkFunction :: MemWidth (ArchAddrWidth arch)
+              => DiscoveryFunInfo arch ids
               -> Bool
 checkFunction info = checkFunction' info Set.empty [discoveredFunAddr info]
 
-checkFunction' :: DiscoveryFunInfo arch ids
-               -> Set (ArchSegmentedAddr arch)
-               -> [ArchSegmentedAddr arch]
+checkFunction' :: MemWidth (ArchAddrWidth arch)
+               => DiscoveryFunInfo arch ids
+               -> Set (ArchSegmentOff arch)
+               -> [ArchSegmentOff arch]
                -> Bool
 checkFunction' _inf _visite [] = True
 checkFunction' info visited (lbl:rest)
@@ -38,7 +42,7 @@ checkFunction' info visited (lbl:rest)
 
 checkRegion :: ParsedBlock arch ids
             -> StatementList arch ids
-            -> Maybe [ArchSegmentedAddr arch]
+            -> Maybe [ArchSegmentOff arch]
 checkRegion reg stmts =
   case stmtsTerm stmts of
     ParsedCall _ Nothing    -> Just []

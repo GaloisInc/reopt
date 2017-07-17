@@ -79,19 +79,23 @@ termChildren Ret = []
 -- FIXME: clag
 findBlock :: Memory 64 -> Word64 -> Either String CFG
 findBlock mem entry = do
-  let Just addr = absoluteAddrSegment mem (fromIntegral entry)
+  let addr = absoluteAddrSegment (fromIntegral entry)
+  (seg,idx) <-
+    case lookupAddrSegment mem addr of
+      Nothing -> Left $ "findBlock given illegal address " ++ show addr
+      Just p -> pure p
   M.singleton entry <$>
-   case runMemoryByteReader Perm.read addr $ extractBlock entry S.empty of
-    Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
-    Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
-    Right (Right ([Absolute next], _, stmts), _) ->
-      Right (Block stmts $ Direct next)
-    Right (Right ([NFallthrough next], _, stmts), _) ->
-      Right (Block stmts $ Fallthrough next)
-    Right (Right ([Absolute branch, Absolute fallthrough], _, stmts), _) ->
-      Right (Block stmts $ Cond branch fallthrough)
-    Right (Right ([NIndirect], _, stmts), _) ->
-      Right (Block stmts $ Indirect)
+   case runMemoryByteReader mem Perm.read seg idx $ extractBlock entry S.empty of
+     Left err -> Left $ "runMemoryByteReader " ++ showHex entry " " ++ show err
+     Right (Left err, _) | err >= 0 -> Left $ "Could not disassemble instruction at 0x" ++ showHex err ""
+     Right (Right ([Absolute next], _, stmts), _) ->
+       Right (Block stmts $ Direct next)
+     Right (Right ([NFallthrough next], _, stmts), _) ->
+       Right (Block stmts $ Fallthrough next)
+     Right (Right ([Absolute branch, Absolute fallthrough], _, stmts), _) ->
+       Right (Block stmts $ Cond branch fallthrough)
+     Right (Right ([NIndirect], _, stmts), _) ->
+       Right (Block stmts $ Indirect)
 
 -- FIXME: fancy data structures could do this better - keep instruction
 -- beginnings around, use a range map...

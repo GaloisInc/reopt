@@ -49,10 +49,10 @@ main = do
         case insertMemSegment seg (emptyMemory Addr64) of
           Left e -> error $ "Segment " ++ showInsertError e
           Right mem' -> mem'
-      base = SegmentedAddr seg 0
+      Just base = resolveSegmentOff seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do
-        (bs, end, maybeError) <- disassembleBlock gen (rootLoc base) (segmentSize seg)
+        (bs, end, maybeError) <- disassembleBlock mem gen (rootLoc base) (segmentSize seg)
         case maybeError of
           Just err -> return $ Left err
           Nothing ->

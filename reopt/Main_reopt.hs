@@ -69,11 +69,11 @@ import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg (X86Reg)
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..), FunctionType)
+import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FunctionArgs (DemandSet, functionDemands, inferFunctionTypeFromDemands)
 import           Reopt.CFG.FunctionCheck
 import qualified Reopt.CFG.LLVM as LLVM
-import           Reopt.CFG.Recovery (recoverFunction)
+import           Reopt.CFG.Recovery
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Relinker
 
@@ -460,16 +460,14 @@ mkFinalCFGWithSyms ainfo mem e = withArchConstraints ainfo $ do
       [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
       _ -> fail "Elf contains multiple symbol tables."
 
-  let (unresolved, resolved) = withArchConstraints ainfo $
+  let resolved = withArchConstraints ainfo $
          resolvedSegmentedElfFuncSymbols mem entries
   -- Check for unresolved symbols
-  when (not (Map.null unresolved)) $ do
-    fail $ show $ withArchConstraints ainfo $ ppElfUnresolvedSymbols unresolved
   let sym_map =
         case symbolAddrMap (fmap head resolved) of
           Left msg -> error msg
           Right m -> m
-  entry <- case withArchConstraints ainfo $ absoluteAddrSegment mem (fromIntegral (elfEntry e)) of
+  entry <- case resolveAbsoluteAddr mem (fromIntegral (elfEntry e)) of
              Nothing -> fail "Could not resolve entry"
              Just v  -> pure v
   let sym_addrs = entry : Map.keys resolved
@@ -554,10 +552,26 @@ showCFG opt path = do
   (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e
   print $ ppDiscoveryStateBlocks disc_info
 
+-- | Attempt to find the address of a string identifying a symbol name, and
+-- return either the string if it cannot be resolved or the address.
+resolveSymAddr :: Map BS.ByteString (MemSegmentOff 64)
+                  -- ^ Map from symbol names in binary to their address.
+               -> Either Word64 String
+                  -- ^ The name of a symbol as a string.
+               -> Either String Word64
+resolveSymAddr _ (Left w) = Right w
+resolveSymAddr symMap (Right nm) =
+  case Map.lookup (fromString nm) symMap of
+    Just addr ->
+      case msegAddr addr of
+        Just b -> Right (fromIntegral b)
+        Nothing -> error "Relocation does not yet support relocatable executables."
+    Nothing -> Left nm
+
 -- | Try to recover function information from the information
 -- recovered during code discovery.
 getFns :: SyscallPersonality X86_64
-       -> Map BS.ByteString (SegmentedAddr 64)
+       -> Map BS.ByteString (MemSegmentOff 64)
           -- ^ Maps symbol names to addresses
        -> Set String
           -- ^ Name of symbols/addresses to exclude
@@ -579,18 +593,17 @@ getFns sysp symMap excludedNames info = do
   let include :: Some (DiscoveryFunInfo X86_64) -> Bool
       include (Some f) = do
         let addr = discoveredFunAddr f
-        case segmentBase (addrSegment addr) of
-          Just base -> Set.notMember word excludeSet
-            where word = fromIntegral (base + addr^.addrOffset)
-          _ -> True
+        case msegAddr addr of
+          Just word -> Set.notMember (fromIntegral word) excludeSet
+          Nothing -> True
 
   let entries = filter include $ exploredFunctions info
 
   let mem = memory info
-  let fDems :: Map (SegmentedAddr 64) (DemandSet X86Reg)
+  let fDems :: Map (MemSegmentOff 64) (DemandSet X86Reg)
       fDems = functionDemands sysp info
-  let fArgs :: Map (SegmentedAddr 64) FunctionType
-      fArgs = inferFunctionTypeFromDemands fDems
+  let fArgs :: AddrToFunctionTypeMap
+      fArgs = Map.mapKeys relativeSegmentAddr $ inferFunctionTypeFromDemands fDems
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \(Some finfo) -> do
     let entry = discoveredFunAddr finfo
@@ -672,7 +685,7 @@ elfAddrSymEntries :: SectionIndexMap 64
                      -- ^ Map from elf section indices to base address for section
                      -- and section in Elf file
                   -> Elf 64
-                  -> [(BS.ByteString, SegmentedAddr 64)]
+                  -> [(BS.ByteString, MemSegmentOff 64)]
 elfAddrSymEntries m binary =
   [ (steName entry, val)
   | tbl <- elfSymtab binary
@@ -684,7 +697,8 @@ elfAddrSymEntries m binary =
   , idx /= SHN_UNDEF && idx <= SHN_LORESERVE
     -- Get base index of section
   , (base, sec) <- maybeToList $ Map.lookup idx m
-  , let val = base & addrOffset +~ fromIntegral (steValue entry - elfSectionAddr sec)
+  , let diff = toInteger (steValue entry) - toInteger (elfSectionAddr sec)
+  , val <- maybeToList $ incSegmentOff base diff
   ]
 
 -- | Create map from symbol names to address.
@@ -692,7 +706,7 @@ elfSymAddrMap  :: SectionIndexMap 64
                   -- ^ Map from elf section indices to base address for section
                   -- and section in Elf file
                -> Elf 64
-               -> Map BS.ByteString (SegmentedAddr 64)
+               -> Map BS.ByteString (MemSegmentOff 64)
 elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
 
 -- | Create map from addresses to symbol name.
@@ -940,40 +954,42 @@ lookupElfOffset m a =
 --
 -- This is used to compute when it is safe to insert a redirection.  We want to
 -- ensure that adding a redirection will not break unknow
-newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (SegmentedAddr w) [SegmentedAddr w]
+newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (MemSegmentOff w) [MemSegmentOff w]
                                       }
 
 -- | Return how many bytes of space there are to write after address without
 -- ovewriting another control flow target.
-lookupControlFlowTargetSpace :: MemWidth w
-                             => SegmentedAddr w
+lookupControlFlowTargetSpace :: forall w
+                             .  MemWidth w
+                             => MemSegmentOff w
                              -> ControlFlowTargetSet w
                              -> MemWord w
 lookupControlFlowTargetSpace addr0 = go 0 addr0 addr0
-  where seg = addrSegment addr0
+  where seg = msegSegment addr0
+        go :: MemWord w -> MemSegmentOff w -> MemSegmentOff w -> ControlFlowTargetSet w -> MemWord w
         go inc base addr s =
           case Map.lookupGT addr (cfTargets s) of
             Just (next,fns)
-              | addrSegment addr == addrSegment next ->
-                let d = next^.addrOffset - addr^.addrOffset
+              | msegSegment addr == msegSegment next ->
+                let d = msegOffset next - msegOffset addr
                  in if null (filter (/= base) fns) then
                       go (inc+d) base next s
                      else
                       inc+d
             _ ->
-              if segmentSize seg >= addr^.addrOffset then
-                segmentSize seg - addr^.addrOffset
+              if segmentSize seg >= msegOffset addr then
+                segmentSize seg - msegOffset addr
                else
                 0
 
 addControlFlowTarget :: ControlFlowTargetSet w
-                     -> SegmentedAddr w
-                     -> SegmentedAddr w -- ^ Function entry point
+                     -> MemSegmentOff w
+                     -> MemSegmentOff w -- ^ Function entry point
                      -> ControlFlowTargetSet w
 addControlFlowTarget m a f = m { cfTargets = Map.insertWith (++) a [f] (cfTargets m) }
 
 addFunctionEntryPoint :: ControlFlowTargetSet w
-                      -> SegmentedAddr w
+                      -> MemSegmentOff w
                       -> ControlFlowTargetSet w
 addFunctionEntryPoint s a = addControlFlowTarget s a a
 
@@ -998,11 +1014,11 @@ addrRedirection :: ControlFlowTargetSet 64
                 -> LLVM.AddrSymMap 64
                 -> ElfSegmentMap 64
                 -> Function
-                -> Either (SegmentedAddr 64) (CodeRedirection Word64)
+                -> Either (MemSegmentOff 64) (CodeRedirection Word64)
 addrRedirection tgts addrSymMap m f = do
   let a = fnAddr f
-  let w = case segmentBase (addrSegment a) of
-            Just b -> fromIntegral (b + a^.addrOffset)
+  let w = case msegAddr a of
+            Just absAddr -> fromIntegral absAddr
             Nothing -> error "Redirection does not yet support relocatable binaries."
   case lookupElfOffset m w of
     Nothing -> Left (fnAddr f)
@@ -1074,22 +1090,6 @@ link_with_libreopt obj_dir args arch obj_llvm = do
 resolveSymName :: String -> Either Word64 String
 resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
 resolveSymName nm = Right nm
-
--- | Attempt to find the address of a string identifying a symbol name, and
--- return either the string if it cannot be resolved or the address.
-resolveSymAddr :: Map BS.ByteString (SegmentedAddr 64)
-                  -- ^ Map from symbol names in binary to their address.
-               -> Either Word64 String
-                  -- ^ The name of a symbol as a string.
-               -> Either String Word64
-resolveSymAddr _ (Left w) = Right w
-resolveSymAddr symMap (Right nm) =
-  case Map.lookup (fromString nm) symMap of
-    Just addr ->
-      case segmentBase (addrSegment addr) of
-        Just b -> Right (fromIntegral (b + addr^.addrOffset))
-        Nothing -> error "Relocation does not yet support relocatable executables."
-    Nothing -> Left nm
 
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
@@ -1171,8 +1171,8 @@ performReopt args =
               | Right binary_nm <- resolveSymName <$> Set.toList notrans
               , Just addr <- [Map.lookup (fromString binary_nm) symAddrMap]
               , let w :: Word64
-                    w = case segmentBase (addrSegment addr) of
-                          Just b -> fromIntegral (b + addr^.addrOffset)
+                    w = case msegAddr addr of
+                          Just b -> fromIntegral b
                           Nothing -> error $ "Merging does not yet support virtual addresses."
                 -- Get symbol name used in object.
               , Just nm <- [Map.lookup addr addrSymMap]

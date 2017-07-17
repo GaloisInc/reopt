@@ -19,7 +19,8 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
-  ( recoverFunction
+  ( Reopt.CFG.RegisterUse.AddrToFunctionTypeMap
+  , recoverFunction
   ) where
 
 import           Control.Lens
@@ -233,23 +234,23 @@ recoverValue' s v = do
   let assignMap   = s^.rsAssignMap
   case v of
     _ | Just Refl <- hasWidth v (memWidth mem)
-      , Just addr <- asLiteralAddr mem v -> do
-        let seg = addrSegment addr
+      , Just addr <- asLiteralAddr v
+      , Just addr_ref <- asSegmentOff mem addr -> do
+        let seg = msegSegment addr_ref
         case () of
           _ | segmentFlags seg `Perm.hasPerm` Perm.execute
             , Just ft <- Map.lookup addr (rsFunctionArgs s) -> do
-                Right $! FnFunctionEntryValue ft addr
+                Right $! FnFunctionEntryValue ft addr_ref
 
-          _ | Map.member addr (interpState^.parsedBlocks) -> do
-              Right $! FnBlockValue addr
-
+          _ | Map.member addr_ref (interpState^.parsedBlocks) -> do
+              Right $! FnBlockValue addr_ref
 
             | segmentFlags seg `Perm.hasPerm` Perm.write -> do
-              Right $! FnGlobalDataAddr addr
+              Right $! FnGlobalDataAddr addr_ref
 
             -- FIXME: do something more intelligent with rodata?
             | segmentFlags seg `Perm.hasPerm` Perm.read -> do
-              Right $! FnGlobalDataAddr addr
+              Right $! FnGlobalDataAddr addr_ref
 
             | otherwise -> do
               Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
@@ -373,8 +374,8 @@ recoverStmt s = do
                        <*> recoverValue ptr
                        <*> recoverValue mdf
       addFnStmt stmt
-    _ -> trace ("recoverStmt undefined for " ++ show (pretty s)) $ do
-      addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (pretty s))
+    _ -> trace ("recoverStmt undefined for " ++ show (ppStmt pretty s)) $ do
+      addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (ppStmt pretty s))
       return ()
 
 ------------------------------------------------------------------------
@@ -685,10 +686,10 @@ recoverFunction sysp fArgs mem fInfo = do
   let a = discoveredFunAddr fInfo
   let blockPreds = funBlockPreds fInfo
   let (usedAssigns, blockRegs)
-        = registerUse sysp fArgs mem fInfo blockPreds
+        = registerUse sysp fArgs fInfo blockPreds
   let cft = fromMaybe
               (debug DFunRecover ("Missing type for " ++ show a) ftMaximumFunctionType) $
-              Map.lookup a fArgs
+              Map.lookup (relativeSegmentAddr a) fArgs
 
   let insReg i (Some r) = MapF.insert r (FnRegValue (FnRegArg r i))
   let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)
@@ -713,7 +714,7 @@ recoverFunction sysp fArgs mem fInfo = do
               }
 
   let recoverInnerBlock :: RecoveredBlockInfo
-                        -> SegmentedAddr 64
+                        -> MemSegmentOff 64
                         -> Recover ids RecoveredBlockInfo
       recoverInnerBlock blockInfo addr = do
         let regs0 :: [Some X86Reg]

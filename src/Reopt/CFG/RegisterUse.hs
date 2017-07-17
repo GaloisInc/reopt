@@ -5,7 +5,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
-
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
@@ -32,7 +31,7 @@ import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
-import           Data.Macaw.Memory (Memory)
+import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -52,9 +51,9 @@ import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 -- funBlockPreds
 
 -- | A map from each address `l` to the labels of blocks that may jump to `l`.
-type FunPredMap w = Map (SegmentedAddr w) [BlockLabel w]
+type FunPredMap w = Map (MemSegmentOff w) [BlockLabel w]
 
-blockSucc :: StatementList arch ids -> [(ArchSegmentedAddr arch, Word64)]
+blockSucc :: StatementList arch ids -> [(ArchSegmentOff arch, Word64)]
 blockSucc stmts = do
   let idx = stmtsIdent stmts
   case stmtsTerm stmts of
@@ -68,7 +67,7 @@ blockSucc stmts = do
     ParsedTranslateError{} -> []
     ClassifyFailure{} -> []
 
-regionSucc :: ParsedBlock arch ids -> [SegmentedAddr (ArchAddrWidth arch)]
+regionSucc :: ParsedBlock arch ids -> [ArchSegmentOff arch]
 regionSucc b = fmap fst $ blockSucc (blockStatementList b)
 
 -- | Return the FunPredMap for the discovered block function.
@@ -90,7 +89,10 @@ type RegDeps ids = (Set (Some (AssignId ids)), Set (Some X86Reg))
 type AssignmentCache ids = Map (Some (AssignId ids)) (RegDeps ids)
 
 -- | Map from address to type of function at that address
-type AddrToFunctionTypeMap = Map (SegmentedAddr 64) FunctionType
+--
+-- We use the given key type so that we do not need access to memory object
+-- in computing types.
+type AddrToFunctionTypeMap = Map (MemAddr 64) FunctionType
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
@@ -100,7 +102,7 @@ data RegisterUseState ids = RUS {
   _assignmentUses     :: !(Set (Some (AssignId ids)))
     -- | Holds state about the set of registers that a block uses
     -- (required by this block or a successor).
-  , _blockRegUses :: !(Map (SegmentedAddr 64) (Set (Some X86Reg)))
+  , _blockRegUses :: !(Map (MemSegmentOff 64) (Set (Some X86Reg)))
     -- | Maps a each label that sets processor registers to the defined registers to their deps.  Not defined for all
     -- variables, hence use of Map instead of RegState X86Reg
   , _blockInitDeps  :: !(Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids)))
@@ -108,7 +110,7 @@ data RegisterUseState ids = RUS {
     -- in the set of deps (but probably should be).
   , _assignmentCache :: !(AssignmentCache ids)
     -- | The set of addresses we need to consider next.
-  , _blockFrontier  :: !(Set (SegmentedAddr 64))
+  , _blockFrontier  :: !(Set (MemSegmentOff 64))
     -- | Function arguments derived from AddrToFunctionTypeMap
   , functionArgs    :: !AddrToFunctionTypeMap
   , currentFunctionType :: !FunctionType
@@ -118,7 +120,7 @@ data RegisterUseState ids = RUS {
 
 initRegisterUseState :: SyscallPersonality X86_64
                      -> AddrToFunctionTypeMap
-                     -> SegmentedAddr 64
+                     -> MemSegmentOff 64
                      -> RegisterUseState ids
 initRegisterUseState sysp fArgs fn =
   RUS { _assignmentUses     = Set.empty
@@ -127,7 +129,7 @@ initRegisterUseState sysp fArgs fn =
       , _assignmentCache    = Map.empty
       , _blockFrontier      = Set.singleton fn
       , functionArgs        = fArgs
-      , currentFunctionType = fromMaybe ftMinimumFunctionType (fArgs ^. at fn)
+      , currentFunctionType = fromMaybe ftMinimumFunctionType (fArgs ^. at (relativeSegmentAddr fn))
       , thisSyscallPersonality = sysp
       }
 
@@ -135,14 +137,14 @@ assignmentUses :: Simple Lens (RegisterUseState ids) (Set (Some (AssignId ids)))
 assignmentUses = lens _assignmentUses (\s v -> s { _assignmentUses = v })
 
 blockRegUses :: Simple Lens (RegisterUseState ids)
-                            (Map (SegmentedAddr 64) (Set (Some X86Reg)))
+                            (Map (MemSegmentOff 64) (Set (Some X86Reg)))
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
 blockInitDeps :: Simple Lens (RegisterUseState ids)
                    (Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids)))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
-blockFrontier :: Simple Lens (RegisterUseState ids) (Set (SegmentedAddr 64))
+blockFrontier :: Simple Lens (RegisterUseState ids) (Set (MemSegmentOff 64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
 assignmentCache :: Simple Lens (RegisterUseState ids) (AssignmentCache ids)
@@ -157,12 +159,12 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps ids)
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
-                            (\_ _      -> (mempty, mempty))
+                            (\_        -> (mempty, mempty))
                             (\r        -> (mempty, Set.singleton (Some r)))
                             (\asgn (assigns, regs) ->
                               (Set.insert (Some asgn) assigns, regs))
 
-demandValue :: SegmentedAddr 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
+demandValue :: MemSegmentOff 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
 demandValue addr v = do
   (assigns, regs) <- valueUses v
   assignmentUses %= Set.union assigns
@@ -180,7 +182,6 @@ registerValues regState = fmap (\(Some r) -> Some (regState^.boundValue r))
 
 -- | Get values that must be evaluated to execute terminal statement.
 termStmtValues :: SyscallPersonality X86_64
-               -> Memory 64
                -> AddrToFunctionTypeMap
                   -- ^ Map from addresses to function type
                -> FunctionType
@@ -188,11 +189,11 @@ termStmtValues :: SyscallPersonality X86_64
                -> ParsedTermStmt X86_64 ids
                   -- ^ Statement to get value of
                -> [Some (Value X86_64 ids)]
-termStmtValues sysp mem typeMap curFunType tstmt =
+termStmtValues sysp typeMap curFunType tstmt =
   case tstmt of
     ParsedCall proc_state _m_ret_addr ->
       -- Get function type associated with function
-      let ft | Just faddr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
+      let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
              , Just ftp <- Map.lookup faddr typeMap = ftp
              | otherwise = ftMaximumFunctionType
        in registerValues proc_state (Some ip_reg : ftArgRegs ft)
@@ -224,11 +225,10 @@ termStmtValues sysp mem typeMap curFunType tstmt =
 -- map of how demands by successor blocks map back to assignments and
 -- registers.
 summarizeBlock :: forall ids
-               .  Memory 64
-               -> DiscoveryFunInfo X86_64 ids
-               -> SegmentedAddr 64
+               .  DiscoveryFunInfo X86_64 ids
+               -> MemSegmentOff 64
                -> RegisterUseM ids ()
-summarizeBlock mem interp_state addr = do
+summarizeBlock interp_state addr = do
   let Just reg = Map.lookup addr (interp_state^.parsedBlocks)
   let go :: StatementList X86_64 ids -> RegisterUseM ids ()
       go stmts = do
@@ -245,14 +245,14 @@ summarizeBlock mem interp_state addr = do
         sysp <- gets thisSyscallPersonality
         typeMap <- gets $ functionArgs
         cur_ft <- gets currentFunctionType
-        let termValues = termStmtValues sysp mem typeMap cur_ft (stmtsTerm stmts)
+        let termValues = termStmtValues sysp typeMap cur_ft (stmtsTerm stmts)
         traverse_ (\(Some r) -> demandValue addr r)
                   (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
 
         case stmtsTerm stmts of
           ParsedCall proc_state _ -> do
             -- Get function type associated with function
-            let ft | Just faddr <- asLiteralAddr mem (proc_state^.boundValue ip_reg)
+            let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
                    , Just ftp <- Map.lookup faddr typeMap = ftp
                    | otherwise = ftMaximumFunctionType
             addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
@@ -284,25 +284,24 @@ summarizeBlock mem interp_state addr = do
   go (blockStatementList reg)
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: Memory 64
-              -> DiscoveryFunInfo X86_64 ids
-              -> Set (SegmentedAddr 64)
+summarizeIter :: DiscoveryFunInfo X86_64 ids
+              -> Set (MemSegmentOff 64)
               -> RegisterUseM ids ()
-summarizeIter mem ist seen = do
+summarizeIter ist seen = do
   f <- use blockFrontier
   case Set.maxView f of
     Nothing -> pure ()
     Just (addr,rest) -> do
       blockFrontier .= rest
       if addr `Set.member` seen then
-        summarizeIter mem ist seen
+        summarizeIter ist seen
        else do
-        summarizeBlock mem ist addr
-        summarizeIter mem ist (Set.insert addr seen)
+        summarizeBlock ist addr
+        summarizeIter ist (Set.insert addr seen)
 
 doOne :: Set (Some X86Reg)
       -> BlockLabel 64
-      -> RegisterUseM ids (SegmentedAddr 64, Set (Some X86Reg))
+      -> RegisterUseM ids (MemSegmentOff 64, Set (Some X86Reg))
 doOne newRegs predLabel = do
   Just depMap <- uses blockInitDeps (Map.lookup predLabel)
 
@@ -319,7 +318,7 @@ doOne newRegs predLabel = do
 -- the right behavior here.
 calculateFixpoint :: FunPredMap 64
                      -- ^ Map addresses to the predessor blocks.
-                  -> Map (SegmentedAddr 64) (Set (Some X86Reg))
+                  -> Map (MemSegmentOff 64) (Set (Some X86Reg))
                      -- ^ Map addresses to the register they need.
                   -> RegisterUseM ids ()
 calculateFixpoint predMap new
@@ -331,24 +330,13 @@ calculateFixpoint predMap new
       calculateFixpoint predMap (Map.unionWith Set.union rest (Map.fromList nexts))
   | otherwise = return ()
 
-{-
-calculateProvides :: Map (SegmentedAddr 64) (Set (Some X86Reg))
-                  -> Map (BlockLabel 64) (Set (Some X86Reg))
-calculateProvides demandMap =
-
-regionProvides :: Map (SegmentedAddr 64) (Set (Some X86Reg))
-               -> ParsedBlock X86_64 ids
-               -> Map Word64 (Set (Some X86Reg))
-regionProvides demandMap reg =
--}
-
 -- | Map from addresses to the registers they depend on
-type DemandedUseMap = Map (SegmentedAddr 64) (Set (Some X86Reg))
+type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 
 -- | Pretty print a demanded use map
 ppDemandedUseMap :: DemandedUseMap -> Doc
 ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
-  where ppEntry :: (SegmentedAddr 64, Set (Some X86Reg)) -> Doc
+  where ppEntry :: (MemSegmentOff 64, Set (Some X86Reg)) -> Doc
         ppEntry (addr, regs) = text (show addr) <> char ':' <+> hsep (ppReg <$> Set.toList regs)
         ppReg :: Some X86Reg -> Doc
         ppReg (Some r) = text (show r)
@@ -358,17 +346,16 @@ ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
 -- the highest index above sp0 that is read or written.
 registerUse :: SyscallPersonality X86_64
             -> AddrToFunctionTypeMap
-            -> Memory 64
             -> DiscoveryFunInfo X86_64 ids
             -> FunPredMap 64
                -- ^ Predecessors for each block in function
             -> ( Set (Some (AssignId ids))
                , DemandedUseMap
                )
-registerUse sysp fArgs mem ist predMap =
+registerUse sysp fArgs ist predMap =
   flip evalState (initRegisterUseState sysp fArgs (discoveredFunAddr ist)) $ do
     -- Run the first phase (block summarization)
-    summarizeIter mem ist Set.empty
+    summarizeIter ist Set.empty
     -- propagate back uses
     new <- use blockRegUses
     -- debugM DRegisterUse ("0x40018d ==> " ++ show (Map.lookup (GeneratedBlock 0x40018d 0) new))
