@@ -506,7 +506,8 @@ getX86ElfArchInfo e =
     abi              ->
      fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
-showNonfatalErrors :: [ElfParseError w] -> IO ()
+showNonfatalErrors :: (Eq (ElfWordType w), Num (ElfWordType w), Show (ElfWordType w))
+                   => [ElfParseError w] -> IO ()
 showNonfatalErrors l = do
   when (not (null l)) $ do
     hPutStrLn stderr $ "Recoverable errors occurred in reading elf file:"
