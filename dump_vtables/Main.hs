@@ -99,8 +99,9 @@ instance Show VTable where
     "  Address: " ++ trimLeadingZeros (showAddr64 addr) ++ "\n" ++
     "  Size: " ++ show size ++ " bytes\n" ++
     "  Offset: " ++ show offset ++ "\n" ++
-    "  RTTI: " ++ rttiString ++ "\n" ++
-    "  Function addrs: " ++ intercalate "," (map (trimLeadingZeros . showAddr64) fptrs)
+    "  RTTI: " ++ rttiString ++ "\n"
+    -- "  Function addrs: " ++ intercalate "," (map (trimLeadingZeros . showAddr64)
+    -- fptrs)
     where rttiString = case rtti of
                          Nothing -> "not present"
                          Just x -> show x
@@ -179,6 +180,7 @@ vTableFromSTE e ste = VTable { vTableAddr = addr
         rttiPtr = (bsWord64le . B.take 8 . B.drop 8) contents
         rtti = rttiFromPtr e rttiPtr
         fptrs = (map bsWord64le . map B.pack . chunksOf 8 . B.unpack . B.drop 16) contents
+        -- TODO: fptrs is broken for multiple inheritance
 
 -- | Get a list of all the VTables in an Elf 64 object.
 vTablesFromElf64 :: Elf 64 -> Either String [VTable]
