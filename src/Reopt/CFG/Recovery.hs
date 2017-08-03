@@ -255,7 +255,12 @@ recoverValue' s v = do
             | otherwise -> do
               Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
 
-    RelocatableValue{} -> Loc.error "Expected relocatable value to be covered by previous case."
+    RelocatableValue w addr -> do
+      -- TODO: Case split on what to return.
+      -- e.g., for code address we may want to do something different.
+      case asAbsoluteAddr addr of
+        Just absAddr -> Right $ FnConstantValue w (toInteger absAddr)
+        Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (BVTypeRepr w)
     BoolValue b ->
       Right $ FnConstantBool b
     BVValue w i ->
@@ -454,9 +459,9 @@ recoverBlock :: forall ids
              -> [Some PhiBinding]
                 -- ^ Phi bindings from input block
              -> ParsedBlock X86_64 ids
-                -- ^ Region
+                -- ^ Map for entire block
              -> StatementList X86_64 ids
-                -- ^ Block to analyze
+                -- ^ Current list of statements to recover
              -> RecoveredBlockInfo
              -> Recover ids RecoveredBlockInfo
 recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
@@ -516,7 +521,8 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
                 go m (Some r) = do
                   v <- getPostCallValue lbl proc_state intrs floatrs r
                   return $! MapF.insert r (FnRegValue v) m
-            let Just provides = Map.lookup ret_addr registerUseMap
+            let provides = Map.findWithDefault Set.empty ret_addr registerUseMap
+
             foldM go MapF.empty provides
 
       let ret_lbl = mkRootBlockLabel <$> m_ret_addr
@@ -535,7 +541,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
             v <- recoverRegister proc_state r
             return $ MapF.insert r (FnRegValue v) m
 
-      let Just provides = Map.lookup tgt_addr  registerUseMap
+      let provides = Map.findWithDefault Set.empty tgt_addr registerUseMap
       regs' <- foldM go MapF.empty provides
 
       let tgt_lbl = mkRootBlockLabel tgt_addr
@@ -592,7 +598,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
              v <- getPostSyscallValue lbl proc_state r
              return $ MapF.insert r (FnRegValue v) m
 
-      let Just provides = Map.lookup next_addr  registerUseMap
+      let provides = Map.findWithDefault Set.empty next_addr registerUseMap
 
       regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
 
@@ -612,8 +618,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
             v <- recoverRegister proc_state r
             return $ MapF.insert r (FnRegValue v) m
 
-      let getRegs next_addr = regs
-            where Just regs = Map.lookup next_addr registerUseMap
+      let getRegs next_addr = Map.findWithDefault Set.empty next_addr registerUseMap
       let provides = Set.unions (getRegs <$> V.toList vec)
       regs' <- foldM go MapF.empty provides
 
