@@ -76,7 +76,7 @@ funBlockPreds info = Map.fromListWith (++)
   [ (next, [GeneratedBlock addr idx])
   | b <- Map.elems (info^.parsedBlocks)
     -- Get address of region
-  , let addr = blockAddr b
+  , let addr = pblockAddr b
     -- get the block successors
   , (next,idx) <- blockSucc (blockStatementList b)
   ]

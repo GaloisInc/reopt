@@ -460,7 +460,7 @@ recoverBlock :: forall ids
              -> RecoveredBlockInfo
              -> Recover ids RecoveredBlockInfo
 recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
-  let addr = blockAddr b
+  let addr = pblockAddr b
   let lbl = GeneratedBlock addr (stmtsIdent stmts)
   when (stmtsIdent stmts /= 0 &&  not (null phis)) $ do
     error $ "recoverBlock asked to create a subblock " ++ show lbl ++ " with phi nodes."

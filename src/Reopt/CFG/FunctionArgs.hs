@@ -547,7 +547,7 @@ summarizeIter mem ist = do
       return ()
     reg : frontier' -> do
       blockFrontier .= frontier'
-      summarizeBlock mem ist (blockAddr reg) (blockStatementList reg)
+      summarizeBlock mem ist (pblockAddr reg) (blockStatementList reg)
       summarizeIter mem ist
 
 calculateOnePred :: (OrdF (ArchReg arch))
