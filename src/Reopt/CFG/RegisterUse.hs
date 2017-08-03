@@ -53,8 +53,9 @@ import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 -- | A map from each address `l` to the labels of blocks that may jump to `l`.
 type FunPredMap w = Map (MemSegmentOff w) [BlockLabel w]
 
-blockSucc :: StatementList arch ids -> [(ArchSegmentOff arch, Word64)]
-blockSucc stmts = do
+-- | Get all successor blocks for the given list of statements.
+stmtListSucc :: StatementList arch ids -> [(ArchSegmentOff arch, Word64)]
+stmtListSucc stmts = do
   let idx = stmtsIdent stmts
   case stmtsTerm stmts of
     ParsedCall _ (Just ret_addr) -> [(ret_addr, idx)]
@@ -62,13 +63,10 @@ blockSucc stmts = do
     ParsedJump _ tgt -> [(tgt, idx)]
     ParsedLookupTable _ _ v -> (,idx) <$> V.toList v
     ParsedReturn{} -> []
-    ParsedIte _ t f -> blockSucc t ++ blockSucc f
+    ParsedIte _ t f -> stmtListSucc t ++ stmtListSucc f
     ParsedSyscall _ ret -> [(ret, idx)]
     ParsedTranslateError{} -> []
     ClassifyFailure{} -> []
-
-regionSucc :: ParsedBlock arch ids -> [ArchSegmentOff arch]
-regionSucc b = fmap fst $ blockSucc (blockStatementList b)
 
 -- | Return the FunPredMap for the discovered block function.
 funBlockPreds :: DiscoveryFunInfo X86_64 ids -> FunPredMap 64
@@ -78,7 +76,7 @@ funBlockPreds info = Map.fromListWith (++)
     -- Get address of region
   , let addr = pblockAddr b
     -- get the block successors
-  , (next,idx) <- blockSucc (blockStatementList b)
+  , (next,idx) <- stmtListSucc (blockStatementList b)
   ]
 
 -------------------------------------------------------------------------------
@@ -229,10 +227,10 @@ summarizeBlock :: forall ids
                -> MemSegmentOff 64
                -> RegisterUseM ids ()
 summarizeBlock interp_state addr = do
-  let Just reg = Map.lookup addr (interp_state^.parsedBlocks)
   let go :: StatementList X86_64 ids -> RegisterUseM ids ()
       go stmts = do
         let lbl = GeneratedBlock addr (stmtsIdent stmts)
+        blockInitDeps %= Map.insert lbl Map.empty
         let -- Figure out the deps of the given registers and update the state for the current label
             addRegisterUses :: RegState X86Reg (Value X86_64 ids)
                             -> [Some X86Reg]
@@ -279,9 +277,11 @@ summarizeBlock interp_state addr = do
             error "Cannot identify register use in code where translation error occurs"
           ClassifyFailure _ ->
             error $ "Classification failed: " ++ show addr
-  -- Update frontier with successor states for region
-  blockFrontier %= \s -> foldr Set.insert s (regionSucc reg)
-  go (blockStatementList reg)
+  -- Update frontier with successor states for block
+  let Just blk = Map.lookup addr (interp_state^.parsedBlocks)
+  let stmts = blockStatementList blk
+  blockFrontier %= \s -> foldr Set.insert s (fst <$> stmtListSucc stmts)
+  go stmts
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: DiscoveryFunInfo X86_64 ids
