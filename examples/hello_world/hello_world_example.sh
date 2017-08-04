@@ -28,6 +28,7 @@ reopt hello_world_ubuntu_64_lts_12_04_diet \
 
 # Get reopt to just print out the LLVM that is discovered.
 reopt hello_world_ubuntu_64_lts_12_04_diet \
+      --llvm-version=llvm38 \
       $reopt_notrans \
       -o "$relink_output.ll"
 
@@ -35,6 +36,7 @@ reopt hello_world_ubuntu_64_lts_12_04_diet \
 reopt hello_world_ubuntu_64_lts_12_04_diet \
       "--gas=$GAS_PATH" \
       "--lib=$LIBREOPT_PATH" \
+      --llvm-version=llvm38 \
       $reopt_notrans \
       -o "$relink_output.o"
 
@@ -42,6 +44,7 @@ reopt hello_world_ubuntu_64_lts_12_04_diet \
 reopt hello_world_ubuntu_64_lts_12_04_diet \
       "--gas=$GAS_PATH" \
       "--lib=$LIBREOPT_PATH" \
+      --llvm-version=llvm38 \
       $reopt_notrans \
       -o "$relink_output"
 
