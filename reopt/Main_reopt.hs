@@ -224,7 +224,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _redirPath  = ""
                    , _outputPath = "a.out"
                    , _gasPath = "gas"
-                   , _llvmVersion = LLVM35
+                   , _llvmVersion = LLVM38
                    , _llcPath = "llc"
                    , _optPath = "opt"
                    , _optLevel  = 2
@@ -1078,7 +1078,7 @@ link_with_libreopt obj_dir args arch obj_llvm = do
 
   do exists <- doesFileExist libreopt_path
      when (not exists) $ do
-       fail "Could not find path to libreopt.bc needed to link object."
+       fail $ "Could not find path to libreopt.bc needed to link object; tried " ++ libreopt_path
 
   let obj_llvm_path = obj_dir </> "obj.ll"
   writeFileBuilder obj_llvm_path obj_llvm

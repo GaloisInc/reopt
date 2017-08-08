@@ -33,7 +33,7 @@ backDoIt:
     %diPtr = inttoptr i64 %di to iSZ *
     %siPtr = inttoptr i64 %si to iSZ *
 
-    %siV = load iSZ * %siPtr
+    %siV = load iSZ, iSZ * %siPtr
     store iSZ %siV, iSZ *%diPtr
 
     %diNext = sub i64 %di, udiv(i64 SZ, i64 8)
@@ -59,7 +59,7 @@ forwDoIt:
     %diPtr = inttoptr i64 %di to iSZ *
     %siPtr = inttoptr i64 %si to iSZ *
 
-    %siV = load iSZ * %siPtr
+    %siV = load iSZ, iSZ * %siPtr
     store iSZ %siV, iSZ *%diPtr
 
     %diNext = add i64 %di, udiv(i64 SZ, i64 8)
