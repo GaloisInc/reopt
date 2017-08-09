@@ -3,7 +3,10 @@
 -- vtables.
 
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
+
+module Main (main) where
 
 import Control.Exception
 import Control.Lens
@@ -37,7 +40,7 @@ trimLeadingZeros = dropWhile (=='0')
 -- Get a section by its section index.
 elfSection :: Elf 64 -> ElfSectionIndex -> ElfSection Word64
 elfSection e i
-  | (section:[]) <- sections = section
+  | [section] <- sections = section
   | (_:_) <- sections = error $ "Multiple sections with index " ++ show idx
   | _     <- sections = error $ "No sections with index " ++ show idx
   where idx = fromElfSectionIndex i
@@ -66,6 +69,7 @@ readElfAddr e addr size = case sections of
 
 ------------------------------------------------------------------------
 -- VTable datatype
+-- TODO: add more information about the various fields
 
 -- | RTTI datatype.
 data RTTI = RTTI { rttiAddr :: Word64
@@ -73,21 +77,19 @@ data RTTI = RTTI { rttiAddr :: Word64
                  , rttiMangledName :: B.ByteString
                  , rttiMangledNameAddr :: Word64
                  , rttiParentRTTIAddrs :: [Word64]
---                 , rttiInheritanceType :: InheritanceType
                  } deriving (Eq)
 
 instance Show RTTI where
   show (RTTI rttiAddr _ rttiMangledName _ rttiParentRTTIAddrs) =
---  show (RTTI rttiAddr _ rttiMangledName _ inheritanceType) =
     "addr = " ++ (trimLeadingZeros . showAddr64) rttiAddr ++ ", " ++
     "name = " ++ show rttiMangledName ++ ", " ++
---    "inheritance = " ++ show inheritanceType
     "parentRTTIAddrs = " ++ intercalate ", " (map (trimLeadingZeros . showAddr64) rttiParentRTTIAddrs)
 
 -- | VTable datatype.
 data VTable = VTable { vTableAddr :: Word64
                      , vTableSize :: Word64
                      , vTableOffset :: Word64
+                     -- ^ offset to top (TODO)
                      , vTableRTTI :: Maybe RTTI
                      , vTableFPtrs :: [Word64]
                      , vTableContents :: B.ByteString
@@ -106,25 +108,29 @@ instance Show VTable where
                          Nothing -> "not present"
                          Just x -> show x
 ------------------------------------------------------------------------
--- | Extracting VTables
+-- Extracting VTables
 
 -- | Get the vtable symbol table entries from the symbol table.
 vTableEntries :: Elf 64 -> ElfSymbolTable Word64 -> [ElfSymbolTableEntry Word64]
 vTableEntries e =
   filter (isVTableEntry e) . V.toList . elfSymbolTableEntries
   where
-    isVTableEntry e ste = B.isPrefixOf (B.pack [95,90,84,86]) (steName ste)
-                          && elfSectionName (section ste) == rodata
+    isVTableEntry e ste = B.isPrefixOf "_ZTV" (steName ste)
+                          && elfSectionName (section ste) == ".rodata"
                           -- ^ This is a guess. So far they've all been in .rodata.
     section ste = elfSection e (steIndex ste)
-    rodata = B.pack [46,114,111,100,97,116,97]
+    -- TODO: ByteString has a IsString instance, so use B.fromString
+--    ztv = "_ZTV"
+--    rodata = ".rodata"
+--    rodata = B.pack [46,114,111,100,97,116,97]
 
 data InheritanceType = BaseInheritance
                      | SingleInheritance
                      | MultipleInheritance
   deriving (Show, Eq)
 
-
+-- | Determine what kind of inheritance, given the vtable of the corresponding
+-- typeinfo object.
 typeInfoInheritance :: Elf 64 -> Word64 -> InheritanceType
 typeInfoInheritance e addr =
   let addrRttiAddr = addr - 8
@@ -132,7 +138,8 @@ typeInfoInheritance e addr =
       addrNameAddr = rttiAddr + 8
       nameAddr = bsWord64le $ readElfAddr e addrNameAddr 8
       name = C.unpack $ readNTBSFromAddr e nameAddr
-      single = isInfixOf "si_class_type_info" name
+      -- TODO: maybe find a better way to do this...
+      single   = isInfixOf "si_class_type_info"  name
       multiple = isInfixOf "vmi_class_type_info" name
   in case (single, multiple) of
        (False, False) -> BaseInheritance
@@ -140,12 +147,10 @@ typeInfoInheritance e addr =
        _         -> MultipleInheritance
 
 -- | Build an RTTI datatype from an address
--- TODO: This is where to add support for multiple inheritance
 rttiFromPtr :: Elf 64 -> Word64 -> Maybe RTTI
 rttiFromPtr e ptr
   | B.null contents = Nothing
   | otherwise = Just (RTTI ptr typeInfoAddr rttiName rttiNameAddr rttiParentRTTIAddrs)
---  | otherwise = Just (RTTI ptr typeInfoAddr rttiName rttiNameAddr inheritanceType)
   where contents = readElfAddr e ptr 128
         typeInfoAddr = (bsWord64le . B.take 8) contents
         rttiNameAddr = (bsWord64le . B.take 8 . B.drop 8) contents
