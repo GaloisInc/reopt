@@ -56,7 +56,7 @@ import           Data.Macaw.Types (Type(..)
                                   , FloatInfoRepr, FloatType
                                   , floatInfoBits
                                   , floatInfoBitsIsPos
-                                  , n8, n16, n32, n64, n80
+                                  , n8, n16, n32, n64--, n80
                                   , typeRepr
                                   )
 
@@ -95,8 +95,8 @@ evalExpr (AppExpr a) = do
     R.Mux nr c1 c2 c3 -> CS.evalLit (BVTypeRepr nr) $ do
       fmap (CS.Literal . CS.bitVector nr) $ doMux <$> CS.asBool c1 <*> CS.asBV c2 <*> CS.asBV c3
     -- Resize ops
-    R.MMXExtend c -> let ones = BV.ones 16
-                      in CS.liftValue (BV.# ones) extPrecisionNatRepr c
+--    R.MMXExtend c -> let ones = BV.ones 16
+--                      in CS.liftValue (BV.# ones) n80 c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
     R.UExt c nr -> CS.liftValue (uExtBV nr) nr c
@@ -472,12 +472,6 @@ addressSequence (CS.Literal baseB) nr (CS.Literal countB) (CS.BoolLiteral revers
     count :: Integer
     count = CS.nat countB
 addressSequence _ _ _ _ = error "addressSequence: undefined argument!"
-
-------------------------------------------------------------------------
-extPrecisionNatRepr :: NatRepr 80
-extPrecisionNatRepr = n80
-
-
 
 ------------------------------------------------------------------------
 -- Helper functions ----------------------------------------------------

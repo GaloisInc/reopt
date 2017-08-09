@@ -731,7 +731,6 @@ appToLLVM' app = do
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
-    MMXExtend _v -> unimplementedInstr' typ "MMXExtend"
     Trunc v sz -> flip (convop L.Trunc) (natReprToLLVMType sz) =<< mkLLVMValue v
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
