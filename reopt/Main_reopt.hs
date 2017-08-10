@@ -4,6 +4,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
 module Main (main) where
 
 import           Control.Exception
@@ -12,7 +13,6 @@ import           Control.Monad
 import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
@@ -29,6 +29,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Tuple (swap)
+import           Data.Type.Equality
 import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
@@ -55,7 +56,6 @@ import qualified Data.VEX.FFI
 import           Data.Macaw.ARM
 #endif
 
---import           Data.Macaw.AbsDomain.AbsState
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
@@ -118,6 +118,28 @@ ppLLVM LLVM37 m = LPP.ppLLVM37 $ LPP.ppModule m
 ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
 
 ------------------------------------------------------------------------
+-- Discovery options
+
+-- | Options controlling discovery
+data DiscoveryOptions
+   = DiscoveryOptions { logAtAnalyzeFunction  :: !Bool
+                        -- ^ Print a message each time we apply discovery analysis to
+                        -- a new function.
+                      , exploreFunctionSymbols :: !Bool
+                        -- ^ Flag indicates we should explore function symbols
+                      , exploreCodeAddrInMem :: !Bool
+                        -- ^ Flag indicating we should explore all potential code
+                        -- addresses in memory
+                      }
+
+defaultDiscoveryOptions :: DiscoveryOptions
+defaultDiscoveryOptions =
+  DiscoveryOptions { logAtAnalyzeFunction = True
+                   , exploreFunctionSymbols = True
+                   , exploreCodeAddrInMem = False
+                   }
+
+------------------------------------------------------------------------
 -- Args
 
 -- | Action to perform when running
@@ -132,7 +154,6 @@ data Action
    | ShowVersion     -- ^ Print out version
    | Relink          -- ^ Link an existing binary and new code together.
    | Reopt           -- ^ Perform a full reoptimization
-
 
 -- | Command line arguments.
 data Args = Args { _reoptAction  :: !Action
@@ -152,6 +173,8 @@ data Args = Args { _reoptAction  :: !Action
                  , _libreoptPath :: !(Maybe FilePath)
                  , _notransAddrs :: !(Set String)
                    -- ^ Set of function entry points that we ignore for translation.
+                 , _discOpts :: !DiscoveryOptions
+                   -- ^ Options affecting discovery
                  }
 
 -- | Action to perform when running
@@ -186,6 +209,10 @@ outputPath = lens _outputPath (\s v -> s { _outputPath = v })
 gasPath :: Simple Lens Args FilePath
 gasPath = lens _gasPath (\s v -> s { _gasPath = v })
 
+-- | Version to use when printing LLVM.
+llvmVersion :: Simple Lens Args LLVMVersion
+llvmVersion = lens _llvmVersion (\s v -> s { _llvmVersion = v })
+
 -- | Path to llc
 llcPath :: Simple Lens Args FilePath
 llcPath = lens _llcPath (\s v -> s { _llcPath = v })
@@ -210,9 +237,9 @@ libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
 notransAddrs :: Simple Lens Args (Set String)
 notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
 
--- | Version to use when printing LLVM.
-llvmVersion :: Simple Lens Args LLVMVersion
-llvmVersion = lens _llvmVersion (\s v -> s { _llvmVersion = v })
+-- | Set of function entry points that we ignore for translation.
+discOpts :: Simple Lens Args DiscoveryOptions
+discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -231,6 +258,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
                    , _notransAddrs = Set.empty
+                   , _discOpts     = defaultDiscoveryOptions
                    }
 
 loadOpt :: Args -> LoadOptions
@@ -300,7 +328,6 @@ sectionFlag :: Flag Args
 sectionFlag = flagNone [ "load-sections" ] upd help
   where upd  = argsLoadStyle .~ LoadBySection
         help = "Load the Elf file using section information."
-
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -382,6 +409,33 @@ notransFlag = flagReq [ "notrans" ] upd "ADDR" help
   where upd s old = Right $ old & notransAddrs %~ Set.insert s
         help = "Address of function to omit from translation (may be repeated)."
 
+{-
+argAsBool :: String -> Maybe Bool
+argAsBool s =
+  case toLower s of
+    "true"  ->  Just True
+    "false" ->  Just False
+    "1" ->  Just True
+    "0" ->  Just False
+    _ -> Nothing
+-}
+
+-- | Print out a trace message when we analyze a function
+logAtAnalyzeFunctionFlag :: Flag Args
+logAtAnalyzeFunctionFlag = flagBool [ "trace-function-discovery" ] upd help
+  where upd b = discOpts %~ \o -> o { logAtAnalyzeFunction = b }
+        help = "Log when analyzing discovered functions."
+
+exploreFunctionSymbolsFlag :: Flag Args
+exploreFunctionSymbolsFlag = flagBool [ "include-syms" ] upd help
+  where upd b = discOpts %~ \o -> o { exploreFunctionSymbols = b }
+        help = "Include function symbols in discovery."
+
+exploreCodeAddrInMemFlag :: Flag Args
+exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
+  where upd b = discOpts %~ \o -> o { exploreCodeAddrInMem = b }
+        help = "Include memory code addresses in discovery."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -408,6 +462,9 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , notransFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
+                , logAtAnalyzeFunctionFlag
+                , exploreFunctionSymbolsFlag
+                , exploreCodeAddrInMemFlag
                 ]
 
 reoptVersion :: String
@@ -448,12 +505,14 @@ dumpDisassembly path = do
   mapM_ printSectionDisassembly sections
 
 -- | Create a final CFG
-mkFinalCFGWithSyms :: Integral (ElfWordType (ArchAddrWidth arch))
+mkFinalCFGWithSyms :: forall arch
+                   .  Integral (ElfWordType (ArchAddrWidth arch))
                    => ArchitectureInfo arch
                    -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
+                   -> DiscoveryOptions -- Options controlling discovery
                    -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
-mkFinalCFGWithSyms ainfo mem e = withArchConstraints ainfo $ do
+mkFinalCFGWithSyms ainfo mem e disOpt = withArchConstraints ainfo $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
@@ -464,17 +523,43 @@ mkFinalCFGWithSyms ainfo mem e = withArchConstraints ainfo $ do
          resolvedSegmentedElfFuncSymbols mem entries
   -- Check for unresolved symbols
   let sym_map =
-        case symbolAddrMap (fmap head resolved) of
+        case symbolAddrMap (head <$> resolved) of
           Left msg -> error msg
           Right m -> m
+  -- resolveFuns explores unexplored functions until we are done.
+  withArchConstraints ainfo $ do
+  let resolveFuns :: DiscoveryState arch -> IO (DiscoveryState arch)
+      resolveFuns info =
+        case Map.lookupMin (info^.unexploredFunctions) of
+          Nothing -> pure info
+          Just (addr, rsn) -> do
+            when (logAtAnalyzeFunction disOpt) $ do
+              let nm = case symbolAtAddr addr sym_map of
+                         Just fnName -> show addr ++ " (" ++ UTF8.toString fnName ++ ")"
+                         Nothing  -> show addr
+              hPutStrLn stderr $ "Analyzing function: " ++ nm
+            resolveFuns $! fst (analyzeFunction addr rsn info)
+  -- Create initial discovery state
   entry <- case resolveAbsoluteAddr mem (fromIntegral (elfEntry e)) of
              Nothing -> fail "Could not resolve entry"
              Just v  -> pure v
-  let sym_addrs = entry : Map.keys resolved
-  let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
-  pure ( cfgFromAddrs ainfo mem sym_map sym_addrs mem_contents
-       , sym_map
-       )
+  let ds0 = emptyDiscoveryState mem sym_map ainfo
+          & markAddrsAsFunction InitAddr [entry]
+  -- Add symbol table entries to discovery state if requested
+  let ds1 | exploreFunctionSymbols disOpt =
+              ds0 & markAddrsAsFunction InitAddr (Map.keys resolved)
+          | otherwise = ds0
+  -- Perform discovery
+  ds2 <- resolveFuns ds1
+  -- Discover functions from arbitrary mem pointers
+  ds3 <-
+    if exploreCodeAddrInMem disOpt then do
+      let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
+      resolveFuns $ ds2 & exploreMemPointers mem_contents
+     else
+      return ds2
+  -- Return
+  pure (ds3, sym_map)
 
 data SomeArchitectureInfo w =
   forall arch
@@ -514,8 +599,8 @@ showNonfatalErrors l = do
     forM_ l $ \emsg -> do
       hPutStrLn stderr (show emsg)
 
-showCFG :: LoadOptions -> String -> IO ()
-showCFG opt path = do
+readSomeElf :: FilePath -> IO (Some Elf)
+readSomeElf path = do
   when (null path) $ do
     hPutStrLn stderr "Please specify a path."
     hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
@@ -532,25 +617,27 @@ showCFG opt path = do
             hPutStrLn stderr (show (ioeGetErrorType e))
             exitFailure
   bs <- BS.readFile path `catch` h
+  case parseElf bs of
+    ElfHeaderError _ msg -> do
+      hPutStrLn stderr $ "Error reading " ++ path ++ ":"
+      hPutStrLn stderr $ "  " ++ msg
+      exitFailure
+    Elf32Res l e -> do
+      showNonfatalErrors l
+      return (Some e)
+    Elf64Res l e -> do
+      showNonfatalErrors l
+      return (Some e)
 
-  Some e <-
-    case parseElf bs of
-      ElfHeaderError _ msg -> do
-        hPutStrLn stderr $ "Error reading " ++ path ++ ":"
-        hPutStrLn stderr $ "  " ++ msg
-        exitFailure
-      Elf32Res l e -> do
-        showNonfatalErrors l
-        return (Some e)
-      Elf64Res l e -> do
-        showNonfatalErrors l
-        return (Some e)
+showCFG :: Args -> IO ()
+showCFG args = do
+  Some e <- readSomeElf (args^.programPath)
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   elfClassInstances (elfClass e) $ do
   withArchConstraints ainfo $ do
-  (_,mem) <- either fail return $ memoryForElf opt e
-  (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e
+  (_,mem) <- either fail return $ memoryForElf (loadOpt args) e
+  (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
   print $ ppDiscoveryStateBlocks disc_info
 
 -- | Attempt to find the address of a string identifying a symbol name, and
@@ -626,7 +713,7 @@ showFunctions args = do
   -- Create memory for elf
   (ainfo, sysp,_) <- getX86ElfArchInfo e
   (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) e
-  (s,_) <- mkFinalCFGWithSyms ainfo mem e
+  (s,_) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
@@ -634,60 +721,15 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
-{-
-ppStmtAndAbs :: MapF (AssignId ids) (AbsValue 64) -> Stmt X86_64 ids -> Doc
-ppStmtAndAbs m stmt =
-  case stmt of
-    AssignStmt a ->
-      case ppAbsValue =<< MapF.lookup (assignId a) m of
-        Just d -> vcat [ text "#" <+> ppAssignId (assignId a) <+> text ":=" <+> d
-                       , pretty a
-                       ]
-        Nothing -> pretty a
-    _ -> pretty stmt
-
-
-ppBlockAndAbs :: MapF (AssignId ids) (AbsValue 64) -> Block X86_64 ids -> Doc
-ppBlockAndAbs m b =
-  pretty (blockLabel b) <> text ":" <$$>
-  indent 2 (vcat (ppStmtAndAbs m <$> blockStmts b) <$$>
-            pretty (blockTerm b))
-
-showCFGAndAI :: LoadStyle -> Elf 64 -> IO ()
-showCFGAndAI loadSty e = do
-  -- Create memory for elf
-  (ainfo,_, _) <- getX86ElfArchInfo e
-  (_,mem) <- mkElfMem loadSty Addr64 e
-  (Some disc_info,_) <- mkFinalCFGWithSyms ainfo mem e
-  forM_ (Map.elems (disc_info^.funInfo)) $ \finfo -> do
-    let abst = blockAbstractState <$> finfo^.parsedBlocks
-    let g  = eliminateDeadRegisters $ mkCFG (disc_info^.blocks)
-    let amap = assignmentAbsValues ainfo mem g abst
-        ppOne b =
-          vcat [case (blockLabel b, Map.lookup (labelAddr (blockLabel b)) abst) of
-                  (GeneratedBlock _ 0, Just ab) -> pretty ab
-                  (GeneratedBlock _ 0, Nothing) -> text "Stored in memory"
-                  (_,_) -> text ""
-
-               , ppBlockAndAbs amap b
-               ]
-    print $ vcat (map ppOne $ Map.elems (g^.cfgBlocks))
---    forM_ (Map.elems (g^.cfgBlocks)) $ \b -> do
---      case blockLabel b of
---        GeneratedBlock _ 0 -> do
---          checkReturnsIdentified g b
---        _ -> return ()
---    -- Check that the CFG correctly identifies call statements.
---    checkCallsIdentified mem g
--}
-
 -- | Extract list containing symbol names and addresses.
-elfAddrSymEntries :: SectionIndexMap 64
+elfAddrSymEntries :: SectionIndexMap w
                      -- ^ Map from elf section indices to base address for section
                      -- and section in Elf file
-                  -> Elf 64
-                  -> [(BS.ByteString, MemSegmentOff 64)]
+                  -> Elf w
+                  -> [(BS.ByteString, MemSegmentOff w)]
 elfAddrSymEntries m binary =
+  elfClassInstances (elfClass binary) $
+  addrWidthClass (elfAddrWidth (elfClass binary)) $
   [ (steName entry, val)
   | tbl <- elfSymtab binary
   , entry <- V.toList $ elfSymbolTableEntries tbl
@@ -713,160 +755,10 @@ elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
 -- | Create map from addresses to symbol name.
 --
 -- Used for naming functions.
-elfAddrSymMap :: SectionIndexMap 64
-              -> Elf 64
-              -> LLVM.AddrSymMap 64
+elfAddrSymMap :: SectionIndexMap w
+              -> Elf w
+              -> LLVM.AddrSymMap w
 elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
-
-{-
-showLLVM :: Args -> String -> IO ()
-showLLVM args dir = do
-  e <- readElf64 (args^.programPath)
-
-  let loadSty = args^.loadStyle
-
-  -- Create memory for elf
-  (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
-  (secMap, mem) <- mkElfMem loadSty e
-  (Some cfg, symMap) <- mkFinalCFGWithSyms ainfo mem e
-
-  let mkName f = dir </> (name ++ "_" ++ addr_str ++ ".ll")
-        where
-          name = case Map.lookup addr symMap of
-                   Nothing -> "unknown"
-                   Just s  -> BSC.unpack s
-          addr = fnAddr f
-          addr_str = case segmentBase (addrSegment addr) of
-                       Just b -> show (b + addr^.addrOffset)
-                       Nothing -> show (segmentIndex (addrSegment addr))
-                         ++ "_" ++ show (addr^.addrOffset)
-  let addrSymMap = elfAddrSymMap secMap e
-  let writeF :: Function -> IO ()
-      writeF f  = do
-        let (_,m) = L.runLLVM $ do
-              LLVM.declareIntrinsics
-              let refs = Map.delete (fnAddr f) (LLVM.getReferencedFunctions f)
-              itraverse_ (LLVM.declareFunction addrSymMap) refs
-              LLVM.defineFunction syscallPostfix addrSymMap f
-        writeFile (mkName f) $ ppLLVM (args^.llvmVersion) m
-
-  createDirectoryIfMissing True dir
-  fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) cfg
-  mapM_ writeF fns
-
--- | This is designed to detect returns from the X86 representation.
--- It pattern matches on a RegState to detect if it read its instruction
--- pointer from an address that is 8 below the stack pointer.
-stateEndsWithRet :: RegState X86Reg (Value X86_64 ids) -> Bool
-stateEndsWithRet s = do
-  let next_ip = s^.boundValue ip_reg
-      next_sp = s^.boundValue sp_reg
-  case () of
-    _ | AssignedValue (Assignment _ (ReadMem a _)) <- next_ip
-      , (ip_base, ip_off) <- asBaseOffset a
-      , (sp_base, sp_off) <- asBaseOffset next_sp ->
-        ip_base == sp_base && ip_off + 8 == sp_off
-    _ -> False
-
--- | @isWriteTo stmt add tpr@ returns true if @stmt@ writes to @addr@
--- with a write having the given type.
-isWriteTo :: Stmt X86_64 ids -> BVValue X86_64 ids 64 -> TypeRepr tp -> Maybe (Value X86_64 ids tp)
-isWriteTo (WriteMem a val) expected tp
-  | Just _ <- testEquality a expected
-  , Just Refl <- testEquality (typeRepr val) tp =
-    Just val
-isWriteTo _ _ _ = Nothing
-
--- | @isCodeAddrWriteTo mem stmt addr@ returns true if @stmt@ writes to @addr@ and
--- @addr@ is a code pointer.
-isCodeAddrWriteTo :: Memory 64 -> Stmt X86_64 ids -> BVValue X86_64 ids 64 -> Maybe Word64
-isCodeAddrWriteTo mem s sp
-  | Just (BVValue _ val) <- isWriteTo s sp (knownType :: TypeRepr (BVType 64))
-  , isCodeAddr mem (fromInteger val)
-  = Just (fromInteger val)
-isCodeAddrWriteTo _ _ _ = Nothing
-
--- | Returns true if it looks like block ends with a call.
-blockContainsCall :: Memory 64
-                  -> Block X86_64 ids
-                  -> RegState X86Reg (Value X86_64 ids)
-                  -> Bool
-blockContainsCall mem b s =
-  let next_sp = s^.boundValue sp_reg
-      go [] = False
-      go (stmt:_) | Just _ <- isCodeAddrWriteTo mem stmt next_sp = True
-      go (ExecArchStmt WriteLoc{}:_) = False
-      go (_:r) = go r
-   in go (reverse (blockStmts b))
-
--- | Return next states for block.
-blockNextStates :: CFG X86_64 ids
-                -> Block X86_64 ids
-                -> [RegState X86Reg (Value X86_64 ids)]
-blockNextStates g b =
-  case blockTerm b of
-    FetchAndExecute s -> [s]
-    Branch _ x_lbl y_lbl -> blockNextStates g x ++ blockNextStates g y
-      where Just x = findBlock g x_lbl
-            Just y = findBlock g y_lbl
-    Syscall{} -> []
-    TranslateError{} -> []
-
-checkReturnsIdentified :: CFG X86_64 ids -> Block X86_64 ids -> IO ()
-checkReturnsIdentified g b =
-  case blockNextStates g b of
-    [s] -> do
-      let lbl = blockLabel b
-      case (stateEndsWithRet s, hasRetComment b) of
-        (True, True) -> return ()
-        (True, False) -> do
-          hPutStrLn stderr $ "UNEXPECTED return Block " ++ show (labelAddr lbl)
-        (False, True) -> do
-          hPutStrLn stderr $ "MISSING return Block " ++ show (labelAddr lbl)
-        _ -> return ()
-    _ -> return ()
-
--- | Returns true if block has a call comment.
-hasCallComment :: Block X86_64 ids -> Bool
-hasCallComment b = any isCallComment (blockStmts b)
-  where isCallComment (Comment s) = "call" `Text.isInfixOf` s
-        isCallComment _ = False
-
--- | Returns true if block has a ret comment.
-hasRetComment :: Block X86_64 ids -> Bool
-hasRetComment b = any isRetComment (blockStmts b)
-  where isRetComment (Comment s) = "ret" `Text.isSuffixOf` s
-        isRetComment _ = False
-
--- | This prints a report summarizing where calls are found that do not have
--- call instructions
-checkCallsIdentified :: Memory 64 -> CFG X86_64 ids -> IO ()
-checkCallsIdentified mem g = do
-  let g_blocks = Map.elems (g^.cfgBlocks)
-  -- Check to see if block contains a call
-  let checkBlockForCall b =
-        case blockNextStates g b of
-          [s] -> blockContainsCall mem b s
-          _ -> False
-  let blocksWithCallDetected = Set.fromList $ fmap blockLabel $ filter checkBlockForCall g_blocks
-
-  let blocksWithCallComment  = Set.fromList $ fmap blockLabel $ filter hasCallComment g_blocks
-
-  let blocksWithSpuriousCall = blocksWithCallDetected `Set.difference` blocksWithCallComment
-  let blocksWithMissedCall   = blocksWithCallComment  `Set.difference` blocksWithCallDetected
-
-  when (not (Set.null blocksWithSpuriousCall)) $ do
-    hPutStrLn stderr $
-         "WARNING: Some blocks were interpreted as having a call, but no call instruction\n"
-      ++ "was found.  The address for the start of each block is listed below:"
-    mapM_ (\a -> hPutStrLn stderr $ "  " ++ show a) (Set.toList blocksWithSpuriousCall)
-
-  when (not (Set.null blocksWithMissedCall)) $ do
-    hPutStrLn stderr $
-         "WARNING: Some blocks contained a call comment, but were not interpreted as\n"
-      ++ "having a call.  The address for the start of each block is listed below:"
-    mapM_ (\a -> hPutStrLn stderr $ "  " ++ show a) (Set.toList blocksWithMissedCall)
--}
 
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
@@ -1095,19 +987,25 @@ resolveSymName nm = Right nm
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
 
+elfIs64Bit :: ElfClass w -> Maybe (w :~: 64)
+elfIs64Bit ELFCLASS32 = Nothing
+elfIs64Bit ELFCLASS64 = Just Refl
+
+
 performReopt :: Args -> IO ()
 performReopt args =
   withSystemTempDirectory "reopt." $ \obj_dir -> do
     -- Get original binary
-    orig_binary <- readElf64 (args^.programPath)
-    -- Construct CFG from binary
-    (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) orig_binary
+    Some orig_binary <- readSomeElf (args^.programPath)
 
-    (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary
+    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
+
+    -- Construct CFG from binary
+--    (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+
 
     case takeExtension output_path of
       ".bc" -> do
@@ -1117,21 +1015,29 @@ performReopt args =
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
         exitFailure
       ".blocks" -> do
+        SomeArch ainfo <- getElfArchInfo orig_binary
+        elfClassInstances (elfClass orig_binary) $ do
+        withArchConstraints ainfo $ do
+        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
         writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
-        let tgts = discoveryControlFlowTargets disc_info
-        forM_ (exploredFunctions disc_info) $ \(Some f) -> do
-          let a = discoveredFunAddr f
-          putStrLn $ BSC.unpack (discoveredFunName f) ++ ": "
-            ++ show (lookupControlFlowTargetSpace a tgts)
       ".fns" -> do
+        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
+        (ainfo, sysp, _) <- getX86ElfArchInfo orig_binary
+        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
+        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
+        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
+        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
+        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -1144,6 +1050,9 @@ performReopt args =
           "compile to generate a .s file."
         exitFailure
       _ -> do
+        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
+        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
+        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
         fns <- getFns sysp symAddrMap notrans disc_info
@@ -1196,8 +1105,7 @@ main' = do
   case args^.reoptAction of
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
-    ShowCFG -> do
-      showCFG (loadOpt args) (args^.programPath)
+    ShowCFG -> showCFG args
 
     ShowCFGAI -> do
       error $ "ShowCFGAI not supported"
