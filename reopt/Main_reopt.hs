@@ -409,17 +409,6 @@ notransFlag = flagReq [ "notrans" ] upd "ADDR" help
   where upd s old = Right $ old & notransAddrs %~ Set.insert s
         help = "Address of function to omit from translation (may be repeated)."
 
-{-
-argAsBool :: String -> Maybe Bool
-argAsBool s =
-  case toLower s of
-    "true"  ->  Just True
-    "false" ->  Just False
-    "1" ->  Just True
-    "0" ->  Just False
-    _ -> Nothing
--}
-
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeFunctionFlag :: Flag Args
 logAtAnalyzeFunctionFlag = flagBool [ "trace-function-discovery" ] upd help

@@ -94,9 +94,6 @@ evalExpr (AppExpr a) = do
       fmap CS.BoolLiteral $ doMux <$> CS.asBool c1 <*> CS.asBool c2 <*> CS.asBool c3
     R.Mux nr c1 c2 c3 -> CS.evalLit (BVTypeRepr nr) $ do
       fmap (CS.Literal . CS.bitVector nr) $ doMux <$> CS.asBool c1 <*> CS.asBV c2 <*> CS.asBV c3
-    -- Resize ops
---    R.MMXExtend c -> let ones = BV.ones 16
---                      in CS.liftValue (BV.# ones) n80 c
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
     R.UExt c nr -> CS.liftValue (uExtBV nr) nr c
