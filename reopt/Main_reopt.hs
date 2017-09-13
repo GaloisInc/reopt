@@ -786,6 +786,7 @@ performRedir args = do
       BSL.writeFile output_path $ renderElf orig_binary
     -- When a non-empty new obj is provided we test
     new_obj_path -> do
+      putStrLn $ "new_obj_path: " ++ new_obj_path
       new_obj <- readElf64 new_obj_path
       redirs <-
         case args^.redirPath of
@@ -1053,6 +1054,7 @@ performReopt args =
         compile_llvm_to_obj args arch llvm obj_path
 
         new_obj <- parseElf64 "new object" =<< BS.readFile obj_path
+        putStrLn $ "obj_path: " ++ obj_path
 
         hPutStrLn stderr "Start merge and write"
         -- Convert binary to LLVM
