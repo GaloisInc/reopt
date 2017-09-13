@@ -301,18 +301,17 @@ recoverBlock interp_state root_addr = do
         ParsedReturn _proc_state -> do
           pure ()
 
-        ParsedSyscall proc_state next_addr -> do
-          addStateVars init_sp proc_state
-
-          let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-          addBlock next_addr sp'
-
         ParsedLookupTable proc_state _idx vec -> do
           addStateVars init_sp proc_state
 
           let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
 
           traverse_ (\a -> addBlock a sp') vec
+        ParsedArchTermStmt X86Syscall proc_state next_addr -> do
+          addStateVars init_sp proc_state
+
+          let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+          addBlock next_addr sp'
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: DiscoveryFunInfo X86_64 ids

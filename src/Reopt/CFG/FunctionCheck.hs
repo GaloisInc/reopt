@@ -51,6 +51,6 @@ checkRegion reg stmts =
     ParsedLookupTable _ _ a -> Just $ V.toList a
     ParsedReturn{}          -> Just []
     ParsedIte _ x y      -> (++) <$> checkRegion reg x <*> checkRegion reg y
-    ParsedSyscall _ a       -> Just [a]
     ParsedTranslateError{}  -> Nothing
     ClassifyFailure _       -> Nothing
+    ParsedArchTermStmt _ _ a -> Just [a]

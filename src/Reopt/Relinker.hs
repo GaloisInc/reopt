@@ -120,12 +120,6 @@ elfAlignment e =
   where isLoadable s = elfSegmentType s == PT_LOAD
         loadableSegments = filter isLoadable $ elfSegments e
 
--- | Return the name of a symbol as a string (or <unamed symbol> if not defined).
-steStringName :: ElfSymbolTableEntry w -> String
-steStringName sym
-  | BS.null (steName sym) = "<unnamed symbol>"
-  | otherwise = BSC.unpack (steName sym)
-
 -- | Information about section in objhect needed for computing layout
 -- and performing relocations.
 data SectionInfo w = SectionInfo { sectionVal   :: (ElfSection w)
@@ -382,15 +376,28 @@ objectSectionAddr src idx m =
     Nothing -> error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
     Just r -> r
 
+-- | A symbol table entry in the new object.
+newtype NewObjectSymbolTableEntry w = NOSTE (ElfSymbolTableEntry w)
+
+newObjectEntryName :: NewObjectSymbolTableEntry w -> BS.ByteString
+newObjectEntryName (NOSTE sym) = steName sym
+
+-- | Return the name of a symbol as a string (or <unamed symbol> if not defined).
+newObjectEntryStringName :: NewObjectSymbolTableEntry w -> String
+newObjectEntryStringName (NOSTE sym)
+  | BS.null (steName sym) = "<unnamed symbol>"
+  | otherwise = BSC.unpack (steName sym)
+
 -- | Get the address of a symbol table if it is mapped in the section map.
 symbolAddr :: (Eq w, Num w)
            => ObjectRelocationInfo w
               -- ^ Information needed for relocations.
            -> String
-              -- ^ Name of reference to a symbol
-           -> ElfSymbolTableEntry w
+              -- ^ Name of reference to a symbol used for debugging purposes.
+           -> NewObjectSymbolTableEntry w
+              -- ^ The symbol table entry in the new object.
            -> Maybe w
-symbolAddr reloc_info src sym =
+symbolAddr reloc_info src (NOSTE sym) =
   case steType sym of
     STT_SECTION
       | steValue sym /= 0 ->
@@ -409,12 +416,12 @@ symbolAddr reloc_info src sym =
           ElfSectionIndex sec_idx ->
             Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info) + steValue sym)
     STT_NOTYPE
-      | steIndex sym /= SHN_UNDEF ->
-          error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
-      | otherwise ->
+      | steIndex sym == SHN_UNDEF ->
         case Map.lookup (steName sym) (binarySymbolMap reloc_info) of
           Nothing -> Nothing
           Just addr -> Just addr
+      | otherwise ->
+          error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
     tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
 type ObjRelocM s w = StateT (ObjRelocState w) (ST s)
@@ -438,10 +445,11 @@ performReloc :: ObjectRelocationInfo Word64
 performReloc reloc_info sym_table this_vaddr mv reloc = do
   -- Offset to modify.
   let off = r_offset reloc :: Word64
-  let sym = getSymbolByIndex sym_table (r_sym reloc)
+  let sym = NOSTE (getSymbolByIndex sym_table (r_sym reloc))
   -- Get the address of a symbol
   case symbolAddr reloc_info "A relocation entry" sym of
-    Nothing -> warnings . unresolvedSymbols %= Set.insert (steName sym)
+    Nothing ->
+      warnings . unresolvedSymbols %= Set.insert (newObjectEntryName sym)
     Just sym_val -> do
       when (sym_val < 0) $ error "performReloc given negative value"
       -- Relocation addend
@@ -456,7 +464,7 @@ performReloc reloc_info sym_table this_vaddr mv reloc = do
                 res32 = fromIntegral res64 :: Word32
         R_X86_64_32
           | fromIntegral res32 /= res64 ->
-            error $ "Relocation of " ++ steStringName sym
+            error $ "Relocation of " ++ newObjectEntryStringName sym
              ++ " at " ++ showHex sym_val " + " ++ show addend
              ++ " does not safely zero extend."
           | otherwise ->
@@ -465,7 +473,7 @@ performReloc reloc_info sym_table this_vaddr mv reloc = do
                 res32 = fromIntegral res64 :: Word32
         R_X86_64_32S
           | fromIntegral res32 /= res64 ->
-            error $ "Relocation of " ++ steStringName sym
+            error $ "Relocation of " ++ newObjectEntryStringName sym
              ++ " at " ++ showHex sym_val " + " ++ show addend
              ++ " does not safely sign extend."
           | otherwise ->
@@ -557,12 +565,12 @@ remapBytes redirs redir_list base bs = runST $ do
   let sym_table = crSymbols redirs
   forM_ redir_list $ \entry -> do
     let off = redirSourceOffset entry
-    let sym = getSymbolByName sym_table $ redirTarget entry
+    let sym = NOSTE (getSymbolByName sym_table (redirTarget entry))
     when (base <= off && off < base + fromIntegral len) $ do
       let tgt =
             case symbolAddr reloc_info "A user defined relocation" sym of
               Just r -> r
-              Nothing -> error $ "Could not find symbol " ++ show (steName sym) ++ "."
+              Nothing -> error $ "Could not find symbol " ++ newObjectEntryStringName sym ++ "."
       let jmp = crMkJump redirs tgt
       -- Only apply redirection when there is enough space to write the code.
       when (BS.length jmp < redirSourceSize entry) $ do

@@ -453,6 +453,87 @@ getPostSyscallValue lbl proc_state r =
     _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
+mkBlock :: BlockLabel 64
+        -> [Some PhiBinding]
+        -> FnTermStmt
+        -> MapF X86Reg FnRegValue
+        -> Recover ids FnBlock
+mkBlock lbl phis tm m = do
+  curStmts <- use rsCurStmts
+  rsCurStmts .= Seq.empty
+  return $! FnBlock { fbLabel = lbl
+                    , fbPhiNodes = phis
+                    , fbStmts  = Fold.toList curStmts
+                    , fbTerm   = tm
+                    , fbRegMap = m
+                    }
+
+recoverX86TermStmt :: forall ids
+             .  DemandedUseMap
+                -- ^ Map from address to registers that address will read.
+             -> [Some PhiBinding]
+                -- ^ Phi bindings from input block
+             -> RecoveredBlockInfo
+             -> BlockLabel 64
+             -> X86TermStmt ids
+             -> RegState (ArchReg X86_64) (Value X86_64 ids)
+             -> MemSegmentOff 64
+             -> Recover ids RecoveredBlockInfo
+recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_addr = seq blockInfo $ do
+  sysp <- gets rsSyscallPersonality
+
+  let syscallRegs :: [ArchReg X86_64 (BVType 64)]
+      syscallRegs = syscallArgumentRegs
+
+
+  let args
+            | BVValue _ this_call_no <- proc_state^.boundValue syscall_num_reg
+            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
+              take (length argtypes) syscallRegs
+            | otherwise =
+              syscallRegs
+
+  let rregs = spResultRegisters sysp
+
+
+  let mkRet :: MapF X86Reg FnRegValue
+            -> Some X86Reg
+            -> Recover ids (MapF X86Reg FnRegValue)
+      mkRet m (Some r) = do
+        rv <- mkReturnVar (typeRepr r)
+        return $ MapF.insert r (FnRegValue $ FnReturn rv) m
+
+  initMap <- foldM mkRet MapF.empty rregs
+
+  -- pull the return variables out of initMap (in order of rregs)
+  let getVar :: Maybe (FnRegValue tp) -> FnReturnVar tp
+      getVar (Just (FnRegValue (FnReturn rv))) = rv
+      getVar _ = Loc.error "impossible"
+
+  let rets :: [Some FnReturnVar]
+      rets = map f rregs
+        where f (Some r) = Some $ getVar $ MapF.lookup r initMap
+
+  -- Fold operation to update register map with values persisted across system calls.
+  let go ::  MapF X86Reg FnRegValue
+         -> Some X86Reg
+         -> Recover ids (MapF X86Reg FnRegValue)
+      go m (Some r) = do
+        v <- getPostSyscallValue lbl proc_state r
+        return $ MapF.insert r (FnRegValue v) m
+
+  let provides = Map.findWithDefault Set.empty next_addr registerUseMap
+
+  regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
+
+  call_num <- recoverRegister proc_state syscall_num_reg
+
+  args'  <- mapM (recoverRegister proc_state) args
+  -- args <- (++ stackArgs stk) <$> stateArgs proc_state
+
+  fb <- mkBlock lbl phis (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
+  pure $! blockInfo & addFnBlock fb
+
 recoverBlock :: forall ids
              .  DemandedUseMap
                 -- ^ Map from address to registers that address will read.
@@ -472,18 +553,6 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
   -- Clear stack offsets
   rsCurLabel  .= lbl
 
-  let mkBlock :: FnTermStmt
-              -> MapF X86Reg FnRegValue
-              -> Recover ids FnBlock
-      mkBlock tm m = do
-        curStmts <- use rsCurStmts
-        rsCurStmts .= Seq.empty
-        return $! FnBlock { fbLabel = lbl
-                          , fbPhiNodes = phis
-                          , fbStmts  = Fold.toList curStmts
-                          , fbTerm   = tm
-                          , fbRegMap = m
-                          }
   -- Recover statements
   Fold.traverse_ recoverStmt (stmtsNonterm stmts)
   case stmtsTerm stmts of
@@ -493,7 +562,8 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       Loc.error $ "Classification failed in Recovery"
     ParsedIte c tblock fblock -> do
       cv <- recoverValue c
-      fb <- mkBlock (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
+      fb <- mkBlock lbl phis
+                    (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
                                  (lbl { labelIndex = stmtsIdent fblock }))
                     MapF.empty
       xr <- recoverBlock registerUseMap [] b tblock (blockInfo & addFnBlock fb)
@@ -530,7 +600,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       args <- mapM (\(Some r) -> Some <$> recoverRegister proc_state r) (ftArgRegs ft)
       -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-      fb <- mkBlock (FnCall call_tgt ft args (intrs, floatrs) ret_lbl) regs'
+      fb <- mkBlock lbl phis (FnCall call_tgt ft args (intrs, floatrs) ret_lbl) regs'
       return $! blockInfo & addFnBlock fb
 
     ParsedJump proc_state tgt_addr -> do
@@ -545,70 +615,18 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       regs' <- foldM go MapF.empty provides
 
       let tgt_lbl = mkRootBlockLabel tgt_addr
-      bl <- mkBlock (FnJump tgt_lbl) regs'
+      bl <- mkBlock lbl phis (FnJump tgt_lbl) regs'
       pure $! blockInfo & addFnBlock bl
 
     ParsedReturn proc_state -> do
       ft <- gets rsCurrentFunctionType
       grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
       frets' <- mapM (recoverRegister proc_state) (ftFloatRetRegs ft)
-      bl <- mkBlock (FnRet grets' frets') MapF.empty
+      bl <- mkBlock lbl phis (FnRet grets' frets') MapF.empty
       pure $! blockInfo & addFnBlock bl
 
-    ParsedSyscall proc_state next_addr -> do
-      sysp <- gets rsSyscallPersonality
-
-      let syscallRegs :: [ArchReg X86_64 (BVType 64)]
-          syscallRegs = syscallArgumentRegs
-
-
-      let args
-            | BVValue _ this_call_no <- proc_state^.boundValue syscall_num_reg
-            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
-              take (length argtypes) syscallRegs
-            | otherwise =
-              syscallRegs
-
-      let rregs = spResultRegisters sysp
-
-
-      let mkRet :: MapF X86Reg FnRegValue
-                -> Some X86Reg
-                -> Recover ids (MapF X86Reg FnRegValue)
-          mkRet m (Some r) = do
-            rv <- mkReturnVar (typeRepr r)
-            return $ MapF.insert r (FnRegValue $ FnReturn rv) m
-
-      initMap <- foldM mkRet MapF.empty rregs
-
-      -- pull the return variables out of initMap (in order of rregs)
-      let getVar :: Maybe (FnRegValue tp) -> FnReturnVar tp
-          getVar (Just (FnRegValue (FnReturn rv))) = rv
-          getVar _ = Loc.error "impossible"
-
-      let rets :: [Some FnReturnVar]
-          rets = map f rregs
-            where f (Some r) = Some $ getVar $ MapF.lookup r initMap
-
-      -- Fold operation to update register map with values persisted across system calls.
-      let go ::  MapF X86Reg FnRegValue
-                 -> Some X86Reg
-                 -> Recover ids (MapF X86Reg FnRegValue)
-          go m (Some r) = do
-             v <- getPostSyscallValue lbl proc_state r
-             return $ MapF.insert r (FnRegValue v) m
-
-      let provides = Map.findWithDefault Set.empty next_addr registerUseMap
-
-      regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
-
-      call_num <- recoverRegister proc_state syscall_num_reg
-
-      args'  <- mapM (recoverRegister proc_state) args
-      -- args <- (++ stackArgs stk) <$> stateArgs proc_state
-
-      fb <- mkBlock (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
-      pure $! blockInfo & addFnBlock fb
+    ParsedArchTermStmt ts proc_state next_addr ->
+      recoverX86TermStmt registerUseMap phis blockInfo lbl ts proc_state next_addr
 
     ParsedLookupTable proc_state idx vec -> do
       let go :: MapF X86Reg FnRegValue
@@ -624,7 +642,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
 
       idx'   <- recoverValue idx
 
-      bl <-  mkBlock (FnLookupTable idx' vec) regs'
+      bl <-  mkBlock lbl phis (FnLookupTable idx' vec) regs'
       pure $! blockInfo & addFnBlock bl
 
 ------------------------------------------------------------------------

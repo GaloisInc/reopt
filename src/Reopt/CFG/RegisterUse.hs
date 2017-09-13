@@ -64,8 +64,8 @@ stmtListSucc stmts = do
     ParsedLookupTable _ _ v -> (,idx) <$> V.toList v
     ParsedReturn{} -> []
     ParsedIte _ t f -> stmtListSucc t ++ stmtListSucc f
-    ParsedSyscall _ ret -> [(ret, idx)]
     ParsedTranslateError{} -> []
+    ParsedArchTermStmt _ _ ret -> [(ret, idx)]
     ClassifyFailure{} -> []
 
 -- | Return the FunPredMap for the discovered block function.
@@ -178,6 +178,25 @@ registerValues :: Functor t
                -> t (Some (Value X86_64 ids))
 registerValues regState = fmap (\(Some r) -> Some (regState^.boundValue r))
 
+
+x86TermStmtValues :: SyscallPersonality X86_64
+                  -> X86TermStmt ids
+                  -> RegState (ArchReg X86_64) (Value X86_64 ids)
+                  -> [Some (Value X86_64 ids)]
+x86TermStmtValues sysp X86Syscall proc_state =
+    registerValues proc_state (Some <$> (sysReg : argRegs))
+   where sysReg ::  ArchReg X86_64 (BVType 64)
+         sysReg = syscall_num_reg
+         -- Get list of registers used as arguments to system calls
+         syscallRegs :: [ArchReg X86_64 (BVType 64)]
+         syscallRegs = syscallArgumentRegs
+         -- Get arguments registers if this is a static system call number
+         argRegs
+             | BVValue _ call_no <- proc_state^.boundValue syscall_num_reg
+             , Just (_,_,argtypes) <- Map.lookup (fromInteger call_no) (spTypeInfo sysp) =
+               take (length argtypes) syscallRegs
+             | otherwise = syscallRegs
+
 -- | Get values that must be evaluated to execute terminal statement.
 termStmtValues :: SyscallPersonality X86_64
                -> AddrToFunctionTypeMap
@@ -202,19 +221,8 @@ termStmtValues sysp typeMap curFunType tstmt =
               ++ (Some <$> take (fnNFloatRets curFunType) x86FloatResultRegs)
        in registerValues proc_state regs
     ParsedIte c _ _ -> [Some c]
-    ParsedSyscall proc_state _ -> registerValues proc_state (Some <$> (sysReg : argRegs))
-      where sysReg ::  ArchReg X86_64 (BVType 64)
-            sysReg = syscall_num_reg
-            -- Get list of registers used as arguments to system calls
-            syscallRegs :: [ArchReg X86_64 (BVType 64)]
-            syscallRegs = syscallArgumentRegs
-            -- Get arguments registers if this is a static system call number
-            argRegs
-               | BVValue _ call_no <- proc_state^.boundValue syscall_num_reg
-               , Just (_,_,argtypes) <- Map.lookup (fromInteger call_no) (spTypeInfo sysp) =
-                   take (length argtypes) syscallRegs
-               | otherwise =
-                   syscallRegs
+    ParsedArchTermStmt ts proc_state _ ->
+      x86TermStmtValues sysp ts proc_state
     ParsedTranslateError _ -> []
     ClassifyFailure _ -> []
 
@@ -267,7 +275,7 @@ summarizeBlock interp_state addr = do
           ParsedIte _ tblock fblock -> do
             go tblock
             go fblock
-          ParsedSyscall proc_state _ -> do
+          ParsedArchTermStmt X86Syscall proc_state _ -> do
             -- FIXME: clagged from call above
             addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
             let insReg :: Some X86Reg -> RegisterUseM ids ()

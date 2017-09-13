@@ -467,7 +467,7 @@ type SummarizeConstraints arch
 -- with a map of how demands by successor blocks map back to
 -- assignments and registers.
 summarizeBlock :: forall arch ids
-               .  SummarizeConstraints arch
+               .  (arch ~ X86_64, SummarizeConstraints arch)
                => Memory (ArchAddrWidth arch)
                -> DiscoveryFunInfo arch ids
                -> ArchSegmentOff arch -- ^ Address of the code.
@@ -512,7 +512,7 @@ summarizeBlock mem interp_state addr stmts = do
       recordBlockDemand lbl proc_state DemandFunctionResult $
           (functionRetRegs (Proxy :: Proxy arch))
 
-    ParsedSyscall proc_state next_addr -> do
+    ParsedArchTermStmt X86Syscall proc_state next_addr -> do
       sysp <- gets funSyscallPersonality
       -- FIXME: we ignore the return type for now, probably not a problem.
       do let syscallRegs :: [ArchReg arch (BVType (ArchAddrWidth arch))]
@@ -536,7 +536,7 @@ summarizeBlock mem interp_state addr stmts = do
       traverse_ (addIntraproceduralJumpTarget interp_state lbl) vec
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: SummarizeConstraints arch
+summarizeIter :: (arch ~ X86_64, SummarizeConstraints arch)
               => Memory (ArchAddrWidth arch)
               -> DiscoveryFunInfo arch ids
               -> FunctionArgsM arch ids ()
@@ -628,7 +628,7 @@ decomposeMap ds addr acc DemandAlways v =
 -- 2. Function arguments to function arguments
 -- 3. Function results to function arguments.
 doOneFunction :: forall arch ids
-              .  SummarizeConstraints arch
+              .  (arch ~ X86_64, SummarizeConstraints arch)
               => SyscallPersonality arch
               -> Set (ArchSegmentOff arch)
               -> DiscoveryState arch
@@ -682,7 +682,7 @@ doOneFunction sysp addrs ist0 acc ist = do
 
 -- | Returns the set of argument registers and result registers for each function.
 functionDemands :: forall arch
-                .  SummarizeConstraints arch
+                .  (arch ~ X86_64, SummarizeConstraints arch)
                 => SyscallPersonality arch
                 -> DiscoveryState arch
                 -> Map (ArchSegmentOff arch) (DemandSet (ArchReg arch))
