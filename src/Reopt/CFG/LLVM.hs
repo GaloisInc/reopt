@@ -882,7 +882,7 @@ rhsToLLVM' rhs =
      p <- mkLLVMValue ptr
      let llvm_typ = typeToLLVMType typ
      p' <- convop L.IntToPtr p (L.PtrTo llvm_typ)
-     fmap (L.Typed llvm_typ) $ evalInstr (L.Load p' Nothing)
+     fmap (L.Typed llvm_typ) $ evalInstr (L.Load p' Nothing Nothing)
    FnAlloca v -> do
      v' <- mkLLVMValue v
      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
@@ -1174,6 +1174,7 @@ defineFunction' syscallPostfix addrSymMap funTypeMap f =
              , L.defGC       = Nothing
              , L.defBody     = [initBlock] ++ blocks ++ [failBlock]
              , L.defMetadata = Map.empty
+             , L.defComdat   = Nothing
              }
   where
     symbol = functionName addrSymMap (fnAddr f)
@@ -1222,6 +1223,7 @@ declareIntrinsic i =
             , L.decArgs    = intrinsicArgs i
             , L.decVarArgs = False
             , L.decAttrs   = intrinsicAttrs i
+            , L.decComdat  = Nothing
             }
 
 -- | Declare all LLVM and reopt-specific intrinsics
@@ -1235,6 +1237,7 @@ declareFunction' addrSymMap (addr, ftp) =
             , L.decArgs    = functionTypeArgTypes ftp
             , L.decVarArgs = False
             , L.decAttrs   = []
+            , L.decComdat  = Nothing
             }
 
 -- | Get module for functions
@@ -1254,6 +1257,7 @@ moduleForFunctions syscallPostfix addrSymMap fns =
              , L.modDefines    = defines
              , L.modInlineAsm  = []
              , L.modAliases    = []
+             , L.modComdat     = Map.empty
              }
   where -- Get all function references
         funTypeMap :: FunctionTypeMap
