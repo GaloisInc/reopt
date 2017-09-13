@@ -38,7 +38,6 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
-import qualified Data.Text as Text
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           GHC.TypeLits
@@ -924,7 +923,7 @@ stmtToLLVM' stmt = do
      -- Cast LLVM point to appropriate type
      llvm_ptr <- convop L.IntToPtr llvm_ptr_as_bv (L.PtrTo (L.typedType llvm_v))
      effect $ L.Store llvm_v llvm_ptr Nothing
-   FnComment str -> comment $ Text.unpack str
+   FnComment _ -> return ()
    FnMemCopy bytesPerCopy nValues src dest direction -> do
      nValues' <- mkLLVMValue nValues
      src'     <- mkLLVMValue src

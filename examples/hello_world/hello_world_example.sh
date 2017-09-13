@@ -7,7 +7,7 @@ relink_output="reopt_diet"
 echo "About to relink"
 
 # Path to GNU Assembler for Linux
-GAS_PATH="$HOME/opt/binutils-linux/bin/x86_64-unknown-linux-gnu-as"
+GAS_PATH=`(which x86_64-unknown-linux-as)`
 
 # Path to Reopt standard library
 LIBREOPT_PATH="../../libreopt/build/x86_64-unknown-linux-gnu/libreopt.bc"
