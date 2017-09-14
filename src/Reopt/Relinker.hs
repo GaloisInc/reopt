@@ -421,7 +421,9 @@ symbolAddr reloc_info src (NOSTE sym) =
           Nothing -> Nothing
           Just addr -> Just addr
       | otherwise ->
-          error "Expected STT_NOTYPE symbol to refer to SHN_UNDEF section."
+        case steIndex sym of
+          ElfSectionIndex sec_idx ->
+            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info) + steValue sym)
     tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
 type ObjRelocM s w = StateT (ObjRelocState w) (ST s)

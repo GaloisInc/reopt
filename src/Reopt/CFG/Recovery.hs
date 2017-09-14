@@ -698,6 +698,33 @@ makePhis preds regs = go <$> MapF.toList regs
   where go :: MapF.Pair X86Reg FnPhiVar -> Some PhiBinding
         go (MapF.Pair r phi_var) = Some (PhiBinding phi_var ((,r) <$> preds))
 
+recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
+                  -> DemandedUseMap
+                  -> FunPredMap 64
+                  -> RecoveredBlockInfo
+                  -> MemSegmentOff 64
+                  -> Recover ids RecoveredBlockInfo
+recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
+  let regs0 :: [Some X86Reg]
+      regs0 =
+        case Map.lookup addr blockRegs of
+          Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show addr) []
+          Just x  -> Set.toList x
+  let mkIdFromReg :: MapF X86Reg FnPhiVar
+                  -> Some X86Reg
+                  -> Recover ids (MapF X86Reg FnPhiVar)
+      mkIdFromReg m (Some r) = do
+        next_id <- freshId
+        pure $! MapF.insert r (FnPhiVar next_id (typeRepr r)) m
+  regs1 <- foldM mkIdFromReg MapF.empty regs0
+  rsCurRegs .= fmapF (FnRegValue . FnPhiValue) regs1
+   -- Get predecessors for this block.
+  let Just preds = Map.lookup addr blockPreds
+   -- Generate phi nodes from predecessors and registers that this block refers to.
+  let phis = makePhis preds regs1
+  Just reg <- pure $ Map.lookup addr (fInfo^.parsedBlocks)
+  recoverBlock blockRegs phis reg (blockStatementList reg) blockInfo
+
 -- | Recover the function at a given address.
 recoverFunction :: forall ids
                 .  SyscallPersonality X86_64
@@ -706,10 +733,14 @@ recoverFunction :: forall ids
                 -> DiscoveryFunInfo X86_64 ids
                 -> Either String Function
 recoverFunction sysp fArgs mem fInfo = do
+
   let a = discoveredFunAddr fInfo
   let blockPreds = funBlockPreds fInfo
   let (usedAssigns, blockRegs)
         = registerUse sysp fArgs fInfo blockPreds
+
+  trace (show a ++ "\n" ++ show blockRegs) $ do
+
   let cft = fromMaybe
               (debug DFunRecover ("Missing type for " ++ show a) ftMaximumFunctionType) $
               Map.lookup (relativeSegmentAddr a) fArgs
@@ -736,36 +767,6 @@ recoverFunction sysp fArgs mem fInfo = do
               , rsFunctionArgs    = fArgs
               }
 
-  let recoverInnerBlock :: RecoveredBlockInfo
-                        -> MemSegmentOff 64
-                        -> Recover ids RecoveredBlockInfo
-      recoverInnerBlock blockInfo addr = do
-        let regs0 :: [Some X86Reg]
-            regs0 =
-              case Map.lookup addr blockRegs of
-                Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show addr) []
-                Just x  -> Set.toList x
-
-        let mkIdFromReg :: MapF X86Reg FnPhiVar
-                        -> Some X86Reg
-                        -> Recover ids (MapF X86Reg FnPhiVar)
-            mkIdFromReg m (Some r) = do
-                next_id <- freshId
-                pure $! MapF.insert r (FnPhiVar next_id (typeRepr r)) m
-
-        regs1 <- foldM mkIdFromReg MapF.empty regs0
-
-        rsCurRegs .= fmapF (FnRegValue . FnPhiValue) regs1
-
-        -- Get predecessors for this block.
-        let Just preds = Map.lookup addr blockPreds
-
-        -- Generate phi nodes from predecessors and registers that this block refers to.
-        let phis = makePhis preds regs1
-
-        Just reg <- pure $ Map.lookup addr (fInfo^.parsedBlocks)
-        recoverBlock blockRegs phis reg (blockStatementList reg) blockInfo
-
   evalRecover rs $ do
     -- The first block is special as it needs to allocate space for
     -- the block stack area.  It should also not be in blockPreds (we
@@ -782,7 +783,7 @@ recoverFunction sysp fArgs mem fInfo = do
       Left msg -> throwError $ "maximumStackDepth: " ++ msg
 
     r0 <- recoverBlock blockRegs [] b stmts emptyRecoveredBlockInfo
-    rf <- foldM recoverInnerBlock r0 (Map.keys blockPreds)
+    rf <- foldM (recoverInnerBlock fInfo blockRegs blockPreds) r0 (Map.keys blockPreds)
 
     pure Function { fnAddr = a
                   , fnType = cft

@@ -47,6 +47,8 @@ import           Reopt.CFG.FnRep ( FunctionType(..)
                                  )
 import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 
+import           Debug.Trace (trace)
+
 -------------------------------------------------------------------------------
 -- funBlockPreds
 
@@ -364,8 +366,10 @@ registerUse sysp fArgs ist predMap =
   flip evalState (initRegisterUseState sysp fArgs (discoveredFunAddr ist)) $ do
     -- Run the first phase (block summarization)
     summarizeIter ist Set.empty
+
     -- propagate back uses
     new <- use blockRegUses
+    trace ("blockRegUses: " ++ show new) $ do
     -- debugM DRegisterUse ("0x40018d ==> " ++ show (Map.lookup (GeneratedBlock 0x40018d 0) new))
     -- let new' = Map.singleton (GeneratedBlock 0x40018d 0) (Set.fromList (Some <$> [N.rax, N.rdx]))
     calculateFixpoint predMap new

@@ -447,7 +447,11 @@ stmtDemandedValues :: CanDemandValues arch
 stmtDemandedValues stmt =
   case stmt of
     -- Assignment statements are side effect free so we ignore them.
-    AssignStmt{} -> []
+    AssignStmt a -> case (assignRhs a) of
+      EvalApp _ -> []
+      SetUndefined _ -> []
+      ReadMem addr _ -> [Some addr]
+      EvalArchFn _ _ -> []
     WriteMem addr _ v -> [Some addr, Some v]
     -- Place holder statements are unknwon
     PlaceHolderStmt _ _ -> []
