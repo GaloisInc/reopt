@@ -739,8 +739,6 @@ recoverFunction sysp fArgs mem fInfo = do
   let (usedAssigns, blockRegs)
         = registerUse sysp fArgs fInfo blockPreds
 
-  trace (show a ++ "\n" ++ show blockRegs) $ do
-
   let cft = fromMaybe
               (debug DFunRecover ("Missing type for " ++ show a) ftMaximumFunctionType) $
               Map.lookup (relativeSegmentAddr a) fArgs
