@@ -337,7 +337,7 @@ doOne bid predMap (aUse, bru) rest newRegs (predLabel:predRest) = do
   let bru' = Map.insertWith Set.union predAddr regs bru
   let d = regs `Set.difference` seenRegs
 
-  let rest' | Set.null d = rest'
+  let rest' | Set.null d = rest
             | otherwise = Map.insertWith Set.union predAddr d rest
   seq aUse' $ seq bru' $ seq rest' $ doOne bid predMap (aUse', bru') rest' newRegs predRest
 
