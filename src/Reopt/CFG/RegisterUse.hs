@@ -47,8 +47,6 @@ import           Reopt.CFG.FnRep ( FunctionType(..)
                                  )
 import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 
-import           Debug.Trace (trace)
-
 -------------------------------------------------------------------------------
 -- funBlockPreds
 
@@ -235,8 +233,8 @@ termStmtValues sysp typeMap curFunType tstmt =
 summarizeBlock :: forall ids
                .  DiscoveryFunInfo X86_64 ids
                -> MemSegmentOff 64
-               -> StatementList arch ids
-               -> RegisterUseM ids stmts ()
+               -> StatementList X86_64 ids
+               -> RegisterUseM ids ()
 summarizeBlock interp_state addr stmts = do
   let lbl = GeneratedBlock addr (stmtsIdent stmts)
   blockInitDeps %= Map.insert lbl Map.empty
@@ -248,15 +246,15 @@ summarizeBlock interp_state addr stmts = do
         vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
         blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
-        -- Add demanded values for terminal
-        sysp <- gets thisSyscallPersonality
-        typeMap <- gets $ functionArgs
-        cur_ft <- gets currentFunctionType
-        let termValues = termStmtValues sysp typeMap cur_ft (stmtsTerm stmts)
-        traverse_ (\(Some r) -> demandValue addr r)
-                  (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
+  -- Add demanded values for terminal
+  sysp <- gets thisSyscallPersonality
+  typeMap <- gets $ functionArgs
+  cur_ft <- gets currentFunctionType
+  let termValues = termStmtValues sysp typeMap cur_ft (stmtsTerm stmts)
+  traverse_ (\(Some r) -> demandValue addr r)
+            (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
 
-        case stmtsTerm stmts of
+  case stmtsTerm stmts of
           ParsedCall proc_state _ -> do
             -- Get function type associated with function
             let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
@@ -286,9 +284,6 @@ summarizeBlock interp_state addr stmts = do
             error "Cannot identify register use in code where translation error occurs"
           ClassifyFailure _ ->
             error $ "Classification failed: " ++ show addr
-  go stmts0
-
-
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: DiscoveryFunInfo X86_64 ids
