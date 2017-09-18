@@ -56,7 +56,6 @@ library
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth
-    Reopt.CFG.StackHeight
     Reopt.Concrete.BitVector
     Reopt.Concrete.Semantics
     Reopt.Concrete.MachineState

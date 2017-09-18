@@ -235,19 +235,18 @@ termStmtValues sysp typeMap curFunType tstmt =
 summarizeBlock :: forall ids
                .  DiscoveryFunInfo X86_64 ids
                -> MemSegmentOff 64
-               -> RegisterUseM ids ()
-summarizeBlock interp_state addr = do
-  let go :: StatementList X86_64 ids -> RegisterUseM ids ()
-      go stmts = do
-        let lbl = GeneratedBlock addr (stmtsIdent stmts)
-        blockInitDeps %= Map.insert lbl Map.empty
-        let -- Figure out the deps of the given registers and update the state for the current label
-            addRegisterUses :: RegState X86Reg (Value X86_64 ids)
-                            -> [Some X86Reg]
-                            -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
-            addRegisterUses s rs = do
-              vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
-              blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
+               -> StatementList arch ids
+               -> RegisterUseM ids stmts ()
+summarizeBlock interp_state addr stmts = do
+  let lbl = GeneratedBlock addr (stmtsIdent stmts)
+  blockInitDeps %= Map.insert lbl Map.empty
+  let -- Figure out the deps of the given registers and update the state for the current label
+      addRegisterUses :: RegState X86Reg (Value X86_64 ids)
+                      -> [Some X86Reg]
+                      -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
+      addRegisterUses s rs = do
+        vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
+        blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
 
         -- Add demanded values for terminal
         sysp <- gets thisSyscallPersonality
@@ -275,8 +274,8 @@ summarizeBlock interp_state addr = do
           ParsedReturn _ ->
             pure ()
           ParsedIte _ tblock fblock -> do
-            go tblock
-            go fblock
+            summarizeBlock interp_state addr tblock
+            summarizeBlock interp_state addr fblock
           ParsedArchTermStmt X86Syscall proc_state _ -> do
             -- FIXME: clagged from call above
             addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
@@ -287,11 +286,9 @@ summarizeBlock interp_state addr = do
             error "Cannot identify register use in code where translation error occurs"
           ClassifyFailure _ ->
             error $ "Classification failed: " ++ show addr
-  -- Update frontier with successor states for block
-  let Just blk = Map.lookup addr (interp_state^.parsedBlocks)
-  let stmts = blockStatementList blk
-  blockFrontier %= \s -> foldr Set.insert s (fst <$> stmtListSucc stmts)
-  go stmts
+  go stmts0
+
+
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: DiscoveryFunInfo X86_64 ids
@@ -306,42 +303,64 @@ summarizeIter ist seen = do
       if addr `Set.member` seen then
         summarizeIter ist seen
        else do
-        summarizeBlock ist addr
+        let Just blk = Map.lookup addr (ist^.parsedBlocks)
+        let stmts = blockStatementList blk
+        blockFrontier %= \s -> foldr Set.insert s (fst <$> stmtListSucc stmts)
+        summarizeBlock ist addr stmts
         summarizeIter ist (Set.insert addr seen)
 
-doOne :: Set (Some X86Reg)
-      -> BlockLabel 64
-      -> RegisterUseM ids (MemSegmentOff 64, Set (Some X86Reg))
-doOne newRegs predLabel = do
-  Just depMap <- uses blockInitDeps (Map.lookup predLabel)
 
-  let (assigns, regs) = mconcat [ depMap ^. ix r | r <- Set.toList newRegs ]
-  assignmentUses %= Set.union assigns
-  -- Get dependencies of predecessor currently.
-  let predAddr = labelAddr predLabel
-  seenRegs <- uses blockRegUses $ fromMaybe Set.empty . Map.lookup predAddr
-  blockRegUses  %= Map.insertWith Set.union predAddr regs
-
-  return (predAddr, regs `Set.difference` seenRegs)
-
--- We use ix here as it returns mempty if there is no key, which is
--- the right behavior here.
-calculateFixpoint :: FunPredMap 64
-                     -- ^ Map addresses to the predessor blocks.
-                  -> Map (MemSegmentOff 64) (Set (Some X86Reg))
-                     -- ^ Map addresses to the register they need.
-                  -> RegisterUseM ids ()
-calculateFixpoint predMap new
-  | Just ((currAddr, newRegs), rest) <- Map.maxViewWithKey new = do
-      -- Get predicates for current block
-      let preds = fromMaybe [] (Map.lookup currAddr predMap)
-      -- propagate backwards any new registers in the predecessors
-      nexts <- filter (not . Set.null . snd) <$> mapM (doOne newRegs) preds
-      calculateFixpoint predMap (Map.unionWith Set.union rest (Map.fromList nexts))
-  | otherwise = return ()
 
 -- | Map from addresses to the registers they depend on
 type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
+
+type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
+
+-- |
+doOne :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids))
+      -> FunPredMap 64
+         -- ^ Map addresses to the predessor blocks.
+      -> FixState ids
+         -- ^ State that we are computing fixpint for.
+      -> DemandedUseMap
+         -- ^ Remaining registers to compute demanded use map
+      -> Set (Some X86Reg)
+         -- ^ Set of new registers the target block depends on.
+      -> [BlockLabel 64]
+         -- ^ Predecessors for the target block.
+      -> FixState ids
+doOne bid predMap s rest _ [] = calculateFixpoint bid predMap s rest
+doOne bid predMap (aUse, bru) rest newRegs (predLabel:predRest) = do
+  let Just depMap = Map.lookup predLabel bid
+
+  let (assigns, regs) = mconcat [ depMap ^. ix r | r <- Set.toList newRegs ]
+  -- Get dependencies of predecessor currently.
+  let predAddr = labelAddr predLabel
+  let seenRegs = fromMaybe Set.empty (Map.lookup predAddr bru)
+
+  let aUse' = Set.union assigns aUse
+  let bru' = Map.insertWith Set.union predAddr regs bru
+  let d = regs `Set.difference` seenRegs
+
+  let rest' | Set.null d = rest'
+            | otherwise = Map.insertWith Set.union predAddr d rest
+  seq aUse' $ seq bru' $ seq rest' $ doOne bid predMap (aUse', bru') rest' newRegs predRest
+
+-- We use ix here as it returns mempty if there is no key, which is
+-- the right behavior here.
+calculateFixpoint :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids))
+                     -- Maps blocks labels to the dependencies for each register they provide.
+                  -> FunPredMap 64
+                     -- ^ Map addresses to the predessor blocks.
+                  -> FixState ids
+                     -- ^ Map addresses to the register they need.
+                  -> DemandedUseMap
+                  -> FixState ids
+calculateFixpoint bid predMap s new =
+  case Map.maxViewWithKey new of
+    Nothing -> s
+    Just ((currAddr, newRegs), rest) -> do
+      doOne bid predMap s rest newRegs $ fromMaybe [] $ Map.lookup currAddr predMap
 
 -- | Pretty print a demanded use map
 ppDemandedUseMap :: DemandedUseMap -> Doc
@@ -362,16 +381,12 @@ registerUse :: SyscallPersonality X86_64
             -> ( Set (Some (AssignId ids))
                , DemandedUseMap
                )
-registerUse sysp fArgs ist predMap =
-  flip evalState (initRegisterUseState sysp fArgs (discoveredFunAddr ist)) $ do
+registerUse sysp fArgs disFunInfo predMap =
+  flip evalState (initRegisterUseState sysp fArgs (discoveredFunAddr disFunInfo)) $ do
     -- Run the first phase (block summarization)
-    summarizeIter ist Set.empty
-
+    summarizeIter disFunInfo Set.empty
     -- propagate back uses
-    new <- use blockRegUses
-    trace ("blockRegUses: " ++ show new) $ do
-    -- debugM DRegisterUse ("0x40018d ==> " ++ show (Map.lookup (GeneratedBlock 0x40018d 0) new))
-    -- let new' = Map.singleton (GeneratedBlock 0x40018d 0) (Set.fromList (Some <$> [N.rax, N.rdx]))
-    calculateFixpoint predMap new
-    (,) <$> use assignmentUses
-        <*> use blockRegUses
+    bid <- use blockInitDeps
+    assignUse <- use assignmentUses
+    bru <- use blockRegUses
+    pure $! calculateFixpoint bid predMap (assignUse, bru) bru
