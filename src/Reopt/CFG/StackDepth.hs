@@ -74,11 +74,6 @@ instance RegisterInfo (ArchReg arch) => Pretty (StackDepthValue arch ids) where
       go (Pos x : xs) = text "+" <+> pretty x <+> go xs
       go (Neg x : xs) = text "-" <+> pretty x <+> go xs
 
--- isConstantDepthValue :: StackDepthValue -> Maybe Int64
--- isConstantDepthValue sv
---   | Set.null (dynamicPart sv) = Just (staticPart sv)
---   | otherwise                 = Nothing
-
 constantDepthValue :: Int64 -> StackDepthValue arch ids
 constantDepthValue c = SDV c Set.empty
 
@@ -144,42 +139,15 @@ blockStackRefs = lens _blockStackRefs (\s v -> s { _blockStackRefs = v })
 blockFrontier :: Simple Lens (StackDepthState arch ids) [ArchSegmentOff arch]
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
--- ----------------------------------------------------------------------------------------
-
--- FIXME: move
-
--- Unwraps all Apps etc, might visit an app twice (Add x x, for example)
--- foldValue :: forall m tp. Monoid m
---              => (forall n.  NatRepr n -> Integer -> m)
---              -> (forall cl. N.RegisterName cl -> m)
---              -> Value tp -> m
--- foldValue litf initf val = go val
---   where
---     go :: forall tp. Value tp -> m
---     go v = case v of
---              BVValue sz i -> litf sz i
---              Initial r    -> initf r
---              AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
-
---     goAssignRHS :: forall tp. AssignRhs tp -> m
---     goAssignRHS v =
---       case v of
---         EvalApp a -> foldApp go a
---         SetUndefined w -> mempty
---         Read loc
---          | MemLoc addr _ <- loc -> go addr
---          | otherwise            -> mempty -- FIXME: what about ControlLoc etc.
---         MemCmp _sz cnt src dest rev -> mconcat [ go cnt, go src, go dest, go rev ]
-
--- ----------------------------------------------------------------------------------------
-
 type StackDepthM arch ids a = ExceptT String (State (StackDepthState arch ids)) a
 
-addBlock :: RegisterInfo (ArchReg arch)
-         => ArchSegmentOff arch
-         -> StackDepthValue arch ids
-         -> StackDepthM arch ids ()
-addBlock addr start = do
+-- | Record that the stack at the block at the current address should have
+-- the given StackDepthValue.
+recordStackOffset :: RegisterInfo (ArchReg arch)
+                  => ArchSegmentOff arch -- ^ Starting address at block
+                  -> StackDepthValue arch ids -- ^
+                  -> StackDepthM arch ids ()
+recordStackOffset addr start = do
   let lbl = mkRootBlockLabel addr
   x <- use $ blockInitStackPointers . at addr
   case x of
@@ -213,7 +181,7 @@ valueHasSP v0 =
     goAssignRHS v =
       case v of
         EvalApp a -> getAny $ foldApp (Any . valueHasSP)  a
-        EvalArchFn (MemCmp _sz cnt src dest rev) _ ->
+        EvalArchFn (X86Fn (MemCmp _sz cnt src dest rev)) _ ->
           or [ valueHasSP cnt, valueHasSP src, valueHasSP dest, valueHasSP rev ]
         _ -> False
 
@@ -257,73 +225,75 @@ goStmt init_sp (WriteMem addr _ v) = do
     _ -> return ()
 goStmt _ _ = return ()
 
-recoverBlock :: DiscoveryFunInfo X86_64 ids
-             -> MemSegmentOff 64
+addStateVars :: StackDepthValue X86_64 ids
+             -> RegState (ArchReg X86_64) (Value X86_64 ids)
              -> StackDepthM X86_64 ids ()
-recoverBlock interp_state root_addr = do
-    Just init_sp <- use $ blockInitStackPointers . at root_addr
-    Just reg <- return $ Map.lookup root_addr (interp_state^.parsedBlocks)
-    go init_sp (blockStatementList reg)
-  where
-    addStateVars init_sp s = do
-      forM_ gpRegList $ \r -> do
-        addDepth $ parseStackPointer init_sp (s ^. boundValue r)
-    go init_sp b = do
-          -- overapproximates by viewing all registers as uses of the
-          -- sp between blocks
+addStateVars init_sp s =
+  forM_ gpRegList $ \r -> do
+    addDepth $ parseStackPointer init_sp (s ^. boundValue r)
 
-      traverse_ (goStmt init_sp) (stmtsNonterm b)
-      case stmtsTerm b of
-        ParsedTranslateError _ ->
-          throwError "Cannot identify stack depth in code where translation error occurs"
-        ClassifyFailure _ ->
-          throwError $ "Classification failed in StackDepth: " ++ show root_addr
-        ParsedIte _c tblock fblock -> do
-          go init_sp tblock
-          go init_sp fblock
+-- | This function finds references to the stack pointer in the statements to
+-- infer the maximal stack offset that may be referenced by the pointe.
+--
+-- In this case, the stack pointer is assumed to grow down (X86 specific),
+-- so maximal actually means the largest negative offset.
+analyzeStmtReferences :: MemSegmentOff 64
+                         -- ^ The address that the statements started at.
+                      -> StackDepthValue X86_64 ids
+                      -> StatementList X86_64 ids
+                      -> StackDepthM X86_64 ids ()
+analyzeStmtReferences root_addr init_sp b = do
+  -- overapproximates by viewing all registers as uses of the
+  -- sp between blocks
+  traverse_ (goStmt init_sp) (stmtsNonterm b)
+  case stmtsTerm b of
+    ParsedTranslateError _ ->
+      throwError "Cannot identify stack depth in code where translation error occurs"
+    ClassifyFailure _ ->
+      throwError $ "Classification failed in StackDepth: " ++ show root_addr
+    ParsedIte _c tblock fblock -> do
+      analyzeStmtReferences root_addr init_sp tblock
+      analyzeStmtReferences root_addr init_sp fblock
 
-        ParsedCall proc_state m_ret_addr -> do
-          addStateVars init_sp proc_state
+    ParsedCall proc_state m_ret_addr -> do
+      addStateVars init_sp proc_state
 
-          let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-          case m_ret_addr of
-            Nothing -> return ()
-            Just ret_addr ->
-              addBlock ret_addr (addStackDepthValue sp' $ constantDepthValue 8)
+      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+      case m_ret_addr of
+        Nothing -> return ()
+        Just ret_addr ->
+          recordStackOffset ret_addr (addStackDepthValue sp' $ constantDepthValue 8)
 
-        ParsedJump proc_state tgt_addr -> do
-          addStateVars init_sp proc_state
+    ParsedJump proc_state tgt_addr -> do
+      addStateVars init_sp proc_state
+      let sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+      recordStackOffset tgt_addr sp'
 
-          let sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+    ParsedReturn _proc_state -> do
+      pure ()
 
-          addBlock tgt_addr sp'
-
-        ParsedReturn _proc_state -> do
-          pure ()
-
-        ParsedLookupTable proc_state _idx vec -> do
-          addStateVars init_sp proc_state
-
-          let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-
-          traverse_ (\a -> addBlock a sp') vec
-        ParsedArchTermStmt X86Syscall proc_state next_addr -> do
-          addStateVars init_sp proc_state
-
-          let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-          addBlock next_addr sp'
+    ParsedLookupTable proc_state _idx vec -> do
+      addStateVars init_sp proc_state
+      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+      traverse_ (\a -> recordStackOffset a sp') vec
+    ParsedArchTermStmt X86Syscall proc_state next_addr -> do
+      addStateVars init_sp proc_state
+      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+      recordStackOffset next_addr sp'
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: DiscoveryFunInfo X86_64 ids
             -> StackDepthM X86_64 ids ()
-recoverIter ist = do
+recoverIter finfo = do
   s <- use blockFrontier
   case s of
     [] -> return ()
-    next : s' -> do
+    root_addr : s' -> do
       blockFrontier .= s'
-      recoverBlock ist next
-      recoverIter ist
+      Just init_sp <- use $ blockInitStackPointers . at root_addr
+      Just reg <- return $ Map.lookup root_addr (finfo^.parsedBlocks)
+      analyzeStmtReferences root_addr init_sp (blockStatementList reg)
+      recoverIter finfo
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.

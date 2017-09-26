@@ -160,6 +160,7 @@ data FnAssignRhs (tp :: Type) where
             -> FnAssignRhs tp
   FnAlloca :: !(FnValue (BVType 64))
            -> FnAssignRhs (BVType 64)
+--  FnEvalArchFn :: !(ArchFn arch ids tp) -> FnAssignRhs tp
   -- See `RepnzScas` in `Data.Macaw.X86.ArchTypes`
   FnRepnzScas :: !(RepValSize n)
               -> !(FnValue (BVType n))

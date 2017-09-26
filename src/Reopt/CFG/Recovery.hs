@@ -325,7 +325,7 @@ recoverAssign asgn = do
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr (typeRepr tp))
-          EvalArchFn (RepnzScas sz val buf cnt) _ -> do
+          EvalArchFn (X86Fn (RepnzScas sz val buf cnt)) _ -> do
             fn_val <- recoverValue val
             fn_buf <- recoverValue buf
             fn_cnt <- recoverValue cnt

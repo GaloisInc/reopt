@@ -433,8 +433,7 @@ instance S.Semantics Semantics where
 
   bvQuot = bvBinOp BVQuot "quot"
   bvRem = bvBinOp BVRem "rem"
-  bvSignedQuot = bvBinOp BVSignedQuot "sQuot"
-  bvSignedRem = bvBinOp BVSignedRem "sRem"
+  bvSignedQuotRem _ _ _ = error "bvSignedQu0tRem not implemented."
 
   exception v1 v2 c = tell [Exception v1 v2 c]
 
