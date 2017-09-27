@@ -253,7 +253,7 @@ addIntraproceduralJumpTarget fun_info src_block dest_addr = do  -- record the ed
         indent 2 (text "Source:" <$$> pretty src_block)
 
 -- | Compute the input registers that this value depends on
-valueUses :: (OrdF (ArchReg arch), CanFoldValues arch)
+valueUses :: (OrdF (ArchReg arch), FoldableFC (ArchFn arch))
           => Value arch ids tp
           -> FunctionArgsM arch ids (RegisterSet (ArchReg arch))
 valueUses v =
@@ -266,7 +266,7 @@ valueUses v =
 
 -- | Record that a block demands the value of certain registers.
 recordBlockDemand :: ( OrdF (ArchReg arch)
-                     , CanFoldValues arch
+                     , FoldableFC (ArchFn arch)
                      )
                   => ArchLabel arch
                      -- ^ The current block
@@ -285,7 +285,7 @@ recordBlockDemand lbl s mk rs = do
 
 -- Figure out the deps of the given registers and update the state for the current label
 recordBlockTransfer :: ( OrdF (ArchReg arch)
-                       , CanFoldValues arch
+                       , FoldableFC (ArchFn arch)
                        )
                     => ArchLabel arch
                     -> RegState (ArchReg arch) (Value arch ids)
@@ -300,7 +300,7 @@ recordBlockTransfer lbl s rs = do
 
 -- | A block requires a value, and so we need to remember which
 -- registers are required.
-demandValue :: (OrdF (ArchReg arch), CanFoldValues arch)
+demandValue :: (OrdF (ArchReg arch), FoldableFC (ArchFn arch))
             => ArchLabel arch
             -> Value arch ids tp
             -> FunctionArgsM arch ids ()
@@ -393,7 +393,7 @@ class CanDemandValues arch where
 -- (callee saved are handled in summarizeBlock).
 summarizeCall :: forall arch ids
               .  ( CanDemandValues arch
-                 , CanFoldValues arch
+                 , FoldableFC (ArchFn arch)
                  , RegisterInfo (ArchReg arch)
                  )
               => Memory (ArchAddrWidth arch)
@@ -453,7 +453,7 @@ stmtDemandedValues stmt =
       ReadMem addr _ -> [Some addr]
       EvalArchFn _ _ -> []
     WriteMem addr _ v -> [Some addr, Some v]
-    -- Place holder statements are unknwon
+    -- Place holder statements are unknown.
     PlaceHolderStmt _ _ -> []
     InstructionStart _ _ -> []
     -- Comment statements have no specific value.
@@ -462,7 +462,7 @@ stmtDemandedValues stmt =
 
 type SummarizeConstraints arch
   = ( CanDemandValues arch
-    , CanFoldValues arch
+    , FoldableFC (ArchFn arch)
     , ArchConstraints arch
     )
 

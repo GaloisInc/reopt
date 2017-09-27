@@ -49,6 +49,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
+import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 import           Data.Macaw.X86.X86Reg
 
@@ -886,7 +887,7 @@ rhsToLLVM' rhs =
      v' <- mkLLVMValue v
      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
      convop L.PtrToInt alloc_ptr (L.iT 64)
-   FnRepnzScas sz val buf cnt -> do
+   FnEvalArchFn (RepnzScas sz val buf cnt) -> do
      llvm_val <- mkLLVMValue val
      -- Make value for buffer
      llvm_buf <- mkLLVMValue buf
@@ -908,6 +909,8 @@ rhsToLLVM' rhs =
      res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [llvm_val, llvm_cnt, llvm_ptr]
      -- Get first result
      extractValue res 0
+   FnEvalArchFn f -> do
+     error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
 stmtToLLVM' :: FnStmt -> BBLLVM ()
 stmtToLLVM' stmt = do

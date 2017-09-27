@@ -28,10 +28,12 @@ module Reopt.CFG.FnRep
    , ftFloatRetRegs
    ) where
 
+import           Control.Monad.Identity
 import           Data.Foldable
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
+import           Data.Parameterized.TraversableFC
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
@@ -46,11 +48,14 @@ import           Data.Macaw.CFG
    , sexpr
    , foldAppl
    , prettyF
+   , ArchFn
+   , ppArchFn
    )
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Data.Macaw.X86.Monad (RepValSize(..), XMMType)
+import           Data.Macaw.X86.ArchTypes (X86_64)
+import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.X86Reg
   ( X86Reg
   , x86ArgumentRegs
@@ -160,13 +165,7 @@ data FnAssignRhs (tp :: Type) where
             -> FnAssignRhs tp
   FnAlloca :: !(FnValue (BVType 64))
            -> FnAssignRhs (BVType 64)
---  FnEvalArchFn :: !(ArchFn arch ids tp) -> FnAssignRhs tp
-  -- See `RepnzScas` in `Data.Macaw.X86.ArchTypes`
-  FnRepnzScas :: !(RepValSize n)
-              -> !(FnValue (BVType n))
-              -> !(FnValue (BVType 64))
-              -> !(FnValue (BVType 64))
-              -> FnAssignRhs (BVType 64)
+  FnEvalArchFn :: !(ArchFn X86_64 FnValue tp) -> FnAssignRhs tp
 
 ppFnAssignRhs :: (forall u . FnValue u -> Doc)
               -> FnAssignRhs tp
@@ -175,7 +174,7 @@ ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w
 ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
 ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
 ppFnAssignRhs pp (FnAlloca sz) = sexpr "alloca" [pp sz]
-ppFnAssignRhs pp (FnRepnzScas _ val base off) = sexpr "first_offset_of" [pp val, pp base, pp off]
+ppFnAssignRhs pp (FnEvalArchFn f) = runIdentity (ppArchFn (pure . pp) f)
 
 instance Pretty (FnAssignRhs tp) where
   pretty = ppFnAssignRhs pretty
@@ -187,7 +186,7 @@ instance HasRepr FnAssignRhs TypeRepr where
       FnReadMem _ tp -> tp
       FnEvalApp a    -> typeRepr a
       FnAlloca _ -> knownType
-      FnRepnzScas{} -> knownType
+      FnEvalArchFn f -> typeRepr f
 
 class FoldFnValue a where
   foldFnValue :: (forall u . s -> FnValue u -> s) -> s -> a -> s
@@ -197,7 +196,7 @@ instance FoldFnValue (FnAssignRhs tp) where
   foldFnValue f s (FnReadMem loc _)   = f s loc
   foldFnValue f s (FnEvalApp a)       = foldAppl f s a
   foldFnValue f s (FnAlloca sz)       = s `f` sz
-  foldFnValue f s (FnRepnzScas _ val buf cnt) = s `f` val `f` buf `f` cnt
+  foldFnValue f s (FnEvalArchFn fn) = foldlFC f s fn
 
 -- tp <- {BVType 64, BVType 128}
 data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId

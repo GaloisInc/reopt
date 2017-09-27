@@ -325,11 +325,13 @@ recoverAssign asgn = do
           ReadMem addr tp -> do
             fn_addr <- recoverValue addr
             pure (FnReadMem fn_addr (typeRepr tp))
-          EvalArchFn (X86Fn (RepnzScas sz val buf cnt)) _ -> do
+          EvalArchFn (RepnzScas sz val buf cnt) _ -> do
             fn_val <- recoverValue val
             fn_buf <- recoverValue buf
             fn_cnt <- recoverValue cnt
-            pure (FnRepnzScas sz fn_val fn_buf fn_cnt)
+            pure $! FnEvalArchFn (RepnzScas sz fn_val fn_buf fn_cnt)
+--          EvalArchFn f _ -> do
+--            FnEvalArchFn <$> traverseFC f val
           EvalArchFn _ tp -> do
             trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
               pure (FnSetUndefined tp)

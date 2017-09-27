@@ -180,9 +180,8 @@ valueHasSP v0 =
     goAssignRHS :: forall tp. AssignRhs X86_64 ids tp -> Bool
     goAssignRHS v =
       case v of
-        EvalApp a -> getAny $ foldApp (Any . valueHasSP)  a
-        EvalArchFn (X86Fn (MemCmp _sz cnt src dest rev)) _ ->
-          or [ valueHasSP cnt, valueHasSP src, valueHasSP dest, valueHasSP rev ]
+        EvalApp a -> getAny $ foldApp (Any . valueHasSP) a
+        EvalArchFn f _ -> getAny $ foldMapFC (Any . valueHasSP) f
         _ -> False
 
 parseStackPointer' :: StackDepthValue X86_64 ids
