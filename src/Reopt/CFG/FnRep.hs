@@ -46,7 +46,6 @@ import           Data.Macaw.CFG
    , ppApp
    , ppLit
    , sexpr
-   , foldAppl
    , prettyF
    , ArchFn
    , ppArchFn
@@ -194,7 +193,7 @@ class FoldFnValue a where
 instance FoldFnValue (FnAssignRhs tp) where
   foldFnValue _ s (FnSetUndefined {}) = s
   foldFnValue f s (FnReadMem loc _)   = f s loc
-  foldFnValue f s (FnEvalApp a)       = foldAppl f s a
+  foldFnValue f s (FnEvalApp a)       = foldlFC f s a
   foldFnValue f s (FnAlloca sz)       = s `f` sz
   foldFnValue f s (FnEvalArchFn fn) = foldlFC f s fn
 

@@ -34,6 +34,7 @@ import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
+import           Data.Parameterized.TraversableFC
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
@@ -214,7 +215,7 @@ valueDependencies = go Set.empty
               | Set.member (Some (assignId a)) s -> go s r
               | otherwise ->
                 case assignRhs a of
-                  EvalApp app -> go (Set.insert (Some (assignId a)) s) (foldAppl (\prev l -> Some l:prev) r app)
+                  EvalApp app -> go (Set.insert (Some (assignId a)) s) (foldlFC (\prev l -> Some l:prev) r app)
                   SetUndefined{} -> go s r
                   ReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
                   EvalArchFn{} -> Left $ "Depends on archfn " ++ show (pretty a)
@@ -317,24 +318,14 @@ recoverAssign asgn = do
     Nothing -> do
       rhs <-
         case assignRhs asgn of
-          EvalApp app -> do
-            app' <- traverseApp recoverValue app
-            pure (FnEvalApp app')
+          EvalApp app ->
+            FnEvalApp <$> traverseFC recoverValue app
           SetUndefined tp ->
             pure (FnSetUndefined tp)
-          ReadMem addr tp -> do
-            fn_addr <- recoverValue addr
-            pure (FnReadMem fn_addr (typeRepr tp))
-          EvalArchFn (RepnzScas sz val buf cnt) _ -> do
-            fn_val <- recoverValue val
-            fn_buf <- recoverValue buf
-            fn_cnt <- recoverValue cnt
-            pure $! FnEvalArchFn (RepnzScas sz fn_val fn_buf fn_cnt)
---          EvalArchFn f _ -> do
---            FnEvalArchFn <$> traverseFC f val
-          EvalArchFn _ tp -> do
-            trace ("recoverAssign does not yet support assignment " ++ show (pretty asgn)) $ do
-              pure (FnSetUndefined tp)
+          ReadMem addr tp ->
+            (`FnReadMem` (typeRepr tp)) <$> recoverValue addr
+          EvalArchFn f _ ->
+            FnEvalArchFn <$> traverseFC recoverValue f
       void $ emitAssign (assignId asgn) rhs
 
 recoverWrite :: BVValue X86_64 ids 64 -> Value X86_64 ids tp -> Recover ids ()

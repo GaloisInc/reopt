@@ -180,7 +180,7 @@ valueHasSP v0 =
     goAssignRHS :: forall tp. AssignRhs X86_64 ids tp -> Bool
     goAssignRHS v =
       case v of
-        EvalApp a -> getAny $ foldApp (Any . valueHasSP) a
+        EvalApp a      -> getAny $ foldMapFC (Any . valueHasSP) a
         EvalArchFn f _ -> getAny $ foldMapFC (Any . valueHasSP) f
         _ -> False
 

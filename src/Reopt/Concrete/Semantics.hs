@@ -44,6 +44,7 @@ import           Data.Bits
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.TraversableFC
 import qualified Flexdis86 as F
 
 
@@ -86,7 +87,7 @@ evalExpr (VarExpr var@(Variable _ name)) = do
   maybe (error msg) return maybeVal
 
 evalExpr (AppExpr a) = do
-  a' <- R.traverseApp evalExpr a
+  a' <- traverseFC evalExpr a
   return $ case a' of
     -- Mux is if-then-else
 
