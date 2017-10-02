@@ -721,11 +721,6 @@ appToLLVM' app = do
         flt_z <- f flt_x (L.typedValue flt_y)
         bitcast flt_z (natReprToLLVMType (floatInfoBits frepr))
   case app of
-    BoolMux c t f -> do
-      l_c <- mkLLVMValue c
-      l_t <- mkLLVMValue t
-      l_f <- mkLLVMValue f
-      fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
     Mux _sz c t f -> do
       l_c <- mkLLVMValue c
       l_t <- mkLLVMValue t
@@ -741,20 +736,6 @@ appToLLVM' app = do
     BVSub _sz x y -> binop (arithop (L.Sub False False)) x y
     BVMul _sz x y -> binop (arithop (L.Mul False False)) x y
 
-    -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
-    -- page 3-393) says that results should be rounded towards
-    -- zero. These operations are called @quot@ and @rem@ in Haskell,
-    -- whereas @div@ and @mod@ in Haskell round towards negative
-    -- infinity. The LLVM @srem@ and @sdiv@ also round towards negative
-    -- infinity, and so are the correct operations to use here.  The
-    -- LLVM documentation
-    -- (http://llvm.org/releases/2.5/docs/LangRef.html) describes the
-    -- semantics of @srem@ with "the result has the same sign as the
-    -- dividend", which is equivalent to rounding towards zero.
-    BVQuot _sz x y       -> binop (arithop (L.UDiv False)) x y
-    BVRem _sz x y        -> binop (arithop L.URem) x y
-    BVSignedQuot _sz x y -> binop (arithop (L.SDiv False)) x y
-    BVSignedRem _sz x y  -> binop (arithop L.SRem) x y
     BVUnsignedLt x y     -> binop (icmpop L.Iult) x y
     BVUnsignedLe x y     -> binop (icmpop L.Iule) x y
     BVSignedLt x y       -> binop (icmpop L.Islt) x y
@@ -870,24 +851,44 @@ appToLLVM' app = do
       flt_v <- mkFloatLLVMValue v frepr
       convop L.FpToSi flt_v (natReprToLLVMType sz)
 
-rhsToLLVM' :: FnAssignRhs tp -> BBLLVM (L.Typed L.Value)
-rhsToLLVM' rhs =
-  case rhs of
-   FnEvalApp app ->
-     appToLLVM' app
-   FnSetUndefined tp -> do
-     let typ = typeToLLVMType tp
-     return (L.Typed typ L.ValUndef)
-   FnReadMem ptr typ -> do
-     p <- mkLLVMValue ptr
-     let llvm_typ = typeToLLVMType typ
-     p' <- convop L.IntToPtr p (L.PtrTo llvm_typ)
-     fmap (L.Typed llvm_typ) $ evalInstr (L.Load p' Nothing Nothing)
-   FnAlloca v -> do
-     v' <- mkLLVMValue v
-     alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
-     convop L.PtrToInt alloc_ptr (L.iT 64)
-   FnEvalArchFn (RepnzScas sz val buf cnt) -> do
+archFnToLLVM :: ArchFn X86_64 FnValue tp -> BBLLVM (L.Typed L.Value)
+archFnToLLVM f =
+  case f of
+   -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
+   -- page 3-393) says that results should be rounded towards
+   -- zero. These operations are called @quot@ and @rem@ in Haskell,
+   -- whereas @div@ and @mod@ in Haskell round towards negative
+   -- infinity. The LLVM @srem@ and @sdiv@ also round towards negative
+   -- infinity, and so are the correct operations to use here.  The
+   -- LLVM documentation
+   -- (http://llvm.org/releases/2.5/docs/LangRef.html) describes the
+   -- semantics of @srem@ with "the result has the same sign as the
+   -- dividend", which is equivalent to rounding towards zero.
+   X86Div repr n d -> do
+     llvm_n <- mkLLVMValue n
+     llvm_d <- mkLLVMValue d
+     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
+     arithop (L.UDiv False) llvm_n llvm_d_ext
+   X86Rem repr n d -> do
+     llvm_n <- mkLLVMValue n
+     llvm_d <- mkLLVMValue d
+     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
+     arithop L.URem llvm_n llvm_d_ext
+   X86IDiv repr n d -> do
+     llvm_n <- mkLLVMValue n
+     llvm_d <- mkLLVMValue d
+     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
+     arithop (L.SDiv False) llvm_n llvm_d_ext
+   X86IRem repr n d -> do
+     llvm_n <- mkLLVMValue n
+     llvm_d <- mkLLVMValue d
+     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
+     arithop L.SRem llvm_n llvm_d_ext
+   RepnzScas sz val buf cnt -> do
      llvm_val <- mkLLVMValue val
      -- Make value for buffer
      llvm_buf <- mkLLVMValue buf
@@ -909,16 +910,35 @@ rhsToLLVM' rhs =
      res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [llvm_val, llvm_cnt, llvm_ptr]
      -- Get first result
      extractValue res 0
-   FnEvalArchFn f -> do
+   _ -> do
      error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
-stmtToLLVM' :: FnStmt -> BBLLVM ()
-stmtToLLVM' stmt = do
+rhsToLLVM :: FnAssignRhs tp -> BBLLVM (L.Typed L.Value)
+rhsToLLVM rhs = do
+  case rhs of
+   FnEvalApp app ->
+     appToLLVM' app
+   FnSetUndefined tp -> do
+     let typ = typeToLLVMType tp
+     return (L.Typed typ L.ValUndef)
+   FnReadMem ptr typ -> do
+     p <- mkLLVMValue ptr
+     let llvm_typ = typeToLLVMType typ
+     p' <- convop L.IntToPtr p (L.PtrTo llvm_typ)
+     fmap (L.Typed llvm_typ) $ evalInstr (L.Load p' Nothing Nothing)
+   FnAlloca v -> do
+     v' <- mkLLVMValue v
+     alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
+     convop L.PtrToInt alloc_ptr (L.iT 64)
+   FnEvalArchFn f -> archFnToLLVM f
+
+stmtToLLVM :: FnStmt -> BBLLVM ()
+stmtToLLVM stmt = do
   comment (show $ pretty stmt)
   case stmt of
    FnAssignStmt (FnAssignment lhs rhs) -> do
      lbl <- gets $ fbLabel . bbBlock
-     llvm_rhs <- rhsToLLVM' rhs
+     llvm_rhs <- rhsToLLVM rhs
      setAssignIdValue lhs lbl llvm_rhs
    FnWriteMem ptr v -> do
      llvm_ptr_as_bv  <- mkLLVMValue ptr
@@ -962,8 +982,8 @@ makeRet' grets frets = do
   v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef (grets' ++ frets')
   ret v
 
-termStmtToLLVM' :: FnTermStmt -> BBLLVM ()
-termStmtToLLVM' tm =
+termStmtToLLVM :: FnTermStmt -> BBLLVM ()
+termStmtToLLVM tm =
   case tm of
      FnJump lbl -> do
        effect $ L.Jump (blockName lbl)
@@ -1141,9 +1161,9 @@ blockToLLVM ctx fs b = (res, funState s)
           -- Add statements for Phi nodes
           mapM_ addPhiBinding (fbPhiNodes b)
           -- Add statements
-          mapM_ stmtToLLVM' $ fbStmts b
+          mapM_ stmtToLLVM (fbStmts b)
           -- Add term statement
-          termStmtToLLVM' (fbTerm b)
+          termStmtToLLVM (fbTerm b)
         s = execState (unBBLLVM go) s0
 
         res = LLVMBlockResult { regBlock = b

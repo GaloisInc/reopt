@@ -91,9 +91,9 @@ evalExpr (AppExpr a) = do
   return $ case a' of
     -- Mux is if-then-else
 
-    R.BoolMux c1 c2 c3 -> CS.evalLit BoolTypeRepr $ do
+    R.Mux BoolTypeRepr c1 c2 c3 -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $ doMux <$> CS.asBool c1 <*> CS.asBool c2 <*> CS.asBool c3
-    R.Mux nr c1 c2 c3 -> CS.evalLit (BVTypeRepr nr) $ do
+    R.Mux (BVTypeRepr nr) c1 c2 c3 -> CS.evalLit (BVTypeRepr nr) $ do
       fmap (CS.Literal . CS.bitVector nr) $ doMux <$> CS.asBool c1 <*> CS.asBV c2 <*> CS.asBV c3
     R.Trunc c nr -> CS.liftValue (truncBV nr) nr c
     R.SExt c nr -> CS.liftValue (sExtBV nr) nr c
@@ -111,10 +111,6 @@ evalExpr (AppExpr a) = do
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
-    R.BVQuot _nr _c1 _c2 -> error "Impossible: BVQuot should be unreachable"
-    R.BVRem _nr _c1 _c2 -> error "Impossible: BVRem should be unreachable"
-    R.BVSignedQuot _nr _c1 _c2 -> error "Impossible: BVSignedQuot should be unreachable"
-    R.BVSignedRem _nr _c1 _c2 -> error "Impossible: BVSignedRem should be unreachable"
 
     -- Comparisons
     R.BVUnsignedLt c1 c2 -> CS.evalLit BoolTypeRepr $ do

@@ -188,10 +188,7 @@ exprWidth e =
 -- corresponding constructors, or add them to 'Expr' above.
 instance S.IsValue Expr where
   bv_width = exprWidth
-  mux c x y =
-    case exprType x of
-      BoolTypeRepr -> app $ R.BoolMux c x y
-      BVTypeRepr w -> app $ R.Mux w c x y
+  mux c x y = app $ R.Mux (exprType x) c x y
   bvLit n v = mkLit n (toInteger v)
   bvAdd x y = app $ R.BVAdd (exprWidth x) x y
   bvSub x y = app $ R.BVSub (exprWidth x) x y
@@ -356,20 +353,6 @@ fresh basename = do
   put (x + 1)
   return $ basename ++ show x
 
--- | Helper for 'S.Semantics' instance below.
-bvBinOp ::
-     (Variable ('BVType n) -> Expr ('BVType n) -> Expr ('BVType n) -> Stmt)
-  -> String
-  -> Expr ('BVType n)
-  -> Expr ('BVType n)
-  -> Semantics (Expr ('BVType n))
-bvBinOp op varName v1 v2 = do
-  varName' <- fresh varName
-  let var = Variable (exprType v2) varName'
-  tell [op var v1 v2]
-  return (VarExpr var)
-
-
 freshVar :: String -> TypeRepr tp -> Semantics (Variable tp)
 freshVar name tp = Variable tp <$> fresh name
 
@@ -431,9 +414,8 @@ instance S.Semantics Semantics where
     tell [GetSegmentBase var seg]
     return $ VarExpr var
 
-  bvQuot = bvBinOp BVQuot "quot"
-  bvRem = bvBinOp BVRem "rem"
-  bvSignedQuotRem _ _ _ = error "bvSignedQu0tRem not implemented."
+  bvQuotRem = error "bvQuotRem not implemented."
+  bvSignedQuotRem _ _ _ = error "bvSignedQuotRem not implemented."
 
   exception v1 v2 c = tell [Exception v1 v2 c]
 
