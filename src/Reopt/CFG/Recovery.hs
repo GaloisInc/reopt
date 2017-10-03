@@ -81,13 +81,13 @@ hasWidth f w =
 data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsInterp        :: !(DiscoveryFunInfo X86_64 ids)
                            , _rsNextAssignId :: !FnAssignId
-                           , _rsAssignMap    :: !(MapF (AssignId ids) FnAssignment)
+                           , _rsAssignMap    :: !(MapF (AssignId ids) (FnAssignment X86_64))
 
                              -- Local state
                            , _rsCurLabel  :: !(BlockLabel 64)
                            , _rsCurStmts  :: !(Seq FnStmt)
 
-                           , _rsCurRegs   :: !(MapF X86Reg FnRegValue)
+                           , _rsCurRegs   :: !(MapF X86Reg (FnRegValue X86_64))
                              -- ^ This maps registers to the associated value
                              -- at the start of the block after any stack allocations have
                              -- been performed.
@@ -109,12 +109,12 @@ rsCurStmts :: Simple Lens (RecoverState ids) (Seq FnStmt)
 rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments in original block to assignment in
-rsAssignMap :: Simple Lens (RecoverState ids) (MapF (AssignId ids) FnAssignment)
+rsAssignMap :: Simple Lens (RecoverState ids) (MapF (AssignId ids) (FnAssignment X86_64))
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
 
 -- | This maps registers to the associated value at the start of the block after
 -- any stack allocations have been performed.
-rsCurRegs :: Simple Lens (RecoverState ids) (MapF X86Reg FnRegValue)
+rsCurRegs :: Simple Lens (RecoverState ids) (MapF X86Reg (FnRegValue X86_64))
 rsCurRegs = lens _rsCurRegs (\s v -> s { _rsCurRegs = v })
 
 ------------------------------------------------------------------------
@@ -176,17 +176,17 @@ mkReturnVar tp = (\next_id -> FnReturnVar next_id tp) <$> freshId
 addFnStmt :: FnStmt -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 
-mkFnAssign :: FnAssignRhs tp -> Recover ids (FnAssignment tp)
+mkFnAssign :: FnAssignRhs X86_64 tp -> Recover ids (FnAssignment X86_64 tp)
 mkFnAssign rhs = (\next_id -> FnAssignment next_id rhs) <$> freshId
 
-emitAssign :: AssignId ids tp -> FnAssignRhs tp -> Recover ids (FnAssignment tp)
+emitAssign :: AssignId ids tp -> FnAssignRhs X86_64 tp -> Recover ids (FnAssignment X86_64 tp)
 emitAssign asgn rhs = do
   fnAssign <- mkFnAssign rhs
   rsAssignMap %= MapF.insert asgn fnAssign
   addFnStmt $ FnAssignStmt fnAssign
   return fnAssign
 
-mkAddAssign :: FnAssignRhs tp -> Recover ids (FnValue tp)
+mkAddAssign :: FnAssignRhs X86_64 tp -> Recover ids (FnValue X86_64 tp)
 mkAddAssign rhs = do
   fnAssign <- mkFnAssign rhs
   addFnStmt $ FnAssignStmt fnAssign
@@ -227,7 +227,7 @@ valueDependencies = go Set.empty
 recoverValue' :: Loc.HasCallStack
               => RecoverState ids
               -> Value X86_64 ids tp
-              -> Either String (FnValue tp)
+              -> Either String (FnValue X86_64 tp)
 recoverValue' s v = do
   let interpState = rsInterp s
   let mem = rsMemory s
@@ -282,7 +282,9 @@ recoverValue' s v = do
         Just (FnRegValue v') ->
           Right v'
 
-recoverValue :: Loc.HasCallStack => Value X86_64 ids tp -> Recover ids (FnValue tp)
+recoverValue :: Loc.HasCallStack
+             => Value X86_64 ids tp
+             -> Recover ids (FnValue X86_64 tp)
 recoverValue v = do
   s <- get
   case recoverValue' s v of
@@ -295,7 +297,7 @@ recoverValue v = do
 recoverRegister :: Loc.HasCallStack
                 => RegState X86Reg (Value X86_64 ids)
                 -> X86Reg tp
-                -> Recover ids (FnValue tp)
+                -> Recover ids (FnValue X86_64 tp)
 recoverRegister proc_state r = do
   s <- get
   case recoverValue' s (proc_state ^. boundValue r) of
@@ -360,18 +362,9 @@ recoverStmt s = do
         recoverWrite addr val
     Comment msg -> do
       addFnStmt $ FnComment msg
-    ExecArchStmt (MemCopy bytesPerCopy nValues src dest direction) -> do
-      stmt <- FnMemCopy bytesPerCopy <$> recoverValue nValues
-                                     <*> recoverValue src
-                                     <*> recoverValue dest
-                                     <*> recoverValue direction
-      addFnStmt stmt
-    ExecArchStmt (MemSet count v ptr mdf) -> do
-      stmt <- FnMemSet <$> recoverValue count
-                       <*> recoverValue v
-                       <*> recoverValue ptr
-                       <*> recoverValue mdf
-      addFnStmt stmt
+    ExecArchStmt (X86Stmt stmt0) -> do
+      stmt <- traverseF recoverValue stmt0
+      addFnStmt (FnArchStmt stmt)
     _ -> trace ("recoverStmt undefined for " ++ show (ppStmt pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (ppStmt pretty s))
       return ()
@@ -400,7 +393,7 @@ getPostCallValue :: BlockLabel 64
                  -> [FnReturnVar (BVType 64)] -- ^ Integer values returned by function.
                  -> [FnReturnVar XMMType]     -- ^ Floating point values returned by function.
                  -> X86Reg tp
-                 -> Recover ids (FnValue tp)
+                 -> Recover ids (FnValue X86_64 tp)
 getPostCallValue lbl proc_state intrs floatrs r = do
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
@@ -433,7 +426,7 @@ getPostSyscallValue :: BlockLabel 64
                     -> RegState X86Reg (Value X86_64 ids)
                        -- ^ Value of registers before syscall
                     -> X86Reg tp
-                    -> Recover ids (FnValue tp)
+                    -> Recover ids (FnValue X86_64 tp)
 getPostSyscallValue lbl proc_state r =
   case r of
     _ | Just Refl <- testEquality r sp_reg -> do
@@ -447,9 +440,9 @@ getPostSyscallValue lbl proc_state r =
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
 mkBlock :: BlockLabel 64
-        -> [Some PhiBinding]
+        -> [Some (PhiBinding X86Reg)]
         -> FnTermStmt
-        -> MapF X86Reg FnRegValue
+        -> MapF X86Reg (FnRegValue X86_64)
         -> Recover ids FnBlock
 mkBlock lbl phis tm m = do
   curStmts <- use rsCurStmts
@@ -464,7 +457,7 @@ mkBlock lbl phis tm m = do
 recoverX86TermStmt :: forall ids
              .  DemandedUseMap
                 -- ^ Map from address to registers that address will read.
-             -> [Some PhiBinding]
+             -> [Some (PhiBinding X86Reg)]
                 -- ^ Phi bindings from input block
              -> RecoveredBlockInfo
              -> BlockLabel 64
@@ -489,9 +482,9 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_
   let rregs = spResultRegisters sysp
 
 
-  let mkRet :: MapF X86Reg FnRegValue
+  let mkRet :: MapF X86Reg (FnRegValue X86_64)
             -> Some X86Reg
-            -> Recover ids (MapF X86Reg FnRegValue)
+            -> Recover ids (MapF X86Reg (FnRegValue X86_64))
       mkRet m (Some r) = do
         rv <- mkReturnVar (typeRepr r)
         return $ MapF.insert r (FnRegValue $ FnReturn rv) m
@@ -499,7 +492,7 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_
   initMap <- foldM mkRet MapF.empty rregs
 
   -- pull the return variables out of initMap (in order of rregs)
-  let getVar :: Maybe (FnRegValue tp) -> FnReturnVar tp
+  let getVar :: Maybe (FnRegValue X86_64 tp) -> FnReturnVar tp
       getVar (Just (FnRegValue (FnReturn rv))) = rv
       getVar _ = Loc.error "impossible"
 
@@ -508,9 +501,9 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_
         where f (Some r) = Some $ getVar $ MapF.lookup r initMap
 
   -- Fold operation to update register map with values persisted across system calls.
-  let go ::  MapF X86Reg FnRegValue
+  let go ::  MapF X86Reg (FnRegValue X86_64)
          -> Some X86Reg
-         -> Recover ids (MapF X86Reg FnRegValue)
+         -> Recover ids (MapF X86Reg (FnRegValue X86_64))
       go m (Some r) = do
         v <- getPostSyscallValue lbl proc_state r
         return $ MapF.insert r (FnRegValue v) m
@@ -530,7 +523,7 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_
 recoverBlock :: forall ids
              .  DemandedUseMap
                 -- ^ Map from address to registers that address will read.
-             -> [Some PhiBinding]
+             -> [Some (PhiBinding X86Reg)]
                 -- ^ Phi bindings from input block
              -> ParsedBlock X86_64 ids
                 -- ^ Map for entire block
@@ -578,9 +571,9 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
         case m_ret_addr of
           Nothing -> pure MapF.empty
           Just ret_addr -> do
-            let go :: MapF X86Reg FnRegValue
+            let go :: MapF X86Reg (FnRegValue X86_64)
                    -> Some X86Reg
-                   -> Recover ids (MapF X86Reg FnRegValue)
+                   -> Recover ids (MapF X86Reg (FnRegValue X86_64))
                 go m (Some r) = do
                   v <- getPostCallValue lbl proc_state intrs floatrs r
                   return $! MapF.insert r (FnRegValue v) m
@@ -597,9 +590,9 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       return $! blockInfo & addFnBlock fb
 
     ParsedJump proc_state tgt_addr -> do
-      let go :: MapF X86Reg FnRegValue
+      let go :: MapF X86Reg (FnRegValue X86_64)
              -> Some X86Reg
-             -> Recover ids (MapF X86Reg FnRegValue)
+             -> Recover ids (MapF X86Reg (FnRegValue X86_64))
           go m (Some r) = do
             v <- recoverRegister proc_state r
             return $ MapF.insert r (FnRegValue v) m
@@ -622,9 +615,9 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       recoverX86TermStmt registerUseMap phis blockInfo lbl ts proc_state next_addr
 
     ParsedLookupTable proc_state idx vec -> do
-      let go :: MapF X86Reg FnRegValue
+      let go :: MapF X86Reg (FnRegValue X86_64)
              -> Some X86Reg
-             -> Recover ids (MapF X86Reg FnRegValue)
+             -> Recover ids (MapF X86Reg (FnRegValue X86_64))
           go m (Some r) = do
             v <- recoverRegister proc_state r
             return $ MapF.insert r (FnRegValue v) m
@@ -663,8 +656,8 @@ allocateStackFrame stmts sd
             when (not (Set.null remaining_asgns)) $ do
               throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
         let doOneDelta :: StackDepthOffset X86_64 ids
-                       -> Recover ids (FnValue (BVType 64))
-                       -> Recover ids (FnValue (BVType 64))
+                       -> Recover ids (FnValue X86_64 (BVType 64))
+                       -> Recover ids (FnValue X86_64 (BVType 64))
             doOneDelta (Pos _) _   = Loc.error "Saw positive stack delta"
             doOneDelta (Neg x) m_v = do
               v0 <- m_v
@@ -686,9 +679,9 @@ makePhis :: [BlockLabel 64]
             -- ^ Predecessors for this block
          -> MapF X86Reg FnPhiVar
             -- ^ Map from registers to variable associated with them.
-         -> [Some PhiBinding]
+         -> [Some (PhiBinding X86Reg)]
 makePhis preds regs = go <$> MapF.toList regs
-  where go :: MapF.Pair X86Reg FnPhiVar -> Some PhiBinding
+  where go :: MapF.Pair X86Reg FnPhiVar -> Some (PhiBinding X86Reg)
         go (MapF.Pair r phi_var) = Some (PhiBinding phi_var ((,r) <$> preds))
 
 recoverInnerBlock :: DiscoveryFunInfo X86_64 ids

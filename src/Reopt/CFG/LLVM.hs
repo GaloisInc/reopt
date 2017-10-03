@@ -313,7 +313,7 @@ getReferencedFunctions :: FunctionTypeMap
 getReferencedFunctions m0 f =
     foldFnValue findReferencedFunctions (insertAddr (fnAddr f) (fnType f) m0) f
   where findReferencedFunctions :: FunctionTypeMap
-                                -> FnValue tp
+                                -> FnValue X86_64 tp
                                 -> FunctionTypeMap
         findReferencedFunctions m (FnFunctionEntryValue ft addr) =
           insertAddr addr ft m
@@ -444,7 +444,7 @@ valueToLLVM :: Loc.HasCallStack
             -> FnBlock
                -- ^ Block we are generating LLVM for.
             -> AssignValMap
-            -> FnValue tp
+            -> FnValue X86_64 tp
             -> L.Typed L.Value
 valueToLLVM ctx blk m val = do
   let typ = typeToLLVMType $ typeRepr val
@@ -521,7 +521,7 @@ valueToLLVMBitvec :: Loc.HasCallStack
                   -> FnBlock
                      -- ^ Block that we are generating LLVM for.
                   -> AssignValMap
-                  -> FnValue tp
+                  -> FnValue X86_64 tp
                   -> L.Typed L.Value
 valueToLLVMBitvec ctx blk m val = do
   let llvm_val = valueToLLVM ctx blk m val
@@ -532,7 +532,7 @@ valueToLLVMBitvec ctx blk m val = do
        in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
     _ -> Loc.error $ "valueToLLVMBitvec given unsupported type."
 
-mkLLVMValue :: Loc.HasCallStack => FnValue tp -> BBLLVM (L.Typed L.Value)
+mkLLVMValue :: Loc.HasCallStack => FnValue X86_64 tp -> BBLLVM (L.Typed L.Value)
 mkLLVMValue val = do
   s <- get
   let fs = funState s
@@ -628,7 +628,7 @@ call_ (valueOf -> f) args =
     _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
 
 mkFloatLLVMValue :: Loc.HasCallStack
-                 => FnValue (BVType (8 * TypeBytes flt))
+                 => FnValue X86_64 (BVType (8 * TypeBytes flt))
                  -> FloatInfoRepr flt
                  -> BBLLVM (L.Typed L.Value)
 mkFloatLLVMValue val frepr = do
@@ -641,9 +641,9 @@ mkFloatLLVMValue val frepr = do
 
 -- | Handle an intrinsic overflows
 intrinsicOverflows' :: String
-                    -> FnValue tp
-                    -> FnValue tp
-                    -> FnValue BoolType
+                    -> FnValue X86_64 tp
+                    -> FnValue X86_64 tp
+                    -> FnValue X86_64 BoolType
                     -> BBLLVM (L.Typed L.Value)
 -- Special case where carry/borrow flag is 0.
 intrinsicOverflows' bop x y (FnConstantBool False) = do
@@ -698,12 +698,12 @@ syscallAsm =
               -- modifications to memory, flags, rcx, and r11.
               "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
 
-appToLLVM' :: App FnValue tp -> BBLLVM (L.Typed L.Value)
+appToLLVM' :: App (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
   let typ = typeToLLVMType $ typeRepr app
   let binop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
-            -> FnValue tp
-            -> FnValue tp
+            -> FnValue X86_64 tp
+            -> FnValue X86_64 tp
             -> BBLLVM (L.Typed L.Value)
       binop f x y = do
         x' <- mkLLVMValue x
@@ -712,8 +712,8 @@ appToLLVM' app = do
     -- A Value that expects to FP bitvectors
   let fpbinop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
               -> FloatInfoRepr flt
-              -> FnValue (FloatType flt)
-              -> FnValue (FloatType flt)
+              -> FnValue X86_64 (FloatType flt)
+              -> FnValue X86_64 (FloatType flt)
               -> BBLLVM (L.Typed L.Value)
       fpbinop f frepr x y = do
         flt_x <- mkFloatLLVMValue x frepr
@@ -851,7 +851,7 @@ appToLLVM' app = do
       flt_v <- mkFloatLLVMValue v frepr
       convop L.FpToSi flt_v (natReprToLLVMType sz)
 
-archFnToLLVM :: ArchFn X86_64 FnValue tp -> BBLLVM (L.Typed L.Value)
+archFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 archFnToLLVM f =
   case f of
    -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
@@ -913,7 +913,7 @@ archFnToLLVM f =
    _ -> do
      error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
-rhsToLLVM :: FnAssignRhs tp -> BBLLVM (L.Typed L.Value)
+rhsToLLVM :: FnAssignRhs X86_64 tp -> BBLLVM (L.Typed L.Value)
 rhsToLLVM rhs = do
   case rhs of
    FnEvalApp app ->
@@ -947,13 +947,13 @@ stmtToLLVM stmt = do
      llvm_ptr <- convop L.IntToPtr llvm_ptr_as_bv (L.PtrTo (L.typedType llvm_v))
      effect $ L.Store llvm_v llvm_ptr Nothing
    FnComment _ -> return ()
-   FnMemCopy bytesPerCopy nValues src dest direction -> do
+   FnArchStmt (MemCopy bytesPerCopy nValues src dest direction) -> do
      nValues' <- mkLLVMValue nValues
      src'     <- mkLLVMValue src
      dest'    <- mkLLVMValue dest
      direction' <- mkLLVMValue direction
      call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
-   FnMemSet count v ptr dir -> do
+   FnArchStmt (MemSet count v ptr dir) -> do
      count' <- mkLLVMValue count
      v'     <- mkLLVMValue v
      ptr'   <- mkLLVMValue ptr
@@ -961,9 +961,7 @@ stmtToLLVM stmt = do
      let typ = typeToLLVMType $ typeRepr v
      ptr_ptr <- convop L.IntToPtr ptr' (L.PtrTo typ)
      call_ (iMemSet typ) [ptr_ptr, v', count', df']
-
-   -- PlaceHolderStmt {} -> void $ unimplementedInstr
-   -- _           -> void $ unimplementedInstr
+   FnArchStmt _ -> error $ "LLVM generation: Unsupported architecture statement."
 
 makeRet' :: [ L.Typed L.Value ] -> [ L.Typed L.Value ] -> BBLLVM ()
 makeRet' grets frets = do
@@ -1020,7 +1018,7 @@ termStmtToLLVM tm =
              dest' <- mkLLVMValue dest
              convop L.IntToPtr dest' fun_ty
 
-       let evalArg :: Some X86Reg -> Some FnValue -> BBLLVM (L.Typed L.Value)
+       let evalArg :: Some X86Reg -> Some (FnValue X86_64) -> BBLLVM (L.Typed L.Value)
            evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
            evalArg (Some (X86_XMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
            evalArg _ _ = Loc.error "Unsupported register arg"
@@ -1135,7 +1133,7 @@ toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLab
 
 -- | Add a phi var with the node info so that we have a ident to reference
 -- it by and queue up work to assign the value later.
-addPhiBinding :: Some PhiBinding -> BBLLVM ()
+addPhiBinding :: Some (PhiBinding X86Reg) -> BBLLVM ()
 addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
   lbl <- gets $ fbLabel . bbBlock
   nm <- freshName

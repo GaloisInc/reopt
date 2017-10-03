@@ -1,11 +1,16 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Reopt.CFG.FnRep
    ( FnAssignId(..)
    , FnAssignment(..)
@@ -33,7 +38,9 @@ import           Data.Foldable
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import           Data.Parameterized.Some
+import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
+import           Data.Proxy
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word
@@ -48,12 +55,15 @@ import           Data.Macaw.CFG
    , sexpr
    , prettyF
    , ArchFn
-   , ppArchFn
+   , ArchAddrWidth
+   , RegAddrWidth
+   , ArchReg
+   , IsArchFn(..)
    )
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Data.Macaw.X86.ArchTypes (X86_64)
+import           Data.Macaw.X86.ArchTypes (X86_64, X86Stmt(..), ppX86Stmt)
 import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.X86Reg
   ( X86Reg
@@ -68,6 +78,9 @@ import           Reopt.CFG.BlockLabel
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
 
+------------------------------------------------------------------------
+-- FnAssignId
+
 newtype FnAssignId = FnAssignId Word64
                    deriving (Eq, Ord)
 
@@ -77,20 +90,46 @@ instance Show FnAssignId where
 ppFnAssignId :: FnAssignId -> Doc
 ppFnAssignId (FnAssignId w) = text ("r" ++ show w)
 
-data FnAssignment tp
-   = FnAssignment { fnAssignId :: !FnAssignId
-                  , fnAssignRhs :: !(FnAssignRhs tp)
-                  }
+------------------------------------------------------------------------
+-- FnPhiVar
 
-instance Pretty (FnAssignment tp) where
-  pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
+data FnPhiVar (tp :: Type) =
+  FnPhiVar { unFnPhiVar :: !FnAssignId
+           , fnPhiVarType :: !(TypeRepr tp)
+           }
 
-instance Show (FnAssignment tp) where
-  show = show . pretty
+instance TestEquality FnPhiVar where
+  testEquality x y = orderingF_refl (compareF x y)
 
-instance ShowF FnAssignment
+instance OrdF FnPhiVar where
+  compareF x y =
+    case compare (unFnPhiVar x) (unFnPhiVar y) of
+      LT -> LTF
+      GT -> GTF
+      EQ ->
+        case testEquality (fnPhiVarType x) (fnPhiVarType y) of
+          Just Refl -> EQF
+          Nothing -> error "mismatched types"
+
+instance Pretty (FnPhiVar tp) where
+  pretty = ppFnAssignId . unFnPhiVar
+
+------------------------------------------------------------------------
+-- FnReturnVar
+
+data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
+                                  , frReturnType :: !(TypeRepr tp)
+                                  }
+
+instance Pretty (FnReturnVar tp) where
+  pretty = ppFnAssignId . frAssignId
+
+------------------------------------------------------------------------
+-- FunctionType
 
 -- | This describes the expected arguments and return types of the function.
+--
+-- This is X86_64 specific.
 data FunctionType =
   FunctionType { fnNIntArgs   :: !Int
                , fnNFloatArgs :: !Int
@@ -130,83 +169,31 @@ ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs
 ftFloatRetRegs :: FunctionType -> [X86Reg (BVType 128)]
 ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
 
--- FIXME: this is in the same namespace as assignments, maybe it shouldn't be?
-
-data FnPhiVar (tp :: Type) =
-  FnPhiVar { unFnPhiVar :: !FnAssignId
-           , fnPhiVarType :: !(TypeRepr tp) }
-
-instance TestEquality FnPhiVar where
-  testEquality x y = orderingF_refl (compareF x y)
-
-instance OrdF FnPhiVar where
-  compareF x y =
-    case compare (unFnPhiVar x) (unFnPhiVar y) of
-      LT -> LTF
-      GT -> GTF
-      EQ ->
-        case testEquality (fnPhiVarType x) (fnPhiVarType y) of
-          Just Refl -> EQF
-          Nothing -> error "mismatched types"
-
-instance Pretty (FnPhiVar tp) where
-  pretty = ppFnAssignId . unFnPhiVar
+------------------------------------------------------------------------
+-- FnAssignment/FnValue/FnAssignRhs mutually recursive constructors
 
 -- | The right-hand side of a function assingment statement.
-data FnAssignRhs (tp :: Type) where
+data FnAssignRhs (arch :: *) (tp :: Type) where
   -- An expression with an undefined value.
   FnSetUndefined :: !(TypeRepr tp) -- Width of undefined value.
-                 -> FnAssignRhs tp
-  FnReadMem :: !(FnValue (BVType 64))
+                 -> FnAssignRhs arch tp
+  FnReadMem :: !(FnValue arch (BVType (ArchAddrWidth arch)))
             -> !(TypeRepr tp)
-            -> FnAssignRhs tp
-  FnEvalApp :: !(App FnValue tp)
-            -> FnAssignRhs tp
-  FnAlloca :: !(FnValue (BVType 64))
-           -> FnAssignRhs (BVType 64)
-  FnEvalArchFn :: !(ArchFn X86_64 FnValue tp) -> FnAssignRhs tp
+            -> FnAssignRhs arch tp
+  FnEvalApp :: !(App (FnValue arch) tp)
+            -> FnAssignRhs arch tp
+  FnAlloca :: !(FnValue arch (BVType (ArchAddrWidth arch)))
+           -> FnAssignRhs arch (BVType (ArchAddrWidth arch))
+  FnEvalArchFn :: !(ArchFn arch (FnValue arch) tp) -> FnAssignRhs arch tp
 
-ppFnAssignRhs :: (forall u . FnValue u -> Doc)
-              -> FnAssignRhs tp
-              -> Doc
-ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w))
-ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
-ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
-ppFnAssignRhs pp (FnAlloca sz) = sexpr "alloca" [pp sz]
-ppFnAssignRhs pp (FnEvalArchFn f) = runIdentity (ppArchFn (pure . pp) f)
+data FnAssignment arch tp
+   = FnAssignment { fnAssignId :: !FnAssignId
+                  , fnAssignRhs :: !(FnAssignRhs arch tp)
+                  }
 
-instance Pretty (FnAssignRhs tp) where
-  pretty = ppFnAssignRhs pretty
-
-instance HasRepr FnAssignRhs TypeRepr where
-  typeRepr rhs =
-    case rhs of
-      FnSetUndefined tp -> tp
-      FnReadMem _ tp -> tp
-      FnEvalApp a    -> typeRepr a
-      FnAlloca _ -> knownType
-      FnEvalArchFn f -> typeRepr f
-
-class FoldFnValue a where
-  foldFnValue :: (forall u . s -> FnValue u -> s) -> s -> a -> s
-
-instance FoldFnValue (FnAssignRhs tp) where
-  foldFnValue _ s (FnSetUndefined {}) = s
-  foldFnValue f s (FnReadMem loc _)   = f s loc
-  foldFnValue f s (FnEvalApp a)       = foldlFC f s a
-  foldFnValue f s (FnAlloca sz)       = s `f` sz
-  foldFnValue f s (FnEvalArchFn fn) = foldlFC f s fn
-
--- tp <- {BVType 64, BVType 128}
-data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
-                                  , frReturnType :: !(TypeRepr tp)
-                                  }
-
-instance Pretty (FnReturnVar tp) where
-  pretty = ppFnAssignId . frAssignId
 
 -- | A function value.
-data FnValue (tp :: Type)
+data FnValue (arch :: *) (tp :: Type)
    =  FnValueUnsupported !String !(TypeRepr tp)
       -- | A value that is actually undefined, like a non-argument register at
       -- the start of a function.
@@ -216,22 +203,39 @@ data FnValue (tp :: Type)
      -- | A particular integer value
    | forall n . (tp ~ BVType n, 1 <= n) => FnConstantValue !(NatRepr n) !Integer
      -- | Value from an assignment statement.
-   | FnAssignedValue !(FnAssignment tp)
+   | FnAssignedValue !(FnAssignment arch tp)
      -- | Value from a phi node
    | FnPhiValue !(FnPhiVar tp)
      -- | A value returned by a function call (rax/rdx/xmm0)
    | FnReturn !(FnReturnVar tp)
      -- | The pointer to a function.
-   | (tp ~ BVType 64) => FnFunctionEntryValue !FunctionType !(MemSegmentOff 64)
+   | (arch ~ X86_64, tp ~ BVType (ArchAddrWidth arch))
+     => FnFunctionEntryValue !FunctionType !(MemSegmentOff (ArchAddrWidth arch))
      -- | A pointer to an internal block at the given address.
-   | (tp ~ BVType 64) => FnBlockValue !(MemSegmentOff 64)
+   | (tp ~ BVType (ArchAddrWidth arch)) => FnBlockValue !(MemSegmentOff (ArchAddrWidth arch))
       -- | Value is a argument passed via a register.
-   | FnRegArg !(X86Reg tp) !Int
-
+   | FnRegArg !(ArchReg arch tp) !Int
      -- | A global address
-   | (tp ~ BVType 64) => FnGlobalDataAddr !(MemSegmentOff 64)
+   | (tp ~ BVType (ArchAddrWidth arch))
+     => FnGlobalDataAddr !(MemSegmentOff (ArchAddrWidth arch))
 
-instance Pretty (FnValue tp) where
+------------------------------------------------------------------------
+-- FoldFnValue
+
+class FoldFnValue a where
+  foldFnValue :: (forall u . s -> FnValue X86_64 u -> s) -> s -> a -> s
+
+------------------------------------------------------------------------
+-- FnAssignment/FnValue/FnAssignRhs basic operations
+
+type FnArchConstraints arch =
+     ( IsArchFn (ArchFn arch)
+     , MemWidth (ArchAddrWidth arch)
+     , HasRepr (ArchFn arch (FnValue arch)) TypeRepr
+     , HasRepr (ArchReg arch) TypeRepr
+     )
+
+instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnValueUnsupported reason _)
                                   = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
@@ -245,7 +249,45 @@ instance Pretty (FnValue tp) where
   pretty (FnBlockValue addr)   = text "BlockValue" <> parens (pretty addr)
   pretty (FnRegArg _ n)           = text "arg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
-instance HasRepr FnValue TypeRepr where
+
+ppFnAssignRhs :: FnArchConstraints arch
+              => (forall u . FnValue arch u -> Doc)
+              -> FnAssignRhs arch tp
+              -> Doc
+ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w))
+ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
+ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
+ppFnAssignRhs pp (FnAlloca sz) = sexpr "alloca" [pp sz]
+ppFnAssignRhs pp (FnEvalArchFn f) = runIdentity (ppArchFn (pure . pp) f)
+
+instance FnArchConstraints arch => Pretty (FnAssignRhs arch tp) where
+  pretty = ppFnAssignRhs pretty
+
+instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
+  pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
+
+
+instance FnArchConstraints arch => Show (FnAssignment arch tp) where
+  show = show . pretty
+
+instance FnArchConstraints arch => ShowF (FnAssignment arch)
+
+archWidthTypeRepr :: forall p arch
+                  .  MemWidth (ArchAddrWidth arch)
+                  => p arch
+                  -> TypeRepr (BVType (ArchAddrWidth arch))
+archWidthTypeRepr _ = BVTypeRepr (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+
+instance FnArchConstraints arch => HasRepr (FnAssignRhs arch) TypeRepr where
+  typeRepr rhs =
+    case rhs of
+      FnSetUndefined tp -> tp
+      FnReadMem _ tp -> tp
+      FnEvalApp a    -> typeRepr a
+      FnAlloca _ -> archWidthTypeRepr (Proxy :: Proxy arch)
+      FnEvalArchFn f -> typeRepr f
+
+instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
   typeRepr v =
     case v of
       FnValueUnsupported _ tp -> tp
@@ -256,104 +298,49 @@ instance HasRepr FnValue TypeRepr where
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> knownType
-      FnBlockValue{} -> knownType
+      FnBlockValue{} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnRegArg r _ -> typeRepr r
-      FnGlobalDataAddr _ -> knownType
+      FnGlobalDataAddr _ -> archWidthTypeRepr (Proxy :: Proxy arch)
+
+instance FoldFnValue (FnAssignRhs X86_64 tp) where
+  foldFnValue _ s (FnSetUndefined {}) = s
+  foldFnValue f s (FnReadMem loc _)   = f s loc
+  foldFnValue f s (FnEvalApp a)       = foldlFC f s a
+  foldFnValue f s (FnAlloca sz)       = s `f` sz
+  foldFnValue f s (FnEvalArchFn fn) = foldlFC f s fn
 
 ------------------------------------------------------------------------
--- Function definitions
+-- FnRegValue
 
-data Function = Function { fnAddr :: !(MemSegmentOff 64)
-                           -- ^ The address for this function
-                         , fnType :: !FunctionType
-                           -- ^ Type of this  function
-                         , fnBlocks :: [FnBlock]
-                           -- ^ A list of all function blocks here.
-                         }
-
-instance Pretty Function where
-  pretty fn =
-    text "function " <+> pretty (show (fnAddr fn))
-    <$$> lbrace
-    <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
-    <$$> rbrace
-
-instance FoldFnValue Function where
-  foldFnValue f s0 fn = foldl' (foldFnValue f) s0 (fnBlocks fn)
-
-data FnRegValue tp
-   = CalleeSaved !(X86Reg tp)
+data FnRegValue arch tp
+   = CalleeSaved !(ArchReg arch tp)
      -- ^ This is a callee saved register.
-   | FnRegValue !(FnValue tp)
+   | FnRegValue !(FnValue arch tp)
      -- ^ A value assigned to a register
 
-instance Pretty (FnRegValue tp) where
-  pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ show r)
+instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegValue arch tp) where
+  pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ showF r)
   pretty (FnRegValue v)      = pretty v
+
+------------------------------------------------------------------------
+-- PhiBinding
 
 -- | A Phi binding maps a phi variable to a list that contains a label
 -- for each predecessor block, and the register to rad from at the end
 -- of that blcok.
-data PhiBinding tp
-   = PhiBinding (FnPhiVar tp) [(BlockLabel 64, X86Reg tp)]
+data PhiBinding r tp
+   = PhiBinding (FnPhiVar tp) [(BlockLabel (RegAddrWidth r), r tp)]
 
--- | A block in the function
-data FnBlock
-   = FnBlock { fbLabel :: !(BlockLabel 64)
-               -- | List of phi bindings.
-               --
-               -- Only initial blocks -- not subblocks should have phi bindings.
-             , fbPhiNodes  :: ![Some PhiBinding]
-             , fbStmts :: ![FnStmt]
-             , fbTerm  :: !(FnTermStmt)
-             , fbRegMap :: !(MapF X86Reg FnRegValue)
-             }
-
-instance Pretty FnBlock where
-  pretty b =
-    pretty (fbLabel b) <$$>
-    indent 2 (ppPhis
-              <$$> vcat (pretty <$> fbStmts b)
-              <$$> pretty (fbTerm b))
-    where
-      ppPhis = vcat (go <$> fbPhiNodes b)
-      go :: Some PhiBinding -> Doc
-      go (Some (PhiBinding aid vs)) =
-         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl vs)
-      goLbl :: (BlockLabel 64, X86Reg tp) -> Doc
-      goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
-
-instance FoldFnValue FnBlock where
-  foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
+------------------------------------------------------------------------
+-- FnStmt
 
 data FnStmt
-  = forall tp . FnWriteMem !(FnValue (BVType 64)) !(FnValue tp)
+  = forall tp . FnWriteMem !(FnValue X86_64 (BVType 64)) !(FnValue X86_64 tp)
     -- | A comment
   | FnComment !Text
     -- | An assignment statement
-  | forall tp . FnAssignStmt !(FnAssignment tp)
-    -- FIXME: can we share these with the front-end?
-  | FnMemCopy !Integer
-             -- /\ Number of bytes to copy at a time (1,2,4,8)
-             !(FnValue (BVType 64))
-              -- /\ Number of values to move.
-             !(FnValue (BVType 64))
-              -- /\ Start of source buffer.
-             !(FnValue (BVType 64))
-              -- /\ Start of destination buffer.
-             !(FnValue BoolType)
-
-              -- /\ Flag indicates whether direction of move:
-              -- True means we should decrement buffer pointers after each copy.
-              -- False means we should increment the buffer pointers after each copy.
-  | forall n. FnMemSet (FnValue (BVType 64))
-                        -- /\ Number of values to assign
-                       (FnValue (BVType n))
-                        -- /\ Value to assign
-                       (FnValue (BVType 64))
-                        -- /\ Address to start assigning from.
-                       (FnValue  BoolType)
-                        -- /\ Direction flag
+  | forall tp . FnAssignStmt !(FnAssignment X86_64 tp)
+  | FnArchStmt (X86Stmt (FnValue X86_64))
 
 instance Pretty FnStmt where
   pretty s =
@@ -361,38 +348,34 @@ instance Pretty FnStmt where
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
-      FnMemCopy  sz cnt src dest rev ->
-        text "memcopy" <+> parens (hcat $ punctuate comma args)
-        where args = [pretty sz, pretty cnt, pretty src, pretty dest, pretty rev]
-      FnMemSet cnt val dest df ->
-        text "memset" <+> parens (hcat $ punctuate comma args)
-        where args = [pretty cnt, pretty val, pretty dest, pretty df]
+      FnArchStmt stmt -> ppX86Stmt pretty stmt
 
 instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f s rhs
-  foldFnValue f s (FnMemCopy _sz cnt src dest rev)    = s `f` cnt `f` src `f` dest `f` rev
-  foldFnValue f s (FnMemSet cnt v ptr df)             = s `f` cnt `f` v `f` ptr `f` df
+  foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
+
+------------------------------------------------------------------------
+-- FnTermStmt
 
 data FnTermStmt
    = FnJump !(BlockLabel 64)
-   | FnRet ![FnValue (BVType 64)] ![FnValue XMMType]
-   | FnBranch !(FnValue BoolType) !(BlockLabel 64) !(BlockLabel 64)
+   | FnRet ![FnValue X86_64 (BVType 64)] ![FnValue X86_64 XMMType]
+   | FnBranch !(FnValue X86_64 BoolType) !(BlockLabel 64) !(BlockLabel 64)
      -- ^ A branch to a block within the function, along with the return vars.
-   | FnCall !(FnValue (BVType 64))
+   | FnCall !(FnValue X86_64 (BVType 64))
             !FunctionType
             -- Arguments
-            [Some FnValue]
+            [Some (FnValue X86_64)]
             !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
             !(Maybe (BlockLabel 64))
      -- ^ A call statement to the given location with the arguments listed that
      -- returns to the label.
-
-   | FnSystemCall !(FnValue (BVType 64))
-                  ![(FnValue (BVType 64))]
+   | FnSystemCall !(FnValue  X86_64 (BVType 64))
+                  ![(FnValue X86_64 (BVType 64))]
                   ![ Some FnReturnVar ] (BlockLabel 64)
-   | FnLookupTable !(FnValue (BVType 64)) !(V.Vector (MemSegmentOff 64))
+   | FnLookupTable !(FnValue X86_64 (BVType 64)) !(V.Vector (MemSegmentOff 64))
    | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
@@ -427,3 +410,56 @@ instance FoldFnValue FnTermStmt where
     foldl f (f s call_no) args
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue _ s (FnTermStmtUndefined {}) = s
+
+------------------------------------------------------------------------
+-- FnBlock
+
+-- | A block in the function
+data FnBlock
+   = FnBlock { fbLabel :: !(BlockLabel 64)
+               -- | List of phi bindings.
+               --
+               -- Only initial blocks -- not subblocks should have phi bindings.
+             , fbPhiNodes  :: ![Some (PhiBinding X86Reg)]
+             , fbStmts :: ![FnStmt]
+             , fbTerm  :: !(FnTermStmt)
+             , fbRegMap :: !(MapF X86Reg (FnRegValue X86_64))
+             }
+
+instance Pretty FnBlock where
+  pretty b =
+    pretty (fbLabel b) <$$>
+    indent 2 (ppPhis
+              <$$> vcat (pretty <$> fbStmts b)
+              <$$> pretty (fbTerm b))
+    where
+      ppPhis = vcat (go <$> fbPhiNodes b)
+      go :: Some (PhiBinding X86Reg) -> Doc
+      go (Some (PhiBinding aid vs)) =
+         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl vs)
+      goLbl :: (BlockLabel 64, X86Reg tp) -> Doc
+      goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
+
+instance FoldFnValue FnBlock where
+  foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
+
+------------------------------------------------------------------------
+-- Function definitions
+
+data Function = Function { fnAddr :: !(MemSegmentOff 64)
+                           -- ^ The address for this function
+                         , fnType :: !FunctionType
+                           -- ^ Type of this  function
+                         , fnBlocks :: [FnBlock]
+                           -- ^ A list of all function blocks here.
+                         }
+
+instance Pretty Function where
+  pretty fn =
+    text "function " <+> pretty (show (fnAddr fn))
+    <$$> lbrace
+    <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
+    <$$> rbrace
+
+instance FoldFnValue Function where
+  foldFnValue f s0 fn = foldl' (foldFnValue f) s0 (fnBlocks fn)

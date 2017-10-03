@@ -29,6 +29,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
+import           Data.Parameterized.TraversableF
 import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -713,12 +714,7 @@ instance CanDemandValues X86_64 where
 
   calleeSavedRegs _ = x86CalleeSavedRegs
 
-  demandedArchStmtValues stmt =
-    case stmt of
-      WriteLoc _ v -> [ Some v]
-      StoreX87Control v -> [ Some v]
-      MemCopy _sz cnt src dest rev -> [ Some cnt, Some src, Some dest, Some rev ]
-      MemSet cnt v ptr mdf -> [ Some cnt, Some v, Some ptr, Some mdf ]
+  demandedArchStmtValues (X86Stmt stmt) = foldMapF (\v -> [Some v]) stmt
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
                              -> Map (MemSegmentOff 64) FunctionType
