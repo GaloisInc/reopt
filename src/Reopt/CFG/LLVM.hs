@@ -698,6 +698,22 @@ syscallAsm =
               -- modifications to memory, flags, rcx, and r11.
               "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
 
+-- | Generate the LLVM for checking parity of an 8-bit value is even.
+evenParity :: L.Typed L.Value -> BBLLVM (L.Typed L.Value)
+evenParity v = do
+  -- This code calls takes the disjunction of the value with itself to update flags,
+  -- then pushes 16-bit flags register to the stack, then pops it to a register.
+  let asm_code = "orb $1, $1\0Apushfw\0Apopw $0\0A"
+  let asm_args = "=r,r"
+  let arg_types = [L.iT 8]
+  let res_type = L.iT 16
+  -- Call function
+  res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v]
+  -- Check parity flag
+  parity_val <- band res (L.ValInteger 4)
+  -- Check result is nonzero
+  icmpop L.Ine parity_val (L.ValInteger 0)
+
 appToLLVM' :: App (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
   let typ = typeToLLVMType $ typeRepr app
@@ -764,21 +780,16 @@ appToLLVM' app = do
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
     Eq x y        -> binop (icmpop L.Ieq) x y
-    EvenParity v  -> do
+    PopCount w v  -> do
       v' <- mkLLVMValue v
-      -- This code calls takes the disjunction of the value with itself to update flags,
-      -- then pushes 16-bit flags register to the stack, then pops it to a register.
-      let asm_code = "orb $1, $1\0Apushfw\0Apopw $0\0A"
+      let wv = natValue w
+      when (wv `notElem` [16, 32, 64]) $ do
+        fail $ "Only support popcount of 16, 32, or 64 bits"
+      let asm_code = "popcnt $0, $1"
       let asm_args = "=r,r"
---      let asm_args = "=r,r,~{dirflag},~{fpsr},~{flags}"
-      let arg_types = [L.iT 8]
-      let res_type = L.iT 16
-      -- Call function
-      res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v']
-      -- Check parity flag
-      parity_val <- band res (L.ValInteger 4)
-      -- Check result is nonzero
-      icmpop L.Ine parity_val (L.ValInteger 0)
+      let res_type = L.iT (fromInteger wv)
+      let arg_types = [res_type]
+      call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v']
 
     ReverseBytes{} -> unimplementedInstr' typ "ReverseBytes"
     -- FIXME: do something more efficient?
@@ -854,6 +865,8 @@ appToLLVM' app = do
 archFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 archFnToLLVM f =
   case f of
+   EvenParity v -> do
+     evenParity =<< mkLLVMValue v
    -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
    -- page 3-393) says that results should be rounded towards
    -- zero. These operations are called @quot@ and @rem@ in Haskell,

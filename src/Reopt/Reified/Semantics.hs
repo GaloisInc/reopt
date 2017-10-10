@@ -209,8 +209,7 @@ instance S.IsValue Expr where
   bvBit x y = app $ R.BVTestBit x y
   sext' w x = app $ R.SExt x w
   uext' w x = app $ R.UExt x w
-  even_parity x = app $ R.EvenParity x
-  reverse_bytes x = app $ R.ReverseBytes (exprWidth x) x
+  reverse_bytes w x = app $ R.ReverseBytes w x
   uadc_overflows x y c = app $ R.UadcOverflows (exprWidth x) x y c
   sadc_overflows x y c = app $ R.SadcOverflows (exprWidth x) x y c
   usbb_overflows x y c = app $ R.UsbbOverflows (exprWidth x) x y c
@@ -402,6 +401,8 @@ instance S.Semantics Semantics where
     var <- freshVar "memcmp" knownType
     tell [MemCmp var r v1 v2 v3 v4]
     return $ VarExpr var
+
+  even_parity = error "even_parity is not yet implemented."
 
   primitive p = tell [Primitive p]
 

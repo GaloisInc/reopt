@@ -140,9 +140,10 @@ evalExpr (AppExpr a) = do
           fmap CS.BoolLiteral $ (==) <$> CS.asBool c1 <*> CS.asBool c2
         BVTypeRepr{} -> do
           fmap CS.BoolLiteral $ (BV.==.) <$> CS.asBV c1 <*> CS.asBV c2
-    R.EvenParity c -> CS.evalLit BoolTypeRepr $ do
-      fmap CS.BoolLiteral $ isEvenParity <$> CS.asBV c
-    R.ReverseBytes nr c -> CS.liftValue BV.reverse nr c
+    R.PopCount _ _ -> error "pop_count not yet implemented."
+    R.ReverseBytes nr c ->
+      case leqMulCongr (LeqProof :: LeqProof 1 8) (leqProof (knownNat :: NatRepr 1) nr) of
+        LeqProof -> CS.liftValue BV.reverse (natMultiply n8 nr) c
     R.UadcOverflows _nr c1 c2 carry -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $
         checkUadcOverflow <$> CS.asBV c1 <*> CS.asBV c2 <*> CS.asBool carry
@@ -489,13 +490,6 @@ truncBV nr = BV.least (fromInteger (natValue nr) :: Int)
 
 bitIdx :: BV -> BV -> Bool
 bitIdx x i = BV.index (BV.uint i) x
-
-
-isEvenParity :: BV -> Bool
-isEvenParity bv = isEven
-  where
-    isEven = 0 == (trueCount `mod` 2)
-    trueCount = length $ filter id (BV.toBits bv)
 
 checkUadcOverflow :: BV -> BV -> Bool -> Bool
 checkUadcOverflow a b carry =  didOverflow
