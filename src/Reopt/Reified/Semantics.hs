@@ -210,10 +210,10 @@ instance S.IsValue Expr where
   sext' w x = app $ R.SExt x w
   uext' w x = app $ R.UExt x w
   reverse_bytes w x = app $ R.ReverseBytes w x
-  uadc_overflows x y c = app $ R.UadcOverflows (exprWidth x) x y c
-  sadc_overflows x y c = app $ R.SadcOverflows (exprWidth x) x y c
-  usbb_overflows x y c = app $ R.UsbbOverflows (exprWidth x) x y c
-  ssbb_overflows x y c = app $ R.SsbbOverflows (exprWidth x) x y c
+  uadc_overflows x y c = app $ R.UadcOverflows x y c
+  sadc_overflows x y c = app $ R.SadcOverflows x y c
+  usbb_overflows x y c = app $ R.UsbbOverflows x y c
+  ssbb_overflows x y c = app $ R.SsbbOverflows x y c
   bsf x = app $ R.Bsf (exprWidth x) x
   bsr x = app $ R.Bsr (exprWidth x) x
   isQNaN rep x = app $ R.FPIsQNaN rep x

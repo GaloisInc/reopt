@@ -109,7 +109,9 @@ evalExpr (AppExpr a) = do
 
     -- Arithmetic ops
     R.BVAdd nr c1 c2 -> CS.liftValue2 (+) nr c1 c2
+    R.BVAdc{} -> error $ "BVAdc not supported"
     R.BVSub nr c1 c2 -> CS.liftValue2 (-) nr c1 c2
+    R.BVSbb{} -> error $ "BVSbb not supported"
     R.BVMul nr c1 c2 -> CS.liftValue2 (*) nr c1 c2
 
     -- Comparisons
@@ -144,16 +146,16 @@ evalExpr (AppExpr a) = do
     R.ReverseBytes nr c ->
       case leqMulCongr (LeqProof :: LeqProof 1 8) (leqProof (knownNat :: NatRepr 1) nr) of
         LeqProof -> CS.liftValue BV.reverse (natMultiply n8 nr) c
-    R.UadcOverflows _nr c1 c2 carry -> CS.evalLit BoolTypeRepr $ do
+    R.UadcOverflows c1 c2 carry -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $
         checkUadcOverflow <$> CS.asBV c1 <*> CS.asBV c2 <*> CS.asBool carry
-    R.SadcOverflows _nr c1 c2 carry -> CS.evalLit BoolTypeRepr $ do
+    R.SadcOverflows c1 c2 carry -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $
         checkSadcOverflow <$> CS.asBV c1 <*> CS.asBV c2 <*> CS.asBool carry
-    R.UsbbOverflows _nr c1 c2 borrow -> CS.evalLit BoolTypeRepr $ do
+    R.UsbbOverflows c1 c2 borrow -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $
         checkUsbbOverflow <$> CS.asBV c1 <*> CS.asBV c2 <*> CS.asBool borrow
-    R.SsbbOverflows _nr c1 c2 borrow -> CS.evalLit BoolTypeRepr $ do
+    R.SsbbOverflows c1 c2 borrow -> CS.evalLit BoolTypeRepr $ do
       fmap CS.BoolLiteral $
         checkSsbbOverflow <$> CS.asBV c1 <*> CS.asBV c2 <*> CS.asBool borrow
     R.Bsf nr c -> CS.liftValueMaybe (bsf nr) nr c

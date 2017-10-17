@@ -640,9 +640,10 @@ mkFloatLLVMValue val frepr = do
     _ -> Loc.error $ "internal: mkFloatLLVMValue given unsupported type."
 
 -- | Handle an intrinsic overflows
-intrinsicOverflows' :: String
-                    -> FnValue X86_64 tp
-                    -> FnValue X86_64 tp
+intrinsicOverflows' :: (1 <= w)
+                    => String
+                    -> FnValue X86_64 (BVType w)
+                    -> FnValue X86_64 (BVType w)
                     -> FnValue X86_64 BoolType
                     -> BBLLVM (L.Typed L.Value)
 -- Special case where carry/borrow flag is 0.
@@ -660,11 +661,15 @@ intrinsicOverflows' bop x y c = do
   r_tuple    <- call (overflowOp bop in_typ) [x', y']
   r          <- extractValue r_tuple 0
   overflows  <- extractValue r_tuple 1
-  -- Check for overflow in carry flat
-  c' <- (`zext` in_typ) =<< mkLLVMValue c
+  -- Check for overflow in carry flag
+  c' <- carryValue (typeWidth x) c
   r_tuple'   <- call (overflowOp bop in_typ) [r, c']
   overflows' <- extractValue r_tuple' 1
   bor overflows (L.typedValue overflows')
+
+carryValue :: (1 <= w) => NatRepr w -> FnValue X86_64 BoolType -> BBLLVM (L.Typed L.Value)
+carryValue w x =
+  (`zext` natReprToLLVMType w) =<< mkLLVMValue x
 
 data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
 
@@ -737,7 +742,7 @@ appToLLVM' app = do
         flt_z <- f flt_x (L.typedValue flt_y)
         bitcast flt_z (natReprToLLVMType (floatInfoBits frepr))
   case app of
-    Mux _sz c t f -> do
+    Mux _tp c t f -> do
       l_c <- mkLLVMValue c
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
@@ -749,9 +754,20 @@ appToLLVM' app = do
     OrApp{}      -> unimplementedInstr' typ "OrApp"
     NotApp{}     -> unimplementedInstr' typ "NotApp"
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
-    BVSub _sz x y -> binop (arithop (L.Sub False False)) x y
-    BVMul _sz x y -> binop (arithop (L.Mul False False)) x y
+    BVAdc _sz x y (FnConstantBool False) -> do
+      binop (arithop (L.Add False False)) x y
+    BVAdc _sz x y c -> do
+      r <- binop (arithop (L.Add False False)) x y
+      arithop (L.Add False False) r . L.typedValue =<< carryValue (typeWidth x) c
 
+    BVSub _sz x y -> binop (arithop (L.Sub False False)) x y
+    BVSbb _sz x y (FnConstantBool False) -> do
+      binop (arithop (L.Sub False False)) x y
+    BVSbb _sz x y b -> do
+      d <- binop (arithop (L.Sub False False)) x y
+      arithop (L.Sub False False) d . L.typedValue =<< carryValue (typeWidth x) b
+
+    BVMul _sz x y -> binop (arithop (L.Mul False False)) x y
     BVUnsignedLt x y     -> binop (icmpop L.Iult) x y
     BVUnsignedLe x y     -> binop (icmpop L.Iule) x y
     BVSignedLt x y       -> binop (icmpop L.Islt) x y
@@ -779,7 +795,10 @@ appToLLVM' app = do
     BVShl _sz x y -> binop shl  x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    Eq x y        -> binop (icmpop L.Ieq) x y
+    Eq x y ->
+      case typeRepr x of
+        BoolTypeRepr -> binop (icmpop L.Ieq) x y
+        BVTypeRepr _ -> binop (icmpop L.Ieq) x y
     PopCount w v  -> do
       v' <- mkLLVMValue v
       let wv = natValue w
@@ -798,10 +817,10 @@ appToLLVM' app = do
     --                in over'
     -- and we rely on llvm optimisations to throw away identical adds
     -- and adds of 0
-    UadcOverflows _sz x y c -> intrinsicOverflows' "uadd" x y c
-    SadcOverflows _sz x y c -> intrinsicOverflows' "sadd" x y c
-    UsbbOverflows _sz x y c -> intrinsicOverflows' "usub" x y c
-    SsbbOverflows _sz x y c -> intrinsicOverflows' "ssub" x y c
+    UadcOverflows x y c -> intrinsicOverflows' "uadd" x y c
+    SadcOverflows x y c -> intrinsicOverflows' "sadd" x y c
+    UsbbOverflows x y c -> intrinsicOverflows' "usub" x y c
+    SsbbOverflows x y c -> intrinsicOverflows' "ssub" x y c
 
     Bsf _sz v -> do
       let cttz = intrinsic ("llvm.cttz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
