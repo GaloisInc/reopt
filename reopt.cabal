@@ -232,6 +232,7 @@ test-suite reopt-tests
     filepath,
     lens,
     macaw-base,
+    macaw-x86,
     parameterized-utils,
     reopt,
     temporary,

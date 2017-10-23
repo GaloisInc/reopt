@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes #-}
@@ -5,19 +6,19 @@ module ElfX64Linux (
   elfX64LinuxTests
   ) where
 
-import Control.Lens ( (^.) )
+import           Control.Lens ( (^.) )
 import qualified Control.Monad.Catch as C
 import qualified Data.ByteString as B
 import qualified Data.Foldable as F
 import qualified Data.Map as M
+import           Data.Maybe
 import qualified Data.Set as S
-import Data.Typeable ( Typeable )
-import Data.Word ( Word64 )
-import System.FilePath ( dropExtension, replaceExtension )
+import           Data.Typeable ( Typeable )
+import           Data.Word ( Word64 )
+import           System.FilePath ( dropExtension, replaceExtension )
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
-import Text.Printf ( printf )
-import Text.Read ( readMaybe )
+import           Text.Read ( readMaybe )
 
 import qualified Data.ElfEdit as E
 
@@ -52,30 +53,42 @@ mkTest fp = T.testCase fp $ withELF exeFilename (testDiscovery fp)
 
 -- | Run a test over a given expected result filename and the ELF file
 -- associated with it
-testDiscovery :: FilePath -> E.Elf Word64 -> IO ()
+testDiscovery :: FilePath -> E.Elf 64 -> IO ()
 testDiscovery expectedFilename elf =
-  withMemory MM.Addr64 elf $ \mem -> do
-    let Just entryPoint = MM.absoluteAddrSegment mem (fromIntegral (E.elfEntry elf))
-    case MD.cfgFromAddrs RO.x86_64_linux_info mem M.empty [entryPoint] [] of
-      PU.Some di -> do
-        expectedString <- readFile expectedFilename
-        case readMaybe expectedString of
-          Nothing -> T.assertFailure ("Invalid expected result: " ++ show expectedString)
-          Just er -> do
-            let expectedEntries = M.fromList [ (entry, S.fromList starts) | (entry, starts) <- funcs er ]
-                ignoredBlocks = S.fromList (ignoreBlocks er)
-            F.forM_ (M.elems (di ^. MD.funInfo)) $ \dfi -> do
-              let actualEntry = fromIntegral (MM.addrValue (MD.discoveredFunAddr dfi))
-                  actualBlockStarts = S.fromList [ fromIntegral (MM.addrValue (MD.blockAddr pbr))
-                                                 | pbr <- M.elems (dfi ^. MD.parsedBlocks)
-                                                 ]
-              case (S.member actualEntry ignoredBlocks, M.lookup actualEntry expectedEntries) of
-                (True, _) -> return ()
-                (_, Nothing) -> T.assertFailure (printf "Unexpected entry point: 0x%x" actualEntry)
-                (_, Just expectedBlockStarts) ->
-                  T.assertEqual (printf "Block starts for 0x%x" actualEntry) expectedBlockStarts (actualBlockStarts `S.difference` ignoredBlocks)
+  withMemory elf $ \mem -> do
+    let Just entryPoint = MM.resolveAbsoluteAddr mem (fromIntegral (E.elfEntry elf))
+    let di = MD.cfgFromAddrs RO.x86_64_linux_info mem MD.emptySymbolAddrMap [entryPoint] []
+    expectedString <- readFile expectedFilename
+    case readMaybe expectedString of
+      Nothing -> T.assertFailure ("Invalid expected result: " ++ show expectedString)
+      Just er -> do
+        let expectedEntries :: M.Map (MM.MemSegmentOff 64) (S.Set (MM.MemSegmentOff 64))
+            expectedEntries = M.fromList [ (resolvedEntry, S.fromList resolvedStarts)
+                                         | (entry, starts) <- funcs er
+                                         , resolvedEntry <- maybeToList $
+                                             MM.resolveAbsoluteAddr mem (fromIntegral entry)
+                                         , let resolvedStarts =
+                                                 mapMaybe (MM.resolveAbsoluteAddr mem . fromIntegral)
+                                                          starts
+                                         ]
+            ignoredBlocks :: S.Set (MM.MemSegmentOff 64)
+            ignoredBlocks = S.fromList $ mapMaybe (MM.resolveAbsoluteAddr mem . fromIntegral) $
+              ignoreBlocks er
 
-withELF :: FilePath -> (E.Elf Word64 -> IO ()) -> IO ()
+        F.forM_ (M.elems (di ^. MD.funInfo)) $ \(PU.Some dfi) -> do
+          let actualEntry :: MM.MemSegmentOff 64
+              actualEntry = MD.discoveredFunAddr dfi
+              actualBlockStarts :: S.Set (MM.MemSegmentOff 64)
+              actualBlockStarts = S.fromList [ MD.pblockAddr pbr
+                                             | pbr <- M.elems (dfi ^. MD.parsedBlocks)
+                                             ]
+          case (S.member actualEntry ignoredBlocks, M.lookup actualEntry expectedEntries) of
+            (True, _) -> return ()
+            (_, Nothing) -> T.assertFailure ("Unexpected function entry point: " ++ show actualEntry)
+            (_, Just expectedBlockStarts) ->
+                  T.assertEqual ("Block starts for " ++ show actualEntry) expectedBlockStarts (actualBlockStarts `S.difference` ignoredBlocks)
+
+withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 withELF fp k = do
   bytes <- B.readFile fp
   case E.parseElf bytes of
@@ -88,12 +101,12 @@ withELF fp k = do
 
 withMemory :: forall w m a
             . (C.MonadThrow m, MM.MemWidth w, Integral (E.ElfWordType w))
-           => MM.AddrWidthRepr w
-           -> E.Elf (E.ElfWordType w)
+           => E.Elf w
            -> (MM.Memory w -> m a)
            -> m a
-withMemory relaWidth e k =
-  case MM.memoryForElfSegments relaWidth e of
+withMemory e k = do
+  let opt = MM.LoadOptions { MM.loadStyle = MM.LoadBySegment, MM.includeBSS = True }
+  case MM.memoryForElf opt e of
     Left err -> C.throwM (MemoryLoadError err)
     Right (_sim, mem) -> k mem
 
