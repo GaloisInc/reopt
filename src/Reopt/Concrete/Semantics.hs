@@ -202,6 +202,8 @@ evalExpr (AppExpr a) = do
     -- return -1 as a BV.
     R.TruncFPToSignedBV fr c nr -> liftFPtoBV (truncateIfValid nr) fr nr c
 
+    _ -> CS.Undefined (typeRepr a')
+
 ------------------------------------------------------------------------
 -- Statement evaluation
 

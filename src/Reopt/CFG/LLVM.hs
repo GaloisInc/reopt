@@ -880,6 +880,7 @@ appToLLVM' app = do
     TruncFPToSignedBV frepr v sz -> do
       flt_v <- mkFloatLLVMValue v frepr
       convop L.FpToSi flt_v (natReprToLLVMType sz)
+    _ -> unimplementedInstr' typ (show (ppApp pretty app))
 
 archFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 archFnToLLVM f =
