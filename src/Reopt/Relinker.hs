@@ -373,7 +373,7 @@ objectSectionAddr :: String
                   -> w
 objectSectionAddr src idx m =
   case Map.lookup idx m of
-    Nothing -> error $ src ++ "refers to an unmapped section index " ++ show idx ++ "."
+    Nothing -> error $ src ++ " refers to an unmapped section index " ++ show idx ++ "."
     Just r -> r
 
 -- | A symbol table entry in the new object.
