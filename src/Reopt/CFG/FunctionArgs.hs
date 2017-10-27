@@ -386,9 +386,6 @@ class CanDemandValues arch where
   -- | List of callee saved registers in function calls.
   calleeSavedRegs :: p arch -> Set (Some (ArchReg arch))
 
-  -- | Return values that must be evaluated to execute this statement
-  demandedArchStmtValues :: ArchStmt arch ids -> [Some (Value arch ids)]
-
 -- A function call is the only block type that results in the
 -- generation of function call demands, so we split that aspect out
 -- (callee saved are handled in summarizeBlock).
@@ -442,7 +439,7 @@ summarizeCall mem lbl proc_state isTailCall = do
       recordBlockDemand lbl proc_state (\_ -> DemandAlways) argRegs
 
 -- | Return values that must be evaluated to execute side effects.
-stmtDemandedValues :: CanDemandValues arch
+stmtDemandedValues :: (CanDemandValues arch, FoldableF (ArchStmt arch))
                    => Stmt arch ids
                    -> [Some (Value arch ids)]
 stmtDemandedValues stmt =
@@ -459,7 +456,7 @@ stmtDemandedValues stmt =
     InstructionStart _ _ -> []
     -- Comment statements have no specific value.
     Comment _ -> []
-    ExecArchStmt astmt -> demandedArchStmtValues astmt
+    ExecArchStmt astmt -> foldMapF (\v -> [Some v]) astmt
 
 type SummarizeConstraints arch
   = ( CanDemandValues arch
@@ -713,8 +710,6 @@ instance CanDemandValues X86_64 where
   functionRetRegs _ = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
 
   calleeSavedRegs _ = x86CalleeSavedRegs
-
-  demandedArchStmtValues (X86Stmt stmt) = foldMapF (\v -> [Some v]) stmt
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
                              -> Map (MemSegmentOff 64) FunctionType

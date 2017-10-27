@@ -362,7 +362,7 @@ recoverStmt s = do
         recoverWrite addr val
     Comment msg -> do
       addFnStmt $ FnComment msg
-    ExecArchStmt (X86Stmt stmt0) -> do
+    ExecArchStmt stmt0 -> do
       stmt <- traverseF recoverValue stmt0
       addFnStmt (FnArchStmt stmt)
     _ -> trace ("recoverStmt undefined for " ++ show (ppStmt pretty s)) $ do

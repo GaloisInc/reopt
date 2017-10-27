@@ -59,11 +59,12 @@ import           Data.Macaw.CFG
    , RegAddrWidth
    , ArchReg
    , IsArchFn(..)
+   , IsArchStmt(..)
    )
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Data.Macaw.X86.ArchTypes (X86_64, X86Stmt(..), ppX86Stmt)
+import           Data.Macaw.X86.ArchTypes (X86_64, X86Stmt(..))
 import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.X86Reg
   ( X86Reg
@@ -348,7 +349,7 @@ instance Pretty FnStmt where
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
-      FnArchStmt stmt -> ppX86Stmt pretty stmt
+      FnArchStmt stmt -> ppArchStmt pretty stmt
 
 instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
