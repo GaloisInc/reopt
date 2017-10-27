@@ -4,6 +4,7 @@ module Reopt.CFG.FunctionCheck
    ) where
 
 import           Control.Lens
+import           Data.Maybe
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -53,4 +54,4 @@ checkRegion reg stmts =
     ParsedIte _ x y      -> (++) <$> checkRegion reg x <*> checkRegion reg y
     ParsedTranslateError{}  -> Nothing
     ClassifyFailure _       -> Nothing
-    ParsedArchTermStmt _ _ a -> Just [a]
+    ParsedArchTermStmt _ _ a -> Just (maybeToList a)

@@ -275,10 +275,10 @@ analyzeStmtReferences root_addr init_sp b = do
       addStateVars init_sp proc_state
       let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') vec
-    ParsedArchTermStmt X86Syscall proc_state next_addr -> do
+    ParsedArchTermStmt X86Syscall proc_state mnext_addr -> do
       addStateVars init_sp proc_state
       let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-      recordStackOffset next_addr sp'
+      traverse_ (\a -> recordStackOffset a sp') mnext_addr
 
 -- | Explore states until we have reached end of frontier.
 recoverIter :: DiscoveryFunInfo X86_64 ids

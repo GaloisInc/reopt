@@ -463,9 +463,9 @@ recoverX86TermStmt :: forall ids
              -> BlockLabel 64
              -> X86TermStmt ids
              -> RegState (ArchReg X86_64) (Value X86_64 ids)
-             -> MemSegmentOff 64
+             -> Maybe (MemSegmentOff 64)
              -> Recover ids RecoveredBlockInfo
-recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_addr = seq blockInfo $ do
+recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state mnext_addr = seq blockInfo $ do
   sysp <- gets rsSyscallPersonality
 
   let syscallRegs :: [ArchReg X86_64 (BVType 64)]
@@ -508,17 +508,20 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state next_
         v <- getPostSyscallValue lbl proc_state r
         return $ MapF.insert r (FnRegValue v) m
 
-  let provides = Map.findWithDefault Set.empty next_addr registerUseMap
+  case mnext_addr of
+    Nothing ->
+      error "Recovery: Could not find system call return label"
+    Just next_addr -> do
+      let provides = Map.findWithDefault Set.empty next_addr registerUseMap
+      regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
 
-  regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
+      call_num <- recoverRegister proc_state syscall_num_reg
 
-  call_num <- recoverRegister proc_state syscall_num_reg
+      args'  <- mapM (recoverRegister proc_state) args
+      -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
-  args'  <- mapM (recoverRegister proc_state) args
-  -- args <- (++ stackArgs stk) <$> stateArgs proc_state
-
-  fb <- mkBlock lbl phis (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
-  pure $! blockInfo & addFnBlock fb
+      fb <- mkBlock lbl phis (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
+      pure $! blockInfo & addFnBlock fb
 
 recoverBlock :: forall ids
              .  DemandedUseMap

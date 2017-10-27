@@ -532,7 +532,7 @@ summarizeBlock mem interp_state addr stmts = do
          recordBlockDemand lbl proc_state (\_ -> DemandAlways) (Some <$> argRegs)
 
       recordCallPropagation proc_state
-      addIntraproceduralJumpTarget interp_state lbl next_addr
+      traverse_ (addIntraproceduralJumpTarget interp_state lbl) next_addr
 
     ParsedLookupTable proc_state lookup_idx vec -> do
       demandValue lbl lookup_idx

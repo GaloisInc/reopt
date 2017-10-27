@@ -19,7 +19,7 @@ import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
+import           Data.Maybe
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -65,7 +65,7 @@ stmtListSucc stmts = do
     ParsedReturn{} -> []
     ParsedIte _ t f -> stmtListSucc t ++ stmtListSucc f
     ParsedTranslateError{} -> []
-    ParsedArchTermStmt _ _ ret -> [(ret, idx)]
+    ParsedArchTermStmt _ _ ret -> maybeToList ((, idx) <$> ret)
     ClassifyFailure{} -> []
 
 -- | Return the FunPredMap for the discovered block function.
