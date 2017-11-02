@@ -2,27 +2,17 @@
 
 A tool for analyzing x86-64 binaries.
 
-## Sandboxed Installation
-
-Run `./build-sandbox.sh` to install `reopt` in a Cabal sandbox. On the
-first run this downloads the dependencies automatically. In the future
-use `./build-sandbox.sh` to rebuild without updating dependencies, or
-`./build-sandbox.sh -p` to `git pull` the dependencies before
-building.
-
 ## Dependencies
 
-In addition to Hackage dependencies, Reopt has the following internally maintained dependencies:
+In addition to Hackage dependencies, Reopt has the following dependencies:
 
+- https://github.com/GaloisInc/dwarf A Haskell library for parsing Dwarf information
 - https://github.com/GaloisInc/elf-edit (a fork of `elf` package on Hackage)
 - https://github.com/GaloisInc/flexdis86
 - https://github.com/GaloisInc/linux-ptrace (a fork of `linux-ptrace` package on Hackage)
 - https://github.com/GaloisInc/llvm-pretty
-- https://github.com/GaloisInc/mss (a multi-package repo which includes `crucible`; *use the `develop` branch, not the `master` branch*)
 - https://github.com/GaloisInc/parameterized-utils
 - https://github.com/GaloisInc/posix-waitpid (a fork of `posix-waitpid` package on Hackage)
-
-The `./update-deps.sh` script can be used to initially clone these dependencies, or to update an existing clone. Note that the default branch for `mss` is `develop`, not `master`! The default branch is automatically checked out on clone by `./update-deps.sh`, but if you work in an `mss` feature branch, be sure to switch back to `develop`, not `master`, when you're done.
 
 ## Executables
 
