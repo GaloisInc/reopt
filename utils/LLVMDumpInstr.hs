@@ -44,7 +44,7 @@ main = do
 
   let retBytes = [0xc3] -- terminate block
       bs = BS.pack $ (map (fst . head) nums) ++ retBytes
-      seg = memSegment 0 (Just 0) Perm.execute [ByteRegion bs]
+      seg = memSegment 0 0 Perm.execute [ByteRegion bs]
       mem =
         case insertMemSegment seg (emptyMemory Addr64) of
           Left e -> error $ "Segment " ++ showInsertError e

@@ -196,19 +196,14 @@ functionName :: AddrSymMap 64
 functionName m addr
     | Just nm <- Map.lookup addr m =
         L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
-    | Just addr_val <- msegAddr addr =
-      L.Symbol $ "reopt_gen_" ++ show addr_val
-    | otherwise = L.Symbol $ "reopt_gen_" ++ show (segmentIndex seg) ++ "_" ++ show off
+    | otherwise = L.Symbol $ "reopt_gen_" ++ show (segmentBase seg) ++ "_" ++ show off
       where seg = msegSegment addr
-            off = msegOffset addr
+            off = segmentOffset seg + msegOffset addr
 
 blockWordName :: MemSegmentOff 64  -> L.Ident
-blockWordName addr = L.Ident ("block_" ++ nm)
+blockWordName addr = L.Ident ("block_" ++ show (segmentBase seg) ++ "_" ++ show off)
   where seg = msegSegment addr
         off = msegOffset addr
-        nm = case segmentBase seg of
-               Just base -> show (base + off)
-               Nothing -> show (segmentIndex seg) ++ "_" ++ show off
 
 blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
 blockName l = L.Named (L.Ident (show l))
