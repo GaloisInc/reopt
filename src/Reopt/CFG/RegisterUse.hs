@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
@@ -8,7 +10,7 @@
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
-  , AddrToFunctionTypeMap
+  , AddrToX86FunctionTypeMap
   , DemandedUseMap
   , ppDemandedUseMap
   , registerUse
@@ -27,25 +29,26 @@ import qualified Data.Vector as V
 import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.Architecture.Syscall
+import           Data.Macaw.Analysis.FunctionArgs (stmtDemandedValues)
 import           Data.Macaw.CFG
+import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
-import           Data.Macaw.X86.ArchTypes
+import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
+import           Data.Macaw.X86.SyscallInfo (SyscallPersonality, spTypeInfo, spResultRegisters)
 import           Data.Macaw.X86.X86Reg
+  ( X86Reg, pattern DF, x86StateRegs, x86ResultRegs, x86FloatResultRegs, x86CalleeSavedRegs
+  )
 
-import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftMaximumFunctionType
-                                 , ftMinimumFunctionType
                                  , ftArgRegs
                                  , ftIntRetRegs
                                  , ftFloatRetRegs
                                  )
-import           Reopt.CFG.FunctionArgs (stmtDemandedValues)
 
 -------------------------------------------------------------------------------
 -- funBlockPreds
@@ -69,7 +72,7 @@ stmtListSucc stmts = do
     ClassifyFailure{} -> []
 
 -- | Return the FunPredMap for the discovered block function.
-funBlockPreds :: DiscoveryFunInfo X86_64 ids -> FunPredMap 64
+funBlockPreds :: DiscoveryFunInfo arch ids -> FunPredMap (ArchAddrWidth arch)
 funBlockPreds info = Map.fromListWith (++)
   [ (next, [GeneratedBlock addr idx])
   | b <- Map.elems (info^.parsedBlocks)
@@ -83,51 +86,53 @@ funBlockPreds info = Map.fromListWith (++)
 
 -- What does a given register depend upon?  Records both assignments
 -- and registers (transitively through Apps etc.)
-type RegDeps ids = (Set (Some (AssignId ids)), Set (Some X86Reg))
-type AssignmentCache ids = Map (Some (AssignId ids)) (RegDeps ids)
+type RegDeps (r :: Type -> *) ids = (Set (Some (AssignId ids)), Set (Some r))
+
+type AssignmentCache r ids = Map (Some (AssignId ids)) (RegDeps r ids)
 
 -- | Map from address to type of function at that address
 --
 -- We use the given key type so that we do not need access to memory object
 -- in computing types.
-type AddrToFunctionTypeMap = Map (MemAddr 64) FunctionType
+type AddrToX86FunctionTypeMap = Map (MemSegmentOff 64) FunctionType
 
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
 data RegisterUseState ids = RUS {
     -- | Holds the set of registers that we need.  This is the final
     -- output of the algorithm, along with the _blockRegUses below.
-  _assignmentUses     :: !(Set (Some (AssignId ids)))
+    _assignmentUses     :: !(Set (Some (AssignId ids)))
     -- | Holds state about the set of registers that a block uses
     -- (required by this block or a successor).
   , _blockRegUses :: !(Map (MemSegmentOff 64) (Set (Some X86Reg)))
     -- | Maps a each label that sets processor registers to the defined registers to their deps.  Not defined for all
     -- variables, hence use of Map instead of RegState X86Reg
-  , _blockInitDeps  :: !(Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids)))
+  , _blockInitDeps  :: !(Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
     -- | A cache of the registers and their deps.  The key is not included
     -- in the set of deps (but probably should be).
-  , _assignmentCache :: !(AssignmentCache ids)
+  , _assignmentCache :: !(AssignmentCache X86Reg ids)
     -- | The set of addresses we need to consider next.
   , _blockFrontier  :: !(Set (MemSegmentOff 64))
-    -- | Function arguments derived from AddrToFunctionTypeMap
-  , functionArgs    :: !AddrToFunctionTypeMap
+    -- | Function arguments derived from AddrToX86FunctionTypeMap
+  , functionArgs    :: !AddrToX86FunctionTypeMap
   , currentFunctionType :: !FunctionType
-  , thisSyscallPersonality :: !(SyscallPersonality X86_64)
+  , thisSyscallPersonality :: !SyscallPersonality
     -- ^ System call personality
   }
 
-initRegisterUseState :: SyscallPersonality X86_64
-                     -> AddrToFunctionTypeMap
+initRegisterUseState :: SyscallPersonality
+                     -> AddrToX86FunctionTypeMap
                      -> MemSegmentOff 64
+                     -> FunctionType -- ^ Type of current function
                      -> RegisterUseState ids
-initRegisterUseState sysp fArgs fn =
+initRegisterUseState sysp fArgs fn ftp =
   RUS { _assignmentUses     = Set.empty
       , _blockRegUses       = Map.empty
       , _blockInitDeps      = Map.empty
       , _assignmentCache    = Map.empty
       , _blockFrontier      = Set.singleton fn
       , functionArgs        = fArgs
-      , currentFunctionType = fromMaybe ftMinimumFunctionType (fArgs ^. at (relativeSegmentAddr fn))
+      , currentFunctionType = ftp
       , thisSyscallPersonality = sysp
       }
 
@@ -139,13 +144,13 @@ blockRegUses :: Simple Lens (RegisterUseState ids)
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
 blockInitDeps :: Simple Lens (RegisterUseState ids)
-                   (Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids)))
+                   (Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
 blockFrontier :: Simple Lens (RegisterUseState ids) (Set (MemSegmentOff 64))
 blockFrontier = lens _blockFrontier (\s v -> s { _blockFrontier = v })
 
-assignmentCache :: Simple Lens (RegisterUseState ids) (AssignmentCache ids)
+assignmentCache :: Simple Lens (RegisterUseState ids) (AssignmentCache X86Reg ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
 type RegisterUseM ids a = State (RegisterUseState ids) a
@@ -154,7 +159,7 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 -- Phase one functions
 -- ----------------------------------------------------------------------------------------
 
-valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps ids)
+valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps X86Reg ids)
 valueUses = zoom assignmentCache .
             foldValueCached (\_ _      -> (mempty, mempty))
                             (\_        -> (mempty, mempty))
@@ -179,7 +184,7 @@ registerValues :: Functor t
 registerValues regState = fmap (\(Some r) -> Some (regState^.boundValue r))
 
 
-x86TermStmtValues :: SyscallPersonality X86_64
+x86TermStmtValues :: SyscallPersonality
                   -> X86TermStmt ids
                   -> RegState (ArchReg X86_64) (Value X86_64 ids)
                   -> [Some (Value X86_64 ids)]
@@ -198,20 +203,22 @@ x86TermStmtValues sysp X86Syscall proc_state =
              | otherwise = syscallRegs
 
 -- | Get values that must be evaluated to execute terminal statement.
-termStmtValues :: SyscallPersonality X86_64
-               -> AddrToFunctionTypeMap
+termStmtValues :: Memory 64
+               -> SyscallPersonality
+               -> AddrToX86FunctionTypeMap
                   -- ^ Map from addresses to function type
                -> FunctionType
                   -- ^ Type of this function
                -> ParsedTermStmt X86_64 ids
                   -- ^ Statement to get value of
                -> [Some (Value X86_64 ids)]
-termStmtValues sysp typeMap curFunType tstmt =
+termStmtValues mem sysp typeMap curFunType tstmt =
   case tstmt of
     ParsedCall proc_state _m_ret_addr ->
       -- Get function type associated with function
       let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
-             , Just ftp <- Map.lookup faddr typeMap = ftp
+             , Just fSegOff <- asSegmentOff mem faddr
+             , Just ftp <- Map.lookup fSegOff typeMap = ftp
              | otherwise = ftMaximumFunctionType
        in registerValues proc_state (Some ip_reg : ftArgRegs ft)
     ParsedJump _proc_state _tgt_addr -> []
@@ -231,11 +238,12 @@ termStmtValues sysp typeMap curFunType tstmt =
 -- map of how demands by successor blocks map back to assignments and
 -- registers.
 summarizeBlock :: forall ids
-               .  DiscoveryFunInfo X86_64 ids
+               .  Memory 64
+               -> DiscoveryFunInfo X86_64 ids
                -> MemSegmentOff 64
                -> StatementList X86_64 ids
                -> RegisterUseM ids ()
-summarizeBlock interp_state addr stmts = do
+summarizeBlock mem interp_state addr stmts = do
   let lbl = GeneratedBlock addr (stmtsIdent stmts)
   blockInitDeps %= Map.insert lbl Map.empty
   let -- Figure out the deps of the given registers and update the state for the current label
@@ -250,7 +258,7 @@ summarizeBlock interp_state addr stmts = do
   sysp <- gets thisSyscallPersonality
   typeMap <- gets $ functionArgs
   cur_ft <- gets currentFunctionType
-  let termValues = termStmtValues sysp typeMap cur_ft (stmtsTerm stmts)
+  let termValues = termStmtValues mem sysp typeMap cur_ft (stmtsTerm stmts)
   traverse_ (\(Some r) -> demandValue addr r)
             (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
 
@@ -258,7 +266,8 @@ summarizeBlock interp_state addr stmts = do
           ParsedCall proc_state _ -> do
             -- Get function type associated with function
             let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
-                   , Just ftp <- Map.lookup faddr typeMap = ftp
+                   , Just fSegOff <- asSegmentOff mem faddr
+                   , Just ftp <- Map.lookup fSegOff typeMap = ftp
                    | otherwise = ftMaximumFunctionType
             addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
             -- Ensure that result registers are defined, but do not have any deps.
@@ -272,8 +281,8 @@ summarizeBlock interp_state addr stmts = do
           ParsedReturn _ ->
             pure ()
           ParsedIte _ tblock fblock -> do
-            summarizeBlock interp_state addr tblock
-            summarizeBlock interp_state addr fblock
+            summarizeBlock mem interp_state addr tblock
+            summarizeBlock mem interp_state addr fblock
           ParsedArchTermStmt X86Syscall proc_state _ -> do
             -- FIXME: clagged from call above
             addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
@@ -286,25 +295,24 @@ summarizeBlock interp_state addr stmts = do
             error $ "Classification failed: " ++ show addr
 
 -- | Explore states until we have reached end of frontier.
-summarizeIter :: DiscoveryFunInfo X86_64 ids
+summarizeIter :: Memory 64
+              -> DiscoveryFunInfo X86_64 ids
               -> Set (MemSegmentOff 64)
               -> RegisterUseM ids ()
-summarizeIter ist seen = do
+summarizeIter mem ist seen = do
   f <- use blockFrontier
   case Set.maxView f of
     Nothing -> pure ()
     Just (addr,rest) -> do
       blockFrontier .= rest
       if addr `Set.member` seen then
-        summarizeIter ist seen
+        summarizeIter mem ist seen
        else do
         let Just blk = Map.lookup addr (ist^.parsedBlocks)
         let stmts = blockStatementList blk
         blockFrontier %= \s -> foldr Set.insert s (fst <$> stmtListSucc stmts)
-        summarizeBlock ist addr stmts
-        summarizeIter ist (Set.insert addr seen)
-
-
+        summarizeBlock mem ist addr stmts
+        summarizeIter mem ist (Set.insert addr seen)
 
 -- | Map from addresses to the registers they depend on
 type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
@@ -312,7 +320,7 @@ type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
 
 -- |
-doOne :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids))
+doOne :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
       -> FunPredMap 64
          -- ^ Map addresses to the predessor blocks.
       -> FixState ids
@@ -343,7 +351,7 @@ doOne bid predMap (aUse, bru) rest newRegs (predLabel:predRest) = do
 
 -- We use ix here as it returns mempty if there is no key, which is
 -- the right behavior here.
-calculateFixpoint :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps ids))
+calculateFixpoint :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
                      -- Maps blocks labels to the dependencies for each register they provide.
                   -> FunPredMap 64
                      -- ^ Map addresses to the predessor blocks.
@@ -368,18 +376,22 @@ ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-registerUse :: SyscallPersonality X86_64
-            -> AddrToFunctionTypeMap
+registerUse :: Memory 64
+            -> SyscallPersonality
+            -> AddrToX86FunctionTypeMap
             -> DiscoveryFunInfo X86_64 ids
+            -> FunctionType
+               -- ^ Expected type of this function
             -> FunPredMap 64
                -- ^ Predecessors for each block in function
             -> ( Set (Some (AssignId ids))
                , DemandedUseMap
                )
-registerUse sysp fArgs disFunInfo predMap =
-  flip evalState (initRegisterUseState sysp fArgs (discoveredFunAddr disFunInfo)) $ do
+registerUse mem sysp fArgs disFunInfo ftp predMap = do
+  let addr = discoveredFunAddr disFunInfo
+  flip evalState (initRegisterUseState sysp fArgs addr ftp) $ do
     -- Run the first phase (block summarization)
-    summarizeIter disFunInfo Set.empty
+    summarizeIter mem disFunInfo Set.empty
     -- propagate back uses
     bid <- use blockInitDeps
     assignUse <- use assignmentUses

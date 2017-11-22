@@ -1,3 +1,10 @@
+{-|
+Copyright        : (c) Galois, Inc 2017
+Maintainer       : Joe Hendrix <jhendrix@galois.com>
+
+Provides utility for checking that all blocks in function info have non-error terminal
+statements.
+-}
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.CFG.FunctionCheck
    ( checkFunction
@@ -10,9 +17,9 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
 
-import Data.Macaw.CFG
-import Data.Macaw.Discovery.State
-import Data.Macaw.Memory (MemWidth)
+import           Data.Macaw.CFG
+import           Data.Macaw.Discovery.State
+import           Data.Macaw.Memory (MemWidth)
 
 -- | This returns true if all block terminators reachable from the
 -- function entry point have non-error term stmts.

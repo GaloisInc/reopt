@@ -58,8 +58,8 @@ import qualified Data.VEX.FFI
 import           Data.Macaw.ARM
 #endif
 
+import           Data.Macaw.Analysis.FunctionArgs
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
-import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
@@ -68,16 +68,47 @@ import           Data.Macaw.Memory.ElfLoader
 
 import           Data.Macaw.X86
 import           Data.Macaw.X86.ArchTypes
-import           Data.Macaw.X86.X86Reg (X86Reg)
+import           Data.Macaw.X86.SyscallInfo
+--import qualified Data.Macaw.X86.X86Reg as X86
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..))
-import           Reopt.CFG.FunctionArgs (DemandSet, functionDemands, inferFunctionTypeFromDemands)
+import           Reopt.CFG.FnRep (Function(..), FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import qualified Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Relinker
+
+------------------------------------------------------------------------
+-- X86-specific functions
+
+summarizeX86TermStmt :: SyscallPersonality
+                     -> ComputeArchTermStmtEffects X86_64 ids
+summarizeX86TermStmt sysp X86Syscall proc_state = do
+  -- Compute the arguments needed by the function
+  let argRegs
+        | BVValue _ call_no <- proc_state^.boundValue syscall_num_reg
+        , Just (_,_,argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
+            take (length argtypes) syscallArgumentRegs
+        | otherwise =
+            syscallArgumentRegs
+  let callRegs = [Some sp_reg] ++ Set.toList x86CalleeSavedRegs
+  ArchTermStmtRegEffects { termRegDemands = Some <$> argRegs
+                         , termRegTransfers = callRegs
+                         }
+
+
+x86DemandInfo :: SyscallPersonality
+              -> ArchDemandInfo X86_64
+x86DemandInfo sysp =
+  ArchDemandInfo { functionArgRegs = [Some RAX]
+                                     ++ (Some <$> x86ArgumentRegs)
+                                     ++ (Some <$> x86FloatArgumentRegs)
+                 , functionRetRegs = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
+                 , calleeSavedRegs = x86CalleeSavedRegs
+                 , computeArchTermStmtEffects = summarizeX86TermStmt sysp
+                 }
+
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -608,7 +639,7 @@ getElfArchInfo e =
      fail $ "Do not support " ++ show (elfClassBitWidth cl) ++ "-bit "
             ++ show arch ++ "-" ++ show abi ++ "binaries."
 
-getX86ElfArchInfo :: Elf 64 -> IO (ArchitectureInfo X86_64, SyscallPersonality X86_64, String)
+getX86ElfArchInfo :: Elf 64 -> IO (ArchitectureInfo X86_64, SyscallPersonality, String)
 getX86ElfArchInfo e =
   case elfOSABI e of
     ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
@@ -712,9 +743,37 @@ showFn args functionName = do
   (_, Some fnInfo) <- stToIO $ analyzeFunction (blockLogFn (args^.discOpts)) addr InitAddr ds0
   print $ pretty fnInfo
 
+inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
+                             -> Map (MemSegmentOff 64) FunctionType
+inferFunctionTypeFromDemands dm =
+  let go ds m = Map.unionWith Set.union (functionResultDemands ds) m
+      retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
+      retDemands = foldr go Map.empty dm
+
+      -- drop the suffix which isn't a member of the arg set.  This
+      -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
+      maximumArgPrefix :: [X86Reg tp] -> RegisterSet X86Reg -> Int
+      maximumArgPrefix regs rs =
+        length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
+
+      -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
+      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> FunctionType
+      orderPadArgs (args, rets) =
+        FunctionType { fnNIntArgs = maximumArgPrefix x86ArgumentRegs args
+                     , fnNFloatArgs = maximumArgPrefix x86FloatArgumentRegs args
+                     , fnNIntRets = maximumArgPrefix x86ResultRegs rets
+                     , fnNFloatRets = maximumArgPrefix x86FloatResultRegs rets
+                     }
+  in fmap orderPadArgs
+     $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
+                        (fmap (\ds ->  (registerDemands ds, mempty)))
+                        (fmap (\s -> (mempty,s)))
+                        dm
+                        retDemands
+
 -- | Try to recover function information from the information
 -- recovered during code discovery.
-getFns :: SyscallPersonality X86_64
+getFns :: SyscallPersonality
        -> Map BS.ByteString (MemSegmentOff 64)
           -- ^ Maps symbol names to addresses
        -> Set String
@@ -739,9 +798,9 @@ getFns sysp symMap excludedNames info = do
   let entries = filter include $ exploredFunctions info
 
   let fDems :: Map (MemSegmentOff 64) (DemandSet X86Reg)
-      fDems = functionDemands sysp info
-  let fArgs :: AddrToFunctionTypeMap
-      fArgs = Map.mapKeys relativeSegmentAddr $ inferFunctionTypeFromDemands fDems
+      fDems = functionDemands (x86DemandInfo sysp) info
+  let fArgs :: AddrToX86FunctionTypeMap
+      fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
   fmap catMaybes $ forM entries $ \(Some finfo) -> do
     let entry = discoveredFunAddr finfo

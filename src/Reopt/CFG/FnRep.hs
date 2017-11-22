@@ -27,7 +27,6 @@ module Reopt.CFG.FnRep
    , FoldFnValue(..)
    , PhiBinding(..)
    , ftMaximumFunctionType
-   , ftMinimumFunctionType
    , ftArgRegs
    , ftIntRetRegs
    , ftFloatRetRegs
@@ -61,6 +60,7 @@ import           Data.Macaw.CFG
    , IsArchFn(..)
    , IsArchStmt(..)
    )
+import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
@@ -73,8 +73,6 @@ import           Data.Macaw.X86.X86Reg
   , x86FloatArgumentRegs
   , x86FloatResultRegs
   )
-
-import           Reopt.CFG.BlockLabel
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
@@ -140,29 +138,27 @@ data FunctionType =
   deriving (Ord, Eq, Show)
 
 instance Pretty FunctionType where
-  pretty f = parens (int (fnNIntArgs f) <> comma <+> int (fnNFloatArgs f))
+  pretty f = parens (commaSepRegs (ftArgRegs f))
              <+> text "->"
              <+> parens (int (fnNIntRets f) <> comma <+> int (fnNFloatRets f))
+   where commaSepRegs :: [Some X86Reg] -> Doc
+         commaSepRegs [] = text ""
+         commaSepRegs [Some r] = text (show r)
+         commaSepRegs (Some r:l) = text (show r) <> comma <+> commaSepRegs l
 
 -- Convenience functions
 ftMaximumFunctionType :: FunctionType
-ftMaximumFunctionType = FunctionType (length x86ArgumentRegs)
-                                     (length x86FloatArgumentRegs)
-                                     (length x86ResultRegs)
-                                     (length x86FloatResultRegs)
+ftMaximumFunctionType = FunctionType { fnNIntArgs = length x86ArgumentRegs
+                                     , fnNFloatArgs = length x86FloatArgumentRegs
+                                     , fnNIntRets = length x86ResultRegs
+                                     , fnNFloatRets = length x86FloatResultRegs
+                                     }
 
-ftMinimumFunctionType :: FunctionType
-ftMinimumFunctionType = FunctionType 0 0 0 0
 
 -- | Return the registers used to pass arguments.
 ftArgRegs :: FunctionType -> [Some X86Reg]
-ftArgRegs ft = fmap Some (ftIntArgRegs ft) ++ fmap Some (ftFloatArgRegs ft)
-
-ftIntArgRegs :: FunctionType -> [X86Reg (BVType 64)]
-ftIntArgRegs ft = take (fnNIntArgs ft) x86ArgumentRegs
-
-ftFloatArgRegs :: FunctionType -> [X86Reg (BVType 128)]
-ftFloatArgRegs ft = take (fnNFloatArgs ft) x86FloatArgumentRegs
+ftArgRegs ft = (Some <$> take (fnNIntArgs ft) x86ArgumentRegs)
+            ++ (Some <$> take (fnNFloatArgs ft) x86FloatArgumentRegs)
 
 ftIntRetRegs :: FunctionType -> [X86Reg (BVType 64)]
 ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs

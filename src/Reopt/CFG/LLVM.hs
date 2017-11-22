@@ -46,6 +46,7 @@ import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
+import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
@@ -53,7 +54,6 @@ import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 import           Data.Macaw.X86.X86Reg
 
-import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FnRep
 
 ------------------------------------------------------------------------
@@ -275,12 +275,6 @@ mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
         inputArgs :: [L.Typed L.Ident]
         inputArgs = zipWith mkInputReg (functionTypeArgTypes ft) [0..]
 
-        fltCnt = fnNFloatArgs ft
-        fltStmts = fltStmt <$> [0..fltCnt-1]
-        fltStmt :: Int -> L.Stmt
-        fltStmt i = L.Result (fltbvArg i) (L.Conv L.BitCast arg (L.iT 128)) []
-          where arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
-
         -- Block to generate
         blk = L.BasicBlock { L.bbLabel = Just (L.Named (L.Ident "init"))
                            , L.bbStmts = fltStmts ++ [L.Effect (L.Jump lbl) []]
@@ -294,6 +288,13 @@ mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
 
         postInitArgs :: V.Vector (L.Typed L.Value)
         postInitArgs = intArgs V.++ fltbvArgs
+
+        fltStmts = fltStmt <$> [0..fnNFloatArgs ft-1]
+          where fltStmt :: Int -> L.Stmt
+                fltStmt i = L.Result (fltbvArg i) (L.Conv L.BitCast arg (L.iT 128)) []
+                  where arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
+
+
 
 failBlock :: L.BasicBlock
 failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)

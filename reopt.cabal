@@ -47,10 +47,7 @@ library
     Reopt
     Reopt.Analysis.Domains.DiffEquations
     Reopt.BasicBlock.Extract
---    Reopt.BasicBlock.FunctionCFG
-    Reopt.CFG.BlockLabel
     Reopt.CFG.FnRep
-    Reopt.CFG.FunctionArgs
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery

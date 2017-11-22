@@ -19,7 +19,7 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
-  ( Reopt.CFG.RegisterUse.AddrToFunctionTypeMap
+  ( Reopt.CFG.RegisterUse.AddrToX86FunctionTypeMap
   , recoverFunction
   ) where
 
@@ -45,8 +45,8 @@ import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.Architecture.Syscall
 import           Data.Macaw.CFG
+import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Memory
@@ -55,9 +55,9 @@ import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (XMMType)
+import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
 
-import           Reopt.CFG.BlockLabel
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
@@ -91,11 +91,11 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                              -- ^ This maps registers to the associated value
                              -- at the start of the block after any stack allocations have
                              -- been performed.
-                           , rsSyscallPersonality  :: !(SyscallPersonality X86_64)
+                           , rsSyscallPersonality  :: !SyscallPersonality
                              -- ^ System call personality
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
                            , rsCurrentFunctionType :: !FunctionType
-                           , rsFunctionArgs        :: !AddrToFunctionTypeMap
+                           , rsFunctionArgs        :: !AddrToX86FunctionTypeMap
                            }
 
 rsNextAssignId :: Simple Lens (RecoverState ids) FnAssignId
@@ -240,7 +240,7 @@ recoverValue' s v = do
         let seg = msegSegment addr_ref
         case () of
           _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-            , Just ft <- Map.lookup addr (rsFunctionArgs s) -> do
+            , Just ft <- Map.lookup addr_ref (rsFunctionArgs s) -> do
                 Right $! FnFunctionEntryValue ft addr_ref
 
           _ | Map.member addr_ref (interpState^.parsedBlocks) -> do
@@ -716,8 +716,8 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
 
 -- | Recover the function at a given address.
 recoverFunction :: forall ids
-                .  SyscallPersonality X86_64
-                -> AddrToFunctionTypeMap
+                .  SyscallPersonality
+                -> AddrToX86FunctionTypeMap
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
                 -> Either String Function
@@ -725,12 +725,14 @@ recoverFunction sysp fArgs mem fInfo = do
 
   let a = discoveredFunAddr fInfo
   let blockPreds = funBlockPreds fInfo
-  let (usedAssigns, blockRegs)
-        = registerUse sysp fArgs fInfo blockPreds
 
   let cft = fromMaybe
               (debug DFunRecover ("Missing type for " ++ show a) ftMaximumFunctionType) $
-              Map.lookup (relativeSegmentAddr a) fArgs
+              Map.lookup a fArgs
+
+  let (usedAssigns, blockRegs)
+        = registerUse mem sysp fArgs fInfo cft blockPreds
+
 
   let insReg i (Some r) = MapF.insert r (FnRegValue (FnRegArg r i))
   let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)

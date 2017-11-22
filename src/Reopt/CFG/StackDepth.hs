@@ -29,13 +29,13 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.CFG
+import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg
 
-import           Reopt.CFG.BlockLabel
 
 data StackDepthOffset arch ids
    = Pos (BVValue arch ids (ArchAddrWidth arch))
