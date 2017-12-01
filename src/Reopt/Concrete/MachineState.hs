@@ -31,6 +31,7 @@ import           Data.Macaw.Types
 
 import           Data.Macaw.X86.Monad (Primitive, Segment)
 import qualified Data.Macaw.X86.X86Reg as X
+import           Flexdis86.Segment
 
 import           Reopt.Concrete.BitVector (BitVector, BV, bitVector, nat, unBitVector)
 import qualified Reopt.Concrete.BitVector as B

@@ -218,6 +218,7 @@ natReprToLLVMType = L.PrimType . L.Integer . fromIntegral . natValue
 typeToLLVMType :: TypeRepr tp -> L.Type
 typeToLLVMType BoolTypeRepr   = L.PrimType (L.Integer 1)
 typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
+typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
 
 functionFloatType :: L.Type
 functionFloatType = L.Vector 2 (L.PrimType $ L.FloatType L.Double)
@@ -791,10 +792,7 @@ appToLLVM' app = do
     BVShl _sz x y -> binop shl  x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    Eq x y ->
-      case typeRepr x of
-        BoolTypeRepr -> binop (icmpop L.Ieq) x y
-        BVTypeRepr _ -> binop (icmpop L.Ieq) x y
+    Eq x y ->  binop (icmpop L.Ieq) x y
     PopCount w v  -> do
       v' <- mkLLVMValue v
       let wv = natValue w
