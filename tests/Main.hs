@@ -3,12 +3,12 @@ module Main ( main ) where
 import System.FilePath.Glob ( namesMatching )
 import qualified Test.Tasty as T
 
-import qualified ElfX64Linux as T
+import qualified ReoptTests as T
 
 main :: IO ()
 main = do
-  x64AsmTests <- namesMatching "tests/x64/*.s.expected"
+  x64AsmTests <- namesMatching "tests/x64/*.exe"
   T.defaultMain $ T.testGroup "ReoptTests" [
-    T.elfX64LinuxTests x64AsmTests
+    T.reoptTests x64AsmTests
     ]
 

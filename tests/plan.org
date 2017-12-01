@@ -1,0 +1,28 @@
+* Initial research
+
+** basic blocks
+*** Functions
+**** getElfArchInfo (Main)
+     Takes an ELF object and returns an ArchitectureInfo object. Don't worry about
+     the Some, that just replaces the architecture type parameter with the width of
+     that same architecture (the ArchitectureInfo contained therein has all the
+     needed information, and the particular architecture gets hidden).
+**** elfClassInstances (Data.ElfEdit.Types)
+     Takes an ElfClass w, an ElfWidthConstraints w => a, and satisfies the
+     constraints, producing an a.
+**** withArchConstraints
+     A field of ArchitectureInfo, provides the architecture constraints to any
+     computation that needs it.
+**** mkFinalCFGWithSyms
+     Create a discovery state and a symbol-address map from an ELF file, the
+     corresponding memory object, ArchitectureInfo, and DiscoveryOptions.
+
+* Implement first test
+** Reduce current tests to single dummy
+** plan
+   1) Stub out separate HelloWorld test module, with HelloWorld/ directory containing
+      all the test executables and such.
+   2) Incorporate this test module into the top level Main.hs
+   3) Test should read in executable, create Elf and Memory objects for it, run
+      mkFinalCFGWithSyms, basically do everything in the performReopt case for block
+      discovery. 

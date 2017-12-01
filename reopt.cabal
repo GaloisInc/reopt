@@ -217,7 +217,7 @@ test-suite reopt-tests
   default-language: Haskell2010
   ghc-options: -Wall
   main-is: Main.hs
-  other-modules: ElfX64Linux
+  other-modules: ReoptTests
   hs-source-dirs: tests
   build-depends:
     base,
