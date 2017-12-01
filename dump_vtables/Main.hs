@@ -52,7 +52,7 @@ readNTBSFromAddr :: Elf 64 -> Word64 -> B.ByteString
 readNTBSFromAddr e ptr = B.takeWhile (/=0) $ readElfAddr e ptr 100
 
 -- | Read a specified number of bytes from an elf section at a specific
--- address. 
+-- address.
 readElfSection :: ElfSection Word64 -> Word64 -> Word64 -> B.ByteString
 readElfSection section addr size =
   B.take (fromIntegral size) (B.drop adjustedAddr (elfSectionData section))
