@@ -48,7 +48,7 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.Domains.DiffEquations
-    Reopt.BasicBlock.Extract
+--    Reopt.BasicBlock.Extract
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
@@ -56,10 +56,10 @@ library
     Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth
     Reopt.Concrete.BitVector
-    Reopt.Concrete.Semantics
-    Reopt.Concrete.MachineState
     Reopt.Interface
-    Reopt.Reified.Semantics
+--    Reopt.Concrete.Semantics
+--    Reopt.Concrete.MachineState
+--    Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
     Reopt.Utils.Hex
@@ -119,6 +119,7 @@ executable reopt
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
+                    {-
 executable reopt_test
   build-depends:
     base >= 4,
@@ -169,6 +170,7 @@ executable ConcreteDumpInstr
 
   hs-source-dirs: utils
   main-is: ConcreteDumpInstr.hs
+           -}
 
 executable LLVMDumpInstr
   build-depends:

@@ -18,6 +18,7 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
 import           Data.ElfEdit
+import qualified Data.ElfEdit as Elf
 import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
@@ -118,10 +119,10 @@ data Action
    = DumpDisassembly -- ^ Print out disassembler output only.
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowFn String   -- ^ Print a specific function
-   | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
-   | ShowLLVM String -- ^ Write out the LLVM into the argument path
    | ShowFunctions   -- ^ Print out generated functions
-   | ShowGaps        -- ^ Print out gaps in discovered blocks
+--   | ShowCFGAI       -- ^ Print out control-flow microcode + abs domain
+--   | ShowLLVM String -- ^ Write out the LLVM into the argument path
+--   | ShowGaps        -- ^ Print out gaps in discovered blocks
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
    | Relink          -- ^ Link an existing binary and new code together.
@@ -129,26 +130,30 @@ data Action
   deriving (Show)
 
 -- | Command line arguments.
-data Args = Args { _reoptAction  :: !Action
-                 , _programPath  :: !FilePath
-                 , _argsLoadStyle    :: !LoadStyle
-                 , _debugKeys    :: [DebugClass]
-                 , _newobjPath   :: !FilePath
-                 , _redirPath    :: !FilePath
-                 , _outputPath   :: !FilePath
-                 , _gasPath      :: !FilePath
-                 , _llvmVersion  :: !LLVMVersion
-                   -- ^ Version to use when printing LLVM.
-                 , _llcPath      :: !FilePath
-                 , _optPath      :: !FilePath
-                 , _optLevel     :: !Int
-                 , _llvmLinkPath :: !FilePath
-                 , _libreoptPath :: !(Maybe FilePath)
-                 , _notransAddrs :: !(Set String)
-                   -- ^ Set of function entry points that we ignore for translation.
-                 , _discOpts :: !DiscoveryOptions
-                   -- ^ Options affecting discovery
-                 }
+data Args
+   = Args { _reoptAction  :: !Action
+          , _programPath  :: !FilePath
+          , _argsLoadStyle    :: !LoadStyle
+          , _argsForceAbsolute :: !Bool
+            -- ^ If true, indicates shared libraries are loaded with absoluate
+            -- addresses.
+          , _debugKeys    :: [DebugClass]
+          , _newobjPath   :: !FilePath
+          , _redirPath    :: !FilePath
+          , _outputPath   :: !FilePath
+          , _gasPath      :: !FilePath
+          , _llvmVersion  :: !LLVMVersion
+            -- ^ Version to use when printing LLVM.
+          , _llcPath      :: !FilePath
+          , _optPath      :: !FilePath
+          , _optLevel     :: !Int
+          , _llvmLinkPath :: !FilePath
+          , _libreoptPath :: !(Maybe FilePath)
+          , _notransAddrs :: !(Set String)
+            -- ^ Set of function entry points that we ignore for translation.
+          , _discOpts :: !DiscoveryOptions
+            -- ^ Options affecting discovery
+          }
 
 -- | Action to perform when running
 reoptAction :: Simple Lens Args Action
@@ -158,9 +163,15 @@ reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
+
 -- | Whether to load file by segment or sections
 argsLoadStyle :: Simple Lens Args LoadStyle
 argsLoadStyle = lens _argsLoadStyle (\s v -> s { _argsLoadStyle = v })
+
+-- | If true, indicates shared libraries are loaded with absoluate
+-- addresses.
+argsForceAbsolute :: Simple Lens Args Bool
+argsForceAbsolute = lens _argsForceAbsolute (\s v -> s { _argsForceAbsolute = v })
 
 -- | Which debug keys (if any) to output
 debugKeys :: Simple Lens Args [DebugClass]
@@ -219,6 +230,7 @@ defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
                    , _programPath = ""
                    , _argsLoadStyle = LoadBySegment
+                   , _argsForceAbsolute = False
                    , _debugKeys = []
                    , _newobjPath = ""
                    , _redirPath  = ""
@@ -234,17 +246,22 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _discOpts     = defaultDiscoveryOptions
                    }
 
-loadOpt :: Args -> LoadOptions
-loadOpt args =  LoadOptions { loadStyle = args^.argsLoadStyle
-                            , includeBSS = False
-                            }
+isRelocatable :: Elf w -> Bool
+isRelocatable e = any (Elf.hasSegmentType Elf.PT_DYNAMIC) (Elf.elfSegments e)
+
+loadOpt :: Args -> Elf w -> LoadOptions
+loadOpt args e =  LoadOptions { loadRegionIndex =
+                                  if isRelocatable e && not (args^.argsForceAbsolute) then 1 else 0
+                              , loadStyle = args^.argsLoadStyle
+                              , includeBSS = False
+                              }
 
 showCFG :: Args -> IO ()
 showCFG args = do
   Some e <- readSomeElf (args^.programPath)
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  (_,mem) <- either fail return $ memoryForElf (loadOpt args) e
+  (_,mem) <- either fail return $ memoryForElf (loadOpt args e) e
   (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
   print $ ppDiscoveryStateBlocks disc_info
 
@@ -253,7 +270,7 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (ainfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) e
+  (secMap, mem) <- either fail return $ memoryForElf (loadOpt args e) e
   (s,_) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
@@ -265,7 +282,7 @@ showFn args functionName = do
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   withArchConstraints ainfo $ do
-  (secMap,mem) <- either fail return $ memoryForElf (loadOpt args) e
+  (secMap,mem) <- either fail return $ memoryForElf (loadOpt args e) e
   addr <-
     case resolveSymAddr mem (elfSymAddrMap secMap e) functionName of
       Left nm -> fail $ "Could not resolve " ++ nm
@@ -300,6 +317,7 @@ showFnFlag = flagReq [ "show-fn" ] upd "FUNCTION" help
   where upd s old = Right $ old & reoptAction .~ ShowFn s
         help = "Print out a specific recovered function."
 
+{-
 cfgAIFlag :: Flag Args
 cfgAIFlag = flagNone [ "ai", "a" ] upd help
   where upd  = reoptAction .~ ShowCFGAI
@@ -309,6 +327,7 @@ llvmFlag :: Flag Args
 llvmFlag = flagReq [ "llvm", "l" ] upd "DIR" help
   where upd s old = Right $ old & reoptAction .~ ShowLLVM s
         help = "Write out generated LLVM."
+-}
 
 llvmVersionFlag :: Flag Args
 llvmVersionFlag = flagReq [ "llvm-version" ] upd "VERSION" help
@@ -330,10 +349,12 @@ funFlag = flagNone [ "functions", "f" ] upd help
   where upd  = reoptAction .~ ShowFunctions
         help = "Print out functions after stack and argument recovery."
 
+{-
 gapFlag :: Flag Args
 gapFlag = flagNone [ "gap", "g" ] upd help
   where upd  = reoptAction .~ ShowGaps
         help = "Print out gaps in the recovered control flow graph of executable."
+-}
 
 relinkFlag :: Flag Args
 relinkFlag = flagNone [ "relink" ] upd help
@@ -349,6 +370,11 @@ sectionFlag :: Flag Args
 sectionFlag = flagNone [ "load-sections" ] upd help
   where upd  = argsLoadStyle .~ LoadBySection
         help = "Load the Elf file using section information."
+
+forceAbsoluteFlag :: Flag Args
+forceAbsoluteFlag = flagNone [ "force-absolute" ] upd help
+  where upd  = argsForceAbsolute .~ True
+        help = "Force reopt to use absolute addresses for shared libraries."
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -458,13 +484,14 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         flags = [ disassembleFlag
                 , cfgFlag
                 , showFnFlag
-                , cfgAIFlag
-                , llvmFlag
+--                , cfgAIFlag
+--                , llvmFlag
                 , llvmVersionFlag
                 , funFlag
-                , gapFlag
+--                , gapFlag
                 , segmentFlag
                 , sectionFlag
+                , forceAbsoluteFlag
                 , debugFlag
                 , relinkFlag
                 , newobjFlag
@@ -787,7 +814,7 @@ performReopt args =
     -- Get original binary
     Some orig_binary <- readSomeElf (args^.programPath)
 
-    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args) orig_binary
+    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args orig_binary) orig_binary
     let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
@@ -898,6 +925,7 @@ main' = do
     ShowCFG -> showCFG args
     ShowFn addr -> showFn args addr
 
+{-
     ShowCFGAI -> do
       error $ "ShowCFGAI not supported"
 --      e <- readElf64 (args^.programPath)
@@ -905,12 +933,13 @@ main' = do
     ShowLLVM _path -> do
 --      showLLVM args path
       error $ "ShowLLVM not supported"
-    ShowFunctions -> do
-      showFunctions args
     ShowGaps -> do
 --      e <- readElf64 (args^.programPath)
 --      showGaps (args^.loadStyle) e
       error $ "ShowGaps not supported"
+-}
+    ShowFunctions -> do
+      showFunctions args
     ShowHelp ->
       print $ helpText [] HelpFormatDefault arguments
     ShowVersion ->

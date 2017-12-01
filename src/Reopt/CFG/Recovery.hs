@@ -65,17 +65,6 @@ import           Reopt.CFG.StackDepth
 import Debug.Trace
 
 ------------------------------------------------------------------------
--- Utilities
-
-hasWidth :: HasRepr f TypeRepr => f tp -> NatRepr w -> Maybe (tp :~: BVType w)
-hasWidth f w =
-  case typeRepr f of
-    BoolTypeRepr -> Nothing
-    BVTypeRepr n -> do
-      Refl <- testEquality n w
-      pure Refl
-
-------------------------------------------------------------------------
 -- RecoverState
 
 data RecoverState ids = RS { rsMemory        :: !(Memory 64)
@@ -234,7 +223,8 @@ recoverValue' s v = do
   let curRegs     = s^.rsCurRegs
   let assignMap   = s^.rsAssignMap
   case v of
-    _ | Just Refl <- hasWidth v (memWidth mem)
+    _ | BVTypeRepr n <- typeRepr v
+      , Just Refl <- testEquality n (memWidth mem)
       , Just addr <- asLiteralAddr v
       , Just addr_ref <- asSegmentOff mem addr -> do
         let seg = msegSegment addr_ref

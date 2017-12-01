@@ -1,15 +1,27 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes #-}
+
 module ReoptTests (
   reoptTests
   ) where
 
+
+import qualified Control.Monad.Catch as C
+import qualified Data.ByteString as B
+import           Data.Typeable ( Typeable )
 import Test.Tasty as T
 import Test.Tasty.HUnit as T
+
+import qualified Data.ElfEdit as E
+import qualified Data.Macaw.Memory as MM
+import qualified Data.Macaw.Memory.ElfLoader as MM
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ withElf fp 
+mkTest fp = T.testCase fp $ putStrLn "dummy test"
 
 withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 withELF fp k = do
@@ -28,7 +40,9 @@ withMemory :: forall w m a
            -> (MM.Memory w -> m a)
            -> m a
 withMemory e k = do
-  let opt = MM.LoadOptions { MM.loadStyle = MM.LoadBySegment, MM.includeBSS = True }
+  let opt = MM.LoadOptions { MM.loadRegionIndex = 0
+                           , MM.loadStyle = MM.LoadBySegment
+                           , MM.includeBSS = True }
   case MM.memoryForElf opt e of
     Left err -> C.throwM (MemoryLoadError err)
     Right (_sim, mem) -> k mem
