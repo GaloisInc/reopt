@@ -1,5 +1,4 @@
 * Initial research
-
 ** basic blocks
 *** Functions
 **** getElfArchInfo (Main)
@@ -18,11 +17,10 @@
      corresponding memory object, ArchitectureInfo, and DiscoveryOptions.
 
 * Implement first test
-** Reduce current tests to single dummy
-** plan
-   1) Stub out separate HelloWorld test module, with HelloWorld/ directory containing
-      all the test executables and such.
-   2) Incorporate this test module into the top level Main.hs
-   3) Test should read in executable, create Elf and Memory objects for it, run
-      mkFinalCFGWithSyms, basically do everything in the performReopt case for block
-      discovery. 
+** Stub out separate HelloWorld test module
+   with HelloWorld/ directory containing all the test executables and such.
+** Factor out code in Main_reopt.hs that we need for test runs
+   under Reopt.Interface
+** Test should read in executable, create Elf and Memory objects for it, run
+   mkFinalCFGWithSyms, basically do everything in the performReopt case for block
+   discovery. 
