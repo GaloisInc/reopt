@@ -34,8 +34,15 @@ mkTest fp = T.testCase fp $ withELF fp $ \e -> do
     withArchConstraints ainfo $ do
       (disc_info,_) <- mkFinalCFGWithSyms ainfo mem e discOpts
       writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
-  where loadOpts = undefined
-        discOpts = undefined
+  where loadOpts = MM.LoadOptions { MM.loadRegionIndex = 0
+                                  , MM.loadStyle       = MM.LoadBySegment
+                                  , MM.includeBSS      = False
+                                  }
+        discOpts = DiscoveryOptions { logAtAnalyzeFunction   = True
+                                    , logAtAnalyzeBlock      = True
+                                    , exploreFunctionSymbols = True
+                                    , exploreCodeAddrInMem   = True
+                                    }
 
 withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 withELF fp k = do
