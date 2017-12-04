@@ -21,6 +21,6 @@
    with HelloWorld/ directory containing all the test executables and such.
 ** Factor out code in Main_reopt.hs that we need for test runs
    under Reopt.Interface
-** Test should read in executable, create Elf and Memory objects for it, run
-   mkFinalCFGWithSyms, basically do everything in the performReopt case for block
-   discovery. 
+** Test should
+   read in executable, create Elf and Memory objects for it, run mkFinalCFGWithSyms,
+   basically do everything in the performReopt case for block discovery.
