@@ -35,7 +35,9 @@ library
     macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,
+    pretty,
     random,
+    unix,
     utf8-string,
     text,
     transformers,
@@ -225,6 +227,7 @@ test-suite reopt-tests
   other-modules: ReoptTests
   hs-source-dirs: tests
   build-depends:
+    ansi-wl-pprint,
     base,
     bytestring,
     containers,
@@ -236,6 +239,7 @@ test-suite reopt-tests
     macaw-base,
     macaw-x86,
     parameterized-utils,
+    pretty,
     reopt,
     temporary,
     tasty,

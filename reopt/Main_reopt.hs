@@ -11,7 +11,6 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Trans.Except
-import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as BSL
@@ -23,15 +22,11 @@ import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (maybeToList)
-import           Data.Monoid
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
-import           Data.Tuple (swap)
 import           Data.Type.Equality
-import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
@@ -44,10 +39,7 @@ import           System.FilePath
 import           System.IO
 import           System.IO.Error
 import           System.IO.Temp
-import           System.Posix.Files
 import qualified Text.LLVM as L
-import qualified Text.LLVM.PP as LPP
-import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import           Paths_reopt (getLibDir, version)
@@ -82,34 +74,6 @@ unintercalate punct str = reverse $ go [] "" str
     go acc thisAcc str'@(x : xs)
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
-
-------------------------------------------------------------------------
--- LLVMVersion
-
--- | Version of LLVM to generate
-data LLVMVersion
-   = LLVM35
-   | LLVM36
-   | LLVM37
-   | LLVM38
-
--- | Convert a string to the LLVM version identifier.
-asLLVMVersion :: String -> Maybe LLVMVersion
-asLLVMVersion s =
-  case s of
-    "llvm35" -> Just LLVM35
-    "llvm36" -> Just LLVM36
-    "llvm37" -> Just LLVM37
-    "llvm38" -> Just LLVM38
-    _ -> Nothing
-
-
--- | Pretty print an LLVM module using the format expected by the given LLVM version.
-ppLLVM :: LLVMVersion -> L.Module -> HPJ.Doc
-ppLLVM LLVM35 m = LPP.ppLLVM35 $ LPP.ppModule m
-ppLLVM LLVM36 m = LPP.ppLLVM36 $ LPP.ppModule m
-ppLLVM LLVM37 m = LPP.ppLLVM37 $ LPP.ppModule m
-ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
 
 ------------------------------------------------------------------------
 -- Args
@@ -538,71 +502,6 @@ getCommandLineArgs = do
       exitFailure
     Right v -> return v
 
-------------------------------------------------------------------------
--- Pattern match on stack pointer possibilities.
-
--- | Extract list containing symbol names and addresses.
-elfAddrSymEntries :: SectionIndexMap w
-                     -- ^ Map from elf section indices to base address for section
-                     -- and section in Elf file
-                  -> Elf w
-                  -> [(BS.ByteString, MemSegmentOff w)]
-elfAddrSymEntries m binary =
-  elfClassInstances (elfClass binary) $
-  addrWidthClass (elfAddrWidth (elfClass binary)) $
-  [ (steName entry, val)
-  | tbl <- elfSymtab binary
-  , entry <- V.toList $ elfSymbolTableEntries tbl
-    -- Check this is a function or NOTYPE
-  , steType entry `elem` [ STT_FUNC, STT_NOTYPE ]
-    -- Compute address of symbol from section
-  , let idx = steIndex entry
-  , idx /= SHN_UNDEF && idx <= SHN_LORESERVE
-    -- Get base index of section
-  , (base, sec) <- maybeToList $ Map.lookup idx m
-  , let diff = toInteger (steValue entry) - toInteger (elfSectionAddr sec)
-  , val <- maybeToList $ incSegmentOff base diff
-  ]
-
--- | Create map from symbol names to address.
-elfSymAddrMap  :: SectionIndexMap w
-                  -- ^ Map from elf section indices to base address for section
-                  -- and section in Elf file
-               -> Elf w
-               -> Map BS.ByteString (MemSegmentOff w)
-elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
-
--- | Create map from addresses to symbol name.
---
--- Used for naming functions.
-elfAddrSymMap :: SectionIndexMap w
-              -> Elf w
-              -> LLVM.AddrSymMap w
-elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
-
--- | Merge a binary and new object
-mergeAndWrite :: FilePath
-              -> Elf 64 -- ^ Original binary
-              -> Elf 64 -- ^ New object
-              -> SymbolNameToAddrMap Word64 -- ^ Extra rdictions
-              -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
-              -> IO ()
-mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
-  putStrLn $ "Performing final relinking."
-  let (mres, warnings) = mergeObject orig_binary new_obj extra_syms redirs
-  when (hasRelinkWarnings warnings) $ do
-    hPrint stderr (pretty warnings)
-  case mres of
-    Left e -> fail e
-    Right new_binary -> do
-      BSL.writeFile output_path $ renderElf new_binary
-      -- Update the file mode
-      do fs <- getFileStatus output_path
-         let fm = ownerExecuteMode
-               .|. groupExecuteMode
-               .|. otherExecuteMode
-         setFileMode output_path (fileMode fs `unionFileModes` fm)
-
 performRedir :: Args -> IO ()
 performRedir args = do
   -- Get original binary
@@ -629,13 +528,6 @@ performRedir args = do
               Right r -> return r
       mergeAndWrite output_path orig_binary new_obj Map.empty redirs
 
-
-llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
-llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
-  where pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
-        pp (HPJ.Chr c)  b = Builder.charUtf8 c <> b
-        pp (HPJ.Str s)  b = Builder.stringUtf8 s <> b
-        pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
 
 -- | Maps virtual addresses to the phdr at them.
 type ElfSegmentMap w = Map (ElfWordType w) (Phdr w)
@@ -799,9 +691,6 @@ link_with_libreopt obj_dir args arch obj_llvm = do
   mllvm <- runExceptT $
     Ext.run_llvm_link (args^.llvmLinkPath) [ obj_llvm_path, libreopt_path ]
   either (fail . show) return mllvm
-
-writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
-writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
 
 elfIs64Bit :: ElfClass w -> Maybe (w :~: 64)
 elfIs64Bit ELFCLASS32 = Nothing
