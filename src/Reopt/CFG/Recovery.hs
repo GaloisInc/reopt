@@ -207,6 +207,7 @@ valueDependencies = go Set.empty
                   EvalApp app -> go (Set.insert (Some (assignId a)) s) (foldlFC (\prev l -> Some l:prev) r app)
                   SetUndefined{} -> go s r
                   ReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
+                  CondReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
                   EvalArchFn{} -> Left $ "Depends on archfn " ++ show (pretty a)
 
 ------------------------------------------------------------------------
@@ -316,6 +317,11 @@ recoverAssign asgn = do
             pure (FnSetUndefined tp)
           ReadMem addr tp ->
             (`FnReadMem` (typeRepr tp)) <$> recoverValue addr
+          CondReadMem tp cond addr def ->
+            FnCondReadMem (typeRepr tp)
+            <$> recoverValue cond
+            <*> recoverValue addr
+            <*> recoverValue def
           EvalArchFn f _ ->
             FnEvalArchFn <$> traverseFC recoverValue f
       void $ emitAssign (assignId asgn) rhs

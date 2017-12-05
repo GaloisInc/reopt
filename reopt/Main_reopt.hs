@@ -52,10 +52,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import           Paths_reopt (getLibDir, version)
 
-#ifdef SUPPORT_ARM
-import qualified Data.VEX.FFI
-import           Data.Macaw.ARM
-#endif
 
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG

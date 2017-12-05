@@ -670,47 +670,47 @@ carryValue w x =
 
 data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
 
-defaultAsm :: AsmAttrs
-defaultAsm = AsmAttrs { asmSideeffect = False }
+noSideEffect :: AsmAttrs
+noSideEffect = AsmAttrs { asmSideeffect = False }
 
 sideeffect :: AsmAttrs
 sideeffect = AsmAttrs { asmSideeffect = True }
 
-asmFunction :: AsmAttrs -- ^ Asm attrs
-            -> L.Type   -- ^ Return type
-            -> [L.Type] -- ^ Argument types
-            -> String   -- ^ Code
-            -> String   -- ^ Args code
-            -> L.Typed L.Value
-asmFunction attrs res_type arg_types asm_code asm_args =
-  L.Typed { L.typedType  = L.PtrTo (L.FunTy res_type arg_types False)
-          , L.typedValue = L.ValAsm (asmSideeffect attrs) False asm_code asm_args
-          }
+-- | Call some inline assembly
+callAsm :: AsmAttrs -- ^ Asm attrs
+        -> L.Type   -- ^ Return type
+        -> String   -- ^ Code
+        -> String   -- ^ Args code
+        -> [L.Typed L.Value] -- ^ Arguments
+        -> BBLLVM (L.Typed L.Value)
+callAsm attrs resType asmCode asmArgs args = do
+  let argTypes = L.typedType <$> args
+      ftp = L.PtrTo (L.FunTy resType argTypes False)
+      f = L.ValAsm (asmSideeffect attrs) False asmCode asmArgs
+  L.Typed resType <$> evalInstr (L.Call False ftp f args)
 
--- | This is the assembly for a system call on Linux
-syscallAsm :: L.Typed L.Value
-syscallAsm =
-  asmFunction sideeffect
+-- | Generate a system call on Linux
+-- TODO: Check registers also work for FreeBSD
+emitSyscall :: L.Typed L.Value
+            -> [L.Typed L.Value] -- ^ Arguments
+            -> BBLLVM (L.Typed L.Value)
+emitSyscall callNum args =
+  callAsm sideeffect
               (L.iT 64)
-              (replicate 7 (L.iT 64))
               "syscall"
               -- This string marks rax as an output.
               -- It also marks rax, rdi, rsi, rdx, rcx, r8, r9 as inputs.
               -- It indicates that the function can make arbitrary
               -- modifications to memory, flags, rcx, and r11.
               "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
+              (callNum : padUndef (L.iT 64) 6 args)
 
 -- | Generate the LLVM for checking parity of an 8-bit value is even.
 evenParity :: L.Typed L.Value -> BBLLVM (L.Typed L.Value)
 evenParity v = do
   -- This code calls takes the disjunction of the value with itself to update flags,
   -- then pushes 16-bit flags register to the stack, then pops it to a register.
-  let asm_code = "orb $1, $1\0Apushfw\0Apopw $0\0A"
-  let asm_args = "=r,r"
-  let arg_types = [L.iT 8]
-  let res_type = L.iT 16
-  -- Call function
-  res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v]
+  res <- callAsm noSideEffect (L.iT 16) "orb $1, $1\0Apushfw\0Apopw $0\0A" "=r,r" [v]
   -- Check parity flag
   parity_val <- band res (L.ValInteger 4)
   -- Check result is nonzero
@@ -798,11 +798,7 @@ appToLLVM' app = do
       let wv = natValue w
       when (wv `notElem` [16, 32, 64]) $ do
         fail $ "Only support popcount of 16, 32, or 64 bits"
-      let asm_code = "popcnt $0, $1"
-      let asm_args = "=r,r"
-      let res_type = L.iT (fromInteger wv)
-      let arg_types = [res_type]
-      call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [v']
+      callAsm noSideEffect (L.iT (fromInteger wv)) "popcnt $0, $1" "=r,r" [v']
 
     ReverseBytes{} -> unimplementedInstr' typ "ReverseBytes"
     -- FIXME: do something more efficient?
@@ -824,16 +820,6 @@ appToLLVM' app = do
       let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
-
-    FPIsQNaN frep v -> do
-      let isQNaN = intrinsic ("reopt.isQNaN." ++ show (pretty frep)) (L.iT 1) [typ]
-      v' <- mkLLVMValue v
-      call isQNaN [v']
-
-    FPIsSNaN frep v -> do
-      let isSNaN = intrinsic ("reopt.isSNaN." ++ show (pretty frep)) (L.iT 1) [typ]
-      v' <- mkLLVMValue v
-      call isSNaN [v']
 
     FPAdd frep x y -> fpbinop (arithop L.FAdd) frep x y
     FPAddRoundedUp _frep _x _y -> unimplementedInstr' typ "FPAddRoundedUp"
@@ -876,6 +862,12 @@ appToLLVM' app = do
       convop L.FpToSi flt_v (natReprToLLVMType sz)
     _ -> unimplementedInstr' typ (show (ppApp pretty app))
 
+-- | Evaluate a function value as a pointer
+llvmAsPtr :: FnValue X86_64 (BVType 64) -> L.Type -> BBLLVM (L.Typed L.Value)
+llvmAsPtr ptr tp = do
+  llvmPtrAsBV  <- mkLLVMValue ptr
+  convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
+
 archFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 archFnToLLVM f =
   case f of
@@ -915,13 +907,12 @@ archFnToLLVM f =
      let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
      llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
      arithop L.SRem llvm_n llvm_d_ext
-   RepnzScas sz val buf cnt -> do
+   RepnzScas sz val base cnt -> do
+     -- Value to search for.
      llvm_val <- mkLLVMValue val
-     -- Make value for buffer
-     llvm_buf <- mkLLVMValue buf
-     let bit_count = 8 * repValSizeByteCount sz
-     let w = L.iT (fromInteger bit_count)
-     llvm_ptr <- convop L.IntToPtr llvm_buf (L.PtrTo w)
+     -- Convert buffer to LLVM
+     let w = L.iT (8 * fromInteger (repValSizeByteCount sz))
+     llvm_ptr <- llvmAsPtr base w
      -- Get count
      llvm_cnt <- mkLLVMValue cnt
      let reg = case sz of
@@ -929,12 +920,12 @@ archFnToLLVM f =
                  WordRepVal  -> "%ax"
                  DWordRepVal -> "%eax"
                  QWordRepVal -> "%rax"
-     let asm_code = "repnz scas %es:(%rdi)," ++ reg
-     let asm_args = "={cx},={di},{ax},{cx},1,~{flags}"
-     let arg_types = [w, L.iT 64, L.PtrTo w]
-     let res_type  = L.Struct [L.iT 64, L.PtrTo w]
      -- Call asm
-     res <- call (asmFunction defaultAsm res_type arg_types asm_code asm_args) [llvm_val, llvm_cnt, llvm_ptr]
+     res <- callAsm noSideEffect
+                    (L.Struct [L.iT 64, L.PtrTo w])
+                    ("repnz scas %es:(%rdi)," ++ reg)
+                    "={cx},={di},{ax},{cx},1,~{flags}"
+                    [llvm_val, llvm_cnt, llvm_ptr]
      -- Get first result
      extractValue res 0
    _ -> do
@@ -943,21 +934,40 @@ archFnToLLVM f =
 rhsToLLVM :: FnAssignRhs X86_64 tp -> BBLLVM (L.Typed L.Value)
 rhsToLLVM rhs = do
   case rhs of
-   FnEvalApp app ->
-     appToLLVM' app
-   FnSetUndefined tp -> do
-     let typ = typeToLLVMType tp
-     return (L.Typed typ L.ValUndef)
-   FnReadMem ptr typ -> do
-     p <- mkLLVMValue ptr
-     let llvm_typ = typeToLLVMType typ
-     p' <- convop L.IntToPtr p (L.PtrTo llvm_typ)
-     fmap (L.Typed llvm_typ) $ evalInstr (L.Load p' Nothing Nothing)
-   FnAlloca v -> do
-     v' <- mkLLVMValue v
-     alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
-     convop L.PtrToInt alloc_ptr (L.iT 64)
-   FnEvalArchFn f -> archFnToLLVM f
+    FnEvalApp app ->
+      appToLLVM' app
+    FnSetUndefined tp -> do
+      let typ = typeToLLVMType tp
+      return (L.Typed typ L.ValUndef)
+    FnReadMem ptr typ -> do
+      let llvm_typ = typeToLLVMType typ
+      p <- llvmAsPtr ptr llvm_typ
+      fmap (L.Typed llvm_typ) $ evalInstr (L.Load p Nothing Nothing)
+    FnCondReadMem _type _cond _addr _default -> do
+      error $ "LLVM backend does not yet support conditional read memory."
+    FnAlloca v -> do
+      v' <- mkLLVMValue v
+      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
+      convop L.PtrToInt alloc_ptr (L.iT 64)
+    FnEvalArchFn f -> archFnToLLVM f
+
+archStmtToLLVM :: X86Stmt (FnValue X86_64) -> BBLLVM ()
+archStmtToLLVM stmt =
+  case stmt of
+    MemCopy bytesPerCopy nValues src dest direction -> do
+      nValues' <- mkLLVMValue nValues
+      src'     <- mkLLVMValue src
+      dest'    <- mkLLVMValue dest
+      direction' <- mkLLVMValue direction
+      call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
+    MemSet count v ptr dir -> do
+      let typ = typeToLLVMType (typeRepr v)
+      ptr'   <- llvmAsPtr ptr typ
+      v'     <- mkLLVMValue v
+      count' <- mkLLVMValue count
+      df'    <- mkLLVMValue dir
+      call_ (iMemSet typ) [ptr', v', count', df']
+    _ -> error $ "LLVM generation: Unsupported architecture statement."
 
 stmtToLLVM :: FnStmt -> BBLLVM ()
 stmtToLLVM stmt = do
@@ -968,27 +978,13 @@ stmtToLLVM stmt = do
      llvm_rhs <- rhsToLLVM rhs
      setAssignIdValue lhs lbl llvm_rhs
    FnWriteMem ptr v -> do
-     llvm_ptr_as_bv  <- mkLLVMValue ptr
      llvm_v <- mkLLVMValue v
+     llvm_ptr <- llvmAsPtr ptr (L.typedType llvm_v)
      -- Cast LLVM point to appropriate type
-     llvm_ptr <- convop L.IntToPtr llvm_ptr_as_bv (L.PtrTo (L.typedType llvm_v))
      effect $ L.Store llvm_v llvm_ptr Nothing
    FnComment _ -> return ()
-   FnArchStmt (MemCopy bytesPerCopy nValues src dest direction) -> do
-     nValues' <- mkLLVMValue nValues
-     src'     <- mkLLVMValue src
-     dest'    <- mkLLVMValue dest
-     direction' <- mkLLVMValue direction
-     call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
-   FnArchStmt (MemSet count v ptr dir) -> do
-     count' <- mkLLVMValue count
-     v'     <- mkLLVMValue v
-     ptr'   <- mkLLVMValue ptr
-     df'    <- mkLLVMValue dir
-     let typ = typeToLLVMType $ typeRepr v
-     ptr_ptr <- convop L.IntToPtr ptr' (L.PtrTo typ)
-     call_ (iMemSet typ) [ptr_ptr, v', count', df']
-   FnArchStmt _ -> error $ "LLVM generation: Unsupported architecture statement."
+   FnArchStmt astmt -> do
+     archStmtToLLVM astmt
 
 makeRet' :: [ L.Typed L.Value ] -> [ L.Typed L.Value ] -> BBLLVM ()
 makeRet' grets frets = do
@@ -1082,8 +1078,7 @@ termStmtToLLVM tm =
        llvm_args  <- mapM mkLLVMValue args
        case pname of
          "Linux" -> do
-           let allArgs = llvm_call_num : padUndef (L.iT 64) 6 llvm_args
-           rvar <- call syscallAsm allArgs
+           rvar <- emitSyscall llvm_call_num llvm_args
            case rets of
              [Some fr] -> do
                -- Assign all return variables to the extracted result
@@ -1092,8 +1087,7 @@ termStmtToLLVM tm =
                  jump (blockName next_lbl)
              _ -> error "Unexpected return values"
          "FreeBSD" -> do
-           let allArgs = llvm_call_num : padUndef (L.iT 64) 6 llvm_args
-           rvar <- call syscallAsm allArgs
+           rvar <- emitSyscall llvm_call_num llvm_args
            case rets of
              [Some fr] -> do
                -- Assign all return variables to the extracted result

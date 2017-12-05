@@ -46,6 +46,11 @@ import           Reopt.CFG.FnRep (Function(..), FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.Recovery
 
+#ifdef SUPPORT_ARM
+import qualified Data.VEX.FFI
+import           Data.Macaw.ARM
+#endif
+
 ------------------------------------------------------------------------
 -- X86-specific functions
 
@@ -74,6 +79,7 @@ x86DemandInfo sysp =
                  , functionRetRegs = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
                  , calleeSavedRegs = x86CalleeSavedRegs
                  , computeArchTermStmtEffects = summarizeX86TermStmt sysp
+                 , demandInfoCtx = x86DemandContext
                  }
 
 ------------------------------------------------------------------------

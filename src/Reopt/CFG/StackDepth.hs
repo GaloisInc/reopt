@@ -177,7 +177,7 @@ valueHasSP v0 =
      Initial r      -> testEquality r sp_reg /= Nothing
      AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
   where
-    goAssignRHS :: forall tp. AssignRhs X86_64 ids tp -> Bool
+    goAssignRHS :: forall tp. AssignRhs X86_64 (Value X86_64 ids) tp -> Bool
     goAssignRHS v =
       case v of
         EvalApp a      -> getAny $ foldMapFC (Any . valueHasSP) a

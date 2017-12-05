@@ -177,6 +177,11 @@ data FnAssignRhs (arch :: *) (tp :: Type) where
   FnReadMem :: !(FnValue arch (BVType (ArchAddrWidth arch)))
             -> !(TypeRepr tp)
             -> FnAssignRhs arch tp
+  FnCondReadMem :: !(TypeRepr tp)
+                -> !(FnValue arch BoolType)
+                -> !(FnValue arch (BVType (ArchAddrWidth arch)))
+                -> !(FnValue arch tp)
+                -> FnAssignRhs arch tp
   FnEvalApp :: !(App (FnValue arch) tp)
             -> FnAssignRhs arch tp
   FnAlloca :: !(FnValue arch (BVType (ArchAddrWidth arch)))
@@ -248,17 +253,17 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
 
 ppFnAssignRhs :: FnArchConstraints arch
-              => (forall u . FnValue arch u -> Doc)
-              -> FnAssignRhs arch tp
+              => FnAssignRhs arch tp
               -> Doc
-ppFnAssignRhs _  (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w))
-ppFnAssignRhs _  (FnReadMem loc _)  = text "*" <> pretty loc
-ppFnAssignRhs pp (FnEvalApp a) = ppApp pp a
-ppFnAssignRhs pp (FnAlloca sz) = sexpr "alloca" [pp sz]
-ppFnAssignRhs pp (FnEvalArchFn f) = runIdentity (ppArchFn (pure . pp) f)
+ppFnAssignRhs (FnSetUndefined w) = text "undef ::" <+> brackets (text (show w))
+ppFnAssignRhs (FnReadMem a _)  = sexpr "Read" [ pretty a]
+ppFnAssignRhs (FnCondReadMem _ c a d)  = sexpr "cond_read" [ pretty c, pretty a, pretty d ]
+ppFnAssignRhs (FnEvalApp a) = ppApp pretty a
+ppFnAssignRhs (FnAlloca sz) = sexpr "alloca" [pretty sz]
+ppFnAssignRhs (FnEvalArchFn f) = runIdentity (ppArchFn (pure . pretty) f)
 
 instance FnArchConstraints arch => Pretty (FnAssignRhs arch tp) where
-  pretty = ppFnAssignRhs pretty
+  pretty = ppFnAssignRhs
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
   pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
@@ -280,6 +285,7 @@ instance FnArchConstraints arch => HasRepr (FnAssignRhs arch) TypeRepr where
     case rhs of
       FnSetUndefined tp -> tp
       FnReadMem _ tp -> tp
+      FnCondReadMem tp _ _ _ -> tp
       FnEvalApp a    -> typeRepr a
       FnAlloca _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnEvalArchFn f -> typeRepr f
@@ -302,6 +308,7 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
 instance FoldFnValue (FnAssignRhs X86_64 tp) where
   foldFnValue _ s (FnSetUndefined {}) = s
   foldFnValue f s (FnReadMem loc _)   = f s loc
+  foldFnValue f s (FnCondReadMem _ c a d)   = f (f (f s c) a) d
   foldFnValue f s (FnEvalApp a)       = foldlFC f s a
   foldFnValue f s (FnAlloca sz)       = s `f` sz
   foldFnValue f s (FnEvalArchFn fn) = foldlFC f s fn

@@ -57,12 +57,15 @@ library
     Reopt.CFG.StackDepth
     Reopt.Concrete.BitVector
     Reopt.Interface
---    Reopt.Concrete.Semantics
---    Reopt.Concrete.MachineState
---    Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
     Reopt.Utils.Hex
+
+  if flag(enable-arm)
+    cpp-options: -DSUPPORT_ARM
+    build-depends:
+      hvex,
+      macaw-arm-vex
 
   ghc-options: -Wall -Werror
   ghc-options: -fno-warn-unticked-promoted-constructors
@@ -105,12 +108,6 @@ executable reopt
   other-modules:
     Reopt.ExternalTools
     Paths_reopt
-
-  if flag(enable-arm)
-    cpp-options: -DSUPPORT_ARM
-    build-depends:
-      hvex,
-      macaw-arm-vex
 
   if flag(enable-hpc)
     ghc-options: -fhpc

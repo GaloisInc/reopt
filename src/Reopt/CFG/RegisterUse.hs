@@ -42,6 +42,7 @@ import           Data.Macaw.X86.SyscallInfo (SyscallPersonality, spTypeInfo, spR
 import           Data.Macaw.X86.X86Reg
   ( X86Reg, pattern DF, x86StateRegs, x86ResultRegs, x86FloatResultRegs, x86CalleeSavedRegs
   )
+import           Data.Macaw.X86 (x86DemandContext)
 
 import           Reopt.CFG.FnRep ( FunctionType(..)
                                  , ftMaximumFunctionType
@@ -259,8 +260,9 @@ summarizeBlock mem interp_state addr stmts = do
   typeMap <- gets $ functionArgs
   cur_ft <- gets currentFunctionType
   let termValues = termStmtValues mem sysp typeMap cur_ft (stmtsTerm stmts)
+  let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
-            (concatMap stmtDemandedValues (stmtsNonterm stmts) ++ termValues)
+            (concatMap (stmtDemandedValues ctx) (stmtsNonterm stmts) ++ termValues)
 
   case stmtsTerm stmts of
           ParsedCall proc_state _ -> do
