@@ -219,7 +219,7 @@ goStmt init_sp (AssignStmt (Assignment _ (ReadMem addr _))) =
   addDepth $ parseStackPointer init_sp addr
 goStmt init_sp (WriteMem addr _ v) = do
   addDepth $ parseStackPointer init_sp addr
-  case testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64)) of
+  case testEquality (typeRepr v) (knownRepr :: TypeRepr (BVType 64)) of
     Just Refl -> addDepth $ parseStackPointer init_sp v
     _ -> return ()
 goStmt _ _ = return ()

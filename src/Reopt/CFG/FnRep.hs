@@ -300,7 +300,7 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
-      FnFunctionEntryValue {} -> knownType
+      FnFunctionEntryValue {} -> knownRepr
       FnBlockValue{} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnRegArg r _ -> typeRepr r
       FnGlobalDataAddr _ -> archWidthTypeRepr (Proxy :: Proxy arch)
