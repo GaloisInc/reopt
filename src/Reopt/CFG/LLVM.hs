@@ -33,7 +33,6 @@ import qualified Data.ByteString.Char8 as BSC
 import           Data.Int
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
@@ -239,18 +238,6 @@ functionTypeToLLVM ft = L.ptrT (L.FunTy funReturnType (functionTypeArgTypes ft) 
 funReturnType :: L.Type
 funReturnType = L.Struct $ (typeToLLVMType . typeRepr <$> x86ResultRegs)
                             ++ (replicate (length x86FloatResultRegs) functionFloatType)
-
-floatReprToLLVMFloatType :: FloatInfoRepr flt -> L.FloatType
-floatReprToLLVMFloatType fir =
-  case fir of
-    HalfFloatRepr         -> L.Half
-    SingleFloatRepr       -> L.Float
-    DoubleFloatRepr       -> L.Double
-    QuadFloatRepr         -> L.Fp128
-    X86_80FloatRepr       -> L.X86_fp80
-
-floatReprToLLVMType :: FloatInfoRepr flt -> L.Type
-floatReprToLLVMType = L.PrimType  . L.FloatType . floatReprToLLVMFloatType
 
 -- | This is a special label used for e.g. table lookup defaults (where we should never reach).
 -- For now it will just loop.
@@ -548,9 +535,11 @@ convop :: L.ConvOp -> L.Typed L.Value -> L.Type -> BBLLVM (L.Typed L.Value)
 convop f val tp = do
   L.Typed tp <$> evalInstr (L.Conv f val tp)
 
+{-
 fcmp :: L.FCmpOp -> L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value)
 fcmp f val s = do
   L.Typed (L.typedType val) <$> evalInstr (L.FCmp f val s)
+-}
 
 -- | Compare two LLVM values using the given operator.
 icmpop :: L.ICmpOp -> L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value)
@@ -623,18 +612,6 @@ call_ (valueOf -> f) args =
         Loc.error $ "Unexpected arguments to " ++ show f
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
-
-mkFloatLLVMValue :: Loc.HasCallStack
-                 => FnValue X86_64 (BVType (8 * TypeBytes flt))
-                 -> FloatInfoRepr flt
-                 -> BBLLVM (L.Typed L.Value)
-mkFloatLLVMValue val frepr = do
-  s <- get
-  let llvm_val = valueToLLVM (funContext s) (bbBlock s) (funAssignValMap (funState s)) val
-  case L.typedType llvm_val of
-    L.PrimType (L.FloatType tp) | tp == floatReprToLLVMFloatType frepr -> pure $ llvm_val
-    L.PrimType (L.Integer _) -> bitcast llvm_val (floatReprToLLVMType frepr)
-    _ -> Loc.error $ "internal: mkFloatLLVMValue given unsupported type."
 
 -- | Handle an intrinsic overflows
 intrinsicOverflows' :: (1 <= w)
@@ -727,6 +704,7 @@ appToLLVM' app = do
         x' <- mkLLVMValue x
         y' <- mkLLVMValue y
         f x' (L.typedValue y')
+{-
     -- A Value that expects to FP bitvectors
   let fpbinop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
               -> FloatInfoRepr flt
@@ -738,6 +716,7 @@ appToLLVM' app = do
         flt_y <- mkFloatLLVMValue y frepr
         flt_z <- f flt_x (L.typedValue flt_y)
         bitcast flt_z (natReprToLLVMType (floatInfoBits frepr))
+-}
   case app of
     Mux _tp c t f -> do
       l_c <- mkLLVMValue c
@@ -820,47 +799,7 @@ appToLLVM' app = do
       let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
-
-    FPAdd frep x y -> fpbinop (arithop L.FAdd) frep x y
-    FPAddRoundedUp _frep _x _y -> unimplementedInstr' typ "FPAddRoundedUp"
-    FPSub frep x y -> fpbinop (arithop L.FSub) frep x y
-    FPSubRoundedUp _frep _x _y -> unimplementedInstr' typ "FPSubRoundedUp"
-    FPMul frep x y -> fpbinop (arithop L.FMul) frep x y
-    FPMulRoundedUp _frep _x _y -> unimplementedInstr' typ "FPMulRoundedUp"
-    FPDiv frep x y -> fpbinop (arithop L.FDiv) frep x y
-    -- FIXME: do we want ordered or unordered here?  The differ in how
-    -- they treat QNaN
-    FPLt  frep x y -> fpbinop (fcmp L.Fult) frep x y
-    -- FIXME: similarly, we probably want oeq here (maybe?)
-    FPEq  frep x y -> fpbinop (fcmp L.Foeq) frep x y
-    FPCvt from_rep x to_rep -> do
-      fp_x <- mkFloatLLVMValue x from_rep
-      let to_typ    = floatReprToLLVMType to_rep
-          from_bits = natValue $ floatInfoBits from_rep
-          to_bits   = natValue $ floatInfoBits to_rep
-      case compare from_bits to_bits of
-        LT -> do
-          fp_z <- convop L.FpExt fp_x to_typ
-          bitcast fp_z (natReprToLLVMType (floatInfoBits to_rep))
-        EQ -> do
-          when (isNothing (MapF.testEquality from_rep to_rep)) $ do
-            Loc.error $ "Incompatible floating point conversion "
-                    ++ show from_rep ++ " and " ++ show to_rep
-          bitcast fp_x (natReprToLLVMType (floatInfoBits to_rep))
-        GT -> do
-          fp_z <- convop L.FpTrunc fp_x to_typ
-          bitcast fp_z (natReprToLLVMType (floatInfoBits to_rep))
-    -- FIXME
-    FPCvtRoundsUp _from_rep _x _to_rep -> unimplementedInstr' typ "FPCvtRoundsUp"
-    FPFromBV v frepr -> do
-      v' <- mkLLVMValue v
-      flt_r <- convop L.SiToFp v' (floatReprToLLVMType frepr)
-      bitcast flt_r (natReprToLLVMType (floatInfoBits frepr))
-    -- FIXME: side-conditions here
-    TruncFPToSignedBV frepr v sz -> do
-      flt_v <- mkFloatLLVMValue v frepr
-      convop L.FpToSi flt_v (natReprToLLVMType sz)
-    _ -> unimplementedInstr' typ (show (ppApp pretty app))
+    TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
 
 -- | Evaluate a function value as a pointer
 llvmAsPtr :: FnValue X86_64 (BVType 64) -> L.Type -> BBLLVM (L.Typed L.Value)
