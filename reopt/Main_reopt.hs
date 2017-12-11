@@ -18,12 +18,11 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
 import           Data.ElfEdit
-import qualified Data.ElfEdit as Elf
 import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (maybeToList)
+import           Data.Maybe
 import           Data.Monoid
 import           Data.Parameterized.Some
 import           Data.Set (Set)
@@ -129,10 +128,6 @@ data Action
 data Args
    = Args { _reoptAction  :: !Action
           , _programPath  :: !FilePath
-          , _argsLoadStyle    :: !LoadStyle
-          , _argsForceAbsolute :: !Bool
-            -- ^ If true, indicates shared libraries are loaded with absoluate
-            -- addresses.
           , _debugKeys    :: [DebugClass]
           , _newobjPath   :: !FilePath
           , _redirPath    :: !FilePath
@@ -158,16 +153,6 @@ reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 -- | Path for main executable
 programPath :: Simple Lens Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
-
-
--- | Whether to load file by segment or sections
-argsLoadStyle :: Simple Lens Args LoadStyle
-argsLoadStyle = lens _argsLoadStyle (\s v -> s { _argsLoadStyle = v })
-
--- | If true, indicates shared libraries are loaded with absoluate
--- addresses.
-argsForceAbsolute :: Simple Lens Args Bool
-argsForceAbsolute = lens _argsForceAbsolute (\s v -> s { _argsForceAbsolute = v })
 
 -- | Which debug keys (if any) to output
 debugKeys :: Simple Lens Args [DebugClass]
@@ -225,8 +210,6 @@ discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
                    , _programPath = ""
-                   , _argsLoadStyle = LoadBySegment
-                   , _argsForceAbsolute = False
                    , _debugKeys = []
                    , _newobjPath = ""
                    , _redirPath  = ""
@@ -242,23 +225,12 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _discOpts     = defaultDiscoveryOptions
                    }
 
-isRelocatable :: Elf w -> Bool
-isRelocatable e = any (Elf.hasSegmentType Elf.PT_DYNAMIC) (Elf.elfSegments e)
-
-loadOpt :: Args -> Elf w -> LoadOptions
-loadOpt args e =  LoadOptions { loadRegionIndex =
-                                  if isRelocatable e && not (args^.argsForceAbsolute) then 1 else 0
-                              , loadStyle = args^.argsLoadStyle
-                              , includeBSS = False
-                              }
-
 showCFG :: Args -> IO ()
 showCFG args = do
   Some e <- readSomeElf (args^.programPath)
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  (_,mem) <- either fail return $ memoryForElf (loadOpt args e) e
-  (disc_info, _) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
+  (_,_,disc_info, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
   print $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
@@ -266,8 +238,7 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (ainfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, mem) <- either fail return $ memoryForElf (loadOpt args e) e
-  (s,_) <- mkFinalCFGWithSyms ainfo mem e (args^.discOpts)
+  (secMap, _, s, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
   fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
@@ -278,14 +249,21 @@ showFn args functionName = do
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   withArchConstraints ainfo $ do
-  (secMap,mem) <- either fail return $ memoryForElf (loadOpt args e) e
+  let disOpt = args^.discOpts
+  let loadOpt =
+        LoadOptions { loadRegionIndex =
+                        if isRelocatable e then 1 else 0
+                    , loadStyle = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
+                    , includeBSS = False
+                    }
+  (secMap,mem) <- either fail return $ memoryForElf loadOpt e
   addr <-
     case resolveSymAddr mem (elfSymAddrMap secMap e) functionName of
       Left nm -> fail $ "Could not resolve " ++ nm
       Right a -> pure a
 
   -- Get meap from addresses to symbol names
-  sym_map <- getSymbolMap mem e
+  sym_map <- getSymbolMap mem secMap e
 
 
   when (logAtAnalyzeFunction (args^.discOpts)) $ do
@@ -359,18 +337,13 @@ relinkFlag = flagNone [ "relink" ] upd help
 
 segmentFlag :: Flag Args
 segmentFlag = flagNone [ "load-segments" ] upd help
-  where upd  = argsLoadStyle .~ LoadBySegment
+  where upd = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySegment }
         help = "Load the Elf file using segment information (default)."
 
 sectionFlag :: Flag Args
 sectionFlag = flagNone [ "load-sections" ] upd help
-  where upd  = argsLoadStyle .~ LoadBySection
+  where upd  = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySection }
         help = "Load the Elf file using section information."
-
-forceAbsoluteFlag :: Flag Args
-forceAbsoluteFlag = flagNone [ "force-absolute" ] upd help
-  where upd  = argsForceAbsolute .~ True
-        help = "Force reopt to use absolute addresses for shared libraries."
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -487,7 +460,6 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
 --                , gapFlag
                 , segmentFlag
                 , sectionFlag
-                , forceAbsoluteFlag
                 , debugFlag
                 , relinkFlag
                 , newobjFlag
@@ -810,8 +782,6 @@ performReopt args =
     -- Get original binary
     Some orig_binary <- readSomeElf (args^.programPath)
 
-    (secMap, mem) <- either fail return $ memoryForElf (loadOpt args orig_binary) orig_binary
-    let addrSymMap = elfAddrSymMap secMap orig_binary
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
 
@@ -828,29 +798,35 @@ performReopt args =
         exitFailure
       ".blocks" -> do
         SomeArch ainfo <- getElfArchInfo orig_binary
-        elfClassInstances (elfClass orig_binary) $ do
-        withArchConstraints ainfo $ do
-        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
+        (_, _, disc_info,_) <-
+          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
         writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
       ".fns" -> do
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, _) <- getX86ElfArchInfo orig_binary
-        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
+
+        (secMap, _, disc_info,_) <-
+          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
+
+        (secMap, _, disc_info,_) <-
+          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
+        let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
+        (secMap, _, disc_info,_) <-
+          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
         fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
+        let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
@@ -864,11 +840,12 @@ performReopt args =
       _ -> do
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-        (disc_info,_) <- mkFinalCFGWithSyms ainfo mem orig_binary (args^.discOpts)
+        (secMap, _, disc_info,_) <-
+          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
         fns <- getFns sysp symAddrMap notrans disc_info
-
+        let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
         llvm <- link_with_libreopt obj_dir args arch obj_llvm
