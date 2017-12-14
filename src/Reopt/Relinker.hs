@@ -93,7 +93,7 @@ writeBS mv base bs = do
 write32_lsb :: SMV.MVector s Word8 -> Word64 -> Word32 -> ST s ()
 write32_lsb v a c = do
   -- Assert there are at least
-  assert (a <= -4) $ do
+  assert (a <= maxBound-3) $ do
   let i = fromIntegral a
   SMV.write v i     $ fromIntegral c
   SMV.write v (i+1) $ fromIntegral (c `shiftR`  8)
