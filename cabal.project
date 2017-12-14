@@ -4,4 +4,6 @@ packages: .,
           deps/dwarf,
           deps/elf-edit,
           deps/flexdis86,
+          deps/llvm-pretty,
+          deps/llvm-pretty-bc-parser,
           deps/parameterized-utils

@@ -13,3 +13,9 @@
 [submodule "deps/flexdis86"]
 	path = deps/flexdis86
 	url = https://github.com/GaloisInc/flexdis86.git
+[submodule "deps/llvm-pretty"]
+	path = deps/llvm-pretty
+	url = https://github.com/elliottt/llvm-pretty.git
+[submodule "deps/llvm-pretty-bc-parser"]
+	path = deps/llvm-pretty-bc-parser
+	url = https://github.com/GaloisInc/llvm-pretty-bc-parser.git
