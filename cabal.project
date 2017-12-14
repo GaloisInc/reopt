@@ -1,0 +1,7 @@
+packages: .,
+          deps/macaw/x86,
+          deps/macaw/base,
+          deps/dwarf,
+          deps/elf-edit,
+          deps/flexdis86,
+          deps/parameterized-utils
