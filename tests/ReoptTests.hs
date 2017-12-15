@@ -12,9 +12,12 @@ import qualified Data.ByteString as B
 import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
-import Test.Tasty as T
-import Test.Tasty.HUnit as T
+import           System.IO.Temp (withSystemTempDirectory)
+import qualified Test.Tasty as T
+import qualified Test.Tasty.HUnit as T
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
+
+import Paths_reopt
 
 import qualified Data.ElfEdit as E
 import           Data.Macaw.Discovery
@@ -28,23 +31,31 @@ reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ withELF fp $ \e -> do
+mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." $ \obj_dir -> do
   (secMap, mem) <- either fail return $ MM.memoryForElf loadOpts e
   (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
+  let obj_path    = replaceFileName fp (takeBaseName fp ++ ".o")
   let addrSymMap  = elfAddrSymMap secMap e
 
   (disc_info,_) <- mkFinalCFGWithSyms ainfo mem e discOpts
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
-  fns <- getFns sysp (elfSymAddrMap secMap e) Set.empty disc_info
+  fns <- getFns (const $ return ()) sysp (elfSymAddrMap secMap e) Set.empty disc_info
   writeFile fns_path $ show (vcat (pretty <$> fns))
 
   let llvmVer = LLVM38
   let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
   writeFileBuilder llvm_path obj_llvm
+
+  arch <- targetArch (E.elfOSABI e)
+  libreopt_path <- (</> arch </> "libreopt.bc") <$> getLibDir
+  let llvm_link_path = "llvm-link"
+  llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
+  return ()
+  -- compile_llvm_to_obj args arch llvm output_path
 
   where loadOpts = MM.LoadOptions { MM.loadRegionIndex = 0
                                   , MM.loadStyle       = MM.LoadBySegment

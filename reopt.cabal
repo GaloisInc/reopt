@@ -23,6 +23,7 @@ library
     bytestring,
     containers,
     data-binary-ieee754,
+    directory,
     elf-edit >= 0.28,
     filepath,
     fingertree,
@@ -36,6 +37,7 @@ library
     mtl,
     parameterized-utils >= 0.1.6,
     pretty,
+    process,
     random,
     unix,
     utf8-string,
@@ -58,6 +60,7 @@ library
     Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth
     Reopt.Concrete.BitVector
+    Reopt.ExternalTools
     Reopt.Interface
 --    Reopt.Concrete.Semantics
 --    Reopt.Concrete.MachineState
@@ -105,7 +108,6 @@ executable reopt
 
 
   other-modules:
-    Reopt.ExternalTools
     Paths_reopt
 
   if flag(enable-arm)

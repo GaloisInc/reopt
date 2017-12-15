@@ -4,6 +4,8 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
+
 
 module Reopt.Interface where
 
@@ -11,6 +13,7 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.ST
+import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
@@ -18,6 +21,7 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
 import           Data.ElfEdit
+import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (catMaybes, maybeToList)
@@ -27,12 +31,14 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Tuple (swap)
+import           Data.Type.Equality
 import qualified Data.Vector as V
 import           Data.Word
 import           GHC.IO (ioToST, stToIO)
 import           Numeric (readHex)
+import           System.Directory (doesFileExist)
 import           System.Exit (exitFailure)
--- import           System.FilePath
+import           System.FilePath
 import           System.IO
 import           System.IO.Error
 import           System.Posix.Files
@@ -40,6 +46,8 @@ import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 import qualified Text.PrettyPrint.HughesPJ as HPJ
+
+-- import           Paths_reopt (getLibDir, version)
 
 import           Data.Macaw.Analysis.FunctionArgs
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
@@ -57,6 +65,7 @@ import           Reopt.CFG.FnRep (Function(..), FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery
+import qualified Reopt.ExternalTools as Ext
 import           Reopt.Relinker
 
 ------------------------------------------------------------------------
@@ -354,7 +363,9 @@ inferFunctionTypeFromDemands dm =
 
 -- | Try to recover function information from the information
 -- recovered during code discovery.
-getFns :: SyscallPersonality
+getFns :: (String -> IO ())
+          -- ^ logging function
+       -> SyscallPersonality
        -> Map BS.ByteString (MemSegmentOff 64)
           -- ^ Maps symbol names to addresses
        -> Set String
@@ -362,14 +373,13 @@ getFns :: SyscallPersonality
        -> DiscoveryState X86_64
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
-getFns sysp symMap excludedNames info = do
-
+getFns logger sysp symMap excludedNames info = do
   let mem = memory info
   -- Compute which functions to compute by looking at the binary
   let nms = Set.toList excludedNames
   let (bad, excludedAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> nms
   when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
+    logger $ "Could not resolve symbols: " ++ unwords bad
 
   let excludeSet = Set.fromList excludedAddrs
   -- Check that the address of the function is not one that we are excluding.
@@ -389,12 +399,13 @@ getFns sysp symMap excludedNames info = do
       _ | checkFunction finfo -> do
             case recoverFunction sysp fArgs mem finfo of
               Left msg -> do
-                hPutStrLn stderr $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
+                logger $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
                 pure Nothing
               Right fn -> do
                 pure (Just fn)
         | otherwise -> do
-            hPutStrLn stderr $ "Invalid function at " ++ show entry
+            -- FIXME
+            logger $ "Invalid function at " ++ show entry
             pure Nothing
 
 llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
@@ -406,6 +417,80 @@ llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
 
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
+
+--------------------------------------------------------------------------------
+-- Redirections
+
+-- | This creates a code redirection or returns the address as failing.
+addrRedirection :: ControlFlowTargetSet 64
+                -> LLVM.AddrSymMap 64
+                -> ElfSegmentMap 64
+                -> Function
+                -> Either (MemSegmentOff 64) (CodeRedirection Word64)
+addrRedirection tgts addrSymMap m f = do
+  let a = fnAddr f
+  let w = case msegAddr a of
+            Just absAddr -> fromIntegral absAddr
+            Nothing -> error "Redirection does not yet support relocatable binaries."
+  case lookupElfOffset m w of
+    Nothing -> Left (fnAddr f)
+    Just (idx,off) -> Right redir
+      where L.Symbol sym_name = LLVM.functionName addrSymMap (fnAddr f)
+            redir = CodeRedirection { redirSourcePhdr   = idx
+                                    , redirSourceOffset = off
+                                    , redirSourceSize   = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
+                                    , redirTarget       = UTF8.fromString sym_name
+                                    }
+
+
+targetArch :: ElfOSABI -> IO String
+targetArch abi =
+  case abi of
+    ELFOSABI_SYSV    -> return "x86_64-unknown-linux-elf"
+    ELFOSABI_NETBSD  -> return "x86_64-unknown-freebsd-elf"
+    ELFOSABI_FREEBSD -> return "x86_64-unknown-linux-elf"
+    _ -> fail $ "Do not support architecture " ++ show abi ++ "."
+
+-- | Compile a bytestring containing LLVM assembly or bitcode into an object.
+compile_llvm_to_obj :: Int -> FilePath -> FilePath -> FilePath -> String -> BS.ByteString -> FilePath -> IO ()
+compile_llvm_to_obj optLevel optPath llcPath gasPath arch llvm obj_path = do
+  -- Run llvm on resulting binary
+  putStrLn "Compiling new code"
+  mres <- runExceptT $ do
+    -- Skip optimization if optLevel == 0
+    llvm_opt <-
+      if optLevel /= 0 then do
+        Ext.run_opt optPath optLevel llvm
+       else
+        pure llvm
+    let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
+                                  , Ext.llc_opt_level = optLevel
+                                  }
+    asm <- Ext.run_llc llcPath llc_opts llvm_opt
+    Ext.run_gas gasPath asm obj_path
+
+  case mres of
+    Left f -> fail $ show f
+    Right () -> return ()
+
+-- | Link the object and libreopt path together and return new object.
+link_with_libreopt :: FilePath -- ^ Path to directory to write temporary files to.
+                   -> FilePath -- ^ Path to libreopt.
+                   -> FilePath -- ^ LLVM link path.
+--                   -> String -- ^ Name of architecture
+                   -> Builder.Builder -- ^ Object file.
+                   -> IO BS.ByteString
+link_with_libreopt obj_dir libreopt_path link_path obj_llvm = do
+  do exists <- doesFileExist libreopt_path
+     when (not exists) $ do
+       fail $ "Could not find path to libreopt.bc needed to link object; tried " ++ libreopt_path
+
+  let obj_llvm_path = obj_dir </> "obj.ll"
+  writeFileBuilder obj_llvm_path obj_llvm
+
+  mllvm <- runExceptT $
+    Ext.run_llvm_link link_path [ obj_llvm_path, libreopt_path ]
+  either (fail . show) return mllvm
 
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
@@ -471,3 +556,90 @@ mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
                .|. groupExecuteMode
                .|. otherExecuteMode
          setFileMode output_path (fileMode fs `unionFileModes` fm)
+
+--------------------------------------------------------------------------------
+-- ControlFlowTargetMap
+
+-- | A map from all control flow targets in the program to the start address of
+-- functions that may target them.
+--
+-- This is used to compute when it is safe to insert a redirection.  We want to
+-- ensure that adding a redirection will not break unknow
+newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (MemSegmentOff w) [MemSegmentOff w]
+                                      }
+
+-- | Return how many bytes of space there are to write after address without
+-- ovewriting another control flow target.
+lookupControlFlowTargetSpace :: forall w
+                             .  MemWidth w
+                             => MemSegmentOff w
+                             -> ControlFlowTargetSet w
+                             -> MemWord w
+lookupControlFlowTargetSpace addr0 = go 0 addr0 addr0
+  where seg = msegSegment addr0
+        go :: MemWord w -> MemSegmentOff w -> MemSegmentOff w -> ControlFlowTargetSet w -> MemWord w
+        go inc base addr s =
+          case Map.lookupGT addr (cfTargets s) of
+            Just (next,fns)
+              | msegSegment addr == msegSegment next ->
+                let d = msegOffset next - msegOffset addr
+                 in if null (filter (/= base) fns) then
+                      go (inc+d) base next s
+                     else
+                      inc+d
+            _ ->
+              if segmentSize seg >= msegOffset addr then
+                segmentSize seg - msegOffset addr
+               else
+                0
+
+addControlFlowTarget :: ControlFlowTargetSet w
+                     -> MemSegmentOff w
+                     -> MemSegmentOff w -- ^ Function entry point
+                     -> ControlFlowTargetSet w
+addControlFlowTarget m a f = m { cfTargets = Map.insertWith (++) a [f] (cfTargets m) }
+
+addFunctionEntryPoint :: ControlFlowTargetSet w
+                      -> MemSegmentOff w
+                      -> ControlFlowTargetSet w
+addFunctionEntryPoint s a = addControlFlowTarget s a a
+
+
+addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
+                                  -> Some (DiscoveryFunInfo arch)
+                                  -> ControlFlowTargetSet (ArchAddrWidth arch)
+addFunDiscoveryControlFlowTargets m0 (Some f) =
+  foldl' (\m b -> addControlFlowTarget m b (discoveredFunAddr f)) m0 (Map.keys (f^.parsedBlocks))
+
+discoveryControlFlowTargets :: DiscoveryState arch -> ControlFlowTargetSet (ArchAddrWidth arch)
+discoveryControlFlowTargets info =
+  let m0 = CFTS { cfTargets = Map.empty }
+      m = foldl' addFunDiscoveryControlFlowTargets m0 (exploredFunctions info)
+   in foldl' addFunctionEntryPoint m (symbolAddrs (symbolNames info))
+
+elfIs64Bit :: ElfClass w -> Maybe (w :~: 64)
+elfIs64Bit ELFCLASS32 = Nothing
+elfIs64Bit ELFCLASS64 = Just Refl
+
+-- | Maps virtual addresses to the phdr at them.
+type ElfSegmentMap w = Map (ElfWordType w) (Phdr w)
+
+-- | Create an elf segment map from a layout.
+elfSegmentMap :: forall w . ElfLayout w -> ElfSegmentMap w
+elfSegmentMap l = elfClassInstances (elfLayoutClass l) $ foldl' insertElfSegment Map.empty (allPhdrs l)
+  where insertElfSegment ::  Ord (ElfWordType w) => ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
+        insertElfSegment m p
+          | elfSegmentType seg == PT_LOAD = Map.insert a p m
+          | otherwise = m
+          where seg = phdrSegment p
+                a = elfSegmentVirtAddr (phdrSegment p)
+
+-- | Lookup an address in the segment map, returning the index of the phdr
+-- and the offset.
+lookupElfOffset :: ElfSegmentMap 64 -> Word64 -> Maybe (Word16, Word64)
+lookupElfOffset m a =
+  case Map.lookupLE a m of
+    Just (base, phdr) | a < base + phdrFileSize phdr ->
+        Just (elfSegmentIndex seg, a - base)
+      where seg = phdrSegment phdr
+    _ -> Nothing

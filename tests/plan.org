@@ -26,7 +26,7 @@
    basically do everything in the performReopt case for block discovery. Also, it
    should print out all the basic block information to a ".blocks" file.
 * Complete tests
-  ** Blocks (done), Functions (done), LLVM, object file, full reoptimization
+  ** Blocks (done), Functions (done), LLVM (done), object file, full reoptimization
 * get rid of stderr output
 * Make tests fail on any error
 * Debug resulting failures
