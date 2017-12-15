@@ -32,6 +32,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
+import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
@@ -40,7 +41,6 @@ import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
-import           Data.Type.Equality
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
@@ -207,6 +207,7 @@ valueDependencies = go Set.empty
                   EvalApp app -> go (Set.insert (Some (assignId a)) s) (foldlFC (\prev l -> Some l:prev) r app)
                   SetUndefined{} -> go s r
                   ReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
+                  CondReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
                   EvalArchFn{} -> Left $ "Depends on archfn " ++ show (pretty a)
 
 ------------------------------------------------------------------------
@@ -316,6 +317,11 @@ recoverAssign asgn = do
             pure (FnSetUndefined tp)
           ReadMem addr tp ->
             (`FnReadMem` (typeRepr tp)) <$> recoverValue addr
+          CondReadMem tp cond addr def ->
+            FnCondReadMem (typeRepr tp)
+            <$> recoverValue cond
+            <*> recoverValue addr
+            <*> recoverValue def
           EvalArchFn f _ ->
             FnEvalArchFn <$> traverseFC recoverValue f
       void $ emitAssign (assignId asgn) rhs
@@ -556,8 +562,8 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
           _ -> pure ftMaximumFunctionType
 
       -- May not be used (only if called function returns at these types)
-      intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownType :: TypeRepr (BVType 64))
-      floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownType :: TypeRepr XMMType)
+      intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownRepr :: TypeRepr (BVType 64))
+      floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownRepr :: TypeRepr XMMType)
 
       -- Get all registers that the block we return to will expect.
       regs' <-

@@ -177,7 +177,7 @@ valueHasSP v0 =
      Initial r      -> testEquality r sp_reg /= Nothing
      AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
   where
-    goAssignRHS :: forall tp. AssignRhs X86_64 ids tp -> Bool
+    goAssignRHS :: forall tp. AssignRhs X86_64 (Value X86_64 ids) tp -> Bool
     goAssignRHS v =
       case v of
         EvalApp a      -> getAny $ foldMapFC (Any . valueHasSP) a
@@ -219,7 +219,7 @@ goStmt init_sp (AssignStmt (Assignment _ (ReadMem addr _))) =
   addDepth $ parseStackPointer init_sp addr
 goStmt init_sp (WriteMem addr _ v) = do
   addDepth $ parseStackPointer init_sp addr
-  case testEquality (typeRepr v) (knownType :: TypeRepr (BVType 64)) of
+  case testEquality (typeRepr v) (knownRepr :: TypeRepr (BVType 64)) of
     Just Refl -> addDepth $ parseStackPointer init_sp v
     _ -> return ()
 goStmt _ _ = return ()

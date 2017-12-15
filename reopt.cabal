@@ -4,6 +4,8 @@ author: Galois, Inc.
 maintainer: jhendrix@galois.com
 build-type: Simple
 cabal-version: >= 1.9.2
+license:       BSD3
+license-file:  LICENSE
 
 flag enable-hpc
   Description: Collect HPC coverage information.
@@ -52,7 +54,6 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.Domains.DiffEquations
---    Reopt.BasicBlock.Extract
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
@@ -62,12 +63,15 @@ library
     Reopt.Concrete.BitVector
     Reopt.ExternalTools
     Reopt.Interface
---    Reopt.Concrete.Semantics
---    Reopt.Concrete.MachineState
---    Reopt.Reified.Semantics
     Reopt.Relinker
     Reopt.Relinker.Redirection
     Reopt.Utils.Hex
+
+  if flag(enable-arm)
+    cpp-options: -DSUPPORT_ARM
+    build-depends:
+      hvex,
+      macaw-arm-vex
 
   ghc-options: -Wall -Werror
   ghc-options: -fno-warn-unticked-promoted-constructors
@@ -110,116 +114,12 @@ executable reopt
   other-modules:
     Paths_reopt
 
-  if flag(enable-arm)
-    cpp-options: -DSUPPORT_ARM
-    build-depends:
-      hvex,
-      macaw-arm-vex
-
   if flag(enable-hpc)
     ghc-options: -fhpc
 
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
-
-                    {-
-executable reopt_test
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    bv,
-    bytestring,
-    cmdargs,
-    containers,
-    elf-edit,
-    flexdis86,
-    lens,
-    linux-ptrace >= 0.1.2.1,
-    macaw-base,
-    macaw-x86,
-    mtl,
-    parameterized-utils >= 0.1.6,
-    posix-waitpid >= 0.1.0.1,
-    unix,
-    terminal-size,
-    reopt
-
-  hs-source-dirs: reopt_test
-  main-is: Main_reopt.hs
-
-  other-modules:
-    SignalUtils
-    Paths_reopt
-
-  if flag(enable-hpc)
-    ghc-options: -fhpc
-
-  ghc-options: -Wall
-  ghc-options: -fno-warn-unticked-promoted-constructors
-  ghc-prof-options: -O2 -fprof-auto-top
-
-executable ConcreteDumpInstr
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    binary,
-    bytestring,
-    containers,
-    flexdis86,
-    macaw-base,
-    macaw-x86,
-    parameterized-utils,
-    reopt
-
-  hs-source-dirs: utils
-  main-is: ConcreteDumpInstr.hs
-           -}
-
-executable LLVMDumpInstr
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    binary,
-    bytestring,
-    containers,
-    flexdis86,
-    lens,
-    llvm-pretty,
-    macaw-base,
-    macaw-x86,
-    mtl,
-    parameterized-utils,
-    reopt
-
-  hs-source-dirs: utils
-  main-is: LLVMDumpInstr.hs
-
-executable dump_debug_data
-  build-depends:
-    base >= 4,
-    elf-edit,
-    macaw-base,
-    reopt
-  hs-source-dirs: dump_debug_data
-  main-is: Main.hs
-
-executable dump_vtables
-  build-depends:
-    ansi-wl-pprint,
-    base >= 4,
-    bytestring,
-    containers,
-    directory,
-    elf-edit,
-    lens,
-    macaw-base,
-    parameterized-utils,
-    reopt,
-    split,
-    vector
-  hs-source-dirs: dump_vtables
-  main-is: Main.hs
 
 test-suite reopt-tests
   type: exitcode-stdio-1.0

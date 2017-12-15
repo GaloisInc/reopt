@@ -24,7 +24,7 @@ import           Data.ElfEdit
 import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (catMaybes, maybeToList)
+import           Data.Maybe
 import           Data.Monoid
 import           Data.Parameterized.Some
 import           Data.Set (Set)
@@ -68,6 +68,11 @@ import           Reopt.CFG.Recovery
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Relinker
 
+#ifdef SUPPORT_ARM
+import qualified Data.VEX.FFI
+import           Data.Macaw.ARM
+#endif
+
 ------------------------------------------------------------------------
 -- X86-specific functions
 
@@ -96,6 +101,7 @@ x86DemandInfo sysp =
                  , functionRetRegs = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
                  , calleeSavedRegs = x86CalleeSavedRegs
                  , computeArchTermStmtEffects = summarizeX86TermStmt sysp
+                 , demandInfoCtx = x86DemandContext
                  }
 
 ------------------------------------------------------------------------
@@ -131,7 +137,9 @@ ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
 
 -- | Options controlling discovery
 data DiscoveryOptions
-   = DiscoveryOptions { logAtAnalyzeFunction  :: !Bool
+   = DiscoveryOptions { forceMemLoadStyle :: !(Maybe LoadStyle)
+                        -- ^ This describes whether we force a particular load style.
+                      , logAtAnalyzeFunction  :: !Bool
                         -- ^ Print a message each time we apply discovery analysis to
                         -- a new function.
                       , logAtAnalyzeBlock     :: !Bool
@@ -146,7 +154,8 @@ data DiscoveryOptions
 
 defaultDiscoveryOptions :: DiscoveryOptions
 defaultDiscoveryOptions =
-  DiscoveryOptions { logAtAnalyzeFunction = True
+  DiscoveryOptions { forceMemLoadStyle = Nothing
+                   , logAtAnalyzeFunction = True
                    , logAtAnalyzeBlock      = False
                    , exploreFunctionSymbols = True
                    , exploreCodeAddrInMem = False
@@ -184,6 +193,26 @@ resolveFuns disOpt sym_map info = seq info $
       info' <- stToIO $ analyzeFunction (blockLogFn disOpt) addr rsn info
       resolveFuns disOpt sym_map (fst info')
 
+getSymbolMap :: Memory w
+             -> SectionIndexMap w
+             -> Elf w
+             -> IO (SymbolAddrMap w)
+getSymbolMap mem indexMap e = do
+  elfClassInstances (elfClass e) $ do
+  entries <-
+    case elfSymtab e of
+      [] -> pure $ []
+      [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
+      _ -> fail "Elf contains multiple symbol tables."
+  let (unresolved, resolved) =
+        resolvedSegmentedElfFuncSymbols mem indexMap entries
+  forM_ unresolved $ \symbol -> do
+    hPutStrLn stderr $ "Could not resolve " ++ show (steName symbol)
+  -- Check for unresolved symbols
+  case symbolAddrMap (head <$> resolved) of
+    Left msg -> fail msg
+    Right m -> pure m
+
 -- | Return the segment offset of the elf file entry point or fail if undefined.
 getElfEntry :: Monad m => Memory w -> Elf w -> m (MemSegmentOff w)
 getElfEntry mem e =  addrWidthClass (memAddrWidth mem) $ do
@@ -192,49 +221,103 @@ getElfEntry mem e =  addrWidthClass (memAddrWidth mem) $ do
     Nothing -> fail "Could not resolve entry"
     Just v  -> pure v
 
-getSymbolMap :: Monad m => Memory w -> Elf w -> m (SymbolAddrMap w)
-getSymbolMap mem e = do
-  entries <-
-    case elfSymtab e of
-      [] -> pure $ []
-      [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
-      _ -> fail "Elf contains multiple symbol tables."
+isRelocatable :: Elf w -> Bool
+isRelocatable e = any (hasSegmentType PT_DYNAMIC) (elfSegments e)
 
-  let resolved = resolvedSegmentedElfFuncSymbols mem entries
-  -- Check for unresolved symbols
-  case symbolAddrMap (head <$> resolved) of
-    Left msg -> fail msg
-    Right m -> pure m
+-- | Create a discovery state and symbol-address map
+mkInitialCFGWithSyms :: forall arch
+                   .  ArchitectureInfo arch
+                   -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
+                   -> DiscoveryOptions -- ^ Options controlling discovery
+                   -> IO ( SectionIndexMap (ArchAddrWidth arch)
+                         , Memory (ArchAddrWidth arch)
+                         , DiscoveryState arch
+                         , SymbolAddrMap (ArchAddrWidth arch)
+                         )
+mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
+  -- Get meap from addresses to symbol names
+  -- Initialize entry state with entry point if it is an executable/shared library.
+  case elfType e of
+    ET_REL -> do
+      case forceMemLoadStyle disOpt of
+        Just LoadBySegment -> do
+          fail $ "Cannot load object files by segment."
+        _ -> pure ()
+      let loadOpts =
+            LoadOptions { loadRegionIndex = 1
+                        , loadStyle = LoadBySection
+                        , includeBSS = False
+                        }
+      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
+      symMap <- getSymbolMap mem secMap e
+      let initState
+            = emptyDiscoveryState mem symMap ainfo
+      pure (secMap, mem, initState, symMap)
+    ET_EXEC -> do
+      let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
+      let loadOpts =
+            LoadOptions { loadRegionIndex =
+                            if isRelocatable e then 1 else 0
+                        , loadStyle = loadSty
+                        , includeBSS = False
+                        }
+      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
+      symMap <- getSymbolMap mem secMap e
+      entry <- getElfEntry mem e
+      let initState
+            = emptyDiscoveryState mem symMap ainfo
+            & markAddrsAsFunction InitAddr [entry]
+      -- Return
+      pure (secMap, mem, initState, symMap)
+    ET_DYN -> do
+      let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
+      let loadOpts =
+            LoadOptions { loadRegionIndex = 1
+                        , loadStyle = loadSty
+                        , includeBSS = False
+                        }
+      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
+      symMap <- getSymbolMap mem secMap e
+      entry <- getElfEntry mem e
+      let initState
+            = emptyDiscoveryState mem symMap ainfo
+            & markAddrsAsFunction InitAddr [entry]
+      -- Discover functions from arbitrary mem pointers
+      -- Return
+      pure (secMap, mem, initState, symMap)
+    ET_CORE -> do
+      fail $ "Reopt does not support loading core files."
+    tp -> do
+      fail $ "Reopt does not support loading elf files with type " ++ show tp ++ "."
+
 
 -- | Create a discovery state and symbol-address map
 mkFinalCFGWithSyms :: forall arch
                    .  ArchitectureInfo arch
-                   -> Memory (ArchAddrWidth arch) -- ^ Layout in memory of file
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> DiscoveryOptions -- ^ Options controlling discovery
-                   -> IO (DiscoveryState arch, SymbolAddrMap (ArchAddrWidth arch))
-mkFinalCFGWithSyms ainfo mem e disOpt = withArchConstraints ainfo $ do
-  -- Get meap from addresses to symbol names
-  sym_map <- getSymbolMap mem e
-  -- Create initial discovery state
-  entry <- getElfEntry mem e
-  let ds0 = emptyDiscoveryState mem sym_map ainfo
-          & markAddrsAsFunction InitAddr [entry]
+                   -> IO ( SectionIndexMap (ArchAddrWidth arch)
+                         , Memory (ArchAddrWidth arch)
+                         , DiscoveryState arch
+                         , SymbolAddrMap (ArchAddrWidth arch)
+                         )
+mkFinalCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
+  (secMap, mem, initState, symMap) <- mkInitialCFGWithSyms ainfo e disOpt
   -- Add symbol table entries to discovery state if requested
-  let ds1 | exploreFunctionSymbols disOpt =
-              ds0 & markAddrsAsFunction InitAddr (symbolAddrs sym_map)
-          | otherwise = ds0
-  -- Perform discovery
-  ds2 <- resolveFuns disOpt sym_map ds1
-  -- Discover functions from arbitrary mem pointers
-  ds3 <-
+  let postSymState
+        | exploreFunctionSymbols disOpt =
+            initState & markAddrsAsFunction InitAddr (symbolAddrs symMap)
+        | otherwise = initState
+  -- Discover functions
+  postPhase1Discovery <- resolveFuns disOpt symMap postSymState
+  finalState <-
     if exploreCodeAddrInMem disOpt then do
       let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
-      resolveFuns disOpt sym_map $ ds2 & exploreMemPointers mem_contents
+      resolveFuns disOpt symMap $ postPhase1Discovery & exploreMemPointers mem_contents
      else
-      return ds2
-  -- Return
-  pure (ds3, sym_map)
+      return postPhase1Discovery
+  -- Return results
+  pure (secMap, mem, finalState, symMap)
 
 data SomeArchitectureInfo w =
   forall arch
