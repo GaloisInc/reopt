@@ -1,0 +1,21 @@
+[submodule "deps/macaw"]
+	path = deps/macaw
+	url = https://github.com/GaloisInc/macaw.git
+[submodule "deps/parameterized-utils"]
+	path = deps/parameterized-utils
+	url = https://github.com/GaloisInc/parameterized-utils.git
+[submodule "deps/dwarf"]
+	path = deps/dwarf
+	url = https://github.com/GaloisInc/dwarf.git
+[submodule "deps/elf-edit"]
+	path = deps/elf-edit
+	url = https://github.com/GaloisInc/elf-edit.git
+[submodule "deps/flexdis86"]
+	path = deps/flexdis86
+	url = https://github.com/GaloisInc/flexdis86.git
+[submodule "deps/llvm-pretty"]
+	path = deps/llvm-pretty
+	url = https://github.com/elliottt/llvm-pretty.git
+[submodule "deps/llvm-pretty-bc-parser"]
+	path = deps/llvm-pretty-bc-parser
+	url = https://github.com/GaloisInc/llvm-pretty-bc-parser.git

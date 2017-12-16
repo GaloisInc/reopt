@@ -1,0 +1,9 @@
+packages: .,
+          deps/macaw/x86,
+          deps/macaw/base,
+          deps/dwarf,
+          deps/elf-edit,
+          deps/flexdis86,
+          deps/llvm-pretty,
+          deps/llvm-pretty-bc-parser,
+          deps/parameterized-utils
