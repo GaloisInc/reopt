@@ -12,6 +12,7 @@ import qualified Data.ByteString as B
 import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
+import           System.IO (hPutStrLn, stderr)
 import           System.IO.Temp (withSystemTempDirectory)
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -32,18 +33,18 @@ reoptTests = T.testGroup "reopt" . map mkTest
 
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." $ \obj_dir -> do
-  (secMap, mem) <- either fail return $ MM.memoryForElf loadOpts e
+  -- (secMap, mem) <- either fail return $ MM.memoryForElf loadOpts e
   (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
   let obj_path    = replaceFileName fp (takeBaseName fp ++ ".o")
-  let addrSymMap  = elfAddrSymMap secMap e
 
-  (disc_info,_) <- mkFinalCFGWithSyms ainfo mem e discOpts
+  (secMap,_mem,disc_info,_) <- mkFinalCFGWithSyms ainfo e discOpts
+  let addrSymMap  = elfAddrSymMap secMap e
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
-  fns <- getFns (const $ return ()) sysp (elfSymAddrMap secMap e) Set.empty disc_info
+  fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap e) Set.empty disc_info
   writeFile fns_path $ show (vcat (pretty <$> fns))
 
   let llvmVer = LLVM38
@@ -65,6 +66,7 @@ mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." 
                                     , logAtAnalyzeBlock      = False
                                     , exploreFunctionSymbols = False
                                     , exploreCodeAddrInMem   = False
+                                    , forceMemLoadStyle      = Nothing -- Just MM.LoadBySegment
                                     }
 
 withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
