@@ -61,6 +61,10 @@ unintercalate punct str = reverse $ go [] "" str
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
 
+-- | We'll use stderr to log error messages
+logger :: String -> IO ()
+logger = hPutStrLn stderr
+
 ------------------------------------------------------------------------
 -- Args
 
@@ -182,10 +186,10 @@ defaultArgs = Args { _reoptAction = Reopt
 
 showCFG :: Args -> IO ()
 showCFG args = do
-  Some e <- readSomeElf (args^.programPath)
+  Some e <- readSomeElf logger (args^.programPath)
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  (_,_,disc_info, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
+  (_,_,disc_info, _) <- mkFinalCFGWithSyms logger ainfo e (args^.discOpts)
   print $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
@@ -193,14 +197,14 @@ showFunctions args = do
   e <- readElf64 (args^.programPath)
   -- Create memory for elf
   (ainfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, _, s, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
-  fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
-  hPutStr stderr "Got fns"
+  (secMap, _, s, _) <- mkFinalCFGWithSyms logger ainfo e (args^.discOpts)
+  fns <- getFns logger sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
+  logger "Got fns"
   mapM_ (print . pretty) fns
 
 showFn :: Args -> String -> IO ()
 showFn args functionName = do
-  Some e <- readSomeElf (args^.programPath)
+  Some e <- readSomeElf logger (args^.programPath)
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   withArchConstraints ainfo $ do
@@ -218,14 +222,14 @@ showFn args functionName = do
       Right a -> pure a
 
   -- Get meap from addresses to symbol names
-  sym_map <- getSymbolMap mem secMap e
+  sym_map <- getSymbolMap logger mem secMap e
 
 
   when (logAtAnalyzeFunction (args^.discOpts)) $ do
-    hPutStrLn stderr $ "Analyzing function: " ++ ppSymbol addr sym_map
+    logger $ "Analyzing function: " ++ ppSymbol addr sym_map
 
   let ds0 = emptyDiscoveryState mem sym_map ainfo
-  (_, Some fnInfo) <- stToIO $ analyzeFunction (blockLogFn (args^.discOpts)) addr InitAddr ds0
+  (_, Some fnInfo) <- stToIO $ analyzeFunction (blockLogFn logger (args^.discOpts)) addr InitAddr ds0
   print $ pretty fnInfo
 
 ------------------------------------------------------------------------
@@ -457,7 +461,7 @@ getCommandLineArgs = do
   argStrings <- getArgs
   case process arguments argStrings of
     Left msg -> do
-      hPutStrLn stderr msg
+      logger msg
       exitFailure
     Right v -> return v
 
@@ -493,7 +497,7 @@ performReopt :: Args -> IO ()
 performReopt args =
   withSystemTempDirectory "reopt." $ \obj_dir -> do
     -- Get original binary
-    Some orig_binary <- readSomeElf (args^.programPath)
+    Some orig_binary <- readSomeElf logger (args^.programPath)
 
     let output_path = args^.outputPath
     let llvmVer = args^.llvmVersion
@@ -504,7 +508,7 @@ performReopt args =
 
     case takeExtension output_path of
       ".bc" -> do
-        hPutStrLn stderr $
+        logger $
           "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
           "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
@@ -512,22 +516,22 @@ performReopt args =
       ".blocks" -> do
         SomeArch ainfo <- getElfArchInfo orig_binary
         (_, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
+          mkFinalCFGWithSyms logger ainfo orig_binary (args^.discOpts)
         writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
       ".fns" -> do
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, _) <- getX86ElfArchInfo orig_binary
         (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
+          mkFinalCFGWithSyms logger ainfo orig_binary (args^.discOpts)
+        fns <- getFns logger sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
-        hPutStrLn stderr "Generating LLVM"
+        logger "Generating LLVM"
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
         (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
+          mkFinalCFGWithSyms logger ainfo orig_binary (args^.discOpts)
+        fns <- getFns logger sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
         let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         writeFileBuilder output_path obj_llvm
@@ -535,8 +539,8 @@ performReopt args =
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
         (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
+          mkFinalCFGWithSyms logger ainfo orig_binary (args^.discOpts)
+        fns <- getFns logger sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
         let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -546,7 +550,7 @@ performReopt args =
         llvm <- link_with_libreopt obj_dir libreopt_path (args^.llvmLinkPath) obj_llvm
         compile_llvm_to_obj (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.gasPath) arch llvm output_path
       ".s" -> do
-        hPutStrLn stderr $
+        logger $
           "Generating '.s' (LLVM ASCII assembly) is not supported!\n" ++
           "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
           "compile to generate a .s file."
@@ -555,10 +559,10 @@ performReopt args =
         Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
         (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
         (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
+          mkFinalCFGWithSyms logger ainfo orig_binary (args^.discOpts)
         let notrans = args^.notransAddrs
         let symAddrMap = elfSymAddrMap secMap orig_binary
-        fns <- getFns (hPutStrLn stderr) sysp symAddrMap notrans disc_info
+        fns <- getFns logger sysp symAddrMap notrans disc_info
         let addrSymMap = elfAddrSymMap secMap orig_binary
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -572,7 +576,7 @@ performReopt args =
         new_obj <- parseElf64 "new object" =<< BS.readFile obj_path
         putStrLn $ "obj_path: " ++ obj_path
 
-        hPutStrLn stderr "Start merge and write"
+        logger "Start merge and write"
         -- Convert binary to LLVM
         let tgts = discoveryControlFlowTargets disc_info
             (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
@@ -600,10 +604,10 @@ main :: IO ()
 main = main' `catch` h
   where h e
           | isUserError e =
-            hPutStrLn stderr (ioeGetErrorString e)
+            logger (ioeGetErrorString e)
           | otherwise = do
-            hPutStrLn stderr (show e)
-            hPutStrLn stderr (show (ioeGetErrorType e))
+            logger (show e)
+            logger (show (ioeGetErrorType e))
 
 main' :: IO ()
 main' = do

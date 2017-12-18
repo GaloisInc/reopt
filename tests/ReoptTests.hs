@@ -12,7 +12,7 @@ import qualified Data.ByteString as B
 import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
-import           System.IO (hPutStrLn, stderr)
+-- import           System.IO (hPutStrLn, stderr)
 import           System.IO.Temp (withSystemTempDirectory)
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -31,6 +31,9 @@ import qualified Reopt.CFG.LLVM as LLVM
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
+logger :: String -> IO ()
+logger = const (return ())
+
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." $ \obj_dir -> do
   -- (secMap, mem) <- either fail return $ MM.memoryForElf loadOpts e
@@ -40,11 +43,11 @@ mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." 
   let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
   let obj_path    = replaceFileName fp (takeBaseName fp ++ ".o")
 
-  (secMap,_mem,disc_info,_) <- mkFinalCFGWithSyms ainfo e discOpts
+  (secMap,_mem,disc_info,_) <- mkFinalCFGWithSyms logger ainfo e discOpts
   let addrSymMap  = elfAddrSymMap secMap e
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
-  fns <- getFns (hPutStrLn stderr) sysp (elfSymAddrMap secMap e) Set.empty disc_info
+  fns <- getFns logger sysp (elfSymAddrMap secMap e) Set.empty disc_info
   writeFile fns_path $ show (vcat (pretty <$> fns))
 
   let llvmVer = LLVM38
@@ -66,7 +69,7 @@ mkTest fp = T.testCase fp $ withELF fp $ \e -> withSystemTempDirectory "reopt." 
                                     , logAtAnalyzeBlock      = False
                                     , exploreFunctionSymbols = False
                                     , exploreCodeAddrInMem   = False
-                                    , forceMemLoadStyle      = Nothing -- Just MM.LoadBySegment
+                                    , forceMemLoadStyle      = Just MM.LoadBySegment
                                     }
 
 withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
@@ -79,19 +82,6 @@ withELF fp k = do
     E.Elf64Res [] e64 -> k e64
     E.Elf32Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
     E.Elf64Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
-
-withMemory :: forall w m a
-            . (C.MonadThrow m, MM.MemWidth w, Integral (E.ElfWordType w))
-           => E.Elf w
-           -> (MM.Memory w -> m a)
-           -> m a
-withMemory e k = do
-  let opt = MM.LoadOptions { MM.loadRegionIndex = 0
-                           , MM.loadStyle = MM.LoadBySegment
-                           , MM.includeBSS = True }
-  case MM.memoryForElf opt e of
-    Left err -> C.throwM (MemoryLoadError err)
-    Right (_sim, mem) -> k mem
 
 data ElfException = MemoryLoadError String
   deriving (Typeable, Show)

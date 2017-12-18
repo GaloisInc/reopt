@@ -180,24 +180,26 @@ ppSymbol addr sym_map =
     Nothing  -> show addr
 
 resolveFuns :: MemWidth (RegAddrWidth (ArchReg arch))
-            => DiscoveryOptions -- ^ Options controlling discovery
+            => (String -> IO ()) -- ^ logging function
+            -> DiscoveryOptions -- ^ Options controlling discovery
             -> SymbolAddrMap (ArchAddrWidth arch)
             -> DiscoveryState arch
             -> IO (DiscoveryState arch)
-resolveFuns disOpt sym_map info = seq info $
+resolveFuns logger disOpt sym_map info = seq info $
   case Map.lookupMin (info^.unexploredFunctions) of
     Nothing -> pure info
     Just (addr, rsn) -> do
       when (logAtAnalyzeFunction disOpt) $ do
-        hPutStrLn stderr $ "Analyzing function: " ++ ppSymbol addr sym_map
-      info' <- stToIO $ analyzeFunction (blockLogFn disOpt) addr rsn info
-      resolveFuns disOpt sym_map (fst info')
+        logger $ "Analyzing function: " ++ ppSymbol addr sym_map
+      info' <- stToIO $ analyzeFunction (blockLogFn logger disOpt) addr rsn info
+      resolveFuns logger disOpt sym_map (fst info')
 
-getSymbolMap :: Memory w
+getSymbolMap :: (String -> IO ()) -- ^ logging function
+             -> Memory w
              -> SectionIndexMap w
              -> Elf w
              -> IO (SymbolAddrMap w)
-getSymbolMap mem indexMap e = do
+getSymbolMap logger mem indexMap e = do
   elfClassInstances (elfClass e) $ do
   entries <-
     case elfSymtab e of
@@ -207,7 +209,7 @@ getSymbolMap mem indexMap e = do
   let (unresolved, resolved) =
         resolvedSegmentedElfFuncSymbols mem indexMap entries
   forM_ unresolved $ \symbol -> do
-    hPutStrLn stderr $ "Could not resolve " ++ show (steName symbol)
+    logger $ "Could not resolve " ++ show (steName symbol)
   -- Check for unresolved symbols
   case symbolAddrMap (head <$> resolved) of
     Left msg -> fail msg
@@ -226,7 +228,8 @@ isRelocatable e = any (hasSegmentType PT_DYNAMIC) (elfSegments e)
 
 -- | Create a discovery state and symbol-address map
 mkInitialCFGWithSyms :: forall arch
-                   .  ArchitectureInfo arch
+                   .  (String -> IO ())
+                   -> ArchitectureInfo arch
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> DiscoveryOptions -- ^ Options controlling discovery
                    -> IO ( SectionIndexMap (ArchAddrWidth arch)
@@ -234,7 +237,7 @@ mkInitialCFGWithSyms :: forall arch
                          , DiscoveryState arch
                          , SymbolAddrMap (ArchAddrWidth arch)
                          )
-mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
+mkInitialCFGWithSyms logger ainfo e disOpt = withArchConstraints ainfo $ do
   -- Get meap from addresses to symbol names
   -- Initialize entry state with entry point if it is an executable/shared library.
   case elfType e of
@@ -249,7 +252,7 @@ mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
                         , includeBSS = False
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      symMap <- getSymbolMap mem secMap e
+      symMap <- getSymbolMap logger mem secMap e
       let initState
             = emptyDiscoveryState mem symMap ainfo
       pure (secMap, mem, initState, symMap)
@@ -262,7 +265,7 @@ mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
                         , includeBSS = False
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      symMap <- getSymbolMap mem secMap e
+      symMap <- getSymbolMap logger mem secMap e
       entry <- getElfEntry mem e
       let initState
             = emptyDiscoveryState mem symMap ainfo
@@ -277,7 +280,7 @@ mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
                         , includeBSS = False
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      symMap <- getSymbolMap mem secMap e
+      symMap <- getSymbolMap logger mem secMap e
       entry <- getElfEntry mem e
       let initState
             = emptyDiscoveryState mem symMap ainfo
@@ -293,7 +296,8 @@ mkInitialCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
 
 -- | Create a discovery state and symbol-address map
 mkFinalCFGWithSyms :: forall arch
-                   .  ArchitectureInfo arch
+                   .  (String -> IO ())
+                   -> ArchitectureInfo arch
                    -> Elf (ArchAddrWidth arch) -- ^ Elf file to create CFG for.
                    -> DiscoveryOptions -- ^ Options controlling discovery
                    -> IO ( SectionIndexMap (ArchAddrWidth arch)
@@ -301,19 +305,19 @@ mkFinalCFGWithSyms :: forall arch
                          , DiscoveryState arch
                          , SymbolAddrMap (ArchAddrWidth arch)
                          )
-mkFinalCFGWithSyms ainfo e disOpt = withArchConstraints ainfo $ do
-  (secMap, mem, initState, symMap) <- mkInitialCFGWithSyms ainfo e disOpt
+mkFinalCFGWithSyms logger ainfo e disOpt = withArchConstraints ainfo $ do
+  (secMap, mem, initState, symMap) <- mkInitialCFGWithSyms logger ainfo e disOpt
   -- Add symbol table entries to discovery state if requested
   let postSymState
         | exploreFunctionSymbols disOpt =
             initState & markAddrsAsFunction InitAddr (symbolAddrs symMap)
         | otherwise = initState
   -- Discover functions
-  postPhase1Discovery <- resolveFuns disOpt symMap postSymState
+  postPhase1Discovery <- resolveFuns logger disOpt symMap postSymState
   finalState <-
     if exploreCodeAddrInMem disOpt then do
       let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
-      resolveFuns disOpt symMap $ postPhase1Discovery & exploreMemPointers mem_contents
+      resolveFuns logger disOpt symMap $ postPhase1Discovery & exploreMemPointers mem_contents
      else
       return postPhase1Discovery
   -- Return results
@@ -350,41 +354,43 @@ getX86ElfArchInfo e =
      fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 showNonfatalErrors :: (Eq (ElfWordType w), Num (ElfWordType w), Show (ElfWordType w))
-                   => [ElfParseError w] -> IO ()
-showNonfatalErrors l = do
+                   => (String -> IO ()) -- ^ logging function
+                   -> [ElfParseError w]
+                   -> IO ()
+showNonfatalErrors logger l = do
   when (not (null l)) $ do
-    hPutStrLn stderr $ "Recoverable errors occurred in reading elf file:"
+    logger $ "Recoverable errors occurred in reading elf file:"
     forM_ l $ \emsg -> do
       hPutStrLn stderr (show emsg)
 
-readSomeElf :: FilePath -> IO (Some Elf)
-readSomeElf path = do
+readSomeElf :: (String -> IO ()) -> FilePath -> IO (Some Elf)
+readSomeElf logger path = do
   when (null path) $ do
-    hPutStrLn stderr "Please specify a path."
-    hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
+    logger "Please specify a path."
+    logger "For help on using reopt, run \"reopt --help\"."
     exitFailure
   let h e | isDoesNotExistError e = do
-            hPutStrLn stderr $ path ++ " does not exist."
-            hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
+            logger $ path ++ " does not exist."
+            logger "For help on using reopt, run \"reopt --help\"."
             exitFailure
           | isUserError e = do
-            hPutStrLn stderr (ioeGetErrorString e)
+            logger (ioeGetErrorString e)
             exitFailure
           | otherwise = do
-            hPutStrLn stderr (show e)
-            hPutStrLn stderr (show (ioeGetErrorType e))
+            logger (show e)
+            logger (show (ioeGetErrorType e))
             exitFailure
   bs <- BS.readFile path `catch` h
   case parseElf bs of
     ElfHeaderError _ msg -> do
-      hPutStrLn stderr $ "Error reading " ++ path ++ ":"
-      hPutStrLn stderr $ "  " ++ msg
+      logger $ "Error reading " ++ path ++ ":"
+      logger $ "  " ++ msg
       exitFailure
     Elf32Res l e -> do
-      showNonfatalErrors l
+      showNonfatalErrors logger l
       return (Some e)
     Elf64Res l e -> do
-      showNonfatalErrors l
+      showNonfatalErrors logger l
       return (Some e)
 
 resolveSymName :: String -> Either Word64 String
@@ -410,10 +416,14 @@ resolveSymAddr mem symMap nm0 = addrWidthClass (memAddrWidth mem) $
          Just addr -> Right addr
          Nothing -> Left nm
 
-blockLogFn :: MemWidth w => DiscoveryOptions -> MemSegmentOff w -> ST RealWorld ()
-blockLogFn disOpt
+blockLogFn :: MemWidth w
+           => (String -> IO ())
+           -> DiscoveryOptions
+           -> MemSegmentOff w
+           -> ST RealWorld ()
+blockLogFn logger disOpt
   | logAtAnalyzeBlock disOpt = \addr ->
-     ioToST $ hPutStrLn stderr $ "  Analyzing block: " ++ show addr
+     ioToST $ logger $ "  Analyzing block: " ++ show addr
   | otherwise = \_ -> pure ()
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
