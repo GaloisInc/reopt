@@ -48,3 +48,19 @@ In addition to Hackage dependencies, Reopt has the following dependencies:
 - https://github.com/GaloisInc/flexdis86
 - https://github.com/GaloisInc/llvm-pretty
 - https://github.com/GaloisInc/parameterized-utils
+
+# Installation
+
+Assuming you have modern git, GHC, and cabal-install you should be able to
+install with:
+
+```
+git submodule update --init
+cabal new-build exe:reopt
+```
+
+And a first run with:
+
+```
+cabal new-run reopt -- --help
+```

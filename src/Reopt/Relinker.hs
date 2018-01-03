@@ -26,6 +26,7 @@ module Reopt.Relinker
   , objectSectionAddr
   ) where
 
+import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.ST
 import           Control.Monad.State.Class
@@ -91,6 +92,8 @@ writeBS mv base bs = do
 
 write32_lsb :: SMV.MVector s Word8 -> Word64 -> Word32 -> ST s ()
 write32_lsb v a c = do
+  -- Assert a+3 doesn't overflow.
+ assert (a <= maxBound-3) $ do
   let i = fromIntegral a
   SMV.write v i     $ fromIntegral c
   SMV.write v (i+1) $ fromIntegral (c `shiftR`  8)
