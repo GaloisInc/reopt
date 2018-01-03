@@ -9,6 +9,36 @@ executable.
 It currently supports only the x86_64 instruction set, but efforts
 are underway to add support for additional executables.
 
+# Usage
+
+Scenarios:
+
+Recompile an application
+
+Pretty print an intermediate format:
+
+Target Selection options:
+
+** Whitelist
+** Blacklist
+
+Logging options:
+
+
+Debugging:
+
+** Objdump-style dump
+** Discovered functions
+** Recovered functions
+** Generated LLVM
+** Object file
+
+
+** Relink existing object and code.
+
+
+
+
 # Dependencies
 
 In addition to Hackage dependencies, Reopt has the following dependencies:

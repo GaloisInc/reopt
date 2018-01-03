@@ -277,6 +277,7 @@ mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
         postInitArgs :: V.Vector (L.Typed L.Value)
         postInitArgs = intArgs V.++ fltbvArgs
 
+        fltStmts :: [L.Stmt]
         fltStmts = fltStmt <$> [0..fnNFloatArgs ft-1]
           where fltStmt :: Int -> L.Stmt
                 fltStmt i = L.Result (fltbvArg i) (L.Conv L.BitCast arg (L.iT 128)) []
@@ -417,8 +418,7 @@ addBoundPhiVar :: L.Ident -> L.Type -> [(BlockLabel 64, X86Reg tp)] -> BBLLVM ()
 addBoundPhiVar nm tp info = do
   s <- get
   let pair = Some $ PendingPhiNode nm tp info
-  seq pair $ do
-  put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
+  seq pair $ put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
 
 $(pure [])
 

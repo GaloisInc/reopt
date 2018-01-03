@@ -38,7 +38,6 @@ import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 
 import           Data.Macaw.X86
-import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.SyscallInfo
 
 import           Reopt
@@ -147,8 +146,7 @@ getSymbolMap :: Memory w
              -> SectionIndexMap w
              -> Elf w
              -> IO (SymbolAddrMap w)
-getSymbolMap mem indexMap e = do
-  elfClassInstances (elfClass e) $ do
+getSymbolMap mem indexMap e = elfClassInstances (elfClass e) $ do
   entries <-
     case elfSymtab e of
       [] -> pure $ []
@@ -166,7 +164,7 @@ getSymbolMap mem indexMap e = do
 -- | Return the segment offset of the elf file entry point or fail if undefined.
 getElfEntry :: Monad m => Memory w -> Elf w -> m (MemSegmentOff w)
 getElfEntry mem e =  addrWidthClass (memAddrWidth mem) $ do
-  elfClassInstances (elfClass e) $ do
+ elfClassInstances (elfClass e) $ do
   case resolveAbsoluteAddr mem (fromIntegral (elfEntry e)) of
     Nothing -> fail "Could not resolve entry"
     Just v  -> pure v
@@ -425,7 +423,7 @@ getFns sysp symMap excludedNames info = do
   let fArgs :: AddrToX86FunctionTypeMap
       fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
-  fmap catMaybes $ forM entries $ \(Some finfo) -> do
+   fmap catMaybes $ forM entries $ \(Some finfo) -> do
     let entry = discoveredFunAddr finfo
     case () of
       _ | checkFunction finfo -> do

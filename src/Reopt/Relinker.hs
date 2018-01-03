@@ -26,7 +26,6 @@ module Reopt.Relinker
   , objectSectionAddr
   ) where
 
-import           Control.Exception (assert)
 import           Control.Lens
 import           Control.Monad.ST
 import           Control.Monad.State.Class
@@ -92,8 +91,6 @@ writeBS mv base bs = do
 
 write32_lsb :: SMV.MVector s Word8 -> Word64 -> Word32 -> ST s ()
 write32_lsb v a c = do
-  -- Assert there are at least
-  assert (a <= -4) $ do
   let i = fromIntegral a
   SMV.write v i     $ fromIntegral c
   SMV.write v (i+1) $ fromIntegral (c `shiftR`  8)
@@ -591,7 +588,7 @@ rawSegmentFromBuilder :: ElfLayout w
                       -> [ElfDataRegion w]
                       -> RelinkM (ElfWordType w) (ElfWordType w, [ElfDataRegion w])
 rawSegmentFromBuilder orig_layout redirs entries off bs rest = do
-  elfClassInstances (elfLayoutClass orig_layout) $ do
+ elfClassInstances (elfLayoutClass orig_layout) $ do
   let off' = off + fromIntegral (BS.length bs)
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
   return (off2, ElfDataRaw (remapBytes redirs entries off bs) : prev)
@@ -604,7 +601,7 @@ mapLoadableSection :: ElfLayout w
                    -> [ElfDataRegion w]
                    -> RelinkM (ElfWordType w) (ElfWordType w, [ElfDataRegion w])
 mapLoadableSection orig_layout redirs entries off sec rest = do
-  elfClassInstances (elfLayoutClass orig_layout) $ do
+ elfClassInstances (elfLayoutClass orig_layout) $ do
   let bs = elfSectionData sec
   let off' = off + fromIntegral (BS.length bs)
 
@@ -616,8 +613,8 @@ mapLoadableSection orig_layout redirs entries off sec rest = do
                  , elfSectionData = remapBytes redirs entries off bs
                  }
   seq sec' $ do
-  (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
-  return (off2, ElfDataSection sec' : prev)
+   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
+   return (off2, ElfDataSection sec' : prev)
 
 -- | This traverses elf data regions in an loadable elf segment.
 mapOrigLoadableRegions :: ElfLayout w
@@ -774,7 +771,7 @@ regionsForOrigSegment :: ElfLayout w
                       -> OrigSegment w
                       -> RelinkM (ElfWordType w) [ElfDataRegion w]
 regionsForOrigSegment orig_layout redirs oseg = do
-  elfClassInstances (elfLayoutClass orig_layout) $ do
+ elfClassInstances (elfLayoutClass orig_layout) $ do
   let padding     = origSegPadding oseg
   let seg         = origSegData oseg
   seg' <- copyOrigLoadableSegment orig_layout redirs seg
@@ -813,7 +810,7 @@ copyOrigLoadableSegment :: forall w
                         -> ElfSegment w
                         -> RelinkM (ElfWordType w) (ElfSegment w)
 copyOrigLoadableSegment orig_layout redirs seg = do
-  elfClassInstances (elfLayoutClass orig_layout) $ do
+ elfClassInstances (elfLayoutClass orig_layout) $ do
   let sub_reg = toList (elfSegmentData seg)
   let idx = elfSegmentIndex seg
   let entries = fromMaybe [] $! Map.lookup idx (crEntries redirs)
@@ -829,7 +826,7 @@ copyOriginalBinaryRegion :: forall w
                          -> ElfDataRegion w
                          -> Either String (OriginalBinaryInfo w)
 copyOriginalBinaryRegion orig_layout info reg = do
-  elfClassInstances (elfLayoutClass orig_layout) $ do
+ elfClassInstances (elfLayoutClass orig_layout) $ do
   case reg of
     ElfDataElfHeader -> do
       didNotExpectOriginalRegion "Elf header outside loadable segment."
@@ -885,7 +882,7 @@ copyOriginalBinaryRegions :: forall w
                           -> ElfWordType w  -- ^ Offset of file.
                           -> Either String (OriginalBinaryInfo w)
 copyOriginalBinaryRegions orig_binary orig_layout base_offset = do
-  elfClassInstances (elfClass orig_binary) $ do
+ elfClassInstances (elfClass orig_binary) $ do
   let f :: OriginalBinaryInfo w
         -> ElfDataRegion w
         -> Either String (OriginalBinaryInfo w)
