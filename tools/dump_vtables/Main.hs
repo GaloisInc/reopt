@@ -81,9 +81,9 @@ data RTTI = RTTI { rttiAddr :: Word64
 
 instance Show RTTI where
   show (RTTI rttiAddr _ rttiMangledName _ rttiParentRTTIAddrs) =
-    "addr = " ++ (trimLeadingZeros . showAddr64) rttiAddr ++ ", " ++
+    "addr = " ++ (trimLeadingZeros . showPaddedHex) rttiAddr ++ ", " ++
     "name = " ++ show rttiMangledName ++ ", " ++
-    "parentRTTIAddrs = " ++ intercalate ", " (map (trimLeadingZeros . showAddr64) rttiParentRTTIAddrs)
+    "parentRTTIAddrs = " ++ intercalate ", " (map (trimLeadingZeros . showPaddedHex) rttiParentRTTIAddrs)
 
 -- | VTable datatype.
 data VTable = VTable { vTableAddr :: Word64
@@ -98,11 +98,11 @@ data VTable = VTable { vTableAddr :: Word64
 instance Show VTable where
   show (VTable addr size offset rtti fptrs contents) =
     "VTable:\n" ++
-    "  Address: " ++ trimLeadingZeros (showAddr64 addr) ++ "\n" ++
+    "  Address: " ++ trimLeadingZeros (showPaddedHex addr) ++ "\n" ++
     "  Size: " ++ show size ++ " bytes\n" ++
     "  Offset: " ++ show offset ++ "\n" ++
     "  RTTI: " ++ rttiString ++ "\n"
-    -- "  Function addrs: " ++ intercalate "," (map (trimLeadingZeros . showAddr64)
+    -- "  Function addrs: " ++ intercalate "," (map (trimLeadingZeros . showPaddedHex)
     -- fptrs)
     where rttiString = case rtti of
                          Nothing -> "not present"

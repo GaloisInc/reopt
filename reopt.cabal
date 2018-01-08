@@ -29,7 +29,7 @@ library
     lens,
     llvm-pretty,
     located-base,
-    macaw-base,
+    macaw-base >= 0.0.2,
     macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,
@@ -61,7 +61,7 @@ library
       hvex,
       macaw-arm-vex
 
-  ghc-options: -Wall -Werror
+  ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 

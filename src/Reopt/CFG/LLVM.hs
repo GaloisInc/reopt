@@ -184,9 +184,6 @@ llvmIntrinsics = [ overflowOp bop in_typ
 -- conversion to LLVM
 --------------------------------------------------------------------------------
 
--- | Maps code addresses in the LLVM state to the associated symbol name if any.
-type AddrSymMap w = Map (MemSegmentOff w) BSC.ByteString
-
 -- | Return the LLVM symbol associated with the given name
 functionName :: AddrSymMap 64
                 -- ^ Maps addresses of symbols to the associated symbol name.

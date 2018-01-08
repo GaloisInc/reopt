@@ -22,15 +22,11 @@ import           Data.Foldable
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe
 import           Data.Monoid
 import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
-import           Data.Tuple (swap)
-import           Data.Type.Equality
-import qualified Data.Vector as V
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
@@ -259,21 +255,17 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _discOpts     = defaultDiscoveryOptions
                    }
 
-showCFG :: Args -> IO ()
+-- | Discovery symbols in program and show function CFGs.
+showCFG :: Args -> IO String
 showCFG args = do
-  Some e <- readSomeElf (args^.programPath)
-  -- Get architecture information for elf
-  SomeArch ainfo <- getElfArchInfo e
-  (_,_,disc_info, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
-  print $ ppDiscoveryStateBlocks disc_info
+  Some disc_info <- discoverBinary (args^.programPath) (args^.discOpts)
+  pure $ show $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  e <- readElf64 (args^.programPath)
-  -- Create memory for elf
-  (ainfo, sysp,_) <- getX86ElfArchInfo e
-  (secMap, _, s, _) <- mkFinalCFGWithSyms ainfo e (args^.discOpts)
-  fns <- getFns sysp (elfSymAddrMap secMap e) (args^.notransAddrs) s
+  (sysp, _, s, _, symAddrMap) <-
+    discoverX86Binary (args^.programPath) (args^.discOpts)
+  fns <- getFns sysp symAddrMap (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
@@ -485,45 +477,6 @@ getCommandLineArgs = do
 ------------------------------------------------------------------------
 -- Pattern match on stack pointer possibilities.
 
--- | Extract list containing symbol names and addresses.
-elfAddrSymEntries :: SectionIndexMap w
-                     -- ^ Map from elf section indices to base address for section
-                     -- and section in Elf file
-                  -> Elf w
-                  -> [(BS.ByteString, MemSegmentOff w)]
-elfAddrSymEntries m binary =
-  elfClassInstances (elfClass binary) $
-  addrWidthClass (elfAddrWidth (elfClass binary)) $
-  [ (steName entry, val)
-  | tbl <- elfSymtab binary
-  , entry <- V.toList $ elfSymbolTableEntries tbl
-    -- Check this is a function or NOTYPE
-  , steType entry `elem` [ STT_FUNC, STT_NOTYPE ]
-    -- Compute address of symbol from section
-  , let idx = steIndex entry
-  , idx /= SHN_UNDEF && idx <= SHN_LORESERVE
-    -- Get base index of section
-  , (base, sec) <- maybeToList $ Map.lookup idx m
-  , let diff = toInteger (steValue entry) - toInteger (elfSectionAddr sec)
-  , val <- maybeToList $ incSegmentOff base diff
-  ]
-
--- | Create map from symbol names to address.
-elfSymAddrMap  :: SectionIndexMap w
-                  -- ^ Map from elf section indices to base address for section
-                  -- and section in Elf file
-               -> Elf w
-               -> Map BS.ByteString (MemSegmentOff w)
-elfSymAddrMap m binary = Map.fromList $ elfAddrSymEntries m binary
-
--- | Create map from addresses to symbol name.
---
--- Used for naming functions.
-elfAddrSymMap :: SectionIndexMap w
-              -> Elf w
-              -> LLVM.AddrSymMap w
-elfAddrSymMap m binary = Map.fromList $ swap <$> elfAddrSymEntries m binary
-
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
               -> Elf 64 -- ^ Original binary
@@ -662,7 +615,7 @@ discoveryControlFlowTargets :: DiscoveryState arch -> ControlFlowTargetSet (Arch
 discoveryControlFlowTargets info =
   let m0 = CFTS { cfTargets = Map.empty }
       m = foldl' addFunDiscoveryControlFlowTargets m0 (exploredFunctions info)
-   in foldl' addFunctionEntryPoint m (symbolAddrs (symbolNames info))
+   in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
 
 --------------------------------------------------------------------------------
 -- Redirections
@@ -745,23 +698,10 @@ link_with_libreopt obj_dir args arch obj_llvm = do
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
 
-elfIs64Bit :: ElfClass w -> Maybe (w :~: 64)
-elfIs64Bit ELFCLASS32 = Nothing
-elfIs64Bit ELFCLASS64 = Just Refl
-
-
 performReopt :: Args -> IO ()
 performReopt args =
   withSystemTempDirectory "reopt." $ \obj_dir -> do
-    -- Get original binary
-    Some orig_binary <- readSomeElf (args^.programPath)
-
     let output_path = args^.outputPath
-
-    -- Construct CFG from binary
---    (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-
-
     case takeExtension output_path of
       ".bc" -> do
         hPutStrLn stderr $
@@ -770,37 +710,24 @@ performReopt args =
           "use 'llvm-as out.ll' to generate an 'out.bc' file."
         exitFailure
       ".blocks" -> do
-        SomeArch ainfo <- getElfArchInfo orig_binary
-        (_, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        writeFile output_path $ show $ ppDiscoveryStateBlocks disc_info
+        writeFile output_path =<< showCFG args
       ".fns" -> do
-        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
-        (ainfo, sysp, _) <- getX86ElfArchInfo orig_binary
-
-        (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
+        (sysp, _, disc_info, _, symAddrMap) <-
+          discoverX86Binary (args^.programPath) (args^.discOpts)
+        fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
-        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
-        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-
-        (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary) (args^.notransAddrs) disc_info
-        let addrSymMap = elfAddrSymMap secMap orig_binary
+        (sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
+          discoverX86Binary (args^.programPath) (args^.discOpts)
+        fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
-        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
-        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-        (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        fns <- getFns sysp (elfSymAddrMap secMap orig_binary)  (args^.notransAddrs) disc_info
-        let addrSymMap = elfAddrSymMap secMap orig_binary
+        (orig_binary, sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
+          discoverX86Elf (args^.programPath) (args^.discOpts)
+        fns <- getFns sysp symAddrMap  (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -813,13 +740,9 @@ performReopt args =
           "compile to generate a .s file."
         exitFailure
       _ -> do
-        Just Refl <- pure $ elfIs64Bit $ elfClass orig_binary
-        (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo orig_binary
-        (secMap, _, disc_info,_) <-
-          mkFinalCFGWithSyms ainfo orig_binary (args^.discOpts)
-        let symAddrMap = elfSymAddrMap secMap orig_binary
+        (orig_binary, sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
+          discoverX86Elf (args^.programPath) (args^.discOpts)
         fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
-        let addrSymMap = elfAddrSymMap secMap orig_binary
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
         arch <- targetArch (elfOSABI orig_binary)
@@ -861,7 +784,7 @@ main' = do
   case args^.reoptAction of
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
-    ShowCFG -> showCFG args
+    ShowCFG -> print =<< showCFG args
     ShowFunctions -> do
       showFunctions args
     ShowHelp -> do
