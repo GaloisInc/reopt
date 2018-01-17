@@ -223,7 +223,7 @@ functionArgType :: Some X86Reg -> L.Type
 functionArgType (Some r) =
   case r of
     X86_GP{} -> L.iT 64
-    X86_XMMReg{} -> functionFloatType
+    X86_YMMReg{} -> functionFloatType
     _ -> Loc.error "Unsupported function type registers"
 
 functionTypeArgTypes :: FunctionType -> [L.Type]
@@ -979,7 +979,7 @@ termStmtToLLVM tm =
 
        let evalArg :: Some X86Reg -> Some (FnValue X86_64) -> BBLLVM (L.Typed L.Value)
            evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
-           evalArg (Some (X86_XMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
+           evalArg (Some (X86_YMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
            evalArg _ _ = Loc.error "Unsupported register arg"
 
        args' <- zipWithM evalArg (ftArgRegs ft) args

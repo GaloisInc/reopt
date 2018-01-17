@@ -33,7 +33,6 @@ import           Data.Parameterized.Some
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
-import qualified Data.Vector as V
 import           Data.Word
 import           GHC.IO (ioToST, stToIO)
 import           Numeric (readHex)
@@ -166,12 +165,7 @@ getSymbolMap :: Memory w
              -> Elf w
              -> IO [(BS.ByteString, MemSegmentOff w)]
 getSymbolMap mem indexMap e = elfClassInstances (elfClass e) $ do
-  entries <-
-    case elfSymtab e of
-      [] -> pure $ []
-      [tbl] -> pure $ V.toList (elfSymbolTableEntries tbl)
-      _ -> fail "Elf contains multiple symbol tables."
-  let (symErrs, resolvedEntries) = resolveElfFuncSymbols mem indexMap entries
+  let (symErrs, resolvedEntries) = resolveElfFuncSymbols mem indexMap e
   forM_ symErrs $ \err -> do
     hPutStrLn stderr $ show err
 

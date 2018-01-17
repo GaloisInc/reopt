@@ -44,6 +44,7 @@ import           Data.String (fromString)
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import qualified Flexdis86.Register as F
 
 import           Data.Macaw.CFG
 import           Data.Macaw.CFG.BlockLabel
@@ -399,9 +400,10 @@ getPostCallValue lbl proc_state intrs floatrs r = do
         spv <- recoverRegister proc_state sp_reg
         mkAddAssign $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
 
-    _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n128)
-      , Just rv <- lookup r (zip x86FloatResultRegs floatrs) ->
-        return $ FnReturn rv
+    X86_YMMReg (F.YMMR rIdx)
+      | length floatrs > fromIntegral rIdx -> do
+        let v = FnReturn (floatrs !! fromIntegral rIdx)
+        mkAddAssign $ FnEvalApp $ UExt v n256
 
    -- df is 0 after a function call.
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
@@ -606,7 +608,11 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
     ParsedReturn proc_state -> do
       ft <- gets rsCurrentFunctionType
       grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
-      frets' <- mapM (recoverRegister proc_state) (ftFloatRetRegs ft)
+      frets' <- forM (ftFloatRetRegs ft) $ \r -> do
+        v <- recoverRegister proc_state r
+        mkAddAssign $ FnEvalApp $ Trunc v n128
+
+
       bl <- mkBlock lbl phis (FnRet grets' frets') MapF.empty
       pure $! blockInfo & addFnBlock bl
 

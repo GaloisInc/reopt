@@ -163,7 +163,7 @@ ftArgRegs ft = (Some <$> take (fnNIntArgs ft) x86ArgumentRegs)
 ftIntRetRegs :: FunctionType -> [X86Reg (BVType 64)]
 ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs
 
-ftFloatRetRegs :: FunctionType -> [X86Reg (BVType 128)]
+ftFloatRetRegs :: FunctionType -> [X86Reg (BVType 256)]
 ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
 
 ------------------------------------------------------------------------
