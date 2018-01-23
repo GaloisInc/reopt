@@ -10,11 +10,15 @@ module Reopt.Interface
   , defaultDiscoveryOptions
   , getFns
   , resolveSymName
-  , readSomeElf
     -- * Architecture info
   , SomeArchitectureInfo(..)
   , getElfArchInfo
   , discoverBinary
+    -- * X86 specific
+  , X86OS(..)
+  , osPersonality
+  , osArchitectureInfo
+  , osLinkName
   , discoverX86Binary
   , discoverX86Elf
   ) where
@@ -107,17 +111,19 @@ getElfEntry mem e =  addrWidthClass (memAddrWidth mem) $ do
     Nothing -> fail "Could not resolve entry"
     Just v  -> pure v
 
+-- | Return true if Elf has a @PT_DYNAMIC@ segment (thus indicating it
+-- is relocatable.
 isRelocatable :: Elf w -> Bool
 isRelocatable e = any (hasSegmentType PT_DYNAMIC) (elfSegments e)
 
--- | Create a discovery state and symbol-address map
-mkInitialCFGWithSyms :: Elf w -- ^ Elf file to create CFG for.
-                     -> DiscoveryOptions -- ^ Options controlling discovery
-                     -> IO ( SectionIndexMap w -- Map from section indices to
-                           , Memory w -- Initial memory
-                           , [MemSegmentOff w]       -- Additional entry points
-                           )
-mkInitialCFGWithSyms e disOpt = do
+-- | This interprets the Elf file to construct the initial attributes
+elfDiscoveryInitialValues :: Elf w -- ^ Elf file to create CFG for.
+                          -> DiscoveryOptions -- ^ Options controlling discovery
+                          -> IO ( Memory w -- Initial memory
+                                , [MemSegmentOff w] -- Entry point(s)
+                                , [MemSymbol w] -- Function symbols
+                                )
+elfDiscoveryInitialValues e disOpt = do
   -- Get meap from addresses to symbol names
   -- Initialize entry state with entry point if it is an executable/shared library.
   case elfType e of
@@ -132,7 +138,8 @@ mkInitialCFGWithSyms e disOpt = do
                         , includeBSS = False
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      pure (secMap, mem, [])
+      funcSymbols <- getSymbolMap mem secMap e
+      pure (mem, [], funcSymbols)
     ET_EXEC -> do
       let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
       let loadOpts =
@@ -143,7 +150,8 @@ mkInitialCFGWithSyms e disOpt = do
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
       entry <- getElfEntry mem e
-      pure (secMap, mem, [entry])
+      funcSymbols <- getSymbolMap mem secMap e
+      pure (mem, [entry], funcSymbols)
     ET_DYN -> do
       let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
       let loadOpts =
@@ -153,7 +161,8 @@ mkInitialCFGWithSyms e disOpt = do
                         }
       (secMap, mem) <- either fail return $ memoryForElf loadOpts e
       entry <- getElfEntry mem e
-      pure (secMap, mem, [entry])
+      funcSymbols <- getSymbolMap mem secMap e
+      pure (mem, [entry], funcSymbols)
     ET_CORE -> do
       fail $ "Reopt does not support loading core files."
     tp -> do
@@ -163,9 +172,9 @@ mkInitialCFGWithSyms e disOpt = do
 getSymbolMap :: Memory w
              -> SectionIndexMap w
              -> Elf w
-             -> IO [(BS.ByteString, MemSegmentOff w)]
-getSymbolMap mem indexMap e = elfClassInstances (elfClass e) $ do
-  let (symErrs, resolvedEntries) = resolveElfFuncSymbols mem indexMap e
+             -> IO [MemSymbol w]
+getSymbolMap mem secMap e = elfClassInstances (elfClass e) $ do
+  let (symErrs, resolvedEntries) = resolveElfFuncSymbols mem secMap e
   forM_ symErrs $ \err -> do
     hPutStrLn stderr $ show err
 
@@ -243,18 +252,15 @@ mkFinalCFGWithSyms ainfo disOpt mem initEntries symMap = withArchConstraints ain
 
 -- | Discover code in the binary identified by the given path.
 discoverBinary :: FilePath
-              -> DiscoveryOptions -- ^ Options controlling discovery
-              -> IO (Some DiscoveryState)
+               -> DiscoveryOptions -- ^ Options controlling discovery
+               -> IO (Some DiscoveryState)
 discoverBinary path disOpt = do
   Some e <- readSomeElf path
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  -- Get
-  (secMap, mem, initEntries) <- mkInitialCFGWithSyms e disOpt
-  -- Get symbol table map
-  entries <- getSymbolMap mem secMap e
-  let symMap = Map.fromList [ (addr,nm) | (nm,addr) <- entries ]
-  Some <$> mkFinalCFGWithSyms ainfo disOpt mem initEntries symMap
+  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
+  Some <$> mkFinalCFGWithSyms ainfo disOpt mem initEntries addrSymMap
 
 $(pure [])
 
@@ -289,20 +295,36 @@ x86DemandInfo sysp =
                  , demandInfoCtx = x86DemandContext
                  }
 
-
-
 ------------------------------------------------------------------------
 -- Execution
 
-getX86ElfArchInfo :: Elf 64 -> IO (ArchitectureInfo X86_64, SyscallPersonality, String)
+data X86OS = Linux | FreeBSD
+
+instance Show X86OS where
+  show Linux = "Linux"
+  show FreeBSD = "FreeBSD"
+
+osPersonality :: X86OS -> SyscallPersonality
+osPersonality Linux = linux_syscallPersonality
+osPersonality FreeBSD = freeBSD_syscallPersonality
+
+osArchitectureInfo :: X86OS -> ArchitectureInfo X86_64
+osArchitectureInfo Linux = x86_64_linux_info
+osArchitectureInfo FreeBSD = x86_64_freeBSD_info
+
+-- | Return the name to pass the linker for this architecture.
+osLinkName :: X86OS -> String
+osLinkName Linux = "x86_64-unknown-linux-elf"
+osLinkName FreeBSD = "x86_64-unknown-freebsd-elf"
+
+getX86ElfArchInfo :: Elf 64 -> IO X86OS
 getX86ElfArchInfo e =
   case elfOSABI e of
-    ELFOSABI_LINUX   -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
-    ELFOSABI_SYSV    -> pure (x86_64_linux_info,   linux_syscallPersonality,   "Linux")
-    ELFOSABI_FREEBSD -> pure (x86_64_freeBSD_info, freeBSD_syscallPersonality, "FreeBSD")
-    abi              ->
-     fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
-
+    ELFOSABI_LINUX   -> pure Linux
+    ELFOSABI_SYSV    -> pure Linux
+    ELFOSABI_FREEBSD -> pure FreeBSD
+    ELFOSABI_NETBSD  -> pure FreeBSD
+    abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 resolveSymName :: String -> Either Word64 String
 resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
@@ -403,38 +425,34 @@ getFns sysp symMap excludedNames info = do
 -- | Create a discovery state and symbol-address map
 discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
                   -> DiscoveryOptions -- ^ Options controlling discovery
-                  -> IO ( SyscallPersonality
-                        , String
+                  -> IO ( X86OS
                         , DiscoveryState X86_64
                         , AddrSymMap 64
                         , Map BS.ByteString (MemSegmentOff 64)
                         )
 discoverX86Binary path disOpt = do
   e <- readElf64 path
-  (secMap, mem, initEntries) <- mkInitialCFGWithSyms e disOpt
-  (ainfo, sysp, pers) <- getX86ElfArchInfo e
-  entries <- getSymbolMap mem secMap e
-  let addrSymMap = Map.fromList [ (addr,nm) | (nm,addr) <- entries ]
-  finalState <- mkFinalCFGWithSyms ainfo disOpt mem initEntries addrSymMap
-  let symAddrMap = Map.fromList entries
-  pure (sysp, pers, finalState, addrSymMap, symAddrMap)
+  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
+  os <- getX86ElfArchInfo e
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
+  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- entries ]
+  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem initEntries addrSymMap
+  pure (os, finalState, addrSymMap, symAddrMap)
 
 -- | Create a discovery state and symbol-address map
 discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
                -> DiscoveryOptions -- ^ Options controlling discovery
                -> IO ( Elf 64
-                     , SyscallPersonality
-                     , String
+                     , X86OS
                      , DiscoveryState X86_64
                      , AddrSymMap 64
                      , Map BS.ByteString (MemSegmentOff 64)
                      )
 discoverX86Elf path disOpt = do
   e <- readElf64 path
-  (secMap, mem, initEntries) <- mkInitialCFGWithSyms e disOpt
-  (ainfo, sysp, pers) <- getX86ElfArchInfo e
-  entries <- getSymbolMap mem secMap e
-  let addrSymMap = Map.fromList [ (addr,nm) | (nm,addr) <- entries ]
-  finalState <- mkFinalCFGWithSyms ainfo disOpt mem initEntries addrSymMap
-  let symAddrMap = Map.fromList entries
-  pure (e, sysp, pers, finalState, addrSymMap, symAddrMap)
+  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
+  os <- getX86ElfArchInfo e
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
+  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- entries ]
+  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem initEntries addrSymMap
+  pure (e, os, finalState, addrSymMap, symAddrMap)

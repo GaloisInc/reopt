@@ -263,9 +263,9 @@ showCFG args = do
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  (sysp, _, s, _, symAddrMap) <-
+  (os, s, _, symAddrMap) <-
     discoverX86Binary (args^.programPath) (args^.discOpts)
-  fns <- getFns sysp symAddrMap (args^.notransAddrs) s
+  fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
@@ -641,15 +641,6 @@ addrRedirection tgts addrSymMap m f = do
                                     , redirTarget       = UTF8.fromString sym_name
                                     }
 
-
-targetArch :: ElfOSABI -> IO String
-targetArch abi =
-  case abi of
-    ELFOSABI_SYSV    -> return "x86_64-unknown-linux-elf"
-    ELFOSABI_NETBSD  -> return "x86_64-unknown-freebsd-elf"
-    ELFOSABI_FREEBSD -> return "x86_64-unknown-linux-elf"
-    _ -> fail $ "Do not support architecture " ++ show abi ++ "."
-
 -- | Compile a bytestring containing LLVM assembly or bitcode into an object.
 compile_llvm_to_obj :: Args -> String -> BS.ByteString -> FilePath -> IO ()
 compile_llvm_to_obj args arch llvm obj_path = do
@@ -712,27 +703,26 @@ performReopt args =
       ".blocks" -> do
         writeFile output_path =<< showCFG args
       ".fns" -> do
-        (sysp, _, disc_info, _, symAddrMap) <-
+        (os, disc_info, _, symAddrMap) <-
           discoverX86Binary (args^.programPath) (args^.discOpts)
-        fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
+        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
-        (sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
+        (os, disc_info, addrSymMap, symAddrMap) <-
           discoverX86Binary (args^.programPath) (args^.discOpts)
-        fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
+        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
-        (orig_binary, sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Elf (args^.programPath) (args^.discOpts)
-        fns <- getFns sysp symAddrMap  (args^.notransAddrs) disc_info
+        (os, disc_info, addrSymMap, symAddrMap) <-
+          discoverX86Binary (args^.programPath) (args^.discOpts)
+        fns <- getFns (osPersonality os) symAddrMap  (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions syscallPostfix addrSymMap fns
-        arch <- targetArch (elfOSABI orig_binary)
-        llvm <- link_with_libreopt obj_dir args arch obj_llvm
-        compile_llvm_to_obj args arch llvm output_path
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+        llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
+        compile_llvm_to_obj args (osLinkName os) llvm output_path
       ".s" -> do
         hPutStrLn stderr $
           "Generating '.s' (LLVM ASCII assembly) is not supported!\n" ++
@@ -740,15 +730,14 @@ performReopt args =
           "compile to generate a .s file."
         exitFailure
       _ -> do
-        (orig_binary, sysp, syscallPostfix, disc_info, addrSymMap, symAddrMap) <-
+        (orig_binary, os, disc_info, addrSymMap, symAddrMap) <-
           discoverX86Elf (args^.programPath) (args^.discOpts)
-        fns <- getFns sysp symAddrMap (args^.notransAddrs) disc_info
+        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions  syscallPostfix addrSymMap fns
-        arch <- targetArch (elfOSABI orig_binary)
-        llvm <- link_with_libreopt obj_dir args arch obj_llvm
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+        llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
         let obj_path = obj_dir </> "obj.o"
-        compile_llvm_to_obj args arch llvm obj_path
+        compile_llvm_to_obj args (osLinkName os) llvm obj_path
 
         new_obj <- parseElf64 "new object" =<< BS.readFile obj_path
         putStrLn $ "obj_path: " ++ obj_path
