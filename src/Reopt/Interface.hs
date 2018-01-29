@@ -46,7 +46,6 @@ import           Data.Macaw.Analysis.FunctionArgs
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery
-import           Data.Macaw.Memory
 import           Data.Macaw.Memory.ElfLoader
 
 import           Data.Macaw.X86

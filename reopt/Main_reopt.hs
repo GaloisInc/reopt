@@ -50,8 +50,7 @@ import           Paths_reopt (getLibDir, version)
 import           Data.Macaw.CFG
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
-import           Data.Macaw.Memory
-import           Data.Macaw.Memory.ElfLoader
+import           Data.Macaw.Memory.LoadCommon
 
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..))
