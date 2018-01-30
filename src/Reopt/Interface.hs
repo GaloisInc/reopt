@@ -102,83 +102,12 @@ data SomeArchitectureInfo w =
 ------------------------------------------------------------------------
 -- Get binary information
 
--- | Return the segment offset of the elf file entry point or fail if undefined.
-getElfEntry :: Monad m => Memory w -> Elf w -> m (MemSegmentOff w)
-getElfEntry mem e =  addrWidthClass (memAddrWidth mem) $ do
- elfClassInstances (elfClass e) $ do
-  case resolveAbsoluteAddr mem (fromIntegral (elfEntry e)) of
-    Nothing -> fail "Could not resolve entry"
-    Just v  -> pure v
-
--- | Return true if Elf has a @PT_DYNAMIC@ segment (thus indicating it
--- is relocatable.
-isRelocatable :: Elf w -> Bool
-isRelocatable e = any (hasSegmentType PT_DYNAMIC) (elfSegments e)
-
--- | This interprets the Elf file to construct the initial attributes
-elfDiscoveryInitialValues :: Elf w -- ^ Elf file to create CFG for.
-                          -> DiscoveryOptions -- ^ Options controlling discovery
-                          -> IO ( Memory w -- Initial memory
-                                , [MemSegmentOff w] -- Entry point(s)
-                                , [MemSymbol w] -- Function symbols
-                                )
-elfDiscoveryInitialValues e disOpt = do
-  -- Get meap from addresses to symbol names
-  -- Initialize entry state with entry point if it is an executable/shared library.
-  case elfType e of
-    ET_REL -> do
-      case forceMemLoadStyle disOpt of
-        Just LoadBySegment -> do
-          fail $ "Cannot load object files by segment."
-        _ -> pure ()
-      let loadOpts =
-            LoadOptions { loadRegionIndex = 1
-                        , loadStyle = LoadBySection
-                        , includeBSS = False
-                        }
-      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      funcSymbols <- getSymbolMap mem secMap e
-      pure (mem, [], funcSymbols)
-    ET_EXEC -> do
-      let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
-      let loadOpts =
-            LoadOptions { loadRegionIndex =
-                            if isRelocatable e then 1 else 0
-                        , loadStyle = loadSty
-                        , includeBSS = False
-                        }
-      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      entry <- getElfEntry mem e
-      funcSymbols <- getSymbolMap mem secMap e
-      pure (mem, [entry], funcSymbols)
-    ET_DYN -> do
-      let loadSty = fromMaybe LoadBySegment (forceMemLoadStyle disOpt)
-      let loadOpts =
-            LoadOptions { loadRegionIndex = 1
-                        , loadStyle = loadSty
-                        , includeBSS = False
-                        }
-      (secMap, mem) <- either fail return $ memoryForElf loadOpts e
-      entry <- getElfEntry mem e
-      funcSymbols <- getSymbolMap mem secMap e
-      pure (mem, [entry], funcSymbols)
-    ET_CORE -> do
-      fail $ "Reopt does not support loading core files."
-    tp -> do
-      fail $ "Reopt does not support loading elf files with type " ++ show tp ++ "."
-
--- | Generate a map from addresses to any associated symbol names.
-getSymbolMap :: Memory w
-             -> SectionIndexMap w
-             -> Elf w
-             -> IO [MemSymbol w]
-getSymbolMap mem secMap e = elfClassInstances (elfClass e) $ do
-  let (symErrs, resolvedEntries) = resolveElfFuncSymbols mem secMap e
-  forM_ symErrs $ \err -> do
-    hPutStrLn stderr $ show err
-
-  -- Check for unresolved symbols
-  pure $ resolvedEntries
+discoveryLoadOptions :: DiscoveryOptions -> LoadOptions
+discoveryLoadOptions disOpt =
+  LoadOptions { loadRegionIndex = Nothing
+              , loadStyleOverride = forceMemLoadStyle disOpt
+              , includeBSS = False
+              }
 
 getElfArchInfo :: Elf w -> IO (SomeArchitectureInfo w)
 getElfArchInfo e =
@@ -257,9 +186,11 @@ discoverBinary path disOpt = do
   Some e <- readSomeElf path
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
-  Some <$> mkFinalCFGWithSyms ainfo disOpt mem initEntries addrSymMap
+  (warnings, mem, entry, symbols) <- either fail pure $
+    initElfDiscoveryInfo (discoveryLoadOptions disOpt) e
+  mapM_ (hPutStrLn stderr) warnings
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
+  Some <$> mkFinalCFGWithSyms ainfo disOpt mem (maybeToList entry) addrSymMap
 
 $(pure [])
 
@@ -431,11 +362,13 @@ discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
                         )
 discoverX86Binary path disOpt = do
   e <- readElf64 path
-  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
+  (warnings, mem, entry, symbols) <- either fail pure $
+    initElfDiscoveryInfo (discoveryLoadOptions disOpt) e
+  mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
-  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- entries ]
-  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem initEntries addrSymMap
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
+  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
+  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
   pure (os, finalState, addrSymMap, symAddrMap)
 
 -- | Create a discovery state and symbol-address map
@@ -449,9 +382,11 @@ discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
                      )
 discoverX86Elf path disOpt = do
   e <- readElf64 path
-  (mem, initEntries, entries) <- elfDiscoveryInitialValues e disOpt
+  (warnings, mem, entry, symbols) <- either fail pure $
+    initElfDiscoveryInfo (discoveryLoadOptions disOpt) e
+  mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- entries ]
-  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- entries ]
-  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem initEntries addrSymMap
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
+  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
+  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
   pure (e, os, finalState, addrSymMap, symAddrMap)

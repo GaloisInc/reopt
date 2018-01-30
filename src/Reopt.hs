@@ -56,7 +56,8 @@ checkedReadFile path = do
 
 -- | Print errors that occured when reading to @stderr@.
 showElfParseErrors :: (Integral (ElfWordType w), Show (ElfWordType w)) -- Eq (ElfWordType w), Num (ElfWordType w)
-                   => [ElfParseError w] -> IO ()
+                   => [ElfParseError w]
+                   -> IO ()
 showElfParseErrors l = do
   when (not (null l)) $ do
     hPutStrLn stderr $ "Recoverable errors occurred in reading elf file:"

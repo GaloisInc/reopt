@@ -227,7 +227,7 @@ recoverValue' s v = do
   case v of
     _ | BVTypeRepr n <- typeRepr v
       , Just Refl <- testEquality n (memWidth mem)
-      , Just addr <- asLiteralAddr v
+      , Just addr <- valueAsMemAddr v
       , Just addr_ref <- asSegmentOff mem addr -> do
         let seg = msegSegment addr_ref
         case () of

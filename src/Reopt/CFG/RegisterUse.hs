@@ -217,8 +217,7 @@ termStmtValues mem sysp typeMap curFunType tstmt =
   case tstmt of
     ParsedCall proc_state _m_ret_addr ->
       -- Get function type associated with function
-      let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
-             , Just fSegOff <- asSegmentOff mem faddr
+      let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
              , Just ftp <- Map.lookup fSegOff typeMap = ftp
              | otherwise = ftMaximumFunctionType
        in registerValues proc_state (Some ip_reg : ftArgRegs ft)
@@ -267,8 +266,7 @@ summarizeBlock mem interp_state addr stmts = do
   case stmtsTerm stmts of
           ParsedCall proc_state _ -> do
             -- Get function type associated with function
-            let ft | Just faddr <- asLiteralAddr (proc_state^.boundValue ip_reg)
-                   , Just fSegOff <- asSegmentOff mem faddr
+            let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
                    , Just ftp <- Map.lookup fSegOff typeMap = ftp
                    | otherwise = ftMaximumFunctionType
             addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
