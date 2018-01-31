@@ -1,11 +1,8 @@
 {-|
+Copyright        : (c) Galois, Inc 2015-2018
 
-Module           : Reopt.CFG.LLVM
-Copyright        : (c) Galois, Inc 2015-2016
-Maintainer       : Simon Winwood <sjw@galois.com>
-
-Functions which convert the types in Representaiton to their
-analogues in LLVM
+Functions which convert the types in Representaiton to their analogues
+in LLVM
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -46,7 +43,6 @@ import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
 import           Data.Macaw.CFG.BlockLabel
-import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -67,6 +63,7 @@ instance HasValue (L.Typed L.Value) where
 ------------------------------------------------------------------------
 -- Intrinsic
 
+-- | An LLVM intrinsic
 data Intrinsic = Intrinsic { intrinsicName :: !L.Symbol
                            , intrinsicRes  :: L.Type
                            , intrinsicArgs  :: [L.Type]
@@ -76,7 +73,6 @@ data Intrinsic = Intrinsic { intrinsicName :: !L.Symbol
 instance HasValue Intrinsic where
   valueOf i = L.Typed tp (L.ValSymbol (intrinsicName i))
     where tp = L.ptrT $ L.FunTy (intrinsicRes i) (intrinsicArgs i) False
-
 
 -- | Define an intrinsic that has no special attributes
 intrinsic :: String -> L.Type -> [L.Type] -> Intrinsic
@@ -91,7 +87,7 @@ intrinsic' name res args attrs = Intrinsic { intrinsicName = L.Symbol name
                                            }
 
 ------------------------------------------------------------------------
--- libreopt funtions
+-- libreopt functions
 
 iRead_X87_RC :: Intrinsic
 iRead_X87_RC = intrinsic' "reopt.Read_X87_RC" (L.iT 2) [] [L.Readonly]
@@ -127,23 +123,6 @@ iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
 iMemCmp :: Intrinsic
 iMemCmp = intrinsic' "reopt.MemCmp" (L.iT 64) [L.iT 64, L.iT 64, L.iT 64, L.iT 64, L.iT 1] [L.Readonly]
 
-{-
-iRepnzScas :: Integer -> Intrinsic
-iRepnzScas sz =
-    intrinsic' ("reopt_repnz_scas_" ++ show sz) (L.iT 64) [w, L.PtrTo w, L.iT 64] [L.Readonly]
-  where w = L.iT (fromInteger sz)
--}
-
-{-
-iSystemCall :: String -> Intrinsic
-iSystemCall pname
-     | null pname = Loc.error "empty string given to iSystemCall"
-     | otherwise = intrinsic ("reopt.SystemCall." ++ pname) (L.Struct [L.iT 64, L.iT 1]) argTypes
-  where
-    -- the +1 is for the additional syscall no. register, which is
-    -- passed via the stack.
-    argTypes = replicate (length x86SyscallArgumentRegs + 1) (L.iT 64)
--}
 
 reoptIntrinsics :: [Intrinsic]
 reoptIntrinsics = [ iRead_X87_RC
@@ -155,8 +134,6 @@ reoptIntrinsics = [ iRead_X87_RC
                   , iRead_GS
                   , iWrite_GS
                   , iMemCmp
---                  , iSystemCall "Linux"
---                  , iSystemCall "FreeBSD"
                   ]
                   ++ [ iMemCopy n       | n <- [8, 16, 32, 64] ]
                   ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
@@ -165,11 +142,23 @@ reoptIntrinsics = [ iRead_X87_RC
 -- LLVM intrinsics
 --------------------------------------------------------------------------------
 
+-- | LLVM arithmetic with overflow intrinsic.
 overflowOp :: String -> L.Type -> Intrinsic
 overflowOp bop in_typ =
   intrinsic ("llvm." ++ bop ++ ".with.overflow." ++ show (L.ppType in_typ))
             (L.Struct [in_typ, L.iT 1])
             [in_typ, in_typ]
+
+-- | @llvm.masked.load.*@ intrinsic
+llvmMaskedLoad :: Int32 -- ^ Number of vector elements
+                -> String -- ^ Type name (e.g. i32)
+                -> L.Type -- ^ Element type (should match string)
+                -> Intrinsic
+llvmMaskedLoad n tp tpv = do
+ let vstr = "v" ++ show n ++ tp
+     mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
+     args = [ L.Vector n (L.PtrTo tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
+  in intrinsic mnem tpv args
 
 llvmIntrinsics :: [Intrinsic]
 llvmIntrinsics = [ overflowOp bop in_typ
@@ -328,14 +317,44 @@ data FunLLVMContext = FunLLVMContext
 -- | Information about a phi node
 data PendingPhiNode tp = PendingPhiNode !L.Ident !L.Type [(BlockLabel 64, X86Reg tp)]
 
--- | Function relevative LLVM State
-data FunState = FunState { nmCounter :: !Int
-                         -- ^ Counter for generating new identifiers
-                         , funAssignValMap :: !AssignValMap
-                         -- ^ Map from function ids already assigned to label where it was assigned and associated value.
-                         }
+-- | Result obtained by printing a block to LLVM
+data LLVMBlockResult = LLVMBlockResult { regBlock   :: !FnBlock
+                                       , llvmBlockStmts  :: ![L.Stmt]
+                                       , llvmBlockPhiVars :: ![Some PendingPhiNode]
+                                       }
 
+-- | Map needed to resolve phi references
+type ResolvePhiMap = Map (BlockLabel 64) LLVMBlockResult
 
+------------------------------------------------------------------------
+-- IntrinsicMap
+
+-- | Map from intrinsic name to intrinsic seen so far
+--
+-- Globally maintained when translating model so that we know which
+-- definitions to include.
+type IntrinsicMap = Map L.Symbol Intrinsic
+
+------------------------------------------------------------------------
+-- FunState
+
+-- | State relative to a function.
+data FunState =
+  FunState { nmCounter :: !Int
+             -- ^ Counter for generating new identifiers
+           , funAssignValMap :: !AssignValMap
+             -- ^ Map from function ids already assigned to label
+             -- where it was assigned and associated value.
+           , funIntrinsicMap :: !IntrinsicMap
+           }
+
+funIntrinsicMapLens :: Simple Lens FunState IntrinsicMap
+funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
+
+------------------------------------------------------------------------
+-- BBLLVM
+
+-- | State specific to translating a single basic block.
 data BBLLVMState = BBLLVMState
   { funContext :: !FunLLVMContext
     -- ^ Context for function level declarations.
@@ -349,6 +368,8 @@ data BBLLVMState = BBLLVMState
     -- ^ Identifiers that we need to generate the phi node information for.
   }
 
+funStateLens :: Simple Lens BBLLVMState FunState
+funStateLens = lens funState (\s v -> s { funState = v })
 
 newtype BBLLVM a = BBLLVM { unBBLLVM :: State BBLLVMState a }
   deriving ( Functor
@@ -417,7 +438,8 @@ addBoundPhiVar nm tp info = do
   let pair = Some $ PendingPhiNode nm tp info
   seq pair $ put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
 
-$(pure [])
+------------------------------------------------------------------------
+-- Convert a value to LLVM
 
 -- | Map a function value to a LLVM value with no change.
 valueToLLVM :: Loc.HasCallStack
@@ -593,8 +615,11 @@ call (valueOf -> f) args =
     L.PtrTo (L.FunTy res argTypes varArgs) -> do
       when varArgs $ do
         Loc.error $ "Varargs not yet supported."
-      when (argTypes /= fmap L.typedType args) $ do
-        Loc.error $ "Unexpected arguments to " ++ show f
+      let actualTypes = fmap L.typedType args
+      when (argTypes /= actualTypes) $ do
+        Loc.error $ "Unexpected arguments to " ++ show f ++ "\n"
+                 ++ "Expected: " ++ show argTypes ++ "\n"
+                 ++ "Actual:   " ++ show actualTypes
       fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> Loc.error $ "Call given non-function pointer argument:\n" ++ show f
 
@@ -798,8 +823,12 @@ appToLLVM' app = do
       call ctlz [v', L.iT 1 L.-: L.int 1]
     TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
 
--- | Evaluate a function value as a pointer
-llvmAsPtr :: FnValue X86_64 (BVType 64) -> L.Type -> BBLLVM (L.Typed L.Value)
+-- | Evaluate a value as a pointer
+llvmAsPtr :: FnValue X86_64 (BVType 64)
+             -- ^ Value to evaluate
+          -> L.Type
+             -- ^ Type of value pointed to
+          -> BBLLVM (L.Typed L.Value)
 llvmAsPtr ptr tp = do
   llvmPtrAsBV  <- mkLLVMValue ptr
   convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
@@ -867,6 +896,21 @@ archFnToLLVM f =
    _ -> do
      error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
+addIntrinsic :: Intrinsic -> BBLLVM ()
+addIntrinsic i = do
+  m <- use $ funStateLens . funIntrinsicMapLens
+  when (Map.notMember (intrinsicName i) m) $ do
+    funStateLens . funIntrinsicMapLens .= Map.insert (intrinsicName i) i m
+
+-- | Create a singleton vector from a value.
+singletonVector :: L.Typed L.Value -> BBLLVM (L.Typed L.Value)
+singletonVector val = do
+  let eltType = L.typedType val
+  let arrayType = L.Vector 1 eltType
+  let vec0 = L.Typed arrayType L.ValUndef
+  L.Typed arrayType
+    <$> evalInstr (L.InsertElt vec0 val (L.ValInteger 0))
+
 rhsToLLVM :: FnAssignRhs X86_64 tp -> BBLLVM (L.Typed L.Value)
 rhsToLLVM rhs = do
   case rhs of
@@ -879,8 +923,18 @@ rhsToLLVM rhs = do
       let llvm_typ = typeToLLVMType typ
       p <- llvmAsPtr ptr llvm_typ
       fmap (L.Typed llvm_typ) $ evalInstr (L.Load p Nothing Nothing)
-    FnCondReadMem _type _cond _addr _default -> do
-      error $ "LLVM backend does not yet support conditional read memory."
+    FnCondReadMem (BVMemRepr w LittleEndian) cond addr passthru -> do
+      let bvw = 8 * fromIntegral (natValue w)
+      let eltType = L.iT bvw
+      let intr = llvmMaskedLoad 1 ("i" ++ show bvw) eltType
+      addIntrinsic intr
+      llvmAddr     <- singletonVector =<< llvmAsPtr addr eltType
+      let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
+      llvmCond     <- singletonVector =<< mkLLVMValue cond
+      llvmPassthru <- singletonVector =<< mkLLVMValue passthru
+      call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
+    FnCondReadMem (BVMemRepr _ BigEndian) _cond _addr _passthru -> do
+      error "LLVM backend does not yet support big endian memory reads."
     FnAlloca v -> do
       v' <- mkLLVMValue v
       alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
@@ -1041,15 +1095,6 @@ termStmtToLLVM tm =
      FnTermStmtUndefined ->
        void $ unimplementedInstr' L.voidT "FnTermStmtUndefined"
 
--- | Result obtained by printing a block to LLVM
-data LLVMBlockResult = LLVMBlockResult { regBlock   :: !FnBlock
-                                       , llvmBlockStmts  :: ![L.Stmt]
-                                       , llvmBlockPhiVars :: ![Some PendingPhiNode]
-                                       }
-
--- Map needed to resolve phi references
-type ResolvePhiMap = Map (BlockLabel 64) LLVMBlockResult
-
 -- | Convert a Phi node assignment to the right value
 resolvePhiNodeReg :: Loc.HasCallStack
                   => FunLLVMContext
@@ -1126,21 +1171,75 @@ blockToLLVM ctx fs b = (res, funState s)
                               , llvmBlockPhiVars = reverse (bbBoundPhiVars s)
                               }
 
+-- | The LLVM translate monad records all the intrinsics detected when adding LLVM.
+newtype LLVMTrans a = LLVMTrans (State IntrinsicMap a)
+  deriving (Functor, Applicative, Monad, MonadState IntrinsicMap)
 
--- | This writes a function to LLVM, and returns the value corresponding to the function.
+-- | Run the translation returning result and intrinsics.
+runLLVMTrans :: LLVMTrans a -> ([Intrinsic], a)
+runLLVMTrans (LLVMTrans action) =
+  let (r, m) = runState action Map.empty
+   in (Map.elems m, r)
+
+-- | This translates the function to LLVM and returns the define.
 --
 -- We have each function return all possible results, although only the ones that are actually
 -- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
 --
 -- Users should declare intrinsics via 'declareIntrinsics' before using this function.
 -- They should also add any referenced functions.
-defineFunction' :: String
+defineFunction :: String
                   -- ^ Name to append to system call
                -> AddrSymMap 64
                -> FunctionTypeMap
                -> Function
-               -> L.Define
-defineFunction' syscallPostfix addrSymMap funTypeMap f =
+               -> LLVMTrans L.Define
+defineFunction syscallPostfix addrSymMap funTypeMap f = do
+  let symbol = functionName addrSymMap (fnAddr f)
+
+  -- Create initial block
+  let inputArgs :: [L.Typed L.Ident]
+      initBlock :: L.BasicBlock
+      postInitArgs :: V.Vector (L.Typed L.Value)
+      (inputArgs, initBlock, postInitArgs) =
+        mkInitBlock (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
+
+  let ctx :: FunLLVMContext
+      ctx = FunLLVMContext { funSyscallIntrinsicPostfix = syscallPostfix
+                           , funAddrSymMap  = addrSymMap
+                           , funAddrTypeMap = funTypeMap
+                           , funArgs        = postInitArgs
+                           }
+
+  -- Create ordinary blocks
+  m0 <- get
+  let init_fun_state :: FunState
+      init_fun_state = FunState { nmCounter = 0
+                                , funAssignValMap = Map.empty
+                                , funIntrinsicMap = m0
+                                }
+  let mkBlockRes :: (FunState, [LLVMBlockResult])
+                 -> FnBlock
+                 -> (FunState, [LLVMBlockResult])
+      mkBlockRes (fs, prev) b =
+        let (r, fs') = blockToLLVM ctx fs b
+         in (fs', r:prev)
+
+  let block_results :: [LLVMBlockResult]
+      (fin_fs, block_results) = foldl mkBlockRes (init_fun_state, []) (fnBlocks f)
+
+  -- Update intrins map
+  put (funIntrinsicMap fin_fs)
+
+  let resolvePhiMap :: ResolvePhiMap
+      resolvePhiMap = Map.fromList
+        [ (fbLabel (regBlock b), b)
+        | b <- block_results
+        ]
+
+  let blocks :: [L.BasicBlock]
+      blocks = toBasicBlock ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
+  pure $
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  = funReturnType
              , L.defName     = symbol
@@ -1153,45 +1252,6 @@ defineFunction' syscallPostfix addrSymMap funTypeMap f =
              , L.defMetadata = Map.empty
              , L.defComdat   = Nothing
              }
-  where
-    symbol = functionName addrSymMap (fnAddr f)
-
-    inputArgs :: [L.Typed L.Ident]
-    initBlock :: L.BasicBlock
-    postInitArgs :: V.Vector (L.Typed L.Value)
-    (inputArgs, initBlock, postInitArgs) =
-      mkInitBlock (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
-
-    ctx :: FunLLVMContext
-    ctx = FunLLVMContext { funSyscallIntrinsicPostfix = syscallPostfix
-                         , funAddrSymMap  = addrSymMap
-                         , funAddrTypeMap = funTypeMap
-                         , funArgs        = postInitArgs
-                         }
-
-    mkBlockRes :: (FunState, [LLVMBlockResult])
-               -> FnBlock
-               -> (FunState, [LLVMBlockResult])
-    mkBlockRes (fs, prev) b =
-      let (r, fs') = blockToLLVM ctx fs b
-       in (fs', r:prev)
-
-    init_fun_state :: FunState
-    init_fun_state = FunState { nmCounter = 0
-                              , funAssignValMap = Map.empty
-                              }
-
-    block_results :: [LLVMBlockResult]
-    (fin_fs, block_results) = foldl mkBlockRes (init_fun_state, []) (fnBlocks f)
-
-    resolvePhiMap :: ResolvePhiMap
-    resolvePhiMap = Map.fromList
-      [ (fbLabel (regBlock b), b)
-      | b <- block_results
-      ]
-
-    blocks :: [L.BasicBlock]
-    blocks = toBasicBlock ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
 
 declareIntrinsic :: Intrinsic -> L.Declare
 declareIntrinsic i =
@@ -1230,7 +1290,9 @@ moduleForFunctions syscallPostfix addrSymMap fns =
              , L.modNamedMd    = []
              , L.modUnnamedMd  = []
              , L.modGlobals    = []
-             , L.modDeclares   = intrinsicDecls ++ fnDecls
+             , L.modDeclares   = intrinsicDecls
+                              ++ fmap declareIntrinsic dynIntrinsics
+                              ++ fnDecls
              , L.modDefines    = defines
              , L.modInlineAsm  = []
              , L.modAliases    = []
@@ -1239,7 +1301,6 @@ moduleForFunctions syscallPostfix addrSymMap fns =
   where -- Get all function references
         funTypeMap :: FunctionTypeMap
         funTypeMap = foldl getReferencedFunctions Map.empty fns
-
 
         excludedSet = Set.fromList $ fnAddr <$> fns
 
@@ -1251,4 +1312,5 @@ moduleForFunctions syscallPostfix addrSymMap fns =
 
         fnDecls = declareFunction' addrSymMap <$> declFunMap
 
-        defines = defineFunction' syscallPostfix addrSymMap funTypeMap <$> fns
+        (dynIntrinsics, defines) = runLLVMTrans $
+          traverse (defineFunction syscallPostfix addrSymMap funTypeMap) fns

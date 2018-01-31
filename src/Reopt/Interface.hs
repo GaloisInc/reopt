@@ -61,8 +61,28 @@ import qualified Data.VEX.FFI
 import           Data.Macaw.ARM
 #endif
 
+-- | Event for logging function
+data DiscoveryEvent w
+   = AnalyzeFunction !(MemSegmentOff w)
+   | AnalyzeBlock !(MemSegmentOff w)
+
+resolveFuns :: MemWidth (RegAddrWidth (ArchReg arch))
+            => (DiscoveryEvent (ArchAddrWidth arch) -> ST s ())
+               -- ^ Callback for discovery events
+            -> DiscoveryState arch
+            -> ST s (DiscoveryState arch)
+resolveFuns logFn info = seq info $
+  case Map.lookupMin (info^.unexploredFunctions) of
+    Nothing -> pure info
+    Just (addr, rsn) -> do
+      logFn (AnalyzeFunction addr)
+      (info',_) <- analyzeFunction (logFn . AnalyzeBlock) addr rsn info
+      resolveFuns logFn info'
+
+$(pure [])
+
 ------------------------------------------------------------------------
--- Discovery options
+-- Top-level discovery
 
 -- | Options controlling discovery
 data DiscoveryOptions
@@ -89,6 +109,52 @@ defaultDiscoveryOptions =
                    , exploreFunctionSymbols = True
                    , exploreCodeAddrInMem = False
                    }
+
+ppSymbol :: MemWidth w => MemSegmentOff w -> AddrSymMap w -> String
+ppSymbol addr sym_map =
+  case Map.lookup addr sym_map of
+    Just fnName -> show addr ++ " (" ++ UTF8.toString fnName ++ ")"
+    Nothing  -> show addr
+
+discoveryLogFn :: MemWidth w
+               => DiscoveryOptions
+               -> AddrSymMap w
+               -> DiscoveryEvent w
+               -> ST RealWorld ()
+discoveryLogFn disOpt symMap (AnalyzeFunction addr) = ioToST $ do
+  when (logAtAnalyzeFunction disOpt) $ do
+    hPutStrLn stderr $ "Analyzing function: " ++ ppSymbol addr symMap
+discoveryLogFn disOpt _ (AnalyzeBlock addr) = ioToST $ do
+  when (logAtAnalyzeBlock disOpt) $ do
+    hPutStrLn stderr $ "  Analyzing block: " ++ show addr
+
+-- | Explore until we have found all functions we can.
+discoverFunctions :: forall arch
+                   .  ArchitectureInfo arch
+                   -> DiscoveryOptions -- ^ Options controlling discovery
+                   -> Memory (ArchAddrWidth arch)
+                   -> [MemSegmentOff (ArchAddrWidth arch)]       -- Additional entry points
+                   -> AddrSymMap (ArchAddrWidth arch)
+                   -> IO (DiscoveryState arch)
+discoverFunctions ainfo disOpt mem initEntries symMap = stToIO $ withArchConstraints ainfo $ do
+  let initState
+        = emptyDiscoveryState mem symMap ainfo
+        & markAddrsAsFunction InitAddr initEntries
+  -- Add symbol table entries to discovery state if requested
+  let postSymState
+        | exploreFunctionSymbols disOpt =
+            initState & markAddrsAsFunction InitAddr (Map.keys symMap)
+        | otherwise = initState
+  -- Discover functions
+  postPhase1Discovery <- resolveFuns (discoveryLogFn disOpt symMap) postSymState
+  -- Discovery functions from memory
+  if exploreCodeAddrInMem disOpt then do
+    let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
+    resolveFuns (discoveryLogFn disOpt symMap) $ postPhase1Discovery & exploreMemPointers mem_contents
+   else
+    return postPhase1Discovery
+
+$(pure [])
 
 ------------------------------------------------------------------------
 -- Architecture info
@@ -126,58 +192,6 @@ getElfArchInfo e =
 ------------------------------------------------------------------------
 -- Explore a control flow graph.
 
-ppSymbol :: MemWidth w => MemSegmentOff w -> AddrSymMap w -> String
-ppSymbol addr sym_map =
-  case Map.lookup addr sym_map of
-    Just fnName -> show addr ++ " (" ++ UTF8.toString fnName ++ ")"
-    Nothing  -> show addr
-
-blockLogFn :: MemWidth w => DiscoveryOptions -> MemSegmentOff w -> ST RealWorld ()
-blockLogFn disOpt
-  | logAtAnalyzeBlock disOpt = \addr ->
-     ioToST $ hPutStrLn stderr $ "  Analyzing block: " ++ show addr
-  | otherwise = \_ -> pure ()
-
-resolveFuns :: MemWidth (RegAddrWidth (ArchReg arch))
-            => DiscoveryOptions -- ^ Options controlling discovery
-            -> AddrSymMap (ArchAddrWidth arch)
-            -> DiscoveryState arch
-            -> IO (DiscoveryState arch)
-resolveFuns disOpt sym_map info = seq info $
-  case Map.lookupMin (info^.unexploredFunctions) of
-    Nothing -> pure info
-    Just (addr, rsn) -> do
-      when (logAtAnalyzeFunction disOpt) $ do
-        hPutStrLn stderr $ "Analyzing function: " ++ ppSymbol addr sym_map
-      info' <- stToIO $ analyzeFunction (blockLogFn disOpt) addr rsn info
-      resolveFuns disOpt sym_map (fst info')
-
--- | Explore until we have found all functions we can.
-mkFinalCFGWithSyms :: forall arch
-                   .  ArchitectureInfo arch
-                   -> DiscoveryOptions -- ^ Options controlling discovery
-                   -> Memory (ArchAddrWidth arch)
-                   -> [MemSegmentOff (ArchAddrWidth arch)]       -- Additional entry points
-                   -> AddrSymMap (ArchAddrWidth arch)
-                   -> IO (DiscoveryState arch)
-mkFinalCFGWithSyms ainfo disOpt mem initEntries symMap = withArchConstraints ainfo $ do
-  let initState
-        = emptyDiscoveryState mem symMap ainfo
-        & markAddrsAsFunction InitAddr initEntries
-  -- Add symbol table entries to discovery state if requested
-  let postSymState
-        | exploreFunctionSymbols disOpt =
-            initState & markAddrsAsFunction InitAddr (Map.keys symMap)
-        | otherwise = initState
-  -- Discover functions
-  postPhase1Discovery <- resolveFuns disOpt symMap postSymState
-  -- Discovery functions from memory
-  if exploreCodeAddrInMem disOpt then do
-    let mem_contents = withArchConstraints ainfo $ memAsAddrPairs mem LittleEndian
-    resolveFuns disOpt symMap $ postPhase1Discovery & exploreMemPointers mem_contents
-   else
-    return postPhase1Discovery
-
 -- | Discover code in the binary identified by the given path.
 discoverBinary :: FilePath
                -> DiscoveryOptions -- ^ Options controlling discovery
@@ -190,7 +204,7 @@ discoverBinary path disOpt = do
     initElfDiscoveryInfo (discoveryLoadOptions disOpt) e
   mapM_ (hPutStrLn stderr) warnings
   let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-  Some <$> mkFinalCFGWithSyms ainfo disOpt mem (maybeToList entry) addrSymMap
+  Some <$> discoverFunctions ainfo disOpt mem (maybeToList entry) addrSymMap
 
 $(pure [])
 
@@ -368,7 +382,7 @@ discoverX86Binary path disOpt = do
   os <- getX86ElfArchInfo e
   let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
   let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
-  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
+  finalState <- discoverFunctions (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
   pure (os, finalState, addrSymMap, symAddrMap)
 
 -- | Create a discovery state and symbol-address map
@@ -388,5 +402,5 @@ discoverX86Elf path disOpt = do
   os <- getX86ElfArchInfo e
   let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
   let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
-  finalState <- mkFinalCFGWithSyms (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
+  finalState <- discoverFunctions (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
   pure (e, os, finalState, addrSymMap, symAddrMap)

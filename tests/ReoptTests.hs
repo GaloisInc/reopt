@@ -23,8 +23,8 @@ reoptTests = T.testGroup "reopt" . map mkTest
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ putStrLn "dummy test"
 
-withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
-withELF fp k = do
+_withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
+_withELF fp k = do
   bytes <- B.readFile fp
   case E.parseElf bytes of
     E.ElfHeaderError off msg ->
@@ -34,15 +34,16 @@ withELF fp k = do
     E.Elf32Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
     E.Elf64Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
 
-withMemory :: forall w m a
+_withMemory :: forall w m a
             . (C.MonadThrow m, MM.MemWidth w, Integral (E.ElfWordType w))
            => E.Elf w
            -> (MM.Memory w -> m a)
            -> m a
-withMemory e k = do
-  let opt = MM.LoadOptions { MM.loadRegionIndex = 0
-                           , MM.loadStyle = MM.LoadBySegment
-                           , MM.includeBSS = True }
+_withMemory e k = do
+  let opt = MM.LoadOptions { MM.loadRegionIndex = Just 0
+                           , MM.loadStyleOverride = Just MM.LoadBySegment
+                           , MM.includeBSS = True
+                           }
   case MM.memoryForElf opt e of
     Left err -> C.throwM (MemoryLoadError err)
     Right (_sim, mem) -> k mem

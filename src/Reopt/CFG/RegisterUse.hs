@@ -34,7 +34,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
-import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
