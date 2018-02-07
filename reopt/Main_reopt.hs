@@ -30,6 +30,7 @@ import           Data.String (fromString)
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
+import           Numeric
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (doesFileExist)
 import           System.Environment (getArgs)
@@ -41,8 +42,8 @@ import           System.IO.Temp
 import           System.Posix.Files
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
-import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
+import qualified Text.PrettyPrint.HughesPJ as HPJ
 
 import           Paths_reopt (getLibDir, version)
 
@@ -165,7 +166,8 @@ data Args
             -- ^ Path to libreopt for providing support to different LLVM functions.
           , _notransAddrs :: !(Set String)
             -- ^ Set of function entry points that we ignore for translation.
-
+          , _loadOpts :: !LoadOptions
+            -- ^ Options affecting initial memory construction
           , _discOpts :: !DiscoveryOptions
             -- ^ Options affecting discovery
           }
@@ -226,7 +228,11 @@ libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
 notransAddrs :: Simple Lens Args (Set String)
 notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
 
--- | Set of function entry points that we ignore for translation.
+-- | Options for controlling loading binaries to memory.
+loadOpts :: Simple Lens Args LoadOptions
+loadOpts = lens _loadOpts (\s v -> s { _loadOpts = v })
+
+-- | Options for controlling discovery
 discOpts :: Simple Lens Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
@@ -251,25 +257,67 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
                    , _notransAddrs = Set.empty
+                   , _loadOpts     = defaultLoadOptions
                    , _discOpts     = defaultDiscoveryOptions
                    }
 
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
-  Some disc_info <- discoverBinary (args^.programPath) (args^.discOpts)
+  Some disc_info <-
+    discoverBinary (args^.programPath) (args^.loadOpts) (args^.discOpts)
   pure $ show $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
   (os, s, _, symAddrMap) <-
-    discoverX86Binary (args^.programPath) (args^.discOpts)
+    discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
   fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
+------------------------------------------------------------------------
 -- Flags
+
+------------------------------------------------------------------------
+-- Loading flags
+
+loadBySegmentFlag :: Flag Args
+loadBySegmentFlag = flagNone [ "load-segments" ] upd help
+  where upd = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySegment }
+        help = "Load the Elf file using segment information (default)."
+
+loadBySectionFlag :: Flag Args
+loadBySectionFlag = flagNone [ "load-sections" ] upd help
+  where upd  = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySection }
+        help = "Load the Elf file using section information."
+
+resolveHex :: String -> Maybe Integer
+resolveHex ('0':'x':wval) | [(w,"")] <- readHex wval = Just w
+resolveHex ('0':'X':wval) | [(w,"")] <- readHex wval = Just w
+resolveHex _ = Nothing
+
+-- | Define a flag that forces the region index to 0 and adjusts
+-- the base pointer address.
+--
+-- Primarily used for loading shared libraries at a fixed address.
+loadForceAbsoluteFlag :: Flag Args
+loadForceAbsoluteFlag = flagReq [ "force-absolute" ] upd "OFFSET" help
+  where help = "Load a Elf file at a given concrete offset."
+        upd :: String -> Args -> Either String Args
+        upd val args =
+          case resolveHex val of
+            Just off -> Right $
+               args & loadOpts %~ \opt -> opt { loadRegionIndex = Just 0
+                                              , loadRegionBaseOffset = off
+                                              }
+            Nothing -> Left $
+              "Expected a hexadecimal address of form '0x???', passsed "
+              ++ show val
+
+------------------------------------------------------------------------
+-- Other Flags
 
 disassembleFlag :: Flag Args
 disassembleFlag = flagNone [ "disassemble", "d" ] upd help
@@ -305,16 +353,6 @@ relinkFlag :: Flag Args
 relinkFlag = flagNone [ "relink" ] upd help
   where upd  = reoptAction .~ Relink
         help = "Link a binary with new object code."
-
-segmentFlag :: Flag Args
-segmentFlag = flagNone [ "load-segments" ] upd help
-  where upd = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySegment }
-        help = "Load the Elf file using segment information (default)."
-
-sectionFlag :: Flag Args
-sectionFlag = flagNone [ "load-sections" ] upd help
-  where upd  = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySection }
-        help = "Load the Elf file using section information."
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -425,8 +463,9 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , llvmVersionFlag
                 , funFlag
-                , segmentFlag
-                , sectionFlag
+                , loadBySegmentFlag
+                , loadBySectionFlag
+                , loadForceAbsoluteFlag
                 , debugFlag
                 , relinkFlag
                 , newobjFlag
@@ -703,20 +742,20 @@ performReopt args =
         writeFile output_path =<< showCFG args
       ".fns" -> do
         (os, disc_info, _, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
         fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
         (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
         fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
         (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
         fns <- getFns (osPersonality os) symAddrMap  (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
@@ -730,7 +769,7 @@ performReopt args =
         exitFailure
       _ -> do
         (orig_binary, os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Elf (args^.programPath) (args^.discOpts)
+          discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts)
         fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
@@ -772,7 +811,7 @@ main' = do
   case args^.reoptAction of
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
-    ShowCFG -> print =<< showCFG args
+    ShowCFG -> putStrLn =<< showCFG args
     ShowFunctions -> do
       showFunctions args
     ShowHelp -> do
