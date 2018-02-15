@@ -24,8 +24,6 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Monoid
 import           Data.Parameterized.Some
-import           Data.Set (Set)
-import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Version
 import           Data.Word
@@ -164,8 +162,10 @@ data Args
             -- This is used when linking the generated LLVM with libreopt.
           , _libreoptPath :: !(Maybe FilePath)
             -- ^ Path to libreopt for providing support to different LLVM functions.
-          , _notransAddrs :: !(Set String)
-            -- ^ Set of function entry points that we ignore for translation.
+          , _includeAddrs   :: ![String]
+            -- ^ List of entry points for translation
+          , _excludeAddrs :: ![String]
+            -- ^ List of function entry points that we exclude for translation.
           , _loadOpts :: !LoadOptions
             -- ^ Options affecting initial memory construction
           , _discOpts :: !DiscoveryOptions
@@ -224,9 +224,13 @@ llvmLinkPath = lens _llvmLinkPath (\s v -> s { _llvmLinkPath = v })
 libreoptPath :: Simple Lens Args (Maybe FilePath)
 libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
 
--- | Set of function entry points that we ignore for translation.
-notransAddrs :: Simple Lens Args (Set String)
-notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
+-- | Function entry points to translate (overrides notrans if non-empty)
+includeAddrs :: Simple Lens Args [String]
+includeAddrs = lens _includeAddrs (\s v -> s { _includeAddrs = v })
+
+-- | Function entry points that we exclude for translation.
+excludeAddrs :: Simple Lens Args [String]
+excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 
 -- | Options for controlling loading binaries to memory.
 loadOpts :: Simple Lens Args LoadOptions
@@ -256,7 +260,8 @@ defaultArgs = Args { _reoptAction = Reopt
 
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
-                   , _notransAddrs = Set.empty
+                   , _includeAddrs = []
+                   , _excludeAddrs  = []
                    , _loadOpts     = defaultLoadOptions
                    , _discOpts     = defaultDiscoveryOptions
                    }
@@ -265,14 +270,14 @@ defaultArgs = Args { _reoptAction = Reopt
 showCFG :: Args -> IO String
 showCFG args = do
   Some disc_info <-
-    discoverBinary (args^.programPath) (args^.loadOpts) (args^.discOpts)
+    discoverBinary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   pure $ show $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  (os, s, _, symAddrMap) <-
-    discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
-  fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) s
+  (os, s, _) <-
+    discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+  fns <- getFns (osPersonality os) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
@@ -428,11 +433,17 @@ libreoptFlag = flagReq [ "lib" ] upd "PATH" help
   where upd s old = Right $ old & libreoptPath .~ Just s
         help = "Path to libreopt.bc."
 
--- | Used to add a new no-translate add
-notransFlag :: Flag Args
-notransFlag = flagReq [ "notrans" ] upd "ADDR" help
-  where upd s old = Right $ old & notransAddrs %~ Set.insert s
-        help = "Address of function to omit from translation (may be repeated)."
+-- | Used to add a new function to ignore translation of.
+includeAddrFlag :: Flag Args
+includeAddrFlag = flagReq [ "include" ] upd "ADDR" help
+  where upd s old = Right $ old & includeAddrs %~ (s:)
+        help = "Address of function to include in analysis (may be repeated)."
+
+-- | Used to add a new function to ignore translation of.
+excludeAddrFlag :: Flag Args
+excludeAddrFlag = flagReq [ "exclude" ] upd "ADDR" help
+  where upd s old = Right $ old & excludeAddrs %~ (s:)
+        help = "Address of function to exclude in analysis (may be repeated)."
 
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeFunctionFlag :: Flag Args
@@ -477,7 +488,8 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , optLevelFlag
                 , llvmLinkFlag
                 , libreoptFlag
-                , notransFlag
+                , includeAddrFlag
+                , excludeAddrFlag
                 , flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 , logAtAnalyzeFunctionFlag
@@ -741,22 +753,22 @@ performReopt args =
       ".blocks" -> do
         writeFile output_path =<< showCFG args
       ".fns" -> do
-        (os, disc_info, _, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+        (os, disc_info, _) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
-        (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+        (os, disc_info, addrSymMap) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
-        (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap  (args^.notransAddrs) disc_info
+        (os, disc_info, addrSymMap) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
@@ -769,8 +781,8 @@ performReopt args =
         exitFailure
       _ -> do
         (orig_binary, os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+          discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
@@ -793,7 +805,7 @@ performReopt args =
         let extra_addrs :: SymbolNameToAddrMap Word64
             extra_addrs = Map.fromList
               [ (fromString "reopt_gen_" `BS.append` nm, w)
-              | Right binary_nm <- resolveSymName <$> Set.toList (args^.notransAddrs)
+              | Right binary_nm <- resolveSymName <$> args^.excludeAddrs
               , Just addr <- [Map.lookup (fromString binary_nm) symAddrMap]
               , let w :: Word64
                     w = case msegAddr addr of

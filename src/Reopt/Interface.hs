@@ -35,7 +35,6 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Parameterized.Some
-import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Word
@@ -91,22 +90,94 @@ getElfArchInfo e =
             ++ show arch ++ "-" ++ show abi ++ "binaries."
 
 ------------------------------------------------------------------------
+-- Resolve symbol addresses
+
+-- | Resolve a hex string or other string as a address of symbol name.
+resolveSymName :: String -> Either Word64 String
+resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
+resolveSymName ('0':'X': nm) | [(w,"")] <- readHex nm = Left w
+resolveSymName nm = Right nm
+
+-- | Attempt to find the address of a string identifying a symbol name, and
+-- return either the string if it cannot be resolved or the address.
+resolveSymAddr :: Memory w
+               -> Map BS.ByteString (MemSegmentOff w)
+                 -- ^ Map from symbol names in binary to their address.
+              -> String
+                 -- ^ The name of a symbol as a string.
+              -> Either String (MemSegmentOff w)
+resolveSymAddr mem symMap nm0 = addrWidthClass (memAddrWidth mem) $
+  case resolveSymName nm0 of
+    Left w ->
+      case resolveAbsoluteAddr mem (fromIntegral w) of
+        Just off -> Right off
+        Nothing -> Left nm0
+    Right nm -> do
+      case Map.lookup (fromString nm) symMap of
+         Just addr -> Right addr
+         Nothing -> Left nm
+
+-- \
+resolveIncludeFn :: Memory w
+                 -> Map BS.ByteString (MemSegmentOff w)
+                 -> [String] -- ^ Addresses to include
+                 -> [String]
+                 -> IO ([MemSegmentOff w], (MemSegmentOff w -> Bool)
+resolveIncludeFn mem symMap [] excludeNames = do
+  let (bad, excludeAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> excludeNames
+  when (not (null bad)) $ do
+    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
+  let s = Set.fromList excludeAddrs
+  pure ([], (`Set.notMember` s))
+resolveIncludeFn mem symMap includeNames [] = do
+  let (bad, includeAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> includeNames
+  when (not (null bad)) $ do
+    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
+  let s = Set.fromList includeAddrs
+  pure $ (includeAddrs, (`Set.member` s))
+resolveIncludeFn _ _ _ _ = do
+  fail "Cannot both include and exclude specific addresses."
+
+runCompleteDiscovery :: ArchitectureInfo arch
+                     -> DiscoveryOptions
+                     -- ^ Options controlling discovery
+                     -> Memory (ArchAddrWidth arch)
+                     -> Maybe (ArchSegmentOff arch)
+                     -> [MemSymbol (ArchAddrWidth arch)]
+                        -- ^ Symbols
+                     -> [String] -- ^ Included addresses
+                     -> [String] -- ^ Excluded addresses
+                     -> IO ( DiscoveryState arch
+                           , AddrSymMap (ArchAddrWidth arch)
+                           , Map BS.ByteString (ArchSegmentOff arch)
+                           )
+runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr = do
+  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
+  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
+  fnPred <- resolveIncludeFn mem symAddrMap includeAddr excludeAddr
+  let initEntries = maybeToList entry
+  s <- completeDiscoveryState ainfo disOpt mem (maybeToList entry) addrSymMap fnPred
+  pure (s, addrSymMap, symAddrMap)
+
+------------------------------------------------------------------------
 -- Explore a control flow graph.
 
 -- | Discover code in the binary identified by the given path.
 discoverBinary :: FilePath
                -> LoadOptions -- ^ Options controlling loading
                -> DiscoveryOptions -- ^ Options controlling discovery
+               -> [String] -- ^ Included addresses
+               -> [String] -- ^ Excluded addresses
                -> IO (Some DiscoveryState)
-discoverBinary path loadOpts disOpt = do
+discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
   Some e <- readSomeElf path
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   (warnings, mem, entry, symbols) <- either fail pure $
     initElfDiscoveryInfo loadOpts e
   mapM_ (hPutStrLn stderr) warnings
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-  Some <$> completeDiscoveryState ainfo disOpt mem (maybeToList entry) addrSymMap
+  (s, _,_) <- runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr
+  pure (Some s)
 
 $(pure [])
 
@@ -172,31 +243,6 @@ getX86ElfArchInfo e =
     ELFOSABI_NETBSD  -> pure FreeBSD
     abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
--- | Resolve a hex string or other string as a address of symbol name.
-resolveSymName :: String -> Either Word64 String
-resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
-resolveSymName ('0':'X': nm) | [(w,"")] <- readHex nm = Left w
-resolveSymName nm = Right nm
-
--- | Attempt to find the address of a string identifying a symbol name, and
--- return either the string if it cannot be resolved or the address.
-resolveSymAddr :: Memory w
-               -> Map BS.ByteString (MemSegmentOff w)
-                 -- ^ Map from symbol names in binary to their address.
-              -> String
-                 -- ^ The name of a symbol as a string.
-              -> Either String (MemSegmentOff w)
-resolveSymAddr mem symMap nm0 = addrWidthClass (memAddrWidth mem) $
-  case resolveSymName nm0 of
-    Left w ->
-      case resolveAbsoluteAddr mem (fromIntegral w) of
-        Just off -> Right off
-        Nothing -> Left nm0
-    Right nm -> do
-      case Map.lookup (fromString nm) symMap of
-         Just addr -> Right addr
-         Nothing -> Left nm
-
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
                              -> Map (MemSegmentOff 64) FunctionType
 inferFunctionTypeFromDemands dm =
@@ -228,28 +274,14 @@ inferFunctionTypeFromDemands dm =
 -- | Try to recover function information from the information
 -- recovered during code discovery.
 getFns :: SyscallPersonality
-       -> Map BS.ByteString (MemSegmentOff 64)
-          -- ^ Maps symbol names to addresses
-       -> Set String
-          -- ^ Name of symbols/addresses to exclude
        -> DiscoveryState X86_64
           -- ^ Information about original binary recovered from static analysis.
        -> IO [Function]
-getFns sysp symMap excludedNames info = do
+getFns sysp info = do
 
   let mem = memory info
-  -- Compute which functions to compute by looking at the binary
-  let nms = Set.toList excludedNames
-  let (bad, excludedAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> nms
-  when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
 
-  let excludeSet = Set.fromList excludedAddrs
-  -- Check that the address of the function is not one that we are excluding.
-  let include :: Some (DiscoveryFunInfo X86_64) -> Bool
-      include (Some f) = Set.notMember (discoveredFunAddr f) excludeSet
-
-  let entries = filter include $ exploredFunctions info
+  let entries = exploredFunctions info
 
   let fDems :: Map (MemSegmentOff 64) (DemandSet X86Reg)
       fDems = functionDemands (x86DemandInfo sysp) info
@@ -274,39 +306,40 @@ getFns sysp symMap excludedNames info = do
 discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
                   -> LoadOptions -- ^ Options controling loading
                   -> DiscoveryOptions -- ^ Options controlling discovery
+                  -> [String] -- ^ Included addresses
+                  -> [String] -- ^ Excluded addresses
                   -> IO ( X86OS
                         , DiscoveryState X86_64
                         , AddrSymMap 64
-                        , Map BS.ByteString (MemSegmentOff 64)
                         )
-discoverX86Binary path loadOpts disOpt = do
+discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
     initElfDiscoveryInfo loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
-  finalState <- completeDiscoveryState (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
-  pure (os, finalState, addrSymMap, symAddrMap)
+  (finalState, addrSymMap, _) <-
+    runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
+  pure (os, finalState, addrSymMap)
 
 -- | Create a discovery state and symbol-address map
 discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
                -> LoadOptions -- ^ Options controling loading
                -> DiscoveryOptions -- ^ Options controlling discovery
+               -> [String] -- ^ Included addresses
+               -> [String] -- ^ Excluded addresses
                -> IO ( Elf 64
                      , X86OS
                      , DiscoveryState X86_64
                      , AddrSymMap 64
                      , Map BS.ByteString (MemSegmentOff 64)
                      )
-discoverX86Elf path loadOpts disOpt = do
+discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
     initElfDiscoveryInfo loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-  let symAddrMap = Map.fromList [ (memSymbolName msym, memSymbolStart msym) | msym <- symbols ]
-  finalState <- completeDiscoveryState (osArchitectureInfo os) disOpt mem (maybeToList entry) addrSymMap
+  (finalState, addrSymMap, symAddrMap) <-
+    runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
   pure (e, os, finalState, addrSymMap, symAddrMap)
