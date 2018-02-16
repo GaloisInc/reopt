@@ -309,7 +309,7 @@ resolveHex _ = Nothing
 -- Primarily used for loading shared libraries at a fixed address.
 loadForceAbsoluteFlag :: Flag Args
 loadForceAbsoluteFlag = flagReq [ "force-absolute" ] upd "OFFSET" help
-  where help = "Load a Elf file at a given concrete offset."
+  where help = "Load a relocatable file at a fixed offset."
         upd :: String -> Args -> Either String Args
         upd val args =
           case resolveHex val of
@@ -354,11 +354,6 @@ funFlag = flagNone [ "functions", "f" ] upd help
   where upd  = reoptAction .~ ShowFunctions
         help = "Print out functions after stack and argument recovery."
 
-relinkFlag :: Flag Args
-relinkFlag = flagNone [ "relink" ] upd help
-  where upd  = reoptAction .~ Relink
-        help = "Link a binary with new object code."
-
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
   case cl of
@@ -382,54 +377,45 @@ debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
             ++ "means disable that key.\n"
             ++ "Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
 
-newobjFlag :: Flag Args
-newobjFlag = flagReq [ "new" ] upd "PATH" help
-  where upd s old = Right $ old & newobjPath .~ s
-        help = "Path to new object code to link into existing binary."
-
-redirFlag :: Flag Args
-redirFlag = flagReq [ "r", "redirections" ] upd "PATH" help
-  where upd s old = Right $ old & redirPath .~ s
-        help = "Path to redirections JSON file that specifies where to patch existing code."
-
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
   where upd s old = Right $ old & outputPath .~ s
         help = "Path to write new binary."
 
-gasFlag :: Flag Args
-gasFlag = flagReq [ "gas" ] upd "PATH" help
-  where upd s old = Right $ old & gasPath .~ s
-        help = "Path to GNU assembler."
+-- | Flag to set path to opt.
+optPathFlag :: Flag Args
+optPathFlag = flagReq [ "opt" ] upd "PATH" help
+  where upd s old = Right $ old & optPath .~ s
+        help = "Path to LLVM \"opt\" command for optimization."
 
 -- | Flag to set llc path.
 llcPathFlag :: Flag Args
 llcPathFlag = flagReq [ "llc" ] upd "PATH" help
   where upd s old = Right $ old & llcPath .~ s
-        help = "Path to llc."
+        help = "Path to LLVM \"llc\" command for compiling LLVM to native assembly."
 
--- | Flag to set path to opt.
-optFlag :: Flag Args
-optFlag = flagReq [ "opt" ] upd "PATH" help
-  where upd s old = Right $ old & optPath .~ s
-        help = "Path to opt."
+-- | Flag to set path to GNU assembler
+gasPathFlag :: Flag Args
+gasPathFlag = flagReq [ "gas" ] upd "PATH" help
+  where upd s old = Right $ old & gasPath .~ s
+        help = "Path to GNU assembler."
 
 -- | Flag to set llc optimization level.
 optLevelFlag :: Flag Args
-optLevelFlag = flagReq [ "opt-level" ] upd "PATH" help
+optLevelFlag = flagReq [ "O", "opt-level" ] upd "PATH" help
   where upd s old =
           case reads s of
             [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & optLevel .~ lvl
             _ -> Left "Expected optimization level to be a number between 0 and 3."
         help = "Optimization level."
 
-llvmLinkFlag :: Flag Args
-llvmLinkFlag = flagReq [ "llvm-link" ] upd "PATH" help
+llvmLinkPathFlag :: Flag Args
+llvmLinkPathFlag = flagReq [ "llvm-link" ] upd "PATH" help
   where upd s old = Right $ old & llvmLinkPath .~ s
         help = "Path to llvm-link."
 
-libreoptFlag :: Flag Args
-libreoptFlag = flagReq [ "lib" ] upd "PATH" help
+libreoptPathFlag :: Flag Args
+libreoptPathFlag = flagReq [ "libreopt" ] upd "PATH" help
   where upd s old = Right $ old & libreoptPath .~ Just s
         help = "Path to libreopt.bc."
 
@@ -449,13 +435,13 @@ excludeAddrFlag = flagReq [ "exclude" ] upd "ADDR" help
 logAtAnalyzeFunctionFlag :: Flag Args
 logAtAnalyzeFunctionFlag = flagBool [ "trace-function-discovery" ] upd help
   where upd b = discOpts %~ \o -> o { logAtAnalyzeFunction = b }
-        help = "Log when starting analysis of a discovered function."
+        help = "Report when starting analysis of each function."
 
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeBlockFlag :: Flag Args
 logAtAnalyzeBlockFlag = flagBool [ "trace-block-discovery" ] upd help
   where upd b = discOpts %~ \o -> o { logAtAnalyzeBlock = b }
-        help = "Log when starting analysis of a discovered block within a function."
+        help = "Report when starting analysis of each basic block with a function."
 
 exploreFunctionSymbolsFlag :: Flag Args
 exploreFunctionSymbolsFlag = flagBool [ "include-syms" ] upd help
@@ -467,35 +453,59 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
   where upd b = discOpts %~ \o -> o { exploreCodeAddrInMem = b }
         help = "Include memory code addresses in discovery."
 
+relinkFlag :: Flag Args
+relinkFlag = flagNone [ "r", "relink" ] upd help
+  where upd  = reoptAction .~ Relink
+        help = "Only run relinker with existing object file, binary, and a patch file"
+
+objectPathFlag :: Flag Args
+objectPathFlag = flagReq [ "object" ] upd "PATH" help
+  where upd s old = Right $ old & newobjPath .~ s
+        help = "Path to new object code to link into existing binary."
+
+patchFilePathFlag :: Flag Args
+patchFilePathFlag = flagReq [ "patch-file" ] upd "PATH" help
+  where upd s old = Right $ old & redirPath .~ s
+        help = "Path to JSON file that specifies where to patch existing code."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
-        flags = [ disassembleFlag
-                , cfgFlag
-                , llvmVersionFlag
-                , funFlag
-                , loadBySegmentFlag
-                , loadBySectionFlag
-                , loadForceAbsoluteFlag
-                , debugFlag
-                , relinkFlag
-                , newobjFlag
-                , redirFlag
-                , outputFlag
-                , gasFlag
-                , llcPathFlag
-                , optFlag
-                , optLevelFlag
-                , llvmLinkFlag
-                , libreoptFlag
-                , includeAddrFlag
-                , excludeAddrFlag
-                , flagHelpSimple (reoptAction .~ ShowHelp)
+        flags = [ -- General purpose options
+                  flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
+                , debugFlag
+                  -- Redirect output to file.
+                , outputFlag
+                  -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
                 , exploreFunctionSymbolsFlag
                 , exploreCodeAddrInMemFlag
+                , includeAddrFlag
+                , excludeAddrFlag
+                  -- Loading options
+                , loadBySegmentFlag
+                , loadBySectionFlag
+                , loadForceAbsoluteFlag
+                  -- LLVM options
+                , llvmVersionFlag
+                  -- Compilation options
+                , optLevelFlag
+                , optPathFlag
+                , llcPathFlag
+                , gasPathFlag
+                  -- Final relinking options
+                , llvmLinkPathFlag
+                , libreoptPathFlag
+                  -- Explicit Modes
+                , disassembleFlag
+                , cfgFlag
+                , funFlag
+                  -- Options for explicit relinking options
+                , relinkFlag
+                , objectPathFlag
+                , patchFilePathFlag
                 ]
 
 reoptVersion :: String
@@ -550,6 +560,8 @@ mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
                .|. otherExecuteMode
          setFileMode output_path (fileMode fs `unionFileModes` fm)
 
+-- | This is a mode for Reopt to just test that the relinker can successfully
+-- combine two binaries.
 performRelink :: Args -> IO ()
 performRelink args = do
   -- Get original binary
@@ -806,7 +818,7 @@ performReopt args =
             extra_addrs = Map.fromList
               [ (fromString "reopt_gen_" `BS.append` nm, w)
               | Right binary_nm <- resolveSymName <$> args^.excludeAddrs
-              , Just addr <- [Map.lookup (fromString binary_nm) symAddrMap]
+              , Just (addr:_) <- [Map.lookup (fromString binary_nm) symAddrMap]
               , let w :: Word64
                     w = case msegAddr addr of
                           Just b -> fromIntegral b
@@ -815,6 +827,7 @@ performReopt args =
               , Just nm <- [Map.lookup addr addrSymMap]
               ]
         mergeAndWrite (args^.outputPath) orig_binary new_obj extra_addrs redirs
+
 
 main' :: IO ()
 main' = do
@@ -827,7 +840,7 @@ main' = do
     ShowFunctions -> do
       showFunctions args
     ShowHelp -> do
-      print $ helpText [] HelpFormatDefault arguments
+      print $ helpText [] HelpFormatAll arguments
     ShowVersion ->
       putStrLn (modeHelp arguments)
     Relink -> do
