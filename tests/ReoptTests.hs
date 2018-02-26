@@ -41,6 +41,7 @@ _withMemory :: forall w m a
            -> m a
 _withMemory e k = do
   let opt = MM.LoadOptions { MM.loadRegionIndex = Just 0
+                           , MM.loadRegionBaseOffset = 0
                            , MM.loadStyleOverride = Just MM.LoadBySegment
                            , MM.includeBSS = True
                            }
