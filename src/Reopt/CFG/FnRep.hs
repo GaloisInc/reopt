@@ -59,6 +59,7 @@ import           Data.Macaw.CFG
    , ArchReg
    , IsArchFn(..)
    , IsArchStmt(..)
+   , MemRepr(..)
    )
 import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
@@ -177,7 +178,7 @@ data FnAssignRhs (arch :: *) (tp :: Type) where
   FnReadMem :: !(FnValue arch (BVType (ArchAddrWidth arch)))
             -> !(TypeRepr tp)
             -> FnAssignRhs arch tp
-  FnCondReadMem :: !(TypeRepr tp)
+  FnCondReadMem :: !(MemRepr tp)
                 -> !(FnValue arch BoolType)
                 -> !(FnValue arch (BVType (ArchAddrWidth arch)))
                 -> !(FnValue arch tp)
@@ -285,7 +286,7 @@ instance FnArchConstraints arch => HasRepr (FnAssignRhs arch) TypeRepr where
     case rhs of
       FnSetUndefined tp -> tp
       FnReadMem _ tp -> tp
-      FnCondReadMem tp _ _ _ -> tp
+      FnCondReadMem tp _ _ _ -> typeRepr tp
       FnEvalApp a    -> typeRepr a
       FnAlloca _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnEvalArchFn f -> typeRepr f

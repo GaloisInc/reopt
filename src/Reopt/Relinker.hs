@@ -23,7 +23,7 @@ module Reopt.Relinker
   , hasRelinkWarnings
     -- * Utilities
   , SectionAddrMap
-  , objectSectionAddr
+--  , objectSectionAddr
   ) where
 
 import           Control.Exception (assert)
@@ -366,6 +366,7 @@ data ObjectRelocationInfo (w :: *)
      , binarySymbolMap :: !(SymbolNameToAddrMap w)
      }
 
+{-
 -- | This returns the base address of a section in the file.
 objectSectionAddr :: String
                   -> Word16
@@ -375,6 +376,7 @@ objectSectionAddr src idx m =
   case Map.lookup idx m of
     Nothing -> error $ src ++ " refers to an unmapped section index " ++ show idx ++ "."
     Just r -> r
+-}
 
 -- | A symbol table entry in the new object.
 newtype NewObjectSymbolTableEntry w = NOSTE (ElfSymbolTableEntry w)
@@ -397,24 +399,24 @@ symbolAddr :: (Eq w, Num w)
            -> NewObjectSymbolTableEntry w
               -- ^ The symbol table entry in the new object.
            -> Maybe w
-symbolAddr reloc_info src (NOSTE sym) =
+symbolAddr reloc_info _src (NOSTE sym) =
   case steType sym of
     STT_SECTION
       | steValue sym /= 0 ->
         error "symbolAddr expects section names to have 0 offset."
       | steIndex sym == SHN_UNDEF ->
-        error "Reference to undefined section."
+          error "Reference to undefined section."
       | otherwise ->
         case steIndex sym of
           ElfSectionIndex sec_idx ->
-            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info))
+            Map.lookup sec_idx (objectSectionMap reloc_info)
     STT_FUNC
       | steIndex sym == SHN_UNDEF ->
         error "Function symbol has undefined section."
       | otherwise ->
         case steIndex sym of
           ElfSectionIndex sec_idx ->
-            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info) + steValue sym)
+             (+ steValue sym) <$> Map.lookup sec_idx (objectSectionMap reloc_info)
     STT_NOTYPE
       | steIndex sym == SHN_UNDEF ->
         case Map.lookup (steName sym) (binarySymbolMap reloc_info) of
@@ -423,7 +425,7 @@ symbolAddr reloc_info src (NOSTE sym) =
       | otherwise ->
         case steIndex sym of
           ElfSectionIndex sec_idx ->
-            Just (objectSectionAddr src sec_idx (objectSectionMap reloc_info) + steValue sym)
+            (+ steValue sym) <$> Map.lookup sec_idx (objectSectionMap reloc_info)
     tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
 
 type ObjRelocM s w = StateT (ObjRelocState w) (ST s)

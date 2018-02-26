@@ -50,7 +50,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.State
-import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
@@ -319,7 +318,7 @@ recoverAssign asgn = do
           ReadMem addr tp ->
             (`FnReadMem` (typeRepr tp)) <$> recoverValue addr
           CondReadMem tp cond addr def ->
-            FnCondReadMem (typeRepr tp)
+            FnCondReadMem tp
             <$> recoverValue cond
             <*> recoverValue addr
             <*> recoverValue def

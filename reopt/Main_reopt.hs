@@ -24,12 +24,11 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Monoid
 import           Data.Parameterized.Some
-import           Data.Set (Set)
-import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
+import           Numeric
 import           System.Console.CmdArgs.Explicit
 import           System.Directory (doesFileExist)
 import           System.Environment (getArgs)
@@ -41,8 +40,8 @@ import           System.IO.Temp
 import           System.Posix.Files
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
-import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
+import qualified Text.PrettyPrint.HughesPJ as HPJ
 
 import           Paths_reopt (getLibDir, version)
 
@@ -163,9 +162,12 @@ data Args
             -- This is used when linking the generated LLVM with libreopt.
           , _libreoptPath :: !(Maybe FilePath)
             -- ^ Path to libreopt for providing support to different LLVM functions.
-          , _notransAddrs :: !(Set String)
-            -- ^ Set of function entry points that we ignore for translation.
-
+          , _includeAddrs   :: ![String]
+            -- ^ List of entry points for translation
+          , _excludeAddrs :: ![String]
+            -- ^ List of function entry points that we exclude for translation.
+          , _loadOpts :: !LoadOptions
+            -- ^ Options affecting initial memory construction
           , _discOpts :: !DiscoveryOptions
             -- ^ Options affecting discovery
           }
@@ -222,11 +224,19 @@ llvmLinkPath = lens _llvmLinkPath (\s v -> s { _llvmLinkPath = v })
 libreoptPath :: Simple Lens Args (Maybe FilePath)
 libreoptPath = lens _libreoptPath (\s v -> s { _libreoptPath = v })
 
--- | Set of function entry points that we ignore for translation.
-notransAddrs :: Simple Lens Args (Set String)
-notransAddrs = lens _notransAddrs (\s v -> s { _notransAddrs = v })
+-- | Function entry points to translate (overrides notrans if non-empty)
+includeAddrs :: Simple Lens Args [String]
+includeAddrs = lens _includeAddrs (\s v -> s { _includeAddrs = v })
 
--- | Set of function entry points that we ignore for translation.
+-- | Function entry points that we exclude for translation.
+excludeAddrs :: Simple Lens Args [String]
+excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
+
+-- | Options for controlling loading binaries to memory.
+loadOpts :: Simple Lens Args LoadOptions
+loadOpts = lens _loadOpts (\s v -> s { _loadOpts = v })
+
+-- | Options for controlling discovery
 discOpts :: Simple Lens Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
@@ -250,26 +260,69 @@ defaultArgs = Args { _reoptAction = Reopt
 
                    , _llvmLinkPath = "llvm-link"
                    , _libreoptPath = Nothing
-                   , _notransAddrs = Set.empty
+                   , _includeAddrs = []
+                   , _excludeAddrs  = []
+                   , _loadOpts     = defaultLoadOptions
                    , _discOpts     = defaultDiscoveryOptions
                    }
 
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
-  Some disc_info <- discoverBinary (args^.programPath) (args^.discOpts)
+  Some disc_info <-
+    discoverBinary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   pure $ show $ ppDiscoveryStateBlocks disc_info
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  (os, s, _, symAddrMap) <-
-    discoverX86Binary (args^.programPath) (args^.discOpts)
-  fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) s
+  (os, s, _) <-
+    discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+  fns <- getFns (osPersonality os) s
   hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
+------------------------------------------------------------------------
 -- Flags
+
+------------------------------------------------------------------------
+-- Loading flags
+
+loadBySegmentFlag :: Flag Args
+loadBySegmentFlag = flagNone [ "load-segments" ] upd help
+  where upd = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySegment }
+        help = "Load the Elf file using segment information (default)."
+
+loadBySectionFlag :: Flag Args
+loadBySectionFlag = flagNone [ "load-sections" ] upd help
+  where upd  = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySection }
+        help = "Load the Elf file using section information."
+
+resolveHex :: String -> Maybe Integer
+resolveHex ('0':'x':wval) | [(w,"")] <- readHex wval = Just w
+resolveHex ('0':'X':wval) | [(w,"")] <- readHex wval = Just w
+resolveHex _ = Nothing
+
+-- | Define a flag that forces the region index to 0 and adjusts
+-- the base pointer address.
+--
+-- Primarily used for loading shared libraries at a fixed address.
+loadForceAbsoluteFlag :: Flag Args
+loadForceAbsoluteFlag = flagReq [ "force-absolute" ] upd "OFFSET" help
+  where help = "Load a relocatable file at a fixed offset."
+        upd :: String -> Args -> Either String Args
+        upd val args =
+          case resolveHex val of
+            Just off -> Right $
+               args & loadOpts %~ \opt -> opt { loadRegionIndex = Just 0
+                                              , loadRegionBaseOffset = off
+                                              }
+            Nothing -> Left $
+              "Expected a hexadecimal address of form '0x???', passsed "
+              ++ show val
+
+------------------------------------------------------------------------
+-- Other Flags
 
 disassembleFlag :: Flag Args
 disassembleFlag = flagNone [ "disassemble", "d" ] upd help
@@ -301,21 +354,6 @@ funFlag = flagNone [ "functions", "f" ] upd help
   where upd  = reoptAction .~ ShowFunctions
         help = "Print out functions after stack and argument recovery."
 
-relinkFlag :: Flag Args
-relinkFlag = flagNone [ "relink" ] upd help
-  where upd  = reoptAction .~ Relink
-        help = "Link a binary with new object code."
-
-segmentFlag :: Flag Args
-segmentFlag = flagNone [ "load-segments" ] upd help
-  where upd = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySegment }
-        help = "Load the Elf file using segment information (default)."
-
-sectionFlag :: Flag Args
-sectionFlag = flagNone [ "load-sections" ] upd help
-  where upd  = discOpts %~ \opt -> opt { forceMemLoadStyle = Just LoadBySection }
-        help = "Load the Elf file using section information."
-
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
   case cl of
@@ -339,74 +377,71 @@ debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
             ++ "means disable that key.\n"
             ++ "Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
 
-newobjFlag :: Flag Args
-newobjFlag = flagReq [ "new" ] upd "PATH" help
-  where upd s old = Right $ old & newobjPath .~ s
-        help = "Path to new object code to link into existing binary."
-
-redirFlag :: Flag Args
-redirFlag = flagReq [ "r", "redirections" ] upd "PATH" help
-  where upd s old = Right $ old & redirPath .~ s
-        help = "Path to redirections JSON file that specifies where to patch existing code."
-
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
   where upd s old = Right $ old & outputPath .~ s
         help = "Path to write new binary."
 
-gasFlag :: Flag Args
-gasFlag = flagReq [ "gas" ] upd "PATH" help
-  where upd s old = Right $ old & gasPath .~ s
-        help = "Path to GNU assembler."
+-- | Flag to set path to opt.
+optPathFlag :: Flag Args
+optPathFlag = flagReq [ "opt" ] upd "PATH" help
+  where upd s old = Right $ old & optPath .~ s
+        help = "Path to LLVM \"opt\" command for optimization."
 
 -- | Flag to set llc path.
 llcPathFlag :: Flag Args
 llcPathFlag = flagReq [ "llc" ] upd "PATH" help
   where upd s old = Right $ old & llcPath .~ s
-        help = "Path to llc."
+        help = "Path to LLVM \"llc\" command for compiling LLVM to native assembly."
 
--- | Flag to set path to opt.
-optFlag :: Flag Args
-optFlag = flagReq [ "opt" ] upd "PATH" help
-  where upd s old = Right $ old & optPath .~ s
-        help = "Path to opt."
+-- | Flag to set path to GNU assembler
+gasPathFlag :: Flag Args
+gasPathFlag = flagReq [ "gas" ] upd "PATH" help
+  where upd s old = Right $ old & gasPath .~ s
+        help = "Path to GNU assembler."
 
 -- | Flag to set llc optimization level.
 optLevelFlag :: Flag Args
-optLevelFlag = flagReq [ "opt-level" ] upd "PATH" help
+optLevelFlag = flagReq [ "O", "opt-level" ] upd "PATH" help
   where upd s old =
           case reads s of
             [(lvl, "")] | 0 <= lvl && lvl <= 3 -> Right $ old & optLevel .~ lvl
             _ -> Left "Expected optimization level to be a number between 0 and 3."
         help = "Optimization level."
 
-llvmLinkFlag :: Flag Args
-llvmLinkFlag = flagReq [ "llvm-link" ] upd "PATH" help
+llvmLinkPathFlag :: Flag Args
+llvmLinkPathFlag = flagReq [ "llvm-link" ] upd "PATH" help
   where upd s old = Right $ old & llvmLinkPath .~ s
         help = "Path to llvm-link."
 
-libreoptFlag :: Flag Args
-libreoptFlag = flagReq [ "lib" ] upd "PATH" help
+libreoptPathFlag :: Flag Args
+libreoptPathFlag = flagReq [ "libreopt" ] upd "PATH" help
   where upd s old = Right $ old & libreoptPath .~ Just s
         help = "Path to libreopt.bc."
 
--- | Used to add a new no-translate add
-notransFlag :: Flag Args
-notransFlag = flagReq [ "notrans" ] upd "ADDR" help
-  where upd s old = Right $ old & notransAddrs %~ Set.insert s
-        help = "Address of function to omit from translation (may be repeated)."
+-- | Used to add a new function to ignore translation of.
+includeAddrFlag :: Flag Args
+includeAddrFlag = flagReq [ "include" ] upd "ADDR" help
+  where upd s old = Right $ old & includeAddrs %~ (s:)
+        help = "Address of function to include in analysis (may be repeated)."
+
+-- | Used to add a new function to ignore translation of.
+excludeAddrFlag :: Flag Args
+excludeAddrFlag = flagReq [ "exclude" ] upd "ADDR" help
+  where upd s old = Right $ old & excludeAddrs %~ (s:)
+        help = "Address of function to exclude in analysis (may be repeated)."
 
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeFunctionFlag :: Flag Args
 logAtAnalyzeFunctionFlag = flagBool [ "trace-function-discovery" ] upd help
   where upd b = discOpts %~ \o -> o { logAtAnalyzeFunction = b }
-        help = "Log when starting analysis of a discovered function."
+        help = "Report when starting analysis of each function."
 
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeBlockFlag :: Flag Args
 logAtAnalyzeBlockFlag = flagBool [ "trace-block-discovery" ] upd help
   where upd b = discOpts %~ \o -> o { logAtAnalyzeBlock = b }
-        help = "Log when starting analysis of a discovered block within a function."
+        help = "Report when starting analysis of each basic block with a function."
 
 exploreFunctionSymbolsFlag :: Flag Args
 exploreFunctionSymbolsFlag = flagBool [ "include-syms" ] upd help
@@ -418,33 +453,59 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
   where upd b = discOpts %~ \o -> o { exploreCodeAddrInMem = b }
         help = "Include memory code addresses in discovery."
 
+relinkFlag :: Flag Args
+relinkFlag = flagNone [ "r", "relink" ] upd help
+  where upd  = reoptAction .~ Relink
+        help = "Only run relinker with existing object file, binary, and a patch file"
+
+objectPathFlag :: Flag Args
+objectPathFlag = flagReq [ "object" ] upd "PATH" help
+  where upd s old = Right $ old & newobjPath .~ s
+        help = "Path to new object code to link into existing binary."
+
+patchFilePathFlag :: Flag Args
+patchFilePathFlag = flagReq [ "patch-file" ] upd "PATH" help
+  where upd s old = Right $ old & redirPath .~ s
+        help = "Path to JSON file that specifies where to patch existing code."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
-        flags = [ disassembleFlag
-                , cfgFlag
-                , llvmVersionFlag
-                , funFlag
-                , segmentFlag
-                , sectionFlag
-                , debugFlag
-                , relinkFlag
-                , newobjFlag
-                , redirFlag
-                , outputFlag
-                , gasFlag
-                , llcPathFlag
-                , optFlag
-                , optLevelFlag
-                , llvmLinkFlag
-                , libreoptFlag
-                , notransFlag
-                , flagHelpSimple (reoptAction .~ ShowHelp)
+        flags = [ -- General purpose options
+                  flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
+                , debugFlag
+                  -- Redirect output to file.
+                , outputFlag
+                  -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
                 , exploreFunctionSymbolsFlag
                 , exploreCodeAddrInMemFlag
+                , includeAddrFlag
+                , excludeAddrFlag
+                  -- Loading options
+                , loadBySegmentFlag
+                , loadBySectionFlag
+                , loadForceAbsoluteFlag
+                  -- LLVM options
+                , llvmVersionFlag
+                  -- Compilation options
+                , optLevelFlag
+                , optPathFlag
+                , llcPathFlag
+                , gasPathFlag
+                  -- Final relinking options
+                , llvmLinkPathFlag
+                , libreoptPathFlag
+                  -- Explicit Modes
+                , disassembleFlag
+                , cfgFlag
+                , funFlag
+                  -- Options for explicit relinking options
+                , relinkFlag
+                , objectPathFlag
+                , patchFilePathFlag
                 ]
 
 reoptVersion :: String
@@ -499,6 +560,8 @@ mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
                .|. otherExecuteMode
          setFileMode output_path (fileMode fs `unionFileModes` fm)
 
+-- | This is a mode for Reopt to just test that the relinker can successfully
+-- combine two binaries.
 performRelink :: Args -> IO ()
 performRelink args = do
   -- Get original binary
@@ -702,22 +765,22 @@ performReopt args =
       ".blocks" -> do
         writeFile output_path =<< showCFG args
       ".fns" -> do
-        (os, disc_info, _, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+        (os, disc_info, _) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         writeFile output_path $ show (vcat (pretty <$> fns))
       ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
-        (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+        (os, disc_info, addrSymMap) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
-        (os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Binary (args^.programPath) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap  (args^.notransAddrs) disc_info
+        (os, disc_info, addrSymMap) <-
+          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
@@ -730,8 +793,8 @@ performReopt args =
         exitFailure
       _ -> do
         (orig_binary, os, disc_info, addrSymMap, symAddrMap) <-
-          discoverX86Elf (args^.programPath) (args^.discOpts)
-        fns <- getFns (osPersonality os) symAddrMap (args^.notransAddrs) disc_info
+          discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+        fns <- getFns (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
         llvm <- link_with_libreopt obj_dir args (osLinkName os) obj_llvm
@@ -754,8 +817,8 @@ performReopt args =
         let extra_addrs :: SymbolNameToAddrMap Word64
             extra_addrs = Map.fromList
               [ (fromString "reopt_gen_" `BS.append` nm, w)
-              | Right binary_nm <- resolveSymName <$> Set.toList (args^.notransAddrs)
-              , Just addr <- [Map.lookup (fromString binary_nm) symAddrMap]
+              | Right binary_nm <- resolveSymName <$> args^.excludeAddrs
+              , Just (addr:_) <- [Map.lookup (fromString binary_nm) symAddrMap]
               , let w :: Word64
                     w = case msegAddr addr of
                           Just b -> fromIntegral b
@@ -765,6 +828,7 @@ performReopt args =
               ]
         mergeAndWrite (args^.outputPath) orig_binary new_obj extra_addrs redirs
 
+
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
@@ -772,11 +836,11 @@ main' = do
   case args^.reoptAction of
     DumpDisassembly -> do
       dumpDisassembly (args^.programPath)
-    ShowCFG -> print =<< showCFG args
+    ShowCFG -> putStrLn =<< showCFG args
     ShowFunctions -> do
       showFunctions args
     ShowHelp -> do
-      print $ helpText [] HelpFormatDefault arguments
+      print $ helpText [] HelpFormatAll arguments
     ShowVersion ->
       putStrLn (modeHelp arguments)
     Relink -> do
