@@ -9,19 +9,66 @@ module ReoptTests (
 
 import qualified Control.Monad.Catch as C
 import qualified Data.ByteString as B
-import           Data.Typeable ( Typeable )
-import Test.Tasty as T
-import Test.Tasty.HUnit as T
-
 import qualified Data.ElfEdit as E
+import           Data.Macaw.Discovery
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Memory.ElfLoader as MM
+import qualified Data.Set as Set
+import           Data.Typeable ( Typeable )
+import           System.FilePath.Posix
+import           System.IO.Temp (withSystemTempDirectory)
+import qualified Test.Tasty as T
+import qualified Test.Tasty.HUnit as T
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
+
+
+import           Paths_reopt
+
+import           Reopt.Interface
+import qualified Reopt.CFG.LLVM as LLVM
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
+logger :: String -> IO ()
+logger = const (return ())
+
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ putStrLn "dummy test"
+mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
+  let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
+  let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
+  let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
+  let obj_path    = replaceFileName fp (takeBaseName fp ++ ".o")
+
+  let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Just 0
+                                , MM.loadRegionBaseOffset = 0
+                                , MM.loadStyleOverride    = Just MM.LoadBySegment
+                                , MM.includeBSS           = False
+                                }
+  let discOpts = DiscoveryOptions { exploreFunctionSymbols = False
+                                  , exploreCodeAddrInMem   = False
+                                  , logAtAnalyzeFunction   = False
+                                  , logAtAnalyzeBlock      = False
+                                  }
+
+  (e, os, disc_info, addrSymMap, _) <-
+    discoverX86Elf fp loadOpts discOpts [] []
+--  (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
+
+  writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
+
+  fns <- getFns logger (osPersonality os) disc_info
+  writeFile fns_path $ show (vcat (pretty <$> fns))
+
+  let llvmVer = LLVM38
+  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+  writeFileBuilder llvm_path obj_llvm
+
+  libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getLibDir
+  let llvm_link_path = "llvm-link"
+  llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
+  return ()
+  -- compile_llvm_to_obj args arch llvm output_path
 
 _withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 _withELF fp k = do
@@ -33,21 +80,6 @@ _withELF fp k = do
     E.Elf64Res [] e64 -> k e64
     E.Elf32Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
     E.Elf64Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
-
-_withMemory :: forall w m a
-            . (C.MonadThrow m, MM.MemWidth w, Integral (E.ElfWordType w))
-           => E.Elf w
-           -> (MM.Memory w -> m a)
-           -> m a
-_withMemory e k = do
-  let opt = MM.LoadOptions { MM.loadRegionIndex = Just 0
-                           , MM.loadRegionBaseOffset = 0
-                           , MM.loadStyleOverride = Just MM.LoadBySegment
-                           , MM.includeBSS = True
-                           }
-  case MM.memoryForElf opt e of
-    Left err -> C.throwM (MemoryLoadError err)
-    Right (_sim, mem) -> k mem
 
 data ElfException = MemoryLoadError String
   deriving (Typeable, Show)

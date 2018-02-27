@@ -24,7 +24,9 @@ library
     bv,
     bytestring,
     containers,
+    directory,
     elf-edit >= 0.28,
+    filepath,
     flexdis86 >= 0.1.1,
     lens,
     llvm-pretty,
@@ -33,6 +35,8 @@ library
     macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,
+    pretty,
+    process,
     text,
     transformers,
     utf8-string,
@@ -50,6 +54,7 @@ library
     Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth
     Reopt.Concrete.BitVector
+    Reopt.ExternalTools
     Reopt.Interface
     Reopt.Relinker
     Reopt.Relinker.Redirection
@@ -95,7 +100,6 @@ executable reopt
 
 
   other-modules:
-    Reopt.ExternalTools
     Paths_reopt
 
   if flag(enable-hpc)
@@ -113,11 +117,16 @@ test-suite reopt-tests
   other-modules: ReoptTests
   hs-source-dirs: tests
   build-depends:
+    ansi-wl-pprint,
     base,
     bytestring,
+    containers,
     elf-edit,
     exceptions,
     filemanip,
+    filepath,
     macaw-base,
+    reopt,
+    temporary,
     tasty,
     tasty-hunit

@@ -21,6 +21,14 @@
    with HelloWorld/ directory containing all the test executables and such.
 ** Factor out code in Main_reopt.hs that we need for test runs
    under Reopt.Interface
-** Test should read in executable, create Elf and Memory objects for it, run
-   mkFinalCFGWithSyms, basically do everything in the performReopt case for block
-   discovery. 
+** Test should
+   read in executable, create Elf and Memory objects for it, run mkFinalCFGWithSyms,
+   basically do everything in the performReopt case for block discovery. Also, it
+   should print out all the basic block information to a ".blocks" file.
+* Complete tests
+  ** Blocks (done), Functions (done), LLVM (done), object file, full reoptimization
+* get rid of stderr output
+* Make tests fail on any error
+* Debug resulting failures
+* Integrate with llvm-as to test LLVM output
+* be able to perform analysis on .o files and integrate into test suite
