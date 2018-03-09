@@ -70,7 +70,7 @@ import Debug.Trace
 data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsInterp        :: !(DiscoveryFunInfo X86_64 ids)
                            , _rsNextAssignId :: !FnAssignId
-                           , _rsAssignMap    :: !(MapF (AssignId ids) (FnAssignment X86_64))
+                           , _rsAssignMap    :: !(MapF (AssignId ids) (FnValue X86_64))
 
                              -- Local state
                            , _rsCurLabel  :: !(BlockLabel 64)
@@ -98,7 +98,7 @@ rsCurStmts :: Simple Lens (RecoverState ids) (Seq FnStmt)
 rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments in original block to assignment in
-rsAssignMap :: Simple Lens (RecoverState ids) (MapF (AssignId ids) (FnAssignment X86_64))
+rsAssignMap :: Simple Lens (RecoverState ids) (MapF (AssignId ids) (FnValue X86_64))
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
 
 -- | This maps registers to the associated value at the start of the block after
@@ -153,6 +153,7 @@ instance MonadState (RecoverState ids) (Recover ids) where
   get  = Recover $ \s -> RecoverSuccess s s
   put t = Recover $ \_ -> RecoverSuccess () t
 
+-- | Create a fresh assign id.
 freshId :: Recover ids FnAssignId
 freshId = do
   FnAssignId next_id <- use rsNextAssignId
@@ -162,24 +163,18 @@ freshId = do
 mkReturnVar :: TypeRepr tp -> Recover ids (FnReturnVar tp)
 mkReturnVar tp = (\next_id -> FnReturnVar next_id tp) <$> freshId
 
+-- | Add a statement to the list of statements in current function block.
 addFnStmt :: FnStmt -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 
-mkFnAssign :: FnAssignRhs X86_64 tp -> Recover ids (FnAssignment X86_64 tp)
-mkFnAssign rhs = (\next_id -> FnAssignment next_id rhs) <$> freshId
-
-emitAssign :: AssignId ids tp -> FnAssignRhs X86_64 tp -> Recover ids (FnAssignment X86_64 tp)
-emitAssign asgn rhs = do
-  fnAssign <- mkFnAssign rhs
-  rsAssignMap %= MapF.insert asgn fnAssign
-  addFnStmt $ FnAssignStmt fnAssign
-  return fnAssign
-
-mkAddAssign :: FnAssignRhs X86_64 tp -> Recover ids (FnValue X86_64 tp)
-mkAddAssign rhs = do
-  fnAssign <- mkFnAssign rhs
-  addFnStmt $ FnAssignStmt fnAssign
-  return $ FnAssignedValue fnAssign
+-- | This evaluates the right-hand side of an assignment and returns
+-- the value.
+evalAssignRhs :: FnAssignRhs X86_64 tp -> Recover ids (FnValue X86_64 tp)
+evalAssignRhs rhs = do
+  fnAssign <- (\next_id -> FnAssignment next_id rhs) <$> freshId
+  seq fnAssign $ do
+    addFnStmt $ FnAssignStmt fnAssign
+    return $ FnAssignedValue fnAssign
 
 ------------------------------------------------------------------------
 -- valueDependencies
@@ -260,9 +255,9 @@ recoverValue' s v = do
 
     AssignedValue asgn -> do
       case MapF.lookup (assignId asgn) assignMap of
-        Just fnAssign -> Right $! FnAssignedValue fnAssign
+        Just rval -> Right rval
         Nothing -> Left $ "Encountered uninitialized assignment: " ++ show (assignId asgn) ++ "\n"
-          ++ show assignMap
+          ++ show (MapF.keys assignMap)
     Initial reg -> do
       case MapF.lookup reg curRegs of
         Nothing ->
@@ -324,7 +319,9 @@ recoverAssign asgn = do
             <*> recoverValue def
           EvalArchFn f _ ->
             FnEvalArchFn <$> traverseFC recoverValue f
-      void $ emitAssign (assignId asgn) rhs
+      rval <- evalAssignRhs rhs
+      -- Associate assign id with the reuslt
+      rsAssignMap %= MapF.insert (assignId asgn) rval
 
 recoverWrite :: BVValue X86_64 ids 64 -> Value X86_64 ids tp -> Recover ids ()
 recoverWrite addr val = do
@@ -395,14 +392,15 @@ getPostCallValue lbl proc_state intrs floatrs r = do
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
       , Just rv <- lookup r ([RAX, RDX] `zip` intrs) ->
         return $ FnReturn rv
+
       | Just Refl <- testEquality r sp_reg -> do
         spv <- recoverRegister proc_state sp_reg
-        mkAddAssign $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
+        evalAssignRhs $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
 
     X86_YMMReg (F.YMMR rIdx)
       | length floatrs > fromIntegral rIdx -> do
         let v = FnReturn (floatrs !! fromIntegral rIdx)
-        mkAddAssign $ FnEvalApp $ UExt v n256
+        evalAssignRhs $ FnEvalApp $ UExt v n256
 
    -- df is 0 after a function call.
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
@@ -515,10 +513,25 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state mnext
       call_num <- recoverRegister proc_state syscall_num_reg
 
       args'  <- mapM (recoverRegister proc_state) args
-      -- args <- (++ stackArgs stk) <$> stateArgs proc_state
 
       fb <- mkBlock lbl phis (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
       pure $! blockInfo & addFnBlock fb
+
+-- | Given a register state this interprets the function arguments.
+evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
+                 -> FunctionType
+                 -> Recover ids [Some (FnValue X86_64)]
+evalFunctionArgs proc_state ft = do
+  intArgs <-
+    forM (take (fnNIntArgs ft) x86ArgumentRegs) $ \r ->
+      Some <$> recoverRegister proc_state r
+  floatArgs <-
+    forM [0 .. (fnNFloatArgs ft - 1)] $ \i -> do
+      let r = X86_YMMReg (F.ymmReg (fromIntegral i))
+      v256 <- recoverRegister proc_state r
+      xmmVal <- evalAssignRhs $ FnEvalApp $ Trunc v256 n128
+      pure $ Some xmmVal
+  pure $! intArgs ++ floatArgs
 
 recoverBlock :: forall ids
              .  DemandedUseMap
@@ -556,38 +569,45 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       recoverBlock registerUseMap [] b fblock xr
 
     ParsedCall proc_state m_ret_addr -> do
+      -- Get call target
       call_tgt <- recoverRegister proc_state ip_reg
+      -- Get function type.
       ft <-
         case call_tgt of
           FnFunctionEntryValue ft _ -> pure ft
           _ -> pure ftMaximumFunctionType
+      -- Evaluate call arguments
 
-      -- May not be used (only if called function returns at these types)
-      intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownRepr :: TypeRepr (BVType 64))
-      floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownRepr :: TypeRepr XMMType)
-
-      -- Get all registers that the block we return to will expect.
-      regs' <-
-        case m_ret_addr of
-          Nothing -> pure MapF.empty
-          Just ret_addr -> do
-            let go :: MapF X86Reg (FnRegValue X86_64)
-                   -> Some X86Reg
-                   -> Recover ids (MapF X86Reg (FnRegValue X86_64))
-                go m (Some r) = do
-                  v <- getPostCallValue lbl proc_state intrs floatrs r
-                  return $! MapF.insert r (FnRegValue v) m
-            let provides = Map.findWithDefault Set.empty ret_addr registerUseMap
-
-            foldM go MapF.empty provides
-
-      let ret_lbl = mkRootBlockLabel <$> m_ret_addr
-
-      args <- mapM (\(Some r) -> Some <$> recoverRegister proc_state r) (ftArgRegs ft)
-      -- args <- (++ stackArgs stk) <$> stateArgs proc_state
-
-      fb <- mkBlock lbl phis (FnCall call_tgt ft args (intrs, floatrs) ret_lbl) regs'
-      return $! blockInfo & addFnBlock fb
+      args <- evalFunctionArgs proc_state ft
+      -- Case split on whether this is a tail call or not so we can decide which
+      -- type of statement to emit.
+      case m_ret_addr of
+        -- Add a call, then jump
+        Just ret_addr -> do
+          -- May not be used (only if called function returns at these types)
+          intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownRepr :: TypeRepr (BVType 64))
+          floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownRepr :: TypeRepr XMMType)
+          -- Add call statement
+          addFnStmt (FnCall call_tgt ft args (intrs, floatrs))
+          -- Get registers that return address needs.
+          let nextRegsNeeded = Map.findWithDefault Set.empty ret_addr registerUseMap
+          -- Get registers for next block.
+          let go :: MapF X86Reg (FnRegValue X86_64)
+                 -> Some X86Reg
+                 -> Recover ids (MapF X86Reg (FnRegValue X86_64))
+              go m (Some r) = do
+                v <- getPostCallValue lbl proc_state intrs floatrs r
+                return $! MapF.insert r (FnRegValue v) m
+          regs' <- foldM go MapF.empty nextRegsNeeded
+          -- Get next label to jump to.
+          let ret_lbl = mkRootBlockLabel ret_addr
+          -- Create block
+          fb <- mkBlock lbl phis (FnJump ret_lbl) regs'
+          return $! blockInfo & addFnBlock fb
+        Nothing -> do
+          -- TODO: Check that return types match.
+          fb <- mkBlock lbl phis (FnTailCall call_tgt ft args) MapF.empty
+          return $! blockInfo & addFnBlock fb
 
     ParsedJump proc_state tgt_addr -> do
       let go :: MapF X86Reg (FnRegValue X86_64)
@@ -609,7 +629,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
       frets' <- forM (ftFloatRetRegs ft) $ \r -> do
         v <- recoverRegister proc_state r
-        mkAddAssign $ FnEvalApp $ Trunc v n128
+        evalAssignRhs $ FnEvalApp $ Trunc v n128
 
 
       bl <- mkBlock lbl phis (FnRet grets' frets') MapF.empty
@@ -666,11 +686,11 @@ allocateStackFrame stmts sd
             doOneDelta (Neg x) m_v = do
               v0 <- m_v
               v  <- recoverValue x
-              mkAddAssign $ FnEvalApp $ BVAdd knownNat v v0
+              evalAssignRhs $ FnEvalApp $ BVAdd knownNat v v0
         let sz0 = toInteger (negate $ staticPart s)
         szv <- foldr doOneDelta (return (FnConstantValue n64 sz0)) (dynamicPart s)
-        alloc <- mkAddAssign $ FnAlloca szv
-        spTop <- mkAddAssign $ FnEvalApp $ BVAdd knownNat alloc szv
+        alloc <- evalAssignRhs $ FnAlloca szv
+        spTop <- evalAssignRhs $ FnEvalApp $ BVAdd knownNat alloc szv
         rsCurRegs %= MapF.insert sp_reg (FnRegValue spTop)
 
   | otherwise = debug DFunRecover "WARNING: non-singleton stack depth" $ return ()

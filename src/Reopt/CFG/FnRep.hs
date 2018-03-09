@@ -85,10 +85,10 @@ newtype FnAssignId = FnAssignId Word64
                    deriving (Eq, Ord)
 
 instance Show FnAssignId where
-  show (FnAssignId w) = show w
+  showsPrec _ p = shows (pretty p)
 
-ppFnAssignId :: FnAssignId -> Doc
-ppFnAssignId (FnAssignId w) = text ("r" ++ show w)
+instance Pretty FnAssignId where
+  pretty (FnAssignId w) = text ('r' : show w)
 
 ------------------------------------------------------------------------
 -- FnPhiVar
@@ -112,7 +112,7 @@ instance OrdF FnPhiVar where
           Nothing -> error "mismatched types"
 
 instance Pretty (FnPhiVar tp) where
-  pretty = ppFnAssignId . unFnPhiVar
+  pretty = pretty . unFnPhiVar
 
 ------------------------------------------------------------------------
 -- FnReturnVar
@@ -122,7 +122,7 @@ data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
                                   }
 
 instance Pretty (FnReturnVar tp) where
-  pretty = ppFnAssignId . frAssignId
+  pretty = pretty . frAssignId
 
 ------------------------------------------------------------------------
 -- FunctionType
@@ -244,8 +244,8 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantBool b)       = text $ if b then "true" else "false"
   pretty (FnConstantValue sz n)   = ppLit sz n
-  pretty (FnAssignedValue ass)    = ppFnAssignId (fnAssignId ass)
-  pretty (FnPhiValue phi)         = ppFnAssignId (unFnPhiVar phi)
+  pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
+  pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
                                     <> parens (pretty $ show n)
@@ -267,8 +267,7 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch tp) where
   pretty = ppFnAssignRhs
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
-  pretty (FnAssignment lhs rhs) = ppFnAssignId lhs <+> text ":=" <+> pretty rhs
-
+  pretty (FnAssignment lhs rhs) = pretty lhs <+> text ":=" <+> pretty rhs
 
 instance FnArchConstraints arch => Show (FnAssignment arch tp) where
   show = show . pretty
@@ -340,11 +339,20 @@ data PhiBinding r tp
 -- FnStmt
 
 data FnStmt
-  = forall tp . FnWriteMem !(FnValue X86_64 (BVType 64)) !(FnValue X86_64 tp)
     -- | A comment
-  | FnComment !Text
+  = FnComment !Text
     -- | An assignment statement
   | forall tp . FnAssignStmt !(FnAssignment X86_64 tp)
+     -- | A call statement to the given location with the arguments
+     -- listed that returns to this code.
+  | forall tp . FnWriteMem !(FnValue X86_64 (BVType 64)) !(FnValue X86_64 tp)
+    -- | A call to a function with some arguments and return values.
+  | FnCall !(FnValue X86_64 (BVType 64))
+            !FunctionType
+            -- Arguments
+            [Some (FnValue X86_64)]
+            -- Return values
+            !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
   | FnArchStmt (X86Stmt (FnValue X86_64))
 
 instance Pretty FnStmt where
@@ -353,12 +361,20 @@ instance Pretty FnStmt where
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
+      FnCall f _ args (grets, frets) ->
+        let arg_docs = (\(Some v) -> pretty v) <$> args
+            ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
+         in parens (commas ret_docs)
+            <+> text ":=" <+> text "call"
+            <+> pretty f <> parens (commas arg_docs)
+
       FnArchStmt stmt -> ppArchStmt pretty stmt
 
 instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldFnValue f s rhs
+  foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
 
 ------------------------------------------------------------------------
@@ -366,54 +382,51 @@ instance FoldFnValue FnStmt where
 
 data FnTermStmt
    = FnJump !(BlockLabel 64)
-   | FnRet ![FnValue X86_64 (BVType 64)] ![FnValue X86_64 XMMType]
    | FnBranch !(FnValue X86_64 BoolType) !(BlockLabel 64) !(BlockLabel 64)
+   | FnLookupTable !(FnValue X86_64 (BVType 64)) !(V.Vector (MemSegmentOff 64))
+   | FnRet ![FnValue X86_64 (BVType 64)] ![FnValue X86_64 XMMType]
      -- ^ A branch to a block within the function, along with the return vars.
-   | FnCall !(FnValue X86_64 (BVType 64))
-            !FunctionType
-            -- Arguments
-            [Some (FnValue X86_64)]
-            !([FnReturnVar (BVType 64)], [FnReturnVar XMMType])
-            !(Maybe (BlockLabel 64))
+   | FnTailCall !(FnValue X86_64 (BVType 64))
+                -- Type
+                !FunctionType
+                -- Arguments
+                [Some (FnValue X86_64)]
      -- ^ A call statement to the given location with the arguments listed that
-     -- returns to the label.
+     -- does not return.
    | FnSystemCall !(FnValue  X86_64 (BVType 64))
                   ![(FnValue X86_64 (BVType 64))]
                   ![ Some FnReturnVar ] (BlockLabel 64)
-   | FnLookupTable !(FnValue X86_64 (BVType 64)) !(V.Vector (MemSegmentOff 64))
    | FnTermStmtUndefined
 
 instance Pretty FnTermStmt where
   pretty s =
     case s of
-      FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnJump lbl -> text "jump" <+> pretty lbl
+      FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
+      FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
+                               <+> parens (commas $ map (pretty . relativeSegmentAddr)
+                                                        (V.toList vec))
       FnRet grets frets -> text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
-      FnCall f _ args (grets, frets) lbl ->
+      FnTailCall f _ args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
-            ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
-         in parens (commas ret_docs)
-            <+> text ":=" <+> text "call"
-            <+> pretty f <> parens (commas arg_docs) <+> pretty lbl
+         in text "tail_call" <+> pretty f <> parens (commas arg_docs)
+
       FnSystemCall call_no args rets lbl ->
         let arg_docs = (pretty <$> args)
             ret_docs = viewSome pretty <$> rets
          in parens (commas ret_docs)
             <+> text ":=" <+> text "syscall"
             <+> pretty call_no <> parens (commas arg_docs) <+> pretty lbl
-      FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ map (pretty . relativeSegmentAddr)
-                                                        (V.toList vec))
       FnTermStmtUndefined -> text "undefined term"
 
 instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
+  foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue f s (FnRet grets frets) = foldl f (foldl f s grets) frets
-  foldFnValue f s (FnCall fn _ args _ _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
+  foldFnValue f s (FnTailCall fn _ args) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnSystemCall call_no args _rets _lbl) =
     foldl f (f s call_no) args
-  foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue _ s (FnTermStmtUndefined {}) = s
 
 ------------------------------------------------------------------------

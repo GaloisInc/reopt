@@ -198,10 +198,10 @@ blockName l = L.Named (L.Ident (show l))
 -- into xmm0 on a return, whereas it does for <2 x double>
 
 natReprToLLVMType :: NatRepr n -> L.Type
-natReprToLLVMType = L.PrimType . L.Integer . fromIntegral . natValue
+natReprToLLVMType = L.iT . fromIntegral . natValue
 
 typeToLLVMType :: TypeRepr tp -> L.Type
-typeToLLVMType BoolTypeRepr   = L.PrimType (L.Integer 1)
+typeToLLVMType BoolTypeRepr   = L.iT 1
 typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
 typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
 
@@ -233,6 +233,11 @@ failLabel = L.Ident "failure"
 argIdent :: Int -> L.Ident
 argIdent i = L.Ident ("arg" ++ show i)
 
+-- | Create a unique name for temporaries used in creating a float.
+fltbvTempArg :: Int -> Int -> L.Ident
+fltbvTempArg i j = L.Ident ("fargbv" ++ show i ++ "_" ++ show j)
+
+-- | Create a unique name for the float argument.
 fltbvArg :: Int -> L.Ident
 fltbvArg i = L.Ident ("fargbv" ++ show i)
 
@@ -258,18 +263,23 @@ mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
         intArgs = V.generate (fnNIntArgs ft)   $ \i -> L.Typed (L.iT 64) (L.ValIdent (argIdent i))
 
         fltbvArgs :: V.Vector (L.Typed L.Value)
-        fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 128) (L.ValIdent (fltbvArg i))
+        fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 256) (L.ValIdent (fltbvArg i))
 
         postInitArgs :: V.Vector (L.Typed L.Value)
         postInitArgs = intArgs V.++ fltbvArgs
 
         fltStmts :: [L.Stmt]
-        fltStmts = fltStmt <$> [0..fnNFloatArgs ft-1]
-          where fltStmt :: Int -> L.Stmt
-                fltStmt i = L.Result (fltbvArg i) (L.Conv L.BitCast arg (L.iT 128)) []
-                  where arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
-
-
+        fltStmts = concatMap fltStmt [0..fnNFloatArgs ft-1]
+          where fltStmt :: Int -> [L.Stmt]
+                fltStmt i = do
+                  -- Get typed arg for input
+                  let arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
+                  -- Get typed argument after bitcast from float to bv128.
+                  let bv128Arg = L.Typed (L.iT 128) (L.ValIdent (fltbvTempArg i 0))
+                  -- Return
+                  [   L.Result (fltbvTempArg i 0) (L.Conv L.BitCast arg   (L.iT 128)) []
+                    , L.Result (fltbvArg i)       (L.Conv L.ZExt bv128Arg (L.iT 256)) []
+                    ]
 
 failBlock :: L.BasicBlock
 failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
@@ -422,12 +432,16 @@ unimplementedInstr' typ reason = do
 -- | Map from assign ID to value.
 type AssignValMap = Map FnAssignId (BlockLabel 64, L.Typed L.Value)
 
-setAssignIdValue :: FnAssignId -> BlockLabel 64 -> L.Typed L.Value -> BBLLVM ()
+setAssignIdValue :: Loc.HasCallStack
+                 => FnAssignId
+                 -> BlockLabel 64
+                 -> L.Typed L.Value
+                 -> BBLLVM ()
 setAssignIdValue fid blk v = do
   s <- get
   let fs = funState s
   case Map.lookup fid (funAssignValMap fs) of
-    Just{} -> Loc.error $ "internal: Assign id " ++ show fid ++ " already assigned."
+    Just{} -> Loc.error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
     Nothing -> do
       let fs' = fs { funAssignValMap = Map.insert fid (blk,v) (funAssignValMap fs) }
       put $! s { funState = fs' }
@@ -465,22 +479,23 @@ valueToLLVM ctx blk m val = do
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find assignment value " ++ show lhs ++ "\n"
+          Loc.error $ "Could not find assignment value " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk)
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp)  -> do
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find phi value " ++ show lhs ++ "\n"
+          Loc.error $ "Could not find phi value " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk)
     -- A value returned by a function call (rax/xmm0)
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find return variable " ++ show lhs ++ "\n"
-                      ++ show (pretty blk)
+          Loc.error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
+                      ++ show (pretty blk) ++ "\n"
+                      ++ show m
     -- The entry pointer to a function.  We do the cast as a const
     -- expr as function addresses appear as constants in e.g. phi
     -- nodes
@@ -635,8 +650,17 @@ call_ (valueOf -> f) args =
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
 
+-- | Sign extend a boolean value to the given width.
+carryValue :: (Loc.HasCallStack, 1 <= w)
+           => NatRepr w
+           -> FnValue X86_64 BoolType
+           -> BBLLVM (L.Typed L.Value)
+carryValue w x =
+  (`zext` natReprToLLVMType w) =<< mkLLVMValue x
+
+
 -- | Handle an intrinsic overflows
-intrinsicOverflows' :: (1 <= w)
+intrinsicOverflows' :: (Loc.HasCallStack, 1 <= w)
                     => String
                     -> FnValue X86_64 (BVType w)
                     -> FnValue X86_64 (BVType w)
@@ -662,10 +686,6 @@ intrinsicOverflows' bop x y c = do
   r_tuple'   <- call (overflowOp bop in_typ) [r, c']
   overflows' <- extractValue r_tuple' 1
   bor overflows (L.typedValue overflows')
-
-carryValue :: (1 <= w) => NatRepr w -> FnValue X86_64 BoolType -> BBLLVM (L.Typed L.Value)
-carryValue w x =
-  (`zext` natReprToLLVMType w) =<< mkLLVMValue x
 
 data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
 
@@ -695,14 +715,14 @@ emitSyscall :: L.Typed L.Value
             -> BBLLVM (L.Typed L.Value)
 emitSyscall callNum args =
   callAsm sideeffect
-              (L.iT 64)
-              "syscall"
-              -- This string marks rax as an output.
-              -- It also marks rax, rdi, rsi, rdx, rcx, r8, r9 as inputs.
-              -- It indicates that the function can make arbitrary
-              -- modifications to memory, flags, rcx, and r11.
-              "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
-              (callNum : padUndef (L.iT 64) 6 args)
+          (L.iT 64)
+          "syscall"
+          -- This string marks rax as an output.
+          -- It also marks rax, rdi, rsi, rdx, rcx, r8, r9 as inputs.
+          -- It indicates that the function can make arbitrary
+          -- modifications to memory, flags, rcx, and r11.
+          "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
+          (callNum : padUndef (L.iT 64) 6 args)
 
 -- | Generate the LLVM for checking parity of an 8-bit value is even.
 evenParity :: L.Typed L.Value -> BBLLVM (L.Typed L.Value)
@@ -715,7 +735,9 @@ evenParity v = do
   -- Check result is nonzero
   icmpop L.Ine parity_val (L.ValInteger 0)
 
-appToLLVM' :: App (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
+appToLLVM' :: Loc.HasCallStack
+           => App (FnValue X86_64) tp
+           -> BBLLVM (L.Typed L.Value)
 appToLLVM' app = do
   let typ = typeToLLVMType $ typeRepr app
   let binop :: (L.Typed L.Value -> L.Value -> BBLLVM (L.Typed L.Value))
@@ -824,7 +846,8 @@ appToLLVM' app = do
     TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
 
 -- | Evaluate a value as a pointer
-llvmAsPtr :: FnValue X86_64 (BVType 64)
+llvmAsPtr :: Loc.HasCallStack
+          => FnValue X86_64 (BVType 64)
              -- ^ Value to evaluate
           -> L.Type
              -- ^ Type of value pointed to
@@ -833,7 +856,8 @@ llvmAsPtr ptr tp = do
   llvmPtrAsBV  <- mkLLVMValue ptr
   convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
 
-archFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
+archFnToLLVM :: Loc.HasCallStack
+             => ArchFn X86_64 (FnValue X86_64) tp -> BBLLVM (L.Typed L.Value)
 archFnToLLVM f =
   case f of
    EvenParity v -> do
@@ -851,25 +875,25 @@ archFnToLLVM f =
    X86Div repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
      llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
      arithop (L.UDiv False) llvm_n llvm_d_ext
    X86Rem repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
      llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
      arithop L.URem llvm_n llvm_d_ext
    X86IDiv repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
      llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
      arithop (L.SDiv False) llvm_n llvm_d_ext
    X86IRem repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.PrimType $ L.Integer $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
      llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
      arithop L.SRem llvm_n llvm_d_ext
    RepnzScas sz val base cnt -> do
@@ -891,7 +915,7 @@ archFnToLLVM f =
                     ("repnz scas %es:(%rdi)," ++ reg)
                     "={cx},={di},{ax},{cx},1,~{flags}"
                     [llvm_val, llvm_cnt, llvm_ptr]
-     -- Get first result
+     -- Get rge cx result
      extractValue res 0
    _ -> do
      error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
@@ -911,7 +935,9 @@ singletonVector val = do
   L.Typed arrayType
     <$> evalInstr (L.InsertElt vec0 val (L.ValInteger 0))
 
-rhsToLLVM :: FnAssignRhs X86_64 tp -> BBLLVM (L.Typed L.Value)
+rhsToLLVM :: Loc.HasCallStack
+          => FnAssignRhs X86_64 tp
+          -> BBLLVM (L.Typed L.Value)
 rhsToLLVM rhs = do
   case rhs of
     FnEvalApp app ->
@@ -941,7 +967,9 @@ rhsToLLVM rhs = do
       convop L.PtrToInt alloc_ptr (L.iT 64)
     FnEvalArchFn f -> archFnToLLVM f
 
-archStmtToLLVM :: X86Stmt (FnValue X86_64) -> BBLLVM ()
+archStmtToLLVM :: Loc.HasCallStack
+               => X86Stmt (FnValue X86_64)
+               -> BBLLVM ()
 archStmtToLLVM stmt =
   case stmt of
     MemCopy bytesPerCopy nValues src dest direction -> do
@@ -959,10 +987,12 @@ archStmtToLLVM stmt =
       call_ (iMemSet typ) [ptr', v', count', df']
     _ -> error $ "LLVM generation: Unsupported architecture statement."
 
-stmtToLLVM :: FnStmt -> BBLLVM ()
+stmtToLLVM :: Loc.HasCallStack
+           => FnStmt -> BBLLVM ()
 stmtToLLVM stmt = do
   comment (show $ pretty stmt)
   case stmt of
+   FnComment _ -> return ()
    FnAssignStmt (FnAssignment lhs rhs) -> do
      lbl <- gets $ fbLabel . bbBlock
      llvm_rhs <- rhsToLLVM rhs
@@ -972,7 +1002,59 @@ stmtToLLVM stmt = do
      llvm_ptr <- llvmAsPtr ptr (L.typedType llvm_v)
      -- Cast LLVM point to appropriate type
      effect $ L.Store llvm_v llvm_ptr Nothing
-   FnComment _ -> return ()
+   FnCall dest ft args (gretvs, fretvs) -> do
+     let arg_tys = functionTypeArgTypes ft
+         ret_tys = funReturnType
+         fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
+
+     addrSymMap  <- gets $ funAddrSymMap  . funContext
+     addrTypeMap <- gets $ funAddrTypeMap . funContext
+     dest_f <-
+         case dest of
+           -- FIXME: use ft here instead?
+           FnFunctionEntryValue dest_ftp addr
+             | Just tp <- Map.lookup addr addrTypeMap -> do
+               let sym = functionName addrSymMap addr
+               when (functionTypeToLLVM tp /= fun_ty) $ do
+                 Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
+                   ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
+                   ++ "Provided: " ++ show fun_ty
+               when (ft /= dest_ftp) $ do
+                 Loc.error $ "Mismatch function type in call with " ++ show sym
+               when (tp /= dest_ftp) $ do
+                 Loc.error $ "Mismatch function type in call with " ++ show sym
+               return $ L.Typed fun_ty (L.ValSymbol sym)
+           _ -> do
+             dest' <- mkLLVMValue dest
+             convop L.IntToPtr dest' fun_ty
+
+     let evalArg :: Some X86Reg -> Some (FnValue X86_64) -> BBLLVM (L.Typed L.Value)
+         evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
+         evalArg (Some (X86_YMMReg _)) (Some v) = do
+           llvmVal <- mkLLVMValue v
+           bitcast llvmVal functionFloatType
+         evalArg _ _ = Loc.error "Unsupported register arg"
+
+     args' <- zipWithM evalArg (ftArgRegs ft) args
+
+     retv <- call dest_f args'
+
+     this_lbl <- gets $ fbLabel . bbBlock
+     -- Assign all return variables to the extracted result
+     let assignIntReturn :: Int -> FnReturnVar (BVType 64) -> BBLLVM ()
+         assignIntReturn i fr = do
+           val <- extractValue retv (fromIntegral i)
+           setAssignIdValue (frAssignId fr) this_lbl val
+     itraverse_ assignIntReturn gretvs
+     let fpBase = 2 -- length (gretvs)
+     -- Assign floating point results
+     let assignFltReturn :: Int -> FnReturnVar (BVType 128) -> BBLLVM ()
+         assignFltReturn i fr = do
+           val_fp <- extractValue retv (fromIntegral $ fpBase + i)
+           val    <- bitcast val_fp (L.iT 128)
+           setAssignIdValue (frAssignId fr) this_lbl val
+     itraverse_ assignFltReturn fretvs
+
    FnArchStmt astmt -> do
      archStmtToLLVM astmt
 
@@ -993,7 +1075,9 @@ makeRet' grets frets = do
   v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef (grets' ++ frets')
   ret v
 
-termStmtToLLVM :: FnTermStmt -> BBLLVM ()
+termStmtToLLVM :: Loc.HasCallStack
+               => FnTermStmt
+               -> BBLLVM ()
 termStmtToLLVM tm =
   case tm of
      FnJump lbl -> do
@@ -1005,7 +1089,7 @@ termStmtToLLVM tm =
      FnBranch cond tlbl flbl -> do
        cond' <- mkLLVMValue cond
        effect $ L.Br cond' (blockName tlbl) (blockName flbl)
-     FnCall dest ft args (gretvs, fretvs) contlbl -> do
+     FnTailCall dest ft args -> do
        let arg_tys = functionTypeArgTypes ft
            ret_tys = funReturnType
            fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
@@ -1037,31 +1121,9 @@ termStmtToLLVM tm =
            evalArg _ _ = Loc.error "Unsupported register arg"
 
        args' <- zipWithM evalArg (ftArgRegs ft) args
-
-
-
        retv <- call dest_f args'
+       ret retv
 
-       case contlbl of
-         Nothing -> do
-           ret retv
-         Just target_lbl -> do
-           this_lbl <- gets $ fbLabel . bbBlock
-           -- Assign all return variables to the extracted result
-           let assignIntReturn :: Int -> FnReturnVar (BVType 64) -> BBLLVM ()
-               assignIntReturn i fr = do
-                 val <- extractValue retv (fromIntegral i)
-                 setAssignIdValue (frAssignId fr) this_lbl val
-           itraverse_ assignIntReturn gretvs
-           let fpBase = 2 -- length (gretvs)
-           -- Assign floating point results
-           let assignFltReturn :: Int -> FnReturnVar (BVType 128) -> BBLLVM ()
-               assignFltReturn i fr = do
-                 val_fp <- extractValue retv (fromIntegral $ fpBase + i)
-                 val    <- bitcast val_fp (L.iT 128)
-                 setAssignIdValue (frAssignId fr) this_lbl val
-           itraverse_ assignFltReturn fretvs
-           jump (blockName target_lbl)
      FnSystemCall call_num args rets next_lbl -> do
        pname <- gets $ funSyscallIntrinsicPostfix . funContext
        llvm_call_num <- mkLLVMValue call_num
@@ -1135,7 +1197,7 @@ toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLab
 
 -- | Add a phi var with the node info so that we have a ident to reference
 -- it by and queue up work to assign the value later.
-addPhiBinding :: Some (PhiBinding X86Reg) -> BBLLVM ()
+addPhiBinding :: Loc.HasCallStack => Some (PhiBinding X86Reg) -> BBLLVM ()
 addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
   lbl <- gets $ fbLabel . bbBlock
   nm <- freshName
