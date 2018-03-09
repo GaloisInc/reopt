@@ -53,7 +53,6 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
 
   (e, os, disc_info, addrSymMap, _) <-
     discoverX86Elf fp loadOpts discOpts [] []
---  (ainfo, sysp, syscallPostfix) <- getX86ElfArchInfo e
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
@@ -64,7 +63,7 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
   let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
   writeFileBuilder llvm_path obj_llvm
 
-  libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getLibDir
+  libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getDataDir
   let llvm_link_path = "llvm-link"
   llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
   return ()
