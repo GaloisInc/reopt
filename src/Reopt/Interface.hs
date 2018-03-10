@@ -75,7 +75,7 @@ import           Data.Macaw.X86
 import           Data.Macaw.X86.SyscallInfo
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..), FunctionType(..))
+import           Reopt.CFG.FnRep (Function(..), FunctionType, FunctionTypeMap, X86FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery
@@ -180,8 +180,9 @@ resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
 resolveSymName ('0':'X': nm) | [(w,"")] <- readHex nm = Left w
 resolveSymName nm = Right nm
 
--- | Attempt to find the address of a string identifying a symbol name, and
--- return either the string if it cannot be resolved or the address.
+-- | Attempt to find the address of a string identifying a symbol
+-- name, and return either the string if it cannot be resolved or the
+-- address.
 resolveSymAddr :: Memory w
                -> Map BS.ByteString [MemSegmentOff w]
                  -- ^ Map from symbol names in binary to their address.
@@ -296,7 +297,7 @@ getX86ElfArchInfo e =
     abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
-                             -> Map (MemSegmentOff 64) FunctionType
+                             -> FunctionTypeMap
 inferFunctionTypeFromDemands dm =
   let go ds m = Map.unionWith Set.union (functionResultDemands ds) m
       retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
@@ -309,13 +310,13 @@ inferFunctionTypeFromDemands dm =
         length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
 
       -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
-      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> FunctionType
+      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> FunctionType X86_64
       orderPadArgs (args, rets) =
-        FunctionType { fnNIntArgs = maximumArgPrefix x86ArgumentRegs args
-                     , fnNFloatArgs = maximumArgPrefix x86FloatArgumentRegs args
-                     , fnNIntRets = maximumArgPrefix x86ResultRegs rets
-                     , fnNFloatRets = maximumArgPrefix x86FloatResultRegs rets
-                     }
+        X86FunctionType { fnNIntArgs = maximumArgPrefix x86ArgumentRegs args
+                        , fnNFloatArgs = maximumArgPrefix x86FloatArgumentRegs args
+                        , fnNIntRets = maximumArgPrefix x86ResultRegs rets
+                        , fnNFloatRets = maximumArgPrefix x86FloatResultRegs rets
+                        }
   in fmap orderPadArgs
      $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
                         (fmap (\ds ->  (registerDemands ds, mempty)))

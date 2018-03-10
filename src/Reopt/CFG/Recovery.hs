@@ -74,7 +74,7 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
 
                              -- Local state
                            , _rsCurLabel  :: !(BlockLabel 64)
-                           , _rsCurStmts  :: !(Seq FnStmt)
+                           , _rsCurStmts  :: !(Seq (FnStmt X86_64))
 
                            , _rsCurRegs   :: !(MapF X86Reg (FnRegValue X86_64))
                              -- ^ This maps registers to the associated value
@@ -83,7 +83,7 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsSyscallPersonality  :: !SyscallPersonality
                              -- ^ System call personality
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
-                           , rsCurrentFunctionType :: !FunctionType
+                           , rsCurrentFunctionType :: !(FunctionType X86_64)
                            , rsFunctionArgs        :: !AddrToX86FunctionTypeMap
                            }
 
@@ -94,7 +94,7 @@ rsCurLabel :: Simple Lens (RecoverState ids) (BlockLabel 64)
 rsCurLabel = lens _rsCurLabel (\s v -> s { _rsCurLabel = v })
 
 -- | List of statements accumulated so far.
-rsCurStmts :: Simple Lens (RecoverState ids) (Seq FnStmt)
+rsCurStmts :: Simple Lens (RecoverState ids) (Seq (FnStmt X86_64))
 rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments in original block to assignment in
@@ -164,12 +164,12 @@ mkReturnVar :: TypeRepr tp -> Recover ids (FnReturnVar tp)
 mkReturnVar tp = (\next_id -> FnReturnVar next_id tp) <$> freshId
 
 -- | Add a statement to the list of statements in current function block.
-addFnStmt :: FnStmt -> Recover ids ()
+addFnStmt :: FnStmt X86_64 -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 
 -- | This evaluates the right-hand side of an assignment and returns
 -- the value.
-evalAssignRhs :: FnAssignRhs X86_64 tp -> Recover ids (FnValue X86_64 tp)
+evalAssignRhs :: FnAssignRhs X86_64 (FnValue X86_64) tp -> Recover ids (FnValue X86_64 tp)
 evalAssignRhs rhs = do
   fnAssign <- (\next_id -> FnAssignment next_id rhs) <$> freshId
   seq fnAssign $ do
@@ -368,12 +368,12 @@ recoverStmt s = do
 -- | Builds a mapping from labels to recovered function blocks and a
 -- mapping from the block label to the register map resulting from
 -- block.
-type RecoveredBlockInfo = Map (BlockLabel 64) FnBlock
+type RecoveredBlockInfo = Map (BlockLabel 64) (FnBlock X86_64)
 
 emptyRecoveredBlockInfo :: RecoveredBlockInfo
 emptyRecoveredBlockInfo = Map.empty
 
-addFnBlock :: FnBlock -> RecoveredBlockInfo -> RecoveredBlockInfo
+addFnBlock :: FnBlock X86_64 -> RecoveredBlockInfo -> RecoveredBlockInfo
 addFnBlock b info = Map.insert (fbLabel b) b info
 
 ------------------------------------------------------------------------
@@ -383,11 +383,10 @@ addFnBlock b info = Map.insert (fbLabel b) b info
 getPostCallValue :: BlockLabel 64
                  -> RegState X86Reg (Value X86_64 ids)
                      -- ^ Value of registers before syscall
-                 -> [FnReturnVar (BVType 64)] -- ^ Integer values returned by function.
-                 -> [FnReturnVar XMMType]     -- ^ Floating point values returned by function.
+                 -> FnReturnInfo X86_64 FnReturnVar
                  -> X86Reg tp
                  -> Recover ids (FnValue X86_64 tp)
-getPostCallValue lbl proc_state intrs floatrs r = do
+getPostCallValue lbl proc_state (intrs, floatrs) r = do
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
       , Just rv <- lookup r ([RAX, RDX] `zip` intrs) ->
@@ -436,9 +435,9 @@ getPostSyscallValue lbl proc_state r =
 
 mkBlock :: BlockLabel 64
         -> [Some (PhiBinding X86Reg)]
-        -> FnTermStmt
+        -> FnTermStmt X86_64
         -> MapF X86Reg (FnRegValue X86_64)
-        -> Recover ids FnBlock
+        -> Recover ids (FnBlock X86_64)
 mkBlock lbl phis tm m = do
   curStmts <- use rsCurStmts
   rsCurStmts .= Seq.empty
@@ -503,23 +502,22 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state mnext
         v <- getPostSyscallValue lbl proc_state r
         return $ MapF.insert r (FnRegValue v) m
 
+  call_num <- recoverRegister proc_state syscall_num_reg
+  args'  <- mapM (recoverRegister proc_state) args
+  addFnStmt (FnSystemCall call_num args' rets)
   case mnext_addr of
-    Nothing ->
+    Nothing -> do
+      -- TODO: Fix this by adding a
       error "Recovery: Could not find system call return label"
     Just next_addr -> do
       let provides = Map.findWithDefault Set.empty next_addr registerUseMap
       regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
-
-      call_num <- recoverRegister proc_state syscall_num_reg
-
-      args'  <- mapM (recoverRegister proc_state) args
-
-      fb <- mkBlock lbl phis (FnSystemCall call_num args' rets (mkRootBlockLabel next_addr)) regs'
+      fb <- mkBlock lbl phis (FnJump (mkRootBlockLabel next_addr)) regs'
       pure $! blockInfo & addFnBlock fb
 
 -- | Given a register state this interprets the function arguments.
 evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
-                 -> FunctionType
+                 -> FunctionType X86_64
                  -> Recover ids [Some (FnValue X86_64)]
 evalFunctionArgs proc_state ft = do
   intArgs <-
@@ -596,7 +594,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
                  -> Some X86Reg
                  -> Recover ids (MapF X86Reg (FnRegValue X86_64))
               go m (Some r) = do
-                v <- getPostCallValue lbl proc_state intrs floatrs r
+                v <- getPostCallValue lbl proc_state (intrs, floatrs) r
                 return $! MapF.insert r (FnRegValue v) m
           regs' <- foldM go MapF.empty nextRegsNeeded
           -- Get next label to jump to.
@@ -631,8 +629,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
         v <- recoverRegister proc_state r
         evalAssignRhs $ FnEvalApp $ Trunc v n128
 
-
-      bl <- mkBlock lbl phis (FnRet grets' frets') MapF.empty
+      bl <- mkBlock lbl phis (FnRet (grets', frets')) MapF.empty
       pure $! blockInfo & addFnBlock bl
 
     ParsedArchTermStmt ts proc_state next_addr ->

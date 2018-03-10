@@ -215,10 +215,10 @@ functionArgType (Some r) =
     X86_YMMReg{} -> functionFloatType
     _ -> Loc.error "Unsupported function type registers"
 
-functionTypeArgTypes :: FunctionType -> [L.Type]
+functionTypeArgTypes :: FunctionType X86_64 -> [L.Type]
 functionTypeArgTypes ft = functionArgType <$> ftArgRegs ft
 
-functionTypeToLLVM :: FunctionType -> L.Type
+functionTypeToLLVM :: FunctionType X86_64 -> L.Type
 functionTypeToLLVM ft = L.ptrT (L.FunTy funReturnType (functionTypeArgTypes ft) False)
 
 funReturnType :: L.Type
@@ -244,7 +244,7 @@ fltbvArg i = L.Ident ("fargbv" ++ show i)
 -- | Create init block and post init args
 --
 -- This function is needed so that we coerce floating point input arguments to the expected types.
-mkInitBlock :: FunctionType -- ^ Type of function
+mkInitBlock :: FunctionType X86_64 -- ^ Type of function
             -> L.BlockLabel -- ^ Label of first block
             -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
 mkInitBlock ft lbl = (inputArgs, blk, postInitArgs)
@@ -286,8 +286,6 @@ failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
 
-type FunctionTypeMap = Map (MemSegmentOff 64) FunctionType
-
 getReferencedFunctions :: FunctionTypeMap
                        -> Function
                        -> FunctionTypeMap
@@ -301,7 +299,7 @@ getReferencedFunctions m0 f =
         findReferencedFunctions m _ = m
 
         insertAddr :: MemSegmentOff 64
-                   -> FunctionType
+                   -> FunctionType X86_64
                    -> FunctionTypeMap
                    -> FunctionTypeMap
         insertAddr addr ft m =
@@ -328,8 +326,8 @@ data FunLLVMContext = FunLLVMContext
 data PendingPhiNode tp = PendingPhiNode !L.Ident !L.Type [(BlockLabel 64, X86Reg tp)]
 
 -- | Result obtained by printing a block to LLVM
-data LLVMBlockResult = LLVMBlockResult { regBlock   :: !FnBlock
-                                       , llvmBlockStmts  :: ![L.Stmt]
+data LLVMBlockResult = LLVMBlockResult { regBlock         :: !(FnBlock X86_64)
+                                       , llvmBlockStmts   :: ![L.Stmt]
                                        , llvmBlockPhiVars :: ![Some PendingPhiNode]
                                        }
 
@@ -368,7 +366,7 @@ funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
 data BBLLVMState = BBLLVMState
   { funContext :: !FunLLVMContext
     -- ^ Context for function level declarations.
-  , bbBlock :: !FnBlock
+  , bbBlock :: !(FnBlock X86_64)
     -- ^ Basic block that we are generating the LLVM for.
   , bbStmts :: ![L.Stmt]
     -- ^ Statements in reverse order
@@ -458,7 +456,7 @@ addBoundPhiVar nm tp info = do
 -- | Map a function value to a LLVM value with no change.
 valueToLLVM :: Loc.HasCallStack
             => FunLLVMContext
-            -> FnBlock
+            -> FnBlock X86_64
                -- ^ Block we are generating LLVM for.
             -> AssignValMap
             -> FnValue X86_64 tp
@@ -536,7 +534,7 @@ floatTypeWidth l =
 -- | Map a function value to a LLVM value with no change.
 valueToLLVMBitvec :: Loc.HasCallStack
                   => FunLLVMContext
-                  -> FnBlock
+                  -> FnBlock X86_64
                      -- ^ Block that we are generating LLVM for.
                   -> AssignValMap
                   -> FnValue X86_64 tp
@@ -936,7 +934,7 @@ singletonVector val = do
     <$> evalInstr (L.InsertElt vec0 val (L.ValInteger 0))
 
 rhsToLLVM :: Loc.HasCallStack
-          => FnAssignRhs X86_64 tp
+          => FnAssignRhs X86_64 (FnValue X86_64) tp
           -> BBLLVM (L.Typed L.Value)
 rhsToLLVM rhs = do
   case rhs of
@@ -988,7 +986,8 @@ archStmtToLLVM stmt =
     _ -> error $ "LLVM generation: Unsupported architecture statement."
 
 stmtToLLVM :: Loc.HasCallStack
-           => FnStmt -> BBLLVM ()
+           => FnStmt X86_64
+           -> BBLLVM ()
 stmtToLLVM stmt = do
   comment (show $ pretty stmt)
   case stmt of
@@ -1054,6 +1053,28 @@ stmtToLLVM stmt = do
            val    <- bitcast val_fp (L.iT 128)
            setAssignIdValue (frAssignId fr) this_lbl val
      itraverse_ assignFltReturn fretvs
+   FnSystemCall call_num args rets -> do
+     pname <- gets $ funSyscallIntrinsicPostfix . funContext
+     llvm_call_num <- mkLLVMValue call_num
+     llvm_args  <- mapM mkLLVMValue args
+     case pname of
+       "Linux" -> do
+           rvar <- emitSyscall llvm_call_num llvm_args
+           case rets of
+             [Some fr] -> do
+               -- Assign all return variables to the extracted result
+                 lbl <- gets $ fbLabel . bbBlock
+                 setAssignIdValue (frAssignId fr) lbl rvar
+             _ -> error "Unexpected return values"
+       "FreeBSD" -> do
+           rvar <- emitSyscall llvm_call_num llvm_args
+           case rets of
+             [Some fr] -> do
+               -- Assign all return variables to the extracted result
+                 lbl <- gets $ fbLabel . bbBlock
+                 setAssignIdValue (frAssignId fr) lbl rvar
+             _ -> error "Unexpected return values"
+       _ -> error $ "Unsupported operating system: " ++ show pname
 
    FnArchStmt astmt -> do
      archStmtToLLVM astmt
@@ -1076,13 +1097,13 @@ makeRet' grets frets = do
   ret v
 
 termStmtToLLVM :: Loc.HasCallStack
-               => FnTermStmt
+               => FnTermStmt X86_64
                -> BBLLVM ()
 termStmtToLLVM tm =
   case tm of
      FnJump lbl -> do
        effect $ L.Jump (blockName lbl)
-     FnRet grets frets -> do
+     FnRet (grets, frets) -> do
        grets' <- mapM mkLLVMValue grets
        frets' <- mapM mkLLVMValue frets
        makeRet' grets' frets'
@@ -1124,30 +1145,6 @@ termStmtToLLVM tm =
        retv <- call dest_f args'
        ret retv
 
-     FnSystemCall call_num args rets next_lbl -> do
-       pname <- gets $ funSyscallIntrinsicPostfix . funContext
-       llvm_call_num <- mkLLVMValue call_num
-       llvm_args  <- mapM mkLLVMValue args
-       case pname of
-         "Linux" -> do
-           rvar <- emitSyscall llvm_call_num llvm_args
-           case rets of
-             [Some fr] -> do
-               -- Assign all return variables to the extracted result
-                 lbl <- gets $ fbLabel . bbBlock
-                 setAssignIdValue (frAssignId fr) lbl rvar
-                 jump (blockName next_lbl)
-             _ -> error "Unexpected return values"
-         "FreeBSD" -> do
-           rvar <- emitSyscall llvm_call_num llvm_args
-           case rets of
-             [Some fr] -> do
-               -- Assign all return variables to the extracted result
-                 lbl <- gets $ fbLabel . bbBlock
-                 setAssignIdValue (frAssignId fr) lbl rvar
-                 jump (blockName next_lbl)
-             _ -> error "Unexpected return values"
-         _ -> error $ "Unsupported operating system: " ++ show pname
 
      FnLookupTable idx vec -> do
        idx' <- mkLLVMValue idx
@@ -1208,7 +1205,7 @@ addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
 blockToLLVM :: FunLLVMContext
                -- ^ Context for block
             -> FunState
-            -> FnBlock
+            -> FnBlock X86_64
                -- ^ Block to generate
             -> (LLVMBlockResult, FunState)
 blockToLLVM ctx fs b = (res, funState s)
@@ -1281,7 +1278,7 @@ defineFunction syscallPostfix addrSymMap funTypeMap f = do
                                 , funIntrinsicMap = m0
                                 }
   let mkBlockRes :: (FunState, [LLVMBlockResult])
-                 -> FnBlock
+                 -> FnBlock X86_64
                  -> (FunState, [LLVMBlockResult])
       mkBlockRes (fs, prev) b =
         let (r, fs') = blockToLLVM ctx fs b
@@ -1329,7 +1326,7 @@ declareIntrinsic i =
 intrinsicDecls :: [L.Declare]
 intrinsicDecls = declareIntrinsic <$> (reoptIntrinsics ++ llvmIntrinsics)
 
-declareFunction' :: AddrSymMap 64 -> (MemSegmentOff 64, FunctionType) -> L.Declare
+declareFunction' :: AddrSymMap 64 -> (MemSegmentOff 64, FunctionType X86_64) -> L.Declare
 declareFunction' addrSymMap (addr, ftp) =
   L.Declare { L.decRetType = funReturnType
             , L.decName    = functionName addrSymMap addr
