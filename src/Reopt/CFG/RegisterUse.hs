@@ -10,7 +10,6 @@
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
-  , AddrToX86FunctionTypeMap
   , DemandedUseMap
   , ppDemandedUseMap
   , registerUse
@@ -44,14 +43,16 @@ import           Data.Macaw.X86.X86Reg
 import           Data.Macaw.X86 (x86DemandContext)
 
 import           Reopt.CFG.FnRep ( FunctionType
-                                 , ftMaximumFunctionType
-                                 , ftArgRegs
-                                 , ftIntRetRegs
-                                 , ftFloatRetRegs
-                                 , fnNIntRets
-                                 , fnNFloatRets
                                  , FunctionTypeMap
                                  )
+
+import           Reopt.CFG.FnRep.X86 ( ftMaximumFunctionType
+                                     , ftArgRegs
+                                     , ftIntRetRegs
+                                     , ftFloatRetRegs
+                                     , fnNIntRets
+                                     , fnNFloatRets
+                                     )
 
 -------------------------------------------------------------------------------
 -- funBlockPreds
@@ -93,12 +94,6 @@ type RegDeps (r :: Type -> *) ids = (Set (Some (AssignId ids)), Set (Some r))
 
 type AssignmentCache r ids = Map (Some (AssignId ids)) (RegDeps r ids)
 
--- | Map from address to type of function at that address
---
--- We use the given key type so that we do not need access to memory object
--- in computing types.
-type AddrToX86FunctionTypeMap = FunctionTypeMap
-
 -- The algorithm computes the set of direct deps (i.e., from writes)
 -- and then iterates, propagating back via the register deps.
 data RegisterUseState ids = RUS {
@@ -117,14 +112,14 @@ data RegisterUseState ids = RUS {
     -- | The set of addresses we need to consider next.
   , _blockFrontier  :: !(Set (MemSegmentOff 64))
     -- | Function arguments derived from FunctionTypeMap
-  , functionArgs    :: !FunctionTypeMap
+  , functionArgs    :: !(FunctionTypeMap X86_64)
   , currentFunctionType :: !(FunctionType X86_64)
   , thisSyscallPersonality :: !SyscallPersonality
     -- ^ System call personality
   }
 
 initRegisterUseState :: SyscallPersonality
-                     -> FunctionTypeMap
+                     -> FunctionTypeMap X86_64
                      -> MemSegmentOff 64
                      -> FunctionType X86_64 -- ^ Type of current function
                      -> RegisterUseState ids
@@ -208,7 +203,7 @@ x86TermStmtValues sysp X86Syscall proc_state =
 -- | Get values that must be evaluated to execute terminal statement.
 termStmtValues :: Memory 64
                -> SyscallPersonality
-               -> FunctionTypeMap
+               -> FunctionTypeMap X86_64
                   -- ^ Map from addresses to function type
                -> FunctionType X86_64
                   -- ^ Type of this function
@@ -380,7 +375,7 @@ ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
 -- the highest index above sp0 that is read or written.
 registerUse :: Memory 64
             -> SyscallPersonality
-            -> FunctionTypeMap
+            -> FunctionTypeMap X86_64
             -> DiscoveryFunInfo X86_64 ids
             -> FunctionType X86_64
                -- ^ Expected type of this function

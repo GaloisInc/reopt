@@ -75,7 +75,8 @@ import           Data.Macaw.X86
 import           Data.Macaw.X86.SyscallInfo
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..), FunctionType, FunctionTypeMap, X86FunctionType(..))
+import           Reopt.CFG.FnRep (Function(..), FunctionType, FunctionTypeMap)
+import           Reopt.CFG.FnRep.X86 (X86FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery
@@ -297,7 +298,7 @@ getX86ElfArchInfo e =
     abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
-                             -> FunctionTypeMap
+                             -> FunctionTypeMap X86_64
 inferFunctionTypeFromDemands dm =
   let go ds m = Map.unionWith Set.union (functionResultDemands ds) m
       retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
@@ -331,7 +332,7 @@ getFns :: Monad m
        -> SyscallPersonality
        -> DiscoveryState X86_64
           -- ^ Information about original binary recovered from static analysis.
-       -> m [Function]
+       -> m [Function X86_64]
 getFns logger sysp info = do
 
   let mem = memory info
@@ -340,7 +341,7 @@ getFns logger sysp info = do
 
   let fDems :: Map (MemSegmentOff 64) (DemandSet X86Reg)
       fDems = functionDemands (x86DemandInfo sysp) info
-  let fArgs :: AddrToX86FunctionTypeMap
+  let fArgs :: FunctionTypeMap X86_64
       fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
    fmap catMaybes $ forM entries $ \(Some finfo) -> do
@@ -540,7 +541,7 @@ lookupElfOffset m a =
 addrRedirection :: ControlFlowTargetSet 64
                 -> LLVM.AddrSymMap 64
                 -> ElfSegmentMap 64
-                -> Function
+                -> Function X86_64
                 -> Either (MemSegmentOff 64) (CodeRedirection Word64)
 addrRedirection tgts addrSymMap m f = do
   let a = fnAddr f

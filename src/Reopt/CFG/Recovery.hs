@@ -19,8 +19,7 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
-  ( Reopt.CFG.RegisterUse.AddrToX86FunctionTypeMap
-  , recoverFunction
+  ( recoverFunction
   ) where
 
 import           Control.Lens
@@ -59,6 +58,7 @@ import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
+import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
 
@@ -84,7 +84,7 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                              -- ^ System call personality
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
                            , rsCurrentFunctionType :: !(FunctionType X86_64)
-                           , rsFunctionArgs        :: !AddrToX86FunctionTypeMap
+                           , rsFunctionArgs        :: !(FunctionTypeMap X86_64)
                            }
 
 rsNextAssignId :: Simple Lens (RecoverState ids) FnAssignId
@@ -357,7 +357,7 @@ recoverStmt s = do
       addFnStmt $ FnComment msg
     ExecArchStmt stmt0 -> do
       stmt <- traverseF recoverValue stmt0
-      addFnStmt (FnArchStmt stmt)
+      addFnStmt (FnArchStmt (X86FnStmt stmt))
     _ -> trace ("recoverStmt undefined for " ++ show (ppStmt pretty s)) $ do
       addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (ppStmt pretty s))
       return ()
@@ -386,7 +386,9 @@ getPostCallValue :: BlockLabel 64
                  -> FnReturnInfo X86_64 FnReturnVar
                  -> X86Reg tp
                  -> Recover ids (FnValue X86_64 tp)
-getPostCallValue lbl proc_state (intrs, floatrs) r = do
+getPostCallValue lbl proc_state rs r = do
+  let intrs   = x86IntReturn rs
+  let floatrs = x86XMMReturn rs
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
       , Just rv <- lookup r ([RAX, RDX] `zip` intrs) ->
@@ -504,7 +506,7 @@ recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state mnext
 
   call_num <- recoverRegister proc_state syscall_num_reg
   args'  <- mapM (recoverRegister proc_state) args
-  addFnStmt (FnSystemCall call_num args' rets)
+  addFnStmt (FnArchStmt (X86FnSystemCall call_num args' rets))
   case mnext_addr of
     Nothing -> do
       -- TODO: Fix this by adding a
@@ -585,8 +587,11 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
           -- May not be used (only if called function returns at these types)
           intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownRepr :: TypeRepr (BVType 64))
           floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownRepr :: TypeRepr XMMType)
+          let ri = X86FnReturnInfo { x86IntReturn = intrs
+                                   , x86XMMReturn = floatrs
+                                   }
           -- Add call statement
-          addFnStmt (FnCall call_tgt ft args (intrs, floatrs))
+          addFnStmt (FnCall call_tgt ft args ri)
           -- Get registers that return address needs.
           let nextRegsNeeded = Map.findWithDefault Set.empty ret_addr registerUseMap
           -- Get registers for next block.
@@ -594,7 +599,7 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
                  -> Some X86Reg
                  -> Recover ids (MapF X86Reg (FnRegValue X86_64))
               go m (Some r) = do
-                v <- getPostCallValue lbl proc_state (intrs, floatrs) r
+                v <- getPostCallValue lbl proc_state ri r
                 return $! MapF.insert r (FnRegValue v) m
           regs' <- foldM go MapF.empty nextRegsNeeded
           -- Get next label to jump to.
@@ -629,7 +634,11 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
         v <- recoverRegister proc_state r
         evalAssignRhs $ FnEvalApp $ Trunc v n128
 
-      bl <- mkBlock lbl phis (FnRet (grets', frets')) MapF.empty
+      let ri = X86FnReturnInfo { x86IntReturn = grets'
+                               , x86XMMReturn = frets'
+                               }
+
+      bl <- mkBlock lbl phis (FnRet ri) MapF.empty
       pure $! blockInfo & addFnBlock bl
 
     ParsedArchTermStmt ts proc_state next_addr ->
@@ -735,10 +744,10 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
 -- | Recover the function at a given address.
 recoverFunction :: forall ids
                 .  SyscallPersonality
-                -> AddrToX86FunctionTypeMap
+                -> FunctionTypeMap X86_64
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
-                -> Either String Function
+                -> Either String (Function X86_64)
 recoverFunction sysp fArgs mem fInfo = do
 
   let a = discoveredFunAddr fInfo

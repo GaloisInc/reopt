@@ -27,6 +27,7 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
+import           Data.Foldable
 import           Data.Int
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -50,6 +51,7 @@ import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
+import           Reopt.CFG.FnRep.X86
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -286,22 +288,24 @@ failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
 
-getReferencedFunctions :: FunctionTypeMap
-                       -> Function
-                       -> FunctionTypeMap
+getReferencedFunctions :: FunctionTypeMap X86_64
+                       -> Function X86_64
+                       -> FunctionTypeMap X86_64
 getReferencedFunctions m0 f =
-    foldFnValue findReferencedFunctions (insertAddr (fnAddr f) (fnType f) m0) f
-  where findReferencedFunctions :: FunctionTypeMap
+    foldl' (foldFnValue findReferencedFunctions) m1 (fnBlocks f)
+  where m1 = insertAddr (fnAddr f) (fnType f) m0
+
+        findReferencedFunctions :: FunctionTypeMap X86_64
                                 -> FnValue X86_64 tp
-                                -> FunctionTypeMap
+                                -> FunctionTypeMap X86_64
         findReferencedFunctions m (FnFunctionEntryValue ft addr) =
           insertAddr addr ft m
         findReferencedFunctions m _ = m
 
         insertAddr :: MemSegmentOff 64
                    -> FunctionType X86_64
-                   -> FunctionTypeMap
-                   -> FunctionTypeMap
+                   -> FunctionTypeMap X86_64
+                   -> FunctionTypeMap X86_64
         insertAddr addr ft m =
           case Map.lookup addr m of
             Just ft' | ft /= ft' ->
@@ -318,7 +322,7 @@ padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef
 data FunLLVMContext = FunLLVMContext
   { funSyscallIntrinsicPostfix :: !String
   , funAddrSymMap :: !(AddrSymMap 64)
-  , funAddrTypeMap :: !FunctionTypeMap
+  , funAddrTypeMap :: !(FunctionTypeMap X86_64)
   , funArgs      :: !(V.Vector (L.Typed L.Value))
   }
 
@@ -418,9 +422,6 @@ comment msg = effect (L.Comment msg)
 
 ret :: L.Typed L.Value -> BBLLVM ()
 ret = effect . L.Ret
-
-jump :: L.BlockLabel -> BBLLVM ()
-jump = effect . L.Jump
 
 unimplementedInstr' :: L.Type -> String -> BBLLVM (L.Typed L.Value)
 unimplementedInstr' typ reason = do
@@ -1001,7 +1002,9 @@ stmtToLLVM stmt = do
      llvm_ptr <- llvmAsPtr ptr (L.typedType llvm_v)
      -- Cast LLVM point to appropriate type
      effect $ L.Store llvm_v llvm_ptr Nothing
-   FnCall dest ft args (gretvs, fretvs) -> do
+   FnCall dest ft args retvs -> do
+     let gretvs = x86IntReturn retvs
+         fretvs = x86XMMReturn retvs
      let arg_tys = functionTypeArgTypes ft
          ret_tys = funReturnType
          fun_ty  = L.ptrT (L.FunTy ret_tys arg_tys False)
@@ -1053,7 +1056,9 @@ stmtToLLVM stmt = do
            val    <- bitcast val_fp (L.iT 128)
            setAssignIdValue (frAssignId fr) this_lbl val
      itraverse_ assignFltReturn fretvs
-   FnSystemCall call_num args rets -> do
+   FnArchStmt (X86FnStmt astmt) -> do
+     archStmtToLLVM astmt
+   FnArchStmt (X86FnSystemCall call_num args rets) -> do
      pname <- gets $ funSyscallIntrinsicPostfix . funContext
      llvm_call_num <- mkLLVMValue call_num
      llvm_args  <- mapM mkLLVMValue args
@@ -1075,9 +1080,6 @@ stmtToLLVM stmt = do
                  setAssignIdValue (frAssignId fr) lbl rvar
              _ -> error "Unexpected return values"
        _ -> error $ "Unsupported operating system: " ++ show pname
-
-   FnArchStmt astmt -> do
-     archStmtToLLVM astmt
 
 makeRet' :: [ L.Typed L.Value ] -> [ L.Typed L.Value ] -> BBLLVM ()
 makeRet' grets frets = do
@@ -1103,7 +1105,9 @@ termStmtToLLVM tm =
   case tm of
      FnJump lbl -> do
        effect $ L.Jump (blockName lbl)
-     FnRet (grets, frets) -> do
+     FnRet rets -> do
+       let grets = x86IntReturn rets
+       let frets = x86XMMReturn rets
        grets' <- mapM mkLLVMValue grets
        frets' <- mapM mkLLVMValue frets
        makeRet' grets' frets'
@@ -1250,8 +1254,8 @@ runLLVMTrans (LLVMTrans action) =
 defineFunction :: String
                   -- ^ Name to append to system call
                -> AddrSymMap 64
-               -> FunctionTypeMap
-               -> Function
+               -> FunctionTypeMap X86_64
+               -> Function X86_64
                -> LLVMTrans L.Define
 defineFunction syscallPostfix addrSymMap funTypeMap f = do
   let symbol = functionName addrSymMap (fnAddr f)
@@ -1340,7 +1344,7 @@ declareFunction' addrSymMap (addr, ftp) =
 moduleForFunctions :: String
                       -- ^ Name to append to system calls
                    -> AddrSymMap 64
-                   -> [Function]
+                   -> [Function X86_64]
                    -> L.Module
 moduleForFunctions syscallPostfix addrSymMap fns =
     L.Module { L.modSourceName = Nothing
@@ -1358,7 +1362,7 @@ moduleForFunctions syscallPostfix addrSymMap fns =
              , L.modComdat     = Map.empty
              }
   where -- Get all function references
-        funTypeMap :: FunctionTypeMap
+        funTypeMap :: FunctionTypeMap X86_64
         funTypeMap = foldl getReferencedFunctions Map.empty fns
 
         excludedSet = Set.fromList $ fnAddr <$> fns

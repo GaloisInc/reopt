@@ -1,12 +1,16 @@
+{-|
+Copyright        : (c) Galois, Inc 2018
+
+Defines a program representation with machine registers replaced by
+values.
+-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -20,7 +24,6 @@ module Reopt.CFG.FnRep
    , Function(..)
    , FunctionType
    , FunctionTypeMap
-   , X86FunctionType(..)
    , FnBlock(..)
    , FnStmt(..)
    , FnTermStmt(..)
@@ -28,16 +31,12 @@ module Reopt.CFG.FnRep
    , FnPhiVar(..)
    , FnReturnVar(..)
    , FnReturnInfo
+   , FnArchStmt
    , FoldFnValue(..)
    , PhiBinding(..)
-   , ftMaximumFunctionType
-   , ftArgRegs
-   , ftIntRetRegs
-   , ftFloatRetRegs
    ) where
 
 import           Control.Monad.Identity
-import           Data.Foldable
 import           Data.Map (Map)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
@@ -62,24 +61,14 @@ import           Data.Macaw.CFG
    , ArchAddrWidth
    , RegAddrWidth
    , ArchReg
-   , ArchStmt
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
+   , PrettyF(..)
    )
 import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
-
-import           Data.Macaw.X86.ArchTypes (X86_64)
-import           Data.Macaw.X86.Monad (XMMType)
-import           Data.Macaw.X86.X86Reg
-  ( X86Reg
-  , x86ArgumentRegs
-  , x86ResultRegs
-  , x86FloatArgumentRegs
-  , x86FloatResultRegs
-  )
 
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
@@ -212,55 +201,18 @@ data FnValue (arch :: *) (tp :: Type)
      => FnGlobalDataAddr !(MemSegmentOff (ArchAddrWidth arch))
 
 ------------------------------------------------------------------------
--- X86FunctionType
-
--- | This describes the expected arguments and return types of the function.
---
--- This is X86_64 specific.
-data X86FunctionType =
-  X86FunctionType { fnNIntArgs   :: !Int
-                  , fnNFloatArgs :: !Int
-                  , fnNIntRets   :: !Int
-                  , fnNFloatRets :: !Int
-                  }
-  deriving (Ord, Eq, Show)
-
-type instance FunctionType X86_64 = X86FunctionType
-
-instance Pretty X86FunctionType where
-  pretty f = parens (commaSepRegs (ftArgRegs f))
-             <+> text "->"
-             <+> parens (int (fnNIntRets f) <> comma <+> int (fnNFloatRets f))
-   where commaSepRegs :: [Some X86Reg] -> Doc
-         commaSepRegs [] = text ""
-         commaSepRegs [Some r] = text (show r)
-         commaSepRegs (Some r:l) = text (show r) <> comma <+> commaSepRegs l
-
--- Convenience functions
-ftMaximumFunctionType :: X86FunctionType
-ftMaximumFunctionType = X86FunctionType { fnNIntArgs = length x86ArgumentRegs
-                                        , fnNFloatArgs = length x86FloatArgumentRegs
-                                        , fnNIntRets = length x86ResultRegs
-                                        , fnNFloatRets = length x86FloatResultRegs
-                                        }
-
-
--- | Return the registers used to pass arguments.
-ftArgRegs :: X86FunctionType -> [Some X86Reg]
-ftArgRegs ft = (Some <$> take (fnNIntArgs ft) x86ArgumentRegs)
-            ++ (Some <$> take (fnNFloatArgs ft) x86FloatArgumentRegs)
-
-ftIntRetRegs :: X86FunctionType -> [X86Reg (BVType 64)]
-ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs
-
-ftFloatRetRegs :: X86FunctionType -> [X86Reg (BVType 256)]
-ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
-
-------------------------------------------------------------------------
 -- FoldFnValue
 
-class FoldFnValue a where
-  foldFnValue :: (forall u . s -> FnValue X86_64 u -> s) -> s -> a -> s
+class FoldFnValue (v :: * -> *)  where
+  foldFnValue :: forall arch s
+              .  ( FoldableF (FnArchStmt arch)
+                 , FoldableFC (ArchFn arch)
+                 , FoldableF (FnReturnInfo arch)
+                 )
+              => (forall u . s -> FnValue arch u -> s)
+              -> s
+              -> v arch
+              -> s
 
 ------------------------------------------------------------------------
 -- FnAssignment/FnValue/FnAssignRhs basic operations
@@ -366,9 +318,9 @@ data PhiBinding r tp
 -- | Return values from a function call in an architecture-specific format.
 --
 -- Note, we may identify ways to eliminate this, but for now it seems useful.
-type family FnReturnInfo (arch :: *) (f :: Type -> *) :: *
+type family FnReturnInfo (arch :: *) :: (Type -> *) -> *
 
-type instance FnReturnInfo X86_64 f = ([f (BVType 64)], [f XMMType])
+type family FnArchStmt (arch :: *) :: (Type -> *) -> *
 
 data FnStmt arch
     -- | A comment
@@ -385,43 +337,32 @@ data FnStmt arch
             [Some (FnValue arch)]
             -- Return values
             !(FnReturnInfo arch FnReturnVar)
-   | (arch ~ X86_64)
-   => FnSystemCall !(FnValue arch (BVType (ArchAddrWidth arch)))
-                   ![FnValue arch (BVType (ArchAddrWidth arch))]
-                   ![Some FnReturnVar]
-     -- ^ A system call with the call number, arguments, return
-     -- variable, and block to jump to when it terminates.
-     --
-     -- TODO: See if we can migrate this to @FnStmt@.
-  | FnArchStmt (ArchStmt arch (FnValue arch))
+  | FnArchStmt (FnArchStmt arch (FnValue arch))
 
-instance Pretty (FnStmt X86_64) where
+instance ( FnArchConstraints arch
+         , FoldableF (FnReturnInfo arch)
+         , IsArchStmt (FnArchStmt arch)
+         )
+      => Pretty (FnStmt arch) where
   pretty s =
     case s of
       FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
-      FnCall f _ args (grets, frets) ->
+      FnCall f _ args rets ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
-            ret_docs = (pretty <$> grets) ++ (pretty <$> frets)
-         in parens (commas ret_docs)
+            ppRet :: forall tp . FnReturnVar tp -> Doc
+            ppRet = pretty
+         in parens (commas (toListF ppRet rets))
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs)
-      FnSystemCall call_no args rets ->
-        let arg_docs = (pretty <$> args)
-            ret_docs = viewSome pretty <$> rets
-         in parens (commas ret_docs)
-            <+> text ":=" <+> text "syscall"
-            <+> pretty call_no <> parens (commas arg_docs)
       FnArchStmt stmt -> ppArchStmt pretty stmt
 
-instance FoldFnValue (FnStmt X86_64) where
+instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldlFC f s rhs
   foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
-  foldFnValue f s (FnSystemCall call_no args _rets) =
-    foldl f (f s call_no) args
   foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
 
 ------------------------------------------------------------------------
@@ -444,7 +385,8 @@ data FnTermStmt arch
      -- listed that does not return.
    | FnTermStmtUndefined
 
-instance Pretty (FnTermStmt X86_64) where
+instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
+      => Pretty (FnTermStmt arch) where
   pretty s =
     case s of
       FnJump lbl -> text "jump" <+> pretty lbl
@@ -452,19 +394,19 @@ instance Pretty (FnTermStmt X86_64) where
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ map (pretty . relativeSegmentAddr)
                                                         (V.toList vec))
-      FnRet (grets, frets) ->
-        text "return" <+> parens (commas $ (pretty <$> grets) ++ (pretty <$> frets))
+      FnRet rets ->
+        text "return" <+> parens (commas $ toListF pretty rets)
       FnTailCall f _ args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
 
       FnTermStmtUndefined -> text "undefined term"
 
-instance FoldFnValue (FnTermStmt X86_64) where
+instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
-  foldFnValue f s (FnRet (grets, frets)) = foldl f (foldl f s grets) frets
+  foldFnValue f s (FnRet rets) = foldlF f s rets
   foldFnValue f s (FnTailCall fn _ args) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue _ s (FnTermStmtUndefined {}) = s
 
@@ -483,7 +425,12 @@ data FnBlock arch
              , fbRegMap :: !(MapF (ArchReg arch) (FnRegValue arch))
              }
 
-instance Pretty (FnBlock X86_64) where
+instance (FnArchConstraints arch
+         , PrettyF (ArchReg arch)
+         , FoldableF (FnReturnInfo arch)
+         , IsArchStmt (FnArchStmt arch)
+         )
+      => Pretty (FnBlock arch) where
   pretty b =
     pretty (fbLabel b) <$$>
     indent 2 (ppPhis
@@ -491,32 +438,35 @@ instance Pretty (FnBlock X86_64) where
               <$$> pretty (fbTerm b))
     where
       ppPhis = vcat (go <$> fbPhiNodes b)
-      go :: Some (PhiBinding X86Reg) -> Doc
+      go :: Some (PhiBinding (ArchReg arch)) -> Doc
       go (Some (PhiBinding aid vs)) =
          pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl vs)
-      goLbl :: (BlockLabel 64, X86Reg tp) -> Doc
+      goLbl :: (ArchLabel arch, ArchReg arch tp) -> Doc
       goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
 
-instance FoldFnValue (FnBlock X86_64) where
+instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
 
 ------------------------------------------------------------------------
 -- Function definitions
 
-data Function = Function { fnAddr :: !(MemSegmentOff (ArchAddrWidth X86_64))
-                           -- ^ The address for this function
-                         , fnType :: !(FunctionType X86_64)
-                           -- ^ Type of this  function
-                         , fnBlocks :: [FnBlock X86_64]
-                           -- ^ A list of all function blocks here.
-                         }
+data Function arch
+   = Function { fnAddr :: !(MemSegmentOff (ArchAddrWidth arch))
+                -- ^ The address for this function
+              , fnType :: !(FunctionType arch)
+                -- ^ Type of this  function
+              , fnBlocks :: [FnBlock arch]
+                -- ^ A list of all function blocks here.
+              }
 
-instance Pretty Function where
+instance (FnArchConstraints arch
+         , PrettyF (ArchReg arch)
+         , FoldableF (FnReturnInfo arch)
+         , IsArchStmt (FnArchStmt arch)
+         )
+      => Pretty (Function arch) where
   pretty fn =
     text "function " <+> pretty (show (fnAddr fn))
     <$$> lbrace
     <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
     <$$> rbrace
-
-instance FoldFnValue Function where
-  foldFnValue f s0 fn = foldl' (foldFnValue f) s0 (fnBlocks fn)

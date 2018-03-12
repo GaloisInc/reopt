@@ -53,6 +53,7 @@ library
     Reopt
     Reopt.Analysis.Domains.DiffEquations
     Reopt.CFG.FnRep
+    Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
     Reopt.CFG.Recovery
