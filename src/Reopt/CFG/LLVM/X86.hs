@@ -366,7 +366,10 @@ emitX86Return rets = do
   -- which we will duplicate, with undef padding where required.
 
   -- cast fp results to the required type
-  cfrets <- mapM (`bitcast` functionFloatType) frets
+  cfrets <- forM frets $ \v256 -> do
+    v128 <- convop L.Trunc v256 (L.PrimType (L.Integer 128))
+    bitcast v128 functionFloatType
+
   let frets' = padUndef functionFloatType (length x86FloatResultRegs) cfrets
   -- construct the return result struct
   let initUndef = L.Typed x86LLVMRetType L.ValUndef

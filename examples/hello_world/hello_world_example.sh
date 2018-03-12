@@ -21,9 +21,9 @@ reopt_exclude="--exclude=__unified_syscall --exclude=__libc_close --exclude=__li
 #reopt_exclude="$reopt_exclude --exclude=memcmp --exclude=getenv --exclude=__stdio_outs --exclude=arch_prctl --exclude=strstr --exclude=__errno_location --exclude=__nop --exclude=__error_unified_syscall --exclude=__unified_syscall_16bit"
 
 # Get reopt to just print out the basic blocks from discovery.
-#$reopt hello_world_ubuntu_64_lts_12_04_diet \
-#      $reopt_exclude \
-#      -o "$relink_output.blocks"
+$reopt hello_world_ubuntu_64_lts_12_04_diet \
+      $reopt_exclude \
+      -o "$relink_output.blocks"
 
 # Get reopt to just print out the functions that are discovered.
 $reopt hello_world_ubuntu_64_lts_12_04_diet \

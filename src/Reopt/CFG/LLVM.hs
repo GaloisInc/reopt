@@ -484,7 +484,7 @@ valueToLLVM archOps ctx blk m val = do
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs m of
         Just (_,v) -> v
-        Nothing ->
+        Nothing -> -- mk L.ValUndef
           Loc.error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk) ++ "\n"
                       ++ show m
@@ -693,7 +693,7 @@ appToLLVM app = do
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
-    Trunc v sz -> flip (convop L.Trunc) (natReprToLLVMType sz) =<< mkLLVMValue v
+    Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     AndApp{}     -> unimplementedInstr' typ "AndApp"
