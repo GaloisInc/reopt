@@ -42,6 +42,7 @@ import           Data.Macaw.Memory.LoadCommon
 
 import           Reopt
 import qualified Reopt.CFG.LLVM as LLVM
+import qualified Reopt.CFG.LLVM.X86 as LLVM
 import           Reopt.Interface
 import           Reopt.Relinker
 
@@ -568,14 +569,16 @@ performReopt args =
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+        let archOps = LLVM.x86LLVMArchOps (show os)
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
         (os, disc_info, addrSymMap) <-
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+        let archOps = LLVM.x86LLVMArchOps (show os)
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
         libreopt_path <-
           case args^.libreoptPath of
             Just s -> return s
@@ -594,7 +597,8 @@ performReopt args =
           discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+        let archOps = LLVM.x86LLVMArchOps (show os)
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
         libreopt_path <-
           case args^.libreoptPath of
             Just s -> return s

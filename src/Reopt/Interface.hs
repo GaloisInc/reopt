@@ -375,9 +375,9 @@ discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
     initElfDiscoveryInfo loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  (finalState, addrSymMap, _) <-
+  (discState, addrSymMap, _) <-
     runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
-  pure (os, finalState, addrSymMap)
+  pure (os, discState, addrSymMap)
 
 -- | Create a discovery state and symbol-address map
 discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
@@ -397,9 +397,9 @@ discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
     initElfDiscoveryInfo loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
-  (finalState, addrSymMap, symAddrMap) <-
+  (discState, addrSymMap, symAddrMap) <-
     runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
-  pure (e, os, finalState, addrSymMap, symAddrMap)
+  pure (e, os, discState, addrSymMap, symAddrMap)
 
 llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
 llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)

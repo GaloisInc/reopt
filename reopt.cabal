@@ -56,6 +56,7 @@ library
     Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
+    Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
     Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth

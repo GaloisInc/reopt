@@ -11,9 +11,7 @@ import qualified Control.Monad.Catch as C
 import qualified Data.ByteString as B
 import qualified Data.ElfEdit as E
 import           Data.Macaw.Discovery
-import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Memory.ElfLoader as MM
-import qualified Data.Set as Set
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
 import           System.IO.Temp (withSystemTempDirectory)
@@ -38,7 +36,6 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
-  let obj_path    = replaceFileName fp (takeBaseName fp ++ ".o")
 
   let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Just 0
                                 , MM.loadRegionBaseOffset = 0
@@ -51,8 +48,8 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
                                   , logAtAnalyzeBlock      = False
                                   }
 
-  (e, os, disc_info, addrSymMap, _) <-
-    discoverX86Elf fp loadOpts discOpts [] []
+  (os, disc_info, addrSymMap) <-
+    discoverX86Binary fp loadOpts discOpts [] []
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
@@ -60,12 +57,13 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
   writeFile fns_path $ show (vcat (pretty <$> fns))
 
   let llvmVer = LLVM38
-  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions (show os) addrSymMap fns
+  let archOps = LLVM.x86LLVMArchOps (show os)
+  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
   writeFileBuilder llvm_path obj_llvm
 
   libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getDataDir
   let llvm_link_path = "llvm-link"
-  llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
+  _llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
   return ()
   -- compile_llvm_to_obj args arch llvm output_path
 

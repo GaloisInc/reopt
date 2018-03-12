@@ -34,6 +34,7 @@ module Reopt.CFG.FnRep
    , FnArchStmt
    , FoldFnValue(..)
    , PhiBinding(..)
+   , FnArchConstraints
    ) where
 
 import           Control.Monad.Identity
