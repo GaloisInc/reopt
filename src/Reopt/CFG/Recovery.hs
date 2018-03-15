@@ -803,5 +803,6 @@ recoverFunction sysp fArgs mem fInfo = do
 
     pure Function { fnAddr = a
                   , fnType = cft
+                  , fnName = discoveredFunName fInfo
                   , fnBlocks = Map.elems rf
                   }
