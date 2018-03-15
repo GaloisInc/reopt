@@ -131,8 +131,8 @@ llvmMaskedLoad :: Int32 -- ^ Number of vector elements
 llvmMaskedLoad n tp tpv = do
  let vstr = "v" ++ show n ++ tp
      mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
-     args = [ L.Vector n (L.PtrTo tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
-  in intrinsic mnem tpv args
+     args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
+  in intrinsic mnem (L.Vector n tpv) args
 
 llvmIntrinsics :: [Intrinsic]
 llvmIntrinsics = [ overflowOp bop in_typ
@@ -812,7 +812,7 @@ rhsToLLVM rhs = do
       let eltType = L.iT bvw
       let intr = llvmMaskedLoad 1 ("i" ++ show bvw) eltType
       addIntrinsic intr
-      llvmAddr     <- singletonVector =<< llvmAsPtr addr eltType
+      llvmAddr     <- llvmAsPtr addr (L.Vector 1 eltType)
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
       llvmCond     <- singletonVector =<< mkLLVMValue cond
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru
