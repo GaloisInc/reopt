@@ -696,9 +696,14 @@ appToLLVM app = do
     Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
-    AndApp{}     -> unimplementedInstr' typ "AndApp"
-    OrApp{}      -> unimplementedInstr' typ "OrApp"
-    NotApp{}     -> unimplementedInstr' typ "NotApp"
+    AndApp x y -> binop band x y
+    OrApp  x y -> binop bor x y
+    NotApp x   -> do
+      -- xor x -1 == complement x, according to LLVM manual.
+      -- TODO: look at LLVM pretty. There should be a better way to write
+      -- Negation.
+      llvm_x <- mkLLVMValue x
+      bitop L.Xor llvm_x (L.ValInteger (-1))
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
