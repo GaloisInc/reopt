@@ -248,16 +248,6 @@ showFunctions args = do
 ------------------------------------------------------------------------
 -- Loading flags
 
-loadBySegmentFlag :: Flag Args
-loadBySegmentFlag = flagNone [ "load-segments" ] upd help
-  where upd = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySegment }
-        help = "Load the Elf file using segment information (default)."
-
-loadBySectionFlag :: Flag Args
-loadBySectionFlag = flagNone [ "load-sections" ] upd help
-  where upd  = loadOpts %~ \opt -> opt { loadStyleOverride = Just LoadBySection }
-        help = "Load the Elf file using section information."
-
 resolveHex :: String -> Maybe Integer
 resolveHex ('0':'x':wval) | [(w,"")] <- readHex wval = Just w
 resolveHex ('0':'X':wval) | [(w,"")] <- readHex wval = Just w
@@ -445,8 +435,6 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , includeAddrFlag
                 , excludeAddrFlag
                   -- Loading options
-                , loadBySegmentFlag
-                , loadBySectionFlag
                 , loadForceAbsoluteFlag
                   -- LLVM options
                 , llvmVersionFlag

@@ -258,7 +258,7 @@ discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   forM_ warnings $ \w -> do
     hPutStrLn stderr w
   (s, _,_) <- runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr
@@ -372,7 +372,7 @@ discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
 discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
   (discState, addrSymMap, _) <-
@@ -394,7 +394,7 @@ discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
 discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
   (discState, addrSymMap, symAddrMap) <-
