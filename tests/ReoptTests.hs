@@ -24,6 +24,7 @@ import           Paths_reopt
 
 import           Reopt.Interface
 import qualified Reopt.CFG.LLVM as LLVM
+import qualified Reopt.CFG.LLVM.X86 as LLVM
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest

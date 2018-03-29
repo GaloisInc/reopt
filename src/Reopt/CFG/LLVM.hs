@@ -131,8 +131,8 @@ llvmMaskedLoad :: Int32 -- ^ Number of vector elements
 llvmMaskedLoad n tp tpv = do
  let vstr = "v" ++ show n ++ tp
      mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
-     args = [ L.Vector n (L.PtrTo tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
-  in intrinsic mnem tpv args
+     args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
+  in intrinsic mnem (L.Vector n tpv) args
 
 llvmIntrinsics :: [Intrinsic]
 llvmIntrinsics = [ overflowOp bop in_typ
@@ -484,7 +484,7 @@ valueToLLVM archOps ctx blk m val = do
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs m of
         Just (_,v) -> v
-        Nothing ->
+        Nothing -> -- mk L.ValUndef
           Loc.error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk) ++ "\n"
                       ++ show m
@@ -693,12 +693,17 @@ appToLLVM app = do
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
-    Trunc v sz -> flip (convop L.Trunc) (natReprToLLVMType sz) =<< mkLLVMValue v
+    Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
-    AndApp{}     -> unimplementedInstr' typ "AndApp"
-    OrApp{}      -> unimplementedInstr' typ "OrApp"
-    NotApp{}     -> unimplementedInstr' typ "NotApp"
+    AndApp x y -> binop band x y
+    OrApp  x y -> binop bor x y
+    NotApp x   -> do
+      -- xor x -1 == complement x, according to LLVM manual.
+      -- TODO: look at LLVM pretty. There should be a better way to write
+      -- Negation.
+      llvm_x <- mkLLVMValue x
+      bitop L.Xor llvm_x (L.ValInteger (-1))
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -812,7 +817,7 @@ rhsToLLVM rhs = do
       let eltType = L.iT bvw
       let intr = llvmMaskedLoad 1 ("i" ++ show bvw) eltType
       addIntrinsic intr
-      llvmAddr     <- singletonVector =<< llvmAsPtr addr eltType
+      llvmAddr     <- llvmAsPtr addr (L.Vector 1 eltType)
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
       llvmCond     <- singletonVector =<< mkLLVMValue cond
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru

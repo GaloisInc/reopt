@@ -47,6 +47,7 @@ import           Data.Parameterized.TraversableFC
 import           Data.Proxy
 import           Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.ByteString.Char8 as BSC
 import           Data.Word
 import qualified Data.Vector as V
 import           GHC.TypeLits
@@ -456,6 +457,8 @@ data Function arch
                 -- ^ The address for this function
               , fnType :: !(FunctionType arch)
                 -- ^ Type of this  function
+              , fnName :: !BSC.ByteString
+                -- ^ Name of this function
               , fnBlocks :: [FnBlock arch]
                 -- ^ A list of all function blocks here.
               }
@@ -467,7 +470,7 @@ instance (FnArchConstraints arch
          )
       => Pretty (Function arch) where
   pretty fn =
-    text "function " <+> pretty (show (fnAddr fn))
+    text "function" <+> pretty (BSC.unpack (fnName fn)) <+> pretty "@" <+> pretty (show (fnAddr fn))
     <$$> lbrace
     <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
     <$$> rbrace
