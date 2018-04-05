@@ -446,10 +446,10 @@ performReloc :: ObjectRelocationInfo Word64
              -> RelaEntry X86_64_RelocationType
                 -- ^ The relocation entry.
              -> ObjRelocM s Word64 ()
-performReloc reloc_info sym_table this_vaddr mv reloc = do
+performReloc reloc_info sym_table this_vaddr mv rela = do
   -- Offset to modify.
-  let off = r_offset reloc :: Word64
-  let sym = NOSTE (getSymbolByIndex sym_table (r_sym reloc))
+  let off = relaOffset rela :: Word64
+  let sym = NOSTE (getSymbolByIndex sym_table (relaSym rela))
   -- Get the address of a symbol
   case symbolAddr reloc_info "A relocation entry" sym of
     Nothing ->
@@ -457,11 +457,11 @@ performReloc reloc_info sym_table this_vaddr mv reloc = do
     Just sym_val -> do
       when (sym_val < 0) $ error "performReloc given negative value"
       -- Relocation addend
-      let addend = r_addend reloc :: Int64
+      let addend = relaAddend rela :: Int64
       -- Get PC offset
       let pc_offset = this_vaddr + off
       -- Parse on type
-      case r_type reloc of
+      case relaType rela of
         R_X86_64_PC32 ->
             lift $ write32_lsb mv off res32
           where res64 = sym_val + fromIntegral addend - pc_offset :: Word64
