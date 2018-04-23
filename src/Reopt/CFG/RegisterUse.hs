@@ -158,12 +158,15 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 -- ----------------------------------------------------------------------------------------
 
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps X86Reg ids)
-valueUses = zoom assignmentCache .
-            foldValueCached (\_ _      -> (mempty, mempty))
-                            (\_        -> (mempty, mempty))
-                            (\r        -> (mempty, Set.singleton (Some r)))
-                            (\asgn (assigns, regs) ->
-                              (Set.insert (Some asgn) assigns, regs))
+valueUses = zoom assignmentCache . foldValueCached fns
+  where fns = ValueFold { foldBoolValue  = \_   -> (mempty, mempty)
+                        , foldBVValue    = \_ _ -> (mempty, mempty)
+                        , foldAddr       = \_ -> (mempty,mempty)
+                        , foldIdentifier = \_ -> (mempty, mempty)
+                        , foldInput      = \r -> (mempty, Set.singleton (Some r))
+                        , foldAssign     = \asgn (assigns, regs) ->
+                              (Set.insert (Some asgn) assigns, regs)
+                        }
 
 demandValue :: MemSegmentOff 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
 demandValue addr v = do
