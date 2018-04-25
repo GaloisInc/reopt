@@ -91,8 +91,18 @@ import           Data.Macaw.ARM
 ------------------------------------------------------------------------
 -- X86-specific functions
 
+-- | Returns information about the registers needed and modified by a
+-- x86 terminal statement.
 summarizeX86TermStmt :: SyscallPersonality
                      -> ComputeArchTermStmtEffects X86_64 ids
+summarizeX86TermStmt _ Hlt _ =
+  ArchTermStmtRegEffects { termRegDemands = []
+                         , termRegTransfers = []
+                         }
+summarizeX86TermStmt _ UD2 _ =
+  ArchTermStmtRegEffects { termRegDemands = []
+                         , termRegTransfers = []
+                         }
 summarizeX86TermStmt sysp X86Syscall proc_state = do
   -- Compute the arguments needed by the function
   let argRegs
