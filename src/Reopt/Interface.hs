@@ -91,8 +91,18 @@ import           Data.Macaw.ARM
 ------------------------------------------------------------------------
 -- X86-specific functions
 
+-- | Returns information about the registers needed and modified by a
+-- x86 terminal statement.
 summarizeX86TermStmt :: SyscallPersonality
                      -> ComputeArchTermStmtEffects X86_64 ids
+summarizeX86TermStmt _ Hlt _ =
+  ArchTermStmtRegEffects { termRegDemands = []
+                         , termRegTransfers = []
+                         }
+summarizeX86TermStmt _ UD2 _ =
+  ArchTermStmtRegEffects { termRegDemands = []
+                         , termRegTransfers = []
+                         }
 summarizeX86TermStmt sysp X86Syscall proc_state = do
   -- Compute the arguments needed by the function
   let argRegs
@@ -258,7 +268,7 @@ discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   forM_ warnings $ \w -> do
     hPutStrLn stderr w
   (s, _,_) <- runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr
@@ -372,7 +382,7 @@ discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
 discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
   (discState, addrSymMap, _) <-
@@ -394,7 +404,7 @@ discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
 discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
   (warnings, mem, entry, symbols) <- either fail pure $
-    initElfDiscoveryInfo loadOpts e
+    resolveElfContents loadOpts e
   mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
   (discState, addrSymMap, symAddrMap) <-

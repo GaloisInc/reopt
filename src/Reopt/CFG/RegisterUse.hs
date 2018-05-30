@@ -158,12 +158,15 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 -- ----------------------------------------------------------------------------------------
 
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps X86Reg ids)
-valueUses = zoom assignmentCache .
-            foldValueCached (\_ _      -> (mempty, mempty))
-                            (\_        -> (mempty, mempty))
-                            (\r        -> (mempty, Set.singleton (Some r)))
-                            (\asgn (assigns, regs) ->
-                              (Set.insert (Some asgn) assigns, regs))
+valueUses = zoom assignmentCache . foldValueCached fns
+  where fns = ValueFold { foldBoolValue  = \_   -> (mempty, mempty)
+                        , foldBVValue    = \_ _ -> (mempty, mempty)
+                        , foldAddr       = \_ -> (mempty,mempty)
+                        , foldIdentifier = \_ -> (mempty, mempty)
+                        , foldInput      = \r -> (mempty, Set.singleton (Some r))
+                        , foldAssign     = \asgn (assigns, regs) ->
+                              (Set.insert (Some asgn) assigns, regs)
+                        }
 
 demandValue :: MemSegmentOff 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
 demandValue addr v = do
@@ -186,6 +189,8 @@ x86TermStmtValues :: SyscallPersonality
                   -> X86TermStmt ids
                   -> RegState (ArchReg X86_64) (Value X86_64 ids)
                   -> [Some (Value X86_64 ids)]
+x86TermStmtValues _ Hlt _ = []
+x86TermStmtValues _ UD2 _ = []
 x86TermStmtValues sysp X86Syscall proc_state =
     registerValues proc_state (Some <$> (sysReg : argRegs))
    where sysReg ::  ArchReg X86_64 (BVType 64)
@@ -230,6 +235,15 @@ termStmtValues mem sysp typeMap curFunType tstmt =
     ParsedTranslateError _ -> []
     ClassifyFailure _ -> []
 
+-- | Figure out the deps of the given registers and update the state for the current label
+addRegisterUses :: BlockLabel 64
+                -> RegState X86Reg (Value X86_64 ids)
+                -> [Some X86Reg]
+                -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
+addRegisterUses lbl s rs = do
+  vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
+  blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
+
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
 -- map of how demands by successor blocks map back to assignments and
@@ -243,14 +257,6 @@ summarizeBlock :: forall ids
 summarizeBlock mem interp_state addr stmts = do
   let lbl = GeneratedBlock addr (stmtsIdent stmts)
   blockInitDeps %= Map.insert lbl Map.empty
-  let -- Figure out the deps of the given registers and update the state for the current label
-      addRegisterUses :: RegState X86Reg (Value X86_64 ids)
-                      -> [Some X86Reg]
-                      -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
-      addRegisterUses s rs = do
-        vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
-        blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
-
   -- Add demanded values for terminal
   sysp <- gets thisSyscallPersonality
   typeMap <- gets $ functionArgs
@@ -261,35 +267,46 @@ summarizeBlock mem interp_state addr stmts = do
             (concatMap (stmtDemandedValues ctx) (stmtsNonterm stmts) ++ termValues)
 
   case stmtsTerm stmts of
-          ParsedCall proc_state _ -> do
-            -- Get function type associated with function
-            let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
-                   , Just ftp <- Map.lookup fSegOff typeMap = ftp
-                   | otherwise = ftMaximumFunctionType
-            addRegisterUses proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
-            -- Ensure that result registers are defined, but do not have any deps.
-            traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
-              (Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ [Some DF]
+    ParsedCall proc_state _ -> do
+      -- Get function type associated with function
+      let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
+             , Just ftp <- Map.lookup fSegOff typeMap = ftp
+             | otherwise = ftMaximumFunctionType
+      addRegisterUses lbl proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
+      -- Ensure that result registers are defined, but do not have any deps.
+      traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
+                (Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ [Some DF]
+    ParsedJump proc_state _ ->
+      addRegisterUses lbl proc_state x86StateRegs
+    ParsedLookupTable proc_state _ _ ->
+      addRegisterUses lbl proc_state x86StateRegs
+    ParsedReturn _ ->
+      pure ()
+    ParsedIte _ tblock fblock -> do
+      summarizeBlock mem interp_state addr tblock
+      summarizeBlock mem interp_state addr fblock
+    ParsedArchTermStmt tstmt proc_state _ -> do
+      summarizeX86ArchTermStmt sysp lbl tstmt proc_state
+    ParsedTranslateError _ ->
+      error "Cannot identify register use in code where translation error occurs"
+    ClassifyFailure _ ->
+      error $ "Classification failed: " ++ show addr
 
-          ParsedJump proc_state _ ->
-            addRegisterUses proc_state x86StateRegs
-          ParsedLookupTable proc_state _ _ ->
-            addRegisterUses proc_state x86StateRegs
-          ParsedReturn _ ->
-            pure ()
-          ParsedIte _ tblock fblock -> do
-            summarizeBlock mem interp_state addr tblock
-            summarizeBlock mem interp_state addr fblock
-          ParsedArchTermStmt X86Syscall proc_state _ -> do
-            -- FIXME: clagged from call above
-            addRegisterUses proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
-            let insReg :: Some X86Reg -> RegisterUseM ids ()
-                insReg sr = blockInitDeps . ix lbl %= Map.insert sr (Set.empty, Set.empty)
-            traverse_ insReg (spResultRegisters sysp)
-          ParsedTranslateError _ ->
-            error "Cannot identify register use in code where translation error occurs"
-          ClassifyFailure _ ->
-            error $ "Classification failed: " ++ show addr
+
+summarizeX86ArchTermStmt :: SyscallPersonality
+                         -> BlockLabel 64
+                         -> X86TermStmt ids
+                         -> RegState (ArchReg X86_64) (Value X86_64 ids)
+                         -> RegisterUseM ids ()
+summarizeX86ArchTermStmt sysp lbl X86Syscall proc_state = do
+  -- FIXME: clagged from call above
+  addRegisterUses lbl proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+  let insReg :: Some X86Reg -> RegisterUseM ids ()
+      insReg sr = blockInitDeps . ix lbl %= Map.insert sr (Set.empty, Set.empty)
+  traverse_ insReg (spResultRegisters sysp)
+summarizeX86ArchTermStmt _ _ Hlt _ = pure ()
+summarizeX86ArchTermStmt _ _ UD2 _ = pure ()
+
 
 -- | Explore states until we have reached end of frontier.
 summarizeIter :: Memory 64

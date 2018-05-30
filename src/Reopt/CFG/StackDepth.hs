@@ -173,6 +173,7 @@ valueHasSP v0 =
      BoolValue{} -> False
      BVValue _sz _i -> False
      RelocatableValue{} -> False
+     SymbolValue{} -> False
      Initial r      -> testEquality r sp_reg /= Nothing
      AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
   where
@@ -230,6 +231,7 @@ addStateVars init_sp s =
   forM_ gpRegList $ \r -> do
     addDepth $ parseStackPointer init_sp (s ^. boundValue r)
 
+
 -- | This function finds references to the stack pointer in the statements to
 -- infer the maximal stack offset that may be referenced by the pointe.
 --
@@ -274,7 +276,7 @@ analyzeStmtReferences root_addr init_sp b = do
       addStateVars init_sp proc_state
       let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') vec
-    ParsedArchTermStmt X86Syscall proc_state mnext_addr -> do
+    ParsedArchTermStmt _ proc_state mnext_addr -> do
       addStateVars init_sp proc_state
       let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') mnext_addr

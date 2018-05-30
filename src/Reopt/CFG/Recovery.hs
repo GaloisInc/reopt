@@ -194,6 +194,7 @@ valueDependencies = go Set.empty
             BoolValue{} -> go s r
             BVValue{} -> go s r
             RelocatableValue{} -> go s r
+            SymbolValue{} -> go s r
             Initial{} -> go s r
             AssignedValue a
               | Set.member (Some (assignId a)) s -> go s r
@@ -242,12 +243,14 @@ recoverValue' s v = do
             | otherwise -> do
               Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
 
-    RelocatableValue w addr -> do
+    RelocatableValue w addr ->
       -- TODO: Case split on what to return.
       -- e.g., for code address we may want to do something different.
       case asAbsoluteAddr addr of
-        Just absAddr -> Right $ FnConstantValue w (toInteger absAddr)
-        Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (BVTypeRepr w)
+        Just absAddr -> Right $ FnConstantValue (addrWidthNatRepr w) (toInteger absAddr)
+        Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (addrWidthTypeRepr w)
+    SymbolValue w sym ->
+      Right $ FnValueUnsupported ("Symbol references " ++ show sym) (addrWidthTypeRepr w)
     BoolValue b ->
       Right $ FnConstantBool b
     BVValue w i ->

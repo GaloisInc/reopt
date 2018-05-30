@@ -40,8 +40,6 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
 
   let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Just 0
                                 , MM.loadRegionBaseOffset = 0
-                                , MM.loadStyleOverride    = Just MM.LoadBySegment
-                                , MM.includeBSS           = False
                                 }
   let discOpts = DiscoveryOptions { exploreFunctionSymbols = False
                                   , exploreCodeAddrInMem   = False
