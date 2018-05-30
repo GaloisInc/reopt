@@ -541,7 +541,7 @@ valueToLLVMBitvec archOps ctx blk m val = do
     L.PrimType (L.FloatType tp) ->
       let itp = L.iT (floatTypeWidth tp)
        in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
-    _ -> Loc.error $ "valueToLLVMBitvec given unsupported type."
+    _ -> Loc.error $ "valueToLLVMBitvec given unsupported type: " ++ show (L.typedType llvm_val)
 
 mkLLVMValue :: (LLVMArchConstraints arch, Loc.HasCallStack)
             => FnValue arch tp
