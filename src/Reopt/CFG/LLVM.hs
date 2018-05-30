@@ -821,7 +821,9 @@ rhsToLLVM rhs = do
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
       llvmCond     <- singletonVector =<< mkLLVMValue cond
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru
-      call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
+      rv <- call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
+      r <- evalInstr $ L.ExtractElt rv (L.ValInteger 0)
+      pure (L.Typed eltType r)
     FnCondReadMem (BVMemRepr _ BigEndian) _cond _addr _passthru -> do
       error "LLVM backend does not yet support big endian memory reads."
     FnAlloca v -> do
