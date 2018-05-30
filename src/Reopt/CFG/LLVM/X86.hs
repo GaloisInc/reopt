@@ -189,10 +189,10 @@ emitSyscall callNum args =
           (L.iT 64)
           "syscall"
           -- This string marks rax as an output.
-          -- It also marks rax, rdi, rsi, rdx, rcx, r8, r9 as inputs.
+          -- It also marks rax, rdi, rsi, rdx, r10, r8, r9 as inputs.
           -- It indicates that the function can make arbitrary
           -- modifications to memory, flags, rcx, and r11.
-          "={rax},{rax},{rdi},{rsi},{rdx},{rcx},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
+          "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
           (callNum : padUndef (L.iT 64) 6 args)
 
 emitX86ArchStmt :: Loc.HasCallStack
