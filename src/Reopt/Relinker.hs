@@ -59,6 +59,8 @@ import qualified Text.PrettyPrint.ANSI.Leijen as PP
 
 import           Reopt.Relinker.Redirection
 
+import           GHC.Stack
+
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -81,11 +83,11 @@ hasBits :: Bits x => x -> x -> Bool
 x `hasBits` b = (x .&. b) == b
 
 -- | Write bytestring to bitvector at given offset.
-writeBS :: SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
+writeBS :: HasCallStack => SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
 writeBS mv base bs = do
   let len = BS.length bs
   when (SMV.length mv < base + len) $ do
-    fail $ "Bytestring overflows buffer."
+    error $ "Bytestring overflows buffer."
   forM_ [0..len-1] $ \i -> do
     SMV.write mv (base+i) (bs `BS.index` i)
 
@@ -487,7 +489,8 @@ performReloc reloc_info sym_table this_vaddr mv rela = do
         _ -> do
           error "Relocation not supported"
 
-performRelocs :: ObjectRelocationInfo Word64
+performRelocs :: HasCallStack
+              => ObjectRelocationInfo Word64
                 -- ^ Maps elf section indices in object to the base virtual address
                 -- in the binary.
               -> V.Vector (ElfSymbolTableEntry Word64)
@@ -550,7 +553,8 @@ data ResolvedRedirs (w :: *) =
 -- | This takes a bytestring in the original binary and updates it with relocations
 -- to point to the new binary.
 remapBytes :: forall w
-           .  Integral w
+           .  HasCallStack
+           => Integral w
            => ResolvedRedirs w
            -> [CodeRedirection w]
               -- ^ List of redirections to apply
@@ -584,7 +588,8 @@ remapBytes redirs redir_list base bs = runST $ do
   return $! Data.ByteString.Internal.fromForeignPtr fp 0 len
 
 -- | Append a raw segment to the list segments
-rawSegmentFromBuilder :: ElfLayout w
+rawSegmentFromBuilder :: HasCallStack
+                      => ElfLayout w
                       -> ResolvedRedirs (ElfWordType w)
                       -> [CodeRedirection (ElfWordType w)]
                          -- ^ Redirections for this segment
@@ -598,7 +603,8 @@ rawSegmentFromBuilder orig_layout redirs entries off bs rest = do
   (off2, prev) <- mapOrigLoadableRegions orig_layout redirs entries off' rest
   return (off2, ElfDataRaw (remapBytes redirs entries off bs) : prev)
 
-mapLoadableSection :: ElfLayout w
+mapLoadableSection :: HasCallStack
+                   => ElfLayout w
                    -> ResolvedRedirs (ElfWordType w)
                    -> [CodeRedirection (ElfWordType w)]
                    -> ElfWordType w -- ^ Offset in segment for this section
@@ -622,7 +628,8 @@ mapLoadableSection orig_layout redirs entries off sec rest = do
    return (off2, ElfDataSection sec' : prev)
 
 -- | This traverses elf data regions in an loadable elf segment.
-mapOrigLoadableRegions :: ElfLayout w
+mapOrigLoadableRegions :: HasCallStack
+                       => ElfLayout w
                           -- ^ Layout created for original binary.
                        -> ResolvedRedirs (ElfWordType w)
                        -> [CodeRedirection (ElfWordType w)]
@@ -771,7 +778,8 @@ data OrigSegment w = OrigSegment { origSegPadding :: !(ElfWordType w)
                                  }
 
 -- | Resovlv
-regionsForOrigSegment :: ElfLayout w
+regionsForOrigSegment :: HasCallStack
+                      => ElfLayout w
                       -> ResolvedRedirs (ElfWordType w)
                       -> OrigSegment w
                       -> RelinkM (ElfWordType w) [ElfDataRegion w]
@@ -808,7 +816,8 @@ initOriginalBinaryInfo o =
       }
 
 copyOrigLoadableSegment :: forall w
-                        .  ElfLayout w
+                        .  HasCallStack
+                        => ElfLayout w
                            -- ^ Layout of original bianry
                         -> ResolvedRedirs (ElfWordType w)
                            -- ^ Redirections in code
@@ -914,7 +923,8 @@ liftS m =
     Right v -> return v
 
 -- | Create region for section in new object.
-relocateObjectSection :: NewObjectInfo 64
+relocateObjectSection :: HasCallStack
+                      => NewObjectInfo 64
                          -- ^ Information about new object
                       -> Word64
                          -- ^ Base address of segment
@@ -961,7 +971,8 @@ x86_64_immediate_jmp addr = BSL.toStrict $ Bld.toLazyByteString $ mov_addr_to_r1
           <> Bld.word8 0xE3
 
 -- | This merges an existing elf binary and new header with a list of redirections.
-mergeObject :: Elf 64
+mergeObject :: HasCallStack
+            => Elf 64
                -- ^ Existing binary
             -> Elf 64
                -- ^ Object file to insert
@@ -1090,7 +1101,8 @@ relocateSymbolTable section_idx_map symbol_name_map reloc_addr entries = (fin_er
             Right Nothing  -> (errs, syms)
             Right (Just e) -> (errs, e:syms)
 
-mergeObject' :: Elf 64 -- ^ Existing binary
+mergeObject' :: HasCallStack
+             => Elf 64 -- ^ Existing binary
              -> Elf 64 -- ^ Object file to merge into existing binary.
              -> SymbolNameToAddrMap Word64
                 -- ^ Extra symbols to use for mapping old code to new.

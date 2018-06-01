@@ -46,6 +46,8 @@ import qualified Reopt.CFG.LLVM.X86 as LLVM
 import           Reopt.Interface
 import           Reopt.Relinker
 
+import           GHC.Stack
+
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -483,7 +485,8 @@ getCommandLineArgs = do
     Right v -> return v
 
 -- | Merge a binary and new object
-mergeAndWrite :: FilePath
+mergeAndWrite :: HasCallStack
+              => FilePath
               -> Elf 64 -- ^ Original binary
               -> Elf 64 -- ^ New object
               -> SymbolNameToAddrMap Word64 -- ^ Extra rdictions
