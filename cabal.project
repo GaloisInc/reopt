@@ -4,6 +4,7 @@ packages: .,
           deps/dwarf,
           deps/elf-edit,
           deps/flexdis86,
+          deps/flexdis86/binary-symbols,
           deps/llvm-pretty,
           deps/llvm-pretty-bc-parser,
           deps/parameterized-utils
