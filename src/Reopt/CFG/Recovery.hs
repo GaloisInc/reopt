@@ -12,6 +12,7 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
@@ -453,6 +454,78 @@ mkBlock lbl phis tm m = do
                     , fbRegMap = m
                     }
 
+recoverX86TermStmt' :: forall ids
+             .  DemandedUseMap
+                -- ^ Map from address to registers that address will read.
+             -> [Some (PhiBinding X86Reg)]
+                -- ^ Phi bindings from input block
+             -> BlockLabel 64
+             -> X86TermStmt ids
+             -> RegState (ArchReg X86_64) (Value X86_64 ids)
+             -> Maybe (MemSegmentOff 64)
+             -> Recover ids (FnBlock X86_64)
+recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr =
+  case tstmt of
+    Hlt -> do
+      addFnStmt $ FnComment "hlt is not supported in function recovery."
+      mkBlock lbl phis FnTermStmtUndefined MapF.empty
+    UD2 -> do
+      addFnStmt $ FnComment "ud2 is not supported in function recovery."
+      mkBlock lbl phis FnTermStmtUndefined MapF.empty
+    X86Syscall -> do
+      sysp <- gets rsSyscallPersonality
+
+      let syscallRegs :: [ArchReg X86_64 (BVType 64)]
+          syscallRegs = syscallArgumentRegs
+
+      let args
+            | BVValue _ this_call_no <- proc_state^.boundValue syscall_num_reg
+            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
+              take (length argtypes) syscallRegs
+            | otherwise =
+              syscallRegs
+
+      let rregs = spResultRegisters sysp
+
+
+      let mkRet :: MapF X86Reg (FnRegValue X86_64)
+                -> Some X86Reg
+                -> Recover ids (MapF X86Reg (FnRegValue X86_64))
+          mkRet m (Some r) = do
+            rv <- mkReturnVar (typeRepr r)
+            return $ MapF.insert r (FnRegValue $ FnReturn rv) m
+
+      initMap <- foldM mkRet MapF.empty rregs
+
+      -- pull the return variables out of initMap (in order of rregs)
+      let getVar :: Maybe (FnRegValue X86_64 tp) -> FnReturnVar tp
+          getVar (Just (FnRegValue (FnReturn rv))) = rv
+          getVar _ = Loc.error "impossible"
+
+      let rets :: [Some FnReturnVar]
+          rets = map f rregs
+            where f (Some r) = Some $ getVar $ MapF.lookup r initMap
+
+      -- Fold operation to update register map with values persisted across system calls.
+      let go ::  MapF X86Reg (FnRegValue X86_64)
+            -> Some X86Reg
+            -> Recover ids (MapF X86Reg (FnRegValue X86_64))
+          go m (Some r) = do
+            v <- getPostSyscallValue lbl proc_state r
+            return $ MapF.insert r (FnRegValue v) m
+
+      call_num <- recoverRegister proc_state syscall_num_reg
+      args'  <- mapM (recoverRegister proc_state) args
+      addFnStmt (FnArchStmt (X86FnSystemCall call_num args' rets))
+      case mnext_addr of
+        Nothing -> do
+          -- TODO: Fix this by adding a
+          error "Recovery: Could not find system call return label"
+        Just next_addr -> do
+          let provides = Map.findWithDefault Set.empty next_addr registerUseMap
+          regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
+          mkBlock lbl phis (FnJump (mkRootBlockLabel next_addr)) regs'
+
 recoverX86TermStmt :: forall ids
              .  DemandedUseMap
                 -- ^ Map from address to registers that address will read.
@@ -464,61 +537,9 @@ recoverX86TermStmt :: forall ids
              -> RegState (ArchReg X86_64) (Value X86_64 ids)
              -> Maybe (MemSegmentOff 64)
              -> Recover ids RecoveredBlockInfo
-recoverX86TermStmt registerUseMap phis blockInfo lbl X86Syscall proc_state mnext_addr = seq blockInfo $ do
-  sysp <- gets rsSyscallPersonality
-
-  let syscallRegs :: [ArchReg X86_64 (BVType 64)]
-      syscallRegs = syscallArgumentRegs
-
-
-  let args
-            | BVValue _ this_call_no <- proc_state^.boundValue syscall_num_reg
-            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
-              take (length argtypes) syscallRegs
-            | otherwise =
-              syscallRegs
-
-  let rregs = spResultRegisters sysp
-
-
-  let mkRet :: MapF X86Reg (FnRegValue X86_64)
-            -> Some X86Reg
-            -> Recover ids (MapF X86Reg (FnRegValue X86_64))
-      mkRet m (Some r) = do
-        rv <- mkReturnVar (typeRepr r)
-        return $ MapF.insert r (FnRegValue $ FnReturn rv) m
-
-  initMap <- foldM mkRet MapF.empty rregs
-
-  -- pull the return variables out of initMap (in order of rregs)
-  let getVar :: Maybe (FnRegValue X86_64 tp) -> FnReturnVar tp
-      getVar (Just (FnRegValue (FnReturn rv))) = rv
-      getVar _ = Loc.error "impossible"
-
-  let rets :: [Some FnReturnVar]
-      rets = map f rregs
-        where f (Some r) = Some $ getVar $ MapF.lookup r initMap
-
-  -- Fold operation to update register map with values persisted across system calls.
-  let go ::  MapF X86Reg (FnRegValue X86_64)
-         -> Some X86Reg
-         -> Recover ids (MapF X86Reg (FnRegValue X86_64))
-      go m (Some r) = do
-        v <- getPostSyscallValue lbl proc_state r
-        return $ MapF.insert r (FnRegValue v) m
-
-  call_num <- recoverRegister proc_state syscall_num_reg
-  args'  <- mapM (recoverRegister proc_state) args
-  addFnStmt (FnArchStmt (X86FnSystemCall call_num args' rets))
-  case mnext_addr of
-    Nothing -> do
-      -- TODO: Fix this by adding a
-      error "Recovery: Could not find system call return label"
-    Just next_addr -> do
-      let provides = Map.findWithDefault Set.empty next_addr registerUseMap
-      regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
-      fb <- mkBlock lbl phis (FnJump (mkRootBlockLabel next_addr)) regs'
-      pure $! blockInfo & addFnBlock fb
+recoverX86TermStmt registerUseMap phis blockInfo lbl tstmt proc_state mnext_addr = do
+  fb <- recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr
+  pure $! blockInfo & addFnBlock fb
 
 -- | Given a register state this interprets the function arguments.
 evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)

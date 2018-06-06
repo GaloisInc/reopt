@@ -418,13 +418,22 @@ instance FoldFnValue FnTermStmt where
 -- | A block in the function
 data FnBlock arch
    = FnBlock { fbLabel :: !(ArchLabel arch)
-               -- | List of phi bindings.
-               --
-               -- Only initial blocks -- not subblocks should have phi bindings.
+               -- ^ Label for identifying block.
              , fbPhiNodes  :: ![Some (PhiBinding (ArchReg arch))]
+               -- ^ List of phi bindings.
+               --
+               -- Only initial blocks -- not subblocks should have phi
+               -- bindings.
              , fbStmts :: ![FnStmt     arch]
+               -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
+               -- ^ Final terminal statement in block.
              , fbRegMap :: !(MapF (ArchReg arch) (FnRegValue arch))
+               -- ^ Map from registers to values supplied by this
+               -- block to successors.
+               --
+               -- Used to resolve Phi nodes, and could be omitted if
+               -- block has no successors.
              }
 
 instance (FnArchConstraints arch

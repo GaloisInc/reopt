@@ -388,7 +388,7 @@ evalInstr :: L.Instr -> BBLLVM arch L.Value
 evalInstr i = do
   nm <- freshName
   emitStmt $! L.Result nm i []
-  pure $! (L.ValIdent nm)
+  pure $! L.ValIdent nm
 
 -- | Emit an instruction as an effect
 effect :: L.Instr -> BBLLVM arch ()

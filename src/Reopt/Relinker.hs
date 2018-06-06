@@ -174,7 +174,7 @@ data ObjRelocState w
 emptyObjRelocState :: ObjRelocState w
 emptyObjRelocState = ObjRelinkState { _warnings         = emptyRelinkWarnings
                                     , _nextSectionIndex = 1
-                                    , _nextSegmentIndex = 0
+                                    , _nextSegmentIndex = 1
                                     , _binarySectionMap = Map.empty
                                     , _objSectionMap    = Map.empty
                                     }
@@ -1232,11 +1232,10 @@ mergeObject' orig_binary obj extra_syms redirs mkJump = do
                          code_sec_bounds
 
   exec_seg <- do
-    seg_index <- freshSegmentIndex
     pure $! ElfSegment
       { elfSegmentType     = PT_LOAD
       , elfSegmentFlags    = pf_r .|. pf_x
-      , elfSegmentIndex    = seg_index
+      , elfSegmentIndex    = 0
       , elfSegmentVirtAddr = new_code_seg_addr
       , elfSegmentPhysAddr = new_code_seg_addr
       , elfSegmentAlign    = elf_align
