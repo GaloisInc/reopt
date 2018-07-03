@@ -1,7 +1,13 @@
 {-|
 Copyright        : (c) Galois, Inc 2015-2018
 
-Functions which convert functions in @FnRep@ into LLVM.
+This provides functionality for converting the
+architecture-independent components of @FnReop@ functions into LLVM.
+
+It exports a fairly large set of capabilities so that all
+architecture-specific functionality can be implemented on top of this
+layer.
+
 -}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
@@ -18,15 +24,16 @@ Functions which convert functions in @FnRep@ into LLVM.
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.LLVM
-  ( functionName
-  , AddrSymMap
+  ( AddrSymMap
   , moduleForFunctions
+  , llvmFunctionName
     -- * Internals for implement architecture specific functions
   , LLVMArchSpecificOps(..)
   , functionTypeToLLVM
   , Intrinsic
   , intrinsic
-  , FunLLVMContext(funAddrSymMap, funAddrTypeMap)
+  , FunLLVMContext(funSymbolCallback, funAddrTypeMap)
+  , FunctionSymbolCallback
   , BBLLVM
   , BBLLVMState(archFns, bbBlock, funContext)
   , typeToLLVMType
@@ -56,6 +63,7 @@ import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable
 import           Data.Int
+import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
@@ -147,23 +155,47 @@ llvmIntrinsics = [ overflowOp bop in_typ
 -- conversion to LLVM
 --------------------------------------------------------------------------------
 
--- | Return the LLVM symbol associated with the given name
-functionName :: MemWidth w
-             => AddrSymMap w
-                -- ^ Maps addresses of symbols to the associated symbol name.
-             -> MemSegmentOff w
-             -> L.Symbol
-functionName m addr
-    | Just nm <- Map.lookup addr m =
-        L.Symbol $ "reopt_gen_" ++ BSC.unpack nm
-    | otherwise = L.Symbol $ "reopt_gen_" ++ show (segmentBase seg) ++ "_" ++ show off
-      where seg = msegSegment addr
-            off = segmentOffset seg + msegOffset addr
+-- | Implements 'llvmFunctionName' after soundness checks complete.
+--
+-- See the documentation for 'moduleForFunctions' for the convention of how
+-- symbols are generated.
+llvmFunctionName' :: MemWidth w
+                 => Map (MemAddr w) L.Symbol
+                 -- ^ Maps addresses of symbols to the associated symbol name.
+                 -> String
+                    -- ^ Prefix to use for automatically generated symbols.
+                    -- To be able to distinguish symbols, this should not be
+                    -- a prefix for any of the symbols in the map.
+                 -> (MemSegmentOff w -> L.Symbol)
+llvmFunctionName' m prefix segOff =
+    case Map.lookup addr m of
+      Just sym -> sym
+      Nothing ->
+        L.Symbol $ prefix ++ "_" ++ show (addrBase addr) ++ "_" ++ show (addrOffset addr)
+  where addr = relativeSegmentAddr segOff
 
-blockWordName :: MemSegmentOff w  -> L.Ident
-blockWordName addr = L.Ident ("block_" ++ show (segmentBase seg) ++ "_" ++ show off)
-  where seg = msegSegment addr
-        off = msegOffset addr
+-- | Creates a function for generating LLVM names.
+--
+-- This See the documentation for 'moduleForFunctions' for the convention of how
+-- symbols are generated.
+llvmFunctionName :: MemWidth w
+                 => AddrSymMap w
+                 -- ^ Maps addresses of symbols to the associated symbol name.
+                 -> String
+                    -- ^ Prefix to use for automatically generated symbols.
+                    -- To be able to distinguish symbols, this should not be
+                    -- a prefix for any of the symbols in the map.
+                 -> Either String (MemSegmentOff w -> L.Symbol)
+llvmFunctionName m prefix
+  | any (\nm -> prefix `isPrefixOf` BSC.unpack nm) (Map.elems m) =
+    Left $ "Symbols in binary must not start with " ++ prefix
+  | otherwise =
+    let m' = Map.fromList [ (relativeSegmentAddr o, L.Symbol (BSC.unpack s)) | (o,s) <- Map.toList m ]
+     in Right $ llvmFunctionName' m' prefix
+
+blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
+blockWordName o = L.Ident $ "block_" ++ show (addrBase addr) ++ "_" ++ show (addrOffset addr)
+  where addr = relativeSegmentAddr o
 
 blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
 blockName l = L.Named (L.Ident (show l))
@@ -334,9 +366,15 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     -- necessary.
   }
 
--- | Values describing current function that do not change between blocks.
+-- | Computes the LLVM symbol of a function at the given address.
+type FunctionSymbolCallback w = MemSegmentOff w -> L.Symbol
+
+-- | Information used to generate LLVM for a specific function.
+--
+-- This information is the same for all blocks within the function.
 data FunLLVMContext arch = FunLLVMContext
-  { funAddrSymMap :: !(AddrSymMap (ArchAddrWidth arch))
+  { funSymbolCallback :: !(FunctionSymbolCallback (ArchAddrWidth arch))
+    -- ^ This is a callback for naming functions at specific addresses.
   , funAddrTypeMap :: !(FunctionTypeMap arch)
   , funArgs      :: !(V.Vector (L.Typed L.Value))
   }
@@ -496,10 +534,11 @@ valueToLLVM archOps ctx blk m val = do
         Just tp
           | ft /= tp -> Loc.error "Mismatch function type"
           | otherwise -> do
-            let sym = functionName (funAddrSymMap ctx) addr
-            let fptr :: L.Typed L.Value
-                fptr = L.Typed (functionTypeToLLVM archOps ft) (L.ValSymbol sym)
-            mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
+            let sym = funSymbolCallback ctx addr
+            seq sym $ do
+              let fptr :: L.Typed L.Value
+                  fptr = L.Typed (functionTypeToLLVM archOps ft) (L.ValSymbol sym)
+              mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
         Nothing -> do
           Loc.error $ "Could not identify " ++ show addr
     -- A pointer to an internal block at the given address.
@@ -1013,12 +1052,13 @@ defineFunction :: forall arch
                .  LLVMArchConstraints arch
                => LLVMArchSpecificOps arch
                   -- ^ Architecture specific operations
-               -> AddrSymMap (ArchAddrWidth arch)
+               -> FunctionSymbolCallback (ArchAddrWidth arch)
+                  -- ^ Callback for naming functions
                -> FunctionTypeMap arch
                -> Function arch
                -> LLVMTrans L.Define
-defineFunction archOps addrSymMap funTypeMap f = do
-  let symbol = functionName addrSymMap (fnAddr f)
+defineFunction archOps symFun funTypeMap f = do
+  let symbol = symFun (fnAddr f)
 
   -- Create initial block
   let inputArgs :: [L.Typed L.Ident]
@@ -1028,7 +1068,7 @@ defineFunction archOps addrSymMap funTypeMap f = do
         mkInitBlock archOps (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
 
   let ctx :: FunLLVMContext arch
-      ctx = FunLLVMContext { funAddrSymMap  = addrSymMap
+      ctx = FunLLVMContext { funSymbolCallback = symFun
                            , funAddrTypeMap = funTypeMap
                            , funArgs        = postInitArgs
                            }
@@ -1088,8 +1128,8 @@ declareIntrinsic i =
             , L.decComdat  = Nothing
             }
 
--- | Get module for functions
--- (x86LLVMArchOps syscallPostfix)
+-- | Generate LLVM module from a list of functions describing the
+-- behavior.
 moduleForFunctions :: forall arch
                    .  (LLVMArchConstraints arch
                       , Show (FunctionType arch)
@@ -1097,10 +1137,11 @@ moduleForFunctions :: forall arch
                       , FoldableF (FnArchStmt arch))
                    => LLVMArchSpecificOps arch
                       -- ^ architecture specific functions
-                   -> AddrSymMap (ArchAddrWidth arch)
+                   -> FunctionSymbolCallback (ArchAddrWidth arch)
+                      -- ^ Function for getting name of functions
                    -> [Function arch]
                    -> L.Module
-moduleForFunctions archOps addrSymMap fns =
+moduleForFunctions archOps symFun fns =
     L.Module { L.modSourceName = Nothing
              , L.modDataLayout = []
              , L.modTypes      = []
@@ -1128,8 +1169,8 @@ moduleForFunctions archOps addrSymMap fns =
           , Set.notMember addr excludedSet
           ]
 
-        fnDecls = (\(addr, ftp) -> declareFunction archOps (functionName addrSymMap addr) ftp)
+        fnDecls = (\(addr, ftp) -> declareFunction archOps (symFun addr) ftp)
           <$> declFunMap
 
         (dynIntrinsics, defines) = runLLVMTrans $
-          traverse (defineFunction archOps addrSymMap funTypeMap) fns
+          traverse (defineFunction archOps symFun funTypeMap) fns

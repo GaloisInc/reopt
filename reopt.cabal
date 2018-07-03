@@ -64,7 +64,9 @@ library
     Reopt.ExternalTools
     Reopt.Interface
     Reopt.Relinker
+    Reopt.Relinker.Object
     Reopt.Relinker.Redirection
+    Reopt.Relinker.Relocations
     Reopt.Utils.Hex
 
   if flag(enable-arm)

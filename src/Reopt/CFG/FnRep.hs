@@ -461,6 +461,11 @@ instance FoldFnValue FnBlock where
 ------------------------------------------------------------------------
 -- Function definitions
 
+-- | A representation of machine-code function after stack alocation
+-- and registers have been removed.
+--
+-- This currently isn't the case, as Phi nodes still use `ArchReg` to
+-- index the nodes.  However, this will be changed.
 data Function arch
    = Function { fnAddr :: !(MemSegmentOff (ArchAddrWidth arch))
                 -- ^ The address for this function

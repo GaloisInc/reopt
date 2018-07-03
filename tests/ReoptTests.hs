@@ -57,7 +57,8 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
 
   let llvmVer = LLVM38
   let archOps = LLVM.x86LLVMArchOps (show os)
-  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
+  let Right symFun = LLVM.llvmFunctionName addrSymMap "reopt"
+  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps symFun fns
   writeFileBuilder llvm_path obj_llvm
 
   libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getDataDir

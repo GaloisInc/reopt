@@ -16,9 +16,7 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
 import           Data.ElfEdit
 import           Data.List ((\\), nub, stripPrefix, intercalate)
-import qualified Data.Map as Map
 import           Data.Parameterized.Some
-import           Data.String (fromString)
 import           Data.Version
 import           Data.Word
 import qualified Data.Yaml as Yaml
@@ -37,7 +35,6 @@ import           Paths_reopt (getLibDir, version)
 
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
-import           Data.Macaw.Memory (msegAddr)
 import           Data.Macaw.Memory.LoadCommon
 
 import           Reopt
@@ -489,14 +486,11 @@ mergeAndWrite :: HasCallStack
               => FilePath
               -> Elf 64 -- ^ Original binary
               -> Elf 64 -- ^ New object
-              -> SymbolNameToAddrMap Word64 -- ^ Extra rdictions
               -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
               -> IO ()
-mergeAndWrite output_path orig_binary new_obj extra_syms redirs = do
+mergeAndWrite output_path orig_binary new_obj redirs = do
   putStrLn $ "Performing final relinking."
-  let (mres, warnings) = mergeObject orig_binary new_obj extra_syms redirs
-  when (hasRelinkWarnings warnings) $ do
-    hPrint stderr (pretty warnings)
+  let mres = mergeObject orig_binary new_obj redirs
   case mres of
     Left e -> fail e
     Right new_binary -> do
@@ -534,7 +528,7 @@ performRelink args = do
             case mredirs of
               Left e -> fail $ show e
               Right r -> return r
-      mergeAndWrite output_path orig_binary new_obj Map.empty redirs
+      mergeAndWrite output_path orig_binary new_obj redirs
 
 performReopt :: Args -> IO ()
 performReopt args =
@@ -561,7 +555,8 @@ performReopt args =
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let archOps = LLVM.x86LLVMArchOps (show os)
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
+        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
         writeFileBuilder output_path obj_llvm
       ".o" -> do
         (os, disc_info, addrSymMap) <-
@@ -569,7 +564,8 @@ performReopt args =
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let archOps = LLVM.x86LLVMArchOps (show os)
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
+        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
         libreopt_path <-
           case args^.libreoptPath of
             Just s -> return s
@@ -584,12 +580,13 @@ performReopt args =
           "compile to generate a .s file."
         exitFailure
       _ -> do
-        (orig_binary, os, disc_info, addrSymMap, symAddrMap) <-
+        (orig_binary, os, disc_info, addrSymMap, _) <-
           discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
         let llvmVer = args^.llvmVersion
         let archOps = LLVM.x86LLVMArchOps (show os)
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps addrSymMap fns
+        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
+        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
         libreopt_path <-
           case args^.libreoptPath of
             Just s -> return s
@@ -612,6 +609,7 @@ performReopt args =
           error $ "Found functions outside program headers:\n  "
             ++ unwords (show <$> bad_addrs)
         -- Merge and write out
+{-
         let extra_addrs :: SymbolNameToAddrMap Word64
             extra_addrs = Map.fromList
               [ (fromString "reopt_gen_" `BS.append` nm, w)
@@ -623,8 +621,8 @@ performReopt args =
                           Nothing -> error $ "Merging does not yet support virtual addresses."
                 -- Get symbol name used in object.
               , Just nm <- [Map.lookup addr addrSymMap]
-              ]
-        mergeAndWrite (args^.outputPath) orig_binary new_obj extra_addrs redirs
+              ]-}
+        mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
 
 main' :: IO ()
 main' = do

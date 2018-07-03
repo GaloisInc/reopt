@@ -262,14 +262,14 @@ emitX86Call dest ft args retvs = do
   aops <- gets $ archFns
   let fun_ty  = functionTypeToLLVM aops ft
 
-  addrSymMap  <- gets $ funAddrSymMap  . funContext
+  fnCallback  <- gets $ funSymbolCallback  . funContext
   addrTypeMap <- gets $ funAddrTypeMap . funContext
   dest_f <-
     case dest of
       -- FIXME: use ft here instead?
       FnFunctionEntryValue dest_ftp addr
         | Just tp <- Map.lookup addr addrTypeMap -> do
-            let sym = functionName addrSymMap addr
+            let sym = fnCallback addr
             when (functionTypeToLLVM aops tp /= fun_ty) $ do
               Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
                 ++ "Declared: " ++ show (functionTypeToLLVM aops tp) ++ "\n"
@@ -321,14 +321,14 @@ emitX86Tailcall dest ft args = do
   aops <- gets $ archFns
   let fun_ty  = functionTypeToLLVM aops ft
 
-  addrSymMap  <- gets $ funAddrSymMap  . funContext
+  fnCallback  <- gets $ funSymbolCallback  . funContext
   addrTypeMap <- gets $ funAddrTypeMap . funContext
   dest_f <-
     case dest of
            -- FIXME: use ft here instead?
            FnFunctionEntryValue dest_ftp addr
              | Just tp <- Map.lookup addr addrTypeMap -> do
-               let sym = functionName addrSymMap addr
+               let sym = fnCallback addr
                when (functionTypeToLLVM aops tp /= fun_ty) $ do
                  Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
                    ++ "Declared: " ++ show (functionTypeToLLVM aops tp) ++ "\n"

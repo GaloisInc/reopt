@@ -1,17 +1,22 @@
 {-|
-Module      : Reopt.Relinker.Redirection
-Copyright   : (c) Galois Inc, 2015
+Copyright   : (c) Galois Inc, 2015-2018
 Maintainer  : jhendrix@galois.com
 
-This module defines the 'CodeRedirection' datatype and its
-JSON format.  This is used by the
+This module is used to insert jumps to new code
+locations into existing code.
 -}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.Relinker.Redirection
   ( CodeRedirection(..)
-  , PhdrIndex
+  , mkCodeAddrMap
+  , insertStaticRedirs
   ) where
 
+import           Control.Monad
+import           Control.Monad.ST
 import           Data.Aeson.Types
   ( typeMismatch
   , FromJSON(..)
@@ -24,11 +29,34 @@ import           Data.Aeson.Types
   )
 import qualified Data.ByteString as BS
 import           Data.ByteString.Char8 (unpack)
+import qualified Data.ByteString.Internal
+import           Data.ElfEdit
+import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import           Data.Maybe
 import           Data.String (fromString)
+import qualified Data.Vector as V
+import qualified Data.Vector.Storable as SV
+import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
+import           GHC.Stack (HasCallStack)
 
--- | Index of program header in an elf file.
-type PhdrIndex = Word16
+import           Reopt.Relinker.Object
+  ( ObjectSectionIndex
+  )
+
+-- | Write bytestring to bitvector at given offset.
+writeBS :: HasCallStack => SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
+writeBS mv base bs = do
+  let len = BS.length bs
+  when (SMV.length mv < base + len) $ do
+    error $ "Bytestring overflows buffer."
+  forM_ [0..len-1] $ \i -> do
+    SMV.write mv (base+i) (bs `BS.index` i)
+
+
+------------------------------------------------------------------------
+-- Definitions
 
 -- | A code redirection used during relinking that maps a code location in a
 -- binary to the replacement code in the new object code.
@@ -38,21 +66,18 @@ type PhdrIndex = Word16
 --
 -- The target location is identified by the name of the symbol.
 data CodeRedirection w
-   = CodeRedirection { redirSourcePhdr :: !PhdrIndex
-                       -- ^ Index of program header where relocation should occur.
-                     , redirSourceOffset :: !w
-                       -- ^ Offset in phdr where we should write file.
+   = CodeRedirection { redirSourceOffset :: !w
+                       -- ^ Offset in file where we should write file.
                      , redirSourceSize :: !Int
                        -- ^ Number of bytes available at source offset to write redirection.
                      , redirTarget :: !BS.ByteString
-                       -- ^ Target symbol table name.
+                       -- ^ Name of symbol in object file.
                      } deriving (Show)
 
 instance Integral w => ToJSON (CodeRedirection w) where
   toJSON redir =
     object
-      [ "phdr"            .= redirSourcePhdr redir
-      , "offset"          .= toInteger (redirSourceOffset redir)
+      [ "offset"          .= toInteger (redirSourceOffset redir)
       , "bytes_available" .= (redirSourceSize redir)
       , "target"          .= unpack (redirTarget redir)
       ]
@@ -60,8 +85,82 @@ instance Integral w => ToJSON (CodeRedirection w) where
 instance Num w => FromJSON (CodeRedirection w) where
   parseJSON (Object o) =
     CodeRedirection
-      <$> o .: "phdr"
-      <*> (fromIntegral <$> (o .: "offset" :: Parser Integer))
+      <$> (fromIntegral <$> (o .: "offset" :: Parser Integer))
       <*> (o .: "bytes_available")
       <*> (fromString <$> (o .: "target"))
   parseJSON v = typeMismatch "CodeRedirection" v
+
+-- | Resolve address of symbols defined in their code region.
+resolveDefinedAddr :: Map ObjectSectionIndex a
+                   -- ^ Maps object section indices to the associated address.
+                   -> ElfSymbolTableEntry a
+                   -> Maybe (BS.ByteString, a)
+resolveDefinedAddr secMap e
+  | STT_FUNC <- steType e, STB_GLOBAL <- steBind e =
+      case steIndex e of
+        -- Ignore undefined indices
+        SHN_UNDEF -> Nothing
+        idx
+          | idx >= SHN_LORESERVE -> Nothing
+          | otherwise ->
+            case Map.lookup (fromElfSectionIndex idx) secMap of
+              Nothing -> error $ "Could not find index of section " ++ show idx
+              Just addr -> Just (steName e, addr)
+  | otherwise =
+    Nothing
+
+-- | Generate a map from functions defined in the object file to their
+-- address in the new binary.  This will only point to new code.
+mkCodeAddrMap :: Map ObjectSectionIndex a
+                 -- ^ Maps object section indices to their name and associated address.
+              -> V.Vector (ElfSymbolTableEntry a)
+                 -- ^ Symbol table entries
+              -> Map BS.ByteString a
+mkCodeAddrMap secMap entries
+    | Map.size m == length addrList = m
+    | otherwise = error "Duplicate function names detected in object file."
+  where addrList = mapMaybe (resolveDefinedAddr secMap) (V.toList entries)
+        m = Map.fromList addrList
+
+
+-- | This takes a bytestring in the original binary and updates it with relocations
+-- to point to the new binary.
+insertStaticRedirs :: (HasCallStack, Integral a)
+                   => (a -> BS.ByteString)
+                      -- ^ Function for creating jump to given address.
+                   -> Map BS.ByteString a
+                      -- ^ Maps names of symbols defined in the object file to
+                      -- their address in the new binary.  This will only point to
+                      -- new code.
+                   -> [CodeRedirection a]
+                   -- ^ List of redirections to apply
+                   -> a
+                   -- ^ File offset in segment
+                   --
+                   -- This is subtracted from redirection source offset to compute
+                   -- offset in bytestring to apply this to.
+                   -> BS.ByteString
+                   -> BS.ByteString
+insertStaticRedirs mkJump codeAddrMap redirList base bs = runST $ do
+  let len :: Int
+      len = BS.length bs
+  mv <- SMV.new len
+  -- Copy original bytes into bytestring
+  writeBS mv 0 bs
+  -- Apply relocations.
+  forM_ redirList $ \redirEntry -> do
+    let off = redirSourceOffset redirEntry
+    let nm = redirTarget redirEntry
+
+    when (base <= off && off < base + fromIntegral len) $ do
+      let tgt =
+            case Map.lookup nm codeAddrMap of
+              Just atgt -> atgt
+              Nothing -> error $ "Could not find symbol name " ++ unpack nm ++ "."
+      let jmp = mkJump tgt
+      -- Only apply redirection when there is enough space to write the code.
+      when (BS.length jmp < redirSourceSize redirEntry) $ do
+        writeBS mv (fromIntegral (off - base)) jmp
+
+  let SMV.MVector _ fp = mv
+  return $! Data.ByteString.Internal.fromForeignPtr fp 0 len

@@ -532,10 +532,9 @@ elfSegmentMap :: forall w . ElfLayout w -> ElfSegmentMap w
 elfSegmentMap l = elfClassInstances (elfLayoutClass l) $ foldl' insertElfSegment Map.empty (allPhdrs l)
   where insertElfSegment ::  Ord (ElfWordType w) => ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
         insertElfSegment m p
-          | elfSegmentType seg == PT_LOAD = Map.insert a p m
+          | phdrSegmentType p == PT_LOAD = Map.insert a p m
           | otherwise = m
-          where seg = phdrSegment p
-                a = elfSegmentVirtAddr (phdrSegment p)
+          where a = phdrSegmentVirtAddr p
 
 -- | Lookup an address in the segment map, returning the index of the phdr
 -- and the offset.
@@ -543,8 +542,7 @@ lookupElfOffset :: ElfSegmentMap 64 -> Word64 -> Maybe (Word16, Word64)
 lookupElfOffset m a =
   case Map.lookupLE a m of
     Just (base, phdr) | a < base + phdrFileSize phdr ->
-        Just (elfSegmentIndex seg, a - base)
-      where seg = phdrSegment phdr
+        Just (phdrSegmentIndex phdr, a - base)
     _ -> Nothing
 
 -- | This creates a code redirection or returns the address as failing.
@@ -560,10 +558,12 @@ addrRedirection tgts addrSymMap m f = do
             Nothing -> error "Redirection does not yet support relocatable binaries."
   case lookupElfOffset m w of
     Nothing -> Left (fnAddr f)
-    Just (idx,off) -> Right redir
-      where L.Symbol sym_name = LLVM.functionName addrSymMap (fnAddr f)
-            redir = CodeRedirection { redirSourcePhdr   = idx
-                                    , redirSourceOffset = off
+    Just (idx,off)
+        | idx /= 0 -> error "addrRedirection should have 0 index."
+        | otherwise -> Right redir
+      where Right nmFun = LLVM.llvmFunctionName addrSymMap "reopt"
+            L.Symbol sym_name = nmFun (fnAddr f)
+            redir = CodeRedirection { redirSourceOffset = off
                                     , redirSourceSize   = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
                                     , redirTarget       = UTF8.fromString sym_name
                                     }
