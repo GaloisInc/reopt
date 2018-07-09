@@ -9,8 +9,7 @@ license-file:  LICENSE
 data-dir:
   libreopt/build
 data-files:
-  x86_64-unknown-freebsd/libreopt.bc
-  x86_64-unknown-linux-gnu/libreopt.bc
+  libreopt.bc
 
 flag enable-hpc
   Description: Collect HPC coverage information.
