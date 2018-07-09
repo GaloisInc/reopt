@@ -467,11 +467,9 @@ recoverX86TermStmt' :: forall ids
 recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr =
   case tstmt of
     Hlt -> do
-      addFnStmt $ FnComment "hlt is not supported in function recovery."
-      mkBlock lbl phis FnTermStmtUndefined MapF.empty
+      throwError "hlt is not supported in function recovery."
     UD2 -> do
-      addFnStmt $ FnComment "ud2 is not supported in function recovery."
-      mkBlock lbl phis FnTermStmtUndefined MapF.empty
+      throwError "ud2 is not supported in function recovery."
     X86Syscall -> do
       sysp <- gets rsSyscallPersonality
 

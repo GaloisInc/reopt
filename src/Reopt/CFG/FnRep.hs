@@ -385,7 +385,6 @@ data FnTermStmt arch
                 [Some (FnValue arch)]
      -- ^ A call statement to the given location with the arguments
      -- listed that does not return.
-   | FnTermStmtUndefined
 
 instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
       => Pretty (FnTermStmt arch) where
@@ -402,15 +401,12 @@ instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
 
-      FnTermStmtUndefined -> text "undefined term"
-
 instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue f s (FnRet rets) = foldlF f s rets
   foldFnValue f s (FnTailCall fn _ args) = foldl (\s' (Some v) -> f s' v) (f s fn) args
-  foldFnValue _ s (FnTermStmtUndefined {}) = s
 
 ------------------------------------------------------------------------
 -- FnBlock

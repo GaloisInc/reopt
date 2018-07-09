@@ -370,6 +370,8 @@ getFns logger sysp info = do
             pure Nothing
 
 -- | Create a discovery state and symbol-address map
+--
+--  Note. This prints warnings to stderr
 discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
                   -> LoadOptions -- ^ Options controling loading
                   -> DiscoveryOptions -- ^ Options controlling discovery

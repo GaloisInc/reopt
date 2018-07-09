@@ -490,7 +490,7 @@ mergeAndWrite :: HasCallStack
               -> IO ()
 mergeAndWrite output_path orig_binary new_obj redirs = do
   putStrLn $ "Performing final relinking."
-  let mres = mergeObject orig_binary new_obj redirs
+  let mres = mergeObject orig_binary new_obj redirs x86_64_immediateJump
   case mres of
     Left e -> fail e
     Right new_binary -> do
@@ -609,19 +609,6 @@ performReopt args =
           error $ "Found functions outside program headers:\n  "
             ++ unwords (show <$> bad_addrs)
         -- Merge and write out
-{-
-        let extra_addrs :: SymbolNameToAddrMap Word64
-            extra_addrs = Map.fromList
-              [ (fromString "reopt_gen_" `BS.append` nm, w)
-              | Right binary_nm <- resolveSymName <$> args^.excludeAddrs
-              , Just (addr:_) <- [Map.lookup (fromString binary_nm) symAddrMap]
-              , let w :: Word64
-                    w = case msegAddr addr of
-                          Just b -> fromIntegral b
-                          Nothing -> error $ "Merging does not yet support virtual addresses."
-                -- Get symbol name used in object.
-              , Just nm <- [Map.lookup addr addrSymMap]
-              ]-}
         mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
 
 main' :: IO ()

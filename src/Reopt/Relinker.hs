@@ -12,10 +12,8 @@ This module performs the merging between the binary and new object.
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Relinker
   ( Reopt.Relinker.Redirection.CodeRedirection(..)
-  , SymbolNameToAddrMap
   , mergeObject
-    -- * Utilities
-  , SectionAddrMap
+  , x86_64_immediateJump
   ) where
 
 import           Control.Lens hiding (pre)
@@ -27,6 +25,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Bld
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import           Data.Either
 import           Data.ElfEdit
 import           Data.Foldable
 import           Data.Map.Strict (Map)
@@ -38,12 +37,15 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
-
+import           Text.Printf
+import Numeric
 import           Reopt.Relinker.Object
 import           Reopt.Relinker.Redirection
 import           Reopt.Relinker.Relocations
 
 import           GHC.Stack
+
+import Debug.Trace
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -59,16 +61,8 @@ fixAlignment v a0
   where a = fromIntegral a0
         (c,m) = v `divMod` a
 
-{-
-mapFromList :: Ord k => (a -> k) -> [a] -> Map k [a]
-mapFromList proj = foldr' ins Map.empty
-  where ins e = Map.insertWith (++) (proj e) [e]
--}
-
 hasBits :: Bits x => x -> x -> Bool
 x `hasBits` b = (x .&. b) == b
-
-
 
 ------------------------------------------------------------------------
 -- Elf specific utilities
@@ -95,145 +89,43 @@ type MergedSectionIndex = Word16
 type BinSectionIndexToMergeMap =
   Map BinSectionIndex MergedSectionIndex
 
-{-
-
--- | This is a map from the section index in the object file to the
--- section index and address in the base
-type ObjSectionIndexToMergeMap w =
-  Map ObjectSectionIndex (MergedSectionIndex, ElfWordType w)
--}
-
-{-
--- | Maps section index in original binary to its section in output and base
--- address of section.
-binarySectionMap :: Simple Lens (ObjRelocState w) BinSectionIndexToMergeMap
-binarySectionMap = lens _binarySectionMap (\s v -> s { _binarySectionMap = v })
-
--- | Maps section index in object to its section in output and base address of
--- section.
-objSectionMap :: Simple Lens (ObjRelocState w) (ObjSectionIndexToMergeMap w)
-objSectionMap = lens _objSectionMap (\s v -> s { _objSectionMap = v })
--}
-
-{-
--- | Create a new section index for a section in the object and record the original
--- index and virtual address of the section.
-bindObjSectionIndex :: MonadState (ObjRelocState w) m
-                    => Word16
-                    -> ElfWordType w
-                    -> m Word16
-bindObjSectionIndex obj_idx addr = do
-  new_idx <- freshSectionIndex
-  objSectionMap %= Map.insert obj_idx (new_idx, addr)
-  return $! new_idx
--}
-
-
 type RelinkM = Except String
 
 ------------------------------------------------------------------------
 -- Code for performing relocations in new object.
-
--- | Find a section with the given name, type, and flags.
---
--- This returns 'Nothing' if no matching section exists, but throws an error if
--- multiple do.
-checkSectionEmpty :: Elf w
-                -> BS.ByteString
-                   -- ^ Expected name of section
-                -> RelinkM ()
-checkSectionEmpty e nm = elfClassInstances (elfClass e) $ do
-  case nm `findSectionByName` e of
-    [sec] -> do
-      when (elfSectionSize sec /= 0) $ do
-       throwE $ "Relinker requires new object contains no data to load."
-    []  -> pure ()
-    _   -> throwE $ "Multiple " ++ BSC.unpack nm ++ " sections in object file."
-
-{-
-elfHasTLSSegment :: Elf w -> Bool
-elfHasTLSSegment e =
-  case filter (`segmentHasType` PT_TLS) (elfSegments e) of
-    [] -> False
-    [_] -> True
-    _ -> error "Multiple TLS segments in original binary"
--}
 
 elfHasTLSSection :: Elf w -> Bool
 elfHasTLSSection e =
   elfClassInstances (elfClass e) $ do
   any (\s -> elfSectionFlags s `hasBits` shf_tls) (e^..elfSections)
 
-elfGNUStackSection :: Elf w -> Maybe (ElfSection (ElfWordType w))
-elfGNUStackSection e =
-  case filter (\s -> elfSectionName s == ".note.GNU-stack") (e^..elfSections) of
-    [] -> Nothing
-    (s:_) -> Just s
-
-------------------------------------------------------------------------
--- SectionMap
-
--- | Map from section indices in object to virtual address where it will be
--- loaded into binary.
-type SectionAddrMap w = Map Word16 w
-
-------------------------------------------------------------------------
--- SymbolNameToAddrMap
-
--- | Maps symbol names in binaries to their virtual address when loaded.
-type SymbolNameToAddrMap w = Map BS.ByteString w
-
 ------------------------------------------------------------------------
 -- Merger
 
 -- | Find relocation entries in section with given name.
-findRelaEntries :: Map BS.ByteString [ElfSection (ElfWordType 64)]
+findRelaEntries :: IsRelocationType r
+                => ElfData
+                -> Map BS.ByteString [ElfSection (ElfWordType 64)]
                    -- ^ Map from section names to sections with that name.
                 -> BS.ByteString
                    -- ^ Name of section containing relocation entries.
-                -> Except String [RelaEntry X86_64_RelocationType]
-findRelaEntries secMap nm = do
+                -> RelinkM [RelaEntry r]
+findRelaEntries dta secMap nm = do
   case fromMaybe [] (Map.lookup nm secMap) of
     -- Assume that no section means no relocations
     [] -> return []
-    [s] -> except $ elfRelaEntries ELFDATA2LSB (BSL.fromStrict (elfSectionData s))
+    [s] -> except $ elfRelaEntries dta (BSL.fromStrict (elfSectionData s))
     _ -> throwE $  "Multiple " ++ BSC.unpack nm ++ " sections in object file."
-
--- | Infomration
-data BinarySymbolTable w =
-  BinarySymbolTable { binLocalSymbols :: !(V.Vector (ElfSymbolTableEntry (ElfWordType w)))
-                    , binNonlocalSymbols :: !(V.Vector (ElfSymbolTableEntry (ElfWordType w)))
-                    }
 
 isLocalSymbol :: ElfSymbolTableEntry w -> Bool
 isLocalSymbol sym = steBind sym == STB_LOCAL
-
--- | Find the symbol table in the binary.
-getBinarySymbolTable :: Elf w
-                       -- ^ Binary file
-                     -> Except String (BinarySymbolTable w)
-getBinarySymbolTable binary = do
-  case elfSymtab binary of
-    -- Assume that no section means no relocations
-    []  -> do
-      pure $! BinarySymbolTable { binLocalSymbols = V.empty
-                                , binNonlocalSymbols = V.empty
-                                }
-    [tbl] -> do
-      (local, global) <- do
-        pure $ V.partition isLocalSymbol (elfSymbolTableEntries tbl)
-      pure $! BinarySymbolTable { binLocalSymbols = local
-                                , binNonlocalSymbols = global
-                                }
-    _   ->
-      throwE $ "Multiple .symtab sections in input binary."
 
 -- | Find the symbol table in the elf.
 findSymbolTable :: String
                    -- ^ Type of file for error reporting.
                 -> Elf w
                     -- ^ Object with relocations
-                -> Except String (ElfSymbolTable (ElfWordType w))
+                -> RelinkM (ElfSymbolTable (ElfWordType w))
 findSymbolTable nm obj = do
   case elfSymtab obj of
     -- Assume that no section means no relocations
@@ -242,8 +134,8 @@ findSymbolTable nm obj = do
     _   -> throwE $ "Multiple .symtab sections in " ++ nm ++ " file."
 
 -- | Check original binary satisfies preconditions.
-checkOriginalBinaryAssumptions :: Monad m => Elf 64 -> m ()
-checkOriginalBinaryAssumptions binary = do
+checkBinaryAssumptions :: Monad m => Elf w -> m ()
+checkBinaryAssumptions binary = do
   when (elfData binary /= ELFDATA2LSB) $ do
     fail $ "Expected the original binary to be least-significant bit first."
   when (elfType binary /= ET_EXEC) $ do
@@ -256,9 +148,9 @@ checkOriginalBinaryAssumptions binary = do
     fail $ "Expected no PT_GNU_RELO segment in binary."
 
 -- | Check object file satisfies preconditions.
-checkObjAssumptions :: Elf 64
+checkObjectAssumptions :: Elf w
                     -> RelinkM ()
-checkObjAssumptions obj = do
+checkObjectAssumptions obj = do
   -- Check new object properties.
   when (elfData obj /= ELFDATA2LSB) $ do
     fail $ "Expected the new binary binary to be least-significant bit first."
@@ -270,73 +162,46 @@ checkObjAssumptions obj = do
     fail $ "Expected elf flags in new object to be zero."
   unless (null (elfGnuRelroRegions obj)) $ do
     fail $ "Expected no PT_GNU_RELO segment in new object."
-  checkSectionEmpty obj ".data"
-  checkSectionEmpty obj ".bss"
   -- Check no TLS in object.
   when (elfHasTLSSection obj) $ do
     throwE $ "TLS section is not allowed in new code object."
 
--- | Intermediate state used when generating layout information for new binary.
-data ExtractState = ExtractState { nextSectionIndex :: !MergedSectionIndex
+-- | Intermediate state used when mapping existing binary contents to new file.
+data TransBinaryState = TransBinaryState { nextSectionIndex :: !MergedSectionIndex
                                    -- ^ Index for next section
-                                 , codeRedirs       :: [CodeRedirection (ElfWordType 64)]
-                                   -- ^ Redirections in code segment
-                                 , binSectionMap    :: !BinSectionIndexToMergeMap
+                                 , binSectionMap    :: !(Map BinSectionIndex MergedSectionIndex)
+                                   -- ^ Maps binary sections to merged section.
                                  }
 
 
 -- | Monad used for extracting code from binaries.
-type ExtractM = State ExtractState
+type TransBinaryM = State TransBinaryState
 
 -- | Create a fresh section index.
-freshSectionIndex :: ExtractM MergedSectionIndex
-freshSectionIndex  = do
-  idx <- gets nextSectionIndex
-  modify $ \s -> s { nextSectionIndex = idx + 1 }
-  return idx
-
--- | Check that the flags of the segment match the expected flags.
-checkSegFlags :: ElfSegment w -> ElfSegmentFlags -> ExtractM ()
-checkSegFlags seg expected =
-  when (elfSegmentFlags seg /= expected) $
-    error $ "Segment " ++ show (elfSegmentFlags seg) ++ " did not have the expected flags "
-      ++ show expected ++ "."
-
--- | Check that virtual address and "physical" address fields are same.
-checkSegmentAddrsMatch :: ElfSegment 64 -> ExtractM ()
-checkSegmentAddrsMatch seg = do
-  when (elfSegmentVirtAddr seg /= elfSegmentPhysAddr seg) $ do
-    error $ "Relinker expects  virtual and physical addresses match."
-
-checkSectionAssumptions :: ElfSection (ElfWordType 64)
-                        -> ExtractM ()
-checkSectionAssumptions sec = do
-  let nm = BSC.unpack $ (elfSectionName sec)
-  when (elfSectionLink sec /= 0) $ do
-    error $ "Expected link of " ++ nm ++ " to be 0."
-  when (elfSectionInfo sec /= 0) $ do
-    error $ "Expected info of " ++ nm ++ " to be 0."
-  when (elfSectionEntSize sec /= 0) $ do
-    error $ "Expected entry size of " ++ nm ++ " to be 0."
+freshSectionIndex :: BinSectionIndex -> TransBinaryM MergedSectionIndex
+freshSectionIndex idx = do
+  newIdx <- gets nextSectionIndex
+  modify $ \s -> s { nextSectionIndex = newIdx + 1
+                   , binSectionMap = Map.insert idx newIdx (binSectionMap s)
+                   }
+  return newIdx
 
 -- | Generate a deferred region from a region within the code segment
 -- of the original binary.
-copyBinaryCodeSections :: (ElfWordType 64 -> BS.ByteString)
-                          -- ^ Make jump
-                       -> Map BS.ByteString (ElfWordType 64)
-                          -- ^ Maps names of symbols defined in the object file to
-                          -- their address in the new binary.  This will only point to
-                          -- new code.
+copyBinaryCodeSections :: (BS.ByteString -> BS.ByteString)
+                          -- ^ Function for renaming sections.
+                       -> [ResolvedCodeRedir (ElfWordType 64)]
+                          -- ^ Modifications to make to existing data
                        -> [ElfDataRegion 64]
                        -- ^ Regions encountered so far.
                        -> ElfWordType 64
                        -- ^ File offset
                        -> [ElfDataRegion 64]
                        -- ^ Regions in binary left to process.
-                       -> ExtractM [ElfDataRegion 64]
+                       -> TransBinaryM [ElfDataRegion 64]
 copyBinaryCodeSections _ _ prevRegions _ [] = do
-  pure $! (reverse prevRegions)
-copyBinaryCodeSections mkJump codeAddrMap prevRegions secOffset (thisRegion:restRegions) = do
+  pure $! reverse prevRegions
+copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegions) = do
  seq secOffset $ do
   case thisRegion of
     ElfDataElfHeader -> do
@@ -356,283 +221,105 @@ copyBinaryCodeSections mkJump codeAddrMap prevRegions secOffset (thisRegion:rest
     ElfDataSymtab _ ->
       error "Elf symbol table appears in unexpected location."
     ElfDataSection sec -> do
-
-      checkSectionAssumptions sec
-
-      -- Get memory size of section
-      let msize = elfSectionSize sec
       -- Get data in section
       let dta = elfSectionData sec
       -- Get filesize of section.
       let fsize = fromIntegral (BS.length dta)
+      -- Generate mapping from original function to new
+      idx <- freshSectionIndex (elfSectionIndex sec)
 
-      let nm = elfSectionName sec
-
-      when (elfSectionType sec /= SHT_PROGBITS) $ do
-        error $ "Unexpected section type " ++ show (elfSectionType sec)
-             ++ " in code section " ++ BSC.unpack nm ++ "."
-      when (msize /= fsize) $ do
-        error $ "PROGBITS section " ++ BSC.unpack nm ++ " filesize must equal memory size."
-
-      redirs <- gets codeRedirs
-
-      -- Add code relocations
-      idx <- freshSectionIndex
-      let dr = ElfSection
+      let newSec = sec
              { elfSectionIndex     = idx
-             , elfSectionName      =
-                 if Set.member nm copiedObjSectionNames then
-                   ".orig" <> nm
-                  else
-                   nm
-             , elfSectionType      = elfSectionType sec
-             , elfSectionFlags     = elfSectionFlags sec
-             , elfSectionAddr      = elfSectionAddr sec
-             , elfSectionSize      = msize
-             , elfSectionLink      = 0
-             , elfSectionInfo      = 0
-             , elfSectionAddrAlign = elfSectionAddrAlign sec
-             , elfSectionEntSize   = 0
-             , elfSectionData      = insertStaticRedirs mkJump codeAddrMap redirs secOffset dta
+             , elfSectionName      = nmFun (elfSectionName sec)
+             , elfSectionData      = insertStaticRedirs rredirs secOffset dta
              }
-      -- Add mapping to new region
-      modify $ \s -> s { binSectionMap = Map.insert (elfSectionIndex sec) idx (binSectionMap s) }
 
       -- The last section
-      let nextRegions = ElfDataSection dr : prevRegions
-      seq dr $ seq nextRegions $
-        copyBinaryCodeSections mkJump codeAddrMap nextRegions (secOffset + fsize) restRegions
+      let nextRegions = ElfDataSection newSec : prevRegions
+      seq newSec $ seq nextRegions $
+        copyBinaryCodeSections nmFun rredirs nextRegions (secOffset + fsize) restRegions
     ElfDataRaw b -> do
       let dr = ElfDataRaw b
       let fsize = fromIntegral (BS.length b)
       let nextRegions = dr : prevRegions
       seq dr $ seq nextRegions $
-        copyBinaryCodeSections mkJump codeAddrMap nextRegions (secOffset + fsize) restRegions
+        copyBinaryCodeSections nmFun rredirs nextRegions (secOffset + fsize) restRegions
 
 
--- | This function is used to generate regions in the executable
--- segment for representing the code in the object file.
---
--- This function maps sections from the object to the new binary.
--- Sections in the object file are not renamed; instead sections in the original binary have
--- ".orig" prepended.
+-- | This function generates regions in the binary for the new object code
+-- using relocation information and the `ObjectSectionInfo`.
 mkObjCodeRegions :: RelocInfo (ElfWordType 64)
-                 -> [ElfDataRegion 64]
-                    -- ^ New regions added so far.
-                 -> [ObjectSectionInfo]
+                 -> ObjectSectionInfo X86_64_RelocationType
                     -- ^ Names of sections to look for and expected flags
-                 -> ExtractM [ElfDataRegion 64]
-mkObjCodeRegions _ prev [] = do
-  pure $ reverse prev
-mkObjCodeRegions relocInfo prevRegions (secInfo:rest) = do
-  let idx = objsecMergedIndex secInfo
-  let relaEntries :: [RelaEntry X86_64_RelocationType]
-      relaEntries = objsecRelocations secInfo
-  let sec = objsecOrigSection secInfo
-  -- Get alignemnt for this section
-  let align = elfSectionAddrAlign sec
-  -- Compute address of this section
-  let secAddr :: ElfWordType 64
-      secAddr = objsecBaseAddr secInfo
-  -- Add padding as needed to this section
-  let paddingCnt = objsecPadding secInfo
+                 -> [ElfDataRegion 64]
+mkObjCodeRegions relocInfo secInfo
+     | BS.length oldData /= BS.length newData  =
+       error "mkObjCodeRegions relocatios have incorrect size"
+     | otherwise
+       =  paddingRegions (objsecPadding secInfo)
+       ++ [ElfDataSection newSec]
+  where sec = objsecOrigSection secInfo
+        -- Get relocations
+        relaEntries :: [RelaEntry X86_64_RelocationType]
+        relaEntries = objsecRelocations secInfo
+        -- Compute address of this section
+        secAddr :: ElfWordType 64
+        oldData = elfSectionData sec
+        secAddr = objsecBaseAddr secInfo
+        newData = performRelocs relocInfo secAddr oldData relaEntries
 
-  let dta = elfSectionData sec
-  let newSec = ElfSection
-             { elfSectionIndex = idx
-             , elfSectionName = elfSectionName sec
-             , elfSectionType = elfSectionType sec
-             , elfSectionFlags = elfSectionFlags sec
-             , elfSectionAddr  = secAddr
-             , elfSectionSize  = elfSectionFileSize sec
-             , elfSectionLink  = 0
-             , elfSectionInfo  = 0
-             , elfSectionAddrAlign = align
-             , elfSectionEntSize   = 0
-             , elfSectionData      = performRelocs relocInfo secAddr dta relaEntries
-             }
-  let newRegions = [ElfDataSection newSec] ++ paddingRegions paddingCnt ++ prevRegions
-  mkObjCodeRegions relocInfo newRegions rest
+        -- Generate new setion
+        newSec
+          = sec
+            { elfSectionIndex = objsecMergedIndex secInfo
+            , elfSectionAddr  = secAddr
+            , elfSectionData = newData
+            }
 
-copiedObjSections :: [(BS.ByteString, ElfSectionFlags (ElfWordType 64))]
-copiedObjSections =
-  [ (,) ".text"     (shf_alloc .|. shf_execinstr)
-  , (,) ".rodata"   shf_alloc
-  , (,) ".eh_frame" shf_alloc
-  ]
-
-copiedObjSectionNames :: Set BS.ByteString
-copiedObjSectionNames = Set.fromList $ fst <$> copiedObjSections
-
--- | Resolve the code segment
-resolveCodeSegment :: ElfWordType 64
-                      -- ^ Required alignment for segment
-                   -> (ElfWordType 64 -> BS.ByteString)
-                      -- ^ Make jump
-                   -> ElfSegment 64 -- ^ Code in original binary
-                   -> [ObjectSectionInfo]
-                      -- ^ Information about new sections
-                   -> V.Vector (ElfSymbolTableEntry (ElfWordType 64))
-                   -- ^ Symbol table entries in object.
-                   -> ElfWordType 64
-                      -- ^ Size of new code segment in bytes
-                      --
-                      -- Note that for code segment the file and memory size are the same.
-                   -> ExtractM (ElfSegment 64)
-resolveCodeSegment align mkJump binCodeSeg objSections objSymbols codeSize = do
-  checkSegmentAddrsMatch binCodeSeg
-
-  -- Get low order bits module alignment
-  let segAddr = elfSegmentVirtAddr binCodeSeg
-  let segAlign = segAddr .&. (align - 1)
-  when (segAlign /= 0) $ do
-    error "Code segment must be aligned to 0 address."
-
-  -- Otherwise we copy segment over, but check the contents for structures we
-  -- cannot support.
-  checkSegFlags binCodeSeg (pf_r .|. pf_x)
-
-  let secNameAddrMap :: Map ObjectSectionIndex (BS.ByteString, ElfWordType 64)
-      secNameAddrMap
-        = Map.fromList
-          [ (objsecSourceIndex secInfo, (objsecName secInfo, objsecBaseAddr secInfo))
-          | secInfo <- objSections
-          ]
-
-  let relocInfo = mkRelocInfo secNameAddrMap objSymbols
-
-  let codeAddrMap = mkCodeAddrMap (snd <$> secNameAddrMap) objSymbols
-
-  rest <-
-    case toList (elfSegmentData binCodeSeg) of
-      ElfDataElfHeader : ElfDataSegmentHeaders : rest -> pure rest
-      ElfDataElfHeader : _ -> do
-        error "Missing segment headers at start of code segment."
-      _ -> do
-        error "Missing elf header at start of file."
-
-  binRegions <- copyBinaryCodeSections mkJump codeAddrMap [] 0 rest
-
-  objRegions  <- mkObjCodeRegions relocInfo [] objSections
-
-  pure $!
-    ElfSegment
-    { elfSegmentType = PT_LOAD
-    , elfSegmentFlags = elfSegmentFlags binCodeSeg
-    , elfSegmentIndex = 0
-    , elfSegmentVirtAddr = elfSegmentVirtAddr binCodeSeg
-    , elfSegmentPhysAddr = elfSegmentVirtAddr binCodeSeg
-    , elfSegmentAlign = align
-    , elfSegmentMemSize = ElfAbsoluteSize codeSize
-    , elfSegmentData = Seq.fromList $
-        [ElfDataElfHeader, ElfDataSegmentHeaders]
-        ++ binRegions
-        ++ objRegions
-    }
-
+-- | `paddingRegions n` generate a padding region to add `n` bytes to binary.
 paddingRegions :: ElfWordType 64 -> [ElfDataRegion 64]
 paddingRegions 0 = []
 paddingRegions p = [ElfDataRaw (BS.replicate (fromIntegral p) 0)]
 
--- | Convert the data segment in the original file to the deferred
--- segment.
-resolveDataSegment :: ElfWordType 64 -- ^ Required alignment for segment.
-                   -> ElfWordType 64 -- ^ File offset
-                   -> ElfSegment 64  -- ^ Original data segment in bianryt
-                   -> ExtractM [ElfDataRegion 64]
-resolveDataSegment align foff seg = do
-  checkSegmentAddrsMatch seg
-  let segAddr = elfSegmentVirtAddr seg
-
-  let mask :: ElfWordType 64
-      mask = align - 1
-  let addrAlign :: ElfWordType 64
-      addrAlign = segAddr .&. mask
-  let fileAlign :: ElfWordType 64
-      fileAlign = foff .&. mask
-
-  -- Padding is the number of bytes that need to be added to the file
-  -- offset to ensure the relevant bits in the file and address
-  -- offsets match.
-  let padding :: ElfWordType 64
-      padding = (addrAlign + align - fileAlign) .&. mask
-
-  -- Otherwise we copy segment over, but check the contents for structures we
-  -- cannot support.
-  checkSegFlags seg (pf_r .|. pf_w)
-  let newSeg = ElfSegment { elfSegmentType = PT_LOAD
-                          , elfSegmentFlags = elfSegmentFlags seg
-                          , elfSegmentIndex = 1
-                          , elfSegmentVirtAddr = elfSegmentVirtAddr seg
-                          , elfSegmentPhysAddr = elfSegmentPhysAddr seg
-                          , elfSegmentAlign = align
-                          , elfSegmentMemSize = elfSegmentMemSize seg
-                          , elfSegmentData = elfSegmentData seg
-                          }
-  pure $! paddingRegions padding ++ [ ElfDataSegment newSeg ]
-
+-- | `resolveSegmentPadding offset addr align` returns the number `n` such that
+-- `(offset + n) `mod` align == addr `mod` align`.
+--
+-- This requires that `align` is a power of two.
+resolveSegmentPadding :: (Bits a, Num a) => a -> a -> a -> a
+resolveSegmentPadding offset addr align
+    | align .&. mask /= 0 = error "resolveSegmentPadding given bad alignment."
+    | otherwise = (align + (addr .&. mask) - (offset .&. mask)) .&. mask
+  where mask = align - 1
 
 ------------------------------------------------------------------------
--- IdentifySegmentResult
+-- Binary checking
 
--- | This is the result of classifying which top-level regions in a
--- binary the relinker should care about.
-data IdentifySegmentResult
-   = IdentifySegmentResult { unexpectedRegionNames :: [String]
-                           , seenSegments :: [ElfSegment 64]
-                           }
-
--- | Empty result before classifying top-level regions.
-emptyIdentifySegmentResult :: IdentifySegmentResult
-emptyIdentifySegmentResult =
-  IdentifySegmentResult { unexpectedRegionNames = []
-                        , seenSegments = []
-                        }
-
--- | Add the name of a region that we did not expect in the binary.
-didNotExpectOriginalRegion :: String
-                           -> IdentifySegmentResult
-                           -> IdentifySegmentResult
-didNotExpectOriginalRegion nm r = do
-  r { unexpectedRegionNames = nm : unexpectedRegionNames r }
-
--- | Add a PT_LOAD segment to the result/
-addLoadSegment :: ElfSegment 64
-               -> IdentifySegmentResult
-               -> IdentifySegmentResult
-addLoadSegment seg r = r { seenSegments = seg : seenSegments r }
-
--- | Classify which segments are important and which are unexpected.
-identifyLoadSegment :: ElfDataRegion 64
-                    -- ^ Data region in input binary left to process
-                 -> IdentifySegmentResult
-                 -> IdentifySegmentResult
-identifyLoadSegment thisRegion =
+-- | Check for regions in the object that we did not expect.
+checkBinaryRegions :: ElfDataRegion 64
+                 -- ^ Data region in input binary left to process
+              -> RelinkM ()
+checkBinaryRegions thisRegion =
   -- Decide current action based on region
   case thisRegion of
-    ElfDataElfHeader ->
-      didNotExpectOriginalRegion "Elf header outside loadable segment."
+    ElfDataElfHeader -> do
+      error "Elf header outside loadable segment."
     ElfDataSegmentHeaders ->
-      didNotExpectOriginalRegion "Elf segment table outside loadable segment."
+      error "Elf segment table outside loadable segment."
     ElfDataGOT _ ->
-      didNotExpectOriginalRegion "top-level .got table"
-    ElfDataSection _ -> do
-      didNotExpectOriginalRegion "top-level section"
+      error "top-level .got table"
+    ElfDataSection _ -> pure ()
     -- Regions to drop
-    ElfDataSectionHeaders -> id
-    ElfDataSectionNameTable _ -> id
-    ElfDataStrtab _ -> id
-    ElfDataSymtab _ -> id
-    ElfDataRaw _ -> id
-    ElfDataSegment seg
-      -- Process loadable segment.
-      | PT_LOAD <- elfSegmentType seg -> addLoadSegment seg
-      | otherwise ->
-        didNotExpectOriginalRegion $ "Not loadable segment " ++ show (elfSegmentIndex seg)
+    ElfDataSectionHeaders -> pure ()
+    ElfDataSectionNameTable _ -> pure ()
+    ElfDataStrtab _ -> pure ()
+    ElfDataSymtab _ -> pure ()
+    ElfDataRaw _ -> pure ()
+    ElfDataSegment seg -> do
+     error $ "Additional segment: " ++ show (elfSegmentIndex seg)
 
 -- | Create a bytestring with a jump to the immediate address.
-x86_64_immediate_jmp :: Word64 -> BS.ByteString
-x86_64_immediate_jmp addr = BSL.toStrict $ Bld.toLazyByteString $ mov_addr_to_r11 <> jump_r11
+x86_64_immediateJump :: Word64 -> BS.ByteString
+x86_64_immediateJump addr = BSL.toStrict $ Bld.toLazyByteString $ mov_addr_to_r11 <> jump_r11
   where mov_addr_to_r11
           =  Bld.word8 0x49
           <> Bld.word8 0xBB
@@ -658,13 +345,14 @@ resolveBinarySymbolTableEntry :: Num (ElfWordType 64)
                               -> ElfSymbolTableEntry (ElfWordType 64)
                               -> RelinkM (Maybe (ElfSymbolTableEntry (ElfWordType 64)))
 resolveBinarySymbolTableEntry sectionIdxMap usedNames ste = do
+  let suffix = "_orig"
   let nm =
         case steType ste of
          STT_SECTION -> ""
          STT_FILE -> steName ste
-         STT_NOTYPE -> steName ste <> "_reopt"
-         STT_OBJECT -> steName ste <> "_reopt"
-         STT_FUNC -> steName ste <> "_reopt"
+         STT_NOTYPE -> steName ste <> suffix
+         STT_OBJECT -> steName ste <> suffix
+         STT_FUNC -> steName ste <> suffix
          tp -> error $ "Symbol type " ++ show tp ++ " is not yet supported."
 
   when (Set.member nm usedNames) $ do
@@ -673,9 +361,9 @@ resolveBinarySymbolTableEntry sectionIdxMap usedNames ste = do
     SHN_ABS -> do
       pure $! (Just $! ste { steName = nm })
     SHN_COMMON -> do
-      error "Binaries with SHN_COMMON symbols are not supported."
+      pure $! (Just $! ste { steName = nm })
     SHN_UNDEF  -> do
-      error "Binaries with SHN_UNDEF symbols are not supported."
+      pure $! (Just $! ste { steName = nm })
     ElfSectionIndex sectionIdx -> do
       case Map.lookup sectionIdx sectionIdxMap of
         Nothing -> do
@@ -693,78 +381,123 @@ resolveBinarySymbolTableEntry sectionIdxMap usedNames ste = do
 
 -- | Information about how specific sections in the object will be
 -- mapped to the binary.
-data ObjectSectionInfo
+data ObjectSectionInfo r
   = ObjectSectionInfo
   { objsecSourceIndex :: !ObjectSectionIndex
     -- ^ Index of section in object.
   , objsecMergedIndex :: !MergedSectionIndex
     -- ^ Index of section in new binary.
-  , objsecPadding  :: !(ElfWordType 64)
+  , objsecPadding  :: !(RelocationWord r)
     -- ^ Number of padding bytes to add before this section
-  , objsecBaseAddr :: !(ElfWordType 64)
+  , objsecBaseAddr :: !(RelocationWord r)
     -- ^ Base address of section after alignment
-  , objsecRelocations :: !([RelaEntry X86_64_RelocationType])
+  , objsecRelocations :: !([RelaEntry r])
     -- ^ Relocations to apply
-  , objsecOrigSection :: !(ElfSection (ElfWordType 64))
+  , objsecOrigSection :: !(ElfSection (RelocationWord r))
+    -- ^ Original section in object.
   }
 
-objsecName :: ObjectSectionInfo -> BS.ByteString
+-- | Name of the section
+objsecName :: ObjectSectionInfo r -> BS.ByteString
 objsecName = elfSectionName . objsecOrigSection
 
+checkSectionFlags :: (Bits w, Integral w, Show w)
+                  => ElfSection w
+                  -> ElfSectionFlags w
+                  -> RelinkM ()
+checkSectionFlags sec expectedFlags =
+  when (elfSectionFlags sec /= expectedFlags) $ do
+    throwE $ BSC.unpack (elfSectionName sec) ++ " section has an unexpected flags: "
+      ++ show (elfSectionFlags sec) ++ "."
+
+collectObjSectionInfo1 :: ElfData
+                       -> Map BS.ByteString [ElfSection (ElfWordType 64)]
+                          -- ^ Map from section name to relocation section(s) for it.
+                       -> MergedSectionIndex
+                       -> ElfWordType 64
+                       -- ^ Address we epxect to load this section to.
+                       -> ElfSection (ElfWordType 64)
+                       -> RelinkM (ObjectSectionInfo X86_64_RelocationType, ElfWordType 64)
+collectObjSectionInfo1 byteOrder relaSecMap idx addr sec = do
+  let nm = elfSectionName sec
+  when (elfSectionType sec /= SHT_PROGBITS) $ do
+    throwE $ BSC.unpack nm ++ " section expected to be type SHT_PROGBITS."
+  let dta = elfSectionData sec
+  when (toInteger (BS.length dta) /= toInteger (elfSectionSize sec)) $ do
+    throwE $ "Object code section sizes must match data length."
+  relaEntries <- findRelaEntries byteOrder relaSecMap nm
+  -- Get alignemnt for this section
+  let align = elfSectionAddrAlign sec
+  -- Compute address of this section
+  let secAddr :: ElfWordType 64
+      secAddr = fixAlignment addr align
+  -- Compute section information
+  let osec = ObjectSectionInfo
+            { objsecSourceIndex = elfSectionIndex sec
+            , objsecMergedIndex = idx
+            , objsecPadding  = secAddr - addr
+            , objsecBaseAddr = secAddr
+            , objsecRelocations = relaEntries
+            , objsecOrigSection = sec
+            }
+  pure $ trace (BSC.unpack nm ++ " " ++ showHex addr " " ++ showHex secAddr " " ++ show align) $
+    (osec,secAddr + elfSectionFileSize sec)
+
 -- | This function is used to generate the information needed to perform relocations.
-resolveObjSectionInfo :: Map BS.ByteString [ElfSection (ElfWordType 64)]
-                         -- ^ Map from section names to section(s) with that name.
-                      -> [ObjectSectionInfo]
-                         -- ^ Map section indices from binary to information.
+collectObjSectionInfo :: ElfData
+                      -> Map BS.ByteString [ElfSection (ElfWordType 64)]
+                         -- ^ Map from section name to relocation section(s) for it.
+                       -> [ObjectSectionInfo X86_64_RelocationType]
+                       -- ^ Map section indices from binary to information.
                       -> MergedSectionIndex
-                         -- ^ Merged section index
+                          -- ^ Merged section index
                       -> ElfWordType 64
-                         -- ^ Base address for code (add file offset to get next address)
-                      -> [(BS.ByteString, ElfSectionFlags (ElfWordType 64))]
-                         -- ^ Names of sections to look for and expected flags
-                      -> Except String ( [ObjectSectionInfo]
-                                       , MergedSectionIndex
-                                       , ElfWordType 64
-                                       )
-resolveObjSectionInfo  _secMap prev idx addr [] = do
+                       -- ^ Base address for code (add file offset to get next address)
+                      -> [ElfSection (ElfWordType 64)]
+                         -- ^ Remaining sections in file.
+                      -> RelinkM ( [ObjectSectionInfo X86_64_RelocationType]
+                                 , MergedSectionIndex
+                                 , ElfWordType 64
+                                 )
+collectObjSectionInfo _ _ prev idx addr [] = do
   pure (reverse prev, idx, addr)
-resolveObjSectionInfo secMap prevRegions idx addr ((nm, expectedFlags):rest) = do
-  case fromMaybe [] (Map.lookup nm secMap) of
-    [] ->
-      -- Ignore missing sections
-      resolveObjSectionInfo secMap prevRegions idx addr rest
-    (sec:otherSections) -> do
-      unless (null otherSections) $ do
-        error $ "Found multiple sections in object file named " ++ BSC.unpack nm
-      when (elfSectionType sec /= SHT_PROGBITS) $ do
-        error $ BSC.unpack nm ++ " section expected to be type SHT_PROGBITS."
-      when (elfSectionFlags sec /= expectedFlags) $ do
-        error $ BSC.unpack nm ++ " section has an unexpected flags."
-      let dta = elfSectionData sec
-      when (toInteger (BS.length dta) /= toInteger (elfSectionSize sec)) $ do
-        error $ "Object code section sizes must match data length."
-      let relaEntries :: [RelaEntry X86_64_RelocationType]
-          relaEntries =
-            case runExcept (findRelaEntries secMap (".rela" <> nm)) of
-              Left e -> error e
-              Right l -> l
-      let fsize = elfSectionFileSize sec
-      -- Get alignemnt for this section
-      let align = elfSectionAddrAlign sec
-      -- Compute address of this section
-      let secAddr :: ElfWordType 64
-          secAddr = fixAlignment addr align
-      -- Compute section information
-      let secInfo
-             = ObjectSectionInfo
-             { objsecSourceIndex = elfSectionIndex sec
-             , objsecMergedIndex = idx
-             , objsecPadding  = secAddr - addr
-             , objsecBaseAddr = secAddr
-             , objsecRelocations = relaEntries
-             , objsecOrigSection = sec
-             }
-      resolveObjSectionInfo secMap (secInfo:prevRegions) (idx + 1) (addr + fsize) rest
+collectObjSectionInfo dta relaSecMap prevRegions idx addr (sec:rest) = do
+  case elfSectionName sec of
+    ".text" -> do
+      checkSectionFlags sec (shf_alloc .|. shf_execinstr)
+      (secInfo,addr') <- collectObjSectionInfo1 dta relaSecMap idx addr sec
+      collectObjSectionInfo dta relaSecMap (secInfo:prevRegions) (idx + 1) addr' rest
+    ".rodata" -> do
+      checkSectionFlags sec shf_alloc
+      (secInfo,addr') <- collectObjSectionInfo1 dta relaSecMap idx addr sec
+      collectObjSectionInfo dta relaSecMap (secInfo:prevRegions) (idx + 1) addr' rest
+    ".rodata.cst16" -> do
+      checkSectionFlags sec (shf_alloc .|. shf_merge)
+      (secInfo,addr') <- collectObjSectionInfo1 dta relaSecMap idx addr sec
+      collectObjSectionInfo dta relaSecMap (secInfo:prevRegions) (idx + 1) addr' rest
+    ".eh_frame" -> do
+      checkSectionFlags sec shf_alloc
+      (secInfo,addr') <- collectObjSectionInfo1 dta relaSecMap idx addr sec
+      collectObjSectionInfo dta relaSecMap (secInfo:prevRegions) (idx + 1) addr' rest
+    ".data" -> do
+      when (elfSectionSize sec /= 0) $ do
+       throwE $ "Relinker requires new object has empty .bss."
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    ".bss" -> do
+      when (elfSectionSize sec /= 0) $ do
+       throwE $ "Relinker requires new object has empty .bss."
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    ".note.GNU-stack" -> do
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    ".symtab" -> do
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    ".strtab" -> do
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    ".shstrtab" -> do
+      collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
+    nm -> do
+      error $ "Unexpected section name: " ++ show nm
+
 
 -- | Information needed to generate the new symbol table from current entries.
 data MkSymbolTableContext w
@@ -776,7 +509,6 @@ data MkSymbolTableContext w
      --
      -- Note that in object files, all sections have an address of `0`.
    }
-
 
 -- | This maps a symbol entry in object to the new entry.
 resolveObjectSymbolTableEntry :: Num (ElfWordType w)
@@ -806,134 +538,220 @@ resolveObjectSymbolTableEntry ctx ste = do
 mkSymbolTable :: MergedSectionIndex
                  -- ^ Index for symbol table
               -> MkSymbolTableContext 64
-              -> BinarySymbolTable 64
-                 -- ^ Binary symbol table information
+              -> Elf 64
+                 -- ^ Input binary symbol table information
               -> V.Vector (ElfSymbolTableEntry Word64)
                  -- ^ Symbols in the new binary.
               -> RelinkM (ElfSymbolTable (ElfWordType 64))
-mkSymbolTable newSymtabIndex ctx  binSyms objSymbols = do
-  let (objInputLocalSyms, objInputGlobalSyms) = V.partition isLocalSymbol objSymbols
+mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols = do
 
-  objLocalSyms <- fmap (V.mapMaybe id) $
-    traverse (resolveObjectSymbolTableEntry ctx)
-             objInputLocalSyms
+  resolvedObjSyms <- fmap (V.mapMaybe id) $
+    traverse (resolveObjectSymbolTableEntry symbolCtx)
+             objFuncSymbols
 
-  objGlobalSyms <- fmap (V.mapMaybe id) $
-    traverse (resolveObjectSymbolTableEntry ctx)
-             objInputGlobalSyms
 
   let objSymbolNames :: Set BS.ByteString
       objSymbolNames = Set.fromList
         [ steName ste
-        | ste <- V.toList objLocalSyms ++ V.toList objGlobalSyms
+        | ste <- V.toList resolvedObjSyms
         ]
 
-  binLocalSyms <- fmap (V.mapMaybe id) $
-    traverse (resolveBinarySymbolTableEntry (binSectionIndexMap ctx) objSymbolNames)
-             (binLocalSymbols binSyms)
+  binSyms <-
+    case elfSymtab binary of
+      -- If symbol table is missing, then just use no existing symbols.
+      []  -> pure V.empty
+      [tbl] -> pure (elfSymbolTableEntries tbl)
+      _   ->
+        throwE $ "Multiple .symtab sections in input binary."
 
-  binGlobalSyms <- fmap (V.mapMaybe id) $
-    traverse (resolveBinarySymbolTableEntry (binSectionIndexMap ctx) objSymbolNames)
-             (binNonlocalSymbols binSyms)
+  newBinSyms <- fmap (V.mapMaybe id) $
+    traverse (resolveBinarySymbolTableEntry (binSectionIndexMap symbolCtx) objSymbolNames)
+              binSyms
+
+  let (localSyms, globalSyms)
+        = V.partition isLocalSymbol
+        $ resolvedObjSyms <> newBinSyms
 
   pure $!
-      ElfSymbolTable { elfSymbolTableIndex = newSymtabIndex
-                     , elfSymbolTableEntries
-                         = V.concat
-                             [ binLocalSyms,  objLocalSyms
-                             , binGlobalSyms, objGlobalSyms
-                             ]
-                     , elfSymbolTableLocalEntries
-                         = fromIntegral (V.length binLocalSyms)
-                         + fromIntegral (V.length objLocalSyms)
+      ElfSymbolTable { elfSymbolTableIndex   = newSymtabIndex
+                     , elfSymbolTableEntries = localSyms <> globalSyms
+                     , elfSymbolTableLocalEntries = fromIntegral $ V.length localSyms
                      }
 
--- | This performs the actions needed to merge the new object file and
--- original code.
-mergeObject' :: HasCallStack
+-- | This merges an existing elf binary and new object file to create a
+-- combined binary.
+--
+-- This function only works on Elf files that meet specific requirements,
+-- and may call `error` or return an error message if they do not.  The
+-- general rule we have is that we call `error` if we expect every binary
+-- will in practice satisfy the assumptions, and return an error message
+-- if we think binaries will fail this in some cases.
+--
+-- The assumptions on the original binary are:
+-- * There are two loadable segments, possibly a PT_GNU_STACK segment and no other
+--   segments.
+-- * The first loadable segment is:
+--   * Readable and executable
+--   * Located at the beginning of the file.
+--   * Contains the elf header, the program header table, and one or more loadable
+--     sections (perhaps with padding between them).  The memory size is the same as
+--    the file size.
+-- * The second loadable segment is:
+--   * Readable and writable
+--   * Located immediately after the code
+--     segment
+--   * Contains loadable sections.  The last section may be a .bss section.
+mergeObject :: HasCallStack
              => Elf 64 -- ^ Existing binary
              -> Elf 64 -- ^ Object file to merge into existing binary.
              -> [CodeRedirection Word64]
                 -- ^ Redirections from old binary to new code.
              -> (Word64 -> BS.ByteString)
                 -- ^ Function for creating jump to given offset.
-             -> RelinkM (Elf 64)
-mergeObject' origBinary obj redirs mkJump = do
+             -> Either String (Elf 64)
+mergeObject binary obj redirs mkJump = runExcept $ do
+  objSymbols <- elfSymbolTableEntries <$> findSymbolTable "object" obj
+
   -- Drop from huge page aligned addresses (0x200000) to normal page alignment.
   let elfAlign :: ElfWordType 64
       elfAlign = pageSize
 
   -- Check original binary properties
-  checkOriginalBinaryAssumptions origBinary
+  checkBinaryAssumptions binary
+
+  -- Get code and data segments
+  (codeSeg, dataSeg) <- do
+    let origData = binary^.elfFileData
+    case toList origData of
+      ElfDataSegment cs : ElfDataSegment ds : rest -> do
+        when (elfSegmentType cs /= PT_LOAD) $ do
+          error "Expected code segment at start of file."
+        when (elfSegmentType ds /= PT_LOAD) $ do
+          error "Expected data segment after code segment."
+        traverse_ checkBinaryRegions rest
+        pure (cs, ds)
+      _ -> do
+        error $ "Expected binary to contain a code segment followed by a data segment."
+
   -- Check object assumptions
-  checkObjAssumptions obj
+  checkObjectAssumptions obj
   -- Check OSABI compat
-  when (elfOSABI obj /= elfOSABI origBinary) $ do
+  when (elfOSABI obj /= elfOSABI binary) $ do
     fail $ "Expected the new object to use the same OS ABI as original."
 
-  -- Get symbols in files.
-  binSymbols <- getBinarySymbolTable origBinary
-  objSymbols <- elfSymbolTableEntries <$> findSymbolTable "object" obj
 
   -- Create GNU stack info if both binary and object have it, and the
   -- stack is non-executable in both.
   let mgnuStack =
-        case () of
-          () | Just binGnuStack <- elfGnuStackSegment origBinary
-             , gnuStackIsExecutable binGnuStack == False
-             , Just _ <- elfGNUStackSection origBinary -> do
-                 Just $ GnuStack { gnuStackSegmentIndex = 2
-                                 , gnuStackIsExecutable = False
-                                 }
-             | otherwise ->
-                 Nothing
+        case elfGnuStackSegment binary of
+          Just binGnuStack ->
+            Just $ binGnuStack { gnuStackSegmentIndex = 2 }
+          Nothing -> Nothing
 
   -- Compute number of program headers
   let newPhdrCount = 2
                    + (if isJust mgnuStack then 1 else 0)
 
   let binaryPhdrCount :: Int
-      binaryPhdrCount = elfSegmentCount origBinary
+      binaryPhdrCount = elfSegmentCount binary
   -- We currently do not allow the number of program headers to change so that
   -- the memory layout between the input binary and output does not change.
   when (newPhdrCount /= binaryPhdrCount) $ do
-    error "Relinker does not allow number of program headers to change."
-
-  (codeSeg, dataSeg) <- do
-    let origData = origBinary^.elfFileData
-    let identResult = foldr identifyLoadSegment emptyIdentifySegmentResult origData
-    let unex = unexpectedRegionNames identResult
-    unless (null unex) $ do
-      error $ "Unexpected regions: " ++ unwords unex
-    case seenSegments identResult of
-      [cs, ds] -> pure (cs, ds)
-      _ -> do
-        error $ "Expected binary to contain a code segment followed by a data segment."
+    error $ printf "internal: Expected program header count %d; got %d." newPhdrCount binaryPhdrCount
 
   -- Get layout of object code.
   (objSections, nextMergedIdx, finalCodeAddr) <- do
-    -- Generate mam from
-    let secMap = Map.fromListWith (++)
-                  [ (elfSectionName sec, [sec]) | sec <- obj^..elfSections ]
+    let (relaPairs, nonrelaSecs) = partitionEithers
+                  [ case BS.stripPrefix ".rela" (elfSectionName sec) of
+                      Just nm -> Left (nm, [sec])
+                      Nothing -> Right sec
+                  | sec <- obj^..elfSections
+                  ]
+    let relaSecMap = Map.fromList relaPairs
     let ElfAbsoluteSize codeMemSize = elfSegmentMemSize codeSeg
-
+    -- Get address of new codwe
     let codeAddr = elfSegmentVirtAddr codeSeg + codeMemSize
-    case runExcept (resolveObjSectionInfo secMap [] 1 codeAddr copiedObjSections) of
-      Left msg -> error msg
-      Right r -> pure r
+    collectObjSectionInfo ELFDATA2LSB relaSecMap [] 1 codeAddr nonrelaSecs
+
+  let objRegions = concatMap (mkObjCodeRegions relocInfo) objSections
+        where relocInfo = mkRelocInfo secNameAddrMap objSymbols
+              secNameAddrMap :: Map ObjectSectionIndex (BS.ByteString, ElfWordType 64)
+              secNameAddrMap
+                = Map.fromList
+                  [ (objsecSourceIndex secInfo, (objsecName secInfo, objsecBaseAddr secInfo))
+                  | secInfo <- objSections
+                  ]
 
   -- Compute size of new code segment.
   let codeSize = finalCodeAddr - elfSegmentVirtAddr codeSeg
 
-  (loadSegments, s) <- do
-    let initState = ExtractState { codeRedirs        = redirs
-                                 , nextSectionIndex  = nextMergedIdx
-                                 , binSectionMap     = Map.empty
-                                 }
-    pure $ flip runState initState $ do
-      rcodeSeg <- resolveCodeSegment elfAlign mkJump codeSeg objSections objSymbols codeSize
-      rdataSeg <- resolveDataSegment elfAlign codeSize dataSeg
-      pure $ ElfDataSegment rcodeSeg : rdataSeg
+  let secAddrMap :: Map ObjectSectionIndex (ElfWordType 64)
+      secAddrMap
+        = Map.fromList
+          [ (objsecSourceIndex secInfo, objsecBaseAddr secInfo)
+          | secInfo <- objSections
+          ]
+
+  -- Get just list of object symbols that correspond to defined functions.
+  let objFuncSymbols = V.filter isFuncSymbol objSymbols
+
+
+
+  -- Get code segment contents
+  let codeSegContents =
+        case toList (elfSegmentData codeSeg) of
+          ElfDataElfHeader : ElfDataSegmentHeaders : rest -> rest
+          ElfDataElfHeader : _ -> do
+            error "Missing segment headers at start of code segment."
+          _ -> do
+            error "Missing elf header at start of file."
+
+  -- Resolve which offsets of code segment to insert jumps into.
+  let codeRedirs = mapMaybe (resolveCodeRedirection mkJump codeAddrMap) redirs
+        where codeAddrMap :: Map BS.ByteString (ElfWordType 64)
+              codeAddrMap = mkCodeAddrMap secAddrMap objFuncSymbols
+
+  let initState = TransBinaryState { nextSectionIndex  = nextMergedIdx
+                                   , binSectionMap     = Map.empty
+                                   }
+
+  let (loadSegments, s) = flip runState initState $ do
+        -- Copy code regions to new binary
+        binCodeRegions <-
+          copyBinaryCodeSections (".orig" <>) codeRedirs [] (elfSegmentVirtAddr codeSeg) codeSegContents
+
+        -- Create new code segment
+        let newCodeSeg =
+              codeSeg
+              { elfSegmentIndex = 0
+              , elfSegmentAlign = elfAlign
+              , elfSegmentMemSize = ElfRelativeSize 0
+              , elfSegmentData = Seq.fromList
+                                 $  [ElfDataElfHeader, ElfDataSegmentHeaders]
+                                 ++ binCodeRegions
+                                 ++ objRegions
+              }
+
+        -- Get file offset for data
+        let dataFileOff = codeSize
+
+        -- Padding is the number of bytes that need to be added to the file
+        -- offset to ensure the relevant bits in the file and address
+        -- offsets match.
+        let dataPadding = resolveSegmentPadding dataFileOff (elfSegmentVirtAddr dataSeg) elfAlign
+
+        binDataRegions <- copyBinaryCodeSections id [] [] 0 (toList (elfSegmentData dataSeg))
+
+        -- Compute resolved data segment
+        let newDataSeg =
+              dataSeg { elfSegmentIndex = 1
+                      , elfSegmentAlign = elfAlign
+                      , elfSegmentData = Seq.fromList binDataRegions
+                      }
+        pure $ [ElfDataSegment newCodeSeg]
+          ++ paddingRegions dataPadding
+          ++ [ElfDataSegment newDataSeg]
+
 
   let loadSectionCount = nextSectionIndex s
 
@@ -949,51 +767,18 @@ mergeObject' origBinary obj redirs mkJump = do
         }
 
   -- Create symbol table
-  symtab <- mkSymbolTable (loadSectionCount + 1) symbolCtx binSymbols objSymbols
+  let newSymtabIndex = loadSectionCount + 1
 
-  return $! Elf { elfData       = ELFDATA2LSB
-                , elfClass      = ELFCLASS64
-                , elfOSABI      = elfOSABI origBinary
-                , elfABIVersion = 0
-                , elfType       = ET_EXEC
-                , elfMachine    = EM_X86_64
-                , elfEntry      = elfEntry origBinary
-                , elfFlags      = 0
-                , _elfFileData  = Seq.fromList $
-                   loadSegments
-                   ++ [ ElfDataSectionNameTable loadSectionCount
-                      , ElfDataSymtab symtab
-                      , ElfDataStrtab (loadSectionCount + 2)
-                      , ElfDataSectionHeaders
-                      ]
-                , elfGnuStackSegment = mgnuStack
-                , elfGnuRelroRegions = []
-                }
+  symtab <- mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols
 
--- | This merges an existing elf binary and new object file to create a
--- combined binary.
---
--- This function only works on Elf files that meet specific requirements,
--- and may call `error` or return an error message if they do not.  The
--- general rule we have is that we call `error` if we expect every binary
--- will in practice satisfy the assumptions, and return an error message
--- if we think binaries will fail this in some cases.
---
--- The assumptions on the original binary are:
--- * There are two loadable segments.
--- * The first loadable segment is:
---   * Readable and executable
---   * Located at the beginning of the file.
---   * Contains the elf header, the program header table, and one or more loadable
---     sections (perhaps with padding between them).
---
-mergeObject :: HasCallStack
-            => Elf 64
-               -- ^ Existing binary
-            -> Elf 64
-               -- ^ Object file to insert
-            -> [CodeRedirection Word64]
-               -- ^ Redirections from original file for new file.
-            -> Either String (Elf 64)
-mergeObject origBinary new_obj redirs = runExcept action
-  where action = mergeObject' origBinary new_obj redirs x86_64_immediate_jmp
+  return $! binary {  elfFlags      = 0
+                   , _elfFileData  = Seq.fromList $
+                     loadSegments
+                     ++ [ ElfDataSectionNameTable loadSectionCount
+                        , ElfDataSymtab symtab
+                        , ElfDataStrtab (loadSectionCount + 2)
+                        , ElfDataSectionHeaders
+                        ]
+                   , elfGnuStackSegment = mgnuStack
+                   , elfGnuRelroRegions = []
+                   }

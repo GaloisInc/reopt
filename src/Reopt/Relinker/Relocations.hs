@@ -30,6 +30,7 @@ import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
 import           GHC.Stack
 import           Numeric (showHex)
+import           Text.Printf
 
 import           Reopt.Relinker.Object
   ( ObjectSectionIndex
@@ -73,35 +74,36 @@ type RelocInfo a =  Map ObjectSymbolTableIndex (BS.ByteString, a)
 resolveRelocEntry :: (Eq a, Num a)
                   => Map ObjectSectionIndex (BS.ByteString, a)
                   -- ^ Maps object section indices to the name and associated address.
+                  -> ObjectSymbolTableIndex
                   -> ElfSymbolTableEntry a
                   -- ^ The symbol table entry in the new object.
                   -> Maybe (BS.ByteString, a)
-resolveRelocEntry secMap sym = do
+resolveRelocEntry secMap idx sym = do
   let secIdx = fromElfSectionIndex (steIndex sym)
   case steType sym of
+    -- Skip file symbols as they just contain the name of the file used to create the object.
+    STT_FILE -> Nothing
     STT_SECTION
       | steValue sym /= 0 ->
-        error "symbolAddr expects section names to have 0 offset."
+        error "resolveRelocEntry expects section names to have 0 offset."
       | steIndex sym == SHN_UNDEF ->
          error $ "Reference to undefined section."
-      | otherwise ->
-        case Map.lookup secIdx secMap of
-          Just (nm, addr) -> Just (nm, addr)
-          Nothing -> error $ "Symbol table contains undefined section index: " ++ show secIdx
+         -- Section symbol indices allowed to be unmapped.
+      | otherwise -> Map.lookup secIdx secMap
     STT_FUNC
       | steIndex sym == SHN_UNDEF ->
         Nothing
       | otherwise -> do
         case Map.lookup secIdx secMap of
           Just (_, base) -> Just (steName sym, base + steValue sym)
-          Nothing -> error $ "Symbol table contains undefined section index: " ++ show secIdx
+          Nothing -> error $ printf "Symbol table entry %d refers to unmapped section index." idx
     STT_NOTYPE
       | steIndex sym == SHN_UNDEF -> Nothing
       | otherwise -> do
         case Map.lookup secIdx secMap of
           Just (_, base) -> Just (steName sym, base + steValue sym)
-          Nothing -> error $ "Symbol table contains undefined section index: " ++ show secIdx
-    tp -> error $ "symbolAddr does not support symbol with type " ++ show tp ++ "."
+          Nothing -> error $ printf "Symbol table entry %d refers to unmapped section index." idx
+    tp -> error $ "resolveRelocEntry does not support symbol with type " ++ show tp ++ "."
 
 -- | This generates the relocation information.
 mkRelocInfo :: (Eq a, Num a)
@@ -116,7 +118,7 @@ mkRelocInfo secMap entries
   where addrList =
           [ (idx, nameAddr)
           | (idx,e) <- zip [0..] (V.toList entries)
-          , nameAddr <- maybeToList (resolveRelocEntry secMap e)
+          , nameAddr <- maybeToList (resolveRelocEntry secMap idx e)
           ]
         m = Map.fromList addrList
 

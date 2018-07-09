@@ -12,6 +12,9 @@ locations into existing code.
 module Reopt.Relinker.Redirection
   ( CodeRedirection(..)
   , mkCodeAddrMap
+  , ResolvedCodeRedir(..)
+  , resolveCodeRedirection
+  , isFuncSymbol
   , insertStaticRedirs
   ) where
 
@@ -33,7 +36,6 @@ import qualified Data.ByteString.Internal
 import           Data.ElfEdit
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe
 import           Data.String (fromString)
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
@@ -67,7 +69,7 @@ writeBS mv base bs = do
 -- The target location is identified by the name of the symbol.
 data CodeRedirection w
    = CodeRedirection { redirSourceOffset :: !w
-                       -- ^ Offset in file where we should write file.
+                       -- ^ Virtual address within code segment where we should change.
                      , redirSourceSize :: !Int
                        -- ^ Number of bytes available at source offset to write redirection.
                      , redirTarget :: !BS.ByteString
@@ -90,24 +92,25 @@ instance Num w => FromJSON (CodeRedirection w) where
       <*> (fromString <$> (o .: "target"))
   parseJSON v = typeMismatch "CodeRedirection" v
 
+-- | Return true if this symbol table entry appears correcponds to a
+-- globally defined function.
+isFuncSymbol :: ElfSymbolTableEntry a -> Bool
+isFuncSymbol e
+  =  steType e == STT_FUNC
+  && steBind e == STB_GLOBAL
+  && steIndex e /= SHN_UNDEF
+  && steIndex e < SHN_LORESERVE
+
+
 -- | Resolve address of symbols defined in their code region.
 resolveDefinedAddr :: Map ObjectSectionIndex a
                    -- ^ Maps object section indices to the associated address.
                    -> ElfSymbolTableEntry a
-                   -> Maybe (BS.ByteString, a)
-resolveDefinedAddr secMap e
-  | STT_FUNC <- steType e, STB_GLOBAL <- steBind e =
-      case steIndex e of
-        -- Ignore undefined indices
-        SHN_UNDEF -> Nothing
-        idx
-          | idx >= SHN_LORESERVE -> Nothing
-          | otherwise ->
-            case Map.lookup (fromElfSectionIndex idx) secMap of
-              Nothing -> error $ "Could not find index of section " ++ show idx
-              Just addr -> Just (steName e, addr)
-  | otherwise =
-    Nothing
+                   -> (BS.ByteString, a)
+resolveDefinedAddr secMap e =
+  case Map.lookup (fromElfSectionIndex (steIndex e)) secMap of
+    Nothing -> error $ "Could not find index of section " ++ show (steIndex e)
+    Just addr -> (steName e, addr)
 
 -- | Generate a map from functions defined in the object file to their
 -- address in the new binary.  This will only point to new code.
@@ -119,48 +122,64 @@ mkCodeAddrMap :: Map ObjectSectionIndex a
 mkCodeAddrMap secMap entries
     | Map.size m == length addrList = m
     | otherwise = error "Duplicate function names detected in object file."
-  where addrList = mapMaybe (resolveDefinedAddr secMap) (V.toList entries)
+  where addrList = fmap (resolveDefinedAddr secMap)
+                 $ V.toList entries
         m = Map.fromList addrList
+
+data ResolvedCodeRedir a
+   = ResolvedCodeRedir { resolvedSourceAddr :: !a
+                         -- ^ Virtual address of source within this.
+                       , resolvedContents   :: !BS.ByteString
+                       }
+
+resolveCodeRedirection :: (a -> BS.ByteString)
+                       -- ^ Function for creating jump to given address.
+                       -> Map BS.ByteString a
+                       -- ^ Maps names of symbols defined in the object file to
+                       -- their address in the new binary.  This will only point to
+                       -- new code.
+                       -> CodeRedirection a
+                       -- ^ List of redirections to apply
+                       -> Maybe (ResolvedCodeRedir a)
+resolveCodeRedirection mkJump codeAddrMap redirEntry
+    -- Only apply redirection when there is enough space to write the code.
+   | BS.length jmp <= redirSourceSize redirEntry = Just redir
+   | otherwise = Nothing
+  where nm = redirTarget redirEntry
+        jmp =
+          case Map.lookup nm codeAddrMap of
+            Just tgt -> mkJump tgt
+            Nothing -> error $ "Could not find symbol name " ++ unpack nm ++ "."
+        redir =
+          ResolvedCodeRedir { resolvedSourceAddr = redirSourceOffset redirEntry
+                            , resolvedContents = jmp
+                            }
 
 
 -- | This takes a bytestring in the original binary and updates it with relocations
 -- to point to the new binary.
 insertStaticRedirs :: (HasCallStack, Integral a)
-                   => (a -> BS.ByteString)
-                      -- ^ Function for creating jump to given address.
-                   -> Map BS.ByteString a
-                      -- ^ Maps names of symbols defined in the object file to
-                      -- their address in the new binary.  This will only point to
-                      -- new code.
-                   -> [CodeRedirection a]
+                   => [ResolvedCodeRedir a]
                    -- ^ List of redirections to apply
                    -> a
-                   -- ^ File offset in segment
+                   -- ^ Base address of this bytestring within the file.
                    --
                    -- This is subtracted from redirection source offset to compute
                    -- offset in bytestring to apply this to.
                    -> BS.ByteString
                    -> BS.ByteString
-insertStaticRedirs mkJump codeAddrMap redirList base bs = runST $ do
+insertStaticRedirs [] _ bs = bs
+insertStaticRedirs redirs base bs = runST $ do
   let len :: Int
       len = BS.length bs
   mv <- SMV.new len
   -- Copy original bytes into bytestring
   writeBS mv 0 bs
   -- Apply relocations.
-  forM_ redirList $ \redirEntry -> do
-    let off = redirSourceOffset redirEntry
-    let nm = redirTarget redirEntry
-
-    when (base <= off && off < base + fromIntegral len) $ do
-      let tgt =
-            case Map.lookup nm codeAddrMap of
-              Just atgt -> atgt
-              Nothing -> error $ "Could not find symbol name " ++ unpack nm ++ "."
-      let jmp = mkJump tgt
-      -- Only apply redirection when there is enough space to write the code.
-      when (BS.length jmp < redirSourceSize redirEntry) $ do
-        writeBS mv (fromIntegral (off - base)) jmp
+  forM_ redirs $ \redir -> do
+    let off = resolvedSourceAddr redir
+    when (base <= off && off - base < fromIntegral len) $ do
+      writeBS mv (fromIntegral (off - base)) (resolvedContents redir)
 
   let SMV.MVector _ fp = mv
   return $! Data.ByteString.Internal.fromForeignPtr fp 0 len

@@ -916,8 +916,6 @@ termStmtToLLVM tm =
       idx' <- mkLLVMValue idx
       let dests = map (L.Named . blockWordName) $ V.toList vec
       effect $ L.Switch idx' (L.Named failLabel) (zip [0..] dests)
-    FnTermStmtUndefined ->
-      void $ unimplementedInstr' L.voidT "FnTermStmtUndefined"
 
 -- | Convert a Phi node assignment to the right value
 resolvePhiNodeReg :: (LLVMArchConstraints arch, Loc.HasCallStack)
