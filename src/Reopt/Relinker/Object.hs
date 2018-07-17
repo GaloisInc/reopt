@@ -18,8 +18,6 @@ module Reopt.Relinker.Object
 import qualified Data.ByteString.Char8 as BSC
 import           Data.ElfEdit
 import           Data.Word
-import           GHC.TypeLits
-
 
 -- | Identifies this should be a section index in the object file
 -- being merged in.

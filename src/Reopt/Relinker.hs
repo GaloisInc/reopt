@@ -295,9 +295,9 @@ resolveSegmentPadding offset addr align
 -- Binary checking
 
 -- | Check for regions in the object that we did not expect.
-checkBinaryRegions :: ElfDataRegion 64
+checkBinaryRegions :: ElfDataRegion w
                  -- ^ Data region in input binary left to process
-              -> RelinkM ()
+                   -> RelinkM ()
 checkBinaryRegions thisRegion =
   -- Decide current action based on region
   case thisRegion of
@@ -578,6 +578,27 @@ mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols = do
                      , elfSymbolTableLocalEntries = fromIntegral $ V.length localSyms
                      }
 
+-- | Drop raw data prefix from the region list
+--
+-- Used to drop padding added for alignment purposes.
+dropLeadingRawData :: [ElfDataRegion w] -> [ElfDataRegion w]
+dropLeadingRawData (ElfDataRaw _ :r) = dropLeadingRawData r
+dropLeadingRawData r = r
+
+-- | Get code and data segments from binary.
+getCodeAndDataSegments :: Elf w -> Except String (ElfSegment w, ElfSegment w)
+getCodeAndDataSegments binary = do
+  (cs,rest0) <-
+    case toList (binary^.elfFileData) of
+      ElfDataSegment cs : drest | elfSegmentType cs == PT_LOAD -> pure (cs,drest)
+      _ -> throwE "Expected code segment at start of file."
+  (ds,rest) <-
+    case dropLeadingRawData rest0 of
+      ElfDataSegment ds : r | elfSegmentType ds == PT_LOAD -> pure (ds,r)
+      _ -> throwE "Expected data segment after code segment."
+  traverse_ checkBinaryRegions rest
+  pure (cs, ds)
+
 -- | This merges an existing elf binary and new object file to create a
 -- combined binary.
 --
@@ -620,18 +641,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   checkBinaryAssumptions binary
 
   -- Get code and data segments
-  (codeSeg, dataSeg) <- do
-    let origData = binary^.elfFileData
-    case toList origData of
-      ElfDataSegment cs : ElfDataSegment ds : rest -> do
-        when (elfSegmentType cs /= PT_LOAD) $ do
-          error "Expected code segment at start of file."
-        when (elfSegmentType ds /= PT_LOAD) $ do
-          error "Expected data segment after code segment."
-        traverse_ checkBinaryRegions rest
-        pure (cs, ds)
-      _ -> do
-        error $ "Expected binary to contain a code segment followed by a data segment."
+  (codeSeg, dataSeg) <- getCodeAndDataSegments binary
 
   -- Check object assumptions
   checkObjectAssumptions obj
