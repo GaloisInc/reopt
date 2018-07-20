@@ -28,6 +28,7 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
 import           Data.ElfEdit
 import           Data.Foldable
+import           Data.List (intercalate)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -198,9 +199,9 @@ copyBinaryCodeSections :: (BS.ByteString -> BS.ByteString)
                        -- ^ File offset
                        -> [ElfDataRegion 64]
                        -- ^ Regions in binary left to process.
-                       -> TransBinaryM [ElfDataRegion 64]
-copyBinaryCodeSections _ _ prevRegions _ [] = do
-  pure $! reverse prevRegions
+                       -> TransBinaryM ([ElfDataRegion 64], ElfWordType 64)
+copyBinaryCodeSections _ _ prevRegions secOffset [] = do
+  pure $! (reverse prevRegions, secOffset)
 copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegions) = do
  seq secOffset $ do
   case thisRegion of
@@ -208,8 +209,21 @@ copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegio
       error "Elf header appears in unexpected location."
     ElfDataSegmentHeaders -> do
       error "Elf segment headers appears in unexpected location."
-    ElfDataSegment _seg ->
-      error "Elf segment appears in unexpected location."
+    ElfDataSegment seg
+      | elfSegmentType seg == PT_NOTE -> case elfSegmentData seg of
+        ElfDataSection sec Seq.:<| Seq.Empty
+          | elfSectionType sec == SHT_NOTE -> do
+            (newData, newOffset) <- copyBinaryCodeSections nmFun rredirs [] secOffset (toList (elfSegmentData seg))
+            let newSeg = seg { elfSegmentData  = Seq.fromList newData }
+                nextRegions = ElfDataSegment newSeg : prevRegions
+            seq newSeg $ seq nextRegions $
+              copyBinaryCodeSections nmFun rredirs nextRegions newOffset restRegions
+          | otherwise ->
+            error "Elf PT_NOTE segment must contain note section (SHT_NOTE) as the only section."
+        sec -> error $ "Unexpected section in PT_NOTE segment:\n" ++ show sec
+      | otherwise -> error $ "Elf segment appears in unexpected location. Section offset: 0x"
+                           ++ showHex secOffset "" ++ "\n"
+                           ++ intercalate "\n" (map showSegmentName (toList (elfSegmentData seg)))
     ElfDataSectionHeaders ->
       error "Elf section header table appears in unexpected location."
     ElfDataSectionNameTable _ ->
@@ -578,6 +592,23 @@ mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols = do
                      , elfSymbolTableLocalEntries = fromIntegral $ V.length localSyms
                      }
 
+-- Helper function for generating diagnostic information
+showSegmentName :: ( Integral (ElfWordType w)
+                   , Show     (ElfWordType w)
+                   ) => ElfDataRegion w -> String
+showSegmentName r = case r of
+  ElfDataElfHeader          -> "ElfDataElfHeader"
+  ElfDataSegmentHeaders     -> "ElfDataSegmentHeaders"
+  ElfDataSegment          s -> "ElfDataSegment@" ++ "0x" ++ showHex (elfSegmentVirtAddr s) "" ++
+                               " type: " ++ show (elfSegmentType s)
+  ElfDataSectionHeaders     -> "ElfDataSectionHeaders"
+  ElfDataSectionNameTable _ -> "ElfDataSectionNameTable"
+  ElfDataGOT              _ -> "ElfDataGOT"
+  ElfDataStrtab           _ -> "ElfDataStrtab"
+  ElfDataSymtab           _ -> "ElfDataSymtab"
+  ElfDataSection          s -> "ElfDataSection" ++ " type: " ++ show (elfSectionType s)
+  ElfDataRaw              _ -> "ElfDataRaw"
+
 -- | This merges an existing elf binary and new object file to create a
 -- combined binary.
 --
@@ -622,7 +653,21 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   -- Get code and data segments
   (codeSeg, dataSeg) <- do
     let origData = binary^.elfFileData
-    case toList origData of
+        -- In some elf binaries, we see padding between the code and data
+        -- segments. To simplifying the processing logic, we remove that
+        -- padding.
+        -- Note: It's important that we don't remove all data raw segments. We
+        -- really only want to remove the one that appears between code and
+        -- data. The code below is slightly more general in that it will remove
+        -- multiple data raws if they happene between the first two segments.
+        filterPadding (cs@(ElfDataSegment _):rest) = cs : filterPadding' rest
+          where
+          filterPadding' (ElfDataRaw _:rest')        = filterPadding' rest'
+          filterPadding' segs@((ElfDataSegment _):_) = segs
+          filterPadding' _                           =
+            error "Expected data segment after code segment."
+        filterPadding _ = error "Expected code segment at start of file followed by data segment."
+    case filterPadding (toList origData) of
       ElfDataSegment cs : ElfDataSegment ds : rest -> do
         when (elfSegmentType cs /= PT_LOAD) $ do
           error "Expected code segment at start of file."
@@ -632,6 +677,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
         pure (cs, ds)
       _ -> do
         error $ "Expected binary to contain a code segment followed by a data segment."
+              ++ "\nActual segments:\n" ++ intercalate "\n" (map showSegmentName (toList origData))
 
   -- Check object assumptions
   checkObjectAssumptions obj
@@ -642,15 +688,23 @@ mergeObject binary obj redirs mkJump = runExcept $ do
 
   -- Create GNU stack info if both binary and object have it, and the
   -- stack is non-executable in both.
-  let mgnuStack =
-        case elfGnuStackSegment binary of
-          Just binGnuStack ->
-            Just $ binGnuStack { gnuStackSegmentIndex = 2 }
-          Nothing -> Nothing
+  let mgnuStack = elfGnuStackSegment binary
+
+  let noteCount = Seq.length (Seq.filter isNoteSegment (binary^.elfFileData))
+
+      isNoteSegment (ElfDataSegment ds) = go (elfSegmentData ds)
+        where
+        go :: (Show (ElfWordType w), Integral (ElfWordType w))
+           => Seq.Seq (ElfDataRegion w) -> Bool
+        go (ElfDataSegment seg Seq.:<| _) | elfSegmentType seg == PT_NOTE = True
+        go (_ Seq.:<| rest) = go rest
+        go Seq.Empty = False
+      isNoteSegment _ = False
 
   -- Compute number of program headers
   let newPhdrCount = 2
                    + (if isJust mgnuStack then 1 else 0)
+                   + noteCount
 
   let binaryPhdrCount :: Int
       binaryPhdrCount = elfSegmentCount binary
@@ -717,14 +771,13 @@ mergeObject binary obj redirs mkJump = runExcept $ do
 
   let (loadSegments, s) = flip runState initState $ do
         -- Copy code regions to new binary
-        binCodeRegions <-
+        (binCodeRegions,_) <-
           copyBinaryCodeSections (".orig" <>) codeRedirs [] (elfSegmentVirtAddr codeSeg) codeSegContents
 
         -- Create new code segment
         let newCodeSeg =
               codeSeg
-              { elfSegmentIndex = 0
-              , elfSegmentAlign = elfAlign
+              { elfSegmentAlign = elfAlign
               , elfSegmentMemSize = ElfRelativeSize 0
               , elfSegmentData = Seq.fromList
                                  $  [ElfDataElfHeader, ElfDataSegmentHeaders]
@@ -740,12 +793,11 @@ mergeObject binary obj redirs mkJump = runExcept $ do
         -- offsets match.
         let dataPadding = resolveSegmentPadding dataFileOff (elfSegmentVirtAddr dataSeg) elfAlign
 
-        binDataRegions <- copyBinaryCodeSections id [] [] 0 (toList (elfSegmentData dataSeg))
+        (binDataRegions,_) <- copyBinaryCodeSections id [] [] 0 (toList (elfSegmentData dataSeg))
 
         -- Compute resolved data segment
         let newDataSeg =
-              dataSeg { elfSegmentIndex = 1
-                      , elfSegmentAlign = elfAlign
+              dataSeg { elfSegmentAlign = elfAlign
                       , elfSegmentData = Seq.fromList binDataRegions
                       }
         pure $ [ElfDataSegment newCodeSeg]
