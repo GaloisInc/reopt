@@ -232,25 +232,34 @@ resolveIncludeFn mem symMap includeNames [] = do
 resolveIncludeFn _ _ _ _ = do
   fail "Cannot both include and exclude specific addresses."
 
-runCompleteDiscovery :: ArchitectureInfo arch
+-- | Discover functions in an elf file.
+--
+--  Note. This prints warnings to stderr
+runCompleteDiscovery :: LoadOptions
+                     -- ^ Options controlling loading
                      -> DiscoveryOptions
                      -- ^ Options controlling discovery
-                     -> Memory (ArchAddrWidth arch)
-                     -> Maybe (ArchSegmentOff arch)
-                     -> [MemSymbol (ArchAddrWidth arch)]
-                        -- ^ Symbols
+                     -> Elf (ArchAddrWidth arch)
+                     -> ArchitectureInfo arch
                      -> [String] -- ^ Included addresses
                      -> [String] -- ^ Excluded addresses
                      -> IO ( DiscoveryState arch
                            , AddrSymMap (ArchAddrWidth arch)
                            , Map BS.ByteString [ArchSegmentOff arch]
                            )
-runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr = do
+runCompleteDiscovery loadOpts disOpt e ainfo includeAddr excludeAddr = do
+  (warnings, mem, entry, symbols) <- either fail pure $
+    resolveElfContents loadOpts e
+  mapM_ (hPutStrLn stderr) warnings
+
   let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
   let symAddrMap = Map.fromListWith (++) [ (memSymbolName msym, [memSymbolStart msym]) | msym <- symbols ]
   (entries, fnPred) <- resolveIncludeFn mem symAddrMap includeAddr excludeAddr
   let initEntries = maybeToList entry ++ entries
-  s <- completeDiscoveryState ainfo disOpt mem initEntries addrSymMap fnPred
+  let initState
+        = emptyDiscoveryState mem addrSymMap ainfo
+        & markAddrsAsFunction InitAddr initEntries
+  s <- completeDiscoveryState initState disOpt fnPred
   pure (s, addrSymMap, symAddrMap)
 
 ------------------------------------------------------------------------
@@ -267,14 +276,8 @@ discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
   Some e <- readSomeElf path
   -- Get architecture information for elf
   SomeArch ainfo <- getElfArchInfo e
-  (warnings, mem, entry, symbols) <- either fail pure $
-    resolveElfContents loadOpts e
-  forM_ warnings $ \w -> do
-    hPutStrLn stderr w
-  (s, _,_) <- runCompleteDiscovery ainfo disOpt mem entry symbols includeAddr excludeAddr
+  (s, _,_) <- runCompleteDiscovery loadOpts disOpt e ainfo includeAddr excludeAddr
   pure (Some s)
-
-$(pure [])
 
 ------------------------------------------------------------------------
 -- Execution
@@ -372,26 +375,6 @@ getFns logger sysp info = do
 -- | Create a discovery state and symbol-address map
 --
 --  Note. This prints warnings to stderr
-discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
-                  -> LoadOptions -- ^ Options controling loading
-                  -> DiscoveryOptions -- ^ Options controlling discovery
-                  -> [String] -- ^ Included addresses
-                  -> [String] -- ^ Excluded addresses
-                  -> IO ( X86OS
-                        , DiscoveryState X86_64
-                        , AddrSymMap 64
-                        )
-discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
-  e <- readElf64 path
-  (warnings, mem, entry, symbols) <- either fail pure $
-    resolveElfContents loadOpts e
-  mapM_ (hPutStrLn stderr) warnings
-  os <- getX86ElfArchInfo e
-  (discState, addrSymMap, _) <-
-    runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
-  pure (os, discState, addrSymMap)
-
--- | Create a discovery state and symbol-address map
 discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
                -> LoadOptions -- ^ Options controling loading
                -> DiscoveryOptions -- ^ Options controlling discovery
@@ -405,13 +388,27 @@ discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
                      )
 discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
   e <- readElf64 path
-  (warnings, mem, entry, symbols) <- either fail pure $
-    resolveElfContents loadOpts e
-  mapM_ (hPutStrLn stderr) warnings
   os <- getX86ElfArchInfo e
   (discState, addrSymMap, symAddrMap) <-
-    runCompleteDiscovery (osArchitectureInfo os) disOpt mem entry symbols includeAddr excludeAddr
+    runCompleteDiscovery loadOpts disOpt e (osArchitectureInfo os) includeAddr excludeAddr
   pure (e, os, discState, addrSymMap, symAddrMap)
+
+-- | Create a discovery state and symbol-address map
+--
+--  Note. This prints warnings to stderr
+discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
+                  -> LoadOptions -- ^ Options controling loading
+                  -> DiscoveryOptions -- ^ Options controlling discovery
+                  -> [String] -- ^ Included addresses
+                  -> [String] -- ^ Excluded addresses
+                  -> IO ( X86OS
+                        , DiscoveryState X86_64
+                        , AddrSymMap 64
+                        )
+discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
+  (_,os,discState,addrSymMap,_) <-
+    discoverX86Elf path loadOpts disOpt includeAddr excludeAddr
+  pure (os, discState, addrSymMap)
 
 llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
 llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
