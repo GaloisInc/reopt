@@ -222,12 +222,25 @@ emitX86ArchStmt pname (X86FnSystemCall call_num args rets) = do
     _ -> error $ "Unsupported operating system: " ++ show pname
 emitX86ArchStmt _ (X86FnStmt stmt) =
   case stmt of
-    MemCopy bytesPerCopy nValues src dest direction -> do
-      nValues' <- mkLLVMValue nValues
-      src'     <- mkLLVMValue src
-      dest'    <- mkLLVMValue dest
-      direction' <- mkLLVMValue direction
-      call_ (iMemCopy (bytesPerCopy * 8)) [dest', src', nValues', direction']
+    RepMovs bytesPerCopy cntExpr srcExpr destExpr dirExpr -> do
+      case dirExpr of
+        FnConstantBool False -> pure ()
+        _ -> fail "LLVM generator only supports rep movs with df=0"
+
+      cnt     <- mkLLVMValue cntExpr
+      src     <- mkLLVMValue srcExpr
+      dest    <- mkLLVMValue destExpr
+      let movAsm = case bytesPerCopy of
+                      ByteRepVal  -> "movsb"
+                      WordRepVal  -> "movsw"
+                      DWordRepVal -> "movsd"
+                      QWordRepVal -> "movsq"
+
+      callAsm_ noSideEffect
+               ("cld\nrep " ++ movAsm)
+               "={cx},={si},={di},~{dirflag},~{memory}"
+               [cnt, src, dest]
+
     MemSet count v ptr dir -> do
       let typ = typeToLLVMType (typeRepr v)
       ptr'   <- llvmAsPtr ptr typ
@@ -380,16 +393,12 @@ emitX86Return rets = do
 ------------------------------------------------------------------------
 -- X86 specific intrinsics
 
-iMemCopy :: Integer -> Intrinsic
-iMemCopy n = intrinsic ("reopt.MemCopy.i" ++ show n) L.voidT [ L.iT 64, L.iT 64, L.iT 64, L.iT 1]
-
 iMemSet :: L.Type -> Intrinsic
 iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
   where args = [L.ptrT typ, typ, L.iT 64, L.iT 1]
 
 x86Intrinsics :: [Intrinsic]
-x86Intrinsics = [ iMemCopy n       | n <- [8, 16, 32, 64] ]
-                  ++ [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
+x86Intrinsics = [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
 
 ------------------------------------------------------------------------
 -- ArchOps

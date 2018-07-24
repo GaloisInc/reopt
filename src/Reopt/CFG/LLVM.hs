@@ -55,6 +55,7 @@ module Reopt.CFG.LLVM
   , noSideEffect
   , sideEffect
   , callAsm
+  , callAsm_
   ) where
 
 import           Control.Lens
@@ -1004,11 +1005,14 @@ blockToLLVM fns ctx fs b = (res, funState s)
 ------------------------------------------------------------------------
 -- Inline assembly
 
+-- | Attributes to annote inline assembly.
 data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
 
+-- | Indicates all side effects  of inline assembly are captured in the constraint list.
 noSideEffect :: AsmAttrs
 noSideEffect = AsmAttrs { asmSideeffect = False }
 
+-- | Indicates asm may have side effects that are not captured in the constraint list.
 sideEffect :: AsmAttrs
 sideEffect = AsmAttrs { asmSideeffect = True }
 
@@ -1024,6 +1028,19 @@ callAsm attrs resType asmCode asmArgs args = do
       ftp = L.PtrTo (L.FunTy resType argTypes False)
       f = L.ValAsm (asmSideeffect attrs) False asmCode asmArgs
   L.Typed resType <$> evalInstr (L.Call False ftp f args)
+
+-- | Call some inline assembly that does not return a value.
+callAsm_ :: AsmAttrs -- ^ Asm attrs
+         -> String   -- ^ Code
+         -> String   -- ^ Args code
+         -> [L.Typed L.Value] -- ^ Arguments
+         -> BBLLVM arch ()
+callAsm_ attrs asmCode asmArgs args = do
+  let argTypes = L.typedType <$> args
+  let ftp = L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes False)
+  let f :: L.Value
+      f = L.ValAsm (asmSideeffect attrs) False asmCode asmArgs
+  call_ (L.Typed ftp f) args
 
 ------------------------------------------------------------------------
 -- Translating functions

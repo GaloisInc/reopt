@@ -480,7 +480,9 @@ instance (FnArchConstraints arch
          )
       => Pretty (Function arch) where
   pretty fn =
-    text "function" <+> pretty (BSC.unpack (fnName fn)) <+> pretty "@" <+> pretty (show (fnAddr fn))
-    <$$> lbrace
-    <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
-    <$$> rbrace
+    let nm = pretty (BSC.unpack (fnName fn))
+        addr = pretty (show (fnAddr fn))
+     in text "function" <+> nm <+> pretty "@" <+> addr
+        <$$> lbrace
+        <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
+        <$$> rbrace
