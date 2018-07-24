@@ -241,7 +241,6 @@ showFunctions args = do
   (os, s, _) <-
     discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   fns <- getFns logger (osPersonality os) s
-  hPutStr stderr "Got fns"
   mapM_ (print . pretty) fns
 
 ------------------------------------------------------------------------
