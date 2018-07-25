@@ -18,7 +18,6 @@ import           Data.Parameterized.Some
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import qualified Text.LLVM as L
-import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
@@ -222,32 +221,48 @@ emitX86ArchStmt pname (X86FnSystemCall call_num args rets) = do
     _ -> error $ "Unsupported operating system: " ++ show pname
 emitX86ArchStmt _ (X86FnStmt stmt) =
   case stmt of
-    RepMovs bytesPerCopy cntExpr srcExpr destExpr dirExpr -> do
-      case dirExpr of
-        FnConstantBool False -> pure ()
-        _ -> fail "LLVM generator only supports rep movs with df=0"
-
-      cnt     <- mkLLVMValue cntExpr
-      src     <- mkLLVMValue srcExpr
+    RepMovs bytesPerCopy destExpr srcExpr cntExpr dirExpr -> do
       dest    <- mkLLVMValue destExpr
-      let movAsm = case bytesPerCopy of
-                      ByteRepVal  -> "movsb"
-                      WordRepVal  -> "movsw"
-                      DWordRepVal -> "movsd"
-                      QWordRepVal -> "movsq"
-
+      src     <- mkLLVMValue srcExpr
+      cnt     <- mkLLVMValue cntExpr
+      df <-
+        case dirExpr of
+          FnConstantBool b -> pure b
+          _ -> fail "LLVM generator only supports rep movs with constant df"
+      let dfAsm = case df of
+                    True  -> "std"
+                    False -> "cld"
+      let movsAsm = case bytesPerCopy of
+                      ByteRepVal  -> "rep movsb"
+                      WordRepVal  -> "rep movsw"
+                      DWordRepVal -> "rep movsd"
+                      QWordRepVal -> "rep movsq"
       callAsm_ noSideEffect
-               ("cld\nrep " ++ movAsm)
+               (dfAsm ++ "\n" ++ movsAsm)
                "={cx},={si},={di},~{dirflag},~{memory}"
                [cnt, src, dest]
 
-    MemSet count v ptr dir -> do
-      let typ = typeToLLVMType (typeRepr v)
-      ptr'   <- llvmAsPtr ptr typ
-      v'     <- mkLLVMValue v
-      count' <- mkLLVMValue count
-      df'    <- mkLLVMValue dir
-      call_ (iMemSet typ) [ptr', v', count', df']
+    RepStos bytesPerCopy destExpr srcExpr cntExpr dirExpr -> do
+      dest    <- mkLLVMValue destExpr
+      src     <- mkLLVMValue srcExpr
+      cnt     <- mkLLVMValue cntExpr
+      df <-
+        case dirExpr of
+          FnConstantBool b -> pure b
+          _ -> fail "LLVM generator only supports rep stos with constant df"
+      let dfAsm = case df of
+                    True  -> "std"
+                    False -> "cld"
+      let stosAsm = case bytesPerCopy of
+                      ByteRepVal  -> "rep stosb"
+                      WordRepVal  -> "rep stosw"
+                      DWordRepVal -> "rep stosd"
+                      QWordRepVal -> "rep stosq"
+      callAsm_ noSideEffect
+               (dfAsm ++ "\n" ++stosAsm)
+               "={cx},={si},={di},~{dirflag},~{memory}"
+               [cnt, src, dest]
+
     _ -> error $ "LLVM generation: Unsupported architecture statement."
 
 ------------------------------------------------------------------------
@@ -391,23 +406,12 @@ emitX86Return rets = do
   ret v
 
 ------------------------------------------------------------------------
--- X86 specific intrinsics
-
-iMemSet :: L.Type -> Intrinsic
-iMemSet typ = intrinsic ("reopt.MemSet." ++ show (L.ppType typ)) L.voidT args
-  where args = [L.ptrT typ, typ, L.iT 64, L.iT 1]
-
-x86Intrinsics :: [Intrinsic]
-x86Intrinsics = [ iMemSet (L.iT n) | n <- [8, 16, 32, 64] ]
-
-------------------------------------------------------------------------
 -- ArchOps
 
 x86LLVMArchOps :: String -- ^ Prefix for system call intrinsic
                -> LLVMArchSpecificOps X86_64
 x86LLVMArchOps pname = LLVMArchSpecificOps
-  { archIntrinsics = x86Intrinsics
-  , archFnArgTypes = \ft -> functionArgType <$> ftArgRegs ft
+  { archFnArgTypes = \ft -> functionArgType <$> ftArgRegs ft
   , archFnReturnType = \_ -> x86LLVMRetType
   , mkInitBlock = mkX86InitBlock
   , archFnCallback = emitX86ArchFn

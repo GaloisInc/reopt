@@ -320,9 +320,7 @@ funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
 
 -- | Architecture-specific operations for generating LLVM
 data LLVMArchSpecificOps arch = LLVMArchSpecificOps
-  { archIntrinsics :: !([Intrinsic])
-    -- ^ Architecture-specific instrinsics
-  , archFnArgTypes :: !(FunctionType arch -> [L.Type])
+  { archFnArgTypes :: !(FunctionType arch -> [L.Type])
     -- ^ Argument types for the given function type
   , archFnReturnType :: !(FunctionType arch -> L.Type)
     -- ^ Returns type for the given function type
@@ -1163,8 +1161,7 @@ moduleForFunctions archOps symFun fns =
              , L.modNamedMd    = []
              , L.modUnnamedMd  = []
              , L.modGlobals    = []
-             , L.modDeclares   = fmap declareIntrinsic (archIntrinsics archOps)
-                              ++ fmap declareIntrinsic llvmIntrinsics
+             , L.modDeclares   = fmap declareIntrinsic llvmIntrinsics
                               ++ fmap declareIntrinsic dynIntrinsics
                               ++ fnDecls
              , L.modDefines    = defines

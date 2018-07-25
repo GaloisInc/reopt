@@ -16,7 +16,6 @@ for f in    tmp/empty_main_args_gnu_gcc   tmp/empty_main_no_args_gnu_gcc    tmp/
 	echo "################################################################"; \
   echo "Running reopt on $f ..."; \
   stack exec -- reopt -o $out \
-    --lib ../../libreopt/build/x86_64-unknown-linux-gnu/libreopt.bc \
     --gas as \
     $f; \
   echo "... exited $?."; \
@@ -67,7 +66,7 @@ reopt: CPUID
 
 ################################################################
 Running reopt on tmp/empty_main_args_diet_gcc ...
-Block stack depth mismatch at block_400356: -40 - r691  and -40 
+Block stack depth mismatch at block_400356: -40 - r691  and -40
 Insert segment 400000.
 Insert segment 601000.
 Compiling new code
@@ -84,7 +83,7 @@ Segmentation fault (core dumped)
 
 ################################################################
 Running reopt on tmp/empty_main_no_args_diet_gcc ...
-Block stack depth mismatch at block_40034f: -40 - r688  and -40 
+Block stack depth mismatch at block_40034f: -40 - r688  and -40
 Insert segment 400000.
 Insert segment 601000.
 Compiling new code
@@ -101,7 +100,7 @@ Segmentation fault (core dumped)
 
 ################################################################
 Running reopt on tmp/empty_main_args_diet_clang ...
-Block stack depth mismatch at block_40030a: -40 - r692  and -40 
+Block stack depth mismatch at block_40030a: -40 - r692  and -40
 Insert segment 400000.
 Insert segment 600560.
 Compiling new code
@@ -118,7 +117,7 @@ Segmentation fault (core dumped)
 
 ################################################################
 Running reopt on tmp/empty_main_no_args_diet_clang ...
-Block stack depth mismatch at block_400303: -40 - r689  and -40 
+Block stack depth mismatch at block_400303: -40 - r689  and -40
 Insert segment 400000.
 Insert segment 600558.
 Compiling new code
@@ -165,5 +164,3 @@ reopt: insertSpecialRegion: attempt to insert .bss overlapping Elf region into .
 Running reopt on tmp/empty_main_no_args_musl_clang ...
 reopt: insertSpecialRegion: attempt to insert .bss overlapping Elf region into .comment.
 ... exited 1.
-
-

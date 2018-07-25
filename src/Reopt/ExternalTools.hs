@@ -85,14 +85,14 @@ catchFailure :: IO a -> (IOError -> IO Failure) -> ExceptT Failure IO a
 catchFailure m h = ExceptT $ fmap Right m `catch` (fmap Left . h)
 
 
--- | This writes a bytestring to the standard input of a program, and throws a 'Failure'
--- if this fails.
---
--- The input handle is closed after executing this even if an exception is thrown.
--- The standard error is closed or semiclosed if an exception is thrown, and open
--- otherwise.
-tryWriteContents :: Tool -> Handle -> Handle -> BS.ByteString -> ExceptT Failure IO ()
-tryWriteContents tool in_handle err_handle bs = do
+-- | This is a helper function that runs an IO action and ensures that
+-- some cleanup is performed if an exception is thrown.
+writeAndClose :: Tool
+                 -> Handle -- ^ Input handle to write to.
+                 -> Handle -- ^ Error handle to close if things fail.
+                 -> IO () -- ^ Action to run
+                 -> ExceptT Failure IO ()
+writeAndClose tool in_handle err_handle action = do
   let h e | ioeGetErrorType e == ResourceVanished = do
               hClose in_handle
               ProgramError tool <$> hGetContents err_handle
@@ -100,8 +100,7 @@ tryWriteContents tool in_handle err_handle bs = do
               hClose in_handle
               hClose err_handle
               throwIO (e :: IOError)
-  liftIO $ hSetBinaryMode in_handle True
-  BS.hPut in_handle bs `catchFailure` h
+  action `catchFailure` h
   liftIO $ hClose in_handle
 
 -- | Wait for a process to end and throw an error case if the return value differs from
@@ -162,7 +161,10 @@ run_llc llc_command opts input_file = do
         ++ llc_opt_args
   (in_handle, out_handle, err_handle, ph) <-
     tryCreateProcess LLC llc_command llc_args
-  tryWriteContents LLC in_handle err_handle input_file
+
+  writeAndClose LLC in_handle err_handle $ do
+    hSetBinaryMode in_handle True
+    BS.hPut in_handle input_file
   res <- liftIO $ readContents out_handle
   waitForEnd LLC err_handle ph
   return res
@@ -180,7 +182,9 @@ run_gas gas_command asm obj_path = do
   let args= [ "-o", obj_path, "--fatal-warnings" ]
   (in_handle, out_handle, err_handle, ph) <- tryCreateProcess Gas gas_command args
   -- Write to input handle and close it.
-  tryWriteContents Gas in_handle err_handle asm
+  writeAndClose Gas in_handle err_handle $ do
+    hSetBinaryMode in_handle True
+    BS.hPut in_handle asm
   -- Close output
   liftIO $ hClose out_handle
   -- Wait for process to end.
@@ -189,15 +193,18 @@ run_gas gas_command asm obj_path = do
 -- | Use opt on a bitcode file and return bitcode file.
 run_opt :: FilePath -- ^ Path to opt
         -> Int -- ^ Optimization level (must be between 0 and 3)
-        -> BS.ByteString -- ^ LLVM ll or bitcode file
+        -> (Handle -> IO ())
+           -- ^ Callback for writing LLVM to opt
         -> ExceptT Failure IO BS.ByteString
-run_opt opt_command lvl input = do
+run_opt opt_command lvl writeInput = do
   when (lvl < 0 || lvl > 3) $ do
     error $ "Optimization level is out of range."
   let opt_args = [ "-O" ++ show lvl ]
   (in_handle, out_handle, err_handle, ph) <-
     tryCreateProcess OPT opt_command opt_args
-  tryWriteContents OPT in_handle err_handle input
+  writeAndClose OPT in_handle err_handle $ do
+    hSetBinaryMode in_handle True
+    writeInput in_handle
   res <- liftIO $ readContents out_handle
   waitForEnd OPT err_handle ph
   return res

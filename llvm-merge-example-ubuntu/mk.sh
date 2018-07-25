@@ -87,14 +87,12 @@ function make_frankenstein_sfiles () {
   done
 }
 
-LIB_REOPT=../libreopt/build
-lib_reopt_flags="-lreopt -L$LIB_REOPT"
 function make_frankenstein_automatic () {
   local cflags=$(make_frankenstein_cflags)
   local sfiles=$(make_frankenstein_sfiles)
   #echo "sfiles='$sfiles'"
   set -x
-  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles $lib_reopt_flags
+  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles
 }
 
 # Create default defintions '-DNAME=name' for all syms, but skipping
@@ -143,7 +141,7 @@ function default_cflags () {
 function asm_redirect () {
   local sym=$1
   local addr=$(get_addr $1)
-  if [[ -z "$addr" ]]; then 
+  if [[ -z "$addr" ]]; then
     die "Could not find address for sym '$sym'!"
   fi
 
@@ -167,7 +165,7 @@ function make_frankenstein_manual_1 () {
   # Here reopted 'tree_equal' depends on reopted 'strcmp'.
   local sfiles="llvm-latest/tree_equal_4002a0.s llvm-latest/strcmp_4022c0.s"
   set -x
-  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles $lib_reopt_flags
+  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles
 }
 
 # Use reopted 'tree_equal', but replace reopted 'strcmp' --
@@ -180,7 +178,7 @@ function make_frankenstein_manual_2 () {
   local strcmp_out=$(asm_redirect strcmp)
   local sfiles="llvm-latest/tree_equal_4002a0.s $strcmp_out"
   set -x
-  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles $lib_reopt_flags
+  musl-gcc $cflags -static -o tmp/frankentree tree.c data.h $sfiles
 }
 
 # Find the 'F<addr>' reopted function for argument symbol.
@@ -249,10 +247,10 @@ function make_frankenstein_manual () {
   # Inlude '.s' files for transitive reopt dependencies.
   for s in ${extra_reopted_syms[@]}; do
     sfiles="$sfiles $(reopted_s_file $s)"
-  done    
+  done
 
   set -x
-  musl-gcc $cflags -static -ggdb -D_DEBUG -o tmp/frankentree tree.c data.h $sfiles $lib_reopt_flags
+  musl-gcc $cflags -static -ggdb -D_DEBUG -o tmp/frankentree tree.c data.h $sfiles
 }
 
 function main () {

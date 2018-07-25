@@ -34,8 +34,7 @@ module Reopt.Interface
   , addrRedirection
     -- * Utilities
   , resolveSymName
-  , compile_llvm_to_obj
-  , link_with_libreopt
+  , compileLLVM
   , writeFileBuilder
   ) where
 
@@ -45,6 +44,7 @@ import           Control.Monad
 import           Control.Monad.Trans.Except
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
 import           Data.Either
 import           Data.ElfEdit
@@ -58,8 +58,6 @@ import qualified Data.Set as Set
 import           Data.String (fromString)
 import           Data.Word
 import           Numeric (readHex)
-import           System.Directory (doesFileExist)
-import           System.FilePath
 import           System.IO
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
@@ -421,17 +419,25 @@ llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
 -- Redirections
 
 -- | Compile a bytestring containing LLVM assembly or bitcode into an object.
-compile_llvm_to_obj :: Int -> FilePath -> FilePath -> FilePath -> String -> BS.ByteString -> FilePath -> IO ()
-compile_llvm_to_obj optLevel optPath llcPath gasPath arch llvm obj_path = do
+compileLLVM :: Int
+            -> FilePath
+            -> FilePath
+            -> FilePath
+            -> String
+            -> Builder.Builder
+            -> FilePath
+            -> IO ()
+compileLLVM optLevel optPath llcPath gasPath arch llvm obj_path = do
   -- Run llvm on resulting binary
   putStrLn "Compiling new code"
   mres <- runExceptT $ do
     -- Skip optimization if optLevel == 0
     llvm_opt <-
       if optLevel /= 0 then do
-        Ext.run_opt optPath optLevel llvm
+        Ext.run_opt optPath optLevel $ \inHandle -> do
+          Builder.hPutBuilder inHandle llvm
        else
-        pure llvm
+        pure $ BSL.toStrict $ Builder.toLazyByteString llvm
     let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
                                   , Ext.llc_opt_level = optLevel
                                   }
@@ -444,24 +450,6 @@ compile_llvm_to_obj optLevel optPath llcPath gasPath arch llvm obj_path = do
 
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)
-
--- | Link the object and libreopt path together and return new object.
-link_with_libreopt :: FilePath -- ^ Path to directory to write temporary files to.
-                   -> FilePath -- ^ Path to libreopt.
-                   -> FilePath -- ^ LLVM link path.
-                   -> Builder.Builder -- ^ Object file.
-                   -> IO BS.ByteString
-link_with_libreopt obj_dir libreopt_path link_path obj_llvm = do
-  do exists <- doesFileExist libreopt_path
-     when (not exists) $ do
-       fail $ "Could not find path to libreopt.bc needed to link object; tried " ++ libreopt_path
-
-  let obj_llvm_path = obj_dir </> "obj.ll"
-  writeFileBuilder obj_llvm_path obj_llvm
-
-  mllvm <- runExceptT $
-    Ext.run_llvm_link link_path [ obj_llvm_path, libreopt_path ]
-  either (fail . show) return mllvm
 
 --------------------------------------------------------------------------------
 -- ControlFlowTargetMap

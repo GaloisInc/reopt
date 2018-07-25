@@ -10,13 +10,10 @@ echo "About to relink"
 export PATH="$HOME/opt/binutils-linux/bin:$PATH"
 
 # Path to GNU Assembler for Linux
-#GAS_PATH=`(which x86_64-unknown-linux-as)`
+# GAS_PATH=$HOME/opt/binutils-linux/bin/x86_64-unknown-linux-as
 GAS_PATH=$(which as)
 
 reopt=$(which reopt)
-
-# Path to Reopt standard library
-LIBREOPT_PATH="$DIR/../../libreopt/build/x86_64-unknown-linux-gnu/libreopt.bc"
 
 # Get list of functions that we will not translate.
 reopt_exclude="--exclude=__unified_syscall --exclude=__libc_close --exclude=__libc_open --exclude=__libc_read --exclude=__libc_write --exclude=_exit --exclude=puts --exclude=__setup_tls --exclude=stackgap --exclude=puts --exclude=__libc_write --exclude=__exit"
@@ -37,7 +34,6 @@ $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
 # Get reopt to just print out the LLVM that is discovered.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
       "--gas=$GAS_PATH" \
-      "--lib=$LIBREOPT_PATH" \
       --llvm-version=llvm38 \
       $reopt_exclude \
       -o "$DIR/$relink_output.ll"
@@ -45,7 +41,6 @@ $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
 # Get reopt to create the object file.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
       "--gas=$GAS_PATH" \
-      "--lib=$LIBREOPT_PATH" \
       --llvm-version=llvm38 \
       $reopt_exclude \
       -o "$DIR/$relink_output.o"
@@ -53,7 +48,6 @@ $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
 # Get reopt to perform the full reoptimization script.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
       "--gas=$GAS_PATH" \
-      "--lib=$LIBREOPT_PATH" \
       --llvm-version=llvm38 \
       $reopt_exclude \
       -o "$DIR/$relink_output"

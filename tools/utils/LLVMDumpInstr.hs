@@ -52,7 +52,7 @@ main = do
       Just base = resolveSegmentOff seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do
-        (bs, end, maybeError) <- disassembleBlock mem gen (rootLoc base) (segmentSize seg)
+        (_bs, _end, maybeError) <- disassembleBlock mem gen (rootLoc base) (segmentSize seg)
         case maybeError of
           Just err -> return $ Left err
           Nothing ->

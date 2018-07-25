@@ -6,10 +6,6 @@ build-type: Simple
 cabal-version: >= 1.10
 license:       BSD3
 license-file:  LICENSE
-data-dir:
-  libreopt/build
-data-files:
-  libreopt.bc
 
 flag enable-hpc
   Description: Collect HPC coverage information.

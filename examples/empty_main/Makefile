@@ -40,7 +40,6 @@ reopt : exes | tmp
 		echo "################################################################"; \
 	  echo "Running reopt on $$f ..."; \
 	  stack exec -- reopt -o $$out \
-	    --lib ../../libreopt/build/x86_64-unknown-linux-gnu/libreopt.bc \
 	    --gas $(GAS) \
 	    $$f; \
 	  echo "... exited $$?."; \

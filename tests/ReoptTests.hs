@@ -19,12 +19,9 @@ import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
-
-import           Paths_reopt
-
-import           Reopt.Interface
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
+import           Reopt.Interface
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
@@ -33,7 +30,7 @@ logger :: String -> IO ()
 logger = const (return ())
 
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
+mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
@@ -61,11 +58,7 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \obj_dir -> do
   let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps symFun fns
   writeFileBuilder llvm_path obj_llvm
 
-  libreopt_path <- (</> osLinkName os </> "libreopt.bc") <$> getDataDir
-  let llvm_link_path = "llvm-link"
-  _llvm <- link_with_libreopt obj_dir libreopt_path llvm_link_path obj_llvm
   return ()
-  -- compile_llvm_to_obj args arch llvm output_path
 
 _withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 _withELF fp k = do
