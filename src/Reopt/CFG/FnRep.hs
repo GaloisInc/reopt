@@ -176,31 +176,41 @@ data FnAssignment arch tp
 
 
 -- | A function value.
-data FnValue (arch :: *) (tp :: Type)
-   =  FnValueUnsupported !String !(TypeRepr tp)
-      -- | A value that is actually undefined, like a non-argument register at
-      -- the start of a function.
-   | FnUndefined !(TypeRepr tp)
-     -- | A particular Bool value
-   | (tp ~ BoolType) => FnConstantBool !Bool
-     -- | A particular integer value
-   | forall n . (tp ~ BVType n, 1 <= n) => FnConstantValue !(NatRepr n) !Integer
-     -- | Value from an assignment statement.
-   | FnAssignedValue !(FnAssignment arch tp)
-     -- | Value from a phi node
-   | FnPhiValue !(FnPhiVar tp)
-     -- | A value returned by a function call (rax/rdx/xmm0)
-   | FnReturn !(FnReturnVar tp)
-     -- | The pointer to a function.
-   | (tp ~ BVType (ArchAddrWidth arch))
-     => FnFunctionEntryValue !(FunctionType arch) !(MemSegmentOff (ArchAddrWidth arch))
-     -- | A pointer to an internal block at the given address.
-   | (tp ~ BVType (ArchAddrWidth arch)) => FnBlockValue !(MemSegmentOff (ArchAddrWidth arch))
-      -- | Value is a argument passed via a register.
-   | FnRegArg !(ArchReg arch tp) !Int
-     -- | A global address
-   | (tp ~ BVType (ArchAddrWidth arch))
-     => FnGlobalDataAddr !(MemSegmentOff (ArchAddrWidth arch))
+data FnValue (arch :: *) (tp :: Type) where
+  -- | A value from the raw type that we do not yet support at the function level.
+   FnValueUnsupported :: !String -> !(TypeRepr tp) -> FnValue arch tp
+
+   -- | A value that is actually undefined, like a non-argument
+   -- register at the start of a function.
+   FnUndefined :: !(TypeRepr tp) -> FnValue arch tp
+
+   -- | A particular Bool value
+   FnConstantBool :: !Bool -> FnValue arch BoolType
+   -- | A particular integer value
+   FnConstantValue :: (1 <= n) => !(NatRepr n) -> !Integer -> FnValue arch (BVType n)
+   -- | Value from an assignment statement.
+   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
+   -- | Value from a phi node
+   FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
+   -- | A value returned by a function call (rax/rdx/xmm0)
+   FnReturn :: !(FnReturnVar tp) -> FnValue arch tp
+   -- | The pointer to a function.
+   FnFunctionEntryValue :: !(FunctionType arch)
+                        -> !(MemSegmentOff (ArchAddrWidth arch))
+                        -> FnValue arch (BVType (ArchAddrWidth arch))
+
+   -- | A pointer to an internal block at the given address.
+   FnBlockValue :: !(MemSegmentOff (ArchAddrWidth arch))
+                -> FnValue arch (BVType (ArchAddrWidth arch))
+
+   -- | Value is a argument passed via a register.
+   FnRegArg :: !(ArchReg arch tp)
+            -> !Int
+            -> FnValue arch tp
+
+   -- | A global address
+   FnGlobalDataAddr :: !(MemSegmentOff (ArchAddrWidth arch))
+                    -> FnValue arch (BVType (ArchAddrWidth arch))
 
 ------------------------------------------------------------------------
 -- FoldFnValue
@@ -250,7 +260,6 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) w
       FnEvalApp a -> ppApp pretty a
       FnAlloca sz -> sexpr "alloca" [pretty sz]
       FnEvalArchFn f -> runIdentity (ppArchFn (pure . pretty) f)
-
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
   pretty (FnAssignment lhs rhs) = pretty lhs <+> text ":=" <+> pretty rhs

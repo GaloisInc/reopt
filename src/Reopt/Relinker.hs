@@ -28,7 +28,6 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
 import           Data.ElfEdit
 import           Data.Foldable
-import           Data.List (intercalate)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -189,20 +188,21 @@ freshSectionIndex idx = do
 
 -- | Generate a deferred region from a region within the code segment
 -- of the original binary.
-copyBinaryCodeSections :: (BS.ByteString -> BS.ByteString)
-                          -- ^ Function for renaming sections.
-                       -> [ResolvedCodeRedir (ElfWordType 64)]
-                          -- ^ Modifications to make to existing data
-                       -> [ElfDataRegion 64]
-                       -- ^ Regions encountered so far.
-                       -> ElfWordType 64
-                       -- ^ File offset
-                       -> [ElfDataRegion 64]
-                       -- ^ Regions in binary left to process.
-                       -> TransBinaryM ([ElfDataRegion 64], ElfWordType 64)
-copyBinaryCodeSections _ _ prevRegions secOffset [] = do
+copyBinaryLoadSegmentRegions
+  :: (BS.ByteString -> BS.ByteString)
+     -- ^ Function for renaming sections.
+  -> [ResolvedCodeRedir (ElfWordType 64)]
+     -- ^ Modifications to make to existing data
+  -> [ElfDataRegion 64]
+     -- ^ Regions encountered so far.
+  -> ElfWordType 64
+     -- ^ File offset
+  -> [ElfDataRegion 64]
+  -- ^ Regions in binary left to process.
+  -> TransBinaryM ([ElfDataRegion 64], ElfWordType 64)
+copyBinaryLoadSegmentRegions _ _ prevRegions secOffset [] = do
   pure $! (reverse prevRegions, secOffset)
-copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegions) = do
+copyBinaryLoadSegmentRegions nmFun rredirs prevRegions secOffset (thisRegion:restRegions) = do
  seq secOffset $ do
   case thisRegion of
     ElfDataElfHeader -> do
@@ -210,20 +210,21 @@ copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegio
     ElfDataSegmentHeaders -> do
       error "Elf segment headers appears in unexpected location."
     ElfDataSegment seg
-      | elfSegmentType seg == PT_NOTE -> case elfSegmentData seg of
-        ElfDataSection sec Seq.:<| Seq.Empty
-          | elfSectionType sec == SHT_NOTE -> do
-            (newData, newOffset) <- copyBinaryCodeSections nmFun rredirs [] secOffset (toList (elfSegmentData seg))
-            let newSeg = seg { elfSegmentData  = Seq.fromList newData }
-                nextRegions = ElfDataSegment newSeg : prevRegions
-            seq newSeg $ seq nextRegions $
-              copyBinaryCodeSections nmFun rredirs nextRegions newOffset restRegions
-          | otherwise ->
-            error "Elf PT_NOTE segment must contain note section (SHT_NOTE) as the only section."
-        sec -> error $ "Unexpected section in PT_NOTE segment:\n" ++ show sec
-      | otherwise -> error $ "Elf segment appears in unexpected location. Section offset: 0x"
-                           ++ showHex secOffset "" ++ "\n"
-                           ++ intercalate "\n" (map showSegmentName (toList (elfSegmentData seg)))
+      | elfSegmentType seg == PT_NOTE ->
+          case toList (elfSegmentData seg) of
+            [ElfDataSection sec]
+              | elfSectionType sec == SHT_NOTE -> do
+                  (newData, newOffset) <-
+                    copyBinaryLoadSegmentRegions nmFun rredirs [] secOffset [ElfDataSection sec]
+                  let newSeg = seg { elfSegmentData  = Seq.fromList newData }
+                  let nextRegions = ElfDataSegment newSeg : prevRegions
+                  seq newSeg $ seq nextRegions $
+                    copyBinaryLoadSegmentRegions nmFun rredirs nextRegions newOffset restRegions
+            _ ->
+                error "Elf PT_NOTE segment must contain note section (SHT_NOTE) as the only section."
+      | otherwise ->
+          error $ "Did not expect to see segment " ++ show (elfSegmentIndex seg)
+              ++ " inside loadable segment."
     ElfDataSectionHeaders ->
       error "Elf section header table appears in unexpected location."
     ElfDataSectionNameTable _ ->
@@ -251,13 +252,13 @@ copyBinaryCodeSections nmFun rredirs prevRegions secOffset (thisRegion:restRegio
       -- The last section
       let nextRegions = ElfDataSection newSec : prevRegions
       seq newSec $ seq nextRegions $
-        copyBinaryCodeSections nmFun rredirs nextRegions (secOffset + fsize) restRegions
+        copyBinaryLoadSegmentRegions nmFun rredirs nextRegions (secOffset + fsize) restRegions
     ElfDataRaw b -> do
       let dr = ElfDataRaw b
       let fsize = fromIntegral (BS.length b)
       let nextRegions = dr : prevRegions
       seq dr $ seq nextRegions $
-        copyBinaryCodeSections nmFun rredirs nextRegions (secOffset + fsize) restRegions
+        copyBinaryLoadSegmentRegions nmFun rredirs nextRegions (secOffset + fsize) restRegions
 
 
 -- | This function generates regions in the binary for the new object code
@@ -592,23 +593,6 @@ mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols = do
                      , elfSymbolTableLocalEntries = fromIntegral $ V.length localSyms
                      }
 
--- Helper function for generating diagnostic information
-showSegmentName :: ( Integral (ElfWordType w)
-                   , Show     (ElfWordType w)
-                   ) => ElfDataRegion w -> String
-showSegmentName r = case r of
-  ElfDataElfHeader          -> "ElfDataElfHeader"
-  ElfDataSegmentHeaders     -> "ElfDataSegmentHeaders"
-  ElfDataSegment          s -> "ElfDataSegment@" ++ "0x" ++ showHex (elfSegmentVirtAddr s) "" ++
-                               " type: " ++ show (elfSegmentType s)
-  ElfDataSectionHeaders     -> "ElfDataSectionHeaders"
-  ElfDataSectionNameTable _ -> "ElfDataSectionNameTable"
-  ElfDataGOT              _ -> "ElfDataGOT"
-  ElfDataStrtab           _ -> "ElfDataStrtab"
-  ElfDataSymtab           _ -> "ElfDataSymtab"
-  ElfDataSection          s -> "ElfDataSection" ++ " type: " ++ show (elfSectionType s)
-  ElfDataRaw              _ -> "ElfDataRaw"
-
 -- | Drop raw data prefix from the region list
 --
 -- Used to drop padding added for alignment purposes.
@@ -767,7 +751,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   let (loadSegments, s) = flip runState initState $ do
         -- Copy code regions to new binary
         (binCodeRegions,_) <-
-          copyBinaryCodeSections (".orig" <>) codeRedirs [] (elfSegmentVirtAddr codeSeg) codeSegContents
+          copyBinaryLoadSegmentRegions (".orig" <>) codeRedirs [] (elfSegmentVirtAddr codeSeg) codeSegContents
 
         -- Create new code segment
         let newCodeSeg =
@@ -788,7 +772,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
         -- offsets match.
         let dataPadding = resolveSegmentPadding dataFileOff (elfSegmentVirtAddr dataSeg) elfAlign
 
-        (binDataRegions,_) <- copyBinaryCodeSections id [] [] 0 (toList (elfSegmentData dataSeg))
+        (binDataRegions,_) <- copyBinaryLoadSegmentRegions id [] [] 0 (toList (elfSegmentData dataSeg))
 
         -- Compute resolved data segment
         let newDataSeg =

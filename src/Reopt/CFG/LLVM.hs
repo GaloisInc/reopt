@@ -195,8 +195,7 @@ llvmFunctionName m prefix
      in Right $ llvmFunctionName' m' prefix
 
 blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
-blockWordName o = L.Ident $ "block_" ++ show (addrBase addr) ++ "_" ++ show (addrOffset addr)
-  where addr = relativeSegmentAddr o
+blockWordName o = L.Ident $ show $ GeneratedBlock o 0
 
 blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
 blockName l = L.Named (L.Ident (show l))
@@ -482,7 +481,8 @@ type LLVMArchConstraints arch
      )
 
 -- | Map a function value to a LLVM value with no change.
-valueToLLVM :: ( LLVMArchConstraints arch
+valueToLLVM :: forall arch tp
+            .  ( LLVMArchConstraints arch
                , Loc.HasCallStack
                )
             => LLVMArchSpecificOps arch
@@ -493,16 +493,14 @@ valueToLLVM :: ( LLVMArchConstraints arch
             -> FnValue arch tp
             -> L.Typed L.Value
 valueToLLVM archOps ctx blk m val = do
-  let typ = typeToLLVMType $ typeRepr val
-  let  mk :: L.Value -> L.Typed L.Value
-       mk  = L.Typed typ
+  let ptrWidth = addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
   case val of
-    FnValueUnsupported _reason _ -> mk L.ValUndef
+    FnValueUnsupported _reason typ -> L.Typed (typeToLLVMType typ) L.ValUndef
     -- A value that is actually undefined, like a non-argument register at
     -- the start of a function.
-    FnUndefined _ -> mk L.ValUndef
-    FnConstantBool b -> mk $ L.integer (if b then 1 else 0)
-    FnConstantValue _sz n -> mk $ L.integer n
+    FnUndefined typ -> L.Typed (typeToLLVMType typ) L.ValUndef
+    FnConstantBool b -> L.Typed (L.iT 1) $ L.integer (if b then 1 else 0)
+    FnConstantValue sz n -> L.Typed (natReprToLLVMType sz) $ L.integer n
     -- Value from an assignment statement.
     FnAssignedValue (FnAssignment lhs _rhs) ->
       case Map.lookup lhs m of
@@ -521,7 +519,7 @@ valueToLLVM archOps ctx blk m val = do
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs m of
         Just (_,v) -> v
-        Nothing -> -- mk L.ValUndef
+        Nothing ->
           Loc.error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk) ++ "\n"
                       ++ show m
@@ -535,14 +533,15 @@ valueToLLVM archOps ctx blk m val = do
           | otherwise -> do
             let sym = funSymbolCallback ctx addr
             seq sym $ do
+              let typ = natReprToLLVMType ptrWidth
               let fptr :: L.Typed L.Value
                   fptr = L.Typed (functionTypeToLLVM archOps ft) (L.ValSymbol sym)
-              mk $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
+              L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
         Nothing -> do
           Loc.error $ "Could not identify " ++ show addr
     -- A pointer to an internal block at the given address.
-    FnBlockValue addr ->
-      mk $ L.ValLabel $ L.Named $ blockWordName addr
+    FnBlockValue _addr -> do
+      Loc.error $ "Cannot create references to local blocks."
     -- Value is an argument passed via a register.
     FnRegArg _ i -> r
       where Just r = funArgs ctx V.!? i
@@ -550,7 +549,7 @@ valueToLLVM archOps ctx blk m val = do
     FnGlobalDataAddr addr ->
       case msegAddr addr of
         Nothing -> Loc.error $ "FnGlobalDataAddr only supports global values."
-        Just fixedAddr -> mk $ L.integer $ fromIntegral fixedAddr
+        Just fixedAddr -> L.Typed (natReprToLLVMType ptrWidth) $ L.integer $ fromIntegral fixedAddr
 
 -- | Return number of bits and LLVM float type should take
 floatTypeWidth :: L.FloatType -> Int32
