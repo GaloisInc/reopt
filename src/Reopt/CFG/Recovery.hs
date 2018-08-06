@@ -196,6 +196,7 @@ valueDependencies = go Set.empty
             BVValue{} -> go s r
             RelocatableValue{} -> go s r
             SymbolValue{} -> go s r
+            ThisFunctionAddr{} -> go s r
             Initial{} -> go s r
             AssignedValue a
               | Set.member (Some (assignId a)) s -> go s r
@@ -221,39 +222,40 @@ recoverValue' s v = do
   let curRegs     = s^.rsCurRegs
   let assignMap   = s^.rsAssignMap
   case v of
-    _ | BVTypeRepr n <- typeRepr v
-      , Just Refl <- testEquality n (memWidth mem)
-      , Just addr <- valueAsMemAddr v
-      , Just addr_ref <- asSegmentOff mem addr -> do
-        let seg = msegSegment addr_ref
-        case () of
-          _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-            , Just ft <- Map.lookup addr_ref (rsFunctionArgs s) -> do
-                Right $! FnFunctionEntryValue ft addr_ref
-
-          _ | Map.member addr_ref (interpState^.parsedBlocks) -> do
-              Right $! FnBlockValue addr_ref
-
-            | segmentFlags seg `Perm.hasPerm` Perm.write -> do
-              Right $! FnGlobalDataAddr addr_ref
-
-            -- FIXME: do something more intelligent with rodata?
-            | segmentFlags seg `Perm.hasPerm` Perm.read -> do
-              Right $! FnGlobalDataAddr addr_ref
-
-            | otherwise -> do
-              Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
-
     RelocatableValue w addr ->
-      -- TODO: Case split on what to return.
-      -- e.g., for code address we may want to do something different.
-      case asAbsoluteAddr addr of
-        Just absAddr -> Right $ FnConstantValue (addrWidthNatRepr w) (toInteger absAddr)
-        Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (addrWidthTypeRepr w)
+      case asSegmentOff mem addr of
+        Nothing ->
+          case asAbsoluteAddr addr of
+            Just absAddr -> Right $ FnConstantValue (addrWidthNatRepr w) (toInteger absAddr)
+            Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (addrWidthTypeRepr w)
+
+        Just addrRef -> do
+          let seg = msegSegment addrRef
+          case () of
+            _ | segmentFlags seg `Perm.hasPerm` Perm.execute
+              , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
+                  Right $! FnFunctionEntryValue ft addrRef
+
+            _ | Map.member addrRef (interpState^.parsedBlocks) -> do
+                  Right $! FnBlockValue addrRef
+
+              | segmentFlags seg `Perm.hasPerm` Perm.write -> do
+                  Right $! FnGlobalDataAddr addrRef
+
+              -- FIXME: do something more intelligent with rodata?
+              | segmentFlags seg `Perm.hasPerm` Perm.read -> do
+                  Right $! FnGlobalDataAddr addrRef
+
+              | otherwise -> do
+                  Right $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
+
     SymbolValue w sym ->
       Right $ FnValueUnsupported ("Symbol references " ++ show sym) (addrWidthTypeRepr w)
+    ThisFunctionAddr w ->
+      Right $ FnValueUnsupported "This function address" (addrWidthTypeRepr w)
     BoolValue b ->
       Right $ FnConstantBool b
+
     BVValue w i ->
       Right $ FnConstantValue w i
 

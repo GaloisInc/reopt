@@ -157,10 +157,9 @@ printX86DisassemblyLine base buffer (DAddr i n mi) = do
   let o = base + fromIntegral i
   let ppAddr x = trimForWord64Buffer base (BS.length buffer) (showPaddedHex x)
   let b = showBytes $ slice i n buffer
-  let next = o + fromIntegral n
   let r = case mi of
             Nothing  -> take 20 b
-            Just ins -> stringToFixedBuffer 21 b ++ "\t" ++ show (ppInstruction next ins)
+            Just ins -> stringToFixedBuffer 21 b ++ "\t" ++ show (ppInstruction ins)
   putStrLn $ "  " ++ ppAddr o ++ ":\t" ++ r
   when (n > 7) $ do
     printX86DisassemblyLine base buffer $ DAddr (i+7) (n-7) Nothing

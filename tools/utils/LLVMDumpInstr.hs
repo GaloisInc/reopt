@@ -62,5 +62,6 @@ main = do
             --     mkF = snd . L.runLLVM $ mapM_ functionToLLVM (finalFunctions cfg)
             -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
   case res of
-    Left err -> putStrLn (show err)
+    Left err -> do
+      putStrLn $ showX86TranslateError show err
     Right _ -> error "UNIMPLEMENTED"
