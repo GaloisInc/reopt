@@ -196,7 +196,6 @@ valueDependencies = go Set.empty
             BVValue{} -> go s r
             RelocatableValue{} -> go s r
             SymbolValue{} -> go s r
-            ThisFunctionAddr{} -> go s r
             Initial{} -> go s r
             AssignedValue a
               | Set.member (Some (assignId a)) s -> go s r
@@ -251,8 +250,6 @@ recoverValue' s v = do
 
     SymbolValue w sym ->
       Right $ FnValueUnsupported ("Symbol references " ++ show sym) (addrWidthTypeRepr w)
-    ThisFunctionAddr w ->
-      Right $ FnValueUnsupported "This function address" (addrWidthTypeRepr w)
     BoolValue b ->
       Right $ FnConstantBool b
 

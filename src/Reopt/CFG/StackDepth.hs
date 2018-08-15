@@ -173,7 +173,6 @@ valueHasSP v0 =
      BoolValue{} -> False
      BVValue _sz _i -> False
      RelocatableValue{} -> False
-     ThisFunctionAddr{} -> False
      SymbolValue{} -> False
      Initial r      -> testEquality r sp_reg /= Nothing
      AssignedValue (Assignment _ rhs) -> goAssignRHS rhs
