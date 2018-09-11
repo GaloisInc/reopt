@@ -135,8 +135,8 @@ performReloc :: RelocInfo (ElfWordType 64)
                 -- ^ The relocation entry.
              -> ST s ()
 performReloc objectIndexAddrMap thisAddr mv rela = do
-  -- Offset to modify.
-  let off = relaOffset rela
+  -- Virtual address to update
+  let vaddr = relaAddr rela
 
   -- Get the address of a symbol
   case Map.lookup (relaSym rela) objectIndexAddrMap of
@@ -147,7 +147,7 @@ performReloc objectIndexAddrMap thisAddr mv rela = do
       -- Relocation addend
       let addend = relaAddend rela
       -- Get PC offset
-      let pc_offset = thisAddr + off
+      let pc_offset = thisAddr + vaddr
       -- Parse on type
       case relaType rela of
         R_X86_64_PC32 -> do
@@ -155,7 +155,7 @@ performReloc objectIndexAddrMap thisAddr mv rela = do
               res64 = symAddr + fromIntegral addend - pc_offset
           let res32 :: Word32
               res32 = fromIntegral res64
-          write32LSB mv off res32
+          write32LSB mv vaddr res32
         R_X86_64_32 -> do
           let res64 = symAddr + fromIntegral addend :: Word64
           let res32 = fromIntegral res64 :: Word32
@@ -163,7 +163,7 @@ performReloc objectIndexAddrMap thisAddr mv rela = do
             error $ "Relocation of " ++ BSC.unpack symName
              ++ " at " ++ showHex symAddr " + " ++ show addend
              ++ " does not safely zero extend."
-          write32LSB mv off res32
+          write32LSB mv vaddr res32
         R_X86_64_32S -> do
           let res64 = fromIntegral symAddr + addend :: Int64
               res32 = fromIntegral res64 :: Int32
@@ -171,7 +171,7 @@ performReloc objectIndexAddrMap thisAddr mv rela = do
             error $ "Relocation of " ++ BSC.unpack symName
              ++ " at " ++ showHex symAddr " + " ++ show addend
              ++ " does not safely sign extend."
-          write32LSB mv off (fromIntegral res32)
+          write32LSB mv vaddr (fromIntegral res32)
         _ -> do
           error "Relocation not supported"
 

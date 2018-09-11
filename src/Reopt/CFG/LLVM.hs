@@ -207,9 +207,19 @@ blockName l = L.Named (L.Ident (show l))
 natReprToLLVMType :: NatRepr n -> L.Type
 natReprToLLVMType = L.iT . fromIntegral . natValue
 
+llvmFloatType :: FloatInfoRepr flt -> L.FloatType
+llvmFloatType flt =
+  case flt of
+    HalfFloatRepr -> L.Half
+    SingleFloatRepr -> L.Float
+    DoubleFloatRepr -> L.Double
+    QuadFloatRepr -> L.Fp128
+    X86_80FloatRepr -> L.X86_fp80
+
 typeToLLVMType :: TypeRepr tp -> L.Type
 typeToLLVMType BoolTypeRepr   = L.iT 1
 typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
+typeToLLVMType (FloatTypeRepr flt) = L.PrimType $ L.FloatType $ llvmFloatType flt
 typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
 
 -- | This is a special label used for e.g. table lookup defaults (where we should never reach).
