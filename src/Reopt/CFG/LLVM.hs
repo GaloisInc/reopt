@@ -29,6 +29,8 @@ module Reopt.CFG.LLVM
   , llvmFunctionName
     -- * Internals for implement architecture specific functions
   , LLVMArchSpecificOps(..)
+  , LLVMArchConstraints
+  , HasValue
   , functionTypeToLLVM
   , Intrinsic
   , intrinsic
@@ -333,8 +335,8 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     -- ^ Argument types for the given function type
   , archFnReturnType :: !(FunctionType arch -> L.Type)
     -- ^ Returns type for the given function type
-  , mkInitBlock :: FunctionType arch -- ^ Type of function
-                -> L.BlockLabel -- ^ Label of first block
+  , mkInitBlock :: FunctionType arch
+                -> L.BlockLabel
                 -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
     -- ^ This is responsible for mapping between function arguments and
     -- the block format used by FnRep.
@@ -343,6 +345,9 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     -- to generate an ABI compliant function and the types expected by the
     -- FnRep.  Eventually, we hope to extend the FnRep representation
     -- enough so that this is not necessary.
+    --
+    -- The arguments are the type of the function and the label of the
+    -- first block.
     --
     -- The return type consists of a triple containing the identifiers
     -- used in the function definition, a block to run before jumping to
