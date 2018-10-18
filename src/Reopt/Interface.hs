@@ -66,7 +66,7 @@ import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Data.Macaw.Analysis.FunctionArgs
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG
-import           Data.Macaw.Discovery
+import           Data.Macaw.Discovery hiding (AddrSymMap)
 import           Data.Macaw.Memory.ElfLoader
 
 import           Data.Macaw.X86
@@ -540,7 +540,7 @@ addrRedirection :: ControlFlowTargetSet 64
                 -> Either (MemSegmentOff 64) (CodeRedirection Word64)
 addrRedirection tgts addrSymMap m f = do
   let a = fnAddr f
-  let w = case msegAddr a of
+  let w = case segoffAsAbsoluteAddr a of
             Just absAddr -> fromIntegral absAddr
             Nothing -> error "Redirection does not yet support relocatable binaries."
   case lookupElfOffset m w of

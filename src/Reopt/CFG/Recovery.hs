@@ -229,7 +229,7 @@ recoverValue' s v = do
             Nothing -> Right $ FnValueUnsupported ("Relative addr " ++ show addr) (addrWidthTypeRepr w)
 
         Just addrRef -> do
-          let seg = msegSegment addrRef
+          let seg = segoffSegment addrRef
           case () of
             _ | segmentFlags seg `Perm.hasPerm` Perm.execute
               , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
