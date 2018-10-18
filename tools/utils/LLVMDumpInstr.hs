@@ -44,7 +44,7 @@ main = do
 
   let retBytes = [0xc3] -- terminate block
       bs = BS.pack $ (map (fst . head) nums) ++ retBytes
-      seg = memSegment 0 0 Perm.execute [ByteRegion bs]
+      seg = mkMemSegment 0 0 Perm.execute [ByteRegion bs]
       mem =
         case insertMemSegment seg (emptyMemory Addr64) of
           Left e -> error $ "Segment " ++ showInsertError e
@@ -52,7 +52,7 @@ main = do
       Just base = resolveSegmentOff seg 0
       -- cfg = cfgFromAddress mem base
       res = withGlobalSTNonceGenerator $ \gen -> do
-        (_bs, _end, maybeError) <- disassembleBlock mem gen (rootLoc base) (segmentSize seg)
+        (_bs, _end, maybeError) <- disassembleBlock gen (rootLoc base) (segmentSize seg)
         case maybeError of
           Just err -> return $ Left err
           Nothing ->
@@ -63,5 +63,5 @@ main = do
             -- in mapM_ (print . pretty) bs' >> print (L.ppModule $ mkF)
   case res of
     Left err -> do
-      putStrLn $ showX86TranslateError show err
+      putStrLn $ show err
     Right _ -> error "UNIMPLEMENTED"

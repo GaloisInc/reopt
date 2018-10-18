@@ -470,20 +470,20 @@ lookupControlFlowTargetSpace :: forall w
                              -> ControlFlowTargetSet w
                              -> MemWord w
 lookupControlFlowTargetSpace addr0 = go 0 addr0 addr0
-  where seg = msegSegment addr0
+  where seg = segoffSegment addr0
         go :: MemWord w -> MemSegmentOff w -> MemSegmentOff w -> ControlFlowTargetSet w -> MemWord w
         go inc base addr s =
           case Map.lookupGT addr (cfTargets s) of
             Just (next,fns)
-              | msegSegment addr == msegSegment next ->
-                let d = msegOffset next - msegOffset addr
+              | segoffSegment addr == segoffSegment next ->
+                let d = segoffOffset next - segoffOffset addr
                  in if null (filter (/= base) fns) then
                       go (inc+d) base next s
                      else
                       inc+d
             _ ->
-              if segmentSize seg >= msegOffset addr then
-                segmentSize seg - msegOffset addr
+              if segmentSize seg >= segoffOffset addr then
+                segmentSize seg - segoffOffset addr
                else
                 0
 

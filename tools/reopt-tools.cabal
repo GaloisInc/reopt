@@ -35,6 +35,7 @@ executable LLVMDumpInstr
 executable dump_debug_data
   build-depends:
     base >= 4,
+    bytestring,
     elf-edit,
     macaw-base,
     reopt

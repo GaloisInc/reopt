@@ -175,7 +175,9 @@ llvmFunctionName' m prefix segOff =
       Just sym -> sym
       Nothing ->
         L.Symbol $ prefix ++ "_" ++ show (addrBase addr) ++ "_" ++ show (addrOffset addr)
-  where addr = relativeSegmentAddr segOff
+  where addr = segoffAddr segOff
+
+type AddrSymMap w = Map.Map (MemSegmentOff w) BSC.ByteString
 
 -- | Creates a function for generating LLVM names.
 --
@@ -193,7 +195,7 @@ llvmFunctionName m prefix
   | any (\nm -> prefix `isPrefixOf` BSC.unpack nm) (Map.elems m) =
     Left $ "Symbols in binary must not start with " ++ prefix
   | otherwise =
-    let m' = Map.fromList [ (relativeSegmentAddr o, L.Symbol (BSC.unpack s)) | (o,s) <- Map.toList m ]
+    let m' = Map.fromList [ (segoffAddr o, L.Symbol (BSC.unpack s)) | (o,s) <- Map.toList m ]
      in Right $ llvmFunctionName' m' prefix
 
 blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
@@ -279,7 +281,7 @@ getReferencedFunctions m0 f =
         insertAddr _ addr ft m =
           case Map.lookup addr m of
             Just ft' | ft /= ft' ->
-                         Loc.error $ show (relativeSegmentAddr addr) ++ " has incompatible types:\n"
+                         Loc.error $ show (segoffAddr addr) ++ " has incompatible types:\n"
                               ++ show ft  ++ "\n"
                               ++ show ft' ++ "\n"
                      | otherwise -> m
@@ -562,7 +564,7 @@ valueToLLVM archOps ctx blk m val = do
       where Just r = funArgs ctx V.!? i
     -- A global address
     FnGlobalDataAddr addr ->
-      case msegAddr addr of
+      case segoffAsAbsoluteAddr addr of
         Nothing -> Loc.error $ "FnGlobalDataAddr only supports global values."
         Just fixedAddr -> L.Typed (natReprToLLVMType ptrWidth) $ L.integer $ fromIntegral fixedAddr
 

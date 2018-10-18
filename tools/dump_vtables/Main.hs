@@ -173,7 +173,8 @@ vTableFromSTE e ste = VTable { vTableAddr = addr
                              , vTableFPtrs = fptrs
                              , vTableOffset = (bsWord64le . B.take 8) contents
                              , vTableRTTI = rtti
-                             , vTableContents = contents }
+                             , vTableContents = contents
+                             }
   where addr = steValue ste
         size = steSize ste
         -- TODO: Why is there an ElfSectionIndex type? Why not just
@@ -182,9 +183,9 @@ vTableFromSTE e ste = VTable { vTableAddr = addr
         -- ElfSectionIndex?
         section = elfSection e (steIndex ste)
         contents = readElfAddr e addr size
-        rttiPtr = (bsWord64le . B.take 8 . B.drop 8) contents
+        rttiPtr = bsWord64le $ B.take 8 $ B.drop 8 $ contents
         rtti = rttiFromPtr e rttiPtr
-        fptrs = (map bsWord64le . map B.pack . chunksOf 8 . B.unpack . B.drop 16) contents
+        fptrs = map bsWord64le $ map B.pack $ chunksOf 8 $ B.unpack $ B.drop 16 $ contents
         -- TODO: fptrs is broken for multiple inheritance
 
 -- | Get a list of all the VTables in an Elf 64 object.

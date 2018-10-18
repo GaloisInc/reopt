@@ -1,11 +1,12 @@
-module Main where
+module Main (main) where
 
-import Control.Monad
-import Data.ElfEdit
-import Data.Macaw.Dwarf
-import Data.Macaw.Memory.ElfLoader
-import System.Environment
-import System.IO
+import           Control.Monad
+import qualified Data.ByteString as BS
+import           Data.ElfEdit
+import           Data.Macaw.Dwarf
+import           Data.Macaw.Memory.ElfLoader
+import           System.Environment
+import           System.IO
 
 run :: Elf v -> IO ()
 run e = do
@@ -18,7 +19,13 @@ run e = do
 main :: IO ()
 main = do
   [path] <- getArgs
-  se <- readElf path
-  case se of
-    Elf64 e -> run e
-    Elf32 e -> run e
+  bs <- BS.readFile path
+  case parseElf bs of
+    Elf64Res _ e -> do
+      run e
+    Elf32Res _ e -> do
+      run e
+    ElfHeaderError _ msg -> do
+      hPutStrLn stderr $
+        "Error parsing file:\n"
+        ++ "  " ++ msg
