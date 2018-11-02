@@ -25,7 +25,7 @@ library
     bytestring,
     containers,
     directory,
-    elf-edit >= 0.28,
+    elf-edit >= 0.33,
     filepath,
     flexdis86 >= 0.1.1,
     lens,

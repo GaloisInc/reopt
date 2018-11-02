@@ -402,8 +402,7 @@ instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
       FnJump lbl -> text "jump" <+> pretty lbl
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ map (pretty . relativeSegmentAddr)
-                                                        (V.toList vec))
+                               <+> parens (commas $ V.toList $ pretty . segoffAddr <$> vec)
       FnRet rets ->
         text "return" <+> parens (commas $ toListF pretty rets)
       FnTailCall f _ args ->

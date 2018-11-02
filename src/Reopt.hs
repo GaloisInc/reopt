@@ -55,8 +55,7 @@ checkedReadFile path = do
 -- Read an elf file
 
 -- | Print errors that occured when reading to @stderr@.
-showElfParseErrors :: (Integral (ElfWordType w), Show (ElfWordType w)) -- Eq (ElfWordType w), Num (ElfWordType w)
-                   => [ElfParseError w]
+showElfParseErrors :: [ElfParseError]
                    -> IO ()
 showElfParseErrors l = do
   when (not (null l)) $ do
