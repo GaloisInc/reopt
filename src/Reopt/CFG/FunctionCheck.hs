@@ -7,7 +7,8 @@ statements.
 -}
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.CFG.FunctionCheck
-   ( checkFunction
+   ( CheckFunctionResult(..)
+   , checkFunction
    ) where
 
 import           Control.Lens
@@ -21,22 +22,34 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Memory (MemWidth)
 
--- | This returns true if all block terminators reachable from the
--- function entry point have non-error term stmts.
---
--- An error term statement is one of form translation error or
--- classify error.
-checkFunction :: MemWidth (ArchAddrWidth arch)
-              => DiscoveryFunInfo arch ids
-              -> Bool
-checkFunction info = checkFunction' info Set.empty [discoveredFunAddr info]
+data CheckFunctionResult
+   = FunctionOK
+   | FunctionIncomplete
+   | FunctionHasPLT
+
+-- | This analyzes the statement list to determine
+checkRegion :: StatementList arch ids
+            -> Either CheckFunctionResult [ArchSegmentOff arch]
+checkRegion stmts =
+  case stmtsTerm stmts of
+    ParsedCall _ Nothing    -> pure []
+    ParsedCall _ (Just a)   -> pure [a]
+    -- PLT stubs are tail calls.
+    PLTStub{} -> Left FunctionHasPLT
+    ParsedJump _ a          -> pure [a]
+    ParsedLookupTable _ _ a -> pure $ V.toList a
+    ParsedReturn{}          -> pure []
+    ParsedIte _ x y      -> (++) <$> checkRegion x <*> checkRegion y
+    ParsedTranslateError{}  -> Left FunctionIncomplete
+    ClassifyFailure _       -> Left FunctionIncomplete
+    ParsedArchTermStmt _ _ a -> pure (maybeToList a)
 
 checkFunction' :: MemWidth (ArchAddrWidth arch)
                => DiscoveryFunInfo arch ids
                -> Set (ArchSegmentOff arch)
                -> [ArchSegmentOff arch]
-               -> Bool
-checkFunction' _inf _visite [] = True
+               -> CheckFunctionResult
+checkFunction' _inf _visite [] = FunctionOK
 checkFunction' info visited (lbl:rest)
   | Set.member lbl visited = checkFunction' info visited rest
   | otherwise =
@@ -44,21 +57,16 @@ checkFunction' info visited (lbl:rest)
       Nothing -> error $ "Missing block: " ++ show lbl
       Just reg -> do
         let b = blockStatementList reg
-        case checkRegion reg b of
-          Nothing -> False
-          Just next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
+        case checkRegion b of
+          Left r -> r
+          Right next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
 
-checkRegion :: ParsedBlock arch ids
-            -> StatementList arch ids
-            -> Maybe [ArchSegmentOff arch]
-checkRegion reg stmts =
-  case stmtsTerm stmts of
-    ParsedCall _ Nothing    -> Just []
-    ParsedCall _ (Just a)   -> Just [a]
-    ParsedJump _ a          -> Just [a]
-    ParsedLookupTable _ _ a -> Just $ V.toList a
-    ParsedReturn{}          -> Just []
-    ParsedIte _ x y      -> (++) <$> checkRegion reg x <*> checkRegion reg y
-    ParsedTranslateError{}  -> Nothing
-    ClassifyFailure _       -> Nothing
-    ParsedArchTermStmt _ _ a -> Just (maybeToList a)
+-- | This returns true if all block terminators reachable from the
+-- function entry point have non-error term stmts.
+--
+-- An error term statement is one of form translation error or
+-- classify error.
+checkFunction :: MemWidth (ArchAddrWidth arch)
+              => DiscoveryFunInfo arch ids
+              -> CheckFunctionResult
+checkFunction info = checkFunction' info Set.empty [discoveredFunAddr info]

@@ -357,18 +357,20 @@ getFns logger sysp info = do
   seq fArgs $ do
    fmap catMaybes $ forM entries $ \(Some finfo) -> do
     let entry = discoveredFunAddr finfo
-    case () of
-      _ | checkFunction finfo -> do
-            case recoverFunction sysp fArgs mem finfo of
-              Left msg -> do
-                logger $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
-                pure Nothing
-              Right fn -> do
-                pure (Just fn)
-        | otherwise -> do
-            -- FIXME
-            logger $ "Invalid function at " ++ show entry
+    case checkFunction finfo of
+      FunctionOK -> do
+        case recoverFunction sysp fArgs mem finfo of
+          Left msg -> do
+            logger $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
             pure Nothing
+          Right fn -> do
+            pure (Just fn)
+      FunctionHasPLT -> do
+        -- Skip PLT functions with no error message.
+        pure Nothing
+      FunctionIncomplete -> do
+        logger $ "Skipped incomplete function at " ++ show entry
+        pure Nothing
 
 -- | Create a discovery state and symbol-address map
 --

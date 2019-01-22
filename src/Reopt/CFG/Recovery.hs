@@ -576,19 +576,6 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
   -- Recover statements
   Fold.traverse_ recoverStmt (stmtsNonterm stmts)
   case stmtsTerm stmts of
-    ParsedTranslateError _ -> do
-      Loc.error "Cannot recover function in blocks where translation error occurs."
-    ClassifyFailure _ ->
-      Loc.error $ "Classification failed in Recovery"
-    ParsedIte c tblock fblock -> do
-      cv <- recoverValue c
-      fb <- mkBlock lbl phis
-                    (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
-                                 (lbl { labelIndex = stmtsIdent fblock }))
-                    MapF.empty
-      xr <- recoverBlock registerUseMap [] b tblock (blockInfo & addFnBlock fb)
-      recoverBlock registerUseMap [] b fblock xr
-
     ParsedCall proc_state m_ret_addr -> do
       -- Get call target
       call_tgt <- recoverRegister proc_state ip_reg
@@ -632,6 +619,20 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
           -- TODO: Check that return types match.
           fb <- mkBlock lbl phis (FnTailCall call_tgt ft args) MapF.empty
           return $! blockInfo & addFnBlock fb
+    PLTStub _ _ _ -> do
+      Loc.error $ "Cannot recover functions with PLT stubs."
+    ParsedTranslateError _ -> do
+      Loc.error "Cannot recover function in blocks where translation error occurs."
+    ClassifyFailure _ ->
+      Loc.error $ "Classification failed in Recovery"
+    ParsedIte c tblock fblock -> do
+      cv <- recoverValue c
+      fb <- mkBlock lbl phis
+                    (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
+                                 (lbl { labelIndex = stmtsIdent fblock }))
+                    MapF.empty
+      xr <- recoverBlock registerUseMap [] b tblock (blockInfo & addFnBlock fb)
+      recoverBlock registerUseMap [] b fblock xr
 
     ParsedJump proc_state tgt_addr -> do
       let go :: MapF X86Reg (FnRegValue X86_64)

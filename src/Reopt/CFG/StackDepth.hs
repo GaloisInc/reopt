@@ -23,6 +23,7 @@ import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Monoid (Any(..))
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.Map as MapF
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
@@ -247,14 +248,6 @@ analyzeStmtReferences root_addr init_sp b = do
   -- sp between blocks
   traverse_ (goStmt init_sp) (stmtsNonterm b)
   case stmtsTerm b of
-    ParsedTranslateError _ ->
-      throwError "Cannot identify stack depth in code where translation error occurs"
-    ClassifyFailure _ ->
-      throwError $ "Classification failed in StackDepth: " ++ show root_addr
-    ParsedIte _c tblock fblock -> do
-      analyzeStmtReferences root_addr init_sp tblock
-      analyzeStmtReferences root_addr init_sp fblock
-
     ParsedCall proc_state m_ret_addr -> do
       addStateVars init_sp proc_state
 
@@ -263,6 +256,22 @@ analyzeStmtReferences root_addr init_sp b = do
         Nothing -> return ()
         Just ret_addr ->
           recordStackOffset ret_addr (addStackDepthValue sp' $ constantDepthValue 8)
+
+    -- PLT stubs are just tail calls.
+    PLTStub regs _ _ -> do
+      forM_ gpRegList $ \r -> do
+        case MapF.lookup r regs of
+          Just v -> addDepth $ parseStackPointer init_sp v
+          Nothing -> pure ()
+
+    ParsedTranslateError _ ->
+      throwError "Cannot identify stack depth in code where translation error occurs"
+    ClassifyFailure _ ->
+      throwError $ "Classification failed in StackDepth: " ++ show root_addr
+    ParsedIte _c tblock fblock -> do
+      analyzeStmtReferences root_addr init_sp tblock
+      analyzeStmtReferences root_addr init_sp fblock
+
 
     ParsedJump proc_state tgt_addr -> do
       addStateVars init_sp proc_state

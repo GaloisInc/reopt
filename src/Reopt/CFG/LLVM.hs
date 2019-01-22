@@ -903,7 +903,7 @@ stmtToLLVM stmt = do
      llvm_v <- mkLLVMValue v
      llvm_ptr <- llvmAsPtr ptr (L.typedType llvm_v)
      -- Cast LLVM point to appropriate type
-     effect $ L.Store llvm_v llvm_ptr Nothing
+     effect $ L.Store llvm_v llvm_ptr Nothing Nothing
    FnCall dest ft args retvs -> do
      fn <- gets $ callCallback . archFns
      fn dest ft args retvs

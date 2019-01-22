@@ -21,7 +21,9 @@ import           Data.Foldable as Fold (traverse_)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
+import           Data.Parameterized.TraversableF (toListF)
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
@@ -67,6 +69,8 @@ stmtListSucc stmts = do
   case stmtsTerm stmts of
     ParsedCall _ (Just ret_addr) -> [(ret_addr, idx)]
     ParsedCall _ Nothing -> []
+    -- This is a tail call.
+    PLTStub{} -> []
     ParsedJump _ tgt -> [(tgt, idx)]
     ParsedLookupTable _ _ v -> (,idx) <$> V.toList v
     ParsedReturn{} -> []
@@ -223,6 +227,7 @@ termStmtValues mem sysp typeMap curFunType tstmt =
              , Just ftp <- Map.lookup fSegOff typeMap = ftp
              | otherwise = ftMaximumFunctionType
        in registerValues proc_state (Some ip_reg : ftArgRegs ft)
+    PLTStub regs _addr _dest -> toListF Some regs
     ParsedJump _proc_state _tgt_addr -> []
     ParsedLookupTable _proc_state idx _vec -> [Some idx]
     ParsedReturn proc_state ->
@@ -241,8 +246,11 @@ addRegisterUses :: BlockLabel 64
                 -> [Some X86Reg]
                 -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
 addRegisterUses lbl s rs = do
-  vs <- mapM (\(Some r) -> (Some r,) <$> valueUses (s ^. boundValue r)) rs
-  blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList vs)
+  vs <- mapM (\(Some r) -> valueUses (s ^. boundValue r)) rs
+  blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList $ zip rs vs)
+
+clearRegDeps :: BlockLabel 64 -> Some X86Reg -> RegisterUseM ids ()
+clearRegDeps lbl r = blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)
 
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
@@ -274,8 +282,11 @@ summarizeBlock mem interp_state addr stmts = do
              | otherwise = ftMaximumFunctionType
       addRegisterUses lbl proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
-      traverse_ (\r -> blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)) $
+      traverse_ (clearRegDeps lbl) $
                 (Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ [Some DF]
+    PLTStub regs _ _ -> do
+      entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
+      blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList entries)
     ParsedJump proc_state _ ->
       addRegisterUses lbl proc_state x86StateRegs
     ParsedLookupTable proc_state _ _ ->
@@ -292,7 +303,6 @@ summarizeBlock mem interp_state addr stmts = do
     ClassifyFailure _ ->
       error $ "Classification failed: " ++ show addr
 
-
 summarizeX86ArchTermStmt :: SyscallPersonality
                          -> BlockLabel 64
                          -> X86TermStmt ids
@@ -301,9 +311,7 @@ summarizeX86ArchTermStmt :: SyscallPersonality
 summarizeX86ArchTermStmt sysp lbl X86Syscall proc_state = do
   -- FIXME: clagged from call above
   addRegisterUses lbl proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
-  let insReg :: Some X86Reg -> RegisterUseM ids ()
-      insReg sr = blockInitDeps . ix lbl %= Map.insert sr (Set.empty, Set.empty)
-  traverse_ insReg (spResultRegisters sysp)
+  traverse_ (clearRegDeps lbl) (spResultRegisters sysp)
 summarizeX86ArchTermStmt _ _ Hlt _ = pure ()
 summarizeX86ArchTermStmt _ _ UD2 _ = pure ()
 
