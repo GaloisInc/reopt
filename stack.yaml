@@ -17,7 +17,7 @@ extra-deps:
 #- s-cargot-0.1.4.0
 #- s-cargot-letbind-0.2.2.0
 #- tasty-hunit-0.10.0.1
-resolver: lts-12.13
+resolver: lts-13.6
 # allow-newer: true
 
 # nix:

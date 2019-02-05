@@ -5,6 +5,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.StackDepth
   ( maximumStackDepth
@@ -299,8 +300,9 @@ recoverIter finfo = do
     [] -> return ()
     root_addr : s' -> do
       blockFrontier .= s'
-      Just init_sp <- use $ blockInitStackPointers . at root_addr
-      Just reg <- return $ Map.lookup root_addr (finfo^.parsedBlocks)
+      spMap <- use $ blockInitStackPointers
+      let Just init_sp = Map.lookup root_addr spMap
+      let Just reg = Map.lookup root_addr (finfo^.parsedBlocks)
       analyzeStmtReferences root_addr init_sp (blockStatementList reg)
       recoverIter finfo
 

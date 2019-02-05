@@ -760,7 +760,7 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
   let Just preds = Map.lookup addr blockPreds
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let phis = makePhis preds regs1
-  Just reg <- pure $ Map.lookup addr (fInfo^.parsedBlocks)
+  let Just reg = Map.lookup addr (fInfo^.parsedBlocks)
   recoverBlock blockRegs phis reg (blockStatementList reg) blockInfo
 
 -- | Recover the function at a given address.
@@ -813,7 +813,7 @@ recoverFunction sysp fArgs mem fInfo = do
     -- Make the alloca and init rsp.  This is the only reason we
     -- need rsCurStmts
 
-    Just b <- pure $ Map.lookup a (fInfo^.parsedBlocks)
+    let Just b = Map.lookup a (fInfo^.parsedBlocks)
     let stmts = blockStatementList b
 
     case maximumStackDepth fInfo a of
