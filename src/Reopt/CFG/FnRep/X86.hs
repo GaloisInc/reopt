@@ -4,6 +4,7 @@ Copyright        : (c) Galois, Inc 2018
 Defines the X86-specific definitions needed in the function representation.
 -}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeFamilies #-}
 module Reopt.CFG.FnRep.X86
   ( -- * X86 specific
@@ -12,7 +13,6 @@ module Reopt.CFG.FnRep.X86
   , ftArgRegs
   , ftIntRetRegs
   , ftFloatRetRegs
-  , X86FnReturnInfo(..)
   , X86FnStmt(..)
   ) where
 
@@ -20,7 +20,6 @@ module Reopt.CFG.FnRep.X86
 import Data.Macaw.CFG (IsArchStmt(..))
 import Data.Macaw.Types
 import Data.Macaw.X86.ArchTypes (X86_64, X86Stmt)
-import Data.Macaw.X86.Monad (XMMType)
 import Data.Macaw.X86.X86Reg
   ( X86Reg
   , x86ArgumentRegs
@@ -52,8 +51,6 @@ data X86FunctionType =
                   }
   deriving (Ord, Eq, Show)
 
-type instance FunctionType X86_64 = X86FunctionType
-
 instance Pretty X86FunctionType where
   pretty f = parens (commaSepRegs (ftArgRegs f))
              <+> text "->"
@@ -80,20 +77,8 @@ ftArgRegs ft = (Some <$> take (fnNIntArgs ft) x86ArgumentRegs)
 ftIntRetRegs :: X86FunctionType -> [X86Reg (BVType 64)]
 ftIntRetRegs ft = take (fnNIntRets ft) x86ResultRegs
 
-ftFloatRetRegs :: X86FunctionType -> [X86Reg (BVType 256)]
+ftFloatRetRegs :: X86FunctionType -> [X86Reg (BVType 512)]
 ftFloatRetRegs ft = take (fnNFloatRets ft) x86FloatResultRegs
-
-------------------------------------------------------------------------
--- X86FnReturnInfo
-
-data X86FnReturnInfo f = X86FnReturnInfo { x86IntReturn :: [f (BVType 64)]
-                                         , x86XMMReturn :: [f XMMType]
-                                         }
-
-type instance FnReturnInfo X86_64 = X86FnReturnInfo
-
-instance FoldableF X86FnReturnInfo where
-  foldrF f s r = foldr f (foldr f s (x86XMMReturn r)) (x86IntReturn r)
 
 ------------------------------------------------------------------------
 -- X86ArchStmt

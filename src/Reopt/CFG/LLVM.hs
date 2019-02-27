@@ -53,6 +53,7 @@ module Reopt.CFG.LLVM
   , call_
   , mkLLVMValue
   , ret
+  , effect
   , AsmAttrs
   , noSideEffect
   , sideEffect
@@ -225,20 +226,28 @@ typeToLLVMType BoolTypeRepr   = L.iT 1
 typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
 typeToLLVMType (FloatTypeRepr flt) = L.PrimType $ L.FloatType $ llvmFloatType flt
 typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
+typeToLLVMType (VecTypeRepr w tp)
+   | toInteger (natValue w) <= toInteger (maxBound :: Int32) =
+     L.Vector (fromIntegral (natValue w)) (typeToLLVMType tp)
+   | otherwise = error $ "Vector width of " ++ show w ++ " is too large."
+
 
 -- | This is a special label used for e.g. table lookup defaults (where we should never reach).
 -- For now it will just loop.
 failLabel :: L.Ident
 failLabel = L.Ident "failure"
 
-functionTypeToLLVM :: LLVMArchSpecificOps arch -> FunctionType arch -> L.Type
-functionTypeToLLVM aops ft = L.ptrT (L.FunTy (archFnReturnType aops ft) (archFnArgTypes aops ft) False)
+functionTypeToLLVM :: FunctionType arch -> L.Type
+functionTypeToLLVM ft = L.ptrT $
+  L.FunTy (L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ft))
+          (viewSome typeToLLVMType <$> fnArgTypes ft)
+          False
 
-declareFunction :: LLVMArchSpecificOps arch -> L.Symbol -> FunctionType arch -> L.Declare
-declareFunction aops nm ftp =
-  L.Declare { L.decRetType = archFnReturnType aops ftp
+declareFunction :: L.Symbol -> FunctionType arch -> L.Declare
+declareFunction nm ftp =
+  L.Declare { L.decRetType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ftp)
             , L.decName    = nm
-            , L.decArgs    = archFnArgTypes aops ftp
+            , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
             , L.decVarArgs = False
             , L.decAttrs   = []
             , L.decComdat  = Nothing
@@ -257,7 +266,6 @@ getReferencedFunctions :: forall arch
                           , MemWidth (ArchAddrWidth arch)
                           , FoldableFC (ArchFn arch)
                           , FoldableF (FnArchStmt arch)
-                          , FoldableF (FnReturnInfo arch)
                           )
                        => FunctionTypeMap arch
                        -> Function arch
@@ -333,11 +341,9 @@ funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
 
 -- | Architecture-specific operations for generating LLVM
 data LLVMArchSpecificOps arch = LLVMArchSpecificOps
-  { archFnArgTypes :: !(FunctionType arch -> [L.Type])
-    -- ^ Argument types for the given function type
-  , archFnReturnType :: !(FunctionType arch -> L.Type)
-    -- ^ Returns type for the given function type
-  , mkInitBlock :: FunctionType arch
+  { archEndianness :: !Endianness
+    -- ^ Endiannes of architecture
+   , mkInitBlock :: FunctionType arch
                 -> L.BlockLabel
                 -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
     -- ^ This is responsible for mapping between function arguments and
@@ -363,22 +369,6 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     -- ^ Callback for emitting a popcount instruction
     --
     -- This is architecture-specific so that we can choose machine code.
-  , callCallback :: !(FnValue arch (BVType (ArchAddrWidth arch))
-                     -> FunctionType arch
-                     -> [Some (FnValue arch)]
-                     -> FnReturnInfo arch FnReturnVar
-                     -> BBLLVM arch ())
-    -- ^ Callback for handling a function call.
-  , tailcallCallback :: !(FnValue arch (BVType (ArchAddrWidth arch))
-                          -> FunctionType arch
-                          -> [Some (FnValue arch)]
-                          -> BBLLVM arch ())
-    -- ^ Callback for handling a tail call.
-  , returnCallback :: !(FnReturnInfo arch (FnValue arch) -> BBLLVM arch ())
-    -- ^ Callback for parsing architecture-specific aspects return terminal statement.
-    --
-    -- Eventually we would like to change @FnRep@ so this is not
-    -- necessary.
   }
 
 -- | Computes the LLVM symbol of a function at the given address.
@@ -392,6 +382,9 @@ data FunLLVMContext arch = FunLLVMContext
     -- ^ This is a callback for naming functions at specific addresses.
   , funAddrTypeMap :: !(FunctionTypeMap arch)
   , funArgs      :: !(V.Vector (L.Typed L.Value))
+     -- ^ Arguments to this function.
+  , funReturnType :: !L.Type
+    -- ^ LLVM return type for this function.
   }
 
 
@@ -492,7 +485,6 @@ type LLVMArchConstraints arch
    = ( FnArchConstraints arch
      , PrettyF (ArchReg arch)
      , OrdF (ArchReg arch)
-     , FoldableF (FnReturnInfo arch)
      , IsArchStmt (FnArchStmt arch)
      , Eq (FunctionType arch)
      )
@@ -502,14 +494,13 @@ valueToLLVM :: forall arch tp
             .  ( LLVMArchConstraints arch
                , Loc.HasCallStack
                )
-            => LLVMArchSpecificOps arch
-            -> FunLLVMContext arch
+            => FunLLVMContext arch
             -> FnBlock arch
                -- ^ Block we are generating LLVM for.
             -> AssignValMap (ArchAddrWidth arch)
             -> FnValue arch tp
             -> L.Typed L.Value
-valueToLLVM archOps ctx blk m val = do
+valueToLLVM ctx blk m val = do
   let ptrWidth = addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
   case val of
     FnValueUnsupported _reason typ -> L.Typed (typeToLLVMType typ) L.ValUndef
@@ -552,7 +543,7 @@ valueToLLVM archOps ctx blk m val = do
             seq sym $ do
               let typ = natReprToLLVMType ptrWidth
               let fptr :: L.Typed L.Value
-                  fptr = L.Typed (functionTypeToLLVM archOps ft) (L.ValSymbol sym)
+                  fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
               L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
         Nothing -> do
           Loc.error $ "Could not identify " ++ show addr
@@ -581,15 +572,14 @@ floatTypeWidth l =
 
 -- | Map a function value to a LLVM value with no change.
 valueToLLVMBitvec :: (LLVMArchConstraints arch, Loc.HasCallStack)
-                  => LLVMArchSpecificOps arch
-                  -> FunLLVMContext arch
+                  => FunLLVMContext arch
                   -> FnBlock arch
                      -- ^ Block that we are generating LLVM for.
                   -> AssignValMap (ArchAddrWidth arch)
                   -> FnValue arch tp
                   -> L.Typed L.Value
-valueToLLVMBitvec archOps ctx blk m val = do
-  let llvm_val = valueToLLVM archOps ctx blk m val
+valueToLLVMBitvec ctx blk m val = do
+  let llvm_val = valueToLLVM ctx blk m val
   case L.typedType llvm_val of
     L.PrimType (L.Integer _) -> llvm_val
     L.PrimType (L.FloatType tp) ->
@@ -603,7 +593,7 @@ mkLLVMValue :: (LLVMArchConstraints arch, Loc.HasCallStack)
 mkLLVMValue val = do
   s <- get
   let fs = funState s
-  pure $! valueToLLVMBitvec (archFns s) (funContext s) (bbBlock s) (funAssignValMap fs) val
+  pure $! valueToLLVMBitvec (funContext s) (bbBlock s) (funAssignValMap fs) val
 
 arithop :: L.ArithOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 arithop f val s = L.Typed (L.typedType val) <$> evalInstr (L.Arith f val s)
@@ -742,6 +732,7 @@ appToLLVM app = do
         y' <- mkLLVMValue y
         f x' (L.typedValue y')
   case app of
+    Eq x y ->  binop (icmpop L.Ieq) x y
     Mux _tp c t f -> do
       l_c <- mkLLVMValue c
       l_t <- mkLLVMValue t
@@ -750,14 +741,16 @@ appToLLVM app = do
     Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
+    Bitcast x tp -> do
+      llvmVal <- mkLLVMValue x
+      convop L.BitCast llvmVal (typeToLLVMType (widthEqTarget tp))
     AndApp x y -> binop band x y
     OrApp  x y -> binop bor x y
     NotApp x   -> do
-      -- xor x -1 == complement x, according to LLVM manual.
-      -- TODO: look at LLVM pretty. There should be a better way to write
-      -- Negation.
+      -- x = 0 == complement x, according to LLVM manual.
       llvm_x <- mkLLVMValue x
-      bitop L.Xor llvm_x (L.ValInteger (-1))
+      icmpop L.Ieq llvm_x (L.ValInteger 0)
+    XorApp x y    -> binop bxor x y
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -795,12 +788,10 @@ appToLLVM app = do
       bitop L.Xor llvm_v (L.ValInteger (-1))
     BVAnd _sz x y -> binop band x y
     BVOr _sz x y  -> binop bor  x y
-    XorApp x y    -> binop bxor x y
     BVXor _sz x y -> binop bxor x y
     BVShl _sz x y -> binop shl  x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    Eq x y ->  binop (icmpop L.Ieq) x y
     PopCount w v  -> do
       fn <- gets $ popCountCallback  . archFns
       fn w v
@@ -852,6 +843,40 @@ singletonVector val = do
   L.Typed arrayType
     <$> evalInstr (L.InsertElt vec0 val (L.ValInteger 0))
 
+checkEndian :: Endianness -> BBLLVM arch ()
+checkEndian end = do
+  req <- gets $ archEndianness . archFns
+  when (end /= req) $
+    fail $ "Memory accesses must have type " ++ show req
+
+llvmFloatName :: FloatInfoRepr flt -> String
+llvmFloatName flt =
+  case flt of
+    HalfFloatRepr -> "f16"
+    SingleFloatRepr -> "f32"
+    DoubleFloatRepr -> "f64"
+    QuadFloatRepr -> "f128"
+    X86_80FloatRepr -> "f80"
+
+
+-- | Given a `MemRepr`, return the name of the type for annotating
+-- intrinsics and the type itself.
+resolveLoadNameAndType :: MemRepr tp -> BBLLVM arch (String, L.Type)
+resolveLoadNameAndType memRep =
+  case memRep of
+    BVMemRepr w end -> do
+      checkEndian end
+      let bvw = 8 * fromIntegral (natValue w)
+      pure ("i" ++ show bvw, L.iT bvw)
+    FloatMemRepr f end -> do
+      checkEndian end
+      pure (llvmFloatName f, L.PrimType (L.FloatType (llvmFloatType f)))
+    PackedVecMemRepr n eltRep -> do
+      (eltName, eltType) <- resolveLoadNameAndType eltRep
+      unless (toInteger (natValue n) <= toInteger (maxBound :: Int32)) $ do
+        error $ "Vector width of " ++ show n ++ " is too large."
+      pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
+
 rhsToLLVM :: (LLVMArchConstraints arch, Loc.HasCallStack)
           => FnAssignRhs arch (FnValue arch) tp
           -> BBLLVM arch (L.Typed L.Value)
@@ -866,10 +891,9 @@ rhsToLLVM rhs = do
       let llvm_typ = typeToLLVMType typ
       p <- llvmAsPtr ptr llvm_typ
       fmap (L.Typed llvm_typ) $ evalInstr (L.Load p Nothing Nothing)
-    FnCondReadMem (BVMemRepr w LittleEndian) cond addr passthru -> do
-      let bvw = 8 * fromIntegral (natValue w)
-      let eltType = L.iT bvw
-      let intr = llvmMaskedLoad 1 ("i" ++ show bvw) eltType
+    FnCondReadMem memRepr cond addr passthru -> do
+      (loadName, eltType) <- resolveLoadNameAndType memRepr
+      let intr = llvmMaskedLoad 1 loadName eltType
       addIntrinsic intr
       llvmAddr     <- llvmAsPtr addr (L.Vector 1 eltType)
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
@@ -878,8 +902,9 @@ rhsToLLVM rhs = do
       rv <- call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
       r <- evalInstr $ L.ExtractElt rv (L.ValInteger 0)
       pure (L.Typed eltType r)
-    FnCondReadMem (BVMemRepr _ BigEndian) _cond _addr _passthru -> do
-      error "LLVM backend does not yet support big endian memory reads."
+      --  FloatMemRepr :: !(FloatInfoRepr f) -> !Endianness -> MemRepr (FloatType f)
+      --  PackedVecMemRepr :: !(NatRepr n) -> !(MemRepr tp) -> MemRepr (VecType n tp)
+
     FnAlloca v -> do
       v' <- mkLLVMValue v
       alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
@@ -888,7 +913,35 @@ rhsToLLVM rhs = do
       fn <- gets $ archFnCallback  . archFns
       fn f
 
-stmtToLLVM :: (LLVMArchConstraints arch, Loc.HasCallStack)
+
+resolveFunctionEntry :: LLVMArchConstraints arch
+                     => FnValue arch (BVType (ArchAddrWidth arch))
+                     -> FunctionType arch
+                     -> BBLLVM arch (L.Typed L.Value)
+resolveFunctionEntry dest ft = do
+  let fun_ty  = functionTypeToLLVM ft
+  addrTypeMap <- gets $ funAddrTypeMap . funContext
+  case dest of
+    -- FIXME: use ft here instead?
+    FnFunctionEntryValue dest_ftp addr
+      | Just tp <- Map.lookup addr addrTypeMap -> do
+          fnCallback  <- gets $ funSymbolCallback  . funContext
+          let sym = fnCallback addr
+          when (functionTypeToLLVM tp /= fun_ty) $ do
+            Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
+              ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
+              ++ "Provided: " ++ show fun_ty
+          when (ft /= dest_ftp) $ do
+            Loc.error $ "Mismatch function type in call with " ++ show sym
+          when (tp /= dest_ftp) $ do
+            Loc.error $ "Mismatch function type in call with " ++ show sym
+          return $ L.Typed fun_ty (L.ValSymbol sym)
+    _ -> do
+      dest' <- mkLLVMValue dest
+      convop L.IntToPtr dest' fun_ty
+
+stmtToLLVM :: forall arch
+           .  (LLVMArchConstraints arch, Loc.HasCallStack)
            => FnStmt arch
            -> BBLLVM arch ()
 stmtToLLVM stmt = do
@@ -905,8 +958,16 @@ stmtToLLVM stmt = do
      -- Cast LLVM point to appropriate type
      effect $ L.Store llvm_v llvm_ptr Nothing Nothing
    FnCall dest ft args retvs -> do
-     fn <- gets $ callCallback . archFns
-     fn dest ft args retvs
+     dest_f <- resolveFunctionEntry dest ft
+     args' <- mapM (\(Some v) -> mkLLVMValue v) args
+     retv <- call dest_f args'
+     this_lbl <- gets $ fbLabel . bbBlock
+     -- Assign all return variables to the extracted result
+     let assignReturn :: Int -> Some FnReturnVar -> BBLLVM arch ()
+         assignReturn i (Some fr) = do
+           val <- extractValue retv (fromIntegral i)
+           setAssignIdValue (frAssignId fr) this_lbl val
+     itraverse_ assignReturn retvs
    FnArchStmt astmt -> do
      fn <- gets $ archStmtCallback . archFns
      fn astmt
@@ -919,14 +980,20 @@ termStmtToLLVM tm =
     FnJump lbl -> do
       effect $ L.Jump (blockName lbl)
     FnRet rets -> do
-      fn <- gets $ returnCallback . archFns
-      fn rets
+      retType <- gets $ funReturnType . funContext
+      retVals <- mapM (viewSome mkLLVMValue) rets
+      -- construct the return result struct
+      let initUndef = L.Typed retType L.ValUndef
+      v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef retVals
+      effect (L.Ret v)
     FnBranch cond tlbl flbl -> do
       cond' <- mkLLVMValue cond
       effect $ L.Br cond' (blockName tlbl) (blockName flbl)
     FnTailCall dest ft args -> do
-      fn <- gets $ tailcallCallback . archFns
-      fn dest ft args
+      dest_f <- resolveFunctionEntry dest ft
+      args' <- mapM (viewSome mkLLVMValue) args
+      retv <- call dest_f args'
+      ret retv
     FnLookupTable idx vec -> do
       idx' <- mkLLVMValue idx
       let dests = map (L.Named . blockWordName) $ V.toList vec
@@ -934,13 +1001,12 @@ termStmtToLLVM tm =
 
 -- | Convert a Phi node assignment to the right value
 resolvePhiNodeReg :: (LLVMArchConstraints arch, Loc.HasCallStack)
-                  => LLVMArchSpecificOps arch
-                  -> FunLLVMContext arch
+                  => FunLLVMContext arch
                   -> AssignValMap (ArchAddrWidth arch)
                   -> ResolvePhiMap arch
                   -> (ArchLabel arch, ArchReg arch tp)
                   -> (L.Value, L.BlockLabel)
-resolvePhiNodeReg archOps ctx avmap m (lbl, reg) =
+resolvePhiNodeReg ctx avmap m (lbl, reg) =
   case Map.lookup lbl m of
     Nothing -> Loc.error $ "Could not resolve block " ++ show lbl
     Just br -> do
@@ -948,29 +1014,27 @@ resolvePhiNodeReg archOps ctx avmap m (lbl, reg) =
       case MapF.lookup reg (fbRegMap b) of
         Nothing -> Loc.error $ "Could not resolve register " ++ show (prettyF reg) ++ " in block " ++ show lbl
         Just (CalleeSaved _) -> Loc.error $ "Resolve callee saved register"
-        Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec archOps ctx b avmap v), blockName lbl)
+        Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx b avmap v), blockName lbl)
 
 resolvePhiStmt :: (LLVMArchConstraints arch, Loc.HasCallStack)
-               => LLVMArchSpecificOps arch
-               -> FunLLVMContext arch
+               => FunLLVMContext arch
                -> AssignValMap (ArchAddrWidth arch)
                -> ResolvePhiMap arch
                -> Some (PendingPhiNode arch)
                -> L.Stmt
-resolvePhiStmt archOps ctx avmap m (Some (PendingPhiNode nm tp info)) = L.Result nm i []
-  where i = L.Phi tp (resolvePhiNodeReg archOps ctx avmap m <$> info)
+resolvePhiStmt ctx avmap m (Some (PendingPhiNode nm tp info)) = L.Result nm i []
+  where i = L.Phi tp (resolvePhiNodeReg ctx avmap m <$> info)
 
 toBasicBlock :: (LLVMArchConstraints arch, Loc.HasCallStack)
-             => LLVMArchSpecificOps arch
-             -> FunLLVMContext arch
+             => FunLLVMContext arch
              -> AssignValMap (ArchAddrWidth arch)
              -> ResolvePhiMap arch
              -> LLVMBlockResult arch
              -> L.BasicBlock
-toBasicBlock archOps ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLabel (regBlock res)))
-                                                    , L.bbStmts = phiStmts ++ llvmBlockStmts res
-                                                    }
-  where phiStmts = resolvePhiStmt archOps ctx avmap m <$> llvmBlockPhiVars res
+toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLabel (regBlock res)))
+                                            , L.bbStmts = phiStmts ++ llvmBlockStmts res
+                                            }
+  where phiStmts = resolvePhiStmt ctx avmap m <$> llvmBlockPhiVars res
 
 
 -- | Add a phi var with the node info so that we have a ident to reference
@@ -1069,7 +1133,6 @@ runLLVMTrans (LLVMTrans action) =
   let (r, m) = runState action Map.empty
    in (Map.elems m, r)
 
-
 -- | This translates the function to LLVM and returns the define.
 --
 -- We have each function return all possible results, although only the ones that are actually
@@ -1100,6 +1163,8 @@ defineFunction archOps symFun funTypeMap f = do
       ctx = FunLLVMContext { funSymbolCallback = symFun
                            , funAddrTypeMap = funTypeMap
                            , funArgs        = postInitArgs
+                           , funReturnType  =
+                             L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
                            }
 
   -- Create ordinary blocks
@@ -1129,10 +1194,11 @@ defineFunction archOps symFun funTypeMap f = do
         ]
 
   let blocks :: [L.BasicBlock]
-      blocks = toBasicBlock archOps ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
+      blocks = toBasicBlock ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
   pure $
     L.Define { L.defLinkage  = Nothing
-             , L.defRetType  = archFnReturnType archOps (fnType f)
+             , L.defRetType  =
+                 L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
              , L.defName     = symbol
              , L.defArgs     = inputArgs
              , L.defVarArgs  = False
@@ -1197,7 +1263,7 @@ moduleForFunctions archOps symFun fns =
           , Set.notMember addr excludedSet
           ]
 
-        fnDecls = (\(addr, ftp) -> declareFunction archOps (symFun addr) ftp)
+        fnDecls = (\(addr, ftp) -> declareFunction (symFun addr) ftp)
           <$> declFunMap
 
         (dynIntrinsics, defines) = runLLVMTrans $

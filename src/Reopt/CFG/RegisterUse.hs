@@ -40,20 +40,15 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
 import           Data.Macaw.X86.SyscallInfo (SyscallPersonality, spTypeInfo, spResultRegisters)
 import           Data.Macaw.X86.X86Reg
-  ( X86Reg, pattern DF, x86StateRegs, x86ResultRegs, x86FloatResultRegs, x86CalleeSavedRegs
+  ( X86Reg, pattern DF, x86StateRegs, x86CalleeSavedRegs
   )
 import           Data.Macaw.X86 (x86DemandContext)
 
-import           Reopt.CFG.FnRep ( FunctionType
-                                 , FunctionTypeMap
-                                 )
-
-import           Reopt.CFG.FnRep.X86 ( ftMaximumFunctionType
+import           Reopt.CFG.FnRep.X86 ( X86FunctionType
+                                     , ftMaximumFunctionType
                                      , ftArgRegs
                                      , ftIntRetRegs
                                      , ftFloatRetRegs
-                                     , fnNIntRets
-                                     , fnNFloatRets
                                      )
 
 -------------------------------------------------------------------------------
@@ -116,16 +111,16 @@ data RegisterUseState ids = RUS {
     -- | The set of addresses we need to consider next.
   , _blockFrontier  :: !(Set (MemSegmentOff 64))
     -- | Function arguments derived from FunctionTypeMap
-  , functionArgs    :: !(FunctionTypeMap X86_64)
-  , currentFunctionType :: !(FunctionType X86_64)
+  , functionArgs    :: !(Map (MemSegmentOff 64) X86FunctionType)
+  , currentFunctionType :: !X86FunctionType
   , thisSyscallPersonality :: !SyscallPersonality
     -- ^ System call personality
   }
 
 initRegisterUseState :: SyscallPersonality
-                     -> FunctionTypeMap X86_64
+                     -> Map (MemSegmentOff 64) X86FunctionType
                      -> MemSegmentOff 64
-                     -> FunctionType X86_64 -- ^ Type of current function
+                     -> X86FunctionType -- ^ Type of current function
                      -> RegisterUseState ids
 initRegisterUseState sysp fArgs fn ftp =
   RUS { _assignmentUses     = Set.empty
@@ -212,28 +207,26 @@ x86TermStmtValues sysp X86Syscall proc_state =
 -- | Get values that must be evaluated to execute terminal statement.
 termStmtValues :: Memory 64
                -> SyscallPersonality
-               -> FunctionTypeMap X86_64
+               -> Map (MemSegmentOff 64) X86FunctionType
                   -- ^ Map from addresses to function type
-               -> FunctionType X86_64
+               -> X86FunctionType
                   -- ^ Type of this function
                -> ParsedTermStmt X86_64 ids
                   -- ^ Statement to get value of
                -> [Some (Value X86_64 ids)]
 termStmtValues mem sysp typeMap curFunType tstmt =
   case tstmt of
-    ParsedCall proc_state _m_ret_addr ->
+    ParsedCall proc_state _m_ret_addr -> do
       -- Get function type associated with function
       let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
              , Just ftp <- Map.lookup fSegOff typeMap = ftp
              | otherwise = ftMaximumFunctionType
-       in registerValues proc_state (Some ip_reg : ftArgRegs ft)
+      registerValues proc_state (Some ip_reg : ftArgRegs ft)
     PLTStub regs _addr _dest -> toListF Some regs
     ParsedJump _proc_state _tgt_addr -> []
     ParsedLookupTable _proc_state idx _vec -> [Some idx]
     ParsedReturn proc_state ->
-      let regs = (Some <$> take (fnNIntRets curFunType) x86ResultRegs)
-              ++ (Some <$> take (fnNFloatRets curFunType) x86FloatResultRegs)
-       in registerValues proc_state regs
+      registerValues proc_state (ftArgRegs curFunType)
     ParsedIte c _ _ -> [Some c]
     ParsedArchTermStmt ts proc_state _ ->
       x86TermStmtValues sysp ts proc_state
@@ -266,9 +259,9 @@ summarizeBlock mem interp_state addr stmts = do
   let lbl = GeneratedBlock addr (stmtsIdent stmts)
   blockInitDeps %= Map.insert lbl Map.empty
   -- Add demanded values for terminal
-  sysp <- gets thisSyscallPersonality
-  typeMap <- gets $ functionArgs
-  cur_ft <- gets currentFunctionType
+  sysp    <- gets thisSyscallPersonality
+  typeMap <- gets functionArgs
+  cur_ft  <- gets currentFunctionType
   let termValues = termStmtValues mem sysp typeMap cur_ft (stmtsTerm stmts)
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
@@ -400,9 +393,9 @@ ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
 -- the highest index above sp0 that is read or written.
 registerUse :: Memory 64
             -> SyscallPersonality
-            -> FunctionTypeMap X86_64
+            -> Map (MemSegmentOff 64) X86FunctionType
             -> DiscoveryFunInfo X86_64 ids
-            -> FunctionType X86_64
+            -> X86FunctionType
                -- ^ Expected type of this function
             -> FunPredMap 64
                -- ^ Predecessors for each block in function

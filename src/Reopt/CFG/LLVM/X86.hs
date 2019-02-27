@@ -13,8 +13,8 @@ module Reopt.CFG.LLVM.X86
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
-import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Some
+import           Data.Type.Equality
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import qualified Text.LLVM as L
@@ -25,76 +25,78 @@ import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
-import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.LLVM
 
 
+zmmFloatType :: L.Type
+zmmFloatType = L.Vector 8 (L.PrimType $ L.FloatType L.Double)
+
+{-
 x86LLVMRetType :: L.Type
 x86LLVMRetType =
   L.Struct $ (typeToLLVMType . typeRepr <$> x86ResultRegs)
-      ++ (replicate (length x86FloatResultRegs) functionFloatType)
+          ++ (replicate (length x86FloatResultRegs) zmmFloatType)
+-}
 
 argIdent :: Int -> L.Ident
 argIdent i = L.Ident ("arg" ++ show i)
-
--- | Create a unique name for temporaries used in creating a float.
-fltbvTempArg :: Int -> Int -> L.Ident
-fltbvTempArg i j = L.Ident ("fargbv" ++ show i ++ "_" ++ show j)
 
 -- | Create a unique name for the float argument.
 fltbvArg :: Int -> L.Ident
 fltbvArg i = L.Ident ("fargbv" ++ show i)
 
-functionFloatType :: L.Type
-functionFloatType = L.Vector 2 (L.PrimType $ L.FloatType L.Double)
-
+{-
 functionArgType :: Some X86Reg -> L.Type
 functionArgType (Some r) =
   case r of
     X86_GP{} -> L.iT 64
-    X86_YMMReg{} -> functionFloatType
+    X86_ZMMReg{} -> zmmFloatType
     _ -> Loc.error "Unsupported function type registers"
+-}
 
 
 mkX86InitBlock :: FunctionType X86_64 -- ^ Type of function
-            -> L.BlockLabel -- ^ Label of first block
-            -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
+               -> L.BlockLabel -- ^ Label of first block
+               -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
 mkX86InitBlock ft lbl = (inputArgs, blk, postInitArgs)
-    where mkInputReg :: L.Type -> Int -> L.Typed L.Ident
-          mkInputReg tp i = L.Typed tp (argIdent i)
+    where mkInputReg :: Some TypeRepr
+                     -> Int
+                     -> (L.Typed L.Ident, [L.Stmt], L.Typed L.Value)
+          mkInputReg (Some (VecTypeRepr l (FloatTypeRepr DoubleFloatRepr))) i
+            | Just Refl <- testEquality l n8 =
+              let -- Get typed arg for input
+                    arg  = L.Typed zmmFloatType (argIdent i)
+                    argv = L.Typed zmmFloatType (L.ValIdent (argIdent i))
+                    stmts =
+                      [ L.Result (fltbvArg i) (L.Conv L.BitCast argv (L.iT 512)) [] ]
+                    postArg = L.Typed (L.iT 512) (L.ValIdent (fltbvArg i))
+               in (arg, stmts, postArg)
+          mkInputReg (Some (BVTypeRepr w)) i
+            | Just Refl <- testEquality w n64 = do
+                (L.Typed (L.iT 64) (argIdent i)
+                  , []
+                  , L.Typed (L.iT 64) (L.ValIdent (argIdent i))
+                  )
+          mkInputReg (Some tp) _i = error $ "Unsupported type " ++ show tp
+
+          inputs = zipWith mkInputReg (fnArgTypes ft) [0..]
 
           inputArgs :: [L.Typed L.Ident]
-          inputArgs = zipWith mkInputReg (functionArgType <$> ftArgRegs ft) [0..]
+          inputArgs = [ a | (a,_,_) <- inputs ]
+
+          fltStmts :: [L.Stmt]
+          fltStmts = [ s | (_,l,_) <- inputs, s <- l ]
 
           -- Block to generate
           blk = L.BasicBlock { L.bbLabel = Just (L.Named (L.Ident "init"))
                              , L.bbStmts = fltStmts ++ [L.Effect (L.Jump lbl) []]
                              }
 
-          intArgs :: V.Vector (L.Typed L.Value)
-          intArgs = V.generate (fnNIntArgs ft)   $ \i -> L.Typed (L.iT 64) (L.ValIdent (argIdent i))
-
-          fltbvArgs :: V.Vector (L.Typed L.Value)
-          fltbvArgs = V.generate (fnNFloatArgs ft) $ \i -> L.Typed (L.iT 256) (L.ValIdent (fltbvArg i))
-
           postInitArgs :: V.Vector (L.Typed L.Value)
-          postInitArgs = intArgs V.++ fltbvArgs
-
-          fltStmts :: [L.Stmt]
-          fltStmts = concatMap fltStmt [0..fnNFloatArgs ft-1]
-            where fltStmt :: Int -> [L.Stmt]
-                  fltStmt i = do
-                    -- Get typed arg for input
-                    let arg = L.Typed functionFloatType (L.ValIdent (argIdent (fnNIntArgs ft + i)))
-                    -- Get typed argument after bitcast from float to bv128.
-                    let bv128Arg = L.Typed (L.iT 128) (L.ValIdent (fltbvTempArg i 0))
-                    -- Return
-                    [   L.Result (fltbvTempArg i 0) (L.Conv L.BitCast arg   (L.iT 128)) []
-                      , L.Result (fltbvArg i)       (L.Conv L.ZExt bv128Arg (L.iT 256)) []
-                      ]
+          postInitArgs = V.fromList [ v | (_,_,v) <- inputs ]
 
 ------------------------------------------------------------------------
 -- emitX86ArchFn
@@ -274,136 +276,7 @@ emitPopCount w v = do
   let wv = natValue w
   when (wv `notElem` [16, 32, 64]) $ do
     fail $ "Only support popcount of 16, 32, or 64 bits"
-  callAsm noSideEffect (L.iT (fromInteger wv)) "popcnt $0, $1" "=r,r" [v']
-
-------------------------------------------------------------------------
--- X86 call
-
-emitX86Call :: FnValue X86_64 (BVType 64)
-            -> FunctionType X86_64
-               -- Arguments
-            -> [Some (FnValue X86_64)]
-               -- Return values
-            -> FnReturnInfo X86_64 FnReturnVar
-            -> BBLLVM X86_64 ()
-emitX86Call dest ft args retvs = do
-  aops <- gets $ archFns
-  let fun_ty  = functionTypeToLLVM aops ft
-
-  fnCallback  <- gets $ funSymbolCallback  . funContext
-  addrTypeMap <- gets $ funAddrTypeMap . funContext
-  dest_f <-
-    case dest of
-      -- FIXME: use ft here instead?
-      FnFunctionEntryValue dest_ftp addr
-        | Just tp <- Map.lookup addr addrTypeMap -> do
-            let sym = fnCallback addr
-            when (functionTypeToLLVM aops tp /= fun_ty) $ do
-              Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
-                ++ "Declared: " ++ show (functionTypeToLLVM aops tp) ++ "\n"
-                ++ "Provided: " ++ show fun_ty
-            when (ft /= dest_ftp) $ do
-              Loc.error $ "Mismatch function type in call with " ++ show sym
-            when (tp /= dest_ftp) $ do
-              Loc.error $ "Mismatch function type in call with " ++ show sym
-            return $ L.Typed fun_ty (L.ValSymbol sym)
-      _ -> do
-        dest' <- mkLLVMValue dest
-        convop L.IntToPtr dest' fun_ty
-
-  let evalArg :: Some X86Reg -> Some (FnValue X86_64) -> BBLLVM X86_64 (L.Typed L.Value)
-      evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
-      evalArg (Some (X86_YMMReg _)) (Some v) = do
-        llvmVal <- mkLLVMValue v
-        bitcast llvmVal functionFloatType
-      evalArg _ _ = Loc.error "Unsupported register arg"
-
-  args' <- zipWithM evalArg (ftArgRegs ft) args
-
-  retv <- call dest_f args'
-
-  this_lbl <- gets $ fbLabel . bbBlock
-  -- Assign all return variables to the extracted result
-  let assignIntReturn :: Int -> FnReturnVar (BVType 64) -> BBLLVM X86_64 ()
-      assignIntReturn i fr = do
-        val <- extractValue retv (fromIntegral i)
-        setAssignIdValue (frAssignId fr) this_lbl val
-  itraverse_ assignIntReturn (x86IntReturn retvs)
-  let fpBase = 2
-  -- Assign floating point results
-  let assignFltReturn :: Int -> FnReturnVar (BVType 128) -> BBLLVM X86_64 ()
-      assignFltReturn i fr = do
-        val_fp <- extractValue retv (fromIntegral $ fpBase + i)
-        val    <- bitcast val_fp (L.iT 128)
-        setAssignIdValue (frAssignId fr) this_lbl val
-  itraverse_ assignFltReturn (x86XMMReturn retvs)
-
-------------------------------------------------------------------------
--- Tailcall
-
-emitX86Tailcall :: FnValue X86_64 (BVType 64)
-                -> FunctionType X86_64
-                -> [Some (FnValue X86_64)]
-                -> BBLLVM X86_64 ()
-emitX86Tailcall dest ft args = do
-  aops <- gets $ archFns
-  let fun_ty  = functionTypeToLLVM aops ft
-
-  fnCallback  <- gets $ funSymbolCallback  . funContext
-  addrTypeMap <- gets $ funAddrTypeMap . funContext
-  dest_f <-
-    case dest of
-           -- FIXME: use ft here instead?
-           FnFunctionEntryValue dest_ftp addr
-             | Just tp <- Map.lookup addr addrTypeMap -> do
-               let sym = fnCallback addr
-               when (functionTypeToLLVM aops tp /= fun_ty) $ do
-                 Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
-                   ++ "Declared: " ++ show (functionTypeToLLVM aops tp) ++ "\n"
-                   ++ "Provided: " ++ show fun_ty
-               when (ft /= dest_ftp) $ do
-                 Loc.error $ "Mismatch function type in call with " ++ show sym
-               when (tp /= dest_ftp) $ do
-                 Loc.error $ "Mismatch function type in call with " ++ show sym
-               return $ L.Typed fun_ty (L.ValSymbol sym)
-           _ -> do
-             dest' <- mkLLVMValue dest
-             convop L.IntToPtr dest' fun_ty
-
-  let evalArg :: Some X86Reg -> Some (FnValue X86_64) -> BBLLVM X86_64 (L.Typed L.Value)
-      evalArg (Some (X86_GP _)) (Some v) = mkLLVMValue v
-      evalArg (Some (X86_YMMReg _)) (Some v) = (`bitcast` functionFloatType) =<< mkLLVMValue v
-      evalArg _ _ = Loc.error "Unsupported register arg"
-
-  args' <- zipWithM evalArg (ftArgRegs ft) args
-  retv <- call dest_f args'
-  ret retv
-
-------------------------------------------------------------------------
--- Return
-
-emitX86Return :: FnReturnInfo X86_64 (FnValue X86_64) -> BBLLVM X86_64  ()
-emitX86Return rets = do
-  grets <- mapM mkLLVMValue (x86IntReturn rets)
-  frets <- mapM mkLLVMValue (x86XMMReturn rets)
-
-  -- clang constructs something like
-  -- %3 = insertvalue { i64, i64 } undef, i64 %1, 0
-  -- %4 = insertvalue { i64, i64 } %3, i64 %2, 1
-  -- ret { i64, i64 } %4
-  -- which we will duplicate, with undef padding where required.
-
-  -- cast fp results to the required type
-  cfrets <- forM frets $ \v256 -> do
-    v128 <- convop L.Trunc v256 (L.PrimType (L.Integer 128))
-    bitcast v128 functionFloatType
-
-  let frets' = padUndef functionFloatType (length x86FloatResultRegs) cfrets
-  -- construct the return result struct
-  let initUndef = L.Typed x86LLVMRetType L.ValUndef
-  let grets'    = padUndef (L.iT 64) (length x86ResultRegs) grets
-  v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef (grets' ++ frets')
-  ret v
+  callAsm noSideEffect (L.iT (fromIntegral wv)) "popcnt $0, $1" "=r,r" [v']
 
 ------------------------------------------------------------------------
 -- ArchOps
@@ -411,13 +284,9 @@ emitX86Return rets = do
 x86LLVMArchOps :: String -- ^ Prefix for system call intrinsic
                -> LLVMArchSpecificOps X86_64
 x86LLVMArchOps pname = LLVMArchSpecificOps
-  { archFnArgTypes = \ft -> functionArgType <$> ftArgRegs ft
-  , archFnReturnType = \_ -> x86LLVMRetType
+  { archEndianness = LittleEndian
   , mkInitBlock = mkX86InitBlock
   , archFnCallback = emitX86ArchFn
   , archStmtCallback = emitX86ArchStmt pname
   , popCountCallback = emitPopCount
-  , callCallback =  emitX86Call
-  , tailcallCallback = emitX86Tailcall
-  , returnCallback = emitX86Return
   }

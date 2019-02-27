@@ -52,7 +52,6 @@ import           Data.Foldable
 import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe
-import           Data.Monoid
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
 import           Data.String (fromString)
@@ -73,7 +72,7 @@ import           Data.Macaw.X86
 import           Data.Macaw.X86.SyscallInfo
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..), FunctionType, FunctionTypeMap)
+import           Reopt.CFG.FnRep (Function(..))
 import           Reopt.CFG.FnRep.X86 (X86FunctionType(..))
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM as LLVM
@@ -309,7 +308,7 @@ getX86ElfArchInfo e =
     abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
-                             -> FunctionTypeMap X86_64
+                             -> Map (MemSegmentOff 64) X86FunctionType
 inferFunctionTypeFromDemands dm =
   let go ds m = Map.unionWith Set.union (functionResultDemands ds) m
       retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
@@ -322,7 +321,7 @@ inferFunctionTypeFromDemands dm =
         length $ dropWhile (not . (`Set.member` rs) . Some) $ reverse regs
 
       -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
-      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> FunctionType X86_64
+      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> X86FunctionType
       orderPadArgs (args, rets) =
         X86FunctionType { fnNIntArgs = maximumArgPrefix x86ArgumentRegs args
                         , fnNFloatArgs = maximumArgPrefix x86FloatArgumentRegs args
@@ -352,7 +351,7 @@ getFns logger sysp info = do
 
   let fDems :: Map (MemSegmentOff 64) (DemandSet X86Reg)
       fDems = functionDemands (x86DemandInfo sysp) info
-  let fArgs :: FunctionTypeMap X86_64
+  let fArgs ::  Map (MemSegmentOff 64) X86FunctionType
       fArgs = inferFunctionTypeFromDemands fDems
   seq fArgs $ do
    fmap catMaybes $ forM entries $ \(Some finfo) -> do
@@ -363,7 +362,8 @@ getFns logger sysp info = do
           Left msg -> do
             logger $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
             pure Nothing
-          Right fn -> do
+          Right (warnings, fn) -> do
+            mapM_ logger warnings
             pure (Just fn)
       FunctionHasPLT -> do
         -- Skip PLT functions with no error message.
