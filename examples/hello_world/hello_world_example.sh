@@ -10,8 +10,8 @@ echo "About to relink"
 export PATH="$HOME/opt/binutils-linux/bin:$PATH"
 
 # Path to GNU Assembler for Linux
-# GAS_PATH=$HOME/opt/binutils-linux/bin/x86_64-unknown-linux-as
-GAS_PATH=$(which as)
+GAS_PATH=$HOME/opt/binutils-linux/bin/x86_64-unknown-linux-as
+# GAS_PATH=$(which as)
 
 reopt=$(which reopt)
 

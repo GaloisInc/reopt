@@ -22,7 +22,7 @@ module Reopt.CFG.FnRep
    , FnAssignRhs(..)
    , FnValue(..)
    , Function(..)
-   , FunctionType
+   , FunctionType(..)
    , FunctionTypeMap
    , FnBlock(..)
    , FnStmt(..)
@@ -30,7 +30,6 @@ module Reopt.CFG.FnRep
    , FnRegValue(..)
    , FnPhiVar(..)
    , FnReturnVar(..)
-   , FnReturnInfo
    , FnArchStmt
    , FoldFnValue(..)
    , PhiBinding(..)
@@ -125,7 +124,12 @@ instance Pretty (FnReturnVar tp) where
 ------------------------------------------------------------------------
 -- FunctionType
 
-type family FunctionType (arch :: *) :: *
+data FunctionType (arch :: *) =
+  FunctionType { fnArgTypes :: [Some TypeRepr]
+               , fnReturnTypes :: [Some TypeRepr]
+               }
+  deriving (Ord, Eq, Show)
+
 
 type FunctionTypeMap arch = Map (MemSegmentOff (ArchAddrWidth arch)) (FunctionType arch)
 
@@ -179,11 +183,9 @@ data FnAssignment arch tp
 data FnValue (arch :: *) (tp :: Type) where
   -- | A value from the raw type that we do not yet support at the function level.
   FnValueUnsupported :: !String -> !(TypeRepr tp) -> FnValue arch tp
-
   -- | A value that is actually undefined, like a non-argument
   -- register at the start of a function.
   FnUndefined :: !(TypeRepr tp) -> FnValue arch tp
-
   -- | A particular Bool value
   FnConstantBool :: !Bool -> FnValue arch BoolType
   -- | A particular integer value
@@ -219,7 +221,6 @@ class FoldFnValue (v :: * -> *)  where
   foldFnValue :: forall arch s
               .  ( FoldableF (FnArchStmt arch)
                  , FoldableFC (ArchFn arch)
-                 , FoldableF (FnReturnInfo arch)
                  )
               => (forall u . s -> FnValue arch u -> s)
               -> s
@@ -326,11 +327,6 @@ data PhiBinding r tp
 ------------------------------------------------------------------------
 -- FnStmt
 
--- | Return values from a function call in an architecture-specific format.
---
--- Note, we may identify ways to eliminate this, but for now it seems useful.
-type family FnReturnInfo (arch :: *) :: (Type -> *) -> *
-
 type family FnArchStmt (arch :: *) :: (Type -> *) -> *
 
 data FnStmt arch
@@ -347,24 +343,23 @@ data FnStmt arch
             -- Arguments
             [Some (FnValue arch)]
             -- Return values
-            !(FnReturnInfo arch FnReturnVar)
+            ![Some FnReturnVar]
   | FnArchStmt (FnArchStmt arch (FnValue arch))
 
 instance ( FnArchConstraints arch
-         , FoldableF (FnReturnInfo arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (FnStmt arch) where
   pretty s =
     case s of
-      FnWriteMem addr val -> text "*" <> parens (pretty addr) <+> text "=" <+> pretty val
+      FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
       FnCall f _ args rets ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
             ppRet :: forall tp . FnReturnVar tp -> Doc
             ppRet = pretty
-         in parens (commas (toListF ppRet rets))
+         in parens (commas (viewSome ppRet <$> rets))
             <+> text ":=" <+> text "call"
             <+> pretty f <> parens (commas arg_docs)
       FnArchStmt stmt -> ppArchStmt pretty stmt
@@ -385,7 +380,7 @@ data FnTermStmt arch
    | FnBranch !(FnValue arch BoolType) !(ArchLabel arch) !(ArchLabel arch)
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
                    !(V.Vector (MemSegmentOff (ArchAddrWidth arch)))
-   | FnRet !(FnReturnInfo arch (FnValue arch))
+   | FnRet ![Some (FnValue arch)]
      -- ^ A return from the function with associated values
    | FnTailCall !(FnValue arch (BVType (ArchAddrWidth arch)))
                 -- Type
@@ -395,7 +390,7 @@ data FnTermStmt arch
      -- ^ A call statement to the given location with the arguments
      -- listed that does not return.
 
-instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
+instance FnArchConstraints arch
       => Pretty (FnTermStmt arch) where
   pretty s =
     case s of
@@ -404,7 +399,7 @@ instance (FnArchConstraints arch, FoldableF (FnReturnInfo arch))
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ V.toList $ pretty . segoffAddr <$> vec)
       FnRet rets ->
-        text "return" <+> parens (commas $ toListF pretty rets)
+        text "return" <+> parens (commas $ viewSome pretty <$> rets)
       FnTailCall f _ args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
@@ -413,7 +408,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
-  foldFnValue f s (FnRet rets) = foldlF f s rets
+  foldFnValue f s (FnRet rets) = foldl (\t (Some v) -> f t v) s rets
   foldFnValue f s (FnTailCall fn _ args) = foldl (\s' (Some v) -> f s' v) (f s fn) args
 
 ------------------------------------------------------------------------
@@ -442,7 +437,6 @@ data FnBlock arch
 
 instance (FnArchConstraints arch
          , PrettyF (ArchReg arch)
-         , FoldableF (FnReturnInfo arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (FnBlock arch) where
@@ -483,7 +477,6 @@ data Function arch
 
 instance (FnArchConstraints arch
          , PrettyF (ArchReg arch)
-         , FoldableF (FnReturnInfo arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (Function arch) where

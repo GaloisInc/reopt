@@ -29,10 +29,9 @@ import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (toList, traverse_, foldlM)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
+import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
@@ -40,21 +39,17 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.String (fromString)
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
-import qualified Flexdis86.Register as F
 
 import           Data.Macaw.CFG
 import           Data.Macaw.CFG.BlockLabel
-import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery.State
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
-import           Data.Macaw.X86.Monad (XMMType)
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
 
@@ -62,8 +57,6 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
-
-import Debug.Trace
 
 ------------------------------------------------------------------------
 -- RecoverState
@@ -84,8 +77,11 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsSyscallPersonality  :: !SyscallPersonality
                              -- ^ System call personality
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
-                           , rsCurrentFunctionType :: !(FunctionType X86_64)
-                           , rsFunctionArgs        :: !(FunctionTypeMap X86_64)
+                           , rsCurrentFunctionType :: !X86FunctionType
+                             -- ^ The type of the function being recovered.
+                           , rsFunctionArgs        :: !(Map (MemSegmentOff 64) X86FunctionType)
+                           , rsWarnings :: ![String]
+                             -- ^ List of warnings added so far.
                            }
 
 rsNextAssignId :: Simple Lens (RecoverState ids) FnAssignId
@@ -117,11 +113,11 @@ data RecoverResult ids a
 newtype Recover ids a = Recover { runRecover :: RecoverState ids -> RecoverResult ids a
                                 }
 
-evalRecover :: RecoverState ids -> Recover ids a -> Either String a
+evalRecover :: RecoverState ids -> Recover ids a -> Either String ([String], a)
 evalRecover s0 m =
   case runRecover m s0 of
     RecoverError msg -> Left msg
-    RecoverSuccess r _ -> Right r
+    RecoverSuccess r s -> Right (reverse (rsWarnings s), r)
 
 instance Functor (Recover ids) where
   fmap f m = Recover $ \s ->
@@ -153,6 +149,12 @@ instance MonadError String (Recover ids) where
 instance MonadState (RecoverState ids) (Recover ids) where
   get  = Recover $ \s -> RecoverSuccess s s
   put t = Recover $ \_ -> RecoverSuccess () t
+
+--  | Report a warning
+addWarning :: String -> Recover ids ()
+addWarning msg = do
+  s <- get
+  put $! s { rsWarnings = msg : rsWarnings s }
 
 -- | Create a fresh assign id.
 freshId :: Recover ids FnAssignId
@@ -218,7 +220,6 @@ recoverValue' :: Loc.HasCallStack
 recoverValue' s v = do
   let interpState = rsInterp s
   let mem = rsMemory s
-  let curRegs     = s^.rsCurRegs
   let assignMap   = s^.rsAssignMap
   case v of
     RelocatableValue w addr ->
@@ -233,10 +234,11 @@ recoverValue' s v = do
           case () of
             _ | segmentFlags seg `Perm.hasPerm` Perm.execute
               , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
-                  Right $! FnFunctionEntryValue ft addrRef
+                  Right $! FnFunctionEntryValue (resolveX86FunctionType ft) addrRef
 
-            _ | Map.member addrRef (interpState^.parsedBlocks) -> do
-                  Right $! FnBlockValue addrRef
+            _ | Map.member addrRef (interpState^.parsedBlocks) ->
+                  let msg = "Do not support unctions that reference block addresses."
+                   in Right $! FnValueUnsupported msg (addrWidthTypeRepr w)
 
               | segmentFlags seg `Perm.hasPerm` Perm.write -> do
                   Right $! FnGlobalDataAddr addrRef
@@ -262,9 +264,9 @@ recoverValue' s v = do
         Nothing -> Left $ "Encountered uninitialized assignment: " ++ show (assignId asgn) ++ "\n"
           ++ show (MapF.keys assignMap)
     Initial reg -> do
-      case MapF.lookup reg curRegs of
+      case MapF.lookup reg (s^.rsCurRegs) of
         Nothing ->
-          Right (FnValueUnsupported ("Initial register " ++ show reg) (typeRepr reg))
+          Right $! FnValueUnsupported ("Initial register " ++ show reg) (typeRepr reg)
         Just (CalleeSaved _) ->
           -- trace ("recoverValue unexpectedly encountered callee saved register: " ++ show reg) $ do
           Right $! FnValueUnsupported ("Initial (callee) register " ++ show reg) (typeRepr reg)
@@ -293,9 +295,31 @@ recoverRegister proc_state r = do
     Left msg -> do
       usedAssigns <- gets rsAssignmentsUsed
       Loc.error $ "Unbound register " ++ show r ++ "\n"
-           ++ msg ++ "\n"
-           ++ "Used: " ++ show usedAssigns
+             ++ msg ++ "\n"
+             ++ "Used: " ++ show usedAssigns
     Right fnVal -> pure fnVal
+
+recoverCallTarget :: Loc.HasCallStack
+                => RegState X86Reg (Value X86_64 ids)
+                -> Recover ids (FnValue X86_64 (BVType 64), X86FunctionType)
+recoverCallTarget regState = do
+  s <- get
+  let mem = rsMemory s
+  let v = regState ^. boundValue ip_reg
+  case v of
+    RelocatableValue _ addr
+      | Just addrRef <- asSegmentOff mem addr
+      , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
+          pure (FnFunctionEntryValue (resolveX86FunctionType ft) addrRef, ft)
+    _ ->
+      case recoverValue' s v of
+        Left msg -> do
+          usedAssigns <- gets rsAssignmentsUsed
+          Loc.error $ "IP unresolved\n"
+            ++ msg ++ "\n"
+            ++ "Used: " ++ show usedAssigns
+        Right call_tgt ->
+          pure (call_tgt, ftMaximumFunctionType)
 
 ------------------------------------------------------------------------
 -- recoverStmt
@@ -337,10 +361,10 @@ recoverStmt :: Stmt X86_64 ids -> Recover ids ()
 recoverStmt s = do
   case s of
     AssignStmt asgn -> do
---      usedAssigns <- gets rsAssignmentsUsed
+      usedAssigns <- gets rsAssignmentsUsed
       -- Only add assignment if it is used.
---      when (Some (assignId asgn) `Set.member` usedAssigns) $ do
-      void $ recoverAssign asgn
+      when (Some (assignId asgn) `Set.member` usedAssigns) $ do
+        recoverAssign asgn
     WriteMem addr _ val
       | Initial reg <- val -> do
         reg_v <- uses rsCurRegs (MapF.lookup reg)
@@ -350,7 +374,8 @@ recoverStmt s = do
               Just _int_addr_off -> do
                 -- modifyCurStack $ recordCalleeSavedWrite int_addr_off saved_reg
                 return ()
-              Nothing -> debug DFunRecover "Could not interpret callee saved offset" $ do
+              Nothing -> do
+                addWarning "Could not interpret callee saved offset"
                 recoverWrite addr val
           _ -> do
             recoverWrite addr val
@@ -361,9 +386,10 @@ recoverStmt s = do
     ExecArchStmt stmt0 -> do
       stmt <- traverseF recoverValue stmt0
       addFnStmt (FnArchStmt (X86FnStmt stmt))
-    _ -> trace ("recoverStmt undefined for " ++ show (ppStmt pretty s)) $ do
-      addFnStmt $ FnComment (fromString $ "UNIMPLEMENTED: " ++ show (ppStmt pretty s))
-      return ()
+    InstructionStart _ _ -> do
+      pure ()
+    ArchState _ _ -> do
+      pure ()
 
 ------------------------------------------------------------------------
 -- RecoveredBlockInfo
@@ -382,38 +408,42 @@ addFnBlock b info = Map.insert (fbLabel b) b info
 ------------------------------------------------------------------------
 -- recoverBlock
 
+bitcast :: FnValue X86_64 i -> WidthEqProof i o -> Recover ids (FnValue X86_64 o)
+bitcast x p = evalAssignRhs $ FnEvalApp (Bitcast x p)
+
 -- Figure out what is preserved across the function call.
 getPostCallValue :: BlockLabel 64
                  -> RegState X86Reg (Value X86_64 ids)
                      -- ^ Value of registers before syscall
-                 -> FnReturnInfo X86_64 FnReturnVar
+                 -> [FnReturnVar (BVType 64)]
+                 -> [FnReturnVar (VecType 8 (FloatType DoubleFloat))]
                  -> X86Reg tp
                  -> Recover ids (FnValue X86_64 tp)
-getPostCallValue lbl proc_state rs r = do
-  let intrs   = x86IntReturn rs
-  let floatrs = x86XMMReturn rs
+getPostCallValue lbl proc_state intrs floatrs r = do
   case r of
     _ | Just Refl <- testEquality (typeRepr r) (BVTypeRepr n64)
-      , Just rv <- lookup r ([RAX, RDX] `zip` intrs) ->
+      , Just rv <- lookup r (x86ResultRegs `zip` intrs) ->
         return $ FnReturn rv
 
       | Just Refl <- testEquality r sp_reg -> do
         spv <- recoverRegister proc_state sp_reg
         evalAssignRhs $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
 
-    X86_YMMReg (F.YMMR rIdx)
+    X86_ZMMReg rIdx
       | length floatrs > fromIntegral rIdx -> do
-        let v = FnReturn (floatrs !! fromIntegral rIdx)
-        evalAssignRhs $ FnEvalApp $ UExt v n256
+        let x = FnReturn (floatrs !! fromIntegral rIdx)
+        v <- bitcast x (VecEqCongruence n8 (FromFloat DoubleFloatRepr))
+        bitcast v (PackBits n8 n64)
 
    -- df is 0 after a function call.
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
 
     _ | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister proc_state r
-    _ -> debug DFunRecover ("WARNING: Nothing known about register "
-                                         ++ show r ++ " at " ++ show lbl ++ "\n"
-                                        ) $ do
+    _ -> do
+      addWarning ("WARNING: Nothing known about register "
+                   ++ show r ++ " at " ++ show lbl ++ "\n"
+                 )
       let nm = "post-call register " ++ show r
       return $! FnValueUnsupported nm (typeRepr r)
 
@@ -435,7 +465,8 @@ getPostSyscallValue lbl proc_state r =
 
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
 
-    _ -> debug DFunRecover ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl) $
+    _ -> do
+      addWarning ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show lbl)
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
 mkBlock :: BlockLabel 64
@@ -453,19 +484,19 @@ mkBlock lbl phis tm m = do
                     , fbRegMap = m
                     }
 
-recoverX86TermStmt' :: forall ids
-             .  DemandedUseMap
-                -- ^ Map from address to registers that address will read.
-             -> [Some (PhiBinding X86Reg)]
-                -- ^ Phi bindings from input block
-             -> BlockLabel 64
-             -> X86TermStmt ids
-             -> RegState (ArchReg X86_64) (Value X86_64 ids)
-             -> Maybe (MemSegmentOff 64)
-             -> Recover ids (FnBlock X86_64)
-recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr =
+recoverX86TermStmt :: forall ids
+                   .  DemandedUseMap
+                   -- ^ Map from address to registers that address will read.
+                   -> [Some (PhiBinding X86Reg)]
+                   -- ^ Phi bindings from input block
+                   -> BlockLabel 64
+                   -> X86TermStmt ids
+                   -> RegState (ArchReg X86_64) (Value X86_64 ids)
+                   -> Maybe (MemSegmentOff 64)
+                   -> Recover ids (FnBlock X86_64)
+recoverX86TermStmt registerUseMap phis lbl tstmt proc_state mnext_addr =
   case tstmt of
-    Hlt -> do
+    Hlt ->
       throwError "hlt is not supported in function recovery."
     UD2 -> do
       throwError "ud2 is not supported in function recovery."
@@ -523,24 +554,9 @@ recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr =
           regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
           mkBlock lbl phis (FnJump (mkRootBlockLabel next_addr)) regs'
 
-recoverX86TermStmt :: forall ids
-             .  DemandedUseMap
-                -- ^ Map from address to registers that address will read.
-             -> [Some (PhiBinding X86Reg)]
-                -- ^ Phi bindings from input block
-             -> RecoveredBlockInfo
-             -> BlockLabel 64
-             -> X86TermStmt ids
-             -> RegState (ArchReg X86_64) (Value X86_64 ids)
-             -> Maybe (MemSegmentOff 64)
-             -> Recover ids RecoveredBlockInfo
-recoverX86TermStmt registerUseMap phis blockInfo lbl tstmt proc_state mnext_addr = do
-  fb <- recoverX86TermStmt' registerUseMap phis lbl tstmt proc_state mnext_addr
-  pure $! blockInfo & addFnBlock fb
-
 -- | Given a register state this interprets the function arguments.
 evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
-                 -> FunctionType X86_64
+                 -> X86FunctionType
                  -> Recover ids [Some (FnValue X86_64)]
 evalFunctionArgs proc_state ft = do
   intArgs <-
@@ -548,11 +564,56 @@ evalFunctionArgs proc_state ft = do
       Some <$> recoverRegister proc_state r
   floatArgs <-
     forM [0 .. (fnNFloatArgs ft - 1)] $ \i -> do
-      let r = X86_YMMReg (F.ymmReg (fromIntegral i))
-      v256 <- recoverRegister proc_state r
-      xmmVal <- evalAssignRhs $ FnEvalApp $ Trunc v256 n128
-      pure $ Some xmmVal
+      v512 <- recoverRegister proc_state (X86_ZMMReg (fromIntegral i))
+      vv <- bitcast v512 (UnpackBits n8 n64)
+      fmap Some $ bitcast vv (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
+      -- evalAssignRhs $ FnEvalApp $ Bitcast v512 (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
   pure $! intArgs ++ floatArgs
+
+-- | This removes the instruction that pushes the return address to the stack.
+stripPushReturn :: MemSegmentOff 64 -- ^ Expected return address
+                -> BVValue X86_64 ids 64 -- ^ Value in stack pointer next.
+                -> [Stmt X86_64 ids] -- ^ Statements in reverse order
+                -> Either String [Stmt X86_64 ids]
+stripPushReturn _addr _next_sp [] =
+  Left "No instructions with push of return address."
+stripPushReturn _addr _next_sp (AssignStmt{}:_) =
+  Left "Assignment before push of return address."
+stripPushReturn retAddr next_sp (WriteMem addr valRepr val:l)
+  -- Check for a call statement by determining if the last statement
+  -- writes an executable address to the stack pointer.
+  | Just _ <- testEquality addr next_sp
+    -- Check this is the right length.
+  , Just Refl <- testEquality (BVMemRepr n8 LittleEndian) valRepr
+    -- Check if value is a valid literal address
+  , Just val_a <- valueAsMemAddr val
+    -- Check if segment of address is marked as executable.
+  , segoffAddr retAddr == val_a =
+    Right l
+  | otherwise =
+    Left "Unexpected right before push of return address."
+stripPushReturn _addr _ (InstructionStart{}:_) =
+  Left "Instruction start before return address."
+stripPushReturn addr next_sp (s@Comment{}:l)= do
+  (s:) <$> stripPushReturn addr next_sp l
+stripPushReturn _addr _ (ExecArchStmt{}:_) =
+  Left "Arch statement before push of return address."
+stripPushReturn addr next_sp (s@ArchState{}:l) =
+  (s:) <$> stripPushReturn addr next_sp l
+
+mkIntReturnVars :: X86FunctionType -> Recover ids [FnReturnVar (BVType 64)]
+mkIntReturnVars ft = replicateM (fnNIntRets ft) $ mkReturnVar knownRepr
+
+type ZMMFloatType = VecType 8 (FloatType DoubleFloat)
+
+zmmFloatRepr :: TypeRepr ZMMFloatType
+zmmFloatRepr = VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr)
+
+
+mkFloatReturnVars :: X86FunctionType
+                  -> Recover ids [FnReturnVar ZMMFloatType]
+mkFloatReturnVars ft =
+  replicateM (fnNFloatRets ft) $ mkReturnVar zmmFloatRepr
 
 recoverBlock :: forall ids
              .  DemandedUseMap
@@ -573,59 +634,78 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
   -- Clear stack offsets
   rsCurLabel  .= lbl
 
-  -- Recover statements
-  Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+  -- Recover term statement
   case stmtsTerm stmts of
     ParsedCall proc_state m_ret_addr -> do
-      -- Get call target
-      call_tgt <- recoverRegister proc_state ip_reg
-      -- Get function type.
-      ft <-
-        case call_tgt of
-          FnFunctionEntryValue ft _ -> pure ft
-          _ -> pure ftMaximumFunctionType
-      -- Evaluate call arguments
-
-      args <- evalFunctionArgs proc_state ft
-      -- Case split on whether this is a tail call or not so we can decide which
-      -- type of statement to emit.
       case m_ret_addr of
         -- Add a call, then jump
         Just ret_addr -> do
+          -- Recover statements
+          let next_sp = proc_state^.boundValue sp_reg
+          case stripPushReturn ret_addr next_sp (reverse (stmtsNonterm stmts)) of
+            Left e -> error e
+            Right l -> Fold.traverse_ recoverStmt (reverse l)
+          -- Get call target
+          (call_tgt, ft) <- recoverCallTarget proc_state
+          -- Evaluate call arguments
+          args <- evalFunctionArgs proc_state ft
+          -- Case split on whether this is a tail call or not so we can decide which
+          -- type of statement to emit.
+          let ftp = resolveX86FunctionType ft
           -- May not be used (only if called function returns at these types)
-          intrs   <- replicateM (fnNIntRets ft) $ mkReturnVar (knownRepr :: TypeRepr (BVType 64))
-          floatrs <- replicateM (fnNFloatRets ft) $ mkReturnVar (knownRepr :: TypeRepr XMMType)
-          let ri = X86FnReturnInfo { x86IntReturn = intrs
-                                   , x86XMMReturn = floatrs
-                                   }
+          intrs   <- mkIntReturnVars ft
+          floatrs <- mkFloatReturnVars ft
+          let ri = fmap Some intrs ++ fmap Some floatrs
           -- Add call statement
-          addFnStmt (FnCall call_tgt ft args ri)
+          addFnStmt (FnCall call_tgt ftp args ri)
           -- Get registers that return address needs.
           let nextRegsNeeded = Map.findWithDefault Set.empty ret_addr registerUseMap
           -- Get registers for next block.
-          let go :: MapF X86Reg (FnRegValue X86_64)
-                 -> Some X86Reg
-                 -> Recover ids (MapF X86Reg (FnRegValue X86_64))
-              go m (Some r) = do
-                v <- getPostCallValue lbl proc_state ri r
-                return $! MapF.insert r (FnRegValue v) m
-          regs' <- foldM go MapF.empty nextRegsNeeded
-          -- Get next label to jump to.
-          let ret_lbl = mkRootBlockLabel ret_addr
-          -- Create block
-          fb <- mkBlock lbl phis (FnJump ret_lbl) regs'
+          regs' <- do
+            let go :: MapF X86Reg (FnRegValue X86_64)
+                   -> Some X86Reg
+                   -> Recover ids (MapF X86Reg (FnRegValue X86_64))
+                go m (Some r) = do
+                  v <- getPostCallValue lbl proc_state intrs floatrs r
+                  return $! MapF.insert r (FnRegValue v) m
+            foldM go MapF.empty nextRegsNeeded
+          -- Create block that ends with jump to return address.
+          fb <- mkBlock lbl phis (FnJump (mkRootBlockLabel ret_addr)) regs'
           return $! blockInfo & addFnBlock fb
         Nothing -> do
-          -- TODO: Check that return types match.
-          fb <- mkBlock lbl phis (FnTailCall call_tgt ft args) MapF.empty
+          thisFunType <- gets rsCurrentFunctionType
+          -- Recover statements
+          Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+          -- Get call target
+          (callTarget, callX86FunType) <- recoverCallTarget proc_state
+          -- Evaluate call arguments
+          args <- evalFunctionArgs proc_state callX86FunType
+          intrs   <- mkIntReturnVars callX86FunType
+          floatrs <- mkFloatReturnVars callX86FunType
+          let ri = fmap Some intrs ++ fmap Some floatrs
+          -- Add function
+          let callFunType = resolveX86FunctionType callX86FunType
+          addFnStmt (FnCall callTarget callFunType args ri)
+
+          -- Create block
+          let ri2 = take (fnNIntRets thisFunType)
+                         (fmap (Some . FnReturn) intrs   ++ repeat (Some (FnUndefined (BVTypeRepr n64))))
+                 ++ take (fnNFloatRets thisFunType)
+                         (fmap (Some . FnReturn) floatrs ++ repeat (Some (FnUndefined zmmFloatRepr)))
+          fb <- mkBlock lbl phis (FnRet ri2) MapF.empty
           return $! blockInfo & addFnBlock fb
     PLTStub _ _ _ -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
       Loc.error $ "Cannot recover functions with PLT stubs."
     ParsedTranslateError _ -> do
       Loc.error "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure _ ->
       Loc.error $ "Classification failed in Recovery"
     ParsedIte c tblock fblock -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+      -- Recover term statement
       cv <- recoverValue c
       fb <- mkBlock lbl phis
                     (FnBranch cv (lbl { labelIndex = stmtsIdent tblock })
@@ -635,6 +715,9 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       recoverBlock registerUseMap [] b fblock xr
 
     ParsedJump proc_state tgt_addr -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+      -- Recover term statement
       let go :: MapF X86Reg (FnRegValue X86_64)
              -> Some X86Reg
              -> Recover ids (MapF X86Reg (FnRegValue X86_64))
@@ -650,23 +733,31 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
       pure $! blockInfo & addFnBlock bl
 
     ParsedReturn proc_state -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+      -- Recover term stmt
       ft <- gets rsCurrentFunctionType
       grets' <- mapM (recoverRegister proc_state) (ftIntRetRegs ft)
       frets' <- forM (ftFloatRetRegs ft) $ \r -> do
-        v <- recoverRegister proc_state r
-        evalAssignRhs $ FnEvalApp $ Trunc v n128
+        x <- recoverRegister proc_state r
+        v <- bitcast x (UnpackBits n8 n64)
+        bitcast v (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
 
-      let ri = X86FnReturnInfo { x86IntReturn = grets'
-                               , x86XMMReturn = frets'
-                               }
-
+      let ri = fmap Some grets' ++ fmap Some frets'
       bl <- mkBlock lbl phis (FnRet ri) MapF.empty
       pure $! blockInfo & addFnBlock bl
 
-    ParsedArchTermStmt ts proc_state next_addr ->
-      recoverX86TermStmt registerUseMap phis blockInfo lbl ts proc_state next_addr
+    ParsedArchTermStmt ts proc_state next_addr -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+      -- Recover term statement
+      fb <- recoverX86TermStmt registerUseMap phis lbl ts proc_state next_addr
+      pure $! blockInfo & addFnBlock fb
 
     ParsedLookupTable proc_state idx vec -> do
+      -- Recover statements
+      Fold.traverse_ recoverStmt (stmtsNonterm stmts)
+      -- Recover term statement
       let go :: MapF X86Reg (FnRegValue X86_64)
              -> Some X86Reg
              -> Recover ids (MapF X86Reg (FnRegValue X86_64))
@@ -685,43 +776,38 @@ recoverBlock registerUseMap phis b stmts blockInfo = seq blockInfo $ do
 
 ------------------------------------------------------------------------
 -- allocateStackFrame
-allocateStackFrame :: forall ids . StatementList X86_64 ids -> Set (StackDepthValue X86_64 ids) -> Recover ids ()
-allocateStackFrame stmts sd
-  | Set.null sd          =
-    debug DFunRecover "WARNING: no stack use detected" $ return ()
-  | [s] <- Set.toList sd = do
-      -- Invoke allocation is non-zero
-      when (not (null (dynamicPart s)) || staticPart s /= 0) $ do
-        -- Compute assignments needed for evaluating dynamic part of stack
-        let vals = (Some . stackDepthOffsetValue) <$> Set.toList (dynamicPart s)
-        case valueDependencies vals of
-          Left msg -> throwError $ "Could not allocate stack frame: " ++ msg
-          Right asgns -> do
-            -- Resolve each assignment in initial block.
-            let goStmt :: Set (Some (AssignId ids)) -> Stmt X86_64 ids -> Recover ids (Set (Some (AssignId ids)))
-                goStmt depSet (AssignStmt asgn)
-                  | Set.member (Some (assignId asgn)) depSet = do
-                    recoverAssign asgn
-                    pure $! Set.delete (Some (assignId asgn)) depSet
-                goStmt depSet _ = return depSet
-            remaining_asgns <- foldlM goStmt asgns (stmtsNonterm stmts)
-            when (not (Set.null remaining_asgns)) $ do
-              throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
-        let doOneDelta :: StackDepthOffset X86_64 ids
-                       -> Recover ids (FnValue X86_64 (BVType 64))
-                       -> Recover ids (FnValue X86_64 (BVType 64))
-            doOneDelta (Pos _) _   = Loc.error "Saw positive stack delta"
-            doOneDelta (Neg x) m_v = do
-              v0 <- m_v
-              v  <- recoverValue x
-              evalAssignRhs $ FnEvalApp $ BVAdd knownNat v v0
-        let sz0 = toInteger (negate $ staticPart s)
-        szv <- foldr doOneDelta (return (FnConstantValue n64 sz0)) (dynamicPart s)
-        alloc <- evalAssignRhs $ FnAlloca szv
-        spTop <- evalAssignRhs $ FnEvalApp $ BVAdd knownNat alloc szv
-        rsCurRegs %= MapF.insert sp_reg (FnRegValue spTop)
-
-  | otherwise = debug DFunRecover "WARNING: non-singleton stack depth" $ return ()
+allocateStackFrame :: forall ids
+                   . StatementList X86_64 ids
+                   -> StackDepthValue X86_64 ids
+                   -> Recover ids (FnValue X86_64 (BVType 64))
+allocateStackFrame stmts s = do
+  -- Compute assignments needed for evaluating dynamic part of stack
+  let vals = (Some . stackDepthOffsetValue) <$> Set.toList (dynamicPart s)
+  case valueDependencies vals of
+    Left msg -> throwError $ "Could not allocate stack frame: " ++ msg
+    Right asgns -> do
+      -- Resolve each assignment in initial block.
+      let goStmt :: Set (Some (AssignId ids)) -> Stmt X86_64 ids -> Recover ids (Set (Some (AssignId ids)))
+          goStmt depSet (AssignStmt asgn)
+            | Set.member (Some (assignId asgn)) depSet = do
+                recoverAssign asgn
+                pure $! Set.delete (Some (assignId asgn)) depSet
+          goStmt depSet _ = return depSet
+      remaining_asgns <- foldlM goStmt asgns (stmtsNonterm stmts)
+      when (not (Set.null remaining_asgns)) $ do
+        throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
+  let doOneDelta :: StackDepthOffset X86_64 ids
+                 -> Recover ids (FnValue X86_64 (BVType 64))
+                 -> Recover ids (FnValue X86_64 (BVType 64))
+      doOneDelta (Pos _) _   = Loc.error "Saw positive stack delta"
+      doOneDelta (Neg x) m_v = do
+        v0 <- m_v
+        v  <- recoverValue x
+        evalAssignRhs $ FnEvalApp $ BVAdd knownNat v v0
+  let sz0 = toInteger (negate $ staticPart s)
+  szv <- foldr doOneDelta (return (FnConstantValue n64 sz0)) (dynamicPart s)
+  alloc <- evalAssignRhs $ FnAlloca szv
+  evalAssignRhs $ FnEvalApp $ BVAdd knownNat alloc szv
 
 ------------------------------------------------------------------------
 -- recoverFunction
@@ -743,18 +829,19 @@ recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> MemSegmentOff 64
                   -> Recover ids RecoveredBlockInfo
 recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
-  let regs0 :: [Some X86Reg]
-      regs0 =
-        case Map.lookup addr blockRegs of
-          Nothing -> debug DFunRecover ("WARNING: No regs for " ++ show addr) []
-          Just x  -> Set.toList x
   let mkIdFromReg :: MapF X86Reg FnPhiVar
                   -> Some X86Reg
                   -> Recover ids (MapF X86Reg FnPhiVar)
       mkIdFromReg m (Some r) = do
         next_id <- freshId
         pure $! MapF.insert r (FnPhiVar next_id (typeRepr r)) m
-  regs1 <- foldM mkIdFromReg MapF.empty regs0
+  regs1 <-
+    case Map.lookup addr blockRegs of
+      Nothing -> do
+        addWarning ("WARNING: No regs for " ++ show addr)
+        pure MapF.empty
+      Just x -> do
+        foldM mkIdFromReg MapF.empty x
   rsCurRegs .= fmapF (FnRegValue . FnPhiValue) regs1
    -- Get predecessors for this block.
   let Just preds = Map.lookup addr blockPreds
@@ -763,21 +850,31 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
   let Just reg = Map.lookup addr (fInfo^.parsedBlocks)
   recoverBlock blockRegs phis reg (blockStatementList reg) blockInfo
 
+resolveX86FunctionType :: X86FunctionType -> FunctionType X86_64
+resolveX86FunctionType ft =
+  FunctionType { fnArgTypes = mapSome typeRepr <$> ftArgRegs ft
+               , fnReturnTypes = replicate (fnNIntRets   ft) (Some (BVTypeRepr n64))
+                              ++ replicate (fnNFloatRets ft) (Some zmmFloatRepr)
+               }
+
 -- | Recover the function at a given address.
+--
+-- Returns either an error message with a fatal error, or a list of warnings and a function.
 recoverFunction :: forall ids
                 .  SyscallPersonality
-                -> FunctionTypeMap X86_64
+                -> Map (MemSegmentOff 64) X86FunctionType
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
-                -> Either String (Function X86_64)
+                -> Either String ([String], Function X86_64)
 recoverFunction sysp fArgs mem fInfo = do
 
   let a = discoveredFunAddr fInfo
   let blockPreds = funBlockPreds fInfo
 
-  let cft = fromMaybe
-              (debug DFunRecover ("Missing type for " ++ show a) ftMaximumFunctionType) $
-              Map.lookup a fArgs
+  let (warn, cft) =
+        case Map.lookup a fArgs of
+          Just r -> ([], r)
+          Nothing -> (["Missing type for " ++ show a], ftMaximumFunctionType)
 
   let (usedAssigns, blockRegs)
         = registerUse mem sysp fArgs fInfo cft blockPreds
@@ -802,7 +899,8 @@ recoverFunction sysp fArgs mem fInfo = do
               , rsSyscallPersonality = sysp
               , rsAssignmentsUsed = usedAssigns
               , rsCurrentFunctionType = cft
-              , rsFunctionArgs    = fArgs
+              , rsFunctionArgs = fArgs
+              , rsWarnings     = warn
               }
 
   evalRecover rs $ do
@@ -816,15 +914,24 @@ recoverFunction sysp fArgs mem fInfo = do
     let Just b = Map.lookup a (fInfo^.parsedBlocks)
     let stmts = blockStatementList b
 
-    case maximumStackDepth fInfo a of
-      Right depths -> allocateStackFrame stmts depths
+    case maximumStackDepth fInfo of
+      Right depths ->
+        case Set.toList depths of
+          [] -> do
+            addWarning "WARNING: no stack use detected"
+            pure ()
+          [s] -> do
+            when (not (null (dynamicPart s)) || staticPart s /= 0) $ do
+              spTop <- allocateStackFrame stmts s
+              rsCurRegs %= MapF.insert sp_reg (FnRegValue spTop)
+          _ -> throwError $ "non-singleton stack depth"
       Left msg -> throwError $ "maximumStackDepth: " ++ msg
 
     r0 <- recoverBlock blockRegs [] b stmts emptyRecoveredBlockInfo
     rf <- foldM (recoverInnerBlock fInfo blockRegs blockPreds) r0 (Map.keys blockPreds)
 
     pure Function { fnAddr = a
-                  , fnType = cft
+                  , fnType = resolveX86FunctionType cft
                   , fnName = discoveredFunName fInfo
                   , fnBlocks = Map.elems rf
                   }

@@ -235,7 +235,7 @@ addStateVars init_sp s =
 
 
 -- | This function finds references to the stack pointer in the statements to
--- infer the maximal stack offset that may be referenced by the pointe.
+-- infer the maximal stack offset that may be referenced by the points.
 --
 -- In this case, the stack pointer is assumed to grow down (X86 specific),
 -- so maximal actually means the largest negative offset.
@@ -309,14 +309,14 @@ recoverIter finfo = do
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
 maximumStackDepth :: DiscoveryFunInfo X86_64 ids
-                  -> MemSegmentOff 64
                   -> Either String (BlockStackDepths X86_64 ids)
-maximumStackDepth ist addr = finish $ runState (runExceptT (recoverIter ist)) s0
+maximumStackDepth ist = finish $ runState (runExceptT (recoverIter ist)) s0
   where
+    addr = discoveredFunAddr ist
+    sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
     s0   = SDS { _blockInitStackPointers = Map.singleton addr sdv0
                , _blockStackRefs         = Set.empty
                , _blockFrontier          = [addr]
                }
-    sdv0 = SDV { staticPart = 0, dynamicPart = Set.empty }
     finish (Right (), s) = Right $ minimizeStackDepthValues $ s ^. blockStackRefs
     finish (Left e, _) = Left e
