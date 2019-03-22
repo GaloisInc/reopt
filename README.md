@@ -51,16 +51,9 @@ In addition to Hackage dependencies, Reopt has the following dependencies:
 
 # Installation
 
-Assuming you have modern git, GHC, and cabal-install you should be able to
-install with:
+If you have `git` and Haskell `stack`, you should be able to install with:
 
 ```
 git submodule update --init
-cabal new-build exe:reopt
-```
-
-And a first run with:
-
-```
-cabal new-run reopt -- --help
+stack install reopt
 ```

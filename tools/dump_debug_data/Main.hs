@@ -1,10 +1,8 @@
 module Main (main) where
 
-import           Control.Monad
 import qualified Data.ByteString as BS
 import           Data.ElfEdit
 import           Data.Macaw.Dwarf
-import           Data.Macaw.Memory.ElfLoader
 import           System.Environment
 import           System.IO
 
