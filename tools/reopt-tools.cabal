@@ -13,25 +13,6 @@ flag enable-arm
   Description: Enable support for ARM binaries
   Default: False
 
-executable LLVMDumpInstr
-  build-depends:
-    base >= 4,
-    ansi-wl-pprint,
-    binary,
-    bytestring,
-    containers,
-    flexdis86,
-    lens,
-    llvm-pretty,
-    macaw-base,
-    macaw-x86,
-    mtl,
-    parameterized-utils,
-    reopt
-
-  hs-source-dirs: utils
-  main-is: LLVMDumpInstr.hs
-
 executable dump_debug_data
   build-depends:
     base >= 4,
