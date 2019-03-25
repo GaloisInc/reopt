@@ -425,7 +425,7 @@ reoptVersion = "Reopt binary reoptimizer (reopt) "  ++ versionString ++ "."
         versionString = show h ++ "." ++ show l ++ "." ++ show r
 
 copyrightNotice :: String
-copyrightNotice = "Copyright 2014-17 Galois, Inc."
+copyrightNotice = "Copyright 2014-19 Galois, Inc."
 
   -- | Flag to set the path to the binary to analyze.
 filenameArg :: Arg Args

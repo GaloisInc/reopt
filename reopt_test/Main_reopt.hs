@@ -144,7 +144,7 @@ loadOpt args = LoadOptions { loadStyle = args^.argsLoadStyle
 
 arguments :: Mode Args
 arguments = mode "reopt_test" defaultArgs help filenameArg flags
-  where help = reoptVersion ++ "\n" ++ copyrightNotice
+  where help = reoptVersion
         flags = [ instrFlag
                 , testFlag
                 , applicationFlag
@@ -183,13 +183,9 @@ traceFlag = flagOpt "100" [ "trace", "T"] upd "N" help
         help = "Trace execution by printing a '.' for each N instructions"
 
 reoptVersion :: String
-reoptVersion = "Reopt semantics verifier (reopt_test) "
-             ++ versionString ++ ", June 2014."
+reoptVersion = "Reopt semantics verifier (reopt_test) " ++ versionString
   where [h,l,r] = versionBranch version
         versionString = show h ++ "." ++ show l ++ "." ++ show r
-
-copyrightNotice :: String
-copyrightNotice = "Copyright 2014 Galois, Inc. All rights reserved."
 
 filenameArg :: Arg Args
 filenameArg = Arg { argValue = setFilename
