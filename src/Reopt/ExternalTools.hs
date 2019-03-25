@@ -1,8 +1,4 @@
 {-|
-Module     : Reopt.ExternalTools
-Copyright  : (c) Galois, Inc 2016
-Maintainer : jhendrix@galois.com
-
 This defines operations that require external tools installed on the system.
 -}
 {-# LANGUAGE ScopedTypeVariables #-}

@@ -1,6 +1,4 @@
 {-|
-Copyright        : (c) Galois, Inc 2018
-
 Defines a program representation with machine registers replaced by
 values.
 -}

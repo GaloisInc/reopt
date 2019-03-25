@@ -1,7 +1,4 @@
 {-|
-Copyright   : (c) Galois Inc, 2016-2018
-Maintainer  : jhendrix@galois.com
-
 This contains defines operations to work with the object containing new code.
 -}
 {-# LANGUAGE DataKinds #-}

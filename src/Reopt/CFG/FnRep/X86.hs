@@ -1,6 +1,4 @@
 {-|
-Copyright        : (c) Galois, Inc 2018
-
 Defines the X86-specific definitions needed in the function representation.
 -}
 {-# LANGUAGE DataKinds #-}
