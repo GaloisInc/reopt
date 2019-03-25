@@ -1,6 +1,4 @@
 {-|
-Copyright        : (c) Galois, Inc 2015-2018
-
 This provides functionality for converting the
 architecture-independent components of @FnReop@ functions into LLVM.
 

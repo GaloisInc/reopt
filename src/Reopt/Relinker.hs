@@ -1,7 +1,4 @@
 {-|
-Copyright   : (c) Galois Inc, 2016-2018
-Maintainer  : jhendrix@galois.com
-
 This module performs the merging between the binary and new object.
 -}
 {-# LANGUAGE DataKinds #-}

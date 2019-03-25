@@ -1,7 +1,5 @@
 {-|
-Copyright        : (c) Galois, Inc 2015-2018
-
-X86-specific operations for FunRep
+X86-specific operations for LLVM generation.
 -}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}

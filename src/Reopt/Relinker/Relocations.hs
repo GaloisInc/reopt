@@ -1,7 +1,4 @@
 {-|
-Copyright   : (c) Galois Inc, 2015-2018
-Maintainer  : jhendrix@galois.com
-
 This module is used to relocate object code into the new address.
 -}
 {-# LANGUAGE DataKinds #-}

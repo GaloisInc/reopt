@@ -1,9 +1,6 @@
 {-|
-Copyright        : (c) Galois, Inc 2017
-Maintainer       : Joe Hendrix <jhendrix@galois.com>
-
-Provides utility for checking that all blocks in function info have non-error terminal
-statements.
+Provides utility for checking that all blocks in function info have
+non-error terminal statements.
 -}
 {-# LANGUAGE FlexibleContexts #-}
 module Reopt.CFG.FunctionCheck

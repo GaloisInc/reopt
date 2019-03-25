@@ -1,7 +1,4 @@
 {-|
-Copyright   : (c) Galois Inc, 2015-2016
-Maintainer  : jhendrix@galois.com
-
 This module provides methods for constructing functions from the basic
 blocks discovered by 'Data.Macaw.Discovery'.
 -}
