@@ -79,6 +79,7 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           GHC.TypeLits
+import           Numeric (showHex)
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
@@ -202,8 +203,23 @@ llvmFunctionName m prefix
 blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
 blockWordName o = L.Ident $ show $ GeneratedBlock o 0
 
+-- | This generates a LLVM block label from a block.
 blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
-blockName l = L.Named (L.Ident (show l))
+blockName (GeneratedBlock s w) =
+  let seg = segoffSegment s
+      off = segoffOffset s
+      addr =
+        if segmentBase seg == 0 then
+          showString "_"
+          . showHex (segmentOffset seg + off)
+        else
+          showString "_"
+          . shows (segmentBase seg)
+          . showString "_"
+          . showHex (segmentOffset seg + off)
+      post | w == 0 = ""
+           | otherwise = "_" ++ show w
+   in L.Named (L.Ident ("block_" ++ addr post))
 
 -- The type of FP arguments and results.  We actually want fp128, but
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
