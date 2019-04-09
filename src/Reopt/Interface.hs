@@ -10,12 +10,8 @@ module Reopt.Interface
   ( -- * Binary discovery
     DiscoveryOptions(..)
   , defaultDiscoveryOptions
-  , discoverBinary
     -- * Functions
   , getFns
-    -- * Architecture info
-  , SomeArchitectureInfo(..)
-  , getElfArchInfo
     -- * X86 specific
   , X86OS(..)
   , osPersonality
@@ -33,7 +29,6 @@ module Reopt.Interface
   , elfSegmentMap
   , addrRedirection
     -- * Utilities
-  , resolveSymName
   , compileLLVM
   , writeFileBuilder
   ) where
@@ -46,7 +41,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.UTF8 as UTF8
-import           Data.Either
 import           Data.ElfEdit
 import           Data.Foldable
 import           Data.Map (Map)
@@ -54,9 +48,7 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
-import           Data.String (fromString)
 import           Data.Word
-import           Numeric (readHex)
 import           System.IO
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
@@ -79,11 +71,6 @@ import           Reopt.CFG.LLVM as LLVM
 import           Reopt.CFG.Recovery
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Relinker
-
-#ifdef SUPPORT_ARM
-import qualified Data.VEX.FFI
-import           Data.Macaw.ARM
-#endif
 
 ------------------------------------------------------------------------
 -- X86-specific functions
@@ -152,129 +139,7 @@ ppLLVM LLVM36 m = LPP.ppLLVM36 $ LPP.ppModule m
 ppLLVM LLVM37 m = LPP.ppLLVM37 $ LPP.ppModule m
 ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
 
-------------------------------------------------------------------------
--- Architecture info
 
-data SomeArchitectureInfo w =
-  forall arch
-    . ( w ~ RegAddrWidth (ArchReg arch)
-      )
-    => SomeArch (ArchitectureInfo arch)
-
-------------------------------------------------------------------------
--- Get binary information
-
-getElfArchInfo :: Elf w -> IO (SomeArchitectureInfo w)
-getElfArchInfo e =
-  case (elfClass e, elfMachine e, elfOSABI e) of
-    (ELFCLASS64, EM_X86_64, ELFOSABI_LINUX)   -> pure (SomeArch x86_64_linux_info)
-    (ELFCLASS64, EM_X86_64, ELFOSABI_SYSV)    -> pure (SomeArch x86_64_linux_info)
-    (ELFCLASS64, EM_X86_64, ELFOSABI_FREEBSD) -> pure (SomeArch x86_64_freeBSD_info)
-#ifdef SUPPORT_ARM
-    (ELFCLASS32, EM_ARM, ELFOSABI_SYSV) -> do
-      Data.VEX.FFI.init Data.VEX.FFI.stdOptions
-      pure (SomeArch armArchle)
-#endif
-    (cl, arch, abi) -> do
-     fail $ "Do not support " ++ show (elfClassBitWidth cl) ++ "-bit "
-            ++ show arch ++ "-" ++ show abi ++ "binaries."
-
-------------------------------------------------------------------------
--- Resolve symbol addresses
-
--- | Resolve a hex string or other string as a address of symbol name.
-resolveSymName :: String -> Either Word64 String
-resolveSymName ('0':'x': nm) | [(w,"")] <- readHex nm = Left w
-resolveSymName ('0':'X': nm) | [(w,"")] <- readHex nm = Left w
-resolveSymName nm = Right nm
-
--- | Attempt to find the address of a string identifying a symbol
--- name, and return either the string if it cannot be resolved or the
--- address.
-resolveSymAddr :: Memory w
-               -> Map BS.ByteString [MemSegmentOff w]
-                 -- ^ Map from symbol names in binary to their address.
-              -> String
-                 -- ^ The name of a symbol as a string.
-              -> Either String [MemSegmentOff w]
-resolveSymAddr mem symMap nm0 = addrWidthClass (memAddrWidth mem) $
-  case resolveSymName nm0 of
-    Left w ->
-      case resolveAbsoluteAddr mem (fromIntegral w) of
-        Just off -> Right [off]
-        Nothing -> Left nm0
-    Right nm -> do
-      case Map.lookup (fromString nm) symMap of
-         Just addrs -> Right addrs
-         Nothing -> Left nm
-
-resolveIncludeFn :: Memory w
-                 -> Map BS.ByteString [MemSegmentOff w]
-                    -- ^ Map from symbol names to addresses with name
-                 -> [String] -- ^ Addresses to include
-                 -> [String]
-                 -> IO ([MemSegmentOff w], (MemSegmentOff w -> Bool))
-resolveIncludeFn mem symMap [] excludeNames = do
-  let (bad, excludeAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> excludeNames
-  when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
-  let s = Set.fromList (concat excludeAddrs)
-  pure ([], (`Set.notMember` s))
-resolveIncludeFn mem symMap includeNames [] = do
-  let (bad, includeAddrs) = partitionEithers $ resolveSymAddr mem symMap  <$> includeNames
-  when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
-  let s = Set.fromList (concat includeAddrs)
-  pure $ (concat includeAddrs, (`Set.member` s))
-resolveIncludeFn _ _ _ _ = do
-  fail "Cannot both include and exclude specific addresses."
-
--- | Discover functions in an elf file.
---
---  Note. This prints warnings to stderr
-runCompleteDiscovery :: LoadOptions
-                     -- ^ Options controlling loading
-                     -> DiscoveryOptions
-                     -- ^ Options controlling discovery
-                     -> Elf (ArchAddrWidth arch)
-                     -> ArchitectureInfo arch
-                     -> [String] -- ^ Included addresses
-                     -> [String] -- ^ Excluded addresses
-                     -> IO ( DiscoveryState arch
-                           , AddrSymMap (ArchAddrWidth arch)
-                           , Map BS.ByteString [ArchSegmentOff arch]
-                           )
-runCompleteDiscovery loadOpts disOpt e ainfo includeAddr excludeAddr = do
-  (warnings, mem, entry, symbols) <- either fail pure $
-    resolveElfContents loadOpts e
-  mapM_ (hPutStrLn stderr) warnings
-
-  let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-  let symAddrMap = Map.fromListWith (++) [ (memSymbolName msym, [memSymbolStart msym]) | msym <- symbols ]
-  (entries, fnPred) <- resolveIncludeFn mem symAddrMap includeAddr excludeAddr
-  let initEntries = maybeToList entry ++ entries
-  let initState
-        = emptyDiscoveryState mem addrSymMap ainfo
-        & markAddrsAsFunction InitAddr initEntries
-  s <- completeDiscoveryState initState disOpt fnPred
-  pure (s, addrSymMap, symAddrMap)
-
-------------------------------------------------------------------------
--- Explore a control flow graph.
-
--- | Discover code in the binary identified by the given path.
-discoverBinary :: FilePath
-               -> LoadOptions -- ^ Options controlling loading
-               -> DiscoveryOptions -- ^ Options controlling discovery
-               -> [String] -- ^ Included addresses
-               -> [String] -- ^ Excluded addresses
-               -> IO (Some DiscoveryState)
-discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
-  Some e <- readSomeElf path
-  -- Get architecture information for elf
-  SomeArch ainfo <- getElfArchInfo e
-  (s, _,_) <- runCompleteDiscovery loadOpts disOpt e ainfo includeAddr excludeAddr
-  pure (Some s)
 
 ------------------------------------------------------------------------
 -- Execution
