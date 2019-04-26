@@ -513,19 +513,18 @@ dumpDisassembly path = do
 -- | This command is called when reopt is called with no specific
 -- action.
 performReopt :: Args -> IO ()
-performReopt args =
-  withSystemTempDirectory "reopt." $ \obj_dir -> do
-    let output_path = args^.outputPath
-    case takeExtension output_path of
-      ".bc" -> do
-        logger $
-          "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
-          "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
-          "use 'llvm-as out.ll' to generate an 'out.bc' file."
-        exitFailure
-      ".blocks" -> do
-        writeFile output_path =<< showCFG args
-      ".fns" -> do
+performReopt args = do
+  let output_path = args^.outputPath
+  case takeExtension output_path of
+    ".bc" -> do
+      logger $
+        "Generating '.bc' (LLVM ASCII assembly) is not supported!\n" ++
+        "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
+        "use 'llvm-as out.ll' to generate an 'out.bc' file."
+      exitFailure
+    ".blocks" -> do
+      writeFile output_path =<< showCFG args
+    ".fns" -> do
         (os, disc_info, _) <-
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
@@ -540,23 +539,23 @@ performReopt args =
         let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
         let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
         writeFileBuilder output_path obj_llvm
-      ".o" -> do
-        (os, disc_info, addrSymMap) <-
-          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-        fns <- getFns logger (osPersonality os) disc_info
-        let llvmVer = args^.llvmVersion
-        let archOps = LLVM.x86LLVMArchOps (show os)
-        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
-        objContents <- compileLLVM (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.llvmMcPath) (osLinkName os) obj_llvm
-        BS.writeFile output_path objContents
-      ".s" -> do
+    ".o" -> do
+      (os, disc_info, addrSymMap) <-
+        discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+      fns <- getFns logger (osPersonality os) disc_info
+      let llvmVer = args^.llvmVersion
+      let archOps = LLVM.x86LLVMArchOps (show os)
+      let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
+      let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
+      objContents <- compileLLVM (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.llvmMcPath) (osLinkName os) obj_llvm
+      BS.writeFile output_path objContents
+    ".s" -> do
         logger $
           "Generating '.s' (LLVM ASCII assembly) is not supported!\n" ++
           "Use '.ll' extension to get assembled LLVM bitcode, and then " ++
           "compile to generate a .s file."
         exitFailure
-      _ -> do
+    _ -> do
         (orig_binary, os, disc_info, addrSymMap, _) <-
           discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
         fns <- getFns logger (osPersonality os) disc_info
