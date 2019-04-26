@@ -7,8 +7,10 @@ module Reopt
   ( readSomeElf
   , readElf64
   , parseElf64
-  , dumpDisassembly
   , showPaddedHex
+  , checkedReadFile
+  , isCodeSection
+  , printX86SectionDisassembly
     -- * Architecture info
   , SomeArchitectureInfo(..)
     -- * Code discovery
@@ -52,8 +54,8 @@ import qualified Data.VEX.FFI
 import           Data.Macaw.ARM
 #endif
 
-showUsage :: IO ()
-showUsage = hPutStrLn stderr "For help on using reopt, run \"reopt --help\"."
+showUsage :: Handle -> IO ()
+showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
 
 ------------------------------------------------------------------------
 -- Resolve which symbols to include
@@ -120,16 +122,16 @@ data SomeArchitectureInfo w =
 
 -- | This reads a file as a strict bytestring.
 --
--- This will exit the program if failures occur.
+-- This will exit the program if failures occur, and also write to stderr.
 checkedReadFile :: FilePath -> IO BS.ByteString
 checkedReadFile path = do
   when (null path) $ do
     hPutStrLn stderr "Please specify a path."
-    showUsage
+    showUsage stderr
     exitFailure
   let h e | isDoesNotExistError e = do
             hPutStrLn stderr $ path ++ " does not exist."
-            showUsage
+            showUsage stderr
             exitFailure
           | isUserError e = do
             hPutStrLn stderr (ioeGetErrorString e)
@@ -310,40 +312,34 @@ stringToFixedBuffer g s | g == n = s
   where n = length s
 
 -- | Print out disasembly for a specific line.
-printX86DisassemblyLine :: Word64 -- ^ Base address for section or segment.
-                     -> BS.ByteString -- ^ Data region for code.
-                     -> DisassembledAddr -- ^ Output from flexdis
-                     -> IO ()
-printX86DisassemblyLine base buffer (DAddr i n mi) = do
+printX86DisassemblyLine :: Handle  -- ^ Handle to write to
+                        -> Word64 -- ^ Base address for section or segment.
+                        -> BS.ByteString -- ^ Data region for code.
+                        -> DisassembledAddr -- ^ Output from flexdis
+                        -> IO ()
+printX86DisassemblyLine h base buffer (DAddr i n mi) = do
   let o = base + fromIntegral i
   let ppAddr x = trimForWord64Buffer base (BS.length buffer) (showPaddedHex x)
   let b = showBytes $ slice i n buffer
   let r = case mi of
             Nothing  -> take 20 b
             Just ins -> stringToFixedBuffer 21 b ++ "\t" ++ show (ppInstruction ins)
-  putStrLn $ "  " ++ ppAddr o ++ ":\t" ++ r
+  hPutStrLn h $ "  " ++ ppAddr o ++ ":\t" ++ r
   when (n > 7) $ do
-    printX86DisassemblyLine base buffer $ DAddr (i+7) (n-7) Nothing
+    printX86DisassemblyLine h base buffer $ DAddr (i+7) (n-7) Nothing
 
--- | Elf sections
-printX86SectionDisassembly :: BSC.ByteString -> Word64 -> BS.ByteString -> IO ()
+-- | Print all the disassembly for a buffer to stdout.
+printX86SectionDisassembly :: BSC.ByteString
+                           -> Word64
+                           -> BS.ByteString
+                           -> IO ()
 printX86SectionDisassembly nm addr buffer = do
   putStrLn $ "Disassembly of section " ++ BSC.unpack nm ++ ":"
   putStrLn ""
   putStrLn $ showPaddedHex addr ++ " <" ++ BSC.unpack nm ++ ">:"
   let dta = disassembleBuffer buffer
-  mapM_ (printX86DisassemblyLine addr buffer) dta
+  mapM_ (printX86DisassemblyLine stdout addr buffer) dta
   putStrLn ""
 
 isCodeSection :: (Bits w, Num w) => ElfSection w -> Bool
 isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
-
-dumpDisassembly :: FilePath -> IO ()
-dumpDisassembly path = do
-  bs <- checkedReadFile path
-  e <- parseElf64 path bs
-  let sections = filter isCodeSection $ e^..elfSections
-  when (null sections) $ do
-    putStrLn "Binary contains no executable sections."
-  forM_ sections $ \s -> do
-    printX86SectionDisassembly (elfSectionName s) (elfSectionAddr s) (elfSectionData s)

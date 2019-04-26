@@ -3,15 +3,18 @@
 #!/bin/bash
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-set -ex
+set -e
 relink_output="reopt_diet"
 
-echo "About to relink"
-export PATH="$HOME/opt/binutils-linux/bin:$PATH"
+function check_path {
+  (builtin type -P "$1" &> /dev/null) || (echo "Error: Could not find '$1' in path." && exit 1)
+}
 
-# Path to GNU Assembler for Linux
-GAS_PATH=$HOME/opt/binutils-linux/bin/x86_64-unknown-linux-as
-# GAS_PATH=$(which as)
+check_path "reopt"
+check_path "opt"
+check_path "llc"
+check_path "llvm-mc"
+
 
 reopt=$(which reopt)
 
@@ -21,25 +24,19 @@ $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
 
 # Get reopt to just print out the functions that are discovered.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
-      --debug=recover \
       -o "$DIR/$relink_output.fns"
+#      --debug=recover \
 
 # Get reopt to just print out the LLVM that is discovered.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
-      "--gas=$GAS_PATH" \
-      --llvm-version=llvm38 \
       -o "$DIR/$relink_output.ll"
 
 # Get reopt to create the object file.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
-      "--gas=$GAS_PATH" \
-      --llvm-version=llvm38 \
       -o "$DIR/$relink_output.o"
 
 # Get reopt to perform the full reoptimization script.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
-      "--gas=$GAS_PATH" \
-      --llvm-version=llvm38 \
       -o "$DIR/$relink_output"
 
 echo "Written relinked output to $relink_output"

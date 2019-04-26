@@ -13,11 +13,12 @@ module Reopt.ExternalTools
   , run_gas
     -- * Running opt
   , run_opt
+    -- * Running assembler
+  , runLlvmMc
     -- * Running llvm-link
   , run_llvm_link
     -- * Failure information
   , Failure(..)
-  , Tool(..)
   , Control.Monad.Trans.Except.ExceptT(..)
   ) where
 
@@ -29,52 +30,48 @@ import qualified Data.ByteString as BS
 import           GHC.IO.Exception
 import           System.IO
 import           System.IO.Error
-import           System.Process
-
-data Tool = Gas | LLC | LLVM_LINK | OPT
-
-instance Show Tool where
-  show Gas = "GNU assembler (as)"
-  show LLC = "llc"
-  show LLVM_LINK = "llvm-link"
-  show OPT = "opt"
+import qualified System.Process  as P
 
 -- |  Type of failure from running tools.
 data Failure
-   = ProgramError !Tool !String
+   = ProgramError !String
      -- ^ gas returned some error.
-   | ProgramNotFound !Tool !String
-   | PermissionError !Tool !String
+   | ProgramNotFound !String
+   | PermissionError !String
 
 instance Show Failure where
-  show (ProgramError _ msg)     = msg
-  show (ProgramNotFound _ path) = "Could not find " ++ path ++ "."
-  show (PermissionError _ path) = "Do not have permissions to execute " ++ path ++ "."
+  show (ProgramError msg)     = msg
+  show (ProgramNotFound path) = "Could not find " ++ path ++ "."
+  show (PermissionError path) = "Do not have permissions to execute " ++ path ++ "."
 
--- | Try to create a process, and return handles for 'stdin', 'stdout', 'stderr', and
--- the process itself if it succeeds.
+-- | Try to create a process, and call the call back funtion with
+-- the handles for 'stdin', 'stdout', and 'stderr' if it succeeds.
+--
+-- This will throw a failure and read from standard error is the process fails.
 --
 -- If the attempt fails, because the process does not exist, then throw the given
 -- exception.
-tryCreateProcess :: Tool
-                 -> String
-                 -> [String]
-                 -> ExceptT Failure IO (Handle, Handle, Handle, ProcessHandle)
-tryCreateProcess tool cmd args = do
-  let cp = (proc cmd args)
-                { env = Nothing
-                , std_in  = CreatePipe
-                , std_out = CreatePipe
-                , std_err = CreatePipe
+withCreateProcess :: String -- ^ Name of tool for error purposes
+                  -> String -- ^ Path of program to execute
+                  -> [String] -- ^ Arguments
+                  -> ((Handle, Handle, Handle) -> ExceptT Failure IO a)
+                  -> ExceptT Failure IO a
+withCreateProcess nm cmd args f = do
+  let cp = (P.proc cmd args)
+                { P.env = Nothing
+                , P.std_in  = P.CreatePipe
+                , P.std_out = P.CreatePipe
+                , P.std_err = P.CreatePipe
                 }
   let h :: IOException -> IO (Either Failure a)
       h ioe
-        | isDoesNotExistError ioe = return $! Left (ProgramNotFound tool cmd)
-        | isPermissionError   ioe = return $! Left (PermissionError tool cmd)
+        | isDoesNotExistError ioe = return $! Left (ProgramNotFound cmd)
+        | isPermissionError   ioe = return $! Left (PermissionError cmd)
         | otherwise = throwIO ioe
   (Just in_handle, Just out, Just err, ph) <- ExceptT $
-     (Right <$> createProcess cp) `catch` h
-  return (in_handle, out, err, ph)
+     (Right <$> P.createProcess cp) `catch` h
+  f (in_handle, out, err) <* waitForEnd nm err ph
+
 
 
 catchFailure :: IO a -> (IOError -> IO Failure) -> ExceptT Failure IO a
@@ -83,15 +80,14 @@ catchFailure m h = ExceptT $ fmap Right m `catch` (fmap Left . h)
 
 -- | This is a helper function that runs an IO action and ensures that
 -- some cleanup is performed if an exception is thrown.
-writeAndClose :: Tool
-                 -> Handle -- ^ Input handle to write to.
-                 -> Handle -- ^ Error handle to close if things fail.
-                 -> IO () -- ^ Action to run
-                 -> ExceptT Failure IO ()
-writeAndClose tool in_handle err_handle action = do
+writeAndClose :: Handle -- ^ Input handle to write to.
+              -> Handle -- ^ Error handle to close if things fail.
+              -> IO () -- ^ Action to run
+              -> ExceptT Failure IO ()
+writeAndClose in_handle err_handle action = do
   let h e | ioeGetErrorType e == ResourceVanished = do
               hClose in_handle
-              ProgramError tool <$> hGetContents err_handle
+              ProgramError <$> hGetContents err_handle
           | otherwise = do
               hClose in_handle
               hClose err_handle
@@ -104,17 +100,20 @@ writeAndClose tool in_handle err_handle action = do
 --
 -- This function takes a handle to the process's stderr and closes it or semicloses
 -- it before returning.
-waitForEnd :: Tool -> Handle -> ProcessHandle -> ExceptT Failure IO ()
+waitForEnd :: String -- ^ Name of tool
+           -> Handle -- ^ Handle to read from for getting error
+           -> P.ProcessHandle -- ^ Handle to process
+           -> ExceptT Failure IO ()
 waitForEnd tool err_handle ph = do
-  ec  <- liftIO $ waitForProcess ph
+  ec  <- liftIO $ P.waitForProcess ph
   case ec of
     ExitSuccess ->
       liftIO $ hClose err_handle
     ExitFailure c -> do
       msg <- liftIO $ hGetContents err_handle
-      let msg' | null msg = show tool ++ " exited with error code " ++ show c ++ "."
-               | otherwise = show tool ++ ": " ++ msg
-      throwE $! ProgramError tool msg'
+      let msg' | null msg = tool ++ " exited with error code " ++ show c ++ "."
+               | otherwise = tool ++ ": " ++ msg
+      throwE $! ProgramError msg'
 
 readContents :: Handle -> IO BS.ByteString
 readContents out_handle = do
@@ -137,7 +136,7 @@ defaultLLCOptions = LLCOptions { llc_triple = Nothing
 --
 -- The contents of the input file may be either an assembly (.ll) file or a
 -- bitcode (.bc) file.  This returns assembled output as a bytestring, or the reason
--- the conversion failed.
+-- t conversion failed.
 run_llc :: FilePath      -- ^ Path to llc
         -> LLCOptions    -- ^ Triple for LLC
         -> BS.ByteString -- ^ Contents of input file.
@@ -155,15 +154,36 @@ run_llc llc_command opts input_file = do
         = [ "-o", "-" ]
         ++ llc_triple_args
         ++ llc_opt_args
-  (in_handle, out_handle, err_handle, ph) <-
-    tryCreateProcess LLC llc_command llc_args
+  withCreateProcess "llc" llc_command llc_args $ \(in_handle, out_handle, err_handle) -> do
+    writeAndClose in_handle err_handle $ do
+      hSetBinaryMode in_handle True
+      BS.hPut in_handle input_file
+    liftIO $ readContents out_handle
 
-  writeAndClose LLC in_handle err_handle $ do
-    hSetBinaryMode in_handle True
-    BS.hPut in_handle input_file
-  res <- liftIO $ readContents out_handle
-  waitForEnd LLC err_handle ph
-  return res
+-- | Run llvm-mc to generate an object file from assembly.
+--
+-- The assembler file should be text, and the output is the bytestring.
+runLlvmMc :: FilePath
+          -- ^ Path to llvm-mc
+          -> BS.ByteString
+          -- ^ Assembler file
+          -> String
+          -- ^ Triple for target architecture (e.g. "x86_64-unknown-linux-gnu")
+          -> ExceptT Failure IO BS.ByteString
+runLlvmMc cmd asm triple = do
+  -- Run GNU asssembler
+  let args= [ "-assemble"
+            , "-filetype=obj"
+            , "-fatal-warnings"
+            , "--triple=" ++ triple ]
+  withCreateProcess "llvm-mc" cmd args $ \(in_handle, out_handle, err_handle) -> do
+    -- Write to input handle and close it.
+    writeAndClose in_handle err_handle $ do
+      hSetBinaryMode in_handle True
+      BS.hPut in_handle asm
+    -- Get output
+    liftIO (readContents out_handle)
+
 
 -- | Use GNU assembler to generate an object file from assembly.
 --
@@ -176,15 +196,13 @@ run_gas :: FilePath      -- ^ Path to gas
 run_gas gas_command asm obj_path = do
   -- Run GNU asssembler
   let args= [ "-o", obj_path, "--fatal-warnings" ]
-  (in_handle, out_handle, err_handle, ph) <- tryCreateProcess Gas gas_command args
-  -- Write to input handle and close it.
-  writeAndClose Gas in_handle err_handle $ do
-    hSetBinaryMode in_handle True
-    BS.hPut in_handle asm
-  -- Close output
-  liftIO $ hClose out_handle
-  -- Wait for process to end.
-  waitForEnd Gas err_handle ph
+  withCreateProcess "gas" gas_command args $ \(in_handle, out_handle, err_handle) -> do
+    -- Write to input handle and close it.
+    writeAndClose in_handle err_handle $ do
+      hSetBinaryMode in_handle True
+      BS.hPut in_handle asm
+    -- Close output
+    liftIO $ hClose out_handle
 
 -- | Use opt on a bitcode file and return bitcode file.
 run_opt :: FilePath -- ^ Path to opt
@@ -196,14 +214,11 @@ run_opt opt_command lvl writeInput = do
   when (lvl < 0 || lvl > 3) $ do
     error $ "Optimization level is out of range."
   let opt_args = [ "-O" ++ show lvl ]
-  (in_handle, out_handle, err_handle, ph) <-
-    tryCreateProcess OPT opt_command opt_args
-  writeAndClose OPT in_handle err_handle $ do
-    hSetBinaryMode in_handle True
-    writeInput in_handle
-  res <- liftIO $ readContents out_handle
-  waitForEnd OPT err_handle ph
-  return res
+  withCreateProcess "opt" opt_command opt_args $ \(in_handle, out_handle, err_handle) -> do
+    writeAndClose in_handle err_handle $ do
+      hSetBinaryMode in_handle True
+      writeInput in_handle
+    liftIO $ readContents out_handle
 
 -- | Use LLVM link to combine several ll or bc files into one.
 run_llvm_link :: FilePath -- ^ Path to llvm-link
@@ -211,8 +226,6 @@ run_llvm_link :: FilePath -- ^ Path to llvm-link
               -> ExceptT Failure IO BS.ByteString
 run_llvm_link llvm_link_command paths = do
   let args = [ "-o=-" ] ++ paths
-  (in_handle, out_handle, err_handle, ph) <- tryCreateProcess LLVM_LINK llvm_link_command args
-  liftIO $ hClose in_handle
-  res <- liftIO $ readContents out_handle
-  waitForEnd LLVM_LINK err_handle ph
-  return res
+  withCreateProcess "llvm-link" llvm_link_command args $ \(in_handle, out_handle, _err_handle) -> do
+    liftIO $ hClose in_handle
+    liftIO $ readContents out_handle
