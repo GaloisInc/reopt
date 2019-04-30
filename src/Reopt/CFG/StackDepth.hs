@@ -31,7 +31,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.CFG
-import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -149,7 +148,6 @@ recordStackOffset :: RegisterInfo (ArchReg arch)
                   -> StackDepthValue arch ids -- ^
                   -> StackDepthM arch ids ()
 recordStackOffset addr start = do
-  let lbl = mkRootBlockLabel addr
   x <- use $ blockInitStackPointers . at addr
   case x of
     Nothing -> do
@@ -159,7 +157,7 @@ recordStackOffset addr start = do
       | start == old_start ->
         return ()
       | otherwise       ->
-        throwError $ "Block stack depth mismatch at " ++ show (pretty lbl) ++ ": "
+        throwError $ "Block stack depth mismatch at " ++ show (pretty addr) ++ ": "
              ++ show (pretty start) ++ " and " ++ show (pretty old_start)
 
 addDepth :: OrdF (ArchReg arch) => Set (StackDepthValue arch ids) -> StackDepthM arch ids ()
@@ -242,17 +240,17 @@ addStateVars init_sp s =
 analyzeStmtReferences :: MemSegmentOff 64
                          -- ^ The address that the statements started at.
                       -> StackDepthValue X86_64 ids
-                      -> StatementList X86_64 ids
+                      -> ParsedBlock X86_64 ids
                       -> StackDepthM X86_64 ids ()
 analyzeStmtReferences root_addr init_sp b = do
   -- overapproximates by viewing all registers as uses of the
   -- sp between blocks
-  traverse_ (goStmt init_sp) (stmtsNonterm b)
-  case stmtsTerm b of
-    ParsedCall proc_state m_ret_addr -> do
-      addStateVars init_sp proc_state
+  traverse_ (goStmt init_sp) (pblockStmts b)
+  case pblockTermStmt b of
+    ParsedCall regs m_ret_addr -> do
+      addStateVars init_sp regs
 
-      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+      let sp'  = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
       case m_ret_addr of
         Nothing -> return ()
         Just ret_addr ->
@@ -269,26 +267,29 @@ analyzeStmtReferences root_addr init_sp b = do
       throwError "Cannot identify stack depth in code where translation error occurs"
     ClassifyFailure _ ->
       throwError $ "Classification failed in StackDepth: " ++ show root_addr
-    ParsedIte _c tblock fblock -> do
-      analyzeStmtReferences root_addr init_sp tblock
-      analyzeStmtReferences root_addr init_sp fblock
 
 
-    ParsedJump proc_state tgt_addr -> do
-      addStateVars init_sp proc_state
-      let sp' = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
-      recordStackOffset tgt_addr sp'
+    ParsedJump regs tgtAddr -> do
+      addStateVars init_sp regs
+      let sp' = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
+      recordStackOffset tgtAddr sp'
 
-    ParsedReturn _proc_state -> do
+    ParsedBranch regs _c trueAddr falseAddr -> do
+      addStateVars init_sp regs
+      let sp' = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
+      recordStackOffset trueAddr sp'
+      recordStackOffset falseAddr sp'
+
+    ParsedReturn _regs -> do
       pure ()
 
-    ParsedLookupTable proc_state _idx vec -> do
-      addStateVars init_sp proc_state
-      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+    ParsedLookupTable regs _idx vec -> do
+      addStateVars init_sp regs
+      let sp'  = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') vec
-    ParsedArchTermStmt _ proc_state mnext_addr -> do
-      addStateVars init_sp proc_state
-      let sp'  = parseStackPointer' init_sp (proc_state ^. boundValue sp_reg)
+    ParsedArchTermStmt _ regs mnext_addr -> do
+      addStateVars init_sp regs
+      let sp'  = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') mnext_addr
 
 -- | Explore states until we have reached end of frontier.
@@ -303,7 +304,7 @@ recoverIter finfo = do
       spMap <- use $ blockInitStackPointers
       let Just init_sp = Map.lookup root_addr spMap
       let Just reg = Map.lookup root_addr (finfo^.parsedBlocks)
-      analyzeStmtReferences root_addr init_sp (blockStatementList reg)
+      analyzeStmtReferences root_addr init_sp reg
       recoverIter finfo
 
 -- | Returns the maximum stack argument used by the function, that is,

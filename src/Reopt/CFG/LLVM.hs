@@ -83,10 +83,11 @@ import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
-import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
+
+type ArchLabel arch = ArchSegmentOff arch
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -145,6 +146,17 @@ llvmMaskedLoad n tp tpv = do
      args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
   in intrinsic mnem (L.Vector n tpv) args
 
+-- | @llvm.masked.store.*@ intrinsic
+llvmMaskedStore :: Int32 -- ^ Number of vector elements
+                -> String -- ^ Type name (e.g. i32)
+                -> L.Type -- ^ Element type (should match string)
+                -> Intrinsic
+llvmMaskedStore n tp tpv = do
+ let vstr = "v" ++ show n ++ tp
+     mnem = "llvm.masked.store." ++ vstr ++ ".p0" ++ vstr
+     args = [ L.PtrTo (L.Vector n tpv), L.iT 32, L.Vector n (L.iT 1), L.Vector n tpv ]
+  in intrinsic mnem (L.Vector n tpv) args
+
 llvmIntrinsics :: [Intrinsic]
 llvmIntrinsics = [ overflowOp bop in_typ
                    | bop <- [ "uadd", "sadd", "usub", "ssub" ]
@@ -199,25 +211,13 @@ llvmFunctionName m prefix
      in Right $ llvmFunctionName' m' prefix
 
 blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
-blockWordName o = L.Ident $ show $ GeneratedBlock o 0
+blockWordName o =
+  let a = segoffAddr o
+   in L.Ident $ "block_" ++ show (addrBase a) ++ "_" ++ showHex (memWordToUnsigned (addrOffset a)) ""
 
--- | This generates a LLVM block label from a block.
-blockName :: MemWidth w => BlockLabel w -> L.BlockLabel
-blockName (GeneratedBlock s w) =
-  let seg = segoffSegment s
-      off = segoffOffset s
-      addr =
-        if segmentBase seg == 0 then
-          showString "_"
-          . showHex (segmentOffset seg + off)
-        else
-          showString "_"
-          . shows (segmentBase seg)
-          . showString "_"
-          . showHex (segmentOffset seg + off)
-      post | w == 0 = ""
-           | otherwise = "_" ++ show w
-   in L.Named (L.Ident ("block_" ++ addr post))
+-- | This generates a LLVM block label from the address of a block.
+blockName :: MemWidth w => MemSegmentOff w -> L.BlockLabel
+blockName s = L.Named (blockWordName s)
 
 -- The type of FP arguments and results.  We actually want fp128, but
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
@@ -467,7 +467,8 @@ unimplementedInstr' typ reason = do
   return (L.Typed typ L.ValUndef)
 
 -- | Map from assign ID to value.
-type AssignValMap w = Map FnAssignId (BlockLabel w, L.Typed L.Value)
+-- FIXME: Clarify comment to indicate what address is for.
+type AssignValMap w = Map FnAssignId (MemSegmentOff w, L.Typed L.Value)
 
 setAssignIdValue :: Loc.HasCallStack
                  => FnAssignId
@@ -966,11 +967,26 @@ stmtToLLVM stmt = do
      lbl <- gets $ fbLabel . bbBlock
      llvm_rhs <- rhsToLLVM rhs
      setAssignIdValue lhs lbl llvm_rhs
-   FnWriteMem ptr v -> do
+   FnWriteMem addr v -> do
      llvm_v <- mkLLVMValue v
-     llvm_ptr <- llvmAsPtr ptr (L.typedType llvm_v)
+     llvm_ptr <- llvmAsPtr addr (L.typedType llvm_v)
      -- Cast LLVM point to appropriate type
      effect $ L.Store llvm_v llvm_ptr Nothing Nothing
+   FnCondWriteMem cond addr v memRepr -> do
+     -- Obtain llvm.masked.store intrinsic and ensure it will be declared.
+     (loadName, eltType) <- resolveLoadNameAndType memRepr
+     let intr = llvmMaskedStore 1 loadName eltType
+     addIntrinsic intr
+     -- Compute value to write
+     llvmValue <- singletonVector =<< mkLLVMValue v
+     -- Convert addr to appropriate pointer.
+     llvmAddr     <- llvmAsPtr addr (L.Vector 1 eltType)
+     -- Just use zero alignment
+     let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
+     -- Construct mask
+     llvmMask <- singletonVector =<< mkLLVMValue cond
+     -- Call llvmn.masked.store intrinsic
+     call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
    FnCall dest ft args retvs -> do
      dest_f <- resolveFunctionEntry dest ft
      args' <- mapM (\(Some v) -> mkLLVMValue v) args
@@ -1171,7 +1187,7 @@ defineFunction archOps symFun funTypeMap f = do
       initBlock :: L.BasicBlock
       postInitArgs :: V.Vector (L.Typed L.Value)
       (inputArgs, initBlock, postInitArgs) =
-        mkInitBlock archOps (fnType f) (blockName (mkRootBlockLabel (fnAddr f)))
+        mkInitBlock archOps (fnType f) (blockName (fnAddr f))
 
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { funSymbolCallback = symFun

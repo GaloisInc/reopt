@@ -25,7 +25,6 @@ $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
 # Get reopt to just print out the functions that are discovered.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \
       -o "$DIR/$relink_output.fns"
-#      --debug=recover \
 
 # Get reopt to just print out the LLVM that is discovered.
 $reopt "$DIR/hello_world_ubuntu_64_lts_12_04_diet" \

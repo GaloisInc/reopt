@@ -31,7 +31,7 @@ library
     lens,
     llvm-pretty >= 0.7.1.1,
     located-base,
-    macaw-base >= 0.3.2,
+    macaw-base >= 0.3.6,
     macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,

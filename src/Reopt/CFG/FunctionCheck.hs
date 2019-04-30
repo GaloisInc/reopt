@@ -24,19 +24,19 @@ data CheckFunctionResult
    | FunctionIncomplete
    | FunctionHasPLT
 
--- | This analyzes the statement list to determine
-checkRegion :: StatementList arch ids
-            -> Either CheckFunctionResult [ArchSegmentOff arch]
-checkRegion stmts =
-  case stmtsTerm stmts of
+-- | This analyzes the block terminator to statement list to determine
+checkTermStmt :: ParsedTermStmt  arch ids
+              -> Either CheckFunctionResult [ArchSegmentOff arch]
+checkTermStmt ts =
+  case ts of
     ParsedCall _ Nothing    -> pure []
     ParsedCall _ (Just a)   -> pure [a]
     -- PLT stubs are tail calls.
     PLTStub{} -> Left FunctionHasPLT
     ParsedJump _ a          -> pure [a]
+    ParsedBranch _ _ t f    -> pure [t,f]
     ParsedLookupTable _ _ a -> pure $ V.toList a
     ParsedReturn{}          -> pure []
-    ParsedIte _ x y      -> (++) <$> checkRegion x <*> checkRegion y
     ParsedTranslateError{}  -> Left FunctionIncomplete
     ClassifyFailure _       -> Left FunctionIncomplete
     ParsedArchTermStmt _ _ a -> pure (maybeToList a)
@@ -52,9 +52,8 @@ checkFunction' info visited (lbl:rest)
   | otherwise =
     case Map.lookup lbl (info^.parsedBlocks) of
       Nothing -> error $ "Missing block: " ++ show lbl
-      Just reg -> do
-        let b = blockStatementList reg
-        case checkRegion b of
+      Just b -> do
+        case checkTermStmt (pblockTermStmt b) of
           Left r -> r
           Right next -> checkFunction' info (Set.insert lbl visited) (next ++ rest)
 

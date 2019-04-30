@@ -28,7 +28,6 @@ import           System.Exit (exitFailure)
 import           System.FilePath
 import           System.IO
 import           System.IO.Error
-import           System.IO.Temp
 import           System.Posix.Files
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
@@ -525,11 +524,11 @@ performReopt args = do
     ".blocks" -> do
       writeFile output_path =<< showCFG args
     ".fns" -> do
-        (os, disc_info, _) <-
+      (os, disc_info, _) <-
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-        fns <- getFns logger (osPersonality os) disc_info
-        writeFile output_path $ show (vcat (pretty <$> fns))
-      ".ll" -> do
+      fns <- getFns logger (osPersonality os) disc_info
+      writeFile output_path $ show (vcat (pretty <$> fns))
+    ".ll" -> do
         hPutStrLn stderr "Generating LLVM"
         (os, disc_info, addrSymMap) <-
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
