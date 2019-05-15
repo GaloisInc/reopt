@@ -51,7 +51,8 @@ import qualified Reopt.CFG.LLVM as LLVM
 
 #ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
-import           Data.Macaw.ARM
+import           Data.Macaw.VEX.AArch32 (armArch32le)
+import           Data.Macaw.VEX.AArch64 (armArch64le)
 #endif
 
 showUsage :: Handle -> IO ()

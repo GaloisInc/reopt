@@ -68,7 +68,7 @@ library
     cpp-options: -DSUPPORT_ARM
     build-depends:
       hvex,
-      macaw-arm-vex
+      macaw-arm-vex >= 0.1.0
 
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors
