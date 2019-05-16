@@ -52,10 +52,9 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
   fns <- getFns logger (osPersonality os) disc_info
   writeFile fns_path $ show (vcat (pretty <$> fns))
 
-  let llvmVer = LLVM38
   let archOps = LLVM.x86LLVMArchOps (show os)
   let Right symFun = LLVM.llvmFunctionName addrSymMap "reopt"
-  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps symFun fns
+  let obj_llvm = llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps symFun fns
   writeFileBuilder llvm_path obj_llvm
 
   return ()

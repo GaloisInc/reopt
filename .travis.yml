@@ -9,7 +9,6 @@ cache:
 
 matrix:
   include:
-  - env: STACK_YAML=stack-8.4.yaml
   - env: STACK_YAML=stack-8.6.yaml
 
 

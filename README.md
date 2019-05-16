@@ -32,22 +32,8 @@ Debugging:
 ** Recovered functions
 ** Generated LLVM
 ** Object file
-
-
 ** Relink existing object and code.
 
-
-
-
-# Dependencies
-
-In addition to Hackage dependencies, Reopt has the following dependencies:
-
-- https://github.com/GaloisInc/dwarf A Haskell library for parsing Dwarf information
-- https://github.com/GaloisInc/elf-edit (a fork of `elf` package on Hackage)
-- https://github.com/GaloisInc/flexdis86
-- https://github.com/GaloisInc/llvm-pretty
-- https://github.com/GaloisInc/parameterized-utils
 
 # Installation
 

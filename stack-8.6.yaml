@@ -1,16 +1,16 @@
-resolver: lts-13.13
+resolver: lts-13.21
 
 packages:
 - .
 - tools
-- deps/dwarf
-- deps/elf-edit
-- deps/flexdis86
-- deps/flexdis86/binary-symbols
-- deps/llvm-pretty
-- deps/macaw/base
-- deps/macaw/x86
-- deps/parameterized-utils
 extra-deps:
-- located-base-0.1.1.1
-- monadLib-3.7.3
+- located-base-0.1.1.1@sha256:7c6395f2b6fbf2d5f76c3514f774423838c0ea94e1c6a5530dd3c94b30c9d1c8
+- monadLib-3.9@sha256:7225fb80bf183bf64968b7d251236fb203b86838679de3eddee7bcc59925adef
+- ./deps/dwarf
+- ./deps/elf-edit
+- ./deps/flexdis86
+- ./deps/flexdis86/binary-symbols
+- ./deps/llvm-pretty
+- ./deps/macaw/base
+- ./deps/macaw/x86
+- ./deps/parameterized-utils

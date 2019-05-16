@@ -29,9 +29,9 @@ library
     filepath,
     flexdis86 >= 0.1.1,
     lens,
-    llvm-pretty,
+    llvm-pretty >= 0.7.1.1,
     located-base,
-    macaw-base >= 0.3.2,
+    macaw-base >= 0.3.6,
     macaw-x86,
     mtl,
     parameterized-utils >= 0.1.6,
@@ -68,7 +68,7 @@ library
     cpp-options: -DSUPPORT_ARM
     build-depends:
       hvex,
-      macaw-arm-vex
+      macaw-arm-vex >= 0.1.0
 
   ghc-options: -Wall
   ghc-options: -fno-warn-unticked-promoted-constructors

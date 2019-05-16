@@ -26,13 +26,10 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF (toListF)
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Vector as V
-import           Data.Word
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Analysis.FunctionArgs (stmtDemandedValues)
 import           Data.Macaw.CFG
-import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
 import           Data.Macaw.Types
@@ -54,35 +51,18 @@ import           Reopt.CFG.FnRep.X86 ( X86FunctionType
 -------------------------------------------------------------------------------
 -- funBlockPreds
 
--- | A map from each address `l` to the labels of blocks that may jump to `l`.
-type FunPredMap w = Map (MemSegmentOff w) [BlockLabel w]
-
--- | Get all successor blocks for the given list of statements.
-stmtListSucc :: StatementList arch ids -> [(ArchSegmentOff arch, Word64)]
-stmtListSucc stmts = do
-  let idx = stmtsIdent stmts
-  case stmtsTerm stmts of
-    ParsedCall _ (Just ret_addr) -> [(ret_addr, idx)]
-    ParsedCall _ Nothing -> []
-    -- This is a tail call.
-    PLTStub{} -> []
-    ParsedJump _ tgt -> [(tgt, idx)]
-    ParsedLookupTable _ _ v -> (,idx) <$> V.toList v
-    ParsedReturn{} -> []
-    ParsedIte _ t f -> stmtListSucc t ++ stmtListSucc f
-    ParsedTranslateError{} -> []
-    ParsedArchTermStmt _ _ ret -> maybeToList ((, idx) <$> ret)
-    ClassifyFailure{} -> []
+-- | A map from each address `l` to the addresses of blocks that may jump to `l`.
+type FunPredMap w = Map (MemSegmentOff w) [MemSegmentOff w]
 
 -- | Return the FunPredMap for the discovered block function.
 funBlockPreds :: DiscoveryFunInfo arch ids -> FunPredMap (ArchAddrWidth arch)
 funBlockPreds info = Map.fromListWith (++)
-  [ (next, [GeneratedBlock addr idx])
+  [ (next, [addr])
   | b <- Map.elems (info^.parsedBlocks)
     -- Get address of region
   , let addr = pblockAddr b
     -- get the block successors
-  , (next,idx) <- stmtListSucc (blockStatementList b)
+  , next <- parsedTermSucc (pblockTermStmt b)
   ]
 
 -------------------------------------------------------------------------------
@@ -104,7 +84,7 @@ data RegisterUseState ids = RUS {
   , _blockRegUses :: !(Map (MemSegmentOff 64) (Set (Some X86Reg)))
     -- | Maps a each label that sets processor registers to the defined registers to their deps.  Not defined for all
     -- variables, hence use of Map instead of RegState X86Reg
-  , _blockInitDeps  :: !(Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
+  , _blockInitDeps  :: !(Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
     -- | A cache of the registers and their deps.  The key is not included
     -- in the set of deps (but probably should be).
   , _assignmentCache :: !(AssignmentCache X86Reg ids)
@@ -141,7 +121,7 @@ blockRegUses :: Simple Lens (RegisterUseState ids)
 blockRegUses = lens _blockRegUses (\s v -> s { _blockRegUses = v })
 
 blockInitDeps :: Simple Lens (RegisterUseState ids)
-                   (Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
+                   (Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids)))
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
 blockFrontier :: Simple Lens (RegisterUseState ids) (Set (MemSegmentOff 64))
@@ -223,27 +203,27 @@ termStmtValues mem sysp typeMap curFunType tstmt =
              | otherwise = ftMaximumFunctionType
       registerValues proc_state (Some ip_reg : ftArgRegs ft)
     PLTStub regs _addr _dest -> toListF Some regs
-    ParsedJump _proc_state _tgt_addr -> []
+    ParsedJump _regs _tgt_addr -> []
+    ParsedBranch _regs cond _ _ -> [Some cond]
     ParsedLookupTable _proc_state idx _vec -> [Some idx]
     ParsedReturn proc_state ->
       registerValues proc_state (ftArgRegs curFunType)
-    ParsedIte c _ _ -> [Some c]
     ParsedArchTermStmt ts proc_state _ ->
       x86TermStmtValues sysp ts proc_state
     ParsedTranslateError _ -> []
     ClassifyFailure _ -> []
 
 -- | Figure out the deps of the given registers and update the state for the current label
-addRegisterUses :: BlockLabel 64
+addRegisterUses :: MemSegmentOff 64
                 -> RegState X86Reg (Value X86_64 ids)
                 -> [Some X86Reg]
                 -> RegisterUseM ids () -- Map (Some N.RegisterName) RegDeps
-addRegisterUses lbl s rs = do
+addRegisterUses addr s rs = do
   vs <- mapM (\(Some r) -> valueUses (s ^. boundValue r)) rs
-  blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList $ zip rs vs)
+  blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList $ zip rs vs)
 
-clearRegDeps :: BlockLabel 64 -> Some X86Reg -> RegisterUseM ids ()
-clearRegDeps lbl r = blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empty)
+clearRegDeps :: MemSegmentOff 64 -> Some X86Reg -> RegisterUseM ids ()
+clearRegDeps addr r = blockInitDeps . ix addr %= Map.insert r (Set.empty, Set.empty)
 
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
@@ -251,60 +231,56 @@ clearRegDeps lbl r = blockInitDeps . ix lbl %= Map.insert r (Set.empty, Set.empt
 -- registers.
 summarizeBlock :: forall ids
                .  Memory 64
-               -> DiscoveryFunInfo X86_64 ids
                -> MemSegmentOff 64
-               -> StatementList X86_64 ids
+               -> ParsedBlock X86_64 ids
                -> RegisterUseM ids ()
-summarizeBlock mem interp_state addr stmts = do
-  let lbl = GeneratedBlock addr (stmtsIdent stmts)
-  blockInitDeps %= Map.insert lbl Map.empty
+summarizeBlock mem addr blk = do
+  blockInitDeps %= Map.insert addr Map.empty
   -- Add demanded values for terminal
   sysp    <- gets thisSyscallPersonality
   typeMap <- gets functionArgs
   cur_ft  <- gets currentFunctionType
-  let termValues = termStmtValues mem sysp typeMap cur_ft (stmtsTerm stmts)
+  let termValues = termStmtValues mem sysp typeMap cur_ft (pblockTermStmt blk)
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
-            (concatMap (stmtDemandedValues ctx) (stmtsNonterm stmts) ++ termValues)
-
-  case stmtsTerm stmts of
-    ParsedCall proc_state _ -> do
+            (concatMap (stmtDemandedValues ctx) (pblockStmts blk) ++ termValues)
+  case pblockTermStmt blk of
+    ParsedJump regs _ ->
+      addRegisterUses addr regs x86StateRegs
+    ParsedBranch regs _ _ _  ->
+      addRegisterUses addr regs x86StateRegs
+    ParsedCall regs  _ -> do
       -- Get function type associated with function
-      let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
+      let ft | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
              , Just ftp <- Map.lookup fSegOff typeMap = ftp
              | otherwise = ftMaximumFunctionType
-      addRegisterUses lbl proc_state (Some sp_reg : Set.toList x86CalleeSavedRegs)
+      addRegisterUses addr regs (Some sp_reg : Set.toList x86CalleeSavedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
-      traverse_ (clearRegDeps lbl) $
+      traverse_ (clearRegDeps addr) $
                 (Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ [Some DF]
     PLTStub regs _ _ -> do
       entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
-      blockInitDeps %= Map.insertWith (Map.unionWith mappend) lbl (Map.fromList entries)
-    ParsedJump proc_state _ ->
-      addRegisterUses lbl proc_state x86StateRegs
-    ParsedLookupTable proc_state _ _ ->
-      addRegisterUses lbl proc_state x86StateRegs
+      blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList entries)
+    ParsedLookupTable regs _ _ ->
+      addRegisterUses addr regs x86StateRegs
     ParsedReturn _ ->
       pure ()
-    ParsedIte _ tblock fblock -> do
-      summarizeBlock mem interp_state addr tblock
-      summarizeBlock mem interp_state addr fblock
-    ParsedArchTermStmt tstmt proc_state _ -> do
-      summarizeX86ArchTermStmt sysp lbl tstmt proc_state
+    ParsedArchTermStmt tstmt regs _ -> do
+      summarizeX86ArchTermStmt sysp addr tstmt regs
     ParsedTranslateError _ ->
       error "Cannot identify register use in code where translation error occurs"
     ClassifyFailure _ ->
       error $ "Classification failed: " ++ show addr
 
 summarizeX86ArchTermStmt :: SyscallPersonality
-                         -> BlockLabel 64
+                         -> MemSegmentOff 64
                          -> X86TermStmt ids
                          -> RegState (ArchReg X86_64) (Value X86_64 ids)
                          -> RegisterUseM ids ()
-summarizeX86ArchTermStmt sysp lbl X86Syscall proc_state = do
+summarizeX86ArchTermStmt sysp addr X86Syscall regs = do
   -- FIXME: clagged from call above
-  addRegisterUses lbl proc_state (Some sp_reg : (Set.toList x86CalleeSavedRegs))
-  traverse_ (clearRegDeps lbl) (spResultRegisters sysp)
+  addRegisterUses addr regs (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+  traverse_ (clearRegDeps addr) (spResultRegisters sysp)
 summarizeX86ArchTermStmt _ _ Hlt _ = pure ()
 summarizeX86ArchTermStmt _ _ UD2 _ = pure ()
 
@@ -324,9 +300,8 @@ summarizeIter mem ist seen = do
         summarizeIter mem ist seen
        else do
         let Just blk = Map.lookup addr (ist^.parsedBlocks)
-        let stmts = blockStatementList blk
-        blockFrontier %= \s -> foldr Set.insert s (fst <$> stmtListSucc stmts)
-        summarizeBlock mem ist addr stmts
+        blockFrontier %= \s -> foldr Set.insert s (parsedTermSucc (pblockTermStmt blk))
+        summarizeBlock mem addr blk
         summarizeIter mem ist (Set.insert addr seen)
 
 -- | Map from addresses to the registers they depend on
@@ -335,7 +310,7 @@ type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
 
 -- |
-doOne :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
+doOne :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
       -> FunPredMap 64
          -- ^ Map addresses to the predessor blocks.
       -> FixState ids
@@ -344,16 +319,15 @@ doOne :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
          -- ^ Remaining registers to compute demanded use map
       -> Set (Some X86Reg)
          -- ^ Set of new registers the target block depends on.
-      -> [BlockLabel 64]
+      -> [MemSegmentOff 64]
          -- ^ Predecessors for the target block.
       -> FixState ids
 doOne bid predMap s rest _ [] = calculateFixpoint bid predMap s rest
-doOne bid predMap (aUse, bru) rest newRegs (predLabel:predRest) = do
-  let Just depMap = Map.lookup predLabel bid
+doOne bid predMap (aUse, bru) rest newRegs (predAddr:predRest) = do
+  let Just depMap = Map.lookup predAddr bid
 
   let (assigns, regs) = mconcat [ depMap ^. ix r | r <- Set.toList newRegs ]
   -- Get dependencies of predecessor currently.
-  let predAddr = labelAddr predLabel
   let seenRegs = fromMaybe Set.empty (Map.lookup predAddr bru)
 
   let aUse' = Set.union assigns aUse
@@ -366,7 +340,7 @@ doOne bid predMap (aUse, bru) rest newRegs (predLabel:predRest) = do
 
 -- We use ix here as it returns mempty if there is no key, which is
 -- the right behavior here.
-calculateFixpoint :: Map (BlockLabel 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
+calculateFixpoint :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
                      -- Maps blocks labels to the dependencies for each register they provide.
                   -> FunPredMap 64
                      -- ^ Map addresses to the predessor blocks.

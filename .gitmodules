@@ -19,3 +19,6 @@
 [submodule "deps/llvm-pretty-bc-parser"]
 	path = deps/llvm-pretty-bc-parser
 	url = git@github.com:GaloisInc/llvm-pretty-bc-parser.git
+[submodule "deps/reopt-vcg"]
+	path = deps/reopt-vcg
+	url = git@github.com:GaloisInc/reopt-vcg.git

@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -20,8 +21,11 @@ module Reopt.Interface
   , discoverX86Binary
   , discoverX86Elf
     -- * LLVM
-  , LLVMVersion(..)
-  , asLLVMVersion
+  , LLVMVersion
+  , versionOfString
+  , LLVMConfig
+  , latestLLVMConfig
+  , getLLVMConfig
   , llvmAssembly
     -- * Redirections
   , ControlFlowTargetSet
@@ -48,7 +52,9 @@ import qualified Data.Map as Map
 import           Data.Maybe
 import           Data.Parameterized.Some
 import qualified Data.Set as Set
+import           Data.String
 import           Data.Word
+import           System.Exit
 import           System.IO
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
@@ -115,31 +121,67 @@ x86DemandInfo sysp =
 ------------------------------------------------------------------------
 -- LLVMVersion
 
--- | Version of LLVM to generate
-data LLVMVersion
-   = LLVM35
-   | LLVM36
-   | LLVM37
-   | LLVM38
+newtype LLVMVersion = LLVMVersion [Integer]
+  deriving (Eq, Ord)
 
--- | Convert a string to the LLVM version identifier.
-asLLVMVersion :: String -> Maybe LLVMVersion
-asLLVMVersion s =
-  case s of
-    "llvm35" -> Just LLVM35
-    "llvm36" -> Just LLVM36
-    "llvm37" -> Just LLVM37
-    "llvm38" -> Just LLVM38
+-- | Parse a string as a version
+versionOfString :: String -> Maybe LLVMVersion
+versionOfString s = do
+  let (f,r) = span (/= '.') s
+  case (reads f, r) of
+    ([(v,"")], [])
+      | v >= 0 ->
+        if v == 0 then
+          Just (LLVMVersion [])
+        else
+          Just (LLVMVersion [v])
+    ([(v,"")], '.':rest)
+      | v >= 0 -> do
+        LLVMVersion l <- versionOfString rest
+        if null l && v == 0 then
+          pure (LLVMVersion [])
+        else
+          pure (LLVMVersion (v : l))
     _ -> Nothing
 
+
+instance IsString LLVMVersion where
+  fromString s =
+    case versionOfString s of
+      Just v -> v
+      Nothing -> error $ "Could not interpret " ++ show s ++ " as a version."
+
+type LLVMConfig = LPP.Config
+
+-- | Configuration for LLVM 3.5 - 3.6
+llvm35Config :: LLVMConfig
+llvm35Config =
+  LPP.Config { LPP.cfgLoadImplicitType = True
+             , LPP.cfgGEPImplicitType  = True
+             , LPP.cfgUseDILocation    = False
+             }
+
+-- | Configuration for LLVM 3.7 & 3.8
+latestLLVMConfig :: LLVMConfig
+latestLLVMConfig =
+  LPP.Config { LPP.cfgLoadImplicitType = False
+             , LPP.cfgGEPImplicitType  = False
+             , LPP.cfgUseDILocation    = True
+             }
+
+llvmVersionMap :: Map LLVMVersion LLVMConfig
+llvmVersionMap = Map.fromList
+  [ (,) "3.5.0" llvm35Config
+  , (,) "3.7.0" latestLLVMConfig
+  ]
+
+--  | Get the LLVM LLVM config associated with a version
+getLLVMConfig :: LLVMVersion -> Maybe LLVMConfig
+getLLVMConfig v = snd <$> Map.lookupLE v llvmVersionMap
+
 -- | Pretty print an LLVM module using the format expected by the given LLVM version.
-ppLLVM :: LLVMVersion -> L.Module -> HPJ.Doc
-ppLLVM LLVM35 m = LPP.ppLLVM35 $ LPP.ppModule m
-ppLLVM LLVM36 m = LPP.ppLLVM36 $ LPP.ppModule m
-ppLLVM LLVM37 m = LPP.ppLLVM37 $ LPP.ppModule m
-ppLLVM LLVM38 m = LPP.ppLLVM38 $ LPP.ppModule m
-
-
+ppLLVM :: LPP.Config -> L.Module -> HPJ.Doc
+ppLLVM c m = LPP.withConfig c $ LPP.ppModule m
 
 ------------------------------------------------------------------------
 -- Execution
@@ -275,28 +317,28 @@ discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
     discoverX86Elf path loadOpts disOpt includeAddr excludeAddr
   pure (os, discState, addrSymMap)
 
-llvmAssembly :: LLVMVersion -> L.Module -> Builder.Builder
-llvmAssembly v m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM v m)
+llvmAssembly :: LPP.Config -> L.Module -> Builder.Builder
+llvmAssembly cfg m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
   where pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
         pp (HPJ.Chr c)  b = Builder.charUtf8 c <> b
         pp (HPJ.Str s)  b = Builder.stringUtf8 s <> b
         pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
 
 --------------------------------------------------------------------------------
--- Redirections
+-- Compile the LLVM
 
 -- | Compile a bytestring containing LLVM assembly or bitcode into an object.
-compileLLVM :: Int
-            -> FilePath
-            -> FilePath
-            -> FilePath
-            -> String
-            -> Builder.Builder
-            -> FilePath
-            -> IO ()
-compileLLVM optLevel optPath llcPath gasPath arch llvm obj_path = do
+--
+-- This writes to standard out and throws an error.
+compileLLVM :: Int -- ^ Optimization level
+            -> FilePath -- ^ Path to LLVM `opt` command
+            -> FilePath -- ^ Path to llc
+            -> FilePath -- ^ Path to llvm-mc
+            -> String   -- ^ Architure triple to pass to LLC
+            -> Builder.Builder -- ^ Representiation of LLVM to serialize
+            -> IO BS.ByteString
+compileLLVM optLevel optPath llcPath llvmMcPath arch llvm = do
   -- Run llvm on resulting binary
-  putStrLn "Compiling new code"
   mres <- runExceptT $ do
     -- Skip optimization if optLevel == 0
     llvm_opt <-
@@ -309,11 +351,13 @@ compileLLVM optLevel optPath llcPath gasPath arch llvm obj_path = do
                                   , Ext.llc_opt_level = optLevel
                                   }
     asm <- Ext.run_llc llcPath llc_opts llvm_opt
-    Ext.run_gas gasPath asm obj_path
+    Ext.runLlvmMc llvmMcPath asm arch
 
   case mres of
-    Left f -> fail $ show f
-    Right () -> return ()
+    Left f -> do
+      hPutStrLn stderr (show f)
+      exitFailure
+    Right b -> return b
 
 writeFileBuilder :: FilePath -> Builder.Builder -> IO ()
 writeFileBuilder nm b = bracket (openBinaryFile nm WriteMode) hClose (\h -> Builder.hPutBuilder h b)

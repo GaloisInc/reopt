@@ -64,8 +64,8 @@ import           Data.Macaw.CFG
    , IsArchStmt(..)
    , MemRepr(..)
    , PrettyF(..)
+   , ArchSegmentOff
    )
-import           Data.Macaw.CFG.BlockLabel
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
@@ -320,29 +320,40 @@ instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegV
 -- for each predecessor block, and the register to rad from at the end
 -- of that blcok.
 data PhiBinding r tp
-   = PhiBinding (FnPhiVar tp) [(BlockLabel (RegAddrWidth r), r tp)]
+   = PhiBinding (FnPhiVar tp) [(MemSegmentOff (RegAddrWidth r), r tp)]
 
 ------------------------------------------------------------------------
 -- FnStmt
 
 type family FnArchStmt (arch :: *) :: (Type -> *) -> *
 
-data FnStmt arch
-    -- | A comment
-  = FnComment !Text
+data FnStmt arch where
+  -- | A comment
+  FnComment :: !Text -> FnStmt arch
     -- | An assignment statement
-  | forall tp . FnAssignStmt !(FnAssignment arch tp)
-     -- | A call statement to the given location with the arguments
-     -- listed that returns to this code.
-  | forall tp . FnWriteMem !(FnValue arch (BVType (ArchAddrWidth arch))) !(FnValue arch tp)
-    -- | A call to a function with some arguments and return values.
-  | FnCall !(FnValue arch (BVType (ArchAddrWidth arch)))
-            !(FunctionType arch)
+  FnAssignStmt :: !(FnAssignment arch tp)
+               -> FnStmt arch
+  -- | Writes to memory
+  FnWriteMem :: !(FnValue arch (BVType (ArchAddrWidth arch)))
+             -> !(FnValue arch tp)
+
+             -> FnStmt arch
+  -- | A conditional write to memory
+  FnCondWriteMem :: !(FnValue arch BoolType)
+                 -> !(FnValue arch (BVType (ArchAddrWidth arch)))
+                 -> !(FnValue arch tp)
+                 -> !(MemRepr tp)
+                 -> FnStmt arch
+  -- | A call to a function with some arguments and return values.
+  FnCall :: !(FnValue arch (BVType (ArchAddrWidth arch)))
+         -> !(FunctionType arch)
             -- Arguments
-            [Some (FnValue arch)]
+         -> [Some (FnValue arch)]
             -- Return values
-            ![Some FnReturnVar]
-  | FnArchStmt (FnArchStmt arch (FnValue arch))
+         -> ![Some FnReturnVar]
+         -> FnStmt arch
+  FnArchStmt :: (FnArchStmt arch (FnValue arch))
+             -> FnStmt arch
 
 instance ( FnArchConstraints arch
          , IsArchStmt (FnArchStmt arch)
@@ -350,9 +361,10 @@ instance ( FnArchConstraints arch
       => Pretty (FnStmt arch) where
   pretty s =
     case s of
-      FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
       FnComment msg -> text "#" <+> text (Text.unpack msg)
       FnAssignStmt assign -> pretty assign
+      FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
+      FnCondWriteMem cond addr val _repr -> text "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
       FnCall f _ args rets ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
             ppRet :: forall tp . FnReturnVar tp -> Doc
@@ -364,6 +376,7 @@ instance ( FnArchConstraints arch
 
 instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
+  foldFnValue f s (FnCondWriteMem c a v _)              = s `f` c `f` a `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldlFC f s rhs
   foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
@@ -374,8 +387,8 @@ instance FoldFnValue FnStmt where
 
 -- | The terminal statement from a block.
 data FnTermStmt arch
-   = FnJump !(ArchLabel arch)
-   | FnBranch !(FnValue arch BoolType) !(ArchLabel arch) !(ArchLabel arch)
+   = FnJump !(ArchSegmentOff arch)
+   | FnBranch !(FnValue arch BoolType) !(ArchSegmentOff arch) !(ArchSegmentOff arch)
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
                    !(V.Vector (MemSegmentOff (ArchAddrWidth arch)))
    | FnRet ![Some (FnValue arch)]
@@ -392,7 +405,7 @@ instance FnArchConstraints arch
       => Pretty (FnTermStmt arch) where
   pretty s =
     case s of
-      FnJump lbl -> text "jump" <+> pretty lbl
+      FnJump a -> text "jump" <+> pretty a
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ V.toList $ pretty . segoffAddr <$> vec)
@@ -414,7 +427,7 @@ instance FoldFnValue FnTermStmt where
 
 -- | A block in the function
 data FnBlock arch
-   = FnBlock { fbLabel :: !(ArchLabel arch)
+   = FnBlock { fbLabel :: !(ArchSegmentOff arch)
                -- ^ Label for identifying block.
              , fbPhiNodes  :: ![Some (PhiBinding (ArchReg arch))]
                -- ^ List of phi bindings.
@@ -447,9 +460,9 @@ instance (FnArchConstraints arch
       ppPhis = vcat (go <$> fbPhiNodes b)
       go :: Some (PhiBinding (ArchReg arch)) -> Doc
       go (Some (PhiBinding aid vs)) =
-         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map goLbl vs)
-      goLbl :: (ArchLabel arch, ArchReg arch tp) -> Doc
-      goLbl (lbl, node) = parens (pretty lbl <> comma <+> prettyF node)
+         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map ppBinding vs)
+      ppBinding :: (ArchSegmentOff arch, ArchReg arch tp) -> Doc
+      ppBinding (a, node) = parens (pretty a <> comma <+> prettyF node)
 
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
