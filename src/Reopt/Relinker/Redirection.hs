@@ -9,9 +9,10 @@ locations into existing code.
 module Reopt.Relinker.Redirection
   ( CodeRedirection(..)
   , mkCodeAddrMap
-  , ResolvedCodeRedir(..)
-  , resolveCodeRedirection
   , isFuncSymbol
+  , ResolvedCodeRedirs
+  , emptyResolvedCodeRedirs
+  , resolveCodeRedirections
   , insertStaticRedirs
   ) where
 
@@ -65,7 +66,7 @@ writeBS mv base bs = do
 --
 -- The target location is identified by the name of the symbol.
 data CodeRedirection w
-   = CodeRedirection { redirSourceOffset :: !w
+   = CodeRedirection { redirSourceVAddr :: !w
                        -- ^ Virtual address within code segment where we should change.
                      , redirSourceSize :: !Int
                        -- ^ Number of bytes available at source offset to write redirection.
@@ -76,7 +77,7 @@ data CodeRedirection w
 instance Integral w => ToJSON (CodeRedirection w) where
   toJSON redir =
     object
-      [ "offset"          .= toInteger (redirSourceOffset redir)
+      [ "vaddr"           .= toInteger (redirSourceVAddr redir)
       , "bytes_available" .= (redirSourceSize redir)
       , "target"          .= unpack (redirTarget redir)
       ]
@@ -84,7 +85,7 @@ instance Integral w => ToJSON (CodeRedirection w) where
 instance Num w => FromJSON (CodeRedirection w) where
   parseJSON (Object o) =
     CodeRedirection
-      <$> (fromIntegral <$> (o .: "offset" :: Parser Integer))
+      <$> (fromIntegral <$> (o .: "vaddr" :: Parser Integer))
       <*> (o .: "bytes_available")
       <*> (fromString <$> (o .: "target"))
   parseJSON v = typeMismatch "CodeRedirection" v
@@ -124,39 +125,71 @@ mkCodeAddrMap secMap entries
         m = Map.fromList addrList
 
 data ResolvedCodeRedir a
-   = ResolvedCodeRedir { resolvedSourceAddr :: !a
+   = ResolvedCodeRedir { resolvedSourceVAddr :: !a
                          -- ^ Virtual address of source within this.
                        , resolvedContents   :: !BS.ByteString
                        }
 
+-- | Resolve a code redirection using information from where symbols
+-- redirect to.
 resolveCodeRedirection :: (a -> BS.ByteString)
                        -- ^ Function for creating jump to given address.
-                       -> Map BS.ByteString a
-                       -- ^ Maps names of symbols defined in the object file to
-                       -- their address in the new binary.  This will only point to
-                       -- new code.
+                       -> (BS.ByteString -> Maybe a)
+                       -- ^ Function that given the name of a symbol
+                       -- returns the address of that symbol in the
+                       -- new binary, or `Nothing` if the symbol is
+                       -- not in the object file.
                        -> CodeRedirection a
-                       -- ^ List of redirections to apply
-                       -> Maybe (ResolvedCodeRedir a)
-resolveCodeRedirection mkJump codeAddrMap redirEntry
-    -- Only apply redirection when there is enough space to write the code.
-   | BS.length jmp <= redirSourceSize redirEntry = Just redir
-   | otherwise = Nothing
-  where nm = redirTarget redirEntry
-        jmp =
-          case Map.lookup nm codeAddrMap of
-            Just tgt -> mkJump tgt
-            Nothing -> error $ "Could not find symbol name " ++ unpack nm ++ "."
-        redir =
-          ResolvedCodeRedir { resolvedSourceAddr = redirSourceOffset redirEntry
-                            , resolvedContents = jmp
-                            }
+                       -- ^ Redirections to apply
+                       -> Either BS.ByteString [ResolvedCodeRedir a]
+resolveCodeRedirection mkJump resolveAddr redirEntry = do
+  let nm = redirTarget redirEntry
+  tgt <-
+    case resolveAddr nm of
+      Just tgt -> Right tgt
+      Nothing -> Left $! nm
+  let jmp = mkJump tgt
+  if BS.length jmp > redirSourceSize redirEntry then
+    pure $! []
+   else
+    let redir = ResolvedCodeRedir { resolvedSourceVAddr = redirSourceVAddr redirEntry
+                                  , resolvedContents = jmp
+                                  }
+     in seq redir $ (pure $! [redir])
 
+
+-- | Code redirections to apply to replace code in the original binary
+-- with new code.
+newtype ResolvedCodeRedirs a = RCR [ResolvedCodeRedir a]
+
+emptyResolvedCodeRedirs :: ResolvedCodeRedirs a
+emptyResolvedCodeRedirs = RCR []
+
+-- | Generate resolved code redirections for inserting jumps from original
+-- binary code into new code.
+--
+-- If we cannot find the address of a symbol in the object file that we
+-- expect to be present, this will return the name of the symbol that
+-- we could not find in the left field, otherwise it returns all the
+-- code redirections.
+resolveCodeRedirections :: (Word64 -> BS.ByteString)
+                        -- ^ Function for creating jump to given offset.
+                        -> [CodeRedirection Word64]
+                        -- ^ List of redirections generated from
+                        -- recovered functions.
+                        -> (BS.ByteString -> Maybe (ElfWordType 64))
+                       -- ^ Function that given the name of a symbol
+                        -- returns the address of that symbol in the
+                        -- new binary, or `Nothing` if the symbol is
+                        -- not in the object file.
+                        -> Either BS.ByteString (ResolvedCodeRedirs (ElfWordType 64))
+resolveCodeRedirections mkJump redirs resolveAddr = do
+  RCR . concat <$> traverse (resolveCodeRedirection mkJump resolveAddr) redirs
 
 -- | This takes a bytestring in the original binary and updates it with relocations
 -- to point to the new binary.
 insertStaticRedirs :: (HasCallStack, Integral a)
-                   => [ResolvedCodeRedir a]
+                   => ResolvedCodeRedirs a
                    -- ^ List of redirections to apply
                    -> a
                    -- ^ Base address of this bytestring within the file.
@@ -165,8 +198,8 @@ insertStaticRedirs :: (HasCallStack, Integral a)
                    -- offset in bytestring to apply this to.
                    -> BS.ByteString
                    -> BS.ByteString
-insertStaticRedirs [] _ bs = bs
-insertStaticRedirs redirs base bs = runST $ do
+insertStaticRedirs (RCR []) _ bs = bs
+insertStaticRedirs (RCR redirs) base bs = runST $ do
   let len :: Int
       len = BS.length bs
   mv <- SMV.new len
@@ -174,9 +207,9 @@ insertStaticRedirs redirs base bs = runST $ do
   writeBS mv 0 bs
   -- Apply relocations.
   forM_ redirs $ \redir -> do
-    let off = resolvedSourceAddr redir
-    when (base <= off && off - base < fromIntegral len) $ do
-      writeBS mv (fromIntegral (off - base)) (resolvedContents redir)
+    let vaddr = resolvedSourceVAddr redir
+    when (base <= vaddr && vaddr - base < fromIntegral len) $ do
+      writeBS mv (fromIntegral (vaddr - base)) (resolvedContents redir)
 
   let SMV.MVector _ fp = mv
   return $! Data.ByteString.Internal.fromForeignPtr fp 0 len

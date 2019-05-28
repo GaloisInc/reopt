@@ -9,8 +9,8 @@ executable.
 It currently supports only the x86_64 instruction set, and its main
 LLVM generation capability is quite immature -- bugs are expected, and
 you may want to only use Reopt to translate specific functions into
-LLVM.  For example `reopt -o abc.ll abc.o` will translate the files
-in the object file `abc.o` into LLVM.
+LLVM.  For example `reopt -o abc.ll abc.o` will translate the files in
+the object file `abc.o` into LLVM.
 
 More documentation will be provided once the tool is in a more mature
 state.

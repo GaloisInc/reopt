@@ -30,7 +30,6 @@ module Reopt.Interface
     -- * Redirections
   , ControlFlowTargetSet
   , discoveryControlFlowTargets
-  , elfSegmentMap
   , addrRedirection
     -- * Utilities
   , compileLLVM
@@ -422,46 +421,19 @@ discoveryControlFlowTargets info =
       m = foldl' addFunDiscoveryControlFlowTargets m0 (exploredFunctions info)
    in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
 
--- | Maps virtual addresses to the phdr at them.
-type ElfSegmentMap w = Map (ElfWordType w) (Phdr w)
-
--- | Create an elf segment map from a layout.
-elfSegmentMap :: forall w . ElfLayout w -> ElfSegmentMap w
-elfSegmentMap l = elfClassInstances (elfLayoutClass l) $ foldl' insertElfSegment Map.empty (allPhdrs l)
-  where insertElfSegment ::  Ord (ElfWordType w) => ElfSegmentMap w -> Phdr w -> ElfSegmentMap w
-        insertElfSegment m p
-          | phdrSegmentType p == PT_LOAD = Map.insert a p m
-          | otherwise = m
-          where a = phdrSegmentVirtAddr p
-
--- | Lookup an address in the segment map, returning the index of the phdr
--- and the offset.
-lookupElfOffset :: ElfSegmentMap 64 -> Word64 -> Maybe (Word16, Word64)
-lookupElfOffset m a =
-  case Map.lookupLE a m of
-    Just (base, phdr) | a < base + phdrFileSize phdr ->
-        Just (phdrSegmentIndex phdr, a - base)
-    _ -> Nothing
-
 -- | This creates a code redirection or returns the address as failing.
 addrRedirection :: ControlFlowTargetSet 64
-                -> LLVM.AddrSymMap 64
-                -> ElfSegmentMap 64
+                -> FunctionSymbolCallback 64
+                   -- ^ Callback for generating names from function addresses.
                 -> Function X86_64
-                -> Either (MemSegmentOff 64) (CodeRedirection Word64)
-addrRedirection tgts addrSymMap m f = do
+                -> CodeRedirection Word64
+addrRedirection tgts nmFun f = do
   let a = fnAddr f
-  let w = case segoffAsAbsoluteAddr a of
-            Just absAddr -> fromIntegral absAddr
-            Nothing -> error "Redirection does not yet support relocatable binaries."
-  case lookupElfOffset m w of
-    Nothing -> Left (fnAddr f)
-    Just (idx,off)
-        | idx /= 0 -> error "addrRedirection should have 0 index."
-        | otherwise -> Right redir
-      where Right nmFun = LLVM.llvmFunctionName addrSymMap "reopt"
-            L.Symbol sym_name = nmFun (fnAddr f)
-            redir = CodeRedirection { redirSourceOffset = off
-                                    , redirSourceSize   = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
-                                    , redirTarget       = UTF8.fromString sym_name
-                                    }
+  let off :: Word64
+      off = fromIntegral (segmentOffset (segoffSegment a)) + fromIntegral (segoffOffset a)
+  let L.Symbol sym_name = nmFun a
+  CodeRedirection { redirSourceVAddr = off
+                  , redirSourceSize =
+                      fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
+                  , redirTarget       = UTF8.fromString sym_name
+                  }

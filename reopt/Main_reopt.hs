@@ -13,7 +13,6 @@ import           Control.Monad
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import           Data.Either
 import           Data.ElfEdit
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Parameterized.Some
@@ -569,12 +568,7 @@ performReopt args = do
         logger "Start merge and write"
         -- Convert binary to LLVM
         let tgts = discoveryControlFlowTargets disc_info
-            (bad_addrs, redirs) = partitionEithers $ mkRedir <$> fns
-              where m = elfSegmentMap (elfLayout orig_binary)
-                    mkRedir f = addrRedirection tgts addrSymMap m f
-        unless (null bad_addrs) $ do
-          error $ "Found functions outside program headers:\n  "
-            ++ unwords (show <$> bad_addrs)
+            redirs = addrRedirection tgts llvmNmFun <$> fns
         -- Merge and write out
         mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
 

@@ -171,9 +171,6 @@ llvmIntrinsics = [ overflowOp bop in_typ
 --------------------------------------------------------------------------------
 
 -- | Implements 'llvmFunctionName' after soundness checks complete.
---
--- See the documentation for 'moduleForFunctions' for the convention of how
--- symbols are generated.
 llvmFunctionName' :: MemWidth w
                  => Map (MemAddr w) L.Symbol
                  -- ^ Maps addresses of symbols to the associated symbol name.
@@ -192,16 +189,13 @@ llvmFunctionName' m prefix segOff =
 type AddrSymMap w = Map.Map (MemSegmentOff w) BSC.ByteString
 
 -- | Creates a function for generating LLVM names.
---
--- This See the documentation for 'moduleForFunctions' for the convention of how
--- symbols are generated.
 llvmFunctionName :: MemWidth w
                  => AddrSymMap w
                  -- ^ Maps addresses of symbols to the associated symbol name.
                  -> String
                     -- ^ Prefix to use for automatically generated symbols.
-                    -- To be able to distinguish symbols, this should not be
-                    -- a prefix for any of the symbols in the map.
+                    -- To avoid name clashes, it is sufficient to know that no
+                    -- symbol starts with this prefix.
                  -> Either String (MemSegmentOff w -> L.Symbol)
 llvmFunctionName m prefix
   | any (\nm -> prefix `isPrefixOf` BSC.unpack nm) (Map.elems m) =
