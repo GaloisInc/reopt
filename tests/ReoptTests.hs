@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-
 module ReoptTests (
   reoptTests
   ) where
@@ -21,7 +21,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
-import           Reopt.Interface
+import           Reopt
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
@@ -49,12 +49,11 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
 
-  fns <- getFns logger (osPersonality os) disc_info
-  writeFile fns_path $ show (vcat (pretty <$> fns))
+  recMod <- getFns logger addrSymMap "reopt" (osPersonality os) disc_info
+  writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
   let archOps = LLVM.x86LLVMArchOps (show os)
-  let Right symFun = LLVM.llvmFunctionName addrSymMap "reopt"
-  let obj_llvm = llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps symFun fns
+  let obj_llvm = llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps recMod
   writeFileBuilder llvm_path obj_llvm
 
   return ()

@@ -22,9 +22,7 @@ layer.
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.LLVM
-  ( AddrSymMap
-  , moduleForFunctions
-  , llvmFunctionName
+  ( moduleForFunctions
     -- * Internals for implement architecture specific functions
   , LLVMArchSpecificOps(..)
   , LLVMArchConstraints
@@ -32,8 +30,7 @@ module Reopt.CFG.LLVM
   , functionTypeToLLVM
   , Intrinsic
   , intrinsic
-  , FunLLVMContext(funSymbolCallback, funAddrTypeMap)
-  , FunctionSymbolCallback
+  , FunLLVMContext
   , BBLLVM
   , BBLLVMState(archFns, bbBlock, funContext)
   , typeToLLVMType
@@ -63,9 +60,7 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
-import           Data.Foldable
 import           Data.Int
-import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
@@ -73,7 +68,6 @@ import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Proxy
-import qualified Data.Set as Set
 import qualified Data.Vector as V
 import qualified GHC.Err.Located as Loc
 import           GHC.TypeLits
@@ -170,40 +164,6 @@ llvmIntrinsics = [ overflowOp bop in_typ
 -- conversion to LLVM
 --------------------------------------------------------------------------------
 
--- | Implements 'llvmFunctionName' after soundness checks complete.
-llvmFunctionName' :: MemWidth w
-                 => Map (MemAddr w) L.Symbol
-                 -- ^ Maps addresses of symbols to the associated symbol name.
-                 -> String
-                    -- ^ Prefix to use for automatically generated symbols.
-                    -- To be able to distinguish symbols, this should not be
-                    -- a prefix for any of the symbols in the map.
-                 -> (MemSegmentOff w -> L.Symbol)
-llvmFunctionName' m prefix segOff =
-    case Map.lookup addr m of
-      Just sym -> sym
-      Nothing ->
-        L.Symbol $ prefix ++ "_" ++ show (addrBase addr) ++ "_" ++ show (addrOffset addr)
-  where addr = segoffAddr segOff
-
-type AddrSymMap w = Map.Map (MemSegmentOff w) BSC.ByteString
-
--- | Creates a function for generating LLVM names.
-llvmFunctionName :: MemWidth w
-                 => AddrSymMap w
-                 -- ^ Maps addresses of symbols to the associated symbol name.
-                 -> String
-                    -- ^ Prefix to use for automatically generated symbols.
-                    -- To avoid name clashes, it is sufficient to know that no
-                    -- symbol starts with this prefix.
-                 -> Either String (MemSegmentOff w -> L.Symbol)
-llvmFunctionName m prefix
-  | any (\nm -> prefix `isPrefixOf` BSC.unpack nm) (Map.elems m) =
-    Left $ "Symbols in binary must not start with " ++ prefix
-  | otherwise =
-    let m' = Map.fromList [ (segoffAddr o, L.Symbol (BSC.unpack s)) | (o,s) <- Map.toList m ]
-     in Right $ llvmFunctionName' m' prefix
-
 blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
 blockWordName o =
   let a = segoffAddr o
@@ -251,57 +211,22 @@ functionTypeToLLVM ft = L.ptrT $
           (viewSome typeToLLVMType <$> fnArgTypes ft)
           False
 
-declareFunction :: L.Symbol -> FunctionType arch -> L.Declare
-declareFunction nm ftp =
-  L.Declare { L.decRetType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ftp)
-            , L.decName    = nm
-            , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
-            , L.decVarArgs = False
-            , L.decAttrs   = []
-            , L.decComdat  = Nothing
-            }
-
-
+declareFunction :: FunctionDecl arch
+                -> L.Declare
+declareFunction d =
+  let ftp = funDeclType d
+   in L.Declare { L.decRetType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ftp)
+                , L.decName    = L.Symbol (BSC.unpack (funDeclName d))
+                , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
+                , L.decVarArgs = False
+                , L.decAttrs   = []
+                , L.decComdat  = Nothing
+                }
 
 failBlock :: L.BasicBlock
 failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
-
-getReferencedFunctions :: forall arch
-                       .  ( Eq (FunctionType arch)
-                          , Show (FunctionType arch)
-                          , MemWidth (ArchAddrWidth arch)
-                          , FoldableFC (ArchFn arch)
-                          , FoldableF (FnArchStmt arch)
-                          )
-                       => FunctionTypeMap arch
-                       -> Function arch
-                       -> FunctionTypeMap arch
-getReferencedFunctions m0 f =
-    foldl' (foldFnValue findReferencedFunctions) m1 (fnBlocks f)
-  where m1 = insertAddr (Proxy :: Proxy arch) (fnAddr f) (fnType f) m0
-
-        findReferencedFunctions :: FunctionTypeMap arch
-                                -> FnValue arch tp
-                                -> FunctionTypeMap arch
-        findReferencedFunctions m (FnFunctionEntryValue ft addr) =
-          insertAddr (Proxy :: Proxy arch) addr ft m
-        findReferencedFunctions m _ = m
-
-        insertAddr :: Proxy arch
-                   -> MemSegmentOff (ArchAddrWidth arch)
-                   -> FunctionType arch
-                   -> FunctionTypeMap arch
-                   -> FunctionTypeMap arch
-        insertAddr _ addr ft m =
-          case Map.lookup addr m of
-            Just ft' | ft /= ft' ->
-                         Loc.error $ show (segoffAddr addr) ++ " has incompatible types:\n"
-                              ++ show ft  ++ "\n"
-                              ++ show ft' ++ "\n"
-                     | otherwise -> m
-            _ -> Map.insert addr ft m
 
 -- Pads the given list of values to be the target lenght using undefs
 padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
@@ -379,17 +304,11 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     -- This is architecture-specific so that we can choose machine code.
   }
 
--- | Computes the LLVM symbol of a function at the given address.
-type FunctionSymbolCallback w = MemSegmentOff w -> L.Symbol
-
 -- | Information used to generate LLVM for a specific function.
 --
 -- This information is the same for all blocks within the function.
 data FunLLVMContext arch = FunLLVMContext
-  { funSymbolCallback :: !(FunctionSymbolCallback (ArchAddrWidth arch))
-    -- ^ This is a callback for naming functions at specific addresses.
-  , funAddrTypeMap :: !(FunctionTypeMap arch)
-  , funArgs      :: !(V.Vector (L.Typed L.Value))
+  { funArgs      :: !(V.Vector (L.Typed L.Value))
      -- ^ Arguments to this function.
   , funReturnType :: !L.Type
     -- ^ LLVM return type for this function.
@@ -543,19 +462,11 @@ valueToLLVM ctx blk m val = do
     -- The entry pointer to a function.  We do the cast as a const
     -- expr as function addresses appear as constants in e.g. phi
     -- nodes
-    FnFunctionEntryValue ft addr -> do
-      case Map.lookup addr (funAddrTypeMap ctx) of
-        Just tp
-          | ft /= tp -> Loc.error "Mismatch function type"
-          | otherwise -> do
-            let sym = funSymbolCallback ctx addr
-            seq sym $ do
-              let typ = natReprToLLVMType ptrWidth
-              let fptr :: L.Typed L.Value
-                  fptr = L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
-              L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
-        Nothing -> do
-          Loc.error $ "Could not identify " ++ show addr
+    FnFunctionEntryValue ftp nm -> do
+      let typ = natReprToLLVMType ptrWidth
+      let fptr :: L.Typed L.Value
+          fptr = L.Typed (functionTypeToLLVM ftp) (L.ValSymbol (L.Symbol (BSC.unpack nm)))
+      L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
     -- A pointer to an internal block at the given address.
     FnBlockValue _addr -> do
       Loc.error $ "Cannot create references to local blocks."
@@ -927,27 +838,16 @@ resolveFunctionEntry :: LLVMArchConstraints arch
                      => FnValue arch (BVType (ArchAddrWidth arch))
                      -> FunctionType arch
                      -> BBLLVM arch (L.Typed L.Value)
-resolveFunctionEntry dest ft = do
-  let fun_ty  = functionTypeToLLVM ft
-  addrTypeMap <- gets $ funAddrTypeMap . funContext
+resolveFunctionEntry dest ft =
   case dest of
-    -- FIXME: use ft here instead?
-    FnFunctionEntryValue dest_ftp addr
-      | Just tp <- Map.lookup addr addrTypeMap -> do
-          fnCallback  <- gets $ funSymbolCallback  . funContext
-          let sym = fnCallback addr
-          when (functionTypeToLLVM tp /= fun_ty) $ do
-            Loc.error $ "Mismatch function type with " ++ show sym ++ "\n"
-              ++ "Declared: " ++ show (functionTypeToLLVM tp) ++ "\n"
-              ++ "Provided: " ++ show fun_ty
-          when (ft /= dest_ftp) $ do
-            Loc.error $ "Mismatch function type in call with " ++ show sym
-          when (tp /= dest_ftp) $ do
-            Loc.error $ "Mismatch function type in call with " ++ show sym
-          return $ L.Typed fun_ty (L.ValSymbol sym)
+    FnFunctionEntryValue dest_ftp nm -> do
+      let sym = L.Symbol (BSC.unpack nm)
+      when (ft /= dest_ftp) $ do
+        Loc.error $ "Mismatch function type in call with " ++ show sym
+      return $ L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
     _ -> do
       dest' <- mkLLVMValue dest
-      convop L.IntToPtr dest' fun_ty
+      convop L.IntToPtr dest' (functionTypeToLLVM ft)
 
 stmtToLLVM :: forall arch
            .  (LLVMArchConstraints arch, Loc.HasCallStack)
@@ -1168,14 +1068,10 @@ defineFunction :: forall arch
                .  LLVMArchConstraints arch
                => LLVMArchSpecificOps arch
                   -- ^ Architecture specific operations
-               -> FunctionSymbolCallback (ArchAddrWidth arch)
-                  -- ^ Callback for naming functions
-               -> FunctionTypeMap arch
                -> Function arch
+                  -- ^ Function to translate
                -> LLVMTrans L.Define
-defineFunction archOps symFun funTypeMap f = do
-  let symbol = symFun (fnAddr f)
-
+defineFunction archOps f = do
   -- Create initial block
   let inputArgs :: [L.Typed L.Ident]
       initBlock :: L.BasicBlock
@@ -1184,9 +1080,7 @@ defineFunction archOps symFun funTypeMap f = do
         mkInitBlock archOps (fnType f) (blockName (fnAddr f))
 
   let ctx :: FunLLVMContext arch
-      ctx = FunLLVMContext { funSymbolCallback = symFun
-                           , funAddrTypeMap = funTypeMap
-                           , funArgs        = postInitArgs
+      ctx = FunLLVMContext { funArgs        = postInitArgs
                            , funReturnType  =
                              L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
                            }
@@ -1223,7 +1117,7 @@ defineFunction archOps symFun funTypeMap f = do
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  =
                  L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
-             , L.defName     = symbol
+             , L.defName     = L.Symbol (BSC.unpack (fnName f))
              , L.defArgs     = inputArgs
              , L.defVarArgs  = False
              , L.defAttrs    = []
@@ -1256,11 +1150,10 @@ moduleForFunctions :: forall arch
                       , FoldableF (FnArchStmt arch))
                    => LLVMArchSpecificOps arch
                       -- ^ architecture specific functions
-                   -> FunctionSymbolCallback (ArchAddrWidth arch)
-                      -- ^ Function for getting name of functions
-                   -> [Function arch]
+                   -> RecoveredModule arch
+                      -- ^ Module to generate
                    -> L.Module
-moduleForFunctions archOps symFun fns =
+moduleForFunctions archOps recMod =
     L.Module { L.modSourceName = Nothing
              , L.modDataLayout = []
              , L.modTypes      = []
@@ -1269,26 +1162,11 @@ moduleForFunctions archOps symFun fns =
              , L.modGlobals    = []
              , L.modDeclares   = fmap declareIntrinsic llvmIntrinsics
                               ++ fmap declareIntrinsic dynIntrinsics
-                              ++ fnDecls
+                              ++ fmap declareFunction (recoveredDecls recMod)
              , L.modDefines    = defines
              , L.modInlineAsm  = []
              , L.modAliases    = []
              , L.modComdat     = Map.empty
              }
-  where -- Get all function references
-        funTypeMap :: FunctionTypeMap arch
-        funTypeMap = foldl getReferencedFunctions Map.empty fns
-
-        excludedSet = Set.fromList $ fnAddr <$> fns
-
-        declFunMap =
-          [ (addr, tp)
-          | (addr, tp) <- Map.toList funTypeMap
-          , Set.notMember addr excludedSet
-          ]
-
-        fnDecls = (\(addr, ftp) -> declareFunction (symFun addr) ftp)
-          <$> declFunMap
-
-        (dynIntrinsics, defines) = runLLVMTrans $
-          traverse (defineFunction archOps symFun funTypeMap) fns
+  where (dynIntrinsics, defines) = runLLVMTrans $
+          traverse (defineFunction archOps) (recoveredDefs recMod)

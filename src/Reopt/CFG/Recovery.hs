@@ -18,11 +18,16 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
   ( recoverFunction
+    -- * Naming
+  , AddrSymMap
+  , isUsedPrefix
+  , recoveredFunctionName
   ) where
 
 import           Control.Lens
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
+import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable as Fold (toList, traverse_, foldlM)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -41,7 +46,7 @@ import qualified GHC.Err.Located as Loc
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
-import           Data.Macaw.Discovery.State
+import           Data.Macaw.Discovery.State hiding (AddrSymMap)
 import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
@@ -77,7 +82,7 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
                            , rsCurrentFunctionType :: !X86FunctionType
                              -- ^ The type of the function being recovered.
-                           , rsFunctionArgs        :: !(Map (MemSegmentOff 64) X86FunctionType)
+                           , rsFunctionArgs        :: !(Map (MemSegmentOff 64) (BSC.ByteString, X86FunctionType))
                            , rsWarnings :: ![String]
                              -- ^ List of warnings added so far.
                            }
@@ -232,8 +237,8 @@ recoverValue' s v = do
           let seg = segoffSegment addrRef
           case () of
             _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-              , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
-                  Right $! FnFunctionEntryValue (resolveX86FunctionType ft) addrRef
+              , Just (nm,ft) <- Map.lookup addrRef (rsFunctionArgs s) -> do
+                  Right $! FnFunctionEntryValue (resolveX86FunctionType ft) nm
 
             _ | Map.member addrRef (interpState^.parsedBlocks) ->
                   let msg = "Do not support unctions that reference block addresses."
@@ -308,8 +313,8 @@ recoverCallTarget regState = do
   case v of
     RelocatableValue _ addr
       | Just addrRef <- asSegmentOff mem addr
-      , Just ft <- Map.lookup addrRef (rsFunctionArgs s) -> do
-          pure (FnFunctionEntryValue (resolveX86FunctionType ft) addrRef, ft)
+      , Just (nm,ft) <- Map.lookup addrRef (rsFunctionArgs s) -> do
+          pure (FnFunctionEntryValue (resolveX86FunctionType ft) nm, ft)
     _ ->
       case recoverValue' s v of
         Left msg -> do
@@ -875,6 +880,7 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
   recoverBlock blockRegs phis b blockInfo
 
+-- | Construct a generatic function type from the x86-specific type rep.
 resolveX86FunctionType :: X86FunctionType -> FunctionType X86_64
 resolveX86FunctionType ft =
   FunctionType { fnArgTypes = mapSome typeRepr <$> ftArgRegs ft
@@ -882,12 +888,36 @@ resolveX86FunctionType ft =
                               ++ replicate (fnNFloatRets ft) (Some zmmFloatRepr)
                }
 
+type AddrSymMap w = Map.Map (MemSegmentOff w) BSC.ByteString
+
+-- | This checks whether anyh of the symbols in the map start with the given string as a prefix.
+isUsedPrefix :: BSC.ByteString -> AddrSymMap w -> Bool
+isUsedPrefix prefix m = any (\nm -> prefix `BSC.isPrefixOf` nm) (Map.elems m)
+
+
+-- | Returns name of recovered function.
+recoveredFunctionName :: MemWidth w
+                      => AddrSymMap w
+                      -- ^ Maps addresses of symbols to the associated symbol name.
+                      -> BSC.ByteString
+                      -- ^ Prefix to use for automatically generated symbols.
+                      -- To be able to distinguish symbols, this should not be
+                      -- a prefix for any of the symbols in the map.
+                      -> MemSegmentOff w
+                      -> BSC.ByteString
+recoveredFunctionName m prefix segOff =
+  case Map.lookup segOff m of
+    Just sym -> sym
+    Nothing ->
+      let addr = segoffAddr segOff
+       in prefix <> "_" <> BSC.pack (show (addrBase addr)) <> "_" <> BSC.pack (show (addrOffset addr))
+
 -- | Recover the function at a given address.
 --
 -- Returns either an error message with a fatal error, or a list of warnings and a function.
 recoverFunction :: forall ids
                 .  SyscallPersonality
-                -> Map (MemSegmentOff 64) X86FunctionType
+                -> Map (MemSegmentOff 64) (BSC.ByteString, X86FunctionType)
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
                 -> Either String ([String], Function X86_64)
@@ -896,13 +926,13 @@ recoverFunction sysp fArgs mem fInfo = do
   let a = discoveredFunAddr fInfo
   let blockPreds = funBlockPreds fInfo
 
-  let (warn, cft) =
-        case Map.lookup a fArgs of
-          Just r -> ([], r)
-          Nothing -> (["Missing type for " ++ show a], ftMaximumFunctionType)
+  (nm,cft) <-
+    case Map.lookup a fArgs of
+      Just (nm,r) -> pure (nm, r)
+      Nothing -> Left $ "Missing type for " ++ show a
 
   let (usedAssigns, blockRegs)
-        = registerUse mem sysp fArgs fInfo cft blockPreds
+        = registerUse mem sysp (fmap snd fArgs) fInfo cft blockPreds
 
 
   let insReg i (Some r) = MapF.insert r (FnRegValue (FnRegArg r i))
@@ -927,7 +957,7 @@ recoverFunction sysp fArgs mem fInfo = do
               , rsAssignmentsUsed = usedAssigns
               , rsCurrentFunctionType = cft
               , rsFunctionArgs = fArgs
-              , rsWarnings     = warn
+              , rsWarnings     = []
               }
 
   evalRecover rs $ do
@@ -956,8 +986,8 @@ recoverFunction sysp fArgs mem fInfo = do
     r0 <- recoverBlock blockRegs [] b emptyRecoveredBlockInfo
     rf <- foldM (recoverInnerBlock fInfo blockRegs blockPreds) r0 (Map.keys blockPreds)
 
-    pure Function { fnAddr = a
-                  , fnType = resolveX86FunctionType cft
-                  , fnName = discoveredFunName fInfo
-                  , fnBlocks = Map.elems rf
-                  }
+    pure $! Function { fnAddr = a
+                     , fnType = resolveX86FunctionType cft
+                     , fnName = nm
+                     , fnBlocks = Map.elems rf
+                     }

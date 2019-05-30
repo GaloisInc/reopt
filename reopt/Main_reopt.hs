@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
@@ -12,6 +13,7 @@ import           Control.Lens
 import           Control.Monad
 import           Data.Bits
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.ElfEdit
 import           Data.List ((\\), nub, stripPrefix, intercalate)
@@ -37,7 +39,6 @@ import           Data.Macaw.Memory.LoadCommon
 import           Reopt
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
-import           Reopt.Interface
 import           Reopt.Relinker
 
 import           Paths_reopt (version)
@@ -124,6 +125,8 @@ data Args
             -- ^ Options affecting initial memory construction
           , _discOpts :: !DiscoveryOptions
             -- ^ Options affecting discovery
+          , _unnamedFunPrefix :: !BS.ByteString
+            -- ^ Prefix for unnamed functions
           }
 
 -- | Action to perform when running
@@ -186,6 +189,10 @@ loadOpts = lens _loadOpts (\s v -> s { _loadOpts = v })
 discOpts :: Simple Lens Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
+-- | Options for controlling discovery
+unnamedFunPrefix :: Simple Lens Args BSC.ByteString
+unnamedFunPrefix = lens _unnamedFunPrefix (\s v -> s { _unnamedFunPrefix = v })
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
@@ -203,6 +210,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _excludeAddrs  = []
                    , _loadOpts     = defaultLoadOptions
                    , _discOpts     = defaultDiscoveryOptions
+                   , _unnamedFunPrefix = "reopt"
                    }
 
 -- | Discovery symbols in program and show function CFGs.
@@ -214,10 +222,10 @@ showCFG args = do
 
 showFunctions :: Args -> IO ()
 showFunctions args = do
-  (os, s, _) <-
+  (os, s, addrSymMap) <-
     discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-  fns <- getFns logger (osPersonality os) s
-  mapM_ (print . pretty) fns
+  recMod <- getFns logger addrSymMap (args^.unnamedFunPrefix) (osPersonality os) s
+  mapM_ (print . pretty) (recoveredDefs recMod)
 
 ------------------------------------------------------------------------
 -- Loading flags
@@ -513,6 +521,8 @@ dumpDisassembly path = do
 performReopt :: Args -> IO ()
 performReopt args = do
   let output_path = args^.outputPath
+  let funPrefix :: BSC.ByteString
+      funPrefix = args^.unnamedFunPrefix
   case takeExtension output_path of
     ".bc" -> do
       logger $
@@ -523,28 +533,28 @@ performReopt args = do
     ".blocks" -> do
       writeFile output_path =<< showCFG args
     ".fns" -> do
-      (os, disc_info, _) <-
+      (os, disc_info, addrSymMap) <-
           discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-      fns <- getFns logger (osPersonality os) disc_info
-      writeFile output_path $ show (vcat (pretty <$> fns))
+      recMod <- getFns logger addrSymMap funPrefix (osPersonality os) disc_info
+      writeFile output_path $ show (vcat (pretty <$> recoveredDefs recMod))
     ".ll" -> do
-        hPutStrLn stderr "Generating LLVM"
-        (os, disc_info, addrSymMap) <-
-          discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-        fns <- getFns logger (osPersonality os) disc_info
-        let llvmVer = args^.llvmVersion
-        let archOps = LLVM.x86LLVMArchOps (show os)
-        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
-        writeFileBuilder output_path obj_llvm
+      hPutStrLn stderr "Generating LLVM"
+      (os, disc_info, addrSymMap) <-
+        discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+      recMod <- getFns logger addrSymMap funPrefix (osPersonality os) disc_info
+      let llvmVer = args^.llvmVersion
+      let archOps = LLVM.x86LLVMArchOps (show os)
+      let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps recMod
+      writeFileBuilder output_path obj_llvm
     ".o" -> do
       (os, disc_info, addrSymMap) <-
         discoverX86Binary (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-      fns <- getFns logger (osPersonality os) disc_info
+      recMod <- getFns logger addrSymMap funPrefix (osPersonality os) disc_info
       let llvmVer = args^.llvmVersion
       let archOps = LLVM.x86LLVMArchOps (show os)
-      let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
-      let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
+      let obj_llvm =
+            llvmAssembly llvmVer $
+              LLVM.moduleForFunctions archOps recMod
       objContents <- compileLLVM (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.llvmMcPath) (osLinkName os) obj_llvm
       BS.writeFile output_path objContents
     ".s" -> do
@@ -554,23 +564,22 @@ performReopt args = do
           "compile to generate a .s file."
         exitFailure
     _ -> do
-        (orig_binary, os, disc_info, addrSymMap, _) <-
-          discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-        fns <- getFns logger (osPersonality os) disc_info
-        let llvmVer = args^.llvmVersion
-        let archOps = LLVM.x86LLVMArchOps (show os)
-        let Right llvmNmFun = LLVM.llvmFunctionName addrSymMap "reopt"
-        let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps llvmNmFun fns
-        objContents <-
-          compileLLVM (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.llvmMcPath) (osLinkName os) obj_llvm
+      (orig_binary, os, disc_info, addrSymMap, _) <-
+        discoverX86Elf (args^.programPath) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+      recMod <- getFns logger addrSymMap funPrefix (osPersonality os) disc_info
+      let llvmVer = args^.llvmVersion
+      let archOps = LLVM.x86LLVMArchOps (show os)
+      let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps recMod
+      objContents <-
+        compileLLVM (args^.optLevel) (args^.optPath) (args^.llcPath) (args^.llvmMcPath) (osLinkName os) obj_llvm
 
-        new_obj <- parseElf64 "new object" objContents
-        logger "Start merge and write"
-        -- Convert binary to LLVM
-        let tgts = discoveryControlFlowTargets disc_info
-            redirs = addrRedirection tgts llvmNmFun <$> fns
-        -- Merge and write out
-        mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
+      new_obj <- parseElf64 "new object" objContents
+      logger "Start merge and write"
+      -- Convert binary to LLVM
+      let tgts = discoveryControlFlowTargets disc_info
+          redirs = addrRedirection tgts addrSymMap funPrefix <$> recoveredDefs recMod
+      -- Merge and write out
+      mergeAndWrite (args^.outputPath) orig_binary new_obj redirs
 
 main' :: IO ()
 main' = do

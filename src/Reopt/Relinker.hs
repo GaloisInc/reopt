@@ -660,7 +660,6 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   when (elfOSABI obj /= elfOSABI binary) $ do
     fail $ "Expected the new object to use the same OS ABI as original."
 
-
   -- Create GNU stack info if both binary and object have it, and the
   -- stack is non-executable in both.
   let mgnuStack = elfGnuStackSegment binary
