@@ -9,12 +9,12 @@ module Reopt.Hints
 --  , lookupFunType
   ) where
 
-import           Data.Aeson as J
+--import           Data.Aeson as J
 import qualified Data.ByteString.Char8 as BSC
-import           Data.HashMap.Strict as H
+--import           Data.HashMap.Strict as H
 import           Data.Hashable
 --import qualified Data.Text as Text
-import qualified Data.Vector as V
+--import qualified Data.Vector as V
 import           Data.Word
 import Numeric
 
