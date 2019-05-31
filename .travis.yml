@@ -19,8 +19,7 @@ before_install:
 - git submodule update --init
 - cd deps/reopt-vcg
 - sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-- git submodule update --init deps/llvm-pretty-bc-parser
-- git submodule update --init deps/crucible/what4
+- git submodule update --init
 - cd ../..
 
 # Download and unpack the stack executable
