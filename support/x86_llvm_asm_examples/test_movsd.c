@@ -1,7 +1,8 @@
 // This file contains C using inline assembly for the movsd instruction.
 //
-// It is designex to both let us test the semantics of movsd, and provide
-// a way of viewing LLVM's inline assembly syntax.
+// It is designex to both let us test the semantics of movsd, and
+// provide examples that use C inline assembly that we can compile to
+// LLVM to view LLVM's inline assembly syntax.
 
 #include<stdint.h>
 #include<stdio.h>
