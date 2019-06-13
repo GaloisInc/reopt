@@ -108,6 +108,14 @@ data Args
             -- ^ LLVM version to generate LLVM for.
             --
             -- Only used when generating LLVM.
+          , clangPath :: !FilePath
+            -- ^ Path to `clang` command.
+            --
+            -- This is only used for a C preprocessor for parsing header files.
+          , llcPath :: !FilePath
+            -- ^ Path to LLVM `llc` command
+            --
+            -- Only used when generating assembly file.
           , optPath      :: !FilePath
             -- ^ Path to LLVM opt command.
             --
@@ -116,10 +124,6 @@ data Args
             -- ^ Optimization level to pass to opt and llc
             --
             -- This defaults to 2
-          , llcPath      :: !FilePath
-            -- ^ Path to LLVM `llc` command
-            --
-            -- Only used when generating assembly file.
           , llvmMcPath      :: !FilePath
             -- ^ Path to llvm-mc
             --
@@ -168,9 +172,10 @@ defaultArgs = Args { _reoptAction = Reopt
                    , outputPath = Nothing
                    , headerPath = Nothing
                    , llvmVersion = latestLLVMConfig
+                   , clangPath = "clang"
+                   , llcPath = "llc"
                    , optPath = "opt"
                    , optLevel  = 2
-                   , llcPath = "llc"
                    , llvmMcPath = "llvm-mc"
                    , _includeAddrs = []
                    , _excludeAddrs  = []
@@ -281,19 +286,23 @@ debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
             ++ "means disable that key.\n"
             ++ "Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
 
-
-
--- | Flag to set path to opt.
-optPathFlag :: Flag Args
-optPathFlag = flagReq [ "opt" ] upd "PATH" help
-  where upd s old = Right $ old { optPath = s }
-        help = "Path to LLVM \"opt\" command for optimization."
+-- | Flag to set clang path.
+clangPathFlag :: Flag Args
+clangPathFlag = flagReq [ "clang" ] upd "PATH" help
+  where upd s old = Right $ old { clangPath = s }
+        help = "Path to LLVM \"clang\" compiler."
 
 -- | Flag to set llc path.
 llcPathFlag :: Flag Args
 llcPathFlag = flagReq [ "llc" ] upd "PATH" help
   where upd s old = Right $ old { llcPath = s }
         help = "Path to LLVM \"llc\" command for compiling LLVM to native assembly."
+
+-- | Flag to set path to opt.
+optPathFlag :: Flag Args
+optPathFlag = flagReq [ "opt" ] upd "PATH" help
+  where upd s old = Right $ old { optPath = s }
+        help = "Path to LLVM \"opt\" command for optimization."
 
 -- | Flag to set path to llvm-mc
 llvmMcPathFlag :: Flag Args
@@ -373,9 +382,10 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- LLVM options
                 , llvmVersionFlag
                   -- Compilation options
+                , clangPathFlag
+                , llcPathFlag
                 , optLevelFlag
                 , optPathFlag
-                , llcPathFlag
                 , llvmMcPathFlag
                 ]
 
@@ -424,7 +434,7 @@ resolveHeader :: Args -> IO Header
 resolveHeader args =
   case headerPath args of
     Nothing -> pure emptyHeader
-    Just p -> parseHeader p
+    Just p -> parseHeader (clangPath args) p
 
 -- | Parse arguments to get information needed for function representation.
 getFunctions :: Args
