@@ -69,7 +69,7 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Proxy
 import qualified Data.Vector as V
-import qualified GHC.Err.Located as Loc
+import           GHC.Stack
 import           GHC.TypeLits
 import           Numeric (showHex)
 import qualified Text.LLVM as L
@@ -383,7 +383,7 @@ unimplementedInstr' typ reason = do
 -- FIXME: Clarify comment to indicate what address is for.
 type AssignValMap w = Map FnAssignId (MemSegmentOff w, L.Typed L.Value)
 
-setAssignIdValue :: Loc.HasCallStack
+setAssignIdValue :: HasCallStack
                  => FnAssignId
                  -> ArchLabel arch
                  -> L.Typed L.Value
@@ -392,7 +392,7 @@ setAssignIdValue fid blk v = do
   s <- get
   let fs = funState s
   case Map.lookup fid (funAssignValMap fs) of
-    Just{} -> Loc.error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
+    Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
     Nothing -> do
       let fs' = fs { funAssignValMap = Map.insert fid (blk,v) (funAssignValMap fs) }
       put $! s { funState = fs' }
@@ -420,7 +420,7 @@ type LLVMArchConstraints arch
 -- | Map a function value to a LLVM value with no change.
 valueToLLVM :: forall arch tp
             .  ( LLVMArchConstraints arch
-               , Loc.HasCallStack
+               , HasCallStack
                )
             => FunLLVMContext arch
             -> FnBlock arch
@@ -442,21 +442,21 @@ valueToLLVM ctx blk m val = do
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find assignment value " ++ show (pretty lhs) ++ "\n"
-                      ++ show (pretty blk)
+          error $ "Could not find assignment value " ++ show (pretty lhs) ++ "\n"
+                    ++ show (pretty blk)
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp)  -> do
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find phi value " ++ show (pretty lhs) ++ "\n"
+          error $ "Could not find phi value " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk)
     -- A value returned by a function call (rax/xmm0)
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs m of
         Just (_,v) -> v
         Nothing ->
-          Loc.error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
+          error $ "Could not find return variable " ++ show (pretty lhs) ++ "\n"
                       ++ show (pretty blk) ++ "\n"
                       ++ show m
     -- The entry pointer to a function.  We do the cast as a const
@@ -469,14 +469,14 @@ valueToLLVM ctx blk m val = do
       L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
     -- A pointer to an internal block at the given address.
     FnBlockValue _addr -> do
-      Loc.error $ "Cannot create references to local blocks."
+      error $ "Cannot create references to local blocks."
     -- Value is an argument passed via a register.
     FnRegArg _ i -> r
       where Just r = funArgs ctx V.!? i
     -- A global address
     FnGlobalDataAddr addr ->
       case segoffAsAbsoluteAddr addr of
-        Nothing -> Loc.error $ "FnGlobalDataAddr only supports global values."
+        Nothing -> error $ "FnGlobalDataAddr only supports global values."
         Just fixedAddr -> L.Typed (natReprToLLVMType ptrWidth) $ L.integer $ fromIntegral fixedAddr
 
 -- | Return number of bits and LLVM float type should take
@@ -488,10 +488,10 @@ floatTypeWidth l =
     L.Double -> 64
     L.Fp128 -> 128
     L.X86_fp80 -> 80
-    L.PPC_fp128 -> Loc.error "PPC floating point types not supported."
+    L.PPC_fp128 -> error "PPC floating point types not supported."
 
 -- | Map a function value to a LLVM value with no change.
-valueToLLVMBitvec :: (LLVMArchConstraints arch, Loc.HasCallStack)
+valueToLLVMBitvec :: (LLVMArchConstraints arch, HasCallStack)
                   => FunLLVMContext arch
                   -> FnBlock arch
                      -- ^ Block that we are generating LLVM for.
@@ -505,9 +505,9 @@ valueToLLVMBitvec ctx blk m val = do
     L.PrimType (L.FloatType tp) ->
       let itp = L.iT (floatTypeWidth tp)
        in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
-    _ -> Loc.error $ "valueToLLVMBitvec given unsupported type: " ++ show (L.typedType llvm_val)
+    _ -> error $ "valueToLLVMBitvec given unsupported type: " ++ show (L.typedType llvm_val)
 
-mkLLVMValue :: (LLVMArchConstraints arch, Loc.HasCallStack)
+mkLLVMValue :: (LLVMArchConstraints arch, HasCallStack)
             => FnValue arch tp
             -> BBLLVM arch (L.Typed L.Value)
 mkLLVMValue val = do
@@ -536,7 +536,7 @@ extractValue ta i = do
   let etp = case L.typedType ta of
               L.Struct fl -> fl !! fromIntegral i
               L.Array _l etp' -> etp'
-              _ -> Loc.error "extractValue not given a struct or array."
+              _ -> error "extractValue not given a struct or array."
   L.Typed etp <$> evalInstr (L.ExtractValue ta [i])
 
 insertValue :: L.Typed L.Value -> L.Typed L.Value -> Int32 -> BBLLVM arch (L.Typed L.Value)
@@ -578,14 +578,14 @@ call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res argTypes varArgs) -> do
       when varArgs $ do
-        Loc.error $ "Varargs not yet supported."
+        error $ "Varargs not yet supported."
       let actualTypes = fmap L.typedType args
       when (argTypes /= actualTypes) $ do
-        Loc.error $ "Unexpected arguments to " ++ show f ++ "\n"
+        error $ "Unexpected arguments to " ++ show f ++ "\n"
                  ++ "Expected: " ++ show argTypes ++ "\n"
                  ++ "Actual:   " ++ show actualTypes
       fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> Loc.error $ "Call given non-function pointer argument:\n" ++ show f
+    _ -> error $ "Call given non-function pointer argument:\n" ++ show f
 
 -- | Generate a non-tail call that does not return a value
 call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM arch ()
@@ -593,14 +593,14 @@ call_ (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes varArgs) -> do
       when varArgs $ do
-        Loc.error $ "Varargs not yet supported."
+        error $ "Varargs not yet supported."
       when (argTypes /= fmap L.typedType args) $ do
-        Loc.error $ "Unexpected arguments to " ++ show f
+        error $ "Unexpected arguments to " ++ show f
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
-    _ -> Loc.error $ "call_ given non-function pointer argument\n" ++ show f
+    _ -> error $ "call_ given non-function pointer argument\n" ++ show f
 
 -- | Sign extend a boolean value to the given width.
-carryValue :: (LLVMArchConstraints arch, Loc.HasCallStack, 1 <= w)
+carryValue :: (LLVMArchConstraints arch, HasCallStack, 1 <= w)
            => NatRepr w
            -> FnValue arch BoolType
            -> BBLLVM arch (L.Typed L.Value)
@@ -609,7 +609,7 @@ carryValue w x =
 
 
 -- | Handle an intrinsic overflows
-intrinsicOverflows :: (LLVMArchConstraints arch, Loc.HasCallStack, 1 <= w)
+intrinsicOverflows :: (LLVMArchConstraints arch, HasCallStack, 1 <= w)
                     => String
                     -> FnValue arch (BVType w)
                     -> FnValue arch (BVType w)
@@ -638,7 +638,7 @@ intrinsicOverflows bop x y c = do
 
 
 appToLLVM :: forall arch tp
-          .  (LLVMArchConstraints arch, Loc.HasCallStack)
+          .  (LLVMArchConstraints arch, HasCallStack)
           => App (FnValue arch) tp
           -> BBLLVM arch (L.Typed L.Value)
 appToLLVM app = do
@@ -696,7 +696,7 @@ appToLLVM app = do
       n' <- mkLLVMValue n
       n_ext <-
         case compareF (typeWidth v) (typeWidth n) of
-          LTF -> Loc.error "BVTestBit expected second argument to be at least first"
+          LTF -> error "BVTestBit expected second argument to be at least first"
           EQF -> pure n'
           GTF -> zext n' in_typ
       mask <- shl (L.Typed in_typ (L.ValInteger 1)) (L.typedValue n_ext)
@@ -738,7 +738,7 @@ appToLLVM app = do
     TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
 
 -- | Evaluate a value as a pointer
-llvmAsPtr :: (LLVMArchConstraints arch, Loc.HasCallStack)
+llvmAsPtr :: (LLVMArchConstraints arch, HasCallStack)
           => FnValue arch (BVType (ArchAddrWidth arch))
              -- ^ Value to evaluate
           -> L.Type
@@ -797,7 +797,7 @@ resolveLoadNameAndType memRep =
         error $ "Vector width of " ++ show n ++ " is too large."
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
-rhsToLLVM :: (LLVMArchConstraints arch, Loc.HasCallStack)
+rhsToLLVM :: (LLVMArchConstraints arch, HasCallStack)
           => FnAssignRhs arch (FnValue arch) tp
           -> BBLLVM arch (L.Typed L.Value)
 rhsToLLVM rhs = do
@@ -843,14 +843,14 @@ resolveFunctionEntry dest ft =
     FnFunctionEntryValue dest_ftp nm -> do
       let sym = L.Symbol (BSC.unpack nm)
       when (ft /= dest_ftp) $ do
-        Loc.error $ "Mismatch function type in call with " ++ show sym
+        error $ "Mismatch function type in call with " ++ show sym
       return $ L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
     _ -> do
       dest' <- mkLLVMValue dest
       convop L.IntToPtr dest' (functionTypeToLLVM ft)
 
 stmtToLLVM :: forall arch
-           .  (LLVMArchConstraints arch, Loc.HasCallStack)
+           .  (LLVMArchConstraints arch, HasCallStack)
            => FnStmt arch
            -> BBLLVM arch ()
 stmtToLLVM stmt = do
@@ -896,7 +896,7 @@ stmtToLLVM stmt = do
      fn <- gets $ archStmtCallback . archFns
      fn astmt
 
-termStmtToLLVM :: (LLVMArchConstraints arch, Loc.HasCallStack)
+termStmtToLLVM :: (LLVMArchConstraints arch, HasCallStack)
                => FnTermStmt arch
                -> BBLLVM arch ()
 termStmtToLLVM tm =
@@ -924,7 +924,7 @@ termStmtToLLVM tm =
       effect $ L.Switch idx' (L.Named failLabel) (zip [0..] dests)
 
 -- | Convert a Phi node assignment to the right value
-resolvePhiNodeReg :: (LLVMArchConstraints arch, Loc.HasCallStack)
+resolvePhiNodeReg :: (LLVMArchConstraints arch, HasCallStack)
                   => FunLLVMContext arch
                   -> AssignValMap (ArchAddrWidth arch)
                   -> ResolvePhiMap arch
@@ -932,15 +932,15 @@ resolvePhiNodeReg :: (LLVMArchConstraints arch, Loc.HasCallStack)
                   -> (L.Value, L.BlockLabel)
 resolvePhiNodeReg ctx avmap m (lbl, reg) =
   case Map.lookup lbl m of
-    Nothing -> Loc.error $ "Could not resolve block " ++ show lbl
+    Nothing -> error $ "Could not resolve block " ++ show lbl
     Just br -> do
       let b = regBlock br
       case MapF.lookup reg (fbRegMap b) of
-        Nothing -> Loc.error $ "Could not resolve register " ++ show (prettyF reg) ++ " in block " ++ show lbl
-        Just (CalleeSaved _) -> Loc.error $ "Resolve callee saved register"
+        Nothing -> error $ "Could not resolve register " ++ show (prettyF reg) ++ " in block " ++ show lbl
+        Just (CalleeSaved _) -> error $ "Resolve callee saved register"
         Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx b avmap v), blockName lbl)
 
-resolvePhiStmt :: (LLVMArchConstraints arch, Loc.HasCallStack)
+resolvePhiStmt :: (LLVMArchConstraints arch, HasCallStack)
                => FunLLVMContext arch
                -> AssignValMap (ArchAddrWidth arch)
                -> ResolvePhiMap arch
@@ -949,7 +949,7 @@ resolvePhiStmt :: (LLVMArchConstraints arch, Loc.HasCallStack)
 resolvePhiStmt ctx avmap m (Some (PendingPhiNode nm tp info)) = L.Result nm i []
   where i = L.Phi tp (resolvePhiNodeReg ctx avmap m <$> info)
 
-toBasicBlock :: (LLVMArchConstraints arch, Loc.HasCallStack)
+toBasicBlock :: (LLVMArchConstraints arch, HasCallStack)
              => FunLLVMContext arch
              -> AssignValMap (ArchAddrWidth arch)
              -> ResolvePhiMap arch
@@ -963,7 +963,7 @@ toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just (blockName (fbLab
 
 -- | Add a phi var with the node info so that we have a ident to reference
 -- it by and queue up work to assign the value later.
-addPhiBinding :: Loc.HasCallStack => Some (PhiBinding (ArchReg arch)) -> BBLLVM arch ()
+addPhiBinding :: HasCallStack => Some (PhiBinding (ArchReg arch)) -> BBLLVM arch ()
 addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
   lbl <- gets $ fbLabel . bbBlock
   nm <- freshName

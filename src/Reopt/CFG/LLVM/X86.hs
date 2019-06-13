@@ -14,7 +14,7 @@ import           Control.Monad.State.Strict
 import           Data.Parameterized.Some
 import           Data.Type.Equality
 import qualified Data.Vector as V
-import qualified GHC.Err.Located as Loc
+import           GHC.Stack
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
@@ -52,7 +52,7 @@ functionArgType (Some r) =
   case r of
     X86_GP{} -> L.iT 64
     X86_ZMMReg{} -> zmmFloatType
-    _ -> Loc.error "Unsupported function type registers"
+    _ -> error "Unsupported function type registers"
 -}
 
 
@@ -110,7 +110,7 @@ evenParity v = do
   -- Check result is nonzero
   icmpop L.Ine parity_val (L.ValInteger 0)
 
-emitX86ArchFn :: Loc.HasCallStack
+emitX86ArchFn :: HasCallStack
               => ArchFn X86_64 (FnValue X86_64) tp
               -> BBLLVM X86_64 (L.Typed L.Value)
 emitX86ArchFn f =
@@ -194,10 +194,10 @@ emitSyscall callNum args =
           "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
           (callNum : padUndef (L.iT 64) 6 args)
 
-emitX86ArchStmt :: Loc.HasCallStack
-               => String -- ^ Prefix for system calls
-               -> X86FnStmt (FnValue X86_64)
-               -> BBLLVM X86_64 ()
+emitX86ArchStmt :: HasCallStack
+                => String -- ^ Prefix for system calls
+                -> X86FnStmt (FnValue X86_64)
+                -> BBLLVM X86_64 ()
 emitX86ArchStmt pname (X86FnSystemCall call_num args rets) = do
   llvm_call_num <- mkLLVMValue call_num
   llvm_args  <- mapM mkLLVMValue args

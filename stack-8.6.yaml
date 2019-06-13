@@ -21,3 +21,7 @@ extra-deps:
 - ./deps/reopt-vcg/annotations
 - ./deps/reopt-vcg/haskell-proto/deps/llvm-pretty-bc-parser
 - ./deps/reopt-vcg/haskell-proto/deps/crucible/what4
+
+nix:
+  enable: true
+  packages: [glpk, pcre, zlib]

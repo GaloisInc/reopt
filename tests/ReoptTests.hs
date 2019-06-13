@@ -27,7 +27,7 @@ reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 logger :: String -> IO ()
-logger = const (return ())
+logger _ = pure ()
 
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do

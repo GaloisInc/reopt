@@ -7,7 +7,7 @@ all : llvm_return_test.as abi_test.ll abi_test.as
 	llc --mtriple=x86_64-pc-linux-elf --x86-asm-syntax=intel -o $@ $<
 
 %.bc : %.c
-	clang -c --target=x86_64-pc-linux-elf -emit-llvm -O3 -o $@ $<
+	clang -c --target=x86_64-pc-linux-elf -mavx512f -emit-llvm -O3 -o $@ $<
 
 %.ll : %.bc
 	llvm-dis $<
