@@ -111,7 +111,8 @@ data Args
           , clangPath :: !FilePath
             -- ^ Path to `clang` command.
             --
-            -- This is only used for a C preprocessor for parsing header files.
+            -- This is only used as a C preprocessor for parsing
+            -- header files.
           , llcPath :: !FilePath
             -- ^ Path to LLVM `llc` command
             --
