@@ -60,12 +60,11 @@ type RelocInfo a =  Map ObjectSymbolTableIndex (BS.ByteString, a)
 -- ^ Maps indices of symbols defined in the original binary to their
 -- name and address.
 --
--- The name is just used for error reporting, so for sections it can
--- refer to the name of the section, while for other symbols it should
+-- The name is just used for error reporting.  For section symbols it
+-- refer to the name of the section, and for other symbols it should
 -- be the name of the symbol.
 --
--- The symbols may be in the data section.
-
+-- The symbols may be in the code or data section.
 
 -- | Get the address of a symbol table if it is mapped in the section map.
 resolveRelocEntry :: (Eq a, Num a)
@@ -88,6 +87,12 @@ resolveRelocEntry secMap idx sym = do
          -- Section symbol indices allowed to be unmapped.
       | otherwise -> Map.lookup secIdx secMap
     STT_FUNC
+      --  JHx Note: The inability to resolve undef symbol is likely wrong.
+      --
+      -- We need to be able to look them up in the original binary
+      -- including symbols and reopt generated ones of the form
+      -- reopt_XX_0x__ that were declared by reopt to denote addresses
+      -- in the binary
       | steIndex sym == SHN_UNDEF ->
         Nothing
       | otherwise -> do
@@ -131,12 +136,12 @@ performReloc :: RelocInfo (ElfWordType 64)
              -> RelaEntry X86_64_RelocationType
                 -- ^ The relocation entry.
              -> ST s ()
-performReloc objectIndexAddrMap thisAddr mv rela = do
+performReloc symbolAddrMap thisAddr mv rela = do
   -- Virtual address to update
   let vaddr = relaAddr rela
 
   -- Get the address of a symbol
-  case Map.lookup (relaSym rela) objectIndexAddrMap of
+  case Map.lookup (relaSym rela) symbolAddrMap of
     Nothing -> do
       error $ "Could not resolve " ++ show (relaSym rela)
     Just (symName, symAddr) -> do
@@ -182,12 +187,12 @@ performRelocs :: HasCallStack
               -> [RelaEntry X86_64_RelocationType]
                  -- ^ Relocation entries to apply
               -> BS.ByteString
-performRelocs indexAddrMap thisAddr dta relocs = runST $ do
+performRelocs relocInfo thisAddr dta relocs = runST $ do
   let len = BS.length dta
   mv <- SMV.new len
   -- Copy original bytes into bytestring
   writeBS mv 0 dta
   -- Updpate using relocations
-  mapM_ (performReloc indexAddrMap thisAddr mv) relocs
+  mapM_ (performReloc relocInfo thisAddr mv) relocs
   let SMV.MVector _ fp = mv
   pure $! Data.ByteString.Internal.fromForeignPtr fp 0 len

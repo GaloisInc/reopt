@@ -5,18 +5,20 @@ This defines operations that require external tools installed on the system.
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -Werror #-}
 module Reopt.ExternalTools
-  ( -- * Running llc
-    LLCOptions(..)
+  ( -- * Clang
+    runClangPreprocessor
+    -- * Running llc
+  , LLCOptions(..)
   , defaultLLCOptions
   , run_llc
-    -- * Running gas
-  , run_gas
     -- * Running opt
   , run_opt
     -- * Running assembler
   , runLlvmMc
     -- * Running llvm-link
   , run_llvm_link
+    -- * Running gas
+  , run_gas
     -- * Failure information
   , Failure(..)
   , Control.Monad.Trans.Except.ExceptT(..)
@@ -77,29 +79,28 @@ withCreateProcess nm cmd args f = do
 catchFailure :: IO a -> (IOError -> IO Failure) -> ExceptT Failure IO a
 catchFailure m h = ExceptT $ fmap Right m `catch` (fmap Left . h)
 
-
 -- | This is a helper function that runs an IO action and ensures that
 -- some cleanup is performed if an exception is thrown.
 writeAndClose :: Handle -- ^ Input handle to write to.
               -> Handle -- ^ Error handle to close if things fail.
               -> IO () -- ^ Action to run
               -> ExceptT Failure IO ()
-writeAndClose in_handle err_handle action = do
+writeAndClose inHandle errHandle action = do
   let h e | ioeGetErrorType e == ResourceVanished = do
-              hClose in_handle
-              ProgramError <$> hGetContents err_handle
+              hClose inHandle
+              ProgramError <$> hGetContents errHandle
           | otherwise = do
-              hClose in_handle
-              hClose err_handle
+              hClose inHandle
+              hClose errHandle
               throwIO (e :: IOError)
   action `catchFailure` h
-  liftIO $ hClose in_handle
+  liftIO $ hClose inHandle
 
--- | Wait for a process to end and throw an error case if the return value differs from
--- the 'ExitSuccess'.
+-- | Wait for a process to end and throw an error case if the return
+-- value differs from the 'ExitSuccess'.
 --
--- This function takes a handle to the process's stderr and closes it or semicloses
--- it before returning.
+-- This function takes a handle to the process's stderr and closes it
+-- or semicloses it before returning.
 waitForEnd :: String -- ^ Name of tool
            -> Handle -- ^ Handle to read from for getting error
            -> P.ProcessHandle -- ^ Handle to process
@@ -115,10 +116,36 @@ waitForEnd tool err_handle ph = do
                | otherwise = tool ++ ": " ++ msg
       throwE $! ProgramError msg'
 
+-- | The the file handle to binary and read its contents.
 readContents :: Handle -> IO BS.ByteString
-readContents out_handle = do
-  hSetBinaryMode out_handle True
-  BS.hGetContents out_handle
+readContents h = do
+  hSetBinaryMode h True
+  BS.hGetContents h
+
+------------------------------------------------------------------------
+-- clang
+
+-- | Run clang with just the preprocessor.
+--
+-- The assembler file should be text, and the output is the bytestring.
+runClangPreprocessor :: FilePath
+                     -- ^ Path to clang
+                     -> FilePath
+                     -- ^ Path to header file to preprocessor.
+                     -> ExceptT Failure IO BS.ByteString
+runClangPreprocessor cmd headerFile = do
+  -- Run GNU asssembler
+  let args= [ "-E"
+            , "-nostdinc"
+            , headerFile
+            ]
+  withCreateProcess "clang" cmd args $ \(inHandle, outHandle, _errHandle) -> do
+    liftIO $ do
+      hClose inHandle
+      readContents outHandle
+
+------------------------------------------------------------------------
+-- LLC
 
 -- | Options to pass to 'llc'
 data LLCOptions
@@ -160,6 +187,9 @@ run_llc llc_command opts input_file = do
       BS.hPut in_handle input_file
     liftIO $ readContents out_handle
 
+------------------------------------------------------------------------
+-- llvm-mc
+
 -- | Run llvm-mc to generate an object file from assembly.
 --
 -- The assembler file should be text, and the output is the bytestring.
@@ -182,27 +212,10 @@ runLlvmMc cmd asm triple = do
       hSetBinaryMode in_handle True
       BS.hPut in_handle asm
     -- Get output
-    liftIO (readContents out_handle)
+    liftIO $ readContents out_handle
 
-
--- | Use GNU assembler to generate an object file from assembly.
---
--- The assembler file should be text, and the output is written to the given
--- path.
-run_gas :: FilePath      -- ^ Path to gas
-             -> BS.ByteString -- ^ Assembler file
-             -> FilePath      -- ^ Path for object file.
-             -> ExceptT Failure IO ()
-run_gas gas_command asm obj_path = do
-  -- Run GNU asssembler
-  let args= [ "-o", obj_path, "--fatal-warnings" ]
-  withCreateProcess "gas" gas_command args $ \(in_handle, out_handle, err_handle) -> do
-    -- Write to input handle and close it.
-    writeAndClose in_handle err_handle $ do
-      hSetBinaryMode in_handle True
-      BS.hPut in_handle asm
-    -- Close output
-    liftIO $ hClose out_handle
+------------------------------------------------------------------------
+-- LLVM opt
 
 -- | Use opt on a bitcode file and return bitcode file.
 run_opt :: FilePath -- ^ Path to opt
@@ -220,6 +233,9 @@ run_opt opt_command lvl writeInput = do
       writeInput in_handle
     liftIO $ readContents out_handle
 
+------------------------------------------------------------------------
+-- llvm-link
+
 -- | Use LLVM link to combine several ll or bc files into one.
 run_llvm_link :: FilePath -- ^ Path to llvm-link
               -> [FilePath]
@@ -229,3 +245,25 @@ run_llvm_link llvm_link_command paths = do
   withCreateProcess "llvm-link" llvm_link_command args $ \(in_handle, out_handle, _err_handle) -> do
     liftIO $ hClose in_handle
     liftIO $ readContents out_handle
+
+------------------------------------------------------------------------
+-- GNU assembler
+
+-- | Use GNU assembler to generate an object file from assembly.
+--
+-- The assembler file should be text, and the output is written to the given
+-- path.
+run_gas :: FilePath      -- ^ Path to gas
+        -> BS.ByteString -- ^ Assembler file
+        -> FilePath      -- ^ Path for object file.
+        -> ExceptT Failure IO ()
+run_gas gas_command asm obj_path = do
+  -- Run GNU asssembler
+  let args= [ "-o", obj_path, "--fatal-warnings" ]
+  withCreateProcess "gas" gas_command args $ \(in_handle, out_handle, err_handle) -> do
+    -- Write to input handle and close it.
+    writeAndClose in_handle err_handle $ do
+      hSetBinaryMode in_handle True
+      BS.hPut in_handle asm
+    -- Close output
+    liftIO $ hClose out_handle

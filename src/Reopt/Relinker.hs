@@ -187,7 +187,7 @@ freshSectionIndex idx = do
 copyBinaryLoadSegmentRegions
   :: (BS.ByteString -> BS.ByteString)
      -- ^ Function for renaming sections.
-  -> [ResolvedCodeRedir (ElfWordType 64)]
+  -> ResolvedCodeRedirs (ElfWordType 64)
      -- ^ Modifications to make to existing data
   -> [ElfDataRegion 64]
      -- ^ Regions encountered so far.
@@ -660,7 +660,6 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   when (elfOSABI obj /= elfOSABI binary) $ do
     fail $ "Expected the new object to use the same OS ABI as original."
 
-
   -- Create GNU stack info if both binary and object have it, and the
   -- stack is non-executable in both.
   let mgnuStack = elfGnuStackSegment binary
@@ -702,6 +701,23 @@ mergeObject binary obj redirs mkJump = runExcept $ do
     let codeAddr = elfSegmentVirtAddr codeSeg + codeMemSize
     collectObjSectionInfo ELFDATA2LSB relaSecMap [] 1 codeAddr nonrelaSecs
 
+  -- Resolve which offsets of code segment to insert jumps into.
+  codeRedirs <- do
+    let secAddrMap :: Map ObjectSectionIndex (ElfWordType 64)
+        secAddrMap
+          = Map.fromList
+            [ (objsecSourceIndex secInfo, objsecBaseAddr secInfo)
+            | secInfo <- objSections
+            ]
+    let codeAddrMap :: Map BS.ByteString (ElfWordType 64)
+        codeAddrMap = mkCodeAddrMap secAddrMap $ V.filter isFuncSymbol objSymbols
+
+    let resolveFn :: BS.ByteString -> Maybe (ElfWordType 64)
+        resolveFn nm = Map.lookup nm codeAddrMap
+    case resolveCodeRedirections mkJump redirs resolveFn of
+      Left nm -> throwE $ "Could not find symbol " ++ BSC.unpack nm ++ " in object file."
+      Right r -> pure r
+
   let objRegions = concatMap (mkObjCodeRegions relocInfo) objSections
         where relocInfo = mkRelocInfo secNameAddrMap objSymbols
               secNameAddrMap :: Map ObjectSectionIndex (BS.ByteString, ElfWordType 64)
@@ -714,17 +730,8 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   -- Compute size of new code segment.
   let codeSize = finalCodeAddr - elfSegmentVirtAddr codeSeg
 
-  let secAddrMap :: Map ObjectSectionIndex (ElfWordType 64)
-      secAddrMap
-        = Map.fromList
-          [ (objsecSourceIndex secInfo, objsecBaseAddr secInfo)
-          | secInfo <- objSections
-          ]
-
   -- Get just list of object symbols that correspond to defined functions.
   let objFuncSymbols = V.filter isFuncSymbol objSymbols
-
-
 
   -- Get code segment contents
   let codeSegContents =
@@ -735,10 +742,6 @@ mergeObject binary obj redirs mkJump = runExcept $ do
           _ -> do
             error "Missing elf header at start of file."
 
-  -- Resolve which offsets of code segment to insert jumps into.
-  let codeRedirs = mapMaybe (resolveCodeRedirection mkJump codeAddrMap) redirs
-        where codeAddrMap :: Map BS.ByteString (ElfWordType 64)
-              codeAddrMap = mkCodeAddrMap secAddrMap objFuncSymbols
 
   let initState = TransBinaryState { nextSectionIndex  = nextMergedIdx
                                    , binSectionMap     = Map.empty
@@ -768,7 +771,8 @@ mergeObject binary obj redirs mkJump = runExcept $ do
         -- offsets match.
         let dataPadding = resolveSegmentPadding dataFileOff (elfSegmentVirtAddr dataSeg) elfAlign
 
-        (binDataRegions,_) <- copyBinaryLoadSegmentRegions id [] [] 0 (toList (elfSegmentData dataSeg))
+        (binDataRegions,_) <- copyBinaryLoadSegmentRegions id emptyResolvedCodeRedirs [] 0
+           (toList (elfSegmentData dataSeg))
 
         -- Compute resolved data segment
         let newDataSeg =

@@ -1,2 +1,4 @@
-This directory is intended to contain various artifacts that do not
-fit in other directories.
+This directory contains some files to test intrinsics, inline
+assembly, and calling conventions.
+
+It is not directly needed by Reopt.

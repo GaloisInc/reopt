@@ -3,9 +3,9 @@ language: minimal
 git:
   submodules: false  # whether to recursively clone submodules
 
-cache:
-  directories:
-    - $HOME/.stack
+#cache:
+#  directories:
+#    - $HOME/.stack
 
 matrix:
   include:
@@ -17,6 +17,10 @@ before_install:
 # our submodules without worrying about ssh keys.
 - sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
 - git submodule update --init
+- cd deps/reopt-vcg
+- sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+- git submodule update --init
+- cd ../..
 
 # Download and unpack the stack executable
 - mkdir -p $HOME/.local/bin

@@ -9,19 +9,21 @@ values.
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 module Reopt.CFG.FnRep
-   ( FnAssignId(..)
+   ( RecoveredModule(..)
+   , FunctionDecl(..)
+   , Function(..)
+   , FnAssignId(..)
    , FnAssignment(..)
    , FnAssignRhs(..)
    , FnValue(..)
-   , Function(..)
    , FunctionType(..)
-   , FunctionTypeMap
    , FnBlock(..)
    , FnStmt(..)
    , FnTermStmt(..)
@@ -35,25 +37,24 @@ module Reopt.CFG.FnRep
    ) where
 
 import           Control.Monad.Identity
-import           Data.Map (Map)
+import qualified Data.ByteString.Char8 as BSC
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
+import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
 import           Data.Proxy
 import           Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.ByteString.Char8 as BSC
-import           Data.Word
 import qualified Data.Vector as V
-import           GHC.TypeLits
+import           Data.Word
+import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
-   , ppLit
    , sexpr
    , prettyF
    , ArchFn
@@ -69,6 +70,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
 
+-- | Utility to pretty print with commas separating arguments.
 commas :: [Doc] -> Doc
 commas = hsep . punctuate (char ',')
 
@@ -122,14 +124,12 @@ instance Pretty (FnReturnVar tp) where
 ------------------------------------------------------------------------
 -- FunctionType
 
+-- | Describes the type of a function.
 data FunctionType (arch :: *) =
   FunctionType { fnArgTypes :: [Some TypeRepr]
                , fnReturnTypes :: [Some TypeRepr]
                }
   deriving (Ord, Eq, Show)
-
-
-type FunctionTypeMap arch = Map (MemSegmentOff (ArchAddrWidth arch)) (FunctionType arch)
 
 ------------------------------------------------------------------------
 -- FnAssignRhs mutually recursive constructors
@@ -141,21 +141,27 @@ type FunctionTypeMap arch = Map (MemSegmentOff (ArchAddrWidth arch)) (FunctionTy
 -- by this.
 -- The third type parameter is for the type of value returned.
 data FnAssignRhs (arch :: *) (f :: Type -> *) (tp :: Type) where
-  -- An expression with an undefined value.
-  FnSetUndefined :: !(TypeRepr tp) -- Width of undefined value.
+  -- | An expression with an undefined value.
+  FnSetUndefined :: !(TypeRepr tp) -- ^ Type of undefined value.
                  -> FnAssignRhs arch f tp
+  -- | A unconditional memory read.
   FnReadMem :: !(f (BVType (ArchAddrWidth arch)))
             -> !(TypeRepr tp)
             -> FnAssignRhs arch f tp
+  -- | A conditional memory read.
   FnCondReadMem :: !(MemRepr tp)
                 -> !(f BoolType)
                 -> !(f (BVType (ArchAddrWidth arch)))
                 -> !(f tp)
                 -> FnAssignRhs arch f tp
+  -- | Evaluate the pure function given by the App.
   FnEvalApp :: !(App f tp)
             -> FnAssignRhs arch f tp
+  -- | Allocate space on the stack that will be automatically
+  -- freed when the function returns.
   FnAlloca :: !(f (BVType (ArchAddrWidth arch)))
            -> FnAssignRhs arch f (BVType (ArchAddrWidth arch))
+  -- | Evaluate an architeture-specific function.
   FnEvalArchFn :: !(ArchFn arch f tp)
                -> FnAssignRhs arch f tp
 
@@ -196,7 +202,9 @@ data FnValue (arch :: *) (tp :: Type) where
   FnReturn :: !(FnReturnVar tp) -> FnValue arch tp
   -- | The pointer to a function.
   FnFunctionEntryValue :: !(FunctionType arch)
-                       -> !(MemSegmentOff (ArchAddrWidth arch))
+                          -- ^ Type of symbol
+                       -> BSC.ByteString
+                          -- ^ Symbol name to associate this this address.
                        -> FnValue arch (BVType (ArchAddrWidth arch))
 
   -- | A pointer to an internal block at the given address.
@@ -240,12 +248,13 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
                                   = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantBool b)       = text $ if b then "true" else "false"
-  pretty (FnConstantValue sz n)   = ppLit sz n
+  pretty (FnConstantValue w i)
+    | i >= 0 = parens (text ("0x" ++ showHex i "") <+> text ":" <+> text "bv" <+> text (show w))
+    | otherwise = error ("FnConstantBool given negative value: " ++ show i)
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
-  pretty (FnFunctionEntryValue _ n) = text "FunctionEntry"
-                                    <> parens (pretty $ show n)
+  pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
   pretty (FnBlockValue addr)   = text "BlockValue" <> parens (pretty addr)
   pretty (FnRegArg _ n)           = text "arg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
@@ -254,7 +263,7 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) w
   pretty rhs =
     case rhs of
       FnSetUndefined w -> text "undef ::" <+> brackets (text (show w))
-      FnReadMem a _ -> sexpr "Read" [ pretty a]
+      FnReadMem a tp -> sexpr "read" [ pretty a, pretty tp]
       FnCondReadMem _ c a d -> sexpr "cond_read" [ pretty c, pretty a, pretty d ]
       FnEvalApp a -> ppApp pretty a
       FnAlloca sz -> sexpr "alloca" [pretty sz]
@@ -376,7 +385,7 @@ instance ( FnArchConstraints arch
 
 instance FoldFnValue FnStmt where
   foldFnValue f s (FnWriteMem addr v)                 = s `f` addr `f` v
-  foldFnValue f s (FnCondWriteMem c a v _)              = s `f` c `f` a `f` v
+  foldFnValue f s (FnCondWriteMem c a v _)            = s `f` c `f` a `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldlFC f s rhs
   foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
@@ -410,7 +419,7 @@ instance FnArchConstraints arch
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ V.toList $ pretty . segoffAddr <$> vec)
       FnRet rets ->
-        text "return" <+> parens (commas $ viewSome pretty <$> rets)
+        text "return" <+> parens (hsep (viewSome pretty <$> rets))
       FnTailCall f _ args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
@@ -494,7 +503,26 @@ instance (FnArchConstraints arch
   pretty fn =
     let nm = pretty (BSC.unpack (fnName fn))
         addr = pretty (show (fnAddr fn))
-     in text "function" <+> nm <+> pretty "@" <+> addr
+        ftp = fnType fn
+        ppArg :: Integer -> Some TypeRepr -> Doc
+        ppArg i (Some tp) = text "arg" <> text (show i) <+> text ":" <+> pretty tp
+        atp = parens (commas (zipWith ppArg [0..] (fnArgTypes ftp)))
+        rtp = parens (hsep (viewSome pretty <$> fnReturnTypes ftp))
+     in text "function" <+> nm <+> text "@" <+> addr <> atp <+> text ":" <+> rtp
         <$$> lbrace
         <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
         <$$> rbrace
+
+-- | A function declaration that has type information, but no recovered definition.
+data FunctionDecl arch =
+  FunctionDecl { funDeclName :: !BSC.ByteString
+                 -- ^ Symbol name for function.
+               , funDeclType :: !(FunctionType arch)
+               }
+
+-- | A set of function declarations and definitions needed to
+-- construct an LLVM module.
+data RecoveredModule arch
+   = RecoveredModule { recoveredDecls :: ![FunctionDecl arch]
+                     , recoveredDefs  :: ![Function arch]
+                     }

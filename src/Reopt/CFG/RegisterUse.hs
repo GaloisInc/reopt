@@ -13,6 +13,15 @@ module Reopt.CFG.RegisterUse
   , DemandedUseMap
   , ppDemandedUseMap
   , registerUse
+    -- * Type information
+  , X86FunTypeInfo(..)
+  , maximumFunTypeInfo
+  , X86ArgInfo(..)
+  , argReg
+  , argRegTypeRepr
+  , X86RetInfo(..)
+  , retReg
+  , retRegTypeRepr
   ) where
 
 import           Control.Lens
@@ -26,6 +35,8 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF (toListF)
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Word
+import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.Analysis.FunctionArgs (stmtDemandedValues)
@@ -37,16 +48,73 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
 import           Data.Macaw.X86.SyscallInfo (SyscallPersonality, spTypeInfo, spResultRegisters)
 import           Data.Macaw.X86.X86Reg
-  ( X86Reg, pattern DF, x86StateRegs, x86CalleeSavedRegs
+  ( X86Reg(..), pattern DF, x86StateRegs, x86CalleeSavedRegs
+  , x86GPPArgumentRegs
   )
 import           Data.Macaw.X86 (x86DemandContext)
 
-import           Reopt.CFG.FnRep.X86 ( X86FunctionType
-                                     , ftMaximumFunctionType
-                                     , ftArgRegs
-                                     , ftIntRetRegs
-                                     , ftFloatRetRegs
-                                     )
+-- | This identifies how a argument is passed into a function, or
+-- a return value is passed out.
+data X86ArgInfo where
+  ArgBV64 :: !F.Reg64 -> X86ArgInfo
+  -- ^ This identifies a 64-bit value passed as a register.
+  --
+  -- The register should be compatible with the ABI.
+  ArgMM512D :: !Word8 -> X86ArgInfo
+  -- ^ This identifies one of the zmm registers used as arguments (zmm0-7).
+
+-- | The register types this return value is associated with.
+argReg :: X86ArgInfo -> Some X86Reg
+argReg (ArgBV64 r) = Some (X86_GP r)
+argReg (ArgMM512D i) = Some (X86_ZMMReg i)
+
+-- | The register type this argument is associated with.
+argRegTypeRepr :: X86ArgInfo -> Some TypeRepr
+argRegTypeRepr ArgBV64{} = Some (BVTypeRepr n64)
+argRegTypeRepr ArgMM512D{} = Some (BVTypeRepr n512)
+
+
+-- | This identifies how a argument is passed into a function, or
+-- a return value is passed out.
+data X86RetInfo where
+  RetBV64 :: !F.Reg64 -> X86RetInfo
+  -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
+  --
+  -- The register should be compatible with the ABI.
+  RetMM512D :: !Word8 -> X86RetInfo
+  -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
+
+-- | The register types this return value is associated with.
+retReg :: X86RetInfo -> Some X86Reg
+retReg (RetBV64 r) = Some (X86_GP r)
+retReg (RetMM512D i) = Some (X86_ZMMReg i)
+
+-- | The register types this return value is associated with.
+retRegTypeRepr :: X86RetInfo -> Some TypeRepr
+retRegTypeRepr r = mapSome typeRepr (retReg r)
+
+-- | This describes the registers and return value of an x86_64 ABI compliant
+-- function.
+--
+-- This representation does not support arguments that spilled on the stack, but
+-- this would be a good feature to add.
+--
+-- It uses a list for arguments so that we can use C headers and ensure the
+-- arguments appear in a particular order (e.g. from the binary perspective
+-- a function that takes two integers followed by a float is indistinguishable
+-- from a function that takes a float followed by two integers.
+data X86FunTypeInfo
+   = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
+                    , ftiRetRegs :: [X86RetInfo]
+                    }
+
+maximumFunTypeInfo :: X86FunTypeInfo
+maximumFunTypeInfo =
+  X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
+                             ++ fmap ArgMM512D [0..7]
+                 , ftiRetRegs = fmap RetBV64   [ F.RAX, F.RDX ]
+                             ++ fmap RetMM512D [0,1]
+                 }
 
 -------------------------------------------------------------------------------
 -- funBlockPreds
@@ -91,16 +159,16 @@ data RegisterUseState ids = RUS {
     -- | The set of addresses we need to consider next.
   , _blockFrontier  :: !(Set (MemSegmentOff 64))
     -- | Function arguments derived from FunctionTypeMap
-  , functionArgs    :: !(Map (MemSegmentOff 64) X86FunctionType)
-  , currentFunctionType :: !X86FunctionType
+  , functionArgs    :: !(Map (MemSegmentOff 64) X86FunTypeInfo)
+  , currentFunctionType :: !X86FunTypeInfo
   , thisSyscallPersonality :: !SyscallPersonality
     -- ^ System call personality
   }
 
 initRegisterUseState :: SyscallPersonality
-                     -> Map (MemSegmentOff 64) X86FunctionType
+                     -> Map (MemSegmentOff 64) X86FunTypeInfo
                      -> MemSegmentOff 64
-                     -> X86FunctionType -- ^ Type of current function
+                     -> X86FunTypeInfo -- ^ Type of current function
                      -> RegisterUseState ids
 initRegisterUseState sysp fArgs fn ftp =
   RUS { _assignmentUses     = Set.empty
@@ -187,29 +255,30 @@ x86TermStmtValues sysp X86Syscall proc_state =
 -- | Get values that must be evaluated to execute terminal statement.
 termStmtValues :: Memory 64
                -> SyscallPersonality
-               -> Map (MemSegmentOff 64) X86FunctionType
+               -> Map (MemSegmentOff 64) X86FunTypeInfo
                   -- ^ Map from addresses to function type
-               -> X86FunctionType
+               -> X86FunTypeInfo
                   -- ^ Type of this function
                -> ParsedTermStmt X86_64 ids
                   -- ^ Statement to get value of
                -> [Some (Value X86_64 ids)]
-termStmtValues mem sysp typeMap curFunType tstmt =
+termStmtValues mem sysp typeMap curFunTypeInfo tstmt =
   case tstmt of
-    ParsedCall proc_state _m_ret_addr -> do
+    ParsedCall regs _m_ret_addr -> do
       -- Get function type associated with function
-      let ft | Just fSegOff <- valueAsSegmentOff mem (proc_state^.boundValue ip_reg)
-             , Just ftp <- Map.lookup fSegOff typeMap = ftp
-             | otherwise = ftMaximumFunctionType
-      registerValues proc_state (Some ip_reg : ftArgRegs ft)
+      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
+              , Just ftp <- Map.lookup fSegOff typeMap =
+                  ftp
+              | otherwise = maximumFunTypeInfo
+      registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
     PLTStub regs _addr _dest -> toListF Some regs
     ParsedJump _regs _tgt_addr -> []
     ParsedBranch _regs cond _ _ -> [Some cond]
     ParsedLookupTable _proc_state idx _vec -> [Some idx]
-    ParsedReturn proc_state ->
-      registerValues proc_state (ftArgRegs curFunType)
-    ParsedArchTermStmt ts proc_state _ ->
-      x86TermStmtValues sysp ts proc_state
+    ParsedReturn regs ->
+      registerValues regs (fmap argReg (ftiArgRegs curFunTypeInfo))
+    ParsedArchTermStmt ts regs _ ->
+      x86TermStmtValues sysp ts regs
     ParsedTranslateError _ -> []
     ClassifyFailure _ -> []
 
@@ -238,9 +307,9 @@ summarizeBlock mem addr blk = do
   blockInitDeps %= Map.insert addr Map.empty
   -- Add demanded values for terminal
   sysp    <- gets thisSyscallPersonality
-  typeMap <- gets functionArgs
-  cur_ft  <- gets currentFunctionType
-  let termValues = termStmtValues mem sysp typeMap cur_ft (pblockTermStmt blk)
+  funTypeMap <- gets functionArgs
+  curFTI  <- gets $ currentFunctionType
+  let termValues = termStmtValues mem sysp funTypeMap curFTI (pblockTermStmt blk)
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
             (concatMap (stmtDemandedValues ctx) (pblockStmts blk) ++ termValues)
@@ -251,13 +320,14 @@ summarizeBlock mem addr blk = do
       addRegisterUses addr regs x86StateRegs
     ParsedCall regs  _ -> do
       -- Get function type associated with function
-      let ft | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
-             , Just ftp <- Map.lookup fSegOff typeMap = ftp
-             | otherwise = ftMaximumFunctionType
+      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
+              , Just ftp <- Map.lookup fSegOff funTypeMap =
+                  ftp
+              | otherwise =
+                  maximumFunTypeInfo
       addRegisterUses addr regs (Some sp_reg : Set.toList x86CalleeSavedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
-      traverse_ (clearRegDeps addr) $
-                (Some <$> ftIntRetRegs ft) ++ (Some <$> ftFloatRetRegs ft) ++ [Some DF]
+      traverse_ (clearRegDeps addr) $ [Some DF] ++ fmap retReg (ftiRetRegs fti)
     PLTStub regs _ _ -> do
       entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
       blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList entries)
@@ -367,9 +437,11 @@ ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
 -- the highest index above sp0 that is read or written.
 registerUse :: Memory 64
             -> SyscallPersonality
-            -> Map (MemSegmentOff 64) X86FunctionType
+            -> Map (MemSegmentOff 64) X86FunTypeInfo
+               -- ^ Map from function entry points we have analyzed to their
+               -- inferred function type.
             -> DiscoveryFunInfo X86_64 ids
-            -> X86FunctionType
+            -> X86FunTypeInfo
                -- ^ Expected type of this function
             -> FunPredMap 64
                -- ^ Predecessors for each block in function
