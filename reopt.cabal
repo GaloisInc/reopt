@@ -143,4 +143,5 @@ test-suite reopt-tests
     reopt,
     temporary,
     tasty,
-    tasty-hunit
+    tasty-hunit,
+    unordered-containers

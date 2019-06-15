@@ -7,13 +7,21 @@ module ReoptTests (
   ) where
 
 
+import           Control.Exception
 import qualified Control.Monad.Catch as C
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit as E
+import           Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HMap
 import           Data.Macaw.Discovery
+import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.ElfLoader as MM
+import qualified Data.Map.Strict as Map
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
+import           System.IO
 import           System.IO.Temp (withSystemTempDirectory)
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -33,7 +41,7 @@ mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
-  let llvm_path   = replaceFileName fp (takeBaseName fp ++ ".ll")
+  let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
 
   let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Just 0
                                 , MM.loadRegionBaseOffset = 0
@@ -44,19 +52,20 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
                                   , logAtAnalyzeBlock      = False
                                   }
 
-  (os, disc_info, addrSymMap) <-
+  (os, discState, addrSymMap, symAddrMap) <-
     discoverX86Binary fp loadOpts discOpts [] []
 
-  writeFile blocks_path $ show $ ppDiscoveryStateBlocks disc_info
-
-  recMod <- getFns logger addrSymMap "reopt" (osPersonality os) disc_info
+  writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
+  let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
+      symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
+  let hdr = emptyHeader
+  recMod <- getFns logger addrSymMap symAddrHashMap hdr "reopt" (osPersonality os) discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
   let archOps = LLVM.x86LLVMArchOps (show os)
-  let obj_llvm = llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps recMod
-  writeFileBuilder llvm_path obj_llvm
-
-  return ()
+  bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
+    Builder.hPutBuilder h $
+      llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps recMod
 
 _withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
 _withELF fp k = do

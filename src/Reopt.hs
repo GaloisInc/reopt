@@ -17,6 +17,9 @@ module Reopt
     -- * Code discovery
   , discoverBinary
     -- * Function recovery
+  , Reopt.Header.Header
+  , Reopt.Header.emptyHeader
+  , Reopt.Header.parseHeader
   , RecoveredModule(..)
   , getFns
     -- * Redirections

@@ -40,7 +40,6 @@ import           Reopt
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
-import           Reopt.Header
 
 import           Paths_reopt (version)
 
