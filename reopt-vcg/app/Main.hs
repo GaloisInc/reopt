@@ -49,8 +49,7 @@ import           Data.Text.Lazy.Builder (Builder)
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
-import           Data.Word
-import qualified Data.Yaml as Yaml
+import qualified Data.Aeson as Yaml
 import           GHC.Natural
 import           Numeric
 import           System.Directory
@@ -1615,11 +1614,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
   liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) (Ann.blockLabel blockAnn) $ \prover -> do
     let blockStart = Ann.blockAddr blockAnn
     let sz = Ann.blockCodeSize blockAnn
-    let blockEnd =
-          if toInteger blockStart + sz < toInteger (maxBound :: Word64) then
-            blockStart + fromInteger sz
-          else
-            error $ "Block overflows memory."
+    let blockEnd = blockStart + sz
     let blockMap = Map.fromList
           [ (segOff, Ann.eventInfo e)
           | e <- Ann.blockEvents blockAnn
@@ -1638,7 +1633,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
                               , curFunAnnotations = funAnn
                               , firstBlockLabel = firstLabel
                               , callbackFns = prover
-                              , mcBlockEndAddr = incAddr sz (segoffAddr thisSegOff)
+                              , mcBlockEndAddr = incAddr (toInteger sz) (segoffAddr thisSegOff)
                               , mcBlockMap = blockMap
                               }
     -- Add builtin functions
@@ -1758,17 +1753,12 @@ withVCGArgs = do
       Nothing -> showError "Missing VCG file to run."
       Just path -> return path
   cfg <- do
-    vcgResult <- Yaml.decodeFileWithWarnings annFile
+    vcgResult <- Yaml.eitherDecodeFileStrict' annFile
     case vcgResult of
       Left err -> do
-        hPutStrLn stderr $ "Error parsing Yaml: " ++ show err
+        hPutStrLn stderr $ "Error parsing annotations: " ++ show err
         exitFailure
-      Right (warnings, cfg) -> do
-        when (not (null warnings)) $ do
-          hPutStrLn stderr $ "Warnings when parsing Yaml file:"
-          forM_ warnings $ \warn -> do
-            hPutStrLn stderr $ "  " ++ show warn
-          exitFailure
+      Right cfg -> do
         pure cfg
   case requestedMode args of
     ExportMode outdir -> do

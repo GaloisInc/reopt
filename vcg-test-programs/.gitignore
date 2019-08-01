@@ -1,0 +1,5 @@
+*.dis
+*.ll
+test_*.o
+out
+glibc/placeholder_initfini.o

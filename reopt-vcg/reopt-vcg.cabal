@@ -26,6 +26,7 @@ executable reopt-vcg
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -Wall
   build-depends:
                 base >=4.7 && <5
+              , aeson
               , ansi-wl-pprint
               , async
               , bytestring
@@ -47,7 +48,7 @@ executable reopt-vcg
               , utf8-string
               , vector
               , what4
-              , yaml
+--              , yaml
   other-modules:
       VCGCommon
       VCGMacaw

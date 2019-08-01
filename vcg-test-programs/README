@@ -1,0 +1,9 @@
+This directory contains a simple example that has been compiled
+with both Diet libc and glibc.
+
+We use the extension .exe to denote executables, and have a Makefile
+to build them.  Because the verifier is tightly depend on exact layout
+choices made during compilation, we check in the executables even
+though they can be build from LLVM 7.0.1.
+
+The other examples will likely be integrated into this directory.

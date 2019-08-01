@@ -25,10 +25,11 @@ import qualified Data.Aeson.Types as Aeson
 import qualified Data.HashMap.Strict as HMap
 import           Data.HashSet (HashSet)
 import qualified Data.HashSet as HSet
-import           Data.Scientific (toBoundedInteger)
+import qualified Data.Scientific as S
 import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Read as Text
 import           Data.Word
 import qualified Flexdis86 as F
 import           GHC.Generics
@@ -80,7 +81,7 @@ instance Show AllocaName where
 instance Aeson.FromJSON AllocaName where
   parseJSON (Aeson.String nm) = pure $ AllocaName nm
   parseJSON (Aeson.Number n)
-    | Just off <- toBoundedInteger n :: Maybe Word64 =
+    | Just off <- S.toBoundedInteger n :: Maybe Word64 =
         pure $ AllocaName (Text.pack (show off))
   parseJSON v =
     fail $ "Allocation name Expected integer or string, not " ++ show v
@@ -136,6 +137,20 @@ data BlockEventInfo
 type MCAddr = Word64
 
 
+parseJSONAddr :: Aeson.Value -> Aeson.Parser MCAddr
+parseJSONAddr (Aeson.String txt)
+  | Just num <- Text.stripPrefix "0x" txt
+  , Right (w,"") <- Text.hexadecimal num
+  , w <= toInteger (maxBound :: Word64) = do
+      pure (fromInteger w)
+parseJSONAddr (Aeson.Number v)
+  | S.isInteger v
+  , Just n <- S.toBoundedInteger v =
+      pure n
+parseJSONAddr v = do
+  fail $ "Address expected a 64-bit number, received " ++ show v
+
+
 -- | Annotes an event at a given address.
 data BlockEvent = BlockEvent
   { eventAddr :: !MCAddr
@@ -149,7 +164,7 @@ blockEventFields = fields ["addr", "type", "alloca"]
 
 instance Aeson.FromJSON BlockEvent where
   parseJSON = withFixedObject "BlockEvent" blockEventFields $ \v -> do
-    addr <- v .: "addr"
+    addr <- parseJSONAddr =<< v .: "addr"
     tp <- v .: "type"
     info <-
       case (tp :: Text) of
@@ -224,7 +239,7 @@ data BlockAnn = BlockAnn
     -- ^ LLVM label of block
   , blockAddr :: !MCAddr
     -- ^ Address of start of block in machine code
-  , blockCodeSize :: !Integer
+  , blockCodeSize :: !Word64
     -- ^ Number of bytes in block
   , blockX87Top  :: !Int
     -- ^ The top of x87 stack (empty = 7, full = 0)
@@ -254,8 +269,12 @@ parsePred t =
 instance Aeson.FromJSON BlockAnn where
   parseJSON = withFixedObject "block" blockInfoFields $ \v -> do
     lbl  <- v .: "label"
-    addr <- v .: "addr"
-    sz   <- v .: "size"
+    addr <- parseJSONAddr =<< v .: "addr"
+    sz   <- parseJSONAddr =<< v .: "size"
+    when (sz == 0) $ do
+      fail $ "Expected block to contain at least one byte."
+    when (addr + sz < addr) $ do
+      fail $ "Expected end of block computation to not overflow."
     x87Top  <- v .:? "x87_top"    .!= 7
     dfFlag  <- v .:? "df_flag"    .!= False
     precondStrs <- v .:? "preconditions" .!= []

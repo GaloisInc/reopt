@@ -1,0 +1,195 @@
+{
+   "_comment0": "Verifying a simple add function.",
+   "_comment1": "The targets are equivalent, hence expecting UNSAT.",
+   "llvmBCFilePath": "test_fib.bc",
+   "binFilePath": "test_fib_diet_lld.exe",
+   "functions": [
+      {
+         "llvm_name": "fib",
+         "stack_size": 48,
+         "blocks": [
+            {
+               "label": "1",
+               "addr": "0x201400",
+               "size": "0x17",
+               "allocas": [
+                  {
+                     "name": "2",
+                     "offset": 16,
+		     "size": 8,
+		     "existing": false
+                  },
+                  {
+                     "name": "3",
+                     "offset": 24,
+		     "size": 8,
+		     "existing": false
+                  }
+               ],
+               "events": [
+                  {
+                     "addr": "0x201400",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x201408",
+                     "type": "joint_stack_access",
+                     "alloca": 3
+                  },
+                  {
+                     "addr": "0x20140c",
+                     "type": "joint_stack_access",
+                     "alloca": 3
+                  }
+               ]
+            },
+
+            {
+               "label": "6",
+               "addr": "0x201417",
+               "size": 13,
+               "allocas": [
+                  {
+                     "name": "2",
+                     "offset": 16,
+		     "size": 8
+                  },
+                  {
+                     "name": "3",
+                     "offset": 24,
+		     "size": 8
+                  }
+               ],
+	       "preconditions": [
+	         "(= rbp (bvsub stack_high (_ bv8  64)))",
+                 "(= rsp (bvsub stack_high (_ bv40 64)))",
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
+		 "(= rbx fnstart_rbx)",
+		 "(= r12 fnstart_r12)",
+		 "(= r13 fnstart_r13)",
+		 "(= r14 fnstart_r14)",
+		 "(= r15 fnstart_r15)"
+	       ],
+               "events": [
+                  {
+                     "addr": "0x201417",
+                     "type": "joint_stack_access",
+                     "alloca": 3
+                  },
+                  {
+                     "addr": "0x20141b",
+                     "type": "joint_stack_access",
+                     "alloca": 2
+                  }
+               ]
+            },
+
+            {
+               "label": "8",
+               "addr": "0x201424",
+               "size": "0x2c",
+               "allocas": [
+                  {
+                     "name": "2",
+                     "offset": 16,
+		     "size": 8
+                  },
+                  {
+                     "name": "3",
+                     "offset": 24,
+		     "size": 8
+                  }
+               ],
+	       "preconditions": [
+	         "(= rbp (bvsub stack_high (_ bv8  64)))",
+                 "(= rsp (bvsub stack_high (_ bv40 64)))",
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
+		 "(= rbx fnstart_rbx)",
+		 "(= r12 fnstart_r12)",
+		 "(= r13 fnstart_r13)",
+		 "(= r14 fnstart_r14)",
+		 "(= r15 fnstart_r15)"
+	       ],
+               "events": [
+                  {
+                     "addr": "0x201424",
+                     "type": "joint_stack_access",
+                     "alloca": 3
+                  },
+                  {
+                     "addr": "0x20142f",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x201434",
+                     "type": "joint_stack_access",
+                     "alloca": 3
+                  },
+                  {
+                     "addr": "0x20143c",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x201440",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x201445",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x20144c",
+                     "type": "joint_stack_access",
+                     "alloca": 2
+                  }
+
+               ]
+            },
+
+            {
+               "label": "16",
+               "addr": "0x201450",
+               "size": "0xa",
+               "allocas": [
+                  {
+                     "name": "2",
+                     "offset": 16,
+		     "size": 8
+                  },
+                  {
+                     "name": "3",
+                     "offset": 24,
+		     "size": 8
+                  }
+               ],
+	       "preconditions": [
+	         "(= rbp (bvsub stack_high (_ bv8  64)))",
+                 "(= rsp (bvsub stack_high (_ bv40 64)))",
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
+		 "(= rbx fnstart_rbx)",
+		 "(= r12 fnstart_r12)",
+		 "(= r13 fnstart_r13)",
+		 "(= r14 fnstart_r14)",
+		 "(= r15 fnstart_r15)"
+	       ],
+               "events": [
+                  {
+                     "addr": "0x201450",
+                     "type": "joint_stack_access",
+                     "alloca": 2
+                  },
+                  {
+                     "addr": "0x201458",
+                     "type": "binary_only_access"
+                  },
+                  {
+                     "addr": "0x201459",
+                     "type": "binary_only_access"
+                  }
+               ]
+            }
+
+         ]
+      }
+   ]
+}
