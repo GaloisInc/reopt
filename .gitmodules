@@ -1,9 +1,6 @@
-[submodule "deps/macaw"]
-	path = deps/macaw
-	url = git@github.com:GaloisInc/macaw.git
-[submodule "deps/parameterized-utils"]
-	path = deps/parameterized-utils
-	url = git@github.com:GaloisInc/parameterized-utils.git
+[submodule "deps/crucible"]
+	path = deps/crucible
+	url = git@github.com:GaloisInc/crucible.git
 [submodule "deps/dwarf"]
 	path = deps/dwarf
 	url = git@github.com:GaloisInc/dwarf.git
@@ -19,6 +16,9 @@
 [submodule "deps/llvm-pretty-bc-parser"]
 	path = deps/llvm-pretty-bc-parser
 	url = git@github.com:GaloisInc/llvm-pretty-bc-parser.git
-[submodule "deps/reopt-vcg"]
-	path = deps/reopt-vcg
-	url = git@github.com:GaloisInc/reopt-vcg.git
+[submodule "deps/macaw"]
+	path = deps/macaw
+	url = git@github.com:GaloisInc/macaw.git
+[submodule "deps/parameterized-utils"]
+	path = deps/parameterized-utils
+	url = git@github.com:GaloisInc/parameterized-utils.git

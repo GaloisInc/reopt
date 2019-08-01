@@ -1,0 +1,80 @@
+name:           reopt-vcg
+version:        0.1.0.1
+synopsis:       Generate verification conditions for equivalence between LLVM and x86.
+description:    Generates verification conditions that are necessary to show an
+                equivalence between the LLVM representation of a program and the x86 binary. The
+                LLVM is recovered using macaw. The verification conditions are
+                intended to be solved using SMT.
+homepage:       https://github.com/GaloisInc/reopt-vcg/haskell-proto
+author:         Guannan Wei and Joe Hendrix
+maintainer:     Joe Hendrix <jhendrix@galois.com>
+copyright:      2018-2019 Galois, Inc
+category:       binary analysis
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
+Tested-With:    GHC == 8.4.3
+
+extra-source-files:
+    README.md
+
+executable reopt-vcg
+  main-is: Main.hs
+  hs-source-dirs:
+      app
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -Wall
+  build-depends:
+                base >=4.7 && <5
+              , ansi-wl-pprint
+              , async
+              , bytestring
+              , containers
+              , directory
+              , elf-edit
+              , filepath
+              , lens
+              , llvm-pretty
+              , llvm-pretty-bc-parser
+              , macaw-base >= 0.3.6
+              , macaw-x86
+              , mtl
+              , parameterized-utils
+              , process
+              , reopt-vcg-ann
+              , text >=1.2.3.0
+              , unordered-containers
+              , utf8-string
+              , vector
+              , what4
+              , yaml
+  other-modules:
+      VCGCommon
+      VCGMacaw
+  default-language: Haskell2010
+
+test-suite reopt-vcg-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , bytestring
+    , containers
+    , elf-edit
+    , lens
+    , llvm-pretty
+    , llvm-pretty-bc-parser
+    , macaw-base
+    , macaw-x86
+    , mtl
+    , parameterized-utils
+    , text >=1.2.3.0
+    , reopt-vcg-ann
+    , vector
+    , what4
+  other-modules:
+      Paths_reopt_vcg
+  default-language: Haskell2010
