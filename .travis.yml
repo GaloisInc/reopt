@@ -17,10 +17,6 @@ before_install:
 # our submodules without worrying about ssh keys.
 - sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
 - git submodule update --init
-- cd deps/reopt-vcg
-- sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-- git submodule update --init
-- cd ../..
 
 # Download and unpack the stack executable
 - mkdir -p $HOME/.local/bin
