@@ -1087,11 +1087,11 @@ defineFunction archOps f = do
 
   -- Create ordinary blocks
   m0 <- get
-  let init_fun_state :: FunState arch
-      init_fun_state = FunState { nmCounter = 0
-                                , funAssignValMap = Map.empty
-                                , funIntrinsicMap = m0
-                                }
+  let initFunState :: FunState arch
+      initFunState = FunState { nmCounter = 0
+                              , funAssignValMap = Map.empty
+                              , funIntrinsicMap = m0
+                              }
   let mkBlockRes :: (FunState arch, [LLVMBlockResult arch])
                  -> FnBlock arch
                  -> (FunState arch, [LLVMBlockResult arch])
@@ -1100,7 +1100,7 @@ defineFunction archOps f = do
          in (fs', r:prev)
 
   let block_results :: [LLVMBlockResult arch]
-      (fin_fs, block_results) = foldl mkBlockRes (init_fun_state, []) (fnBlocks f)
+      (fin_fs, block_results) = foldl mkBlockRes (initFunState, []) (fnBlocks f)
 
   -- Update intrins map
   put (funIntrinsicMap fin_fs)

@@ -32,14 +32,18 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF (toListF)
+import           Data.Parameterized.TraversableF
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
 import qualified Flexdis86 as F
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.Analysis.FunctionArgs (stmtDemandedValues)
+import           Data.Macaw.CFG.DemandSet
+  ( DemandContext
+  , demandConstraints
+  , hasSideEffects
+  )
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Fold
@@ -293,6 +297,25 @@ addRegisterUses addr s rs = do
 
 clearRegDeps :: MemSegmentOff 64 -> Some X86Reg -> RegisterUseM ids ()
 clearRegDeps addr r = blockInitDeps . ix addr %= Map.insert r (Set.empty, Set.empty)
+
+-- | Return values that must be evaluated to execute side effects.
+stmtDemandedValues :: DemandContext arch
+                   -> Stmt arch ids
+                   -> [Some (Value arch ids)]
+stmtDemandedValues ctx stmt = demandConstraints ctx $
+  case stmt of
+    AssignStmt a
+      | hasSideEffects ctx (assignRhs a) -> do
+          foldMapFC (\v -> [Some v]) (assignRhs a)
+      | otherwise ->
+          []
+    WriteMem addr _ v -> [Some addr, Some v]
+    CondWriteMem cond addr _ v -> [Some cond, Some addr, Some v]
+    InstructionStart _ _ -> []
+    -- Comment statements have no specific value.
+    Comment _ -> []
+    ExecArchStmt astmt -> foldMapF (\v -> [Some v]) astmt
+    ArchState _addr assn -> foldMapF (\v -> [Some v]) assn
 
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a

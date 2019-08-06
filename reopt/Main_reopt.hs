@@ -11,8 +11,10 @@ module Main (main) where
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BSC
 import           Data.ElfEdit
 import           Data.HashMap.Strict (HashMap)
@@ -40,6 +42,7 @@ import           Reopt
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
+import qualified Reopt.VCG.Annotations as Ann
 
 import           Paths_reopt (version)
 
@@ -98,20 +101,18 @@ data Args
             -- Debug information ^ TODO: See if we can omit this.
           , outputPath   :: !(Maybe FilePath)
             -- ^ Path to output
-            --
-            -- Only used when reoptAction is @Relink@ and @Reopt@.
           , headerPath :: !(Maybe FilePath)
             -- ^ Filepath for C header file that helps provide
             -- information about program.
-          , llvmVersion  :: !LLVMConfig
-            -- ^ LLVM version to generate LLVM for.
-            --
-            -- Only used when generating LLVM.
           , clangPath :: !FilePath
             -- ^ Path to `clang` command.
             --
             -- This is only used as a C preprocessor for parsing
             -- header files.
+          , llvmVersion  :: !LLVMConfig
+            -- ^ LLVM version to generate LLVM for.
+            --
+            -- Only used when generating LLVM.
           , llcPath :: !FilePath
             -- ^ Path to LLVM `llc` command
             --
@@ -137,7 +138,11 @@ data Args
           , _discOpts :: !DiscoveryOptions
             -- ^ Options affecting discovery
           , unnamedFunPrefix :: !BS.ByteString
-            -- ^ Prefix for unnamed functions
+            -- ^ Prefix for unnamed functions identified in code discovery.
+          , annotationsPath :: !(Maybe FilePath)
+            -- ^ Path to write reopt-vcg annotations to.
+            --
+            -- If `Nothing` then annotations are not generated.
           }
 
 -- | Action to perform when running
@@ -182,6 +187,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _loadOpts     = defaultLoadOptions
                    , _discOpts     = defaultDiscoveryOptions
                    , unnamedFunPrefix = "reopt"
+                   , annotationsPath = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -262,6 +268,11 @@ llvmVersionFlag = flagReq [ "llvm-version" ] upd "VERSION" help
 
         help = "LLVM version (e.g. 3.5.2)"
 
+-- | Path to write LLVM annotations to.
+annotationsFlag :: Flag Args
+annotationsFlag = flagReq [ "annotations" ] upd "PATH" help
+  where upd s old = Right $ old { annotationsPath = Just s }
+        help = "Name of file for writing reopt-vcg annotations."
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -381,6 +392,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , loadForceAbsoluteFlag
                   -- LLVM options
                 , llvmVersionFlag
+                , annotationsFlag
                   -- Compilation options
                 , clangPathFlag
                 , llcPathFlag
@@ -406,7 +418,6 @@ getCommandLineArgs = do
       logger msg
       exitFailure
     Right v -> return v
-
 
 -- | Print out the disassembly of all executable sections.
 --
@@ -506,12 +517,28 @@ main' = do
     ShowFunctions -> do
       showFunctions args
     ShowLLVM -> do
+      when (isJust (annotationsPath args) && isNothing (outputPath args)) $ do
+        hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
+        exitFailure
       hPutStrLn stderr "Generating LLVM"
       (os,recMod) <- getFunctions args
+      case annotationsPath args of
+        Nothing -> pure ()
+        Just annPath -> do
+          let Just llvmPath = outputPath args
+          hPutStrLn stderr "Generating annotations"
+          let vcgAnn :: Ann.ReoptVCGAnnotations
+              vcgAnn = Ann.ReoptVCGAnnotations
+                { Ann.llvmFilePath = llvmPath
+                , Ann.binFilePath = programPath args
+                , Ann.functions = [] -- TODO: Actually add annotations.
+                }
+          BSL.writeFile annPath (Aeson.encode vcgAnn)
       let archOps = LLVM.x86LLVMArchOps (show os)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h $
           llvmAssembly (llvmVersion args) $ LLVM.moduleForFunctions archOps recMod
+
     ShowObject -> do
       outPath <-
         case outputPath args of
@@ -521,10 +548,9 @@ main' = do
           Just p ->
             pure p
       (os,recMod) <- getFunctions args
-      let llvmVer = llvmVersion args
       let archOps = LLVM.x86LLVMArchOps (show os)
       let obj_llvm =
-            llvmAssembly llvmVer $
+            llvmAssembly (llvmVersion args) $
               LLVM.moduleForFunctions archOps recMod
       objContents <- compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args) (osLinkName os) obj_llvm
       BS.writeFile outPath objContents

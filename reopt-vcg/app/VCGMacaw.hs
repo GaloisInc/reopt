@@ -120,7 +120,7 @@ instance Show Event where
 
 -- | State for machine code.
 data MState = MState
-  { addrEventAnnMap :: !(Map (MemSegmentOff 64) Ann.BlockEventInfo)
+  { addrEventAnnMap :: !(Map (MemSegmentOff 64) Ann.MemoryAccessType)
     -- ^ Map from addresses to annotations of events on that address.
   , blockStartAddr :: !(MemSegmentOff 64)
     -- ^ Initial address of block.
@@ -154,7 +154,7 @@ addCommand cmd = addEvent $ CmdEvent cmd
 addWarning :: String -> MStateM ()
 addWarning msg = addEvent $ WarningEvent msg
 
-getCurrentEventInfo :: MStateM Ann.BlockEventInfo
+getCurrentEventInfo :: MStateM Ann.MemoryAccessType
 getCurrentEventInfo = do
   m <- gets addrEventAnnMap
   a <- gets mcCurAddr
@@ -516,7 +516,7 @@ block2SMT b = do
   mapM_ stmt2SMT (blockStmts b)
   termStmt2SMT (blockTerm b)
 
-blockEvents :: Map (MemSegmentOff 64) Ann.BlockEventInfo
+blockEvents :: Map (MemSegmentOff 64) Ann.MemoryAccessType
                -- ^ Map from addresses to annotations of events on that address.
             -> RegState X86Reg (Const SMT.Term)
                -- ^ Initial values for registers

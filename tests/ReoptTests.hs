@@ -9,10 +9,8 @@ module ReoptTests (
 
 import           Control.Exception
 import qualified Control.Monad.Catch as C
-import qualified Data.ByteString as B
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
-import qualified Data.ElfEdit as E
 import           Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HMap
 import           Data.Macaw.Discovery
@@ -22,7 +20,6 @@ import qualified Data.Map.Strict as Map
 import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
 import           System.IO
-import           System.IO.Temp (withSystemTempDirectory)
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
@@ -38,7 +35,7 @@ logger :: String -> IO ()
 logger _ = pure ()
 
 mkTest :: FilePath -> T.TestTree
-mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
+mkTest fp = T.testCase fp $ do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
@@ -66,17 +63,6 @@ mkTest fp = T.testCase fp $ withSystemTempDirectory "reopt." $ \_obj_dir -> do
   bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
     Builder.hPutBuilder h $
       llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps recMod
-
-_withELF :: FilePath -> (E.Elf 64 -> IO ()) -> IO ()
-_withELF fp k = do
-  bytes <- B.readFile fp
-  case E.parseElf bytes of
-    E.ElfHeaderError off msg ->
-      error ("Error parsing ELF header at offset " ++ show off ++ ": " ++ msg)
-    E.Elf32Res [] _e32 -> error "ELF32 is unsupported in the test suite"
-    E.Elf64Res [] e64 -> k e64
-    E.Elf32Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
-    E.Elf64Res errs _ -> error ("Errors while parsing ELF file: " ++ show errs)
 
 data ElfException = MemoryLoadError String
   deriving (Typeable, Show)

@@ -10,10 +10,16 @@ module Reopt.VCG.SMTParser
   ( Expr(..)
   , evalExpr
   , ExprType(..)
-  , readPred
+  , fromText
+  , exprToText
   , IsExprVar(..)
   , SExpr(..)
   , ppSExpr
+  , encodeExpr
+    -- * Rendering
+  , SExprEncoding
+  , encodeList
+  , IsString(..)
   ) where
 
 import           Control.Monad
@@ -24,6 +30,8 @@ import           Data.List
 import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Lazy as LText
+import qualified Data.Text.Lazy.Builder as Text
 import qualified Data.Text.Read as Text
 import           GHC.Natural
 
@@ -72,6 +80,24 @@ sexprParser = do
 readSExpr :: Text -> Either String SExpr
 readSExpr = parseOnly sexprParser
 
+------------------------------------------------------------------------
+-- SExpression rendering
+
+-- | Format for efficiently rendering an s-expression
+newtype SExprEncoding = SExprEncoding { encBuilder :: Text.Builder }
+
+instance IsString SExprEncoding where
+  fromString = SExprEncoding . fromString
+
+encodeList :: [SExprEncoding] -> SExprEncoding
+encodeList [] = "()"
+encodeList l = SExprEncoding ("(" <> foldr (\e r -> encBuilder e <> " " <> r) ")" l)
+
+encodingToLazy :: SExprEncoding -> LText.Text
+encodingToLazy = Text.toLazyText . encBuilder
+
+------------------------------------------------------------------------
+-- Expression
 
 data ExprType
    = BVType !Natural
@@ -86,13 +112,15 @@ data Expr (v :: *) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v
   BVDecimal :: !Natural -> !Natural -> Expr v
+  -- ^ @BVDecimal v w@ denotes the @w@-bit value @v@ which should
+  -- satisfy the property that @0 <= v < s^w@.
   Var :: !v -> Expr v
  deriving (Show)
 
 -- | Denotes a type that can be read from expression atoms.
 class IsExprVar v where
-  fromExpr :: SExpr -> Either String (Expr v, ExprType)
-
+  fromExpr :: SExpr -> Either String (v, ExprType)
+  encodeVar :: v -> SExprEncoding
 
 type Evaluator a = Either String a
 
@@ -117,12 +145,23 @@ evalExpr (List [Atom "_", Atom t, Number w])
   , Right (n,"") <- Text.decimal (Text.drop 2 t) =
       pure (BVDecimal (n .&. (2^w - 1)) w, BVType w)
 evalExpr t =
-  fromExpr t
+  fmap (\(v,tp) -> (Var v, tp)) $ fromExpr t
 
-readPred :: IsExprVar a => Text -> Either String (Expr a)
-readPred t = do
+fromText :: IsExprVar a => Text -> Either String (Expr a)
+fromText t = do
   se <- readSExpr t
   (e,tp) <- evalExpr se
   case tp of
     BoolType -> pure e
     _ -> Left $ "Expected " ++ ppSExpr se " to be a predicate."
+
+-- | Render the expression into a builder
+encodeExpr :: IsExprVar a => Expr a -> SExprEncoding
+encodeExpr (Eq x y) = encodeList ["=", encodeExpr x, encodeExpr y]
+encodeExpr (BVSub x y) = encodeList ["bvsub", encodeExpr x, encodeExpr y]
+encodeExpr (BVDecimal v w) = encodeList ["_", fromString ("bv" <> show v), fromString (show w)]
+encodeExpr (Var v) = encodeVar v
+
+-- | Render the expression into a builder
+exprToText :: IsExprVar a => Expr a -> Text
+exprToText = LText.toStrict . encodingToLazy . encodeExpr
