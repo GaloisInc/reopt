@@ -8,6 +8,7 @@ is a subset of SMTLIB expressions with the QF_BV theory.
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.VCG.SMTParser
   ( Expr(..)
+  , VarParser
   , evalExpr
   , ExprType(..)
   , fromText
@@ -119,38 +120,40 @@ data Expr (v :: *) where
 
 -- | Denotes a type that can be read from expression atoms.
 class IsExprVar v where
-  fromExpr :: SExpr -> Either String (v, ExprType)
   encodeVar :: v -> SExprEncoding
 
 type Evaluator a = Either String a
 
+-- | A parser from S-expressions to foreign variables.
+type VarParser v = SExpr -> Either String (v, ExprType)
+
 -- | Parse an expression and generate an expression along with its
 -- type.
-evalExpr :: IsExprVar a => SExpr -> Either String (Expr a, ExprType)
-evalExpr (List [Atom "=", x,y]) = do
-  (xe, xtp) <- evalExpr x
-  (ye, ytp) <- evalExpr y
+evalExpr :: VarParser a -> SExpr -> Either String (Expr a, ExprType)
+evalExpr parseVar (List [Atom "=", x,y]) = do
+  (xe, xtp) <- evalExpr parseVar x
+  (ye, ytp) <- evalExpr parseVar y
   when (xtp /= ytp) $ do
     Left $ ppSExpr x (" and " ++ ppSExpr y " should have the same type.")
   pure (Eq xe ye, BoolType)
-evalExpr (List [Atom "bvsub", x, y]) = do
-  (xe, xtp) <- evalExpr x
-  (ye, ytp) <- evalExpr y
+evalExpr parseVar (List [Atom "bvsub", x, y]) = do
+  (xe, xtp) <- evalExpr parseVar x
+  (ye, ytp) <- evalExpr parseVar y
   case (xtp, ytp) of
     (BVType xw, BVType yw) | xw == yw -> do
        pure (BVSub xe ye, xtp)
     _ -> Left $ ppSExpr x (" and " ++ ppSExpr y " should be bitvectors with the same width.")
-evalExpr (List [Atom "_", Atom t, Number w])
+evalExpr parseVar (List [Atom "_", Atom t, Number w])
   | "bv" `Text.isPrefixOf` t
   , Right (n,"") <- Text.decimal (Text.drop 2 t) =
       pure (BVDecimal (n .&. (2^w - 1)) w, BVType w)
-evalExpr t =
-  fmap (\(v,tp) -> (Var v, tp)) $ fromExpr t
+evalExpr parseVar t =
+  fmap (\(v,tp) -> (Var v, tp)) $ parseVar t
 
-fromText :: IsExprVar a => Text -> Either String (Expr a)
-fromText t = do
+fromText :: VarParser a -> Text -> Either String (Expr a)
+fromText varParser t = do
   se <- readSExpr t
-  (e,tp) <- evalExpr se
+  (e,tp) <- evalExpr varParser se
   case tp of
     BoolType -> pure e
     _ -> Left $ "Expected " ++ ppSExpr se " to be a predicate."

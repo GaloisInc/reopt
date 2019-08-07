@@ -10,17 +10,20 @@ module Reopt.VCG.Annotations
   ( ReoptVCGAnnotations(..)
   , FunctionAnn(..)
   , BlockAnn(..)
+  , ReachableBlockAnn(..)
   , AllocaInfo(..)
   , AllocaName(..)
   , BlockEvent(..)
   , MemoryAccessType(..)
   , Expr(..)
   , BlockVar(..)
+  , parseAnnotations
+  , x86ArgGPRegs
   , calleeSavedGPRegs
   ) where
 
 import           Control.Monad
-import           Data.Aeson.Types ((.:), (.:?), (.!=), (.=), object)
+import           Data.Aeson.Types ((.:), (.:!), (.!=), (.=), object)
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.HashMap.Strict as HMap
 import           Data.HashSet (HashSet)
@@ -30,6 +33,7 @@ import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as Text
+import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           GHC.Generics
@@ -124,7 +128,7 @@ instance Aeson.FromJSON AllocaInfo where
     nm <- v .: "name"
     o <- v .: "offset"
     sz <- v .: "size"
-    existing <- (v .:? "existing") .!= True
+    existing <- (v .:! "existing") .!= True
     when (sz > o) $
       fail $ "Allocation size " ++ show sz ++ " must not be greater than offset " ++ show o ++ "."
     pure AllocaInfo { allocaName = nm
@@ -221,19 +225,24 @@ instance Aeson.ToJSON BlockEvent where
 ------------------------------------------------------------------------
 -- BlockVar
 
+-- | General purpose registers that may be used to pass arguments.
+x86ArgGPRegs :: [F.Reg64]
+x86ArgGPRegs = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
+
 -- | This is the list of callee saved registers.
 calleeSavedGPRegs :: [F.Reg64]
 calleeSavedGPRegs = [ F.RBP, F.RBX, F.R12, F.R13, F.R14, F.R15 ]
 
 
--- | A variable that may appear in a block invariant.
+-- | A variable that may appear in a block precondition.
 data BlockVar
    = StackHigh
      -- ^ Denotes the high address on the stack.
      --
      -- This is the address the return address is stored at.
    | InitGPReg64 !F.Reg64
-     -- ^ Denotes a 64-bit general purpose register a
+     -- ^ Denotes the value of a 64-bit general purpose register
+     -- at the start of the block execution.
    | FnStartGPReg64 !F.Reg64
      -- ^ Denotes the value of a general purpose when the function starts.
      --
@@ -247,36 +256,64 @@ data BlockVar
      -- Our memory model only tracks the mc-only variables, so if the
      -- address is not a stack-only variable, then the value just
      -- means some arbitrary value.
+   | LLVMValue !Text
+     -- ^ Denotes the value of an LLVM variable when the block starts.
+     --
+     -- This should be either a function argument or a phi node.
   deriving (Show)
 
 -- | Hashmap that maps constants to their block var.
-blockVarNameMap :: HMap.HashMap Text (BlockVar, ExprType)
-blockVarNameMap = HMap.fromList $
-  [ (Text.pack (show r), (InitGPReg64 r, BVType 64))
+regVarMap :: HMap.HashMap Text F.Reg64
+regVarMap = HMap.fromList $
+  [ (Text.pack (show r), r)
   | r <- F.Reg64 <$> [0..15]
   ]
-  ++ [("stack_high", (StackHigh, BVType 64))]
-  ++ [ (Text.pack ("fnstart_" ++ show r), (FnStartGPReg64 r, BVType 64))
-     | r <- calleeSavedGPRegs
-     ]
+
+
+fnstartVarMap :: HMap.HashMap Text F.Reg64
+fnstartVarMap = HMap.fromList $
+  [ (Text.pack (show r), r)
+  | r <- x86ArgGPRegs ++ calleeSavedGPRegs
+  ]
+
+type LLVMVarMap = HMap.HashMap Text ExprType
+
+-- | Attempt to parse a block variable from an S-expression.
+fromExpr :: LLVMVarMap
+            -- ^ Map from LLVM identifiers to their associated type.
+         -> SExpr
+         -> Either String (BlockVar, ExprType)
+fromExpr llvmMap (List [Atom "mcstack", sa, sw]) = do
+  (a, tp) <- evalExpr (fromExpr llvmMap)  sa
+  when (tp /= BVType 64) $ fail "Expected 64-bit address."
+  w <- case sw of
+         List [Atom "_", Atom "BitVec", Number w] | w `elem` [8,16,32,64] -> pure w
+         _ -> fail $ "mcstack could not interpet memory type."
+  pure (MCStack a w, BVType w)
+fromExpr _llvmMap (List [Atom "fnstart", regExpr]) =
+  case regExpr of
+    Atom regName
+      | Just r <- HMap.lookup regName regVarMap ->
+          pure (FnStartGPReg64 r, BVType 64)
+    _ ->
+      Left $ "Could not interpret " ++ ppSExpr regExpr ""
+fromExpr llvmMap (List [Atom "llvm", llvmExpr]) =
+  case llvmExpr of
+    Atom llvmName
+      | Just tp <- HMap.lookup llvmName llvmMap ->
+         pure (LLVMValue llvmName, tp)
+    _ -> Left $ "Could not interpret " ++ ppSExpr llvmExpr ""
+fromExpr _llvmMap (Atom "stack_high") = Right (StackHigh, BVType 64)
+fromExpr _llvmMap (Atom nm)
+  | Just r <- HMap.lookup nm regVarMap = Right (InitGPReg64 r, BVType 64)
+fromExpr _llvmMap s =
+  Left $ "Could not interpret " ++ ppSExpr s ""
+
 
 instance IsExprVar BlockVar where
-  fromExpr (List [Atom "mcstack", sa, sw]) = do
-    (a, tp) <- evalExpr sa
-    when (tp /= BVType 64) $ fail "Expected 64-bit address."
-    w <- case sw of
-           List [Atom "_", Atom "BitVec", Number w] | w `elem` [8,16,32,64] -> pure w
-           _ -> fail $ "mcstack could not interpet memory type."
-    pure (MCStack a w, BVType w)
-
-  fromExpr (Atom nm)
-    | Just (v,tp) <- HMap.lookup nm blockVarNameMap = Right (v, tp)
-  fromExpr s =
-    Left $ "Could not interpret " ++ ppSExpr s ""
-
   encodeVar StackHigh = "stack_high"
   encodeVar (InitGPReg64 r) = fromString (show r)
-  encodeVar (FnStartGPReg64 r) = fromString $ "fnstart_ " <> show r
+  encodeVar (FnStartGPReg64 r) = encodeList ["fnstart", fromString (show r)]
   encodeVar (MCStack e w) = encodeList [encodeExpr e, fromString (show w)]
 
 ------------------------------------------------------------------------
@@ -285,73 +322,97 @@ instance IsExprVar BlockVar where
 -- | An SMT expression that can be rendered into JSON.
 newtype JSONExpr = JSONExpr { jsonExpr :: Expr BlockVar }
 
-instance Aeson.FromJSON JSONExpr where
-  parseJSON (Aeson.String s) =
-    case fromText s of
-      Left msg -> fail msg
-      Right e -> pure (JSONExpr e)
-  parseJSON _ = error "Precondition must be a string."
+parseExpr :: LLVMVarMap -> Aeson.Value -> Aeson.Parser (Expr BlockVar)
+parseExpr llvmMap (Aeson.String s) =
+  case fromText (fromExpr llvmMap) s of
+    Left msg -> fail msg
+    Right e -> pure e
+parseExpr _ _ = error "Precondition must be a string."
 
 instance Aeson.ToJSON JSONExpr where
   toJSON (JSONExpr e) = Aeson.String (exprToText e)
 
 ------------------------------------------------------------------------
--- BlockAnn
+-- ReachableBlockAnn
 
 -- | Annotations that relate a LLVM block to a contiguous sequence of
 -- machine code instrutions.
-data BlockAnn = BlockAnn
-  { blockLabel :: !String
-    -- ^ LLVM label of block
-  , blockAddr :: !MCAddr
-    -- ^ Address of start of block in machine code
-  , blockCodeSize :: !Word64
-    -- ^ Number of bytes in block
-  , blockX87Top  :: !Int
-    -- ^ The top of x87 stack (empty = 7, full = 0)
-  , blockDFFlag  :: !Bool
-    -- ^ The value of the DF flag (default = False)
-  , blockPreconditions :: ![Expr BlockVar]
-    -- ^ List of preconditions for block.
-  , blockAllocas :: ![AllocaInfo]
-    -- ^ Maps LLVM allocations to an offset of the stack where it
-    -- starts.
-  , blockEvents :: ![BlockEvent]
-    -- ^ Annotates events within the block.
-  }
+data ReachableBlockAnn
+  = ReachableBlockAnn
+    { blockAddr :: !MCAddr
+      -- ^ Address of start of block in machine code
+    , blockCodeSize :: !Word64
+      -- ^ Number of bytes in block
+    , blockX87Top  :: !Int
+      -- ^ The top of x87 stack (empty = 7, full = 0)
+    , blockDFFlag  :: !Bool
+      -- ^ The value of the DF flag (default = False)
+    , blockPreconditions :: ![Expr BlockVar]
+      -- ^ List of preconditions for block.
+    , blockAllocas :: ![AllocaInfo]
+      -- ^ Maps LLVM allocations to an offset of the stack where it
+      -- starts.
+    , blockEvents :: ![BlockEvent]
+      -- ^ Annotates events within the block.
+    }
   deriving (Show, Generic)
 
 
-blockInfoFields :: FieldList
-blockInfoFields =
-  fields ["label", "addr", "size", "x87_top", "df_flag", "allocas", "preconditions", "events"]
+------------------------------------------------------------------------
+-- BlockAnn
 
-instance Aeson.FromJSON BlockAnn where
-  parseJSON = withFixedObject "block" blockInfoFields $ \v -> do
-    lbl  <- v .: "label"
-    addr <- mcAddr <$> v .: "addr"
-    sz   <- mcAddr <$> v .: "size"
-    when (addr + sz < addr) $ do
-      fail $ "Expected end of block computation to not overflow."
-    x87Top  <- v .:? "x87_top"    .!= 7
-    dfFlag  <- v .:? "df_flag"    .!= False
-    preconditions <- v .:? "preconditions" .!= []
-    allocas <- v .:? "allocas"    .!= []
-    events  <- v .:? "events"     .!= []
-    pure BlockAnn { blockLabel = lbl
-                  , blockAddr  = addr
-                  , blockCodeSize = sz
-                  , blockX87Top    = x87Top
-                  , blockDFFlag    = dfFlag
-                  , blockPreconditions = jsonExpr <$> preconditions
-                  , blockAllocas = allocas
-                  , blockEvents = events
-                  }
+data BlockAnn
+   = ReachableBlock !ReachableBlockAnn
+     -- ^ Indicates the block is reachable.
+   | UnreachableBlock
+     -- ^ Indicates the block is unreachable.
+  deriving (Show)
 
-instance Aeson.ToJSON BlockAnn where
-  toJSON blk =
-    object
-    $ [ "label"  .= blockLabel blk
+parseArray :: Text -> (Aeson.Value -> Aeson.Parser a) -> Aeson.Object -> Aeson.Parser [a]
+parseArray nm f o = do
+  mo <- o .:! nm
+  case mo of
+    Nothing -> pure []
+    Just v -> Aeson.withArray (Text.unpack nm) (traverse f . V.toList) v
+
+parseJSONBlockAnn :: LLVMVarMap
+                  -- ^ Map from LLVM identifiers to their associated type.
+                  -> Aeson.Value
+                  -> Aeson.Parser (String, BlockAnn)
+parseJSONBlockAnn llvmMap (Aeson.Object v) = do
+  lbl  <- v .: "label"
+  reachable <- v .:! "reachable" .!= True
+  case reachable of
+    False -> do
+      pure $ (lbl, UnreachableBlock)
+    True -> do
+      addr <- mcAddr <$> v .: "addr"
+      sz   <- mcAddr <$> v .: "size"
+      when (addr + sz < addr) $ do
+        fail $ "Expected end of block computation to not overflow."
+      x87Top  <- v .:! "x87_top"    .!= 7
+      dfFlag  <- v .:! "df_flag"    .!= False
+      preconditions <- parseArray "preconditions" (parseExpr llvmMap) v
+      allocas <- v .:! "allocas"    .!= []
+      events  <- v .:! "events"     .!= []
+      let rbann = ReachableBlockAnn { blockAddr  = addr
+                                    , blockCodeSize = sz
+                                    , blockX87Top    = x87Top
+                                    , blockDFFlag    = dfFlag
+                                    , blockPreconditions = preconditions
+                                    , blockAllocas = allocas
+                                    , blockEvents = events
+                                    }
+      pure $ (lbl, ReachableBlock rbann)
+
+blockAnnToJSON :: String -> BlockAnn -> Aeson.Value
+blockAnnToJSON lbl UnreachableBlock =
+  object $ [ "label" .= lbl
+           , "reachable" .= False
+           ]
+blockAnnToJSON lbl (ReachableBlock blk) =
+  object
+    $ [ "label"  .= lbl
       , "addr"   .= JSONAddr (blockAddr blk)
       , "stack_size" .= blockCodeSize blk
       , "x87_top"    .= blockX87Top blk
@@ -364,6 +425,7 @@ instance Aeson.ToJSON BlockAnn where
 ------------------------------------------------------------------------
 -- FunctionAnn
 
+-- | Annotations for a function.
 data FunctionAnn = FunctionAnn
   { llvmFunName    :: !String
     -- ^ LLVM function name
@@ -377,22 +439,28 @@ data FunctionAnn = FunctionAnn
 functionInfoFields :: FieldList
 functionInfoFields = fields ["llvm_name", "stack_size", "blocks"]
 
-instance Aeson.FromJSON FunctionAnn where
-  parseJSON = withFixedObject "function" functionInfoFields $ \v -> do
-    fnm <- v .: "llvm_name"
-    sz  <- v .: "stack_size"
-    bl <- v .: "blocks"
-    pure $! FunctionAnn { llvmFunName = fnm
-                        , stackSize = sz
-                        , blocks = HMap.fromList [ (blockLabel b, b) | b <- bl ]
-                        }
+parseFunctionAnn :: LLVMVarMap
+                 -- ^ Map from LLVM identifiers to their associated type.
+                 -> Aeson.Value
+                 -> Aeson.Parser FunctionAnn
+parseFunctionAnn llvmMap (Aeson.Object v) = do
+  fnm <- v .: "llvm_name"
+  sz  <- v .: "stack_size"
+  bl <- Aeson.withArray "blocks" (traverse (parseJSONBlockAnn llvmMap) . V.toList) =<< v .: "blocks"
+  pure $! FunctionAnn { llvmFunName = fnm
+                      , stackSize = sz
+                      , blocks = HMap.fromList bl
+                      }
+parseFunctionAnn _ _ =
+  fail $ "Function annotation expected a JSON object."
 
 instance Aeson.ToJSON FunctionAnn where
   toJSON fun =
-    object [ "llvm_name"  .= llvmFunName fun
-           , "stack_size" .= stackSize fun
-           , "blocks"     .= HMap.elems (blocks fun)
-           ]
+    let blks = uncurry blockAnnToJSON <$> HMap.toList (blocks fun)
+     in object [ "llvm_name"  .= llvmFunName fun
+               , "stack_size" .= stackSize fun
+               , "blocks"     .= Aeson.Array (V.fromList blks)
+               ]
 
 ------------------------------------------------------------------------
 -- Module annotations
@@ -406,17 +474,21 @@ data ReoptVCGAnnotations = ReoptVCGAnnotations
   }
   deriving (Show, Generic)
 
-instance Aeson.FromJSON ReoptVCGAnnotations where
-  parseJSON (Aeson.Object o) = do
-    llvmPath <- o .: "llvm_path"
-    binPath  <- o .: "binary_path"
-    funs     <- o .: "functions"
-    pure $! ReoptVCGAnnotations { llvmFilePath = llvmPath
-                          , binFilePath = binPath
-                          , functions = funs
-                          }
-  parseJSON _ =
-    fail $ "Expected an object for the meta config."
+
+parseAnnotations :: LLVMVarMap
+                  -- ^ Map from LLVM identifiers to their associated type.
+                 -> Aeson.Value
+                 -> Aeson.Parser ReoptVCGAnnotations
+parseAnnotations llvmMap (Aeson.Object o) = do
+  llvmPath <- o .: "llvm_path"
+  binPath  <- o .: "binary_path"
+  funs <- parseArray "functions" (parseFunctionAnn llvmMap) o
+  pure $! ReoptVCGAnnotations { llvmFilePath = llvmPath
+                              , binFilePath = binPath
+                              , functions = funs
+                              }
+parseAnnotations _ _ =
+  fail $ "Expected an object for the meta config."
 
 
 instance Aeson.ToJSON ReoptVCGAnnotations where

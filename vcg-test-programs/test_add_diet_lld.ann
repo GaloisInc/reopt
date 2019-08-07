@@ -1,8 +1,8 @@
 {
    "_comment1": "Verifying a simple add function.",
    "_comment2": "The targets are equivalent, hence expecting UNSAT.",
-   "llvmBCFilePath": "test_add.bc",
-   "binFilePath": "test_add_diet_lld.exe",
+   "llvm_path":   "test_add.bc",
+   "binary_path": "test_add_diet_lld.exe",
    "functions": [
       {
          "llvm_name": "add",

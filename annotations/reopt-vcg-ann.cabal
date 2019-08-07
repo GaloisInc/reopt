@@ -25,6 +25,7 @@ library
               , scientific
               , text
               , unordered-containers
+              , vector
   exposed-modules:
     Reopt.VCG.Annotations
     Reopt.VCG.SMTParser

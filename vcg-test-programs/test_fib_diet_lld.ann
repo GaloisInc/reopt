@@ -1,8 +1,8 @@
 {
    "_comment0": "Verifying a simple add function.",
    "_comment1": "The targets are equivalent, hence expecting UNSAT.",
-   "llvmBCFilePath": "test_fib.bc",
-   "binFilePath": "test_fib_diet_lld.exe",
+   "llvm_path": "test_fib.bc",
+   "binary_path": "test_fib_diet_lld.exe",
    "functions": [
       {
          "llvm_name": "fib",
@@ -63,12 +63,12 @@
 	       "preconditions": [
 	         "(= rbp (bvsub stack_high (_ bv8  64)))",
                  "(= rsp (bvsub stack_high (_ bv40 64)))",
-		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
-		 "(= rbx fnstart_rbx)",
-		 "(= r12 fnstart_r12)",
-		 "(= r13 fnstart_r13)",
-		 "(= r14 fnstart_r14)",
-		 "(= r15 fnstart_r15)"
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) (fnstart rbp))",
+		 "(= rbx (fnstart rbx))",
+		 "(= r12 (fnstart r12))",
+		 "(= r13 (fnstart r13))",
+		 "(= r14 (fnstart r14))",
+		 "(= r15 (fnstart r15))"
 	       ],
                "events": [
                   {
@@ -103,12 +103,12 @@
 	       "preconditions": [
 	         "(= rbp (bvsub stack_high (_ bv8  64)))",
                  "(= rsp (bvsub stack_high (_ bv40 64)))",
-		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
-		 "(= rbx fnstart_rbx)",
-		 "(= r12 fnstart_r12)",
-		 "(= r13 fnstart_r13)",
-		 "(= r14 fnstart_r14)",
-		 "(= r15 fnstart_r15)"
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) (fnstart rbp))",
+		 "(= rbx (fnstart rbx))",
+		 "(= r12 (fnstart r12))",
+		 "(= r13 (fnstart r13))",
+		 "(= r14 (fnstart r14))",
+		 "(= r15 (fnstart r15))"
 	       ],
                "events": [
                   {
@@ -165,12 +165,12 @@
 	       "preconditions": [
 	         "(= rbp (bvsub stack_high (_ bv8  64)))",
                  "(= rsp (bvsub stack_high (_ bv40 64)))",
-		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) fnstart_rbp)",
-		 "(= rbx fnstart_rbx)",
-		 "(= r12 fnstart_r12)",
-		 "(= r13 fnstart_r13)",
-		 "(= r14 fnstart_r14)",
-		 "(= r15 fnstart_r15)"
+		 "(= (mcstack (bvsub stack_high (_ bv8 64)) (_ BitVec 64)) (fnstart rbp))",
+		 "(= rbx (fnstart rbx))",
+		 "(= r12 (fnstart r12))",
+		 "(= r13 (fnstart r13))",
+		 "(= r14 (fnstart r14))",
+		 "(= r15 (fnstart r15))"
 	       ],
                "events": [
                   {

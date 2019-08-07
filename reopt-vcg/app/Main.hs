@@ -21,6 +21,7 @@ import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Internal as Aeson
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
@@ -52,6 +53,7 @@ import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
 import           GHC.IO.Exception (IOErrorType( ResourceVanished ))
 import           GHC.Natural
+import           GHC.Stack
 import           Numeric
 import           System.Directory
 import           System.Environment
@@ -100,18 +102,20 @@ data ProverInterface = ProverInterface
     -- ^ Invoked to add an SMT command.
     --
     -- These commands must not change the solver out of assert mode.
-  , proveFalseCallback :: !(SMT.Term -> String -> IO ())
+  , proveFalseCallback :: !(HasCallStack => SMT.Term -> String -> IO ())
     -- ^ Invoked when we have a proposition to prove is false for all
     -- interprettions.
     --
     -- The message is provide so the user knows the source of the
     -- check.
-  , proveTrueCallback  :: !(SMT.Term -> String -> IO ())
+  , proveTrueCallback  :: !(HasCallStack => SMT.Term -> String -> IO ())
     -- ^ Invoked when we have a proposition to prove is true for all
     -- interpretations.
     --
     -- The message is provide so the user knows the source of the
     -- check.
+  , blockErrorCallback :: String -> IO ()
+    -- ^ Report a block error
   }
 
 $(pure [])
@@ -192,19 +196,18 @@ moduleThrow :: String -> ModuleVCG a
 moduleThrow msg = do
   liftIO $ throw (ModuleError msg)
 
--- | Catch a VCG error
+-- | Catch a VCG error, print it to the screen and keep going.
 moduleCatch :: ModuleVCG () -> ModuleVCG ()
 moduleCatch (ModuleVCG m) = ModuleVCG $ ReaderT $ \ctx -> do
   catch (runReaderT m ctx) $ \(ModuleError e) -> do
     when (writeStderr ctx) $ do
-      hPutStrLn stderr $ "Error: " ++ e
+      hPutStrLn stderr $ e
     modifyIORef' (errorCount ctx) (+1)
 
 $(pure [])
 
 ------------------------------------------------------------------------
 -- BlockVCG
-
 
 -- | Information that does not change during execution of @BlockVCG@.
 data BlockVCGContext = BlockVCGContext
@@ -214,6 +217,8 @@ data BlockVCGContext = BlockVCGContext
     -- ^ Annotations for the current function we are verifying.
   , firstBlockLabel :: !BlockLabel
     -- ^ Label for first block in this function
+  , currentBlock :: !BlockLabel
+    -- ^ Label for block we are verifying.
   , callbackFns :: !ProverInterface
     -- ^ Functions for interacting with SMT solver.
   , mcBlockEndAddr :: !(MemAddr 64)
@@ -294,10 +299,15 @@ haltBlock :: BlockVCG a
 haltBlock = BlockVCG $ \_ _ _ -> pure ()
 
 -- | Report an error at the given location and stop verification of this block.
-errorAt :: String -> BlockVCG a
-errorAt msg = do
+fatalBlockError :: String -> BlockVCG a
+fatalBlockError msg = do
+  thisFun <- asks $ Ann.llvmFunName . curFunAnnotations
+  thisBlk <- asks $ ppBlock . currentBlock
   addr <- gets $ mcCurAddr
-  liftIO $ hPutStrLn stderr $ "At " ++ showsPrec 10 addr ": " ++ msg
+  liftIO $ hPutStrLn stderr $
+    (printf "%s.%s (%s): %s" thisFun thisBlk (showsPrec 10 addr "") msg)
+  callback <- asks $ blockErrorCallback . callbackFns
+  liftIO $ callback msg
   haltBlock
 
 $(pure [])
@@ -311,21 +321,21 @@ $(pure [])
 
 -- | @proveFalse p msg@ adds a proof obligation @p@ is false for all
 -- interpretations of constants with the message @msg@.
-proveFalse :: SMT.Term -> String -> BlockVCG ()
+proveFalse :: HasCallStack => SMT.Term -> String -> BlockVCG ()
 proveFalse p msg = do
   fns <- asks callbackFns
   liftIO $ proveFalseCallback fns p msg
 
 -- | @proveTrue p msg@ adds a proof obligation @p@ is true for all
 -- interpretations of constants with the message @msg@.
-proveTrue :: SMT.Term -> String -> BlockVCG ()
+proveTrue :: HasCallStack => SMT.Term -> String -> BlockVCG ()
 proveTrue p msg = do
   fns <- asks callbackFns
   liftIO $ proveTrueCallback fns p msg
 
 -- | @proveEq x y msg@ add a proof obligation named @msg@ asserting
 -- that @x@ equals @y@.
-proveEq :: SMT.Term -> SMT.Term -> String -> BlockVCG ()
+proveEq :: HasCallStack => SMT.Term -> SMT.Term -> String -> BlockVCG ()
 proveEq x y msg = proveFalse (SMT.distinct [x,y]) msg
 
 -- | Assume the propositon is true without requiring it to be proven.
@@ -396,6 +406,14 @@ declareAddrStartRegValues prover nm definedRegs = do
 calleeSavedGPRegs :: [X86Reg (M.BVType 64)]
 calleeSavedGPRegs = X86_GP <$> Ann.calleeSavedGPRegs
 
+-- | This is the list of callee saved registers.
+x86ArgGPRegs :: [X86Reg (M.BVType 64)]
+x86ArgGPRegs = X86_GP <$> Ann.x86ArgGPRegs
+
+fnStartSortedGPRegList :: [X86Reg (M.BVType 64)]
+fnStartSortedGPRegList = Set.toList $ Set.fromList $ x86ArgGPRegs ++ calleeSavedGPRegs
+
+
 -- | Return the name of the SMT variable for the register when the
 -- function starts.
 --
@@ -410,7 +428,7 @@ declareFunctionStartRegValues prover = do
   let initReg reg =
         addCommandCallback prover $!
           SMT.declareFun (functionStartRegValue reg) [] (M.toSMTType (M.typeRepr reg))
-  traverse_ initReg calleeSavedGPRegs
+  traverse_ initReg fnStartSortedGPRegList
 
 -- | Assert that the functions identified by the LLVM and macaw
 -- function pointers are equivalent.
@@ -424,9 +442,6 @@ assertFnNameEq (L.Symbol nm) macawIP = do
   let expectedAddrTerm = SMT.bvhexadecimal (toInteger addr) 64
   -- Assert the two addresses are equal.
   proveEq expectedAddrTerm macawIP ("Equivalence of function: " ++ nm)
-
-x86ArgRegs :: [X86Reg (M.BVType 64)]
-x86ArgRegs = [ RDI, RSI, RDX, RCX, R8, R9 ]
 
 -- | Information about a supported memory type.
 data SupportedMemType = SupportedMemType { supportedSuffix :: !String
@@ -733,41 +748,6 @@ assertAddrRangeOnUnallocStack :: SMT.Term -> Integer -> String -> BlockVCG ()
 assertAddrRangeOnUnallocStack mcAddr sz msg = do
   proveTrue (evalRangeCheck onMCFunStack mcAddr sz) msg
 
-processMCEvents :: [M.Event] -> BlockVCG [M.Event]
-processMCEvents (M.CmdEvent cmd:mevs) = do
-  addCommand cmd
-  processMCEvents mevs
-processMCEvents (M.WarningEvent msg:mevs) = do
-  liftIO $ hPutStrLn stderr msg
-  processMCEvents mevs
-processMCEvents (M.InstructionEvent _curAddr:mevs) = do
-  processMCEvents mevs
-processMCEvents (M.MCOnlyStackReadEvent mcAddr tp macawValVar:mevs) = do
-  -- Assert address is on stack
-  do thisIP <- gets mcCurAddr
-     assertAddrRangeOnUnallocStack mcAddr (memReprBytes tp) $
-       printf "Machine code read at %s is in unreserved stack space." (show thisIP)
-  -- Define value from reading Macaw heap
-  supType <- getSupportedType tp
-  defineVarWithReadValue macawValVar mcAddr supType
-  -- Process future events.
-  processMCEvents mevs
--- Every LLVM write should have a machine code write (but not
--- necessarily vice versa), we first pattern match on machine code
--- writes.
-processMCEvents (M.MCOnlyStackWriteEvent mcAddr tp macawVal:mevs) = do
-  -- Update stack with write.
-  macawWrite mcAddr tp macawVal
-  -- Assert address is on stack
-  do addr <- gets mcCurAddr
-     let sz = memReprBytes tp
-     proveTrue (SMT.term_app onMCFunStack [mcAddr, SMT.bvdecimal sz 64])
-               (printf "Machine code write at %s is in unreserved stack space." (show addr))
-  -- Process next events
-  processMCEvents mevs
--- Fallback case
-processMCEvents mevs = pure mevs
-
 -- | Return true if the first address is always less than second.
 addrLt :: MemAddr 64 -> MemAddr 64 -> Bool
 addrLt x y = addrBase x == addrBase y && addrOffset x < addrOffset y
@@ -775,54 +755,48 @@ addrLt x y = addrBase x == addrBase y && addrOffset x < addrOffset y
 mcNextAddr :: BlockVCGState -> MemAddr 64
 mcNextAddr s = incAddr (toInteger (mcCurSize s)) (segoffAddr (mcCurAddr s))
 
-
-getNextEvents :: BlockVCG ()
+-- | Get next events
+getNextEvents :: HasCallStack => BlockVCG ()
 getNextEvents = do
   ctx <- ask
   s <- get
   let addr = mcNextAddr s
-  if not (addrLt addr (mcBlockEndAddr ctx)) then
+  when (not (addrLt addr (mcBlockEndAddr ctx))) $ do
     error $ "Unexpected end of machine code events."
-   else do
-    let mem = moduleMem (mcModuleVCGContext ctx)
-    let Just addrSegOff = asSegmentOff mem addr
-    let loc = ExploreLoc { loc_ip = addrSegOff
-                         , loc_x87_top = mcX87Top s
-                         , loc_df_flag = mcDF s
-                         }
-    (r, nextIdx, sz) <-
-      case M.blockEvents (mcBlockMap ctx) (mcCurRegs s) (mcLocalIndex s) loc of
-        Left e -> errorAt e
-        Right p -> pure p
-    -- Update local index and next addr
-    put $! s { mcLocalIndex = nextIdx
-             , mcCurAddr  = addrSegOff
-             , mcCurSize  = sz
-             }
-    -- Update events
-    modify $ \t -> t { mcEvents = r }
+  let mem = moduleMem (mcModuleVCGContext ctx)
+  let Just addrSegOff = asSegmentOff mem addr
+  let loc = ExploreLoc { loc_ip = addrSegOff
+                       , loc_x87_top = mcX87Top s
+                       , loc_df_flag = mcDF s
+                       }
+  (r, nextIdx, sz) <-
+    case M.blockEvents (mcBlockMap ctx) (mcCurRegs s) (mcLocalIndex s) loc of
+      Left e -> fatalBlockError e
+      Right p -> pure p
+  -- Update local index and next addr
+  put $! s { mcLocalIndex = nextIdx
+           , mcCurAddr  = addrSegOff
+           , mcCurSize  = sz
+           }
+  -- Update events
+  modify $ \t -> t { mcEvents = r }
 
-popMCEvent :: BlockVCG M.Event
-popMCEvent = do
-  evts0 <- gets mcEvents
-  evts <- processMCEvents evts0
-  ctx <- ask
-  nextAddr <- gets mcNextAddr
+-- | Execute the machine-code only events that occur before jumping to the given address
+execMCOnlyEvents :: HasCallStack => MemAddr 64 -> BlockVCG ()
+execMCOnlyEvents endAddr = do
+  evts <- gets mcEvents
   case evts of
-    [] -> do
-      getNextEvents
-      popMCEvent
     M.CmdEvent cmd:mevs -> do
       addCommand cmd
       modify $ \s -> s { mcEvents = mevs }
-      popMCEvent
+      execMCOnlyEvents endAddr
     M.WarningEvent msg:mevs -> do
       liftIO $ hPutStrLn stderr msg
       modify $ \s -> s { mcEvents = mevs }
-      popMCEvent
+      execMCOnlyEvents endAddr
     M.InstructionEvent _curAddr:mevs -> do
       modify $ \s -> s { mcEvents = mevs }
-      popMCEvent
+      execMCOnlyEvents endAddr
     M.MCOnlyStackReadEvent mcAddr tp macawValVar:mevs -> do
       -- Assert address is on stack
       do thisIP <- gets mcCurAddr
@@ -833,7 +807,7 @@ popMCEvent = do
       defineVarWithReadValue macawValVar mcAddr supType
       -- Process future events.
       modify $ \s -> s { mcEvents = mevs }
-      popMCEvent
+      execMCOnlyEvents endAddr
     -- Every LLVM write should have a machine code write (but not
     -- necessarily vice versa), we pattern match on machine code
     -- writes.
@@ -847,14 +821,10 @@ popMCEvent = do
            (printf "Machine code write at %s is in unreserved stack space." (show addr))
       -- Process next events
       modify $ \s -> s { mcEvents = mevs }
-      popMCEvent
+      execMCOnlyEvents endAddr
     -- This checks to see if the next instruction jumps to the next ip,
     -- and if so it runs it.
-    (M.FetchAndExecuteEvent ectx regs:r)
-      -- Check IP in registers matches next register
-      | Just ipAddr <- valueAsMemAddr (regs^.boundValue X86_IP)
-      , nextAddr == ipAddr
-      , addrLt ipAddr (mcBlockEndAddr ctx) -> do
+    (M.FetchAndExecuteEvent ectx regs:r) -> do
       when (not (null r)) $ do
         error "MC event after fetch and execute"
       modify $ \s -> s { mcEvents = [] }
@@ -870,23 +840,45 @@ popMCEvent = do
       -- Update registers
       modify $ \s -> s { mcCurRegs = fmapF (Const . M.primEval ectx) regs }
       -- Process next events
-      getNextEvents
-      popMCEvent
+      nextAddr <- gets mcNextAddr
+      case valueAsMemAddr (regs^.boundValue X86_IP) of
+        Just ipAddr | ipAddr == nextAddr && addrLt nextAddr endAddr -> do
+                        getNextEvents
+                        execMCOnlyEvents endAddr
+        _ -> do
+          pure ()
+    [] -> do
+      nextAddr <- gets mcNextAddr
+      when (addrLt nextAddr endAddr) $ do
+        getNextEvents
+        execMCOnlyEvents endAddr
+    _:_ -> do
+      pure ()
+
+-- | Get the next MC event that could interact with LLVM.
+popMCEvent :: HasCallStack => BlockVCG M.Event
+popMCEvent = do
+  endAddr <- asks mcBlockEndAddr
+  execMCOnlyEvents endAddr
+  evts <- gets mcEvents
+  case evts of
+    [] -> do
+      error "Reached end of block"
     (h:r) -> do
       modify $ \s -> s { mcEvents = r }
       pure h
 
-popFetchAndExecute :: BlockVCG ()
-popFetchAndExecute = do
-  evt <- popMCEvent
-  case evt of
-    M.FetchAndExecuteEvent ectx regs -> do
-      r <- gets mcEvents
-      when (not (null r)) $ do
-        error "MC event after fetch and execute"
-      modify $ \s -> s { mcCurRegs = fmapF (Const . M.primEval ectx) regs }
-    _ -> do
-      error "Missing fetch and execute event."
+-- | Move to end of current block.
+mcExecuteToEnd :: HasCallStack => BlockVCG ()
+mcExecuteToEnd = do
+  endAddr <- asks mcBlockEndAddr
+  execMCOnlyEvents endAddr
+  evts <- gets mcEvents
+  case evts of
+    [] -> do
+      pure ()
+    (h:_) -> do
+      error $ "Expecting end of block instead of " ++ show h
 
 -- | Check direction flag is clear.
 --
@@ -896,20 +888,11 @@ checkDirectionFlagClear = do
   df <- gets mcDF
   when df $ error "Direction flag must be clear."
 
--- | Get name to use for SMT purpioses.
-getBlockAnn :: BlockLabel -> BlockVCG Ann.BlockAnn
-getBlockAnn lbl = do
-  fnAnn <- asks $ curFunAnnotations
-  case findBlock fnAnn lbl of
-    Nothing -> errorAt $ "getBlockAnn: Could not find annotations for LLVM block " ++ show lbl
-    Just b -> pure b
-
 $(pure [])
 
 -- | Return name of variable associated with LLVM identifier.
 llvmVar :: Text -> Text
 llvmVar nm = "llvm_" <> nm
-
 
 -- | Return name of variable associated with LLVM identifier.
 identVar :: Ident -> Text
@@ -936,19 +919,22 @@ evalTyped (Typed tp var) = primEval tp var
 
 $(pure [])
 
-llvmInvoke :: Bool
+llvmInvoke :: HasCallStack
+           => Bool
            -> L.Symbol
            -> [Typed (Value' BlockLabel) ]
            -> (Maybe (Ident, Type))
            -> BlockVCG ()
 llvmInvoke isTailCall fsym args lRet = do
   when isTailCall $ error "Tail calls are not yet supported."
+  liftIO $ hPutStrLn stderr "Reached invoke"
+  -- Run the machine until we reach a call (which wil terminate the block)
+  execMCOnlyEvents =<< asks mcBlockEndAddr
+  -- Get current registers
+  regs <- gets mcCurRegs
 
   -- Evaluate arguments.
   lArgs <- traverse evalTyped args
-  -- Get machine code state at end of the instruction.
-  popFetchAndExecute
-  regs <- gets mcCurRegs
 
   let mRegIP = getConst $ regs ^. boundValue X86_IP
   assertFnNameEq fsym mRegIP
@@ -956,9 +942,8 @@ llvmInvoke isTailCall fsym args lRet = do
   -- number of arguments from LLVM side, since the number of arguments
   -- in Macaw side seems not explicit.  Also assuming that the # of
   -- arguments of LLVM side is less or equal than six.
-  when (length lArgs > length x86ArgRegs) $ do
+  when (length lArgs > length Ann.x86ArgGPRegs) $ do
     error $ "Too many arguments."
-
 
   -- Get address of next instruction as an SMT term.
   nextInsnAddr <- gets $  mcNextAddr
@@ -971,13 +956,13 @@ llvmInvoke isTailCall fsym args lRet = do
      mem <- gets  $ varTerm . memVar . mcMemIndex
      -- Check stored return value matches next instruction
      proveEq (readFromMCMemory mem sp addrSupportedMemType) (M.evalMemAddr nextInsnAddr)
-       "Check return address matches next instructiomain."
+       "Check return address matches next instruction."
 
   do let compareArg :: SMT.Term -> X86Reg (M.BVType 64) -> BlockVCG ()
          compareArg la reg = do
            let Const ma = regs^.boundValue reg
            proveEq la ma "Register matches LLVM"
-     zipWithM_ compareArg lArgs x86ArgRegs
+     zipWithM_ compareArg lArgs x86ArgGPRegs
 
   checkDirectionFlagClear
 
@@ -1010,10 +995,9 @@ llvmInvoke isTailCall fsym args lRet = do
 
 -- | Add the LLVM declarations for an allocation.
 allocaDeclarations :: Ann.AllocaName
-                   -> Natural -- Size
+                   -> SMT.Term -- ^ Size as a 64-bit unsigned bitector.
                    -> BlockVCG ()
-allocaDeclarations nm isz = do
-  let sz = SMT.bvdecimal (toInteger isz) 64
+allocaDeclarations nm sz = do
   -- Declare LLVM alloca base
   addCommand $ SMT.declareConst (allocaLLVMBaseVar nm) ptrSort
   let llvmBase = varTerm (allocaLLVMBaseVar nm)
@@ -1035,26 +1019,31 @@ allocaDeclarations nm isz = do
 
 
 -- | This updates the state for an LLVM allocation
-llvmAlloca :: Ident -- ^ Identifier to assign this to.
+llvmAlloca :: HasCallStack
+           => Ident -- ^ Identifier to assign this to.
            -> Type -- ^ Type of elements
            -> Maybe (Typed (Value' BlockLabel)) -- ^ Number of elements (Nothing = 1)
            -> Maybe Int -- ^ Required alignment
            -> BlockVCG ()
 llvmAlloca (Ident nm0) ty eltCount _malign = do
-  let eltSize :: Integer
-      eltSize =
-        case ty of
-          PrimType (Integer i) | i .&. 0x7 == 0 -> toInteger i `shiftR` 3
-          PtrTo _ -> 8
-          _ -> error $ "Unexpected type " ++ show ty
+  eltSize <-
+    case ty of
+      PrimType (Integer i)
+        | i .&. 0x7 == 0, i > 0 ->
+            pure $ (fromIntegral i `shiftR` 3 :: Natural)
+      PtrTo _ ->
+        pure 8
+      _ ->
+        fatalBlockError $ "Unexpected type " ++ show (L.ppType ty)
   let nm = Ann.AllocaName (Text.pack nm0)
 
   allocaMap <- gets $ mcPendingAllocaOffsetMap
   a <-
     case Map.lookup nm allocaMap of
-      Nothing ->
-        error $ "Could not find offset of alloca with name: " ++ show nm ++ "\n"
-          ++ "Names: " ++ show (Map.keys allocaMap)
+      Nothing -> do
+        fnm <- asks $  Ann.llvmFunName . curFunAnnotations
+        bnm <- asks $ ppBlock . currentBlock
+        fatalBlockError $ printf "%s.%s: Missing annotation on alloca %s." fnm bnm (show nm)
       Just a -> pure a
 
   -- Delete this from pending allocations
@@ -1063,18 +1052,27 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
   -- Get total size as a bv64
   llvmSize <-
     case eltCount of
-      Nothing -> pure $ SMT.bvdecimal eltSize 64
-      Just (Typed itp@(PrimType (Integer 64)) i) -> do
-        cnt <- primEval itp i
-        pure $ SMT.bvmul (SMT.bvdecimal eltSize 64) [cnt]
+      Nothing -> pure $ eltSize
+      Just (Typed (PrimType (Integer w)) i) | w >= 1 -> do
+        case i of
+          ValInteger cnt -> do
+            let modCnt :: Natural
+                modCnt = fromIntegral $ cnt .&. (2^w-1)
+            pure $ eltSize * modCnt
+          _ ->
+            fatalBlockError "reopt-vcg only supports constant allocation sizes."
       Just (Typed itp _) -> do
-        error $ "Unexpected count type " ++ show itp
-  proveEq (SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64) llvmSize
-    "Size provided to LLVM matches expected size."
+        fatalBlockError $ "Unexpected count type " ++ show (L.ppType itp)
+  when (llvmSize /= Ann.allocaSize a) $
+    fatalBlockError $
+       printf "Allocation size %s must match specification %s."
+              (show llvmSize) (show (Ann.allocaSize a))
   -- Create declarations for alloca.
-  allocaDeclarations nm (Ann.allocaSize a)
+  let sz = SMT.bvdecimal (toInteger llvmSize) 64
+  allocaDeclarations nm sz
 
-llvmLoad :: SMT.Term
+llvmLoad :: HasCallStack
+         => SMT.Term
          -> L.Type
          -> Var
          -> BlockVCG ()
@@ -1128,7 +1126,8 @@ llvmLoad llvmAddr llvmType llvmValVar = do
       error "Expected a machine code load event."
 
 -- | Handle an LLVM store.
-llvmStore :: SMT.Term -- ^ Address
+llvmStore :: HasCallStack
+          => SMT.Term -- ^ Address
           -> L.Type -- ^ LLVM type
           -> SMT.Term -- ^ Value written
           -> BlockVCG ()
@@ -1138,7 +1137,7 @@ llvmStore llvmAddr llvmType llvmVal = do
     M.JointStackWriteEvent mcAddr mcType mcVal allocName -> do
       -- Check the number of bytes written are the same.
       unless (typeCompat llvmType mcType) $ do
-        errorAt $ "Machine code and LLVM writes have incompatible types:\n"
+        fatalBlockError $ "Machine code and LLVM writes have incompatible types:\n"
             ++ "MC type:   " ++ show mcType ++ "\n"
             ++ "LLVM type: " ++ show llvmType
 
@@ -1170,10 +1169,10 @@ llvmStore llvmAddr llvmType llvmVal = do
     _ -> do
       error "llvmStore: Expected a Macaw heap or joint stack write event."
 
-llvmReturn :: Maybe (Typed (Value' BlockLabel)) -> BlockVCG ()
+llvmReturn :: HasCallStack => Maybe (Typed (Value' BlockLabel)) -> BlockVCG ()
 llvmReturn mlret = do
+  mcExecuteToEnd
   -- Get register values after return.
-  popFetchAndExecute
   regs <- gets mcCurRegs
   -- Assert the IP after the fetch and execute is the return address
   proveEq (getConst (regs^.boundValue X86_IP)) (varTerm "return_addr")
@@ -1250,7 +1249,7 @@ getDefineByName llvmMod name =
 $(pure [])
 
 -- | Register values initialized from annotations.
-initBlockRegValues :: Ann.BlockAnn -> [(Some X86Reg, SMT.Term)]
+initBlockRegValues :: Ann.ReachableBlockAnn -> [(Some X86Reg, SMT.Term)]
 initBlockRegValues blockAnn =
   [ (Some X86_IP,     SMT.bvhexadecimal (toInteger (Ann.blockAddr blockAnn)) 64)
   , (Some X87_TopReg, SMT.bvdecimal (toInteger (Ann.blockX87Top blockAnn)) 3)
@@ -1280,17 +1279,27 @@ evalAnnPred regs mem e = do
 
 $(pure [])
 
--- | @verifyBlockPreconditions f lbl@ verifies the preconditions for block @f@
+-- | @verifyBlockPreconditions f lbl@ verifies the preconditions for block @lbl@
 -- are satisfied in the current state.
 --
 -- The function @f@ is applied to each predicate before verification,
 -- and allows us to conditionally validate some of the preconditions.
 verifyBlockPreconditions :: String
                          -> (SMT.Term -> SMT.Term)
-                         -> BlockLabel
+                         -> BlockLabel -- ^ Label of block we are jumping to.
                          -> BlockVCG ()
 verifyBlockPreconditions prefix f lbl = do
-  tgtBlockAnn <- getBlockAnn lbl
+  fnAnn <- asks $ curFunAnnotations
+  tgtBlockAnn <-
+    case findBlock fnAnn lbl of
+      Nothing -> do
+        fatalBlockError $
+          printf "Target block %s lacks annotations." (ppBlock lbl)
+      Just Ann.UnreachableBlock ->
+        fatalBlockError $
+          printf "Target block %s is marked as unreachable." (ppBlock lbl)
+      Just (Ann.ReachableBlock b) -> pure b
+
   firstLabel <- asks firstBlockLabel
 
   when (lbl == firstLabel) $ fail "Do not support jumping to first label in function."
@@ -1307,20 +1316,69 @@ verifyBlockPreconditions prefix f lbl = do
   forM_ (Ann.blockPreconditions tgtBlockAnn) $ \p -> do
     proveTrue (f (evalAnnPred regs mem p)) $ printf "Checking %s precondition." prefix
 
+-- | Construct SMT sort from type and report error if this fails.
+coerceToSMTSort :: Type -> BlockVCG SMT.Sort
+coerceToSMTSort ty = do
+  case asSMTSort ty of
+    Just tp -> pure tp
+    Nothing -> error $ "Unexpected type " ++ show (L.ppType ty)
+
 -- | Process LLVM and macaw events to ensure they are equivalent.
-stmtsEq :: [L.Stmt]
-        -> BlockVCG ()
-stmtsEq (stmt@(L.Result ident inst _mds):stmts) = do
+--
+-- This returns True if we should keep executing as we are not at end of block.
+stepNextStmt :: HasCallStack
+             => L.Stmt
+             -> BlockVCG Bool
+stepNextStmt stmt@(L.Result ident inst _mds) = do
   setCurrentLLVMStmt stmt
   case inst of
-    Arith lop (Typed lty lhs) rhs
-      | Just tp <- asSMTSort lty -> do
-          lhsv   <- primEval lty lhs
-          rhsv   <- primEval lty rhs
-          defineTerm ident tp $ arithOpFunc lop lhsv rhsv
-          stmtsEq stmts
-    ICmp lop (Typed lty@(PrimType (Integer w)) lhs) rhs -> do
-      when (w <= 0) $ error $ "Unexpected bitwidth " ++ show w
+    Alloca ty eltCount malign -> do
+      llvmAlloca ident ty eltCount malign
+      pure True
+    Arith lop (Typed lty lhs) rhs -> do
+      tp <- coerceToSMTSort lty
+      lhsv   <- primEval lty lhs
+      rhsv   <- primEval lty rhs
+      defineTerm ident tp $ arithOpFunc lop lhsv rhsv
+      pure True
+    Call isTailCall retty f args -> do
+      -- Evaluate function
+      fSym <- case f of
+                ValSymbol s -> pure s
+                _ -> fail $ "VCG currently only supports direct calls."
+      -- Add invoke event
+      llvmInvoke isTailCall fSym args (Just (ident, retty))
+      pure True
+    Conv convOp (Typed inputType primVal) resultType -> do
+      smtResultType <- coerceToSMTSort resultType
+      val <- primEval inputType primVal
+      result <-
+        case convOp of
+          PtrToInt -> do
+            case inputType of
+              PtrTo{} -> pure ()
+              _ -> error "ptrtoint expected a pointer."
+            when (resultType /= PrimType (Integer 64)) $ do
+              error "ptrtoint expected a i64 result."
+            pure val
+          IntToPtr -> do
+            when (inputType /= PrimType (Integer 64)) $ do
+              error "inttoptr expected a i64 input type."
+            case resultType of
+              PtrTo{} -> pure ()
+              _ -> error "inttoptr expected a pointer result."
+            pure val
+          _ -> do
+            error $ "Do not yet support " ++ show (L.ppConvOp convOp)
+      defineTerm ident smtResultType result
+      pure True
+    ICmp lop (Typed lty lhs) rhs -> do
+      case lty of
+        PrimType (Integer w)
+          | w > 0 -> do
+              pure ()
+        _ -> do
+          error "ICmp given unexpected type."
       lhsv <- primEval lty lhs
       rhsv <- primEval lty rhs
       let r =
@@ -1336,60 +1394,44 @@ stmtsEq (stmt@(L.Result ident inst _mds):stmts) = do
               Islt -> SMT.bvslt lhsv rhsv
               Isle -> SMT.bvsle lhsv rhsv
       defineTerm ident (SMT.bvSort 1) (SMT.ite r (SMT.bvdecimal 1 1) (SMT.bvdecimal 0 1))
-      stmtsEq stmts
-    Alloca ty eltCount malign -> do
-      llvmAlloca ident ty eltCount malign
-      stmtsEq stmts
+      pure True
     Load (Typed (PtrTo lty) src) _ord _align -> do
+      missingFeature "Check LLVM load atomic ordering."
+      missingFeature "Check LLVM load alignment"
       addrTerm <- primEval (PtrTo lty) src
       llvmLoad addrTerm lty (identVar ident)
-      stmtsEq stmts
-    Call isTailCall retty f args -> do
-      -- Evaluate function
-      fSym <- case f of
-                ValSymbol s -> pure s
-                _ -> fail $ "VCG currently only supports direct calls."
-      -- Add invoke event
-      llvmInvoke isTailCall fSym args (Just (ident, retty))
-      stmtsEq stmts
+      pure True
     _ -> do
-      error $ "stmtsEq: unsupported instruction: " ++ show inst
-stmtsEq (stmt@(L.Effect instr _mds):stmts) = do
+      error $ "stepNextStmt: unsupported instruction: " ++ show inst
+stepNextStmt stmt@(L.Effect instr _mds) = do
   setCurrentLLVMStmt stmt
   case instr of
     Store llvmVal llvmPtr _ordering _align -> do
       addrTerm <- evalTyped llvmPtr
       valTerm  <- evalTyped llvmVal
       llvmStore addrTerm (typedType llvmVal) valTerm
-      stmtsEq stmts
+      pure True
     Br (Typed _ty cnd) tlbl flbl -> do
+      mcExecuteToEnd
+      -- Get condition
       cndTerm <- primEval (PrimType (Integer 1)) cnd
       let c = SMT.eq [cndTerm, SMT.bvdecimal 1 1]
-
-      unless (null stmts) $ error "Expected branch as last LLVM statement."
-      popFetchAndExecute
-
       -- Verify block preconditions.
       verifyBlockPreconditions "true branch"  (SMT.implies [c])         tlbl
       verifyBlockPreconditions "false branch" (SMT.implies [SMT.not c]) flbl
-
-
+      pure False
     Jump lbl -> do
-      unless (null stmts) $ error "Expected jump to be last LLVM statement."
-      popFetchAndExecute
-
+      mcExecuteToEnd
       -- Verify block preconditions
       verifyBlockPreconditions "jump" id lbl
-
+      pure False
     Ret retVal -> do
-      unless (null stmts) $ error "Expected return to be last LLVM statement."
       llvmReturn (Just retVal)
-    RetVoid ->
-      unless (null stmts) $ error "Expected return to be last LLVM statement."
+      pure False
+    RetVoid -> do
       llvmReturn Nothing
+      pure False
     _ -> error "Unsupported instruction."
-stmtsEq [] = do
-  error $ "We have reached end of LLVM events without a block terminator."
 
 $(pure [])
 
@@ -1436,7 +1478,8 @@ waitForResponse errHandle action = do
       pure resp
 
 -- | Function to verify a SMT proposition is unsat.
-interactiveVerifyGoal :: InteractiveContext -- ^ Context for verifying goals
+interactiveVerifyGoal :: HasCallStack
+                      => InteractiveContext -- ^ Context for verifying goals
                       -> SMT.Term
                          -- ^ Negation of goal to verify
                       -> String
@@ -1450,8 +1493,11 @@ interactiveVerifyGoal ictx ng propName = do
   let respHandle = ictxRespHandle ictx
 
   cnt <- readIORef (ictxBlockGoalCounter ictx)
+
   modifyIORef' (ictxAllGoalCounter ictx)      (+1)
   modifyIORef' (ictxBlockGoalCounter ictx)    (+1)
+
+
   let fname = standaloneGoalFilename funName lbl cnt
   hPutStrLn stderr $ printf "Verifying %s: %s" fname propName
   writeCommand cmdHandle $ SMT.checkSatAssuming [ng]
@@ -1480,16 +1526,26 @@ interactiveVerifyGoal ictx ng propName = do
       hPutStrLn stderr $ "The SMT solver returned the following message after check-sat-assuming:"
       hPutStrLn stderr ""
       hPutStrLn stderr $ "  " ++ msg
+      hPutStrLn stderr ""
+      hPutStrLn stderr $ "This behavior likely reflects a bug in reopt-vcg:"
+      hPutStrLn stderr $ prettyCallStack callStack
+      hPutStrLn stderr ""
+      hPutStrLn stderr $ printf "To see output, run `reopt-vcg %s --export <dir>`." annFile
+      hPutStrLn stderr $ "The result will be stored in " ++ fname
 
-newInteractiveSession :: FilePath -- ^ Path for annotations
+
+newInteractiveSession :: HasCallStack
+                      => FilePath -- ^ Path for annotations
                       -> String -- ^ Command line for SMT solver
                       -> IORef Natural -- ^ Counter for each goal
                       -> IORef Natural -- ^ Counter for each verified goal.
+                      -> IORef Natural -- ^ Counter for errors
                       -> FunctionName -- ^ Name of function
                       -> String -- ^ Block label for this session.
                       -> (ProverInterface -> IO a)
                       -> IO a
-newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter funName lbl action = do
+newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter errorCounter
+                      funName lbl action = do
   -- Create Goal counter for just this block.
   blockGoalCounter <- newIORef 0
   let cp = (P.shell cmdline)
@@ -1516,12 +1572,13 @@ newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter funName
         let fns = ProverInterface
                     { addCommandCallback = \cmd -> do
                         writeCommand cmdHandle cmd
-                    , proveFalseCallback = \p msg -> do
-                        interactiveVerifyGoal ictx p msg
-                    , proveTrueCallback = \p msg -> do
-                        interactiveVerifyGoal ictx (SMT.not p) msg
+                    , proveFalseCallback = interactiveVerifyGoal ictx
+                    , proveTrueCallback =
+                        interactiveVerifyGoal ictx . SMT.not
+                    , blockErrorCallback = \_ -> do
+                        modifyIORef errorCounter (+1)
                     }
-        r <- action fns
+        r <- seq ictx $ seq fns $ action fns
         writeCommand cmdHandle $ SMT.exit
         pure r
     Right _ -> do
@@ -1542,16 +1599,22 @@ interactiveSMTGenerator annFile cmdline = do
   allGoalCounter <- newIORef 0
   -- Counter for goals successfully verified.
   verifiedGoalCounter <- newIORef 0
+  -- Counter for errors
+  errorCounter <- newIORef 0
   let whenDone = do
         allCnt <- readIORef allGoalCounter
         verCnt <- readIORef verifiedGoalCounter
-        if verCnt < allCnt then do
-          hPutStrLn stdout "Verification Failed"
-         else do
-          hPutStrLn stdout "All verifications succeeded"
-        hPutStrLn stdout $ "Verified " ++ show verCnt ++ "/" ++ show allCnt ++ " Goals."
+        errorCnt <- readIORef errorCounter
+        if errorCnt == 0 && verCnt == allCnt then
+          hPutStrLn stdout "Verification succeeded."
+         else
+          hPutStrLn stdout "Verification failed."
+        hPutStrLn stdout $ printf "Verified %s/%s goal(s)." (show verCnt) (show allCnt)
+        when (errorCnt > 0) $ do
+          hPutStrLn stdout $ printf "Encountered %s error(s)." (show errorCnt)
   pure $! PSGen { blockCallbacks =
-                    newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter
+                    newInteractiveSession annFile cmdline
+                      allGoalCounter verifiedGoalCounter errorCounter
                 , sessionComplete = whenDone
                 }
 
@@ -1594,12 +1657,14 @@ exportCallbacks outDir fn lbl action = do
         exportCheckSatProblem outDir fn lbl goalCounter cmdRef p msg
     , proveTrueCallback = \p msg ->
         exportCheckSatProblem outDir fn lbl goalCounter cmdRef (SMT.not p) msg
+    , blockErrorCallback = \_ ->
+        pure ()
     }
 
 runVCGs :: Ann.FunctionAnn -- ^ Annotations for the function we are verifying.
         -> BlockLabel -- ^ Label of first block
         -> BlockLabel -- ^ Label of this block.
-        -> Ann.BlockAnn -- ^ Annotations for the block we are verifying.
+        -> Ann.ReachableBlockAnn -- ^ Annotations for the block we are verifying.
         -> BlockVCG ()
         -> ModuleVCG ()
 runVCGs funAnn firstLabel lbl blockAnn action = do
@@ -1613,7 +1678,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
       Nothing -> moduleThrow $ "Could not resolve " ++ show absAddr
 
   gen <- asks proverGen
-  liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) (Ann.blockLabel blockAnn) $ \prover -> do
+  liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) (ppBlock lbl) $ \prover -> do
     let blockStart = Ann.blockAddr blockAnn
     let sz = Ann.blockCodeSize blockAnn
     let blockEnd = blockStart + sz
@@ -1634,6 +1699,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
     let ctx = BlockVCGContext { mcModuleVCGContext = modCtx
                               , curFunAnnotations = funAnn
                               , firstBlockLabel = firstLabel
+                              , currentBlock = lbl
                               , callbackFns = prover
                               , mcBlockEndAddr = incAddr (toInteger sz) (segoffAddr thisSegOff)
                               , mcBlockMap = blockMap
@@ -1656,10 +1722,12 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
       let rspRegValues
              | isFirstBlock = [(Some RSP, varTerm "stack_high")]
              | otherwise = []
+      -- Assert register value equals function start register value
+      -- if we are in first block.
       let calleeRegValues
             | isFirstBlock =
               [ (Some r, varTerm (functionStartRegValue r))
-              | r <- calleeSavedGPRegs
+              | r <- fnStartSortedGPRegList
               ]
             | otherwise =
               []
@@ -1748,7 +1816,6 @@ withVCGArgs = do
         showHelp
         exitSuccess
       Right (RunVCG a) -> pure a
-
   -- Get path to YAML
   annFile <-
     case reoptAnnotationsPath args of
@@ -1760,8 +1827,14 @@ withVCGArgs = do
       Left err -> do
         hPutStrLn stderr $ "Error parsing annotations: " ++ show err
         exitFailure
-      Right cfg -> do
-        pure cfg
+      Right jsonConfig -> do
+        let llvmMap = undefined
+        case Aeson.iparse (Ann.parseAnnotations llvmMap) jsonConfig of
+          Aeson.IError path msg -> do
+            hPutStrLn stderr $ "Error parsing annotations: " ++ Aeson.formatError path msg
+            exitFailure
+          Aeson.ISuccess cfg -> do
+            pure cfg
   case requestedMode args of
     ExportMode outdir -> do
       r <- try $ createDirectoryIfMissing True outdir
@@ -1790,31 +1863,21 @@ standaloneGoalFilename :: String -- ^ Name of function to verify
 standaloneGoalFilename fn lbl i = fn ++ "_" ++ lbl ++ "_" ++ show i ++ ".smt2"
 
 
--- | Define LLVM arguments in terms of machine code registers.
---
--- Note. Our current assumption is that LLVM arguments may only be
--- directly referenced in the initial block, and the arguments are
--- only defined in the initial block.  If this changes, then the code
--- below is incorrect as it assumes the value of the registers at the
--- block start is the same as at function start.
-defineLLVMArgs :: AddrName
-                  -- ^ Pretty printed name of function start address
-                  -- for display purposes
-               -> [Typed Ident]
+-- | Define LLVM arguments in terms of the function start value of
+-- machine code registers.
+defineLLVMArgs :: [Typed Ident]
                -> [X86Reg (M.BVType 64)] -- ^ Remaining registers for arguments.
                -> BlockVCG ()
-defineLLVMArgs _ [] _x86Regs = pure ()
-defineLLVMArgs nm (Typed (PrimType (Integer 64)) val : rest) x86Regs =
+defineLLVMArgs [] _x86Regs = pure ()
+defineLLVMArgs (Typed (PrimType (Integer 64)) val : rest) x86Regs =
   case x86Regs of
     [] -> error $ "Ran out of register arguments."
     (reg:restRegs) -> do
       addCommand $ SMT.defineFun (identVar val) [] (SMT.bvSort 64)
-                                 (varTerm (addrStartRegValue nm reg))
-      defineLLVMArgs nm rest restRegs
-defineLLVMArgs _ (Typed tp _val : _rest) _x86Regs =
+                                 (varTerm (functionStartRegValue reg))
+      defineLLVMArgs rest restRegs
+defineLLVMArgs (Typed tp _val : _rest) _x86Regs =
   error $ "Unexpected type " ++ show tp
-
-
 
 -- | Return true if the allocations overlap in memory.
 allocaOverlap :: Ann.AllocaInfo -> Ann.AllocaInfo -> Bool
@@ -1853,9 +1916,24 @@ checkAllocaOverlap lbl l = do
         hPutStrLn stderr $ do
           printf "  Allocation %s overlaps with %s" (show (Ann.allocaName x)) (show (Ann.allocaName y))
 
+-- | Loop over LLVM stmts
+--
+-- Note. This is written to take a function rather than directly call
+-- @stepNextStmtg@ so that the call stack is cleaner.
+loopStmts :: (L.Stmt -> BlockVCG Bool) -> [L.Stmt] -> BlockVCG ()
+loopStmts _ [] = do
+  error $ "We have reached end of LLVM events without a block terminator."
+loopStmts f (stmt:stmts) = do
+  c <- f stmt
+  if c then
+    loopStmts f stmts
+   else
+    unless (null stmts) $ error "Expected return to be last LLVM statement."
+
 
 -- | Verify a block satisfies its specification.
-verifyBlock :: Define
+verifyBlock :: HasCallStack
+            => Define
                -- ^ LLVM function that current block is contained
                -- within.
             -> Ann.FunctionAnn -- ^ Annotations for function
@@ -1866,48 +1944,52 @@ verifyBlock lFun funAnn firstLabel bb = do
   -- Get block label
   let Just lbl = L.bbLabel bb
   -- Get annotations for this block
-  blockAnn <-
+  mblockAnn <-
     case findBlock funAnn lbl of
       Just b -> pure b
-      Nothing -> moduleThrow $ "verifyBlock: Could not find annotations for block " ++ show lbl
-  -- Check allocations fit in stack size.
-  forM_ (Ann.blockAllocas blockAnn) $ \a -> do
-    when (Ann.allocaBinaryOffset a > Ann.stackSize funAnn) $ do
-      moduleThrow $
-        printf "Allocation %s has offset in %s that is outside of stack bounds."
-          (show (Ann.allocaName a)) (show lbl)
-  -- Check allocations do not overlap with each other.
-  checkAllocaOverlap lbl (Ann.blockAllocas blockAnn)
-  -- Start running verification condition generator.
-  runVCGs funAnn firstLabel lbl blockAnn $ do
-    blockAddr <- gets mcCurAddr
-    -- Add LLVM declarations for all existing allocations.
-    forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
-      when (Ann.allocaExisting a) $ do
-        allocaDeclarations (Ann.allocaName a) (Ann.allocaSize a)
-
-    -- Declare registers for block and function start.
-    let blockName = addrName (segoffAddr blockAddr)
-    -- Declare memory
-    addCommand $ SMT.declareConst (memVar 0) memSort
-    -- Declare constant representing where we return to.
-    defineVarWithReadValue "return_addr" (varTerm "stack_high") addrSupportedMemType
-    -- Declare LLVM arguments in terms of Macaw registers
-    when (firstLabel == lbl) $
-      defineLLVMArgs blockName (defArgs lFun) x86ArgRegs
-    -- Assume preconditions
-    do regs <- gets mcCurRegs
-       mem  <- gets $ varTerm . memVar . mcMemIndex
-       forM_ (Ann.blockPreconditions blockAnn) $ \p -> do
-         assume (evalAnnPred regs mem p)
-    -- Start processing LLVM statements
-    stmtsEq (bbStmts bb)
+      Nothing ->
+        moduleThrow $
+          printf "%s: Block %s lacks annotations." (Ann.llvmFunName funAnn) (ppBlock lbl)
+  case mblockAnn of
+    -- We only need to verify unreachable blocks are not reachable."
+    Ann.UnreachableBlock -> do
+      pure ()
+    Ann.ReachableBlock blockAnn -> do
+      -- Check allocations fit in stack size.
+      forM_ (Ann.blockAllocas blockAnn) $ \a -> do
+        when (Ann.allocaBinaryOffset a > Ann.stackSize funAnn) $ do
+          moduleThrow $
+            printf "%s: Block %s allocation %s has offset outside of stack bounds."
+              (Ann.llvmFunName funAnn) (ppBlock lbl) (show (Ann.allocaName a))
+      -- Check allocations do not overlap with each other.
+      checkAllocaOverlap lbl (Ann.blockAllocas blockAnn)
+      -- Start running verification condition generator.
+      runVCGs funAnn firstLabel lbl blockAnn $ do
+        -- Add LLVM declarations for all existing allocations.
+        forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
+          when (Ann.allocaExisting a) $ do
+            let sz = SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64
+            allocaDeclarations (Ann.allocaName a) sz
+        -- Declare memory
+        addCommand $ SMT.declareConst (memVar 0) memSort
+        -- Declare constant representing where we return to.
+        defineVarWithReadValue "return_addr" (varTerm "stack_high") addrSupportedMemType
+        -- Declare LLVM arguments in terms of Macaw registers at function start.
+        defineLLVMArgs (L.defArgs lFun) x86ArgGPRegs
+        -- Assume preconditions
+        do regs <- gets mcCurRegs
+           mem  <- gets $ varTerm . memVar . mcMemIndex
+           forM_ (Ann.blockPreconditions blockAnn) $ \p -> do
+             assume (evalAnnPred regs mem p)
+        -- Start processing LLVM statements
+        loopStmts stepNextStmt (bbStmts bb)
 
 $(pure [])
 
 
 -- | Verify a particular function satisfies its specification.
-verifyFunction :: Module
+verifyFunction :: HasCallStack
+               => Module
                -- ^ LLVM Module
                -> Ann.FunctionAnn
                -- ^ Annotations to add in mapping LLVM module and
@@ -1915,7 +1997,8 @@ verifyFunction :: Module
                -> ModuleVCG ()
 verifyFunction lMod funAnn = do
   modCtx <- ask
-  let fnm = Ann.llvmFunName funAnn
+  let fnm :: String
+      fnm = Ann.llvmFunName funAnn
   vcgLog $ "Analyzing " ++ fnm
 
   lFun <-
@@ -1923,7 +2006,7 @@ verifyFunction lMod funAnn = do
       Just f -> pure f
       Nothing -> moduleThrow $ printf "Could not find LLVM function %s in module." fnm
 
-  when (length (defArgs lFun) > length x86ArgRegs) $ do
+  when (length (L.defArgs lFun) > length Ann.x86ArgGPRegs) $ do
     moduleThrow $ "Too many arguments."
 
   case defBody lFun of
@@ -1932,9 +2015,13 @@ verifyFunction lMod funAnn = do
       let Just entryLabel = bbLabel firstBlock
       firstBlockAnn <-
         case findBlock funAnn entryLabel of
-          Just b -> pure b
+          Just (Ann.ReachableBlock b) -> pure b
+          Just Ann.UnreachableBlock -> do
+            moduleThrow $
+              printf "%s: Entry block %s must be reachable." fnm (ppBlock entryLabel)
           Nothing ->
-            moduleThrow $ printf "verifyFunction: Could not find annotations for LLVM block %%%s." (ppBlock entryLabel)
+            moduleThrow $
+              printf "%s: Could not find annotations for LLVM block %s." fnm (ppBlock entryLabel)
 
       let Right addr = getMCAddrOfLLVMFunction (symbolAddrMap modCtx) fnm
       when (toInteger addr /= toInteger (Ann.blockAddr firstBlockAnn)) $ do
@@ -1942,7 +2029,7 @@ verifyFunction lMod funAnn = do
 
       -- Verify the blocks.
       forM_ (firstBlock:restBlocks) $ \bb -> do
-        verifyBlock lFun funAnn entryLabel bb
+        moduleCatch $ verifyBlock lFun funAnn entryLabel bb
 
 $(pure [])
 

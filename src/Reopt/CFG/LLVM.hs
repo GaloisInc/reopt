@@ -200,10 +200,18 @@ typeToLLVMType (VecTypeRepr w tp)
    | otherwise = error $ "Vector width of " ++ show w ++ " is too large."
 
 
--- | This is a special label used for e.g. table lookup defaults (where we should never reach).
--- For now it will just loop.
-failLabel :: L.Ident
-failLabel = L.Ident "failure"
+-- | This is a special label used for e.g. table lookup defaults
+-- (where we should never reach).
+--
+-- It just calls the unreachable instruction.
+failLabel :: L.BlockLabel
+failLabel = L.Named (L.Ident "failure")
+
+-- | Block for fail label.
+failBlock :: L.BasicBlock
+failBlock = L.BasicBlock { L.bbLabel = Just failLabel
+                         , L.bbStmts = [L.Effect L.Unreachable []]
+                         }
 
 functionTypeToLLVM :: FunctionType arch -> L.Type
 functionTypeToLLVM ft = L.ptrT $
@@ -222,11 +230,6 @@ declareFunction d =
                 , L.decAttrs   = []
                 , L.decComdat  = Nothing
                 }
-
-failBlock :: L.BasicBlock
-failBlock = L.BasicBlock { L.bbLabel = Just (L.Named failLabel)
-                         , L.bbStmts = [L.Effect L.Unreachable []]
-                         }
 
 -- Pads the given list of values to be the target lenght using undefs
 padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
@@ -921,7 +924,7 @@ termStmtToLLVM tm =
     FnLookupTable idx vec -> do
       idx' <- mkLLVMValue idx
       let dests = map (L.Named . blockWordName) $ V.toList vec
-      effect $ L.Switch idx' (L.Named failLabel) (zip [0..] dests)
+      effect $ L.Switch idx' failLabel (zip [0..] dests)
 
 -- | Convert a Phi node assignment to the right value
 resolvePhiNodeReg :: (LLVMArchConstraints arch, HasCallStack)
