@@ -387,10 +387,9 @@ addrStartRegValue b reg = b <> "_" <> Text.pack (show reg)
 -- execution.
 declareAddrStartRegValues :: ProverInterface
                           -> AddrName
-                          -> [(Some X86Reg, SMT.Term)]
+                          -> Map (Some X86Reg) SMT.Term
                           -> IO (RegState X86Reg (Const SMT.Term))
-declareAddrStartRegValues prover nm definedRegs = do
-  let definedRegMap = Map.fromList definedRegs
+declareAddrStartRegValues prover nm definedRegMap = do
   let initReg :: X86Reg tp -> IO (Const SMT.Term tp)
       initReg reg = do
         let regName = addrStartRegValue nm reg
@@ -411,7 +410,7 @@ x86ArgGPRegs :: [X86Reg (M.BVType 64)]
 x86ArgGPRegs = X86_GP <$> Ann.x86ArgGPRegs
 
 fnStartSortedGPRegList :: [X86Reg (M.BVType 64)]
-fnStartSortedGPRegList = Set.toList $ Set.fromList $ x86ArgGPRegs ++ calleeSavedGPRegs
+fnStartSortedGPRegList = Set.toList $ Set.fromList $ x86ArgGPRegs ++ calleeSavedGPRegs ++ [RSP]
 
 
 -- | Return the name of the SMT variable for the register when the
@@ -601,20 +600,25 @@ defineRangeCheck nm low high = do
 evalRangeCheck :: Text -> SMT.Term -> Integer -> SMT.Term
 evalRangeCheck nm a sz = SMT.term_app (Builder.fromText nm) [a, SMT.bvdecimal sz 64]
 
+-- | @stackHighTerm@ denotes the top of the stack.
+stackHighTerm :: SMT.Term
+stackHighTerm = varTerm (functionStartRegValue RSP)
 
+-- | @allocaMCBaseEndDecls a@ introduces variables for defining the
+-- extent in the machine code stack of an LLVM alloca.
 allocaMCBaseEndDecls :: Ann.AllocaInfo -> [SMT.Command]
 allocaMCBaseEndDecls a =
   let nm = Ann.allocaName a
       base = Ann.allocaBinaryOffset a
       end  = base - Ann.allocaSize a
   -- Define machine code base for allocation.
-   in [ SMT.defineFun (allocaMCBaseVar nm) [] ptrSort (subc (varTerm "stack_high") base)
-      , SMT.defineFun (allocaMCEndVar  nm) [] ptrSort (subc (varTerm "stack_high") end)
+   in [ SMT.defineFun (allocaMCBaseVar nm) [] ptrSort (subc stackHighTerm base)
+      , SMT.defineFun (allocaMCEndVar  nm) [] ptrSort (subc stackHighTerm end)
         -- Introduce predicate to check machine-code addresses.
       , defineRangeCheck (isInMCAlloca nm) (varTerm (allocaMCBaseVar nm)) (varTerm (allocaMCEndVar nm))
       ]
 
--- | @mcMemDecls byetsAbove@ adds declarations about the memory.
+-- | @mcMemDecls bytesAbove allocas@ adds declarations about the memory.
 --
 -- It assumes that there is a fresh constant blockinit_RSP declared for
 -- the initial RSP, and asserts that @sz < blockinit_RSP < 2^64 - 8@
@@ -638,17 +642,16 @@ mcMemDecls fnSize allocas
     , SMT.assert $ SMT.bvult (varTerm "heap_low") (varTerm "heap_high")
       -- Declare in_heap_segment
     , defineRangeCheck "in_heap_segment" (varTerm "heap_low") (varTerm "heap_high")
-    , comment "stack_high is the maxium address on stack in this frame."
-    , comment "This points to the address the return address is stored at."
-    , SMT.declareFun "stack_high"  [] (SMT.bvSort 64)
-    , SMT.assert $ SMT.bvult (varTerm "stack_high") (SMT.bvhexadecimal (2^(64::Int) - 8) 64)
-    , SMT.assert $ SMT.bvugt (varTerm "stack_high") (SMT.bvdecimal (toInteger fnSize) 64)
+      -- Assert that stack pointer at function
+    , comment "Assert that stack pointer has room to allocate frame data."
+    , SMT.assert $ SMT.bvult stackHighTerm (SMT.bvhexadecimal (2^(64::Int) - 8) 64)
+    , SMT.assert $ SMT.bvugt stackHighTerm (SMT.bvdecimal (toInteger fnSize) 64)
       -- High water stack pointer includes 8 bytes for return address.
       -- The return address top must be aligned to a 16-byte boundary.
-      -- This is done by asserting the 4 low-order bits of stack_high are 8.
-    , SMT.assert $ SMT.eq [ SMT.extract 3 0 (varTerm "stack_high"), SMT.bvdecimal 8 4]
+      -- This is done by asserting the 4 low-order bits of fnstart_rsp are 8.
+    , SMT.assert $ SMT.eq [ SMT.extract 3 0 stackHighTerm, SMT.bvdecimal 8 4]
     , comment "stack_low is the minimum address on stack in this frame."
-    , SMT.defineFun "stack_low"  [] (SMT.bvSort 64) (subc (varTerm "stack_high") fnSize)
+    , SMT.defineFun "stack_low"  [] (SMT.bvSort 64) (subc stackHighTerm fnSize)
     ]
   ++ concatMap allocaMCBaseEndDecls allocas
   -- Declare on_this_stack_frame
@@ -656,7 +659,7 @@ mcMemDecls fnSize allocas
            inStack =
              [ SMT.bvule (varTerm "stack_low") (varTerm "a")
              , SMT.bvule (varTerm "a") (varTerm "e")
-             , SMT.bvule (varTerm "e") (addc (varTerm "stack_high") 8)
+             , SMT.bvule (varTerm "e") (addc stackHighTerm 8)
              ]
            disjointFn a =
              let nm = Ann.allocaName a
@@ -975,7 +978,7 @@ llvmInvoke isTailCall fsym args lRet = do
           ]
           ++ [(Some RSP, addc (getConst (regs^.boundValue RSP)) 8)]
     liftIO $
-      declareAddrStartRegValues prover (addrName nextInsnAddr) calleeRegValues
+      declareAddrStartRegValues prover (addrName nextInsnAddr) (Map.fromList calleeRegValues)
   modify $ \s -> s { mcCurRegs = newRegs }
 
   -- Clear all non callee saved registers
@@ -1180,7 +1183,7 @@ llvmReturn mlret = do
 
   -- Assert the stack height at the return is just above the return
   -- address pointer.
-  proveEq (getConst (regs^.boundValue RSP)) (addc (varTerm "stack_high") 8)
+  proveEq (getConst (regs^.boundValue RSP)) (addc stackHighTerm 8)
     "Stack height at return matches init."
 
   checkDirectionFlagClear
@@ -1270,7 +1273,7 @@ evalAnnPred regs mem e = do
     Ann.BVDecimal x y -> SMT.bvdecimal (toInteger x) y
     Ann.Var v ->
       case v of
-        Ann.StackHigh -> varTerm "stack_high"
+        Ann.StackHigh -> stackHighTerm
         Ann.InitGPReg64 reg -> getConst $ regs^.boundValue (X86_GP reg)
         Ann.FnStartGPReg64 reg ->
           varTerm (functionStartRegValue (X86_GP reg))
@@ -1709,18 +1712,19 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
        -- Add read/write operations (independent of registers)
        mapM_ (addCommandCallback prover . supportedReadDecl)  supportedMemTypes
        mapM_ (addCommandCallback prover . supportedWriteDecl) supportedMemTypes
-    -- Declare stack and heap bounds.
-    mapM_ (addCommandCallback prover) $ mcMemDecls (Ann.stackSize funAnn) (Ann.blockAllocas blockAnn)
 
     -- Declare registers when function starts.
     declareFunctionStartRegValues prover
+    -- Declare stack and heap bounds.
+    mapM_ (addCommandCallback prover) $
+      mcMemDecls (Ann.stackSize funAnn) (Ann.blockAllocas blockAnn)
     -- Create registers
     regs <- do
       -- Register values determined by location.
       let locRegValues = initBlockRegValues blockAnn
       -- Implicit RSP constraint on block.
       let rspRegValues
-             | isFirstBlock = [(Some RSP, varTerm "stack_high")]
+             | isFirstBlock = [(Some RSP, stackHighTerm)]
              | otherwise = []
       -- Assert register value equals function start register value
       -- if we are in first block.
@@ -1732,7 +1736,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
             | otherwise =
               []
       declareAddrStartRegValues prover (addrName (segoffAddr thisSegOff))
-        (locRegValues ++ rspRegValues ++ calleeRegValues)
+        (Map.fromList $ locRegValues ++ rspRegValues ++ calleeRegValues)
     -- Create block state.
     let s = BlockVCGState { mcCurAddr   = thisSegOff
                           , mcCurSize   = 0
@@ -1973,7 +1977,7 @@ verifyBlock lFun funAnn firstLabel bb = do
         -- Declare memory
         addCommand $ SMT.declareConst (memVar 0) memSort
         -- Declare constant representing where we return to.
-        defineVarWithReadValue "return_addr" (varTerm "stack_high") addrSupportedMemType
+        defineVarWithReadValue "return_addr" stackHighTerm addrSupportedMemType
         -- Declare LLVM arguments in terms of Macaw registers at function start.
         defineLLVMArgs (L.defArgs lFun) x86ArgGPRegs
         -- Assume preconditions
