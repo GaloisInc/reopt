@@ -412,7 +412,6 @@ x86ArgGPRegs = X86_GP <$> Ann.x86ArgGPRegs
 fnStartSortedGPRegList :: [X86Reg (M.BVType 64)]
 fnStartSortedGPRegList = Set.toList $ Set.fromList $ x86ArgGPRegs ++ calleeSavedGPRegs ++ [RSP]
 
-
 -- | Return the name of the SMT variable for the register when the
 -- function starts.
 --
@@ -1722,10 +1721,6 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
     regs <- do
       -- Register values determined by location.
       let locRegValues = initBlockRegValues blockAnn
-      -- Implicit RSP constraint on block.
-      let rspRegValues
-             | isFirstBlock = [(Some RSP, stackHighTerm)]
-             | otherwise = []
       -- Assert register value equals function start register value
       -- if we are in first block.
       let calleeRegValues
