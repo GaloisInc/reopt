@@ -15,7 +15,7 @@ module VCGMacaw
   , ppEvent
   , evenParityDecl
   , evalMemAddr
-  , toSMTType
+  , toSMTSort
     -- * EvalContext
   , EvalContext
   , primEval
@@ -198,35 +198,10 @@ primEval _ (SymbolValue _w _id) = do
 doPrimEval :: Value X86_64 ids tp -> MStateM SMT.Term
 doPrimEval v = (`primEval` v) <$> getEvalContext
 
-toSMTType :: M.TypeRepr tp -> SMT.Sort
-toSMTType (M.BVTypeRepr w) = SMT.bvSort (natValue w)
-toSMTType M.BoolTypeRepr = SMT.boolSort
-toSMTType tp = error $ "toSMTType: unsupported type " ++ show tp
-
-{-
-readMem :: SMT.Term
-        -> M.MemRepr tp
-        -> MStateM SMT.Term
-readMem ptr (BVMemRepr w end) = do
-  when (end /= LittleEndian) $ do
-    error "reopt-vcg only encountered big endian read."
-  -- TODO: Add assertion that memory is valid.
-  mem <- gets curMem
-  pure $ readBVLE mem ptr (natValue w)
-
-writeMem :: SMT.Term
-         -> M.MemRepr tp
-         -> SMT.Term
-         -> MStateM ()
-writeMem ptr (BVMemRepr w LittleEndian) val = do
-  modify' $ \s ->
-    let SMem newMem = writeBVLE (curMem s) ptr val (natValue w)
-        cmd = SMT.defineFun (memVar (memIndex s)) [] memSort newMem
-     in s { curMem = SMem (varTerm (memVar (memIndex s)))
-          , memIndex = memIndex s + 1
-          , events = CmdEvent cmd : events s
-          }
--}
+toSMTSort :: M.TypeRepr tp -> SMT.Sort
+toSMTSort (M.BVTypeRepr w) = SMT.bvSort (natValue w)
+toSMTSort M.BoolTypeRepr = SMT.boolSort
+toSMTSort tp = error $ "toSMTSort: unsupported type " ++ show tp
 
 -- | Record that the given assign id has been set.
 recordLocal :: AssignId ids tp
@@ -246,7 +221,7 @@ setUndefined :: AssignId ids tp
              -> MStateM ()
 setUndefined aid tp = do
   v <- recordLocal aid
-  addCommand $ SMT.declareFun v [] (toSMTType tp)
+  addCommand $ SMT.declareFun v [] (toSMTSort tp)
 
 -- | Unsigned overflow occurs when the most significant bit is 1.
 -- In @unsignedOverflow r w@, the argument @w@ must be one less than the width of @r@.
@@ -267,7 +242,7 @@ evalApp2SMT :: AssignId ids tp
             -> MStateM ()
 evalApp2SMT aid a = do
   let doSet v = do
-        let tp = toSMTType (M.typeRepr a)
+        let tp = toSMTSort (M.typeRepr a)
         t <- recordLocal aid
         addCommand $ SMT.defineFun t [] tp v
   case a of
