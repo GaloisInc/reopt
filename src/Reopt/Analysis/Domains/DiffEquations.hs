@@ -1,5 +1,4 @@
 {-# LANGUAGE DoAndIfThenElse #-}
-{-# OPTIONS_GHC -Wall #-}
 module Reopt.Analysis.Domains.DiffEquations
   ( DiffEquations
   , empty

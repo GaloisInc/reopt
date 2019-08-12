@@ -440,9 +440,6 @@ data FnBlock arch
                -- ^ Label for identifying block.
              , fbPhiNodes  :: ![Some (PhiBinding (ArchReg arch))]
                -- ^ List of phi bindings.
-               --
-               -- Only initial blocks -- not subblocks should have phi
-               -- bindings.
              , fbStmts :: ![FnStmt     arch]
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)

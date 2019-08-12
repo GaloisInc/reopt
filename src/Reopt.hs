@@ -720,11 +720,11 @@ recoveredFunctionName m prefix segOff =
       let addr = segoffAddr segOff
        in prefix <> "_" <> BSC.pack (show (addrBase addr)) <> "_" <> BSC.pack (show (addrOffset addr))
 
-toComputedRegs :: X86FunTypeInfo -> ComputedRegs X86Reg
-toComputedRegs fti =
-  CR { crArguments = argReg <$> ftiArgRegs fti
-     , crReturn = retReg <$> ftiRetRegs fti
-     }
+toKnownFunABI :: X86FunTypeInfo -> KnownFunABI X86Reg
+toKnownFunABI fti =
+  KnownFnABI { kfArguments = argReg <$> ftiArgRegs fti
+             , kfReturn = retReg <$> ftiRetRegs fti
+             }
 
 -- | Try to recover function information from the information
 -- recovered during code discovery.
@@ -778,12 +778,12 @@ getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
     mapM_ logger warnings
     pure l
 
-  let symTypeMap :: Map BS.ByteString (ComputedRegs X86Reg)
-      symTypeMap = Map.fromList $ over _2 toComputedRegs <$> symTypeList
+  let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
+      symTypeMap = Map.fromList $ over _2 toKnownFunABI <$> symTypeList
 
-  let addrTypeMap :: Map (MemSegmentOff 64) (ComputedRegs X86Reg)
+  let addrTypeMap :: Map (MemSegmentOff 64) (KnownFunABI X86Reg)
       addrTypeMap = Map.fromList
-        [ (addr, toComputedRegs tp)
+        [ (addr, toKnownFunABI tp)
         | (sym,tp) <- symTypeList
         , addr <- maybeToList (HMap.lookup sym symAddrMap)
         ]

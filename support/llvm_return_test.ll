@@ -49,7 +49,52 @@ define <2 x double> @return_2double() {
   ret <2 x double> <double 47.0, double 57.0 >
 }
 
-; [47.0,57.0] is stored in xmm0 and [67.0, 77.0] is stored in xmm1
+; On processors that support:
+; SSE: [47.0,57.0] is stored in xmm0 and [67.0, 77.0] is stored in xmm1
+; AVX256 or 512:   [47.0,57.0, 67.0, 77.0] is stored in ymm0
 define <4 x double> @return_4double() {
   ret <4 x double> <double 47.0, double 57.0, double 67.0, double 77.0 >
+}
+
+; On processors that support:
+; SSE only:
+;    xmm0: [17.0,27.0]
+;    xmm1: [37.0,47.0]
+;    xmm2: [57.0,67.0]
+;    xmm3: [77.0,87.0]
+; AVX256:
+;    ymm0: [17.0,27.0,37.0,47.0]
+;    ymm1: [57.0,67.0,77.0, 87.0]
+; AVX512:
+;    ymm0: [17.0,27.0,37.0,47.0,57.0,67.0,77.0, 87.0]
+define <8 x double> @return_8double() {
+  ret <8 x double> <double 17.0, double 27.0, double 37.0, double 47.0,
+                    double 57.0, double 67.0, double 77.0, double 87.0>
+}
+
+; On processors that support:
+; SSE only:
+;    xmm0 = xmm0 + xmm2
+;    xmm1 = xmm1 + xmm3
+; AVX256 and AVX512:
+;    ymm0 = ymm0 + ymm1
+define <4 x double> @add_4double(<4 x double> %a, <4 x double> %b) {
+  %r = fadd <4 x double> %a, %b
+  ret <4 x double> %r
+}
+
+; On processors that support:
+; SSE only:
+;    xmm0 = xmm0 + xmm4
+;    xmm1 = xmm1 + xmm5
+;    xmm2 = xmm2 + xmm6
+;    xmm3 = xmm3 + xmm7
+; AVX256 and AVX512:
+;    ymm0 = ymm0 + ymm2
+;    ymm1 = ymm1 + ymm3
+; AVX256 and AVX512:
+;    zmm0 = zmm0 + zmm1
+define <8 x double> @add_8double(<8 x double> %a, <8 x double> %b) {
+  %r = fadd <8 x double> %a, %b
+  ret <8 x double> %r
 }

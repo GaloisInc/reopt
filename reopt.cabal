@@ -29,10 +29,10 @@ library
     language-c,
     lens,
     llvm-pretty >= 0.7.1.1,
-    macaw-base >= 0.3.6,
+    macaw-base >= 0.3.10,
     macaw-x86,
     mtl,
-    parameterized-utils >= 2.0.0.0.100,
+    parameterized-utils >= 2.0.0.0.102,
     pretty,
     process,
     text,
@@ -46,6 +46,7 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.Domains.DiffEquations
+    Reopt.Analysis.Stack
     Reopt.CFG.FnRep
     Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
@@ -77,6 +78,7 @@ executable reopt
   default-language: Haskell2010
   build-depends:
     base >= 4,
+    aeson,
     ansi-wl-pprint,
     bytestring,
     containers,
@@ -88,7 +90,8 @@ executable reopt
     macaw-x86,
     parameterized-utils >= 0.1.6,
     unordered-containers,
-    reopt
+    reopt,
+    reopt-vcg-ann
 
   hs-source-dirs: reopt
   main-is: Main_reopt.hs

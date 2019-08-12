@@ -1,6 +1,16 @@
 all : llvm_return_test.as abi_test.ll abi_test.as
 
-%.as : %.ll
+%.512.o : %.ll
+	llc --mtriple=x86_64-pc-linux-elf -mattr=avx512f --x86-asm-syntax=intel -filetype=obj -o $@ $<
+
+%.512.as : %.ll
+	llc --mtriple=x86_64-pc-linux-elf -mattr=avx512f --x86-asm-syntax=intel -filetype=asm -o $@ $<
+
+
+%.256.as : %.ll
+	llc --mtriple=x86_64-pc-linux-elf -mattr=avx2 --x86-asm-syntax=intel -o $@ $<
+
+%.128.as : %.ll
 	llc --mtriple=x86_64-pc-linux-elf --x86-asm-syntax=intel -o $@ $<
 
 %.as : %.bc

@@ -1,0 +1,32 @@
+name:           reopt-vcg-ann
+version:        0.1.0.0
+synopsis:       Annotation language that reopt generates for verification.
+description:    This defines the core annotation language that reopt uses to generate annotations
+                for the VCG.
+homepage:       https://github.com/GaloisInc/reopt-vcg/haskell-proto
+author:         Joe Hendrix
+maintainer:     Joe Hendrix <jhendrix@galois.com>
+copyright:      2018-2019 Galois, Inc
+category:       binary analysis
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+cabal-version:  >= 1.10
+
+library
+  hs-source-dirs:
+      src
+  build-depends:
+                base >=4.7 && <5
+              , aeson
+              , attoparsec
+              -- flexdis86 used just for register names
+              , flexdis86
+              , scientific
+              , text
+              , unordered-containers
+              , vector
+  exposed-modules:
+    Reopt.VCG.Annotations
+    Reopt.VCG.SMTParser
+  default-language: Haskell2010
