@@ -256,7 +256,8 @@ data BlockVar
      -- Our memory model only tracks the mc-only variables, so if the
      -- address is not a stack-only variable, then the value just
      -- means some arbitrary value.
-   | LLVMValue !Text
+-- JHX: Commented out to for now until we need it.
+--   | LLVMValue !Text
      -- ^ Denotes the value of an LLVM variable when the block starts.
      --
      -- This should be either a function argument or a phi node.
@@ -301,7 +302,8 @@ fromExpr llvmMap (List [Atom "llvm", llvmExpr]) =
   case llvmExpr of
     Atom llvmName
       | Just tp <- HMap.lookup llvmName llvmMap ->
-         pure (LLVMValue llvmName, tp)
+          Left $ "The LLVM name " ++ Text.unpack llvmName ++ " is not not yet supported."
+--         pure (LLVMValue llvmName, tp)
     _ -> Left $ "Could not interpret " ++ ppSExpr llvmExpr ""
 fromExpr _llvmMap (Atom "stack_high") = Right (StackHigh, BVType 64)
 fromExpr _llvmMap (Atom nm)
