@@ -1,4 +1,7 @@
-all : llvm_return_test.as abi_test.ll abi_test.as
+all : llvm_return_test.as abi_test.ll abi_test.as print_stackheap_addrs
+
+print_stackheap_addrs: print_stackheap_addrs.c
+	clang -o $@ -fstack-protector-strong -fstack-protector-all $<
 
 %.512.o : %.ll
 	llc --mtriple=x86_64-pc-linux-elf -mattr=avx512f --x86-asm-syntax=intel -filetype=obj -o $@ $<

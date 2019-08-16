@@ -97,21 +97,23 @@ retReg (RetMM512D i) = Some (X86_ZMMReg i)
 retRegTypeRepr :: X86RetInfo -> Some TypeRepr
 retRegTypeRepr r = mapSome typeRepr (retReg r)
 
--- | This describes the registers and return value of an x86_64 ABI compliant
--- function.
+-- | This describes the registers and return value of an x86_64 ABI
+-- compliant function.
 --
--- This representation does not support arguments that spilled on the stack, but
--- this would be a good feature to add.
+-- This representation does not support arguments that spilled on the
+-- stack, but this would be a good feature to add.
 --
--- It uses a list for arguments so that we can use C headers and ensure the
--- arguments appear in a particular order (e.g. from the binary perspective
--- a function that takes two integers followed by a float is indistinguishable
--- from a function that takes a float followed by two integers.
+-- It uses a list for arguments so that we can use C headers and
+-- ensure the arguments appear in a particular order (e.g. from the
+-- binary perspective a function that takes two integers followed by a
+-- float is indistinguishable from a function that takes a float
+-- followed by two integers.
 data X86FunTypeInfo
    = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
                     , ftiRetRegs :: [X86RetInfo]
                     }
 
+-- |  Maximum function type.
 maximumFunTypeInfo :: X86FunTypeInfo
 maximumFunTypeInfo =
   X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
@@ -256,36 +258,6 @@ x86TermStmtValues sysp X86Syscall proc_state =
                take (length argtypes) syscallRegs
              | otherwise = syscallRegs
 
--- | Get values that must be evaluated to execute terminal statement.
-termStmtValues :: Memory 64
-               -> SyscallPersonality
-               -> Map (MemSegmentOff 64) X86FunTypeInfo
-                  -- ^ Map from addresses to function type
-               -> X86FunTypeInfo
-                  -- ^ Type of this function
-               -> ParsedTermStmt X86_64 ids
-                  -- ^ Statement to get value of
-               -> [Some (Value X86_64 ids)]
-termStmtValues mem sysp typeMap curFunTypeInfo tstmt =
-  case tstmt of
-    ParsedCall regs _m_ret_addr -> do
-      -- Get function type associated with function
-      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
-              , Just ftp <- Map.lookup fSegOff typeMap =
-                  ftp
-              | otherwise = maximumFunTypeInfo
-      registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
-    PLTStub regs _addr _dest -> toListF Some regs
-    ParsedJump _regs _tgt_addr -> []
-    ParsedBranch _regs cond _ _ -> [Some cond]
-    ParsedLookupTable _proc_state idx _vec -> [Some idx]
-    ParsedReturn regs ->
-      registerValues regs (fmap argReg (ftiArgRegs curFunTypeInfo))
-    ParsedArchTermStmt ts regs _ ->
-      x86TermStmtValues sysp ts regs
-    ParsedTranslateError _ -> []
-    ClassifyFailure _ -> []
-
 -- | Figure out the deps of the given registers and update the state for the current label
 addRegisterUses :: MemSegmentOff 64
                 -> RegState X86Reg (Value X86_64 ids)
@@ -317,6 +289,42 @@ stmtDemandedValues ctx stmt = demandConstraints ctx $
     ExecArchStmt astmt -> foldMapF (\v -> [Some v]) astmt
     ArchState _addr assn -> foldMapF (\v -> [Some v]) assn
 
+-- | Get values that must be evaluated to execute terminal statement.
+termStmtValues :: Memory 64
+               -> SyscallPersonality
+               -> Map (MemSegmentOff 64) X86FunTypeInfo
+                  -- ^ Map from addresses to function type
+               -> X86FunTypeInfo
+                  -- ^ Type of this function
+               -> MemSegmentOff 64 -- ^ Address
+               -> ParsedTermStmt X86_64 ids
+                  -- ^ Statement to get value of
+               ->  RegisterUseM ids ()
+termStmtValues mem sysp typeMap curFunTypeInfo tstmt =
+  case tstmt of
+    ParsedCall regs _m_ret_addr -> do
+      -- Get function type associated with function
+      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
+              , Just ftp <- Map.lookup fSegOff typeMap =
+                  ftp
+              | otherwise = maximumFunTypeInfo
+      traverse_ (\(Some r) -> demandValue addr r) $
+        registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
+    PLTStub regs _addr _dest ->
+      traverseF_ (demandValue addr) regs
+    ParsedJump _regs _tgt_addr -> do
+      pure ()
+    ParsedBranch _regs cond _ _ ->
+      demandValue addr cond
+    ParsedLookupTable _proc_state idx _vec -> do
+      demandValue addr [Some idx]
+    ParsedReturn regs ->
+      registerValues regs (fmap argReg (ftiArgRegs curFunTypeInfo))
+    ParsedArchTermStmt ts regs _ ->
+      x86TermStmtValues sysp ts regs
+    ParsedTranslateError _ -> []
+    ClassifyFailure _ -> []
+
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
 -- map of how demands by successor blocks map back to assignments and
@@ -332,10 +340,11 @@ summarizeBlock mem addr blk = do
   sysp    <- gets thisSyscallPersonality
   funTypeMap <- gets functionArgs
   curFTI  <- gets $ currentFunctionType
-  let termValues = termStmtValues mem sysp funTypeMap curFTI (pblockTermStmt blk)
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
-            (concatMap (stmtDemandedValues ctx) (pblockStmts blk) ++ termValues)
+            (concatMap (stmtDemandedValues ctx) (pblockStmts blk))
+  let termValues = termStmtValues mem sysp funTypeMap curFTI addr (pblockTermStmt blk)
+  traverse_ (\(Some r) -> demandValue addr r) termValues
   case pblockTermStmt blk of
     ParsedJump regs _ ->
       addRegisterUses addr regs x86StateRegs

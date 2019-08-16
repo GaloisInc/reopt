@@ -441,6 +441,7 @@ showCFG args = do
     discoverBinary (programPath args) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   pure $ show $ ppDiscoveryStateBlocks discState
 
+-- | This parses function argument information from a user-provided header file.
 resolveHeader :: Args -> IO Header
 resolveHeader args =
   case headerPath args of
@@ -462,14 +463,6 @@ getFunctions args = do
                    (osPersonality os) discState
   pure (os, recMod)
 
--- | Write out functions discovered.
-showFunctions :: Args -> IO ()
-showFunctions args = do
-  (_,recMod) <- getFunctions args
-  writeOutput (outputPath args) $ \h -> do
-    mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-
-
 ------------------------------------------------------------------------
 --
 
@@ -478,8 +471,6 @@ showFunctions args = do
 performReopt :: Args -> IO ()
 performReopt args = do
   hdr <- resolveHeader args
-  let funPrefix :: BSC.ByteString
-      funPrefix = unnamedFunPrefix args
   (origElf, os, discState, addrSymMap, symAddrMap) <-
     discoverX86Elf (programPath args)
                    (args^.loadOpts)
@@ -488,6 +479,8 @@ performReopt args = do
                    (args^.excludeAddrs)
   let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
+  let funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
   recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os) discState
   let llvmVer = llvmVersion args
   let archOps = LLVM.x86LLVMArchOps (show os)
@@ -504,6 +497,12 @@ performReopt args = do
   let outPath = fromMaybe "a.out" (outputPath args)
   mergeAndWrite outPath origElf new_obj redirs
 
+getFunAnnotations :: Function X86_64 -> Ann.FunctionAnn
+getFunAnnotations f =
+  Ann.FunctionAnn { Ann.llvmFunName = undefined
+                  , Ann.
+
+
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
@@ -514,19 +513,22 @@ main' = do
     ShowCFG ->
       writeOutput (outputPath args) $ \h -> do
         hPutStrLn h =<< showCFG args
+
+    -- Write function discovered
     ShowFunctions -> do
-      showFunctions args
+      (_,recMod) <- getFunctions args
+      writeOutput (outputPath args) $ \h -> do
+        mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
+
     ShowLLVM -> do
       when (isJust (annotationsPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      hPutStrLn stderr "Generating LLVM"
       (os,recMod) <- getFunctions args
       case annotationsPath args of
         Nothing -> pure ()
         Just annPath -> do
           let Just llvmPath = outputPath args
-          hPutStrLn stderr "Generating annotations"
           let vcgAnn :: Ann.ReoptVCGAnnotations
               vcgAnn = Ann.ReoptVCGAnnotations
                 { Ann.llvmFilePath = llvmPath

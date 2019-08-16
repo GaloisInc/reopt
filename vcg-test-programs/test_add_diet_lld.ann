@@ -3,6 +3,8 @@
    "_comment2": "The targets are equivalent, hence expecting UNSAT.",
    "llvm_path":   "test_add.bc",
    "binary_path": "test_add_diet_lld.exe",
+   "page_size": 4096,
+   "stack_guard_pages": 1,
    "functions": [
       {
          "llvm_name": "add",
