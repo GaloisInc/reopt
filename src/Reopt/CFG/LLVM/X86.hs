@@ -207,16 +207,14 @@ emitX86ArchStmt pname (X86FnSystemCall call_num args rets) = do
       case rets of
         [Some fr] -> do
           -- Assign all return variables to the extracted result
-          lbl <- gets $ fbLabel . bbBlock
-          setAssignIdValue (frAssignId fr) lbl rvar
+          setAssignIdValue (frAssignId fr) rvar
         _ -> error "Unexpected return values"
     "FreeBSD" -> do
       rvar <- emitSyscall llvm_call_num llvm_args
       case rets of
         [Some fr] -> do
           -- Assign all return variables to the extracted result
-          lbl <- gets $ fbLabel . bbBlock
-          setAssignIdValue (frAssignId fr) lbl rvar
+          setAssignIdValue (frAssignId fr) rvar
         _ -> error "Unexpected return values"
     _ -> error $ "Unsupported operating system: " ++ show pname
 emitX86ArchStmt _ (X86FnStmt stmt) =

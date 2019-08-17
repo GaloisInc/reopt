@@ -289,52 +289,16 @@ stmtDemandedValues ctx stmt = demandConstraints ctx $
     ExecArchStmt astmt -> foldMapF (\v -> [Some v]) astmt
     ArchState _addr assn -> foldMapF (\v -> [Some v]) assn
 
--- | Get values that must be evaluated to execute terminal statement.
-termStmtValues :: Memory 64
-               -> SyscallPersonality
-               -> Map (MemSegmentOff 64) X86FunTypeInfo
-                  -- ^ Map from addresses to function type
-               -> X86FunTypeInfo
-                  -- ^ Type of this function
-               -> MemSegmentOff 64 -- ^ Address
-               -> ParsedTermStmt X86_64 ids
-                  -- ^ Statement to get value of
-               ->  RegisterUseM ids ()
-termStmtValues mem sysp typeMap curFunTypeInfo tstmt =
-  case tstmt of
-    ParsedCall regs _m_ret_addr -> do
-      -- Get function type associated with function
-      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
-              , Just ftp <- Map.lookup fSegOff typeMap =
-                  ftp
-              | otherwise = maximumFunTypeInfo
-      traverse_ (\(Some r) -> demandValue addr r) $
-        registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
-    PLTStub regs _addr _dest ->
-      traverseF_ (demandValue addr) regs
-    ParsedJump _regs _tgt_addr -> do
-      pure ()
-    ParsedBranch _regs cond _ _ ->
-      demandValue addr cond
-    ParsedLookupTable _proc_state idx _vec -> do
-      demandValue addr [Some idx]
-    ParsedReturn regs ->
-      registerValues regs (fmap argReg (ftiArgRegs curFunTypeInfo))
-    ParsedArchTermStmt ts regs _ ->
-      x86TermStmtValues sysp ts regs
-    ParsedTranslateError _ -> []
-    ClassifyFailure _ -> []
-
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
 -- map of how demands by successor blocks map back to assignments and
 -- registers.
 summarizeBlock :: forall ids
                .  Memory 64
-               -> MemSegmentOff 64
                -> ParsedBlock X86_64 ids
                -> RegisterUseM ids ()
-summarizeBlock mem addr blk = do
+summarizeBlock mem blk = do
+  let addr = pblockAddr blk
   blockInitDeps %= Map.insert addr Map.empty
   -- Add demanded values for terminal
   sysp    <- gets thisSyscallPersonality
@@ -343,12 +307,14 @@ summarizeBlock mem addr blk = do
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
             (concatMap (stmtDemandedValues ctx) (pblockStmts blk))
-  let termValues = termStmtValues mem sysp funTypeMap curFTI addr (pblockTermStmt blk)
-  traverse_ (\(Some r) -> demandValue addr r) termValues
   case pblockTermStmt blk of
     ParsedJump regs _ ->
       addRegisterUses addr regs x86StateRegs
-    ParsedBranch regs _ _ _  ->
+    ParsedBranch regs cond _ _  -> do
+      demandValue addr cond
+      addRegisterUses addr regs x86StateRegs
+    ParsedLookupTable regs idx _ -> do
+      demandValue addr idx
       addRegisterUses addr regs x86StateRegs
     ParsedCall regs  _ -> do
       -- Get function type associated with function
@@ -357,17 +323,21 @@ summarizeBlock mem addr blk = do
                   ftp
               | otherwise =
                   maximumFunTypeInfo
+      traverse_ (\(Some r) -> demandValue addr r) $
+        registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
       addRegisterUses addr regs (Some sp_reg : Set.toList x86CalleeSavedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
       traverse_ (clearRegDeps addr) $ [Some DF] ++ fmap retReg (ftiRetRegs fti)
     PLTStub regs _ _ -> do
+      traverseF_ (demandValue addr) regs
       entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
       blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList entries)
-    ParsedLookupTable regs _ _ ->
-      addRegisterUses addr regs x86StateRegs
-    ParsedReturn _ ->
-      pure ()
+    ParsedReturn regs -> do
+      traverse_ (\(Some r) -> demandValue addr r) $
+        registerValues regs (fmap argReg (ftiArgRegs curFTI))
     ParsedArchTermStmt tstmt regs _ -> do
+      traverse_ (\(Some r) -> demandValue addr r) $
+        x86TermStmtValues sysp tstmt regs
       summarizeX86ArchTermStmt sysp addr tstmt regs
     ParsedTranslateError _ ->
       error "Cannot identify register use in code where translation error occurs"
@@ -403,7 +373,7 @@ summarizeIter mem ist seen = do
        else do
         let Just blk = Map.lookup addr (ist^.parsedBlocks)
         blockFrontier %= \s -> foldr Set.insert s (parsedTermSucc (pblockTermStmt blk))
-        summarizeBlock mem addr blk
+        summarizeBlock mem blk
         summarizeIter mem ist (Set.insert addr seen)
 
 -- | Map from addresses to the registers they depend on
@@ -411,7 +381,6 @@ type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 
 type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
 
--- |
 doOne :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
       -> FunPredMap 64
          -- ^ Map addresses to the predessor blocks.

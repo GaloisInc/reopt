@@ -39,6 +39,7 @@ import           Data.Macaw.Memory.LoadCommon
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.CFG.FnRep (Function(..), FnBlock(..))
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
@@ -497,11 +498,16 @@ performReopt args = do
   let outPath = fromMaybe "a.out" (outputPath args)
   mergeAndWrite outPath origElf new_obj redirs
 
+getBlockAnnotations :: FnBlock X86_64 -> (String, Ann.BlockAnn)
+getBlockAnnotations b = (nm, ann)
+  where nm = undefined
+        ann = undefined
+
 getFunAnnotations :: Function X86_64 -> Ann.FunctionAnn
 getFunAnnotations f =
-  Ann.FunctionAnn { Ann.llvmFunName = undefined
-                  , Ann.
-
+  Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
+                  , Ann.blocks = HMap.empty
+                  }
 
 main' :: IO ()
 main' = do
@@ -529,11 +535,13 @@ main' = do
         Nothing -> pure ()
         Just annPath -> do
           let Just llvmPath = outputPath args
-          let vcgAnn :: Ann.ReoptVCGAnnotations
-              vcgAnn = Ann.ReoptVCGAnnotations
+          let vcgAnn :: Ann.ModuleAnnotations
+              vcgAnn = Ann.ModuleAnnotations
                 { Ann.llvmFilePath = llvmPath
                 , Ann.binFilePath = programPath args
-                , Ann.functions = [] -- TODO: Actually add annotations.
+                , Ann.pageSize = 4096
+                , Ann.stackGuardPageCount = 1
+                , Ann.functions = getFunAnnotations <$> recoveredDefs recMod
                 }
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       let archOps = LLVM.x86LLVMArchOps (show os)
