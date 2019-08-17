@@ -37,8 +37,10 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.String
 import qualified Data.Vector as V
 import           GHC.Stack
+import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
@@ -54,6 +56,13 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 import           Reopt.CFG.StackDepth
+
+
+
+addrBlockLabel :: MemWidth w => MemSegmentOff w -> FnBlockLabel
+addrBlockLabel o = fromString $
+  let a = segoffAddr o
+   in "block_" ++ show (addrBase a) ++ "_" ++ showHex (memWordToUnsigned (addrOffset a)) ""
 
 ------------------------------------------------------------------------
 -- RecoverState
@@ -424,8 +433,8 @@ type RecoveredBlockInfo = Map (MemSegmentOff 64) (FnBlock X86_64)
 emptyRecoveredBlockInfo :: RecoveredBlockInfo
 emptyRecoveredBlockInfo = Map.empty
 
-addFnBlock :: FnBlock X86_64 -> RecoveredBlockInfo -> RecoveredBlockInfo
-addFnBlock b info = Map.insert (fbLabel b) b info
+addFnBlock :: MemSegmentOff 64 -> FnBlock X86_64 -> RecoveredBlockInfo -> RecoveredBlockInfo
+addFnBlock a b info = Map.insert a b info
 
 ------------------------------------------------------------------------
 -- recoverBlock
@@ -480,16 +489,20 @@ getPostSyscallValue addr proc_state r =
       return (FnValueUnsupported ("post-syscall register " ++ show r) (typeRepr r))
 
 mkBlock :: MemSegmentOff 64
-        -> [Some (PhiBinding X86Reg)]
+        -> [MemSegmentOff 64]
+        -- ^ Predecessors for this block
+        -> MapF X86Reg FnPhiVar
+        -- ^ Map from registers to variable associated with them.
         -> FnTermStmt X86_64
         -> MapF X86Reg (FnRegValue X86_64)
            -- ^ Map from X86 register to the value associated with that register.
         -> Recover ids (FnBlock X86_64)
-mkBlock addr phis tm regMap = do
+mkBlock addr preds phiVars tm regMap = do
   curStmts <- use rsCurStmts
   rsCurStmts .= Seq.empty
-  return $! FnBlock { fbLabel = addr
-                    , fbPhiNodes = phis
+  return $! FnBlock { fbLabel = addrBlockLabel addr
+                    , fbPrevBlocks = addrBlockLabel <$> preds
+                    , fbPhiMap = phiVars
                     , fbStmts  = toList curStmts
                     , fbTerm   = tm
                     , fbRegMap = regMap
@@ -498,14 +511,16 @@ mkBlock addr phis tm regMap = do
 recoverX86TermStmt :: forall ids
                    .  DemandedUseMap
                    -- ^ Map from address to registers that address will read.
-                   -> [Some (PhiBinding X86Reg)]
-                   -- ^ Phi bindings from input block
+                   -> [MemSegmentOff 64]
+                   -- ^ Predecessors for this block
+                   -> MapF X86Reg FnPhiVar
+                   -- ^ Map from registers to variable associated with them.
                    -> MemSegmentOff 64
                    -> X86TermStmt ids
                    -> RegState (ArchReg X86_64) (Value X86_64 ids)
                    -> Maybe (MemSegmentOff 64)
                    -> Recover ids (FnBlock X86_64)
-recoverX86TermStmt registerUseMap phis addr tstmt proc_state mnext_addr =
+recoverX86TermStmt registerUseMap preds phiVars addr tstmt proc_state mnext_addr = do
   case tstmt of
     Hlt ->
       throwError "hlt is not supported in function recovery."
@@ -563,7 +578,7 @@ recoverX86TermStmt registerUseMap phis addr tstmt proc_state mnext_addr =
         Just next_addr -> do
           let provides = Map.findWithDefault Set.empty next_addr registerUseMap
           regs' <- foldM go initMap (provides `Set.difference` Set.fromList rregs)
-          mkBlock addr phis (FnJump next_addr) regs'
+          mkBlock addr preds phiVars (FnJump (addrBlockLabel next_addr)) regs'
 
 -- | Given a register state this interprets the function arguments.
 evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
@@ -635,13 +650,15 @@ evalReturnVars retInfo = do
 recoverBlock :: forall ids
              .  DemandedUseMap
                 -- ^ Map from address to registers that address will read.
-             -> [Some (PhiBinding X86Reg)]
-                -- ^ Phi bindings from input block
+             -> [MemSegmentOff 64]
+             -- ^ Predecessors for this block
+             -> MapF X86Reg FnPhiVar
+            -- ^ Map from registers to variable associated with them.
              -> ParsedBlock X86_64 ids
                 -- ^ Entire block.
              -> RecoveredBlockInfo
              -> Recover ids RecoveredBlockInfo
-recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
+recoverBlock registerUseMap preds phiVars b blockInfo = seq blockInfo $ do
   let addr = pblockAddr b
   -- Clear stack offsets
   rsCurAddr  .= addr
@@ -686,8 +703,8 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
                       pure $! MapF.insert r (FnRegValue v) m
             foldM go MapF.empty nextRegsNeeded
           -- Create block that ends with jump to return address.
-          fb <- mkBlock addr phis (FnJump ret_addr) regs'
-          return $! blockInfo & addFnBlock fb
+          fb <- mkBlock addr preds phiVars (FnJump (addrBlockLabel ret_addr)) regs'
+          return $! blockInfo & addFnBlock addr fb
         Nothing -> do
           thisFunType <- gets $ rsCurrentFunctionType
           -- Recover statements
@@ -710,8 +727,8 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
                       Nothing -> Some (FnUndefined (typeRepr r))
           -- Create block
           let ri2 = resolveReg <$> ftiRetRegs thisFunType
-          fb <- mkBlock addr phis (FnRet ri2) MapF.empty
-          return $! blockInfo & addFnBlock fb
+          fb <- mkBlock addr preds phiVars (FnRet ri2) MapF.empty
+          return $! blockInfo & addFnBlock addr fb
     PLTStub _ _ _ -> do
       -- Recover statements
       traverse_ recoverStmt (pblockStmts b)
@@ -735,8 +752,8 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
       let provides = Map.findWithDefault Set.empty tgt_addr registerUseMap
       regs' <- foldM go MapF.empty provides
 
-      bl <- mkBlock addr phis (FnJump tgt_addr) regs'
-      pure $! blockInfo & addFnBlock bl
+      bl <- mkBlock addr preds phiVars (FnJump (addrBlockLabel tgt_addr)) regs'
+      pure $! blockInfo & addFnBlock addr bl
 
     ParsedBranch regs cond trueAddr falseAddr -> do
       -- Recover statements
@@ -755,8 +772,9 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
       -- Populate register map
       regs' <- foldM go MapF.empty provides
 
-      bl <- mkBlock addr phis (FnBranch condVal trueAddr falseAddr) regs'
-      pure $! blockInfo & addFnBlock bl
+      let br = FnBranch condVal (addrBlockLabel trueAddr) (addrBlockLabel falseAddr)
+      bl <- mkBlock addr preds phiVars br regs'
+      pure $! blockInfo & addFnBlock addr bl
 
     ParsedReturn regs -> do
       -- Recover statements
@@ -771,15 +789,15 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
             v <- bitcast x (UnpackBits n8 n64)
             Some <$> bitcast v (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
       ri <- traverse evalRet (ftiRetRegs fti)
-      bl <- mkBlock addr phis (FnRet ri) MapF.empty
-      pure $! blockInfo & addFnBlock bl
+      bl <- mkBlock addr preds phiVars (FnRet ri) MapF.empty
+      pure $! blockInfo & addFnBlock addr bl
 
     ParsedArchTermStmt ts regs next_addr -> do
       -- Recover statements
       traverse_ recoverStmt (pblockStmts b)
       -- Recover term statement
-      fb <- recoverX86TermStmt registerUseMap phis addr ts regs next_addr
-      pure $! blockInfo & addFnBlock fb
+      fb <- recoverX86TermStmt registerUseMap preds phiVars addr ts regs next_addr
+      pure $! blockInfo & addFnBlock addr fb
 
     ParsedLookupTable regs idx vec -> do
       -- Recover statements
@@ -798,8 +816,9 @@ recoverBlock registerUseMap phis b blockInfo = seq blockInfo $ do
 
       idx'   <- recoverValue idx
 
-      bl <-  mkBlock addr phis (FnLookupTable idx' vec) regs'
-      pure $! blockInfo & addFnBlock bl
+      let lblVec = addrBlockLabel <$> vec
+      bl <-  mkBlock addr preds phiVars (FnLookupTable idx' lblVec) regs'
+      pure $! blockInfo & addFnBlock addr bl
 
 ------------------------------------------------------------------------
 -- allocateStackFrame
@@ -839,16 +858,6 @@ allocateStackFrame b s = do
 ------------------------------------------------------------------------
 -- recoverFunction
 
--- | Generate phi bindings
-makePhis :: [MemSegmentOff 64]
-            -- ^ Predecessors for this block
-         -> MapF X86Reg FnPhiVar
-            -- ^ Map from registers to variable associated with them.
-         -> [Some (PhiBinding X86Reg)]
-makePhis preds regs = go <$> MapF.toList regs
-  where go :: MapF.Pair X86Reg FnPhiVar -> Some (PhiBinding X86Reg)
-        go (MapF.Pair r phi_var) = Some (PhiBinding phi_var ((,r) <$> preds))
-
 recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> DemandedUseMap
                   -> FunPredMap 64
@@ -856,26 +865,29 @@ recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> MemSegmentOff 64
                   -> Recover ids RecoveredBlockInfo
 recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
-  let mkIdFromReg :: MapF X86Reg FnPhiVar
-                  -> Some X86Reg
-                  -> Recover ids (MapF X86Reg FnPhiVar)
-      mkIdFromReg m (Some r) = do
+  let addPhiVar :: MapF X86Reg FnPhiVar
+                -> Some X86Reg
+                -> Recover ids (MapF X86Reg FnPhiVar)
+      addPhiVar m (Some r) = do
         next_id <- freshId
-        pure $! MapF.insert r (FnPhiVar next_id (typeRepr r)) m
-  regs1 <-
+        let v = FnPhiVar { unFnPhiVar = next_id
+                         , fnPhiVarType = typeRepr r
+                         }
+        pure $! MapF.insert r v m
+
+  phiVars <-
     case Map.lookup addr blockRegs of
       Nothing -> do
         addWarning ("WARNING: No regs for " ++ show addr)
         pure MapF.empty
       Just x -> do
-        foldM mkIdFromReg MapF.empty x
-  rsCurRegs .= fmapF (FnRegValue . FnPhiValue) regs1
+        foldM addPhiVar MapF.empty x
+  rsCurRegs .= fmapF (FnRegValue . FnPhiValue) phiVars
    -- Get predecessors for this block.
   let Just preds = Map.lookup addr blockPreds
    -- Generate phi nodes from predecessors and registers that this block refers to.
-  let phis = makePhis preds regs1
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
-  recoverBlock blockRegs phis b blockInfo
+  recoverBlock blockRegs preds phiVars b blockInfo
 
 -- | Construct a generatic function type from the x86-specific type rep.
 resolveX86FunctionType :: X86FunTypeInfo -> FunctionType X86_64
@@ -956,11 +968,14 @@ recoverFunction sysp funTypeMap mem fInfo = do
           _ -> throwError $ "non-singleton stack depth"
       Left msg -> throwError $ "maximumStackDepth: " ++ msg
 
-    r0 <- recoverBlock blockRegs [] b emptyRecoveredBlockInfo
+    r0 <- recoverBlock blockRegs [] MapF.empty b emptyRecoveredBlockInfo
     rf <- foldM (recoverInnerBlock fInfo blockRegs blockPreds) r0 (Map.keys blockPreds)
+
+    let (Just entry,restBlocks) = Map.updateLookupWithKey (\_ _ -> Nothing) a rf
 
     pure $! Function { fnAddr = a
                      , fnType = resolveX86FunctionType cfti
                      , fnName = nm
-                     , fnBlocks = Map.elems rf
+                     , fnEntryBlock = entry
+                     , fnRestBlocks = Map.elems restBlocks
                      }

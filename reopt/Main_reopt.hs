@@ -39,7 +39,11 @@ import           Data.Macaw.Memory.LoadCommon
 import           Data.Macaw.X86
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..), FnBlock(..))
+import           Reopt.CFG.FnRep (Function(..)
+                                 , fnBlocks
+                                 , FnBlock(..)
+                                 , fnBlockLabelUnpack
+                                 )
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
@@ -498,15 +502,24 @@ performReopt args = do
   let outPath = fromMaybe "a.out" (outputPath args)
   mergeAndWrite outPath origElf new_obj redirs
 
+
 getBlockAnnotations :: FnBlock X86_64 -> (String, Ann.BlockAnn)
-getBlockAnnotations b = (nm, ann)
-  where nm = undefined
-        ann = undefined
+getBlockAnnotations b = (nm, Ann.ReachableBlock ann)
+  where nm = fnBlockLabelUnpack (fbLabel b)
+        -- TODO: Fix me
+        ann = Ann.ReachableBlockAnn { Ann.blockAddr = 0
+                                    , Ann.blockCodeSize = 0
+                                    , Ann.blockX87Top = 7
+                                    , Ann.blockDFFlag = False
+                                    , Ann.blockPreconditions = []
+                                    , Ann.blockAllocas = []
+                                    , Ann.blockEvents = []
+                                    }
 
 getFunAnnotations :: Function X86_64 -> Ann.FunctionAnn
 getFunAnnotations f =
   Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
-                  , Ann.blocks = HMap.empty
+                  , Ann.blocks = HMap.fromList $ getBlockAnnotations <$> fnBlocks f
                   }
 
 main' :: IO ()

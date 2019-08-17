@@ -71,17 +71,14 @@ import           Data.Proxy
 import qualified Data.Vector as V
 import           GHC.Stack
 import           GHC.TypeLits
-import           Numeric (showHex)
 import qualified Text.LLVM as L
-import qualified Text.LLVM.PP as L (ppType)
+import qualified Text.LLVM.PP as L (ppLabel, ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
-
-type ArchLabel arch = ArchSegmentOff arch
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -164,15 +161,6 @@ llvmIntrinsics = [ overflowOp bop in_typ
 -- conversion to LLVM
 --------------------------------------------------------------------------------
 
-blockWordName :: MemWidth w => MemSegmentOff w  -> L.Ident
-blockWordName o =
-  let a = segoffAddr o
-   in L.Ident $ "block_" ++ show (addrBase a) ++ "_" ++ showHex (memWordToUnsigned (addrOffset a)) ""
-
--- | This generates a LLVM block label from the address of a block.
-blockName :: MemWidth w => MemSegmentOff w -> L.BlockLabel
-blockName s = L.Named (blockWordName s)
-
 -- The type of FP arguments and results.  We actually want fp128, but
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
 -- into xmm0 on a return, whereas it does for <2 x double>
@@ -236,19 +224,19 @@ padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
 padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef))
 
 -- | Information about a phi node
-data PendingPhiNode arch tp = PendingPhiNode !L.Ident !L.Type [(ArchLabel arch, ArchReg arch tp)]
+data PendingPhiNode arch tp = PendingPhiNode !L.Ident !L.Type [(L.BlockLabel, ArchReg arch tp)]
 
 -- | Result obtained by printing a block to LLVM
-data LLVMBlockResult arch = LLVMBlockResult { regBlockAddr  :: !(ArchSegmentOff arch)
-                                            , regProvideMap :: !(MapF.MapF (ArchReg arch) (FnRegValue arch))
-                                              -- ^ Map from registers to the value provided
-                                              -- as a result.
+data LLVMBlockResult arch = LLVMBlockResult { regBlockLabel :: !L.BlockLabel
+                                              -- ^ Name of LLVM block
+                                            , regLLVMMap  :: !(Map (Some (ArchReg arch)) (Maybe L.Value))
+                                              -- ^ Maps registers to value (or `Nothing` if calee-saved
                                             , llvmBlockStmts   :: ![L.Stmt]
                                             , llvmBlockPhiVars :: ![Some (PendingPhiNode arch)]
                                             }
 
--- | Map needed to resolve phi references
-type ResolvePhiMap arch = Map (ArchLabel arch) (LLVMBlockResult arch)
+-- | Maps LLVM blocks to the results for that label.
+type ResolvePhiMap phiLabel = Map L.BlockLabel (Map phiLabel (Maybe L.Value))
 
 ------------------------------------------------------------------------
 -- IntrinsicMap
@@ -262,14 +250,16 @@ type IntrinsicMap = Map L.Symbol Intrinsic
 ------------------------------------------------------------------------
 -- FunState
 
+-- | Map from assign ID to LLVM value
+type AssignValMap = Map FnAssignId (L.Typed L.Value)
+
 -- | State relative to a function.
 data FunState arch =
   FunState { nmCounter :: !Int
              -- ^ Counter for generating new identifiers
-           , funAssignValMap :: !(AssignValMap (ArchAddrWidth arch))
-             -- ^ Map from function ids already assigned to label
-             -- where it was assigned and associated value.
            , funIntrinsicMap :: !IntrinsicMap
+           , prevBlocks :: !([LLVMBlockResult arch])
+             -- ^ Blocks processed so far.
            }
 
 funIntrinsicMapLens :: Simple Lens (FunState arch) IntrinsicMap
@@ -329,8 +319,8 @@ data BBLLVMState arch = BBLLVMState
     -- ^ Context for function level declarations.
   , funState :: !(FunState arch)
    -- ^ State local to function rather than block
-  , bbAddr :: !(ArchSegmentOff arch)
-    -- ^ Address of block we are generating LLVM for.
+  , bbAssignValMap :: !AssignValMap
+    -- ^ Map assignment ids created in this block to the LLVM value.
   , bbStmts :: ![L.Stmt]
     -- ^ Statements in reverse order
   , bbBoundPhiVars :: ![Some (PendingPhiNode arch)]
@@ -350,11 +340,9 @@ newtype BBLLVM arch a = BBLLVM { unBBLLVM :: State (BBLLVMState arch) a }
 -- | Generate a fresh identifier with the name 'rX'
 freshName :: BBLLVM arch L.Ident
 freshName = do
-  s <- get
-  let fs = funState s
-  let fs' = fs { nmCounter = nmCounter fs + 1 }
-  put $! s { funState = fs' }
-  pure $! L.Ident ('r' : show (nmCounter fs))
+  c <- uses funStateLens nmCounter
+  modify' $ funStateLens %~ \fs -> fs { nmCounter = c + 1 }
+  pure $! L.Ident ('r' : show c)
 
 -- | Append a statement to the list of statements
 emitStmt :: L.Stmt -> BBLLVM arch ()
@@ -385,28 +373,20 @@ unimplementedInstr' typ reason = do
   comment ("UNIMPLEMENTED: " ++ reason)
   return (L.Typed typ L.ValUndef)
 
--- | Map from assign ID to value.
--- FIXME: Clarify comment to indicate what address is for.
-type AssignValMap w = Map FnAssignId (MemSegmentOff w, L.Typed L.Value)
-
 setAssignIdValue :: HasCallStack
                  => FnAssignId
                  -> L.Typed L.Value
                  -> BBLLVM arch ()
 setAssignIdValue fid v = do
-  blk <- gets bbAddr
-  m <- gets $ funAssignValMap . funState
-  case Map.lookup fid m of
-    Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
-    Nothing -> pure ()
-  modify' $ \s ->
-              s { funState = (funState s) { funAssignValMap = Map.insert fid (blk,v) (funAssignValMap (funState s))
-                                          }
-                }
+  do m <- gets $ bbAssignValMap
+     case Map.lookup fid m of
+       Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
+       Nothing -> pure ()
+  modify' $ \s -> s { bbAssignValMap = Map.insert fid v (bbAssignValMap s) }
 
 addBoundPhiVar :: L.Ident
                -> L.Type
-               -> [(ArchLabel arch, ArchReg arch tp)]
+               -> [(L.BlockLabel, ArchReg arch tp)]
                -> BBLLVM arch ()
 addBoundPhiVar nm tp info = do
   s <- get
@@ -430,7 +410,7 @@ valueToLLVM :: forall arch tp
                , HasCallStack
                )
             => FunLLVMContext arch
-            -> AssignValMap (ArchAddrWidth arch)
+            -> AssignValMap
             -> FnValue arch tp
             -> L.Typed L.Value
 valueToLLVM ctx avmap val = do
@@ -445,19 +425,19 @@ valueToLLVM ctx avmap val = do
     -- Value from an assignment statement.
     FnAssignedValue (FnAssignment lhs _rhs) ->
       case Map.lookup lhs avmap of
-        Just (_,v) -> v
+        Just v -> v
         Nothing ->
           error $ "Could not find assignment value " ++ show (pretty lhs)
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp)  -> do
       case Map.lookup lhs avmap of
-        Just (_,v) -> v
+        Just v -> v
         Nothing ->
           error $ "Could not find phi value " ++ show (pretty lhs) ++ "\n"
     -- A value returned by a function call (rax/xmm0)
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs avmap of
-        Just (_,v) -> v
+        Just v -> v
         Nothing ->
           error $ "Could not find return variable " ++ show (pretty lhs)
     -- The entry pointer to a function.  We do the cast as a const
@@ -494,7 +474,7 @@ floatTypeWidth l =
 -- | Map a function value to a LLVM value with no change.
 valueToLLVMBitvec :: (LLVMArchConstraints arch, HasCallStack)
                   => FunLLVMContext arch
-                  -> AssignValMap (ArchAddrWidth arch)
+                  -> AssignValMap
                   -> FnValue arch tp
                   -> L.Typed L.Value
 valueToLLVMBitvec ctx m val = do
@@ -511,7 +491,7 @@ mkLLVMValue :: (LLVMArchConstraints arch, HasCallStack)
             -> BBLLVM arch (L.Typed L.Value)
 mkLLVMValue val = do
   ctx <- gets funContext
-  m   <- gets $ funAssignValMap . funState
+  m   <- gets $ bbAssignValMap
   pure $! valueToLLVMBitvec ctx m val
 
 arithop :: L.ArithOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
@@ -893,13 +873,23 @@ stmtToLLVM stmt = do
      fn <- gets $ archStmtCallback . archFns
      fn astmt
 
+llvmBlockLabel :: FnBlockLabel -> L.BlockLabel
+llvmBlockLabel = L.Named . L.Ident . fnBlockLabelUnpack
+
 termStmtToLLVM :: (LLVMArchConstraints arch, HasCallStack)
                => FnTermStmt arch
                -> BBLLVM arch ()
 termStmtToLLVM tm =
   case tm of
     FnJump lbl -> do
-      effect $ L.Jump (blockName lbl)
+      effect $ L.Jump (llvmBlockLabel lbl)
+    FnBranch cond tlbl flbl -> do
+      cond' <- mkLLVMValue cond
+      effect $ L.Br cond' (llvmBlockLabel tlbl) (llvmBlockLabel flbl)
+    FnLookupTable idx vec -> do
+      idx' <- mkLLVMValue idx
+      let dests = V.toList $ llvmBlockLabel <$> vec
+      effect $ L.Switch idx' failLabel (zip [0..] dests)
     FnRet rets -> do
       retType <- gets $ funReturnType . funContext
       retVals <- mapM (viewSome mkLLVMValue) rets
@@ -907,67 +897,58 @@ termStmtToLLVM tm =
       let initUndef = L.Typed retType L.ValUndef
       v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef retVals
       effect (L.Ret v)
-    FnBranch cond tlbl flbl -> do
-      cond' <- mkLLVMValue cond
-      effect $ L.Br cond' (blockName tlbl) (blockName flbl)
     FnTailCall dest ft args -> do
       dest_f <- resolveFunctionEntry dest ft
       args' <- mapM (viewSome mkLLVMValue) args
       retv <- call dest_f args'
       ret retv
-    FnLookupTable idx vec -> do
-      idx' <- mkLLVMValue idx
-      let dests = map (L.Named . blockWordName) $ V.toList vec
-      effect $ L.Switch idx' failLabel (zip [0..] dests)
 
 -- | Convert a Phi node assignment to the right value
 resolvePhiNodeReg :: (LLVMArchConstraints arch, HasCallStack)
-                  => FunLLVMContext arch
-                  -> AssignValMap (ArchAddrWidth arch)
-                  -> ResolvePhiMap arch
-                  -> (ArchLabel arch, ArchReg arch tp)
+                  => ResolvePhiMap (Some (ArchReg arch))
+                  -> (L.BlockLabel, ArchReg arch tp)
                   -> (L.Value, L.BlockLabel)
-resolvePhiNodeReg ctx avmap m (lbl, reg) =
-  case Map.lookup lbl m of
-    Nothing -> error $ "Could not resolve block " ++ show lbl
-    Just br ->
-      case MapF.lookup reg (regProvideMap br) of
-        Nothing -> error $ "Could not resolve register " ++ show (prettyF reg) ++ " in block " ++ show lbl
-        Just (CalleeSaved _) -> error $ "Resolve callee saved register"
-        Just (FnRegValue v) -> (L.typedValue (valueToLLVMBitvec ctx avmap v), blockName lbl)
+resolvePhiNodeReg phiMap (lbl, reg) =
+  case Map.lookup lbl phiMap of
+    Nothing -> error $ "Could not resolve block " ++ show (L.ppLabel lbl)
+    Just m ->
+      case Map.lookup (Some reg) m of
+        Nothing -> error $ "Could not resolve register " ++ show (prettyF reg)
+                   ++ " in block " ++ show (L.ppLabel lbl)
+        Just Nothing -> error $ "Resolve callee saved register"
+        Just (Just v) -> (v,lbl)
 
 resolvePhiStmt :: (LLVMArchConstraints arch, HasCallStack)
-               => FunLLVMContext arch
-               -> AssignValMap (ArchAddrWidth arch)
-               -> ResolvePhiMap arch
+               => ResolvePhiMap (Some (ArchReg arch))
                -> Some (PendingPhiNode arch)
                -> L.Stmt
-resolvePhiStmt ctx avmap m (Some (PendingPhiNode nm tp info)) = L.Result nm i []
-  where i = L.Phi tp (resolvePhiNodeReg ctx avmap m <$> info)
+resolvePhiStmt phiMap (Some (PendingPhiNode nm tp info)) = L.Result nm i []
+  where i = L.Phi tp (resolvePhiNodeReg phiMap <$> info)
 
 toBasicBlock :: (LLVMArchConstraints arch, HasCallStack)
-             => FunLLVMContext arch
-             -> AssignValMap (ArchAddrWidth arch)
-             -> ResolvePhiMap arch
+             => ResolvePhiMap (Some (ArchReg arch))
              -> LLVMBlockResult arch
              -> L.BasicBlock
-toBasicBlock ctx avmap m res = L.BasicBlock { L.bbLabel = Just $! blockName (regBlockAddr res)
-                                            , L.bbStmts = phiStmts ++ llvmBlockStmts res
-                                            }
-  where phiStmts = resolvePhiStmt ctx avmap m <$> llvmBlockPhiVars res
+toBasicBlock phiMap res = L.BasicBlock { L.bbLabel = Just $! regBlockLabel res
+                                       , L.bbStmts = phiStmts ++ llvmBlockStmts res
+                                       }
+  where phiStmts = resolvePhiStmt phiMap <$> llvmBlockPhiVars res
 
 
 -- | Add a phi var with the node info so that we have a ident to reference
 -- it by and queue up work to assign the value later.
-addPhiBinding :: HasCallStack => Some (PhiBinding (ArchReg arch)) -> BBLLVM arch ()
-addPhiBinding (Some (PhiBinding (FnPhiVar fid tp) info)) = do
+addPhiBinding :: (MemWidth (ArchAddrWidth arch), HasCallStack)
+              => [FnBlockLabel]
+              -> ArchReg arch tp
+              -> FnPhiVar tp
+              -> BBLLVM arch ()
+addPhiBinding predBlocks reg (FnPhiVar fid tp) = do
   nm <- freshName
-  let llvm_tp = typeToLLVMType tp
-  setAssignIdValue fid (L.Typed llvm_tp (L.ValIdent nm))
-  addBoundPhiVar nm llvm_tp info
+  let llvmType = typeToLLVMType tp
+  setAssignIdValue fid (L.Typed llvmType (L.ValIdent nm))
+  addBoundPhiVar nm llvmType [ (llvmBlockLabel lbl, reg) | lbl <- predBlocks ]
 
-
-blockToLLVM :: forall arch
+addLLVMBlock :: forall arch
             .  LLVMArchConstraints arch
             => LLVMArchSpecificOps arch
             -> FunLLVMContext arch
@@ -975,29 +956,38 @@ blockToLLVM :: forall arch
             -> FunState arch
             -> FnBlock arch
                -- ^ Block to generate
-            -> (LLVMBlockResult arch, FunState arch)
-blockToLLVM fns ctx fs b = (res, funState s)
+            -> FunState arch
+addLLVMBlock fns ctx fs b = finFS { prevBlocks = res : prevBlocks finFS }
   where s0 = BBLLVMState { archFns = fns
                          , funContext     = ctx
-                         , bbAddr         = fbLabel b
-                         , bbStmts        = []
                          , funState       = fs
+                         , bbAssignValMap = Map.empty
+                         , bbStmts        = []
                          , bbBoundPhiVars = []
                          }
         go :: BBLLVM arch ()
         go = do
           -- Add statements for Phi nodes
-          mapM_ addPhiBinding (fbPhiNodes b)
+          MapF.traverseWithKey_ (addPhiBinding (fbPrevBlocks b)) (fbPhiMap b)
           -- Add statements
           mapM_ stmtToLLVM (fbStmts b)
           -- Add term statement
           termStmtToLLVM (fbTerm b)
         s = execState (unBBLLVM go) s0
 
-        res = LLVMBlockResult { regBlockAddr = fbLabel b
-                              , regProvideMap = fbRegMap b
-                              , llvmBlockStmts = reverse (bbStmts s)
+        finFS = funState s
+
+        transReg :: FnRegValue arch tp -> Maybe L.Value
+        transReg (CalleeSaved _) = Nothing
+        transReg (FnRegValue v) = Just $! L.typedValue (valueToLLVMBitvec ctx (bbAssignValMap s) v)
+
+        res = LLVMBlockResult { regBlockLabel = llvmBlockLabel (fbLabel b)
+                              , regLLVMMap = Map.fromAscList $
+                                  [ (Some r, transReg val)
+                                  | MapF.Pair r val <- MapF.toAscList (fbRegMap b)
+                                  ]
                               , llvmBlockPhiVars = reverse (bbBoundPhiVars s)
+                              , llvmBlockStmts = reverse (bbStmts s)
                               }
 
 ------------------------------------------------------------------------
@@ -1073,7 +1063,7 @@ defineFunction archOps f = do
       initBlock :: L.BasicBlock
       postInitArgs :: V.Vector (L.Typed L.Value)
       (inputArgs, initBlock, postInitArgs) =
-        mkInitBlock archOps (fnType f) (blockName (fnAddr f))
+        mkInitBlock archOps (fnType f) (llvmBlockLabel (fbLabel (fnEntryBlock f)))
 
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { funArgs        = postInitArgs
@@ -1085,30 +1075,23 @@ defineFunction archOps f = do
   m0 <- get
   let initFunState :: FunState arch
       initFunState = FunState { nmCounter = 0
-                              , funAssignValMap = Map.empty
                               , funIntrinsicMap = m0
+                              , prevBlocks = []
                               }
-  let mkBlockRes :: (FunState arch, [LLVMBlockResult arch])
-                 -> FnBlock arch
-                 -> (FunState arch, [LLVMBlockResult arch])
-      mkBlockRes (fs, prev) b =
-        let (r, fs') = blockToLLVM archOps ctx fs b
-         in (fs', r:prev)
 
-  let block_results :: [LLVMBlockResult arch]
-      (fin_fs, block_results) = foldl mkBlockRes (initFunState, []) (fnBlocks f)
+  let fin_fs = foldl (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
 
   -- Update intrins map
   put (funIntrinsicMap fin_fs)
 
-  let resolvePhiMap :: ResolvePhiMap arch
+  let resolvePhiMap :: ResolvePhiMap (Some (ArchReg arch))
       resolvePhiMap = Map.fromList
-        [ (regBlockAddr b, b)
-        | b <- block_results
+        [ (regBlockLabel b, regLLVMMap b)
+        | b <- prevBlocks fin_fs
         ]
 
   let blocks :: [L.BasicBlock]
-      blocks = toBasicBlock ctx (funAssignValMap fin_fs) resolvePhiMap <$> reverse block_results
+      blocks = toBasicBlock resolvePhiMap <$> reverse (prevBlocks fin_fs)
   pure $
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  =

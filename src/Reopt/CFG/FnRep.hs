@@ -19,12 +19,15 @@ module Reopt.CFG.FnRep
    ( RecoveredModule(..)
    , FunctionDecl(..)
    , Function(..)
+   , fnBlocks
    , FnAssignId(..)
    , FnAssignment(..)
    , FnAssignRhs(..)
    , FnValue(..)
    , FunctionType(..)
    , FnBlock(..)
+   , FnBlockLabel
+   , fnBlockLabelUnpack
    , FnStmt(..)
    , FnTermStmt(..)
    , FnRegValue(..)
@@ -32,7 +35,6 @@ module Reopt.CFG.FnRep
    , FnReturnVar(..)
    , FnArchStmt
    , FoldFnValue(..)
-   , PhiBinding(..)
    , FnArchConstraints
    ) where
 
@@ -40,11 +42,13 @@ import           Control.Monad.Identity
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
 import           Data.Proxy
+import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector as V
@@ -59,13 +63,11 @@ import           Data.Macaw.CFG
    , prettyF
    , ArchFn
    , ArchAddrWidth
-   , RegAddrWidth
    , ArchReg
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
    , PrettyF(..)
-   , ArchSegmentOff
    )
 import           Data.Macaw.Memory
 import           Data.Macaw.Types
@@ -323,15 +325,6 @@ instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegV
   pretty (FnRegValue v)      = pretty v
 
 ------------------------------------------------------------------------
--- PhiBinding
-
--- | A Phi binding maps a phi variable to a list that contains a label
--- for each predecessor block, and the register to rad from at the end
--- of that blcok.
-data PhiBinding r tp
-   = PhiBinding (FnPhiVar tp) [(MemSegmentOff (RegAddrWidth r), r tp)]
-
-------------------------------------------------------------------------
 -- FnStmt
 
 type family FnArchStmt (arch :: *) :: (Type -> *) -> *
@@ -394,12 +387,46 @@ instance FoldFnValue FnStmt where
 ------------------------------------------------------------------------
 -- FnTermStmt
 
+-- | A block label
+newtype FnBlockLabel = FnBlockLabel Text
+  deriving (Eq)
+
+instance Pretty FnBlockLabel where
+  pretty (FnBlockLabel t) = text (Text.unpack t)
+
+charInRange :: Char -> (Char, Char) -> Bool
+charInRange c (l,h) = l <= c && c <= h
+
+isBlockStart :: Char -> Bool
+isBlockStart c
+  =  c `charInRange` ('a', 'z')
+  || c `charInRange` ('A', 'Z')
+
+isBlockId :: Char -> Bool
+isBlockId c
+  =  c `charInRange` ('a', 'z')
+  || c `charInRange` ('A', 'Z')
+  || c `charInRange` ('0', '9')
+  || c == '_'
+
+fnBlockLabelUnpack :: FnBlockLabel -> String
+fnBlockLabelUnpack (FnBlockLabel t) = Text.unpack t
+
+instance IsString FnBlockLabel where
+  fromString [] = error "Block label must be non-empty."
+  fromString (c:r)
+    | isBlockStart c, all isBlockId r =
+        FnBlockLabel $ Text.pack $ c:r
+    | otherwise =
+        error $ "Invalid block label: " ++ (c:r)
+
+
 -- | The terminal statement from a block.
 data FnTermStmt arch
-   = FnJump !(ArchSegmentOff arch)
-   | FnBranch !(FnValue arch BoolType) !(ArchSegmentOff arch) !(ArchSegmentOff arch)
+   = FnJump !FnBlockLabel
+   | FnBranch !(FnValue arch BoolType) !FnBlockLabel !FnBlockLabel
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
-                   !(V.Vector (MemSegmentOff (ArchAddrWidth arch)))
+                   !(V.Vector FnBlockLabel)
    | FnRet ![Some (FnValue arch)]
      -- ^ A return from the function with associated values
    | FnTailCall !(FnValue arch (BVType (ArchAddrWidth arch)))
@@ -417,7 +444,7 @@ instance FnArchConstraints arch
       FnJump a -> text "jump" <+> pretty a
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ V.toList $ pretty . segoffAddr <$> vec)
+                               <+> parens (commas $ V.toList $ pretty <$> vec)
       FnRet rets ->
         text "return" <+> parens (hsep (viewSome pretty <$> rets))
       FnTailCall f _ args ->
@@ -436,10 +463,12 @@ instance FoldFnValue FnTermStmt where
 
 -- | A block in the function
 data FnBlock arch
-   = FnBlock { fbLabel :: !(ArchSegmentOff arch)
+   = FnBlock { fbLabel :: !FnBlockLabel
                -- ^ Label for identifying block.
-             , fbPhiNodes  :: ![Some (PhiBinding (ArchReg arch))]
-               -- ^ List of phi bindings.
+             , fbPrevBlocks :: ![FnBlockLabel]
+               -- ^ Labels of blocks that jump to this one.
+             , fbPhiMap :: !(MapF (ArchReg arch) FnPhiVar)
+               -- ^ Maps registers to phi variables
              , fbStmts :: ![FnStmt     arch]
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
@@ -463,12 +492,15 @@ instance (FnArchConstraints arch
               <$$> vcat (pretty <$> fbStmts b)
               <$$> pretty (fbTerm b))
     where
-      ppPhis = vcat (go <$> fbPhiNodes b)
-      go :: Some (PhiBinding (ArchReg arch)) -> Doc
-      go (Some (PhiBinding aid vs)) =
-         pretty aid <+> text ":= phi " <+> hsep (punctuate comma $ map ppBinding vs)
-      ppBinding :: (ArchSegmentOff arch, ArchReg arch tp) -> Doc
-      ppBinding (a, node) = parens (pretty a <> comma <+> prettyF node)
+      go :: MapF.Pair (ArchReg arch) FnPhiVar -> Doc
+      go (MapF.Pair r v) =
+         pretty v <+> text ":= phi "
+         <+> hsep (punctuate comma $ map (ppBinding r) (fbPrevBlocks b))
+
+      ppPhis = vcat (go <$> MapF.toAscList (fbPhiMap b))
+
+      ppBinding :: ArchReg arch tp -> FnBlockLabel -> Doc
+      ppBinding r a = parens (pretty a <> comma <+> prettyF r)
 
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
@@ -488,9 +520,14 @@ data Function arch
                 -- ^ Type of this  function
               , fnName :: !BSC.ByteString
                 -- ^ Name of this function
-              , fnBlocks :: [FnBlock arch]
+              , fnEntryBlock :: !(FnBlock arch)
+              , fnRestBlocks :: ![FnBlock arch]
                 -- ^ A list of all function blocks here.
               }
+
+-- | Return blocks in function with entry block first.
+fnBlocks :: Function arch -> [FnBlock arch]
+fnBlocks f = fnEntryBlock f : fnRestBlocks f
 
 instance (FnArchConstraints arch
          , PrettyF (ArchReg arch)

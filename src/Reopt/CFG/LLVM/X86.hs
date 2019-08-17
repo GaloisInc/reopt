@@ -10,7 +10,6 @@ module Reopt.CFG.LLVM.X86
 
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.State.Strict
 import           Data.Parameterized.Some
 import           Data.Type.Equality
 import qualified Data.Vector as V
