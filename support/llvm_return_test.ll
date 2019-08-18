@@ -72,6 +72,20 @@ define <8 x double> @return_8double() {
                     double 57.0, double 67.0, double 77.0, double 87.0>
 }
 
+; rdi is a pointer to a 32 byte buffer containing the return value
+
+; The first argument is stored in (rsi, rdx, rcx, r8) with rsi
+; containing the least-significant 8 bytes.
+
+; The second argument is stored in (r9, [rsp+8], [rsp+16], [rsp+24])
+; with r9 containing the least significant 8 bytes.
+;
+; When returning rax contains the address in rdi.
+define i256 @add_i256(i256 %a, i256 %b) {
+  %r = add i256 %a, %b
+  ret i256 %r
+}
+
 ; On processors that support:
 ; SSE only:
 ;    xmm0 = xmm0 + xmm2
@@ -81,6 +95,13 @@ define <8 x double> @return_8double() {
 define <4 x double> @add_4double(<4 x double> %a, <4 x double> %b) {
   %r = fadd <4 x double> %a, %b
   ret <4 x double> %r
+}
+
+; This adds 64-bit integers rather than doubles, and uses the same
+; calling convention as add_4double
+define <4 x i64> @add_4i64(<4 x i64> %a, <4 x i64> %b) {
+  %r = add <4 x i64> %a, %b
+  ret <4 x i64> %r
 }
 
 ; On processors that support:

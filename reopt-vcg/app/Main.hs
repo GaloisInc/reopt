@@ -1493,8 +1493,8 @@ verifyBlockPreconditions prefix f lbl = do
         fatalBlockError $
           printf "Target block %s lacks annotations." (ppBlock lbl)
       Just Ann.UnreachableBlock ->
-        fatalBlockError $
-          printf "Target block %s is marked as unreachable." (ppBlock lbl)
+        proveTrue (f SMT.false) $
+          printf "Target block %s is unreachable." (ppBlock lbl)
       Just (Ann.ReachableBlock b) -> pure b
 
   firstLabel <- asks firstBlockLabel

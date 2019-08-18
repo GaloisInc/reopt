@@ -61,6 +61,7 @@ import           Control.Monad
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Int
+import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
@@ -229,8 +230,6 @@ data PendingPhiNode arch tp = PendingPhiNode !L.Ident !L.Type [(L.BlockLabel, Ar
 -- | Result obtained by printing a block to LLVM
 data LLVMBlockResult arch = LLVMBlockResult { regBlockLabel :: !L.BlockLabel
                                               -- ^ Name of LLVM block
-                                            , regLLVMMap  :: !(Map (Some (ArchReg arch)) (Maybe L.Value))
-                                              -- ^ Maps registers to value (or `Nothing` if calee-saved
                                             , llvmBlockStmts   :: ![L.Stmt]
                                             , llvmBlockPhiVars :: ![Some (PendingPhiNode arch)]
                                             }
@@ -258,8 +257,7 @@ data FunState arch =
   FunState { nmCounter :: !Int
              -- ^ Counter for generating new identifiers
            , funIntrinsicMap :: !IntrinsicMap
-           , prevBlocks :: !([LLVMBlockResult arch])
-             -- ^ Blocks processed so far.
+           , funBlockPhiMap :: !(ResolvePhiMap (Some (ArchReg arch)))
            }
 
 funIntrinsicMapLens :: Simple Lens (FunState arch) IntrinsicMap
@@ -956,8 +954,8 @@ addLLVMBlock :: forall arch
             -> FunState arch
             -> FnBlock arch
                -- ^ Block to generate
-            -> FunState arch
-addLLVMBlock fns ctx fs b = finFS { prevBlocks = res : prevBlocks finFS }
+            -> (FunState arch, LLVMBlockResult arch)
+addLLVMBlock fns ctx fs b = (finFS', res)
   where s0 = BBLLVMState { archFns = fns
                          , funContext     = ctx
                          , funState       = fs
@@ -977,15 +975,20 @@ addLLVMBlock fns ctx fs b = finFS { prevBlocks = res : prevBlocks finFS }
 
         finFS = funState s
 
+        llvmLabel = llvmBlockLabel (fbLabel b)
+
         transReg :: FnRegValue arch tp -> Maybe L.Value
         transReg (CalleeSaved _) = Nothing
         transReg (FnRegValue v) = Just $! L.typedValue (valueToLLVMBitvec ctx (bbAssignValMap s) v)
 
+        llvmMap = Map.fromAscList
+                $ [ (Some r, transReg val)
+                  | MapF.Pair r val <- MapF.toAscList (fbRegMap b)
+                  ]
+
+        finFS' = finFS { funBlockPhiMap = Map.insert llvmLabel llvmMap (funBlockPhiMap finFS) }
+
         res = LLVMBlockResult { regBlockLabel = llvmBlockLabel (fbLabel b)
-                              , regLLVMMap = Map.fromAscList $
-                                  [ (Some r, transReg val)
-                                  | MapF.Pair r val <- MapF.toAscList (fbRegMap b)
-                                  ]
                               , llvmBlockPhiVars = reverse (bbBoundPhiVars s)
                               , llvmBlockStmts = reverse (bbStmts s)
                               }
@@ -1076,22 +1079,17 @@ defineFunction archOps f = do
   let initFunState :: FunState arch
       initFunState = FunState { nmCounter = 0
                               , funIntrinsicMap = m0
-                              , prevBlocks = []
+                              , funBlockPhiMap = Map.empty
                               }
 
-  let fin_fs = foldl (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
+  let (fin_fs, finalBlocks) = mapAccumL (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
+
 
   -- Update intrins map
   put (funIntrinsicMap fin_fs)
 
-  let resolvePhiMap :: ResolvePhiMap (Some (ArchReg arch))
-      resolvePhiMap = Map.fromList
-        [ (regBlockLabel b, regLLVMMap b)
-        | b <- prevBlocks fin_fs
-        ]
-
   let blocks :: [L.BasicBlock]
-      blocks = toBasicBlock resolvePhiMap <$> reverse (prevBlocks fin_fs)
+      blocks = toBasicBlock (funBlockPhiMap fin_fs) <$> finalBlocks
   pure $
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  =

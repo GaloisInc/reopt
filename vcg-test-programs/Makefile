@@ -39,10 +39,10 @@ test_add_diet_reopt.o : test_add_diet_lld.exe
 test_fib_diet_reopt.exe : test_fib_diet_lld.exe
 	$(reopt) -o $@ --include add $<
 
-verify_test_add_diet_reopt.ann : test_add_diet_reopt.ann test_add_diet_reopt.bc
+verify_test_add_diet_reopt.ann : test_add_diet_reopt.ann test_add_diet_reopt.ll
 	reopt-vcg $<
 
-verify_test_fib_diet_reopt.ann : test_fib_diet_reopt.ann test_fib_diet_reopt.bc
+verify_test_fib_diet_reopt.ann : test_fib_diet_reopt.ann test_fib_diet_reopt.ll
 	reopt-vcg $<
 
 .PHONY : verify_test_add_diet_reopt.ann verify_test_fib_diet_reopt.ann
