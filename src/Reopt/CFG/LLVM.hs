@@ -447,7 +447,7 @@ valueToLLVM ctx avmap val = do
           fptr = L.Typed (functionTypeToLLVM ftp) (L.ValSymbol (L.Symbol (BSC.unpack nm)))
       L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
     -- Value is an argument passed via a register.
-    FnRegArg _ i -> r
+    FnArg i _tp -> r
       where Just r = funArgs ctx V.!? i
     -- A global address
     FnGlobalDataAddr addr ->

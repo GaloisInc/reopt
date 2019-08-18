@@ -920,7 +920,7 @@ recoverFunction sysp funTypeMap mem fInfo = do
         = registerUse mem sysp (fmap snd funTypeMap) fInfo cfti blockPreds
 
 
-  let insReg i (Some r) = MapF.insert r (FnRegValue (FnRegArg r i))
+  let insReg i (Some r) = MapF.insert r (FnRegValue (FnArg i (typeRepr r)))
   -- This marks all the registers in the ABI that should save their
   -- value as callee saved
   let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)
