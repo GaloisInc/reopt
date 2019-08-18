@@ -446,9 +446,6 @@ valueToLLVM ctx avmap val = do
       let fptr :: L.Typed L.Value
           fptr = L.Typed (functionTypeToLLVM ftp) (L.ValSymbol (L.Symbol (BSC.unpack nm)))
       L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
-    -- A pointer to an internal block at the given address.
-    FnBlockValue _addr -> do
-      error $ "Cannot create references to local blocks."
     -- Value is an argument passed via a register.
     FnRegArg _ i -> r
       where Just r = funArgs ctx V.!? i

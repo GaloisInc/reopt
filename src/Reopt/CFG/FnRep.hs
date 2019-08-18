@@ -209,10 +209,6 @@ data FnValue (arch :: *) (tp :: Type) where
                           -- ^ Symbol name to associate this this address.
                        -> FnValue arch (BVType (ArchAddrWidth arch))
 
-  -- | A pointer to an internal block at the given address.
-  FnBlockValue :: !(MemSegmentOff (ArchAddrWidth arch))
-               -> FnValue arch (BVType (ArchAddrWidth arch))
-
   -- | Value is a argument passed via a register.
   FnRegArg :: !(ArchReg arch tp)
            -> !Int
@@ -257,7 +253,6 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
-  pretty (FnBlockValue addr)   = text "BlockValue" <> parens (pretty addr)
   pretty (FnRegArg _ n)           = text "arg" <> int n
   pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
 
@@ -307,7 +302,6 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
-      FnBlockValue{} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnRegArg r _ -> typeRepr r
       FnGlobalDataAddr _ -> archWidthTypeRepr (Proxy :: Proxy arch)
 
