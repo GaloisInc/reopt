@@ -1487,32 +1487,30 @@ verifyBlockPreconditions :: String
                          -> BlockVCG ()
 verifyBlockPreconditions prefix f lbl = do
   fnAnn <- asks $ curFunAnnotations
-  tgtBlockAnn <-
-    case findBlock fnAnn lbl of
-      Nothing -> do
-        fatalBlockError $
-          printf "Target block %s lacks annotations." (ppBlock lbl)
-      Just Ann.UnreachableBlock ->
-        proveTrue (f SMT.false) $
-          printf "Target block %s is unreachable." (ppBlock lbl)
-      Just (Ann.ReachableBlock b) -> pure b
+  case findBlock fnAnn lbl of
+    Nothing -> do
+      fatalBlockError $
+        printf "Target block %s lacks annotations." (ppBlock lbl)
+    Just Ann.UnreachableBlock ->
+      proveTrue (f SMT.false) $
+      printf "Target block %s is unreachable." (ppBlock lbl)
+    Just (Ann.ReachableBlock tgtBlockAnn) -> do
+      firstLabel <- asks firstBlockLabel
 
-  firstLabel <- asks firstBlockLabel
+      when (lbl == firstLabel) $ fail "Do not support jumping to first label in function."
 
-  when (lbl == firstLabel) $ fail "Do not support jumping to first label in function."
+      -- Get current registers
+      regs <- gets mcCurRegs
+      -- Check initialized register values
+      forM_ (initBlockRegValues tgtBlockAnn) $ \(Some r, expected) -> do
+        -- Get register values
+        let mcValue = getConst $ regs ^. boundValue r
+        proveTrue (f (SMT.eq [expected, mcValue])) $ printf "Checking %s register %s." prefix (show r)
 
-  -- Get current registers
-  regs <- gets mcCurRegs
-  -- Check initialized register values
-  forM_ (initBlockRegValues tgtBlockAnn) $ \(Some r, expected) -> do
-    -- Get register values
-    let mcValue = getConst $ regs ^. boundValue r
-    proveTrue (f (SMT.eq [expected, mcValue])) $ printf "Checking %s register %s." prefix (show r)
-
-  mem  <- getMCMem
-  -- Check preconditions
-  forM_ (Ann.blockPreconditions tgtBlockAnn) $ \p -> do
-    proveTrue (f (evalPrecondition regs mem p)) $ printf "Checking %s precondition." prefix
+      mem  <- getMCMem
+      -- Check preconditions
+      forM_ (Ann.blockPreconditions tgtBlockAnn) $ \p -> do
+        proveTrue (f (evalPrecondition regs mem p)) $ printf "Checking %s precondition." prefix
 
 -- | Construct SMT sort from type and report error if this fails.
 coerceToSMTSort :: Type -> BlockVCG SMT.Sort
