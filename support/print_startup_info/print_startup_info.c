@@ -44,7 +44,7 @@ const char* myitoa(uint64_t x) {
 // Run with the stack pointer
 void run(const uint64_t* sp) {
 
-    myprint(0, "Hello world!\n");
+    myprint(0, "Printing arguments:\n");
     uint64_t argc = sp[0];
     const char** argv = (const char**) (sp + 1);
     uint64_t i;
@@ -53,6 +53,7 @@ void run(const uint64_t* sp) {
 	myprint(0, "\n");
     }
 
+    myprint(0, "Printing environment:\n");
     const char** init_envp = (const char**) (sp + 2 + argc);
     const char** envp = init_envp;
     while (*envp) {
@@ -61,6 +62,7 @@ void run(const uint64_t* sp) {
 	++envp;
     }
 
+    myprint(0, "Printing ELF Auxiliary Vectors:\n");
     const auxv_t* init_auxv = (const auxv_t*) (envp + 1);
     const auxv_t* auxv = init_auxv;
     while (auxv->a_type) {
