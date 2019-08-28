@@ -67,6 +67,7 @@ import           Data.Macaw.CFG
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
+   , WidthEqProof(..)
    , PrettyF(..)
    )
 import           Data.Macaw.Memory
@@ -209,10 +210,11 @@ data FnValue (arch :: *) (tp :: Type) where
                           -- ^ Symbol name to associate this this address.
                        -> FnValue arch (BVType (ArchAddrWidth arch))
 
-  -- | Value is a argument passed via a register.
-  FnArg :: !Int
-        -> !(TypeRepr tp)
-        -> FnValue arch tp
+  -- | Value is a function.
+  --
+  -- The int should be in the range @[0..argCount)@, and the type repr
+  -- is the type.
+  FnArg :: !Int -> !(TypeRepr tp) -> FnValue arch tp
 
   -- | A global address
   FnGlobalDataAddr :: !(MemSegmentOff (ArchAddrWidth arch))
@@ -308,15 +310,18 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
 ------------------------------------------------------------------------
 -- FnRegValue
 
-data FnRegValue arch tp
-   = CalleeSaved !(ArchReg arch tp)
-     -- ^ This is a callee saved register.
-   | FnRegValue !(FnValue arch tp)
+data FnRegValue arch tp where
+  CalleeSaved :: !(ArchReg arch tp)
+              -> FnRegValue arch tp
+  -- ^ This is a callee saved register
+  FnRegValue :: !(FnValue arch i)
+             -> !(WidthEqProof i o)
+             -> FnRegValue arch o
      -- ^ A value assigned to a register
 
 instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegValue arch tp) where
   pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ showF r)
-  pretty (FnRegValue v)      = pretty v
+  pretty (FnRegValue v _)    = pretty v
 
 ------------------------------------------------------------------------
 -- FnStmt
@@ -467,7 +472,7 @@ data FnBlock arch
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
-             , fbRegMap :: !(MapF (ArchReg arch) (FnRegValue arch))
+             , fbRegMap :: !(MapF (ArchReg arch) (FnValue arch))
                -- ^ Map from registers to values supplied by this
                -- block to successors.
                --

@@ -298,7 +298,7 @@ nextStackPrecond sai fps blockPrecond assignMap tstmt = do
       addPrecond addr nextPrecond fps
     ParsedTranslateError _ -> do
       Left "Encountered translation error"
-    ClassifyFailure _ -> do
+    ClassifyFailure _ _ -> do
       Left "Encountered classification failure."
 
 

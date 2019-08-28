@@ -263,9 +263,9 @@ analyzeStmtReferences root_addr init_sp b = do
           Just v -> addDepth $ parseStackPointer init_sp v
           Nothing -> pure ()
 
-    ParsedTranslateError _ ->
+    ParsedTranslateError{} ->
       throwError "Cannot identify stack depth in code where translation error occurs"
-    ClassifyFailure _ ->
+    ClassifyFailure{} ->
       throwError $ "Classification failed in StackDepth: " ++ show root_addr
 
 

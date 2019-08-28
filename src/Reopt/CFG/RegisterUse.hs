@@ -341,7 +341,7 @@ summarizeBlock mem blk = do
       summarizeX86ArchTermStmt sysp addr tstmt regs
     ParsedTranslateError _ ->
       error "Cannot identify register use in code where translation error occurs"
-    ClassifyFailure _ ->
+    ClassifyFailure _ _ ->
       error $ "Classification failed: " ++ show addr
 
 summarizeX86ArchTermStmt :: SyscallPersonality

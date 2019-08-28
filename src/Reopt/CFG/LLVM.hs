@@ -269,25 +269,10 @@ funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
 -- | Architecture-specific operations for generating LLVM
 data LLVMArchSpecificOps arch = LLVMArchSpecificOps
   { archEndianness :: !Endianness
-    -- ^ Endiannes of architecture
-   , mkInitBlock :: FunctionType arch
-                -> L.BlockLabel
-                -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
-    -- ^ This is responsible for mapping between function arguments and
-    -- the block format used by FnRep.
+    -- ^ Endianness of architecture
     --
-    -- Essentially it is used so that we can map between the types needed
-    -- to generate an ABI compliant function and the types expected by the
-    -- FnRep.  Eventually, we hope to extend the FnRep representation
-    -- enough so that this is not necessary.
-    --
-    -- The arguments are the type of the function and the label of the
-    -- first block.
-    --
-    -- The return type consists of a triple containing the identifiers
-    -- used in the function definition, a block to run before jumping to
-    -- the first FnRep block, and a vector identifiying the arguments to
-    -- actually use as the start of the function.
+    -- Some architectures allow endianness to change dynamically,
+    -- Macaw does not support this.
   , archFnCallback :: !(forall tp . ArchFn arch (FnValue arch) tp -> BBLLVM arch (L.Typed L.Value))
     -- ^ Callback for architecture-specific functions
   , archStmtCallback :: !(FnArchStmt arch (FnValue arch) -> BBLLVM arch ())
@@ -447,8 +432,8 @@ valueToLLVM ctx avmap val = do
           fptr = L.Typed (functionTypeToLLVM ftp) (L.ValSymbol (L.Symbol (BSC.unpack nm)))
       L.Typed typ $ L.ValConstExpr (L.ConstConv L.PtrToInt fptr typ)
     -- Value is an argument passed via a register.
-    FnArg i _tp -> r
-      where Just r = funArgs ctx V.!? i
+    FnArg i _tp | 0 <= i, i < V.length (funArgs ctx) -> funArgs ctx V.! i
+                | otherwise -> error $ "Illegal argument index " ++ show i
     -- A global address
     FnGlobalDataAddr addr ->
       case segoffAsAbsoluteAddr addr of
@@ -974,9 +959,9 @@ addLLVMBlock fns ctx fs b = (finFS', res)
 
         llvmLabel = llvmBlockLabel (fbLabel b)
 
-        transReg :: FnRegValue arch tp -> Maybe L.Value
-        transReg (CalleeSaved _) = Nothing
-        transReg (FnRegValue v) = Just $! L.typedValue (valueToLLVMBitvec ctx (bbAssignValMap s) v)
+        transReg :: FnValue arch tp -> Maybe L.Value
+        transReg v =
+          Just $! L.typedValue (valueToLLVMBitvec ctx (bbAssignValMap s) v)
 
         llvmMap = Map.fromAscList
                 $ [ (Some r, transReg val)
@@ -1043,6 +1028,9 @@ runLLVMTrans (LLVMTrans action) =
   let (r, m) = runState action Map.empty
    in (Map.elems m, r)
 
+argIdent :: Int -> L.Ident
+argIdent i = L.Ident ("arg" ++ show i)
+
 -- | This translates the function to LLVM and returns the define.
 --
 -- We have each function return all possible results, although only the ones that are actually
@@ -1058,17 +1046,15 @@ defineFunction :: forall arch
                   -- ^ Function to translate
                -> LLVMTrans L.Define
 defineFunction archOps f = do
-  -- Create initial block
+  let mkInputReg :: Some TypeRepr -> Int -> L.Typed L.Ident
+      mkInputReg (Some tp) i = L.Typed (typeToLLVMType tp) (argIdent i)
+
   let inputArgs :: [L.Typed L.Ident]
-      initBlock :: L.BasicBlock
-      postInitArgs :: V.Vector (L.Typed L.Value)
-      (inputArgs, initBlock, postInitArgs) =
-        mkInitBlock archOps (fnType f) (llvmBlockLabel (fbLabel (fnEntryBlock f)))
+      inputArgs = zipWith mkInputReg (fnArgTypes (fnType f)) [0..]
 
   let ctx :: FunLLVMContext arch
-      ctx = FunLLVMContext { funArgs        = postInitArgs
-                           , funReturnType  =
-                             L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
+      ctx = FunLLVMContext { funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
+                           , funReturnType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
                            }
 
   -- Create ordinary blocks
@@ -1097,7 +1083,7 @@ defineFunction archOps f = do
              , L.defAttrs    = []
              , L.defSection  = Nothing
              , L.defGC       = Nothing
-             , L.defBody     = [initBlock] ++ blocks ++ [failBlock]
+             , L.defBody     = blocks ++ [failBlock]
              , L.defMetadata = Map.empty
              , L.defComdat   = Nothing
              }

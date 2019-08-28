@@ -11,8 +11,6 @@ module Reopt.CFG.LLVM.X86
 import           Control.Lens
 import           Control.Monad
 import           Data.Parameterized.Some
-import           Data.Type.Equality
-import qualified Data.Vector as V
 import           GHC.Stack
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
@@ -26,74 +24,6 @@ import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.LLVM
-
-
-zmmFloatType :: L.Type
-zmmFloatType = L.Vector 8 (L.PrimType $ L.FloatType L.Double)
-
-{-
-x86LLVMRetType :: L.Type
-x86LLVMRetType =
-  L.Struct $ (typeToLLVMType . typeRepr <$> x86ResultRegs)
-          ++ (replicate (length x86FloatResultRegs) zmmFloatType)
--}
-
-argIdent :: Int -> L.Ident
-argIdent i = L.Ident ("arg" ++ show i)
-
--- | Create a unique name for the float argument.
-fltbvArg :: Int -> L.Ident
-fltbvArg i = L.Ident ("fargbv" ++ show i)
-
-{-
-functionArgType :: Some X86Reg -> L.Type
-functionArgType (Some r) =
-  case r of
-    X86_GP{} -> L.iT 64
-    X86_ZMMReg{} -> zmmFloatType
-    _ -> error "Unsupported function type registers"
--}
-
-
-mkX86InitBlock :: FunctionType X86_64 -- ^ Type of function
-               -> L.BlockLabel -- ^ Label of first block
-               -> ([L.Typed L.Ident], L.BasicBlock, V.Vector (L.Typed L.Value))
-mkX86InitBlock ft lbl = (inputArgs, blk, postInitArgs)
-    where mkInputReg :: Some TypeRepr
-                     -> Int
-                     -> (L.Typed L.Ident, [L.Stmt], L.Typed L.Value)
-          mkInputReg (Some (VecTypeRepr l (FloatTypeRepr DoubleFloatRepr))) i
-            | Just Refl <- testEquality l n8 =
-              let -- Get typed arg for input
-                    arg  = L.Typed zmmFloatType (argIdent i)
-                    argv = L.Typed zmmFloatType (L.ValIdent (argIdent i))
-                    stmts =
-                      [ L.Result (fltbvArg i) (L.Conv L.BitCast argv (L.iT 512)) [] ]
-                    postArg = L.Typed (L.iT 512) (L.ValIdent (fltbvArg i))
-               in (arg, stmts, postArg)
-          mkInputReg (Some (BVTypeRepr w)) i
-            | Just Refl <- testEquality w n64 = do
-                (L.Typed (L.iT 64) (argIdent i)
-                  , []
-                  , L.Typed (L.iT 64) (L.ValIdent (argIdent i))
-                  )
-          mkInputReg (Some tp) _i = error $ "Unsupported type " ++ show tp
-
-          inputs = zipWith mkInputReg (fnArgTypes ft) [0..]
-
-          inputArgs :: [L.Typed L.Ident]
-          inputArgs = [ a | (a,_,_) <- inputs ]
-
-          fltStmts :: [L.Stmt]
-          fltStmts = [ s | (_,l,_) <- inputs, s <- l ]
-
-          -- Block to generate
-          blk = L.BasicBlock { L.bbLabel = Just (L.Named (L.Ident "init"))
-                             , L.bbStmts = fltStmts ++ [L.Effect (L.Jump lbl) []]
-                             }
-
-          postInitArgs :: V.Vector (L.Typed L.Value)
-          postInitArgs = V.fromList [ v | (_,_,v) <- inputs ]
 
 ------------------------------------------------------------------------
 -- emitX86ArchFn
@@ -280,7 +210,6 @@ x86LLVMArchOps :: String -- ^ Prefix for system call intrinsic
                -> LLVMArchSpecificOps X86_64
 x86LLVMArchOps pname = LLVMArchSpecificOps
   { archEndianness = LittleEndian
-  , mkInitBlock = mkX86InitBlock
   , archFnCallback = emitX86ArchFn
   , archStmtCallback = emitX86ArchStmt pname
   , popCountCallback = emitPopCount

@@ -4,6 +4,8 @@ packages:
 - .
 - reopt-vcg
 - tools
+- ./deps/macaw/base
+- ./deps/macaw/x86
 extra-deps:
 - annotations
 - fgl-visualize-0.1.0.1
@@ -18,8 +20,6 @@ extra-deps:
 - ./deps/flexdis86/binary-symbols
 - ./deps/llvm-pretty
 - ./deps/llvm-pretty-bc-parser
-- ./deps/macaw/base
-- ./deps/macaw/x86
 - ./deps/parameterized-utils
 
 #nix:
