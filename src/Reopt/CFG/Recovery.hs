@@ -45,7 +45,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
-import qualified Data.Macaw.Memory.Permissions as Perm
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
@@ -241,22 +240,17 @@ recoverValue v = do
             Nothing -> pure $ FnValueUnsupported ("Relative addr " ++ show addr) (addrWidthTypeRepr w)
 
         Just addrRef -> do
-          let seg = segoffSegment addrRef
           case () of
-            _ | segmentFlags seg `Perm.hasPerm` Perm.execute
-              , Just (nm, ft) <- Map.lookup addrRef (rsFunctionArgs s) -> do
+            _ | Just (nm, ft) <- Map.lookup addrRef (rsFunctionArgs s) -> do
                   pure $! FnFunctionEntryValue (resolveX86FunctionType ft) nm
 
             _ | Map.member addrRef (interpState^.parsedBlocks) -> do
                   let msg = "Do not support functions that reference block addresses."
                   pure $! FnValueUnsupported msg (addrWidthTypeRepr w)
 
-              | segmentFlags seg `Perm.hasPerm` Perm.write -> do
-                  pure $! FnGlobalDataAddr addrRef
-
-              -- FIXME: do something more intelligent with rodata?
-              | segmentFlags seg `Perm.hasPerm` Perm.read -> do
-                  pure $! FnGlobalDataAddr addrRef
+                -- Turn address into hardcoded constant.
+              | Just fixedAddr <- segoffAsAbsoluteAddr addrRef -> do
+                  pure $ FnConstantValue n64 (fromIntegral fixedAddr)
 
               | otherwise -> do
                   pure $! FnValueUnsupported ("segment pointer " ++ show addr) (typeRepr v)
@@ -871,6 +865,17 @@ recoverInnerBlock fInfo blockRegs blockPreds blockInfo addr = do
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
   recoverBlock blockRegs preds phiVars b blockInfo
+
+-- | Type used in passing this argument to a function.
+argRegTypeRepr :: X86ArgInfo -> Some TypeRepr
+argRegTypeRepr ArgBV64{} = Some (BVTypeRepr n64)
+argRegTypeRepr ArgMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
+
+-- | The register types this return value is associated with.
+retRegTypeRepr :: X86RetInfo -> Some TypeRepr
+retRegTypeRepr RetBV64{} = Some (BVTypeRepr n64)
+retRegTypeRepr RetMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
+
 
 -- | Construct a generatic function type from the x86-specific type rep.
 resolveX86FunctionType :: X86FunTypeInfo -> FunctionType X86_64

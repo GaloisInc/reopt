@@ -18,10 +18,8 @@ module Reopt.CFG.RegisterUse
   , maximumFunTypeInfo
   , X86ArgInfo(..)
   , argReg
-  , argRegTypeRepr
   , X86RetInfo(..)
   , retReg
-  , retRegTypeRepr
   ) where
 
 import           Control.Lens
@@ -72,12 +70,6 @@ argReg :: X86ArgInfo -> Some X86Reg
 argReg (ArgBV64 r) = Some (X86_GP r)
 argReg (ArgMM512D i) = Some (X86_ZMMReg i)
 
--- | The register type this argument is associated with.
-argRegTypeRepr :: X86ArgInfo -> Some TypeRepr
-argRegTypeRepr ArgBV64{} = Some (BVTypeRepr n64)
-argRegTypeRepr ArgMM512D{} = Some (BVTypeRepr n512)
-
-
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
 data X86RetInfo where
@@ -92,10 +84,6 @@ data X86RetInfo where
 retReg :: X86RetInfo -> Some X86Reg
 retReg (RetBV64 r) = Some (X86_GP r)
 retReg (RetMM512D i) = Some (X86_ZMMReg i)
-
--- | The register types this return value is associated with.
-retRegTypeRepr :: X86RetInfo -> Some TypeRepr
-retRegTypeRepr r = mapSome typeRepr (retReg r)
 
 -- | This describes the registers and return value of an x86_64 ABI
 -- compliant function.

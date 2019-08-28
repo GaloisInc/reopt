@@ -216,10 +216,6 @@ data FnValue (arch :: *) (tp :: Type) where
   -- is the type.
   FnArg :: !Int -> !(TypeRepr tp) -> FnValue arch tp
 
-  -- | A global address
-  FnGlobalDataAddr :: !(MemSegmentOff (ArchAddrWidth arch))
-                   -> FnValue arch (BVType (ArchAddrWidth arch))
-
 ------------------------------------------------------------------------
 -- FoldFnValue
 
@@ -256,7 +252,6 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
   pretty (FnArg i _)              = text "arg" <> int i
-  pretty (FnGlobalDataAddr addr)  = text "data@" <> parens (pretty addr)
 
 instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) where
   pretty rhs =
@@ -305,7 +300,6 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnArg _ tp -> tp
-      FnGlobalDataAddr _ -> archWidthTypeRepr (Proxy :: Proxy arch)
 
 ------------------------------------------------------------------------
 -- FnRegValue

@@ -434,12 +434,8 @@ valueToLLVM ctx avmap val = do
     -- Value is an argument passed via a register.
     FnArg i _tp | 0 <= i, i < V.length (funArgs ctx) -> funArgs ctx V.! i
                 | otherwise -> error $ "Illegal argument index " ++ show i
-    -- A global address
-    FnGlobalDataAddr addr ->
-      case segoffAsAbsoluteAddr addr of
-        Nothing -> error $ "FnGlobalDataAddr only supports global values."
-        Just fixedAddr -> L.Typed (natReprToLLVMType ptrWidth) $ L.integer $ fromIntegral fixedAddr
 
+{-
 -- | Return number of bits and LLVM float type should take
 floatTypeWidth :: L.FloatType -> Int32
 floatTypeWidth l =
@@ -465,6 +461,7 @@ valueToLLVMBitvec ctx m val = do
       let itp = L.iT (floatTypeWidth tp)
        in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
     _ -> error $ "valueToLLVMBitvec given unsupported type: " ++ show (L.typedType llvm_val)
+-}
 
 mkLLVMValue :: (LLVMArchConstraints arch, HasCallStack)
             => FnValue arch tp
@@ -472,7 +469,7 @@ mkLLVMValue :: (LLVMArchConstraints arch, HasCallStack)
 mkLLVMValue val = do
   ctx <- gets funContext
   m   <- gets $ bbAssignValMap
-  pure $! valueToLLVMBitvec ctx m val
+  pure $! valueToLLVM ctx m val
 
 arithop :: L.ArithOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 arithop f val s = L.Typed (L.typedType val) <$> evalInstr (L.Arith f val s)
@@ -532,7 +529,10 @@ alloca :: L.Type -> Maybe (L.Typed L.Value) -> Maybe Int -> BBLLVM arch (L.Typed
 alloca tp cnt align = fmap (L.Typed (L.PtrTo tp)) $ evalInstr $ L.Alloca tp cnt align
 
 -- | Generate a non-tail call that returns a value
-call :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM arch (L.Typed L.Value)
+call :: (HasCallStack, HasValue v)
+     => v
+     -> [L.Typed L.Value]
+     -> BBLLVM arch (L.Typed L.Value)
 call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res argTypes varArgs) -> do
@@ -961,7 +961,7 @@ addLLVMBlock fns ctx fs b = (finFS', res)
 
         transReg :: FnValue arch tp -> Maybe L.Value
         transReg v =
-          Just $! L.typedValue (valueToLLVMBitvec ctx (bbAssignValMap s) v)
+          Just $! L.typedValue (valueToLLVM ctx (bbAssignValMap s) v)
 
         llvmMap = Map.fromAscList
                 $ [ (Some r, transReg val)
