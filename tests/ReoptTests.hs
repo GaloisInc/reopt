@@ -34,6 +34,8 @@ reoptTests = T.testGroup "reopt" . map mkTest
 logger :: String -> IO ()
 logger _ = pure ()
 
+-- | This just tests that we can successfully run discovery,
+-- function recovery and LLVM generation on the given input Elf file.
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
