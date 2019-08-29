@@ -189,16 +189,17 @@ typeToLLVMType (VecTypeRepr w tp)
    | otherwise = error $ "Vector width of " ++ show w ++ " is too large."
 
 
--- | This is a special label used for e.g. table lookup defaults
--- (where we should never reach).
+-- | This is a special label used for switch statement defaults.
 --
--- It just calls the unreachable instruction.
-failLabel :: L.BlockLabel
-failLabel = L.Named (L.Ident "failure")
+-- We should never actually reach these blocks, and with some
+-- additional analysis we can probably eliminate the need for ever
+-- generating them, however at the moment we use them.
+switchFailLabel :: L.BlockLabel
+switchFailLabel = L.Named (L.Ident "failure")
 
 -- | Block for fail label.
 failBlock :: L.BasicBlock
-failBlock = L.BasicBlock { L.bbLabel = Just failLabel
+failBlock = L.BasicBlock { L.bbLabel = Just switchFailLabel
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
 
@@ -257,7 +258,12 @@ data FunState arch =
   FunState { nmCounter :: !Int
              -- ^ Counter for generating new identifiers
            , funIntrinsicMap :: !IntrinsicMap
+             -- ^ Collection used for tracking which intrinsics we need.
+           , needSwitchFailLabel :: !Bool
+             -- ^ Flag that indicates if we need the fail block for a
+             -- switch statement.
            , funBlockPhiMap :: !(ResolvePhiMap (Some (ArchReg arch)))
+             -- ^ Maps blocks to the phi nodes for that block.
            }
 
 funIntrinsicMapLens :: Simple Lens (FunState arch) IntrinsicMap
@@ -292,7 +298,6 @@ data FunLLVMContext arch = FunLLVMContext
   , funReturnType :: !L.Type
     -- ^ LLVM return type for this function.
   }
-
 
 -- | State specific to translating a single basic block.
 data BBLLVMState arch = BBLLVMState
@@ -435,40 +440,12 @@ valueToLLVM ctx avmap val = do
     FnArg i _tp | 0 <= i, i < V.length (funArgs ctx) -> funArgs ctx V.! i
                 | otherwise -> error $ "Illegal argument index " ++ show i
 
-{-
--- | Return number of bits and LLVM float type should take
-floatTypeWidth :: L.FloatType -> Int32
-floatTypeWidth l =
-  case l of
-    L.Half -> 16
-    L.Float -> 32
-    L.Double -> 64
-    L.Fp128 -> 128
-    L.X86_fp80 -> 80
-    L.PPC_fp128 -> error "PPC floating point types not supported."
-
--- | Map a function value to a LLVM value with no change.
-valueToLLVMBitvec :: (LLVMArchConstraints arch, HasCallStack)
-                  => FunLLVMContext arch
-                  -> AssignValMap
-                  -> FnValue arch tp
-                  -> L.Typed L.Value
-valueToLLVMBitvec ctx m val = do
-  let llvm_val = valueToLLVM ctx m val
-  case L.typedType llvm_val of
-    L.PrimType (L.Integer _) -> llvm_val
-    L.PrimType (L.FloatType tp) ->
-      let itp = L.iT (floatTypeWidth tp)
-       in L.Typed itp $ L.ValConstExpr $ L.ConstConv L.BitCast llvm_val itp
-    _ -> error $ "valueToLLVMBitvec given unsupported type: " ++ show (L.typedType llvm_val)
--}
-
 mkLLVMValue :: (LLVMArchConstraints arch, HasCallStack)
             => FnValue arch tp
             -> BBLLVM arch (L.Typed L.Value)
 mkLLVMValue val = do
   ctx <- gets funContext
-  m   <- gets $ bbAssignValMap
+  m   <- gets bbAssignValMap
   pure $! valueToLLVM ctx m val
 
 arithop :: L.ArithOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
@@ -869,7 +846,8 @@ termStmtToLLVM tm =
     FnLookupTable idx vec -> do
       idx' <- mkLLVMValue idx
       let dests = V.toList $ llvmBlockLabel <$> vec
-      effect $ L.Switch idx' failLabel (zip [0..] dests)
+      funStateLens %= \s -> s { needSwitchFailLabel = True }
+      effect $ L.Switch idx' switchFailLabel (zip [0..] dests)
     FnRet rets -> do
       retType <- gets $ funReturnType . funContext
       retVals <- mapM (viewSome mkLLVMValue) rets
@@ -1062,17 +1040,21 @@ defineFunction archOps f = do
   let initFunState :: FunState arch
       initFunState = FunState { nmCounter = 0
                               , funIntrinsicMap = m0
+                              , needSwitchFailLabel = False
                               , funBlockPhiMap = Map.empty
                               }
 
-  let (fin_fs, finalBlocks) = mapAccumL (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
+  let (finalFunState, finalBlocks) = mapAccumL (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
 
 
   -- Update intrins map
-  put (funIntrinsicMap fin_fs)
+  put (funIntrinsicMap finalFunState)
 
   let blocks :: [L.BasicBlock]
-      blocks = toBasicBlock (funBlockPhiMap fin_fs) <$> finalBlocks
+      blocks = toBasicBlock (funBlockPhiMap finalFunState) <$> finalBlocks
+
+  let finBlock | needSwitchFailLabel finalFunState = [failBlock]
+               | otherwise = []
   pure $
     L.Define { L.defLinkage  = Nothing
              , L.defRetType  =
@@ -1083,7 +1065,7 @@ defineFunction archOps f = do
              , L.defAttrs    = []
              , L.defSection  = Nothing
              , L.defGC       = Nothing
-             , L.defBody     = blocks ++ [failBlock]
+             , L.defBody     = blocks ++ finBlock
              , L.defMetadata = Map.empty
              , L.defComdat   = Nothing
              }

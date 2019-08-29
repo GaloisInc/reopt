@@ -876,7 +876,6 @@ retRegTypeRepr :: X86RetInfo -> Some TypeRepr
 retRegTypeRepr RetBV64{} = Some (BVTypeRepr n64)
 retRegTypeRepr RetMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
 
-
 -- | Construct a generatic function type from the x86-specific type rep.
 resolveX86FunctionType :: X86FunTypeInfo -> FunctionType X86_64
 resolveX86FunctionType ft =
