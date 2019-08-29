@@ -18,10 +18,8 @@ module Reopt.CFG.RegisterUse
   , maximumFunTypeInfo
   , X86ArgInfo(..)
   , argReg
-  , argRegTypeRepr
   , X86RetInfo(..)
   , retReg
-  , retRegTypeRepr
   ) where
 
 import           Control.Lens
@@ -72,12 +70,6 @@ argReg :: X86ArgInfo -> Some X86Reg
 argReg (ArgBV64 r) = Some (X86_GP r)
 argReg (ArgMM512D i) = Some (X86_ZMMReg i)
 
--- | The register type this argument is associated with.
-argRegTypeRepr :: X86ArgInfo -> Some TypeRepr
-argRegTypeRepr ArgBV64{} = Some (BVTypeRepr n64)
-argRegTypeRepr ArgMM512D{} = Some (BVTypeRepr n512)
-
-
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
 data X86RetInfo where
@@ -93,25 +85,23 @@ retReg :: X86RetInfo -> Some X86Reg
 retReg (RetBV64 r) = Some (X86_GP r)
 retReg (RetMM512D i) = Some (X86_ZMMReg i)
 
--- | The register types this return value is associated with.
-retRegTypeRepr :: X86RetInfo -> Some TypeRepr
-retRegTypeRepr r = mapSome typeRepr (retReg r)
-
--- | This describes the registers and return value of an x86_64 ABI compliant
--- function.
+-- | This describes the registers and return value of an x86_64 ABI
+-- compliant function.
 --
--- This representation does not support arguments that spilled on the stack, but
--- this would be a good feature to add.
+-- This representation does not support arguments that spilled on the
+-- stack, but this would be a good feature to add.
 --
--- It uses a list for arguments so that we can use C headers and ensure the
--- arguments appear in a particular order (e.g. from the binary perspective
--- a function that takes two integers followed by a float is indistinguishable
--- from a function that takes a float followed by two integers.
+-- It uses a list for arguments so that we can use C headers and
+-- ensure the arguments appear in a particular order (e.g. from the
+-- binary perspective a function that takes two integers followed by a
+-- float is indistinguishable from a function that takes a float
+-- followed by two integers.
 data X86FunTypeInfo
    = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
                     , ftiRetRegs :: [X86RetInfo]
                     }
 
+-- |  Maximum function type.
 maximumFunTypeInfo :: X86FunTypeInfo
 maximumFunTypeInfo =
   X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
@@ -256,36 +246,6 @@ x86TermStmtValues sysp X86Syscall proc_state =
                take (length argtypes) syscallRegs
              | otherwise = syscallRegs
 
--- | Get values that must be evaluated to execute terminal statement.
-termStmtValues :: Memory 64
-               -> SyscallPersonality
-               -> Map (MemSegmentOff 64) X86FunTypeInfo
-                  -- ^ Map from addresses to function type
-               -> X86FunTypeInfo
-                  -- ^ Type of this function
-               -> ParsedTermStmt X86_64 ids
-                  -- ^ Statement to get value of
-               -> [Some (Value X86_64 ids)]
-termStmtValues mem sysp typeMap curFunTypeInfo tstmt =
-  case tstmt of
-    ParsedCall regs _m_ret_addr -> do
-      -- Get function type associated with function
-      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
-              , Just ftp <- Map.lookup fSegOff typeMap =
-                  ftp
-              | otherwise = maximumFunTypeInfo
-      registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
-    PLTStub regs _addr _dest -> toListF Some regs
-    ParsedJump _regs _tgt_addr -> []
-    ParsedBranch _regs cond _ _ -> [Some cond]
-    ParsedLookupTable _proc_state idx _vec -> [Some idx]
-    ParsedReturn regs ->
-      registerValues regs (fmap argReg (ftiArgRegs curFunTypeInfo))
-    ParsedArchTermStmt ts regs _ ->
-      x86TermStmtValues sysp ts regs
-    ParsedTranslateError _ -> []
-    ClassifyFailure _ -> []
-
 -- | Figure out the deps of the given registers and update the state for the current label
 addRegisterUses :: MemSegmentOff 64
                 -> RegState X86Reg (Value X86_64 ids)
@@ -323,23 +283,26 @@ stmtDemandedValues ctx stmt = demandConstraints ctx $
 -- registers.
 summarizeBlock :: forall ids
                .  Memory 64
-               -> MemSegmentOff 64
                -> ParsedBlock X86_64 ids
                -> RegisterUseM ids ()
-summarizeBlock mem addr blk = do
+summarizeBlock mem blk = do
+  let addr = pblockAddr blk
   blockInitDeps %= Map.insert addr Map.empty
   -- Add demanded values for terminal
   sysp    <- gets thisSyscallPersonality
   funTypeMap <- gets functionArgs
   curFTI  <- gets $ currentFunctionType
-  let termValues = termStmtValues mem sysp funTypeMap curFTI (pblockTermStmt blk)
   let ctx = x86DemandContext
   traverse_ (\(Some r) -> demandValue addr r)
-            (concatMap (stmtDemandedValues ctx) (pblockStmts blk) ++ termValues)
+            (concatMap (stmtDemandedValues ctx) (pblockStmts blk))
   case pblockTermStmt blk of
     ParsedJump regs _ ->
       addRegisterUses addr regs x86StateRegs
-    ParsedBranch regs _ _ _  ->
+    ParsedBranch regs cond _ _  -> do
+      demandValue addr cond
+      addRegisterUses addr regs x86StateRegs
+    ParsedLookupTable regs idx _ -> do
+      demandValue addr idx
       addRegisterUses addr regs x86StateRegs
     ParsedCall regs  _ -> do
       -- Get function type associated with function
@@ -348,21 +311,25 @@ summarizeBlock mem addr blk = do
                   ftp
               | otherwise =
                   maximumFunTypeInfo
+      traverse_ (\(Some r) -> demandValue addr r) $
+        registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
       addRegisterUses addr regs (Some sp_reg : Set.toList x86CalleeSavedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
       traverse_ (clearRegDeps addr) $ [Some DF] ++ fmap retReg (ftiRetRegs fti)
     PLTStub regs _ _ -> do
+      traverseF_ (demandValue addr) regs
       entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
       blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList entries)
-    ParsedLookupTable regs _ _ ->
-      addRegisterUses addr regs x86StateRegs
-    ParsedReturn _ ->
-      pure ()
+    ParsedReturn regs -> do
+      traverse_ (\(Some r) -> demandValue addr r) $
+        registerValues regs (fmap argReg (ftiArgRegs curFTI))
     ParsedArchTermStmt tstmt regs _ -> do
+      traverse_ (\(Some r) -> demandValue addr r) $
+        x86TermStmtValues sysp tstmt regs
       summarizeX86ArchTermStmt sysp addr tstmt regs
     ParsedTranslateError _ ->
       error "Cannot identify register use in code where translation error occurs"
-    ClassifyFailure _ ->
+    ClassifyFailure _ _ ->
       error $ "Classification failed: " ++ show addr
 
 summarizeX86ArchTermStmt :: SyscallPersonality
@@ -394,7 +361,7 @@ summarizeIter mem ist seen = do
        else do
         let Just blk = Map.lookup addr (ist^.parsedBlocks)
         blockFrontier %= \s -> foldr Set.insert s (parsedTermSucc (pblockTermStmt blk))
-        summarizeBlock mem addr blk
+        summarizeBlock mem blk
         summarizeIter mem ist (Set.insert addr seen)
 
 -- | Map from addresses to the registers they depend on
@@ -402,7 +369,6 @@ type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 
 type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
 
--- |
 doOne :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
       -> FunPredMap 64
          -- ^ Map addresses to the predessor blocks.

@@ -39,6 +39,11 @@ import           Data.Macaw.Memory.LoadCommon
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.CFG.FnRep (Function(..)
+                                 , fnBlocks
+                                 , FnBlock(..)
+                                 , fnBlockLabelUnpack
+                                 )
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
@@ -441,6 +446,7 @@ showCFG args = do
     discoverBinary (programPath args) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   pure $ show $ ppDiscoveryStateBlocks discState
 
+-- | This parses function argument information from a user-provided header file.
 resolveHeader :: Args -> IO Header
 resolveHeader args =
   case headerPath args of
@@ -462,14 +468,6 @@ getFunctions args = do
                    (osPersonality os) discState
   pure (os, recMod)
 
--- | Write out functions discovered.
-showFunctions :: Args -> IO ()
-showFunctions args = do
-  (_,recMod) <- getFunctions args
-  writeOutput (outputPath args) $ \h -> do
-    mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-
-
 ------------------------------------------------------------------------
 --
 
@@ -478,8 +476,6 @@ showFunctions args = do
 performReopt :: Args -> IO ()
 performReopt args = do
   hdr <- resolveHeader args
-  let funPrefix :: BSC.ByteString
-      funPrefix = unnamedFunPrefix args
   (origElf, os, discState, addrSymMap, symAddrMap) <-
     discoverX86Elf (programPath args)
                    (args^.loadOpts)
@@ -488,6 +484,8 @@ performReopt args = do
                    (args^.excludeAddrs)
   let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
+  let funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
   recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os) discState
   let llvmVer = llvmVersion args
   let archOps = LLVM.x86LLVMArchOps (show os)
@@ -504,6 +502,26 @@ performReopt args = do
   let outPath = fromMaybe "a.out" (outputPath args)
   mergeAndWrite outPath origElf new_obj redirs
 
+
+getBlockAnnotations :: FnBlock X86_64 -> (String, Ann.BlockAnn)
+getBlockAnnotations b = (nm, Ann.ReachableBlock ann)
+  where nm = fnBlockLabelUnpack (fbLabel b)
+        -- TODO: Fix me
+        ann = Ann.ReachableBlockAnn { Ann.blockAddr = 0
+                                    , Ann.blockCodeSize = 0
+                                    , Ann.blockX87Top = 7
+                                    , Ann.blockDFFlag = False
+                                    , Ann.blockPreconditions = []
+                                    , Ann.blockAllocas = []
+                                    , Ann.blockEvents = []
+                                    }
+
+getFunAnnotations :: Function X86_64 -> Ann.FunctionAnn
+getFunAnnotations f =
+  Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
+                  , Ann.blocks = HMap.fromList $ getBlockAnnotations <$> fnBlocks f
+                  }
+
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
@@ -514,24 +532,29 @@ main' = do
     ShowCFG ->
       writeOutput (outputPath args) $ \h -> do
         hPutStrLn h =<< showCFG args
+
+    -- Write function discovered
     ShowFunctions -> do
-      showFunctions args
+      (_,recMod) <- getFunctions args
+      writeOutput (outputPath args) $ \h -> do
+        mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
+
     ShowLLVM -> do
       when (isJust (annotationsPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      hPutStrLn stderr "Generating LLVM"
       (os,recMod) <- getFunctions args
       case annotationsPath args of
         Nothing -> pure ()
         Just annPath -> do
           let Just llvmPath = outputPath args
-          hPutStrLn stderr "Generating annotations"
-          let vcgAnn :: Ann.ReoptVCGAnnotations
-              vcgAnn = Ann.ReoptVCGAnnotations
+          let vcgAnn :: Ann.ModuleAnnotations
+              vcgAnn = Ann.ModuleAnnotations
                 { Ann.llvmFilePath = llvmPath
                 , Ann.binFilePath = programPath args
-                , Ann.functions = [] -- TODO: Actually add annotations.
+                , Ann.pageSize = 4096
+                , Ann.stackGuardPageCount = 1
+                , Ann.functions = getFunAnnotations <$> recoveredDefs recMod
                 }
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       let archOps = LLVM.x86LLVMArchOps (show os)

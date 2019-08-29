@@ -38,7 +38,7 @@ checkTermStmt ts =
     ParsedLookupTable _ _ a -> pure $ V.toList a
     ParsedReturn{}          -> pure []
     ParsedTranslateError{}  -> Left FunctionIncomplete
-    ClassifyFailure _       -> Left FunctionIncomplete
+    ClassifyFailure{}       -> Left FunctionIncomplete
     ParsedArchTermStmt _ _ a -> pure (maybeToList a)
 
 checkFunction' :: MemWidth (ArchAddrWidth arch)

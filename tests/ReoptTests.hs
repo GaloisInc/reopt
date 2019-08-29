@@ -34,16 +34,18 @@ reoptTests = T.testGroup "reopt" . map mkTest
 logger :: String -> IO ()
 logger _ = pure ()
 
+-- | This just tests that we can successfully run discovery,
+-- function recovery and LLVM generation on the given input Elf file.
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
 
-  let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Just 0
+  let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Nothing
                                 , MM.loadRegionBaseOffset = 0
                                 }
-  let discOpts = DiscoveryOptions { exploreFunctionSymbols = False
+  let discOpts = DiscoveryOptions { exploreFunctionSymbols = True
                                   , exploreCodeAddrInMem   = False
                                   , logAtAnalyzeFunction   = False
                                   , logAtAnalyzeBlock      = False

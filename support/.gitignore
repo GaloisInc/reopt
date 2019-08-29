@@ -1,3 +1,6 @@
 *.as
 *.bc
-abi_test.ll
+*.256.ll
+*.512.ll
+*.o
+print_stackheap_addrs

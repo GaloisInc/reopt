@@ -76,10 +76,10 @@ data Event
     -- and assign the value returned to `v`.  This appears in the both the binary
     -- and LLVM.  The alloca name refers to the LLVM allocation this is part of,
     -- and otherwise this is a binary only read.
-  | forall tp . HeapReadEvent !SMT.Term !(MemRepr tp) !Var
-    -- ^ `HeapReadEvent a w v` indicates that we read `w` bytes
-    -- from `a`, and assign the value returned to `v`.  The address `a` should be
-    -- in the heap.
+  | forall tp . NonStackReadEvent !SMT.Term !(MemRepr tp) !Var
+    -- ^ `NonStackReadEvent a w v` indicates that we read `w` bytes
+    -- from `a`, and assign the value returned to `v`.  The address `a` should not
+    -- be in the stack.
   | forall tp . MCOnlyStackWriteEvent !SMT.Term !(MemRepr tp) !SMT.Term
     -- ^ `MCOnlyStackWriteEvent a tp v` indicates that we write the `w` byte value `v`  to `a`.
     --
@@ -89,9 +89,9 @@ data Event
     -- The write affects the alloca pointed to by Allocaname.
     --
     -- This has side effects, so we record the event.
-  | forall tp . HeapWriteEvent !SMT.Term !(MemRepr tp) !SMT.Term
-    -- ^ `HeapWriteEvent a w v` indicates that we write the `w` byte value `v`  to `a`.  The
-    -- address `a` may be assumed to be in the heap.
+  | forall tp . NonStackWriteEvent !SMT.Term !(MemRepr tp) !SMT.Term
+    -- ^ `NonStackWriteEvent a w v` indicates that we write the `w` byte value `v`  to `a`.  The
+    -- address `a` should not be in the stack.
     --
     -- This has side effects, so we record the event.
   | forall ids . FetchAndExecuteEvent !EvalContext !(RegState (ArchReg X86_64) (Value X86_64 ids))
@@ -104,11 +104,11 @@ ppEvent (WarningEvent _) = "warning"
 ppEvent CmdEvent{} = "cmd"
 ppEvent MCOnlyStackReadEvent{} = "mconly_read"
 ppEvent JointStackReadEvent{} = "joint_stack_read"
-ppEvent HeapReadEvent{} = "heap_read"
+ppEvent NonStackReadEvent{} = "nonstack_read"
 --ppEvent CondReadEvent{} = "condRead"
 ppEvent MCOnlyStackWriteEvent{} = "mconly_write"
 ppEvent JointStackWriteEvent{} = "joint_stack_write"
-ppEvent HeapWriteEvent{} = "heap_write"
+ppEvent NonStackWriteEvent{} = "nonstack_write"
 ppEvent (FetchAndExecuteEvent _ _) = "fetchAndExecute"
 
 instance Show Event where
@@ -174,7 +174,9 @@ data EvalContext = EvalContext { evalLocals :: !(Map Word64 Text)
 getEvalContext :: MStateM EvalContext
 getEvalContext = do
   s <- get
-  pure $! EvalContext { evalLocals = locals s, evalRegs = initRegs s }
+  pure $! EvalContext { evalLocals = locals s
+                      , evalRegs = initRegs s
+                      }
 
 primEval :: EvalContext
          -> Value X86_64 ids tp
@@ -391,8 +393,7 @@ evalApp2SMT aid a = do
 -- | Declaration of even-parity function.
 evenParityDecl :: SMT.Command
 evenParityDecl =
-  let v = varTerm "v"
-      bitTerm = SMT.bvxor (SMT.extract 0 0 v) [ SMT.extract i i v | i <- [1..7] ]
+  let bitTerm = SMT.bvxor (SMT.extract 0 0 "v") [ SMT.extract i i "v" | i <- [1..7] ]
       r = SMT.eq [bitTerm, SMT.bvbinary 0 1]
    in SMT.defineFun "even_parity" [("v", SMT.bvSort 8)] SMT.boolSort r
 
@@ -426,7 +427,7 @@ assignRhs2SMT aid rhs = do
         Ann.JointStackAccess aname -> do
           addEvent $ JointStackReadEvent addrTerm tp t aname
         Ann.HeapAccess -> do
-          addEvent $ HeapReadEvent addrTerm tp t
+          addEvent $ NonStackReadEvent addrTerm tp t
 
     CondReadMem _ _cond _addr _def -> do
 --      when (end /= LittleEndian) $ do
@@ -461,7 +462,7 @@ stmt2SMT stmt =
         Ann.JointStackAccess aname -> do
           addEvent $ JointStackWriteEvent addrTerm tp valTerm aname
         Ann.HeapAccess -> do
-          addEvent $ HeapWriteEvent addrTerm tp valTerm
+          addEvent $ NonStackWriteEvent addrTerm tp valTerm
     CondWriteMem{} ->  error "stmt2SMT does not yet support conditional writes."
 
     InstructionStart off _mnem -> do

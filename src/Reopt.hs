@@ -726,10 +726,35 @@ toKnownFunABI fti =
              , kfReturn = retReg <$> ftiRetRegs fti
              }
 
+-- | Resolve annotations on funbction types from C header, and return
+-- warnings and the list of functions.
+resolveHeaderFuns :: Header -> ([String], AnnotatedFuns)
+resolveHeaderFuns hdr =  Map.foldrWithKey resolveTypeRegs ([],[]) (hdrFunDecls hdr)
+  where resolveTypeRegs :: BSC.ByteString -- ^ Name of function
+                        -> HdrFunDecl -- ^ Function types
+                        -> ([String],AnnotatedFuns)
+                        -> ([String],AnnotatedFuns)
+        resolveTypeRegs nm tp (prevWarnings,prev) =
+          if hfdVarArg tp then
+            let warn = "varargs unsupported; Remove " ++ BSC.unpack nm
+             in (warn:prevWarnings,prev)
+           else do
+            let s0 = ARS { arsPrev = []
+                         , arsNextGPP = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
+                         }
+            case (,) <$> runExcept (execStateT (argsToRegisters 0 (hfdArgs tp)) s0)
+                     <*> parseReturnType (hfdRet tp) of
+              Left e ->
+                (e:prevWarnings,prev)
+              Right (s,ret) ->
+                let fti = X86FunTypeInfo { ftiArgRegs = reverse (arsPrev s)
+                                         , ftiRetRegs = ret
+                                         }
+                 in (prevWarnings,(nm,fti):prev)
+
 -- | Try to recover function information from the information
 -- recovered during code discovery.
-getFns :: Monad m
-       => (String -> m ())
+getFns :: (String -> IO ())
        -- ^ Logging function for
        -> AddrSymMap 64
        -- ^ Map from address to symbol name
@@ -744,43 +769,29 @@ getFns :: Monad m
        -- ^ Personality information for system calls.
        -> DiscoveryState X86_64
           -- ^ Information about original binary recovered from static analysis.
-       -> m (RecoveredModule X86_64)
+       -> IO (RecoveredModule X86_64)
 getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
   when (isUsedPrefix unnamedFunPrefix addrSymMap) $
     error $ "No symbol in the binary may start with the prefix " ++ show unnamedFunPrefix ++ "."
 
   let mem = memory info
 
-  let resolveTypeRegs :: BSC.ByteString -- ^ Name of function
-                      -> HdrFunDecl -- ^ Function types
-                      -> ([String],AnnotatedFuns)
-                      -> ([String],AnnotatedFuns)
-      resolveTypeRegs nm tp (prevWarnings,prev) =
-        if hfdVarArg tp then
-          let warn = "varargs unsupported; Remove " ++ BSC.unpack nm
-           in (warn:prevWarnings,prev)
-         else do
-          let s0 = ARS { arsPrev = []
-                       , arsNextGPP = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
-                       }
-          case (,) <$> runExcept (execStateT (argsToRegisters 0 (hfdArgs tp)) s0)
-                   <*> parseReturnType (hfdRet tp) of
-            Left e ->
-              (e:prevWarnings,prev)
-            Right (s,ret) ->
-              let fti = X86FunTypeInfo { ftiArgRegs = reverse (arsPrev s)
-                                       , ftiRetRegs = ret
-                                       }
-               in (prevWarnings,(nm,fti):prev)
-
+  -- Resolve function type annotations from header, and report rwarnings.
   symTypeList <- do
-    let (warnings, l) = Map.foldrWithKey resolveTypeRegs ([],[]) (hdrFunDecls hdr)
+    let (warnings, l) = resolveHeaderFuns hdr
     mapM_ logger warnings
     pure l
 
+  -- Generate map from symbol names to known type.
+  --
+  -- This is used when we determine that a function jumps to an
+  -- undefined symbol via a relocation.
   let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
       symTypeMap = Map.fromList $ over _2 toKnownFunABI <$> symTypeList
 
+  -- Generate map from symbol names to known type.
+  --
+  -- This is used when we see a function jumps to a defined address.
   let addrTypeMap :: Map (MemSegmentOff 64) (KnownFunABI X86Reg)
       addrTypeMap = Map.fromList
         [ (addr, toKnownFunABI tp)

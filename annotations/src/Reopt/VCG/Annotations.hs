@@ -7,7 +7,7 @@ to JSON.
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.VCG.Annotations
-  ( ReoptVCGAnnotations(..)
+  ( ModuleAnnotations(..)
   , FunctionAnn(..)
   , BlockAnn(..)
   , ReachableBlockAnn(..)
@@ -25,6 +25,7 @@ module Reopt.VCG.Annotations
 import           Control.Monad
 import           Data.Aeson.Types ((.:), (.:!), (.!=), (.=), object)
 import qualified Data.Aeson.Types as Aeson
+import           Data.Bits
 import qualified Data.HashMap.Strict as HMap
 import           Data.HashSet (HashSet)
 import qualified Data.HashSet as HSet
@@ -112,6 +113,11 @@ data AllocaInfo = AllocaInfo
   , allocaBinaryOffset :: !Natural
     -- ^ Number of bytes from start of alloca to offset of stack
     -- pointer in machine code.
+    --
+    -- The stack grows down, so the actual memory addresses represented
+    -- are
+    -- @[rsp0 - allocaBinaryOffset, rsp0 - allocaBinaryOffset + allocaSize)@
+    -- where @rsp0@ denotes the value of @rsp@ when the function starts.
   , allocaSize :: !Natural
     -- ^ Size of allocation in bytes.
   , allocaExisting :: !Bool
@@ -429,10 +435,8 @@ blockAnnToJSON lbl (ReachableBlock blk) =
 
 -- | Annotations for a function.
 data FunctionAnn = FunctionAnn
-  { llvmFunName    :: !String
+  { llvmFunName :: !String
     -- ^ LLVM function name
-  , stackSize :: !Natural
-    -- ^ Number of bytes in binary stack size.
   , blocks :: !(HMap.HashMap String BlockAnn)
     -- ^ Maps LLVM labels to the block associated with that label.
   }
@@ -447,10 +451,8 @@ parseFunctionAnn :: LLVMVarMap
                  -> Aeson.Parser FunctionAnn
 parseFunctionAnn llvmMap (Aeson.Object v) = do
   fnm <- v .: "llvm_name"
-  sz  <- v .: "stack_size"
   bl <- Aeson.withArray "blocks" (traverse (parseJSONBlockAnn llvmMap) . V.toList) =<< v .: "blocks"
   pure $! FunctionAnn { llvmFunName = fnm
-                      , stackSize = sz
                       , blocks = HMap.fromList bl
                       }
 parseFunctionAnn _ _ =
@@ -460,18 +462,21 @@ instance Aeson.ToJSON FunctionAnn where
   toJSON fun =
     let blks = uncurry blockAnnToJSON <$> HMap.toList (blocks fun)
      in object [ "llvm_name"  .= llvmFunName fun
-               , "stack_size" .= stackSize fun
                , "blocks"     .= Aeson.Array (V.fromList blks)
                ]
 
 ------------------------------------------------------------------------
 -- Module annotations
 
-data ReoptVCGAnnotations = ReoptVCGAnnotations
+data ModuleAnnotations = ModuleAnnotations
   { llvmFilePath :: FilePath
     -- ^ Path to LLVM .bc or .ll file path
   , binFilePath    ::  String
-    -- ^ Binary file path that will be analyzed by Macaw
+    -- ^ Binary file path that will be analyzed by Macaw.
+  , pageSize :: !Natural
+    -- ^ The number of bytes in a page (must be a power of 2)
+  , stackGuardPageCount :: !Natural
+    -- ^ The number of unallocated pages beneath the stack.
   , functions :: [FunctionAnn]
   }
   deriving (Show, Generic)
@@ -480,22 +485,31 @@ data ReoptVCGAnnotations = ReoptVCGAnnotations
 parseAnnotations :: LLVMVarMap
                   -- ^ Map from LLVM identifiers to their associated type.
                  -> Aeson.Value
-                 -> Aeson.Parser ReoptVCGAnnotations
+                 -> Aeson.Parser ModuleAnnotations
 parseAnnotations llvmMap (Aeson.Object o) = do
   llvmPath <- o .: "llvm_path"
   binPath  <- o .: "binary_path"
+  psize <- o .:! "page_size" .!= 4096
+  guardCount <- o .:! "stack_guard_pages" .!= 1
+  when (psize .&. (psize - 1) /= 0) $ do
+    fail $ "Page size must be a power of 2."
+  when (guardCount == 0) $ do
+    fail $ "There must be at least one guard page."
   funs <- parseArray "functions" (parseFunctionAnn llvmMap) o
-  pure $! ReoptVCGAnnotations { llvmFilePath = llvmPath
-                              , binFilePath = binPath
-                              , functions = funs
-                              }
+  pure $! ModuleAnnotations { llvmFilePath = llvmPath
+                            , binFilePath  = binPath
+                            , pageSize     = psize
+                            , stackGuardPageCount = guardCount
+                            , functions    = funs
+                            }
 parseAnnotations _ _ =
   fail $ "Expected an object for the meta config."
 
-
-instance Aeson.ToJSON ReoptVCGAnnotations where
+instance Aeson.ToJSON ModuleAnnotations where
    toJSON ann =
-     object [ "llvm_path"   .= llvmFilePath ann
-            , "binary_path" .= binFilePath ann
-            , "functions"   .= functions ann
+     object [ "llvm_path"         .= llvmFilePath ann
+            , "binary_path"       .= binFilePath ann
+            , "page_size"         .= pageSize ann
+            , "stack_guard_pages" .= stackGuardPageCount ann
+            , "functions"         .= functions ann
             ]

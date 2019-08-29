@@ -1,4 +1,4 @@
 This directory contains some files to test intrinsics, inline
-assembly, and calling conventions.
+assembly, and conventions.
 
 It is not directly needed by Reopt.

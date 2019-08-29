@@ -1,6 +1,7 @@
 This is a small program that runs without a standard library.
 
-It prints out the arguments, environment, then the AUXV vector.
+It prints out the arguments, environment, then the Elf auxilary
+vector.
 
 It's primary use is to help one debug the records constructed by the
 Linux static process loader.  It can only be built on Linux.

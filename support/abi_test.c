@@ -83,11 +83,6 @@ __m256d add_ymm9(__m256d x0, __m256d x1,
     return r;
 }
 
-// This returns in zmm0.
-__m512d set_512_pd() {
-    return _mm512_set_pd (7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
-
-}
 
 struct uint64_pair {
     uint64_t x;
@@ -134,4 +129,27 @@ struct return_quad add_rq(struct uint64_pair s) {
 	, .d1 = 7
 	};
     return r;
+}
+
+typedef double __m512d __attribute__((__vector_size__(64)));
+
+#define DEFAULT_FN_ATTRS512 __attribute__((__always_inline__, __nodebug__, __min_vector_width__(512)))
+
+static __inline__ __m512d DEFAULT_FN_ATTRS512
+mm512_set_pd (double __A, double __B, double __C, double __D,
+        double __E, double __F, double __G, double __H)
+{
+  return __extension__ (__m512d)
+  { __H, __G, __F, __E, __D, __C, __B, __A };
+}
+
+// This returns in zmm0.
+__m512d set_512_pd() {
+    return mm512_set_pd (7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
+
+}
+
+
+__m512d copy(__m512d a) {
+    return a;
 }
