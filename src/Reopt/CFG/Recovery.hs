@@ -84,6 +84,7 @@ data RecoverState ids = RS { rsMemory        :: !(Memory 64)
                            , rsSyscallPersonality  :: !SyscallPersonality
                              -- ^ System call personality
                            , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
+                             -- ^ Assignments we need to map to function representation.
                            , rsCurrentFunctionType :: !X86FunTypeInfo
                              -- ^ The type of the function being recovered.
                            , rsFunctionArgs
@@ -485,7 +486,7 @@ mkBlock addr preds phiVars tm regMap = do
                     }
 
 recoverX86TermStmt :: forall ids
-                   .  DemandedUseMap
+                   .  X86BlockRegMap
                    -- ^ Map from address to registers that address will read.
                    -> [MemSegmentOff 64]
                    -- ^ Predecessors for this block
@@ -625,7 +626,7 @@ evalReturnVars retInfo = do
   foldrM mkRetReg ([], MapF.empty) retInfo
 
 recoverBlock :: forall ids
-             .  DemandedUseMap
+             .  X86BlockRegMap
                 -- ^ Map from address to registers that address will read.
              -> [MemSegmentOff 64]
              -- ^ Predecessors for this block
@@ -836,7 +837,7 @@ allocateStackFrame b s = do
 -- recoverFunction
 
 recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
-                  -> DemandedUseMap
+                  -> X86BlockRegMap
                   -> FunPredMap 64
                   -> RecoveredBlockInfo
                   -> MemSegmentOff 64

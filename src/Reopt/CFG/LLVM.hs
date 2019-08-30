@@ -1046,7 +1046,6 @@ defineFunction archOps f = do
 
   let (finalFunState, finalBlocks) = mapAccumL (addLLVMBlock archOps ctx) initFunState (fnBlocks f)
 
-
   -- Update intrins map
   put (funIntrinsicMap finalFunState)
 

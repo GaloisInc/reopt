@@ -10,8 +10,8 @@
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
-  , DemandedUseMap
-  , ppDemandedUseMap
+  , X86BlockRegMap
+  , ppX86BlockRegMap
   , registerUse
     -- * Type information
   , X86FunTypeInfo(..)
@@ -31,6 +31,7 @@ import           Data.Maybe
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
+import           Data.Parameterized.TraversableFC
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word
@@ -198,18 +199,20 @@ type RegisterUseM ids a = State (RegisterUseState ids) a
 -- Phase one functions
 -- ----------------------------------------------------------------------------------------
 
+-- | Return the register and assignment dependencies needed to
 valueUses :: Value X86_64 ids tp -> RegisterUseM ids (RegDeps X86Reg ids)
 valueUses = zoom assignmentCache . foldValueCached fns
-  where fns = ValueFold { foldBoolValue  = \_   -> (mempty, mempty)
-                        , foldBVValue    = \_ _ -> (mempty, mempty)
-                        , foldAddr       = \_ -> (mempty,mempty)
-                        , foldIdentifier = \_ -> (mempty, mempty)
+  where fns = ValueFold { foldCValue     = \_   -> (mempty, mempty)
                         , foldInput      = \r -> (mempty, Set.singleton (Some r))
                         , foldAssign     = \asgn (assigns, regs) ->
                               (Set.insert (Some asgn) assigns, regs)
                         }
 
-demandValue :: MemSegmentOff 64 -> Value X86_64 ids tp -> RegisterUseM ids ()
+-- | Record the values needed to compute the given value.
+demandValue :: MemSegmentOff 64
+               -- ^ Address of current block
+            -> Value X86_64 ids tp
+            -> RegisterUseM ids ()
 demandValue addr v = do
   (assigns, regs) <- valueUses v
   assignmentUses %= Set.union assigns
@@ -223,7 +226,7 @@ registerValues :: Functor t
                => RegState X86Reg (Value X86_64 ids)
                -> t (Some X86Reg)
                -> t (Some (Value X86_64 ids))
-registerValues regState = fmap (\(Some r) -> Some (regState^.boundValue r))
+registerValues regs = fmap (\(Some r) -> Some (regs^.boundValue r))
 
 
 x86TermStmtValues :: SyscallPersonality
@@ -259,23 +262,35 @@ clearRegDeps :: MemSegmentOff 64 -> Some X86Reg -> RegisterUseM ids ()
 clearRegDeps addr r = blockInitDeps . ix addr %= Map.insert r (Set.empty, Set.empty)
 
 -- | Return values that must be evaluated to execute side effects.
-stmtDemandedValues :: DemandContext arch
-                   -> Stmt arch ids
-                   -> [Some (Value arch ids)]
-stmtDemandedValues ctx stmt = demandConstraints ctx $
+demandStmtValues :: DemandContext X86_64
+                 -> ArchSegmentOff X86_64
+                    -- ^ Address of block this statement is in.
+                 -> Stmt X86_64 ids
+                    -- ^ Statement we want to demand.
+                 -> RegisterUseM ids ()
+demandStmtValues ctx blockAddr stmt = demandConstraints ctx $
   case stmt of
     AssignStmt a
-      | hasSideEffects ctx (assignRhs a) -> do
-          foldMapFC (\v -> [Some v]) (assignRhs a)
+      | hasSideEffects ctx (assignRhs a) ->
+          traverseFC_ (\v -> demandValue blockAddr v) (assignRhs a)
       | otherwise ->
-          []
-    WriteMem addr _ v -> [Some addr, Some v]
-    CondWriteMem cond addr _ v -> [Some cond, Some addr, Some v]
-    InstructionStart _ _ -> []
+          pure ()
+    WriteMem addr _ v -> do
+      demandValue blockAddr addr
+      demandValue blockAddr v
+    CondWriteMem cond addr _ v -> do
+      demandValue blockAddr cond
+      demandValue blockAddr addr
+      demandValue blockAddr v
+    InstructionStart _ _ ->
+      pure ()
     -- Comment statements have no specific value.
-    Comment _ -> []
-    ExecArchStmt astmt -> foldMapF (\v -> [Some v]) astmt
-    ArchState _addr assn -> foldMapF (\v -> [Some v]) assn
+    Comment _ ->
+      pure ()
+    ExecArchStmt astmt -> do
+      traverseF_ (demandValue blockAddr) astmt
+    ArchState _addr _assn -> do
+      pure ()
 
 -- | This function figures out what the block requires (i.e.,
 -- addresses that are stored to, and the value stored), along with a
@@ -293,8 +308,7 @@ summarizeBlock mem blk = do
   funTypeMap <- gets functionArgs
   curFTI  <- gets $ currentFunctionType
   let ctx = x86DemandContext
-  traverse_ (\(Some r) -> demandValue addr r)
-            (concatMap (stmtDemandedValues ctx) (pblockStmts blk))
+  traverse_ (demandStmtValues ctx addr) (pblockStmts blk)
   case pblockTermStmt blk of
     ParsedJump regs _ ->
       addRegisterUses addr regs x86StateRegs
@@ -321,8 +335,10 @@ summarizeBlock mem blk = do
       entries <- traverse (\(MapF.Pair r v) -> (Some r,) <$> valueUses v) (MapF.toList regs)
       blockInitDeps %= Map.insertWith (Map.unionWith mappend) addr (Map.fromList entries)
     ParsedReturn regs -> do
-      traverse_ (\(Some r) -> demandValue addr r) $
-        registerValues regs (fmap argReg (ftiArgRegs curFTI))
+      let demandRet ri =
+            case retReg ri of
+              Some r -> demandValue addr (regs^.boundValue r)
+      traverse_ demandRet (ftiRetRegs curFTI)
     ParsedArchTermStmt tstmt regs _ -> do
       traverse_ (\(Some r) -> demandValue addr r) $
         x86TermStmtValues sysp tstmt regs
@@ -365,16 +381,17 @@ summarizeIter mem ist seen = do
         summarizeIter mem ist (Set.insert addr seen)
 
 -- | Map from addresses to the registers they depend on
-type DemandedUseMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
+type X86BlockRegMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
 
-type FixState ids = (Set (Some (AssignId ids)), DemandedUseMap)
+-- | The set of demanded assignments and a map from block addresses to registers demanded.
+type FixState ids = (Set (Some (AssignId ids)), X86BlockRegMap)
 
 doOne :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg ids))
       -> FunPredMap 64
          -- ^ Map addresses to the predessor blocks.
       -> FixState ids
          -- ^ State that we are computing fixpint for.
-      -> DemandedUseMap
+      -> X86BlockRegMap
          -- ^ Remaining registers to compute demanded use map
       -> Set (Some X86Reg)
          -- ^ Set of new registers the target block depends on.
@@ -404,18 +421,19 @@ calculateFixpoint :: Map (MemSegmentOff 64) (Map (Some X86Reg) (RegDeps X86Reg i
                   -> FunPredMap 64
                      -- ^ Map addresses to the predessor blocks.
                   -> FixState ids
-                     -- ^ Map addresses to the register they need.
-                  -> DemandedUseMap
+                  -> X86BlockRegMap
+                     -- ^ Map addresses to the input registers they use.
                   -> FixState ids
 calculateFixpoint bid predMap s new =
   case Map.maxViewWithKey new of
     Nothing -> s
-    Just ((currAddr, newRegs), rest) -> do
-      doOne bid predMap s rest newRegs $ fromMaybe [] $ Map.lookup currAddr predMap
+    Just ((currAddr, newRegs), rest) ->
+      let predAddrs = Map.findWithDefault [] currAddr predMap
+       in doOne bid predMap s rest newRegs predAddrs
 
 -- | Pretty print a demanded use map
-ppDemandedUseMap :: DemandedUseMap -> Doc
-ppDemandedUseMap m = vcat (ppEntry <$> Map.toList m)
+ppX86BlockRegMap :: X86BlockRegMap -> Doc
+ppX86BlockRegMap m = vcat (ppEntry <$> Map.toList m)
   where ppEntry :: (MemSegmentOff 64, Set (Some X86Reg)) -> Doc
         ppEntry (addr, regs) = text (show addr) <> char ':' <+> hsep (ppReg <$> Set.toList regs)
         ppReg :: Some X86Reg -> Doc
@@ -435,7 +453,7 @@ registerUse :: Memory 64
             -> FunPredMap 64
                -- ^ Predecessors for each block in function
             -> ( Set (Some (AssignId ids))
-               , DemandedUseMap
+               , X86BlockRegMap
                )
 registerUse mem sysp fArgs disFunInfo ftp predMap = do
   let addr = discoveredFunAddr disFunInfo
