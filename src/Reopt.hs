@@ -43,6 +43,8 @@ module Reopt
   , discoverX86Elf
     -- * Utility
   , copyrightNotice
+    -- * Re-exports
+  , Data.Macaw.Memory.ElfLoader.LoadOptions(..)
   ) where
 
 import           Control.Exception
@@ -291,7 +293,7 @@ getElfArchInfo e =
 --
 --  Note. This prints warnings to stderr
 runCompleteDiscovery :: LoadOptions
-                     -- ^ Options controlling loading
+                     -- ^ Option to load the binary at the given address
                      -> DiscoveryOptions
                      -- ^ Options controlling discovery
                      -> Elf (ArchAddrWidth arch)
@@ -330,7 +332,8 @@ runCompleteDiscovery loadOpts disOpt e ainfo includeAddr excludeAddr = do
 
 -- | Discover code in the binary identified by the given path.
 discoverBinary :: FilePath
-               -> LoadOptions -- ^ Options controlling loading
+               -> LoadOptions
+                  -- ^ Option to load the binary at the given address
                -> DiscoveryOptions -- ^ Options controlling discovery
                -> [String] -- ^ Included addresses
                -> [String] -- ^ Excluded addresses
@@ -859,7 +862,8 @@ getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
 --
 --  Note. This prints warnings to stderr
 discoverX86Elf :: FilePath -- ^ Path to binary for exploring CFG
-               -> LoadOptions -- ^ Options controling loading
+               -> LoadOptions
+               -- ^ Option to load the binary at the given address
                -> DiscoveryOptions -- ^ Options controlling discovery
                -> [String] -- ^ Included addresses (if empty then all addresses included)
                -> [String] -- ^ Excluded addresses
@@ -880,7 +884,8 @@ discoverX86Elf path loadOpts disOpt includeAddr excludeAddr = do
 --
 --  Note. This prints warnings to stderr
 discoverX86Binary :: FilePath -- ^ Path to binary for exploring CFG
-                  -> LoadOptions -- ^ Options controling loading
+                  -> LoadOptions
+                  -- ^ Option to load the binary at the given address
                   -> DiscoveryOptions -- ^ Options controlling discovery
                   -> [String] -- ^ Included addresses
                   -> [String] -- ^ Excluded addresses

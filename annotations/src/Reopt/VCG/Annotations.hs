@@ -5,14 +5,16 @@ annotation information, and routines for serializing and deserializing
 to JSON.
 -}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.VCG.Annotations
   ( ModuleAnnotations(..)
   , FunctionAnn(..)
   , BlockAnn(..)
+  , MCAddr
   , ReachableBlockAnn(..)
   , AllocaInfo(..)
-  , AllocaName(..)
+  , LocalIdent(..)
   , BlockEvent(..)
   , MemoryAccessType(..)
   , Expr(..)
@@ -55,21 +57,11 @@ fields = HSet.fromList
 
 -- | Parse a YAML and fail if there are any fields not in the set.
 withFixedObject :: String
-                -> FieldList
                 -> (Aeson.Object -> Aeson.Parser a)
                 -> Aeson.Value
                 -> Aeson.Parser a
-withFixedObject nm flds f (Aeson.Object o) =
-  case HMap.foldrWithKey badFields [] o of
-    [] -> f o
-    l -> fail $ "Unexpected fields in " ++ nm ++ ": " ++ show l
-  where badFields :: Text -> Aeson.Value -> [Text] -> [Text]
-        badFields fld _ l =
-          if HSet.member fld flds then
-            l
-           else
-            fld:l
-withFixedObject _ _ _ _ = fail "Expected an object."
+withFixedObject _nm f (Aeson.Object o) = f o
+withFixedObject nm _ _ = fail $ "Expected an object for " ++ nm ++ "."
 
 -- | @optValList nm l@ generates a binding from @nm@ to @l@ if @l@ is
 -- non-empty, and leaves it blank otherwise.
@@ -79,37 +71,43 @@ optValList :: Aeson.ToJSON a => Text -> [a] -> [(Text,Aeson.Value)]
 optValList _ [] = []
 optValList nm l = [nm .= l]
 
-------------------------------------------------------------------------
--- AllocaName
+-- | @optVal nm v default@ generates a binding from @nm@ to @v@ if @v@
+-- is distinct from @default@, and the empty list otherwise.
+optVal :: (Eq a, Aeson.ToJSON a) => Text -> a -> a -> [(Text,Aeson.Value)]
+optVal nm v d | v == d = []
+              | otherwise = [nm .= v]
 
--- | Identifier associated with an LLVM allocation.
-newtype AllocaName = AllocaName { allocaNameText :: Text }
+------------------------------------------------------------------------
+-- LocalIdent
+
+-- | A local LLVM identifier
+newtype LocalIdent = LocalIdent { allocaNameText :: Text }
   deriving (Eq, Ord)
 
-instance IsString AllocaName where
-  fromString = AllocaName . Text.pack
+instance IsString LocalIdent where
+  fromString = LocalIdent . Text.pack
 
-instance Show AllocaName where
-  show (AllocaName nm) = Text.unpack nm
+instance Show LocalIdent where
+  show (LocalIdent nm) = Text.unpack nm
 
-instance Aeson.FromJSON AllocaName where
-  parseJSON (Aeson.String nm) = pure $ AllocaName nm
+instance Aeson.FromJSON LocalIdent where
+  parseJSON (Aeson.String nm) = pure $ LocalIdent nm
   parseJSON (Aeson.Number n)
     | Just off <- S.toBoundedInteger n :: Maybe Word64 =
-        pure $ AllocaName (Text.pack (show off))
+        pure $ LocalIdent (Text.pack (show off))
   parseJSON v =
     fail $ "Allocation name Expected integer or string, not " ++ show v
 
-instance Aeson.ToJSON AllocaName where
-  toJSON (AllocaName nm) = Aeson.String nm
+instance Aeson.ToJSON LocalIdent where
+  toJSON (LocalIdent nm) = Aeson.String nm
 
 ------------------------------------------------------------------------
 -- AllocaInfo
 
--- | Annotes an event at a given address.
+-- | Provides a mapping between LLVM alloca and machine code stack usage.
 data AllocaInfo = AllocaInfo
-  { allocaName :: !AllocaName
-    -- ^ Name of allocation.
+  { allocaIdent :: !LocalIdent
+    -- ^ The LLVM identifier initialized by the allocation.
   , allocaBinaryOffset :: !Natural
     -- ^ Number of bytes from start of alloca to offset of stack
     -- pointer in machine code.
@@ -126,25 +124,22 @@ data AllocaInfo = AllocaInfo
   }
   deriving (Show)
 
-allocaInfoFields :: FieldList
-allocaInfoFields = fields ["name", "offset", "size", "existing"]
-
 instance Aeson.FromJSON AllocaInfo where
-  parseJSON = withFixedObject "AllocaInfo" allocaInfoFields $ \v -> do
-    nm <- v .: "name"
+  parseJSON = withFixedObject "AllocaInfo" $ \v -> do
+    nm <- v .: "llvm_ident"
     o <- v .: "offset"
     sz <- v .: "size"
     existing <- (v .:! "existing") .!= True
     when (sz > o) $
       fail $ "Allocation size " ++ show sz ++ " must not be greater than offset " ++ show o ++ "."
-    pure AllocaInfo { allocaName = nm
+    pure AllocaInfo { allocaIdent = nm
                     , allocaBinaryOffset = o
                     , allocaSize = sz
                     , allocaExisting = existing
                     }
 
 instance Aeson.ToJSON AllocaInfo where
-  toJSON a = Aeson.object [ "name" .= allocaName a
+  toJSON a = Aeson.object [ "llvm_ident" .= allocaIdent a
                           , "offset" .= allocaBinaryOffset a
                           , "size"   .= allocaSize a
                           , "existing" .= allocaExisting a
@@ -157,7 +152,7 @@ data MemoryAccessType
    = BinaryOnlyAccess
      -- ^ The instruction at the address updates the binary
      -- stack, but does not affect LLVM memory.
-   | JointStackAccess !AllocaName
+   | JointStackAccess !LocalIdent
      -- ^ The instructions at the address access the LLVM allocation
      -- associated with the given name.
    | HeapAccess
@@ -182,42 +177,52 @@ renderMemoryAccessType (JointStackAccess a) = [ "type" .= Aeson.String "joint_st
 renderMemoryAccessType HeapAccess = ["type" .= Aeson.String "heap_access" ]
 
 ------------------------------------------------------------------------
--- BlockEvent
+-- MCAddr
 
-type MCAddr = Word64
+-- | This represents the address of code.
+--
+-- For non-position independent executables, it is an absolute address.
+--
+-- For position independent executables and libraries, it is relative
+-- to the base address.
+--
+-- For object files, it is the offset into the .text section.
+newtype MCAddr = MCAddr { mcAddr :: Word64 }
+  deriving (Eq, Ord, Num, Enum, Real, Integral)
 
-newtype JSONAddr = JSONAddr { mcAddr :: MCAddr }
+instance Show MCAddr where
+  showsPrec _ (MCAddr w) = ("0x" ++) . showHex w
 
-instance Aeson.FromJSON JSONAddr where
+instance Aeson.FromJSON MCAddr where
   parseJSON (Aeson.String txt)
     | Just num <- Text.stripPrefix "0x" txt
     , Right (w,"") <- Text.hexadecimal num
     , w <= toInteger (maxBound :: Word64) = do
-        pure $! JSONAddr (fromInteger w)
+        pure $! MCAddr (fromInteger w)
   parseJSON (Aeson.Number v)
     | S.isInteger v
     , Just n <- S.toBoundedInteger v =
-        pure $! JSONAddr n
+        pure $! MCAddr n
   parseJSON v = do
     fail $ "Address expected a 64-bit number, received " ++ show v
 
-instance Aeson.ToJSON JSONAddr where
-  toJSON (JSONAddr a) = Aeson.String ("0x" <> Text.pack (showHex a ""))
+instance Aeson.ToJSON MCAddr where
+  toJSON (MCAddr a) = Aeson.String ("0x" <> Text.pack (showHex a ""))
+
+------------------------------------------------------------------------
+-- BlockEvent
 
 -- | Annotes an event at a given address.
 data BlockEvent = BlockEvent
   { eventAddr :: !MCAddr
+    -- ^ Address in machine code where event occurs.
   , eventInfo :: !MemoryAccessType
   }
   deriving (Show)
 
--- | Lift of fields
-blockEventFields :: FieldList
-blockEventFields = fields ["addr", "type", "alloca"]
-
 instance Aeson.FromJSON BlockEvent where
-  parseJSON = withFixedObject "BlockEvent" blockEventFields $ \v -> do
-    addr <- mcAddr <$> v .: "addr"
+  parseJSON = withFixedObject "BlockEvent" $ \v -> do
+    addr <- v .: "addr"
     info <- parseMemoryAccessType v
     pure $ BlockEvent { eventAddr = addr
                       , eventInfo = info
@@ -225,7 +230,7 @@ instance Aeson.FromJSON BlockEvent where
 
 instance Aeson.ToJSON BlockEvent where
   toJSON e = object
-    $  ["addr" .= JSONAddr (eventAddr e) ]
+    $  ["addr" .= eventAddr e ]
     ++ renderMemoryAccessType (eventInfo e)
 
 ------------------------------------------------------------------------
@@ -351,7 +356,7 @@ data ReachableBlockAnn
       -- ^ Address of start of block in machine code
     , blockCodeSize :: !Word64
       -- ^ Number of bytes in block
-    , blockX87Top  :: !Int
+    , blockX87Top  :: !Word8
       -- ^ The top of x87 stack (empty = 7, full = 0)
     , blockDFFlag  :: !Bool
       -- ^ The value of the DF flag (default = False)
@@ -394,9 +399,9 @@ parseJSONBlockAnn llvmMap (Aeson.Object v) = do
     False -> do
       pure $ (lbl, UnreachableBlock)
     True -> do
-      addr <- mcAddr <$> v .: "addr"
+      addr <- v .: "addr"
       sz   <- mcAddr <$> v .: "size"
-      when (addr + sz < addr) $ do
+      when (mcAddr addr + sz < mcAddr addr) $ do
         fail $ "Expected end of block computation to not overflow."
       x87Top  <- v .:! "x87_top"    .!= 7
       dfFlag  <- v .:! "df_flag"    .!= False
@@ -420,12 +425,12 @@ blockAnnToJSON lbl UnreachableBlock =
            ]
 blockAnnToJSON lbl (ReachableBlock blk) =
   object
-    $ [ "label"  .= lbl
-      , "addr"   .= JSONAddr (blockAddr blk)
-      , "stack_size" .= blockCodeSize blk
-      , "x87_top"    .= blockX87Top blk
-      , "df_flag"    .= blockDFFlag blk
+    $ [ "label"      .= lbl
+      , "addr"       .= blockAddr blk
+      , "size"       .= blockCodeSize blk
       ]
+    <> optVal     "x87_top"       (blockX87Top blk) 7
+    <> optVal     "df_flag"       (blockDFFlag blk) False
     <> optValList "preconditions" (JSONExpr <$> blockPreconditions blk)
     <> optValList "allocas"       (blockAllocas blk)
     <> optValList "events"        (blockEvents  blk)

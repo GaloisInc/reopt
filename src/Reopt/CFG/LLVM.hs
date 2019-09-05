@@ -502,9 +502,6 @@ ashr = bitop (L.Ashr False)
 lshr :: L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 lshr = bitop (L.Lshr False)
 
-alloca :: L.Type -> Maybe (L.Typed L.Value) -> Maybe Int -> BBLLVM arch (L.Typed L.Value)
-alloca tp cnt align = fmap (L.Typed (L.PtrTo tp)) $ evalInstr $ L.Alloca tp cnt align
-
 -- | Generate a non-tail call that returns a value
 call :: (HasCallStack, HasValue v)
      => v
@@ -733,20 +730,22 @@ resolveLoadNameAndType memRep =
         error $ "Vector width of " ++ show n ++ " is too large."
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
+-- | Convert an assignment to a llvm expression
 rhsToLLVM :: (LLVMArchConstraints arch, HasCallStack)
-          => FnAssignRhs arch (FnValue arch) tp
-          -> BBLLVM arch (L.Typed L.Value)
-rhsToLLVM rhs = do
+          => FnAssignId -- ^ Value being assigned.
+          -> FnAssignRhs arch (FnValue arch) tp
+          -> BBLLVM arch ()
+rhsToLLVM lhs rhs =
   case rhs of
-    FnEvalApp app ->
-      appToLLVM app
+    FnEvalApp app -> do
+      llvmRhs <- appToLLVM app
+      setAssignIdValue lhs llvmRhs
     FnSetUndefined tp -> do
-      let typ = typeToLLVMType tp
-      return (L.Typed typ L.ValUndef)
+      setAssignIdValue lhs (L.Typed (typeToLLVMType tp) L.ValUndef)
     FnReadMem ptr typ -> do
-      let llvm_typ = typeToLLVMType typ
-      p <- llvmAsPtr ptr llvm_typ
-      fmap (L.Typed llvm_typ) $ evalInstr (L.Load p Nothing Nothing)
+      p <- llvmAsPtr ptr (typeToLLVMType typ)
+      v <- evalInstr (L.Load p Nothing Nothing)
+      setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
     FnCondReadMem memRepr cond addr passthru -> do
       (loadName, eltType) <- resolveLoadNameAndType memRepr
       let intr = llvmMaskedLoad 1 loadName eltType
@@ -757,18 +756,15 @@ rhsToLLVM rhs = do
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru
       rv <- call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
       r <- evalInstr $ L.ExtractElt rv (L.ValInteger 0)
-      pure (L.Typed eltType r)
-      --  FloatMemRepr :: !(FloatInfoRepr f) -> !Endianness -> MemRepr (FloatType f)
-      --  PackedVecMemRepr :: !(NatRepr n) -> !(MemRepr tp) -> MemRepr (VecType n tp)
-
+      setAssignIdValue lhs (L.Typed eltType r)
     FnAlloca v -> do
-      v' <- mkLLVMValue v
-      alloc_ptr <- alloca (L.iT 8) (Just v') Nothing
-      convop L.PtrToInt alloc_ptr (L.iT 64)
+      llvmCnt <- mkLLVMValue v
+      ptr <- evalInstr $ L.Alloca (L.iT 8) (Just llvmCnt) Nothing
+      bvVal <- convop L.PtrToInt (L.Typed (L.PtrTo (L.iT 8)) ptr) (L.iT 64)
+      setAssignIdValue lhs bvVal
     FnEvalArchFn f -> do
       fn <- gets $ archFnCallback  . archFns
-      fn f
-
+      setAssignIdValue lhs  =<< fn f
 
 resolveFunctionEntry :: LLVMArchConstraints arch
                      => FnValue arch (BVType (ArchAddrWidth arch))
@@ -794,8 +790,7 @@ stmtToLLVM stmt = do
   case stmt of
    FnComment _ -> return ()
    FnAssignStmt (FnAssignment lhs rhs) -> do
-     llvm_rhs <- rhsToLLVM rhs
-     setAssignIdValue lhs llvm_rhs
+     rhsToLLVM lhs rhs
    FnWriteMem addr v -> do
      llvm_v <- mkLLVMValue v
      llvm_ptr <- llvmAsPtr addr (L.typedType llvm_v)
@@ -830,8 +825,8 @@ stmtToLLVM stmt = do
      fn <- gets $ archStmtCallback . archFns
      fn astmt
 
-llvmBlockLabel :: FnBlockLabel -> L.BlockLabel
-llvmBlockLabel = L.Named . L.Ident . fnBlockLabelUnpack
+llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
+llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
 
 termStmtToLLVM :: (LLVMArchConstraints arch, HasCallStack)
                => FnTermStmt arch
@@ -896,7 +891,7 @@ toBasicBlock phiMap res = L.BasicBlock { L.bbLabel = Just $! regBlockLabel res
 -- | Add a phi var with the node info so that we have a ident to reference
 -- it by and queue up work to assign the value later.
 addPhiBinding :: (MemWidth (ArchAddrWidth arch), HasCallStack)
-              => [FnBlockLabel]
+              => [FnBlockLabel w]
               -> ArchReg arch tp
               -> FnPhiVar tp
               -> BBLLVM arch ()

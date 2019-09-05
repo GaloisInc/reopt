@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 module VCGMacaw
-  ( blockEvents
+  ( instructionEvents
   , Event(..)
   , ppEvent
   , evenParityDecl
@@ -71,7 +71,7 @@ data Event
     -- ^ `MCOnlyReadEvent a w v` indicates that we read `w` bytes
     -- from `a`, and assign the value returned to `v`.  This only
     -- appears in the binary code.
-  | forall tp . JointStackReadEvent !SMT.Term !(MemRepr tp) !Var !Ann.AllocaName
+  | forall tp . JointStackReadEvent !SMT.Term !(MemRepr tp) !Var !Ann.LocalIdent
     -- ^ `JointReadEvent a w v llvmAlloca` indicates that we read `w` bytes from `a`,
     -- and assign the value returned to `v`.  This appears in the both the binary
     -- and LLVM.  The alloca name refers to the LLVM allocation this is part of,
@@ -84,7 +84,7 @@ data Event
     -- ^ `MCOnlyStackWriteEvent a tp v` indicates that we write the `w` byte value `v`  to `a`.
     --
     -- This has side effects, so we record the event.
-  | forall tp . JointStackWriteEvent !SMT.Term !(MemRepr tp) !SMT.Term !Ann.AllocaName
+  | forall tp . JointStackWriteEvent !SMT.Term !(MemRepr tp) !SMT.Term !Ann.LocalIdent
     -- ^ `JointStackWriteEvent a w v` indicates that we write the `w` byte value `v`  to `a`.
     -- The write affects the alloca pointed to by Allocaname.
     --
@@ -120,12 +120,10 @@ instance Show Event where
 
 -- | State for machine code.
 data MState = MState
-  { addrEventAnnMap :: !(Map (MemSegmentOff 64) Ann.MemoryAccessType)
-    -- ^ Map from addresses to annotations of events on that address.
-  , blockStartAddr :: !(MemSegmentOff 64)
-    -- ^ Initial address of block.
-  , mcCurAddr :: !(MemSegmentOff 64)
+  { mcCurAddr :: !(MemSegmentOff 64)
     -- ^ Current address of instruction.
+  , mcEventInfo :: !(Maybe Ann.MemoryAccessType)
+    -- ^ Information about the current instruction or nothing.
   , initRegs :: !(RegState X86Reg (Const SMT.Term))
   , locals   :: !(Map Word64 Text)
     -- ^ Maps assignment indices to the variable name.
@@ -156,11 +154,12 @@ addWarning msg = addEvent $ WarningEvent msg
 
 getCurrentEventInfo :: MStateM Ann.MemoryAccessType
 getCurrentEventInfo = do
-  m <- gets addrEventAnnMap
-  a <- gets mcCurAddr
-  case Map.lookup a m of
+  m <- gets mcEventInfo
+  case m of
     Just info -> pure info
-    Nothing -> MStateM $ throwError $ "Unannotated memory event at " ++ show a
+    Nothing -> do
+      a <- gets mcCurAddr
+      MStateM $ throwError $ "Unannotated memory event" ++ show a
 
 ------------------------------------------------------------------------
 -- Translation
@@ -466,10 +465,8 @@ stmt2SMT stmt =
     CondWriteMem{} ->  error "stmt2SMT does not yet support conditional writes."
 
     InstructionStart off _mnem -> do
-      blockAddr <- gets blockStartAddr
-      let Just addr = incSegmentOff blockAddr (toInteger off)
-      modify $ \s -> s { mcCurAddr = addr }
-      addEvent $ InstructionEvent addr
+      when (off /= 0) $ do
+        error "Expected to handle a single instruction."
     Comment _s -> return ()                 -- NoOps
     ArchState _a _m -> return ()             -- NoOps
     ExecArchStmt{} -> error "stmt2SMT unsupported statement."
@@ -492,33 +489,36 @@ block2SMT b = do
   mapM_ stmt2SMT (blockStmts b)
   termStmt2SMT (blockTerm b)
 
-blockEvents :: Map (MemSegmentOff 64) Ann.MemoryAccessType
-               -- ^ Map from addresses to annotations of events on that address.
-            -> RegState X86Reg (Const SMT.Term)
-               -- ^ Initial values for registers
-            -> Integer
-               -- ^ Next Local variable index
-            -> ExploreLoc
-               -- ^ Location to explore
-            -> Either String ([Event], Integer, MemWord 64)
-blockEvents evtMap regs nextLocal loc = runST $ do
+instructionBlock :: ExploreLoc
+                 -> Either String (Some (Block X86_64), MemWord 64)
+instructionBlock loc = runST $ do
   Some stGen <- newSTNonceGenerator
-  let addr = loc_ip loc
-  mBlock <- runExceptT $ translateInstruction stGen (initX86State loc) addr
-  case mBlock of
+  mr <- runExceptT $ translateInstruction stGen (initX86State loc) (loc_ip loc)
+  case mr of
     Left err ->
-      error $ "Translation error: " ++ show err
+      pure $ Left $ "Translation error: " ++ show err
     Right (b, sz) -> do
-      let ms0 = MState { addrEventAnnMap = evtMap
-                       , blockStartAddr = addr
-                       , mcCurAddr = addr
-                       , initRegs = regs
-                       , locals = Map.empty
-                       , nextLocalIndex = nextLocal
-                       , revEvents = []
-                       }
-      case runMStateM ms0 (block2SMT b) of
-        Left e -> do
-          pure $! Left e
-        Right ms1 ->
-          pure $! Right (reverse (revEvents ms1), nextLocalIndex ms1, sz)
+      pure $ Right $ (Some b, sz)
+
+instructionEvents :: Map (MemSegmentOff 64) Ann.MemoryAccessType
+                  -- ^ Map from addresses to annotations of events on that address.
+                  -> RegState X86Reg (Const SMT.Term)
+                  -- ^ Initial values for registers
+                  -> Integer
+                  -- ^ Next Local variable index
+                  -> ExploreLoc
+                  -- ^ Location to explore
+                  -> Either String ([Event], Integer, MemWord 64)
+instructionEvents evtMap regs nextLocal loc = do
+  (Some b, sz) <- instructionBlock loc
+  let addr = loc_ip loc
+  let ms0 = MState { mcCurAddr = addr
+                   , mcEventInfo = Map.lookup addr evtMap
+                   , initRegs = regs
+                   , locals = Map.empty
+                   , nextLocalIndex = nextLocal
+                   , revEvents = []
+                   }
+  case runMStateM ms0 (block2SMT b) of
+    Left e -> Left e
+    Right ms1 -> Right (reverse (revEvents ms1), nextLocalIndex ms1, sz)

@@ -29,7 +29,7 @@ library
     language-c,
     lens,
     llvm-pretty >= 0.7.1.1,
-    macaw-base >= 0.3.11,
+    macaw-base >= 0.3.12,
     macaw-x86,
     mtl,
     parameterized-utils >= 2.0.0.0.102,

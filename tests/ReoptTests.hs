@@ -42,9 +42,7 @@ mkTest fp = T.testCase fp $ do
   let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
   let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
 
-  let loadOpts = MM.LoadOptions { MM.loadRegionIndex      = Nothing
-                                , MM.loadRegionBaseOffset = 0
-                                }
+  let loadOpts = MM.defaultLoadOptions
   let discOpts = DiscoveryOptions { exploreFunctionSymbols = True
                                   , exploreCodeAddrInMem   = False
                                   , logAtAnalyzeFunction   = False

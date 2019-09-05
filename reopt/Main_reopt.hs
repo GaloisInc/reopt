@@ -14,8 +14,8 @@ import           Control.Monad
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as BSL
 import           Data.ElfEdit
 import           Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HMap
@@ -24,6 +24,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import           Data.Parameterized.Some
 import           Data.Version
+import           Data.Word
 import           Numeric
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
@@ -35,14 +36,14 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
 import           Data.Macaw.Memory
-import           Data.Macaw.Memory.LoadCommon
 import           Data.Macaw.X86
 
 import           Reopt
 import           Reopt.CFG.FnRep (Function(..)
                                  , fnBlocks
                                  , FnBlock(..)
-                                 , fnBlockLabelUnpack
+                                 , fnBlockLabelAddr
+                                 , fnBlockLabelString
                                  )
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
@@ -138,8 +139,8 @@ data Args
             -- ^ List of entry points for translation
           , _excludeAddrs :: ![String]
             -- ^ List of function entry points that we exclude for translation.
-          , _loadOpts :: !LoadOptions
-            -- ^ Options affecting initial memory construction
+          , loadBaseAddress :: !(Maybe Word64)
+            -- ^ Address to load binary at if relocatable.
           , _discOpts :: !DiscoveryOptions
             -- ^ Options affecting discovery
           , unnamedFunPrefix :: !BS.ByteString
@@ -166,10 +167,6 @@ includeAddrs = lens _includeAddrs (\s v -> s { _includeAddrs = v })
 excludeAddrs :: Simple Lens Args [String]
 excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 
--- | Options for controlling loading binaries to memory.
-loadOpts :: Simple Lens Args LoadOptions
-loadOpts = lens _loadOpts (\s v -> s { _loadOpts = v })
-
 -- | Options for controlling discovery
 discOpts :: Simple Lens Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
@@ -189,7 +186,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , llvmMcPath = "llvm-mc"
                    , _includeAddrs = []
                    , _excludeAddrs  = []
-                   , _loadOpts     = defaultLoadOptions
+                   , loadBaseAddress = Nothing
                    , _discOpts     = defaultDiscoveryOptions
                    , unnamedFunPrefix = "reopt"
                    , annotationsPath = Nothing
@@ -198,25 +195,26 @@ defaultArgs = Args { _reoptAction = Reopt
 ------------------------------------------------------------------------
 -- Loading flags
 
-resolveHex :: String -> Maybe Integer
-resolveHex ('0':'x':wval) | [(w,"")] <- readHex wval = Just w
-resolveHex ('0':'X':wval) | [(w,"")] <- readHex wval = Just w
+resolveHex :: String -> Maybe Word64
+resolveHex ('0':x:wval)
+  | x `elem` ['x', 'X']
+  , [(w,"")] <- readHex wval
+  , fromInteger w <= toInteger (maxBound :: Word64)  =
+    Just $! fromInteger w
 resolveHex _ = Nothing
 
--- | Define a flag that forces the region index to 0 and adjusts
--- the base pointer address.
+-- | Define a flag that tells reopt to load the binary at a particular
+-- base address.
 --
 -- Primarily used for loading shared libraries at a fixed address.
-loadForceAbsoluteFlag :: Flag Args
-loadForceAbsoluteFlag = flagReq [ "force-absolute" ] upd "OFFSET" help
-  where help = "Load a relocatable file at a fixed offset."
+loadBaseAddressFlag :: Flag Args
+loadBaseAddressFlag = flagReq [ "load-at-addr" ] upd "OFFSET" help
+  where help = "Load a relocatable file at the given base address."
         upd :: String -> Args -> Either String Args
         upd val args =
           case resolveHex val of
             Just off -> Right $
-               args & loadOpts %~ \opt -> opt { loadRegionIndex = Just 0
-                                              , loadRegionBaseOffset = off
-                                              }
+               args { loadBaseAddress = Just off }
             Nothing -> Left $
               "Expected a hexadecimal address of form '0x???', passsed "
               ++ show val
@@ -394,7 +392,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- Function options
                 , headerFlag
                   -- Loading options
-                , loadForceAbsoluteFlag
+                , loadBaseAddressFlag
                   -- LLVM options
                 , llvmVersionFlag
                 , annotationsFlag
@@ -439,11 +437,14 @@ dumpDisassembly args = do
     forM_ sections $ \s -> do
       printX86SectionDisassembly h (elfSectionName s) (elfSectionAddr s) (elfSectionData s)
 
+loadOptions :: Args -> LoadOptions
+loadOptions args = LoadOptions { loadOffset = loadBaseAddress args }
+
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
   Some discState <-
-    discoverBinary (programPath args) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+    discoverBinary (programPath args) (loadOptions args) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   pure $ show $ ppDiscoveryStateBlocks discState
 
 -- | This parses function argument information from a user-provided header file.
@@ -461,7 +462,7 @@ getFunctions :: Args
 getFunctions args = do
   hdr <- resolveHeader args
   (os, discState, addrSymMap, symAddrMap) <-
-    discoverX86Binary (programPath args) (args^.loadOpts) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+    discoverX86Binary (programPath args) (loadOptions args) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
   recMod <- getFns logger addrSymMap symAddrHashMap hdr (unnamedFunPrefix args)
@@ -478,7 +479,7 @@ performReopt args = do
   hdr <- resolveHeader args
   (origElf, os, discState, addrSymMap, symAddrMap) <-
     discoverX86Elf (programPath args)
-                   (args^.loadOpts)
+                   (loadOptions args)
                    (args^.discOpts)
                    (args^.includeAddrs)
                    (args^.excludeAddrs)
@@ -504,13 +505,15 @@ performReopt args = do
 
 
 getBlockAnnotations :: FnBlock X86_64 -> (String, Ann.BlockAnn)
-getBlockAnnotations b = (nm, Ann.ReachableBlock ann)
-  where nm = fnBlockLabelUnpack (fbLabel b)
+getBlockAnnotations b = (fnBlockLabelString lbl, Ann.ReachableBlock ann)
+  where lbl = fbLabel b
+        a  = addrOffset (segoffAddr (fnBlockLabelAddr lbl))
+        pr = fbPrecond b
         -- TODO: Fix me
-        ann = Ann.ReachableBlockAnn { Ann.blockAddr = 0
-                                    , Ann.blockCodeSize = 0
-                                    , Ann.blockX87Top = 7
-                                    , Ann.blockDFFlag = False
+        ann = Ann.ReachableBlockAnn { Ann.blockAddr = fromIntegral a
+                                    , Ann.blockCodeSize = fbSize b
+                                    , Ann.blockX87Top = blockInitX87TopReg pr
+                                    , Ann.blockDFFlag = blockInitDF pr
                                     , Ann.blockPreconditions = []
                                     , Ann.blockAllocas = []
                                     , Ann.blockEvents = []
@@ -572,10 +575,16 @@ main' = do
             pure p
       (os,recMod) <- getFunctions args
       let archOps = LLVM.x86LLVMArchOps (show os)
-      let obj_llvm =
+      let objLLVM =
             llvmAssembly (llvmVersion args) $
               LLVM.moduleForFunctions archOps recMod
-      objContents <- compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args) (osLinkName os) obj_llvm
+      objContents <-
+        compileLLVM (optLevel args)
+                    (optPath args)
+                    (llcPath args)
+                    (llvmMcPath args)
+                    (osLinkName os)
+                    objLLVM
       BS.writeFile outPath objContents
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
