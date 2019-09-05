@@ -12,17 +12,17 @@
          "blocks": [
             {
                "label": "1",
-               "addr": "0x201400",
+               "addr": "0x201000",
                "size": "0x1d",
                "allocas": [
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 16,
 		     "size": 8,
 		     "existing": false
                   },
                   {
-                     "name": "3",
+                     "llvm_ident": "3",
                      "offset": 24,
 		     "size": 8,
 		     "existing": false
@@ -30,35 +30,35 @@
                ],
                "events": [
                   {
-                     "addr": "0x201400",
+                     "addr": "0x201000",
                      "type": "binary_only_access"
                   },
                   {
-                     "addr": "0x201404",
+                     "addr": "0x201004",
                      "type": "joint_stack_access",
                      "alloca": 2
                   },
                   {
-                     "addr": "0x201408",
+                     "addr": "0x201008",
                      "type": "joint_stack_access",
                      "alloca": 2
                   },
                   {
-                     "addr": "0x20140c",
+                     "addr": "0x20100c",
                      "type": "joint_stack_access",
                      "alloca": 3
                   },
                   {
-                     "addr": "0x201410",
+                     "addr": "0x201010",
                      "type": "joint_stack_access",
                      "alloca": 3
                   },
                   {
-                     "addr": "0x20141b",
+                     "addr": "0x20101b",
                      "type": "binary_only_access"
                   },
                   {
-                     "addr": "0x20141c",
+                     "addr": "0x20101c",
                      "type": "binary_only_access"
                   }
                ]
@@ -71,41 +71,41 @@
          "blocks": [
             {
                "label": "0",
-               "addr": "0x201420",
+               "addr": "0x201020",
                "size": "0x2d",
                "allocas": [
                   {
-                     "name": "1",
+                     "llvm_ident": "1",
                      "offset": 12,
 		     "size": 4,
 		     "existing": false
                   },
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 24,
 		     "size": 8,
 		     "existing": false
                   }
                ],
                "events": [
-                  { "addr": "0x201420",
+                  { "addr": "0x201020",
                     "type": "binary_only_access"
                   },
-                  { "addr": "0x20142f",
+                  { "addr": "0x201028",
                     "type": "joint_stack_access",
                     "alloca": 1
                   },
-                  { "addr": "0x201436",
+                  { "addr": "0x201034",
                     "type": "binary_only_access"
                   },
-                  { "addr": "0x20143d",
+                  { "addr": "0x20103b",
                     "type": "joint_stack_access",
                     "alloca": 2
                   },
-                  { "addr": "0x201447",
+                  { "addr": "0x201045",
                     "type": "binary_only_access"
                   },
-                  { "addr": "0x201448",
+                  { "addr": "0x201046",
                     "type": "binary_only_access"
                   }
 	       ]

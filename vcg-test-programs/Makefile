@@ -49,7 +49,7 @@ verify_test_fib_diet_reopt.ann : test_fib_diet_reopt.ann test_fib_diet_reopt.ll
 
 diet_libs=diet/start.o diet/libc.a
 
-# This builds a test proram with diet libc and lld.
+# This builds a test program with diet libc and lld.
 test_%_diet_lld.exe : test_%.o $(diet_libs)
 	$(lld) -static -o $@ $+
 

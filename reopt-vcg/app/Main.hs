@@ -254,7 +254,7 @@ data BlockVCGState = BlockVCGState
     -- ^ Unprocessed events from last instruction.
   , mcLocalIndex :: !Integer
     -- ^ Index of next local variable for machine code.
-  , mcPendingAllocaOffsetMap :: !(Map Ann.AllocaName Ann.AllocaInfo)
+  , mcPendingAllocaOffsetMap :: !(Map Ann.LocalIdent Ann.AllocaInfo)
     -- ^ This is a map from allocation names to the offset relative to
     -- the top of the function stack frame.  In this case, we do not
     -- include the 8 bytes storing the return address.  These are
@@ -262,7 +262,7 @@ data BlockVCGState = BlockVCGState
   , llvmInstIndex :: !Int
     -- ^ Index of next LLVM instruction within block to execute
     -- Used for error reporting
-  , activeAllocaSet :: !(Set Ann.AllocaName)
+  , activeAllocaSet :: !(Set Ann.LocalIdent)
     -- ^ Set of allocation names that are active.
   }
 
@@ -321,7 +321,8 @@ prependLocation msg = do
 
 $(pure [])
 
--- | Report an error at the given location and stop verification of this block.
+-- | Report an error at the given location and stop verification of
+-- this block.
 fatalBlockError :: String -> BlockVCG a
 fatalBlockError msg = do
   annMsg <- prependLocation msg
@@ -609,15 +610,27 @@ $(pure [])
 mcOnlyStackRange :: Text
 mcOnlyStackRange = "mc_only_stack_range"
 
--- | Add a fixed nat to a term.
-addc :: SMT.Term -> Natural -> SMT.Term
-addc t 0 = t
-addc t i = SMT.bvadd t [SMT.bvdecimal (toInteger i) 64]
+-- | @addc w x y@ returns an expression equal to @bvadd x y@.
+--
+-- @w@ should be positive.
+addc :: Natural -> SMT.Term -> Natural -> SMT.Term
+addc _ t 0 = t
+addc w t i = SMT.bvadd t [SMT.bvdecimal (toInteger i) w]
 
--- | Subtract a fixed nat from a term.
-subc :: SMT.Term -> Natural -> SMT.Term
-subc t 0 = t
-subc t i = SMT.bvsub t (SMT.bvdecimal (toInteger i) 64)
+-- | @subc w x y@ returns an expression equal to @bvsub x y@.
+--
+-- @w@ should be positive.
+subc :: Natural -> SMT.Term -> Natural -> SMT.Term
+subc _ t 0 = t
+subc w t i = SMT.bvsub t (SMT.bvdecimal (toInteger i) w)
+
+-- | @mulc w x y@ returns an expression equal to @bvmul x y@.
+--
+-- @w@ should be positive.
+mulc :: Natural -> Natural -> SMT.Term -> SMT.Term
+mulc w 0 _ = SMT.bvdecimal 0 w
+mulc _ 1 x = x
+mulc w c x = SMT.bvmul (SMT.bvdecimal (toInteger c) w) [x]
 
 -- | @defineRangeCheck nm low high@ introduces the definition for a
 -- function named @nm@ that takes an address @a@ and size @sz@, and
@@ -668,12 +681,12 @@ stackHighTerm = functionStartRegValue RSP
 -- extent in the machine code stack of an LLVM alloca.
 allocaMCBaseEndDecls :: Ann.AllocaInfo -> [SMT.Command]
 allocaMCBaseEndDecls a =
-  let nm = Ann.allocaName a
+  let nm = Ann.allocaIdent a
       base = Ann.allocaBinaryOffset a
       end  = base - Ann.allocaSize a
   -- Define machine code base for allocation.
-   in [ SMT.defineFun (allocaMCBaseVar nm) [] ptrSort (subc stackHighTerm base)
-      , SMT.defineFun (allocaMCEndVar  nm) [] ptrSort (subc stackHighTerm end)
+   in [ SMT.defineFun (allocaMCBaseVar nm) [] ptrSort (subc 64 stackHighTerm base)
+      , SMT.defineFun (allocaMCEndVar  nm) [] ptrSort (subc 64 stackHighTerm end)
         -- Introduce predicate to check machine-code addresses.
       , defineRangeCheck (isInMCAlloca nm) (varTerm (allocaMCBaseVar nm)) (varTerm (allocaMCEndVar nm))
       ]
@@ -747,7 +760,7 @@ mcMemDecls pageSize guardPageCount allocas
        , SMT.assert $ SMT.bvult (SMT.bvdecimal (toInteger guardSize) 64) "stack_alloc_min"
 
        , SMT.defineFun "stack_guard_min" [] (SMT.bvSort 64) $
-           subc "stack_alloc_min" guardSize
+           subc 64 "stack_alloc_min" guardSize
        , SMT.assert $ SMT.bvult "stack_guard_min" "stack_alloc_min"
 
          -- Declare the upper bound on stack address.
@@ -758,14 +771,14 @@ mcMemDecls pageSize guardPageCount allocas
 
          -- Assert RSP is between stack_alloc_min and stack_max - return address size
        , SMT.assert $ SMT.bvule "stack_alloc_min" stackHighTerm
-       , SMT.assert $ SMT.bvule stackHighTerm (subc "stack_max" 8)
+       , SMT.assert $ SMT.bvule stackHighTerm (subc 64 "stack_max" 8)
 
          -- Define check to assert stack is in given range
        , defineRangeCheck onStack "stack_guard_min" "stack_max"
        -- Declare not in stack that asserts a range is not on the stack.
        , defineNotInStackRange
        -- Assert that stack pointer is at least 8 below stack high
-       , SMT.assert $ SMT.bvult stackHighTerm (subc "stack_max" 8)
+       , SMT.assert $ SMT.bvult stackHighTerm (subc 64 "stack_max" 8)
        -- High water stack pointer includes 8 bytes for return address.
        -- The return address top must be aligned to a 16-byte boundary.
        -- This is done by asserting the 4 low-order bits of fnstart_rsp are 8.
@@ -778,7 +791,7 @@ mcMemDecls pageSize guardPageCount allocas
            SMT.and $ [ SMT.term_app (Builder.fromText "on_stack") ["a", "sz"] ]
                      ++ [ isDisjoint ("a", "e") (allocaMCBaseVar nm, allocaMCEndVar nm)
                         | a <- allocas
-                        , let nm = Ann.allocaName a
+                        , let nm = Ann.allocaIdent a
                         ]
      ]
 
@@ -789,30 +802,30 @@ missingFeature :: String -> BlockVCG ()
 missingFeature msg = liftIO $ hPutStrLn stderr $ "TODO: " ++ msg
 
 -- | Identifies the LLVM base address of an allocation.
-allocaLLVMBaseVar :: (IsString a, Monoid a) => Ann.AllocaName -> a
-allocaLLVMBaseVar = \(Ann.AllocaName nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_llvm_base"
+allocaLLVMBaseVar :: (IsString a, Monoid a) => Ann.LocalIdent -> a
+allocaLLVMBaseVar = \(Ann.LocalIdent nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_llvm_base"
 
 -- | Identifies the LLVM end address of an allocation.
-allocaLLVMEndVar :: (IsString a, Monoid a) => Ann.AllocaName -> a
-allocaLLVMEndVar = \(Ann.AllocaName nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_llvm_end"
+allocaLLVMEndVar :: (IsString a, Monoid a) => Ann.LocalIdent -> a
+allocaLLVMEndVar = \(Ann.LocalIdent nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_llvm_end"
 
 -- | Identifies the machine code base address of an allocation.
-allocaMCBaseVar :: (IsString a, Monoid a) => Ann.AllocaName -> a
-allocaMCBaseVar = \(Ann.AllocaName nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_mc_base"
+allocaMCBaseVar :: (IsString a, Monoid a) => Ann.LocalIdent -> a
+allocaMCBaseVar = \(Ann.LocalIdent nm) -> "alloca_" <> fromString (Text.unpack nm) <> "_mc_base"
 
 -- | Name of a predicate that checks if a range [start, start+size)]
 -- is in the range of an allocation for LLVM addresses.
-isInLLVMAlloca :: Ann.AllocaName -> Text
-isInLLVMAlloca (Ann.AllocaName nm) = mconcat ["llvmaddr_in_alloca_", nm]
+isInLLVMAlloca :: Ann.LocalIdent -> Text
+isInLLVMAlloca (Ann.LocalIdent nm) = mconcat ["llvmaddr_in_alloca_", nm]
 
 -- | Name of a predicate that checks if a range [start, start+size)]
 -- is in the range of an allocation for machine code addresses.
-isInMCAlloca :: Ann.AllocaName -> Text
-isInMCAlloca (Ann.AllocaName nm) = mconcat ["mcaddr_in_alloca_", nm]
+isInMCAlloca :: Ann.LocalIdent -> Text
+isInMCAlloca (Ann.LocalIdent nm) = mconcat ["mcaddr_in_alloca_", nm]
 
 -- | Identifies the LLVM end address of an allocation.
-allocaMCEndVar :: (IsString a, Monoid a) => Ann.AllocaName -> a
-allocaMCEndVar (Ann.AllocaName nm)  = "alloca_" <> fromString (Text.unpack nm) <> "_mc_end"
+allocaMCEndVar :: (IsString a, Monoid a) => Ann.LocalIdent -> a
+allocaMCEndVar (Ann.LocalIdent nm)  = "alloca_" <> fromString (Text.unpack nm) <> "_mc_end"
 
 -- | A range @(b,e)@ representing the addresses @[b..e)@.
 -- We assume that @b ule e@.
@@ -827,7 +840,7 @@ isDisjoint (b0, e0) (b1, e1) = SMT.or [ SMT.bvule e0 b1, SMT.bvule e1 b0 ]
 -- is disjoint from allocation identified by @nm@.
 --
 -- We can assume @end >= base@ for all allocations
-assumeLLVMDisjoint :: Range -> Ann.AllocaName -> SMT.Term
+assumeLLVMDisjoint :: Range -> Ann.LocalIdent -> SMT.Term
 assumeLLVMDisjoint r nm = isDisjoint r (allocaLLVMBaseVar nm, allocaLLVMEndVar nm)
 
 -- | Check if LLVM type and Macaw types have the same memory layout.
@@ -867,8 +880,8 @@ getNextEvents = do
                        , loc_x87_top = mcX87Top s
                        , loc_df_flag = mcDF s
                        }
-  (r, nextIdx, sz) <-
-    case M.blockEvents (mcBlockMap ctx) (mcCurRegs s) (mcLocalIndex s) loc of
+  (events, nextIdx, sz) <-
+    case M.instructionEvents (mcBlockMap ctx) (mcCurRegs s) (mcLocalIndex s) loc of
       Left e -> fatalBlockError e
       Right p -> pure p
   -- Update local index and next addr
@@ -877,7 +890,7 @@ getNextEvents = do
            , mcCurSize  = sz
            }
   -- Update events
-  modify $ \t -> t { mcEvents = r }
+  modify $ \t -> t { mcEvents = events }
 
 -- | Set machine code registers from reg state.
 setMCRegs :: M.EvalContext
@@ -907,9 +920,6 @@ execMCOnlyEvents endAddr = do
       execMCOnlyEvents endAddr
     M.WarningEvent msg:mevs -> do
       liftIO $ hPutStrLn stderr msg
-      modify $ \s -> s { mcEvents = mevs }
-      execMCOnlyEvents endAddr
-    M.InstructionEvent _curAddr:mevs -> do
       modify $ \s -> s { mcEvents = mevs }
       execMCOnlyEvents endAddr
     M.MCOnlyStackReadEvent mcAddr tp macawValVar:mevs -> do
@@ -1093,7 +1103,7 @@ llvmInvoke isTailCall fsym args lRet = do
 
   -- Add 8 to RSP for post-call value to represent poping the stack pointer.
   let postCallRSP :: SMT.Term
-      postCallRSP = addc (getConst (regs^.boundValue RSP)) 8
+      postCallRSP = addc 64 (getConst (regs^.boundValue RSP)) 8
 
   -- Create registers for instruction after call.
   --
@@ -1125,7 +1135,7 @@ llvmInvoke isTailCall fsym args lRet = do
      addAssert $ SMT.term_app "eqrange" [ memTerm (idx+1)
                                         , memTerm idx
                                         , postCallRSP
-                                        , addc stackHighTerm 7
+                                        , addc 64 stackHighTerm 7
                                         ]
      -- Increment memory count
      modify' $ \s -> s { mcMemIndex = mcMemIndex s + 1 }
@@ -1147,7 +1157,7 @@ llvmInvoke isTailCall fsym args lRet = do
     Nothing -> pure ()
 
 -- | Add the LLVM declarations for an allocation.
-allocaDeclarations :: Ann.AllocaName
+allocaDeclarations :: Ann.LocalIdent
                    -> Natural-- ^ Size as a 64-bit unsigned bitector.
                    -> BlockVCG ()
 allocaDeclarations nm szNat = do
@@ -1164,7 +1174,7 @@ allocaDeclarations nm szNat = do
   addAssert $ SMT.bvule (allocaLLVMBaseVar nm)
                         (SMT.bvdecimal (- (toInteger (szNat + 1))) 64)
   addCommand $ SMT.defineFun (allocaLLVMEndVar nm) [] ptrSort $
-    addc (allocaLLVMBaseVar nm) szNat
+    addc 64 (allocaLLVMBaseVar nm) szNat
   -- Introduce predicate to check LLVM addresses.
   addCommand $ defineRangeCheck (isInLLVMAlloca nm) (allocaLLVMBaseVar nm) (allocaLLVMEndVar nm)
   -- Add assumption that LLVM allocation does not overlap with
@@ -1191,7 +1201,7 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
         pure 8
       _ ->
         fatalBlockError $ "Unexpected type " ++ show (L.ppType ty)
-  let nm = Ann.AllocaName (Text.pack nm0)
+  let nm = Ann.LocalIdent (Text.pack nm0)
 
   allocaMap <- gets $ mcPendingAllocaOffsetMap
   a <-
@@ -1205,26 +1215,23 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
   -- Delete this from pending allocations
   modify $ \s -> s { mcPendingAllocaOffsetMap = Map.delete nm allocaMap }
 
-  -- Get total size as a bv64
-  llvmSize <-
-    case eltCount of
-      Nothing -> pure $ eltSize
-      Just (Typed (PrimType (Integer w)) i) | w >= 1 -> do
-        case i of
-          ValInteger cnt -> do
-            let modCnt :: Natural
-                modCnt = fromIntegral $ cnt .&. (2^w-1)
-            pure $ eltSize * modCnt
-          _ ->
-            fatalBlockError "reopt-vcg only supports constant allocation sizes."
-      Just (Typed itp _) -> do
-        fatalBlockError $ "Unexpected count type " ++ show (L.ppType itp)
-  when (llvmSize /= Ann.allocaSize a) $
-    fatalBlockError $
-       printf "Allocation size %s must match specification %s."
-              (show llvmSize) (show (Ann.allocaSize a))
+  -- Check the size of LLVM allocation matches annotations.
+  case eltCount of
+    Nothing -> do
+      when (eltSize /= Ann.allocaSize a) $
+        fatalBlockError $
+           printf "Allocation size at %s must match specification %s."
+             nm0 (show (Ann.allocaSize a))
+    Just (Typed (PrimType (Integer w)) i) | w >= 1 -> do
+       cntExpr <- primEval (PrimType (Integer w)) i
+       let wn = fromIntegral w
+       proveEq (mulc wn eltSize cntExpr) (SMT.bvdecimal (toInteger (Ann.allocaSize a)) wn) $
+         printf "Allocation size at %s must match specification %s."
+                nm0 (show (Ann.allocaSize a))
+    Just (Typed itp _) -> do
+      fatalBlockError $ "Unexpected allocation count type " ++ show (L.ppType itp)
   -- Create declarations for alloca.
-  allocaDeclarations nm llvmSize
+  allocaDeclarations nm (Ann.allocaSize a)
 
 $(pure [])
 
@@ -1250,13 +1257,13 @@ $(pure [])
 
 -- | Process a LLVM load statement.
 llvmLoad :: HasCallStack
-         => Value' BlockLabel
+         => Ident -- ^ Variable to assign load value to.
+         -> Value' BlockLabel
             -- ^ Address being loaded
          -> L.Type -- ^ LLVM type for load
-         -> Var -- ^ Variable to assign load value to.
          -> Maybe L.Align -- ^ Alignment
          -> BlockVCG ()
-llvmLoad src llvmType llvmValVar malign = do
+llvmLoad ident src llvmType  malign = do
   llvmAddr <- primEval (PtrTo llvmType) src
   llvmAlign <- do
     let a0 = fromMaybe 0 malign
@@ -1276,9 +1283,9 @@ llvmLoad src llvmType llvmValVar malign = do
   mevt <- popMCEvent
   case mevt of
     M.JointStackReadEvent mcAddr mcType macawValVar allocName -> do
-      -- Check size of writes are equivalent.
+      -- Check LLVM type and machine code types are equivalent.
       unless (typeCompat llvmType mcType) $ do
-        error "Incompatible LLVM and machine code types."
+        fatalBlockError "Incompatible LLVM and machine code types."
       let sz = memReprBytes mcType
       -- Check alloca is defined
       do used <- gets $ activeAllocaSet
@@ -1297,10 +1304,13 @@ llvmLoad src llvmType llvmValVar malign = do
       -- Define value from reading Macaw heap
       supType <- getSupportedType mcType
       defineVarFromReadMCMem macawValVar mcAddr supType
-      let smtType = supportedSort supType
-      -- Define LLVM value
-      addCommand $ SMT.defineFun llvmValVar [] smtType (varTerm macawValVar)
+
+      -- Define LLVM value in terms of Macaw value.
+      addCommand $ SMT.defineFun (identVar ident) [] (supportedSort supType) (varTerm macawValVar)
     M.NonStackReadEvent mcAddr mcType macawValVar -> do
+      -- Check LLVM type and machine code types are equivalent.
+      unless (typeCompat llvmType mcType) $ do
+        fatalBlockError "Incompatible LLVM and machine code types."
       -- Assert addresses are the same
       proveEq mcAddr llvmAddr
         ("Machine code heap load address matches expected from LLVM")
@@ -1308,18 +1318,13 @@ llvmLoad src llvmType llvmValVar malign = do
       do addr <- gets mcCurAddr
          proveTrue (notInStackRange mcAddr (memReprBytes mcType))
            (printf "Read from heap at %s is valid." (show addr))
-
-      -- Check size of writes are equivalent.
-      unless (typeCompat llvmType mcType) $ do
-        error "Incompatible LLVM and machine code types."
       -- Define value from reading Macaw heap
       supType <- getSupportedType mcType
       defineVarFromReadMCMem macawValVar mcAddr supType
-      let smtType = supportedSort supType
       -- Define LLVM value returned in terms of macaw value
-      addCommand $ SMT.defineFun llvmValVar [] smtType (varTerm macawValVar)
+      addCommand $ SMT.defineFun (identVar ident) [] (supportedSort supType) (varTerm macawValVar)
     _ -> do
-      error "Expected a machine code load event."
+      fatalBlockError "Expected a machine code load event."
 
 -- | Handle an LLVM store.
 llvmStore :: HasCallStack
@@ -1376,7 +1381,7 @@ llvmReturn mlret = do
 
   -- Assert the stack height at the return is just above the return
   -- address pointer.
-  proveEq (getConst (regs^.boundValue RSP)) (addc stackHighTerm 8)
+  proveEq (getConst (regs^.boundValue RSP)) (addc 64 stackHighTerm 8)
     "Stack height at return matches init."
 
   checkDirectionFlagClear
@@ -1594,7 +1599,7 @@ stepNextStmt stmt@(L.Result ident inst _mds) = do
     Load (Typed (PtrTo lty) src) ord malign -> do
       when (isJust ord) $ do
         error $ "Do not yet support atomic ordering."
-      llvmLoad src lty (identVar ident) malign
+      llvmLoad ident src lty malign
       pure True
     _ -> do
       error $ "stepNextStmt: unsupported instruction: " ++ show inst
@@ -1878,20 +1883,19 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
   liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) (ppBlock lbl) $ \prover -> do
     let blockStart = Ann.blockAddr blockAnn
     let sz = Ann.blockCodeSize blockAnn
-    let blockEnd = blockStart + sz
     let blockMap = Map.fromList
           [ (segOff, Ann.eventInfo e)
           | e <- Ann.blockEvents blockAnn
             -- Get segment offset of event.
           , let ea = Ann.eventAddr e
           , let segOff =
-                  if blockStart <= ea && ea < blockEnd then
+                  if blockStart <= ea && fromIntegral (ea - blockStart) < sz then
                     case incSegmentOff thisSegOff (toInteger (ea - blockStart)) of
                       Just so -> so
                       Nothing -> error "Block extends outside of starting memory segment"
                    else
-                    error $ printf "Memory event annotation address %0x is out of range (low: %0x, high: %0x)."
-                                   ea blockStart blockEnd
+                    error $ printf "Memory event annotation address %s is out of range (low: %s, size: %d)."
+                                   (show ea) (show blockStart) sz
           ]
 
     let ctx = BlockVCGContext { mcModuleVCGContext = modCtx
@@ -1932,7 +1936,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
     -- Create block state.
     let s = BlockVCGState { mcCurAddr   = thisSegOff
                           , mcCurSize   = 0
-                          , mcX87Top    = Ann.blockX87Top blockAnn
+                          , mcX87Top    = fromIntegral (Ann.blockX87Top blockAnn)
                           , mcDF        = Ann.blockDFFlag blockAnn
                           , mcCurRegs  = regs
                           , mcMemIndex = 0
@@ -1940,7 +1944,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
                           , mcLocalIndex = 0
                           , mcPendingAllocaOffsetMap =
                               Map.fromList
-                              [ (Ann.allocaName a, a)
+                              [ (Ann.allocaIdent a, a)
                               | a <- Ann.blockAllocas blockAnn
                               , not (Ann.allocaExisting a)
                               ]
@@ -2111,7 +2115,7 @@ checkAllocaOverlap lbl l = do
       hPutStrLn stderr $ printf "Error: Overlapping allocations in %s:\n" (show lbl)
       forM_ (h:r) $ \(x,y) -> do
         hPutStrLn stderr $ do
-          printf "  Allocation %s overlaps with %s" (show (Ann.allocaName x)) (show (Ann.allocaName y))
+          printf "  Allocation %s overlaps with %s" (show (Ann.allocaIdent x)) (show (Ann.allocaIdent y))
 
 -- | Loop over LLVM stmts
 --
@@ -2160,7 +2164,7 @@ verifyBlock lFun funAnn firstLabel bb = do
         -- Add LLVM declarations for all existing allocations.
         forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
           when (Ann.allocaExisting a) $ do
-            allocaDeclarations (Ann.allocaName a) (Ann.allocaSize a)
+            allocaDeclarations (Ann.allocaIdent a) (Ann.allocaSize a)
         -- Declare memory
         addCommand $ SMT.declareConst (memVar 0) memSort
         -- Declare constant representing where we return to.
@@ -2213,11 +2217,10 @@ verifyFunction lMod funAnn = do
           Nothing ->
             moduleThrow $
               printf "%s: Could not find annotations for LLVM block %s." fnm (ppBlock entryLabel)
-
       let Right addr = getMCAddrOfLLVMFunction (symbolAddrMap modCtx) fnm
       when (toInteger addr /= toInteger (Ann.blockAddr firstBlockAnn)) $ do
-        moduleThrow $ "LLVM function " ++ fnm ++ " does not have expected address: " ++ show addr
-
+        moduleThrow $ printf "%s annotations list address of %s; symbol table reports address of %s."
+                             fnm (show (Ann.blockAddr firstBlockAnn)) (show addr)
       -- Verify the blocks.
       forM_ (firstBlock:restBlocks) $ \bb -> do
         moduleCatch $ verifyBlock lFun funAnn entryLabel bb

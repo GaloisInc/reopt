@@ -14,13 +14,13 @@
                "size": "0x17",
                "allocas": [
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 16,
 		     "size": 8,
 		     "existing": false
                   },
                   {
-                     "name": "3",
+                     "llvm_ident": "3",
                      "offset": 24,
 		     "size": 8,
 		     "existing": false
@@ -50,12 +50,12 @@
                "size": 13,
                "allocas": [
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 16,
 		     "size": 8
                   },
                   {
-                     "name": "3",
+                     "llvm_ident": "3",
                      "offset": 24,
 		     "size": 8
                   }
@@ -90,12 +90,12 @@
                "size": "0x2c",
                "allocas": [
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 16,
 		     "size": 8
                   },
                   {
-                     "name": "3",
+                     "llvm_ident": "3",
                      "offset": 24,
 		     "size": 8
                   }
@@ -152,12 +152,12 @@
                "size": "0xa",
                "allocas": [
                   {
-                     "name": "2",
+                     "llvm_ident": "2",
                      "offset": 16,
 		     "size": 8
                   },
                   {
-                     "name": "3",
+                     "llvm_ident": "3",
                      "offset": 24,
 		     "size": 8
                   }

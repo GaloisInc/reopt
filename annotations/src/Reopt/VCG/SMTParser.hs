@@ -112,9 +112,9 @@ data ExprType
 data Expr (v :: *) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v
+  -- | @BVDecimal v w@ denotes the @w@-bit value @v@ which should
+  -- satisfy the property that @v < s^w@.
   BVDecimal :: !Natural -> !Natural -> Expr v
-  -- ^ @BVDecimal v w@ denotes the @w@-bit value @v@ which should
-  -- satisfy the property that @0 <= v < s^w@.
   Var :: !v -> Expr v
  deriving (Show)
 

@@ -16,7 +16,7 @@
               "addr": "0x201400",
               "size": "0x1d",
               "allocas": [
-                  { "name": "r0",
+                  { "llvm_ident": "r0",
                     "offset": 24,
 		    "size": 24,
 		    "existing": false

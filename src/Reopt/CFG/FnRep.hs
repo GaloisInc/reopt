@@ -27,7 +27,9 @@ module Reopt.CFG.FnRep
    , FunctionType(..)
    , FnBlock(..)
    , FnBlockLabel
-   , fnBlockLabelUnpack
+   , fnBlockLabelFromAddr
+   , fnBlockLabelAddr
+   , fnBlockLabelString
    , FnStmt(..)
    , FnTermStmt(..)
    , FnRegValue(..)
@@ -36,6 +38,8 @@ module Reopt.CFG.FnRep
    , FnArchStmt
    , FoldFnValue(..)
    , FnArchConstraints
+     -- ArchBlockPrecond
+   ,
    ) where
 
 import           Control.Monad.Identity
@@ -48,7 +52,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
 import           Data.Proxy
-import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector as V
@@ -63,6 +66,7 @@ import           Data.Macaw.CFG
    , prettyF
    , ArchFn
    , ArchAddrWidth
+   , ArchBlockPrecond
    , ArchReg
    , IsArchFn(..)
    , IsArchStmt(..)
@@ -381,12 +385,24 @@ instance FoldFnValue FnStmt where
 -- FnTermStmt
 
 -- | A block label
-newtype FnBlockLabel = FnBlockLabel Text
+newtype FnBlockLabel w = FnBlockLabel { fnBlockLabelAddr :: MemSegmentOff w }
+
   deriving (Eq)
 
-instance Pretty FnBlockLabel where
-  pretty (FnBlockLabel t) = text (Text.unpack t)
+-- | Render block label from segment offset.
+fnBlockLabelFromAddr ::  MemSegmentOff w -> FnBlockLabel w
+fnBlockLabelFromAddr = FnBlockLabel
 
+-- | Render block label as a string
+fnBlockLabelString :: FnBlockLabel w -> String
+fnBlockLabelString (FnBlockLabel s) =
+  let a = segoffAddr s
+   in "block_" ++ show (addrBase a) ++ "_" ++ showHex (memWordToUnsigned (addrOffset a)) ""
+
+instance Pretty (FnBlockLabel w) where
+  pretty = text . fnBlockLabelString
+
+{-
 charInRange :: Char -> (Char, Char) -> Bool
 charInRange c (l,h) = l <= c && c <= h
 
@@ -401,10 +417,9 @@ isBlockId c
   || c `charInRange` ('A', 'Z')
   || c `charInRange` ('0', '9')
   || c == '_'
+-}
 
-fnBlockLabelUnpack :: FnBlockLabel -> String
-fnBlockLabelUnpack (FnBlockLabel t) = Text.unpack t
-
+{-
 instance IsString FnBlockLabel where
   fromString [] = error "Block label must be non-empty."
   fromString (c:r)
@@ -412,14 +427,16 @@ instance IsString FnBlockLabel where
         FnBlockLabel $ Text.pack $ c:r
     | otherwise =
         error $ "Invalid block label: " ++ (c:r)
-
+-}
 
 -- | The terminal statement from a block.
 data FnTermStmt arch
-   = FnJump !FnBlockLabel
-   | FnBranch !(FnValue arch BoolType) !FnBlockLabel !FnBlockLabel
+   = FnJump !(FnBlockLabel (ArchAddrWidth arch))
+   | FnBranch !(FnValue arch BoolType)
+              !(FnBlockLabel (ArchAddrWidth arch))
+              !(FnBlockLabel (ArchAddrWidth arch))
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
-                   !(V.Vector FnBlockLabel)
+                   !(V.Vector (FnBlockLabel (ArchAddrWidth arch)))
    | FnRet ![Some (FnValue arch)]
      -- ^ A return from the function with associated values
    | FnTailCall !(FnValue arch (BVType (ArchAddrWidth arch)))
@@ -454,11 +471,19 @@ instance FoldFnValue FnTermStmt where
 ------------------------------------------------------------------------
 -- FnBlock
 
--- | A block in the function
+-- | A block in the function.
+--
+-- This representation is designed to be both easy to generate LLVM
+-- and generate block annotations for `reopt-vcg`.
 data FnBlock arch
-   = FnBlock { fbLabel :: !FnBlockLabel
+   = FnBlock { fbLabel :: !(FnBlockLabel (ArchAddrWidth arch))
                -- ^ Label for identifying block.
-             , fbPrevBlocks :: ![FnBlockLabel]
+             , fbPrecond :: !(ArchBlockPrecond arch)
+               -- ^ Architecture-specifici information assumed to be
+               -- true when jumping to this block.
+             , fbSize :: !Word64
+               -- ^ Number of bytes in the machine code for this block.
+             , fbPrevBlocks :: ![FnBlockLabel (ArchAddrWidth arch)]
                -- ^ Labels of blocks that jump to this one.
              , fbPhiMap :: !(MapF (ArchReg arch) FnPhiVar)
                -- ^ Maps registers to phi variables
@@ -492,7 +517,7 @@ instance (FnArchConstraints arch
 
       ppPhis = vcat (go <$> MapF.toAscList (fbPhiMap b))
 
-      ppBinding :: ArchReg arch tp -> FnBlockLabel -> Doc
+      ppBinding :: ArchReg arch tp -> FnBlockLabel (ArchAddrWidth arch) -> Doc
       ppBinding r a = parens (pretty a <> comma <+> prettyF r)
 
 instance FoldFnValue FnBlock where
