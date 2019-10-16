@@ -646,8 +646,9 @@ defineRangeCheck nm low high = do
               ]
 
 -- | Evaluate a stack is in a range check.
-evalRangeCheck :: Text -> SMT.Term -> Integer -> SMT.Term
-evalRangeCheck nm a sz = SMT.term_app (Builder.fromText nm) [a, SMT.bvdecimal sz 64]
+evalRangeCheck :: Text -> SMT.Term -> Natural -> SMT.Term
+evalRangeCheck nm a sz =
+  SMT.term_app (Builder.fromText nm) [a, SMT.bvdecimal (toInteger sz) 64]
 
 -- | Defines a predicate @(not_in_stack_range a sz)@ that holds if @a + sz@
 -- does not overflow and @[a..a+sz)@ does not overlap with the
@@ -670,8 +671,9 @@ defineNotInStackRange = do
 --
 -- Note. This predicate can assume that `sz > 0` and `sz < 2^64`, but still
 -- be correct if the computation of `addr+sz` overflows.
-notInStackRange :: SMT.Term -> Integer -> SMT.Term
-notInStackRange addr sz = SMT.term_app "not_in_stack_range" [addr, SMT.bvdecimal sz 64]
+notInStackRange :: SMT.Term -> Natural -> SMT.Term
+notInStackRange addr sz =
+  SMT.term_app "not_in_stack_range" [addr, SMT.bvdecimal (toInteger sz) 64]
 
 -- | @stackHighTerm@ denotes the top of the stack.
 stackHighTerm :: SMT.Term
