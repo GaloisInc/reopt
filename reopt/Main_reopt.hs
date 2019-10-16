@@ -39,12 +39,6 @@ import           Data.Macaw.Memory
 import           Data.Macaw.X86
 
 import           Reopt
-import           Reopt.CFG.FnRep (Function(..)
-                                 , fnBlocks
-                                 , FnBlock(..)
-                                 , fnBlockLabelAddr
-                                 , fnBlockLabelString
-                                 )
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
@@ -493,11 +487,10 @@ getFunctions args = do
 renderLLVMBitcode :: Args -- ^ Arguments passed
                   -> X86OS -- ^ Operating system
                   -> RecoveredModule X86_64 -- ^ Recovered module
-                  -> Builder.Builder
+                  -> (Builder.Builder, [Ann.FunctionAnn])
 renderLLVMBitcode args os recMod =
   let archOps = LLVM.x86LLVMArchOps (show os)
-   in llvmAssembly (llvmVersion args) $
-      LLVM.moduleForFunctions archOps (llvmGenOptions args) recMod
+   in llvmAssembly archOps (llvmGenOptions archs) recMod (llvmVersion args)
 
 -- | This command is called when reopt is called with no specific
 -- action.
@@ -516,10 +509,10 @@ performReopt args = do
       funPrefix = unnamedFunPrefix args
   recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os)
                    discState
-  let obj_llvm = renderLLVMBitcode args os recMod
+  let (objLLVM,_) = renderLLVMBitcode args os recMod
   objContents <-
     compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
-                (osLinkName os) obj_llvm
+                (osLinkName os) objLLVM
 
   new_obj <- parseElf64 "new object" objContents
   -- Convert binary to LLVM
@@ -529,28 +522,6 @@ performReopt args = do
   putStrLn $ "Performing final relinking."
   let outPath = fromMaybe "a.out" (outputPath args)
   mergeAndWrite outPath origElf new_obj redirs
-
-
-getBlockAnnotations :: FnBlock X86_64 -> (String, Ann.BlockAnn)
-getBlockAnnotations b = (fnBlockLabelString lbl, Ann.ReachableBlock ann)
-  where lbl = fbLabel b
-        a  = addrOffset (segoffAddr (fnBlockLabelAddr lbl))
-        pr = fbPrecond b
-        -- TODO: Fix me
-        ann = Ann.ReachableBlockAnn { Ann.blockAddr = fromIntegral a
-                                    , Ann.blockCodeSize = fbSize b
-                                    , Ann.blockX87Top = blockInitX87TopReg pr
-                                    , Ann.blockDFFlag = blockInitDF pr
-                                    , Ann.blockPreconditions = []
-                                    , Ann.blockAllocas = []
-                                    , Ann.blockEvents = []
-                                    }
-
-getFunAnnotations :: Function X86_64 -> Ann.FunctionAnn
-getFunAnnotations f =
-  Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
-                  , Ann.blocks = HMap.fromList $ getBlockAnnotations <$> fnBlocks f
-                  }
 
 main' :: IO ()
 main' = do
@@ -574,6 +545,7 @@ main' = do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
       (os,recMod) <- getFunctions args
+      let (llvmMod, funAnn) = renderLLVMBitcode args os recMod
       case annotationsPath args of
         Nothing -> pure ()
         Just annPath -> do
@@ -584,12 +556,11 @@ main' = do
                 , Ann.binFilePath = programPath args
                 , Ann.pageSize = 4096
                 , Ann.stackGuardPageCount = 1
-                , Ann.functions = getFunAnnotations <$> recoveredDefs recMod
+                , Ann.functions = funAnn
                 }
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
-        Builder.hPutBuilder h $
-          renderLLVMBitcode args os recMod
+        Builder.hPutBuilder h llvmMod
 
     ShowObject -> do
       outPath <-
@@ -600,14 +571,14 @@ main' = do
           Just p ->
             pure p
       (os,recMod) <- getFunctions args
-      let objLLVM = renderLLVMBitcode args os recMod
+      let (llvmMod, _) = renderLLVMBitcode args os recMod
       objContents <-
         compileLLVM (optLevel args)
                     (optPath args)
                     (llcPath args)
                     (llvmMcPath args)
                     (osLinkName os)
-                    objLLVM
+                    llvmMod
       BS.writeFile outPath objContents
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments

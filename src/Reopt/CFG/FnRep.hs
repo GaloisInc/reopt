@@ -9,7 +9,7 @@ values.
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoStarIsType #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -19,6 +19,7 @@ module Reopt.CFG.FnRep
    ( RecoveredModule(..)
    , FunctionDecl(..)
    , Function(..)
+   , FnAlloca(..)
    , fnBlocks
    , FnAssignId(..)
    , FnAssignment(..)
@@ -32,21 +33,19 @@ module Reopt.CFG.FnRep
    , fnBlockLabelString
    , FnStmt(..)
    , FnTermStmt(..)
-   , FnRegValue(..)
+   , FnJumpTarget(..)
    , FnPhiVar(..)
    , FnReturnVar(..)
    , FnArchStmt
    , FoldFnValue(..)
    , FnArchConstraints
      -- ArchBlockPrecond
-   ,
    ) where
 
 import           Control.Monad.Identity
 import qualified Data.ByteString.Char8 as BSC
+import           Data.Kind
 import           Data.Parameterized.Classes
-import           Data.Parameterized.Map (MapF)
-import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
@@ -57,13 +56,14 @@ import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
+import           Numeric.Natural
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
+import           Data.Macaw.AbsDomain.JumpBounds (LocMap)
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
    , sexpr
-   , prettyF
    , ArchFn
    , ArchAddrWidth
    , ArchBlockPrecond
@@ -71,11 +71,12 @@ import           Data.Macaw.CFG
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
-   , WidthEqProof(..)
    , PrettyF(..)
    )
 import           Data.Macaw.Memory
-import           Data.Macaw.Types
+import qualified Data.Macaw.Types as M (Type)
+import           Data.Macaw.Types hiding (Type)
+
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc] -> Doc
@@ -97,7 +98,8 @@ instance Pretty FnAssignId where
 ------------------------------------------------------------------------
 -- FnPhiVar
 
-data FnPhiVar (tp :: Type) =
+-- | A phi variable
+data FnPhiVar (tp :: M.Type) =
   FnPhiVar { unFnPhiVar :: !FnAssignId
            , fnPhiVarType :: !(TypeRepr tp)
            }
@@ -132,7 +134,7 @@ instance Pretty (FnReturnVar tp) where
 -- FunctionType
 
 -- | Describes the type of a function.
-data FunctionType (arch :: *) =
+data FunctionType (arch :: Type) =
   FunctionType { fnArgTypes :: [Some TypeRepr]
                , fnReturnTypes :: [Some TypeRepr]
                }
@@ -147,7 +149,7 @@ data FunctionType (arch :: *) =
 -- The second type parameter is used for arguments to the operations described
 -- by this.
 -- The third type parameter is for the type of value returned.
-data FnAssignRhs (arch :: *) (f :: Type -> *) (tp :: Type) where
+data FnAssignRhs (arch :: Type) (f :: M.Type -> Type) (tp :: M.Type) where
   -- | An expression with an undefined value.
   FnSetUndefined :: !(TypeRepr tp) -- ^ Type of undefined value.
                  -> FnAssignRhs arch f tp
@@ -164,10 +166,6 @@ data FnAssignRhs (arch :: *) (f :: Type -> *) (tp :: Type) where
   -- | Evaluate the pure function given by the App.
   FnEvalApp :: !(App f tp)
             -> FnAssignRhs arch f tp
-  -- | Allocate space on the stack that will be automatically
-  -- freed when the function returns.
-  FnAlloca :: !(f (BVType (ArchAddrWidth arch)))
-           -> FnAssignRhs arch f (BVType (ArchAddrWidth arch))
   -- | Evaluate an architeture-specific function.
   FnEvalArchFn :: !(ArchFn arch f tp)
                -> FnAssignRhs arch f tp
@@ -177,7 +175,6 @@ instance FoldableFC (ArchFn arch) => FoldableFC (FnAssignRhs arch) where
   foldrFC f s (FnReadMem loc _)   = f loc s
   foldrFC f s (FnCondReadMem _ c a d)   = f c (f a (f d s))
   foldrFC f s (FnEvalApp a)       = foldrFC f s a
-  foldrFC f s (FnAlloca sz)       = f sz s
   foldrFC f s (FnEvalArchFn fn)   = foldrFC f s fn
 
 ------------------------------------------------------------------------
@@ -191,9 +188,7 @@ data FnAssignment arch tp
 
 
 -- | A function value.
-data FnValue (arch :: *) (tp :: Type) where
-  -- | A value from the raw type that we do not yet support at the function level.
-  FnValueUnsupported :: !String -> !(TypeRepr tp) -> FnValue arch tp
+data FnValue (arch :: Type) (tp :: M.Type) where
   -- | A value that is actually undefined, like a non-argument
   -- register at the start of a function.
   FnUndefined :: !(TypeRepr tp) -> FnValue arch tp
@@ -203,6 +198,9 @@ data FnValue (arch :: *) (tp :: Type) where
   FnConstantValue :: (1 <= n) => !(NatRepr n) -> !Integer -> FnValue arch (BVType n)
   -- | Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
+  -- | Denotes the base address of the `i`th stack allocation in
+  -- `fnAllocas`.
+  FnAllocaRef :: !Int -> FnValue arch (BVType (ArchAddrWidth arch))
   -- | Value from a phi node
   FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
   -- | A value returned by a function call (rax/rdx/xmm0)
@@ -223,7 +221,7 @@ data FnValue (arch :: *) (tp :: Type) where
 ------------------------------------------------------------------------
 -- FoldFnValue
 
-class FoldFnValue (v :: * -> *)  where
+class FoldFnValue (v :: Type -> Type)  where
   foldFnValue :: forall arch s
               .  ( FoldableF (FnArchStmt arch)
                  , FoldableFC (ArchFn arch)
@@ -244,14 +242,13 @@ type FnArchConstraints arch =
      )
 
 instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
-  pretty (FnValueUnsupported reason _)
-                                  = text $ "unsupported (" ++ reason ++ ")"
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantBool b)       = text $ if b then "true" else "false"
   pretty (FnConstantValue w i)
     | i >= 0 = parens (text ("0x" ++ showHex i "") <+> text ":" <+> text "bv" <+> text (show w))
     | otherwise = error ("FnConstantBool given negative value: " ++ show i)
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
+  pretty (FnAllocaRef i)          = text "alloca" <> int i
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
@@ -264,7 +261,6 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) w
       FnReadMem a tp -> sexpr "read" [ pretty a, pretty tp]
       FnCondReadMem _ c a d -> sexpr "cond_read" [ pretty c, pretty a, pretty d ]
       FnEvalApp a -> ppApp pretty a
-      FnAlloca sz -> sexpr "alloca" [pretty sz]
       FnEvalArchFn f -> runIdentity (ppArchFn (pure . pretty) f)
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
@@ -289,42 +285,25 @@ instance (MemWidth (ArchAddrWidth arch), HasRepr (ArchFn arch f) TypeRepr)
       FnReadMem _ tp -> tp
       FnCondReadMem tp _ _ _ -> typeRepr tp
       FnEvalApp a    -> typeRepr a
-      FnAlloca _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnEvalArchFn f -> typeRepr f
 
 instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
   typeRepr v =
     case v of
-      FnValueUnsupported _ tp -> tp
       FnUndefined tp -> tp
       FnConstantBool _ -> BoolTypeRepr
       FnConstantValue sz _ -> BVTypeRepr sz
       FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
+      FnAllocaRef _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnArg _ tp -> tp
 
 ------------------------------------------------------------------------
--- FnRegValue
-
-data FnRegValue arch tp where
-  CalleeSaved :: !(ArchReg arch tp)
-              -> FnRegValue arch tp
-  -- ^ This is a callee saved register
-  FnRegValue :: !(FnValue arch i)
-             -> !(WidthEqProof i o)
-             -> FnRegValue arch o
-     -- ^ A value assigned to a register
-
-instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegValue arch tp) where
-  pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ showF r)
-  pretty (FnRegValue v _)    = pretty v
-
-------------------------------------------------------------------------
 -- FnStmt
 
-type family FnArchStmt (arch :: *) :: (Type -> *) -> *
+type family FnArchStmt (arch :: Type) :: (M.Type -> Type) -> Type
 
 data FnStmt arch where
   -- | A comment
@@ -382,12 +361,11 @@ instance FoldFnValue FnStmt where
   foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
 
 ------------------------------------------------------------------------
--- FnTermStmt
+-- FnBlockLabel
 
 -- | A block label
 newtype FnBlockLabel w = FnBlockLabel { fnBlockLabelAddr :: MemSegmentOff w }
-
-  deriving (Eq)
+  deriving (Eq, Ord)
 
 -- | Render block label from segment offset.
 fnBlockLabelFromAddr ::  MemSegmentOff w -> FnBlockLabel w
@@ -429,20 +407,40 @@ instance IsString FnBlockLabel where
         error $ "Invalid block label: " ++ (c:r)
 -}
 
+------------------------------------------------------------------------
+-- FnJumpTarget
+
+data FnJumpTarget arch =
+  FnJumpTarget { fnJumpLabel :: !(FnBlockLabel (ArchAddrWidth arch))
+                 -- ^ Label of block we are jumping to.
+               , fnJumpPhiValues :: !(V.Vector (Some (FnValue arch)))
+                 -- ^ Values to assign to phi variables for block.
+                 --
+                 -- These must match the type of the jump target.
+               }
+
+instance MemWidth (ArchAddrWidth arch) => Pretty (FnJumpTarget arch) where
+  pretty tgt = pretty (fnJumpLabel tgt) <+> encloseSep lbracket rbracket (text " ") phiVals
+    where phiVals = V.toList $ viewSome pretty <$> fnJumpPhiValues tgt
+
+------------------------------------------------------------------------
+-- FnTermStmt
+
 -- | The terminal statement from a block.
 data FnTermStmt arch
-   = FnJump !(FnBlockLabel (ArchAddrWidth arch))
+   = FnJump !(FnJumpTarget arch)
    | FnBranch !(FnValue arch BoolType)
-              !(FnBlockLabel (ArchAddrWidth arch))
-              !(FnBlockLabel (ArchAddrWidth arch))
+              !(FnJumpTarget arch)
+              !(FnJumpTarget arch)
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
-                   !(V.Vector (FnBlockLabel (ArchAddrWidth arch)))
+                   !(V.Vector (FnJumpTarget arch))
    | FnRet ![Some (FnValue arch)]
      -- ^ A return from the function with associated values
-   | FnTailCall !(FnValue arch (BVType (ArchAddrWidth arch)))
-                -- Type
+   | FnTailCall -- Address of function to jump to.
+                !(FnValue arch (BVType (ArchAddrWidth arch)))
+                -- Expected type of function to jump to.
                 !(FunctionType arch)
-                -- Arguments
+                -- Arguments (must match function type)
                 [Some (FnValue arch)]
      -- ^ A call statement to the given location with the arguments
      -- listed that does not return.
@@ -485,18 +483,22 @@ data FnBlock arch
                -- ^ Number of bytes in the machine code for this block.
              , fbPrevBlocks :: ![FnBlockLabel (ArchAddrWidth arch)]
                -- ^ Labels of blocks that jump to this one.
-             , fbPhiMap :: !(MapF (ArchReg arch) FnPhiVar)
-               -- ^ Maps registers to phi variables
+             , fbPhiVars :: !(V.Vector (Some FnPhiVar))
+               -- ^ Vector of phi variables that block expects to be assigned.
+             , fbPhiMap :: !(LocMap (ArchReg arch) FnPhiVar)
+               -- ^ Maps register/stack locations to phi variables
              , fbStmts :: ![FnStmt     arch]
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
+{-
              , fbRegMap :: !(MapF (ArchReg arch) (FnValue arch))
                -- ^ Map from registers to values supplied by this
                -- block to successors.
                --
                -- Used to resolve Phi nodes, and could be omitted if
                -- block has no successors.
+-}
              }
 
 instance (FnArchConstraints arch
@@ -505,23 +507,36 @@ instance (FnArchConstraints arch
          )
       => Pretty (FnBlock arch) where
   pretty b =
-    pretty (fbLabel b) <$$>
-    indent 2 (ppPhis
-              <$$> vcat (pretty <$> fbStmts b)
-              <$$> pretty (fbTerm b))
+    pretty (fbLabel b) <+> encloseSep lbracket rbracket (text " ") phiVars <$$>
+      indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
     where
-      go :: MapF.Pair (ArchReg arch) FnPhiVar -> Doc
-      go (MapF.Pair r v) =
-         pretty v <+> text ":= phi "
-         <+> hsep (punctuate comma $ map (ppBinding r) (fbPrevBlocks b))
-
-      ppPhis = vcat (go <$> MapF.toAscList (fbPhiMap b))
-
-      ppBinding :: ArchReg arch tp -> FnBlockLabel (ArchAddrWidth arch) -> Doc
-      ppBinding r a = parens (pretty a <> comma <+> prettyF r)
+      phiVars = V.toList $ viewSome pretty <$> fbPhiVars b
 
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
+
+------------------------------------------------------------------------
+-- FnAlloca
+
+{-
+-- | Type repr for a value with a defined memory layout.
+data MemTypeRepr (tp::M.Type) where
+  BVMemTypeRepr :: !(NatRepr bytes) -> MemTypeRepr (BVType (8 * bytes))
+-}
+
+-- | Information about allocas made in function.
+data FnAlloca
+   = FnAlloca  { fnAllocaBinaryOffset :: !Natural
+               -- ^ Number of bytes from start of alloca to offset of stack
+               -- pointer in machine code.
+               --
+                 -- We currently only support architectures where the stack
+               -- grows down, so the actual memory addresses represented are
+               -- @[rsp0 - allocaBinaryOffset, rsp0 - allocaBinaryOffset +
+               -- allocaSize)@ where @rsp0@ denotes the value of @rsp@ when
+               -- the function starts.
+               , allocaSize :: !Natural
+               }
 
 ------------------------------------------------------------------------
 -- Function definitions
@@ -538,9 +553,14 @@ data Function arch
                 -- ^ Type of this  function
               , fnName :: !BSC.ByteString
                 -- ^ Name of this function
+              , fnAllocas :: !(V.Vector FnAlloca)
+                -- ^ Stack allocations made in program.
+                --
+                -- We do not allow allocas to be made dynamically.
               , fnEntryBlock :: !(FnBlock arch)
+                -- Initial entry block.
               , fnRestBlocks :: ![FnBlock arch]
-                -- ^ A list of all function blocks here.
+                -- ^ A list of function blocks after entry.
               }
 
 -- | Return blocks in function with entry block first.

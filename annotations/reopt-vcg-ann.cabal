@@ -20,6 +20,7 @@ library
                 base >=4.7 && <5
               , aeson
               , attoparsec
+              , containers
               -- flexdis86 used just for register names
               , flexdis86
               , scientific
