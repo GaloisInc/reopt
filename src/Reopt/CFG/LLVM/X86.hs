@@ -12,6 +12,7 @@ import           Control.Lens
 import           Control.Monad
 import           Data.Parameterized.Some
 import           GHC.Stack
+import           Numeric.Natural
 import qualified Text.LLVM as L
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
@@ -39,6 +40,9 @@ evenParity v = do
   -- Check result is nonzero
   icmpop L.Ine parity_val (L.ValInteger 0)
 
+itNat :: Natural -> L.Type
+itNat w = L.iT (fromIntegral w)
+
 emitX86ArchFn :: HasCallStack
               => ArchFn X86_64 (FnValue X86_64) tp
               -> BBLLVM X86_64 (L.Typed L.Value)
@@ -59,32 +63,32 @@ emitX86ArchFn f =
    X86Div repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = itNat (16 * repValSizeByteCount repr)
      llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
      arithop (L.UDiv False) llvm_n llvm_d_ext
    X86Rem repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = itNat (16 * repValSizeByteCount repr)
      llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
      arithop L.URem llvm_n llvm_d_ext
    X86IDiv repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = itNat (16 * repValSizeByteCount repr)
      llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
      arithop (L.SDiv False) llvm_n llvm_d_ext
    X86IRem repr n d -> do
      llvm_n <- mkLLVMValue n
      llvm_d <- mkLLVMValue d
-     let tp = L.iT $ fromInteger $ 16 * repValSizeByteCount repr
+     let tp = itNat (16 * repValSizeByteCount repr)
      llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
      arithop L.SRem llvm_n llvm_d_ext
    RepnzScas sz val base cnt -> do
      -- Value to search for.
      llvm_val <- mkLLVMValue val
      -- Convert buffer to LLVM
-     let w = L.iT (8 * fromInteger (repValSizeByteCount sz))
+     let w = itNat (8 * repValSizeByteCount sz)
      llvm_ptr <- llvmAsPtr base w
      -- Get count
      llvm_cnt <- mkLLVMValue cnt
