@@ -16,6 +16,10 @@ verify_test_add_diet_reopt : test_add_diet_reopt.ann test_add_diet_reopt.ll
 .PHONY : verify_test_add_diet_reopt
 
 # Generate LLVM file using reopt for add example
+test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
+	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add $<
+
+# Generate LLVM file using reopt for add example
 test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_protos.h $(reopt)
 	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add $<
 

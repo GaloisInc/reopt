@@ -22,6 +22,7 @@ module Reopt.CFG.RegisterUse
   , AssignStackOffsetMap
   , valueStackOffset
   , DependencySet(..)
+  , StmtIndex
 
     -- * Type information
   , X86FunTypeInfo(..)
@@ -167,6 +168,8 @@ valueStackOffset bnds amap v =
 
 -------------------------------------------------------------------------------
 
+type StmtIndex = Int
+
 -- | This records what assignments and initial value locations are
 -- needed to compute a value or execute code in a block with side
 -- effects.
@@ -176,7 +179,7 @@ data DependencySet (r :: M.Type -> Type) ids =
          , dsLocSet :: !(Set (Some (BoundLoc r)))
            -- ^ Set of locations that block reads the initial
            -- value of.
-         , dsWriteStmtIndexSet :: !(Set Int)
+         , dsWriteStmtIndexSet :: !(Set StmtIndex)
            -- ^ Block start address and index of write statement that
            -- writes a value to the stack that is read later.
          }
@@ -197,13 +200,16 @@ locDepSet l =
          , dsWriteStmtIndexSet = Set.empty
          }
 
-addWriteDep :: Int -> DependencySet r ids -> DependencySet r ids
-addWriteDep idx s = seq idx $ s { dsWriteStmtIndexSet = Set.insert idx (dsWriteStmtIndexSet s) }
+-- | @addWriteDep stmtIdx
+addWriteDep :: StmtIndex -> DependencySet r ids -> DependencySet r ids
+addWriteDep idx s = seq idx $
+  s { dsWriteStmtIndexSet = Set.insert idx (dsWriteStmtIndexSet s) }
 
 instance MapF.OrdF r => Semigroup (DependencySet r ids) where
   x <> y = DepSet { dsAssignSet = Set.union (dsAssignSet x) (dsAssignSet y)
                   , dsLocSet = Set.union (dsLocSet x) (dsLocSet x)
-                  , dsWriteStmtIndexSet = Set.union (dsWriteStmtIndexSet x) (dsWriteStmtIndexSet y)
+                  , dsWriteStmtIndexSet =
+                      Set.union (dsWriteStmtIndexSet x) (dsWriteStmtIndexSet y)
                   }
 
 instance MapF.OrdF r => Monoid (DependencySet r ids) where
@@ -370,7 +376,7 @@ requiredAssignDeps aid deps = do
 -- | Return values that must be evaluated to execute side effects.
 demandStmtValues :: HasCallStack
                  => DemandContext X86_64
-                 -> Int  -- ^ Index of statement.
+                 -> StmtIndex -- ^ Index of statement.
                  -> Stmt X86_64 ids
                     -- ^ Statement we want to demand.
                  -> RegisterUseM ids ()
@@ -417,7 +423,8 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
               requiredAssignDeps aid deps
         CondReadMem _repr c addr val -> do
           depCache <- gets _assignmentCache
-          let deps = mconcat [valueUses depCache c, valueUses depCache addr, valueUses depCache val]
+          let deps = mconcat
+                [valueUses depCache c, valueUses depCache addr, valueUses depCache val]
           requiredAssignDeps aid deps
         EvalArchFn fn _ -> do
           depCache <- gets _assignmentCache

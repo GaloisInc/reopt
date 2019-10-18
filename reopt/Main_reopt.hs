@@ -490,7 +490,7 @@ renderLLVMBitcode :: Args -- ^ Arguments passed
                   -> (Builder.Builder, [Ann.FunctionAnn])
 renderLLVMBitcode args os recMod =
   let archOps = LLVM.x86LLVMArchOps (show os)
-   in llvmAssembly archOps (llvmGenOptions archs) recMod (llvmVersion args)
+   in llvmAssembly archOps (llvmGenOptions args) recMod (llvmVersion args)
 
 -- | This command is called when reopt is called with no specific
 -- action.
