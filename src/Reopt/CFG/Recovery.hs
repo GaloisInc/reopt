@@ -62,8 +62,6 @@ import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 --import           Reopt.CFG.StackDepth
 
-import Debug.Trace
-
 ------------------------------------------------------------------------
 -- FnRegValue
 
@@ -623,7 +621,7 @@ recoverStmt _stmtIdx s = do
 
           -- TODO: Update value at given stack offset.
           undefined o
-        Nothing -> trace (" Write " ++ show addr ++ "\n" ++ show assignStackMap) $ do
+        Nothing -> do
           rAddr <- recoverValue addr
           rVal  <- recoverValue val
           addFnStmt $ FnWriteMem rAddr rVal
