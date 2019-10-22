@@ -10,6 +10,7 @@ module Reopt.CFG.LLVM.X86
 
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.State
 import           Data.Parameterized.Some
 import           GHC.Stack
 import           Numeric.Natural
@@ -40,55 +41,102 @@ evenParity v = do
   -- Check result is nonzero
   icmpop L.Ine parity_val (L.ValInteger 0)
 
-itNat :: Natural -> L.Type
-itNat w = L.iT (fromIntegral w)
+mkPair :: L.Typed L.Value
+       -> L.Typed L.Value
+       -> BBLLVM arch (L.Typed L.Value)
+mkPair x y = do
+  let tp = L.Struct [L.typedType x, L.typedType y]
+  let s0 = L.Typed tp L.ValUndef
+  s1 <- insertValue s0 x 0
+  insertValue s1 y 1
+
+llvmDivNumerator :: Natural -- ^ Number of bits in w.
+                 -> FnValue X86_64 (BVType w)
+                 -> FnValue X86_64 (BVType w)
+                 -> BBLLVM X86_64 (L.Typed L.Value)
+llvmDivNumerator bitCount num1 num2 = do
+  let extTp = llvmITypeNat (2 * bitCount)
+  llvmNumH <- mkLLVMValue num1
+  llvmNumHExt <- convop L.ZExt llvmNumH extTp
+  let shiftAmt = L.ValInteger  (toInteger bitCount)
+  llvmNumHShift <- shl llvmNumHExt shiftAmt
+  llvmNumL <- mkLLVMValue num2
+  llvmNumLExt <- convop L.ZExt llvmNumL extTp
+  bor llvmNumHShift (L.typedValue llvmNumLExt)
 
 emitX86ArchFn :: HasCallStack
               => ArchFn X86_64 (FnValue X86_64) tp
               -> BBLLVM X86_64 (L.Typed L.Value)
-emitX86ArchFn f =
+emitX86ArchFn f = do
+  genOpts <- gets $ funLLVMGenOptions . funContext
   case f of
    EvenParity v -> do
      evenParity =<< mkLLVMValue v
-   -- The x86 documentation for @idiv@ (Intel x86 manual volume 2A,
-   -- page 3-393) says that results should be rounded towards
-   -- zero. These operations are called @quot@ and @rem@ in Haskell,
-   -- whereas @div@ and @mod@ in Haskell round towards negative
-   -- infinity. The LLVM @srem@ and @sdiv@ also round towards negative
-   -- infinity, and so are the correct operations to use here.  The
-   -- LLVM documentation
-   -- (http://llvm.org/releases/2.5/docs/LangRef.html) describes the
-   -- semantics of @srem@ with "the result has the same sign as the
-   -- dividend", which is equivalent to rounding towards zero.
-   X86Div repr n d -> do
-     llvm_n <- mkLLVMValue n
-     llvm_d <- mkLLVMValue d
-     let tp = itNat (16 * repValSizeByteCount repr)
-     llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
-     arithop (L.UDiv False) llvm_n llvm_d_ext
-   X86Rem repr n d -> do
-     llvm_n <- mkLLVMValue n
-     llvm_d <- mkLLVMValue d
-     let tp = itNat (16 * repValSizeByteCount repr)
-     llvm_d_ext <- L.typedValue <$> convop L.ZExt llvm_d tp
-     arithop L.URem llvm_n llvm_d_ext
-   X86IDiv repr n d -> do
-     llvm_n <- mkLLVMValue n
-     llvm_d <- mkLLVMValue d
-     let tp = itNat (16 * repValSizeByteCount repr)
-     llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
-     arithop (L.SDiv False) llvm_n llvm_d_ext
-   X86IRem repr n d -> do
-     llvm_n <- mkLLVMValue n
-     llvm_d <- mkLLVMValue d
-     let tp = itNat (16 * repValSizeByteCount repr)
-     llvm_d_ext <- L.typedValue <$> convop L.SExt llvm_d tp
-     arithop L.SRem llvm_n llvm_d_ext
+
+   -- Unsigned division and remainder
+   X86DivRem repr num1 num2 d
+     -- If potentially undefined LLVM is allowed, then we
+     -- translate to it.
+     | llvmExceptionIsUB genOpts-> do
+         -- Get wide type
+         let bitCount = 8 * repValSizeByteCount repr
+         -- Compute numerator as (num1 << bitCount | num2)
+         llvmNumExt <- llvmDivNumerator bitCount num1 num2
+         -- Compute denominator
+         llvmDen <- mkLLVMValue d
+         let extTp = llvmITypeNat (2 * bitCount)
+         llvmDenExt <- L.typedValue <$> convop L.ZExt llvmDen extTp
+         -- Perform divison and remainder
+         q <- arithop (L.UDiv False) llvmNumExt llvmDenExt
+         r <- arithop L.URem llvmNumExt llvmDenExt
+         -- Compute pair
+         mkPair q r
+       -- Otherwise we switch to assembly
+       | otherwise -> do
+           let tp = llvmITypeNat (repValSizeBitCount repr)
+           llvmNumH <- mkLLVMValue num1
+           llvmNumL <- mkLLVMValue num2
+           llvmDen <- mkLLVMValue d
+           callAsm sideEffect
+                   (L.Struct [tp, tp])
+                   "div $4"
+                   "={ax},={dx},{dx},{ax},r,~{flags}"
+                   [llvmNumH, llvmNumL, llvmDen]
+
+   -- Signed division and remainder
+   X86IDivRem repr num1 num2 d
+     -- If potentially undefined LLVM is allowed, then we
+     -- translate to it.
+     | llvmExceptionIsUB genOpts -> do
+         -- Get wide type
+         let bitCount = 8 * repValSizeByteCount repr
+         -- Compute numerator as (num1 << bitCount | num2)
+         llvmNumExt <- llvmDivNumerator bitCount num1 num2
+         -- Compute denominator
+         llvmDen <- mkLLVMValue d
+         let extTp = llvmITypeNat (2 * bitCount)
+         llvmDenExt <- L.typedValue <$> convop L.SExt llvmDen extTp
+         -- Perform divison and remainder
+         q <- arithop (L.SDiv False) llvmNumExt llvmDenExt
+         r <- arithop L.SRem llvmNumExt llvmDenExt
+         -- Compute pair
+         mkPair q r
+       | otherwise -> do
+           let tp = llvmITypeNat (repValSizeBitCount repr)
+           llvmNumH <- mkLLVMValue num1
+           llvmNumL <- mkLLVMValue num2
+           llvmDen <- mkLLVMValue d
+           callAsm sideEffect
+                    (L.Struct [tp, tp])
+                    ("idiv $4")
+                    "={ax},={dx},{dx},{ax},r,~{flags}"
+                    [llvmNumH, llvmNumL, llvmDen]
+
    RepnzScas sz val base cnt -> do
      -- Value to search for.
      llvm_val <- mkLLVMValue val
      -- Convert buffer to LLVM
-     let w = itNat (8 * repValSizeByteCount sz)
+     let w = llvmITypeNat (8 * repValSizeByteCount sz)
      llvm_ptr <- llvmAsPtr base w
      -- Get count
      llvm_cnt <- mkLLVMValue cnt
@@ -205,14 +253,15 @@ emitPopCount w v = do
   let wv = natValue w
   when (wv `notElem` [16, 32, 64]) $ do
     fail $ "Only support popcount of 16, 32, or 64 bits"
-  callAsm noSideEffect (L.iT (fromIntegral wv)) "popcnt $0, $1" "=r,r" [v']
+  callAsm noSideEffect (llvmITypeNat wv) "popcnt $0, $1" "=r,r" [v']
 
 ------------------------------------------------------------------------
 -- ArchOps
 
 x86LLVMArchOps :: String -- ^ Prefix for system call intrinsic
                -> LLVMArchSpecificOps X86_64
-x86LLVMArchOps pname = LLVMArchSpecificOps
+x86LLVMArchOps pname =
+  LLVMArchSpecificOps
   { archEndianness = LittleEndian
   , archFnCallback = emitX86ArchFn
   , archStmtCallback = emitX86ArchStmt pname
