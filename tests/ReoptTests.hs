@@ -8,7 +8,6 @@ module ReoptTests (
 
 
 import           Control.Exception
-import qualified Control.Monad.Catch as C
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import           Data.HashMap.Strict (HashMap)
@@ -17,7 +16,6 @@ import           Data.Macaw.Discovery
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.ElfLoader as MM
 import qualified Data.Map.Strict as Map
-import           Data.Typeable ( Typeable )
 import           System.FilePath.Posix
 import           System.IO
 import qualified Test.Tasty as T
@@ -33,6 +31,10 @@ reoptTests = T.testGroup "reopt" . map mkTest
 
 logger :: String -> IO ()
 logger _ = pure ()
+
+defaultLLVMGenOptions :: LLVM.LLVMGenOptions
+defaultLLVMGenOptions =
+  LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = False }
 
 -- | This just tests that we can successfully run discovery,
 -- function recovery and LLVM generation on the given input Elf file.
@@ -62,9 +64,5 @@ mkTest fp = T.testCase fp $ do
   let archOps = LLVM.x86LLVMArchOps (show os)
   bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
     Builder.hPutBuilder h $
-      llvmAssembly latestLLVMConfig $ LLVM.moduleForFunctions archOps recMod
-
-data ElfException = MemoryLoadError String
-  deriving (Typeable, Show)
-
-instance C.Exception ElfException
+      llvmAssembly latestLLVMConfig $
+        LLVM.moduleForFunctions archOps defaultLLVMGenOptions recMod

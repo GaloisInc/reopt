@@ -23,6 +23,7 @@ layer.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.LLVM
   ( moduleForFunctions
+  , LLVMGenOptions(..)
     -- * Internals for implement architecture specific functions
   , LLVMArchSpecificOps(..)
   , LLVMArchConstraints
@@ -30,9 +31,9 @@ module Reopt.CFG.LLVM
   , functionTypeToLLVM
   , Intrinsic
   , intrinsic
-  , FunLLVMContext
+  , FunLLVMContext(funLLVMGenOptions)
   , BBLLVM
-  , BBLLVMState(archFns)
+  , BBLLVMState(archFns, funContext)
   , typeToLLVMType
   , setAssignIdValue
   , padUndef
@@ -40,6 +41,8 @@ module Reopt.CFG.LLVM
   , convop
   , bitcast
   , band
+  , bor
+  , shl
   , icmpop
   , llvmAsPtr
   , extractValue
@@ -54,6 +57,7 @@ module Reopt.CFG.LLVM
   , sideEffect
   , callAsm
   , callAsm_
+  , llvmITypeNat
   ) where
 
 import           Control.Lens
@@ -65,6 +69,7 @@ import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
@@ -72,6 +77,7 @@ import           Data.Proxy
 import qualified Data.Vector as V
 import           GHC.Stack
 import           GHC.TypeLits
+import           Numeric.Natural
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppLabel, ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
@@ -80,6 +86,17 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import           Reopt.CFG.FnRep
+
+-- | Return a LLVM type for a integer with the given width.
+llvmITypeNat :: Natural -> L.Type
+llvmITypeNat w | w <= fromIntegral (maxBound :: Int32) = L.PrimType (L.Integer wn)
+        | otherwise = error $ "llvmITypeNat given bad width " ++ show w
+  where wn :: Int32
+        wn = fromIntegral w
+
+natReprToLLVMType :: NatRepr n -> L.Type
+natReprToLLVMType = llvmITypeNat . natValue
+
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -166,9 +183,6 @@ llvmIntrinsics = [ overflowOp bop in_typ
 -- it looks like llvm (at least as of version 3.6.2) doesn't put fp128
 -- into xmm0 on a return, whereas it does for <2 x double>
 
-natReprToLLVMType :: NatRepr n -> L.Type
-natReprToLLVMType = L.iT . fromIntegral . natValue
-
 llvmFloatType :: FloatInfoRepr flt -> L.FloatType
 llvmFloatType flt =
   case flt of
@@ -180,7 +194,7 @@ llvmFloatType flt =
 
 typeToLLVMType :: TypeRepr tp -> L.Type
 typeToLLVMType BoolTypeRepr   = L.iT 1
-typeToLLVMType (BVTypeRepr n) = natReprToLLVMType n
+typeToLLVMType (BVTypeRepr n) = llvmITypeNat (natValue n)
 typeToLLVMType (FloatTypeRepr flt) = L.PrimType $ L.FloatType $ llvmFloatType flt
 typeToLLVMType (TupleTypeRepr s) = L.Struct (toListFC typeToLLVMType s)
 typeToLLVMType (VecTypeRepr w tp)
@@ -270,6 +284,17 @@ funIntrinsicMapLens :: Simple Lens (FunState arch) IntrinsicMap
 funIntrinsicMapLens = lens funIntrinsicMap (\s v -> s { funIntrinsicMap = v })
 
 ------------------------------------------------------------------------
+-- LLVMGEneration options
+
+-- | Options for generating LLVM
+data LLVMGenOptions =
+  LLVMGenOptions { llvmExceptionIsUB :: !Bool
+                   -- ^ Code with side effects is allowed to result in
+                   -- LLVM undefined behavior if machine code would
+                   -- hve raised an exception.
+                 }
+
+------------------------------------------------------------------------
 -- BBLLVM
 
 -- | Architecture-specific operations for generating LLVM
@@ -279,11 +304,13 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
     --
     -- Some architectures allow endianness to change dynamically,
     -- Macaw does not support this.
-  , archFnCallback :: !(forall tp . ArchFn arch (FnValue arch) tp -> BBLLVM arch (L.Typed L.Value))
+  , archFnCallback :: !(forall tp . ArchFn arch (FnValue arch) tp
+                        -> BBLLVM arch (L.Typed L.Value))
     -- ^ Callback for architecture-specific functions
   , archStmtCallback :: !(FnArchStmt arch (FnValue arch) -> BBLLVM arch ())
     -- ^ Callback for architecture-specific statements
-  , popCountCallback :: !(forall w . NatRepr w -> FnValue arch (BVType w) -> BBLLVM arch (L.Typed L.Value))
+  , popCountCallback :: !(forall w . NatRepr w -> FnValue arch (BVType w)
+                          -> BBLLVM arch (L.Typed L.Value))
     -- ^ Callback for emitting a popcount instruction
     --
     -- This is architecture-specific so that we can choose machine code.
@@ -293,7 +320,9 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
 --
 -- This information is the same for all blocks within the function.
 data FunLLVMContext arch = FunLLVMContext
-  { funArgs      :: !(V.Vector (L.Typed L.Value))
+  { funLLVMGenOptions :: !LLVMGenOptions
+    -- ^ Options for generating LLVM
+  , funArgs      :: !(V.Vector (L.Typed L.Value))
      -- ^ Arguments to this function.
   , funReturnType :: !L.Type
     -- ^ LLVM return type for this function.
@@ -472,7 +501,11 @@ extractValue ta i = do
               _ -> error "extractValue not given a struct or array."
   L.Typed etp <$> evalInstr (L.ExtractValue ta [i])
 
-insertValue :: L.Typed L.Value -> L.Typed L.Value -> Int32 -> BBLLVM arch (L.Typed L.Value)
+-- | Insert a valiue into an aggregate
+insertValue :: L.Typed L.Value -- ^ Aggregate
+            -> L.Typed L.Value -- ^ Value to insert
+            -> Int32 -- ^ Index to insert
+            -> BBLLVM arch (L.Typed L.Value)
 insertValue ta tv i =
   L.Typed (L.typedType ta) <$> evalInstr (L.InsertValue ta tv [i])
 
@@ -487,6 +520,7 @@ zext = convop L.ZExt
 band :: L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 band = bitop L.And
 
+-- | Bitwise inclusive  or
 bor :: L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 bor = bitop L.Or
 
@@ -537,9 +571,12 @@ carryValue :: (LLVMArchConstraints arch, HasCallStack, 1 <= w)
            => NatRepr w
            -> FnValue arch BoolType
            -> BBLLVM arch (L.Typed L.Value)
-carryValue w x =
-  (`zext` natReprToLLVMType w) =<< mkLLVMValue x
-
+carryValue w x = do
+  val <- mkLLVMValue x
+  if natValue w == 1 then
+    pure val
+   else
+    zext val (llvmITypeNat (natValue w))
 
 -- | Handle an intrinsic overflows
 intrinsicOverflows :: (LLVMArchConstraints arch, HasCallStack, 1 <= w)
@@ -668,7 +705,17 @@ appToLLVM app = do
       let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
-    TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
+    -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
+    TupleField _fieldTypes macawStruct idx -> do
+      -- Make a struct
+      llvmStruct <- mkLLVMValue macawStruct
+      -- Get index as an Int32
+      let idxVal :: Integer
+          idxVal = PL.indexValue idx
+      when (idxVal >= toInteger (maxBound :: Int32)) $
+        error $ "Index out of range " ++ show idxVal ++ "."
+      -- Extract a value
+      extractValue llvmStruct (fromInteger idxVal :: Int32)
 
 -- | Evaluate a value as a pointer
 llvmAsPtr :: (LLVMArchConstraints arch, HasCallStack)
@@ -719,8 +766,8 @@ resolveLoadNameAndType memRep =
   case memRep of
     BVMemRepr w end -> do
       checkEndian end
-      let bvw = 8 * fromIntegral (natValue w)
-      pure ("i" ++ show bvw, L.iT bvw)
+      let bvw = 8 * natValue w
+      pure ("i" ++ show bvw, llvmITypeNat bvw)
     FloatMemRepr f end -> do
       checkEndian end
       pure (llvmFloatName f, L.PrimType (L.FloatType (llvmFloatType f)))
@@ -792,10 +839,10 @@ stmtToLLVM stmt = do
    FnAssignStmt (FnAssignment lhs rhs) -> do
      rhsToLLVM lhs rhs
    FnWriteMem addr v -> do
-     llvm_v <- mkLLVMValue v
-     llvm_ptr <- llvmAsPtr addr (L.typedType llvm_v)
+     llvmVal <- mkLLVMValue v
+     llvmPtr <- llvmAsPtr addr (L.typedType llvmVal)
      -- Cast LLVM point to appropriate type
-     effect $ L.Store llvm_v llvm_ptr Nothing Nothing
+     effect $ L.Store llvmVal llvmPtr Nothing Nothing
    FnCondWriteMem cond addr v memRepr -> do
      -- Obtain llvm.masked.store intrinsic and ensure it will be declared.
      (loadName, eltType) <- resolveLoadNameAndType memRepr
@@ -804,7 +851,7 @@ stmtToLLVM stmt = do
      -- Compute value to write
      llvmValue <- singletonVector =<< mkLLVMValue v
      -- Convert addr to appropriate pointer.
-     llvmAddr     <- llvmAsPtr addr (L.Vector 1 eltType)
+     llvmAddr <- llvmAsPtr addr (L.Vector 1 eltType)
      -- Just use zero alignment
      let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
      -- Construct mask
@@ -958,7 +1005,8 @@ data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
 noSideEffect :: AsmAttrs
 noSideEffect = AsmAttrs { asmSideeffect = False }
 
--- | Indicates asm may have side effects that are not captured in the constraint list.
+-- | Indicates asm may have side effects that are not captured in the
+-- constraint list.
 sideEffect :: AsmAttrs
 sideEffect = AsmAttrs { asmSideeffect = True }
 
@@ -991,7 +1039,8 @@ callAsm_ attrs asmCode asmArgs args = do
 ------------------------------------------------------------------------
 -- Translating functions
 
--- | The LLVM translate monad records all the intrinsics detected when adding LLVM.
+-- | The LLVM translate monad records all the intrinsics detected when
+-- adding LLVM.
 newtype LLVMTrans a = LLVMTrans (State IntrinsicMap a)
   deriving (Functor, Applicative, Monad, MonadState IntrinsicMap)
 
@@ -1004,30 +1053,36 @@ runLLVMTrans (LLVMTrans action) =
 argIdent :: Int -> L.Ident
 argIdent i = L.Ident ("arg" ++ show i)
 
+
 -- | This translates the function to LLVM and returns the define.
 --
--- We have each function return all possible results, although only the ones that are actually
--- used (we use undef for the others).  This makes the LLVM conversion slightly simpler.
+-- We have each function return all possible results, although only
+-- the ones that are actually used (we use undef for the others).
+-- This makes the LLVM conversion slightly simpler.
 --
--- Users should declare intrinsics via 'declareIntrinsics' before using this function.
--- They should also add any referenced functions.
+-- Users should declare intrinsics via 'declareIntrinsics' before
+-- using this function.  They should also add any referenced
+-- functions.
 defineFunction :: forall arch
                .  LLVMArchConstraints arch
                => LLVMArchSpecificOps arch
                   -- ^ Architecture specific operations
+               -> LLVMGenOptions
+                  -- ^ Options for generating LLVM
                -> Function arch
                   -- ^ Function to translate
                -> LLVMTrans L.Define
-defineFunction archOps f = do
+defineFunction archOps genOpts f = do
   let mkInputReg :: Some TypeRepr -> Int -> L.Typed L.Ident
       mkInputReg (Some tp) i = L.Typed (typeToLLVMType tp) (argIdent i)
 
   let inputArgs :: [L.Typed L.Ident]
       inputArgs = zipWith mkInputReg (fnArgTypes (fnType f)) [0..]
-
+  let retType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
   let ctx :: FunLLVMContext arch
-      ctx = FunLLVMContext { funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
-                           , funReturnType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
+      ctx = FunLLVMContext { funLLVMGenOptions = genOpts
+                           , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
+                           , funReturnType = retType
                            }
 
   -- Create ordinary blocks
@@ -1085,11 +1140,13 @@ moduleForFunctions :: forall arch
                       , FoldableFC (ArchFn arch)
                       , FoldableF (FnArchStmt arch))
                    => LLVMArchSpecificOps arch
-                      -- ^ architecture specific functions
+                      -- ^ Architecture specific functions
+                   -> LLVMGenOptions
+                      -- ^ Options for generating LLVM
                    -> RecoveredModule arch
                       -- ^ Module to generate
                    -> L.Module
-moduleForFunctions archOps recMod =
+moduleForFunctions archOps genOpts  recMod =
     L.Module { L.modSourceName = Nothing
              , L.modDataLayout = []
              , L.modTypes      = []
@@ -1105,4 +1162,4 @@ moduleForFunctions archOps recMod =
              , L.modComdat     = Map.empty
              }
   where (dynIntrinsics, defines) = runLLVMTrans $
-          traverse (defineFunction archOps) (recoveredDefs recMod)
+          traverse (defineFunction archOps genOpts) (recoveredDefs recMod)

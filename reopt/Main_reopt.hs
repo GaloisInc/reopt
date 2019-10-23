@@ -145,6 +145,8 @@ data Args
             -- ^ Options affecting discovery
           , unnamedFunPrefix :: !BS.ByteString
             -- ^ Prefix for unnamed functions identified in code discovery.
+          , llvmGenOptions :: !LLVM.LLVMGenOptions
+            -- ^ Generation options for LLVM
           , annotationsPath :: !(Maybe FilePath)
             -- ^ Path to write reopt-vcg annotations to.
             --
@@ -171,6 +173,10 @@ excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 discOpts :: Simple Lens Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
+defaultLLVMGenOptions :: LLVM.LLVMGenOptions
+defaultLLVMGenOptions =
+  LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = False }
+
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
 defaultArgs = Args { _reoptAction = Reopt
@@ -189,6 +195,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , loadBaseAddress = Nothing
                    , _discOpts     = defaultDiscoveryOptions
                    , unnamedFunPrefix = "reopt"
+                   , llvmGenOptions = defaultLLVMGenOptions
                    , annotationsPath = Nothing
                    }
 
@@ -367,6 +374,15 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
   where upd b = discOpts %~ \o -> o { exploreCodeAddrInMem = b }
         help = "Include memory code addresses in discovery."
 
+-- | This flag if set allows the LLVM generator to treat
+-- trigger a undefined-behavior in cases like instructions
+-- throwing exceptions or errors.
+allowLLVMUB :: Flag Args
+allowLLVMUB = flagBool [ "llvm-ub" ] upd help
+  where upd b s = s { llvmGenOptions =
+                        LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = b } }
+        help = "Generated LLVM trigger UB on error."
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -396,6 +412,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- LLVM options
                 , llvmVersionFlag
                 , annotationsFlag
+                , allowLLVMUB
                   -- Compilation options
                 , clangPathFlag
                 , llcPathFlag
@@ -472,6 +489,16 @@ getFunctions args = do
 ------------------------------------------------------------------------
 --
 
+-- | Rendered a recovered X86_64 module as LLVM bitcode
+renderLLVMBitcode :: Args -- ^ Arguments passed
+                  -> X86OS -- ^ Operating system
+                  -> RecoveredModule X86_64 -- ^ Recovered module
+                  -> Builder.Builder
+renderLLVMBitcode args os recMod =
+  let archOps = LLVM.x86LLVMArchOps (show os)
+   in llvmAssembly (llvmVersion args) $
+      LLVM.moduleForFunctions archOps (llvmGenOptions args) recMod
+
 -- | This command is called when reopt is called with no specific
 -- action.
 performReopt :: Args -> IO ()
@@ -487,12 +514,12 @@ performReopt args = do
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os) discState
-  let llvmVer = llvmVersion args
-  let archOps = LLVM.x86LLVMArchOps (show os)
-  let obj_llvm = llvmAssembly llvmVer $ LLVM.moduleForFunctions archOps recMod
+  recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os)
+                   discState
+  let obj_llvm = renderLLVMBitcode args os recMod
   objContents <-
-    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args) (osLinkName os) obj_llvm
+    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                (osLinkName os) obj_llvm
 
   new_obj <- parseElf64 "new object" objContents
   -- Convert binary to LLVM
@@ -560,10 +587,9 @@ main' = do
                 , Ann.functions = getFunAnnotations <$> recoveredDefs recMod
                 }
           BSL.writeFile annPath (Aeson.encode vcgAnn)
-      let archOps = LLVM.x86LLVMArchOps (show os)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h $
-          llvmAssembly (llvmVersion args) $ LLVM.moduleForFunctions archOps recMod
+          renderLLVMBitcode args os recMod
 
     ShowObject -> do
       outPath <-
@@ -574,10 +600,7 @@ main' = do
           Just p ->
             pure p
       (os,recMod) <- getFunctions args
-      let archOps = LLVM.x86LLVMArchOps (show os)
-      let objLLVM =
-            llvmAssembly (llvmVersion args) $
-              LLVM.moduleForFunctions archOps recMod
+      let objLLVM = renderLLVMBitcode args os recMod
       objContents <-
         compileLLVM (optLevel args)
                     (optPath args)
