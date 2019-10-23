@@ -69,6 +69,7 @@ import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
+import qualified Data.Parameterized.List as PL
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
@@ -704,7 +705,17 @@ appToLLVM app = do
       let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
-    TupleField{} -> unimplementedInstr' typ (show (ppApp pretty app))
+    -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
+    TupleField _fieldTypes macawStruct idx -> do
+      -- Make a struct
+      llvmStruct <- mkLLVMValue macawStruct
+      -- Get index as an Int32
+      let idxVal :: Integer
+          idxVal = PL.indexValue idx
+      when (idxVal >= toInteger (maxBound :: Int32)) $
+        error $ "Index out of range " ++ show idxVal ++ "."
+      -- Extract a value
+      extractValue llvmStruct (fromInteger idxVal :: Int32)
 
 -- | Evaluate a value as a pointer
 llvmAsPtr :: (LLVMArchConstraints arch, HasCallStack)
