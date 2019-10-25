@@ -40,14 +40,12 @@ import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import           Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           GHC.Stack
-import           Numeric.Natural
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.AbsDomain.JumpBounds -- (BoundLoc(..), StackMap, emptyStackMap, sta)
+import           Data.Macaw.AbsDomain.JumpBounds
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Types
@@ -182,9 +180,8 @@ data RecoverState arch ids =
      , rsLocPhiVarMap :: !(LocMap (ArchReg arch) FnPhiVar)
        -- ^ Map from locations demanded by this block to phi variable
        -- for that location.
-     , rsAssignmentsUsed     :: !(Set (Some (AssignId ids)))
-        -- ^ Contains ids of all assignments that were determined to
-        -- be needed to execute block.
+     , rsDependencySet :: !(DependencySet (ArchReg arch)  ids)
+       -- ^ Dependencies computed for current block.
      , rsCurRegs   :: !(MapF (ArchReg arch) (FnRegValue arch))
        -- ^ This maps registers to the associated value at the start
        -- of the block after any stack allocations have been
@@ -217,7 +214,8 @@ rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments that have been evaluated to the value bound
 -- to them.
-rsAssignMap :: Simple Lens (RecoverState arch ids) (MapF (AssignId ids) (FnValue arch))
+rsAssignMap :: Simple Lens (RecoverState arch ids)
+                           (MapF (AssignId ids) (FnValue arch))
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
 
 ------------------------------------------------------------------------
@@ -254,15 +252,11 @@ evalRecover b preds phiVars locPhiVarMap regs initStackMap m = do
              Just ds' -> ds'
              Nothing -> error $ "Could not find block dependencies."
 
-  -- Get assignments used
-  let usedAssignSet :: Set (Some (AssignId ids))
-      usedAssignSet = dsAssignSet ds
-
   let s0 = RS { rsBlock = b
               , rsPredBlockAddrs = preds
               , rsPhiVars = phiVars
               , rsLocPhiVarMap = locPhiVarMap
-              , rsAssignmentsUsed = usedAssignSet
+              , rsDependencySet = ds
               , rsCurRegs = regs
               , _rsAssignStackOffsetMap = Map.empty
               , _rsStackMap = initStackMap
@@ -458,7 +452,7 @@ recoverValue v = do
       case MapF.lookup (assignId asgn) assignMap of
         Just rval -> pure rval
         Nothing -> do
-          usedAssigns <- gets rsAssignmentsUsed
+          usedAssigns <- gets $ dsAssignSet . rsDependencySet
           -- Only add assignment if it is used.
           if Some (assignId asgn) `Set.member` usedAssigns then
             error $ "Encountered uninitialized assignment: " ++ show (assignId asgn) ++ "\n"
@@ -517,23 +511,24 @@ recoverCallTarget regState = do
 
 $(pure [])
 
-checkAssignmentUnused :: AssignId ids tp -> Recover ids ()
+checkAssignmentUnused :: HasCallStack => AssignId ids tp -> Recover ids ()
 checkAssignmentUnused aid = do
   mSeen <- uses rsAssignMap (MapF.lookup aid)
   case mSeen of
-    Just{} -> return ()
-    Nothing -> error "internal: Assign already seen"
+    Nothing -> return ()
+    Just _ -> error $ "internal: Assign " ++ show aid ++ " already seen"
 
 -- | Associate assign id with the reuslt
-setAssignVal :: AssignId ids tp
+setAssignVal :: HasCallStack
+             => AssignId ids tp
              -> FnValue X86_64 tp
              -> Recover ids ()
 setAssignVal aid rval = do
   checkAssignmentUnused aid
   rsAssignMap %= MapF.insert aid rval
 
-
-setAssignRhs :: AssignId ids tp
+setAssignRhs :: HasCallStack
+             => AssignId ids tp
              -> FnAssignRhs X86_64 (FnValue X86_64) tp
              -> Recover ids ()
 setAssignRhs aid rhs = do
@@ -542,7 +537,7 @@ setAssignRhs aid rhs = do
 
 whenUsed :: AssignId ids tp -> Recover ids () -> Recover ids ()
 whenUsed aid m = do
-  usedAssigns <- gets rsAssignmentsUsed
+  usedAssigns <- gets $ dsAssignSet . rsDependencySet
   -- Only add assignment if it is used.
   when (Some aid `Set.member` usedAssigns) m
 
@@ -599,28 +594,33 @@ recoverAssign asgn = do
         fval <- traverseFC recoverValue f
         setAssignRhs aid (FnEvalArchFn fval)
 
---checkNotStack :: String -> Value X86_64 ids tp -> Recover ids ()
---checkNotStack = undefined
+-- | Run the given computation if a write statement is used.
+whenStackWriteIsUsed :: StmtIndex
+                     -> Recover ids ()
+                     -> Recover ids ()
+whenStackWriteIsUsed idx m = do
+  idxSet <- gets $ dsWriteStmtIndexSet . rsDependencySet
+  when (Set.member idx idxSet) m
 
 -- | This should add code as needed to support the statement.
-recoverStmt :: Natural -- ^ Index of statement
+recoverStmt :: StmtIndex -- ^ Index of statement
             -> Stmt X86_64 ids
             -> Recover ids ()
-recoverStmt _stmtIdx s = do
+recoverStmt stmtIdx s = do
   --regs <- use rsCurRegs
   case s of
     AssignStmt asgn -> do
       recoverAssign asgn
-    WriteMem addr _ val -> do
+    WriteMem addr memRepr val -> do
       initBounds <- gets $ blockJumpBounds . rsBlock
       assignStackMap <- use rsAssignStackOffsetMap
       case valueStackOffset initBounds assignStackMap addr of
         Just o -> do
-          -- TODO: Check if written address is actually read
-          -- Update stack location with value if it is used.
-
-          -- TODO: Update value at given stack offset.
-          undefined o
+          -- Check if written address is actually read
+          whenStackWriteIsUsed stmtIdx $ do
+            rval <- recoverValue val
+            -- Overwrite value in stack.
+            rsStackMap %= stackMapOverwrite o memRepr rval
         Nothing -> do
           rAddr <- recoverValue addr
           rVal  <- recoverValue val
@@ -878,7 +878,7 @@ evalReturnVars retInfo = do
 
 $(pure [])
 
-recoverStmts :: Natural -> [Stmt X86_64 ids] -> Recover ids ()
+recoverStmts :: StmtIndex -> [Stmt X86_64 ids] -> Recover ids ()
 recoverStmts _ [] = pure ()
 recoverStmts stmtIdx (n:r) = do
   recoverStmt stmtIdx n
@@ -1246,12 +1246,12 @@ recoverFunction sysp funTypeMap mem fInfo = do
                 r0
                 (Map.keys blockPreds)
 
-    let (Just entry,restBlocks) = Map.updateLookupWithKey (\_ _ -> Nothing) entryAddr rf
+    let (Just entry,restBlocks) =
+          `Map.updateLookupWithKey (\_ _ -> Nothing) entryAddr rf
 
     pure $! Function { fnAddr = entryAddr
                      , fnType = resolveX86FunctionType cfti
                      , fnName = nm
-                     , fnAllocas = V.empty
                      , fnEntryBlock = entry
                      , fnRestBlocks = Map.elems restBlocks
                      }

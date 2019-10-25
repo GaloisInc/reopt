@@ -192,6 +192,13 @@ emptyDeps =
          , dsWriteStmtIndexSet = Set.empty
          }
 
+assignSet :: AssignId ids tp -> DependencySet r ids
+assignSet aid =
+  DepSet { dsAssignSet = Set.singleton (Some aid)
+         , dsLocSet = Set.empty
+         , dsWriteStmtIndexSet = Set.empty
+         }
+
 -- | Create a dependency set for a single location.
 locDepSet :: BoundLoc r tp -> DependencySet r ids
 locDepSet l =
@@ -368,9 +375,11 @@ clearDependencySet (Some r) = blockInitDeps %= Map.insert (Some (RegLoc r)) memp
 
 -- | Set dependencies for an assignment whose right-hand-side must be
 -- evaluated for side effects.
-requiredAssignDeps :: AssignId ids tp -> DependencySet X86Reg ids -> RegisterUseM ids ()
+requiredAssignDeps :: AssignId ids tp
+                   -> DependencySet X86Reg ids
+                   -> RegisterUseM ids ()
 requiredAssignDeps aid deps = do
-  addDeps deps
+  addDeps $ deps
   assignmentCache %= Map.insert (Some aid) mempty
 
 -- | Return values that must be evaluated to execute side effects.
@@ -393,15 +402,18 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
               assignmentCache %= Map.insert (Some aid) mempty
               modify $ \s ->
                 s { _assignStackOffset =
-                      Map.insert (Some aid) (fromInteger o)
+                      Map.insert (Some aid)
+                                 (fromInteger o)
                                  (_assignStackOffset s)
                   }
             Nothing -> do
               depCache <- gets _assignmentCache
-              let deps = foldlFC' (\s v -> mappend s (valueUses depCache v)) mempty app
+              let deps = foldlFC' (\s v -> mappend s (valueUses depCache v))
+                                  (assignSet aid)
+                                  app
               assignmentCache %= Map.insert (Some aid) deps
         SetUndefined{} -> do
-          assignmentCache %= Map.insert (Some aid) mempty
+          assignmentCache %= Map.insert (Some aid) (assignSet aid)
         ReadMem addr repr -> do
           bnds <- gets blockPrecond
           amap <- gets _assignStackOffset
@@ -410,25 +422,32 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
               wmap <- use writeOffsets
               deps <-
                 case stackMapLookup o repr wmap of
-                  SMLResult (Const deps) -> pure deps
+                  SMLResult (Const deps) -> pure $ assignSet aid <> deps
                     -- Update DependencySet to depend on stack offsets and update.
                   SMLOverlap _ _ _ -> do
                     throwError "Stack read overlap"
                   SMLNone ->
-                    pure $! locDepSet (StackOffLoc o repr)
+                    pure $! assignSet aid <> locDepSet (StackOffLoc o repr)
               assignmentCache %= Map.insert (Some aid) deps
             Nothing -> do
               depCache <- gets _assignmentCache
-              let deps = valueUses depCache addr
+              let deps = assignSet aid <> valueUses depCache addr
               requiredAssignDeps aid deps
         CondReadMem _repr c addr val -> do
           depCache <- gets _assignmentCache
           let deps = mconcat
-                [valueUses depCache c, valueUses depCache addr, valueUses depCache val]
+                [ assignSet aid
+                , valueUses depCache c
+                , valueUses depCache addr
+                , valueUses depCache val
+                ]
           requiredAssignDeps aid deps
+          addDeps $ assignSet aid
         EvalArchFn fn _ -> do
           depCache <- gets _assignmentCache
-          let deps = foldlFC' (\s v -> mappend s (valueUses depCache v)) mempty fn
+          let deps = foldlFC' (\s v -> mappend s (valueUses depCache v))
+                              (assignSet aid)
+                              fn
           if archFnHasSideEffects ctx fn then do
             requiredAssignDeps aid deps
            else

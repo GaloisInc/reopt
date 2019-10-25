@@ -19,7 +19,7 @@ module Reopt.CFG.FnRep
    ( RecoveredModule(..)
    , FunctionDecl(..)
    , Function(..)
-   , FnAlloca(..)
+--   , FnAlloca(..)
    , fnBlocks
    , FnAssignId(..)
    , FnAssignment(..)
@@ -200,7 +200,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
   -- | Denotes the base address of the `i`th stack allocation in
   -- `fnAllocas`.
-  FnAllocaRef :: !Int -> FnValue arch (BVType (ArchAddrWidth arch))
+  --FnAllocaRef :: !Int -> FnValue arch (BVType (ArchAddrWidth arch))
   -- | Value from a phi node
   FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
   -- | A value returned by a function call (rax/rdx/xmm0)
@@ -245,10 +245,11 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnUndefined {})         = text "undef"
   pretty (FnConstantBool b)       = text $ if b then "true" else "false"
   pretty (FnConstantValue w i)
-    | i >= 0 = parens (text ("0x" ++ showHex i "") <+> text ":" <+> text "bv" <+> text (show w))
+    | i >= 0 = parens (text ("0x" ++ showHex i "")
+                        <+> text ":" <+> text "bv" <+> text (show w))
     | otherwise = error ("FnConstantBool given negative value: " ++ show i)
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
-  pretty (FnAllocaRef i)          = text "alloca" <> int i
+  --pretty (FnAllocaRef i)          = text "alloca" <> int i
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
@@ -294,7 +295,7 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnConstantBool _ -> BoolTypeRepr
       FnConstantValue sz _ -> BVTypeRepr sz
       FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
-      FnAllocaRef _ -> archWidthTypeRepr (Proxy :: Proxy arch)
+      --FnAllocaRef _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
@@ -464,7 +465,8 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue f s (FnRet rets) = foldl (\t (Some v) -> f t v) s rets
-  foldFnValue f s (FnTailCall fn _ args) = foldl (\s' (Some v) -> f s' v) (f s fn) args
+  foldFnValue f s (FnTailCall fn _ args) =
+    foldl (\s' (Some v) -> f s' v) (f s fn) args
 
 ------------------------------------------------------------------------
 -- FnBlock
@@ -519,11 +521,6 @@ instance FoldFnValue FnBlock where
 -- FnAlloca
 
 {-
--- | Type repr for a value with a defined memory layout.
-data MemTypeRepr (tp::M.Type) where
-  BVMemTypeRepr :: !(NatRepr bytes) -> MemTypeRepr (BVType (8 * bytes))
--}
-
 -- | Information about allocas made in function.
 data FnAlloca
    = FnAlloca  { fnAllocaBinaryOffset :: !Natural
@@ -537,6 +534,7 @@ data FnAlloca
                -- the function starts.
                , allocaSize :: !Natural
                }
+-}
 
 ------------------------------------------------------------------------
 -- Function definitions
@@ -553,10 +551,6 @@ data Function arch
                 -- ^ Type of this  function
               , fnName :: !BSC.ByteString
                 -- ^ Name of this function
-              , fnAllocas :: !(V.Vector FnAlloca)
-                -- ^ Stack allocations made in program.
-                --
-                -- We do not allow allocas to be made dynamically.
               , fnEntryBlock :: !(FnBlock arch)
                 -- Initial entry block.
               , fnRestBlocks :: ![FnBlock arch]
