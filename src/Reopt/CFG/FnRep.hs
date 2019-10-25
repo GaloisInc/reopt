@@ -19,7 +19,6 @@ module Reopt.CFG.FnRep
    ( RecoveredModule(..)
    , FunctionDecl(..)
    , Function(..)
---   , FnAlloca(..)
    , fnBlocks
    , FnAssignId(..)
    , FnAssignment(..)
@@ -56,7 +55,6 @@ import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
-import           Numeric.Natural
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.AbsDomain.JumpBounds (LocMap)
@@ -198,9 +196,6 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   FnConstantValue :: (1 <= n) => !(NatRepr n) -> !Integer -> FnValue arch (BVType n)
   -- | Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
-  -- | Denotes the base address of the `i`th stack allocation in
-  -- `fnAllocas`.
-  --FnAllocaRef :: !Int -> FnValue arch (BVType (ArchAddrWidth arch))
   -- | Value from a phi node
   FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
   -- | A value returned by a function call (rax/rdx/xmm0)
@@ -249,7 +244,6 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
                         <+> text ":" <+> text "bv" <+> text (show w))
     | otherwise = error ("FnConstantBool given negative value: " ++ show i)
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
-  --pretty (FnAllocaRef i)          = text "alloca" <> int i
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
   pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
@@ -295,7 +289,6 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnConstantBool _ -> BoolTypeRepr
       FnConstantValue sz _ -> BVTypeRepr sz
       FnAssignedValue (FnAssignment _ rhs) -> typeRepr rhs
-      --FnAllocaRef _ -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnPhiValue phi -> fnPhiVarType phi
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
@@ -380,33 +373,6 @@ fnBlockLabelString (FnBlockLabel s) =
 
 instance Pretty (FnBlockLabel w) where
   pretty = text . fnBlockLabelString
-
-{-
-charInRange :: Char -> (Char, Char) -> Bool
-charInRange c (l,h) = l <= c && c <= h
-
-isBlockStart :: Char -> Bool
-isBlockStart c
-  =  c `charInRange` ('a', 'z')
-  || c `charInRange` ('A', 'Z')
-
-isBlockId :: Char -> Bool
-isBlockId c
-  =  c `charInRange` ('a', 'z')
-  || c `charInRange` ('A', 'Z')
-  || c `charInRange` ('0', '9')
-  || c == '_'
--}
-
-{-
-instance IsString FnBlockLabel where
-  fromString [] = error "Block label must be non-empty."
-  fromString (c:r)
-    | isBlockStart c, all isBlockId r =
-        FnBlockLabel $ Text.pack $ c:r
-    | otherwise =
-        error $ "Invalid block label: " ++ (c:r)
--}
 
 ------------------------------------------------------------------------
 -- FnJumpTarget
@@ -493,14 +459,6 @@ data FnBlock arch
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
-{-
-             , fbRegMap :: !(MapF (ArchReg arch) (FnValue arch))
-               -- ^ Map from registers to values supplied by this
-               -- block to successors.
-               --
-               -- Used to resolve Phi nodes, and could be omitted if
-               -- block has no successors.
--}
              }
 
 instance (FnArchConstraints arch
@@ -516,25 +474,6 @@ instance (FnArchConstraints arch
 
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
-
-------------------------------------------------------------------------
--- FnAlloca
-
-{-
--- | Information about allocas made in function.
-data FnAlloca
-   = FnAlloca  { fnAllocaBinaryOffset :: !Natural
-               -- ^ Number of bytes from start of alloca to offset of stack
-               -- pointer in machine code.
-               --
-                 -- We currently only support architectures where the stack
-               -- grows down, so the actual memory addresses represented are
-               -- @[rsp0 - allocaBinaryOffset, rsp0 - allocaBinaryOffset +
-               -- allocaSize)@ where @rsp0@ denotes the value of @rsp@ when
-               -- the function starts.
-               , allocaSize :: !Natural
-               }
--}
 
 ------------------------------------------------------------------------
 -- Function definitions

@@ -54,11 +54,9 @@ import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
 
---import           Reopt.Analysis.Stack (StackOffset, BlockStackPrecond)
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
---import           Reopt.CFG.StackDepth
 
 ------------------------------------------------------------------------
 -- FnRegValue
@@ -310,38 +308,6 @@ mkBlock tm = do
                     , fbStmts  = toList curStmts
                     , fbTerm   = tm
                     }
-
-{-
-------------------------------------------------------------------------
--- valueDependencies
-
--- | Compute the complete set of functional values needed to evaluate the given values.
---
--- e.g. 'valueDependencies l' will return the complete set of assignments needed to compute the values in 'l'
--- or return an error if the values in 'l' depend on architecture-specific functions or memory.
-valueDependencies :: forall ids . [Some (Value X86_64 ids)] -> Either String (Set (Some (AssignId ids)))
-valueDependencies = go Set.empty
-  where go :: Set (Some (AssignId ids))
-           -> [Some (Value X86_64 ids)]
-           -> Either String (Set (Some (AssignId ids)))
-        go s [] = Right s
-        go s (Some v:r) =
-          case v of
-            BoolValue{} -> go s r
-            BVValue{} -> go s r
-            RelocatableValue{} -> go s r
-            SymbolValue{} -> go s r
-            Initial{} -> go s r
-            AssignedValue a
-              | Set.member (Some (assignId a)) s -> go s r
-              | otherwise ->
-                case assignRhs a of
-                  EvalApp app -> go (Set.insert (Some (assignId a)) s) (foldlFC (\prev l -> Some l:prev) r app)
-                  SetUndefined{} -> go s r
-                  ReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
-                  CondReadMem{} -> Left $ "Depends on read " ++ show (pretty a)
-                  EvalArchFn{} -> Left $ "Depends on archfn " ++ show (pretty a)
--}
 
 $(pure [])
 
@@ -991,44 +957,6 @@ recoverBlock b = do
       tgtVec <- traverse (recoverJumpTarget (recoverRegister regs)) vec
       mkBlock (FnLookupTable idx' tgtVec)
 
-{-
-------------------------------------------------------------------------
--- allocateStackFrame
-
-allocateStackFrame :: forall ids
-                   .  ParsedBlock X86_64 ids
-                   -> StackDepthValue X86_64 ids
-                   -> Recover ids (FnValue X86_64 (BVType 64))
-allocateStackFrame b s = do
-  -- Compute assignments needed for evaluating dynamic part of stack
-  let vals = (Some . stackDepthOffsetValue) <$> Set.toList (dynamicPart s)
-  case valueDependencies vals of
-    Left msg -> throwError $ "Could not allocate stack frame: " ++ msg
-    Right asgns -> do
-      -- Resolve each assignment in initial block.
-      let goStmt :: Set (Some (AssignId ids)) -> Stmt X86_64 ids -> Recover ids (Set (Some (AssignId ids)))
-          goStmt depSet (AssignStmt asgn)
-            | Set.member (Some (assignId asgn)) depSet = do
-                recoverAssign asgn
-                pure $! Set.delete (Some (assignId asgn)) depSet
-          goStmt depSet _ = return depSet
-      remaining_asgns <- foldlM goStmt asgns (pblockStmts b)
-      when (not (Set.null remaining_asgns)) $ do
-        throwError $ "Found unsupported symbolic stack references: " ++ show remaining_asgns
-  let doOneDelta :: StackDepthOffset X86_64 ids
-                 -> Recover ids (FnValue X86_64 (BVType 64))
-                 -> Recover ids (FnValue X86_64 (BVType 64))
-      doOneDelta (Pos _) _   = error "Saw positive stack delta"
-      doOneDelta (Neg x) m_v = do
-        v0 <- m_v
-        v  <- recoverValue x
-        evalAssignRhs $ FnEvalApp $ BVAdd knownNat v v0
-  let sz0 = toInteger (negate $ staticPart s)
-  szv <- foldr doOneDelta (return (FnConstantValue n64 sz0)) (dynamicPart s)
-  alloc <- evalAssignRhs $ FnAlloca szv
-  evalAssignRhs $ FnEvalApp $ BVAdd knownNat alloc szv
--}
-
 ------------------------------------------------------------------------
 -- recoverFunction
 
@@ -1042,27 +970,6 @@ recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> MemSegmentOff 64
                   -> FunRecover ids RecoveredBlockInfo
 recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
-{-
-  let addPhiVar :: MapF X86Reg FnPhiVar
-                -> Some X86Reg
-                -> FunRecover ids (MapF X86Reg FnPhiVar)
-      addPhiVar m (Some r) = do
-        next_id <- funFreshId
-        let v = FnPhiVar { unFnPhiVar = next_id
-                         , fnPhiVarType = typeRepr r
-                         }
-        pure $! MapF.insert r v m
-  phiVars <-
-    case Map.lookup addr blockRegs of
-      Nothing -> do
-        funAddWarning ("WARNING: No regs for " ++ show addr)
-        pure MapF.empty
-      Just x -> do
-        foldM addPhiVar MapF.empty x
-  let regs = fmapF (\v -> FnRegValue (FnPhiValue v) (WidthEqRefl (fnPhiVarType v))) phiVars
--}
-
-
   let addPhiVar :: ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
                 -> Some (BlockEqClass X86Reg)
                 -> FunRecover ids ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
@@ -1074,9 +981,12 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
         pure (Some phiVar:vl, m')
 
 
-  let eqClasses = case Map.lookup addr blockUsageInfo of
-                    Just c -> c
-                    Nothing -> error $ "internal: Could not find usage infor for " ++ show addr ++ "."
+  let eqClasses =
+        case Map.lookup addr blockUsageInfo of
+          Just c -> c
+          Nothing ->
+            error $ "internal: Could not find usage infor for "
+                    ++ show addr ++ "."
 
   (phiVarList, locPhiVarMap) <- foldlM addPhiVar ([], locMapEmpty) eqClasses
 
@@ -1218,27 +1128,6 @@ recoverFunction sysp funTypeMap mem fInfo = do
 
     r0 <-
       evalRecover b [] V.empty locMapEmpty initRegs initStackMap $ do
-        -- The first block is special as it needs to allocate space for
-        -- the block stack area.  It should also not be in blockPreds (we
-        -- assume no recursion/looping through the initial block)
-
-        -- Make the alloca and init rsp.  This is the only reason we
-        -- need rsCurStmts
-
-      {-
-        case maximumStackDepth fInfo of
-          Right depths ->
-            case Set.toList depths of
-              [] -> do
-                addWarning "WARNING: no stack use detected"
-              [s] -> do
-                when (not (null (dynamicPart s)) || staticPart s /= 0) $ do
-                  spTop <- allocateStackFrame b s
-                  rsCurRegs %= MapF.insert sp_reg (FnValue spTop (WidthEqRefl (knownRepr :: TypeRepr (BVType 64))))
-              _ -> throwError $ "non-singleton stack depth"
-          Left msg -> throwError $ "maximumStackDepth: " ++ msg
--}
-
         fb <- recoverBlock b
         return $! emptyRecoveredBlockInfo & addFnBlock fb
 
@@ -1247,7 +1136,7 @@ recoverFunction sysp funTypeMap mem fInfo = do
                 (Map.keys blockPreds)
 
     let (Just entry,restBlocks) =
-          `Map.updateLookupWithKey (\_ _ -> Nothing) entryAddr rf
+          Map.updateLookupWithKey (\_ _ -> Nothing) entryAddr rf
 
     pure $! Function { fnAddr = entryAddr
                      , fnType = resolveX86FunctionType cfti
@@ -1255,14 +1144,3 @@ recoverFunction sysp funTypeMap mem fInfo = do
                      , fnEntryBlock = entry
                      , fnRestBlocks = Map.elems restBlocks
                      }
-
-{-
-We need to be able to recognize each value that references the stack, and
-map it to a concrete offset.
-
-We also need to be able to
-
-
-data Alloca
-
--}

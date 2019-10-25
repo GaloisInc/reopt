@@ -95,13 +95,12 @@ import qualified Reopt.VCG.Annotations as Ann
 -- | Return a LLVM type for a integer with the given width.
 llvmITypeNat :: Natural -> L.Type
 llvmITypeNat w | w <= fromIntegral (maxBound :: Int32) = L.PrimType (L.Integer wn)
-        | otherwise = error $ "llvmITypeNat given bad width " ++ show w
+               | otherwise = error $ "llvmITypeNat given bad width " ++ show w
   where wn :: Int32
         wn = fromIntegral w
 
 natReprToLLVMType :: NatRepr n -> L.Type
 natReprToLLVMType = llvmITypeNat . natValue
-
 
 ------------------------------------------------------------------------
 -- HasValue
@@ -468,17 +467,6 @@ setAssignIdValue fid v = do
        Nothing -> pure ()
   modify' $ \s -> s { bbAssignValMap = Map.insert fid v (bbAssignValMap s) }
 
-{-
-addBoundPhiVar :: L.Ident
-               -> L.Type
-               -> [(L.BlockLabel, ArchReg arch tp)]
-               -> BBLLVM arch ()
-addBoundPhiVar nm tp info = do
-  s <- get
-  let pair = Some $ PendingPhiNode nm tp info
-  seq pair $ put $! s { bbBoundPhiVars = pair : bbBoundPhiVars s }
--}
-
 ------------------------------------------------------------------------
 -- Convert a value to LLVM
 
@@ -503,14 +491,6 @@ valueToLLVM ctx avmap val = withArchConstraints ctx $ do
         Just v -> v
         Nothing ->
           error $ "Could not find assignment value " ++ show (pretty lhs)
-{-
-    FnAllocaRef i
-      | 0 <= i && i < funAllocaCount ctx ->
-          L.Typed (ptrType (Proxy :: Proxy (ArchAddrWidth arch))) $
-            L.ValIdent (allocaIdent i)
-      | otherwise ->
-        error "Alloca out of range."
--}
     -- Value from a phi node
     FnPhiValue (FnPhiVar lhs _tp)  -> do
       case Map.lookup lhs avmap of
@@ -1023,15 +1003,7 @@ toBasicBlock phiMap res
         lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
         phiStmts = V.toList $ V.zipWith resolvePhiStmt phiAssignment phiVars
         finalState = finalBBState res
-{-
-toBasicBlock phiMap res = L.BasicBlock { L.bbLabel = Just lbl
-                                       , L.bbStmts = phiStmts ++ reverse (bbStmts fs)
-                                       }
-  where b = fnBlock res
-        fs = finalBBState res
-        lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
-        phiStmts = reverse $ resolvePhiStmt phiMap <$> bbBoundPhiVars fs
--}
+
 
 data PhiBinding = PhiBinding !(Some FnPhiVar) !L.Ident
 
@@ -1045,7 +1017,6 @@ addPhiBinding v@(Some (FnPhiVar fid tp)) = do
   let llvmType = typeToLLVMType tp
   setAssignIdValue fid (L.Typed llvmType (L.ValIdent nm))
   pure $! PhiBinding v nm
---  addBoundPhiVar nm llvmType [ (llvmBlockLabel lbl, reg) | lbl <- predBlocks ]
 
 addLLVMBlock :: forall arch
             .  FunLLVMContext arch
@@ -1235,14 +1206,6 @@ defineFunction archOps genOpts f = do
                                , Ann.blocks = finBlockAnnMap
                                }
   pure (funDef,funAnn)
-
-{-
-    FnAlloca v -> do
-      llvmCnt <- mkLLVMValue v
-      ptr <- evalInstr $ L.Alloca (L.iT 8) (Just llvmCnt) Nothing
-      bvVal <- convop L.PtrToInt (L.Typed (L.PtrTo (L.iT 8)) ptr) (L.iT 64)
-      setAssignIdValue lhs bvVal
--}
 
 ------------------------------------------------------------------------
 -- Other
