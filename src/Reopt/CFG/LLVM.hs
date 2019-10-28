@@ -34,7 +34,6 @@ module Reopt.CFG.LLVM
   , intrinsic
   , FunLLVMContext(archFns, funLLVMGenOptions)
   , BBLLVM
---  , BBLLVMState(funContext)
   , typeToLLVMType
   , setAssignIdValue
   , padUndef
