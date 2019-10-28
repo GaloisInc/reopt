@@ -63,6 +63,6 @@ mkTest fp = T.testCase fp $ do
 
   let archOps = LLVM.x86LLVMArchOps (show os)
   bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
-    Builder.hPutBuilder h $
-      llvmAssembly latestLLVMConfig $
-        LLVM.moduleForFunctions archOps defaultLLVMGenOptions recMod
+    let (llvmContents, _ann) =
+          llvmAssembly archOps defaultLLVMGenOptions recMod latestLLVMConfig
+    Builder.hPutBuilder h llvmContents
