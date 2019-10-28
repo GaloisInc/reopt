@@ -14,11 +14,8 @@
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
---  , X86BlockRegMap
---  , ppX86BlockRegMap
   , registerUse
---  , BlockEqClassVec
---  , BlockEqClass(..)
+  , ppBlockDependencySetMap
   , AssignStackOffsetMap
   , valueStackOffset
   , DependencySet(..)
@@ -50,6 +47,7 @@ import qualified Data.Set as Set
 import           Data.Word
 import qualified Flexdis86 as F
 import           GHC.Stack
+import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.AbsDomain.JumpBounds
 import           Data.Macaw.CFG.DemandSet
@@ -63,12 +61,18 @@ import           Data.Macaw.Types hiding (Type)
 import qualified Data.Macaw.Types as M
 
 import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
-import           Data.Macaw.X86.SyscallInfo (SyscallPersonality, spTypeInfo, spResultRegisters)
+import           Data.Macaw.X86.SyscallInfo
+  (SyscallPersonality
+  , spTypeInfo
+  , spResultRegisters
+  )
 import           Data.Macaw.X86.X86Reg
   ( X86Reg(..), pattern DF, x86StateRegs, x86CalleeSavedRegs
   , x86GPPArgumentRegs
   )
 import           Data.Macaw.X86 (x86DemandContext)
+
+import Debug.Trace
 
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
@@ -85,8 +89,8 @@ argReg :: X86ArgInfo -> Some X86Reg
 argReg (ArgBV64 r) = Some (X86_GP r)
 argReg (ArgMM512D i) = Some (X86_ZMMReg i)
 
--- | This identifies how a argument is passed into a function, or
--- a return value is passed out.
+-- | This identifies how a return value is passed from a callee to
+-- the callee.
 data X86RetInfo where
   RetBV64 :: !F.Reg64 -> X86RetInfo
   -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
@@ -167,43 +171,64 @@ valueStackOffset bnds amap v =
       Map.lookup (Some aid) amap
 
 -------------------------------------------------------------------------------
+-- StmtIndex
 
 type StmtIndex = Int
+
+-------------------------------------------------------------------------------
+-- DependencySet
 
 -- | This records what assignments and initial value locations are
 -- needed to compute a value or execute code in a block with side
 -- effects.
 data DependencySet (r :: M.Type -> Type) ids =
-  DepSet { dsAssignSet :: !(Set (Some (AssignId ids)))
-           -- ^ Set of assignments that must be executed.
-         , dsLocSet :: !(Set (Some (BoundLoc r)))
+  DepSet { dsLocSet :: !(Set (Some (BoundLoc r)))
            -- ^ Set of locations that block reads the initial
            -- value of.
+         , dsAssignSet :: !(Set (Some (AssignId ids)))
+           -- ^ Set of assignments that must be executed.
          , dsWriteStmtIndexSet :: !(Set StmtIndex)
            -- ^ Block start address and index of write statement that
            -- writes a value to the stack that is read later.
          }
 
+ppSet :: (a -> Doc) -> Set a -> Doc
+ppSet f s = encloseSep lbrace rbrace comma (f <$> Set.toList s)
+
+ppSomeAssignId :: Some (AssignId ids) -> Doc
+ppSomeAssignId (Some aid) = text (show aid)
+
+ppSomeBoundLoc :: MapF.ShowF r => Some (BoundLoc r) -> Doc
+ppSomeBoundLoc (Some loc) = pretty loc
+
+instance MapF.ShowF r => Pretty (DependencySet r ids) where
+  pretty ds =
+    vcat [ text "Assignments:" <+> ppSet ppSomeAssignId (dsAssignSet ds)
+         , text "Locations:  " <+> ppSet ppSomeBoundLoc (dsLocSet ds)
+         , text "Write Stmts:" <+> ppSet pretty (dsWriteStmtIndexSet ds)
+         ]
+
 -- | Empty dependency set.
 emptyDeps :: DependencySet r ids
 emptyDeps =
-  DepSet { dsAssignSet = Set.empty
-         , dsLocSet = Set.empty
+  DepSet { dsLocSet = Set.empty
+         , dsAssignSet = Set.empty
          , dsWriteStmtIndexSet = Set.empty
          }
 
+-- | Dependency set for a single assignment
 assignSet :: AssignId ids tp -> DependencySet r ids
 assignSet aid =
-  DepSet { dsAssignSet = Set.singleton (Some aid)
-         , dsLocSet = Set.empty
+  DepSet { dsLocSet = Set.empty
+         , dsAssignSet = Set.singleton (Some aid)
          , dsWriteStmtIndexSet = Set.empty
          }
 
 -- | Create a dependency set for a single location.
 locDepSet :: BoundLoc r tp -> DependencySet r ids
 locDepSet l =
-  DepSet { dsAssignSet = Set.empty
-         , dsLocSet = Set.singleton (Some l)
+  DepSet { dsLocSet = Set.singleton (Some l)
+         , dsAssignSet = Set.empty
          , dsWriteStmtIndexSet = Set.empty
          }
 
@@ -214,7 +239,7 @@ addWriteDep idx s = seq idx $
 
 instance MapF.OrdF r => Semigroup (DependencySet r ids) where
   x <> y = DepSet { dsAssignSet = Set.union (dsAssignSet x) (dsAssignSet y)
-                  , dsLocSet = Set.union (dsLocSet x) (dsLocSet x)
+                  , dsLocSet = Set.union (dsLocSet x) (dsLocSet y)
                   , dsWriteStmtIndexSet =
                       Set.union (dsWriteStmtIndexSet x) (dsWriteStmtIndexSet y)
                   }
@@ -222,12 +247,39 @@ instance MapF.OrdF r => Semigroup (DependencySet r ids) where
 instance MapF.OrdF r => Monoid (DependencySet r ids) where
   mempty = emptyDeps
 
+------------------------------------------------------------------------
+--
+
 type AssignmentCache r ids = Map (Some (AssignId ids)) (DependencySet r ids)
 
 -- | This maps each location that could be accessed after a block
 -- terminates to the set of values needed to compute the value of the
 -- location.
-type BlockProvideDepMap r ids = Map (Some (BoundLoc r)) (DependencySet r ids)
+type BlockProvideDepMap r ids = LocMap r (Const (DependencySet r ids))
+
+emptyBlockProvideDepMap :: BlockProvideDepMap r ids
+emptyBlockProvideDepMap = locMapEmpty
+
+-- | Get dependency set for location.
+--
+-- Note. This code is currently buggy in that it will back propagate
+-- stack reads that are partially overwritten.
+getLocDependencySet :: (MapF.OrdF r, MemWidth (RegAddrWidth r))
+                    => BlockProvideDepMap r ids
+                    -> BoundLoc r tp
+                    -> DependencySet r ids
+getLocDependencySet srcDepMap l =
+  case locLookup l srcDepMap of
+    Nothing -> locDepSet l
+    Just (Const s) -> s
+
+addLocDependency :: (MapF.OrdF r, MemWidth (RegAddrWidth r))
+                 => BoundLoc r tp
+                 -> DependencySet r ids
+                 -> BlockProvideDepMap r ids
+                 -> BlockProvideDepMap r ids
+addLocDependency l ds m =
+  locOverwriteWith (\(Const n) (Const o) -> Const (mappend n o)) l (Const ds) m
 
 -- | This maps each block to the @BlockProvideDepMap@ for the block.
 --
@@ -268,33 +320,25 @@ data BlockUsageSummary (arch :: Type) ids = RUS
     -- | Map assignment ids that point to the current stack frame to
     -- the stack offset.
   , _assignStackOffset :: !(AssignStackOffsetMap (ArchAddrWidth arch) ids)
-    -- | Maps stack offsets written by code in this block to the
-    -- dependencies.
-  , _writeOffsets :: !(StackMap (ArchAddrWidth arch) (Const (DependencySet (ArchReg arch) ids)))
   }
 
 initBlockUsageSummary :: InitJumpBounds arch -> BlockUsageSummary arch ids
 initBlockUsageSummary bnds =
   RUS { blockPrecond       = bnds
-      , _blockInitDeps     = Map.empty
+      , _blockInitDeps     = emptyBlockProvideDepMap
       , _blockExecDemands  = emptyDeps
       , _assignmentCache   = Map.empty
       , _assignStackOffset = Map.empty
-      , _writeOffsets      = emptyStackMap
       }
 
-blockInitDeps :: Simple Lens (BlockUsageSummary arch ids) (BlockProvideDepMap (ArchReg arch) ids)
+blockInitDeps :: Lens' (BlockUsageSummary arch ids) (BlockProvideDepMap (ArchReg arch) ids)
 blockInitDeps = lens _blockInitDeps (\s v -> s { _blockInitDeps = v })
 
-blockExecDemands :: Simple Lens (BlockUsageSummary arch ids) (DependencySet (ArchReg arch) ids)
+blockExecDemands :: Lens' (BlockUsageSummary arch ids) (DependencySet (ArchReg arch) ids)
 blockExecDemands = lens _blockExecDemands (\s v -> s { _blockExecDemands = v })
 
-assignmentCache :: Simple Lens (BlockUsageSummary arch ids) (AssignmentCache (ArchReg arch) ids)
+assignmentCache :: Lens' (BlockUsageSummary arch ids) (AssignmentCache (ArchReg arch) ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
-
-writeOffsets :: Lens' (BlockUsageSummary arch ids)
-                      (StackMap (ArchAddrWidth arch) (Const (DependencySet (ArchReg arch) ids)))
-writeOffsets = lens _writeOffsets (\s v -> s { _writeOffsets = v })
 
 type RegisterUseM ids a =
   ReaderT RegisterUseContext (StateT (BlockUsageSummary X86_64 ids) (Except String)) a
@@ -304,23 +348,25 @@ type RegisterUseM ids a =
 -- ----------------------------------------------------------------------------------------
 
 -- | Return the register and assignment dependencies needed to
-valueUses :: MapF.OrdF (ArchReg arch)
+valueUses :: (HasCallStack, MapF.OrdF (ArchReg arch))
           => Map (Some (AssignId ids)) (DependencySet (ArchReg arch) ids)
           -> Value arch ids tp
           -> DependencySet (ArchReg arch) ids
 valueUses _ (CValue _) = emptyDeps
-valueUses _ (Initial r) = emptyDeps { dsLocSet = Set.singleton (Some (RegLoc r)) }
+valueUses _ (Initial r) = locDepSet (RegLoc r)
 valueUses m (AssignedValue (Assignment a _)) =
   case Map.lookup (Some a) m of
     Nothing -> error $ "Assignment " ++ show a ++ " is not defined."
     Just r -> r
 
 -- | Record the given dependencies are needed to execute this block.
-addDeps :: DependencySet X86Reg ids -> RegisterUseM ids ()
-addDeps deps = blockExecDemands %= mappend deps
+addDeps :: HasCallStack => DependencySet X86Reg ids -> RegisterUseM ids ()
+addDeps deps = trace ("Adding demands:\n" ++ show (pretty deps) ++ "\n" ++ prettyCallStack callStack) $ do
+  blockExecDemands %= mappend deps
 
 -- | Record the values needed to compute the given value.
-demandValue :: Value X86_64 ids tp
+demandValue :: HasCallStack
+            => Value X86_64 ids tp
             -> RegisterUseM ids ()
 demandValue v = do
   depCache <- gets _assignmentCache
@@ -367,11 +413,12 @@ addRegisterUses regs rs = do
   let insReg :: BlockProvideDepMap X86Reg ids
              -> Some X86Reg
              -> BlockProvideDepMap X86Reg ids
-      insReg m (Some r) = Map.insertWith mappend (Some (RegLoc r)) (valueUses depCache (regs^.boundValue r)) m
+      insReg m (Some r) = addLocDependency (RegLoc r) (valueUses depCache (regs^.boundValue r)) m
   blockInitDeps %= \m -> foldl' insReg m rs
 
+-- | Mark the given register has no dependencies
 clearDependencySet :: Some X86Reg -> RegisterUseM ids ()
-clearDependencySet (Some r) = blockInitDeps %= Map.insert (Some (RegLoc r)) mempty
+clearDependencySet (Some r) = blockInitDeps %= locOverwriteWith (\n _ -> n) (RegLoc r) (Const mempty)
 
 -- | Set dependencies for an assignment whose right-hand-side must be
 -- evaluated for side effects.
@@ -419,16 +466,10 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
           amap <- gets _assignStackOffset
           case valueStackOffset bnds amap addr of
             Just o -> do
-              wmap <- use writeOffsets
-              deps <-
-                case stackMapLookup o repr wmap of
-                  SMLResult (Const deps) -> pure $ assignSet aid <> deps
-                    -- Update DependencySet to depend on stack offsets and update.
-                  SMLOverlap _ _ _ -> do
-                    throwError "Stack read overlap"
-                  SMLNone ->
-                    pure $! assignSet aid <> locDepSet (StackOffLoc o repr)
-              assignmentCache %= Map.insert (Some aid) deps
+              wmap <- use blockInitDeps
+              let deps = getLocDependencySet wmap (StackOffLoc o repr)
+              let deps' = assignSet aid <> deps
+              assignmentCache %= Map.insert (Some aid) deps'
             Nothing -> do
               depCache <- gets _assignmentCache
               let deps = assignSet aid <> valueUses depCache addr
@@ -457,11 +498,10 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
       amap <- gets _assignStackOffset
       case valueStackOffset bnds amap addr of
         Just o -> do
-          demandValue addr
           depCache <- gets _assignmentCache
           -- Record value dependency in stack offset.
           let valDeps = addWriteDep stmtIdx (valueUses depCache v)
-          writeOffsets %= stackMapOverwrite o repr (Const valDeps)
+          blockInitDeps %= addLocDependency (StackOffLoc o repr) valDeps
         Nothing -> do
           demandValue addr
           demandValue v
@@ -523,7 +563,7 @@ summarizeBlock ctx mem blk = do
                   -> X86Reg tp
                   -> Value X86_64 ids tp
                   -> BlockProvideDepMap X86Reg ids
-          insDeps m r v = Map.insertWith mappend (Some (RegLoc r)) (valueUses depCache v) m
+          insDeps m r v = addLocDependency (RegLoc r) (valueUses depCache v) m
       blockInitDeps %= \m -> MapF.foldlWithKey' insDeps m regs
     ParsedReturn regs -> do
       curFTI     <- asks currentFunctionType
@@ -594,16 +634,15 @@ backPropagateOne :: forall ids
 
                  -> [(MemSegmentOff 64,  BlockProvideDepMap X86Reg ids)]
                  -- ^ Predecessors for the target block and their provide map
-                 -> ( FixState X86Reg ids
-                    , NewDemandMap X86Reg
-                    )
+                 -> (FixState X86Reg ids, NewDemandMap X86Reg)
 backPropagateOne s rest _ [] = (s, rest)
 backPropagateOne s rest newLocs ((srcAddr,srcDepMap):predRest) = do
   -- Get dependencies for all new locations that are demanded.
   let allDeps :: DependencySet X86Reg ids
-      allDeps = mconcat [ srcDepMap ^. ix l | l <- Set.toList newLocs ]
+      allDeps = mconcat [ getLocDependencySet srcDepMap l | Some l <- Set.toList newLocs ]
   -- Add demands for srcAddr and get existing demands.
-  let (mseenRegs, s') = Map.insertLookupWithKey (\_ x y -> x <> y) srcAddr allDeps s
+  let (mseenRegs, s') =
+        Map.insertLookupWithKey (\_ x y -> x <> y) srcAddr allDeps s
   -- Get the difference in demands so that we can propagate further.
   let d = case mseenRegs of
             Nothing -> dsLocSet allDeps
@@ -628,16 +667,6 @@ backPropagate predMap s new =
       let predAddrs = Map.findWithDefault [] currAddr predMap
           (s', rest') = backPropagateOne s rest newRegs predAddrs
        in backPropagate predMap s' rest'
-
-{-
--- | Pretty print a demanded use map
-ppX86BlockRegMap :: X86BlockRegMap -> Doc
-ppX86BlockRegMap m = vcat (ppEntry <$> Map.toList m)
-  where ppEntry :: (MemSegmentOff 64, Set (Some X86Reg)) -> Doc
-        ppEntry (addr, regs) = text (show addr) <> char ':' <+> hsep (ppReg <$> Set.toList regs)
-        ppReg :: Some X86Reg -> Doc
-        ppReg (Some r) = text (show r)
--}
 
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
@@ -667,5 +696,14 @@ registerUse mem sysp fArgs finfo ftp predMap = do
       bru = view blockExecDemands <$> m
   let providePair prev = (prev, _blockInitDeps rus)
         where Just rus = Map.lookup prev m
+
   let predProvideMap = fmap (fmap providePair) predMap
   pure $! backPropagate predProvideMap bru (dsLocSet <$> bru)
+
+ppBlockDependencySetMap :: (MemWidth w, MapF.ShowF r)
+                        => Map (MemSegmentOff w) (DependencySet r ids)
+                        -> Doc
+ppBlockDependencySetMap m =
+  vcat [ text "Address:" <+> text (show addr) <$$> indent 2 (pretty deps)
+       | (addr, deps) <-  Map.toList m
+       ]

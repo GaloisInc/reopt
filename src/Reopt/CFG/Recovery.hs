@@ -44,6 +44,7 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           GHC.Stack
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Text.Printf
 
 import           Data.Macaw.AbsDomain.JumpBounds
 import           Data.Macaw.CFG
@@ -57,6 +58,8 @@ import           Data.Macaw.X86.X86Reg
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
+
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 -- FnRegValue
@@ -83,7 +86,7 @@ $(pure [])
 -- begins execution.
 data BlockEqClass r tp =
   BlockEqClass { blockEqInitLocation :: !(BoundLoc r tp)
-               , blockEqClassLocations :: ![BoundLoc r tp]
+               , blockEqLaterLocations :: ![BoundLoc r tp]
                  -- ^ Set of demanded locations considered equivalent.
                , blockEqClassType :: !(TypeRepr tp)
                }
@@ -91,15 +94,31 @@ data BlockEqClass r tp =
 -- | Create a class from a initial value.
 initClass :: HasRepr r TypeRepr => BoundLoc r tp -> BlockEqClass r tp
 initClass loc = BlockEqClass { blockEqInitLocation = loc
-                             , blockEqClassLocations = []
+                             , blockEqLaterLocations = [loc]
                              , blockEqClassType = typeRepr loc
                              }
+
+-- | Fold over all locations  in class.
+foldBlockEqClasses :: (a -> BoundLoc r tp -> a)
+                   -> a
+                   -> BlockEqClass r tp
+                   -> a
+foldBlockEqClasses f a0 cl =
+  let a1 = f a0 (blockEqInitLocation cl)
+   in seq a1 (foldr' (flip f) a1 (blockEqLaterLocations cl))
 
 -- | Add a location to the class.
 addLocToClass :: BoundLoc r tp
               -> BlockEqClass r tp
               -> BlockEqClass r tp
-addLocToClass l cl = cl { blockEqClassLocations = l : blockEqClassLocations cl }
+addLocToClass l cl = cl { blockEqLaterLocations = l : blockEqLaterLocations cl }
+
+instance ShowF r => Show (BlockEqClass r tp) where
+  showsPrec _ eqCl =
+    let locs = blockEqInitLocation eqCl : blockEqLaterLocations eqCl
+     in showList (pretty <$> locs)
+
+instance ShowF r => ShowF (BlockEqClass r)
 
 -- | Vector of all equivalence classes of locations in a block that
 -- are demanded by the block.
@@ -181,10 +200,14 @@ data RecoverState arch ids =
      , rsDependencySet :: !(DependencySet (ArchReg arch)  ids)
        -- ^ Dependencies computed for current block.
      , rsCurRegs   :: !(MapF (ArchReg arch) (FnRegValue arch))
+       --
        -- ^ This maps registers to the associated value at the start
        -- of the block after any stack allocations have been
        -- performed.
-     , _rsAssignStackOffsetMap :: !(AssignStackOffsetMap (ArchAddrWidth arch) ids )
+     , rsBlockOff :: !(ArchAddrWord arch)
+       -- ^ The offset in the block of the current code we are steppign through.
+     , _rsAssignStackOffsetMap
+       :: !(AssignStackOffsetMap (ArchAddrWidth arch) ids )
        -- ^ Maps assignments that refer to stack to the corresponding
        -- stack offset.
      , _rsStackMap :: !(StackMap (ArchAddrWidth arch) (FnValue arch))
@@ -203,23 +226,24 @@ rsAssignStackOffsetMap =
   lens _rsAssignStackOffsetMap (\s v -> s { _rsAssignStackOffsetMap = v })
 
 -- | Maps stack offsets to the register value set there.
-rsStackMap :: Simple Lens (RecoverState arch ids) (StackMap (ArchAddrWidth arch) (FnValue arch))
+rsStackMap :: Lens' (RecoverState arch ids)
+                    (StackMap (ArchAddrWidth arch) (FnValue arch))
 rsStackMap = lens _rsStackMap (\s v -> s { _rsStackMap = v })
 
 -- | List of statements accumulated so far.
-rsCurStmts :: Simple Lens (RecoverState arch ids) (Seq (FnStmt arch))
+rsCurStmts :: Lens' (RecoverState arch ids) (Seq (FnStmt arch))
 rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 
 -- | Map from assignments that have been evaluated to the value bound
 -- to them.
-rsAssignMap :: Simple Lens (RecoverState arch ids)
-                           (MapF (AssignId ids) (FnValue arch))
+rsAssignMap :: Lens' (RecoverState arch ids)
+                     (MapF (AssignId ids) (FnValue arch))
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
 
 ------------------------------------------------------------------------
 -- Recover
 
--- | Monad for recovering code in a function.
+-- | Monad for recovering code in a block.
 newtype Recover ids a = Recover {
     runRecover :: StateT (RecoverState X86_64 ids) (FunRecover ids) a
   }
@@ -256,6 +280,7 @@ evalRecover b preds phiVars locPhiVarMap regs initStackMap m = do
               , rsLocPhiVarMap = locPhiVarMap
               , rsDependencySet = ds
               , rsCurRegs = regs
+              , rsBlockOff = 0
               , _rsAssignStackOffsetMap = Map.empty
               , _rsStackMap = initStackMap
               , _rsCurStmts = Seq.empty
@@ -284,6 +309,13 @@ mkReturnVar tp = (`FnReturnVar` tp) <$> freshId
 -- | Add a statement to the list of statements in current function block.
 addFnStmt :: FnStmt X86_64 -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
+
+-- | Return address of instruction we are translating.
+getCurRecoveryAddr :: Recover ids (MemAddr 64)
+getCurRecoveryAddr = do
+  b <- gets rsBlock
+  o <- gets rsBlockOff
+  pure $ incAddr (toInteger o) (segoffAddr (pblockAddr b))
 
 ------------------------------------------------------------------------
 
@@ -544,7 +576,9 @@ recoverAssign asgn = do
               SMLOverlap _overOff _overRepr _overVal -> do
                 error "Stack read at an overlapping offset."
               SMLNone -> do
-                error "Stack read at an uninitialized location."
+                curInsnAddr <- getCurRecoveryAddr
+                error $ show curInsnAddr
+                  ++ ": Stack read at an uninitialized location."
           Nothing -> do
             addrVal <- recoverValue addr
             setAssignRhs aid (FnReadMem addrVal (typeRepr memRepr))
@@ -572,9 +606,9 @@ whenStackWriteIsUsed idx m = do
 recoverStmt :: StmtIndex -- ^ Index of statement
             -> Stmt X86_64 ids
             -> Recover ids ()
-recoverStmt stmtIdx s = do
+recoverStmt stmtIdx stmt = do
   --regs <- use rsCurRegs
-  case s of
+  case stmt of
     AssignStmt asgn -> do
       recoverAssign asgn
     WriteMem addr memRepr val -> do
@@ -598,11 +632,11 @@ recoverStmt stmtIdx s = do
       addFnStmt $ FnCondWriteMem rCond rAddr rVal memRepr
     Comment msg -> do
       addFnStmt $ FnComment msg
-    ExecArchStmt stmt0 -> do
-      stmt <- traverseF recoverValue stmt0
-      addFnStmt (FnArchStmt (X86FnStmt stmt))
-    InstructionStart _ _ -> do
-      pure ()
+    ExecArchStmt astmt0 -> do
+      astmt <- traverseF recoverValue astmt0
+      addFnStmt (FnArchStmt (X86FnStmt astmt))
+    InstructionStart o _ -> do
+      modify $ \s -> s { rsBlockOff = o }
     ArchState _ _ -> do
       pure ()
 
@@ -610,27 +644,23 @@ recoverStmt stmtIdx s = do
 -- Jump target
 
 recoverJumpTarget :: forall ids
-                  .  (forall tp . X86Reg tp -> Recover ids (FnValue X86_64 tp))
+                  .  HasCallStack
+                  => (forall tp . X86Reg tp -> Recover ids (FnValue X86_64 tp))
                      -- ^ Function for getting  register value.
                   -> MemSegmentOff 64 -- ^ Address to jump to
                   -> Recover ids (FnJumpTarget X86_64)
 recoverJumpTarget regFn tgtAddr = do
-
-  -- TODO:
-  -- Get list of locations that phi variables are from.
-  -- For each location, create phi values by reading value from stack/registers
-  -- Create jump target with label and pfi values.
-
   varMap <- frcPhiVarMap <$> getFunCtx
 
+  -- Get phi variables
   let varLocs :: BlockEqClassVec X86Reg
       varLocs =
-        case Map.lookup tgtAddr varMap of
-          Nothing -> error $
-            "internal: Could not find phi variables for " ++ show tgtAddr ++ "."
-          Just v -> v
+        let emsg = "internal: Could not find phi variables for "
+                   ++ show tgtAddr ++ "."
+         in Map.findWithDefault (error emsg) tgtAddr varMap
 
-  let recoverVec :: Some (BlockEqClass X86Reg) -> Recover ids (Some (FnValue X86_64))
+  let recoverVec :: Some (BlockEqClass X86Reg)
+                 -> Recover ids (Some (FnValue X86_64))
       recoverVec (Some cl) = do
         case blockEqInitLocation cl of
           RegLoc r -> Some <$> regFn r
@@ -638,8 +668,10 @@ recoverJumpTarget regFn tgtAddr = do
             sm <- use rsStackMap
             case stackMapLookup o repr sm of
               SMLResult v -> pure (Some v)
-              _ -> error $ "Could not resolve value at stack offset."
-
+              _ -> do
+                curInsnAddr <- getCurRecoveryAddr
+                error $ printf "%s: Could not resolve value at stack offset %s."
+                               (show curInsnAddr) (show o)
   values <- traverse recoverVec varLocs
   pure $! FnJumpTarget { fnJumpLabel = fnBlockLabelFromAddr tgtAddr
                        , fnJumpPhiValues = values
@@ -673,17 +705,21 @@ $(pure [])
 -- | Return the value associated with a register after a function call.
 getPostCallValue :: RegState X86Reg (Value X86_64 ids)
                      -- ^ Value of registers before syscall
+                 -> MapF X86Reg (FnValue X86_64)
+                    -- ^ Return values
                  -> X86Reg tp
                  -> Recover ids (FnValue X86_64 tp)
-getPostCallValue regs r = do
+getPostCallValue regs retRegMap r = do
   case r of
+    _ | Just v <- MapF.lookup r retRegMap -> do
+          pure v
     _ | Just Refl <- testEquality r sp_reg -> do
-        spv <- recoverRegister regs sp_reg
-        evalAssignRhs $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
+          spv <- recoverRegister regs sp_reg
+          evalAssignRhs $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
 
    -- df is 0 after a function call.
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
-
+    -- Callee-saved registers are preserved.
     _ | Some r `Set.member` x86CalleeSavedRegs ->
         recoverRegister regs r
     _ -> do
@@ -822,17 +858,21 @@ stripPushReturn _addr _ (ExecArchStmt{}:_) =
 stripPushReturn addr next_sp (s@ArchState{}:l) =
   (s:) <$> stripPushReturn addr next_sp l
 
+-- | This contains the list of return variables for a call and a map from registers
+-- to value returned.
+--
+-- This does not support stack return values.
+type ReturnInfo arch = ([Some FnReturnVar], MapF (ArchReg arch) (FnValue arch))
+
+-- | Analyze list of return values to create information needed to
+--  resolve return.
 evalReturnVars :: forall ids
                .  [X86RetInfo]
-               -> Recover ids ([Some FnReturnVar], MapF X86Reg (FnValue X86_64))
+               -> Recover ids (ReturnInfo X86_64)
 evalReturnVars retInfo = do
   let mkRetReg :: X86RetInfo
-               -> ( [Some FnReturnVar]
-                  , MapF X86Reg (FnValue X86_64)
-                  )
-               -> Recover ids ( [Some FnReturnVar]
-                              , MapF X86Reg (FnValue X86_64)
-                              )
+               -> ReturnInfo X86_64
+               -> Recover ids (ReturnInfo X86_64)
       mkRetReg ri (vars,m) = do
         aid <- freshId
         Some reg <- pure (retReg ri)
@@ -873,11 +913,11 @@ recoverBlock b = do
       args <- evalFunctionArgs regs fti
       -- Get list of return variables for call, and map from register to value for
       -- needed return values.
-      (ri, _argRegs) <- evalReturnVars (ftiRetRegs fti)
+      (ri, retRegMap) <- evalReturnVars (ftiRetRegs fti)
       -- Add call statement
       addFnStmt (FnCall call_tgt ftp args ri)
       -- Create block that ends with jump to return address.
-      retTgt <- recoverJumpTarget (getPostCallValue regs) retAddr
+      retTgt <- recoverJumpTarget (getPostCallValue regs retRegMap) retAddr
       mkBlock (FnJump retTgt)
     -- Handle tail call.
     ParsedCall regs Nothing -> do
@@ -962,6 +1002,20 @@ recoverBlock b = do
 
 $(pure [])
 
+
+-- | Introduce a new phi var for a class, and updae location map.
+addPhiVarForClass :: ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
+                     -- ^ Previously constructed pfi variables and location map.
+                  -> Some (BlockEqClass X86Reg)
+                     -- ^ Class to add
+                  -> FunRecover ids ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
+addPhiVarForClass (vl,m0) (Some eqCl) = do
+  vnm <- funFreshId
+  let phiVar = FnPhiVar vnm (blockEqClassType eqCl)
+  let ins m l = trace ("Adding loc " ++ show (pretty l)) $ nonOverlapLocInsert l phiVar m
+  let m' = foldBlockEqClasses ins m0 eqCl
+  pure (Some phiVar:vl, m')
+
 recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> FunPredMap 64
                   -> Map (MemSegmentOff 64) (BlockEqClassVec X86Reg)
@@ -970,33 +1024,25 @@ recoverInnerBlock :: DiscoveryFunInfo X86_64 ids
                   -> MemSegmentOff 64
                   -> FunRecover ids RecoveredBlockInfo
 recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
-  let addPhiVar :: ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
-                -> Some (BlockEqClass X86Reg)
-                -> FunRecover ids ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
-      addPhiVar (vl,m0) (Some eqCl) = do
-        vnm <- funFreshId
-        let phiVar = FnPhiVar vnm (blockEqClassType eqCl)
-        let ins m l = nonOverlapLocInsert l phiVar m
-        let m' = foldl ins m0 (blockEqClassLocations eqCl)
-        pure (Some phiVar:vl, m')
-
 
   let eqClasses =
-        case Map.lookup addr blockUsageInfo of
-          Just c -> c
-          Nothing ->
-            error $ "internal: Could not find usage infor for "
-                    ++ show addr ++ "."
+        let emsg = "internal: Could not find usage info for "
+                   ++ show addr ++ "."
+         in Map.findWithDefault (error emsg) addr blockUsageInfo
 
-  (phiVarList, locPhiVarMap) <- foldlM addPhiVar ([], locMapEmpty) eqClasses
+  trace ("Classes " ++ show eqClasses) $ pure ()
+
+
+  (phiVarList, locPhiVarMap) <- foldlM addPhiVarForClass ([], locMapEmpty) eqClasses
 
   let phiVars :: V.Vector (Some FnPhiVar)
       phiVars = V.fromList (reverse phiVarList)
 
   let regs :: MapF X86Reg (FnRegValue X86_64)
       regs = MapF.fromList
-         [ MapF.Pair r (FnValue (FnPhiValue phiVar) (WidthEqRefl (fnPhiVarType phiVar)))
+         [ MapF.Pair r (FnValue (FnPhiValue phiVar) pr)
          | MapF.Pair r phiVar <- MapF.toList $ locMapRegs locPhiVarMap
+         , let pr = WidthEqRefl (fnPhiVarType phiVar)
          ]
   let initStackMap :: StackMap 64 (FnValue X86_64)
       initStackMap = fmapF FnPhiValue (locMapStack locPhiVarMap)
@@ -1005,8 +1051,10 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
   let Just preds = Map.lookup addr blockPreds
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
+  let ppReg nm v = nm <+> text "=" <+> pretty v
   fb <- evalRecover b preds phiVars locPhiVarMap regs initStackMap $
-    recoverBlock b
+    trace ("Initial block stack map: " ++ show (ppStackMap ppReg initStackMap)) $ do
+      recoverBlock b
   return $! blockInfo & addFnBlock fb
 
 $(pure [])
@@ -1054,6 +1102,8 @@ eqClassVecFromDeps depMap b =
       let bnds = blockJumpBounds b
        in eqClassVec $ foldl (addDemandedLocation bnds) emptyClassState (dsLocSet ds)
 
+
+
 -- | Recover the function at a given address.
 --
 -- Returns either an error message with a fatal error, or a list of
@@ -1082,6 +1132,8 @@ recoverFunction sysp funTypeMap mem fInfo = do
   -- Compute map from block starting addresses to the dependicies required to run block.
   depMap <- runExcept $
     registerUse mem sysp (fmap snd funTypeMap) fInfo cfti blockPreds
+
+  trace ("Dependencies:\n" ++ show (ppBlockDependencySetMap depMap)) $ pure ()
 
   let blockUsageInfo :: Map (MemSegmentOff 64) (BlockEqClassVec X86Reg)
       blockUsageInfo = eqClassVecFromDeps depMap <$> fInfo^.parsedBlocks
