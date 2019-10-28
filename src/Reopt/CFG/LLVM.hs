@@ -220,9 +220,22 @@ failBlock = L.BasicBlock { L.bbLabel = Just $ L.Named $ L.Ident switchFailLabel
                          , L.bbStmts = [L.Effect L.Unreachable []]
                          }
 
+------------------------------------------------------------------------
+-- Return handing
+
+-- | Get LLVM type for a function that returns the given values.
+llvmFunctionReturnType :: FunctionType arch -> L.Type
+llvmFunctionReturnType ftp =
+  case fnReturnTypes ftp of
+    [] -> L.PrimType L.Void
+    [Some rtp] -> typeToLLVMType rtp
+    rtypes -> L.Struct (viewSome typeToLLVMType <$> rtypes)
+
+------------------------------------------------------------------------
+
 functionTypeToLLVM :: FunctionType arch -> L.Type
 functionTypeToLLVM ft = L.ptrT $
-  L.FunTy (L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ft))
+  L.FunTy (llvmFunctionReturnType ft)
           (viewSome typeToLLVMType <$> fnArgTypes ft)
           False
 
@@ -230,7 +243,7 @@ declareFunction :: FunctionDecl arch
                 -> L.Declare
 declareFunction d =
   let ftp = funDeclType d
-   in L.Declare { L.decRetType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes ftp)
+   in L.Declare { L.decRetType = llvmFunctionReturnType ftp
                 , L.decName    = L.Symbol (BSC.unpack (funDeclName d))
                 , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
                 , L.decVarArgs = False
@@ -373,8 +386,8 @@ data FunLLVMContext arch = FunLLVMContext
     -- ^ Options for generating LLVM
   , funArgs      :: !(V.Vector (L.Typed L.Value))
      -- ^ Arguments to this function.
-  , funReturnType :: !L.Type
-    -- ^ LLVM return type for this function.
+  , funType :: !(FunctionType arch)
+    -- ^ Type for this function
   , funAllocaCount    :: !Int
   , withArchConstraints :: forall a . (LLVMArchConstraints arch => a) -> a
   }
@@ -897,16 +910,24 @@ stmtToLLVM stmt = bbArchConstraints $ do
      llvmMask <- singletonVector =<< mkLLVMValue cond
      -- Call llvmn.masked.store intrinsic
      call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
-   FnCall dest ft args retvs -> do
-     dest_f <- resolveFunctionEntry dest ft
-     args' <- mapM (\(Some v) -> mkLLVMValue v) args
-     retv <- call dest_f args'
-     -- Assign all return variables to the extracted result
-     let assignReturn :: Int -> Some FnReturnVar -> BBLLVM arch ()
-         assignReturn i (Some fr) = do
-           val <- extractValue retv (fromIntegral i)
-           setAssignIdValue (frAssignId fr) val
-     itraverse_ assignReturn retvs
+   FnCall dest ftp args retvs -> do
+     llvmFn <- resolveFunctionEntry dest ftp
+     llvmArgs <- mapM (\(Some v) -> mkLLVMValue v) args
+     retv <- call llvmFn llvmArgs
+     -- Assign return values
+     case (fnReturnTypes ftp, retvs) of
+       ([], []) -> do
+         pure ()
+       ([_rtp], [Some rvar]) -> do
+         setAssignIdValue (frAssignId rvar) retv
+       -- Struct return
+       (_rtypes, _) -> do
+         -- Assign all return variables to the extracted result
+         let assignReturn :: Int -> Some FnReturnVar -> BBLLVM arch ()
+             assignReturn i (Some fr) = do
+               val <- extractValue retv (fromIntegral i)
+               setAssignIdValue (frAssignId fr) val
+         itraverse_ assignReturn retvs
    FnArchStmt astmt -> do
      fn <- asks $ archStmtCallback . archFns
      fn astmt
@@ -956,14 +977,23 @@ termStmtToLLVM tm =
       markNeedSwitchFailLabel
       effect $ L.Switch idx' (L.Named (L.Ident switchFailLabel)) (zip [0..] dests)
     FnRet rets -> do
-      retType <- asks funReturnType
-      retVals <- mapM (viewSome mkLLVMValue) rets
-      -- construct the return result struct
-      let initUndef = L.Typed retType L.ValUndef
-      v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n))
-                   initUndef
-                   retVals
-      effect (L.Ret v)
+      ftp <- asks funType
+      case (fnReturnTypes ftp, rets) of
+        ([],[]) -> do
+          effect L.RetVoid
+        ([_rtp], [Some rval]) -> do
+          llvmRetVal <- mkLLVMValue rval
+          effect $! L.Ret llvmRetVal
+        -- Return a struct that will get turned into different registers
+        (rtypes, _) -> do
+          when (length rtypes /= length rets) $ do
+            error $ "Mismatch between number of return valeus and expected function return type."
+          retVals <- mapM (viewSome mkLLVMValue) rets
+          let rtype = L.Struct (viewSome typeToLLVMType <$> rtypes)
+          -- construct the return result struct
+          let initUndef = L.Typed rtype L.ValUndef
+          v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef retVals
+          effect (L.Ret v)
     FnTailCall dest ft args -> do
       dest_f <- resolveFunctionEntry dest ft
       args' <- mapM (viewSome mkLLVMValue) args
@@ -1145,12 +1175,11 @@ defineFunction archOps genOpts f = do
 
   let inputArgs :: [L.Typed L.Ident]
       inputArgs = zipWith mkInputReg (fnArgTypes (fnType f)) [0..]
-  let retType = L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
                            , funLLVMGenOptions = genOpts
                            , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
-                           , funReturnType = retType
+                           , funType = fnType f
                            , funAllocaCount = 0
                            , withArchConstraints = \x -> x
                            }
@@ -1189,8 +1218,7 @@ defineFunction archOps genOpts f = do
 
 
   let funDef = L.Define { L.defLinkage  = Nothing
-                        , L.defRetType  =
-                          L.Struct (viewSome typeToLLVMType <$> fnReturnTypes (fnType f))
+                        , L.defRetType  = llvmFunctionReturnType (fnType f)
                         , L.defName     = L.Symbol (BSC.unpack (fnName f))
                         , L.defArgs     = inputArgs
                         , L.defVarArgs  = False
