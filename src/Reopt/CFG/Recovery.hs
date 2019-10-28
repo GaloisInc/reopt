@@ -1046,7 +1046,6 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
   let Just preds = Map.lookup addr blockPreds
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
-  let ppReg nm v = nm <+> text "=" <+> pretty v
   fb <- evalRecover b preds phiVars locPhiVarMap regs initStackMap $
           recoverBlock b
   return $! blockInfo & addFnBlock fb

@@ -34,7 +34,6 @@ import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
 import           Text.Printf
-import Numeric
 import           Reopt.Relinker.Object
 import           Reopt.Relinker.Redirection
 import           Reopt.Relinker.Relocations
