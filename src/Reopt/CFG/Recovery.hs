@@ -59,8 +59,6 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 
-import           Debug.Trace
-
 ------------------------------------------------------------------------
 -- FnRegValue
 
@@ -1012,7 +1010,7 @@ addPhiVarForClass :: ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
 addPhiVarForClass (vl,m0) (Some eqCl) = do
   vnm <- funFreshId
   let phiVar = FnPhiVar vnm (blockEqClassType eqCl)
-  let ins m l = trace ("Adding loc " ++ show (pretty l)) $ nonOverlapLocInsert l phiVar m
+  let ins m l = nonOverlapLocInsert l phiVar m
   let m' = foldBlockEqClasses ins m0 eqCl
   pure (Some phiVar:vl, m')
 
@@ -1029,9 +1027,6 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
         let emsg = "internal: Could not find usage info for "
                    ++ show addr ++ "."
          in Map.findWithDefault (error emsg) addr blockUsageInfo
-
-  trace ("Classes " ++ show eqClasses) $ pure ()
-
 
   (phiVarList, locPhiVarMap) <- foldlM addPhiVarForClass ([], locMapEmpty) eqClasses
 
@@ -1053,8 +1048,7 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
   let ppReg nm v = nm <+> text "=" <+> pretty v
   fb <- evalRecover b preds phiVars locPhiVarMap regs initStackMap $
-    trace ("Initial block stack map: " ++ show (ppStackMap ppReg initStackMap)) $ do
-      recoverBlock b
+          recoverBlock b
   return $! blockInfo & addFnBlock fb
 
 $(pure [])
@@ -1132,8 +1126,6 @@ recoverFunction sysp funTypeMap mem fInfo = do
   -- Compute map from block starting addresses to the dependicies required to run block.
   depMap <- runExcept $
     registerUse mem sysp (fmap snd funTypeMap) fInfo cfti blockPreds
-
-  trace ("Dependencies:\n" ++ show (ppBlockDependencySetMap depMap)) $ pure ()
 
   let blockUsageInfo :: Map (MemSegmentOff 64) (BlockEqClassVec X86Reg)
       blockUsageInfo = eqClassVecFromDeps depMap <$> fInfo^.parsedBlocks

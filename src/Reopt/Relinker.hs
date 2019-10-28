@@ -41,8 +41,6 @@ import           Reopt.Relinker.Relocations
 
 import           GHC.Stack
 
-import Debug.Trace
-
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -451,8 +449,7 @@ collectObjSectionInfo1 byteOrder relaSecMap idx addr sec = do
             , objsecRelocations = relaEntries
             , objsecOrigSection = sec
             }
-  pure $ trace (BSC.unpack nm ++ " " ++ showHex addr " " ++ showHex secAddr " " ++ show align) $
-    (osec,secAddr + elfSectionFileSize sec)
+  pure $ (osec, secAddr + elfSectionFileSize sec)
 
 -- | This function is used to generate the information needed to perform relocations.
 collectObjSectionInfo :: ElfData

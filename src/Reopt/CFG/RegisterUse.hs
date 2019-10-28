@@ -72,8 +72,6 @@ import           Data.Macaw.X86.X86Reg
   )
 import           Data.Macaw.X86 (x86DemandContext)
 
-import Debug.Trace
-
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
 data X86ArgInfo where
@@ -361,7 +359,7 @@ valueUses m (AssignedValue (Assignment a _)) =
 
 -- | Record the given dependencies are needed to execute this block.
 addDeps :: HasCallStack => DependencySet X86Reg ids -> RegisterUseM ids ()
-addDeps deps = trace ("Adding demands:\n" ++ show (pretty deps) ++ "\n" ++ prettyCallStack callStack) $ do
+addDeps deps = do
   blockExecDemands %= mappend deps
 
 -- | Record the values needed to compute the given value.
