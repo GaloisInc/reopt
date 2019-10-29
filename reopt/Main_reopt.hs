@@ -169,7 +169,7 @@ discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
 defaultLLVMGenOptions =
-  LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = False }
+  LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = False }
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -372,10 +372,10 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
 -- trigger a undefined-behavior in cases like instructions
 -- throwing exceptions or errors.
 allowLLVMUB :: Flag Args
-allowLLVMUB = flagBool [ "llvm-ub" ] upd help
+allowLLVMUB = flagBool [ "allow-undef-llvm" ] upd help
   where upd b s = s { llvmGenOptions =
-                        LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = b } }
-        help = "Generated LLVM trigger UB on error."
+                        LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = b } }
+        help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
 
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
