@@ -1,4 +1,6 @@
 *.dis
+*.cfg
+*.fns
 *.ll
 test_add_diet_reopt.ann
 test_*.o

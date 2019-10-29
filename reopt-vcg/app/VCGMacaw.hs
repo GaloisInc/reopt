@@ -122,7 +122,7 @@ instance Show Event where
 data MState = MState
   { mcCurAddr :: !(MemSegmentOff 64)
     -- ^ Current address of instruction.
-  , mcEventInfo :: !(Maybe Ann.MemoryAccessType)
+  , mcEventInfo :: !(Maybe Ann.MemoryAnn)
     -- ^ Information about the current instruction or nothing.
   , initRegs :: !(RegState X86Reg (Const SMT.Term))
   , locals   :: !(Map Word64 Text)
@@ -152,7 +152,7 @@ addCommand cmd = addEvent $ CmdEvent cmd
 addWarning :: String -> MStateM ()
 addWarning msg = addEvent $ WarningEvent msg
 
-getCurrentEventInfo :: MStateM Ann.MemoryAccessType
+getCurrentEventInfo :: MStateM Ann.MemoryAnn
 getCurrentEventInfo = do
   m <- gets mcEventInfo
   case m of
@@ -500,7 +500,7 @@ instructionBlock loc = runST $ do
     Right (b, sz) -> do
       pure $ Right $ (Some b, sz)
 
-instructionEvents :: Map (MemSegmentOff 64) Ann.MemoryAccessType
+instructionEvents :: Map (MemSegmentOff 64) Ann.MemoryAnn
                   -- ^ Map from addresses to annotations of events on that address.
                   -> RegState X86Reg (Const SMT.Term)
                   -- ^ Initial values for registers

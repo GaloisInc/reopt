@@ -95,12 +95,14 @@ import           Data.Macaw.X86.X86Reg
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionCheck
-import           Reopt.CFG.RegisterUse
+import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions, moduleForFunctions)
 import           Reopt.CFG.Recovery
+import           Reopt.CFG.RegisterUse
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Header
 import           Reopt.Hints
 import           Reopt.Relinker
+import qualified Reopt.VCG.Annotations as Ann
 
 #ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
@@ -749,7 +751,7 @@ resolveHeaderFuns hdr =  Map.foldrWithKey resolveTypeRegs ([],[]) (hdrFunDecls h
                      <*> parseReturnType (hfdRet tp) of
               Left e ->
                 (e:prevWarnings,prev)
-              Right (s,ret) ->
+              Right (s, ret) ->
                 let fti = X86FunTypeInfo { ftiArgRegs = reverse (arsPrev s)
                                          , ftiRetRegs = ret
                                          }
@@ -899,9 +901,21 @@ discoverX86Binary path loadOpts disOpt includeAddr excludeAddr = do
     discoverX86Elf path loadOpts disOpt includeAddr excludeAddr
   pure (os, discState, addrSymMap, symAddrMap)
 
--- | Produce a LLVM textual rendering of the module using the given version info.
-llvmAssembly :: LPP.Config -> L.Module -> Builder.Builder
-llvmAssembly cfg m = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
+-- | Produce a LLVM textual rendering of the module for the LLVM version.
+llvmAssembly :: LLVMArchSpecificOps X86_64
+                -- ^ architecture specific functions
+             -> LLVMGenOptions
+                -- ^ Options for generating LLVM
+             -> RecoveredModule X86_64
+                -- ^ Module to generate
+             -> LPP.Config
+             -> (Builder.Builder, [Ann.FunctionAnn])
+llvmAssembly archOps genOpts recMod cfg =
+      -- Generate LLVM module
+   let (m,ann) = moduleForFunctions archOps genOpts recMod
+       -- Render into LLVM
+       out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
+    in (out, ann)
   where pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
         pp (HPJ.Chr c)  b = Builder.charUtf8 c <> b
         pp (HPJ.Str s)  b = Builder.stringUtf8 s <> b

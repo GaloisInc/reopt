@@ -56,8 +56,7 @@ instance Eq (ArchReg arch (BVType (ArchAddrWidth arch))) => Eq (BlockStackPrecon
 
 -- | Block stack references for function entry point.
 fnEntryStackRefs :: RegisterInfo (ArchReg arch) => BlockStackPrecond arch
-fnEntryStackRefs =
-  BlockStackPrecond { bspRegisterOffsets = Map.singleton sp_reg 0 }
+fnEntryStackRefs = BlockStackPrecond { bspRegisterOffsets = Map.singleton sp_reg 0 }
 
 type InferStackError = String
 
@@ -327,7 +326,7 @@ processStackPrecond sai finfo fps = do
       fps' <- nextStackPrecond sai fpsRest blockPrecond assignMap (pblockTermStmt b)
       processStackPrecond sai finfo fps'
 
--- | This analyzes the given function to determine what
+-- | This analyzes the given function to determine stack usage.
 inferStackPrecond :: ( RegisterInfo (ArchReg arch)
                        , Ord (AddrReg (ArchReg arch))
                        , FoldableFC (ArchFn arch)

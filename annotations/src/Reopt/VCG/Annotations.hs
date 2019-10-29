@@ -13,10 +13,10 @@ module Reopt.VCG.Annotations
   , BlockAnn(..)
   , MCAddr
   , ReachableBlockAnn(..)
-  , AllocaInfo(..)
+  , AllocaAnn(..)
   , LocalIdent(..)
-  , BlockEvent(..)
-  , MemoryAccessType(..)
+  , MCMemoryEvent(..)
+  , MemoryAnn(..)
   , Expr(..)
   , BlockVar(..)
   , parseAnnotations
@@ -31,6 +31,8 @@ import           Data.Bits
 import qualified Data.HashMap.Strict as HMap
 import           Data.HashSet (HashSet)
 import qualified Data.HashSet as HSet
+import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as S
 import           Data.String
 import           Data.Text (Text)
@@ -102,10 +104,10 @@ instance Aeson.ToJSON LocalIdent where
   toJSON (LocalIdent nm) = Aeson.String nm
 
 ------------------------------------------------------------------------
--- AllocaInfo
+-- AllocaAnn
 
 -- | Provides a mapping between LLVM alloca and machine code stack usage.
-data AllocaInfo = AllocaInfo
+data AllocaAnn = AllocaAnn
   { allocaIdent :: !LocalIdent
     -- ^ The LLVM identifier initialized by the allocation.
   , allocaBinaryOffset :: !Natural
@@ -122,23 +124,23 @@ data AllocaInfo = AllocaInfo
     -- ^ Stores true if the allocation already exists at this block.
     -- The default is true, so we only need to assign this to false.
   }
-  deriving (Show)
+  deriving (Eq, Show)
 
-instance Aeson.FromJSON AllocaInfo where
-  parseJSON = withFixedObject "AllocaInfo" $ \v -> do
+instance Aeson.FromJSON AllocaAnn where
+  parseJSON = withFixedObject "AllocaAnn" $ \v -> do
     nm <- v .: "llvm_ident"
     o <- v .: "offset"
     sz <- v .: "size"
     existing <- (v .:! "existing") .!= True
     when (sz > o) $
       fail $ "Allocation size " ++ show sz ++ " must not be greater than offset " ++ show o ++ "."
-    pure AllocaInfo { allocaIdent = nm
+    pure AllocaAnn { allocaIdent = nm
                     , allocaBinaryOffset = o
                     , allocaSize = sz
                     , allocaExisting = existing
                     }
 
-instance Aeson.ToJSON AllocaInfo where
+instance Aeson.ToJSON AllocaAnn where
   toJSON a = Aeson.object [ "llvm_ident" .= allocaIdent a
                           , "offset" .= allocaBinaryOffset a
                           , "size"   .= allocaSize a
@@ -146,9 +148,9 @@ instance Aeson.ToJSON AllocaInfo where
                           ]
 
 ------------------------------------------------------------------------
--- BlockEventType
+-- MemoryAnn
 
-data MemoryAccessType
+data MemoryAnn
    = BinaryOnlyAccess
      -- ^ The instruction at the address updates the binary
      -- stack, but does not affect LLVM memory.
@@ -159,8 +161,8 @@ data MemoryAccessType
      -- ^ There is an access to heap memory.
   deriving (Show)
 
-parseMemoryAccessType :: Aeson.Object -> Aeson.Parser MemoryAccessType
-parseMemoryAccessType v = do
+parseMemoryAnn :: Aeson.Object -> Aeson.Parser MemoryAnn
+parseMemoryAnn v = do
   tp <- v .: "type"
   case (tp :: Text) of
     "binary_only_access" -> pure BinaryOnlyAccess
@@ -169,12 +171,12 @@ parseMemoryAccessType v = do
     "heap_access" -> pure HeapAccess
     _ -> fail "Unexpected alloca type"
 
-renderMemoryAccessType :: MemoryAccessType -> [(Text, Aeson.Value)]
-renderMemoryAccessType BinaryOnlyAccess = ["type" .= Aeson.String "binary_old_access"]
-renderMemoryAccessType (JointStackAccess a) = [ "type" .= Aeson.String "joint_stack_access"
+renderMemoryAnn :: MemoryAnn -> [(Text, Aeson.Value)]
+renderMemoryAnn BinaryOnlyAccess = ["type" .= Aeson.String "binary_old_access"]
+renderMemoryAnn (JointStackAccess a) = [ "type" .= Aeson.String "joint_stack_access"
                                               , "alloca" .= a
                                               ]
-renderMemoryAccessType HeapAccess = ["type" .= Aeson.String "heap_access" ]
+renderMemoryAnn HeapAccess = ["type" .= Aeson.String "heap_access" ]
 
 ------------------------------------------------------------------------
 -- MCAddr
@@ -210,28 +212,28 @@ instance Aeson.ToJSON MCAddr where
   toJSON (MCAddr a) = Aeson.String ("0x" <> Text.pack (showHex a ""))
 
 ------------------------------------------------------------------------
--- BlockEvent
+-- MCMemoryEvent
 
 -- | Annotes an event at a given address.
-data BlockEvent = BlockEvent
+data MCMemoryEvent = MCMemoryEvent
   { eventAddr :: !MCAddr
     -- ^ Address in machine code where event occurs.
-  , eventInfo :: !MemoryAccessType
+  , eventInfo :: !MemoryAnn
   }
   deriving (Show)
 
-instance Aeson.FromJSON BlockEvent where
-  parseJSON = withFixedObject "BlockEvent" $ \v -> do
+instance Aeson.FromJSON MCMemoryEvent where
+  parseJSON = withFixedObject "MCMemoryEvent" $ \v -> do
     addr <- v .: "addr"
-    info <- parseMemoryAccessType v
-    pure $ BlockEvent { eventAddr = addr
+    info <- parseMemoryAnn v
+    pure $ MCMemoryEvent { eventAddr = addr
                       , eventInfo = info
                       }
 
-instance Aeson.ToJSON BlockEvent where
+instance Aeson.ToJSON MCMemoryEvent where
   toJSON e = object
     $  ["addr" .= eventAddr e ]
-    ++ renderMemoryAccessType (eventInfo e)
+    ++ renderMemoryAnn (eventInfo e)
 
 ------------------------------------------------------------------------
 -- BlockVar
@@ -360,16 +362,17 @@ data ReachableBlockAnn
       -- ^ The top of x87 stack (empty = 7, full = 0)
     , blockDFFlag  :: !Bool
       -- ^ The value of the DF flag (default = False)
+      -- | List of preconditions for block.
     , blockPreconditions :: ![Expr BlockVar]
-      -- ^ List of preconditions for block.
-    , blockAllocas :: ![AllocaInfo]
-      -- ^ Maps LLVM allocations to an offset of the stack where it
-      -- starts.
-    , blockEvents :: ![BlockEvent]
-      -- ^ Annotates events within the block.
+      -- | Maps identifiers to the allocation used to initialize them.
+      --
+      -- The same allocations should be used across the function, but
+      -- some block may not have been initialized.
+    , blockAllocas :: !(Map LocalIdent AllocaAnn)
+      -- | Annotates events within the block.
+    , mcMemoryEvents :: ![MCMemoryEvent]
     }
   deriving (Show, Generic)
-
 
 ------------------------------------------------------------------------
 -- BlockAnn
@@ -407,14 +410,16 @@ parseJSONBlockAnn llvmMap (Aeson.Object v) = do
       dfFlag  <- v .:! "df_flag"    .!= False
       preconditions <- parseArray "preconditions" (parseExpr llvmMap) v
       allocas <- v .:! "allocas"    .!= []
-      events  <- v .:! "events"     .!= []
+      mcEvents  <- v .:! "mem_events"     .!= []
       let rbann = ReachableBlockAnn { blockAddr  = addr
                                     , blockCodeSize = sz
                                     , blockX87Top    = x87Top
                                     , blockDFFlag    = dfFlag
                                     , blockPreconditions = preconditions
-                                    , blockAllocas = allocas
-                                    , blockEvents = events
+                                    , blockAllocas =
+                                        Map.fromList
+                                        [ (allocaIdent a, a) | a <- allocas ]
+                                    , mcMemoryEvents = mcEvents
                                     }
       pure $ (lbl, ReachableBlock rbann)
 
@@ -432,8 +437,8 @@ blockAnnToJSON lbl (ReachableBlock blk) =
     <> optVal     "x87_top"       (blockX87Top blk) 7
     <> optVal     "df_flag"       (blockDFFlag blk) False
     <> optValList "preconditions" (JSONExpr <$> blockPreconditions blk)
-    <> optValList "allocas"       (blockAllocas blk)
-    <> optValList "events"        (blockEvents  blk)
+    <> optValList "allocas"       (Map.elems (blockAllocas blk))
+    <> optValList "mem_events"    (mcMemoryEvents blk)
 
 ------------------------------------------------------------------------
 -- FunctionAnn
@@ -444,8 +449,7 @@ data FunctionAnn = FunctionAnn
     -- ^ LLVM function name
   , blocks :: !(HMap.HashMap String BlockAnn)
     -- ^ Maps LLVM labels to the block associated with that label.
-  }
-  deriving (Show)
+  } deriving (Show)
 
 functionInfoFields :: FieldList
 functionInfoFields = fields ["llvm_name", "stack_size", "blocks"]

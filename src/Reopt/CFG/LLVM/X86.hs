@@ -10,7 +10,7 @@ module Reopt.CFG.LLVM.X86
 
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.State
+import           Control.Monad.Reader
 import           Data.Parameterized.Some
 import           GHC.Stack
 import           Numeric.Natural
@@ -68,7 +68,7 @@ emitX86ArchFn :: HasCallStack
               => ArchFn X86_64 (FnValue X86_64) tp
               -> BBLLVM X86_64 (L.Typed L.Value)
 emitX86ArchFn f = do
-  genOpts <- gets $ funLLVMGenOptions . funContext
+  genOpts <- asks $ funLLVMGenOptions
   case f of
    EvenParity v -> do
      evenParity =<< mkLLVMValue v
@@ -154,7 +154,8 @@ emitX86ArchFn f = do
      -- Get rge cx result
      extractValue res 0
    _ -> do
-     error $ "LLVM backend does not yet support: " ++ show (runIdentity (ppArchFn (pure . pretty) f))
+     error $ "LLVM backend does not yet support: "
+       ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
 ------------------------------------------------------------------------
 -- emitX86ArchStmt

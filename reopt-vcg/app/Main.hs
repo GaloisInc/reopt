@@ -52,9 +52,9 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
 import           GHC.IO.Exception (IOErrorType( ResourceVanished ))
-import           GHC.Natural
 import           GHC.Stack
 import           Numeric
+import           Numeric.Natural
 import           System.Directory
 import           System.Environment
 import           System.Exit
@@ -219,7 +219,7 @@ data BlockVCGContext = BlockVCGContext
   { mcModuleVCGContext :: !ModuleVCGContext
     -- ^ Information about machine code module.
   , curFunAnnotations :: !Ann.FunctionAnn
-    -- ^ Annotations for the current function we are verifying.
+    -- ^ Annotations for the current function.
   , firstBlockLabel :: !BlockLabel
     -- ^ Label for first block in this function
   , currentBlock :: !BlockLabel
@@ -228,7 +228,7 @@ data BlockVCGContext = BlockVCGContext
     -- ^ Functions for interacting with SMT solver.
   , mcBlockEndAddr :: !(MemAddr 64)
     -- ^ The end address of the block.
-  , mcBlockMap :: !(Map (MemSegmentOff 64) Ann.MemoryAccessType)
+  , mcBlockMap :: !(Map (MemSegmentOff 64) Ann.MemoryAnn)
     -- ^ Map from addresses to annotations of events on that address.
   }
 
@@ -247,18 +247,15 @@ data BlockVCGState = BlockVCGState
     -- ^ Direction flag
   , mcCurRegs :: !(RegState X86Reg (Const SMT.Term))
     -- ^ Map registers to the SMT term.
-
   , mcMemIndex :: !Natural
     -- ^ Index of last defined memory object.
    , mcEvents :: ![M.Event]
     -- ^ Unprocessed events from last instruction.
   , mcLocalIndex :: !Integer
     -- ^ Index of next local variable for machine code.
-  , mcPendingAllocaOffsetMap :: !(Map Ann.LocalIdent Ann.AllocaInfo)
-    -- ^ This is a map from allocation names to the offset relative to
-    -- the top of the function stack frame.  In this case, we do not
-    -- include the 8 bytes storing the return address.  These are
-    -- allocas that have not been made when the block starts.
+  , mcPendingAllocaOffsetMap :: !(Map Ann.LocalIdent Ann.AllocaAnn)
+    -- ^ This is a map from allocation names to the annotations about their
+    -- size and offset.
   , llvmInstIndex :: !Int
     -- ^ Index of next LLVM instruction within block to execute
     -- Used for error reporting
@@ -624,14 +621,6 @@ subc :: Natural -> SMT.Term -> Natural -> SMT.Term
 subc _ t 0 = t
 subc w t i = SMT.bvsub t (SMT.bvdecimal (toInteger i) w)
 
--- | @mulc w x y@ returns an expression equal to @bvmul x y@.
---
--- @w@ should be positive.
-mulc :: Natural -> Natural -> SMT.Term -> SMT.Term
-mulc w 0 _ = SMT.bvdecimal 0 w
-mulc _ 1 x = x
-mulc w c x = SMT.bvmul (SMT.bvdecimal (toInteger c) w) [x]
-
 -- | @defineRangeCheck nm low high@ introduces the definition for a
 -- function named @nm@ that takes an address @a@ and size @sz@, and
 -- checks that @[a..a+sz)@ is in @[low..high)@ and that @a+sz@ does not overflow.
@@ -681,7 +670,7 @@ stackHighTerm = functionStartRegValue RSP
 
 -- | @allocaMCBaseEndDecls a@ introduces variables for defining the
 -- extent in the machine code stack of an LLVM alloca.
-allocaMCBaseEndDecls :: Ann.AllocaInfo -> [SMT.Command]
+allocaMCBaseEndDecls :: Ann.AllocaAnn -> [SMT.Command]
 allocaMCBaseEndDecls a =
   let nm = Ann.allocaIdent a
       base = Ann.allocaBinaryOffset a
@@ -750,7 +739,7 @@ mcMemDecls :: Natural
               -- Should be a power of two.
            -> Natural
            -- ^ The number of guard pages for the stack.
-           -> [Ann.AllocaInfo]
+           -> [Ann.AllocaAnn]
               -- ^ Allocations
            -> [SMT.Command]
 mcMemDecls pageSize guardPageCount allocas
@@ -1086,11 +1075,9 @@ llvmInvoke isTailCall fsym args lRet = do
   let curRSP :: SMT.Term
       curRSP = getConst (regs^.boundValue RSP)
 
-  -- TODO: So far we have a function call.
-  --
-  -- We cannot check that the LLVM stack address is the same as the machine
-  -- code one, so this we skip this.
-  --
+  -- Note. We cannot check that the LLVM stack address is the same as
+  -- the machine code one, so we skip this.
+
   -- We check that the return address matches the address of the
   -- next instruction so that the return in LLVM matches the return
   -- address in machine code.
@@ -1160,23 +1147,21 @@ llvmInvoke isTailCall fsym args lRet = do
 
 -- | Add the LLVM declarations for an allocation.
 allocaDeclarations :: Ann.LocalIdent
-                   -> Natural-- ^ Size as a 64-bit unsigned bitector.
+                   -> SMT.Term -- ^ Number of bytes
                    -> BlockVCG ()
-allocaDeclarations nm szNat = do
+allocaDeclarations nm sz = do
   -- Get used allocas
   used <- gets activeAllocaSet
   -- Check that alloca name is not in use.
   when (Set.member nm used) $ error $ show nm ++ " is already used an allocation."
   -- Add alloca name to active set.
   modify' $ \s -> s { activeAllocaSet = Set.insert nm used }
-  -- Declare LLVM alloca base
+  -- Declare LLVM alloca base and end
   addCommand $ SMT.declareConst (allocaLLVMBaseVar nm) ptrSort
-  -- Declare LLVM alloca base
-  -- Assert alloca base is not too large.
-  addAssert $ SMT.bvule (allocaLLVMBaseVar nm)
-                        (SMT.bvdecimal (- (toInteger (szNat + 1))) 64)
   addCommand $ SMT.defineFun (allocaLLVMEndVar nm) [] ptrSort $
-    addc 64 (allocaLLVMBaseVar nm) szNat
+    SMT.bvadd (allocaLLVMBaseVar nm) [sz]
+  -- Assert alloca end computation did not overflow.
+  addAssert $ SMT.bvule (allocaLLVMBaseVar nm) (allocaLLVMEndVar nm)
   -- Introduce predicate to check LLVM addresses.
   addCommand $ defineRangeCheck (isInLLVMAlloca nm) (allocaLLVMBaseVar nm) (allocaLLVMEndVar nm)
   -- Add assumption that LLVM allocation does not overlap with
@@ -1184,7 +1169,6 @@ allocaDeclarations nm szNat = do
   mapM_ (addAssert . assumeLLVMDisjoint (allocaLLVMBaseVar nm, allocaLLVMEndVar nm)) used
   -- Define register alloca is returned to.
   addCommand $ SMT.defineFun (llvmVar (Ann.allocaNameText nm)) [] ptrSort (allocaLLVMBaseVar nm)
-
 
 -- | This updates the state for an LLVM allocation
 llvmAlloca :: HasCallStack
@@ -1209,13 +1193,14 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
   a <-
     case Map.lookup nm allocaMap of
       Nothing -> do
-        fnm <- asks $  Ann.llvmFunName . curFunAnnotations
-        bnm <- asks $ ppBlock . currentBlock
-        fatalBlockError $ printf "%s.%s: Missing annotation on alloca %s." fnm bnm (show nm)
+        fatalBlockError $ printf "Missing annotation on alloca %s." (show nm)
       Just a -> pure a
 
-  -- Delete this from pending allocations
-  modify $ \s -> s { mcPendingAllocaOffsetMap = Map.delete nm allocaMap }
+  when (Ann.allocaExisting a) $ do
+    fatalBlockError $
+      printf "Allocation %s annotation indicates it should have already been created." (show nm)
+  -- Mark this as existing.
+  modify $ \s -> s { mcPendingAllocaOffsetMap = Map.insert nm a { Ann.allocaExisting = True } allocaMap }
 
   -- Check the size of LLVM allocation matches annotations.
   case eltCount of
@@ -1225,15 +1210,21 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
            printf "Allocation size at %s must match specification %s."
              nm0 (show (Ann.allocaSize a))
     Just (Typed (PrimType (Integer w)) i) | w >= 1 -> do
+       let (q,r) = Ann.allocaSize a `quotRem` eltSize
+       when (r /= 0) $ do
+         fatalBlockError $ "Expect alloca size to be a multple of element size."
+       when (q >= 2^w) $ do
+         fatalBlockError $ "Specified allocation is outside range of alloca size."
        cntExpr <- primEval (PrimType (Integer w)) i
        let wn = fromIntegral w
-       proveEq (mulc wn eltSize cntExpr) (SMT.bvdecimal (toInteger (Ann.allocaSize a)) wn) $
+       proveEq cntExpr (SMT.bvdecimal (toInteger q) wn) $
          printf "Allocation size at %s must match specification %s."
                 nm0 (show (Ann.allocaSize a))
     Just (Typed itp _) -> do
       fatalBlockError $ "Unexpected allocation count type " ++ show (L.ppType itp)
+
   -- Create declarations for alloca.
-  allocaDeclarations nm (Ann.allocaSize a)
+  allocaDeclarations nm (SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64)
 
 $(pure [])
 
@@ -1500,7 +1491,7 @@ verifyBlockPreconditions prefix f lbl = do
         printf "Target block %s lacks annotations." (ppBlock lbl)
     Just Ann.UnreachableBlock ->
       proveTrue (f SMT.false) $
-      printf "Target block %s is unreachable." (ppBlock lbl)
+        printf "Target block %s is unreachable." (ppBlock lbl)
     Just (Ann.ReachableBlock tgtBlockAnn) -> do
       firstLabel <- asks firstBlockLabel
 
@@ -1518,6 +1509,11 @@ verifyBlockPreconditions prefix f lbl = do
       -- Check preconditions
       forM_ (Ann.blockPreconditions tgtBlockAnn) $ \p -> do
         proveTrue (f (evalPrecondition regs mem p)) $ printf "Checking %s precondition." prefix
+
+      -- Check allocations are preserved.
+      curAllocas <- gets mcPendingAllocaOffsetMap
+      when (Ann.blockAllocas tgtBlockAnn /= curAllocas) $ do
+        fatalBlockError $ printf "Allocations in jump to %s do not match." (ppBlock lbl)
 
 -- | Construct SMT sort from type and report error if this fails.
 coerceToSMTSort :: Type -> BlockVCG SMT.Sort
@@ -1865,13 +1861,13 @@ exportCallbacks outDir fn lbl action = do
         pure ()
     }
 
-runVCGs :: Ann.FunctionAnn -- ^ Annotations for the function we are verifying.
-        -> BlockLabel -- ^ Label of first block
-        -> BlockLabel -- ^ Label of this block.
-        -> Ann.ReachableBlockAnn -- ^ Annotations for the block we are verifying.
-        -> BlockVCG ()
-        -> ModuleVCG ()
-runVCGs funAnn firstLabel lbl blockAnn action = do
+runBlockVCG :: Ann.FunctionAnn -- ^ Annotations for the function we are verifying.
+            -> BlockLabel -- ^ Label of first block
+            -> BlockLabel -- ^ Label of this block.
+            -> Ann.ReachableBlockAnn -- ^ Annotations for the block we are verifying.
+            -> BlockVCG ()
+            -> ModuleVCG ()
+runBlockVCG funAnn firstLabel lbl blockAnn action = do
   let isFirstBlock = firstLabel == lbl
   modCtx <- ask
   let mem = moduleMem modCtx
@@ -1887,7 +1883,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
     let sz = Ann.blockCodeSize blockAnn
     let blockMap = Map.fromList
           [ (segOff, Ann.eventInfo e)
-          | e <- Ann.blockEvents blockAnn
+          | e <- Ann.mcMemoryEvents blockAnn
             -- Get segment offset of event.
           , let ea = Ann.eventAddr e
           , let segOff =
@@ -1919,7 +1915,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
     -- Declare stack and heap bounds.
     let ann = moduleAnn modCtx
     mapM_ (addCommandCallback prover) $
-      mcMemDecls (Ann.pageSize ann) (Ann.stackGuardPageCount ann) (Ann.blockAllocas blockAnn)
+      mcMemDecls (Ann.pageSize ann) (Ann.stackGuardPageCount ann) (Map.elems (Ann.blockAllocas blockAnn))
     -- Create registers
     regs <- do
       -- Register values determined by location.
@@ -1944,12 +1940,7 @@ runVCGs funAnn firstLabel lbl blockAnn action = do
                           , mcMemIndex = 0
                           , mcEvents = []
                           , mcLocalIndex = 0
-                          , mcPendingAllocaOffsetMap =
-                              Map.fromList
-                              [ (Ann.allocaIdent a, a)
-                              | a <- Ann.blockAllocas blockAnn
-                              , not (Ann.allocaExisting a)
-                              ]
+                          , mcPendingAllocaOffsetMap = Ann.blockAllocas blockAnn
                           , llvmInstIndex = 0
                           , activeAllocaSet = Set.empty
                           }
@@ -2083,7 +2074,7 @@ defineLLVMArgs (Typed tp _val : _rest) _x86Regs =
   error $ "Unexpected type " ++ show tp
 
 -- | Return true if the allocations overlap in memory.
-allocaOverlap :: Ann.AllocaInfo -> Ann.AllocaInfo -> Bool
+allocaOverlap :: Ann.AllocaAnn -> Ann.AllocaAnn -> Bool
 allocaOverlap x y = (ylow - Ann.allocaSize y < xlow) && (xlow - Ann.allocaSize x < ylow)
   where xlow  = Ann.allocaBinaryOffset x
         ylow  = Ann.allocaBinaryOffset y
@@ -2096,9 +2087,9 @@ allocaOverlap x y = (ylow - Ann.allocaSize y < xlow) && (xlow - Ann.allocaSize x
 -- any overlaps exist by using a @n*log n@ algorithm, but in practice
 -- the number of allocations is expected to be quite small, so we have
 -- not done so.
-allocaOverlaps :: [Ann.AllocaInfo] -- ^ Existing overlaps to check against.
-               -> [Ann.AllocaInfo] -- ^ Unprocessed overlaps.
-               -> [(Ann.AllocaInfo, Ann.AllocaInfo)]
+allocaOverlaps :: [Ann.AllocaAnn] -- ^ Existing overlaps to check against.
+               -> [Ann.AllocaAnn] -- ^ Unprocessed overlaps.
+               -> [(Ann.AllocaAnn, Ann.AllocaAnn)]
 allocaOverlaps _prev [] = []
 allocaOverlaps prev (h:r) =
   [ (x,h) | x <- reverse (filter (`allocaOverlap` h) prev) ]
@@ -2107,7 +2098,7 @@ allocaOverlaps prev (h:r) =
 
 -- | Check for allocations that overlap in machine code.
 checkAllocaOverlap :: BlockLabel -- ^ Label for this block.
-                   -> [Ann.AllocaInfo]
+                   -> [Ann.AllocaAnn]
                       -- ^ Allocation annotations for this block.
                    -> ModuleVCG ()
 checkAllocaOverlap lbl l = do
@@ -2119,18 +2110,18 @@ checkAllocaOverlap lbl l = do
         hPutStrLn stderr $ do
           printf "  Allocation %s overlaps with %s" (show (Ann.allocaIdent x)) (show (Ann.allocaIdent y))
 
--- | Loop over LLVM stmts
+-- | Verify c over LLVM stmts
 --
 -- Note. This is written to take a function rather than directly call
 -- @stepNextStmtg@ so that the call stack is cleaner.
-loopStmts :: (L.Stmt -> BlockVCG Bool) -> [L.Stmt] -> BlockVCG ()
-loopStmts _ [] = do
+checkEachStmt :: (L.Stmt -> BlockVCG Bool) -> [L.Stmt] -> BlockVCG ()
+checkEachStmt _ [] = do
   error $ "We have reached end of LLVM events without a block terminator."
-loopStmts f (stmt:stmts) = do
+checkEachStmt f (stmt:stmts) = do
   c <- f stmt
   modify' $ \s -> s { llvmInstIndex = llvmInstIndex s + 1 }
   if c then
-    loopStmts f stmts
+    checkEachStmt f stmts
    else
     unless (null stmts) $ error "Expected return to be last LLVM statement."
 
@@ -2160,13 +2151,13 @@ verifyBlock lFun funAnn firstLabel bb = do
       pure ()
     Ann.ReachableBlock blockAnn -> do
       -- Check allocations do not overlap with each other.
-      checkAllocaOverlap lbl (Ann.blockAllocas blockAnn)
+      checkAllocaOverlap lbl (Map.elems (Ann.blockAllocas blockAnn))
       -- Start running verification condition generator.
-      runVCGs funAnn firstLabel lbl blockAnn $ do
+      runBlockVCG funAnn firstLabel lbl blockAnn $ do
         -- Add LLVM declarations for all existing allocations.
         forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
           when (Ann.allocaExisting a) $ do
-            allocaDeclarations (Ann.allocaIdent a) (Ann.allocaSize a)
+            allocaDeclarations (Ann.allocaIdent a) (SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64)
         -- Declare memory
         addCommand $ SMT.declareConst (memVar 0) memSort
         -- Declare constant representing where we return to.
@@ -2179,7 +2170,7 @@ verifyBlock lFun funAnn firstLabel bb = do
            forM_ (Ann.blockPreconditions blockAnn) $ \p -> do
              addAssert (evalPrecondition regs mem p)
         -- Start processing LLVM statements
-        loopStmts stepNextStmt (bbStmts bb)
+        checkEachStmt stepNextStmt (bbStmts bb)
 
 $(pure [])
 
