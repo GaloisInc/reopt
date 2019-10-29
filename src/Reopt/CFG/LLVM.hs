@@ -340,7 +340,7 @@ tempIdent c = L.Ident ('t' : show c)
 
 -- | Options for generating LLVM
 data LLVMGenOptions =
-  LLVMGenOptions { llvmExceptionIsUB :: !Bool
+  LLVMGenOptions { mcExceptionIsUB :: !Bool
                    -- ^ Code with side effects is allowed to result in
                    -- LLVM undefined behavior if machine code would
                    -- hve raised an exception.
