@@ -77,18 +77,28 @@ emitX86ArchFn f = do
    X86DivRem repr num1 num2 d
      -- If potentially undefined LLVM is allowed, then we
      -- translate to it.
-     | llvmExceptionIsUB genOpts-> do
+     | mcExceptionIsUB genOpts-> do
          -- Get wide type
          let bitCount = 8 * repValSizeByteCount repr
+         -- Get type of inputs and result
+         let resTp = llvmITypeNat bitCount
+         -- Division occurs at double bitwidth
+         let extTp = llvmITypeNat (2 * bitCount)
          -- Compute numerator as (num1 << bitCount | num2)
          llvmNumExt <- llvmDivNumerator bitCount num1 num2
          -- Compute denominator
          llvmDen <- mkLLVMValue d
-         let extTp = llvmITypeNat (2 * bitCount)
          llvmDenExt <- L.typedValue <$> convop L.ZExt llvmDen extTp
          -- Perform divison and remainder
-         q <- arithop (L.UDiv False) llvmNumExt llvmDenExt
-         r <- arithop L.URem llvmNumExt llvmDenExt
+         qext <- arithop (L.UDiv False) llvmNumExt llvmDenExt
+         rext <- arithop L.URem llvmNumExt llvmDenExt
+         -- Get low  order bits of quotient and remainder
+         --
+         -- Note.  This will compute the wrong answer rather than #DE
+         -- when the division result overflows, but that is allowed by
+         -- mcExceptionIsUB
+         q <- convop L.Trunc qext resTp
+         r <- convop L.Trunc rext resTp
          -- Compute pair
          mkPair q r
        -- Otherwise we switch to assembly
@@ -107,18 +117,28 @@ emitX86ArchFn f = do
    X86IDivRem repr num1 num2 d
      -- If potentially undefined LLVM is allowed, then we
      -- translate to it.
-     | llvmExceptionIsUB genOpts -> do
-         -- Get wide type
+     | mcExceptionIsUB genOpts -> do
+         -- Get bitwidth
          let bitCount = 8 * repValSizeByteCount repr
+         -- Get type of inputs and result
+         let resTp = llvmITypeNat bitCount
+         -- Division occurs at double bitwidth
+         let extTp = llvmITypeNat (2 * bitCount)
          -- Compute numerator as (num1 << bitCount | num2)
          llvmNumExt <- llvmDivNumerator bitCount num1 num2
          -- Compute denominator
          llvmDen <- mkLLVMValue d
-         let extTp = llvmITypeNat (2 * bitCount)
          llvmDenExt <- L.typedValue <$> convop L.SExt llvmDen extTp
          -- Perform divison and remainder
-         q <- arithop (L.SDiv False) llvmNumExt llvmDenExt
-         r <- arithop L.SRem llvmNumExt llvmDenExt
+         qext <- arithop (L.SDiv False) llvmNumExt llvmDenExt
+         rext <- arithop L.SRem llvmNumExt llvmDenExt
+         -- Get low  order bits of quotient and remainder
+         --
+         -- Note.  This will compute the wrong answer rather than #DE
+         -- when the division result overflows, but that is allowed by
+         -- mcExceptionIsUB
+         q <- convop L.Trunc qext resTp
+         r <- convop L.Trunc rext resTp
          -- Compute pair
          mkPair q r
        | otherwise -> do

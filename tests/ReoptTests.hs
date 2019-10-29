@@ -34,7 +34,7 @@ logger _ = pure ()
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
 defaultLLVMGenOptions =
-  LLVM.LLVMGenOptions { LLVM.llvmExceptionIsUB = False }
+  LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = False }
 
 -- | This just tests that we can successfully run discovery,
 -- function recovery and LLVM generation on the given input Elf file.
