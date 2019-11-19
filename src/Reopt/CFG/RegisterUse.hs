@@ -163,7 +163,7 @@ valueStackOffset bnds amap v =
       Nothing
     Initial r ->
       case boundsLocationInfo bnds (RegLoc r) of
-        (_rep, IsStackOffset o, _cnt) -> Just o
+        (_rep, IsStackOffset o) -> Just o
         _ -> Nothing
     AssignedValue (Assignment aid _) ->
       Map.lookup (Some aid) amap
