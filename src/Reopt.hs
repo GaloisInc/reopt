@@ -97,7 +97,6 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions, moduleForFunctions)
 import           Reopt.CFG.Recovery
-import           Reopt.CFG.RegisterUse
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Header
 import           Reopt.Hints

@@ -14,20 +14,19 @@
 module Reopt.CFG.RegisterUse
   ( FunPredMap
   , funBlockPreds
+  , RegisterUseContext(..)
+  , FunctionTypeRegs(..)
   , registerUse
   , ppBlockDependencySetMap
   , AssignStackOffsetMap
   , valueStackOffset
   , DependencySet(..)
   , StmtIndex
-
-    -- * Type information
-  , X86FunTypeInfo(..)
-  , maximumFunTypeInfo
-  , X86ArgInfo(..)
-  , argReg
-  , X86RetInfo(..)
-  , retReg
+    -- * Monadic implementation
+  , RegisterUseM
+  , demandValue
+  , addRegisterUses
+  , clearDependencySet
   ) where
 
 import           Control.Lens
@@ -38,14 +37,10 @@ import           Data.Foldable
 import           Data.Kind
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Parameterized
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF
-import           Data.Parameterized.TraversableFC
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Word
-import qualified Flexdis86 as F
 import           GHC.Stack
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
@@ -59,73 +54,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Types hiding (Type)
 import qualified Data.Macaw.Types as M
-
-import           Data.Macaw.X86.ArchTypes (X86_64, X86TermStmt(..))
-import           Data.Macaw.X86.SyscallInfo
-  (SyscallPersonality
-  , spTypeInfo
-  , spResultRegisters
-  )
-import           Data.Macaw.X86.X86Reg
-  ( X86Reg(..), pattern DF, x86StateRegs, x86CalleeSavedRegs
-  , x86GPPArgumentRegs
-  )
-import           Data.Macaw.X86 (x86DemandContext)
-
--- | This identifies how a argument is passed into a function, or
--- a return value is passed out.
-data X86ArgInfo where
-  ArgBV64 :: !F.Reg64 -> X86ArgInfo
-  -- ^ This identifies a 64-bit value passed as a register.
-  --
-  -- The register should be compatible with the ABI.
-  ArgMM512D :: !Word8 -> X86ArgInfo
-  -- ^ This identifies one of the zmm registers used as arguments (zmm0-7).
-
--- | The register types this return value is associated with.
-argReg :: X86ArgInfo -> Some X86Reg
-argReg (ArgBV64 r) = Some (X86_GP r)
-argReg (ArgMM512D i) = Some (X86_ZMMReg i)
-
--- | This identifies how a return value is passed from a callee to
--- the callee.
-data X86RetInfo where
-  RetBV64 :: !F.Reg64 -> X86RetInfo
-  -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
-  --
-  -- The register should be compatible with the ABI.
-  RetMM512D :: !Word8 -> X86RetInfo
-  -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
-
--- | The register types this return value is associated with.
-retReg :: X86RetInfo -> Some X86Reg
-retReg (RetBV64 r) = Some (X86_GP r)
-retReg (RetMM512D i) = Some (X86_ZMMReg i)
-
--- | This describes the registers and return value of an x86_64 ABI
--- compliant function.
---
--- This representation does not support arguments that spilled on the
--- stack, but this would be a good feature to add.
---
--- It uses a list for arguments so that we can use C headers and
--- ensure the arguments appear in a particular order (e.g. from the
--- binary perspective a function that takes two integers followed by a
--- float is indistinguishable from a function that takes a float
--- followed by two integers.
-data X86FunTypeInfo
-   = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
-                    , ftiRetRegs :: [X86RetInfo]
-                    }
-
--- |  Maximum function type.
-maximumFunTypeInfo :: X86FunTypeInfo
-maximumFunTypeInfo =
-  X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
-                             ++ fmap ArgMM512D [0..7]
-                 , ftiRetRegs = fmap RetBV64   [ F.RAX, F.RDX ]
-                             ++ fmap RetMM512D [0,1]
-                 }
 
 -------------------------------------------------------------------------------
 -- funBlockPreds
@@ -153,10 +81,13 @@ type AssignStackOffsetMap w ids = Map (Some (AssignId ids)) (MemInt w)
 
 -- | Return offset of value if it is a stack offset, and @Nothing@ if
 -- value is not expected to point to stack.
-valueStackOffset :: InitJumpBounds X86_64
-                 -> AssignStackOffsetMap 64 ids
-                 -> Value X86_64 ids tp
-                 -> Maybe (MemInt 64)
+valueStackOffset :: ( MemWidth (ArchAddrWidth arch)
+                    , OrdF (ArchReg arch)
+                    )
+                 => InitJumpBounds arch
+                 -> AssignStackOffsetMap (ArchAddrWidth arch) ids
+                 -> Value arch ids (BVType (ArchAddrWidth arch))
+                 -> Maybe (MemInt (ArchAddrWidth arch))
 valueStackOffset bnds amap v =
   case v of
     CValue{} ->
@@ -171,6 +102,7 @@ valueStackOffset bnds amap v =
 -------------------------------------------------------------------------------
 -- StmtIndex
 
+-- | Index of a stmt in a block.
 type StmtIndex = Int
 
 -------------------------------------------------------------------------------
@@ -279,27 +211,44 @@ addLocDependency :: (MapF.OrdF r, MemWidth (RegAddrWidth r))
 addLocDependency l ds m =
   locOverwriteWith (\(Const n) (Const o) -> Const (mappend n o)) l (Const ds) m
 
--- | This maps each block to the @BlockProvideDepMap@ for the block.
---
--- These are used as function summaries to simplify the computation of
--- overall function register uses.
---type FunctionBlockProvideDepMap r ids
---   = Map (MemSegmentOff (RegAddrWidth r)) (BlockProvideDepMap r ids)
+------------------------------------------------------------------------
+-- FunctionTypeRegs
 
--- This pair identifies write within a function by the starting
--- address of the block it is in, and the index of the instruction
--- with the write.
---type WriteRef w = (MemSegmentOff w, Natural)
+-- | This indicates which registers a function is expected to
+-- read/write.
+data FunctionTypeRegs (r :: M.Type -> Type) =
+  FunctionTypeRegs { fnArgRegs :: [Some r]
+                   , fnReturnRegs :: [Some r]
+                   }
+  deriving (Ord, Eq, Show)
 
---type ReadRef ids = AssignId ids
+------------------------------------------------------------------------
+-- RegisterUseM
+
+type ArchTermStmtSummarizationFn arch ids
+  = ArchTermStmt arch ids
+  -> RegState (ArchReg arch) (Value arch ids)
+  -> RegisterUseM arch ids ()
 
 -- | Information about architecture, rest of the program, and current
 -- function needed to determine register usage.
-data RegisterUseContext = RUC
-  { functionArgs    :: !(Map (MemSegmentOff 64) X86FunTypeInfo)
-  , currentFunctionType :: !X86FunTypeInfo
-    -- | System call personality
-  , thisSyscallPersonality :: !SyscallPersonality
+data RegisterUseContext arch ids
+  = RegisterUseContext
+  { -- | Map function entry points to function type above.
+    functionArgs    :: !(Map (MemSegmentOff (ArchAddrWidth arch)) (FunctionTypeRegs (ArchReg arch)))
+    -- | Registers to use for indirect calls or targets not in list.
+  , defaultCallRegs :: !(FunctionTypeRegs (ArchReg arch))
+    -- | Return registers demanded by this function
+  , returnRegisters :: ![Some (ArchReg arch)]
+    -- | List of registers that calls must preserve.
+  , calleeSavedRegisters :: ![Some (ArchReg arch)]
+    -- | List of registers that callers may freely change.
+  , callScratchRegisters :: ![Some (ArchReg arch)]
+    -- | Callback function for summarizing register usage of terminal
+    -- statements.
+  , summarizeTermFn :: !(ArchTermStmtSummarizationFn arch ids)
+    -- | Demand context for registers
+  , demandContext :: !(DemandContext arch)
   }
 
 -- | This contains information about a specific block needed to infer
@@ -320,6 +269,9 @@ data BlockUsageSummary (arch :: Type) ids = RUS
   , _assignStackOffset :: !(AssignStackOffsetMap (ArchAddrWidth arch) ids)
   }
 
+type RegisterUseM arch ids a =
+  ReaderT (RegisterUseContext arch ids) (StateT (BlockUsageSummary arch ids) (Except String)) a
+
 initBlockUsageSummary :: InitJumpBounds arch -> BlockUsageSummary arch ids
 initBlockUsageSummary bnds =
   RUS { blockPrecond       = bnds
@@ -338,15 +290,12 @@ blockExecDemands = lens _blockExecDemands (\s v -> s { _blockExecDemands = v })
 assignmentCache :: Lens' (BlockUsageSummary arch ids) (AssignmentCache (ArchReg arch) ids)
 assignmentCache = lens _assignmentCache (\s v -> s { _assignmentCache = v })
 
-type RegisterUseM ids a =
-  ReaderT RegisterUseContext (StateT (BlockUsageSummary X86_64 ids) (Except String)) a
-
 -- ----------------------------------------------------------------------------------------
 -- Phase one functions
 -- ----------------------------------------------------------------------------------------
 
 -- | Return the register and assignment dependencies needed to
-valueUses :: (HasCallStack, MapF.OrdF (ArchReg arch))
+valueUses :: (HasCallStack, OrdF (ArchReg arch))
           => Map (Some (AssignId ids)) (DependencySet (ArchReg arch) ids)
           -> Value arch ids tp
           -> DependencySet (ArchReg arch) ids
@@ -358,83 +307,72 @@ valueUses m (AssignedValue (Assignment a _)) =
     Just r -> r
 
 -- | Record the given dependencies are needed to execute this block.
-addDeps :: HasCallStack => DependencySet X86Reg ids -> RegisterUseM ids ()
-addDeps deps = do
-  blockExecDemands %= mappend deps
+addDeps :: (HasCallStack, OrdF (ArchReg arch))
+        => DependencySet (ArchReg arch) ids
+        -> RegisterUseM arch ids ()
+addDeps deps = blockExecDemands %= mappend deps
 
 -- | Record the values needed to compute the given value.
-demandValue :: HasCallStack
-            => Value X86_64 ids tp
-            -> RegisterUseM ids ()
+demandValue :: (HasCallStack, OrdF (ArchReg arch))
+            => Value arch ids tp
+            -> RegisterUseM arch ids ()
 demandValue v = do
   depCache <- gets _assignmentCache
   addDeps (valueUses depCache v)
 
 -- | Return the values bound to the given registers
-registerValues :: Functor t
-               => RegState X86Reg (Value X86_64 ids)
-               -> t (Some X86Reg)
-               -> t (Some (Value X86_64 ids))
+registerValues :: (OrdF (ArchReg arch), Functor t)
+               => RegState (ArchReg arch) (Value arch ids)
+               -> t (Some (ArchReg arch))
+               -> t (Some (Value arch ids))
 registerValues regs = fmap (\(Some r) -> Some (regs^.boundValue r))
-
-x86TermStmtValues :: SyscallPersonality
-                  -> X86TermStmt ids
-                  -> RegState (ArchReg X86_64) (Value X86_64 ids)
-                  -> [Some (Value X86_64 ids)]
-x86TermStmtValues _ Hlt _ = []
-x86TermStmtValues _ UD2 _ = []
-x86TermStmtValues sysp X86Syscall regs =
-    registerValues regs (Some <$> (sysReg : argRegs))
-   where sysReg ::  ArchReg X86_64 (BVType 64)
-         sysReg = syscall_num_reg
-         -- Get list of registers used as arguments to system calls
-         syscallRegs :: [ArchReg X86_64 (BVType 64)]
-         syscallRegs = syscallArgumentRegs
-         -- Get arguments registers if this is a static system call number
-         argRegs
-             | BVValue _ call_no <- regs^.boundValue syscall_num_reg
-             , Just (_,_,argtypes) <- Map.lookup (fromInteger call_no) (spTypeInfo sysp) =
-               take (length argtypes) syscallRegs
-             | otherwise = syscallRegs
 
 -- | Figure out the deps of the given registers and update the state
 -- for the current label
-addRegisterUses :: forall ids
-                .  RegState X86Reg (Value X86_64 ids)
+addRegisterUses :: forall arch ids
+                .  (MemWidth (ArchAddrWidth arch), OrdF (ArchReg arch))
+                => RegState (ArchReg arch) (Value arch ids)
                    -- ^ Register values when block terminates.
-                -> [Some X86Reg]
+                -> [Some (ArchReg arch)]
                    -- ^ List of registers that future blocks are allowed
                    -- to depend on.
-                -> RegisterUseM ids ()
+                -> RegisterUseM arch ids ()
 addRegisterUses regs rs = do
   depCache <- gets _assignmentCache
-  let insReg :: BlockProvideDepMap X86Reg ids
-             -> Some X86Reg
-             -> BlockProvideDepMap X86Reg ids
+  let insReg :: BlockProvideDepMap (ArchReg arch) ids
+             -> Some (ArchReg arch)
+             -> BlockProvideDepMap (ArchReg arch) ids
       insReg m (Some r) = addLocDependency (RegLoc r) (valueUses depCache (regs^.boundValue r)) m
   blockInitDeps %= \m -> foldl' insReg m rs
 
 -- | Mark the given register has no dependencies
-clearDependencySet :: Some X86Reg -> RegisterUseM ids ()
+clearDependencySet :: (MemWidth (ArchAddrWidth arch), OrdF (ArchReg arch))
+                   => Some (ArchReg arch)
+                   -> RegisterUseM arch ids ()
 clearDependencySet (Some r) = blockInitDeps %= locOverwriteWith (\n _ -> n) (RegLoc r) (Const mempty)
 
 -- | Set dependencies for an assignment whose right-hand-side must be
 -- evaluated for side effects.
-requiredAssignDeps :: AssignId ids tp
-                   -> DependencySet X86Reg ids
-                   -> RegisterUseM ids ()
+requiredAssignDeps :: OrdF (ArchReg arch)
+                   => AssignId ids tp
+                   -> DependencySet (ArchReg arch) ids
+                   -> RegisterUseM arch ids ()
 requiredAssignDeps aid deps = do
   addDeps $ deps
   assignmentCache %= Map.insert (Some aid) mempty
 
 -- | Return values that must be evaluated to execute side effects.
-demandStmtValues :: HasCallStack
-                 => DemandContext X86_64
-                 -> StmtIndex -- ^ Index of statement.
-                 -> Stmt X86_64 ids
+demandStmtValues :: ( HasCallStack
+                    , OrdF (ArchReg arch)
+                    , MemWidth (ArchAddrWidth arch)
+                    )
+                 => StmtIndex -- ^ Index of statement we are processing.
+                 -> Stmt arch ids
                     -- ^ Statement we want to demand.
-                 -> RegisterUseM ids ()
-demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
+                 -> RegisterUseM arch ids ()
+demandStmtValues stmtIdx stmt = do
+ ctx <- asks demandContext
+ demandConstraints ctx $ do
   case stmt of
     AssignStmt (Assignment aid arhs) -> do
       case arhs of
@@ -521,81 +459,64 @@ demandStmtValues ctx stmtIdx stmt = demandConstraints ctx $
 -- addresses that are stored to, and the value stored), along with a
 -- map of how demands by successor blocks map back to assignments and
 -- registers.
-summarizeBlock :: forall ids
-               .  RegisterUseContext
-               -> Memory 64
-               -> ParsedBlock X86_64 ids
-               -> Except String (BlockUsageSummary X86_64 ids)
+summarizeBlock :: forall arch ids
+               .  RegisterInfo (ArchReg arch)
+               => RegisterUseContext arch ids
+               -> Memory (ArchAddrWidth arch)
+               -> ParsedBlock arch ids
+               -> Except String (BlockUsageSummary arch ids)
 summarizeBlock ctx mem blk = do
  let s0 = initBlockUsageSummary (blockJumpBounds blk)
  flip execStateT s0 $ flip runReaderT ctx $ do
   let addr = pblockAddr blk
   -- Add demanded values for terminal
-  zipWithM_ (demandStmtValues x86DemandContext) [0..] (pblockStmts blk)
+  zipWithM_ demandStmtValues [0..] (pblockStmts blk)
   case pblockTermStmt blk of
     ParsedJump regs _ ->
-      addRegisterUses regs x86StateRegs
+      addRegisterUses regs archRegs
     ParsedBranch regs cond _ _  -> do
       demandValue cond
-      addRegisterUses regs x86StateRegs
+      addRegisterUses regs archRegs
     ParsedLookupTable regs idx _ -> do
       demandValue idx
-      addRegisterUses regs x86StateRegs
+      addRegisterUses regs archRegs
     ParsedCall regs  _ -> do
       funTypeMap <- asks functionArgs
+      defCallRegs <- asks defaultCallRegs
       -- Get function type associated with function
-      let fti | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
+      let ftr | Just fSegOff <- valueAsSegmentOff mem (regs^.boundValue ip_reg)
               , Just ftp <- Map.lookup fSegOff funTypeMap =
                   ftp
               | otherwise =
-                  maximumFunTypeInfo
+                  defCallRegs
       traverse_ (\(Some v) -> demandValue v) $
-        registerValues regs (Some ip_reg : fmap argReg (ftiArgRegs fti))
-      addRegisterUses regs (Some sp_reg : Set.toList x86CalleeSavedRegs)
+        registerValues regs (Some ip_reg : fnArgRegs ftr)
+      do savedRegs <- asks calleeSavedRegisters
+         addRegisterUses regs (Some sp_reg : savedRegs)
       -- Ensure that result registers are defined, but do not have any deps.
-      traverse_ clearDependencySet $ [Some DF] ++ fmap retReg (ftiRetRegs fti)
+      do clearedRegs <- asks callScratchRegisters
+         traverse_ clearDependencySet clearedRegs
+      traverse_ clearDependencySet (fnReturnRegs ftr)
     PLTStub regs _ _ -> do
       traverseF_ demandValue regs
       depCache <- gets _assignmentCache
-      let insDeps :: BlockProvideDepMap X86Reg ids
-                  -> X86Reg tp
-                  -> Value X86_64 ids tp
-                  -> BlockProvideDepMap X86Reg ids
+      let insDeps :: BlockProvideDepMap (ArchReg arch) ids
+                  -> ArchReg arch tp
+                  -> Value arch ids tp
+                  -> BlockProvideDepMap (ArchReg arch) ids
           insDeps m r v = addLocDependency (RegLoc r) (valueUses depCache v) m
       blockInitDeps %= \m -> MapF.foldlWithKey' insDeps m regs
     ParsedReturn regs -> do
-      curFTI     <- asks currentFunctionType
-      let demandRet ri =
-            case retReg ri of
-              Some r -> demandValue (regs^.boundValue r)
-      traverse_ demandRet (ftiRetRegs curFTI)
+      retRegs     <- asks $ returnRegisters
+      let demandRet (Some r) = demandValue (regs^.boundValue r)
+      traverse_ demandRet retRegs
     ParsedArchTermStmt tstmt regs _ -> do
-      sysp  <- asks thisSyscallPersonality
-      traverse_ (\(Some r) -> demandValue r) $
-        x86TermStmtValues sysp tstmt regs
-      summarizeX86ArchTermStmt sysp tstmt regs
+      summaryFn <- asks summarizeTermFn
+      summaryFn tstmt regs
     ParsedTranslateError _ ->
       error "Cannot identify register use in code where translation error occurs"
     ClassifyFailure _ _ ->
       error $ "Classification failed: " ++ show addr
-
-summarizeX86ArchTermStmt :: SyscallPersonality
-                         -> X86TermStmt ids
-                         -> RegState (ArchReg X86_64) (Value X86_64 ids)
-                         -> RegisterUseM ids ()
-summarizeX86ArchTermStmt sysp X86Syscall regs = do
-  -- FIXME: clagged from call above
-  addRegisterUses regs (Some sp_reg : (Set.toList x86CalleeSavedRegs))
-  traverse_ clearDependencySet (spResultRegisters sysp)
-summarizeX86ArchTermStmt _ Hlt _ = pure ()
-summarizeX86ArchTermStmt _ UD2 _ = pure ()
-
-
-{-
--- | Map each block starting address to a set of registers that the
--- block needs to be computed to successfully execute the block.
-type X86BlockRegMap = Map (MemSegmentOff 64) (Set (Some X86Reg))
--}
 
 -- | Maps the starting address of a block with the given register type to the value.
 type BlockAddrMap r v = Map (MemSegmentOff (RegAddrWidth r)) v
@@ -619,24 +540,27 @@ type NewDemandMap r = BlockAddrMap r (Set (Some (BoundLoc r)))
 -- | This takes a list of registers that a block demands that have not
 -- been back-propogated, and infers new demands for predecessor
 -- registers.
-backPropagateOne :: forall ids
-                 .  BlockAddrMap X86Reg (DependencySet X86Reg ids)
+backPropagateOne :: forall r ids
+                 .  (MapF.OrdF r, MemWidth (RegAddrWidth r))
+                 => BlockAddrMap r (DependencySet r ids)
                  -- ^ State that we are computing fixpint for.
-                 -> NewDemandMap X86Reg
+                 -> NewDemandMap r
                  -- ^ Maps block addresses to the set of register demands we
                  -- have not yet back propagated.
-                 -> Set (Some (BoundLoc X86Reg))
+                 -> Set (Some (BoundLoc r))
                  -- ^ Set of new locations the target block depends on
                  -- that we have not yet backpropagate demands to the
                  -- previous block for.
 
-                 -> [(MemSegmentOff 64,  BlockProvideDepMap X86Reg ids)]
+                 -> [( MemSegmentOff (RegAddrWidth r)
+                     , BlockProvideDepMap r ids
+                     )]
                  -- ^ Predecessors for the target block and their provide map
-                 -> (FixState X86Reg ids, NewDemandMap X86Reg)
+                 -> (FixState r ids, NewDemandMap r)
 backPropagateOne s rest _ [] = (s, rest)
 backPropagateOne s rest newLocs ((srcAddr,srcDepMap):predRest) = do
   -- Get dependencies for all new locations that are demanded.
-  let allDeps :: DependencySet X86Reg ids
+  let allDeps :: DependencySet r ids
       allDeps = mconcat [ getLocDependencySet srcDepMap l | Some l <- Set.toList newLocs ]
   -- Add demands for srcAddr and get existing demands.
   let (mseenRegs, s') =
@@ -650,14 +574,15 @@ backPropagateOne s rest newLocs ((srcAddr,srcDepMap):predRest) = do
             | otherwise = Map.insertWith Set.union srcAddr d rest
   seq s' $ seq rest' $ backPropagateOne s' rest' newLocs predRest
 
-
 -- | This transitively back propagates blocks across
-backPropagate :: PredProvideMap X86Reg ids
+backPropagate :: forall r ids
+              .  (MapF.OrdF r, MemWidth (RegAddrWidth r))
+              => PredProvideMap r ids
               -- ^ Pred provide map computed during summarization.
-              -> FixState X86Reg ids
-              -> NewDemandMap X86Reg
+              -> FixState r ids
+              -> NewDemandMap r
               -- ^ New demands on block addresses.
-              -> FixState X86Reg ids
+              -> FixState r ids
 backPropagate predMap s new =
   case Map.maxViewWithKey new of
     Nothing -> s
@@ -666,31 +591,26 @@ backPropagate predMap s new =
           (s', rest') = backPropagateOne s rest newRegs predAddrs
        in backPropagate predMap s' rest'
 
+------------------------------------------------------------------------
+-- registerUse
+
 -- | Returns the maximum stack argument used by the function, that is,
 -- the highest index above sp0 that is read or written.
-registerUse :: forall ids
-            .  Memory 64
-            -> SyscallPersonality
-            -> Map (MemSegmentOff 64) X86FunTypeInfo
-               -- ^ Map from function entry points we have analyzed to their
-               -- inferred function type.
-            -> DiscoveryFunInfo X86_64 ids
-            -> X86FunTypeInfo
-               -- ^ Expected type of this function
-            -> FunPredMap 64
+registerUse :: forall arch ids
+            .  RegisterInfo (ArchReg arch)
+            => Memory (ArchAddrWidth arch)
+            -> RegisterUseContext arch ids
+            -> DiscoveryFunInfo arch ids
+            -> FunPredMap (ArchAddrWidth arch)
                -- ^ Predecessors for each block in function
-            -> Except String (Map (MemSegmentOff 64) (DependencySet X86Reg ids))
-registerUse mem sysp fArgs finfo ftp predMap = do
-  let ctx = RUC { functionArgs = fArgs
-                , currentFunctionType = ftp
-                , thisSyscallPersonality = sysp
-                }
+            -> Except String (Map (MemSegmentOff (ArchAddrWidth arch)) (DependencySet (ArchReg arch) ids))
+registerUse mem ctx finfo predMap = do
   -- Run the first phase (block summarization)
   m <- traverse (summarizeBlock ctx mem) (finfo^.parsedBlocks)
   -- Get all assignments that must be executed for all blocks
   -- to execute in program.
   -- Build map from summarization
-  let bru :: BlockAddrMap X86Reg (DependencySet X86Reg ids)
+  let bru :: BlockAddrMap (ArchReg arch) (DependencySet (ArchReg arch) ids)
       bru = view blockExecDemands <$> m
   let providePair prev = (prev, _blockInitDeps rus)
         where Just rus = Map.lookup prev m
