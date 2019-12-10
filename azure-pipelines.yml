@@ -30,13 +30,13 @@ steps:
       stack --no-terminal setup
       stack --no-terminal build --only-dependencies
       mkdir -p cache
-      cp -r $HOME/.stack-root cache/stack-root
+      cp -r $HOME/.stack cache/stack-root
       cp -r .stack-work cache cache/stack-work
     displayName: Build dependencies
     condition: ne(variables.CACHE_RESTORED, 'true')
   - script: |
       # Move cache to appropriate directories.
-      mv cache/stack-root $HOME/.stack-root
+      mv cache/stack-root $HOME/.stack
       mv cache/stack-work .stack-work
     displayName: Copy cache
     condition: eq(variables.CACHE_RESTORED, 'true')
