@@ -20,6 +20,10 @@ module Reopt.VCG.Annotations
   , Expr(..)
   , BlockVar(..)
   , parseAnnotations
+--  , LLVMVarMap
+--  , SMTP.ExprType(..)
+--  , parseJSONBlockAnn
+  , blockAnnToJSON
   , x86ArgGPRegs
   , calleeSavedGPRegs
   ) where
