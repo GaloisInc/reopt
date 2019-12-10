@@ -20,6 +20,7 @@ module Reopt.VCG.SMTParser
     -- * Rendering
   , SExprEncoding
   , encodeList
+  , sexprFromText
   , IsString(..)
   ) where
 
@@ -90,9 +91,12 @@ newtype SExprEncoding = SExprEncoding { encBuilder :: Text.Builder }
 instance IsString SExprEncoding where
   fromString = SExprEncoding . fromString
 
+sexprFromText :: Text -> SExprEncoding
+sexprFromText = SExprEncoding . Text.fromText
+
 encodeList :: [SExprEncoding] -> SExprEncoding
 encodeList [] = "()"
-encodeList l = SExprEncoding ("(" <> foldr (\e r -> encBuilder e <> " " <> r) ")" l)
+encodeList (h:l) = SExprEncoding ("(" <> encBuilder h <> foldr (\e r -> " " <> encBuilder e <> r) ")" l)
 
 encodingToLazy :: SExprEncoding -> LText.Text
 encodingToLazy = Text.toLazyText . encBuilder
@@ -150,6 +154,7 @@ evalExpr parseVar (List [Atom "_", Atom t, Number w])
 evalExpr parseVar t =
   fmap (\(v,tp) -> (Var v, tp)) $ parseVar t
 
+-- | Read an SMT expression given a variable parser.
 fromText :: VarParser a -> Text -> Either String (Expr a)
 fromText varParser t = do
   se <- readSExpr t

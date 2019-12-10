@@ -35,10 +35,10 @@ module Reopt.CFG.FnRep
    , FnJumpTarget(..)
    , FnPhiVar(..)
    , FnReturnVar(..)
+   , FnMemAccessType(..)
    , FnArchStmt
    , FoldFnValue(..)
    , FnArchConstraints
-     -- ArchBlockPrecond
    ) where
 
 import           Control.Monad.Identity
@@ -437,6 +437,11 @@ instance FoldFnValue FnTermStmt where
 ------------------------------------------------------------------------
 -- FnBlock
 
+-- | Indicates the type of access and whether it accessed heap or stack.
+data FnMemAccessType
+   = HeapAccess
+   | StackAccess
+
 -- | A block in the function.
 --
 -- This representation is designed to be both easy to generate LLVM
@@ -459,6 +464,11 @@ data FnBlock arch
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
+             , fbMemInsnAddrs :: !(V.Vector (Word64, FnMemAccessType))
+               -- ^ Vector contains a pair @(off, atp)@ for each machine
+               -- code instruction that accessed memory.  The offset @off@
+               -- is the offset of the instruction type, and @atp@ indicates
+               -- properties inferred about the acccess.
              }
 
 instance (FnArchConstraints arch

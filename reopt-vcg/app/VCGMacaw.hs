@@ -159,7 +159,7 @@ getCurrentEventInfo = do
     Just info -> pure info
     Nothing -> do
       a <- gets mcCurAddr
-      MStateM $ throwError $ "Unannotated memory event" ++ show a
+      MStateM $ throwError $ "Unannotated memory event at address " ++ show a
 
 ------------------------------------------------------------------------
 -- Translation

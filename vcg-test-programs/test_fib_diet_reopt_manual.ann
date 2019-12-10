@@ -1,0 +1,122 @@
+{
+   "_comment1": "Verifying a simple fib function.",
+   "_comment2": "The targets are equivalent, hence expecting UNSAT.",
+   "llvm_path": "test_fib_diet_reopt.ll",
+   "binary_path": "test_fib_diet_lld.exe",
+   "functions": [
+      {
+         "llvm_name": "fib",
+         "stack_size": 48,
+         "blocks": [
+            { "label": "block_0_201400",
+              "addr": "0x201400",
+              "size": "0x17",
+              "mem_events": [
+                  { "addr": "0x201400", "type": "binary_only_access" },
+                  { "addr": "0x201408", "type": "binary_only_access" },
+                  { "addr": "0x20140c", "type": "binary_only_access" }
+              ]
+            },
+            { "label": "block_0_201417",
+              "addr": "0x201417",
+              "size": 13,
+              "preconditions": [
+                "(= rbp (bvsub stack_high (_ bv8  64)))",
+                "(= rsp (bvsub stack_high (_ bv40 64)))",
+                "(= (mcstack (bvsub stack_high (_ bv8  64)) (_ BitVec 64)) (fnstart rbp))",
+   	        "(= (mcstack (bvsub stack_high (_ bv24 64)) (_ BitVec 64)) (llvm t4))",
+	        "(= rbx (fnstart rbx))",
+		"(= r12 (fnstart r12))",
+		"(= r13 (fnstart r13))",
+		"(= r14 (fnstart r14))",
+		"(= r15 (fnstart r15))"
+              ],
+              "mem_events": [
+                  { "addr": "0x201417", "type": "binary_only_access" },
+                  { "addr": "0x20141b", "type": "binary_only_access" }
+              ]
+            },
+            { "label": "block_0_201424",
+              "addr": "0x201424",
+              "size": 16,
+              "preconditions": [
+                "(= rbp (bvsub stack_high (_ bv8  64)))",
+                "(= rsp (bvsub stack_high (_ bv40 64)))",
+                "(= (mcstack (bvsub stack_high (_ bv8 64))  (_ BitVec 64)) (fnstart rbp))",
+                "(= (mcstack (bvsub stack_high (_ bv24 64)) (_ BitVec 64)) (llvm t5))",
+	        "(= rbx (fnstart rbx))",
+		"(= r12 (fnstart r12))",
+		"(= r13 (fnstart r13))",
+		"(= r14 (fnstart r14))",
+		"(= r15 (fnstart r15))"
+              ],
+              "mem_events": [
+                  { "addr": "0x201424", "type": "binary_only_access" },
+                  { "addr": "0x20142f", "type": "binary_only_access" }
+              ]
+            },
+            { "label": "block_0_201434",
+              "addr": "0x201434",
+              "size": 17,
+              "preconditions": [
+                "(= rbp (bvsub stack_high (_ bv8 64)))",
+                "(= rsp (bvsub stack_high (_ bv40 64)))",
+                "(= (mcstack (bvsub stack_high (_ bv8 64))  (_ BitVec 64)) (fnstart rbp))",
+                "(= (mcstack (bvsub stack_high (_ bv24 64)) (_ BitVec 64)) (llvm t9))",
+                "(= rax (llvm t8))",
+	        "(= rbx (fnstart rbx))",
+		"(= r12 (fnstart r12))",
+		"(= r13 (fnstart r13))",
+		"(= r14 (fnstart r14))",
+		"(= r15 (fnstart r15))"
+              ],
+              "mem_events": [
+                  { "addr": "0x201434", "type": "binary_only_access" },
+                  { "addr": "0x20143c", "type": "binary_only_access" },
+                  { "addr": "0x201440", "type": "binary_only_access" }
+              ]
+            },
+            { "label": "block_0_201445",
+              "addr": "0x201445",
+              "size": 11,
+              "preconditions": [
+                "(= rbp (bvsub stack_high (_ bv8 64)))",
+                "(= rsp (bvsub stack_high (_ bv40 64)))",
+                "(= (mcstack (bvsub stack_high (_ bv8  64)) (_ BitVec 64)) (fnstart rbp))",
+                "(= (mcstack (bvsub stack_high (_ bv32 64)) (_ BitVec 64)) (llvm t13))",
+          	"(= rax (llvm t12))",
+	        "(= rbx (fnstart rbx))",
+		"(= r12 (fnstart r12))",
+		"(= r13 (fnstart r13))",
+		"(= r14 (fnstart r14))",
+		"(= r15 (fnstart r15))"
+              ],
+              "mem_events": [
+                  { "addr": "0x201445", "type": "binary_only_access" },
+                  { "addr": "0x20144c", "type": "binary_only_access" }
+              ]
+            },
+            { "label": "block_0_201450",
+              "addr": "0x201450",
+              "size": 10,
+              "preconditions": [
+                 "(= rbp (bvsub stack_high (_ bv8 64)))",
+                 "(= rsp (bvsub stack_high (_ bv40 64)))",
+		 "(= (mcstack (bvsub stack_high (_ bv8  64)) (_ BitVec 64)) (fnstart rbp))",
+		 "(= (mcstack (bvsub stack_high (_ bv16 64)) (_ BitVec 64)) (llvm t15))",
+		 "(= rbx (fnstart rbx))",
+		 "(= r12 (fnstart r12))",
+		 "(= r13 (fnstart r13))",
+		 "(= r14 (fnstart r14))",
+		 "(= r15 (fnstart r15))"
+              ],
+              "mem_events": [
+                  { "addr": "0x201450", "type": "binary_only_access" },
+                  { "addr": "0x201458", "type": "binary_only_access" },
+                  { "addr": "0x201459", "type": "binary_only_access" }
+              ]
+            }
+         ]
+      }
+   ]
+}

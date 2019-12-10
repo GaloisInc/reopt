@@ -77,6 +77,7 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Proxy
 import qualified Data.Vector as V
+import           Data.Word
 import           GHC.Stack
 import           GHC.TypeLits
 import           Numeric.Natural
@@ -1135,20 +1136,30 @@ runLLVMTrans (LLVMTrans action) =
 argIdent :: Int -> L.Ident
 argIdent i = L.Ident ("arg" ++ show i)
 
+-- | Generate pair containing block label in LLVM and annotations from
+-- block.
 getBlockAnn :: LLVMBlockResult X86_64 -> (String, Ann.BlockAnn)
 getBlockAnn blockRes = (fnBlockLabelString lbl, Ann.ReachableBlock ann)
   where b = fnBlock blockRes
         lbl = fbLabel b
         addr  = addrOffset $ segoffAddr $ fnBlockLabelAddr lbl
         pr = fbPrecond b
-        -- TODO: Fix me
+        memAnn :: (Word64, FnMemAccessType) -> Ann.MCMemoryEvent
+        memAnn (o, tp) =
+          Ann.MCMemoryEvent
+          { Ann.eventAddr = fromIntegral addr + fromIntegral o
+          , Ann.eventInfo =
+              case tp of
+                HeapAccess -> Ann.HeapAccess
+                StackAccess -> Ann.BinaryOnlyAccess
+          }
         ann = Ann.ReachableBlockAnn { Ann.blockAddr = fromIntegral addr
                                     , Ann.blockCodeSize = fbSize b
                                     , Ann.blockX87Top = blockInitX87TopReg pr
                                     , Ann.blockDFFlag = blockInitDF pr
                                     , Ann.blockPreconditions = []
                                     , Ann.blockAllocas = Map.empty
-                                    , Ann.mcMemoryEvents = []
+                                    , Ann.mcMemoryEvents = V.toList $ memAnn <$> fbMemInsnAddrs b
                                     }
 
 -- | This translates the function to LLVM and returns the define.
@@ -1207,11 +1218,11 @@ defineFunction archOps genOpts f = do
   let blocks :: [L.BasicBlock]
       blocks = toBasicBlock (funBlockPhiMap finalFunState) <$> finalBlocks
 
-  let blockAnnMap = HMap.fromList $ getBlockAnn <$> finalBlocks
+  let blockAnnMap = HMap.fromList $ getBlockAnn <$> (entryBlockRes : finalBlocks)
 
-  let (finBlocks,finBlockAnnMap)
+  let (finBlocks, finBlockAnnMap)
         | needSwitchFailLabel finalFunState =
-            ( [entryLLVMBlock] ++ blocks ++ [failBlock]
+            ( entryLLVMBlock : (blocks ++ [failBlock])
             , HMap.insert switchFailLabel Ann.UnreachableBlock blockAnnMap
             )
         | otherwise = (entryLLVMBlock : blocks, blockAnnMap)
@@ -1232,7 +1243,7 @@ defineFunction archOps genOpts f = do
   let funAnn = Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
                                , Ann.blocks = finBlockAnnMap
                                }
-  pure (funDef,funAnn)
+  pure (funDef, funAnn)
 
 ------------------------------------------------------------------------
 -- Other

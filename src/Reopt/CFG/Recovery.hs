@@ -42,6 +42,7 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import           Data.Word
 import           GHC.Stack
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Text.Printf
@@ -203,7 +204,7 @@ data RecoverState arch ids =
        -- of the block after any stack allocations have been
        -- performed.
      , rsBlockOff :: !(ArchAddrWord arch)
-       -- ^ The offset in the block of the current code we are steppign through.
+       -- ^ The offset in the block of the current code.
      , _rsAssignStackOffsetMap
        :: !(AssignStackOffsetMap (ArchAddrWidth arch) ids )
        -- ^ Maps assignments that refer to stack to the corresponding
@@ -212,6 +213,8 @@ data RecoverState arch ids =
        -- ^ Maps stack offsets to the register value set there.
      , _rsCurStmts  :: !(Seq (FnStmt arch))
      , _rsAssignMap    :: !(MapF (AssignId ids) (FnValue arch))
+     , _rsMemInsnAddrs :: ![(Word64, FnMemAccessType)]
+       -- ^ Pairs for offsets and mem access types of instructions in reverse order.
      }
 
 
@@ -237,6 +240,11 @@ rsCurStmts = lens _rsCurStmts (\s v -> s { _rsCurStmts = v })
 rsAssignMap :: Lens' (RecoverState arch ids)
                      (MapF (AssignId ids) (FnValue arch))
 rsAssignMap = lens _rsAssignMap (\s v -> s { _rsAssignMap = v })
+
+-- | Pairs for offsets and mem access types of instructions in reverse
+-- order.
+rsMemInsnAddrs :: Lens' (RecoverState arch ids) [(Word64, FnMemAccessType)]
+rsMemInsnAddrs = lens _rsMemInsnAddrs (\s v -> s { _rsMemInsnAddrs = v })
 
 ------------------------------------------------------------------------
 -- Recover
@@ -283,6 +291,7 @@ evalRecover b preds phiVars locPhiVarMap regs initStackMap m = do
               , _rsStackMap = initStackMap
               , _rsCurStmts = Seq.empty
               , _rsAssignMap = MapF.empty
+              , _rsMemInsnAddrs = []
               }
   evalStateT (runRecover m) s0
 
@@ -329,6 +338,7 @@ mkBlock tm = do
   phiVars <- gets rsPhiVars
   phiVarMap <- gets rsLocPhiVarMap
   curStmts <- use rsCurStmts
+  memInfo <- use rsMemInsnAddrs
   return $! FnBlock { fbLabel = fnBlockLabelFromAddr (pblockAddr b)
                     , fbPrecond = pr
                     , fbSize  = fromIntegral (blockSize b)
@@ -337,6 +347,7 @@ mkBlock tm = do
                     , fbPhiMap  = phiVarMap
                     , fbStmts  = toList curStmts
                     , fbTerm   = tm
+                    , fbMemInsnAddrs = V.fromList (reverse memInfo)
                     }
 
 $(pure [])
@@ -537,9 +548,13 @@ whenUsed aid m = do
   -- Only add assignment if it is used.
   when (Some aid `Set.member` usedAssigns) m
 
+recordMemAccess :: FnMemAccessType -> Recover ids ()
+recordMemAccess tp = do
+  -- Get offset of block for recording read.
+  o <- fromIntegral <$> gets rsBlockOff
+  rsMemInsnAddrs %= ((o, tp):)
+
 -- | Add statements for the assignment
---
--- N.B. This has already checked that the assignment is needed.
 recoverAssign :: HasCallStack => Assignment X86_64 ids tp -> Recover ids ()
 recoverAssign asgn = do
   let aid = assignId asgn
@@ -560,11 +575,12 @@ recoverAssign asgn = do
       whenUsed aid $
         setAssignRhs aid (FnSetUndefined tp)
     ReadMem addr memRepr -> do
-      whenUsed aid $ do
-        initBounds <- gets $ blockJumpBounds . rsBlock
-        assignStackMap <- use rsAssignStackOffsetMap
-        case valueStackOffset initBounds assignStackMap addr of
-          Just o -> do
+      initBounds <- gets $ blockJumpBounds . rsBlock
+      assignStackMap <- use rsAssignStackOffsetMap
+      case valueStackOffset initBounds assignStackMap addr of
+        Just o -> do
+          recordMemAccess StackAccess
+          whenUsed aid $ do
             -- Get values on stack
             curStack <- use rsStackMap
             -- Lookup offset repr pair in current stack.
@@ -577,7 +593,10 @@ recoverAssign asgn = do
                 curInsnAddr <- getCurRecoveryAddr
                 error $ show curInsnAddr
                   ++ ": Stack read at an uninitialized location."
-          Nothing -> do
+        Nothing -> do
+          -- Note. Are we allowed to deleted unused heap accesses?
+          whenUsed aid $ do
+            recordMemAccess HeapAccess
             addrVal <- recoverValue addr
             setAssignRhs aid (FnReadMem addrVal (typeRepr memRepr))
     CondReadMem tp cond addr def -> do
@@ -619,10 +638,12 @@ recoverStmt stmtIdx stmt = do
             rval <- recoverValue val
             -- Overwrite value in stack.
             rsStackMap %= stackMapOverwrite o memRepr rval
+          recordMemAccess StackAccess
         Nothing -> do
           rAddr <- recoverValue addr
           rVal  <- recoverValue val
           addFnStmt $ FnWriteMem rAddr rVal
+          recordMemAccess HeapAccess
     CondWriteMem cond addr memRepr val -> do
       rCond <- recoverValue cond
       rAddr <- recoverValue addr
