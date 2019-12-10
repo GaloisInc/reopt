@@ -12,28 +12,34 @@ steps:
       git submodule update --init
 
       # Download and unpack the stack executable to a path location
-      mkdir -p $HOME/.local/bin
-      export PATH=$HOME/.local/bin:$PATH
+      mkdir -p $PWD/.local/bin
+      export PATH=$PWD/.local/bin:$PATH
       curl -L https://get.haskellstack.org/stable/linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
 
       # Download GHC  and other dependendencies
-      stack --no-terminal setup
+      stack --stack-root=$PWD/.stack-root --no-terminal setup
     displayName: Setup
   - script: |
        find .
+       echo "Show home"
+       find $HOME
     displayName: Show setup artifacts
   - script: |
-      stack build --no-terminal --only-dependencies
+      stack --stack-root=$PWD/.stack-root build --no-terminal --only-dependencies
     displayName: Build Dependencies
   - script: |
        find .
+       echo "Show home"
+       find $HOME
     displayName: Show dependencies
   - script: |
-      stack build --no-terminal --ghc-options="-Wall -Werror"
+      stack --stack-root=$PWD/.stack-root build --no-terminal --ghc-options="-Wall -Werror"
     displayName: Build
   - script: |
-      stack test --no-terminal --ghc-options="-Wall -Werror"
+      stack --stack-root=$PWD/.stack-root test --no-terminal --ghc-options="-Wall -Werror"
     displayName: Tests
   - script: |
        find .
+       echo "Show home"
+       find $HOME
     displayName: Show all artifacts
