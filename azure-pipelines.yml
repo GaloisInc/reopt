@@ -1,0 +1,32 @@
+trigger:
+- master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - script: |
+      # Changes ssh paths into http path for a read-only clone of
+      # submodules without ssh keys.
+      sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+      git submodule update --init
+
+      # Download and unpack the stack executable to a path location
+      mkdir -p $HOME/.local/bin
+      export PATH=$HOME/.local/bin:$PATH
+      curl -L https://get.haskellstack.org/stable/linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+
+      # Download GHC  and other dependendencies
+      stack --no-terminal setup
+    displayName: Setup
+
+  - script: |
+      stack build --no-terminal --only-dependencies
+    displayName: Build Dependencies
+
+  - script: |
+      stack build --no-terminal --ghc-options="-Wall -Werror"
+    displayName: Build
+  - script: |
+      stack test --no-terminal --ghc-options="-Wall -Werror"
+    disiplayName: Tests
