@@ -28,7 +28,7 @@ steps:
   - script: |
       # Download GHC  and other dependendencies
       stack --no-terminal setup
-      stack --no-terminal --only-dependencies
+      stack --no-terminal build --only-dependencies
       mkdir -p cache
       cp -r $HOME/.stack-root cache/stack-root
       cp -r .stack-work cache cache/stack-work
