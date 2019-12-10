@@ -31,7 +31,7 @@ steps:
       stack --no-terminal build --only-dependencies
       mkdir -p cache
       cp -r $HOME/.stack cache/stack-root
-      cp -r .stack-work cache cache/stack-work
+      cp -r .stack-work cache/stack-work
     displayName: Build dependencies
     condition: ne(variables.CACHE_RESTORED, 'true')
   - script: |
