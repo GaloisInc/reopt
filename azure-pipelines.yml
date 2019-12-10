@@ -19,13 +19,21 @@ steps:
       # Download GHC  and other dependendencies
       stack --no-terminal setup
     displayName: Setup
-
+  - script: |
+       find .
+    displayName: Show setup artifacts
   - script: |
       stack build --no-terminal --only-dependencies
     displayName: Build Dependencies
+  - script: |
+       find .
+    displayName: Show dependencies
   - script: |
       stack build --no-terminal --ghc-options="-Wall -Werror"
     displayName: Build
   - script: |
       stack test --no-terminal --ghc-options="-Wall -Werror"
     displayName: Tests
+  - script: |
+       find .
+    displayName: Show all artifacts
