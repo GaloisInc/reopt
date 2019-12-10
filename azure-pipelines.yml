@@ -15,9 +15,9 @@ steps:
     displayName: Checkout submodules
   - script: |
       # Download and unpack the stack executable to a path location
-      mkdir -p $PWD/.local/bin
-      export PATH=$PWD/.local/bin:$PATH
-      curl -L https://get.haskellstack.org/stable/linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+      mkdir -p $HOME/.local/bin
+      export PATH=$HOME/.local/bin:$PATH
+      curl -L https://get.haskellstack.org/stable/linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C $HOME/.local/bin '*/stack'
     displayName: Download stack
   - task: Cache@2
     inputs:
