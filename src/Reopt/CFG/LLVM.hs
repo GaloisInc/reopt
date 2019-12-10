@@ -1227,6 +1227,7 @@ defineFunction archOps genOpts f = do
             )
         | otherwise = (entryLLVMBlock : blocks, blockAnnMap)
 
+  let blockObjMap = HMap.mapWithKey Ann.blockAnnToJSON finBlockAnnMap
 
   let funDef = L.Define { L.defLinkage  = Nothing
                         , L.defRetType  = llvmFunctionReturnType (fnType f)
@@ -1241,7 +1242,7 @@ defineFunction archOps genOpts f = do
                         , L.defComdat   = Nothing
                         }
   let funAnn = Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
-                               , Ann.blocks = finBlockAnnMap
+                               , Ann.blocks = blockObjMap
                                }
   pure (funDef, funAnn)
 

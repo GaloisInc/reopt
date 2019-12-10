@@ -24,6 +24,7 @@ module Reopt.VCG.Annotations
   , LLVMVarMap
   , SMTP.ExprType(..)
   , parseJSONBlockAnn
+  , blockAnnToJSON
   , x86ArgGPRegs
   , calleeSavedGPRegs
   ) where
