@@ -23,10 +23,9 @@ steps:
   - script: |
       stack build --no-terminal --only-dependencies
     displayName: Build Dependencies
-
   - script: |
       stack build --no-terminal --ghc-options="-Wall -Werror"
     displayName: Build
   - script: |
       stack test --no-terminal --ghc-options="-Wall -Werror"
-    disiplayName: Tests
+    displayName: Tests
