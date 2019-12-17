@@ -22,6 +22,12 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
   ( recoverFunction
+    -- * X86 type
+  , X86FunTypeInfo(..)
+  , X86ArgInfo(..)
+  , argReg
+  , X86RetInfo(..)
+  , retReg
   ) where
 
 import           Control.Lens
@@ -42,6 +48,7 @@ import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as V
+import           Data.Word
 import           GHC.Stack
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Text.Printf
@@ -51,28 +58,90 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Types
 
+import qualified Flexdis86 as F
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
+import           Data.Macaw.X86 (x86DemandContext)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.RegisterUse
 
 ------------------------------------------------------------------------
+-- FunTypeRegs
+
+-- | This identifies how a argument is passed into a function, or
+-- a return value is passed out.
+data X86ArgInfo where
+  ArgBV64 :: !F.Reg64 -> X86ArgInfo
+  -- ^ This identifies a 64-bit value passed as a register.
+  --
+  -- The register should be compatible with the ABI.
+  ArgMM512D :: !Word8 -> X86ArgInfo
+  -- ^ This identifies one of the zmm registers used as arguments (zmm0-7).
+
+-- | The register types this return value is associated with.
+argReg :: X86ArgInfo -> Some X86Reg
+argReg (ArgBV64 r) = Some (X86_GP r)
+argReg (ArgMM512D i) = Some (X86_ZMMReg i)
+
+-- | This identifies how a return value is passed from a callee to
+-- the callee.
+data X86RetInfo where
+  RetBV64 :: !F.Reg64 -> X86RetInfo
+  -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
+  --
+  -- The register should be compatible with the ABI.
+  RetMM512D :: !Word8 -> X86RetInfo
+  -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
+
+-- | The register types this return value is associated with.
+retReg :: X86RetInfo -> Some X86Reg
+retReg (RetBV64 r) = Some (X86_GP r)
+retReg (RetMM512D i) = Some (X86_ZMMReg i)
+
+-- | This describes the registers and return value of an x86_64 ABI
+-- compliant function.
+--
+-- This representation does not support arguments that spilled on the
+-- stack, but this would be a good feature to add.
+--
+-- It uses a list for arguments so that we can use C headers and
+-- ensure the arguments appear in a particular order (e.g. from the
+-- binary perspective a function that takes two integers followed by a
+-- float is indistinguishable from a function that takes a float
+-- followed by two integers.
+data X86FunTypeInfo
+   = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
+                    , ftiRetRegs :: [X86RetInfo]
+                    }
+
+-- |  Maximum function type.
+maximumFunTypeInfo :: X86FunTypeInfo
+maximumFunTypeInfo =
+  X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
+                             ++ fmap ArgMM512D [0..7]
+                 , ftiRetRegs = fmap RetBV64   [ F.RAX, F.RDX ]
+                             ++ fmap RetMM512D [0,1]
+                 }
+
+toFunctionTypeRegs :: X86FunTypeInfo -> FunctionTypeRegs X86Reg
+toFunctionTypeRegs ftp =
+  FunctionTypeRegs { fnArgRegs    = argReg <$> ftiArgRegs ftp
+                   , fnReturnRegs = retReg <$> ftiRetRegs ftp
+                   }
+
+------------------------------------------------------------------------
 -- FnRegValue
 
 data FnRegValue arch tp where
-  CalleeSaved :: !(ArchReg arch tp)
-              -> FnRegValue arch tp
-  -- ^ This is a callee saved register
   FnValue :: !(FnValue arch i)
           -> !(WidthEqProof i o)
           -> FnRegValue arch o
      -- ^ A value assigned to a register
 
 instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegValue arch tp) where
-  pretty (CalleeSaved r)     = text "calleeSaved" <> parens (text $ showF r)
   pretty (FnValue v _)    = pretty v
 
 $(pure [])
@@ -416,8 +485,8 @@ recoverCValue cv =
 
         Just addrRef -> do
           case () of
-            _ | Just (nm, ft) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
-                  pure $! FnFunctionEntryValue (resolveX86FunctionType ft) nm
+            _ | Just (nm, ftp) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
+                  pure $! FnFunctionEntryValue (resolveX86FunctionType ftp) nm
 
             _ | Map.member addrRef (interpState^.parsedBlocks) -> do
                   let msg = "Do not support functions that reference block addresses."
@@ -460,8 +529,6 @@ recoverValue v = do
       case MapF.lookup reg (rsCurRegs s) of
         Nothing ->
           unsupportedFnValue ("Initial register " ++ show reg) (typeRepr reg)
-        Just (CalleeSaved _) ->
-          unsupportedFnValue ("Initial (callee) register " ++ show reg) (typeRepr reg)
         Just (FnValue v' pr) -> do
           case testEquality (widthEqSource pr) (widthEqTarget pr) of
             Just Refl -> do
@@ -488,7 +555,10 @@ $(pure [])
 
 recoverCallTarget :: HasCallStack
                   => RegState X86Reg (Value X86_64 ids)
-                  -> Recover ids (FnValue X86_64 (BVType 64), X86FunTypeInfo)
+                  -> Recover ids ( FnValue X86_64 (BVType 64)
+                                 , X86FunTypeInfo
+                                 , FunctionType X86_64
+                                 )
 recoverCallTarget regState = do
   funCtx <- getFunCtx
   let mem = frcMemory funCtx
@@ -496,11 +566,11 @@ recoverCallTarget regState = do
   case v of
     RelocatableValue _ addr
       | Just addrRef <- asSegmentOff mem addr
-      , Just (nm, ft) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
-          pure (FnFunctionEntryValue (resolveX86FunctionType ft) nm, ft)
+      , Just (nm, ftp) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
+          pure (FnFunctionEntryValue (resolveX86FunctionType ftp) nm, ftp, resolveX86FunctionType ftp)
     _ -> do
       callTgt <- recoverValue v
-      pure (callTgt, maximumFunTypeInfo)
+      pure (callTgt, maximumFunTypeInfo, resolveX86FunctionType maximumFunTypeInfo)
 
 ------------------------------------------------------------------------
 -- recoverStmt
@@ -905,9 +975,8 @@ recoverBlock b = do
         Left e -> throwError e
         Right l -> recoverStmts 0 (reverse l)
       -- Get call target
-      (call_tgt, fti) <- recoverCallTarget regs
+      (call_tgt, fti, ftp) <- recoverCallTarget regs
       -- Evaluate call arguments
-      let ftp = resolveX86FunctionType fti
       args <- evalFunctionArgs regs fti
       -- Get list of return variables for call, and map from register to value for
       -- needed return values.
@@ -923,9 +992,8 @@ recoverBlock b = do
       -- Recover statements
       recoverStmts 0 (pblockStmts b)
       -- Get call target
-      (callTarget, callFunTypeInfo) <- recoverCallTarget regs
+      (callTarget, callFunTypeInfo, callFunType) <- recoverCallTarget regs
       -- Evaluate call arguments
-      let callFunType = resolveX86FunctionType callFunTypeInfo
       args <- evalFunctionArgs regs callFunTypeInfo
       (ri,retRegMap) <- evalReturnVars (ftiRetRegs callFunTypeInfo)
       -- Add function call
@@ -1095,7 +1163,28 @@ eqClassVecFromDeps depMap b =
       let bnds = blockJumpBounds b
        in eqClassVec $ foldl (addDemandedLocation bnds) emptyClassState (dsLocSet ds)
 
+summarizeX86ArchTermStmt :: SyscallPersonality
+                         -> X86TermStmt ids
+                         -> RegState (ArchReg X86_64) (Value X86_64 ids)
+                         -> RegisterUseM X86_64 ids ()
+summarizeX86ArchTermStmt _ Hlt _ = pure ()
+summarizeX86ArchTermStmt _ UD2 _ = pure ()
+summarizeX86ArchTermStmt sysp X86Syscall regs = do
+  let sysReg ::  ArchReg X86_64 (BVType 64)
+      sysReg = syscall_num_reg
+      -- Get list of registers used as arguments to system calls
+  let syscallRegs :: [ArchReg X86_64 (BVType 64)]
+      syscallRegs = syscallArgumentRegs
+      -- Get arguments registers if this is a static system call number
+  let argRegs
+        | BVValue _ call_no <- regs^.boundValue syscall_num_reg
+        , Just (_,_,argtypes) <- Map.lookup (fromInteger call_no) (spTypeInfo sysp) =
+            take (length argtypes) syscallRegs
+        | otherwise = syscallRegs
+  traverse_ (\r -> demandValue (regs^.boundValue r)) (sysReg : argRegs)
 
+  addRegisterUses regs (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+  traverse_ clearDependencySet (spResultRegisters sysp)
 
 -- | Recover the function at a given address.
 --
@@ -1123,8 +1212,17 @@ recoverFunction sysp funTypeMap mem fInfo = do
   let blockPreds = funBlockPreds fInfo
 
   -- Compute map from block starting addresses to the dependicies required to run block.
-  depMap <- runExcept $
-    registerUse mem sysp (fmap snd funTypeMap) fInfo cfti blockPreds
+  depMap <- runExcept $ do
+    let ctx = RegisterUseContext
+              { functionArgs = toFunctionTypeRegs . snd <$> funTypeMap
+              , defaultCallRegs = toFunctionTypeRegs maximumFunTypeInfo
+              , returnRegisters = retReg <$> ftiRetRegs cfti
+              , calleeSavedRegisters = Set.toList x86CalleeSavedRegs
+              , callScratchRegisters = [Some DF]
+              , summarizeTermFn = summarizeX86ArchTermStmt sysp
+              , demandContext = x86DemandContext
+              }
+    registerUse mem ctx fInfo blockPreds
 
   let blockUsageInfo :: Map (MemSegmentOff 64) (BlockEqClassVec X86Reg)
       blockUsageInfo = eqClassVecFromDeps depMap <$> fInfo^.parsedBlocks
@@ -1153,10 +1251,6 @@ recoverFunction sysp funTypeMap mem fInfo = do
               pr = PackBits n8 n64
            in MapF.insert (X86_ZMMReg r) (FnValue (FnArg i itp) pr) m
 
-    -- This marks all the registers in the ABI that should save their
-    -- value as callee saved
-    let insCalleeSaved (Some r) = MapF.insert r (CalleeSaved r)
-
     -- Note. We currently do not support arguments passed by stack.
     let initStackMap = emptyStackMap
 
@@ -1165,7 +1259,6 @@ recoverFunction sysp funTypeMap mem fInfo = do
         initRegs
           = MapF.empty
           & flip (ifoldr insArg) (ftiArgRegs cfti)
-          & flip (foldr insCalleeSaved) x86CalleeSavedRegs
           -- Set df to 0 at function start.
           & MapF.insert DF (FnValue (FnConstantBool False) (WidthEqRefl (typeRepr DF)))
 
