@@ -22,6 +22,12 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
   ( recoverFunction
+    -- * X86 type info
+  , X86FunTypeInfo(..)
+  , X86ArgInfo(..)
+  , argReg
+  , X86RetInfo(..)
+  , retReg
   ) where
 
 import           Control.Lens
@@ -43,11 +49,14 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
+import qualified Flexdis86 as F
 import           GHC.Stack
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 import           Text.Printf
 
-import           Data.Macaw.AbsDomain.JumpBounds
+import           Data.Macaw.AbsDomain.StackAnalysis
+import           Data.Macaw.AbsDomain.JumpBounds (InitJumpBounds(..))
+import           Data.Macaw.Analysis.RegisterUse
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
 import           Data.Macaw.Types
@@ -55,10 +64,71 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
+import           Data.Macaw.X86 (x86DemandContext)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
-import           Reopt.CFG.RegisterUse
+
+-- | This identifies how a argument is passed into a function, or
+-- a return value is passed out.
+data X86ArgInfo where
+  ArgBV64 :: !F.Reg64 -> X86ArgInfo
+  -- ^ This identifies a 64-bit value passed as a register.
+  --
+  -- The register should be compatible with the ABI.
+  ArgMM512D :: !Word8 -> X86ArgInfo
+  -- ^ This identifies one of the zmm registers used as arguments (zmm0-7).
+
+-- | The register types this return value is associated with.
+argReg :: X86ArgInfo -> Some X86Reg
+argReg (ArgBV64 r) = Some (X86_GP r)
+argReg (ArgMM512D i) = Some (X86_ZMMReg i)
+
+-- | This identifies how a return value is passed from a callee to
+-- the callee.
+data X86RetInfo where
+  RetBV64 :: !F.Reg64 -> X86RetInfo
+  -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
+  --
+  -- The register should be compatible with the ABI.
+  RetMM512D :: !Word8 -> X86RetInfo
+  -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
+
+-- | The register types this return value is associated with.
+retReg :: X86RetInfo -> Some X86Reg
+retReg (RetBV64 r) = Some (X86_GP r)
+retReg (RetMM512D i) = Some (X86_ZMMReg i)
+
+-- | This describes the registers and return value of an x86_64 ABI
+-- compliant function.
+--
+-- This representation does not support arguments that spilled on the
+-- stack, but this would be a good feature to add.
+--
+-- It uses a list for arguments so that we can use C headers and
+-- ensure the arguments appear in a particular order (e.g. from the
+-- binary perspective a function that takes two integers followed by a
+-- float is indistinguishable from a function that takes a float
+-- followed by two integers.
+data X86FunTypeInfo
+   = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
+                    , ftiRetRegs :: [X86RetInfo]
+                    }
+
+-- |  Maximum function type.
+maximumFunTypeInfo :: X86FunTypeInfo
+maximumFunTypeInfo =
+  X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
+                             ++ fmap ArgMM512D [0..7]
+                 , ftiRetRegs = fmap RetBV64   [ F.RAX, F.RDX ]
+                             ++ fmap RetMM512D [0,1]
+                 }
+
+toFunctionTypeRegs :: X86FunTypeInfo -> FunctionTypeRegs X86Reg
+toFunctionTypeRegs ftp =
+  FunctionTypeRegs { fnArgRegs    = argReg <$> ftiArgRegs ftp
+                   , fnReturnRegs = retReg <$> ftiRetRegs ftp
+                   }
 
 ------------------------------------------------------------------------
 -- FnRegValue
@@ -85,6 +155,7 @@ $(pure [])
 -- begins execution.
 data BlockEqClass r tp =
   BlockEqClass { blockEqInitLocation :: !(BoundLoc r tp)
+                 -- ^ The main location to use for argument passing purposes.
                , blockEqLaterLocations :: ![BoundLoc r tp]
                  -- ^ Set of demanded locations considered equivalent.
                , blockEqClassType :: !(TypeRepr tp)
@@ -93,7 +164,7 @@ data BlockEqClass r tp =
 -- | Create a class from a initial value.
 initClass :: HasRepr r TypeRepr => BoundLoc r tp -> BlockEqClass r tp
 initClass loc = BlockEqClass { blockEqInitLocation = loc
-                             , blockEqLaterLocations = [loc]
+                             , blockEqLaterLocations = []
                              , blockEqClassType = typeRepr loc
                              }
 
@@ -190,12 +261,9 @@ data RecoverState arch ids =
        -- ^ Initial block
      , rsPredBlockAddrs :: ![MemSegmentOff (ArchAddrWidth arch)]
        -- ^ Predecessors for this block
-     , rsPhiVars :: !(V.Vector (Some FnPhiVar))
+     , rsPhiVars :: !(V.Vector (Some (FnPhiVar arch)))
        -- ^ List of phi variables in order blocks jumping to
        -- this block should define them.
-     , rsLocPhiVarMap :: !(LocMap (ArchReg arch) FnPhiVar)
-       -- ^ Map from locations demanded by this block to phi variable
-       -- for that location.
      , rsDependencySet :: !(DependencySet (ArchReg arch)  ids)
        -- ^ Dependencies computed for current block.
      , rsCurRegs   :: !(MapF (ArchReg arch) (FnRegValue arch))
@@ -262,17 +330,14 @@ evalRecover :: forall ids a
             .  ParsedBlock X86_64 ids
             -> [MemSegmentOff 64]
                -- ^ Predecessors of current block
-            -> V.Vector (Some FnPhiVar)
+            -> V.Vector (Some (FnPhiVar X86_64))
                -- ^ Phi variables in expected order.
-            -> LocMap X86Reg FnPhiVar
-               -- ^ Map from locations to phi vars associated with
-               -- them.
             -> MapF X86Reg (FnRegValue X86_64)
                -- ^ Initial register values
             -> StackMap 64 (FnValue X86_64)
             -> Recover ids a
             -> FunRecover ids a
-evalRecover b preds phiVars locPhiVarMap regs initStackMap m = do
+evalRecover b preds phiVars regs initStackMap m = do
   depMap <- FR $ asks frcBlockDepMap
 
   -- Get dependencies for this block.
@@ -283,7 +348,6 @@ evalRecover b preds phiVars locPhiVarMap regs initStackMap m = do
   let s0 = RS { rsBlock = b
               , rsPredBlockAddrs = preds
               , rsPhiVars = phiVars
-              , rsLocPhiVarMap = locPhiVarMap
               , rsDependencySet = ds
               , rsCurRegs = regs
               , rsBlockOff = 0
@@ -336,7 +400,6 @@ mkBlock tm = do
           Right pr -> pure pr
   preds    <- gets rsPredBlockAddrs
   phiVars <- gets rsPhiVars
-  phiVarMap <- gets rsLocPhiVarMap
   curStmts <- use rsCurStmts
   memInfo <- use rsMemInsnAddrs
   return $! FnBlock { fbLabel = fnBlockLabelFromAddr (pblockAddr b)
@@ -344,7 +407,6 @@ mkBlock tm = do
                     , fbSize  = fromIntegral (blockSize b)
                     , fbPrevBlocks = fnBlockLabelFromAddr <$> preds
                     , fbPhiVars = phiVars
-                    , fbPhiMap  = phiVarMap
                     , fbStmts  = toList curStmts
                     , fbTerm   = tm
                     , fbMemInsnAddrs = V.fromList (reverse memInfo)
@@ -562,9 +624,9 @@ recoverAssign asgn = do
   case assignRhs asgn of
     EvalApp app -> do
       -- Check if this is a stack value
-      initBounds <- gets $ blockJumpBounds . rsBlock
+      initStackCns <- gets $ initBndsMap . blockJumpBounds . rsBlock
       assignStackMap <- use rsAssignStackOffsetMap
-      let stackFn v = toInteger <$> valueStackOffset initBounds assignStackMap v
+      let stackFn v = toInteger <$> valueStackOffset initStackCns assignStackMap v
       case appAsStackOffset stackFn app of
         Just (StackOffsetView o) -> do
           rsAssignStackOffsetMap %= Map.insert (Some aid) (fromInteger o)
@@ -575,9 +637,9 @@ recoverAssign asgn = do
       whenUsed aid $
         setAssignRhs aid (FnSetUndefined tp)
     ReadMem addr memRepr -> do
-      initBounds <- gets $ blockJumpBounds . rsBlock
+      initStackCns <- gets $ initBndsMap . blockJumpBounds . rsBlock
       assignStackMap <- use rsAssignStackOffsetMap
-      case valueStackOffset initBounds assignStackMap addr of
+      case valueStackOffset initStackCns assignStackMap addr of
         Just o -> do
           recordMemAccess StackAccess
           whenUsed aid $ do
@@ -629,9 +691,9 @@ recoverStmt stmtIdx stmt = do
     AssignStmt asgn -> do
       recoverAssign asgn
     WriteMem addr memRepr val -> do
-      initBounds <- gets $ blockJumpBounds . rsBlock
+      initStackCns <- gets $ initBndsMap . blockJumpBounds . rsBlock
       assignStackMap <- use rsAssignStackOffsetMap
-      case valueStackOffset initBounds assignStackMap addr of
+      case valueStackOffset initStackCns assignStackMap addr of
         Just o -> do
           -- Check if written address is actually read
           whenStackWriteIsUsed stmtIdx $ do
@@ -1023,14 +1085,20 @@ $(pure [])
 
 
 -- | Introduce a new phi var for a class, and updae location map.
-addPhiVarForClass :: ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
+addPhiVarForClass :: ([Some (FnPhiVar X86_64)], LocMap X86Reg (FnPhiVar X86_64))
                      -- ^ Previously constructed pfi variables and location map.
                   -> Some (BlockEqClass X86Reg)
                      -- ^ Class to add
-                  -> FunRecover ids ([Some FnPhiVar], LocMap X86Reg FnPhiVar)
+                  -> FunRecover ids ( [Some (FnPhiVar X86_64)]
+                                    , LocMap X86Reg (FnPhiVar X86_64)
+                                    )
 addPhiVarForClass (vl,m0) (Some eqCl) = do
   vnm <- funFreshId
-  let phiVar = FnPhiVar vnm (blockEqClassType eqCl)
+  let phiVar = FnPhiVar { unFnPhiVar = vnm
+                        , fnPhiVarType = blockEqClassType eqCl
+                        , fnPhiVarRep = blockEqInitLocation eqCl
+                        , fnPhiVarLocations = blockEqLaterLocations eqCl
+                        }
   let ins m l = nonOverlapLocInsert l phiVar m
   let m' = foldBlockEqClasses ins m0 eqCl
   pure (Some phiVar:vl, m')
@@ -1051,7 +1119,7 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
 
   (phiVarList, locPhiVarMap) <- foldlM addPhiVarForClass ([], locMapEmpty) eqClasses
 
-  let phiVars :: V.Vector (Some FnPhiVar)
+  let phiVars :: V.Vector (Some (FnPhiVar X86_64))
       phiVars = V.fromList (reverse phiVarList)
 
   let regs :: MapF X86Reg (FnRegValue X86_64)
@@ -1067,13 +1135,13 @@ recoverInnerBlock fInfo blockPreds blockUsageInfo blockInfo addr = do
   let Just preds = Map.lookup addr blockPreds
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let Just b = Map.lookup addr (fInfo^.parsedBlocks)
-  fb <- evalRecover b preds phiVars locPhiVarMap regs initStackMap $
+  fb <- evalRecover b preds phiVars regs initStackMap $
           recoverBlock b
   return $! blockInfo & addFnBlock fb
 
 $(pure [])
 
--- | Initial state used to build class vector.
+-- | Maps Initial state used to build class vector.
 type EqClassState r = MapF (BoundLoc r) (BlockEqClass r)
 
 eqClassVec :: EqClassState r -> BlockEqClassVec r
@@ -1087,17 +1155,20 @@ addDemandedLocation :: ( MemWidth (ArchAddrWidth arch)
                        , OrdF (ArchReg arch)
                        , HasRepr (ArchReg arch) TypeRepr
                        )
-                    => InitJumpBounds arch
+                    => BlockStartStackConstraints arch
                     -> EqClassState (ArchReg arch)
                     -> Some (BoundLoc (ArchReg arch))
                     -> EqClassState (ArchReg arch)
-addDemandedLocation bnds m (Some loc) =
-  let rep = boundsLocationRep bnds loc
-      f _ old = addLocToClass loc old
-   in MapF.insertWith f rep (initClass loc) m
+addDemandedLocation cns m (Some loc) =
+  case blockStartLocRepAndCns cns loc of
+    (_,Just _) -> m
+    (rep,Nothing) ->
+      let f _ old = addLocToClass loc old
+       in MapF.insertWith f rep (initClass loc) m
 
--- | Compute the equivalence classes to use for phi variables
--- for a block.
+-- | This cross references the locations demanded by a block with the
+-- inferred equivalences between locations to generate a vector
+-- describing each Phi nodes a block will use for inputs.
 eqClassVecFromDeps :: ( MemWidth (ArchAddrWidth arch)
                       , OrdF (ArchReg arch)
                       , HasRepr (ArchReg arch) TypeRepr
@@ -1109,14 +1180,23 @@ eqClassVecFromDeps :: ( MemWidth (ArchAddrWidth arch)
                       -- ^ block address
                    -> BlockEqClassVec (ArchReg arch)
 eqClassVecFromDeps depMap b =
+  -- Lookup dependencies for block we are jumping to.
   case Map.lookup (pblockAddr b) depMap of
     Nothing ->
       error $ "No dependencies for " ++ show (pblockAddr b) ++ "."
     Just ds ->
       let bnds = blockJumpBounds b
-       in eqClassVec $ foldl (addDemandedLocation bnds) emptyClassState (dsLocSet ds)
+       in eqClassVec $ foldl (addDemandedLocation (initBndsMap bnds)) emptyClassState (dsLocSet ds)
 
-
+summarizeX86ArchTermStmt :: SyscallPersonality
+                         -> X86TermStmt ids
+                         -> RegState (ArchReg X86_64) (Value X86_64 ids)
+                         -> RegisterUseM X86_64 ids ()
+summarizeX86ArchTermStmt sysp X86Syscall regs = do
+  addRegisterUses regs (Some sp_reg : (Set.toList x86CalleeSavedRegs))
+  traverse_ clearDependencySet (spResultRegisters sysp)
+summarizeX86ArchTermStmt _ Hlt _ = pure ()
+summarizeX86ArchTermStmt _ UD2 _ = pure ()
 
 -- | Recover the function at a given address.
 --
@@ -1144,8 +1224,19 @@ recoverFunction sysp funTypeMap mem fInfo = do
   let blockPreds = funBlockPreds fInfo
 
   -- Compute map from block starting addresses to the dependicies required to run block.
-  depMap <- runExcept $
-    registerUse mem sysp (fmap snd funTypeMap) fInfo cfti blockPreds
+  depMap <- runExcept $ do
+    let ctx = RegisterUseContext
+              { functionArgFn = \a -> do
+                  segOff <- asSegmentOff mem a
+                  toFunctionTypeRegs . snd <$> Map.lookup segOff funTypeMap
+              , defaultCallRegs = toFunctionTypeRegs maximumFunTypeInfo
+              , returnRegisters = retReg <$> ftiRetRegs cfti
+              , calleeSavedRegisters = Set.toList x86CalleeSavedRegs
+              , callScratchRegisters = [Some DF]
+              , summarizeTermFn = summarizeX86ArchTermStmt sysp
+              , demandContext = x86DemandContext
+              }
+    registerUse ctx fInfo blockPreds
 
   let blockUsageInfo :: Map (MemSegmentOff 64) (BlockEqClassVec X86Reg)
       blockUsageInfo = eqClassVecFromDeps depMap <$> fInfo^.parsedBlocks
@@ -1191,7 +1282,7 @@ recoverFunction sysp funTypeMap mem fInfo = do
           & MapF.insert DF (FnValue (FnConstantBool False) (WidthEqRefl (typeRepr DF)))
 
     r0 <-
-      evalRecover b [] V.empty locMapEmpty initRegs initStackMap $ do
+      evalRecover b [] V.empty initRegs initStackMap $ do
         fb <- recoverBlock b
         return $! emptyRecoveredBlockInfo & addFnBlock fb
 

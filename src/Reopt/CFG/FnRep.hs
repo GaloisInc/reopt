@@ -57,7 +57,7 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.AbsDomain.JumpBounds (LocMap)
+import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc)
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
@@ -74,7 +74,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Types as M (Type)
 import           Data.Macaw.Types hiding (Type)
-
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc] -> Doc
@@ -97,15 +96,21 @@ instance Pretty FnAssignId where
 -- FnPhiVar
 
 -- | A phi variable
-data FnPhiVar (tp :: M.Type) =
+data FnPhiVar arch (tp :: M.Type) =
   FnPhiVar { unFnPhiVar :: !FnAssignId
            , fnPhiVarType :: !(TypeRepr tp)
+           , fnPhiVarRep :: !(BoundLoc (ArchReg arch) tp)
+             -- ^ Class representative for locations that lead to this
+             -- phi variable.
+           , fnPhiVarLocations :: ![BoundLoc (ArchReg arch) tp]
+             -- ^ Additional class locations that this phi variable is
+             -- equivalent to.
            }
 
-instance TestEquality FnPhiVar where
+instance TestEquality (FnPhiVar arch) where
   testEquality x y = orderingF_refl (compareF x y)
 
-instance OrdF FnPhiVar where
+instance OrdF (FnPhiVar arch) where
   compareF x y =
     case compare (unFnPhiVar x) (unFnPhiVar y) of
       LT -> LTF
@@ -114,9 +119,6 @@ instance OrdF FnPhiVar where
         case testEquality (fnPhiVarType x) (fnPhiVarType y) of
           Just Refl -> EQF
           Nothing -> error "mismatched types"
-
-instance Pretty (FnPhiVar tp) where
-  pretty = pretty . unFnPhiVar
 
 ------------------------------------------------------------------------
 -- FnReturnVar
@@ -197,7 +199,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   -- | Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
   -- | Value from a phi node
-  FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
+  FnPhiValue :: !(FnPhiVar arch tp) -> FnValue arch tp
   -- | A value returned by a function call (rax/rdx/xmm0)
   FnReturn :: !(FnReturnVar tp) -> FnValue arch tp
   -- | The pointer to a function.
@@ -456,10 +458,8 @@ data FnBlock arch
                -- ^ Number of bytes in the machine code for this block.
              , fbPrevBlocks :: ![FnBlockLabel (ArchAddrWidth arch)]
                -- ^ Labels of blocks that jump to this one.
-             , fbPhiVars :: !(V.Vector (Some FnPhiVar))
+             , fbPhiVars :: !(V.Vector (Some (FnPhiVar arch)))
                -- ^ Vector of phi variables that block expects to be assigned.
-             , fbPhiMap :: !(LocMap (ArchReg arch) FnPhiVar)
-               -- ^ Maps register/stack locations to phi variables
              , fbStmts :: ![FnStmt     arch]
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
@@ -480,7 +480,7 @@ instance (FnArchConstraints arch
     pretty (fbLabel b) <+> encloseSep lbracket rbracket (text " ") phiVars <$$>
       indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
     where
-      phiVars = V.toList $ viewSome pretty <$> fbPhiVars b
+      phiVars = V.toList $ viewSome (pretty.unFnPhiVar) <$> fbPhiVars b
 
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)

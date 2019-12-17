@@ -37,6 +37,9 @@ test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_
 test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann --header test_fib_protos.h --include fib $<
 
+%_reopt_pretty.ann : %_reopt.ann
+	python -m json.tool $< > $@
+
 #####################
 # Debugging utilities
 
@@ -101,7 +104,8 @@ test_%_glibc_ld.exe : test_%.o $(glibc_libc)
 
 clean :
 	rm -rf *.crt *.dis *.o *.ll
-	rm -rf test_add_diet_reopt.ll test_add_diet_reopt.ann
+	rm -rf test_add_diet_reopt.ll test_add_diet_reopt.ann test_add_diet_reopt_pretty.ann
+	rm -rf test_fib_diet_reopt.ll test_fib_diet_reopt.ann test_fib_diet_reopt_pretty.ann
 
 # Deletes executables even though they are checked into repo.
 all-clean : clean

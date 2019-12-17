@@ -76,6 +76,7 @@ import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Proxy
+import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
 import           GHC.Stack
@@ -85,6 +86,7 @@ import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
+import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import           Data.Macaw.X86
@@ -260,7 +262,7 @@ padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef
 data LLVMBlockResult arch =
   LLVMBlockResult { fnBlock :: !(FnBlock arch)
                     -- ^ Fn block to create this.
-                  , llvmPhiVars :: !(V.Vector PhiBinding)
+                  , llvmPhiVars :: !(V.Vector (PhiBinding arch))
                     -- ^ Vector phi variables
                   , finalBBState :: !(BBLLVMState arch)
                   }
@@ -505,11 +507,11 @@ valueToLLVM ctx avmap val = withArchConstraints ctx $ do
         Nothing ->
           error $ "Could not find assignment value " ++ show (pretty lhs)
     -- Value from a phi node
-    FnPhiValue (FnPhiVar lhs _tp)  -> do
-      case Map.lookup lhs avmap of
+    FnPhiValue phiVar -> do
+      case Map.lookup (unFnPhiVar phiVar) avmap of
         Just v -> v
         Nothing ->
-          error $ "Could not find phi value " ++ show (pretty lhs) ++ "\n"
+          error $ "Could not find phi value " ++ show (unFnPhiVar phiVar)
     -- A value returned by a function call (rax/xmm0)
     FnReturn (FnReturnVar lhs _tp) ->
       case Map.lookup lhs avmap of
@@ -1002,23 +1004,22 @@ termStmtToLLVM tm =
       ret retv
 
 resolvePhiStmt :: PhiValues
-               -> PhiBinding
+               -> PhiBinding arch
                -> L.Stmt
-resolvePhiStmt phiValues (PhiBinding (Some phiVar) lnm) =
-    L.Result lnm (L.Phi llvmType llvmPhiValues) []
-  where llvmType :: L.Type
-        llvmType  = typeToLLVMType (fnPhiVarType phiVar)
-        llvmPhiValues :: [(L.Value, L.BlockLabel)]
-        llvmPhiValues =
-          [ (llvmVal, lbl)
-          | (lbl, llvmVal) <- Map.toList phiValues
-          ]
-
+resolvePhiStmt phiValues b =
+  case phiFnRepVar b of
+    Some phiVar ->
+      let lnm = L.Ident (phiLLVMIdent b)
+          llvmType :: L.Type
+          llvmType  = typeToLLVMType (fnPhiVarType phiVar)
+          llvmPhiValues :: [(L.Value, L.BlockLabel)]
+          llvmPhiValues = [ (llvmVal, lbl) | (lbl, llvmVal) <- Map.toList phiValues ]
+       in L.Result lnm (L.Phi llvmType llvmPhiValues) []
 
 -- | Construct a basic block from a block result
 toBasicBlock :: (LLVMArchConstraints arch, HasCallStack)
              => ResolvePhiMap (ArchAddrWidth arch)
-             -> LLVMBlockResult arch
+             -> LLVMBlockResult arch -- ^ This block
              -> L.BasicBlock
 toBasicBlock phiMap res
   | V.length phiVars /= V.length phiAssignment =
@@ -1034,19 +1035,26 @@ toBasicBlock phiMap res
         phiStmts = V.toList $ V.zipWith resolvePhiStmt phiAssignment phiVars
         finalState = finalBBState res
 
-
-data PhiBinding = PhiBinding !(Some FnPhiVar) !L.Ident
+-- | Information relating a Macaw funcation variable and LLVM identifier.
+data PhiBinding arch =
+  PhiBinding { phiFnRepVar :: !(Some (FnPhiVar arch))
+               -- ^ Function representation variable.
+             , phiLLVMIdent :: !String
+               -- ^ LLVM identifier for Phi variable
+             }
 
 -- | Add a phi var with the node info so that we have a ident to
 -- reference it by and queue up work to assign the value later.
 addPhiBinding :: HasCallStack
-              => Some FnPhiVar
-              -> BBLLVM arch PhiBinding
-addPhiBinding v@(Some (FnPhiVar fid tp)) = do
-  nm <- freshName
-  let llvmType = typeToLLVMType tp
-  setAssignIdValue fid (L.Typed llvmType (L.ValIdent nm))
-  pure $! PhiBinding v nm
+              => Some (FnPhiVar arch)
+              -> BBLLVM arch (PhiBinding arch)
+addPhiBinding (Some phiVar) = do
+  L.Ident nm <- freshName
+  let llvmType = typeToLLVMType (fnPhiVarType phiVar)
+  setAssignIdValue (unFnPhiVar phiVar) (L.Typed llvmType (L.ValIdent (L.Ident nm)))
+  pure $! PhiBinding { phiFnRepVar = Some phiVar
+                     , phiLLVMIdent = nm
+                     }
 
 addLLVMBlock :: forall arch
             .  FunLLVMContext arch
@@ -1060,7 +1068,7 @@ addLLVMBlock ctx fs b = (finFS, res)
                          , bbAssignValMap = Map.empty
                          , bbStmts        = []
                          }
-        go :: BBLLVM arch (V.Vector PhiBinding)
+        go :: BBLLVM arch (V.Vector (PhiBinding arch))
         go = do
           -- Add statements for Phi nodes
           bindings <- traverse addPhiBinding (fbPhiVars b)
@@ -1136,30 +1144,69 @@ runLLVMTrans (LLVMTrans action) =
 argIdent :: Int -> L.Ident
 argIdent i = L.Ident ("arg" ++ show i)
 
+memAnn :: Ann.MCAddr -> (Word64, FnMemAccessType) -> Ann.MCMemoryEvent
+memAnn a (o, tp) =
+  Ann.MCMemoryEvent
+  { Ann.eventAddr = fromIntegral a + fromIntegral o
+  , Ann.eventInfo =
+      case tp of
+        HeapAccess -> Ann.HeapAccess
+        StackAccess -> Ann.BinaryOnlyAccess
+  }
+
+mkBoundLocExpr :: BoundLoc X86Reg tp -> Ann.Expr Ann.BlockVar
+mkBoundLocExpr (RegLoc xr) =
+  case xr of
+    X86_GP r -> Ann.Var (Ann.InitGPReg64 r)
+    _ -> error $ "Do not support register " ++ show xr
+mkBoundLocExpr (StackOffLoc o tp) =
+  if o < 0 then
+    case tp of
+      BVMemRepr byteCount LittleEndian ->
+        let oExpr = Ann.BVDecimal (fromIntegral (negate o)) 64
+            stackExpr = Ann.BVSub (Ann.Var Ann.StackHigh) oExpr
+            bitCount = 8 * natValue byteCount
+         in Ann.Var (Ann.MCStack stackExpr bitCount)
+      _ ->
+        error $ "Do not support stack references with type " ++ show tp
+   else
+    error $ "Do not support positive stack offsets."
+
+-- | Generate preconditions for a phi variable to associate LLVM phi
+-- variables with machine code.
+mkPhiPrecond :: PhiBinding X86_64 -> [Ann.Expr Ann.BlockVar]
+mkPhiPrecond b =
+  case phiFnRepVar b of
+    Some phiVar ->
+          -- Get expression representing LLVM value.
+      let phiExpr :: Ann.Expr Ann.BlockVar
+          phiExpr = Ann.Var (Ann.LLVMVar (Text.pack (phiLLVMIdent b)))
+          -- Get expression representing value of representive in machine code.
+          repExpr :: Ann.Expr Ann.BlockVar
+          repExpr = mkBoundLocExpr (fnPhiVarRep phiVar)
+          varEq = Ann.Eq phiExpr repExpr
+       in varEq : [ Ann.Eq repExpr (mkBoundLocExpr v) | v <- fnPhiVarLocations phiVar ]
+
+
 -- | Generate pair containing block label in LLVM and annotations from
 -- block.
 getBlockAnn :: LLVMBlockResult X86_64 -> (String, Ann.BlockAnn)
 getBlockAnn blockRes = (fnBlockLabelString lbl, Ann.ReachableBlock ann)
   where b = fnBlock blockRes
         lbl = fbLabel b
-        addr  = addrOffset $ segoffAddr $ fnBlockLabelAddr lbl
+        addr  = fromIntegral $ addrOffset $ segoffAddr $ fnBlockLabelAddr lbl
         pr = fbPrecond b
-        memAnn :: (Word64, FnMemAccessType) -> Ann.MCMemoryEvent
-        memAnn (o, tp) =
-          Ann.MCMemoryEvent
-          { Ann.eventAddr = fromIntegral addr + fromIntegral o
-          , Ann.eventInfo =
-              case tp of
-                HeapAccess -> Ann.HeapAccess
-                StackAccess -> Ann.BinaryOnlyAccess
-          }
-        ann = Ann.ReachableBlockAnn { Ann.blockAddr = fromIntegral addr
+        -- Preconditions that relate phi variable with Macaw location.
+        phiPreconds :: [Ann.Expr Ann.BlockVar]
+        phiPreconds = concatMap mkPhiPrecond (V.toList (llvmPhiVars blockRes))
+        -- Generate memory event annotation given base address, offset and address type.
+        ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
                                     , Ann.blockCodeSize = fbSize b
                                     , Ann.blockX87Top = blockInitX87TopReg pr
                                     , Ann.blockDFFlag = blockInitDF pr
-                                    , Ann.blockPreconditions = []
+                                    , Ann.blockPreconditions = phiPreconds
                                     , Ann.blockAllocas = Map.empty
-                                    , Ann.mcMemoryEvents = V.toList $ memAnn <$> fbMemInsnAddrs b
+                                    , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
                                     }
 
 -- | This translates the function to LLVM and returns the define.
@@ -1285,8 +1332,8 @@ moduleForFunctions archOps genOpts recMod =
                           , L.modUnnamedMd  = []
                           , L.modGlobals    = []
                           , L.modDeclares   = fmap declareIntrinsic llvmIntrinsics
-                                              ++ fmap declareIntrinsic dynIntrinsics
-                                              ++ fmap declareFunction (recoveredDecls recMod)
+                                           ++ fmap declareIntrinsic dynIntrinsics
+                                           ++ fmap declareFunction (recoveredDecls recMod)
                           , L.modDefines    = fst <$> definesAndAnn
                           , L.modInlineAsm  = []
                           , L.modAliases    = []

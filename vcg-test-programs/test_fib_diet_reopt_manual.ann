@@ -21,15 +21,15 @@
               "addr": "0x201417",
               "size": 13,
               "preconditions": [
+	        "(= rbx (fnstart rbx))",
                 "(= rbp (bvsub stack_high (_ bv8  64)))",
                 "(= rsp (bvsub stack_high (_ bv40 64)))",
-                "(= (mcstack (bvsub stack_high (_ bv8  64)) (_ BitVec 64)) (fnstart rbp))",
-   	        "(= (mcstack (bvsub stack_high (_ bv24 64)) (_ BitVec 64)) (llvm t4))",
-	        "(= rbx (fnstart rbx))",
 		"(= r12 (fnstart r12))",
 		"(= r13 (fnstart r13))",
 		"(= r14 (fnstart r14))",
-		"(= r15 (fnstart r15))"
+		"(= r15 (fnstart r15))",
+                "(= (mcstack (bvsub stack_high (_ bv8  64)) (_ BitVec 64)) (fnstart rbp))",
+   	        "(= (llvm t4) (mcstack (bvsub stack_high (_ bv24 64)) (_ BitVec 64)))"
               ],
               "mem_events": [
                   { "addr": "0x201417", "type": "binary_only_access" },
