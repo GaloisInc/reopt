@@ -10,3 +10,4 @@ dist-newstyle
 latest.txt
 llvm-latest
 out/
+stack.yaml.lock

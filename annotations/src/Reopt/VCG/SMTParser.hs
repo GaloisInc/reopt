@@ -20,6 +20,7 @@ module Reopt.VCG.SMTParser
     -- * Rendering
   , SExprEncoding
   , encodeList
+  , sexprFromText
   , IsString(..)
   ) where
 
@@ -90,6 +91,9 @@ newtype SExprEncoding = SExprEncoding { encBuilder :: Text.Builder }
 instance IsString SExprEncoding where
   fromString = SExprEncoding . fromString
 
+sexprFromText :: Text -> SExprEncoding
+sexprFromText = SExprEncoding . Text.fromText
+
 encodeList :: [SExprEncoding] -> SExprEncoding
 encodeList [] = "()"
 encodeList l = SExprEncoding ("(" <> foldr (\e r -> encBuilder e <> " " <> r) ")" l)
@@ -111,6 +115,7 @@ data ExprType
 -- variables or other known constants.
 data Expr (v :: *) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
+  BVAdd :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v
   -- | @BVDecimal v w@ denotes the @w@-bit value @v@ which should
   -- satisfy the property that @v < s^w@.
