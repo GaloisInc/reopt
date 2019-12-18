@@ -1013,8 +1013,7 @@ execMCOnlyEvents endAddr = do
       --
       -- Checking this is on the stack also ensures there are no side effects
       -- from mem-mapped IO reads since the stack should not be mem-mapped IO.
-      do thisIP <- gets mcCurAddr
-         proveTrue (evalRangeCheck onStack mcAddr (memReprBytes tp)) $
+      proveTrue (evalRangeCheck onStack mcAddr (memReprBytes tp)) $
            "Machine code read is in unallocated stack space."
       -- Define value from reading Macaw heap
       supType <- getSupportedType tp

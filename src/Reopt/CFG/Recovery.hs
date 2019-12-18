@@ -906,39 +906,6 @@ evalFunctionArgs regs ft = do
         vv <- bitcast v512 (UnpackBits n8 n64)
         Some <$> bitcast vv (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
 
--- | This removes the instruction that pushes the return address to the stack.
-stripPushReturn :: MemSegmentOff 64 -- ^ Expected return address
-                -> BVValue X86_64 ids 64 -- ^ Value in stack pointer next.
-                -> [Stmt X86_64 ids] -- ^ Statements in reverse order
-                -> Either String [Stmt X86_64 ids]
-stripPushReturn _addr _next_sp [] =
-  Left "No instructions with push of return address."
-stripPushReturn _addr _next_sp (AssignStmt{}:_) =
-  Left "Assignment before push of return address."
-stripPushReturn retAddr next_sp (WriteMem addr valRepr val:l)
-  -- Check for a call statement by determining if the last statement
-  -- writes an executable address to the stack pointer.
-  | Just _ <- testEquality addr next_sp
-    -- Check this is the right length.
-  , Just Refl <- testEquality (BVMemRepr n8 LittleEndian) valRepr
-    -- Check if value is a valid literal address
-  , Just val_a <- valueAsMemAddr val
-    -- Check if segment of address is marked as executable.
-  , segoffAddr retAddr == val_a =
-    Right l
-  | otherwise =
-    Left "Unexpected right before push of return address."
-stripPushReturn _addr _next_sp (CondWriteMem{}:_) =
-  Left "Conditional memory write before push of return address."
-stripPushReturn _addr _ (InstructionStart{}:_) =
-  Left "Instruction start before return address."
-stripPushReturn addr next_sp (s@Comment{}:l)= do
-  (s:) <$> stripPushReturn addr next_sp l
-stripPushReturn _addr _ (ExecArchStmt{}:_) =
-  Left "Arch statement before push of return address."
-stripPushReturn addr next_sp (s@ArchState{}:l) =
-  (s:) <$> stripPushReturn addr next_sp l
-
 -- | This contains the list of return variables for a call and a map from registers
 -- to value returned.
 --
@@ -982,8 +949,6 @@ recoverBlock b = do
     -- Case split on whether this is a tail call or not so we can decide which
     -- type of statement to emit.
     ParsedCall regs (Just retAddr) -> do
-      -- Recover statements
-      let next_sp = regs^.boundValue sp_reg
       -- Recover statements
       --
       -- Note that this will process the write of the return address

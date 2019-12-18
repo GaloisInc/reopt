@@ -155,6 +155,7 @@ instance Aeson.ToJSON AllocaAnn where
 ------------------------------------------------------------------------
 -- MemoryAnn
 
+-- | Annotation on memory address.
 data MemoryAnn
    = BinaryOnlyAccess
      -- ^ The instruction at the address updates the binary
