@@ -984,9 +984,13 @@ recoverBlock b = do
     ParsedCall regs (Just retAddr) -> do
       -- Recover statements
       let next_sp = regs^.boundValue sp_reg
-      case stripPushReturn retAddr next_sp (reverse (pblockStmts b)) of
-        Left e -> throwError e
-        Right l -> recoverStmts 0 (reverse l)
+      -- Recover statements
+      --
+      -- Note that this will process the write of the return address
+      -- of the stack, but this should not count as a demanded value
+      -- and not affect the LLVM.  However, it is needed to ensure
+      -- annotations are generated for all memory events.
+      recoverStmts 0 (pblockStmts b)
       -- Get call target
       (call_tgt, fti) <- recoverCallTarget regs
       -- Evaluate call arguments
