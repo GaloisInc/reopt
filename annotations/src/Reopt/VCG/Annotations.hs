@@ -457,7 +457,7 @@ blockAnnToJSON lbl (ReachableBlock blk) =
 data FunctionAnn = FunctionAnn
   { llvmFunName :: !String
     -- ^ LLVM function name
-  , blocks :: !(HMap.HashMap String Aeson.Object)
+  , blocks :: !(V.Vector Aeson.Object)
     -- ^ Maps LLVM labels to an JSON object describing information associated with
     -- that block.
   } deriving (Show)
@@ -466,10 +466,9 @@ functionInfoFields :: FieldList
 functionInfoFields = fields ["llvm_name", "stack_size", "blocks"]
 
 parseJSONBlockAnnObj :: Aeson.Value
-                     -> Aeson.Parser (String, Aeson.Object)
+                     -> Aeson.Parser Aeson.Object
 parseJSONBlockAnnObj (Aeson.Object o) = do
-  lbl  <- o .: "label"
-  pure (lbl, o)
+  pure o
 parseJSONBlockAnnObj _ =
   fail "block annotation expects object."
 
@@ -479,7 +478,7 @@ parseFunctionAnn (Aeson.Object v) = do
   fnm <- v .: "llvm_name"
   bl <- Aeson.withArray "blocks" (traverse parseJSONBlockAnnObj . V.toList) =<< v .: "blocks"
   pure $! FunctionAnn { llvmFunName = fnm
-                      , blocks = HMap.fromList bl
+                      , blocks = V.fromList bl
                       }
 parseFunctionAnn _ =
   fail $ "Function annotation expected a JSON object."
@@ -487,7 +486,7 @@ parseFunctionAnn _ =
 instance Aeson.ToJSON FunctionAnn where
   toJSON fun =
     object [ "llvm_name"  .= llvmFunName fun
-           , "blocks"     .= Aeson.Array (Aeson.Object <$> V.fromList (HMap.elems (blocks fun)))
+           , "blocks"     .= Aeson.Array (Aeson.Object <$> blocks fun)
            ]
 ------------------------------------------------------------------------
 -- Module annotations

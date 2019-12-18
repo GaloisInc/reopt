@@ -66,7 +66,6 @@ import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable
-import qualified Data.HashMap.Strict as HMap
 import           Data.Int
 import           Data.List
 import           Data.Map.Strict (Map)
@@ -1265,16 +1264,16 @@ defineFunction archOps genOpts f = do
   let blocks :: [L.BasicBlock]
       blocks = toBasicBlock (funBlockPhiMap finalFunState) <$> finalBlocks
 
-  let blockAnnMap = HMap.fromList $ getBlockAnn <$> (entryBlockRes : finalBlocks)
+  let blockAnnMap = getBlockAnn <$> V.fromList (entryBlockRes : finalBlocks)
 
   let (finBlocks, finBlockAnnMap)
         | needSwitchFailLabel finalFunState =
             ( entryLLVMBlock : (blocks ++ [failBlock])
-            , HMap.insert switchFailLabel Ann.UnreachableBlock blockAnnMap
+            , V.snoc blockAnnMap (switchFailLabel, Ann.UnreachableBlock)
             )
         | otherwise = (entryLLVMBlock : blocks, blockAnnMap)
 
-  let blockObjMap = HMap.mapWithKey Ann.blockAnnToJSON finBlockAnnMap
+  let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
 
   let funDef = L.Define { L.defLinkage  = Nothing
                         , L.defRetType  = llvmFunctionReturnType (fnType f)
