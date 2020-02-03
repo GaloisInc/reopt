@@ -34,6 +34,7 @@ module Reopt.CFG.FnRep
    , FnTermStmt(..)
    , FnJumpTarget(..)
    , FnPhiVar(..)
+   , Data.Macaw.Analysis.RegisterUse.FnBlockInvariant(..)
    , FnReturnVar(..)
    , FnMemAccessType(..)
    , FnArchStmt
@@ -58,6 +59,7 @@ import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
 import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc)
+import           Data.Macaw.Analysis.RegisterUse (FnBlockInvariant(..))
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
@@ -74,6 +76,7 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Types as M (Type)
 import           Data.Macaw.Types hiding (Type)
+
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc] -> Doc
@@ -103,9 +106,12 @@ data FnPhiVar arch (tp :: M.Type) =
              -- ^ Class representative for locations that lead to this
              -- phi variable.
            , fnPhiVarLocations :: ![BoundLoc (ArchReg arch) tp]
-             -- ^ Additional class locations that this phi variable is
-             -- equivalent to.
+             -- ^ Locations read after this phi variable is introduced that
+             -- are equivalent to this phi variable.
            }
+
+instance HasRepr (FnPhiVar arch) TypeRepr where
+  typeRepr = fnPhiVarType
 
 instance TestEquality (FnPhiVar arch) where
   testEquality x y = orderingF_refl (compareF x y)
@@ -379,6 +385,8 @@ instance Pretty (FnBlockLabel w) where
 ------------------------------------------------------------------------
 -- FnJumpTarget
 
+-- | A jump target along with values to assign the phi variables when
+-- jumping.
 data FnJumpTarget arch =
   FnJumpTarget { fnJumpLabel :: !(FnBlockLabel (ArchAddrWidth arch))
                  -- ^ Label of block we are jumping to.
@@ -436,6 +444,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f s (FnTailCall fn _ args) =
     foldl (\s' (Some v) -> f s' v) (f s fn) args
 
+
 ------------------------------------------------------------------------
 -- FnBlock
 
@@ -458,6 +467,9 @@ data FnBlock arch
                -- ^ Number of bytes in the machine code for this block.
              , fbPrevBlocks :: ![FnBlockLabel (ArchAddrWidth arch)]
                -- ^ Labels of blocks that jump to this one.
+             , fbInvariants :: ![FnBlockInvariant arch]
+               -- ^ Invariants inferred about machine code relevant to
+               -- this translation.
              , fbPhiVars :: !(V.Vector (Some (FnPhiVar arch)))
                -- ^ Vector of phi variables that block expects to be assigned.
              , fbStmts :: ![FnStmt     arch]
@@ -465,10 +477,11 @@ data FnBlock arch
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
              , fbMemInsnAddrs :: !(V.Vector (Word64, FnMemAccessType))
-               -- ^ Vector contains a pair @(off, atp)@ for each machine
-               -- code instruction that accessed memory.  The offset @off@
-               -- is the offset of the instruction type, and @atp@ indicates
-               -- properties inferred about the acccess.
+               -- ^ Vector contains a pair @(off, atp)@ for each
+               -- machine code instruction that accessed memory.  The
+               -- offset @off@ is the offset of the start address of
+               -- the instruction, and @atp@ indicates properties
+               -- inferred about the acccess.
              }
 
 instance (FnArchConstraints arch

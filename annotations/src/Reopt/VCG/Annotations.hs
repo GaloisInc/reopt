@@ -254,13 +254,13 @@ x86ArgGPRegs = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
 calleeSavedGPRegs :: [F.Reg64]
 calleeSavedGPRegs = [ F.RBP, F.RBX, F.R12, F.R13, F.R14, F.R15 ]
 
-
 -- | A variable that may appear in a block precondition.
 data BlockVar
    = StackHigh
      -- ^ Denotes the high address on the stack.
      --
-     -- This is the address the return address is stored at.
+     -- This is the address the return address is stored at, and
+     -- the curent frame.
    | InitGPReg64 !F.Reg64
      -- ^ Denotes the value of a 64-bit general purpose register
      -- at the start of the block execution.

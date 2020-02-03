@@ -115,6 +115,7 @@ data ExprType
 -- variables or other known constants.
 data Expr (v :: *) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
+  BVAdd :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v
   -- | @BVDecimal v w@ denotes the @w@-bit value @v@ which should
   -- satisfy the property that @v < s^w@.
