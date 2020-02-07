@@ -41,13 +41,11 @@ import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map (MapF)
 import qualified Data.Parameterized.Map as MapF
-import           Data.Parameterized.Pair
 import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import           Data.Parameterized.TraversableFC
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
@@ -611,7 +609,9 @@ recoverStmt stmtIdx stmt = do
 -- Jump target
 
 -- | Resolve a phi value from an inferred value.
-resolveInferValue :: InferValue X86_64 ids tp -> Recover ids (Some (FnValue X86_64))
+resolveInferValue :: HasCallStack
+                  => InferValue X86_64 ids tp
+                  -> Recover ids (Some (FnValue X86_64))
 resolveInferValue phiVal =
   case phiVal of
     IVDomain d ->
@@ -651,20 +651,23 @@ getBlockInvariants addr = do
 -- values to initialize the phi variables in the target.
 recoverJumpTarget :: forall ids
                   .  HasCallStack
-                  => MemSegmentOff 64 -- ^ Address to jump to
+                  => MapF X86Reg (FnValue X86_64)
+                  -> MemSegmentOff 64 -- ^ Address to jump to
                   -> Recover ids (FnJumpTarget X86_64)
-recoverJumpTarget tgtAddr = do
+recoverJumpTarget retVarMap tgtAddr = do
   thisAddr <- gets $ rsStartAddr
-  -- Get phi variables for targe taddr
-  tgtPhiVars <- liftFunRecover $ biPhiVars <$> getBlockInvariants tgtAddr
-
-  let recoverVec :: Some (PhiVarInfo X86_64 ids)
+  -- Get invariant info for target address.
+  tgtInv <- liftFunRecover $ getBlockInvariants tgtAddr
+  let postValues =
+        let emsg = "Could not find post values for target."
+         in Map.findWithDefault (error emsg) thisAddr (biPredPostValues tgtInv)
+  let recoverVec :: Some (BoundLoc X86Reg)
                  -> Recover ids (Some (FnValue X86_64))
-      recoverVec (Some v) = do
-        case Map.lookup thisAddr (phiVarValue v) of
-          Nothing -> error "Could not find value for phi variable."
-          Just val -> resolveInferValue val
-  values <- traverse recoverVec tgtPhiVars
+      recoverVec (Some (RegLoc r))
+        | Just v <- MapF.lookup r retVarMap =
+            pure (Some v)
+      recoverVec (Some l) = resolveInferValue (pvmFind l postValues)
+  values <- traverse recoverVec (V.fromList (biPhiLocs tgtInv))
   pure $! FnJumpTarget { fnJumpLabel = fnBlockLabelFromAddr tgtAddr
                        , fnJumpPhiValues = values
                        }
@@ -713,7 +716,7 @@ getPostCallValue regs retRegMap r = do
    -- df is 0 after a function call.
     _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
     -- Callee-saved registers are preserved.
-    _ | Some r `Set.member` x86CalleeSavedRegs ->
+    _ | Some r `Set.member` x86CalleeS*aavedRegs ->
         recoverRegister regs r
     _ -> do
       addr <- gets $ rsStartAddr
@@ -803,7 +806,7 @@ recoverX86TermStmt tstmt regs mnext_addr =
           -- TODO: Fix this by adding a
           error "Recovery: Could not find system call return label"
         Just nextAddr -> do
-          FnJump <$> recoverJumpTarget nextAddr
+          FnJump <$> recoverJumpTarget MapF.empty nextAddr
 
 -- | Given a register state this interprets the function arguments.
 evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
@@ -878,12 +881,11 @@ recoverBlock b = do
       args <- evalFunctionArgs regs fti
       -- Get list of return variables for call, and map from register to value for
       -- needed return values.
-      (ri, _retRegMap) <- evalReturnVars (ftiRetRegs fti)
+      (ri, retRegMap) <- evalReturnVars (ftiRetRegs fti)
       -- Add call statement
       addFnStmt (FnCall call_tgt ftp args ri)
       -- Create block that ends with jump to return address.
-      retTgt <- recoverJumpTarget retAddr
-      pure (FnJump retTgt)
+      FnJump <$> recoverJumpTarget retRegMap retAddr
     -- Handle tail call.
     ParsedCall regs Nothing -> do
       -- Get call target
@@ -915,21 +917,21 @@ recoverBlock b = do
 
     ParsedJump _regs tgtAddr -> do
       -- Get target
-      tgt  <- recoverJumpTarget tgtAddr
+      tgt  <- recoverJumpTarget MapF.empty tgtAddr
       pure (FnJump tgt)
 
     ParsedBranch _regs cond trueAddr falseAddr -> do
       -- Translate condition
       condVal <- recoverValue cond
       -- Get registers that may be needed by one of the two branch targets.
-      trueTgt  <- recoverJumpTarget trueAddr
-      falseTgt <- recoverJumpTarget falseAddr
+      trueTgt  <- recoverJumpTarget MapF.empty trueAddr
+      falseTgt <- recoverJumpTarget MapF.empty falseAddr
       pure (FnBranch condVal trueTgt falseTgt)
 
     ParsedLookupTable _regs idx vec -> do
       -- Recover term statement
       idx'   <- recoverValue idx
-      tgtVec <- traverse recoverJumpTarget vec
+      tgtVec <- traverse (recoverJumpTarget MapF.empty) vec
       pure (FnLookupTable idx' tgtVec)
 
     ParsedReturn regs -> do
@@ -998,24 +1000,27 @@ $(pure [])
 
 
 -- | Introduce a new phi var for a class, and updae location map.
-addPhiVarForClass :: ([Some (FnPhiVar X86_64)], MapF (BoundLoc X86Reg) (FnRegValue X86_64))
+addPhiVarForClass :: BlockInvariants X86_64 ids
+                  -> ([Some (FnPhiVar X86_64)], MapF (BoundLoc X86Reg) (FnRegValue X86_64))
                      -- ^ Previously constructed location map.
-                  -> Some (PhiVarInfo X86_64 ids)
+                  -> Some (BoundLoc X86Reg)
                      -- ^ Class to add
                   -> FunRecover ids ([Some (FnPhiVar X86_64)], MapF (BoundLoc X86Reg) (FnRegValue X86_64))
-addPhiVarForClass (vl,m0) (Some varInfo) = do
+addPhiVarForClass inv (vl,m0) (Some phiLoc) = do
   vnm <- funFreshId
+  let tp = typeRepr phiLoc
+  let ll = llValues (MapF.findWithDefault (LL []) phiLoc (biLocMap inv))
   let phiVar = FnPhiVar { unFnPhiVar = vnm
-                        , fnPhiVarType = phiVarType varInfo
-                        , fnPhiVarRep  = phiVarRep varInfo
-                        , fnPhiVarLocations = phiVarLocations varInfo
+                        , fnPhiVarType = tp
+                        , fnPhiVarRep  = phiLoc
+                        , fnPhiVarLocations = ll
                         }
-  let pr = WidthEqRefl (phiVarType varInfo)
+  let pr = WidthEqRefl tp
   let v = FnValue (FnPhiValue phiVar) pr
   let isReg (RegLoc _) = True
       isReg (StackOffLoc _ _) = False
   let ins m l = MapF.insert l v m
-  let m' = foldl' ins m0 (phiVarRep varInfo : filter isReg (phiVarLocations varInfo))
+  let m' = foldl' ins m0 (phiLoc : filter isReg ll)
   seq m' $ pure (Some phiVar:vl, m')
 
 recoverInnerBlock :: RecoveredBlockInfo
@@ -1024,7 +1029,7 @@ recoverInnerBlock :: RecoveredBlockInfo
 recoverInnerBlock blockInfo addr = do
   fInfo <- frcInterp <$> FR ask
   inv <- getBlockInvariants addr
-  (phiVars, locMap) <- foldlM addPhiVarForClass ([],MapF.empty) (biPhiVars inv)
+  (phiVars, locMap) <- foldlM (addPhiVarForClass inv) ([],MapF.empty) (biPhiLocs inv)
    -- Get predecessors for this block.
   let Just preds = Map.lookup addr (funBlockPreds fInfo)
    -- Generate phi nodes from predecessors and registers that this block refers to.
@@ -1143,7 +1148,13 @@ recoverFunction sysp funTypeMap mem fInfo = do
                { archCallParams = x86_64CallParams
                , archPostTermStmtInvariants = x86TermStmtNext
                , defaultCallRegs = toFunctionTypeRegs maximumFunTypeInfo
-               , calleeSavedRegisters = Set.toList x86CalleeSavedRegs
+               , calleeSavedRegisters = [ Some RBP
+                                        , Some RBX
+                                        , Some R12
+                                        , Some R13
+                                        , Some R14
+                                        , Some R15
+                                        ]
                , callScratchRegisters = []
                , returnRegisters = retReg <$> ftiRetRegs cfti
                , reguseTermFn = x86TermStmtUsage sysp

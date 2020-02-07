@@ -4,6 +4,7 @@
 *.fns
 *.ll
 test_add_diet_reopt.ann
+test_fib_diet_reopt.ann
 test_*.o
 out
 glibc/placeholder_initfini.o

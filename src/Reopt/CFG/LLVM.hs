@@ -1160,7 +1160,7 @@ mkStackExpr o
         oExpr = Ann.BVDecimal (fromInteger o) 64
      in Ann.BVAdd (Ann.Var Ann.StackHigh) oExpr
 
-mkBoundLocExpr :: BoundLoc X86Reg tp -> Ann.Expr Ann.BlockVar
+mkBoundLocExpr :: HasCallStack => BoundLoc X86Reg tp -> Ann.Expr Ann.BlockVar
 mkBoundLocExpr (RegLoc xr) =
   case xr of
     X86_GP r -> Ann.Var (Ann.InitGPReg64 r)

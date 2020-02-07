@@ -153,7 +153,7 @@ type FunctionName = String
 -- As blocks can be independently verified, we create a separate
 -- prover interface for each block to be verified.
 data ProverSessionGenerator
-   = PSGen { blockCallbacks :: forall a . FunctionName -> BlockLabel -> (ProverInterface -> IO a) -> IO a
+   = PSGen { blockCallbacks :: FunctionName -> BlockLabel -> (ProverInterface -> IO ()) -> IO ()
            , sessionComplete :: IO ()
            }
 
@@ -1567,6 +1567,7 @@ evalPrecondition phiTermFn regs mem e = do
   let r = evalPrecondition phiTermFn regs mem
   case e of
     Ann.Eq x y -> SMT.eq [r x, r y]
+    Ann.BVAdd x y -> SMT.bvadd (r x) [r y]
     Ann.BVSub x y -> SMT.bvsub (r x) (r y)
     Ann.BVDecimal x y -> SMT.bvdecimal (toInteger x) y
     Ann.Var v ->
@@ -1872,19 +1873,20 @@ interactiveVerifyGoal ictx negGoal propName = do
 
 newInteractiveSession :: HasCallStack
                       => FilePath -- ^ Path for annotations
-                      -> String -- ^ Command line for SMT solver
+                      -> FilePath -- ^ Path to SMT solver
+                      -> [String] -- ^ Arguments
                       -> IORef Natural -- ^ Counter for each goal
                       -> IORef Natural -- ^ Counter for each verified goal.
                       -> IORef Natural -- ^ Counter for errors
                       -> FunctionName -- ^ Name of function
                       -> BlockLabel -- ^ Block label for this session.
-                      -> (ProverInterface -> IO a)
-                      -> IO a
-newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter errorCounter
+                      -> (ProverInterface -> IO ())
+                      -> IO ()
+newInteractiveSession annFile solver solverArgs allGoalCounter verifiedGoalCounter errorCounter
                       funName lbl action = do
   -- Create Goal counter for just this block.
   blockGoalCounter <- newIORef 0
-  let cp = (P.shell cmdline)
+  let cp = (P.proc solver solverArgs)
            { P.std_in  = P.CreatePipe
            , P.std_out = P.CreatePipe
            , P.std_err = P.CreatePipe
@@ -1892,47 +1894,60 @@ newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter errorCo
   createResult <- try $ P.createProcess cp
   case createResult of
     Right (Just cmdHandle, Just respHandle, Just errHandle, ph) -> do
-      flip finally (P.terminateProcess ph) $ do
-        writeCommand cmdHandle $ SMT.setLogic SMT.allSupported
-        writeCommand cmdHandle $ SMT.setProduceModels True
-        let ictx = InteractiveContext { ictxAnnFile = annFile
-                                      , ictxFunName = funName
-                                      , ictxBlockLabel = ppBlock lbl
-                                      , ictxAllGoalCounter = allGoalCounter
-                                      , ictxVerifiedGoalCounter = verifiedGoalCounter
-                                      , ictxBlockGoalCounter = blockGoalCounter
-                                      , ictxCmdHandle = cmdHandle
-                                      , ictxRespHandle = respHandle
-                                      , ictxErrHandle = errHandle
-                                      }
-        let fns = ProverInterface
-                    { addCommandCallback = \cmd -> do
-                        writeCommand cmdHandle cmd
-                    , proveFalseCallback = \g ->
-                        interactiveVerifyGoal ictx g
-                    , proveTrueCallback = \g ->
-                        interactiveVerifyGoal ictx (SMT.not g)
-                    , blockErrorCallback = \i a msg -> do
-                        hPutStrLn stderr $ "Error: " ++ renderMCInstError funName lbl i a msg
-                        modifyIORef errorCounter (+1)
-                    }
-        r <- seq ictx $ seq fns $ action fns
-        writeCommand cmdHandle $ SMT.exit
-        pure r
+      let ictx = InteractiveContext { ictxAnnFile = annFile
+                                    , ictxFunName = funName
+                                    , ictxBlockLabel = ppBlock lbl
+                                    , ictxAllGoalCounter = allGoalCounter
+                                    , ictxVerifiedGoalCounter = verifiedGoalCounter
+                                    , ictxBlockGoalCounter = blockGoalCounter
+                                    , ictxCmdHandle = cmdHandle
+                                    , ictxRespHandle = respHandle
+                                    , ictxErrHandle = errHandle
+                                    }
+      let fns = ProverInterface
+                { addCommandCallback = \smtCmd -> do
+                    writeCommand cmdHandle smtCmd
+                , proveFalseCallback = \g ->
+                    interactiveVerifyGoal ictx g
+                , proveTrueCallback = \g ->
+                    interactiveVerifyGoal ictx (SMT.not g)
+                , blockErrorCallback = \i a msg -> do
+                    hPutStrLn stderr $ "Error: " ++ renderMCInstError funName lbl i a msg
+                    modifyIORef errorCounter (+1)
+                }
+      let runSession = do
+            mr <- try $ writeCommand cmdHandle $ SMT.setLogic SMT.allSupported
+            case mr of
+              Left (_e :: IOException) -> do
+                hPutStrLn stderr $ "Could not start " ++ solver
+                exitFailure
+              Right () -> do
+                writeCommand cmdHandle $ SMT.setProduceModels True
+                action fns
+                writeCommand cmdHandle $ SMT.exit
+      seq ictx $ seq fns $ mask $ \restore -> do
+        catch (restore runSession) $ \e -> do
+          P.terminateProcess ph
+          throwIO (e :: SomeException)
+        P.terminateProcess ph
     Right _ -> do
-      hPutStrLn stderr $ "Unexpected failure running " ++ cmdline
+      hPutStrLn stderr $ "Unexpected failure running " ++ solver
       exitFailure
     Left err -> do
-      hPutStrLn stderr $ "Could not execute " ++ cmdline
-      hPutStrLn stderr $ "  " ++ show (err :: IOException)
+      if isDoesNotExistError err then
+        hPutStrLn stderr $ "Could not find " ++ solver ++ " executable."
+       else do
+        hPutStrLn stderr $ "Could not execute " ++ solver ++ "\n"
+                        ++ "  " ++ show (err :: IOException)
       exitFailure
 
 -- | This runs an action with a proof session generator, and reports
 -- the final proof results.
 interactiveSMTGenerator :: FilePath -- ^ Name of yaml file for error reporting purposes.
-                        -> String -- ^ Command line for running SMT solver
+                        -> FilePath -- ^ Command line for running SMT solver
+                        -> [String] -- ^ Arguments
                         -> IO ProverSessionGenerator
-interactiveSMTGenerator annFile cmdline = do
+interactiveSMTGenerator annFile cmd cmdArgs = do
   -- Counter for all goals
   allGoalCounter <- newIORef 0
   -- Counter for goals successfully verified.
@@ -1954,7 +1969,7 @@ interactiveSMTGenerator annFile cmdline = do
         unless verSuccess exitFailure
 
   pure $! PSGen { blockCallbacks =
-                    newInteractiveSession annFile cmdline
+                    newInteractiveSession annFile cmd cmdArgs
                       allGoalCounter verifiedGoalCounter errorCounter
                 , sessionComplete = whenDone
                 }
@@ -2094,7 +2109,7 @@ runBlockVCG funAnn blkMap firstLabel lbl blockAnn action = do
 data VerificationMode
    = DefaultMode
    | ExportMode !FilePath
-   | RunSolver !String
+   | RunSolver !FilePath ![String]
 
 isDefault :: VerificationMode -> Bool
 isDefault DefaultMode = True
@@ -2122,7 +2137,10 @@ parseArgs cmdArgs args = seq args $
     ("--solver":cmdline:rest) -> do
       unless (isDefault (requestedMode args)) $ do
         throwError $ "Cannot specify --export or --solver multiple times."
-      parseArgs rest $ args { requestedMode = RunSolver cmdline }
+      case words cmdline of
+        [] -> throwError "Expected command line argument."
+        (solver:solverArgs) ->
+          parseArgs rest $ args { requestedMode = RunSolver solver solverArgs }
     (path:rest) -> do
       when ("--" `isPrefixOf` path) $ do
         throwError $ "Unexpected flag " ++ path
@@ -2145,10 +2163,10 @@ showError msg = do
 
 withVCGArgs :: IO (Ann.ModuleAnnotations, ProverSessionGenerator)
 withVCGArgs = do
-  cmdArgs <- getArgs
+  vcgArgs <- getArgs
   let initVCG = VCGArgs { reoptAnnotationsPath = Nothing, requestedMode = DefaultMode }
   args <-
-    case runExcept (parseArgs cmdArgs initVCG) of
+    case runExcept (parseArgs vcgArgs initVCG) of
       Left msg ->
         showError msg
       Right ShowHelp -> do
@@ -2188,10 +2206,11 @@ withVCGArgs = do
           hPutStrLn stderr $ "  " ++ show (e :: IOError)
           exitFailure
     DefaultMode -> do
-      psGen <- interactiveSMTGenerator annFile "cvc4 --lang=smt2 --dedicated-eqrange-quant --incremental"
+      let cmdArgs = ["--lang=smt2", "--dedicated-eqrange-quant", "--incremental"]
+      psGen <- interactiveSMTGenerator annFile "cvc4" cmdArgs
       pure (cfg, psGen)
-    RunSolver cmdline -> do
-      psGen <- interactiveSMTGenerator annFile cmdline
+    RunSolver cmd cmdArgs -> do
+      psGen <- interactiveSMTGenerator annFile cmd cmdArgs
       pure (cfg, psGen)
 
 standaloneGoalFilename :: String -- ^ Name of function to verify
@@ -2593,17 +2612,25 @@ getLLVMBCModule bs = do
 -- | Parse the LLVM  module either in .bc or .ll format.
 getLLVMModule :: FilePath -> IO Module
 getLLVMModule path = do
-  bs <- BS.readFile path
-  if BS.take 4 bs == "BC\xc0\xde" then
-    getLLVMBCModule bs
-   else if takeExtension path == ".ll" then do
-    hPutStrLn stderr "Reading assembly"
-    bcBS <- runLlvmAs "llvm-as" bs
-    getLLVMBCModule bcBS
-   else do
-    hPutStrLn stderr $ "Could not determine type of LLVM file: " ++ path ++ "\n"
-      ++ show (BS.take 4 bs)
-    exitFailure
+  mbs <- try $ BS.readFile path
+  case mbs of
+    Left (err :: IOError) -> do
+      if isDoesNotExistError err then
+        hPutStrLn stderr $ "Could not find LLVM module: " ++  path
+       else do
+        hPutStrLn stderr $ "Error reading: " ++  path
+        hPutStrLn stderr $ show err
+      exitFailure
+    Right bs
+      | BS.take 4 bs == "BC\xc0\xde" -> do
+          getLLVMBCModule bs
+      | takeExtension path == ".ll" -> do
+          bcBS <- runLlvmAs "llvm-as" bs
+          getLLVMBCModule bcBS
+      | otherwise -> do
+          hPutStrLn stderr $ "Could not determine type of LLVM file: " ++ path ++ "\n"
+                          ++ show (BS.take 4 bs)
+          exitFailure
 
 main :: IO ()
 main = do
