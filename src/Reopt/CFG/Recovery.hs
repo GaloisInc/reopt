@@ -625,7 +625,6 @@ resolveInferValue tgt pvm l =
             Just rv ->
               Some <$> coerceRegValue rv
     IVAssignValue aid -> do
-      assignMap <- use rsAssignMap
       Some <$> recoverAssignId aid
     IVCValue cv -> Some <$> recoverCValue cv
     IVCondWrite idx repr  -> do

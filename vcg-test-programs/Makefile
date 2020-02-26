@@ -13,11 +13,9 @@ reopt-vcg := $(shell which reopt-vcg)
 # reopt-vcg.
 
 
-all : test_add_diet_lld.ann \
-	test_add_diet_reopt.crt \
-	test_add_diet_reopt_manual.crt \
-	test_fib_diet_lld.crt \
-	test_fib_diet_reopt_manual.crt
+all : test_add_diet_reopt.crt \
+      test_fib_diet_reopt.crt \
+      test_fib_diet_reopt_manual.crt
 
 
 %_manual.crt : %_manual.ann %.ll $(reopt-vcg)
@@ -34,7 +32,8 @@ test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_
 
 # Generate LLVM file using reopt for add example
 test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann --header test_fib_protos.h --include fib --include main $<
+	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann \
+                 --header test_fib_protos.h --include fib --include main $<
 
 %_reopt_pretty.ann : %_reopt.ann
 	python -m json.tool $< > $@
@@ -53,10 +52,6 @@ test_fib_diet_lld.cfg : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.fns : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib --include main $<
-
-# Generate LLVM file using reopt for fib example
-test_fib_diet_lld.ll : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ --llvm --header test_fib_protos.h --include fib $<
 
 # Generate the .o file using reopt.
 test_add_diet_reopt.o : test_add_diet_lld.exe

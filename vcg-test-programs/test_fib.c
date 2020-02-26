@@ -11,6 +11,6 @@ uint64_t fib(uint64_t x) {
 }
 
 int main() {
-  printf("fib(5): %" PRIx64 "\n", fib(5));
-  return 0;
+    printf("fib(5): %" PRIx64 "\n", fib(5));
+    return 0;
 }
