@@ -31,7 +31,6 @@ import           Data.Foldable
 import qualified Data.HashMap.Strict as HMap
 import           Data.IORef
 import           Data.Int
-import           Data.LLVM.BitCode
 import           Data.List as List
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory.ElfLoader
@@ -54,7 +53,6 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
 import qualified Data.Vector as V
-import           GHC.IO.Exception (IOErrorType( ResourceVanished ))
 import           GHC.Stack
 import           Numeric
 import           Numeric.Natural
@@ -74,6 +72,8 @@ import qualified What4.Protocol.SMTLib2.Parse as SMTP
 import qualified What4.Protocol.SMTLib2.Syntax as SMT
 
 import qualified Reopt.VCG.Annotations as Ann
+
+import           LLVMLoader
 import           VCGCommon
 import qualified VCGMacaw as M
 
@@ -1001,10 +1001,8 @@ execMCOnlyEvents endAddr = do
       modify $ \s -> s { mcEvents = mevs }
       execMCOnlyEvents endAddr
     M.MCOnlyStackReadEvent mcAddr tp macawValVar:mevs -> do
-      -- TODO: Fix this to the following
-
       -- A MCOnlyStack read means the machine code reads memory, but
-      -- the stack does not.
+      -- LLVM does not.
       --
       -- We currently check that these reads only access the stack as
       -- the only current use of these annotations is to mark register
@@ -1051,6 +1049,8 @@ execMCOnlyEvents endAddr = do
         _ -> do
           pure ()
     [] -> do
+      -- If we run out of events for this instruction, then get events
+      -- for next instruction.
       nextAddr <- gets mcNextAddr
       when (addrLt nextAddr endAddr) $ do
         getNextEvents
@@ -1174,7 +1174,7 @@ llvmInvoke isTailCall fsym args lRet = do
   let postCallRIP :: SMT.Term
       postCallRIP = M.evalMemAddr nextInsnAddr
 
-  -- Check check pointer is valid and we saved return address on call.
+  -- Check stack pointer is valid and we saved return address on call.
   do -- Get value stored at return address
      mem <- gets  $ varTerm . memVar . mcMemIndex
      -- Check stored return value matches next instruction
@@ -1348,7 +1348,7 @@ llvmLoad :: HasCallStack
          -> L.Type -- ^ LLVM type for load
          -> Maybe L.Align -- ^ Alignment
          -> BlockVCG ()
-llvmLoad ident src llvmType  malign = do
+llvmLoad ident src llvmType malign = do
   llvmAddr <- primEval (PtrTo llvmType) src
   llvmAlign <- do
     let a0 = fromMaybe 0 malign
@@ -1655,8 +1655,7 @@ coerceToSMTSort ty = do
 stepNextStmt :: HasCallStack
              => L.Stmt
              -> BlockVCG Bool
-stepNextStmt stmt@(L.Result ident inst _mds) = do
-  setCurrentLLVMStmt stmt
+stepNextStmt (L.Result ident inst _mds) = do
   case inst of
     Phi _tp _values -> do
       error $ "stepNextStmt expected phi statements to be stripped."
@@ -1736,8 +1735,7 @@ stepNextStmt stmt@(L.Result ident inst _mds) = do
       pure True
     _ -> do
       error $ "stepNextStmt: unsupported instruction: " ++ show inst
-stepNextStmt stmt@(L.Effect instr _mds) = do
-  setCurrentLLVMStmt stmt
+stepNextStmt (L.Effect instr _mds) = do
   case instr of
     Store llvmVal llvmPtr _ordering _align -> do
       addrTerm <- evalTyped llvmPtr
@@ -2299,14 +2297,15 @@ checkAllocaOverlap lbl l = do
 --
 -- Note. This is written to take a function rather than directly call
 -- @stepNextStmtg@ so that the call stack is cleaner.
-checkEachStmt :: (L.Stmt -> BlockVCG Bool) -> [L.Stmt] -> BlockVCG ()
-checkEachStmt _ [] = do
+checkEachStmt :: [L.Stmt] -> BlockVCG ()
+checkEachStmt [] = do
   error $ "We have reached end of LLVM events without a block terminator."
-checkEachStmt f (stmt:stmts) = do
-  c <- f stmt
+checkEachStmt (stmt:stmts) = do
+  setCurrentLLVMStmt stmt
+  continue <- stepNextStmt stmt
   modify' $ \s -> s { llvmInstIndex = llvmInstIndex s + 1 }
-  if c then
-    checkEachStmt f stmts
+  if continue then
+    checkEachStmt stmts
    else
     unless (null stmts) $ error "Expected return to be last LLVM statement."
 
@@ -2369,7 +2368,7 @@ verifyBlock funAnn argBindings blkMap firstLabel bAnn = do
            forM_ (Ann.blockPreconditions blockAnn) $ \p -> do
              addAssert (evalPrecondition (varTerm . llvmVar) regs mem p)
         -- Start processing LLVM statements
-        checkEachStmt stepNextStmt stmts
+        checkEachStmt stmts
 
 $(pure [])
 
@@ -2508,133 +2507,11 @@ readElf path = do
         warning "Expected Linux binary"
       pure e
 
--- | Wait for a process to end and throw an error case if the return
--- value differs from the 'ExitSuccess'.
---
--- This function takes a handle to the process's stderr and closes it
--- or semicloses it before returning.
-waitForEnd :: String -- ^ Name of tool
-           -> Handle -- ^ Handle to read from for getting error
-           -> P.ProcessHandle -- ^ Handle to process
-           -> IO ()
-waitForEnd tool errHandle ph = do
-  ec  <- P.waitForProcess ph
-  case ec of
-    ExitSuccess ->
-      hClose errHandle
-    ExitFailure c -> do
-      msg <- hGetContents errHandle
-      let msg' | null msg = tool ++ " exited with error code " ++ show c ++ "."
-               | otherwise = tool ++ ": " ++ msg
-      hPutStrLn stderr msg'
-
--- | Try to create a process, and call the call back funtion with
--- the handles for 'stdin', 'stdout', and 'stderr' if it succeeds.
---
--- This will throw a failure and read from standard error is the process fails.
---
--- If the attempt fails, because the process does not exist, then throw the given
--- exception.
-withCreateProcess :: String -- ^ Name of tool for error purposes
-                  -> String -- ^ Path of program to execute
-                  -> [String] -- ^ Arguments
-                  -> ((Handle, Handle, Handle) -> IO a)
-                  -> IO a
-withCreateProcess nm cmd args f = do
-  let cp = (P.proc cmd args)
-                { P.env = Nothing
-                , P.std_in  = P.CreatePipe
-                , P.std_out = P.CreatePipe
-                , P.std_err = P.CreatePipe
-                }
-  let h :: IOException -> IO a
-      h ioe
-        | isDoesNotExistError ioe = do
-            hPutStrLn stderr "Could not find llvm-as"
-            exitFailure
-        | isPermissionError ioe = do
-            hPutStrLn stderr "Do not have permission to execute llvm-as"
-            exitFailure
-        | otherwise = throwIO ioe
-  (Just in_handle, Just out, Just err, ph) <-
-     P.createProcess cp `catch` h
-  f (in_handle, out, err) <* waitForEnd nm err ph
-
--- | This is a helper function that runs an IO action and ensures that
--- some cleanup is performed if an exception is thrown.
-writeAndClose :: Handle -- ^ Input handle to write to.
-              -> Handle -- ^ Error handle to close if things fail.
-              -> IO () -- ^ Action to run
-              -> IO ()
-writeAndClose inHandle errHandle action = do
-  let h :: IOError -> IO ()
-      h e | ioeGetErrorType e == ResourceVanished = do
-              hClose inHandle
-              hPutStrLn stderr =<< hGetContents errHandle
-              exitFailure
-          | otherwise = do
-              hClose inHandle
-              hClose errHandle
-              throwIO (e :: IOError)
-  action `catch` h
-  hClose inHandle
-
-
--- | Run llvm-as to generate an bitcode file from text.
-runLlvmAs :: FilePath
-          -- ^ Path to llvm-as
-          -> BS.ByteString
-          -- ^ .ll file file
-          -> IO BS.ByteString
-runLlvmAs cmd asm = do
-  -- Run GNU asssembler
-  let args= []
-  withCreateProcess "llvm-as" cmd args $ \(inHandle, outHandle, errHandle) -> do
-    -- Write to input handle and close it.
-    writeAndClose inHandle errHandle $ do
-      hSetBinaryMode inHandle True
-      BS.hPut inHandle asm
-    -- Get output
-    hSetBinaryMode outHandle True
-    BS.hGetContents outHandle
-
--- | Parse thte Get LLVM module
-getLLVMBCModule :: BS.ByteString -> IO Module
-getLLVMBCModule bs = do
-  res <- parseBitCode bs
-  case res of
-    Left err -> do
-      hPutStrLn stderr $ "Could not parse LLVM: " ++ show err
-      exitFailure
-    Right m ->
-      pure m
-
--- | Parse the LLVM  module either in .bc or .ll format.
-getLLVMModule :: FilePath -> IO Module
-getLLVMModule path = do
-  mbs <- try $ BS.readFile path
-  case mbs of
-    Left (err :: IOError) -> do
-      if isDoesNotExistError err then
-        hPutStrLn stderr $ "Could not find LLVM module: " ++  path
-       else do
-        hPutStrLn stderr $ "Error reading: " ++  path
-        hPutStrLn stderr $ show err
-      exitFailure
-    Right bs
-      | BS.take 4 bs == "BC\xc0\xde" -> do
-          getLLVMBCModule bs
-      | takeExtension path == ".ll" -> do
-          bcBS <- runLlvmAs "llvm-as" bs
-          getLLVMBCModule bcBS
-      | otherwise -> do
-          hPutStrLn stderr $ "Could not determine type of LLVM file: " ++ path ++ "\n"
-                          ++ show (BS.take 4 bs)
-          exitFailure
-
 main :: IO ()
 main = do
+  -- Get arguments to main
   (ann, gen) <- withVCGArgs
+  -- Load Elf file and emit warnings
   e <- readElf $ Ann.binFilePath ann
   let loadOpts = defaultLoadOptions
   (warnings, mem, _entry, symbols) <-
@@ -2645,10 +2522,8 @@ main = do
           ++ "  " ++ err
         exitFailure
       Right r -> pure r
-
   forM_ warnings $ \w -> do
     hPutStrLn stderr w
-
   -- Get LLVM module
   lMod <- getLLVMModule (Ann.llvmFilePath ann)
   -- Create verification coontext for module.
@@ -2666,12 +2541,12 @@ main = do
                                     [ (nm,tp)
                                     | L.TypeDecl nm tp <- L.modTypes lMod
                                     ]
-
                                 }
   -- Run verification.
   runModuleVCG modCtx $ do
     forM_ (Ann.functions ann) $ \funAnn -> do
       moduleCatch $ verifyFunction lMod funAnn
+  -- print out results
   errorCnt <- readIORef errorRef
   if errorCnt > 0 then do
     hPutStrLn stderr "Errors during verification."

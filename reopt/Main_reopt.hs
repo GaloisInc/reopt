@@ -337,7 +337,7 @@ optLevelFlag = flagReq [ "O", "opt-level" ] upd "PATH" help
 -- | Used to add a new function to ignore translation of.
 includeAddrFlag :: Flag Args
 includeAddrFlag = flagReq [ "include" ] upd "ADDR" help
-  where upd s old = Right $ old & includeAddrs %~ (s:)
+  where upd s old = Right $ old & includeAddrs %~ (words s ++)
         help = "Address of function to include in analysis (may be repeated)."
 
 -- | Used to add a new function to ignore translation of.

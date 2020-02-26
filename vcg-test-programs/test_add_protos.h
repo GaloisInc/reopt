@@ -4,3 +4,5 @@
 typedef long uint64_t;
 
 uint64_t add(uint64_t x);
+
+long main();

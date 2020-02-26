@@ -30,11 +30,11 @@ all : test_add_diet_lld.ann \
 
 # Generate LLVM file using reopt for add example
 test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_protos.h $(reopt)
-	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add $<
+	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add --include main $<
 
 # Generate LLVM file using reopt for add example
 test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann --header test_fib_protos.h --include fib $<
+	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann --header test_fib_protos.h --include fib --include main $<
 
 %_reopt_pretty.ann : %_reopt.ann
 	python -m json.tool $< > $@
@@ -44,16 +44,15 @@ test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_
 
 # Generate LLVM file using reopt for add example
 test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
-	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add $<
-
+	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.cfg : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ -c --include fib $<
+	$(reopt) -o $@ -c --include fib --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.fns : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib $<
+	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.ll : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
@@ -62,7 +61,6 @@ test_fib_diet_lld.ll : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 # Generate the .o file using reopt.
 test_add_diet_reopt.o : test_add_diet_lld.exe
 	$(reopt) -o $@ --include add test_add_diet_lld.exe
-
 
 diet_libs=diet/start.o diet/libc.a
 

@@ -21,7 +21,6 @@
 		    "size": 24,
 		    "existing": false
                   }
-
               ],
               "preconditions": [
                  "(= rsp (fnstart rsp))",

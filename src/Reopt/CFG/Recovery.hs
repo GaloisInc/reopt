@@ -605,22 +605,27 @@ recoverStmt stmtIdx stmt = do
 
 -- | Resolve a phi value from an inferred value.
 resolveInferValue :: HasCallStack
-                  => InferValue X86_64 ids tp
+                  => MemSegmentOff 64 -- ^ Address to jump to
+                  -> PostValueMap X86_64 ids
+                  -> BoundLoc X86Reg tp
                   -> Recover ids (Some (FnValue X86_64))
-resolveInferValue phiVal =
-  case phiVal of
+resolveInferValue tgt pvm l =
+  case pvmFind l pvm of
     IVDomain d ->
       case d of
         ValueRegUseStackOffset _ -> throwError "Stack offset escaped."
         FnStartRegister _ -> throwError "Callee-saved register escaped."
-        RegEqualLoc l -> do
+        RegEqualLoc lr -> do
           m <- gets rsPhiVarMap
-          case MapF.lookup l m of
+          case MapF.lookup lr m of
             Nothing -> do
-              addr <- gets rsStartAddr
-              error $ printf "%s. Missing value for %s." (show addr) (show (pretty l))
-            Just rv -> Some <$> coerceRegValue rv
+              src <- gets rsStartAddr
+              error $ printf "Internal error: %s should provide value of %s (originally %s) to %s"
+                             (show src) (show (pretty lr)) (show (pretty l)) (show tgt)
+            Just rv ->
+              Some <$> coerceRegValue rv
     IVAssignValue aid -> do
+      assignMap <- use rsAssignMap
       Some <$> recoverAssignId aid
     IVCValue cv -> Some <$> recoverCValue cv
     IVCondWrite idx repr  -> do
@@ -659,9 +664,8 @@ recoverJumpTarget retVarMap tgtAddr = do
   let recoverVec :: Some (BoundLoc X86Reg)
                  -> Recover ids (Some (FnValue X86_64))
       recoverVec (Some (RegLoc r))
-        | Just v <- MapF.lookup r retVarMap =
-            pure (Some v)
-      recoverVec (Some l) = resolveInferValue (pvmFind l postValues)
+        | Just v <- MapF.lookup r retVarMap = pure (Some v)
+      recoverVec (Some l) = resolveInferValue tgtAddr postValues l
   values <- traverse recoverVec (V.fromList (biPhiLocs tgtInv))
   pure $! FnJumpTarget { fnJumpLabel = fnBlockLabelFromAddr tgtAddr
                        , fnJumpPhiValues = values

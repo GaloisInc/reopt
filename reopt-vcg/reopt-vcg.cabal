@@ -50,6 +50,7 @@ executable reopt-vcg
               , what4
 --              , yaml
   other-modules:
+      LLVMLoader
       VCGCommon
       VCGMacaw
   default-language: Haskell2010

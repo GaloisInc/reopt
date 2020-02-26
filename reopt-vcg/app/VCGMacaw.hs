@@ -46,6 +46,7 @@ import qualified What4.Protocol.SMTLib2.Syntax as SMT
 import qualified Reopt.VCG.Annotations as Ann
 import           VCGCommon
 
+
 macawError :: HasCallStack => String -> a
 macawError msg = error $ "[Macaw Error] " ++ msg
 
@@ -113,7 +114,6 @@ ppEvent (FetchAndExecuteEvent _ _) = "fetchAndExecute"
 
 instance Show Event where
   show = ppEvent
-
 
 ------------------------------------------------------------------------
 -- MStateM
