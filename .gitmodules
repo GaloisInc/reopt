@@ -1,6 +1,3 @@
-[submodule "deps/crucible"]
-	path = deps/crucible
-	url = git@github.com:GaloisInc/crucible.git
 [submodule "deps/dwarf"]
 	path = deps/dwarf
 	url = git@github.com:GaloisInc/dwarf.git
@@ -22,3 +19,6 @@
 [submodule "deps/parameterized-utils"]
 	path = deps/parameterized-utils
 	url = git@github.com:GaloisInc/parameterized-utils.git
+[submodule "deps/what4"]
+	path = deps/what4
+	url = git@github.com:GaloisInc/what4.git
