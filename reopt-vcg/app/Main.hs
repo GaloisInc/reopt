@@ -53,6 +53,7 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
 import qualified Data.Vector as V
+import           GHC.IO.Exception
 import           GHC.Stack
 import           Numeric
 import           Numeric.Natural
@@ -1137,10 +1138,11 @@ llvmInvoke isTailCall fsym args lRet = do
   execMCOnlyEvents =<< asks mcBlockEndAddr
   -- Get current registers
   regs <- gets mcCurRegs
-  -- Evaluate arguments.
+  -- Check we are calling the same function in LLVM and binary.
   lArgs <- traverse evalTyped args
   let mRegIP = getConst $ regs ^. boundValue X86_IP
   assertFnNameEq fsym mRegIP
+  missingFeature "Check varargs functions pass in correct number of arguments."
   -- Verify that the arguments should be same.  Note: Here we take the
   -- number of arguments from LLVM side, since the number of arguments
   -- in Macaw side seems not explicit.  Also assuming that the # of
@@ -1164,17 +1166,9 @@ llvmInvoke isTailCall fsym args lRet = do
   let curRSP :: SMT.Term
       curRSP = getConst (regs^.boundValue RSP)
 
-  -- Note. We cannot check that the LLVM stack address is the same as
-  -- the machine code one, so we skip this.
-
-  -- We check that the return address matches the address of the
-  -- next instruction so that the return in LLVM matches the return
-  -- address in machine code.
-
+  -- Check we saved return address on call.
   let postCallRIP :: SMT.Term
       postCallRIP = M.evalMemAddr nextInsnAddr
-
-  -- Check stack pointer is valid and we saved return address on call.
   do -- Get value stored at return address
      mem <- gets  $ varTerm . memVar . mcMemIndex
      -- Check stored return value matches next instruction
@@ -1811,6 +1805,29 @@ waitForResponse errHandle action = do
       ASync.cancel pollHandle
       pure resp
 
+-- | Run a solver command and catch any errors from solver crashing.
+catchSolverWriteFail :: InteractiveContext -> IO a -> IO a
+catchSolverWriteFail ictx m = m `catch` h
+  where exitOnEOF :: IOError -> IO a
+        exitOnEOF e | isEOFError e = exitFailure
+                    | otherwise = do
+                      hPutStrLn stderr "exitOnEOF throw"
+                      throwIO e
+        h :: IOError -> IO a
+        h e =
+          case ioeGetErrorType e of
+            ResourceVanished -> do
+              hPutStrLn stderr $ "Error reported from solver:"
+              let loop :: IO a
+                  loop = do
+                    msg <- hGetLine (ictxErrHandle ictx) `catch` exitOnEOF
+                    hPutStrLn stderr $ "  " ++ msg
+                    loop
+              loop
+            _tp -> do
+              hPutStrLn stderr $ "Connection to solver failed: " ++ show e
+              exitFailure
+
 -- | Function to verify a SMT proposition is unsat.
 interactiveVerifyGoal :: HasCallStack
                       => InteractiveContext -- ^ Context for verifying goals
@@ -1831,11 +1848,11 @@ interactiveVerifyGoal ictx negGoal propName = do
   modifyIORef' (ictxAllGoalCounter ictx)      (+1)
   modifyIORef' (ictxBlockGoalCounter ictx)    (+1)
 
-
   let fname = standaloneGoalFilename funName lbl cnt
   hPutStrLn stderr $ printf "Verify: %s" propName
-  writeCommand cmdHandle $ SMT.checkSatAssuming [negGoal]
-  hFlush cmdHandle
+  catchSolverWriteFail ictx $ do 
+    writeCommand cmdHandle $ SMT.checkSatAssuming [negGoal]
+    hFlush cmdHandle
   asyncResp <- ASync.async (SMTP.readCheckSatResponse respHandle)
   resp <- waitForResponse (ictxErrHandle ictx) asyncResp
   case resp of

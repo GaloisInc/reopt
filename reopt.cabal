@@ -62,6 +62,7 @@ library
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relocations
     Reopt.Utils.Hex
+    Reopt.Utils.Printf 
 
   if flag(enable-arm)
     cpp-options: -DSUPPORT_ARM

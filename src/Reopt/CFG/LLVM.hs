@@ -239,7 +239,7 @@ functionTypeToLLVM :: FunctionType arch -> L.Type
 functionTypeToLLVM ft = L.ptrT $
   L.FunTy (llvmFunctionReturnType ft)
           (viewSome typeToLLVMType <$> fnArgTypes ft)
-          False
+          (fnVarArgs ft)
 
 declareFunction :: FunctionDecl arch
                 -> L.Declare
@@ -248,7 +248,7 @@ declareFunction d =
    in L.Declare { L.decRetType = llvmFunctionReturnType ftp
                 , L.decName    = L.Symbol (BSC.unpack (funDeclName d))
                 , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
-                , L.decVarArgs = False
+                , L.decVarArgs = fnVarArgs ftp
                 , L.decAttrs   = []
                 , L.decComdat  = Nothing
                 }
@@ -372,7 +372,7 @@ data LLVMArchSpecificOps arch = LLVMArchSpecificOps
 
 type LLVMArchConstraints arch
    = ( FnArchConstraints arch
-     , PrettyF (ArchReg arch)
+     , ShowF (ArchReg arch)
      , OrdF (ArchReg arch)
      , IsArchStmt (FnArchStmt arch)
      , Eq (FunctionType arch)
@@ -603,14 +603,7 @@ call :: (HasCallStack, HasValue v)
      -> BBLLVM arch (L.Typed L.Value)
 call (valueOf -> f) args =
   case L.typedType f of
-    L.PtrTo (L.FunTy res argTypes varArgs) -> do
-      when varArgs $ do
-        error $ "Varargs not yet supported."
-      let actualTypes = fmap L.typedType args
-      when (argTypes /= actualTypes) $ do
-        error $ "Unexpected arguments to " ++ show f ++ "\n"
-                 ++ "Expected: " ++ show argTypes ++ "\n"
-                 ++ "Actual:   " ++ show actualTypes
+    L.PtrTo (L.FunTy res _argTypes _varArgs) -> do
       fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> error $ "Call given non-function pointer argument:\n" ++ show f
 
@@ -856,19 +849,14 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs  =<< fn f
 
 resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
-                     -> FunctionType arch
                      -> BBLLVM arch (L.Typed L.Value)
-resolveFunctionEntry dest ft =
+resolveFunctionEntry dest =
   case dest of
     FnFunctionEntryValue dest_ftp nm -> do
       let sym = L.Symbol (BSC.unpack nm)
-      when (ft /= dest_ftp) $ do
-        error $ "Mismatch function type in call with " ++ show sym
-      return $ L.Typed (functionTypeToLLVM ft) (L.ValSymbol sym)
+      return $ L.Typed (functionTypeToLLVM dest_ftp) (L.ValSymbol sym)
     _ -> do
-      dest' <- mkLLVMValue dest
-      convop L.IntToPtr dest' (functionTypeToLLVM ft)
-
+      error "Do not support indirect calls."
 
 {-# INLINE bbArchConstraints #-}
 bbArchConstraints :: (LLVMArchConstraints arch => BBLLVM arch a) -> BBLLVM arch a
@@ -906,18 +894,18 @@ stmtToLLVM stmt = bbArchConstraints $ do
      llvmMask <- singletonVector =<< mkLLVMValue cond
      -- Call llvmn.masked.store intrinsic
      call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
-   FnCall dest ftp args retvs -> do
-     llvmFn <- resolveFunctionEntry dest ftp
+   FnCall dest args retvs -> do
+     llvmFn <- resolveFunctionEntry dest
      llvmArgs <- mapM (\(Some v) -> mkLLVMValue v) args
      retv <- call llvmFn llvmArgs
      -- Assign return values
-     case (fnReturnTypes ftp, retvs) of
-       ([], []) -> do
+     case retvs of
+       [] -> do
          pure ()
-       ([_rtp], [Some rvar]) -> do
+       [Some rvar] -> do
          setAssignIdValue (frAssignId rvar) retv
        -- Struct return
-       (_rtypes, _) -> do
+       _ -> do
          -- Assign all return variables to the extracted result
          let assignReturn :: Int -> Some FnReturnVar -> BBLLVM arch ()
              assignReturn i (Some fr) = do
@@ -990,8 +978,8 @@ termStmtToLLVM tm =
           let initUndef = L.Typed rtype L.ValUndef
           v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef retVals
           effect (L.Ret v)
-    FnTailCall dest ft args -> do
-      dest_f <- resolveFunctionEntry dest ft
+    FnTailCall dest args -> do
+      dest_f <- resolveFunctionEntry dest
       args' <- mapM (viewSome mkLLVMValue) args
       retv <- call dest_f args'
       ret retv

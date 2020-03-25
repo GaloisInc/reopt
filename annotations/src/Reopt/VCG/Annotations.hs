@@ -34,8 +34,6 @@ import           Data.Aeson.Types ((.:), (.:!), (.!=), (.=), object)
 import qualified Data.Aeson.Types as Aeson
 import           Data.Bits
 import qualified Data.HashMap.Strict as HMap
-import           Data.HashSet (HashSet)
-import qualified Data.HashSet as HSet
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as S
@@ -54,13 +52,6 @@ import           Reopt.VCG.SMTParser as SMTP
 
 ------------------------------------------------------------------------
 -- JSON utilities
-
--- | A list of valid fields for an object.
-type FieldList = HashSet Text
-
--- | Create a field list from a list
-fields :: [Text] -> FieldList
-fields = HSet.fromList
 
 -- | Parse a YAML and fail if there are any fields not in the set.
 withFixedObject :: String
@@ -289,13 +280,6 @@ regVarMap = HMap.fromList $
   | r <- F.Reg64 <$> [0..15]
   ]
 
-
-fnstartVarMap :: HMap.HashMap Text F.Reg64
-fnstartVarMap = HMap.fromList $
-  [ (Text.pack (show r), r)
-  | r <- x86ArgGPRegs ++ calleeSavedGPRegs
-  ]
-
 -- | Map from LLVM phi variable names to their expected tpye.
 type LLVMVarMap = HMap.HashMap Text ExprType
 
@@ -345,7 +329,7 @@ instance IsExprVar BlockVar where
 -- JSONExpr
 
 -- | An SMT expression that can be rendered into JSON.
-newtype JSONExpr = JSONExpr { jsonExpr :: Expr BlockVar }
+newtype JSONExpr = JSONExpr { _jsonExpr :: Expr BlockVar }
 
 parseExpr :: LLVMVarMap -> Aeson.Value -> Aeson.Parser (Expr BlockVar)
 parseExpr llvmMap (Aeson.String s) =
@@ -462,9 +446,6 @@ data FunctionAnn = FunctionAnn
     -- ^ Maps LLVM labels to an JSON object describing information associated with
     -- that block.
   } deriving (Show)
-
-functionInfoFields :: FieldList
-functionInfoFields = fields ["llvm_name", "stack_size", "blocks"]
 
 parseJSONBlockAnnObj :: Aeson.Value
                      -> Aeson.Parser Aeson.Object

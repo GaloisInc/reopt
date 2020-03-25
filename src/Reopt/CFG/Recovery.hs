@@ -15,6 +15,7 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeSynonymInstances #-}
@@ -66,6 +67,7 @@ import           Data.Macaw.X86 (x86DemandContext, x86_64CallParams)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
+import qualified Reopt.Utils.Printf as Printf
 
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
@@ -106,27 +108,13 @@ retReg (RetMM512D i) = Some (X86_ZMMReg i)
 -- It uses a list for arguments so that we can use C headers and
 -- ensure the arguments appear in a particular order (e.g. from the
 -- binary perspective a function that takes two integers followed by a
--- float is indistinguishable from a function that takes a float
+-- float is ABI compatible with a function that takes a float
 -- followed by two integers.
 data X86FunTypeInfo
-   = X86FunTypeInfo { ftiArgRegs :: [X86ArgInfo]
-                    , ftiRetRegs :: [X86RetInfo]
-                    }
-
--- |  Maximum function type.
-maximumFunTypeInfo :: X86FunTypeInfo
-maximumFunTypeInfo =
-  X86FunTypeInfo { ftiArgRegs = fmap ArgBV64 x86GPPArgumentRegs
-                             ++ fmap ArgMM512D [0..7]
-                 , ftiRetRegs = fmap RetBV64   [ F.RAX, F.RDX ]
-                             ++ fmap RetMM512D [0,1]
-                 }
-
-toFunctionTypeRegs :: X86FunTypeInfo -> FunctionTypeRegs X86Reg
-toFunctionTypeRegs ftp =
-  FunctionTypeRegs { fnArgRegs    = argReg <$> ftiArgRegs ftp
-                   , fnReturnRegs = retReg <$> ftiRetRegs ftp
-                   }
+   = X86NonvarargFun [X86ArgInfo] [X86RetInfo]
+   | X86PrintfFun
+     -- ^ A function that is like printf where the first argument is a string
+     -- and subsequent arguments are inferred from it.
 
 ------------------------------------------------------------------------
 -- FnRegValue
@@ -151,9 +139,7 @@ data FunRecoverContext ids =
       , frcInterp :: !(DiscoveryFunInfo X86_64 ids)
       , frcSyscallPersonality  :: !SyscallPersonality
         -- ^ System call personality
-      , frcFunctionArgs :: !(Map (MemSegmentOff 64) (BSC.ByteString, X86FunTypeInfo))
-        -- ^ Maps addresses to their name and type information.
-      , frcCurrentFunctionType :: !X86FunTypeInfo
+      , frcCurrentFunctionReturns :: ![X86RetInfo]
         -- ^ The type of the function being recovered.
       , frcBlockDepMap :: !(Map (MemSegmentOff 64) (BlockInvariants X86_64 ids))
         -- ^ Maps the starting address of blocks to the dependency set
@@ -181,13 +167,6 @@ runFunRecover ctx m =
    in case runExcept (runStateT (runReaderT (runFR m) ctx) s0) of
         Left e -> Left e
         Right (a,s) -> Right (frsWarnings s, a)
-
-{-
---  | Report a warning
-funAddWarning :: String -> FunRecover ids ()
-funAddWarning msg = do
-  FR $ modify' $ \frs -> frs { frsWarnings = msg : frsWarnings frs }
--}
 
 -- | Create a fresh assign id.
 funFreshId :: FunRecover ids FnAssignId
@@ -284,16 +263,6 @@ retRegTypeRepr RetBV64{} = Some (BVTypeRepr n64)
 retRegTypeRepr RetMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
 
 $(pure [])
-
--- | Construct a generatic function type from the x86-specific type rep.
-resolveX86FunctionType :: X86FunTypeInfo -> FunctionType X86_64
-resolveX86FunctionType ft =
-  FunctionType { fnArgTypes = argRegTypeRepr <$> ftiArgRegs ft
-               , fnReturnTypes = retRegTypeRepr <$> ftiRetRegs ft
-               }
-
-$(pure [])
-
 ------------------------------------------------------------------------
 -- evalAssign
 
@@ -326,7 +295,6 @@ unsupportedFnValue :: String -> TypeRepr tp -> Recover ids (FnValue X86_64 tp)
 unsupportedFnValue nm _repr = do
   throwError $ "Cannot create value: " ++ nm
 
-
 -- | Recover a constant.
 recoverCValue :: HasCallStack
               => CValue X86_64 tp
@@ -349,9 +317,6 @@ recoverCValue cv =
 
         Just addrRef -> do
           case () of
-            _ | Just (nm, ftp) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
-                  pure $! FnFunctionEntryValue (resolveX86FunctionType ftp) nm
-
             _ | Map.member addrRef (interpState^.parsedBlocks) -> do
                   let msg = "Do not support functions that reference block addresses."
                   unsupportedFnValue msg (addrWidthTypeRepr w)
@@ -412,24 +377,15 @@ $(pure [])
 ------------------------------------------------------------------------
 -- recoverCallTarget
 
-recoverCallTarget :: HasCallStack
-                  => RegState X86Reg (Value X86_64 ids)
-                  -> Recover ids ( FnValue X86_64 (BVType 64)
-                                 , X86FunTypeInfo
-                                 , FunctionType X86_64
+recoverCallTarget :: Recover ids ( FnValue X86_64 (BVType 64)
+                                 , [X86ArgInfo]
+                                 , [X86RetInfo]
                                  )
-recoverCallTarget regState = do
-  funCtx <- getFunCtx
-  let mem = frcMemory funCtx
-  let v = regState ^. boundValue ip_reg
-  case v of
-    RelocatableValue _ addr
-      | Just addrRef <- asSegmentOff mem addr
-      , Just (nm, ftp) <- Map.lookup addrRef (frcFunctionArgs funCtx) -> do
-          pure (FnFunctionEntryValue (resolveX86FunctionType ftp) nm, ftp, resolveX86FunctionType ftp)
-    _ -> do
-      callTgt <- recoverValue v
-      pure (callTgt, maximumFunTypeInfo, resolveX86FunctionType maximumFunTypeInfo)
+recoverCallTarget = do
+  mp <- gets $ biCallFunType . rsBlockInvariants
+  case mp of
+    Just p -> pure p
+    Nothing -> error $ "Expected call return type."
 
 ------------------------------------------------------------------------
 -- recoverStmt
@@ -807,18 +763,17 @@ recoverX86TermStmt tstmt regs mnext_addr =
           FnJump <$> recoverJumpTarget MapF.empty nextAddr
 
 -- | Given a register state this interprets the function arguments.
-evalFunctionArgs :: RegState X86Reg (Value X86_64 ids)
-                 -> X86FunTypeInfo
-                 -> Recover ids [Some (FnValue X86_64)]
-evalFunctionArgs regs ft = do
-  forM (ftiArgRegs ft) $ \argInfo -> do
-    case argInfo of
-      ArgBV64 r -> do
-        Some <$> recoverRegister regs (X86_GP r)
-      ArgMM512D i -> do
-        v512 <- recoverRegister regs (X86_ZMMReg i)
-        vv <- bitcast v512 (UnpackBits n8 n64)
-        Some <$> bitcast vv (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
+evalFunctionArg :: RegState X86Reg (Value X86_64 ids)
+                -> X86ArgInfo
+                -> Recover ids (Some (FnValue X86_64))
+evalFunctionArg regs argInfo =
+  case argInfo of
+    ArgBV64 r -> do
+      Some <$> recoverRegister regs (X86_GP r)
+    ArgMM512D i -> do
+      v512 <- recoverRegister regs (X86_ZMMReg i)
+      vv <- bitcast v512 (UnpackBits n8 n64)
+      Some <$> bitcast vv (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
 
 -- | This contains the list of return variables for a call and a map from registers
 -- to value returned.
@@ -873,25 +828,25 @@ recoverBlock b = do
     -- type of statement to emit.
     ParsedCall regs (Just retAddr) -> do
       -- Get call target
-      (call_tgt, fti, ftp) <- recoverCallTarget regs
+      (call_tgt, argRegs, retRegs) <- recoverCallTarget
       -- Evaluate call arguments
-      args <- evalFunctionArgs regs fti
+      args <- mapM (evalFunctionArg regs) argRegs
       -- Get list of return variables for call, and map from register to value for
       -- needed return values.
-      (ri, retRegMap) <- evalReturnVars (ftiRetRegs fti)
+      (ri, retRegMap) <- evalReturnVars retRegs
       -- Add call statement
-      addFnStmt (FnCall call_tgt ftp args ri)
+      addFnStmt (FnCall call_tgt args ri)
       -- Create block that ends with jump to return address.
       FnJump <$> recoverJumpTarget retRegMap retAddr
     -- Handle tail call.
     ParsedCall regs Nothing -> do
       -- Get call target
-      (callTarget, callFunTypeInfo, callFunType) <- recoverCallTarget regs
+      (callTarget, cArgRegs, cRetRegs) <- recoverCallTarget
       -- Evaluate call arguments
-      args <- evalFunctionArgs regs callFunTypeInfo
-      (ri,retRegMap) <- evalReturnVars (ftiRetRegs callFunTypeInfo)
+      args <- mapM (evalFunctionArg regs) cArgRegs
+      (ri,retRegMap) <- evalReturnVars cRetRegs
       -- Add function call
-      addFnStmt (FnCall callTarget callFunType args ri)
+      addFnStmt (FnCall callTarget args ri)
       let resolveReg :: X86RetInfo
                      -> Some (FnValue X86_64)
           resolveReg retInfo =
@@ -901,8 +856,8 @@ recoverBlock b = do
                   Just v -> Some v
                   Nothing -> Some (FnUndefined (typeRepr r))
       -- Create block
-      thisFunType <- frcCurrentFunctionType <$> getFunCtx
-      let ri2 = resolveReg <$> ftiRetRegs thisFunType
+      retRegs <- frcCurrentFunctionReturns <$> getFunCtx
+      let ri2 = resolveReg <$> retRegs
       pure (FnRet ri2)
     PLTStub _ _ _ -> do
       error $ "Cannot recover functions with PLT stubs."
@@ -932,7 +887,7 @@ recoverBlock b = do
 
     ParsedReturn regs -> do
       -- Recover term stmt
-      fti <- frcCurrentFunctionType <$> getFunCtx
+      ftr <- frcCurrentFunctionReturns <$> getFunCtx
       let evalRet :: X86RetInfo -> Recover ids (Some (FnValue X86_64))
           evalRet (RetBV64 r) = do
             Some <$> recoverRegister regs (X86_GP r)
@@ -940,7 +895,7 @@ recoverBlock b = do
             x <- recoverRegister regs (X86_ZMMReg i)
             v <- bitcast x (UnpackBits n8 n64)
             Some <$> bitcast v (VecEqCongruence n8 (ToFloat DoubleFloatRepr))
-      ri <- traverse evalRet (ftiRetRegs fti)
+      ri <- traverse evalRet ftr
       pure (FnRet ri)
 
     ParsedArchTermStmt ts regs nextAddr -> do
@@ -1070,36 +1025,257 @@ x86TermStmtUsage sysp X86Syscall regs s = do
 x86TermStmtUsage _ Hlt _ _ = pure mempty
 x86TermStmtUsage _ UD2 _ _ = pure mempty
 
+-- | This contians a reference to the function to call, the arguments and return register.
+type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
+                                   , [X86ArgInfo]
+                                   , [X86RetInfo]
+                                   )
+
+type IsSigned = Bool
+
+-- | Type for argument expected by printf.
+data PrintfArgType
+  = Char     !IsSigned
+  | Short    !IsSigned
+  | Int      !IsSigned
+  | Long     !IsSigned
+  | LongLong !IsSigned
+  | IntMaxT  !IsSigned
+  | SizeT    !IsSigned
+  | PtrDiffT
+  | WIntT -- ^ A wint_t character
+  | Double
+  | LongDouble
+  | VoidPtrT -- ^ A void pointer
+  | CharPtrT -- ^ A character pointer
+  | WCharPtrT -- ^ A wchar_t pointer
+  | NoArg
+
+printfIntArgType :: IsSigned -> Printf.Length -> Either String PrintfArgType
+printfIntArgType isSigned len =
+  case len of
+    Printf.HH -> pure $ Char isSigned
+    Printf.H  -> pure $ Short isSigned
+    Printf.LongInt  -> pure $ Long isSigned
+    Printf.LLongInt -> pure $ LongLong isSigned
+    Printf.LongDouble -> Left $ "L prefix only applicable to floating point."
+    Printf.Q -> pure $ LongLong isSigned
+    Printf.J -> pure $ IntMaxT isSigned
+    Printf.Z -> pure $ SizeT isSigned
+    Printf.T -> pure $ PtrDiffT
+    Printf.NoLength -> pure $ Int isSigned
+
+printfFloatLength :: Printf.Length -> Either String PrintfArgType
+printfFloatLength len =
+  case len of
+    Printf.LongDouble -> pure $ LongDouble
+    Printf.NoLength -> pure $ Double
+    _ -> Left $ Printf.ppLength len ++ " prefix not applicable to floating point."
+
+printfArgType :: Printf.Specifier -> Either String PrintfArgType
+printfArgType sp = do
+  let len = Printf.specifierLength sp
+  case Printf.specifierConv sp of
+    Printf.IntDecimal          -> printfIntArgType True len
+    Printf.UnsignedOctal       -> printfIntArgType False len
+    Printf.UnsignedDecimal     -> printfIntArgType False len
+    Printf.UnsignedHexadecimal -> printfIntArgType False len
+    Printf.FloatExponent    -> printfFloatLength len
+    Printf.FloatDecimal     -> printfFloatLength len
+    Printf.FloatGeneral     -> printfFloatLength len
+    Printf.FloatHexadecimal -> printfFloatLength len
+    Printf.Char ->
+      case len of
+        Printf.LongInt -> pure $ WIntT
+        _        -> pure $ Int True
+    Printf.String ->
+      case len of
+        Printf.LongInt -> pure $ WCharPtrT
+        _        -> pure $ CharPtrT
+    Printf.Pointer -> pure VoidPtrT
+    Printf.CharCount   -> pure NoArg
+    Printf.PrintStderr -> pure NoArg
+
+
+data PrintfArgState = PrintfArgState
+  { pasRemainingIntArgs :: [X86ArgInfo]
+  , pasRemainingFloatArgs :: [X86ArgInfo]
+  , pasArgRegs :: [X86ArgInfo]
+    -- ^ ARgumetn registers  in reverse order.
+  }
+
+argStateRegs :: PrintfArgState -> CallRegs X86_64
+argStateRegs pas =
+  let funType :: FunctionType X86_64
+      funType = FunctionType { fnArgTypes = [Some (BVTypeRepr n64)]
+                            , fnReturnTypes = [Some (BVTypeRepr n64)]
+                            , fnVarArgs = True
+                            }
+      fnEntry :: FnValue X86_64 (BVType 64)
+      fnEntry = FnFunctionEntryValue funType "printf"
+
+      x86ArgInfo :: [X86ArgInfo]
+      x86ArgInfo = reverse (pasArgRegs pas)
+      x86RetInfo :: [X86RetInfo]
+      x86RetInfo = [RetBV64 F.RAX]
+
+   in CallRegs { callRegsFnType = (fnEntry, x86ArgInfo, x86RetInfo)
+               , callArgRegs = argReg <$> x86ArgInfo
+               , callReturnRegs = retReg <$> x86RetInfo
+               }
+
+initPrintfArgState :: PrintfArgState
+initPrintfArgState =
+  case x86GPPArgumentRegs of
+    [] -> error $ "Expected non-empty argument regs."
+    farg:remArgs ->
+      PrintfArgState { pasRemainingIntArgs = ArgBV64 <$> remArgs
+                     , pasRemainingFloatArgs = ArgMM512D <$> [0..7]
+                     , pasArgRegs = [ArgBV64 farg]
+                     }
+
+addIntArg :: PrintfArgState -> Either String PrintfArgState
+addIntArg pas =
+  case pasRemainingIntArgs pas of
+    [] -> Left $ "Too many integer arguments."
+    (h:r) -> Right $ pas { pasArgRegs = h : pasArgRegs pas
+                         , pasRemainingIntArgs = r
+                         }
+
+addFloatArg :: PrintfArgState -> Either String PrintfArgState
+addFloatArg pas =
+  case pasRemainingFloatArgs pas of
+    [] -> Left $ "Too many float arguments."
+    (h:r) -> Right $ pas { pasArgRegs = h : pasArgRegs pas
+                         , pasRemainingFloatArgs = r
+                         }
+
+addArg :: PrintfArgState -> PrintfArgType -> Either String PrintfArgState
+addArg pas tp =
+  case tp of
+    Char _ -> addIntArg pas
+    Short _ -> addIntArg pas
+    Int _ -> addIntArg pas
+    Long _ -> addIntArg pas
+    LongLong _ -> addIntArg pas
+    IntMaxT _ -> addIntArg pas
+    SizeT _ -> addIntArg pas
+    PtrDiffT -> addIntArg pas
+    WIntT    -> addIntArg pas
+    Double   -> addFloatArg pas
+    LongDouble -> Left $ "Do not support long double arguments."
+    VoidPtrT -> addIntArg pas
+    CharPtrT -> addIntArg pas
+    WCharPtrT -> addIntArg pas
+    NoArg     -> pure pas
+
+parseUnpackedFormat :: PrintfArgState -> Printf.UnpackedRep -> Either String (CallRegs X86_64)
+parseUnpackedFormat pas (Printf.UnpackedTerm _) =
+  Right (argStateRegs pas)
+parseUnpackedFormat pas (Printf.UnpackedLiteral _ r) =
+  parseUnpackedFormat pas r
+parseUnpackedFormat pas (Printf.UnpackedSpecifier s r) = do
+  argType <- printfArgType s
+  pas' <- addArg pas argType
+  parseUnpackedFormat pas' r
+parseUnpackedFormat _ (Printf.UnpackedError e) =
+  Left ("printf error " ++ show e)
+
+inferPrintfArgs :: Memory 64 -- ^ Memory state
+                -> RegState X86Reg (Value X86_64 ids) -- Register values
+                -> Either String (CallRegs X86_64)
+inferPrintfArgs mem regs = do
+  printfFormatAddr <-
+    case valueAsSegmentOff mem (regs^.boundValue RDI) of
+      Just addr -> pure addr
+      Nothing -> Left "Could not resolve printf format string address."
+  s <- case readNullTermString printfFormatAddr of
+          NullTermString s -> pure s
+          NoNullTerm -> Left "Could not read printf format string."
+          NullTermMemoryError e -> Left $ "Access error for printf format sting: " ++ show e
+          RelocationBeforeNull _ -> Left "Encountered relocation in format string."
+  let uf = Printf.unpackFormat s
+  case parseUnpackedFormat initPrintfArgState uf of
+    Left msg -> Left $ "printf error: " ++ show s ++ "\n" ++ msg
+    Right r -> Right r
+
+-- Compute map from block starting addresses to the dependicies required to run block.
+x86CallRegs :: forall ids
+            .  Memory 64
+            -> Map (MemSegmentOff 64) BSC.ByteString
+              -- ^ Map from addresses to function name.
+            -> Map BSC.ByteString X86FunTypeInfo
+               -- ^ Map from address to the name at that address along with type
+            -> MemSegmentOff 64
+               -- ^ Address of the call statement
+            -> RegState X86Reg (Value X86_64 ids)
+               -- ^ Registers when call occurs.
+            -> Either (RegisterUseError X86_64) (CallRegs X86_64)
+x86CallRegs mem funNameMap funTypeMap addr regs = do
+  callTarget <-
+    case valueAsSegmentOff mem (regs^.boundValue ip_reg) of
+      Just r -> pure r
+      Nothing -> Left (UnresolvedFunctionTypeError addr "Call targets must be direct calls.")
+  nm <- case Map.lookup callTarget funNameMap of
+          Just r -> Right r
+          Nothing ->
+            Left $ UnresolvedFunctionTypeError addr $
+              "Could not identify function for call to " ++ show callTarget ++ "."
+  tp <- case Map.lookup nm funTypeMap of
+          Just p -> pure p
+          Nothing ->
+            Left $ UnresolvedFunctionTypeError addr $
+              "Could not determine arguments for call to " ++ BSC.unpack nm ++ "."
+  case tp of
+    X86NonvarargFun args rets -> do
+      let ftp = FunctionType { fnArgTypes = argRegTypeRepr <$> args
+                             , fnReturnTypes = retRegTypeRepr <$> rets
+                             , fnVarArgs = False
+                             }
+      let v = FnFunctionEntryValue ftp nm
+      Right CallRegs { callRegsFnType = (v, args, rets)
+                     , callArgRegs    = argReg <$> args
+                     , callReturnRegs = retReg <$> rets
+                     }
+    X86PrintfFun ->
+      case inferPrintfArgs mem regs of
+        Left msg -> Left (UnresolvedFunctionTypeError addr msg)
+        Right r -> Right r
+
 -- | Recover the function at a given address.
 --
 -- Returns either an error message with a fatal error, or a list of
 -- warnings and a function.
 recoverFunction :: forall ids
                 .  SyscallPersonality
-                -> Map (MemSegmentOff 64) (BSC.ByteString, X86FunTypeInfo)
+                -> Map (MemSegmentOff 64) BSC.ByteString
                    -- ^ Map from address to the name at that address along with type.
+                -> Map BSC.ByteString X86FunTypeInfo
+                   -- ^ Map from address to the type information at that address.
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
                 -> Either String ([String], Function X86_64)
-recoverFunction sysp funTypeMap mem fInfo = do
+recoverFunction sysp funNameMap funTypeMap mem fInfo = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
-
-  -- Get name and type information inferred about fthis function.
-  (nm,cfti) <-
-    case Map.lookup entryAddr funTypeMap of
-      Just p -> pure p
-      Nothing -> Left $ "Missing type for " ++ show entryAddr ++ "."
-
   -- Get map from block start addresses to start addresses of blocks
   -- that jump to them.
   let blockPreds = funBlockPreds fInfo
+  -- Get name and type information inferred about fthis function.
+  nm <-
+    case Map.lookup entryAddr funNameMap of
+      Just nm -> pure nm
+      Nothing -> Left $ "Missing name for " ++ show entryAddr ++ "."
+  (curArgs, curRets) <-
+    case Map.lookup nm funTypeMap of
+      Just (X86NonvarargFun args rets) -> pure (args, rets)
+      Just X86PrintfFun ->
+        Left $ BSC.unpack nm ++ " is a vararg function and not supported."
+      Nothing -> Left $ "Missing type for " ++ BSC.unpack nm ++ "."
 
-  -- Compute map from block starting addresses to the dependicies required to run block.
   let useCtx = RegisterUseContext
                { archCallParams = x86_64CallParams
                , archPostTermStmtInvariants = x86TermStmtNext
-               , defaultCallRegs = toFunctionTypeRegs maximumFunTypeInfo
                , calleeSavedRegisters = [ Some RBP
                                         , Some RBX
                                         , Some R12
@@ -1108,11 +1284,9 @@ recoverFunction sysp funTypeMap mem fInfo = do
                                         , Some R15
                                         ]
                , callScratchRegisters = []
-               , returnRegisters = retReg <$> ftiRetRegs cfti
+               , returnRegisters = retReg <$> curRets
                , reguseTermFn = x86TermStmtUsage sysp
-               , functionArgFn = \a -> do
-                   segOff <- asSegmentOff mem a
-                   toFunctionTypeRegs . snd <$> Map.lookup segOff funTypeMap
+               , callDemandFn = x86CallRegs mem funNameMap funTypeMap
                , demandContext = x86DemandContext
                }
   invMap <-
@@ -1123,8 +1297,7 @@ recoverFunction sysp funTypeMap mem fInfo = do
   let funCtx = FRC { frcMemory = mem
                    , frcInterp = fInfo
                    , frcSyscallPersonality = sysp
-                   , frcCurrentFunctionType = cfti
-                   , frcFunctionArgs = funTypeMap
+                   , frcCurrentFunctionReturns = curRets
                    , frcBlockDepMap = invMap
                    }
   runFunRecover funCtx $ do
@@ -1146,7 +1319,7 @@ recoverFunction sysp funTypeMap mem fInfo = do
     let initRegs :: MapF (BoundLoc X86Reg) (FnRegValue X86_64)
         initRegs
           = MapF.empty
-          & flip (ifoldr insArg) (ftiArgRegs cfti)
+          & flip (ifoldr insArg) curArgs
           -- Set df to 0 at function start.
           & MapF.insert (RegLoc DF) (FnValue (FnConstantBool False) (WidthEqRefl (typeRepr DF)))
 
@@ -1160,7 +1333,11 @@ recoverFunction sysp funTypeMap mem fInfo = do
           Map.updateLookupWithKey (\_ _ -> Nothing) entryAddr rf
 
     pure $! Function { fnAddr = entryAddr
-                     , fnType = resolveX86FunctionType cfti
+                     , fnType =
+                         FunctionType { fnArgTypes    = argRegTypeRepr <$> curArgs
+                                      , fnReturnTypes = retRegTypeRepr <$> curRets
+                                      , fnVarArgs = False
+                                      }
                      , fnName = nm
                      , fnEntryBlock = entry
                      , fnRestBlocks = Map.elems restBlocks

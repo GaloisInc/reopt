@@ -71,7 +71,6 @@ import           Data.Macaw.CFG
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
-   , PrettyF(..)
    )
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Types as M (Type)
@@ -87,7 +86,7 @@ commas = hsep . punctuate (char ',')
 
 -- | A unique identifier for an assignment, phi variable, or return.
 newtype FnAssignId = FnAssignId Word64
-                   deriving (Eq, Ord)
+  deriving (Eq, Ord)
 
 instance Show FnAssignId where
   showsPrec _ p = shows (pretty p)
@@ -142,6 +141,7 @@ instance Pretty (FnReturnVar tp) where
 -- | Describes the type of a function.
 data FunctionType (arch :: Type) =
   FunctionType { fnArgTypes :: [Some TypeRepr]
+               , fnVarArgs :: !Bool
                , fnReturnTypes :: [Some TypeRepr]
                }
   deriving (Ord, Eq, Show)
@@ -254,7 +254,7 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
-  pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
+  pretty (FnFunctionEntryValue _ n) = text (BSC.unpack n)
   pretty (FnArg i _)              = text "arg" <> int i
 
 instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) where
@@ -326,8 +326,6 @@ data FnStmt arch where
                  -> FnStmt arch
   -- | A call to a function with some arguments and return values.
   FnCall :: !(FnValue arch (BVType (ArchAddrWidth arch)))
-         -> !(FunctionType arch)
-            -- Arguments
          -> [Some (FnValue arch)]
             -- Return values
          -> ![Some FnReturnVar]
@@ -345,7 +343,7 @@ instance ( FnArchConstraints arch
       FnAssignStmt assign -> pretty assign
       FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
       FnCondWriteMem cond addr val _repr -> text "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
-      FnCall f _ args rets ->
+      FnCall f args rets ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
             ppRet :: forall tp . FnReturnVar tp -> Doc
             ppRet = pretty
@@ -359,7 +357,7 @@ instance FoldFnValue FnStmt where
   foldFnValue f s (FnCondWriteMem c a v _)            = s `f` c `f` a `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldlFC f s rhs
-  foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
+  foldFnValue f s (FnCall fn args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
 
 ------------------------------------------------------------------------
@@ -415,8 +413,6 @@ data FnTermStmt arch
      -- ^ A return from the function with associated values
    | FnTailCall -- Address of function to jump to.
                 !(FnValue arch (BVType (ArchAddrWidth arch)))
-                -- Expected type of function to jump to.
-                !(FunctionType arch)
                 -- Arguments (must match function type)
                 [Some (FnValue arch)]
      -- ^ A call statement to the given location with the arguments
@@ -432,7 +428,7 @@ instance FnArchConstraints arch
                                <+> parens (commas $ V.toList $ pretty <$> vec)
       FnRet rets ->
         text "return" <+> parens (hsep (viewSome pretty <$> rets))
-      FnTailCall f _ args ->
+      FnTailCall f args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
 
@@ -441,7 +437,7 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue f s (FnRet rets) = foldl (\t (Some v) -> f t v) s rets
-  foldFnValue f s (FnTailCall fn _ args) =
+  foldFnValue f s (FnTailCall fn args) =
     foldl (\s' (Some v) -> f s' v) (f s fn) args
 
 ------------------------------------------------------------------------
@@ -508,16 +504,22 @@ data FnBlock arch
              }
 
 instance (FnArchConstraints arch
-         , PrettyF (ArchReg arch)
+         , ShowF (ArchReg arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (FnBlock arch) where
   pretty b =
     pretty (fbLabel b) <+> encloseSep lbracket rbracket (text " ") phiVars <$$>
-      indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
+      indent 2 (vcat phiBindings <$$> vcat stmts <$$> tstmt)
     where
-      phiVars = V.toList $ viewSome (pretty.unFnPhiVar) <$> fbPhiVars b
-
+      ppPhiName v = parens (pretty (unFnPhiVar v) <+> pretty (fnPhiVarType v))
+      phiVars = V.toList $ viewSome ppPhiName <$> fbPhiVars b
+      ppBinding v l = parens (text "mc_binding" <+> v <+> pretty l)
+      ppPhiBindings v = vcat $ ppBinding (pretty (unFnPhiVar v)) <$> locs
+        where locs = fnPhiVarRep v : fnPhiVarLocations v
+      phiBindings = V.toList $ viewSome ppPhiBindings <$> fbPhiVars b
+      stmts = pretty <$> fbStmts b
+      tstmt = pretty (fbTerm b)
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
 
@@ -547,7 +549,7 @@ fnBlocks :: Function arch -> [FnBlock arch]
 fnBlocks f = fnEntryBlock f : fnRestBlocks f
 
 instance (FnArchConstraints arch
-         , PrettyF (ArchReg arch)
+         , ShowF (ArchReg arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (Function arch) where

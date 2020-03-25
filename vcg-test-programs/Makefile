@@ -14,9 +14,7 @@ reopt-vcg := $(shell which reopt-vcg)
 
 
 all : test_add_diet_reopt.crt \
-      test_fib_diet_reopt.crt \
-      test_fib_diet_reopt_manual.crt
-
+      test_fib_diet_reopt.crt
 
 %_manual.crt : %_manual.ann %.ll $(reopt-vcg)
 	$(reopt-vcg) $<

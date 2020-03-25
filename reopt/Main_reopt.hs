@@ -19,6 +19,7 @@ import qualified Data.ByteString.Lazy as BSL
 import           Data.ElfEdit
 import           Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HMap
+import           Data.IORef
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -26,6 +27,7 @@ import           Data.Parameterized.Some
 import           Data.Version
 import           Data.Word
 import           Numeric
+import           Numeric.Natural
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
@@ -69,10 +71,6 @@ unintercalate punct str = reverse $ go [] "" str
     go acc thisAcc str'@(x : xs)
       | Just sfx <- stripPrefix punct str' = go ((reverse thisAcc) : acc) "" sfx
       | otherwise = go acc (x : thisAcc) xs
-
--- | We'll use stderr to log error messages
-logger :: String -> IO ()
-logger = hPutStrLn stderr
 
 ------------------------------------------------------------------------
 -- Action
@@ -429,7 +427,7 @@ getCommandLineArgs = do
   argStrings <- getArgs
   case process arguments argStrings of
     Left msg -> do
-      logger msg
+      hPutStrLn stderr msg
       exitFailure
     Right v -> return v
 
@@ -465,6 +463,17 @@ resolveHeader args =
     Nothing -> pure emptyHeader
     Just p -> parseHeader (clangPath args) p
 
+-- | Function for recovering log information.
+--
+-- This has a side effect where it increments an IORef so
+-- that the number of errors can be recorded.
+recoverLogError :: IORef Natural -- ^ Counter
+                -> String  -- ^ Message to log
+                -> IO ()
+recoverLogError ref msg = do
+  modifyIORef' ref (+1)
+  hPutStrLn stderr msg
+
 -- | Parse arguments to get information needed for function representation.
 getFunctions :: Args
              -> IO ( X86OS
@@ -476,8 +485,19 @@ getFunctions args = do
     discoverX86Binary (programPath args) (loadOptions args) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
   let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
-  recMod <- getFns logger addrSymMap symAddrHashMap hdr (unnamedFunPrefix args)
+  let funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
+  errorRef <- newIORef 0
+  recMod <- getFns (recoverLogError errorRef) addrSymMap symAddrHashMap hdr funPrefix
                    (osPersonality os) discState
+  errorCnt <- readIORef errorRef
+  when (errorCnt > 0) $ do
+    if errorCnt == 1 then
+      hPutStrLn stderr $ "1 error occured."
+    else
+      hPutStrLn stderr $ show errorCnt ++ " errors occured."
+       
+    exitFailure
   pure (os, recMod)
 
 ------------------------------------------------------------------------
@@ -507,8 +527,13 @@ performReopt args = do
       symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  recMod <- getFns logger addrSymMap symAddrHashMap hdr funPrefix (osPersonality os)
+  errorRef <- newIORef 0
+  recMod <- getFns (recoverLogError errorRef) addrSymMap symAddrHashMap hdr funPrefix (osPersonality os)
                    discState
+  errorCnt <- readIORef errorRef
+  when (errorCnt > 0) $ do
+    hPutStrLn stderr $ show errorCnt ++ " error(s) occured ."
+    exitFailure
   let (objLLVM,_) = renderLLVMBitcode args os recMod
   objContents <-
     compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)

@@ -557,44 +557,6 @@ getX86ElfArchInfo e =
     ELFOSABI_NETBSD  -> pure FreeBSD
     abi              -> fail $ "Do not support " ++ show EM_X86_64 ++ "-" ++ show abi ++ "binaries."
 
-inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
-                             -> Map (MemSegmentOff 64) X86FunTypeInfo
-inferFunctionTypeFromDemands dm =
-  let go :: DemandSet X86Reg
-         -> Map (MemSegmentOff 64) (RegisterSet X86Reg)
-         -> Map (MemSegmentOff 64) (RegisterSet X86Reg)
-      go ds m = Map.unionWith Set.union (functionResultDemands ds) m
-
-      retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
-      retDemands = foldr go Map.empty dm
-
-      -- drop the suffix which isn't a member of the arg set.  This
-      -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
-      dropArgSuffix :: (a -> X86Reg tp)
-                    -> [a]
-                    -> RegisterSet X86Reg
-                    -> [a]
-      dropArgSuffix f regs rs =
-        reverse $ dropWhile (not . (`Set.member` rs) . Some . f) $ reverse regs
-
-      -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
-      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> X86FunTypeInfo
-      orderPadArgs (args, rets) =
-        X86FunTypeInfo { ftiArgRegs
-                         =  fmap ArgBV64   (dropArgSuffix X86_GP     x86GPPArgumentRegs args)
-                         ++ fmap ArgMM512D (dropArgSuffix X86_ZMMReg [0..7] args)
-                       , ftiRetRegs
-                         =  fmap RetBV64   (dropArgSuffix X86_GP     [F.RAX, F.RDX] rets)
-                         ++ fmap RetMM512D (dropArgSuffix X86_ZMMReg [0,1]          rets)
-                       }
-
-  in fmap orderPadArgs
-     $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
-                        (fmap (\ds ->  (registerDemands ds, mempty)))
-                        (fmap (\s -> (mempty,s)))
-                        dm
-                        retDemands
-
 -- | Map memory addresses to the associated type for that address.
 type FunctionTypeMap arch = Map BS.ByteString (FunctionType arch)
 
@@ -707,6 +669,12 @@ parseReturnType tp0 =
 isUsedPrefix :: BSC.ByteString -> AddrSymMap w -> Bool
 isUsedPrefix prefix m = any (\nm -> prefix `BSC.isPrefixOf` nm) (Map.elems m)
 
+-- | Name of recovered function when no function exists.
+nosymFunctionName :: BSC.ByteString -> MemSegmentOff w -> BSC.ByteString
+nosymFunctionName prefix segOff =
+  let addr = segoffAddr segOff
+   in prefix <> "_" <> BSC.pack (show (addrBase addr)) <> "_" <> BSC.pack (show (addrOffset addr))
+
 -- | Returns name of recovered function.
 recoveredFunctionName :: MemWidth w
                       => AddrSymMap w
@@ -720,15 +688,19 @@ recoveredFunctionName :: MemWidth w
 recoveredFunctionName m prefix segOff =
   case Map.lookup segOff m of
     Just sym -> sym
-    Nothing ->
-      let addr = segoffAddr segOff
-       in prefix <> "_" <> BSC.pack (show (addrBase addr)) <> "_" <> BSC.pack (show (addrOffset addr))
+    Nothing -> nosymFunctionName prefix segOff
 
-toKnownFunABI :: X86FunTypeInfo -> KnownFunABI X86Reg
-toKnownFunABI fti =
-  KnownFnABI { kfArguments = argReg <$> ftiArgRegs fti
-             , kfReturn = retReg <$> ftiRetRegs fti
-             }
+-- | Map x86 function type to known functon abi.
+--
+-- This is used for global function argument analysis which doesn't yet support vararg
+-- functions such as printf.
+toKnownFunABI :: X86FunTypeInfo -> [KnownFunABI X86Reg]
+toKnownFunABI (X86NonvarargFun args rets) =
+  [KnownFnABI { kfArguments = argReg <$> args
+              , kfReturn = retReg <$> rets
+              }
+  ]
+toKnownFunABI X86PrintfFun = []
 
 -- | Resolve annotations on funbction types from C header, and return
 -- warnings and the list of functions.
@@ -751,15 +723,49 @@ resolveHeaderFuns hdr =  Map.foldrWithKey resolveTypeRegs ([],[]) (hdrFunDecls h
               Left e ->
                 (e:prevWarnings,prev)
               Right (s, ret) ->
-                let fti = X86FunTypeInfo { ftiArgRegs = reverse (arsPrev s)
-                                         , ftiRetRegs = ret
-                                         }
+                let fti = X86NonvarargFun (reverse (arsPrev s)) ret
                  in (prevWarnings,(nm,fti):prev)
+
+-- | Construct function type from demands.
+inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
+                             -> Map (MemSegmentOff 64) X86FunTypeInfo
+inferFunctionTypeFromDemands dm =
+  let go :: DemandSet X86Reg
+         -> Map (MemSegmentOff 64) (RegisterSet X86Reg)
+         -> Map (MemSegmentOff 64) (RegisterSet X86Reg)
+      go ds m = Map.unionWith Set.union (functionResultDemands ds) m
+
+      retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
+      retDemands = foldr go Map.empty dm
+
+      -- drop the suffix which isn't a member of the arg set.  This
+      -- allows e.g. arg0, arg2 to go to arg0, arg1, arg2.
+      dropArgSuffix :: (a -> X86Reg tp)
+                    -> [a]
+                    -> RegisterSet X86Reg
+                    -> [a]
+      dropArgSuffix f regs rs =
+        reverse $ dropWhile (not . (`Set.member` rs) . Some . f) $ reverse regs
+
+      -- Turns a set of arguments into a prefix of x86ArgumentRegisters and friends
+      orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> X86FunTypeInfo
+      orderPadArgs (argSet, retSet) =
+        let args = fmap ArgBV64   (dropArgSuffix X86_GP     x86GPPArgumentRegs argSet)
+                ++ fmap ArgMM512D (dropArgSuffix X86_ZMMReg [0..7] argSet)
+            rets = fmap RetBV64   (dropArgSuffix X86_GP     [F.RAX, F.RDX] retSet)
+                ++ fmap RetMM512D (dropArgSuffix X86_ZMMReg [0,1]          retSet)
+         in X86NonvarargFun args rets
+  in fmap orderPadArgs
+     $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
+                        (fmap (\ds ->  (registerDemands ds, mempty)))
+                        (fmap (\s -> (mempty,s)))
+                        dm
+                        retDemands
 
 -- | Try to recover function information from the information
 -- recovered during code discovery.
 getFns :: (String -> IO ())
-       -- ^ Logging function for
+       -- ^ Logging function for errors
        -> AddrSymMap 64
        -- ^ Map from address to symbol name
        -> HashMap BSC.ByteString (MemSegmentOff 64)
@@ -781,26 +787,29 @@ getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
   let mem = memory info
 
   -- Resolve function type annotations from header, and report rwarnings.
-  symTypeList <- do
-    let (warnings, l) = resolveHeaderFuns hdr
-    mapM_ logger warnings
-    pure l
+  let (hdrWarnings, symTypeList) = resolveHeaderFuns hdr
+  mapM_ logger hdrWarnings
 
   -- Generate map from symbol names to known type.
   --
   -- This is used when we determine that a function jumps to an
   -- undefined symbol via a relocation.
   let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
-      symTypeMap = Map.fromList $ over _2 toKnownFunABI <$> symTypeList
+      symTypeMap = Map.fromList $
+        [ (nm,tp)
+        | (nm,annTp) <- symTypeList
+        , tp <- toKnownFunABI annTp
+        ]
 
   -- Generate map from symbol names to known type.
   --
   -- This is used when we see a function jumps to a defined address.
   let addrTypeMap :: Map (MemSegmentOff 64) (KnownFunABI X86Reg)
       addrTypeMap = Map.fromList
-        [ (addr, toKnownFunABI tp)
-        | (sym,tp) <- symTypeList
+        [ (addr, tp)
+        | (sym,annTp) <- symTypeList
         , addr <- maybeToList (HMap.lookup sym symAddrMap)
+        , tp <- toKnownFunABI annTp
         ]
 
   -- Compute only those functions whose entries are not known.
@@ -812,25 +821,28 @@ getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
           filter notKnown $ exploredFunctions info
   mapM_ logger demandWarnings
 
-  let insertName :: MemSegmentOff 64 -> X86FunTypeInfo -> (BS.ByteString, X86FunTypeInfo)
-      insertName addr tp = ( recoveredFunctionName addrSymMap unnamedFunPrefix addr
-                           , tp
-                           )
-
-  let funTypeMap ::  Map (MemSegmentOff 64) (BS.ByteString, X86FunTypeInfo)
-      funTypeMap = Map.mapWithKey insertName (inferFunctionTypeFromDemands fDems)
-                <> Map.fromList [ (addr, (sym,tp))
-                                | (sym,tp) <- symTypeList
-                                , addr <- maybeToList (HMap.lookup sym symAddrMap)
+  let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
+      funNameMap = addrSymMap
+                <> Map.fromList [ (addr, nosymFunctionName unnamedFunPrefix addr)
+                                | Some finfo <- exploredFunctions info
+                                , let addr = discoveredFunAddr finfo
+                                , Map.notMember addr addrSymMap
                                 ]
+  let funTypeMap ::  Map BS.ByteString X86FunTypeInfo
+      funTypeMap = Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
+                                | (addr,tp) <- Map.toList (inferFunctionTypeFromDemands fDems)
+                                ]
+                <> Map.singleton "printf" X86PrintfFun
+                <> Map.fromList symTypeList
   fnDefs <- fmap catMaybes $
     forM (exploredFunctions info) $ \(Some finfo) -> do
       let entry = discoveredFunAddr finfo
       case checkFunction finfo of
         FunctionOK -> do
-          case recoverFunction sysp funTypeMap mem finfo of
+          case recoverFunction sysp funNameMap funTypeMap mem finfo of
             Left msg -> do
-              logger $ "Could not recover function " ++ show entry ++ ":\n  " ++ msg
+              let nm = BSC.unpack (discoveredFunName finfo)
+              logger $ "Could not recover function " ++ nm ++ ":\n  " ++ msg
               pure Nothing
             Right (warnings, fn) -> do
               mapM_ logger warnings
