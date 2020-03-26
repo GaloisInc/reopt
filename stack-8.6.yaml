@@ -1,4 +1,4 @@
-resolver: lts-13.30
+resolver: lts-14.23
 
 packages:
 - .
@@ -7,14 +7,11 @@ packages:
 - ./deps/macaw/base
 - ./deps/macaw/x86
 extra-deps:
-- aeson-1.4.3.0
-- annotations
-- fgl-visualize-0.1.0.1
-- located-base-0.1.1.1@sha256:7c6395f2b6fbf2d5f76c3514f774423838c0ea94e1c6a5530dd3c94b30c9d1c8
-- monadLib-3.9@sha256:7225fb80bf183bf64968b7d251236fb203b86838679de3eddee7bcc59925adef
-- th-abstraction-0.3.1.0@sha256:96042f6658f2dccfac03b33f0fd59f62b1f65b9b0a765d8a2ea6026f4081ee4a
+- fgl-visualize-0.1.0.1@sha256:e682066053a6e75478a08fd6822dd0143a3b8ea23244bdb01dd389a266447c5e,995
+- monadLib-3.10@sha256:21dc120625bd612527b372e54251fd8358270effe263023d40d8e5892d24531c,653
+- panic-0.4.0.1@sha256:fb46577c9e0ca38c37960572f958a8469f2b577e963ed4f3ea1904d8400d828b,702
 - zenc-0.1.1@sha256:e4be3e5e9fe1a1ade05910909c6e5b5a8eff72e697868b03955c9781b0443947,964
-- ./deps/crucible/what4
+- annotations
 - ./deps/dwarf
 - ./deps/elf-edit
 - ./deps/flexdis86
@@ -22,6 +19,7 @@ extra-deps:
 - ./deps/llvm-pretty
 - ./deps/llvm-pretty-bc-parser
 - ./deps/parameterized-utils
+- ./deps/what4/what4
 
 #nix:
 #  enable: true

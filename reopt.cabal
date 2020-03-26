@@ -47,14 +47,12 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.Domains.DiffEquations
-    Reopt.Analysis.Stack
     Reopt.CFG.FnRep
     Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
-    Reopt.CFG.RegisterUse
     Reopt.CFG.StackDepth
     Reopt.ExternalTools
     Reopt.Header
@@ -64,6 +62,7 @@ library
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relocations
     Reopt.Utils.Hex
+    Reopt.Utils.Printf 
 
   if flag(enable-arm)
     cpp-options: -DSUPPORT_ARM

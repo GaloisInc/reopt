@@ -4,3 +4,5 @@
 typedef long uint64_t;
 
 uint64_t fib(uint64_t x);
+
+long main();

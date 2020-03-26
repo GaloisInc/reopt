@@ -21,6 +21,7 @@ import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson
 import qualified Data.Aeson.Internal as Aeson
 import           Data.Bits
 import qualified Data.ByteString as BS
@@ -29,7 +30,7 @@ import qualified Data.ElfEdit as Elf
 import           Data.Foldable
 import qualified Data.HashMap.Strict as HMap
 import           Data.IORef
-import           Data.LLVM.BitCode
+import           Data.Int
 import           Data.List as List
 import           Data.Macaw.CFG
 import           Data.Macaw.Memory.ElfLoader
@@ -51,7 +52,8 @@ import           Data.Text.Lazy.Builder (Builder)
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.IO as LText
 import           Data.Typeable
-import           GHC.IO.Exception (IOErrorType( ResourceVanished ))
+import qualified Data.Vector as V
+import           GHC.IO.Exception
 import           GHC.Stack
 import           Numeric
 import           Numeric.Natural
@@ -71,6 +73,8 @@ import qualified What4.Protocol.SMTLib2.Parse as SMTP
 import qualified What4.Protocol.SMTLib2.Syntax as SMT
 
 import qualified Reopt.VCG.Annotations as Ann
+
+import           LLVMLoader
 import           VCGCommon
 import qualified VCGMacaw as M
 
@@ -83,9 +87,28 @@ ppBlock (Anon i) = show i
 
 $(pure [])
 
+-- | Maps phi variable names to their corresponding type and values
+-- for each source block.
+type PhiVarMap = HMap.HashMap Text (Type, Map BlockLabel L.Value)
+
+-- | Information about a block including annotations
+data AnnotatedBlock
+  = AnnotatedBlock { abAnn :: !Ann.BlockAnn
+                   , abLbl :: !BlockLabel -- ^ Label for block
+                   , abPhiVarMap :: !PhiVarMap
+                   , abStmts :: ![L.Stmt]
+                     -- ^ Statements after phi variables.
+                   }
+
+
+-- | Maps LLM block labels to their associated annotations.
+type ReachableBlockAnnMap = HMap.HashMap String AnnotatedBlock
+
 -- | Find a block with the given label in the config.
-findBlock :: Ann.FunctionAnn -> BlockLabel -> Maybe Ann.BlockAnn
-findBlock cfg lbl = HMap.lookup (ppBlock lbl) (Ann.blocks cfg)
+findBlock :: ReachableBlockAnnMap -> BlockLabel -> Maybe (Ann.BlockAnn, PhiVarMap)
+findBlock m lbl = do
+  ab <- HMap.lookup (ppBlock lbl) m
+  pure (abAnn ab, abPhiVarMap ab)
 
 $(pure [])
 
@@ -115,20 +138,23 @@ data ProverInterface = ProverInterface
     --
     -- The message is provide so the user knows the source of the
     -- check.
-  , blockErrorCallback :: String -> IO ()
-    -- ^ Report a block error
+  , blockErrorCallback :: !(Int -> MemSegmentOff 64 -> String -> IO ())
+    -- ^ Report a block error given LLVM instruction index and machine code address.
   }
 
 $(pure [])
 
 type FunctionName = String
+-- ^ The name of a function in the annotation.
+--
+-- This is the name in LLVM.
 
 -- | Function for creating sessions to interact with SMT solver.
 --
 -- As blocks can be independently verified, we create a separate
 -- prover interface for each block to be verified.
 data ProverSessionGenerator
-   = PSGen { blockCallbacks :: forall a . FunctionName -> String -> (ProverInterface -> IO a) -> IO a
+   = PSGen { blockCallbacks :: FunctionName -> BlockLabel -> (ProverInterface -> IO ()) -> IO ()
            , sessionComplete :: IO ()
            }
 
@@ -162,11 +188,72 @@ data ModuleVCGContext =
 
 $(pure [])
 
-newtype ModuleError = ModuleError String
+-- | Errors that are tied to a specific function.
+data FunctionError
+   = FunctionNotFound
+   | FunctionArgTypeUnsupported !Ident L.Type
+   | FunctionMissingEntryBlock
+   | FunctionEntryUnreachable
+   | SomeFunctionError !String
+   deriving (Show)
+
+instance IsString FunctionError where
+  fromString = SomeFunctionError
+
+ppFunctionError :: FunctionError -> String
+ppFunctionError FunctionNotFound = "Could not find definition in LLVM."
+ppFunctionError (FunctionArgTypeUnsupported (Ident nm) tp) =
+  printf "Function argument %s has unsupported type %s." nm (show (L.ppType tp))
+ppFunctionError FunctionMissingEntryBlock =
+  "Function body is missing an entry block."
+ppFunctionError FunctionEntryUnreachable =
+  "Function entry marked unreachable."
+ppFunctionError (SomeFunctionError msg) = msg
+
+-- | Errors that are tied to a specific
+data BlockError
+   = BlockAnnParseFailure !String
+   | BlockMissingAnnotations
+   | BlockUnsupportedPhiVarType !Ident !Type
+   | BlockAddrInvalid !(MemWord 64)
+   deriving (Show)
+
+ppBlockError :: BlockError -> String
+ppBlockError (BlockAnnParseFailure msg) = printf "Annotation parse failure: %s" msg
+ppBlockError BlockMissingAnnotations = "Could not find block annotations."
+ppBlockError (BlockUnsupportedPhiVarType (Ident nm) tp) =
+  printf "Phi variable %s has unsupported type %s." nm (show (L.ppType tp))
+ppBlockError (BlockAddrInvalid addr) =
+  printf "Annotated block address %s is not not in code segment." (show addr)
+
+data ModuleError
+   = ModuleError String
+   | FunctionError !FunctionName !FunctionError
+   | BlockError !FunctionName !BlockLabel !BlockError
+     -- ^ @BlockAnnParseFailure fn Could not parse JSON object
   deriving (Typeable, Show)
 
+renderBlockError :: FunctionName -> BlockLabel -> String -> String
+renderBlockError fnm lbl msg = printf "%s.%s. %s" fnm (ppBlock lbl) msg
+
+-- | Pretty print an error that occurs at the start of an instruction.
+renderMCInstError :: FunctionName -- ^ Name of function
+                  -> BlockLabel -- ^ Block label
+                  -> Int -- ^ LLVM instruction index
+                  -> MemSegmentOff 64 -- ^ Address of current instruction.
+                  -> String
+                  -> String
+renderMCInstError fnm lbl idx addr msg =
+  printf "%s.%s.%d (%s). %s" fnm (ppBlock lbl) idx (showsPrec 10 addr "") msg
+
 instance Exception ModuleError where
-  displayException (ModuleError msg) = msg
+  displayException e =
+    case e of
+      ModuleError msg -> msg
+      FunctionError fnm funErr ->
+        printf "%s. %s" fnm (ppFunctionError funErr)
+      BlockError fnm lbl blockErr ->
+        renderBlockError fnm lbl (ppBlockError blockErr)
 
 -- | A monad for running verification of an entire module
 newtype ModuleVCG a = ModuleVCG { _unModuleVCG :: ReaderT ModuleVCGContext IO a }
@@ -188,25 +275,24 @@ vcgLog msg = do
   when (writeStderr ctx) $ do
     liftIO $ hPutStrLn stderr msg
 
-{-
-moduleWarn :: String -> ModuleVCG ()
-moduleWarn msg = do
-  vcgLog $ "Error: " ++ msg
-  ctx <- ask
-  liftIO $ modifyIORef' (errorCount ctx) (+1)
--}
+-- | A warning that stops execution until catch.
+functionError :: FunctionName -> FunctionError -> ModuleVCG a
+functionError fnm e = liftIO (throwIO (FunctionError fnm e))
 
 -- | A warning that stops execution until catch.
+blockError :: FunctionName -> BlockLabel -> BlockError -> ModuleVCG a
+blockError fnm lbl e = liftIO (throwIO (BlockError fnm lbl e))
+
+-- | A warning that stops execution until ca1tch.
 moduleThrow :: String -> ModuleVCG a
-moduleThrow msg = do
-  liftIO $ throw (ModuleError msg)
+moduleThrow = liftIO . throw . ModuleError
 
 -- | Catch a VCG error, print it to the screen and keep going.
 moduleCatch :: ModuleVCG () -> ModuleVCG ()
 moduleCatch (ModuleVCG m) = ModuleVCG $ ReaderT $ \ctx -> do
-  catch (runReaderT m ctx) $ \(ModuleError e) -> do
+  catch (runReaderT m ctx) $ \(e :: ModuleError) -> do
     when (writeStderr ctx) $ do
-      hPutStrLn stderr $ e
+      hPutStrLn stderr $ "Error: " ++ displayException e
     modifyIORef' (errorCount ctx) (+1)
 
 $(pure [])
@@ -217,9 +303,11 @@ $(pure [])
 -- | Information that does not change during execution of @BlockVCG@.
 data BlockVCGContext = BlockVCGContext
   { mcModuleVCGContext :: !ModuleVCGContext
-    -- ^ Information about machine code module.
-  , curFunAnnotations :: !Ann.FunctionAnn
+    -- ^ Information at module level about CFG.
+  , llvmFunName :: !String
     -- ^ Annotations for the current function.
+  , funBlkAnnotations :: !ReachableBlockAnnMap
+    -- ^ Annotations for blocks in the CFG.
   , firstBlockLabel :: !BlockLabel
     -- ^ Label for first block in this function
   , currentBlock :: !BlockLabel
@@ -249,7 +337,7 @@ data BlockVCGState = BlockVCGState
     -- ^ Map registers to the SMT term.
   , mcMemIndex :: !Natural
     -- ^ Index of last defined memory object.
-   , mcEvents :: ![M.Event]
+  , mcEvents :: ![M.Event]
     -- ^ Unprocessed events from last instruction.
   , mcLocalIndex :: !Integer
     -- ^ Index of next local variable for machine code.
@@ -310,11 +398,11 @@ $(pure [])
 -- display to user.
 prependLocation :: String -> BlockVCG String
 prependLocation msg = do
-  thisFun <- asks $ Ann.llvmFunName . curFunAnnotations
-  thisBlk <- asks $ ppBlock . currentBlock
+  thisFun <- asks $ llvmFunName
+  thisBlk <- asks $ currentBlock
   thisInst <- gets $ llvmInstIndex
   addr <- gets $ mcCurAddr
-  return $! printf "%s.%s.%d (%s) - %s" thisFun thisBlk thisInst (showsPrec 10 addr "") msg
+  return $! renderMCInstError thisFun thisBlk thisInst addr msg
 
 $(pure [])
 
@@ -322,10 +410,10 @@ $(pure [])
 -- this block.
 fatalBlockError :: String -> BlockVCG a
 fatalBlockError msg = do
-  annMsg <- prependLocation msg
-  liftIO $ hPutStrLn stderr annMsg
+  thisInst <- gets $ llvmInstIndex
+  addr <- gets $ mcCurAddr
   callback <- asks $ blockErrorCallback . callbackFns
-  liftIO $ callback msg
+  liftIO $ callback thisInst addr msg
   haltBlock
 
 $(pure [])
@@ -337,6 +425,10 @@ addCommand cmd = do
 
 $(pure [])
 
+-- | Add assertion that the propositon is true without requiring it to be proven.
+addAssert :: SMT.Term -> BlockVCG ()
+addAssert p = addCommand $ SMT.assert p
+
 -- | @proveTrue p msg@ adds a proof obligation @p@ is true for all
 -- interpretations of constants with the message @msg@.
 proveTrue :: HasCallStack => SMT.Term -> String -> BlockVCG ()
@@ -344,7 +436,7 @@ proveTrue p msg = do
   annMsg <- prependLocation msg
   fns <- asks callbackFns
   liftIO $ proveTrueCallback fns p annMsg
-  addCommand $ SMT.assert p
+  addAssert p
 
 -- | @proveEq x y msg@ add a proof obligation named @msg@ asserting
 -- that @x@ equals @y@.
@@ -354,11 +446,7 @@ proveEq x y msg = do
   annMsg <- prependLocation msg
   liftIO $ proveFalseCallback fns (SMT.distinct [x,y]) annMsg
   -- Add command for future proofs
-  addCommand $ SMT.assert (SMT.eq [x,y])
-
--- | Add assertion that the propositon is true without requiring it to be proven.
-addAssert :: SMT.Term -> BlockVCG ()
-addAssert p = addCommand $ SMT.assert p
+  addAssert (SMT.eq [x,y])
 
 $(pure [])
 
@@ -914,10 +1002,8 @@ execMCOnlyEvents endAddr = do
       modify $ \s -> s { mcEvents = mevs }
       execMCOnlyEvents endAddr
     M.MCOnlyStackReadEvent mcAddr tp macawValVar:mevs -> do
-      -- TODO: Fix this to the following
-
       -- A MCOnlyStack read means the machine code reads memory, but
-      -- the stack does not.
+      -- LLVM does not.
       --
       -- We currently check that these reads only access the stack as
       -- the only current use of these annotations is to mark register
@@ -926,9 +1012,8 @@ execMCOnlyEvents endAddr = do
       --
       -- Checking this is on the stack also ensures there are no side effects
       -- from mem-mapped IO reads since the stack should not be mem-mapped IO.
-      do thisIP <- gets mcCurAddr
-         proveTrue (evalRangeCheck onStack mcAddr (memReprBytes tp)) $
-           printf "Machine code read at %s is not within stack space." (show thisIP)
+      proveTrue (evalRangeCheck onStack mcAddr (memReprBytes tp)) $
+           "Machine code read is in unallocated stack space."
       -- Define value from reading Macaw heap
       supType <- getSupportedType tp
       defineVarFromReadMCMem macawValVar mcAddr supType
@@ -965,6 +1050,8 @@ execMCOnlyEvents endAddr = do
         _ -> do
           pure ()
     [] -> do
+      -- If we run out of events for this instruction, then get events
+      -- for next instruction.
       nextAddr <- gets mcNextAddr
       when (addrLt nextAddr endAddr) $ do
         getNextEvents
@@ -1017,15 +1104,18 @@ identVar (Ident nm) = llvmVar (Text.pack nm)
 
 -- | Return the SMT term equal to the current value at the current
 -- program location.
-primEval :: Type -> Value' BlockLabel -> BlockVCG SMT.Term
+primEval :: Type -> L.Value -> BlockVCG SMT.Term
 primEval _ (ValIdent var) = do
   pure $! varTerm (identVar var)
 primEval (PrimType (Integer w)) (ValInteger i) = do
   when (w <= 0) $ error "primEval given negative width."
-  pure $ SMT.bvdecimal i (fromIntegral w)
-primEval tp v  = error $ "TODO: Add more support in primEval:\n"
-                    ++ "Type:  " ++ show tp ++ "\n"
-                    ++ "Value: " ++ show v
+  pure $! SMT.bvdecimal i (fromIntegral w)
+primEval (PrimType (Integer 1)) (ValBool b) = do
+  pure $! SMT.bvdecimal (if b then 1 else 0) 1
+primEval tp v  =
+  error $ "Error: Missing case in primEval:\n"
+      ++ "Type:  " ++ show tp ++ "\n"
+      ++ "Value: " ++ show v
 
 $(pure [])
 
@@ -1048,10 +1138,11 @@ llvmInvoke isTailCall fsym args lRet = do
   execMCOnlyEvents =<< asks mcBlockEndAddr
   -- Get current registers
   regs <- gets mcCurRegs
-  -- Evaluate arguments.
+  -- Check we are calling the same function in LLVM and binary.
   lArgs <- traverse evalTyped args
   let mRegIP = getConst $ regs ^. boundValue X86_IP
   assertFnNameEq fsym mRegIP
+  missingFeature "Check varargs functions pass in correct number of arguments."
   -- Verify that the arguments should be same.  Note: Here we take the
   -- number of arguments from LLVM side, since the number of arguments
   -- in Macaw side seems not explicit.  Also assuming that the # of
@@ -1059,11 +1150,11 @@ llvmInvoke isTailCall fsym args lRet = do
   when (length lArgs > length x86ArgGPRegs) $ do
     error $ "Too many arguments."
   -- Check LLVM and machine code arguments match
-  do let compareArg :: SMT.Term -> X86Reg (M.BVType 64) -> BlockVCG ()
-         compareArg la reg = do
+  do let compareArg :: (Int, SMT.Term, X86Reg (M.BVType 64)) -> BlockVCG ()
+         compareArg (idx, la, reg) = do
            let Const ma = regs^.boundValue reg
-           proveEq la ma "Register matches LLVM"
-     zipWithM_ compareArg lArgs x86ArgGPRegs
+           proveEq la ma $ printf "LLVM argument %d is equal to value in register %s." idx (show reg)
+     traverse_ compareArg (zip3 [0..] lArgs x86ArgGPRegs)
 
   -- Check direction flag is clear
   checkDirectionFlagClear
@@ -1075,20 +1166,14 @@ llvmInvoke isTailCall fsym args lRet = do
   let curRSP :: SMT.Term
       curRSP = getConst (regs^.boundValue RSP)
 
-  -- Note. We cannot check that the LLVM stack address is the same as
-  -- the machine code one, so we skip this.
-
-  -- We check that the return address matches the address of the
-  -- next instruction so that the return in LLVM matches the return
-  -- address in machine code.
-
-  -- Check check pointer is valid and we saved return address on call.
+  -- Check we saved return address on call.
+  let postCallRIP :: SMT.Term
+      postCallRIP = M.evalMemAddr nextInsnAddr
   do -- Get value stored at return address
      mem <- gets  $ varTerm . memVar . mcMemIndex
      -- Check stored return value matches next instruction
-     proveEq (readFromMemory mem curRSP addrSupportedMemType) (M.evalMemAddr nextInsnAddr)
+     proveEq (readFromMemory mem curRSP addrSupportedMemType) postCallRIP
        "Check return address matches next instruction."
-
 
   -- Add 8 to RSP for post-call value to represent poping the stack pointer.
   let postCallRSP :: SMT.Term
@@ -1104,8 +1189,9 @@ llvmInvoke isTailCall fsym args lRet = do
           [ (Some r, getConst $ regs^.boundValue r)
           | r <- calleeSavedGPRegs
           ]
-          ++ [ (Some RSP, postCallRSP)
-             , (Some DF, SMT.false)
+          ++ [ (Some X86_IP, postCallRIP)
+             , (Some RSP,    postCallRSP)
+             , (Some DF,     SMT.false)
              , (Some X87_TopReg, SMT.bvdecimal 7 3)
              ]
     liftIO $
@@ -1256,7 +1342,7 @@ llvmLoad :: HasCallStack
          -> L.Type -- ^ LLVM type for load
          -> Maybe L.Align -- ^ Alignment
          -> BlockVCG ()
-llvmLoad ident src llvmType  malign = do
+llvmLoad ident src llvmType malign = do
   llvmAddr <- primEval (PtrTo llvmType) src
   llvmAlign <- do
     let a0 = fromMaybe 0 malign
@@ -1368,14 +1454,14 @@ llvmReturn mlret = do
   mcExecuteToEnd
   -- Get register values after return.
   regs <- gets mcCurRegs
-  -- Assert the IP after the fetch and execute is the return address
-  proveEq (getConst (regs^.boundValue X86_IP)) (varTerm "return_addr")
-    "Return address matches entry value."
-
   -- Assert the stack height at the return is just above the return
   -- address pointer.
   proveEq (getConst (regs^.boundValue RSP)) (addc 64 stackHighTerm 8)
     "Stack height at return matches init."
+
+  -- Assert the IP after the fetch and execute is the return address
+  proveEq (getConst (regs^.boundValue X86_IP)) (varTerm "return_addr")
+    "Return address matches entry value."
 
   checkDirectionFlagClear
 
@@ -1410,29 +1496,37 @@ llvmReturn mlret = do
 
 $(pure [])
 
-defineTerm :: Ident -> SMT.Sort -> SMT.Term -> BlockVCG ()
-defineTerm nm tp t = do
+-- | Tell the SMT solver that the given LLVM identifier has the given
+-- SMT sort and definition.
+defineIdent :: Ident -> SMT.Sort -> SMT.Term -> BlockVCG ()
+defineIdent nm tp t = do
   addCommand $ SMT.defineFun (identVar nm) [] tp t
-
 
 $(pure [])
 
 llvmError :: String -> a
 llvmError msg = error ("[LLVM Error] " ++ msg)
 
-arithOpFunc :: ArithOp
-            -> SMT.Term
-            -> SMT.Term
-            -> SMT.Term
-arithOpFunc (Add _uw _sw) x y = SMT.bvadd x [y]
-arithOpFunc (Sub _uw _sw) x y = SMT.bvsub x y
-arithOpFunc (Mul _uw _sw) x y = SMT.bvmul x [y]
+arithOpFunc :: ArithOp -> SMT.Term -> SMT.Term -> BlockVCG SMT.Term
+arithOpFunc (Add _uw _sw) x y = pure $! SMT.bvadd x [y]
+arithOpFunc (Sub _uw _sw) x y = pure $! SMT.bvsub x y
+arithOpFunc (Mul _uw _sw) x y = pure $! SMT.bvmul x [y]
 arithOpFunc _ _ _ = llvmError "Not implemented yet"
+
+bitOpFunc :: BitOp -> SMT.Term -> SMT.Term -> BlockVCG SMT.Term
+bitOpFunc And x y = pure $! SMT.bvand x [y]
+bitOpFunc Or  x y = pure $! SMT.bvor  x [y]
+bitOpFunc Xor x y = pure $! SMT.bvxor x [y]
+bitOpFunc _ _ _ = llvmError "Not implemented yet"
+
+-- | Sort for LLVM iX with the given width.
+llvmISort :: Int32 -> SMT.Sort
+llvmISort i = SMT.bvSort (fromIntegral i)
 
 -- | Convert LLVM type to SMT sort.
 asSMTSort :: Type -> Maybe SMT.Sort
 asSMTSort (PtrTo _) = Just (SMT.bvSort 64)
-asSMTSort (PrimType (Integer i)) | i > 0 = Just $ SMT.bvSort (fromIntegral i)
+asSMTSort (PrimType (Integer i)) | i > 0 = Just $ llvmISort i
 asSMTSort _ = Nothing
 
 -- | Return the definition in the module with the given name.
@@ -1453,14 +1547,21 @@ initBlockRegValues blockAnn =
 $(pure [])
 
 -- | Evaluate a annoatation expression to construct an SMT term.
-evalPrecondition :: RegState X86Reg (Const SMT.Term)
-                 -> SMT.Term -- ^ Current state of memory
-                 -> Ann.Expr Ann.BlockVar
+evalPrecondition :: (Text -> SMT.Term)
+                    -- ^ Function for mapping LLVM phi variables to
+                    -- their definition.
+                 -> RegState X86Reg (Const SMT.Term)
+                    -- ^ Map from registers to LLVM term.
                  -> SMT.Term
-evalPrecondition regs mem e = do
-  let r = evalPrecondition regs mem
+                    -- ^ Expression representing memory.
+                 -> Ann.Expr Ann.BlockVar
+                    -- ^ Expression with precondition.
+                 -> SMT.Term
+evalPrecondition phiTermFn regs mem e = do
+  let r = evalPrecondition phiTermFn regs mem
   case e of
     Ann.Eq x y -> SMT.eq [r x, r y]
+    Ann.BVAdd x y -> SMT.bvadd (r x) [r y]
     Ann.BVSub x y -> SMT.bvsub (r x) (r y)
     Ann.BVDecimal x y -> SMT.bvdecimal (toInteger x) y
     Ann.Var v ->
@@ -1471,6 +1572,8 @@ evalPrecondition regs mem e = do
           functionStartRegValue (X86_GP reg)
         Ann.MCStack addr bitCount ->
           readFromMemory mem (r addr) (supportedBVMemType (bitCount `shiftR` 3))
+        Ann.LLVMVar nm ->
+          phiTermFn nm
 
 $(pure [])
 
@@ -1481,18 +1584,18 @@ $(pure [])
 -- and allows us to conditionally validate some of the preconditions.
 verifyBlockPreconditions :: String
                          -> (SMT.Term -> SMT.Term)
-                         -> BlockLabel -- ^ Label of block we are jumping to.
+                         -> BlockLabel -- ^ LLVM Label of block we are jumping to.
                          -> BlockVCG ()
 verifyBlockPreconditions prefix f lbl = do
-  fnAnn <- asks $ curFunAnnotations
-  case findBlock fnAnn lbl of
+  blkMap <- asks $ funBlkAnnotations
+  case findBlock blkMap lbl of
     Nothing -> do
       fatalBlockError $
         printf "Target block %s lacks annotations." (ppBlock lbl)
-    Just Ann.UnreachableBlock ->
+    Just (Ann.UnreachableBlock,_) ->
       proveTrue (f SMT.false) $
         printf "Target block %s is unreachable." (ppBlock lbl)
-    Just (Ann.ReachableBlock tgtBlockAnn) -> do
+    Just (Ann.ReachableBlock tgtBlockAnn, varMap) -> do
       firstLabel <- asks firstBlockLabel
 
       when (lbl == firstLabel) $ fail "Do not support jumping to first label in function."
@@ -1506,9 +1609,27 @@ verifyBlockPreconditions prefix f lbl = do
         proveTrue (f (SMT.eq [expected, mcValue])) $ printf "Checking %s register %s." prefix (show r)
 
       mem  <- getMCMem
+
+      srcLbl <- asks currentBlock
+
+      -- Resolve terms for SMT variables.
+      let resolvePhiVarValue :: Text -> (Type, Map BlockLabel L.Value) -> BlockVCG SMT.Term
+          resolvePhiVarValue nm (tp, valMap) = do
+            case Map.lookup srcLbl valMap of
+              Just v -> primEval tp v
+              Nothing -> fail $ printf "Could not find initial value of %s." (Text.unpack nm)
+      phiTermMap <- HMap.traverseWithKey resolvePhiVarValue varMap
+
+      let resolveVar :: Text -> SMT.Term
+          resolveVar phiVar =
+            case HMap.lookup phiVar phiTermMap of
+              Nothing -> error $ "Unassigned variable " ++ Text.unpack phiVar
+              Just t -> t
+
       -- Check preconditions
       forM_ (Ann.blockPreconditions tgtBlockAnn) $ \p -> do
-        proveTrue (f (evalPrecondition regs mem p)) $ printf "Checking %s precondition." prefix
+        proveTrue (f (evalPrecondition resolveVar regs mem p)) $
+          printf "%s precondition: %s" prefix (Ann.exprToText p)
 
       -- Check allocations are preserved.
       curAllocas <- gets mcPendingAllocaOffsetMap
@@ -1528,17 +1649,24 @@ coerceToSMTSort ty = do
 stepNextStmt :: HasCallStack
              => L.Stmt
              -> BlockVCG Bool
-stepNextStmt stmt@(L.Result ident inst _mds) = do
-  setCurrentLLVMStmt stmt
+stepNextStmt (L.Result ident inst _mds) = do
   case inst of
+    Phi _tp _values -> do
+      error $ "stepNextStmt expected phi statements to be stripped."
     Alloca ty eltCount malign -> do
       llvmAlloca ident ty eltCount malign
       pure True
-    Arith lop (Typed lty lhs) rhs -> do
-      tp <- coerceToSMTSort lty
-      lhsv   <- primEval lty lhs
-      rhsv   <- primEval lty rhs
-      defineTerm ident tp $ arithOpFunc lop lhsv rhsv
+    Arith lop (Typed lty x) y -> do
+      s <- coerceToSMTSort lty
+      xv   <- primEval lty x
+      yv   <- primEval lty y
+      defineIdent ident s =<< arithOpFunc lop xv yv
+      pure True
+    Bit bop (Typed tp@(PrimType (Integer i)) x) y -> do
+      xv <- primEval tp x
+      yv <- primEval tp y
+      let s = llvmISort (fromIntegral i)
+      defineIdent ident s =<< bitOpFunc bop xv yv
       pure True
     Call isTailCall retty f args -> do
       -- Evaluate function
@@ -1569,7 +1697,7 @@ stepNextStmt stmt@(L.Result ident inst _mds) = do
             pure val
           _ -> do
             error $ "Do not yet support " ++ show (L.ppConvOp convOp)
-      defineTerm ident smtResultType result
+      defineIdent ident smtResultType result
       pure True
     ICmp lop (Typed lty lhs) rhs -> do
       case lty of
@@ -1592,7 +1720,7 @@ stepNextStmt stmt@(L.Result ident inst _mds) = do
               Isge -> SMT.bvsge lhsv rhsv
               Islt -> SMT.bvslt lhsv rhsv
               Isle -> SMT.bvsle lhsv rhsv
-      defineTerm ident (SMT.bvSort 1) (SMT.ite r (SMT.bvdecimal 1 1) (SMT.bvdecimal 0 1))
+      defineIdent ident (SMT.bvSort 1) (SMT.ite r (SMT.bvdecimal 1 1) (SMT.bvdecimal 0 1))
       pure True
     Load (Typed (PtrTo lty) src) ord malign -> do
       when (isJust ord) $ do
@@ -1601,8 +1729,7 @@ stepNextStmt stmt@(L.Result ident inst _mds) = do
       pure True
     _ -> do
       error $ "stepNextStmt: unsupported instruction: " ++ show inst
-stepNextStmt stmt@(L.Effect instr _mds) = do
-  setCurrentLLVMStmt stmt
+stepNextStmt (L.Effect instr _mds) = do
   case instr of
     Store llvmVal llvmPtr _ordering _align -> do
       addrTerm <- evalTyped llvmPtr
@@ -1640,6 +1767,9 @@ writeCommand h (SMT.Cmd b) =
 
 $(pure [])
 
+------------------------------------------------------------------------
+-- Interactive session
+
 -- | Information needed for interatively verifying goal.
 data InteractiveContext = InteractiveContext
   { ictxAnnFile :: !FilePath
@@ -1675,6 +1805,29 @@ waitForResponse errHandle action = do
       ASync.cancel pollHandle
       pure resp
 
+-- | Run a solver command and catch any errors from solver crashing.
+catchSolverWriteFail :: InteractiveContext -> IO a -> IO a
+catchSolverWriteFail ictx m = m `catch` h
+  where exitOnEOF :: IOError -> IO a
+        exitOnEOF e | isEOFError e = exitFailure
+                    | otherwise = do
+                      hPutStrLn stderr "exitOnEOF throw"
+                      throwIO e
+        h :: IOError -> IO a
+        h e =
+          case ioeGetErrorType e of
+            ResourceVanished -> do
+              hPutStrLn stderr $ "Error reported from solver:"
+              let loop :: IO a
+                  loop = do
+                    msg <- hGetLine (ictxErrHandle ictx) `catch` exitOnEOF
+                    hPutStrLn stderr $ "  " ++ msg
+                    loop
+              loop
+            _tp -> do
+              hPutStrLn stderr $ "Connection to solver failed: " ++ show e
+              exitFailure
+
 -- | Function to verify a SMT proposition is unsat.
 interactiveVerifyGoal :: HasCallStack
                       => InteractiveContext -- ^ Context for verifying goals
@@ -1695,11 +1848,11 @@ interactiveVerifyGoal ictx negGoal propName = do
   modifyIORef' (ictxAllGoalCounter ictx)      (+1)
   modifyIORef' (ictxBlockGoalCounter ictx)    (+1)
 
-
   let fname = standaloneGoalFilename funName lbl cnt
   hPutStrLn stderr $ printf "Verify: %s" propName
-  writeCommand cmdHandle $ SMT.checkSatAssuming [negGoal]
-  hFlush cmdHandle
+  catchSolverWriteFail ictx $ do 
+    writeCommand cmdHandle $ SMT.checkSatAssuming [negGoal]
+    hFlush cmdHandle
   asyncResp <- ASync.async (SMTP.readCheckSatResponse respHandle)
   resp <- waitForResponse (ictxErrHandle ictx) asyncResp
   case resp of
@@ -1735,19 +1888,20 @@ interactiveVerifyGoal ictx negGoal propName = do
 
 newInteractiveSession :: HasCallStack
                       => FilePath -- ^ Path for annotations
-                      -> String -- ^ Command line for SMT solver
+                      -> FilePath -- ^ Path to SMT solver
+                      -> [String] -- ^ Arguments
                       -> IORef Natural -- ^ Counter for each goal
                       -> IORef Natural -- ^ Counter for each verified goal.
                       -> IORef Natural -- ^ Counter for errors
                       -> FunctionName -- ^ Name of function
-                      -> String -- ^ Block label for this session.
-                      -> (ProverInterface -> IO a)
-                      -> IO a
-newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter errorCounter
+                      -> BlockLabel -- ^ Block label for this session.
+                      -> (ProverInterface -> IO ())
+                      -> IO ()
+newInteractiveSession annFile solver solverArgs allGoalCounter verifiedGoalCounter errorCounter
                       funName lbl action = do
   -- Create Goal counter for just this block.
   blockGoalCounter <- newIORef 0
-  let cp = (P.shell cmdline)
+  let cp = (P.proc solver solverArgs)
            { P.std_in  = P.CreatePipe
            , P.std_out = P.CreatePipe
            , P.std_err = P.CreatePipe
@@ -1755,46 +1909,60 @@ newInteractiveSession annFile cmdline allGoalCounter verifiedGoalCounter errorCo
   createResult <- try $ P.createProcess cp
   case createResult of
     Right (Just cmdHandle, Just respHandle, Just errHandle, ph) -> do
-      flip finally (P.terminateProcess ph) $ do
-        writeCommand cmdHandle $ SMT.setLogic SMT.allSupported
-        writeCommand cmdHandle $ SMT.setProduceModels True
-        let ictx = InteractiveContext { ictxAnnFile = annFile
-                                      , ictxFunName = funName
-                                      , ictxBlockLabel = lbl
-                                      , ictxAllGoalCounter = allGoalCounter
-                                      , ictxVerifiedGoalCounter = verifiedGoalCounter
-                                      , ictxBlockGoalCounter = blockGoalCounter
-                                      , ictxCmdHandle = cmdHandle
-                                      , ictxRespHandle = respHandle
-                                      , ictxErrHandle = errHandle
-                                      }
-        let fns = ProverInterface
-                    { addCommandCallback = \cmd -> do
-                        writeCommand cmdHandle cmd
-                    , proveFalseCallback = \g ->
-                        interactiveVerifyGoal ictx g
-                    , proveTrueCallback = \g ->
-                        interactiveVerifyGoal ictx (SMT.not g)
-                    , blockErrorCallback = \_ -> do
-                        modifyIORef errorCounter (+1)
-                    }
-        r <- seq ictx $ seq fns $ action fns
-        writeCommand cmdHandle $ SMT.exit
-        pure r
+      let ictx = InteractiveContext { ictxAnnFile = annFile
+                                    , ictxFunName = funName
+                                    , ictxBlockLabel = ppBlock lbl
+                                    , ictxAllGoalCounter = allGoalCounter
+                                    , ictxVerifiedGoalCounter = verifiedGoalCounter
+                                    , ictxBlockGoalCounter = blockGoalCounter
+                                    , ictxCmdHandle = cmdHandle
+                                    , ictxRespHandle = respHandle
+                                    , ictxErrHandle = errHandle
+                                    }
+      let fns = ProverInterface
+                { addCommandCallback = \smtCmd -> do
+                    writeCommand cmdHandle smtCmd
+                , proveFalseCallback = \g ->
+                    interactiveVerifyGoal ictx g
+                , proveTrueCallback = \g ->
+                    interactiveVerifyGoal ictx (SMT.not g)
+                , blockErrorCallback = \i a msg -> do
+                    hPutStrLn stderr $ "Error: " ++ renderMCInstError funName lbl i a msg
+                    modifyIORef errorCounter (+1)
+                }
+      let runSession = do
+            mr <- try $ writeCommand cmdHandle $ SMT.setLogic SMT.allSupported
+            case mr of
+              Left (_e :: IOException) -> do
+                hPutStrLn stderr $ "Could not start " ++ solver
+                exitFailure
+              Right () -> do
+                writeCommand cmdHandle $ SMT.setProduceModels True
+                action fns
+                writeCommand cmdHandle $ SMT.exit
+      seq ictx $ seq fns $ mask $ \restore -> do
+        catch (restore runSession) $ \e -> do
+          P.terminateProcess ph
+          throwIO (e :: SomeException)
+        P.terminateProcess ph
     Right _ -> do
-      hPutStrLn stderr $ "Unexpected failure running " ++ cmdline
+      hPutStrLn stderr $ "Unexpected failure running " ++ solver
       exitFailure
     Left err -> do
-      hPutStrLn stderr $ "Could not execute " ++ cmdline
-      hPutStrLn stderr $ "  " ++ show (err :: IOException)
+      if isDoesNotExistError err then
+        hPutStrLn stderr $ "Could not find " ++ solver ++ " executable."
+       else do
+        hPutStrLn stderr $ "Could not execute " ++ solver ++ "\n"
+                        ++ "  " ++ show (err :: IOException)
       exitFailure
 
 -- | This runs an action with a proof session generator, and reports
 -- the final proof results.
 interactiveSMTGenerator :: FilePath -- ^ Name of yaml file for error reporting purposes.
-                        -> String -- ^ Command line for running SMT solver
+                        -> FilePath -- ^ Command line for running SMT solver
+                        -> [String] -- ^ Arguments
                         -> IO ProverSessionGenerator
-interactiveSMTGenerator annFile cmdline = do
+interactiveSMTGenerator annFile cmd cmdArgs = do
   -- Counter for all goals
   allGoalCounter <- newIORef 0
   -- Counter for goals successfully verified.
@@ -1805,15 +1973,18 @@ interactiveSMTGenerator annFile cmdline = do
         allCnt <- readIORef allGoalCounter
         verCnt <- readIORef verifiedGoalCounter
         errorCnt <- readIORef errorCounter
-        if errorCnt == 0 && verCnt == allCnt then
+        let verSuccess = errorCnt == 0 && verCnt == allCnt
+        if verSuccess then
           hPutStrLn stdout "Verification succeeded."
          else
           hPutStrLn stdout "Verification failed."
         hPutStrLn stdout $ printf "Verified %s/%s goal(s)." (show verCnt) (show allCnt)
         when (errorCnt > 0) $ do
           hPutStrLn stdout $ printf "Encountered %s error(s)." (show errorCnt)
+        unless verSuccess exitFailure
+
   pure $! PSGen { blockCallbacks =
-                    newInteractiveSession annFile cmdline
+                    newInteractiveSession annFile cmd cmdArgs
                       allGoalCounter verifiedGoalCounter errorCounter
                 , sessionComplete = whenDone
                 }
@@ -1844,7 +2015,7 @@ exportCheckSatProblem outDir fn lbl goalCounter cmdRef negGoal msg = do
 
 exportCallbacks :: FilePath -- ^ Directory to write file to.
                 -> FunctionName -- ^ Name of function
-                -> String -- ^ Block label
+                -> BlockLabel -- ^ Block label
                 -> (ProverInterface -> IO a)
                 -> IO a
 exportCallbacks outDir fn lbl action = do
@@ -1854,20 +2025,22 @@ exportCallbacks outDir fn lbl action = do
     { addCommandCallback = \(SMT.Cmd cmd) -> do
         modifyIORef' cmdRef $ \s -> s <> cmd <> "\n"
     , proveFalseCallback = \p msg ->
-        exportCheckSatProblem outDir fn lbl goalCounter cmdRef p msg
+        exportCheckSatProblem outDir fn (ppBlock lbl) goalCounter cmdRef p msg
     , proveTrueCallback = \p msg ->
-        exportCheckSatProblem outDir fn lbl goalCounter cmdRef (SMT.not p) msg
-    , blockErrorCallback = \_ ->
-        pure ()
+        exportCheckSatProblem outDir fn (ppBlock lbl) goalCounter cmdRef (SMT.not p) msg
+    , blockErrorCallback = \i a msg ->
+        hPutStrLn stderr $ "Error: " ++ renderMCInstError fn lbl i a msg
     }
 
 runBlockVCG :: Ann.FunctionAnn -- ^ Annotations for the function we are verifying.
+            -> ReachableBlockAnnMap
+            -- ^ Annotations on blocks.
             -> BlockLabel -- ^ Label of first block
             -> BlockLabel -- ^ Label of this block.
             -> Ann.ReachableBlockAnn -- ^ Annotations for the block we are verifying.
             -> BlockVCG ()
             -> ModuleVCG ()
-runBlockVCG funAnn firstLabel lbl blockAnn action = do
+runBlockVCG funAnn blkMap firstLabel lbl blockAnn action = do
   let isFirstBlock = firstLabel == lbl
   modCtx <- ask
   let mem = moduleMem modCtx
@@ -1875,13 +2048,14 @@ runBlockVCG funAnn firstLabel lbl blockAnn action = do
     let absAddr = fromIntegral (Ann.blockAddr blockAnn)
     case resolveAbsoluteAddr mem absAddr of
       Just o -> pure o
-      Nothing -> moduleThrow $ "Could not resolve " ++ show absAddr
+      Nothing -> blockError (Ann.llvmFunName funAnn) lbl (BlockAddrInvalid absAddr)
 
   gen <- asks proverGen
-  liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) (ppBlock lbl) $ \prover -> do
+  liftIO $ blockCallbacks gen (Ann.llvmFunName funAnn) lbl $ \prover -> do
     let blockStart = Ann.blockAddr blockAnn
     let sz = Ann.blockCodeSize blockAnn
-    let blockMap = Map.fromList
+    let blockMap :: Map (MemSegmentOff 64) Ann.MemoryAnn
+        blockMap = Map.fromList
           [ (segOff, Ann.eventInfo e)
           | e <- Ann.mcMemoryEvents blockAnn
             -- Get segment offset of event.
@@ -1897,7 +2071,8 @@ runBlockVCG funAnn firstLabel lbl blockAnn action = do
           ]
 
     let ctx = BlockVCGContext { mcModuleVCGContext = modCtx
-                              , curFunAnnotations = funAnn
+                              , llvmFunName = Ann.llvmFunName funAnn
+                              , funBlkAnnotations = blkMap
                               , firstBlockLabel = firstLabel
                               , currentBlock = lbl
                               , callbackFns = prover
@@ -1949,7 +2124,7 @@ runBlockVCG funAnn firstLabel lbl blockAnn action = do
 data VerificationMode
    = DefaultMode
    | ExportMode !FilePath
-   | RunSolver !String
+   | RunSolver !FilePath ![String]
 
 isDefault :: VerificationMode -> Bool
 isDefault DefaultMode = True
@@ -1977,7 +2152,10 @@ parseArgs cmdArgs args = seq args $
     ("--solver":cmdline:rest) -> do
       unless (isDefault (requestedMode args)) $ do
         throwError $ "Cannot specify --export or --solver multiple times."
-      parseArgs rest $ args { requestedMode = RunSolver cmdline }
+      case words cmdline of
+        [] -> throwError "Expected command line argument."
+        (solver:solverArgs) ->
+          parseArgs rest $ args { requestedMode = RunSolver solver solverArgs }
     (path:rest) -> do
       when ("--" `isPrefixOf` path) $ do
         throwError $ "Unexpected flag " ++ path
@@ -2000,10 +2178,10 @@ showError msg = do
 
 withVCGArgs :: IO (Ann.ModuleAnnotations, ProverSessionGenerator)
 withVCGArgs = do
-  cmdArgs <- getArgs
+  vcgArgs <- getArgs
   let initVCG = VCGArgs { reoptAnnotationsPath = Nothing, requestedMode = DefaultMode }
   args <-
-    case runExcept (parseArgs cmdArgs initVCG) of
+    case runExcept (parseArgs vcgArgs initVCG) of
       Left msg ->
         showError msg
       Right ShowHelp -> do
@@ -2022,8 +2200,7 @@ withVCGArgs = do
         hPutStrLn stderr $ "Error parsing annotations: " ++ show err
         exitFailure
       Right jsonConfig -> do
-        let llvmMap = undefined
-        case Aeson.iparse (Ann.parseAnnotations llvmMap) jsonConfig of
+        case Aeson.iparse Ann.parseAnnotations jsonConfig of
           Aeson.IError path msg -> do
             hPutStrLn stderr $ "Error parsing annotations: " ++ Aeson.formatError path msg
             exitFailure
@@ -2044,10 +2221,11 @@ withVCGArgs = do
           hPutStrLn stderr $ "  " ++ show (e :: IOError)
           exitFailure
     DefaultMode -> do
-      psGen <- interactiveSMTGenerator annFile "cvc4 --lang=smt2 --dedicated-eqrange-quant --incremental"
+      let cmdArgs = ["--lang=smt2", "--dedicated-eqrange-quant", "--incremental"]
+      psGen <- interactiveSMTGenerator annFile "cvc4" cmdArgs
       pure (cfg, psGen)
-    RunSolver cmdline -> do
-      psGen <- interactiveSMTGenerator annFile cmdline
+    RunSolver cmd cmdArgs -> do
+      psGen <- interactiveSMTGenerator annFile cmd cmdArgs
       pure (cfg, psGen)
 
 standaloneGoalFilename :: String -- ^ Name of function to verify
@@ -2056,22 +2234,44 @@ standaloneGoalFilename :: String -- ^ Name of function to verify
                        -> FilePath
 standaloneGoalFilename fn lbl i = fn ++ "_" ++ lbl ++ "_" ++ show i ++ ".smt2"
 
+-- | Maps between LLVM argument and machine code name.
+data LLVMMCArgBinding
+   = LLVMMCArgBinding { llvmArgName :: !Ident
+                      , argSMTSort :: !SMT.Sort
+                      , argMCReg   :: !(Some X86Reg)
+                      }
 
 -- | Define LLVM arguments in terms of the function start value of
 -- machine code registers.
-defineLLVMArgs :: [Typed Ident]
-               -> [X86Reg (M.BVType 64)] -- ^ Remaining registers for arguments.
-               -> BlockVCG ()
-defineLLVMArgs [] _x86Regs = pure ()
-defineLLVMArgs (Typed (PrimType (Integer 64)) val : rest) x86Regs =
+defineArgBinding :: LLVMMCArgBinding -> BlockVCG ()
+defineArgBinding b = do
+  let nm = llvmArgName b
+  case argMCReg b of
+    Some r ->
+      addCommand $ SMT.defineFun (identVar nm) [] (argSMTSort b) (functionStartRegValue r)
+
+-- | Define LLVM arguments in terms of the function start value of
+-- machine code registers.
+parseLLVMArgs :: FunctionName -- ^ Name of function for error purposes.
+              -> [LLVMMCArgBinding]
+              -> [Typed Ident]
+              -> [X86Reg (M.BVType 64)] -- ^ Remaining registers for arguments.
+              -> ModuleVCG [LLVMMCArgBinding]
+parseLLVMArgs _fnm prev [] _x86Regs =
+  pure (reverse prev)
+parseLLVMArgs fnm prev (Typed (PrimType (Integer 64)) val : rest) x86Regs =
   case x86Regs of
-    [] -> error $ "Ran out of register arguments."
+    [] ->
+      functionError fnm $
+        SomeFunctionError (printf "Maximum of %d i64 arguments supported." (length x86ArgGPRegs))
     (reg:restRegs) -> do
-      addCommand $ SMT.defineFun (identVar val) [] (SMT.bvSort 64)
-                                 (functionStartRegValue reg)
-      defineLLVMArgs rest restRegs
-defineLLVMArgs (Typed tp _val : _rest) _x86Regs =
-  error $ "Unexpected type " ++ show tp
+      let binding = LLVMMCArgBinding { llvmArgName = val
+                                     , argSMTSort = SMT.bvSort 64
+                                     , argMCReg = Some reg
+                                     }
+      seq binding $ parseLLVMArgs fnm (binding:prev) rest restRegs
+parseLLVMArgs fnm _ (Typed tp val : _rest) _x86Regs = do
+  functionError fnm (FunctionArgTypeUnsupported val tp)
 
 -- | Return true if the allocations overlap in memory.
 allocaOverlap :: Ann.AllocaAnn -> Ann.AllocaAnn -> Bool
@@ -2114,37 +2314,42 @@ checkAllocaOverlap lbl l = do
 --
 -- Note. This is written to take a function rather than directly call
 -- @stepNextStmtg@ so that the call stack is cleaner.
-checkEachStmt :: (L.Stmt -> BlockVCG Bool) -> [L.Stmt] -> BlockVCG ()
-checkEachStmt _ [] = do
+checkEachStmt :: [L.Stmt] -> BlockVCG ()
+checkEachStmt [] = do
   error $ "We have reached end of LLVM events without a block terminator."
-checkEachStmt f (stmt:stmts) = do
-  c <- f stmt
+checkEachStmt (stmt:stmts) = do
+  setCurrentLLVMStmt stmt
+  continue <- stepNextStmt stmt
   modify' $ \s -> s { llvmInstIndex = llvmInstIndex s + 1 }
-  if c then
-    checkEachStmt f stmts
+  if continue then
+    checkEachStmt stmts
    else
     unless (null stmts) $ error "Expected return to be last LLVM statement."
 
+$(pure [])
+
+llvmTypeToExprType :: Type -> Maybe Ann.ExprType
+llvmTypeToExprType (L.PrimType  (L.Integer lw))
+  | lw > 0 = Just (Ann.BVType (fromIntegral lw))
+llvmTypeToExprType (L.PtrTo _) = Just (Ann.BVType 64)
+llvmTypeToExprType _ = Nothing
+
+$(pure [])
 
 -- | Verify a block satisfies its specification.
 verifyBlock :: HasCallStack
-            => Define
-               -- ^ LLVM function that current block is contained
-               -- within.
-            -> Ann.FunctionAnn -- ^ Annotations for function
+            => Ann.FunctionAnn -- ^ Annotations for function
+            -> [LLVMMCArgBinding]
+            -> ReachableBlockAnnMap
+            -- ^ Annotations on blocks.
             -> BlockLabel -- ^ Label of first block.
-            -> L.BasicBlock
+            -> AnnotatedBlock
             -> ModuleVCG ()
-verifyBlock lFun funAnn firstLabel bb = do
-  -- Get block label
-  let Just lbl = L.bbLabel bb
+verifyBlock funAnn argBindings blkMap firstLabel bAnn = do
+  let lbl = abLbl bAnn
+  let mblockAnn = abAnn bAnn
+  let stmts = abStmts bAnn
   -- Get annotations for this block
-  mblockAnn <-
-    case findBlock funAnn lbl of
-      Just b -> pure b
-      Nothing ->
-        moduleThrow $
-          printf "%s: Block %s lacks annotations." (Ann.llvmFunName funAnn) (ppBlock lbl)
   case mblockAnn of
     -- We only need to verify unreachable blocks are not reachable."
     Ann.UnreachableBlock -> do
@@ -2153,7 +2358,7 @@ verifyBlock lFun funAnn firstLabel bb = do
       -- Check allocations do not overlap with each other.
       checkAllocaOverlap lbl (Map.elems (Ann.blockAllocas blockAnn))
       -- Start running verification condition generator.
-      runBlockVCG funAnn firstLabel lbl blockAnn $ do
+      runBlockVCG funAnn blkMap firstLabel lbl blockAnn $ do
         -- Add LLVM declarations for all existing allocations.
         forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
           when (Ann.allocaExisting a) $ do
@@ -2163,17 +2368,77 @@ verifyBlock lFun funAnn firstLabel bb = do
         -- Declare constant representing where we return to.
         defineVarFromReadMCMem "return_addr" stackHighTerm addrSupportedMemType
         -- Declare LLVM arguments in terms of Macaw registers at function start.
-        defineLLVMArgs (L.defArgs lFun) x86ArgGPRegs
+        mapM_ defineArgBinding argBindings
+        -- Declare phi variables
+        let declarePhiVar nm (tp, _) next = do
+              case asSMTSort tp of
+                Nothing -> do
+                  fail $ printf "The type %s of variable %s is not supported."
+                                       (show (L.ppType tp)) (Text.unpack nm)
+                Just s -> do
+                  addCommand $ SMT.declareConst (llvmVar nm) s
+                  next
+        HMap.foldrWithKey declarePhiVar (pure ()) (abPhiVarMap bAnn)
         -- Assume preconditions
         do regs <- gets mcCurRegs
            mem  <- getMCMem
            forM_ (Ann.blockPreconditions blockAnn) $ \p -> do
-             addAssert (evalPrecondition regs mem p)
+             addAssert (evalPrecondition (varTerm . llvmVar) regs mem p)
         -- Start processing LLVM statements
-        checkEachStmt stepNextStmt (bbStmts bb)
+        checkEachStmt stmts
 
 $(pure [])
 
+-- | Extract the phi statements from the list of statements, returning
+-- either the name of the variable and type that could not be interpreted
+-- or a map from from variable names to their types.
+extractPhiStmtVars :: [(Ident, Type, Map BlockLabel L.Value)]
+                    -> [L.Stmt]
+                    -> ( [(Ident, Type, Map BlockLabel L.Value)]
+                       , [L.Stmt])
+extractPhiStmtVars prev (L.Result nm (Phi tp vals) _:rest) =
+  let valMap = Map.fromList [ (lbl, v) | (v,lbl) <- vals ]
+   in extractPhiStmtVars ((nm, tp, valMap):prev) rest
+extractPhiStmtVars prev rest = (prev, rest)
+
+$(pure [])
+
+-- | Parse all blocks in a module.
+parseBlockFn :: FunctionName
+             -> HMap.HashMap Text Aeson.Object
+             -> BasicBlock
+             -> ModuleVCG AnnotatedBlock
+parseBlockFn fnm blockMap b = do
+  let Just lbl = bbLabel b
+  let (phiVarList, llvmStmts) = extractPhiStmtVars [] (bbStmts b)
+
+  let parseLLVMVar :: (Ident, Type, a) -> ModuleVCG (Text, Ann.ExprType)
+      parseLLVMVar (Ident nm, tp, _) =
+        case llvmTypeToExprType tp of
+          Just etp ->
+            pure (Text.pack nm, etp)
+          Nothing ->
+            blockError fnm lbl $ BlockUnsupportedPhiVarType (Ident nm) tp
+
+  llvmVarMap <- HMap.fromList <$> traverse parseLLVMVar phiVarList
+
+  o <- case HMap.lookup (Text.pack (ppBlock lbl)) blockMap of
+         Just o ->
+           pure o
+         Nothing ->
+           blockError fnm lbl BlockMissingAnnotations
+  case Aeson.parse (Ann.parseJSONBlockAnn llvmVarMap) o of
+    Aeson.Error msg ->
+      blockError fnm lbl (BlockAnnParseFailure msg)
+    Aeson.Success a -> do
+      pure $! AnnotatedBlock { abAnn = a
+                             , abLbl = lbl
+                             , abPhiVarMap = HMap.fromList
+                                             [ (Text.pack nm, (tp, m))
+                                             | (L.Ident nm, tp, m) <- phiVarList
+                                             ]
+                             , abStmts = llvmStmts
+                             }
 
 -- | Verify a particular function satisfies its specification.
 verifyFunction :: HasCallStack
@@ -2185,38 +2450,49 @@ verifyFunction :: HasCallStack
                -> ModuleVCG ()
 verifyFunction lMod funAnn = do
   modCtx <- ask
-  let fnm :: String
+  let fnm :: FunctionName
       fnm = Ann.llvmFunName funAnn
   vcgLog $ "Analyzing " ++ fnm
 
   lFun <-
     case getDefineByName lMod fnm of
-      Just f -> pure f
-      Nothing -> moduleThrow $ printf "Could not find LLVM function %s in module." fnm
+      Just f ->
+        pure f
+      Nothing ->
+        functionError fnm FunctionNotFound
 
-  when (length (L.defArgs lFun) > length Ann.x86ArgGPRegs) $ do
-    moduleThrow $ "Too many arguments."
+  argBindings <- parseLLVMArgs fnm [] (L.defArgs lFun) x86ArgGPRegs
 
+  blockEntries <- forM (Ann.blocks funAnn) $ \blockAnn -> do
+    case HMap.lookup "label" blockAnn of
+      Just (Aeson.String lbl) -> pure (lbl, blockAnn)
+      Just _ -> functionError fnm "Block annotation labels must be strings."
+      Nothing -> functionError fnm "Block annotations must contain \"label\" fields."
+
+  let blockMap = HMap.fromList (V.toList blockEntries)
+
+  blks <- traverse (parseBlockFn fnm blockMap) (defBody lFun)
+  let blkMap = HMap.fromList [ (ppBlock (abLbl ab), ab) | ab <- blks ]
   case defBody lFun of
-    [] -> moduleThrow $ "Expected function to have at least one basic block."
-    firstBlock:restBlocks -> do
+    [] ->
+      functionError fnm FunctionMissingEntryBlock
+    firstBlock:_ -> do
       let Just entryLabel = bbLabel firstBlock
-      firstBlockAnn <-
-        case findBlock funAnn entryLabel of
-          Just (Ann.ReachableBlock b) -> pure b
-          Just Ann.UnreachableBlock -> do
-            moduleThrow $
-              printf "%s: Entry block %s must be reachable." fnm (ppBlock entryLabel)
-          Nothing ->
-            moduleThrow $
-              printf "%s: Could not find annotations for LLVM block %s." fnm (ppBlock entryLabel)
-      let Right addr = getMCAddrOfLLVMFunction (symbolAddrMap modCtx) fnm
-      when (toInteger addr /= toInteger (Ann.blockAddr firstBlockAnn)) $ do
-        moduleThrow $ printf "%s annotations list address of %s; symbol table reports address of %s."
-                             fnm (show (Ann.blockAddr firstBlockAnn)) (show addr)
+      do firstBlockAnn <-
+           case findBlock blkMap entryLabel of
+             Just (Ann.ReachableBlock b, _) ->
+               pure b
+             Just (Ann.UnreachableBlock, _) -> do
+               functionError fnm FunctionEntryUnreachable
+             Nothing ->
+               blockError fnm entryLabel BlockMissingAnnotations
+         let Right addr = getMCAddrOfLLVMFunction (symbolAddrMap modCtx) fnm
+         when (toInteger addr /= toInteger (Ann.blockAddr firstBlockAnn)) $ do
+           moduleThrow $ printf "%s annotations list address of %s; symbol table reports address of %s."
+                               fnm (show (Ann.blockAddr firstBlockAnn)) (show addr)
       -- Verify the blocks.
-      forM_ (firstBlock:restBlocks) $ \bb -> do
-        moduleCatch $ verifyBlock lFun funAnn entryLabel bb
+      forM_ blks $ \ab -> do
+        moduleCatch $ verifyBlock funAnn argBindings blkMap entryLabel ab
 
 $(pure [])
 
@@ -2248,125 +2524,11 @@ readElf path = do
         warning "Expected Linux binary"
       pure e
 
--- | Wait for a process to end and throw an error case if the return
--- value differs from the 'ExitSuccess'.
---
--- This function takes a handle to the process's stderr and closes it
--- or semicloses it before returning.
-waitForEnd :: String -- ^ Name of tool
-           -> Handle -- ^ Handle to read from for getting error
-           -> P.ProcessHandle -- ^ Handle to process
-           -> IO ()
-waitForEnd tool errHandle ph = do
-  ec  <- P.waitForProcess ph
-  case ec of
-    ExitSuccess ->
-      hClose errHandle
-    ExitFailure c -> do
-      msg <- hGetContents errHandle
-      let msg' | null msg = tool ++ " exited with error code " ++ show c ++ "."
-               | otherwise = tool ++ ": " ++ msg
-      hPutStrLn stderr msg'
-
--- | Try to create a process, and call the call back funtion with
--- the handles for 'stdin', 'stdout', and 'stderr' if it succeeds.
---
--- This will throw a failure and read from standard error is the process fails.
---
--- If the attempt fails, because the process does not exist, then throw the given
--- exception.
-withCreateProcess :: String -- ^ Name of tool for error purposes
-                  -> String -- ^ Path of program to execute
-                  -> [String] -- ^ Arguments
-                  -> ((Handle, Handle, Handle) -> IO a)
-                  -> IO a
-withCreateProcess nm cmd args f = do
-  let cp = (P.proc cmd args)
-                { P.env = Nothing
-                , P.std_in  = P.CreatePipe
-                , P.std_out = P.CreatePipe
-                , P.std_err = P.CreatePipe
-                }
-  let h :: IOException -> IO a
-      h ioe
-        | isDoesNotExistError ioe = do
-            hPutStrLn stderr "Could not find llvm-as"
-            exitFailure
-        | isPermissionError ioe = do
-            hPutStrLn stderr "Do not have permission to execute llvm-as"
-            exitFailure
-        | otherwise = throwIO ioe
-  (Just in_handle, Just out, Just err, ph) <-
-     P.createProcess cp `catch` h
-  f (in_handle, out, err) <* waitForEnd nm err ph
-
--- | This is a helper function that runs an IO action and ensures that
--- some cleanup is performed if an exception is thrown.
-writeAndClose :: Handle -- ^ Input handle to write to.
-              -> Handle -- ^ Error handle to close if things fail.
-              -> IO () -- ^ Action to run
-              -> IO ()
-writeAndClose inHandle errHandle action = do
-  let h :: IOError -> IO ()
-      h e | ioeGetErrorType e == ResourceVanished = do
-              hClose inHandle
-              hPutStrLn stderr =<< hGetContents errHandle
-              exitFailure
-          | otherwise = do
-              hClose inHandle
-              hClose errHandle
-              throwIO (e :: IOError)
-  action `catch` h
-  hClose inHandle
-
-
--- | Run llvm-as to generate an bitcode file from text.
-runLlvmAs :: FilePath
-          -- ^ Path to llvm-as
-          -> BS.ByteString
-          -- ^ .ll file file
-          -> IO BS.ByteString
-runLlvmAs cmd asm = do
-  -- Run GNU asssembler
-  let args= []
-  withCreateProcess "llvm-as" cmd args $ \(inHandle, outHandle, errHandle) -> do
-    -- Write to input handle and close it.
-    writeAndClose inHandle errHandle $ do
-      hSetBinaryMode inHandle True
-      BS.hPut inHandle asm
-    -- Get output
-    hSetBinaryMode outHandle True
-    BS.hGetContents outHandle
-
--- | Parse thte Get LLVM module
-getLLVMBCModule :: BS.ByteString -> IO Module
-getLLVMBCModule bs = do
-  res <- parseBitCode bs
-  case res of
-    Left err -> do
-      hPutStrLn stderr $ "Could not parse LLVM: " ++ show err
-      exitFailure
-    Right m ->
-      pure m
-
--- | Parse the LLVM  module either in .bc or .ll format.
-getLLVMModule :: FilePath -> IO Module
-getLLVMModule path = do
-  bs <- BS.readFile path
-  if BS.take 4 bs == "BC\xc0\xde" then
-    getLLVMBCModule bs
-   else if takeExtension path == ".ll" then do
-    hPutStrLn stderr "Reading assembly"
-    bcBS <- runLlvmAs "llvm-as" bs
-    getLLVMBCModule bcBS
-   else do
-    hPutStrLn stderr $ "Could not determine type of LLVM file: " ++ path ++ "\n"
-      ++ show (BS.take 4 bs)
-    exitFailure
-
 main :: IO ()
 main = do
+  -- Get arguments to main
   (ann, gen) <- withVCGArgs
+  -- Load Elf file and emit warnings
   e <- readElf $ Ann.binFilePath ann
   let loadOpts = defaultLoadOptions
   (warnings, mem, _entry, symbols) <-
@@ -2377,10 +2539,8 @@ main = do
           ++ "  " ++ err
         exitFailure
       Right r -> pure r
-
   forM_ warnings $ \w -> do
     hPutStrLn stderr w
-
   -- Get LLVM module
   lMod <- getLLVMModule (Ann.llvmFilePath ann)
   -- Create verification coontext for module.
@@ -2398,14 +2558,15 @@ main = do
                                     [ (nm,tp)
                                     | L.TypeDecl nm tp <- L.modTypes lMod
                                     ]
-
                                 }
   -- Run verification.
   runModuleVCG modCtx $ do
     forM_ (Ann.functions ann) $ \funAnn -> do
       moduleCatch $ verifyFunction lMod funAnn
+  -- print out results
   errorCnt <- readIORef errorRef
-  if errorCnt > 0 then
+  if errorCnt > 0 then do
     hPutStrLn stderr "Errors during verification."
+    exitFailure
    else
     sessionComplete gen

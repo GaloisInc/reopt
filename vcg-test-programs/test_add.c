@@ -3,7 +3,6 @@ long add(long x) {
   return y + 1;
 }
 
-
 int main() {
   long x = add(42);
   return 0;

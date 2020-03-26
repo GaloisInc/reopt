@@ -20,14 +20,13 @@ module Reopt.VCG.SMTParser
     -- * Rendering
   , SExprEncoding
   , encodeList
+  , sexprFromText
   , IsString(..)
   ) where
 
 import           Control.Monad
 import           Data.Attoparsec.Text
 import           Data.Bits
-import           Data.Char
-import           Data.List
 import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -54,7 +53,7 @@ ppSExpr :: SExpr -> ShowS
 ppSExpr (Atom nm) = showString (Text.unpack nm)
 ppSExpr (Number n) = shows n
 ppSExpr (List []) = showString "()"
-ppSExpr (List (h:r)) = showParen True (ppSExpr h . showL r)
+ppSExpr (List (h0:r0)) = showParen True (ppSExpr h0 . showL r0)
   where showL :: [SExpr] -> ShowS
         showL [] = id
         showL (h:l) = showChar ' ' . ppSExpr h . showL l
@@ -64,9 +63,9 @@ sexprParser :: Parser SExpr
 sexprParser = do
   skipSpace
   mconcat
-    [ do char '('
+    [ do void $ char '('
          l <- many' sexprParser
-         skipSpace *> char ')'
+         void $ skipSpace *> char ')'
          pure (List l)
     , do t <- takeWhile1 (inClass simpleSymbolChar)
          case () of
@@ -90,9 +89,14 @@ newtype SExprEncoding = SExprEncoding { encBuilder :: Text.Builder }
 instance IsString SExprEncoding where
   fromString = SExprEncoding . fromString
 
+sexprFromText :: Text -> SExprEncoding
+sexprFromText = SExprEncoding . Text.fromText
+
 encodeList :: [SExprEncoding] -> SExprEncoding
 encodeList [] = "()"
-encodeList l = SExprEncoding ("(" <> foldr (\e r -> encBuilder e <> " " <> r) ")" l)
+encodeList (h0:r0) = SExprEncoding ("(" <> encBuilder h0 <> go r0)
+  where go (h:r) = " " <> encBuilder h <> go r
+        go [] = ")"
 
 encodingToLazy :: SExprEncoding -> LText.Text
 encodingToLazy = Text.toLazyText . encBuilder
@@ -111,6 +115,7 @@ data ExprType
 -- variables or other known constants.
 data Expr (v :: *) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
+  BVAdd :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v
   -- | @BVDecimal v w@ denotes the @w@-bit value @v@ which should
   -- satisfy the property that @v < s^w@.
@@ -121,8 +126,6 @@ data Expr (v :: *) where
 -- | Denotes a type that can be read from expression atoms.
 class IsExprVar v where
   encodeVar :: v -> SExprEncoding
-
-type Evaluator a = Either String a
 
 -- | A parser from S-expressions to foreign variables.
 type VarParser v = SExpr -> Either String (v, ExprType)
@@ -143,7 +146,7 @@ evalExpr parseVar (List [Atom "bvsub", x, y]) = do
     (BVType xw, BVType yw) | xw == yw -> do
        pure (BVSub xe ye, xtp)
     _ -> Left $ ppSExpr x (" and " ++ ppSExpr y " should be bitvectors with the same width.")
-evalExpr parseVar (List [Atom "_", Atom t, Number w])
+evalExpr _parseVar (List [Atom "_", Atom t, Number w])
   | "bv" `Text.isPrefixOf` t
   , Right (n,"") <- Text.decimal (Text.drop 2 t) =
       pure (BVDecimal (n .&. (2^w - 1)) w, BVType w)
@@ -161,6 +164,7 @@ fromText varParser t = do
 -- | Render the expression into a builder
 encodeExpr :: IsExprVar a => Expr a -> SExprEncoding
 encodeExpr (Eq x y) = encodeList ["=", encodeExpr x, encodeExpr y]
+encodeExpr (BVAdd x y) = encodeList ["bvadd", encodeExpr x, encodeExpr y]
 encodeExpr (BVSub x y) = encodeList ["bvsub", encodeExpr x, encodeExpr y]
 encodeExpr (BVDecimal v w) = encodeList ["_", fromString ("bv" <> show v), fromString (show w)]
 encodeExpr (Var v) = encodeVar v

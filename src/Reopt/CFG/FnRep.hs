@@ -26,6 +26,8 @@ module Reopt.CFG.FnRep
    , FnValue(..)
    , FunctionType(..)
    , FnBlock(..)
+   , FnBlockInvariant(..)
+   , FnMemAccessType(..)
    , FnBlockLabel
    , fnBlockLabelFromAddr
    , fnBlockLabelAddr
@@ -57,7 +59,7 @@ import           Data.Word
 import           Numeric (showHex)
 import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
 
-import           Data.Macaw.AbsDomain.JumpBounds (LocMap)
+import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc)
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
@@ -69,7 +71,6 @@ import           Data.Macaw.CFG
    , IsArchFn(..)
    , IsArchStmt(..)
    , MemRepr(..)
-   , PrettyF(..)
    )
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Types as M (Type)
@@ -85,7 +86,7 @@ commas = hsep . punctuate (char ',')
 
 -- | A unique identifier for an assignment, phi variable, or return.
 newtype FnAssignId = FnAssignId Word64
-                   deriving (Eq, Ord)
+  deriving (Eq, Ord)
 
 instance Show FnAssignId where
   showsPrec _ p = shows (pretty p)
@@ -97,15 +98,24 @@ instance Pretty FnAssignId where
 -- FnPhiVar
 
 -- | A phi variable
-data FnPhiVar (tp :: M.Type) =
+data FnPhiVar arch (tp :: M.Type) =
   FnPhiVar { unFnPhiVar :: !FnAssignId
            , fnPhiVarType :: !(TypeRepr tp)
+           , fnPhiVarRep :: !(BoundLoc (ArchReg arch) tp)
+             -- ^ Class representative for locations that lead to this
+             -- phi variable.
+           , fnPhiVarLocations :: ![BoundLoc (ArchReg arch) tp]
+             -- ^ Locations read after this phi variable is introduced that
+             -- are equivalent to this phi variable.
            }
 
-instance TestEquality FnPhiVar where
+instance HasRepr (FnPhiVar arch) TypeRepr where
+  typeRepr = fnPhiVarType
+
+instance TestEquality (FnPhiVar arch) where
   testEquality x y = orderingF_refl (compareF x y)
 
-instance OrdF FnPhiVar where
+instance OrdF (FnPhiVar arch) where
   compareF x y =
     case compare (unFnPhiVar x) (unFnPhiVar y) of
       LT -> LTF
@@ -114,9 +124,6 @@ instance OrdF FnPhiVar where
         case testEquality (fnPhiVarType x) (fnPhiVarType y) of
           Just Refl -> EQF
           Nothing -> error "mismatched types"
-
-instance Pretty (FnPhiVar tp) where
-  pretty = pretty . unFnPhiVar
 
 ------------------------------------------------------------------------
 -- FnReturnVar
@@ -134,6 +141,7 @@ instance Pretty (FnReturnVar tp) where
 -- | Describes the type of a function.
 data FunctionType (arch :: Type) =
   FunctionType { fnArgTypes :: [Some TypeRepr]
+               , fnVarArgs :: !Bool
                , fnReturnTypes :: [Some TypeRepr]
                }
   deriving (Ord, Eq, Show)
@@ -197,7 +205,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   -- | Value from an assignment statement.
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
   -- | Value from a phi node
-  FnPhiValue :: !(FnPhiVar tp) -> FnValue arch tp
+  FnPhiValue :: !(FnPhiVar arch tp) -> FnValue arch tp
   -- | A value returned by a function call (rax/rdx/xmm0)
   FnReturn :: !(FnReturnVar tp) -> FnValue arch tp
   -- | The pointer to a function.
@@ -246,7 +254,7 @@ instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
-  pretty (FnFunctionEntryValue _ n) = text "FunctionEntry" <> text (BSC.unpack n)
+  pretty (FnFunctionEntryValue _ n) = text (BSC.unpack n)
   pretty (FnArg i _)              = text "arg" <> int i
 
 instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) where
@@ -318,8 +326,6 @@ data FnStmt arch where
                  -> FnStmt arch
   -- | A call to a function with some arguments and return values.
   FnCall :: !(FnValue arch (BVType (ArchAddrWidth arch)))
-         -> !(FunctionType arch)
-            -- Arguments
          -> [Some (FnValue arch)]
             -- Return values
          -> ![Some FnReturnVar]
@@ -337,7 +343,7 @@ instance ( FnArchConstraints arch
       FnAssignStmt assign -> pretty assign
       FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
       FnCondWriteMem cond addr val _repr -> text "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
-      FnCall f _ args rets ->
+      FnCall f args rets ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
             ppRet :: forall tp . FnReturnVar tp -> Doc
             ppRet = pretty
@@ -351,7 +357,7 @@ instance FoldFnValue FnStmt where
   foldFnValue f s (FnCondWriteMem c a v _)            = s `f` c `f` a `f` v
   foldFnValue _ s (FnComment {})                      = s
   foldFnValue f s (FnAssignStmt (FnAssignment _ rhs)) = foldlFC f s rhs
-  foldFnValue f s (FnCall fn _ args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
+  foldFnValue f s (FnCall fn args _) = foldl (\s' (Some v) -> f s' v) (f s fn) args
   foldFnValue f s (FnArchStmt stmt) = foldlF' f s stmt
 
 ------------------------------------------------------------------------
@@ -377,6 +383,8 @@ instance Pretty (FnBlockLabel w) where
 ------------------------------------------------------------------------
 -- FnJumpTarget
 
+-- | A jump target along with values to assign the phi variables when
+-- jumping.
 data FnJumpTarget arch =
   FnJumpTarget { fnJumpLabel :: !(FnBlockLabel (ArchAddrWidth arch))
                  -- ^ Label of block we are jumping to.
@@ -405,8 +413,6 @@ data FnTermStmt arch
      -- ^ A return from the function with associated values
    | FnTailCall -- Address of function to jump to.
                 !(FnValue arch (BVType (ArchAddrWidth arch)))
-                -- Expected type of function to jump to.
-                !(FunctionType arch)
                 -- Arguments (must match function type)
                 [Some (FnValue arch)]
      -- ^ A call statement to the given location with the arguments
@@ -422,7 +428,7 @@ instance FnArchConstraints arch
                                <+> parens (commas $ V.toList $ pretty <$> vec)
       FnRet rets ->
         text "return" <+> parens (hsep (viewSome pretty <$> rets))
-      FnTailCall f _ args ->
+      FnTailCall f args ->
         let arg_docs = (\(Some v) -> pretty v) <$> args
          in text "tail_call" <+> pretty f <> parens (commas arg_docs)
 
@@ -431,11 +437,40 @@ instance FoldFnValue FnTermStmt where
   foldFnValue f s (FnBranch c _ _)     = f s c
   foldFnValue f s (FnLookupTable idx _) = s `f` idx
   foldFnValue f s (FnRet rets) = foldl (\t (Some v) -> f t v) s rets
-  foldFnValue f s (FnTailCall fn _ args) =
+  foldFnValue f s (FnTailCall fn args) =
     foldl (\s' (Some v) -> f s' v) (f s fn) args
 
 ------------------------------------------------------------------------
+-- FnBlockInvariant
+
+-- | Invariants about a block location.
+data FnBlockInvariant arch where
+  -- | @FnCalleeSavedReg r x@ indices that @r@ is a callee saved
+  -- register, and @x:@ is a location that store the value @r@ had
+  -- when the function started execution.
+  FnCalleeSavedReg :: ArchReg arch tp
+                   -> BoundLoc (ArchReg arch) tp
+                   -> FnBlockInvariant arch
+  -- | @FnEqualLocs x y@ indicares that the value stored in the
+  -- locations @x@ and @y@ are all equal.
+  FnEqualLocs :: BoundLoc (ArchReg arch) tp
+              -> BoundLoc (ArchReg arch) tp
+              -> FnBlockInvariant arch
+  -- | @FnStackOffset o x@ indices that @x@ stores the value in the
+  -- frame pointer plus @o@.
+  --
+  -- @o@ is typically negative on processors whose stacks grow down.
+  FnStackOff :: !(MemInt (ArchAddrWidth arch))
+             -> !(BoundLoc (ArchReg arch) (BVType (ArchAddrWidth arch)))
+             -> FnBlockInvariant arch
+
+------------------------------------------------------------------------
 -- FnBlock
+
+-- | Indicates the type of access and whether it accessed heap or stack.
+data FnMemAccessType
+   = HeapAccess
+   | StackAccess
 
 -- | A block in the function.
 --
@@ -451,27 +486,40 @@ data FnBlock arch
                -- ^ Number of bytes in the machine code for this block.
              , fbPrevBlocks :: ![FnBlockLabel (ArchAddrWidth arch)]
                -- ^ Labels of blocks that jump to this one.
-             , fbPhiVars :: !(V.Vector (Some FnPhiVar))
+             , fbInvariants :: ![FnBlockInvariant arch]
+               -- ^ Invariants inferred about machine code relevant to
+               -- this translation.
+             , fbPhiVars :: !(V.Vector (Some (FnPhiVar arch)))
                -- ^ Vector of phi variables that block expects to be assigned.
-             , fbPhiMap :: !(LocMap (ArchReg arch) FnPhiVar)
-               -- ^ Maps register/stack locations to phi variables
              , fbStmts :: ![FnStmt     arch]
                -- ^ List of non-terminal statements in block.
              , fbTerm  :: !(FnTermStmt arch)
                -- ^ Final terminal statement in block.
+             , fbMemInsnAddrs :: !(V.Vector (Word64, FnMemAccessType))
+               -- ^ Vector contains a pair @(off, atp)@ for each
+               -- machine code instruction that accessed memory.  The
+               -- offset @off@ is the offset of the start address of
+               -- the instruction, and @atp@ indicates properties
+               -- inferred about the acccess.
              }
 
 instance (FnArchConstraints arch
-         , PrettyF (ArchReg arch)
+         , ShowF (ArchReg arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (FnBlock arch) where
   pretty b =
     pretty (fbLabel b) <+> encloseSep lbracket rbracket (text " ") phiVars <$$>
-      indent 2 (vcat (pretty <$> fbStmts b) <$$> pretty (fbTerm b))
+      indent 2 (vcat phiBindings <$$> vcat stmts <$$> tstmt)
     where
-      phiVars = V.toList $ viewSome pretty <$> fbPhiVars b
-
+      ppPhiName v = parens (pretty (unFnPhiVar v) <+> pretty (fnPhiVarType v))
+      phiVars = V.toList $ viewSome ppPhiName <$> fbPhiVars b
+      ppBinding v l = parens (text "mc_binding" <+> v <+> pretty l)
+      ppPhiBindings v = vcat $ ppBinding (pretty (unFnPhiVar v)) <$> locs
+        where locs = fnPhiVarRep v : fnPhiVarLocations v
+      phiBindings = V.toList $ viewSome ppPhiBindings <$> fbPhiVars b
+      stmts = pretty <$> fbStmts b
+      tstmt = pretty (fbTerm b)
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
 
@@ -501,7 +549,7 @@ fnBlocks :: Function arch -> [FnBlock arch]
 fnBlocks f = fnEntryBlock f : fnRestBlocks f
 
 instance (FnArchConstraints arch
-         , PrettyF (ArchReg arch)
+         , ShowF (ArchReg arch)
          , IsArchStmt (FnArchStmt arch)
          )
       => Pretty (Function arch) where

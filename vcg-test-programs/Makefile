@@ -1,4 +1,3 @@
-
 # Use variable names for programs for distros that want to change these
 # (e.g. Ubuntu)
 clang ?= clang
@@ -10,46 +9,51 @@ cpp_flags ?=
 reopt := $(shell which reopt)
 reopt-vcg := $(shell which reopt-vcg)
 
-verify_test_add_diet_reopt : test_add_diet_reopt.ann test_add_diet_reopt.ll
+# We create empty ".crt" files to indicate successful runs of
+# reopt-vcg.
+
+
+all : test_add_diet_reopt.crt \
+      test_fib_diet_reopt.crt
+
+%_manual.crt : %_manual.ann %.ll $(reopt-vcg)
 	$(reopt-vcg) $<
+	touch $@
 
-.PHONY : verify_test_add_diet_reopt
-
-# Generate LLVM file using reopt for add example
-test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
-	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add $<
+%.crt : %.ann %.ll $(reopt-vcg)
+	$(reopt-vcg) $<
+	touch $@
 
 # Generate LLVM file using reopt for add example
 test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_protos.h $(reopt)
-	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add $<
+	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add --include main $<
+
+# Generate LLVM file using reopt for add example
+test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
+	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann \
+                 --header test_fib_protos.h --include fib --include main $<
+
+%_reopt_pretty.ann : %_reopt.ann
+	python -m json.tool $< > $@
+
+#####################
+# Debugging utilities
+
+# Generate LLVM file using reopt for add example
+test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
+	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.cfg : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ -c --include fib $<
+	$(reopt) -o $@ -c --include fib --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.fns : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib $<
-
-# Generate LLVM file using reopt for fib example
-test_fib_diet_lld.ll : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ --llvm --header test_fib_protos.h --include fib $<
+	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib --include main $<
 
 # Generate the .o file using reopt.
 test_add_diet_reopt.o : test_add_diet_lld.exe
 	$(reopt) -o $@ --include add test_add_diet_lld.exe
-
-# Generate a the executable file.
-test_fib_diet_reopt.exe : test_fib_diet_lld.exe
-	$(reopt) -o $@ --include add $<
-
-verify_test_add_diet_reopt.ann : test_add_diet_reopt.ann test_add_diet_reopt.ll
-	reopt-vcg $<
-
-verify_test_fib_diet_reopt.ann : test_fib_diet_reopt.ann test_fib_diet_reopt.ll
-	reopt-vcg $<
-
-.PHONY : verify_test_add_diet_reopt.ann verify_test_fib_diet_reopt.ann
 
 diet_libs=diet/start.o diet/libc.a
 
@@ -89,8 +93,9 @@ test_%_glibc_ld.exe : test_%.o $(glibc_libc)
 	$(clang) --target=x86_64-pc-linux-elf -I/usr/include/x86_64-linux-gnu -o $@ -c $<
 
 clean :
-	rm -rf *.dis *.o *.ll
-	rm -rf test_add_diet_reopt.ll test_add_diet_reopt.ann
+	rm -rf *.crt *.dis *.o *.ll
+	rm -rf test_add_diet_reopt.ll test_add_diet_reopt.ann test_add_diet_reopt_pretty.ann
+	rm -rf test_fib_diet_reopt.ll test_fib_diet_reopt.ann test_fib_diet_reopt_pretty.ann
 
 # Deletes executables even though they are checked into repo.
 all-clean : clean

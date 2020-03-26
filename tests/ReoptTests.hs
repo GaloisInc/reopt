@@ -29,8 +29,9 @@ import           Reopt
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
+-- | Function that accepts warnings/errors from macaw.
 logger :: String -> IO ()
-logger _ = pure ()
+logger _msg = pure () -- error $ "Test failed: " ++ msg
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
 defaultLLVMGenOptions =
