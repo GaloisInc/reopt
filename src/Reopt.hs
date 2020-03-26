@@ -816,10 +816,9 @@ getFns logger addrSymMap symAddrMap hdr unnamedFunPrefix sysp info = do
   let notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrTypeMap)
 
   -- Compute the function demands
-  let (fDems,demandWarnings) =
+  let fDems =
         functionDemands (x86DemandInfo sysp) addrTypeMap symTypeMap mem $
           filter notKnown $ exploredFunctions info
-  mapM_ logger demandWarnings
 
   let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
       funNameMap = addrSymMap
