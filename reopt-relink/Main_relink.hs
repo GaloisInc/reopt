@@ -70,23 +70,23 @@ data Args
           }
 
 -- | Action to perform when running
-reoptAction :: Simple Lens Args Action
+reoptAction :: Lens' Args Action
 reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 
 -- | Path for main executable
-programPath :: Simple Lens Args FilePath
+programPath :: Lens' Args FilePath
 programPath = lens _programPath (\s v -> s { _programPath = v })
 
 -- | Path to write file to.
-outputPath :: Simple Lens Args FilePath
+outputPath :: Lens' Args FilePath
 outputPath = lens _outputPath (\s v -> s { _outputPath = v })
 
 -- | Path to new object code for relinker
-newobjPath :: Simple Lens Args FilePath
+newobjPath :: Lens' Args FilePath
 newobjPath = lens _newobjPath (\s v -> s { _newobjPath = v })
 
 -- | Path to JSON file describing the redirections
-redirPath :: Simple Lens Args FilePath
+redirPath :: Lens' Args FilePath
 redirPath = lens _redirPath (\s v -> s { _redirPath = v })
 
 -- | Initial arguments if nothing is specified.

@@ -788,7 +788,7 @@ checkEndian :: Endianness -> BBLLVM arch ()
 checkEndian end = do
   req <- asks $ archEndianness . archFns
   when (end /= req) $
-    fail $ "Memory accesses must have type " ++ show req
+    error $ "Memory accesses must have byte order " ++ show req
 
 llvmFloatName :: FloatInfoRepr flt -> String
 llvmFloatName flt =

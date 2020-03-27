@@ -17,7 +17,6 @@ import qualified Data.Vector as V
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
-import           Data.Macaw.Memory (MemWidth)
 
 data CheckFunctionResult
    = FunctionOK

@@ -146,23 +146,23 @@ data Args
           }
 
 -- | Action to perform when running
-reoptAction :: Simple Lens Args Action
+reoptAction :: Lens' Args Action
 reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
 
 -- | Which debug keys (if any) to output
-debugKeys :: Simple Lens Args [DebugClass]
+debugKeys :: Lens' Args [DebugClass]
 debugKeys = lens _debugKeys (\s v -> s { _debugKeys = v })
 
 -- | Function entry points to translate (overrides notrans if non-empty)
-includeAddrs :: Simple Lens Args [String]
+includeAddrs :: Lens' Args [String]
 includeAddrs = lens _includeAddrs (\s v -> s { _includeAddrs = v })
 
 -- | Function entry points that we exclude for translation.
-excludeAddrs :: Simple Lens Args [String]
+excludeAddrs :: Lens' Args [String]
 excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 
 -- | Options for controlling discovery
-discOpts :: Simple Lens Args DiscoveryOptions
+discOpts :: Lens' Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
@@ -496,7 +496,7 @@ getFunctions args = do
       hPutStrLn stderr $ "1 error occured."
     else
       hPutStrLn stderr $ show errorCnt ++ " errors occured."
-       
+
     exitFailure
   pure (os, recMod)
 

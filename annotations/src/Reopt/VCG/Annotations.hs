@@ -290,10 +290,10 @@ fromExpr :: LLVMVarMap
          -> Either String (BlockVar, ExprType)
 fromExpr llvmMap (List [Atom "mcstack", sa, sw]) = do
   (a, tp) <- evalExpr (fromExpr llvmMap)  sa
-  when (tp /= BVType 64) $ fail "Expected 64-bit address."
+  when (tp /= BVType 64) $ Left $ "Expected 64-bit address."
   w <- case sw of
          List [Atom "_", Atom "BitVec", Number w] | w `elem` [8,16,32,64] -> pure w
-         _ -> fail $ "mcstack could not interpret memory type."
+         _ -> Left $ "mcstack could not interpret memory type."
   pure (MCStack a w, BVType w)
 fromExpr _llvmMap (List [Atom "fnstart", regExpr]) =
   case regExpr of

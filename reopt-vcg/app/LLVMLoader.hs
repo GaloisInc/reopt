@@ -7,7 +7,7 @@ module LLVMLoader
 import           Control.Exception
 import qualified Data.ByteString as BS
 import           Data.LLVM.BitCode
-import           GHC.IO.Exception (IOException, IOErrorType( ResourceVanished ))
+import           GHC.IO.Exception (IOErrorType( ResourceVanished ))
 import           System.Exit
 import           System.FilePath
 import           System.IO

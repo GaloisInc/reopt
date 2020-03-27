@@ -16,7 +16,6 @@ import qualified Control.Concurrent.Async as ASync
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad (forM_)
 import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State
@@ -1598,7 +1597,7 @@ verifyBlockPreconditions prefix f lbl = do
     Just (Ann.ReachableBlock tgtBlockAnn, varMap) -> do
       firstLabel <- asks firstBlockLabel
 
-      when (lbl == firstLabel) $ fail "Do not support jumping to first label in function."
+      when (lbl == firstLabel) $ error "LLVM should not jump to first label in function."
 
       -- Get current registers
       regs <- gets mcCurRegs
@@ -1617,7 +1616,7 @@ verifyBlockPreconditions prefix f lbl = do
           resolvePhiVarValue nm (tp, valMap) = do
             case Map.lookup srcLbl valMap of
               Just v -> primEval tp v
-              Nothing -> fail $ printf "Could not find initial value of %s." (Text.unpack nm)
+              Nothing -> error $ printf "Could not find initial value of %s." (Text.unpack nm)
       phiTermMap <- HMap.traverseWithKey resolvePhiVarValue varMap
 
       let resolveVar :: Text -> SMT.Term
@@ -1670,11 +1669,11 @@ stepNextStmt (L.Result ident inst _mds) = do
       pure True
     Call isTailCall retty f args -> do
       -- Evaluate function
-      fSym <- case f of
-                ValSymbol s -> pure s
-                _ -> fail $ "VCG currently only supports direct calls."
+      case f of
+        ValSymbol fSym ->
+          llvmInvoke isTailCall fSym args (Just (ident, retty))
+        _ -> missingFeature $ "VCG currently only supports direct calls."
       -- Add invoke event
-      llvmInvoke isTailCall fSym args (Just (ident, retty))
       pure True
     Conv convOp (Typed inputType primVal) resultType -> do
       smtResultType <- coerceToSMTSort resultType
@@ -1850,7 +1849,7 @@ interactiveVerifyGoal ictx negGoal propName = do
 
   let fname = standaloneGoalFilename funName lbl cnt
   hPutStrLn stderr $ printf "Verify: %s" propName
-  catchSolverWriteFail ictx $ do 
+  catchSolverWriteFail ictx $ do
     writeCommand cmdHandle $ SMT.checkSatAssuming [negGoal]
     hFlush cmdHandle
   asyncResp <- ASync.async (SMTP.readCheckSatResponse respHandle)
@@ -2373,7 +2372,7 @@ verifyBlock funAnn argBindings blkMap firstLabel bAnn = do
         let declarePhiVar nm (tp, _) next = do
               case asSMTSort tp of
                 Nothing -> do
-                  fail $ printf "The type %s of variable %s is not supported."
+                  error $ printf "The type %s of variable %s is not supported."
                                        (show (L.ppType tp)) (Text.unpack nm)
                 Just s -> do
                   addCommand $ SMT.declareConst (llvmVar nm) s
