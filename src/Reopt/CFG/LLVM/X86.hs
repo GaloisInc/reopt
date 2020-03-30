@@ -21,7 +21,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 
 import           Data.Macaw.X86.ArchTypes
-import           Data.Macaw.X86.Monad (RepValSize(..), repValSizeByteCount)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
@@ -228,7 +227,7 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
       df <-
         case dirExpr of
           FnConstantBool b -> pure b
-          _ -> fail "LLVM generator only supports rep movs with constant df"
+          _ -> error "LLVM generator only supports rep movs with constant df"
       let dfAsm = case df of
                     True  -> "std"
                     False -> "cld"
@@ -249,7 +248,7 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
       df <-
         case dirExpr of
           FnConstantBool b -> pure b
-          _ -> fail "LLVM generator only supports rep stos with constant df"
+          _ -> error "LLVM generator only supports rep stos with constant df"
       let dfAsm = case df of
                     True  -> "std"
                     False -> "cld"
@@ -273,7 +272,7 @@ emitPopCount w v = do
   v' <- mkLLVMValue v
   let wv = natValue w
   when (wv `notElem` [16, 32, 64]) $ do
-    fail $ "Only support popcount of 16, 32, or 64 bits"
+    error $ "Only support popcount of 16, 32, or 64 bits"
   callAsm noSideEffect (llvmITypeNat wv) "popcnt $0, $1" "=r,r" [v']
 
 ------------------------------------------------------------------------

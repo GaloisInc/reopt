@@ -70,7 +70,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.TraversableF
 import qualified Data.Set as Set
 import           Data.String
-import           Data.String (fromString)
 import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F

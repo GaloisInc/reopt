@@ -14,9 +14,9 @@ module Reopt.Relinker
   ) where
 
 import           Control.Lens hiding (pre)
+import           Control.Monad.Except
 import           Control.Monad.State.Class
 import           Control.Monad.State.Strict
-import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Bld
@@ -107,8 +107,10 @@ findRelaEntries dta secMap nm = do
   case fromMaybe [] (Map.lookup nm secMap) of
     -- Assume that no section means no relocations
     [] -> return []
-    [s] -> except $ elfRelaEntries dta (BSL.fromStrict (elfSectionData s))
-    _ -> throwE $  "Multiple " ++ BSC.unpack nm ++ " sections in object file."
+    [s] -> case elfRelaEntries dta (BSL.fromStrict (elfSectionData s)) of
+             Left e -> throwError e
+             Right r -> pure r
+    _ -> throwError $  "Multiple " ++ BSC.unpack nm ++ " sections in object file."
 
 isLocalSymbol :: ElfSymbolTableEntry w -> Bool
 isLocalSymbol sym = steBind sym == STB_LOCAL
@@ -122,42 +124,42 @@ findSymbolTable :: String
 findSymbolTable nm obj = do
   case elfSymtab obj of
     -- Assume that no section means no relocations
-    []  -> throwE $ "Could not find symbol table."
+    []  -> throwError $ "Could not find symbol table."
     [tbl] -> return tbl
-    _   -> throwE $ "Multiple .symtab sections in " ++ nm ++ " file."
+    _   -> throwError $ "Multiple .symtab sections in " ++ nm ++ " file."
 
 -- | Check original binary satisfies preconditions.
-checkBinaryAssumptions :: Monad m => Elf w -> m ()
+checkBinaryAssumptions :: Elf w -> Except String ()
 checkBinaryAssumptions binary = do
   when (elfData binary /= ELFDATA2LSB) $ do
-    fail $ "Expected the original binary to be least-significant bit first."
+    throwError $ "Expected the original binary to be least-significant bit first."
   when (elfType binary /= ET_EXEC) $ do
-    fail $ "Expected the original binary is an executable."
+    throwError $ "Expected the original binary is an executable."
   when (elfMachine binary /= EM_X86_64) $ do
-    fail $ "Only x86 64-bit object files are supported."
+    throwError $ "Only x86 64-bit object files are supported."
   when (elfFlags binary /= 0) $ do
-    fail $ "Expected elf flags in binary to be zero."
+    throwError $ "Expected elf flags in binary to be zero."
   unless (null (elfGnuRelroRegions binary)) $ do
-    fail $ "Expected no PT_GNU_RELO segment in binary."
+    throwError $ "Expected no PT_GNU_RELO segment in binary."
 
 -- | Check object file satisfies preconditions.
 checkObjectAssumptions :: Elf w
-                    -> RelinkM ()
+                       -> RelinkM ()
 checkObjectAssumptions obj = do
   -- Check new object properties.
   when (elfData obj /= ELFDATA2LSB) $ do
-    fail $ "Expected the new binary binary to be least-significant bit first."
+    throwError $ "Expected the new binary binary to be least-significant bit first."
   when (elfType obj /= ET_REL) $ do
-    fail $ "Expected a relocatable file as input."
+    throwError $ "Expected a relocatable file as input."
   when (elfMachine obj /= EM_X86_64) $ do
-    fail $ "Only x86 64-bit executables are supported."
+    throwError $ "Only x86 64-bit executables are supported."
   when (elfFlags obj /= 0) $ do
-    fail $ "Expected elf flags in new object to be zero."
+    throwError $ "Expected elf flags in new object to be zero."
   unless (null (elfGnuRelroRegions obj)) $ do
-    fail $ "Expected no PT_GNU_RELO segment in new object."
+    throwError $ "Expected no PT_GNU_RELO segment in new object."
   -- Check no TLS in object.
   when (elfHasTLSSection obj) $ do
-    throwE $ "TLS section is not allowed in new code object."
+    throwError $ "TLS section is not allowed in new code object."
 
 -- | Intermediate state used when mapping existing binary contents to new file.
 data TransBinaryState = TransBinaryState { nextSectionIndex :: !MergedSectionIndex
@@ -415,7 +417,7 @@ checkSectionFlags :: (Bits w, Integral w, Show w)
                   -> RelinkM ()
 checkSectionFlags sec expectedFlags =
   when (elfSectionFlags sec /= expectedFlags) $ do
-    throwE $ BSC.unpack (elfSectionName sec) ++ " section has an unexpected flags: "
+    throwError $ BSC.unpack (elfSectionName sec) ++ " section has an unexpected flags: "
       ++ show (elfSectionFlags sec) ++ "."
 
 collectObjSectionInfo1 :: ElfData
@@ -429,10 +431,10 @@ collectObjSectionInfo1 :: ElfData
 collectObjSectionInfo1 byteOrder relaSecMap idx addr sec = do
   let nm = elfSectionName sec
   when (elfSectionType sec /= SHT_PROGBITS) $ do
-    throwE $ BSC.unpack nm ++ " section expected to be type SHT_PROGBITS."
+    throwError $ BSC.unpack nm ++ " section expected to be type SHT_PROGBITS."
   let dta = elfSectionData sec
   when (toInteger (BS.length dta) /= toInteger (elfSectionSize sec)) $ do
-    throwE $ "Object code section sizes must match data length."
+    throwError $ "Object code section sizes must match data length."
   relaEntries <- findRelaEntries byteOrder relaSecMap nm
   -- Get alignemnt for this section
   let align = elfSectionAddrAlign sec
@@ -488,11 +490,11 @@ collectObjSectionInfo dta relaSecMap prevRegions idx addr (sec:rest) = do
       collectObjSectionInfo dta relaSecMap (secInfo:prevRegions) (idx + 1) addr' rest
     ".data" -> do
       when (elfSectionSize sec /= 0) $ do
-       throwE $ "Relinker requires new object has empty .bss."
+       throwError $ "Relinker requires new object has empty .bss."
       collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
     ".bss" -> do
       when (elfSectionSize sec /= 0) $ do
-       throwE $ "Relinker requires new object has empty .bss."
+       throwError $ "Relinker requires new object has empty .bss."
       collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
     ".note.GNU-stack" -> do
       collectObjSectionInfo dta relaSecMap prevRegions idx addr rest
@@ -569,7 +571,7 @@ mkSymbolTable newSymtabIndex symbolCtx binary objFuncSymbols = do
       []  -> pure V.empty
       [tbl] -> pure (elfSymbolTableEntries tbl)
       _   ->
-        throwE $ "Multiple .symtab sections in input binary."
+        throwError $ "Multiple .symtab sections in input binary."
 
   newBinSyms <- fmap (V.mapMaybe id) $
     traverse (resolveBinarySymbolTableEntry (binSectionIndexMap symbolCtx) objSymbolNames)
@@ -598,11 +600,11 @@ getCodeAndDataSegments binary = do
   (cs,rest0) <-
     case toList (binary^.elfFileData) of
       ElfDataSegment cs : drest | elfSegmentType cs == PT_LOAD -> pure (cs,drest)
-      _ -> throwE "Expected code segment at start of file."
+      _ -> throwError "Expected code segment at start of file."
   (ds,rest) <-
     case dropLeadingRawData rest0 of
       ElfDataSegment ds : r | elfSegmentType ds == PT_LOAD -> pure (ds,r)
-      _ -> throwE "Expected data segment after code segment."
+      _ -> throwError "Expected data segment after code segment."
   traverse_ checkBinaryRegions rest
   pure (cs, ds)
 
@@ -654,7 +656,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
   checkObjectAssumptions obj
   -- Check OSABI compat
   when (elfOSABI obj /= elfOSABI binary) $ do
-    fail $ "Expected the new object to use the same OS ABI as original."
+    throwError $ "Expected the new object to use the same OS ABI as original."
 
   -- Create GNU stack info if both binary and object have it, and the
   -- stack is non-executable in both.
@@ -711,7 +713,7 @@ mergeObject binary obj redirs mkJump = runExcept $ do
     let resolveFn :: BS.ByteString -> Maybe (ElfWordType 64)
         resolveFn nm = Map.lookup nm codeAddrMap
     case resolveCodeRedirections mkJump redirs resolveFn of
-      Left nm -> throwE $ "Could not find symbol " ++ BSC.unpack nm ++ " in object file."
+      Left nm -> throwError $ "Could not find symbol " ++ BSC.unpack nm ++ " in object file."
       Right r -> pure r
 
   let objRegions = concatMap (mkObjCodeRegions relocInfo) objSections

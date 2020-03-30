@@ -1,0 +1,120 @@
+name: CI
+
+on: [push]
+
+jobs:
+  cvc4:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Get CVC4
+      uses: actions/checkout@v2
+      with:
+        repository: GaloisInc/vadd-CVC4
+        ref: eqrange-quant
+    - name: Export CVC_HASH
+      run: echo "::set-env name=CVC4_HASH::`git rev-parse HEAD`"
+    - name: Cache CVC4
+      id: cache-cvc4
+      uses: actions/cache@v1
+      with:
+        path: cache
+        key: cvc-${{ env.CVC4_HASH }}
+    - name: Get Antlr
+      run: ./contrib/get-antlr-3.4
+      if: steps.cache-cvc4.outputs.cache-hit != 'true'
+    - name: Configure
+      run: ./configure.sh production --static --proofs --prefix=$PWD/dist
+      if: steps.cache-cvc4.outputs.cache-hit != 'true'
+    - name: Build
+      working-directory: build
+      run: make -j 8
+      if: steps.cache-cvc4.outputs.cache-hit != 'true'
+    - name: Copy to cache
+      run: |
+        mkdir -p cache
+        cp build/bin/cvc4 cache
+      if: steps.cache-cvc4.outputs.cache-hit != 'true'
+    - name: cvc4 artifact
+      uses: actions/upload-artifact@v1
+      with:
+        name: cvc4
+        path: cache/cvc4
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # NOTE: must list all targets in `include` here to activate them
+        name: ["Linux 8.8.3"]
+        include:
+          - name: Linux 8.8.3
+            ghc-ver: 8.8.3
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Get GHC
+      run: |
+        sudo apt-get install --no-install-recommends -y cabal-install-3.0 ghc-${{ matrix.ghc-ver }}
+        echo "::add-path::/opt/cabal/bin"
+        echo "::add-path::/opt/ghc/${{ matrix.ghc-ver }}/bin"
+    - name: Cache
+      uses: actions/cache@v1
+      with:
+        path: /home/runner/.cabal/store/ghc-${{ matrix.ghc-ver }}
+        # Prefer previous SHA hash if it is still cached
+        key: ${{ matrix.name }}-reopt-build-${{ github.sha }}
+        # otherwise just use most recent build.
+        restore-keys: ${{ matrix.name }}-reopt-build
+    - name: Cabal enable werror
+      run: ln -s cabal.project.werror cabal.project.local
+    - name: Cabal update
+      run: cabal update
+    - name: Install
+      run: cabal install -j exe:reopt reopt-vcg
+    - name: Test
+      run: cabal test -j reopt-tests
+    - name: Create archive
+      run: |
+        mkdir -p dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt        dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt-relink dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt-vcg    dist/reopt/bin
+        cd dist
+        tar cvfz reopt.tgz reopt
+    - name: Make reopt
+      uses: actions/upload-artifact@v1
+      with:
+        name: reopt
+        path: dist/reopt.tgz
+  # This runs the CVC4 tests using reopt and the artifacts produced.
+  vcg-test:
+    needs: [cvc4, build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+    - name: Get llvm
+      run: |
+        sudo apt-get update
+        sudo apt-get install llvm
+    - name: Get reopt and reopt-vcg
+      uses: actions/download-artifact@v1
+      with:
+        name: reopt
+        path: artifacts
+    - name: Get CVC4
+      uses: actions/download-artifact@v1
+      with:
+        name: cvc4
+        path: artifacts/cvc4
+    - name: Unpack reopt
+      working-directory: artifacts
+      run: tar xvfz reopt.tgz
+    - name: Update cvc4 permissions
+      run: chmod a+x artifacts/cvc4/cvc4
+    - name: VCG Tests
+      run: |
+        export PATH="$PWD/artifacts/reopt/bin:$PWD/artifacts/cvc4:$PATH"
+        cd vcg-test-programs
+        make
