@@ -9,13 +9,8 @@ module ReoptTests (
 
 import           Control.Exception
 import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Char8 as BSC
-import           Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HMap
 import           Data.Macaw.Discovery
-import           Data.Macaw.Memory
 import qualified Data.Macaw.Memory.ElfLoader as MM
-import qualified Data.Map.Strict as Map
 import           System.FilePath.Posix
 import           System.IO
 import qualified Test.Tasty as T
@@ -30,7 +25,7 @@ reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 -- | Function that accepts warnings/errors from macaw.
-logger :: String -> IO ()
+logger :: GetFnsLogEvent -> IO ()
 logger _msg = pure () -- error $ "Test failed: " ++ msg
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
@@ -51,15 +46,11 @@ mkTest fp = T.testCase fp $ do
                                   , logAtAnalyzeFunction   = False
                                   , logAtAnalyzeBlock      = False
                                   }
-
-  (os, discState, addrSymMap, symAddrMap) <-
-    discoverX86Binary fp loadOpts discOpts [] []
+  let hdrAnn = emptyHeader
+  (_, os, discState, _, recMod) <-
+    discoverX86Elf logger fp loadOpts discOpts [] [] hdrAnn "reopt"
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
-  let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
-      symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
-  let hdr = emptyHeader
-  recMod <- getFns logger addrSymMap symAddrHashMap hdr "reopt" (osPersonality os) discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
   let archOps = LLVM.x86LLVMArchOps (show os)

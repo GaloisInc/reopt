@@ -228,10 +228,9 @@ failBlock = L.BasicBlock { L.bbLabel = Just $ L.Named $ L.Ident switchFailLabel
 -- | Get LLVM type for a function that returns the given values.
 llvmFunctionReturnType :: FunctionType arch -> L.Type
 llvmFunctionReturnType ftp =
-  case fnReturnTypes ftp of
-    [] -> L.PrimType L.Void
-    [Some rtp] -> typeToLLVMType rtp
-    rtypes -> L.Struct (viewSome typeToLLVMType <$> rtypes)
+  case fnReturnType ftp of
+    Nothing -> L.PrimType L.Void
+    Just (Some rtp) -> typeToLLVMType rtp
 
 ------------------------------------------------------------------------
 
@@ -469,16 +468,16 @@ unimplementedInstr' typ reason = do
   comment ("UNIMPLEMENTED: " ++ reason)
   return (L.Typed typ L.ValUndef)
 
--- | This finally
+-- | Sets the value of the function assign id.
 setAssignIdValue :: HasCallStack
                  => FnAssignId
                  -> L.Typed L.Value
                  -> BBLLVM arch ()
 setAssignIdValue fid v = do
-  do m <- gets $ bbAssignValMap
-     case Map.lookup fid m of
-       Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
-       Nothing -> pure ()
+  m <- gets $ bbAssignValMap
+  case Map.lookup fid m of
+    Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
+    Nothing -> pure ()
   modify' $ \s -> s { bbAssignValMap = Map.insert fid v (bbAssignValMap s) }
 
 ------------------------------------------------------------------------
@@ -604,18 +603,18 @@ call :: (HasCallStack, HasValue v)
 call (valueOf -> f) args =
   case L.typedType f of
     L.PtrTo (L.FunTy res _argTypes _varArgs) -> do
-      fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
+      case res of
+        L.PrimType L.Void -> do
+          error $ "Call expected to return a value, but returns void."
+        _ -> do
+          fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> error $ "Call given non-function pointer argument:\n" ++ show f
 
 -- | Generate a non-tail call that does not return a value
 call_ :: HasValue v => v -> [L.Typed L.Value] -> BBLLVM arch ()
 call_ (valueOf -> f) args =
   case L.typedType f of
-    L.PtrTo (L.FunTy (L.PrimType L.Void) argTypes varArgs) -> do
-      when varArgs $ do
-        error $ "Varargs not yet supported."
-      when (argTypes /= fmap L.typedType args) $ do
-        error $ "Unexpected arguments to " ++ show f
+    L.PtrTo (L.FunTy (L.PrimType L.Void) _argTypes _varArgs) -> do
       effect $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> error $ "call_ given non-function pointer argument\n" ++ show f
 
@@ -681,6 +680,31 @@ appToLLVM app = bbArchConstraints $ do
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
+    -- Construct a tuple from fields.
+    MkTuple fieldTypes fields -> do
+      let structType = L.Struct (toListFC typeToLLVMType fieldTypes)
+      let initUndef = L.Typed structType L.ValUndef
+      let f :: forall utp
+            .  FnValue arch utp
+            -> (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value))
+            -> (Int32 -> L.Typed L.Value -> BBLLVM arch (L.Typed L.Value))
+          f fld c i s = do
+            llvmFieldValue <- mkLLVMValue fld
+            s' <- insertValue s llvmFieldValue i
+            c (i+1) s'
+      foldrFC f (\_ r -> pure r) fields 0 initUndef
+
+    -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
+    TupleField _fieldTypes macawStruct idx -> do
+      -- Make a struct
+      llvmStruct <- mkLLVMValue macawStruct
+      -- Get index as an Int32
+      let idxVal :: Integer
+          idxVal = PL.indexValue idx
+      when (idxVal >= toInteger (maxBound :: Int32)) $
+        error $ "Index out of range " ++ show idxVal ++ "."
+      -- Extract a value
+      extractValue llvmStruct (fromInteger idxVal :: Int32)
     Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
     SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
     UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
@@ -752,17 +776,6 @@ appToLLVM app = bbArchConstraints $ do
       let ctlz = intrinsic ("llvm.ctlz." ++ show (L.ppType typ)) typ [typ, L.iT 1]
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
-    -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
-    TupleField _fieldTypes macawStruct idx -> do
-      -- Make a struct
-      llvmStruct <- mkLLVMValue macawStruct
-      -- Get index as an Int32
-      let idxVal :: Integer
-          idxVal = PL.indexValue idx
-      when (idxVal >= toInteger (maxBound :: Int32)) $
-        error $ "Index out of range " ++ show idxVal ++ "."
-      -- Extract a value
-      extractValue llvmStruct (fromInteger idxVal :: Int32)
 
 -- | Evaluate a value as a pointer
 llvmAsPtr :: HasCallStack
@@ -894,31 +907,22 @@ stmtToLLVM stmt = bbArchConstraints $ do
      llvmMask <- singletonVector =<< mkLLVMValue cond
      -- Call llvmn.masked.store intrinsic
      call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
-   FnCall dest args retvs -> do
+   FnCall dest args mretv -> do
      llvmFn <- resolveFunctionEntry dest
      llvmArgs <- mapM (\(Some v) -> mkLLVMValue v) args
-     retv <- call llvmFn llvmArgs
      -- Assign return values
-     case retvs of
-       [] -> do
-         pure ()
-       [Some rvar] -> do
+     case mretv of
+       Nothing -> do
+         call_ llvmFn llvmArgs
+       Just (Some rvar) -> do
+         retv <- call llvmFn llvmArgs
          setAssignIdValue (frAssignId rvar) retv
-       -- Struct return
-       _ -> do
-         -- Assign all return variables to the extracted result
-         let assignReturn :: Int -> Some FnReturnVar -> BBLLVM arch ()
-             assignReturn i (Some fr) = do
-               val <- extractValue retv (fromIntegral i)
-               setAssignIdValue (frAssignId fr) val
-         itraverse_ assignReturn retvs
    FnArchStmt astmt -> do
      fn <- asks $ archStmtCallback . archFns
      fn astmt
 
 llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
 llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
-
 
 addTargetPhiValues :: forall arch . FnJumpTarget arch -> BBLLVM arch ()
 addTargetPhiValues tgt = do
@@ -960,29 +964,32 @@ termStmtToLLVM tm =
       let dests = V.toList $ llvmBlockLabel . fnJumpLabel <$> vec
       markNeedSwitchFailLabel
       effect $ L.Switch idx' (L.Named (L.Ident switchFailLabel)) (zip [0..] dests)
-    FnRet rets -> do
+    FnRet mret -> do
       ftp <- asks funType
-      case (fnReturnTypes ftp, rets) of
-        ([],[]) -> do
+      case (fnReturnType ftp, mret) of
+        (Nothing, Nothing) -> do
           effect L.RetVoid
-        ([_rtp], [Some rval]) -> do
+        (Just _, Nothing) -> error "Expected return value when none found."
+        (Nothing, Just _) -> error "Unexpected return value."
+        (Just _rtp, Just (Some rval)) -> do
           llvmRetVal <- mkLLVMValue rval
           effect $! L.Ret llvmRetVal
-        -- Return a struct that will get turned into different registers
-        (rtypes, _) -> do
-          when (length rtypes /= length rets) $ do
-            error $ "Mismatch between number of return valeus and expected function return type."
-          retVals <- mapM (viewSome mkLLVMValue) rets
-          let rtype = L.Struct (viewSome typeToLLVMType <$> rtypes)
-          -- construct the return result struct
-          let initUndef = L.Typed rtype L.ValUndef
-          v <- ifoldlM (\n acc fld -> insertValue acc fld (fromIntegral n)) initUndef retVals
-          effect (L.Ret v)
     FnTailCall dest args -> do
-      dest_f <- resolveFunctionEntry dest
-      args' <- mapM (viewSome mkLLVMValue) args
-      retv <- call dest_f args'
-      ret retv
+      callTarget <- resolveFunctionEntry dest
+      llvmArgs <- mapM (viewSome mkLLVMValue) args
+      let callTargetType = L.typedType callTarget
+      let callTargetValue = L.typedValue callTarget
+      case callTargetType of
+        L.PtrTo (L.FunTy res _argTypes _varArgs) ->
+          case res of
+            L.PrimType L.Void -> do
+              effect $ L.Call False callTargetType callTargetValue llvmArgs
+              effect L.RetVoid
+            _ -> do
+              retv <- evalInstr $ L.Call False callTargetType callTargetValue llvmArgs
+              effect (L.Ret (L.Typed res retv))
+        _ -> do
+          error "Expected function type to tail call target."
 
 resolvePhiStmt :: PhiValues
                -> PhiBinding arch

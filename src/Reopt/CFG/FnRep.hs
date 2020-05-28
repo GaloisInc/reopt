@@ -140,9 +140,9 @@ instance Pretty (FnReturnVar tp) where
 
 -- | Describes the type of a function.
 data FunctionType (arch :: Type) =
-  FunctionType { fnArgTypes :: [Some TypeRepr]
+  FunctionType { fnArgTypes :: ![Some TypeRepr]
                , fnVarArgs :: !Bool
-               , fnReturnTypes :: [Some TypeRepr]
+               , fnReturnType :: !(Maybe (Some TypeRepr))
                }
   deriving (Ord, Eq, Show)
 
@@ -206,7 +206,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   FnAssignedValue :: !(FnAssignment arch tp) -> FnValue arch tp
   -- | Value from a phi node
   FnPhiValue :: !(FnPhiVar arch tp) -> FnValue arch tp
-  -- | A value returned by a function call (rax/rdx/xmm0)
+  -- | A value returned by a function call
   FnReturn :: !(FnReturnVar tp) -> FnValue arch tp
   -- | The pointer to a function.
   FnFunctionEntryValue :: !(FunctionType arch)
@@ -214,7 +214,6 @@ data FnValue (arch :: Type) (tp :: M.Type) where
                        -> BSC.ByteString
                           -- ^ Symbol name to associate this this address.
                        -> FnValue arch (BVType (ArchAddrWidth arch))
-
   -- | Value is a function.
   --
   -- The int should be in the range @[0..argCount)@, and the type repr
@@ -328,7 +327,7 @@ data FnStmt arch where
   FnCall :: !(FnValue arch (BVType (ArchAddrWidth arch)))
          -> [Some (FnValue arch)]
             -- Return values
-         -> ![Some FnReturnVar]
+         -> !(Maybe (Some FnReturnVar))
          -> FnStmt arch
   FnArchStmt :: (FnArchStmt arch (FnValue arch))
              -> FnStmt arch
@@ -343,13 +342,12 @@ instance ( FnArchConstraints arch
       FnAssignStmt assign -> pretty assign
       FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
       FnCondWriteMem cond addr val _repr -> text "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
-      FnCall f args rets ->
-        let arg_docs = (\(Some v) -> pretty v) <$> args
-            ppRet :: forall tp . FnReturnVar tp -> Doc
-            ppRet = pretty
-         in parens (commas (viewSome ppRet <$> rets))
-            <+> text ":=" <+> text "call"
-            <+> pretty f <> parens (commas arg_docs)
+      FnCall f args mret ->
+        let argDocs = (\(Some v) -> pretty v) <$> args
+            retDoc = case mret of
+                       Just (Some r) -> pretty r <+> text ":= "
+                       Nothing -> mempty
+         in retDoc <> text "call" <+> pretty f <> parens (commas argDocs)
       FnArchStmt stmt -> ppArchStmt pretty stmt
 
 instance FoldFnValue FnStmt where
@@ -409,7 +407,7 @@ data FnTermStmt arch
               !(FnJumpTarget arch)
    | FnLookupTable !(FnValue arch (BVType (ArchAddrWidth arch)))
                    !(V.Vector (FnJumpTarget arch))
-   | FnRet ![Some (FnValue arch)]
+   | FnRet !(Maybe (Some (FnValue arch)))
      -- ^ A return from the function with associated values
    | FnTailCall -- Address of function to jump to.
                 !(FnValue arch (BVType (ArchAddrWidth arch)))
@@ -426,11 +424,11 @@ instance FnArchConstraints arch
       FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
       FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
                                <+> parens (commas $ V.toList $ pretty <$> vec)
-      FnRet rets ->
-        text "return" <+> parens (hsep (viewSome pretty <$> rets))
+      FnRet Nothing           -> text "return void"
+      FnRet (Just (Some ret)) -> text "return" <+> pretty ret
       FnTailCall f args ->
-        let arg_docs = (\(Some v) -> pretty v) <$> args
-         in text "tail_call" <+> pretty f <> parens (commas arg_docs)
+        let argDocs = (\(Some v) -> pretty v) <$> args
+         in text "tail_call" <+> pretty f <> parens (commas argDocs)
 
 instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
@@ -560,7 +558,9 @@ instance (FnArchConstraints arch
         ppArg :: Integer -> Some TypeRepr -> Doc
         ppArg i (Some tp) = text "arg" <> text (show i) <+> text ":" <+> pretty tp
         atp = parens (commas (zipWith ppArg [0..] (fnArgTypes ftp)))
-        rtp = parens (hsep (viewSome pretty <$> fnReturnTypes ftp))
+        rtp = case fnReturnType ftp of
+                Nothing -> text "void"
+                Just (Some tp) -> pretty tp
      in text "function" <+> nm <+> text "@" <+> addr <> atp <+> text ":" <+> rtp
         <$$> lbrace
         <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))

@@ -17,11 +17,8 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.ElfEdit
-import           Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HMap
 import           Data.IORef
 import           Data.List ((\\), nub, stripPrefix, intercalate)
-import qualified Data.Map.Strict as Map
 import           Data.Maybe
 import           Data.Parameterized.Some
 import           Data.Version
@@ -37,7 +34,6 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
-import           Data.Macaw.Memory
 import           Data.Macaw.X86
 
 import           Reopt
@@ -468,37 +464,30 @@ resolveHeader args =
 -- This has a side effect where it increments an IORef so
 -- that the number of errors can be recorded.
 recoverLogError :: IORef Natural -- ^ Counter
-                -> String  -- ^ Message to log
+                -> GetFnsLogEvent  -- ^ Message to log
                 -> IO ()
 recoverLogError ref msg = do
   modifyIORef' ref (+1)
-  hPutStrLn stderr msg
+  hPutStrLn stderr (show msg)
 
 -- | Parse arguments to get information needed for function representation.
-getFunctions :: Args
-             -> IO ( X86OS
-                   , RecoveredModule X86_64
-                   )
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, Natural)
 getFunctions args = do
-  hdr <- resolveHeader args
-  (os, discState, addrSymMap, symAddrMap) <-
-    discoverX86Binary (programPath args) (loadOptions args) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
-  let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
-      symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
+  hdrAnn <- resolveHeader args
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  recMod <- getFns (recoverLogError errorRef) addrSymMap symAddrHashMap hdr funPrefix
-                   (osPersonality os) discState
+  (_, os, _, _, recMod) <-
+    discoverX86Elf (recoverLogError errorRef)
+                   (programPath args)
+                   (loadOptions args)
+                   (args^.discOpts)
+                   (args^.includeAddrs)
+                   (args^.excludeAddrs)
+                   hdrAnn
+                   funPrefix
   errorCnt <- readIORef errorRef
-  when (errorCnt > 0) $ do
-    if errorCnt == 1 then
-      hPutStrLn stderr $ "1 error occured."
-    else
-      hPutStrLn stderr $ show errorCnt ++ " errors occured."
-
-    exitFailure
-  pure (os, recMod)
+  pure (os, recMod, errorCnt)
 
 ------------------------------------------------------------------------
 --
@@ -516,20 +505,19 @@ renderLLVMBitcode args os recMod =
 -- action.
 performReopt :: Args -> IO ()
 performReopt args = do
-  hdr <- resolveHeader args
-  (origElf, os, discState, addrSymMap, symAddrMap) <-
-    discoverX86Elf (programPath args)
+  hdrAnn <- resolveHeader args
+  let funPrefix :: BSC.ByteString
+      funPrefix = unnamedFunPrefix args
+  errorRef <- newIORef 0
+  (origElf, os, discState, addrSymMap, recMod) <-
+    discoverX86Elf (recoverLogError errorRef)
+                   (programPath args)
                    (loadOptions args)
                    (args^.discOpts)
                    (args^.includeAddrs)
                    (args^.excludeAddrs)
-  let symAddrHashMap :: HashMap BSC.ByteString (MemSegmentOff 64)
-      symAddrHashMap = HMap.fromList [ (nm,addr) | (nm,addr) <- Map.toList symAddrMap ]
-  let funPrefix :: BSC.ByteString
-      funPrefix = unnamedFunPrefix args
-  errorRef <- newIORef 0
-  recMod <- getFns (recoverLogError errorRef) addrSymMap symAddrHashMap hdr funPrefix (osPersonality os)
-                   discState
+                   hdrAnn
+                   funPrefix
   errorCnt <- readIORef errorRef
   when (errorCnt > 0) $ do
     hPutStrLn stderr $ show errorCnt ++ " error(s) occured ."
@@ -561,15 +549,22 @@ main' = do
 
     -- Write function discovered
     ShowFunctions -> do
-      (_,recMod) <- getFunctions args
+      (_,recMod, errorCnt) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
+      when (errorCnt > 0) $ do
+        hPutStrLn stderr $
+          if errorCnt == 1 then
+            "1 error occured."
+           else
+            show errorCnt ++ " errors occured."
+        exitFailure
 
     ShowLLVM -> do
       when (isJust (annotationsPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      (os,recMod) <- getFunctions args
+      (os, recMod, errorCnt) <- getFunctions args
       let (llvmMod, funAnn) = renderLLVMBitcode args os recMod
       case annotationsPath args of
         Nothing -> pure ()
@@ -586,7 +581,13 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-
+      when (errorCnt > 0) $ do
+        hPutStrLn stderr $
+          if errorCnt == 1 then
+            "1 error occured."
+           else
+            show errorCnt ++ " errors occured."
+        exitFailure
     ShowObject -> do
       outPath <-
         case outputPath args of
@@ -595,7 +596,7 @@ main' = do
             exitFailure
           Just p ->
             pure p
-      (os,recMod) <- getFunctions args
+      (os, recMod, errorCnt) <- getFunctions args
       let (llvmMod, _) = renderLLVMBitcode args os recMod
       objContents <-
         compileLLVM (optLevel args)
@@ -605,6 +606,13 @@ main' = do
                     (osLinkName os)
                     llvmMod
       BS.writeFile outPath objContents
+      when (errorCnt > 0) $ do
+        hPutStrLn stderr $
+          if errorCnt == 1 then
+            "1 error occured."
+           else
+            show errorCnt ++ " errors occured."
+        exitFailure
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
     ShowVersion ->
