@@ -467,7 +467,10 @@ recoverLogError :: IORef Natural -- ^ Counter
                 -> GetFnsLogEvent  -- ^ Message to log
                 -> IO ()
 recoverLogError ref msg = do
-  modifyIORef' ref (+1)
+  -- Update error count
+  case msg of
+    StartFunRecovery _ -> pure ()
+    _ -> modifyIORef' ref (+1)
   hPutStrLn stderr (show msg)
 
 -- | Parse arguments to get information needed for function representation.
