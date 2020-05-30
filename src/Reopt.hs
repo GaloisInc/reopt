@@ -786,15 +786,15 @@ argsToRegisters cnt args
       resolveArgType nm (funArgType arg) (funArgType arg)
       argsToRegisters (cnt+1) args
 
-parseReturnType :: HdrType -> Either HeaderAnnError [X86RetInfo]
+parseReturnType :: HdrType -> Either HeaderAnnError [Some X86RetInfo]
 parseReturnType tp0 =
   case tp0 of
     VoidHdrType ->
       Right []
     UInt64HdrType ->
-      Right [RetBV64 F.RAX]
+      Right [Some (RetBV64 F.RAX)]
     PtrHdrType _ ->
-      Right [RetBV64 F.RAX]
+      Right [Some (RetBV64 F.RAX)]
     TypedefHdrType _ tp
       | Right r <- parseReturnType tp ->
         Right r
@@ -832,7 +832,7 @@ recoveredFunctionName m prefix segOff =
 toKnownFunABI :: X86FunTypeInfo -> [KnownFunABI X86Reg]
 toKnownFunABI (X86NonvarargFun args rets) =
   [KnownFnABI { kfArguments = argReg <$> args
-              , kfReturn = retReg <$> rets
+              , kfReturn = viewSome retReg <$> rets
               }
   ]
 toKnownFunABI X86PrintfFun = []
@@ -887,8 +887,8 @@ inferFunctionTypeFromDemands dm =
       orderPadArgs (argSet, retSet) =
         let args = fmap ArgBV64   (dropArgSuffix X86_GP     x86GPPArgumentRegs argSet)
                 ++ fmap ArgMM512D (dropArgSuffix X86_ZMMReg [0..7] argSet)
-            rets = fmap RetBV64   (dropArgSuffix X86_GP     [F.RAX, F.RDX] retSet)
-                ++ fmap RetMM512D (dropArgSuffix X86_ZMMReg [0,1]          retSet)
+            rets = fmap (Some . RetBV64)   (dropArgSuffix X86_GP     [F.RAX, F.RDX] retSet)
+                ++ fmap (Some . RetMM512D) (dropArgSuffix X86_ZMMReg [0,1]          retSet)
          in X86NonvarargFun args rets
   in fmap orderPadArgs
      $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
