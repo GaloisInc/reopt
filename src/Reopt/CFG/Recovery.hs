@@ -71,11 +71,11 @@ import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import qualified Reopt.Utils.Printf as Printf
 
-mapListToSome :: forall (a :: *) (f::k -> *) . (a -> Some f) -> [a] -> Some (P.List f)
-mapListToSome _ [] = Some P.Nil
-mapListToSome f (h:r) =
-  case (f h, mapListToSome f r) of
-    (Some hv, Some rv) -> Some (hv P.:< rv)
+fromSomeList :: [Some f] -> Some (P.List f)
+fromSomeList [] = Some P.Nil
+fromSomeList (Some h:r) =
+  case fromSomeList r of
+    Some r' -> Some (h P.:< r')
 
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
@@ -92,21 +92,35 @@ argReg :: X86ArgInfo -> Some X86Reg
 argReg (ArgBV64 r) = Some (X86_GP r)
 argReg (ArgMM512D i) = Some (X86_ZMMReg i)
 
+$(pure [])
+
 -- | This identifies how a return value is passed from a callee to
--- the callee.
-data X86RetInfo
-   = RetBV64 !F.Reg64
+-- the callee.  The type indicates the type of the register as observed in the
+-- ABI.
+data X86RetInfo tp where
+  RetBV64 :: !F.Reg64 -> X86RetInfo (BVType 64)
    -- ^ This identifies a 64-bit value returned as a register (RAX/RDX)
    --
    -- The register should be compatible with the ABI.
-   | RetMM512D !Word8
+  RetMM512D :: !Word8 -> X86RetInfo (VecType 8 (FloatType DoubleFloat))
    -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
-  deriving (Eq, Show)
+--  deriving (Eq, Show)
 
 -- | The register types this return value is associated with.
-retReg :: X86RetInfo -> Some X86Reg
-retReg (RetBV64 r) = Some (X86_GP r)
-retReg (RetMM512D i) = Some (X86_ZMMReg i)
+retReg :: X86RetInfo tp -> Some X86Reg
+retReg (RetBV64   r) = Some $! X86_GP r
+retReg (RetMM512D i) = Some $! X86_ZMMReg i
+
+instance TestEquality X86RetInfo where
+  testEquality (RetBV64   x) (RetBV64   y) = if x == y then Just Refl else Nothing
+  testEquality (RetMM512D x) (RetMM512D y) = if x == y then Just Refl else Nothing
+  testEquality _ _ = Nothing
+
+instance HasRepr X86RetInfo TypeRepr where
+  typeRepr (RetBV64 _) = knownRepr
+  typeRepr (RetMM512D _) = knownRepr
+
+$(pure [])
 
 -- | This describes the registers and return value of an x86_64 ABI
 -- compliant function.
@@ -120,7 +134,7 @@ retReg (RetMM512D i) = Some (X86_ZMMReg i)
 -- float is ABI compatible with a function that takes a float
 -- followed by two integers.
 data X86FunTypeInfo
-   = X86NonvarargFun [X86ArgInfo] [X86RetInfo]
+   = X86NonvarargFun [X86ArgInfo] [Some X86RetInfo]
    | X86PrintfFun
      -- ^ A function that is like printf where the first argument is a string
      -- and subsequent arguments are inferred from it.
@@ -148,7 +162,7 @@ data FunRecoverContext ids =
       , frcInterp :: !(DiscoveryFunInfo X86_64 ids)
       , frcSyscallPersonality  :: !SyscallPersonality
         -- ^ System call personality
-      , frcCurrentFunctionReturns :: ![X86RetInfo]
+      , frcCurrentFunctionReturns :: ![Some X86RetInfo]
         -- ^ The type of the function being recovered.
       , frcBlockDepMap :: !(Map (MemSegmentOff 64) (BlockInvariants X86_64 ids))
         -- ^ Maps the starting address of blocks to the dependency set
@@ -263,13 +277,6 @@ $(pure [])
 argRegTypeRepr :: X86ArgInfo -> Some TypeRepr
 argRegTypeRepr ArgBV64{} = Some (BVTypeRepr n64)
 argRegTypeRepr ArgMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
-
-$(pure [])
-
--- | The register types this return value is associated with.
-retRegTypeRepr :: X86RetInfo -> Some TypeRepr
-retRegTypeRepr RetBV64{} = Some (BVTypeRepr n64)
-retRegTypeRepr RetMM512D{} = Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
 
 $(pure [])
 
@@ -402,19 +409,18 @@ $(pure [])
 -- Return register/value handling
 
 -- | Information needed to interpret a return value.
-data RetConversionInfo tp
-   = RetConversionInfo { rciRetType :: !(TypeRepr tp)
+data RetConversionInfo retType
+   = RetConversionInfo { rciRetType :: !(TypeRepr retType)
                        , rciRetToRegisters
                          :: !(forall ids
-                              .  FnValue X86_64 tp
+                              . FnValue X86_64 retType
                               -> MapF X86Reg (FnValue X86_64)
                               -> Recover ids (MapF X86Reg (FnValue X86_64)))
                        , rciRegistersToRet
                          :: !(forall ids
                               .  RegState X86Reg (Value X86_64 ids)
-                              -> Recover ids (FnValue X86_64 tp))
+                              -> Recover ids (FnValue X86_64 retType))
                        }
-
 
 $(pure [])
 
@@ -422,7 +428,7 @@ $(pure [])
 --
 -- Note. This is different for ZMM registers with the underlying type
 -- of the ZMM register returned by `retReg`.
-retConvInfo :: X86RetInfo -> Some RetConversionInfo
+retConvInfo :: X86RetInfo tp -> RetConversionInfo tp
 retConvInfo (RetBV64 r) =
   let tp :: TypeRepr (BVType 64)
       tp = knownRepr
@@ -436,11 +442,10 @@ retConvInfo (RetBV64 r) =
                 -> Recover ids (FnValue X86_64 (BVType 64))
       regsToRet regs = recoverValue (regs^.boundValue (X86_GP r))
 
-      convInfo = RetConversionInfo { rciRetType = tp
-                                   , rciRetToRegisters = retToRegs
-                                   , rciRegistersToRet = regsToRet
-                                   }
-   in Some convInfo
+   in RetConversionInfo { rciRetType = tp
+                        , rciRetToRegisters = retToRegs
+                        , rciRegistersToRet = regsToRet
+                        }
 retConvInfo (RetMM512D i) =
   let tp :: TypeRepr (VecType 8 (FloatType DoubleFloat))
       tp = knownRepr
@@ -457,11 +462,10 @@ retConvInfo (RetMM512D i) =
         v <- recoverValue (regs^.boundValue (X86_ZMMReg i))
         bitcast v bv512ToVec8Double
 
-      convInfo = RetConversionInfo { rciRetType = tp
-                                   , rciRetToRegisters = retToRegs
-                                   , rciRegistersToRet = regsToRet
-                                   }
-   in Some convInfo
+   in RetConversionInfo { rciRetType = tp
+                        , rciRetToRegisters = retToRegs
+                        , rciRegistersToRet = regsToRet
+                        }
 
 $(pure [])
 
@@ -524,14 +528,12 @@ convStruct convList =
                         , rciRegistersToRet = regsToRet
                         }
 
-retListConvInfo :: [X86RetInfo] -> Maybe (Some RetConversionInfo)
+retListConvInfo :: [Some X86RetInfo] -> Maybe (Some RetConversionInfo)
 retListConvInfo [] = Nothing
-retListConvInfo [r] = Just $! retConvInfo r
+retListConvInfo [r] = Just $! mapSome retConvInfo r
 retListConvInfo l = Just $! viewSome (Some . convStruct) (foldr f (Some emptyRCIL) l)
-  where f :: X86RetInfo -> Some RetConversionInfoList -> Some RetConversionInfoList
-        f r (Some ci) =
-          case retConvInfo r of
-            Some i -> Some (consRCIL i ci)
+  where f :: Some X86RetInfo -> Some RetConversionInfoList -> Some RetConversionInfoList
+        f (Some r) (Some ci) = Some (consRCIL (retConvInfo r) ci)
 
 $(pure [])
 
@@ -540,7 +542,7 @@ $(pure [])
 
 recoverCallTarget :: Recover ids ( FnValue X86_64 (BVType 64)
                                  , [X86ArgInfo]
-                                 , [X86RetInfo]
+                                 , [Some X86RetInfo]
                                  )
 recoverCallTarget = do
   mp <- gets $ biCallFunType . rsBlockInvariants
@@ -967,7 +969,7 @@ evalReturnVar :: forall ids
 evalReturnVar [] = do
   pure (Nothing, MapF.empty)
 evalReturnVar [RetBV64 r] = do
-  aid <- freshId
+aid <- freshId
   let v = FnReturnVar { frAssignId = aid
                       , frReturnType = knownRepr
                       }
@@ -1008,6 +1010,119 @@ recoverStmts stmtIdx (n:r) = do
 
 $(pure [])
 
+
+data RetFieldRelation retType fieldType where
+  IdentField :: RetFieldRelation retType retType
+  IndexField :: !(P.Index flds tp) -> RetFieldRelation (TupleType flds) tp
+
+data FieldRegRelation ftype rtype where
+  GPFieldRegRel :: FieldRegRelation (BVType 64) (BVType 64)
+  ZmmFieldRegRel :: FieldRegRelation (VecType 8 (FloatType DoubleFloat)) (BVType 512)
+
+
+-- | Denotes a value returned by a function return.
+data RetRegRelation retType regType where
+  RetRegRelation :: !(RetFieldRelation retType fieldType)
+                 -> !(FieldRegRelation fieldType regType)
+                 -> RetRegRelation retType regType
+
+-- | List of return values
+data RetRegRelations retType =
+  RetRegRelations { fnRetValuesType :: !(TypeRepr retType)
+                  -- ^ Type actually returned.
+                  , fnRetValueMap :: !(MapF X86Reg (RetRegRelation retType))
+                  }
+
+retInfoRegPair :: X86RetInfo fieldType
+               -> Pair X86Reg (FieldRegRelation fieldType)
+retInfoRegPair (RetBV64   r) = Pair (X86_GP r)     GPFieldRegRel
+retInfoRegPair (RetMM512D i) = Pair (X86_ZMMReg i) ZmmFieldRegRel
+
+-- | Infer return values from ret info.
+inferRetRegRelations :: forall fields . P.List X86RetInfo fields -> Maybe (Some RetRegRelations)
+inferRetRegRelations P.Nil = Nothing
+inferRetRegRelations (retInfo P.:< P.Nil) =
+  case retInfoRegPair retInfo of
+    Pair reg rel ->
+      let frv = RetRegRelations { fnRetValuesType = typeRepr retInfo
+                                , fnRetValueMap = MapF.singleton reg (RetRegRelation IdentField rel)
+                                }
+       in Just (Some frv)
+inferRetRegRelations fields =
+  let insField :: P.Index fields tp
+               -> X86RetInfo tp
+               -> MapF X86Reg (RetRegRelation (TupleType fields))
+               -> MapF X86Reg (RetRegRelation (TupleType fields))
+      insField idx retInfo m =
+        case retInfoRegPair retInfo of
+          Pair reg fieldRegRel ->
+            MapF.insert reg (RetRegRelation (IndexField idx) fieldRegRel) m
+      frv = RetRegRelations { fnRetValuesType = TupleTypeRepr (fmapFC typeRepr fields)
+                            , fnRetValueMap = P.ifoldr insField MapF.empty fields
+                            }
+   in Just (Some frv)
+
+getRetField :: FnValue X86_64 retType
+            -> RetFieldRelation retType fieldType
+            -> Recover ids (FnValue X86_64 fieldType)
+getRetField retVal IdentField = pure $! retVal
+getRetField retVal (IndexField idx) = do
+  case typeRepr retVal of
+    TupleTypeRepr fieldTypes ->
+      evalAssignRhs (FnEvalApp (TupleField fieldTypes retVal idx))
+
+resolveRetInfoValue :: MapF X86Reg (RetRegRelation retType)
+                    -> FnValue X86_64 retType
+                    -> X86RetInfo fieldType
+                    -> Recover ids (TypeRepr fieldType, FnValue X86_64 fieldType)
+resolveRetInfoValue regRel retVal (RetBV64 r) =
+  case MapF.lookup (X86_GP r) regRel of
+    Just (RetRegRelation retFieldRel GPFieldRegRel) -> do
+      fieldVal <- getRetField retVal retFieldRel
+      pure (knownRepr, fieldVal)
+    Nothing -> throwError $ "Could not resolve return value."
+resolveRetInfoValue regRel retVal (RetMM512D i) =
+  case MapF.lookup (X86_ZMMReg i) regRel of
+    Just (RetRegRelation retFieldRel ZmmFieldRegRel) -> do
+      fieldVal <- getRetField retVal retFieldRel
+      pure (knownRepr, fieldVal)
+    Nothing -> throwError $ "Could not resolve return value."
+
+resolveRetValueFields :: MapF X86Reg (RetRegRelation retType)
+                      -> FnValue X86_64 retType
+                      -> V.Vector (Some X86RetInfo)
+                      -> P.List TypeRepr flds
+                      -> P.List (FnValue X86_64) flds
+                      -> Int
+                      -> Recover ids (Some (FnValue X86_64))
+resolveRetValueFields _ _ _ types vals 0 = do
+  fmap Some $ evalAssignRhs $ FnEvalApp (MkTuple types vals)
+resolveRetValueFields regRel retVal callerRets types vals i =
+  case callerRets V.! (i-1) of
+    Some ri -> do
+      (tp,v) <- resolveRetInfoValue regRel retVal ri
+      resolveRetValueFields regRel retVal callerRets (tp P.:< types) (v P.:< vals) (i-1)
+
+
+resolveRetValue :: MapF X86Reg (RetRegRelation retType)
+                   -- ^ Maps regsters with information for retrieving value
+                   -- from return value.
+                -> FnValue X86_64 retType
+                   -- ^ Return value
+                -> V.Vector (Some X86RetInfo)
+                   -- ^ Information aboout return values expected by return.
+                -> Recover ids (Maybe (Some (FnValue X86_64)))
+resolveRetValue regRel retVal callerRets =
+  case V.length callerRets of
+    0 -> pure Nothing
+    1 ->
+      case callerRets V.! 0 of
+        Some ri -> do
+          (_tp,val) <- resolveRetInfoValue regRel retVal ri
+          pure $! Just (Some val)
+    n ->
+      Just <$> resolveRetValueFields regRel retVal callerRets P.Nil P.Nil n
+
 -- | Generate FnBlock fro mparsed block
 recoverBlock :: forall ids
              .  ParsedBlock X86_64 ids
@@ -1034,12 +1149,17 @@ recoverBlock b = do
       thisReturnLocs <- frcCurrentFunctionReturns <$> getFunCtx
       if thisReturnLocs == callReturnLocs then
         pure $ FnTailCall callTarget args
-       else
-        pure $ FnTailCall callTarget args
+       else do
+        Some callReturnList <- pure $ fromSomeList callReturnLocs
+        case inferRetRegRelations callReturnList of
+          Nothing -> do
+            throwError "Tail call returns no values, but function expects return values."
+          Just (Some callRetInfo) -> do
+            v <- mkReturnVar (fnRetValuesType callRetInfo)
+            addFnStmt $! FnCall callTarget args (Just (Some v))
+            mretValue <- resolveRetValue (fnRetValueMap callRetInfo) (FnReturn v) (V.fromList thisReturnLocs)
+            pure $ FnRet mretValue
 
---        error $ "Incompatible registers for tail call.\n"
---             ++ "  Caller: " ++ show thisReturnLocs ++ "\n"
---             ++ "  Callee: " ++ show callReturnLocs ++ "\n"
     -- Handle non-tail call.
     ParsedCall regs (Just retAddr) -> do
       -- Get call target
@@ -1053,10 +1173,7 @@ recoverBlock b = do
           let retMap = MapF.empty
           FnJump <$> recoverJumpTarget retMap retAddr
         Just (Some convInfo) -> do
-          aid <- freshId
-          let v = FnReturnVar { frAssignId = aid
-                              , frReturnType = rciRetType convInfo
-                              }
+          v <- mkReturnVar (rciRetType convInfo)
           addFnStmt (FnCall callTarget args (Just (Some v)))
           retMap <- rciRetToRegisters convInfo (FnReturn v) MapF.empty
           FnJump <$> recoverJumpTarget retMap retAddr
@@ -1223,7 +1340,7 @@ x86TermStmtUsage _ UD2 _ _ = pure mempty
 -- | This contians a reference to the function to call, the arguments and return register.
 type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
                                    , [X86ArgInfo]
-                                   , [X86RetInfo]
+                                   , [Some X86RetInfo]
                                    )
 
 type IsSigned = Bool
@@ -1311,12 +1428,12 @@ argStateRegs pas =
 
       x86ArgInfo :: [X86ArgInfo]
       x86ArgInfo = reverse (pasArgRegs pas)
-      x86RetInfo :: [X86RetInfo]
-      x86RetInfo = [RetBV64 F.RAX]
+      x86RetInfo :: [Some X86RetInfo]
+      x86RetInfo = [Some (RetBV64 F.RAX)]
 
    in CallRegs { callRegsFnType = (fnEntry, x86ArgInfo, x86RetInfo)
-               , callArgRegs = argReg <$> x86ArgInfo
-               , callReturnRegs = retReg <$> x86RetInfo
+               , callArgRegs    = argReg <$> x86ArgInfo
+               , callReturnRegs = viewSome retReg <$> x86RetInfo
                }
 
 initPrintfArgState :: PrintfArgState
@@ -1395,10 +1512,12 @@ inferPrintfArgs mem regs = do
     Right r -> Right r
 
 -- | Compute the return type (if any) of this function.
-retReturnType :: [X86RetInfo] -> Maybe (Some TypeRepr)
+retReturnType :: [Some X86RetInfo] -> Maybe (Some TypeRepr)
 retReturnType [] = Nothing
-retReturnType [r] = Just $! retRegTypeRepr r
-retReturnType l = Just $! viewSome (Some . TupleTypeRepr) (mapListToSome retRegTypeRepr l)
+retReturnType [r] = Just $! mapSome typeRepr r
+retReturnType l =
+ case fromSomeList l of
+   Some rets -> Just $! (Some $ TupleTypeRepr (fmapFC typeRepr rets))
 
 -- Compute map from block starting addresses to the dependicies required to run block.
 x86CallRegs :: forall ids
@@ -1436,7 +1555,7 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
       let v = FnFunctionEntryValue ftp nm
       Right CallRegs { callRegsFnType = (v, args, rets)
                      , callArgRegs    = argReg <$> args
-                     , callReturnRegs = retReg <$> rets
+                     , callReturnRegs = viewSome retReg <$> rets
                      }
     X86PrintfFun ->
       case inferPrintfArgs mem regs of
@@ -1485,7 +1604,7 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
                                         , Some R15
                                         ]
                , callScratchRegisters = []
-               , returnRegisters = retReg <$> curRets
+               , returnRegisters = viewSome retReg <$> curRets
                , reguseTermFn = x86TermStmtUsage sysp
                , callDemandFn = x86CallRegs mem funNameMap funTypeMap
                , demandContext = x86DemandContext

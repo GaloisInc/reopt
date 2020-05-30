@@ -259,7 +259,7 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
                       QWordRepVal -> "rep stosq"
       callAsm_ noSideEffect
                (dfAsm ++ "\n" ++stosAsm)
-               "={cx},={si},={di},~{dirflag},~{memory}"
+               "cx,si,di,~{cx},~{si},~{di},~{dirflag},~{memory}"
                [cnt, src, dest]
 
     _ -> error $ "LLVM generation: Unsupported architecture statement."
