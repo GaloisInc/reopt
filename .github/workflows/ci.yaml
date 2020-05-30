@@ -66,8 +66,10 @@ jobs:
         key: ${{ matrix.name }}-reopt-build-${{ github.sha }}
         # otherwise just use most recent build.
         restore-keys: ${{ matrix.name }}-reopt-build
-    - name: Cabal enable werror
-      run: ln -s cabal.project.werror cabal.project.local
+    - name: Cabal freeze and enable werrror.
+      run: |
+        ln -s cabal.project.freeze.ghc.${{ matrix.ghc-ver }} cabal.project.freeze
+        ln -s cabal.project.werror cabal.project.local
     - name: Cabal update
       run: cabal update
     - name: Install
