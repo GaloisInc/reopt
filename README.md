@@ -46,10 +46,21 @@ more mature state.
 
 # Installation
 
-If you have `git` and Haskell `stack`, you should be able to install
-with:
+Reopt is currently in development and installation is tuned towards
+supporting developers.  Building requires Haskell and cabal
+installed, and uses submodules that expect users to have Github
+accounts.  We only test building Reopt on Linux, but OSX should
+work as well.  To download and install Reopt,
+we recommend that users first make sure GHC 8.8.3 and cabal are
+installed, then perform the following steps:
 
 ```
-git submodule update --init
-stack install reopt
+git clone https://github.com/GaloisInc/reopt.git
+
+cd reopt
+sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+git submodule update --init --remote
+cabal install exe:reopt
 ```
+
+This will leave reopt installed at `$HOME/.cabal/bin/reopt`.
