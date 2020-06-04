@@ -27,9 +27,7 @@ module Reopt
   , RecoveredModule(..)
   , GetFnsLogEvent(..)
     -- * Redirections
-  , ControlFlowTargetSet
-  , discoveryControlFlowTargets
-  , addrRedirection
+  , addrRedirections
   , mergeAndWrite
     -- * LLVM
   , LLVMVersion
@@ -55,7 +53,6 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Except
 import           Control.Monad.State
---import           Control.Monad.Trans.Except
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
@@ -63,8 +60,14 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
 import           Data.ElfEdit
+  ( Elf
+  , SomeElf(..)
+  )
 import qualified Data.ElfEdit as Elf
+import qualified Data.ElfEdit.ByteString as ElfBS
 import           Data.Foldable
+import           Data.IORef
+import           Data.Int
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -114,7 +117,6 @@ import           Data.Macaw.VEX.AArch64 (armArch64le)
 copyrightNotice :: String
 copyrightNotice = "Copyright 2014-19 Galois, Inc."
 
-
 showUsage :: Handle -> IO ()
 showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
 
@@ -122,14 +124,18 @@ showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
 -- Resolve which symbols to include
 
 -- | Map from defined symbol names to the address of the symbol
-newtype SymAddrMap w = SymAddrMap (Map BS.ByteString [MemSegmentOff w])
+newtype SymAddrMap w = SymAddrMap (Map BS.ByteString (Set.Set (MemSegmentOff w)))
+
+symAddrMapEmpty :: SymAddrMap w
+symAddrMapEmpty = SymAddrMap Map.empty
+
+symAddrMapInsert :: BSC.ByteString -> MemSegmentOff w -> SymAddrMap w -> SymAddrMap w
+symAddrMapInsert nm addr (SymAddrMap m) =
+  seq nm $ seq addr $ SymAddrMap (Map.insertWith (\_ old -> Set.insert addr old) nm (Set.singleton addr) m)
 
 symAddrMapFromList :: [MemSymbol w] -> SymAddrMap w
-symAddrMapFromList = SymAddrMap . foldl ins Map.empty
-  where ins m msym =
-          let nm = memSymbolName msym
-              addr = memSymbolStart msym
-           in seq addr $ Map.insertWith (\_ old -> addr:old) nm [addr] m
+symAddrMapFromList l =
+  foldl' (\m s -> seq s $ symAddrMapInsert (memSymbolName s) (memSymbolStart s) m) symAddrMapEmpty l
 
 -- | Error code if @symAddrMapLookup@ fails.
 data SymAddrMapLookupError
@@ -139,10 +145,11 @@ data SymAddrMapLookupError
 -- | Lookup entry in symbol to address map.
 symAddrMapLookup :: SymAddrMap w -> BS.ByteString -> Either SymAddrMapLookupError (MemSegmentOff w)
 symAddrMapLookup (SymAddrMap m) nm =
-  case Map.lookup nm m of
-    Nothing -> Left SymAddrMapNotFound
-    Just [a] -> Right a
-    Just _ -> Left SymAddrMapAmbiguous
+  let s = Map.findWithDefault Set.empty nm m
+   in case Set.size s of
+       0 -> Left SymAddrMapNotFound
+       1 -> Right (Set.findMin s)
+       _ -> Left SymAddrMapAmbiguous
 
 -- | Attempt to find the address of a string identifying a symbol
 -- name, and return either the string if it cannot be resolved or the
@@ -198,11 +205,27 @@ resolveIncludeFn _ _ _ _ _ = do
 ------------------------------------------------------------------------
 -- Architecture info
 
-data SomeArchitectureInfo w =
-  forall arch
-    . ( w ~ RegAddrWidth (ArchReg arch)
-      )
-    => SomeArch (ArchitectureInfo arch)
+
+type ProcessPLTEntries w
+   = Elf.ElfData
+   -> BS.ByteString -- ^ Symbol table data
+   -> BS.ByteString -- ^ String table data for symbol table.
+   -> Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType w)]
+      -- ^ Map from section names to section.
+   -> Memory w
+      -- ^ Memory
+   -> IORef (Maybe (MemSegmentOff w, MemWord w))
+      -- ^ Records PLT bounds
+   -> IORef [(MemSegmentOff w, BS.ByteString)]
+      -- ^ PLT bounds
+   -> IORef (SymbolMaps w)
+      -- ^ Symbol maps to update
+   -> IO ()
+
+data SomeArchitectureInfo w where
+  SomeArch :: !(ArchitectureInfo arch)
+           -> !(ProcessPLTEntries (ArchAddrWidth arch))
+           -> SomeArchitectureInfo (ArchAddrWidth arch)
 
 
 ------------------------------------------------------------------------
@@ -234,7 +257,7 @@ checkedReadFile path = do
 -- Read an elf file
 
 -- | Print errors that occured when reading to @stderr@.
-showElfParseErrors :: [ElfParseError]
+showElfParseErrors :: [Elf.ElfParseError]
                    -> IO ()
 showElfParseErrors l = do
   when (not (null l)) $ do
@@ -248,7 +271,7 @@ parseElf64 :: String
               -- ^ Data to read
            -> IO (Elf 64)
 parseElf64 nm bs =
-  case parseElfHeaderInfo bs of
+  case Elf.parseElfHeaderInfo bs of
     Left (_, msg) -> do
       hPutStrLn stderr $ "Could not parse Elf file " ++ nm ++ ":"
       hPutStrLn stderr $ "  " ++ msg
@@ -257,7 +280,7 @@ parseElf64 nm bs =
       hPutStrLn stderr "32-bit elf files are not yet supported."
       exitFailure
     Right (Elf64 hdr) -> do
-      let (l, e) = getElf hdr
+      let (l, e) = Elf.getElf hdr
       showElfParseErrors l
       return e
 
@@ -270,10 +293,10 @@ readElf64 path = checkedReadFile path >>= parseElf64 path
 -- | Read an elf file from the path and write errors to standard error.
 --
 -- This will print to stderr and exit if path cannot be read.
-readSomeElf :: FilePath -> IO (Some ElfHeaderInfo)
+readSomeElf :: FilePath -> IO (Some Elf.ElfHeaderInfo)
 readSomeElf path = do
   bs <- checkedReadFile path
-  case parseElfHeaderInfo bs of
+  case Elf.parseElfHeaderInfo bs of
     Left (_, msg) -> do
       hPutStrLn stderr $ "Error reading " ++ path ++ ":"
       hPutStrLn stderr $ "  " ++ msg
@@ -286,66 +309,313 @@ readSomeElf path = do
 ------------------------------------------------------------------------
 -- Get binary information
 
-getElfArchInfo :: ElfClass w -> ElfMachine -> ElfOSABI -> IO (SomeArchitectureInfo w)
+getElfArchInfo :: Elf.ElfClass w -> Elf.ElfMachine -> Elf.ElfOSABI -> IO (SomeArchitectureInfo w)
 getElfArchInfo cl arch abi =
   case (cl, arch, abi) of
-    (ELFCLASS64, EM_X86_64, ELFOSABI_LINUX)   -> pure (SomeArch x86_64_linux_info)
-    (ELFCLASS64, EM_X86_64, ELFOSABI_SYSV)    -> pure (SomeArch x86_64_linux_info)
-    (ELFCLASS64, EM_X86_64, ELFOSABI_FREEBSD) -> pure (SomeArch x86_64_freeBSD_info)
+    (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_LINUX)   ->
+      pure $! SomeArch x86_64_linux_info   processX86PLTEntries
+    (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_SYSV)    ->
+      pure $! SomeArch x86_64_linux_info   processX86PLTEntries
+    (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_FREEBSD) ->
+      pure $! SomeArch x86_64_freeBSD_info processX86PLTEntries
 #ifdef SUPPORT_ARM
-    (ELFCLASS32, EM_ARM, ELFOSABI_SYSV) -> do
+    (Elf.ELFCLASS32, Elf.EM_ARM, ELFOSABI_SYSV) -> do
       Data.VEX.FFI.init Data.VEX.FFI.stdOptions
-      pure (SomeArch armArch32le)
-    (ELFCLASS64, EM_AARCH64, ELFOSABI_SYSV) -> do
+      pure $! SomeArch armArch32le ignorePLTEntries
+    (Elf.ELFCLASS64, Elf.EM_AARCH64, ELFOSABI_SYSV) -> do
       Data.VEX.FFI.init Data.VEX.FFI.stdOptions
-      pure (SomeArch armArch64le)
+      pure $! SomeArch armArch64le ignorePLTEntries
 #endif
     _ -> do
-     let archName = case Map.lookup arch elfMachineNameMap of
+     let archName = case Map.lookup arch Elf.elfMachineNameMap of
                       Just nm -> nm
-                      Nothing -> "unknown-abi(" ++ showHex (fromElfMachine arch) ")"
+                      Nothing -> "unknown-abi(" ++ showHex (Elf.fromElfMachine arch) ")"
      hPutStrLn stderr
-        $ "Do not support " ++ show (elfClassBitWidth cl) ++ "-bit "
+        $ "Do not support " ++ show (Elf.elfClassBitWidth cl) ++ "-bit "
         ++ archName ++ " " ++ show abi ++ " binaries."
      exitFailure
 
 ------------------------------------------------------------------------
 -- Explore a control flow graph.
 
-elfInstances :: ElfHeaderInfo w
-             -> ((MemWidth w, Integral (ElfWordType w), Show (ElfWordType w)) => a)
+elfInstances :: Elf.ElfHeaderInfo w
+             -> ((MemWidth w, Integral (Elf.ElfWordType w), Show (Elf.ElfWordType w)) => a)
              -> a
 elfInstances hdr x =
   case Elf.headerClass (Elf.header hdr) of
-    ELFCLASS32 -> x
-    ELFCLASS64 -> x
+    Elf.ELFCLASS32 -> x
+    Elf.ELFCLASS64 -> x
+
+-- | Symbol table maps needed for function discovery/post processing.
+type SymbolMaps w = (SymAddrMap w, AddrSymMap w)
+
+-- | Write a warning to stderr.
+showWarning :: MonadIO m => String -> m ()
+showWarning msg = liftIO $ hPutStrLn stderr $ "Warning: " ++ msg
+{-# INLINE showWarning #-}
+
+insertSymbolMaps :: IORef (SymbolMaps w) -> BS.ByteString -> MemSegmentOff w -> IO ()
+insertSymbolMaps r nm addr = do
+  modifyIORef' r $ \(symAddrMap, addrSymMap) ->
+    let symAddrMap' = symAddrMapInsert nm addr symAddrMap
+        addrSymMap' = Map.insert addr nm addrSymMap
+     in seq symAddrMap' $ seq addrSymMap' $ (symAddrMap', addrSymMap')
+
+-- | Insert a symbol table entry into map.
+insSymbol :: (MemWidth w, Integral (Elf.ElfWordType w))
+          => SectionIndexMap w
+          -> IORef (SymbolMaps w)
+          -> (Int, Elf.ElfSymbolTableEntry (Elf.ElfWordType w))
+          -> IO ()
+insSymbol secMap symMapRef (idx, symEntry)
+  -- Skip non-function symbols
+  | Elf.steType symEntry /= Elf.STT_FUNC = do
+      pure ()
+  | Elf.steIndex symEntry == Elf.SHN_UNDEF = do
+      pure ()
+  | BS.null (Elf.steName symEntry) = do
+      showWarning (show (EmptySymbolName idx (Elf.steType symEntry)))
+  | Elf.steIndex symEntry == Elf.SHN_ABS = do
+      showWarning "SHN_ABS symbols not supported in dynamic binaries."
+  | otherwise = do
+      let nm = Elf.steName symEntry
+      let val = Elf.steValue symEntry
+      case Map.lookup (Elf.steIndex symEntry) secMap of
+        Just (base,sec)
+          | Elf.elfSectionAddr sec <= val && val < Elf.elfSectionAddr sec + Elf.elfSectionSize sec
+          , off <- toInteger val - toInteger (Elf.elfSectionAddr sec) -> do
+              let addr = fromMaybe (error "Invalid address") (incSegmentOff base off)
+              insertSymbolMaps symMapRef nm addr
+        _ -> do
+          showWarning (show (CouldNotResolveAddr nm))
+
+-- | Run a computation with the given section, and print a warning if
+-- the section is not found or multiply defined.
+withSection :: Map BS.ByteString [Elf.ElfSection tp]
+            -> String -- ^ Name of section for warning messages.
+            -> BS.ByteString -- ^ Name of section in Elf file.
+            -> (Elf.ElfSection tp -> IO ())
+            -> IO ()
+withSection sectionNameMap warnName secName f =
+  case Map.findWithDefault [] secName sectionNameMap of
+    []    -> showWarning $ "Could not find " ++ warnName ++ " sections."
+    _:_:_ -> showWarning $ "Found multiple " ++ warnName ++ " sections."
+    [s] -> f s
+
+withSymtab :: V.Vector (Elf.ElfSection tp)
+              -- ^ Section vector
+           -> Map BS.ByteString [Elf.ElfSection tp]
+              -- ^ Map from names to sections
+           -> String
+           -> BS.ByteString
+           -> (BS.ByteString -> BS.ByteString -> IO ())
+              -- ^ Continuation to run to get symtab and string table (respectively).
+           -> IO ()
+withSymtab sections sectionNameMap warnName secName f = do
+  withSection sectionNameMap warnName secName $ \symtab -> do
+    let strtabIdx = Elf.elfSectionLink symtab
+    if strtabIdx == 0 || fromIntegral strtabIdx >= V.length sections then do
+      showWarning $ "Invalid symbol table index in" ++ warnName ++ "."
+     else do
+      let strtab = sections V.! fromIntegral strtabIdx
+      f (Elf.elfSectionData symtab) (Elf.elfSectionData strtab)
+
+
+addDefinedSymbolTableFuns
+  :: (MemWidth w, Integral (Elf.ElfWordType w))
+  => Elf.ElfClass w
+  -> Elf.ElfData
+  -> SectionIndexMap w
+  -> BS.ByteString -- ^ Symbol table for parsing.
+  -> BS.ByteString -- ^ String table
+  -> IORef (SymbolMaps w)
+  -> IO ()
+addDefinedSymbolTableFuns cl dta secMap symtabData strtab symMapRef = do
+  let symEntrySize :: Int
+      symEntrySize = Elf.symbolTableEntrySize cl
+  let cnt :: Word32
+      cnt = fromIntegral (BS.length symtabData `quot` symEntrySize)
+  let symtabDataL = BSL.fromChunks [symtabData]
+  let go idx
+        | idx >= cnt = pure ()
+        | otherwise =
+            case Elf.parseSymbolTableEntry cl dta strtab symtabDataL idx of
+              Left e -> do
+                showWarning $ "Failed to parse symbol table entry " ++ show e
+                go (idx+1)
+              Right symEntry -> do
+                insSymbol secMap symMapRef (fromIntegral idx, symEntry)
+                go (idx+1)
+  go 1
+
+-- | Arguments for identifying a PLT stub.
+data MatchPLTStubArgs =
+  MatchPLTStubArgs { -- | Address of PLT in Elf file
+                     pltElfAddr :: !Word64
+                     -- | Address in memory of PLT section.
+                     --
+                     -- This is a function of the PLT Elf addr and the load options.
+                   , pltMemAddr :: !(MemSegmentOff 64)
+                     -- | Code in PLT
+                   , pltPLTData :: !BS.ByteString
+                     -- | Contents of `.plt.rela` for relocations
+                   , pltPLTRelaData :: !BS.ByteString
+                     -- | Symbol table data
+                   , pltSymtab  :: !BS.ByteString
+                     -- | String table for symbol table.
+                   , pltStrtab  :: !BS.ByteString
+                   }
+
+-- | This match a X86_64 PLT stub.
+--
+-- The format is
+--   jmpq off(%rip)  -- This is "ff 25" followed by (got address) - rip.
+--   pushq idx      -- This is "68" followed by a 4 byte index into GOT table.
+--   jmpq plt entry -- This is "e9" followed by a 4-byte signed int
+matchPLTStub :: Elf.ElfData -- ^ Endianess of Elf file
+             -> MatchPLTStubArgs
+             -> IORef [(MemSegmentOff 64, BS.ByteString)]
+             -- ^ PLT functions
+             -> IORef (SymbolMaps 64)
+             -> Int -- ^ Index of PLT entry (first function is at zero)
+             -> ExceptT () IO ()
+matchPLTStub dta args pltFnsRef symMapRef idx = do
+  -- Offset of PLT stub in data
+  let off :: Int
+      off = 0x10 * (idx+1)
+  -- PLT code
+  let plt = pltPLTData args
+  -- Get relocation entry for this PLT stub.
+  let rela :: Elf.RelaEntry Elf.X86_64_RelocationType
+      rela = Elf.relaEntry dta (pltPLTRelaData args) idx
+  let pltEntryAddr :: Word64
+      pltEntryAddr = pltElfAddr args + fromIntegral off
+  unless (Elf.relaType rela == Elf.R_X86_64_JUMP_SLOT) $ do
+    showWarning $ "PLT stub relocation type is not a jump slot."
+  unless (Elf.relaAddend rela == 0) $ do
+    showWarning $ "PLT stub relocation addened is non-zero."
+  unless (plt `BS.index` off == 0xff && plt `BS.index` (off+ 1) == 0x25) $ do
+    showWarning $ "PLT stub first instruction is not RIP relative jump."
+  -- Address of the pushq instruction.
+  let pushqAddr :: Word64
+      pushqAddr = pltEntryAddr + 6
+  -- Get offset of PLT Got entry as encoded in plt code.
+  let pltGotAddr = pushqAddr + fromIntegral (ElfBS.bsWord32le (BS.take 4 (BS.drop (off+2) plt)))
+  unless (pltGotAddr == Elf.relaAddr rela) $ do
+    showWarning $ "PLT jump address does not point to expected relocation entry in GOT table."
+  unless (plt `BS.index` (off+ 6) == 0x68) $ do
+    showWarning $ "PLT stub second instruction is not push."
+
+  -- Index stored in pushq instruction
+  let pushqIdx = ElfBS.bsWord32le (BS.take 4 (BS.drop (off+7) plt))
+  unless (pushqIdx == fromIntegral idx) $ do
+    showWarning $ "PLT stub push index does not match expected value."
+
+  unless (plt `BS.index` (off+11) == 0xe9) $ do
+    showWarning $ "PLT stub third instruction is not direct jump."
+  let pltDelta :: Int32
+      pltDelta = fromIntegral $ ElfBS.bsWord32le $ BS.take 4 $ BS.drop (off+12) plt
+  unless (fromIntegral pltDelta == -0x10 * (idx+2)) $ do
+    showWarning "PLT stub third instruction is not direct jump."
+  -- Get symbol index for relation
+  let symIndex :: Word32
+      symIndex = Elf.relaSym rela
+  let symtab = BSL.fromChunks [pltSymtab args]
+  sym <-
+    case Elf.parseSymbolTableEntry Elf.ELFCLASS64 dta (pltStrtab args) symtab symIndex of
+      Left err -> do
+        showWarning (show err)
+        throwError ()
+      Right entry ->
+        pure entry
+  let symName = Elf.steName sym
+  unless (Elf.steType sym == Elf.STT_FUNC) $
+    showWarning "PLT symbol must be a function."
+  unless (Elf.steBind sym == Elf.STB_GLOBAL) $
+    showWarning "PLT symbol must have global vinding."
+  unless (Elf.steIndex sym == Elf.SHN_UNDEF) $
+    showWarning "PLT symbol is must be undefined."
+  unless (Elf.steValue sym == 0 && Elf.steSize sym == 0) $ do
+    showWarning "PLT symbol must be unassigned."
+  a <-
+    case incSegmentOff (pltMemAddr args) (toInteger off) of
+      Nothing -> do
+        showWarning "PLT does not appear to have a valid address."
+        throwError ()
+      Just a -> pure a
+  liftIO $ do
+    modifyIORef' pltFnsRef (\l -> (a,symName):l)
+    insertSymbolMaps symMapRef symName a
+
+#ifdef SUPPORT_ARM
+ignorePLTEntries :: ProcessPLTEntries w
+ignorePLTEntries _ _ _ _ _ _ _ _ = pure ()
+#endif
+
+processX86PLTEntries :: Elf.ElfData
+                     -> BS.ByteString -- ^ Symbol table data
+                     -> BS.ByteString -- ^ String table data for symbol table.
+                     -> Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType 64)]
+                        -- ^ Map from section names to section.
+                     -> Memory 64
+                     -> IORef (Maybe (MemSegmentOff 64, MemWord 64))
+                        -- ^ Records PLT bounds
+                     -> IORef [(MemSegmentOff 64, BS.ByteString)]
+                        -- ^ PLT functions
+                     -> IORef (SymbolMaps 64)
+                     -> IO ()
+processX86PLTEntries dta symtab strtab sectionNameMap mem pltBoundsRef pltFnsRef symMapRef = do
+  withSection sectionNameMap "PLT" ".plt" $ \pltSec -> do
+    case Map.lookup (Elf.elfSectionIndex pltSec) (memSectionIndexMap mem) of
+      Nothing -> do
+        showWarning "PLT section is not loaded in memory"
+      Just pltAddr -> do
+        writeIORef pltBoundsRef $! Just (pltAddr, fromIntegral (Elf.elfSectionSize pltSec))
+        withSection sectionNameMap "PLT relocation" ".rela.plt" $ \relaPLT -> do
+          let relaData = Elf.elfSectionData relaPLT
+          let (relaCount, r) = BS.length relaData `quotRem` Elf.relaEntSize Elf.ELFCLASS64
+          when (r /= 0) $ do
+            showWarning ".rela.plt data is not a multiple of relocation entry size."
+
+          -- Find base address of PLT stubs
+          let pltStubArgs = MatchPLTStubArgs { pltElfAddr = Elf.elfSectionAddr pltSec
+                                             , pltMemAddr = pltAddr
+                                             , pltPLTData = Elf.elfSectionData pltSec
+                                             , pltPLTRelaData = relaData
+                                             , pltSymtab = symtab
+                                             , pltStrtab = strtab
+                                             }
+          forM_ [0..relaCount-1] $ \i -> do
+            void $ runExceptT (matchPLTStub dta pltStubArgs pltFnsRef symMapRef i)
 
 -- | Discover functions in an elf file.
 --
 --  Note. This prints warnings to stderr
-runCompleteDiscovery :: LoadOptions
+runCompleteDiscovery :: forall arch
+                     . LoadOptions
                      -- ^ Option to load the binary at the given address
                      -> DiscoveryOptions
                      -- ^ Options controlling discovery
-                     -> ElfHeaderInfo (ArchAddrWidth arch)
+                     -> Elf.ElfHeaderInfo (ArchAddrWidth arch)
                      -> ArchitectureInfo arch
+                     -> ProcessPLTEntries (ArchAddrWidth arch)
                      -> [String] -- ^ Included addresses
                      -> [String] -- ^ Excluded addresses
                      -> IO ( Elf (ArchAddrWidth arch)
                            , DiscoveryState arch
                            , AddrSymMap (ArchAddrWidth arch)
                            , SymAddrMap (ArchAddrWidth arch)
+                           , [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
                            )
-runCompleteDiscovery loadOpts disOpt hdrInfo ainfo includeAddr excludeAddr = elfInstances hdrInfo $ do
+runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstances hdrInfo $ do
   let hdr = Elf.header hdrInfo
   case Elf.headerType hdr of
     -- This is for object files.
     Elf.ET_REL -> do
       case loadOffset loadOpts of
         Nothing -> pure ()
-        Just _ -> hPutStrLn stderr $ "Ignoring load offset for object file as there is no global base address."
-
-      let (l, elfFile) = getElf hdrInfo
+        Just _ -> showWarning $ "Ignoring load offset for object file as there is no global base address."
+      let (l, elfFile) = Elf.getElf hdrInfo
       showElfParseErrors l
       (mem, secMap, warnings) <-
         case memoryForElfSections elfFile of
@@ -353,8 +623,6 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo includeAddr excludeAddr = elf
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
       let isRelevant ste = Elf.steType ste == Elf.STT_FUNC
---      let secIdxMap  = Map.fromList [ (elfSectionIndex s, s) | s <- elfFile^..Elf.elfSections ]
---      let secNameMap = Map.fromList [ (elfSectionName s, s)  | s <- elfFile^..Elf.elfSections ]
 
       let (symErrs, symbols) = resolveElfFuncSymbols mem secMap isRelevant elfFile
 
@@ -368,17 +636,17 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo includeAddr excludeAddr = elf
           regIdx = 1
 
       (allEntries, fnPred) <- resolveIncludeFn mem regIdx symAddrMap includeAddr excludeAddr
-      let initState
+      let readyState
             = emptyDiscoveryState mem addrSymMap ainfo
             & markAddrsAsFunction InitAddr allEntries
-      s <- completeDiscoveryState initState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap)
+      s <- completeDiscoveryState readyState disOpt fnPred
+      pure (elfFile, s, addrSymMap, symAddrMap, [])
     -- Static executable
     Elf.ET_EXEC -> do
       case loadOffset loadOpts of
         Nothing -> pure ()
-        Just _ -> hPutStrLn stderr $ "Ignoring load offset for unrelocatable executable."
-      let (l, elfFile) = getElf hdrInfo
+        Just _ -> showWarning $ "Ignoring load offset for unrelocatable executable."
+      let (l, elfFile) = Elf.getElf hdrInfo
       showElfParseErrors l
       (mem, secMap, warnings) <-
         case memoryForElfSegments defaultLoadOptions elfFile of
@@ -392,54 +660,91 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo includeAddr excludeAddr = elf
       let symAddrMap = symAddrMapFromList symbols
       -- Get initial entries and predicate for exploring
       (entries, fnPred) <- resolveIncludeFn mem 0 symAddrMap includeAddr excludeAddr
+      let initState
+            = emptyDiscoveryState mem addrSymMap ainfo
+            & markAddrsAsFunction InitAddr entries
+
       let entry = Elf.headerEntry hdr
-      allEntries <-
+      readyState <-
         case resolveRegionOff mem 0 (fromIntegral entry) of
           Nothing -> do
             hPutStrLn stderr $ "Could not resolve entry point 0x" ++ showHex entry ""
-            pure entries
+            pure $! initState
           Just v -> do
-            pure (v:entries)
-      let initState
-            = emptyDiscoveryState mem addrSymMap ainfo
-            & markAddrsAsFunction InitAddr allEntries
-      s <- completeDiscoveryState initState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap)
+            pure $! initState & markAddrAsFunction InitAddr v
+      s <- completeDiscoveryState readyState disOpt fnPred
+      pure (elfFile, s, addrSymMap, symAddrMap, [])
     -- This is a shared library or position-independent executable.
     Elf.ET_DYN -> do
-      let (l, elfFile) = getElf hdrInfo
+      let (l, elfFile) = Elf.getElf hdrInfo
       showElfParseErrors l
+      -- Create memory image for elf file.
       (mem, secMap, warnings) <-
         case memoryForElfSegments loadOpts elfFile of
           Left errMsg -> hPutStrLn stderr errMsg *> exitFailure
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
-      let isRelevant ste = Elf.steType ste == Elf.STT_FUNC
-      let (symErrs, symbols) = resolveElfFuncSymbols mem secMap isRelevant elfFile
-      let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-      let symAddrMap = symAddrMapFromList symbols
+      -- Get symbol table.
+      let cl = Elf.headerClass hdr
+      let dta = Elf.headerData hdr
+
+      let sections = Elf.headerSections hdrInfo
+
+      let sectionNameMap :: Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))]
+          sectionNameMap =
+            Map.fromListWith (++)
+              [ (Elf.elfSectionName s, [s]) | s <- V.toList sections ]
+
+      symMapRef <- newIORef $ (symAddrMapEmpty, Map.empty)
+      withSymtab sections sectionNameMap "static symbol table" ".symtab" $ \symtab strtab -> do
+        addDefinedSymbolTableFuns cl dta secMap symtab strtab symMapRef
+
+      pltBoundsRef <- newIORef Nothing
+      pltFnsRef <- newIORef []
+      withSymtab sections sectionNameMap "dynamic symbol table" ".dynsym" $ \dynSymtab dynStrtab -> do
+        addDefinedSymbolTableFuns cl dta secMap dynSymtab dynStrtab symMapRef
+        pltFn dta dynSymtab dynStrtab sectionNameMap mem pltBoundsRef pltFnsRef symMapRef
+
+      mbounds <- readIORef pltBoundsRef
+      let exploreFn =
+            case mbounds of
+              Nothing -> \_ -> True
+              Just (pltStartSegOff, pltSize) ->
+                let pltStartAddr = segoffAddr pltStartSegOff
+                    pltBase   = addrBase pltStartAddr
+                    pltStartOff = addrOffset pltStartAddr
+                    inPLT a = pltBase == addrBase a
+                              && pltStartOff <= addrOffset a
+                              && addrOffset a - pltStartOff < pltSize
+                 in \a -> not (inPLT (segoffAddr a))
+      pltFns <- readIORef pltFnsRef
+      (symAddrMap, addrSymMap) <- readIORef symMapRef
+
+
       -- Get initial entries and predicate for exploring
       let regIdx :: RegionIndex
           regIdx = if isJust (loadOffset loadOpts) then 0 else 1
+
       (entries, fnPred) <- resolveIncludeFn mem regIdx symAddrMap includeAddr excludeAddr
-      mapM_ (hPutStrLn stderr . show) symErrs
+      let postEntryState = emptyDiscoveryState mem addrSymMap ainfo
+                         & exploreFunctionAddr .~ exploreFn
+                         & markAddrsAsFunction InitAddr entries
+
       let entry = Elf.headerEntry hdr
       let adjEntry =
             case loadOffset loadOpts of
               Nothing -> toInteger entry
               Just o -> toInteger o + toInteger entry
-      allEntries <-
+      readyState <-
         case resolveRegionOff mem regIdx (fromInteger adjEntry) of
           Nothing -> do
             hPutStrLn stderr $ "Could not resolve entry point: " ++ showHex entry ""
-            pure entries
+            pure $! postEntryState
           Just v -> do
-            pure (v:entries)
-      let initState
-            = emptyDiscoveryState mem addrSymMap ainfo
-            & markAddrsAsFunction InitAddr allEntries
-      s <- completeDiscoveryState initState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap)
+            pure $! postEntryState & markAddrAsFunction InitAddr v
+
+      s <- completeDiscoveryState readyState disOpt fnPred
+      pure (elfFile, s, addrSymMap, symAddrMap, pltFns)
     Elf.ET_CORE -> do
       hPutStrLn stderr "Reopt does not support loading core files."
       exitFailure
@@ -457,10 +762,10 @@ discoverBinary :: FilePath
                -> IO (Some DiscoveryState)
 discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
   Some hdrInfo <- readSomeElf path
-  let hdr = header hdrInfo
+  let hdr = Elf.header hdrInfo
   -- Get architecture information for elf
-  SomeArch ainfo <- getElfArchInfo (headerClass hdr) (headerMachine hdr) (headerOSABI hdr)
-  (_, s, _,_) <- runCompleteDiscovery loadOpts disOpt hdrInfo ainfo includeAddr excludeAddr
+  SomeArch ainfo pltFn <- getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
+  (_, s, _, _, _) <- runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr
   pure (Some s)
 
 ------------------------------------------------------------------------
@@ -471,7 +776,6 @@ hexDigitsReq :: Bits a => a -> Int
 hexDigitsReq b = go 1 (b `shiftR` 4)
   where go r v | popCount v == 0 = r
                | otherwise = go (r+1) (v `shiftR` 4)
-
 
 trimForWord64Buffer :: Word64 -> Int -> String -> String
 trimForWord64Buffer base n s = drop d s
@@ -535,8 +839,8 @@ printX86SectionDisassembly h nm addr buffer = do
   mapM_ (printX86DisassemblyLine h addr buffer) dta
   hPutStrLn h ""
 
-isCodeSection :: (Bits w, Num w) => ElfSection w -> Bool
-isCodeSection s = elfSectionFlags s .&. shf_execinstr == shf_execinstr
+isCodeSection :: (Bits w, Num w) => Elf.ElfSection w -> Bool
+isCodeSection s = Elf.elfSectionFlags s .&. Elf.shf_execinstr == Elf.shf_execinstr
 
 ------------------------------------------------------------------------
 -- X86-specific functions
@@ -665,11 +969,11 @@ osLinkName :: X86OS -> String
 osLinkName Linux = "x86_64-unknown-linux-gnu"
 osLinkName FreeBSD = "x86_64-unknown-freebsd-elf"
 
-getX86ElfArchInfo :: ElfMachine -> ElfOSABI -> IO X86OS
-getX86ElfArchInfo EM_X86_64 ELFOSABI_LINUX   = pure Linux
-getX86ElfArchInfo EM_X86_64 ELFOSABI_SYSV    = pure Linux
-getX86ElfArchInfo EM_X86_64 ELFOSABI_FREEBSD = pure FreeBSD
-getX86ElfArchInfo EM_X86_64 ELFOSABI_NETBSD  = pure FreeBSD
+getX86ElfArchInfo :: Elf.ElfMachine -> Elf.ElfOSABI -> IO X86OS
+getX86ElfArchInfo Elf.EM_X86_64 Elf.ELFOSABI_LINUX   = pure Linux
+getX86ElfArchInfo Elf.EM_X86_64 Elf.ELFOSABI_SYSV    = pure Linux
+getX86ElfArchInfo Elf.EM_X86_64 Elf.ELFOSABI_FREEBSD = pure FreeBSD
+getX86ElfArchInfo Elf.EM_X86_64 Elf.ELFOSABI_NETBSD  = pure FreeBSD
 getX86ElfArchInfo m abi = do
   hPutStrLn stderr $ printf "Do not support %s %s binaries." (show m) (show abi)
   exitFailure
@@ -917,6 +1221,11 @@ instance Show GetFnsLogEvent where
   show (RecoveryWarning _ msg) = "  Warning: " ++ msg
   show (GetFnsError msg) = msg
 
+defaultX86Type :: X86FunTypeInfo
+defaultX86Type = X86NonvarargFun args rets
+  where args = fmap ArgBV64 x86GPPArgumentRegs ++ fmap ArgMM512D [0..7]
+        rets = [ Some (RetBV64 F.RAX), Some (RetBV64 F.RDX) ]
+
 -- | Analyze an elf binary to extract information.
 --
 --  Note. This prints warnings to stderr and may exit if the Elf file cannot be parsed.
@@ -935,13 +1244,12 @@ discoverX86Elf :: (GetFnsLogEvent -> IO ())
                -> IO ( Elf 64
                      , X86OS
                      , DiscoveryState X86_64
-                     , AddrSymMap 64
                      , RecoveredModule X86_64
                      )
 discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unnamedFunPrefix = do
   bs <- checkedReadFile path
   hdrInfo <-
-    case parseElfHeaderInfo bs of
+    case Elf.parseElfHeaderInfo bs of
       Left (_, msg) -> do
         hPutStrLn stderr $ "Could not parse Elf file " ++ path ++ ":"
         hPutStrLn stderr $ "  " ++ msg
@@ -951,10 +1259,10 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
         exitFailure
       Right (Elf64 hdrInfo) -> do
         pure hdrInfo
-  let hdr = header hdrInfo
-  os <- getX86ElfArchInfo (headerMachine hdr) (headerOSABI hdr)
-  (e, discState, addrSymMap, symAddrMap) <-
-    runCompleteDiscovery loadOpts disOpt hdrInfo (osArchitectureInfo os) includeAddr excludeAddr
+  let hdr = Elf.header hdrInfo
+  os <- getX86ElfArchInfo (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
+  (e, discState, addrSymMap, symAddrMap, pltFuns) <-
+    runCompleteDiscovery loadOpts disOpt hdrInfo (osArchitectureInfo os) processX86PLTEntries includeAddr excludeAddr
   when (isUsedPrefix unnamedFunPrefix addrSymMap) $ do
     hPutStrLn stderr $ printf "No symbol in the binary may start with the prefix %d." (BSC.unpack unnamedFunPrefix)
     exitFailure
@@ -963,17 +1271,6 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
   -- Resolve function type annotations from header, and report rwarnings.
   let (hdrWarnings, symTypeList) = resolveHeaderFuns hdrAnn
   mapM_ (\(nm,err) -> logger (HeaderAnnError nm err)) hdrWarnings
-
-  -- Generate map from symbol names to known type.
-  --
-  -- This is used when we determine that a function jumps to an
-  -- undefined symbol via a relocation.
-  let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
-      symTypeMap = Map.fromList $
-        [ (nm, tp)
-        | (nm, annTp) <- symTypeList
-        , tp <- toKnownFunABI annTp
-        ]
 
   -- Generate map from symbol names to known type.
   --
@@ -994,13 +1291,19 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
               pure $ foldl (\m' tp -> Map.insert addr tp m') m (toKnownFunABI annTp)
     foldlM insSymType Map.empty symTypeList
 
-  -- Compute only those functions whose entries are not known.
-  let notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrTypeMap)
-
   -- Compute the function demands
   let fDems =
-        functionDemands (x86DemandInfo sysp) addrTypeMap symTypeMap mem $
-          filter notKnown $ exploredFunctions discState
+        -- Generate map from symbol names to known type.
+        let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
+            symTypeMap = Map.fromList $
+              [ (nm, tp)
+              | (nm, annTp) <- symTypeList
+              , tp <- toKnownFunABI annTp
+              ]
+            -- Compute only those functions whose entries are not known.
+            notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrTypeMap)
+         in functionDemands (x86DemandInfo sysp) addrTypeMap symTypeMap mem $
+              filter notKnown $ exploredFunctions discState
 
   let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
       funNameMap = addrSymMap
@@ -1010,11 +1313,12 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
                                 , Map.notMember addr addrSymMap
                                 ]
   let funTypeMap ::  Map BS.ByteString X86FunTypeInfo
-      funTypeMap = Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
+      funTypeMap = Map.fromList symTypeList
+                <> Map.singleton "printf" X86PrintfFun
+                <> Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
                                 | (addr,tp) <- Map.toList (inferFunctionTypeFromDemands fDems)
                                 ]
-                <> Map.singleton "printf" X86PrintfFun
-                <> Map.fromList symTypeList
+                <> Map.fromList [ (nm, defaultX86Type) | (_addr,nm) <- pltFuns ]
   fnDefs <- fmap catMaybes $
     forM (exploredFunctions discState) $ \(Some finfo) -> do
       let fnm = discoveredFunName finfo
@@ -1049,7 +1353,7 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
                                                   ]
                                , recoveredDefs = fnDefs
                                }
-  seq recMod $ pure (e, os, discState, addrSymMap, recMod)
+  seq recMod $ pure (e, os, discState, recMod)
 
 -- | Produce a LLVM textual rendering of the module for the LLVM version.
 llvmAssembly :: LLVMArchSpecificOps X86_64
@@ -1113,7 +1417,7 @@ compileLLVM optLevel optPath llcPath llvmMcPath arch llvm = do
 -- functions that may target them.
 --
 -- This is used to compute when it is safe to insert a redirection.  We want to
--- ensure that adding a redirection will not break unknow
+-- ensure that adding a redirection will not break unknown functions..
 newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (MemSegmentOff w) [MemSegmentOff w]
                                       }
 
@@ -1153,7 +1457,6 @@ addFunctionEntryPoint :: ControlFlowTargetSet w
                       -> ControlFlowTargetSet w
 addFunctionEntryPoint s a = addControlFlowTarget s a a
 
-
 addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
                                   -> Some (DiscoveryFunInfo arch)
                                   -> ControlFlowTargetSet (ArchAddrWidth arch)
@@ -1168,27 +1471,24 @@ discoveryControlFlowTargets info =
 
 -- | This creates a code redirection or returns the address as failing.
 addrRedirection :: ControlFlowTargetSet 64
-                -> AddrSymMap 64
-                   -- ^ Map from address to symbol name
-                -> BSC.ByteString
-                   -- ^ Prefix to use for functions without a prefix.
                 -> Function X86_64
                 -> CodeRedirection Word64
-addrRedirection tgts addrSymMap prefix f = do
+addrRedirection tgts f = do
   let a = fnAddr f
   let off :: Word64
       off = fromIntegral (segmentOffset (segoffSegment a)) + fromIntegral (segoffOffset a)
-  CodeRedirection { redirSourceVAddr = off
-                  , redirSourceSize =
-                      fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
-                  , redirTarget =
-                      case Map.lookup a addrSymMap of
-                        Just nm -> nm
-                        Nothing ->
-                          let aa = segoffAddr a
-                           in prefix <> "_" <> BSC.pack (show (addrBase aa)) <> "_" <> BSC.pack (show (addrOffset aa))
-                  }
+   in CodeRedirection { redirSourceVAddr = off
+                      , redirSourceSize = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
+                      , redirTarget = fnName f
+                      }
 
+-- | This generates redirections from original functions to a list of new functions.
+addrRedirections :: DiscoveryState X86_64
+                 -> [Function X86_64]
+                 -> [CodeRedirection Word64]
+addrRedirections s fns =
+  let tgts = discoveryControlFlowTargets s
+   in addrRedirection tgts <$> fns
 
 -- | Merge a binary and new object
 mergeAndWrite :: FilePath
@@ -1201,7 +1501,7 @@ mergeAndWrite output_path orig_binary new_obj redirs = do
   case mres of
     Left e -> fail e
     Right new_binary -> do
-      BSL.writeFile output_path $ renderElf new_binary
+      BSL.writeFile output_path $ Elf.renderElf new_binary
       -- Update the file mode
       do fs <- getFileStatus output_path
          let fm = ownerExecuteMode
