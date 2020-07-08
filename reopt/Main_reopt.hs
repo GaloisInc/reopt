@@ -453,10 +453,10 @@ showCFG args = do
   pure $ show $ ppDiscoveryStateBlocks discState
 
 -- | This parses function argument information from a user-provided header file.
-resolveHeader :: Args -> IO Header
+resolveHeader :: Args -> IO AnnDeclarations
 resolveHeader args =
   case headerPath args of
-    Nothing -> pure emptyHeader
+    Nothing -> pure emptyAnnDeclarations
     Just p -> parseHeader (clangPath args) p
 
 -- | Function for recovering log information.

@@ -15,6 +15,7 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
@@ -79,13 +80,14 @@ fromSomeList (Some h:r) =
 
 -- | This identifies how a argument is passed into a function, or
 -- a return value is passed out.
-data X86ArgInfo where
-  ArgBV64 :: !F.Reg64 -> X86ArgInfo
-  -- ^ This identifies a 64-bit value passed as a register.
-  --
-  -- The register should be compatible with the ABI.
-  ArgMM512D :: !Word8 -> X86ArgInfo
+data X86ArgInfo
+  = ArgBV64 !F.Reg64
+    -- ^ This identifies a 64-bit value passed as a register.
+    --
+    -- The register should be compatible with the ABI.
+  | ArgMM512D !Word8
   -- ^ This identifies one of the zmm registers used as arguments (zmm0-7).
+  deriving (Eq, Show)
 
 -- | The register types this return value is associated with.
 argReg :: X86ArgInfo -> Some X86Reg
@@ -104,7 +106,10 @@ data X86RetInfo tp where
    -- The register should be compatible with the ABI.
   RetMM512D :: !Word8 -> X86RetInfo (VecType 8 (FloatType DoubleFloat))
    -- ^ This identifies one of the two zmm registers used as argument (zmm0/1).
---  deriving (Eq, Show)
+
+deriving instance (Show (X86RetInfo tp))
+
+instance ShowF X86RetInfo
 
 -- | The register types this return value is associated with.
 retReg :: X86RetInfo tp -> Some X86Reg
@@ -122,8 +127,7 @@ instance HasRepr X86RetInfo TypeRepr where
 
 $(pure [])
 
--- | This describes the registers and return value of an x86_64 ABI
--- compliant function.
+-- | This describes the registers and return value of an x86_64 function.
 --
 -- This representation does not support arguments that spilled on the
 -- stack, but this would be a good feature to add.
@@ -134,10 +138,12 @@ $(pure [])
 -- float is ABI compatible with a function that takes a float
 -- followed by two integers.
 data X86FunTypeInfo
-   = X86NonvarargFun [X86ArgInfo] [Some X86RetInfo]
-   | X86PrintfFun
+   = X86NonvarargFunType [X86ArgInfo] [Some X86RetInfo]
+   | X86PrintfFunType
      -- ^ A function that is like printf where the first argument is a string
      -- and subsequent arguments are inferred from it.
+   | X86UnsupportedFunType
+  deriving (Eq, Show)
 
 ------------------------------------------------------------------------
 -- FnRegValue
@@ -1519,7 +1525,8 @@ retReturnType l =
  case fromSomeList l of
    Some rets -> Just $! (Some $ TupleTypeRepr (fmapFC typeRepr rets))
 
--- Compute map from block starting addresses to the dependicies required to run block.
+-- | Compute map from block starting addresses to the dependicies
+-- required to run block.
 x86CallRegs :: forall ids
             .  Memory 64
             -> Map (MemSegmentOff 64) BSC.ByteString
@@ -1547,7 +1554,7 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
             Left $ UnresolvedFunctionTypeError addr $
               "Could not determine arguments for call to " ++ BSC.unpack nm ++ "."
   case tp of
-    X86NonvarargFun args rets -> do
+    X86NonvarargFunType args rets -> do
       let ftp = FunctionType { fnArgTypes = argRegTypeRepr <$> args
                              , fnReturnType = retReturnType rets
                              , fnVarArgs = False
@@ -1557,10 +1564,14 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
                      , callArgRegs    = argReg <$> args
                      , callReturnRegs = viewSome retReg <$> rets
                      }
-    X86PrintfFun ->
+    X86PrintfFunType ->
       case inferPrintfArgs mem regs of
         Left msg -> Left (UnresolvedFunctionTypeError addr msg)
         Right r -> Right r
+    X86UnsupportedFunType ->
+      Left $ UnresolvedFunctionTypeError addr
+        "Function calling convention not supported by Reopt."
+
 
 -- | Recover the function at a given address.
 --
@@ -1588,10 +1599,12 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
       Nothing -> Left $ "Missing name for " ++ show entryAddr ++ "."
   (curArgs, curRets) <-
     case Map.lookup nm funTypeMap of
-      Just (X86NonvarargFun args rets) -> pure (args, rets)
-      Just X86PrintfFun ->
+      Just (X86NonvarargFunType args rets) -> pure (args, rets)
+      Just X86PrintfFunType ->
         Left $ BSC.unpack nm ++ " is a vararg function and not supported."
-      Nothing -> Left $ "Missing type for " ++ BSC.unpack nm ++ "."
+      Just X86UnsupportedFunType ->
+        Left $ printf "%s has an unsupported type." (BSC.unpack nm)
+      Nothing -> Left $ printf "Missing type for %s." (BSC.unpack nm)
 
   let useCtx = RegisterUseContext
                { archCallParams = x86_64CallParams
