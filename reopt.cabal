@@ -23,7 +23,7 @@ library
     ansi-wl-pprint,
     bytestring,
     containers,
-    elf-edit >= 0.36,
+    elf-edit >= 0.37,
     flexdis86 >= 0.1.1,
     hashable,
     language-c,

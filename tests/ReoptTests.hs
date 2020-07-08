@@ -47,7 +47,7 @@ mkTest fp = T.testCase fp $ do
                                   , logAtAnalyzeBlock      = False
                                   }
   let hdrAnn = emptyHeader
-  (_, os, discState, _, recMod) <-
+  (_, os, discState, recMod) <-
     discoverX86Elf logger fp loadOpts discOpts [] [] hdrAnn "reopt"
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
