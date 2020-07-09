@@ -1667,8 +1667,6 @@ resolveDebugFunTypes logger annMap elfInfo = do
         ]
   case Map.findWithDefault [] ".debug_info" secDataMap of
     [] -> do
-      putStrLn "No debug information"
-      _ <- exitFailure
       -- No debug information
       pure annMap
     _:_ -> do
