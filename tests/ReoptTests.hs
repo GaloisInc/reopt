@@ -46,7 +46,7 @@ mkTest fp = T.testCase fp $ do
                                   , logAtAnalyzeFunction   = False
                                   , logAtAnalyzeBlock      = False
                                   }
-  let hdrAnn = emptyHeader
+  let hdrAnn = emptyAnnDeclarations
   (_, os, discState, recMod) <-
     discoverX86Elf logger fp loadOpts discOpts [] [] hdrAnn "reopt"
 
