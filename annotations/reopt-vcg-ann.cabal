@@ -23,6 +23,8 @@ library
               , containers
               -- flexdis86 used just for register names
               , flexdis86
+                -- macaw-x86 only used for register names.
+              , macaw-x86
               , scientific
               , text
               , unordered-containers

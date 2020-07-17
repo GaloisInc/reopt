@@ -18,17 +18,20 @@ import           Reopt.CFG.Recovery (X86ArgInfo(..))
 data ArgResolverError
    = OutOfGPRegs !String
      -- ^ @OutOfGPRegs nm@ The argument @nm@ has run out of general-purpose registers.
+   | MissingArgType !String
+     -- ^ Return type for argument is missing
    | UnsupportedArgType !String !String
-     -- ^ @UssupportedArgType nm tp@ Argument @nm@ does not support type.
+     -- ^ @UnsupportedArgType nm tp@ Argument @nm@ does not support type.
    | UnsupportedReturnType !String
    | DebugResolveError !String
    | VarArgsUnsupported
-
 
 -- | Pretty print for header errors.
 showArgResolverError :: ArgResolverError -> String
 showArgResolverError (OutOfGPRegs _) =
   "Stack arguments are not supported and no more general-purpose registers available."
+showArgResolverError (MissingArgType vnm) =
+  printf "Argument %s missing type." vnm
 showArgResolverError (UnsupportedArgType vnm tp) =
   printf "Argument %s does not support type %s." vnm tp
 showArgResolverError (UnsupportedReturnType tp) =
