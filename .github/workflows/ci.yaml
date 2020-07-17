@@ -43,7 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # NOTE: must list all targets in `include` here to activate them
         name: ["Linux 8.8.3"]
         include:
           - name: Linux 8.8.3
@@ -66,7 +65,7 @@ jobs:
         key: ${{ matrix.name }}-reopt-build-${{ github.sha }}
         # otherwise just use most recent build.
         restore-keys: ${{ matrix.name }}-reopt-build
-    - name: Cabal freeze and enable werrror.
+    - name: Cabal freeze and enable werror.
       run: |
         ln -s cabal.project.freeze.ghc.${{ matrix.ghc-ver }} cabal.project.freeze
         ln -s cabal.project.werror cabal.project.local

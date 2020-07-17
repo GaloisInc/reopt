@@ -139,9 +139,12 @@ $(pure [])
 -- followed by two integers.
 data X86FunTypeInfo
    = X86NonvarargFunType [X86ArgInfo] [Some X86RetInfo]
-   | X86PrintfFunType
-     -- ^ A function that is like printf where the first argument is a string
-     -- and subsequent arguments are inferred from it.
+   | X86PrintfFunType !Int
+     -- ^ A function that is like printf where the last non-vararg
+     -- argument is a string and subsequent arguments are inferred
+     -- from it.
+     --
+     -- The int denotes the number of 64-bit bitvectors previously.
    | X86UnsupportedFunType
   deriving (Eq, Show)
 
@@ -1416,14 +1419,16 @@ printfArgType sp = do
 
 
 data PrintfArgState = PrintfArgState
-  { pasRemainingIntArgs :: [X86ArgInfo]
+  { pasRemainingIntArgs :: [F.Reg64]
   , pasRemainingFloatArgs :: [X86ArgInfo]
   , pasArgRegs :: [X86ArgInfo]
     -- ^ ARgumetn registers  in reverse order.
   }
 
-argStateRegs :: PrintfArgState -> CallRegs X86_64
-argStateRegs pas =
+argStateRegs :: RegState X86Reg (Value X86_64 ids)
+             -> PrintfArgState
+             -> CallRegs X86_64 ids
+argStateRegs regs pas =
   let funType :: FunctionType X86_64
       funType = FunctionType { fnArgTypes = [Some (BVTypeRepr n64)]
                             , fnReturnType = Just (Some (BVTypeRepr n64))
@@ -1438,27 +1443,37 @@ argStateRegs pas =
       x86RetInfo = [Some (RetBV64 F.RAX)]
 
    in CallRegs { callRegsFnType = (fnEntry, x86ArgInfo, x86RetInfo)
-               , callArgRegs    = argReg <$> x86ArgInfo
+               , callArgValues =
+                   [ Some (regs^.boundValue r)
+                   | Some r <- argReg <$> x86ArgInfo
+                   ]
                , callReturnRegs = viewSome retReg <$> x86RetInfo
                }
 
+-- | Initial printf arg state.
 initPrintfArgState :: PrintfArgState
 initPrintfArgState =
-  case x86GPPArgumentRegs of
-    [] -> error $ "Expected non-empty argument regs."
-    farg:remArgs ->
-      PrintfArgState { pasRemainingIntArgs = ArgBV64 <$> remArgs
-                     , pasRemainingFloatArgs = ArgMM512D <$> [0..7]
-                     , pasArgRegs = [ArgBV64 farg]
+  PrintfArgState { pasRemainingIntArgs = x86GPPArgumentRegs
+                 , pasRemainingFloatArgs = ArgMM512D <$> [0..7]
+                 , pasArgRegs = []
+                 }
+
+getPrintfIntArg :: PrintfArgState -> Maybe (F.Reg64, PrintfArgState)
+getPrintfIntArg pas =
+  case pasRemainingIntArgs pas of
+    [] -> Nothing
+    (h:r) ->
+      let pas' = pas { pasArgRegs = ArgBV64 h : pasArgRegs pas
+                     , pasRemainingIntArgs = r
                      }
+       in seq pas' $ Just (h, pas')
+
 
 addIntArg :: PrintfArgState -> Either String PrintfArgState
 addIntArg pas =
-  case pasRemainingIntArgs pas of
-    [] -> Left $ "Too many integer arguments."
-    (h:r) -> Right $ pas { pasArgRegs = h : pasArgRegs pas
-                         , pasRemainingIntArgs = r
-                         }
+  case getPrintfIntArg pas of
+    Nothing -> Left "Too many integer arguments."
+    Just (_,pas') -> Right pas'
 
 addFloatArg :: PrintfArgState -> Either String PrintfArgState
 addFloatArg pas =
@@ -1487,9 +1502,9 @@ addArg pas tp =
     WCharPtrT -> addIntArg pas
     NoArg     -> pure pas
 
-parseUnpackedFormat :: PrintfArgState -> Printf.UnpackedRep -> Either String (CallRegs X86_64)
+parseUnpackedFormat :: PrintfArgState -> Printf.UnpackedRep -> Either String PrintfArgState
 parseUnpackedFormat pas (Printf.UnpackedTerm _) =
-  Right (argStateRegs pas)
+  Right pas
 parseUnpackedFormat pas (Printf.UnpackedLiteral _ r) =
   parseUnpackedFormat pas r
 parseUnpackedFormat pas (Printf.UnpackedSpecifier s r) = do
@@ -1501,10 +1516,15 @@ parseUnpackedFormat _ (Printf.UnpackedError e) =
 
 inferPrintfArgs :: Memory 64 -- ^ Memory state
                 -> RegState X86Reg (Value X86_64 ids) -- Register values
-                -> Either String (CallRegs X86_64)
-inferPrintfArgs mem regs = do
+                -> PrintfArgState -- ^ Initial printf arg state
+                -> Either String (CallRegs X86_64 ids)
+inferPrintfArgs mem regs initState = do
+  (formatStringReg, initState') <-
+    case getPrintfIntArg initState of
+      Nothing -> Left "Could not get printf format string register."
+      Just p -> Right p
   printfFormatAddr <-
-    case valueAsSegmentOff mem (regs^.boundValue RDI) of
+    case valueAsSegmentOff mem (regs^.boundValue (X86_GP formatStringReg)) of
       Just addr -> pure addr
       Nothing -> Left "Could not resolve printf format string address."
   s <- case readNullTermString printfFormatAddr of
@@ -1513,9 +1533,9 @@ inferPrintfArgs mem regs = do
          NullTermMemoryError e -> Left $ "Access error for printf format sting: " ++ show e
          RelocationBeforeNull _ -> Left "Encountered relocation in format string."
   let uf = Printf.unpackFormat s
-  case parseUnpackedFormat initPrintfArgState uf of
+  case parseUnpackedFormat initState' uf of
     Left msg -> Left $ "printf error: " ++ show s ++ "\n" ++ msg
-    Right r -> Right r
+    Right pas -> Right $! argStateRegs regs pas
 
 -- | Compute the return type (if any) of this function.
 retReturnType :: [Some X86RetInfo] -> Maybe (Some TypeRepr)
@@ -1537,7 +1557,7 @@ x86CallRegs :: forall ids
                -- ^ Address of the call statement
             -> RegState X86Reg (Value X86_64 ids)
                -- ^ Registers when call occurs.
-            -> Either (RegisterUseError X86_64) (CallRegs X86_64)
+            -> Either (RegisterUseError X86_64) (CallRegs X86_64 ids)
 x86CallRegs mem funNameMap funTypeMap addr regs = do
   callTarget <-
     case valueAsSegmentOff mem (regs^.boundValue ip_reg) of
@@ -1561,17 +1581,28 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
                              }
       let v = FnFunctionEntryValue ftp nm
       Right CallRegs { callRegsFnType = (v, args, rets)
-                     , callArgRegs    = argReg <$> args
+                     , callArgValues =
+                         [ Some (regs^.boundValue r)
+                         | Some r <- argReg <$> args
+                         ]
                      , callReturnRegs = viewSome retReg <$> rets
                      }
-    X86PrintfFunType ->
-      case inferPrintfArgs mem regs of
+    X86PrintfFunType icnt0 -> do
+      let resolveInitArgs 0 s = Right s
+          resolveInitArgs n s =
+            if n == 0 then
+              Right s
+             else
+              case getPrintfIntArg s of
+                Nothing -> Left $ UnresolvedFunctionTypeError addr "Too many printf initial args."
+                Just (_, s') -> resolveInitArgs (n-1) s'
+      s <- resolveInitArgs icnt0 initPrintfArgState
+      case inferPrintfArgs mem regs s of
         Left msg -> Left (UnresolvedFunctionTypeError addr msg)
         Right r -> Right r
     X86UnsupportedFunType ->
       Left $ UnresolvedFunctionTypeError addr
         "Function calling convention not supported by Reopt."
-
 
 -- | Recover the function at a given address.
 --
@@ -1600,7 +1631,7 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
   (curArgs, curRets) <-
     case Map.lookup nm funTypeMap of
       Just (X86NonvarargFunType args rets) -> pure (args, rets)
-      Just X86PrintfFunType ->
+      Just (X86PrintfFunType _) ->
         Left $ BSC.unpack nm ++ " is a vararg function and not supported."
       Just X86UnsupportedFunType ->
         Left $ printf "%s has an unsupported type." (BSC.unpack nm)

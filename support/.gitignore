@@ -2,5 +2,6 @@
 *.bc
 *.256.ll
 *.512.ll
+/*.exe
 *.o
 print_stackheap_addrs

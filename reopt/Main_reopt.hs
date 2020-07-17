@@ -524,8 +524,7 @@ performReopt args = do
                    funPrefix
   errorCnt <- readIORef errorRef
   when (errorCnt > 0) $ do
-    hPutStrLn stderr $ show errorCnt ++ " error(s) occured ."
-    exitFailure
+    hPutStrLn stderr $ show errorCnt ++ " error(s) occured."
   let (objLLVM,_) = renderLLVMBitcode args os recMod
   objContents <-
     compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)

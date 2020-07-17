@@ -3,6 +3,8 @@ all : llvm_return_test.512.as abi_test.512.ll abi_test.256.ll abi_test.as print_
 print_stackheap_addrs: print_stackheap_addrs.c
 	clang -o $@ -fstack-protector-strong -fstack-protector-all $<
 
+build_id_sample.exe : build_id_sample.c Makefile
+	clang -o $@ -Wl,--build-id=sha1 $<
 
 %.512.o : %.ll
 	llc --mtriple=x86_64-pc-linux-elf -mattr=avx512f -filetype=obj -o $@ $<
