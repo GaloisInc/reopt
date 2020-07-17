@@ -62,6 +62,7 @@ module Reopt.CFG.LLVM
 
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Data.ByteString.Char8 as BSC
@@ -84,6 +85,7 @@ import           Numeric.Natural
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import           Text.PrettyPrint.ANSI.Leijen (pretty)
+import           Text.Printf
 
 import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc(..))
 import           Data.Macaw.CFG
@@ -1153,72 +1155,94 @@ mkStackExpr o
         oExpr = Ann.BVDecimal (fromInteger o) 64
      in Ann.BVAdd (Ann.Var Ann.StackHigh) oExpr
 
-mkBoundLocExpr :: HasCallStack => BoundLoc X86Reg tp -> Ann.Expr Ann.BlockVar
+newtype BlockAnnGen a = BlockAnnGen (Except String a)
+  deriving (Functor, Applicative, Monad, MonadError String)
+
+runBlockAnnGen :: BSC.ByteString -> Ann.MCAddr -> BlockAnnGen a -> Either String a
+runBlockAnnGen fnm a (BlockAnnGen m) =
+  case runExcept m of
+    Left e -> Left $ printf "Missing annotation generation feature in %s(%s): %s" (BSC.unpack fnm) (show a) e
+    Right r -> Right r
+
+
+mkBoundLocExpr :: HasCallStack => BoundLoc X86Reg tp -> BlockAnnGen (Ann.Expr Ann.BlockVar)
 mkBoundLocExpr (RegLoc xr) =
   case xr of
-    X86_GP r -> Ann.Var (Ann.InitGPReg64 r)
-    _ -> error $ "Do not support register " ++ show xr
+    X86_GP r ->
+      pure $! Ann.Var (Ann.InitGPReg64 r)
+    X86_FlagReg r->
+      pure $! Ann.Var (Ann.InitFlagReg r)
+    _ ->
+      throwError $ "Do not support register " ++ show xr
 mkBoundLocExpr (StackOffLoc o tp) =
   if o < 0 then
     case tp of
-      BVMemRepr byteCount LittleEndian ->
+      BVMemRepr byteCount LittleEndian -> do
         let stackExpr = mkStackExpr (toInteger o)
             bitCount = 8 * natValue byteCount
-         in Ann.Var (Ann.MCStack stackExpr bitCount)
+        pure $! Ann.Var (Ann.MCStack stackExpr bitCount)
       _ ->
-        error $ "Do not support stack references with type " ++ show tp
+        throwError $ "Do not support stack references with type " ++ show tp
    else
-    error $ "Do not support positive stack offsets."
+    throwError $ "Do not support positive stack offsets."
 
 -- | Generate preconditions for a phi variable to associate LLVM phi
 -- variables with machine code.
-mkPhiPrecond :: PhiBinding X86_64 -> [Ann.Expr Ann.BlockVar]
-mkPhiPrecond b =
+addPhiPrecond :: PhiBinding X86_64 -> [Ann.Expr Ann.BlockVar] -> BlockAnnGen [Ann.Expr Ann.BlockVar]
+addPhiPrecond b prev0 =
   case phiFnRepVar b of
-    Some phiVar ->
+    Some phiVar -> do
           -- Get expression representing LLVM value.
       let phiExpr :: Ann.Expr Ann.BlockVar
           phiExpr = Ann.Var (Ann.LLVMVar (Text.pack (phiLLVMIdent b)))
           -- Assert pfi expression is equal to each machine location.
           vars = fnPhiVarRep phiVar : fnPhiVarLocations phiVar
-       in [ Ann.Eq phiExpr (mkBoundLocExpr v) | v <- vars ]
+      let fn v prev = seq prev $ do
+            e <- mkBoundLocExpr v
+            let expr = Ann.Eq phiExpr e
+            seq expr $ pure (expr : prev)
+      foldrM fn prev0 vars
 
 -- | Create assertions from block preconditions.
-mkInvPrecond :: FnBlockInvariant X86_64 -> Ann.Expr Ann.BlockVar
-mkInvPrecond (FnCalleeSavedReg r x) =
-  let regExpr =
-        case r of
-          X86_GP rgp -> Ann.Var (Ann.FnStartGPReg64 rgp)
-          _ -> error "Only general purpose registers are supported."
-   in Ann.Eq (mkBoundLocExpr x) regExpr
+mkInvPrecond :: FnBlockInvariant X86_64 -> BlockAnnGen (Ann.Expr Ann.BlockVar)
+mkInvPrecond (FnCalleeSavedReg r x) = do
+  xExpr <- mkBoundLocExpr x
+  regExpr <-
+    case r of
+      X86_GP rgp -> pure $! Ann.Var (Ann.FnStartGPReg64 rgp)
+      _ -> throwError "Only general purpose registers are supported."
+  pure $! Ann.Eq xExpr regExpr
 mkInvPrecond (FnEqualLocs x y) =
-  Ann.Eq (mkBoundLocExpr x) (mkBoundLocExpr y)
+  Ann.Eq <$> mkBoundLocExpr x <*> mkBoundLocExpr y
 mkInvPrecond (FnStackOff o x) =
-  Ann.Eq (mkBoundLocExpr x) (mkStackExpr (toInteger o))
-
+  Ann.Eq <$> mkBoundLocExpr x <*> pure (mkStackExpr (toInteger o))
 
 -- | Generate pair containing block label in LLVM and annotations from
 -- block.
-getBlockAnn :: LLVMBlockResult X86_64 -> (String, Ann.BlockAnn)
-getBlockAnn blockRes = (fnBlockLabelString lbl, Ann.ReachableBlock ann)
-  where b = fnBlock blockRes
-        lbl = fbLabel b
-        addr  = fromIntegral $ addrOffset $ segoffAddr $ fnBlockLabelAddr lbl
-        pr = fbPrecond b
-        -- Preconditions that relate phi variable with Macaw location.
-        phiPreconds :: [Ann.Expr Ann.BlockVar]
-        phiPreconds = concatMap mkPhiPrecond (V.toList (llvmPhiVars blockRes))
-        invPreconds :: [Ann.Expr Ann.BlockVar]
-        invPreconds = mkInvPrecond <$> fbInvariants b
-        -- Generate memory event annotation given base address, offset and address type.
-        ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
+getBlockAnn :: BSC.ByteString -- ^ Name of function
+            -> LLVMBlockResult X86_64
+            -> Either String (String, Ann.BlockAnn)
+getBlockAnn fnm blockRes = do
+  let b = fnBlock blockRes
+  let lbl = fbLabel b
+  let addr  = fromIntegral $ addrOffset $ segoffAddr $ fnBlockLabelAddr lbl
+  runBlockAnnGen fnm addr $ do
+    let pr = fbPrecond b
+    invPreconds <- mapM mkInvPrecond (fbInvariants b)
+
+    -- Preconditions that relate phi variable with Macaw location.
+    preconds <- foldrM addPhiPrecond invPreconds (llvmPhiVars blockRes)
+
+    -- Generate memory event annotation given base address, offset and address type.
+    let ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
                                     , Ann.blockCodeSize = fbSize b
                                     , Ann.blockX87Top = blockInitX87TopReg pr
                                     , Ann.blockDFFlag = blockInitDF pr
-                                    , Ann.blockPreconditions = phiPreconds ++ invPreconds
+                                    , Ann.blockPreconditions = preconds
                                     , Ann.blockAllocas = Map.empty
                                     , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
                                     }
+    pure $! (fnBlockLabelString lbl, Ann.ReachableBlock ann)
 
 -- | This translates the function to LLVM and returns the define.
 --
@@ -1237,7 +1261,7 @@ defineFunction :: forall arch
                   -- ^ Options for generating LLVM
                -> Function arch
                   -- ^ Function to translate
-               -> LLVMTrans (L.Define, Ann.FunctionAnn)
+               -> LLVMTrans (L.Define, Either String Ann.FunctionAnn)
 defineFunction archOps genOpts f = do
   let mkInputReg :: Some TypeRepr -> Int -> L.Typed L.Ident
       mkInputReg (Some tp) i = L.Typed (typeToLLVMType tp) (argIdent i)
@@ -1276,17 +1300,9 @@ defineFunction archOps genOpts f = do
   let blocks :: [L.BasicBlock]
       blocks = toBasicBlock (funBlockPhiMap finalFunState) <$> finalBlocks
 
-  let blockAnnMap = getBlockAnn <$> V.fromList (entryBlockRes : finalBlocks)
-
-  let (finBlocks,finBlockAnnMap)
-        | needSwitchFailLabel finalFunState =
-            ( entryLLVMBlock : (blocks ++ [failBlock])
-            , V.snoc blockAnnMap (switchFailLabel, Ann.UnreachableBlock)
-            )
-        | otherwise = (entryLLVMBlock : blocks, blockAnnMap)
-
-  let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
-
+  let finBlocks
+        | needSwitchFailLabel finalFunState = entryLLVMBlock : (blocks ++ [failBlock])
+        | otherwise = entryLLVMBlock : blocks
   let funDef = L.Define { L.defLinkage  = Nothing
                         , L.defRetType  = llvmFunctionReturnType (fnType f)
                         , L.defName     = L.Symbol (BSC.unpack (fnName f))
@@ -1299,10 +1315,19 @@ defineFunction archOps genOpts f = do
                         , L.defMetadata = Map.empty
                         , L.defComdat   = Nothing
                         }
-  let funAnn = Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
-                               , Ann.blocks = blockObjMap
-                               }
-  pure (funDef,funAnn)
+  let funAnn :: Either String Ann.FunctionAnn
+      funAnn = do
+        blockAnnEntries <- mapM (getBlockAnn (fnName f)) (V.fromList (entryBlockRes : finalBlocks))
+        let finBlockAnnMap
+              | needSwitchFailLabel finalFunState =
+                  V.snoc blockAnnEntries (switchFailLabel, Ann.UnreachableBlock)
+              | otherwise =
+                  blockAnnEntries
+        let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
+        pure $! Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
+                                , Ann.blocks = blockObjMap
+                                }
+  pure (funDef, funAnn)
 
 ------------------------------------------------------------------------
 -- Other
@@ -1332,7 +1357,7 @@ moduleForFunctions :: forall arch
                       -- ^ Options for generating LLVM
                    -> RecoveredModule arch
                       -- ^ Module to generate
-                   -> (L.Module, [Ann.FunctionAnn])
+                   -> (L.Module, [Either String Ann.FunctionAnn])
 moduleForFunctions archOps genOpts recMod =
   let (dynIntrinsics, definesAndAnn) = runLLVMTrans $
         traverse (defineFunction archOps genOpts) (recoveredDefs recMod)

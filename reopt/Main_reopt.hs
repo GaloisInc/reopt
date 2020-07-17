@@ -16,6 +16,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import           Data.Either
 import           Data.ElfEdit
 import           Data.IORef
 import           Data.List ((\\), nub, stripPrefix, intercalate)
@@ -499,7 +500,7 @@ getFunctions args = do
 renderLLVMBitcode :: Args -- ^ Arguments passed
                   -> X86OS -- ^ Operating system
                   -> RecoveredModule X86_64 -- ^ Recovered module
-                  -> (Builder.Builder, [Ann.FunctionAnn])
+                  -> (Builder.Builder, [Either String Ann.FunctionAnn])
 renderLLVMBitcode args os recMod =
   let archOps = LLVM.x86LLVMArchOps (show os)
    in llvmAssembly archOps (llvmGenOptions args) recMod (llvmVersion args)
@@ -567,10 +568,15 @@ main' = do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
       (os, recMod, errorCnt) <- getFunctions args
-      let (llvmMod, funAnn) = renderLLVMBitcode args os recMod
+      let (llvmMod, mFunAnn) = renderLLVMBitcode args os recMod
       case annotationsPath args of
         Nothing -> pure ()
         Just annPath -> do
+          let (annErrs, funAnn) = partitionEithers mFunAnn
+          -- Print annotation errors
+          forM_ annErrs $ \e -> do
+            hPutStrLn stderr $ "Annotation error: " ++ e
+          -- Write out annotation.
           let Just llvmPath = outputPath args
           let vcgAnn :: Ann.ModuleAnnotations
               vcgAnn = Ann.ModuleAnnotations

@@ -85,6 +85,7 @@ import           System.IO.Error
 import           System.Posix.Files
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
+import           Text.PrettyPrint.ANSI.Leijen (pretty)
 import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.Printf (printf)
 
@@ -1398,9 +1399,11 @@ resolveDwarfArgType logger typeMap nm ref = do
         throwDwarfTypeError ref $ printf "Byte count %s too large." (show byteCount)
       addGPReg64 nm
     Dwarf.FloatType -> do
-      throwDwarfTypeError ref "Floating point is not supported."
+      throwDwarfTypeError ref "Float is not supported."
     Dwarf.DoubleType -> do
-      throwDwarfTypeError ref "Double precision is not supported."
+      throwDwarfTypeError ref "Double is not supported."
+    Dwarf.LongDoubleType -> do
+      throwDwarfTypeError ref "Long double is not supported."
     Dwarf.UnsignedCharType -> do
       addGPReg64 nm
     Dwarf.SignedCharType -> do
@@ -1432,19 +1435,34 @@ resolveDwarfArgType logger typeMap nm ref = do
 -- | Resolve Dwarf arg types
 resolveDwarfArgTypes :: (GetFnsLogEvent -> IO ())
                      -- ^ Logging function for errors
+                     -> Maybe Dwarf.Subprogram
+                        -- ^ Origin subprogram if defined
                      -> Map Dwarf.TypeRef Dwarf.AbsType
                      -> Int -- ^ Number of arguments passed so far.
                      -> [Dwarf.Variable]
                      -> ArgResolver ()
-resolveDwarfArgTypes _ _typeMap _cnt [] = pure ()
-resolveDwarfArgTypes logger typeMap cnt (a:r) = seq cnt $ do
+resolveDwarfArgTypes _ _morigin _typeMap _cnt [] = pure ()
+resolveDwarfArgTypes logger morigin typeMap cnt (a:r) = seq cnt $ do
   let nm | Dwarf.varName a == "" = "arg" ++ show cnt
          | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.varName a))
   case Dwarf.varType a of
-    Nothing -> throwError $ UnsupportedArgType nm "unknown type"
-    Just ref -> do
-      resolveDwarfArgType logger typeMap nm ref
-      resolveDwarfArgTypes logger typeMap (cnt+1) r
+    Nothing ->
+      case (morigin, Dwarf.varOrigin a) of
+        (Nothing, Nothing) -> throwError $ MissingArgType nm
+        (Nothing, Just _) -> throwError $ DebugResolveError $ "Missing subroutine abstract origin."
+        (Just _, Nothing) -> throwError $ DebugResolveError $ "Missing argument abstract origin."
+        (Just subOrigin, Just varOrigRef) -> do
+          varOrig <-
+            case Map.lookup varOrigRef (Dwarf.subParamMap subOrigin) of
+              Nothing -> throwError $ DebugResolveError $ printf "Could not find variable origin %s for %s." (show (pretty varOrigRef)) nm
+              Just o -> pure o
+
+          -- Get origin ref
+          case Dwarf.varType varOrig of
+            Nothing -> throwError $ MissingArgType nm
+            Just ref -> resolveDwarfArgType logger (Dwarf.subTypeMap subOrigin) nm ref
+    Just ref -> resolveDwarfArgType logger typeMap nm ref
+  resolveDwarfArgTypes logger morigin typeMap (cnt+1) r
 
 retGPReg64 :: ExceptT ArgResolverError IO [Some X86RetInfo]
 retGPReg64 = pure [Some (RetBV64 F.RAX)]
@@ -1468,9 +1486,11 @@ resolveDwarfRetType logger typeMap ref = do
         throwDwarfTypeError ref $ printf "Byte count %s too large." (show byteCount)
       retGPReg64
     Dwarf.FloatType -> do
-      throwDwarfTypeError ref "Floating point is not supported."
+      throwDwarfTypeError ref "Float return type is not supported."
     Dwarf.DoubleType -> do
-      throwDwarfTypeError ref "Double precision is not supported."
+      throwDwarfTypeError ref "Double return type is not supported."
+    Dwarf.LongDoubleType -> do
+      throwDwarfTypeError ref "Long double return type is not supported."
     Dwarf.UnsignedCharType -> do
       retGPReg64
     Dwarf.SignedCharType -> do
@@ -1503,37 +1523,45 @@ resolveDwarfRetType logger typeMap ref = do
 --
 -- This returns nothing if name is empty and ext is true or
 -- ext if false and the address is empty.
-resolveDwarfSubprogramDebugName :: Dwarf.Name -- ^ Name of subprogram in Dwarf
-                                -> Bool -- ^ Whether the symbol has external visibility
+resolveDwarfSubprogramDebugName :: Dwarf.Subprogram -- ^ Subprogram
                                 -> Maybe Word64 -- ^ Offset of subprogram.
                                 -> Maybe String
-resolveDwarfSubprogramDebugName nm True _moff =
-  if nm == "" then
-    Nothing
-   else
-    Just $! BSC.unpack (Dwarf.nameVal nm)
-resolveDwarfSubprogramDebugName nm False moff =
-  case moff of
-    Nothing -> Nothing
-    Just o ->
-      let nmVal :: String
-          nmVal | nm == "" = "Unnamed function"
-                | otherwise = BSC.unpack (Dwarf.nameVal nm)
-       in Just $! printf "%s (0x%x)" nmVal (toInteger o)
+resolveDwarfSubprogramDebugName sub moff
+  | Dwarf.subExternal sub =
+    if Dwarf.subName sub == "" then
+      Nothing
+     else
+      Just $! BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
+  | otherwise =
+    case moff of
+      Nothing -> Nothing
+      Just o ->
+        let nmVal :: String
+            nmVal | Dwarf.subName sub == "" = "Unnamed function"
+                  | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
+         in Just $! printf "%s (0x%x)" nmVal (toInteger o)
 
 -- | Resolve the type of a Dwarf subprogram
 resolveDwarfSubprogramFunType :: (GetFnsLogEvent -> IO ())
                               -- ^ Logging function for errors
                               -> Dwarf.Subprogram
+                              -> Maybe Dwarf.Subprogram -- ^ Origin if subprogram is generated from another.
                               -> ExceptT ArgResolverError IO X86FunTypeInfo
-resolveDwarfSubprogramFunType logger sub = do
+resolveDwarfSubprogramFunType logger sub morigin = do
   when (Dwarf.subUnspecifiedParams sub) $
     throwError $ VarArgsUnsupported
-  argTypes <- runArgResolver $ resolveDwarfArgTypes logger (Dwarf.subTypeMap sub) 0 (Dwarf.subParams sub)
+  argTypes <- runArgResolver $ resolveDwarfArgTypes logger morigin (Dwarf.subTypeMap sub) 0 (Map.elems (Dwarf.subParamMap sub))
   retTypes <-
     case Dwarf.subRetType sub of
-      Nothing -> pure []
+      Nothing ->
+        case morigin of
+          Nothing -> pure []
+          Just origin ->
+            case Dwarf.subRetType origin of
+              Nothing -> pure []
+              Just ref -> resolveDwarfRetType logger (Dwarf.subTypeMap origin) ref
       Just ref -> resolveDwarfRetType logger (Dwarf.subTypeMap sub) ref
+
   pure $! X86NonvarargFunType argTypes retTypes
 
 
@@ -1551,12 +1579,14 @@ dwarfSubEntry sub =
 
 resolveSubprogram :: (GetFnsLogEvent -> IO ())
                   -- ^ Logging function for errors
+                  -> Dwarf.CompileUnit
+                     -- ^ Compile unit for this sub program
                   -> FunTypeMaps
                   -- ^ Annotations from source file
                   -> Dwarf.Subprogram
                   -- ^ Elf file for header information
                   -> IO FunTypeMaps
-resolveSubprogram logger annMap sub
+resolveSubprogram logger cu annMap sub
   -- Non-defining subprograms are skipped.
   | Dwarf.subIsDeclaration sub = do
       pure annMap
@@ -1584,7 +1614,7 @@ resolveSubprogram logger annMap sub
                 pure Nothing
               Just a ->
                 pure (Just a)
-      case resolveDwarfSubprogramDebugName dwarfName (Dwarf.subExternal sub) mentry of
+      case resolveDwarfSubprogramDebugName sub mentry of
         Nothing -> pure annMap
         Just debugName -> do
           when (not (funTypeIsDefined annMap externalName entryAddr)) $ do
@@ -1613,18 +1643,31 @@ resolveSubprogram logger annMap sub
                 pure Nothing
               Just a ->
                 pure (Just a)
-      case resolveDwarfSubprogramDebugName dwarfName (Dwarf.subExternal sub) mentry of
-        Nothing -> pure annMap
-        Just debugName -> do
-          mfunType <- runExceptT $ resolveDwarfSubprogramFunType logger sub
-          funType <-
-            case mfunType of
-              Left e -> do
-                logger $ ArgResolverError debugName e
-                pure $! X86UnsupportedFunType
-              Right funType ->
-                pure funType
-          addNamedFunType logger annMap debugName externalName entryAddr funType
+      -- Get origin if this is an inlined or specialized instance of a source subprogram.
+      let emorigin =
+            case Dwarf.subOrigin sub of
+              Nothing -> Right Nothing
+              Just originRef ->
+                case Map.lookup originRef (Dwarf.cuSubprogramMap cu) of
+                  Nothing -> Left $ "Could not find origin " ++ show (pretty originRef)
+                  Just r -> Right (Just r)
+      case emorigin of
+        Left err -> do
+          logger $ DebugError err
+          pure annMap
+        Right morigin ->
+          case resolveDwarfSubprogramDebugName sub mentry of
+            Nothing -> pure annMap
+            Just debugName -> do
+              mfunType <- runExceptT $ resolveDwarfSubprogramFunType logger sub morigin
+              funType <-
+                case mfunType of
+                  Left e -> do
+                    logger $ ArgResolverError debugName e
+                    pure $! X86UnsupportedFunType
+                  Right funType ->
+                    pure funType
+              addNamedFunType logger annMap debugName externalName entryAddr funType
 
 -- | Add all compile units in plugin
 resolveCompileUnits :: (GetFnsLogEvent -> IO ())
@@ -1647,7 +1690,7 @@ resolveCompileUnits logger annMap (Just (Right ctx)) = do
       logger (DebugError msg)
       resolveCompileUnits logger annMap (Dwarf.nextCUContext ctx)
     Right cu -> do
-      annMap' <- foldlM (resolveSubprogram logger) annMap (Dwarf.cuSubprograms cu)
+      annMap' <- foldlM (resolveSubprogram logger cu) annMap (Dwarf.cuSubprograms cu)
       resolveCompileUnits logger annMap' (Dwarf.nextCUContext ctx)
 
 -- | Extend function types with header information.
@@ -1865,7 +1908,7 @@ llvmAssembly :: LLVMArchSpecificOps X86_64
              -> RecoveredModule X86_64
                 -- ^ Module to generate
              -> LPP.Config
-             -> (Builder.Builder, [Ann.FunctionAnn])
+             -> (Builder.Builder, [Either String Ann.FunctionAnn])
 llvmAssembly archOps genOpts recMod cfg =
       -- Generate LLVM module
    let (m,ann) = moduleForFunctions archOps genOpts recMod
