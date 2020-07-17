@@ -133,8 +133,6 @@ checkBinaryAssumptions :: Elf w -> Except String ()
 checkBinaryAssumptions binary = do
   when (elfData binary /= ELFDATA2LSB) $ do
     throwError $ "Expected the original binary to be least-significant bit first."
-  when (elfType binary /= ET_EXEC) $ do
-    throwError $ "Expected the original binary is an executable."
   when (elfMachine binary /= EM_X86_64) $ do
     throwError $ "Only x86 64-bit object files are supported."
   when (elfFlags binary /= 0) $ do
@@ -648,6 +646,11 @@ mergeObject binary obj redirs mkJump = runExcept $ do
 
   -- Check original binary properties
   checkBinaryAssumptions binary
+  case eltType binary of
+    ET_EXEC -> pure ()
+    _ -> do
+      throwError $ "Expected the original binary is an executable."
+
 
   -- Get code and data segments
   (codeSeg, dataSeg) <- getCodeAndDataSegments binary

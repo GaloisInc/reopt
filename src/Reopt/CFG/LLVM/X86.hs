@@ -228,39 +228,39 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
         case dirExpr of
           FnConstantBool b -> pure b
           _ -> error "LLVM generator only supports rep movs with constant df"
-      let dfAsm = case df of
-                    True  -> "std"
-                    False -> "cld"
       let movsAsm = case bytesPerCopy of
                       ByteRepVal  -> "rep movsb"
                       WordRepVal  -> "rep movsw"
                       DWordRepVal -> "rep movsd"
                       QWordRepVal -> "rep movsq"
+      let dfAsm = case df of
+                    True  -> "std\n" ++ movsAsm ++ "\ncld"
+                    False -> movsAsm
       callAsm_ noSideEffect
                (dfAsm ++ "\n" ++ movsAsm)
                "={cx},={si},={di},~{dirflag},~{memory}"
                [cnt, src, dest]
 
-    RepStos bytesPerCopy destExpr srcExpr cntExpr dirExpr -> do
+    RepStos bytesPerCopy destExpr valExpr cntExpr dirExpr -> do
       dest    <- mkLLVMValue destExpr
-      src     <- mkLLVMValue srcExpr
+      val     <- mkLLVMValue valExpr
       cnt     <- mkLLVMValue cntExpr
       df <-
         case dirExpr of
           FnConstantBool b -> pure b
           _ -> error "LLVM generator only supports rep stos with constant df"
-      let dfAsm = case df of
-                    True  -> "std"
-                    False -> "cld"
       let stosAsm = case bytesPerCopy of
                       ByteRepVal  -> "rep stosb"
                       WordRepVal  -> "rep stosw"
                       DWordRepVal -> "rep stosd"
                       QWordRepVal -> "rep stosq"
+      let dfAsm = case df of
+                    True  -> "std\n" ++ stosAsm ++ "\ncld"
+                    False -> stosAsm
       callAsm_ noSideEffect
-               (dfAsm ++ "\n" ++stosAsm)
-               "cx,si,di,~{cx},~{si},~{di},~{dirflag},~{memory}"
-               [cnt, src, dest]
+               dfAsm
+               "{cx},{di},{ax},~{memory},~{flags}"
+               [cnt, dest, val]
 
     _ -> error $ "LLVM generation: Unsupported architecture statement."
 

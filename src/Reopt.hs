@@ -1193,7 +1193,7 @@ toKnownFunABI (X86NonvarargFunType args rets) =
               , kfReturn = viewSome retReg <$> rets
               }
   ]
-toKnownFunABI X86PrintfFunType = []
+toKnownFunABI (X86PrintfFunType _) = []
 toKnownFunABI X86UnsupportedFunType = []
 
 -- | Resolve annotations on funbction types from C header, and return
@@ -1284,18 +1284,20 @@ defaultX86Type = X86NonvarargFunType args rets
 $(pure [])
 
 -- | Function type information parsed from annotations or debug information.
-data FunTypeMaps = FunTypeMaps { macawMemory :: !(Memory 64)
-                                 -- ^ Memory
-                               , dwarfBaseCodeAddr :: !(MemAddr 64)
-                                 -- ^ Address to add to all code offsets in dwarf file.
-                               , nameToAddrMap :: !(SymAddrMap 64)
-                                 -- ^ Map from symbol names to the address.
-                               , nameTypeMap :: !(Map BS.ByteString X86FunTypeInfo)
-                                 -- ^ Map from external undefined symbol names to type.
-                               , addrTypeMap :: !(Map (MemSegmentOff 64) X86FunTypeInfo)
-                                 -- ^ Map from code addresses that are start of function
-                                 -- to type.
-                               }
+data FunTypeMaps =
+  FunTypeMaps { macawMemory :: !(Memory 64)
+                -- ^ Memory
+              , dwarfBaseCodeAddr :: !(MemAddr 64)
+                -- ^ Address to add to all code offsets in dwarf file.
+              , nameToAddrMap :: !(SymAddrMap 64)
+                -- ^ Map from symbol names to the address.
+              , nameTypeMap :: !(Map BS.ByteString X86FunTypeInfo)
+                -- ^ Map from external undefined symbol names to type.
+              , addrTypeMap :: !(Map (MemSegmentOff 64) X86FunTypeInfo)
+                -- ^ Map from code addresses that are start of function
+                -- to type.
+              , noreturnMap :: !(Map (MemSegmentOff 64) NoReturnFunStatus)
+              }
 
 $(pure [])
 
@@ -1577,72 +1579,38 @@ dwarfSubEntry sub =
     Just e -> Just e
     Nothing -> Dwarf.subLowPC =<< Dwarf.subDef sub
 
-resolveSubprogram :: (GetFnsLogEvent -> IO ())
-                  -- ^ Logging function for errors
-                  -> Dwarf.CompileUnit
-                     -- ^ Compile unit for this sub program
-                  -> FunTypeMaps
-                  -- ^ Annotations from source file
-                  -> Dwarf.Subprogram
-                  -- ^ Elf file for header information
-                  -> IO FunTypeMaps
-resolveSubprogram logger cu annMap sub
+-- | Resolve type information from subroutine.
+resolveSubprogramType :: (GetFnsLogEvent -> IO ())
+                      -- ^ Logging function for errors
+                      -> Dwarf.CompileUnit
+                      -- ^ Compile unit for this sub program
+                      -> FunTypeMaps
+                      -- ^ Annotations from source file
+                      -> Dwarf.Subprogram
+                      -- ^ Dwarf function information
+                      -> Maybe (MemSegmentOff 64)
+                         -- Address
+                      -> IO FunTypeMaps
+resolveSubprogramType logger cu annMap sub entryAddr
   -- Non-defining subprograms are skipped.
   | Dwarf.subIsDeclaration sub = do
       pure annMap
     -- Var args functions have a special usage.
   | Dwarf.subUnspecifiedParams sub = do
-      let dwarfName = Dwarf.subName sub
       -- Get name as an external symbol
       let externalName :: Maybe BS.ByteString
           externalName = dwarfExternalName sub
-      -- Get entry address from Dwarf
-      let mentry :: Maybe Word64
-          mentry = dwarfSubEntry sub
       -- Get entry address in terms of memory.
-      let mem = macawMemory annMap
-      entryAddr <-
-        case mentry of
-          Nothing -> pure Nothing
-          Just entry -> do
-            let adjEntry = incAddr (toInteger entry) (dwarfBaseCodeAddr annMap)
-            case asSegmentOff mem adjEntry of
-              Nothing -> do
-                let debugName | dwarfName == "" = "Unnamed symbol"
-                              | otherwise = BSC.unpack (Dwarf.nameVal dwarfName)
-                logger $ DebugError $ printf "%s invalid debug address %s." debugName (show adjEntry)
-                pure Nothing
-              Just a ->
-                pure (Just a)
-      case resolveDwarfSubprogramDebugName sub mentry of
+      case resolveDwarfSubprogramDebugName sub (dwarfSubEntry sub) of
         Nothing -> pure annMap
         Just debugName -> do
           when (not (funTypeIsDefined annMap externalName entryAddr)) $ do
             logger $ ArgResolverError debugName VarArgsUnsupported
           pure annMap
   | otherwise = do
-      let mem = macawMemory annMap
-      let dwarfName = Dwarf.subName sub
       -- Get name as an external symbol
       let externalName :: Maybe BS.ByteString
           externalName = dwarfExternalName sub
-      -- Get entry address from Dwarf
-      let mentry :: Maybe Word64
-          mentry = dwarfSubEntry sub
-      -- Get entry address in terms of memory.
-      entryAddr <-
-        case mentry of
-          Nothing -> pure Nothing
-          Just entry -> do
-            let adjEntry = incAddr (toInteger entry) (dwarfBaseCodeAddr annMap)
-            case asSegmentOff mem adjEntry of
-              Nothing -> do
-                let debugName | dwarfName == "" = "Unnamed symbol"
-                              | otherwise = BSC.unpack (Dwarf.nameVal dwarfName)
-                logger $ DebugError $ printf "%s invalid debug address %s." debugName (show adjEntry)
-                pure Nothing
-              Just a ->
-                pure (Just a)
       -- Get origin if this is an inlined or specialized instance of a source subprogram.
       let emorigin =
             case Dwarf.subOrigin sub of
@@ -1656,7 +1624,7 @@ resolveSubprogram logger cu annMap sub
           logger $ DebugError err
           pure annMap
         Right morigin ->
-          case resolveDwarfSubprogramDebugName sub mentry of
+          case resolveDwarfSubprogramDebugName sub (dwarfSubEntry sub) of
             Nothing -> pure annMap
             Just debugName -> do
               mfunType <- runExceptT $ resolveDwarfSubprogramFunType logger sub morigin
@@ -1668,6 +1636,44 @@ resolveSubprogram logger cu annMap sub
                   Right funType ->
                     pure funType
               addNamedFunType logger annMap debugName externalName entryAddr funType
+
+-- | Resolve type information from subroutine.
+resolveSubprogram :: (GetFnsLogEvent -> IO ())
+                  -- ^ Logging function for errors
+                  -> Dwarf.CompileUnit
+                  -- ^ Compile unit for this sub program
+                  -> FunTypeMaps
+                  -- ^ Annotations from source file
+                  -> Dwarf.Subprogram
+                  -- ^ Elf file for header information
+                  -> IO FunTypeMaps
+resolveSubprogram logger cu annMap sub = do
+  -- Get entry address in terms of memory.
+  let mem = macawMemory annMap
+  entryAddr <-
+    case dwarfSubEntry sub of
+      Nothing -> pure Nothing
+      Just entry -> do
+        let adjEntry = incAddr (toInteger entry) (dwarfBaseCodeAddr annMap)
+        case asSegmentOff mem adjEntry of
+          Nothing -> do
+            let dwarfName = Dwarf.subName sub
+            let debugName | dwarfName == "" = "Unnamed symbol"
+                          | otherwise = BSC.unpack (Dwarf.nameVal dwarfName)
+            logger $ DebugError $ printf "%s invalid debug address %s." debugName (show adjEntry)
+            pure Nothing
+          Just a ->
+            pure (Just a)
+  annMap' <- resolveSubprogramType logger cu annMap sub entryAddr
+  case entryAddr of
+    Nothing -> pure annMap'
+    Just entry -> do
+      let val | Dwarf.subNoreturn sub = NoReturnFun
+              | otherwise = MayReturnFun
+      let fn NoReturnFun _ = NoReturnFun
+          fn _ NoReturnFun = NoReturnFun
+          fn _ _ = MayReturnFun
+      pure $ annMap' { noreturnMap = Map.insertWith fn entry val (noreturnMap annMap') }
 
 -- | Add all compile units in plugin
 resolveCompileUnits :: (GetFnsLogEvent -> IO ())
@@ -1767,7 +1773,10 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
   -- Generate type information from annotations
   let nameAnnTypeMap
         = hdrTypeMap
-        <> Map.singleton "printf" X86PrintfFunType
+        <> Map.singleton "printf"   (X86PrintfFunType 0)
+        <> Map.singleton "fprintf"  (X86PrintfFunType 1)
+        <> Map.singleton "sprintf"  (X86PrintfFunType 1)
+        <> Map.singleton "snprintf" (X86PrintfFunType 2)
 
   -- Create initial state
   let ainfo = osArchitectureInfo os
@@ -1808,6 +1817,7 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
         , nameToAddrMap     = symAddrMap
         , nameTypeMap = nameAnnTypeMap
         , addrTypeMap = addrAnnTypeMap
+        , noreturnMap = readyState^.trustedFunctionEntryPoints
         }
 
   -- Resolve debug information.
@@ -1820,7 +1830,8 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
     exitFailure
 
   -- Run discovery
-  discState <- completeDiscoveryState readyState disOpt fnPred
+  let postDebugState = readyState & trustedFunctionEntryPoints .~ noreturnMap debugTypeMap
+  discState <- completeDiscoveryState postDebugState disOpt fnPred
 
   let sysp = osPersonality os
 
@@ -2036,15 +2047,41 @@ addrRedirections s fns =
    in addrRedirection tgts <$> fns
 
 -- | Merge a binary and new object
+mergeAndWrite' :: FilePath
+               -> Elf 64 -- ^ Original binary
+              -> Elf 64 -- ^ New object
+              -> [CodeRedirection Word64]
+              -- ^ List of redirections from old binary to new.
+              -> IO ()
+mergeAndWrite' output_path orig_binary new_obj redirs = do
+
+  let mres = mergeObject orig_binary new_obj redirs x86_64_immediateJump
+  case mres of
+    Left e -> do
+      hPutStrLn stderr e
+      exitFailure
+    Right new_binary -> do
+      BSL.writeFile output_path $ Elf.renderElf new_binary
+      -- Update the file mode
+      do fs <- getFileStatus output_path
+         let fm = ownerExecuteMode
+               .|. groupExecuteMode
+               .|. otherExecuteMode
+         setFileMode output_path (fileMode fs `unionFileModes` fm)
+
+-- | Merge a binary and new object
 mergeAndWrite :: FilePath
               -> Elf 64 -- ^ Original binary
               -> Elf 64 -- ^ New object
-              -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
+              -> [CodeRedirection Word64]
+              -- ^ List of redirections from old binary to new.
               -> IO ()
 mergeAndWrite output_path orig_binary new_obj redirs = do
   let mres = mergeObject orig_binary new_obj redirs x86_64_immediateJump
   case mres of
-    Left e -> fail e
+    Left e -> do
+      hPutStrLn stderr e
+      exitFailure
     Right new_binary -> do
       BSL.writeFile output_path $ Elf.renderElf new_binary
       -- Update the file mode
