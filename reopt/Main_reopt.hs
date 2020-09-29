@@ -481,7 +481,7 @@ getFunctions args = do
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (_, os, _, recMod) <-
+  (_, _, os, _, recMod) <-
     discoverX86Elf (recoverLogError errorRef)
                    (programPath args)
                    (loadOptions args)
@@ -513,7 +513,7 @@ performReopt args = do
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (origElf, os, discState, recMod) <-
+  (origElf, _, os, discState, recMod) <-
     discoverX86Elf (recoverLogError errorRef)
                    (programPath args)
                    (loadOptions args)
@@ -529,14 +529,12 @@ performReopt args = do
   objContents <-
     compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
                 (osLinkName os) objLLVM
-
-  newObj <- parseElf64 "new object" objContents
   -- Convert binary to LLVM
   let redirs = addrRedirections discState (recoveredDefs recMod)
   -- Merge and write out
   putStrLn $ "Performing final relinking."
   let outPath = fromMaybe "a.out" (outputPath args)
-  mergeAndWrite outPath origElf newObj redirs
+  mergeAndWrite outPath origElf "new object" objContents redirs
 
 main' :: IO ()
 main' = do

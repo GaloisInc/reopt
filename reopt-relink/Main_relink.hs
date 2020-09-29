@@ -10,8 +10,7 @@ module Main (main) where
 
 import           Control.Exception
 import           Control.Lens
-import qualified Data.ByteString.Lazy as BSL
-import           Data.ElfEdit
+import           Control.Monad
 import           Data.Version (versionBranch)
 import qualified Data.Yaml as Yaml
 import           System.Console.CmdArgs.Explicit
@@ -42,7 +41,7 @@ logger = hPutStrLn stderr
 -- | Action to perform when running
 data Action
    = ShowHelp        -- ^ Print out help message
-   | ShowVersion     -- ^ Print out version
+   | Showversion     -- ^ Print out version
    | Relink          -- ^ Link an existing binary and new code together.
   deriving (Show)
 
@@ -154,28 +153,28 @@ getCommandLineArgs = do
 -- combine two binaries.
 performRelink :: Args -> IO ()
 performRelink args = do
+  let objPath = args^.newobjPath
+  when (objPath == "") $ do
+    hPutStrLn stderr $ "Please provide a object file to merge."
+    exitFailure
+
   -- Get original binary
-  orig_binary <- readElf64 (args^.programPath)
-  let output_path = args^.outputPath
-  case args^.newobjPath of
-    -- When no new object is provided, we just copy the input
-    -- file to test out Elf decoder/encoder.
-    "" -> do
-      putStrLn $ "Copying binary to: " ++ output_path
-      BSL.writeFile output_path $ renderElf orig_binary
-    -- When a non-empty new obj is provided we test
-    new_obj_path -> do
-      putStrLn $ "new_obj_path: " ++ new_obj_path
-      new_obj <- readElf64 new_obj_path
-      redirs <-
-        case args^.redirPath of
-          "" -> return []
-          redir_path -> do
-            mredirs <- Yaml.decodeFileEither redir_path
-            case mredirs of
-              Left e -> fail $ show e
-              Right r -> return r
-      mergeAndWrite output_path orig_binary new_obj redirs
+  bs <- checkedReadFile (args^.programPath)
+  origBinary <- parseElfHeaderInfo64 (args^.programPath) bs
+  let outPath = args^.outputPath
+
+  newObj <- checkedReadFile objPath
+  redirs <-
+    case args^.redirPath of
+      "" -> return []
+      redir_path -> do
+        mredirs <- Yaml.decodeFileEither redir_path
+        case mredirs of
+          Left e -> do
+            hPutStrLn stderr $ show e
+            exitFailure
+          Right r -> return r
+  mergeAndWrite outPath origBinary objPath newObj redirs
 
 -- | Main executable
 main' :: IO ()

@@ -71,7 +71,7 @@ resolveRelocEntry :: (Eq a, Num a)
                   => Map ObjectSectionIndex (BS.ByteString, a)
                   -- ^ Maps object section indices to the name and associated address.
                   -> ObjectSymbolTableIndex
-                  -> ElfSymbolTableEntry a
+                  -> ElfSymbolTableEntry BS.ByteString a
                   -- ^ The symbol table entry in the new object.
                   -> Maybe (BS.ByteString, a)
 resolveRelocEntry secMap idx sym = do
@@ -111,7 +111,7 @@ resolveRelocEntry secMap idx sym = do
 mkRelocInfo :: (Eq a, Num a)
             => Map ObjectSectionIndex (BS.ByteString, a)
                -- ^ Maps object section indices to the name and associated address.
-            -> V.Vector (ElfSymbolTableEntry a)
+            -> V.Vector (ElfSymbolTableEntry BS.ByteString a)
                -- ^ Symbol table entries in object.
             -> RelocInfo a
 mkRelocInfo secMap entries
@@ -185,7 +185,7 @@ performRelocs :: HasCallStack
               -> BS.ByteString
                  -- ^ Data in section that we are applying relocations to.
               -> [RelaEntry X86_64_RelocationType]
-                 -- ^ Relocation entries to apply
+                 -- ^ Relocation entries in original binary to apply.
               -> BS.ByteString
 performRelocs relocInfo thisAddr dta relocs = runST $ do
   let len = BS.length dta

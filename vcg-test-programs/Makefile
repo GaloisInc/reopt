@@ -48,17 +48,19 @@ test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_
 test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
 	$(reopt) -o test_add_diet_reopt.cfg  -c --header test_add_protos.h --include add --include main $<
 
+# Generate the .o file using reopt.
+test_add_diet_reopt.o : test_add_diet_lld.exe
+	$(reopt) --object -o $@ --include add test_add_diet_lld.exe
+
+
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.cfg : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 	$(reopt) -o $@ -c --include fib --include main $<
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.fns : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o $@ --fns --header test_fib_protos.h --include fib --include main $<
+	$(reopt) --fns    -o $@ --header test_fib_protos.h --include fib --include main $<
 
-# Generate the .o file using reopt.
-test_add_diet_reopt.o : test_add_diet_lld.exe
-	$(reopt) -o $@ --include add test_add_diet_lld.exe
 
 diet_libs=diet/start.o diet/libc.a
 

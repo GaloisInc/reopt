@@ -9,8 +9,7 @@ module Reopt.ExternalTools
     runClangPreprocessor
     -- * Running llc
   , LLCOptions(..)
-  , defaultLLCOptions
-  , run_llc
+  , runLLC
     -- * Running opt
   , run_opt
     -- * Running assembler
@@ -149,38 +148,41 @@ runClangPreprocessor cmd headerFile = do
 
 -- | Options to pass to 'llc'
 data LLCOptions
-  = LLCOptions { llc_triple :: !(Maybe String)
-               , llc_opt_level :: !Int
+  = LLCOptions { llcTriple :: !(Maybe String)
+                 -- ^ LLVM triple (otherwise default to .ll contents)
+               , llcOptLevel :: !Int
+                 -- ^ Optimization level (must be between 0 and 3 inclusive)
+               , llcFunctionSections :: !Bool
+                 -- ^ Set to true to use function sections.
                }
 
--- | Default LLC options
-defaultLLCOptions :: LLCOptions
-defaultLLCOptions = LLCOptions { llc_triple = Nothing
-                               , llc_opt_level = 0
-                               }
 
 -- | Use 'llc' to create assembly from LLVM bitcode.
 --
 -- The contents of the input file may be either an assembly (.ll) file or a
 -- bitcode (.bc) file.  This returns assembled output as a bytestring, or the reason
 -- t conversion failed.
-run_llc :: FilePath      -- ^ Path to llc
+runLLC :: FilePath      -- ^ Path to llc
         -> LLCOptions    -- ^ Triple for LLC
         -> BS.ByteString -- ^ Contents of input file.
         -> ExceptT Failure IO BS.ByteString
-run_llc llc_command opts input_file = do
-  let llc_triple_args =
-        case llc_triple opts of
+runLLC llc_command opts input_file = do
+  let llcTripleArgs =
+        case llcTriple opts of
           Just arch -> [ "-mtriple=" ++ arch ]
           Nothing   -> []
-  let llc_opt_args
+  let llcOptArgs
           | 0 <= lvl && lvl <= 3 = [ "-O=" ++ show lvl ]
-          | otherwise            = error "run_llc given bad optimization level."
-        where lvl = llc_opt_level opts
+          | otherwise            = error "internal: runLLC given bad optimization level."
+        where lvl = llcOptLevel opts
+  let llcFunctionSectionsArgs
+        | llcFunctionSections opts = ["--function-sections"]
+        | otherwise = []
   let llc_args
         = [ "-o", "-" ]
-        ++ llc_triple_args
-        ++ llc_opt_args
+        ++ llcTripleArgs
+        ++ llcOptArgs
+        ++ llcFunctionSectionsArgs
   withCreateProcess "llc" llc_command llc_args $ \(in_handle, out_handle, err_handle) -> do
     writeAndClose in_handle err_handle $ do
       hSetBinaryMode in_handle True

@@ -24,7 +24,7 @@ type ObjectSectionIndex = Word16
 -- ObjectSymbolTableEntry
 
 -- | A symbol table entry in the object with the new code.
-newtype ObjectSymbolTableEntry w = OSTE (ElfSymbolTableEntry (ElfWordType w))
+newtype ObjectSymbolTableEntry w = OSTE (ElfSymbolTableEntry BSC.ByteString (ElfWordType w))
 
 -- | Return the symbol name.
 objectEntryName :: ObjectSymbolTableEntry w -> BSC.ByteString
