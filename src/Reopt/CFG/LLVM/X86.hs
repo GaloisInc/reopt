@@ -172,6 +172,34 @@ emitX86ArchFn f = do
                     [llvm_val, llvm_cnt, llvm_ptr]
      -- Get rge cx result
      extractValue res 0
+
+   MemCmp 1 _nv _x _y _dir -> do
+     -- bpv is bytes eper value
+     -- nv is number of bvalues
+     --
+     error $ "LLVM backend does not yet support: "
+       ++ show (runIdentity (ppArchFn (pure . pretty) f))
+
+ {-
+  -- | Compares two memory regions and return the number of bytes that were the same.
+  --
+  -- In an expression @MemCmp bpv nv p1 p2 dir@:
+  --
+  -- * @bpv@ is the number of bytes per value
+  -- * @nv@ is the number of values to compare
+  -- * @p1@ is the pointer to the first buffer
+  -- * @p2@ is the pointer to the second buffer
+  -- * @dir@ is a flag that indicates the direction of comparison ('True' ==
+  --   decrement, 'False' == increment) for updating the buffer
+  --   pointers.
+  MemCmp :: !Integer
+         -> !(f (BVType 64))
+         -> !(f (BVType 64))
+         -> !(f (BVType 64))
+         -> !(f BoolType)
+         -> X86PrimFn f (BVType 64)
+-}
+
    _ -> do
      error $ "LLVM backend does not yet support: "
        ++ show (runIdentity (ppArchFn (pure . pretty) f))
@@ -238,7 +266,7 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
                     False -> movsAsm
       callAsm_ noSideEffect
                (dfAsm ++ "\n" ++ movsAsm)
-               "={cx},={si},={di},~{dirflag},~{memory}"
+               "{cx},{si},{di},~{dirflag},~{flags},~{memory}"
                [cnt, src, dest]
 
     RepStos bytesPerCopy destExpr valExpr cntExpr dirExpr -> do

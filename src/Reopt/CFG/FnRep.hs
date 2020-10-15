@@ -536,6 +536,8 @@ data Function arch
                 -- ^ Type of this  function
               , fnName :: !BSC.ByteString
                 -- ^ Name of this function
+                --
+                -- This is required to be unique for the executable.
               , fnEntryBlock :: !(FnBlock arch)
                 -- Initial entry block.
               , fnRestBlocks :: ![FnBlock arch]

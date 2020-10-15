@@ -127,19 +127,75 @@ showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
 ------------------------------------------------------------------------
 -- Resolve which symbols to include
 
--- | Map from defined symbol names to the address of the symbol
-newtype SymAddrMap w = SymAddrMap (Map BS.ByteString (Set.Set (MemSegmentOff w)))
+-- | Name of a symbol along with its visibility
+data QualifiedSymbolName
+   = QualifiedSymbolName
+   { qsnBytes :: !BSC.ByteString
+     -- ^ Bytestring
+   , qsnGlobal :: !Bool
+     -- ^ Flag indicating if this is a global symbol
+     --
+     -- Global symbols should be unique for a binary while non-global
+     -- symbols are only unique for a compilation unit.
+   }
 
+mkQualifiedSymbolName :: Elf.ElfSymbolTableEntry BS.ByteString w
+                      -> QualifiedSymbolName
+mkQualifiedSymbolName ste =
+  QualifiedSymbolName { qsnBytes  = Elf.steName ste
+                      , qsnGlobal = Elf.steBind ste == Elf.STB_GLOBAL
+                      }
+
+
+-- | @mergeName new old@ picks the symbol to use when two symbols @new@ and @old@
+-- have the same address, and we need a sensible default.
+mergeName :: QualifiedSymbolName -> QualifiedSymbolName -> QualifiedSymbolName
+mergeName new old =
+  case (qsnGlobal new, qsnGlobal old) of
+    -- Replace local symbols with global symbols.
+    (True, False) -> new
+    -- Otherwise use old symbol.
+    (_,_) -> old
+
+--------------------------------------------------------------------------------
+-- SymAddrMap
+
+-- | Maintain symbol/address name mappings.
+data SymAddrMap w =
+  SymAddrMap { samNameMap :: !(Map BS.ByteString (Set.Set (MemSegmentOff w)))
+               -- ^ Map from global symbol names to their address.
+             , samAddrMap :: !(Map (MemSegmentOff w) QualifiedSymbolName)
+               -- ^ Map from address to the symbol to use for that address.
+               --
+               -- In the case where multiple symbols have the same address, we
+               -- use the first symbol with that address in the symbol table but
+               -- prioritze global symbols over local symbols.
+             }
+
+getAddrSymMap :: SymAddrMap w -> Map (MemSegmentOff w) BS.ByteString
+getAddrSymMap sam = fmap qsnBytes (samAddrMap sam)
+
+-- | Empty symbol address map
 symAddrMapEmpty :: SymAddrMap w
-symAddrMapEmpty = SymAddrMap Map.empty
+symAddrMapEmpty = SymAddrMap { samNameMap = Map.empty
+                             , samAddrMap = Map.empty
+                             }
 
-symAddrMapInsert :: BSC.ByteString -> MemSegmentOff w -> SymAddrMap w -> SymAddrMap w
-symAddrMapInsert nm addr (SymAddrMap m) =
-  seq nm $ seq addr $ SymAddrMap (Map.insertWith (\_ old -> Set.insert addr old) nm (Set.singleton addr) m)
-
-symAddrMapFromList :: [MemSymbol w] -> SymAddrMap w
-symAddrMapFromList l =
-  foldl' (\m s -> seq s $ symAddrMapInsert (memSymbolName s) (memSymbolStart s) m) symAddrMapEmpty l
+-- | Symbol address map insertyion
+symAddrMapInsert :: Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType w)
+                 -> MemSegmentOff w
+                 -> SymAddrMap w
+                 -> SymAddrMap w
+symAddrMapInsert sym addr sam = seq addr $
+  let qnm = mkQualifiedSymbolName sym
+      nmMap' = Map.insertWith (\_new -> Set.insert addr)
+                              (qsnBytes qnm)
+                              (Set.singleton addr)
+                              (samNameMap sam)
+      addrMap' = Map.insertWith mergeName addr qnm (samAddrMap sam)
+   in seq qnm $ SymAddrMap { samNameMap = nmMap'
+                           , samAddrMap = addrMap'
+                           }
 
 -- | Error code if @symAddrMapLookup@ fails.
 data SymAddrMapLookupError
@@ -148,12 +204,15 @@ data SymAddrMapLookupError
 
 -- | Lookup entry in symbol to address map.
 symAddrMapLookup :: SymAddrMap w -> BS.ByteString -> Either SymAddrMapLookupError (MemSegmentOff w)
-symAddrMapLookup (SymAddrMap m) nm =
-  let s = Map.findWithDefault Set.empty nm m
+symAddrMapLookup sam nm =
+  let s = Map.findWithDefault Set.empty nm (samNameMap sam)
    in case Set.size s of
        0 -> Left SymAddrMapNotFound
        1 -> Right (Set.findMin s)
        _ -> Left SymAddrMapAmbiguous
+
+----------------------------------------------------------------------------------
+-- Resolution functions
 
 -- | Attempt to find the address of a string identifying a symbol
 -- name, and return either the string if it cannot be resolved or the
@@ -232,7 +291,7 @@ type ProcessPLTEntries w
       -- ^ Records PLT bounds
    -> IORef [(MemSegmentOff w, BS.ByteString)]
       -- ^ PLT bounds
-   -> IORef (SymbolMaps w)
+   -> IORef (SymAddrMap w)
       -- ^ Symbol maps to update
    -> IO ()
 
@@ -369,20 +428,10 @@ elfInstances hdr x =
     Elf.ELFCLASS32 -> x
     Elf.ELFCLASS64 -> x
 
--- | Symbol table maps needed for function discovery/post processing.
-type SymbolMaps w = (SymAddrMap w, AddrSymMap w)
-
 -- | Write a warning to stderr.
 showWarning :: MonadIO m => String -> m ()
 showWarning msg = liftIO $ hPutStrLn stderr $ "Warning: " ++ msg
 {-# INLINE showWarning #-}
-
-insertSymbolMaps :: IORef (SymbolMaps w) -> BS.ByteString -> MemSegmentOff w -> IO ()
-insertSymbolMaps r nm addr = do
-  modifyIORef' r $ \(symAddrMap, addrSymMap) ->
-    let symAddrMap' = symAddrMapInsert nm addr symAddrMap
-        addrSymMap' = Map.insert addr nm addrSymMap
-     in seq symAddrMap' $ seq addrSymMap' $ (symAddrMap', addrSymMap')
 
 -- | Insert a symbol table entry into map.
 --
@@ -393,7 +442,7 @@ insSymbol :: forall w
           -- ^ Loaded memory
           -> MemAddr w
           -- ^ Base address that binary is loaded at
-          -> IORef (SymbolMaps w)
+          -> IORef (SymAddrMap w)
           -- ^ Map to add symbol to
           -> (Int, Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType w))
           -> IO ()
@@ -415,8 +464,10 @@ insSymbol mem baseAddr symMapRef (idx, symEntry)
           symAddr = incAddr (toInteger val) baseAddr
       -- Resolve address as segment offset.
       case asSegmentOff mem symAddr of
-        Just addr -> insertSymbolMaps symMapRef nm addr
-        Nothing -> showWarning (show (CouldNotResolveAddr nm))
+        Just addr ->
+          modifyIORef' symMapRef $ symAddrMapInsert symEntry addr
+        Nothing ->
+          showWarning (show (CouldNotResolveAddr nm))
 
 -- | Run a computation with the given section, and print a warning if
 -- the section is not found or multiply defined.
@@ -452,17 +503,14 @@ withSymtab sections sectionNameMap warnName secName f = do
 addDefinedSymbolTableFuns
   :: (MemWidth w, Integral (Elf.ElfWordType w))
   => Elf.ElfHeaderInfo w
-     -- ^ Binary to load symbols from
-  -> Memory w
-     -- ^ Loaded memory
-  -> MemAddr w
-     -- ^ Base address that binary is loaded at
+  -> Memory w  -- ^ Memory created from binary.
+  -> MemAddr w -- ^ Address binary is loaded at
   -> BS.ByteString -- ^ Symbol table for parsing.
   -> BS.ByteString -- ^ String table
-  -> IORef (SymbolMaps w)
+  -> IORef (SymAddrMap w)
   -> IO ()
-addDefinedSymbolTableFuns binary mem baseAddr symtabData strtab symMapRef = do
-  let hdr = Elf.header binary
+addDefinedSymbolTableFuns hdrInfo mem baseAddr symtabData strtab symMapRef = do
+  let hdr = Elf.header hdrInfo
   let cl = Elf.headerClass hdr
   let dta = Elf.headerData hdr
   let symEntrySize :: Int
@@ -510,7 +558,7 @@ matchPLTStub :: Elf.ElfData -- ^ Endianess of Elf file
              -> MatchPLTStubArgs
              -> IORef [(MemSegmentOff 64, BS.ByteString)]
              -- ^ PLT functions
-             -> IORef (SymbolMaps 64)
+             -> IORef (SymAddrMap 64)
              -> Int -- ^ Index of PLT entry (first function is at zero)
              -> ExceptT () IO ()
 matchPLTStub dta args pltFnsRef symMapRef idx = do
@@ -562,7 +610,6 @@ matchPLTStub dta args pltFnsRef symMapRef idx = do
         throwError ()
       Right entry ->
         pure entry
-  let symName = Elf.steName sym
   unless (Elf.steType sym == Elf.STT_FUNC) $
     showWarning "PLT symbol must be a function."
   unless (Elf.steBind sym == Elf.STB_GLOBAL) $
@@ -578,8 +625,9 @@ matchPLTStub dta args pltFnsRef symMapRef idx = do
         throwError ()
       Just a -> pure a
   liftIO $ do
-    modifyIORef' pltFnsRef (\l -> (a,symName):l)
-    insertSymbolMaps symMapRef symName a
+    modifyIORef' pltFnsRef (\l -> (a, Elf.steName sym):l)
+    modifyIORef' symMapRef $ symAddrMapInsert sym a
+
 
 #ifdef SUPPORT_ARM
 ignorePLTEntries :: ProcessPLTEntries w
@@ -596,7 +644,7 @@ processX86PLTEntries :: Elf.ElfData
                         -- ^ Records PLT bounds
                      -> IORef [(MemSegmentOff 64, BS.ByteString)]
                         -- ^ PLT functions
-                     -> IORef (SymbolMaps 64)
+                     -> IORef (SymAddrMap 64)
                      -> IO ()
 processX86PLTEntries dta symtab strtab sectionNameMap mem pltBoundsRef pltFnsRef symMapRef = do
   withSection sectionNameMap "PLT" ".plt" $ \pltSec -> do
@@ -622,57 +670,55 @@ processX86PLTEntries dta symtab strtab sectionNameMap mem pltBoundsRef pltFnsRef
           forM_ [0..relaCount-1] $ \i -> do
             void $ runExceptT (matchPLTStub dta pltStubArgs pltFnsRef symMapRef i)
 
-
 -- | Information returned by `initDiscovery` below.
-data InitDiscovery arch = InitDiscovery { initDiscElf :: !(Elf (ArchAddrWidth arch))
-                                          -- ^ Elf file read in.
-                                        , initDiscState :: !(DiscoveryState arch)
-                                          -- ^ Initial state for discovery
-                                        , initDiscAddrSymMap :: !(AddrSymMap (ArchAddrWidth arch))
-                                          -- ^ Partial Map from addresses to associated external symbol name
-                                        , initDiscSymAddrMap :: !(SymAddrMap (ArchAddrWidth arch))
-                                          -- ^ Map from symbols to addresses addresses
-                                        , initDiscPLTFuns :: [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
-                                          -- ^ A list of address and name pairs for PLT functions.
-                                        , initDiscPred :: !(ArchSegmentOff arch -> Bool)
-                                          -- ^ Predicate that returns true if we should explore a function at that
-                                          -- address.
-                                        , initDiscBaseCodeAddr :: !(MemAddr (ArchAddrWidth arch))
-                                          -- ^ Address to use as base address for program counters in Dwarf
-                                          -- debug information.
-                                        }
+data InitDiscovery arch
+  = InitDiscovery
+    { initDiscElf :: !(Elf (ArchAddrWidth arch))
+      -- ^ Elf file read in.
+    , initDiscState :: !(DiscoveryState arch)
+      -- ^ Initial state for discovery
+    , initDiscSymAddrMap :: !(SymAddrMap (ArchAddrWidth arch))
+      -- ^ Map from symbols to addresses addresses
+    , initDiscPLTFuns :: [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
+      -- ^ A list of address and name pairs for PLT functions.
+    , initDiscPred :: !(ArchSegmentOff arch -> Bool)
+      -- ^ Predicate that returns true if we should explore a function
+      -- at that address.
+    , initDiscBaseCodeAddr :: !(MemAddr (ArchAddrWidth arch))
+      -- ^ Address to use as base address for program counters in
+      -- Dwarf debug information.
+    }
 
 -- | Resolve a symbol table entry in an object file.
 resolveObjSymbol :: Elf.ElfHeaderInfo w
                  -> Memory w
                  -> Map Word16 (MemSegmentOff w)
-                 -> Int
-                 -> Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType w)
-                 -> IO [MemSymbol w]
-resolveObjSymbol hdrInfo mem secMap idx ste = elfInstances hdrInfo $ do
+                    -- ^ Map from section index to offset in memory of section.
+                 -> SymAddrMap w
+                    -- ^ Symbol addr map
+                 -> (Int, Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType w))
+                    -- ^ Index of symbol in symbol table and entry.
+                 -> IO (SymAddrMap w)
+resolveObjSymbol hdrInfo mem secMap sam (idx, ste) = elfInstances hdrInfo $ do
   let secIdx = Elf.steIndex ste
   if Elf.steType ste /= Elf.STT_FUNC then do
-    pure []
+    pure sam
    else if secIdx == Elf.SHN_UNDEF then
-    pure []
+    pure sam
    else if Elf.steName ste == "" then do
     hPutStrLn stderr $ show $ EmptySymbolName idx (Elf.steType ste)
-    pure []
+    pure sam
    else if secIdx == Elf.SHN_ABS then do
     let val = Elf.steValue ste
     case resolveAbsoluteAddr mem (fromIntegral val) of
-      Just addr ->
-        pure [ MemSymbol { memSymbolName = Elf.steName ste
-                         , memSymbolStart = addr
-                         , memSymbolSize = fromIntegral (Elf.steSize ste)
-                         }
-             ]
+      Just addr -> do
+        pure $! symAddrMapInsert ste addr sam
       Nothing -> do
         hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
-        pure []
+        pure sam
    else if Elf.fromElfSectionIndex secIdx >= Elf.headerSectionCount hdrInfo then do
     hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
-    pure []
+    pure sam
    else do
     let shdr = Elf.getShdrEntry hdrInfo (Elf.fromElfSectionIndex secIdx)
     let val = Elf.steValue ste
@@ -681,14 +727,10 @@ resolveObjSymbol hdrInfo mem secMap idx ste = elfInstances hdrInfo $ do
         | Elf.shdrAddr shdr <= val && (val - Elf.shdrAddr shdr) < Elf.shdrSize shdr
         , off <- toInteger (val - Elf.shdrAddr shdr)
         , Just addr <- incSegmentOff base off -> do
-            pure [MemSymbol { memSymbolName = Elf.steName ste
-                            , memSymbolStart = addr
-                            , memSymbolSize = fromIntegral (Elf.steSize ste)
-                            }
-                 ]
+            pure $! symAddrMapInsert ste addr sam
       _ -> do
         hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
-        pure []
+        pure sam
 
 -- | Discover functions in an elf file.
 --
@@ -715,11 +757,10 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
         Just _ -> showWarning $ "Ignoring load offset for object file as there is no global base address."
       let (l, elfFile) = Elf.getElf hdrInfo
       showElfParseErrors l
-
       -- Load elf sections
       (mem, secMap, warnings) <- do
         -- Create map from section name to sections with that name.
-        let sectionMap :: SectionNameMap (ArchAddrWidth arch)
+        let sectionMap :: Map BSC.ByteString [Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))]
             sectionMap = foldlOf Elf.elfSections insSec Map.empty elfFile
               where insSec m sec = Map.insertWith (\new old -> old ++ new) (Elf.elfSectionName sec) [sec] m
         -- Parse Elf symbol table
@@ -731,20 +772,17 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
         case memoryForElfSections' hdr sectionMap symtab of
           Left errMsg -> hPutStrLn stderr errMsg *> exitFailure
           Right r -> pure r
-
       mapM_ (hPutStrLn stderr . show) warnings
 
-      symbols <-
+      symAddrMap <-
         case Elf.elfSymtab elfFile of
-          [] -> pure []
+          [] ->
+            pure symAddrMapEmpty
           tbl:r -> do
             when (not (null r)) $ do
               hPutStrLn stderr $ show $ MultipleSymbolTables
             let staticEntries = zip [0..] (V.toList (Elf.elfSymbolTableEntries tbl))
-            fmap mconcat $ mapM (uncurry (resolveObjSymbol hdrInfo mem secMap)) staticEntries
-
-      let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-      let symAddrMap = symAddrMapFromList symbols
+            foldlM (resolveObjSymbol hdrInfo mem secMap) symAddrMapEmpty staticEntries
 
       -- Get index of text section section.
       textSectionIndex <-
@@ -771,12 +809,12 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
 
       -- Get initial entries and predicate for exploring
       (allEntries, fnPred) <- resolveIncludeFn mem (Right regIdx) symAddrMap includeAddr excludeAddr
+      let addrSymMap = getAddrSymMap symAddrMap
       let readyState
             = emptyDiscoveryState mem addrSymMap ainfo
             & markAddrsAsFunction InitAddr allEntries
       pure $! InitDiscovery { initDiscElf = elfFile
                             , initDiscState = readyState
-                            , initDiscAddrSymMap = addrSymMap
                             , initDiscSymAddrMap = symAddrMap
                             , initDiscPLTFuns = []
                             , initDiscPred = fnPred
@@ -795,41 +833,42 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
 
-      let staticEntries :: [(Int, Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch)))]
+      let staticEntries :: [Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))]
           staticEntries =
-            let mk tbl = zip [0..] (V.toList (Elf.elfSymbolTableEntries tbl))
+            let mk tbl = V.toList (Elf.elfSymbolTableEntries tbl)
              in concatMap mk (Elf.elfSymtab elfFile)
 
       when (length (Elf.elfSymtab elfFile) > 1) $ do
         hPutStrLn stderr $ show MultipleSymbolTables
 
-      symbols <- fmap mconcat $ forM staticEntries $ \(_idx,sym) -> do
-        if Elf.steType sym /= Elf.STT_FUNC then
-          pure []
-          -- Check symbol is defined
-         else if Elf.steIndex sym == Elf.SHN_UNDEF then
-          pure []
-          -- Check symbol name is non-empty
-         else if Elf.steName sym == "" then
-          pure []
-          -- Lookup symbol as absolute
-         else do
-          let val = Elf.steValue sym
-          case resolveAbsoluteAddr mem (fromIntegral val) of
-            Just addr ->
-              pure [MemSymbol { memSymbolName = Elf.steName sym
-                              , memSymbolStart = addr
-                              , memSymbolSize = fromIntegral (Elf.steSize sym)
-                              }
-                   ]
-            Nothing -> do
-              hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName sym)
-              pure []
+      let insStatSymbol :: SymAddrMap (ArchAddrWidth arch)
+                        -> Elf.ElfSymbolTableEntry BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))
+                        -> IO (SymAddrMap (ArchAddrWidth arch))
+          insStatSymbol sam sym = do
+            if Elf.steType sym /= Elf.STT_FUNC then
+              pure sam
+            -- Check symbol is defined
+             else if Elf.steIndex sym == Elf.SHN_UNDEF then
+              pure sam
+            -- Check symbol name is non-empty
+             else if Elf.steName sym == "" then
+              pure sam
+            -- Lookup symbol as absolute
+             else do
+              let val = Elf.steValue sym
+              case resolveAbsoluteAddr mem (fromIntegral val) of
+                Just addr ->
+                  pure $! symAddrMapInsert sym addr sam
+                Nothing -> do
+                  hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName sym)
+                  pure sam
 
-      let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-      let symAddrMap = symAddrMapFromList symbols
+      symAddrMap <- foldlM insStatSymbol symAddrMapEmpty staticEntries
+
       -- Get initial entries and predicate for exploring
       (entries, fnPred) <- resolveIncludeFn mem (Right 0) symAddrMap includeAddr excludeAddr
+
+      let addrSymMap = getAddrSymMap symAddrMap
       let initState
             = emptyDiscoveryState mem addrSymMap ainfo
             & markAddrsAsFunction InitAddr entries
@@ -844,7 +883,6 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
             pure $! initState & markAddrAsFunction InitAddr v
       pure $! InitDiscovery { initDiscElf = elfFile
                             , initDiscState = readyState
-                            , initDiscAddrSymMap = addrSymMap
                             , initDiscSymAddrMap = symAddrMap
                             , initDiscPLTFuns = []
                             , initDiscPred = fnPred
@@ -878,7 +916,7 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
             Map.fromListWith (++)
               [ (Elf.elfSectionName s, [s]) | (_rng,s) <- V.toList sections ]
 
-      symMapRef <- newIORef $ (symAddrMapEmpty, Map.empty)
+      symMapRef <- newIORef symAddrMapEmpty
       withSymtab (snd <$> sections) sectionNameMap "static symbol table" ".symtab" $ \symtab strtab -> do
         addDefinedSymbolTableFuns hdrInfo mem baseAddr symtab strtab symMapRef
 
@@ -901,13 +939,14 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
                               && addrOffset a - pltStartOff < pltSize
                  in \a -> not (inPLT (segoffAddr a))
       pltFns <- readIORef pltFnsRef
-      (symAddrMap, addrSymMap) <- readIORef symMapRef
+      symAddrMap <- readIORef symMapRef
 
       -- Get initial entries and predicate for exploring
       let regIdx :: RegionIndex
           regIdx = if isJust (loadOffset loadOpts) then 0 else 1
 
       (entries, fnPred) <- resolveIncludeFn mem (Right regIdx) symAddrMap includeAddr excludeAddr
+      let addrSymMap = getAddrSymMap symAddrMap
       let postEntryState = emptyDiscoveryState mem addrSymMap ainfo
                          & exploreFunctionAddr .~ exploreFn
                          & markAddrsAsFunction InitAddr entries
@@ -934,7 +973,6 @@ initDiscovery loadOpts hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstance
       -- Return discovery
       pure $! InitDiscovery { initDiscElf = elfFile
                             , initDiscState = readyState
-                            , initDiscAddrSymMap = addrSymMap
                             , initDiscSymAddrMap = symAddrMap
                             , initDiscPLTFuns = pltFns
                             , initDiscPred = fnPred
@@ -1293,8 +1331,19 @@ resolveHdrFunType _logger _funName funType =
      pure $! X86NonvarargFunType args ret
 
 -- | This checks whether any of the symbols in the map start with the given string as a prefix.
-isUsedPrefix :: BSC.ByteString -> AddrSymMap w -> Bool
-isUsedPrefix prefix m = any (\nm -> prefix `BSC.isPrefixOf` nm) (Map.elems m)
+isUsedPrefix :: BSC.ByteString -> SymAddrMap  w -> Bool
+isUsedPrefix prefix sam = any (\s -> prefix `BSC.isPrefixOf` qsnBytes s) (Map.elems (samAddrMap sam))
+
+-- | Name of recovered function from a qualified symbol name.
+localFunctionName :: BSC.ByteString -> QualifiedSymbolName -> MemSegmentOff w -> BSC.ByteString
+localFunctionName prefix qnm segOff =
+  if qsnGlobal qnm then
+    qsnBytes qnm
+   else
+    let addr = segoffAddr segOff
+     in prefix <> "_" <> qsnBytes qnm
+               <> "_" <> BSC.pack (show (addrBase addr))
+               <> "_" <> BSC.pack (show (addrOffset addr))
 
 -- | Name of recovered function when no function exists.
 nosymFunctionName :: BSC.ByteString -> MemSegmentOff w -> BSC.ByteString
@@ -1304,7 +1353,7 @@ nosymFunctionName prefix segOff =
 
 -- | Returns name of recovered function.
 recoveredFunctionName :: MemWidth w
-                      => AddrSymMap w
+                      => SymAddrMap w
                       -- ^ Maps addresses of symbols to the associated symbol name.
                       -> BSC.ByteString
                       -- ^ Prefix to use for automatically generated symbols.
@@ -1313,8 +1362,8 @@ recoveredFunctionName :: MemWidth w
                       -> MemSegmentOff w
                       -> BSC.ByteString
 recoveredFunctionName m prefix segOff =
-  case Map.lookup segOff m of
-    Just sym -> sym
+  case Map.lookup segOff (samAddrMap m) of
+    Just qname -> localFunctionName prefix qname segOff
     Nothing -> nosymFunctionName prefix segOff
 
 -- | Map x86 function type to known functon abi.
@@ -1403,7 +1452,8 @@ instance Show GetFnsLogEvent where
   show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
   show (DuplicateSections nm)  = "Multiple sections named " ++ BSC.unpack nm
   show (DebugError msg)        = msg
-  show (StartFunRecovery fnm)  = "Recovering function " ++ BSC.unpack fnm
+  show (StartFunRecovery fnm)  =
+    "Recovering function " ++ BSC.unpack fnm
   show (RecoveryFailed _ msg)  = "  Failed:  " ++ msg
   show (RecoveryPLTSkipped _)  = "  Skipped PLT stub"
   show (RecoveryWarning _ msg) = "  Warning: " ++ msg
@@ -1911,7 +1961,6 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
   initState <- initDiscovery loadOpts hdrInfo ainfo procPLT includeAddr excludeAddr
   let e = initDiscElf initState
       readyState = initDiscState initState
-      addrSymMap = initDiscAddrSymMap initState
       symAddrMap = initDiscSymAddrMap initState
       pltFuns = initDiscPLTFuns initState
       fnPred = initDiscPred initState
@@ -1951,7 +2000,7 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
   -- Resolve debug information.
   debugTypeMap <- resolveDebugFunTypes logger annTypeMap hdrInfo
 
-  when (isUsedPrefix unnamedFunPrefix addrSymMap) $ do
+  when (isUsedPrefix unnamedFunPrefix symAddrMap) $ do
     hPutStrLn stderr $
       printf "No symbol in the binary may start with the prefix %d."
              (BSC.unpack unnamedFunPrefix)
@@ -1987,24 +2036,29 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
                 filter notKnown $ exploredFunctions discState
 
   let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
-      funNameMap = addrSymMap
+      funNameMap = Map.mapWithKey (\addr qnm -> localFunctionName unnamedFunPrefix qnm addr)
+                                  (samAddrMap symAddrMap)
                 <> Map.fromList [ (addr, nosymFunctionName unnamedFunPrefix addr)
                                 | Some finfo <- exploredFunctions discState
                                 , let addr = discoveredFunAddr finfo
-                                , Map.notMember addr addrSymMap
+                                , Map.notMember addr (samAddrMap symAddrMap)
                                 ]
   let funTypeMap ::  Map BS.ByteString X86FunTypeInfo
       funTypeMap = nameTypeMap debugTypeMap
-                <> Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
+                <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
                                 | (addr,tp) <- Map.toList (addrTypeMap debugTypeMap)
                                 ]
-                <> Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
+                <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
                                 | (addr,tp) <- Map.toList fDems
                                 ]
                 <> Map.fromList [ (nm, defaultX86Type) | (_addr,nm) <- pltFuns ]
   fnDefs <- fmap catMaybes $
     forM (exploredFunctions discState) $ \(Some finfo) -> do
-      let fnm = discoveredFunName finfo
+      let faddr = segoffAddr (discoveredFunAddr finfo)
+      let fnm =
+            case discoveredFunSymbol finfo of
+              Just nm -> nm <> "(0x" <> BSC.pack (showHex (addrOffset faddr) ")")
+              Nothing -> "0x" <> BSC.pack (showHex (addrOffset faddr) "")
       logger $ StartFunRecovery fnm
       case checkFunction finfo of
         FunctionOK -> do
@@ -2023,7 +2077,7 @@ discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unname
           logger $ RecoveryFailed fnm $ "Incomplete discovery."
           pure Nothing
   -- Get list of addresses included in this set.
-  let excludedSet = Set.fromList $ recoveredFunctionName addrSymMap unnamedFunPrefix . fnAddr <$> fnDefs
+  let excludedSet = Set.fromList $ recoveredFunctionName symAddrMap unnamedFunPrefix . fnAddr <$> fnDefs
 
   -- Get all functions that are referenced, but not defined in the module.
   let declFunTypeMap :: FunctionTypeMap X86_64

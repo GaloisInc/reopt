@@ -377,7 +377,7 @@ recoverAssignId aid = do
   case MapF.lookup aid assignMap of
     Just rval -> pure rval
     Nothing ->
-      error $ "Encountered uninitialized assignment: " ++ show aid ++ "\n"
+      throwError $ "Encountered uninitialized assignment: " ++ show aid ++ "\n"
               ++ show (MapF.keys assignMap)
 
 $(pure [])
@@ -628,6 +628,12 @@ recoverAssign asgn = do
     SetUndefined tp ->
       whenAssignUsed aid $ do
         setAssignRhs aid (FnSetUndefined tp)
+    EvalArchFn (CPUID _) _ -> do
+      throwError "cpuid unsupported."
+    EvalArchFn (MemCmp _ _ _ _ _) _ -> do
+      throwError "MemCmp unsupported."
+    EvalArchFn ReadFSBase _ -> do
+      throwError "ReadFSBase unsupported."
     EvalArchFn f _ -> do
       whenAssignUsed aid $ do
         fval <- traverseFC recoverValue f
@@ -679,7 +685,7 @@ recoverAssign asgn = do
         FrameCondWriteAccess{} -> error "Expected read access"
         FrameCondWriteOverlapAccess{} -> error "Expected read access"
     CondReadMem _tp _cond _addr _def -> do
-      error "Conditional reads are not yet supported."
+      throwError "Conditional reads are not yet supported."
 
 $(pure [])
 
