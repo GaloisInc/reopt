@@ -23,41 +23,26 @@ import qualified Data.Vector as V
 data AnnType
    = VoidAnnType
      -- ^ Void type (not directly allowed in arguments)
-   | CharAnnType
-     -- ^ 8-bit signed integer.
-   | ShortAnnType
-     -- ^ A C short (on x86_64 is 16-bits)
-   | IntAnnType
-     -- ^ A C Int (on x86_64 is 32-bits)
-   | LongAnnType
-     -- ^ A C long (on x86_64 is 64-bits)
-   | LongLongAnnType
-     -- ^ A C long long (on x86_64 is 64-bits)
+   | IAnnType !Int
+     -- ^ An integer type with the given number of bits.
    | FloatAnnType
-     -- ^ A C long long (on x86_64 is 64-bits)
+     -- ^ A C float (32bits IEEE)
    | DoubleAnnType
-     -- ^ A C long long (on x86_64 is 64-bits)
-   | BoolAnnType
-     -- ^ A C _Bool (on x86_64 in LLVM is an i1)
+     -- ^ A C double (64bits IEEE)
    | PtrAnnType !AnnType
      -- ^ Pointer header type.
    | TypedefAnnType !BSC.ByteString !AnnType
      -- ^ A typedef with the name and resolved right hand side.
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- | Pretty print the header type for the end user.
 ppAnnType :: AnnType -> String
 ppAnnType tp0 =
   case tp0 of
     VoidAnnType -> "void"
-    CharAnnType -> "char"
-    ShortAnnType -> "short"
-    IntAnnType  -> "int"
-    LongAnnType -> "long"
-    LongLongAnnType -> "long long"
+    IAnnType w  -> "i" <> show w
     FloatAnnType -> "float"
     DoubleAnnType -> "double"
-    BoolAnnType -> "_Bool"
     PtrAnnType tp -> ppAnnType tp ++ "*"
     TypedefAnnType nm _ -> BSC.unpack nm
 
@@ -66,14 +51,14 @@ ppAnnType tp0 =
 data AnnFunArg = AnnFunArg { funArgName :: !(Maybe String)
                            , funArgType :: !AnnType
                            }
-  deriving (Show)
+  deriving (Eq,Show)
 
 -- | Types for a function declaration.
-data AnnFunType = HdrFunType { funRet :: !AnnType
+data AnnFunType = AnnFunType { funRet :: !AnnType
                              , funArgs :: !(V.Vector AnnFunArg)
                              , funVarArg :: !Bool
                              }
-  deriving (Show)
+  deriving (Eq,Show)
 
 -- | Annotations provided by the user in the form of a header file.
 data AnnDeclarations

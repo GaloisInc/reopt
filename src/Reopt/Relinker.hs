@@ -15,34 +15,21 @@ module Reopt.Relinker
   , x86_64_immediateJump
   ) where
 
---import           Control.Lens hiding (pre)
 import           Control.Monad.Except
---import           Control.Monad.State.Class
---import           Control.Monad.State.Strict
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Bld
---import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
---import           Data.Either
 import           Data.ElfEdit ()
 import qualified Data.ElfEdit as Elf
 import           Data.Foldable
---import           Data.Int
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
---import           Data.Maybe
---import qualified Data.Sequence as Seq
---import           Data.Set (Set)
---import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           Data.Word
---import           Reopt.Relinker.Object
 import           Reopt.Relinker.Redirection
---import           Reopt.Relinker.Relocations
 import           System.Exit
 import           System.IO
---import           Text.Printf
 
 import           GHC.Stack
 
@@ -1699,8 +1686,8 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   let binSecIndexToNewIndexMap:: Map Word16 Word16
       binSecIndexToNewIndexMap = bslSectionMap binShdrIndexInfo
 
-  -- Map from global function symbol names in object file to new section index
-  -- and offset within new section.
+  -- Map symbol names in object file to new section index and offset
+  -- within new section.
   let objSymAddrMap :: Map BS.ByteString (Elf.ElfSectionIndex, Word64)
       objSymAddrMap = nyi "objSymAddrMap"
 

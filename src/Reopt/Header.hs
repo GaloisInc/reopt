@@ -46,10 +46,10 @@ data DeclLenMod
 declLenModIntType :: DeclLenMod -> AnnType
 declLenModIntType dlm =
  case dlm of
-   NoLenMod       -> IntAnnType
-   ShortLenMod    -> ShortAnnType
-   LongLenMod     -> LongAnnType
-   LongLongLenMod -> LongLongAnnType
+   NoLenMod       -> IAnnType 32
+   ShortLenMod    -> IAnnType 16
+   LongLenMod     -> IAnnType 64
+   LongLongLenMod -> IAnnType 64
 
 data QualMods = QM { qmLenMod :: !DeclLenMod
                    , qmTypeSpec :: !(Maybe C.CTypeSpec)
@@ -64,15 +64,15 @@ parseType :: QualMods -> C.CTypeSpec -> CParser AnnType
 parseType qm tp =
   case tp of
     C.CVoidType _   -> pure $! VoidAnnType
-    C.CCharType _   -> pure $! CharAnnType
-    C.CShortType _  -> pure $! ShortAnnType
+    C.CCharType _   -> pure $! IAnnType 8
+    C.CShortType _  -> pure $! IAnnType 16
     C.CIntType  _   -> pure $! declLenModIntType (qmLenMod qm)
-    C.CLongType _   -> pure $! LongAnnType
+    C.CLongType _   -> pure $! IAnnType 64
     C.CFloatType _  -> pure $! FloatAnnType
     C.CDoubleType _ -> pure $! DoubleAnnType
-    C.CSignedType _ -> pure $! IntAnnType
-    C.CUnsigType _  -> pure $! IntAnnType
-    C.CBoolType _   -> pure $! BoolAnnType
+    C.CSignedType _ -> pure $! IAnnType 32
+    C.CUnsigType _  -> pure $! IAnnType 32
+    C.CBoolType _   -> pure $! IAnnType  1
     C.CComplexType n -> errorAt n "_Complex is not supported."
     C.CInt128Type n   -> errorAt n "__int128 is not supported."
     C.CFloatNType _ _ n -> errorAt n "Floating point extensions are not supported."
@@ -102,7 +102,7 @@ parseQualType qm qtp =
     C.CTypeSpec s : r ->
       case s of
         C.CVoidType _ -> pure $! VoidAnnType
-        C.CCharType _ -> pure $! CharAnnType
+        C.CCharType _ -> pure $! IAnnType 8
         C.CShortType n ->
           case qmLenMod qm of
             NoLenMod -> parseQualType qm { qmLenMod = ShortLenMod } r
@@ -120,7 +120,7 @@ parseQualType qm qtp =
         C.CDoubleType _ -> pure $! DoubleAnnType
         C.CSignedType _ -> parseQualType qm r
         C.CUnsigType _  -> parseQualType qm  r
-        C.CBoolType _   -> pure $! BoolAnnType
+        C.CBoolType _   -> pure $! IAnnType 1
         C.CComplexType n -> errorAt n "_Complex is not supported."
         C.CInt128Type n   -> errorAt n "__int128 is not supported."
         C.CFloatNType _ _ n -> errorAt n "Floating point extensions are not supported."
@@ -210,7 +210,7 @@ parseExtDeclaration (C.CDeclExt d) = do
             Right (cArgs, varArgs) -> do
               args <- traverse parseFunDeclArg (V.fromList cArgs)
               retType <- parseTypeDerivedDecl derived =<< parseType emptyQualMods ctype
-              let fd = HdrFunType { funRet = retType
+              let fd = AnnFunType { funRet = retType
                                   , funArgs = args
                                   , funVarArg = varArgs
                                   }

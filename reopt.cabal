@@ -72,8 +72,8 @@ library
       hvex,
       macaw-arm-vex >= 0.1.0
 
-  ghc-options: -Wall
-  ghc-options: -fno-warn-unticked-promoted-constructors
+--  ghc-options: -Wall
+--  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -103,8 +103,25 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
+
+executable compare-dwarfdump-ehframe
+  default-language: Haskell2010
+  build-depends:
+    base >= 0,
+    bytestring,
+    clock,
+    deepseq,
+    directory,
+    elf-edit,
+    filepath,
+    galois-dwarf,
+    mtl,
+    process,
+    zlib
+
+  hs-source-dirs: ehframe
+  main-is: Main.hs
 
 executable reopt-relink
   default-language: Haskell2010

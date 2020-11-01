@@ -11,6 +11,7 @@ packages:
   deps/llvm-pretty-bc-parser
   deps/macaw/base
   deps/macaw/x86
+  deps/macaw/utils/compare-dwarfdump
   deps/parameterized-utils
   deps/what4/what4
 

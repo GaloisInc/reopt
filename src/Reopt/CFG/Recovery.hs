@@ -1431,17 +1431,18 @@ data PrintfArgState = PrintfArgState
     -- ^ ARgumetn registers  in reverse order.
   }
 
-argStateRegs :: RegState X86Reg (Value X86_64 ids)
+argStateRegs :: BSC.ByteString -- ^ Name of function
+             -> RegState X86Reg (Value X86_64 ids)
              -> PrintfArgState
              -> CallRegs X86_64 ids
-argStateRegs regs pas =
+argStateRegs nm regs pas =
   let funType :: FunctionType X86_64
       funType = FunctionType { fnArgTypes = [Some (BVTypeRepr n64)]
                             , fnReturnType = Just (Some (BVTypeRepr n64))
                             , fnVarArgs = True
                             }
       fnEntry :: FnValue X86_64 (BVType 64)
-      fnEntry = FnFunctionEntryValue funType "printf"
+      fnEntry = FnFunctionEntryValue funType nm
 
       x86ArgInfo :: [X86ArgInfo]
       x86ArgInfo = reverse (pasArgRegs pas)
@@ -1521,10 +1522,11 @@ parseUnpackedFormat _ (Printf.UnpackedError e) =
   Left ("printf error " ++ show e)
 
 inferPrintfArgs :: Memory 64 -- ^ Memory state
+                -> BSC.ByteString -- ^ Name of function
                 -> RegState X86Reg (Value X86_64 ids) -- Register values
                 -> PrintfArgState -- ^ Initial printf arg state
                 -> Either String (CallRegs X86_64 ids)
-inferPrintfArgs mem regs initState = do
+inferPrintfArgs mem nm regs initState = do
   (formatStringReg, initState') <-
     case getPrintfIntArg initState of
       Nothing -> Left "Could not get printf format string register."
@@ -1541,7 +1543,7 @@ inferPrintfArgs mem regs initState = do
   let uf = Printf.unpackFormat s
   case parseUnpackedFormat initState' uf of
     Left msg -> Left $ "printf error: " ++ show s ++ "\n" ++ msg
-    Right pas -> Right $! argStateRegs regs pas
+    Right pas -> Right $! argStateRegs nm regs pas
 
 -- | Compute the return type (if any) of this function.
 retReturnType :: [Some X86RetInfo] -> Maybe (Some TypeRepr)
@@ -1603,7 +1605,7 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
                 Nothing -> Left $ UnresolvedFunctionTypeError addr "Too many printf initial args."
                 Just (_, s') -> resolveInitArgs (n-1) s'
       s <- resolveInitArgs icnt0 initPrintfArgState
-      case inferPrintfArgs mem regs s of
+      case inferPrintfArgs mem nm regs s of
         Left msg -> Left (UnresolvedFunctionTypeError addr msg)
         Right r -> Right r
     X86UnsupportedFunType ->

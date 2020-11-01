@@ -49,11 +49,11 @@ data ArgResolverState = ARS { arsPrev :: [X86ArgInfo]
                               -- available for arguments.
                             }
 
-newtype ArgResolver a =
-    ArgResolver (StateT ArgResolverState (ExceptT ArgResolverError IO) a)
+newtype ArgResolver m a =
+    ArgResolver (StateT ArgResolverState (ExceptT ArgResolverError m) a)
   deriving (Functor, Applicative, Monad, MonadError ArgResolverError, MonadIO)
 
-runArgResolver :: ArgResolver () -> ExceptT ArgResolverError IO [X86ArgInfo]
+runArgResolver :: Monad m => ArgResolver m () -> ExceptT ArgResolverError m [X86ArgInfo]
 runArgResolver (ArgResolver m) =
   let s0 = ARS { arsPrev = []
                , arsNextGPP = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
@@ -62,7 +62,7 @@ runArgResolver (ArgResolver m) =
 
 
 -- | Reserve a 64-bit register for an argument
-addGPReg64 :: String -> ArgResolver ()
+addGPReg64 :: Monad m => String -> ArgResolver m ()
 addGPReg64 nm = ArgResolver $ do
   regs <- gets arsNextGPP
   case regs of

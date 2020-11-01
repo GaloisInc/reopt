@@ -182,7 +182,12 @@ defaultArgs = Args { _reoptAction = Reopt
                    , _includeAddrs = []
                    , _excludeAddrs  = []
                    , loadBaseAddress = Nothing
-                   , _discOpts     = defaultDiscoveryOptions
+                   , _discOpts     =
+                       DiscoveryOptions { exploreFunctionSymbols = False
+                                        , exploreCodeAddrInMem   = False
+                                        , logAtAnalyzeFunction   = True
+                                        , logAtAnalyzeBlock      = False
+                                        }
                    , unnamedFunPrefix = "reopt"
                    , llvmGenOptions = defaultLLVMGenOptions
                    , annotationsPath = Nothing
@@ -353,11 +358,6 @@ logAtAnalyzeBlockFlag = flagBool [ "trace-block-discovery" ] upd help
   where upd b = discOpts %~ \o -> o { logAtAnalyzeBlock = b }
         help = "Report when starting analysis of each basic block with a function."
 
-exploreFunctionSymbolsFlag :: Flag Args
-exploreFunctionSymbolsFlag = flagBool [ "include-syms" ] upd help
-  where upd b = discOpts %~ \o -> o { exploreFunctionSymbols = b }
-        help = "Include function symbols in discovery."
-
 exploreCodeAddrInMemFlag :: Flag Args
 exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
   where upd b = discOpts %~ \o -> o { exploreCodeAddrInMem = b }
@@ -390,7 +390,6 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
-                , exploreFunctionSymbolsFlag
                 , exploreCodeAddrInMemFlag
                 , includeAddrFlag
                 , excludeAddrFlag
@@ -446,11 +445,19 @@ dumpDisassembly args = do
 loadOptions :: Args -> LoadOptions
 loadOptions args = LoadOptions { loadOffset = loadBaseAddress args }
 
+argsReoptOptions :: Args -> ReoptOptions
+argsReoptOptions args = ReoptOptions { roIncluded = args^.includeAddrs
+                                     , roExcluded = args^.excludeAddrs
+                                     }
+
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
+  hdrAnn <- resolveHeader args
+  errorRef <- newIORef 0
   Some discState <-
-    discoverBinary (programPath args) (loadOptions args) (args^.discOpts) (args^.includeAddrs) (args^.excludeAddrs)
+    discoverBinary (recoverLogError errorRef)
+                   (programPath args) (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn
   pure $ show $ ppDiscoveryStateBlocks discState
 
 -- | This parses function argument information from a user-provided header file.
@@ -486,8 +493,7 @@ getFunctions args = do
                    (programPath args)
                    (loadOptions args)
                    (args^.discOpts)
-                   (args^.includeAddrs)
-                   (args^.excludeAddrs)
+                   (argsReoptOptions args)
                    hdrAnn
                    funPrefix
   errorCnt <- readIORef errorRef
@@ -518,8 +524,7 @@ performReopt args = do
                    (programPath args)
                    (loadOptions args)
                    (args^.discOpts)
-                   (args^.includeAddrs)
-                   (args^.excludeAddrs)
+                   (argsReoptOptions args)
                    hdrAnn
                    funPrefix
   errorCnt <- readIORef errorRef
