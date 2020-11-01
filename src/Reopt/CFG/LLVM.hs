@@ -98,9 +98,9 @@ import qualified Reopt.VCG.Annotations as Ann
 
 -- | Return a LLVM type for a integer with the given width.
 llvmITypeNat :: Natural -> L.Type
-llvmITypeNat w | w <= fromIntegral (maxBound :: Int32) = L.PrimType (L.Integer wn)
+llvmITypeNat w | w <= fromIntegral (maxBound :: Word32) = L.PrimType (L.Integer wn)
                | otherwise = error $ "llvmITypeNat given bad width " ++ show w
-  where wn :: Int32
+  where wn :: Word32
         wn = fromIntegral w
 
 natReprToLLVMType :: NatRepr n -> L.Type
@@ -152,11 +152,13 @@ overflowOp bop in_typ =
             (L.Struct [in_typ, L.iT 1])
             [in_typ, in_typ]
 
+type VectorLength = Word64
+
 -- | @llvm.masked.load.*@ intrinsic
-llvmMaskedLoad :: Int32 -- ^ Number of vector elements
-                -> String -- ^ Type name (e.g. i32)
-                -> L.Type -- ^ Element type (should match string)
-                -> Intrinsic
+llvmMaskedLoad :: VectorLength -- ^ Number of vector elements
+               -> String -- ^ Type name (e.g. i32)
+               -> L.Type -- ^ Element type (should match string)
+               -> Intrinsic
 llvmMaskedLoad n tp tpv = do
  let vstr = "v" ++ show n ++ tp
      mnem = "llvm.masked.load." ++ vstr ++ ".p0" ++ vstr
@@ -164,7 +166,7 @@ llvmMaskedLoad n tp tpv = do
   in intrinsic mnem (L.Vector n tpv) args
 
 -- | @llvm.masked.store.*@ intrinsic
-llvmMaskedStore :: Int32 -- ^ Number of vector elements
+llvmMaskedStore :: VectorLength -- ^ Number of vector elements
                 -> String -- ^ Type name (e.g. i32)
                 -> L.Type -- ^ Element type (should match string)
                 -> Intrinsic

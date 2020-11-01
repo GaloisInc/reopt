@@ -28,7 +28,7 @@ library
     hashable,
     language-c,
     lens,
-    llvm-pretty >= 0.7.1.1,
+    llvm-pretty >= 0.11.0,
     macaw-base >= 0.3.15.2,
     macaw-x86 >= 0.3.1,
     mtl,
