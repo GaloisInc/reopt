@@ -41,7 +41,7 @@ logger = hPutStrLn stderr
 -- | Action to perform when running
 data Action
    = ShowHelp        -- ^ Print out help message
-   | Showversion     -- ^ Print out version
+   | ShowVersion     -- ^ Print out version
    | Relink          -- ^ Link an existing binary and new code together.
   deriving (Show)
 

@@ -1193,7 +1193,7 @@ mkBinaryPhdrLayout binHeaderInfo objCodeEndOffset r =
       let o' :: Elf.FileOffset Word64
           o' = resolveSegmentOffset objCodeEndOffset binDataVirtAddr
       let padding :: Bld.Builder
-          padding = Elf.alignmentPadding objCodeEndOffset o'
+          padding = Bld.byteString $ BS.replicate (fromIntegral (o' - objCodeEndOffset)) 0
       let newData  :: Bld.Builder
           newData = Bld.byteString $ BS.take (fromIntegral sz) $ BS.drop (fromIntegral (Elf.fromFileOffset o)) c
       pure $! BinaryPhdrLayout { bplBinDataAddr = Elf.phdrSegmentVirtAddr firstDataPhdr
@@ -1235,13 +1235,13 @@ getShdrTable :: Elf.ElfHeaderInfo 64 -> IO (V.Vector (Elf.ShdrEntry BS.ByteStrin
 getShdrTable binHeaderInfo = do
   -- Index of section header entry for section name table.
   let shstrtabShdrIndex :: Word16
-      shstrtabShdrIndex = Elf.shdrNameIdx binHeaderInfo
+      shstrtabShdrIndex = Elf.shstrtabIndex binHeaderInfo
 
   when (shstrtabShdrIndex == 0) $ do
     relinkFail "Require non-zero shstrtab index."
   -- Sections in binary
-  let rawBinShdrs :: V.Vector (Elf.ShdrEntry Word32 Word64)
-      rawBinShdrs = Elf.headerSectionHeaders binHeaderInfo
+  let rawBinShdrs :: V.Vector (Elf.Shdr Word32 Word64)
+      rawBinShdrs = Elf.headerShdrs binHeaderInfo
   when (fromIntegral shstrtabShdrIndex < V.length rawBinShdrs) $ do
     relinkFail "Invalid binary section header table"
   let binShstrtab :: BS.ByteString
@@ -1258,12 +1258,12 @@ data NewCodeInfo = NewCodeInfo { nciBinDataAddr :: !Word64
 
 -- | Section information for new binary.
 data NewSectionInfo
-   = OldBinaryCodeSection !(Elf.ShdrEntry BS.ByteString Word64)
+   = OldBinaryCodeSection !(Elf.Shdr BS.ByteString Word64)
    | NewBinaryCodeSection
-   | OldBinaryDataSection !(Elf.ShdrEntry BS.ByteString Word64)
-   | NewSymtabSection     !(Elf.ShdrEntry BS.ByteString Word64)
-   | NewStrtabSection     !(Elf.ShdrEntry BS.ByteString Word64)
-   | NewShstrtabSection   !(Elf.ShdrEntry BS.ByteString Word64)
+   | OldBinaryDataSection !(Elf.Shdr BS.ByteString Word64)
+   | NewSymtabSection     !(Elf.Shdr BS.ByteString Word64)
+   | NewStrtabSection     !(Elf.Shdr BS.ByteString Word64)
+   | NewShstrtabSection   !(Elf.Shdr BS.ByteString Word64)
 
 -- | Information needed to compute code layout.
 data NewSectionRenderInfo =
@@ -1301,7 +1301,7 @@ nsriMapShdrLink nsri link =
 
 renderNewSectionInfo :: NewSectionRenderInfo
                      -> NewSectionInfo
-                     -> Elf.ShdrEntry BS.ByteString Word64
+                     -> Elf.Shdr BS.ByteString Word64
 renderNewSectionInfo nsri nsi =
   case nsi of
     OldBinaryCodeSection shdr ->
@@ -1312,12 +1312,12 @@ renderNewSectionInfo nsri nsi =
                , Elf.shdrInfo = newInfo
                }
     NewBinaryCodeSection ->
-      Elf.ShdrEntry
+      Elf.Shdr
       { Elf.shdrName  = newCodeSectionName
       , Elf.shdrType  = Elf.SHT_PROGBITS
       , Elf.shdrFlags = Elf.shf_alloc .|. Elf.shf_execinstr
       , Elf.shdrAddr  = nsriOverflowAddr nsri
-      , Elf.shdrOff   = Elf.fromFileOffset (nsriOverflowOffset nsri)
+      , Elf.shdrOff   = nsriOverflowOffset nsri
       , Elf.shdrSize  = nsriOverflowSize nsri
       , Elf.shdrLink  = 0
       , Elf.shdrInfo  = 0
@@ -1326,20 +1326,20 @@ renderNewSectionInfo nsri nsi =
       }
     OldBinaryDataSection shdr ->
       shdr { Elf.shdrLink = nsriMapShdrLink nsri (Elf.shdrLink shdr)
-           , Elf.shdrOff = Elf.shdrOff shdr + nsriDataDelta nsri
+           , Elf.shdrOff = Elf.shdrOff shdr `Elf.incOffset` nsriDataDelta nsri
            }
     NewSymtabSection shdr ->
-      shdr { Elf.shdrOff  = Elf.fromFileOffset $ nsriSymtabOffset nsri
+      shdr { Elf.shdrOff  = nsriSymtabOffset nsri
            , Elf.shdrSize = nsriSymtabSize nsri
            , Elf.shdrLink = fromIntegral (nsriStrtabIndex nsri)
            , Elf.shdrInfo = nsriSymtabLocalCount nsri
            }
     NewStrtabSection shdr ->
-      shdr { Elf.shdrOff  = Elf.fromFileOffset $ nsriStrtabOffset nsri
+      shdr { Elf.shdrOff  = nsriStrtabOffset nsri
            , Elf.shdrSize = nsriStrtabSize nsri
            }
     NewShstrtabSection shdr ->
-      shdr { Elf.shdrOff  = Elf.fromFileOffset $ nsriShstabOffset nsri
+      shdr { Elf.shdrOff  = nsriShstabOffset nsri
            , Elf.shdrSize = nsriShstrtabSize nsri
            }
 
@@ -1385,7 +1385,7 @@ addBinShdr bsl binIdx nm secInfo = seq nm $ seq secInfo $
 layoutBinaryShdr :: NewCodeInfo
                -> BinarySectionLayout
                -> Word16
-               -> Elf.ShdrEntry BS.ByteString Word64
+               -> Elf.Shdr BS.ByteString Word64
                -> IO BinarySectionLayout
 layoutBinaryShdr nci bsl0 idx shdr = seq idx $ do
   let bsl1 | bslNeedNewCodeShdr bsl0, Elf.shdrAddr shdr >= nciBinDataAddr nci =
@@ -1623,7 +1623,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   binShdrs <- getShdrTable binHeaderInfo
 
   -- Section header for symbol table in binary
-  (binSymtabShdr :: Elf.ShdrEntry BS.ByteString Word64) <-
+  (binSymtabShdr :: Elf.Shdr BS.ByteString Word64) <-
     case V.find (\e -> Elf.shdrType e == Elf.SHT_SYMTAB) binShdrs of
       Nothing -> relinkFail "Could not find binary file symbol table."
       Just r -> pure r
@@ -1642,16 +1642,16 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
       binSymtab = getShdrContents binSymtabShdr binHeaderInfo
 
   (binSymbols :: V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64)) <-
-    case Elf.getSymbolTableEntries cl elfDta binStrtab binSymtab of
+    case Elf.decodeSymtab cl elfDta binStrtab binSymtab of
       Left _e -> fail "Could not parse binary symbol table."
       Right syms -> pure $ syms
 
   -- Sections in object file.
-  let objShdrs :: V.Vector (Elf.ShdrEntry Word32 Word64)
-      objShdrs = Elf.headerSectionHeaders objHeaderInfo
+  let objShdrs :: V.Vector (Elf.Shdr Word32 Word64)
+      objShdrs = Elf.headerShdrs objHeaderInfo
 
   -- Section header for symbol table in object file
-  (objSymtabShdr :: Elf.ShdrEntry Word32 Word64) <-
+  (objSymtabShdr :: Elf.Shdr Word32 Word64) <-
     case V.find (\e -> Elf.shdrType e == Elf.SHT_SYMTAB) objShdrs of
       Nothing -> relinkFail "Could not find object file symbol table."
       Just r -> pure r
@@ -1716,7 +1716,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   -- Note these are considered local
   newObjSyms <- do
     (objSymbols :: V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64))
-      <- case Elf.getSymbolTableEntries cl elfDta objStrtab objSymtab of
+      <- case Elf.decodeSymtab cl elfDta objStrtab objSymtab of
            Left _e -> fail "Could not parse object file symbol table."
            Right syms -> pure $ syms
 
@@ -1752,7 +1752,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
         let cnt :: Word64
             cnt = fromIntegral (V.length newSymbols)
             sz :: Word64
-            sz  = fromIntegral (Elf.symbolTableEntrySize cl)
+            sz  = fromIntegral (Elf.symtabEntrySize cl)
          in (cnt * sz)
 
   -- Get end offset of symbol table.
@@ -1762,7 +1762,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   -- Get symbol string table
   let newStrtabContents :: BS.ByteString
       strtabOffsetMap :: Map BS.ByteString Word32
-      (newStrtabContents, strtabOffsetMap) = Elf.stringTable $
+      (newStrtabContents, strtabOffsetMap) = Elf.encodeStringTable $
         V.toList $ Elf.steName <$> newSymbols
 
   let newSymtabEntries :: V.Vector (Elf.ElfSymbolTableEntry Word32 Word64)
@@ -1780,7 +1780,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   let newShstrtabContents :: BS.ByteString
       shstrtabOffsetMap :: Map BS.ByteString Word32
       (newShstrtabContents, shstrtabOffsetMap) =
-        Elf.stringTable $ bslSectionNames binShdrIndexInfo
+        Elf.encodeStringTable $ bslSectionNames binShdrIndexInfo
 
   -- Get section header stringtable size
   let newShstrtabSize :: Word64
@@ -1793,7 +1793,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   -- Get offset of section header
   let newShdrTableOffset :: Elf.FileOffset Word64
       newShdrTableOffset =
-        Elf.alignFileOffset (Elf.shdrAlign cl) newShstrtabEndOffset
+        Elf.alignFileOffset (Elf.shdrTableAlign cl) newShstrtabEndOffset
 
   outPhdrs <-
     let mkPhdr :: Int -> IO (Elf.Phdr 64)
@@ -1822,8 +1822,6 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   let overflowContents :: Bld.Builder
       overflowContents = nyi "overflowContents"
 
-  let renderEntries = foldMap (Elf.renderSymbolTableEntry cl elfDta)
-
   -- .strtab section index
   (newStrtabIndex :: Word16) <-
      case Map.lookup (bslStrtabIndex binShdrIndexInfo) (bslSectionMap binShdrIndexInfo) of
@@ -1832,7 +1830,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
 
   -- .shstrtab section index.
   (newShstrtabIndex :: Word16) <-
-     case Map.lookup (Elf.shdrNameIdx binHeaderInfo) (bslSectionMap binShdrIndexInfo) of
+     case Map.lookup (Elf.shstrtabIndex binHeaderInfo) (bslSectionMap binShdrIndexInfo) of
        Just i -> pure i
        Nothing -> relinkFail "Could not find .shstrtab index."
 
@@ -1868,16 +1866,16 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
             renderShdr nsi =
               let shdr = finalizeShdrNameIndex shstrtabOffsetMap $
                            renderNewSectionInfo nsri nsi
-               in Elf.writeShdrEntry elfDta cl shdr
+               in Elf.encodeShdr cl elfDta shdr
             -- Render sections (not bslSectionHeaders is in reverse order)
          in foldMap renderShdr (reverse (bslSectionHeaders binShdrIndexInfo))
 
   -- Create final elf image.
   return $ Bld.toLazyByteString $
     -- Main elf header
-    Elf.buildElfHeader ehdr
+    Elf.encodeEhdr ehdr
     -- Program header table
-    <> Elf.buildElfSegmentHeaderTable cl elfDta (V.toList outPhdrs)
+    <> Elf.encodePhdrTable cl elfDta (V.toList outPhdrs)
     -- Existing code
     <> newBinCodeContent
     -- New object code
@@ -1885,12 +1883,12 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
     -- Padding and data content
     <> bplNewDataContent binPhdrLayout
     -- Symbol table
-    <> renderEntries newSymtabEntries
+    <> foldMap (Elf.encodeSymtabEntry cl elfDta) newSymtabEntries
     -- string table
     <> Bld.byteString newStrtabContents
     -- Section header name table
     <> Bld.byteString newShstrtabContents
     -- section header table padding
-    <> Elf.alignmentPadding newShstrtabEndOffset newShdrTableOffset
+    <> Bld.byteString (BS.replicate (fromIntegral (newShdrTableOffset - newShstrtabEndOffset)) 0)
     -- Section header table
     <> newShdrTable

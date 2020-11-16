@@ -105,24 +105,6 @@ executable reopt
 
   ghc-prof-options: -O2 -fprof-auto-top
 
-executable compare-dwarfdump-ehframe
-  default-language: Haskell2010
-  build-depends:
-    base >= 0,
-    bytestring,
-    clock,
-    deepseq,
-    directory,
-    elf-edit,
-    filepath,
-    galois-dwarf,
-    mtl,
-    process,
-    zlib
-
-  hs-source-dirs: ehframe
-  main-is: Main.hs
-
 executable reopt-relink
   default-language: Haskell2010
   build-depends:

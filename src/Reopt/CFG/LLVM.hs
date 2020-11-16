@@ -1167,7 +1167,7 @@ runBlockAnnGen fnm a (BlockAnnGen m) =
     Left e -> Left $ printf "Missing annotation generation feature in %s(%s): %s" (BSC.unpack fnm) (show a) e
     Right r -> Right r
 
-
+-- | Create an annotation from a bound location.
 mkBoundLocExpr :: HasCallStack => BoundLoc X86Reg tp -> BlockAnnGen (Ann.Expr Ann.BlockVar)
 mkBoundLocExpr (RegLoc xr) =
   case xr of

@@ -488,7 +488,7 @@ getFunctions args = do
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (_, _, os, _, recMod) <-
+  (_, os, _, recMod) <-
     discoverX86Elf (recoverLogError errorRef)
                    (programPath args)
                    (loadOptions args)
@@ -519,7 +519,7 @@ performReopt args = do
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (origElf, _, os, discState, recMod) <-
+  (origElf, os, discState, recMod) <-
     discoverX86Elf (recoverLogError errorRef)
                    (programPath args)
                    (loadOptions args)
