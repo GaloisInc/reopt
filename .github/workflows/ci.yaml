@@ -73,7 +73,7 @@ jobs:
     - name: Cabal update
       run: cabal update
     - name: Install
-      run: cabal install -j exe:reopt reopt-vcg
+      run: cabal install -j exe:reopt
     - name: Test
       run: cabal test -j reopt-tests
     - name: Create archive
@@ -81,42 +81,42 @@ jobs:
         mkdir -p dist/reopt/bin
         cp $HOME/.cabal/bin/reopt        dist/reopt/bin
         cp $HOME/.cabal/bin/reopt-relink dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt-vcg    dist/reopt/bin
         cd dist
         tar cvfz reopt.tgz reopt
+#        cp $HOME/.cabal/bin/reopt-vcg    dist/reopt/bin
     - name: Make reopt
       uses: actions/upload-artifact@v1
       with:
         name: reopt
         path: dist/reopt.tgz
   # This runs the CVC4 tests using reopt and the artifacts produced.
-  vcg-test:
-    needs: [cvc4, build]
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v2
-    - name: Get llvm
-      run: |
-        sudo apt-get update
-        sudo apt-get install llvm
-    - name: Get reopt and reopt-vcg
-      uses: actions/download-artifact@v1
-      with:
-        name: reopt
-        path: artifacts
-    - name: Get CVC4
-      uses: actions/download-artifact@v1
-      with:
-        name: cvc4
-        path: artifacts/cvc4
-    - name: Unpack reopt
-      working-directory: artifacts
-      run: tar xvfz reopt.tgz
-    - name: Update cvc4 permissions
-      run: chmod a+x artifacts/cvc4/cvc4
-    - name: VCG Tests
-      run: |
-        export PATH="$PWD/artifacts/reopt/bin:$PWD/artifacts/cvc4:$PATH"
-        cd vcg-test-programs
-        make
+#  vcg-test:
+#    needs: [cvc4, build]
+#    runs-on: ubuntu-latest
+#    steps:
+#    - name: Checkout
+#      uses: actions/checkout@v2
+#    - name: Get llvm
+#      run: |
+#        sudo apt-get update
+#        sudo apt-get install llvm
+#    - name: Get reopt and reopt-vcg
+#      uses: actions/download-artifact@v1
+#      with:
+#        name: reopt
+#        path: artifacts
+#    - name: Get CVC4
+#      uses: actions/download-artifact@v1
+#      with:
+#        name: cvc4
+#        path: artifacts/cvc4
+#    - name: Unpack reopt
+#      working-directory: artifacts
+#      run: tar xvfz reopt.tgz
+#    - name: Update cvc4 permissions
+#      run: chmod a+x artifacts/cvc4/cvc4
+#    - name: VCG Tests
+#      run: |
+#        export PATH="$PWD/artifacts/reopt/bin:$PWD/artifacts/cvc4:$PATH"
+#        cd vcg-test-programs
+#        make

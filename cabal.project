@@ -1,7 +1,6 @@
 packages:
   reopt.cabal
   annotations
-  reopt-vcg
   tools
   deps/dwarf
   deps/elf-edit
@@ -18,8 +17,6 @@ packages:
 package reopt
   ghc-options: -Wall
 package reopt-tools
-  ghc-options: -Wall
-package reopt-vcg
   ghc-options: -Wall
 package reopt-vcg-ann
   ghc-options: -Wall
