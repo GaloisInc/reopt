@@ -115,7 +115,7 @@ findRelaEntries dta secMap nm = do
 -}
 
 {-
-isLocalSymbol :: ElfSymbolTableEntry w -> Bool
+isLocalSymbol :: SymtabEntry w -> Bool
 isLocalSymbol sym = steBind sym == STB_LOCAL
 -}
 
@@ -434,8 +434,8 @@ resolveBinarySymbolTableEntry :: Num (Elf.ElfWordType 64)
                               -> Set BS.ByteString
                                  -- ^ Set of symbols in the new object file.
 
-                              -> ElfSymbolTableEntry (Elf.ElfWordType 64)
-                              -> RelinkM (Maybe (ElfSymbolTableEntry (Elf.ElfWordType 64)))
+                              -> SymtabEntry (Elf.ElfWordType 64)
+                              -> RelinkM (Maybe (SymtabEntry (Elf.ElfWordType 64)))
 resolveBinarySymbolTableEntry sectionIdxMap usedNames ste = do
   let suffix = "_orig"
   let nm =
@@ -657,8 +657,8 @@ data MkSymbolTableContext w
 -- | This maps a symbol entry in object to the new entry.
 resolveObjectSymbolTableEntry :: Num (Elf.ElfWordType w)
                               => MkSymbolTableContext w
-                              -> ElfSymbolTableEntry (Elf.ElfWordType w)
-                              -> RelinkM (Maybe (ElfSymbolTableEntry (Elf.ElfWordType w)))
+                              -> SymtabEntry (Elf.ElfWordType w)
+                              -> RelinkM (Maybe (SymtabEntry (Elf.ElfWordType w)))
 resolveObjectSymbolTableEntry ctx ste = do
   case steIndex ste of
     SHN_ABS -> do
@@ -688,7 +688,7 @@ mkSymbolTable :: MergedSectionIndex
               -> MkSymbolTableContext 64
               -> Elf 64
                  -- ^ Input binary symbol table information
-              -> V.Vector (ElfSymbolTableEntry Word64)
+              -> V.Vector (SymtabEntry Word64)
                  -- ^ Symbols in the new binary.
               -> RelinkM ( ElfSymbolTable (Elf.ElfWordType 64)
                          , BS.ByteString
@@ -852,7 +852,7 @@ data ObjInfoContext
                    -- ^ Header for object file
                    , objctxContents :: !BS.ByteString
                    -- ^ Contents of object file.
-                   , objctxShdrs :: !(V.Vector (Elf.ShdrEntry Word32 Word64))
+                   , objctxShdrs :: !(V.Vector (Elf.Shdr Word32 Word64))
                      -- ^ Object section headers
                    }
 
@@ -871,7 +871,7 @@ data ObjInfo =
             -- ^ Maps object section indices to the relocation entry information for them
             --
             -- Note. We only support RELA format.
-          , objinfoSymtabs :: !(Map Word16 (V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64)))
+          , objinfoSymtabs :: !(Map Word16 (V.Vector (Elf.SymtabEntry BS.ByteString Word64)))
             -- ^ Map SYMTAB section indices to their entries.
           , objinfoSpillEnd :: !Word64
             -- ^ End address for code that spilled to new section.
@@ -887,7 +887,7 @@ collectObjShdrInfo :: ObjInfoContext
                       -- ^ Object references
                    -> Word16
                       -- ^ This section header index
-                   -> Elf.ShdrEntry Word32 Word64
+                   -> Elf.Shdr Word32 Word64
                       -- ^ Section header to process
                    -> RelinkM ObjInfo
 collectObjShdrInfo ctx objInfo thisIdx shdr = do
@@ -969,7 +969,7 @@ data UnusedRegion =
 {-
 -- | Information about a section that will be initialized after copying
 -- the binary section headers.
-type DeferredShdr = Maybe (Word32, Elf.ShdrEntry Word32 Word64)
+type DeferredShdr = Maybe (Word32, Elf.Shdr Word32 Word64)
 
 type DeferredSectionLens = Lens' NewSectionInfo DeferredShdr
 
@@ -977,7 +977,7 @@ type DeferredSectionLens = Lens' NewSectionInfo DeferredShdr
 data NewSectionInfo = NewSectionInfo
   { nsiSectionCount :: !Word32
     -- ^ Number of sections added so far (for generating new sections.
-  , nsiCopyShdrs :: !(Map Word32 (Elf.ShdrEntry BS.ByteString Word64))
+  , nsiCopyShdrs :: !(Map Word32 (Elf.Shdr BS.ByteString Word64))
     -- ^ Sections to copy
   , nsiGnuHash  :: !DeferredShdr
     -- ^ ".gnu.hash" section which will be generated from symbol tables.
@@ -1010,7 +1010,7 @@ nsiShstrtabLens = lens nsiShstrtab (\s v -> s { nsiShstrtab = v })
 type BinarySectionAction
    = NewSectionInfo
    -> Word16
-   -> Elf.ShdrEntry Word32 Word64
+   -> Elf.Shdr Word32 Word64
    -> RelinkM NewSectionInfo
 
 type BinarySectionRule = (BS.ByteString, BinarySectionAction)
@@ -1126,7 +1126,7 @@ copyBinarySectionHeader :: BS.ByteString -- ^ Section name table
                         -> NewSectionInfo
                         -> Word16
                            -- ^ Section inex
-                        -> Elf.ShdrEntry Word32 (Elf.ElfWordType 64)
+                        -> Elf.Shdr Word32 (Elf.ElfWordType 64)
                            -- ^ Section header
                         -> RelinkM NewSectionInfo
 copyBinarySectionHeader shStrTable _secInfo shdrIndex shdr = do
@@ -1149,7 +1149,7 @@ data BinaryPhdrLayout
                       }
 
 -- | Get bytes from a section header file.
-getShdrContents :: Elf.ShdrEntry nm Word64 -> Elf.ElfHeaderInfo 64 -> BS.ByteString
+getShdrContents :: Elf.Shdr nm Word64 -> Elf.ElfHeaderInfo 64 -> BS.ByteString
 getShdrContents shdr hdrInfo =
   let o  = fromIntegral $ Elf.shdrOff shdr
       sz = fromIntegral $ Elf.shdrSize shdr
@@ -1205,8 +1205,8 @@ mkBinaryPhdrLayout binHeaderInfo objCodeEndOffset r =
 -- |  Resolve symbol table entry into offset.
 finalizeSymtabEntryNameIndex :: HasCallStack
                              => Map BS.ByteString Word32
-                             -> Elf.ElfSymbolTableEntry BS.ByteString v
-                             -> Elf.ElfSymbolTableEntry Word32 v
+                             -> Elf.SymtabEntry BS.ByteString v
+                             -> Elf.SymtabEntry Word32 v
 finalizeSymtabEntryNameIndex strtabOffsetMap e =
   case Map.lookup (Elf.steName e) strtabOffsetMap of
     Nothing -> error $ "internal failure: Unexpected symbol."
@@ -1214,7 +1214,7 @@ finalizeSymtabEntryNameIndex strtabOffsetMap e =
 
 
 -- | Replace section header name index with bytestring.
-substituteShdrName :: BS.ByteString -> Elf.ShdrEntry Word32 Word64 -> IO (Elf.ShdrEntry BS.ByteString Word64)
+substituteShdrName :: BS.ByteString -> Elf.Shdr Word32 Word64 -> IO (Elf.Shdr BS.ByteString Word64)
 substituteShdrName shstrtab shdr =
   case Elf.lookupString (Elf.shdrName shdr) shstrtab of
     Left _ -> relinkFail "Failed to find section header name."
@@ -1223,15 +1223,15 @@ substituteShdrName shstrtab shdr =
 -- | Replace a section shdr entry bytestring with an index.
 finalizeShdrNameIndex :: HasCallStack
                       => Map BS.ByteString Word32
-                      -> Elf.ShdrEntry BS.ByteString v
-                      -> Elf.ShdrEntry Word32 v
+                      -> Elf.Shdr BS.ByteString v
+                      -> Elf.Shdr Word32 v
 finalizeShdrNameIndex strtabOffsetMap e =
   case Map.lookup (Elf.shdrName e) strtabOffsetMap of
     Nothing -> error $ "internal failure: Unexpected section header name."
     Just idx -> e { Elf.shdrName = idx }
 
 -- | Get section header table.
-getShdrTable :: Elf.ElfHeaderInfo 64 -> IO (V.Vector (Elf.ShdrEntry BS.ByteString Word64))
+getShdrTable :: Elf.ElfHeaderInfo 64 -> IO (V.Vector (Elf.Shdr BS.ByteString Word64))
 getShdrTable binHeaderInfo = do
   -- Index of section header entry for section name table.
   let shstrtabShdrIndex :: Word16
@@ -1558,7 +1558,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   -- Resolve which offsets of code segment to insert jumps into.
   codeRedirs <- do
     -- Map from symbols to the associated address
-    let objSymMap :: Map BS.ByteString (ElfSymbolTableEntry (ElfWordType 64))
+    let objSymMap :: Map BS.ByteString (SymtabEntry (ElfWordType 64))
         objSymMap = Map.fromList [ (steName e, e) | e <- V.toList objSymbols ]
     when (Map.size objSymMap /= V.length objSymbols) $ do
       relinkFail "Duplicate function names detected in object file."
@@ -1641,7 +1641,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   let binSymtab :: BS.ByteString
       binSymtab = getShdrContents binSymtabShdr binHeaderInfo
 
-  (binSymbols :: V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64)) <-
+  (binSymbols :: V.Vector (Elf.SymtabEntry BS.ByteString Word64)) <-
     case Elf.decodeSymtab cl elfDta binStrtab binSymtab of
       Left _e -> fail "Could not parse binary symbol table."
       Right syms -> pure $ syms
@@ -1693,9 +1693,9 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
 
   -- Map symbol in the original binary to a new address.
   let mapBinSymbol :: Int -- ^ Index of symbol
-                   -> Elf.ElfSymbolTableEntry BS.ByteString Word64
+                   -> Elf.SymtabEntry BS.ByteString Word64
                    -- ^ Symbol entry in the original binary
-                   -> Elf.ElfSymbolTableEntry BS.ByteString Word64
+                   -> Elf.SymtabEntry BS.ByteString Word64
       mapBinSymbol idx e
         -- Look to see if global symbols have been moved.
         | Just nm <- objNameOfBinSymbolIndex idx
@@ -1715,14 +1715,14 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
   -- Get symbols from object file.
   -- Note these are considered local
   newObjSyms <- do
-    (objSymbols :: V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64))
+    (objSymbols :: V.Vector (Elf.SymtabEntry BS.ByteString Word64))
       <- case Elf.decodeSymtab cl elfDta objStrtab objSymtab of
            Left _e -> fail "Could not parse object file symbol table."
            Right syms -> pure $ syms
 
-    let processObjSymbol :: Elf.ElfSymbolTableEntry BS.ByteString Word64
-                         -> [Elf.ElfSymbolTableEntry BS.ByteString Word64]
-                         -> [Elf.ElfSymbolTableEntry BS.ByteString Word64]
+    let processObjSymbol :: Elf.SymtabEntry BS.ByteString Word64
+                         -> [Elf.SymtabEntry BS.ByteString Word64]
+                         -> [Elf.SymtabEntry BS.ByteString Word64]
         processObjSymbol e r
           -- Copy function symbols pointing to the code section that are not
           -- in the binary, but make them local and fix address.
@@ -1743,7 +1743,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
       newLocalSymCount = fromIntegral $ V.length newLocalSyms + V.length newObjSyms
 
   -- Symbols
-  let newSymbols ::  V.Vector (Elf.ElfSymbolTableEntry BS.ByteString Word64)
+  let newSymbols ::  V.Vector (Elf.SymtabEntry BS.ByteString Word64)
       newSymbols = newLocalSyms <> newObjSyms <> newGlobalSyms
 
   -- Get end offset of symbol table.
@@ -1765,7 +1765,7 @@ mergeObject binHeaderInfo objHeaderInfo objNameOfBinSymbolIndex _redirs = do
       (newStrtabContents, strtabOffsetMap) = Elf.encodeStringTable $
         V.toList $ Elf.steName <$> newSymbols
 
-  let newSymtabEntries :: V.Vector (Elf.ElfSymbolTableEntry Word32 Word64)
+  let newSymtabEntries :: V.Vector (Elf.SymtabEntry Word32 Word64)
       newSymtabEntries = finalizeSymtabEntryNameIndex strtabOffsetMap <$> newSymbols
 
   -- Get section header stringtable size

@@ -30,7 +30,7 @@ import           Data.Aeson.Types
 import qualified Data.ByteString as BS
 import           Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Internal
-import           Data.ElfEdit
+import qualified Data.ElfEdit as Elf
 import           Data.String (fromString)
 import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as SMV
@@ -85,12 +85,12 @@ instance Num w => FromJSON (CodeRedirection w) where
 
 -- | Return true if this symbol table entry appears correcponds to a
 -- globally defined function.
-isFuncSymbol :: ElfSymbolTableEntry nm v -> Bool
+isFuncSymbol :: Elf.SymtabEntry nm v -> Bool
 isFuncSymbol e
-  =  steType e == STT_FUNC
-  && steBind e == STB_GLOBAL
-  && steIndex e /= SHN_UNDEF
-  && steIndex e < SHN_LORESERVE
+  =  Elf.steType e == Elf.STT_FUNC
+  && Elf.steBind e == Elf.STB_GLOBAL
+  && Elf.steIndex e /= Elf.SHN_UNDEF
+  && Elf.steIndex e < Elf.SHN_LORESERVE
 
 data ResolvedCodeRedir a
    = ResolvedCodeRedir { resolvedSourceVAddr :: !a
@@ -145,12 +145,12 @@ resolveCodeRedirections :: (Word64 -> BS.ByteString)
                         -> [CodeRedirection Word64]
                         -- ^ List of redirections generated from
                         -- recovered functions.
-                        -> (BS.ByteString -> Maybe (ElfWordType 64))
+                        -> (BS.ByteString -> Maybe (Elf.ElfWordType 64))
                        -- ^ Function that given the name of a symbol
                         -- returns the address of that symbol in the
                         -- new binary, or `Nothing` if the symbol is
                         -- not in the object file.
-                        -> Either BS.ByteString (ResolvedCodeRedirs (ElfWordType 64))
+                        -> Either BS.ByteString (ResolvedCodeRedirs (Elf.ElfWordType 64))
 resolveCodeRedirections mkJump redirs resolveAddr = do
   RCR . concat <$> traverse (resolveCodeRedirection mkJump resolveAddr) redirs
 

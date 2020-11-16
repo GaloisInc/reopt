@@ -23,7 +23,7 @@ library
     ansi-wl-pprint,
     bytestring,
     containers,
-    elf-edit >= 0.38,
+    elf-edit >= 0.39,
     flexdis86 >= 0.1.1,
     hashable,
     language-c,
@@ -60,9 +60,7 @@ library
     Reopt.Header
     Reopt.Hints
     Reopt.Relinker
-    Reopt.Relinker.Object
     Reopt.Relinker.Redirection
-    Reopt.Relinker.Relocations
     Reopt.Utils.Hex
     Reopt.Utils.Printf
 
@@ -72,8 +70,6 @@ library
       hvex,
       macaw-arm-vex >= 0.1.0
 
---  ghc-options: -Wall
---  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
