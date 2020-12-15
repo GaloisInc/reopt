@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -27,12 +28,11 @@ import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Map as MapF
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Prettyprinter
 
-import           Data.Macaw.Discovery.State
 import           Data.Macaw.CFG
+import           Data.Macaw.Discovery.State
 import           Data.Macaw.Types
-
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.X86Reg
 
@@ -67,12 +67,10 @@ deriving instance OrdF (ArchReg arch) => Ord (StackDepthValue arch ids)
 deriving instance RegisterInfo (ArchReg arch) => Show (StackDepthValue arch ids)
 
 instance RegisterInfo (ArchReg arch) => Pretty (StackDepthValue arch ids) where
-  pretty sdv = integer (fromIntegral $ staticPart sdv)
-               <+> go (Set.toList $ dynamicPart sdv)
+  pretty sdv = pretty (staticPart sdv) <+> foldr go mempty (dynamicPart sdv)
     where
-      go []           = mempty
-      go (Pos x : xs) = text "+" <+> pretty x <+> go xs
-      go (Neg x : xs) = text "-" <+> pretty x <+> go xs
+      go (Pos x) r = "+ " <> pretty x <+> r
+      go (Neg x) r = "- " <> pretty x <+> r
 
 constantDepthValue :: Int64 -> StackDepthValue arch ids
 constantDepthValue c = SDV c Set.empty

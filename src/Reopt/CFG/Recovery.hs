@@ -54,7 +54,7 @@ import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           GHC.Stack
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Prettyprinter
 import           Text.Printf
 
 import           Data.Macaw.AbsDomain.StackAnalysis

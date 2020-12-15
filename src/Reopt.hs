@@ -79,13 +79,13 @@ import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           Numeric
+import           Prettyprinter (pretty)
 import           System.Exit
 import           System.IO
 import           System.IO.Error
 import           System.Posix.Files
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
 import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.Printf (printf)
 

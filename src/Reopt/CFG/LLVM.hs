@@ -84,7 +84,7 @@ import           GHC.TypeLits
 import           Numeric.Natural
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
+import           Prettyprinter (pretty)
 import           Text.Printf
 
 import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc(..))

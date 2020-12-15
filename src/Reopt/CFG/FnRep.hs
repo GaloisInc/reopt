@@ -10,6 +10,7 @@ values.
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NoStarIsType #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -57,7 +58,7 @@ import qualified Data.Text as Text
 import qualified Data.Vector as V
 import           Data.Word
 import           Numeric (showHex)
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>))
+import           Prettyprinter
 
 import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc)
 import           Data.Macaw.CFG
@@ -78,8 +79,8 @@ import           Data.Macaw.Types hiding (Type)
 
 
 -- | Utility to pretty print with commas separating arguments.
-commas :: [Doc] -> Doc
-commas = hsep . punctuate (char ',')
+commas :: [Doc a] -> Doc a
+commas = hsep . punctuate comma
 
 ------------------------------------------------------------------------
 -- FnAssignId
@@ -92,7 +93,7 @@ instance Show FnAssignId where
   showsPrec _ p = shows (pretty p)
 
 instance Pretty FnAssignId where
-  pretty (FnAssignId w) = text ('r' : show w)
+  pretty (FnAssignId w) = "r" <> pretty w
 
 ------------------------------------------------------------------------
 -- FnPhiVar
@@ -244,29 +245,28 @@ type FnArchConstraints arch =
      )
 
 instance MemWidth (ArchAddrWidth arch) => Pretty (FnValue arch tp) where
-  pretty (FnUndefined {})         = text "undef"
-  pretty (FnConstantBool b)       = text $ if b then "true" else "false"
+  pretty (FnUndefined {})         = "undef"
+  pretty (FnConstantBool b)       = if b then "true" else "false"
   pretty (FnConstantValue w i)
-    | i >= 0 = parens (text ("0x" ++ showHex i "")
-                        <+> text ":" <+> text "bv" <+> text (show w))
+    | i >= 0 = parens ("0x" <> pretty (showHex i "") <> " : " <> "bv" <+> pretty (natValue w))
     | otherwise = error ("FnConstantBool given negative value: " ++ show i)
   pretty (FnAssignedValue ass)    = pretty (fnAssignId ass)
   pretty (FnPhiValue phi)         = pretty (unFnPhiVar phi)
   pretty (FnReturn var)           = pretty var
-  pretty (FnFunctionEntryValue _ n) = text (BSC.unpack n)
-  pretty (FnArg i _)              = text "arg" <> int i
+  pretty (FnFunctionEntryValue _ n) = pretty (BSC.unpack n)
+  pretty (FnArg i _)              = "arg" <> pretty i
 
 instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) where
   pretty rhs =
     case rhs of
-      FnSetUndefined w -> text "undef ::" <+> brackets (text (show w))
+      FnSetUndefined w -> "undef :: " <> brackets (pretty w)
       FnReadMem a tp -> sexpr "read" [ pretty a, pretty tp]
       FnCondReadMem _ c a d -> sexpr "cond_read" [ pretty c, pretty a, pretty d ]
       FnEvalApp a -> ppApp pretty a
       FnEvalArchFn f -> runIdentity (ppArchFn (pure . pretty) f)
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
-  pretty (FnAssignment lhs rhs) = pretty lhs <+> text ":=" <+> pretty rhs
+  pretty (FnAssignment lhs rhs) = pretty lhs <> " := " <> pretty rhs
 
 instance FnArchConstraints arch => Show (FnAssignment arch tp) where
   show = show . pretty
@@ -338,16 +338,16 @@ instance ( FnArchConstraints arch
       => Pretty (FnStmt arch) where
   pretty s =
     case s of
-      FnComment msg -> text "#" <+> text (Text.unpack msg)
+      FnComment msg -> mconcat $ (\l -> "# " <> pretty l <> hardline) <$> Text.lines msg
       FnAssignStmt assign -> pretty assign
-      FnWriteMem addr val -> text "write" <+> pretty addr <+> pretty val
-      FnCondWriteMem cond addr val _repr -> text "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
+      FnWriteMem addr val -> "write " <> pretty addr <+> pretty val
+      FnCondWriteMem cond addr val _repr -> "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
       FnCall f args mret ->
         let argDocs = (\(Some v) -> pretty v) <$> args
             retDoc = case mret of
-                       Just (Some r) -> pretty r <+> text ":= "
+                       Just (Some r) -> pretty r <> " := "
                        Nothing -> mempty
-         in retDoc <> text "call" <+> pretty f <> parens (commas argDocs)
+         in retDoc <> "call" <+> pretty f <> parens (commas argDocs)
       FnArchStmt stmt -> ppArchStmt pretty stmt
 
 instance FoldFnValue FnStmt where
@@ -369,14 +369,15 @@ newtype FnBlockLabel w = FnBlockLabel { fnBlockLabelAddr :: MemSegmentOff w }
 fnBlockLabelFromAddr ::  MemSegmentOff w -> FnBlockLabel w
 fnBlockLabelFromAddr = FnBlockLabel
 
+instance Pretty (FnBlockLabel w) where
+  pretty (FnBlockLabel s) =
+    let a = segoffAddr s
+        o = memWordToUnsigned (addrOffset a)
+     in "block_" <> pretty (addrBase a) <> "_" <> pretty (showHex o "")
+
 -- | Render block label as a string
 fnBlockLabelString :: FnBlockLabel w -> String
-fnBlockLabelString (FnBlockLabel s) =
-  let a = segoffAddr s
-   in "block_" ++ show (addrBase a) ++ "_" ++ showHex (memWordToUnsigned (addrOffset a)) ""
-
-instance Pretty (FnBlockLabel w) where
-  pretty = text . fnBlockLabelString
+fnBlockLabelString = show . pretty
 
 ------------------------------------------------------------------------
 -- FnJumpTarget
@@ -393,7 +394,7 @@ data FnJumpTarget arch =
                }
 
 instance MemWidth (ArchAddrWidth arch) => Pretty (FnJumpTarget arch) where
-  pretty tgt = pretty (fnJumpLabel tgt) <+> encloseSep lbracket rbracket (text " ") phiVals
+  pretty tgt = pretty (fnJumpLabel tgt) <+> encloseSep lbracket rbracket " " phiVals
     where phiVals = V.toList $ viewSome pretty <$> fnJumpPhiValues tgt
 
 ------------------------------------------------------------------------
@@ -420,15 +421,16 @@ instance FnArchConstraints arch
       => Pretty (FnTermStmt arch) where
   pretty s =
     case s of
-      FnJump a -> text "jump" <+> pretty a
-      FnBranch c x y -> text "branch" <+> pretty c <+> pretty x <+> pretty y
-      FnLookupTable idx vec -> text "lookup" <+> pretty idx <+> text "in"
-                               <+> parens (commas $ V.toList $ pretty <$> vec)
-      FnRet Nothing           -> text "return void"
-      FnRet (Just (Some ret)) -> text "return" <+> pretty ret
+      FnJump a -> "jump " <> pretty a
+      FnBranch c x y -> "branch" <+> pretty c <+> pretty x <+> pretty y
+      FnLookupTable idx vec ->
+        let entries = commas $ V.toList $ pretty <$> vec
+         in "lookup" <+> pretty idx <> " in " <> parens entries
+      FnRet Nothing           -> "return void"
+      FnRet (Just (Some ret)) -> "return " <> pretty ret
       FnTailCall f args ->
         let argDocs = (\(Some v) -> pretty v) <$> args
-         in text "tail_call" <+> pretty f <> parens (commas argDocs)
+         in "tail_call" <+> pretty f <> parens (commas argDocs)
 
 instance FoldFnValue FnTermStmt where
   foldFnValue _ s (FnJump {})          = s
@@ -507,16 +509,19 @@ instance (FnArchConstraints arch
          )
       => Pretty (FnBlock arch) where
   pretty b =
-    pretty (fbLabel b) <+> encloseSep lbracket rbracket (text " ") phiVars <$$>
-      indent 2 (vcat phiBindings <$$> vcat stmts <$$> tstmt)
+      pretty (fbLabel b) <+> encloseSep lbracket rbracket " " phiVars <> hardline
+      <> indent 2 (phiBindings <> stmts <> tstmt)
     where
       ppPhiName v = parens (pretty (unFnPhiVar v) <+> pretty (fnPhiVarType v))
       phiVars = V.toList $ viewSome ppPhiName <$> fbPhiVars b
-      ppBinding v l = parens (text "mc_binding" <+> v <+> pretty l)
-      ppPhiBindings v = vcat $ ppBinding (pretty (unFnPhiVar v)) <$> locs
+      ppBinding v l = parens ("mc_binding " <> v <+> pretty l) <> hardline
+
+      ppPhiBindings :: Some (FnPhiVar arch) -> Doc a
+      ppPhiBindings (Some v) = foldMap (ppBinding (pretty (unFnPhiVar v))) locs
         where locs = fnPhiVarRep v : fnPhiVarLocations v
-      phiBindings = V.toList $ viewSome ppPhiBindings <$> fbPhiVars b
-      stmts = pretty <$> fbStmts b
+
+      phiBindings = foldMap ppPhiBindings (fbPhiVars b)
+      stmts = foldMap (\s -> pretty s <> hardline) (fbStmts b)
       tstmt = pretty (fbTerm b)
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
@@ -555,18 +560,19 @@ instance (FnArchConstraints arch
       => Pretty (Function arch) where
   pretty fn =
     let nm = pretty (BSC.unpack (fnName fn))
-        addr = pretty (show (fnAddr fn))
+        addr = pretty (fnAddr fn)
         ftp = fnType fn
-        ppArg :: Integer -> Some TypeRepr -> Doc
-        ppArg i (Some tp) = text "arg" <> text (show i) <+> text ":" <+> pretty tp
+        ppArg :: Integer -> Some TypeRepr -> Doc a
+        ppArg i (Some tp) = "arg" <> pretty i <> " : " <> pretty tp
         atp = parens (commas (zipWith ppArg [0..] (fnArgTypes ftp)))
         rtp = case fnReturnType ftp of
-                Nothing -> text "void"
+                Nothing -> "void"
                 Just (Some tp) -> pretty tp
-     in text "function" <+> nm <+> text "@" <+> addr <> atp <+> text ":" <+> rtp
-        <$$> lbrace
-        <$$> (nest 4 $ vcat (pretty <$> fnBlocks fn))
-        <$$> rbrace
+     in vcat [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
+             , lbrace
+             , nest 4 $ vcat (pretty <$> fnBlocks fn)
+             , rbrace
+             ]
 
 -- | A function declaration that has type information, but no recovered definition.
 data FunctionDecl arch =

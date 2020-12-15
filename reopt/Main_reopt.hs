@@ -26,12 +26,12 @@ import           Data.Version
 import           Data.Word
 import           Numeric
 import           Numeric.Natural
+import           Prettyprinter (pretty)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.IO
 import           System.IO.Error
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery

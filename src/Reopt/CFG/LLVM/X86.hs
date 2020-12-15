@@ -14,8 +14,8 @@ import           Control.Monad.Reader
 import           Data.Parameterized.Some
 import           GHC.Stack
 import           Numeric.Natural
+import           Prettyprinter
 import qualified Text.LLVM as L
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
