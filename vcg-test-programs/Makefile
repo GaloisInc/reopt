@@ -29,6 +29,11 @@ test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_
 	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add --include main $<
 
 # Generate LLVM file using reopt for add example
+test_fpadd_diet_reopt.ll test_fpadd_diet_reopt.ann : test_fpadd_diet_lld.exe test_fpadd_protos.h $(reopt)
+	$(reopt) -o test_fpadd_diet_reopt.ll  --llvm --annotations test_fpadd_diet_reopt.ann --include fpadd --include main $<
+
+
+# Generate LLVM file using reopt for add example
 test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
 	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann \
                  --header test_fib_protos.h --include fib --include main $<
