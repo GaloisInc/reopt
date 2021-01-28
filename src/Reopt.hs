@@ -1023,7 +1023,7 @@ instance Show GetFnsLogEvent where
                  Just nm -> BSC.unpack nm <> "(0x" <> showHex (addrOffset (segoffAddr faddr)) ")"
                  Nothing -> "0x" <> showHex (addrOffset (segoffAddr faddr)) ""
       in "Recovering function " <> fnm
-  show (RecoveryFailed _ _ msg)  = "  Failed:  " ++ msg
+  show (RecoveryFailed _ _ msg)  = "  " <> msg
   show (RecoveryPLTSkipped _ _)  = "  Skipped PLT stub"
   show (RecoveryWarning _ _ msg) = "  Warning: " ++ msg
   show (GetFnsError msg) = msg

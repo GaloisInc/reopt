@@ -184,10 +184,13 @@ data FunRecoverState = FRS { frsNextAssignId :: !FnAssignId
                              -- ^ List of warnings added so far.
                            }
 
+data RecoverError w
+   = RecoverErrorAt !(MemAddr w) !String
+
 -- | Monad for function recovery
 newtype FunRecover ids a =
-    FR { runFR :: ReaderT (FunRecoverContext ids) (StateT FunRecoverState (Except String)) a }
-  deriving (Functor, Applicative, Monad, MonadError String)
+    FR { runFR :: ReaderT (FunRecoverContext ids) (StateT FunRecoverState (Except (RecoverError 64))) a }
+  deriving (Functor, Applicative, Monad, MonadError (RecoverError 64))
 
 runFunRecover :: FunRecoverContext ids
               -> FunRecover ids a
@@ -197,7 +200,7 @@ runFunRecover ctx m =
                , frsWarnings = []
                }
    in case runExcept (runStateT (runReaderT (runFR m) ctx) s0) of
-        Left e -> Left e
+        Left (RecoverErrorAt a e) -> Left $ show (addrOffset a)  <> ": " <> e
         Right (a,s) -> Right (frsWarnings s, a)
 
 -- | Create a fresh assign id.
@@ -255,7 +258,7 @@ newtype Recover ids a = Recover {
     runRecover :: StateT (RecoverState X86_64 ids) (FunRecover ids) a
   }
   deriving ( Functor, Applicative, Monad
-           , MonadError String
+           , MonadError (RecoverError 64)
            , MonadState (RecoverState X86_64 ids)
            )
 
@@ -276,6 +279,13 @@ mkReturnVar tp = (`FnReturnVar` tp) <$> freshId
 -- | Add a statement to the list of statements in current function block.
 addFnStmt :: FnStmt X86_64 -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
+
+throwErrorAt :: String -> Recover ids a
+throwErrorAt msg = do
+  sa <- gets rsStartAddr
+  o <- gets rsBlockOff
+  let curAddr = incAddr (toInteger o) (segoffAddr sa)
+  throwError $ RecoverErrorAt curAddr msg
 
 $(pure [])
 
@@ -308,6 +318,7 @@ bitcast x p = evalAssignRhs $ FnEvalApp (Bitcast x p)
 
 $(pure [])
 
+-- | This turns a @FnRegValue@ into a @FnValue@.
 coerceRegValue :: FnRegValue X86_64 tp -> Recover ids (FnValue X86_64 tp)
 coerceRegValue (FnValue v' pr) =
   case testEquality (widthEqSource pr) (widthEqTarget pr) of
@@ -331,7 +342,7 @@ $(pure [])
 
 unsupportedFnValue :: String -> TypeRepr tp -> Recover ids (FnValue X86_64 tp)
 unsupportedFnValue nm _repr = do
-  throwError $ "Cannot create value: " ++ nm
+  throwErrorAt $ "Cannot create value: " ++ nm
 
 -- | Recover a constant.
 recoverCValue :: HasCallStack
@@ -377,8 +388,8 @@ recoverAssignId aid = do
   case MapF.lookup aid assignMap of
     Just rval -> pure rval
     Nothing ->
-      throwError $ "Encountered uninitialized assignment: " ++ show aid ++ "\n"
-              ++ show (MapF.keys assignMap)
+      throwErrorAt $ "Encountered uninitialized assignment: " ++ show aid ++ "\n"
+                ++ show (MapF.keys assignMap)
 
 $(pure [])
 
@@ -606,8 +617,7 @@ popMemAccessInfo = do
       pure a
 
 setBlockOff :: MemWord 64 -> Recover ids ()
-setBlockOff o = do
-  modify $ \s -> s { rsBlockOff = o }
+setBlockOff o = modify $ \s -> s { rsBlockOff = o }
 
 pushMemAccessType :: FnMemAccessType -> Recover ids ()
 pushMemAccessType tp = do
@@ -629,11 +639,11 @@ recoverAssign asgn = do
       whenAssignUsed aid $ do
         setAssignRhs aid (FnSetUndefined tp)
     EvalArchFn (CPUID _) _ -> do
-      throwError "cpuid unsupported."
+      throwErrorAt "cpuid unsupported."
     EvalArchFn (MemCmp _ _ _ _ _) _ -> do
-      throwError "MemCmp unsupported."
+      throwErrorAt "MemCmp unsupported."
     EvalArchFn ReadFSBase _ -> do
-      throwError "ReadFSBase unsupported."
+      throwErrorAt "ReadFSBase unsupported."
     EvalArchFn f _ -> do
       whenAssignUsed aid $ do
         fval <- traverseFC recoverValue f
@@ -661,7 +671,7 @@ recoverAssign asgn = do
                     m <- gets rsPhiLocMap
                     case MapF.lookup l m of
                       Nothing ->
-                        throwError "Uninitialized phi variable."
+                        throwErrorAt "Uninitialized phi variable."
                       Just rv -> do
                         v <- coerceRegValue rv
                         setAssignVal aid v
@@ -680,12 +690,12 @@ recoverAssign asgn = do
         FrameReadOverlapAccess _ -> do
           pushMemAccessType StackAccess
           whenAssignUsed aid $ do
-            error "Stack read at an overlapping offset."
+            throwErrorAt  $ "Stack read at an overlapping offset."
         FrameWriteAccess{} -> error "Expected read access"
         FrameCondWriteAccess{} -> error "Expected read access"
         FrameCondWriteOverlapAccess{} -> error "Expected read access"
     CondReadMem _tp _cond _addr _def -> do
-      throwError "Conditional reads are not yet supported."
+      throwErrorAt "Conditional reads are not yet supported."
 
 $(pure [])
 
@@ -748,14 +758,14 @@ resolveInferValue tgt pvm l =
   case pvmFind l pvm of
     IVDomain d ->
       case d of
-        ValueRegUseStackOffset _ -> throwError "Stack offset escaped."
-        FnStartRegister _ -> throwError "Callee-saved register escaped."
+        ValueRegUseStackOffset _ -> throwErrorAt "Stack offset escaped."
+        FnStartRegister _ -> throwErrorAt "Callee-saved register escaped."
         RegEqualLoc lr -> do
           m <- gets rsPhiLocMap
           case MapF.lookup lr m of
             Nothing -> do
               src <- gets rsStartAddr
-              throwError $
+              throwErrorAt $
                 printf "Internal error: %s should provide value of %s (originally %s) to %s"
                        (show src) (show (pretty lr)) (show (pretty l)) (show tgt)
             Just rv ->
@@ -778,7 +788,7 @@ getBlockInvariants :: MemSegmentOff 64
                    -> FunRecover ids (BlockInvariants X86_64 ids)
 getBlockInvariants addr = do
   ctx <- FR ask
-  let emsg = "internal: Could not find phi variables for " ++ show addr ++ "."
+  let emsg = "internal: Could not find block invariants for " ++ show addr ++ "."
   pure $! Map.findWithDefault (error emsg) addr (frcBlockDepMap ctx)
 
 -- | Given an address to jump to (which should be the start of a
@@ -805,28 +815,6 @@ recoverJumpTarget retVarMap tgtAddr = do
   pure $! FnJumpTarget { fnJumpLabel = fnBlockLabelFromAddr tgtAddr
                        , fnJumpPhiValues = values
                        }
-
-$(pure [])
-
-{-
-------------------------------------------------------------------------
--- RecoveredBlockInfo
-
--- | Builds a mapping from labels to recovered function blocks and a
--- mapping from the block label to the register map resulting from
--- block.
-type RecoveredBlockInfo = Map (MemSegmentOff 64) (FnBlock X86_64)
-
-emptyRecoveredBlockInfo :: RecoveredBlockInfo
-emptyRecoveredBlockInfo = Map.empty
-
-addFnBlock :: FnBlock X86_64
-           -> RecoveredBlockInfo
-           -> RecoveredBlockInfo
-addFnBlock b info =
-  let a = fnBlockLabelAddr (fbLabel b)
-   in Map.insert a b info
--}
 
 $(pure [])
 
@@ -897,9 +885,9 @@ recoverX86TermStmt :: forall ids
 recoverX86TermStmt tstmt regs mnext_addr =
   case tstmt of
     Hlt ->
-      throwError "hlt is not supported in function recovery."
+      throwErrorAt "hlt is not supported in function recovery."
     UD2 -> do
-      throwError "ud2 is not supported in function recovery."
+      throwErrorAt "ud2 is not supported in function recovery."
     X86Syscall -> do
       sysp <- frcSyscallPersonality <$> getFunCtx
 
@@ -1095,13 +1083,13 @@ resolveRetInfoValue regRel retVal (RetBV64 r) =
     Just (RetRegRelation retFieldRel GPFieldRegRel) -> do
       fieldVal <- getRetField retVal retFieldRel
       pure (knownRepr, fieldVal)
-    Nothing -> throwError $ "Could not resolve return value."
+    Nothing -> throwErrorAt $ "Could not resolve return value."
 resolveRetInfoValue regRel retVal (RetMM512D i) =
   case MapF.lookup (X86_ZMMReg i) regRel of
     Just (RetRegRelation retFieldRel ZmmFieldRegRel) -> do
       fieldVal <- getRetField retVal retFieldRel
       pure (knownRepr, fieldVal)
-    Nothing -> throwError $ "Could not resolve return value."
+    Nothing -> throwErrorAt $ "Could not resolve return value."
 
 resolveRetValueFields :: MapF X86Reg (RetRegRelation retType)
                       -> FnValue X86_64 retType
@@ -1168,7 +1156,7 @@ recoverBlock b = do
         Some callReturnList <- pure $ fromSomeList callReturnLocs
         case inferRetRegRelations callReturnList of
           Nothing -> do
-            throwError "Tail call returns no values, but function expects return values."
+            throwErrorAt "Tail call returns no values, but function expects return values."
           Just (Some callRetInfo) -> do
             v <- mkReturnVar (fnRetValuesType callRetInfo)
             addFnStmt $! FnCall callTarget args (Just (Some v))
@@ -1264,7 +1252,7 @@ evalRecover b inv preds phiVars locMap = do
               }
 
   pr <- case pblockPrecond b of
-          Left _e -> throwError "Could not resolve block precondition."
+          Left _e -> throwError (RecoverErrorAt (segoffAddr (pblockAddr b)) "Could not resolve block precondition.")
           Right pr -> pure pr
 
   (tm, s) <- runStateT (runRecover (recoverBlock b)) s0
@@ -1613,6 +1601,12 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
       Left $ UnresolvedFunctionTypeError addr
         "Function calling convention not supported by Reopt."
 
+uninitRegs :: [Pair X86Reg (FnRegValue X86_64)]
+uninitRegs =
+  [ Pair (X86_ZMMReg i) (FnValue (FnUndefined knownRepr) (WidthEqRefl knownRepr))
+  | i <- [0..31]
+  ]
+
 -- | Recover the function at a given address.
 --
 -- Returns either an error message with a fatal error, or a list of
@@ -1666,7 +1660,7 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
                }
   invMap <-
     case runExcept (registerUse useCtx fInfo blockPreds) of
-      Left e -> throwError (show e)
+      Left e -> Left (show e)
       Right v -> pure v
 
   let funCtx = FRC { frcMemory = mem
@@ -1678,6 +1672,7 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
   runFunRecover funCtx $ do
     let Just entryBlk = Map.lookup entryAddr (fInfo^.parsedBlocks)
 
+    -- Insert argument into initial register list.
     let insArg :: Int
                -> X86ArgInfo
                -> MapF (BoundLoc X86Reg) (FnRegValue X86_64)
@@ -1688,14 +1683,21 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo = do
         insArg i (ArgMM512D r) m =
           let itp = VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr)
            in MapF.insert (RegLoc (X86_ZMMReg r)) (FnValue (FnArg i itp) vec8DoubleToBV512) m
-
+    -- Insert uninitialized register into initial block location map.
+    let insUninit :: Pair X86Reg (FnRegValue X86_64)
+                  -> MapF (BoundLoc X86Reg) (FnRegValue X86_64)
+                  -> MapF (BoundLoc X86Reg) (FnRegValue X86_64)
+        insUninit (Pair r v) m = MapF.insertWith (\_n old -> old) (RegLoc r) v m
     -- Compute registers for first block
     let locMap :: MapF (BoundLoc X86Reg) (FnRegValue X86_64)
         locMap
           = MapF.empty
-          & flip (ifoldr insArg) curArgs
-          -- Set df to 0 at function start.
+            -- Set df to 0 at function start.
           & MapF.insert (RegLoc DF) (FnValue (FnConstantBool False) (WidthEqRefl (typeRepr DF)))
+            -- Populate used arguments.
+          & flip (ifoldr insArg) curArgs
+            -- Populate unused registers with default values.
+          & flip (foldr insUninit) uninitRegs
 
     entryInv <- getBlockInvariants entryAddr
     recoveredEntryBlk <- evalRecover entryBlk entryInv [] V.empty locMap
