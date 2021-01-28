@@ -37,7 +37,6 @@ import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
 import           GHC.Stack (HasCallStack)
 
-
 -- | Write bytestring to bitvector at given offset.
 writeBS :: HasCallStack => SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
 writeBS mv base bs = do
@@ -46,7 +45,6 @@ writeBS mv base bs = do
     error $ "Bytestring overflows buffer."
   forM_ [0..len-1] $ \i -> do
     SMV.write mv (base+i) (bs `BS.index` i)
-
 
 ------------------------------------------------------------------------
 -- Definitions

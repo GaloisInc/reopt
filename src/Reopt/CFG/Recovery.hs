@@ -1212,7 +1212,7 @@ recoverBlock b = do
       falseTgt <- recoverJumpTarget MapF.empty falseAddr
       pure (FnBranch condVal trueTgt falseTgt)
 
-    ParsedLookupTable _regs idx vec -> do
+    ParsedLookupTable _layout _regs idx vec -> do
       -- Recover term statement
       idx'   <- recoverValue idx
       tgtVec <- traverse (recoverJumpTarget MapF.empty) vec
@@ -1433,6 +1433,7 @@ data PrintfArgState = PrintfArgState
 
 argStateRegs :: BSC.ByteString -- ^ Name of function
              -> RegState X86Reg (Value X86_64 ids)
+                -- ^ Registers
              -> PrintfArgState
              -> CallRegs X86_64 ids
 argStateRegs nm regs pas =
@@ -1619,9 +1620,11 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
 recoverFunction :: forall ids
                 .  SyscallPersonality
                 -> Map (MemSegmentOff 64) BSC.ByteString
-                   -- ^ Map from address to the name at that address along with type.
+                   -- ^ Map from addresses that correspond to function
+                   -- entry points to the name of the function at that
+                   -- addresses.
                 -> Map BSC.ByteString X86FunTypeInfo
-                   -- ^ Map from address to the type information at that address.
+                   -- ^ Map from function name to the type information at that address.
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
                 -> Either String ([String], Function X86_64)

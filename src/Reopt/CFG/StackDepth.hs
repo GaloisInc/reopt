@@ -281,7 +281,7 @@ analyzeStmtReferences root_addr init_sp b = do
     ParsedReturn _regs -> do
       pure ()
 
-    ParsedLookupTable regs _idx vec -> do
+    ParsedLookupTable _layout regs _idx vec -> do
       addStateVars init_sp regs
       let sp'  = parseStackPointer' init_sp (regs ^. boundValue sp_reg)
       traverse_ (\a -> recordStackOffset a sp') vec

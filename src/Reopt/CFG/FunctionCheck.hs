@@ -34,7 +34,7 @@ checkTermStmt ts =
     PLTStub{} -> Left FunctionHasPLT
     ParsedJump _ a          -> pure [a]
     ParsedBranch _ _ t f    -> pure [t,f]
-    ParsedLookupTable _ _ a -> pure $ V.toList a
+    ParsedLookupTable _layout _ _ a -> pure $ V.toList a
     ParsedReturn{}          -> pure []
     ParsedTranslateError{}  -> Left FunctionIncomplete
     ClassifyFailure{}       -> Left FunctionIncomplete

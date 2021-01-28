@@ -213,7 +213,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   FnFunctionEntryValue :: !(FunctionType arch)
                           -- ^ Type of symbol
                        -> BSC.ByteString
-                          -- ^ Symbol name to associate this this address.
+                          -- ^ Symbol name of this function.
                        -> FnValue arch (BVType (ArchAddrWidth arch))
   -- | Value is a function.
   --

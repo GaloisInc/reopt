@@ -4,6 +4,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 module Main (main) where
@@ -32,6 +33,7 @@ import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
 import           System.IO
 import           System.IO.Error
+import           Text.Printf
 
 import           Data.Macaw.DebugLogging
 import           Data.Macaw.Discovery
@@ -78,7 +80,6 @@ data Action
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowFunctions   -- ^ Print out generated functions
    | ShowLLVM        -- ^ Print out LLVM in textual format
-   | ShowObject      -- ^ Print out the object file.
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
    | Reopt           -- ^ Perform a full reoptimization
@@ -134,12 +135,18 @@ data Args
             -- ^ Options affecting discovery
           , unnamedFunPrefix :: !BS.ByteString
             -- ^ Prefix for unnamed functions identified in code discovery.
-          , llvmGenOptions :: !LLVM.LLVMGenOptions
-            -- ^ Generation options for LLVM
-          , annotationsPath :: !(Maybe FilePath)
+          , annotationsExportPath :: !(Maybe FilePath)
             -- ^ Path to write reopt-vcg annotations to.
             --
             -- If `Nothing` then annotations are not generated.
+          , relinkerInfoExportPath :: !(Maybe FilePath)
+            -- ^ Path to write relationships needed for relinker
+          , llvmGenOptions :: !LLVM.LLVMGenOptions
+            -- ^ Generation options for LLVM
+          , llvmExportPath :: !(Maybe FilePath)
+            -- ^ Path to export LLVM bitcode to.
+          , objectExportPath :: !(Maybe FilePath)
+            -- ^ Path to export object file.
           }
 
 -- | Action to perform when running
@@ -189,8 +196,11 @@ defaultArgs = Args { _reoptAction = Reopt
                                         , logAtAnalyzeBlock      = False
                                         }
                    , unnamedFunPrefix = "reopt"
+                   , annotationsExportPath  = Nothing
+                   , relinkerInfoExportPath = Nothing
                    , llvmGenOptions = defaultLLVMGenOptions
-                   , annotationsPath = Nothing
+                   , llvmExportPath         = Nothing
+                   , objectExportPath       = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -243,15 +253,10 @@ llvmFlag = flagNone [ "llvm" ] upd help
   where upd  = reoptAction .~ ShowLLVM
         help = "Show generated LLVM."
 
-objFlag :: Flag Args
-objFlag = flagNone [ "object" ] upd help
-  where upd  = reoptAction .~ ShowObject
-        help = "Write recompiled object code to output file."
-
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
   where upd s old = Right $ old { outputPath = Just s }
-        help = "Path to write new binary."
+        help = "Path to write output."
 
 headerFlag :: Flag Args
 headerFlag = flagReq [ "header" ] upd "PATH" help
@@ -271,12 +276,6 @@ llvmVersionFlag = flagReq [ "llvm-version" ] upd "VERSION" help
           pure $ old { llvmVersion = cfg }
 
         help = "LLVM version (e.g. 3.5.2)"
-
--- | Path to write LLVM annotations to.
-annotationsFlag :: Flag Args
-annotationsFlag = flagReq [ "annotations" ] upd "PATH" help
-  where upd s old = Right $ old { annotationsPath = Just s }
-        help = "Name of file for writing reopt-vcg annotations."
 
 parseDebugFlags ::  [DebugClass] -> String -> Either String [DebugClass]
 parseDebugFlags oldKeys cl =
@@ -301,29 +300,32 @@ debugFlag = flagOpt "all" [ "debug", "D" ] upd "FLAGS" help
             ++ "means disable that key.\n"
             ++ "Supported keys: all, " ++ intercalate ", " (map debugKeyName allDebugKeys)
 
+-- | Defines a flag to update a file path to an executable with a
+-- default.
+pathFlag :: String
+         -- ^ Command name and flag name
+         -> Lens' Args FilePath
+         -- ^ Lens for reading and writng
+         -> Flag Args
+pathFlag nm l = flagReq [ nm ] upd "PATH" help
+  where upd s old = Right $ old & l .~ s
+        help = printf "Path to %s (default %s)" (show nm) (show (defaultArgs^.l))
+
 -- | Flag to set clang path.
 clangPathFlag :: Flag Args
-clangPathFlag = flagReq [ "clang" ] upd "PATH" help
-  where upd s old = Right $ old { clangPath = s }
-        help = "Path to LLVM \"clang\" compiler."
+clangPathFlag = pathFlag "clang" (lens clangPath (\s v -> s { clangPath = v }))
 
 -- | Flag to set llc path.
 llcPathFlag :: Flag Args
-llcPathFlag = flagReq [ "llc" ] upd "PATH" help
-  where upd s old = Right $ old { llcPath = s }
-        help = "Path to LLVM \"llc\" command for compiling LLVM to native assembly."
+llcPathFlag = pathFlag "llc" (lens llcPath (\s v -> s { llcPath = v }))
 
 -- | Flag to set path to opt.
 optPathFlag :: Flag Args
-optPathFlag = flagReq [ "opt" ] upd "PATH" help
-  where upd s old = Right $ old { optPath = s }
-        help = "Path to LLVM \"opt\" command for optimization."
+optPathFlag = pathFlag "opt" (lens optPath (\s v -> s { optPath = v }))
 
 -- | Flag to set path to llvm-mc
 llvmMcPathFlag :: Flag Args
-llvmMcPathFlag = flagReq [ "llvm-mc" ] upd "PATH" help
-  where upd s old = Right $ old { llvmMcPath = s }
-        help = "Path to llvm-mc"
+llvmMcPathFlag = pathFlag "llvm-mc" (lens llvmMcPath (\s v -> s { llvmMcPath = v }))
 
 -- | Flag to set llc optimization level.
 optLevelFlag :: Flag Args
@@ -372,6 +374,31 @@ allowLLVMUB = flagBool [ "allow-undef-llvm" ] upd help
                         LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = b } }
         help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
 
+-- | Generate an export flag
+exportFlag :: String -- ^ Flag name
+           -> String -- ^ Name for help
+           -> (Args -> Maybe FilePath -> Args) -- ^ Setter
+           -> Flag Args
+exportFlag flagName helpName setter =
+    flagReq [ flagName ] upd "PATH" help
+  where upd s old = Right $ setter old (Just s)
+        help = printf "Where to export %s." helpName
+
+-- | Path to write LLVM annotations to.
+annotationsExportFlag :: Flag Args
+annotationsExportFlag = exportFlag "annotations" "reopt-vcg annotations" upd
+  where upd s v = s { annotationsExportPath = v }
+
+-- | Path to export object file to.
+objectExportFlag :: Flag Args
+objectExportFlag = exportFlag "object" "object file" upd
+  where upd s v = s { objectExportPath = v }
+
+-- | Path to write LLVM annotations to.
+relinkerInfoExportFlag :: Flag Args
+relinkerInfoExportFlag = exportFlag "relinker-info" "relinker relationships" upd
+  where upd s v = s { relinkerInfoExportPath = v }
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -386,7 +413,6 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , funFlag
                 , llvmFlag
-                , objFlag
                   -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
@@ -399,14 +425,18 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , loadBaseAddressFlag
                   -- LLVM options
                 , llvmVersionFlag
-                , annotationsFlag
+                , annotationsExportFlag
                 , allowLLVMUB
-                  -- Compilation options
+                  -- Command line programs
                 , clangPathFlag
                 , llcPathFlag
-                , optLevelFlag
                 , optPathFlag
                 , llvmMcPathFlag
+                  -- * Optimization
+                , optLevelFlag
+                  -- * Export
+                , objectExportFlag
+                , relinkerInfoExportFlag
                 ]
 
 -- | Flag to set the path to the binary to analyze.
@@ -477,7 +507,7 @@ recoverLogError :: IORef Natural -- ^ Counter
 recoverLogError ref msg = do
   -- Update error count
   case msg of
-    StartFunRecovery _ -> pure ()
+    StartFunRecovery _ _ -> pure ()
     _ -> modifyIORef' ref (+1)
   hPutStrLn stderr (show msg)
 
@@ -488,19 +518,24 @@ getFunctions args = do
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (_, os, _, recMod) <-
-    discoverX86Elf (recoverLogError errorRef)
-                   (programPath args)
-                   (loadOptions args)
-                   (args^.discOpts)
-                   (argsReoptOptions args)
-                   hdrAnn
-                   funPrefix
+  (_, os, recMod, _) <-
+    recoverX86Elf (recoverLogError errorRef)
+                  (programPath args)
+                  (loadOptions args)
+                  (args^.discOpts)
+                  (argsReoptOptions args)
+                  hdrAnn
+                  funPrefix
   errorCnt <- readIORef errorRef
   pure (os, recMod, errorCnt)
 
 ------------------------------------------------------------------------
---
+-- LLVM Generation
+
+builderWriteFile :: FilePath -> Builder.Builder -> IO ()
+builderWriteFile path bld =
+  withFile path WriteMode $ \h -> do
+    Builder.hPutBuilder h bld
 
 -- | Rendered a recovered X86_64 module as LLVM bitcode
 renderLLVMBitcode :: Args -- ^ Arguments passed
@@ -515,31 +550,73 @@ renderLLVMBitcode args os recMod =
 -- action.
 performReopt :: Args -> IO ()
 performReopt args = do
+  let nothingToDo = isNothing (relinkerInfoExportPath args)
+                 && isNothing (llvmExportPath args)
+                 && isNothing (objectExportPath args)
+                 && isNothing (outputPath args)
+  when nothingToDo $ do
+    hPutStrLn stderr $ "Nothing to do\n"
+      ++ "  Specify an output via --output or other info to export."
+    exitFailure
+
   hdrAnn <- resolveHeader args
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
   errorRef <- newIORef 0
-  (origElf, os, discState, recMod) <-
-    discoverX86Elf (recoverLogError errorRef)
-                   (programPath args)
-                   (loadOptions args)
-                   (args^.discOpts)
-                   (argsReoptOptions args)
-                   hdrAnn
-                   funPrefix
+  (origElf, os, recMod, relinkerInfo) <-
+    recoverX86Elf (recoverLogError errorRef)
+                  (programPath args)
+                  (loadOptions args)
+                  (args^.discOpts)
+                  (argsReoptOptions args)
+                  hdrAnn
+                  funPrefix
+  case relinkerInfoExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      Aeson.encodeFile path relinkerInfo  `catch` onErr
+
   errorCnt <- readIORef errorRef
   when (errorCnt > 0) $ do
     hPutStrLn stderr $ show errorCnt ++ " error(s) occured."
+  -- Generate LLVM
   let (objLLVM,_) = renderLLVMBitcode args os recMod
-  objContents <-
-    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
-                (osLinkName os) objLLVM
-  -- Convert binary to LLVM
-  let redirs = addrRedirections discState (recoveredDefs recMod)
-  -- Merge and write out
-  putStrLn $ "Performing final relinking."
-  let outPath = fromMaybe "a.out" (outputPath args)
-  mergeAndWrite outPath origElf "new object" objContents redirs
+  -- Write LLVM if requested.
+  case llvmExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      builderWriteFile path objLLVM `catch` onErr
+  when (isJust (objectExportPath args) || isJust (outputPath args)) $ do
+    -- Compile LLVM
+    objContents <-
+      compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                  (osLinkName os) objLLVM
+    case objectExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        let onErr :: IOException -> IO ()
+            onErr e = do
+              hPutStrLn stderr "Error writing object file:"
+              hPutStrLn stderr $ "  " <> show e
+              exitFailure
+        BS.writeFile path objContents `catch` onErr
+    -- Merge and write out
+    case outputPath args of
+      Nothing -> do
+        hPutStrLn stderr "Skipping final relinking: Use --output <filename> if final binary expected."
+      Just outPath -> do
+        hPutStrLn stderr "Performing final relinking."
+        mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
 main' :: IO ()
 main' = do
@@ -566,12 +643,12 @@ main' = do
         exitFailure
 
     ShowLLVM -> do
-      when (isJust (annotationsPath args) && isNothing (outputPath args)) $ do
+      when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
       (os, recMod, errorCnt) <- getFunctions args
       let (llvmMod, mFunAnn) = renderLLVMBitcode args os recMod
-      case annotationsPath args of
+      case annotationsExportPath args of
         Nothing -> pure ()
         Just annPath -> do
           let (annErrs, funAnn) = partitionEithers mFunAnn
@@ -591,31 +668,6 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-      when (errorCnt > 0) $ do
-        hPutStrLn stderr $
-          if errorCnt == 1 then
-            "1 error occured."
-           else
-            show errorCnt ++ " errors occured."
-        exitFailure
-    ShowObject -> do
-      outPath <-
-        case outputPath args of
-          Nothing -> do
-            hPutStrLn stderr "Please specify output path for object."
-            exitFailure
-          Just p ->
-            pure p
-      (os, recMod, errorCnt) <- getFunctions args
-      let (llvmMod, _) = renderLLVMBitcode args os recMod
-      objContents <-
-        compileLLVM (optLevel args)
-                    (optPath args)
-                    (llcPath args)
-                    (llvmMcPath args)
-                    (osLinkName os)
-                    llvmMod
-      BS.writeFile outPath objContents
       when (errorCnt > 0) $ do
         hPutStrLn stderr $
           if errorCnt == 1 then
