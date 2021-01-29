@@ -737,7 +737,7 @@ recoverAssign asgn = do
                       Just rv -> do
                         v <- coerceRegValue rv
                         setAssignVal aid v
-        FrameReadWriteAccess _o writeIdx -> do
+        FrameReadWriteAccess writeIdx -> do
           pushMemAccessType StackAccess
           whenAssignUsed aid $ do
             m <- gets rsWriteMap
@@ -779,7 +779,7 @@ recoverStmt stmtIdx stmt = do
           rVal  <- recoverValue val
           addFnStmt $ FnWriteMem rAddr rVal
         FrameReadInitAccess{} -> error "Expected write access"
-        FrameReadWriteAccess{} -> error "Expected write access"
+        FrameReadWriteAccess _ -> error "Expected write access"
         FrameReadOverlapAccess{} -> error "Expected write access"
         FrameCondWriteAccess{} -> error "Expected write access"
         FrameCondWriteOverlapAccess{} -> error "Expected write access"

@@ -48,8 +48,8 @@ mkTest fp = T.testCase fp $ do
                                   }
   let hdrAnn = emptyAnnDeclarations
   let reoptOpts = ReoptOptions { roIncluded = [], roExcluded = [] }
-  (_, os, discState, recMod) <-
-    discoverX86Elf logger fp loadOpts discOpts reoptOpts hdrAnn "reopt"
+  (_, os, discState, recMod, _) <-
+    recoverX86Elf logger fp loadOpts discOpts reoptOpts hdrAnn "reopt"
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))

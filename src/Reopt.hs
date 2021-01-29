@@ -2138,6 +2138,7 @@ recoverX86Elf :: (GetFnsLogEvent -> IO ())
                -> BSC.ByteString -- ^ Prefix to use if we need to generate new function endpoints later.
                -> IO ( Elf.ElfHeaderInfo 64
                      , X86OS
+                     , DiscoveryState X86_64
                      , RecoveredModule X86_64
                      , MergeRelations
                      )
@@ -2152,7 +2153,8 @@ recoverX86Elf logger path loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix = do
   let pltFn = processX86PLTEntries
   initState <- initDiscovery loadOpts hdrInfo pltFn
 
-  (debugTypeMap, discState) <- doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts
+  (debugTypeMap, discState) <-
+    doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts
   let mem = memory discState
 
   let symAddrMap = initDiscSymAddrMap initState
@@ -2275,7 +2277,7 @@ recoverX86Elf logger path loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix = do
         { mrObjectFuns = mkObjFunDef <$> V.fromList fnDefs
         , mrUndefinedFuns = undefinedFuns
         }
-  seq recMod $ pure (hdrInfo, os, recMod, mergeRel)
+  seq recMod $ pure (hdrInfo, os, discState, recMod, mergeRel)
 
 $(pure [])
 
