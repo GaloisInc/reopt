@@ -187,12 +187,10 @@ instance FoldableFC (ArchFn arch) => FoldableFC (FnAssignRhs arch) where
 ------------------------------------------------------------------------
 -- FnAssignment/FnValue mutually recursive constructors
 
-
 data FnAssignment arch tp
    = FnAssignment { fnAssignId :: !FnAssignId
                   , fnAssignRhs :: !(FnAssignRhs arch (FnValue arch) tp)
                   }
-
 
 -- | A function value.
 data FnValue (arch :: Type) (tp :: M.Type) where

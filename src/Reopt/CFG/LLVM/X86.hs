@@ -180,6 +180,19 @@ emitX86ArchFn f = do
      error $ "LLVM backend does not yet support: "
        ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
+   -- Convert floating point to signed integer.
+   SSE_CVTTSX2SI outW _floatTp x -> do
+     llvmX <- mkLLVMValue x
+     convop L.FpToSi llvmX (llvmITypeNat (natValue outW))
+
+   -- Convert signed integer to floating point.
+   SSE_CVTSI2SX outTp _inW x -> do
+     llvmX <- mkLLVMValue x
+     let llvmFloatType = case outTp of
+                           SSE_Single -> L.Float
+                           SSE_Double -> L.Double
+     convop L.SiToFp llvmX (L.PrimType (L.FloatType llvmFloatType))
+
  {-
   -- | Compares two memory regions and return the number of bytes that were the same.
   --

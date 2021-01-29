@@ -157,7 +157,8 @@ data FnRegValue arch tp where
           -> FnRegValue arch o
      -- ^ A value assigned to a register
 
-instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch)) => Pretty (FnRegValue arch tp) where
+instance (ShowF (ArchReg arch), MemWidth (ArchAddrWidth arch))
+      => Pretty (FnRegValue arch tp) where
   pretty (FnValue v _)    = pretty v
 
 $(pure [])
@@ -215,6 +216,11 @@ $(pure [])
 ------------------------------------------------------------------------
 -- RecoverState
 
+-- | This represents a value writen to the stack and the memory
+-- representation used to write it.
+data StackWriteVal arch =
+  forall tp . StackWriteVal !(FnRegValue arch tp) !(MemRepr tp)
+
 -- | State used for recovering a block
 data RecoverState arch ids =
   RS { rsStartAddr :: !(ArchSegmentOff arch)
@@ -233,7 +239,7 @@ data RecoverState arch ids =
      , _rsAssignMap    :: !(MapF (AssignId ids) (FnValue arch))
        -- | Map the index of processed used memory writes to the
        -- value stored in memory after they execute.
-     , rsWriteMap  :: !(Map StmtIndex (Some (FnValue arch)))
+     , rsWriteMap  :: !(Map StmtIndex (StackWriteVal arch))
        -- | Instruction offset and type of previous accesses
      , rsSeenMemAccessTypes :: ![(Word64, FnMemAccessType)]
        -- | Memory accesses that have not yet been processed.
@@ -313,17 +319,50 @@ evalAssignRhs rhs = do
 
 $(pure [])
 
-bitcast :: FnValue X86_64 i -> WidthEqProof i o -> Recover ids (FnValue X86_64 o)
+bitcast :: FnValue X86_64 i
+        -> WidthEqProof i o
+        -> Recover ids (FnValue X86_64 o)
 bitcast x p = evalAssignRhs $ FnEvalApp (Bitcast x p)
 
 $(pure [])
 
 -- | This turns a @FnRegValue@ into a @FnValue@.
-coerceRegValue :: FnRegValue X86_64 tp -> Recover ids (FnValue X86_64 tp)
-coerceRegValue (FnValue v' pr) =
+coerceRegValue :: FnRegValue X86_64 tp
+               -> Recover ids (FnValue X86_64 tp)
+coerceRegValue (FnValue v pr) =
   case testEquality (widthEqSource pr) (widthEqTarget pr) of
-    Just Refl -> pure v'
-    Nothing -> bitcast v' pr
+    Just Refl -> pure v
+    Nothing -> bitcast v pr
+
+-- | This turns a @FnRegValue@ into a @FnValue@.
+coerceSlicedRegValue :: FnRegValue X86_64 wtp
+                -> MemSlice wtp rtp
+                -> Recover ids (FnValue X86_64 rtp)
+coerceSlicedRegValue (FnValue v pr) NoMemSlice =
+  case testEquality (widthEqSource pr) (widthEqTarget pr) of
+    Just Refl -> pure v
+    Nothing -> bitcast v pr
+coerceSlicedRegValue (FnValue _v _pr) ms@MemSlice{} =
+  throwErrorAt $ "Mem slice not supported: " ++ show ms
+
+coerceWriteToRead :: FnRegValue X86_64 wtp
+                  -> MemRepr wtp
+                  -> MemRepr rtp
+                  -> Recover ids (FnValue X86_64 rtp)
+coerceWriteToRead (FnValue v pr) writeRepr readRepr
+  | Just Refl <- testEquality writeRepr readRepr =
+      case testEquality (widthEqSource pr) (widthEqTarget pr) of
+        Just Refl -> pure v
+        Nothing -> bitcast v pr
+  | BVMemRepr writeWidth writeEnd <- writeRepr
+  , FloatMemRepr readFloatRepr readEnd <- readRepr
+  , Just Refl <- testEquality writeWidth (floatInfoBytes readFloatRepr)
+  , writeEnd == readEnd =
+      bitcast v (WidthEqTrans pr (ToFloat readFloatRepr))
+  | otherwise =
+      throwErrorAt $
+        printf "Cannot read type %s from write of type %s."
+               (show readRepr) (show writeRepr)
 
 $(pure [])
 ------------------------------------------------------------------------
@@ -392,6 +431,30 @@ recoverAssignId aid = do
                 ++ show (MapF.keys assignMap)
 
 $(pure [])
+
+-- | Recover a value without basing it.
+recoverRegValue :: HasCallStack
+             => Value X86_64 ids tp
+             -> Recover ids (FnRegValue X86_64 tp)
+recoverRegValue val = do
+  case val of
+    CValue cv -> do
+      v <- recoverCValue cv
+      pure $ FnValue v (WidthEqRefl (typeRepr v))
+    Initial reg -> do
+      s <- get
+      case MapF.lookup (RegLoc reg) (rsPhiLocMap s) of
+        Nothing -> do
+          v <- unsupportedFnValue ("Initial register " ++ show reg) (typeRepr reg)
+          pure $ FnValue v (WidthEqRefl (typeRepr v))
+        Just rv ->
+          pure rv
+    AssignedValue asgn -> do
+      v <- recoverAssignId (assignId asgn)
+      pure $ FnValue v (WidthEqRefl (typeRepr v))
+
+$(pure [])
+
 
 -- | Recover a stack value
 recoverValue :: HasCallStack
@@ -648,7 +711,6 @@ recoverAssign asgn = do
       whenAssignUsed aid $ do
         fval <- traverseFC recoverValue f
         setAssignRhs aid (FnEvalArchFn fval)
-
     ReadMem addr memRepr -> do
       access <- popMemAccessInfo
       case access of
@@ -681,12 +743,8 @@ recoverAssign asgn = do
             m <- gets rsWriteMap
             case Map.lookup writeIdx m of
               Nothing -> error "Could not find value."
-              Just (Some v) ->
-                case testEquality (typeRepr v) (typeRepr memRepr) of
-                  Just Refl ->
-                    setAssignVal aid v
-                  Nothing ->
-                    error "Invalid type for write access."
+              Just (StackWriteVal v writeRepr) ->
+                setAssignVal aid =<< coerceWriteToRead v writeRepr memRepr
         FrameReadOverlapAccess _ -> do
           pushMemAccessType StackAccess
           whenAssignUsed aid $ do
@@ -712,7 +770,7 @@ recoverStmt stmtIdx stmt = do
   case stmt of
     AssignStmt asgn -> do
       recoverAssign asgn
-    WriteMem addr _memRepr val -> do
+    WriteMem addr memRepr val -> do
       ainfo <- popMemAccessInfo
       case ainfo of
         NotFrameAccess -> do
@@ -728,8 +786,9 @@ recoverStmt stmtIdx stmt = do
         FrameWriteAccess _o -> do
           pushMemAccessType StackAccess
           whenWriteUsed stmtIdx $ do
-            rval <- recoverValue val
-            modify $ \s -> s { rsWriteMap = Map.insert stmtIdx (Some rval) (rsWriteMap s) }
+            rval <- recoverRegValue val
+            let v = StackWriteVal rval memRepr
+            modify $ \s -> s { rsWriteMap = Map.insert stmtIdx v (rsWriteMap s) }
 
     CondWriteMem _cond _addr _memRepr _val -> do
       error $ "Conditional writes are not yet supported."
@@ -756,20 +815,20 @@ resolveInferValue :: HasCallStack
                   -> Recover ids (Some (FnValue X86_64))
 resolveInferValue tgt pvm l =
   case pvmFind l pvm of
-    IVDomain d ->
-      case d of
-        ValueRegUseStackOffset _ -> throwErrorAt "Stack offset escaped."
-        FnStartRegister _ -> throwErrorAt "Callee-saved register escaped."
-        RegEqualLoc lr -> do
-          m <- gets rsPhiLocMap
-          case MapF.lookup lr m of
-            Nothing -> do
-              src <- gets rsStartAddr
-              throwErrorAt $
-                printf "Internal error: %s should provide value of %s (originally %s) to %s"
-                       (show src) (show (pretty lr)) (show (pretty l)) (show tgt)
-            Just rv ->
-              Some <$> coerceRegValue rv
+    IVDomain (ValueRegUseStackOffset _) _ ->
+      throwErrorAt "Stack offset escaped."
+    IVDomain (FnStartRegister _) _ ->
+      throwErrorAt "Callee-saved register escaped."
+    IVDomain (RegEqualLoc lr) ms -> do
+      m <- gets rsPhiLocMap
+      case MapF.lookup lr m of
+        Nothing -> do
+          src <- gets rsStartAddr
+          throwErrorAt $
+            printf "Internal error: %s should provide value of %s (originally %s) to %s"
+                   (show src) (show (pretty lr)) (show (pretty l)) (show tgt)
+        Just rv ->
+          Some <$> coerceSlicedRegValue rv ms
     IVAssignValue aid -> do
       Some <$> recoverAssignId aid
     IVCValue cv -> Some <$> recoverCValue cv
@@ -777,10 +836,10 @@ resolveInferValue tgt pvm l =
       m <- gets rsWriteMap
       case Map.lookup idx m of
         Nothing -> error "Could not find write value."
-        Just (Some v) ->
-          case testEquality (typeRepr repr) (typeRepr v) of
+        Just (StackWriteVal rv writeRepr) ->
+          case testEquality repr writeRepr of
             Nothing -> error "Invalid type"
-            Just Refl -> pure (Some v)
+            Just Refl -> Some <$> coerceRegValue rv
 
 -- | Get the phi variable information for the block that starts at the
 -- given address.
