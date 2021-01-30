@@ -54,7 +54,7 @@ evalMemAddr :: MemAddr 64
             -> SMT.Term
 evalMemAddr a =
   if addrBase a == 0 then
-    SMT.bvhexadecimal (toInteger (addrOffset a)) 64
+    bvhexadecimal (toInteger (addrOffset a)) 64
    else
     error "evalMemAddr only supports static binaries."
 
@@ -180,9 +180,9 @@ getEvalContext = do
 primEval :: EvalContext
          -> Value X86_64 ids tp
          -> SMT.Term
-primEval _ (BVValue w i) = do
-  SMT.bvdecimal i (natValue w)
-primEval _ (BoolValue b) = do
+primEval _ (BVValue w i) =
+  bvdecimal i (natValue w)
+primEval _ (BoolValue b) =
   if b then SMT.true else SMT.false
 primEval s (AssignedValue (Assignment (AssignId ident) _rhs)) = do
   case Map.lookup (indexValue ident) (evalLocals s) of
@@ -336,7 +336,7 @@ evalApp2SMT aid a = do
       xExpr <- SMT.bvzeroExtend 1 <$> doPrimEval x
       yExpr <- SMT.bvzeroExtend 1 <$> doPrimEval y
       cv <- doPrimEval c
-      let cExpr = SMT.ite cv (SMT.bvdecimal 1 (w+1)) (SMT.bvdecimal 0 (w+1))
+      let cExpr = SMT.ite cv (bvdecimal 1 (w+1)) (bvdecimal 0 (w+1))
       -- Perform addition
       let rExpr = SMT.bvadd xExpr [yExpr, cExpr]
       -- Unsigned overflow occurs if most-significant bit is set.
@@ -350,7 +350,7 @@ evalApp2SMT aid a = do
       yExpr <- SMT.bvsignExtend 1 <$> doPrimEval y
       -- Compute carry
       cBit <- doPrimEval c
-      let cExpr = SMT.ite cBit (SMT.bvdecimal 1 (w+1)) (SMT.bvdecimal 0 (w+1))
+      let cExpr = SMT.ite cBit (bvdecimal 1 (w+1)) (bvdecimal 0 (w+1))
       -- Perform addition with w+1 bits.
       let rExpr = SMT.bvadd xExpr [yExpr, cExpr]
       -- Signed overflow occurs if the most significant and second most significant bit are distinct.
@@ -365,7 +365,7 @@ evalApp2SMT aid a = do
       yExpr <- SMT.bvneg . SMT.bvzeroExtend 1 <$> doPrimEval y
       -- Compute borrow
       bv <- doPrimEval b
-      let bExpr = SMT.ite bv (SMT.bvdecimal 1 (w+1)) (SMT.bvdecimal 0 (w+1))
+      let bExpr = SMT.ite bv (bvdecimal 1 (w+1)) (bvdecimal 0 (w+1))
       -- Perform addition
       let rExpr = SMT.bvsub (SMT.bvsub xExpr yExpr) bExpr
       -- Unsigned overflow occurs if most-significant bit is set.
@@ -379,7 +379,7 @@ evalApp2SMT aid a = do
       yExpr <- SMT.bvneg . SMT.bvsignExtend 1 <$> doPrimEval y
       -- Compute carry
       bBit <- doPrimEval b
-      let bExpr = SMT.ite bBit (SMT.bvdecimal 1 (w+1)) (SMT.bvdecimal 0 (w+1))
+      let bExpr = SMT.ite bBit (bvdecimal 1 (w+1)) (bvdecimal 0 (w+1))
       -- Perform addition with w+1 bits.
       let rExpr = SMT.bvsub (SMT.bvsub xExpr yExpr) bExpr
       -- Signed overflow occurs if the most significant and second most significant bit are distinct.
@@ -393,7 +393,7 @@ evalApp2SMT aid a = do
 evenParityDecl :: SMT.Command
 evenParityDecl =
   let bitTerm = SMT.bvxor (SMT.extract 0 0 "v") [ SMT.extract i i "v" | i <- [1..7] ]
-      r = SMT.eq [bitTerm, SMT.bvbinary 0 1]
+      r = SMT.eq [bitTerm, bvbinary 0 1]
    in SMT.defineFun "even_parity" [("v", SMT.bvSort 8)] SMT.boolSort r
 
 x86PrimFnToSMT :: AssignId ids tp

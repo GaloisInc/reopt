@@ -20,26 +20,27 @@ library
   build-depends:
     base >= 4,
     aeson,
-    ansi-wl-pprint,
     bytestring,
     containers,
-    elf-edit >= 0.37,
+    elf-edit >= 0.40,
     flexdis86 >= 0.1.1,
     hashable,
     language-c,
     lens,
-    llvm-pretty >= 0.7.1.1,
-    macaw-base >= 0.3.14,
+    llvm-pretty >= 0.11.0,
+    macaw-base >= 0.3.15.2,
     macaw-x86 >= 0.3.1,
     mtl,
     parameterized-utils >= 2.0.0.0.102,
     pretty,
+    prettyprinter,
     process,
     reopt-vcg-ann,
     text,
     transformers,
     unix,
     unordered-containers,
+    utf8-string,
     vector
 
   hs-source-dirs: src
@@ -47,6 +48,8 @@ library
   exposed-modules:
     Reopt
     Reopt.Analysis.Domains.DiffEquations
+    Reopt.AnnotatedTypes
+    Reopt.ArgResolver
     Reopt.CFG.FnRep
     Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
@@ -60,6 +63,7 @@ library
     Reopt.Relinker
     Reopt.Relinker.Object
     Reopt.Relinker.Redirection
+    Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
     Reopt.Utils.Hex
     Reopt.Utils.Printf
@@ -70,8 +74,6 @@ library
       hvex,
       macaw-arm-vex >= 0.1.0
 
-  ghc-options: -Wall
-  ghc-options: -fno-warn-unticked-promoted-constructors
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -79,8 +81,7 @@ executable reopt
   build-depends:
     base >= 4,
     aeson,
-    ansi-wl-pprint,
-    bytestring,
+    bytestring >= 0.10.8.0,
     containers,
     cmdargs,
     elf-edit,
@@ -89,6 +90,7 @@ executable reopt
     macaw-base,
     macaw-x86,
     parameterized-utils >= 0.1.6,
+    prettyprinter,
     unordered-containers,
     reopt,
     reopt-vcg-ann
@@ -101,24 +103,19 @@ executable reopt
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt-relink
   default-language: Haskell2010
   build-depends:
     base >= 4,
-    bytestring,
     cmdargs,
-    elf-edit,
-    lens,
     yaml,
     reopt
 
   hs-source-dirs: reopt-relink
   main-is: Main_relink.hs
-  other-modules:
-    Paths_reopt
+  other-modules: Paths_reopt
 
   if flag(enable-hpc)
     ghc-options: -fhpc
@@ -134,7 +131,6 @@ test-suite reopt-tests
   other-modules: ReoptTests
   hs-source-dirs: tests
   build-depends:
-    ansi-wl-pprint,
     base,
     bytestring,
     containers,
@@ -143,6 +139,7 @@ test-suite reopt-tests
     filemanip,
     filepath,
     macaw-base,
+    prettyprinter,
     reopt,
     temporary,
     tasty,

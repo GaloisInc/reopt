@@ -9,9 +9,6 @@
 module Main (main) where
 
 import           Control.Exception
-import           Control.Lens
-import qualified Data.ByteString.Lazy as BSL
-import           Data.ElfEdit
 import           Data.Version (versionBranch)
 import qualified Data.Yaml as Yaml
 import           System.Console.CmdArgs.Explicit
@@ -25,7 +22,7 @@ import           Reopt
 import           Paths_reopt (version)
 
 reoptVersion :: String
-reoptVersion = "Reopt binary reoptimizer (reopt) "  ++ versionString ++ "."
+reoptVersion = "Reopt relinker (reopt-relink) "  ++ versionString ++ "."
   where [h,l,r] = versionBranch version
         versionString = show h ++ "." ++ show l ++ "." ++ show r
 
@@ -51,95 +48,54 @@ data Action
 
 -- | Command line arguments.
 data Args
-   = Args { _reoptAction  :: !Action
+   = Args { reoptAction  :: !Action
             -- ^ Action to perform
-          , _programPath  :: !FilePath
-            -- ^ Path to input program to optimize/export
-          , _outputPath   :: !FilePath
+          , outputPath   :: !(Maybe FilePath)
             -- ^ Path to output
-            --
-            -- Only used when reoptAction is @Relink@ and @Reopt@.
-          , _newobjPath   :: !FilePath
+          , binaryPath  :: !(Maybe FilePath)
+            -- ^ Path to input program to optimize/export
+          , objectPath   :: !(Maybe FilePath)
             -- ^ Path for new object to merge into program
-            --
-            -- Only used when reoptAction is @Relink@.
-          , _redirPath    :: !FilePath
+          , infoPath    :: !(Maybe FilePath)
             -- ^ Path to file for manual redirections.
-            --
-            -- Only used when reoptAction is @Relink@.
           }
-
--- | Action to perform when running
-reoptAction :: Lens' Args Action
-reoptAction = lens _reoptAction (\s v -> s { _reoptAction = v })
-
--- | Path for main executable
-programPath :: Lens' Args FilePath
-programPath = lens _programPath (\s v -> s { _programPath = v })
-
--- | Path to write file to.
-outputPath :: Lens' Args FilePath
-outputPath = lens _outputPath (\s v -> s { _outputPath = v })
-
--- | Path to new object code for relinker
-newobjPath :: Lens' Args FilePath
-newobjPath = lens _newobjPath (\s v -> s { _newobjPath = v })
-
--- | Path to JSON file describing the redirections
-redirPath :: Lens' Args FilePath
-redirPath = lens _redirPath (\s v -> s { _redirPath = v })
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
-defaultArgs = Args { _reoptAction = Relink
-                   , _programPath = ""
-                   , _outputPath = "a.out"
-                   , _newobjPath = ""
-                   , _redirPath  = ""
+defaultArgs = Args { reoptAction = Relink
+                   , outputPath = Nothing
+                   , binaryPath = Nothing
+                   , objectPath = Nothing
+                   , infoPath = Nothing
                    }
-
-------------------------------------------------------------------------
--- Other Flags
-
-outputFlag :: Flag Args
-outputFlag = flagReq [ "o", "output" ] upd "PATH" help
-  where upd s old = Right $ old & outputPath .~ s
-        help = "Path to write new binary."
-
--- | Object file to use for relinking only.
-objectPathFlag :: Flag Args
-objectPathFlag = flagReq [ "object" ] upd "PATH" help
-  where upd s old = Right $ old & newobjPath .~ s
-        help = "Path to new object code to link into existing binary."
-
--- | The patch file provides
-patchFilePathFlag :: Flag Args
-patchFilePathFlag = flagReq [ "patch-file" ] upd "PATH" help
-  where upd s old = Right $ old & redirPath .~ s
-        help = "Path to JSON file that specifies where to patch existing code."
 
 -- | Arguments
 arguments :: Mode Args
-arguments = mode "reopt" defaultArgs help filenameArg flags
-  where help = reoptVersion ++ "\n" ++ copyrightNotice
-        flags = [ -- General purpose options
-                  flagHelpSimple (reoptAction .~ ShowHelp)
-                , flagVersion (reoptAction .~ ShowVersion)
-                  -- Redirect output to file.
-                , outputFlag
-                  -- Options for explicit relinking options
-                , objectPathFlag
-                , patchFilePathFlag
+arguments =
+    (modeEmpty defaultArgs)
+    { modeNames = ["relink"]
+    , modeHelp
+        =  reoptVersion ++ "\n"
+        ++ copyrightNotice ++ "\n\n"
+        ++ "Usage: reopt-relink <output> <binary> <object> <relinkInfo>"
+    , modeArgs = (args, Nothing)
+    , modeGroupFlags = toGroup flags
+    }
+  where args = [ pathArg "OUTPUT" (\s f -> s { outputPath = f })
+               , pathArg "BINARY" (\s f -> s { binaryPath = f })
+               , pathArg "OBJECT" (\s f -> s { objectPath = f })
+               , pathArg "INFO"   (\s f -> s { infoPath = f })
+               ]
+        flags = [ flagHelpSimple (\s -> s { reoptAction = ShowHelp })
+                , flagVersion (\s -> s { reoptAction = ShowVersion })
                 ]
 
-  -- | Flag to set the path to the binary to analyze.
-filenameArg :: Arg Args
-filenameArg = Arg { argValue = setFilename
-                  , argType = "FILE"
-                  , argRequire = False
-                  }
-  where setFilename :: String -> Args -> Either String Args
-        setFilename nm a = Right (a & programPath .~ nm)
+-- | Flag to set the path to the binary to analyze.
+pathArg :: String -> (Args -> Maybe FilePath -> Args) -> Arg Args
+pathArg nm f = Arg { argValue = \p a -> Right (f a (Just p))
+                   , argType = nm
+                   , argRequire = False
+                   }
 
 getCommandLineArgs :: IO Args
 getCommandLineArgs = do
@@ -150,38 +106,40 @@ getCommandLineArgs = do
       exitFailure
     Right v -> return v
 
+getPath :: String -> Maybe FilePath -> IO FilePath
+getPath nm Nothing = do
+  hPutStrLn stderr $ "Provide " <> nm <> "."
+  exitFailure
+getPath _ (Just p) = pure p
+
 -- | This is a mode for Reopt to just test that the relinker can successfully
 -- combine two binaries.
 performRelink :: Args -> IO ()
 performRelink args = do
+  outPath <- getPath "Output file" (outputPath args)
+  binPath <- getPath "Binary file" (binaryPath args)
+  objPath <- getPath "Object file" (objectPath args)
+  thisInfoPath <- getPath "Relink info" (infoPath args)
+
   -- Get original binary
-  orig_binary <- readElf64 (args^.programPath)
-  let output_path = args^.outputPath
-  case args^.newobjPath of
-    -- When no new object is provided, we just copy the input
-    -- file to test out Elf decoder/encoder.
-    "" -> do
-      putStrLn $ "Copying binary to: " ++ output_path
-      BSL.writeFile output_path $ renderElf orig_binary
-    -- When a non-empty new obj is provided we test
-    new_obj_path -> do
-      putStrLn $ "new_obj_path: " ++ new_obj_path
-      new_obj <- readElf64 new_obj_path
-      redirs <-
-        case args^.redirPath of
-          "" -> return []
-          redir_path -> do
-            mredirs <- Yaml.decodeFileEither redir_path
-            case mredirs of
-              Left e -> fail $ show e
-              Right r -> return r
-      mergeAndWrite output_path orig_binary new_obj redirs
+  bs <- checkedReadFile binPath
+  origBinary <- parseElfHeaderInfo64 binPath bs
+
+  newObj <- checkedReadFile objPath
+  mrelinkInfo <- Yaml.decodeFileEither thisInfoPath
+  relinkInfo <-
+    case mrelinkInfo of
+      Left e -> do
+        hPutStrLn stderr $ show e
+        exitFailure
+      Right r -> return r
+  mergeAndWrite outPath origBinary objPath newObj relinkInfo
 
 -- | Main executable
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
-  case args^.reoptAction of
+  case reoptAction args of
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
     ShowVersion ->

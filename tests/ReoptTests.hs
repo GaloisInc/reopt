@@ -11,11 +11,11 @@ import           Control.Exception
 import qualified Data.ByteString.Builder as Builder
 import           Data.Macaw.Discovery
 import qualified Data.Macaw.Memory.ElfLoader as MM
+import           Prettyprinter
 import           System.FilePath.Posix
 import           System.IO
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
-import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (</>), (<>))
 
 import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
@@ -46,9 +46,10 @@ mkTest fp = T.testCase fp $ do
                                   , logAtAnalyzeFunction   = False
                                   , logAtAnalyzeBlock      = False
                                   }
-  let hdrAnn = emptyHeader
-  (_, os, discState, recMod) <-
-    discoverX86Elf logger fp loadOpts discOpts [] [] hdrAnn "reopt"
+  let hdrAnn = emptyAnnDeclarations
+  let reoptOpts = ReoptOptions { roIncluded = [], roExcluded = [] }
+  (_, os, discState, recMod, _) <-
+    recoverX86Elf logger fp loadOpts discOpts reoptOpts hdrAnn "reopt"
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))

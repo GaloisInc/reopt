@@ -4,3 +4,7 @@ package reopt-tools
   ghc-options: -Werror
 package reopt-vcg-ann
   ghc-options: -Werror
+package macaw-base
+  ghc-options: -Werror
+package elf-edit
+  ghc-options: -Werror

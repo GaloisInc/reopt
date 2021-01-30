@@ -1,7 +1,6 @@
 packages:
   reopt.cabal
   annotations
-  reopt-vcg
   tools
   deps/dwarf
   deps/elf-edit
@@ -11,14 +10,13 @@ packages:
   deps/llvm-pretty-bc-parser
   deps/macaw/base
   deps/macaw/x86
+  deps/macaw/utils/compare-dwarfdump
   deps/parameterized-utils
   deps/what4/what4
 
 package reopt
   ghc-options: -Wall
 package reopt-tools
-  ghc-options: -Wall
-package reopt-vcg
   ghc-options: -Wall
 package reopt-vcg-ann
   ghc-options: -Wall

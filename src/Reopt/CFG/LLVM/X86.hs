@@ -14,8 +14,8 @@ import           Control.Monad.Reader
 import           Data.Parameterized.Some
 import           GHC.Stack
 import           Numeric.Natural
+import           Prettyprinter
 import qualified Text.LLVM as L
-import           Text.PrettyPrint.ANSI.Leijen (pretty)
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
@@ -172,6 +172,47 @@ emitX86ArchFn f = do
                     [llvm_val, llvm_cnt, llvm_ptr]
      -- Get rge cx result
      extractValue res 0
+
+   MemCmp 1 _nv _x _y _dir -> do
+     -- bpv is bytes eper value
+     -- nv is number of bvalues
+     --
+     error $ "LLVM backend does not yet support: "
+       ++ show (runIdentity (ppArchFn (pure . pretty) f))
+
+   -- Convert floating point to signed integer.
+   SSE_CVTTSX2SI outW _floatTp x -> do
+     llvmX <- mkLLVMValue x
+     convop L.FpToSi llvmX (llvmITypeNat (natValue outW))
+
+   -- Convert signed integer to floating point.
+   SSE_CVTSI2SX outTp _inW x -> do
+     llvmX <- mkLLVMValue x
+     let llvmFloatType = case outTp of
+                           SSE_Single -> L.Float
+                           SSE_Double -> L.Double
+     convop L.SiToFp llvmX (L.PrimType (L.FloatType llvmFloatType))
+
+ {-
+  -- | Compares two memory regions and return the number of bytes that were the same.
+  --
+  -- In an expression @MemCmp bpv nv p1 p2 dir@:
+  --
+  -- * @bpv@ is the number of bytes per value
+  -- * @nv@ is the number of values to compare
+  -- * @p1@ is the pointer to the first buffer
+  -- * @p2@ is the pointer to the second buffer
+  -- * @dir@ is a flag that indicates the direction of comparison ('True' ==
+  --   decrement, 'False' == increment) for updating the buffer
+  --   pointers.
+  MemCmp :: !Integer
+         -> !(f (BVType 64))
+         -> !(f (BVType 64))
+         -> !(f (BVType 64))
+         -> !(f BoolType)
+         -> X86PrimFn f (BVType 64)
+-}
+
    _ -> do
      error $ "LLVM backend does not yet support: "
        ++ show (runIdentity (ppArchFn (pure . pretty) f))
@@ -228,39 +269,39 @@ emitX86ArchStmt _ (X86FnStmt stmt) =
         case dirExpr of
           FnConstantBool b -> pure b
           _ -> error "LLVM generator only supports rep movs with constant df"
-      let dfAsm = case df of
-                    True  -> "std"
-                    False -> "cld"
       let movsAsm = case bytesPerCopy of
                       ByteRepVal  -> "rep movsb"
                       WordRepVal  -> "rep movsw"
                       DWordRepVal -> "rep movsd"
                       QWordRepVal -> "rep movsq"
+      let dfAsm = case df of
+                    True  -> "std\n" ++ movsAsm ++ "\ncld"
+                    False -> movsAsm
       callAsm_ noSideEffect
                (dfAsm ++ "\n" ++ movsAsm)
-               "={cx},={si},={di},~{dirflag},~{memory}"
+               "{cx},{si},{di},~{dirflag},~{flags},~{memory}"
                [cnt, src, dest]
 
-    RepStos bytesPerCopy destExpr srcExpr cntExpr dirExpr -> do
+    RepStos bytesPerCopy destExpr valExpr cntExpr dirExpr -> do
       dest    <- mkLLVMValue destExpr
-      src     <- mkLLVMValue srcExpr
+      val     <- mkLLVMValue valExpr
       cnt     <- mkLLVMValue cntExpr
       df <-
         case dirExpr of
           FnConstantBool b -> pure b
           _ -> error "LLVM generator only supports rep stos with constant df"
-      let dfAsm = case df of
-                    True  -> "std"
-                    False -> "cld"
       let stosAsm = case bytesPerCopy of
                       ByteRepVal  -> "rep stosb"
                       WordRepVal  -> "rep stosw"
                       DWordRepVal -> "rep stosd"
                       QWordRepVal -> "rep stosq"
+      let dfAsm = case df of
+                    True  -> "std\n" ++ stosAsm ++ "\ncld"
+                    False -> stosAsm
       callAsm_ noSideEffect
-               (dfAsm ++ "\n" ++stosAsm)
-               "cx,si,di,~{cx},~{si},~{di},~{dirflag},~{memory}"
-               [cnt, src, dest]
+               dfAsm
+               "{cx},{di},{ax},~{memory},~{flags}"
+               [cnt, dest, val]
 
     _ -> error $ "LLVM generation: Unsupported architecture statement."
 

@@ -29,6 +29,7 @@ executable reopt-vcg
               , aeson
               , ansi-wl-pprint
               , async
+              , bv-sized
               , bytestring
               , containers
               , directory

@@ -5,29 +5,28 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Reopt
   ( readElf64
   , parseElf64
+  , parseElfHeaderInfo64
   , showPaddedHex
   , checkedReadFile
   , isCodeSection
   , printX86SectionDisassembly
-    -- * SymAddrMap
-  , SymAddrMap
-  , SymAddrMapLookupError(..)
-  , symAddrMapLookup
     -- * Architecture info
   , SomeArchitectureInfo(..)
     -- * Code discovery
+  , ReoptOptions(..)
   , discoverBinary
     -- * Function recovery
-  , Reopt.Header.Header
-  , Reopt.Header.emptyHeader
+  , Reopt.AnnotatedTypes.AnnDeclarations
+  , Reopt.AnnotatedTypes.emptyAnnDeclarations
   , Reopt.Header.parseHeader
   , RecoveredModule(..)
   , GetFnsLogEvent(..)
-    -- * Redirections
-  , addrRedirections
+    -- * Object merging
+  , Reopt.Relinker.MergeRelations
   , mergeAndWrite
     -- * LLVM
   , LLVMVersion
@@ -41,28 +40,23 @@ module Reopt
   , X86OS(..)
   , osPersonality
   , osLinkName
-  , discoverX86Elf
+  , recoverX86Elf
     -- * Utility
   , copyrightNotice
     -- * Re-exports
   , Data.Macaw.Memory.ElfLoader.LoadOptions(..)
   ) where
 
+import           Control.Monad.State
 import           Control.Exception
 import           Control.Lens
-import           Control.Monad
 import           Control.Monad.Except
-import           Control.Monad.State
 import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
-import           Data.Either
-import           Data.ElfEdit
-  ( Elf
-  , SomeElf(..)
-  )
+import           Data.ElfEdit (Elf)
 import qualified Data.ElfEdit as Elf
 import qualified Data.ElfEdit.ByteString as ElfBS
 import           Data.Foldable
@@ -79,6 +73,7 @@ import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           Numeric
+import           Prettyprinter (pretty)
 import           System.Exit
 import           System.IO
 import           System.IO.Error
@@ -92,12 +87,15 @@ import           Data.Macaw.Analysis.FunctionArgs
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery
+import qualified Data.Macaw.Dwarf as Dwarf
 import           Data.Macaw.Memory.ElfLoader
-
-import           Data.Macaw.X86
+import           Data.Macaw.X86 (X86_64, X86TermStmt(..))
+import qualified Data.Macaw.X86 as X86
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
 
+import           Reopt.AnnotatedTypes
+import           Reopt.ArgResolver
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions, moduleForFunctions)
@@ -115,7 +113,7 @@ import           Data.Macaw.VEX.AArch64 (armArch64le)
 #endif
 
 copyrightNotice :: String
-copyrightNotice = "Copyright 2014-19 Galois, Inc."
+copyrightNotice = "Copyright 2014-21 Galois, Inc."
 
 showUsage :: Handle -> IO ()
 showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
@@ -123,19 +121,75 @@ showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
 ------------------------------------------------------------------------
 -- Resolve which symbols to include
 
--- | Map from defined symbol names to the address of the symbol
-newtype SymAddrMap w = SymAddrMap (Map BS.ByteString (Set.Set (MemSegmentOff w)))
+-- | Name of a symbol along with its visibility
+data QualifiedSymbolName
+   = QualifiedSymbolName
+   { qsnBytes :: !BSC.ByteString
+     -- ^ Bytestring
+   , qsnGlobal :: !Bool
+     -- ^ Flag indicating if this is a global symbol
+     --
+     -- Global symbols should be unique for a binary while non-global
+     -- symbols are only unique for a compilation unit.
+   }
 
+mkQualifiedSymbolName :: Elf.SymtabEntry BS.ByteString w
+                      -> QualifiedSymbolName
+mkQualifiedSymbolName ste =
+  QualifiedSymbolName { qsnBytes  = Elf.steName ste
+                      , qsnGlobal = Elf.steBind ste == Elf.STB_GLOBAL
+                      }
+
+
+-- | @mergeName new old@ picks the symbol to use when two symbols @new@ and @old@
+-- have the same address, and we need a sensible default.
+mergeName :: QualifiedSymbolName -> QualifiedSymbolName -> QualifiedSymbolName
+mergeName new old =
+  case (qsnGlobal new, qsnGlobal old) of
+    -- Replace local symbols with global symbols.
+    (True, False) -> new
+    -- Otherwise use old symbol.
+    _ -> old
+
+--------------------------------------------------------------------------------
+-- SymAddrMap
+
+-- | Maintain symbol/address name mappings.
+data SymAddrMap w =
+  SymAddrMap { samNameMap :: !(Map BS.ByteString (Set.Set (MemSegmentOff w)))
+               -- ^ Map from global symbol names to their address.
+             , samAddrMap :: !(Map (MemSegmentOff w) QualifiedSymbolName)
+               -- ^ Map from address to the symbol to use for that address.
+               --
+               -- In the case where multiple symbols have the same address, we
+               -- use the first symbol with that address in the symbol table but
+               -- prioritze global symbols over local symbols.
+             }
+
+getAddrSymMap :: SymAddrMap w -> Map (MemSegmentOff w) BS.ByteString
+getAddrSymMap sam = fmap qsnBytes (samAddrMap sam)
+
+-- | Empty symbol address map
 symAddrMapEmpty :: SymAddrMap w
-symAddrMapEmpty = SymAddrMap Map.empty
+symAddrMapEmpty = SymAddrMap { samNameMap = Map.empty
+                             , samAddrMap = Map.empty
+                             }
 
-symAddrMapInsert :: BSC.ByteString -> MemSegmentOff w -> SymAddrMap w -> SymAddrMap w
-symAddrMapInsert nm addr (SymAddrMap m) =
-  seq nm $ seq addr $ SymAddrMap (Map.insertWith (\_ old -> Set.insert addr old) nm (Set.singleton addr) m)
-
-symAddrMapFromList :: [MemSymbol w] -> SymAddrMap w
-symAddrMapFromList l =
-  foldl' (\m s -> seq s $ symAddrMapInsert (memSymbolName s) (memSymbolStart s) m) symAddrMapEmpty l
+-- | Symbol address map insertyion
+symAddrMapInsert :: Elf.SymtabEntry BS.ByteString (Elf.ElfWordType w)
+                 -> MemSegmentOff w
+                 -> SymAddrMap w
+                 -> SymAddrMap w
+symAddrMapInsert sym addr sam = seq addr $
+  let qnm = mkQualifiedSymbolName sym
+      nmMap' = Map.insertWith (\_new -> Set.insert addr)
+                              (qsnBytes qnm)
+                              (Set.singleton addr)
+                              (samNameMap sam)
+      addrMap' = Map.insertWith mergeName addr qnm (samAddrMap sam)
+   in seq qnm $ SymAddrMap { samNameMap = nmMap'
+                           , samAddrMap = addrMap'
+                           }
 
 -- | Error code if @symAddrMapLookup@ fails.
 data SymAddrMapLookupError
@@ -144,63 +198,67 @@ data SymAddrMapLookupError
 
 -- | Lookup entry in symbol to address map.
 symAddrMapLookup :: SymAddrMap w -> BS.ByteString -> Either SymAddrMapLookupError (MemSegmentOff w)
-symAddrMapLookup (SymAddrMap m) nm =
-  let s = Map.findWithDefault Set.empty nm m
+symAddrMapLookup sam nm =
+  let s = Map.findWithDefault Set.empty nm (samNameMap sam)
    in case Set.size s of
        0 -> Left SymAddrMapNotFound
        1 -> Right (Set.findMin s)
        _ -> Left SymAddrMapAmbiguous
+
+----------------------------------------------------------------------------------
+-- Resolution functions
 
 -- | Attempt to find the address of a string identifying a symbol
 -- name, and return either the string if it cannot be resolved or the
 -- address.
 resolveSymAddr :: Memory w
                   -- ^ Loaded memory object.
-               -> RegionIndex
-                  -- ^ Region index for resolving addresses.
+               -> Either String RegionIndex
+                  -- ^ Region index for resolving addresses or error message tro print
                -> SymAddrMap w
                  -- ^ Map from symbol names in binary to associated addresses.
                -> String
                   -- ^ The name of a symbol as a string.
-               -> Either String (MemSegmentOff w)
-resolveSymAddr mem regIdx symMap nm0 = addrWidthClass (memAddrWidth mem) $
+               -> IO (MemSegmentOff w)
+resolveSymAddr mem mregIdx symMap nm0 = addrWidthClass (memAddrWidth mem) $
   case resolveSymName nm0 of
-    AddrIdent w ->
+    AddrIdent w -> do
+      regIdx <-
+        case mregIdx of
+          Left e -> do
+            hPutStrLn stderr e
+            exitFailure
+          Right regIdx ->
+            pure regIdx
       case resolveRegionOff mem regIdx (fromIntegral w) of
-        Just off -> Right off
-        Nothing -> Left nm0
+        Just off ->
+          pure off
+        Nothing -> do
+          hPutStrLn stderr $ "Could not resolve address: " ++ nm0
+          exitFailure
     SymbolIdent nm ->
       case symAddrMapLookup symMap nm of
-        Left _ -> Left nm0
-        Right a -> Right a
+        Left _ -> do
+          hPutStrLn stderr $ "Could not resolve symbol: " ++ nm0
+          exitFailure
+        Right a ->
+          pure a
 
-resolveIncludeFn :: Memory w
-                    -- ^ Memory for binary
-                 -> RegionIndex
-                    -- ^ Region index to use for resolving addresses as numbers.
-                 -> SymAddrMap w
-                    -- ^ Map from symbol names to addresses with name.
-                    --
-                    -- Note. This includes local and weak symbols.
-                    -- Currently there is no way to disambiguate which
-                    -- symbol is referred to, but that is likely ok.
-                 -> [String] -- ^ Addresses to include
-                 -> [String] -- ^ Addresses to exclude.
-                 -> IO ([MemSegmentOff w], (MemSegmentOff w -> Bool))
-resolveIncludeFn mem ridx symMap [] excludeNames = do
-  let (bad, excludeAddrs) = partitionEithers $ resolveSymAddr mem ridx symMap <$> excludeNames
-  when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
-  let s = Set.fromList excludeAddrs
-  pure ([], (`Set.notMember` s))
-resolveIncludeFn mem ridx symMap includeNames [] = do
-  let (bad, includeAddrs) = partitionEithers $ resolveSymAddr mem ridx  symMap  <$> includeNames
-  when (not (null bad)) $ do
-    hPutStrLn stderr $ "Could not resolve symbols: " ++ unwords bad
-  let s = Set.fromList includeAddrs
-  pure $ (includeAddrs, (`Set.member` s))
-resolveIncludeFn _ _ _ _ _ = do
-  fail "Cannot both include and exclude specific addresses."
+-- | Information from user to control which addresses to include and
+-- exclude.
+data ReoptOptions =
+  ReoptOptions { roIncluded :: [String] -- ^ Symbols/addresses user wanted included
+               , roExcluded :: [String] -- ^ Symbols/addresses user wanted exluded.
+               }
+
+addKnownFn :: SymAddrMap w
+           -> BS.ByteString
+           -> NoReturnFunStatus
+           -> Map (MemSegmentOff w) NoReturnFunStatus
+           -> Map (MemSegmentOff w) NoReturnFunStatus
+addKnownFn sam nm noRet m0 =
+  let s = Map.findWithDefault Set.empty nm (samNameMap sam)
+   in foldl (\m a -> Map.insert a noRet m) m0 s
 
 ------------------------------------------------------------------------
 -- Architecture info
@@ -218,7 +276,7 @@ type ProcessPLTEntries w
       -- ^ Records PLT bounds
    -> IORef [(MemSegmentOff w, BS.ByteString)]
       -- ^ PLT bounds
-   -> IORef (SymbolMaps w)
+   -> IORef (SymAddrMap w)
       -- ^ Symbol maps to update
    -> IO ()
 
@@ -265,24 +323,35 @@ showElfParseErrors l = do
     forM_ l $ \emsg -> do
       hPutStrLn stderr (show emsg)
 
+parseElfHeaderInfo64 :: String
+                     -- ^ Name of output for error messages
+                     -> BS.ByteString
+                     -- ^ Data to read
+                     -> IO (Elf.ElfHeaderInfo 64)
+parseElfHeaderInfo64 path bs = do
+  case Elf.decodeElfHeaderInfo bs of
+    Left (_, msg) -> do
+      hPutStrLn stderr $ "Could not parse Elf file " ++ path ++ ":"
+      hPutStrLn stderr $ "  " ++ msg
+      exitFailure
+    Right (Elf.SomeElf hdrInfo) -> do
+      case Elf.headerClass (Elf.header hdrInfo) of
+        Elf.ELFCLASS32 -> do
+          hPutStrLn stderr "32-bit elf files are not yet supported."
+          exitFailure
+        Elf.ELFCLASS64 -> do
+          pure hdrInfo
+
 parseElf64 :: String
               -- ^ Name of output for error messages
            -> BS.ByteString
               -- ^ Data to read
            -> IO (Elf 64)
-parseElf64 nm bs =
-  case Elf.parseElfHeaderInfo bs of
-    Left (_, msg) -> do
-      hPutStrLn stderr $ "Could not parse Elf file " ++ nm ++ ":"
-      hPutStrLn stderr $ "  " ++ msg
-      exitFailure
-    Right (Elf32 _) -> do
-      hPutStrLn stderr "32-bit elf files are not yet supported."
-      exitFailure
-    Right (Elf64 hdr) -> do
-      let (l, e) = Elf.getElf hdr
-      showElfParseErrors l
-      return e
+parseElf64 nm bs = do
+  hdr <- parseElfHeaderInfo64 nm bs
+  let (l, e) = Elf.getElf hdr
+  showElfParseErrors l
+  return e
 
 -- | Read a 64-bit elf file.
 readElf64 :: FilePath
@@ -296,14 +365,12 @@ readElf64 path = checkedReadFile path >>= parseElf64 path
 readSomeElf :: FilePath -> IO (Some Elf.ElfHeaderInfo)
 readSomeElf path = do
   bs <- checkedReadFile path
-  case Elf.parseElfHeaderInfo bs of
+  case Elf.decodeElfHeaderInfo bs of
     Left (_, msg) -> do
       hPutStrLn stderr $ "Error reading " ++ path ++ ":"
       hPutStrLn stderr $ "  " ++ msg
       exitFailure
-    Right (Elf32 hdr) ->
-      pure $! Some hdr
-    Right (Elf64 hdr) ->
+    Right (Elf.SomeElf hdr) ->
       pure $! Some hdr
 
 ------------------------------------------------------------------------
@@ -313,11 +380,11 @@ getElfArchInfo :: Elf.ElfClass w -> Elf.ElfMachine -> Elf.ElfOSABI -> IO (SomeAr
 getElfArchInfo cl arch abi =
   case (cl, arch, abi) of
     (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_LINUX)   ->
-      pure $! SomeArch x86_64_linux_info   processX86PLTEntries
+      pure $! SomeArch X86.x86_64_linux_info   processX86PLTEntries
     (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_SYSV)    ->
-      pure $! SomeArch x86_64_linux_info   processX86PLTEntries
+      pure $! SomeArch X86.x86_64_linux_info   processX86PLTEntries
     (Elf.ELFCLASS64, Elf.EM_X86_64, Elf.ELFOSABI_FREEBSD) ->
-      pure $! SomeArch x86_64_freeBSD_info processX86PLTEntries
+      pure $! SomeArch X86.x86_64_freeBSD_info processX86PLTEntries
 #ifdef SUPPORT_ARM
     (Elf.ELFCLASS32, Elf.EM_ARM, ELFOSABI_SYSV) -> do
       Data.VEX.FFI.init Data.VEX.FFI.stdOptions
@@ -330,9 +397,9 @@ getElfArchInfo cl arch abi =
      let archName = case Map.lookup arch Elf.elfMachineNameMap of
                       Just nm -> nm
                       Nothing -> "unknown-abi(" ++ showHex (Elf.fromElfMachine arch) ")"
-     hPutStrLn stderr
-        $ "Do not support " ++ show (Elf.elfClassBitWidth cl) ++ "-bit "
-        ++ archName ++ " " ++ show abi ++ " binaries."
+     hPutStrLn stderr $
+       printf "Do not support %d-bit %s %s binaries."
+              (Elf.elfClassBitWidth cl) archName (show abi)
      exitFailure
 
 ------------------------------------------------------------------------
@@ -346,28 +413,25 @@ elfInstances hdr x =
     Elf.ELFCLASS32 -> x
     Elf.ELFCLASS64 -> x
 
--- | Symbol table maps needed for function discovery/post processing.
-type SymbolMaps w = (SymAddrMap w, AddrSymMap w)
-
 -- | Write a warning to stderr.
 showWarning :: MonadIO m => String -> m ()
 showWarning msg = liftIO $ hPutStrLn stderr $ "Warning: " ++ msg
 {-# INLINE showWarning #-}
 
-insertSymbolMaps :: IORef (SymbolMaps w) -> BS.ByteString -> MemSegmentOff w -> IO ()
-insertSymbolMaps r nm addr = do
-  modifyIORef' r $ \(symAddrMap, addrSymMap) ->
-    let symAddrMap' = symAddrMapInsert nm addr symAddrMap
-        addrSymMap' = Map.insert addr nm addrSymMap
-     in seq symAddrMap' $ seq addrSymMap' $ (symAddrMap', addrSymMap')
-
 -- | Insert a symbol table entry into map.
-insSymbol :: (MemWidth w, Integral (Elf.ElfWordType w))
-          => SectionIndexMap w
-          -> IORef (SymbolMaps w)
-          -> (Int, Elf.ElfSymbolTableEntry (Elf.ElfWordType w))
+--
+-- This is used in dynamic binaries.
+insSymbol :: forall w
+          . (MemWidth w, Integral (Elf.ElfWordType w))
+          => Memory w
+          -- ^ Loaded memory
+          -> MemAddr w
+          -- ^ Base address that binary is loaded at
+          -> IORef (SymAddrMap w)
+          -- ^ Map to add symbol to
+          -> (Int, Elf.SymtabEntry BS.ByteString (Elf.ElfWordType w))
           -> IO ()
-insSymbol secMap symMapRef (idx, symEntry)
+insSymbol mem baseAddr symMapRef (idx, symEntry)
   -- Skip non-function symbols
   | Elf.steType symEntry /= Elf.STT_FUNC = do
       pure ()
@@ -380,13 +444,14 @@ insSymbol secMap symMapRef (idx, symEntry)
   | otherwise = do
       let nm = Elf.steName symEntry
       let val = Elf.steValue symEntry
-      case Map.lookup (Elf.steIndex symEntry) secMap of
-        Just (base,sec)
-          | Elf.elfSectionAddr sec <= val && val < Elf.elfSectionAddr sec + Elf.elfSectionSize sec
-          , off <- toInteger val - toInteger (Elf.elfSectionAddr sec) -> do
-              let addr = fromMaybe (error "Invalid address") (incSegmentOff base off)
-              insertSymbolMaps symMapRef nm addr
-        _ -> do
+      -- Get memory address of symbol
+      let symAddr :: MemAddr w
+          symAddr = incAddr (toInteger val) baseAddr
+      -- Resolve address as segment offset.
+      case asSegmentOff mem symAddr of
+        Just addr ->
+          modifyIORef' symMapRef $ symAddrMapInsert symEntry addr
+        Nothing ->
           showWarning (show (CouldNotResolveAddr nm))
 
 -- | Run a computation with the given section, and print a warning if
@@ -420,31 +485,32 @@ withSymtab sections sectionNameMap warnName secName f = do
       let strtab = sections V.! fromIntegral strtabIdx
       f (Elf.elfSectionData symtab) (Elf.elfSectionData strtab)
 
-
 addDefinedSymbolTableFuns
   :: (MemWidth w, Integral (Elf.ElfWordType w))
-  => Elf.ElfClass w
-  -> Elf.ElfData
-  -> SectionIndexMap w
+  => Elf.ElfHeaderInfo w
+  -> Memory w  -- ^ Memory created from binary.
+  -> MemAddr w -- ^ Address binary is loaded at
   -> BS.ByteString -- ^ Symbol table for parsing.
   -> BS.ByteString -- ^ String table
-  -> IORef (SymbolMaps w)
+  -> IORef (SymAddrMap w)
   -> IO ()
-addDefinedSymbolTableFuns cl dta secMap symtabData strtab symMapRef = do
+addDefinedSymbolTableFuns hdrInfo mem baseAddr symtabData strtab symMapRef = do
+  let hdr = Elf.header hdrInfo
+  let cl = Elf.headerClass hdr
+  let dta = Elf.headerData hdr
   let symEntrySize :: Int
-      symEntrySize = Elf.symbolTableEntrySize cl
+      symEntrySize = Elf.symtabEntrySize cl
   let cnt :: Word32
       cnt = fromIntegral (BS.length symtabData `quot` symEntrySize)
-  let symtabDataL = BSL.fromChunks [symtabData]
   let go idx
         | idx >= cnt = pure ()
         | otherwise =
-            case Elf.parseSymbolTableEntry cl dta strtab symtabDataL idx of
+            case Elf.decodeSymtabEntry cl dta strtab symtabData idx of
               Left e -> do
                 showWarning $ "Failed to parse symbol table entry " ++ show e
                 go (idx+1)
               Right symEntry -> do
-                insSymbol secMap symMapRef (fromIntegral idx, symEntry)
+                insSymbol mem baseAddr symMapRef (fromIntegral idx, symEntry)
                 go (idx+1)
   go 1
 
@@ -476,7 +542,7 @@ matchPLTStub :: Elf.ElfData -- ^ Endianess of Elf file
              -> MatchPLTStubArgs
              -> IORef [(MemSegmentOff 64, BS.ByteString)]
              -- ^ PLT functions
-             -> IORef (SymbolMaps 64)
+             -> IORef (SymAddrMap 64)
              -> Int -- ^ Index of PLT entry (first function is at zero)
              -> ExceptT () IO ()
 matchPLTStub dta args pltFnsRef symMapRef idx = do
@@ -487,7 +553,7 @@ matchPLTStub dta args pltFnsRef symMapRef idx = do
   let plt = pltPLTData args
   -- Get relocation entry for this PLT stub.
   let rela :: Elf.RelaEntry Elf.X86_64_RelocationType
-      rela = Elf.relaEntry dta (pltPLTRelaData args) idx
+      rela = Elf.decodeRelaEntry dta (pltPLTRelaData args) idx
   let pltEntryAddr :: Word64
       pltEntryAddr = pltElfAddr args + fromIntegral off
   unless (Elf.relaType rela == Elf.R_X86_64_JUMP_SLOT) $ do
@@ -520,15 +586,14 @@ matchPLTStub dta args pltFnsRef symMapRef idx = do
   -- Get symbol index for relation
   let symIndex :: Word32
       symIndex = Elf.relaSym rela
-  let symtab = BSL.fromChunks [pltSymtab args]
+  let symtab = pltSymtab args
   sym <-
-    case Elf.parseSymbolTableEntry Elf.ELFCLASS64 dta (pltStrtab args) symtab symIndex of
+    case Elf.decodeSymtabEntry Elf.ELFCLASS64 dta (pltStrtab args) symtab symIndex of
       Left err -> do
         showWarning (show err)
         throwError ()
       Right entry ->
         pure entry
-  let symName = Elf.steName sym
   unless (Elf.steType sym == Elf.STT_FUNC) $
     showWarning "PLT symbol must be a function."
   unless (Elf.steBind sym == Elf.STB_GLOBAL) $
@@ -544,8 +609,9 @@ matchPLTStub dta args pltFnsRef symMapRef idx = do
         throwError ()
       Just a -> pure a
   liftIO $ do
-    modifyIORef' pltFnsRef (\l -> (a,symName):l)
-    insertSymbolMaps symMapRef symName a
+    modifyIORef' pltFnsRef (\l -> (a, Elf.steName sym):l)
+    modifyIORef' symMapRef $ symAddrMapInsert sym a
+
 
 #ifdef SUPPORT_ARM
 ignorePLTEntries :: ProcessPLTEntries w
@@ -562,7 +628,7 @@ processX86PLTEntries :: Elf.ElfData
                         -- ^ Records PLT bounds
                      -> IORef [(MemSegmentOff 64, BS.ByteString)]
                         -- ^ PLT functions
-                     -> IORef (SymbolMaps 64)
+                     -> IORef (SymAddrMap 64)
                      -> IO ()
 processX86PLTEntries dta symtab strtab sectionNameMap mem pltBoundsRef pltFnsRef symMapRef = do
   withSection sectionNameMap "PLT" ".plt" $ \pltSec -> do
@@ -588,104 +654,230 @@ processX86PLTEntries dta symtab strtab sectionNameMap mem pltBoundsRef pltFnsRef
           forM_ [0..relaCount-1] $ \i -> do
             void $ runExceptT (matchPLTStub dta pltStubArgs pltFnsRef symMapRef i)
 
+$(pure [])
+
+--------------------------------------------------------------------------------
+-- InitDiscovery
+
+-- | Information returned by `initDiscovery` below.
+data InitDiscovery arch
+  = InitDiscovery
+    { initDiscMemory :: !(Memory (ArchAddrWidth arch))
+      -- ^ Memory to use when exploring
+    , initDiscEntryPoint :: !(Maybe (ArchSegmentOff arch))
+      -- ^ Entry point for binary (defined if an executable or shared library)
+    , initDiscRegionIndex :: !RegionIndex
+      -- ^ Region index to use for resolving include/exclude values
+      -- given as numeric literals or error message to print
+    , initDiscSymAddrMap :: !(SymAddrMap (ArchAddrWidth arch))
+      -- ^ Map from symbols to addresses.
+    , initDiscExploreFn :: !(ArchSegmentOff arch -> Bool)
+      -- ^ A function for filtering addresses to explore.
+    , initDiscPLTFuns :: [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
+      -- ^ A list of address and name pairs for PLT functions.
+    , initDiscBaseCodeAddr :: !(MemAddr (ArchAddrWidth arch))
+      -- ^ Address to use as base address for program counters in
+      -- Dwarf debug information.
+    }
+
+$(pure [])
+
+-- | Resolve a symbol table entry in an object file.
+resolveObjSymbol :: Elf.ElfHeaderInfo w
+                 -> Memory w
+                 -> Map Word16 (MemSegmentOff w)
+                    -- ^ Map from section index to offset in memory of section.
+                 -> SymAddrMap w
+                    -- ^ Symbol addr map
+                 -> (Int, Elf.SymtabEntry BS.ByteString (Elf.ElfWordType w))
+                    -- ^ Index of symbol in symbol table and entry.
+                 -> IO (SymAddrMap w)
+resolveObjSymbol hdrInfo mem secMap sam (idx, ste) = elfInstances hdrInfo $ do
+  let secIdx = Elf.steIndex ste
+  if Elf.steType ste /= Elf.STT_FUNC then do
+    pure sam
+   else if secIdx == Elf.SHN_UNDEF then
+    pure sam
+   else if Elf.steName ste == "" then do
+    hPutStrLn stderr $ show $ EmptySymbolName idx (Elf.steType ste)
+    pure sam
+   else if secIdx == Elf.SHN_ABS then do
+    let val = Elf.steValue ste
+    case resolveAbsoluteAddr mem (fromIntegral val) of
+      Just addr -> do
+        pure $! symAddrMapInsert ste addr sam
+      Nothing -> do
+        hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
+        pure sam
+   else if Elf.fromElfSectionIndex secIdx >= Elf.shdrCount hdrInfo then do
+    hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
+    pure sam
+   else do
+    let shdr = Elf.shdrByIndex hdrInfo (Elf.fromElfSectionIndex secIdx)
+    let val = Elf.steValue ste
+    case Map.lookup (Elf.fromElfSectionIndex secIdx) secMap of
+      Just base
+        | Elf.shdrAddr shdr <= val && (val - Elf.shdrAddr shdr) < Elf.shdrSize shdr
+        , off <- toInteger (val - Elf.shdrAddr shdr)
+        , Just addr <- incSegmentOff base off -> do
+            pure $! symAddrMapInsert ste addr sam
+      _ -> do
+        hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName ste)
+        pure sam
+
+$(pure [])
+
 -- | Discover functions in an elf file.
 --
 --  Note. This prints warnings to stderr
-runCompleteDiscovery :: forall arch
-                     . LoadOptions
-                     -- ^ Option to load the binary at the given address
-                     -> DiscoveryOptions
-                     -- ^ Options controlling discovery
-                     -> Elf.ElfHeaderInfo (ArchAddrWidth arch)
-                     -> ArchitectureInfo arch
-                     -> ProcessPLTEntries (ArchAddrWidth arch)
-                     -> [String] -- ^ Included addresses
-                     -> [String] -- ^ Excluded addresses
-                     -> IO ( Elf (ArchAddrWidth arch)
-                           , DiscoveryState arch
-                           , AddrSymMap (ArchAddrWidth arch)
-                           , SymAddrMap (ArchAddrWidth arch)
-                           , [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
-                           )
-runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr = elfInstances hdrInfo $ do
+initDiscovery :: forall arch
+              . LoadOptions
+              -- ^ Option to load the binary at the given address
+              -> Elf.ElfHeaderInfo (ArchAddrWidth arch)
+              -> ProcessPLTEntries (ArchAddrWidth arch)
+              -> IO (InitDiscovery arch)
+initDiscovery loadOpts hdrInfo pltFn = elfInstances hdrInfo $ do
   let hdr = Elf.header hdrInfo
   case Elf.headerType hdr of
     -- This is for object files.
     Elf.ET_REL -> do
+      -- Note. This code requires code is in a single text section.  It does
+      -- not support objects with -ffunction-sections
+
       case loadOffset loadOpts of
         Nothing -> pure ()
         Just _ -> showWarning $ "Ignoring load offset for object file as there is no global base address."
-      let (l, elfFile) = Elf.getElf hdrInfo
-      showElfParseErrors l
-      (mem, secMap, warnings) <-
-        case memoryForElfSections elfFile of
+      -- Load elf sections
+      (mem, secMap, warnings) <- do
+        -- Do loading
+        case memoryForElfSections hdrInfo of
           Left errMsg -> hPutStrLn stderr errMsg *> exitFailure
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
-      let isRelevant ste = Elf.steType ste == Elf.STT_FUNC
 
-      let (symErrs, symbols) = resolveElfFuncSymbols mem secMap isRelevant elfFile
+      -- Get static symbol table
+      symAddrMap <-
+        case Elf.decodeHeaderSymtab hdrInfo of
+          Nothing -> pure symAddrMapEmpty
+          Just (Left e) -> do
+            hPutStrLn stderr (show e)
+            pure symAddrMapEmpty
+          Just (Right tbl) -> do
+            let staticEntries = zip [0..] (V.toList (Elf.symtabEntries tbl))
+            foldlM (resolveObjSymbol hdrInfo mem secMap) symAddrMapEmpty staticEntries
 
-      mapM_ (hPutStrLn stderr . show) symErrs
-
-      let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-      let symAddrMap = symAddrMapFromList symbols
-      -- Get initial entries and predicate for exploring
-      -- TODO: Check this.
+      -- Get index of text section section.
+      textSectionIndex <-
+        case Elf.headerNamedShdrs hdrInfo of
+          Left (secIdx, _) -> do
+            hPutStrLn stderr $ printf "Could not resolve name of section %s." (show secIdx)
+            exitFailure
+          Right shdrs -> do
+            let isText s = Elf.shdrName s == ".text"
+            case V.findIndex isText shdrs of
+              Nothing -> do
+                hPutStrLn stderr "Could not find .text section."
+                exitFailure
+              Just secIdx -> do
+                when (isJust (V.findIndex isText (V.drop (secIdx+1) shdrs))) $ do
+                  hPutStrLn stderr "Duplicate .text sections found."
+                  exitFailure
+                pure $ (fromIntegral secIdx :: Word16)
+      -- Get offset for text section.
+      textBaseAddr <-
+        case Map.lookup textSectionIndex secMap of
+          Nothing -> do
+            hPutStrLn stderr "Text section is not loaded."
+            exitFailure
+          Just a ->
+            pure a
+       -- Get region of text segment
       let regIdx :: RegionIndex
-          regIdx = 1
-
-      (allEntries, fnPred) <- resolveIncludeFn mem regIdx symAddrMap includeAddr excludeAddr
-      let readyState
-            = emptyDiscoveryState mem addrSymMap ainfo
-            & markAddrsAsFunction InitAddr allEntries
-      s <- completeDiscoveryState readyState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap, [])
+          regIdx = segmentBase (segoffSegment textBaseAddr)
+      -- Get initial entries and predicate for exploring
+      pure $! InitDiscovery { initDiscMemory = mem
+                            , initDiscEntryPoint = Nothing
+                            , initDiscRegionIndex = regIdx
+                            , initDiscSymAddrMap = symAddrMap
+                            , initDiscExploreFn = \_ -> True
+                            , initDiscPLTFuns = []
+                            , initDiscBaseCodeAddr = MemAddr regIdx 0
+                            }
     -- Static executable
     Elf.ET_EXEC -> do
       case loadOffset loadOpts of
         Nothing -> pure ()
         Just _ -> showWarning $ "Ignoring load offset for unrelocatable executable."
-      let (l, elfFile) = Elf.getElf hdrInfo
-      showElfParseErrors l
-      (mem, secMap, warnings) <-
-        case memoryForElfSegments defaultLoadOptions elfFile of
+      (mem, _secMap, warnings) <-
+        case memoryForElfSegments defaultLoadOptions hdrInfo of
           Left errMsg -> hPutStrLn stderr errMsg *> exitFailure
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
-      let isRelevant ste = Elf.steType ste == Elf.STT_FUNC
-      let (symErrs, symbols) = resolveElfFuncSymbols mem secMap isRelevant elfFile
-      mapM_ (hPutStrLn stderr . show) symErrs
-      let addrSymMap = Map.fromList [ (memSymbolStart msym, memSymbolName msym) | msym <- symbols ]
-      let symAddrMap = symAddrMapFromList symbols
-      -- Get initial entries and predicate for exploring
-      (entries, fnPred) <- resolveIncludeFn mem 0 symAddrMap includeAddr excludeAddr
-      let initState
-            = emptyDiscoveryState mem addrSymMap ainfo
-            & markAddrsAsFunction InitAddr entries
 
+      -- Get static symbol table
+      staticEntries <-
+        case Elf.decodeHeaderSymtab hdrInfo of
+          Nothing -> pure []
+          Just (Left e) -> do
+            hPutStrLn stderr (show e)
+            pure []
+          Just (Right symtab) -> do
+            pure $ V.toList $ Elf.symtabEntries symtab
+
+      let insStatSymbol :: SymAddrMap (ArchAddrWidth arch)
+                        -> Elf.SymtabEntry BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))
+                        -> IO (SymAddrMap (ArchAddrWidth arch))
+          insStatSymbol sam sym = do
+            if Elf.steType sym /= Elf.STT_FUNC then
+              pure sam
+            -- Check symbol is defined
+             else if Elf.steIndex sym == Elf.SHN_UNDEF then
+              pure sam
+            -- Check symbol name is non-empty
+             else if Elf.steName sym == "" then
+              pure sam
+            -- Lookup symbol as absolute
+             else do
+              let val = Elf.steValue sym
+              case resolveAbsoluteAddr mem (fromIntegral val) of
+                Just addr ->
+                  pure $! symAddrMapInsert sym addr sam
+                Nothing -> do
+                  hPutStrLn stderr $ show $ CouldNotResolveAddr (Elf.steName sym)
+                  pure sam
+
+      symAddrMap <- foldlM insStatSymbol symAddrMapEmpty staticEntries
+      -- Get entry addr
       let entry = Elf.headerEntry hdr
-      readyState <-
-        case resolveRegionOff mem 0 (fromIntegral entry) of
-          Nothing -> do
-            hPutStrLn stderr $ "Could not resolve entry point 0x" ++ showHex entry ""
-            pure $! initState
-          Just v -> do
-            pure $! initState & markAddrAsFunction InitAddr v
-      s <- completeDiscoveryState readyState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap, [])
+      let entryAddr = resolveRegionOff mem 0 (fromIntegral entry)
+      when (isNothing entryAddr) $ do
+        hPutStrLn stderr $ "Could not resolve entry point 0x" ++ showHex entry ""
+      -- Return discovery
+      pure $! InitDiscovery { initDiscMemory = mem
+                            , initDiscEntryPoint = entryAddr
+                            , initDiscRegionIndex = 0
+                            , initDiscSymAddrMap = symAddrMap
+                            , initDiscExploreFn = \_ -> True
+                            , initDiscPLTFuns = []
+                            , initDiscBaseCodeAddr = MemAddr 0 0
+                            }
     -- This is a shared library or position-independent executable.
     Elf.ET_DYN -> do
-      let (l, elfFile) = Elf.getElf hdrInfo
-      showElfParseErrors l
       -- Create memory image for elf file.
-      (mem, secMap, warnings) <-
-        case memoryForElfSegments loadOpts elfFile of
+      (mem, _secMap, warnings) <-
+        case memoryForElfSegments loadOpts hdrInfo of
           Left errMsg -> hPutStrLn stderr errMsg *> exitFailure
           Right r -> pure r
       mapM_ (hPutStrLn stderr . show) warnings
+
+      -- Get base address to use for computing section offsets.
+      let baseAddr :: MemAddr (ArchAddrWidth arch)
+          baseAddr =
+            case loadOffset loadOpts of
+              Just o  -> MemAddr { addrBase = 0, addrOffset = fromIntegral o }
+              Nothing -> MemAddr { addrBase = 1, addrOffset = 0 }
+
       -- Get symbol table.
-      let cl = Elf.headerClass hdr
       let dta = Elf.headerData hdr
 
       let sections = Elf.headerSections hdrInfo
@@ -693,19 +885,20 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr
       let sectionNameMap :: Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))]
           sectionNameMap =
             Map.fromListWith (++)
-              [ (Elf.elfSectionName s, [s]) | s <- V.toList sections ]
+              [ (Elf.elfSectionName s, [s]) | (_rng,s) <- V.toList sections ]
 
-      symMapRef <- newIORef $ (symAddrMapEmpty, Map.empty)
-      withSymtab sections sectionNameMap "static symbol table" ".symtab" $ \symtab strtab -> do
-        addDefinedSymbolTableFuns cl dta secMap symtab strtab symMapRef
+      symMapRef <- newIORef symAddrMapEmpty
+      withSymtab (snd <$> sections) sectionNameMap "static symbol table" ".symtab" $ \symtab strtab -> do
+        addDefinedSymbolTableFuns hdrInfo mem baseAddr symtab strtab symMapRef
 
       pltBoundsRef <- newIORef Nothing
       pltFnsRef <- newIORef []
-      withSymtab sections sectionNameMap "dynamic symbol table" ".dynsym" $ \dynSymtab dynStrtab -> do
-        addDefinedSymbolTableFuns cl dta secMap dynSymtab dynStrtab symMapRef
+      withSymtab (snd <$> sections) sectionNameMap "dynamic symbol table" ".dynsym" $ \dynSymtab dynStrtab -> do
+        addDefinedSymbolTableFuns hdrInfo mem baseAddr dynSymtab dynStrtab symMapRef
         pltFn dta dynSymtab dynStrtab sectionNameMap mem pltBoundsRef pltFnsRef symMapRef
 
       mbounds <- readIORef pltBoundsRef
+      -- Exclude PLT bounds
       let exploreFn =
             case mbounds of
               Nothing -> \_ -> True
@@ -718,33 +911,37 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr
                               && addrOffset a - pltStartOff < pltSize
                  in \a -> not (inPLT (segoffAddr a))
       pltFns <- readIORef pltFnsRef
-      (symAddrMap, addrSymMap) <- readIORef symMapRef
-
+      symAddrMap <- readIORef symMapRef
 
       -- Get initial entries and predicate for exploring
       let regIdx :: RegionIndex
           regIdx = if isJust (loadOffset loadOpts) then 0 else 1
 
-      (entries, fnPred) <- resolveIncludeFn mem regIdx symAddrMap includeAddr excludeAddr
-      let postEntryState = emptyDiscoveryState mem addrSymMap ainfo
-                         & exploreFunctionAddr .~ exploreFn
-                         & markAddrsAsFunction InitAddr entries
-
+      -- Get initial entry address
       let entry = Elf.headerEntry hdr
+      -- Adjust entry by load offset.
       let adjEntry =
             case loadOffset loadOpts of
               Nothing -> toInteger entry
               Just o -> toInteger o + toInteger entry
-      readyState <-
-        case resolveRegionOff mem regIdx (fromInteger adjEntry) of
-          Nothing -> do
-            hPutStrLn stderr $ "Could not resolve entry point: " ++ showHex entry ""
-            pure $! postEntryState
-          Just v -> do
-            pure $! postEntryState & markAddrAsFunction InitAddr v
-
-      s <- completeDiscoveryState readyState disOpt fnPred
-      pure (elfFile, s, addrSymMap, symAddrMap, pltFns)
+      -- Mark entry as address as function
+      let entryAddr = resolveRegionOff mem regIdx (fromInteger adjEntry)
+      when (isNothing entryAddr) $ do
+        hPutStrLn stderr $ "Could not resolve entry point: " ++ showHex entry ""
+      -- Get base address for Dwarf
+      let dwarfBaseAddr =
+            case loadOffset loadOpts of
+              Just o -> MemAddr 0 (fromIntegral o)
+              Nothing -> MemAddr 1 0
+      -- Return discovery
+      pure $! InitDiscovery { initDiscMemory = mem
+                            , initDiscEntryPoint = entryAddr
+                            , initDiscRegionIndex = regIdx
+                            , initDiscSymAddrMap = symAddrMap
+                            , initDiscExploreFn = exploreFn
+                            , initDiscPLTFuns = pltFns
+                            , initDiscBaseCodeAddr = dwarfBaseAddr
+                            }
     Elf.ET_CORE -> do
       hPutStrLn stderr "Reopt does not support loading core files."
       exitFailure
@@ -752,21 +949,623 @@ runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr
       hPutStrLn stderr $ "Reopt does not support loading elf files with type " ++ show tp ++ "."
       exitFailure
 
+$(pure [])
+
+initDiscState :: InitDiscovery arch
+              -> ArchitectureInfo arch
+              -> ReoptOptions
+              -> IO (DiscoveryState arch)
+initDiscState disc ainfo reoptOpts = do
+  let mem = initDiscMemory disc
+  let regIdx = initDiscRegionIndex disc
+  let symAddrMap = initDiscSymAddrMap disc
+  let explorePred = initDiscExploreFn disc
+  let resolveEntry qsn | ".cold" `BS.isSuffixOf` qsnBytes qsn = Nothing
+                       | otherwise = Just MayReturnFun
+  let entryPoints = Map.mapMaybe resolveEntry (samAddrMap symAddrMap)
+                  & addKnownFn symAddrMap "abort"            NoReturnFun
+                  & addKnownFn symAddrMap "exit"             NoReturnFun
+                  & addKnownFn symAddrMap "_Unwind_Resume"   NoReturnFun
+                  & addKnownFn symAddrMap "__cxa_rethrow"    NoReturnFun
+                  & addKnownFn symAddrMap "__cxa_throw"      NoReturnFun
+                  & addKnownFn symAddrMap "__malloc_assert"  NoReturnFun
+                  & addKnownFn symAddrMap "__stack_chk_fail" NoReturnFun
+                  & addKnownFn symAddrMap "_ZSt9terminatev"  NoReturnFun
+  s <-
+    case (roIncluded reoptOpts, roExcluded reoptOpts) of
+      ([], excludeNames) -> do
+        excludeAddrs <- mapM (resolveSymAddr mem (Right regIdx) symAddrMap) excludeNames
+        let s = Set.fromList excludeAddrs
+        let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+                      & trustedFunctionEntryPoints .~ entryPoints
+                      & exploreFnPred .~ (\a -> Set.notMember a s && explorePred a)
+                      & markAddrsAsFunction InitAddr (Map.keys entryPoints)
+        pure $! initState
+      (includeNames, []) -> do
+        includeAddrs <- mapM (resolveSymAddr mem (Right regIdx) symAddrMap) includeNames
+        let s = Set.fromList includeAddrs
+        let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+                      & trustedFunctionEntryPoints .~ entryPoints
+                      & exploreFnPred .~ (\a -> Set.member a s)
+                      & markAddrsAsFunction InitAddr s
+        pure $! initState
+      _ -> do
+        fail "Cannot both include and exclude specific addresses."
+  case initDiscEntryPoint disc of
+    Nothing -> pure $! s
+    Just entry -> pure $! s & markAddrAsFunction InitAddr entry
+
+$(pure [])
+
+---------------------------------------------------------------------------------
+-- GetFnsLogEvent
+
+-- | Event passed to logger when discovering functions
+data GetFnsLogEvent
+   = ArgResolverError !String !ArgResolverError
+   | DuplicateSections !BSC.ByteString
+   | DebugError !String
+   | StartFunRecovery !(Maybe BSC.ByteString) !(MemSegmentOff 64)
+     -- ^ Notify we are starting analysis of given function.
+   | RecoveryFailed !(Maybe BSC.ByteString)  !(MemSegmentOff 64) !String
+     -- ^ @RecoveryFailed dnm addr msg@ notes we failed to recover function due to given reason.
+   | RecoveryPLTSkipped  !(Maybe BSC.ByteString)  !(MemSegmentOff 64)
+   | RecoveryWarning !(Maybe BSC.ByteString) !(MemSegmentOff 64) !String
+   | GetFnsError !String
+     -- ^ A general error message
+
+instance Show GetFnsLogEvent where
+  show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
+  show (DuplicateSections nm)  = "Multiple sections named " ++ BSC.unpack nm
+  show (DebugError msg)        = msg
+  show (StartFunRecovery dnm faddr)  =
+     let fnm = case dnm of
+                 Just nm -> BSC.unpack nm <> "(0x" <> showHex (addrOffset (segoffAddr faddr)) ")"
+                 Nothing -> "0x" <> showHex (addrOffset (segoffAddr faddr)) ""
+      in "Recovering function " <> fnm
+  show (RecoveryFailed _ _ msg)  = "  " <> msg
+  show (RecoveryPLTSkipped _ _)  = "  Skipped PLT stub"
+  show (RecoveryWarning _ _ msg) = "  Warning: " ++ msg
+  show (GetFnsError msg) = msg
+
+$(pure [])
+
+---------------------------------------------------------------------------------
+-- ReoptFunType
+
+-- | This describes the arguments to a function using the type system
+-- internally maintained by Reopt.
+data ReoptFunType
+   = ReoptNonvarargFunType !AnnFunType
+   | ReoptPrintfFunType !Int
+     -- ^ A function that is like printf where the last non-vararg
+     -- argument is a string and subsequent arguments are inferred
+     -- from it.
+     --
+     -- The int denotes the number of 64-bit bitvectors previously.
+   | ReoptUnsupportedFunType
+  deriving (Eq, Show)
+
+$(pure [])
+
+---------------------------------------------------------------------------------
+-- FunTypeMaps
+
+-- | Function type information parsed from annotations and debug information.
+data FunTypeMaps w =
+  FunTypeMaps { dwarfAddrResolve :: !(BS.ByteString -> Word64 -> Maybe (MemSegmentOff w))
+                -- ^ This resolve the address of a function given its name and object.
+                --
+                -- This general type is used for eventual support of object files
+                -- with function sections, where the Dwarf information does not
+                -- contain address information, and so we use symbol addresses.
+                --
+                -- It returns nothing if an address cannot be resolved.
+              , dwarfBaseCodeAddr :: !(MemAddr w)
+                -- ^ Address to add to all code offsets in dwarf file.
+              , nameToAddrMap :: !(SymAddrMap w)
+                -- ^ Map from symbol names to the address.
+              , nameTypeMap :: !(Map BS.ByteString ReoptFunType)
+                -- ^ Map from external undefined symbol names to type.
+              , addrTypeMap :: !(Map (MemSegmentOff w) ReoptFunType)
+                -- ^ Map from code addresses that are start of function
+                -- to type.
+              , noreturnMap :: !(Map (MemSegmentOff w) NoReturnFunStatus)
+              }
+
+$(pure [])
+
+-- | Add a new function type to a function
+funTypeIsDefined :: FunTypeMaps w -- ^ Current type map information
+                 -> Maybe BS.ByteString -- ^ External name of function if not defined
+                 -> Maybe (MemSegmentOff w)
+                 -> Bool
+funTypeIsDefined funTypeMaps msym maddr = do
+  let symDef = case msym of
+                 Nothing -> True
+                 Just sym -> Map.member sym (nameTypeMap funTypeMaps)
+      addrDef = case maddr of
+                  Nothing -> True
+                  Just addr -> Map.member addr (addrTypeMap funTypeMaps)
+   in symDef && addrDef
+
+$(pure [])
+
+-- | Add a type to a map
+addCheckExisting :: (Ord k, Eq tp, Show tp)
+                 => (GetFnsLogEvent -> IO ())
+                 -> String
+                 -> k
+                 -> tp
+                 -> Map k tp
+                 -> IO (Map k tp)
+addCheckExisting logger nm k v m =
+  case Map.lookup k m of
+    Nothing ->
+      pure $! Map.insert k v m
+    Just pv -> do
+      when (pv /= v) $ do
+        logger $ GetFnsError $ printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v)
+      pure m
+
+$(pure [])
+
+-- | Add a new function type to a function
+addNamedFunType :: (GetFnsLogEvent -> IO ()) -- ^ Logging function for recording errors.
+                -> FunTypeMaps w -- ^ Current type map information
+                -> String -- ^ Name of entry for logging purposes.
+                -> Maybe BS.ByteString -- ^ External name of function if not defined
+                -> Maybe (MemSegmentOff w)
+                -> ReoptFunType
+                -> IO (FunTypeMaps w)
+addNamedFunType logger funTypeMaps loggingName msym maddr reoptFunType = do
+  ntm <-
+    case msym of
+      Nothing ->
+        pure $! nameTypeMap funTypeMaps
+      Just sym -> do
+        addCheckExisting logger loggingName sym reoptFunType (nameTypeMap funTypeMaps)
+  atm <-
+    case maddr of
+      Nothing -> do
+        pure $! addrTypeMap funTypeMaps
+      Just addr -> do
+        let nm = loggingName ++ " address"
+        addCheckExisting logger nm addr reoptFunType (addrTypeMap funTypeMaps)
+  pure $! funTypeMaps { nameTypeMap = ntm, addrTypeMap = atm }
+
+$(pure [])
+
+---------------------------------------------------------------------------------
+-- Debug resolution
+
+-- | Get name as an external symbol
+dwarfExternalName :: Dwarf.Subprogram -> Maybe BS.ByteString
+dwarfExternalName sub
+  | Dwarf.subExternal sub, Dwarf.subName sub /= "" = Just $ Dwarf.nameVal $ Dwarf.subName sub
+  | otherwise = Nothing
+
+
+dwarfSubEntry :: Dwarf.Subprogram -> Maybe Word64
+dwarfSubEntry sub =
+  case Dwarf.subEntryPC sub of
+    Just e -> Just e
+    Nothing -> Dwarf.subLowPC =<< Dwarf.subDef sub
+
+
+-- | @resolveDwarfSubprogramDebugName nm isExt o@ resolve the name to
+-- use for subprogram with the given name and offset.
+--
+-- This returns nothing if name is empty and ext is true or
+-- ext if false and the address is empty.
+resolveDwarfSubprogramDebugName :: Dwarf.Subprogram -- ^ Subprogram
+                                -> Maybe Word64 -- ^ Offset of subprogram.
+                                -> Maybe String
+resolveDwarfSubprogramDebugName sub moff
+  | Dwarf.subExternal sub =
+    if Dwarf.subName sub == "" then
+      Nothing
+     else
+      Just $! BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
+  | otherwise =
+    case moff of
+      Nothing -> Nothing
+      Just o ->
+        let nmVal :: String
+            nmVal | Dwarf.subName sub == "" = "Unnamed function"
+                  | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.subName sub))
+         in Just $! printf "%s (0x%x)" nmVal (toInteger o)
+
+$(pure [])
+
+throwDwarfTypeError :: MonadError ArgResolverError m => Dwarf.TypeRef -> String -> m a
+throwDwarfTypeError ref msg =
+  throwError $ DebugResolveError $ printf "Bad type ref 0x%x: %s" (Dwarf.typeRefFileOffset ref) msg
+
+$(pure [])
+
+resolveDwarfTypeRef :: (MonadIO m, MonadError ArgResolverError m)
+                    => (GetFnsLogEvent -> IO ())
+                    -> Map Dwarf.TypeRef Dwarf.AbsType
+                       -- ^ Logging function for errors
+                    -> Dwarf.TypeRef
+                    -> m Dwarf.TypeApp
+resolveDwarfTypeRef logger typeMap ref = do
+  case Map.lookup ref typeMap of
+    Nothing -> do
+      let o = Dwarf.typeRefFileOffset ref
+      throwDwarfTypeError ref $ printf "Could not find type %x." o
+    Just (Left msg, warnings) -> do
+      liftIO $ mapM_ (logger . DebugError) warnings
+      throwDwarfTypeError ref $ printf "Dwarf parsing error: %s" msg
+    Just (Right tp, warnings) -> do
+      liftIO $ mapM_ (logger . DebugError) warnings
+      pure tp
+
+$(pure [])
+
+resolveDwarfType :: (GetFnsLogEvent -> IO ())
+                    -- ^ Logging function for errors
+                 -> Map Dwarf.TypeRef Dwarf.AbsType
+                 -> Dwarf.TypeRef
+                 -> ExceptT ArgResolverError IO AnnType
+resolveDwarfType logger typeMap ref = do
+  tp <- resolveDwarfTypeRef logger typeMap ref
+  case tp of
+    Dwarf.BoolType -> do
+      pure $! IAnnType 1
+    Dwarf.UnsignedIntType byteCount -> do
+      pure $! IAnnType (8*byteCount)
+    Dwarf.SignedIntType byteCount -> do
+      pure $! IAnnType (8*byteCount)
+    Dwarf.FloatType -> do
+      pure FloatAnnType
+    Dwarf.DoubleType -> do
+      pure DoubleAnnType
+    Dwarf.LongDoubleType -> do
+      throwDwarfTypeError ref "Long double return type is not supported."
+    Dwarf.UnsignedCharType -> do
+      pure $! IAnnType 8
+    Dwarf.SignedCharType -> do
+      pure $! IAnnType 8
+    Dwarf.ArrayType _ _ -> do
+      throwDwarfTypeError ref "Array arguments are not supported."
+    Dwarf.PointerType _ _ -> do
+      -- We just use void pointers for now.
+      pure $ PtrAnnType VoidAnnType
+    Dwarf.StructType _ -> do
+      throwDwarfTypeError ref "Struct arguments are not supported."
+    Dwarf.UnionType _ -> do
+      throwDwarfTypeError ref "Union arguments are not supported."
+    Dwarf.EnumType d ->
+      case Dwarf.enumDeclType d of
+        Just r -> resolveDwarfType logger typeMap r
+        Nothing -> throwError $ DebugResolveError $ printf "Could not find type for enum at " ++ show ref
+    Dwarf.SubroutinePtrType _ -> do
+      -- We just use void pointers for now.
+      pure $ PtrAnnType VoidAnnType
+    Dwarf.TypedefType d -> do
+      resolveDwarfType  logger typeMap (Dwarf.typedefType d)
+    Dwarf.TypeQualType ann -> do
+      case Dwarf.tqaType ann of
+        Just r -> resolveDwarfType logger typeMap r
+        Nothing -> throwError $ DebugResolveError $ printf "Could not find type for qualifier at " ++ show ref
+    Dwarf.SubroutineTypeF _ -> do
+      throwDwarfTypeError ref "Subroutines may not be passed as return values."
+
+$(pure [])
+
+-- | Resolve Dwarf arg types
+resolveDwarfArgTypes :: (GetFnsLogEvent -> IO ())
+                      -- ^ Logging function for errors
+                      -> Maybe Dwarf.Subprogram
+                        -- ^ Origin subprogram if defined
+                      -> Map Dwarf.TypeRef Dwarf.AbsType
+                      -> [AnnFunArg] -- ^ Arguments processed so far in reverse order.
+                      -> Int -- ^ Number of arguments passed so far.
+                      -> [Dwarf.Variable]
+                      -> ExceptT ArgResolverError IO (V.Vector AnnFunArg)
+resolveDwarfArgTypes _ _morigin _typeMap prev _cnt [] =
+  pure $! V.fromList (reverse prev)
+resolveDwarfArgTypes logger morigin typeMap prev cnt (a:r) = seq cnt $ do
+  let nm | Dwarf.varName a == "" = "arg" ++ show cnt
+         | otherwise = BSC.unpack (Dwarf.nameVal (Dwarf.varName a))
+  let mnm | Dwarf.varName a == "" = Nothing
+          | otherwise = Just (BSC.unpack (Dwarf.nameVal (Dwarf.varName a)))
+  tp <-
+    case Dwarf.varType a of
+      Just ref -> do
+        resolveDwarfType logger typeMap ref
+      Nothing -> do
+        subOrigin <-
+          case morigin of
+            Nothing -> throwError $ MissingArgType nm
+            Just subOrigin -> pure subOrigin
+        varOrig <-
+          case Dwarf.varOrigin a of
+            Nothing -> throwError $ DebugResolveError $ "Missing argument abstract origin."
+            Just varOrigRef ->
+              case Map.lookup varOrigRef (Dwarf.subParamMap subOrigin) of
+                Nothing ->
+                  throwError $ DebugResolveError $
+                    printf "Could not find variable origin %s for %s." (show (pretty varOrigRef)) nm
+                Just o -> pure o
+        -- Get origin ref
+        ref <-
+          case Dwarf.varType varOrig of
+            Nothing -> throwError $ MissingArgType nm
+            Just ref -> pure ref
+        resolveDwarfType logger (Dwarf.subTypeMap subOrigin) ref
+  let a' = AnnFunArg { funArgName = mnm, funArgType = tp }
+  resolveDwarfArgTypes logger morigin typeMap (a':prev) (cnt+1) r
+
+-- | Resolve the type of a Dwarf subprogram
+resolveDwarfSubprogramFunType :: (GetFnsLogEvent -> IO ())
+                                 -- ^ Logging function for errors
+                              -> Dwarf.Subprogram
+                              -> Maybe Dwarf.Subprogram -- ^ Origin if subprogram is generated from another.
+                              -> ExceptT ArgResolverError IO AnnFunType
+resolveDwarfSubprogramFunType logger sub morigin = do
+  when (Dwarf.subUnspecifiedParams sub) $
+    throwError $ VarArgsUnsupported
+  argTypes <- resolveDwarfArgTypes logger morigin (Dwarf.subTypeMap sub) [] 0 (Map.elems (Dwarf.subParamMap sub))
+  retType <-
+    case Dwarf.subRetType sub of
+      Nothing ->
+        case morigin of
+          Nothing -> pure VoidAnnType
+          Just origin ->
+            case Dwarf.subRetType origin of
+              Nothing -> pure VoidAnnType
+              Just ref -> resolveDwarfType logger (Dwarf.subTypeMap origin) ref
+      Just ref -> resolveDwarfType logger (Dwarf.subTypeMap sub) ref
+
+  pure $! AnnFunType
+    { funRet    = retType
+    , funArgs  = argTypes
+    , funVarArg = False
+    }
+
+$(pure [])
+
+-- | Resolve type information from subroutine.
+resolveSubprogramType :: (GetFnsLogEvent -> IO ())
+                      -- ^ Logging function for errors
+                      -> Dwarf.CompileUnit
+                      -- ^ Compile unit for this sub program
+                      -> FunTypeMaps w
+                      -- ^ Annotations from source file
+                      -> Dwarf.Subprogram
+                      -- ^ Dwarf function information
+                      -> Maybe (MemSegmentOff w)
+                         -- Address
+                      -> IO (FunTypeMaps w)
+resolveSubprogramType logger cu annMap sub entryAddr
+  -- Non-defining subprograms are skipped.
+  | Dwarf.subIsDeclaration sub = do
+      pure annMap
+    -- Var args functions have a special usage.
+  | Dwarf.subUnspecifiedParams sub = do
+      -- Get name as an external symbol
+      let externalName :: Maybe BS.ByteString
+          externalName = dwarfExternalName sub
+      -- Get entry address in terms of memory.
+      case resolveDwarfSubprogramDebugName sub (dwarfSubEntry sub) of
+        Nothing -> pure annMap
+        Just debugName -> do
+          when (not (funTypeIsDefined annMap externalName entryAddr)) $ do
+            logger $ ArgResolverError debugName VarArgsUnsupported
+          pure annMap
+  | otherwise = do
+      -- Get name as an external symbol
+      let externalName :: Maybe BS.ByteString
+          externalName = dwarfExternalName sub
+      -- Get origin if this is an inlined or specialized instance of a source subprogram.
+      let emorigin =
+            case Dwarf.subOrigin sub of
+              Nothing -> Right Nothing
+              Just originRef ->
+                case Map.lookup originRef (Dwarf.cuSubprogramMap cu) of
+                  Nothing -> Left $ "Could not find origin " ++ show (pretty originRef)
+                  Just r -> Right (Just r)
+      case emorigin of
+        Left err -> do
+          logger $ DebugError err
+          pure annMap
+        Right morigin ->
+          case resolveDwarfSubprogramDebugName sub (dwarfSubEntry sub) of
+            Nothing -> pure annMap
+            Just debugName -> do
+              mfunType <- runExceptT $ resolveDwarfSubprogramFunType logger sub morigin
+              funType <-
+                case mfunType of
+                  Left e -> do
+                    logger $ ArgResolverError debugName e
+                    pure $! ReoptUnsupportedFunType
+                  Right funType -> do
+                    pure (ReoptNonvarargFunType funType)
+              addNamedFunType logger annMap debugName externalName entryAddr funType
+
+-- | Resolve type information from subroutine.
+resolveSubprogram :: (GetFnsLogEvent -> IO ())
+                  -- ^ Logging function for errors
+                  -> Dwarf.CompileUnit
+                  -- ^ Compile unit for this sub program
+                  -> FunTypeMaps w
+                  -- ^ Annotations from source file
+                  -> Dwarf.Subprogram
+                  -- ^ Elf file for header information
+                  -> IO (FunTypeMaps w)
+resolveSubprogram logger cu annMap sub = do
+  -- Get entry address in terms of memory.
+  entryAddr <-
+    case dwarfSubEntry sub of
+      Nothing -> pure Nothing
+      Just entry -> do
+        let dwarfName = Dwarf.subName sub
+        let r = dwarfAddrResolve annMap (Dwarf.nameVal dwarfName) entry
+        when (isNothing r) $ do
+          let debugName | dwarfName == "" = "Unnamed symbol"
+                        | otherwise = BSC.unpack (Dwarf.nameVal dwarfName)
+          logger $ DebugError $ printf "%s invalid debug address %s." debugName (show entry)
+        pure r
+  annMap' <- resolveSubprogramType logger cu annMap sub entryAddr
+  case entryAddr of
+    Nothing -> pure annMap'
+    Just entry -> do
+      let val | Dwarf.subNoreturn sub = NoReturnFun
+              | otherwise = MayReturnFun
+      let fn NoReturnFun _ = NoReturnFun
+          fn _ NoReturnFun = NoReturnFun
+          fn _ _ = MayReturnFun
+      pure $ annMap' { noreturnMap = Map.insertWith fn entry val (noreturnMap annMap') }
+
+-- | Add all compile units in plugin
+resolveCompileUnits :: (GetFnsLogEvent -> IO ())
+                    -- ^ Logging function for errors
+                    -> FunTypeMaps w
+                    -- ^ Map from function names to type info.
+                    -> Maybe (Either String Dwarf.CUContext)
+                    -- ^ Elf file for header information
+                    -> IO (FunTypeMaps w)
+resolveCompileUnits _logge annMap Nothing = do
+  pure annMap
+resolveCompileUnits logger annMap (Just (Left e)) = do
+  logger (DebugError e)
+  pure annMap
+resolveCompileUnits logger annMap (Just (Right ctx)) = do
+  let (mcr, warnings) = Dwarf.getCompileUnit ctx
+  mapM_ (logger . DebugError) (reverse warnings)
+  case mcr of
+    Left msg -> do
+      logger (DebugError msg)
+      resolveCompileUnits logger annMap (Dwarf.nextCUContext ctx)
+    Right cu -> do
+      annMap' <- foldlM (resolveSubprogram logger cu) annMap (Dwarf.cuSubprograms cu)
+      resolveCompileUnits logger annMap' (Dwarf.nextCUContext ctx)
+
+-- | Extend function types with header information.
+resolveDebugFunTypes :: forall w
+                     . (GetFnsLogEvent -> IO ())
+                     -- ^ Logging function for errors
+                     -> FunTypeMaps w
+                     -- ^ Annotations from source file
+                     -> Elf.ElfHeaderInfo w
+                     -- ^ Elf file for header information
+                     -> IO (FunTypeMaps w)
+resolveDebugFunTypes logger annMap elfInfo = do
+  let hdr = Elf.header elfInfo
+  let secDataMap :: Map BS.ByteString [(Elf.FileRange (Elf.ElfWordType w), Elf.ElfSection (Elf.ElfWordType w))]
+      secDataMap = Map.fromListWith (++)
+        [ (Elf.elfSectionName sec, [(r,sec)])
+        | (r,sec) <- V.toList (Elf.headerSections elfInfo)
+        ]
+  case Map.findWithDefault [] ".debug_info" secDataMap of
+    [] -> do
+      -- No debug information
+      pure annMap
+    _:_ -> do
+      let end =
+            case Elf.headerData hdr of
+              Elf.ELFDATA2LSB -> Dwarf.LittleEndian
+              Elf.ELFDATA2MSB -> Dwarf.BigEndian
+      sections <- Dwarf.mkSections $ \nm ->
+        case Map.findWithDefault [] nm secDataMap of
+          [] -> pure BS.empty
+          (_, s):r -> do
+            when (not (null r)) $ logger (DuplicateSections nm)
+            pure $! Elf.elfSectionData s
+      resolveCompileUnits logger annMap (Dwarf.firstCUContext end sections)
+
+$(pure [])
+
+---------------------------------------------------------------------------------
+-- Complete discovery
+
+doDiscovery :: forall arch
+            .  (GetFnsLogEvent -> IO ())
+               -- ^ Logging function for errors
+            -> AnnDeclarations
+               -- ^ Header with hints for assisting typing.
+            -> Elf.ElfHeaderInfo (ArchAddrWidth arch)
+            -> ArchitectureInfo arch
+            -> InitDiscovery arch
+            -> DiscoveryOptions -- ^ Options controlling discovery
+            -> ReoptOptions
+            -> IO ( FunTypeMaps (ArchAddrWidth arch)
+                  , DiscoveryState arch
+                  )
+doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts = withArchConstraints ainfo $ do
+  s <- initDiscState initState ainfo reoptOpts
+  let mem = memory s
+  let symAddrMap = initDiscSymAddrMap initState
+
+  -- Generate type information from annotations
+  let nameAnnTypeMap
+        = fmap ReoptNonvarargFunType (funDecls hdrAnn)
+        <> Map.singleton "printf"   (ReoptPrintfFunType 0)
+        <> Map.singleton "fprintf"  (ReoptPrintfFunType 1)
+        <> Map.singleton "sprintf"  (ReoptPrintfFunType 1)
+        <> Map.singleton "snprintf" (ReoptPrintfFunType 2)
+
+  -- Generate map from address names to known type.
+  --
+  -- This is used when we see a function jumps to a defined address.
+  addrAnnTypeMap <- do
+    let insSymType :: Map (ArchSegmentOff arch) ReoptFunType
+                   -> (BS.ByteString, ReoptFunType)
+                   -> IO (Map (ArchSegmentOff arch) ReoptFunType)
+        insSymType m (sym,annTp) = do
+          case symAddrMapLookup symAddrMap sym of
+            Left SymAddrMapNotFound -> do
+              -- Silently drop symbols without addresses as they may be undefined.
+              pure m
+            Left SymAddrMapAmbiguous -> do
+              logger $ GetFnsError $ "Ambiguous symbol " ++ BSC.unpack sym ++ "."
+              pure m
+            Right addr -> do
+              pure $! Map.insert addr annTp m
+    foldlM insSymType Map.empty (Map.toList nameAnnTypeMap)
+
+  let annTypeMap :: FunTypeMaps (ArchAddrWidth arch)
+      annTypeMap = FunTypeMaps
+        { dwarfBaseCodeAddr = initDiscBaseCodeAddr initState
+        , dwarfAddrResolve = \_symName off -> do
+            let addr = incAddr (toInteger off) (initDiscBaseCodeAddr initState)
+             in asSegmentOff mem addr
+        , nameToAddrMap = initDiscSymAddrMap initState
+        , nameTypeMap = nameAnnTypeMap
+        , addrTypeMap = addrAnnTypeMap
+        , noreturnMap = s^.trustedFunctionEntryPoints
+        }
+
+  -- Resolve debug information.
+  debugTypeMap <- resolveDebugFunTypes logger annTypeMap hdrInfo
+  let postDebugState = s & trustedFunctionEntryPoints .~ noreturnMap debugTypeMap
+
+  discState <- completeDiscoveryState postDebugState disOpt
+  pure (debugTypeMap, discState)
+
 -- | Discover code in the binary identified by the given path.
-discoverBinary :: FilePath
+discoverBinary :: (GetFnsLogEvent -> IO ())
+                  -- ^ Logging function for errors
+               -> FilePath
                -> LoadOptions
                   -- ^ Option to load the binary at the given address
                -> DiscoveryOptions -- ^ Options controlling discovery
-               -> [String] -- ^ Included addresses
-               -> [String] -- ^ Excluded addresses
+               -> ReoptOptions
+               -> AnnDeclarations
+                  -- ^ Header with hints for assisting typing.
                -> IO (Some DiscoveryState)
-discoverBinary path loadOpts disOpt includeAddr excludeAddr = do
+discoverBinary logger path loadOpts disOpt reoptOpts hdrAnn = do
   Some hdrInfo <- readSomeElf path
   let hdr = Elf.header hdrInfo
   -- Get architecture information for elf
   SomeArch ainfo pltFn <- getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
-  (_, s, _, _, _) <- runCompleteDiscovery loadOpts disOpt hdrInfo ainfo pltFn includeAddr excludeAddr
-  pure (Some s)
+  -- Parse elf file to get relevant state.
+  initState <- initDiscovery loadOpts hdrInfo pltFn
+  (_,r) <- doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts
+  pure (Some r)
 
 ------------------------------------------------------------------------
 -- Print disassembly
@@ -879,7 +1678,7 @@ x86DemandInfo sysp =
                  , functionRetRegs = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
                  , calleeSavedRegs = x86CalleeSavedRegs
                  , computeArchTermStmtEffects = summarizeX86TermStmt sysp
-                 , demandInfoCtx = x86DemandContext
+                 , demandInfoCtx = X86.x86DemandContext
                  }
 
 ------------------------------------------------------------------------
@@ -957,12 +1756,12 @@ instance Show X86OS where
   show FreeBSD = "FreeBSD"
 
 osPersonality :: X86OS -> SyscallPersonality
-osPersonality Linux = linux_syscallPersonality
-osPersonality FreeBSD = freeBSD_syscallPersonality
+osPersonality Linux   = X86.linux_syscallPersonality
+osPersonality FreeBSD = X86.freeBSD_syscallPersonality
 
 osArchitectureInfo :: X86OS -> ArchitectureInfo X86_64
-osArchitectureInfo Linux = x86_64_linux_info
-osArchitectureInfo FreeBSD = x86_64_freeBSD_info
+osArchitectureInfo Linux   = X86.x86_64_linux_info
+osArchitectureInfo FreeBSD = X86.x86_64_freeBSD_info
 
 -- | Return the name to pass the linker for this architecture.
 osLinkName :: X86OS -> String
@@ -978,7 +1777,7 @@ getX86ElfArchInfo m abi = do
   hPutStrLn stderr $ printf "Do not support %s %s binaries." (show m) (show abi)
   exitFailure
 
--- | Map memory addresses to the associated type for that address.
+-- | Map function names to the associated type for the function with that name.
 type FunctionTypeMap arch = Map BS.ByteString (FunctionType arch)
 
 -- | This updates the map by adding the types for this function along
@@ -994,8 +1793,7 @@ getReferencedFunctions :: forall arch
                           , FoldableF (FnArchStmt arch)
                           )
                        => Set.Set BS.ByteString
-                       -- ^ Functions with definitions that we do not
-                       -- need declarations for.
+                       -- ^ Name of functions with definitions.
                        -> FunctionTypeMap arch
                        -> Function arch
                        -> FunctionTypeMap arch
@@ -1005,14 +1803,14 @@ getReferencedFunctions excluded m0 f =
                                 -> FnValue arch tp
                                 -> FunctionTypeMap arch
         findReferencedFunctions m (FnFunctionEntryValue ft nm) =
-          insertAddr nm ft m
+          insertName nm ft m
         findReferencedFunctions m _ = m
 
-        insertAddr :: BS.ByteString
+        insertName :: BS.ByteString
                    -> FunctionType arch
                    -> FunctionTypeMap arch
                    -> FunctionTypeMap arch
-        insertAddr nm ft m
+        insertName nm ft m
           | Set.member nm excluded = m
           | otherwise =
             case Map.lookup nm m of
@@ -1023,90 +1821,81 @@ getReferencedFunctions excluded m0 f =
                        | otherwise -> m
               _ -> Map.insert nm ft m
 
--- | List of annotations
-type AnnotatedFuns = [(BS.ByteString, X86FunTypeInfo)]
-
--- | An error from parsing the external header for arguments
-data HeaderAnnError
-   = OutOfGPRegs !String
-     -- ^ @OutOfGPRegs The argument @nm
-   | UnsupportedArgType !String !HdrType
-   | UnsupportedReturnType !HdrType
-   | VarArgsUnsupported
-
--- | Pretty print for header errors.
-showHeaderAnnError :: BSC.ByteString -> HeaderAnnError -> String
-showHeaderAnnError fnm (OutOfGPRegs _) =
-  printf "Ignoring header type on %s: Only stack arguments supported and no registers available." (BSC.unpack fnm)
-showHeaderAnnError fnm (UnsupportedArgType _ tp) =
-  printf "Ignoring header type on %s: Do not support argument type %s." (BSC.unpack fnm) (ppHdrType tp)
-showHeaderAnnError fnm (UnsupportedReturnType tp) =
-  printf "Ignoring header type on %s: Do not support return argument type %s." (BSC.unpack fnm) (ppHdrType tp)
-showHeaderAnnError fnm VarArgsUnsupported =
-  printf "Ignoring header type on %s: Do not support vararg functions." (BSC.unpack fnm)
-
--- |  State monad for resolving arguments.
-data ArgResolverState = ARS { arsPrev :: [X86ArgInfo]
-                              -- ^ Arguments identified in reverse order.
-                            , arsNextGPP :: [F.Reg64]
-                              -- ^ General purpose registers still
-                              -- available for arguments.
-                            }
-
-type ArgResolver = StateT ArgResolverState (Except HeaderAnnError)
-
 -- | Attempt to resolve what register to associate with an argument.
-resolveArgType :: String  -- ^ Argument name.
-               -> HdrType -- ^ Initial type for display purposes.
-               -> HdrType -- ^ Type Initial type for display purposes.
-               -> ArgResolver ()
-resolveArgType nm initType tp0 =
+resolveArgType :: Monad m
+               => String  -- ^ Argument name.
+               -> AnnType -- ^ Type to resolve
+               -> ArgResolver m ()
+resolveArgType nm tp0 =
   case tp0 of
-    UInt64HdrType -> do
-      regs <- gets arsNextGPP
-      case regs of
-        [] ->
-          throwError $ OutOfGPRegs nm
-        (r:rest) -> do
-          modify $ \s -> s { arsPrev = ArgBV64 r : arsPrev s
-                           , arsNextGPP = rest
-                           }
-    TypedefHdrType _ tp ->
-      resolveArgType nm initType tp
-    _ -> do
-      throwError $ UnsupportedArgType nm initType
+    VoidAnnType ->
+      throwError $ UnsupportedArgType nm (ppAnnType tp0)
+    IAnnType w -> do
+      when (w > 64) $ throwError $ UnsupportedArgType nm (ppAnnType tp0)
+      addGPReg64 nm
+    FloatAnnType ->
+      throwError $ UnsupportedArgType nm (ppAnnType tp0)
+    DoubleAnnType ->
+      throwError $ UnsupportedArgType nm (ppAnnType tp0)
+    PtrAnnType _ ->
+      addGPReg64 nm
+    TypedefAnnType _ tp ->
+      resolveArgType nm tp
 
 -- | This parses the types extracted from header function argumnts to
 -- the machine code registers that the function will expect.
-argsToRegisters :: Int -- ^ Number of arguments processed so far.
-                -> V.Vector HdrFunArg
+argsToRegisters :: Monad m
+                => Int -- ^ Number of arguments processed so far.
+                -> V.Vector AnnFunArg
                    -- ^ Remaining arguments to parse
-                -> ArgResolver ()
+                -> ArgResolver m ()
 argsToRegisters cnt args
   | cnt >= V.length args = pure ()
   | otherwise = do
       let arg = args V.! cnt
       let nm = fromMaybe ("arg" ++ show cnt) (funArgName arg)
-      resolveArgType nm (funArgType arg) (funArgType arg)
+      resolveArgType nm (funArgType arg)
       argsToRegisters (cnt+1) args
 
-parseReturnType :: HdrType -> Either HeaderAnnError [Some X86RetInfo]
+parseReturnType :: AnnType -> Either ArgResolverError [Some X86RetInfo]
 parseReturnType tp0 =
   case tp0 of
-    VoidHdrType ->
-      Right []
-    UInt64HdrType ->
-      Right [Some (RetBV64 F.RAX)]
-    PtrHdrType _ ->
-      Right [Some (RetBV64 F.RAX)]
-    TypedefHdrType _ tp
-      | Right r <- parseReturnType tp ->
-        Right r
-    _ -> Left $ UnsupportedReturnType tp0
+    VoidAnnType      -> Right []
+    IAnnType w | w > 64 -> Left  $ UnsupportedReturnType (ppAnnType tp0)
+               | otherwise -> Right $ [Some (RetBV64 F.RAX)]
+    FloatAnnType     -> Left  $ UnsupportedReturnType (ppAnnType tp0)
+    DoubleAnnType    -> Left  $ UnsupportedReturnType (ppAnnType tp0)
+    PtrAnnType _     -> Right $ [Some (RetBV64 F.RAX)]
+    TypedefAnnType _ tp -> parseReturnType tp
+
+
+resolveAnnFunType :: Monad m
+                  => AnnFunType
+                  -> ExceptT ArgResolverError m X86FunTypeInfo
+resolveAnnFunType funType =
+   if funVarArg funType then do
+     throwError VarArgsUnsupported
+    else do
+     args <- runArgResolver (argsToRegisters 0 (funArgs funType))
+     ret <- case parseReturnType (funRet funType) of
+              Left e -> throwError e
+              Right r -> pure r
+     pure $! X86NonvarargFunType args ret
 
 -- | This checks whether any of the symbols in the map start with the given string as a prefix.
-isUsedPrefix :: BSC.ByteString -> AddrSymMap w -> Bool
-isUsedPrefix prefix m = any (\nm -> prefix `BSC.isPrefixOf` nm) (Map.elems m)
+isUsedPrefix :: BSC.ByteString -> SymAddrMap  w -> Bool
+isUsedPrefix prefix sam = any (\s -> prefix `BSC.isPrefixOf` qsnBytes s) (Map.elems (samAddrMap sam))
+
+-- | Name of recovered function from a qualified symbol name.
+localFunctionName :: BSC.ByteString -> QualifiedSymbolName -> MemSegmentOff w -> BSC.ByteString
+localFunctionName prefix qnm segOff =
+  if qsnGlobal qnm then
+    qsnBytes qnm
+   else
+    let addr = segoffAddr segOff
+     in prefix <> "_" <> qsnBytes qnm
+               <> "_" <> BSC.pack (show (addrBase addr))
+               <> "_" <> BSC.pack (show (addrOffset addr))
 
 -- | Name of recovered function when no function exists.
 nosymFunctionName :: BSC.ByteString -> MemSegmentOff w -> BSC.ByteString
@@ -1116,7 +1905,7 @@ nosymFunctionName prefix segOff =
 
 -- | Returns name of recovered function.
 recoveredFunctionName :: MemWidth w
-                      => AddrSymMap w
+                      => SymAddrMap w
                       -- ^ Maps addresses of symbols to the associated symbol name.
                       -> BSC.ByteString
                       -- ^ Prefix to use for automatically generated symbols.
@@ -1125,45 +1914,26 @@ recoveredFunctionName :: MemWidth w
                       -> MemSegmentOff w
                       -> BSC.ByteString
 recoveredFunctionName m prefix segOff =
-  case Map.lookup segOff m of
-    Just sym -> sym
+  case Map.lookup segOff (samAddrMap m) of
+    Just qname -> localFunctionName prefix qname segOff
     Nothing -> nosymFunctionName prefix segOff
+
+$(pure [])
 
 -- | Map x86 function type to known functon abi.
 --
 -- This is used for global function argument analysis which doesn't yet support vararg
 -- functions such as printf.
-toKnownFunABI :: X86FunTypeInfo -> [KnownFunABI X86Reg]
-toKnownFunABI (X86NonvarargFun args rets) =
-  [KnownFnABI { kfArguments = argReg <$> args
-              , kfReturn = viewSome retReg <$> rets
-              }
-  ]
-toKnownFunABI X86PrintfFun = []
-
--- | Resolve annotations on funbction types from C header, and return
--- warnings and the list of functions.
-resolveHeaderFuns :: Header
-                  -> ([(BSC.ByteString, HeaderAnnError)], AnnotatedFuns)
-resolveHeaderFuns hdr =  Map.foldrWithKey resolveTypeRegs ([],[]) (hdrFunDecls hdr)
-  where resolveTypeRegs :: BSC.ByteString -- ^ Name of function
-                        -> HdrFunDecl -- ^ Function types
-                        -> ([(BSC.ByteString, HeaderAnnError)], AnnotatedFuns)
-                        -> ([(BSC.ByteString, HeaderAnnError)], AnnotatedFuns)
-        resolveTypeRegs funName tp (prevWarnings,prev) =
-          if hfdVarArg tp then
-            ((funName,VarArgsUnsupported):prevWarnings,prev)
-           else do
-            let s0 = ARS { arsPrev = []
-                         , arsNextGPP = [ F.RDI, F.RSI, F.RDX, F.RCX, F.R8, F.R9 ]
-                         }
-            case (,) <$> runExcept (execStateT (argsToRegisters 0 (hfdArgs tp)) s0)
-                     <*> parseReturnType (hfdRet tp) of
-              Left e -> do
-                ((funName,e):prevWarnings,prev)
-              Right (s, ret) ->
-                let fti = X86NonvarargFun (reverse (arsPrev s)) ret
-                 in (prevWarnings, (funName, fti):prev)
+toKnownFunABI :: ReoptFunType -> Maybe (KnownFunABI X86Reg)
+toKnownFunABI (ReoptNonvarargFunType atp) =
+  case runExcept (resolveAnnFunType atp) of
+    Right (X86NonvarargFunType args rets) ->
+      Just $ KnownFnABI { kfArguments = argReg <$> args
+                        , kfReturn = viewSome retReg <$> rets
+                        }
+    _ -> Nothing
+toKnownFunABI (ReoptPrintfFunType _) = Nothing
+toKnownFunABI ReoptUnsupportedFunType = Nothing
 
 -- | Construct function type from demands.
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
@@ -1193,7 +1963,7 @@ inferFunctionTypeFromDemands dm =
                 ++ fmap ArgMM512D (dropArgSuffix X86_ZMMReg [0..7] argSet)
             rets = fmap (Some . RetBV64)   (dropArgSuffix X86_GP     [F.RAX, F.RDX] retSet)
                 ++ fmap (Some . RetMM512D) (dropArgSuffix X86_ZMMReg [0,1]          retSet)
-         in X86NonvarargFun args rets
+         in X86NonvarargFunType args rets
   in fmap orderPadArgs
      $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
                         (fmap (\ds ->  (registerDemands ds, mempty)))
@@ -1201,159 +1971,315 @@ inferFunctionTypeFromDemands dm =
                         dm
                         retDemands
 
--- | Event passed to logger when discovering functions
-data GetFnsLogEvent
-   = HeaderAnnError !BSC.ByteString !HeaderAnnError
-   | StartFunRecovery !BSC.ByteString
-     -- ^ Notify we are starting analysis of given function.
-   | RecoveryFailed !BSC.ByteString !String
-     -- ^ @RecoveryFailed fnm msg@ notes we failed to recover function due to given reason.
-   | RecoveryPLTSkipped !BSC.ByteString
-   | RecoveryWarning !BSC.ByteString !String
-   | GetFnsError !String
-     -- ^ A general error message
-
-instance Show GetFnsLogEvent where
-  show (HeaderAnnError fnm e) = showHeaderAnnError fnm e
-  show (StartFunRecovery fnm) = "Recovering function " ++ BSC.unpack fnm
-  show (RecoveryFailed _ msg)  = "  Failed:  " ++ msg
-  show (RecoveryPLTSkipped _)  = "  Skipped PLT stub"
-  show (RecoveryWarning _ msg) = "  Warning: " ++ msg
-  show (GetFnsError msg) = msg
-
 defaultX86Type :: X86FunTypeInfo
-defaultX86Type = X86NonvarargFun args rets
+defaultX86Type = X86NonvarargFunType args rets
   where args = fmap ArgBV64 x86GPPArgumentRegs ++ fmap ArgMM512D [0..7]
         rets = [ Some (RetBV64 F.RAX), Some (RetBV64 F.RDX) ]
+
+
+$(pure [])
+
+resolveReoptFunType :: Monad m
+                    => ReoptFunType
+                    -> ExceptT ArgResolverError m X86FunTypeInfo
+resolveReoptFunType (ReoptNonvarargFunType ftp) =
+  resolveAnnFunType ftp
+resolveReoptFunType (ReoptPrintfFunType i) =
+  pure $! X86PrintfFunType i
+resolveReoptFunType ReoptUnsupportedFunType =
+  pure $! X86UnsupportedFunType
+
+$(pure [])
+
+--------------------------------------------------------------------------------
+-- UseMap
+
+-- | Type synonym to identify segment offsets that should correspond
+-- to the start of a function.
+type FunAddress w = MemSegmentOff w
+
+type BlockSize = Word64
+
+-- | Maps offsets within a region to the size and starting addresses
+-- of functions
+type FunUseOffsetMap w = Map BlockOff (BlockOff, [FunAddress w])
+
+type BlockOff = Word64
+
+-- | Create map with a single region
+initFunUseOffsetMap :: FunAddress w -> BlockOff -> BlockOff -> FunUseOffsetMap w
+initFunUseOffsetMap f off endOff = Map.singleton off (endOff, [f])
+
+-- | Replace a region at a given block
+replaceRegion :: BlockOff
+              -> FunAddress w -- ^ New function
+              -> BlockOff -- ^ End offset of new function block
+              -> [FunAddress w] -- ^ Old functions
+              -> BlockOff -- ^ Size of old function blocks
+              -> FunUseOffsetMap w
+              -> FunUseOffsetMap w
+replaceRegion off f newEnd oldFuns oldEnd m =
+  case compare oldEnd newEnd of
+    LT -> Map.insert off (oldEnd, (f:oldFuns)) $
+          Map.insert oldEnd (newEnd, [f]) m
+    EQ -> Map.insert off (oldEnd, (f:oldFuns)) m
+    GT -> Map.insert off (newEnd, (f:oldFuns)) $
+          Map.insert newEnd (oldEnd, [f]) m
+
+-- | Update funUseOffsetMap with new address
+updateFunUseOffsetMap :: FunAddress w
+                      -> BlockOff
+                      -> BlockOff -- ^ end offset
+                      -> FunUseOffsetMap w
+                      -> FunUseOffsetMap w
+updateFunUseOffsetMap f off newEnd old = do
+  case Map.lookupLT newEnd old of
+    Nothing -> Map.insert off (newEnd, [f]) old
+    Just (oldOff, (oldEnd, oldFuns))
+      -- If old region ends before this one, then just add new region.
+      | oldEnd <= off -> Map.insert off (newEnd, [f]) old
+      | otherwise ->
+          case compare oldOff off of
+            LT ->
+              replaceRegion off f newEnd oldFuns oldEnd $
+                Map.insert oldOff (off, oldFuns) old
+            EQ -> replaceRegion off f newEnd oldFuns oldEnd old
+            GT ->
+              updateFunUseOffsetMap f off oldOff $
+                replaceRegion oldOff f newEnd oldFuns oldEnd old
+
+-- | Maps regions indices for code to offsets witin region to the size of the segment and a list
+-- of functions that occupy that region.
+--
+-- This maintains the invariant that the list of functions are
+-- non-empty, and no regions overlap.
+newtype FunUseMap w = FunUseMap (Map RegionIndex (FunUseOffsetMap w))
+
+-- | Empty use map
+emptyFunUseMap :: FunUseMap w
+emptyFunUseMap = FunUseMap Map.empty
+
+-- | Mark a region as belonging to a particular function
+recordRegionUse :: FunAddress w -> MemSegmentOff w -> BlockSize -> State (FunUseMap w) ()
+recordRegionUse f so sz = do
+  let a = segoffAddr so
+      -- Offset of block
+      off :: BlockOff
+      off = memWordValue (addrOffset a)
+      initMap = initFunUseOffsetMap f off (off+sz)
+      updMap _ old = updateFunUseOffsetMap f off (off + sz) old
+  modify $ \(FunUseMap regionMap) ->
+     FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
+
+-- | Record memory used by block to function address
+recordBlockUse :: FunAddress (ArchAddrWidth arch)
+               -> ParsedBlock arch ids
+               -> State (FunUseMap (ArchAddrWidth arch)) ()
+recordBlockUse f b = do
+  recordRegionUse f (pblockAddr b) (fromIntegral (blockSize b))
+  -- Record jumptable backing as well.
+  case pblockTermStmt b of
+    ParsedLookupTable layout _ _ _ -> do
+      let a = jtlBackingAddr layout
+          sz = jtlBackingSize layout
+      recordRegionUse f a sz
+    _ -> pure ()
+
+-- | Record memory used by block to function address
+recordFunUse :: DiscoveryFunInfo arch ids
+             -> State (FunUseMap (ArchAddrWidth arch)) ()
+recordFunUse f =
+  mapM_ (recordBlockUse (discoveredFunAddr f)) (f^.parsedBlocks)
+
+mkFunUseMap :: DiscoveryState arch -> FunUseMap (ArchAddrWidth arch)
+mkFunUseMap s = flip execState emptyFunUseMap $ do
+  mapM_ (\(Some f) -> recordFunUse f) (s^.funInfo)
+
+-- | Return the number of bytes only allocated to the function.
+endOwnedByFun :: FunAddress w -> BlockOff -> FunUseOffsetMap w -> BlockOff -> BlockOff
+endOwnedByFun f o m regionSize =
+  case Map.lookupGE o m of
+    Nothing -> regionSize
+    Just (s, (e, fns))
+      | fns == [f] -> endOwnedByFun f e m regionSize
+      | otherwise -> s
+
+-- | Return the number of bytes starting from function entry
+-- point in the segment that are exclusive allocated to function.
+lookupFunSize :: MemWidth w => MemSegmentOff w -> FunUseMap w -> Word64
+lookupFunSize f (FunUseMap m) =
+  let seg = segoffSegment f
+      a = segoffAddr f
+      o = memWordValue (addrOffset a)
+      err = error "internal error: Function unregistered"
+      offMap = Map.findWithDefault err (addrBase a) m
+      maxValue = memWordValue (segmentSize seg) - memWordValue (segoffOffset f)
+      endOff = endOwnedByFun f o offMap maxValue
+   in endOff - o
+
+$(pure [])
+
+--------------------------------------------------------------------------------
+-- recoverX86Elf
 
 -- | Analyze an elf binary to extract information.
 --
 --  Note. This prints warnings to stderr and may exit if the Elf file cannot be parsed.
-discoverX86Elf :: (GetFnsLogEvent -> IO ())
+recoverX86Elf :: (GetFnsLogEvent -> IO ())
                -- ^ Logging function for errors
                -> FilePath
                -- ^ Path to binary for exploring CFG
                -> LoadOptions
                -- ^ Option to load the binary at the given address
                -> DiscoveryOptions -- ^ Options controlling discovery
-               -> [String] -- ^ Included addresses (if empty then all addresses included)
-               -> [String] -- ^ Excluded addresses
-               -> Header
+               -> ReoptOptions -- ^ User
+               -> AnnDeclarations
                -- ^ Header with hints for assisting typing.
                -> BSC.ByteString -- ^ Prefix to use if we need to generate new function endpoints later.
-               -> IO ( Elf 64
+               -> IO ( Elf.ElfHeaderInfo 64
                      , X86OS
                      , DiscoveryState X86_64
                      , RecoveredModule X86_64
+                     , MergeRelations
                      )
-discoverX86Elf logger path loadOpts disOpt includeAddr excludeAddr hdrAnn unnamedFunPrefix = do
+recoverX86Elf logger path loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix = do
   bs <- checkedReadFile path
-  hdrInfo <-
-    case Elf.parseElfHeaderInfo bs of
-      Left (_, msg) -> do
-        hPutStrLn stderr $ "Could not parse Elf file " ++ path ++ ":"
-        hPutStrLn stderr $ "  " ++ msg
-        exitFailure
-      Right (Elf32 _) -> do
-        hPutStrLn stderr "32-bit elf files are not yet supported."
-        exitFailure
-      Right (Elf64 hdrInfo) -> do
-        pure hdrInfo
+  hdrInfo <- parseElfHeaderInfo64 path bs
   let hdr = Elf.header hdrInfo
-  os <- getX86ElfArchInfo (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
-  (e, discState, addrSymMap, symAddrMap, pltFuns) <-
-    runCompleteDiscovery loadOpts disOpt hdrInfo (osArchitectureInfo os) processX86PLTEntries includeAddr excludeAddr
-  when (isUsedPrefix unnamedFunPrefix addrSymMap) $ do
-    hPutStrLn stderr $ printf "No symbol in the binary may start with the prefix %d." (BSC.unpack unnamedFunPrefix)
-    exitFailure
-  let sysp = osPersonality os
-  let mem = memory discState
-  -- Resolve function type annotations from header, and report rwarnings.
-  let (hdrWarnings, symTypeList) = resolveHeaderFuns hdrAnn
-  mapM_ (\(nm,err) -> logger (HeaderAnnError nm err)) hdrWarnings
 
-  -- Generate map from symbol names to known type.
-  --
-  -- This is used when we see a function jumps to a defined address.
-  addrTypeMap <- do
-    let insSymType :: Map (MemSegmentOff 64) (KnownFunABI X86Reg)
-                   -> (BS.ByteString, X86FunTypeInfo)
-                   -> IO (Map (MemSegmentOff 64) (KnownFunABI X86Reg))
-        insSymType m (sym,annTp) = do
-          case symAddrMapLookup symAddrMap sym of
-            Left SymAddrMapNotFound -> do
-              logger $ GetFnsError $ "Could not find symbol " ++ BSC.unpack sym ++ "."
-              pure m
-            Left SymAddrMapAmbiguous -> do
-              logger $ GetFnsError $ "Ambiguous symbol " ++ BSC.unpack sym ++ "."
-              pure m
-            Right addr -> do
-              pure $ foldl (\m' tp -> Map.insert addr tp m') m (toKnownFunABI annTp)
-    foldlM insSymType Map.empty symTypeList
+  os <- getX86ElfArchInfo (Elf.headerMachine hdr) (Elf.headerOSABI hdr)
+
+  let ainfo = osArchitectureInfo os
+  let pltFn = processX86PLTEntries
+  initState <- initDiscovery loadOpts hdrInfo pltFn
+
+  (debugTypeMap, discState) <-
+    doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts
+  let mem = memory discState
+
+  let symAddrMap = initDiscSymAddrMap initState
+  when (isUsedPrefix unnamedFunPrefix symAddrMap) $ do
+    hPutStrLn stderr $
+      printf "No symbol in the binary may start with the prefix %d."
+             (BSC.unpack unnamedFunPrefix)
+    exitFailure
+
+  let sysp = osPersonality os
 
   -- Compute the function demands
   let fDems =
         -- Generate map from symbol names to known type.
-        let symTypeMap :: Map BS.ByteString (KnownFunABI X86Reg)
-            symTypeMap = Map.fromList $
-              [ (nm, tp)
-              | (nm, annTp) <- symTypeList
-              , tp <- toKnownFunABI annTp
-              ]
-            -- Compute only those functions whose entries are not known.
-            notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrTypeMap)
-         in functionDemands (x86DemandInfo sysp) addrTypeMap symTypeMap mem $
-              filter notKnown $ exploredFunctions discState
+        let symFunABIMap :: Map BS.ByteString (KnownFunABI X86Reg)
+            symFunABIMap = Map.mapMaybe toKnownFunABI (nameTypeMap debugTypeMap)
+            -- Generate map from address names to known type.
+            --
+            -- This is used when we see a function jumps to a defined address.
+            addrFunABIMap = Map.mapMaybe toKnownFunABI (addrTypeMap debugTypeMap)
+            -- Compute only those functions whose types are not known.
+            notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrFunABIMap)
+         in inferFunctionTypeFromDemands $
+              functionDemands (x86DemandInfo sysp) addrFunABIMap symFunABIMap mem $
+                filter notKnown $ exploredFunctions discState
 
+  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
+      resolveX86Type rtp =
+        case runExcept (resolveReoptFunType rtp) of
+          Left _ -> Nothing
+          Right r -> Just r
+
+  -- Maps address to name of function to use.
   let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
-      funNameMap = addrSymMap
-                <> Map.fromList [ (addr, nosymFunctionName unnamedFunPrefix addr)
-                                | Some finfo <- exploredFunctions discState
-                                , let addr = discoveredFunAddr finfo
-                                , Map.notMember addr addrSymMap
-                                ]
+      funNameMap =
+        Map.mapWithKey (\addr qnm -> localFunctionName unnamedFunPrefix qnm addr)
+                       (samAddrMap symAddrMap)
+        <> Map.fromList [ (addr, nosymFunctionName unnamedFunPrefix addr)
+                        | Some finfo <- exploredFunctions discState
+                        , let addr = discoveredFunAddr finfo
+                        , Map.notMember addr (samAddrMap symAddrMap)
+                        ]
   let funTypeMap ::  Map BS.ByteString X86FunTypeInfo
-      funTypeMap = Map.fromList symTypeList
-                <> Map.singleton "printf" X86PrintfFun
-                <> Map.fromList [ (recoveredFunctionName addrSymMap unnamedFunPrefix addr, tp)
-                                | (addr,tp) <- Map.toList (inferFunctionTypeFromDemands fDems)
+      funTypeMap = Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
+                <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
+                                | (addr,rtp) <- Map.toList (addrTypeMap debugTypeMap)
+                                , Right xtp <- [runExcept (resolveReoptFunType rtp)]
                                 ]
-                <> Map.fromList [ (nm, defaultX86Type) | (_addr,nm) <- pltFuns ]
+                <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
+                                | (addr,tp) <- Map.toList fDems
+                                ]
+                <> Map.fromList [ (nm, defaultX86Type) | (_addr,nm) <- initDiscPLTFuns initState ]
   fnDefs <- fmap catMaybes $
     forM (exploredFunctions discState) $ \(Some finfo) -> do
-      let fnm = discoveredFunName finfo
-      logger $ StartFunRecovery fnm
+      let faddr = discoveredFunAddr finfo
+      let dnm = discoveredFunSymbol finfo
+      logger $ StartFunRecovery dnm faddr
       case checkFunction finfo of
         FunctionOK -> do
           case recoverFunction sysp funNameMap funTypeMap mem finfo of
             Left msg -> do
-              logger $ RecoveryFailed fnm msg
+              logger $ RecoveryFailed dnm faddr msg
               pure Nothing
             Right (warnings, fn) -> do
-              mapM_ (logger . RecoveryWarning fnm) warnings
+              mapM_ (logger . RecoveryWarning dnm faddr) warnings
               pure (Just fn)
         FunctionHasPLT -> do
-          logger $ RecoveryPLTSkipped fnm
+          logger $ RecoveryPLTSkipped dnm faddr
           -- Skip PLT functions with no error message.
           pure Nothing
         FunctionIncomplete -> do
-          logger $ RecoveryFailed fnm $ "Incomplete discovery."
+          logger $ RecoveryFailed dnm faddr "Incomplete discovery."
           pure Nothing
-  -- Get list of addresses included in this set.
-  let excludedSet = Set.fromList $ recoveredFunctionName addrSymMap unnamedFunPrefix . fnAddr <$> fnDefs
+  -- Get list of names of functions defined
+  let definedNames :: Set.Set BSC.ByteString
+      definedNames = Set.fromList $
+        recoveredFunctionName symAddrMap unnamedFunPrefix . fnAddr <$> fnDefs
 
   -- Get all functions that are referenced, but not defined in the module.
   let declFunTypeMap :: FunctionTypeMap X86_64
-      declFunTypeMap = foldl (getReferencedFunctions excludedSet) Map.empty fnDefs
+      declFunTypeMap = foldl (getReferencedFunctions definedNames) Map.empty fnDefs
 
-  let recMod = RecoveredModule { recoveredDecls = [ FunctionDecl { funDeclName = nm
-                                                                 , funDeclType = tp
-                                                                 }
-                                                  | (nm, tp) <- Map.toList declFunTypeMap
-                                                  ]
-                               , recoveredDefs = fnDefs
+  let fnDecls =  [ FunctionDecl { funDeclName = nm
+                                , funDeclType = tp
+                                }
+                 | (nm, tp) <- Map.toList declFunTypeMap
+                 ]
+  let recMod = RecoveredModule { recoveredDecls = fnDecls
+                               , recoveredDefs  = fnDefs
                                }
-  seq recMod $ pure (e, os, discState, recMod)
+
+
+  -- Maps ranges of addresses used in binary to the starting address
+  -- of functions found.
+  --
+  -- Used to compute sizes of functions for overwriting purposes.
+  let addrUseMap :: FunUseMap 64
+      addrUseMap = mkFunUseMap discState
+
+  let mkObjFunDef :: Function X86_64 -> ObjFunDef
+      mkObjFunDef f =
+        ObjFunDef { ofdObjName = fnName f
+                  , ofdBinAddr = memWordValue (addrOffset (segoffAddr (fnAddr f)))
+                  , ofdBinSize = lookupFunSize (fnAddr f) addrUseMap
+                  }
+
+
+    -- Map name of declared functions to the address in binary (if any)
+  let undefinedFuns :: V.Vector ObjFunRef
+      undefinedFuns = V.fromList
+        [ ObjFunRef { ofrObjName = name, ofrBinAddr = memWordValue addr }
+        | (segOff, name) <- Map.toList funNameMap
+        , not (Set.member name definedNames)
+        , let addr = addrOffset (segoffAddr segOff)
+        ]
+
+
+  let mergeRel =
+        MergeRelations
+        { mrObjectFuns = mkObjFunDef <$> V.fromList fnDefs
+        , mrUndefinedFuns = undefinedFuns
+        }
+  seq recMod $ pure (hdrInfo, os, discState, recMod, mergeRel)
+
+$(pure [])
 
 -- | Produce a LLVM textual rendering of the module for the LLVM version.
 llvmAssembly :: LLVMArchSpecificOps X86_64
@@ -1363,7 +2289,7 @@ llvmAssembly :: LLVMArchSpecificOps X86_64
              -> RecoveredModule X86_64
                 -- ^ Module to generate
              -> LPP.Config
-             -> (Builder.Builder, [Ann.FunctionAnn])
+             -> (Builder.Builder, [Either String Ann.FunctionAnn])
 llvmAssembly archOps genOpts recMod cfg =
       -- Generate LLVM module
    let (m,ann) = moduleForFunctions archOps genOpts recMod
@@ -1398,10 +2324,11 @@ compileLLVM optLevel optPath llcPath llvmMcPath arch llvm = do
           Builder.hPutBuilder inHandle llvm
        else
         pure $ BSL.toStrict $ Builder.toLazyByteString llvm
-    let llc_opts = Ext.LLCOptions { Ext.llc_triple    = Just arch
-                                  , Ext.llc_opt_level = optLevel
+    let llc_opts = Ext.LLCOptions { Ext.llcTriple    = Just arch
+                                  , Ext.llcOptLevel  = optLevel
+                                  , Ext.llcFunctionSections = True
                                   }
-    asm <- Ext.run_llc llcPath llc_opts llvm_opt
+    asm <- Ext.runLLC llcPath llc_opts llvm_opt
     Ext.runLlvmMc llvmMcPath asm arch
 
   case mres of
@@ -1410,101 +2337,20 @@ compileLLVM optLevel optPath llcPath llvmMcPath arch llvm = do
       exitFailure
     Right b -> return b
 
---------------------------------------------------------------------------------
--- ControlFlowTargetMap
-
--- | A map from all control flow targets in the program to the start address of
--- functions that may target them.
---
--- This is used to compute when it is safe to insert a redirection.  We want to
--- ensure that adding a redirection will not break unknown functions..
-newtype ControlFlowTargetSet w = CFTS { cfTargets :: Map (MemSegmentOff w) [MemSegmentOff w]
-                                      }
-
--- | Return how many bytes of space there are to write after address without
--- ovewriting another control flow target.
-lookupControlFlowTargetSpace :: forall w
-                             .  MemWidth w
-                             => MemSegmentOff w
-                             -> ControlFlowTargetSet w
-                             -> MemWord w
-lookupControlFlowTargetSpace addr0 = go 0 addr0 addr0
-  where seg = segoffSegment addr0
-        go :: MemWord w -> MemSegmentOff w -> MemSegmentOff w -> ControlFlowTargetSet w -> MemWord w
-        go inc base addr s =
-          case Map.lookupGT addr (cfTargets s) of
-            Just (next,fns)
-              | segoffSegment addr == segoffSegment next ->
-                let d = segoffOffset next - segoffOffset addr
-                 in if null (filter (/= base) fns) then
-                      go (inc+d) base next s
-                     else
-                      inc+d
-            _ ->
-              if segmentSize seg >= segoffOffset addr then
-                segmentSize seg - segoffOffset addr
-               else
-                0
-
-addControlFlowTarget :: ControlFlowTargetSet w
-                     -> MemSegmentOff w
-                     -> MemSegmentOff w -- ^ Function entry point
-                     -> ControlFlowTargetSet w
-addControlFlowTarget m a f = m { cfTargets = Map.insertWith (++) a [f] (cfTargets m) }
-
-addFunctionEntryPoint :: ControlFlowTargetSet w
-                      -> MemSegmentOff w
-                      -> ControlFlowTargetSet w
-addFunctionEntryPoint s a = addControlFlowTarget s a a
-
-addFunDiscoveryControlFlowTargets :: ControlFlowTargetSet (ArchAddrWidth arch)
-                                  -> Some (DiscoveryFunInfo arch)
-                                  -> ControlFlowTargetSet (ArchAddrWidth arch)
-addFunDiscoveryControlFlowTargets m0 (Some f) =
-  foldl' (\m b -> addControlFlowTarget m b (discoveredFunAddr f)) m0 (Map.keys (f^.parsedBlocks))
-
-discoveryControlFlowTargets :: DiscoveryState arch -> ControlFlowTargetSet (ArchAddrWidth arch)
-discoveryControlFlowTargets info =
-  let m0 = CFTS { cfTargets = Map.empty }
-      m = foldl' addFunDiscoveryControlFlowTargets m0 (exploredFunctions info)
-   in foldl' addFunctionEntryPoint m (Map.keys (symbolNames info))
-
--- | This creates a code redirection or returns the address as failing.
-addrRedirection :: ControlFlowTargetSet 64
-                -> Function X86_64
-                -> CodeRedirection Word64
-addrRedirection tgts f = do
-  let a = fnAddr f
-  let off :: Word64
-      off = fromIntegral (segmentOffset (segoffSegment a)) + fromIntegral (segoffOffset a)
-   in CodeRedirection { redirSourceVAddr = off
-                      , redirSourceSize = fromIntegral (lookupControlFlowTargetSpace (fnAddr f) tgts)
-                      , redirTarget = fnName f
-                      }
-
--- | This generates redirections from original functions to a list of new functions.
-addrRedirections :: DiscoveryState X86_64
-                 -> [Function X86_64]
-                 -> [CodeRedirection Word64]
-addrRedirections s fns =
-  let tgts = discoveryControlFlowTargets s
-   in addrRedirection tgts <$> fns
-
 -- | Merge a binary and new object
-mergeAndWrite :: FilePath
-              -> Elf 64 -- ^ Original binary
-              -> Elf 64 -- ^ New object
-              -> [CodeRedirection Word64] -- ^ List of redirections from old binary to new.
+mergeAndWrite :: FilePath -- ^ Path to write output to.
+              -> Elf.ElfHeaderInfo 64 -- ^ Original binary
+              -> FilePath
+              -- ^ Path or name to use to refer to new object code in
+              -- error messages.
+              -> BS.ByteString -- ^ New object contents
+              -> MergeRelations
               -> IO ()
-mergeAndWrite output_path orig_binary new_obj redirs = do
-  let mres = mergeObject orig_binary new_obj redirs x86_64_immediateJump
-  case mres of
-    Left e -> fail e
-    Right new_binary -> do
-      BSL.writeFile output_path $ Elf.renderElf new_binary
-      -- Update the file mode
-      do fs <- getFileStatus output_path
-         let fm = ownerExecuteMode
-               .|. groupExecuteMode
-               .|. otherExecuteMode
-         setFileMode output_path (fileMode fs `unionFileModes` fm)
+mergeAndWrite outputPath origBinary objName objContents mergeRel = do
+  newObjHdrInfo <- parseElfHeaderInfo64 objName objContents
+  newBinary <- mergeObject origBinary newObjHdrInfo mergeRel
+  BSL.writeFile outputPath newBinary
+  -- Update the file mode
+  do fs <- getFileStatus outputPath
+     let fm = ownerExecuteMode .|. groupExecuteMode .|. otherExecuteMode
+     setFileMode outputPath (fileMode fs `unionFileModes` fm)

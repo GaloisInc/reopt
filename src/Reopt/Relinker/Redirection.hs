@@ -8,7 +8,6 @@ locations into existing code.
 {-# LANGUAGE OverloadedStrings #-}
 module Reopt.Relinker.Redirection
   ( CodeRedirection(..)
-  , mkCodeAddrMap
   , isFuncSymbol
   , ResolvedCodeRedirs
   , emptyResolvedCodeRedirs
@@ -31,19 +30,12 @@ import           Data.Aeson.Types
 import qualified Data.ByteString as BS
 import           Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Internal
-import           Data.ElfEdit
-import           Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import qualified Data.ElfEdit as Elf
 import           Data.String (fromString)
-import qualified Data.Vector as V
 import qualified Data.Vector.Storable as SV
 import qualified Data.Vector.Storable.Mutable as SMV
 import           Data.Word
 import           GHC.Stack (HasCallStack)
-
-import           Reopt.Relinker.Object
-  ( ObjectSectionIndex
-  )
 
 -- | Write bytestring to bitvector at given offset.
 writeBS :: HasCallStack => SV.MVector s Word8 -> Int -> BS.ByteString -> ST s ()
@@ -53,7 +45,6 @@ writeBS mv base bs = do
     error $ "Bytestring overflows buffer."
   forM_ [0..len-1] $ \i -> do
     SMV.write mv (base+i) (bs `BS.index` i)
-
 
 ------------------------------------------------------------------------
 -- Definitions
@@ -92,37 +83,12 @@ instance Num w => FromJSON (CodeRedirection w) where
 
 -- | Return true if this symbol table entry appears correcponds to a
 -- globally defined function.
-isFuncSymbol :: ElfSymbolTableEntry a -> Bool
+isFuncSymbol :: Elf.SymtabEntry nm v -> Bool
 isFuncSymbol e
-  =  steType e == STT_FUNC
-  && steBind e == STB_GLOBAL
-  && steIndex e /= SHN_UNDEF
-  && steIndex e < SHN_LORESERVE
-
-
--- | Resolve address of symbols defined in their code region.
-resolveDefinedAddr :: Map ObjectSectionIndex a
-                   -- ^ Maps object section indices to the associated address.
-                   -> ElfSymbolTableEntry a
-                   -> (BS.ByteString, a)
-resolveDefinedAddr secMap e =
-  case Map.lookup (fromElfSectionIndex (steIndex e)) secMap of
-    Nothing -> error $ "Could not find index of section " ++ show (steIndex e)
-    Just addr -> (steName e, addr)
-
--- | Generate a map from functions defined in the object file to their
--- address in the new binary.  This will only point to new code.
-mkCodeAddrMap :: Map ObjectSectionIndex a
-                 -- ^ Maps object section indices to their name and associated address.
-              -> V.Vector (ElfSymbolTableEntry a)
-                 -- ^ Symbol table entries
-              -> Map BS.ByteString a
-mkCodeAddrMap secMap entries
-    | Map.size m == length addrList = m
-    | otherwise = error "Duplicate function names detected in object file."
-  where addrList = fmap (resolveDefinedAddr secMap)
-                 $ V.toList entries
-        m = Map.fromList addrList
+  =  Elf.steType e == Elf.STT_FUNC
+  && Elf.steBind e == Elf.STB_GLOBAL
+  && Elf.steIndex e /= Elf.SHN_UNDEF
+  && Elf.steIndex e < Elf.SHN_LORESERVE
 
 data ResolvedCodeRedir a
    = ResolvedCodeRedir { resolvedSourceVAddr :: !a
@@ -177,12 +143,12 @@ resolveCodeRedirections :: (Word64 -> BS.ByteString)
                         -> [CodeRedirection Word64]
                         -- ^ List of redirections generated from
                         -- recovered functions.
-                        -> (BS.ByteString -> Maybe (ElfWordType 64))
+                        -> (BS.ByteString -> Maybe (Elf.ElfWordType 64))
                        -- ^ Function that given the name of a symbol
                         -- returns the address of that symbol in the
                         -- new binary, or `Nothing` if the symbol is
                         -- not in the object file.
-                        -> Either BS.ByteString (ResolvedCodeRedirs (ElfWordType 64))
+                        -> Either BS.ByteString (ResolvedCodeRedirs (Elf.ElfWordType 64))
 resolveCodeRedirections mkJump redirs resolveAddr = do
   RCR . concat <$> traverse (resolveCodeRedirection mkJump resolveAddr) redirs
 

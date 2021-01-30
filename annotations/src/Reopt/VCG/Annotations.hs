@@ -34,6 +34,7 @@ import           Data.Aeson.Types ((.:), (.:!), (.!=), (.=), object)
 import qualified Data.Aeson.Types as Aeson
 import           Data.Bits
 import qualified Data.HashMap.Strict as HMap
+import qualified Data.Macaw.X86.X86Flag as M
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as S
@@ -255,6 +256,8 @@ data BlockVar
    | InitGPReg64 !F.Reg64
      -- ^ Denotes the value of a 64-bit general purpose register
      -- at the start of the block execution.
+   | InitFlagReg !M.X86Flag
+     -- ^ Denotes the value of a flag register at the start of execution.
    | FnStartGPReg64 !F.Reg64
      -- ^ Denotes the value of a general purpose when the function starts.
      --
@@ -319,6 +322,7 @@ fromExpr _llvmMap s =
 instance IsExprVar BlockVar where
   encodeVar StackHigh = "stack_high"
   encodeVar (InitGPReg64 r) = fromString (show r)
+  encodeVar (InitFlagReg r) = fromString (show r)
   encodeVar (FnStartGPReg64 r) = encodeList ["fnstart", fromString (show r)]
   encodeVar (MCStack e w) =
     let tp = encodeList ["_", "BitVec", fromString (show w)]

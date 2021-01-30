@@ -542,7 +542,7 @@ assertFnNameEq (L.Symbol nm) macawIP = do
   -- Get the address in the original binary of the executable.
   let Right addr = getMCAddrOfLLVMFunction addrMap nm
   -- Generate an SMT term with the address associated with the symbol.
-  let expectedAddrTerm = SMT.bvhexadecimal (toInteger addr) 64
+  let expectedAddrTerm = bvhexadecimal (toInteger addr) 64
   -- Assert the two addresses are equal.
   proveEq expectedAddrTerm macawIP ("Equivalence of function: " ++ nm)
 
@@ -569,7 +569,7 @@ readBVLE mem ptr0 w = go (w-1)
   where go :: Natural -> SMT.Term
         go 0 = SMT.select mem ptr0
         go i =
-          let ptr = SMT.bvadd ptr0 [SMT.bvdecimal (toInteger i) 64]
+          let ptr = SMT.bvadd ptr0 [bvdecimal (toInteger i) 64]
            in SMT.concat (SMT.select mem ptr) (go (i-1))
 
 memVar :: Natural -> Text
@@ -699,14 +699,14 @@ mcOnlyStackRange = "mc_only_stack_range"
 -- @w@ should be positive.
 addc :: Natural -> SMT.Term -> Natural -> SMT.Term
 addc _ t 0 = t
-addc w t i = SMT.bvadd t [SMT.bvdecimal (toInteger i) w]
+addc w t i = SMT.bvadd t [bvdecimal (toInteger i) w]
 
 -- | @subc w x y@ returns an expression equal to @bvsub x y@.
 --
 -- @w@ should be positive.
 subc :: Natural -> SMT.Term -> Natural -> SMT.Term
 subc _ t 0 = t
-subc w t i = SMT.bvsub t (SMT.bvdecimal (toInteger i) w)
+subc w t i = SMT.bvsub t (bvdecimal (toInteger i) w)
 
 -- | @defineRangeCheck nm low high@ introduces the definition for a
 -- function named @nm@ that takes an address @a@ and size @sz@, and
@@ -724,7 +724,7 @@ defineRangeCheck nm low high = do
 -- | Evaluate a stack is in a range check.
 evalRangeCheck :: Text -> SMT.Term -> Natural -> SMT.Term
 evalRangeCheck nm a sz =
-  SMT.term_app (Builder.fromText nm) [a, SMT.bvdecimal (toInteger sz) 64]
+  SMT.term_app (Builder.fromText nm) [a, bvdecimal (toInteger sz) 64]
 
 -- | Defines a predicate @(not_in_stack_range a sz)@ that holds if @a + sz@
 -- does not overflow and @[a..a+sz)@ does not overlap with the
@@ -749,7 +749,7 @@ defineNotInStackRange = do
 -- be correct if the computation of `addr+sz` overflows.
 notInStackRange :: SMT.Term -> Natural -> SMT.Term
 notInStackRange addr sz =
-  SMT.term_app "not_in_stack_range" [addr, SMT.bvdecimal (toInteger sz) 64]
+  SMT.term_app "not_in_stack_range" [addr, bvdecimal (toInteger sz) 64]
 
 -- | @stackHighTerm@ denotes the top of the stack.
 stackHighTerm :: SMT.Term
@@ -775,8 +775,8 @@ isPageAligned :: SMT.Term -> Natural -> SMT.Term
 isPageAligned a sz
   | sz < 0 = error "isPageAligned must have positive value."
   | otherwise =
-    SMT.eq [ SMT.bvand a [SMT.bvhexadecimal (toInteger (sz-1)) 64]
-           , SMT.bvdecimal 0 64
+    SMT.eq [ SMT.bvand a [bvhexadecimal (toInteger (sz-1)) 64]
+           , bvdecimal 0 64
            ]
 
 -- | Variable indicating a range is between `stack_guard_min` and
@@ -835,7 +835,7 @@ mcMemDecls pageSize guardPageCount allocas
   (let guardSize = pageSize * guardPageCount
     in [ SMT.declareConst "stack_alloc_min" (SMT.bvSort 64)
        , SMT.assert $ isPageAligned "stack_alloc_min" pageSize
-       , SMT.assert $ SMT.bvult (SMT.bvdecimal (toInteger guardSize) 64) "stack_alloc_min"
+       , SMT.assert $ SMT.bvult (bvdecimal (toInteger guardSize) 64) "stack_alloc_min"
 
        , SMT.defineFun "stack_guard_min" [] (SMT.bvSort 64) $
            subc 64 "stack_alloc_min" guardSize
@@ -860,7 +860,7 @@ mcMemDecls pageSize guardPageCount allocas
        -- High water stack pointer includes 8 bytes for return address.
        -- The return address top must be aligned to a 16-byte boundary.
        -- This is done by asserting the 4 low-order bits of fnstart_rsp are 8.
-       , SMT.assert $ SMT.eq [ SMT.extract 3 0 stackHighTerm, SMT.bvdecimal 8 4]
+       , SMT.assert $ SMT.eq [ SMT.extract 3 0 stackHighTerm, bvdecimal 8 4]
        ])
   ++ concatMap allocaMCBaseEndDecls allocas
   -- Declare mcOnlyStackRange
@@ -1108,9 +1108,9 @@ primEval _ (ValIdent var) = do
   pure $! varTerm (identVar var)
 primEval (PrimType (Integer w)) (ValInteger i) = do
   when (w <= 0) $ error "primEval given negative width."
-  pure $! SMT.bvdecimal i (fromIntegral w)
+  pure $! bvdecimal i (fromIntegral w)
 primEval (PrimType (Integer 1)) (ValBool b) = do
-  pure $! SMT.bvdecimal (if b then 1 else 0) 1
+  pure $! bvdecimal (if b then 1 else 0) 1
 primEval tp v  =
   error $ "Error: Missing case in primEval:\n"
       ++ "Type:  " ++ show tp ++ "\n"
@@ -1191,7 +1191,7 @@ llvmInvoke isTailCall fsym args lRet = do
           ++ [ (Some X86_IP, postCallRIP)
              , (Some RSP,    postCallRSP)
              , (Some DF,     SMT.false)
-             , (Some X87_TopReg, SMT.bvdecimal 7 3)
+             , (Some X87_TopReg, bvdecimal 7 3)
              ]
     liftIO $
       declareAddrStartRegValues prover (addrName nextInsnAddr) (Map.fromList calleeRegValues)
@@ -1302,14 +1302,14 @@ llvmAlloca (Ident nm0) ty eltCount _malign = do
          fatalBlockError $ "Specified allocation is outside range of alloca size."
        cntExpr <- primEval (PrimType (Integer w)) i
        let wn = fromIntegral w
-       proveEq cntExpr (SMT.bvdecimal (toInteger q) wn) $
+       proveEq cntExpr (bvdecimal (toInteger q) wn) $
          printf "Allocation size at %s must match specification %s."
                 nm0 (show (Ann.allocaSize a))
     Just (Typed itp _) -> do
       fatalBlockError $ "Unexpected allocation count type " ++ show (L.ppType itp)
 
   -- Create declarations for alloca.
-  allocaDeclarations nm (SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64)
+  allocaDeclarations nm (bvdecimal (toInteger (Ann.allocaSize a)) 64)
 
 $(pure [])
 
@@ -1538,8 +1538,8 @@ $(pure [])
 -- | Register values initialized from annotations.
 initBlockRegValues :: Ann.ReachableBlockAnn -> [(Some X86Reg, SMT.Term)]
 initBlockRegValues blockAnn =
-  [ (Some X86_IP,     SMT.bvhexadecimal (toInteger (Ann.blockAddr blockAnn)) 64)
-  , (Some X87_TopReg, SMT.bvdecimal (toInteger (Ann.blockX87Top blockAnn)) 3)
+  [ (Some X86_IP,     bvhexadecimal (toInteger (Ann.blockAddr blockAnn)) 64)
+  , (Some X87_TopReg, bvdecimal (toInteger (Ann.blockX87Top blockAnn)) 3)
   , (Some DF,         if Ann.blockDFFlag blockAnn then SMT.true else SMT.false)
   ]
 
@@ -1562,7 +1562,7 @@ evalPrecondition phiTermFn regs mem e = do
     Ann.Eq x y -> SMT.eq [r x, r y]
     Ann.BVAdd x y -> SMT.bvadd (r x) [r y]
     Ann.BVSub x y -> SMT.bvsub (r x) (r y)
-    Ann.BVDecimal x y -> SMT.bvdecimal (toInteger x) y
+    Ann.BVDecimal x y -> bvdecimal (toInteger x) y
     Ann.Var v ->
       case v of
         Ann.StackHigh -> stackHighTerm
@@ -1719,7 +1719,7 @@ stepNextStmt (L.Result ident inst _mds) = do
               Isge -> SMT.bvsge lhsv rhsv
               Islt -> SMT.bvslt lhsv rhsv
               Isle -> SMT.bvsle lhsv rhsv
-      defineIdent ident (SMT.bvSort 1) (SMT.ite r (SMT.bvdecimal 1 1) (SMT.bvdecimal 0 1))
+      defineIdent ident (SMT.bvSort 1) (SMT.ite r (bvdecimal 1 1) (bvdecimal 0 1))
       pure True
     Load (Typed (PtrTo lty) src) ord malign -> do
       when (isJust ord) $ do
@@ -1739,7 +1739,7 @@ stepNextStmt (L.Effect instr _mds) = do
       mcExecuteToEnd
       -- Get condition
       cndTerm <- primEval (PrimType (Integer 1)) cnd
-      let c = SMT.eq [cndTerm, SMT.bvdecimal 1 1]
+      let c = SMT.eq [cndTerm, bvdecimal 1 1]
       -- Verify block preconditions.
       verifyBlockPreconditions "true branch"  (SMT.implies [c])         tlbl
       verifyBlockPreconditions "false branch" (SMT.implies [SMT.not c]) flbl
@@ -2361,7 +2361,7 @@ verifyBlock funAnn argBindings blkMap firstLabel bAnn = do
         -- Add LLVM declarations for all existing allocations.
         forM_ (Ann.blockAllocas blockAnn) $ \a  -> do
           when (Ann.allocaExisting a) $ do
-            allocaDeclarations (Ann.allocaIdent a) (SMT.bvdecimal (toInteger (Ann.allocaSize a)) 64)
+            allocaDeclarations (Ann.allocaIdent a) (bvdecimal (toInteger (Ann.allocaSize a)) 64)
         -- Declare memory
         addCommand $ SMT.declareConst (memVar 0) memSort
         -- Declare constant representing where we return to.
