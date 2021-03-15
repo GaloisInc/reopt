@@ -53,21 +53,22 @@ library
   exposed-modules:
     Reopt
     Reopt.CFG.FnRep.X86
+    Reopt.CFG.LLVM
     Reopt.EncodeInvariants
+    Reopt.ExternalTools
     Reopt.Relinker.Binary
     Reopt.Server
     Reopt.Utils.Dir
+    Reopt.Utils.Builder
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.ArgResolver
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
-    Reopt.CFG.LLVM
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
     Reopt.CFG.StackDepth
     Reopt.Events
-    Reopt.ExternalTools
     Reopt.Hints
     Reopt.Relinker
     Reopt.Relinker.Constants
@@ -108,6 +109,7 @@ executable reopt
     lens,
     macaw-base,
     macaw-x86,
+    mtl,
     parameterized-utils >= 0.1.6,
     prettyprinter,
     unordered-containers,
@@ -183,7 +185,6 @@ test-suite reopt-tests
     macaw-base,
     prettyprinter,
     reopt,
-    temporary,
     tasty,
     tasty-hunit,
     unordered-containers
