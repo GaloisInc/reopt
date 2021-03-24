@@ -1,5 +1,6 @@
 #include <emmintrin.h>
 #include <immintrin.h>
+#include <stdint.h>
 
 struct double_pair {
     double x;
@@ -11,6 +12,22 @@ struct double_pair {
 struct double_pair add_doublepair(struct double_pair s) {
     struct double_pair r = { .x = s.x * s.x, .y = s.x * s.y };
     return r;
+}
+
+union double_union {
+    uint64_t i;
+    double d;
+};
+
+struct double_pair call_add_doublepair(uint64_t x, uint64_t y) {
+    union double_union xu;
+    union double_union yu;
+    xu.i = x;
+    yu.i = y;
+    struct double_pair p;
+    p.x = xu.d;
+    p.y = yu.d;
+    return add_doublepair(p);
 }
 
 // This will get returned via xmm0

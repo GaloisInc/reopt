@@ -14,6 +14,8 @@ packages:
   deps/parameterized-utils
   deps/what4/what4
 
+tests: true
+
 package reopt
   ghc-options: -Wall
 package reopt-tools

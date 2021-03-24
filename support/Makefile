@@ -1,4 +1,7 @@
-all : llvm_return_test.512.as abi_test.512.ll abi_test.256.ll abi_test.as print_stackheap_addrs avx_intrin.512.o avx_intrin.512.ll
+LLVM_DIS ?= llvm-dis
+
+
+all : llvm_return_test.512.as abi_test.512.ll abi_test.256.ll print_stackheap_addrs avx_intrin.512.o avx_intrin.512.ll
 
 print_stackheap_addrs: print_stackheap_addrs.c
 	clang -o $@ -fstack-protector-strong -fstack-protector-all $<
@@ -22,7 +25,7 @@ print_stackheap_addrs: print_stackheap_addrs.c
 %.512.bc : %.c
 	clang -c --target=x86_64-pc-linux-elf -emit-llvm -mavx512f -O3 -o $@ $<
 
-%.256.bc : ^.c
+%.256.bc : %.c
 	clang -c --target=x86_64-pc-linux-elf -emit-llvm -mavx2 -O3 -o $@ $<
 
 %.512.o : %.512.c
@@ -31,12 +34,11 @@ print_stackheap_addrs: print_stackheap_addrs.c
 %.512.bc : %.512.c
 	clang -c --target=x86_64-pc-linux-elf -mavx512f -emit-llvm -O3 -o $@ $<
 
-
 %.ll : %.bc
-	llvm-dis $<
+	$(LLVM_DIS) $<
 
 .PHONY : all clean
-.PRECIOUS : %.512.bc %.bc %.ll
+.PRECIOUS : %.512.bc %.256.bc %.bc %.ll
 
 clean :
 	rm -rf *.as *.bc *.o abi_test.ll print_stackheap_addrs
