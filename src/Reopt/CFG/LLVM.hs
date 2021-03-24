@@ -685,6 +685,15 @@ appToLLVM app = bbArchConstraints $ do
       l_t <- mkLLVMValue t
       l_f <- mkLLVMValue f
       fmap (L.Typed (L.typedType l_t)) $ evalInstr $ L.Select l_c l_t (L.typedValue l_f)
+
+    AndApp x y -> binop band x y
+    OrApp  x y -> binop bor x y
+    NotApp x -> do
+      -- x = 0 == complement x, according to LLVM manual.
+      llvmX <- mkLLVMValue x
+      icmpop L.Ieq llvmX (L.ValInteger 0)
+    XorApp x y    -> binop bxor x y
+
     -- Construct a tuple from fields.
     MkTuple fieldTypes fields -> do
       let structType = L.Struct (toListFC typeToLLVMType fieldTypes)
@@ -698,7 +707,6 @@ appToLLVM app = bbArchConstraints $ do
             s' <- insertValue s llvmFieldValue i
             c (i+1) s'
       foldrFC f (\_ r -> pure r) fields 0 initUndef
-
     -- :: !(P.List TypeRepr l) -> !(f (TupleType l)) -> !(P.Index l r) -> App f r
     TupleField _fieldTypes macawStruct idx -> do
       -- Make a struct
@@ -710,19 +718,25 @@ appToLLVM app = bbArchConstraints $ do
         error $ "Index out of range " ++ show idxVal ++ "."
       -- Extract a value
       extractValue llvmStruct (fromInteger idxVal :: Int32)
+
+    ExtractElement fldType vec idx -> do
+      let llvmFldType = typeToLLVMType fldType
+      llvmVec <- mkLLVMValue vec
+      let llvmIdx = L.ValInteger (toInteger idx)
+      L.Typed llvmFldType <$> evalInstr (L.ExtractElt llvmVec llvmIdx)
+    InsertElement vecType vec idx val -> do
+      let llvmVecType = typeToLLVMType vecType
+      llvmVec <- mkLLVMValue vec
+      llvmVal <- mkLLVMValue val
+      let llvmIdx = L.ValInteger (toInteger idx)
+      L.Typed llvmVecType <$> evalInstr (L.InsertElt llvmVec llvmVal llvmIdx)
+
     Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
-    SExt v sz  -> flip (convop L.SExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
-    UExt v sz  -> flip (convop L.ZExt)  (natReprToLLVMType sz) =<< mkLLVMValue v
+    SExt  v sz -> mkLLVMValue v >>= \u -> convop L.SExt  u (natReprToLLVMType sz)
+    UExt  v sz -> mkLLVMValue v >>= \u -> convop L.ZExt  u (natReprToLLVMType sz)
     Bitcast x tp -> do
       llvmVal <- mkLLVMValue x
       convop L.BitCast llvmVal (typeToLLVMType (widthEqTarget tp))
-    AndApp x y -> binop band x y
-    OrApp  x y -> binop bor x y
-    NotApp x   -> do
-      -- x = 0 == complement x, according to LLVM manual.
-      llvm_x <- mkLLVMValue x
-      icmpop L.Ieq llvm_x (L.ValInteger 0)
-    XorApp x y    -> binop bxor x y
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y

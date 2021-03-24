@@ -158,6 +158,9 @@ data FunctionType (arch :: Type) =
 -- The third type parameter is for the type of value returned.
 data FnAssignRhs (arch :: Type) (f :: M.Type -> Type) (tp :: M.Type) where
   -- | An expression with an undefined value.
+  --
+  -- NB. Undefined values in this representation are values with a
+  -- non-deterministically chosen value.
   FnSetUndefined :: !(TypeRepr tp) -- ^ Type of undefined value.
                  -> FnAssignRhs arch f tp
   -- | A unconditional memory read.

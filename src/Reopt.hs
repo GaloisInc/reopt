@@ -1836,7 +1836,7 @@ resolveArgType nm tp0 =
     FloatAnnType ->
       throwError $ UnsupportedArgType nm (ppAnnType tp0)
     DoubleAnnType ->
-      throwError $ UnsupportedArgType nm (ppAnnType tp0)
+      addDoubleArg nm
     PtrAnnType _ ->
       addGPReg64 nm
     TypedefAnnType _ tp ->
@@ -1862,10 +1862,10 @@ parseReturnType tp0 =
   case tp0 of
     VoidAnnType      -> Right []
     IAnnType w | w > 64 -> Left  $ UnsupportedReturnType (ppAnnType tp0)
-               | otherwise -> Right $ [Some (RetBV64 F.RAX)]
+               | otherwise -> Right [Some (RetBV64 F.RAX)]
     FloatAnnType     -> Left  $ UnsupportedReturnType (ppAnnType tp0)
-    DoubleAnnType    -> Left  $ UnsupportedReturnType (ppAnnType tp0)
-    PtrAnnType _     -> Right $ [Some (RetBV64 F.RAX)]
+    DoubleAnnType    -> Right [Some (RetZMM ZMMDouble 0)]
+    PtrAnnType _     -> Right [Some (RetBV64 F.RAX)]
     TypedefAnnType _ tp -> parseReturnType tp
 
 
@@ -1920,6 +1920,12 @@ recoveredFunctionName m prefix segOff =
 
 $(pure [])
 
+
+-- | This returns the value associate with a argument for demand computation purposes.
+argReg :: X86ArgInfo -> Some X86Reg
+argReg (ArgBV64 r)  = Some $ X86_GP r
+argReg (ArgZMM _ i) = Some $ X86_ZMMReg i
+
 -- | Map x86 function type to known functon abi.
 --
 -- This is used for global function argument analysis which doesn't yet support vararg
@@ -1959,13 +1965,13 @@ inferFunctionTypeFromDemands dm =
       -- Turns a set of arguments into a prefix of x86 argument registers and friends
       orderPadArgs :: (RegisterSet X86Reg, RegisterSet X86Reg) -> X86FunTypeInfo
       orderPadArgs (argSet, retSet) =
-        let args = fmap ArgBV64   (dropArgSuffix X86_GP     x86GPPArgumentRegs argSet)
-                ++ fmap ArgMM512D (dropArgSuffix X86_ZMMReg [0..7] argSet)
+        let args = fmap ArgBV64            (dropArgSuffix X86_GP     x86GPPArgumentRegs argSet)
+                ++ fmap (ArgZMM ZMM512D)   (dropArgSuffix X86_ZMMReg [0..7] argSet)
             rets = fmap (Some . RetBV64)   (dropArgSuffix X86_GP     [F.RAX, F.RDX] retSet)
-                ++ fmap (Some . RetMM512D) (dropArgSuffix X86_ZMMReg [0,1]          retSet)
+                ++ fmap (Some . RetZMM ZMM512D) (dropArgSuffix X86_ZMMReg [0,1]          retSet)
          in X86NonvarargFunType args rets
-  in fmap orderPadArgs
-     $ Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
+  in orderPadArgs <$>
+       Map.mergeWithKey (\_ ds rets -> Just (registerDemands ds, rets))
                         (fmap (\ds ->  (registerDemands ds, mempty)))
                         (fmap (\s -> (mempty,s)))
                         dm
@@ -1973,7 +1979,8 @@ inferFunctionTypeFromDemands dm =
 
 defaultX86Type :: X86FunTypeInfo
 defaultX86Type = X86NonvarargFunType args rets
-  where args = fmap ArgBV64 x86GPPArgumentRegs ++ fmap ArgMM512D [0..7]
+  where args = fmap ArgBV64 x86GPPArgumentRegs
+            ++ fmap (ArgZMM ZMM512D) [0..7]
         rets = [ Some (RetBV64 F.RAX), Some (RetBV64 F.RDX) ]
 
 
