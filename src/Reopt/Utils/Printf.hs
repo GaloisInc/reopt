@@ -298,7 +298,7 @@ parseWidth = do
       when (d == 0) $ do
         throwError $ InvalidFieldWidth i
       pure $! IntLit (negate (toInteger d))
-    _ | '1' <= 'c', c <= '9' -> lift $ do
+    _ | '1' <= c, c <= '9' -> lift $ do
         skipChar
         val <- parseNatDigits (fromIntegral (asDigit c))
         pure $! IntLit (toInteger val)
