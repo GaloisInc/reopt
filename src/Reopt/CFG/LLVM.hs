@@ -270,11 +270,14 @@ data LLVMBlockResult arch =
                   , finalBBState :: !(BBLLVMState arch)
                   }
 
+-- | Maps each block label to the number of times a value should be repeated and the value.
+--
+-- The number of repetitions should be positive and needed because LLVM needs a separate phi
+-- value for each incoming edge even if they are from the same block.  Edges from the same block
+-- must have the same value.
+type PhiValues = Map L.BlockLabel (Int, L.Value)
 
-type PhiValues = Map L.BlockLabel L.Value
-
--- | Contains a vector with one element for each LLVM blocks to the
--- results for that label.
+-- | A vector with an element for each phi variable in a block.
 type BlockPhiAssignment = V.Vector PhiValues
 
 -- | Maps LLVM blocks to the phi assignment for them.
@@ -943,6 +946,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
 llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
 llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
 
+-- | Add Phi values for for target block
 addTargetPhiValues :: forall arch . FnJumpTarget arch -> BBLLVM arch ()
 addTargetPhiValues tgt = do
   thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
@@ -950,12 +954,12 @@ addTargetPhiValues tgt = do
       tgtLbl = fnJumpLabel tgt
   let values = fnJumpPhiValues tgt
   -- Add this block value to phi assignment
-  let updateVar :: Map L.BlockLabel L.Value
+  let updateVar :: Map L.BlockLabel (Int, L.Value)
                 -> Some (FnValue arch)
-                -> BBLLVM arch (Map L.BlockLabel L.Value)
+                -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
       updateVar prevVars (Some v) = do
         thisVal <- mkLLVMValue v
-        pure $! Map.insert thisLabel (L.typedValue thisVal) prevVars
+        pure $! Map.insertWith (\_ (o,ov) -> (o+1, ov))  thisLabel (1, L.typedValue thisVal) prevVars
   m <- BBLLVM $ use $ funStateLens . funBlockPhiMapLens
   let curEntries = phiAssignmentForBlock m tgtLbl
   newEntries <- V.zipWithM updateVar curEntries values
@@ -1020,7 +1024,10 @@ resolvePhiStmt phiValues b =
           llvmType :: L.Type
           llvmType  = typeToLLVMType (fnPhiVarType phiVar)
           llvmPhiValues :: [(L.Value, L.BlockLabel)]
-          llvmPhiValues = [ (llvmVal, lbl) | (lbl, llvmVal) <- Map.toList phiValues ]
+          llvmPhiValues = [ binding
+                          | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
+                          , binding <- replicate llvmCnt (llvmVal, lbl)
+                          ]
        in L.Result lnm (L.Phi llvmType llvmPhiValues) []
 
 -- | Construct a basic block from a block result
