@@ -310,7 +310,7 @@ type family FnArchStmt (arch :: Type) :: (M.Type -> Type) -> Type
 data FnStmt arch where
   -- | A comment
   FnComment :: !Text -> FnStmt arch
-    -- | An assignment statement
+  -- | An assignment statement
   FnAssignStmt :: !(FnAssignment arch tp)
                -> FnStmt arch
   -- | Writes to memory
