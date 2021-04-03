@@ -970,8 +970,8 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
   -- Check object assumptions
   checkObjectHeaderAssumptions objHdr
   -- Check OSABI compat
-  when (Elf.headerOSABI objHdr /= Elf.headerOSABI binHdr) $ do
-    relinkFail $ "Expected the new object to use the same OS ABI as original."
+  -- when (Elf.headerOSABI objHdr /= Elf.headerOSABI binHdr) $ do
+  --   relinkFail $ "Expected the new object to use the same OS ABI as original."
 
   -- Step 2. Parse binary segments to infer information to layout
   -- object code.
