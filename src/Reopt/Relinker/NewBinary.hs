@@ -150,9 +150,11 @@ layoutNewBinary ctx l = do
 -- Informaton for constructing new binary
 data BuildCtx w = BuildCtx
   { bctxHeaderInfo :: !(Elf.ElfHeaderInfo w)
-  , bctxEhdr       :: !(Elf.Ehdr w)
   , bctxExtendedSegmentMap :: !(Map.Map Word16 (Elf.ElfWordType w))
     -- ^ Maps section indices that change to the new size.
+  , bctxPhdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType  w))
+  , bctxShdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType  w))
+  , bctxShdrStrndx :: !Word16
   , bctxShdrCount  :: !Word16
   , bctxShdrTable  :: !Bld.Builder
   , bctxShstrtab   :: !BS.ByteString
@@ -194,9 +196,6 @@ mkNewPhdrTable ctx = gen 0
               | otherwise = Elf.encodePhdr cl elfDta (mkPhdr i) <> gen (i+1)
 
 -----------------------------------------------------------------------
--- Make new section header header table.
-
------------------------------------------------------------------------
 -- Make new binary
 
 buildNewBinary' :: BuildCtx w
@@ -216,7 +215,16 @@ buildNewBinary' ctx off (Orig.ElfRegion binOff binSize cns src:rest) = do
         case src of
           Orig.SrcSpecialRegion reg ->
             case reg of
-              Orig.Ehdr -> (Elf.encodeEhdr (bctxEhdr ctx), fromIntegral (Elf.ehdrSize cl))
+              Orig.Ehdr -> do
+                -- Elf header.
+                let ehdr = Elf.Ehdr { Elf.ehdrHeader   = Elf.header binInfo
+                                    , Elf.ehdrPhoff    = bctxPhdrTableOffset ctx
+                                    , Elf.ehdrShoff    = bctxShdrTableOffset ctx
+                                    , Elf.ehdrPhnum    = Elf.phdrCount binInfo
+                                    , Elf.ehdrShnum    = bctxShdrCount ctx
+                                    , Elf.ehdrShstrndx = bctxShdrStrndx ctx
+                                    }
+                (Elf.encodeEhdr ehdr, fromIntegral (Elf.ehdrSize cl))
               Orig.PhdrTable ->
                 let cnt = Elf.phdrCount binInfo
                     sz = fromIntegral cnt * fromIntegral (Elf.phdrEntrySize cl)

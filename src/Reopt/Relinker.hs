@@ -43,8 +43,6 @@ import qualified Reopt.Relinker.NewBinary as New
 import           Reopt.Relinker.Relations as Relations
 import           Reopt.Relinker.Relocations
 
---import Debug.Trace
-
 ------------------------------------------------------------------------
 -- Utilities
 
@@ -383,7 +381,22 @@ data NewSectionInfo
 
 $(pure [])
 
+-- | Map from addresses at allocated section to size and index of section.
 type AddrToSectionMap = Map Word64 (Word64, Word16)
+
+-- | Create map from section headers.
+mkAddrToSectionMap  :: V.Vector (Elf.Shdr BS.ByteString Word64)
+                       -- ^ Section headers in original binary
+                    -> AddrToSectionMap
+mkAddrToSectionMap = V.ifoldl' ins Map.empty
+  where ins m idx shdr
+          | (Elf.shdrFlags shdr .&. Elf.shf_alloc) == Elf.shf_alloc =
+              let addr = Elf.shdrAddr shdr
+                  sz   = Elf.shdrSize shdr
+               in Map.insert addr (sz, fromIntegral idx) m
+          | otherwise = m
+
+$(pure [])
 
 -- | Information extracted from scan of sections in binary.
 data BinarySectionLayout =
@@ -400,8 +413,6 @@ data BinarySectionLayout =
         -- ^ Index of symbol table (or zero if not found)
       , bslStrtabIndex :: !Word16
         -- ^ Index of string table (or zero if not found)
-      , bslAllocatedAddrMap :: !AddrToSectionMap
-        -- ^ Maps address of section headers to size and index.
       }
 
   -- Convert from section index in binary to new section index.
@@ -433,34 +444,27 @@ addOverflowCodeShdr bsl =
 -- information.
 layoutBinaryShdr :: BinaryLayoutContext
                  -> BinarySectionLayout
-                 -> Word16 -- ^ Index of section header in binary
+                 -> Int -- ^ Index of section header in binary
                  -> Elf.Shdr BS.ByteString Word64
-                 -> IO BinarySectionLayout
-layoutBinaryShdr nci bsl0 idx shdr = seq idx $ do
+                 -> BinarySectionLayout
+layoutBinaryShdr nci bsl0 idxInt shdr = do
+  let idx = fromIntegral idxInt
   let bsl1 | bslOverflowCodeShdrIndex bsl0 == 0
            , Elf.shdrOff shdr > blcBinCodeEndOff nci =
                addOverflowCodeShdr bsl0
            | otherwise = bsl0
   if Elf.shdrName shdr == ".symtab" then do
     let bsl2 = bsl1 { bslSymtabIndex = idx }
-    pure $ addBinShdr bsl2 (Elf.shdrName shdr) $ NewSymtabSection shdr
+    addBinShdr bsl2 (Elf.shdrName shdr) $ NewSymtabSection shdr
    else if Elf.shdrName shdr == ".strtab" then do
     let bsl2 = bsl1 { bslStrtabIndex = idx }
-    pure $ addBinShdr bsl2 (Elf.shdrName shdr) $ NewStrtabSection shdr
+    addBinShdr bsl2 (Elf.shdrName shdr) $ NewStrtabSection shdr
    else if Elf.shdrName shdr == ".shstrtab" then
-    pure $ addBinShdr bsl1 (Elf.shdrName shdr) $ NewShstrtabSection shdr
+    addBinShdr bsl1 (Elf.shdrName shdr) $ NewShstrtabSection shdr
    else if Elf.shdrOff shdr > blcBinCodeEndOff nci then
-    pure $ addBinShdr bsl1 (Elf.shdrName shdr) $ OldBinaryDataSection shdr
+    addBinShdr bsl1 (Elf.shdrName shdr) $ OldBinaryDataSection shdr
    else do
-    let bsl2
-          | (Elf.shdrFlags shdr .&. Elf.shf_alloc) == Elf.shf_alloc =
-              let addr = Elf.shdrAddr shdr
-                  sz   = Elf.shdrSize shdr
-                  m = bslAllocatedAddrMap bsl1
-               in bsl1 { bslAllocatedAddrMap = Map.insert addr (sz, idx) m  }
-          | otherwise =
-              bsl1
-    pure $ addBinShdr bsl2 (Elf.shdrName shdr) $ OldBinaryCodeSection shdr
+    addBinShdr bsl1 (Elf.shdrName shdr) $ OldBinaryCodeSection shdr
 
 mkBinarySectionLayout :: BinaryLayoutContext
                          -- ^ Context information
@@ -474,11 +478,10 @@ mkBinarySectionLayout ctx binShdrs = do
                  , bslOverflowCodeShdrIndex = 0
                  , bslSymtabIndex = 0
                  , bslStrtabIndex = 0
-                 , bslAllocatedAddrMap = Map.empty
                  }
-  bsl <- ifoldlM' (layoutBinaryShdr ctx) bsl0 binShdrs
   when (V.length binShdrs == 0) $ do
     relinkFail "Do not support binaries missing section headers."
+  let bsl = V.ifoldl' (layoutBinaryShdr ctx) bsl0 binShdrs
   when (bslOverflowCodeShdrIndex bsl == 0) $ do
     relinkFail "Unsupport binary; expected additional section headers after code."
   pure bsl
@@ -632,7 +635,6 @@ mapFromFuns :: (Foldable f, Ord k) => (a -> k) -> (a -> v) -> f a -> Map k v
 mapFromFuns kf vf l =
   let insAddr m f = Map.insert (kf f) (vf f) m
    in foldl' insAddr Map.empty l
-
 
 -- | Create symbol table in new file.
 mkNewSymtab :: MergeRelations
@@ -987,9 +989,11 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
   -- one.  If not, we add the function to the set of functions that we need
   -- to find space for.
 
+  let addrToSec = mkAddrToSectionMap binShdrs
+
   let newCodeIndexFromAddr :: Word64 -> Maybe (Word16, Word64)
       newCodeIndexFromAddr addr = do
-        (base, (sz, idx)) <- Map.lookupLE addr (bslAllocatedAddrMap binShdrIndexInfo)
+        (base, (sz, idx)) <- Map.lookupLE addr addrToSec
         when (addr - base >= sz) Nothing
         pure (idx, addr - base)
 
@@ -1103,15 +1107,6 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
       Nothing -> relinkFail "Missing section header table."
       Just o -> pure o
 
-  -- Elf header.
-  let ehdr = Elf.Ehdr { Elf.ehdrHeader   = binHdr
-                      , Elf.ehdrPhoff    = newPhdrTableOffset
-                      , Elf.ehdrShoff    = newShdrTableOffset
-                      , Elf.ehdrPhnum    = Elf.phdrCount binHeaderInfo
-                      , Elf.ehdrShnum    = newShdrCount
-                      , Elf.ehdrShstrndx = fromNewSectionIndex newShstrtabIndex
-                      }
-
   -- Section Header table
   let newShdrCtx :: NewShdrContext 64
       newShdrCtx =
@@ -1136,9 +1131,11 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
   let newBuildCtx =
         New.BuildCtx
         { New.bctxHeaderInfo = binHeaderInfo
-        , New.bctxEhdr = ehdr
         , New.bctxExtendedSegmentMap =
             Map.singleton binCodePhdrIndex (Elf.phdrFileSize binCodePhdr + overflowTotalSize)
+        , New.bctxPhdrTableOffset = newPhdrTableOffset
+        , New.bctxShdrTableOffset = newShdrTableOffset
+        , New.bctxShdrStrndx      = fromNewSectionIndex newShstrtabIndex
         , New.bctxShdrCount  = newShdrCount
         , New.bctxShdrTable = mkNewShdrTable binHdr newShdrCtx newShdrs
         , New.bctxShstrtab  = newShstrtabContents
