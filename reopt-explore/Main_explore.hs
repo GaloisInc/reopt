@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
@@ -18,8 +19,7 @@ import Reopt
     ( LoadOptions(LoadOptions, loadOffset),
       ReoptOptions(ReoptOptions, roIncluded, roExcluded),
       copyrightNotice,
-      RecoveryStats(..),
-      withElfFilesInDir,
+      ReoptStats(..),
       statsHeader,
       recoverFunctions,
       renderFnStats,
@@ -28,7 +28,9 @@ import Reopt
       latestLLVMConfig,
       statsRows,
       RecoveredModule,
-      X86OS)
+      X86OS
+    )
+import Reopt.Utils.Dir
 import System.Console.CmdArgs.Explicit
     ( process, flagNone, flagReq, mode, Arg(..), Flag, Mode )
 import System.Environment (getArgs)
@@ -119,7 +121,7 @@ llvmGenSuccess LLVMGenPass{} = True
 llvmGenSuccess LLVMGenFail{} = False
 
 data ExplorationResult
-  = ExplorationStats RecoveryStats LLVMGenResult
+  = ExplorationStats (ReoptStats 64) LLVMGenResult
   | ExplorationError FilePath String
 
 renderExplorationResult :: ExplorationResult -> String

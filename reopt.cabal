@@ -20,6 +20,8 @@ library
   build-depends:
     base >= 4,
     aeson,
+    attoparsec,
+    base-encoding,
     bytestring,
     containers,
     directory,
@@ -38,6 +40,7 @@ library
     prettyprinter,
     process,
     reopt-vcg-ann,
+    scientific,
     text,
     transformers,
     unix,
@@ -59,14 +62,20 @@ library
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
     Reopt.CFG.StackDepth
+    Reopt.Events
     Reopt.ExternalTools
     Reopt.Header
     Reopt.Hints
     Reopt.Relinker
+    Reopt.Relinker.Binary
+    Reopt.Relinker.Constants
+    Reopt.Relinker.NewBinary
     Reopt.Relinker.Object
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
+    Reopt.Server
+    Reopt.Utils.Dir
     Reopt.Utils.Hex
     Reopt.Utils.Printf
 

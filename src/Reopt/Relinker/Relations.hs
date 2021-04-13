@@ -103,6 +103,7 @@ data MergeRelations = MergeRelations
   { mrObjectFuns :: !(V.Vector ObjFunDef)
     -- ^ Functions in object file and their relation to the object.
   , mrUndefinedFuns :: !(V.Vector ObjFunRef)
+    -- ^ Functions in the object file and their address in binary.
   }
 
 instance A.FromJSON MergeRelations where

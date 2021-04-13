@@ -15,7 +15,7 @@ module Reopt.CFG.StackDepth
   , stackDepthOffsetValue
   ) where
 
-import           Control.Lens
+import Control.Lens
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (traverse_)

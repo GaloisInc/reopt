@@ -2,3 +2,6 @@
 /cabal.project.local
 /dist-newstyle
 /TAGS
+/tar
+/containers
+/vscode-plugin

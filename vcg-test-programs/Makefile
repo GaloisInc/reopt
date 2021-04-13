@@ -6,7 +6,7 @@ llvm_as ?= llvm-as
 cpp_flags ?=
 #cpp_flags=-I/usr/include/x86_64-linux-gnu
 
-reopt := $(shell which reopt)
+reopt := 'cabal run reopt --'
 reopt-vcg := $(shell which reopt-vcg)
 
 # We create empty ".crt" files to indicate successful runs of
@@ -24,18 +24,28 @@ all : test_add_diet_reopt.crt \
 	$(reopt-vcg) $<
 	touch $@
 
-# Generate LLVM file using reopt for add example
-test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_protos.h $(reopt)
-	$(reopt) -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add --include main $<
+# Generate add  binary
+test_add_diet_lld_reopt.exe : test_add_diet_lld.exe test_add_protos.h
+	cabal run exe:reopt -- -o $@ --header test_add_protos.h --include add --include main $<
 
 # Generate LLVM file using reopt for add example
-test_fpadd_diet_lld.ll test_fpadd_diet_lld.ann : test_fpadd_diet_lld.exe test_fpadd_protos.h $(reopt)
+test_add_diet_reopt.ll test_add_diet_reopt.ann : test_add_diet_lld.exe test_add_protos.h
+	cabal run exe:reopt -- -o test_add_diet_reopt.ll  --llvm --annotations test_add_diet_reopt.ann --header test_add_protos.h --include add --include main $<
+
+# Generate Fibonacci binary
+test_fib_diet_reopt.exe : test_fib_diet_lld.exe test_fib_protos.h
+	cabal run exe:reopt --  -o $@ --header test_fib_protos.h --include fib --include main $<
+
+# Generate LLVM file using reopt for fib example
+test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h
+	cabal run exe:reopt --  -o $@  --llvm --annotations test_fib_diet_reopt.ann \
+                                 --header test_fib_protos.h --include fib --include main $<
+
+# Generate LLVM file using reopt for fpadd
+test_fpadd_diet_lld.ll test_fpadd_diet_lld.ann : test_fpadd_diet_lld.exe test_fpadd_protos.h
 	cabal run exe:reopt -- -o test_fpadd_diet_lld.ll --llvm --annotations test_fpadd_diet_lld.ann --header test_fpadd_protos.h --include fpadd --include main $<
 
-# Generate LLVM file using reopt for add example
-test_fib_diet_reopt.ll test_fib_diet_reopt.ann : test_fib_diet_lld.exe test_fib_protos.h $(reopt)
-	$(reopt) -o test_fib_diet_reopt.ll  --llvm --annotations test_fib_diet_reopt.ann \
-                 --header test_fib_protos.h --include fib --include main $<
+
 
 %_reopt_pretty.ann : %_reopt.ann
 	python -m json.tool $< > $@
@@ -50,7 +60,6 @@ test_add_diet_reopt.cfg : test_add_diet_lld.exe test_add_protos.h $(reopt)
 # Generate the .o file using reopt.
 test_add_diet_reopt.o : test_add_diet_lld.exe
 	$(reopt) --object -o $@ --include add test_add_diet_lld.exe
-
 
 # Generate LLVM file using reopt for fib example
 test_fib_diet_lld.cfg : test_fib_diet_lld.exe test_fib_protos.h $(reopt)

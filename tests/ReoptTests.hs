@@ -24,7 +24,7 @@ reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 -- | Function that accepts warnings/errors from macaw.
-logger :: RecoveryLogEvent -> IO ()
+logger :: a -> IO ()
 logger _msg = pure () -- error $ "Test failed: " ++ msg
 
 -- | This just tests that we can successfully run discovery,
