@@ -26,7 +26,6 @@ import           Data.Parameterized.Some
 import           Data.Version
 import           Data.Word
 import           Numeric
-import           Numeric.Natural
 import           Prettyprinter (pretty)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
@@ -36,7 +35,8 @@ import           System.IO.Error
 import           Text.Printf
 
 import           Data.Macaw.DebugLogging
-import           Data.Macaw.Discovery
+import Data.Macaw.Discovery
+    ( ppDiscoveryStateBlocks, DiscoveryOptions(..) )
 import           Data.Macaw.X86
 
 import           Reopt
@@ -147,6 +147,10 @@ data Args
             -- ^ Path to export LLVM bitcode to.
           , objectExportPath :: !(Maybe FilePath)
             -- ^ Path to export object file.
+          , printStats :: !Bool
+            -- ^ Should we print discovery/recovery statistics to stdout?
+          , exportStatsPath :: !(Maybe FilePath)
+            -- ^ Should we export discovery/recovery statistics?
           }
 
 -- | Action to perform when running
@@ -201,6 +205,8 @@ defaultArgs = Args { _reoptAction = Reopt
                    , llvmGenOptions = defaultLLVMGenOptions
                    , llvmExportPath         = Nothing
                    , objectExportPath       = Nothing
+                   , printStats             = False
+                   , exportStatsPath        = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -252,6 +258,16 @@ llvmFlag :: Flag Args
 llvmFlag = flagNone [ "llvm" ] upd help
   where upd  = reoptAction .~ ShowLLVM
         help = "Show generated LLVM."
+
+statsPrintFlag :: Flag Args
+statsPrintFlag = flagNone [ "print-stats" ] upd help
+  where upd old = old { printStats = True}
+        help = "Print discovery/recovery statistics."
+
+statsExportFlag :: Flag Args
+statsExportFlag = flagReq [ "export-stats" ] upd "PATH" help
+  where upd path old = Right $ old { exportStatsPath = Just path }
+        help = "Path at which to write discovery/recovery statistics."
 
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
@@ -406,6 +422,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 , debugFlag
+                , statsPrintFlag
                   -- Redirect output to file.
                 , outputFlag
                   -- Explicit Modes
@@ -437,6 +454,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- * Export
                 , objectExportFlag
                 , relinkerInfoExportFlag
+                , statsExportFlag
                 ]
 
 -- | Flag to set the path to the binary to analyze.
@@ -483,51 +501,14 @@ argsReoptOptions args = ReoptOptions { roIncluded = args^.includeAddrs
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
-  hdrAnn <- resolveHeader args
-  errorRef <- newIORef 0
+  hdrAnn <- resolveHeader (headerPath args) (clangPath args)
+  statsRef <- newIORef initRecoveryStats
   Some discState <-
-    discoverBinary (recoverLogError errorRef)
+    discoverBinary (recoverLogEvent statsRef)
                    (programPath args) (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn
   pure $ show $ ppDiscoveryStateBlocks discState
 
--- | This parses function argument information from a user-provided header file.
-resolveHeader :: Args -> IO AnnDeclarations
-resolveHeader args =
-  case headerPath args of
-    Nothing -> pure emptyAnnDeclarations
-    Just p -> parseHeader (clangPath args) p
 
--- | Function for recovering log information.
---
--- This has a side effect where it increments an IORef so
--- that the number of errors can be recorded.
-recoverLogError :: IORef Natural -- ^ Counter
-                -> GetFnsLogEvent  -- ^ Message to log
-                -> IO ()
-recoverLogError ref msg = do
-  -- Update error count
-  case msg of
-    StartFunRecovery _ _ -> pure ()
-    _ -> modifyIORef' ref (+1)
-  hPutStrLn stderr (show msg)
-
--- | Parse arguments to get information needed for function representation.
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, Natural)
-getFunctions args = do
-  hdrAnn <- resolveHeader args
-  let funPrefix :: BSC.ByteString
-      funPrefix = unnamedFunPrefix args
-  errorRef <- newIORef 0
-  (_, os, _, recMod, _) <-
-    recoverX86Elf (recoverLogError errorRef)
-                  (programPath args)
-                  (loadOptions args)
-                  (args^.discOpts)
-                  (argsReoptOptions args)
-                  hdrAnn
-                  funPrefix
-  errorCnt <- readIORef errorRef
-  pure (os, recMod, errorCnt)
 
 ------------------------------------------------------------------------
 -- LLVM Generation
@@ -554,17 +535,19 @@ performReopt args = do
                  && isNothing (llvmExportPath args)
                  && isNothing (objectExportPath args)
                  && isNothing (outputPath args)
+                 && not (printStats args)
+                 && isNothing (exportStatsPath args)
   when nothingToDo $ do
     hPutStrLn stderr $ "Nothing to do\n"
       ++ "  Specify an output via --output or other info to export."
     exitFailure
 
-  hdrAnn <- resolveHeader args
+  hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  errorRef <- newIORef 0
+  statsRef <- newIORef initRecoveryStats
   (origElf, os, _, recMod, relinkerInfo) <-
-    recoverX86Elf (recoverLogError errorRef)
+    recoverX86Elf (recoverLogEvent statsRef)
                   (programPath args)
                   (loadOptions args)
                   (args^.discOpts)
@@ -581,9 +564,8 @@ performReopt args = do
             exitFailure
       Aeson.encodeFile path relinkerInfo  `catch` onErr
 
-  errorCnt <- readIORef errorRef
-  when (errorCnt > 0) $ do
-    hPutStrLn stderr $ show errorCnt ++ " error(s) occured."
+  stats <- readIORef statsRef
+  reportStats (programPath args) (printStats args) (exportStatsPath args) stats
   -- Generate LLVM
   let (objLLVM,_) = renderLLVMBitcode args os recMod
   -- Write LLVM if requested.
@@ -618,6 +600,16 @@ performReopt args = do
         hPutStrLn stderr "Performing final relinking."
         mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, RecoveryStats)
+getFunctions args =
+  recoverFunctions (programPath args)
+                   (clangPath args)
+                   (loadOptions args)
+                   (args^.discOpts)
+                   (argsReoptOptions args)
+                   (headerPath args)
+                   (unnamedFunPrefix args)
+
 main' :: IO ()
 main' = do
   args <- getCommandLineArgs
@@ -631,22 +623,18 @@ main' = do
 
     -- Write function discovered
     ShowFunctions -> do
-      (_,recMod, errorCnt) <- getFunctions args
+      (_,recMod, stats) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-      when (errorCnt > 0) $ do
-        hPutStrLn stderr $
-          if errorCnt == 1 then
-            "1 error occured."
-           else
-            show errorCnt ++ " errors occured."
+      reportStats (programPath args) (printStats args) (exportStatsPath args) stats
+      when ((statsErrorCnt stats) > 0)
         exitFailure
 
     ShowLLVM -> do
       when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      (os, recMod, errorCnt) <- getFunctions args
+      (os, recMod, stats) <- getFunctions args
       let (llvmMod, mFunAnn) = renderLLVMBitcode args os recMod
       case annotationsExportPath args of
         Nothing -> pure ()
@@ -668,12 +656,8 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-      when (errorCnt > 0) $ do
-        hPutStrLn stderr $
-          if errorCnt == 1 then
-            "1 error occured."
-           else
-            show errorCnt ++ " errors occured."
+      reportStats (programPath args) (printStats args) (exportStatsPath args) stats
+      when ((statsErrorCnt stats) > 0) $ do
         exitFailure
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments

@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -24,7 +25,11 @@ module Reopt
   , Reopt.AnnotatedTypes.emptyAnnDeclarations
   , Reopt.Header.parseHeader
   , RecoveredModule(..)
-  , GetFnsLogEvent(..)
+  , RecoveryLogEvent(..)
+  , isErrorEvent
+  , discoveredFnName
+  , recoverFunctions
+  , resolveHeader
     -- * Object merging
   , Reopt.Relinker.MergeRelations
   , mergeAndWrite
@@ -45,6 +50,12 @@ module Reopt
   , copyrightNotice
     -- * Re-exports
   , Data.Macaw.Memory.ElfLoader.LoadOptions(..)
+    -- * Reporting
+  , RecoveryStats(..)
+  , initRecoveryStats
+  , reportStats
+  , recoverLogEvent
+  , statsToTable
   ) where
 
 import           Control.Monad.State
@@ -60,6 +71,7 @@ import           Data.ElfEdit (Elf)
 import qualified Data.ElfEdit as Elf
 import qualified Data.ElfEdit.ByteString as ElfBS
 import           Data.Foldable
+import           Data.List (intercalate)
 import           Data.IORef
 import           Data.Int
 import           Data.Map (Map)
@@ -73,6 +85,7 @@ import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           Numeric
+import           Numeric.Natural
 import           Prettyprinter (pretty)
 import           System.Exit
 import           System.IO
@@ -998,35 +1011,58 @@ initDiscState disc ainfo reoptOpts = do
 $(pure [])
 
 ---------------------------------------------------------------------------------
--- GetFnsLogEvent
+-- RecoveryLogEvent
 
 -- | Event passed to logger when discovering functions
-data GetFnsLogEvent
+data RecoveryLogEvent
    = ArgResolverError !String !ArgResolverError
    | DuplicateSections !BSC.ByteString
    | DebugError !String
    | StartFunRecovery !(Maybe BSC.ByteString) !(MemSegmentOff 64)
      -- ^ Notify we are starting analysis of given function.
+   | EndFunRecovery !(Maybe BSC.ByteString) !(MemSegmentOff 64)
+     -- ^ Notify we successfully completed analysis of given function.
    | RecoveryFailed !(Maybe BSC.ByteString)  !(MemSegmentOff 64) !String
      -- ^ @RecoveryFailed dnm addr msg@ notes we failed to recover function due to given reason.
    | RecoveryPLTSkipped  !(Maybe BSC.ByteString)  !(MemSegmentOff 64)
    | RecoveryWarning !(Maybe BSC.ByteString) !(MemSegmentOff 64) !String
-   | GetFnsError !String
+   | RecoveryError !String
      -- ^ A general error message
 
-instance Show GetFnsLogEvent where
+-- | Human-readable name of discovered function.
+discoveredFnName :: (Maybe BSC.ByteString) -> MemSegmentOff 64 -> String
+discoveredFnName Nothing faddr   = "0x" <> showHex (addrOffset (segoffAddr faddr)) ""
+discoveredFnName (Just nm) faddr = BSC.unpack nm <> "(0x" <> showHex (addrOffset (segoffAddr faddr)) ")"
+
+instance Show RecoveryLogEvent where
   show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
   show (DuplicateSections nm)  = "Multiple sections named " ++ BSC.unpack nm
   show (DebugError msg)        = msg
   show (StartFunRecovery dnm faddr)  =
-     let fnm = case dnm of
-                 Just nm -> BSC.unpack nm <> "(0x" <> showHex (addrOffset (segoffAddr faddr)) ")"
-                 Nothing -> "0x" <> showHex (addrOffset (segoffAddr faddr)) ""
+     let fnm = discoveredFnName dnm faddr
       in "Recovering function " <> fnm
+  show (EndFunRecovery dnm faddr)  =
+     let fnm = discoveredFnName dnm faddr
+      in "Completed recovering function " <> fnm
   show (RecoveryFailed _ _ msg)  = "  " <> msg
   show (RecoveryPLTSkipped _ _)  = "  Skipped PLT stub"
   show (RecoveryWarning _ _ msg) = "  Warning: " ++ msg
-  show (GetFnsError msg) = msg
+  show (RecoveryError msg) = msg
+
+-- | Should this event increase the error count?
+isErrorEvent :: RecoveryLogEvent -> Bool
+isErrorEvent =
+  \case
+    ArgResolverError{}   -> True
+    DuplicateSections{}  -> True
+    DebugError{}         -> True
+    StartFunRecovery{}   -> False
+    EndFunRecovery{}     -> False
+    RecoveryFailed{}     -> True
+    RecoveryPLTSkipped{} -> True
+    RecoveryWarning{}    -> True
+    RecoveryError{}        -> True
+
 
 $(pure [])
 
@@ -1093,7 +1129,7 @@ $(pure [])
 
 -- | Add a type to a map
 addCheckExisting :: (Ord k, Eq tp, Show tp)
-                 => (GetFnsLogEvent -> IO ())
+                 => (RecoveryLogEvent -> IO ())
                  -> String
                  -> k
                  -> tp
@@ -1105,13 +1141,13 @@ addCheckExisting logger nm k v m =
       pure $! Map.insert k v m
     Just pv -> do
       when (pv /= v) $ do
-        logger $ GetFnsError $ printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v)
+        logger $ RecoveryError $ printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v)
       pure m
 
 $(pure [])
 
 -- | Add a new function type to a function
-addNamedFunType :: (GetFnsLogEvent -> IO ()) -- ^ Logging function for recording errors.
+addNamedFunType :: (RecoveryLogEvent -> IO ()) -- ^ Logging function for recording errors.
                 -> FunTypeMaps w -- ^ Current type map information
                 -> String -- ^ Name of entry for logging purposes.
                 -> Maybe BS.ByteString -- ^ External name of function if not defined
@@ -1185,7 +1221,7 @@ throwDwarfTypeError ref msg =
 $(pure [])
 
 resolveDwarfTypeRef :: (MonadIO m, MonadError ArgResolverError m)
-                    => (GetFnsLogEvent -> IO ())
+                    => (RecoveryLogEvent -> IO ())
                     -> Map Dwarf.TypeRef Dwarf.AbsType
                        -- ^ Logging function for errors
                     -> Dwarf.TypeRef
@@ -1204,7 +1240,7 @@ resolveDwarfTypeRef logger typeMap ref = do
 
 $(pure [])
 
-resolveDwarfType :: (GetFnsLogEvent -> IO ())
+resolveDwarfType :: (RecoveryLogEvent -> IO ())
                     -- ^ Logging function for errors
                  -> Map Dwarf.TypeRef Dwarf.AbsType
                  -> Dwarf.TypeRef
@@ -1256,7 +1292,7 @@ resolveDwarfType logger typeMap ref = do
 $(pure [])
 
 -- | Resolve Dwarf arg types
-resolveDwarfArgTypes :: (GetFnsLogEvent -> IO ())
+resolveDwarfArgTypes :: (RecoveryLogEvent -> IO ())
                       -- ^ Logging function for errors
                       -> Maybe Dwarf.Subprogram
                         -- ^ Origin subprogram if defined
@@ -1300,7 +1336,7 @@ resolveDwarfArgTypes logger morigin typeMap prev cnt (a:r) = seq cnt $ do
   resolveDwarfArgTypes logger morigin typeMap (a':prev) (cnt+1) r
 
 -- | Resolve the type of a Dwarf subprogram
-resolveDwarfSubprogramFunType :: (GetFnsLogEvent -> IO ())
+resolveDwarfSubprogramFunType :: (RecoveryLogEvent -> IO ())
                                  -- ^ Logging function for errors
                               -> Dwarf.Subprogram
                               -> Maybe Dwarf.Subprogram -- ^ Origin if subprogram is generated from another.
@@ -1329,7 +1365,7 @@ resolveDwarfSubprogramFunType logger sub morigin = do
 $(pure [])
 
 -- | Resolve type information from subroutine.
-resolveSubprogramType :: (GetFnsLogEvent -> IO ())
+resolveSubprogramType :: (RecoveryLogEvent -> IO ())
                       -- ^ Logging function for errors
                       -> Dwarf.CompileUnit
                       -- ^ Compile unit for this sub program
@@ -1387,7 +1423,7 @@ resolveSubprogramType logger cu annMap sub entryAddr
               addNamedFunType logger annMap debugName externalName entryAddr funType
 
 -- | Resolve type information from subroutine.
-resolveSubprogram :: (GetFnsLogEvent -> IO ())
+resolveSubprogram :: (RecoveryLogEvent -> IO ())
                   -- ^ Logging function for errors
                   -> Dwarf.CompileUnit
                   -- ^ Compile unit for this sub program
@@ -1421,7 +1457,7 @@ resolveSubprogram logger cu annMap sub = do
       pure $ annMap' { noreturnMap = Map.insertWith fn entry val (noreturnMap annMap') }
 
 -- | Add all compile units in plugin
-resolveCompileUnits :: (GetFnsLogEvent -> IO ())
+resolveCompileUnits :: (RecoveryLogEvent -> IO ())
                     -- ^ Logging function for errors
                     -> FunTypeMaps w
                     -- ^ Map from function names to type info.
@@ -1446,7 +1482,7 @@ resolveCompileUnits logger annMap (Just (Right ctx)) = do
 
 -- | Extend function types with header information.
 resolveDebugFunTypes :: forall w
-                     . (GetFnsLogEvent -> IO ())
+                     . (RecoveryLogEvent -> IO ())
                      -- ^ Logging function for errors
                      -> FunTypeMaps w
                      -- ^ Annotations from source file
@@ -1483,7 +1519,7 @@ $(pure [])
 -- Complete discovery
 
 doDiscovery :: forall arch
-            .  (GetFnsLogEvent -> IO ())
+            .  (RecoveryLogEvent -> IO ())
                -- ^ Logging function for errors
             -> AnnDeclarations
                -- ^ Header with hints for assisting typing.
@@ -1521,7 +1557,7 @@ doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts = withArchCon
               -- Silently drop symbols without addresses as they may be undefined.
               pure m
             Left SymAddrMapAmbiguous -> do
-              logger $ GetFnsError $ "Ambiguous symbol " ++ BSC.unpack sym ++ "."
+              logger $ RecoveryError $ "Ambiguous symbol " ++ BSC.unpack sym ++ "."
               pure m
             Right addr -> do
               pure $! Map.insert addr annTp m
@@ -1547,7 +1583,7 @@ doDiscovery logger hdrAnn hdrInfo ainfo initState disOpt reoptOpts = withArchCon
   pure (debugTypeMap, discState)
 
 -- | Discover code in the binary identified by the given path.
-discoverBinary :: (GetFnsLogEvent -> IO ())
+discoverBinary :: (RecoveryLogEvent -> IO ())
                   -- ^ Logging function for errors
                -> FilePath
                -> LoadOptions
@@ -2132,7 +2168,7 @@ $(pure [])
 -- | Analyze an elf binary to extract information.
 --
 --  Note. This prints warnings to stderr and may exit if the Elf file cannot be parsed.
-recoverX86Elf :: (GetFnsLogEvent -> IO ())
+recoverX86Elf :: (RecoveryLogEvent -> IO ())
                -- ^ Logging function for errors
                -> FilePath
                -- ^ Path to binary for exploring CFG
@@ -2227,6 +2263,7 @@ recoverX86Elf logger path loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix = do
               pure Nothing
             Right (warnings, fn) -> do
               mapM_ (logger . RecoveryWarning dnm faddr) warnings
+              logger $ EndFunRecovery dnm faddr
               pure (Just fn)
         FunctionHasPLT -> do
           logger $ RecoveryPLTSkipped dnm faddr
@@ -2361,3 +2398,185 @@ mergeAndWrite outputPath origBinary objName objContents mergeRel = do
   do fs <- getFileStatus outputPath
      let fm = ownerExecuteMode .|. groupExecuteMode .|. otherExecuteMode
      setFileMode outputPath (fileMode fs `unionFileModes` fm)
+
+
+--------------------------------------------------------------------------------
+-- Function Recovery and Statistics
+
+
+-- | This parses function argument information from a user-provided header file.
+resolveHeader ::
+  Maybe FilePath {- ^ Filepath for C header with program info (if any). -} ->
+  FilePath {- ^ Path to clang. -} ->
+  IO AnnDeclarations
+resolveHeader mHdrPath clangPath =
+  case mHdrPath of
+    Nothing -> pure emptyAnnDeclarations
+    Just p -> parseHeader clangPath p
+
+
+-- | Describes the result of a function recovery attempt.
+data FnRecoveryResult
+  = FnDiscovered
+  | FnRecovered
+  | FnFailedRecovery
+  | FnPLTSkipped
+  deriving (Show, Eq)
+
+
+
+-- | Statistics summarizing our recovery efforts.
+data RecoveryStats =
+  RecoveryStats
+  { statsFnResults :: Map ((Maybe BSC.ByteString), (MemSegmentOff 64)) FnRecoveryResult
+  -- ^ Mapping of functions to the result of recovery
+  , statsFnDiscoveredCnt :: Natural
+  -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
+  , statsFnRecoveredCnt :: Natural
+  -- ^ Number of successfully recovered functions.
+  , statsFnPLTSkippedCnt :: Natural
+  -- ^ Number of skipped PLT stubs.
+  , statsFnFailedCnt :: Natural
+  -- ^ Number of functions which failed during recovery.
+  , statsErrorCnt :: Natural
+  -- ^ Overall error count.
+  }
+
+initRecoveryStats :: RecoveryStats
+initRecoveryStats =
+  RecoveryStats
+  { statsFnResults = Map.empty
+  , statsFnDiscoveredCnt = 0
+  , statsFnRecoveredCnt = 0
+  , statsFnPLTSkippedCnt = 0
+  , statsFnFailedCnt = 0
+  , statsErrorCnt = 0
+  }
+
+renderFnStats :: RecoveryStats -> String
+renderFnStats s =
+  if (statsFnDiscoveredCnt s) == 0 then "reopt discovered no functions."
+  else
+    "reopt discovered " ++ (show (statsFnDiscoveredCnt s)) ++ " functions:" ++
+    "\n  recovery succeeded: " ++ (show (statsFnRecoveredCnt s)) ++ passedStr ++
+    "\n     recovery failed: " ++ (show (statsFnFailedCnt s)) ++ failedStr ++
+    "\n    skipped PLT stub: " ++ (show (statsFnPLTSkippedCnt s)) ++ skippedStr
+  where passed :: Double = (fromIntegral $ statsFnRecoveredCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+        passedStr = printf " (%.2f%%)" (passed * 100.0)
+        failed :: Double = (fromIntegral $ statsFnFailedCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+        failedStr = printf " (%.2f%%)" (failed * 100.0)
+        skipped :: Double = (fromIntegral $ statsFnPLTSkippedCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+        skippedStr = printf " (%.2f%%)" (skipped * 100.0)
+
+
+-- | Return header and rows for table summary of recovery statistics.
+statsToTable ::
+  FilePath {- ^ Path to binary statistics are for. -}->
+  RecoveryStats {- ^ Stats to export. -} ->
+  ([String], [[String]])
+statsToTable binPath stats = (csvHeader, csvRows)
+  where csvHeader = ["binary", "fn name", "address", "recovery result"]
+        csvRows = map toCsvRow $ Map.toList $ statsFnResults stats
+        toCsvRow :: (((Maybe BSC.ByteString), (MemSegmentOff 64)), FnRecoveryResult) -> [String]
+        toCsvRow ((mNm, faddr), res) =
+          let name = case mNm of Nothing -> ""; Just nm -> BSC.unpack nm
+              hexAddr = "0x" ++ (showHex (addrOffset (segoffAddr faddr)) "")
+          in [binPath, name, hexAddr, show res]
+
+exportFnStats ::
+  FilePath {- ^ Path to binary statistics are for. -} ->
+  FilePath {- ^ Path to write statistics to. -} ->
+  RecoveryStats {- ^ Stats to export. -} ->
+  IO ()
+exportFnStats binPath outPath stats = do
+  let (hdr, rows) = statsToTable binPath stats
+      hdrStr = intercalate "," hdr
+      rowsStr = map (intercalate ",") rows
+  writeFile outPath $ unlines $ hdrStr:rowsStr
+
+
+-- | Print and/or export statistics (if relevant flags are set) and the error count.
+reportStats ::
+  FilePath {- ^ Path to program.-} ->
+  Bool {- ^ Whether to print statistics to stderr.-} ->
+  Maybe FilePath {- ^ Where to export stats to.-} ->
+  RecoveryStats ->
+  IO ()
+reportStats progPath printStats mStatsPath stats = do
+  when printStats $ do
+    hPutStrLn stderr $ renderFnStats stats
+  case mStatsPath of
+    Nothing -> pure ()
+    Just statsPath -> exportFnStats progPath statsPath stats
+  when ((statsErrorCnt stats) > 0) $ do
+    hPutStrLn stderr $
+      if (statsErrorCnt stats) == 1 then
+        "1 error occured."
+        else
+        show (statsErrorCnt stats) ++ " errors occured."
+
+-- | Function for recovering log information.
+--
+-- This has a side effect where it increments an IORef so
+-- that the number of errors can be recorded.
+recoverLogEvent ::
+  IORef RecoveryStats
+  -> RecoveryLogEvent  -- ^ Message to log
+  -> IO ()
+recoverLogEvent statsRef event = do
+  -- Update error count when applicable
+  when (isErrorEvent event) $ do
+    modifyIORef' statsRef $ \s -> s {statsErrorCnt = 1 + (statsErrorCnt s)}
+  -- Record more detailed info when appropriate.
+  case event of
+    StartFunRecovery mNm addr -> do
+      let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
+                       , statsFnDiscoveredCnt = 1 + (statsFnDiscoveredCnt s)}
+      modifyIORef' statsRef update
+    EndFunRecovery mNm addr -> do
+      let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
+                       , statsFnRecoveredCnt = 1 + (statsFnRecoveredCnt s) }
+      prevEntry <- Map.lookup (mNm, addr) <$> statsFnResults <$> readIORef statsRef
+      case prevEntry of
+        Nothing -> hPutStrLn stderr (show event)
+        Just FnDiscovered -> pure ()
+        Just res -> hPutStrLn stderr $ "function " ++ (discoveredFnName mNm addr)
+                                       ++ " had an unexpected previous state at the end of discovery: "
+                                       ++ (show res)
+      modifyIORef' statsRef update
+    RecoveryFailed mNm addr _errMsg -> do
+      let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
+                       , statsFnFailedCnt = 1 + (statsFnFailedCnt s) }
+      modifyIORef' statsRef update
+    RecoveryPLTSkipped mNm addr -> do
+      let update s = s { statsFnResults = Map.insert (mNm, addr) FnPLTSkipped (statsFnResults s)
+                       , statsFnPLTSkippedCnt = 1 + (statsFnPLTSkippedCnt s) }
+      modifyIORef' statsRef update
+    _ -> pure ()
+  -- Print log info to stderr.
+  hPutStrLn stderr (show event)
+
+
+-- | Parse arguments to get information needed for function representation.
+recoverFunctions ::
+  FilePath {- ^ Path to program -} ->
+  FilePath {- ^ Path to clang -} ->
+  LoadOptions ->
+  DiscoveryOptions ->
+  ReoptOptions ->
+  Maybe FilePath {- ^ Filepath for C header with program info (if any). -} ->
+  BS.ByteString {- ^ Prefix for unnamed functions identified in code discovery. -} ->
+  IO (X86OS, RecoveredModule X86_64, RecoveryStats)
+recoverFunctions progPath clangPath lOpts dOpts rOpts mCHdr unnamedFnPrefix = do
+  hdrAnn <- resolveHeader mCHdr clangPath
+  statsRef <- newIORef initRecoveryStats
+  (_, os, _, recMod, _) <-
+    recoverX86Elf (recoverLogEvent statsRef)
+                  progPath
+                  lOpts
+                  dOpts
+                  rOpts
+                  hdrAnn
+                  unnamedFnPrefix
+  stats <- readIORef statsRef
+  pure (os, recMod, stats)

@@ -25,7 +25,7 @@ reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
 
 -- | Function that accepts warnings/errors from macaw.
-logger :: GetFnsLogEvent -> IO ()
+logger :: RecoveryLogEvent -> IO ()
 logger _msg = pure () -- error $ "Test failed: " ++ msg
 
 defaultLLVMGenOptions :: LLVM.LLVMGenOptions
