@@ -18,7 +18,9 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
-import           Data.ElfEdit
+import Data.ElfEdit
+    ( elfSections,
+      ElfSection(elfSectionName, elfSectionAddr, elfSectionData) )
 import           Data.IORef
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Maybe
@@ -42,7 +44,6 @@ import           Data.Macaw.X86
 import           Reopt
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.CFG.LLVM as LLVM
-import qualified Reopt.CFG.LLVM.X86 as LLVM
 import qualified Reopt.VCG.Annotations as Ann
 
 import           Paths_reopt (version)
@@ -173,9 +174,7 @@ excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 discOpts :: Lens' Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
 
-defaultLLVMGenOptions :: LLVM.LLVMGenOptions
-defaultLLVMGenOptions =
-  LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = False }
+
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -502,7 +501,7 @@ argsReoptOptions args = ReoptOptions { roIncluded = args^.includeAddrs
 showCFG :: Args -> IO String
 showCFG args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
-  statsRef <- newIORef initRecoveryStats
+  statsRef <- newIORef $ initRecoveryStats $ programPath args
   Some discState <-
     discoverBinary (recoverLogEvent statsRef)
                    (programPath args) (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn
@@ -518,14 +517,6 @@ builderWriteFile path bld =
   withFile path WriteMode $ \h -> do
     Builder.hPutBuilder h bld
 
--- | Rendered a recovered X86_64 module as LLVM bitcode
-renderLLVMBitcode :: Args -- ^ Arguments passed
-                  -> X86OS -- ^ Operating system
-                  -> RecoveredModule X86_64 -- ^ Recovered module
-                  -> (Builder.Builder, [Either String Ann.FunctionAnn])
-renderLLVMBitcode args os recMod =
-  let archOps = LLVM.x86LLVMArchOps (show os)
-   in llvmAssembly archOps (llvmGenOptions args) recMod (llvmVersion args)
 
 -- | This command is called when reopt is called with no specific
 -- action.
@@ -545,7 +536,7 @@ performReopt args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  statsRef <- newIORef initRecoveryStats
+  statsRef <- newIORef $ (initRecoveryStats $ programPath args)
   (origElf, os, _, recMod, relinkerInfo) <-
     recoverX86Elf (recoverLogEvent statsRef)
                   (programPath args)
@@ -565,9 +556,12 @@ performReopt args = do
       Aeson.encodeFile path relinkerInfo  `catch` onErr
 
   stats <- readIORef statsRef
-  reportStats (programPath args) (printStats args) (exportStatsPath args) stats
+  reportStats (printStats args) (exportStatsPath args) stats
   -- Generate LLVM
-  let (objLLVM,_) = renderLLVMBitcode args os recMod
+  let (objLLVM,_) = renderLLVMBitcode (llvmGenOptions args)
+                                      (llvmVersion args)
+                                      os
+                                      recMod
   -- Write LLVM if requested.
   case llvmExportPath args of
     Nothing -> pure ()
@@ -626,8 +620,8 @@ main' = do
       (_,recMod, stats) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-      reportStats (programPath args) (printStats args) (exportStatsPath args) stats
-      when ((statsErrorCnt stats) > 0)
+      reportStats (printStats args) (exportStatsPath args) stats
+      when ((statsErrorCount stats) > 0)
         exitFailure
 
     ShowLLVM -> do
@@ -635,7 +629,10 @@ main' = do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
       (os, recMod, stats) <- getFunctions args
-      let (llvmMod, mFunAnn) = renderLLVMBitcode args os recMod
+      let (llvmMod, mFunAnn) = renderLLVMBitcode (llvmGenOptions args)
+                                                 (llvmVersion args)
+                                                 os
+                                                 recMod
       case annotationsExportPath args of
         Nothing -> pure ()
         Just annPath -> do
@@ -656,8 +653,8 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-      reportStats (programPath args) (printStats args) (exportStatsPath args) stats
-      when ((statsErrorCnt stats) > 0) $ do
+      reportStats (printStats args) (exportStatsPath args) stats
+      when ((statsErrorCount stats) > 0) $ do
         exitFailure
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments

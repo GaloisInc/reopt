@@ -17,7 +17,6 @@ import           System.IO
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 
-import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.CFG.LLVM.X86 as LLVM
 import           Reopt
 
@@ -27,10 +26,6 @@ reoptTests = T.testGroup "reopt" . map mkTest
 -- | Function that accepts warnings/errors from macaw.
 logger :: RecoveryLogEvent -> IO ()
 logger _msg = pure () -- error $ "Test failed: " ++ msg
-
-defaultLLVMGenOptions :: LLVM.LLVMGenOptions
-defaultLLVMGenOptions =
-  LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = False }
 
 -- | This just tests that we can successfully run discovery,
 -- function recovery and LLVM generation on the given input Elf file.

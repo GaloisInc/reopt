@@ -41,6 +41,8 @@ module Reopt
   , latestLLVMConfig
   , getLLVMConfig
   , compileLLVM
+  , renderLLVMBitcode
+  , defaultLLVMGenOptions
       -- * X86 specific
   , X86OS(..)
   , osPersonality
@@ -48,6 +50,8 @@ module Reopt
   , recoverX86Elf
     -- * Utility
   , copyrightNotice
+  , foreachFile
+  , withElfFilesInDir
     -- * Re-exports
   , Data.Macaw.Memory.ElfLoader.LoadOptions(..)
     -- * Reporting
@@ -55,7 +59,9 @@ module Reopt
   , initRecoveryStats
   , reportStats
   , recoverLogEvent
-  , statsToTable
+  , renderFnStats
+  , statsHeader
+  , statsRows
   ) where
 
 import           Control.Monad.State
@@ -84,10 +90,13 @@ import           Data.String
 import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
+import           GHC.Stack
 import           Numeric
 import           Numeric.Natural
 import           Prettyprinter (pretty)
+import           System.Directory
 import           System.Exit
+import           System.FilePath
 import           System.IO
 import           System.IO.Error
 import           System.Posix.Files
@@ -111,13 +120,14 @@ import           Reopt.AnnotatedTypes
 import           Reopt.ArgResolver
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FunctionCheck
-import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions, moduleForFunctions)
+import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions(..), moduleForFunctions)
 import           Reopt.CFG.Recovery
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Header
 import           Reopt.Hints
 import           Reopt.Relinker
 import qualified Reopt.VCG.Annotations as Ann
+import qualified Reopt.CFG.LLVM.X86 as LLVM
 
 #ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
@@ -130,6 +140,69 @@ copyrightNotice = "Copyright 2014-21 Galois, Inc."
 
 showUsage :: Handle -> IO ()
 showUsage h = hPutStrLn h "For help on using reopt, run \"reopt --help\"."
+
+reportError :: HasCallStack => FilePath -> String -> IO a
+reportError path msg = hPutStrLn stderr (path <> ": " <> msg) >> exitFailure
+
+-- | Runs the action on each file in a directory (recursively)
+foreachFile :: a -> (a -> FilePath -> IO a) -> FilePath -> IO a
+foreachFile v0 act path = do
+  -- Ignore sym links
+  isLink <- pathIsSymbolicLink path
+  if isLink then
+    pure v0
+   else do
+    dexist <- doesDirectoryExist path
+    if dexist then do
+      mentries <- try $ listDirectory path
+      case mentries of
+        Right entries -> do
+          foldlM (\v f -> foreachFile v act (path </> f)) v0 entries
+        Left e
+          | isPermissionError e -> pure v0
+          | otherwise -> throwError  e
+     else do
+      fexist <- doesFileExist path
+      if fexist && not isLink then
+        act v0 path
+       else
+        pure v0
+
+-- | This reads an argument in the file.
+withElfFilesInDir :: (a -> FilePath -> IO a)
+                  -> a
+                  -> FilePath
+                  -> IO a
+withElfFilesInDir action v0 path = do
+  fexist <- doesFileExist path
+  if fexist then
+    action v0 path
+   else do
+    dexist <- doesDirectoryExist path
+    if dexist then do
+      let visitFile v fname = do
+            fPermissions <- getPermissions fname
+            if executable fPermissions then do
+              mbytes <- try $ BS.readFile fname
+              case mbytes of
+                -- Ignore files we cannot read
+                Left (_e :: IOException) -> do
+                  pure v
+                Right bytes -> do
+                  if Elf.elfMagic `BS.isPrefixOf` bytes then
+                    action v fname
+                  else
+                    pure v
+            else pure v
+      mentries <- try $ listDirectory path
+      case mentries of
+        Right entries -> do
+          foldlM (\v f -> foreachFile v visitFile (path </> f)) v0 entries
+        Left e
+          | isPermissionError e -> pure v0
+          | otherwise -> throwError  e
+     else do
+      reportError path "File not found"
 
 ------------------------------------------------------------------------
 -- Resolve which symbols to include
@@ -2428,92 +2501,95 @@ data FnRecoveryResult
 -- | Statistics summarizing our recovery efforts.
 data RecoveryStats =
   RecoveryStats
-  { statsFnResults :: Map ((Maybe BSC.ByteString), (MemSegmentOff 64)) FnRecoveryResult
+  { statsBinary :: !FilePath
+  -- ^ Which binary are these statistics for?
+  , statsFnResults :: Map ((Maybe BSC.ByteString), (MemSegmentOff 64)) FnRecoveryResult
   -- ^ Mapping of functions to the result of recovery
-  , statsFnDiscoveredCnt :: Natural
+  , statsFnDiscoveredCount :: Natural
   -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
-  , statsFnRecoveredCnt :: Natural
+  , statsFnRecoveredCount :: Natural
   -- ^ Number of successfully recovered functions.
-  , statsFnPLTSkippedCnt :: Natural
+  , statsFnPLTSkippedCount :: Natural
   -- ^ Number of skipped PLT stubs.
-  , statsFnFailedCnt :: Natural
+  , statsFnFailedCount :: Natural
   -- ^ Number of functions which failed during recovery.
-  , statsErrorCnt :: Natural
+  , statsErrorCount :: Natural
   -- ^ Overall error count.
   }
 
-initRecoveryStats :: RecoveryStats
-initRecoveryStats =
+initRecoveryStats :: FilePath -> RecoveryStats
+initRecoveryStats binPath =
   RecoveryStats
-  { statsFnResults = Map.empty
-  , statsFnDiscoveredCnt = 0
-  , statsFnRecoveredCnt = 0
-  , statsFnPLTSkippedCnt = 0
-  , statsFnFailedCnt = 0
-  , statsErrorCnt = 0
+  { statsBinary = binPath
+  , statsFnResults = Map.empty
+  , statsFnDiscoveredCount = 0
+  , statsFnRecoveredCount = 0
+  , statsFnPLTSkippedCount = 0
+  , statsFnFailedCount = 0
+  , statsErrorCount = 0
   }
 
 renderFnStats :: RecoveryStats -> String
 renderFnStats s =
-  if (statsFnDiscoveredCnt s) == 0 then "reopt discovered no functions."
+  if (statsFnDiscoveredCount s) == 0 then "reopt discovered no functions."
   else
-    "reopt discovered " ++ (show (statsFnDiscoveredCnt s)) ++ " functions:" ++
-    "\n  recovery succeeded: " ++ (show (statsFnRecoveredCnt s)) ++ passedStr ++
-    "\n     recovery failed: " ++ (show (statsFnFailedCnt s)) ++ failedStr ++
-    "\n    skipped PLT stub: " ++ (show (statsFnPLTSkippedCnt s)) ++ skippedStr
-  where passed :: Double = (fromIntegral $ statsFnRecoveredCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+    "reopt discovered " ++ (show (statsFnDiscoveredCount s)) ++ " functions in the binary "++(statsBinary s)++":" ++
+    "\n  recovery succeeded: " ++ (show (statsFnRecoveredCount s)) ++ passedStr ++
+    "\n     recovery failed: " ++ (show (statsFnFailedCount s)) ++ failedStr ++
+    "\n    skipped PLT stub: " ++ (show (statsFnPLTSkippedCount s)) ++ skippedStr
+  where passed :: Double = (fromIntegral $ statsFnRecoveredCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         passedStr = printf " (%.2f%%)" (passed * 100.0)
-        failed :: Double = (fromIntegral $ statsFnFailedCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+        failed :: Double = (fromIntegral $ statsFnFailedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         failedStr = printf " (%.2f%%)" (failed * 100.0)
-        skipped :: Double = (fromIntegral $ statsFnPLTSkippedCnt s) / (fromIntegral $  statsFnDiscoveredCnt s)
+        skipped :: Double = (fromIntegral $ statsFnPLTSkippedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         skippedStr = printf " (%.2f%%)" (skipped * 100.0)
 
 
--- | Return header and rows for table summary of recovery statistics.
-statsToTable ::
-  FilePath {- ^ Path to binary statistics are for. -}->
-  RecoveryStats {- ^ Stats to export. -} ->
-  ([String], [[String]])
-statsToTable binPath stats = (csvHeader, csvRows)
-  where csvHeader = ["binary", "fn name", "address", "recovery result"]
-        csvRows = map toCsvRow $ Map.toList $ statsFnResults stats
-        toCsvRow :: (((Maybe BSC.ByteString), (MemSegmentOff 64)), FnRecoveryResult) -> [String]
+
+
+-- | Header row for data produced by @statsRows@
+statsHeader :: [String]
+statsHeader = ["binary", "fn name", "address", "recovery result"]
+
+-- | Rows for table summary of recovery statistics; see also @statsHeader@.
+statsRows ::
+  RecoveryStats {- ^ Stats to convert to rows. -} ->
+  [[String]]
+statsRows stats = map toCsvRow $ Map.toList $ statsFnResults stats
+  where toCsvRow :: (((Maybe BSC.ByteString), (MemSegmentOff 64)), FnRecoveryResult) -> [String]
         toCsvRow ((mNm, faddr), res) =
           let name = case mNm of Nothing -> ""; Just nm -> BSC.unpack nm
               hexAddr = "0x" ++ (showHex (addrOffset (segoffAddr faddr)) "")
-          in [binPath, name, hexAddr, show res]
+          in [statsBinary stats, name, hexAddr, show res]
 
 exportFnStats ::
-  FilePath {- ^ Path to binary statistics are for. -} ->
   FilePath {- ^ Path to write statistics to. -} ->
   RecoveryStats {- ^ Stats to export. -} ->
   IO ()
-exportFnStats binPath outPath stats = do
-  let (hdr, rows) = statsToTable binPath stats
-      hdrStr = intercalate "," hdr
-      rowsStr = map (intercalate ",") rows
+exportFnStats outPath stats = do
+  let hdrStr = intercalate "," statsHeader
+      rowsStr = map (intercalate ",") $ statsRows stats
   writeFile outPath $ unlines $ hdrStr:rowsStr
 
 
 -- | Print and/or export statistics (if relevant flags are set) and the error count.
 reportStats ::
-  FilePath {- ^ Path to program.-} ->
   Bool {- ^ Whether to print statistics to stderr.-} ->
   Maybe FilePath {- ^ Where to export stats to.-} ->
   RecoveryStats ->
   IO ()
-reportStats progPath printStats mStatsPath stats = do
+reportStats printStats mStatsPath stats = do
   when printStats $ do
     hPutStrLn stderr $ renderFnStats stats
   case mStatsPath of
     Nothing -> pure ()
-    Just statsPath -> exportFnStats progPath statsPath stats
-  when ((statsErrorCnt stats) > 0) $ do
+    Just statsPath -> exportFnStats statsPath stats
+  when ((statsErrorCount stats) > 0) $ do
     hPutStrLn stderr $
-      if (statsErrorCnt stats) == 1 then
+      if (statsErrorCount stats) == 1 then
         "1 error occured."
         else
-        show (statsErrorCnt stats) ++ " errors occured."
+        show (statsErrorCount stats) ++ " errors occured."
 
 -- | Function for recovering log information.
 --
@@ -2526,16 +2602,16 @@ recoverLogEvent ::
 recoverLogEvent statsRef event = do
   -- Update error count when applicable
   when (isErrorEvent event) $ do
-    modifyIORef' statsRef $ \s -> s {statsErrorCnt = 1 + (statsErrorCnt s)}
+    modifyIORef' statsRef $ \s -> s {statsErrorCount = 1 + (statsErrorCount s)}
   -- Record more detailed info when appropriate.
   case event of
     StartFunRecovery mNm addr -> do
       let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
-                       , statsFnDiscoveredCnt = 1 + (statsFnDiscoveredCnt s)}
+                       , statsFnDiscoveredCount = 1 + (statsFnDiscoveredCount s)}
       modifyIORef' statsRef update
     EndFunRecovery mNm addr -> do
       let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
-                       , statsFnRecoveredCnt = 1 + (statsFnRecoveredCnt s) }
+                       , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
       prevEntry <- Map.lookup (mNm, addr) <$> statsFnResults <$> readIORef statsRef
       case prevEntry of
         Nothing -> hPutStrLn stderr (show event)
@@ -2546,11 +2622,11 @@ recoverLogEvent statsRef event = do
       modifyIORef' statsRef update
     RecoveryFailed mNm addr _errMsg -> do
       let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
-                       , statsFnFailedCnt = 1 + (statsFnFailedCnt s) }
+                       , statsFnFailedCount = 1 + (statsFnFailedCount s) }
       modifyIORef' statsRef update
     RecoveryPLTSkipped mNm addr -> do
       let update s = s { statsFnResults = Map.insert (mNm, addr) FnPLTSkipped (statsFnResults s)
-                       , statsFnPLTSkippedCnt = 1 + (statsFnPLTSkippedCnt s) }
+                       , statsFnPLTSkippedCount = 1 + (statsFnPLTSkippedCount s) }
       modifyIORef' statsRef update
     _ -> pure ()
   -- Print log info to stderr.
@@ -2569,7 +2645,7 @@ recoverFunctions ::
   IO (X86OS, RecoveredModule X86_64, RecoveryStats)
 recoverFunctions progPath clangPath lOpts dOpts rOpts mCHdr unnamedFnPrefix = do
   hdrAnn <- resolveHeader mCHdr clangPath
-  statsRef <- newIORef initRecoveryStats
+  statsRef <- newIORef $ initRecoveryStats progPath
   (_, os, _, recMod, _) <-
     recoverX86Elf (recoverLogEvent statsRef)
                   progPath
@@ -2580,3 +2656,18 @@ recoverFunctions progPath clangPath lOpts dOpts rOpts mCHdr unnamedFnPrefix = do
                   unnamedFnPrefix
   stats <- readIORef statsRef
   pure (os, recMod, stats)
+
+
+defaultLLVMGenOptions :: LLVMGenOptions
+defaultLLVMGenOptions = LLVMGenOptions { mcExceptionIsUB = False }
+
+-- | Rendered a recovered X86_64 module as LLVM bitcode
+renderLLVMBitcode ::
+  LLVMGenOptions ->
+  LLVMConfig ->
+  X86OS {- ^ Operating system -} ->
+  RecoveredModule X86_64 {- ^ Recovered module -} ->
+  (Builder.Builder, [Either String Ann.FunctionAnn])
+renderLLVMBitcode llvmGenOpt llvmCfg os recMod =
+  let archOps = LLVM.x86LLVMArchOps (show os)
+   in llvmAssembly archOps llvmGenOpt recMod llvmCfg
