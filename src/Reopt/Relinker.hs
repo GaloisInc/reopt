@@ -361,25 +361,7 @@ newCodeSectionName = ".text.reopt"
 $(pure [])
 
 --------------------------------------------------------------------------------
--- BinarySectionLayout
-
--- | Information needed to compute code layout.
-data BinaryLayoutContext = BinaryLayoutContext { blcBinCodeEndOff :: !(Elf.FileOffset Word64)
-                                                 -- ^ End offset of code section.
-                                               }
-
-$(pure [])
-
--- | Section information for new binary.
-data NewSectionInfo
-   = OldBinaryCodeSection !(Elf.Shdr BS.ByteString Word64)
-   | NewBinaryCodeSection
-   | OldBinaryDataSection !(Elf.Shdr BS.ByteString Word64)
-   | NewSymtabSection     !(Elf.Shdr BS.ByteString Word64)
-   | NewStrtabSection     !(Elf.Shdr BS.ByteString Word64)
-   | NewShstrtabSection   !(Elf.Shdr BS.ByteString Word64)
-
-$(pure [])
+-- AddrToSectionMap
 
 -- | Map from addresses at allocated section to size and index of section.
 type AddrToSectionMap = Map Word64 (Word64, Word16)
@@ -398,14 +380,20 @@ mkAddrToSectionMap = V.ifoldl' ins Map.empty
 
 $(pure [])
 
+--------------------------------------------------------------------------------
+-- BinarySectionLayout
+
+-- | Information needed to compute code layout.
+data BinaryLayoutContext = BinaryLayoutContext { blcBinCodeEndOff :: !(Elf.FileOffset Word64)
+                                                 -- ^ End offset of code section.
+                                               }
+
 -- | Information extracted from scan of sections in binary.
 data BinarySectionLayout =
   BSL { bslSectionCount :: !Word16
         -- ^ Number of sections added
       , bslSectionNames :: ![BS.ByteString]
         -- ^ Names of setions
-      , bslSectionHeaders :: [NewSectionInfo]
-        --- ^ List of sections in reverse order.
       , bslOverflowCodeShdrIndex :: !Word16
         -- ^ Number of section headers in binary prior to overflow
         -- section.
@@ -424,19 +412,16 @@ mapBinSectionIndex bsl i
 
 addBinShdr :: BinarySectionLayout
            -> BS.ByteString
-           -> NewSectionInfo
            -> BinarySectionLayout
-addBinShdr bsl nm secInfo = seq nm $ seq secInfo $
+addBinShdr bsl nm = seq nm $
   bsl { bslSectionCount = bslSectionCount bsl  + 1
       , bslSectionNames = nm : bslSectionNames bsl
-      , bslSectionHeaders = secInfo:bslSectionHeaders bsl
       }
 
 addOverflowCodeShdr :: BinarySectionLayout -> BinarySectionLayout
 addOverflowCodeShdr bsl =
   bsl { bslSectionCount    = bslSectionCount bsl + 1
       , bslSectionNames    = newCodeSectionName : bslSectionNames bsl
-      , bslSectionHeaders  = NewBinaryCodeSection : bslSectionHeaders bsl
       , bslOverflowCodeShdrIndex = bslSectionCount bsl
       }
 
@@ -453,18 +438,9 @@ layoutBinaryShdr nci bsl0 idxInt shdr = do
            , Elf.shdrOff shdr > blcBinCodeEndOff nci =
                addOverflowCodeShdr bsl0
            | otherwise = bsl0
-  if Elf.shdrName shdr == ".symtab" then do
-    let bsl2 = bsl1 { bslSymtabIndex = idx }
-    addBinShdr bsl2 (Elf.shdrName shdr) $ NewSymtabSection shdr
-   else if Elf.shdrName shdr == ".strtab" then do
-    let bsl2 = bsl1 { bslStrtabIndex = idx }
-    addBinShdr bsl2 (Elf.shdrName shdr) $ NewStrtabSection shdr
-   else if Elf.shdrName shdr == ".shstrtab" then
-    addBinShdr bsl1 (Elf.shdrName shdr) $ NewShstrtabSection shdr
-   else if Elf.shdrOff shdr > blcBinCodeEndOff nci then
-    addBinShdr bsl1 (Elf.shdrName shdr) $ OldBinaryDataSection shdr
-   else do
-    addBinShdr bsl1 (Elf.shdrName shdr) $ OldBinaryCodeSection shdr
+  let bsl2 | Elf.shdrName shdr == ".strtab" = bsl1 { bslStrtabIndex = idx }
+           | otherwise = bsl1
+  addBinShdr bsl2 (Elf.shdrName shdr)
 
 mkBinarySectionLayout :: BinaryLayoutContext
                          -- ^ Context information
@@ -474,7 +450,6 @@ mkBinarySectionLayout :: BinaryLayoutContext
 mkBinarySectionLayout ctx binShdrs = do
   let bsl0 = BSL { bslSectionCount = 0
                  , bslSectionNames   = []
-                 , bslSectionHeaders = []
                  , bslOverflowCodeShdrIndex = 0
                  , bslSymtabIndex = 0
                  , bslStrtabIndex = 0
@@ -539,6 +514,7 @@ data NewShdrContext w =
     -- new binary.
   , nscSectionNameMap :: !(BSC.ByteString -> Word32)
     -- ^ Maps section names to their offset.
+  , nscOverflowCodeShdrIndex :: !Word16
   , nscOverflowOffset :: !(Elf.FileOffset Word64)
     -- ^ Starting file offset of new code.
   , nscOverflowAddr :: !NewAddr
@@ -565,20 +541,29 @@ nscMapShdrLink nsc link =
     link
 
 mkNewShdr :: NewShdrContext 64
-          -> NewSectionInfo
           -> Elf.Shdr BS.ByteString Word64
-mkNewShdr nsc nsi =
-  case nsi of
-    OldBinaryCodeSection shdr ->
-      let newInfo | Elf.shdrFlags shdr `hasFlags` Elf.shf_info_link = nscMapShdrLink nsc (Elf.shdrInfo shdr)
-                  | otherwise = Elf.shdrInfo shdr
-       in shdr { Elf.shdrOff = nscFileOffsetFn nsc (Elf.shdrOff shdr)
-               , Elf.shdrLink = nscMapShdrLink nsc (Elf.shdrLink shdr)
-               , Elf.shdrInfo = newInfo
-               }
-    NewBinaryCodeSection ->
-      Elf.Shdr
-      { Elf.shdrName  = newCodeSectionName
+          -> Elf.Shdr Word32 Word64
+mkNewShdr nsc shdr = do
+  let info
+        | Elf.shdrType shdr == Elf.SHT_RELA = nscMapShdrLink  nsc (Elf.shdrInfo shdr)
+        | Elf.shdrName shdr == ".symtab"    = nscSymtabLocalCount nsc
+        | otherwise = Elf.shdrInfo shdr
+  let size = case Elf.shdrName shdr of
+                ".symtab" -> nscSymtabSize nsc
+                ".strtab" -> nscStrtabSize nsc
+                ".shstrtab" -> nscShstrtabSize nsc
+                _ -> Elf.shdrSize shdr
+  shdr { Elf.shdrName = nscSectionNameMap nsc (Elf.shdrName shdr)
+       , Elf.shdrOff  = nscFileOffsetFn nsc (Elf.shdrOff shdr)
+       , Elf.shdrSize = size
+       , Elf.shdrLink = nscMapShdrLink  nsc (Elf.shdrLink shdr)
+       , Elf.shdrInfo = info
+       }
+
+newBinaryCodeSection :: NewShdrContext 64 -> Elf.Shdr Word32 Word64
+newBinaryCodeSection nsc =
+  Elf.Shdr
+      { Elf.shdrName  = nscSectionNameMap nsc newCodeSectionName
       , Elf.shdrType  = Elf.SHT_PROGBITS
       , Elf.shdrFlags = Elf.shf_alloc .|. Elf.shf_execinstr
       , Elf.shdrAddr  = fromNewAddr (nscOverflowAddr nsc)
@@ -589,38 +574,23 @@ mkNewShdr nsc nsi =
       , Elf.shdrAddrAlign = 16
       , Elf.shdrEntSize = 0
       }
-    OldBinaryDataSection shdr ->
-      shdr { Elf.shdrOff = nscFileOffsetFn nsc (Elf.shdrOff shdr)
-           , Elf.shdrLink = nscMapShdrLink nsc (Elf.shdrLink shdr)
-           }
-    NewSymtabSection shdr ->
-      shdr { Elf.shdrOff = nscFileOffsetFn nsc (Elf.shdrOff shdr)
-           , Elf.shdrSize = nscSymtabSize nsc
-           , Elf.shdrLink = nscMapShdrLink nsc (Elf.shdrLink shdr)
-           , Elf.shdrInfo = nscSymtabLocalCount nsc
-           }
-    NewStrtabSection shdr ->
-      shdr { Elf.shdrOff = nscFileOffsetFn nsc (Elf.shdrOff shdr)
-           , Elf.shdrSize = nscStrtabSize nsc
-           }
-    NewShstrtabSection shdr ->
-      shdr { Elf.shdrOff = nscFileOffsetFn nsc (Elf.shdrOff shdr)
-           , Elf.shdrSize = nscShstrtabSize nsc
-           }
 
 mkNewShdrTable :: Elf.ElfHeader 64
                -> NewShdrContext 64
-               -> [NewSectionInfo]
+               -> V.Vector (Elf.Shdr BS.ByteString Word64)
                -> Bld.Builder
 mkNewShdrTable hdr nsc shdrs =
   let cl = Elf.headerClass hdr
       elfDta = Elf.headerData hdr
-      renderShdr :: NewSectionInfo -> Bld.Builder
-      renderShdr nsi =
-        let shdr = mkNewShdr nsc nsi
-            shdr' = shdr { Elf.shdrName = nscSectionNameMap nsc (Elf.shdrName shdr) }
-        in Elf.encodeShdr cl elfDta shdr'
-   in foldMap renderShdr shdrs
+
+      renderShdr :: Int -> Elf.Shdr BS.ByteString Word64 -> Bld.Builder
+      renderShdr i shdr =
+        let newShdr | fromIntegral i == nscOverflowCodeShdrIndex nsc =
+                      Elf.encodeShdr cl elfDta (newBinaryCodeSection nsc)
+                    | otherwise =
+                      mempty
+         in newShdr <> Elf.encodeShdr cl elfDta (mkNewShdr nsc shdr)
+   in foldMap id $ V.imap renderShdr shdrs
 
 $(pure [])
 
@@ -913,7 +883,7 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
   let binHdr = Elf.header binHeaderInfo
   let objHdr = Elf.header objHeaderInfo
 
-  -- Step 1. Header validation
+  -- Header validation
   let cl     = Elf.ELFCLASS64
 
   -- Check this is an executable
@@ -1116,6 +1086,7 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
         , nscSectionNameMap = \nm ->
             let msg = "internal failure: Missing section header name."
              in Map.findWithDefault (error msg) nm shstrtabOffsetMap
+        , nscOverflowCodeShdrIndex = bslOverflowCodeShdrIndex binShdrIndexInfo
         , nscOverflowOffset   = overflowOffset
         , nscOverflowSize     = overflowSize
         , nscOverflowAddr     = NewAddr overflowAddr
@@ -1125,7 +1096,6 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
         , nscShstrtabSize     = newShstrtabSize
         , nscFileOffsetFn = New.nblFindNewOffset newBinLayout
         }
-  let newShdrs = reverse (bslSectionHeaders binShdrIndexInfo)
 
   -- Compute context for new binary layout.
   let newBuildCtx =
@@ -1137,7 +1107,7 @@ mergeObject binHeaderInfo objHeaderInfo ctx = do
         , New.bctxShdrTableOffset = newShdrTableOffset
         , New.bctxShdrStrndx      = fromNewSectionIndex newShstrtabIndex
         , New.bctxShdrCount  = newShdrCount
-        , New.bctxShdrTable = mkNewShdrTable binHdr newShdrCtx newShdrs
+        , New.bctxShdrTable = mkNewShdrTable binHdr newShdrCtx binShdrs
         , New.bctxShstrtab  = newShstrtabContents
         , New.bctxStrtab    = nsiStrtabContents newSymtab
         , New.bctxSymtab    = nsiSymtabContents newSymtab

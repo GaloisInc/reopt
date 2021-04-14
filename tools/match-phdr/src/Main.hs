@@ -31,6 +31,7 @@ import           System.Exit
 import           System.FilePath
 import           System.IO
 import           System.IO.Error (isPermissionError)
+import           Text.Printf
 
 import           Reopt.Relinker.Binary
 
@@ -44,12 +45,17 @@ data MatchStats = MatchStats
   , totalBinaries :: !Int
     -- | Map from segment name and section name to file.
   , unknownSectionMap :: !(Map.Map BS.ByteString FilePath)
+  , unexpectedShdrInfo :: !(Map.Map BS.ByteString FilePath)
   , failedBinaries :: [(FilePath, String)]
   }
 
-addUnexpectedSection :: MatchStats -> FilePath -> BS.ByteString -> MatchStats
-addUnexpectedSection stats path nm =
+addUnexpectedSection :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
+addUnexpectedSection path nm stats =
   stats { unknownSectionMap = Map.insertWith (\_ o -> o) nm path (unknownSectionMap stats) }
+
+addUnexpectedShdrInfo :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
+addUnexpectedShdrInfo path nm stats =
+  stats { unexpectedShdrInfo = Map.insertWith (\_ o -> o) nm path (unexpectedShdrInfo stats) }
 
 emptyMatchStats :: MatchStats
 emptyMatchStats =
@@ -57,6 +63,7 @@ emptyMatchStats =
   { successfulBinaries = 0
   , totalBinaries = 0
   , unknownSectionMap = Map.empty
+  , unexpectedShdrInfo = Map.empty
   , failedBinaries = []
   }
 
@@ -64,15 +71,20 @@ printMatchStats :: MatchStats -> IO ()
 printMatchStats s = do
   putStrLn $ "Sucessfully Analyzed " ++ show (successfulBinaries s)
              ++ " of " ++ show (totalBinaries s) ++ " executables."
-  let noErrors = Map.null (unknownSectionMap s)
-              && null (failedBinaries s)
+  let noErrors = null (failedBinaries s)
+              && Map.null (unknownSectionMap s)
+              && Map.null (unexpectedShdrInfo s)
   unless noErrors $ do
     forM_ (reverse (failedBinaries s)) $ \(path, msg) -> do
       hPutStrLn stderr $ path ++ ": " ++ msg
     unless (Map.null (unknownSectionMap s)) $ do
       hPutStrLn stderr "Unknown sections"
-    forM_ (Map.toList (unknownSectionMap s)) $ \(secName, _path) -> do
-      hPutStrLn stderr $ "  , " ++ show secName
+    forM_ (Map.toList (unknownSectionMap s)) $ \(secName, path) -> do
+      hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
+    unless (Map.null (unexpectedShdrInfo s)) $ do
+      hPutStrLn stderr "Unexpected shdr info"
+    forM_ (Map.toList (unexpectedShdrInfo s)) $ \(secName, path) -> do
+      hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
     exitFailure
 
 knownShdrs :: Set.Set BS.ByteString
@@ -166,22 +178,46 @@ knownShdrs = Set.fromList
   , "__libc_subfreeres"
   ]
 
-checkShdrName :: FilePath
-              -> Elf.Shdr BS.ByteString v
-              -> State (Bool, MatchStats) ()
-checkShdrName path shdr = do
-  let nm = Elf.shdrName shdr
-  modify $ \(failed, stats) ->
-    if Set.member nm knownShdrs then
-      (failed, stats)
-     else
-      (True, addUnexpectedSection stats path nm)
+type CheckM = State (Bool, MatchStats)
 
-checkShdrNames :: FilePath
-               -> V.Vector (Elf.Shdr BS.ByteString v)
-               -> MatchStats
-               -> (Bool, MatchStats)
-checkShdrNames path v stats = execState (mapM_ (checkShdrName path) v) (False, stats)
+runCheckM :: CheckM () -> MatchStats -> (Bool, MatchStats)
+runCheckM act stats = execState act (False, stats)
+
+markFailed :: (MatchStats -> MatchStats) -> CheckM ()
+markFailed f = modify' $  \(_,s) -> let s' = f s in seq s' (True, s')
+
+checkShdr :: FilePath
+          -> V.Vector (Elf.Shdr BS.ByteString v)
+          -> Elf.Shdr BS.ByteString v
+          -> CheckM ()
+checkShdr path shdrs shdr = do
+  let nm = Elf.shdrName shdr
+  when (Set.notMember nm knownShdrs) $ do
+    markFailed $ addUnexpectedSection path nm
+  case Elf.shdrType shdr of
+    Elf.SHT_RELA -> do
+      let info = Elf.shdrInfo shdr
+      if toInteger info >= toInteger (V.length shdrs) then
+        markFailed $ addUnexpectedShdrInfo path nm
+       else do
+        let tgt = shdrs V.! fromIntegral info
+        if nm == ".rela.dyn" then
+          when (Elf.shdrInfo shdr /= 0) $ do
+            markFailed $ addUnexpectedShdrInfo path nm
+         else if nm == ".rela.plt" then
+          when (Elf.shdrName tgt `notElem` [".got", ".got.plt", ".plt"]) $ do
+            markFailed $ addUnexpectedShdrInfo path nm
+         else do
+          when (".rela" <> Elf.shdrName tgt /= nm) $ do
+            markFailed $ addUnexpectedShdrInfo path nm
+    -- This section seems to use info to store the number of versions needed (VERNEEDNUM)
+    Elf.SHT_GNU_verneed -> pure ()
+    -- Symtab are use local symbol count.
+    Elf.SHT_DYNSYM -> pure ()
+    Elf.SHT_SYMTAB -> pure ()
+    _ -> do
+      when (Elf.shdrInfo shdr /= 0) $ do
+        markFailed $ addUnexpectedShdrInfo path nm
 
 -- | @compareElf dwarfDump path@ compares the output of the Haskell
 -- ehframe parsing on output with the output of @dwarfDump --eh-frame
@@ -204,7 +240,9 @@ compareElf stats0 path bytes = do
     pure stats0
    else do
     putStrLn $ "Checking " <> path
-    let (seenError, stats) = checkShdrNames path shdrs stats0
+    let (seenError, stats) =
+          flip runCheckM stats0 $ do
+            V.mapM_ (checkShdr path shdrs) shdrs
     case inferBinaryLayout elfHdr shdrs of
       Left msg -> do
         pure $!

@@ -204,7 +204,7 @@ markLoadRegion off0 sz0 = do
 
 insertAtomic :: String -> Int -> Int -> Int -> SpecialRegion -> InferM w ()
 insertAtomic nm off sz fileCns src =  withElfClassInstances $ do
-  m <- gets $ Map.lookupLE (off+sz) . imsFileOffsetMap
+  m <- gets $ Map.lookupLT (off+sz) . imsFileOffsetMap
   case m of
     Just (prevOff, (prevSize, cns, Data))
       | prevEnd <- prevOff + prevSize
@@ -218,10 +218,10 @@ insertAtomic nm off sz fileCns src =  withElfClassInstances $ do
        else do
         deleteFileOffsetMapEntry nm prevOff cns
         insertAtomic nm off sz fileCns src
-    Just (prevOff, (prevSize, _, _))
+    Just (prevOff, (prevSize, _, prevSrc))
       | prevEnd <- prevOff + prevSize
       , prevEnd > off -> do
-      throwError $ printf "%s overlaps with previous segment." nm
+      throwError $ printf "%s overlaps with previous %s segment." nm (show prevSrc)
     _ -> do
       setFileOffsetMapEntry off sz (mkFileOffset fileCns) (SrcSpecialRegion src)
       setSpecialRegionOff nm src off sz
