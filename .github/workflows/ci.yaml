@@ -39,6 +39,68 @@ jobs:
       with:
         name: cvc4
         path: cache/cvc4
+  docker:
+    runs-on: ubuntu-20.04
+    container: centos:7
+    steps:
+    - name: Install Centos 7 libraries
+      run: |
+        yum install -y centos-release-scl
+        yum install -y http://opensource.wandisco.com/centos/7/git/x86_64/wandisco-git-release-7-2.noarch.rpm
+        yum install -y devtoolset-8-gcc devtoolset-8-make gmp-devel zlib-devel git
+        echo "/opt/rh/devtoolset-8/root/bin" >> $GITHUB_PATH
+        echo "$HOME/.ghcup/bin" >> $GITHUB_PATH
+    - name: Install GHC
+      run: |
+        cd $HOME
+        mkdir -p  .ghcup/bin
+        curl -o   .ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/0.1.14.1/x86_64-linux-ghcup-0.1.14.1
+        chmod a+x .ghcup/bin/ghcup
+        ghcup install ghc 8.10.4
+        ghcup install cabal 3.4.0.0
+        ghcup set
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Cache cabal files
+      uses: actions/cache@v1
+      with:
+        path: /home/runner/.cabal/store/ghc-${{ matrix.ghc-ver }}
+        # Prefer previous ref
+        key: docker-cabal-${{ matrix.ghc-ver }}-${{ github.ref }}
+        # otherwise just use most recent build.
+        restore-keys: docker-cabal-${{ matrix.ghc-ver }}
+    - name: Cache local build files
+      uses: actions/cache@v1
+      with:
+        path: dist-newstyle
+        # Prefer previous ref
+        key: docker-local-${{ github.ref }}
+        # otherwise just use most recent build.
+        restore-keys: docker-local
+    - name: Cabal freeze and enable werrror.
+      run: |
+        ln -s cabal.project.freeze.ghc.${{ matrix.ghc-ver }} cabal.project.freeze
+        ln -s cabal.project.werror cabal.project.local
+    - name: Cabal update
+      run: cabal update
+    - name: Install
+      run: cabal install -j exe:reopt
+    - name: Test
+      run: cabal test -j reopt-tests
+    - name: Create archive
+      run: |
+        mkdir -p dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt        dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt-relink dist/reopt/bin
+        cd dist
+        tar cvfz reopt.tgz reopt
+    - name: Make reopt
+      uses: actions/upload-artifact@v1
+      with:
+        name: reopt
+        path: dist/reopt.tgz
   build:
     runs-on: ubuntu-latest
     strategy:
@@ -86,7 +148,7 @@ jobs:
     - name: Make reopt
       uses: actions/upload-artifact@v1
       with:
-        name: reopt
+        name: reopt-ubuntu
         path: dist/reopt.tgz
   # This runs the CVC4 tests using reopt and the artifacts produced.
 #  vcg-test:
