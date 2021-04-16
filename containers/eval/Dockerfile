@@ -2,7 +2,7 @@ FROM ubuntu:focal
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive TZ=UTC \
-       apt-get install -y --no-install-recommends llvm-8 \
+       apt-get install -y --no-install-recommends llvm-8 binutils \
   && rm -rf /var/lib/apt/lists/*
 RUN ln -s ../../lib/llvm-8/bin/opt     /usr/local/bin
 RUN ln -s ../../lib/llvm-8/bin/llc     /usr/local/bin

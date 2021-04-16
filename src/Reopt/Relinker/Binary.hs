@@ -12,6 +12,7 @@ module Reopt.Relinker.Binary
   , eclCodeRegions
   , SpecialRegion(..)
   , OffsetConstraint(..)
+  , inferNextOff
   , FileSource(..)
   , FileOffsetMap
   , inferBinaryLayout
@@ -96,6 +97,17 @@ checkSubsumption po l@(FileOffsetMultiple p) oo r@(FileOffsetMultiple o)
   | (oo - po + p) `rem` o == 0 = Just l
   | po == oo, o `rem` p == 0 = Just r
   | otherwise = Nothing
+
+nextMultiple :: Int -> Int -> Int
+nextMultiple off n = n * ((off + (n-1)) `div` n)
+
+-- | Compute next offset given alignment constraint.
+inferNextOff :: Int -> OffsetConstraint -> Int
+inferNextOff off (FileOffsetMultiple n) = nextMultiple off n
+inferNextOff off (LoadSegmentConstraint addr) = off + diff
+  where mask = pageSize - 1
+        diff = (pageSize + (addr .&. mask) - (off .&. mask)) .&. mask
+
 
 -----------------------------------------------------------------------
 -- FileSource
@@ -275,7 +287,11 @@ checkPhdr :: Word16 -- ^ Index of program header.
           -> InferM w ()
 checkPhdr idx phdr
   | hasSegmentType phdr Elf.PT_PHDR = withElfClassInstances $ do
+    hdrInfo <- asks imcElf
     let a = fromIntegral (Elf.phdrSegmentAlign phdr)
+    when (Elf.phdrFileStart phdr /= Elf.phdrTableFileOffset hdrInfo) $ do
+      throwError $ "Mismatch in program header table location."
+
     insertAtomicSegment idx phdr a PhdrTable
   | hasSegmentType phdr Elf.PT_INTERP = withElfClassInstances $ do
     let a = fromIntegral (Elf.phdrSegmentAlign phdr)
@@ -373,10 +389,10 @@ inferBinaryLayout elfHdr shdrs = do
     let ctx = IMC { imcElf = elfHdr }
     let esize = fromIntegral (Elf.ehdrSize cl)
     let s0 = IMS { imsInLoad = Map.empty
-                , imsFileOffsetMap = Map.singleton 0 (esize, unconstrained, SrcSpecialRegion Ehdr)
-                , imsCodeRegion = Nothing
-                , imsSpecialRegionOff = Map.singleton Ehdr (0, esize)
-                }
+                 , imsFileOffsetMap = Map.singleton 0 (esize, unconstrained, SrcSpecialRegion Ehdr)
+                 , imsCodeRegion = Nothing
+                 , imsSpecialRegionOff = Map.singleton Ehdr (0, esize)
+                 }
     let act = do
           -- Insert section header table if defined.
           when (Elf.shdrCount elfHdr > 0) $ do
@@ -413,3 +429,5 @@ inferBinaryLayout elfHdr shdrs = do
                 , eclCodeOffset = codeOff
                 , eclCodeSize = codeSize
                 }
+
+

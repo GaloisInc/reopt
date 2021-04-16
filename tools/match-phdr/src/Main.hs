@@ -43,15 +43,10 @@ data MatchStats = MatchStats
     successfulBinaries :: !Int
     -- | Total binaries traversed
   , totalBinaries :: !Int
-    -- | Map from segment name and section name to file.
-  , unknownSectionMap :: !(Map.Map BS.ByteString FilePath)
+    -- Map for section headers with unexpected info values.
   , unexpectedShdrInfo :: !(Map.Map BS.ByteString FilePath)
   , failedBinaries :: [(FilePath, String)]
   }
-
-addUnexpectedSection :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
-addUnexpectedSection path nm stats =
-  stats { unknownSectionMap = Map.insertWith (\_ o -> o) nm path (unknownSectionMap stats) }
 
 addUnexpectedShdrInfo :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
 addUnexpectedShdrInfo path nm stats =
@@ -62,7 +57,6 @@ emptyMatchStats =
   MatchStats
   { successfulBinaries = 0
   , totalBinaries = 0
-  , unknownSectionMap = Map.empty
   , unexpectedShdrInfo = Map.empty
   , failedBinaries = []
   }
@@ -72,111 +66,15 @@ printMatchStats s = do
   putStrLn $ "Sucessfully Analyzed " ++ show (successfulBinaries s)
              ++ " of " ++ show (totalBinaries s) ++ " executables."
   let noErrors = null (failedBinaries s)
-              && Map.null (unknownSectionMap s)
               && Map.null (unexpectedShdrInfo s)
   unless noErrors $ do
     forM_ (reverse (failedBinaries s)) $ \(path, msg) -> do
       hPutStrLn stderr $ path ++ ": " ++ msg
-    unless (Map.null (unknownSectionMap s)) $ do
-      hPutStrLn stderr "Unknown sections"
-    forM_ (Map.toList (unknownSectionMap s)) $ \(secName, path) -> do
-      hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
     unless (Map.null (unexpectedShdrInfo s)) $ do
       hPutStrLn stderr "Unexpected shdr info"
     forM_ (Map.toList (unexpectedShdrInfo s)) $ \(secName, path) -> do
       hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
     exitFailure
-
-knownShdrs :: Set.Set BS.ByteString
-knownShdrs = Set.fromList
-  [ ""
-  , ".bss"
-  , ".comment"
-  , ".ctors"
-  , ".data"
-  , ".data.rel.ro"
-  , ".debug_abbrev"
-  , ".debug_aranges"
-  , ".debug_gdb_scripts"
-  , ".debug_info"
-  , ".debug_line"
-  , ".debug_loc"
-  , ".debug_ranges"
-  , ".debug_str"
-  , ".digest_md5"
-  , ".dtors"
-  , ".dynamic"
-  , ".dynstr"
-  , ".dynsym"
-  , ".eh_frame"
-  , ".eh_frame_hdr"
-  , ".fini"
-  , ".fini_array"
-  , ".gcc_except_table"
-  , ".gnu.hash"
-  , ".gnu.version"
-  , ".gnu.version_r"
-  , ".gnu_debuglink"
-  , ".go.buildinfo"
-  , ".gopclntab"
-  , ".gosymtab"
-  , ".got"
-  , ".got.plt"
-  , ".hash"
-  , ".init"
-  , ".init_array"
-  , ".interp"
-  , ".itablink"
-  , ".jcr"
-  , ".noptrbss"
-  , ".noptrdata"
-  , ".note.ABI-tag"
-  , ".note.gnu.build-id"
-  , ".note.gnu.gold-version"
-  , ".note.gnu.property"
-  , ".note.go.buildid"
-  , ".note.stapsdt"
-  , ".plt"
-  , ".plt.got"
-  , ".plt.sec"
-  , ".preinit_array"
-  , ".probes"
-  , ".r_debug"
-  , ".rela"
-  , ".rela.data.rel.ro"
-  , ".rela.got"
-  , ".rela.dyn"
-  , ".rela.plt"
-  , ".rodata"
-  , ".sha256_sig"
-  , ".shstrtab"
-  , ".sig_key"
-  , ".stapsdt.base"
-  , ".strtab"
-  , ".symtab"
-  , ".tbss"
-  , ".tdata"
-  , ".text"
-  , ".tm_clone_table"
-  , ".typelink"
-  , ".upd_info"
-  , ".zdebug_abbrev"
-  , ".zdebug_frame"
-  , ".zdebug_info"
-  , ".zdebug_line"
-  , ".zdebug_loc"
-  , ".zdebug_pubnames"
-  , ".zdebug_pubtypes"
-  , ".zdebug_ranges"
-
-  , ",bss"
-  , ".rela,bss"
-  , "__libc_IO_vtables"
-  , "__libc_atexit"
-  , "__libc_freeres_fn" -- Qemu alpha static
-  , "__libc_freeres_ptrs"
-  , "__libc_subfreeres"
-  ]
 
 type CheckM = State (Bool, MatchStats)
 
@@ -192,10 +90,10 @@ checkShdr :: FilePath
           -> CheckM ()
 checkShdr path shdrs shdr = do
   let nm = Elf.shdrName shdr
-  when (Set.notMember nm knownShdrs) $ do
-    markFailed $ addUnexpectedSection path nm
-  case Elf.shdrType shdr of
-    Elf.SHT_RELA -> do
+  case () of
+
+    _ | Elf.shdrType shdr == Elf.SHT_RELA
+        || nm == ".rela.plt" -> do
       let info = Elf.shdrInfo shdr
       if toInteger info >= toInteger (V.length shdrs) then
         markFailed $ addUnexpectedShdrInfo path nm
@@ -210,11 +108,15 @@ checkShdr path shdrs shdr = do
          else do
           when (".rela" <> Elf.shdrName tgt /= nm) $ do
             markFailed $ addUnexpectedShdrInfo path nm
+
     -- This section seems to use info to store the number of versions needed (VERNEEDNUM)
-    Elf.SHT_GNU_verneed -> pure ()
+      | Elf.shdrType shdr `elem` [Elf.SHT_GNU_verneed, Elf.SHT_GNU_verdef]
+        || nm `elem` [".gnu.version_d", ".gnu.version_r"] -> pure ()
+
     -- Symtab are use local symbol count.
-    Elf.SHT_DYNSYM -> pure ()
-    Elf.SHT_SYMTAB -> pure ()
+    _ | Elf.shdrType shdr `elem`  [Elf.SHT_DYNSYM, Elf.SHT_SYMTAB]
+        || Elf.shdrName shdr == ".dynsym" -> do
+        pure ()
     _ -> do
       when (Elf.shdrInfo shdr /= 0) $ do
         markFailed $ addUnexpectedShdrInfo path nm
@@ -233,7 +135,7 @@ compareElf stats0 path bytes = do
     case Elf.headerNamedShdrs elfHdr of
       Left _ -> reportError path "Could not parse section headers."
       Right r -> pure r
-  let shouldExplore =  Elf.headerType hdr `elem` [ Elf.ET_REL, Elf.ET_EXEC ]
+  let shouldExplore =  Elf.headerType hdr `elem` [ Elf.ET_DYN, Elf.ET_EXEC ]
                     && Elf.headerMachine hdr `elem` [Elf.EM_X86_64]
                     && Elf.phdrCount elfHdr > 0
   if not shouldExplore then do

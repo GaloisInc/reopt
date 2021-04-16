@@ -1,0 +1,108 @@
+ INFO: nweb starting:1234:309872
+ INFO: request:GET / HTTP/1.1**Host: localhost:1234**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1234**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1234/****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: request:GET /favicon.ico HTTP/1.1**Host: localhost:1234**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1234/****:3
+NOT FOUND: failed to open file:favicon.ico
+ INFO: nweb starting:1234:310065
+ INFO: request:GET / HTTP/1.1**Host: localhost:1234**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1**Cache-Control: max-age=0****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1234**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1234/**Cache-Control: max-age=0****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: nweb starting:1234:310101
+ERROR: system call:bind Errno=98 exiting pid=310101
+ INFO: nweb starting:1234:310117
+ERROR: system call:bind Errno=98 exiting pid=310117
+ INFO: nweb starting:1235:310143
+ INFO: request:GET / HTTP/1.1**Host: localhost:1235**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1235**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1235/****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: request:GET /favicon.ico HTTP/1.1**Host: localhost:1235**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1235/****:3
+NOT FOUND: failed to open file:favicon.ico
+ INFO: nweb starting:1236:310388
+ INFO: request:GET / HTTP/1.1**Host: localhost:1236**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1236**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1236/****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: request:GET /favicon.ico HTTP/1.1**Host: localhost:1236**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1236/****:3
+NOT FOUND: failed to open file:favicon.ico
+ INFO: request:GET / HTTP/1.1**Host: localhost:1236**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:4
+ INFO: SEND:index.html:4
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:4
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1236**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1236/****:5
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: nweb starting:1238:311969
+ INFO: request:GET / HTTP/1.1**Host: localhost:1238**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1238**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1238/****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: request:GET /favicon.ico HTTP/1.1**Host: localhost:1238**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1238/****:3
+NOT FOUND: failed to open file:favicon.ico
+ INFO: nweb starting:1239:348941
+ INFO: request:GET / HTTP/1.1**Host: localhost:1239**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1****:1
+ INFO: SEND:index.html:1
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:1
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1239**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1239/****:2
+NOT FOUND: failed to open file:example/prettypicture.jpg
+ INFO: request:GET /favicon.ico HTTP/1.1**Host: localhost:1239**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1239/****:3
+NOT FOUND: failed to open file:favicon.ico
+ INFO: request:GET / HTTP/1.1**Host: localhost:1239**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8**Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Upgrade-Insecure-Requests: 1**Cache-Control: max-age=0****:4
+ INFO: SEND:index.html:4
+ INFO: Header:HTTP/1.1 200 OK
+Server: nweb/23.0
+Content-Length: 1807
+Connection: close
+Content-Type: text/html
+
+:4
+ INFO: request:GET /example/prettypicture.jpg HTTP/1.1**Host: localhost:1239**User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0**Accept: image/webp,*/***Accept-Language: en-US,en;q=0.5**Accept-Encoding: gzip, deflate**Connection: keep-alive**Referer: http://localhost:1239/**Cache-Control: max-age=0****:5
+NOT FOUND: failed to open file:example/prettypicture.jpg

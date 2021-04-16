@@ -92,7 +92,6 @@ import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
 
-
 import           Reopt.CFG.FnRep
 import qualified Reopt.VCG.Annotations as Ann
 

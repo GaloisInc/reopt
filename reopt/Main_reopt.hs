@@ -44,7 +44,6 @@ import           Data.Macaw.X86
 import           Reopt
 import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
-import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.VCG.Annotations as Ann
 
 import           Paths_reopt (version)
@@ -144,7 +143,7 @@ data Args
             -- If `Nothing` then annotations are not generated.
           , relinkerInfoExportPath :: !(Maybe FilePath)
             -- ^ Path to write relationships needed for relinker
-          , llvmGenOptions :: !LLVM.LLVMGenOptions
+          , llvmGenOptions :: !LLVMGenOptions
             -- ^ Generation options for LLVM
           , llvmExportPath :: !(Maybe FilePath)
             -- ^ Path to export LLVM bitcode to.
@@ -175,8 +174,6 @@ excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 -- | Options for controlling discovery
 discOpts :: Lens' Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
-
-
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -393,7 +390,7 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
 allowLLVMUB :: Flag Args
 allowLLVMUB = flagBool [ "allow-undef-llvm" ] upd help
   where upd b s = s { llvmGenOptions =
-                        LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = b } }
+                        LLVMGenOptions { mcExceptionIsUB = b } }
         help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
 
 -- | Generate an export flag
@@ -520,7 +517,6 @@ builderWriteFile :: FilePath -> Builder.Builder -> IO ()
 builderWriteFile path bld =
   withFile path WriteMode $ \h -> do
     Builder.hPutBuilder h bld
-
 
 -- | This command is called when reopt is called with no specific
 -- action.

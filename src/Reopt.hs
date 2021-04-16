@@ -43,13 +43,15 @@ module Reopt
   , LLVMVersion
   , versionOfString
   , LLVMConfig
-  , llvmAssembly
   , latestLLVMConfig
   , getLLVMConfig
   , compileLLVM
   , renderLLVMBitcode
   , defaultLLVMGenOptions
-      -- * X86 specific
+  , Reopt.CFG.LLVM.LLVMGenOptions(..)
+  , LLVM.x86LLVMArchOps
+  , llvmAssembly
+    -- * X86 specific
   , X86OS(..)
   , osPersonality
   , osLinkName
@@ -57,6 +59,7 @@ module Reopt
   , x86OSForABI
   , osArchitectureInfo
   , processX86PLTEntries
+  , Reopt.CFG.FnRep.X86.X86FnStmt
     -- * Utility
   , copyrightNotice
     -- * Reporting
@@ -70,6 +73,8 @@ module Reopt
   , warnABIUntested
     -- * Re-exports
   , Data.Macaw.CFG.MemWidth
+  , Data.Macaw.CFG.IsArchStmt
+  , Reopt.CFG.FnRep.FnArchStmt
   , Data.Macaw.Memory.ElfLoader.LoadOptions(..)
   , Data.Macaw.Memory.ElfLoader.defaultLoadOptions
   , Data.Macaw.CFG.MemSegmentOff
@@ -131,8 +136,10 @@ import           Data.Macaw.X86.X86Reg
 import           Reopt.AnnotatedTypes
 import           Reopt.ArgResolver
 import           Reopt.CFG.FnRep
+import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.FunctionCheck
 import           Reopt.CFG.LLVM (LLVMArchSpecificOps, LLVMGenOptions(..), moduleForFunctions)
+import qualified Reopt.CFG.LLVM.X86 as LLVM
 import           Reopt.CFG.Recovery
 import           Reopt.Events
 import qualified Reopt.ExternalTools as Ext
@@ -140,7 +147,6 @@ import           Reopt.Header
 import           Reopt.Hints
 import           Reopt.Relinker
 import qualified Reopt.VCG.Annotations as Ann
-import qualified Reopt.CFG.LLVM.X86 as LLVM
 
 #ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
@@ -2106,7 +2112,7 @@ replaceRegion off f newEnd oldFuns oldEnd m =
           Map.insert oldEnd (newEnd, [f]) m
     EQ -> Map.insert off (oldEnd, (f:oldFuns)) m
     GT -> Map.insert off (newEnd, (f:oldFuns)) $
-          Map.insert newEnd (oldEnd, [f]) m
+          Map.insert newEnd (oldEnd, oldFuns) m
 
 -- | Update funUseOffsetMap with new address
 updateFunUseOffsetMap :: FunAddress w
@@ -2116,22 +2122,19 @@ updateFunUseOffsetMap :: FunAddress w
                       -> FunUseOffsetMap w
 updateFunUseOffsetMap f off newEnd old = do
   case Map.lookupLT newEnd old of
-    Nothing -> Map.insert off (newEnd, [f]) old
-    Just (oldOff, (oldEnd, oldFuns))
-      -- If old region ends before this one, then just add new region.
-      | oldEnd <= off -> Map.insert off (newEnd, [f]) old
-      | otherwise ->
-          case compare oldOff off of
-            LT ->
-              replaceRegion off f newEnd oldFuns oldEnd $
-                Map.insert oldOff (off, oldFuns) old
-            EQ -> replaceRegion off f newEnd oldFuns oldEnd old
-            GT ->
-              updateFunUseOffsetMap f off oldOff $
-                replaceRegion oldOff f newEnd oldFuns oldEnd old
+    Just (oldOff, (oldEnd, oldFuns)) | oldEnd > off ->
+      case compare oldOff off of
+        LT -> do
+          let m = Map.insert oldOff (off, oldFuns) old
+          replaceRegion off f newEnd oldFuns oldEnd m
+        EQ -> replaceRegion off f newEnd oldFuns oldEnd old
+        GT -> do
+          let m  = replaceRegion oldOff f newEnd oldFuns oldEnd old
+          updateFunUseOffsetMap f off oldOff m
+    _ -> Map.insert off (newEnd, [f]) old
 
--- | Maps regions indices for code to offsets witin region to the size of the segment and a list
--- of functions that occupy that region.
+-- | Maps regions indices for code to offsets witin region to the size
+-- of the segment and a list of functions that occupy that region.
 --
 -- This maintains the invariant that the list of functions are
 -- non-empty, and no regions overlap.
@@ -2141,30 +2144,33 @@ newtype FunUseMap w = FunUseMap (Map RegionIndex (FunUseOffsetMap w))
 emptyFunUseMap :: FunUseMap w
 emptyFunUseMap = FunUseMap Map.empty
 
--- | Mark a region as belonging to a particular function
-recordRegionUse :: FunAddress w -> MemSegmentOff w -> BlockSize -> State (FunUseMap w) ()
-recordRegionUse f so sz = do
+-- | @recordRegionUse f o sz@ Mark a region as belonging to a particular function
+recordRegionUse :: FunAddress w
+                -> MemSegmentOff w
+                -> BlockSize
+                -> FunUseMap w
+                -> FunUseMap w
+recordRegionUse f so sz (FunUseMap regionMap) = do
   let a = segoffAddr so
       -- Offset of block
       off :: BlockOff
       off = memWordValue (addrOffset a)
       initMap = initFunUseOffsetMap f off (off+sz)
       updMap _ old = updateFunUseOffsetMap f off (off + sz) old
-  modify $ \(FunUseMap regionMap) ->
-     FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
+   in FunUseMap (Map.insertWith updMap (addrBase a) initMap regionMap)
 
 -- | Record memory used by block to function address
 recordBlockUse :: FunAddress (ArchAddrWidth arch)
                -> ParsedBlock arch ids
                -> State (FunUseMap (ArchAddrWidth arch)) ()
 recordBlockUse f b = do
-  recordRegionUse f (pblockAddr b) (fromIntegral (blockSize b))
+  modify $ recordRegionUse f (pblockAddr b) (fromIntegral (blockSize b))
   -- Record jumptable backing as well.
   case pblockTermStmt b of
     ParsedLookupTable layout _ _ _ -> do
       let a = jtlBackingAddr layout
           sz = jtlBackingSize layout
-      recordRegionUse f a sz
+      modify $ recordRegionUse f a sz
     _ -> pure ()
 
 -- | Record memory used by block to function address
@@ -2173,6 +2179,7 @@ recordFunUse :: DiscoveryFunInfo arch ids
 recordFunUse f =
   mapM_ (recordBlockUse (discoveredFunAddr f)) (f^.parsedBlocks)
 
+-- | Create a function use map from all functions in discover state.
 mkFunUseMap :: DiscoveryState arch -> FunUseMap (ArchAddrWidth arch)
 mkFunUseMap s = flip execState emptyFunUseMap $ do
   mapM_ (\(Some f) -> recordFunUse f) (s^.funInfo)
@@ -2193,11 +2200,12 @@ lookupFunSize f (FunUseMap m) =
   let seg = segoffSegment f
       a = segoffAddr f
       o = memWordValue (addrOffset a)
-      err = error "internal error: Function unregistered"
+      err = error "internal error: Function register index"
       offMap = Map.findWithDefault err (addrBase a) m
       maxValue = memWordValue (segmentSize seg) - memWordValue (segoffOffset f)
-      endOff = endOwnedByFun f o offMap maxValue
-   in endOff - o
+   in case Map.lookup o offMap of
+        Just _ -> endOwnedByFun f o offMap maxValue - o
+        Nothing -> error $ "Unknown function " ++ showHex o ""
 
 $(pure [])
 
@@ -2459,7 +2467,16 @@ mergeAndWrite :: FilePath -- ^ Path to write output to.
               -> IO ()
 mergeAndWrite outputPath origBinary objName objContents mergeRel = do
   newObjHdrInfo <- parseElfHeaderInfo64 objName objContents
-  newBinary <- mergeObject origBinary newObjHdrInfo mergeRel
+  let (warnings, mergeRes) = mergeObject origBinary newObjHdrInfo mergeRel
+  forM_ warnings $ \w -> do
+    hPutStrLn stderr $ "Relinker warning: " ++ w
+  newBinary <-
+    case mergeRes of
+      Left msg -> do
+        hPutStrLn stderr msg
+        exitFailure
+      Right r -> do
+        pure r
   BSL.writeFile outputPath newBinary
   -- Update the file mode
   do fs <- getFileStatus outputPath

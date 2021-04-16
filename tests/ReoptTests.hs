@@ -17,7 +17,6 @@ import           System.IO
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 
-import qualified Reopt.CFG.LLVM.X86 as LLVM
 import           Reopt
 
 reoptTests :: [FilePath] -> T.TestTree
@@ -49,7 +48,7 @@ mkTest fp = T.testCase fp $ do
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
-  let archOps = LLVM.x86LLVMArchOps (show os)
+  let archOps = x86LLVMArchOps (show os)
   bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
     let (llvmContents, _ann) =
           llvmAssembly archOps defaultLLVMGenOptions recMod latestLLVMConfig

@@ -29,7 +29,10 @@ import           GHC.Stack
 import           Numeric (showHex)
 import           Text.Printf
 
-import           Reopt.Relinker.Object (ObjectSectionIndex)
+-- | Identifies this should be a section index in the object file
+-- being merged in.
+type ObjectSectionIndex = Word16
+
 
 -- | Index of symbol in the object file.
 type ObjectSymbolTableIndex = Word32

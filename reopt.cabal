@@ -52,11 +52,15 @@ library
 
   exposed-modules:
     Reopt
+    Reopt.CFG.FnRep.X86
+    Reopt.Relinker.Binary
+    Reopt.Server
+    Reopt.Utils.Dir
+  other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.AnnotatedTypes
     Reopt.ArgResolver
     Reopt.CFG.FnRep
-    Reopt.CFG.FnRep.X86
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM
     Reopt.CFG.LLVM.X86
@@ -67,17 +71,16 @@ library
     Reopt.Header
     Reopt.Hints
     Reopt.Relinker
-    Reopt.Relinker.Binary
     Reopt.Relinker.Constants
     Reopt.Relinker.NewBinary
-    Reopt.Relinker.Object
+    Reopt.Relinker.NewLayout
+    Reopt.Relinker.NewSymtab
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
-    Reopt.Server
-    Reopt.Utils.Dir
     Reopt.Utils.Hex
     Reopt.Utils.Printf
+
 
   if flag(enable-arm)
     cpp-options: -DSUPPORT_ARM
