@@ -133,18 +133,19 @@ initReoptStats binPath =
 
 renderFnStats :: ReoptStats w -> String
 renderFnStats s =
-  if (statsFnDiscoveredCount s) == 0 then "reopt discovered no functions."
-  else
-    "reopt discovered " ++ (show (statsFnDiscoveredCount s)) ++ " functions in the binary "++(statsBinary s)++":" ++
-    "\n  recovery succeeded: " ++ (show (statsFnRecoveredCount s)) ++ passedStr ++
-    "\n     recovery failed: " ++ (show (statsFnFailedCount s)) ++ failedStr ++
-    "\n    skipped PLT stub: " ++ (show (statsFnPLTSkippedCount s)) ++ skippedStr
-  where passed :: Double = (fromIntegral $ statsFnRecoveredCount s) / (fromIntegral $  statsFnDiscoveredCount s)
+  if statsFnDiscoveredCount s == 0 then
+    "reopt discovered no functions."
+   else do
+    let passed :: Double = (fromIntegral $ statsFnRecoveredCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         passedStr = printf " (%.2f%%)" (passed * 100.0)
         failed :: Double = (fromIntegral $ statsFnFailedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         failedStr = printf " (%.2f%%)" (failed * 100.0)
         skipped :: Double = (fromIntegral $ statsFnPLTSkippedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         skippedStr = printf " (%.2f%%)" (skipped * 100.0)
+    "reopt discovered " ++ (show (statsFnDiscoveredCount s)) ++ " functions in the binary "++(statsBinary s)++":\n"
+      ++ "  recovery succeeded: " ++ (show (statsFnRecoveredCount s)) ++ passedStr ++ "\n"
+      ++ "  recovery failed: " ++ (show (statsFnFailedCount s)) ++ failedStr ++ "\n"
+      ++ "  skipped PLT stub: " ++ (show (statsFnPLTSkippedCount s)) ++ skippedStr
 
 -- | Header row for data produced by @statsRows@
 statsHeader :: [String]
@@ -171,7 +172,6 @@ exportFnStats outPath stats = do
       rowsStr = map (intercalate ",") $ statsRows stats
   writeFile outPath $ unlines $ hdrStr:rowsStr
 
-
 -- | Print and/or export statistics (if relevant flags are set) and the error count.
 reportStats
   :: MemWidth w
@@ -189,7 +189,7 @@ reportStats printStats mStatsPath stats = do
     hPutStrLn stderr $
       if (statsErrorCount stats) == 1 then
         "1 error occured."
-        else
+       else
         show (statsErrorCount stats) ++ " errors occured."
 
 

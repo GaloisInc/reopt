@@ -67,7 +67,6 @@ module Reopt
   , Reopt.Events.initReoptStats
   , Reopt.Events.reportStats
   , Reopt.Events.recoverLogEvent
-  , Reopt.Events.renderFnStats
   , Reopt.Events.statsHeader
   , Reopt.Events.statsRows
   , warnABIUntested
@@ -96,10 +95,8 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.ElfEdit (Elf)
 import qualified Data.ElfEdit as Elf
-import qualified Data.ElfEdit.ByteString as ElfBS
 import           Data.Foldable
 import           Data.IORef
-import           Data.Int
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe
@@ -455,20 +452,23 @@ type InitDiscoveryComp r  = IncComp String (Either String r)
 $(pure [])
 
 ------------------------------------------------------------------------
--- withSection
+-- Utilities
 
 -- | Run a computation with the given section, and print a warning if
 -- the section is not found or multiply defined.
-withSection :: Map BS.ByteString [Elf.ElfSection tp]
+withShdr :: Map BS.ByteString [s]
+               -- ^ Map from section names to sections with that name.
             -> String -- ^ Name of section for warning messages.
             -> BS.ByteString -- ^ Name of section in Elf file.
+            -> Bool -- ^ Flag that should be true if expected
             -> a -- ^ Value if nothing defined.
-            -> (Elf.ElfSection tp -> InitDiscM r a)
+            -> (s -> InitDiscM r a)
             -> InitDiscM r a
-withSection sectionNameMap warnName secName d f =
+withShdr sectionNameMap warnName secName expected d f =
   case Map.findWithDefault [] secName sectionNameMap of
     []    -> do
-      initWarning $ "Could not find " ++ warnName ++ " sections."
+      when expected $ do
+        initWarning $ "Could not find " ++ warnName ++ " sections."
       pure d
     _:_:_ -> do
       initWarning $ "Found multiple " ++ warnName ++ " sections."
@@ -516,41 +516,15 @@ matchPLTStub dta args idx = do
   -- Offset of PLT stub in data
   let off :: Int
       off = 0x10 * (idx+1)
-  -- PLT code
-  let plt = pltPLTData args
   -- Get relocation entry for this PLT stub.
   let rela :: Elf.RelaEntry Elf.X86_64_RelocationType
       rela = Elf.decodeRelaEntry dta (pltPLTRelaData args) idx
-  let pltEntryAddr :: Word64
-      pltEntryAddr = pltElfAddr args + fromIntegral off
-  unless (Elf.relaType rela == Elf.R_X86_64_JUMP_SLOT) $ do
-    lift $ lift $ initWarning $ "PLT stub relocation type is not a jump slot."
-  unless (Elf.relaAddend rela == 0) $ do
-    lift $ lift $ initWarning $ "PLT stub relocation addened is non-zero."
-  unless (plt `BS.index` off == 0xff && plt `BS.index` (off+ 1) == 0x25) $ do
-    lift $ lift $ initWarning $ "PLT stub first instruction is not RIP relative jump."
-  -- Address of the pushq instruction.
-  let pushqAddr :: Word64
-      pushqAddr = pltEntryAddr + 6
-  -- Get offset of PLT Got entry as encoded in plt code.
-  let pltGotAddr = pushqAddr + fromIntegral (ElfBS.bsWord32le (BS.take 4 (BS.drop (off+2) plt)))
   lift $ lift $ do
-    unless (pltGotAddr == Elf.relaAddr rela) $ do
-      initWarning $ "PLT jump address does not point to expected relocation entry in GOT table."
-    unless (plt `BS.index` (off+ 6) == 0x68) $ do
-      initWarning $ "PLT stub second instruction is not push."
+    unless (Elf.relaType rela == Elf.R_X86_64_JUMP_SLOT) $ do
+      initWarning $ "PLT stub relocation type is not a jump slot."
+    unless (Elf.relaAddend rela == 0) $ do
+      initWarning $ "PLT stub relocation addened is non-zero."
 
-  -- Index stored in pushq instruction
-  let pushqIdx = ElfBS.bsWord32le (BS.take 4 (BS.drop (off+7) plt))
-  lift $ lift $ unless (pushqIdx == fromIntegral idx) $ do
-    initWarning $ "PLT stub push index does not match expected value."
-
-  lift $ lift $ unless (plt `BS.index` (off+11) == 0xe9) $ do
-    initWarning $ "PLT stub third instruction is not direct jump."
-  let pltDelta :: Int32
-      pltDelta = fromIntegral $ ElfBS.bsWord32le $ BS.take 4 $ BS.drop (off+12) plt
-  lift $ lift $ unless (fromIntegral pltDelta == -0x10 * (idx+2)) $ do
-    initWarning "PLT stub third instruction is not direct jump."
   -- Get symbol index for relation
   let symIndex :: Word32
       symIndex = Elf.relaSym rela
@@ -582,32 +556,45 @@ matchPLTStub dta args idx = do
            , pltSymAddrMap = symAddrMapInsert sym a (pltSymAddrMap pltRes)
            }
 
-processX86PLTEntries :: Elf.ElfData
+shdrContents :: Integral (Elf.ElfWordType w)
+             => Elf.ElfHeaderInfo w -> Elf.Shdr nm (Elf.ElfWordType w) -> BS.ByteString
+shdrContents hdrInfo shdr =
+  let fileOff = Elf.shdrOff shdr
+      size    = Elf.shdrSize shdr
+   in BS.take (fromIntegral size)
+    $ BS.drop (fromIntegral fileOff)
+    $ Elf.headerFileContents hdrInfo
+
+processX86PLTEntries :: Elf.ElfHeaderInfo 64
                      -> BS.ByteString -- ^ Symbol table data
                      -> BS.ByteString -- ^ String table data for symbol table.
-                     -> Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType 64)]
-                        -- ^ Map from section names to section.
+                     -> Map BS.ByteString [Word16]
+                        -- ^ Map from section names to index with that name.
                      -> Memory 64
                      -> PLTResult 64
                      -> InitDiscM r (PLTResult 64)
-processX86PLTEntries dta symtab strtab sectionNameMap mem pltRes = do
-  withSection sectionNameMap "PLT" ".plt" pltRes $ \pltSec -> do
-    case Map.lookup (Elf.elfSectionIndex pltSec) (memSectionIndexMap mem) of
+processX86PLTEntries hdrInfo symtab strtab shdrNameMap mem pltRes = do
+  let dta = Elf.headerData (Elf.header hdrInfo)
+  withShdr shdrNameMap "PLT" ".plt" True pltRes $ \pltIdx -> do
+    let pltShdr = Elf.shdrByIndex hdrInfo pltIdx
+    let pltSize = Elf.shdrSize pltShdr
+    let pltData = shdrContents hdrInfo pltShdr
+    case Map.lookup pltIdx (memSectionIndexMap mem) of
       Nothing -> do
         initWarning "PLT section is not loaded in memory"
         pure pltRes
       Just pltAddr -> do
-        let pltRes2 = pltRes { pltBounds = Just (pltAddr, fromIntegral (Elf.elfSectionSize pltSec)) }
-        withSection sectionNameMap "PLT relocation" ".rela.plt" pltRes2 $ \relaPLT -> do
-          let relaData = Elf.elfSectionData relaPLT
+        let pltRes2 = pltRes { pltBounds = Just (pltAddr, fromIntegral pltSize) }
+        withShdr shdrNameMap "PLT relocation" ".rela.plt" True pltRes2 $ \relaIdx -> do
+          let relaShdr = Elf.shdrByIndex hdrInfo relaIdx
+          let relaData = shdrContents hdrInfo relaShdr
           let (relaCount, r) = BS.length relaData `quotRem` Elf.relaEntSize Elf.ELFCLASS64
           when (r /= 0) $ do
             initWarning ".rela.plt data is not a multiple of relocation entry size."
-
           -- Find base address of PLT stubs
-          let pltStubArgs = MatchPLTStubArgs { pltElfAddr = Elf.elfSectionAddr pltSec
+          let pltStubArgs = MatchPLTStubArgs { pltElfAddr = Elf.shdrAddr pltShdr
                                              , pltMemAddr = pltAddr
-                                             , pltPLTData = Elf.elfSectionData pltSec
+                                             , pltPLTData = pltData
                                              , pltPLTRelaData = relaData
                                              , pltSymtab = symtab
                                              , pltStrtab = strtab
@@ -662,11 +649,11 @@ x86OSForABI abi = Map.lookup abi x86ABIMap
 
 type ProcessPLTEntries w
    = forall r
-  .   Elf.ElfData
+  .   Elf.ElfHeaderInfo w
    -> BS.ByteString -- ^ Symbol table data
    -> BS.ByteString -- ^ String table data for symbol table.
-   -> Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType w)]
-      -- ^ Map from section names to section.
+   -> Map BS.ByteString [Word16]
+      -- ^ Map from section names to section with that index.
    -> Memory w
       -- ^ Memory
    -> PLTResult w
@@ -750,25 +737,31 @@ insSymbol mem baseAddr (idx, symEntry)
         Nothing ->
           lift $ initWarning (show (CouldNotResolveAddr nm))
 
-withSymtab :: V.Vector (Elf.ElfSection tp)
-              -- ^ Section vector
-           -> Map BS.ByteString [Elf.ElfSection tp]
-              -- ^ Map from names to sections
-           -> String
-           -> BS.ByteString
-           -> a -- ^ Value if nothing defined.
-           -> (BS.ByteString -> BS.ByteString -> InitDiscM r a)
-              -- ^ Continuation to run to get symtab and string table (respectively).
-           -> InitDiscM r a
-withSymtab sections sectionNameMap warnName secName d f = do
-  withSection sectionNameMap warnName secName d $ \symtab -> do
-    let strtabIdx = Elf.elfSectionLink symtab
-    if strtabIdx == 0 || fromIntegral strtabIdx >= V.length sections then do
-      initWarning $ "Invalid symbol table index in" ++ warnName ++ "."
+withSymtab
+  :: Integral (Elf.ElfWordType w)
+  => Elf.ElfHeaderInfo w
+    -- ^ Header information
+  -> Map BS.ByteString [Word16]
+    -- ^ Map from names to section indices with name.
+  -> String
+  -> BS.ByteString
+  -> Bool -- ^ Flag that should be true if we want to warn when misisng
+  -> a -- ^ Value if nothing defined.
+  -> (BS.ByteString -> BS.ByteString -> InitDiscM r a)
+    -- ^ Continuation to run to get symtab and string table (respectively).
+  -> InitDiscM r a
+withSymtab hdrInfo shdrNameMap warnName secName expected d f = do
+  withShdr shdrNameMap warnName secName expected d $ \symtabIdx -> do
+    let symtabShdr = Elf.shdrByIndex hdrInfo symtabIdx
+    let symtabData = shdrContents hdrInfo symtabShdr
+    let strtabIdx = Elf.shdrLink symtabShdr
+    if strtabIdx == 0 || strtabIdx >= fromIntegral (Elf.shdrCount hdrInfo) then do
+      initWarning $ printf "Invalid string table index %s in %s." (show strtabIdx) (BSC.unpack secName)
       pure d
      else do
-      let strtab = sections V.! fromIntegral strtabIdx
-      f (Elf.elfSectionData symtab) (Elf.elfSectionData strtab)
+      let strtabShdr = Elf.shdrByIndex hdrInfo (fromIntegral strtabIdx)
+      let strtabData = shdrContents hdrInfo strtabShdr
+      f symtabData strtabData
 
 addDefinedSymbolTableFuns
   :: (MemWidth w, Integral (Elf.ElfWordType w))
@@ -1056,18 +1049,22 @@ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts = runIncCompM $ fmap Right 
               Just o  -> MemAddr { addrBase = 0, addrOffset = fromIntegral o }
               Nothing -> MemAddr { addrBase = 1, addrOffset = 0 }
 
-      -- Get symbol table.
-      let dta = Elf.headerData hdr
+      let shdrs =
+            case Elf.headerNamedShdrs hdrInfo of
+              Left _ -> V.empty
+              Right r -> r
 
-      let sections = Elf.headerSections hdrInfo
-
-      let sectionNameMap :: Map BS.ByteString [Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))]
-          sectionNameMap =
+      let shdrNameMap :: Map BS.ByteString [Word16]
+          shdrNameMap =
             Map.fromListWith (++)
-              [ (Elf.elfSectionName s, [s]) | (_rng,s) <- V.toList sections ]
+              [ (Elf.shdrName s, [fromIntegral (idx-1)])
+              | idx <- [1..V.length shdrs]
+              , let s = shdrs V.! (idx-1)
+              ]
 
-      symAddrMap0 <-
-        withSymtab (snd <$> sections) sectionNameMap "static symbol table" ".symtab" symAddrMapEmpty $ \symtab strtab -> do
+      symAddrMap0 <- do
+        let nm = "static symbol table"
+        withSymtab hdrInfo shdrNameMap nm ".symtab" False symAddrMapEmpty $ \symtab strtab -> do
           flip execStateT symAddrMapEmpty $
             addDefinedSymbolTableFuns hdrInfo mem baseAddr symtab strtab
 
@@ -1075,12 +1072,13 @@ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts = runIncCompM $ fmap Right 
                               , pltFuns = []
                               , pltSymAddrMap = symAddrMap0
                               }
-      pltRes <-
-        withSymtab (snd <$> sections) sectionNameMap "dynamic symbol table" ".dynsym" pltRes0 $ \dynSymtab dynStrtab -> do
+      pltRes <- do
+        let nm = "dynamic symbol table"
+        withSymtab hdrInfo shdrNameMap nm ".dynsym" True pltRes0 $ \dynSymtab dynStrtab -> do
           symAddrMap1 <- flip execStateT symAddrMap0 $
             addDefinedSymbolTableFuns hdrInfo mem baseAddr dynSymtab dynStrtab
           let pltRes1 = pltRes0 { pltSymAddrMap = symAddrMap1 }
-          pltFn dta dynSymtab dynStrtab sectionNameMap mem pltRes1
+          pltFn hdrInfo dynSymtab dynStrtab shdrNameMap mem pltRes1
 
       let mbounds = pltBounds pltRes
       -- Exclude PLT bounds
@@ -2483,10 +2481,8 @@ mergeAndWrite outputPath origBinary objName objContents mergeRel = do
      let fm = ownerExecuteMode .|. groupExecuteMode .|. otherExecuteMode
      setFileMode outputPath (fileMode fs `unionFileModes` fm)
 
-
 --------------------------------------------------------------------------------
 -- Function Recovery and Statistics
-
 
 -- | This parses function argument information from a user-provided header file.
 resolveHeader :: Maybe FilePath -- ^ Filepath for C header with program info (if any).

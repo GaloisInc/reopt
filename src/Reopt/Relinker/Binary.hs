@@ -8,6 +8,7 @@ module Reopt.Relinker.Binary
   ( ElfContentLayout
   , ElfRegion(..)
   , eclCodePhdrIndex
+  , eclRodataPhdrIndex
   , eclFileRegions
   , eclCodeRegions
   , SpecialRegion(..)
@@ -22,7 +23,7 @@ import           Control.Monad (when, unless, forM_)
 import           Control.Monad.Except ( ExceptT, runExceptT, throwError )
 import           Control.Monad.Reader ( Reader, asks, runReader )
 import           Control.Monad.State.Strict ( StateT, runStateT, gets, modify )
-import           Data.Bits ( Bits((.&.)) )
+import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ElfEdit as Elf
 import qualified Data.Map as Map
@@ -32,7 +33,8 @@ import           Data.Word ( Word16, Word64 )
 import           Numeric (showHex)
 import           Text.Printf ( printf )
 
-import         Reopt.Relinker.Constants ( pageSize )
+import           Reopt.Relinker.Constants ( pageSize )
+import           Reopt.Utils.Flags (hasFlags)
 
 -- | @enumCnt b c@ returns a list with @c@ enum values starting from @b@.
 enumCnt :: (Enum e, Real r) => e -> r -> [e]
@@ -129,17 +131,19 @@ instance Show FileSource where
 
 -- | Elf file content layout information used for generating
 -- content.
-data ElfContentLayout =
-  ECL { eclSpecialRegionInLoad :: !(Map.Map SpecialRegion Bool)
+data ElfContentLayout w =
+  ECL { eclHeader :: !(Elf.ElfHeaderInfo w)
+      , eclSpecialRegionInLoad :: !(Map.Map SpecialRegion Bool)
         -- ^ Map from special region to load
       , eclFileOffsetMap :: !(Map.Map Int (Int, OffsetConstraint, FileSource))
         -- ^ Map from region file offsets to size, constraints on offsets and source.
       , eclCodePhdrIndex :: !Word16
-      , eclCodeOffset :: !Int
-      , eclCodeSize   :: !Int
+        -- ^ Index of program header.
+      , eclRodataPhdrIndex :: !(Maybe Word16)
+        -- ^ Index of program header to extend for rodata (or `Nothing` if code phdr should be used).
       }
 
-
+-- | A region of the binary
 data ElfRegion = ElfRegion { eregOff  :: !Int
                            , eregSize :: !Int
                            , eregCns  :: !OffsetConstraint
@@ -150,14 +154,17 @@ data ElfRegion = ElfRegion { eregOff  :: !Int
 mkElfRegion :: (Int, (Int, OffsetConstraint, FileSource)) -> ElfRegion
 mkElfRegion (off, (sz, cns, src)) = ElfRegion off sz cns src
 
-eclFileRegions :: ElfContentLayout -> [ElfRegion]
+eclFileRegions :: ElfContentLayout w -> [ElfRegion]
 eclFileRegions l = mkElfRegion <$> Map.toList (eclFileOffsetMap l)
 
 -- | Return code regions associated with Elf content.
-eclCodeRegions :: ElfContentLayout -> [ElfRegion]
+eclCodeRegions :: Integral (Elf.ElfWordType w) => ElfContentLayout w -> [ElfRegion]
 eclCodeRegions l = mkElfRegion <$> Map.toList m
-  where codeOff = eclCodeOffset l
-        codeEnd = codeOff + eclCodeSize l
+  where codePhdr = Elf.phdrByIndex (eclHeader l) (eclCodePhdrIndex l)
+        codeOff :: Int
+        codeOff = fromIntegral (Elf.phdrFileStart codePhdr)
+        codeEnd :: Int
+        codeEnd = codeOff + fromIntegral (Elf.phdrFileSize codePhdr)
         m = Map.takeWhileAntitone (< codeEnd)
           $ Map.dropWhileAntitone (< codeOff)
           $ eclFileOffsetMap l
@@ -172,10 +179,12 @@ type FileOffsetMap = Map.Map Int (Int, OffsetConstraint, FileSource)
 
 data InferMState = IMS { imsInLoad :: !(Map.Map Int Int)
                        , imsFileOffsetMap :: !FileOffsetMap
-                       , imsCodeRegion :: !(Maybe Word16)
-                         -- ^ Index of program header.
+                       , imsCodePhdrIndex :: !(Maybe Word16)
+                         -- ^ Index of program header for code
+                       , imsRodataPhdrIndex :: !(Maybe Word16)
+                         -- ^ Index of program header for readonly data.
                        , imsSpecialRegionOff :: !(Map.Map SpecialRegion (Int, Int))
-                         -- ^ Map from special regions to their index in file.
+                         -- ^ Map from special regions to their offset and size in file.
                        }
 
 type InferM w = ExceptT String (StateT InferMState (Reader (InferMContext w)))
@@ -268,7 +277,7 @@ insertDataSegment2 off sz cns = do
                 (showHex off "") (show src) (show cns) (showHex prevOff "") (show prevCns)
           when (off+sz > prevEnd) $ do
             setFileOffsetMapEntry prevEnd (off+sz - prevEnd) unconstrained Data
-       else
+       else --prevOff > off
         if Data == src then do
           setFileOffsetMapEntry prevOff (off-prevOff) prevCns Data
           insertDataSegment2 off (max (prevEnd - off) sz) cns
@@ -303,13 +312,21 @@ checkPhdr idx phdr
     let sz = fromIntegral (Elf.phdrFileSize phdr)
     -- Mark load region
     markLoadRegion off sz
-    -- Constraint
-    -- Special case for program header.
-    when (Elf.phdrSegmentFlags phdr .&. Elf.pf_x == Elf.pf_x) $ do
-      cr <- gets imsCodeRegion
+
+    -- Record index of code segment.
+    let isCodeSegment = Elf.phdrSegmentFlags phdr `hasFlags` (Elf.pf_r .|. Elf.pf_x)
+                     && Elf.phdrMemSize phdr == Elf.phdrFileSize phdr
+    when isCodeSegment $ do
+      cr <- gets imsCodePhdrIndex
       when (isJust cr) $ do
         throwError $ "Code region already defined."
-      modify $ \s -> s { imsCodeRegion = Just idx }
+      modify $ \s -> s { imsCodePhdrIndex = Just idx }
+
+    -- Record index of last data segment.
+    let isRodataSegment = Elf.phdrSegmentFlags phdr == Elf.pf_r
+                       && Elf.phdrMemSize phdr == Elf.phdrFileSize phdr
+    when isRodataSegment $ do
+      modify $ \s -> s { imsRodataPhdrIndex = Just idx }
 
     let cns = LoadSegmentConstraint (fromIntegral (Elf.phdrSegmentVirtAddr phdr) .&. 0xfff)
     insertDataSegment off sz cns
@@ -381,7 +398,8 @@ updateCodeConstraints base off sz = go (off+sz)
 -- | Infer layout from binary.
 inferBinaryLayout :: Elf.ElfHeaderInfo w
                   -> V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w))
-                  -> Either String ElfContentLayout
+                     -- ^ Section headers from binary
+                  -> Either String (ElfContentLayout w)
 inferBinaryLayout elfHdr shdrs = do
   let hdr = Elf.header elfHdr
   let cl = Elf.headerClass hdr
@@ -390,7 +408,8 @@ inferBinaryLayout elfHdr shdrs = do
     let esize = fromIntegral (Elf.ehdrSize cl)
     let s0 = IMS { imsInLoad = Map.empty
                  , imsFileOffsetMap = Map.singleton 0 (esize, unconstrained, SrcSpecialRegion Ehdr)
-                 , imsCodeRegion = Nothing
+                 , imsCodePhdrIndex = Nothing
+                 , imsRodataPhdrIndex = Nothing
                  , imsSpecialRegionOff = Map.singleton Ehdr (0, esize)
                  }
     let act = do
@@ -406,7 +425,7 @@ inferBinaryLayout elfHdr shdrs = do
     let (me, s) = runReader (runStateT (runExceptT act) s0) ctx
     () <- me
     codePhdrIndex <-
-      case imsCodeRegion s of
+      case imsCodePhdrIndex s of
         Nothing -> Left "Could not find executable segment."
         Just r -> pure r
 
@@ -423,11 +442,11 @@ inferBinaryLayout elfHdr shdrs = do
 
     let fileOffMap = updateCodeConstraints codeAddr codeOff codeSize (imsFileOffsetMap s)
 
-    Right $ ECL { eclSpecialRegionInLoad = specMap
+    Right $ ECL { eclHeader = elfHdr
+                , eclSpecialRegionInLoad = specMap
                 , eclFileOffsetMap = fileOffMap
                 , eclCodePhdrIndex = codePhdrIndex
-                , eclCodeOffset = codeOff
-                , eclCodeSize = codeSize
+                , eclRodataPhdrIndex = imsRodataPhdrIndex s
                 }
 
 

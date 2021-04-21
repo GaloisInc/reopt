@@ -33,8 +33,8 @@ data LayoutCtx w = LayoutCtx
     -- ^ Size of string table if defined and -1 if not
   , lctxSymtabSize :: !Int
     -- ^ Size of symbol table if defined and -1 if not.
-  , lctxOverflowInsertOffset :: !Int
-  , lctxOverflowSize :: !Int
+  , lctxAppendMap :: !(Map.Map Int Int)
+    -- ^ Map end of region file offsets to number of bytes to insert.
   }
 
 -- | Layout information in new binary
@@ -117,15 +117,13 @@ layoutNewBinary' ctx off l0 (Orig.ElfRegion binOff binSize cns src:rest) = do
           pure (l, binSize)
         Orig.Data ->
           pure (l, binSize)
-    let overflowSize
-          | binOff + binSize == lctxOverflowInsertOffset ctx = lctxOverflowSize ctx
-          | otherwise = 0
+    let overflowSize = Map.findWithDefault 0 (binOff + binSize) (lctxAppendMap ctx)
     let nextOff = off' + contentsSize + overflowSize
     layoutNewBinary' ctx nextOff l' rest
 
 -- | Generate new binary layout.
 layoutNewBinary :: LayoutCtx w
-                -> Orig.ElfContentLayout
+                -> Orig.ElfContentLayout w
                 -> Either String (NewBinaryLayout w)
 layoutNewBinary ctx l = do
   let s = NewBinaryLayout { nblPhdrTableOffset = Nothing

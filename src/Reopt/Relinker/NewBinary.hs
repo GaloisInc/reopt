@@ -59,19 +59,10 @@ data BuildCtx w = BuildCtx
   , bctxOverflowSize    :: !(Elf.ElfWordType  w)
     -- ^ Code size
   , bctxOverflowInsertOffset :: !(Elf.FileOffset (Elf.ElfWordType w))
-  , bctxOverflowContents :: !Bld.Builder
-
+  , bctxAppendMap :: !(Map.Map (Elf.FileOffset (Elf.ElfWordType w)) [(Elf.ElfWordType w, Bld.Builder)])
+    -- ^ Map end of region file offsets to number of bytes to insert and contents.
   , bctxShstrtab   :: !BS.ByteString
-
   , bctxNewSymtab  :: !(Maybe NewSymtab)
-
-{-
-  , bctxStrtab     :: !BS.ByteString
-  , bctxSymtab     :: !Bld.Builder
-  , bctxSymtabSize :: !(Elf.ElfWordType  w)
-  , bctxSymtabLocalCount :: !Word32
--}
-
   }
 
 -----------------------------------------------------------------------
@@ -122,7 +113,7 @@ isStrtab :: Elf.Shdr BS.ByteString v -> Bool
 isStrtab shdr = Elf.shdrName shdr == ".strtab"
 
 isShstrtab :: Elf.Shdr BS.ByteString v -> Bool
-isShstrtab shdr = Elf.shdrName shdr == ".strtab"
+isShstrtab shdr = Elf.shdrName shdr == ".shstrtab"
 
 mkNewShdr :: Num (Elf.ElfWordType w)
           => BuildCtx w
@@ -151,16 +142,19 @@ mkNewShdr ctx shdr = do
        , Elf.shdrInfo = info
        }
 
-newBinaryCodeSection :: (Bits (Elf.ElfWordType  w), Num (Elf.ElfWordType w))
-                     => BuildCtx w
-                     -> Elf.Shdr Word32 (Elf.ElfWordType w)
-newBinaryCodeSection ctx =
-  Elf.Shdr { Elf.shdrName  = bctxSectionNameMap ctx newCodeSectionName
+newBinaryCodeSection :: (Bits v, Num v)
+                     => nm -- ^ Name of section
+                     -> v -- ^ Address
+                     -> Elf.FileOffset v
+                     -> v
+                     -> Elf.Shdr nm v
+newBinaryCodeSection nm addr off sz =
+  Elf.Shdr { Elf.shdrName  = nm
            , Elf.shdrType  = Elf.SHT_PROGBITS
            , Elf.shdrFlags = Elf.shf_alloc .|. Elf.shf_execinstr
-           , Elf.shdrAddr  = bctxOverflowAddr ctx
-           , Elf.shdrOff   = Elf.alignFileOffset 16 (bctxOverflowInsertOffset ctx)
-           , Elf.shdrSize  = bctxOverflowSize ctx
+           , Elf.shdrAddr  = addr
+           , Elf.shdrOff   = Elf.alignFileOffset 16 off
+           , Elf.shdrSize  = sz
            , Elf.shdrLink  = 0
            , Elf.shdrInfo  = 0
            , Elf.shdrAddrAlign = 16
@@ -179,7 +173,12 @@ mkNewShdrTable ctx =
       renderShdr :: Int -> Elf.Shdr BS.ByteString (Elf.ElfWordType  w) -> Bld.Builder
       renderShdr i shdr = Elf.elfClassInstances cl $
         let newShdr | fromIntegral i == bctxOverflowCodeShdrIndex ctx =
-                      Elf.encodeShdr cl elfDta (newBinaryCodeSection ctx)
+                      Elf.encodeShdr cl elfDta $
+                        newBinaryCodeSection
+                          (bctxSectionNameMap ctx newCodeSectionName)
+                          (bctxOverflowAddr ctx)
+                          (bctxOverflowInsertOffset ctx)
+                          (bctxOverflowSize ctx)
                     | otherwise =
                       mempty
          in newShdr <> Elf.encodeShdr cl elfDta (mkNewShdr ctx shdr)
@@ -188,7 +187,8 @@ mkNewShdrTable ctx =
 -----------------------------------------------------------------------
 -- Make new binary
 
-buildNewBinary' :: BuildCtx w
+buildNewBinary' :: forall w
+                .  BuildCtx w
                 -> Int -- ^ FileOffset
                 -> [Orig.ElfRegion] -- ^ Remaining regions
                 -> Bld.Builder
@@ -252,14 +252,24 @@ buildNewBinary' ctx off (Orig.ElfRegion binOff binSize cns src:rest) = do
             Orig.Data ->
               let origContents = BS.take binSize $ BS.drop binOff binContents
               in (Bld.byteString origContents, binSize)
-    let (overflow, overflowSize)
-          | fromIntegral (binOff + binSize) == bctxOverflowInsertOffset ctx =
-            (bctxOverflowContents ctx, fromIntegral (bctxOverflowSize ctx))
-          | otherwise =
-            (mempty, 0)
+    let binEnd :: Int
+        binEnd = binOff + binSize
+    let (overflow, overflowSize) = do
+          let appends = Map.findWithDefault [] (fromIntegral binEnd) (bctxAppendMap ctx)
+          let go prevBuffer prevCnt [] = (prevBuffer, prevCnt)
+              go prevBuffer prevCnt ((sz,nextContents):r) = do
+                let endOff :: Elf.FileOffset  (Elf.ElfWordType w)
+                    endOff = fromIntegral (binEnd + prevCnt)
+                let insertOffset = Elf.alignFileOffset 16 endOff
+                let paddingCnt = fromIntegral $ Elf.fromFileOffset insertOffset - Elf.fromFileOffset endOff
+                let overflowPadding = Bld.byteString (BS.replicate paddingCnt 0)
+                let cnt :: Int
+                    cnt = paddingCnt + fromIntegral sz
+                go (prevBuffer <> overflowPadding <> nextContents) (prevCnt + cnt) r
+          go mempty 0 appends
     let nextOff = off' + contentsSize + overflowSize
     padding <> contents <> overflow <> buildNewBinary' ctx nextOff rest
 
 -- | Genertate new binary layout.
-buildNewBinary :: BuildCtx w -> Orig.ElfContentLayout -> Bld.Builder
+buildNewBinary :: BuildCtx w -> Orig.ElfContentLayout w -> Bld.Builder
 buildNewBinary ctx l = buildNewBinary' ctx 0 (Orig.eclFileRegions l)

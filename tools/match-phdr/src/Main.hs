@@ -18,11 +18,11 @@ import           Control.Exception
 import           Control.Monad
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
+import           Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ElfEdit as Elf
 import           Data.Foldable
 import qualified Data.Map as Map
-import qualified Data.Set as Set
 import qualified Data.Vector as V
 import           GHC.Stack
 import           System.Directory
@@ -45,12 +45,37 @@ data MatchStats = MatchStats
   , totalBinaries :: !Int
     -- Map for section headers with unexpected info values.
   , unexpectedShdrInfo :: !(Map.Map BS.ByteString FilePath)
+    -- Map for section headers with unexpected info values.
+  , unexpectedShdrLink :: !(Map.Map BS.ByteString FilePath)
+    -- | Binaries missing an read-only and executable segment
+  , missingExecutableSegment :: ![FilePath]
+    -- | Binaries missing a read-only segment
+  , missingReadonlySegment :: ![FilePath]
+    -- | Binaries missing a read-only segment
+  , multipleReadonlySegments :: ![FilePath]
+    -- Binaries that had a fatal failure for some reason.
   , failedBinaries :: [(FilePath, String)]
   }
+
+addMissingExecutableSegment :: FilePath -> MatchStats -> MatchStats
+addMissingExecutableSegment path stats =
+  stats { missingExecutableSegment = path : missingExecutableSegment stats }
+
+addMissingReadonlySegment :: FilePath -> MatchStats -> MatchStats
+addMissingReadonlySegment path stats =
+  stats { missingReadonlySegment = path : missingReadonlySegment stats }
+
+addMultipleReadonlySegments :: FilePath -> MatchStats -> MatchStats
+addMultipleReadonlySegments path stats =
+  stats { multipleReadonlySegments = path : multipleReadonlySegments stats }
 
 addUnexpectedShdrInfo :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
 addUnexpectedShdrInfo path nm stats =
   stats { unexpectedShdrInfo = Map.insertWith (\_ o -> o) nm path (unexpectedShdrInfo stats) }
+
+addUnexpectedShdrLink :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
+addUnexpectedShdrLink path nm stats =
+  stats { unexpectedShdrLink = Map.insertWith (\_ o -> o) nm path (unexpectedShdrLink stats) }
 
 emptyMatchStats :: MatchStats
 emptyMatchStats =
@@ -58,8 +83,28 @@ emptyMatchStats =
   { successfulBinaries = 0
   , totalBinaries = 0
   , unexpectedShdrInfo = Map.empty
+  , unexpectedShdrLink = Map.empty
+  , missingExecutableSegment = []
+  , missingReadonlySegment   = []
+  , multipleReadonlySegments = []
   , failedBinaries = []
   }
+
+printSecMap :: String -> Map.Map BS.ByteString FilePath -> IO ()
+printSecMap nm m = do
+  unless (Map.null m) $ do
+    hPutStrLn stderr nm
+  forM_ (Map.toList m) $ \(secName, path) -> do
+    hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
+
+
+printErrorList :: String -> [FilePath] -> IO ()
+printErrorList nm l = do
+  unless (null l) $
+    hPutStrLn stderr nm
+  forM_ l $ \path -> do
+    hPutStrLn stderr $ "  " ++ path
+
 
 printMatchStats :: MatchStats -> IO ()
 printMatchStats s = do
@@ -67,13 +112,18 @@ printMatchStats s = do
              ++ " of " ++ show (totalBinaries s) ++ " executables."
   let noErrors = null (failedBinaries s)
               && Map.null (unexpectedShdrInfo s)
+              && Map.null (unexpectedShdrLink s)
+              && null (missingExecutableSegment s)
+--              && null (missingReadonlySegment s)
+--              && null (multipleReadonlySegments s)
   unless noErrors $ do
     forM_ (reverse (failedBinaries s)) $ \(path, msg) -> do
       hPutStrLn stderr $ path ++ ": " ++ msg
-    unless (Map.null (unexpectedShdrInfo s)) $ do
-      hPutStrLn stderr "Unexpected shdr info"
-    forM_ (Map.toList (unexpectedShdrInfo s)) $ \(secName, path) -> do
-      hPutStrLn stderr $ printf "  %s -- %s" (show secName) path
+    printErrorList "Missing executable segment:" (missingExecutableSegment s)
+    --printErrorList "Missing readonly segment:"   (missingReadonlySegment s)
+    --printErrorList "Multiple readonly segments:" (multipleReadonlySegments s)
+    printSecMap "Unexpected shdr info:" (unexpectedShdrInfo s)
+    printSecMap "Unexpected shdr link:" (unexpectedShdrLink s)
     exitFailure
 
 type CheckM = State (Bool, MatchStats)
@@ -81,28 +131,28 @@ type CheckM = State (Bool, MatchStats)
 runCheckM :: CheckM () -> MatchStats -> (Bool, MatchStats)
 runCheckM act stats = execState act (False, stats)
 
+updateStats :: (MatchStats -> MatchStats) -> CheckM ()
+updateStats f = modify' $  \(b, s) -> let s' = f s in seq s' (b, s')
+
 markFailed :: (MatchStats -> MatchStats) -> CheckM ()
 markFailed f = modify' $  \(_,s) -> let s' = f s in seq s' (True, s')
 
-checkShdr :: FilePath
-          -> V.Vector (Elf.Shdr BS.ByteString v)
-          -> Elf.Shdr BS.ByteString v
-          -> CheckM ()
-checkShdr path shdrs shdr = do
+-- | Validate assumptions about a section header
+checkShdrInfo :: FilePath
+              -> V.Vector (Elf.Shdr BS.ByteString v)
+              -> Elf.Shdr BS.ByteString v
+              -> CheckM ()
+checkShdrInfo path shdrs shdr = do
   let nm = Elf.shdrName shdr
   case () of
-
-    _ | Elf.shdrType shdr == Elf.SHT_RELA
-        || nm == ".rela.plt" -> do
+    _ | Elf.shdrType shdr == Elf.SHT_RELA || nm == ".rela.plt"
+      , nm /= ".rela.dyn" -> do
       let info = Elf.shdrInfo shdr
       if toInteger info >= toInteger (V.length shdrs) then
         markFailed $ addUnexpectedShdrInfo path nm
        else do
         let tgt = shdrs V.! fromIntegral info
-        if nm == ".rela.dyn" then
-          when (Elf.shdrInfo shdr /= 0) $ do
-            markFailed $ addUnexpectedShdrInfo path nm
-         else if nm == ".rela.plt" then
+        if nm == ".rela.plt" then
           when (Elf.shdrName tgt `notElem` [".got", ".got.plt", ".plt"]) $ do
             markFailed $ addUnexpectedShdrInfo path nm
          else do
@@ -121,11 +171,82 @@ checkShdr path shdrs shdr = do
       when (Elf.shdrInfo shdr /= 0) $ do
         markFailed $ addUnexpectedShdrInfo path nm
 
--- | @compareElf dwarfDump path@ compares the output of the Haskell
--- ehframe parsing on output with the output of @dwarfDump --eh-frame
--- path@ and fails if they are different.
-compareElf :: MatchStats -> FilePath -> BS.ByteString -> IO MatchStats
-compareElf stats0 path bytes = do
+-- | Validate assumptions about a section header
+checkShdr :: FilePath
+          -> Bool
+          -> V.Vector (Elf.Shdr BS.ByteString v)
+          -> Elf.Shdr BS.ByteString v
+          -> CheckM ()
+checkShdr path static shdrs shdr = do
+  checkShdrInfo path shdrs shdr
+  let nm = Elf.shdrName shdr
+  let link = Elf.shdrLink shdr
+  case () of
+
+    _ | Elf.shdrType shdr == Elf.SHT_RELA
+      , not static -> do
+        if toInteger link >= toInteger (V.length shdrs) then
+          markFailed $ addUnexpectedShdrLink path nm
+        else do
+          let tgt = shdrs V.! fromIntegral link
+          when (Elf.shdrType tgt /= Elf.SHT_DYNSYM) $ do
+            markFailed $ addUnexpectedShdrLink path nm
+
+      | not static, Elf.shdrType shdr `elem` [Elf.SHT_DYNAMIC, Elf.SHT_DYNSYM, Elf.SHT_SYMTAB, Elf.SHT_GNU_verneed] -> do
+        if toInteger link >= toInteger (V.length shdrs) then
+          markFailed $ addUnexpectedShdrLink path nm
+        else do
+          let tgt = shdrs V.! fromIntegral link
+          when (Elf.shdrType tgt /= Elf.SHT_STRTAB) $ do
+            markFailed $ addUnexpectedShdrLink path nm
+
+    _ | not static, nm `elem` [".gnu.hash", ".gnu.version", ".hash", ".rela.dyn", ".rela.plt"] -> do
+        if toInteger link >= toInteger (V.length shdrs) then
+          markFailed $ addUnexpectedShdrLink path nm
+        else do
+          let tgt = shdrs V.! fromIntegral link
+          when (Elf.shdrName tgt /= ".dynsym") $ do
+            markFailed $ addUnexpectedShdrLink path nm
+
+    _  | not static, nm `elem` [".dynamic", ".dynsym", ".gnu.version_r"] -> do
+        if toInteger link >= toInteger (V.length shdrs) then
+          markFailed $ addUnexpectedShdrLink path nm
+        else do
+          let tgt = shdrs V.! fromIntegral link
+          when (Elf.shdrName tgt /= ".dynstr") $ do
+            markFailed $ addUnexpectedShdrLink path nm
+
+    _ -> do
+      when (link /= 0) $ do
+        markFailed $ addUnexpectedShdrLink path nm
+
+checkBinary :: FilePath
+            -> Elf.ElfHeaderInfo  w
+            -> V.Vector (Elf.Shdr BS.ByteString v)
+            -> CheckM ()
+checkBinary path elf shdrs = do
+  let phdrs = Elf.headerPhdrs elf
+  let isInterp p = Elf.phdrSegmentType p == Elf.PT_INTERP
+  let isStatic = Elf.headerType (Elf.header elf) == Elf.ET_EXEC && null (filter isInterp phdrs)
+  V.mapM_ (checkShdr path isStatic shdrs) shdrs
+  let isExec p = Elf.phdrSegmentType p == Elf.PT_LOAD
+              && Elf.phdrSegmentFlags p == (Elf.pf_r  .|. Elf.pf_x)
+  case filter isExec phdrs of
+    [_] -> pure ()
+    _ -> markFailed $ addMissingExecutableSegment path
+  let isReadonly p = Elf.phdrSegmentType p == Elf.PT_LOAD
+                  && Elf.phdrSegmentFlags p == Elf.pf_r
+  case filter isReadonly phdrs of
+    [_] -> pure ()
+    [] -> updateStats $ addMissingReadonlySegment path
+    _:_:_ -> updateStats $ addMultipleReadonlySegments path
+
+
+-- | @checkElf stats path bytes@ checks that the Elf file with path
+-- @path@ and contnts @bytes@ satisfies all the assumptions we think we
+-- can make on Elf files.
+checkElf :: MatchStats -> FilePath -> BS.ByteString -> IO MatchStats
+checkElf stats0 path bytes = do
   Elf.SomeElf elfHdr <-
     case Elf.decodeElfHeaderInfo bytes of
       Left (_o, m) -> reportError path m
@@ -142,9 +263,7 @@ compareElf stats0 path bytes = do
     pure stats0
    else do
     putStrLn $ "Checking " <> path
-    let (seenError, stats) =
-          flip runCheckM stats0 $ do
-            V.mapM_ (checkShdr path shdrs) shdrs
+    let (seenError, stats) = runCheckM (checkBinary path elfHdr shdrs) stats0
     case inferBinaryLayout elfHdr shdrs of
       Left msg -> do
         pure $!
@@ -224,5 +343,5 @@ main = do
   when (null paths) $ do
     hPutStrLn stderr $ "Please specify at least one file or directory for comparing."
     exitFailure
-  errs <- foldlM (withElfFilesInDir compareElf) emptyMatchStats paths
+  errs <- foldlM (withElfFilesInDir checkElf) emptyMatchStats paths
   printMatchStats errs

@@ -78,6 +78,7 @@ library
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
+    Reopt.Utils.Flags
     Reopt.Utils.Hex
     Reopt.Utils.Printf
 
