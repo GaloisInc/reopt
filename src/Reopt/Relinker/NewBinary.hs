@@ -10,6 +10,7 @@ module Reopt.Relinker.NewBinary
     -- * Section
   , NewSectionIndex(..)
   , mkNewShdrTable
+  , newBinaryCodeSection
   ) where
 
 import           Data.Bits
@@ -42,23 +43,15 @@ data BuildCtx w = BuildCtx
     -- ^ Section headers in original binary
   , bctxSectionNameMap :: !(BS.ByteString -> Word32)
     -- ^ Maps section names to their offset.
-  , bctxBinSectionIndexMap :: !(Word16 -> NewSectionIndex)
-
-    -- ^ Map section header indices in original binary to indices in
-    -- new binary.
-  , bctxShdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType  w))
+  , bctxShdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType w))
     -- ^ File offset to use for new section header table.
+  , bctxInsertedSectionMap :: !(Map.Map Word16 [Elf.Shdr Word32 (Elf.ElfWordType w)])
+    -- ^ Map from section indices that we want to
   , bctxShdrStrndx :: !Word16
     -- ^ Index of section header string table.
-
   , bctxCodeMap :: !(Word64 -> Int -> Int -> Either String Bld.Builder)
-  , bctxOverflowCodeShdrIndex :: !Word16
-    -- ^ Index to insert overflow code into.
-  , bctxOverflowAddr :: !(Elf.ElfWordType  w)
-    -- ^ Address of new code section (relative to base in dynamically linked files)
-  , bctxOverflowSize    :: !(Elf.ElfWordType  w)
-    -- ^ Code size
-  , bctxOverflowInsertOffset :: !(Elf.FileOffset (Elf.ElfWordType w))
+    -- ^ @bctxCodeMap addr off size@ returns the contents to store in a code region at the
+    -- given address, file offset and size or an error message if that fails.
   , bctxAppendMap :: !(Map.Map (Elf.FileOffset (Elf.ElfWordType w)) [(Elf.ElfWordType w, Bld.Builder)])
     -- ^ Map end of region file offsets to number of bytes to insert and contents.
   , bctxShstrtab   :: !BS.ByteString
@@ -96,15 +89,16 @@ mkNewPhdrTable ctx = gen 0
 -- New Section header generation
 
 -- | Function that maps old section header link to new section header link.
-bctxMapShdrLink :: BuildCtx w -> Word32 -> Word32
-bctxMapShdrLink ctx link = do
+bctxMapShdr :: BuildCtx w -> Word32 -> Word32
+bctxMapShdr ctx idx = do
   -- If link is a current section index, then we treat it as a section index and
   -- remap it.
-  if 1 <= link && link < fromIntegral (Elf.shdrCount (bctxHeaderInfo ctx)) then
-    let link' = fromIntegral link
-     in fromIntegral $ fromNewSectionIndex $ bctxBinSectionIndexMap ctx link'
+  if 1 <= idx && idx < fromIntegral (Elf.shdrCount (bctxHeaderInfo ctx)) then do
+    let idx' = fromIntegral idx
+    let m = Map.takeWhileAntitone (<= idx') (bctxInsertedSectionMap ctx)
+    fromIntegral $ idx + fromIntegral (Map.size m)
    else
-    link
+    idx
 
 isSymtab :: Elf.Shdr BS.ByteString v -> Bool
 isSymtab shdr = Elf.shdrName shdr == ".symtab"
@@ -120,13 +114,6 @@ mkNewShdr :: Num (Elf.ElfWordType w)
           -> Elf.Shdr BS.ByteString (Elf.ElfWordType w)
           -> Elf.Shdr Word32 (Elf.ElfWordType w)
 mkNewShdr ctx shdr = do
-  let info
-        | Elf.shdrType shdr == Elf.SHT_RELA = bctxMapShdrLink  ctx (Elf.shdrInfo shdr)
-        | isSymtab shdr =
-          case bctxNewSymtab ctx of
-            Nothing -> error "internal: Unexpected symtab"
-            Just symtab -> newSymtabLocalCount symtab
-        | otherwise = Elf.shdrInfo shdr
   let size
         | isStrtab shdr   = fromIntegral (BS.length (bctxShstrtab ctx))
         | isSymtab shdr   =
@@ -135,23 +122,32 @@ mkNewShdr ctx shdr = do
             Just symtab -> fromIntegral (newSymtabSize symtab)
         | isShstrtab shdr = fromIntegral (BS.length (bctxShstrtab ctx))
         | otherwise = Elf.shdrSize shdr
+  let info
+        | infoIsShdrIndex shdr =
+            bctxMapShdr ctx (Elf.shdrInfo shdr)
+        | isSymtab shdr =
+          case bctxNewSymtab ctx of
+            Nothing -> error "internal: Unexpected symtab"
+            Just symtab -> newSymtabLocalCount symtab
+        | otherwise = Elf.shdrInfo shdr
   shdr { Elf.shdrName = bctxSectionNameMap ctx (Elf.shdrName shdr)
        , Elf.shdrOff  = bctxFileOffsetFn ctx (Elf.shdrOff shdr)
        , Elf.shdrSize = size
-       , Elf.shdrLink = bctxMapShdrLink  ctx (Elf.shdrLink shdr)
        , Elf.shdrInfo = info
+       , Elf.shdrLink = bctxMapShdr ctx (Elf.shdrLink shdr)
        }
 
 newBinaryCodeSection :: (Bits v, Num v)
                      => nm -- ^ Name of section
+                     -> Elf.ElfSectionFlags v
                      -> v -- ^ Address
                      -> Elf.FileOffset v
                      -> v
                      -> Elf.Shdr nm v
-newBinaryCodeSection nm addr off sz =
+newBinaryCodeSection nm flags addr off sz =
   Elf.Shdr { Elf.shdrName  = nm
            , Elf.shdrType  = Elf.SHT_PROGBITS
-           , Elf.shdrFlags = Elf.shf_alloc .|. Elf.shf_execinstr
+           , Elf.shdrFlags = flags
            , Elf.shdrAddr  = addr
            , Elf.shdrOff   = Elf.alignFileOffset 16 off
            , Elf.shdrSize  = sz
@@ -172,16 +168,10 @@ mkNewShdrTable ctx =
 
       renderShdr :: Int -> Elf.Shdr BS.ByteString (Elf.ElfWordType  w) -> Bld.Builder
       renderShdr i shdr = Elf.elfClassInstances cl $
-        let newShdr | fromIntegral i == bctxOverflowCodeShdrIndex ctx =
-                      Elf.encodeShdr cl elfDta $
-                        newBinaryCodeSection
-                          (bctxSectionNameMap ctx newCodeSectionName)
-                          (bctxOverflowAddr ctx)
-                          (bctxOverflowInsertOffset ctx)
-                          (bctxOverflowSize ctx)
-                    | otherwise =
-                      mempty
-         in newShdr <> Elf.encodeShdr cl elfDta (mkNewShdr ctx shdr)
+        let newEncodedShdr = do
+              let newShdrs = Map.findWithDefault [] (fromIntegral i) (bctxInsertedSectionMap ctx)
+              mconcat $ Elf.encodeShdr cl elfDta <$> newShdrs
+         in newEncodedShdr <> Elf.encodeShdr cl elfDta (mkNewShdr ctx shdr)
    in foldMap id $ V.imap renderShdr shdrs
 
 -----------------------------------------------------------------------
@@ -209,11 +199,14 @@ buildNewBinary' ctx off (Orig.ElfRegion binOff binSize cns src:rest) = do
               case reg of
                 Orig.Ehdr -> do
                   -- Elf header.
+                  let shdrCnt
+                        = Elf.shdrCount binInfo
+                        + sum (fromIntegral . length <$> bctxInsertedSectionMap ctx)
                   let ehdr = Elf.Ehdr { Elf.ehdrHeader   = Elf.header binInfo
                                       , Elf.ehdrPhoff    = bctxPhdrTableOffset ctx
                                       , Elf.ehdrShoff    = bctxShdrTableOffset ctx
                                       , Elf.ehdrPhnum    = Elf.phdrCount binInfo
-                                      , Elf.ehdrShnum    = Elf.shdrCount binInfo + 1
+                                      , Elf.ehdrShnum    = shdrCnt
                                       , Elf.ehdrShstrndx = bctxShdrStrndx ctx
                                       }
                   (Elf.encodeEhdr ehdr, fromIntegral (Elf.ehdrSize cl))

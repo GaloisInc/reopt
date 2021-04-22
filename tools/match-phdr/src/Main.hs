@@ -33,7 +33,7 @@ import           System.IO
 import           System.IO.Error (isPermissionError)
 import           Text.Printf
 
-import           Reopt.Relinker.Binary
+import           Reopt.Relinker.Binary (inferBinaryLayout, infoIsShdrIndex)
 
 reportError :: HasCallStack => FilePath -> String -> IO a
 reportError path msg = hPutStrLn stderr (path <> ": " <> msg) >> exitFailure
@@ -145,8 +145,7 @@ checkShdrInfo :: FilePath
 checkShdrInfo path shdrs shdr = do
   let nm = Elf.shdrName shdr
   case () of
-    _ | Elf.shdrType shdr == Elf.SHT_RELA || nm == ".rela.plt"
-      , nm /= ".rela.dyn" -> do
+    _ | infoIsShdrIndex shdr -> do
       let info = Elf.shdrInfo shdr
       if toInteger info >= toInteger (V.length shdrs) then
         markFailed $ addUnexpectedShdrInfo path nm

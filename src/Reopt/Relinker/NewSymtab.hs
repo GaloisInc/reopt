@@ -4,9 +4,6 @@
 module Reopt.Relinker.NewSymtab
   ( NewSymtab(..)
   , mkNewSymtab
-    -- *
-  , BinarySectionLayout(..)
-  , mapBinSectionIndex
     -- * Utilities
   , getShdrContents
   , mapFromFuns
@@ -51,31 +48,6 @@ getShdrContents shdr hdrInfo =
    in BS.take sz $ BS.drop o $ Elf.headerFileContents hdrInfo
 
 -----------------------------------------------------------------------
--- BinarySectionLayout
-
--- | Information extracted from scan of sections in binary.
-data BinarySectionLayout =
-  BSL { bslSectionCount :: !Word16
-        -- ^ Number of sections added
-      , bslSectionNames :: ![BS.ByteString]
-        -- ^ Names of setions
-      , bslOverflowCodeShdrIndex :: !Word16
-        -- ^ Number of section headers in binary prior to overflow
-        -- section.
-      , bslSymtabIndex :: !Word16
-        -- ^ Index of symbol table (or zero if not found)
-      , bslStrtabIndex :: !Word16
-        -- ^ Index of string table (or zero if not found)
-      }
-
-  -- Convert from section index in binary to new section index.
-mapBinSectionIndex :: BinarySectionLayout -> Word16 -> NewSectionIndex
-mapBinSectionIndex bsl i
-  -- If i is less than new code index then use it
-  | i < bslOverflowCodeShdrIndex bsl = NewSectionIndex i
-  | otherwise = NewSectionIndex (i+1)
-
------------------------------------------------------------------------
 -- NewSymtab
 
 -- | Information from constructing new symbol table.
@@ -98,21 +70,23 @@ finalizeSymtabEntryNameIndex strtabOffsetMap e =
 -- | Create symbol table in new file.
 mkNewSymtab :: MergeRelations
             -> Elf.ElfHeaderInfo 64
-            -> BinarySectionLayout
             -> V.Vector (Elf.Shdr BS.ByteString Word64)
             -- ^ Section headers in original binary
+            -> Word16 -- ^ Index of symbol table
+            -> (Word16 -> Word16)
+               -- ^ Map section indices from original binary to new.
             -> V.Vector (Elf.SymtabEntry BS.ByteString Word64)
                -- ^ Symbols in object file
             -> (BS.ByteString -> Maybe (NewSectionIndex, Word64))
                -- ^ Maps symbol names in object file to index and
                -- offset where they are stored.
             -> Except String NewSymtab
-mkNewSymtab ctx binHeaderInfo binShdrInfo binShdrs objSymbols addrOfObjSymbol = do
+mkNewSymtab ctx binHeaderInfo binShdrs binSymtabIndex binShdrIndexMap objSymbols addrOfObjSymbol= do
   let hdr = Elf.header binHeaderInfo
       cl = Elf.headerClass hdr
       elfDta = Elf.headerData hdr
 
-  let binSymtabShdr = binShdrs  V.! fromIntegral (bslSymtabIndex binShdrInfo)
+  let binSymtabShdr = binShdrs  V.! fromIntegral binSymtabIndex
 
   let binLocalSymCount :: Word32
       binLocalSymCount = Elf.shdrInfo binSymtabShdr
@@ -148,7 +122,7 @@ mkNewSymtab ctx binHeaderInfo binShdrInfo binShdrs objSymbols addrOfObjSymbol = 
         case moff of
           Nothing -> do
             let binIdx = Elf.fromElfSectionIndex (Elf.steIndex e)
-                NewSectionIndex newIdx = mapBinSectionIndex binShdrInfo binIdx
+                newIdx = binShdrIndexMap binIdx
             pure $! e { Elf.steIndex = Elf.ElfSectionIndex newIdx }
           Just (NewSectionIndex midx, off) ->
             pure $! e { Elf.steIndex = Elf.ElfSectionIndex midx

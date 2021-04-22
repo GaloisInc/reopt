@@ -17,6 +17,7 @@ module Reopt.Relinker.Binary
   , FileSource(..)
   , FileOffsetMap
   , inferBinaryLayout
+  , Reopt.Relinker.Constants.infoIsShdrIndex
   ) where
 
 import           Control.Monad (when, unless, forM_)
@@ -33,7 +34,7 @@ import           Data.Word ( Word16, Word64 )
 import           Numeric (showHex)
 import           Text.Printf ( printf )
 
-import           Reopt.Relinker.Constants ( pageSize )
+import           Reopt.Relinker.Constants
 import           Reopt.Utils.Flags (hasFlags)
 
 -- | @enumCnt b c@ returns a list with @c@ enum values starting from @b@.
