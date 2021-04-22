@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
@@ -18,17 +19,17 @@ import Reopt
     ( LoadOptions(LoadOptions, loadOffset),
       ReoptOptions(ReoptOptions, roIncluded, roExcluded),
       copyrightNotice,
-      RecoveryStats(..),
-      withElfFilesInDir,
+      ReoptStats(..),
       statsHeader,
       recoverFunctions,
-      renderFnStats,
       renderLLVMBitcode,
       defaultLLVMGenOptions,
       latestLLVMConfig,
       statsRows,
       RecoveredModule,
-      X86OS)
+      X86OS
+    )
+import Reopt.Utils.Dir
 import System.Console.CmdArgs.Explicit
     ( process, flagNone, flagReq, mode, Arg(..), Flag, Mode )
 import System.Environment (getArgs)
@@ -119,22 +120,33 @@ llvmGenSuccess LLVMGenPass{} = True
 llvmGenSuccess LLVMGenFail{} = False
 
 data ExplorationResult
-  = ExplorationStats RecoveryStats LLVMGenResult
+  = ExplorationStats (ReoptStats 64) LLVMGenResult
   | ExplorationError FilePath String
+
+binStats :: ReoptStats w -> String -> String
+binStats stats llvmGen =
+  unlines
+    [ statsBinary stats
+    , "  Discovered:  " ++ show (statsFnDiscoveredCount stats)
+    , "  Recovered:   " ++ show (statsFnRecoveredCount stats)
+    , "  PLT entries: " ++ show (statsFnPLTSkippedCount stats)
+    , "  Failures:    " ++ show (statsFnFailedCount stats)
+    , "  Errors:      " ++ show (statsErrorCount stats)
+    , "  LLVM:        " ++ llvmGen
+    ]
 
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult =
   \case
-    ExplorationStats stats (LLVMGenPass n)  ->
-      "\n"++ renderFnStats stats ++ "\n"++(show n)++" bytes of LLVM bitcode generated."
+    ExplorationStats stats (LLVMGenPass _n)  -> do
+      binStats stats "Success"
     ExplorationStats stats (LLVMGenFail errMsg)  ->
-      "\n"++ renderFnStats stats ++ "\nLLVM bitcode generation failed:\n" ++ (indentErrMsg errMsg)
+      binStats stats ("Failed: " ++ errMsg)
     ExplorationError fpath errMsg ->
-      "\nreopt encountered a fatal error while exploring the binary " ++ fpath ++ ":\n" ++ (indentErrMsg errMsg)
-  where
-    indentErrMsg :: String -> String
-    indentErrMsg msg = "  " ++ concatMap (\c -> if c == '\n' then "\n  " else [c]) msg
-
+      unlines $
+        [ fpath
+        , "  Fatal error:"]
+        ++ ((\m -> "    " ++ m) <$> lines errMsg)
 
 exploreBinary ::
   Args ->
@@ -265,9 +277,7 @@ main = do
         exitFailure
       results <- foldM (withElfFilesInDir (exploreBinary args)) [] paths
       when (printStats args) $ do
-        hPutStrLn stderr "\n==== reopt-explore individual statistics ===="
-        mapM_ (\s -> hPutStrLn stderr (renderExplorationResult s)) results
-        hPutStrLn stderr "\n==== reopt-explore cumulative statistics ===="
+        mapM_ (\s -> hPutStrLn stderr ("\n" ++ renderExplorationResult s)) results
         hPutStrLn stderr $ renderSummaryStats results
       case exportStatsPath args of
         Nothing -> pure ()

@@ -42,8 +42,8 @@ import Data.Macaw.Discovery
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
-import qualified Reopt.CFG.LLVM as LLVM
 import qualified Reopt.VCG.Annotations as Ann
 
 import           Paths_reopt (version)
@@ -81,6 +81,7 @@ data Action
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowFunctions   -- ^ Print out generated functions
    | ShowLLVM        -- ^ Print out LLVM in textual format
+   | ServerMode      -- ^ Start reopt in server mode
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
    | Reopt           -- ^ Perform a full reoptimization
@@ -142,7 +143,7 @@ data Args
             -- If `Nothing` then annotations are not generated.
           , relinkerInfoExportPath :: !(Maybe FilePath)
             -- ^ Path to write relationships needed for relinker
-          , llvmGenOptions :: !LLVM.LLVMGenOptions
+          , llvmGenOptions :: !LLVMGenOptions
             -- ^ Generation options for LLVM
           , llvmExportPath :: !(Maybe FilePath)
             -- ^ Path to export LLVM bitcode to.
@@ -173,8 +174,6 @@ excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 -- | Options for controlling discovery
 discOpts :: Lens' Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
-
-
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -267,6 +266,11 @@ statsExportFlag :: Flag Args
 statsExportFlag = flagReq [ "export-stats" ] upd "PATH" help
   where upd path old = Right $ old { exportStatsPath = Just path }
         help = "Path at which to write discovery/recovery statistics."
+
+serverModeFlag :: Flag Args
+serverModeFlag = flagNone [ "server" ] upd help
+  where upd = reoptAction .~ ServerMode
+        help = "Run reopt in server mode."
 
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
@@ -386,7 +390,7 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
 allowLLVMUB :: Flag Args
 allowLLVMUB = flagBool [ "allow-undef-llvm" ] upd help
   where upd b s = s { llvmGenOptions =
-                        LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = b } }
+                        LLVMGenOptions { mcExceptionIsUB = b } }
         help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
 
 -- | Generate an export flag
@@ -429,6 +433,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , funFlag
                 , llvmFlag
+                , serverModeFlag
                   -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
@@ -448,9 +453,9 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , llcPathFlag
                 , optPathFlag
                 , llvmMcPathFlag
-                  -- * Optimization
+                  -- Optimization
                 , optLevelFlag
-                  -- * Export
+                  -- Export
                 , objectExportFlag
                 , relinkerInfoExportFlag
                 , statsExportFlag
@@ -479,8 +484,7 @@ getCommandLineArgs = do
 -- Note.  This does not apply relocations.
 dumpDisassembly :: Args -> IO ()
 dumpDisassembly args = do
-  bs <- checkedReadFile (programPath args)
-  e <- parseElf64 (programPath args) bs
+  e <- readElf64 (programPath args)
   let sections = filter isCodeSection $ e^..elfSections
   when (null sections) $ do
     hPutStrLn stderr "Binary contains no executable sections."
@@ -501,13 +505,10 @@ argsReoptOptions args = ReoptOptions { roIncluded = args^.includeAddrs
 showCFG :: Args -> IO String
 showCFG args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
-  statsRef <- newIORef $ initRecoveryStats $ programPath args
   Some discState <-
-    discoverBinary (recoverLogEvent statsRef)
+    discoverBinary (hPutStrLn stderr . show)
                    (programPath args) (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn
   pure $ show $ ppDiscoveryStateBlocks discState
-
-
 
 ------------------------------------------------------------------------
 -- LLVM Generation
@@ -516,7 +517,6 @@ builderWriteFile :: FilePath -> Builder.Builder -> IO ()
 builderWriteFile path bld =
   withFile path WriteMode $ \h -> do
     Builder.hPutBuilder h bld
-
 
 -- | This command is called when reopt is called with no specific
 -- action.
@@ -536,7 +536,7 @@ performReopt args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  statsRef <- newIORef $ (initRecoveryStats $ programPath args)
+  statsRef <- newIORef $ (initReoptStats $ programPath args)
   (origElf, os, _, recMod, relinkerInfo) <-
     recoverX86Elf (recoverLogEvent statsRef)
                   (programPath args)
@@ -594,7 +594,7 @@ performReopt args = do
         hPutStrLn stderr "Performing final relinking."
         mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, RecoveryStats)
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats 64)
 getFunctions args =
   recoverFunctions (programPath args)
                    (clangPath args)
@@ -614,7 +614,6 @@ main' = do
     ShowCFG ->
       writeOutput (outputPath args) $ \h -> do
         hPutStrLn h =<< showCFG args
-
     -- Write function discovered
     ShowFunctions -> do
       (_,recMod, stats) <- getFunctions args
@@ -623,7 +622,6 @@ main' = do
       reportStats (printStats args) (exportStatsPath args) stats
       when ((statsErrorCount stats) > 0)
         exitFailure
-
     ShowLLVM -> do
       when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
@@ -656,6 +654,8 @@ main' = do
       reportStats (printStats args) (exportStatsPath args) stats
       when ((statsErrorCount stats) > 0) $ do
         exitFailure
+    ServerMode -> do
+      runServer
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
     ShowVersion ->

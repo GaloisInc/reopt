@@ -2,6 +2,7 @@ packages:
   reopt.cabal
   annotations
   tools
+  tools/match-phdr
   deps/dwarf
   deps/elf-edit
   deps/flexdis86

@@ -22,3 +22,6 @@
 [submodule "deps/what4"]
 	path = deps/what4
 	url = git@github.com:GaloisInc/what4.git
+[submodule "deps/reopt-vcg"]
+	path = deps/reopt-vcg
+	url = git@github.com:GaloisInc/reopt-vcg.git

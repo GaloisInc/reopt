@@ -1,4 +1,6 @@
 /cabal.project.freeze
 /cabal.project.local
 /dist-newstyle
+/hie.yml
 /TAGS
+/tar
