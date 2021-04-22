@@ -305,7 +305,8 @@ collectObjShdrInfo ctx objInfo thisIdx shdr = do
             when (Elf.shdrSize shdr /= 0) $ do
               throwError "Expect object file compiled with -ffunction-sections."
             pure objInfo
-          ".rodata.cst16" -> do
+          shdrName
+            | Just _secName <- BS.stripPrefix ".rodata." shdrName -> do
             let off = objRodataSize objInfo
             pure objInfo
               { objSectionAddrMap = Map.insert thisIdx (RodataAddr off) (objSectionAddrMap objInfo)

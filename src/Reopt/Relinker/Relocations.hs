@@ -145,16 +145,27 @@ mkRelocInfo undefMap secMap entries shdrs = do
                     , relocSectionMap = m
                     }
 
-write32LSB :: SMV.MVector s Word8 -> Word64 -> Word32 -> ST s ()
+write32LSB :: SMV.MVector s Word8 -> Word64 -> Word32 -> ExceptT String (ST s) ()
 write32LSB v a c = do
   -- Assert a+3 doesn't overflow.
-  when (SMV.length v < 4 || a >= fromIntegral (SMV.length v) - 3) $
-    error "Illegal relative addr in relocation."
+  when (SMV.length v < 4 || a > fromIntegral (SMV.length v) - 4) $
+    throwError "Illegal relative addr in relocation."
   let i = fromIntegral a
-  SMV.write v i     $ fromIntegral c
-  SMV.write v (i+1) $ fromIntegral (c `shiftR`  8)
-  SMV.write v (i+2) $ fromIntegral (c `shiftR` 16)
-  SMV.write v (i+3) $ fromIntegral (c `shiftR` 24)
+  lift $ do
+    SMV.write v i     $ fromIntegral c
+    SMV.write v (i+1) $ fromIntegral (c `shiftR`  8)
+    SMV.write v (i+2) $ fromIntegral (c `shiftR` 16)
+    SMV.write v (i+3) $ fromIntegral (c `shiftR` 24)
+
+write64LSB :: SMV.MVector s Word8 -> Word64 -> Word64 -> ExceptT String (ST s) ()
+write64LSB v a c = do
+  -- Assert a+3 doesn't overflow.
+  when (SMV.length v < 8 || a > fromIntegral (SMV.length v) - 8) $
+    throwError $ "Illegal relative addr in relocation."
+  let i:: Int
+      i = fromIntegral a
+  let w j = SMV.write v (i+j) $ fromIntegral (c `shiftR` 8 *fromIntegral j)
+  lift $ w 0 >> w 1 >> w 2 >> w 3 >> w 4 >> w 5 >> w 6 >> w 7
 
 -- | Perform a relocation listed in the new object.
 performReloc :: RelocInfo Word64
@@ -193,7 +204,7 @@ performReloc relocs thisAddr mv rela = do
         -- Compute 32bit
         let res32 :: Word32
             res32 = fromIntegral res64
-        lift $ write32LSB mv vaddr res32
+        write32LSB mv vaddr res32
   -- Parse on type
   case Elf.relaType rela of
     Elf.R_X86_64_PC32 -> performPC32
@@ -203,13 +214,16 @@ performReloc relocs thisAddr mv rela = do
       let res32 = fromIntegral res64 :: Word32
       when (fromIntegral res32 /= res64) $ do
         throwError $ "Relocation at " <> showHex vaddr " does not safely zero extend."
-      lift $ write32LSB mv vaddr res32
+      write32LSB mv vaddr res32
     Elf.R_X86_64_32S -> do
       let res64 = fromIntegral symAddr + addend :: Int64
           res32 = fromIntegral res64 :: Int32
       when (fromIntegral res32 /= res64) $
         throwError $ "Relocation at " <> showHex vaddr " does not safely sign extend."
-      lift $ write32LSB mv vaddr (fromIntegral res32)
+      write32LSB mv vaddr (fromIntegral res32)
+    Elf.R_X86_64_64 -> do
+      let res64 = symAddr + fromIntegral addend
+      write64LSB mv vaddr res64
     tp -> do
       throwError $ printf "Relocation type %s is not supported" (show tp)
 
