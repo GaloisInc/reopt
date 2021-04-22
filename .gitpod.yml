@@ -1,1 +1,4 @@
 image: galoisbinaryanalysis/reopt
+vscode:
+  extensions:
+    - galois.reopt@0.0.1:a2599e99e85b44bd5a12e2c071216b03
