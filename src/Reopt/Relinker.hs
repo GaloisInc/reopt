@@ -807,7 +807,10 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
     let layoutCtx = New.LayoutCtx
           { New.lctxClass = cl
           , New.lctxPhdrCount = Elf.phdrCount binHeaderInfo
-          , New.lctxShdrCount = Elf.shdrCount binHeaderInfo + 1
+          , New.lctxShdrCount = Elf.shdrCount binHeaderInfo
+                              + case Map.lookupMax insertedSectionIndices of
+                                  Nothing -> 0
+                                  Just (_,v) -> v
           , New.lctxShstrtabSize = fromIntegral (BS.length newShstrtabContents)
           , New.lctxStrtabSize   =
               maybe 0 (BS.length . newStrtabContents) newSymtab
