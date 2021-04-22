@@ -206,6 +206,7 @@ jobs:
       run: |
         docker build -t galoisbinaryanalysis/reopt containers/eval
     - name: Push to Docker hub
+      if: github.event_name == 'push' && github.ref == 'master'
       run: |
         echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt
