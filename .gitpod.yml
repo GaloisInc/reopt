@@ -1,0 +1,3 @@
+image: galoisbinaryanalysis/reopt
+tasks:
+  - init: file:///usr/local/share/reopt/reopt.vsix
