@@ -826,18 +826,6 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
       throwError "Could not find .shstrtab index."
     pure $! binShdrIndexMap idx
 
-  -- Get offset of program header table
-  newPhdrTableOffset <-
-    case New.nblPhdrTableOffset newBinLayout of
-      Nothing -> throwError "Missing program header table."
-      Just o -> pure o
-
-  -- Get offset of section header table
-  newShdrTableOffset <-
-    case New.nblShdrTableOffset newBinLayout of
-      Nothing -> throwError "Missing section header table."
-      Just o -> pure o
-
   -----------------------------------------------------------------------------
   -- 4. Generate contents
 
@@ -987,11 +975,9 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
         { New.bctxHeaderInfo = binHeaderInfo
         , New.bctxExtendedSegmentMap =
             Map.fromList $ [ (idx, sz) | (idx, sz, _) <- phdrAppends ]
-        , New.bctxPhdrTableOffset = newPhdrTableOffset
         , New.bctxBinShdrs = binShdrs
         , New.bctxSectionNameMap = shdrNameFn
         , New.bctxInsertedSectionMap = insSecMap
-        , New.bctxShdrTableOffset = newShdrTableOffset
         , New.bctxShdrStrndx      = newShstrtabIndex
         , New.bctxShstrtab        = newShstrtabContents
         , New.bctxCodeMap =

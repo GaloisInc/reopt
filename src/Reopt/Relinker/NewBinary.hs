@@ -35,16 +35,10 @@ data BuildCtx w = BuildCtx
     -- ^ Maps file offsets in original binary to code in new binary.
   , bctxExtendedSegmentMap :: !(Map.Map Word16 (Elf.ElfWordType w))
     -- ^ Maps segment indices that change to the new size.
-
-  , bctxPhdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType  w))
-    -- ^ File offset for program header table.
-
   , bctxBinShdrs    :: !(V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w)))
     -- ^ Section headers in original binary
   , bctxSectionNameMap :: !(BS.ByteString -> Word32)
     -- ^ Maps section names to their offset.
-  , bctxShdrTableOffset :: !(Elf.FileOffset (Elf.ElfWordType w))
-    -- ^ File offset to use for new section header table.
   , bctxInsertedSectionMap :: !(Map.Map Word16 [Elf.Shdr Word32 (Elf.ElfWordType w)])
     -- ^ Map from section indices that we want to
   , bctxShdrStrndx :: !Word16
@@ -203,8 +197,10 @@ buildNewBinary' ctx off (Orig.ElfRegion binOff binSize cns src:rest) = do
                         = Elf.shdrCount binInfo
                         + sum (fromIntegral . length <$> bctxInsertedSectionMap ctx)
                   let ehdr = Elf.Ehdr { Elf.ehdrHeader   = Elf.header binInfo
-                                      , Elf.ehdrPhoff    = bctxPhdrTableOffset ctx
-                                      , Elf.ehdrShoff    = bctxShdrTableOffset ctx
+                                      , Elf.ehdrPhoff =
+                                          bctxFileOffsetFn ctx (Elf.phdrTableFileOffset binInfo)
+                                      , Elf.ehdrShoff    =
+                                          bctxFileOffsetFn ctx (Elf.shdrTableFileOffset binInfo)
                                       , Elf.ehdrPhnum    = Elf.phdrCount binInfo
                                       , Elf.ehdrShnum    = shdrCnt
                                       , Elf.ehdrShstrndx = bctxShdrStrndx ctx

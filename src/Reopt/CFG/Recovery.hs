@@ -71,6 +71,7 @@ import           Data.Macaw.X86 (x86DemandContext, x86_64CallParams)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
+import           Reopt.CFG.LLVM.X86 (x86ArchFnToLLVM)
 import qualified Reopt.Utils.Printf as Printf
 
 fromSomeList :: [Some f] -> Some (P.List f)
@@ -696,15 +697,15 @@ recoverAssign asgn = do
     SetUndefined tp ->
       whenAssignUsed aid $ do
         setAssignRhs aid (FnSetUndefined tp)
-    EvalArchFn (CPUID _) _ -> do
-      throwErrorAt "cpuid unsupported."
-    EvalArchFn (MemCmp _ _ _ _ _) _ -> do
-      throwErrorAt "MemCmp unsupported."
-    EvalArchFn ReadFSBase _ -> do
-      throwErrorAt "ReadFSBase unsupported."
     EvalArchFn f _ -> do
       whenAssignUsed aid $ do
         fval <- traverseFC recoverValue f
+        case x86ArchFnToLLVM fval of
+          Just _ ->
+            pure ()
+          Nothing -> do
+            throwErrorAt $ "LLVM backend does not yet support: "
+                      ++ show (runIdentity (ppArchFn (pure . pretty) f))
         setAssignRhs aid (FnEvalArchFn fval)
     ReadMem addr memRepr -> do
       access <- popMemAccessInfo
