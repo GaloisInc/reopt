@@ -8,5 +8,5 @@ RUN ln -s ../../lib/llvm-8/bin/opt     /usr/local/bin
 RUN ln -s ../../lib/llvm-8/bin/llc     /usr/local/bin
 RUN ln -s ../../lib/llvm-8/bin/llvm-mc /usr/local/bin
 COPY reopt/bin/reopt /usr/local/bin
-
+COPY reopt.vsix /root
 WORKDIR /root

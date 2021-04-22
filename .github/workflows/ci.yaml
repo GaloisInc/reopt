@@ -120,6 +120,31 @@ jobs:
       with:
         name: reopt
         path: dist/reopt.tgz
+  # This builds the VSCode extension
+  vscode-extension:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install npm
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y npm
+    - name: Install vsce
+      run: sudo npm install -g --no-optional vsce
+    - name: Install dependencies
+      working-directory: vscode-plugin
+      run: npm install
+    - name: Package extension
+      working-directory: vscode-plugin
+      run: |
+        vsce package
+        mv reopt-0.0.1.vsix reopt.vsix
+    - name: Upload extension artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: vscode-extension
+        path: vscode-plugin/reopt.vsix
+
   # lean:
   #   runs-on: ubuntu-20.04
   #   outputs:
@@ -186,27 +211,32 @@ jobs:
   #     working-directory: deps/reopt-vcg
   #     run: .github/ci.sh run-tests
   upload:
-    needs: [build]
+    needs: [build, vscode-extension]
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout
       uses: actions/checkout@v2
       with:
         submodules: true
-    - uses: actions/download-artifact@v2
+    - name: Download reopt artifact
+      uses: actions/download-artifact@v2
       with:
         name: reopt
         path: dist
     - name: Copy files
       run: |
-        find dist
         cd containers/eval
         tar xvfz ../../dist/reopt.tgz
+    - name: Download extension artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: vscode-extension
+        path: containers/eval
     - name: Build docker image
       run: |
         docker build -t galoisbinaryanalysis/reopt containers/eval
     - name: Push to Docker hub
-      if: github.event_name == 'push' && github.ref == 'master'
+      # if: github.event_name == 'push' && github.ref == 'master'
       run: |
         echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt
