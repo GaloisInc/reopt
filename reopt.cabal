@@ -53,6 +53,7 @@ library
   exposed-modules:
     Reopt
     Reopt.CFG.FnRep.X86
+    Reopt.EncodeInvariants
     Reopt.Relinker.Binary
     Reopt.Server
     Reopt.Utils.Dir

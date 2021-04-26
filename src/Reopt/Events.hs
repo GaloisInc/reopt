@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Events
@@ -6,18 +7,18 @@ module Reopt.Events
   , isErrorEvent
     -- * Statistics
   , ReoptStats(..)
+  , FnRecoveryResult(..)
   , initReoptStats
   , reportStats
-  , recoverLogEvent
   , renderFnStats
   , statsHeader
   , statsRows
+  , ppFnEntry
   ) where
 
 import           Control.Monad (when)
 import qualified Data.ByteString.Char8 as BS
 import           Data.List (intercalate)
-import           Data.IORef
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Numeric ( showHex )
@@ -25,27 +26,31 @@ import           Numeric.Natural ( Natural )
 import           System.IO
 import           Text.Printf (printf)
 
+import           Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery
 
-import Reopt.ArgResolver ( showArgResolverError, ArgResolverError )
+import           Reopt.ArgResolver ( showArgResolverError, ArgResolverError )
 
 -- | Event passed to logger when discovering functions
-data ReoptLogEvent w
+data ReoptLogEvent arch
    = InitializationWarning !String
    | ArgResolverError !String !ArgResolverError
    | DuplicateSections !BS.ByteString
    | DebugError !String
-   | StartFunDiscovery !(Maybe BS.ByteString) !(MemSegmentOff w) !(FunctionExploreReason w)
-   | StartBlockDiscovery !(MemSegmentOff w)
-   | StartFunRecovery !(Maybe BS.ByteString) !(MemSegmentOff w)
+   | StartFunDiscovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(FunctionExploreReason (ArchAddrWidth arch))
+   | StartBlockDiscovery !(ArchSegmentOff arch)
+   | FnInvariantsFailed !(Maybe BS.ByteString) !(ArchSegmentOff arch) String
+     -- ^ Notify register use computation failed.
+
+   | forall ids . StartFunRecovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(BlockInvariantMap arch ids)
      -- ^ Notify we are starting analysis of given function.
-   | EndFunRecovery  !(Maybe BS.ByteString) !(MemSegmentOff w)
+   | EndFunRecovery  !(Maybe BS.ByteString) !(ArchSegmentOff arch)
      -- ^ Notify we successfully completed analysis of given function.
-   | RecoveryFailed !(Maybe BS.ByteString)  !(MemSegmentOff w) !String
+   | RecoveryFailed !(Maybe BS.ByteString)  !(ArchSegmentOff arch) String
      -- ^ @RecoveryFailed dnm addr msg@ notes we failed to recover function due to given reason.
-   | RecoveryPLTSkipped  !(Maybe BS.ByteString)  !(MemSegmentOff w)
-   | RecoveryWarning !(Maybe BS.ByteString) !(MemSegmentOff w) !String
+   | RecoveryPLTSkipped  !(Maybe BS.ByteString) !(ArchSegmentOff arch)
+   | RecoveryWarning !(Maybe BS.ByteString) !(ArchSegmentOff arch) String
    | RecoveryError !String
      -- ^ A general error message
 
@@ -54,7 +59,7 @@ ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
 ppFnEntry (Just nm) addr = BS.unpack nm <> "(0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ")"
 ppFnEntry Nothing addr   = "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
 
-instance Show (ReoptLogEvent w) where
+instance Show (ReoptLogEvent arch) where
   show (InitializationWarning msg) = "Warning: " ++ msg
   show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
   show (DuplicateSections nm)  = "Multiple sections named " ++ BS.unpack nm
@@ -63,7 +68,9 @@ instance Show (ReoptLogEvent w) where
     "Discovering function: " <> ppFnEntry dnm faddr ++  ppFunReason rsn
   show (StartBlockDiscovery addr) =
     "  Analyzing block: " <> "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
-  show (StartFunRecovery dnm faddr)  =
+  show (FnInvariantsFailed dnm faddr msg) =
+    "Invariant synthesis failed " <> ppFnEntry dnm faddr <> "\n  " <> msg
+  show (StartFunRecovery dnm faddr _)  =
     "Recovering function " <> ppFnEntry dnm faddr
   show (EndFunRecovery dnm faddr)  =
      let fnm = ppFnEntry dnm faddr
@@ -74,21 +81,22 @@ instance Show (ReoptLogEvent w) where
   show (RecoveryError msg) = msg
 
 -- | Should this event increase the error count?
-isErrorEvent ::  ReoptLogEvent w -> Bool
+isErrorEvent ::  ReoptLogEvent arch -> Bool
 isErrorEvent =
   \case
     InitializationWarning{} -> True
-    ArgResolverError{}   -> True
-    DuplicateSections{}  -> True
-    DebugError{}         -> True
-    StartFunDiscovery{}  -> False
+    ArgResolverError{}    -> True
+    DuplicateSections{}   -> True
+    DebugError{}          -> True
+    StartFunDiscovery{}   -> False
     StartBlockDiscovery{} -> False
-    StartFunRecovery{}   -> False
-    EndFunRecovery{}     -> False
-    RecoveryFailed{}     -> True
-    RecoveryPLTSkipped{} -> True
-    RecoveryWarning{}    -> True
-    RecoveryError{}      -> True
+    FnInvariantsFailed{}   -> True
+    StartFunRecovery{}    -> False
+    EndFunRecovery{}      -> False
+    RecoveryFailed{}      -> True
+    RecoveryPLTSkipped{}  -> True
+    RecoveryWarning{}     -> True
+    RecoveryError{}       -> True
 
 -------------------------------------------------------------------------------
 
@@ -191,45 +199,3 @@ reportStats printStats mStatsPath stats = do
         "1 error occured."
        else
         show (statsErrorCount stats) ++ " errors occured."
-
-
--- | Function for recovering log information.
---
--- This has a side effect where it increments an IORef so
--- that the number of errors can be recorded.
-recoverLogEvent
-  :: IORef (ReoptStats w)
-  -> ReoptLogEvent w  -- ^ Message to log
-  -> IO ()
-recoverLogEvent statsRef event = do
-  -- Update error count when applicable
-  when (isErrorEvent event) $ do
-    modifyIORef' statsRef $ \s -> s {statsErrorCount = 1 + (statsErrorCount s)}
-  -- Record more detailed info when appropriate.
-  case event of
-    StartFunRecovery mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
-                       , statsFnDiscoveredCount = 1 + (statsFnDiscoveredCount s)}
-      modifyIORef' statsRef update
-    EndFunRecovery mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
-                       , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
-      prevEntry <- Map.lookup (mNm, addr) <$> statsFnResults <$> readIORef statsRef
-      case prevEntry of
-        Nothing -> hPutStrLn stderr (show event)
-        Just FnDiscovered -> pure ()
-        Just res -> hPutStrLn stderr $ "function " ++ ppFnEntry mNm addr
-                                       ++ " had an unexpected previous state at the end of discovery: "
-                                       ++ show res
-      modifyIORef' statsRef update
-    RecoveryFailed mNm addr _errMsg -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
-                       , statsFnFailedCount = 1 + (statsFnFailedCount s) }
-      modifyIORef' statsRef update
-    RecoveryPLTSkipped mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnPLTSkipped (statsFnResults s)
-                       , statsFnPLTSkippedCount = 1 + (statsFnPLTSkippedCount s) }
-      modifyIORef' statsRef update
-    _ -> pure ()
-  -- Print log info to stderr.
-  hPutStrLn stderr (show event)
