@@ -149,8 +149,6 @@ import           Reopt.Hints
 import           Reopt.Relinker
 import qualified Reopt.VCG.Annotations as Ann
 
-import           Debug.Trace
-
 #ifdef SUPPORT_ARM
 import qualified Data.VEX.FFI
 import           Data.Macaw.VEX.AArch32 (armArch32le)
@@ -557,7 +555,6 @@ matchPLTStub dta args idx = do
         lift $ lift $ initWarning "PLT does not appear to have a valid address."
         throwError ()
       Just a -> pure a
---  trace ("plt fun " ++ show a ++ show (Elf.steName sym)) $ pure ()
   modify $ \pltRes ->
     pltRes { pltFuns = (a, Elf.steName sym):pltFuns pltRes
            , pltSymAddrMap = symAddrMapInsert sym a (pltSymAddrMap pltRes)
@@ -596,7 +593,6 @@ processX86PLTEntries hdrInfo symtab strtab shdrNameMap mem pltRes = do
           let relaShdr = Elf.shdrByIndex hdrInfo relaIdx
           let relaData = shdrContents hdrInfo relaShdr
           let (relaCount, r) = BS.length relaData `quotRem` Elf.relaEntSize Elf.ELFCLASS64
---          trace ("Found plt addr "  ++ show relaCount) $ pure ()
           when (r /= 0) $ do
             initWarning ".rela.plt data is not a multiple of relocation entry size."
           -- Find base address of PLT stubs
@@ -751,7 +747,6 @@ insSymbol mem baseAddr (idx, symEntry)
         Just addr ->
           modify $ symAddrMapInsert symEntry addr
         Nothing -> do
-          trace (unwords ["insSymbol fail", show baseAddr, showHex (toInteger val) ""]) $ pure ()
           lift $ initWarning (show (CouldNotResolveAddr nm))
 
 withSymtab
@@ -2273,15 +2268,11 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
                 <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
                                 | (addr,tp) <- Map.toList fDems
                                 ]
---                <> Map.fromList [ (nm, defaultX86Type) | (_addr,nm) <- pltFns ]
-  trace (unlines $ (\(s,a) -> show s ++ " " ++ show a) <$>  Map.toList funNameMap) $ pure ()
-  trace (unlines $ (\(s,a) -> show s ++ " " ++ show a) <$>  Map.toList funTypeMap) $ pure ()
 
   fnDefs <- fmap catMaybes $
     forM (exploredFunctions discState) $ \(Some finfo) -> do
       let faddr = discoveredFunAddr finfo
       let dnm = discoveredFunSymbol finfo
-      trace ("Explore " ++ show dnm ++ " " ++ show faddr) $ pure ()
       case checkFunction finfo of
         FunctionOK -> do
           case x86BlockInvariants sysp mem funNameMap funTypeMap finfo of
@@ -2394,7 +2385,6 @@ recoverX86Elf' loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
 
   -- Check function names
   let symAddrMap = initDiscSymAddrMap initState
---  trace (unlines $ (\(s,a) -> show s ++ " " ++ show a) <$>  Map.toList (samAddrMap symAddrMap)) $ pure ()
   when (isUsedPrefix unnamedFunPrefix symAddrMap) $ do
     fatalError $
         printf "No symbol in the binary may start with the prefix %d."

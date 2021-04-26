@@ -32,7 +32,6 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 import           Data.Version
 import           Data.Word
-import           Debug.Trace
 import           Numeric (readHex, showHex)
 import           System.CPUTime
 import           System.Console.CmdArgs.Explicit as CmdArgs
