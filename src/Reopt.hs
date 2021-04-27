@@ -123,6 +123,7 @@ import qualified Text.PrettyPrint.HughesPJ as HPJ
 import           Text.Printf (printf)
 
 import           Data.Macaw.Analysis.FunctionArgs
+import           Data.Macaw.Analysis.RegisterUse (callArgValues)
 import           Data.Macaw.Architecture.Info (ArchitectureInfo(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery
@@ -1771,7 +1772,7 @@ x86DemandInfo :: SyscallPersonality
               -> ArchDemandInfo X86_64
 x86DemandInfo sysp =
   ArchDemandInfo { functionArgRegs = [Some RAX]
-                                     ++ (Some <$> x86ArgumentRegs)
+                                     ++ (Some . X86_GP <$> x86GPPArgumentRegs)
                                      ++ (Some <$> x86FloatArgumentRegs)
                  , functionRetRegs = ((Some <$> x86ResultRegs) ++ (Some <$> x86FloatResultRegs))
                  , calleeSavedRegs = x86CalleeSavedRegs
@@ -1990,28 +1991,6 @@ recoveredFunctionName m prefix segOff =
 
 $(pure [])
 
-
--- | This returns the value associate with a argument for demand computation purposes.
-argReg :: X86ArgInfo -> Some X86Reg
-argReg (ArgBV64 r)  = Some $ X86_GP r
-argReg (ArgZMM _ i) = Some $ X86_ZMMReg i
-
--- | Map x86 function type to known functon abi.
---
--- This is used for global function argument analysis which doesn't yet support vararg
--- functions such as printf.
-toKnownFunABI :: ReoptFunType -> Maybe (KnownFunABI X86Reg)
-toKnownFunABI (ReoptNonvarargFunType atp) =
-  case runExcept (resolveAnnFunType atp) of
-    Right (X86NonvarargFunType args rets) ->
-      Just $ KnownFnABI { kfArguments = argReg <$> args
-                        , kfReturn = viewSome retReg <$> rets
-                        }
-    _ -> Nothing
-toKnownFunABI (ReoptPrintfFunType _) = Nothing
-toKnownFunABI ReoptOpenFunType = Nothing
-toKnownFunABI ReoptUnsupportedFunType = Nothing
-
 -- | Construct function type from demands.
 inferFunctionTypeFromDemands :: Map (MemSegmentOff 64) (DemandSet X86Reg)
                              -> Map (MemSegmentOff 64) X86FunTypeInfo
@@ -2047,14 +2026,6 @@ inferFunctionTypeFromDemands dm =
                         (fmap (\s -> (mempty,s)))
                         dm
                         retDemands
-
-{-
-defaultX86Type :: X86FunTypeInfo
-defaultX86Type = X86NonvarargFunType args rets
-  where args = fmap ArgBV64 x86GPPArgumentRegs
-            ++ fmap (ArgZMM ZMM512D) [0..7]
-        rets = [ Some (RetBV64 F.RAX), Some (RetBV64 F.RDX) ]
--}
 
 $(pure [])
 
@@ -2205,24 +2176,42 @@ $(pure [])
 --------------------------------------------------------------------------------
 -- recoverX86Elf
 
+-- | Infer arguments for functions that we do not already know.
 x86ArgumentAnalysis :: SyscallPersonality
-                    -> FunTypeMaps 64 -- ^ Information from debug info
+                    -> Map (MemSegmentOff 64) BSC.ByteString
+                       -- ^ Map from addresses to function name.
+                    -> Map BSC.ByteString X86FunTypeInfo
+                       -- ^ Map from address to the name at that address along with type
                     -> DiscoveryState X86_64
-                    -> Map (MemSegmentOff 64) X86FunTypeInfo
-x86ArgumentAnalysis sysp debugTypeMap discState = do
+                    -> IncCompM (ReoptLogEvent X86_64) r (Map (MemSegmentOff 64) X86FunTypeInfo)
+x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
   -- Generate map from symbol names to known type.
   let mem = memory discState
-  let symFunABIMap :: Map BS.ByteString (KnownFunABI X86Reg)
-      symFunABIMap = Map.mapMaybe toKnownFunABI (nameTypeMap debugTypeMap)
-      -- Generate map from address names to known type.
-      --
-      -- This is used when we see a function jumps to a defined address.
-  let addrFunABIMap = Map.mapMaybe toKnownFunABI (addrTypeMap debugTypeMap)
       -- Compute only those functions whose types are not known.
-  let notKnown (Some f) = not (Map.member (discoveredFunAddr f) addrFunABIMap)
-  inferFunctionTypeFromDemands $
-    functionDemands (x86DemandInfo sysp) addrFunABIMap symFunABIMap mem $
-      filter notKnown $ exploredFunctions discState
+  let known (Some f) =
+        case Map.lookup (discoveredFunAddr f) funNameMap of
+          Just nm -> Map.member nm knownFunTypeMap
+          Nothing -> False
+
+  let resolveFn :: MemSegmentOff 64
+                -> RegState X86Reg (Value X86_64 ids)
+                -> Either String [Some (Value X86_64 ids)]
+      resolveFn callSite callRegs = do
+        callArgValues <$> x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs
+
+  let (dems, summaryFails) =
+        functionDemands (x86DemandInfo sysp) mem resolveFn $
+          filter (not . known) $ exploredFunctions discState
+
+  forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
+    case rsn of
+      PLTStubNotSupported -> error "internal x86ArgumentAnalysis provided PLTStub"
+      CallAnalysisError callSite msg -> do
+        let dnm = do
+              Some finfo <- Map.lookup faddr (discState^.funInfo)
+              discoveredFunSymbol finfo
+        incCompLog $ FnArgInferenceFailed dnm faddr callSite msg
+  pure $ inferFunctionTypeFromDemands dems
 
 -- | Analyze an elf binary to extract information.
 --
@@ -2240,15 +2229,6 @@ doRecoverX86 :: BSC.ByteString -- ^ Prefix to use if we need to generate new fun
 doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = do
   let mem = memory discState
 
-  -- Infer registers each function demands.
-  let fDems = x86ArgumentAnalysis sysp debugTypeMap discState
-
-  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
-      resolveX86Type rtp =
-        case runExcept (resolveReoptFunType rtp) of
-          Left _ -> Nothing
-          Right r -> Just r
-
   -- Maps address to name of function to use.
   let funNameMap ::  Map (MemSegmentOff 64) BS.ByteString
       funNameMap =
@@ -2259,12 +2239,27 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
                         , let addr = discoveredFunAddr finfo
                         , Map.notMember addr (samAddrMap symAddrMap)
                         ]
+
+  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
+      resolveX86Type rtp =
+        case runExcept (resolveReoptFunType rtp) of
+          Left _ -> Nothing
+          Right r -> Just r
+
+  -- Map names to known function types when we have explcit information.
+  let knownFunTypeMap ::  Map BS.ByteString X86FunTypeInfo
+      knownFunTypeMap
+        = Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
+        <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
+                        | (addr,rtp) <- Map.toList (addrTypeMap debugTypeMap)
+                        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
+                        ]
+
+  -- Infer registers each function demands.
+  fDems <- x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState
+
   let funTypeMap ::  Map BS.ByteString X86FunTypeInfo
-      funTypeMap = Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
-                <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
-                                | (addr,rtp) <- Map.toList (addrTypeMap debugTypeMap)
-                                , Right xtp <- [runExcept (resolveReoptFunType rtp)]
-                                ]
+      funTypeMap = knownFunTypeMap
                 <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
                                 | (addr,tp) <- Map.toList fDems
                                 ]

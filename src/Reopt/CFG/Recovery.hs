@@ -27,6 +27,7 @@ module Reopt.CFG.Recovery
   ( recoverFunction
   ,  Data.Macaw.Analysis.RegisterUse.BlockInvariantMap
   , x86BlockInvariants
+  , x86CallRegs
     -- * X86 type info
   , X86FunTypeInfo(..)
   , X86ArgInfo(..)
@@ -725,7 +726,7 @@ recoverAssign asgn = do
           whenAssignUsed aid $ do
             case d of
               ValueRegUseStackOffset _ -> do
-                error "Stack pointer escape."
+                throwErrorAt "Stack pointer escape."
               FnStartRegister _r -> do
                 error "Read callee saved register."
               RegEqualLoc l ->
@@ -881,61 +882,6 @@ $(pure [])
 
 ------------------------------------------------------------------------
 -- recoverBlock
-
-{-
--- | Return the value associated with a register after a function call.
-getPostCallValue :: RegState X86Reg (Value X86_64 ids)
-                     -- ^ Value of registers before syscall
-                 -> MapF X86Reg (FnValue X86_64)
-                    -- ^ Return values
-                 -> X86Reg tp
-                 -> Recover ids (FnValue X86_64 tp)
-getPostCallValue regs retRegMap r = do
-  case r of
-    _ | Just v <- MapF.lookup r retRegMap -> do
-          pure v
-    _ | Just Refl <- testEquality r sp_reg -> do
-          spv <- recoverRegister regs sp_reg
-          evalAssignRhs $ FnEvalApp $ BVAdd knownNat spv (FnConstantValue n64 8)
-
-   -- df is 0 after a function call.
-    _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
-    -- Callee-saved registers are preserved.
-    _ | Some r `Set.member` x86CalleeS*aavedRegs ->
-        recoverRegister regs r
-    _ -> do
-      addr <- gets $ rsStartAddr
-      addWarning ("WARNING: Nothing known about register "
-                   ++ show r ++ " at " ++ show addr ++ "\n"
-                 )
-      let nm = "post-call register " ++ show r
-      unsupportedFnValue nm (typeRepr r)
--}
-
-$(pure [])
-
-{-
--- | Get value for register after a system call.
---
--- This is subtly different to that for function calls.
-getPostSyscallValue :: RegState X86Reg (Value X86_64 ids)
-                       -- ^ Value of registers before syscall
-                    -> X86Reg tp
-                    -> Recover ids (FnValue X86_64 tp)
-getPostSyscallValue regs r =
-  case r of
-    _ | Just Refl <- testEquality r sp_reg -> do
-          recoverRegister regs sp_reg
-      | Some r `Set.member` x86CalleeSavedRegs ->
-        recoverRegister regs r
-
-    _ | Just Refl <- testEquality r DF -> return $ FnConstantBool False
-
-    _ -> do
-      addr <- gets $ rsStartAddr
-      addWarning ("WARNING: Nothing known about register " ++ show r ++ " at " ++ show addr)
-      unsupportedFnValue ("post-syscall register " ++ show r) (typeRepr r)
--}
 
 recoverX86TermStmt :: forall ids
                    .  X86TermStmt ids
@@ -1153,7 +1099,7 @@ resolveRetInfoValue regRel retVal (RetZMM ZMMDouble i) =
       fv <- getRetField retVal retFieldRel
       evalAssignRhs $ FnEvalApp (ExtractElement knownRepr fv 0)
     Nothing -> throwErrorAt "Could not resolve return value."
--- | Recover
+
 resolveRetValueFields :: MapF X86Reg (RetRegRelation retType)
                       -> FnValue X86_64 retType
                       -> V.Vector (Some X86RetInfo)
@@ -1171,10 +1117,10 @@ resolveRetValueFields regRel retVal callerRets types vals i =
 
 -- | Resolve the return value of a function
 resolveRetValue :: MapF X86Reg (RetRegRelation retType)
-                   -- ^ Maps regsters with information for retrieving value
+                   -- ^ Maps registers with information for retrieving value
                    -- from return value.
                 -> FnValue X86_64 retType
-                   -- ^ Return value
+                   -- ^ Return value of tail call.
                 -> V.Vector (Some X86RetInfo)
                    -- ^ Information aboout return values expected by return.
                 -> Recover ids (Maybe (Some (FnValue X86_64)))
@@ -1188,6 +1134,14 @@ resolveRetValue regRel retVal callerRets =
           pure $! (Just $! Some val)
     n ->
       Just <$> resolveRetValueFields regRel retVal callerRets P.Nil P.Nil n
+
+-- | Compute the return type (if any) of this function.
+retReturnType :: [Some X86RetInfo] -> Maybe (Some TypeRepr)
+retReturnType [] = Nothing
+retReturnType [r] = Just $! mapSome typeRepr r
+retReturnType l =
+ case fromSomeList l of
+   Some rets -> Just $! (Some $ TupleTypeRepr (fmapFC typeRepr rets))
 
 -- | Generate FnBlock fro mparsed block
 recoverBlock :: forall ids
@@ -1218,8 +1172,12 @@ recoverBlock b = do
        else do
         Some callReturnList <- pure $ fromSomeList callReturnLocs
         case inferRetRegRelations callReturnList of
-          Nothing -> do
-            throwErrorAt "Tail call returns no values, but function expects return values."
+          Nothing ->
+            -- If we don't have a return value, then we make it up.
+            case retReturnType thisReturnLocs of
+              Nothing -> pure $ FnRet Nothing
+              Just (Some tp) -> pure $ FnRet $ Just $ Some (FnUndefined tp)
+--            throwErrorAt "Tail call returns no values, but function expects return values."
           Just (Some callRetInfo) -> do
             v <- mkReturnVar (fnRetValuesType callRetInfo)
             addFnStmt $! FnCall callTarget args (Just (Some v))
@@ -1611,13 +1569,6 @@ inferPrintfArgs mem nm regs initState = do
                        , callReturnRegs = viewSome retReg <$> x86RetInfo
                        }
 
--- | Compute the return type (if any) of this function.
-retReturnType :: [Some X86RetInfo] -> Maybe (Some TypeRepr)
-retReturnType [] = Nothing
-retReturnType [r] = Just $! mapSome typeRepr r
-retReturnType l =
- case fromSomeList l of
-   Some rets -> Just $! (Some $ TupleTypeRepr (fmapFC typeRepr rets))
 
 -- | Create flag value.
 oCreat :: Integer
@@ -1635,22 +1586,36 @@ x86CallRegs :: forall ids
                -- ^ Address of the call statement
             -> RegState X86Reg (Value X86_64 ids)
                -- ^ Registers when call occurs.
-            -> Either (RegisterUseError X86_64) (CallRegs X86_64 ids)
-x86CallRegs mem funNameMap funTypeMap addr regs = do
-  callTarget <-
-    case valueAsSegmentOff mem (regs^.boundValue ip_reg) of
-      Just r -> pure r
-      Nothing -> Left (UnresolvedFunctionTypeError addr "Call targets must be direct calls.")
-  nm <- case Map.lookup callTarget funNameMap of
+            -> Either String (CallRegs X86_64 ids)
+x86CallRegs mem funNameMap funTypeMap _callSite regs = do
+  nm <- do
+    let ipVal = regs^.boundValue ip_reg
+    case ipVal of
+      BVValue _ val -> do
+        callTarget <-
+          case asSegmentOff mem (absoluteAddr (fromInteger val)) of
+            Just r -> pure r
+            Nothing -> Left "Call targets must be a valid code address."
+        case Map.lookup callTarget funNameMap of
           Just r -> Right r
           Nothing ->
-            Left $ UnresolvedFunctionTypeError addr $
-              "Could not identify function for call to " ++ show callTarget ++ "."
+            Left $ printf "Could not identify function for call to %s." (show callTarget)
+      RelocatableValue _ faddr -> do
+        callTarget <-
+          case asSegmentOff mem faddr of
+            Just r -> pure r
+            Nothing -> Left "Call targets must be a valid code address."
+        case Map.lookup callTarget funNameMap of
+          Just r -> Right r
+          Nothing ->
+            Left $ printf "Could not identify function for call to %s." (show callTarget)
+      SymbolValue _ (SymbolRelocation nm _ver) -> do
+        pure nm
+      _ -> Left "Call targets must be direct calls."
   tp <- case Map.lookup nm funTypeMap of
           Just p -> pure p
           Nothing ->
-            Left $ UnresolvedFunctionTypeError addr $
-              "Could not determine arguments for call to " ++ BSC.unpack nm ++ "."
+            Left $ printf "Could not determine arguments for call to %s." (BSC.unpack nm)
   case tp of
     X86NonvarargFunType args rets -> do
       let ftp = FunctionType { fnArgTypes = argRegTypeRepr <$> args
@@ -1669,11 +1634,11 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
               Right s
              else
               case getPrintfIntArg s of
-                Nothing -> Left $ UnresolvedFunctionTypeError addr "Too many printf initial args."
+                Nothing -> Left $ "Too many printf initial args."
                 Just (_, s') -> resolveInitArgs (n-1) s'
       s <- resolveInitArgs icnt0 initPrintfArgState
       case inferPrintfArgs mem nm regs s of
-        Left msg -> Left (UnresolvedFunctionTypeError addr msg)
+        Left msg -> Left msg
         Right r -> Right r
     X86OpenFunType -> do
       let stringPtrType = BVTypeRepr n64
@@ -1690,7 +1655,7 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
       isCreat <-
           case flagsValue of
             BVValue _ val -> Right (val .&. oCreat == oCreat)
-            _ -> Left (UnresolvedFunctionTypeError addr "Could not resolve flags as constant.")
+            _ -> Left "Could not resolve flags as constant."
       -- Get number of arguments for open
       let argCnt = if isCreat then 3 else 2
 
@@ -1703,8 +1668,7 @@ x86CallRegs mem funNameMap funTypeMap addr regs = do
                      , callReturnRegs = [Some (X86_GP F.RAX)]
                      }
     X86UnsupportedFunType ->
-      Left $ UnresolvedFunctionTypeError addr
-        "Function calling convention not supported by Reopt."
+      Left "Function calling convention not supported by Reopt."
 
 uninitRegs :: [Pair X86Reg (FnRegValue X86_64)]
 uninitRegs =

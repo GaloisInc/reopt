@@ -40,9 +40,10 @@ data ReoptLogEvent arch
    | DebugError !String
    | StartFunDiscovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(FunctionExploreReason (ArchAddrWidth arch))
    | StartBlockDiscovery !(ArchSegmentOff arch)
+     -- | Failed to infer arguments to function do to unresolvable call sitee
+   | FnArgInferenceFailed !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(ArchSegmentOff arch) String
    | FnInvariantsFailed !(Maybe BS.ByteString) !(ArchSegmentOff arch) String
      -- ^ Notify register use computation failed.
-
    | forall ids . StartFunRecovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(BlockInvariantMap arch ids)
      -- ^ Notify we are starting analysis of given function.
    | EndFunRecovery  !(Maybe BS.ByteString) !(ArchSegmentOff arch)
@@ -54,10 +55,15 @@ data ReoptLogEvent arch
    | RecoveryError !String
      -- ^ A general error message
 
+ppSegOff :: MemSegmentOff w -> String
+ppSegOff addr = "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
+
 -- | Human-readable name of discovered function.
 ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
-ppFnEntry (Just nm) addr = BS.unpack nm <> "(0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ")"
-ppFnEntry Nothing addr   = "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
+ppFnEntry (Just nm) addr = BS.unpack nm <> "(" <> ppSegOff addr <> ")"
+ppFnEntry Nothing addr   = ppSegOff addr
+
+
 
 instance Show (ReoptLogEvent arch) where
   show (InitializationWarning msg) = "Warning: " ++ msg
@@ -67,7 +73,9 @@ instance Show (ReoptLogEvent arch) where
   show (StartFunDiscovery dnm faddr rsn) =
     "Discovering function: " <> ppFnEntry dnm faddr ++  ppFunReason rsn
   show (StartBlockDiscovery addr) =
-    "  Analyzing block: " <> "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
+    "  Analyzing block: " <> ppSegOff addr
+  show (FnArgInferenceFailed dnm faddr callSite msg) =
+    printf "Call argument analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddr) msg
   show (FnInvariantsFailed dnm faddr msg) =
     "Invariant synthesis failed " <> ppFnEntry dnm faddr <> "\n  " <> msg
   show (StartFunRecovery dnm faddr _)  =
@@ -90,6 +98,7 @@ isErrorEvent =
     DebugError{}          -> True
     StartFunDiscovery{}   -> False
     StartBlockDiscovery{} -> False
+    FnArgInferenceFailed{} -> True
     FnInvariantsFailed{}   -> True
     StartFunRecovery{}    -> False
     EndFunRecovery{}      -> False
