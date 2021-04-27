@@ -16,8 +16,8 @@ clean :
 nweb23.exe : nweb23.c
 	cc -o $@ -g $<
 
-nweb23.ll nweb23.ann : nweb23.exe
-	$(reopt) --llvm -o nweb23.ll --annotations nweb23.ann nweb23.exe || true
+nweb23.ll nweb23.ann : nweb23.exe nweb.h
+	$(reopt) --llvm -o nweb23.ll --annotations nweb23.ann --header nweb.h nweb23.exe || true
 
 nweb23.reopt.exe : nweb23.exe
 	$(reopt) -o nweb23.reopt.exe $<
