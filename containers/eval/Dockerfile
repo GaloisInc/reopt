@@ -3,7 +3,7 @@ FROM ubuntu:focal
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive TZ=UTC \
        apt-get install -y --no-install-recommends \
-       llvm-8 clang-8 lld binutils make python \
+       llvm-8 clang-8 lld binutils cmake make openssh-client python git \
   && rm -rf /var/lib/apt/lists/*
 RUN ln -s ../../lib/llvm-8/bin/opt     /usr/local/bin
 RUN ln -s ../../lib/llvm-8/bin/llc     /usr/local/bin
