@@ -6,12 +6,14 @@
         "sourceType": "module"
     },
     "plugins": [
-        "@typescript-eslint"
+        "@typescript-eslint/eslint-plugin",
+        "eslint-plugin-tsdoc"
     ],
     "rules": {
         "@typescript-eslint/semi":  ["warn", "never"],
         "eqeqeq": "warn",
         "no-throw-literal": "warn",
+        "tsdoc/syntax": "warn",
         "semi": "off"
     }
 }

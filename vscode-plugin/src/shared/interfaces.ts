@@ -1,0 +1,76 @@
+import * as vscode from 'vscode'
+
+import * as W2E from './webview-to-extension'
+
+/**
+ * This state is persisted between multiple "displays" of the webview, during a
+ * single invocation of VSCode.  It is **not** persisted across VSCode
+ * invocations, for this, you want to use the 'workspaceState' in the extension.
+ */
+export interface ActivityViewPersistedState {
+    projectName?: string
+}
+
+export interface ActivityViewVSCodeAPI {
+    getState(): ActivityViewPersistedState | undefined
+    setState(s: ActivityViewPersistedState): void
+    postMessage(m: W2E.ActivityWebviewToExtension): void
+}
+
+export interface MainViewPersistedState {
+    results: string[]
+}
+
+export interface MainViewVSCodeAPI {
+    getState(): MainViewPersistedState | undefined
+    setState(s: MainViewPersistedState): void
+    postMessage(m: W2E.MainWebviewToExtension): void
+}
+
+export interface DisassemblyLineInformation {
+    address: string
+    /** Where the address appears in the line. */
+    addressRange: vscode.Range
+    /** Where the bytes appear in the line. */
+    bytesRange: vscode.Range
+    /** Address of the first byte of this line. */
+    firstByteAddress: BigInt
+    instruction: string
+    /** Address of the last byte of this line. */
+    lastByteAddress: BigInt
+    /** From the first address character to the end of the line. */
+    wholeLineRange: vscode.Range
+}
+
+export type SerializationOf<T>
+    = T extends BigInt ? string
+    : T extends DisassemblyLineInformation ? SerializedDisassemblyLineInformation
+    : T extends string ? string
+    : T extends vscode.Position ? SerializedPosition
+    : T extends vscode.Range ? SerializedRange
+    : T extends vscode.SymbolKind ? vscode.SymbolKind // currently serializable as is
+    : T extends vscode.SymbolInformation ? SerializedSymbolInformation
+    : never
+
+interface SerializedPosition {
+    readonly character: number
+    readonly line: number
+}
+
+interface SerializedRange {
+    readonly end: SerializationOf<vscode.Position>,
+    readonly start: SerializationOf<vscode.Position>,
+}
+
+type SerializedDisassemblyLineInformation = {
+    [K in keyof DisassemblyLineInformation]: SerializationOf<DisassemblyLineInformation[K]>
+}
+
+// For SymbolInformation, we capture some information differently
+interface SerializedSymbolInformation {
+    readonly containerName: string
+    readonly fsPath: string
+    readonly kind: SerializationOf<vscode.SymbolKind>
+    readonly name: string
+    readonly range: SerializationOf<vscode.Range>
+}
