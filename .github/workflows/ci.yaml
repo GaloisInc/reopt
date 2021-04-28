@@ -5,43 +5,6 @@ name: CI
 
 on: [push]
 jobs:
-  cvc4:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Get CVC4
-      uses: actions/checkout@v2
-      with:
-        repository: GaloisInc/vadd-CVC4
-        ref: eqrange-quant
-    - name: Export CVC_HASH
-      run: echo "CVC4_HASH=`git rev-parse HEAD`" >> $GITHUB_ENV
-    - name: Cache CVC4
-      id: cache-cvc4
-      uses: actions/cache@v1
-      with:
-        path: cache
-        key: cvc-${{ env.CVC4_HASH }}
-    - name: Get Antlr
-      run: ./contrib/get-antlr-3.4
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: Configure
-      run: ./configure.sh production --static --proofs --prefix=$PWD/dist
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: Build
-      working-directory: build
-      run: make -j 8
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: Copy to cache
-      run: |
-        mkdir -p cache
-        cp build/bin/cvc4 cache
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: cvc4 artifact
-      uses: actions/upload-artifact@v1
-      with:
-        name: cvc4
-        path: cache/cvc4
-
   # This task builds the dev image used to build reopt.
   dev-img:
     runs-on: ubuntu-20.04
@@ -144,74 +107,40 @@ jobs:
       with:
         name: vscode-extension
         path: vscode-plugin/reopt.vsix
-
-  # lean:
-  #   runs-on: ubuntu-20.04
-  #   outputs:
-  #     lean4-sha: ${{ steps.version.outputs.lean4-sha }}
-  #   steps:
-  #   - name: Get reopt-vcg
-  #     uses: actions/checkout@v2
-  #     with:
-  #       repository: GaloisInc/reopt-vcg
-  #       ref: master
-  #   - name: Export hash
-  #     id: version
-  #     run: echo "::set-output name=lean4-sha::`git submodule status deps/lean4 | cut -b2-41`"
-  #   - name: Cache Lean
-  #     id: cache-lean
-  #     uses: actions/cache@v1
-  #     with:
-  #       path: cache
-  #       key: lean-${{ steps.version.outputs.lean4-sha }}
-  #   - name: Install clang 8
-  #     if: steps.cache-lean.outputs.cache-hit != 'true'
-  #     run: sudo apt-get install -y --no-install-recommends clang-8
-  #   - name: Clone lean
-  #     if: steps.cache-lean.outputs.cache-hit != 'true'
-  #     run: |
-  #       sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
-  #       git submodule update --init --depth 1 deps/lean4
-  #   - name: Configure
-  #     if: steps.cache-lean.outputs.cache-hit != 'true'
-  #     working-directory: deps/lean4
-  #     run: |
-  #       mkdir build
-  #       cd build
-  #       cmake .. -DCMAKE_BUILD_TYPE=release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/cache/lean -DLLVM=ON -DLLVM_DIR=`llvm-config-8 --cmakedir`
-  #   - name: Build
-  #     if: steps.cache-lean.outputs.cache-hit != 'true'
-  #     working-directory: deps/lean4/build
-  #     run: make -j 8 install
-  # reopt-vcg:
-  #   needs: [lean, cvc4]
-  #   runs-on: ubuntu-20.04
-  #   steps:
-  #   - name: Get reopt
-  #     uses: actions/checkout@v2
-  #   - uses: actions/cache@v2
-  #     id: lean4-cache
-  #     name: lean4 cache
-  #     with:
-  #       path: opt/lean
-  #       key: lean-${{ needs.lean.outputs.lean4-sha }}
-  #   - name: Dependencies
-  #     run: sudo apt-get install -y --no-install-recommends clang-8
-  #   - name: Clone reopt-vcg
-  #     run: |
-  #       sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
-  #       git submodule update --init --depth 1 deps/reopt-vcg
-  #       cd deps/reopt-vcg
-  #       sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
-  #       git submodule update --init --depth 1
-  #   - name: Build
-  #     working-directory: deps/reopt-vcg
-  #     run: .github/ci.sh build
-  #   - shell: Test
-  #     working-directory: deps/reopt-vcg
-  #     run: .github/ci.sh run-tests
+  reopt-vcg:
+    runs-on: ubuntu-20.04
+    steps:
+    - name: Get reopt
+      uses: actions/checkout@v2
+    - name: Dependencies
+      run: sudo apt-get install -y --no-install-recommends llvm-8 llvm-8-dev clang-8
+    - name: Clone reopt-vcg
+      run: |
+        sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
+        git submodule update --init --depth 1 deps/reopt-vcg
+        cd deps/reopt-vcg
+        sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
+        git submodule update --init --depth 1
+    - name: Build
+      working-directory: deps/reopt-vcg
+      run: ./build.sh
+    - name: Test
+      working-directory: deps/reopt-vcg
+      run: .github/ci.sh run-tests
+    - name: Create archive
+      run: |
+        mkdir -p dist/reopt-vcg/bin
+        cp deps/reopt-vcg/build/bin/reopt-vcg dist/reopt-vcg/bin/reopt-vcg
+        cp deps/reopt-vcg/deps/cvc4-2020-09-16-x86_64-linux-opt dist/reopt-vcg/bin/cvc4
+        cd dist
+        tar cvfz reopt-vcg.tgz reopt-vcg
+    - name: Make reopt-vcg
+      uses: actions/upload-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist/reopt-vcg.tgz
   upload:
-    needs: [build, vscode-extension]
+    needs: [build, vscode-extension, reopt-vcg]
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout
@@ -223,10 +152,16 @@ jobs:
       with:
         name: reopt
         path: dist
+    - name: Download reopt-vcg artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist
     - name: Copy files
       run: |
         cd containers/eval
         tar xvfz ../../dist/reopt.tgz
+        tar xvfz ../../dist/reopt-vcg.tgz
     - name: Download extension artifact
       uses: actions/download-artifact@v2
       with:
@@ -236,7 +171,7 @@ jobs:
       run: |
         docker build -t galoisbinaryanalysis/reopt containers/eval
     - name: Push to Docker hub
-      # if: github.event_name == 'push' && github.ref == 'master'
+      if: github.event_name == 'push' && github.ref == 'master'
       run: |
         echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt
