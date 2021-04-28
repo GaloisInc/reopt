@@ -1,7 +1,58 @@
-{ "$schema": "http://json-schema.org/schema#",
+{
+  "$schema": "http://json-schema.org/schema#",
   "$id": "reopt-project",
   "type": "object",
   "properties": {
-    "binaries": { "type": "array", "items": { "type": "string"} }
+    "binaryFile": {
+      "type": "string"
+    },
+    "excludes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "headers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "includes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outputNameCFG": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outputNameDisassemble": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outputNameFunctions": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outputNameLLVM": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
   }
 }

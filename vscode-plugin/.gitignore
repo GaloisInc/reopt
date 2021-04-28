@@ -1,3 +1,7 @@
 /out
 /node_modules
+/pirate-architecture-*.vsix
 /reopt-0.0.1.vsix
+/webpack.config.js
+/webpack.config.d.ts
+*.tsbuildinfo

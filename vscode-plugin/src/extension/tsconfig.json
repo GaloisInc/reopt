@@ -1,0 +1,21 @@
+{
+    "extends": "../../tsconfig-common.json",
+    "compilerOptions": {
+        "composite": true,
+        "outDir": "../../out",
+        "paths": {
+            "@shared/*": [
+                "../shared/*",
+            ],
+        },
+        "rootDir": "..",
+    },
+    "include": [
+        ".",
+    ],
+    "references": [
+        {
+            "path": "../shared",
+        },
+    ],
+}

@@ -1,106 +1,167 @@
 {
-				"name": "reopt",
-				"displayName": "Reopt VSCode Extension",
-				"description": "",
-				"version": "0.0.1",
-				"engines": {
-								"vscode": "^1.55.0"
+	"name": "reopt",
+	"displayName": "Reopt VSCode Extension",
+	"description": "",
+	"version": "0.0.1",
+	"engines": {
+		"vscode": "^1.55.0"
+	},
+	"publisher": "Galois",
+	"categories": [
+		"Other"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/GaloisInc/reopt.git",
+		"directory": "vscode-plugin"
+	},
+	"activationEvents": [
+		"*"
+	],
+	"main": "./out/extension.bundle.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "reopt.createProject",
+				"title": "Create Reopt Project"
+			},
+			{
+				"command": "reopt.jumpToFunction",
+				"title": "Reopt: Jump to function",
+				"icon": "$(go-to-file)"
+			},
+			{
+				"command": "reopt.showLLVM",
+				"title": "Reopt: Show LLVM",
+				"icon": "$(go-to-file)"
+			}
+		],
+		"configuration": {
+			"type": "object",
+			"title": "Reopt Configuration",
+			"properties": {
+				"mclean.btnEnabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Display Machine code view button"
 				},
-				"publisher": "Galois",
-				"categories": [
-								"Other"
-				],
-				"repository": {
-								"type": "git",
-								"url": "https://github.com/GaloisInc/reopt.git",
-								"directory": "vscode-plugin"
-				},
-				"activationEvents": [
-								"*"
-				],
-				"main": "./out/extension/extension/main.js",
-				"contributes": {
-								"commands": [
-												{
-																"command": "reopt.createProject",
-																"title": "Create Reopt Project"
-												}
-								],
-								"languages": [
-												{
-																"id": "elf",
-																"aliases": [
-																				"Elf"
-																],
-																"extensions": [
-																				".exe",
-																				".so"
-																],
-																"firstLine": ".ELF.*"
-												}
-								],
-								"menus": {
-												"explorer/context": [
-																{
-																				"command": "reopt.createProject",
-																				"when": "resourceScheme == file && resourceLangId == elf"
-																}
-												]
-								},
-								"customEditors": [
-												{
-																"viewType": "reopt.project",
-																"displayName": "View Reopt Project Contents",
-																"selector": [
-																				{
-																								"filenamePattern": "*.rpj"
-																				}
-																],
-																"priority": "default"
-												}
-								],
-								"jsonValidation": [
-												{
-																"fileMatch": "*.rpj",
-																"url": "./schemas/rpj-schema.json"
-												}
-								],
-								"configuration": {
-												"type": "object",
-												"title": "Reopt Configuration",
-												"properties": {
-																"mclean.btnEnabled": {
-																				"type": "boolean",
-																				"default": true,
-																				"description": "Display Machine code view button"
-																}
-												}
-								}
-				},
-				"scripts": {
-								"vscode:prepublish": "npm run compile",
-								"compile": "tsc -p ./tsconfig.json && tsc -p ./tsconfig-webview.json",
-								"lint": "eslint src --ext ts",
-								"watch": "./node_modules/.bin/nodemon --watch 'src/**/*.ts' --ignore 'src/**/*.spec.ts' --exec 'npm run compile'",
-								"pretest": "npm run compile && npm run lint",
-								"test": "node ./out/extension/test/runTest.js"
-				},
-				"devDependencies": {
-								"@types/glob": "^7.1.3",
-								"@types/mocha": "^8.2.2",
-								"@types/node": "^14.14.37",
-								"@types/vscode": "^1.55.0",
-								"@typescript-eslint/eslint-plugin": "^4.20.0",
-								"@typescript-eslint/parser": "^4.20.0",
-								"eslint": "^7.23.0",
-								"glob": "^7.1.6",
-								"mocha": "^8.3.2",
-								"typescript": "^4.2.3",
-								"vscode-test": "^1.5.2"
-				},
-				"dependencies": {
-								"nodemon": "^2.0.7",
-								"tsc-watch": "^4.2.9",
-								"vsce": "^1.87.1"
+				"reopt.reoptExecutable": {
+					"type": "string",
+					"default": "reopt",
+					"description": "Path to the reopt executable"
 				}
+			}
+		},
+		"languages": [
+			{
+				"id": "elf",
+				"aliases": [
+					"Elf"
+				],
+				"extensions": [
+					".exe",
+					".so"
+				],
+				"firstLine": ".ELF.*"
+			},
+			{
+				"id": "json",
+				"extensions": [
+					".rpj"
+				]
+			}
+		],
+		"jsonValidation": [
+			{
+				"fileMatch": "*.rpj",
+				"url": "./schemas/rpj-schema.json"
+			}
+		],
+		"menus": {
+			"editor/title": [
+				{
+					"command": "reopt.showLLVM",
+					"group": "navigation",
+					"when": "resourceScheme == file"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "reopt.createProject",
+					"when": "resourceScheme == file && resourceLangId == elf"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "reopt.jumpToFunction",
+					"when": "view == reopt-activity-view",
+					"group": "inline"
+				}
+			]
+		},
+		"views": {
+			"reopt-activity-view-container": [
+				{
+					"id": "reopt-activity-view",
+					"name": "Project",
+					"icon": "$(list-tree)",
+					"contextualTitle": "Reopt Package Explorer",
+					"type": "webview"
+				}
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "reopt-activity-view-container",
+					"title": "Reopt",
+					"icon": "$(list-tree)"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"compile": "webpack",
+		"lint": "eslint --ext ts,tsx src",
+		"pretest": "npm run compile && npm run lint",
+		"test": "node ./out/extension/test/runTest.js",
+		"vscode:prepublish": "webpack --mode production",
+		"watch": "./node_modules/.bin/nodemon --watch 'src/**/*.ts' --ignore 'src/**/*.spec.ts' --exec 'npm run compile'"
+	},
+	"devDependencies": {
+		"@types/es6-promisify": "^6.0.0",
+		"@types/glob": "^7.1.3",
+		"@types/mocha": "^8.2.2",
+		"@types/node": "^14.14.37",
+		"@types/react": "^17.0.3",
+		"@types/react-dom": "^17.0.3",
+		"@types/vscode": "^1.55.0",
+		"@typescript-eslint/eslint-plugin": "^4.20.0",
+		"@typescript-eslint/parser": "^4.20.0",
+		"copy-webpack-plugin": "^8.1.1",
+		"eslint": "^7.23.0",
+		"eslint-import-resolver-typescript": "^2.4.0",
+		"glob": "^7.1.6",
+		"mocha": "^8.3.2",
+		"ts-loader": "^9.0.0",
+		"ts-node": "^9.1.1",
+		"tsconfig-paths-webpack-plugin": "^3.5.1",
+		"typescript": "^4.2.3",
+		"vsce": "^1.88.0",
+		"vscode-test": "^1.5.2",
+		"webpack-cli": "^4.6.0"
+	},
+	"dependencies": {
+		"es6-promisify": "^6.1.1",
+		"fp-ts": "^2.10.4",
+		"io-ts": "^2.2.16",
+		"io-ts-types": "^0.5.16",
+		"monocle-ts": "^2.3.9",
+		"newtype-ts": "^0.3.4",
+		"nodemon": "^2.0.7",
+		"react": "^17.0.2",
+		"react-dom": "^17.0.2",
+		"tsc-watch": "^4.2.9",
+		"webpack": "^5.34.0"
+	}
 }
