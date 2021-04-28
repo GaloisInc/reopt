@@ -1,8 +1,8 @@
 {-|
-Function information pulled from user-provided header file.
+Type information pulled from user-provided header file.
 -}
 {-# LANGUAGE BlockArguments #-}
-module Reopt.Header
+module Reopt.TypeInference.Header
   ( parseHeader
   ) where
 
@@ -17,8 +17,8 @@ import           System.Exit
 import           System.IO
 import qualified Language.C as C
 
-import Reopt.AnnotatedTypes
-import Reopt.ExternalTools (runClangPreprocessor)
+import           Reopt.TypeInference.HeaderTypes
+import           Reopt.ExternalTools (runClangPreprocessor)
 
 identToByteString :: C.Ident -> BSC.ByteString
 identToByteString = BSC.pack . C.identToString

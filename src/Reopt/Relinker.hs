@@ -807,7 +807,10 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
     let layoutCtx = New.LayoutCtx
           { New.lctxClass = cl
           , New.lctxPhdrCount = Elf.phdrCount binHeaderInfo
-          , New.lctxShdrCount = Elf.shdrCount binHeaderInfo + 1
+          , New.lctxShdrCount = Elf.shdrCount binHeaderInfo
+                              + case Map.lookupMax insertedSectionIndices of
+                                  Nothing -> 0
+                                  Just (_,v) -> v
           , New.lctxShstrtabSize = fromIntegral (BS.length newShstrtabContents)
           , New.lctxStrtabSize   =
               maybe 0 (BS.length . newStrtabContents) newSymtab
@@ -825,18 +828,6 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
     when (idx >= Elf.shdrCount binHeaderInfo) $ do
       throwError "Could not find .shstrtab index."
     pure $! binShdrIndexMap idx
-
-  -- Get offset of program header table
-  newPhdrTableOffset <-
-    case New.nblPhdrTableOffset newBinLayout of
-      Nothing -> throwError "Missing program header table."
-      Just o -> pure o
-
-  -- Get offset of section header table
-  newShdrTableOffset <-
-    case New.nblShdrTableOffset newBinLayout of
-      Nothing -> throwError "Missing section header table."
-      Just o -> pure o
 
   -----------------------------------------------------------------------------
   -- 4. Generate contents
@@ -987,11 +978,9 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
         { New.bctxHeaderInfo = binHeaderInfo
         , New.bctxExtendedSegmentMap =
             Map.fromList $ [ (idx, sz) | (idx, sz, _) <- phdrAppends ]
-        , New.bctxPhdrTableOffset = newPhdrTableOffset
         , New.bctxBinShdrs = binShdrs
         , New.bctxSectionNameMap = shdrNameFn
         , New.bctxInsertedSectionMap = insSecMap
-        , New.bctxShdrTableOffset = newShdrTableOffset
         , New.bctxShdrStrndx      = newShstrtabIndex
         , New.bctxShstrtab        = newShstrtabContents
         , New.bctxCodeMap =

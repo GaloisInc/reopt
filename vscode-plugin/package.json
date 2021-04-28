@@ -4,17 +4,17 @@
 				"description": "",
 				"version": "0.0.1",
 				"engines": {
-								"vscode": "^1.54.0"
+								"vscode": "^1.55.0"
 				},
 				"publisher": "Galois",
 				"categories": [
 								"Other"
 				],
-        "repository": {
-          "type": "git",
-          "url": "https://github.com/GaloisInc/reopt.git",
-          "directory": "vscode-plugin"
-        },
+				"repository": {
+								"type": "git",
+								"url": "https://github.com/GaloisInc/reopt.git",
+								"directory": "vscode-plugin"
+				},
 				"activationEvents": [
 								"*"
 				],
@@ -33,7 +33,8 @@
 																				"Elf"
 																],
 																"extensions": [
-																				".exe", ".so"
+																				".exe",
+																				".so"
 																],
 																"firstLine": ".ELF.*"
 												}
@@ -58,12 +59,12 @@
 																"priority": "default"
 												}
 								],
-                "jsonValidation": [
-                  {
-                    "fileMatch": "*.rpj",
-                    "url": "./schemas/rpj-schema.json"
-                  }
-                ],
+								"jsonValidation": [
+												{
+																"fileMatch": "*.rpj",
+																"url": "./schemas/rpj-schema.json"
+												}
+								],
 								"configuration": {
 												"type": "object",
 												"title": "Reopt Configuration",
@@ -99,6 +100,7 @@
 				},
 				"dependencies": {
 								"nodemon": "^2.0.7",
-								"tsc-watch": "^4.2.9"
+								"tsc-watch": "^4.2.9",
+								"vsce": "^1.87.1"
 				}
 }

@@ -13,6 +13,7 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encoding as AE
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
@@ -31,7 +32,7 @@ import           Numeric
 import           Prettyprinter (pretty)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
-import           System.Exit (exitFailure)
+import           System.Exit
 import           System.IO
 import           System.IO.Error
 import           Text.Printf
@@ -42,6 +43,7 @@ import Data.Macaw.Discovery
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.EncodeInvariants
 import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
 import qualified Reopt.VCG.Annotations as Ann
@@ -141,18 +143,20 @@ data Args
             -- ^ Path to write reopt-vcg annotations to.
             --
             -- If `Nothing` then annotations are not generated.
-          , relinkerInfoExportPath :: !(Maybe FilePath)
-            -- ^ Path to write relationships needed for relinker
           , llvmGenOptions :: !LLVMGenOptions
             -- ^ Generation options for LLVM
+          , invariantsExportPath :: !(Maybe FilePath)
+            -- ^ Export invariants to file.
           , llvmExportPath :: !(Maybe FilePath)
             -- ^ Path to export LLVM bitcode to.
+          , cfgExportPath :: !(Maybe FilePath)
+            -- ^ Path to export CFG
+          , fnsExportPath :: !(Maybe FilePath)
+            -- ^ Path to export object file.
           , objectExportPath :: !(Maybe FilePath)
             -- ^ Path to export object file.
-          , printStats :: !Bool
-            -- ^ Should we print discovery/recovery statistics to stdout?
-          , exportStatsPath :: !(Maybe FilePath)
-            -- ^ Should we export discovery/recovery statistics?
+          , relinkerInfoExportPath :: !(Maybe FilePath)
+            -- ^ Path to write relationships needed for relinker
           }
 
 -- | Action to perform when running
@@ -197,14 +201,15 @@ defaultArgs = Args { _reoptAction = Reopt
                                         , logAtAnalyzeFunction   = True
                                         , logAtAnalyzeBlock      = False
                                         }
+                   , invariantsExportPath = Nothing
                    , unnamedFunPrefix = "reopt"
                    , annotationsExportPath  = Nothing
-                   , relinkerInfoExportPath = Nothing
                    , llvmGenOptions = defaultLLVMGenOptions
                    , llvmExportPath         = Nothing
-                   , objectExportPath       = Nothing
-                   , printStats             = False
-                   , exportStatsPath        = Nothing
+                   , cfgExportPath = Nothing
+                   , fnsExportPath = Nothing
+                   , objectExportPath = Nothing
+                   , relinkerInfoExportPath = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -256,16 +261,6 @@ llvmFlag :: Flag Args
 llvmFlag = flagNone [ "llvm" ] upd help
   where upd  = reoptAction .~ ShowLLVM
         help = "Show generated LLVM."
-
-statsPrintFlag :: Flag Args
-statsPrintFlag = flagNone [ "print-stats" ] upd help
-  where upd old = old { printStats = True}
-        help = "Print discovery/recovery statistics."
-
-statsExportFlag :: Flag Args
-statsExportFlag = flagReq [ "export-stats" ] upd "PATH" help
-  where upd path old = Right $ old { exportStatsPath = Just path }
-        help = "Path at which to write discovery/recovery statistics."
 
 serverModeFlag :: Flag Args
 serverModeFlag = flagNone [ "server" ] upd help
@@ -403,10 +398,25 @@ exportFlag flagName helpName setter =
   where upd s old = Right $ setter old (Just s)
         help = printf "Where to export %s." helpName
 
+-- | Path to export invariants to
+invariantsExportFlag :: Flag Args
+invariantsExportFlag = exportFlag "invariants" "Reopt invariants" upd
+  where upd s v = s { invariantsExportPath = v }
+
 -- | Path to write LLVM annotations to.
 annotationsExportFlag :: Flag Args
 annotationsExportFlag = exportFlag "annotations" "reopt-vcg annotations" upd
   where upd s v = s { annotationsExportPath = v }
+
+-- | Path to export CFG
+cfgExportFlag :: Flag Args
+cfgExportFlag = exportFlag "export-cfg" "CFG file" upd
+  where upd s v = s { cfgExportPath = v }
+
+-- | Path to export functions to.
+fnsExportFlag :: Flag Args
+fnsExportFlag = exportFlag "export-fns" "object file" upd
+  where upd s v = s { fnsExportPath = v }
 
 -- | Path to export object file to.
 objectExportFlag :: Flag Args
@@ -425,7 +435,6 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   flagHelpSimple (reoptAction .~ ShowHelp)
                 , flagVersion (reoptAction .~ ShowVersion)
                 , debugFlag
-                , statsPrintFlag
                   -- Redirect output to file.
                 , outputFlag
                   -- Explicit Modes
@@ -444,6 +453,8 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , headerFlag
                   -- Loading options
                 , loadBaseAddressFlag
+                  -- Recovery options
+                , invariantsExportFlag
                   -- LLVM options
                 , llvmVersionFlag
                 , annotationsExportFlag
@@ -456,9 +467,10 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- Optimization
                 , optLevelFlag
                   -- Export
+                , cfgExportFlag
+                , fnsExportFlag
                 , objectExportFlag
                 , relinkerInfoExportFlag
-                , statsExportFlag
                 ]
 
 -- | Flag to set the path to the binary to analyze.
@@ -511,24 +523,51 @@ showCFG args = do
   pure $ show $ ppDiscoveryStateBlocks discState
 
 ------------------------------------------------------------------------
--- LLVM Generation
+-- Reopt action
 
 builderWriteFile :: FilePath -> Builder.Builder -> IO ()
 builderWriteFile path bld =
   withFile path WriteMode $ \h -> do
     Builder.hPutBuilder h bld
 
+-- | Return true if Reopt should compile LVM
+shouldCompileLLVM :: Args -> Bool
+shouldCompileLLVM args
+  =  isJust (objectExportPath args)
+  || isJust (outputPath args)
+
+
+-- | Retun true if we should generate LLVM
+shouldGenerateLLVM :: Args -> Bool
+shouldGenerateLLVM args
+  =  isJust (llvmExportPath args)
+  || shouldCompileLLVM  args
+
+
+collectInvariants :: IORef [Aeson.Encoding]
+                  -> ReoptLogEvent X86_64
+                  -> IO ()
+collectInvariants ref evt = do
+  case evt of
+    ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
+      let enc = encodeInvariantMsg addr invMap
+      seq enc $ modifyIORef ref $ (enc:)
+    ReoptStepFailed (InvariantInference addr _mnm) msg -> do
+      let enc = encodeInvariantFailedMsg addr msg
+      seq enc $ modifyIORef ref $ (enc:)
+    _ -> do
+      pure ()
+
 -- | This command is called when reopt is called with no specific
 -- action.
 performReopt :: Args -> IO ()
 performReopt args = do
-  let nothingToDo = isNothing (relinkerInfoExportPath args)
-                 && isNothing (llvmExportPath args)
-                 && isNothing (objectExportPath args)
-                 && isNothing (outputPath args)
-                 && not (printStats args)
-                 && isNothing (exportStatsPath args)
-  when nothingToDo $ do
+  let somethingToDo = isJust (cfgExportPath args)
+                   || isJust (fnsExportPath args)
+                   || isJust (invariantsExportPath args)
+                   || isJust (relinkerInfoExportPath args)
+                   || shouldGenerateLLVM args
+  when (not somethingToDo) $ do
     hPutStrLn stderr $ "Nothing to do\n"
       ++ "  Specify an output via --output or other info to export."
     exitFailure
@@ -536,32 +575,53 @@ performReopt args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  statsRef <- newIORef $ (initReoptStats $ programPath args)
-  (origElf, os, _, recMod, relinkerInfo) <-
-    recoverX86Elf (recoverLogEvent statsRef)
-                  (programPath args)
-                  (loadOptions args)
-                  (args^.discOpts)
-                  (argsReoptOptions args)
-                  hdrAnn
-                  funPrefix
+  --statsRef <- newIORef $ (initReoptStats $ programPath args)
+
+
+
+  let elfPath = programPath args
+  origElf <- parseElfHeaderInfo64 elfPath =<< checkedReadFile elfPath
+
+  invariantsRef <- newIORef []
+
+  let logger =
+        case invariantsExportPath args of
+          Just _ -> joinLogEvents printLogEvent (collectInvariants invariantsRef)
+          Nothing -> printLogEvent
+
+  (os, _, recMod, relinkerInfo) <-
+    runReoptInIO logger $ do
+      recoverX86Elf' (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn funPrefix origElf
+
+  -- Write invariants
+  case invariantsExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      invariants <- reverse <$> readIORef invariantsRef
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing annotations:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      let buffer = Builder.toLazyByteString (AE.fromEncoding (AE.list id invariants))
+      BSL.writeFile path buffer `catch` onErr
+
   case relinkerInfoExportPath args of
     Nothing -> pure ()
     Just path -> do
       let onErr :: IOException -> IO ()
           onErr e = do
-            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr "Error writing annotations:"
             hPutStrLn stderr $ "  " <> show e
             exitFailure
       Aeson.encodeFile path relinkerInfo  `catch` onErr
 
-  stats <- readIORef statsRef
-  reportStats (printStats args) (exportStatsPath args) stats
+--  stats <- readIORef statsRef
+--  reportStats (printStats args) (exportStatsPath args) stats
+  when (not (shouldGenerateLLVM args)) $ do
+    exitFailure
   -- Generate LLVM
-  let (objLLVM,_) = renderLLVMBitcode (llvmGenOptions args)
-                                      (llvmVersion args)
-                                      os
-                                      recMod
+  let (objLLVM,_) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
   -- Write LLVM if requested.
   case llvmExportPath args of
     Nothing -> pure ()
@@ -572,29 +632,34 @@ performReopt args = do
             hPutStrLn stderr $ "  " <> show e
             exitFailure
       builderWriteFile path objLLVM `catch` onErr
-  when (isJust (objectExportPath args) || isJust (outputPath args)) $ do
-    -- Compile LLVM
-    objContents <-
-      compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
-                  (osLinkName os) objLLVM
-    case objectExportPath args of
-      Nothing -> pure ()
-      Just path -> do
-        let onErr :: IOException -> IO ()
-            onErr e = do
-              hPutStrLn stderr "Error writing object file:"
-              hPutStrLn stderr $ "  " <> show e
-              exitFailure
-        BS.writeFile path objContents `catch` onErr
-    -- Merge and write out
+
+  unless (shouldCompileLLVM args) $ do
+    exitSuccess
+  -- Compile LLVM
+  objContents <-
+    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                (osLinkName os) objLLVM
+  case objectExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      BS.writeFile path objContents `catch` onErr
+  -- Merge and write out
+  outPath <-
     case outputPath args of
       Nothing -> do
         hPutStrLn stderr "Skipping final relinking: Use --output <filename> if final binary expected."
-      Just outPath -> do
-        hPutStrLn stderr "Performing final relinking."
-        mergeAndWrite outPath origElf "new object" objContents relinkerInfo
+        exitSuccess
+      Just outPath ->
+        pure outPath
+  hPutStrLn stderr "Performing final relinking."
+  mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats 64)
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats)
 getFunctions args =
   recoverFunctions (programPath args)
                    (clangPath args)
@@ -616,12 +681,9 @@ main' = do
         hPutStrLn h =<< showCFG args
     -- Write function discovered
     ShowFunctions -> do
-      (_,recMod, stats) <- getFunctions args
+      (_,recMod, _stats) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-      reportStats (printStats args) (exportStatsPath args) stats
-      when ((statsErrorCount stats) > 0)
-        exitFailure
     ShowLLVM -> do
       when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
@@ -651,7 +713,6 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-      reportStats (printStats args) (exportStatsPath args) stats
       when ((statsErrorCount stats) > 0) $ do
         exitFailure
     ServerMode -> do

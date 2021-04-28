@@ -8,15 +8,13 @@ Provides function for computing new layout
 module Reopt.Relinker.NewLayout
   ( LayoutCtx(..)
   , NewBinaryLayout
-  , nblPhdrTableOffset
-  , nblShdrTableOffset
   , nblFindNewOffset
   , layoutNewBinary
   ) where
 
 import qualified Data.Map as Map
 import qualified Data.ElfEdit as Elf
-import           Data.Word
+import           Data.Word ( Word16 )
 
 import           GHC.TypeNats (Nat)
 import qualified Reopt.Relinker.Binary as Orig
@@ -40,11 +38,9 @@ data LayoutCtx w = LayoutCtx
 -- | Layout information in new binary
 data NewBinaryLayout (w :: Nat) =
   NewBinaryLayout
-  { nblPhdrTableOffset :: !(Maybe (Elf.FileOffset (Elf.ElfWordType w)))
-  , nblShdrTableOffset :: !(Maybe (Elf.FileOffset (Elf.ElfWordType w)))
-  , nblFileStartMap :: !(Map.Map Int Int)
-    -- ^ Sparse map from file offsets for start of region in original file to their corresponding new
-    -- offset in new binary
+  { nblFileStartMap :: !(Map.Map Int Int)
+    -- ^ Sparse map from file offsets for start of region in original file
+    -- to their corresponding newoffset in new binary
   }
 
 -- | Map file offset in binary to new offset.
@@ -89,18 +85,10 @@ layoutNewBinary' ctx off l0 (Orig.ElfRegion binOff binSize cns src:rest) = do
               pure (l, fromIntegral (Elf.ehdrSize cl))
             Orig.PhdrTable -> do
               let sz = fromIntegral (lctxPhdrCount ctx) * fromIntegral (Elf.phdrEntrySize cl)
-              case nblPhdrTableOffset l of
-                Nothing -> pure ()
-                Just _ -> Left "Program header table already defined."
-              let l' = l { nblPhdrTableOffset = Just (Elf.FileOffset (fromIntegral off')) }
-              pure (l', sz)
+              pure (l, sz)
             Orig.ShdrTable -> do
               let sz = fromIntegral (lctxShdrCount ctx) * fromIntegral (Elf.shdrEntrySize cl)
-              case nblShdrTableOffset l of
-                Nothing -> pure ()
-                Just _ -> Left "Section header table already defined."
-              let l' = l { nblShdrTableOffset = Just (Elf.FileOffset (fromIntegral off')) }
-              pure (l', sz)
+              pure (l, sz)
             Orig.Interpreter -> do
               pure (l, binSize)
             Orig.Shstrtab -> do
@@ -126,8 +114,5 @@ layoutNewBinary :: LayoutCtx w
                 -> Orig.ElfContentLayout w
                 -> Either String (NewBinaryLayout w)
 layoutNewBinary ctx l = do
-  let s = NewBinaryLayout { nblPhdrTableOffset = Nothing
-                          , nblShdrTableOffset = Nothing
-                          , nblFileStartMap   = Map.empty
-                          }
+  let s = NewBinaryLayout { nblFileStartMap = Map.empty }
   layoutNewBinary' ctx 0 s (Orig.eclFileRegions l)

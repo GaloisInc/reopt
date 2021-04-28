@@ -36,6 +36,7 @@ import           Text.Printf (printf)
 import           Data.Macaw.Utils.IncComp
 
 import           Reopt
+import           Reopt.TypeInference.FunTypeMaps
 
 -------------------------------------------------------------------------------
 -- Encode

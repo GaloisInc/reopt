@@ -1,8 +1,7 @@
 {-|
-Declarations for function types pulled from user-provided header
-file.
+Declarations for function types pulled from user-provided header file.
 -}
-module Reopt.AnnotatedTypes
+module Reopt.TypeInference.HeaderTypes
   ( AnnDeclarations(..)
   , emptyAnnDeclarations
   , AnnFunType(..)

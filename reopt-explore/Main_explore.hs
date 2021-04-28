@@ -120,10 +120,10 @@ llvmGenSuccess LLVMGenPass{} = True
 llvmGenSuccess LLVMGenFail{} = False
 
 data ExplorationResult
-  = ExplorationStats (ReoptStats 64) LLVMGenResult
+  = ExplorationStats ReoptStats LLVMGenResult
   | ExplorationError FilePath String
 
-binStats :: ReoptStats w -> String -> String
+binStats :: ReoptStats -> String -> String
 binStats stats llvmGen =
   unlines
     [ statsBinary stats

@@ -1,94 +1,127 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Events
   ( ReoptLogEvent(..)
+  , ReoptStep(..)
+  , ReoptEventSeverity(..)
   , isErrorEvent
     -- * Statistics
   , ReoptStats(..)
+  , FnRecoveryResult(..)
   , initReoptStats
   , reportStats
-  , recoverLogEvent
   , renderFnStats
   , statsHeader
   , statsRows
+  , ppFnEntry
+  , segoffWord64
+  , ppSegOff
   ) where
 
 import           Control.Monad (when)
 import qualified Data.ByteString.Char8 as BS
 import           Data.List (intercalate)
-import           Data.IORef
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Word
 import           Numeric ( showHex )
 import           Numeric.Natural ( Natural )
 import           System.IO
 import           Text.Printf (printf)
 
+import           Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
 import           Data.Macaw.CFG
-import           Data.Macaw.Discovery
 
-import Reopt.ArgResolver ( showArgResolverError, ArgResolverError )
+-- | Identifies steps in Reopt's recompilation pipeline that may
+-- generate events.
+--
+-- The parameter is used to represent information returned if the
+-- event completes successfully.
+data ReoptStep arch a where
+  -- | Initial argument checking and setup for discovery.
+  DiscoveryInitialization :: ReoptStep arch ()
+  -- | Parse information from header file to infer function types.
+  HeaderTypeInference :: ReoptStep arch ()
+  -- | Parse debug information to infer function types.
+  DebugTypeInference :: ReoptStep arch ()
+  -- | Function discovery at given address and name.
+  Discovery :: !Word64
+            -> !(Maybe BS.ByteString)
+            -> ReoptStep arch ()
+  -- | Global function argument inference
+  FunctionArgInference :: ReoptStep arch ()
+  -- | Function invariant inference.
+  InvariantInference :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch (BlockInvariantMap arch ids)
+  -- | Function recovery at given address and name.
+  Recovery :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch ()
+
+ppFn :: Word64 -> Maybe BS.ByteString -> String
+ppFn a (Just nm) = BS.unpack nm <> "(0x" <> showHex a ")"
+ppFn a Nothing   = "0x" <> showHex a ""
+
+
+ppStep :: ReoptStep arch a -> String
+ppStep DiscoveryInitialization = "Initialization"
+ppStep HeaderTypeInference = "Header Processing"
+ppStep DebugTypeInference = "Debug Processing"
+ppStep (Discovery a mnm) = "Discovering " <> ppFn a mnm
+ppStep FunctionArgInference = "Argument inference"
+ppStep (Recovery a mnm) = "Recovering " <> ppFn a mnm
+ppStep (InvariantInference a mnm) = "Analyzing " <> ppFn a mnm
+
+data ReoptEventSeverity
+   = ReoptInfo
+     -- ^ Informational event used to report progress.
+   | ReoptWarning
+     -- ^ Warning that something was amiss that likely will affect results.
+
 
 -- | Event passed to logger when discovering functions
-data ReoptLogEvent w
-   = InitializationWarning !String
-   | ArgResolverError !String !ArgResolverError
-   | DuplicateSections !BS.ByteString
-   | DebugError !String
-   | StartFunDiscovery !(Maybe BS.ByteString) !(MemSegmentOff w) !(FunctionExploreReason w)
-   | StartBlockDiscovery !(MemSegmentOff w)
-   | StartFunRecovery !(Maybe BS.ByteString) !(MemSegmentOff w)
-     -- ^ Notify we are starting analysis of given function.
-   | EndFunRecovery  !(Maybe BS.ByteString) !(MemSegmentOff w)
-     -- ^ Notify we successfully completed analysis of given function.
-   | RecoveryFailed !(Maybe BS.ByteString)  !(MemSegmentOff w) !String
-     -- ^ @RecoveryFailed dnm addr msg@ notes we failed to recover function due to given reason.
-   | RecoveryPLTSkipped  !(Maybe BS.ByteString)  !(MemSegmentOff w)
-   | RecoveryWarning !(Maybe BS.ByteString) !(MemSegmentOff w) !String
-   | RecoveryError !String
-     -- ^ A general error message
+data ReoptLogEvent arch
+     -- | Indicates we started as step.
+   = forall a. ReoptStepStarted !(ReoptStep arch a)
+     -- | Log an event.
+   | forall a. ReoptLogEvent !(ReoptStep arch a) !ReoptEventSeverity !String
+     -- | Indicate a step failed due to the given error.
+   | forall a. ReoptStepFailed !(ReoptStep arch a) !String
+     -- | Indicate a step completed successfully.
+   | forall a. ReoptStepFinished !(ReoptStep arch a) !a
+
+segoffWord64 :: MemSegmentOff w -> Word64
+segoffWord64 = memWordValue . addrOffset . segoffAddr
+
+
+ppSegOff :: MemSegmentOff w -> String
+ppSegOff addr = "0x" <> showHex (segoffWord64 addr) ""
 
 -- | Human-readable name of discovered function.
 ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
-ppFnEntry (Just nm) addr = BS.unpack nm <> "(0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ")"
-ppFnEntry Nothing addr   = "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
+ppFnEntry (Just nm) addr = BS.unpack nm <> "(" <> ppSegOff addr <> ")"
+ppFnEntry Nothing addr   = ppSegOff addr
 
-instance Show (ReoptLogEvent w) where
-  show (InitializationWarning msg) = "Warning: " ++ msg
-  show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
-  show (DuplicateSections nm)  = "Multiple sections named " ++ BS.unpack nm
-  show (DebugError msg)        = msg
-  show (StartFunDiscovery dnm faddr rsn) =
-    "Discovering function: " <> ppFnEntry dnm faddr ++  ppFunReason rsn
-  show (StartBlockDiscovery addr) =
-    "  Analyzing block: " <> "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
-  show (StartFunRecovery dnm faddr)  =
-    "Recovering function " <> ppFnEntry dnm faddr
-  show (EndFunRecovery dnm faddr)  =
-     let fnm = ppFnEntry dnm faddr
-      in "Completed recovering function " <> fnm
-  show (RecoveryFailed _ _ msg)  = "  " <> msg
-  show (RecoveryPLTSkipped _ _)  = "  Skipped PLT stub"
-  show (RecoveryWarning _ _ msg) = "  Warning: " ++ msg
-  show (RecoveryError msg) = msg
+
+--ppSeverity :: ReoptEventSeverity -> String
+--ppSeverity ReoptInfo = "Info"
+--ppSeverity ReoptWarning = "Warn"
+
+
+instance Show (ReoptLogEvent arch) where
+  show (ReoptStepStarted st) = ppStep st
+  show (ReoptStepFinished _ _) = printf "  Complete."
+  show (ReoptLogEvent _st _sev msg) = printf "  %s" msg
+  show (ReoptStepFailed _st msg) = printf "  Failed: %s" msg
 
 -- | Should this event increase the error count?
-isErrorEvent ::  ReoptLogEvent w -> Bool
+isErrorEvent ::  ReoptLogEvent arch -> Bool
 isErrorEvent =
   \case
-    InitializationWarning{} -> True
-    ArgResolverError{}   -> True
-    DuplicateSections{}  -> True
-    DebugError{}         -> True
-    StartFunDiscovery{}  -> False
-    StartBlockDiscovery{} -> False
-    StartFunRecovery{}   -> False
-    EndFunRecovery{}     -> False
-    RecoveryFailed{}     -> True
-    RecoveryPLTSkipped{} -> True
-    RecoveryWarning{}    -> True
-    RecoveryError{}      -> True
+    ReoptStepStarted{} -> False
+    ReoptLogEvent _ ReoptInfo _ -> False
+    ReoptLogEvent _ _ _         -> True
+    ReoptStepFailed{} -> True
+    ReoptStepFinished{} -> False
 
 -------------------------------------------------------------------------------
 
@@ -97,15 +130,14 @@ data FnRecoveryResult
   = FnDiscovered
   | FnRecovered
   | FnFailedRecovery
-  | FnPLTSkipped
   deriving (Show, Eq)
 
 -- | Statistics summarizing our recovery efforts.
-data ReoptStats w =
+data ReoptStats =
   ReoptStats
   { statsBinary :: !FilePath
   -- ^ Which binary are these statistics for?
-  , statsFnResults :: Map (Maybe BS.ByteString, MemSegmentOff w) FnRecoveryResult
+  , statsFnResults :: Map (Maybe BS.ByteString, Word64) FnRecoveryResult
   -- ^ Mapping of functions to the result of recovery
   , statsFnDiscoveredCount :: Natural
   -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
@@ -119,7 +151,7 @@ data ReoptStats w =
   -- ^ Overall error count.
   }
 
-initReoptStats :: FilePath -> ReoptStats w
+initReoptStats :: FilePath -> ReoptStats
 initReoptStats binPath =
   ReoptStats
   { statsBinary = binPath
@@ -131,7 +163,7 @@ initReoptStats binPath =
   , statsErrorCount = 0
   }
 
-renderFnStats :: ReoptStats w -> String
+renderFnStats :: ReoptStats -> String
 renderFnStats s =
   if statsFnDiscoveredCount s == 0 then
     "reopt discovered no functions."
@@ -152,20 +184,17 @@ statsHeader :: [String]
 statsHeader = ["binary", "fn name", "address", "recovery result"]
 
 -- | Rows for table summary of recovery statistics; see also @statsHeader@.
-statsRows :: forall w
-          .  MemWidth w
-          => ReoptStats w -- ^ Stats to convert to rows.
+statsRows :: ReoptStats -- ^ Stats to convert to rows.
           -> [[String]]
 statsRows stats = map toCsvRow $ Map.toList $ statsFnResults stats
-  where toCsvRow :: (((Maybe BS.ByteString), (MemSegmentOff w)), FnRecoveryResult) -> [String]
+  where toCsvRow :: ((Maybe BS.ByteString, Word64), FnRecoveryResult) -> [String]
         toCsvRow ((mNm, faddr), res) =
           let name = case mNm of Nothing -> ""; Just nm -> BS.unpack nm
-              hexAddr = "0x" ++ (showHex (addrOffset (segoffAddr faddr)) "")
+              hexAddr = "0x" ++ showHex faddr ""
           in [statsBinary stats, name, hexAddr, show res]
 
-exportFnStats :: MemWidth w
-              => FilePath -- ^ Path to write statistics to.
-              -> ReoptStats w -- ^ Stats to export.
+exportFnStats :: FilePath -- ^ Path to write statistics to.
+              -> ReoptStats -- ^ Stats to export.
               -> IO ()
 exportFnStats outPath stats = do
   let hdrStr = intercalate "," statsHeader
@@ -174,10 +203,9 @@ exportFnStats outPath stats = do
 
 -- | Print and/or export statistics (if relevant flags are set) and the error count.
 reportStats
-  :: MemWidth w
-  => Bool -- ^ Whether to print statistics to stderr.
+  :: Bool -- ^ Whether to print statistics to stderr.
   -> Maybe FilePath -- ^ Where to export stats to.
-  -> ReoptStats w
+  -> ReoptStats
   -> IO ()
 reportStats printStats mStatsPath stats = do
   when printStats $ do
@@ -191,45 +219,3 @@ reportStats printStats mStatsPath stats = do
         "1 error occured."
        else
         show (statsErrorCount stats) ++ " errors occured."
-
-
--- | Function for recovering log information.
---
--- This has a side effect where it increments an IORef so
--- that the number of errors can be recorded.
-recoverLogEvent
-  :: IORef (ReoptStats w)
-  -> ReoptLogEvent w  -- ^ Message to log
-  -> IO ()
-recoverLogEvent statsRef event = do
-  -- Update error count when applicable
-  when (isErrorEvent event) $ do
-    modifyIORef' statsRef $ \s -> s {statsErrorCount = 1 + (statsErrorCount s)}
-  -- Record more detailed info when appropriate.
-  case event of
-    StartFunRecovery mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
-                       , statsFnDiscoveredCount = 1 + (statsFnDiscoveredCount s)}
-      modifyIORef' statsRef update
-    EndFunRecovery mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
-                       , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
-      prevEntry <- Map.lookup (mNm, addr) <$> statsFnResults <$> readIORef statsRef
-      case prevEntry of
-        Nothing -> hPutStrLn stderr (show event)
-        Just FnDiscovered -> pure ()
-        Just res -> hPutStrLn stderr $ "function " ++ ppFnEntry mNm addr
-                                       ++ " had an unexpected previous state at the end of discovery: "
-                                       ++ show res
-      modifyIORef' statsRef update
-    RecoveryFailed mNm addr _errMsg -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
-                       , statsFnFailedCount = 1 + (statsFnFailedCount s) }
-      modifyIORef' statsRef update
-    RecoveryPLTSkipped mNm addr -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnPLTSkipped (statsFnResults s)
-                       , statsFnPLTSkippedCount = 1 + (statsFnPLTSkippedCount s) }
-      modifyIORef' statsRef update
-    _ -> pure ()
-  -- Print log info to stderr.
-  hPutStrLn stderr (show event)
