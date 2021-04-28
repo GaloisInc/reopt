@@ -4,6 +4,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Events
   ( ReoptLogEvent(..)
+  , ReoptStep(..)
+  , ReoptEventSeverity(..)
   , isErrorEvent
     -- * Statistics
   , ReoptStats(..)
@@ -14,6 +16,8 @@ module Reopt.Events
   , statsHeader
   , statsRows
   , ppFnEntry
+  , segoffWord64
+  , ppSegOff
   ) where
 
 import           Control.Monad (when)
@@ -21,6 +25,7 @@ import qualified Data.ByteString.Char8 as BS
 import           Data.List (intercalate)
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Word
 import           Numeric ( showHex )
 import           Numeric.Natural ( Natural )
 import           System.IO
@@ -28,35 +33,68 @@ import           Text.Printf (printf)
 
 import           Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
 import           Data.Macaw.CFG
-import           Data.Macaw.Discovery
 
-import           Reopt.ArgResolver ( showArgResolverError, ArgResolverError )
+-- | Identifies steps in Reopt's recompilation pipeline that may
+-- generate events.
+--
+-- The parameter is used to represent information returned if the
+-- event completes successfully.
+data ReoptStep arch a where
+  -- | Initial argument checking and setup for discovery.
+  DiscoveryInitialization :: ReoptStep arch ()
+  -- | Parse information from header file to infer function types.
+  HeaderTypeInference :: ReoptStep arch ()
+  -- | Parse debug information to infer function types.
+  DebugTypeInference :: ReoptStep arch ()
+  -- | Function discovery at given address and name.
+  Discovery :: !Word64
+            -> !(Maybe BS.ByteString)
+            -> ReoptStep arch ()
+  -- | Global function argument inference
+  FunctionArgInference :: ReoptStep arch ()
+  -- | Function invariant inference.
+  InvariantInference :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch (BlockInvariantMap arch ids)
+  -- | Function recovery at given address and name.
+  Recovery :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch ()
+
+ppFn :: Word64 -> Maybe BS.ByteString -> String
+ppFn a (Just nm) = BS.unpack nm <> "(0x" <> showHex a ")"
+ppFn a Nothing   = "0x" <> showHex a ""
+
+
+ppStep :: ReoptStep arch a -> String
+ppStep DiscoveryInitialization = "Initialization"
+ppStep HeaderTypeInference = "Header Processing"
+ppStep DebugTypeInference = "Debug Processing"
+ppStep (Discovery a mnm) = "Discovering " <> ppFn a mnm
+ppStep FunctionArgInference = "Argument inference"
+ppStep (Recovery a mnm) = "Recovering " <> ppFn a mnm
+ppStep (InvariantInference a mnm) = "Analyzing " <> ppFn a mnm
+
+data ReoptEventSeverity
+   = ReoptInfo
+     -- ^ Informational event used to report progress.
+   | ReoptWarning
+     -- ^ Warning that something was amiss that likely will affect results.
+
 
 -- | Event passed to logger when discovering functions
 data ReoptLogEvent arch
-   = InitializationWarning !String
-   | ArgResolverError !String !ArgResolverError
-   | DuplicateSections !BS.ByteString
-   | DebugError !String
-   | StartFunDiscovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(FunctionExploreReason (ArchAddrWidth arch))
-   | StartBlockDiscovery !(ArchSegmentOff arch)
-     -- | Failed to infer arguments to function do to unresolvable call sitee
-   | FnArgInferenceFailed !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(ArchSegmentOff arch) String
-   | FnInvariantsFailed !(Maybe BS.ByteString) !(ArchSegmentOff arch) String
-     -- ^ Notify register use computation failed.
-   | forall ids . StartFunRecovery !(Maybe BS.ByteString) !(ArchSegmentOff arch) !(BlockInvariantMap arch ids)
-     -- ^ Notify we are starting analysis of given function.
-   | EndFunRecovery  !(Maybe BS.ByteString) !(ArchSegmentOff arch)
-     -- ^ Notify we successfully completed analysis of given function.
-   | RecoveryFailed !(Maybe BS.ByteString)  !(ArchSegmentOff arch) String
-     -- ^ @RecoveryFailed dnm addr msg@ notes we failed to recover function due to given reason.
-   | RecoveryPLTSkipped  !(Maybe BS.ByteString) !(ArchSegmentOff arch)
-   | RecoveryWarning !(Maybe BS.ByteString) !(ArchSegmentOff arch) String
-   | RecoveryError !String
-     -- ^ A general error message
+     -- | Indicates we started as step.
+   = forall a. ReoptStepStarted !(ReoptStep arch a)
+     -- | Log an event.
+   | forall a. ReoptLogEvent !(ReoptStep arch a) !ReoptEventSeverity !String
+     -- | Indicate a step failed due to the given error.
+   | forall a. ReoptStepFailed !(ReoptStep arch a) !String
+     -- | Indicate a step completed successfully.
+   | forall a. ReoptStepFinished !(ReoptStep arch a) !a
+
+segoffWord64 :: MemSegmentOff w -> Word64
+segoffWord64 = memWordValue . addrOffset . segoffAddr
+
 
 ppSegOff :: MemSegmentOff w -> String
-ppSegOff addr = "0x" <> showHex (memWordValue (addrOffset (segoffAddr addr))) ""
+ppSegOff addr = "0x" <> showHex (segoffWord64 addr) ""
 
 -- | Human-readable name of discovered function.
 ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
@@ -64,48 +102,26 @@ ppFnEntry (Just nm) addr = BS.unpack nm <> "(" <> ppSegOff addr <> ")"
 ppFnEntry Nothing addr   = ppSegOff addr
 
 
+--ppSeverity :: ReoptEventSeverity -> String
+--ppSeverity ReoptInfo = "Info"
+--ppSeverity ReoptWarning = "Warn"
+
 
 instance Show (ReoptLogEvent arch) where
-  show (InitializationWarning msg) = "Warning: " ++ msg
-  show (ArgResolverError fnm e)  = printf "Type error on %s: %s" fnm (showArgResolverError e)
-  show (DuplicateSections nm)  = "Multiple sections named " ++ BS.unpack nm
-  show (DebugError msg)        = msg
-  show (StartFunDiscovery dnm faddr rsn) =
-    "Discovering function: " <> ppFnEntry dnm faddr ++  ppFunReason rsn
-  show (StartBlockDiscovery addr) =
-    "  Analyzing block: " <> ppSegOff addr
-  show (FnArgInferenceFailed dnm faddr callSite msg) =
-    printf "Call argument analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddr) msg
-  show (FnInvariantsFailed dnm faddr msg) =
-    "Invariant synthesis failed " <> ppFnEntry dnm faddr <> "\n  " <> msg
-  show (StartFunRecovery dnm faddr _)  =
-    "Recovering function " <> ppFnEntry dnm faddr
-  show (EndFunRecovery dnm faddr)  =
-     let fnm = ppFnEntry dnm faddr
-      in "Completed recovering function " <> fnm
-  show (RecoveryFailed _ _ msg)  = "  " <> msg
-  show (RecoveryPLTSkipped _ _)  = "  Skipped PLT stub"
-  show (RecoveryWarning _ _ msg) = "  Warning: " ++ msg
-  show (RecoveryError msg) = msg
+  show (ReoptStepStarted st) = ppStep st
+  show (ReoptStepFinished _ _) = printf "  Complete."
+  show (ReoptLogEvent _st _sev msg) = printf "  %s" msg
+  show (ReoptStepFailed _st msg) = printf "  Failed: %s" msg
 
 -- | Should this event increase the error count?
 isErrorEvent ::  ReoptLogEvent arch -> Bool
 isErrorEvent =
   \case
-    InitializationWarning{} -> True
-    ArgResolverError{}    -> True
-    DuplicateSections{}   -> True
-    DebugError{}          -> True
-    StartFunDiscovery{}   -> False
-    StartBlockDiscovery{} -> False
-    FnArgInferenceFailed{} -> True
-    FnInvariantsFailed{}   -> True
-    StartFunRecovery{}    -> False
-    EndFunRecovery{}      -> False
-    RecoveryFailed{}      -> True
-    RecoveryPLTSkipped{}  -> True
-    RecoveryWarning{}     -> True
-    RecoveryError{}       -> True
+    ReoptStepStarted{} -> False
+    ReoptLogEvent _ ReoptInfo _ -> False
+    ReoptLogEvent _ _ _         -> True
+    ReoptStepFailed{} -> True
+    ReoptStepFinished{} -> False
 
 -------------------------------------------------------------------------------
 
@@ -114,15 +130,14 @@ data FnRecoveryResult
   = FnDiscovered
   | FnRecovered
   | FnFailedRecovery
-  | FnPLTSkipped
   deriving (Show, Eq)
 
 -- | Statistics summarizing our recovery efforts.
-data ReoptStats w =
+data ReoptStats =
   ReoptStats
   { statsBinary :: !FilePath
   -- ^ Which binary are these statistics for?
-  , statsFnResults :: Map (Maybe BS.ByteString, MemSegmentOff w) FnRecoveryResult
+  , statsFnResults :: Map (Maybe BS.ByteString, Word64) FnRecoveryResult
   -- ^ Mapping of functions to the result of recovery
   , statsFnDiscoveredCount :: Natural
   -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
@@ -136,7 +151,7 @@ data ReoptStats w =
   -- ^ Overall error count.
   }
 
-initReoptStats :: FilePath -> ReoptStats w
+initReoptStats :: FilePath -> ReoptStats
 initReoptStats binPath =
   ReoptStats
   { statsBinary = binPath
@@ -148,7 +163,7 @@ initReoptStats binPath =
   , statsErrorCount = 0
   }
 
-renderFnStats :: ReoptStats w -> String
+renderFnStats :: ReoptStats -> String
 renderFnStats s =
   if statsFnDiscoveredCount s == 0 then
     "reopt discovered no functions."
@@ -169,20 +184,17 @@ statsHeader :: [String]
 statsHeader = ["binary", "fn name", "address", "recovery result"]
 
 -- | Rows for table summary of recovery statistics; see also @statsHeader@.
-statsRows :: forall w
-          .  MemWidth w
-          => ReoptStats w -- ^ Stats to convert to rows.
+statsRows :: ReoptStats -- ^ Stats to convert to rows.
           -> [[String]]
 statsRows stats = map toCsvRow $ Map.toList $ statsFnResults stats
-  where toCsvRow :: (((Maybe BS.ByteString), (MemSegmentOff w)), FnRecoveryResult) -> [String]
+  where toCsvRow :: ((Maybe BS.ByteString, Word64), FnRecoveryResult) -> [String]
         toCsvRow ((mNm, faddr), res) =
           let name = case mNm of Nothing -> ""; Just nm -> BS.unpack nm
-              hexAddr = "0x" ++ (showHex (addrOffset (segoffAddr faddr)) "")
+              hexAddr = "0x" ++ showHex faddr ""
           in [statsBinary stats, name, hexAddr, show res]
 
-exportFnStats :: MemWidth w
-              => FilePath -- ^ Path to write statistics to.
-              -> ReoptStats w -- ^ Stats to export.
+exportFnStats :: FilePath -- ^ Path to write statistics to.
+              -> ReoptStats -- ^ Stats to export.
               -> IO ()
 exportFnStats outPath stats = do
   let hdrStr = intercalate "," statsHeader
@@ -191,10 +203,9 @@ exportFnStats outPath stats = do
 
 -- | Print and/or export statistics (if relevant flags are set) and the error count.
 reportStats
-  :: MemWidth w
-  => Bool -- ^ Whether to print statistics to stderr.
+  :: Bool -- ^ Whether to print statistics to stderr.
   -> Maybe FilePath -- ^ Where to export stats to.
-  -> ReoptStats w
+  -> ReoptStats
   -> IO ()
 reportStats printStats mStatsPath stats = do
   when printStats $ do

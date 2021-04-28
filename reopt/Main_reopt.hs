@@ -549,10 +549,10 @@ collectInvariants :: IORef [Aeson.Encoding]
                   -> IO ()
 collectInvariants ref evt = do
   case evt of
-    StartFunRecovery _mnm addr invMap -> do
+    ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
       let enc = encodeInvariantMsg addr invMap
       seq enc $ modifyIORef ref $ (enc:)
-    FnInvariantsFailed _mnm addr msg -> do
+    ReoptStepFailed (InvariantInference addr _mnm) msg -> do
       let enc = encodeInvariantFailedMsg addr msg
       seq enc $ modifyIORef ref $ (enc:)
     _ -> do
@@ -659,7 +659,7 @@ performReopt args = do
   hPutStrLn stderr "Performing final relinking."
   mergeAndWrite outPath origElf "new object" objContents relinkerInfo
 
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats 64)
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats)
 getFunctions args =
   recoverFunctions (programPath args)
                    (clangPath args)

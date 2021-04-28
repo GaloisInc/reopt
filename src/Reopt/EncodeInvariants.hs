@@ -9,6 +9,7 @@ import qualified Data.Aeson.Encoding as Aeson
 import qualified Data.Map.Strict as Map
 import           Data.Parameterized.Some
 import qualified Data.Text as Text
+import           Data.Word
 import           Numeric (showHex)
 
 import           Data.Macaw.AbsDomain.StackAnalysis
@@ -16,8 +17,11 @@ import           Data.Macaw.Analysis.RegisterUse
 import           Data.Macaw.Memory
 import           Data.Macaw.X86
 
+encodeAddr :: Word64 -> Aeson.Encoding
+encodeAddr a = Aeson.text (Text.pack (showHex a ""))
+
 encodeSegmentOff :: MemSegmentOff  w -> Aeson.Encoding
-encodeSegmentOff a = Aeson.text (Text.pack (showHex (memWordValue (addrOffset (segoffAddr a))) ""))
+encodeSegmentOff a = encodeAddr (memWordValue (addrOffset (segoffAddr a)))
 
 encodeSomePhiLoc :: Some (BoundLoc X86Reg) -> Aeson.Encoding
 encodeSomePhiLoc (Some (RegLoc r)) = Aeson.text (Text.pack (show r))
@@ -34,16 +38,16 @@ encodeBlockInvariants addr inv = Aeson.pairs $
 encodeBlockInvariantMap :: BlockInvariantMap X86_64 ids -> Aeson.Encoding
 encodeBlockInvariantMap m = Aeson.list (uncurry encodeBlockInvariants) (Map.toList m)
 
-encodeInvariantMsg :: MemSegmentOff w -> BlockInvariantMap X86_64 ids -> Aeson.Encoding
+encodeInvariantMsg :: Word64 -> BlockInvariantMap X86_64 ids -> Aeson.Encoding
 encodeInvariantMsg addr m =
   Aeson.pairs $
     Aeson.pair "type" (Aeson.text "invariant")
-    <> Aeson.pair "addr" (encodeSegmentOff addr)
+    <> Aeson.pair "addr" (encodeAddr addr)
     <> Aeson.pair "invariants" (encodeBlockInvariantMap m)
 
-encodeInvariantFailedMsg :: MemSegmentOff w -> String -> Aeson.Encoding
+encodeInvariantFailedMsg :: Word64 -> String -> Aeson.Encoding
 encodeInvariantFailedMsg addr msg =
   Aeson.pairs $
     Aeson.pair "type" (Aeson.text "invariantFailed")
-    <> Aeson.pair "addr" (encodeSegmentOff addr)
+    <> Aeson.pair "addr" (encodeAddr addr)
     <> Aeson.pair "message" (Aeson.text (Text.pack msg))

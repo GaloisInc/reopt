@@ -59,7 +59,6 @@ library
     Reopt.Utils.Dir
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
-    Reopt.AnnotatedTypes
     Reopt.ArgResolver
     Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
@@ -69,7 +68,6 @@ library
     Reopt.CFG.StackDepth
     Reopt.Events
     Reopt.ExternalTools
-    Reopt.Header
     Reopt.Hints
     Reopt.Relinker
     Reopt.Relinker.Constants
@@ -79,6 +77,10 @@ library
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
+    Reopt.TypeInference.DebugTypes
+    Reopt.TypeInference.FunTypeMaps
+    Reopt.TypeInference.Header
+    Reopt.TypeInference.HeaderTypes
     Reopt.Utils.Flags
     Reopt.Utils.Hex
     Reopt.Utils.Printf
