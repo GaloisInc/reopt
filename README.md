@@ -28,6 +28,13 @@ For most people, the easiest way to try out Reopt is to
 This requires an account on Gitpod, but gives you access to a VSCode IDE connected to a
 Linux container with Reopt pre-installed.
 
+### Github Releases
+
+If you have Linux installed, you can download one of our recent releases from
+the [Releases page](https://github.com/GaloisInc/reopt/releases).  We build
+releases as static binaries on Centos 7, so they should work on a variety
+of distributions.
+
 ### Docker
 
 If you have Docker installed, you can install and run the Reopt pre-release
