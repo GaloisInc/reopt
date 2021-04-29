@@ -3,7 +3,7 @@ version:        0.1.0.0
 synopsis:       Annotation language that reopt generates for verification.
 description:    This defines the core annotation language that reopt uses to generate annotations
                 for the VCG.
-homepage:       https://github.com/GaloisInc/reopt-vcg/haskell-proto
+homepage:       https://github.com/GaloisInc/reopt-vcg
 author:         Joe Hendrix
 maintainer:     Joe Hendrix <jhendrix@galois.com>
 copyright:      2018-2019 Galois, Inc
