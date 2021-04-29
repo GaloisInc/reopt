@@ -71,6 +71,13 @@ Additional options can be viewed by running `reopt --help`.
 
  * **LLVM Generation** `reopt --llvm <binary>` generates LLVM from the binary.
    This is essentially a version of function recovery rendered in LLVM's format.
+   Providing the `--annotations <ann_file>` flag during LLVM generation will
+   cause `reopt` to additionally emit JSON in `<ann_file>` describing
+   verification conditions which (if valid) demonstrate functional equivalence
+   between the generated LLVM and machine code. Running `reopt-vcg
+   <ann_file>` will simulate the executation of the LLVM and machine code,
+   block-by-block, leveraging an SMT solver (cvc4) to verify as many of
+   the conditions as possible.
 
  * **Object Files** `reopt --object <binary>` generates an object file from the
    LLVM generated in the previous state.  This is essentially the same as
