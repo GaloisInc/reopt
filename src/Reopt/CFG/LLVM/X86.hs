@@ -6,6 +6,7 @@ X86-specific operations for LLVM generation.
 {-# LANGUAGE GADTs #-}
 module Reopt.CFG.LLVM.X86
   ( x86LLVMArchOps
+  , x86ArchFnToLLVM
   ) where
 
 import           Control.Lens
@@ -27,7 +28,7 @@ import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.LLVM
 
 ------------------------------------------------------------------------
--- emitX86ArchFn
+-- x86ArchFnToLLVM
 
 -- | Generate the LLVM for checking parity of an 8-bit value is even.
 evenParity :: L.Typed L.Value -> BBLLVM X86_64 (L.Typed L.Value)
@@ -63,95 +64,93 @@ llvmDivNumerator bitCount num1 num2 = do
   llvmNumLExt <- convop L.ZExt llvmNumL extTp
   bor llvmNumHShift (L.typedValue llvmNumLExt)
 
-emitX86ArchFn :: HasCallStack
-              => ArchFn X86_64 (FnValue X86_64) tp
-              -> BBLLVM X86_64 (L.Typed L.Value)
-emitX86ArchFn f = do
-  genOpts <- asks $ funLLVMGenOptions
+x86ArchFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp
+              -> Maybe (BBLLVM X86_64 (L.Typed L.Value))
+x86ArchFnToLLVM f = do
   case f of
-   EvenParity v -> do
-     evenParity =<< mkLLVMValue v
+    EvenParity v -> Just $ do
+      evenParity =<< mkLLVMValue v
 
-   -- Unsigned division and remainder
-   X86DivRem repr num1 num2 d
-     -- If potentially undefined LLVM is allowed, then we
-     -- translate to it.
-     | mcExceptionIsUB genOpts-> do
-         -- Get wide type
-         let bitCount = 8 * repValSizeByteCount repr
-         -- Get type of inputs and result
-         let resTp = llvmITypeNat bitCount
-         -- Division occurs at double bitwidth
-         let extTp = llvmITypeNat (2 * bitCount)
-         -- Compute numerator as (num1 << bitCount | num2)
-         llvmNumExt <- llvmDivNumerator bitCount num1 num2
-         -- Compute denominator
-         llvmDen <- mkLLVMValue d
-         llvmDenExt <- L.typedValue <$> convop L.ZExt llvmDen extTp
-         -- Perform divison and remainder
-         qext <- arithop (L.UDiv False) llvmNumExt llvmDenExt
-         rext <- arithop L.URem llvmNumExt llvmDenExt
-         -- Get low  order bits of quotient and remainder
-         --
-         -- Note.  This will compute the wrong answer rather than #DE
-         -- when the division result overflows, but that is allowed by
-         -- mcExceptionIsUB
-         q <- convop L.Trunc qext resTp
-         r <- convop L.Trunc rext resTp
-         -- Compute pair
-         mkPair q r
-       -- Otherwise we switch to assembly
-       | otherwise -> do
-           let tp = llvmITypeNat (repValSizeBitCount repr)
-           llvmNumH <- mkLLVMValue num1
-           llvmNumL <- mkLLVMValue num2
-           llvmDen <- mkLLVMValue d
-           callAsm sideEffect
-                   (L.Struct [tp, tp])
-                   "div $4"
-                   "={ax},={dx},{dx},{ax},r,~{flags}"
-                   [llvmNumH, llvmNumL, llvmDen]
+    -- Unsigned division and remainder
+    X86DivRem repr num1 num2 d -> Just $ do
+      genOpts <- asks $ funLLVMGenOptions
+      if mcExceptionIsUB genOpts then do
+        -- If potentially undefined LLVM is allowed, then we
+        -- translate to it.
+        -- Get wide type
+        let bitCount = 8 * repValSizeByteCount repr
+        -- Get type of inputs and result
+        let resTp = llvmITypeNat bitCount
+        -- Division occurs at double bitwidth
+        let extTp = llvmITypeNat (2 * bitCount)
+        -- Compute numerator as (num1 << bitCount | num2)
+        llvmNumExt <- llvmDivNumerator bitCount num1 num2
+        -- Compute denominator
+        llvmDen <- mkLLVMValue d
+        llvmDenExt <- L.typedValue <$> convop L.ZExt llvmDen extTp
+        -- Perform divison and remainder
+        qext <- arithop (L.UDiv False) llvmNumExt llvmDenExt
+        rext <- arithop L.URem llvmNumExt llvmDenExt
+        -- Get low  order bits of quotient and remainder
+        --
+        -- Note.  This will compute the wrong answer rather than #DE
+        -- when the division result overflows, but that is allowed by
+        -- mcExceptionIsUB
+        q <- convop L.Trunc qext resTp
+        r <- convop L.Trunc rext resTp
+        -- Compute pair
+        mkPair q r
+       else do
+        -- Otherwise we switch to assembly
+        let tp = llvmITypeNat (repValSizeBitCount repr)
+        llvmNumH <- mkLLVMValue num1
+        llvmNumL <- mkLLVMValue num2
+        llvmDen <- mkLLVMValue d
+        callAsm sideEffect
+                (L.Struct [tp, tp])
+                "div $4"
+                "={ax},={dx},{dx},{ax},r,~{flags}"
+                [llvmNumH, llvmNumL, llvmDen]
 
    -- Signed division and remainder
-   X86IDivRem repr num1 num2 d
-     -- If potentially undefined LLVM is allowed, then we
-     -- translate to it.
-     | mcExceptionIsUB genOpts -> do
-         -- Get bitwidth
-         let bitCount = 8 * repValSizeByteCount repr
-         -- Get type of inputs and result
-         let resTp = llvmITypeNat bitCount
-         -- Division occurs at double bitwidth
-         let extTp = llvmITypeNat (2 * bitCount)
-         -- Compute numerator as (num1 << bitCount | num2)
-         llvmNumExt <- llvmDivNumerator bitCount num1 num2
-         -- Compute denominator
-         llvmDen <- mkLLVMValue d
-         llvmDenExt <- L.typedValue <$> convop L.SExt llvmDen extTp
-         -- Perform divison and remainder
-         qext <- arithop (L.SDiv False) llvmNumExt llvmDenExt
-         rext <- arithop L.SRem llvmNumExt llvmDenExt
-         -- Get low  order bits of quotient and remainder
-         --
-         -- Note.  This will compute the wrong answer rather than #DE
-         -- when the division result overflows, but that is allowed by
-         -- mcExceptionIsUB
-         q <- convop L.Trunc qext resTp
-         r <- convop L.Trunc rext resTp
-         -- Compute pair
-         mkPair q r
-       | otherwise -> do
-           let tp = llvmITypeNat (repValSizeBitCount repr)
-           llvmNumH <- mkLLVMValue num1
-           llvmNumL <- mkLLVMValue num2
-           llvmDen <- mkLLVMValue d
-           callAsm sideEffect
-                    (L.Struct [tp, tp])
-                    ("idiv $4")
-                    "={ax},={dx},{dx},{ax},r,~{flags}"
-                    [llvmNumH, llvmNumL, llvmDen]
+    X86IDivRem repr num1 num2 d -> Just $ do
+      genOpts <- asks $ funLLVMGenOptions
+      if mcExceptionIsUB genOpts then do
+        -- Get bitwidth
+        let bitCount = 8 * repValSizeByteCount repr
+        -- Get type of inputs and result
+        let resTp = llvmITypeNat bitCount
+        -- Division occurs at double bitwidth
+        let extTp = llvmITypeNat (2 * bitCount)
+        -- Compute numerator as (num1 << bitCount | num2)
+        llvmNumExt <- llvmDivNumerator bitCount num1 num2
+        -- Compute denominator
+        llvmDen <- mkLLVMValue d
+        llvmDenExt <- L.typedValue <$> convop L.SExt llvmDen extTp
+        -- Perform divison and remainder
+        qext <- arithop (L.SDiv False) llvmNumExt llvmDenExt
+        rext <- arithop L.SRem llvmNumExt llvmDenExt
+        -- Get low  order bits of quotient and remainder
+        --
+        -- Note.  This will compute the wrong answer rather than #DE
+        -- when the division result overflows, but that is allowed by
+        -- mcExceptionIsUB
+        q <- convop L.Trunc qext resTp
+        r <- convop L.Trunc rext resTp
+        -- Compute pair
+        mkPair q r
+       else do
+        let tp = llvmITypeNat (repValSizeBitCount repr)
+        llvmNumH <- mkLLVMValue num1
+        llvmNumL <- mkLLVMValue num2
+        llvmDen <- mkLLVMValue d
+        callAsm sideEffect
+                (L.Struct [tp, tp])
+                ("idiv $4")
+                "={ax},={dx},{dx},{ax},r,~{flags}"
+                [llvmNumH, llvmNumL, llvmDen]
 
-   RepnzScas sz val base cnt -> do
+    RepnzScas sz val base cnt -> Just $ do
      -- Value to search for.
      llvm_val <- mkLLVMValue val
      -- Convert buffer to LLVM
@@ -173,49 +172,25 @@ emitX86ArchFn f = do
      -- Get rge cx result
      extractValue res 0
 
-   MemCmp 1 _nv _x _y _dir -> do
-     -- bpv is bytes eper value
-     -- nv is number of bvalues
-     --
-     error $ "LLVM backend does not yet support: "
-       ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
-   -- Convert floating point to signed integer.
-   SSE_CVTTSX2SI outW _floatTp x -> do
-     llvmX <- mkLLVMValue x
-     convop L.FpToSi llvmX (llvmITypeNat (natValue outW))
+    -- Convert floating point to signed integer.
+    SSE_CVTTSX2SI outW _floatTp x -> Just $ do
+      llvmX <- mkLLVMValue x
+      convop L.FpToSi llvmX (llvmITypeNat (natValue outW))
 
-   -- Convert signed integer to floating point.
-   SSE_CVTSI2SX outTp _inW x -> do
+    -- Convert signed integer to floating point.
+    SSE_CVTSI2SX outTp _inW x -> Just $ do
      llvmX <- mkLLVMValue x
      let llvmFloatType = case outTp of
                            SSE_Single -> L.Float
                            SSE_Double -> L.Double
      convop L.SiToFp llvmX (L.PrimType (L.FloatType llvmFloatType))
 
- {-
-  -- | Compares two memory regions and return the number of bytes that were the same.
-  --
-  -- In an expression @MemCmp bpv nv p1 p2 dir@:
-  --
-  -- * @bpv@ is the number of bytes per value
-  -- * @nv@ is the number of values to compare
-  -- * @p1@ is the pointer to the first buffer
-  -- * @p2@ is the pointer to the second buffer
-  -- * @dir@ is a flag that indicates the direction of comparison ('True' ==
-  --   decrement, 'False' == increment) for updating the buffer
-  --   pointers.
-  MemCmp :: !Integer
-         -> !(f (BVType 64))
-         -> !(f (BVType 64))
-         -> !(f (BVType 64))
-         -> !(f BoolType)
-         -> X86PrimFn f (BVType 64)
--}
+    _ -> Nothing
 
-   _ -> do
-     error $ "LLVM backend does not yet support: "
-       ++ show (runIdentity (ppArchFn (pure . pretty) f))
+--   _ -> do
+--     error $ "LLVM backend does not yet support: "
+--       ++ show (runIdentity (ppArchFn (pure . pretty) f))
 
 ------------------------------------------------------------------------
 -- emitX86ArchStmt
@@ -319,12 +294,22 @@ emitPopCount w v = do
 ------------------------------------------------------------------------
 -- ArchOps
 
+x86FnCallback :: HasCallStack
+              => ArchFn X86_64 (FnValue X86_64) tp
+              -> BBLLVM X86_64 (L.Typed L.Value)
+x86FnCallback f = do
+  case x86ArchFnToLLVM f of
+    Just act -> act
+    Nothing -> do
+      error $ "LLVM backend does not yet support: "
+         ++ show (runIdentity (ppArchFn (pure . pretty) f))
+
 x86LLVMArchOps :: String -- ^ Prefix for system call intrinsic
                -> LLVMArchSpecificOps X86_64
 x86LLVMArchOps pname =
   LLVMArchSpecificOps
   { archEndianness = LittleEndian
-  , archFnCallback = emitX86ArchFn
+  , archFnCallback = x86FnCallback
   , archStmtCallback = emitX86ArchStmt pname
   , popCountCallback = emitPopCount
   }

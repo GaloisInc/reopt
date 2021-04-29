@@ -13,12 +13,15 @@ import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encoding as AE
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Either
-import           Data.ElfEdit
+import Data.ElfEdit
+    ( elfSections,
+      ElfSection(elfSectionName, elfSectionAddr, elfSectionData) )
 import           Data.IORef
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Maybe
@@ -26,23 +29,23 @@ import           Data.Parameterized.Some
 import           Data.Version
 import           Data.Word
 import           Numeric
-import           Numeric.Natural
 import           Prettyprinter (pretty)
 import           System.Console.CmdArgs.Explicit
 import           System.Environment (getArgs)
-import           System.Exit (exitFailure)
+import           System.Exit
 import           System.IO
 import           System.IO.Error
 import           Text.Printf
 
 import           Data.Macaw.DebugLogging
-import           Data.Macaw.Discovery
+import Data.Macaw.Discovery
+    ( ppDiscoveryStateBlocks, DiscoveryOptions(..) )
 import           Data.Macaw.X86
 
 import           Reopt
+import           Reopt.EncodeInvariants
+import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
-import qualified Reopt.CFG.LLVM as LLVM
-import qualified Reopt.CFG.LLVM.X86 as LLVM
 import qualified Reopt.VCG.Annotations as Ann
 
 import           Paths_reopt (version)
@@ -80,6 +83,7 @@ data Action
    | ShowCFG         -- ^ Print out control-flow microcode.
    | ShowFunctions   -- ^ Print out generated functions
    | ShowLLVM        -- ^ Print out LLVM in textual format
+   | ServerMode      -- ^ Start reopt in server mode
    | ShowHelp        -- ^ Print out help message
    | ShowVersion     -- ^ Print out version
    | Reopt           -- ^ Perform a full reoptimization
@@ -139,14 +143,20 @@ data Args
             -- ^ Path to write reopt-vcg annotations to.
             --
             -- If `Nothing` then annotations are not generated.
-          , relinkerInfoExportPath :: !(Maybe FilePath)
-            -- ^ Path to write relationships needed for relinker
-          , llvmGenOptions :: !LLVM.LLVMGenOptions
+          , llvmGenOptions :: !LLVMGenOptions
             -- ^ Generation options for LLVM
+          , invariantsExportPath :: !(Maybe FilePath)
+            -- ^ Export invariants to file.
           , llvmExportPath :: !(Maybe FilePath)
             -- ^ Path to export LLVM bitcode to.
+          , cfgExportPath :: !(Maybe FilePath)
+            -- ^ Path to export CFG
+          , fnsExportPath :: !(Maybe FilePath)
+            -- ^ Path to export object file.
           , objectExportPath :: !(Maybe FilePath)
             -- ^ Path to export object file.
+          , relinkerInfoExportPath :: !(Maybe FilePath)
+            -- ^ Path to write relationships needed for relinker
           }
 
 -- | Action to perform when running
@@ -168,10 +178,6 @@ excludeAddrs = lens _excludeAddrs (\s v -> s { _excludeAddrs = v })
 -- | Options for controlling discovery
 discOpts :: Lens' Args DiscoveryOptions
 discOpts = lens _discOpts (\s v -> s { _discOpts = v })
-
-defaultLLVMGenOptions :: LLVM.LLVMGenOptions
-defaultLLVMGenOptions =
-  LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = False }
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
@@ -195,12 +201,15 @@ defaultArgs = Args { _reoptAction = Reopt
                                         , logAtAnalyzeFunction   = True
                                         , logAtAnalyzeBlock      = False
                                         }
+                   , invariantsExportPath = Nothing
                    , unnamedFunPrefix = "reopt"
                    , annotationsExportPath  = Nothing
-                   , relinkerInfoExportPath = Nothing
                    , llvmGenOptions = defaultLLVMGenOptions
                    , llvmExportPath         = Nothing
-                   , objectExportPath       = Nothing
+                   , cfgExportPath = Nothing
+                   , fnsExportPath = Nothing
+                   , objectExportPath = Nothing
+                   , relinkerInfoExportPath = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -252,6 +261,11 @@ llvmFlag :: Flag Args
 llvmFlag = flagNone [ "llvm" ] upd help
   where upd  = reoptAction .~ ShowLLVM
         help = "Show generated LLVM."
+
+serverModeFlag :: Flag Args
+serverModeFlag = flagNone [ "server" ] upd help
+  where upd = reoptAction .~ ServerMode
+        help = "Run reopt in server mode."
 
 outputFlag :: Flag Args
 outputFlag = flagReq [ "o", "output" ] upd "PATH" help
@@ -371,7 +385,7 @@ exploreCodeAddrInMemFlag = flagBool [ "include-mem" ] upd help
 allowLLVMUB :: Flag Args
 allowLLVMUB = flagBool [ "allow-undef-llvm" ] upd help
   where upd b s = s { llvmGenOptions =
-                        LLVM.LLVMGenOptions { LLVM.mcExceptionIsUB = b } }
+                        LLVMGenOptions { mcExceptionIsUB = b } }
         help = "Generate LLVM instead of inline assembly even when LLVM may result in undefined behavior."
 
 -- | Generate an export flag
@@ -384,10 +398,25 @@ exportFlag flagName helpName setter =
   where upd s old = Right $ setter old (Just s)
         help = printf "Where to export %s." helpName
 
+-- | Path to export invariants to
+invariantsExportFlag :: Flag Args
+invariantsExportFlag = exportFlag "invariants" "Reopt invariants" upd
+  where upd s v = s { invariantsExportPath = v }
+
 -- | Path to write LLVM annotations to.
 annotationsExportFlag :: Flag Args
 annotationsExportFlag = exportFlag "annotations" "reopt-vcg annotations" upd
   where upd s v = s { annotationsExportPath = v }
+
+-- | Path to export CFG
+cfgExportFlag :: Flag Args
+cfgExportFlag = exportFlag "export-cfg" "CFG file" upd
+  where upd s v = s { cfgExportPath = v }
+
+-- | Path to export functions to.
+fnsExportFlag :: Flag Args
+fnsExportFlag = exportFlag "export-fns" "object file" upd
+  where upd s v = s { fnsExportPath = v }
 
 -- | Path to export object file to.
 objectExportFlag :: Flag Args
@@ -413,6 +442,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , cfgFlag
                 , funFlag
                 , llvmFlag
+                , serverModeFlag
                   -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
@@ -423,6 +453,8 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , headerFlag
                   -- Loading options
                 , loadBaseAddressFlag
+                  -- Recovery options
+                , invariantsExportFlag
                   -- LLVM options
                 , llvmVersionFlag
                 , annotationsExportFlag
@@ -432,9 +464,11 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , llcPathFlag
                 , optPathFlag
                 , llvmMcPathFlag
-                  -- * Optimization
+                  -- Optimization
                 , optLevelFlag
-                  -- * Export
+                  -- Export
+                , cfgExportFlag
+                , fnsExportFlag
                 , objectExportFlag
                 , relinkerInfoExportFlag
                 ]
@@ -462,8 +496,7 @@ getCommandLineArgs = do
 -- Note.  This does not apply relocations.
 dumpDisassembly :: Args -> IO ()
 dumpDisassembly args = do
-  bs <- checkedReadFile (programPath args)
-  e <- parseElf64 (programPath args) bs
+  e <- readElf64 (programPath args)
   let sections = filter isCodeSection $ e^..elfSections
   when (null sections) $ do
     hPutStrLn stderr "Binary contains no executable sections."
@@ -483,109 +516,112 @@ argsReoptOptions args = ReoptOptions { roIncluded = args^.includeAddrs
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
 showCFG args = do
-  hdrAnn <- resolveHeader args
-  errorRef <- newIORef 0
+  hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   Some discState <-
-    discoverBinary (recoverLogError errorRef)
+    discoverBinary (hPutStrLn stderr . show)
                    (programPath args) (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn
   pure $ show $ ppDiscoveryStateBlocks discState
 
--- | This parses function argument information from a user-provided header file.
-resolveHeader :: Args -> IO AnnDeclarations
-resolveHeader args =
-  case headerPath args of
-    Nothing -> pure emptyAnnDeclarations
-    Just p -> parseHeader (clangPath args) p
-
--- | Function for recovering log information.
---
--- This has a side effect where it increments an IORef so
--- that the number of errors can be recorded.
-recoverLogError :: IORef Natural -- ^ Counter
-                -> GetFnsLogEvent  -- ^ Message to log
-                -> IO ()
-recoverLogError ref msg = do
-  -- Update error count
-  case msg of
-    StartFunRecovery _ _ -> pure ()
-    _ -> modifyIORef' ref (+1)
-  hPutStrLn stderr (show msg)
-
--- | Parse arguments to get information needed for function representation.
-getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, Natural)
-getFunctions args = do
-  hdrAnn <- resolveHeader args
-  let funPrefix :: BSC.ByteString
-      funPrefix = unnamedFunPrefix args
-  errorRef <- newIORef 0
-  (_, os, _, recMod, _) <-
-    recoverX86Elf (recoverLogError errorRef)
-                  (programPath args)
-                  (loadOptions args)
-                  (args^.discOpts)
-                  (argsReoptOptions args)
-                  hdrAnn
-                  funPrefix
-  errorCnt <- readIORef errorRef
-  pure (os, recMod, errorCnt)
-
 ------------------------------------------------------------------------
--- LLVM Generation
+-- Reopt action
 
 builderWriteFile :: FilePath -> Builder.Builder -> IO ()
 builderWriteFile path bld =
   withFile path WriteMode $ \h -> do
     Builder.hPutBuilder h bld
 
--- | Rendered a recovered X86_64 module as LLVM bitcode
-renderLLVMBitcode :: Args -- ^ Arguments passed
-                  -> X86OS -- ^ Operating system
-                  -> RecoveredModule X86_64 -- ^ Recovered module
-                  -> (Builder.Builder, [Either String Ann.FunctionAnn])
-renderLLVMBitcode args os recMod =
-  let archOps = LLVM.x86LLVMArchOps (show os)
-   in llvmAssembly archOps (llvmGenOptions args) recMod (llvmVersion args)
+-- | Return true if Reopt should compile LVM
+shouldCompileLLVM :: Args -> Bool
+shouldCompileLLVM args
+  =  isJust (objectExportPath args)
+  || isJust (outputPath args)
+
+
+-- | Retun true if we should generate LLVM
+shouldGenerateLLVM :: Args -> Bool
+shouldGenerateLLVM args
+  =  isJust (llvmExportPath args)
+  || shouldCompileLLVM  args
+
+
+collectInvariants :: IORef [Aeson.Encoding]
+                  -> ReoptLogEvent X86_64
+                  -> IO ()
+collectInvariants ref evt = do
+  case evt of
+    ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
+      let enc = encodeInvariantMsg addr invMap
+      seq enc $ modifyIORef ref $ (enc:)
+    ReoptStepFailed (InvariantInference addr _mnm) msg -> do
+      let enc = encodeInvariantFailedMsg addr msg
+      seq enc $ modifyIORef ref $ (enc:)
+    _ -> do
+      pure ()
 
 -- | This command is called when reopt is called with no specific
 -- action.
 performReopt :: Args -> IO ()
 performReopt args = do
-  let nothingToDo = isNothing (relinkerInfoExportPath args)
-                 && isNothing (llvmExportPath args)
-                 && isNothing (objectExportPath args)
-                 && isNothing (outputPath args)
-  when nothingToDo $ do
+  let somethingToDo = isJust (cfgExportPath args)
+                   || isJust (fnsExportPath args)
+                   || isJust (invariantsExportPath args)
+                   || isJust (relinkerInfoExportPath args)
+                   || shouldGenerateLLVM args
+  when (not somethingToDo) $ do
     hPutStrLn stderr $ "Nothing to do\n"
       ++ "  Specify an output via --output or other info to export."
     exitFailure
 
-  hdrAnn <- resolveHeader args
+  hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  errorRef <- newIORef 0
-  (origElf, os, _, recMod, relinkerInfo) <-
-    recoverX86Elf (recoverLogError errorRef)
-                  (programPath args)
-                  (loadOptions args)
-                  (args^.discOpts)
-                  (argsReoptOptions args)
-                  hdrAnn
-                  funPrefix
+  --statsRef <- newIORef $ (initReoptStats $ programPath args)
+
+
+
+  let elfPath = programPath args
+  origElf <- parseElfHeaderInfo64 elfPath =<< checkedReadFile elfPath
+
+  invariantsRef <- newIORef []
+
+  let logger =
+        case invariantsExportPath args of
+          Just _ -> joinLogEvents printLogEvent (collectInvariants invariantsRef)
+          Nothing -> printLogEvent
+
+  (os, _, recMod, relinkerInfo) <-
+    runReoptInIO logger $ do
+      recoverX86Elf' (loadOptions args) (args^.discOpts) (argsReoptOptions args) hdrAnn funPrefix origElf
+
+  -- Write invariants
+  case invariantsExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      invariants <- reverse <$> readIORef invariantsRef
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing annotations:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      let buffer = Builder.toLazyByteString (AE.fromEncoding (AE.list id invariants))
+      BSL.writeFile path buffer `catch` onErr
+
   case relinkerInfoExportPath args of
     Nothing -> pure ()
     Just path -> do
       let onErr :: IOException -> IO ()
           onErr e = do
-            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr "Error writing annotations:"
             hPutStrLn stderr $ "  " <> show e
             exitFailure
       Aeson.encodeFile path relinkerInfo  `catch` onErr
 
-  errorCnt <- readIORef errorRef
-  when (errorCnt > 0) $ do
-    hPutStrLn stderr $ show errorCnt ++ " error(s) occured."
+--  stats <- readIORef statsRef
+--  reportStats (printStats args) (exportStatsPath args) stats
+  when (not (shouldGenerateLLVM args)) $ do
+    exitFailure
   -- Generate LLVM
-  let (objLLVM,_) = renderLLVMBitcode args os recMod
+  let (objLLVM,_) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
   -- Write LLVM if requested.
   case llvmExportPath args of
     Nothing -> pure ()
@@ -596,27 +632,42 @@ performReopt args = do
             hPutStrLn stderr $ "  " <> show e
             exitFailure
       builderWriteFile path objLLVM `catch` onErr
-  when (isJust (objectExportPath args) || isJust (outputPath args)) $ do
-    -- Compile LLVM
-    objContents <-
-      compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
-                  (osLinkName os) objLLVM
-    case objectExportPath args of
-      Nothing -> pure ()
-      Just path -> do
-        let onErr :: IOException -> IO ()
-            onErr e = do
-              hPutStrLn stderr "Error writing object file:"
-              hPutStrLn stderr $ "  " <> show e
-              exitFailure
-        BS.writeFile path objContents `catch` onErr
-    -- Merge and write out
+
+  unless (shouldCompileLLVM args) $ do
+    exitSuccess
+  -- Compile LLVM
+  objContents <-
+    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                (osLinkName os) objLLVM
+  case objectExportPath args of
+    Nothing -> pure ()
+    Just path -> do
+      let onErr :: IOException -> IO ()
+          onErr e = do
+            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr $ "  " <> show e
+            exitFailure
+      BS.writeFile path objContents `catch` onErr
+  -- Merge and write out
+  outPath <-
     case outputPath args of
       Nothing -> do
         hPutStrLn stderr "Skipping final relinking: Use --output <filename> if final binary expected."
-      Just outPath -> do
-        hPutStrLn stderr "Performing final relinking."
-        mergeAndWrite outPath origElf "new object" objContents relinkerInfo
+        exitSuccess
+      Just outPath ->
+        pure outPath
+  hPutStrLn stderr "Performing final relinking."
+  mergeAndWrite outPath origElf "new object" objContents relinkerInfo
+
+getFunctions :: Args -> IO (X86OS, RecoveredModule X86_64, ReoptStats)
+getFunctions args =
+  recoverFunctions (programPath args)
+                   (clangPath args)
+                   (loadOptions args)
+                   (args^.discOpts)
+                   (argsReoptOptions args)
+                   (headerPath args)
+                   (unnamedFunPrefix args)
 
 main' :: IO ()
 main' = do
@@ -628,26 +679,20 @@ main' = do
     ShowCFG ->
       writeOutput (outputPath args) $ \h -> do
         hPutStrLn h =<< showCFG args
-
     -- Write function discovered
     ShowFunctions -> do
-      (_,recMod, errorCnt) <- getFunctions args
+      (_,recMod, _stats) <- getFunctions args
       writeOutput (outputPath args) $ \h -> do
         mapM_ (hPutStrLn h . show . pretty) (recoveredDefs recMod)
-      when (errorCnt > 0) $ do
-        hPutStrLn stderr $
-          if errorCnt == 1 then
-            "1 error occured."
-           else
-            show errorCnt ++ " errors occured."
-        exitFailure
-
     ShowLLVM -> do
       when (isJust (annotationsExportPath args) && isNothing (outputPath args)) $ do
         hPutStrLn stderr "Must specify --output for LLVM when generating annotations."
         exitFailure
-      (os, recMod, errorCnt) <- getFunctions args
-      let (llvmMod, mFunAnn) = renderLLVMBitcode args os recMod
+      (os, recMod, stats) <- getFunctions args
+      let (llvmMod, mFunAnn) = renderLLVMBitcode (llvmGenOptions args)
+                                                 (llvmVersion args)
+                                                 os
+                                                 recMod
       case annotationsExportPath args of
         Nothing -> pure ()
         Just annPath -> do
@@ -668,13 +713,10 @@ main' = do
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do
         Builder.hPutBuilder h llvmMod
-      when (errorCnt > 0) $ do
-        hPutStrLn stderr $
-          if errorCnt == 1 then
-            "1 error occured."
-           else
-            show errorCnt ++ " errors occured."
+      when ((statsErrorCount stats) > 0) $ do
         exitFailure
+    ServerMode -> do
+      runServer
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
     ShowVersion ->

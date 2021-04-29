@@ -1,74 +1,69 @@
+# This script builds reopt and reopt-vcg and
+
+
 name: CI
 
 on: [push]
-
 jobs:
-  cvc4:
-    runs-on: ubuntu-latest
+  # This task builds the dev image used to build reopt.
+  dev-img:
+    runs-on: ubuntu-20.04
     steps:
-    - name: Get CVC4
+    - name: Checkout
       uses: actions/checkout@v2
-      with:
-        repository: GaloisInc/vadd-CVC4
-        ref: eqrange-quant
-    - name: Export CVC_HASH
-      run: echo "CVC4_HASH=`git rev-parse HEAD`" >> $GITHUB_ENV
-    - name: Cache CVC4
-      id: cache-cvc4
+    - name: Export DEV_HASH
+      run: echo "DEV_HASH=`shasum containers/dev/Dockerfile | cut -d' ' -f1`" >> $GITHUB_ENV
+    - name: Cache Developer environment
+      id: cache
       uses: actions/cache@v1
       with:
         path: cache
-        key: cvc-${{ env.CVC4_HASH }}
-    - name: Get Antlr
-      run: ./contrib/get-antlr-3.4
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: Configure
-      run: ./configure.sh production --static --proofs --prefix=$PWD/dist
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
+        key: reopt-dev-${{ env.DEV_HASH }}
     - name: Build
-      working-directory: build
-      run: make -j 8
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: Copy to cache
+      run: docker build -t galoisbinaryanalysis/reopt-dev containers/dev
+      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Push to Docker hub
       run: |
-        mkdir -p cache
-        cp build/bin/cvc4 cache
-      if: steps.cache-cvc4.outputs.cache-hit != 'true'
-    - name: cvc4 artifact
-      uses: actions/upload-artifact@v1
-      with:
-        name: cvc4
-        path: cache/cvc4
+        echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
+        docker push galoisbinaryanalysis/reopt-dev
+      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Create dummy directory for cache
+      run: mkdir -p cache
+      if: steps.cache.outputs.cache-hit != 'true'
+  # This task builds reopt on the reopt-dev container and
+  # generates the reopt artifact with the binary.
   build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # NOTE: must list all targets in `include` here to activate them
-        name: ["Linux 8.8.4"]
-        include:
-          - name: Linux 8.8.4
-            ghc-ver: 8.8.4
+    needs: [dev-img]
+    runs-on: ubuntu-20.04
+    container: galoisbinaryanalysis/reopt-dev
     steps:
     - name: Checkout
       uses: actions/checkout@v2
       with:
         submodules: true
-    - name: Get GHC
+    - name: Set env.home and enc.ghc
       run: |
-        sudo apt-get install --no-install-recommends -y cabal-install-3.0 ghc-${{ matrix.ghc-ver }}
-        echo "/opt/cabal/bin" >> $GITHUB_PATH
-        echo "/opt/ghc/${{ matrix.ghc-ver }}/bin" >> $GITHUB_PATH
-    - name: Cache
+        echo "home=$HOME" >> $GITHUB_ENV
+        echo "ghc=`ghc --version --help | cut -d' ' -f8`" >> $GITHUB_ENV
+    - name: Cache cabal files
       uses: actions/cache@v1
       with:
-        path: /home/runner/.cabal/store/ghc-${{ matrix.ghc-ver }}
-        # Prefer previous SHA hash if it is still cached
-        key: ${{ matrix.name }}-reopt-build-${{ github.sha }}
+        path: ${{env.home}}/.cabal/store/ghc-${{ env.ghc }}
+        # Prefer previous ref
+        key: build-cabal-${{ env.ghc }}-${{ github.ref }}
         # otherwise just use most recent build.
-        restore-keys: ${{ matrix.name }}-reopt-build
-    - name: Cabal freeze and enable werrror.
+        restore-keys: build-cabal-${{ env.ghc }}
+    - name: Cache local build files
+      uses: actions/cache@v1
+      with:
+        path: dist-newstyle
+        # Prefer previous ref
+        key: build-dist-${{ env.ghc }}-${{ github.ref }}
+        # otherwise just use most recent build.
+        restore-keys: build-dist-${{ env.ghc }}
+    - name: Cabal freeze and enable werror.
       run: |
-        ln -s cabal.project.freeze.ghc.${{ matrix.ghc-ver }} cabal.project.freeze
+        ln -s cabal.project.freeze.ghc.${{ env.ghc }} cabal.project.freeze
         ln -s cabal.project.werror cabal.project.local
     - name: Cabal update
       run: cabal update
@@ -84,38 +79,99 @@ jobs:
         cd dist
         tar cvfz reopt.tgz reopt
     - name: Make reopt
-      uses: actions/upload-artifact@v1
+      uses: actions/upload-artifact@v2
       with:
         name: reopt
         path: dist/reopt.tgz
-  # This runs the CVC4 tests using reopt and the artifacts produced.
-#  vcg-test:
-#    needs: [cvc4, build]
-#    runs-on: ubuntu-latest
-#    steps:
-#    - name: Checkout
-#      uses: actions/checkout@v2
-#    - name: Get llvm
-#      run: |
-#        sudo apt-get update
-#        sudo apt-get install llvm
-#    - name: Get reopt and reopt-vcg
-#      uses: actions/download-artifact@v1
-#      with:
-#        name: reopt
-#        path: artifacts
-#    - name: Get CVC4
-#      uses: actions/download-artifact@v1
-#      with:
-#        name: cvc4
-#        path: artifacts/cvc4
-#    - name: Unpack reopt
-#      working-directory: artifacts
-#      run: tar xvfz reopt.tgz
-#    - name: Update cvc4 permissions
-#      run: chmod a+x artifacts/cvc4/cvc4
-#    - name: VCG Tests
-#      run: |
-#        export PATH="$PWD/artifacts/reopt/bin:$PWD/artifacts/cvc4:$PATH"
-#        cd vcg-test-programs
-#        make
+  # This builds the VSCode extension
+  vscode-extension:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install npm
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y npm
+    - name: Install vsce
+      run: sudo npm install -g --no-optional vsce
+    - name: Install dependencies
+      working-directory: vscode-plugin
+      run: npm install
+    - name: Package extension
+      working-directory: vscode-plugin
+      run: |
+        vsce package
+        mv reopt-0.0.1.vsix reopt.vsix
+    - name: Upload extension artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: vscode-extension
+        path: vscode-plugin/reopt.vsix
+  reopt-vcg:
+    runs-on: ubuntu-20.04
+    steps:
+    - name: Get reopt
+      uses: actions/checkout@v2
+    - name: Dependencies
+      run: sudo apt-get install -y --no-install-recommends llvm-8 llvm-8-dev clang-8
+    - name: Clone reopt-vcg
+      run: |
+        sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
+        git submodule update --init --depth 1 deps/reopt-vcg
+        cd deps/reopt-vcg
+        sed -i -e 's|git@github.com:|https://github.com/|' .gitmodules
+        git submodule update --init --depth 1
+    - name: Build
+      working-directory: deps/reopt-vcg
+      run: ./build.sh
+    - name: Test
+      working-directory: deps/reopt-vcg
+      run: .github/ci.sh run-tests
+    - name: Create archive
+      run: |
+        mkdir -p dist/reopt-vcg/bin
+        cp deps/reopt-vcg/build/bin/reopt-vcg dist/reopt-vcg/bin/reopt-vcg
+        cp deps/reopt-vcg/deps/cvc4-2020-09-16-x86_64-linux-opt dist/reopt-vcg/bin/cvc4
+        cd dist
+        tar cvfz reopt-vcg.tgz reopt-vcg
+    - name: Make reopt-vcg
+      uses: actions/upload-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist/reopt-vcg.tgz
+  upload:
+    needs: [build, vscode-extension, reopt-vcg]
+    runs-on: ubuntu-20.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        submodules: true
+    - name: Download reopt artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt
+        path: dist
+    - name: Download reopt-vcg artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist
+    - name: Copy files
+      run: |
+        cd containers/eval
+        tar xvfz ../../dist/reopt.tgz
+        tar xvfz ../../dist/reopt-vcg.tgz
+    - name: Download extension artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: vscode-extension
+        path: containers/eval
+    - name: Build docker image
+      run: |
+        docker build -t galoisbinaryanalysis/reopt containers/eval
+    - name: Push to Docker hub
+      if: github.event_name == 'push' && github.ref == 'master'
+      run: |
+        echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
+        docker push galoisbinaryanalysis/reopt

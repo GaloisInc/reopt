@@ -1,0 +1,127 @@
+cradle:
+  cabal:
+    - path: "annotations/src"
+      component: "lib:reopt-vcg-ann"
+
+    - path: "deps/dwarf/src"
+      component: "lib:galois-dwarf"
+
+    - path: "deps/dwarf/tests"
+      component: "galois-dwarf:test:galois-dwarf-tests"
+
+    - path: "deps/elf-edit/src"
+      component: "lib:elf-edit"
+
+    - path: "deps/elf-edit/tests"
+      component: "elf-edit:test:test-elf"
+
+    - path: "deps/flexdis86/binary-symbols/src"
+      component: "lib:binary-symbols"
+
+    - path: "deps/flexdis86/src"
+      component: "lib:flexdis86"
+
+    - path: "deps/flexdis86/utils/DumpInstr.hs"
+      component: "flexdis86:exe:DumpInstr"
+
+    - path: "deps/flexdis86/tests"
+      component: "flexdis86:test:flexdis86-tests"
+
+    - path: "deps/llvm-pretty/src"
+      component: "lib:llvm-pretty"
+
+    - path: "deps/llvm-pretty-bc-parser/src"
+      component: "lib:llvm-pretty-bc-parser"
+
+    - path: "deps/llvm-pretty-bc-parser/llvm-disasm/LLVMDis.hs"
+      component: "llvm-pretty-bc-parser:exe:llvm-disasm"
+
+    - path: "deps/llvm-pretty-bc-parser/unit-test"
+      component: "llvm-pretty-bc-parser:test:unit-test"
+
+    - path: "deps/llvm-pretty-bc-parser/disasm-test"
+      component: "llvm-pretty-bc-parser:test:disasm-test"
+
+    - path: "deps/llvm-pretty-bc-parser/regression-test/Main.hs"
+      component: "llvm-pretty-bc-parser:exe:regression-test"
+
+    - path: "deps/llvm-pretty-bc-parser/fuzzing/Main.hs"
+      component: "llvm-pretty-bc-parser:exe:fuzz-llvm-disasm"
+
+    - path: "deps/macaw/base/src"
+      component: "lib:macaw-base"
+
+    - path: "deps/macaw/utils/compare-dwarfdump/src/Main.hs"
+      component: "compare-dwarfdump:exe:compare-dwarfdump"
+
+    - path: "deps/macaw/x86/src"
+      component: "lib:macaw-x86"
+
+    - path: "deps/macaw/x86/tests"
+      component: "macaw-x86:test:macaw-x86-tests"
+
+    - path: "deps/parameterized-utils/src"
+      component: "lib:parameterized-utils"
+
+    - path: "deps/parameterized-utils/test"
+      component: "parameterized-utils:test:parameterizedTests"
+
+    - path: "deps/what4/what4/src"
+      component: "lib:what4"
+
+    - path: "deps/what4/what4/./doc/QuickStart.hs"
+      component: "what4:exe:quickstart"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:adapter-test"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:online-solver-test"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:expr-builder-smtlib2"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:exprs_tests"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:iteexprs_tests"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:bvdomain_tests"
+
+    - path: "deps/what4/what4/test/QC"
+      component: "what4:test:bvdomain_tests"
+
+    - path: "deps/what4/what4/test"
+      component: "what4:test:bvdomain_tests_hh"
+
+    - path: "deps/what4/what4/test/HH"
+      component: "what4:test:bvdomain_tests_hh"
+
+    - path: "src"
+      component: "lib:reopt"
+
+    - path: "reopt/Main_reopt.hs"
+      component: "reopt:exe:reopt"
+
+    - path: "reopt/Paths_reopt.hs"
+      component: "reopt:exe:reopt"
+
+    - path: "reopt-relink/Main_relink.hs"
+      component: "reopt:exe:reopt-relink"
+
+    - path: "reopt-relink/Paths_reopt.hs"
+      component: "reopt:exe:reopt-relink"
+
+    - path: "tests"
+      component: "reopt:test:reopt-tests"
+
+    - path: "tools/match-phdr/src/Main.hs"
+      component: "match-phdr:exe:match-phdr"
+
+    - path: "tools/dump_debug_data/Main.hs"
+      component: "reopt-tools:exe:dump_debug_data"
+
+    - path: "tools/dump_vtables"
+      component: "reopt-tools:exe:dump_vtables"
