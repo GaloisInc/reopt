@@ -1,15 +1,6 @@
-# Dockerfile for OCCAM binary
-# produces package in /occam/build
-# Arguments:
-#  - UBUNTU:     bionic
-#  - BUILD_TYPE: debug, release
-
-# ARG UBUNTU
-
 # Pull base image.
-FROM buildpack-deps:bionic
+FROM buildpack-deps:focal
 
-# ARG BUILD_TYPE
 RUN echo "Build type set to: $Release" && \
      # Install deps.
     apt-get update && \
@@ -20,7 +11,12 @@ RUN echo "Build type set to: $Release" && \
     apt-get install -y cmake && \
     apt-get install -y llvm-10 && \
     apt-get install -y clang-10 && \
-    apt-get install -y clang-format-10 
+    apt-get install -y clang-format-10  && \
+    apt-get install -y llvm-8 && \
+    apt-get install -y clang-8 && \
+    apt-get install -y lld && \
+    apt-get install -y binutils
+
 
 RUN pip3 --version && \
     pip3 install setuptools --upgrade && \
@@ -34,12 +30,6 @@ ENV GOPATH "/go"
 
 RUN apt-get -y install golang-go && \
     go get github.com/SRI-CSL/gllvm/cmd/...
-
-# Install llvm10 from llvm repo since bionic comes with much older version
-# WORKDIR /tmp
-# RUN wget https://apt.llvm.org/llvm.sh && \
-#  chmod +x llvm.sh && \
-#  ./llvm.sh 10
 
 ENV LLVM_HOME "/usr/lib/llvm-10"
 ENV PATH "$LLVM_HOME/bin:/bin:/usr/bin:/usr/local/bin:/occam/utils/FileCheck_trusty:$GOPATH/bin:$PATH"
@@ -60,24 +50,8 @@ RUN make install
 RUN make test
 
 
-# Install GHCUP
-ENV PATH=/root/.ghcup/bin:${PATH}
-
-RUN mkdir -p /root/.ghcup/bin
-RUN  curl -o /root/.ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/0.1.14.1/x86_64-linux-ghcup-0.1.14.1 \
- && chmod a+x /root/.ghcup/bin/ghcup
-
-# Install GHC
-RUN ghcup install ghc 8.10.4 \
- && ghcup install cabal 3.4.0.0 \
- && ghcup set ghc
-
-RUN cd / && rm -rf /reopt && \
-    git clone https://github.com/GaloisInc/reopt.git reopt
-
-WORKDIR /reopt
-RUN git checkout occam-in-docker
-RUN sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-RUN git submodule update --init
-RUN cabal update
-RUN cabal build exe:reopt
+# copy in reopt related binaries
+COPY reopt/bin/reopt /usr/local/bin
+COPY reopt/bin/reopt-relink /usr/local/bin
+COPY reopt/bin/reopt-vcg /usr/local/bin
+COPY reopt/bin/cvc4 /usr/local/bin
