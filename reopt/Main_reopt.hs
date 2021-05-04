@@ -10,8 +10,10 @@
 module Main (main) where
 
 import           Control.Exception
-import           Control.Lens
+import Control.Lens
+    ( (&), (^..), (^.), lens, (%~), (.~), Lens' )
 import           Control.Monad
+import           Control.Monad.Except (runExceptT)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encoding as AE
 import qualified Data.ByteString as BS
@@ -22,7 +24,7 @@ import           Data.Either
 import Data.ElfEdit
     ( elfSections,
       ElfSection(elfSectionName, elfSectionAddr, elfSectionData) )
-import           Data.IORef
+import Data.IORef ( readIORef, modifyIORef', newIORef, IORef )
 import           Data.List ((\\), nub, stripPrefix, intercalate)
 import           Data.Maybe
 import           Data.Parameterized.Some
@@ -46,7 +48,11 @@ import           Reopt
 import           Reopt.EncodeInvariants
 import           Reopt.Server
 import           Reopt.CFG.FnRep.X86 ()
+import           Reopt.ExternalTools (run_slash)
+import           Reopt.CFG.FnRep.X86 ()
+import           Reopt.Utils.Builder (builderWriteFile)
 import qualified Reopt.VCG.Annotations as Ann
+import           System.FilePath (splitFileName)
 
 import           Paths_reopt (version)
 
@@ -157,6 +163,8 @@ data Args
             -- ^ Path to export object file.
           , relinkerInfoExportPath :: !(Maybe FilePath)
             -- ^ Path to write relationships needed for relinker
+          , occamConfigPath   :: !(Maybe FilePath)
+            -- ^ OCCAM configuration (if applicable)
           }
 
 -- | Action to perform when running
@@ -210,6 +218,7 @@ defaultArgs = Args { _reoptAction = Reopt
                    , fnsExportPath = Nothing
                    , objectExportPath = Nothing
                    , relinkerInfoExportPath = Nothing
+                   , occamConfigPath        = Nothing
                    }
 
 ------------------------------------------------------------------------
@@ -428,6 +437,14 @@ relinkerInfoExportFlag :: Flag Args
 relinkerInfoExportFlag = exportFlag "relinker-info" "relinker relationships" upd
   where upd s v = s { relinkerInfoExportPath = v }
 
+-- | Flag to enable OCCAM (with default config if not accompanied by the `occam-config` flag).
+occamFlag :: Flag Args
+occamFlag =
+  flagReq [ "occam" ] upd "PATH" help
+  where upd path cfg = Right $ cfg {occamConfigPath = Just path}
+        help = printf "Enables OCCAM as reopt's optimizer using the manifest at PATH."
+
+
 arguments :: Mode Args
 arguments = mode "reopt" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
@@ -443,6 +460,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                 , funFlag
                 , llvmFlag
                 , serverModeFlag
+                , occamFlag
                   -- Discovery options
                 , logAtAnalyzeFunctionFlag
                 , logAtAnalyzeBlockFlag
@@ -525,16 +543,12 @@ showCFG args = do
 ------------------------------------------------------------------------
 -- Reopt action
 
-builderWriteFile :: FilePath -> Builder.Builder -> IO ()
-builderWriteFile path bld =
-  withFile path WriteMode $ \h -> do
-    Builder.hPutBuilder h bld
-
--- | Return true if Reopt should compile LVM
+-- | Return true if Reopt should compile LLVM
 shouldCompileLLVM :: Args -> Bool
 shouldCompileLLVM args
   =  isJust (objectExportPath args)
   || isJust (outputPath args)
+  || isJust (occamConfigPath args)
 
 
 -- | Retun true if we should generate LLVM
@@ -551,10 +565,10 @@ collectInvariants ref evt = do
   case evt of
     ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
       let enc = encodeInvariantMsg addr invMap
-      seq enc $ modifyIORef ref $ (enc:)
+      seq enc $ modifyIORef' ref $ (enc:)
     ReoptStepFailed (InvariantInference addr _mnm) msg -> do
       let enc = encodeInvariantFailedMsg addr msg
-      seq enc $ modifyIORef ref $ (enc:)
+      seq enc $ modifyIORef' ref $ (enc:)
     _ -> do
       pure ()
 
@@ -636,18 +650,29 @@ performReopt args = do
   unless (shouldCompileLLVM args) $ do
     exitSuccess
   -- Compile LLVM
-  objContents <-
-    compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
-                (osLinkName os) objLLVM
-  case objectExportPath args of
-    Nothing -> pure ()
-    Just path -> do
-      let onErr :: IOException -> IO ()
-          onErr e = do
-            hPutStrLn stderr "Error writing object file:"
-            hPutStrLn stderr $ "  " <> show e
+  objContents <- do
+    contents <- compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                            (osLinkName os) (Left objLLVM)
+    case objectExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        let onErr :: IOException -> IO ()
+            onErr e = do
+              hPutStrLn stderr "Error writing object file:"
+              hPutStrLn stderr $ "  " <> show e
+              exitFailure
+        BS.writeFile path contents `catch` onErr
+    case occamConfigPath args of
+      Nothing -> pure contents
+      Just cfgPath -> do
+        let (_, fileName) = splitFileName $ programPath args
+        maybeRes <- runExceptT $ run_slash "slash" cfgPath fileName objLLVM
+        case maybeRes of
+          Left e -> do
+            hPutStrLn stderr (show e)
             exitFailure
-      BS.writeFile path objContents `catch` onErr
+          Right slashedBC -> compileLLVM (optLevel args) (optPath args) (llcPath args) (llvmMcPath args)
+                                        (osLinkName os) (Right slashedBC)
   -- Merge and write out
   outPath <-
     case outputPath args of

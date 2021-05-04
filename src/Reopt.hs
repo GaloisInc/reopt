@@ -1995,18 +1995,21 @@ compileLLVM :: Int -- ^ Optimization level
             -> FilePath -- ^ Path to llc
             -> FilePath -- ^ Path to llvm-mc
             -> String   -- ^ Architure triple to pass to LLC
-            -> Builder.Builder -- ^ Representiation of LLVM to serialize
+            -> Either Builder.Builder BS.ByteString -- ^ Representiation of LLVM to serialize
             -> IO BS.ByteString
 compileLLVM optLevel optPath llcPath llvmMcPath arch llvm = do
   -- Run llvm on resulting binary
   mres <- runExceptT $ do
     -- Skip optimization if optLevel == 0
     llvm_opt <-
-      if optLevel /= 0 then do
-        Ext.run_opt optPath optLevel $ \inHandle -> do
-          Builder.hPutBuilder inHandle llvm
-       else
-        pure $ BSL.toStrict $ Builder.toLazyByteString llvm
+      case llvm of
+        Left llvmBldr ->
+          if optLevel /= 0 then do
+            Ext.run_opt optPath optLevel $ \inHandle -> do
+              Builder.hPutBuilder inHandle llvmBldr
+          else
+            pure $ BSL.toStrict $ Builder.toLazyByteString llvmBldr
+        Right llvmBS -> pure llvmBS
     let llc_opts = Ext.LLCOptions { Ext.llcTriple    = Just arch
                                   , Ext.llcOptLevel  = optLevel
                                   , Ext.llcFunctionSections = True

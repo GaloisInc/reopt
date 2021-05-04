@@ -164,3 +164,32 @@ You can then use this file to tell Reopt about the expected types for
 ```
 reopt -o ls.exe --header decls.h $(which ls)
 ```
+
+## Using `OCCAM` for additional optimizations
+
+`reopt` can leverage the [OCCAM](https://github.com/SRI-CSL/OCCAM) whole-program
+partial evaluator for LLVM bitcode to further optimize binaries (assuming a user
+has already installed and made available both `OCCAM` and its accompanying
+interface `slash`).
+
+This feature can be enabled by passing the `--occam-config=FILE` option to
+`reopt`, where `FILE` is the `reopt`/`OCCAM` manifest. The manifest should
+essentially a valid [OCCAM manifest
+file](https://github.com/SRI-CSL/OCCAM/wiki/Manifest) (i.e., a file with JSON
+entries) with the following (optional) additional field:
+
+ + `slash_options`: a list of command line option flags for OCCAM's `slash` tool,
+
+and *excluding* the following fields (`reopt` will populate these appropriately):
+
+  + `binary`
+  + `name`
+
+The `main` field should specify the desired name of the bitcode file that will
+be generated for `OCCAM` to process, and the OCCAM optimized result will share
+the name with an added `.occam` suffix.
+
+N.B., when passing flags to customize `OCCAM`/`slash` behavior, be aware that
+`reopt` passes the `-c` and `-emit-llvm` flags via the
+`ldflags` manifest entry so `OCCAM` skips recompiling and acts only as an LLVM
+to LLVM translator.

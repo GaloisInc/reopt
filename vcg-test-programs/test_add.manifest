@@ -1,0 +1,7 @@
+{ "main" :  "add.bc"
+, "modules" : []
+, "native_libs" : []
+, "ldflags" : []
+, "static_args" : []
+, "dynamic_args" : "0"
+}
