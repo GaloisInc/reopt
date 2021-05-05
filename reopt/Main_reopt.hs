@@ -424,7 +424,7 @@ cfgExportFlag = exportFlag "export-cfg" "CFG file" upd
 
 -- | Path to export functions to.
 fnsExportFlag :: Flag Args
-fnsExportFlag = exportFlag "export-fns" "object file" upd
+fnsExportFlag = exportFlag "export-fns" "functions file" upd
   where upd s v = s { fnsExportPath = v }
 
 -- | Path to export object file to.
