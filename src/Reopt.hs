@@ -1725,7 +1725,8 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
 
   forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
     case rsn of
-      PLTStubNotSupported -> error "internal x86ArgumentAnalysis provided PLTStub"
+      PLTStubNotSupported ->
+        pure () -- error "internal x86ArgumentAnalysis provided PLTStub"
       CallAnalysisError callSite msg -> do
         let dnm = do
               Some finfo <- Map.lookup faddr (discState^.funInfo)
@@ -2123,7 +2124,7 @@ recoverFunctions progPath clangPath lOpts dOpts rOpts mCHdr unnamedFnPrefix = do
   hdrAnn <- resolveHeader mCHdr clangPath
   statsRef <- newIORef $ initReoptStats progPath
   (_, os, _, recMod, _) <-
-    recoverX86Elf (recoverLogEvent statsRef)
+    recoverX86Elf (joinLogEvents printLogEvent (recoverLogEvent statsRef))
                   progPath
                   lOpts
                   dOpts
