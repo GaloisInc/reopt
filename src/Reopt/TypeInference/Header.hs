@@ -190,7 +190,7 @@ parseFunDeclArg (C.CStaticAssert _ _ n) =
 parseExtDeclaration :: C.CExternalDeclaration C.NodeInfo -> CParser ()
 parseExtDeclaration (C.CDeclExt d) = do
   case d of
-    -- Parsea  typedef
+    -- Parse typedef
     C.CDecl (C.CStorageSpec (C.CTypedef _) : ctype)
             [(Just (C.CDeclr (Just typeIdent) typeMod Nothing [] _), Nothing, Nothing)]
             _n -> do
@@ -206,13 +206,13 @@ parseExtDeclaration (C.CDeclExt d) = do
           when (not (null attrs)) $ do
             errorAt n $ "Functions may not have attributes."
           case cparams of
-            Left _ -> errorAt n "Function delcarions require explicit arguments."
+            Left _ -> errorAt n "Function declarations require explicit arguments."
             Right (cArgs, varArgs) -> do
               args <- traverse parseFunDeclArg (V.fromList cArgs)
               retType <- parseTypeDerivedDecl derived =<< parseType emptyQualMods ctype
+              when varArgs $ errorAt n $ "Vararg functions unsupported."
               let fd = AnnFunType { funRet = retType
                                   , funArgs = args
-                                  , funVarArg = varArgs
                                   }
               m <- gets funDecls
               let nm = BSC.pack (C.identToString fnIdent)

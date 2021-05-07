@@ -316,11 +316,12 @@ checkPhdr idx phdr
 
     -- Record index of code segment.
     let isCodeSegment = Elf.phdrSegmentFlags phdr `hasFlags` (Elf.pf_r .|. Elf.pf_x)
-                     && Elf.phdrMemSize phdr == Elf.phdrFileSize phdr
     when isCodeSegment $ do
       cr <- gets imsCodePhdrIndex
       when (isJust cr) $ do
         throwError $ "Code region already defined."
+      when (Elf.phdrMemSize phdr /= Elf.phdrFileSize phdr) $ do
+        throwError $ "Code segment memory and file size must match."
       modify $ \s -> s { imsCodePhdrIndex = Just idx }
 
     -- Record index of last data segment.

@@ -1,10 +1,9 @@
 {-|
-compare-dwarfdump generate dwarfdump-output on specific parts of binary,
-and reports inconsistencies.
-
-It currently only supports .eh_frame and .debug_frame sections.
+reopt-checker runs various checks on a binary to ensure algorithms
+correctly interpret the contents.
 -}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -34,6 +33,7 @@ import           System.IO.Error (isPermissionError)
 import           Text.Printf
 
 import           Reopt.Relinker.Binary (inferBinaryLayout, infoIsShdrIndex)
+import           Reopt.PltParser
 
 reportError :: HasCallStack => FilePath -> String -> IO a
 reportError path msg = hPutStrLn stderr (path <> ": " <> msg) >> exitFailure
@@ -48,26 +48,21 @@ data MatchStats = MatchStats
     -- Map for section headers with unexpected info values.
   , unexpectedShdrLink :: !(Map.Map BS.ByteString FilePath)
     -- | Binaries missing an read-only and executable segment
-  , missingExecutableSegment :: ![FilePath]
-    -- | Binaries missing a read-only segment
-  , missingReadonlySegment :: ![FilePath]
-    -- | Binaries missing a read-only segment
-  , multipleReadonlySegments :: ![FilePath]
+  , missingExecutableSegments :: ![FilePath]
     -- Binaries that had a fatal failure for some reason.
   , failedBinaries :: [(FilePath, String)]
   }
 
+incTotalBinaries :: MatchStats -> MatchStats
+incTotalBinaries stats = stats { totalBinaries = totalBinaries stats + 1 }
+
+addFailedBinary :: FilePath -> String -> MatchStats -> MatchStats
+addFailedBinary path msg stats = stats { failedBinaries = (path,msg) : failedBinaries stats }
+
 addMissingExecutableSegment :: FilePath -> MatchStats -> MatchStats
 addMissingExecutableSegment path stats =
-  stats { missingExecutableSegment = path : missingExecutableSegment stats }
+  stats { missingExecutableSegments = path : missingExecutableSegments stats }
 
-addMissingReadonlySegment :: FilePath -> MatchStats -> MatchStats
-addMissingReadonlySegment path stats =
-  stats { missingReadonlySegment = path : missingReadonlySegment stats }
-
-addMultipleReadonlySegments :: FilePath -> MatchStats -> MatchStats
-addMultipleReadonlySegments path stats =
-  stats { multipleReadonlySegments = path : multipleReadonlySegments stats }
 
 addUnexpectedShdrInfo :: FilePath -> BS.ByteString -> MatchStats -> MatchStats
 addUnexpectedShdrInfo path nm stats =
@@ -84,9 +79,7 @@ emptyMatchStats =
   , totalBinaries = 0
   , unexpectedShdrInfo = Map.empty
   , unexpectedShdrLink = Map.empty
-  , missingExecutableSegment = []
-  , missingReadonlySegment   = []
-  , multipleReadonlySegments = []
+  , missingExecutableSegments = []
   , failedBinaries = []
   }
 
@@ -108,34 +101,31 @@ printErrorList nm l = do
 
 printMatchStats :: MatchStats -> IO ()
 printMatchStats s = do
-  putStrLn $ "Sucessfully Analyzed " ++ show (successfulBinaries s)
-             ++ " of " ++ show (totalBinaries s) ++ " executables."
+  putStrLn $ printf "Sucessfully analyzed %s of %s executables."
+                    (show (successfulBinaries s)) (show (totalBinaries s))
   let noErrors = null (failedBinaries s)
               && Map.null (unexpectedShdrInfo s)
               && Map.null (unexpectedShdrLink s)
-              && null (missingExecutableSegment s)
---              && null (missingReadonlySegment s)
---              && null (multipleReadonlySegments s)
+              && null (missingExecutableSegments s)
   unless noErrors $ do
     forM_ (reverse (failedBinaries s)) $ \(path, msg) -> do
       hPutStrLn stderr $ path ++ ": " ++ msg
-    printErrorList "Missing executable segment:" (missingExecutableSegment s)
-    --printErrorList "Missing readonly segment:"   (missingReadonlySegment s)
-    --printErrorList "Multiple readonly segments:" (multipleReadonlySegments s)
+    printErrorList "Missing executable segment:" (missingExecutableSegments s)
     printSecMap "Unexpected shdr info:" (unexpectedShdrInfo s)
     printSecMap "Unexpected shdr link:" (unexpectedShdrLink s)
     exitFailure
 
-type CheckM = State (Bool, MatchStats)
+type CheckM = ExceptT String (State (Bool, MatchStats))
 
-runCheckM :: CheckM () -> MatchStats -> (Bool, MatchStats)
-runCheckM act stats = execState act (False, stats)
-
-updateStats :: (MatchStats -> MatchStats) -> CheckM ()
-updateStats f = modify' $  \(b, s) -> let s' = f s in seq s' (b, s')
+runCheckM :: FilePath -> CheckM () -> MatchStats -> (Bool, MatchStats)
+runCheckM path act stats =
+  case runState (runExceptT act) (False, stats) of
+    (Right (), s) -> s
+    (Left msg, (_,stats2)) -> (True, addFailedBinary path msg stats2)
 
 markFailed :: (MatchStats -> MatchStats) -> CheckM ()
 markFailed f = modify' $  \(_,s) -> let s' = f s in seq s' (True, s')
+
 
 -- | Validate assumptions about a section header
 checkShdrInfo :: FilePath
@@ -170,14 +160,13 @@ checkShdrInfo path shdrs shdr = do
       when (Elf.shdrInfo shdr /= 0) $ do
         markFailed $ addUnexpectedShdrInfo path nm
 
--- | Validate assumptions about a section header
-checkShdr :: FilePath
+-- | Check section link matches expected
+checkShdrLink :: FilePath
           -> Bool
           -> V.Vector (Elf.Shdr BS.ByteString v)
           -> Elf.Shdr BS.ByteString v
           -> CheckM ()
-checkShdr path static shdrs shdr = do
-  checkShdrInfo path shdrs shdr
+checkShdrLink path static shdrs shdr = do
   let nm = Elf.shdrName shdr
   let link = Elf.shdrLink shdr
   case () of
@@ -207,7 +196,7 @@ checkShdr path static shdrs shdr = do
           when (Elf.shdrName tgt /= ".dynsym") $ do
             markFailed $ addUnexpectedShdrLink path nm
 
-    _  | not static, nm `elem` [".dynamic", ".dynsym", ".gnu.version_r"] -> do
+    _  | not static, nm `elem` [".dynamic", ".dynsym", ".gnu.version_d", ".gnu.version_r"] -> do
         if toInteger link >= toInteger (V.length shdrs) then
           markFailed $ addUnexpectedShdrLink path nm
         else do
@@ -219,27 +208,67 @@ checkShdr path static shdrs shdr = do
       when (link /= 0) $ do
         markFailed $ addUnexpectedShdrLink path nm
 
-checkBinary :: FilePath
-            -> Elf.ElfHeaderInfo  w
-            -> V.Vector (Elf.Shdr BS.ByteString v)
+-- Check properties of binaries.
+checkBinary :: forall w
+            .  (w ~ 64)
+            => FilePath
+            -> Elf.ElfHeaderInfo w
+            -> V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w))
             -> CheckM ()
 checkBinary path elf shdrs = do
-  let phdrs = Elf.headerPhdrs elf
-  let isInterp p = Elf.phdrSegmentType p == Elf.PT_INTERP
-  let isStatic = Elf.headerType (Elf.header elf) == Elf.ET_EXEC && null (filter isInterp phdrs)
-  V.mapM_ (checkShdr path isStatic shdrs) shdrs
-  let isExec p = Elf.phdrSegmentType p == Elf.PT_LOAD
-              && Elf.phdrSegmentFlags p == (Elf.pf_r  .|. Elf.pf_x)
-  case filter isExec phdrs of
-    [_] -> pure ()
-    _ -> markFailed $ addMissingExecutableSegment path
-  let isReadonly p = Elf.phdrSegmentType p == Elf.PT_LOAD
-                  && Elf.phdrSegmentFlags p == Elf.pf_r
-  case filter isReadonly phdrs of
-    [_] -> pure ()
-    [] -> updateStats $ addMissingReadonlySegment path
-    _:_:_ -> updateStats $ addMultipleReadonlySegments path
+  let cl = Elf.headerClass (Elf.header elf)
+  Elf.elfClassInstances cl $ do
+    -- Check section headers
+    let phdrs = Elf.headerPhdrs elf
+    let isInterp = hasPhdrType Elf.PT_INTERP
+    let isStatic = Elf.headerType (Elf.header elf) == Elf.ET_EXEC && null (filter isInterp phdrs)
+    forM_ shdrs $ \shdr -> do
+      checkShdrInfo path shdrs shdr
+      checkShdrLink path isStatic shdrs shdr
+    -- Shdr map
+    --let shdrMap = Map.fromListWith (++) [ (Elf.shdrName s, [s]) | s <- V.toList shdrs ]
+    -- Check PLT sections
+    _ <- either throwError pure $ extractPLTEntries elf shdrs
 
+    let hasDynamic = any (hasPhdrType Elf.PT_DYNAMIC) phdrs
+
+    case filter (hasPhdrType Elf.PT_INTERP) phdrs of
+      [] -> do
+        when (Elf.headerType (Elf.header elf) /= Elf.ET_DYN && hasDynamic) $ do
+          throwError "Unexpected dynamic section."
+      [interpPhdr] -> do
+        let interpContents = phdrContents elf interpPhdr
+        let klibcName :: BS.ByteString
+            klibcName = "/lib/klibc-OvGFfwo2ORZBy9wDQTD7AsebxJc.so\0"
+        case interpContents of
+          "/lib/klibc-OvGFfwo2ORZBy9wDQTD7AsebxJc.so\0" -> do
+            when hasDynamic $ do
+              throwError "Unexpected dynamic section with klibc loader."
+          _ -> do
+            when (not hasDynamic) $ do
+              throwError $ printf "Expected dynamic section\n%s\n%s\n%s" (ppBuffer interpContents) (ppBuffer klibcName)
+                (show (interpContents /= klibcName))
+      _:_:_ -> do
+        throwError "Multiple interpreter sections."
+
+
+
+  --  case Map.findWithDefault [] ".fini" shdrMap of
+  --    [] -> pure ()
+  --    [s] -> checkFini elf s
+  --    _ -> throwError "Multiple .fini sections"
+    -- Check for single executable section
+    let isExec p = Elf.phdrSegmentType p == Elf.PT_LOAD
+                && Elf.phdrSegmentFlags p == (Elf.pf_r  .|. Elf.pf_x)
+    case filter isExec phdrs of
+      [_] -> pure ()
+      _ -> markFailed $ addMissingExecutableSegment path
+
+hasSegmentType :: Elf.PhdrType -> Elf.Phdr w -> Bool
+hasSegmentType tp p = Elf.phdrSegmentType p == tp
+
+hasNullLoad :: (Eq (Elf.ElfWordType w), Num (Elf.ElfWordType w)) => Elf.ElfHeaderInfo w -> Bool
+hasNullLoad elfHdr = any (\p -> hasSegmentType Elf.PT_LOAD p && (Elf.phdrFileSize p == 0)) (Elf.headerPhdrs elfHdr)
 
 -- | @checkElf stats path bytes@ checks that the Elf file with path
 -- @path@ and contnts @bytes@ satisfies all the assumptions we think we
@@ -255,28 +284,29 @@ checkElf stats0 path bytes = do
     case Elf.headerNamedShdrs elfHdr of
       Left _ -> reportError path "Could not parse section headers."
       Right r -> pure r
-  let shouldExplore =  Elf.headerType hdr `elem` [ Elf.ET_DYN, Elf.ET_EXEC ]
+  let cl = Elf.headerClass hdr
+  let shouldExplore =  Elf.elfClassInstances cl
+                    $  Elf.headerType hdr `elem` [ Elf.ET_DYN, Elf.ET_EXEC ]
                     && Elf.headerMachine hdr `elem` [Elf.EM_X86_64]
                     && Elf.phdrCount elfHdr > 0
-  if not shouldExplore then do
-    pure stats0
-   else do
-    putStrLn $ "Checking " <> path
-    let (seenError, stats) = runCheckM (checkBinary path elfHdr shdrs) stats0
-    case inferBinaryLayout elfHdr shdrs of
-      Left msg -> do
-        pure $!
-          stats { failedBinaries = (path,msg) : failedBinaries stats
-                , totalBinaries = totalBinaries stats + 1
-                }
-      Right _l ->
-        pure $!
-          if seenError then
-            stats { totalBinaries = totalBinaries stats + 1 }
-           else
-            stats { successfulBinaries = successfulBinaries stats + 1
-                  , totalBinaries = totalBinaries stats + 1
-                  }
+                    && not (hasNullLoad elfHdr)
+  case Elf.headerClass hdr of
+    Elf.ELFCLASS64 | shouldExplore -> do
+      putStrLn $ "Checking " <> path
+      let (seenError, stats) = runCheckM path (checkBinary path elfHdr shdrs) stats0
+      -- check that infer binary layout succeeeds
+      case inferBinaryLayout elfHdr shdrs of
+        Left msg -> do
+          pure $ incTotalBinaries $ addFailedBinary path msg stats
+        Right _l ->
+          pure $!
+            if seenError then
+              incTotalBinaries stats
+            else
+                incTotalBinaries $ stats { successfulBinaries = successfulBinaries stats + 1 }
+    _ -> do
+      putStrLn $ "Skipping " <> path
+      pure stats0
 
 -- | Runs the action on each file in a directory (recursively)
 foreachFile :: a -> (a -> FilePath -> IO a) -> FilePath -> IO a

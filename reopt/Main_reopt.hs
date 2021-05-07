@@ -153,12 +153,12 @@ data Args
             -- ^ Generation options for LLVM
           , invariantsExportPath :: !(Maybe FilePath)
             -- ^ Export invariants to file.
-          , llvmExportPath :: !(Maybe FilePath)
-            -- ^ Path to export LLVM bitcode to.
           , cfgExportPath :: !(Maybe FilePath)
             -- ^ Path to export CFG
           , fnsExportPath :: !(Maybe FilePath)
-            -- ^ Path to export object file.
+            -- ^ Path to export functions file.
+          , llvmExportPath :: !(Maybe FilePath)
+            -- ^ Path to export LLVM file.
           , objectExportPath :: !(Maybe FilePath)
             -- ^ Path to export object file.
           , relinkerInfoExportPath :: !(Maybe FilePath)
@@ -213,9 +213,9 @@ defaultArgs = Args { _reoptAction = Reopt
                    , unnamedFunPrefix = "reopt"
                    , annotationsExportPath  = Nothing
                    , llvmGenOptions = defaultLLVMGenOptions
-                   , llvmExportPath         = Nothing
                    , cfgExportPath = Nothing
                    , fnsExportPath = Nothing
+                   , llvmExportPath = Nothing
                    , objectExportPath = Nothing
                    , relinkerInfoExportPath = Nothing
                    , occamConfigPath        = Nothing
@@ -427,9 +427,14 @@ fnsExportFlag :: Flag Args
 fnsExportFlag = exportFlag "export-fns" "functions file" upd
   where upd s v = s { fnsExportPath = v }
 
+-- | Path to export LLVM to
+llvmExportFlag :: Flag Args
+llvmExportFlag = exportFlag "export-llvm" "LLVM" upd
+  where upd s v = s { llvmExportPath = v }
+
 -- | Path to export object file to.
 objectExportFlag :: Flag Args
-objectExportFlag = exportFlag "object" "object file" upd
+objectExportFlag = exportFlag "export-object" "object file" upd
   where upd s v = s { objectExportPath = v }
 
 -- | Path to write LLVM annotations to.
@@ -487,6 +492,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
                   -- Export
                 , cfgExportFlag
                 , fnsExportFlag
+                , llvmExportFlag
                 , objectExportFlag
                 , relinkerInfoExportFlag
                 ]
@@ -639,7 +645,7 @@ performReopt args = do
     Just path -> do
       let onErr :: IOException -> IO ()
           onErr e = do
-            hPutStrLn stderr "Error writing object file:"
+            hPutStrLn stderr "Error writing LLVM file:"
             hPutStrLn stderr $ "  " <> show e
             exitFailure
       builderWriteFile path objLLVM `catch` onErr
