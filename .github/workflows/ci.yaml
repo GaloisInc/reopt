@@ -74,8 +74,9 @@ jobs:
     - name: Create archive
       run: |
         mkdir -p dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt        dist/reopt/bin
-        cp $HOME/.cabal/bin/reopt-relink dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt         dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt-explore dist/reopt/bin
+        cp $HOME/.cabal/bin/reopt-relink  dist/reopt/bin
         cd dist
         tar cvfz reopt.tgz reopt
     - name: Make reopt
@@ -169,7 +170,7 @@ jobs:
         path: containers/eval
     - name: Build docker image
       run: |
-        docker build -t galoisbinaryanalysis/reopt containers/eval
+        docker build -t galoisbinaryanalysis/reopt:head containers/eval
     - name: Push to Docker hub
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       run: |
