@@ -209,8 +209,6 @@ data SummaryStats =
   -- ^ Number of discovered functions.
   , totalFnRecoveredCount :: Natural
   -- ^ Number of successfully recovered functions.
-  , totalFnPLTSkippedCount :: Natural
-  -- ^ Number of skipped PLT stubs.
   , totalFnFailedCount :: Natural
   -- ^ Number of functions which failed during recovery.
   , totalErrorCount :: Natural
@@ -232,7 +230,6 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
       acc { totalBinaryCount = 1 + (totalBinaryCount acc)
           , totalFnDiscoveredCount = (statsFnDiscoveredCount s) + (totalFnDiscoveredCount acc)
           , totalFnRecoveredCount = (statsFnRecoveredCount s) + (totalFnRecoveredCount acc)
-          , totalFnPLTSkippedCount = (statsFnPLTSkippedCount s) + (totalFnPLTSkippedCount acc)
           , totalFnFailedCount = (statsFnFailedCount s) + (totalFnFailedCount acc)
           , totalErrorCount = (statsErrorCount s) + (totalErrorCount acc)
           , totalLLVMGenerated = (totalLLVMGenerated acc) + (if llvmGenSuccess llvmGenRes then 1 else 0)
@@ -246,17 +243,12 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
       if (totalFnDiscoveredCount s) == 0
       then "\nreopt discovered no functions after exploring "++(show $ totalBinaryCount s)++" binaries."
       else
-        let passed :: Double = (fromIntegral $ totalFnRecoveredCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            passedStr = printf " (%.2f%%)" (passed * 100.0)
-            failed :: Double = (fromIntegral $ totalFnFailedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            failedStr = printf " (%.2f%%)" (failed * 100.0)
-            skipped :: Double = (fromIntegral $ totalFnPLTSkippedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            skippedStr = printf " (%.2f%%)" (skipped * 100.0)
+        let passedPercent :: Double = (fromIntegral $ totalFnRecoveredCount s) / (fromIntegral $  totalFnDiscoveredCount s)
+            failedPercent :: Double = (fromIntegral $ totalFnFailedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
         in "\nrepot generated LLVM bitcode for "++(show $ totalLLVMGenerated s)++" out of "++(show $ totalBinaryCount s)++" binaries."++
            "\nreopt discovered " ++ (show (totalFnDiscoveredCount s)) ++ " functions while exploring "++(show $ totalBinaryCount s)++" binaries:" ++
-           "\n  recovery succeeded: " ++ (show (totalFnDiscoveredCount s)) ++ passedStr ++
-           "\n     recovery failed: " ++ (show (totalFnFailedCount s)) ++ failedStr ++
-           "\n    skipped PLT stub: " ++ (show (totalFnPLTSkippedCount s)) ++ skippedStr ++
+           "\n  recovery succeeded: " ++ (printf "%d (%.2f%%)" (totalFnDiscoveredCount s) ++
+           "\n     recovery failed: " ++ (printf "%d (%.2f%%)" (totalFnFailedCount s) (failed * 100.0) ++
            "\n"++(show $ totalErrorCount s)++" errors occurred during exploration."
 
 

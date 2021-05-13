@@ -143,8 +143,6 @@ data ReoptStats =
   -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
   , statsFnRecoveredCount :: Natural
   -- ^ Number of successfully recovered functions.
-  , statsFnPLTSkippedCount :: Natural
-  -- ^ Number of skipped PLT stubs.
   , statsFnFailedCount :: Natural
   -- ^ Number of functions which failed during recovery.
   , statsErrorCount :: Natural
@@ -158,7 +156,6 @@ initReoptStats binPath =
   , statsFnResults = Map.empty
   , statsFnDiscoveredCount = 0
   , statsFnRecoveredCount = 0
-  , statsFnPLTSkippedCount = 0
   , statsFnFailedCount = 0
   , statsErrorCount = 0
   }
@@ -172,12 +169,9 @@ renderFnStats s =
         passedStr = printf " (%.2f%%)" (passed * 100.0)
         failed :: Double = (fromIntegral $ statsFnFailedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
         failedStr = printf " (%.2f%%)" (failed * 100.0)
-        skipped :: Double = (fromIntegral $ statsFnPLTSkippedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
-        skippedStr = printf " (%.2f%%)" (skipped * 100.0)
     "reopt discovered " ++ (show (statsFnDiscoveredCount s)) ++ " functions in the binary "++(statsBinary s)++":\n"
       ++ "  recovery succeeded: " ++ (show (statsFnRecoveredCount s)) ++ passedStr ++ "\n"
       ++ "  recovery failed: " ++ (show (statsFnFailedCount s)) ++ failedStr ++ "\n"
-      ++ "  skipped PLT stub: " ++ (show (statsFnPLTSkippedCount s)) ++ skippedStr
 
 -- | Header row for data produced by @statsRows@
 statsHeader :: [String]
