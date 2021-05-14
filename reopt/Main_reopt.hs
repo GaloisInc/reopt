@@ -566,7 +566,7 @@ collectInvariants ref evt = do
     ReoptStepFinished (InvariantInference addr _mnm) invMap -> do
       let enc = encodeInvariantMsg addr invMap
       seq enc $ modifyIORef' ref $ (enc:)
-    ReoptStepFailed (InvariantInference addr _mnm) msg -> do
+    ReoptStepFailed (InvariantInference addr _mnm) ReoptInvariantInferenceFailureTag msg -> do
       let enc = encodeInvariantFailedMsg addr msg
       seq enc $ modifyIORef' ref $ (enc:)
     _ -> do
@@ -589,9 +589,6 @@ performReopt args = do
   hdrAnn <- resolveHeader (headerPath args) (clangPath args)
   let funPrefix :: BSC.ByteString
       funPrefix = unnamedFunPrefix args
-  --statsRef <- newIORef $ (initReoptStats $ programPath args)
-
-
 
   let elfPath = programPath args
   origElf <- parseElfHeaderInfo64 elfPath =<< checkedReadFile elfPath

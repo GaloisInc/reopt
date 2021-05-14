@@ -31,7 +31,9 @@ import           Reopt.Events
 import           Reopt.TypeInference.FunTypeMaps
 
 reoptTypeWarning :: String -> IncCompM (ReoptLogEvent arch) r ()
-reoptTypeWarning msg = incCompLog $ ReoptLogEvent DebugTypeInference ReoptWarning msg
+reoptTypeWarning msg = incCompLog
+                       $ ReoptLogEvent DebugTypeInference ReoptWarning
+                       $ ReoptLogMessage msg
 
 
 -- | Get name as an external symbol

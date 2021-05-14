@@ -4,15 +4,22 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Events
   ( ReoptLogEvent(..)
+  , ReoptErrorTag(..)
   , ReoptStep(..)
+  , ReoptStepTag(..)
   , ReoptEventSeverity(..)
+  , ReoptLogData(..)
   , isErrorEvent
     -- * Statistics
   , ReoptStats(..)
   , FnRecoveryResult(..)
   , initReoptStats
-  , reportStats
-  , renderFnStats
+  , statsStepErrorCount
+  , renderAllFailures
+  , stepErrorCount
+  , incFnResult
+  , incStepError
+  , mergeFnFailures
   , statsHeader
   , statsRows
   , ppFnEntry
@@ -20,19 +27,24 @@ module Reopt.Events
   , ppSegOff
   ) where
 
-import           Control.Monad (when)
 import qualified Data.ByteString.Char8 as BS
-import           Data.List (intercalate)
+import           Data.List (foldl')
 import           Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Word
 import           Numeric ( showHex )
 import           Numeric.Natural ( Natural )
-import           System.IO
 import           Text.Printf (printf)
 
 import           Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
-import           Data.Macaw.CFG
+import Data.Macaw.CFG
+    ( MemSegmentOff,
+      MemAddr(addrOffset),
+      segoffAddr,
+      MemWord(memWordValue) )
+import           Prettyprinter
+  (Doc, pretty, vsep, hsep, indent, hang, layoutPretty, defaultLayoutOptions)
+import           Prettyprinter.Render.String (renderString)
 
 -- | Identifies steps in Reopt's recompilation pipeline that may
 -- generate events.
@@ -51,7 +63,7 @@ data ReoptStep arch a where
             -> !(Maybe BS.ByteString)
             -> ReoptStep arch ()
   -- | Global function argument inference
-  FunctionArgInference :: ReoptStep arch ()
+  FunctionArgInference :: Maybe (Word64 , Maybe BS.ByteString) -> ReoptStep arch ()
   -- | Function invariant inference.
   InvariantInference :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch (BlockInvariantMap arch ids)
   -- | Function recovery at given address and name.
@@ -67,7 +79,8 @@ ppStep DiscoveryInitialization = "Initialization"
 ppStep HeaderTypeInference = "Header Processing"
 ppStep DebugTypeInference = "Debug Processing"
 ppStep (Discovery a mnm) = "Discovering " <> ppFn a mnm
-ppStep FunctionArgInference = "Argument inference"
+ppStep (FunctionArgInference Nothing) = "Argument inference"
+ppStep (FunctionArgInference (Just (a, mnm))) = "Argument inference " <> ppFn a mnm
 ppStep (Recovery a mnm) = "Recovering " <> ppFn a mnm
 ppStep (InvariantInference a mnm) = "Analyzing " <> ppFn a mnm
 
@@ -77,15 +90,97 @@ data ReoptEventSeverity
    | ReoptWarning
      -- ^ Warning that something was amiss that likely will affect results.
 
+data ReoptStepTag
+  = DiscoveryInitializationStepTag
+  | HeaderTypeInferenceStepTag
+  | DebugTypeInferenceStepTag
+  | DiscoveryStepTag
+  | FunctionArgInferenceStepTag
+  | InvariantInferenceStepTag
+  | RecoveryStepTag
+  deriving (Eq, Ord, Show)
+
+ppReoptStepTag :: ReoptStepTag -> String
+ppReoptStepTag =
+  \case
+    DiscoveryInitializationStepTag -> "discovery initialization"
+    HeaderTypeInferenceStepTag -> "header type inference"
+    DebugTypeInferenceStepTag -> "debug type inference"
+    DiscoveryStepTag -> "discovery"
+    FunctionArgInferenceStepTag -> "function argument inference"
+    InvariantInferenceStepTag -> "invariant inference"
+    RecoveryStepTag -> "recovery"
+
+-- | A specific reason a ReoptStep failed for reporting purposes/statistics.
+data ReoptErrorTag
+  = MacawParsedTranslateFailureTag
+  | MacawClassifyFailureTag
+  | MacawRegisterUseErrorTag
+  | MacawCallAnalysisErrorTag
+  | ReoptVarArgFnTag
+  | ReoptMissingNameTag
+  | ReoptMissingTypeTag
+  | ReoptUnsupportedTypeTag
+  | ReoptBlockPreconditionUnresolvedTag
+  | ReoptUnsupportedMemOpTag
+  | ReoptTypeMismatchTag
+  | ReoptUnsupportedFnValueTag
+  | ReoptUninitializedAssignmentTag
+  | ReoptUnimplementedFeatureTag
+  | ReoptUnsupportedInFnRecoveryTag
+  | ReoptUnimplementedLLVMBackendFeatureTag
+  | ReoptStackOffsetEscapeTag
+  | ReoptRegisterEscapeTag
+  | ReoptStackReadOverlappingOffsetTag
+  | ReoptUninitializedPhiVarTag
+  | ReoptUnresolvedReturnValTag
+  | ReoptCannotRecoverFnWithPLTStubsTag
+  | ReoptInvariantInferenceFailureTag
+  | ReoptMissingVariableValue
+  | ReoptWarningTag
+  deriving (Eq, Ord, Show)
+
+ppReoptErrorTag :: ReoptErrorTag -> String
+ppReoptErrorTag =
+  \case
+    MacawParsedTranslateFailureTag -> "block translation error"
+    MacawClassifyFailureTag -> "block classification error"
+    MacawRegisterUseErrorTag -> "register use error"
+    MacawCallAnalysisErrorTag -> "call analysis error"
+    ReoptVarArgFnTag -> "unsupported variadic function"
+    ReoptMissingNameTag -> "missing name"
+    ReoptMissingTypeTag -> "missing type"
+    ReoptUnsupportedTypeTag -> "unsupported type tag"
+    ReoptBlockPreconditionUnresolvedTag -> "block precondition unresolved"
+    ReoptUnsupportedMemOpTag -> "unsupported memory operation"
+    ReoptTypeMismatchTag -> "type mismatch"
+    ReoptUnsupportedFnValueTag -> "unsupported function value"
+    ReoptUninitializedAssignmentTag -> "uninitialized assignment"
+    ReoptUnimplementedFeatureTag -> "unimplemented feature"
+    ReoptUnsupportedInFnRecoveryTag -> "unsupported action in function recovery"
+    ReoptUnimplementedLLVMBackendFeatureTag -> "unimplemented LLVM backend feature"
+    ReoptStackOffsetEscapeTag -> "stack offset escape"
+    ReoptRegisterEscapeTag -> "register escape"
+    ReoptStackReadOverlappingOffsetTag -> "stack read overlapping offset"
+    ReoptUninitializedPhiVarTag -> "uninitialized phi variable"
+    ReoptUnresolvedReturnValTag -> "unresolved return value"
+    ReoptCannotRecoverFnWithPLTStubsTag -> "unexpected PLT stub"
+    ReoptInvariantInferenceFailureTag -> "invariant inference failure"
+    ReoptMissingVariableValue -> "missing variable value"
+    ReoptWarningTag -> "warning"
+
+data ReoptLogData
+  = ReoptLogMessage !String
+  | ReoptLogInitEntryPointCount !Natural
 
 -- | Event passed to logger when discovering functions
 data ReoptLogEvent arch
      -- | Indicates we started as step.
    = forall a. ReoptStepStarted !(ReoptStep arch a)
      -- | Log an event.
-   | forall a. ReoptLogEvent !(ReoptStep arch a) !ReoptEventSeverity !String
+   | forall a. ReoptLogEvent !(ReoptStep arch a) !ReoptEventSeverity !ReoptLogData
      -- | Indicate a step failed due to the given error.
-   | forall a. ReoptStepFailed !(ReoptStep arch a) !String
+   | forall a. ReoptStepFailed !(ReoptStep arch a) !ReoptErrorTag !String
      -- | Indicate a step completed successfully.
    | forall a. ReoptStepFinished !(ReoptStep arch a) !a
 
@@ -110,8 +205,11 @@ ppFnEntry Nothing addr   = ppSegOff addr
 instance Show (ReoptLogEvent arch) where
   show (ReoptStepStarted st) = ppStep st
   show (ReoptStepFinished _ _) = printf "  Complete."
-  show (ReoptLogEvent _st _sev msg) = printf "  %s" msg
-  show (ReoptStepFailed _st msg) = printf "  Failed: %s" msg
+  show (ReoptLogEvent _st _sev (ReoptLogMessage msg)) = printf "  %s" msg
+  show (ReoptLogEvent _st _sev (ReoptLogInitEntryPointCount cnt)) =
+    printf "  initial entry points: %d" cnt
+  show (ReoptStepFailed _st tag msg) =
+    printf "  Failed (%s): %s" (ppReoptErrorTag tag) msg
 
 -- | Should this event increase the error count?
 isErrorEvent ::  ReoptLogEvent arch -> Bool
@@ -129,49 +227,109 @@ isErrorEvent =
 data FnRecoveryResult
   = FnDiscovered
   | FnRecovered
+  | FnFailedDiscovery
   | FnFailedRecovery
+  | FnFailedArgInference
   deriving (Show, Eq)
 
 -- | Statistics summarizing our recovery efforts.
 data ReoptStats =
   ReoptStats
-  { statsBinary :: !FilePath
+  { statsBinaryPath :: !FilePath
   -- ^ Which binary are these statistics for?
-  , statsFnResults :: Map (Maybe BS.ByteString, Word64) FnRecoveryResult
+  , statsBinarySize :: !Natural
+  -- ^ How many bytes is the binary?
+  , statsInitEntryPointCount :: !Natural
+  -- ^ Number of initial entry points in the binary
+  , statsFnResults :: !(Map (Maybe BS.ByteString, Word64) FnRecoveryResult)
   -- ^ Mapping of functions to the result of recovery
-  , statsFnDiscoveredCount :: Natural
+  , statsFnDiscoveredCount :: !Natural
   -- ^ Number of discovered functions (i.e., may or may not end up being successfully recovered).
-  , statsFnRecoveredCount :: Natural
+  , statsFnRecoveredCount :: !Natural
   -- ^ Number of successfully recovered functions.
-  , statsFnFailedCount :: Natural
-  -- ^ Number of functions which failed during recovery.
-  , statsErrorCount :: Natural
+  , statsStepErrors :: !(Map ReoptStepTag (Map ReoptErrorTag Natural))
+  -- ^ Errors and warnings encountered, organized by reopt step.
+  , statsErrorCount :: !Natural
   -- ^ Overall error count.
   }
 
-initReoptStats :: FilePath -> ReoptStats
-initReoptStats binPath =
+initReoptStats :: FilePath -> Natural -> ReoptStats
+initReoptStats binPath binSize =
   ReoptStats
-  { statsBinary = binPath
+  { statsBinaryPath = binPath
+  , statsBinarySize = binSize
+  , statsInitEntryPointCount = 0
   , statsFnResults = Map.empty
   , statsFnDiscoveredCount = 0
   , statsFnRecoveredCount = 0
-  , statsFnFailedCount = 0
+  , statsStepErrors = Map.empty
   , statsErrorCount = 0
   }
 
-renderFnStats :: ReoptStats -> String
-renderFnStats s =
-  if statsFnDiscoveredCount s == 0 then
-    "reopt discovered no functions."
-   else do
-    let passed :: Double = (fromIntegral $ statsFnRecoveredCount s) / (fromIntegral $  statsFnDiscoveredCount s)
-        passedStr = printf " (%.2f%%)" (passed * 100.0)
-        failed :: Double = (fromIntegral $ statsFnFailedCount s) / (fromIntegral $  statsFnDiscoveredCount s)
-        failedStr = printf " (%.2f%%)" (failed * 100.0)
-    "reopt discovered " ++ (show (statsFnDiscoveredCount s)) ++ " functions in the binary "++(statsBinary s)++":\n"
-      ++ "  recovery succeeded: " ++ (show (statsFnRecoveredCount s)) ++ passedStr ++ "\n"
-      ++ "  recovery failed: " ++ (show (statsFnFailedCount s)) ++ failedStr ++ "\n"
+statsStepErrorCount :: ReoptStats -> Natural
+statsStepErrorCount stats = foldl' (+) 0 totals
+  where totals = concatMap Map.elems $ Map.elems $ statsStepErrors stats
+
+
+-- | Number of errors during a particular step.
+stepErrorCount :: ReoptStepTag -> ReoptStats -> Natural
+stepErrorCount step stats = foldl' (+) 0 errors
+  where errors = Map.findWithDefault Map.empty step
+                 $ statsStepErrors stats
+
+
+
+incFnResult ::
+  Maybe BS.ByteString ->
+  Word64 ->
+  FnRecoveryResult ->
+  Map (Maybe BS.ByteString, Word64) FnRecoveryResult ->
+  Map (Maybe BS.ByteString, Word64) FnRecoveryResult
+incFnResult mFnName fnAddress fnResult results = Map.insert (mFnName, fnAddress) fnResult results
+
+incStepError ::
+  ReoptStepTag ->
+  ReoptErrorTag ->
+  Map ReoptStepTag (Map ReoptErrorTag Natural) ->
+  Map ReoptStepTag (Map ReoptErrorTag Natural)
+incStepError stepTag failureTag = Map.alter logFail stepTag
+  where incErr Nothing    = Just 1 -- if there is not an entry for the particular error, start at 1
+        incErr (Just cnt) = Just $ cnt+1 -- otherwise just increment the count by 1
+        logFail Nothing = Just $ Map.fromList [(failureTag, 1)] -- if there is no map for this step, start one
+        logFail (Just m) = Just $ Map.alter incErr failureTag m -- otherwise just increment the particular failure
+
+-- | Combine two maps of reopt failures, i.e., combining their respective counts.
+mergeFnFailures ::
+  Map ReoptStepTag (Map ReoptErrorTag Natural) ->
+  Map ReoptStepTag (Map ReoptErrorTag Natural) ->
+  Map ReoptStepTag (Map ReoptErrorTag Natural)
+mergeFnFailures = Map.unionWith mergeStepMap
+  where mergeStepMap :: Map ReoptErrorTag Natural -> Map ReoptErrorTag Natural -> Map ReoptErrorTag Natural
+        mergeStepMap = Map.unionWith (+)
+
+-- | Render the registered failures in an indented list-style Doc.
+renderAllFailures' :: Map ReoptStepTag (Map ReoptErrorTag Natural) -> Doc ()
+renderAllFailures' = vsep . (map renderStepFailures) . Map.toList
+  where
+    renderStepFailures :: (ReoptStepTag, Map ReoptErrorTag Natural) -> Doc ()
+    renderStepFailures (tag, failures) =
+      let hdr = hsep [pretty $ stepCount failures
+                     , pretty "failures during"
+                     , (pretty $ ppReoptStepTag tag) <> (pretty " step:")]
+      in hang 2 $ vsep $ [hdr] ++ (map renderFailure $ Map.toList failures)
+    renderFailure :: (ReoptErrorTag, Natural) -> Doc ()
+    renderFailure (tag, cnt) = hsep [pretty $ show cnt, pretty $ ppReoptErrorTag tag]
+    stepCount :: Map ReoptErrorTag Natural -> Natural
+    stepCount = foldl' (+) 0 . Map.elems
+
+
+renderAllFailures :: Map ReoptStepTag (Map ReoptErrorTag Natural) -> String
+renderAllFailures  failures =
+  renderString
+  $ layoutPretty defaultLayoutOptions
+  $ indent 2
+  $ renderAllFailures' failures
+
 
 -- | Header row for data produced by @statsRows@
 statsHeader :: [String]
@@ -185,31 +343,4 @@ statsRows stats = map toCsvRow $ Map.toList $ statsFnResults stats
         toCsvRow ((mNm, faddr), res) =
           let name = case mNm of Nothing -> ""; Just nm -> BS.unpack nm
               hexAddr = "0x" ++ showHex faddr ""
-          in [statsBinary stats, name, hexAddr, show res]
-
-exportFnStats :: FilePath -- ^ Path to write statistics to.
-              -> ReoptStats -- ^ Stats to export.
-              -> IO ()
-exportFnStats outPath stats = do
-  let hdrStr = intercalate "," statsHeader
-      rowsStr = map (intercalate ",") $ statsRows stats
-  writeFile outPath $ unlines $ hdrStr:rowsStr
-
--- | Print and/or export statistics (if relevant flags are set) and the error count.
-reportStats
-  :: Bool -- ^ Whether to print statistics to stderr.
-  -> Maybe FilePath -- ^ Where to export stats to.
-  -> ReoptStats
-  -> IO ()
-reportStats printStats mStatsPath stats = do
-  when printStats $ do
-    hPutStrLn stderr $ renderFnStats stats
-  case mStatsPath of
-    Nothing -> pure ()
-    Just statsPath -> exportFnStats statsPath stats
-  when ((statsErrorCount stats) > 0) $ do
-    hPutStrLn stderr $
-      if (statsErrorCount stats) == 1 then
-        "1 error occured."
-       else
-        show (statsErrorCount stats) ++ " errors occured."
+          in [statsBinaryPath stats, name, hexAddr, show res]
