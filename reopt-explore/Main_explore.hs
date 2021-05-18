@@ -127,6 +127,7 @@ formatNatural = addCommas . show
                         ([], _) -> Nothing
                         p -> Just p
 
+-- FIXME use a package for this textual alignment...?
 binStats :: ReoptStats -> String -> String
 binStats stats llvmGen =
   let sizeHdr       = "          Binary size (bytes): "
@@ -135,20 +136,10 @@ binStats stats llvmGen =
       recoveredHdr  = "          Functions recovered: "
       totalErrsHdr  = "    Total error/warning count: "
       llvmGenHdr    = "       LLVM generation status: "
-      step1Hdr      = "        Initialization errors: "
-      step2Hdr      = " Header type inference errors: "
-      step3Hdr      = "  Debug type inference errors: "
-      step4Hdr      = "             Discovery errors: "
-      step5Hdr      = "    Argument inference errors: "
-      step6Hdr      = "   Invariant inference errors: "
-      step7Hdr      = "              Recovery errors: "
-      step1ErrCount = stepErrorCount DiscoveryInitializationStepTag stats
-      step2ErrCount = stepErrorCount HeaderTypeInferenceStepTag stats
-      step3ErrCount = stepErrorCount DebugTypeInferenceStepTag stats
-      step4ErrCount = stepErrorCount DiscoveryStepTag stats
-      step5ErrCount = stepErrorCount FunctionArgInferenceStepTag stats
-      step6ErrCount = stepErrorCount InvariantInferenceStepTag stats
-      step7ErrCount = stepErrorCount RecoveryStepTag stats
+      discErrHdr    = "             Discovery errors: "
+      recErrHdr     = "              Recovery errors: "
+      discErrCount = stepErrorCount DiscoveryStepTag stats
+      recErrCount = stepErrorCount RecoveryStepTag stats
       maybeRow cnt hdr = if cnt == 0 then [] else [hdr ++ (show cnt)]
   in unlines $
        [ statsBinaryPath stats
@@ -157,13 +148,8 @@ binStats stats llvmGen =
        , discoveredHdr ++ show (statsFnDiscoveredCount stats)
        , recoveredHdr ++ show (statsFnRecoveredCount stats)
        ]
-       ++ (maybeRow step1ErrCount step1Hdr)
-       ++ (maybeRow step2ErrCount step2Hdr)
-       ++ (maybeRow step3ErrCount step3Hdr)
-       ++ (maybeRow step4ErrCount step4Hdr)
-       ++ (maybeRow step5ErrCount step5Hdr)
-       ++ (maybeRow step6ErrCount step6Hdr)
-       ++ (maybeRow step7ErrCount step7Hdr)
+       ++ (maybeRow discErrCount discErrHdr)
+       ++ (maybeRow recErrCount recErrHdr)
        ++ [ totalErrsHdr ++ show (statsErrorCount stats)
           , llvmGenHdr ++ llvmGen
           ]

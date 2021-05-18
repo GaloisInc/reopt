@@ -19,6 +19,8 @@ module Reopt.Events
   , stepErrorCount
   , incFnResult
   , incStepError
+  , reoptStepTag
+  , stepFailResult
   , mergeFnFailures
   , statsHeader
   , statsRows
@@ -90,26 +92,32 @@ data ReoptEventSeverity
    | ReoptWarning
      -- ^ Warning that something was amiss that likely will affect results.
 
+-- | Tags for reporting errors during various reopt steps.
 data ReoptStepTag
-  = DiscoveryInitializationStepTag
-  | HeaderTypeInferenceStepTag
-  | DebugTypeInferenceStepTag
-  | DiscoveryStepTag
-  | FunctionArgInferenceStepTag
-  | InvariantInferenceStepTag
+  = DiscoveryStepTag
   | RecoveryStepTag
   deriving (Eq, Ord, Show)
 
 ppReoptStepTag :: ReoptStepTag -> String
 ppReoptStepTag =
   \case
-    DiscoveryInitializationStepTag -> "discovery initialization"
-    HeaderTypeInferenceStepTag -> "header type inference"
-    DebugTypeInferenceStepTag -> "debug type inference"
     DiscoveryStepTag -> "discovery"
-    FunctionArgInferenceStepTag -> "function argument inference"
-    InvariantInferenceStepTag -> "invariant inference"
     RecoveryStepTag -> "recovery"
+
+-- | Returns the step tag corresponding to the given ReoptStep.
+-- N.B., we combine several inference steps and just refer to
+-- them as part of discovery for error reporting purposes.
+reoptStepTag :: ReoptStep arch a -> ReoptStepTag
+reoptStepTag =
+  \case
+    DiscoveryInitialization{} -> DiscoveryStepTag
+    HeaderTypeInference{} -> DiscoveryStepTag
+    DebugTypeInference{} -> DiscoveryStepTag
+    Discovery{} -> DiscoveryStepTag
+    FunctionArgInference{} -> DiscoveryStepTag
+    InvariantInference{} -> DiscoveryStepTag
+    Recovery{} -> RecoveryStepTag
+
 
 -- | A specific reason a ReoptStep failed for reporting purposes/statistics.
 data ReoptErrorTag
@@ -229,8 +237,22 @@ data FnRecoveryResult
   | FnRecovered
   | FnFailedDiscovery
   | FnFailedRecovery
-  | FnFailedArgInference
   deriving (Show, Eq)
+
+-- | Convert the failure of a step to the appropriate FnRecoveryResult if
+-- possible along with the address and function name (if present), else return
+-- Nothing.
+stepFailResult :: ReoptStep arch a -> Maybe (FnRecoveryResult, Word64, Maybe BS.ByteString)
+stepFailResult =
+  \case
+    DiscoveryInitialization{} -> Nothing
+    HeaderTypeInference{} -> Nothing
+    DebugTypeInference{} -> Nothing
+    Discovery a mnm -> Just (FnFailedDiscovery, a, mnm)
+    FunctionArgInference (Just (a, mnm)) -> Just (FnFailedDiscovery, a, mnm)
+    FunctionArgInference Nothing -> Nothing
+    InvariantInference a mnm-> Just (FnFailedRecovery, a, mnm)
+    Recovery a mnm -> Just (FnFailedRecovery, a, mnm)
 
 -- | Statistics summarizing our recovery efforts.
 data ReoptStats =

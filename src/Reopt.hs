@@ -2130,24 +2130,14 @@ recoverLogEvent statsRef event = do
                            , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
           modifyIORef' statsRef update
         _ -> pure ()
-    ReoptStepFailed step errTag _errMsg ->
-      case step of
-        Discovery addr mNm -> do
-          let update s = s { statsFnResults = incFnResult mNm addr FnFailedDiscovery $ statsFnResults s
-                           , statsStepErrors = incStepError DiscoveryStepTag errTag $ statsStepErrors s
-                           }
-          modifyIORef' statsRef update
-        Recovery addr mNm -> do
-          let update s = s { statsFnResults = incFnResult mNm addr FnFailedRecovery $ statsFnResults s
-                           , statsStepErrors = incStepError RecoveryStepTag errTag $ statsStepErrors s
-                           }
-          modifyIORef' statsRef update
-        FunctionArgInference (Just (addr, mNm)) -> do
-          let update s = s { statsFnResults = incFnResult mNm addr FnFailedRecovery $ statsFnResults s
-                           , statsStepErrors = incStepError FunctionArgInferenceStepTag errTag $ statsStepErrors s
-                           }
-          modifyIORef' statsRef update
-        _ -> pure ()
+    ReoptStepFailed step errTag _errMsg -> do
+      case stepFailResult step of
+          Nothing -> pure ()
+          Just (result, addr, mNm) -> do
+            let update s = s { statsFnResults = incFnResult mNm addr result $ statsFnResults s }
+            modifyIORef' statsRef update
+      let update s = s { statsStepErrors = incStepError (reoptStepTag step) errTag $ statsStepErrors s }
+      modifyIORef' statsRef update
 
 getFileSize :: String -> IO Natural
 getFileSize path = do
