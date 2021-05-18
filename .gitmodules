@@ -25,3 +25,6 @@
 [submodule "deps/reopt-vcg"]
 	path = deps/reopt-vcg
 	url = git@github.com:GaloisInc/reopt-vcg.git
+[submodule "deps/reopt-benchmark-binaries"]
+	path = deps/reopt-benchmark-binaries
+	url = git@github.com:GaloisInc/reopt-benchmark-binaries.git
