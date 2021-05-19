@@ -69,8 +69,15 @@ jobs:
       run: cabal update
     - name: Install
       run: cabal install -j exe:reopt
-    - name: Test
+    - name: Unit Tests
       run: cabal test -j reopt-tests
+    - name: CentOS7 Dev Bin Tests
+      run: ./reopt_explore_tests.sh
+    - name: reopt-explore CentOS7 Summary Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: centos7-bin-summary.txt
+        path: centos7-dev/centos7-bin-summary.txt
     - name: Create archive
       run: |
         mkdir -p dist/reopt/bin
