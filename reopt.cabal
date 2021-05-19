@@ -55,6 +55,7 @@ library
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
+    Reopt.Events
     Reopt.ExternalTools
     Reopt.Relinker.Binary
     Reopt.Server
@@ -68,7 +69,6 @@ library
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
     Reopt.CFG.StackDepth
-    Reopt.Events
     Reopt.Hints
     Reopt.Relinker
     Reopt.Relinker.Constants
@@ -132,6 +132,7 @@ executable reopt-explore
     base >= 4,
     bytestring,
     cmdargs,
+    containers,
     elf-edit,
     lens,
     macaw-base,

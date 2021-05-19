@@ -66,11 +66,16 @@ module Reopt
     -- * Utility
   , copyrightNotice
     -- * Reporting
+  , Reopt.Events.ReoptStepTag(..)
+  , Reopt.Events.ReoptErrorTag(..)
   , Reopt.Events.ReoptStats(..)
   , Reopt.Events.initReoptStats
-  , Reopt.Events.reportStats
   , Reopt.Events.statsHeader
   , Reopt.Events.statsRows
+  , Reopt.Events.statsStepErrorCount
+  , Reopt.Events.mergeFnFailures
+  , Reopt.Events.renderAllFailures
+  , Reopt.Events.stepErrorCount
   , joinLogEvents
   , printLogEvent
   , recoverLogEvent
@@ -113,6 +118,7 @@ import qualified Data.Vector as V
 import           Data.Word
 import qualified Flexdis86 as F
 import           Numeric
+import           Numeric.Natural (Natural)
 import           System.Exit
 import           System.IO
 import           System.IO.Error
@@ -1015,11 +1021,13 @@ discEventToGetFnsEvent symMap e =
     ReportAnalyzeFunctionDone a -> do
       ReoptStepFinished (Discovery (segoffWord64 a) (Map.lookup a symMap)) ()
     ReportIdentifyFunction a tgt rsn -> do
-      ReoptLogEvent (Discovery (segoffWord64 a) (Map.lookup a symMap)) ReoptInfo  $
-        printf "Candidate function %s %s." (ppFnEntry (Map.lookup tgt symMap) tgt) (ppFunReason rsn)
+      ReoptLogEvent (Discovery (segoffWord64 a) (Map.lookup a symMap)) ReoptInfo
+      $ ReoptLogMessage
+      $ printf "Candidate function %s %s." (ppFnEntry (Map.lookup tgt symMap) tgt) (ppFunReason rsn)
     ReportAnalyzeBlock fa b ->
-      ReoptLogEvent (Discovery (segoffWord64 fa) (Map.lookup fa symMap)) ReoptInfo $
-        printf "Discovered block %s." (ppSegOff b)
+      ReoptLogEvent (Discovery (segoffWord64 fa) (Map.lookup fa symMap)) ReoptInfo
+      $ ReoptLogMessage
+      $ printf "Discovered block %s." (ppSegOff b)
 
 $(pure [])
 
@@ -1030,14 +1038,19 @@ $(pure [])
 stepStarted :: ReoptStep arch a -> IncCompM (ReoptLogEvent arch) r ()
 stepStarted s = incCompLog (ReoptStepStarted s)
 
+logInitEntryPointCount :: Int -> IncCompM (ReoptLogEvent arch) r ()
+logInitEntryPointCount cnt =
+  let n = if cnt >= 0 then fromIntegral cnt else 0
+  in incCompLog (ReoptLogEvent DiscoveryInitialization ReoptInfo (ReoptLogInitEntryPointCount n))
+
 logEvent :: ReoptStep arch a -> ReoptEventSeverity -> String -> IncCompM (ReoptLogEvent arch) r ()
-logEvent s t m = incCompLog (ReoptLogEvent s t m)
+logEvent s t m = incCompLog (ReoptLogEvent s t (ReoptLogMessage m))
 
 stepFinished :: ReoptStep arch a -> a -> IncCompM (ReoptLogEvent arch) r ()
 stepFinished s x = incCompLog (ReoptStepFinished s x)
 
-stepFailed :: ReoptStep arch a -> String -> IncCompM (ReoptLogEvent arch) r ()
-stepFailed s m = incCompLog (ReoptStepFailed s m)
+stepFailed :: ReoptStep arch a -> ReoptErrorTag -> String -> IncCompM (ReoptLogEvent arch) r ()
+stepFailed s tag m = incCompLog (ReoptStepFailed s tag m)
 
 ---------------------------------------------------------------------------------
 -- Initial type inference
@@ -1139,6 +1152,7 @@ doDiscovery :: forall arch r
                   )
 doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ do
   let s = initDiscoveryState initState
+  logInitEntryPointCount $ Map.size $ view unexploredFunctions s
   let mem = memory s
   let symAddrMap = initDiscSymAddrMap initState
 
@@ -1174,7 +1188,7 @@ discoverBinary logger path loadOpts disOpt reoptOpts hdrAnn = do
   -- Parse elf file to get relevant state.
   initState <-
     runReoptInIO logger $ do
-      mr <- liftIncComp (ReoptLogEvent DiscoveryInitialization ReoptWarning) $ do
+      mr <- liftIncComp ((ReoptLogEvent DiscoveryInitialization ReoptWarning) . ReoptLogMessage) $ do
         initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts
       case mr of
         Left msg -> do
@@ -1717,25 +1731,25 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
       resolveFn callSite callRegs = do
         callArgValues <$> x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs
 
-  stepStarted FunctionArgInference
+  stepStarted $ FunctionArgInference Nothing
 
   let (dems, summaryFails) =
         functionDemands (x86DemandInfo sysp) mem resolveFn $
           filter (not . known) $ exploredFunctions discState
 
-  forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
+  forM_ (Map.toList summaryFails) $ \(faddrOff, rsn) -> do
+    let dnm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
+                 discoveredFunSymbol finfo
+    let faddrAndNm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
+                        pure $ (memWordValue (addrOffset (segoffAddr ( discoveredFunAddr finfo))), discoveredFunSymbol finfo)
     case rsn of
       PLTStubNotSupported ->
         pure () -- error "internal x86ArgumentAnalysis provided PLTStub"
       CallAnalysisError callSite msg -> do
-        let dnm = do
-              Some finfo <- Map.lookup faddr (discState^.funInfo)
-              discoveredFunSymbol finfo
-        logEvent FunctionArgInference ReoptWarning $
-          printf "Call analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddr) msg
-  stepFinished FunctionArgInference ()
+        let errMsg = printf "Call analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddrOff) msg
+        stepFailed (FunctionArgInference faddrAndNm) MacawCallAnalysisErrorTag errMsg
+  stepFinished (FunctionArgInference Nothing) ()
   pure $ inferFunctionTypeFromDemands dems
-
 
 -- | Analyze an elf binary to extract information.
 --
@@ -1797,8 +1811,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
       case checkFunction finfo of
         FunctionOK -> do
           case x86BlockInvariants sysp mem funNameMap funTypeMap finfo of
-            Left msg -> do
-              stepFailed fnInvEvt msg
+            Left (failTag, msg) -> do
+              stepFailed fnInvEvt failTag msg
               pure Nothing
             Right invMap -> do
               stepFinished fnInvEvt invMap
@@ -1806,20 +1820,20 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
               let fnRecEvt = Recovery (memWordValue (addrOffset (segoffAddr faddr))) dnm
               stepStarted fnRecEvt
               case recoverFunction sysp funNameMap funTypeMap mem finfo invMap of
-                Left msg -> do
-                  stepFailed fnRecEvt msg
+                Left (errTag, errMsg) -> do
+                  stepFailed fnRecEvt errTag errMsg
                   pure Nothing
                 Right (warnings, fn) -> do
                   mapM_ (logEvent fnRecEvt ReoptWarning) warnings
                   stepFinished fnRecEvt ()
                   pure (Just fn)
-        FunctionIncomplete -> do
-          stepFailed fnInvEvt "Incomplete discovery."
+        FunctionIncomplete errTag -> do
+          stepFailed fnInvEvt errTag "Incomplete discovery."
           pure Nothing
         -- We should have filtered out PLT entries from the explored functions,
         -- so this is considered an error.
         FunctionHasPLT -> do
-          stepFailed fnInvEvt "Encountered unexpected PLT stub."
+          stepFailed fnInvEvt ReoptCannotRecoverFnWithPLTStubsTag "Encountered unexpected PLT stub."
           pure Nothing
   -- Get list of names of functions defined
   let definedNames :: Set.Set BSC.ByteString
@@ -1907,7 +1921,7 @@ recoverX86Elf' loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
         logEvent DiscoveryInitialization ReoptWarning (warnABIUntested (Elf.headerOSABI hdr))
         pure Linux
   let ainfo = osArchitectureInfo os
-  mr <- liftIncComp (ReoptLogEvent DiscoveryInitialization ReoptWarning) $ do
+  mr <- liftIncComp ((ReoptLogEvent DiscoveryInitialization ReoptWarning) . ReoptLogMessage) $ do
     initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts
 
   initState <-
@@ -2093,22 +2107,42 @@ recoverLogEvent statsRef event = do
     modifyIORef' statsRef $ \s -> s {statsErrorCount = 1 + (statsErrorCount s)}
   -- Record more detailed info when appropriate.
   case event of
-    ReoptStepStarted (Recovery addr mNm) -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
-                       , statsFnDiscoveredCount = 1 + (statsFnDiscoveredCount s)
-                       }
+    ReoptLogEvent _step _severity content ->
+      case content of
+        ReoptLogInitEntryPointCount cnt -> do
+          let update s = s { statsInitEntryPointCount = cnt }
+          modifyIORef' statsRef update
+        ReoptLogMessage _ -> pure ()
+    ReoptStepStarted step ->
+      case step of
+        Discovery _ _ -> do
+          let update s = s { statsFnDiscoveredCount = 1 + (statsFnDiscoveredCount s) }
+          modifyIORef' statsRef update
+        _ -> pure ()
+    ReoptStepFinished step _ ->
+      case step of
+        Discovery addr mNm -> do
+          let update s = s { statsFnResults = Map.insert (mNm, addr) FnDiscovered (statsFnResults s)
+                           }
+          modifyIORef' statsRef update
+        Recovery addr mNm -> do
+          let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
+                           , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
+          modifyIORef' statsRef update
+        _ -> pure ()
+    ReoptStepFailed step errTag _errMsg -> do
+      case stepFailResult step of
+          Nothing -> pure ()
+          Just (result, addr, mNm) -> do
+            let update s = s { statsFnResults = incFnResult mNm addr result $ statsFnResults s }
+            modifyIORef' statsRef update
+      let update s = s { statsStepErrors = incStepError (reoptStepTag step) errTag $ statsStepErrors s }
       modifyIORef' statsRef update
-    ReoptStepFinished (Recovery addr mNm) _ -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnRecovered (statsFnResults s)
-                       , statsFnRecoveredCount = 1 + (statsFnRecoveredCount s) }
-      modifyIORef' statsRef update
-    ReoptStepFailed (Recovery addr mNm) _errMsg -> do
-      let update s = s { statsFnResults = Map.insert (mNm, addr) FnFailedRecovery (statsFnResults s)
-                       , statsFnFailedCount = 1 + statsFnFailedCount s
-                       }
-      modifyIORef' statsRef update
-    _ -> pure ()
 
+getFileSize :: String -> IO Natural
+getFileSize path = do
+    stat <- getFileStatus path
+    return $ fromIntegral (fileSize stat)
 
 -- | Parse arguments to get information needed for function representation.
 recoverFunctions
@@ -2122,7 +2156,8 @@ recoverFunctions
   -> IO (X86OS, RecoveredModule X86_64, ReoptStats)
 recoverFunctions progPath clangPath lOpts dOpts rOpts mCHdr unnamedFnPrefix = do
   hdrAnn <- resolveHeader mCHdr clangPath
-  statsRef <- newIORef $ initReoptStats progPath
+  progSize <- getFileSize progPath
+  statsRef <- newIORef $ initReoptStats progPath progSize
   (_, os, _, recMod, _) <-
     recoverX86Elf (joinLogEvents printLogEvent (recoverLogEvent statsRef))
                   progPath

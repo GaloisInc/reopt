@@ -51,7 +51,7 @@ import           Data.Parameterized.Map (MapF, Pair(..))
 import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import           Data.Parameterized.TraversableF
+import Data.Parameterized.TraversableF ( TraversableF(traverseF) )
 import           Data.Parameterized.TraversableFC
 import           Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -76,6 +76,7 @@ import           Data.Macaw.X86 (x86DemandContext, x86_64CallParams)
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
 import           Reopt.CFG.LLVM.X86 (x86ArchFnToLLVM)
+import           Reopt.Events (ReoptErrorTag(..))
 import qualified Reopt.Utils.Printf as Printf
 
 fromSomeList :: [Some f] -> Some (P.List f)
@@ -258,7 +259,7 @@ data FunRecoverState = FRS { frsNextAssignId :: !FnAssignId
                            }
 
 data RecoverError w
-   = RecoverErrorAt !(MemAddr w) !String
+   = RecoverErrorAt !ReoptErrorTag !(MemAddr w) !String
 
 -- | Monad for function recovery
 newtype FunRecover ids a =
@@ -267,13 +268,13 @@ newtype FunRecover ids a =
 
 runFunRecover :: FunRecoverContext ids
               -> FunRecover ids a
-              -> Either String ([String], a)
+              -> Either (ReoptErrorTag, String) ([String], a)
 runFunRecover ctx m =
   let s0 = FRS { frsNextAssignId = FnAssignId 0
                , frsWarnings = []
                }
    in case runExcept (runStateT (runReaderT (runFR m) ctx) s0) of
-        Left (RecoverErrorAt a e) -> Left $ show (addrOffset a)  <> ": " <> e
+        Left (RecoverErrorAt tag a e) -> Left (tag, show (addrOffset a)  <> ": " <> e)
         Right (a,s) -> Right (frsWarnings s, a)
 
 -- | Create a fresh assign id.
@@ -358,12 +359,12 @@ mkReturnVar tp = (`FnReturnVar` tp) <$> freshId
 addFnStmt :: FnStmt X86_64 -> Recover ids ()
 addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 
-throwErrorAt :: String -> Recover ids a
-throwErrorAt msg = do
+throwErrorAt :: ReoptErrorTag -> String -> Recover ids a
+throwErrorAt tag msg = do
   sa <- gets rsStartAddr
   o <- gets rsBlockOff
   let curAddr = incAddr (toInteger o) (segoffAddr sa)
-  throwError $ RecoverErrorAt curAddr msg
+  throwError $ RecoverErrorAt tag curAddr msg
 
 $(pure [])
 
@@ -428,7 +429,7 @@ coerceSlicedRegValue :: FnRegValue X86_64 wtp
 coerceSlicedRegValue v NoMemSlice = do
   coerceRegValue v
 coerceSlicedRegValue (EmbeddingApp _v _pr) ms@MemSlice{} =
-  throwErrorAt $ "Mem slice not supported: " ++ show ms
+  throwErrorAt ReoptUnsupportedMemOpTag $ "Mem slice not supported: " ++ show ms
 
 -- | This takes a value written to memory (e.g., the stack),
 -- and coerces it to a value of the read type while bypassing
@@ -447,7 +448,7 @@ coerceWriteToRead (EmbeddingApp v emb) writeRepr readRepr
   , writeEnd == readEnd =
       bitcast v (WidthEqTrans pr (ToFloat readFloatRepr))
   | otherwise =
-      throwErrorAt $
+      throwErrorAt ReoptTypeMismatchTag $
         printf "Cannot read type %s from write of type %s."
                (show readRepr) (show writeRepr)
 
@@ -468,7 +469,7 @@ $(pure [])
 
 unsupportedFnValue :: String -> TypeRepr tp -> Recover ids (FnValue X86_64 tp)
 unsupportedFnValue nm _repr = do
-  throwErrorAt $ "Cannot create value: " ++ nm
+  throwErrorAt ReoptUnsupportedFnValueTag $ "Cannot create value: " ++ nm
 
 -- | Recover a constant.
 recoverCValue :: HasCallStack
@@ -514,8 +515,9 @@ recoverAssignId aid = do
   case MapF.lookup aid assignMap of
     Just rval -> pure rval
     Nothing ->
-      throwErrorAt $ "Encountered uninitialized assignment: " ++ show aid ++ "\n"
-                ++ show (MapF.keys assignMap)
+      throwErrorAt ReoptUninitializedAssignmentTag $
+        "Encountered uninitialized assignment: " ++ show aid ++ "\n"
+        ++ show (MapF.keys assignMap)
 
 $(pure [])
 
@@ -711,8 +713,9 @@ recoverAssign asgn = do
           Just _ ->
             pure ()
           Nothing -> do
-            throwErrorAt $ "LLVM backend does not yet support: "
-                      ++ show (runIdentity (ppArchFn (pure . pretty) f))
+            throwErrorAt ReoptUnimplementedLLVMBackendFeatureTag $
+              "LLVM backend does not yet support: "
+              ++ show (runIdentity (ppArchFn (pure . pretty) f))
         setAssignRhs aid (FnEvalArchFn fval)
     ReadMem addr memRepr -> do
       access <- popMemAccessInfo
@@ -726,7 +729,7 @@ recoverAssign asgn = do
           whenAssignUsed aid $ do
             case d of
               ValueRegUseStackOffset _ -> do
-                throwErrorAt "Stack pointer escape."
+                throwErrorAt ReoptStackOffsetEscapeTag "Stack pointer escape."
               FnStartRegister _r -> do
                 error "Read callee saved register."
               RegEqualLoc l ->
@@ -736,7 +739,7 @@ recoverAssign asgn = do
                     m <- gets rsPhiLocMap
                     case MapF.lookup l m of
                       Nothing ->
-                        throwErrorAt "Uninitialized phi variable."
+                        throwErrorAt ReoptUninitializedPhiVarTag "Uninitialized phi variable."
                       Just rv -> do
                         v <- coerceRegValue rv
                         setAssignVal aid v
@@ -751,12 +754,12 @@ recoverAssign asgn = do
         FrameReadOverlapAccess _ -> do
           pushMemAccessType StackAccess
           whenAssignUsed aid $ do
-            throwErrorAt  $ "Stack read at an overlapping offset."
+            throwErrorAt ReoptStackReadOverlappingOffsetTag "Stack read at an overlapping offset."
         FrameWriteAccess{} -> error "Expected read access"
         FrameCondWriteAccess{} -> error "Expected read access"
         FrameCondWriteOverlapAccess{} -> error "Expected read access"
     CondReadMem _tp _cond _addr _def -> do
-      throwErrorAt "Conditional reads are not yet supported."
+      throwErrorAt ReoptUnimplementedFeatureTag "Conditional reads are not yet supported."
 
 $(pure [])
 
@@ -819,17 +822,22 @@ resolveInferValue :: HasCallStack
 resolveInferValue tgt pvm l =
   case pvmFind l pvm of
     IVDomain (ValueRegUseStackOffset _) _ ->
-      throwErrorAt "Stack offset escaped."
+      throwErrorAt ReoptStackOffsetEscapeTag "Stack offset escaped."
     IVDomain (FnStartRegister _) _ ->
-      throwErrorAt "Callee-saved register escaped."
+      throwErrorAt ReoptRegisterEscapeTag "Callee-saved register escaped."
     IVDomain (RegEqualLoc lr) ms -> do
       m <- gets rsPhiLocMap
       case MapF.lookup lr m of
         Nothing -> do
           src <- gets rsStartAddr
-          throwErrorAt $
-            printf "Internal error: %s should provide value of %s (originally %s) to %s"
-                   (show src) (show (pretty lr)) (show (pretty l)) (show tgt)
+          let var  = show (pretty lr)
+              orig = show (pretty l)
+          throwErrorAt ReoptMissingVariableValue $
+            if var == orig
+            then printf "%s should provide value of %s to %s"
+                        (show src) var (show tgt)
+            else printf "%s should provide value of %s (originally %s) to %s"
+                        (show src) var orig (show tgt)
         Just rv ->
           Some <$> coerceSlicedRegValue rv ms
     IVAssignValue aid -> do
@@ -892,9 +900,9 @@ recoverX86TermStmt :: forall ids
 recoverX86TermStmt tstmt regs mnext_addr =
   case tstmt of
     Hlt ->
-      throwErrorAt "hlt is not supported in function recovery."
+      throwErrorAt ReoptUnsupportedInFnRecoveryTag "hlt is not supported in function recovery."
     UD2 -> do
-      throwErrorAt "ud2 is not supported in function recovery."
+      throwErrorAt ReoptUnsupportedInFnRecoveryTag "ud2 is not supported in function recovery."
     X86Syscall -> do
       sysp <- frcSyscallPersonality <$> getFunCtx
 
@@ -1081,7 +1089,7 @@ resolveRetInfoValue regRel retVal (RetBV64 r) =
   case MapF.lookup (X86_GP r) regRel of
     Just (RetRegRelation retFieldRel GPFieldRegRel) -> do
       getRetField retVal retFieldRel
-    Nothing -> throwErrorAt "Could not resolve return value."
+    Nothing -> throwErrorAt ReoptUnresolvedReturnValTag "Could not resolve return value."
 resolveRetInfoValue regRel retVal (RetZMM ZMM512D i) =
   case MapF.lookup (X86_ZMMReg i) regRel of
     Just (RetRegRelation retFieldRel ZmmV8DFieldRegRel) -> do
@@ -1090,7 +1098,7 @@ resolveRetInfoValue regRel retVal (RetZMM ZMM512D i) =
       vecVal <- evalAssignRhs $ FnSetUndefined knownRepr
       fv <- getRetField retVal retFieldRel
       evalAssignRhs $ FnEvalApp (InsertElement knownRepr vecVal 0 fv)
-    Nothing -> throwErrorAt "Could not resolve return value."
+    Nothing -> throwErrorAt ReoptUnresolvedReturnValTag "Could not resolve return value."
 resolveRetInfoValue regRel retVal (RetZMM ZMMDouble i) =
   case MapF.lookup (X86_ZMMReg i) regRel of
     Just (RetRegRelation retFieldRel ZmmDFieldRegRel) -> do
@@ -1098,7 +1106,7 @@ resolveRetInfoValue regRel retVal (RetZMM ZMMDouble i) =
     Just (RetRegRelation retFieldRel ZmmV8DFieldRegRel) -> do
       fv <- getRetField retVal retFieldRel
       evalAssignRhs $ FnEvalApp (ExtractElement knownRepr fv 0)
-    Nothing -> throwErrorAt "Could not resolve return value."
+    Nothing -> throwErrorAt ReoptUnresolvedReturnValTag "Could not resolve return value."
 
 resolveRetValueFields :: MapF X86Reg (RetRegRelation retType)
                       -> FnValue X86_64 retType
@@ -1225,11 +1233,11 @@ recoverBlock b = do
                 P.ifoldlM (g fieldTypes rv) MapF.empty retEmbeddings
       FnJump <$> recoverJumpTarget retMap retAddr
     PLTStub{} -> do
-      error $ "Cannot recover functions with PLT stubs."
+      throwErrorAt ReoptCannotRecoverFnWithPLTStubsTag "Cannot recover functions with PLT stubs."
     ParsedTranslateError{} -> do
-      error "Cannot recover function in blocks where translation error occurs."
+      throwErrorAt MacawParsedTranslateFailureTag "Cannot recover function in blocks where translation error occurs."
     ClassifyFailure{} ->
-      error $ "Classification failed in Recovery"
+      throwErrorAt MacawClassifyFailureTag "Classification failed in Recovery"
 
     ParsedJump _regs tgtAddr -> do
       -- Get target
@@ -1291,7 +1299,7 @@ evalRecover b inv preds phiVars locMap = do
               }
 
   pr <- case pblockPrecond b of
-          Left _e -> throwError (RecoverErrorAt (segoffAddr (pblockAddr b)) "Could not resolve block precondition.")
+          Left _e -> throwError (RecoverErrorAt ReoptBlockPreconditionUnresolvedTag (segoffAddr (pblockAddr b)) "Could not resolve block precondition.")
           Right pr -> pure pr
 
   (tm, s) <- runStateT (runRecover (recoverBlock b)) s0
@@ -1707,24 +1715,24 @@ x86BlockInvariants
   -> Map BSC.ByteString X86FunTypeInfo
      -- ^ Map from function name to the type information at that address.
   -> DiscoveryFunInfo X86_64 ids
-  -> Either String (BlockInvariantMap X86_64 ids)
+  -> Either (ReoptErrorTag, String) (BlockInvariantMap X86_64 ids)
 x86BlockInvariants sysp mem funNameMap funTypeMap fInfo = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
   -- Get name and type information inferred about fthis function.
   nm <-
     case Map.lookup entryAddr funNameMap of
-      Nothing -> Left $ "Missing name for " ++ show entryAddr ++ "."
+      Nothing -> Left (ReoptMissingNameTag, "Missing name for " ++ show entryAddr ++ ".")
       Just nm -> pure nm
   retRegs <-
     case Map.lookup nm funTypeMap of
       Nothing ->
-        Left $ printf "Missing type for %s." (BSC.unpack nm)
+        Left (ReoptMissingTypeTag, printf "Missing type for %s." (BSC.unpack nm))
       Just (X86NonvarargFunType _args rets) -> Right $ viewSome retReg <$> rets
       Just (X86PrintfFunType _) -> Right $ [Some (X86_GP F.RAX)]
       Just X86OpenFunType       -> Right $ [Some (X86_GP F.RAX)]
       Just X86UnsupportedFunType ->
-        Left $ printf "%s has an unsupported type." (BSC.unpack nm)
+        Left (ReoptUnsupportedTypeTag, printf "%s has an unsupported type." (BSC.unpack nm))
   let useCtx = RegisterUseContext
               { archCallParams = x86_64CallParams
               , archPostTermStmtInvariants = x86TermStmtNext
@@ -1737,7 +1745,7 @@ x86BlockInvariants sysp mem funNameMap funTypeMap fInfo = do
               , demandContext = x86DemandContext
               }
   case runExcept (registerUse useCtx fInfo) of
-    Left e -> Left (show e)
+    Left e -> Left (MacawRegisterUseErrorTag, show e)
     Right v -> Right v
 
 -- | Recover the function at a given address.
@@ -1756,7 +1764,7 @@ recoverFunction :: forall ids
                 -> DiscoveryFunInfo X86_64 ids
                 -> Map (MemSegmentOff 64) (BlockInvariants X86_64 ids)
                    -- ^ Inferred block invariants
-                -> Either String ([String], Function X86_64)
+                -> Either (ReoptErrorTag, String) ([String], Function X86_64)
 recoverFunction sysp funNameMap funTypeMap mem fInfo invMap = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
@@ -1764,18 +1772,18 @@ recoverFunction sysp funNameMap funTypeMap mem fInfo invMap = do
   nm <-
     case Map.lookup entryAddr funNameMap of
       Just nm -> pure nm
-      Nothing -> Left $ "Missing name for " ++ show entryAddr ++ "."
+      Nothing -> Left (ReoptMissingNameTag, "Missing name for " ++ show entryAddr ++ ".")
   (curArgs, curRets) <-
     case Map.lookup nm funTypeMap of
       Just (X86NonvarargFunType args rets) -> pure (args, rets)
       Just (X86PrintfFunType _) ->
-        Left $ BSC.unpack nm ++ " is a vararg function and not supported."
+        Left (ReoptVarArgFnTag, BSC.unpack nm ++ " is a vararg function and not supported.")
       Just X86OpenFunType ->
-        Left $ BSC.unpack nm ++ " is a vararg function and not supported."
+        Left (ReoptVarArgFnTag, BSC.unpack nm ++ " is a vararg function and not supported.")
       Just X86UnsupportedFunType ->
-        Left $ printf "%s has an unsupported type." (BSC.unpack nm)
+        Left (ReoptUnsupportedTypeTag, printf "%s has an unsupported type." (BSC.unpack nm))
       Nothing ->
-        Left $ printf "Missing type for %s." (BSC.unpack nm)
+        Left (ReoptMissingTypeTag, printf "Missing type for %s." (BSC.unpack nm))
 
   let funCtx = FRC { frcMemory = mem
                    , frcInterp = fInfo

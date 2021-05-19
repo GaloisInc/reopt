@@ -3,21 +3,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
 
-import Control.Monad (when, foldM)
+import Control.Monad (foldM)
 import Control.Exception (catch, SomeException)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.List ( intercalate, foldl', unfoldr, intersperse)
 import Data.Macaw.Discovery ( DiscoveryOptions(..) )
 import Data.Macaw.X86 ( X86_64 )
-import Data.List ( intercalate )
-import Data.Maybe ( isNothing )
+import           Data.Map (Map)
+import qualified Data.Map.Strict as Map
 import Data.Version ( Version(versionBranch) )
 import Numeric.Natural ( Natural )
 import Paths_reopt (version)
 import Reopt
     ( LoadOptions(LoadOptions, loadOffset),
       ReoptOptions(ReoptOptions, roIncluded, roExcluded),
+      ReoptStepTag(..),
+      ReoptErrorTag(..),
       copyrightNotice,
       ReoptStats(..),
       statsHeader,
@@ -25,16 +28,19 @@ import Reopt
       renderLLVMBitcode,
       defaultLLVMGenOptions,
       latestLLVMConfig,
+      renderAllFailures,
+      stepErrorCount,
+      mergeFnFailures,
       statsRows,
       RecoveredModule,
       X86OS
     )
 import Reopt.Utils.Dir
 import System.Console.CmdArgs.Explicit
-    ( process, flagNone, flagReq, mode, Arg(..), Flag, Mode )
+    ( process, flagReq, mode, Arg(..), Flag, Mode )
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import System.IO (hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, stderr)
 import Text.Printf (printf)
 
 reoptVersion :: String
@@ -52,8 +58,6 @@ data Args
             --
             -- This is only used as a C preprocessor for parsing
             -- header files.
-          , printStats :: !Bool
-            -- ^ Should we print discovery/recovery statistics to stdout?
           , exportStatsPath :: !(Maybe FilePath)
             -- ^ Should we export discovery/recovery statistics?
           }
@@ -63,7 +67,6 @@ defaultArgs =
   Args
   { programPaths  = []
   , clangPath = "clang"
-  , printStats = False
   , exportStatsPath = Nothing
   }
 
@@ -73,11 +76,6 @@ clangPathFlag =
   let upd s old = Right $ old {clangPath = s}
       help = printf "Path to clang (default "++(clangPath defaultArgs)++")"
   in flagReq [ "clang" ] upd "PATH" help
-
-statsPrintFlag :: Flag Args
-statsPrintFlag = flagNone [ "print-stats" ] upd help
-  where upd old = old { printStats = True}
-        help = "Print discovery/recovery statistics."
 
 statsExportFlag :: Flag Args
 statsExportFlag = flagReq [ "export-stats" ] upd "PATH" help
@@ -98,7 +96,6 @@ arguments :: Mode Args
 arguments = mode "reopt-explore" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
         flags = [ clangPathFlag
-                , statsPrintFlag
                 , statsExportFlag
                 ]
 
@@ -123,23 +120,45 @@ data ExplorationResult
   = ExplorationStats ReoptStats LLVMGenResult
   | ExplorationError FilePath String
 
+formatNatural :: Natural -> String
+formatNatural = addCommas . show
+    where addCommas = reverse . concat . intersperse "," . unfoldr chunkBy3 . reverse
+          chunkBy3 l = case splitAt 3 l of
+                        ([], _) -> Nothing
+                        p -> Just p
+
+-- FIXME use a package for this textual alignment...?
 binStats :: ReoptStats -> String -> String
 binStats stats llvmGen =
-  unlines
-    [ statsBinary stats
-    , "  Discovered:  " ++ show (statsFnDiscoveredCount stats)
-    , "  Recovered:   " ++ show (statsFnRecoveredCount stats)
-    , "  PLT entries: " ++ show (statsFnPLTSkippedCount stats)
-    , "  Failures:    " ++ show (statsFnFailedCount stats)
-    , "  Errors:      " ++ show (statsErrorCount stats)
-    , "  LLVM:        " ++ llvmGen
-    ]
+  let sizeHdr       = "          Binary size (bytes): "
+      entriesHdr    = "         Initial entry points: "
+      discoveredHdr = "         Functions discovered: "
+      recoveredHdr  = "          Functions recovered: "
+      totalErrsHdr  = "    Total error/warning count: "
+      llvmGenHdr    = "       LLVM generation status: "
+      discErrHdr    = "             Discovery errors: "
+      recErrHdr     = "              Recovery errors: "
+      discErrCount = stepErrorCount DiscoveryStepTag stats
+      recErrCount = stepErrorCount RecoveryStepTag stats
+      maybeRow cnt hdr = if cnt == 0 then [] else [hdr ++ (show cnt)]
+  in unlines $
+       [ statsBinaryPath stats
+       , sizeHdr ++ (formatNatural $ statsBinarySize stats)
+       , entriesHdr ++ show (statsInitEntryPointCount stats)
+       , discoveredHdr ++ show (statsFnDiscoveredCount stats)
+       , recoveredHdr ++ show (statsFnRecoveredCount stats)
+       ]
+       ++ (maybeRow discErrCount discErrHdr)
+       ++ (maybeRow recErrCount recErrHdr)
+       ++ [ totalErrsHdr ++ show (statsErrorCount stats)
+          , llvmGenHdr ++ llvmGen
+          ]
 
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult =
   \case
-    ExplorationStats stats (LLVMGenPass _n)  -> do
-      binStats stats "Success"
+    ExplorationStats stats (LLVMGenPass sz)  -> do
+      binStats stats $ printf "Succeeded (%s bytes generated)" (formatNatural sz)
     ExplorationStats stats (LLVMGenFail errMsg)  ->
       binStats stats ("Failed: " ++ errMsg)
     ExplorationError fpath errMsg ->
@@ -167,8 +186,8 @@ exploreBinary args results fPath = do
             , logAtAnalyzeBlock      = False
             }
     rOpts = ReoptOptions { roIncluded = []
-                          , roExcluded = []
-                          }
+                         , roExcluded = []
+                         }
     hdrPath = Nothing
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
@@ -192,7 +211,7 @@ exploreBinary args results fPath = do
                                           os
                                           recMod
         let sz = BSL.length $ BS.toLazyByteString llvm
-        hPutStrLn stderr $ (show sz) ++ " bytes of LLVM bitcode generated."
+        hPutStrLn stderr $ (show sz) ++ " bytes of LLVM textual bitcode generated."
         pure $ if sz < 0 then 0 else fromIntegral sz
     handleFailure :: (FilePath -> String -> ExplorationResult) -> SomeException -> IO ExplorationResult
     handleFailure mkResult e = do
@@ -203,26 +222,34 @@ exploreBinary args results fPath = do
 
 data SummaryStats =
   SummaryStats
-  { totalBinaryCount :: Natural
-  -- ^ Which binary are these statistics for?
-  , totalFnDiscoveredCount :: Natural
+  { totalBinaryCount :: !Natural
+  -- ^ How many binaries were analyzed?
+  , totalBinaryBytes :: !Natural
+  -- ^ How many binaries were analyzed?
+  , totalInitEntryPointCount :: !Natural
+  -- ^ How many initial entry points were encountered?
+  , totalFnDiscoveredCount :: !Natural
   -- ^ Number of discovered functions.
-  , totalFnRecoveredCount :: Natural
+  , totalFnRecoveredCount :: !Natural
   -- ^ Number of successfully recovered functions.
-  , totalFnPLTSkippedCount :: Natural
-  -- ^ Number of skipped PLT stubs.
-  , totalFnFailedCount :: Natural
-  -- ^ Number of functions which failed during recovery.
-  , totalErrorCount :: Natural
-  -- ^ Overall number of errors encountered while exploring binaries.
-  , totalFailedBinaries :: Natural
+  , totalFnFailures :: !(Map ReoptStepTag (Map ReoptErrorTag Natural))
+  -- ^ Overall collection of failures by tag.
+  , totalFailedBinaries :: !Natural
   -- ^ Number of binaries which failed to complete discovery.
-  , totalLLVMGenerated :: Natural
+  , totalLLVMGenerated :: !Natural
   -- ^ Number of binaries which we successfully produced LLVM bitcode for.
+  , totalLLVMBytes :: !Natural
+  -- ^ Number of bytes of LLVM generated.
+  , totalErrorCount :: !Natural
+  -- ^ Overall number of errors encountered while exploring binaries.
   }
 
 initSummaryStats :: SummaryStats
-initSummaryStats = SummaryStats 0 0 0 0 0 0 0 0
+initSummaryStats = SummaryStats 0 0 0 0 0 Map.empty 0 0 0 0
+
+totalFailureCount :: SummaryStats -> Natural
+totalFailureCount stats = foldl' (+) 0 totals
+  where totals = concatMap Map.elems $ Map.elems $ totalFnFailures stats
 
 renderSummaryStats :: [ExplorationResult] -> String
 renderSummaryStats results = formatSummary $ foldr processResult initSummaryStats results
@@ -230,34 +257,36 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
     processResult :: ExplorationResult -> SummaryStats -> SummaryStats
     processResult (ExplorationStats s llvmGenRes) acc =
       acc { totalBinaryCount = 1 + (totalBinaryCount acc)
+          , totalBinaryBytes = (statsBinarySize s) + (totalBinaryBytes acc)
+          , totalInitEntryPointCount = (statsInitEntryPointCount s) + (totalInitEntryPointCount acc)
           , totalFnDiscoveredCount = (statsFnDiscoveredCount s) + (totalFnDiscoveredCount acc)
           , totalFnRecoveredCount = (statsFnRecoveredCount s) + (totalFnRecoveredCount acc)
-          , totalFnPLTSkippedCount = (statsFnPLTSkippedCount s) + (totalFnPLTSkippedCount acc)
-          , totalFnFailedCount = (statsFnFailedCount s) + (totalFnFailedCount acc)
+          , totalFnFailures = mergeFnFailures (statsStepErrors s) (totalFnFailures acc)
           , totalErrorCount = (statsErrorCount s) + (totalErrorCount acc)
           , totalLLVMGenerated = (totalLLVMGenerated acc) + (if llvmGenSuccess llvmGenRes then 1 else 0)
+          , totalLLVMBytes = (totalLLVMBytes acc) + (case llvmGenRes of LLVMGenPass sz -> sz; _ -> 0)
           }
     processResult (ExplorationError _ _) acc =
       acc { totalBinaryCount = 1 + (totalBinaryCount acc)
           , totalFailedBinaries = 1 + (totalFailedBinaries acc)
+          , totalErrorCount = 1 + (totalErrorCount acc)
           }
     formatSummary :: SummaryStats -> String
     formatSummary s =
       if (totalFnDiscoveredCount s) == 0
       then "\nreopt discovered no functions after exploring "++(show $ totalBinaryCount s)++" binaries."
       else
-        let passed :: Double = (fromIntegral $ totalFnRecoveredCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            passedStr = printf " (%.2f%%)" (passed * 100.0)
-            failed :: Double = (fromIntegral $ totalFnFailedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            failedStr = printf " (%.2f%%)" (failed * 100.0)
-            skipped :: Double = (fromIntegral $ totalFnPLTSkippedCount s) / (fromIntegral $  totalFnDiscoveredCount s)
-            skippedStr = printf " (%.2f%%)" (skipped * 100.0)
-        in "\nrepot generated LLVM bitcode for "++(show $ totalLLVMGenerated s)++" out of "++(show $ totalBinaryCount s)++" binaries."++
-           "\nreopt discovered " ++ (show (totalFnDiscoveredCount s)) ++ " functions while exploring "++(show $ totalBinaryCount s)++" binaries:" ++
-           "\n  recovery succeeded: " ++ (show (totalFnDiscoveredCount s)) ++ passedStr ++
-           "\n     recovery failed: " ++ (show (totalFnFailedCount s)) ++ failedStr ++
-           "\n    skipped PLT stub: " ++ (show (totalFnPLTSkippedCount s)) ++ skippedStr ++
-           "\n"++(show $ totalErrorCount s)++" errors occurred during exploration."
+        let passedPercent :: Double = (fromIntegral $ totalFnRecoveredCount s) / (fromIntegral $  totalFnDiscoveredCount s)
+        in "\nreopt-explore discovered the following:" ++
+           "\n  " ++ (printf "%d binaries (%s bytes total)" (totalBinaryCount s) (formatNatural $ totalBinaryBytes s)) ++
+           "\n  " ++ (printf "%d initial entry points" (totalInitEntryPointCount s)) ++
+           "\n  " ++ (printf "%d functions" (totalFnDiscoveredCount s)) ++
+           "\n"++(printf "%d (%.2f%%) discovered functions were successfully recovered." (totalFnRecoveredCount s) (passedPercent * 100.0)) ++
+           "\nreopt generated LLVM bitcode for "++(show $ totalLLVMGenerated s)++" out of "++(show $ totalBinaryCount s)++" binaries."++
+           "\n"++(printf "%s bytes of textual LLVM bitcode were generated." (formatNatural $ totalLLVMBytes s))++
+           "\n"++(show $ totalFailureCount s)++" errors/warnings during exploration." ++
+           "\nError metrics:" ++
+           "\n"++(renderAllFailures $ totalFnFailures s)
 
 
 
@@ -271,14 +300,9 @@ main = do
       hPutStrLn stderr "Must provide at least one input program or directory to explore."
       exitFailure
     paths -> do
-      when ((not $ printStats args) && isNothing (exportStatsPath args)) $ do
-        hPutStrLn stderr "There is nothing to be done."
-        hPutStrLn stderr "Please provide either the --print-stats and/or --export-stats=PATH flag(s)."
-        exitFailure
       results <- foldM (withElfFilesInDir (exploreBinary args)) [] paths
-      when (printStats args) $ do
-        mapM_ (\s -> hPutStrLn stderr ("\n" ++ renderExplorationResult s)) results
-        hPutStrLn stderr $ renderSummaryStats results
+      mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
+      hPutStrLn stderr $ renderSummaryStats results
       case exportStatsPath args of
         Nothing -> pure ()
         Just exportPath -> do

@@ -17,10 +17,11 @@ import qualified Data.Vector as V
 
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
+import           Reopt.Events (ReoptErrorTag(..))
 
 data CheckFunctionResult
    = FunctionOK
-   | FunctionIncomplete
+   | FunctionIncomplete ReoptErrorTag
    | FunctionHasPLT
 
 -- | This analyzes the block terminator to statement list to determine
@@ -36,8 +37,8 @@ checkTermStmt ts =
     ParsedBranch _ _ t f    -> pure [t,f]
     ParsedLookupTable _layout _ _ a -> pure $ V.toList a
     ParsedReturn{}          -> pure []
-    ParsedTranslateError{}  -> Left FunctionIncomplete
-    ClassifyFailure{}       -> Left FunctionIncomplete
+    ParsedTranslateError{}  -> Left $ FunctionIncomplete MacawParsedTranslateFailureTag
+    ClassifyFailure{}       -> Left $ FunctionIncomplete MacawClassifyFailureTag
     ParsedArchTermStmt _ _ a -> pure (maybeToList a)
 
 checkFunction' :: MemWidth (ArchAddrWidth arch)
