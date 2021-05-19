@@ -37,7 +37,8 @@ import Reopt
     )
 import Reopt.Utils.Dir
 import System.Console.CmdArgs.Explicit
-    ( process, flagReq, mode, Arg(..), Flag, Mode )
+    ( process, flagHelpSimple, helpText, HelpFormat(..),
+      flagReq, mode, Arg(..), Flag, Mode)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStr, hPutStrLn, stderr)
@@ -58,8 +59,12 @@ data Args
             --
             -- This is only used as a C preprocessor for parsing
             -- header files.
-          , exportStatsPath :: !(Maybe FilePath)
-            -- ^ Should we export discovery/recovery statistics?
+          , exportFnResultsPath :: !(Maybe FilePath)
+            -- ^ Should we export function discovery/recovery results?
+          , exportSummaryPath :: !(Maybe FilePath)
+            -- ^ Should we export summary information?
+          , showHelp :: !Bool
+            -- ^ Show help to user?
           }
 
 defaultArgs :: Args
@@ -67,7 +72,9 @@ defaultArgs =
   Args
   { programPaths  = []
   , clangPath = "clang"
-  , exportStatsPath = Nothing
+  , exportFnResultsPath = Nothing
+  , exportSummaryPath = Nothing
+  , showHelp = False
   }
 
 -- | Flag to set clang path.
@@ -77,15 +84,25 @@ clangPathFlag =
       help = printf "Path to clang (default "++(clangPath defaultArgs)++")"
   in flagReq [ "clang" ] upd "PATH" help
 
-statsExportFlag :: Flag Args
-statsExportFlag = flagReq [ "export-stats" ] upd "PATH" help
-  where upd path old = Right $ old { exportStatsPath = Just path }
-        help = "Path at which to write discovery/recovery statistics."
+exportFnResultsFlag :: Flag Args
+exportFnResultsFlag = flagReq [ "export-fn-results" ] upd "PATH" help
+  where upd path old = Right $ old { exportFnResultsPath = Just path }
+        help = "Path at which to write function discovery/recovery results."
+
+exportSummaryFlag :: Flag Args
+exportSummaryFlag = flagReq [ "export-summary" ] upd "PATH" help
+  where upd path old = Right $ old { exportSummaryPath = Just path }
+        help = "Path at which to write discovery/recovery summary statistics."
+
+showHelpFlag :: Flag Args
+showHelpFlag = flagHelpSimple upd
+  where upd old = old { showHelp = True }
+
 
 -- | Flag to set the path to the binary to analyze.
 filenameArg :: Arg Args
 filenameArg = Arg { argValue = addFilename
-                  , argType = "FILE"
+                  , argType = "PATH ..."
                   , argRequire = False
                   }
   where addFilename :: String -> Args -> Either String Args
@@ -95,8 +112,10 @@ filenameArg = Arg { argValue = addFilename
 arguments :: Mode Args
 arguments = mode "reopt-explore" defaultArgs help filenameArg flags
   where help = reoptVersion ++ "\n" ++ copyrightNotice
-        flags = [ clangPathFlag
-                , statsExportFlag
+        flags = [ showHelpFlag
+                , clangPathFlag
+                , exportFnResultsFlag
+                , exportSummaryFlag
                 ]
 
 getCommandLineArgs :: IO Args
@@ -295,21 +314,31 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
 main :: IO ()
 main = do
   args <- getCommandLineArgs
-  case programPaths args of
-    [] -> do
+  case (showHelp args, programPaths args) of
+    (True, _) -> do
+      print $ helpText [] HelpFormatAll arguments
+    (False, []) -> do
       hPutStrLn stderr "Must provide at least one input program or directory to explore."
+      hPutStrLn stderr "Use --help to see additional options."
       exitFailure
-    paths -> do
+    (False, paths) -> do
       results <- foldM (withElfFilesInDir (exploreBinary args)) [] paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
-      case exportStatsPath args of
+      case exportFnResultsPath args of
         Nothing -> pure ()
         Just exportPath -> do
           let hdrStr = intercalate "," statsHeader
               rowsStr = map (intercalate ",") $ concatMap toRows results
           writeFile exportPath $ unlines $ hdrStr:rowsStr
-          hPutStrLn stderr $ "CSV-formatted statistics written to " ++ exportPath
+          hPutStrLn stderr $ "CSV-formatted function result statistics written to " ++ exportPath ++ "."
+      case exportSummaryPath args of
+        Nothing -> pure ()
+        Just exportPath -> do
+          let individualSummaries = concatMap (\s -> "\n" ++ renderExplorationResult s) results
+              overallSummary      = renderSummaryStats results
+          writeFile exportPath $ individualSummaries ++ "\n" ++ overallSummary
+          hPutStrLn stderr $ "Summary statistics written to " ++ exportPath ++ "."
   where
     toRows :: ExplorationResult -> [[String]]
     toRows (ExplorationStats stats _) = statsRows stats
