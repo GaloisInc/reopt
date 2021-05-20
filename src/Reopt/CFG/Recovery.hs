@@ -1715,24 +1715,21 @@ x86BlockInvariants
   -> Map BSC.ByteString X86FunTypeInfo
      -- ^ Map from function name to the type information at that address.
   -> DiscoveryFunInfo X86_64 ids
+  -> X86FunTypeInfo
+     -- ^ Type of discovered function
   -> Either (ReoptErrorTag, String) (BlockInvariantMap X86_64 ids)
-x86BlockInvariants sysp mem funNameMap funTypeMap fInfo = do
-  -- Get address of function entry point
-  let entryAddr = discoveredFunAddr fInfo
-  -- Get name and type information inferred about fthis function.
-  nm <-
-    case Map.lookup entryAddr funNameMap of
-      Nothing -> Left (ReoptMissingNameTag, "Missing name for " ++ show entryAddr ++ ".")
-      Just nm -> pure nm
+x86BlockInvariants sysp mem funNameMap funTypeMap fInfo ftype = do
+  -- Get return register from type.
   retRegs <-
-    case Map.lookup nm funTypeMap of
-      Nothing ->
-        Left (ReoptMissingTypeTag, printf "Missing type for %s." (BSC.unpack nm))
-      Just (X86NonvarargFunType _args rets) -> Right $ viewSome retReg <$> rets
-      Just (X86PrintfFunType _) -> Right $ [Some (X86_GP F.RAX)]
-      Just X86OpenFunType       -> Right $ [Some (X86_GP F.RAX)]
-      Just X86UnsupportedFunType ->
-        Left (ReoptUnsupportedTypeTag, printf "%s has an unsupported type." (BSC.unpack nm))
+    case ftype of
+      X86NonvarargFunType _args rets ->
+        Right $ viewSome retReg <$> rets
+      X86PrintfFunType _ ->
+        Right $ [Some (X86_GP F.RAX)]
+      X86OpenFunType ->
+        Right $ [Some (X86_GP F.RAX)]
+      X86UnsupportedFunType -> do
+        Left (ReoptUnsupportedTypeTag, "Unsupported type.")
   let useCtx = RegisterUseContext
               { archCallParams = x86_64CallParams
               , archPostTermStmtInvariants = x86TermStmtNext
@@ -1754,36 +1751,27 @@ x86BlockInvariants sysp mem funNameMap funTypeMap fInfo = do
 -- warnings and a function.
 recoverFunction :: forall ids
                 .  SyscallPersonality
-                -> Map (MemSegmentOff 64) BSC.ByteString
-                   -- ^ Map from addresses that correspond to function
-                   -- entry points to the name of the function at that
-                   -- addresses.
-                -> Map BSC.ByteString X86FunTypeInfo
-                   -- ^ Map from function name to the type information at that address.
                 -> Memory 64
                 -> DiscoveryFunInfo X86_64 ids
                 -> Map (MemSegmentOff 64) (BlockInvariants X86_64 ids)
                    -- ^ Inferred block invariants
+                -> BSC.ByteString
+                   -- ^ Name of function
+                -> X86FunTypeInfo -- ^ Type of function
                 -> Either (ReoptErrorTag, String) ([String], Function X86_64)
-recoverFunction sysp funNameMap funTypeMap mem fInfo invMap = do
+recoverFunction sysp mem fInfo invMap nm ftype = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
-  -- Get name and type information inferred about fthis function.
-  nm <-
-    case Map.lookup entryAddr funNameMap of
-      Just nm -> pure nm
-      Nothing -> Left (ReoptMissingNameTag, "Missing name for " ++ show entryAddr ++ ".")
   (curArgs, curRets) <-
-    case Map.lookup nm funTypeMap of
-      Just (X86NonvarargFunType args rets) -> pure (args, rets)
-      Just (X86PrintfFunType _) ->
+    case ftype of
+      X86NonvarargFunType args rets ->
+        pure (args, rets)
+      X86PrintfFunType _ ->
         Left (ReoptVarArgFnTag, BSC.unpack nm ++ " is a vararg function and not supported.")
-      Just X86OpenFunType ->
+      X86OpenFunType ->
         Left (ReoptVarArgFnTag, BSC.unpack nm ++ " is a vararg function and not supported.")
-      Just X86UnsupportedFunType ->
+      X86UnsupportedFunType ->
         Left (ReoptUnsupportedTypeTag, printf "%s has an unsupported type." (BSC.unpack nm))
-      Nothing ->
-        Left (ReoptMissingTypeTag, printf "Missing type for %s." (BSC.unpack nm))
 
   let funCtx = FRC { frcMemory = mem
                    , frcInterp = fInfo

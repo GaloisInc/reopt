@@ -125,8 +125,6 @@ data ReoptErrorTag
   | MacawRegisterUseErrorTag
   | MacawCallAnalysisErrorTag
   | ReoptVarArgFnTag
-  | ReoptMissingNameTag
-  | ReoptMissingTypeTag
   | ReoptUnsupportedTypeTag
   | ReoptBlockPreconditionUnresolvedTag
   | ReoptUnsupportedMemOpTag
@@ -155,8 +153,6 @@ ppReoptErrorTag =
     MacawRegisterUseErrorTag -> "register use error"
     MacawCallAnalysisErrorTag -> "call analysis error"
     ReoptVarArgFnTag -> "unsupported variadic function"
-    ReoptMissingNameTag -> "missing name"
-    ReoptMissingTypeTag -> "missing type"
     ReoptUnsupportedTypeTag -> "unsupported type tag"
     ReoptBlockPreconditionUnresolvedTag -> "block precondition unresolved"
     ReoptUnsupportedMemOpTag -> "unsupported memory operation"

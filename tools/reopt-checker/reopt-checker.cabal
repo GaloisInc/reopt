@@ -1,4 +1,4 @@
-name: match-phdr
+name: reopt-checker
 version: 0.1.0
 author: Galois, Inc.
 maintainer: jhendrix@galois.com
@@ -7,7 +7,7 @@ cabal-version: >= 1.10
 license:       BSD3
 license-file:  LICENSE
 
-executable match-phdr
+executable reopt-checker
   default-language: Haskell2010
   build-depends:
     base >= 0,
