@@ -55,7 +55,6 @@ data AnnFunArg = AnnFunArg { funArgName :: !(Maybe String)
 -- | Types for a function declaration.
 data AnnFunType = AnnFunType { funRet :: !AnnType
                              , funArgs :: !(V.Vector AnnFunArg)
-                             , funVarArg :: !Bool
                              }
   deriving (Eq,Show)
 

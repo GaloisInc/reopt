@@ -151,6 +151,7 @@ import           Reopt.CFG.Recovery
 import           Reopt.Events
 import qualified Reopt.ExternalTools as Ext
 import           Reopt.Hints
+import           Reopt.PltParser
 import           Reopt.Relinker
 import           Reopt.TypeInference.DebugTypes
 import           Reopt.TypeInference.FunTypeMaps
@@ -329,8 +330,6 @@ data InitDiscovery arch
   = InitDiscovery
     { initDiscSymAddrMap :: !(SymAddrMap (ArchAddrWidth arch))
       -- ^ Map from symbols to addresses.
-    , initDiscPLTFuns :: [(MemSegmentOff (ArchAddrWidth arch), BS.ByteString)]
-      -- ^ A list of address and name pairs for PLT functions.
     , initDiscBaseCodeAddr :: !(MemAddr (ArchAddrWidth arch))
       -- ^ Address to use as base address for program counters in
       -- Dwarf debug information.
@@ -397,30 +396,44 @@ withShdr sectionNameMap warnName secName expected d f =
 ------------------------------------------------------------------------
 -- PLT functions
 
--- | Arguments for identifying a PLT stub.
-data MatchPLTStubArgs =
-  MatchPLTStubArgs { -- | Address of PLT in Elf file
-                     pltElfAddr :: !Word64
-                     -- | Address in memory of PLT section.
-                     --
-                     -- This is a function of the PLT Elf addr and the load options.
-                   , pltMemAddr :: !(MemSegmentOff 64)
-                     -- | Code in PLT
-                   , pltPLTData :: !BS.ByteString
-                     -- | Contents of `.plt.rela` for relocations
-                   , pltPLTRelaData :: !BS.ByteString
-                     -- | Symbol table data
-                   , pltSymtab  :: !BS.ByteString
-                     -- | String table for symbol table.
-                   , pltStrtab  :: !BS.ByteString
-                   }
+-- | Add Plt symbols
+addPltSyms
+  :: forall w r
+  .  (Num (MemWord w), Integral (Elf.ElfWordType w))
+  => Elf.ElfHeader w
+  -> BS.ByteString -- ^ String table contents
+  -> BS.ByteString -- ^ Symbol table contents
+  -> Memory w
+  -> RegionIndex
+  -> SymAddrMap w
+  -> PltInfo w
+  -> InitDiscM r (SymAddrMap w)
+addPltSyms hdr strtab symtab mem regIdx m0 p = do
+  let cl = Elf.headerClass hdr
+  let dta = Elf.headerData hdr
+  let ins :: Elf.ElfWordType w
+          -> (ResolvedPltEntry, Elf.ElfWordType w)
+          -> (SymAddrMap w -> InitDiscM r (SymAddrMap w))
+          -> (SymAddrMap w -> InitDiscM r (SymAddrMap w))
+      ins o (f, _sz) cont m = do
+        case resolveRegionOff mem regIdx (fromIntegral o) of
+          Nothing -> do
+            initWarning $ printf "Unexpected symbol offset %s." (showHex (toInteger o) "")
+            cont m
+          Just a -> do
+            case f of
+              PltStub idx ->
+                case Elf.decodeSymtabEntry cl dta strtab symtab idx of
+                  Left e -> do
+                    initWarning (show e)
+                    cont m
+                  Right sym -> do
+                    cont $! symAddrMapInsert sym a m
+              PltNotCallable ->
+                cont m
+  Map.foldrWithKey' ins pure (pltMap p) m0
 
-data PLTResult w =
-    PLTResult { pltBounds :: (Maybe (MemSegmentOff w, MemWord w))
-              , pltFuns :: [(MemSegmentOff w, BS.ByteString)]
-              , pltSymAddrMap :: (SymAddrMap w)
-              }
-
+{-
 -- | This match a X86_64 PLT stub.
 --
 -- The format is
@@ -430,7 +443,7 @@ data PLTResult w =
 matchPLTStub :: Elf.ElfData -- ^ Endianess of Elf file
              -> MatchPLTStubArgs
              -> Int -- ^ Index of PLT entry (first function is at zero)
-             -> ExceptT () (StateT (PLTResult 64) (InitDiscM r)) ()
+             -> ExceptT () (StateT (PltMap 64) (InitDiscM r)) ()
 matchPLTStub dta args idx = do
   -- Offset of PLT stub in data
   let off :: Int
@@ -471,9 +484,9 @@ matchPLTStub dta args idx = do
         throwError ()
       Just a -> pure a
   modify $ \pltRes ->
-    pltRes { pltFuns = (a, Elf.steName sym):pltFuns pltRes
-           , pltSymAddrMap = symAddrMapInsert sym a (pltSymAddrMap pltRes)
+    pltRes { pltSymAddrMap = symAddrMapInsert sym a (pltSymAddrMap pltRes)
            }
+-}
 
 shdrContents :: Integral (Elf.ElfWordType w)
              => Elf.ElfHeaderInfo w -> Elf.Shdr nm (Elf.ElfWordType w) -> BS.ByteString
@@ -485,19 +498,25 @@ shdrContents hdrInfo shdr =
     $ Elf.headerFileContents hdrInfo
 
 processX86PLTEntries :: Elf.ElfHeaderInfo 64
-                     -> BS.ByteString -- ^ Symbol table data
-                     -> BS.ByteString -- ^ String table data for symbol table.
-                     -> Map BS.ByteString [Word16]
-                        -- ^ Map from section names to index with that name.
-                     -> Memory 64
-                     -> PLTResult 64
-                     -> InitDiscM r (PLTResult 64)
+                     -> InitDiscM r (Maybe (PltInfo 64))
+processX86PLTEntries hdrInfo  = do
+  let shdrs =
+        case Elf.headerNamedShdrs hdrInfo of
+          Left _ -> V.empty
+          Right r -> r
+  case extractPLTEntries hdrInfo shdrs of
+    Left err -> do
+      incCompLog err
+      pure Nothing
+    Right m ->
+      pure m
+{-
 processX86PLTEntries hdrInfo symtab strtab shdrNameMap mem pltRes = do
   let dta = Elf.headerData (Elf.header hdrInfo)
   withShdr shdrNameMap "PLT" ".plt" True pltRes $ \pltIdx -> do
     let pltShdr = Elf.shdrByIndex hdrInfo pltIdx
     let pltSize = Elf.shdrSize pltShdr
-    let pltData = shdrContents hdrInfo pltShdr
+--    let pltData = shdrContents hdrInfo pltShdr
     case Map.lookup pltIdx (memSectionIndexMap mem) of
       Nothing -> do
         initWarning "PLT section is not loaded in memory"
@@ -511,15 +530,14 @@ processX86PLTEntries hdrInfo symtab strtab shdrNameMap mem pltRes = do
           when (r /= 0) $ do
             initWarning ".rela.plt data is not a multiple of relocation entry size."
           -- Find base address of PLT stubs
-          let pltStubArgs = MatchPLTStubArgs { pltElfAddr = Elf.shdrAddr pltShdr
-                                             , pltMemAddr = pltAddr
-                                             , pltPLTData = pltData
+          let pltStubArgs = MatchPLTStubArgs { pltMemAddr = pltAddr
                                              , pltPLTRelaData = relaData
                                              , pltSymtab = symtab
                                              , pltStrtab = strtab
                                              }
           flip execStateT pltRes2 $ forM_ [0..relaCount-1] $ \i -> do
             void $ runExceptT (matchPLTStub dta pltStubArgs i)
+-}
 
 $(pure [])
 
@@ -568,14 +586,7 @@ x86OSForABI abi = Map.lookup abi x86ABIMap
 type ProcessPLTEntries w
    = forall r
   .   Elf.ElfHeaderInfo w
-   -> BS.ByteString -- ^ Symbol table data
-   -> BS.ByteString -- ^ String table data for symbol table.
-   -> Map BS.ByteString [Word16]
-      -- ^ Map from section names to section with that index.
-   -> Memory w
-      -- ^ Memory
-   -> PLTResult w
-   -> InitDiscM r (PLTResult w)
+   -> InitDiscM r (Maybe (PltInfo w))
 
 data SomeArchitectureInfo w where
   SomeArch :: !(ArchitectureInfo arch)
@@ -719,7 +730,7 @@ addDefinedSymbolTableFuns hdrInfo mem baseAddr symtabData strtab = do
 
 #ifdef SUPPORT_ARM
 ignorePLTEntries :: ProcessPLTEntries w
-ignorePLTEntries _ _ _ _ _ _ _ _ = pure ()
+ignorePLTEntries _ _ _ _ _ _ _ = pure ()
 #endif
 
 $(pure [])
@@ -823,9 +834,8 @@ discoverSymbolNames :: (MemWidth w, Integral (Elf.ElfWordType w))
                     => Elf.ElfHeaderInfo w -- ^ Binary information
                     -> Memory w  -- ^ Initial memory for binary
                     -> MemAddr w -- ^ Base address to add to symbol offsets.
-                    -> ProcessPLTEntries w
-                    -> InitDiscM r (PLTResult w)
-discoverSymbolNames hdrInfo mem baseAddr pltFn = do
+                    -> InitDiscM r (SymAddrMap w)
+discoverSymbolNames hdrInfo mem baseAddr = do
   let shdrs =
         case Elf.headerNamedShdrs hdrInfo of
           Left _ -> V.empty
@@ -842,16 +852,10 @@ discoverSymbolNames hdrInfo mem baseAddr pltFn = do
     withSymtab hdrInfo shdrNameMap nm ".symtab" symAddrMapEmpty $ \symtab strtab -> do
       flip execStateT symAddrMapEmpty $
         addDefinedSymbolTableFuns hdrInfo mem baseAddr symtab strtab
-  let pltRes0 = PLTResult { pltBounds = Nothing
-                          , pltFuns = []
-                          , pltSymAddrMap = symAddrMap0
-                          }
   let nm = "dynamic symbol table"
-  withSymtab hdrInfo shdrNameMap nm ".dynsym" pltRes0 $ \dynSymtab dynStrtab -> do
-    symAddrMap1 <- flip execStateT symAddrMap0 $
+  withSymtab hdrInfo shdrNameMap nm ".dynsym" symAddrMap0 $ \dynSymtab dynStrtab -> do
+    flip execStateT symAddrMap0 $
       addDefinedSymbolTableFuns hdrInfo mem baseAddr dynSymtab dynStrtab
-    let pltRes1 = pltRes0 { pltSymAddrMap = symAddrMap1 }
-    pltFn hdrInfo dynSymtab dynStrtab shdrNameMap mem pltRes1
 
 -- | Creates InitDiscovery state containing all information needed
 -- to perform function discovery.
@@ -870,23 +874,43 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
       Right r -> pure r
   mapM_ (initWarning . show) warnings
 
-  pltRes <- discoverSymbolNames hdrInfo mem baseAddr pltFn
+  symAddrMap0 <- discoverSymbolNames hdrInfo mem baseAddr
 
-  let mbounds = pltBounds pltRes
+  mpltRes <- pltFn hdrInfo
+
+  -- Create symbol address map that includes plt information if available.
+  symAddrMap <-
+    case mpltRes of
+      Just pltRes -> do
+        let vmap = pltVirtMap pltRes
+        let hdr = Elf.header hdrInfo
+        let regIdx = addrBase baseAddr
+        strtab <-
+          case Elf.lookupVirtAddrContents (pltStrtabOff pltRes) vmap of
+            Nothing -> fatalError "Dynamic string table invalid."
+            Just s -> do
+              when (BS.length s < fromIntegral (pltStrtabSize pltRes)) $ do
+                fatalError "Dynamic string table range invalid."
+              pure $ BS.take (fromIntegral (pltStrtabSize pltRes)) s
+        symtab <-
+          case Elf.lookupVirtAddrContents (pltSymtabOff pltRes) vmap of
+            Nothing -> fatalError "Dynamic symbol table invalid."
+            Just s -> pure s
+        addPltSyms hdr strtab symtab mem regIdx symAddrMap0 pltRes
+      Nothing -> do
+        pure symAddrMap0
+
   -- Exclude PLT bounds
-  let explorePred =
-        case mbounds of
-          Nothing -> \_ -> True
-          Just (pltStartSegOff, pltSize) ->
-            let pltStartAddr = segoffAddr pltStartSegOff
-                pltBase   = addrBase pltStartAddr
-                pltStartOff = addrOffset pltStartAddr
-                inPLT a = pltBase == addrBase a
-                          && pltStartOff <= addrOffset a
-                          && addrOffset a - pltStartOff < pltSize
-              in \a -> not (inPLT (segoffAddr a))
-  let pltFns = pltFuns pltRes
-  let symAddrMap = pltSymAddrMap pltRes
+  let explorePred a =
+        case mpltRes of
+          Nothing -> True
+          Just pltRes -> do
+            let off = fromIntegral $ addrOffset (segoffAddr a)
+            case Map.lookupLE off (pltMap pltRes) of
+              Just (entryOff, (_pltFn, entrySize))
+                | off - entryOff < entrySize ->
+                  False
+              _ -> True
 
   -- Get initial entry address
   let hdr = Elf.header hdrInfo
@@ -898,12 +922,12 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
     initWarning $ "Could not resolve entry point: " ++ showHex entry ""
   let regInfo :: RegionInfo
       regInfo = HasDefaultRegion (addrBase baseAddr)
-  s <- case runExcept (initDiscState mem entryAddr regInfo symAddrMap explorePred ainfo reoptOpts) of
-        Left e -> fatalError e
-        Right r -> pure r
+  s <-
+    case runExcept (initDiscState mem entryAddr regInfo symAddrMap explorePred ainfo reoptOpts) of
+      Left e -> fatalError e
+      Right r -> pure r
   -- Return discovery
   pure $! InitDiscovery { initDiscSymAddrMap = symAddrMap
-                        , initDiscPLTFuns = pltFns
                         , initDiscBaseCodeAddr = baseAddr
                         , initDiscoveryState   = s
                         }
@@ -982,7 +1006,6 @@ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts = runIncCompM $ fmap Right 
             Right r -> pure r
       -- Get initial entries and predicate for exploring
       pure $! InitDiscovery { initDiscSymAddrMap = symAddrMap
-                            , initDiscPLTFuns      = []
                             , initDiscBaseCodeAddr = MemAddr regIdx 0
                             , initDiscoveryState   = s
                             }
@@ -1067,39 +1090,32 @@ headerTypeMap :: forall arch r
               -> IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
 headerTypeMap hdrAnn mem baseAddr symAddrMap noretMap = do
   stepStarted HeaderTypeInference
-  let voidPtrType = PtrAnnType  VoidAnnType
+  let voidPtrType = PtrAnnType VoidAnnType
+  let charPtrType = PtrAnnType (IAnnType 8)
   let sizetType = IAnnType 64
   let offType = sizetType
   let intType = IAnnType 32
-  let mmapFunType :: AnnFunType
-      mmapFunType =
-        AnnFunType
-        { funRet = voidPtrType
-        , funArgs = V.fromList $ fmap (AnnFunArg Nothing) [voidPtrType, sizetType, intType, intType, intType, offType ]
-        , funVarArg = False
-        }
-  let fstatFunType :: AnnFunType
-      fstatFunType =
-        AnnFunType
-        { funRet = intType
-        , funArgs = V.fromList $ fmap (AnnFunArg Nothing) [intType, voidPtrType]
-        , funVarArg = False
-        }
+  let ftype res args = ReoptNonvarargFunType (AnnFunType { funRet = res, funArgs = V.fromList args })
+  let declFn = Map.singleton
+  let nmArg nm tp = AnnFunArg (Just nm) tp
+  let nonmArg tp = AnnFunArg Nothing tp
   -- Generate type information from annotations
   let nameAnnTypeMap
         = fmap ReoptNonvarargFunType (funDecls hdrAnn)
-        <> Map.singleton "printf"   (ReoptPrintfFunType 0)
-        <> Map.singleton "fprintf"  (ReoptPrintfFunType 1)
-        <> Map.singleton "sprintf"  (ReoptPrintfFunType 1)
-        <> Map.singleton "snprintf" (ReoptPrintfFunType 2)
-        <> Map.singleton "open"     ReoptOpenFunType
-        <> Map.singleton "exit"
-             (ReoptNonvarargFunType
-               (AnnFunType VoidAnnType (V.fromList [AnnFunArg (Just "status") (IAnnType 64)]) False))
-        <> Map.singleton "__errno_location"
-             (ReoptNonvarargFunType (AnnFunType (PtrAnnType (IAnnType 32)) V.empty False))
-        <> Map.singleton "mmap" (ReoptNonvarargFunType mmapFunType)
-        <> Map.singleton "__fstat" (ReoptNonvarargFunType fstatFunType)
+        <> declFn "__errno_location" (ftype (PtrAnnType (IAnnType 32)) [])
+        <> declFn "__fstat" (ftype intType (fmap nonmArg [intType, voidPtrType]))
+        <> declFn "__printf_chk"     (ftype intType [nmArg "flag" intType, AnnFunArg (Just "format") charPtrType])
+        <> declFn "__stack_chk_fail" (ftype VoidAnnType [])
+        <> declFn "exit"     (ftype VoidAnnType [AnnFunArg (Just "status") (IAnnType 64)])
+        <> declFn "fprintf"  (ReoptPrintfFunType 1)
+        <> declFn "memcmp"   (ftype intType [nmArg "s1" voidPtrType, nmArg "s1" voidPtrType, nmArg "n" sizetType])
+        <> declFn "mmap"     (ftype voidPtrType (fmap nonmArg [voidPtrType, sizetType, intType, intType, intType, offType ]))
+        <> declFn "open"     ReoptOpenFunType
+        <> declFn "printf"   (ReoptPrintfFunType 0)
+        <> declFn "putchar"  (ftype intType [nmArg "c" intType])
+        <> declFn "puts"     (ftype intType [nonmArg charPtrType])
+        <> declFn "sprintf"  (ReoptPrintfFunType 1)
+        <> declFn "snprintf" (ReoptPrintfFunType 2)
 
   -- Generate map from address names to known type.
   --
@@ -1475,15 +1491,13 @@ parseReturnType tp0 =
 resolveAnnFunType :: Monad m
                   => AnnFunType
                   -> ExceptT ArgResolverError m X86FunTypeInfo
-resolveAnnFunType funType =
-   if funVarArg funType then do
-     throwError VarArgsUnsupported
-    else do
-     args <- runArgResolver (argsToRegisters 0 (funArgs funType))
-     ret <- case parseReturnType (funRet funType) of
-              Left e -> throwError e
-              Right r -> pure r
-     pure $! X86NonvarargFunType args ret
+resolveAnnFunType funType = do
+  args <- runArgResolver (argsToRegisters 0 (funArgs funType))
+  ret <-
+    case parseReturnType (funRet funType) of
+      Left e -> throwError e
+      Right r -> pure r
+  pure $! X86NonvarargFunType args ret
 
 -- | This checks whether any of the symbols in the map start with the given string as a prefix.
 isUsedPrefix :: BSC.ByteString -> SymAddrMap  w -> Bool
@@ -1708,6 +1722,14 @@ $(pure [])
 --------------------------------------------------------------------------------
 -- recoverX86Elf
 
+
+matchPLT :: DiscoveryFunInfo arch ids -> Maybe VersionedSymbol
+matchPLT finfo
+  | [b] <- Map.elems (finfo^.parsedBlocks)
+  , PLTStub _ _ sym <- pblockTermStmt b =
+    Just sym
+matchPLT _ = Nothing
+
 -- | Infer arguments for functions that we do not already know.
 x86ArgumentAnalysis :: SyscallPersonality
                     -> Map (MemSegmentOff 64) BSC.ByteString
@@ -1720,35 +1742,35 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
   -- Generate map from symbol names to known type.
   let mem = memory discState
       -- Compute only those functions whose types are not known.
-  let known (Some f) =
+  let known :: DiscoveryFunInfo X86_64 ids -> Bool
+      known f =
         case Map.lookup (discoveredFunAddr f) funNameMap of
           Just nm -> Map.member nm knownFunTypeMap
           Nothing -> False
+  let shouldPropagate (Some f) = not (known f) && isNothing (matchPLT f)
 
-  let resolveFn :: MemSegmentOff 64
-                -> RegState X86Reg (Value X86_64 ids)
-                -> Either String [Some (Value X86_64 ids)]
-      resolveFn callSite callRegs = do
-        callArgValues <$> x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs
+  stepStarted $ FunctionArgInference
 
-  stepStarted $ FunctionArgInference Nothing
-
-  let (dems, summaryFails) =
+  let (dems, summaryFails) = do
+        let resolveFn :: MemSegmentOff 64
+                      -> RegState X86Reg (Value X86_64 ids)
+                      -> Either String [Some (Value X86_64 ids)]
+            resolveFn callSite callRegs = do
+              callArgValues <$> x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs
         functionDemands (x86DemandInfo sysp) mem resolveFn $
-          filter (not . known) $ exploredFunctions discState
+          filter shouldPropagate $ exploredFunctions discState
 
-  forM_ (Map.toList summaryFails) $ \(faddrOff, rsn) -> do
-    let dnm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
-                 discoveredFunSymbol finfo
-    let faddrAndNm = do Some finfo <- Map.lookup faddrOff (discState^.funInfo)
-                        pure $ (memWordValue (addrOffset (segoffAddr ( discoveredFunAddr finfo))), discoveredFunSymbol finfo)
+  forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
     case rsn of
-      PLTStubNotSupported ->
-        pure () -- error "internal x86ArgumentAnalysis provided PLTStub"
+      PLTStubNotSupported -> do
+        let dnm = Map.lookup faddr funNameMap
+        logEvent FunctionArgInference ReoptWarning $
+          printf "%s: Unexpected PLT stub." (ppFnEntry dnm faddr)
       CallAnalysisError callSite msg -> do
-        let errMsg = printf "Call analysis at %s in %s failed:\n  %s" (ppSegOff callSite) (ppFnEntry dnm faddrOff) msg
-        stepFailed (FunctionArgInference faddrAndNm) MacawCallAnalysisErrorTag errMsg
-  stepFinished (FunctionArgInference Nothing) ()
+        let dnm =  Map.lookup faddr funNameMap
+        logEvent FunctionArgInference ReoptWarning $
+          printf "%s: Could not determine signature at callsite %s:\n    %s" (ppFnEntry dnm faddr) (ppSegOff callSite) msg
+  stepFinished FunctionArgInference ()
   pure $ inferFunctionTypeFromDemands dems
 
 -- | Analyze an elf binary to extract information.
@@ -1757,14 +1779,13 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
 doRecoverX86 :: BSC.ByteString -- ^ Prefix to use if we need to generate new function endpoints later.
              -> SyscallPersonality
              -> SymAddrMap 64
-             -> [(MemSegmentOff 64, BS.ByteString)]
-             -> FunTypeMaps 64
+             -> Map BS.ByteString X86FunTypeInfo
              -> DiscoveryState X86_64
              -> IncCompM (ReoptLogEvent X86_64) r
                   ( RecoveredModule X86_64
                   , MergeRelations
                   )
-doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = do
+doRecoverX86 unnamedFunPrefix sysp symAddrMap knownFunTypeMap discState = do
   let mem = memory discState
 
   -- Maps address to name of function to use.
@@ -1772,25 +1793,13 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
       funNameMap =
         Map.mapWithKey (\addr qnm -> localFunctionName unnamedFunPrefix qnm addr)
                        (samAddrMap symAddrMap)
-        <> Map.fromList [ (addr, nosymFunctionName unnamedFunPrefix addr)
+        <> Map.fromList [ (addr, nm)
                         | Some finfo <- exploredFunctions discState
                         , let addr = discoveredFunAddr finfo
                         , Map.notMember addr (samAddrMap symAddrMap)
-                        ]
-
-  let resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
-      resolveX86Type rtp =
-        case runExcept (resolveReoptFunType rtp) of
-          Left _ -> Nothing
-          Right r -> Just r
-
-  -- Map names to known function types when we have explcit information.
-  let knownFunTypeMap ::  Map BS.ByteString X86FunTypeInfo
-      knownFunTypeMap
-        = Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
-        <> Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
-                        | (addr,rtp) <- Map.toList (addrTypeMap debugTypeMap)
-                        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
+                        , let nm = case matchPLT finfo of
+                                     Just sym -> versymName sym
+                                     Nothing -> nosymFunctionName unnamedFunPrefix addr
                         ]
 
   -- Infer registers each function demands.
@@ -1808,33 +1817,42 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
       let dnm = discoveredFunSymbol finfo
       let fnInvEvt = InvariantInference (memWordValue (addrOffset (segoffAddr faddr))) dnm
       stepStarted fnInvEvt
-      case checkFunction finfo of
-        FunctionOK -> do
-          case x86BlockInvariants sysp mem funNameMap funTypeMap finfo of
-            Left (failTag, msg) -> do
-              stepFailed fnInvEvt failTag msg
+      let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
+      case Map.lookup nm funTypeMap of
+        Nothing -> do
+          -- TODO: Check an error has already been reported on this.
+          pure Nothing
+        Just X86UnsupportedFunType -> do
+          -- TODO: Check an error has already been reported on this.
+          pure Nothing
+        Just tp ->
+          case checkFunction finfo of
+            FunctionIncomplete errTag -> do
+              stepFailed fnInvEvt errTag "Incomplete discovery."
               pure Nothing
-            Right invMap -> do
-              stepFinished fnInvEvt invMap
-              -- Do function recovery
-              let fnRecEvt = Recovery (memWordValue (addrOffset (segoffAddr faddr))) dnm
-              stepStarted fnRecEvt
-              case recoverFunction sysp funNameMap funTypeMap mem finfo invMap of
-                Left (errTag, errMsg) -> do
-                  stepFailed fnRecEvt errTag errMsg
+            -- We should have filtered out PLT entries from the explored functions,
+            -- so this is considered an error.
+            FunctionHasPLT -> do
+              stepFailed fnInvEvt ReoptCannotRecoverFnWithPLTStubsTag "Encountered unexpected PLT stub."
+              pure Nothing
+            FunctionOK ->
+              case x86BlockInvariants sysp mem funNameMap funTypeMap finfo tp of
+                Left (failTag, msg) -> do
+                  stepFailed fnInvEvt failTag msg
                   pure Nothing
-                Right (warnings, fn) -> do
-                  mapM_ (logEvent fnRecEvt ReoptWarning) warnings
-                  stepFinished fnRecEvt ()
-                  pure (Just fn)
-        FunctionIncomplete errTag -> do
-          stepFailed fnInvEvt errTag "Incomplete discovery."
-          pure Nothing
-        -- We should have filtered out PLT entries from the explored functions,
-        -- so this is considered an error.
-        FunctionHasPLT -> do
-          stepFailed fnInvEvt ReoptCannotRecoverFnWithPLTStubsTag "Encountered unexpected PLT stub."
-          pure Nothing
+                Right invMap -> do
+                  stepFinished fnInvEvt invMap
+                  -- Do function recovery
+                  let fnRecEvt = Recovery (memWordValue (addrOffset (segoffAddr faddr))) dnm
+                  stepStarted fnRecEvt
+                  case recoverFunction sysp mem finfo invMap nm tp of
+                    Left (errTag, errMsg) -> do
+                      stepFailed fnRecEvt errTag errMsg
+                      pure Nothing
+                    Right (warnings, fn) -> do
+                      mapM_ (logEvent fnRecEvt ReoptWarning) warnings
+                      stepFinished fnRecEvt ()
+                      pure (Just fn)
   -- Get list of names of functions defined
   let definedNames :: Set.Set BSC.ByteString
       definedNames = Set.fromList $
@@ -1885,6 +1903,12 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap _pltFns debugTypeMap discState = d
 
 type RecoverIncCompM arch r a
    = IncCompM (ReoptLogEvent arch) (Either String r) a
+
+resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
+resolveX86Type rtp =
+  case runExcept (resolveReoptFunType rtp) of
+    Left _ -> Nothing
+    Right r -> Just r
 
 -- | Analyze an elf binary to extract information.
 --
@@ -1939,13 +1963,20 @@ recoverX86Elf' loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
             (BSC.unpack unnamedFunPrefix)
   stepFinished DiscoveryInitialization ()
 
-  (debugTypeMap, discState) <-
-    doDiscovery hdrAnn hdrInfo ainfo initState disOpt
+  (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState disOpt
+
+  -- Map names to known function types when we have explicit information.
+  let knownFunTypeMap ::  Map BS.ByteString X86FunTypeInfo
+      knownFunTypeMap
+        =  Map.fromList [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
+                        | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap)
+                        , Right xtp <- [runExcept (resolveReoptFunType rtp)]
+                        ]
+        <> Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
 
   let sysp = osPersonality os
-  let pltFns = initDiscPLTFuns initState
   (recMod, mergeRel) <-
-    doRecoverX86 unnamedFunPrefix sysp symAddrMap pltFns debugTypeMap discState
+    doRecoverX86 unnamedFunPrefix sysp symAddrMap knownFunTypeMap discState
 
   pure (os, discState, recMod, mergeRel)
 

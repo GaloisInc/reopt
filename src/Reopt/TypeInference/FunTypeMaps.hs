@@ -97,7 +97,7 @@ symAddrMapEmpty = SymAddrMap { samNameMap = Map.empty
                              , samAddrMap = Map.empty
                              }
 
--- | Symbol address map insertyion
+-- | Symbol address map insertion.
 symAddrMapInsert :: Elf.SymtabEntry BS.ByteString (Elf.ElfWordType w)
                  -> MemSegmentOff w
                  -> SymAddrMap w

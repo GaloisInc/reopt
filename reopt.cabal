@@ -57,6 +57,7 @@ library
     Reopt.EncodeInvariants
     Reopt.Events
     Reopt.ExternalTools
+    Reopt.PltParser
     Reopt.Relinker.Binary
     Reopt.Server
     Reopt.Utils.Dir

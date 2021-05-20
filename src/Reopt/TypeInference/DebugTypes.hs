@@ -180,7 +180,6 @@ resolveDwarfSubprogramFunType sub morigin = do
   pure $! AnnFunType
     { funRet    = retType
     , funArgs  = argTypes
-    , funVarArg = False
     }
 
 -- | @resolveDwarfSubprogramDebugName nm isExt o@ resolve the name to

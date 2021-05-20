@@ -117,8 +117,8 @@ cradle:
     - path: "tests"
       component: "reopt:test:reopt-tests"
 
-    - path: "tools/match-phdr/src/Main.hs"
-      component: "match-phdr:exe:match-phdr"
+    - path: "tools/reopt-checker/src/Main.hs"
+      component: "reopt-checker:exe:reopt-checker"
 
     - path: "tools/dump_debug_data/Main.hs"
       component: "reopt-tools:exe:dump_debug_data"

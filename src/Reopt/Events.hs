@@ -65,7 +65,7 @@ data ReoptStep arch a where
             -> !(Maybe BS.ByteString)
             -> ReoptStep arch ()
   -- | Global function argument inference
-  FunctionArgInference :: Maybe (Word64 , Maybe BS.ByteString) -> ReoptStep arch ()
+  FunctionArgInference :: ReoptStep arch ()
   -- | Function invariant inference.
   InvariantInference :: !Word64 -> !(Maybe BS.ByteString) -> ReoptStep arch (BlockInvariantMap arch ids)
   -- | Function recovery at given address and name.
@@ -81,8 +81,7 @@ ppStep DiscoveryInitialization = "Initialization"
 ppStep HeaderTypeInference = "Header Processing"
 ppStep DebugTypeInference = "Debug Processing"
 ppStep (Discovery a mnm) = "Discovering " <> ppFn a mnm
-ppStep (FunctionArgInference Nothing) = "Argument inference"
-ppStep (FunctionArgInference (Just (a, mnm))) = "Argument inference " <> ppFn a mnm
+ppStep FunctionArgInference = "Argument inference"
 ppStep (Recovery a mnm) = "Recovering " <> ppFn a mnm
 ppStep (InvariantInference a mnm) = "Analyzing " <> ppFn a mnm
 
@@ -126,8 +125,6 @@ data ReoptErrorTag
   | MacawRegisterUseErrorTag
   | MacawCallAnalysisErrorTag
   | ReoptVarArgFnTag
-  | ReoptMissingNameTag
-  | ReoptMissingTypeTag
   | ReoptUnsupportedTypeTag
   | ReoptBlockPreconditionUnresolvedTag
   | ReoptUnsupportedMemOpTag
@@ -156,8 +153,6 @@ ppReoptErrorTag =
     MacawRegisterUseErrorTag -> "register use error"
     MacawCallAnalysisErrorTag -> "call analysis error"
     ReoptVarArgFnTag -> "unsupported variadic function"
-    ReoptMissingNameTag -> "missing name"
-    ReoptMissingTypeTag -> "missing type"
     ReoptUnsupportedTypeTag -> "unsupported type tag"
     ReoptBlockPreconditionUnresolvedTag -> "block precondition unresolved"
     ReoptUnsupportedMemOpTag -> "unsupported memory operation"
@@ -194,7 +189,6 @@ data ReoptLogEvent arch
 
 segoffWord64 :: MemSegmentOff w -> Word64
 segoffWord64 = memWordValue . addrOffset . segoffAddr
-
 
 ppSegOff :: MemSegmentOff w -> String
 ppSegOff addr = "0x" <> showHex (segoffWord64 addr) ""
@@ -249,8 +243,7 @@ stepFailResult =
     HeaderTypeInference{} -> Nothing
     DebugTypeInference{} -> Nothing
     Discovery a mnm -> Just (FnFailedDiscovery, a, mnm)
-    FunctionArgInference (Just (a, mnm)) -> Just (FnFailedDiscovery, a, mnm)
-    FunctionArgInference Nothing -> Nothing
+    FunctionArgInference -> Nothing
     InvariantInference a mnm-> Just (FnFailedRecovery, a, mnm)
     Recovery a mnm -> Just (FnFailedRecovery, a, mnm)
 
@@ -298,8 +291,6 @@ stepErrorCount :: ReoptStepTag -> ReoptStats -> Natural
 stepErrorCount step stats = foldl' (+) 0 errors
   where errors = Map.findWithDefault Map.empty step
                  $ statsStepErrors stats
-
-
 
 incFnResult ::
   Maybe BS.ByteString ->
