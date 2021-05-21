@@ -3,7 +3,7 @@ FROM centos:7
 # Install system libraries
 RUN yum install -y centos-release-scl \
  && yum install -y http://opensource.wandisco.com/centos/7/git/x86_64/wandisco-git-release-7-2.noarch.rpm \
- && yum install -y devtoolset-8-gcc devtoolset-8-make gmp-devel zlib-devel git \
+ && yum install -y devtoolset-8-gcc devtoolset-8-make gmp-devel zlib-devel git lzma \
  && yum clean all \
  && rm -rf /var/cache/yum
 ENV PATH=/opt/rh/devtoolset-8/root/bin:${PATH}
