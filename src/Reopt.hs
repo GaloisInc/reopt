@@ -1816,7 +1816,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap knownFunTypeMap discState = do
       let faddr = discoveredFunAddr finfo
       let dnm = discoveredFunSymbol finfo
       let fnInvEvt = InvariantInference (memWordValue (addrOffset (segoffAddr faddr))) dnm
-      stepStarted fnInvEvt
       let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
       case Map.lookup nm funTypeMap of
         Nothing -> do
@@ -1825,18 +1824,29 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap knownFunTypeMap discState = do
         Just X86UnsupportedFunType -> do
           -- TODO: Check an error has already been reported on this.
           pure Nothing
-        Just tp ->
+        Just (X86PrintfFunType _) -> do
+          stepStarted fnInvEvt
+          stepFailed fnInvEvt ReoptVarArgFnTag (BSC.unpack nm ++ " is a printf-style vararg function and not supported.")
+          pure Nothing
+        Just X86OpenFunType -> do
+          stepStarted fnInvEvt
+          stepFailed fnInvEvt ReoptVarArgFnTag (BSC.unpack nm ++ " is a open-style varrarg function and not supported.")
+          pure Nothing
+        Just (X86NonvarargFunType argRegs retRegs) -> do
           case checkFunction finfo of
             FunctionIncomplete errTag -> do
+              stepStarted fnInvEvt
               stepFailed fnInvEvt errTag "Incomplete discovery."
               pure Nothing
             -- We should have filtered out PLT entries from the explored functions,
             -- so this is considered an error.
             FunctionHasPLT -> do
+              stepStarted fnInvEvt
               stepFailed fnInvEvt ReoptCannotRecoverFnWithPLTStubsTag "Encountered unexpected PLT stub."
               pure Nothing
-            FunctionOK ->
-              case x86BlockInvariants sysp mem funNameMap funTypeMap finfo tp of
+            FunctionOK -> do
+              stepStarted fnInvEvt
+              case x86BlockInvariants sysp mem funNameMap funTypeMap finfo retRegs of
                 Left (failTag, msg) -> do
                   stepFailed fnInvEvt failTag msg
                   pure Nothing
@@ -1845,9 +1855,9 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap knownFunTypeMap discState = do
                   -- Do function recovery
                   let fnRecEvt = Recovery (memWordValue (addrOffset (segoffAddr faddr))) dnm
                   stepStarted fnRecEvt
-                  case recoverFunction sysp mem finfo invMap nm tp of
-                    Left (errTag, errMsg) -> do
-                      stepFailed fnRecEvt errTag errMsg
+                  case recoverFunction sysp mem finfo invMap nm argRegs retRegs of
+                    Left (RecoverErrorAt errTag errAddr errMsg) -> do
+                      stepFailed fnRecEvt errTag $ show errAddr ++ ": " ++ errMsg
                       pure Nothing
                     Right (warnings, fn) -> do
                       mapM_ (logEvent fnRecEvt ReoptWarning) warnings

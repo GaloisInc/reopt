@@ -269,6 +269,10 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) w
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
   pretty (FnAssignment lhs rhs) = pretty lhs <> " := " <> pretty rhs
 
+instance FnArchConstraints arch => Show (FnValue arch tp) where
+  show = show . pretty
+instance FnArchConstraints arch => ShowF (FnValue arch)
+
 instance FnArchConstraints arch => Show (FnAssignment arch tp) where
   show = show . pretty
 
