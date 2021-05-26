@@ -103,6 +103,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Dwarf as Dwarf
 import           Data.ElfEdit (Elf)
 import qualified Data.ElfEdit as Elf
 import           Data.Foldable
@@ -139,6 +140,7 @@ import           Data.Macaw.X86 (X86_64, X86TermStmt(..))
 import qualified Data.Macaw.X86 as X86
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
+
 
 import           Reopt.TypeInference.HeaderTypes
 import           Reopt.ArgResolver
@@ -497,13 +499,11 @@ shdrContents hdrInfo shdr =
     $ BS.drop (fromIntegral fileOff)
     $ Elf.headerFileContents hdrInfo
 
-processX86PLTEntries :: Elf.ElfHeaderInfo 64
-                     -> InitDiscM r (Maybe (PltInfo 64))
-processX86PLTEntries hdrInfo  = do
-  let shdrs =
-        case Elf.headerNamedShdrs hdrInfo of
-          Left _ -> V.empty
-          Right r -> r
+processX86PLTEntries ::
+  Elf.ElfHeaderInfo 64 ->
+  V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType 64)) ->
+  InitDiscM r (Maybe (PltInfo 64))
+processX86PLTEntries hdrInfo shdrs = do
   case extractPLTEntries hdrInfo shdrs of
     Left err -> do
       incCompLog err
@@ -586,6 +586,7 @@ x86OSForABI abi = Map.lookup abi x86ABIMap
 type ProcessPLTEntries w
    = forall r
   .   Elf.ElfHeaderInfo w
+   -> V.Vector (Elf.Shdr BS.ByteString (Elf.ElfWordType w))
    -> InitDiscM r (Maybe (PltInfo w))
 
 data SomeArchitectureInfo w where
@@ -784,52 +785,50 @@ resolveObjSymbol hdrInfo mem secMap sam (idx, ste) = elfInstances hdrInfo $ do
 $(pure [])
 
 initDiscState :: Memory (ArchAddrWidth arch) -- ^ Initial memory
-              -> Maybe (ArchSegmentOff arch) -- ^ Entry point
+              -> [MemSegmentOff (ArchAddrWidth arch)] -- ^ Initial entry points
               -> RegionInfo -- ^ Region information
               -> SymAddrMap (ArchAddrWidth arch) -- ^ Symbol addr map
               -> (ArchSegmentOff arch -> Bool) -- ^ Explore predicate
               -> ArchitectureInfo arch
               -> ReoptOptions
               -> Except String (DiscoveryState arch)
-initDiscState mem entryPoint regInfo symAddrMap explorePred ainfo reoptOpts = do
+initDiscState mem initPoints regInfo symAddrMap explorePred ainfo reoptOpts = do
   let resolveEntry qsn | ".cold" `BS.isSuffixOf` qsnBytes qsn = Nothing
                        | otherwise = Just MayReturnFun
-  let entryPoints = Map.mapMaybe resolveEntry (samAddrMap symAddrMap)
-                  & addKnownFn symAddrMap "abort"            NoReturnFun
-                  & addKnownFn symAddrMap "exit"             NoReturnFun
-                  & addKnownFn symAddrMap "_Unwind_Resume"   NoReturnFun
-                  & addKnownFn symAddrMap "__cxa_rethrow"    NoReturnFun
-                  & addKnownFn symAddrMap "__cxa_throw"      NoReturnFun
-                  & addKnownFn symAddrMap "__malloc_assert"  NoReturnFun
-                  & addKnownFn symAddrMap "__stack_chk_fail" NoReturnFun
-                  & addKnownFn symAddrMap "_ZSt9terminatev"  NoReturnFun
-  s <-
-    case (roIncluded reoptOpts, roExcluded reoptOpts) of
-      ([], excludeNames) -> do
-        excludeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) excludeNames
-        let s = Set.fromList excludeAddrs
-        let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
-                      & trustedFunctionEntryPoints .~ entryPoints
-                      & exploreFnPred .~ (\a -> Set.notMember a s && explorePred a)
-                      & markAddrsAsFunction InitAddr (Map.keys entryPoints)
-        pure $! initState
-      (includeNames, []) -> do
-        includeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) includeNames
-        let s = Set.fromList includeAddrs
-        let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
-                      & trustedFunctionEntryPoints .~ entryPoints
-                      & exploreFnPred .~ (\a -> Set.member a s)
-                      & markAddrsAsFunction InitAddr s
-        pure $! initState
-      _ -> do
-        throwError "Cannot both include and exclude specific addresses."
-  case entryPoint of
-    Nothing -> pure $! s
-    Just entry -> pure $! s & markAddrAsFunction InitAddr entry
+  let entryPoints0
+        = Map.mapMaybe resolveEntry (samAddrMap symAddrMap)
+        & addKnownFn symAddrMap "abort"            NoReturnFun
+        & addKnownFn symAddrMap "exit"             NoReturnFun
+        & addKnownFn symAddrMap "_Unwind_Resume"   NoReturnFun
+        & addKnownFn symAddrMap "__cxa_rethrow"    NoReturnFun
+        & addKnownFn symAddrMap "__cxa_throw"      NoReturnFun
+        & addKnownFn symAddrMap "__malloc_assert"  NoReturnFun
+        & addKnownFn symAddrMap "__stack_chk_fail" NoReturnFun
+        & addKnownFn symAddrMap "_ZSt9terminatev"  NoReturnFun
+  let entryPoints = foldl (\m a -> Map.insert a MayReturnFun m) entryPoints0 initPoints
+  case (roIncluded reoptOpts, roExcluded reoptOpts) of
+    ([], excludeNames) -> do
+      excludeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) excludeNames
+      let s = Set.fromList excludeAddrs
+      let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+                    & trustedFunctionEntryPoints .~ entryPoints
+                    & exploreFnPred .~ (\a -> Set.notMember a s && explorePred a)
+                    & markAddrsAsFunction InitAddr (Map.keys entryPoints)
+      pure $! initState
+    (includeNames, []) -> do
+      includeAddrs <- mapM (resolveSymAddr mem regInfo symAddrMap) includeNames
+      let s = Set.fromList includeAddrs
+      let initState = emptyDiscoveryState mem (getAddrSymMap symAddrMap) ainfo
+                    & trustedFunctionEntryPoints .~ entryPoints
+                    & exploreFnPred .~ (\a -> Set.member a s)
+                    & markAddrsAsFunction InitAddr s
+      pure $! initState
+    _ -> do
+      throwError "Cannot both include and exclude specific addresses."
 
 $(pure [])
 
--- | Identiy symbol names
+-- | Identify symbol names
 discoverSymbolNames :: (MemWidth w, Integral (Elf.ElfWordType w))
                     => Elf.ElfHeaderInfo w -- ^ Binary information
                     -> Memory w  -- ^ Initial memory for binary
@@ -857,6 +856,109 @@ discoverSymbolNames hdrInfo mem baseAddr = do
     flip execStateT symAddrMap0 $
       addDefinedSymbolTableFuns hdrInfo mem baseAddr dynSymtab dynStrtab
 
+-- | Information about .eh_frame/.debug_frame
+data Frame w = Frame
+  { frameMem :: !(Memory w)
+  , frameRegion :: !RegionIndex
+  -- | Flag to indicate if this is .eh_frame or .debug_frame.
+  , frameCtx :: !Dwarf.FrameContext
+  -- | Endianess
+  , frameEnd :: !Dwarf.Endianess
+  -- | Address frame is loaded at.
+  , frameAddr :: !Word64
+  -- | Bytes in frame
+  , frameData :: !BS.ByteString
+  }
+
+-- | Print out all the FDEs for the given CIE in Dwarf dump format.
+fdeEntryPoints ::
+  Frame w ->
+  [MemSegmentOff w] ->
+  -- | CIE for this FDE
+  Dwarf.DW_CIE ->
+  -- | Offset within eh frame.
+  Word64 ->
+  InitDiscM r (Dwarf.FDEParseError, [MemSegmentOff w])
+fdeEntryPoints f entries cie off = do
+  let mem = frameMem f
+  case Dwarf.getFDEAt (frameCtx f) (frameData f) cie off of
+    Left e -> do
+      pure (e, entries)
+    Right (fde, off') -> addrWidthClass (memAddrWidth mem) $ do
+      let faddr = frameAddr f + Dwarf.fdeStartAddress fde
+      case resolveRegionOff mem (frameRegion f) (fromIntegral faddr) of
+        Nothing -> do
+          incCompLog "Could not resolve FDE address."
+          fdeEntryPoints f entries cie off'
+        Just a -> do
+          fdeEntryPoints f (a:entries) cie off'
+
+-- | Pretty print CIEs in file with
+cieEntryPoints ::
+  Frame w ->
+  Word64 ->
+  [MemSegmentOff w] ->
+  InitDiscM r [MemSegmentOff w]
+cieEntryPoints f off entries
+  | BS.length (frameData f) <= fromIntegral off =
+    pure entries
+cieEntryPoints f off entries =
+  case Dwarf.getCIE (frameCtx f) (frameEnd f) Dwarf.TargetSize64 (frameData f) off of
+    Left (_, msg) -> do
+      incCompLog $ "CIE " <> showHex off " parse failure: " <> msg
+      pure entries
+    Right (_, Nothing) -> do
+      pure entries
+    Right (off', Just cie)   -> do
+      (fdeErr, entries') <- fdeEntryPoints f entries cie off'
+      case fdeErr of
+        Dwarf.FDEReachedEnd ->
+          pure entries
+        Dwarf.FDEParseError fdeOff msg -> do
+          incCompLog $ "FDE error " ++ showHex fdeOff ": " ++ msg
+          pure entries
+        Dwarf.FDECIE nextCIEOff -> do
+          cieEntryPoints f nextCIEOff entries'
+        Dwarf.FDEEnd _ -> do
+          pure entries'
+
+-- | Pretty print CIEs in file with
+ehframeEntryPoints ::
+  -- | Elf file
+  Elf.ElfHeaderInfo w ->
+  -- | Section header map
+  Map BS.ByteString [Elf.Shdr nm (Elf.ElfWordType w)] ->
+  -- | Initial memory
+  Memory w ->
+  -- | Index for resolving CIE addresses
+  RegionIndex ->
+  [MemSegmentOff w] ->
+  InitDiscM r [MemSegmentOff w]
+ehframeEntryPoints elfFile shdrMap mem regIdx entries = do
+  let nm = ".eh_frame"
+  case Map.findWithDefault [] nm shdrMap of
+    [] -> do
+      pure entries
+    frameSection : rest -> do
+      when (not (null rest)) $ do
+        incCompLog $ "Multiple " <> BSC.unpack nm <> " sections."
+      if not (null (Map.findWithDefault [] (".rela" <> nm) shdrMap)) then do
+        incCompLog $ "Do not support relocations in " <> BSC.unpack nm <> "."
+        pure entries
+       else do
+        let f = Frame { frameMem = mem
+                      , frameRegion = regIdx
+                      , frameCtx = Dwarf.EhFrame
+                      , frameEnd =
+                          case Elf.headerData (Elf.header elfFile) of
+                            Elf.ELFDATA2LSB -> Dwarf.LittleEndian
+                            Elf.ELFDATA2MSB -> Dwarf.BigEndian
+                      , frameAddr = Elf.elfClassInstances (Elf.headerClass (Elf.header elfFile)) $
+                          fromIntegral (Elf.shdrAddr frameSection)
+                      , frameData = Elf.shdrData elfFile frameSection
+                      }
+        seq f $ cieEntryPoints f 0 entries
+
 -- | Creates InitDiscovery state containing all information needed
 -- to perform function discovery.
 initExecDiscovery :: forall arch r
@@ -876,7 +978,16 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
 
   symAddrMap0 <- discoverSymbolNames hdrInfo mem baseAddr
 
-  mpltRes <- pltFn hdrInfo
+  -- Resolve section headers
+  shdrs <-
+    case Elf.headerNamedShdrs hdrInfo of
+      Left (secIdx, _) -> do
+        fatalError $ printf "Could not resolve name of section %s." (show secIdx)
+      Right shdrs -> do
+        pure shdrs
+
+  -- Resolve PLT entries
+  mpltRes <- pltFn hdrInfo shdrs
 
   -- Create symbol address map that includes plt information if available.
   symAddrMap <-
@@ -915,15 +1026,22 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
   -- Get initial entry address
   let hdr = Elf.header hdrInfo
   let entry = Elf.headerEntry hdr
-  -- Mark entry as address as function
   let entryAddr = asSegmentOff mem (incAddr (toInteger entry) baseAddr)
-
   when (isNothing entryAddr) $ do
     initWarning $ "Could not resolve entry point: " ++ showHex entry ""
+
+  -- Get eh_frame entry points
+  let shdrMap :: Map BS.ByteString [Elf.Shdr BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))]
+      shdrMap =
+        Map.fromListWith (++) [ (Elf.shdrName s, [s]) | s <- V.toList shdrs ]
+
+  ehFrameAddrs <- ehframeEntryPoints hdrInfo shdrMap mem (addrBase baseAddr) (maybeToList entryAddr)
+
+  -- Create initial discovery state.
   let regInfo :: RegionInfo
       regInfo = HasDefaultRegion (addrBase baseAddr)
   s <-
-    case runExcept (initDiscState mem entryAddr regInfo symAddrMap explorePred ainfo reoptOpts) of
+    case runExcept (initDiscState mem ehFrameAddrs regInfo symAddrMap explorePred ainfo reoptOpts) of
       Left e -> fatalError e
       Right r -> pure r
   -- Return discovery
@@ -974,20 +1092,23 @@ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts = runIncCompM $ fmap Right 
               initWarning (show e)
             pure sm
 
-      -- Get index of text section section.
-      textSectionIndex <-
+      shdrs <-
         case Elf.headerNamedShdrs hdrInfo of
           Left (secIdx, _) -> do
             fatalError $ printf "Could not resolve name of section %s." (show secIdx)
           Right shdrs -> do
-            let isText s = Elf.shdrName s == ".text"
-            case V.findIndex isText shdrs of
-              Nothing -> do
-                fatalError "Could not find .text section."
-              Just secIdx -> do
-                when (isJust (V.findIndex isText (V.drop (secIdx+1) shdrs))) $ do
-                  fatalError "Duplicate .text sections found."
-                pure $ (fromIntegral secIdx :: Word16)
+            pure shdrs
+
+      -- Get index of text section section.
+      textSectionIndex <- do
+        let isText s = Elf.shdrName s == ".text"
+        case V.findIndex isText shdrs of
+          Nothing -> do
+            fatalError "Could not find .text section."
+          Just secIdx -> do
+            when (isJust (V.findIndex isText (V.drop (secIdx+1) shdrs))) $ do
+              fatalError "Duplicate .text sections found."
+            pure $ (fromIntegral secIdx :: Word16)
       -- Get offset for text section.
       textBaseAddr <-
         case Map.lookup textSectionIndex secMap of
@@ -1001,7 +1122,7 @@ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts = runIncCompM $ fmap Right 
       let regInfo :: RegionInfo
           regInfo = HasDefaultRegion regIdx
       let explorePred = \_ -> True
-      s <- case runExcept (initDiscState mem entryAddr regInfo symAddrMap explorePred ainfo reoptOpts) of
+      s <- case runExcept (initDiscState mem (maybeToList entryAddr) regInfo symAddrMap explorePred ainfo reoptOpts) of
             Left e -> fatalError e
             Right r -> pure r
       -- Get initial entries and predicate for exploring
@@ -2131,6 +2252,8 @@ printLogEvent
 printLogEvent event = do
   -- Print log info of important events to stderr.
   case event of
+    ReoptLogEvent _st _sev (ReoptLogInitEntryPointCount _) -> do
+      pure ()
     _ -> do
       hPutStrLn stderr (show event)
 

@@ -28,6 +28,7 @@ library
     elf-edit >= 0.40,
     filepath,
     flexdis86 >= 0.1.1,
+    galois-dwarf >= 0.2.2,
     hashable,
     language-c,
     lens,
