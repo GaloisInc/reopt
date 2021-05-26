@@ -140,7 +140,8 @@ executable reopt-explore
     macaw-base,
     macaw-x86,
     mtl,
-    reopt
+    reopt,
+    unix
 
   hs-source-dirs: reopt-explore
   main-is: Main_explore.hs

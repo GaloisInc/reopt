@@ -8,6 +8,7 @@ import Control.Exception (catch, SomeException)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.IORef (newIORef, readIORef)
 import Data.List ( intercalate, foldl', unfoldr, intersperse)
 import Data.Macaw.Discovery ( DiscoveryOptions(..) )
 import Data.Macaw.X86 ( X86_64 )
@@ -24,7 +25,6 @@ import Reopt
       copyrightNotice,
       ReoptStats(..),
       statsHeader,
-      recoverFunctions,
       renderLLVMBitcode,
       defaultLLVMGenOptions,
       latestLLVMConfig,
@@ -33,15 +33,22 @@ import Reopt
       mergeFnFailures,
       statsRows,
       RecoveredModule,
-      X86OS
+      X86OS,
+      emptyAnnDeclarations,
+      recoverX86Elf,
+      initReoptStats,
+      joinLogEvents,
+      printLogEvent,
+      recoverLogEvent
     )
 import Reopt.Utils.Dir
 import System.Console.CmdArgs.Explicit
     ( process, flagHelpSimple, helpText, HelpFormat(..),
-      flagReq, mode, Arg(..), Flag, Mode)
+      flagReq, flagNone, mode, Arg(..), Flag, Mode)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStr, hPutStrLn, stderr)
+import System.Posix.Files (fileSize, getFileStatus)
 import Text.Printf (printf)
 
 reoptVersion :: String
@@ -65,6 +72,8 @@ data Args
             -- ^ Should we export summary information?
           , showHelp :: !Bool
             -- ^ Show help to user?
+          , verbose :: !Bool
+            -- ^ Report output of individual binaries.
           }
 
 defaultArgs :: Args
@@ -75,6 +84,7 @@ defaultArgs =
   , exportFnResultsPath = Nothing
   , exportSummaryPath = Nothing
   , showHelp = False
+  , verbose = False
   }
 
 -- | Flag to set clang path.
@@ -98,6 +108,10 @@ showHelpFlag :: Flag Args
 showHelpFlag = flagHelpSimple upd
   where upd old = old { showHelp = True }
 
+verboseFlag :: Flag Args
+verboseFlag = flagNone [ "verbose", "v" ] upd help
+  where upd old = old { verbose = True }
+        help = "Show output of individual binaries."
 
 -- | Flag to set the path to the binary to analyze.
 filenameArg :: Arg Args
@@ -116,6 +130,7 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
                 , clangPathFlag
                 , exportFnResultsFlag
                 , exportSummaryFlag
+                , verboseFlag
                 ]
 
 getCommandLineArgs :: IO Args
@@ -192,7 +207,6 @@ exploreBinary ::
   FilePath ->
   IO [ExplorationResult]
 exploreBinary args results fPath = do
-  hPutStrLn stderr $ "Analyzing binary " ++ fPath ++ " ..."
   result <- catch performRecovery
                   (handleFailure ExplorationError)
   pure $ result:results
@@ -207,32 +221,43 @@ exploreBinary args results fPath = do
     rOpts = ReoptOptions { roIncluded = []
                          , roExcluded = []
                          }
-    hdrPath = Nothing
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
     performRecovery = do
-        (os, recMod, stats) <- recoverFunctions fPath
-                                                (clangPath args)
-                                                lOpts
-                                                dOpts
-                                                rOpts
-                                                hdrPath
-                                                unnamedFunPrefix
-        hPutStrLn stderr $ "Completed analyzing binary " ++ fPath ++ "."
-        catch (do sz <- generateLLVM os recMod; pure $ ExplorationStats stats $ LLVMGenPass sz)
-              (handleFailure $ \_ errMsg -> ExplorationStats stats $ LLVMGenFail errMsg)
+        hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
+        stat <- getFileStatus fPath
+        let progSize = fileSize stat
+        statsRef <- newIORef $ initReoptStats fPath (fromIntegral progSize)
+        let logger | verbose args = joinLogEvents printLogEvent (recoverLogEvent statsRef)
+                   | otherwise = recoverLogEvent statsRef
+        (_, os, _, recMod, _) <-
+          recoverX86Elf logger
+                        fPath
+                        lOpts
+                        dOpts
+                        rOpts
+                        emptyAnnDeclarations
+                        unnamedFunPrefix
+        stats <- readIORef statsRef
+        res <- catch (generateLLVM os recMod)
+                    (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
+        pure $ ExplorationStats stats res
+
     -- | Generate LLVM bitcode and return the number of bytes generated.
-    generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO Natural
+    generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO LLVMGenResult
     generateLLVM os recMod = do
-        hPutStrLn stderr $ "Generating LLVM bitcode..."
         let (llvm, _) = renderLLVMBitcode defaultLLVMGenOptions
                                           latestLLVMConfig
                                           os
                                           recMod
         let sz = BSL.length $ BS.toLazyByteString llvm
-        hPutStrLn stderr $ (show sz) ++ " bytes of LLVM textual bitcode generated."
-        pure $ if sz < 0 then 0 else fromIntegral sz
-    handleFailure :: (FilePath -> String -> ExplorationResult) -> SomeException -> IO ExplorationResult
+        seq sz $ do
+          if verbose args then
+            hPutStrLn stderr $ "Completed " ++ fPath ++ "."
+           else
+            hPutStrLn stderr $ "  Done."
+          pure $ LLVMGenPass $ if sz < 0 then 0 else fromIntegral sz
+    handleFailure :: (FilePath -> String -> a) -> SomeException -> IO a
     handleFailure mkResult e = do
         hPutStrLn stderr "Error raised during exploration"
         hPutStrLn stderr $ show e
@@ -306,10 +331,6 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
            "\n"++(show $ totalFailureCount s)++" errors/warnings during exploration." ++
            "\nError metrics:" ++
            "\n"++(renderAllFailures $ totalFnFailures s)
-
-
-
-
 
 main :: IO ()
 main = do
