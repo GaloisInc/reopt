@@ -159,8 +159,6 @@ data FunTypeMaps w =
                 -- contain address information, and so we use symbol addresses.
                 --
                 -- It returns nothing if an address cannot be resolved.
-              , dwarfBaseCodeAddr :: !(MemAddr w)
-                -- ^ Address to add to all code offsets in dwarf file.
               , nameToAddrMap :: !(SymAddrMap w)
                 -- ^ Map from symbol names to the address.
               , nameTypeMap :: !(Map BS.ByteString ReoptFunType)

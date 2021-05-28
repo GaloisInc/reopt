@@ -2,6 +2,7 @@
 /cabal.project.local
 /dist-newstyle
 /hie.yml
+/scratch
 /TAGS
 /tar
 .DS_Store

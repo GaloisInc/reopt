@@ -549,7 +549,7 @@ recoverInitialReg reg = do
       case MapF.lookup lr m of
         Nothing -> do
           let var  = show (pretty lr)
-          throwErrorAt ReoptUnsupportedFnValueTag $ printf "Uninitialized value {}" var
+          throwErrorAt ReoptUnsupportedFnValueTag $ printf "Uninitialized value %s" var
         Just rv ->
           pure rv
 
@@ -1303,9 +1303,9 @@ recoverBlock b = do
     PLTStub{} -> do
       throwErrorAt ReoptCannotRecoverFnWithPLTStubsTag "Cannot recover functions with PLT stubs."
     ParsedTranslateError{} -> do
-      throwErrorAt MacawParsedTranslateFailureTag "Cannot recover function in blocks where translation error occurs."
+      error "Functions with translate error should not appear."
     ClassifyFailure{} ->
-      throwErrorAt MacawClassifyFailureTag "Classification failed in Recovery"
+      error "Functions with classify failure should not appear."
 
     ParsedJump _regs tgtAddr -> do
       -- Get target

@@ -71,6 +71,7 @@ library
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
     Reopt.CFG.StackDepth
+    Reopt.FunUseMap
     Reopt.Hints
     Reopt.Relinker
     Reopt.Relinker.Constants
@@ -85,6 +86,7 @@ library
     Reopt.TypeInference.Header
     Reopt.TypeInference.HeaderTypes
     Reopt.Utils.Flags
+    Reopt.Utils.Folds
     Reopt.Utils.Hex
     Reopt.Utils.Printf
 

@@ -16,6 +16,15 @@ clean :
 nweb23.exe : nweb23.c
 	cc -o $@ -g $<
 
+nweb23.cfg : nweb23.exe nweb.h
+	$(reopt) --cfg -o $@ --header nweb.h nweb23.exe
+.PHONY : nweb23.cfg
+
+nweb23.fns : nweb23.exe nweb.h
+	$(reopt) --fns -o $@ --header nweb.h nweb23.exe
+
+.PHONY : nweb23.fns
+
 nweb23.ll nweb23.ann : nweb23.exe nweb.h
 	$(reopt) --llvm -o nweb23.ll --annotations nweb23.ann --header nweb.h nweb23.exe || true
 

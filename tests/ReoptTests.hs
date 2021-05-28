@@ -2,22 +2,22 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-module ReoptTests (
-  reoptTests
-  ) where
 
+module ReoptTests
+  ( reoptTests,
+  )
+where
 
-import           Control.Exception
+import Control.Exception
 import qualified Data.ByteString.Builder as Builder
-import           Data.Macaw.Discovery
+import Data.Macaw.Discovery
 import qualified Data.Macaw.Memory.ElfLoader as MM
-import           Prettyprinter
-import           System.FilePath.Posix
-import           System.IO
+import Prettyprinter
+import Reopt
+import System.FilePath.Posix
+import System.IO
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
-
-import           Reopt
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
@@ -31,19 +31,22 @@ logger _msg = pure () -- error $ "Test failed: " ++ msg
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
-  let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
-  let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
+  let fns_path = replaceFileName fp (takeBaseName fp ++ ".fns")
+  let llvmPath = replaceFileName fp (takeBaseName fp ++ ".ll")
 
   let loadOpts = MM.defaultLoadOptions
-  let discOpts = DiscoveryOptions { exploreFunctionSymbols = True
-                                  , exploreCodeAddrInMem   = False
-                                  , logAtAnalyzeFunction   = False
-                                  , logAtAnalyzeBlock      = False
-                                  }
+  let discOpts =
+        DiscoveryOptions
+          { exploreFunctionSymbols = True,
+            exploreCodeAddrInMem = False,
+            logAtAnalyzeFunction = False,
+            logAtAnalyzeBlock = False
+          }
   let hdrAnn = emptyAnnDeclarations
-  let reoptOpts = ReoptOptions { roIncluded = [], roExcluded = [] }
+  let reoptOpts = ReoptOptions {roIncluded = [], roExcluded = []}
+  contents <- checkedReadFile fp
   (_, os, discState, recMod, _) <-
-    recoverX86Elf logger fp loadOpts discOpts reoptOpts hdrAnn "reopt"
+    recoverX86Elf logger fp contents loadOpts discOpts reoptOpts hdrAnn "reopt"
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))

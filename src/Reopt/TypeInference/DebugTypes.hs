@@ -24,17 +24,15 @@ import           Data.Macaw.Discovery
 import qualified Data.Macaw.Dwarf as Dwarf
 import           Data.Macaw.Utils.IncComp
 
-
 import           Reopt.TypeInference.HeaderTypes
 import           Reopt.ArgResolver
 import           Reopt.Events
 import           Reopt.TypeInference.FunTypeMaps
 
 reoptTypeWarning :: String -> IncCompM (ReoptLogEvent arch) r ()
-reoptTypeWarning msg = incCompLog
-                       $ ReoptLogEvent DebugTypeInference ReoptWarning
-                       $ ReoptLogMessage msg
-
+reoptTypeWarning msg =
+  incCompLog $
+    ReoptGlobalStepWarning DebugTypeInference msg
 
 -- | Get name as an external symbol
 dwarfExternalName :: Dwarf.Subprogram -> Maybe BSC.ByteString
@@ -337,7 +335,7 @@ resolveDebugFunTypes annMap elfInfo = do
       -- No debug information
       pure annMap
     _:_ -> do
-      incCompLog (ReoptStepStarted DebugTypeInference)
+      incCompLog (ReoptGlobalStepStarted DebugTypeInference)
       let end =
             case Elf.headerData hdr of
               Elf.ELFDATA2LSB -> Dwarf.LittleEndian
@@ -349,5 +347,5 @@ resolveDebugFunTypes annMap elfInfo = do
             when (not (null r)) $ reoptTypeWarning $ printf "Multiple %s sections in Elf file." (BSC.unpack nm)
             pure $! Elf.elfSectionData s
       r <- resolveCompileUnits annMap (Dwarf.firstCUContext end sections)
-      incCompLog (ReoptStepFinished DebugTypeInference ())
+      incCompLog (ReoptGlobalStepFinished DebugTypeInference ())
       pure r
