@@ -2,7 +2,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 -- |
 -- Datatype for recording events in Reopt.
@@ -51,7 +50,7 @@ where
 import Control.Lens
 import qualified Data.ByteString.Char8 as BS
 import Data.IORef
-import Data.List (foldl', intersperse, unfoldr)
+import Data.List (foldl', intercalate, unfoldr)
 import Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
 import Data.Macaw.Discovery (DiscoveryState, memory, unexploredFunctions)
 import Data.Macaw.Memory
@@ -300,7 +299,7 @@ printLogEvent event = do
       hPutStrLn stderr $ printf "  %s" msg
     ReoptFunStepStarted s f ->
       hPutStrLn stderr $ ppFunStep s ++ " " ++ ppFunId f
-    ReoptFunStepFinished _ _ _ ->
+    ReoptFunStepFinished{} ->
       hPutStrLn stderr $ printf "  Complete."
     ReoptFunStepFailed s _ e ->
       hPutStrLn stderr $
@@ -359,7 +358,7 @@ incStepError stepTag failureTag = Map.alter logFail stepTag
 
 -- | Render the registered failures in an indented list-style Doc.
 renderAllFailures' :: forall a. (Num a, Show a) => StepErrorMap a -> Doc ()
-renderAllFailures' = vsep . (map renderStepFailures) . Map.toList
+renderAllFailures' = vsep . map renderStepFailures . Map.toList
   where
     renderStepFailures :: (ReoptStepTag, Map ReoptErrorTag a) -> Doc ()
     renderStepFailures (tag, failures) =
@@ -367,9 +366,9 @@ renderAllFailures' = vsep . (map renderStepFailures) . Map.toList
             hsep
               [ viaShow $ stepCount failures,
                 pretty "failures during",
-                (pretty $ ppReoptStepTag tag) <> (pretty " step:")
+                pretty (ppReoptStepTag tag) <> pretty " step:"
               ]
-       in hang 2 $ vsep $ [hdr] ++ (map renderFailure $ Map.toList failures)
+       in hang 2 $ vsep $ hdr : map renderFailure (Map.toList failures)
     renderFailure :: (ReoptErrorTag, a) -> Doc ()
     renderFailure (tag, cnt) = hsep [pretty $ show cnt, pretty $ ppReoptErrorTag tag]
     stepCount :: Map ReoptErrorTag a -> a
@@ -420,7 +419,7 @@ fsTotalCount fs = fsSuccessCount fs + fsFailCount fs
 groupDigits :: Show a => a -> String
 groupDigits = addCommas . show
   where
-    addCommas = reverse . concat . intersperse "," . unfoldr chunkBy3 . reverse
+    addCommas = reverse . intercalate "," . unfoldr chunkBy3 . reverse
     chunkBy3 l = case splitAt 3 l of
       ([], _) -> Nothing
       p -> Just p
@@ -532,14 +531,15 @@ ppDiscoveryStats stats = do
   let discCodeSize = fromIntegral (statsDiscoveredCodeSize stats)
   let totalCodeSize = fromIntegral (statsCodeSegmentSize stats)
   ppSection "Discovery" $
-    [ppFrac "Bytes discovered" discCodeSize totalCodeSize]
-      ++ ppFunStepStats (lookupFunStepStats Discovery stats)
+    ppFrac "Bytes discovered" discCodeSize totalCodeSize
+      : ppFunStepStats (lookupFunStepStats Discovery stats)
 
 ppArgumentAnalysisStats :: ReoptStats -> [String]
 ppArgumentAnalysisStats stats = do
   let discTotal = fsSuccessCount $ lookupFunStepStats Discovery stats
   let inferTotal = fsTotalCount $ lookupFunStepStats InvariantInference stats
-  ppSection "Argument Analysis" $
+  ppSection
+    "Argument Analysis"
     [ ppFrac "Succeeded" inferTotal discTotal,
       ppFrac "Failed" (discTotal - inferTotal) discTotal,
       outputRow "Header Warnings" (groupDigits (globalStepWarningCount HeaderTypeInference stats)),

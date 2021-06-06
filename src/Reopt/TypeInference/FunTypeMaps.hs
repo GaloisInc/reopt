@@ -197,7 +197,7 @@ addCheckExisting nm k v m =
       pure $! Map.insert k v m
     Just pv -> do
       when (pv /= v) $ do
-        modify $ (printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v) :)
+        modify (printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v) :)
       pure m
 
 

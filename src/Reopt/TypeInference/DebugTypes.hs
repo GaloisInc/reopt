@@ -24,10 +24,10 @@ import           Data.Macaw.Discovery
 import qualified Data.Macaw.Dwarf as Dwarf
 import           Data.Macaw.Utils.IncComp
 
-import           Reopt.TypeInference.HeaderTypes
 import           Reopt.ArgResolver
 import           Reopt.Events
 import           Reopt.TypeInference.FunTypeMaps
+import           Reopt.TypeInference.HeaderTypes
 
 reoptTypeWarning :: String -> IncCompM (ReoptLogEvent arch) r ()
 reoptTypeWarning msg =
