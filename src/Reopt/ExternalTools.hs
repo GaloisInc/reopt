@@ -4,8 +4,6 @@ This defines operations that require external tools installed on the system.
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wall #-}
--- {-# OPTIONS_GHC -Werror #-}
 module Reopt.ExternalTools
   ( -- * Clang
     runClangPreprocessor
@@ -20,10 +18,11 @@ module Reopt.ExternalTools
   , run_llvm_link
     -- * Running gas
   , run_gas
-    -- * Running slash
-  , run_slash
+    -- * Slash
+  , runSlash
     -- * Failure information
   , Failure(..)
+  , ToolName(..)
   , Control.Monad.Trans.Except.ExceptT(..)
   ) where
 
@@ -50,19 +49,44 @@ import System.IO.Error
 import           System.Exit (exitFailure)
 import           System.FilePath ((</>), (<.>))
 import qualified System.Process  as P
-import           Reopt.Utils.Builder (builderWriteFile)
+
+data ToolName
+   = Clang
+   | Gas
+   | Llc
+   | LlvmLink
+   | LlvmMc
+   | Opt
+   -- | Slash
+   | Slash
+
+instance Show ToolName where
+  show Clang = "clang"
+  show Gas = "gas"
+  show Llc = "llc"
+  show LlvmLink = "llvm-link"
+  show LlvmMc = "llvm-mc"
+  show Opt = "opt"
+
 
 -- |  Type of failure from running tools.
 data Failure
-   = ProgramError !String
-     -- ^ gas returned some error.
-   | ProgramNotFound !String
-   | PermissionError !String
+  = ProgramNotFound !ToolName !String
+  | PermissionError !ToolName !String
+  | EarlyTerminationError !ToolName !String
+     -- | @ExitError tool out exit@ indicates program identified by @tool@ exited
+     -- with a non-zero exit code @exit@.  @out@ denotes output from @stderr@.
+  | ExitError !ToolName !String !Int
 
 instance Show Failure where
-  show (ProgramError msg)     = msg
-  show (ProgramNotFound path) = "Could not find " ++ path ++ "."
-  show (PermissionError path) = "Do not have permissions to execute " ++ path ++ "."
+  show (ProgramNotFound _ path) = "Could not find " ++ path ++ "."
+  show (PermissionError _ path) = "Do not have permissions to execute " ++ path ++ "."
+  show (EarlyTerminationError _ msg)
+    | null msg = "Unexpected end of output"
+    | otherwise = "Unexpected end of output:\n  " ++ msg
+  show (ExitError _ output exitCode)
+    | null output = "Exited with error code " ++ show exitCode ++ "."
+    | otherwise =  output
 
 -- | Try to create a process, and call the call back funtion with
 -- the handles for 'stdin', 'stdout', and 'stderr' if it succeeds.
@@ -71,7 +95,7 @@ instance Show Failure where
 --
 -- If the attempt fails, because the process does not exist, then throw the given
 -- exception.
-withCreateProcess :: String -- ^ Name of tool for error purposes
+withCreateProcess :: ToolName -- ^ Name of tool for error purposes
                   -> String -- ^ Path of program to execute
                   -> [String] -- ^ Arguments
                   -> ((Handle, Handle, Handle) -> ExceptT Failure IO a)
@@ -85,28 +109,27 @@ withCreateProcess nm cmd args f = do
                 }
   let h :: IOException -> IO (Either Failure a)
       h ioe
-        | isDoesNotExistError ioe = return $! Left (ProgramNotFound cmd)
-        | isPermissionError   ioe = return $! Left (PermissionError cmd)
+        | isDoesNotExistError ioe = return $! (Left $! ProgramNotFound nm cmd)
+        | isPermissionError   ioe = return $! (Left $! PermissionError nm cmd)
         | otherwise = throwIO ioe
-  (Just in_handle, Just out, Just err, ph) <- ExceptT $
+  (Just inHandle, Just out, Just err, ph) <- ExceptT $
      (Right <$> P.createProcess cp) `catch` h
-  f (in_handle, out, err) <* waitForEnd nm err ph
-
-
+  f (inHandle, out, err) <* waitForEnd nm err ph
 
 catchFailure :: IO a -> (IOError -> IO Failure) -> ExceptT Failure IO a
 catchFailure m h = ExceptT $ fmap Right m `catch` (fmap Left . h)
 
 -- | This is a helper function that runs an IO action and ensures that
 -- some cleanup is performed if an exception is thrown.
-writeAndClose :: Handle -- ^ Input handle to write to.
+writeAndClose :: ToolName
+              -> Handle -- ^ Input handle to write to.
               -> Handle -- ^ Error handle to close if things fail.
               -> IO () -- ^ Action to run
               -> ExceptT Failure IO ()
-writeAndClose inHandle errHandle action = do
+writeAndClose nm inHandle errHandle action = do
   let h e | ioeGetErrorType e == ResourceVanished = do
               hClose inHandle
-              ProgramError <$> hGetContents errHandle
+              EarlyTerminationError nm <$> hGetContents errHandle
           | otherwise = do
               hClose inHandle
               hClose errHandle
@@ -119,7 +142,7 @@ writeAndClose inHandle errHandle action = do
 --
 -- This function takes a handle to the process's stderr and closes it
 -- or semicloses it before returning.
-waitForEnd :: String -- ^ Name of tool
+waitForEnd :: ToolName -- ^ Name of tool
            -> Handle -- ^ Handle to read from for getting error
            -> P.ProcessHandle -- ^ Handle to process
            -> ExceptT Failure IO ()
@@ -130,9 +153,7 @@ waitForEnd tool err_handle ph = do
       liftIO $ hClose err_handle
     ExitFailure c -> do
       msg <- liftIO $ hGetContents err_handle
-      let msg' | null msg = tool ++ " exited with error code " ++ show c ++ "."
-               | otherwise = tool ++ ": " ++ msg
-      throwE $! ProgramError msg'
+      throwE $! ExitError tool msg c
 
 -- | The the file handle to binary and read its contents.
 readContents :: Handle -> IO BS.ByteString
@@ -157,7 +178,7 @@ runClangPreprocessor cmd headerFile = do
             , "-nostdinc"
             , headerFile
             ]
-  withCreateProcess "clang" cmd args $ \(inHandle, outHandle, _errHandle) -> do
+  withCreateProcess Clang cmd args $ \(inHandle, outHandle, _errHandle) -> do
     liftIO $ do
       hClose inHandle
       readContents outHandle
@@ -174,7 +195,6 @@ data LLCOptions
                , llcFunctionSections :: !Bool
                  -- ^ Set to true to use function sections.
                }
-
 
 -- | Use 'llc' to create assembly from LLVM bitcode.
 --
@@ -202,8 +222,8 @@ runLLC llc_command opts input_file = do
         ++ llcTripleArgs
         ++ llcOptArgs
         ++ llcFunctionSectionsArgs
-  withCreateProcess "llc" llc_command llc_args $ \(in_handle, out_handle, err_handle) -> do
-    writeAndClose in_handle err_handle $ do
+  withCreateProcess Llc llc_command llc_args $ \(in_handle, out_handle, err_handle) -> do
+    writeAndClose Llc in_handle err_handle $ do
       hSetBinaryMode in_handle True
       BS.hPut in_handle input_file
     liftIO $ readContents out_handle
@@ -227,108 +247,13 @@ runLlvmMc cmd asm triple = do
             , "-filetype=obj"
             , "-fatal-warnings"
             , "--triple=" ++ triple ]
-  withCreateProcess "llvm-mc" cmd args $ \(in_handle, out_handle, err_handle) -> do
+  withCreateProcess LlvmMc cmd args $ \(in_handle, out_handle, err_handle) -> do
     -- Write to input handle and close it.
-    writeAndClose in_handle err_handle $ do
+    writeAndClose LlvmMc in_handle err_handle $ do
       hSetBinaryMode in_handle True
       BS.hPut in_handle asm
     -- Get output
     liftIO $ readContents out_handle
-
-------------------------------------------------------------------------
--- OCCAM integration
-
--- | User configuration for SRI's OCCAM tool when used by Reopt.
---
--- Essentially a subset and combination of the information contained
--- in an OCCAM manifest file and the command line options
--- to OCCAM's `slash` tool.
-data ReoptOccamConfig =
-  ReoptOccamConfig
-  { occamSlashOptions :: [Text]
-  -- ^ Command line options for OCCAM's `slash` tool (not including
-  -- the manifest file).
-  , occamLDFlags :: [Text]
-  -- ^ User specified `ldflags` entry -- we explicitly capture this because we add to it
-  -- if it already exists.
-  , occamBitcodeFileName :: String
-  -- ^ Name of the bitcode file to emit and pass to OCCAM.
-  , occamOtherOptions :: HashMap Text Aeson.Value
-  -- ^ Manifest entries provided by the user that are passed on to OCCAM/slash.
-  }
-
-
-instance Aeson.FromJSON ReoptOccamConfig where
-  parseJSON (Aeson.Object userData) =
-    case HM.lookup "main" userData of
-      Just (Aeson.String bcFileName) -> do
-        slashOpts <- getJSONStringListFromObjField (pure []) "slash_options" userData
-        ldFlags <- getJSONStringListFromObjField (pure []) "ldflags" userData
-        pure $ ReoptOccamConfig
-               { occamSlashOptions = slashOpts
-               , occamLDFlags = ldFlags
-               , occamBitcodeFileName = T.unpack bcFileName
-               , occamOtherOptions = HM.delete "slash_options"
-                                     $ HM.delete "ldflags"
-                                     $ HM.delete "main" userData
-               }
-      Just other -> fail $ "Expected \"main\" field of JSON object to contain a string but found " ++ (show other)
-      Nothing -> fail $ "Expected a JSON object with a \"main\" entry"
-  parseJSON js = fail $ "Expected a JSON object describing the OCCAM config but got " ++ show js
-
-getJSONStringListFromObjField :: Aeson.Parser [Text] -> Text -> HashMap Text Aeson.Value -> Aeson.Parser [Text]
-getJSONStringListFromObjField dflt fieldName obj = do
-  case HM.lookup fieldName obj of
-    Nothing -> dflt
-    Just (Aeson.Array elems) -> do
-      let getStr (Aeson.String txt) = pure txt
-          getStr other = fail $ "Expected a string but got "++ (show other)
-      mapM getStr $ V.toList elems
-    Just other -> fail $ "Expected a JSON array of strings in object field `"++(T.unpack fieldName)++"` but got "++(show other)
-
--- | Generate an OCCAM manifest from a Reopt config for OCCAM.
-toOccamManifest ::
-  ReoptOccamConfig
-  -> String -- ^ Name of the original program
-  -> String -- ^ Name (not path) of file to emit after optimization
-  -> Aeson.Value
-toOccamManifest cfg progName bcOutFile =
-  Aeson.Object
-  $ HM.insert "main" (Aeson.String $ T.pack $ occamBitcodeFileName cfg)
-  $ HM.insert "binary" (Aeson.toJSON bcOutFile)
-  $ HM.insert "name" (Aeson.String $ T.pack progName)
-  $ HM.insert "ldflags" (Aeson.toJSON $ (["-c", "-emit-llvm"] ++ (occamLDFlags cfg)))
-  $ occamOtherOptions cfg
-
-
--- | Use OCCAM's slash on a bitcode file to optimize and recompile it.
-run_slash ::
-  FilePath -- ^ Path to slash script on host machine
-  -> FilePath -- ^ Configuration file for OCCAM
-  -> String -- ^ Name of the original program
-  -> Builder.Builder -- ^ Bitcode to optimize and compile with OCCAM's slash
-  -> ExceptT Failure IO BS.ByteString
-run_slash slash_command cfgPath progName bc = do
-  cfg <- do res <- liftIO $ Aeson.decodeFileStrict cfgPath
-            case res of
-              Nothing -> error $ "Failed to parse JSON in OCCAM config file: "++cfgPath
-              Just c -> pure c
-  let onBitcodeErr :: IOException -> IO ()
-      onBitcodeErr e = do
-        hPutStrLn stderr "Error writing bitcode file:"
-        hPutStrLn stderr $ "  " <> show e
-        exitFailure
-  curDir <- liftIO $ getCurrentDirectory
-  liftIO $ builderWriteFile (occamBitcodeFileName cfg) bc `catch` onBitcodeErr
-  let bcOutFile = (occamBitcodeFileName cfg) <.> "occam"
-  let manifest = toOccamManifest cfg progName bcOutFile
-  let manifestPath = cfgPath <.> "occam"
-  liftIO $ encodeFile manifestPath manifest
-  let slashArgs = [manifestPath] ++ (map T.unpack $ occamSlashOptions cfg)
-  liftIO $ hPutStrLn stderr $ "running slash "++(intercalate " " slashArgs)
-  liftIO $ P.callProcess slash_command slashArgs
-  liftIO $ withFile (curDir </> bcOutFile) ReadMode readContents
-
 
 ------------------------------------------------------------------------
 -- LLVM opt
@@ -343,8 +268,8 @@ run_opt opt_command lvl writeInput = do
   when (lvl < 0 || lvl > 3) $ do
     error $ "Optimization level is out of range."
   let opt_args = [ "-O" ++ show lvl ]
-  withCreateProcess "opt" opt_command opt_args $ \(in_handle, out_handle, err_handle) -> do
-    writeAndClose in_handle err_handle $ do
+  withCreateProcess Opt opt_command opt_args $ \(in_handle, out_handle, err_handle) -> do
+    writeAndClose Opt in_handle err_handle $ do
       hSetBinaryMode in_handle True
       writeInput in_handle
     liftIO $ readContents out_handle
@@ -358,7 +283,7 @@ run_llvm_link :: FilePath -- ^ Path to llvm-link
               -> ExceptT Failure IO BS.ByteString
 run_llvm_link llvm_link_command paths = do
   let args = [ "-o=-" ] ++ paths
-  withCreateProcess "llvm-link" llvm_link_command args $ \(in_handle, out_handle, _err_handle) -> do
+  withCreateProcess LlvmLink llvm_link_command args $ \(in_handle, out_handle, _err_handle) -> do
     liftIO $ hClose in_handle
     liftIO $ readContents out_handle
 
@@ -376,12 +301,27 @@ run_gas :: FilePath      -- ^ Path to gas
 run_gas gas_command asm obj_path = do
   -- Run GNU asssembler
   let args= [ "-o", obj_path, "--fatal-warnings" ]
-  withCreateProcess "gas" gas_command args $ \(in_handle, out_handle, err_handle) -> do
+  withCreateProcess Gas gas_command args $ \(in_handle, out_handle, err_handle) -> do
     -- Write to input handle and close it.
-    writeAndClose in_handle err_handle $ do
+    writeAndClose Gas in_handle err_handle $ do
       hSetBinaryMode in_handle True
       BS.hPut in_handle asm
     -- Close output
     liftIO $ hClose out_handle
 
+------------------------------------------------------------------------
+-- slash
 
+-- | Use LLVM link to combine several ll or bc files into one.
+runSlash ::
+  -- | Path to slash
+  FilePath ->
+  -- | Path to manifest file
+  FilePath ->
+  -- | Additional arguments to slash
+  [String] ->
+  ExceptT Failure IO ()
+runSlash slashPath manifestPath args = do
+  withCreateProcess Slash slashPath (manifestPath:args) $ \(in_handle, out_handle, _err_handle) -> do
+    liftIO $ hClose in_handle
+    liftIO $ hClose out_handle

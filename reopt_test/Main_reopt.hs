@@ -76,7 +76,6 @@ import           Data.Macaw.X86.Semantics
 import           Data.Macaw.X86.X86Flag (flagIndex)
 import           Data.Macaw.X86.X86Reg (X86Reg(..), x86StateRegs)
 
-import           Reopt (readElf64)
 import           Reopt.Concrete.BitVector hiding (modify)
 import           Reopt.Concrete.MachineState (MonadMachineState(..), FoldableMachineState(..)
                                              , Address8, modifyAddr, asBV, ConcreteStateT)
@@ -90,7 +89,7 @@ import           SignalUtils (signalToString, statusToString)
 
 -- | Action to perform when running
 data Action
-   = Application    -- * Exectue and simulate in parallel, printing errors
+   = Application    -- * Execute and simulate in parallel, printing errors
    | Test            -- * Execute a single-instruction test in parallel
    | Instr
    | ShowHelp        -- ^ Print out help message
@@ -312,7 +311,13 @@ testSingleInstruction args = mkTest args singleInstructionTest
 
 printExecutedInstructions :: Args -> IO ()
 printExecutedInstructions args = do
-  e <- readElf64 (args^.programPath)
+  when (null (args^.programPath)) $ do
+    fail "Missing program path."
+  bs <- checkedReadFile(args^.programPath)
+  hdr <- handleEitherStringWithExit $ parseElfHeaderInfo64 (args^.programPath) bs
+  let (l, e) = Elf.getElf hdr
+  unless (null l) $ do
+    fail "Errors occurred in reading elf file."
   let Right (_,mem) = memoryForElf (loadOpt args) e
   child <- traceFile $ args^.programPath
   runStateT (traceInner (printInstr mem) child) ()

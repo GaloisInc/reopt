@@ -8,12 +8,12 @@ module ReoptTests
   )
 where
 
-import Control.Exception
 import qualified Data.ByteString.Builder as Builder
 import Data.Macaw.Discovery
 import qualified Data.Macaw.Memory.ElfLoader as MM
 import Prettyprinter
 import Reopt
+import Reopt.Utils.Exit
 import System.FilePath.Posix
 import System.IO
 import qualified Test.Tasty as T
@@ -45,14 +45,17 @@ mkTest fp = T.testCase fp $ do
   let hdrAnn = emptyAnnDeclarations
   let reoptOpts = ReoptOptions {roIncluded = [], roExcluded = []}
   contents <- checkedReadFile fp
-  (_, os, discState, recMod, _) <-
-    recoverX86Elf logger fp contents loadOpts discOpts reoptOpts hdrAnn "reopt"
+
+  hdrInfo <- either fail pure $ parseElfHeaderInfo64 fp contents
+  mr <-
+    runReoptM logger $ do
+      recoverX86Elf loadOpts discOpts reoptOpts hdrAnn "reopt" hdrInfo
+  (os, discState, recMod, _) <- either (fail . show) pure mr
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
-  let archOps = x86LLVMArchOps (show os)
-  bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
+  withBinaryFile llvmPath WriteMode $ \h -> do
     let (llvmContents, _ann) =
-          llvmAssembly archOps defaultLLVMGenOptions recMod latestLLVMConfig
+          renderLLVMBitcode defaultLLVMGenOptions latestLLVMConfig os recMod
     Builder.hPutBuilder h llvmContents

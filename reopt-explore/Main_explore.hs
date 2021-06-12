@@ -17,21 +17,22 @@ import Data.Version (Version (versionBranch))
 import Numeric.Natural (Natural)
 import Paths_reopt (version)
 import Reopt
-  ( LoadOptions (LoadOptions, loadOffset),
+  ( runReoptM,
+    LoadOptions (LoadOptions, loadOffset),
     RecoveredModule,
     ReoptOptions (ReoptOptions, roExcluded, roIncluded),
     X86OS,
-    checkedReadFile,
     copyrightNotice,
     defaultLLVMGenOptions,
     emptyAnnDeclarations,
-    joinLogEvents,
     latestLLVMConfig,
+    parseElfHeaderInfo64,
     recoverX86Elf,
     renderLLVMBitcode,
   )
 import Reopt.Events
 import Reopt.Utils.Dir
+import Reopt.Utils.Exit
 import System.Console.CmdArgs.Explicit
   ( Arg (..),
     Flag,
@@ -204,14 +205,17 @@ exploreBinary args results fPath = do
             | otherwise =
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
-      (_, os, _, recMod, _) <-
-        recoverX86Elf logger fPath bs lOpts dOpts rOpts annDecl unnamedFunPrefix
-      summary <- readIORef summaryRef
-      stats <- readIORef statsRef
+      hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
+      mr <-
+        runReoptM logger $
+          recoverX86Elf lOpts dOpts rOpts annDecl unnamedFunPrefix hdrInfo
+      (os, _, recMod, _) <- handleEitherWithExit mr
       res <-
         catch
           (generateLLVM os recMod)
           (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
+      summary <- readIORef summaryRef
+      stats <- readIORef statsRef
       pure $ ExplorationStats summary stats res
 
     generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO LLVMGenResult

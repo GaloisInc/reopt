@@ -42,6 +42,7 @@ library
     process,
     reopt-vcg-ann,
     scientific,
+    temporary,
     text,
     transformers,
     unix,
@@ -57,12 +58,14 @@ library
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
     Reopt.Events
+    Reopt.Events.Export
     Reopt.ExternalTools
+    Reopt.Occam
     Reopt.PltParser
     Reopt.Relinker.Binary
     Reopt.Server
     Reopt.Utils.Dir
-    Reopt.Utils.Builder
+    Reopt.Utils.Exit
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.ArgResolver
@@ -116,6 +119,7 @@ executable reopt
     mtl,
     parameterized-utils >= 0.1.6,
     prettyprinter,
+    text,
     unordered-containers,
     reopt,
     reopt-vcg-ann

@@ -13,12 +13,9 @@ import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector as V
-import           System.Exit
-import           System.IO
 import qualified Language.C as C
 
 import           Reopt.TypeInference.HeaderTypes
-import           Reopt.ExternalTools (runClangPreprocessor)
 
 identToByteString :: C.Ident -> BSC.ByteString
 identToByteString = BSC.pack . C.identToString
@@ -246,34 +243,27 @@ parseTransUnit (C.CTranslUnit decls _r) =
 
 -- | This parses a C file that effectively provides hints to the
 -- decompiler.
---
--- It writes errors to stderr and exits the program if parsing fails.
-parseHeader :: FilePath -- ^ Path to clang
-            -> FilePath -- ^ Path to header clang
-            -> IO AnnDeclarations
-parseHeader clangCmd fname = do
-  inputStream <- do
-    maybeInputStream <- runExceptT $ runClangPreprocessor clangCmd fname
-    case maybeInputStream of
-      Left e -> do
-        hPutStrLn stderr (show e)
-        exitFailure
-      Right s -> pure s
+parseHeader ::
+  -- | Path to header clang
+  FilePath ->
+  BSC.ByteString ->
+  Either String AnnDeclarations
+parseHeader fname inputStream = do
   -- Run Language.C parser
   ctu <-
     case C.parseC inputStream (C.initPos fname) of
       Left e -> do
-        hPutStrLn stderr $ "Language.C could not parse header " ++ fname
-        hPutStrLn stderr $ "  " ++ show e
-        exitFailure
+        Left $ unlines
+          [ "Language.C could not parse header " ++ fname,
+            "  " ++ show e
+          ]
       Right ctu ->
         pure ctu
   -- Parse the compiled code.
   case parseTransUnit ctu of
     Left (_,e) -> do
-      hPutStrLn stderr $ "Error parsing header in " ++ fname
-      forM_ (lines e) $ \m -> do
-        hPutStrLn stderr $ "  " ++ m
-      exitFailure
+      Left $ unlines $
+        ("Error parsing header in " ++ fname)
+          : [ "  " ++ m | m <- lines e ]
     Right r -> do
       pure $! r

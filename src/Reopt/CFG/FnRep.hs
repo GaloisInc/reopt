@@ -60,7 +60,6 @@ import           Data.Word
 import           Numeric (showHex)
 import           Prettyprinter
 
-import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc)
 import           Data.Macaw.CFG
    ( App(..)
    , ppApp
@@ -73,6 +72,7 @@ import           Data.Macaw.CFG
    , IsArchStmt(..)
    , MemRepr(..)
    )
+import           Data.Macaw.Analysis.RegisterUse (BoundLoc)
 import           Data.Macaw.Memory
 import qualified Data.Macaw.Types as M (Type)
 import           Data.Macaw.Types hiding (Type)

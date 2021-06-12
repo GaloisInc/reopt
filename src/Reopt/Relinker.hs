@@ -15,6 +15,7 @@ and new object.
 module Reopt.Relinker
   ( module Relations
   , mergeObject
+  , parseElfHeaderInfo64
   , x86_64_immediateJump
   ) where
 
@@ -43,6 +44,27 @@ import           Reopt.Relinker.NewSymtab
 import           Reopt.Relinker.Relations as Relations
 import           Reopt.Relinker.Relocations
 import           Reopt.Utils.Flags
+
+parseElfHeaderInfo64 ::
+  -- | Name of output for error messages
+  String ->
+  -- | Data to read
+  BS.ByteString ->
+  Either String (Elf.ElfHeaderInfo 64)
+parseElfHeaderInfo64 path bs = do
+  case Elf.decodeElfHeaderInfo bs of
+    Left (_, msg) -> do
+      Left $
+        unlines
+          [ "Could not parse Elf file " ++ path ++ ":",
+            "  " ++ msg
+          ]
+    Right (Elf.SomeElf hdrInfo) -> do
+      case Elf.headerClass (Elf.header hdrInfo) of
+        Elf.ELFCLASS32 -> do
+          Left "32-bit elf files are not yet supported."
+        Elf.ELFCLASS64 -> do
+          pure hdrInfo
 
 ------------------------------------------------------------------------
 -- RelinkM and ObjRelocState
@@ -571,13 +593,19 @@ phdrEndOff p = Elf.incOffset (Elf.phdrFileStart p) (Elf.phdrFileSize p)
 -- 2. Collect object information.
 -- 3. Compute file layout
 -- 4. Generate contents
-mergeObject :: HasCallStack
-            => Elf.ElfHeaderInfo 64 -- ^ Existing binary
-            -> Elf.ElfHeaderInfo 64 -- ^ Object file to merge into existing binary.
-            -> MergeRelations
-            -- ^ Mapping information for relating binary and object.
-            -> ([String], Either String BSL.ByteString)
-mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
+mergeObject ::
+  HasCallStack =>
+  -- | Existing binary
+  Elf.ElfHeaderInfo 64 ->
+  -- | Path or name to use to refer to new object code in
+  -- error messages.
+  String ->
+  -- | New object contents
+  BS.ByteString ->
+  -- | Mapping information for relating binary and object.
+  MergeRelations ->
+  ([String], Either String BSL.ByteString)
+mergeObject binHeaderInfo objName objContents ctx = runPureRelinkM $ do
   -----------------------------------------------------------------------------
   -- 1. Collect binary information.
 
@@ -632,6 +660,9 @@ mergeObject binHeaderInfo objHeaderInfo ctx = runPureRelinkM $ do
   -- to be replaced.  If so, we mark that function has replacing the existing
   -- one.  If not, we add the function to the set of functions that we need
   -- to find space for.
+
+
+  objHeaderInfo <- ExceptT $ pure $ parseElfHeaderInfo64 objName objContents
 
   let objHdr = Elf.header objHeaderInfo
   -- Check object assumptions

@@ -238,7 +238,7 @@ resolveSubprogramType cu annMap sub entryAddr
             case Dwarf.subOrigin sub of
               Nothing -> Right Nothing
               Just originRef ->
-                case Map.lookup originRef (Dwarf.cuSubprogramMap cu) of
+                case Dwarf.lookupSubprogram originRef cu of
                   Nothing -> Left $ "Could not find origin " ++ show (pretty originRef)
                   Just r -> Right (Just r)
       case emorigin of

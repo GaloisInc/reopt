@@ -12,10 +12,16 @@ module Reopt.Events
     ReoptFunStep (..),
     ReoptStepTag (..),
     mkReoptErrorTag,
-    DiscoveryErrorType (..),
+    DiscoveryError (..),
+    DiscoveryErrorTag (..),
+    RecoverError (..),
     FunId (..),
     funId,
     printLogEvent,
+
+    -- * Fatal errors
+    ReoptFatalError (..),
+    ReoptFileType (..),
 
     -- * Summary
     ReoptSummary (..),
@@ -44,15 +50,17 @@ module Reopt.Events
     groupDigits,
     outputRow,
     ppIndent,
+    joinLogEvents,
   )
 where
 
+import Control.Exception (IOException)
 import Control.Lens
 import qualified Data.ByteString.Char8 as BS
 import Data.IORef
 import Data.List (foldl', intercalate, unfoldr)
-import Data.Macaw.Analysis.RegisterUse (BlockInvariantMap)
-import Data.Macaw.Discovery (DiscoveryState, memory, unexploredFunctions)
+import Data.Macaw.Analysis.RegisterUse (BlockInvariantMap, RegisterUseError (..), RegisterUseErrorReason (..), RegisterUseErrorTag (..), ppRegisterUseErrorReason)
+import Data.Macaw.Discovery (ArchAddrWidth, DiscoveryState, memory, unexploredFunctions)
 import Data.Macaw.Memory
   ( MemAddr (addrOffset),
     MemSegmentOff,
@@ -66,6 +74,9 @@ import Data.Macaw.Memory
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import Data.Parameterized.Some
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Void (Void)
 import Data.Word (Word64)
 import Numeric (showHex)
@@ -81,22 +92,32 @@ import Prettyprinter
     vsep,
   )
 import Prettyprinter.Render.String (renderString)
+import qualified Reopt.ExternalTools as Ext
 import Reopt.FunUseMap
 import Reopt.Utils.Folds
 import System.IO
 import Text.Printf (printf)
 
 -- | Function identifier and name.
-data FunId = FunId !Word64 !BS.ByteString
+data FunId = FunId
+  { funIdAddr :: !Word64,
+    funIdName :: !BS.ByteString
+  }
   deriving (Eq, Ord)
 
+segoffWord64 :: MemSegmentOff w -> Word64
+segoffWord64 = memWordValue . addrOffset . segoffAddr
+
 funId :: MemSegmentOff w -> Maybe BS.ByteString -> FunId
-funId a mnm = FunId (memWordValue (addrOffset (segoffAddr a))) (fromMaybe BS.empty mnm)
+funId a mnm = FunId (segoffWord64 a) (fromMaybe BS.empty mnm)
 
 ppFunId :: FunId -> String
 ppFunId (FunId a nm)
   | BS.null nm = "0x" <> showHex a ""
   | otherwise = BS.unpack nm <> "(0x" <> showHex a ")"
+
+joinLogEvents :: Monad m => (a -> m ()) -> (a -> m ()) -> a -> m ()
+joinLogEvents x y e = x e >> y e
 
 -------------------------------------------------------------------------------
 -- Errors exported to VSCode
@@ -118,17 +139,45 @@ data ReoptExportedError = ReoptExportedError
   }
 
 -------------------------------------------------------------------------------
---  Other
+-- DiscoveryError
 
 -- | Errors for discovery process.
-data DiscoveryErrorType
-  = DiscoveryTransError
-  | DiscoveryClassError
+data DiscoveryErrorTag
+  = DiscoveryPLTErrorTag
+    -- ^ Discovery uncovered an unexpected PLT stub
+  | DiscoveryTransErrorTag
+    -- ^ Discovery had a translation error in block
+  | DiscoveryClassErrorTag
+    -- ^ Discovery had a PLT error in block.
   deriving (Eq, Ord, Show)
 
-instance Semigroup DiscoveryErrorType where
-  DiscoveryTransError <> _ = DiscoveryTransError
-  DiscoveryClassError <> r = r
+instance Semigroup DiscoveryErrorTag where
+  DiscoveryPLTErrorTag <> _ = DiscoveryPLTErrorTag
+  _ <> DiscoveryPLTErrorTag = DiscoveryPLTErrorTag
+
+  DiscoveryTransErrorTag <> _ = DiscoveryTransErrorTag
+  DiscoveryClassErrorTag <> r = r
+
+data DiscoveryError = DiscoveryError
+  { discErrorTag :: !DiscoveryErrorTag,
+    discErrorBlockAddr :: !Word64,
+    -- | Instruction index.
+    discErrorBlockInsnIndex :: !Int,
+    discErrorMessage :: !Text
+  }
+
+-------------------------------------------------------------------------------
+-- RecoveryError
+
+data RecoverError w = RecoverErrorAt
+  { recoverErrorTag :: !ReoptErrorTag,
+    recoverErrorBlock :: !(MemSegmentOff w),
+    recoverErrorInsnIndex :: !Int,
+    recoverErrorMessage :: !Text
+  }
+
+-------------------------------------------------------------------------------
+--  Other
 
 -- | Identifies a step in Reopt's recompilation pipeline that
 -- is over all functions.
@@ -144,20 +193,25 @@ data ReoptGlobalStep arch r where
   DebugTypeInference :: ReoptGlobalStep arch ()
   -- | Global function argument inference
   FunctionArgInference :: ReoptGlobalStep arch ()
+  -- | Run relinker
+  Relinking :: ReoptGlobalStep arch ()
 
 type GlobalStepId = Int
 
+-- | Unique identifier for global steps so we can store them in map.
 globalStepId :: ReoptGlobalStep arch r -> GlobalStepId
 globalStepId DiscoveryInitialization = 0
 globalStepId HeaderTypeInference = 1
 globalStepId DebugTypeInference = 2
 globalStepId FunctionArgInference = 3
+globalStepId Relinking = 4
 
 ppGlobalStep :: ReoptGlobalStep arch r -> String
 ppGlobalStep DiscoveryInitialization = "Initialization"
 ppGlobalStep HeaderTypeInference = "Header Processing"
 ppGlobalStep DebugTypeInference = "Debug Processing"
 ppGlobalStep FunctionArgInference = "Argument inference"
+ppGlobalStep Relinking = "Relinker"
 
 -- | Identifies steps in Reopt's recompilation pipeline that involves
 -- a single function.
@@ -166,11 +220,13 @@ ppGlobalStep FunctionArgInference = "Argument inference"
 -- function step fails, and result returned when all functions are analyzed.
 data ReoptFunStep arch r e ar where
   -- | Function discovery at given address and name.
-  Discovery :: ReoptFunStep arch () DiscoveryErrorType (DiscoveryState arch)
+  --
+  -- The error should be a non-empty list of errors.
+  Discovery :: ReoptFunStep arch () [DiscoveryError] (DiscoveryState arch)
   -- | Function invariant inference.
-  InvariantInference :: ReoptFunStep arch (BlockInvariantMap arch ids) (ReoptErrorTag, String) ()
+  InvariantInference :: ReoptFunStep arch (BlockInvariantMap arch ids) (RegisterUseError arch) ()
   -- | Function recovery at given address and name.
-  Recovery :: ReoptFunStep arch () (ReoptErrorTag, String) ()
+  Recovery :: ReoptFunStep arch () (RecoverError (ArchAddrWidth arch)) ()
 
 ppFunStep :: ReoptFunStep arch r e a -> String
 ppFunStep Discovery = "Discovering"
@@ -179,10 +235,10 @@ ppFunStep Recovery = "Recovering"
 
 -- | A specific reason a ReoptStep failed for reporting purposes/statistics.
 data ReoptErrorTag
-  = MacawDiscoveryError !DiscoveryErrorType
+  = MacawDiscoveryError !DiscoveryErrorTag
+  | MacawRegisterUseErrorTag !(Some RegisterUseErrorTag)
   | MacawParsedTranslateFailureTag
   | MacawClassifyFailureTag
-  | MacawRegisterUseErrorTag
   | MacawCallAnalysisErrorTag
   | ReoptVarArgFnTag
   | ReoptUnsupportedTypeTag
@@ -208,20 +264,28 @@ data ReoptErrorTag
 mkReoptErrorTag :: ReoptFunStep arch r e a -> e -> ReoptErrorTag
 mkReoptErrorTag s e =
   case s of
-    Discovery -> MacawDiscoveryError e
-    InvariantInference -> fst e
-    Recovery -> fst e
+    Discovery ->
+      case e of
+        [] -> error "Discovery failure reasons must be non-empty"
+        de0 : rest ->
+          MacawDiscoveryError (foldr (\de t -> discErrorTag de <> t) (discErrorTag de0) rest)
+    InvariantInference ->
+      case ruReason e of
+        Reason tag _ -> MacawRegisterUseErrorTag (Some tag)
+    Recovery ->
+      recoverErrorTag e
 
 ppReoptErrorTag :: ReoptErrorTag -> String
 ppReoptErrorTag =
   \case
     MacawDiscoveryError e ->
       case e of
-        DiscoveryTransError -> "Unhandled instruction"
-        DiscoveryClassError -> "Unidentified control flow"
+        DiscoveryPLTErrorTag -> "Unexpected PLT stub"
+        DiscoveryTransErrorTag -> "Unhandled instruction"
+        DiscoveryClassErrorTag -> "Unidentified control flow"
     MacawParsedTranslateFailureTag -> "Block translation error"
     MacawClassifyFailureTag -> "Block classification error"
-    MacawRegisterUseErrorTag -> "Register use error"
+    MacawRegisterUseErrorTag (Some tag) -> show tag
     MacawCallAnalysisErrorTag -> "Call analysis error"
     ReoptVarArgFnTag -> "Unsupported variadic function"
     ReoptUnsupportedTypeTag -> "Unsupported type tag"
@@ -251,23 +315,16 @@ data ReoptLogEvent arch where
   ReoptGlobalStepFinished :: !(ReoptGlobalStep arch a) -> !a -> ReoptLogEvent arch
   -- | Log a warning.
   ReoptGlobalStepWarning :: !(ReoptGlobalStep arch a) -> !String -> ReoptLogEvent arch
-  -- | Log an event.
-  ReoptGlobalStepLog :: !(ReoptGlobalStep arch a) -> !String -> ReoptLogEvent arch
   -- | Indicates we started as step
   ReoptFunStepStarted :: !(ReoptFunStep arch r e a) -> !FunId -> ReoptLogEvent arch
   -- | Indicate a step completed successfully.
   ReoptFunStepFinished :: !(ReoptFunStep arch r e a) -> !FunId -> !r -> ReoptLogEvent arch
   -- | Indicate a step failed due to the given error.
   ReoptFunStepFailed :: !(ReoptFunStep arch r e a) -> !FunId -> !e -> ReoptLogEvent arch
-  -- | Log an event.
+  -- | Log an event specific to a function.
   ReoptFunStepLog :: !(ReoptFunStep arch r e a) -> !FunId -> !String -> ReoptLogEvent arch
-  -- | Log an event.
-  ReoptFunStepWarning :: !(ReoptFunStep arch r e a) -> !FunId -> !String -> ReoptLogEvent arch
   -- | All function steps of the given type are complete.
   ReoptFunStepAllFinished :: !(ReoptFunStep arch r e a) -> a -> ReoptLogEvent arch
-
-segoffWord64 :: MemSegmentOff w -> Word64
-segoffWord64 = memWordValue . addrOffset . segoffAddr
 
 ppSegOff :: MemSegmentOff w -> String
 ppSegOff addr = "0x" <> showHex (segoffWord64 addr) ""
@@ -276,9 +333,6 @@ ppSegOff addr = "0x" <> showHex (segoffWord64 addr) ""
 ppFnEntry :: Maybe BS.ByteString -> MemSegmentOff w -> String
 ppFnEntry (Just nm) addr = BS.unpack nm <> "(" <> ppSegOff addr <> ")"
 ppFnEntry Nothing addr = ppSegOff addr
-
-ppReoptError :: (ReoptErrorTag, String) -> String
-ppReoptError (tag, msg) = printf "  Failed (%s): %s" (ppReoptErrorTag tag) msg
 
 -- | Function for recovering log information.
 --
@@ -295,25 +349,94 @@ printLogEvent event = do
       hPutStrLn stderr $ printf "  Complete."
     ReoptGlobalStepWarning _st msg ->
       hPutStrLn stderr $ printf "  %s" msg
-    ReoptGlobalStepLog _st msg ->
-      hPutStrLn stderr $ printf "  %s" msg
     ReoptFunStepStarted s f ->
       hPutStrLn stderr $ ppFunStep s ++ " " ++ ppFunId f
-    ReoptFunStepFinished{} ->
+    ReoptFunStepFinished {} ->
       hPutStrLn stderr $ printf "  Complete."
     ReoptFunStepFailed s _ e ->
       hPutStrLn stderr $
-        ("  " ++) $
-          case s of
-            Discovery -> "Incomplete."
-            InvariantInference -> ppReoptError e
-            Recovery -> ppReoptError e
+        case s of
+          Discovery ->
+            unlines $
+              [ printf "  Block 0x%x: %s" (discErrorBlockAddr de) (Text.unpack (discErrorMessage de))
+                | de <- e
+              ]
+                ++ ["  Incomplete."]
+          InvariantInference ->
+            printf "  Block: 0x%x: %s"
+              (segoffWord64 (ruBlock e))
+              (ppRegisterUseErrorReason (ruReason e))
+          Recovery ->
+            printf
+              "  Failed (0x%x:%d, %s): %s"
+              (segoffWord64 (recoverErrorBlock e))
+              (recoverErrorInsnIndex e)
+              (ppReoptErrorTag (recoverErrorTag e))
+              (recoverErrorMessage e)
     ReoptFunStepLog _st _f msg ->
-      hPutStrLn stderr $ printf "  %s" msg
-    ReoptFunStepWarning _st _f msg ->
       hPutStrLn stderr $ printf "  %s" msg
     ReoptFunStepAllFinished _ _ ->
       pure ()
+
+-------------------------------------------------------------------------------
+-- ReoptFatalErrors
+
+-- | Enumeration of different file types Reopt may read or write.
+data ReoptFileType
+  = -- | Annotations of function signatures provided by user.
+    UserHeaderFileType
+  | -- | Annotations file generated for ReoptVCG.
+    AnnotationsFileType
+  | -- | JSON file with information needed to run relinker.
+    RelinkerInfoFileType
+  | -- | @.ll@ file produced by compiling LLVM file
+    LlvmFileType
+  | -- | @.o@ file produced by compiling LLVM file
+    ObjectFileType
+  | -- | File reopt reads to configure Occam.
+    OccamConfigFileType
+  | -- | Manifest file passed to Occam slash
+    --
+    -- This file is generated by Reopt
+    OccamManifestFileType
+
+ppReoptFileType :: ReoptFileType -> String
+ppReoptFileType tp =
+  case tp of
+    UserHeaderFileType -> "header file"
+    AnnotationsFileType -> "annotations"
+    RelinkerInfoFileType -> "relinker information"
+    LlvmFileType -> "LLVM bitcode"
+    ObjectFileType -> "Object file"
+    OccamConfigFileType -> "Occam configuration file"
+    OccamManifestFileType -> "Generated OCCAM manifest file."
+
+-- | Errors that terminate reopt immediately when they occur.
+data ReoptFatalError
+  = -- | Error occuring when writing to a file.
+    ReoptWriteError !ReoptFileType !FilePath !IOException
+  | -- | Error occurring in initialization
+    ReoptInitError !String
+  | -- | Error in running C preprocessor to parse user annotations.
+    ReoptUserAnnPreprocessorError !Ext.Failure
+  | -- | Error in content of a text file.
+    ReoptTextParseError !ReoptFileType !FilePath !String
+  | -- | Fatal error during relinking
+    ReoptRelinkerFatalError !String
+
+instance Show ReoptFatalError where
+  show (ReoptWriteError tp path e) =
+    printf "Error writing %s:\n  Path: %s\n  Message: %s" (ppReoptFileType tp) path (show e)
+  show (ReoptInitError msg) = msg
+  show (ReoptUserAnnPreprocessorError f) =
+    printf "Error running preprocessor to parse annotations:\n  %s" (show f)
+  show (ReoptTextParseError tp path msg) =
+    unlines
+      [ printf "Error reading %s:" (ppReoptFileType tp),
+        printf "  Path: %s" path,
+        printf "  %s" msg
+      ]
+  show (ReoptRelinkerFatalError e) = e
 
 -------------------------------------------------------------------------------
 
@@ -531,8 +654,8 @@ ppDiscoveryStats stats = do
   let discCodeSize = fromIntegral (statsDiscoveredCodeSize stats)
   let totalCodeSize = fromIntegral (statsCodeSegmentSize stats)
   ppSection "Discovery" $
-    ppFrac "Bytes discovered" discCodeSize totalCodeSize
-      : ppFunStepStats (lookupFunStepStats Discovery stats)
+    ppFrac "Bytes discovered" discCodeSize totalCodeSize :
+    ppFunStepStats (lookupFunStepStats Discovery stats)
 
 ppArgumentAnalysisStats :: ReoptStats -> [String]
 ppArgumentAnalysisStats stats = do

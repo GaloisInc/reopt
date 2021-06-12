@@ -87,7 +87,7 @@ import qualified Text.LLVM.PP as L (ppType)
 import           Prettyprinter (pretty)
 import           Text.Printf
 
-import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc(..))
+import           Data.Macaw.Analysis.RegisterUse (BoundLoc(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
