@@ -14,6 +14,7 @@ module Reopt
     ReoptM,
     runReoptM,
     reoptRunInit,
+    reoptWrite,
     reoptWriteBuilder,
     reoptWriteByteString,
     reoptWriteStrictByteString,
@@ -308,9 +309,8 @@ reoptLog e = ReoptM $ ReaderT $ \logger -> lift (logger e)
 --reoptEnd :: ReoptM arch r ()
 --reoptEnd = reopt
 
-
-reoptRunWrite :: ReoptFileType -> FilePath -> (Handle -> IO ()) -> ReoptM arch r ()
-reoptRunWrite tp path f =
+reoptWrite :: ReoptFileType -> FilePath -> (Handle -> IO ()) -> ReoptM arch r ()
+reoptWrite tp path f =
   ReoptM $ ReaderT $ \_ -> ContT $ \c -> do
     mr <- try $ withBinaryFile path WriteMode f
     case mr of
@@ -318,16 +318,15 @@ reoptRunWrite tp path f =
       Right () -> c ()
 
 reoptWriteBuilder :: ReoptFileType -> FilePath -> Builder.Builder -> ReoptM arch r ()
-reoptWriteBuilder tp path buffer =
-  reoptRunWrite tp path $ \h -> Builder.hPutBuilder h buffer
+reoptWriteBuilder tp path buffer = reoptWrite tp path $ \h -> Builder.hPutBuilder h buffer
 
 reoptWriteByteString :: ReoptFileType -> FilePath -> BSL.ByteString -> ReoptM arch r ()
 reoptWriteByteString tp path buffer = do
-  reoptRunWrite tp path $ \h -> BSL.hPut h buffer
+  reoptWrite tp path $ \h -> BSL.hPut h buffer
 
 reoptWriteStrictByteString :: ReoptFileType -> FilePath -> BS.ByteString -> ReoptM arch r ()
 reoptWriteStrictByteString tp path buffer = do
-  reoptRunWrite tp path $ \h -> BS.hPut h buffer
+  reoptWrite tp path $ \h -> BS.hPut h buffer
 
 reoptIncComp ::
   IncCompM (ReoptLogEvent arch) a a ->
@@ -1041,10 +1040,11 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
         pure symAddrMap0
 
   -- Exclude PLT bounds
-  let explorePred a =
+  let addrIsNotInPlt :: ArchSegmentOff arch -> Bool
+      addrIsNotInPlt =
         case mpltRes of
-          Nothing -> True
-          Just pltRes -> do
+          Nothing -> const True
+          Just pltRes -> \a -> do
             let off = fromIntegral $ addrOffset (segoffAddr a)
             case Map.lookupLE off (pltMap pltRes) of
               Just (entryOff, (_pltFn, entrySize))
@@ -1052,6 +1052,24 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
                   False
               _ -> True
 
+  -- Maps section header names to the section headers for it.
+  let shdrMap :: Map BS.ByteString [Elf.Shdr BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))]
+      shdrMap =
+        Map.fromListWith (++) [(Elf.shdrName s, [s]) | s <- V.toList shdrs]
+
+  let addrInRodata =
+        case Map.findWithDefault [] ".rodata" shdrMap of
+          [shdr] ->
+            let sOff :: Word64
+                sOff = fromIntegral $ Elf.shdrAddr shdr
+                sSize :: Word64
+                sSize = fromIntegral (Elf.shdrSize shdr)
+             in \a ->
+                  let aOff = memWordValue $ addrOffset (segoffAddr a)
+                   in sOff <= aOff && (aOff - sOff) < sSize
+          _ -> \_ -> False
+
+  let explorePred a = addrIsNotInPlt a && not (addrInRodata a)
   -- Get initial entry address
   let hdr = Elf.header hdrInfo
   let entry = Elf.headerEntry hdr
@@ -1059,11 +1077,8 @@ initExecDiscovery baseAddr hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo 
   when (isNothing entryAddr) $ do
     initWarning $ "Could not resolve entry point: " ++ showHex entry ""
 
-  -- Get eh_frame entry points
-  let shdrMap :: Map BS.ByteString [Elf.Shdr BS.ByteString (Elf.ElfWordType (ArchAddrWidth arch))]
-      shdrMap =
-        Map.fromListWith (++) [(Elf.shdrName s, [s]) | s <- V.toList shdrs]
 
+  -- Get eh_frame entry points
   ehFrameAddrs <-
     ehframeEntryPoints hdrInfo shdrMap mem (addrBase baseAddr) (maybeToList entryAddr)
 
@@ -1219,12 +1234,10 @@ headerTypeMap ::
   MemWidth (ArchAddrWidth arch) =>
   -- | Header with hints for assisting typing.
   AnnDeclarations ->
-  Memory (ArchAddrWidth arch) ->
-  MemAddr (ArchAddrWidth arch) ->
   SymAddrMap (ArchAddrWidth arch) ->
   Map (ArchSegmentOff arch) NoReturnFunStatus ->
   ReoptM arch r (FunTypeMaps (ArchAddrWidth arch))
-headerTypeMap hdrAnn mem baseAddr symAddrMap noretMap = do
+headerTypeMap hdrAnn symAddrMap noretMap = do
   globalStepStarted HeaderTypeInference
 
   let voidPtrType = PtrAnnType VoidAnnType
@@ -1278,10 +1291,7 @@ headerTypeMap hdrAnn mem baseAddr symAddrMap noretMap = do
   let annTypeMap :: FunTypeMaps (ArchAddrWidth arch)
       annTypeMap =
         FunTypeMaps
-          { dwarfAddrResolve = \_symName off -> do
-              let addr = incAddr (toInteger off) baseAddr
-               in asSegmentOff mem addr,
-            nameToAddrMap = symAddrMap,
+          { nameToAddrMap = symAddrMap,
             nameTypeMap = nameAnnTypeMap,
             addrTypeMap = addrAnnTypeMap,
             noreturnMap = noretMap
@@ -1315,12 +1325,17 @@ doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ 
   -- MArk initialization as finished.
   globalStepFinished DiscoveryInitialization s
 
-  annTypeMap <- headerTypeMap hdrAnn mem (initDiscBaseCodeAddr initState) symAddrMap (s ^. trustedFunctionEntryPoints)
+  let baseAddr = initDiscBaseCodeAddr initState
+  annTypeMap <- headerTypeMap hdrAnn symAddrMap (s ^. trustedFunctionEntryPoints)
 
   -- Resolve debug information.
+  let resolveFn _symName off =
+       let addr = incAddr (toInteger off) baseAddr
+        in asSegmentOff mem addr
+
   debugTypeMap <-
     reoptIncComp $
-      resolveDebugFunTypes annTypeMap hdrInfo
+      resolveDebugFunTypes resolveFn annTypeMap hdrInfo
   let postDebugState = s & trustedFunctionEntryPoints .~ noreturnMap debugTypeMap
 
   let symMap = getAddrSymMap symAddrMap

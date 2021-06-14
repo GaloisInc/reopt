@@ -38,6 +38,8 @@ import Data.Version
 import Data.Word
 import Numeric
 import Paths_reopt (version)
+import qualified Prettyprinter as PP
+import qualified Prettyprinter.Render.Text as PP
 import Reopt
 import Reopt.CFG.FnRep.X86 ()
 import Reopt.EncodeInvariants
@@ -630,9 +632,6 @@ showCFG args = do
       pure $ show $ ppDiscoveryStateBlocks discState
   handleEitherWithExit mr
 
-
-
-
 ------------------------------------------------------------------------
 -- Reopt action
 
@@ -727,10 +726,22 @@ performReopt args = do
     let ainfo = osArchitectureInfo os
     (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState (args ^. discOpts)
 
+    case cfgExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        reoptWrite CfgFileType path $ \h -> do
+          PP.hPutDoc h (ppDiscoveryStateBlocks discState)
+
     when (skipRecovery args) $ reoptEndNow ()
 
     let sysp = osPersonality os
     (recMod, relinkerInfo) <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
+
+    case fnsExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        reoptWrite FunsFileType path $ \h -> do
+          mapM_ (PP.hPutDoc h . PP.pretty) (recoveredDefs recMod)
 
     -- Write invariants
     case invariantsExportPath args of

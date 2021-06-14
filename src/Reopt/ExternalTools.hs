@@ -30,24 +30,11 @@ import           Control.Exception
 import           Control.Monad (when)
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Except
-import           Data.Aeson (encodeFile)
-import qualified Data.Aeson as Aeson (decodeFileStrict)
-import qualified Data.Aeson.Types as Aeson
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Builder as Builder
-import           Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HM
-import           Data.List (intercalate)
-import           Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Vector as V
 import           GHC.IO.Exception
-import           System.Directory ( getCurrentDirectory )
 import           System.IO
 import System.IO.Error
     ( ioeGetErrorType, isDoesNotExistError, isPermissionError )
-import           System.Exit (exitFailure)
-import           System.FilePath ((</>), (<.>))
 import qualified System.Process  as P
 
 data ToolName
@@ -67,6 +54,7 @@ instance Show ToolName where
   show LlvmLink = "llvm-link"
   show LlvmMc = "llvm-mc"
   show Opt = "opt"
+  show Slash = "slash"
 
 
 -- |  Type of failure from running tools.
