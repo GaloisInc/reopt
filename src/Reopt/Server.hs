@@ -242,9 +242,9 @@ decodeHeader bytes = do
     Left (_, msg) -> do
       openFailed msg
 
-openInit :: IncComp String (Either String a) -> OpenM a
+openInit :: IncCompM String (Either String a) a -> OpenM a
 openInit comp = do
-  mr <- processIncCompLogs openWarning comp
+  mr <- processIncCompLogs openWarning (runIncCompM (fmap Right comp))
   case mr of
     Left msg -> openFailed msg
     Right r -> pure r
@@ -276,7 +276,7 @@ doOpen bytes = do
   let ainfo = osArchitectureInfo os
   let pltFn = processX86PLTEntries
 
-  initState <- openInit $ initDiscovery loadOpts hdrInfo ainfo pltFn reoptOpts
+  initState <- openInit $ doInit loadOpts hdrInfo ainfo pltFn reoptOpts
   let symAddrMap = initDiscSymAddrMap initState
   let symbols = uncurry mkSymbol <$> V.fromList (symAddrMapContents symAddrMap)
   w <- getWarnings

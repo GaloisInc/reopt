@@ -87,7 +87,7 @@ import qualified Text.LLVM.PP as L (ppType)
 import           Prettyprinter (pretty)
 import           Text.Printf
 
-import           Data.Macaw.AbsDomain.StackAnalysis (BoundLoc(..))
+import           Data.Macaw.Analysis.RegisterUse (BoundLoc(..))
 import           Data.Macaw.CFG
 import           Data.Macaw.Types
 import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
@@ -248,7 +248,9 @@ declareFunction :: FunctionDecl arch
                 -> L.Declare
 declareFunction d =
   let ftp = funDeclType d
-   in L.Declare { L.decRetType = llvmFunctionReturnType ftp
+   in L.Declare { L.decLinkage = Nothing
+                , L.decVisibility = Nothing
+                , L.decRetType = llvmFunctionReturnType ftp
                 , L.decName    = L.Symbol (BSC.unpack (funDeclName d))
                 , L.decArgs    = viewSome typeToLLVMType <$> fnArgTypes ftp
                 , L.decVarArgs = fnVarArgs ftp
@@ -1327,6 +1329,7 @@ defineFunction archOps genOpts f = do
         | needSwitchFailLabel finalFunState = entryLLVMBlock : (blocks ++ [failBlock])
         | otherwise = entryLLVMBlock : blocks
   let funDef = L.Define { L.defLinkage  = Nothing
+                        , L.defVisibility = Nothing
                         , L.defRetType  = llvmFunctionReturnType (fnType f)
                         , L.defName     = L.Symbol (BSC.unpack (fnName f))
                         , L.defArgs     = inputArgs
@@ -1357,7 +1360,9 @@ defineFunction archOps genOpts f = do
 
 declareIntrinsic :: Intrinsic -> L.Declare
 declareIntrinsic i =
-  L.Declare { L.decRetType = intrinsicRes i
+  L.Declare { L.decLinkage = Nothing
+            , L.decVisibility = Nothing
+            , L.decRetType = intrinsicRes i
             , L.decName    = intrinsicName i
             , L.decArgs    = intrinsicArgs i
             , L.decVarArgs = False

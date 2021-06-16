@@ -151,17 +151,7 @@ data ReoptFunType
 
 -- | Function type information parsed from annotations and debug information.
 data FunTypeMaps w =
-  FunTypeMaps { dwarfAddrResolve :: !(BS.ByteString -> Word64 -> Maybe (MemSegmentOff w))
-                -- ^ This resolve the address of a function given its name and object.
-                --
-                -- This general type is used for eventual support of object files
-                -- with function sections, where the Dwarf information does not
-                -- contain address information, and so we use symbol addresses.
-                --
-                -- It returns nothing if an address cannot be resolved.
-              , dwarfBaseCodeAddr :: !(MemAddr w)
-                -- ^ Address to add to all code offsets in dwarf file.
-              , nameToAddrMap :: !(SymAddrMap w)
+  FunTypeMaps { nameToAddrMap :: !(SymAddrMap w)
                 -- ^ Map from symbol names to the address.
               , nameTypeMap :: !(Map BS.ByteString ReoptFunType)
                 -- ^ Map from external undefined symbol names to type.
@@ -199,7 +189,7 @@ addCheckExisting nm k v m =
       pure $! Map.insert k v m
     Just pv -> do
       when (pv /= v) $ do
-        modify $ (printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v) :)
+        modify (printf "%s assigned incompatible types.\nPrev:\n%s\nNew:\n%s" nm (show pv) (show v) :)
       pure m
 
 

@@ -1,21 +1,19 @@
+{-|
+Recursive exploration of Elf files in a directory.
+-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.Utils.Dir
   ( withElfFilesInDir
   ) where
 
-import           Control.Exception
+import           Control.Exception ( IOException, try, throwIO )
 import qualified Data.ByteString as BS
 import qualified Data.ElfEdit as Elf
 import           Data.Foldable ( foldlM )
+import           Reopt.Utils.Exit (reportErrorAndExit)
 import           System.Directory
-import           System.Exit ( exitFailure )
 import           System.FilePath ( (</>) )
-import           System.IO ( stderr, hPutStrLn )
 import           System.IO.Error ( isPermissionError )
-
-
-reportError :: FilePath -> String -> IO a
-reportError path msg = hPutStrLn stderr (path <> ": " <> msg) >> exitFailure
 
 -- | Runs the action on each file in a directory (recursively)
 foreachFile :: a -> (a -> FilePath -> IO a) -> FilePath -> IO a
@@ -75,4 +73,4 @@ withElfFilesInDir action v0 path = do
           | isPermissionError e -> pure v0
           | otherwise -> throwIO e
      else do
-      reportError path "File not found"
+      reportErrorAndExit path "File not found"
