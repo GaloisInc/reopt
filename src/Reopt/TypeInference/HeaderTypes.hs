@@ -32,7 +32,7 @@ data AnnType
      -- ^ Pointer header type.
    | TypedefAnnType !BSC.ByteString !AnnType
      -- ^ A typedef with the name and resolved right hand side.
-  deriving (Eq, Show)
+  deriving (Eq, Show, Read)
 
 -- | Pretty print the header type for the end user.
 ppAnnType :: AnnType -> String
@@ -50,13 +50,13 @@ ppAnnType tp0 =
 data AnnFunArg = AnnFunArg { funArgName :: !(Maybe String)
                            , funArgType :: !AnnType
                            }
-  deriving (Eq,Show)
+  deriving (Eq, Show, Read)
 
 -- | Types for a function declaration.
 data AnnFunType = AnnFunType { funRet :: !AnnType
                              , funArgs :: !(V.Vector AnnFunArg)
                              }
-  deriving (Eq,Show)
+  deriving (Eq, Show, Read)
 
 -- | Annotations provided by the user in the form of a header file.
 data AnnDeclarations
