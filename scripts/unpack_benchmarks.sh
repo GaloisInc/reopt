@@ -1,29 +1,34 @@
 #!/bin/bash
 
-set -e
+set -xe
 
 CENTOS7_DEV_DIR="centos7-dev"
 
 
 unlzma_mv_untar () {
-  echo -n "Unpacking and extracting contents of $1.lzma to $2..."
-  if [[ "$1.lzma" -nt "$1"  ]] ; then
-    unlzma -k "$1.lzma"
+  TAR_FILE=$1
+  DEST=$2
+  echo -n "Unpacking and extracting contents of $TAR_FILE.lzma to $DEST..."
+  if [[ "$TAR_FILE.lzma" -nt "$TAR_FILE"  ]] ; then
+    unlzma -k "$TAR_FILE.lzma"
   fi
-  mkdir -p $2
-  if [[ -e "$1" ]] ; then
-    mv $1 $2
+  mkdir -p $DEST
+  if [[ -e "$TAR_FILE" ]] ; then
+    mv $TAR_FILE $DEST
+    pushd $DEST > /dev/null
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      tar -xkf $TAR_FILE
+    else
+      tar --overwrite -xf $TAR_FILE
+    fi
+    popd > /dev/null # $DEST
   fi
-  pushd $2 > /dev/null
-  tar -xkf $1
-  popd > /dev/null # $2
   echo " done!"
 }
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BENCHMARK_DIR="$SCRIPT_DIR/../deps/reopt-benchmark-binaries"
 pushd $BENCHMARK_DIR > /dev/null
-
 
 CENTOS7_DEV_BIN="centos7-dev-bin.tar"
 CENTOS7_DEV_LIB64="centos7-dev-lib64.tar"
@@ -34,10 +39,5 @@ unlzma_mv_untar $CENTOS7_DEV_BIN $CENTOS7_DEV_DIR
 unlzma_mv_untar $CENTOS7_DEV_LIB64 $CENTOS7_DEV_DIR
 unlzma_mv_untar $CENTOS7_DEV_DEBUG_LIB64 $CENTOS7_DEV_DIR
 
-
-# echo "Exploring centos7-dev binaries..."
-# pushd $CENTOS7_DEV_DIR
-# cabal run exe:reopt-explore -- ./bin --export-summary=centos7-bin-summary.txt
-# popd # $CENTOS7_DEV_DIR
 
 popd > /dev/null # $BENCHMARK_DIR 

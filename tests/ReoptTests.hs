@@ -35,21 +35,22 @@ mkTest fp = T.testCase fp $ do
   let llvmPath = replaceFileName fp (takeBaseName fp ++ ".ll")
 
   let loadOpts = MM.defaultLoadOptions
-  let discOpts =
-        DiscoveryOptions
-          { exploreFunctionSymbols = True,
-            exploreCodeAddrInMem = False,
-            logAtAnalyzeFunction = False,
-            logAtAnalyzeBlock = False
-          }
+  let reoptOpts = defaultReoptOptions
+                  { roDiscoveryOptions =
+                    DiscoveryOptions
+                    { exploreFunctionSymbols = True,
+                      exploreCodeAddrInMem = False,
+                      logAtAnalyzeFunction = False,
+                      logAtAnalyzeBlock = False
+                    }
+                  }
   let hdrAnn = emptyAnnDeclarations
-  let reoptOpts = ReoptOptions {roIncluded = [], roExcluded = []}
   contents <- checkedReadFile fp
 
   hdrInfo <- either fail pure $ parseElfHeaderInfo64 fp contents
   mr <-
     runReoptM logger $ do
-      recoverX86Elf loadOpts discOpts reoptOpts hdrAnn "reopt" hdrInfo
+      recoverX86Elf loadOpts reoptOpts hdrAnn "reopt" hdrInfo
   (os, discState, recMod, _) <- either (fail . show) pure mr
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState

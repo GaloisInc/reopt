@@ -38,14 +38,17 @@ module Reopt
     SomeArchitectureInfo (..),
     -- * Code discovery
     ReoptOptions (..),
+    reoptDefaultDiscoveryOptions,
     defaultReoptOptions,
     InitDiscovery,
     initDiscSymAddrMap,
     doDiscovery,
     -- * Debug info discovery
-    debugInfoDir,
-    debugInfoFileCache,
+    reoptHomeDir,
+    reoptHomeDirEnvVar,
+    debugInfoCacheFilePath,
     discoverFunDebugInfo,
+    getGdbDebugInfoDirs,
     -- * Function recovery
     Reopt.TypeInference.HeaderTypes.AnnDeclarations,
     Reopt.TypeInference.HeaderTypes.emptyAnnDeclarations,
@@ -97,7 +100,7 @@ module Reopt
   )
 where
 
-import Control.Exception (assert, bracket, try)
+import Control.Exception (assert, bracket, try, catch, SomeException)
 import Control.Lens ( (.~), (&), (^.) )
 import Control.Monad.Except
 import Control.Monad.Reader
@@ -155,9 +158,12 @@ import Reopt.TypeInference.FunTypeMaps
 import Reopt.TypeInference.Header
 import Reopt.TypeInference.HeaderTypes
 import qualified Reopt.VCG.Annotations as Ann
-import System.Directory (withCurrentDirectory, getXdgDirectory, XdgDirectory(XdgData), doesFileExist)
+import System.Directory
+  (withCurrentDirectory, getXdgDirectory, XdgDirectory(XdgData),
+   doesFileExist, doesDirectoryExist, createDirectoryIfMissing)
+import System.Exit (ExitCode(ExitSuccess))
 import System.FilePath ((</>), (<.>))
-import System.IO (Handle, IOMode (..), hPutStrLn, withBinaryFile, stderr)
+import System.IO (Handle, IOMode (..), hPutStrLn, withBinaryFile, stderr, withFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix as Posix
     ( getEnv,
@@ -172,7 +178,8 @@ import System.Posix as Posix
       ownerWriteMode,
       createFile,
       closeFd,
-      fdToHandle )
+      fdToHandle, fileExist )
+import System.Process (readCreateProcessWithExitCode, shell)
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
 import qualified Text.PrettyPrint.HughesPJ as HPJ
@@ -234,18 +241,42 @@ resolveSymAddr mem regInfo symMap nm0 = addrWidthClass (memAddrWidth mem) $
         Right a ->
           pure a
 
+reoptDefaultDiscoveryOptions :: DiscoveryOptions
+reoptDefaultDiscoveryOptions =
+  DiscoveryOptions
+    { exploreFunctionSymbols = False,
+      exploreCodeAddrInMem = False,
+      logAtAnalyzeFunction = True,
+      logAtAnalyzeBlock = False
+    }
+
 -- | Information from user to control which addresses to include and
 -- exclude.
 data ReoptOptions = ReoptOptions
   { -- | Symbols/addresses user wanted included
     roIncluded :: [String],
     -- | Symbols/addresses user wanted exluded.
-    roExcluded :: [String]
+    roExcluded :: [String],
+    -- | Should reopt be verbose in reporting?
+    roVerboseMode :: !Bool,
+    -- | Discovery options for Macaw.
+    roDiscoveryOptions :: !DiscoveryOptions,
+    -- | Additional paths to search for dynamic dependencies.
+    roDynDepPaths :: ![FilePath],
+    -- | Additional paths to search for debug versions of dynamic dependencies.
+    roDynDepDebugPaths :: ![FilePath]
   }
 
 -- | Reopt options with no additional functions to explore or not explore.
 defaultReoptOptions :: ReoptOptions
-defaultReoptOptions = ReoptOptions {roIncluded = [], roExcluded = []}
+defaultReoptOptions =
+  ReoptOptions
+    { roIncluded = [],
+      roExcluded = [],
+      roVerboseMode = False,
+      roDiscoveryOptions = reoptDefaultDiscoveryOptions,
+      roDynDepPaths = [],
+      roDynDepDebugPaths = []}
 
 addKnownFn ::
   SymAddrMap w ->
@@ -1221,10 +1252,243 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
 
 $(pure [])
 
-------------------------------------------------------------------------
--- Dynamic dependencies
 
--- | Get values of DT_NEEDED entries.
+---------------------------------------------------------------------------------
+-- Dynamic Dependency Handling
+
+reoptHomeDirEnvVar :: FilePath
+reoptHomeDirEnvVar = "REOPTHOME"
+
+-- | Return the path to the debug info directory -- N.B., depends
+-- on environment variable REOPTHOME.
+reoptHomeDir :: IO FilePath
+reoptHomeDir = do
+  mStr <- getEnv "REOPTHOME"
+  case mStr of
+    Nothing -> getXdgDirectory XdgData ".reopt"
+    Just "" -> getXdgDirectory XdgData ".reopt"
+    Just path -> pure path
+
+-- | Given a binary's name, return the path to its debug function information
+--   cache (whether or not the file exists).
+debugInfoCacheFilePath :: String -> IO FilePath
+debugInfoCacheFilePath binaryName = do
+  dir <- reoptHomeDir
+  pure $ dir </> binaryName <.> "debug_info"
+
+-- | Finds the cached debug info for a dependency, returning its file path and
+-- contents if found.
+findCachedDebugInfo :: String -> IO (Maybe (FilePath, String))
+findCachedDebugInfo depName = do
+  cFile <- debugInfoCacheFilePath depName
+  doesFileExist cFile >>= \case
+    True -> do
+      contents <- readFile cFile
+      pure $ Just (cFile, contents)
+    False -> pure $ Nothing
+
+
+-- | Return the debug information regarding functions in the given elf file.
+discoverFunDebugInfo ::
+  forall arch r.
+  Elf.ElfHeaderInfo (ArchAddrWidth arch) ->
+  ArchitectureInfo arch ->
+  ReoptM
+    arch
+    r
+    (FunTypeMaps (RegAddrWidth (ArchReg arch)))
+discoverFunDebugInfo hdrInfo ainfo = withArchConstraints ainfo $ do
+  let resolveFn _symName _off = Nothing
+  debugTypeMap <-
+    reoptIncComp $
+      resolveDebugFunTypes resolveFn funTypeMapsEmpty hdrInfo
+  pure $ debugTypeMap
+
+-- | Default directories to search for dynamic dependencies in on unix platforms.
+unixLibDirs :: [FilePath]
+unixLibDirs = [ "/usr/local/lib"
+              , "/usr/local/lib64"
+              , "/usr/lib"
+              , "/usr/lib64"
+              , "/lib"
+              , "/lib64"]
+
+-- | Ask gdb where it looks for debug information.
+getGdbDebugInfoDirs :: IO [FilePath]
+getGdbDebugInfoDirs = do
+  let cmd = shell "gdb --batch --eval-command=\"show debug-file-directory\""
+  let stdIn = ""
+  readCreateProcessWithExitCode cmd stdIn >>= \case
+    (ExitSuccess, sOut, _sErr) ->
+      case dropWhile (/= '"') sOut of
+        ('"':rst) -> do
+          let debugDir = takeWhile (/= '"') rst
+          doesDirectoryExist debugDir >>= \case
+            True -> pure [debugDir]
+            False -> couldNotFindDir $ "debug directory reported by gdb does not exist: " ++ debugDir
+        _ -> couldNotFindDir $ "response on stdout did not match expected pattern: " ++ sOut
+    (_,_,sErr) -> couldNotFindDir sErr
+  where couldNotFindDir msg = do
+          hPutStrLn stderr "Could not determine gdb's debug-file-directory:"
+          hPutStrLn stderr $ "  " ++ msg
+          pure []
+
+-- | Populate function type information using debug information.
+findGnuDebugLinkSection ::
+  forall w .
+  -- | Elf file for header information
+  Elf.ElfHeaderInfo w ->
+  Maybe String
+findGnuDebugLinkSection elfInfo = do
+  let secDataMap :: Map BSC.ByteString [( Elf.FileRange  (Elf.ElfWordType w)
+                                       , Elf.ElfSection (Elf.ElfWordType w)
+                                       )]
+      secDataMap = Map.fromListWith (++)
+        [ (Elf.elfSectionName sec, [(r,sec)])
+        | (r,sec) <- V.toList (Elf.headerSections elfInfo)
+        ]
+  case Map.findWithDefault [] ".gnu_debuglink" secDataMap of
+    [] -> Nothing
+    (_, s):_ ->
+      -- The `.gnu_debuglink` section begins with "A filename, with any leading
+      -- directory components removed, followed by a zero byte", which is the
+      -- part we're interested in (we'll skip checking the remaining padding
+      -- and CRC checksum...).
+      Just $ BSC.unpack $ BS.takeWhile (/= 0) $ Elf.elfSectionData s
+
+
+-- | Finds the debug version of a dynamic dependency and return @Just@ the path
+-- and contents if possible, otherwise returns @Nothing@.
+findDebugDynDep ::
+  ReoptOptions ->
+  String ->
+  IO (Maybe (FilePath, BS.ByteString))
+findDebugDynDep opts depName = do
+  -- Try to find the dependency on disk.
+  findDepLoc >>= \case
+    Just (depLoc, depContents) -> do
+      -- We found the dependency! Now:
+      -- 1. Verify it is an Elf file
+      -- 2. Check for a .gnu_debuglink entry
+      --    and... if none exists, try `depName.debug`
+      case Elf.decodeElfHeaderInfo depContents of
+        Left (_, msg) -> failWithMessage ("Error reading " ++ depLoc ++ ":") msg
+        Right (Elf.SomeElf hdrInfo) -> do
+          let hdr = Elf.header hdrInfo
+          getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr) >>= \case
+            Left msg -> failWithMessage ("Error reading ELF header in " ++ depLoc ++ ":") msg
+            Right (warnings, SomeArch ainfo _pltFn) -> withArchConstraints ainfo $ do
+              when (not $ null warnings) $ do
+                hPutStrLn stderr $ "Warnings reading ELF header in " ++ depLoc ++ ":"
+                mapM_ (hPutStrLn stderr) warnings
+              case findGnuDebugLinkSection hdrInfo of
+                -- If we can't find a `.gnu_debuglink` entry, assume the name is
+                -- the same as the dependency with `.debug` appended.
+                Nothing -> do
+                  hPutStrLn stderr $ "No .gnu_debuglink section for " ++ depName
+                  findDebugLoc (depName <.> "debug")
+                -- If we found the name, use that (making sure it exists
+                -- somewhere and returning that file path).
+                Just debugName -> do
+                  findDebugLoc debugName
+    Nothing -> findDebugLoc (depName <.> "debug")
+  where
+    failWithMessage :: String -> String -> IO (Maybe (FilePath, BS.ByteString))
+    failWithMessage header details = do
+      hPutStrLn stderr $ header
+      hPutStrLn stderr $ "  " ++ details
+      pure Nothing
+    findDepLoc :: IO (Maybe (FilePath, BS.ByteString))
+    findDepLoc = go libDirs
+      where go :: [FilePath] -> IO (Maybe (FilePath, BS.ByteString))
+            go [] = pure Nothing
+            go (dir:rst) = do
+              let fPath = dir <.> depName
+              fileExist fPath >>= \case
+                True  -> readFileAsByteString fPath
+                False -> go rst
+            libDirs :: [FilePath]
+            libDirs = (roDynDepPaths opts) ++ unixLibDirs
+    findDebugLoc :: FilePath -> IO (Maybe (FilePath, BS.ByteString))
+    findDebugLoc debugName = do
+        go debugDirs
+      where go :: [FilePath] -> IO (Maybe (FilePath, BS.ByteString))
+            go [] = pure Nothing
+            go (debugDir:rst) = do
+              let fPath = debugDir </> debugName
+              fileExist fPath >>= \case
+                True  -> readFileAsByteString fPath
+                False -> go rst
+            debugDirs :: [FilePath]
+            debugDirs = roDynDepDebugPaths opts
+    readFileAsByteString :: FilePath -> IO (Maybe (FilePath, BS.ByteString))
+    readFileAsByteString fPath = do
+      catch (do bs <- BS.readFile fPath
+                pure $ Just (fPath, bs))
+            (\(e :: SomeException) -> failWithMessage ("Unable to read debug file " ++ fPath ++ ":")
+                                                      (show e))
+
+-- | Add the debug information from dynamic dependencies (if available either in
+--   cached format or on disk for analysis).
+addDynDepDebugInfo ::
+  ReoptOptions ->
+  -- | Map to extend with debug info.
+  Map BS.ByteString ReoptFunType ->
+  -- | Dependency name as it appears in a DT_NEEDED entry in an elf file.
+  BS.ByteString ->
+  IO (Map BS.ByteString ReoptFunType)
+addDynDepDebugInfo rDisOpt m rawDepName = do
+  let depName = BSC.unpack rawDepName
+  hPutStrLn stderr $ "Searching for dynamic dependency " ++ depName ++ "'s debug info..."
+  (findCachedDebugInfo depName) >>= \case
+    Just (cacheFile, contents) -> do
+      case (reads contents) :: [(Map BS.ByteString ReoptFunType, String)] of
+        [] -> do
+          hPutStrLn stderr $ "Internal warning: " ++ cacheFile ++ " did not contain valid data."
+          pure m
+        ((m',_):_) -> do
+          pure $ m <> m'
+    Nothing -> do
+      findDebugDynDep rDisOpt depName >>= \case
+        Nothing -> do
+          hPutStrLn stderr $ "No debug info for " ++ depName ++ " found."
+          pure m
+        Just (fPath, fContent) ->
+          case Elf.decodeElfHeaderInfo fContent of
+            Left (_, msg) -> do
+              hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+              hPutStrLn stderr $ "  " ++ msg
+              pure m
+            Right (Elf.SomeElf hdrInfo) -> do
+              let hdr = Elf.header hdrInfo
+              -- Get architecture specific information (Either String ([String], SomeArchitectureInfo w))
+              getElfArchInfo (Elf.headerClass hdr) (Elf.headerMachine hdr) (Elf.headerOSABI hdr) >>= \case
+                Left errMsg -> do
+                  hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+                  hPutStrLn stderr $ "  " ++ errMsg
+                  pure m
+                Right (warnings, SomeArch ainfo _pltFn) -> do
+                  when (not $ null warnings) $ do
+                    hPutStrLn stderr $ "Warnings while computing architecture specific info for " ++ fPath ++ ":"
+                    mapM_ (hPutStrLn stderr) warnings -- IO (Either ReoptFatalError r) r = mFnMap
+                  runReoptM printLogEvent (discoverFunDebugInfo hdrInfo ainfo) >>= \case
+                    Left err -> do
+                      hPutStrLn stderr $ "Error decoding elf header info in " ++ fPath ++ ":"
+                      hPutStrLn stderr $ "  " ++ (show err)
+                      pure m
+                    Right fnMaps -> do
+                      let addrTypeMapSz = Map.size $ addrTypeMap fnMaps
+                      let noreturnMapSz = Map.size $ noreturnMap fnMaps
+                      let fnMap = nameTypeMap fnMaps
+                      when (not $ 0 == addrTypeMapSz) $ do
+                        hPutStrLn stderr $ "WARNING: " ++ show addrTypeMapSz ++ " functions in debug info ignored (addrTypeMap) in " ++ fPath ++ "."
+                      when (not $ 0 == noreturnMapSz) $ do
+                        hPutStrLn stderr $ "WARNING: " ++ show noreturnMapSz ++ " functions in debug info ignored (noreturnMap) in "  ++ fPath ++ "."
+                      cPath <- debugInfoCacheFilePath $ depName
+                      withFile cPath WriteMode $ \h -> hPutStrLn h (show $ fnMap)
+                      pure $ fnMap <> m
+
+-- | Get values of DT_NEEDED entries in an ELF file.
 parseDynamicNeeded ::
   Elf.ElfHeaderInfo w ->
   Either String [BS.ByteString]
@@ -1247,6 +1511,22 @@ parseDynamicNeeded elf = elfInstances elf $
     [] -> Left "No PT_DYNAMIC section."
     _ -> Left "Multiple PT_DYNAMIC sections."
   where ehdr = Elf.header elf
+
+-- | Identifies the ELF file's dynamic dependencies and searches
+-- for their debug versions to glean function type annotations.
+findDynamicDependencyDebugInfo ::
+  Elf.ElfHeaderInfo w ->
+  ReoptOptions ->
+  IO (Map BS.ByteString ReoptFunType)
+findDynamicDependencyDebugInfo hdrInfo rDisOpt = do
+  infoDir <- reoptHomeDir
+  createDirectoryIfMissing True infoDir
+  case parseDynamicNeeded hdrInfo of
+    Left errMsg -> do
+      hPutStrLn stderr $ "Error retrieving dynamic dependencies: " ++ errMsg
+      pure Map.empty
+    Right dynDeps ->
+      foldlM (addDynDepDebugInfo rDisOpt) Map.empty dynDeps
 
 
 $(pure [])
@@ -1352,61 +1632,6 @@ headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
   pure annTypeMap
 
 
----------------------------------------------------------------------------------
--- Dynamic Dependency Helpers
-
--- | Return the path to the debug info directory -- N.B., depends
--- on environment variable REOPTHOME.
-debugInfoDir :: IO FilePath
-debugInfoDir = do
-  mStr <- getEnv "REOPTHOME"
-  case mStr of
-    Nothing -> getXdgDirectory XdgData ".reopt"
-    Just "" -> getXdgDirectory XdgData ".reopt"
-    Just path -> pure path
-
--- | Given a binary's name, return the path to its debug function information
---   cache (whether or not the file exists).
-debugInfoFileCache :: String -> IO FilePath
-debugInfoFileCache binaryName = do
-  dir <- debugInfoDir
-  pure $ dir </> binaryName <.> "debug_info"
-
--- | Finds the cached debug info file for a dependency (if one exists).
-findDepDebugInfo :: String -> IO (Maybe FilePath)
-findDepDebugInfo depName = do
-  cFile <- debugInfoFileCache depName
-  cFileExists <- doesFileExist cFile
-  if cFileExists
-  then pure $ Just cFile
-  else do
-    cFile' <- debugInfoFileCache $ depName ++ ".debug"
-    cFileExists' <- doesFileExist cFile'
-    if cFileExists'
-    then pure $ Just cFile'
-    else do
-      hPutStrLn stderr $ "Could not find debug info associated with " ++ depName
-      pure $ Nothing
-
-
--- | Add the cached debug information from dynamic
---   dependencies (if available).
-addDynDepDebugInfo ::
-  Map BS.ByteString ReoptFunType ->
-  BS.ByteString ->
-  ReoptM arch r (Map BS.ByteString ReoptFunType)
-addDynDepDebugInfo m dep = reoptIO $ do
-  mCacheFile <- findDepDebugInfo $ BSC.unpack dep
-  case mCacheFile of
-    Nothing -> pure m
-    Just cacheFile -> do
-      contents <- readFile cacheFile
-      case (reads contents) :: [(Map BS.ByteString ReoptFunType, String)] of
-        [] -> do
-          hPutStrLn stderr $ "Internal warning: " ++ cacheFile ++ " did not contain valid data."
-          pure m
-        ((m',_):_) -> do
-          pure $ m <> m'
 
 ---------------------------------------------------------------------------------
 -- Complete discovery
@@ -1418,15 +1643,14 @@ doDiscovery ::
   Elf.ElfHeaderInfo (ArchAddrWidth arch) ->
   ArchitectureInfo arch ->
   InitDiscovery arch ->
-  -- | Options controlling discovery
-  DiscoveryOptions ->
+  ReoptOptions ->
   ReoptM
     arch
     r
     ( FunTypeMaps (ArchAddrWidth arch),
       DiscoveryState arch
     )
-doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ do
+doDiscovery hdrAnn hdrInfo ainfo initState rDisOpt = withArchConstraints ainfo $ do
   let s = initDiscoveryState initState
   let mem = memory s
   let symAddrMap = initDiscSymAddrMap initState
@@ -1434,13 +1658,8 @@ doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ 
   -- Mark initialization as finished.
   globalStepFinished DiscoveryInitialization s
 
-  dynDepsMap <- do
-    dynDeps <- case parseDynamicNeeded hdrInfo of
-                 Left errMsg -> do
-                   globalStepWarning DebugTypeInference errMsg
-                   pure []
-                 Right deps -> pure deps
-    foldlM addDynDepDebugInfo Map.empty dynDeps
+  dynDepsMap <- reoptIO $
+    findDynamicDependencyDebugInfo hdrInfo rDisOpt
 
   let baseAddr = initDiscBaseCodeAddr initState
   annTypeMap <- headerTypeMap hdrAnn dynDepsMap symAddrMap (s ^. trustedFunctionEntryPoints)
@@ -1459,7 +1678,7 @@ doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ 
   let symMap = getAddrSymMap symAddrMap
   discState <-
     reoptRunDiscovery symMap $
-      incCompleteDiscovery postDebugState disOpt
+      incCompleteDiscovery postDebugState (roDiscoveryOptions rDisOpt)
   funStepAllFinished Discovery discState
   pure (debugTypeMap, discState)
 
@@ -2184,8 +2403,6 @@ checkSymbolUnused unnamedFunPrefix symAddrMap = do
 recoverX86Elf ::
   -- | Option to load the binary at the given address
   LoadOptions ->
-  -- | Options controlling discovery
-  DiscoveryOptions ->
   ReoptOptions ->
   -- | Header with hints for assisting typing.
   AnnDeclarations ->
@@ -2200,13 +2417,14 @@ recoverX86Elf ::
       RecoveredModule X86_64,
       MergeRelations
     )
-recoverX86Elf loadOpts disOpt reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
+recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
   let symAddrMap = initDiscSymAddrMap initState
   checkSymbolUnused unnamedFunPrefix symAddrMap
 
   let ainfo = osArchitectureInfo os
-  (debugTypeMap, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState disOpt
+  (debugTypeMap, discState) <-
+    doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
 
   let sysp = osPersonality os
   (recMod, mergeRel) <- doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState
@@ -2327,24 +2545,3 @@ renderLLVMBitcode llvmGenOpt cfg os recMod =
     pp (HPJ.Str s) b = Builder.stringUtf8 s <> b
     pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
 
-
----------------------------------------------------------------------------------
--- Debug info discovery
-
-
-
--- | Return the debug information regarding functions in the given elf file.
-discoverFunDebugInfo ::
-  forall arch r.
-  Elf.ElfHeaderInfo (ArchAddrWidth arch) ->
-  ArchitectureInfo arch ->
-  ReoptM
-    arch
-    r
-    (FunTypeMaps (RegAddrWidth (ArchReg arch)))
-discoverFunDebugInfo hdrInfo ainfo = withArchConstraints ainfo $ do
-  let resolveFn _symName _off = Nothing
-  debugTypeMap <-
-    reoptIncComp $
-      resolveDebugFunTypes resolveFn funTypeMapsEmpty hdrInfo
-  pure $ debugTypeMap
