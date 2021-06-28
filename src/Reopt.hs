@@ -359,6 +359,7 @@ checkBlockError b = do
       Just $! DiscoveryError {
           discErrorTag = DiscoveryPLTErrorTag,
           discErrorBlockAddr = a,
+          discErrorBlockSize = blockSize b,
           discErrorBlockInsnIndex = length (pblockStmts b),
           discErrorMessage = "Unexpected PLT stub outside PLT"
         }
@@ -366,6 +367,7 @@ checkBlockError b = do
       Just $! DiscoveryError {
           discErrorTag = DiscoveryTransErrorTag,
           discErrorBlockAddr = a,
+          discErrorBlockSize = blockSize b,
           discErrorBlockInsnIndex = length (pblockStmts b),
           discErrorMessage = msg
         }
@@ -373,6 +375,7 @@ checkBlockError b = do
       Just $! DiscoveryError {
           discErrorTag = DiscoveryClassErrorTag,
           discErrorBlockAddr = a,
+          discErrorBlockSize = blockSize b,
           discErrorBlockInsnIndex = length (pblockStmts b),
           discErrorMessage = "Unclassified control flow transfer."
         }
