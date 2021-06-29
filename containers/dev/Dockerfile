@@ -16,8 +16,8 @@ RUN  curl -o /root/.ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/0.1.14.
  && chmod a+x /root/.ghcup/bin/ghcup
 
 # Install GHC
-RUN ghcup install ghc 8.10.4 \
+RUN ghcup install ghc 8.10.5 \
  && ghcup install cabal 3.4.0.0 \
- && ghcup set ghc
+ && ghcup set ghc 8.10.5
 
 WORKDIR /root
