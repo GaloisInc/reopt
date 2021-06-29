@@ -1,3 +1,5 @@
+import * as vscode from 'vscode'
+
 import * as Interfaces from './interfaces'
 
 /**
@@ -10,7 +12,7 @@ export type ActivityWebviewToExtension
     = CloseProject
     | CreateProjectFile
     | GenerateCFG
-    | GenerateDisassembly
+    // | GenerateDisassembly
     | GenerateFunctions
     | GenerateLLVM
     | JumpToSymbol
@@ -32,10 +34,10 @@ export interface GenerateCFG {
     readonly tag: typeof generateCFG
 }
 
-export const generateDisassembly = 'GenerateDisassembly'
-export interface GenerateDisassembly {
-    readonly tag: typeof generateDisassembly
-}
+// export const generateDisassembly = 'GenerateDisassembly'
+// export interface GenerateDisassembly {
+//     readonly tag: typeof generateDisassembly
+// }
 
 export const generateFunctions = 'GenerateFunctions'
 export interface GenerateFunctions {
@@ -50,7 +52,7 @@ export interface GenerateLLVM {
 export const jumpToSymbol = 'JumpToSymbol'
 export interface JumpToSymbol {
     readonly tag: typeof jumpToSymbol
-    readonly symbol: Interfaces.SerializedSymbolInformation
+    readonly symbol: Interfaces.SerializationOf<vscode.SymbolInformation>
 }
 
 export const openProject = 'OpenProject'

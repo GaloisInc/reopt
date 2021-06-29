@@ -11,6 +11,8 @@
 		"resolveJsonModule": true,
 		"sourceMap": true,
 		"strict": true,
+		/* There is currently a bug where ES2020+ does not handle
+		 * chaining operator correctly! */
 		"target": "ES2019",
 	},
 	"exclude": [

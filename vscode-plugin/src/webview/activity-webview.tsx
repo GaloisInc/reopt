@@ -1,4 +1,5 @@
 import * as React from 'react'
+import * as vscode from 'vscode'
 
 import * as E2W from '@shared/extension-to-webview'
 import * as Interfaces from '@shared/interfaces'
@@ -8,7 +9,7 @@ type ReactSetter<T> = React.Dispatch<React.SetStateAction<T>>
 
 function makeMessageListener(setters: {
     setProjectName: ReactSetter<string | undefined>,
-    setSymbols: ReactSetter<Interfaces.SerializedSymbolInformation[]>,
+    setSymbols: ReactSetter<Interfaces.SerializationOf<vscode.SymbolInformation>[]>,
 }) {
     return (message: E2W.ExtensionToActivityWebview) => {
         switch (message.tag) {
@@ -46,8 +47,8 @@ enum SortBy {
 function getSort(
     sortBy: SortBy,
 ): (
-        a: [number, Interfaces.SerializedSymbolInformation],
-        b: [number, Interfaces.SerializedSymbolInformation]
+        a: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
+        b: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
     ) => number {
     switch (sortBy) {
 
@@ -64,7 +65,7 @@ function getSort(
 
 function jumpToSymbol(
     vscode: Interfaces.ActivityViewVSCodeAPI,
-    symbol: Interfaces.SerializedSymbolInformation,
+    symbol: Interfaces.SerializationOf<vscode.SymbolInformation>,
 ) {
     vscode.postMessage({
         tag: W2E.jumpToSymbol,
@@ -153,13 +154,13 @@ export function ActivityWebview(props: {
     const renderGenerateButtons = (
 
         <div>
-
+{/*
             <input
                 type="button"
                 value="Generate disassembly"
                 onClick={() => vscode.postMessage({ tag: W2E.generateDisassembly })}
             />
-
+ */}
             <input
                 type="button"
                 value="Generate functions"

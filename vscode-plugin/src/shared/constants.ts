@@ -17,7 +17,7 @@ export type PackageCommands
  * This check could be done statically with something like:
  * https://github.com/tc39/proposal-import-assertions
  *
- * @param command Command to check for existence.
+ * @param command - Command to check for existence.
  * @returns The command if the check succeeded, throws otherwise.
  */
 function commandExistsOrFailLoudly<Literal extends string>(

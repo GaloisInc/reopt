@@ -3,6 +3,7 @@
 */
 
 import { ExecFileException } from 'child_process'
+import * as fs from 'fs'
 import * as path from 'path'
 import * as vscode from 'vscode'
 
@@ -11,6 +12,7 @@ import {
     clearWorkspaceConfiguration,
     clearWorkspaceProjectFile,
     getWorkspaceProjectFile,
+    ProjectConfiguration,
 } from '@shared/project-configuration'
 import * as W2E from '@shared/webview-to-extension'
 
@@ -25,13 +27,21 @@ import * as reopt from './reopt'
 async function openOutputFile(outputFile: string): Promise<void> {
     const absoluteUri = vscode.Uri.file(path.resolve(outputFile))
     const doc = await vscode.workspace.openTextDocument(absoluteUri)
-    await vscode.window.showTextDocument(doc)
+    await vscode.window.showTextDocument(doc, {
+        preview: false,
+    })
 }
 
 
 /** Just like vscode.OutputChannel, but the 'dispose' method is hidden. */
 export type PrivateOutputChannel =
     Pick<vscode.OutputChannel, 'appendLine' | 'show'>
+/**
+ * When the user switches reopt projects, we drop the output channel for the
+ * project to be closed, and open a new output channel for the project to be
+ * opened.  This way, the messages in the output pane are always relevant to the
+ * currently opened project.
+ */
 export type ReplaceOutputChannel =
     (newChannel: string) => PrivateOutputChannel
 
@@ -56,18 +66,33 @@ function makeDisplayError(
 }
 
 
+/**
+ * Returns a string that can be displayed to the user while reopt is running in
+ * a given mode.
+ * @param reoptMode - Mode reopt is running in
+ * @returns User-friendly string description
+ */
 function getTitleForReoptMode(
     reoptMode: reopt.ReoptMode,
 ): string {
     switch (reoptMode) {
         case reopt.ReoptMode.GenerateCFG: return 'Generating CFG...'
-        case reopt.ReoptMode.GenerateDisassembly: return 'Generating disassembly...'
+        // case reopt.ReoptMode.GenerateObject: return 'Generating disassembly...'
         case reopt.ReoptMode.GenerateFunctions: return 'Generating functions...'
         case reopt.ReoptMode.GenerateLLVM: return 'Generating LLVM...'
     }
 }
 
 
+/**
+ * Contains the shared logic for calling reopt and updating the IDE state, for
+ * all interesting modes in which we can run reopt.
+ * @param context - VSCode extension context
+ * @param diagnosticCollection - current diagnostic collection
+ * @param replaceOutputChannel - cf. 'ReplaceOutputChannel'
+ * @returns Given a reopt mode, returns a function that runs reopt in that mode,
+ * and displays the results.
+ */
 function makeReoptGenerate(
     context: vscode.ExtensionContext,
     diagnosticCollection: vscode.DiagnosticCollection,
@@ -75,7 +100,9 @@ function makeReoptGenerate(
 ): (reoptMode: reopt.ReoptMode) => void {
 
     return (reoptMode) => {
+
         vscode.window
+
             .withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
@@ -83,10 +110,14 @@ function makeReoptGenerate(
                     cancellable: true,
                 },
                 // TODO: we can probably kill the child process upon cancellation
-                (_progress, _token) => reopt.runReopt(context, diagnosticCollection, reoptMode)
+                (_progress, _token) => reopt.runReoptToGenerateFile(context, reoptMode)
             )
+
             .then(
-                openOutputFile,
+                (({ outputFile, eventsFile }) => {
+                    openOutputFile(outputFile)
+                    processEventsFile(context, diagnosticCollection, eventsFile)
+                }),
                 makeDisplayError(replaceOutputChannel),
             )
 
@@ -95,6 +126,17 @@ function makeReoptGenerate(
 }
 
 
+/**
+ *
+ * @param context - VSCode extension context
+ * @param webview - Extension webview
+ * @param diagnosticCollection - Current diagnostic collection
+ * @param replaceConfigurationWatcher - While a reopt project is open, we have a
+ * filesystem watcher for its project file.  When a different project is open,
+ * we call this to replace the old watcher with a new one.
+ * @param replaceOutputChannel - see [[ReplaceOutputChannel]]
+ * @returns
+ */
 export function makeMessageHandler(
     context: vscode.ExtensionContext,
     webview: vscode.Webview,
@@ -135,10 +177,10 @@ export function makeMessageHandler(
                 return
             }
 
-            case W2E.generateDisassembly: {
-                reoptGenerate(reopt.ReoptMode.GenerateDisassembly)
-                return
-            }
+            // case W2E.generateDisassembly: {
+            //     reoptGenerate(reopt.ReoptMode.GenerateObject)
+            //     return
+            // }
 
             case W2E.generateFunctions: {
                 reoptGenerate(reopt.ReoptMode.GenerateFunctions)
@@ -198,4 +240,32 @@ export function makeMessageHandler(
 
         }
     }
+}
+
+
+/**
+ * Reopt generates an events file when running.  This processes it, displaying
+ * relevant information to the user at the end of a run: what errors happened in
+ * the process and where/why.
+ * @param context - VSCode extension context
+ * @param diagnosticsCollection - Current diagnostics collection
+ * @param eventsFile - The generated events file
+ */
+async function processEventsFile(
+    context: vscode.ExtensionContext,
+    diagnosticsCollection: vscode.DiagnosticCollection,
+    eventsFile: fs.PathLike,
+): Promise<void> {
+
+    // We need the disassembly file to show errors.  This makes sure that it has
+    // been generated.
+    const disassemblyFile = await reopt.runReoptToGenerateDisassembly(context)
+
+    reopt.displayReoptEventsAsDiagnostics(
+        context,
+        diagnosticsCollection,
+        disassemblyFile,
+        eventsFile,
+    )
+
 }

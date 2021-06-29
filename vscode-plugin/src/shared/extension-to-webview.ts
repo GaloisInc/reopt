@@ -1,4 +1,5 @@
 import * as Interfaces from './interfaces'
+import * as vscode from 'vscode'
 
 /**
  * WARNING: make sure that all of the data you put in messages is serialized. In
@@ -13,7 +14,7 @@ export interface WebviewInitialData {
 export const activityWebviewInitialDataKey = 'activityWebviewInitialData'
 export interface ActivityWebviewInitialData {
     readonly projectName?: string
-    readonly symbols: Interfaces.SerializedSymbolInformation[]
+    readonly symbols: Interfaces.SerializationOf<vscode.SymbolInformation>[]
 }
 
 export type ExtensionToActivityWebview
@@ -35,5 +36,5 @@ export interface OpenedProject {
 export const symbolList = 'SymbolList'
 export interface SymbolList {
     readonly tag: typeof symbolList
-    readonly symbols: Interfaces.SerializedSymbolInformation[]
+    readonly symbols: Interfaces.SerializationOf<vscode.SymbolInformation>[]
 }
