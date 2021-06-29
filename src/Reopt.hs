@@ -42,6 +42,10 @@ module Reopt
     InitDiscovery,
     initDiscSymAddrMap,
     doDiscovery,
+    -- * Debug info discovery
+    debugInfoDir,
+    debugInfoFileCache,
+    discoverFunDebugInfo,
     -- * Function recovery
     Reopt.TypeInference.HeaderTypes.AnnDeclarations,
     Reopt.TypeInference.HeaderTypes.emptyAnnDeclarations,
@@ -94,7 +98,7 @@ module Reopt
 where
 
 import Control.Exception (assert, bracket, try)
-import Control.Lens
+import Control.Lens ( (.~), (&), (^.) )
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
@@ -132,7 +136,7 @@ import Reopt.ArgResolver
 import Reopt.CFG.FnRep
 import Reopt.CFG.FunctionCheck
 import Reopt.CFG.LLVM (LLVMGenOptions (..), moduleForFunctions)
-import Reopt.CFG.LLVM.X86 as LLVM
+import Reopt.CFG.LLVM.X86 as LLVM ( x86LLVMArchOps )
 import Reopt.CFG.Recovery
 import Reopt.Events
 import qualified Reopt.ExternalTools as Ext
@@ -151,10 +155,24 @@ import Reopt.TypeInference.FunTypeMaps
 import Reopt.TypeInference.Header
 import Reopt.TypeInference.HeaderTypes
 import qualified Reopt.VCG.Annotations as Ann
-import System.Directory (withCurrentDirectory)
-import System.IO (Handle, IOMode (..), hPutStrLn, withBinaryFile)
+import System.Directory (withCurrentDirectory, getXdgDirectory, XdgDirectory(XdgData), doesFileExist)
+import System.FilePath ((</>), (<.>))
+import System.IO (Handle, IOMode (..), hPutStrLn, withBinaryFile, stderr)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix as Posix
+    ( getEnv,
+      groupExecuteMode,
+      groupReadMode,
+      groupWriteMode,
+      otherExecuteMode,
+      otherReadMode,
+      otherWriteMode,
+      ownerExecuteMode,
+      ownerReadMode,
+      ownerWriteMode,
+      createFile,
+      closeFd,
+      fdToHandle )
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as LPP
 import qualified Text.PrettyPrint.HughesPJ as HPJ
@@ -611,6 +629,7 @@ getElfArchInfo cl arch abi =
             (show abi)
 
 $(pure [])
+
 
 ------------------------------------------------------------------------
 -- Explore a control flow graph.
@@ -1202,6 +1221,36 @@ doInit loadOpts hdrInfo ainfo pltFn reoptOpts = elfInstances hdrInfo $ do
 
 $(pure [])
 
+------------------------------------------------------------------------
+-- Dynamic dependencies
+
+-- | Get values of DT_NEEDED entries.
+parseDynamicNeeded ::
+  Elf.ElfHeaderInfo w ->
+  Either String [BS.ByteString]
+parseDynamicNeeded elf = elfInstances elf $
+  case filter (\p -> Elf.phdrSegmentType p == Elf.PT_DYNAMIC) (Elf.headerPhdrs elf) of
+    [dynPhdr] ->
+      let dynContents = Elf.slice (Elf.phdrFileRange dynPhdr) (Elf.headerFileContents elf)
+      in case Elf.dynamicEntries (Elf.headerData ehdr) (Elf.headerClass ehdr) dynContents of
+           Left dynError ->
+             let errMsg = "Could not parse dynamic section of Elf file: " ++ show dynError
+             in Left errMsg
+           Right dynSection -> do
+             case Elf.virtAddrMap (Elf.headerFileContents elf) (Elf.headerPhdrs elf) of
+               Nothing -> do
+                 Left $ "Could not construct virtual address map from bytestring and list of program headers in."
+               Just phdrs ->
+                 case Elf.dynNeeded dynSection phdrs of
+                   Left errMsg -> Left $ "Could not parse phdrs from Elf file: "++errMsg
+                   Right deps -> Right deps
+    [] -> Left "No PT_DYNAMIC section."
+    _ -> Left "Multiple PT_DYNAMIC sections."
+  where ehdr = Elf.header elf
+
+
+$(pure [])
+
 ---------------------------------------------------------------------------------
 -- Logging
 
@@ -1234,10 +1283,12 @@ headerTypeMap ::
   MemWidth (ArchAddrWidth arch) =>
   -- | Header with hints for assisting typing.
   AnnDeclarations ->
+  -- | Function information gleaned from dynamic dependencies.
+  Map BS.ByteString ReoptFunType ->
   SymAddrMap (ArchAddrWidth arch) ->
   Map (ArchSegmentOff arch) NoReturnFunStatus ->
   ReoptM arch r (FunTypeMaps (ArchAddrWidth arch))
-headerTypeMap hdrAnn symAddrMap noretMap = do
+headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
   globalStepStarted HeaderTypeInference
 
   let voidPtrType = PtrAnnType VoidAnnType
@@ -1252,6 +1303,7 @@ headerTypeMap hdrAnn symAddrMap noretMap = do
   -- Generate type information from annotations
   let nameAnnTypeMap =
         fmap ReoptNonvarargFunType (funDecls hdrAnn)
+          <> dynDepsTypeMap
           <> declFn "__errno_location" (ftype (PtrAnnType (IAnnType 32)) [])
           <> declFn "__fstat" (ftype intType (fmap nonmArg [intType, voidPtrType]))
           <> declFn "__printf_chk" (ftype intType [nmArg "flag" intType, AnnFunArg (Just "format") charPtrType])
@@ -1299,6 +1351,63 @@ headerTypeMap hdrAnn symAddrMap noretMap = do
   globalStepFinished HeaderTypeInference ()
   pure annTypeMap
 
+
+---------------------------------------------------------------------------------
+-- Dynamic Dependency Helpers
+
+-- | Return the path to the debug info directory -- N.B., depends
+-- on environment variable REOPTHOME.
+debugInfoDir :: IO FilePath
+debugInfoDir = do
+  mStr <- getEnv "REOPTHOME"
+  case mStr of
+    Nothing -> getXdgDirectory XdgData ".reopt"
+    Just "" -> getXdgDirectory XdgData ".reopt"
+    Just path -> pure path
+
+-- | Given a binary's name, return the path to its debug function information
+--   cache (whether or not the file exists).
+debugInfoFileCache :: String -> IO FilePath
+debugInfoFileCache binaryName = do
+  dir <- debugInfoDir
+  pure $ dir </> binaryName <.> "debug_info"
+
+-- | Finds the cached debug info file for a dependency (if one exists).
+findDepDebugInfo :: String -> IO (Maybe FilePath)
+findDepDebugInfo depName = do
+  cFile <- debugInfoFileCache depName
+  cFileExists <- doesFileExist cFile
+  if cFileExists
+  then pure $ Just cFile
+  else do
+    cFile' <- debugInfoFileCache $ depName ++ ".debug"
+    cFileExists' <- doesFileExist cFile'
+    if cFileExists'
+    then pure $ Just cFile'
+    else do
+      hPutStrLn stderr $ "Could not find debug info associated with " ++ depName
+      pure $ Nothing
+
+
+-- | Add the cached debug information from dynamic
+--   dependencies (if available).
+addDynDepDebugInfo ::
+  Map BS.ByteString ReoptFunType ->
+  BS.ByteString ->
+  ReoptM arch r (Map BS.ByteString ReoptFunType)
+addDynDepDebugInfo m dep = reoptIO $ do
+  mCacheFile <- findDepDebugInfo $ BSC.unpack dep
+  case mCacheFile of
+    Nothing -> pure m
+    Just cacheFile -> do
+      contents <- readFile cacheFile
+      case (reads contents) :: [(Map BS.ByteString ReoptFunType, String)] of
+        [] -> do
+          hPutStrLn stderr $ "Internal warning: " ++ cacheFile ++ " did not contain valid data."
+          pure m
+        ((m',_):_) -> do
+          pure $ m <> m'
+
 ---------------------------------------------------------------------------------
 -- Complete discovery
 
@@ -1322,16 +1431,25 @@ doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ 
   let mem = memory s
   let symAddrMap = initDiscSymAddrMap initState
 
-  -- MArk initialization as finished.
+  -- Mark initialization as finished.
   globalStepFinished DiscoveryInitialization s
 
+  dynDepsMap <- do
+    dynDeps <- case parseDynamicNeeded hdrInfo of
+                 Left errMsg -> do
+                   globalStepWarning DebugTypeInference errMsg
+                   pure []
+                 Right deps -> pure deps
+    foldlM addDynDepDebugInfo Map.empty dynDeps
+
   let baseAddr = initDiscBaseCodeAddr initState
-  annTypeMap <- headerTypeMap hdrAnn symAddrMap (s ^. trustedFunctionEntryPoints)
+  annTypeMap <- headerTypeMap hdrAnn dynDepsMap symAddrMap (s ^. trustedFunctionEntryPoints)
 
   -- Resolve debug information.
   let resolveFn _symName off =
        let addr = incAddr (toInteger off) baseAddr
         in asSegmentOff mem addr
+
 
   debugTypeMap <-
     reoptIncComp $
@@ -1866,7 +1984,6 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                       Just sym -> versymName sym
                       Nothing -> nosymFunctionName unnamedFunPrefix addr
             ]
-
   -- Infer registers each function demands.
   fDems <- x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState
 
@@ -2209,3 +2326,25 @@ renderLLVMBitcode llvmGenOpt cfg os recMod =
     pp (HPJ.Chr c) b = Builder.charUtf8 c <> b
     pp (HPJ.Str s) b = Builder.stringUtf8 s <> b
     pp (HPJ.PStr s) b = Builder.stringUtf8 s <> b
+
+
+---------------------------------------------------------------------------------
+-- Debug info discovery
+
+
+
+-- | Return the debug information regarding functions in the given elf file.
+discoverFunDebugInfo ::
+  forall arch r.
+  Elf.ElfHeaderInfo (ArchAddrWidth arch) ->
+  ArchitectureInfo arch ->
+  ReoptM
+    arch
+    r
+    (FunTypeMaps (RegAddrWidth (ArchReg arch)))
+discoverFunDebugInfo hdrInfo ainfo = withArchConstraints ainfo $ do
+  let resolveFn _symName _off = Nothing
+  debugTypeMap <-
+    reoptIncComp $
+      resolveDebugFunTypes resolveFn funTypeMapsEmpty hdrInfo
+  pure $ debugTypeMap

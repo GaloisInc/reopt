@@ -54,6 +54,7 @@ library
 
   exposed-modules:
     Reopt
+    Reopt.CentOS7Debug
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
@@ -64,6 +65,7 @@ library
     Reopt.PltParser
     Reopt.Relinker.Binary
     Reopt.Server
+    Reopt.TypeInference.FunTypeMaps
     Reopt.Utils.Dir
     Reopt.Utils.Exit
   other-modules:
@@ -85,7 +87,6 @@ library
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
     Reopt.TypeInference.DebugTypes
-    Reopt.TypeInference.FunTypeMaps
     Reopt.TypeInference.Header
     Reopt.TypeInference.HeaderTypes
     Reopt.Utils.Flags
@@ -141,11 +142,14 @@ executable reopt-explore
     bytestring,
     cmdargs,
     containers,
+    directory,
     elf-edit,
+    filepath,
     lens,
     macaw-base,
     macaw-x86,
     mtl,
+    parameterized-utils >= 0.1.6,
     reopt,
     unix
 

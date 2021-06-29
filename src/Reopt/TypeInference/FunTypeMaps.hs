@@ -15,6 +15,7 @@ module Reopt.TypeInference.FunTypeMaps
   , getAddrSymMap
     -- * FunTypeMaps
   , FunTypeMaps(..)
+  , funTypeMapsEmpty
   , funTypeIsDefined
   , addNamedFunType
   ) where
@@ -25,13 +26,13 @@ import qualified Data.ElfEdit.Prim as Elf
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import           Data.Word
 import           Text.Printf (printf)
 
-import           Data.Macaw.Discovery (NoReturnFunStatus)
-import           Data.Macaw.Memory ( MemSegmentOff, MemAddr )
+import           Data.Macaw.Discovery (NoReturnFunStatus(..))
+import           Data.Macaw.Memory ( MemSegmentOff )
 
 import           Reopt.TypeInference.HeaderTypes ( AnnFunType )
+
 
 ------------------------------------------------------------------------
 -- QualifiedSymbolName
@@ -127,6 +128,13 @@ symAddrMapLookup sam nm =
        1 -> Right (Set.findMin s)
        _ -> Left SymAddrMapAmbiguous
 
+instance Semigroup (SymAddrMap w) where
+  x <> y = SymAddrMap
+           { samNameMap = (samNameMap x) <> (samNameMap y)
+           , samAddrMap   = (samAddrMap x) <> (samAddrMap y)
+           }
+
+
 ---------------------------------------------------------------------------------
 -- ReoptFunType
 
@@ -143,7 +151,7 @@ data ReoptFunType
    | ReoptOpenFunType
      -- ^ Open
    | ReoptUnsupportedFunType
-  deriving (Eq, Show)
+  deriving (Eq, Show, Read)
 
 --------------------------------------------------------------------------------
 -- FunTypeMaps
@@ -161,6 +169,9 @@ data FunTypeMaps w =
               , noreturnMap :: !(Map (MemSegmentOff w) NoReturnFunStatus)
               }
 
+-- | Empty function type information.
+funTypeMapsEmpty :: FunTypeMaps w
+funTypeMapsEmpty = FunTypeMaps symAddrMapEmpty Map.empty Map.empty Map.empty
 
 -- | Returnm true if the function name or address is known by Reopt.
 funTypeIsDefined :: FunTypeMaps w -- ^ Current type map information
