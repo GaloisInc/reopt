@@ -54,7 +54,6 @@ library
 
   exposed-modules:
     Reopt
-    Reopt.CentOS7Debug
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
