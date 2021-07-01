@@ -2289,10 +2289,13 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
 
   let fnDecls =
         [ FunctionDecl
-            { funDeclName = nm,
-              funDeclType = tp
+            { funDeclAddr = addr,
+              funDeclName = nm,
+              funDeclType = tp,
+              funDeclNoReturn = False -- FIXME
             }
-          | (nm, tp) <- Map.toList declFunTypeMap
+          | (nm, tp) <- Map.toList declFunTypeMap,
+            let Just addr = resolveRegionOff mem 0 0 -- FIXME
         ]
   let recMod =
         RecoveredModule
@@ -2528,14 +2531,17 @@ renderLLVMBitcode ::
   X86OS ->
   -- | Recovered module
   RecoveredModule X86_64 ->
-  (Builder.Builder, [(FunId, Either String Ann.FunctionAnn)])
+  (Builder.Builder,
+   [(FunId, Either String Ann.FunctionAnn)],
+   [Ann.ExternalFunctionAnn]
+   )
 renderLLVMBitcode llvmGenOpt cfg os recMod =
   -- Generate LLVM module
   let archOps = LLVM.x86LLVMArchOps (show os)
-      (m, ann) = moduleForFunctions archOps llvmGenOpt recMod
+      (m, ann, ext) = moduleForFunctions archOps llvmGenOpt recMod
       -- Render into LLVM
       out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
-   in (out, ann)
+   in (out, ann, ext)
   where
     pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
     pp (HPJ.Chr c) b = Builder.charUtf8 c <> b

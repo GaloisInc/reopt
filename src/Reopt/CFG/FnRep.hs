@@ -581,10 +581,15 @@ instance (FnArchConstraints arch
 
 -- | A function declaration that has type information, but no recovered definition.
 data FunctionDecl arch =
-  FunctionDecl { funDeclName :: !BSC.ByteString
-                 -- ^ Symbol name for function.
-               , funDeclType :: !(FunctionType arch)
-               }
+  FunctionDecl { -- | Address of function in binary.
+                 funDeclAddr :: !(MemSegmentOff (ArchAddrWidth arch)),
+                 -- | Symbol name for function.
+                 funDeclName :: !BSC.ByteString,
+                 -- | Type of function
+                 funDeclType :: !(FunctionType arch),
+                 -- | Whether function is marked as no-return.
+                 funDeclNoReturn :: !Bool
+                }
 
 -- | A set of function declarations and definitions needed to
 -- construct an LLVM module.
