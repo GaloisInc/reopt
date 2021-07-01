@@ -811,7 +811,8 @@ main' = do
                     Ann.binFilePath = programPath args,
                     Ann.pageSize = 4096,
                     Ann.stackGuardPageCount = 1,
-                    Ann.functions = funAnn
+                    Ann.functions = funAnn,
+                    Ann.extFunctions = [] -- FIXME
                   }
           BSL.writeFile annPath (Aeson.encode vcgAnn)
       writeOutput (outputPath args) $ \h -> do

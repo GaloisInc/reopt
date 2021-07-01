@@ -1258,6 +1258,10 @@ getBlockAnn fnm blockRes = do
     -- Preconditions that relate phi variable with Macaw location.
     preconds <- foldrM addPhiPrecond invPreconds (llvmPhiVars blockRes)
 
+    let isTail = case fbTerm b of
+          FnTailCall {} -> True
+          _             -> False
+
     -- Generate memory event annotation given base address, offset and address type.
     let ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
                                     , Ann.blockCodeSize = fbSize b
@@ -1266,6 +1270,7 @@ getBlockAnn fnm blockRes = do
                                     , Ann.blockPreconditions = preconds
                                     , Ann.blockAllocas = Map.empty
                                     , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
+                                    , Ann.isTailCall     = isTail
                                     }
     pure $! (fnBlockLabelString lbl, Ann.ReachableBlock ann)
 
@@ -1350,7 +1355,9 @@ defineFunction archOps genOpts f = do
               | otherwise =
                   blockAnnEntries
         let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
+        let addr  = fromIntegral $ addrOffset $ segoffAddr $ fnAddr f
         pure $! Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
+                                , Ann.faStartAddr = addr
                                 , Ann.blocks = blockObjMap
                                 }
   pure (funDef, funAnn)
