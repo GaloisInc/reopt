@@ -93,6 +93,7 @@ import           Data.Macaw.Types
 import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
 
 import           Reopt.CFG.FnRep
+import           Reopt.Events (FunId, funId)
 import qualified Reopt.VCG.Annotations as Ann
 
 -- | Return a LLVM type for a integer with the given width.
@@ -1385,10 +1386,13 @@ moduleForFunctions :: forall arch
                       -- ^ Options for generating LLVM
                    -> RecoveredModule arch
                       -- ^ Module to generate
-                   -> (L.Module, [Either String Ann.FunctionAnn])
+                   -> (L.Module, [(FunId, Either String Ann.FunctionAnn)])
 moduleForFunctions archOps genOpts recMod =
   let (dynIntrinsics, definesAndAnn) = runLLVMTrans $
-        traverse (defineFunction archOps genOpts) (recoveredDefs recMod)
+        forM (recoveredDefs recMod) $ \f -> do
+          let fId = funId (fnAddr f) (Just (fnName f))
+          (d, ma) <- defineFunction archOps genOpts f
+          pure (d, (fId, ma))
       llvmMod =  L.Module { L.modSourceName = Nothing
                           , L.modDataLayout = []
                           , L.modTypes      = []
