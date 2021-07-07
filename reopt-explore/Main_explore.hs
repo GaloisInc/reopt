@@ -14,7 +14,6 @@ import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ElfEdit as Elf
 import Data.IORef (newIORef, readIORef)
 import Data.List (intercalate)
-import Data.Macaw.Discovery (DiscoveryOptions (..))
 import Data.Macaw.X86 (X86_64)
 import Data.Maybe (isJust)
 import qualified Data.Map as Map
@@ -28,7 +27,7 @@ import Reopt
   ( runReoptM,
     LoadOptions (LoadOptions, loadOffset),
     RecoveredModule,
-    ReoptOptions (ReoptOptions, roExcluded, roIncluded),
+    ReoptOptions (..),
     X86OS,
     copyrightNotice,
     defaultLLVMGenOptions,
@@ -40,8 +39,10 @@ import Reopt
     SomeArchitectureInfo(..),
     getElfArchInfo,
     discoverFunDebugInfo,
-    debugInfoFileCache,
-    debugInfoDir
+    debugInfoCacheFilePath,
+    reoptHomeDir,
+    getGdbDebugInfoDirs,
+    defaultReoptOptions
   )
 import Reopt.Events
 import Reopt.TypeInference.FunTypeMaps
@@ -99,7 +100,11 @@ data Args = Args
     -- | Show help to user?
     showHelp :: !Bool,
     -- | Report output of individual binaries.
-    verbose :: !Bool
+    verbose :: !Bool,
+    -- | Additional locations to search for dynamic dependencies.
+    dynDepPath :: ![FilePath],
+    -- | Additional locations to search for dynamic dependencies' debug info.
+    dynDepDebugPath :: ![FilePath]
   }
 
 defaultArgs :: Args
@@ -111,7 +116,9 @@ defaultArgs =
       exportFnResultsPath = Nothing,
       exportSummaryPath = Nothing,
       showHelp = False,
-      verbose = False
+      verbose = False,
+      dynDepPath = [],
+      dynDepDebugPath = []
     }
 
 -- | Flag to set clang path.
@@ -162,6 +169,21 @@ filenameArg =
     addFilename :: String -> Args -> Either String Args
     addFilename nm a = Right (a {programPaths = nm : (programPaths a)})
 
+-- | Used to add a path at which to search for dynamic dependencies.
+dynDepPathFlag :: Flag Args
+dynDepPathFlag = flagReq ["lib-dir"] upd "PATH" help
+  where
+    upd path args = Right $ args {dynDepPath = path:(dynDepPath args)}
+    help = "Additional location to search for dynamic dependencies."
+
+
+-- | Used to add a path at which to search for dynamic dependencies.
+dynDepDebugPathFlag :: Flag Args
+dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
+  where
+    upd path args = Right $ args {dynDepDebugPath = path:(dynDepDebugPath args)}
+    help = "Additional location to search for dynamic dependencies' debug info."
+
 arguments :: Mode Args
 arguments = mode "reopt-explore" defaultArgs help filenameArg flags
   where
@@ -172,7 +194,9 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
         exportFnResultsFlag,
         exportSummaryFlag,
         verboseFlag,
-        debugInfoFlag
+        debugInfoFlag,
+        dynDepPathFlag,
+        dynDepDebugPathFlag
       ]
 
 getCommandLineArgs :: IO Args
@@ -206,27 +230,15 @@ renderExplorationResult (ExplorationStats summary stats lgen) = do
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 
 exploreBinary ::
-  Args ->
+  ReoptOptions ->
   [ExplorationResult] ->
   FilePath ->
   IO [ExplorationResult]
-exploreBinary args results fPath = do
+exploreBinary opts results fPath = do
   result <- performRecovery
   pure $ result : results
   where
     lOpts = LoadOptions {loadOffset = Nothing}
-    dOpts =
-      DiscoveryOptions
-        { exploreFunctionSymbols = False,
-          exploreCodeAddrInMem = False,
-          logAtAnalyzeFunction = True,
-          logAtAnalyzeBlock = False
-        }
-    rOpts =
-      ReoptOptions
-        { roIncluded = [],
-          roExcluded = []
-        }
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
     performRecovery = do
@@ -235,7 +247,7 @@ exploreBinary args results fPath = do
       summaryRef <- newIORef $ initReoptSummary fPath
       statsRef <- newIORef mempty
       let logger
-            | verbose args =
+            | roVerboseMode opts =
               joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
             | otherwise =
               recoverLogEvent summaryRef statsRef
@@ -243,7 +255,7 @@ exploreBinary args results fPath = do
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
       mr <-
         runReoptM logger $
-          recoverX86Elf lOpts dOpts rOpts annDecl unnamedFunPrefix hdrInfo
+          recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo
       (os, _, recMod, _) <- handleEitherWithExit mr
       res <-
         catch
@@ -263,7 +275,7 @@ exploreBinary args results fPath = do
               recMod
       let sz = BSL.length $ BS.toLazyByteString llvm
       seq sz $ do
-        if verbose args
+        if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
           else hPutStrLn stderr $ "  Done."
         pure $ LLVMGenPass $ if sz < 0 then 0 else fromIntegral sz
@@ -351,7 +363,7 @@ exploreDebugInfo results fPath = do
   mFnMap <- runReoptM printLogEvent $
               discoverFunDebugInfo hdrInfo ainfo
   fnMap <- handleEitherWithExit mFnMap
-  cPath <- debugInfoFileCache $ snd (splitFileName fPath)
+  cPath <- debugInfoCacheFilePath $ snd (splitFileName fPath)
   withFile cPath WriteMode $ \h -> hPutStrLn h (show $ nameTypeMap fnMap)
 
   absPath <- canonicalizePath fPath
@@ -386,8 +398,8 @@ exploreLink targets () linkPath = do
   absTgtPath <- withCurrentDirectory linkDir $ canonicalizePath tgtPath
   if not $ Set.member absTgtPath targets then pure ()
   else do
-    newLinkDestPath <- debugInfoFileCache $ snd $ splitFileName absTgtPath
-    newLinkPath     <- debugInfoFileCache $ linkName
+    newLinkDestPath <- debugInfoCacheFilePath $ snd $ splitFileName absTgtPath
+    newLinkPath     <- debugInfoCacheFilePath $ linkName
     alreadyExists <- doesFileExist newLinkPath
     when alreadyExists $ removeFile newLinkPath
     createFileLink newLinkDestPath newLinkPath
@@ -411,6 +423,10 @@ renderDebugSummary debugDir results =
 main :: IO ()
 main = do
   args <- getCommandLineArgs
+  gdbDebugDirs <- getGdbDebugInfoDirs
+  let opts = defaultReoptOptions { roVerboseMode = verbose args,
+                                   roDynDepPaths = dynDepPath args,
+                                   roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs}
   case (showHelp args, programPaths args, exploreMode args) of
     (True, _, _) -> do
       print $ helpText [] HelpFormatAll arguments
@@ -419,7 +435,7 @@ main = do
       hPutStrLn stderr "Use --help to see additional options."
       exitFailure
     (False, paths, ReoptExploreMode) -> do
-      results <- foldM (withElfExeFilesInDir (exploreBinary args)) [] paths
+      results <- foldM (withElfExeFilesInDir (exploreBinary opts)) [] paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
       case exportFnResultsPath args of
@@ -443,7 +459,7 @@ main = do
       when (isJust $ exportFnResultsPath args) $ do
         hPutStrLn stderr "The --export-summary flag not compatible with the --debug-info flag."
         exitFailure
-      infoDir <- debugInfoDir
+      infoDir <- reoptHomeDir
       createDirectoryIfMissing True infoDir
       results <- foldM (withElfFilesInDir exploreDebugInfo) [] paths
       let tgts = Set.fromList $ map debugFileAbsPath results

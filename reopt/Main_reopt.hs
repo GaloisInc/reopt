@@ -94,6 +94,8 @@ data Action
     ServerMode
   | -- | Print out help message
     ShowHelp
+  | -- | Print out help message
+    ShowHomeDirectory
   | -- | Print out version
     ShowVersion
   | -- | Perform a full reoptimization
@@ -172,7 +174,11 @@ data Args = Args
     -- | Path to write relationships needed for relinker
     relinkerInfoExportPath :: !(Maybe FilePath),
     -- | OCCAM configuration (if applicable)
-    occamConfigPath :: !(Maybe FilePath)
+    occamConfigPath :: !(Maybe FilePath),
+    -- | Additional locations to search for dynamic dependencies.
+    dynDepPath :: ![FilePath],
+    -- | Additional locations to search for dynamic dependencies' debug info.
+    dynDepDebugPath :: ![FilePath]
   }
 
 -- | Action to perform when running
@@ -214,13 +220,7 @@ defaultArgs =
       _includeAddrs = [],
       _excludeAddrs = [],
       loadBaseAddress = Nothing,
-      _discOpts =
-        DiscoveryOptions
-          { exploreFunctionSymbols = False,
-            exploreCodeAddrInMem = False,
-            logAtAnalyzeFunction = True,
-            logAtAnalyzeBlock = False
-          },
+      _discOpts = reoptDefaultDiscoveryOptions,
       invariantsExportPath = Nothing,
       unnamedFunPrefix = "reopt",
       eventsExportPath = Nothing,
@@ -231,7 +231,9 @@ defaultArgs =
       llvmExportPath = Nothing,
       objectExportPath = Nothing,
       relinkerInfoExportPath = Nothing,
-      occamConfigPath = Nothing
+      occamConfigPath = Nothing,
+      dynDepPath = [],
+      dynDepDebugPath = []
     }
 
 ------------------------------------------------------------------------
@@ -275,6 +277,14 @@ cfgFlag = flagNone ["c", "cfg"] upd help
   where
     upd = reoptAction .~ ShowCFG
     help = "Show recovered control-flow graphs."
+
+showHomeDirFlag :: Flag Args
+showHomeDirFlag = flagNone ["home-dir"] upd help
+  where
+    upd = reoptAction .~ ShowHomeDirectory
+    help = "Display the directory reopt uses to cache info"
+           ++ " (customizable via the environment variable "
+           ++ reoptHomeDirEnvVar ++ ")."
 
 serverModeFlag :: Flag Args
 serverModeFlag = flagNone ["server"] upd help
@@ -395,6 +405,22 @@ excludeAddrFlag = flagReq ["exclude"] upd "ADDR" help
     upd s old = Right $ old & excludeAddrs %~ (s :)
     help = "Address of function to exclude in analysis (may be repeated)."
 
+-- | Used to add a path at which to search for dynamic dependencies.
+dynDepPathFlag :: Flag Args
+dynDepPathFlag = flagReq ["lib-dir"] upd "PATH" help
+  where
+    upd path args = Right $ args {dynDepPath = path:(dynDepPath args)}
+    help = "Additional location to search for dynamic dependencies."
+
+
+-- | Used to add a path at which to search for dynamic dependencies.
+dynDepDebugPathFlag :: Flag Args
+dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
+  where
+    upd path args = Right $ args {dynDepDebugPath = path:(dynDepDebugPath args)}
+    help = "Additional location to search for dynamic dependencies' debug info."
+
+
 -- | Print out a trace message when we analyze a function
 logAtAnalyzeFunctionFlag :: Flag Args
 logAtAnalyzeFunctionFlag = flagBool ["trace-function-discovery"] upd help
@@ -512,12 +538,16 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         disassembleFlag,
         cfgFlag,
         serverModeFlag,
+        showHomeDirFlag,
         -- Discovery options
         logAtAnalyzeFunctionFlag,
         logAtAnalyzeBlockFlag,
         exploreCodeAddrInMemFlag,
         includeAddrFlag,
         excludeAddrFlag,
+        -- Dependency options
+        dynDepPathFlag,
+        dynDepDebugPathFlag,
         -- Function options
         headerFlag,
         -- Loading options
@@ -591,12 +621,17 @@ dumpDisassembly args = do
 loadOptions :: Args -> LoadOptions
 loadOptions args = LoadOptions {loadOffset = loadBaseAddress args}
 
-argsReoptOptions :: Args -> ReoptOptions
-argsReoptOptions args =
-  ReoptOptions
-    { roIncluded = args ^. includeAddrs,
-      roExcluded = args ^. excludeAddrs
-    }
+argsReoptOptions :: Args -> IO ReoptOptions
+argsReoptOptions args = do
+    gdbDebugDirs <- getGdbDebugInfoDirs
+    pure $ ReoptOptions
+            { roIncluded = [],
+              roExcluded = [],
+              roVerboseMode = True,
+              roDiscoveryOptions = args ^. discOpts,
+              roDynDepPaths = dynDepPath args,
+              roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs
+            }
 
 -- | Discovery symbols in program and show function CFGs.
 showCFG :: Args -> IO String
@@ -606,8 +641,7 @@ showCFG args = do
     exitFailure
 
   let path = programPath args
-  let disOpt = args ^. discOpts
-  let reoptOpts = argsReoptOptions args
+  reoptOpts <- argsReoptOptions args
   Some hdrInfo <- do
     bs <- checkedReadFile path
     case Elf.decodeElfHeaderInfo bs of
@@ -629,7 +663,7 @@ showCFG args = do
       -- Perform Discovery
       globalStepStarted DiscoveryInitialization
       initState <- reoptRunInit $ doInit (loadOptions args) hdrInfo ainfo pltFn reoptOpts
-      (_, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState disOpt
+      (_, discState) <- doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
       -- Print discovery
       pure $ show $ ppDiscoveryStateBlocks discState
   handleEitherWithExit mr
@@ -719,20 +753,22 @@ performReopt args = do
           Nothing -> logger1
           Just h -> joinLogEvents logger1 (Export.exportEvent h)
 
+  rOpts <- argsReoptOptions args
+
   mr <- runReoptM logger2 $ do
     hdrAnn <- resolveHeader (headerPath args) (clangPath args)
 
     let funPrefix :: BSC.ByteString
         funPrefix = unnamedFunPrefix args
 
-    (os, initState) <- reoptX86Init (loadOptions args) (argsReoptOptions args) origElf
+    (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
     let symAddrMap = initDiscSymAddrMap initState
 
     when (shouldRecover args) $
       checkSymbolUnused funPrefix symAddrMap
 
     let ainfo = osArchitectureInfo os
-    (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState (args ^. discOpts)
+    (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState rOpts
 
     case cfgExportPath args of
       Nothing -> pure ()
@@ -891,6 +927,9 @@ main' = do
       runServer
     ShowHelp -> do
       print $ helpText [] HelpFormatAll arguments
+    ShowHomeDirectory -> do
+      homeDir <- reoptHomeDir
+      print $ "Reopt's current home directory: " ++ homeDir
     ShowVersion ->
       putStrLn (modeHelp arguments)
     Reopt -> do
