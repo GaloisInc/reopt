@@ -771,6 +771,19 @@ recoverReadMem stmtIdx aid addr memRepr = do
     FrameCondWriteAccess{} -> error "Expected read access"
     FrameCondWriteOverlapAccess{} -> error "Expected read access"
 
+-- | This records a stack access if the assignment is a memory
+-- read.  It is used so annotations include all memory accesses.
+recordPotentialStackMemAccess ::
+  Assignment X86_64 ids tp ->
+  Recover ids ()
+recordPotentialStackMemAccess asgn = do
+  case assignRhs asgn of
+    ReadMem _addr _memRepr -> do
+      pushMemAccessType StackAccess
+    CondReadMem _tp _cond _addr _def -> do
+      throwErrorAt ReoptUnimplementedFeatureTag "Conditional reads are not yet supported."
+    _ -> do
+      pure ()
 
 -- | Recover computation needed to assign correct value to assignment
 -- identifier.
@@ -784,11 +797,11 @@ recoverAssign stmtIdx asgn = do
   case MapF.lookup aid (biAssignMap inv) of
     -- Skip
     Just (IVDomain _ _) -> do
-      pure ()
+      recordPotentialStackMemAccess asgn
     Just (IVAssignValue _) -> do
-      pure ()
+      recordPotentialStackMemAccess asgn
     Just (IVCValue _) -> do
-      pure ()
+      recordPotentialStackMemAccess asgn
     _ -> do
       let nm = "r" ++ show aid
       case assignRhs asgn of

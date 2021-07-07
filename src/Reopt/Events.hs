@@ -27,8 +27,6 @@ module Reopt.Events
     ReoptSummary (..),
     FnRecoveryResult (..),
     initReoptSummary,
-    setSummaryFnStatus,
-
     -- * Statistics
     ReoptStats (..),
     renderAllFailures,
@@ -109,7 +107,11 @@ segoffWord64 :: MemSegmentOff w -> Word64
 segoffWord64 = memWordValue . addrOffset . segoffAddr
 
 funId :: MemSegmentOff w -> Maybe BS.ByteString -> FunId
-funId a mnm = FunId (segoffWord64 a) (fromMaybe BS.empty mnm)
+funId a mnm =
+  FunId
+    { funIdAddr = segoffWord64 a,
+      funIdName = fromMaybe BS.empty mnm
+    }
 
 ppFunId :: FunId -> String
 ppFunId (FunId a nm)
@@ -227,11 +229,14 @@ data ReoptFunStep arch r e ar where
   InvariantInference :: ReoptFunStep arch (BlockInvariantMap arch ids) (RegisterUseError arch) ()
   -- | Function recovery at given address and name.
   Recovery :: ReoptFunStep arch () (RecoverError (ArchAddrWidth arch)) ()
+  -- | Annotation generation for a function
+  AnnotationGeneration :: ReoptFunStep arch () String ()
 
 ppFunStep :: ReoptFunStep arch r e a -> String
 ppFunStep Discovery = "Discovering"
 ppFunStep InvariantInference = "Analyzing"
 ppFunStep Recovery = "Recovering"
+ppFunStep AnnotationGeneration = "Generating Annotations"
 
 -- | A specific reason a ReoptStep failed for reporting purposes/statistics.
 data ReoptErrorTag
@@ -259,6 +264,7 @@ data ReoptErrorTag
   | ReoptInvariantInferenceFailureTag
   | ReoptMissingVariableValue
   | ReoptWarningTag
+  | ReoptAnnotationGeneration
   deriving (Eq, Ord)
 
 mkReoptErrorTag :: ReoptFunStep arch r e a -> e -> ReoptErrorTag
@@ -274,6 +280,8 @@ mkReoptErrorTag s e =
         Reason tag _ -> MacawRegisterUseErrorTag (Some tag)
     Recovery ->
       recoverErrorTag e
+    AnnotationGeneration -> ReoptAnnotationGeneration
+
 
 ppReoptErrorTag :: ReoptErrorTag -> String
 ppReoptErrorTag =
@@ -306,6 +314,7 @@ ppReoptErrorTag =
     ReoptInvariantInferenceFailureTag -> "Invariant inference failure"
     ReoptMissingVariableValue -> "Missing variable value"
     ReoptWarningTag -> "Warning"
+    ReoptAnnotationGeneration -> "Annotations Failed"
 
 -- | Event passed to logger when discovering functions
 data ReoptLogEvent arch where
@@ -373,6 +382,8 @@ printLogEvent event = do
               (recoverErrorInsnIndex e)
               (ppReoptErrorTag (recoverErrorTag e))
               (recoverErrorMessage e)
+          AnnotationGeneration ->
+            printf "  %s" e
     ReoptFunStepLog _st _f msg ->
       hPutStrLn stderr $ printf "  %s" msg
     ReoptFunStepAllFinished _ _ ->
@@ -445,14 +456,6 @@ instance Show ReoptFatalError where
   show (ReoptRelinkerFatalError e) = e
 
 -------------------------------------------------------------------------------
-
--- | Describes the result of a function recovery attempt.
-data FnRecoveryResult
-  = FnDiscovered
-  | FnRecovered
-  | FnFailedDiscovery
-  | FnFailedRecovery
-  deriving (Show, Eq)
 
 -- | Tags for reporting errors during various reopt steps.
 newtype ReoptStepTag = ReoptStepTag BS.ByteString
@@ -697,6 +700,18 @@ ppStats stats =
 -----------------------------------------------------------------------
 -- ReoptSummary
 
+-- | Describes the result of a function recovery attempt.
+data FnRecoveryResult
+  = forall arch r e ar . FnFailedAt !(ReoptFunStep arch r e ar)
+
+instance Show FnRecoveryResult where
+  show (FnFailedAt f) =
+    case f of
+      Discovery -> "DiscoveryFailed"
+      InvariantInference -> "InvariantFailed"
+      Recovery -> "RecoveryFailed"
+      AnnotationGeneration -> "AnnotationsFailed"
+
 -- | Collected information on recovery results.
 --
 -- Used for generating statistics.
@@ -764,23 +779,8 @@ recoverLogEvent summaryRef statsRef event = do
           }
     ReoptFunStepFinished step _ _ -> do
       modifyIORefFunStepStats statsRef step recordFunStepStatsSuccess
-    {-
-          case step of
-            Discovery -> do
-              modifyIORef' summaryRef $ setSummaryFnStatus f FnDiscovered
-            InvariantInference -> do
-              pure ()
-            Recovery -> do
-              modifyIORef' summaryRef $ setSummaryFnStatus f FnRecovered
-    -}
-
     ReoptFunStepFailed step f e -> do
-      let result =
-            case step of
-              Discovery -> FnFailedDiscovery
-              InvariantInference -> FnFailedRecovery
-              Recovery -> FnFailedRecovery
-      modifyIORef' summaryRef $ setSummaryFnStatus f result
+      modifyIORef' summaryRef $ setSummaryFnStatus f (FnFailedAt step)
       -- Record fun step failure
       let errTag = mkReoptErrorTag step e
       modifyIORefFunStepStats statsRef step (recordFunStepStatsFail errTag)

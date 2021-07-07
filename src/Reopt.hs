@@ -25,6 +25,10 @@ module Reopt
     globalStepStarted,
     globalStepWarning,
     globalStepFinished,
+    funStepStarted,
+    funStepFinished,
+    funStepFailed,
+    funStepAllFinished,
     Reopt.Events.ReoptFatalError(..),
     Reopt.Events.ReoptFileType(..),
     -- Initiization
@@ -88,11 +92,6 @@ module Reopt
     Data.Macaw.CFG.addrBase,
     Data.Macaw.CFG.addrOffset,
     Data.Macaw.CFG.memWordValue,
-    {-
-        Data.Macaw.CFG.MemWidth,
-        Data.Macaw.CFG.IsArchStmt,
-        Reopt.CFG.FnRep.FnArchStmt,
-        -}
     Data.Macaw.X86.X86_64,
   )
 where
@@ -315,7 +314,6 @@ reoptInTempDirectory (ReoptM m) =
 
 -- | End the reopt computation with the given return value.
 reoptEndNow :: r -> ReoptM arch r a
---reoptEndNow r = ReoptM $ ReaderT $ \_ -> ContT $ \_ -> pure (Right r)
 reoptEndNow = ReoptM . ReaderT . \r _ -> ContT (\_ -> pure (Right r))
 
 reoptFatalError :: ReoptFatalError -> ReoptM arch r a
@@ -339,11 +337,11 @@ reoptWriteBuilder :: ReoptFileType -> FilePath -> Builder.Builder -> ReoptM arch
 reoptWriteBuilder tp path buffer = reoptWrite tp path $ \h -> Builder.hPutBuilder h buffer
 
 reoptWriteByteString :: ReoptFileType -> FilePath -> BSL.ByteString -> ReoptM arch r ()
-reoptWriteByteString tp path buffer = do
+reoptWriteByteString tp path buffer =
   reoptWrite tp path $ \h -> BSL.hPut h buffer
 
 reoptWriteStrictByteString :: ReoptFileType -> FilePath -> BS.ByteString -> ReoptM arch r ()
-reoptWriteStrictByteString tp path buffer = do
+reoptWriteStrictByteString tp path buffer =
   reoptWrite tp path $ \h -> BS.hPut h buffer
 
 reoptIncComp ::
@@ -1450,7 +1448,6 @@ doDiscovery hdrAnn hdrInfo ainfo initState disOpt = withArchConstraints ainfo $ 
        let addr = incAddr (toInteger off) baseAddr
         in asSegmentOff mem addr
 
-
   debugTypeMap <-
     reoptIncComp $
       resolveDebugFunTypes resolveFn annTypeMap hdrInfo
@@ -2313,7 +2310,7 @@ renderLLVMBitcode ::
   X86OS ->
   -- | Recovered module
   RecoveredModule X86_64 ->
-  (Builder.Builder, [Either String Ann.FunctionAnn])
+  (Builder.Builder, [(FunId, Either String Ann.FunctionAnn)])
 renderLLVMBitcode llvmGenOpt cfg os recMod =
   -- Generate LLVM module
   let archOps = LLVM.x86LLVMArchOps (show os)

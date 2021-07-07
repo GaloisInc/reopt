@@ -58,6 +58,8 @@ exportEvent h evt =
             emitEvent h $ CFGError f b insn msg
         InvariantInference -> do
           pure ()
+        AnnotationGeneration -> do
+          pure ()
         Recovery -> do
           let f = funIdAddr fId
           let b = segoffWord64 (recoverErrorBlock fsErr)
