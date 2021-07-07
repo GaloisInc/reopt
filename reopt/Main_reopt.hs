@@ -18,6 +18,7 @@ import qualified Data.Aeson.Encoding as AE
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BSC
+import Data.Either (rights)
 import Data.ElfEdit
   ( ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
     elfSections,
@@ -49,6 +50,7 @@ import Reopt.ExternalTools (runSlash)
 import Reopt.Occam
 import Reopt.Server
 import Reopt.Utils.Exit
+import Reopt.VCG.Annotations as Ann
 import System.Console.CmdArgs.Explicit
 import System.Environment (getArgs)
 import System.Exit
@@ -669,26 +671,27 @@ showCFG args = do
 ------------------------------------------------------------------------
 -- Reopt action
 
--- | Return true if Reopt can stop before compiling LLVM
-skipCompileLLVM :: Args -> Bool
-skipCompileLLVM args =
-  isNothing (objectExportPath args)
-    && isNothing (outputPath args)
-    && isNothing (occamConfigPath args)
+-- | Return true if Reopt can should compile the LLVM
+shouldCompileLLVM :: Args -> Bool
+shouldCompileLLVM args =
+  isJust (objectExportPath args)
+    || isJust (outputPath args)
+    || isJust (occamConfigPath args)
 
--- | Retun true if we can stop before generating LLVM.
-skipGenerateLLVM :: Args -> Bool
-skipGenerateLLVM args =
-  isNothing (llvmExportPath args)
-    && skipCompileLLVM args
+-- | Retun true if Reopt should generate LLVM and/or notations.
+shouldGenerateLLVM :: Args -> Bool
+shouldGenerateLLVM args =
+  isJust (llvmExportPath args)
+    || isJust (annotationsExportPath args)
+    || shouldCompileLLVM args
 
--- | Skip function recovery
-skipRecovery :: Args -> Bool
-skipRecovery args =
-  isNothing (fnsExportPath args)
-    && isNothing (invariantsExportPath args)
-    && isNothing (relinkerInfoExportPath args)
-    && skipGenerateLLVM args
+-- | Return true when Reopt should perform function recovery.
+shouldRecover :: Args -> Bool
+shouldRecover args =
+  isJust (fnsExportPath args)
+    || isJust (invariantsExportPath args)
+    || isJust (relinkerInfoExportPath args)
+    || shouldGenerateLLVM args
 
 collectInvariants ::
   IORef [Aeson.Encoding] ->
@@ -709,13 +712,18 @@ collectInvariants ref evt = do
 -- action.
 performReopt :: Args -> IO ()
 performReopt args = do
-  let nothingToDo = isNothing (cfgExportPath args) && skipRecovery args
-  when nothingToDo $ do
+  let somethingToDo = isJust (cfgExportPath args) || shouldRecover args
+  unless somethingToDo $ do
     hPutStrLn stderr $
       unlines
         [ "Nothing to do",
           "  Specify output via --output or other info to export."
         ]
+    exitFailure
+
+  when (isJust (annotationsExportPath args) && isNothing (llvmExportPath args)) $ do
+    hPutStrLn stderr $
+      "Using --annotations requires --export-llvm."
     exitFailure
 
   let elfPath = programPath args
@@ -756,7 +764,7 @@ performReopt args = do
     (os, initState) <- reoptX86Init (loadOptions args) rOpts origElf
     let symAddrMap = initDiscSymAddrMap initState
 
-    when (skipRecovery args) $
+    when (shouldRecover args) $
       checkSymbolUnused funPrefix symAddrMap
 
     let ainfo = osArchitectureInfo os
@@ -768,7 +776,7 @@ performReopt args = do
         reoptWrite CfgFileType path $ \h -> do
           PP.hPutDoc h (ppDiscoveryStateBlocks discState)
 
-    when (skipRecovery args) $ reoptEndNow ()
+    unless (shouldRecover args) $ reoptEndNow ()
 
     let sysp = osPersonality os
     (recMod, relinkerInfo) <- doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
@@ -792,16 +800,38 @@ performReopt args = do
       Just path -> do
         reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
-    when (skipGenerateLLVM args) $ reoptEndNow ()
+    unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate LLVM
-    let (objLLVM, _) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
+    let (objLLVM, ann) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
     -- Write LLVM if requested.
     case llvmExportPath args of
       Nothing -> pure ()
-      Just path -> reoptWriteBuilder LlvmFileType path objLLVM
+      Just llvmPath -> do
+        reoptWriteBuilder LlvmFileType llvmPath objLLVM
+        case annotationsExportPath args of
+          Nothing -> pure ()
+          Just annPath -> do
+            forM_ ann $ \(fid, fann) -> do
+              funStepStarted AnnotationGeneration fid
+              case fann of
+                Left msg -> do
+                  funStepFailed AnnotationGeneration fid msg
+                Right _ -> do
+                  funStepFinished AnnotationGeneration fid ()
 
-    when (skipCompileLLVM args) $ reoptEndNow ()
+            let vcgAnn :: Ann.ModuleAnnotations
+                vcgAnn = Ann.ModuleAnnotations
+                  { Ann.llvmFilePath = llvmPath
+                  , Ann.binFilePath = programPath args
+                  , Ann.pageSize = 4096
+                  , Ann.stackGuardPageCount = 1
+                  , Ann.functions = rights (snd <$> ann)
+                  }
+            reoptWriteByteString AnnotationsFileType annPath (Aeson.encode vcgAnn)
+            funStepAllFinished AnnotationGeneration ()
+
+    unless (shouldCompileLLVM args) $ reoptEndNow ()
 
     -- Generate object file
     objContents <- generateObjectFile args os objLLVM
