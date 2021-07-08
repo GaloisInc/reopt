@@ -156,6 +156,34 @@ jobs:
       with:
         name: reopt-vcg
         path: dist/reopt-vcg.tgz
+  integration-tests:
+    needs: [build, reopt-vcg]
+    runs-on: ubuntu-20.04
+    steps:
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y gdb llvm-8
+    - name: Checkout
+      uses: actions/checkout@v2
+    - name: Download reopt artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt
+        path: dist
+    - name: Download reopt-vcg artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist
+    - name: Unpack and add executables to PATH
+      run: |
+        tar xvfz reopt.tgz
+        tar xvfz reopt-vcg.tgz
+        echo "$PWD/reopt/bin" >> $GITHUB_PATH
+        echo "$PWD/reopt-vcg/bin" >> $GITHUB_PATH
+      working-directory: dist
+    - name: Test nweb
+      run: ./integration_test.sh
+      working-directory: vcg-test-programs/nweb
   upload:
     needs: [build, vscode-extension, reopt-vcg]
     runs-on: ubuntu-20.04
