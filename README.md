@@ -102,9 +102,9 @@ command line flags to export intermediate results.  We describe the
 main flags for exporting intermediate state below.
 Additional options can be viewed by running `reopt --help`.
 
- * **Disassembly.**  `reopt -d <binary>` provides a raw disassembler output view
-   of the code in the binary.  This is similiar to `objdump`'s disassembly
-   output.
+ * **Disassembly.**  `reopt --disassemble <binary>` provides a raw
+   disassembler output view of the code in the binary.  This is similiar to
+   `objdump`'s disassembly output.
 
  * **Control flow graph construction.** `reopt --cfg <binary>` displays the low
    level control flow graphs that Reopt has constructed for each discovered
@@ -113,14 +113,16 @@ Additional options can be viewed by running `reopt --help`.
    machine code instructions into a more architectural neutral register
    transfer language.
 
- * **Function Recovery** `reopt --fns <binary>` displays the functions that
+ * **Function Recovery** `reopt --export-fns <path> <binary>` writes the
+   functionsthat
    Reopt has generated after performing stack and function argument analysis.
    This is a higher-level IR in which explicit references to the stack have been
    replaced with allocations, and functions take arguments.
 
- * **LLVM Generation** `reopt --llvm <binary>` generates LLVM from the binary.
-   This is essentially a version of function recovery rendered in LLVM's format.
-   Providing the `--annotations <ann_file>` flag during LLVM generation will
+ * **LLVM Generation** `reopt --export-llvm <path> <binary>` generates
+   LLVM from the binary.  This is essentially a version of function
+   recovery rendered in LLVM's format.  Providing the
+   `--annotations <ann_file>` flag during LLVM generation will
    cause `reopt` to additionally emit JSON in `<ann_file>` describing
    verification conditions which (if valid) demonstrate functional equivalence
    between the generated LLVM and machine code. Running `reopt-vcg
@@ -128,11 +130,10 @@ Additional options can be viewed by running `reopt --help`.
    block-by-block, leveraging an SMT solver (cvc4) to verify as many of
    the conditions as possible.
 
- * **Object Files** `reopt --object <binary>` generates an object file from the
-   LLVM generated in the previous state.  This is essentially the same as
-   generating the LLVM, and then running the LLVM compiler toolchain with
-   the selected options.  The output file should be specified with the
-   `-o` flag as object files cannot be written to standard out.
+ * **Object Files** `reopt --export-object <path> <binary>` generates an object
+   file from the LLVM generated in the previous state.
+   This is essentially the same as generating the LLVM, and then running
+   the LLVM compiler toolchain with the selected options.
 
 ## Function arguments
 
