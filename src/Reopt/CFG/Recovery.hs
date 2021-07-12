@@ -31,6 +31,7 @@ module Reopt.CFG.Recovery
   , x86CallRegs
     -- * X86 type info
   , X86FunTypeInfo(..)
+  , mkX86FunctionType
   , X86ArgInfo(..)
   , ZMMType(..)
   , X86RetInfo(..)
@@ -186,7 +187,6 @@ data X86FunTypeInfo
      -- The function must return an int.
    | X86OpenFunType
      -- ^ @X86OpenFunType@ denotes the rtype of open.
-   | X86UnsupportedFunType
   deriving (Eq, Show)
 ------------------------------------------------------------------------
 -- Embedding
@@ -1664,6 +1664,32 @@ inferPrintfArgs mem nm regs initState = do
 oCreat :: Integer
 oCreat = 64
 
+-- | Create function type from arg info and ret info
+mkX86FunctionType ::
+  X86FunTypeInfo ->
+  FunctionType X86_64
+mkX86FunctionType (X86NonvarargFunType args rets) =
+  FunctionType {
+    fnArgTypes = argRegTypeRepr <$> args,
+    fnReturnType = retReturnType rets,
+    fnVarArgs = False
+  }
+mkX86FunctionType (X86PrintfFunType icnt0) =
+  let intType = Some (BVTypeRepr n64)
+   in FunctionType {
+          fnArgTypes = replicate (icnt0+1) intType,
+          fnReturnType = Just intType,
+          fnVarArgs = True
+        }
+mkX86FunctionType X86OpenFunType =
+  let stringPtrType = BVTypeRepr n64
+      intType = BVTypeRepr n64
+   in FunctionType {
+          fnArgTypes = [ Some stringPtrType, Some intType ],
+          fnReturnType = Just (Some intType),
+          fnVarArgs = True
+        }
+
 x86TranslateCallType ::
   Memory 64 ->
   -- | Name of function
@@ -1672,11 +1698,8 @@ x86TranslateCallType ::
   RegState X86Reg (Value X86_64 ids) ->
   X86FunTypeInfo ->
   Either RegisterUseErrorReason (CallRegs X86_64 ids)
-x86TranslateCallType _mem nm regs (X86NonvarargFunType args rets) = do
-  let ftp = FunctionType { fnArgTypes = argRegTypeRepr <$> args
-                          , fnReturnType = retReturnType rets
-                          , fnVarArgs = False
-                          }
+x86TranslateCallType _mem nm regs x86Ftp@(X86NonvarargFunType args rets) = do
+  let ftp = mkX86FunctionType x86Ftp
   let v = FnFunctionEntryValue ftp nm
   Right CallRegs { callRegsFnType = (v, args, rets)
                   , callArgValues = argValue regs <$> args
@@ -1701,13 +1724,8 @@ x86TranslateCallType mem nm regs (X86PrintfFunType icnt0) = do
       Left $ Reason ResolutonFailureCallToKnownVarArgsFunction msg
     Right r ->
       Right r
-x86TranslateCallType _mem nm regs X86OpenFunType = do
-  let stringPtrType = BVTypeRepr n64
-  let intType = BVTypeRepr n64
-  let ftp = FunctionType { fnArgTypes = [ Some stringPtrType, Some intType ]
-                          , fnReturnType = Just (Some intType)
-                          , fnVarArgs = True
-                          }
+x86TranslateCallType _mem nm regs x86Ftp@X86OpenFunType = do
+  let ftp = mkX86FunctionType x86Ftp
   let v = FnFunctionEntryValue ftp nm
 
   -- Register for storing flags
@@ -1728,22 +1746,21 @@ x86TranslateCallType _mem nm regs X86OpenFunType = do
                   , callArgValues  = argValue regs <$> args
                   , callReturnRegs = [Some (X86_GP F.RAX)]
                   }
-x86TranslateCallType _mem nm _ X86UnsupportedFunType =
-  Left $ Reason UnsupportedCallTargetCallingConvention nm
 
 -- | Compute map from block starting addresses to the dependencies
 -- required to run block.
-x86CallRegs :: forall ids
-            .  Memory 64
-            -> Map (MemSegmentOff 64) BSC.ByteString
-              -- ^ Map from addresses to function name.
-            -> Map BSC.ByteString X86FunTypeInfo
-               -- ^ Map from address to the name at that address along with type
-            -> MemSegmentOff 64
-               -- ^ Address of the call statement
-            -> RegState X86Reg (Value X86_64 ids)
-               -- ^ Registers when call occurs.
-            -> Either RegisterUseErrorReason (CallRegs X86_64 ids)
+x86CallRegs ::
+  forall ids .
+  Memory 64 ->
+  -- | Map function starting addresses to the function name.
+  (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
+  -- | Maps function names to be exported to the type associated with that name.
+  (BSC.ByteString -> Maybe X86FunTypeInfo) ->
+  -- | Address of the call statement
+  MemSegmentOff 64 ->
+  -- | Registers when call occurs.
+  RegState X86Reg (Value X86_64 ids) ->
+  Either RegisterUseErrorReason (CallRegs X86_64 ids)
 x86CallRegs mem funNameMap funTypeMap _callSite regs = do
   nm <- do
     let ipVal = regs^.boundValue ip_reg
@@ -1754,8 +1771,9 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
           case asSegmentOff mem faddr  of
             Just r -> pure r
             Nothing -> Left $ Reason InvalidCallTargetAddress (memWordValue (addrOffset faddr))
-        case Map.lookup callTarget funNameMap of
-          Just r -> Right r
+        case funNameMap callTarget of
+          Just r ->
+            Right r
           Nothing ->
             Left $ Reason CallTargetNotFunctionEntryPoint (memWordValue (addrOffset faddr))
       RelocatableValue _ faddr -> do
@@ -1763,7 +1781,7 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
           case asSegmentOff mem faddr of
             Just r -> pure r
             Nothing -> Left $ Reason InvalidCallTargetAddress (memWordValue (addrOffset faddr))
-        case Map.lookup callTarget funNameMap of
+        case funNameMap callTarget of
           Just r ->
             Right r
           Nothing ->
@@ -1772,7 +1790,7 @@ x86CallRegs mem funNameMap funTypeMap _callSite regs = do
         pure nm
       _ ->
         Left $ Reason IndirectCallTarget ()
-  case Map.lookup nm funTypeMap of
+  case funTypeMap nm of
     Just tp -> x86TranslateCallType mem nm regs tp
     Nothing -> Left $ Reason UnknownCallTargetArguments nm
 
@@ -1806,11 +1824,11 @@ initializeArgumentValues args locMap = ifoldr insArg locMap args
 x86BlockInvariants
   :: SyscallPersonality
   -> Memory 64
-  -> Map (MemSegmentOff 64) BSC.ByteString
+  -> (MemSegmentOff 64 -> Maybe BSC.ByteString)
      -- ^ Map from addresses that correspond to function
      -- entry points to the name of the function at that
      -- addresses.
-  -> Map BSC.ByteString X86FunTypeInfo
+  -> (BSC.ByteString -> Maybe X86FunTypeInfo)
      -- ^ Map from function name to the type information at that address.
   -> DiscoveryFunInfo X86_64 ids
   -> [Some X86RetInfo]

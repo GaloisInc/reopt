@@ -2093,8 +2093,6 @@ resolveReoptFunType (ReoptPrintfFunType i) =
   pure $! X86PrintfFunType i
 resolveReoptFunType ReoptOpenFunType =
   pure $! X86OpenFunType
-resolveReoptFunType ReoptUnsupportedFunType =
-  pure $! X86UnsupportedFunType
 
 $(pure [])
 
@@ -2112,19 +2110,19 @@ matchPLT _ = Nothing
 x86ArgumentAnalysis ::
   SyscallPersonality ->
   -- | Map from addresses to function name.
-  Map (MemSegmentOff 64) BSC.ByteString ->
+  (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
   -- | Map from address to the name at that address along with type
-  Map BSC.ByteString X86FunTypeInfo ->
+  (BSC.ByteString -> Maybe X86FunTypeInfo) ->
   DiscoveryState X86_64 ->
   ReoptM X86_64 r (Map (MemSegmentOff 64) X86FunTypeInfo)
-x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
+x86ArgumentAnalysis sysp resolveFunName resolveFunType discState = do
   -- Generate map from symbol names to known type.
   let mem = memory discState
   -- Compute only those functions whose types are not known.
   let known :: DiscoveryFunInfo X86_64 ids -> Bool
       known f =
-        case Map.lookup (discoveredFunAddr f) funNameMap of
-          Just nm -> Map.member nm knownFunTypeMap
+        case resolveFunName (discoveredFunAddr f) of
+          Just nm -> isJust (resolveFunType nm)
           Nothing -> False
   let shouldPropagate (Some f) = not (known f) && isNothing (matchPLT f)
 
@@ -2136,7 +2134,7 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
               RegState X86Reg (Value X86_64 ids) ->
               Either String [Some (Value X86_64 ids)]
             resolveFn callSite callRegs = do
-              case x86CallRegs mem funNameMap knownFunTypeMap callSite callRegs of
+              case x86CallRegs mem resolveFunName resolveFunType callSite callRegs of
                 Left rsn -> Left (ppRegisterUseErrorReason rsn)
                 Right r -> Right (callArgValues r)
         functionDemands (x86DemandInfo sysp) mem resolveFn $
@@ -2145,11 +2143,11 @@ x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState = do
   forM_ (Map.toList summaryFails) $ \(faddr, rsn) -> do
     case rsn of
       PLTStubNotSupported -> do
-        let dnm = Map.lookup faddr funNameMap
+        let dnm = resolveFunName faddr
         globalStepWarning FunctionArgInference $
           printf "%s: Unexpected PLT stub." (ppFnEntry dnm faddr)
       CallAnalysisError callSite msg -> do
-        let dnm = Map.lookup faddr funNameMap
+        let dnm = resolveFunName faddr
         globalStepWarning FunctionArgInference $
           printf "%s: Could not determine signature at callsite %s:\n    %s" (ppFnEntry dnm faddr) (ppSegOff callSite) msg
   globalStepFinished FunctionArgInference ()
@@ -2171,14 +2169,14 @@ doRecoverX86 ::
     )
 doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
   -- Map names to known function types when we have explicit information.
-  let knownFunTypeMap :: Map BS.ByteString X86FunTypeInfo
+  let knownFunTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
       knownFunTypeMap =
         Map.fromList
-          [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, xtp)
+          [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, (addr, xtp))
             | (addr, rtp) <- Map.toList (addrTypeMap debugTypeMap),
               Right xtp <- [runExcept (resolveReoptFunType rtp)]
           ]
-          <> Map.mapMaybe resolveX86Type (nameTypeMap debugTypeMap)
+          <> Map.mapMaybeWithKey (resolveX86Type symAddrMap) (nameTypeMap debugTypeMap)
 
   -- Used to compute sizes of functions for overwriting purposes.
   let addrUseMap = mkFunUseMap discState
@@ -2201,14 +2199,20 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                       Nothing -> nosymFunctionName unnamedFunPrefix addr
             ]
   -- Infer registers each function demands.
-  fDems <- x86ArgumentAnalysis sysp funNameMap knownFunTypeMap discState
+  fDems <- do
+    let resolveFunName a = Map.lookup a funNameMap
+    let resolveFunType fnm = snd <$> Map.lookup fnm knownFunTypeMap
+    x86ArgumentAnalysis sysp resolveFunName resolveFunType discState
 
-  let funTypeMap :: Map BS.ByteString X86FunTypeInfo
+  let funTypeMap :: Map BS.ByteString (MemSegmentOff 64, X86FunTypeInfo)
       funTypeMap =
         knownFunTypeMap
-          <> Map.fromList
-            [ (recoveredFunctionName symAddrMap unnamedFunPrefix addr, tp)
-              | (addr, tp) <- Map.toList fDems
+        <> Map.fromList
+            [ (nm, (faddr, tp))
+            | Some finfo <- exploredFunctions discState,
+              let faddr = discoveredFunAddr finfo,
+              let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap,
+              tp <- maybeToList $ Map.lookup faddr fDems
             ]
 
   fnDefs <- fmap catMaybes $
@@ -2217,52 +2221,27 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
       let dnm = discoveredFunSymbol finfo
       let fnId = funId faddr dnm
       let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-      case Map.lookup nm funTypeMap of
+      case (\(_,tp) -> tp) <$> Map.lookup nm funTypeMap of
         Nothing -> do
           -- TODO: Check an error has already been reported on this.
           pure Nothing
-        Just X86UnsupportedFunType -> do
-          -- TODO: Check an error has already been reported on this.
-          pure Nothing
         Just (X86PrintfFunType _) -> do
-{-
-          funStepImmediateFailed
-            InvariantInference
-            fnId
-            (ReoptVarArgFnTag, BSC.unpack nm ++ " is a printf-style vararg function and not supported.")
-            -}
+          -- Var-args cannot be recovered.
           pure Nothing
         Just X86OpenFunType -> do
-{-
-          funStepImmediateFailed
-            InvariantInference
-            fnId
-            (ReoptVarArgFnTag, BSC.unpack nm ++ " is a open-style varrarg function and not supported.")
-            -}
+          -- open cannot be recovered.
           pure Nothing
         Just (X86NonvarargFunType argRegs retRegs) -> do
           case checkFunction finfo of
             FunctionIncomplete _errTag -> do
-{-
-              funStepImmediateFailed
-                InvariantInference
-                fnId
-                (errTag, "Incomplete discovery.")
-                -}
               pure Nothing
-            -- We should have filtered out PLT entries from the explored functions,
-            -- so this is considered an error.
             FunctionHasPLT -> do
-{-
-              funStepImmediateFailed
-                InvariantInference
-                fnId
-                (ReoptCannotRecoverFnWithPLTStubsTag, "Encountered unexpected PLT stub.")
-                -}
               pure Nothing
             FunctionOK -> do
               funStepStarted InvariantInference fnId
-              case x86BlockInvariants sysp mem funNameMap funTypeMap finfo retRegs of
+              let resolveFunName a = Map.lookup a funNameMap
+              let resolveFunType fnm = snd <$> Map.lookup fnm funTypeMap
+              case x86BlockInvariants sysp mem resolveFunName resolveFunType finfo retRegs of
                 Left e -> do
                   funStepFailed InvariantInference fnId e
                   pure Nothing
@@ -2291,11 +2270,15 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
         [ FunctionDecl
             { funDeclAddr = addr,
               funDeclName = nm,
-              funDeclType = tp,
-              funDeclNoReturn = False -- FIXME
+              funDeclType = mkX86FunctionType tp,
+              funDeclNoReturn =
+                case noRet of
+                  MayReturnFun -> False
+                  NoReturnFun -> True
             }
-          | (nm, tp) <- Map.toList declFunTypeMap,
-            let Just addr = resolveRegionOff mem 0 0 -- FIXME
+          | (nm, _) <- Map.toList declFunTypeMap,
+            (addr, tp) <- maybeToList $ Map.lookup nm funTypeMap,
+            let noRet = Map.findWithDefault MayReturnFun addr (discState^.trustedFunctionEntryPoints)
         ]
   let recMod =
         RecoveredModule
@@ -2328,11 +2311,17 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
           }
   seq recMod $ pure (recMod, mergeRel)
 
-resolveX86Type :: ReoptFunType -> Maybe X86FunTypeInfo
-resolveX86Type rtp =
-  case runExcept (resolveReoptFunType rtp) of
-    Left _ -> Nothing
-    Right r -> Just r
+resolveX86Type ::
+  SymAddrMap 64 ->
+  BS.ByteString ->
+  ReoptFunType ->
+  Maybe (MemSegmentOff 64, X86FunTypeInfo)
+resolveX86Type m nm rtp
+  | Right r <- runExcept (resolveReoptFunType rtp),
+    [addr] <- Set.toList (Map.findWithDefault Set.empty nm (samNameMap m)) =
+      Just (addr, r)
+  | otherwise =
+    Nothing
 
 {-
 -- | Initialization checks needed if running function recovery.

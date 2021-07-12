@@ -150,7 +150,6 @@ data ReoptFunType
      -- The int denotes the number of 64-bit bitvectors previously.
    | ReoptOpenFunType
      -- ^ Open
-   | ReoptUnsupportedFunType
   deriving (Eq, Show, Read)
 
 --------------------------------------------------------------------------------
