@@ -1259,6 +1259,10 @@ getBlockAnn fnm blockRes = do
     -- Preconditions that relate phi variable with Macaw location.
     preconds <- foldrM addPhiPrecond invPreconds (llvmPhiVars blockRes)
 
+    let isTail = case fbTerm b of
+          FnTailCall {} -> True
+          _             -> False
+
     -- Generate memory event annotation given base address, offset and address type.
     let ann = Ann.ReachableBlockAnn { Ann.blockAddr = addr
                                     , Ann.blockCodeSize = fbSize b
@@ -1267,6 +1271,7 @@ getBlockAnn fnm blockRes = do
                                     , Ann.blockPreconditions = preconds
                                     , Ann.blockAllocas = Map.empty
                                     , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
+                                    , Ann.isTailCall     = isTail
                                     }
     pure $! (fnBlockLabelString lbl, Ann.ReachableBlock ann)
 
@@ -1351,10 +1356,27 @@ defineFunction archOps genOpts f = do
               | otherwise =
                   blockAnnEntries
         let blockObjMap = uncurry Ann.blockAnnToJSON <$> finBlockAnnMap
+        let addr  = fromIntegral $ addrOffset $ segoffAddr $ fnAddr f
         pure $! Ann.FunctionAnn { Ann.llvmFunName = BSC.unpack (fnName f)
+                                , Ann.faStartAddr = addr
                                 , Ann.blocks = blockObjMap
                                 }
   pure (funDef, funAnn)
+
+-- | Create function annotation from declaration.
+mkExternalFunctionAnn ::
+  FunctionDecl arch ->
+  Ann.ExternalFunctionAnn
+mkExternalFunctionAnn d =
+  let -- Name of function as string
+      nm = BSC.unpack $ funDeclName d
+      -- Address of function
+      a = memWordValue $ addrOffset $ segoffAddr $ funDeclAddr d
+   in Ann.ExternalFunctionAnn
+        { Ann.efaLlvmFunName = nm,
+          Ann.efaStartAddr = fromIntegral a,
+          Ann.efaIsNoReturn = funDeclNoReturn d
+        }
 
 ------------------------------------------------------------------------
 -- Other
@@ -1373,20 +1395,22 @@ declareIntrinsic i =
 
 -- | Generate LLVM module from a list of functions describing the
 -- behavior.
-moduleForFunctions :: forall arch
-                   .  ( LLVMArchConstraints arch
-                      , Show (FunctionType arch)
-                      , FoldableFC (ArchFn arch)
-                      , FoldableF (FnArchStmt arch)
-                      , arch ~ X86_64
-                      )
-                   => LLVMArchSpecificOps arch
-                      -- ^ Architecture specific functions
-                   -> LLVMGenOptions
-                      -- ^ Options for generating LLVM
-                   -> RecoveredModule arch
-                      -- ^ Module to generate
-                   -> (L.Module, [(FunId, Either String Ann.FunctionAnn)])
+moduleForFunctions ::
+  forall arch .
+  ( LLVMArchConstraints arch,
+    Show (FunctionType arch),
+    FoldableFC (ArchFn arch),
+    FoldableF (FnArchStmt arch),
+    arch ~ X86_64) =>
+  -- | Architecture specific functions
+  LLVMArchSpecificOps arch ->
+  -- | Options for generating LLVM
+  LLVMGenOptions ->
+  -- | Module to generate
+  RecoveredModule arch ->
+  (L.Module,
+   [(FunId, Either String Ann.FunctionAnn)],
+   [Ann.ExternalFunctionAnn])
 moduleForFunctions archOps genOpts recMod =
   let (dynIntrinsics, definesAndAnn) = runLLVMTrans $
         forM (recoveredDefs recMod) $ \f -> do
@@ -1407,4 +1431,5 @@ moduleForFunctions archOps genOpts recMod =
                           , L.modAliases    = []
                           , L.modComdat     = Map.empty
                           }
-   in (llvmMod, snd <$> definesAndAnn)
+      annDecls = mkExternalFunctionAnn <$> recoveredDecls recMod
+   in (llvmMod, snd <$> definesAndAnn, annDecls) -- FIXME

@@ -267,7 +267,7 @@ exploreBinary opts results fPath = do
 
     generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO LLVMGenResult
     generateLLVM os recMod = do
-      let (llvm, _) =
+      let (llvm, _, _) =
             renderLLVMBitcode
               defaultLLVMGenOptions
               latestLLVMConfig

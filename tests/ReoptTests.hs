@@ -57,6 +57,6 @@ mkTest fp = T.testCase fp $ do
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
   withBinaryFile llvmPath WriteMode $ \h -> do
-    let (llvmContents, _ann) =
+    let (llvmContents, _ann, _decl) =
           renderLLVMBitcode defaultLLVMGenOptions latestLLVMConfig os recMod
     Builder.hPutBuilder h llvmContents

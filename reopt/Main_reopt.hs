@@ -803,7 +803,7 @@ performReopt args = do
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate LLVM
-    let (objLLVM, ann) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
+    let (objLLVM, ann, ext) = renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
     -- Write LLVM if requested.
     case llvmExportPath args of
       Nothing -> pure ()
@@ -827,6 +827,7 @@ performReopt args = do
                   , Ann.pageSize = 4096
                   , Ann.stackGuardPageCount = 1
                   , Ann.functions = rights (snd <$> ann)
+                  , Ann.extFunctions = ext
                   }
             reoptWriteByteString AnnotationsFileType annPath (Aeson.encode vcgAnn)
             funStepAllFinished AnnotationGeneration ()

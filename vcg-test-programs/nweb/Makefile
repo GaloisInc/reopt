@@ -26,7 +26,9 @@ nweb23.fns : nweb23.exe nweb.h
 .PHONY : nweb23.fns
 
 nweb23.ll nweb23.ann : nweb23.exe nweb.h
-	$(reopt) --llvm -o nweb23.ll --annotations nweb23.ann --header nweb.h nweb23.exe || true
+	$(reopt) --export-llvm nweb23.ll --annotations nweb23.ann --header nweb.h nweb23.exe || true
+
+.PHONY : nweb23.ann
 
 nweb23.reopt.exe : nweb23.exe
 	$(reopt) -o nweb23.reopt.exe $<
