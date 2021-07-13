@@ -12,7 +12,6 @@ import qualified Data.Text as Text
 import           Data.Word
 import           Numeric (showHex)
 
-import           Data.Macaw.AbsDomain.StackAnalysis
 import           Data.Macaw.Analysis.RegisterUse
 import           Data.Macaw.Memory
 import           Data.Macaw.X86

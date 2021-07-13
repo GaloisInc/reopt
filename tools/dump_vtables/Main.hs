@@ -199,7 +199,15 @@ main = do
   args <- getArgs
   case args of
     (bFileName:_) -> do
-      e <- readElf64 bFileName
+      when (null bFileName) $ do
+        hPutStrLn stderr "Missing file"
+        exitFailure
+      bs <- checkedReadFilebFileName
+      hdr <- handleEitherStringWithExit $ parseElfHeaderInfo64 bFileName bs
+      let (l, e) = Elf.getElf hdr
+      unless (null l) $ do
+        hPutStrLn stderr "Recoverable errors occurred in reading elf file:"
+        mapM_ (hPrint stderr) l
       case vTablesFromElf64 e of
         Left s -> putStrLn s
         Right vtables -> mapM_ print vtables

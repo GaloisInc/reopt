@@ -6,25 +6,27 @@
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
+
 module Main (main) where
 
-import           Control.Exception
-import           Data.Version (versionBranch)
+import Control.Exception
+import Control.Monad
+import Data.Version (versionBranch)
 import qualified Data.Yaml as Yaml
-import           System.Console.CmdArgs.Explicit
-import           System.Environment (getArgs)
-import           System.Exit (exitFailure)
-import           System.IO
-import           System.IO.Error
-
-import           Reopt
-
-import           Paths_reopt (version)
+import Paths_reopt (version)
+import Reopt
+import Reopt.Utils.Exit
+import System.Console.CmdArgs.Explicit
+import System.Environment (getArgs)
+import System.Exit (exitFailure)
+import System.IO
+import System.IO.Error
 
 reoptVersion :: String
-reoptVersion = "Reopt relinker (reopt-relink) "  ++ versionString ++ "."
-  where [h,l,r] = versionBranch version
-        versionString = show h ++ "." ++ show l ++ "." ++ show r
+reoptVersion = "Reopt relinker (reopt-relink) " ++ versionString ++ "."
+  where
+    [h, l, r] = versionBranch version
+    versionString = show h ++ "." ++ show l ++ "." ++ show r
 
 ------------------------------------------------------------------------
 -- Utilities
@@ -38,64 +40,78 @@ logger = hPutStrLn stderr
 
 -- | Action to perform when running
 data Action
-   = ShowHelp        -- ^ Print out help message
-   | ShowVersion     -- ^ Print out version
-   | Relink          -- ^ Link an existing binary and new code together.
+  = -- | Print out help message
+    ShowHelp
+  | -- | Print out version
+    ShowVersion
+  | -- | Link an existing binary and new code together.
+    Relink
   deriving (Show)
 
 ------------------------------------------------------------------------
 -- Args
 
 -- | Command line arguments.
-data Args
-   = Args { reoptAction  :: !Action
-            -- ^ Action to perform
-          , outputPath   :: !(Maybe FilePath)
-            -- ^ Path to output
-          , binaryPath  :: !(Maybe FilePath)
-            -- ^ Path to input program to optimize/export
-          , objectPath   :: !(Maybe FilePath)
-            -- ^ Path for new object to merge into program
-          , infoPath    :: !(Maybe FilePath)
-            -- ^ Path to file for manual redirections.
-          }
+data Args = Args
+  { -- | Action to perform
+    reoptAction :: !Action,
+    -- | Path to output
+    outputPath :: !(Maybe FilePath),
+    -- | Path to input program to optimize/export
+    binaryPath :: !(Maybe FilePath),
+    -- | Path for new object to merge into program
+    objectPath :: !(Maybe FilePath),
+    -- | Path to file for manual redirections.
+    infoPath :: !(Maybe FilePath)
+  }
 
 -- | Initial arguments if nothing is specified.
 defaultArgs :: Args
-defaultArgs = Args { reoptAction = Relink
-                   , outputPath = Nothing
-                   , binaryPath = Nothing
-                   , objectPath = Nothing
-                   , infoPath = Nothing
-                   }
+defaultArgs =
+  Args
+    { reoptAction = Relink,
+      outputPath = Nothing,
+      binaryPath = Nothing,
+      objectPath = Nothing,
+      infoPath = Nothing
+    }
+
+-- | Flag to set the path to the binary to analyze.
+pathArg :: String -> (Args -> Maybe FilePath -> Args) -> Arg Args
+pathArg nm f =
+  Arg
+    { argValue = \p a -> do
+        when (null p) $ do
+          Left $ "Missing " ++ nm ++ " path."
+        Right (f a (Just p)),
+      argType = nm,
+      argRequire = False
+    }
 
 -- | Arguments
 arguments :: Mode Args
 arguments =
-    (modeEmpty defaultArgs)
-    { modeNames = ["relink"]
-    , modeHelp
-        =  reoptVersion ++ "\n"
-        ++ copyrightNotice ++ "\n\n"
-        ++ "Usage: reopt-relink <output> <binary> <object> <relinkInfo>"
-    , modeArgs = (args, Nothing)
-    , modeGroupFlags = toGroup flags
+  (modeEmpty defaultArgs)
+    { modeNames = ["relink"],
+      modeHelp =
+        reoptVersion ++ "\n"
+          ++ copyrightNotice
+          ++ "\n\n"
+          ++ "Usage: reopt-relink <output> <binary> <object> <relinkInfo>",
+      modeArgs = (args, Nothing),
+      modeGroupFlags = toGroup flags
     }
-  where args = [ pathArg "OUTPUT" (\s f -> s { outputPath = f })
-               , pathArg "BINARY" (\s f -> s { binaryPath = f })
-               , pathArg "OBJECT" (\s f -> s { objectPath = f })
-               , pathArg "INFO"   (\s f -> s { infoPath = f })
-               ]
-        flags = [ flagHelpSimple (\s -> s { reoptAction = ShowHelp })
-                , flagVersion (\s -> s { reoptAction = ShowVersion })
-                ]
-
--- | Flag to set the path to the binary to analyze.
-pathArg :: String -> (Args -> Maybe FilePath -> Args) -> Arg Args
-pathArg nm f = Arg { argValue = \p a -> Right (f a (Just p))
-                   , argType = nm
-                   , argRequire = False
-                   }
+  where
+    args =
+      [ pathArg "OUTPUT" (\s f -> s {outputPath = f}),
+        pathArg "BINARY" (\s f -> s {binaryPath = f}),
+        pathArg "OBJECT" (\s f -> s {objectPath = f}),
+        pathArg "INFO" (\s f -> s {infoPath = f})
+      ]
+    flags =
+      [ flagHelpSimple (\s -> s {reoptAction = ShowHelp}),
+        flagVersion (\s -> s {reoptAction = ShowVersion})
+      ]
 
 getCommandLineArgs :: IO Args
 getCommandLineArgs = do
@@ -123,8 +139,7 @@ performRelink args = do
 
   -- Get original binary
   bs <- checkedReadFile binPath
-  origBinary <- parseElfHeaderInfo64 binPath bs
-
+  origBinary <- handleEitherStringWithExit $ parseElfHeaderInfo64 binPath bs
   newObj <- checkedReadFile objPath
   mrelinkInfo <- Yaml.decodeFileEither thisInfoPath
   relinkInfo <-
@@ -133,7 +148,16 @@ performRelink args = do
         hPutStrLn stderr $ show e
         exitFailure
       Right r -> return r
-  mergeAndWrite outPath origBinary objPath newObj relinkInfo
+
+  let (warnings, mergeRes) = mergeObject origBinary objPath newObj relinkInfo
+  forM_ warnings $ \w -> do
+    hPutStrLn stderr $ "Relinker warning: " ++ w
+  case mergeRes of
+    Left e -> do
+      hPutStrLn stderr e
+      exitFailure
+    Right newBinary -> do
+      writeExecutable outPath newBinary
 
 -- | Main executable
 main' :: IO ()
@@ -149,11 +173,12 @@ main' = do
 
 main :: IO ()
 main = main' `catch` h
-  where h e
-          | isUserError e = do
-            hPutStrLn stderr "User error"
-            hPutStrLn stderr $ ioeGetErrorString e
-          | otherwise = do
-            hPutStrLn stderr "Other error"
-            hPutStrLn stderr $ show e
-            hPutStrLn stderr $ show (ioeGetErrorType e)
+  where
+    h e
+      | isUserError e = do
+        hPutStrLn stderr "User error"
+        hPutStrLn stderr $ ioeGetErrorString e
+      | otherwise = do
+        hPutStrLn stderr "Other error"
+        hPutStrLn stderr $ show e
+        hPutStrLn stderr $ show (ioeGetErrorType e)

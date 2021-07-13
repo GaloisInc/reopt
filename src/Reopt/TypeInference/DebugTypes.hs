@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Reopt.TypeInference.DebugTypes
-  ( resolveDebugFunTypes
+  ( ResolveAddrFn,
+    resolveDebugFunTypes
   ) where
 
 import           Control.Monad.State
@@ -24,17 +25,15 @@ import           Data.Macaw.Discovery
 import qualified Data.Macaw.Dwarf as Dwarf
 import           Data.Macaw.Utils.IncComp
 
-
-import           Reopt.TypeInference.HeaderTypes
 import           Reopt.ArgResolver
 import           Reopt.Events
 import           Reopt.TypeInference.FunTypeMaps
+import           Reopt.TypeInference.HeaderTypes
 
 reoptTypeWarning :: String -> IncCompM (ReoptLogEvent arch) r ()
-reoptTypeWarning msg = incCompLog
-                       $ ReoptLogEvent DebugTypeInference ReoptWarning
-                       $ ReoptLogMessage msg
-
+reoptTypeWarning msg =
+  incCompLog $
+    ReoptGlobalStepWarning DebugTypeInference msg
 
 -- | Get name as an external symbol
 dwarfExternalName :: Dwarf.Subprogram -> Maybe BSC.ByteString
@@ -240,7 +239,7 @@ resolveSubprogramType cu annMap sub entryAddr
             case Dwarf.subOrigin sub of
               Nothing -> Right Nothing
               Just originRef ->
-                case Map.lookup originRef (Dwarf.cuSubprogramMap cu) of
+                case Dwarf.lookupSubprogram originRef cu of
                   Nothing -> Left $ "Could not find origin " ++ show (pretty originRef)
                   Just r -> Right (Just r)
       case emorigin of
@@ -262,22 +261,33 @@ resolveSubprogramType cu annMap sub entryAddr
                   pure m
 
 
+-- | This resolve the address of a function given its name and offset.
+--
+-- This general type is used for eventual support of object files
+-- with function sections, where the Dwarf information does not
+-- contain address information, and so we use symbol addresses.
+--
+-- It returns nothing if an address cannot be resolved.
+type ResolveAddrFn w = BSC.ByteString -> Word64 -> Maybe (MemSegmentOff w)
+
 -- | Resolve type information from subroutine.
-resolveSubprogram :: Dwarf.CompileUnit
-                  -- ^ Compile unit for this sub program
-                  -> FunTypeMaps (ArchAddrWidth arch)
-                  -- ^ Annotations from source file
-                  -> Dwarf.Subprogram
-                  -- ^ Elf file for header information
-                  -> IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
-resolveSubprogram cu annMap sub = do
+resolveSubprogram ::
+  ResolveAddrFn (ArchAddrWidth arch) ->
+  -- | Compile unit for this sub program
+  Dwarf.CompileUnit ->
+  -- | Annotations from source file
+  FunTypeMaps (ArchAddrWidth arch) ->
+  -- | Program to resolve
+  Dwarf.Subprogram ->
+  IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
+resolveSubprogram resolveFn cu annMap sub = do
   -- Get entry address in terms of memory.
   entryAddr <-
     case dwarfSubEntry sub of
       Nothing -> pure Nothing
       Just entry -> do
         let dwarfName = Dwarf.subName sub
-        let r = dwarfAddrResolve annMap (Dwarf.nameVal dwarfName) entry
+        let r = resolveFn (Dwarf.nameVal dwarfName) entry
         when (isNothing r) $ do
           let debugName | dwarfName == "" = "Unnamed symbol"
                         | otherwise = BSC.unpack (Dwarf.nameVal dwarfName)
@@ -295,35 +305,38 @@ resolveSubprogram cu annMap sub = do
       pure $ annMap' { noreturnMap = Map.insertWith fn entry val (noreturnMap annMap') }
 
 -- | Add all compile units in plugin
-resolveCompileUnits :: FunTypeMaps (ArchAddrWidth arch)
-                    -- ^ Map from function names to type info.
-                    -> Maybe (Either String Dwarf.CUContext)
-                    -- ^ Elf file for header information
-                    -> IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
-resolveCompileUnits annMap Nothing = do
+resolveCompileUnits ::
+  ResolveAddrFn (ArchAddrWidth arch) ->
+  -- | Map from function names to type info.
+  FunTypeMaps (ArchAddrWidth arch) ->
+  -- context information
+  Maybe (Either String Dwarf.CUContext) ->
+  IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
+resolveCompileUnits _resolveFn annMap Nothing = do
   pure annMap
-resolveCompileUnits annMap (Just (Left e)) = do
+resolveCompileUnits _resolveFn annMap (Just (Left e)) = do
   reoptTypeWarning e
   pure annMap
-resolveCompileUnits annMap (Just (Right ctx)) = do
+resolveCompileUnits resolveFn annMap (Just (Right ctx)) = do
   let (mcr, warnings) = Dwarf.getCompileUnit ctx
   mapM_ reoptTypeWarning (reverse warnings)
   case mcr of
     Left msg -> do
       reoptTypeWarning msg
-      resolveCompileUnits annMap (Dwarf.nextCUContext ctx)
+      resolveCompileUnits resolveFn annMap (Dwarf.nextCUContext ctx)
     Right cu -> do
-      annMap' <- foldlM (resolveSubprogram cu) annMap (Dwarf.cuSubprograms cu)
-      resolveCompileUnits annMap' (Dwarf.nextCUContext ctx)
+      annMap' <- foldlM (resolveSubprogram resolveFn cu) annMap (Dwarf.cuSubprograms cu)
+      resolveCompileUnits resolveFn annMap' (Dwarf.nextCUContext ctx)
 
 -- | Populate function type information using debug information.
-resolveDebugFunTypes :: forall arch r
-                     .  FunTypeMaps (ArchAddrWidth arch)
-                     -- ^ Annotations from source file
-                     -> Elf.ElfHeaderInfo (ArchAddrWidth arch)
-                     -- ^ Elf file for header information
-                     -> IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
-resolveDebugFunTypes annMap elfInfo = do
+resolveDebugFunTypes ::
+  forall arch r .
+  ResolveAddrFn (ArchAddrWidth arch) ->
+  FunTypeMaps (ArchAddrWidth arch) ->
+  -- | Elf file for header information
+  Elf.ElfHeaderInfo (ArchAddrWidth arch) ->
+  IncCompM (ReoptLogEvent arch) r (FunTypeMaps (ArchAddrWidth arch))
+resolveDebugFunTypes resolveFn annMap elfInfo = do
   let hdr = Elf.header elfInfo
   let secDataMap :: Map BSC.ByteString [( Elf.FileRange  (Elf.ElfWordType (ArchAddrWidth arch))
                                        , Elf.ElfSection (Elf.ElfWordType (ArchAddrWidth arch))
@@ -337,7 +350,7 @@ resolveDebugFunTypes annMap elfInfo = do
       -- No debug information
       pure annMap
     _:_ -> do
-      incCompLog (ReoptStepStarted DebugTypeInference)
+      incCompLog (ReoptGlobalStepStarted DebugTypeInference)
       let end =
             case Elf.headerData hdr of
               Elf.ELFDATA2LSB -> Dwarf.LittleEndian
@@ -348,6 +361,6 @@ resolveDebugFunTypes annMap elfInfo = do
           (_, s):r -> do
             when (not (null r)) $ reoptTypeWarning $ printf "Multiple %s sections in Elf file." (BSC.unpack nm)
             pure $! Elf.elfSectionData s
-      r <- resolveCompileUnits annMap (Dwarf.firstCUContext end sections)
-      incCompLog (ReoptStepFinished DebugTypeInference ())
+      r <- resolveCompileUnits resolveFn annMap (Dwarf.firstCUContext end sections)
+      incCompLog (ReoptGlobalStepFinished DebugTypeInference ())
       pure r

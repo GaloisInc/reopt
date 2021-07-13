@@ -5,6 +5,8 @@ package reopt-tools
 package reopt-vcg-ann
   ghc-options: -Werror
 package macaw-base
-  ghc-options: -Werror
+  ghc-options: -Wall -Werror
 package elf-edit
-  ghc-options: -Werror
+  ghc-options: -Wall -Werror
+package galois-dwarf
+  ghc-options: -Wall -Werror

@@ -71,13 +71,22 @@ jobs:
       run: cabal install -j exe:reopt
     - name: Unit Tests
       run: cabal test -j reopt-tests
-    - name: CentOS7 Dev Bin Tests
-      run: ./reopt_explore_tests.sh
+    - name: CentOS7 reopt executable tests
+      run: |
+        ./scripts/test_reopt.sh
+        ./scripts/test_reopt.sh getopt
+    - name: CentOS7 reopt-explore executable tests
+      run: |
+        ./scripts/test_reopt_explore.sh small
+        ./scripts/test_reopt_explore.sh all-debug-info
+    # Disabled temporarily so we can update reopt
+    #- name: CentOS7 reopt-explore executable tests (long)
+    #  run: ./scripts/test_reopt_explore.sh all
     - name: reopt-explore CentOS7 Summary Artifact
       uses: actions/upload-artifact@v2
       with:
         name: centos7-bin-summary.txt
-        path: centos7-dev/centos7-bin-summary.txt
+        path: deps/reopt-benchmark-binaries/centos7-dev/centos7-bin-summary.txt
     - name: Create archive
       run: |
         mkdir -p dist/reopt/bin
@@ -147,6 +156,34 @@ jobs:
       with:
         name: reopt-vcg
         path: dist/reopt-vcg.tgz
+  integration-tests:
+    needs: [build, reopt-vcg]
+    runs-on: ubuntu-20.04
+    steps:
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y gdb llvm-8
+    - name: Checkout
+      uses: actions/checkout@v2
+    - name: Download reopt artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt
+        path: dist
+    - name: Download reopt-vcg artifact
+      uses: actions/download-artifact@v2
+      with:
+        name: reopt-vcg
+        path: dist
+    - name: Unpack and add executables to PATH
+      run: |
+        tar xvfz reopt.tgz
+        tar xvfz reopt-vcg.tgz
+        echo "$PWD/reopt/bin" >> $GITHUB_PATH
+        echo "$PWD/reopt-vcg/bin" >> $GITHUB_PATH
+      working-directory: dist
+    - name: Test nweb
+      run: ./integration_test.sh
+      working-directory: vcg-test-programs/nweb
   upload:
     needs: [build, vscode-extension, reopt-vcg]
     runs-on: ubuntu-20.04

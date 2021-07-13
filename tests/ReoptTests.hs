@@ -2,22 +2,22 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-module ReoptTests (
-  reoptTests
-  ) where
 
+module ReoptTests
+  ( reoptTests,
+  )
+where
 
-import           Control.Exception
 import qualified Data.ByteString.Builder as Builder
-import           Data.Macaw.Discovery
+import Data.Macaw.Discovery
 import qualified Data.Macaw.Memory.ElfLoader as MM
-import           Prettyprinter
-import           System.FilePath.Posix
-import           System.IO
+import Prettyprinter
+import Reopt
+import Reopt.Utils.Exit
+import System.FilePath.Posix
+import System.IO
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
-
-import           Reopt
 
 reoptTests :: [FilePath] -> T.TestTree
 reoptTests = T.testGroup "reopt" . map mkTest
@@ -31,25 +31,32 @@ logger _msg = pure () -- error $ "Test failed: " ++ msg
 mkTest :: FilePath -> T.TestTree
 mkTest fp = T.testCase fp $ do
   let blocks_path = replaceFileName fp (takeBaseName fp ++ ".blocks")
-  let fns_path    = replaceFileName fp (takeBaseName fp ++ ".fns")
-  let llvmPath   = replaceFileName fp (takeBaseName fp ++ ".ll")
+  let fns_path = replaceFileName fp (takeBaseName fp ++ ".fns")
+  let llvmPath = replaceFileName fp (takeBaseName fp ++ ".ll")
 
   let loadOpts = MM.defaultLoadOptions
-  let discOpts = DiscoveryOptions { exploreFunctionSymbols = True
-                                  , exploreCodeAddrInMem   = False
-                                  , logAtAnalyzeFunction   = False
-                                  , logAtAnalyzeBlock      = False
-                                  }
+  let reoptOpts = defaultReoptOptions
+                  { roDiscoveryOptions =
+                    DiscoveryOptions
+                    { exploreFunctionSymbols = True,
+                      exploreCodeAddrInMem = False,
+                      logAtAnalyzeFunction = False,
+                      logAtAnalyzeBlock = False
+                    }
+                  }
   let hdrAnn = emptyAnnDeclarations
-  let reoptOpts = ReoptOptions { roIncluded = [], roExcluded = [] }
-  (_, os, discState, recMod, _) <-
-    recoverX86Elf logger fp loadOpts discOpts reoptOpts hdrAnn "reopt"
+  contents <- checkedReadFile fp
+
+  hdrInfo <- either fail pure $ parseElfHeaderInfo64 fp contents
+  mr <-
+    runReoptM logger $ do
+      recoverX86Elf loadOpts reoptOpts hdrAnn "reopt" hdrInfo
+  (os, discState, recMod, _) <- either (fail . show) pure mr
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
 
-  let archOps = x86LLVMArchOps (show os)
-  bracket (openBinaryFile llvmPath WriteMode) hClose $ \h -> do
-    let (llvmContents, _ann) =
-          llvmAssembly archOps defaultLLVMGenOptions recMod latestLLVMConfig
+  withBinaryFile llvmPath WriteMode $ \h -> do
+    let (llvmContents, _ann, _decl) =
+          renderLLVMBitcode defaultLLVMGenOptions latestLLVMConfig os recMod
     Builder.hPutBuilder h llvmContents

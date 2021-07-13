@@ -10,6 +10,7 @@ to JSON.
 module Reopt.VCG.Annotations
   ( ModuleAnnotations(..)
   , FunctionAnn(..)
+  , ExternalFunctionAnn(..)
   , BlockAnn(..)
   , MCAddr
   , ReachableBlockAnn(..)
@@ -369,6 +370,7 @@ data ReachableBlockAnn
     , blockAllocas :: !(Map LocalIdent AllocaAnn)
       -- | Annotates events within the block.
     , mcMemoryEvents :: ![MCMemoryEvent]
+    , isTailCall     :: !Bool
     }
   deriving (Show, Generic)
 
@@ -409,6 +411,7 @@ parseJSONBlockAnn llvmMap o = do
       preconditions <- parseArray "preconditions" (parseExpr llvmMap) o
       allocas <- o .:! "allocas"    .!= []
       mcEvents  <- o .:! "mem_events"     .!= []
+      isTail    <- o .: "is_tail_call"
       let ann = ReachableBlockAnn { blockAddr  = addr
                                   , blockCodeSize = sz
                                   , blockX87Top    = x87Top
@@ -417,6 +420,7 @@ parseJSONBlockAnn llvmMap o = do
                                   , blockAllocas =
                                       Map.fromList [ (allocaIdent a, a) | a <- allocas ]
                                   , mcMemoryEvents = mcEvents
+                                  , isTailCall     = isTail
                                   }
       pure $! ReachableBlock ann
 
@@ -432,6 +436,7 @@ blockAnnToJSON lbl (ReachableBlock blk) =
     $ [ "label"      .= lbl
       , "addr"       .= blockAddr blk
       , "size"       .= blockCodeSize blk
+      , "is_tail_call" .= isTailCall blk
       ]
     <> optVal     "x87_top"       (blockX87Top blk) 7
     <> optVal     "df_flag"       (blockDFFlag blk) False
@@ -446,6 +451,7 @@ blockAnnToJSON lbl (ReachableBlock blk) =
 data FunctionAnn = FunctionAnn
   { llvmFunName :: !String
     -- ^ LLVM function name
+  , faStartAddr :: !MCAddr
   , blocks :: !(V.Vector Aeson.Object)
     -- ^ Maps LLVM labels to an JSON object describing information associated with
     -- that block.
@@ -462,8 +468,10 @@ parseFunctionAnn :: Aeson.Value
                  -> Aeson.Parser FunctionAnn
 parseFunctionAnn (Aeson.Object v) = do
   fnm <- v .: "llvm_name"
+  fsa <- v .: "start_addr"
   bl <- Aeson.withArray "blocks" (traverse parseJSONBlockAnnObj . V.toList) =<< v .: "blocks"
   pure $! FunctionAnn { llvmFunName = fnm
+                      , faStartAddr = fsa
                       , blocks = V.fromList bl
                       }
 parseFunctionAnn _ =
@@ -472,21 +480,60 @@ parseFunctionAnn _ =
 instance Aeson.ToJSON FunctionAnn where
   toJSON fun =
     object [ "llvm_name"  .= llvmFunName fun
+           , "start_addr" .= faStartAddr fun
            , "blocks"     .= Aeson.Array (Aeson.Object <$> blocks fun)
            ]
+
+------------------------------------------------------------------------
+-- ExternalFunctionAnn
+
+-- | Annotations for a function.
+data ExternalFunctionAnn = ExternalFunctionAnn
+  { efaLlvmFunName :: !String
+    -- ^ LLVM function name
+  , efaStartAddr :: !MCAddr
+    -- ^ Maps LLVM labels to an JSON object describing information associated with
+    -- that block.
+  , efaIsNoReturn :: !Bool
+  } deriving (Show)
+
+parseExternalFunctionAnn :: Aeson.Value
+                         -> Aeson.Parser ExternalFunctionAnn
+parseExternalFunctionAnn (Aeson.Object v) = do
+  fnm <- v .: "llvm_name"
+  addr <- v .: "start_addr"
+  nr   <- v .: "is_no_return"
+  pure $! ExternalFunctionAnn { efaLlvmFunName = fnm
+                              , efaStartAddr   = addr
+                              , efaIsNoReturn  = nr
+                              }
+
+parseExternalFunctionAnn _ =
+  fail "External Function annotation expected a JSON object."
+
+instance Aeson.ToJSON ExternalFunctionAnn where
+  toJSON fun =
+    object [ "llvm_name"    .= efaLlvmFunName fun
+           , "start_addr"   .= efaStartAddr fun
+           , "is_no_return" .= efaIsNoReturn fun
+           ]
+
 ------------------------------------------------------------------------
 -- Module annotations
 
 data ModuleAnnotations = ModuleAnnotations
-  { llvmFilePath :: FilePath
-    -- ^ Path to LLVM .bc or .ll file path
-  , binFilePath    ::  String
-    -- ^ Binary file path that will be analyzed by Macaw.
-  , pageSize :: !Natural
-    -- ^ The number of bytes in a page (must be a power of 2)
-  , stackGuardPageCount :: !Natural
-    -- ^ The number of unallocated pages beneath the stack.
-  , functions :: [FunctionAnn]
+  { -- | Path to LLVM .bc or .ll file path
+    llvmFilePath :: FilePath,
+    -- | Binary file path that will be analyzed by Macaw.
+    binFilePath    ::  String,
+    -- | The number of bytes in a page (must be a power of 2)
+    pageSize :: !Natural,
+    -- | The number of unallocated pages beneath the stack.
+    stackGuardPageCount :: !Natural,
+    -- | Information about functions successfully lifted to LLVM.
+    functions :: [FunctionAnn],
+    -- | Information about functions referenced, but not succcessfully lifted.
+    extFunctions :: [ExternalFunctionAnn]
   }
   deriving (Show, Generic)
 
@@ -502,11 +549,13 @@ parseAnnotations (Aeson.Object o) = do
   when (guardCount == 0) $ do
     fail $ "There must be at least one guard page."
   funs <- parseArray "functions" parseFunctionAnn o
+  extfuns <- parseArray "extfunctions" parseExternalFunctionAnn o
   pure $! ModuleAnnotations { llvmFilePath = llvmPath
                             , binFilePath  = binPath
                             , pageSize     = psize
                             , stackGuardPageCount = guardCount
                             , functions    = funs
+                            , extFunctions = extfuns
                             }
 parseAnnotations _ =
   fail $ "Expected an object for the meta config."
@@ -518,4 +567,5 @@ instance Aeson.ToJSON ModuleAnnotations where
             , "page_size"         .= pageSize ann
             , "stack_guard_pages" .= stackGuardPageCount ann
             , "functions"         .= functions ann
+            , "extfunctions"      .= extFunctions ann
             ]
