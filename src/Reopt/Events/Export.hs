@@ -3,6 +3,7 @@ Operations for exporting relevant parts of events to JSON.
 -}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
+
 module Reopt.Events.Export
   ( exportEvent,
     exportFatalError
@@ -21,10 +22,10 @@ import System.IO
 type ExportFunId = Word64
 
 data ExportEvent
-  -- | @CFGError f b idx msg@ indicates an error in a function at the
-  -- given function identifier @f@, block identifier @b@, instruction index @idx@
-  -- and message @msg@.
-  = CFGError !ExportFunId !Word64 !Int !Text
+  -- | @CFGError f b sz idx msg@ indicates an error in a function at the given
+  -- function identifier @f@, block identifier @b@, block size @sz@, instruction
+  -- index @idx@ and message @msg@.
+  = CFGError !ExportFunId !Word64 !Int !Int !Text
   deriving (Generic)
 
 instance Aeson.ToJSON ExportEvent where
@@ -54,8 +55,9 @@ exportEvent h evt =
             let f = funIdAddr fId
             let b = discErrorBlockAddr e
             let insn = discErrorBlockInsnIndex e
+            let sz = discErrorBlockSize e
             let msg = discErrorMessage e
-            emitEvent h $ CFGError f b insn msg
+            emitEvent h $ CFGError f b sz insn msg
         InvariantInference -> do
           pure ()
         AnnotationGeneration -> do
@@ -64,8 +66,9 @@ exportEvent h evt =
           let f = funIdAddr fId
           let b = segoffWord64 (recoverErrorBlock fsErr)
           let insn = recoverErrorInsnIndex fsErr
+          let sz = recoverErrorBlockSize fsErr
           let msg = recoverErrorMessage fsErr
-          emitEvent h $ CFGError f b insn msg
+          emitEvent h $ CFGError f b sz insn msg
     ReoptFunStepLog{} -> pure ()
     ReoptFunStepAllFinished{} -> pure ()
 

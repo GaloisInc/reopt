@@ -306,6 +306,7 @@ data RecoverState arch ids =
      , rsInsnIndex :: !Int
      , rsBlockOff :: !(ArchAddrWord arch)
      -- ^ The offset in the block of the current code.
+     , rsBlockSize :: !Int
      , _rsCurStmts  :: !(Seq (FnStmt arch))
        -- ^ Statements added to block so far
        -- | Maps assignments processed so far to their values
@@ -362,10 +363,12 @@ addFnStmt stmt = rsCurStmts %= (Seq.|> stmt)
 throwErrorAt :: ReoptErrorTag -> String -> Recover ids a
 throwErrorAt tag msg = do
   sa <- gets rsStartAddr
+  sz <- gets rsBlockSize
   idx <- gets rsInsnIndex
   throwError $ RecoverErrorAt {
     recoverErrorTag = tag,
-    recoverErrorBlock  = sa,
+    recoverErrorBlock = sa,
+    recoverErrorBlockSize = sz,
     recoverErrorInsnIndex = idx,
     recoverErrorMessage = Text.pack msg
   }
@@ -1371,6 +1374,7 @@ evalRecover b inv preds phiVars locMap = do
               , rsPhiLocMap = locMap
               , rsInsnIndex = 0
               , rsBlockOff = 0
+              , rsBlockSize = blockSize b
               , _rsCurStmts = Seq.empty
               , _rsAssignMap = MapF.empty
               , rsWriteMap = Map.empty
