@@ -186,6 +186,36 @@ x86ArchFnToLLVM f = do
                            SSE_Double -> L.Double
      convop L.SiToFp llvmX (L.PrimType (L.FloatType llvmFloatType))
 
+    SSE_UnaryOp unop tp x y -> Just $ do
+      genOpts <- asks $ funLLVMGenOptions
+      llvmX <- mkLLVMValue x
+      llvmY <- mkLLVMValue y
+      if mcExceptionIsUB genOpts then do
+        let (llvmFloatType, fXX) = case tp of
+                SSE_Single -> (L.PrimType $ L.FloatType L.Float, "f32")
+                SSE_Double -> (L.PrimType $ L.FloatType L.Double, "f64")
+        case unop of
+          SSE_Add -> arithop L.FAdd llvmX (L.typedValue llvmY)
+          SSE_Sub -> arithop L.FSub llvmX (L.typedValue llvmY)
+          SSE_Mul -> arithop L.FMul llvmX (L.typedValue llvmY)
+          SSE_Div -> arithop L.FDiv llvmX (L.typedValue llvmY)
+          SSE_Min ->
+            let fmin = intrinsic ("llvm.minnum."++fXX) llvmFloatType [llvmFloatType, llvmFloatType]
+             in call fmin [llvmX, llvmY]
+          SSE_Max ->
+            let fmax = intrinsic ("llvm.maxnum."++fXX) llvmFloatType [llvmFloatType, llvmFloatType]
+             in call fmax [llvmX, llvmY]
+
+      else do
+        let (llvmFloatType, opSuffix) = case tp of
+                SSE_Single -> (L.PrimType $ L.FloatType L.Float, "s")
+                SSE_Double -> (L.PrimType $ L.FloatType L.Double, "d")
+        let mnemonic = (ppMnem $ sseOpName unop) ++ "s" ++ opSuffix
+        callAsm sideEffect
+                llvmFloatType
+               (mnemonic ++ " $2,$1")
+               "=x,x,x,~{dirflag},~{fpsr},~{flags}"
+               [llvmX, llvmY]
     _ -> Nothing
 
 --   _ -> do

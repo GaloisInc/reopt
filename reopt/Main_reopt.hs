@@ -178,7 +178,9 @@ data Args = Args
     -- | Additional locations to search for dynamic dependencies.
     dynDepPath :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
-    dynDepDebugPath :: ![FilePath]
+    dynDepDebugPath :: ![FilePath],
+    -- | Perform recovery regardless of other options.
+    performRecovery :: Bool
   }
 
 -- | Action to perform when running
@@ -225,7 +227,8 @@ defaultArgs =
       relinkerInfoExportPath = Nothing,
       occamConfigPath = Nothing,
       dynDepPath = [],
-      dynDepDebugPath = []
+      dynDepDebugPath = [],
+      performRecovery = False
     }
 
 ------------------------------------------------------------------------
@@ -269,6 +272,12 @@ cfgFlag = flagNone ["c", "cfg"] upd help
   where
     upd = reoptAction .~ ShowCFG
     help = "Show recovered control-flow graphs."
+
+performRecoveryFlag :: Flag Args
+performRecoveryFlag = flagNone ["recover"] upd help
+  where
+    upd s = s {performRecovery = True}
+    help = "Perform recovery regardless of other options."
 
 showHomeDirFlag :: Flag Args
 showHomeDirFlag = flagNone ["home-dir"] upd help
@@ -522,6 +531,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         flagHelpSimple (reoptAction .~ ShowHelp),
         flagVersion (reoptAction .~ ShowVersion),
         debugFlag,
+        performRecoveryFlag,
         -- Output for final binary
         outputFlag,
         -- Output events
@@ -684,6 +694,7 @@ shouldRecover args =
     || isJust (invariantsExportPath args)
     || isJust (relinkerInfoExportPath args)
     || shouldGenerateLLVM args
+    || performRecovery args
 
 collectInvariants ::
   IORef [Aeson.Encoding] ->
