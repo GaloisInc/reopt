@@ -163,6 +163,7 @@ instance Semigroup DiscoveryErrorTag where
 data DiscoveryError = DiscoveryError
   { discErrorTag :: !DiscoveryErrorTag,
     discErrorBlockAddr :: !Word64,
+    discErrorBlockSize :: !Int,
     -- | Instruction index.
     discErrorBlockInsnIndex :: !Int,
     discErrorMessage :: !Text
@@ -174,6 +175,7 @@ data DiscoveryError = DiscoveryError
 data RecoverError w = RecoverErrorAt
   { recoverErrorTag :: !ReoptErrorTag,
     recoverErrorBlock :: !(MemSegmentOff w),
+    recoverErrorBlockSize :: !Int,
     recoverErrorInsnIndex :: !Int,
     recoverErrorMessage :: !Text
   }
