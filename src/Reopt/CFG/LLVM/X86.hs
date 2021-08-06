@@ -50,6 +50,14 @@ mkPair x y = do
   s1 <- insertValue s0 x 0
   insertValue s1 y 1
 
+mkFlags :: [Bool] -> BBLLVM arch (L.Typed L.Value)
+mkFlags flags = do
+  let tp = L.Struct $ map (const (L.iT 1)) flags
+  let s0 = L.Typed tp L.ValUndef
+  let insertFlag s (f, idx) = insertValue s (L.Typed (L.iT 1) $ L.ValBool f) idx
+  foldM insertFlag s0 (zip flags [0..])
+
+
 llvmDivNumerator :: Natural -- ^ Number of bits in w.
                  -> FnValue X86_64 (BVType w)
                  -> FnValue X86_64 (BVType w)
@@ -66,7 +74,7 @@ llvmDivNumerator bitCount num1 num2 = do
 
 x86ArchFnToLLVM :: ArchFn X86_64 (FnValue X86_64) tp
               -> Maybe (BBLLVM X86_64 (L.Typed L.Value))
-x86ArchFnToLLVM f = do
+x86ArchFnToLLVM f =
   case f of
     EvenParity v -> Just $ do
       evenParity =<< mkLLVMValue v
@@ -216,6 +224,51 @@ x86ArchFnToLLVM f = do
                (mnemonic ++ " $2,$1")
                "=x,x,x,~{dirflag},~{fpsr},~{flags}"
                [llvmX, llvmY]
+
+    SSE_UCOMIS tp x y -> Just $ do
+      llvmX <- mkLLVMValue x
+      llvmY <- mkLLVMValue y
+      genOpts <- asks $ funLLVMGenOptions
+      if mcExceptionIsUB genOpts then do
+        -- According to intex x86 instruction set reference, UCOMISS/UCOMISD use
+        -- the following values for flags ZF,PF,CF based on the result: unordered
+        -- (111), greater than (000) less than (011), and equal (100)
+        isLt <- fcmpop L.Folt llvmX (L.typedValue llvmY)
+        ltRes <- mkFlags [False,False,True]
+        isGt <- fcmpop L.Folt llvmY (L.typedValue llvmX)
+        gtRes <- mkFlags [False,False,False]
+        isEq <- fcmpop L.Foeq llvmX (L.typedValue llvmY)
+        eqRes <- mkFlags [True,False,False]
+        unordRes <- mkFlags [True,True,True]
+        let resTp = L.Struct [(L.iT 1),(L.iT 1),(L.iT 1)]
+        selectVal resTp [(isLt,ltRes),(isGt,gtRes),(isEq,eqRes)] unordRes
+      else do
+        res <- case tp of
+                 SSE_Single ->
+                   callAsm noSideEffect
+                           (L.iT 16)
+                           "ucomiss $1,$2\0A\09pushfw\0A\09popw $0\0A\09"
+                           "=r|r,x|x,x|M,~{dirflag},~{fpsr},~{flags}"
+                           [llvmX, llvmY]
+                 SSE_Double ->
+                   callAsm noSideEffect
+                           (L.iT 16)
+                           "ucomisd $1,$2\0A\09pushfw\0A\09popw $0\0A\09"
+                           "=r|r,x|x,x|N,~{dirflag},~{fpsr},~{flags}"
+                           [llvmX, llvmY]
+        -- Eflags are returned in a 16bit integer so we
+        -- extract flags and return in struct.
+        cf <- band res (L.ValInteger 1) -- 0b1
+        cfSet <- icmpop L.Ine cf (L.ValInteger 0)
+        pf <- band res (L.ValInteger 4) -- 0b100
+        pfSet <- icmpop L.Ine pf (L.ValInteger 0)
+        zf <- band res (L.ValInteger 64) -- 0b1000000
+        zfSet <- icmpop L.Ine zf (L.ValInteger 0)
+        let retTp = L.Struct [(L.iT 1),(L.iT 1),(L.iT 1)]
+        let s0 = L.Typed retTp L.ValUndef
+        s1 <- insertValue s0 zfSet 0
+        s2 <- insertValue s1 pfSet 1
+        insertValue s2 cfSet 2
     _ -> Nothing
 
 --   _ -> do

@@ -38,12 +38,14 @@ module Reopt.CFG.LLVM
   , setAssignIdValue
   , padUndef
   , arithop
+  , selectVal
   , convop
   , bitcast
   , band
   , bor
   , shl
   , icmpop
+  , fcmpop
   , llvmAsPtr
   , extractValue
   , insertValue
@@ -473,6 +475,20 @@ comment msg = effect (L.Comment msg)
 ret :: L.Typed L.Value -> BBLLVM arch ()
 ret = effect . L.Ret
 
+-- | Conditional expression, i.e. a series of if-then pairs
+-- and a final else/default value if no test is true.
+selectVal ::
+  -- | Overall result type.
+  L.Type ->
+  -- | Test expressions and associated results.
+  [(L.Typed L.Value, L.Typed L.Value)] ->
+  -- | If no test expressions evaluate to true, return this value.
+  L.Typed L.Value ->
+  BBLLVM arch (L.Typed L.Value)
+selectVal resTy ifThens elseVal = do
+  L.Typed resTy <$> foldM addClause (L.typedValue elseVal) ifThens
+  where addClause acc (test,res) = evalInstr $ L.Select test res acc
+
 unimplementedInstr' :: L.Type -> String -> BBLLVM arch (L.Typed L.Value)
 unimplementedInstr' typ reason = do
   comment ("UNIMPLEMENTED: " ++ reason)
@@ -556,10 +572,16 @@ bitop f val s = L.Typed (L.typedType val) <$> evalInstr (L.Bit f val s)
 convop :: L.ConvOp -> L.Typed L.Value -> L.Type -> BBLLVM arch (L.Typed L.Value)
 convop f val tp = L.Typed tp <$> evalInstr (L.Conv f val tp)
 
--- | Compare two LLVM values using the given operator.
+-- | Compare two LLVM integer values using the given operator.
 icmpop :: L.ICmpOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 icmpop f val s = do
   L.Typed (L.iT 1) <$> evalInstr (L.ICmp f val s)
+
+-- | Compare two LLVM float values using the given operator.
+fcmpop :: L.FCmpOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
+fcmpop f val s = do
+  L.Typed (L.iT 1) <$> evalInstr (L.FCmp f val s)
+
 
 -- | Extract a value from a struct
 extractValue :: L.Typed L.Value -> Int32 -> BBLLVM arch (L.Typed L.Value)
