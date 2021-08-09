@@ -222,7 +222,7 @@ x86ArchFnToLLVM f =
         callAsm sideEffect
                 llvmFloatType
                (mnemonic ++ " $2,$1")
-               "=x,x,x,~{dirflag},~{fpsr},~{flags}"
+               "=x|x,x|x,x|m,~{dirflag},~{fpsr},~{flags}"
                [llvmX, llvmY]
 
     SSE_UCOMIS tp x y -> Just $ do
