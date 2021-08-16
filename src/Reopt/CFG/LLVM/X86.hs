@@ -269,6 +269,51 @@ x86ArchFnToLLVM f =
         s1 <- insertValue s0 zfSet 0
         s2 <- insertValue s1 pfSet 1
         insertValue s2 cfSet 2
+    MemCmp bytesPerVal valCnt ptr1 ptr2 dir ->
+      case (cmpsxFromSize bytesPerVal, dir) of
+        (Just cmpsx, FnConstantBool dfVal) -> Just $ do
+          llvmCnt <- mkLLVMValue valCnt
+          llvmPtr1 <- mkLLVMValue ptr1
+          llvmPtr2 <- mkLLVMValue ptr2
+          -- If the MemCmp `dir` flag is set to true, enable decrementing order
+          -- for buffer pointers by setting the machine's DF.
+          when dfVal $ callAsm_ noSideEffect "std" "~{flags},~{dirflag},~{fpsr},~{flags}" []
+          llvmAsmRes <-
+            callAsm sideEffect
+                    (L.Struct [L.iT 64, L.iT 16])
+                    ("mov $2,%rcx\0A\09"++ -- Load count into rcx register for cmpsx op
+                     "mov $3,%rdi\0A\09"++ -- Load in ptr1
+                     "mov $4,%rsi\0A\09"++ -- Load in ptr2
+                     "repz "++cmpsx++"\0A\09"++ -- repeat cmpsx until zero (i.e., non-match)
+                     "mov %rcx,$0\0A\09"++ -- move unvisited mem loc count into ret val 1
+                     "pushfw\0A\09"++ -- push flags onto the stack (we want ZF, which was set by cmpsx)
+                     "popw $1\0A\09") -- pop flags into ret val 2
+                    "=r,=r,r,r,r,~{flags},~{rcx},~{rdi},~{rsi},~{dirflag},~{fpsr},~{flags}"
+                    [llvmCnt, llvmPtr1, llvmPtr2]
+          -- Restore the DF in needed.
+          when dfVal $ callAsm_ noSideEffect "cld" "~{flags},~{dirflag},~{fpsr},~{flags}" []
+          llvmUnvisitedCnt <- extractValue llvmAsmRes 0
+          llvmFlags <- extractValue llvmAsmRes 1
+          llvmZF <- band llvmFlags (L.ValInteger 64) -- 0b1000000
+          llvmZFSet <- icmpop L.Ine llvmZF (L.ValInteger 0)
+          -- sameCnt = (cnt - unvisitedCnt) - (zf ? 0 : 1);
+          -- i.e., the number that are the same is the number visited minus 1 _if_ the ZF is clear
+          -- and thus the last cmpsx indicated the final values were unequal.
+          llvmVisitedCnt <- arithop (L.Sub False False) llvmCnt (L.typedValue llvmUnvisitedCnt)
+          llvmLastValueSame <-
+            selectVal (L.iT 64)
+                      [(llvmZFSet, (L.Typed (L.iT 64) $ L.ValInteger 0))]
+                      (L.Typed (L.iT 64) $ L.ValInteger 1)
+          llvmSameCnt <- arithop (L.Sub False False) llvmVisitedCnt (L.typedValue llvmLastValueSame)
+          llvmCntNonZero <- icmpop L.Ine llvmCnt (L.ValInteger 0)
+          -- If there was a non-zero count we use the calculated count of the
+          -- number of same values, but if the count was zero it's a degenerate
+          -- case (you get an underflow) for how we calculated that number and
+          -- so we need to check for that.
+          selectVal (L.iT 64)
+            [(llvmCntNonZero, llvmSameCnt)]
+            (L.Typed (L.iT 64) $ L.ValInteger 0)
+        _ -> Nothing -- no support for val size outside of [1,2,4,8] bytes or non-constant direction flag values
     _ -> Nothing
 
 --   _ -> do

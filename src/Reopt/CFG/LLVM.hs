@@ -46,6 +46,7 @@ module Reopt.CFG.LLVM
   , shl
   , icmpop
   , fcmpop
+  , cmpsxFromSize
   , llvmAsPtr
   , extractValue
   , insertValue
@@ -581,6 +582,16 @@ icmpop f val s = do
 fcmpop :: L.FCmpOp -> L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value)
 fcmpop f val s = do
   L.Typed (L.iT 1) <$> evalInstr (L.FCmp f val s)
+
+
+-- | Given a byte size, return the appropriate mnemonic, i.e.,
+-- one of `cmpsb` (1), `cmpsw` (2), `cmpsd` (4), or `cmpsq` (8).
+cmpsxFromSize :: Integer -> Maybe String
+cmpsxFromSize 1 = Just "cmpsb"
+cmpsxFromSize 2 = Just "cmpsw"
+cmpsxFromSize 4 = Just "cmpsd"
+cmpsxFromSize 8 = Just "cmpsq"
+cmpsxFromSize _ = Nothing
 
 
 -- | Extract a value from a struct
