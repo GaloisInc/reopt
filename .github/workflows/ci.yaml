@@ -214,9 +214,9 @@ jobs:
         path: containers/eval
     - name: Build docker image
       run: |
-        docker build -t galoisbinaryanalysis/reopt:head containers/eval
+        docker build -t galoisbinaryanalysis/reopt:head -t galoisbinaryanalysis/reopt:latest containers/eval
     - name: Push to Docker hub
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       run: |
         echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
-        docker push galoisbinaryanalysis/reopt:latest
+        docker push galoisbinaryanalysis/reopt --all-tags
