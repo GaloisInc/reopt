@@ -34,9 +34,12 @@ function commandExistsOrFailLoudly<Literal extends string>(
 }
 
 
+/**
+ * The following keys should match your package.json.
+ */
 export const reoptSectionKey = 'reopt'
-
 export const reoptExecutableKey = 'reoptExecutable'
+export const reoptVCGExecutableKey = 'reoptVCGExecutable'
 
 /**
  * The following line makes it so that we get a static error if the property

@@ -50,7 +50,7 @@ export function setWorkspaceProjectFile(
  * derived from it.
  */
 export const ProjectConfiguration = ty.type({
-    annotations: ty.array(ty.string),
+    annotations: optionFromNullable(ty.string),
     binaryFile: ty.string,
     excludes: ty.array(ty.string),
     headers: ty.array(ty.string),
@@ -67,7 +67,7 @@ export type ProjectConfiguration = ty.TypeOf<typeof ProjectConfiguration>
 
 
 export const defaultConfiguration: ProjectConfiguration = {
-    annotations: [],
+    annotations: option.none,
     // This field will be instantiated by the code that creates the
     // configuration file
     binaryFile: '<name of your executable>',

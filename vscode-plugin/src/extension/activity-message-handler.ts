@@ -26,6 +26,7 @@ import {
     openReoptProjectViaDialog,
 } from './open-reopt-project'
 import * as reopt from './reopt'
+import * as reoptVCG from './reopt-vcg'
 import { ActivityWebview, ReoptVCGEntry, ReoptVCGWebview } from '@shared/interfaces'
 import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
 import { InterfaceContributions } from 'mocha'
@@ -124,39 +125,10 @@ function makeReoptGenerate(
 
             .then(
                 // on fulfilled
-                (({ outputFile, eventsFile }) => {
-                    openOutputFile(outputFile)
-                    processEventsFile(context, diagnosticCollection, eventsFile)
-                }),
+                processOutputAndEvents(context, diagnosticCollection, reoptMode, reoptVCGWebviewPromise),
                 // on rejected
                 makeDisplayError(replaceOutputChannel),
             )
-
-            .then(() => {
-
-                const projectConfiguration = getWorkspaceConfiguration(context)
-                if (!projectConfiguration) { return }
-                const projectName = projectConfiguration.name
-                if (option.isNone(projectName)) { return }
-
-                reoptVCGWebviewPromise.then(webview => {
-
-                    // Fake running `reopt-vcg` by looking for a JSON file with the
-                    // same name as the project.
-                    const reoptVCGOutputFilename = `${projectName.value}.json`
-                    const reoptVCGOutputFile = vscode.Uri.joinPath(context.extensionUri, 'out', 'webview-static', reoptVCGOutputFilename).fsPath
-                    if (!fs.existsSync(reoptVCGOutputFile)) { return }
-
-                    const reoptVCGOutput: ReoptVCGEntry[] = JSON.parse(fs.readFileSync(reoptVCGOutputFile).toString())
-
-                    webview.postMessage({
-                        tag: E2ReoptVCGW.reoptVCGOutput,
-                        output: reoptVCGOutput,
-                    } as E2ReoptVCGW.ReoptVCGOutput)
-
-
-                })
-            })
 
     }
 
@@ -307,4 +279,102 @@ async function processEventsFile(
         eventsFile,
     )
 
+}
+
+
+function processOutputAndEvents(
+    context: vscode.ExtensionContext,
+    diagnosticCollection: vscode.DiagnosticCollection,
+    reoptMode: reopt.ReoptMode,
+    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
+) {
+    return async ({
+        outputFile,
+        eventsFile,
+    }: { outputFile: string, eventsFile: string }) => {
+
+        openOutputFile(outputFile)
+        processEventsFile(context, diagnosticCollection, eventsFile)
+
+        // Then, if the file was LLVM, we can run reopt-vcg
+        if (reoptMode !== reopt.ReoptMode.GenerateLLVM) { return }
+
+        const projectConfiguration = getWorkspaceConfiguration(context)
+        if (!projectConfiguration) { return }
+        const projectName = projectConfiguration.name
+        const annotationsFile = projectConfiguration.annotations
+        if (option.isNone(projectName)) { return }
+
+        // Cannot run reopt-vcg if there is no annotations file
+        if (option.isNone(annotationsFile)) {
+            vscode.window.showErrorMessage(
+                'Not running reopt-vcg because the configuration does not specify an annotations file.'
+            )
+            return
+        }
+
+        const workingDirectory = path.dirname(projectConfiguration.binaryFile)
+
+        const resolvedAnnotationsFile = path.resolve(workingDirectory, annotationsFile.value)
+
+        if (!fs.existsSync(resolvedAnnotationsFile)) {
+            vscode.window.showErrorMessage(
+                `Not running reopt-vcg because the annotations file does not exist: ${annotationsFile.value} resolved to ${resolvedAnnotationsFile}`
+            )
+            return
+        }
+
+        // We also need a handler to the reopt-vcg webview to send the results
+        // to.
+        // FIXME: I'm worried that if the user has never clicked on the panel
+        // that shows the result, we will stay here forever.
+        const webview = await reoptVCGWebviewPromise
+
+        const jsonsFile = await (
+            vscode.window
+                .withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: 'Running reopt-vcg',
+                        cancellable: true,
+                    },
+                    // TODO: we can probably kill the child process upon cancellation
+                    (_progress, _token) => reoptVCG.runReoptVCGToGenerateJSONs(context, annotationsFile.value)
+                )
+        )
+
+        const resolvedJSONsFile = path.resolve(workingDirectory, jsonsFile)
+
+        if (!fs.existsSync(resolvedJSONsFile)) {
+            vscode.window.showErrorMessage(
+                `Not displaying reopt-vcg results because JSONs file does not exist: ${jsonsFile}`
+            )
+        }
+
+        reoptVCG.processReoptVCGOutput(
+            resolvedJSONsFile,
+            output => {
+
+                webview.postMessage({
+                    tag: E2ReoptVCGW.reoptVCGOutput,
+                    output,
+                } as E2ReoptVCGW.ReoptVCGOutput)
+
+            },
+        )
+
+        // Fake running `reopt-vcg` by looking for a JSON file with
+        // the same name as the project.
+        // const reoptVCGOutputFilename = `${projectName.value}.jsons`
+        // const reoptVCGOutputFile = vscode.Uri.joinPath(context.extensionUri, 'out', 'webview-static', reoptVCGOutputFilename).fsPath
+        // if (!fs.existsSync(reoptVCGOutputFile)) { return }
+
+        // const reoptVCGOutput: ReoptVCGEntry[] = JSON.parse(fs.readFileSync(reoptVCGOutputFile).toString())
+
+        // webview.postMessage({
+        //     tag: E2ReoptVCGW.reoptVCGOutput,
+        //     output: reoptVCGOutput,
+        // } as E2ReoptVCGW.ReoptVCGOutput)
+
+    }
 }

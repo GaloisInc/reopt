@@ -1,12 +1,9 @@
-import { getOrElse } from 'fp-ts/Option'
 import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-reopt-vcg-webview'
 
-import * as ReoptVCGMessageHandler from './reopt-vcg-message-handler'
 import { getNonce } from './nonce'
-import { LLVMDocumentSymbolProvider } from './symbol-provider'
 import { getWorkspaceConfiguration } from '@shared/project-configuration'
 import { ReoptVCGWebview } from '@shared/interfaces'
 

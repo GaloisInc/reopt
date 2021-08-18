@@ -1,5 +1,6 @@
 import * as ChildProcess from 'child_process'
-import { getOrElse } from 'fp-ts/Option'
+import * as Array from 'fp-ts/Array'
+import * as Option from 'fp-ts/Option'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -27,7 +28,7 @@ export enum ReoptMode {
 }
 
 
-function replaceExtensionWith(replacement: string): (exe: string) => string {
+export function replaceExtensionWith(replacement: string): (exe: string) => string {
     return (executablePath: string) => {
         const dir = path.dirname(executablePath)
         const executableWithoutExtension = path.basename(
@@ -54,7 +55,7 @@ function outputForReoptMode(
 
         case ReoptMode.GenerateCFG: {
             return (
-                getOrElse
+                Option.getOrElse
                     (() => replaceExtensionWithCFG(projectConfiguration.binaryFile))
                     (projectConfiguration.outputNameCFG)
             )
@@ -70,7 +71,7 @@ function outputForReoptMode(
 
         case ReoptMode.GenerateFunctions: {
             return (
-                getOrElse
+                Option.getOrElse
                     (() => replaceExtensionWithFns(projectConfiguration.binaryFile))
                     (projectConfiguration.outputNameFunctions)
             )
@@ -78,7 +79,7 @@ function outputForReoptMode(
 
         case ReoptMode.GenerateLLVM: {
             return (
-                getOrElse
+                Option.getOrElse
                     (() => replaceExtensionWithLL(projectConfiguration.binaryFile))
                     (projectConfiguration.outputNameLLVM)
             )
@@ -158,7 +159,7 @@ export async function displayReoptEventsAsDiagnostics(
 
     // Highlight for the bytes in blocks that caused errors
     const bytesDecoration = vscode.window.createTextEditorDecorationType({
-        backgroundColor: "#45383F",
+        // backgroundColor: "#45383F",
         textDecoration: "#FF6464 wavy underline",
     })
 
@@ -239,7 +240,11 @@ export function runReopt(
             reoptExecutable,
 
             ([] as string[]).concat(
-                projectConfiguration.annotations.map(a => `--annotations=${a}`),
+                Option.foldMap
+                    (Array.getMonoid<string>())
+                    (a => [`--annotations=${a}`])
+                    (projectConfiguration.annotations)
+                ,
                 projectConfiguration.excludes.map(e => `--exclude=${e}`),
                 projectConfiguration.headers.map(h => `--header=${h}`),
                 projectConfiguration.includes.map(i => `--include=${i}`),
@@ -275,7 +280,7 @@ export function runReopt(
 export async function runReoptToGenerateDisassembly(
     context: vscode.ExtensionContext,
 ): Promise<string> {
-    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'temp-crux-llvm-'))
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'temp-reopt-'))
     const disassemblyFile = `${tempDir}/disassemble`
 
     await runReopt(context, [

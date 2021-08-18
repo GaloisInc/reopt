@@ -49,6 +49,11 @@
 					"type": "string",
 					"default": "reopt",
 					"description": "Path to the reopt executable"
+				},
+				"reopt.reoptVCGExecutable": {
+					"type": "string",
+					"default": "reopt-vcg",
+					"description": "Path to the reopt-vcg executable"
 				}
 			}
 		},
