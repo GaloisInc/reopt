@@ -7,10 +7,6 @@ import * as vscode from 'vscode'
  * on the other end!
  */
 
-export const webviewInitialDataKey = 'webviewInitialData'
-export interface WebviewInitialData {
-}
-
 export const activityWebviewInitialDataKey = 'activityWebviewInitialData'
 export interface ActivityWebviewInitialData {
     readonly projectName?: string
@@ -22,19 +18,19 @@ export type ExtensionToActivityWebview
     | OpenedProject
     | SymbolList
 
-export const closedProject = 'closedProject'
+export const closedProjectTag = 'ClosedProject'
 export interface ClosedProject {
-    readonly tag: typeof closedProject
+    readonly tag: typeof closedProjectTag
 }
 
-export const openedProject = 'OpenedProject'
+export const openedProjectTag = 'OpenedProject'
 export interface OpenedProject {
-    readonly tag: typeof openedProject
+    readonly tag: typeof openedProjectTag
     readonly projectName: string
 }
 
-export const symbolList = 'SymbolList'
+export const symbolListTag = 'SymbolList'
 export interface SymbolList {
-    readonly tag: typeof symbolList
+    readonly tag: typeof symbolListTag
     readonly symbols: Interfaces.SerializationOf<vscode.SymbolInformation>[]
 }

@@ -20,7 +20,8 @@
         "rootDirs": [
             "src/extension",
             "src/shared",
-            "src/webview",
+            "src/activity-webview",
+            "src/reopt-vcg-webview",
         ],
     },
     "files": [

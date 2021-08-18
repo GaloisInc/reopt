@@ -2,12 +2,14 @@ import { getOrElse } from 'fp-ts/Option'
 import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
-import * as E2W from '@shared/extension-to-webview'
+import * as E2W from '@shared/extension-to-activity-webview'
 
 import * as ActivityMessageHandler from './activity-message-handler'
 import { getNonce } from './nonce'
 import { LLVMDocumentSymbolProvider } from './symbol-provider'
 import { getWorkspaceConfiguration } from '@shared/project-configuration'
+import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
+import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
 
 
 export class ActivityViewProvider implements vscode.WebviewViewProvider {
@@ -15,15 +17,18 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'reopt-activity-view'
     readonly #context: vscode.ExtensionContext
     readonly #diagnosticCollection: vscode.DiagnosticCollection
+    readonly #reoptVCGWebviewPromise: Promise<ReoptVCGWebview> // FIXME
     #outputChannel?: vscode.OutputChannel
     #projectConfigurationWatcher?: vscode.FileSystemWatcher
 
 
     constructor(
         context: vscode.ExtensionContext,
+        reoptVCGWebviewPromise: Promise<ReoptVCGWebview>, // FIXME
     ) {
         this.#context = context
         this.#diagnosticCollection = vscode.languages.createDiagnosticCollection('reopt')
+        this.#reoptVCGWebviewPromise = reoptVCGWebviewPromise
     }
 
 
@@ -62,6 +67,7 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
+        const webview: ActivityWebview = webviewView.webview
 
         const stylesheetURI = vscode.Uri.joinPath(
             this.#context.extensionUri, 'out', 'webview-static', 'activity-webview.css'
@@ -69,8 +75,6 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
         const webviewBundleURI = vscode.Uri.joinPath(
             this.#context.extensionUri, 'out', 'activity-webview.bundle.js',
         )
-
-        const webview = webviewView.webview
 
         webview.options = {
             enableScripts: true,
@@ -99,6 +103,7 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
                 this.#context,
                 webview,
                 this.#diagnosticCollection,
+                this.#reoptVCGWebviewPromise, // FIXME
                 this.replaceProjectConfigurationWatcher.bind(this),
                 this.replaceOutputChannel.bind(this),
             ),

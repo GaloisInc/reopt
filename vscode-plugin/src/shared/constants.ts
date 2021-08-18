@@ -1,6 +1,7 @@
 import PackageJSON from './package.json'
 
 export const activityWebviewId = 'reopt-activity'
+export const webviewId = 'reopt-vcg-webview'
 
 export const createProjectCommand = commandExistsOrFailLoudly('reopt.createProject')
 export const jumpToFunctionCommand = commandExistsOrFailLoudly('reopt.jumpToFunction')

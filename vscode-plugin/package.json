@@ -4,7 +4,7 @@
 	"description": "",
 	"version": "0.0.1",
 	"engines": {
-		"vscode": "^1.58.1"
+		"vscode": "^1.59.0"
 	},
 	"publisher": "Galois",
 	"categories": [
@@ -108,6 +108,13 @@
 					"contextualTitle": "Reopt Package Explorer",
 					"type": "webview"
 				}
+			],
+			"reopt-vcg-panel": [
+				{
+					"id": "reopt-vcg-view",
+					"name": "Reopt VCG view",
+					"type": "webview"
+				}
 			]
 		},
 		"viewsContainers": {
@@ -116,6 +123,13 @@
 					"id": "reopt-activity-view-container",
 					"title": "Reopt",
 					"icon": "$(list-tree)"
+				}
+			],
+			"panel": [
+				{
+					"id": "reopt-vcg-panel",
+					"title": "Reopt Verification Conditions",
+					"icon": ""
 				}
 			]
 		}
@@ -163,6 +177,7 @@
 		"nodemon": "^2.0.12",
 		"react": "^17.0.2",
 		"react-dom": "^17.0.2",
+		"ts-essentials": "^8.0.0",
 		"tsc-watch": "^4.4.0",
 		"webpack": "^5.50.0"
 	}

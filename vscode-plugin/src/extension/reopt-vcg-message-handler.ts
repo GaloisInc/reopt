@@ -9,8 +9,7 @@ import * as vscode from 'vscode'
 
 import { option } from 'fp-ts'
 
-import * as E2W from '@shared/extension-to-activity-webview'
-import * as E2ReoptVCGW from '@shared/extension-to-reopt-vcg-webview'
+import * as E2W from '@shared/extension-to-reopt-vcg-webview'
 import {
     clearWorkspaceConfiguration,
     clearWorkspaceProjectFile,
@@ -18,7 +17,7 @@ import {
     getWorkspaceProjectFile,
     ProjectConfiguration,
 } from '@shared/project-configuration'
-import * as W2E from '@shared/activity-webview-to-extension'
+import * as W2E from '@shared/reopt-vcg-webview-to-extension'
 
 import { createReoptProject } from './create-reopt-project'
 import {
@@ -26,9 +25,7 @@ import {
     openReoptProjectViaDialog,
 } from './open-reopt-project'
 import * as reopt from './reopt'
-import { ActivityWebview, ReoptVCGEntry, ReoptVCGWebview } from '@shared/interfaces'
-import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
-import { InterfaceContributions } from 'mocha'
+import { ActivityWebview } from '@shared/interfaces'
 
 
 async function openOutputFile(outputFile: string): Promise<void> {
@@ -105,7 +102,7 @@ function makeReoptGenerate(
     context: vscode.ExtensionContext,
     diagnosticCollection: vscode.DiagnosticCollection,
     replaceOutputChannel: ReplaceOutputChannel,
-    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
+    webview: ActivityWebview,
 ): (reoptMode: reopt.ReoptMode) => void {
 
     return (reoptMode) => {
@@ -139,23 +136,21 @@ function makeReoptGenerate(
                 const projectName = projectConfiguration.name
                 if (option.isNone(projectName)) { return }
 
-                reoptVCGWebviewPromise.then(webview => {
+                // Fake running `reopt-vcg` by looking for a JSON file with the
+                // same name as the project.
+                const reoptVCGOutputFilename = `${projectName.value}.json`
+                const reoptVCGOutputFile = vscode.Uri.joinPath(context.extensionUri, 'out', 'webview-static', reoptVCGOutputFilename).fsPath
+                if (fs.existsSync(reoptVCGOutputFile)) {
 
-                    // Fake running `reopt-vcg` by looking for a JSON file with the
-                    // same name as the project.
-                    const reoptVCGOutputFilename = `${projectName.value}.json`
-                    const reoptVCGOutputFile = vscode.Uri.joinPath(context.extensionUri, 'out', 'webview-static', reoptVCGOutputFilename).fsPath
-                    if (!fs.existsSync(reoptVCGOutputFile)) { return }
-
-                    const reoptVCGOutput: ReoptVCGEntry[] = JSON.parse(fs.readFileSync(reoptVCGOutputFile).toString())
+                    const reoptVCGOutput = JSON.parse(fs.readFileSync(reoptVCGOutputFile).toString())
 
                     webview.postMessage({
-                        tag: E2ReoptVCGW.reoptVCGOutput,
+                        tag: E2W.reoptVCGOutput,
                         output: reoptVCGOutput,
-                    } as E2ReoptVCGW.ReoptVCGOutput)
+                    } as E2W.ReoptVCGOutput)
 
+                }
 
-                })
             })
 
     }
@@ -176,108 +171,31 @@ function makeReoptGenerate(
  */
 export function makeMessageHandler(
     context: vscode.ExtensionContext,
-    activityWebview: ActivityWebview,
+    webview: vscode.Webview,
     diagnosticCollection: vscode.DiagnosticCollection,
-    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
-    replaceConfigurationWatcher: (w?: vscode.FileSystemWatcher) => void,
+    _replaceConfigurationWatcher: (w?: vscode.FileSystemWatcher) => void,
     replaceOutputChannel: ReplaceOutputChannel,
-): (m: W2E.ActivityWebviewToExtension) => Promise<void> {
+): (m: W2E.ReoptVCGWebviewToExtension) => Promise<void> {
 
     const reoptGenerate = makeReoptGenerate(
         context,
         diagnosticCollection,
         replaceOutputChannel,
-        reoptVCGWebviewPromise,
+        webview,
     )
 
-    return async (message: W2E.ActivityWebviewToExtension) => {
+    return async (_message: W2E.ReoptVCGWebviewToExtension) => {
 
-        switch (message.tag) {
+        // switch (message.tag) {
 
-            case W2E.closeProject: {
-                clearWorkspaceConfiguration(context)
-                clearWorkspaceProjectFile(context)
-                activityWebview.postMessage({
-                    tag: E2W.closedProjectTag,
-                } as E2W.ClosedProject)
-                replaceConfigurationWatcher(undefined)
-                return
-            }
+        //     // forces exhaustivity checking
+        //     default: {
+        //         const exhaustiveCheck: never = message
+        //         throw new Error(`Unhandled color case: ${exhaustiveCheck}`)
+        //     }
 
-            case W2E.createProjectFile: {
-                const reoptProjectFile = await createReoptProject()
-                const watcher = await openReoptProject(context, activityWebview, reoptProjectFile)
-                replaceConfigurationWatcher(watcher)
-                return
-            }
+        // }
 
-            case W2E.generateCFG: {
-                reoptGenerate(reopt.ReoptMode.GenerateCFG)
-                return
-            }
-
-            // case W2E.generateDisassembly: {
-            //     reoptGenerate(reopt.ReoptMode.GenerateObject)
-            //     return
-            // }
-
-            case W2E.generateFunctions: {
-                reoptGenerate(reopt.ReoptMode.GenerateFunctions)
-                return
-            }
-
-            case W2E.generateLLVM: {
-                reoptGenerate(reopt.ReoptMode.GenerateLLVM)
-                return
-            }
-
-            case W2E.jumpToSymbol: {
-                const { fsPath, range } = message.symbol
-
-                const doc = await vscode.workspace.openTextDocument(fsPath)
-                const editor = await vscode.window.showTextDocument(doc)
-                const startPosition = new vscode.Position(range.start.line, range.start.character)
-                const endPosition = new vscode.Position(range.end.line, range.end.character)
-
-                // Move symbol into view and select it
-                editor.selection = new vscode.Selection(startPosition, endPosition)
-                editor.revealRange(
-                    new vscode.Range(startPosition, endPosition),
-                    vscode.TextEditorRevealType.AtTop,
-                )
-
-                return
-            }
-
-            case W2E.openProject: {
-                const watcher = await openReoptProjectViaDialog(context, activityWebview)
-                replaceConfigurationWatcher(watcher)
-                return
-            }
-
-            case W2E.showProjectFile: {
-
-                const projectFile = getWorkspaceProjectFile(context)
-                if (projectFile === undefined) {
-                    // this should not be possible, but just in case...
-                    vscode.window.showErrorMessage(
-                        'Could not show project file: please reopen the project.',
-                    )
-                    return
-                }
-                const doc = await vscode.workspace.openTextDocument(projectFile)
-                const editor = await vscode.window.showTextDocument(doc)
-
-                return
-            }
-
-            // forces exhaustivity checking
-            default: {
-                const exhaustiveCheck: never = message
-                throw new Error(`Unhandled color case: ${exhaustiveCheck}`)
-            }
-
-        }
     }
 }
 

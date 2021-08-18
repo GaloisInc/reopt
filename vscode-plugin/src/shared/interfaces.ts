@@ -1,6 +1,13 @@
 import * as vscode from 'vscode'
 
-import * as W2E from './webview-to-extension'
+import * as W2E from './activity-webview-to-extension'
+
+/* Branded types so that we cannot accidentally pass one for the other. */
+type Flavor<T, F> = T & { _flavor?: F }
+export type ActivityWebview = Flavor<vscode.Webview, 'activity-webview'>
+export type ReoptVCGWebview = Flavor<vscode.Webview, 'reopt-vcg-webview'>
+
+export type ReactSetter<T> = React.Dispatch<React.SetStateAction<T>>
 
 /**
  * This state is persisted between multiple "displays" of the webview, during a
@@ -73,4 +80,15 @@ interface SerializedSymbolInformation {
     readonly kind: SerializationOf<vscode.SymbolKind>
     readonly name: string
     readonly range: SerializationOf<vscode.Range>
+}
+
+
+export type ReoptVCGEntry = {
+    "SMT check-sat result": 'sat' | 'unsat'
+    "Machine Code Address": string
+    "LLVM Instruction Index": string
+    "LLVM Function Name": string
+    "LLVM Block Label": string
+    "Goal Tag": string
+    "Goal Extra Info": string
 }

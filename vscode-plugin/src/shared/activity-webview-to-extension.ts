@@ -17,6 +17,7 @@ export type ActivityWebviewToExtension
     | GenerateLLVM
     | JumpToSymbol
     | OpenProject
+    // | ReoptVCGOutput
     | ShowProjectFile
 
 export const closeProject = 'CloseProject'
@@ -59,6 +60,12 @@ export const openProject = 'OpenProject'
 export interface OpenProject {
     readonly tag: typeof openProject
 }
+
+// export const reoptVCGOutput = 'ReoptVCGOutput'
+// export interface ReoptVCGOutput {
+//     readonly tag: typeof reoptVCGOutput
+//     readonly output: Interfaces.ReoptVCGEntry[]
+// }
 
 export const showProjectFile = 'ShowProjectFile'
 export interface ShowProjectFile {

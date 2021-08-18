@@ -5,6 +5,8 @@ import * as Constants from '@shared/constants'
 import { ActivityViewProvider } from './activity-view-provider'
 import { LLVMDocumentSymbolProvider } from './symbol-provider'
 import { createReoptProject } from './create-reopt-project'
+import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
+import { ReoptVCGWebview } from '@shared/interfaces'
 
 class ReoptViewer implements vscode.CustomTextEditorProvider {
 
@@ -95,10 +97,21 @@ class Extension {
         // context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('ftp', treeDataProvider))
         // const tree = vscode.window.createTreeView('reopt-activity-view', { treeDataProvider })
 
+        /* We need the activity webview to tell the reopt-vcg webview when to
+        start working. This is quite ugly, should be made better later. */
+        const reoptVCGWebviewPromise = new Promise<ReoptVCGWebview>(resolve => {
+            subscribe(
+                vscode.window.registerWebviewViewProvider(
+                    ReoptVCGViewProvider.viewType,
+                    new ReoptVCGViewProvider(context, resolve),
+                ),
+            )
+        })
+
         subscribe(
             vscode.window.registerWebviewViewProvider(
                 ActivityViewProvider.viewType,
-                new ActivityViewProvider(context),
+                new ActivityViewProvider(context, reoptVCGWebviewPromise),
             ),
         )
 

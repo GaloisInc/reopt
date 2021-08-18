@@ -1,38 +1,37 @@
 import * as React from 'react'
 import * as vscode from 'vscode'
 
-import * as E2W from '@shared/extension-to-webview'
-import * as Interfaces from '@shared/interfaces'
-import * as W2E from '@shared/webview-to-extension'
+import { UnreachableCaseError } from 'ts-essentials'
 
-type ReactSetter<T> = React.Dispatch<React.SetStateAction<T>>
+import * as E2W from '@shared/extension-to-activity-webview'
+import * as Interfaces from '@shared/interfaces'
+import * as W2E from '@shared/activity-webview-to-extension'
 
 function makeMessageListener(setters: {
-    setProjectName: ReactSetter<string | undefined>,
-    setSymbols: ReactSetter<Interfaces.SerializationOf<vscode.SymbolInformation>[]>,
+    setProjectName: Interfaces.ReactSetter<string | undefined>,
+    setSymbols: Interfaces.ReactSetter<Interfaces.SerializationOf<vscode.SymbolInformation>[]>,
 }) {
     return (message: E2W.ExtensionToActivityWebview) => {
+
         switch (message.tag) {
 
-            case E2W.closedProject: {
+            case E2W.closedProjectTag: {
                 setters.setProjectName(undefined)
                 break
             }
 
-            case E2W.openedProject: {
+            case E2W.openedProjectTag: {
                 setters.setProjectName(message.projectName)
                 break
             }
 
-            case E2W.symbolList: {
+            case E2W.symbolListTag: {
                 setters.setSymbols(message.symbols)
                 break
             }
 
-            // forces exhaustivity checking
             default: {
-                const exhaustiveCheck: never = message
-                throw new Error(`Unhandled color case: ${exhaustiveCheck}`)
+                throw new UnreachableCaseError(message)
             }
 
         }
@@ -154,7 +153,7 @@ export function ActivityWebview(props: {
     const renderGenerateButtons = (
 
         <div>
-{/*
+            {/*
             <input
                 type="button"
                 value="Generate disassembly"

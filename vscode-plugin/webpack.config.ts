@@ -78,8 +78,8 @@ const config: Configuration[] = [
     (Object.assign({
 
         entry: {
-            'activity-webview': './src/webview/activity-webview-entry.tsx',
-            webview: './src/webview/webview-entry.tsx',
+            'activity-webview': './src/activity-webview/entry-point.tsx',
+            'reopt-vcg-webview': './src/reopt-vcg-webview/entry-point.tsx',
         },
 
         output: Object.assign({

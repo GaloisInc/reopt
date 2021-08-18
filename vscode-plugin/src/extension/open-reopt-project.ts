@@ -9,7 +9,8 @@ import {
     setWorkspaceProjectFile,
 } from '@shared/project-configuration'
 import * as Promisified from '@shared/promisified'
-import * as E2W from '@shared/extension-to-webview'
+import * as E2W from '@shared/extension-to-activity-webview'
+import { ActivityWebview } from '@shared/interfaces'
 
 
 async function readReoptProjectFile(
@@ -35,13 +36,13 @@ async function readReoptProjectFile(
 
 async function readAndSetProjectConfiguration(
     context: vscode.ExtensionContext,
-    webview: vscode.Webview,
+    webview: ActivityWebview,
     reoptProjectFile: string,
 ): Promise<void> {
     const configuration = await readReoptProjectFile(reoptProjectFile)
     setWorkspaceConfiguration(context, configuration)
     webview.postMessage({
-        tag: E2W.openedProject,
+        tag: E2W.openedProjectTag,
         projectName: toNullable(configuration.name),
     } as E2W.OpenedProject)
 }
@@ -49,7 +50,7 @@ async function readAndSetProjectConfiguration(
 
 export async function openReoptProject(
     context: vscode.ExtensionContext,
-    webview: vscode.Webview,
+    webview: ActivityWebview,
     reoptProjectFile: string,
 ): Promise<vscode.FileSystemWatcher> {
 
@@ -69,7 +70,7 @@ export async function openReoptProject(
 
 export async function openReoptProjectViaDialog(
     context: vscode.ExtensionContext,
-    webview: vscode.Webview,
+    webview: ActivityWebview,
 ): Promise<vscode.FileSystemWatcher> {
 
     const files = await vscode.window.showOpenDialog({

@@ -2,15 +2,15 @@ import * as React from 'react'
 import * as ReactDOM from 'react-dom'
 
 import * as Constants from '@shared/constants'
-import * as E2W from '@shared/extension-to-webview'
+import * as E2W from '@shared/extension-to-reopt-vcg-webview'
 import * as Interfaces from '@shared/interfaces'
 
 import { Webview } from './webview'
 
-interface ActivityWebviewWindow extends Window {
-    [E2W.activityWebviewInitialDataKey]: E2W.ActivityWebviewInitialData,
+interface WebviewWindow extends Window {
+    [E2W.webviewInitialDataKey]: E2W.WebviewInitialData,
 }
-declare const window: ActivityWebviewWindow
+declare const window: WebviewWindow
 
 declare const acquireVsCodeApi: () => Interfaces.MainViewVSCodeAPI
 const vscode = acquireVsCodeApi()
@@ -18,11 +18,11 @@ const vscode = acquireVsCodeApi()
 const container = document.getElementById(Constants.activityWebviewId) as HTMLDivElement | null
 
 if (container === null) {
-    console.log(`Webview container with id ${Constants.activityWebviewId} is missing`)
+    console.log(`Webview container with id ${Constants.webviewId} is missing`)
 } else {
     ReactDOM.render(
         <Webview
-            initialData={window[E2W.activityWebviewInitialDataKey]}
+            initialData={window[E2W.webviewInitialDataKey]}
             vscode={vscode}
         />,
         container,
