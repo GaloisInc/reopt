@@ -36,13 +36,27 @@ export function Webview(_props: {
         }
     }
 
-    const renderVCGs = reoptVCGOutput.map((vcg, index) => (
-        <tr key={index}>
-            <td>{vcg['Machine Code Address']}</td>
-            <td style={{ color: colorForResult(vcg['SMT check-sat result']) }}>{vcg['Goal Tag']}</td>
-            <td>{vcg['Goal Extra Info']}</td>
-        </tr>
-    ))
+    const textForResult = (result: 'sat' | 'unsat') => {
+        switch (result) {
+            case 'unsat': return '✓'
+            case 'sat': return '❌'
+            default: throw new UnreachableCaseError(result)
+        }
+    }
+
+    const renderVCGs = reoptVCGOutput.map((vcg, index) => {
+
+        const result = vcg['SMT check-sat result']
+
+        return (
+            <tr key={index}>
+                <td>{vcg['Machine Code Address']}</td>
+                <td style={{ color: colorForResult(result) }}>{textForResult(result)}</td>
+                <td>{vcg['Goal Tag']}</td>
+                <td>{vcg['Goal Extra Info']}</td>
+            </tr>
+        )
+    })
 
     return (
         <div>
