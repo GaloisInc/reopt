@@ -239,6 +239,7 @@ export function runReopt(
             reoptExecutable,
 
             ([] as string[]).concat(
+                projectConfiguration.annotations.map(a => `--annotations=${a}`),
                 projectConfiguration.excludes.map(e => `--exclude=${e}`),
                 projectConfiguration.headers.map(h => `--header=${h}`),
                 projectConfiguration.includes.map(i => `--include=${i}`),

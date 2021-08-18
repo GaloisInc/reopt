@@ -45,7 +45,12 @@ export function setWorkspaceProjectFile(
 }
 
 
+/**
+ * Make sure this schema corresponds to rpj-schema.json.  Ideally it would be
+ * derived from it.
+ */
 export const ProjectConfiguration = ty.type({
+    annotations: ty.array(ty.string),
     binaryFile: ty.string,
     excludes: ty.array(ty.string),
     headers: ty.array(ty.string),
@@ -62,6 +67,7 @@ export type ProjectConfiguration = ty.TypeOf<typeof ProjectConfiguration>
 
 
 export const defaultConfiguration: ProjectConfiguration = {
+    annotations: [],
     // This field will be instantiated by the code that creates the
     // configuration file
     binaryFile: '<name of your executable>',

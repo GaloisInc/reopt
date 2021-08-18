@@ -3,6 +3,12 @@
   "$id": "reopt-project",
   "type": "object",
   "properties": {
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "binaryFile": {
       "type": "string"
     },
