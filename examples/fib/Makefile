@@ -21,8 +21,8 @@ fib_diet_lld.reopt.exe : fib_diet_lld.exe fib_protos.h
 
 # Generate LLVM file using reopt for fib example
 fib_diet_reopt.ll fib_diet_reopt.ann : fib_diet_lld.exe fib_protos.h
-	reopt -o fib_diet_reopt.ll --llvm --annotations fib_diet_reopt.ann \
-               --header fib_protos.h --include fib --include main $<
+	reopt --export-llvm fib_diet_reopt.ll --annotations fib_diet_reopt.ann \
+        --header fib_protos.h --include fib --include main $<
 	python -m json.tool fib_diet_reopt.ann > fib_diet_reopt.ann.pretty
 	mv fib_diet_reopt.ann.pretty fib_diet_reopt.ann
 

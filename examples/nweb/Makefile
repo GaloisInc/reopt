@@ -18,7 +18,7 @@ nweb23.exe : nweb23.c
 	$(clang) -o $@ -g $<
 
 nweb23.ll nweb23.ann : nweb23.exe nweb23.h
-	reopt --llvm -o nweb23.ll --annotations nweb23.ann --header nweb23.h nweb23.exe || true
+	reopt --export-llvm nweb23.ll --annotations nweb23.ann --header nweb23.h nweb23.exe || true
 	python -m json.tool nweb23.ann > nweb23.ann.pretty
 	mv nweb23.ann.pretty nweb23.ann
 
