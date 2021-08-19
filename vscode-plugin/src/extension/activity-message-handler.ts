@@ -85,7 +85,7 @@ function getTitleForReoptMode(
 ): string {
     switch (reoptMode) {
         case reopt.ReoptMode.GenerateCFG: return 'Generating CFG...'
-        // case reopt.ReoptMode.GenerateObject: return 'Generating disassembly...'
+        case reopt.ReoptMode.GenerateDisassembly: return 'Generating disassembly...'
         case reopt.ReoptMode.GenerateFunctions: return 'Generating functions...'
         case reopt.ReoptMode.GenerateLLVM: return 'Generating LLVM...'
     }
@@ -354,7 +354,7 @@ function processOutputAndEvents(
         reoptVCG.processReoptVCGOutput(
             resolvedJSONsFile,
             output => {
-
+                console.log(`Read ${output.length} entries from JSONs file.`)
                 webview.postMessage({
                     tag: E2ReoptVCGW.reoptVCGOutput,
                     output,

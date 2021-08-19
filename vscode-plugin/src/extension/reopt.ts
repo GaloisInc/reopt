@@ -5,6 +5,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import * as readline from 'readline'
+import { UnreachableCaseError } from 'ts-essentials'
 import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
@@ -22,7 +23,7 @@ import {
 
 export enum ReoptMode {
     GenerateCFG,
-    // GenerateObject,
+    GenerateDisassembly,
     GenerateFunctions,
     GenerateLLVM,
 }
@@ -41,7 +42,7 @@ export function replaceExtensionWith(replacement: string): (exe: string) => stri
 
 
 const replaceExtensionWithCFG = replaceExtensionWith('cfg')
-// const replaceExtensionWithDis = replaceExtensionWith('dis')
+const replaceExtensionWithDis = replaceExtensionWith('dis')
 const replaceExtensionWithFns = replaceExtensionWith('fns')
 const replaceExtensionWithLL = replaceExtensionWith('ll')
 
@@ -61,13 +62,13 @@ function outputForReoptMode(
             )
         }
 
-        // case ReoptMode.GenerateObject: {
-        //     return (
-        //         getOrElse
-        //             (() => replaceExtensionWithDis(projectConfiguration.binaryFile))
-        //             (projectConfiguration.outputNameDisassemble)
-        //     )
-        // }
+        case ReoptMode.GenerateDisassembly: {
+            return (
+                Option.getOrElse
+                    (() => replaceExtensionWithDis(projectConfiguration.binaryFile))
+                    (projectConfiguration.outputNameDisassemble)
+            )
+        }
 
         case ReoptMode.GenerateFunctions: {
             return (
@@ -83,6 +84,10 @@ function outputForReoptMode(
                     (() => replaceExtensionWithLL(projectConfiguration.binaryFile))
                     (projectConfiguration.outputNameLLVM)
             )
+        }
+
+        default: {
+            throw new UnreachableCaseError(reoptMode)
         }
 
     }
@@ -103,9 +108,9 @@ function argsForReoptMode(
             return ['export-cfg', output]
         }
 
-        // case ReoptMode.GenerateObject: {
-        //     return [`--export-object=${output}`]
-        // }
+        case ReoptMode.GenerateDisassembly: {
+            return ['--export-object', output]
+        }
 
         case ReoptMode.GenerateFunctions: {
             return ['export-fns', output]
@@ -113,6 +118,10 @@ function argsForReoptMode(
 
         case ReoptMode.GenerateLLVM: {
             return ['export-llvm', output]
+        }
+
+        default: {
+            throw new UnreachableCaseError(reoptMode)
         }
 
     }
@@ -207,6 +216,7 @@ export async function displayReoptEventsAsDiagnostics(
 export function runReopt(
     context: vscode.ExtensionContext,
     extraArgs: string[],
+    reoptMode: ReoptMode,
 ): Promise<[string, string]> {
 
     const workspaceConfiguration = vscode.workspace.getConfiguration(
@@ -235,16 +245,20 @@ export function runReopt(
 
     return new Promise(async (resolve, reject) => {
 
+        const annotations =
+            (reoptMode === ReoptMode.GenerateLLVM)
+                ? Option.foldMap
+                    (Array.getMonoid<string>())
+                    (a => [`--annotations=${a}`])
+                    (projectConfiguration.annotations)
+                : []
+
         ChildProcess.execFile(
 
             reoptExecutable,
 
             ([] as string[]).concat(
-                Option.foldMap
-                    (Array.getMonoid<string>())
-                    (a => [`--annotations=${a}`])
-                    (projectConfiguration.annotations)
-                ,
+                annotations,
                 projectConfiguration.excludes.map(e => `--exclude=${e}`),
                 projectConfiguration.headers.map(h => `--header=${h}`),
                 projectConfiguration.includes.map(i => `--include=${i}`),
@@ -283,10 +297,14 @@ export async function runReoptToGenerateDisassembly(
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'temp-reopt-'))
     const disassemblyFile = `${tempDir}/disassemble`
 
-    await runReopt(context, [
-        '--disassemble',
-        `--output=${disassemblyFile}`,
-    ])
+    await runReopt(
+        context,
+        [
+            '--disassemble',
+            `--output=${disassemblyFile}`,
+        ],
+        ReoptMode.GenerateDisassembly,
+    )
 
     populateAddresses(context, disassemblyFile)
 
@@ -323,10 +341,14 @@ export async function runReoptToGenerateFile(
     const projectConfiguration = await getProjectConfiguration(context)
 
     const [flag, outputFile] = argsForReoptMode(projectConfiguration, reoptMode)
-    await runReopt(context, [
-        `--${flag}=${outputFile}`,
-        `--export-events=${eventsFile}`,
-    ])
+    await runReopt(
+        context,
+        [
+            `--${flag}=${outputFile}`,
+            `--export-events=${eventsFile}`,
+        ],
+        reoptMode,
+    )
 
     return { outputFile, eventsFile }
 }
