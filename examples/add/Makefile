@@ -21,8 +21,8 @@ add_diet_lld.reopt.exe : add_diet_lld.exe add_protos.h
 
 # Generate LLVM file using reopt for add example
 add_diet_reopt.ll add_diet_reopt.ann : add_diet_lld.exe add_protos.h
-	reopt -o add_diet_reopt.ll --llvm --annotations add_diet_reopt.ann \
-               --header add_protos.h --include add --include main $<
+	reopt --export-llvm add_diet_reopt.ll --annotations add_diet_reopt.ann \
+        --header add_protos.h --include add --include main $<
 	python -m json.tool add_diet_reopt.ann > add_diet_reopt.ann.pretty
 	mv add_diet_reopt.ann.pretty add_diet_reopt.ann
 
