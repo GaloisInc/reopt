@@ -111,26 +111,3 @@ export function runReoptVCG(
     })
 
 }
-
-
-/**
- * Runs reopt-vcg on the given annotations file
- * @param context - TODO
- * @param annotationsFile - TODO
- * @returns The output jsons file (supposedly one JSON object per line)
- */
-export async function runReoptVCGToGenerateJSONs(
-    context: vscode.ExtensionContext,
-    annotationsFile: fs.PathLike,
-): Promise<string> {
-
-    const jsonsFile = replaceExtensionWith('jsons')(annotationsFile.toString())
-
-    // Don't wait for this, just get it started
-    runReoptVCG(context, {
-        annotationsFile: annotationsFile.toString(),
-        jsonsFile,
-    })
-
-    return jsonsFile
-}

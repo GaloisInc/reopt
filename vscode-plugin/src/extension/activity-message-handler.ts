@@ -336,23 +336,26 @@ function processOutputAndEvents(
             tag: E2ReoptVCGW.clearReoptVCGEntries,
         } as E2ReoptVCGW.ClearReoptVCGEntries)
 
+        const jsonsFile = reopt.replaceExtensionWith('jsons')(annotationsFile.value)
+
         // FIXME: currently the progress stops when the JSONs file is returned, but
         // it should continue while the reopt-vcg process is running.
-        const jsonsFile = await (
-            vscode.window
-                .withProgress(
+        vscode.window
+            .withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Running reopt-vcg',
+                    cancellable: true,
+                },
+                // TODO: we can probably kill the child process upon cancellation
+                (_progress, _token) => reoptVCG.runReoptVCG(
+                    context,
                     {
-                        location: vscode.ProgressLocation.Notification,
-                        title: 'Running reopt-vcg',
-                        cancellable: true,
+                        annotationsFile: annotationsFile.value,
+                        jsonsFile,
                     },
-                    // TODO: we can probably kill the child process upon cancellation
-                    (_progress, _token) => reoptVCG.runReoptVCGToGenerateJSONs(
-                        context,
-                        annotationsFile.value,
-                    )
                 )
-        )
+            )
 
         const resolvedJSONsFile = path.resolve(workingDirectory, jsonsFile)
 
