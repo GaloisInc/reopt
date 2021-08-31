@@ -15,6 +15,7 @@ export function Webview(_props: {
 }): JSX.Element {
 
     const [reoptVCGOutput, setReoptVCGOutput] = React.useState([] as Interfaces.ReoptVCGEntry[])
+    const [showValidVCGs, setShowValidVCGs] = React.useState(false)
 
     /** Listen to messages coming from the extension. */
     React.useEffect(() => {
@@ -51,7 +52,7 @@ export function Webview(_props: {
     const badVCGs = reoptVCGOutput.filter(vcg => vcg['SMT check-sat result'] === 'sat')
 
     const renderVCGs = (
-        badVCGs
+        (showValidVCGs ? reoptVCGOutput : badVCGs)
             .map((vcg, index) => {
 
                 const result = vcg['SMT check-sat result']
@@ -71,12 +72,14 @@ export function Webview(_props: {
         <div>
             <p>
                 {vcgCount} VCGs attempted ({goodVCGs.length} proved safe, {badVCGs.length} currently unsafe)
-                {/* <input
-                    style={{ marginLeft: '40px' }}
-                    type="checkbox"
-                    name="show-safe-vcgs"
-                />
-                <label htmlFor="show-safe-vcgs">Display safe VCGs</label> */}
+                <span style={{ float: 'right' }}>
+                    <input
+                        onChange={e => setShowValidVCGs(e.target.checked)}
+                        name="show-safe-vcgs"
+                        type="checkbox"
+                    />
+                    <label htmlFor="show-safe-vcgs">Display safe VCGs</label>
+                </span>
             </p>
             <table>
                 <tbody>
