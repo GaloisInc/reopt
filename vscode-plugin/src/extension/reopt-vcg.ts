@@ -94,11 +94,12 @@ export function runReoptVCG(
                 // Currently, reopt-vcg returns a bad status code if any VCG
                 // failed, so we accept failures.
                 if (err) {
-                    if (err.code) {
-                        console.log(`reopt-vcg return exit code: ${err.code}`)
-                    } else if (err.killed) {
-                        console.log('reopt-vcg was killed')
-                    }
+                    vscode.window.showErrorMessage(err.message)
+                    // if (err.code) {
+                    //     console.log(`reopt-vcg return exit code: ${err.code}`)
+                    // } else if (err.killed) {
+                    //     console.log('reopt-vcg was killed')
+                    // }
                 }
 
                 resolve([stdout, stderr])
@@ -125,7 +126,8 @@ export async function runReoptVCGToGenerateJSONs(
 
     const jsonsFile = replaceExtensionWith('jsons')(annotationsFile.toString())
 
-    await runReoptVCG(context, {
+    // Don't wait for this, just get it started
+    runReoptVCG(context, {
         annotationsFile: annotationsFile.toString(),
         jsonsFile,
     })

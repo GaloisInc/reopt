@@ -12,10 +12,16 @@ export type WebviewInitialData = {
 }
 
 export type ExtensionToReoptVCGWebview
-    = ReoptVCGOutput
+    = ClearReoptVCGEntries
+    | ReoptVCGEntry
 
-export const reoptVCGOutput = 'reoptVCGOutput'
-export type ReoptVCGOutput = Readonly<{
-    tag: typeof reoptVCGOutput
-    output: Interfaces.ReoptVCGEntry[]
+export const clearReoptVCGEntries = 'ClearReoptVCGEntries'
+export type ClearReoptVCGEntries = Readonly<{
+    tag: typeof clearReoptVCGEntries
+}>
+
+export const reoptVCGEntry = 'ReoptVCGEntry'
+export type ReoptVCGEntry = Readonly<{
+    tag: typeof reoptVCGEntry
+    entry: Interfaces.ReoptVCGEntry
 }>

@@ -150,10 +150,12 @@
 	"devDependencies": {
 		"@types/es6-promisify": "^6.0.0",
 		"@types/glob": "^7.1.4",
+		"@types/immutability-helper": "^2.6.3",
 		"@types/mocha": "^9.0.0",
 		"@types/node": "^16.6.1",
 		"@types/react": "^17.0.18",
 		"@types/react-dom": "^17.0.9",
+		"@types/tail": "^2.2.1",
 		"@types/vscode": "^1.58.2",
 		"@typescript-eslint/eslint-plugin": "^4.29.2",
 		"@typescript-eslint/parser": "^4.29.2",
@@ -175,6 +177,7 @@
 	"dependencies": {
 		"es6-promisify": "^7.0.0",
 		"fp-ts": "^2.11.1",
+		"immutability-helper": "^3.1.1",
 		"io-ts": "^2.2.16",
 		"io-ts-types": "^0.5.16",
 		"monocle-ts": "^2.3.10",
@@ -182,6 +185,7 @@
 		"nodemon": "^2.0.12",
 		"react": "^17.0.2",
 		"react-dom": "^17.0.2",
+		"tail": "^2.2.3",
 		"ts-essentials": "^8.0.0",
 		"tsc-watch": "^4.4.0",
 		"webpack": "^5.50.0"

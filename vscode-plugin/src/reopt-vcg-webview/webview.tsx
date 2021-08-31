@@ -1,11 +1,12 @@
+import { Context } from 'immutability-helper'
 import * as React from 'react'
-import * as ReactDOM from 'react-dom'
-import * as vscode from 'vscode'
+import { UnreachableCaseError } from 'ts-essentials'
 
-import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-reopt-vcg-webview'
 import * as Interfaces from '@shared/interfaces'
-import { UnreachableCaseError } from 'ts-essentials'
+
+
+const update = (new Context()).update
 
 
 export function Webview(_props: {
@@ -44,24 +45,43 @@ export function Webview(_props: {
         }
     }
 
-    const renderVCGs = reoptVCGOutput.map((vcg, index) => {
+    const vcgCount = reoptVCGOutput.length
 
-        const result = vcg['SMT check-sat result']
+    const goodVCGs = reoptVCGOutput.filter(vcg => vcg['SMT check-sat result'] === 'unsat')
+    const badVCGs = reoptVCGOutput.filter(vcg => vcg['SMT check-sat result'] === 'sat')
 
-        return (
-            <tr key={index}>
-                <td>{vcg['Machine Code Address']}</td>
-                <td style={{ color: colorForResult(result) }}>{textForResult(result)}</td>
-                <td>{vcg['Goal Tag']}</td>
-                <td>{vcg['Goal Extra Info']}</td>
-            </tr>
-        )
-    })
+    const renderVCGs = (
+        badVCGs
+            .map((vcg, index) => {
+
+                const result = vcg['SMT check-sat result']
+
+                return (
+                    <tr key={index}>
+                        <td>{vcg['Machine Code Address']}</td>
+                        <td style={{ color: colorForResult(result) }}>{textForResult(result)}</td>
+                        <td>{vcg['Goal Tag']}</td>
+                        <td>{vcg['Goal Extra Info']}</td>
+                    </tr>
+                )
+            })
+    )
 
     return (
         <div>
+            <p>
+                {vcgCount} VCGs attempted ({goodVCGs.length} proved safe, {badVCGs.length} currently unsafe)
+                {/* <input
+                    style={{ marginLeft: '40px' }}
+                    type="checkbox"
+                    name="show-safe-vcgs"
+                />
+                <label htmlFor="show-safe-vcgs">Display safe VCGs</label> */}
+            </p>
             <table>
-                {renderVCGs}
+                <tbody>
+                    {renderVCGs}
+                </tbody>
             </table>
         </div>
     )
@@ -75,13 +95,20 @@ function makeMessageListener(setters: {
     return (message: E2W.ExtensionToReoptVCGWebview) => {
         switch (message.tag) {
 
-            case E2W.reoptVCGOutput: {
-                setters.setReoptVCGOutput(message.output)
+            case E2W.clearReoptVCGEntries: {
+                setters.setReoptVCGOutput([])
+                break
+            }
+
+            case E2W.reoptVCGEntry: {
+                setters.setReoptVCGOutput(entries =>
+                    update(entries, { $push: [message.entry] })
+                )
                 break
             }
 
             default: {
-                throw new UnreachableCaseError(message.tag)
+                throw new UnreachableCaseError(message)
             }
 
         }

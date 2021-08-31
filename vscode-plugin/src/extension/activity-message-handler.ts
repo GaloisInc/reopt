@@ -30,6 +30,7 @@ import * as reoptVCG from './reopt-vcg'
 import { ActivityWebview, ReoptVCGEntry, ReoptVCGWebview } from '@shared/interfaces'
 import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
 import { InterfaceContributions } from 'mocha'
+import { Tail } from 'tail'
 
 
 async function openOutputFile(outputFile: string): Promise<void> {
@@ -330,6 +331,13 @@ function processOutputAndEvents(
         // that shows the result, we will stay here forever.
         const webview = await reoptVCGWebviewPromise
 
+        // Tell the webview to forget about pre-existing entries
+        webview.postMessage({
+            tag: E2ReoptVCGW.clearReoptVCGEntries,
+        } as E2ReoptVCGW.ClearReoptVCGEntries)
+
+        // FIXME: currently the progress stops when the JSONs file is returned, but
+        // it should continue while the reopt-vcg process is running.
         const jsonsFile = await (
             vscode.window
                 .withProgress(
@@ -339,29 +347,42 @@ function processOutputAndEvents(
                         cancellable: true,
                     },
                     // TODO: we can probably kill the child process upon cancellation
-                    (_progress, _token) => reoptVCG.runReoptVCGToGenerateJSONs(context, annotationsFile.value)
+                    (_progress, _token) => reoptVCG.runReoptVCGToGenerateJSONs(
+                        context,
+                        annotationsFile.value,
+                    )
                 )
         )
 
         const resolvedJSONsFile = path.resolve(workingDirectory, jsonsFile)
 
-        if (!fs.existsSync(resolvedJSONsFile)) {
-            vscode.window.showErrorMessage(
-                `Not displaying reopt-vcg results because JSONs file does not exist: ${jsonsFile}`
-            )
-        }
+        const tail = new Tail(resolvedJSONsFile, { fromBeginning: true })
+        tail.on('line', line => {
 
-        reoptVCG.processReoptVCGOutput(
-            resolvedJSONsFile,
-            output => {
-                console.log(`Read ${output.length} entries from JSONs file.`)
-                webview.postMessage({
-                    tag: E2ReoptVCGW.reoptVCGOutput,
-                    output,
-                } as E2ReoptVCGW.ReoptVCGOutput)
+            webview.postMessage({
+                tag: E2ReoptVCGW.reoptVCGEntry,
+                entry: JSON.parse(line),
+            } as E2ReoptVCGW.ReoptVCGEntry)
 
-            },
-        )
+        })
+
+        // if (!fs.existsSync(resolvedJSONsFile)) {
+        //     vscode.window.showErrorMessage(
+        //         `Not displaying reopt-vcg results because JSONs file does not exist: ${jsonsFile}`
+        //     )
+        // }
+
+        // reoptVCG.processReoptVCGOutput(
+        //     resolvedJSONsFile,
+        //     output => {
+        //         console.log(`Read ${output.length} entries from JSONs file.`)
+        //         webview.postMessage({
+        //             tag: E2ReoptVCGW.reoptVCGOutput,
+        //             output,
+        //         } as E2ReoptVCGW.ReoptVCGOutput)
+
+        //     },
+        // )
 
         // Fake running `reopt-vcg` by looking for a JSON file with
         // the same name as the project.
