@@ -4,4 +4,6 @@
 /reopt-0.0.1.vsix
 /webpack.config.js
 /webpack.config.d.ts
+*.ann
+*.jsons
 *.tsbuildinfo

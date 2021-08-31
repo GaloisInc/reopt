@@ -1,5 +1,6 @@
-import { promisify } from 'es6-promisify'
 import * as fs from 'fs'
+
+import { promisify } from 'es6-promisify'
 
 export const close = promisify(fs.close)
 export const open = promisify(fs.open)

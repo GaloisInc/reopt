@@ -3,13 +3,12 @@ import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-activity-webview'
+import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
+import { getWorkspaceConfiguration } from '@shared/project-configuration'
 
 import * as ActivityMessageHandler from './activity-message-handler'
 import { getNonce } from './nonce'
 import { LLVMDocumentSymbolProvider } from './symbol-provider'
-import { getWorkspaceConfiguration } from '@shared/project-configuration'
-import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
-import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
 
 
 export class ActivityViewProvider implements vscode.WebviewViewProvider {
@@ -66,7 +65,7 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
-    ) {
+    ): void {
         const webview: ActivityWebview = webviewView.webview
 
         const stylesheetURI = vscode.Uri.joinPath(

@@ -1,5 +1,6 @@
-import * as Interfaces from './interfaces'
 import * as vscode from 'vscode'
+
+import * as Interfaces from './interfaces'
 
 /**
  * WARNING: make sure that all of the data you put in messages is serialized. In

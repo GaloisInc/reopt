@@ -1,10 +1,11 @@
 import * as ChildProcess from 'child_process'
-import * as Array from 'fp-ts/Array'
-import * as Option from 'fp-ts/Option'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import * as readline from 'readline'
+
+import * as Array from 'fp-ts/Array'
+import * as Option from 'fp-ts/Option'
 import { UnreachableCaseError } from 'ts-essentials'
 import * as vscode from 'vscode'
 
@@ -56,7 +57,8 @@ function outputForReoptMode(
 
         case ReoptMode.GenerateCFG: {
             return (
-                Option.getOrElse
+                Option
+                    .getOrElse
                     (() => replaceExtensionWithCFG(projectConfiguration.binaryFile))
                     (projectConfiguration.outputNameCFG)
             )
@@ -130,13 +132,13 @@ function argsForReoptMode(
 
 
 // TODO: get that schema from the Haskell side
-type ReoptError =
-    [
-        number,
-        number,
-        number,
-        string,
-    ]
+// type ReoptError =
+//     [
+//         number,
+//         number,
+//         number,
+//         string,
+//     ]
 
 
 /**
@@ -169,7 +171,7 @@ export async function displayReoptEventsAsDiagnostics(
     // Highlight for the bytes in blocks that caused errors
     const bytesDecoration = vscode.window.createTextEditorDecorationType({
         // backgroundColor: "#45383F",
-        textDecoration: "#FF6464 wavy underline",
+        textDecoration: '#FF6464 wavy underline',
     })
 
     const lineReader = readline.createInterface(
@@ -243,7 +245,7 @@ export function runReopt(
         return Promise.reject()
     }
 
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
 
         const annotations =
             (reoptMode === ReoptMode.GenerateLLVM)
@@ -381,7 +383,7 @@ function makeDiagnosticBuilderForAddresses(
     addresses: DisassemblyLineInformation[],
 ): (line: string) => Promise<DiagnosticAndBytesRanges> {
     return async (line) => {
-        const [funId, blockId, _instrIndex, blockSize, which, message] = JSON.parse(line) as ReoptCFGError
+        const [, blockId, , blockSize, which, message] = JSON.parse(line) as ReoptCFGError
         const address = blockId.toString(16)
         const zero = new vscode.Position(0, 0)
         const zeroRange = new vscode.Range(zero, zero)

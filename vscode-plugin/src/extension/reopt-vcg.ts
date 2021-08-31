@@ -1,8 +1,8 @@
 import * as ChildProcess from 'child_process'
 import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 import * as readline from 'readline'
+
 import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
@@ -10,8 +10,6 @@ import { ReoptVCGEntry } from '@shared/interfaces'
 import {
     getWorkspaceConfiguration,
 } from '@shared/project-configuration'
-
-import { replaceExtensionWith } from './reopt'
 
 
 export enum ReoptMode {
@@ -74,7 +72,7 @@ export function runReoptVCG(
         return Promise.reject()
     }
 
-    return new Promise(async (resolve, _reject) => {
+    return new Promise((resolve, _reject) => {
 
         ChildProcess.execFile(
 

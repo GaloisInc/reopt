@@ -32,7 +32,7 @@ export class ReoptNodeProvider implements vscode.TreeDataProvider<LLVMFunction>,
         return Array.from(fakeLLVMParser(currentDocument.getText()))
     }
 
-    getTreeItem(e: LLVMFunction) {
+    getTreeItem(e: LLVMFunction): vscode.TreeItem {
         return new vscode.TreeItem(e.name)
     }
 

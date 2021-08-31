@@ -8,11 +8,13 @@
  * there if available.
  */
 
+import * as fs from 'fs'
+
+import * as vscode from 'vscode'
+
 import * as Deserializers from '@shared/deserializers'
 import { DisassemblyLineInformation, SerializationOf } from '@shared/interfaces'
 import * as Serializers from '@shared/serializers'
-import * as fs from 'fs'
-import * as vscode from 'vscode'
 
 
 const addressesStateKey = 'reopt-addresses' // do NOT export
@@ -68,7 +70,7 @@ export function populateAddresses(
 
                 /*
                  * A line follows the following structure:
-                 * - two spaces (using underscore here for readability)             __
+                 * - two spaces (using underscore here for readability)             _{2}
                  * - a hex address, capture group 1:                                ([0-9a-f]+)
                  * - a colon, followed by a tab                                     :\t
                  * - a bunch of hex bytes, grouped 2 characters by 2, separated
@@ -79,7 +81,7 @@ export function populateAddresses(
                  * - a tab,                                                         \t?
                  * - and finally the instruction decoded, capture group 3.          (.*)
                  */
-                let lineRE = /  ([0-9a-f]+):\t((?:[0-9a-f][0-9a-f] ?)*[0-9a-f][0-9a-f]) *\t?(.*)/
+                const lineRE = / {2}([0-9a-f]+):\t((?:[0-9a-f][0-9a-f] ?)*[0-9a-f][0-9a-f]) *\t?(.*)/
 
                 const [lineNumber, line] = entry
 

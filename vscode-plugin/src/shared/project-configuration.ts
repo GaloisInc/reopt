@@ -91,7 +91,7 @@ ${JSON.stringify(input, null, 2)}
 
 Error details:
 
-${failure(errors).map(s => '- ' + s).join('\n')}
+${failure(errors).map(s => `- ${s}`).join('\n')}
 `
 }
 

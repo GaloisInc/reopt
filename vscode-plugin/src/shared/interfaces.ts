@@ -84,11 +84,11 @@ interface SerializedSymbolInformation {
 
 
 export type ReoptVCGEntry = {
-    "SMT check-sat result": 'sat' | 'unsat'
-    "Machine Code Address": string
-    "LLVM Instruction Index": string
-    "LLVM Function Name": string
-    "LLVM Block Label": string
-    "Goal Tag": string
-    "Goal Extra Info": string
+    'SMT check-sat result': 'sat' | 'unsat'
+    'Machine Code Address': string
+    'LLVM Instruction Index': string
+    'LLVM Function Name': string
+    'LLVM Block Label': string
+    'Goal Tag': string
+    'Goal Extra Info': string
 }

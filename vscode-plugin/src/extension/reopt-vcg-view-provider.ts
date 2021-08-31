@@ -2,10 +2,9 @@ import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-reopt-vcg-webview'
+import { ReoptVCGWebview } from '@shared/interfaces'
 
 import { getNonce } from './nonce'
-import { getWorkspaceConfiguration } from '@shared/project-configuration'
-import { ReoptVCGWebview } from '@shared/interfaces'
 
 
 export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
@@ -28,7 +27,7 @@ export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
         webviewView: vscode.WebviewView,
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
-    ) {
+    ): void {
         const webview = webviewView.webview
 
         const webviewBundleURI = vscode.Uri.joinPath(
@@ -71,8 +70,6 @@ export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
         // this allows the content security policy to allow execution of exactly
         // the scripts with this random identifier
         const nonce = getNonce()
-
-        const projectConfiguration = getWorkspaceConfiguration(this.#context)
 
         const initialData: E2W.WebviewInitialData = {
             _tag: 'WebviewInitialData',

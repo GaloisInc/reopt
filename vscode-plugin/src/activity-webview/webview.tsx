@@ -1,11 +1,11 @@
 import * as React from 'react'
+import { UnreachableCaseError } from 'ts-essentials'
 import * as vscode from 'vscode'
 
-import { UnreachableCaseError } from 'ts-essentials'
 
+import * as W2E from '@shared/activity-webview-to-extension'
 import * as E2W from '@shared/extension-to-activity-webview'
 import * as Interfaces from '@shared/interfaces'
-import * as W2E from '@shared/activity-webview-to-extension'
 
 function makeMessageListener(setters: {
     setProjectName: Interfaces.ReactSetter<string | undefined>,
@@ -38,39 +38,42 @@ function makeMessageListener(setters: {
     }
 }
 
-enum SortBy {
-    Name = 'name',
-    Position = 'position',
-}
+// enum SortBy {
+//     Name = 'name',
+//     Position = 'position',
+// }
 
-function getSort(
-    sortBy: SortBy,
-): (
-        a: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
-        b: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
-    ) => number {
-    switch (sortBy) {
 
-        case SortBy.Name: {
-            return (a, b) => a[1].name.localeCompare(b[1].name)
-        }
+// function getSort(
+//     sortBy: SortBy,
+// ): (
+//         a: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
+//         b: [number, Interfaces.SerializationOf<vscode.SymbolInformation>],
+//     ) => number {
+//     switch (sortBy) {
 
-        case SortBy.Position: {
-            return (a, b) => a[0] - b[0]
-        }
+//         case SortBy.Name: {
+//             return (a, b) => a[1].name.localeCompare(b[1].name)
+//         }
 
-    }
-}
+//         case SortBy.Position: {
+//             return (a, b) => a[0] - b[0]
+//         }
 
-function jumpToSymbol(
-    vscode: Interfaces.ActivityViewVSCodeAPI,
-    symbol: Interfaces.SerializationOf<vscode.SymbolInformation>,
-) {
-    vscode.postMessage({
-        tag: W2E.jumpToSymbol,
-        symbol,
-    })
-}
+//     }
+// }
+
+
+// function jumpToSymbol(
+//     vscode: Interfaces.ActivityViewVSCodeAPI,
+//     symbol: Interfaces.SerializationOf<vscode.SymbolInformation>,
+// ) {
+//     vscode.postMessage({
+//         tag: W2E.jumpToSymbol,
+//         symbol,
+//     })
+// }
+
 
 export function ActivityWebview(props: {
     initialData: E2W.ActivityWebviewInitialData,
@@ -81,12 +84,12 @@ export function ActivityWebview(props: {
 
     const persisted = props.vscode.getState()
 
-    const [filter, setFilter] = React.useState('')
+    // const [filter, setFilter] = React.useState('')
     const [projectName, setProjectName] = React.useState(
         persisted?.projectName || initialData.projectName
     )
-    const [sortBy, setSortBy] = React.useState(SortBy.Position)
-    const [symbols, setSymbols] = React.useState(initialData.symbols)
+    // const [sortBy, setSortBy] = React.useState(SortBy.Position)
+    const [, setSymbols] = React.useState(initialData.symbols)
 
     /*
     This effect tracks all values that are part of the persisted state, and
@@ -142,7 +145,7 @@ export function ActivityWebview(props: {
         <h3>
             {
                 projectName === undefined
-                    ? "No project open"
+                    ? 'No project open'
                     : <a onClick={showProjectFile}>{projectName}</a>
             }
         </h3>

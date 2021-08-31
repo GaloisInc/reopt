@@ -2,6 +2,8 @@ import { isLeft } from 'fp-ts/Either'
 import { toNullable } from 'fp-ts/Option'
 import * as vscode from 'vscode'
 
+import * as E2W from '@shared/extension-to-activity-webview'
+import { ActivityWebview } from '@shared/interfaces'
 import {
     ProjectConfiguration,
     decodeConfiguration,
@@ -9,8 +11,6 @@ import {
     setWorkspaceProjectFile,
 } from '@shared/project-configuration'
 import * as Promisified from '@shared/promisified'
-import * as E2W from '@shared/extension-to-activity-webview'
-import { ActivityWebview } from '@shared/interfaces'
 
 
 async function readReoptProjectFile(
@@ -23,7 +23,7 @@ async function readReoptProjectFile(
 
     if (isLeft(decoded)) {
         vscode.window.showErrorMessage(
-            `Could not decode your configuration file. See your console.`
+            'Could not decode your configuration file. See your console.'
         )
         console.log(decoded.left)
         return Promise.reject()

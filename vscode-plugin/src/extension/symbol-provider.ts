@@ -37,7 +37,7 @@ function inspectLineForSymbol(
                 vscode.SymbolKind.Function,
                 '',
                 new vscode.Location(document.uri, new vscode.Range(start, end))
-            )
+            ),
         ]
 
     }

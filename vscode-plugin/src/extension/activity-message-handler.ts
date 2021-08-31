@@ -5,20 +5,21 @@
 import { ExecFileException } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
-import * as vscode from 'vscode'
 
 import { option } from 'fp-ts'
+import { Tail } from 'tail'
+import * as vscode from 'vscode'
 
+import * as W2E from '@shared/activity-webview-to-extension'
 import * as E2W from '@shared/extension-to-activity-webview'
 import * as E2ReoptVCGW from '@shared/extension-to-reopt-vcg-webview'
+import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
 import {
     clearWorkspaceConfiguration,
     clearWorkspaceProjectFile,
     getWorkspaceConfiguration,
     getWorkspaceProjectFile,
-    ProjectConfiguration,
 } from '@shared/project-configuration'
-import * as W2E from '@shared/activity-webview-to-extension'
 
 import { createReoptProject } from './create-reopt-project'
 import {
@@ -27,10 +28,6 @@ import {
 } from './open-reopt-project'
 import * as reopt from './reopt'
 import * as reoptVCG from './reopt-vcg'
-import { ActivityWebview, ReoptVCGEntry, ReoptVCGWebview } from '@shared/interfaces'
-import { ReoptVCGViewProvider } from './reopt-vcg-view-provider'
-import { InterfaceContributions } from 'mocha'
-import { Tail } from 'tail'
 
 
 async function openOutputFile(outputFile: string): Promise<void> {
@@ -239,7 +236,7 @@ export function makeMessageHandler(
                     return
                 }
                 const doc = await vscode.workspace.openTextDocument(projectFile)
-                const editor = await vscode.window.showTextDocument(doc)
+                await vscode.window.showTextDocument(doc)
 
                 return
             }

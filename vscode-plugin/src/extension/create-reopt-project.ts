@@ -1,6 +1,7 @@
-import { option } from 'fp-ts'
 import * as fs from 'fs'
 import * as path from 'path'
+
+import { option } from 'fp-ts'
 import * as vscode from 'vscode'
 
 import * as Configuration from '@shared/project-configuration'

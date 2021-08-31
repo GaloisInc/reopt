@@ -43,7 +43,7 @@ export const serializeSymbolInformation
             // terms of JSON seralizability, it will allow 'symbol.location.range'
             // as a value of type 'SerializedRange', even though a 'vscode.Range'
             // does not serialize correctly!
-            range: serializeRange(range)
+            range: serializeRange(range),
         }
 
     }
