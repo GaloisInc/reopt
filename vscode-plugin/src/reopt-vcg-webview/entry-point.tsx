@@ -12,7 +12,7 @@ interface WebviewWindow extends Window {
 }
 declare const window: WebviewWindow
 
-declare const acquireVsCodeApi: () => Interfaces.MainViewVSCodeAPI
+declare const acquireVsCodeApi: () => Interfaces.ReoptVCGViewVSCodeAPI
 const vscode = acquireVsCodeApi()
 
 const container = document.getElementById(Constants.activityWebviewId) as HTMLDivElement | null

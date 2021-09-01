@@ -6,22 +6,28 @@ import * as Interfaces from './interfaces'
  * on the other end!
  */
 
+
 export const webviewInitialDataKey = 'webviewInitialData'
 export type WebviewInitialData = {
-    _tag: 'WebviewInitialData'
+    entries: Interfaces.ReoptVCGEntry[]
+}
+
+
+export enum Tags {
+    addReoptVCGEntry = 'AddReoptVCGEntry',
+    setReoptVCGEntries = 'SetReoptVCGEntries',
 }
 
 export type ExtensionToReoptVCGWebview
-    = ClearReoptVCGEntries
-    | ReoptVCGEntry
+    = AddReoptVCGEntry
+    | SetReoptVCGEntries
 
-export const clearReoptVCGEntries = 'ClearReoptVCGEntries'
-export type ClearReoptVCGEntries = Readonly<{
-    tag: typeof clearReoptVCGEntries
-}>
-
-export const reoptVCGEntry = 'ReoptVCGEntry'
-export type ReoptVCGEntry = Readonly<{
-    tag: typeof reoptVCGEntry
+export type AddReoptVCGEntry = Readonly<{
+    tag: Tags.addReoptVCGEntry
     entry: Interfaces.ReoptVCGEntry
 }>
+
+export type SetReoptVCGEntries = {
+    tag: Tags.setReoptVCGEntries
+    entries: Interfaces.ReoptVCGEntry[]
+}

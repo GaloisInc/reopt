@@ -7,9 +7,7 @@ import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
 import { ReoptVCGEntry } from '@shared/interfaces'
-import {
-    getWorkspaceConfiguration,
-} from '@shared/project-configuration'
+import * as WorkspaceState from '@shared/workspace-state'
 
 
 export enum ReoptMode {
@@ -52,7 +50,7 @@ export function runReoptVCG(
         Constants.reoptSectionKey,
     )
 
-    const projectConfiguration = getWorkspaceConfiguration(context)
+    const projectConfiguration = WorkspaceState.readReoptProjectConfiguration(context)
 
     if (projectConfiguration === undefined) {
         vscode.window.showErrorMessage(

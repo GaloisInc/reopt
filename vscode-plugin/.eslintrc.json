@@ -114,7 +114,11 @@
                 "alwaysTryTypes": true, // always try to resolve types under `<root>@types` directory even it doesn't contain any source code, like `@types/unist`
                 // Choose from one of the "project" configs below or omit to use <root>/tsconfig.json by default
                 "project": [
-                    "tsconfig.json"
+                    "tsconfig.json",
+                    "src/activity-webview/tsconfig.json",
+                    "src/extension/tsconfig.json",
+                    "src/reopt-vcg-webview/tsconfig.json",
+                    "src/shared/tsconfig.json"
                 ]
             }
         }

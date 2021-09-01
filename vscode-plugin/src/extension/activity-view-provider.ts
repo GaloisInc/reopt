@@ -4,7 +4,7 @@ import * as vscode from 'vscode'
 import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-activity-webview'
 import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
-import { getWorkspaceConfiguration } from '@shared/project-configuration'
+import * as WorkspaceState from '@shared/workspace-state'
 
 import * as ActivityMessageHandler from './activity-message-handler'
 import { getNonce } from './nonce'
@@ -135,7 +135,7 @@ export class ActivityViewProvider implements vscode.WebviewViewProvider {
         // the scripts with this random identifier
         const nonce = getNonce()
 
-        const projectConfiguration = getWorkspaceConfiguration(this.#context)
+        const projectConfiguration = WorkspaceState.readReoptProjectConfiguration(this.#context)
 
         const initialData: E2W.ActivityWebviewInitialData = {
             projectName: (

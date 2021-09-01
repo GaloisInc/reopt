@@ -10,16 +10,11 @@ import { UnreachableCaseError } from 'ts-essentials'
 import * as vscode from 'vscode'
 
 import * as Constants from '@shared/constants'
-import { DisassemblyLineInformation } from '@shared/interfaces'
-import {
-    getWorkspaceConfiguration,
-    ProjectConfiguration,
-} from '@shared/project-configuration'
+import { DisassemblyLineInformation, OutputAndEventsFiles } from '@shared/interfaces'
+import { ProjectConfiguration } from '@shared/project-configuration'
+import * as WorkspaceState from '@shared/workspace-state'
 
-import {
-    getWorkspaceAddresses,
-    populateAddresses,
-} from './workspace-addresses'
+import { getWorkspaceAddresses, populateAddresses } from './workspace-addresses'
 
 
 export enum ReoptMode {
@@ -225,7 +220,7 @@ export function runReopt(
         Constants.reoptSectionKey,
     )
 
-    const projectConfiguration = getWorkspaceConfiguration(context)
+    const projectConfiguration = WorkspaceState.readReoptProjectConfiguration(context)
 
     if (projectConfiguration === undefined) {
         vscode.window.showErrorMessage(
@@ -318,7 +313,7 @@ export async function getProjectConfiguration(
     context: vscode.ExtensionContext,
 ): Promise<ProjectConfiguration> {
 
-    const projectConfiguration = getWorkspaceConfiguration(context)
+    const projectConfiguration = WorkspaceState.readReoptProjectConfiguration(context)
 
     if (projectConfiguration === undefined) {
         vscode.window.showErrorMessage(
@@ -335,7 +330,7 @@ export async function getProjectConfiguration(
 export async function runReoptToGenerateFile(
     context: vscode.ExtensionContext,
     reoptMode: ReoptMode,
-): Promise<{ outputFile: string, eventsFile: string }> {
+): Promise<OutputAndEventsFiles> {
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'temp-crux-llvm-'))
     const eventsFile = `${tempDir}/events`
     // const outputFile = `${tempDir}/disassemble`

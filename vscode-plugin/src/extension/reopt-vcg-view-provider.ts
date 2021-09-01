@@ -3,6 +3,7 @@ import * as vscode from 'vscode'
 import * as Constants from '@shared/constants'
 import * as E2W from '@shared/extension-to-reopt-vcg-webview'
 import { ReoptVCGWebview } from '@shared/interfaces'
+import * as WorkspaceState from '@shared/workspace-state'
 
 import { getNonce } from './nonce'
 
@@ -13,11 +14,11 @@ export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
     readonly #context: vscode.ExtensionContext
     #outputChannel?: vscode.OutputChannel
     #projectConfigurationWatcher?: vscode.FileSystemWatcher
-    #resolveReoptVCGWebview: (w : ReoptVCGWebview) => void
+    #resolveReoptVCGWebview: (w: ReoptVCGWebview) => void
 
     constructor(
         context: vscode.ExtensionContext,
-        resolveReoptVCGWebview: (w : ReoptVCGWebview) => void,
+        resolveReoptVCGWebview: (w: ReoptVCGWebview) => void,
     ) {
         this.#context = context
         this.#resolveReoptVCGWebview = resolveReoptVCGWebview
@@ -54,6 +55,24 @@ export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
             // symbols,
         )
 
+        /**
+         * When the webview changes visibility, its context is not retained.
+         * Therefore, when the webview becomes visible again, its persisted
+         * state is stale w.r.t. the workspace state.  So we authoritatively
+         * overwrite the extension state with the current workspace state.
+         */
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible) {
+                const entries = WorkspaceState.readReoptVCGEntries(this.#context)
+                webview.postMessage(
+                    {
+                        tag: E2W.Tags.setReoptVCGEntries,
+                        entries,
+                    } as E2W.SetReoptVCGEntries
+                )
+            }
+        })
+
         this.#resolveReoptVCGWebview(webview)
 
     }
@@ -72,7 +91,7 @@ export class ReoptVCGViewProvider implements vscode.WebviewViewProvider {
         const nonce = getNonce()
 
         const initialData: E2W.WebviewInitialData = {
-            _tag: 'WebviewInitialData',
+            entries: WorkspaceState.readReoptVCGEntries(this.#context),
         }
 
         return `

@@ -24,14 +24,18 @@ export interface ActivityViewVSCodeAPI {
     postMessage(m: W2E.ActivityWebviewToExtension): void
 }
 
-export interface MainViewPersistedState {
-    results: string[]
+export interface ReoptVCGViewPersistedState {
+    results: ReoptVCGEntry[]
 }
 
-export interface MainViewVSCodeAPI {
-    getState(): MainViewPersistedState | undefined
-    setState(s: MainViewPersistedState): void
+export interface ReoptVCGViewVSCodeAPI {
+    getState(): ReoptVCGViewPersistedState | undefined
+    setState(s: ReoptVCGViewPersistedState): void
     postMessage(m: W2E.MainWebviewToExtension): void
+}
+
+export const initialReoptVCGViewPersistedState : ReoptVCGViewPersistedState = {
+    results: [],
 }
 
 export interface DisassemblyLineInformation {
@@ -91,4 +95,10 @@ export type ReoptVCGEntry = {
     'LLVM Block Label': string
     'Goal Tag': string
     'Goal Extra Info': string
+}
+
+
+export type OutputAndEventsFiles = {
+    outputFile: string
+    eventsFile: string
 }

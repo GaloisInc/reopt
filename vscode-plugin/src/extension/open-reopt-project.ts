@@ -4,13 +4,9 @@ import * as vscode from 'vscode'
 
 import * as E2W from '@shared/extension-to-activity-webview'
 import { ActivityWebview } from '@shared/interfaces'
-import {
-    ProjectConfiguration,
-    decodeConfiguration,
-    setWorkspaceConfiguration,
-    setWorkspaceProjectFile,
-} from '@shared/project-configuration'
+import { ProjectConfiguration, decodeConfiguration } from '@shared/project-configuration'
 import * as Promisified from '@shared/promisified'
+import * as WorkspaceState from '@shared/workspace-state'
 
 
 async function readReoptProjectFile(
@@ -40,7 +36,7 @@ async function readAndSetProjectConfiguration(
     reoptProjectFile: string,
 ): Promise<void> {
     const configuration = await readReoptProjectFile(reoptProjectFile)
-    setWorkspaceConfiguration(context, configuration)
+    WorkspaceState.writeReoptProjectConfiguration(context, configuration)
     webview.postMessage({
         tag: E2W.openedProjectTag,
         projectName: toNullable(configuration.name),
@@ -54,7 +50,7 @@ export async function openReoptProject(
     reoptProjectFile: string,
 ): Promise<vscode.FileSystemWatcher> {
 
-    setWorkspaceProjectFile(context, reoptProjectFile)
+    WorkspaceState.writeReoptProjectFile(context, reoptProjectFile)
     readAndSetProjectConfiguration(context, webview, reoptProjectFile)
 
     const watcher = vscode.workspace.createFileSystemWatcher(

@@ -10,16 +10,11 @@ import { option } from 'fp-ts'
 import { Tail } from 'tail'
 import * as vscode from 'vscode'
 
-import * as W2E from '@shared/activity-webview-to-extension'
-import * as E2W from '@shared/extension-to-activity-webview'
-import * as E2ReoptVCGW from '@shared/extension-to-reopt-vcg-webview'
-import { ActivityWebview, ReoptVCGWebview } from '@shared/interfaces'
-import {
-    clearWorkspaceConfiguration,
-    clearWorkspaceProjectFile,
-    getWorkspaceConfiguration,
-    getWorkspaceProjectFile,
-} from '@shared/project-configuration'
+import * as AW2E from '@shared/activity-webview-to-extension'
+import * as E2AW from '@shared/extension-to-activity-webview'
+import * as E2VCGW from '@shared/extension-to-reopt-vcg-webview'
+import * as Interfaces from '@shared/interfaces'
+import * as WorkspaceState from '@shared/workspace-state'
 
 import { createReoptProject } from './create-reopt-project'
 import {
@@ -104,7 +99,7 @@ function makeReoptGenerate(
     context: vscode.ExtensionContext,
     diagnosticCollection: vscode.DiagnosticCollection,
     replaceOutputChannel: ReplaceOutputChannel,
-    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
+    reoptVCGWebviewPromise: Promise<Interfaces.ReoptVCGWebview>,
 ): (reoptMode: reopt.ReoptMode) => void {
 
     return (reoptMode) => {
@@ -146,12 +141,12 @@ function makeReoptGenerate(
  */
 export function makeMessageHandler(
     context: vscode.ExtensionContext,
-    activityWebview: ActivityWebview,
+    activityWebview: Interfaces.ActivityWebview,
     diagnosticCollection: vscode.DiagnosticCollection,
-    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
+    reoptVCGWebviewPromise: Promise<Interfaces.ReoptVCGWebview>,
     replaceConfigurationWatcher: (w?: vscode.FileSystemWatcher) => void,
     replaceOutputChannel: ReplaceOutputChannel,
-): (m: W2E.ActivityWebviewToExtension) => Promise<void> {
+): (m: AW2E.ActivityWebviewToExtension) => Promise<void> {
 
     const reoptGenerate = makeReoptGenerate(
         context,
@@ -160,28 +155,42 @@ export function makeMessageHandler(
         reoptVCGWebviewPromise,
     )
 
-    return async (message: W2E.ActivityWebviewToExtension) => {
+    const resetProject = () => {
+        WorkspaceState.clearVariable(context, WorkspaceState.reoptProjectConfiguration)
+        WorkspaceState.clearVariable(context, WorkspaceState.reoptProjectFile)
+        WorkspaceState.clearVariable(context, WorkspaceState.reoptVCGEntries)
+        activityWebview.postMessage(
+            { tag: E2AW.closedProjectTag } as E2AW.ClosedProject
+        )
+        reoptVCGWebviewPromise.then(w =>
+            w.postMessage(
+                {
+                    tag: E2VCGW.Tags.setReoptVCGEntries,
+                    entries: [],
+                } as E2VCGW.SetReoptVCGEntries
+            )
+        )
+    }
+
+    return async (message: AW2E.ActivityWebviewToExtension) => {
 
         switch (message.tag) {
 
-            case W2E.closeProject: {
-                clearWorkspaceConfiguration(context)
-                clearWorkspaceProjectFile(context)
-                activityWebview.postMessage({
-                    tag: E2W.closedProjectTag,
-                } as E2W.ClosedProject)
+            case AW2E.closeProject: {
+                resetProject()
                 replaceConfigurationWatcher(undefined)
                 return
             }
 
-            case W2E.createProjectFile: {
+            case AW2E.createProjectFile: {
+                resetProject()
                 const reoptProjectFile = await createReoptProject()
                 const watcher = await openReoptProject(context, activityWebview, reoptProjectFile)
                 replaceConfigurationWatcher(watcher)
                 return
             }
 
-            case W2E.generateCFG: {
+            case AW2E.generateCFG: {
                 reoptGenerate(reopt.ReoptMode.GenerateCFG)
                 return
             }
@@ -191,17 +200,17 @@ export function makeMessageHandler(
             //     return
             // }
 
-            case W2E.generateFunctions: {
+            case AW2E.generateFunctions: {
                 reoptGenerate(reopt.ReoptMode.GenerateFunctions)
                 return
             }
 
-            case W2E.generateLLVM: {
+            case AW2E.generateLLVM: {
                 reoptGenerate(reopt.ReoptMode.GenerateLLVM)
                 return
             }
 
-            case W2E.jumpToSymbol: {
+            case AW2E.jumpToSymbol: {
                 const { fsPath, range } = message.symbol
 
                 const doc = await vscode.workspace.openTextDocument(fsPath)
@@ -219,15 +228,15 @@ export function makeMessageHandler(
                 return
             }
 
-            case W2E.openProject: {
+            case AW2E.openProject: {
+                resetProject()
                 const watcher = await openReoptProjectViaDialog(context, activityWebview)
                 replaceConfigurationWatcher(watcher)
                 return
             }
 
-            case W2E.showProjectFile: {
-
-                const projectFile = getWorkspaceProjectFile(context)
+            case AW2E.showProjectFile: {
+                const projectFile = WorkspaceState.readReoptProjectFile(context)
                 if (projectFile === undefined) {
                     // this should not be possible, but just in case...
                     vscode.window.showErrorMessage(
@@ -284,12 +293,12 @@ function processOutputAndEvents(
     context: vscode.ExtensionContext,
     diagnosticCollection: vscode.DiagnosticCollection,
     reoptMode: reopt.ReoptMode,
-    reoptVCGWebviewPromise: Promise<ReoptVCGWebview>,
-) {
+    reoptVCGWebviewPromise: Promise<Interfaces.ReoptVCGWebview>,
+): (files: Interfaces.OutputAndEventsFiles) => Promise<void> {
     return async ({
         outputFile,
         eventsFile,
-    }: { outputFile: string, eventsFile: string }) => {
+    }) => {
 
         openOutputFile(outputFile)
         processEventsFile(context, diagnosticCollection, eventsFile)
@@ -297,7 +306,7 @@ function processOutputAndEvents(
         // Then, if the file was LLVM, we can run reopt-vcg
         if (reoptMode !== reopt.ReoptMode.GenerateLLVM) { return }
 
-        const projectConfiguration = getWorkspaceConfiguration(context)
+        const projectConfiguration = WorkspaceState.readReoptProjectConfiguration(context)
         if (!projectConfiguration) { return }
         const projectName = projectConfiguration.name
         const annotationsFile = projectConfiguration.annotations
@@ -330,13 +339,36 @@ function processOutputAndEvents(
 
         // Tell the webview to forget about pre-existing entries
         webview.postMessage({
-            tag: E2ReoptVCGW.clearReoptVCGEntries,
-        } as E2ReoptVCGW.ClearReoptVCGEntries)
+            tag: E2VCGW.Tags.setReoptVCGEntries,
+            entries: [],
+        } as E2VCGW.SetReoptVCGEntries)
 
         const jsonsFile = reopt.replaceExtensionWith('jsons')(annotationsFile.value)
+        const resolvedJSONsFile = path.resolve(workingDirectory, jsonsFile)
 
-        // FIXME: currently the progress stops when the JSONs file is returned, but
-        // it should continue while the reopt-vcg process is running.
+        // Since we are going to start reading the file in parallel with
+        // reopt-vcg starting to write into it, we better make sure it does not
+        // contain old lines!
+        fs.closeSync(fs.openSync(resolvedJSONsFile, 'w'))
+
+        const entries: Interfaces.ReoptVCGEntry[] = []
+        WorkspaceState.writeReoptVCGEntries(context, entries)
+
+        /**
+         * WARNING: Make sure to `unwatch` the file when reopt-vcg is done, or
+         * you will have multiple watchers at the same time!
+         */
+        const tail = new Tail(resolvedJSONsFile, { fromBeginning: true })
+        tail.on('line', line => {
+            const entry = JSON.parse(line)
+            entries.push(entry)
+            WorkspaceState.writeReoptVCGEntries(context, entries)
+            webview.postMessage({
+                tag: E2VCGW.Tags.addReoptVCGEntry,
+                entry,
+            } as E2VCGW.AddReoptVCGEntry)
+        })
+
         vscode.window
             .withProgress(
                 {
@@ -345,57 +377,18 @@ function processOutputAndEvents(
                     cancellable: true,
                 },
                 // TODO: we can probably kill the child process upon cancellation
-                (_progress, _token) => reoptVCG.runReoptVCG(
-                    context,
-                    {
-                        annotationsFile: annotationsFile.value,
-                        jsonsFile,
-                    },
+                (_progress, _token) => (
+                    reoptVCG.runReoptVCG(
+                        context,
+                        {
+                            annotationsFile: annotationsFile.value,
+                            jsonsFile,
+                        },
+                    ).finally(() => {
+                        tail.unwatch()
+                    })
                 )
             )
-
-        const resolvedJSONsFile = path.resolve(workingDirectory, jsonsFile)
-
-        const tail = new Tail(resolvedJSONsFile, { fromBeginning: true })
-        tail.on('line', line => {
-
-            webview.postMessage({
-                tag: E2ReoptVCGW.reoptVCGEntry,
-                entry: JSON.parse(line),
-            } as E2ReoptVCGW.ReoptVCGEntry)
-
-        })
-
-        // if (!fs.existsSync(resolvedJSONsFile)) {
-        //     vscode.window.showErrorMessage(
-        //         `Not displaying reopt-vcg results because JSONs file does not exist: ${jsonsFile}`
-        //     )
-        // }
-
-        // reoptVCG.processReoptVCGOutput(
-        //     resolvedJSONsFile,
-        //     output => {
-        //         console.log(`Read ${output.length} entries from JSONs file.`)
-        //         webview.postMessage({
-        //             tag: E2ReoptVCGW.reoptVCGOutput,
-        //             output,
-        //         } as E2ReoptVCGW.ReoptVCGOutput)
-
-        //     },
-        // )
-
-        // Fake running `reopt-vcg` by looking for a JSON file with
-        // the same name as the project.
-        // const reoptVCGOutputFilename = `${projectName.value}.jsons`
-        // const reoptVCGOutputFile = vscode.Uri.joinPath(context.extensionUri, 'out', 'webview-static', reoptVCGOutputFilename).fsPath
-        // if (!fs.existsSync(reoptVCGOutputFile)) { return }
-
-        // const reoptVCGOutput: ReoptVCGEntry[] = JSON.parse(fs.readFileSync(reoptVCGOutputFile).toString())
-
-        // webview.postMessage({
-        //     tag: E2ReoptVCGW.reoptVCGOutput,
-        //     output: reoptVCGOutput,
-        // } as E2ReoptVCGW.ReoptVCGOutput)
 
     }
 }
