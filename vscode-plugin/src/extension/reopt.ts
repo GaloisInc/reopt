@@ -353,7 +353,7 @@ export async function runReoptToGenerateFile(
 
 // TODO: I would like this to be generated on the Haskell side using
 // aeson-typescript.
-type ReoptCFGError = [number, number, number, number, string, string]
+type ReoptCFGError = [number, number, number, number, string]
 
 
 type DiagnosticAndBytesRanges = {
@@ -378,7 +378,9 @@ function makeDiagnosticBuilderForAddresses(
     addresses: DisassemblyLineInformation[],
 ): (line: string) => Promise<DiagnosticAndBytesRanges> {
     return async (line) => {
-        const [, blockId, , blockSize, which, message] = JSON.parse(line) as ReoptCFGError
+        // Ideally this would be synced with the ExportEvent datatype from
+        // Reopt/Events/Export.hs
+        const [, blockId, , blockSize, which] = JSON.parse(line) as ReoptCFGError
         const address = blockId.toString(16)
         const zero = new vscode.Position(0, 0)
         const zeroRange = new vscode.Range(zero, zero)
@@ -390,7 +392,7 @@ function makeDiagnosticBuilderForAddresses(
 
         const diagnostic = new vscode.Diagnostic(
             range,
-            `${which}: ${message}`,
+            `${which} (block ${address} of size ${blockSize})`,
             vscode.DiagnosticSeverity.Error,
         )
 
