@@ -4,7 +4,7 @@ Reopt is a general purpose decompilation and recompilation tool
 for repurposing application logic.  It does this by analyzing machine
 code to recover a more flexible program representation --
 specifically the [LLVM assembly language](https://llvm.org/docs/LangRef.html).
-Once in this format, one can then optimization tools to optimize the
+Once in this format, one can then apply optimization tools to optimize the
 LLVM, recompile the application into optimized or security hardened
 object code, and use Reopt to merge the recompiled code back into the
 original executable.
@@ -62,12 +62,15 @@ git clone https://github.com/GaloisInc/reopt.git
 cd reopt
 # Fix submodule URLs (can skip if you have a Github account)
 sed -i 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-git submodule update --init --remote
+git submodule update --init
 # Build Reopt
 cabal install exe:reopt
+# Build Reopt Explore
+cabal install exe:reopt-explore
 ```
 
-Reopt will be installed at `$HOME/.cabal/bin/reopt`.
+Reopt and Reopt Explore will be installed at `$HOME/.cabal/bin/reopt`
+`$HOME/.cabal/bin/reopt-explore`.
 
 Reopt's verification condition generator (`reopt-vcg`) is included in the
 aforementioned Github release and Docker image, however the source is currently
@@ -114,10 +117,9 @@ Additional options can be viewed by running `reopt --help`.
    transfer language.
 
  * **Function Recovery** `reopt --export-fns <path> <binary>` writes the
-   functionsthat
-   Reopt has generated after performing stack and function argument analysis.
-   This is a higher-level IR in which explicit references to the stack have been
-   replaced with allocations, and functions take arguments.
+   functions that Reopt has generated after performing stack and function
+   argument analysis. This is a higher-level IR in which explicit references to
+   the stack have been replaced with allocations, and functions take arguments.
 
  * **LLVM Generation** `reopt --export-llvm <path> <binary>` generates
    LLVM from the binary.  This is essentially a version of function
@@ -194,3 +196,103 @@ N.B., when passing flags to customize `OCCAM`/`slash` behavior, be aware that
 `reopt` passes the `-c` and `-emit-llvm` flags via the
 `ldflags` manifest entry so `OCCAM` skips recompiling and acts only as an LLVM
 to LLVM translator.
+
+## Using Reopt Explore
+
+With `reopt-explore` installed we can gather statistics regarding `reopt`'s ability
+to recover functions in an individual or collection of binaries.
+
+To examine a single binary, simply call `reopt-explore` with the a path to the binary:
+
+```
+$ reopt-explore $(which ls)
+...
+/usr/bin/ls
+  Initialization:
+    Code segment: 112,004 bytes
+    Initial entry points: 234
+    Warnings: 0
+  Discovery:
+    Bytes discovered: 59,502 (53%)
+    Succeeded: 216 (92%)
+    Failed: 18 (8%)
+      Unhandled instruction: 1 (0%)
+      Unidentified control flow: 17 (7%)
+  Argument Analysis:
+    Succeeded: 123 (57%)
+    Failed: 93 (43%)
+    Header Warnings: 0
+    DWARF Warnings: 0
+    Code Warnings: 112
+  Invariant Inference:
+    Succeeded: 92 (75%)
+    Failed: 31 (25%)
+      Indirect call target: 1 (1%)
+      Unresolved call target arguments: 30 (24%)
+  Recovery:
+    Succeeded: 81 (88%)
+    Failed: 11 (12%)
+      Unsupported function value: 8 (9%)
+      Unimplemented LLVM backend feature: 3 (3%)
+  LLVM generation status: Succeeded.
+```
+
+To recursively search a directory for binaries and examine each,
+call `reopt-explore` with the path to the directory to search:
+
+```
+$ reopt-explore /usr/bin
+...
+reopt analyzed 394 binaries:
+Generated LLVM bitcode for 394 out of 394 binaries.
+Initialization:
+  Code segment: 42,933,178 bytes
+  Initial entry points: 79776
+  Warnings: 0
+Discovery:
+  Bytes discovered: 23,025,164 (54%)
+  Succeeded: 64,494 (81%)
+  Failed: 15,500 (19%)
+    Unhandled instruction: 425 (1%)
+    Unidentified control flow: 15,075 (19%)
+Argument Analysis:
+  Succeeded: 40,429 (63%)
+  Failed: 24,065 (37%)
+  Header Warnings: 0
+  DWARF Warnings: 0
+  Code Warnings: 38,681
+Invariant Inference:
+  Succeeded: 30,221 (75%)
+  Failed: 10,208 (25%)
+    Symbolic call stack height: 1 (0%)
+    Unresolved stack read: 13 (0%)
+    Indirect call target: 526 (1%)
+    Call target not function entry point: 41 (0%)
+    Unresolved call target arguments: 9,614 (24%)
+    Could not resolve varargs args: 13 (0%)
+Recovery:
+  Succeeded: 21,952 (73%)
+  Failed: 8,269 (27%)
+    Unsupported function value: 2,425 (8%)
+    Unimplemented feature: 6 (0%)
+    Unimplemented LLVM backend feature: 4,762 (16%)
+    Stack offset escape: 83 (0%)
+    Stack read overlapping offset: 1 (0%)
+    Unresolved return value: 8 (0%)
+    Missing variable value: 984 (3%)
+```
+
+## Improving recovery with debug information
+
+`reopt` and `reopt-explore` will try to determine if any debug information
+is available for dynamic dependencies by quiering `gdb` (if it is installed).
+
+Users can also manually specify dependency and debug directories to search in
+manually for both `reopt` and `reopt-explore` via the folowing flags:
+
+```
+--lib-dir=PATH              Additional location to search for dynamic
+                            dependencies.
+--debug-dir=PATH            Additional location to search for dynamic
+                            dependencies' debug info.
+```
