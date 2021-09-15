@@ -218,5 +218,5 @@ jobs:
     - name: Push to Docker hub
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       run: |
-        echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
+        echo '${{ secrets.DOCKER_PASSWORD }}' | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt --all-tags
