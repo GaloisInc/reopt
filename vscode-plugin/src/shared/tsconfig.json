@@ -1,0 +1,22 @@
+{
+    "extends": "../../tsconfig-common.json",
+    "compilerOptions": {
+        "composite": true,
+        "outDir": "../../out",
+        "paths": {
+            "@root/*": [
+                "../../*",
+            ],
+        },
+        "rootDir": "..",
+    },
+    "include": [
+        ".",
+        "./package.json",
+    ],
+    "references": [
+        {
+            "path": "../..",
+        },
+    ],
+}

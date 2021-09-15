@@ -1,4 +1,11 @@
 {
+    "extends": [
+        "eslint:recommended",
+        "plugin:@typescript-eslint/recommended",
+        "plugin:import/errors",
+        "plugin:import/warnings",
+        "plugin:import/typescript"
+    ],
     "root": true,
     "parser": "@typescript-eslint/parser",
     "parserOptions": {
@@ -6,12 +13,114 @@
         "sourceType": "module"
     },
     "plugins": [
-        "@typescript-eslint"
+        "@typescript-eslint",
+        "eslint-plugin-tsdoc",
+        "import"
     ],
     "rules": {
-        "@typescript-eslint/semi":  ["warn", "never"],
+        "@typescript-eslint/semi": [
+            "warn",
+            "never"
+        ],
+        "@typescript-eslint/no-namespace": "off",
+        "@typescript-eslint/no-unused-vars": [
+            "error",
+            {
+                "argsIgnorePattern": "^_"
+            }
+        ],
+        "block-spacing": [
+            "error",
+            "always"
+        ],
+        "brace-style": [
+            "warn",
+            "1tbs",
+            {
+                "allowSingleLine": true
+            }
+        ],
+        "comma-dangle": [
+            "warn",
+            "always-multiline"
+        ],
+        "curly": [
+            "error",
+            "multi-line",
+            "consistent"
+        ],
         "eqeqeq": "warn",
+        "import/order": [
+            "error",
+            {
+                "alphabetize": {
+                    "order": "asc"
+                },
+                "groups": [
+                    "builtin",
+                    "external",
+                    "internal",
+                    "parent",
+                    "sibling",
+                    "index"
+                ],
+                "newlines-between": "always",
+                "pathGroups": [
+                    {
+                        "pattern": "@shared/**",
+                        "group": "parent",
+                        "position": "after"
+                    }
+                ],
+                "pathGroupsExcludedImportTypes": []
+            }
+        ],
+        "import/no-unresolved": "error",
+        "no-constant-condition": [
+            "error",
+            {
+                "checkLoops": false
+            }
+        ],
+        // This one is annoying when you have curried functions and you want to
+        // put one argument per line.
+        "no-unexpected-multiline": "off",
         "no-throw-literal": "warn",
-        "semi": "off"
+        "no-trailing-spaces": "error",
+        "no-unused-vars": "off", // use @typescript-eslint/no-unused-vars
+        "prefer-template": "error",
+        "quotes": [
+            "warn",
+            "single",
+            {
+                "avoidEscape": true
+            }
+        ],
+        "semi": "off",
+        "template-curly-spacing": [
+            "error",
+            "never"
+        ],
+        "tsdoc/syntax": "warn"
+    },
+    "settings": {
+        "import/parsers": {
+            "@typescript-eslint/parser": [
+                ".ts"
+            ]
+        },
+        "import/resolver": {
+            "typescript": {
+                "alwaysTryTypes": true, // always try to resolve types under `<root>@types` directory even it doesn't contain any source code, like `@types/unist`
+                // Choose from one of the "project" configs below or omit to use <root>/tsconfig.json by default
+                "project": [
+                    "tsconfig.json",
+                    "src/activity-webview/tsconfig.json",
+                    "src/extension/tsconfig.json",
+                    "src/reopt-vcg-webview/tsconfig.json",
+                    "src/shared/tsconfig.json"
+                ]
+            }
+        }
     }
 }

@@ -1,0 +1,57 @@
+a {
+    cursor: pointer;
+}
+
+body {
+    height: 100%;
+}
+
+input {
+    background-color: var(--vscode-button-background);
+    border: 1px solid black;
+    border-radius: 0.25em;
+    color: var(--vscode-button-foreground);
+    margin-top: 0.25em;
+    min-width: 12em;
+    padding: 0.25em;
+}
+
+input.red {
+    background-color: #f44336;
+    color: white;
+}
+input.red:hover {
+    background-color: #e57373;
+}
+
+input:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+.column {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.container {
+    height: 100%;
+}
+
+.column-header {
+    flex-shrink: 0;
+}
+
+.column-body {
+    flex-grow: 1;
+    overflow-y: auto;
+}
+
+html {
+    height: 100%;
+}
+
+.row {
+    display: flex;
+    flex-direction: row;
+}
