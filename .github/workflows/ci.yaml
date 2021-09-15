@@ -24,7 +24,7 @@ jobs:
       if: steps.cache.outputs.cache-hit != 'true'
     - name: Push to Docker hub
       run: |
-        echo ${{ secrets.docker_password }} | docker login -u galoisbinaryanalysisbot --password-stdin
+        echo '${{ secrets.DOCKER_PASSWORD }}' | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt-dev
       if: steps.cache.outputs.cache-hit != 'true'
     - name: Create dummy directory for cache
