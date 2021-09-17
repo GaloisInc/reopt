@@ -13,6 +13,8 @@ The Reopt VSCode plugin introduces a new file type, Reopt project files.  These
 store information for running Reopt on a specific binaries including paths to
 the binaries.
 
+![Reopt plugin](./assets/reopt-full-window-annotated.png)
+
 ### Setting up a Reopt project
 
 To create a Reopt project file, you can open the Reopt plugin activity pane by
