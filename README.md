@@ -13,6 +13,28 @@ Reopt supports Linux x86_64 programs.  We are working towards a full
 1.0 release, but the current pre-release version supports the end-to-end
 recompilation toolchain.
 
+
+This repository branch is intended to help people try out Reopt.  Reopt
+can be tried out through [Gitpod][gitpod].  You can
+also view these locally using the [Reopt Docker image][dockerimage].  If you
+have VSCode and Docker installed, then you can also use this as a
+[devcontainer][devcontainer].
+
+[gitpod]: https://gitpod.io#https://github.com/GaloisInc/reopt/tree/try-reopt
+[dockerimage]: https://hub.docker.com/r/galoisbinaryanalysis/reopt
+[devcontainer]: https://code.visualstudio.com/docs/remote/remote-overview
+
+## Included examples
+
+There are several small examples in the `examples` directory that include
+make files that run `reopt` and `reopt-vcg` on the examples.  To run
+each example, change into that directory and run `make`.
+
+The `benchmark-binaries` submodule contains CentOS 7 binaries, dynamic
+dependencies, and debug information that were used to benchmark
+`reopt` and `reopt-explore`. The script `run_centos7_benchmarks.sh` should
+unpack said binaries and run `reopt-explore` on them.
+
 ## Using Reopt
 
 Once `reopt` is installed on a Linux system and included in your path,
