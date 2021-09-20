@@ -220,3 +220,6 @@ jobs:
       run: |
         echo '${{ secrets.DOCKER_PASSWORD }}' | docker login -u galoisbinaryanalysisbot --password-stdin
         docker push galoisbinaryanalysis/reopt --all-tags
+    - name: Build docker image with examples
+      run: |
+        docker build -t galoisbinaryanalysis/reopt-with-examples:latest containers/eval-with-examples

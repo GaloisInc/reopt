@@ -28,3 +28,6 @@
 [submodule "deps/reopt-benchmark-binaries"]
 	path = deps/reopt-benchmark-binaries
 	url = git@github.com:GaloisInc/reopt-benchmark-binaries.git
+[submodule "deps/try-reopt"]
+	path = deps/try-reopt
+	url = https://github.com/GaloisInc/reopt.git
