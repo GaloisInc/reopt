@@ -1,6 +1,6 @@
 image: galoisbinaryanalysis/reopt
 vscode:
   extensions:
-    - https://github.com/GaloisInc/reopt/blob/vr/vscode/vscode-plugin/reopt-0.0.1.vsix?raw=true
+    - https://github.com/GaloisInc/reopt/blob/main/vscode-plugin/reopt-0.0.1.vsix?raw=true
     - RReverser.llvm
     - usernamehw.errorlens
