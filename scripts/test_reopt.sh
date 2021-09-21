@@ -3,7 +3,7 @@
 set -Euo pipefail
 
 if [ -x $(which reopt) ] ; then
-  REOPT=reopt
+  REOPT=$(which reopt)
 else
   REOPT="cabal run exe:reopt --"
 fi
