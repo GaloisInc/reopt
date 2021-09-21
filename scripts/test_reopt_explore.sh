@@ -1,6 +1,12 @@
 #!/bin/bash
 
-set -Eeuox pipefail
+set -Eeuo pipefail
+
+if [ -x $(which reopt-explore) ] ; then
+  REOPT_EXLPORE=reopt-explore
+else
+  REOPT_EXLPORE="cabal run exe:reopt-explore --"
+fi
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
@@ -21,14 +27,14 @@ shift
 case $COMMAND in
     all)
       pushd $CENTOS7_DEV_DIR
-      cabal run exe:reopt-explore -- bin --export-summary=centos7-bin-summary.txt \
+      $REOPT_EXLPORE bin --export-summary=centos7-bin-summary.txt \
         --lib-dir=lib64 \
         --debug-dir=debug-lib64
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
     all-debug-info)
       pushd $CENTOS7_DEV_DIR
-      cabal run exe:reopt-explore -- --debug-info debug-lib64
+      $REOPT_EXLPORE --debug-info debug-lib64
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
     small)
@@ -38,8 +44,8 @@ case $COMMAND in
       cp bin/mkdir test-bins/mkdir
       cp bin/curl test-bins/curl
       cp bin/date test-bins/date
-      cabal run exe:reopt-explore -- test-bins/mkdir --lib-dir=lib64 --debug-dir=debug-lib64
-      cabal run exe:reopt-explore -- test-bins --lib-dir=lib64 --debug-dir=debug-lib64
+      $REOPT_EXLPORE test-bins/mkdir --lib-dir=lib64 --debug-dir=debug-lib64
+      $REOPT_EXLPORE test-bins --lib-dir=lib64 --debug-dir=debug-lib64
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
     *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
