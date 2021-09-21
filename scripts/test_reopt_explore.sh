@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-if [ -x $(which reopt-explore) ] ; then
+if [[ -x $(which reopt-explore) ]] ; then
   REOPT_EXLPORE=$(which reopt-explore)
 else
   REOPT_EXLPORE="cabal run exe:reopt-explore --"
