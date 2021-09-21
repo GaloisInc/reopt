@@ -1,3 +1,0 @@
-[submodule "benchmark-binaries"]
-	path = benchmark-binaries
-	url = git@github.com:GaloisInc/reopt-benchmark-binaries.git
