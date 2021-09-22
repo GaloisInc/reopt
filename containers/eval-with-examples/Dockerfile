@@ -1,4 +1,4 @@
-FROM galoisbinaryanalysis/reopt
+FROM galoisbinaryanalysis/reopt:latest
 
 COPY deps/try-reopt /root/deps/try-reopt
 COPY deps/reopt-benchmark-binaries /root/deps/reopt-benchmark-binaries
