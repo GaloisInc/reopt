@@ -222,7 +222,7 @@ jobs:
         docker push galoisbinaryanalysis/reopt --all-tags
     - name: Build docker image with examples
       run: |
-        docker build -t galoisbinaryanalysis/reopt-with-examples:latest containers/eval-with-examples
+        docker build -t galoisbinaryanalysis/reopt-with-examples:latest -f containers/eval-with-examples/Dockerfile .
     - name: Push to Docker hub
       if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       run: |
