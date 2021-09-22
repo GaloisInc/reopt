@@ -2,9 +2,15 @@
 
 set -Euo pipefail
 
+if [[ -x $(which reopt) ]] ; then
+  REOPT=$(which reopt)
+else
+  REOPT="cabal run exe:reopt --"
+fi
+
 run_reopt () {
   echo "Running reopt on $1"
-  cabal run exe:reopt -- --recover $1 --lib-dir=lib64 --debug-dir=debug-lib64
+  $REOPT --recover $1 --lib-dir=lib64 --debug-dir=debug-lib64
 }
 
 
