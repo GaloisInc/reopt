@@ -21,5 +21,7 @@ RUN git submodule update --init
 RUN cabal update
 RUN cabal build exe:reopt exe:reopt-explore
 
+RUN cp /home/vadd/reopt-vcg/deps/cvc4-2020-09-16-x86_64-linux-opt /usr/local/bin/cvc4
+COPY ./containers/dev-with-builds/README.md /home/vadd
 WORKDIR /home/vadd
 
