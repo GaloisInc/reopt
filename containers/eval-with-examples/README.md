@@ -18,8 +18,10 @@ contain some high level documentation the respective tools.
 
 ## Test Binaries
 
-The `/root/deps/try-reopt` directory contains some basic information and a few
-example binaries which `reopt` and `reopt-vcg` can be run on.
+The `/root/deps/try-reopt` directory contain a few small example programs which
+`reopt` and `reopt-vcg` can be run on once they are built. To build and run
+`reopt` and `reopt-vcg` on an example, simply run `make` in the respective
+subdirectory.
 
 The `/root/deps/reopt-benchmark-binaries` directory contains a compressed corpus
 of binaries and their dependencies from CentOS7 that can serve as example target
