@@ -8,5 +8,6 @@ COPY scripts/test_reopt_explore.sh /root/scripts/test_reopt_explore.sh
 COPY containers/eval-with-examples/README.md /root/README.md
 COPY README.md /root/reopt-README.md
 COPY deps/reopt-vcg/README.md /root/reopt-vcg-README.md
+RUN rm /root/deps/try-reopt/README.md
 
 WORKDIR /root
