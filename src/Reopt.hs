@@ -70,6 +70,9 @@ module Reopt
     getLLVMConfig,
     optimizeLLVM,
     compileLLVM,
+    RecoverLogEvent(..),
+    recoveryLogEventHeader,
+    recoveryLogEventToStrings,
     -- Reopt.Relinker.MergeRelations,
     Reopt.Relinker.mergeObject,
     -- * X86 specific
@@ -137,7 +140,10 @@ import Numeric
 import Reopt.ArgResolver
 import Reopt.CFG.FnRep
 import Reopt.CFG.FunctionCheck
-import Reopt.CFG.LLVM (LLVMGenOptions (..), moduleForFunctions)
+import Reopt.CFG.LLVM
+  ( LLVMGenOptions (..),
+    moduleForFunctions
+  )
 import Reopt.CFG.LLVM.X86 as LLVM ( x86LLVMArchOps )
 import Reopt.CFG.Recovery
 import Reopt.Events
@@ -2168,7 +2174,8 @@ doRecoverX86 ::
     X86_64
     r
     ( RecoveredModule X86_64,
-      MergeRelations
+      MergeRelations,
+      [RecoverLogEvent]
     )
 doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
   -- Map names to known function types when we have explicit information.
@@ -2218,7 +2225,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
               tp <- maybeToList $ Map.lookup faddr fDems
             ]
 
-  fnDefs <- fmap catMaybes $
+  fnDefsAndLogEvents <- fmap catMaybes $
     forM (exploredFunctions discState) $ \(Some finfo) -> do
       let faddr = discoveredFunAddr finfo
       let dnm = discoveredFunSymbol finfo
@@ -2259,6 +2266,8 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                     Right fn -> do
                       funStepFinished Recovery fnId ()
                       pure (Just fn)
+  let fnDefs = map recoveredFunction fnDefsAndLogEvents
+      logEvents = concatMap recoveryLogEvents fnDefsAndLogEvents
   -- Get list of names of functions defined
   let definedNames :: Set.Set BSC.ByteString
       definedNames =
@@ -2312,7 +2321,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
           { mrObjectFuns = mkObjFunDef <$> V.fromList fnDefs,
             mrUndefinedFuns = undefinedFuns
           }
-  seq recMod $ pure (recMod, mergeRel)
+  seq recMod $ pure (recMod, mergeRel, logEvents)
 
 resolveX86Type ::
   SymAddrMap 64 ->
@@ -2407,7 +2416,8 @@ recoverX86Elf ::
     ( X86OS,
       DiscoveryState X86_64,
       RecoveredModule X86_64,
-      MergeRelations
+      MergeRelations,
+      [RecoverLogEvent]
     )
 recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo
@@ -2419,9 +2429,10 @@ recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
     doDiscovery hdrAnn hdrInfo ainfo initState reoptOpts
 
   let sysp = osPersonality os
-  (recMod, mergeRel) <- doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState
+  (recMod, mergeRel, logEvents) <-
+    doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState
 
-  pure (os, discState, recMod, mergeRel)
+  pure (os, discState, recMod, mergeRel, logEvents)
 
 $(pure [])
 
@@ -2525,8 +2536,7 @@ renderLLVMBitcode ::
   RecoveredModule X86_64 ->
   (Builder.Builder,
    [(FunId, Either String Ann.FunctionAnn)],
-   [Ann.ExternalFunctionAnn]
-   )
+   [Ann.ExternalFunctionAnn])
 renderLLVMBitcode llvmGenOpt cfg os recMod =
   -- Generate LLVM module
   let archOps = LLVM.x86LLVMArchOps (show os)

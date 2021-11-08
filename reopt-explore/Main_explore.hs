@@ -29,6 +29,9 @@ import Reopt
     RecoveredModule,
     ReoptOptions (..),
     X86OS,
+    RecoverLogEvent,
+    recoveryLogEventHeader,
+    recoveryLogEventToStrings,
     copyrightNotice,
     defaultLLVMGenOptions,
     emptyAnnDeclarations,
@@ -62,7 +65,7 @@ import System.Console.CmdArgs.Explicit
   )
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import System.FilePath (splitFileName)
+import System.FilePath (splitFileName, (<.>))
 import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile)
 import System.Directory
   (createDirectoryIfMissing, getSymbolicLinkTarget, canonicalizePath, createFileLink,
@@ -211,7 +214,7 @@ getCommandLineArgs = do
 data LLVMGenResult
   = -- | Error message
     LLVMGenFail String
-  | -- | How many bytes of LLVM bitcode were generated.
+  | -- | How many bytes of LLVM bitcode were generated and any logging.
     LLVMGenPass Natural
 
 llvmGenSuccess :: LLVMGenResult -> Bool
@@ -219,15 +222,24 @@ llvmGenSuccess LLVMGenPass {} = True
 llvmGenSuccess LLVMGenFail {} = False
 
 data ExplorationResult
-  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult
+  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![RecoverLogEvent]
 
 renderExplorationResult :: ExplorationResult -> String
-renderExplorationResult (ExplorationStats summary stats lgen) = do
+renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   let llvmGen = case lgen of
         LLVMGenPass _ -> "Succeeded."
         LLVMGenFail errMsg -> "Failed: " ++ errMsg
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
+
+
+renderLogEvents :: ExplorationResult -> String
+renderLogEvents stats = unlines $ header:(map renderRow logEvents)
+  where (ExplorationStats summary _stats _lgen logEvents) = stats
+        binPath = summaryBinaryPath summary
+        header = intercalate "," $ "File":recoveryLogEventHeader
+        renderRow event = intercalate "," $ binPath:(recoveryLogEventToStrings event)
+
 
 exploreBinary ::
   ReoptOptions ->
@@ -253,32 +265,35 @@ exploreBinary opts results fPath = do
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-      mr <-
-        runReoptM logger $
-          recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo
-      (os, _, recMod, _) <- handleEitherWithExit mr
+      (os, _, recMod, _, logEvents) <-
+        handleEitherWithExit =<<
+          (runReoptM logger $
+            recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo)
       res <-
         catch
           (generateLLVM os recMod)
           (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
       summary <- readIORef summaryRef
       stats <- readIORef statsRef
-      pure $ ExplorationStats summary stats res
+      pure $ ExplorationStats summary stats res logEvents
 
-    generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO LLVMGenResult
+    generateLLVM ::
+      X86OS ->
+      RecoveredModule X86_64 ->
+      IO LLVMGenResult
     generateLLVM os recMod = do
-      let (llvm, _, _) =
-            renderLLVMBitcode
-              defaultLLVMGenOptions
-              latestLLVMConfig
-              os
-              recMod
+      let (llvm, _, _) = renderLLVMBitcode
+                          defaultLLVMGenOptions
+                          latestLLVMConfig
+                          os
+                          recMod
       let sz = BSL.length $ BS.toLazyByteString llvm
       seq sz $ do
         if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
           else hPutStrLn stderr $ "  Done."
-        pure $ LLVMGenPass $ if sz < 0 then 0 else fromIntegral sz
+        let res = if sz < 0 then 0 else fromIntegral sz
+        pure $ (LLVMGenPass res)
     handleFailure :: (FilePath -> String -> a) -> SomeException -> IO a
     handleFailure mkResult e = do
       hPutStrLn stderr "Error raised during exploration"
@@ -306,7 +321,7 @@ renderSummaryStats :: [ExplorationResult] -> String
 renderSummaryStats results = formatSummary $ foldr processResult initSummaryStats results
   where
     processResult :: ExplorationResult -> SummaryStats -> SummaryStats
-    processResult (ExplorationStats _summary stats llvmGenRes) acc =
+    processResult (ExplorationStats _summary stats llvmGenRes _logEvents) acc =
       acc
         { totalBinaryCount = 1 + totalBinaryCount acc,
           totalLLVMGenerated = totalLLVMGenerated acc + if llvmGenSuccess llvmGenRes then 1 else 0,
@@ -452,6 +467,10 @@ main = do
               overallSummary = renderSummaryStats results
           writeFile exportPath $ individualSummaries ++ "\n" ++ overallSummary
           hPutStrLn stderr $ "Summary statistics written to " ++ exportPath ++ "."
+          let logEventsSummary = concatMap (\s -> "\n" ++ renderLogEvents s) results
+              logEventsPath = exportPath <.> "casts" <.> "csv"
+          writeFile logEventsPath $ logEventsSummary
+          hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
     (False, paths, DebugExploreMode) -> do
       when (isJust $ exportFnResultsPath args) $ do
         hPutStrLn stderr "The --export-fn-results flag not compatible with the --debug-info flag."
@@ -470,4 +489,4 @@ main = do
 
   where
     toRows :: ExplorationResult -> [[String]]
-    toRows (ExplorationStats summary _stats _) = summaryRows summary
+    toRows (ExplorationStats summary _stats _ _logEvents) = summaryRows summary
