@@ -254,11 +254,10 @@ renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 
 
-renderLogEvents :: ExplorationResult -> String
-renderLogEvents stats = unlines $ header:(map renderRow logEvents)
+renderLogEvents :: ExplorationResult -> [String]
+renderLogEvents stats = map renderRow logEvents
   where (ExplorationStats summary _stats _lgen logEvents) = stats
         binPath = summaryBinaryPath summary
-        header = intercalate "," $ "File":recoveryLogEventHeader
         renderRow event = intercalate "," $ binPath:(recoveryLogEventToStrings event)
 
 
@@ -492,17 +491,17 @@ main = do
           hPutStrLn stderr $ "CSV-formatted function result statistics written to " ++ exportPath ++ "."
       case exportSummaryPath args of
         Nothing -> pure ()
-        Just specifiedPath -> do
+        Just summaryPath -> do
           let individualSummaries = concatMap (\s -> "\n" ++ renderExplorationResult s) results
               overallSummary = renderSummaryStats results
-          writeFile specifiedPath $ individualSummaries ++ "\n" ++ overallSummary
-          hPutStrLn stderr $ "Summary statistics written to " ++ specifiedPath ++ "."
+          writeFile summaryPath $ individualSummaries ++ "\n" ++ overallSummary
+          hPutStrLn stderr $ "Summary statistics written to " ++ summaryPath ++ "."
       case exportLogCSVPath args of
         Nothing -> pure ()
-        Just specifiedPath -> do
-          let logEventsSummary = concatMap (\s -> "\n" ++ renderLogEvents s) results
-              logEventsPath = specifiedPath
-          writeFile logEventsPath $ logEventsSummary
+        Just logEventsPath -> do
+          let logEventsHeader = intercalate "," $ "File":recoveryLogEventHeader
+              logEventsRows   =  concatMap renderLogEvents results
+          writeFile logEventsPath $ unlines $ logEventsHeader:logEventsRows
           hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
     (False, paths, DebugExploreMode) -> do
       when (isJust $ exportFnResultsPath args) $ do
