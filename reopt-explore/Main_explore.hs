@@ -153,7 +153,7 @@ exportSummaryFlag = flagReq ["export-summary"] upd "PATH" help
 exportLogFlag :: Flag Args
 exportLogFlag = flagReq ["export-log"] upd "PATH" help
   where
-    upd path old = Right $ old {exportSummaryPath = Just path}
+    upd path old = Right $ old {exportLogCSVPath = Just path}
     help = "Path at which to write recovery and LLVM generation log events (as a CSV)."
 
 showHelpFlag :: Flag Args
