@@ -236,11 +236,15 @@ data LLVMGenResult
   = -- | Error message
     LLVMGenFail String
   | -- | How many bytes of LLVM bitcode were generated and any logging.
-    LLVMGenPass Natural
+    LLVMGenPass Natural ![LLVMLogEvent]
 
 llvmGenSuccess :: LLVMGenResult -> Bool
 llvmGenSuccess LLVMGenPass {} = True
 llvmGenSuccess LLVMGenFail {} = False
+
+llvmGenLogEvents :: LLVMGenResult -> [LLVMLogEvent]
+llvmGenLogEvents (LLVMGenFail _) = []
+llvmGenLogEvents (LLVMGenPass _ events) = events
 
 data ExplorationResult
   = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![LLVMLogEvent]
@@ -248,15 +252,15 @@ data ExplorationResult
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   let llvmGen = case lgen of
-        LLVMGenPass _ -> "Succeeded."
+        LLVMGenPass _ _ -> "Succeeded."
         LLVMGenFail errMsg -> "Failed: " ++ errMsg
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 
 
 renderLogEvents :: ExplorationResult -> [String]
-renderLogEvents stats = map renderRow logEvents
-  where (ExplorationStats summary _stats _lgen logEvents) = stats
+renderLogEvents stats = map renderRow $ logEvents ++ llvmGenLogEvents lgen
+  where (ExplorationStats summary _stats lgen logEvents) = stats
         binPath = summaryBinaryPath summary
         renderRow event = intercalate "," $ binPath:(llvmLogEventToStrings event)
 
@@ -303,18 +307,19 @@ exploreBinary args opts results fPath = do
       RecoveredModule X86_64 ->
       IO LLVMGenResult
     generateLLVM os recMod = do
-      let (objLLVM, _, _) = renderLLVMBitcode
-                          defaultLLVMGenOptions
-                          latestLLVMConfig
-                          os
-                          recMod
+      let (objLLVM, _, _, logEvents) =
+            renderLLVMBitcode
+              defaultLLVMGenOptions
+              latestLLVMConfig
+              os
+              recMod
       let sz = BSL.length $ BS.toLazyByteString objLLVM
       llvmRes <- seq sz $ do
         if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
           else hPutStrLn stderr $ "  Done."
         let res = if sz < 0 then 0 else fromIntegral sz
-        pure $ (LLVMGenPass res)
+        pure $ (LLVMGenPass res logEvents)
       when (emitLLVM args) $ do
         let llvmPath = fPath ++ ".ll"
         mr <- runReoptM printLogEvent $ do

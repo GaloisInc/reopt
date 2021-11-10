@@ -104,8 +104,8 @@ x86ArchFnToLLVM f =
         -- Note.  This will compute the wrong answer rather than #DE
         -- when the division result overflows, but that is allowed by
         -- mcExceptionIsUB
-        q <- convop L.Trunc qext resTp
-        r <- convop L.Trunc rext resTp
+        q <- llvmTrunc "X86DivRem" qext resTp
+        r <- llvmTrunc "X86DivRem" rext resTp
         -- Compute pair
         mkPair q r
        else do
@@ -143,8 +143,8 @@ x86ArchFnToLLVM f =
         -- Note.  This will compute the wrong answer rather than #DE
         -- when the division result overflows, but that is allowed by
         -- mcExceptionIsUB
-        q <- convop L.Trunc qext resTp
-        r <- convop L.Trunc rext resTp
+        q <- llvmTrunc "X86IDivRem" qext resTp
+        r <- llvmTrunc "X86IDivRem" rext resTp
         -- Compute pair
         mkPair q r
        else do
@@ -163,7 +163,7 @@ x86ArchFnToLLVM f =
      llvm_val <- mkLLVMValue val
      -- Convert buffer to LLVM
      let w = llvmITypeNat (8 * repValSizeByteCount sz)
-     llvm_ptr <- llvmAsPtr base w
+     llvm_ptr <- llvmAsPtr "RepnzScas" base w
      -- Get count
      llvm_cnt <- mkLLVMValue cnt
      let reg = case sz of

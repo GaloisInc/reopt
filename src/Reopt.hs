@@ -2536,14 +2536,15 @@ renderLLVMBitcode ::
   RecoveredModule X86_64 ->
   (Builder.Builder,
    [(FunId, Either String Ann.FunctionAnn)],
-   [Ann.ExternalFunctionAnn])
+   [Ann.ExternalFunctionAnn],
+   [LLVMLogEvent])
 renderLLVMBitcode llvmGenOpt cfg os recMod =
   -- Generate LLVM module
   let archOps = LLVM.x86LLVMArchOps (show os)
-      (m, ann, ext) = moduleForFunctions archOps llvmGenOpt recMod
+      (m, ann, ext, logEvents) = moduleForFunctions archOps llvmGenOpt recMod
       -- Render into LLVM
       out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
-   in (out, ann, ext)
+   in (out, ann, ext, logEvents)
   where
     pp :: HPJ.TextDetails -> Builder.Builder -> Builder.Builder
     pp (HPJ.Chr c) b = Builder.charUtf8 c <> b

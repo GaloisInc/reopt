@@ -807,7 +807,7 @@ performReopt args = do
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate LLVM
-    let (objLLVM, ann, ext) =
+    let (objLLVM, ann, ext, _logEvents) =
           renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
     -- Write LLVM if requested.
     case llvmExportPath args of
