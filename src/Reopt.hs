@@ -70,9 +70,9 @@ module Reopt
     getLLVMConfig,
     optimizeLLVM,
     compileLLVM,
-    RecoverLogEvent(..),
-    recoveryLogEventHeader,
-    recoveryLogEventToStrings,
+    LLVMLogEvent(..),
+    llvmLogEventHeader,
+    llvmLogEventToStrings,
     -- Reopt.Relinker.MergeRelations,
     Reopt.Relinker.mergeObject,
     -- * X86 specific
@@ -2175,7 +2175,7 @@ doRecoverX86 ::
     r
     ( RecoveredModule X86_64,
       MergeRelations,
-      [RecoverLogEvent]
+      [LLVMLogEvent]
     )
 doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
   -- Map names to known function types when we have explicit information.
@@ -2267,7 +2267,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
                       funStepFinished Recovery fnId ()
                       pure (Just fn)
   let fnDefs = map recoveredFunction fnDefsAndLogEvents
-      logEvents = concatMap recoveryLogEvents fnDefsAndLogEvents
+      logEvents = concatMap llvmLogEvents fnDefsAndLogEvents
   -- Get list of names of functions defined
   let definedNames :: Set.Set BSC.ByteString
       definedNames =
@@ -2417,7 +2417,7 @@ recoverX86Elf ::
       DiscoveryState X86_64,
       RecoveredModule X86_64,
       MergeRelations,
-      [RecoverLogEvent]
+      [LLVMLogEvent]
     )
 recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   (os, initState) <- reoptX86Init loadOpts reoptOpts hdrInfo

@@ -29,9 +29,9 @@ import Reopt
     RecoveredModule,
     ReoptOptions (..),
     X86OS,
-    RecoverLogEvent,
-    recoveryLogEventHeader,
-    recoveryLogEventToStrings,
+    LLVMLogEvent,
+    llvmLogEventHeader,
+    llvmLogEventToStrings,
     copyrightNotice,
     defaultLLVMGenOptions,
     emptyAnnDeclarations,
@@ -243,7 +243,7 @@ llvmGenSuccess LLVMGenPass {} = True
 llvmGenSuccess LLVMGenFail {} = False
 
 data ExplorationResult
-  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![RecoverLogEvent]
+  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![LLVMLogEvent]
 
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
@@ -258,7 +258,7 @@ renderLogEvents :: ExplorationResult -> [String]
 renderLogEvents stats = map renderRow logEvents
   where (ExplorationStats summary _stats _lgen logEvents) = stats
         binPath = summaryBinaryPath summary
-        renderRow event = intercalate "," $ binPath:(recoveryLogEventToStrings event)
+        renderRow event = intercalate "," $ binPath:(llvmLogEventToStrings event)
 
 
 exploreBinary ::
@@ -499,7 +499,7 @@ main = do
       case exportLogCSVPath args of
         Nothing -> pure ()
         Just logEventsPath -> do
-          let logEventsHeader = intercalate "," $ "File":recoveryLogEventHeader
+          let logEventsHeader = intercalate "," $ "File":llvmLogEventHeader
               logEventsRows   =  concatMap renderLogEvents results
           writeFile logEventsPath $ unlines $ logEventsHeader:logEventsRows
           hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
