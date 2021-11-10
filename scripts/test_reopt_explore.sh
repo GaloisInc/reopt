@@ -28,6 +28,7 @@ case $COMMAND in
     all)
       pushd $CENTOS7_DEV_DIR
       $REOPT_EXLPORE bin --export-summary=centos7-bin-summary.txt \
+        --export-log=centos7-bin-casts.csv  \
         --lib-dir=lib64 \
         --debug-dir=debug-lib64
       popd > /dev/null # $CENTOS7_DEV_DIR

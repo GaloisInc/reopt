@@ -45,7 +45,8 @@ import Reopt
     debugInfoCacheFilePath,
     reoptHomeDir,
     getGdbDebugInfoDirs,
-    defaultReoptOptions
+    defaultReoptOptions,
+    reoptWriteBuilder
   )
 import Reopt.Events
 import Reopt.TypeInference.FunTypeMaps
@@ -65,8 +66,8 @@ import System.Console.CmdArgs.Explicit
   )
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import System.FilePath (splitFileName, (<.>))
-import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile)
+import System.FilePath (splitFileName)
+import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile, hPrint)
 import System.Directory
   (createDirectoryIfMissing, getSymbolicLinkTarget, canonicalizePath, createFileLink,
    withCurrentDirectory, doesFileExist, removeFile)
@@ -100,10 +101,14 @@ data Args = Args
     exportFnResultsPath :: !(Maybe FilePath),
     -- | Should we export summary information?
     exportSummaryPath :: !(Maybe FilePath),
+    -- | Should we export log events?
+    exportLogCSVPath :: !(Maybe FilePath),
     -- | Show help to user?
     showHelp :: !Bool,
     -- | Report output of individual binaries.
     verbose :: !Bool,
+    -- | Emit generated LLVM next to binary with `.ll` suffix.
+    emitLLVM :: !Bool,
     -- | Additional locations to search for dynamic dependencies.
     dynDepPath :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
@@ -118,8 +123,10 @@ defaultArgs =
       clangPath = "clang",
       exportFnResultsPath = Nothing,
       exportSummaryPath = Nothing,
+      exportLogCSVPath = Nothing,
       showHelp = False,
       verbose = False,
+      emitLLVM = True,
       dynDepPath = [],
       dynDepDebugPath = []
     }
@@ -143,6 +150,12 @@ exportSummaryFlag = flagReq ["export-summary"] upd "PATH" help
     upd path old = Right $ old {exportSummaryPath = Just path}
     help = "Path at which to write discovery/recovery summary statistics."
 
+exportLogFlag :: Flag Args
+exportLogFlag = flagReq ["export-log"] upd "PATH" help
+  where
+    upd path old = Right $ old {exportSummaryPath = Just path}
+    help = "Path at which to write recovery and LLVM generation log events (as a CSV)."
+
 showHelpFlag :: Flag Args
 showHelpFlag = flagHelpSimple upd
   where
@@ -153,6 +166,12 @@ verboseFlag = flagNone ["verbose", "v"] upd help
   where
     upd old = old {verbose = True}
     help = "Show output of individual binaries."
+
+omitLLVMFlag :: Flag Args
+omitLLVMFlag = flagNone ["omit-llvm"] upd help
+  where
+    upd old = old {emitLLVM = False}
+    help = "Do not output generated LLVM."
 
 debugInfoFlag :: Flag Args
 debugInfoFlag = flagNone ["debug-info", "d"] upd help
@@ -196,8 +215,10 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
         clangPathFlag,
         exportFnResultsFlag,
         exportSummaryFlag,
+        exportLogFlag,
         verboseFlag,
         debugInfoFlag,
+        omitLLVMFlag,
         dynDepPathFlag,
         dynDepDebugPathFlag
       ]
@@ -242,11 +263,12 @@ renderLogEvents stats = unlines $ header:(map renderRow logEvents)
 
 
 exploreBinary ::
+  Args ->
   ReoptOptions ->
   [ExplorationResult] ->
   FilePath ->
   IO [ExplorationResult]
-exploreBinary opts results fPath = do
+exploreBinary args opts results fPath = do
   result <- performRecovery
   pure $ result : results
   where
@@ -282,18 +304,26 @@ exploreBinary opts results fPath = do
       RecoveredModule X86_64 ->
       IO LLVMGenResult
     generateLLVM os recMod = do
-      let (llvm, _, _) = renderLLVMBitcode
+      let (objLLVM, _, _) = renderLLVMBitcode
                           defaultLLVMGenOptions
                           latestLLVMConfig
                           os
                           recMod
-      let sz = BSL.length $ BS.toLazyByteString llvm
-      seq sz $ do
+      let sz = BSL.length $ BS.toLazyByteString objLLVM
+      llvmRes <- seq sz $ do
         if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
           else hPutStrLn stderr $ "  Done."
         let res = if sz < 0 then 0 else fromIntegral sz
         pure $ (LLVMGenPass res)
+      when (emitLLVM args) $ do
+        let llvmPath = fPath ++ ".ll"
+        mr <- runReoptM printLogEvent $ do
+          reoptWriteBuilder LlvmFileType llvmPath objLLVM
+        case mr of
+          Left f -> hPrint stderr f
+          Right () -> hPutStrLn stderr $ "LLVM written to " ++ llvmPath ++ "."
+      pure llvmRes
     handleFailure :: (FilePath -> String -> a) -> SomeException -> IO a
     handleFailure mkResult e = do
       hPutStrLn stderr "Error raised during exploration"
@@ -450,7 +480,7 @@ main = do
       hPutStrLn stderr "Use --help to see additional options."
       exitFailure
     (False, paths, ReoptExploreMode) -> do
-      results <- foldM (withElfExeFilesInDir (exploreBinary opts)) [] paths
+      results <- foldM (withElfExeFilesInDir (exploreBinary args opts)) [] paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
       case exportFnResultsPath args of
@@ -462,13 +492,16 @@ main = do
           hPutStrLn stderr $ "CSV-formatted function result statistics written to " ++ exportPath ++ "."
       case exportSummaryPath args of
         Nothing -> pure ()
-        Just exportPath -> do
+        Just specifiedPath -> do
           let individualSummaries = concatMap (\s -> "\n" ++ renderExplorationResult s) results
               overallSummary = renderSummaryStats results
-          writeFile exportPath $ individualSummaries ++ "\n" ++ overallSummary
-          hPutStrLn stderr $ "Summary statistics written to " ++ exportPath ++ "."
+          writeFile specifiedPath $ individualSummaries ++ "\n" ++ overallSummary
+          hPutStrLn stderr $ "Summary statistics written to " ++ specifiedPath ++ "."
+      case exportLogCSVPath args of
+        Nothing -> pure ()
+        Just specifiedPath -> do
           let logEventsSummary = concatMap (\s -> "\n" ++ renderLogEvents s) results
-              logEventsPath = exportPath <.> "casts" <.> "csv"
+              logEventsPath = specifiedPath
           writeFile logEventsPath $ logEventsSummary
           hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
     (False, paths, DebugExploreMode) -> do
@@ -477,6 +510,9 @@ main = do
         exitFailure
       when (isJust $ exportFnResultsPath args) $ do
         hPutStrLn stderr "The --export-summary flag not compatible with the --debug-info flag."
+        exitFailure
+      when (isJust $ exportLogCSVPath args) $ do
+        hPutStrLn stderr "The --export-log flag not compatible with the --debug-info flag."
         exitFailure
       infoDir <- reoptHomeDir
       createDirectoryIfMissing True infoDir
