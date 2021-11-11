@@ -29,6 +29,9 @@ import Reopt
     RecoveredModule,
     ReoptOptions (..),
     X86OS,
+    LLVMLogEvent,
+    llvmLogEventHeader,
+    llvmLogEventToStrings,
     copyrightNotice,
     defaultLLVMGenOptions,
     emptyAnnDeclarations,
@@ -42,7 +45,8 @@ import Reopt
     debugInfoCacheFilePath,
     reoptHomeDir,
     getGdbDebugInfoDirs,
-    defaultReoptOptions
+    defaultReoptOptions,
+    reoptWriteBuilder
   )
 import Reopt.Events
 import Reopt.TypeInference.FunTypeMaps
@@ -63,7 +67,7 @@ import System.Console.CmdArgs.Explicit
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath (splitFileName)
-import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile)
+import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile, hPrint)
 import System.Directory
   (createDirectoryIfMissing, getSymbolicLinkTarget, canonicalizePath, createFileLink,
    withCurrentDirectory, doesFileExist, removeFile)
@@ -97,10 +101,14 @@ data Args = Args
     exportFnResultsPath :: !(Maybe FilePath),
     -- | Should we export summary information?
     exportSummaryPath :: !(Maybe FilePath),
+    -- | Should we export log events?
+    exportLogCSVPath :: !(Maybe FilePath),
     -- | Show help to user?
     showHelp :: !Bool,
     -- | Report output of individual binaries.
     verbose :: !Bool,
+    -- | Emit generated LLVM next to binary with `.ll` suffix.
+    emitLLVM :: !Bool,
     -- | Additional locations to search for dynamic dependencies.
     dynDepPath :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
@@ -115,8 +123,10 @@ defaultArgs =
       clangPath = "clang",
       exportFnResultsPath = Nothing,
       exportSummaryPath = Nothing,
+      exportLogCSVPath = Nothing,
       showHelp = False,
       verbose = False,
+      emitLLVM = True,
       dynDepPath = [],
       dynDepDebugPath = []
     }
@@ -140,6 +150,12 @@ exportSummaryFlag = flagReq ["export-summary"] upd "PATH" help
     upd path old = Right $ old {exportSummaryPath = Just path}
     help = "Path at which to write discovery/recovery summary statistics."
 
+exportLogFlag :: Flag Args
+exportLogFlag = flagReq ["export-log"] upd "PATH" help
+  where
+    upd path old = Right $ old {exportLogCSVPath = Just path}
+    help = "Path at which to write recovery and LLVM generation log events (as a CSV)."
+
 showHelpFlag :: Flag Args
 showHelpFlag = flagHelpSimple upd
   where
@@ -150,6 +166,12 @@ verboseFlag = flagNone ["verbose", "v"] upd help
   where
     upd old = old {verbose = True}
     help = "Show output of individual binaries."
+
+omitLLVMFlag :: Flag Args
+omitLLVMFlag = flagNone ["omit-llvm"] upd help
+  where
+    upd old = old {emitLLVM = False}
+    help = "Do not output generated LLVM."
 
 debugInfoFlag :: Flag Args
 debugInfoFlag = flagNone ["debug-info", "d"] upd help
@@ -193,8 +215,10 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
         clangPathFlag,
         exportFnResultsFlag,
         exportSummaryFlag,
+        exportLogFlag,
         verboseFlag,
         debugInfoFlag,
+        omitLLVMFlag,
         dynDepPathFlag,
         dynDepDebugPathFlag
       ]
@@ -211,30 +235,43 @@ getCommandLineArgs = do
 data LLVMGenResult
   = -- | Error message
     LLVMGenFail String
-  | -- | How many bytes of LLVM bitcode were generated.
-    LLVMGenPass Natural
+  | -- | How many bytes of LLVM bitcode were generated and any logging.
+    LLVMGenPass Natural ![LLVMLogEvent]
 
 llvmGenSuccess :: LLVMGenResult -> Bool
 llvmGenSuccess LLVMGenPass {} = True
 llvmGenSuccess LLVMGenFail {} = False
 
+llvmGenLogEvents :: LLVMGenResult -> [LLVMLogEvent]
+llvmGenLogEvents (LLVMGenFail _) = []
+llvmGenLogEvents (LLVMGenPass _ events) = events
+
 data ExplorationResult
-  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult
+  = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![LLVMLogEvent]
 
 renderExplorationResult :: ExplorationResult -> String
-renderExplorationResult (ExplorationStats summary stats lgen) = do
+renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   let llvmGen = case lgen of
-        LLVMGenPass _ -> "Succeeded."
+        LLVMGenPass _ _ -> "Succeeded."
         LLVMGenFail errMsg -> "Failed: " ++ errMsg
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 
+
+renderLogEvents :: ExplorationResult -> [String]
+renderLogEvents stats = map renderRow $ logEvents ++ llvmGenLogEvents lgen
+  where (ExplorationStats summary _stats lgen logEvents) = stats
+        binPath = summaryBinaryPath summary
+        renderRow event = intercalate "," $ binPath:(llvmLogEventToStrings event)
+
+
 exploreBinary ::
+  Args ->
   ReoptOptions ->
   [ExplorationResult] ->
   FilePath ->
   IO [ExplorationResult]
-exploreBinary opts results fPath = do
+exploreBinary args opts results fPath = do
   result <- performRecovery
   pure $ result : results
   where
@@ -253,32 +290,44 @@ exploreBinary opts results fPath = do
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-      mr <-
-        runReoptM logger $
-          recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo
-      (os, _, recMod, _) <- handleEitherWithExit mr
+      (os, _, recMod, _, logEvents) <-
+        handleEitherWithExit =<<
+          (runReoptM logger $
+            recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo)
       res <-
         catch
           (generateLLVM os recMod)
           (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
       summary <- readIORef summaryRef
       stats <- readIORef statsRef
-      pure $ ExplorationStats summary stats res
+      pure $ ExplorationStats summary stats res logEvents
 
-    generateLLVM :: X86OS -> RecoveredModule X86_64 -> IO LLVMGenResult
+    generateLLVM ::
+      X86OS ->
+      RecoveredModule X86_64 ->
+      IO LLVMGenResult
     generateLLVM os recMod = do
-      let (llvm, _, _) =
+      let (objLLVM, _, _, logEvents) =
             renderLLVMBitcode
               defaultLLVMGenOptions
               latestLLVMConfig
               os
               recMod
-      let sz = BSL.length $ BS.toLazyByteString llvm
-      seq sz $ do
+      let sz = BSL.length $ BS.toLazyByteString objLLVM
+      llvmRes <- seq sz $ do
         if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
           else hPutStrLn stderr $ "  Done."
-        pure $ LLVMGenPass $ if sz < 0 then 0 else fromIntegral sz
+        let res = if sz < 0 then 0 else fromIntegral sz
+        pure $ (LLVMGenPass res logEvents)
+      when (emitLLVM args) $ do
+        let llvmPath = fPath ++ ".ll"
+        mr <- runReoptM printLogEvent $ do
+          reoptWriteBuilder LlvmFileType llvmPath objLLVM
+        case mr of
+          Left f -> hPrint stderr f
+          Right () -> hPutStrLn stderr $ "LLVM written to " ++ llvmPath ++ "."
+      pure llvmRes
     handleFailure :: (FilePath -> String -> a) -> SomeException -> IO a
     handleFailure mkResult e = do
       hPutStrLn stderr "Error raised during exploration"
@@ -306,7 +355,7 @@ renderSummaryStats :: [ExplorationResult] -> String
 renderSummaryStats results = formatSummary $ foldr processResult initSummaryStats results
   where
     processResult :: ExplorationResult -> SummaryStats -> SummaryStats
-    processResult (ExplorationStats _summary stats llvmGenRes) acc =
+    processResult (ExplorationStats _summary stats llvmGenRes _logEvents) acc =
       acc
         { totalBinaryCount = 1 + totalBinaryCount acc,
           totalLLVMGenerated = totalLLVMGenerated acc + if llvmGenSuccess llvmGenRes then 1 else 0,
@@ -435,7 +484,7 @@ main = do
       hPutStrLn stderr "Use --help to see additional options."
       exitFailure
     (False, paths, ReoptExploreMode) -> do
-      results <- foldM (withElfExeFilesInDir (exploreBinary opts)) [] paths
+      results <- foldM (withElfExeFilesInDir (exploreBinary args opts)) [] paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
       case exportFnResultsPath args of
@@ -447,17 +496,27 @@ main = do
           hPutStrLn stderr $ "CSV-formatted function result statistics written to " ++ exportPath ++ "."
       case exportSummaryPath args of
         Nothing -> pure ()
-        Just exportPath -> do
+        Just summaryPath -> do
           let individualSummaries = concatMap (\s -> "\n" ++ renderExplorationResult s) results
               overallSummary = renderSummaryStats results
-          writeFile exportPath $ individualSummaries ++ "\n" ++ overallSummary
-          hPutStrLn stderr $ "Summary statistics written to " ++ exportPath ++ "."
+          writeFile summaryPath $ individualSummaries ++ "\n" ++ overallSummary
+          hPutStrLn stderr $ "Summary statistics written to " ++ summaryPath ++ "."
+      case exportLogCSVPath args of
+        Nothing -> pure ()
+        Just logEventsPath -> do
+          let logEventsHeader = intercalate "," $ "File":llvmLogEventHeader
+              logEventsRows   =  concatMap renderLogEvents results
+          writeFile logEventsPath $ unlines $ logEventsHeader:logEventsRows
+          hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
     (False, paths, DebugExploreMode) -> do
       when (isJust $ exportFnResultsPath args) $ do
         hPutStrLn stderr "The --export-fn-results flag not compatible with the --debug-info flag."
         exitFailure
       when (isJust $ exportFnResultsPath args) $ do
         hPutStrLn stderr "The --export-summary flag not compatible with the --debug-info flag."
+        exitFailure
+      when (isJust $ exportLogCSVPath args) $ do
+        hPutStrLn stderr "The --export-log flag not compatible with the --debug-info flag."
         exitFailure
       infoDir <- reoptHomeDir
       createDirectoryIfMissing True infoDir
@@ -470,4 +529,4 @@ main = do
 
   where
     toRows :: ExplorationResult -> [[String]]
-    toRows (ExplorationStats summary _stats _) = summaryRows summary
+    toRows (ExplorationStats summary _stats _ _logEvents) = summaryRows summary

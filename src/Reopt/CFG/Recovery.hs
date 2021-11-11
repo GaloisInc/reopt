@@ -25,8 +25,12 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE ViewPatterns #-}
 module Reopt.CFG.Recovery
   ( recoverFunction
+  , RecoveredFunction(..)
+  , LLVMLogEvent(..)
+  , llvmLogEventHeader
+  , llvmLogEventToStrings
   , RecoverError(..)
-  ,  Data.Macaw.Analysis.RegisterUse.BlockInvariantMap
+  , Data.Macaw.Analysis.RegisterUse.BlockInvariantMap
   , x86BlockInvariants
   , x86CallRegs
     -- * X86 type info
@@ -78,9 +82,22 @@ import           Data.Macaw.X86 (x86DemandContext, x86_64CallParams)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
+import           Reopt.CFG.LLVM
+  ( LLVMLogEvent(..),
+    LLVMLogEvent(..),
+    LLVMLogEventInfo(..),
+    LLVMBitCastInfo(..),
+    typeToLLVMType,
+    llvmITypeNat,
+    llvmLogEventHeader,
+    llvmLogEventToStrings)
 import           Reopt.CFG.LLVM.X86 (x86ArchFnToLLVM)
 import           Reopt.Events (RecoverError(..), ReoptErrorTag(..))
 import qualified Reopt.Utils.Printf as Printf
+
+-------------------------------------------------------------------------------
+--
+
 
 fromSomeList :: [Some f] -> Some (P.List f)
 fromSomeList = P.fromListWith id
@@ -259,19 +276,21 @@ data FunRecoverContext ids =
       }
 
 -- | State for function recovery common to all blocks in a function.
-data FunRecoverState = FRS { frsNextAssignId :: !FnAssignId
+data FunRecoverState = FRS { frsNextAssignId :: !FnAssignId,
+                             frsLogEvents :: ![LLVMLogEvent]
                            }
 
 -- | Monad for function recovery
 newtype FunRecover ids a =
     FR { runFR :: ReaderT (FunRecoverContext ids) (StateT FunRecoverState (Except (RecoverError 64))) a }
-  deriving (Functor, Applicative, Monad, MonadError (RecoverError 64))
+  deriving (Functor, Applicative, Monad, MonadState FunRecoverState, MonadError (RecoverError 64))
 
 runFunRecover :: FunRecoverContext ids
               -> FunRecover ids a
               -> Either (RecoverError 64) a
 runFunRecover ctx m =
-  let s0 = FRS { frsNextAssignId = FnAssignId 0
+  let s0 = FRS { frsNextAssignId = FnAssignId 0,
+                 frsLogEvents = []
                }
    in runExcept (evalStateT (runReaderT (runFR m) ctx) s0)
 
@@ -318,6 +337,7 @@ data RecoverState arch ids =
      , rsSeenMemAccessTypes :: ![(Word64, FnMemAccessType)]
        -- | Memory accesses that have not yet been processed.
      , rsPendingMemAccesses :: ![(StmtIndex, MemAccessInfo arch ids)]
+     , rsLogEvents :: ![LLVMLogEvent]
      }
 
 -- | List of statements accumulated so far.
@@ -347,6 +367,9 @@ liftFunRecover m = Recover $ lift m
 
 getFunCtx :: Recover ids (FunRecoverContext ids)
 getFunCtx = liftFunRecover $ FR ask
+
+logEvent :: LLVMLogEvent -> Recover ids ()
+logEvent e = modify $ \s -> s { rsLogEvents = e:rsLogEvents s }
 
 -- | Create a fresh variable for the left-hand-side of an assignment.
 freshId :: Recover ids FnAssignId
@@ -402,20 +425,27 @@ evalAssignRhs rhs = do
 
 $(pure [])
 
-bitcast :: FnValue X86_64 i
+bitcast :: String
+        -> FnValue X86_64 i
         -> WidthEqProof i o
         -> Recover ids (FnValue X86_64 o)
-bitcast x p = evalAssignRhs $ FnEvalApp (Bitcast x p)
+bitcast ctx x p = do
+  logEvent event
+  evalAssignRhs $ FnEvalApp (Bitcast x p)
+  where src = typeToLLVMType $ widthEqSource p
+        dst = typeToLLVMType $ widthEqTarget p
+        event = LLVMLogEvent ctx $ LogInfoBitCast $ LLVMBitCastInfo src dst
 
 $(pure [])
 
-checkedBitcast :: FnValue X86_64 i
+checkedBitcast :: String
+               -> FnValue X86_64 i
                -> WidthEqProof i o
                -> Recover ids (FnValue X86_64 o)
-checkedBitcast v pr =
+checkedBitcast ctx v pr =
   case testEquality (widthEqSource pr) (widthEqTarget pr) of
     Just Refl -> pure v
-    Nothing -> bitcast v pr
+    Nothing -> bitcast ctx v pr
 
 $(pure [])
 
@@ -424,9 +454,9 @@ coerceRegValue :: FnRegValue X86_64 tp
                -> Recover ids (FnValue X86_64 tp)
 coerceRegValue (EmbeddingApp v e) =
   case e of
-    EqEmbedding pr -> checkedBitcast v pr
+    EqEmbedding pr -> checkedBitcast "coerceRegValue" v pr
     UExtEmbedding pr w -> do
-      vw <- checkedBitcast v pr
+      vw <- checkedBitcast "coerceRegValue" v pr
       evalAssignRhs $ FnEvalApp (UExt vw w)
 
 -- | This takes a value written to memory (e.g., the stack),
@@ -444,7 +474,7 @@ coerceWriteToRead (EmbeddingApp v emb) writeRepr readRepr
   , EqEmbedding pr <- emb
   , Just Refl <- testEquality writeWidth (floatInfoBytes readFloatRepr)
   , writeEnd == readEnd =
-      bitcast v (WidthEqTrans pr (ToFloat readFloatRepr))
+      bitcast "coerceWriteToRead" v (WidthEqTrans pr (ToFloat readFloatRepr))
   | otherwise =
       throwErrorAt ReoptTypeMismatchTag $
         printf "Cannot read type %s from write of type %s."
@@ -628,10 +658,13 @@ recoverZMMRegValue tstmtIdx tp i regs = do
   v512 <- recoverRegister tstmtIdx regs (X86_ZMMReg i)
   case tp of
     ZMMDouble -> do
+      logEvent $ LLVMLogEvent "recoverZMMRegValue"
+               $ LogInfoTrunc
+               $ LLVMBitCastInfo (llvmITypeNat 512) (llvmITypeNat 64)
       v64 <- evalAssignRhs $ FnEvalApp (Trunc v512 n64)
-      bitcast v64 (ToFloat DoubleFloatRepr)
+      bitcast "recoverZMMRegValue" v64 (ToFloat DoubleFloatRepr)
     ZMM512D -> do
-      bitcast v512 bv512ToVec8Double
+      bitcast "recoverZMMRegValue" v512 bv512ToVec8Double
 
 returnValueForX86RetInfo :: StmtIndex
                          -> X86RetInfo tp
@@ -1380,6 +1413,7 @@ evalRecover b inv preds phiVars locMap = do
               , rsWriteMap = Map.empty
               , rsSeenMemAccessTypes = []
               , rsPendingMemAccesses = biMemAccessList inv
+              , rsLogEvents = []
               }
 
   let pr =
@@ -1389,16 +1423,18 @@ evalRecover b inv preds phiVars locMap = do
 
   (tm, s) <- runStateT (runRecover (recoverBlock b)) s0
 
+  modify' $ \fs -> fs {frsLogEvents = rsLogEvents s ++ frsLogEvents fs}
+
   return $! FnBlock { fbLabel = fnBlockLabelFromAddr (pblockAddr b)
-                    , fbPrecond = pr
-                    , fbSize  = fromIntegral (blockSize b)
-                    , fbPrevBlocks = fnBlockLabelFromAddr <$> preds
-                    , fbInvariants = ppInvariant <$> locMapToList (bscLocMap (biStartConstraints inv))
-                    , fbPhiVars = phiVars
-                    , fbStmts  = toList (s^.rsCurStmts)
-                    , fbTerm   = tm
-                    , fbMemInsnAddrs = V.fromList (reverse (rsSeenMemAccessTypes s))
-                    }
+                     , fbPrecond = pr
+                     , fbSize  = fromIntegral (blockSize b)
+                     , fbPrevBlocks = fnBlockLabelFromAddr <$> preds
+                     , fbInvariants = ppInvariant <$> locMapToList (bscLocMap (biStartConstraints inv))
+                     , fbPhiVars = phiVars
+                     , fbStmts  = toList (s^.rsCurStmts)
+                     , fbTerm   = tm
+                     , fbMemInsnAddrs = V.fromList (reverse (rsSeenMemAccessTypes s))
+                     }
 
 $(pure [])
 
@@ -1856,6 +1892,12 @@ x86BlockInvariants sysp mem funNameMap funTypeMap fInfo rets = do
     Left e -> Left e
     Right v -> Right v
 
+data RecoveredFunction a =
+  RecoveredFunction
+  { recoveredFunction :: !(Function a)
+  , llvmLogEvents :: ![LLVMLogEvent]
+  }
+
 -- | Recover the function at a given address.
 --
 -- Returns either an error message with a fatal error, or a list of
@@ -1870,7 +1912,7 @@ recoverFunction :: forall ids
                    -- ^ Name of function
                 -> [X86ArgInfo] -- ^ Type of arguments
                 -> [Some X86RetInfo] -- ^ Type of return types
-                -> Either (RecoverError 64) (Function X86_64)
+                -> Either (RecoverError 64) (RecoveredFunction X86_64)
 recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
   -- Get address of function entry point
   let entryAddr = discoveredFunAddr fInfo
@@ -1911,13 +1953,15 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
           | otherwise = Just <$> recoverInnerBlock blk
     blks <- Map.traverseMaybeWithKey recoverBlk (fInfo^.parsedBlocks)
 
-    pure $! Function { fnAddr = entryAddr
-                     , fnType =
-                         FunctionType { fnArgTypes   = argRegTypeRepr <$> curArgs
-                                      , fnReturnType = retReturnType curRets
-                                      , fnVarArgs    = False
-                                      }
-                     , fnName = nm
-                     , fnEntryBlock = recoveredEntryBlk
-                     , fnRestBlocks = Map.elems blks
-                     }
+    let fn = Function { fnAddr = entryAddr
+                      , fnType =
+                          FunctionType { fnArgTypes   = argRegTypeRepr <$> curArgs
+                                       , fnReturnType = retReturnType curRets
+                                       , fnVarArgs    = False
+                                       }
+                      , fnName = nm
+                      , fnEntryBlock = recoveredEntryBlk
+                      , fnRestBlocks = Map.elems blks
+                      }
+    events <- gets frsLogEvents
+    pure $! seq fn $ RecoveredFunction fn events
