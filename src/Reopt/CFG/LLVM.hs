@@ -55,6 +55,7 @@ module Reopt.CFG.LLVM
   , cmpsxFromSize
   , llvmAsPtr
   , llvmTrunc
+  , llvmBitCast
   , extractValue
   , insertValue
   , call
@@ -825,12 +826,12 @@ appToLLVM app = bbArchConstraints $ do
       let llvmIdx = L.ValInteger (toInteger idx)
       L.Typed llvmVecType <$> evalInstr (L.InsertElt llvmVec llvmVal llvmIdx)
 
-    Trunc v sz -> mkLLVMValue v >>= \u -> convop L.Trunc u (natReprToLLVMType sz)
+    Trunc v sz -> mkLLVMValue v >>= \u -> llvmTrunc "appToLLVM" u (natReprToLLVMType sz)
     SExt  v sz -> mkLLVMValue v >>= \u -> convop L.SExt  u (natReprToLLVMType sz)
     UExt  v sz -> mkLLVMValue v >>= \u -> convop L.ZExt  u (natReprToLLVMType sz)
     Bitcast x tp -> do
       llvmVal <- mkLLVMValue x
-      convop L.BitCast llvmVal (typeToLLVMType (widthEqTarget tp))
+      llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -890,7 +891,7 @@ appToLLVM app = bbArchConstraints $ do
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
 
--- | Evaluate a value as a pointer
+-- | Evaluate a value as a pointer (and log).
 llvmAsPtr :: HasCallStack
           => String
           -- ^ Context calling this helper (for logging purposes)
@@ -907,7 +908,7 @@ llvmAsPtr ctx ptr tp = do
   convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
 
 
--- | Truncate (and log).
+-- | Truncate and log.
 llvmTrunc :: forall arch.
              String
              -- ^ Context truncation is being generated in.
@@ -919,6 +920,19 @@ llvmTrunc ctx lhs rhs = do
            $ LogInfoTrunc
            $ LLVMBitCastInfo (L.typedType lhs) rhs
   convop L.Trunc lhs rhs
+
+-- | Bitcast and log.
+llvmBitCast :: forall arch.
+             String
+             -- ^ Context truncation is being generated in.
+             -> L.Typed L.Value
+             -> L.Type
+             -> BBLLVM arch (L.Typed L.Value)
+llvmBitCast ctx lhs rhs = do
+  logEvent $ LLVMLogEvent ctx
+           $ LogInfoBitCast
+           $ LLVMBitCastInfo (L.typedType lhs) rhs
+  convop L.BitCast lhs rhs
 
 -- | Create a singleton vector from a value.
 singletonVector :: L.Typed L.Value -> BBLLVM arch (L.Typed L.Value)
