@@ -129,7 +129,7 @@ upperBound type1 type2 =
     -- J-TypeVar
     (t1@(VarTy _), t2) -> orTy t1 t2
     (t1, t2@(VarTy _)) -> orTy t1 t2
-    -- J-Ptr
+    -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
     ((PtrTy t1), (PtrTy t2)) -> ptrTy (upperBound t1 t2)
     -- J-NoRel
     (_,_) -> TopTy
@@ -316,8 +316,11 @@ updateUpperBounds (s, t) initial =
       -- If `α </: s` or if we _already_ know `α <: t` then simply move on.
       if not (Set.member s ts) || (Set.member t ts) then (cset, cinfo)
       -- otherwise we need to compute the closure
-      else  -- Add `Υ(α <: S)` to `C`.
-        let cset' = addConstraints (decomposeSubC (VarTy a) s) cset
+      else
+        -- Add `Υ(α <: T)` to `C`. (N.B., TIE suggests adding `Υ(α <: S)`
+        -- instead, but if we previously recorded `α <: S` already, then we
+        -- would have already recorded `Υ(α <: S)` at that time as well).
+        let cset' = addConstraints (decomposeSubC (VarTy a) t) cset
             -- `S_{<:} = S_{<:} ∪ {a <: t}`
             supCache' = let updateSupSet mTys =
                               case mTys of Nothing  -> Just $ Set.singleton t
