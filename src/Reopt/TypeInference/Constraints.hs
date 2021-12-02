@@ -285,11 +285,11 @@ initConstraintSet constraints = addConstraints constraints emptyConstraintSet
 -- FIXME use S_{=} to not actually do full substitutions all the time and just
 -- do them _as_ we consider constraints...? Use a newtype?
 
--- | @solveEqC (t1,t2) cset cinfo@ updates @cset@ and @cinfo@ with the equality
--- `t1 == t2`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
+-- | @solveEqC (s,t) cset cinfo@ updates @cset@ and @cinfo@ with the equality
+-- `s == t`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
 -- failed the occurs check.
 solveEqC :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> Maybe (ConstraintSet, ConstraintInfo)
-solveEqC (type1, type2) (cset, cinfo) = go type1 type2
+solveEqC (s, t) (cset, cinfo) = go s t
   where go :: X86Ty -> X86Ty -> Maybe (ConstraintSet, ConstraintInfo)
         go (VarTy x) t2 =
           if occursIn x t2
