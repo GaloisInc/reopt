@@ -326,18 +326,43 @@ updateUpperBounds (s, t) initial =
                               case mTys of Nothing  -> Just $ Set.singleton t
                                            Just tys -> Just $ Set.insert t tys
                         in Map.alter updateSupSet a $ ciSupertypeCache cinfo
-            -- `B↑(α) ← B↑(α) ⊓ B↑(T)`, `
+            -- `B↑(α) ← B↑(α) ⊓ B↑(T)`
             upperBounds' = let aTy = lowerBound (currentUpperBound (VarTy a) cinfo) (currentUpperBound t cinfo)
                              in Map.insert a aTy $ ciVarUpperBounds cinfo
             cinfo' = cinfo{ciSupertypeCache = supCache', ciVarUpperBounds = upperBounds'}
           in (cset', cinfo')
 
--- | Given `t1 <: t2`, if `t2` is a type variable `x`, update the lower bounds
--- of any supertypes. I.e., ∀ `y` s.t.`x <: y`, we want to record `t1 <: y`. Cf.
--- rule (3) in the Decomposition Rules of § 6.3.2.
+-- | Given `s <: t`, for all type variables `β` where `t <: β`, we add `s <: β`,
+-- update the lower bound of `β`, and record any implied information from `s <:
+-- β`. Cf. rule (3) in the Decomposition Rules of § 6.3.2. N.B., we interpret
+-- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
+-- `∀(T <: α)` to quantify only over known subtype constraints where `β` is
+-- _explicitly a type variable_.
 updateLowerBounds :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
-updateLowerBounds (t1, VarTy x) (cset, cinfo) = undefined -- FIXME
-updateLowerBounds (_, _)  (cset, cinfo) = (cset, cinfo)
+updateLowerBounds (s, t) initial =
+  -- Find all `β` where `t <: β` and perform updates to propogate `s <: β`.
+  Map.foldrWithKey update initial (ciSubtypeCache $ snd initial)
+  where
+    update :: TyVar -> Set X86Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+    update b ts (cset, cinfo) =
+      -- If `t </: β` or if we _already_ know `s <: β` then simply move on.
+      if not (Set.member t ts) || (Set.member s ts) then (cset, cinfo)
+      -- otherwise we need to compute the closure
+      else
+        -- Add `Υ(S <: β)` to `C`. (N.B., TIE suggests adding `Υ(T <: β)`
+        -- instead, but if we previously recorded `T <: β` already, then we
+        -- would have already recorded `Υ(T <: β)` at that time as well).
+        let cset' = addConstraints (decomposeSubC s (VarTy b)) cset
+            -- `S_{<:} = S_{<:} ∪ {s <: β}`
+            subCache' = let updateSubSet mTys =
+                              case mTys of Nothing  -> Just $ Set.singleton s
+                                           Just tys -> Just $ Set.insert s tys
+                        in Map.alter updateSubSet b $ ciSubtypeCache cinfo
+            -- `B↓(α) ← B↓(β) ⊔ B↓(S)`
+            lowerBounds' = let bTy = upperBound (currentLowerBound (VarTy b) cinfo) (currentLowerBound s cinfo)
+                             in Map.insert b bTy $ ciVarLowerBounds cinfo
+            cinfo' = cinfo{ciSubtypeCache = subCache', ciVarUpperBounds = lowerBounds'}
+          in (cset', cinfo')
 
 -- FIXME use `decomposeSubC` as a "preprocess" pass over the subtype constraint...???
 
@@ -346,7 +371,7 @@ updateLowerBounds (_, _)  (cset, cinfo) = (cset, cinfo)
 solveSubC :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
 solveSubC (t1,t2) (cset, cinfo) = -- FIXME substEqs here
     -- If `t1 <: t2` the contraint is trivial and should be discarded.
-    if subtype t1 t2 then (cset, cinfo)  -- FIXME occurs check
+    if subtype t1 t2 then (cset, cinfo)  -- FIXME occurs check!
     else let (cset', cinfo') = updateLowerBounds (t1,t2)
                                $ updateUpperBounds (t1,t2)
                                $ (cset, cinfo)
