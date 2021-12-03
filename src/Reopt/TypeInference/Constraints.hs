@@ -9,188 +9,252 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+-- import Data.List.NonEmpty (NonEmpty)
+-- import qualified Data.List.NonEmpty as NonEmpty
 
-data NumSize
-  = NumSize8
-  | NumSize16
-  | NumSize32
-  | NumSize64
-  deriving (Eq, Ord)
-
-numSizeInt :: NumSize -> Int
-numSizeInt =
-  \case
-    NumSize8 -> 8
-    NumSize16 -> 16
-    NumSize32 -> 32
-    NumSize64 -> 64
 
 newtype TyVar = TyVar {tyVarInt :: Int }
   deriving (Eq, Ord)
 
 -- | Types of values in x86 machine code (missing reg types, records/memory, functions)
-data X86Ty
-  = TopTy
-  | BotTy
-  | VarTy TyVar -- a type unification variable
-  | PtrTy X86Ty
-  | NumTy NumSize
-  | ScalarFloatTy
-  | VecFloatTy -- FIXME does this overlap with ScalarFloatTy in it's memory representation?
-  | AndTy X86Ty X86Ty
-  | OrTy X86Ty X86Ty
+data Ty
+  = -- | Top type (any kind of value).
+    TopTy
+  | -- | Bottom type (no possible values).
+    BotTy
+  | -- Type unification variable.
+    VarTy TyVar
+  | -- | A pointer of specified bit width pointing to some type of value (i.e., on X86_64 bit width would be 64).
+    PtrTy Int Ty
+  | -- | Code of specified bit width (i.e., on X86_64 bit width would be 64).
+    CodeTy Int
+  | -- | Register type of specified bit width (i.e., any value that can fit in a register of said size).
+    RegTy Int
+  | -- | Integer type of specified bit width (sign or unsigned).
+    NumTy Int
+  | -- | Unsigned integer type of specified bit width.
+    UIntTy Int
+  | -- | Signed integer type of specified bit width.
+    IntTy Int
+  | -- | Float type of specified bit width (e.g., float32, float64).
+    FloatTy Int
+  -- | -- | Record type, mapping bit offsets to types
+  --   RecordTy [(Int, Ty)]
+  | -- | Intersection of two or more types. Should not contain duplicates or nested intersections.
+    AndTy Ty Ty [Ty]
+  | -- | Union of two or more types. Should not contain duplicates or nested unions.
+    OrTy Ty Ty [Ty]
   deriving (Eq, Ord)
 
-isBaseTy :: X86Ty -> Bool
+isBaseTy :: Ty -> Bool
 isBaseTy t = case t of
   TopTy -> False
   BotTy -> False
   VarTy{} -> False
   PtrTy{} -> True
+  CodeTy{} -> True
+  RegTy{} -> True
   NumTy{} -> True
-  ScalarFloatTy -> True
-  VecFloatTy -> True
+  UIntTy{} -> True
+  IntTy{} -> True
+  FloatTy{} -> True
   AndTy{} -> False
   OrTy{} -> False
 
+reg1Ty, reg8Ty, reg16Ty, reg32Ty, reg64Ty :: Ty
+reg1Ty  = RegTy 1
+reg8Ty  = RegTy 8
+reg16Ty = RegTy 16
+reg32Ty = RegTy 32
+reg64Ty = RegTy 64
 
-num8Ty, num16Ty, num32Ty, num64Ty :: X86Ty
-num8Ty = NumTy NumSize8
-num16Ty = NumTy NumSize16
-num32Ty = NumTy NumSize32
-num64Ty = NumTy NumSize64
+uint8Ty, uint16Ty, uint32Ty, uint64Ty :: Ty
+uint8Ty  = UIntTy 8
+uint16Ty = UIntTy 16
+uint32Ty = UIntTy 32
+uint64Ty = UIntTy 64
+
+int8Ty, int16Ty, int32Ty, int64Ty :: Ty
+int8Ty  = IntTy 8
+int16Ty = IntTy 16
+int32Ty = IntTy 32
+int64Ty = IntTy 64
+
+num8Ty, num16Ty, num32Ty, num64Ty :: Ty
+num8Ty  = NumTy 8
+num16Ty = NumTy 16
+num32Ty = NumTy 32
+num64Ty = NumTy 64
+
+float32Ty, float64Ty :: Ty
+float32Ty = FloatTy 32
+float64Ty = FloatTy 64
 
 -- Constructs a pointer type, simplifying some cases.
-ptrTy :: X86Ty -> X86Ty
-ptrTy BotTy = BotTy
-ptrTy t = PtrTy t
+ptrTy :: Int -> Ty -> Ty
+ptrTy _ BotTy = BotTy
+ptrTy w t = PtrTy w t
 
--- Constructs an intersection type, simplifying some cases.
-andTy :: X86Ty -> X86Ty -> X86Ty
-andTy BotTy _ = BotTy
-andTy _ BotTy = BotTy
-andTy TopTy t = t
-andTy t TopTy = t
-andTy (PtrTy t1) (PtrTy t2) = PtrTy (andTy t1 t2)
-andTy t1 t2 = if t1 == t2 then t1 else AndTy t1 t2
+-- Constructs an intersection type, simplifying some basic cases.
+andTy :: [Ty] -> Ty
+andTy = go Set.empty
+  where go :: Set Ty -> [Ty] -> Ty
+        go acc [] = case Set.toList acc of
+                      [] -> TopTy
+                      [t] -> t
+                      t1:t2:ts -> AndTy t1 t2 ts
+        go acc (TopTy:ts) = go acc ts
+        go _   (BotTy:_) = BotTy
+        go acc (AndTy s1 s2 ss:ts) = go acc (s1:s2:(ss++ts))
+        go acc (t:ts) = go (Set.insert t acc) ts
 
--- Constructs a union type, simplifying some cases.
-orTy :: X86Ty -> X86Ty -> X86Ty
-orTy BotTy t = t
-orTy t BotTy = t
-orTy TopTy _ = TopTy
-orTy _ TopTy = TopTy
-orTy t1 t2 = if t1 == t2 then t1 else OrTy t1 t2
+
+-- Constructs a union type, simplifying some basic cases.
+orTy :: [Ty] -> Ty
+orTy = go Set.empty
+  where go :: Set Ty -> [Ty] -> Ty
+        go acc [] = case Set.toList acc of
+                      [] -> BotTy
+                      [t] -> t
+                      t1:t2:ts -> OrTy t1 t2 ts
+        go acc (BotTy:ts) = go acc ts
+        go _   (TopTy:_) = TopTy
+        go acc (OrTy s1 s2 ss:ts) = go acc (s1:s2:(ss++ts))
+        go acc (t:ts) = go (Set.insert t acc) ts
 
 
 -- | Return the given type with all type variables replaced via the lookup function.
-concretize :: X86Ty -> (TyVar -> X86Ty) -> X86Ty
+concretize :: Ty -> (TyVar -> Ty) -> Ty
 concretize initialTy lookupVar = go initialTy
   where
-    go :: X86Ty -> X86Ty
+    go :: Ty -> Ty
     go TopTy = TopTy
     go BotTy = BotTy
     go (VarTy x) = lookupVar x
-    go (PtrTy t) = ptrTy (go t)
-    go t@(NumTy _) = t
-    go ScalarFloatTy = ScalarFloatTy
-    go VecFloatTy = VecFloatTy
-    go (AndTy t1 t2) = andTy (go t1) (go t2)
-    go (OrTy t1 t2) = orTy (go t1) (go t2)
+    go (PtrTy w t) = ptrTy w (go t)
+    go t@CodeTy{} = t
+    go t@RegTy{} = t
+    go t@NumTy{} = t
+    go t@IntTy{} = t
+    go t@UIntTy{} = t
+    go t@FloatTy{} = t
+    go (AndTy t1 t2 ts) = andTy $ (go t1):(go t2):(map go ts)
+    go (OrTy t1 t2 ts) = orTy $ (go t1):(go t2):(map go ts)
 
 -- | @subst x t1 t2@ says substitute appearances of @x@ out for @t1@ in @t2@.
-subst :: TyVar -> X86Ty -> X86Ty -> X86Ty
+subst :: TyVar -> Ty -> Ty -> Ty
 subst x xTy ty = concretize ty (\y -> if x == y then xTy else (VarTy y))
 
-subtype :: X86Ty -> X86Ty -> Bool
+subtype :: Ty -> Ty -> Bool
 subtype type1 type2 =
   case (type1,type2) of
-    (t1,t2) | t1 == t2 -> True
+    -- Reflexivity
+    (s,t) | s == t -> True
+    -- Top/Bot
     (_, TopTy) -> True
     (BotTy, _) -> True
-    (PtrTy t1, PtrTy t2) -> subtype t1 t2
-    (NumTy n1, NumTy n2) -> (numSizeInt n1) <= (numSizeInt n2)
-    (AndTy t1 t2, t3) -> subtype t1 t3 || subtype t2 t3
-    (OrTy t1 t2, t3)  -> subtype t1 t3 && subtype t2 t3
-    (t1, AndTy t2 t3) -> subtype t1 t2 && subtype t1 t3
-    (t1, OrTy t2 t3)  -> subtype t1 t2 || subtype t1 t3
+    -- Pointer subtypes
+    (PtrTy w1 s, PtrTy w2 t) -> w1 <= w2 && subtype s t
+    -- Register subtypes
+    (RegTy w1,   RegTy w2) -> w1 <= w2
+    (PtrTy w1 n, RegTy w2) -> w1 <= w2
+    (CodeTy w1,  RegTy w2) -> w1 <= w2
+    (NumTy w1,   RegTy w2) -> w1 <= w2
+    (IntTy w1,   RegTy w2) -> w1 <= w2
+    (UIntTy w1,  RegTy w2) -> w1 <= w2
+    -- Numeric (signed/unsigned integer) subtypes
+    (NumTy w1,  NumTy w2) -> w1 <= w2
+    (IntTy w1,  NumTy w2) -> w1 <= w2
+    (UIntTy w1, NumTy w2) -> w1 <= w2
+    -- Signed/Unsigned integer subtypes
+    (IntTy w1,  IntTy w2)  -> w1 <= w2
+    (UIntTy w1, UIntTy w2) -> w1 <= w2
+    -- Set-theoretic subtypes
+    (AndTy s1 s2 ss, t) -> any (\s -> subtype s t) (s1:s2:ss)
+    (OrTy s1 s2 ss, t)  -> all (\s -> subtype s t) (s1:s2:ss)
+    (s, AndTy t1 t2 ts) -> all (subtype s) (t1:t2:ts)
+    (s, OrTy t1 t2 ts)  -> any (subtype s) (t1:t2:ts)
+    -- Conservative base case
     (_, _) -> False
 
 
 -- | Calculates the (least) upper bound of two types (denoted by the “join”
 -- operator ⊔).
-upperBound :: X86Ty -> X86Ty -> X86Ty
+upperBound :: Ty -> Ty -> Ty
 upperBound type1 type2 =
     case (type1,type2) of
-    (t1,t2) | t1 == t2 -> t1
+    (s,t) | s == t -> s
     -- J-Subtype
-    (t1, t2) | isBaseTy t1 && isBaseTy t2 && subtype t1 t2 -> t2
-    (t1, t2) | isBaseTy t1 && isBaseTy t2 && subtype t2 t1 -> t1
+    (s, t) | isBaseTy s && isBaseTy t && subtype s t -> t
+    (s, t) | isBaseTy s && isBaseTy t && subtype t s -> s
     -- J-TypeVar
-    (t1@(VarTy _), t2) -> orTy t1 t2
-    (t1, t2@(VarTy _)) -> orTy t1 t2
+    (s@(VarTy _), t) -> orTy [s,t]
+    (s, t@(VarTy _)) -> orTy [s,t]
     -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
-    ((PtrTy t1), (PtrTy t2)) -> ptrTy (upperBound t1 t2)
+    ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (upperBound s t)
     -- J-NoRel
     (_,_) -> TopTy
 
 -- | Calculates the (greatest) lower bound of two types (denoted by the meet”
 -- operator ⊓).
-lowerBound :: X86Ty -> X86Ty -> X86Ty
+lowerBound :: Ty -> Ty -> Ty
 lowerBound type1 type2 =
   case (type1,type2) of
-    (t1,t2) | t1 == t2 -> t1
+    (s,t) | s == t -> s
     -- M-Subtype
-    (t1, t2) | isBaseTy t1 && isBaseTy t2 && subtype t1 t2 -> t1
-    (t1, t2) | isBaseTy t1 && isBaseTy t2 && subtype t2 t1 -> t2
+    (s, t) | isBaseTy s && isBaseTy t && subtype s t -> s
+    (s, t) | isBaseTy s && isBaseTy t && subtype t s -> t
     -- M-TypeVar
-    (t1@(VarTy _), t2) -> andTy t1 t2
-    (t1, t2@(VarTy _)) -> andTy t1 t2
+    (s@(VarTy _), t) -> andTy [s,t]
+    (s, t@(VarTy _)) -> andTy [s,t]
     -- M-Ptr
-    ((PtrTy t1), (PtrTy t2)) -> ptrTy (lowerBound t1 t2)
+    ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (lowerBound s t)
     -- M-NoRel
     (_,_) -> BotTy
 
-tyFreeVars :: X86Ty -> Set TyVar
+tyFreeVars :: Ty -> Set TyVar
 tyFreeVars =
     \case
        TopTy -> Set.empty
        BotTy -> Set.empty
-       (VarTy x) -> Set.singleton x
-       (PtrTy t) -> tyFreeVars t
-       (NumTy _) -> Set.empty
-       ScalarFloatTy -> Set.empty
-       VecFloatTy -> Set.empty
-       (AndTy t1 t2) -> Set.union (tyFreeVars t1) (tyFreeVars t2)
-       (OrTy t1 t2) -> Set.union (tyFreeVars t1) (tyFreeVars t2)
+       VarTy x -> Set.singleton x
+       PtrTy _ t -> tyFreeVars t
+       CodeTy{} -> Set.empty
+       RegTy{} -> Set.empty
+       NumTy{} -> Set.empty
+       IntTy{} -> Set.empty
+       UIntTy{} -> Set.empty
+       FloatTy{} -> Set.empty
+       (AndTy t1 t2 ts) -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
+       (OrTy t1 t2 ts)  -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
 
 -- | @occursIn x t@, does `x` appear in `t`?
-occursIn :: TyVar -> X86Ty -> Bool
+occursIn :: TyVar -> Ty -> Bool
 occursIn x ty = Set.member x $ tyFreeVars ty
 
 
 -- | A type which has not been subjected to any substitutions currently being
 -- considered.
--- newtype RawX86Ty = RawX86Ty {rawX86Ty :: X86Ty}
+-- newtype RawTy = RawTy {rawTy :: Ty}
 
 
 
 -- | x86 type constraints
-data X86TyConstraint
+data TyConstraint
   = -- | An equality constraint.
-    EqC X86Ty X86Ty
+    EqC Ty Ty
   | -- | A subtype constraint.
-    SubC X86Ty X86Ty
-  | OrC [X86TyConstraint]
-  | AndC [X86TyConstraint]
+    SubC Ty Ty
+  | OrC [TyConstraint]
+  | AndC [TyConstraint]
 
--- eqConstraint :: X86Ty -> X86Ty -> X86TyConstraint
+-- eqConstraint :: Ty -> Ty -> TyConstraint
 -- eqConstraint
 
 
--- cSubst :: TyVar -> X86Ty -> X86TyConstraint -> X86TyConstraint
+-- cSubst :: TyVar -> Ty -> TyConstraint -> TyConstraint
 -- cSubst x xTy constraint = go constraint
---   where go :: X86TyConstraint -> X86TyConstraint
+--   where go :: TyConstraint -> TyConstraint
 --         go (EqC t1 t2)  = EqC (subst x xTy t1) (subst x xTy t2)
 --         go (SubC t1 t2) = SubC (subst x xTy t1) (subst x xTy t2)
 --         go (OrC cs)     = OrC (map go cs)
@@ -199,18 +263,20 @@ data X86TyConstraint
 
 -- | @decompSubC t1 t2@ decomposes `t1 <: t2` into any implied constraints. Cf.
 -- TIE's `Υ` operator from § 6.3.2.
-decomposeSubC :: X86Ty -> X86Ty -> [X86TyConstraint]
-decomposeSubC (PtrTy t1) (PtrTy t2) = [SubC t1 t2]
-decomposeSubC t1 (AndTy t2 t3) = [SubC t1 t2, SubC t1 t3]
-decomposeSubC (OrTy t1 t2) t3 = [SubC t1 t3, SubC t2 t3]
-decomposeSubC _ _ = []
+decomposeSubC :: Ty -> Ty -> [TyConstraint]
+decomposeSubC type1 type2 =
+  case (type1,type2) of
+    ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 ->  [SubC s t]
+    (s, (AndTy t1 t2 ts)) -> map (SubC s) (t1:t2:ts)
+    ((OrTy s1 s2 ss), t) -> map (\s -> SubC s t) (s1:s2:ss)
+    _ -> []
 
 -- | An equality constraint before relevant substitutions have been applied.
-data RawEqC = RawEqC X86Ty X86Ty
+data RawEqC = RawEqC Ty Ty
 -- | A subtype constraint before relevant substitutions have been applied.
-data RawSubC = RawSubC X86Ty X86Ty
+data RawSubC = RawSubC Ty Ty
 -- | A disjunction of constraints before relevant substitutions have been applied.
-data RawOrC = RawOrC [X86TyConstraint]
+data RawOrC = RawOrC [TyConstraint]
 
 -- | Constraints, organized by type. Cf. `C` in TIE § 6.3. N.B., in TIE,
 -- substutition is used on this entire set frequently. We prefer lazily
@@ -219,9 +285,9 @@ data RawOrC = RawOrC [X86TyConstraint]
 data ConstraintSet
   = ConstraintSet
     { csRawEqConstraints  :: [RawEqC]
-    , csEqConstraints  :: [(X86Ty, X86Ty)]
+    , csEqConstraints  :: [(Ty, Ty)]
     , csRawSubConstraints :: [RawSubC]
-    , csSubConstraints :: [(X86Ty, X86Ty)]
+    , csSubConstraints :: [(Ty, Ty)]
     , csRawOrConstraints  :: [RawOrC]
     }
 
@@ -233,40 +299,40 @@ data ConstraintInfo
   = ConstraintInfo
     { -- | Map from type variables to their known subtypes.
       -- One half of `S_{<:}` from TIE § 6.3.
-      ciSubtypeCache :: Map TyVar (Set X86Ty)
+      ciSubtypeCache :: Map TyVar (Set Ty)
       -- | Map from type variables to their known supertypes.
       -- One half of `S_{<:}` from TIE § 6.3.
-    , ciSupertypeCache :: Map TyVar (Set X86Ty)
+    , ciSupertypeCache :: Map TyVar (Set Ty)
     -- | Known type for type variables. `S_{=}` from TIE § 6.3. N.B., this map
     -- is used in conjunction with `substEqs` to apply substitutions lazily.
-    , ciVarTypes :: Map TyVar X86Ty
+    , ciVarTypes :: Map TyVar Ty
     -- | Upper bounds for type variables. `B^{↑}` from TIE § 6.3.
-    , ciVarUpperBounds :: Map TyVar X86Ty
+    , ciVarUpperBounds :: Map TyVar Ty
     -- | Lower bounds for type variables. `B^{↓}` from TIE § 6.3.
-    , ciVarLowerBounds :: Map TyVar X86Ty
+    , ciVarLowerBounds :: Map TyVar Ty
     }
 
 -- | Perform the substitutions implied thus far by the @ConstraintInfo@'s
 -- @ciVarTypes@ map. (This is to avoid performing repeated substitutions on the
 -- entire constraint set.)
-substEqs :: X86Ty -> ConstraintInfo -> X86Ty
+substEqs :: Ty -> ConstraintInfo -> Ty
 substEqs t cinfo = concretize t lookupVar
   where lookupVar x = Map.findWithDefault (VarTy x) x (ciVarTypes cinfo)
 
 -- | Concretize the type using any available upper bounds for type variables.
-currentUpperBound :: X86Ty -> ConstraintInfo -> X86Ty
+currentUpperBound :: Ty -> ConstraintInfo -> Ty
 currentUpperBound t cinfo = concretize t lookupVar
   where lookupVar x = Map.findWithDefault TopTy x (ciVarUpperBounds cinfo)
 
 -- | Concretize the type using any available lower bounds for type variables.
-currentLowerBound :: X86Ty -> ConstraintInfo -> X86Ty
+currentLowerBound :: Ty -> ConstraintInfo -> Ty
 currentLowerBound t cinfo = concretize t lookupVar
   where lookupVar x = Map.findWithDefault BotTy x (ciVarLowerBounds cinfo)
 
 emptyConstraintInfo :: ConstraintInfo
 emptyConstraintInfo = ConstraintInfo Map.empty Map.empty Map.empty Map.empty Map.empty
 
-addConstraints :: [X86TyConstraint] -> ConstraintSet -> ConstraintSet
+addConstraints :: [TyConstraint] -> ConstraintSet -> ConstraintSet
 addConstraints [] cset = cset
 addConstraints ((EqC  t1 t2):cs) cset =
     addConstraints cs (cset {csRawEqConstraints = (RawEqC t1 t2):csRawEqConstraints cset})
@@ -279,7 +345,7 @@ addConstraints ((AndC cs'):cs) cset =
 
 -- | Partition the constraints into the @ConstraintSet@, which we use to order
 -- which are handled when during unification.
-initConstraintSet :: [X86TyConstraint] -> ConstraintSet
+initConstraintSet :: [TyConstraint] -> ConstraintSet
 initConstraintSet constraints = addConstraints constraints emptyConstraintSet
 
 -- FIXME use S_{=} to not actually do full substitutions all the time and just
@@ -287,16 +353,16 @@ initConstraintSet constraints = addConstraints constraints emptyConstraintSet
 
 -- | @solveEqC (s,t) cset cinfo@ updates @cset@ and @cinfo@ with the equality
 -- `s == t`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
--- failed the occurs check.
-solveEqC :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> Maybe (ConstraintSet, ConstraintInfo)
-solveEqC (s, t) (cset, cinfo) = go s t
-  where go :: X86Ty -> X86Ty -> Maybe (ConstraintSet, ConstraintInfo)
-        go (VarTy x) t2 =
-          if occursIn x t2
+-- failed the occurs check. FIXME should we have a `decomposeEqC` similar to `decomposeSubC`?
+solveEqC :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> Maybe (ConstraintSet, ConstraintInfo)
+solveEqC (type1, type2) (cset, cinfo) = go type1 type2
+  where go :: Ty -> Ty -> Maybe (ConstraintSet, ConstraintInfo)
+        go (VarTy x) t =
+          if occursIn x t
             then Nothing
-            else Just (cset, cinfo{ciVarTypes = Map.insert x t2 (ciVarTypes cinfo)})
-        go t1 t2@(VarTy _) = go t2 t1
-        go (PtrTy t1) (PtrTy t2) = Just (cset{csEqConstraints = (t1,t2):csEqConstraints cset} , cinfo)
+            else Just (cset, cinfo{ciVarTypes = Map.insert x t (ciVarTypes cinfo)})
+        go s t@(VarTy _) = go t s
+        go (PtrTy _w1 s) (PtrTy _w2 t) = Just (cset{csEqConstraints = (s,t):csEqConstraints cset} , cinfo)
         go _ _ = Just (cset, cinfo)
 
 
@@ -306,12 +372,12 @@ solveEqC (s, t) (cset, cinfo) = go s t
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(α <: S)` to quantify only over known subtype constraints where `α` is
 -- _explicitly a type variable_.
-updateUpperBounds :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+updateUpperBounds :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
 updateUpperBounds (s, t) initial =
   -- Find all `α` where `α <: s` and perform updates to propogate `α <: t`.
   Map.foldrWithKey update initial (ciSupertypeCache $ snd initial)
   where
-    update :: TyVar -> Set X86Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+    update :: TyVar -> Set Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
     update a ts (cset, cinfo) =
       -- If `α </: s` or if we _already_ know `α <: t` then simply move on.
       if not (Set.member s ts) || (Set.member t ts) then (cset, cinfo)
@@ -338,12 +404,12 @@ updateUpperBounds (s, t) initial =
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(T <: α)` to quantify only over known subtype constraints where `β` is
 -- _explicitly a type variable_.
-updateLowerBounds :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+updateLowerBounds :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
 updateLowerBounds (s, t) initial =
   -- Find all `β` where `t <: β` and perform updates to propogate `s <: β`.
   Map.foldrWithKey update initial (ciSubtypeCache $ snd initial)
   where
-    update :: TyVar -> Set X86Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+    update :: TyVar -> Set Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
     update b ts (cset, cinfo) =
       -- If `t </: β` or if we _already_ know `s <: β` then simply move on.
       if not (Set.member t ts) || (Set.member s ts) then (cset, cinfo)
@@ -368,7 +434,7 @@ updateLowerBounds (s, t) initial =
 
 -- | @solveSubC (t1,t2) cset cinfo@ updates @cset@ and @cinfo@ with the subtype constraint
 -- `t1 <: t2`. Cf. TIE § 6.3.2.
-solveSubC :: (X86Ty,X86Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+solveSubC :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
 solveSubC (t1,t2) (cset, cinfo) = -- FIXME substEqs here
     -- If `t1 <: t2` the contraint is trivial and should be discarded.
     if subtype t1 t2 then (cset, cinfo)  -- FIXME occurs check!
@@ -378,10 +444,10 @@ solveSubC (t1,t2) (cset, cinfo) = -- FIXME substEqs here
            in (addConstraints (decomposeSubC t1 t2) cset', cinfo')
 
 
-newtype X86TyUnificationError = X86TyUnificationError String
+newtype TyUnificationError = TyUnificationError String
 
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
-unifyConstraints :: [X86TyConstraint] -> Either X86TyUnificationError (Map TyVar X86Ty)
+unifyConstraints :: [TyConstraint] -> Either TyUnificationError (Map TyVar Ty)
 unifyConstraints initialConstraints = undefined -- FIXME
