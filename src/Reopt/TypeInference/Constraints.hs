@@ -232,13 +232,6 @@ tyFreeVars =
 occursIn :: TyVar -> Ty -> Bool
 occursIn x ty = Set.member x $ tyFreeVars ty
 
-
--- | A type which has not been subjected to any substitutions currently being
--- considered.
--- newtype RawTy = RawTy {rawTy :: Ty}
-
-
-
 -- | x86 type constraints
 data TyConstraint
   = -- | An equality constraint.
@@ -271,82 +264,69 @@ decomposeSubC type1 type2 =
     ((OrTy s1 s2 ss), t) -> map (\s -> SubC s t) (s1:s2:ss)
     _ -> []
 
--- | An equality constraint before relevant substitutions have been applied.
-data RawEqC = RawEqC Ty Ty
--- | A subtype constraint before relevant substitutions have been applied.
-data RawSubC = RawSubC Ty Ty
--- | A disjunction of constraints before relevant substitutions have been applied.
-data RawOrC = RawOrC [TyConstraint]
-
--- | Constraints, organized by type. Cf. `C` in TIE § 6.3. N.B., in TIE,
--- substutition is used on this entire set frequently. We prefer lazily
+-- | Constraints and working sets. Cf. `C` and related sets/maps in TIE § 6.3. N.B., in TIE,
+-- substutition is used on the entire `C` set frequently. We prefer lazily
 -- performing these substitutions _as we handle constraints_, via @substEqs@
--- and the relevant @ConstraintInfo@.
-data ConstraintSet
-  = ConstraintSet
-    { csRawEqConstraints  :: [RawEqC]
-    , csEqConstraints  :: [(Ty, Ty)]
-    , csRawSubConstraints :: [RawSubC]
-    , csSubConstraints :: [(Ty, Ty)]
-    , csRawOrConstraints  :: [RawOrC]
-    }
-
-emptyConstraintSet :: ConstraintSet
-emptyConstraintSet = ConstraintSet [] [] [] [] []
-
-
-data ConstraintInfo
-  = ConstraintInfo
-    { -- | Map from type variables to their known subtypes.
+-- and the relevant @Context@.
+data Context
+  = Context
+    { -- | Equality constraints, i.e. each `(s,t)` means `s == t`. Cf. `C` from TIE § 6.3.
+      ctxEqConstraints  :: [(Ty, Ty)]
+    , -- | Subtype constraints, i.e. each `(s,t)` means `s <: t`. Cf. `C` from TIE § 6.3.
+      ctxSubConstraints :: [(Ty, Ty)]
+    , -- | Disjunctive constraints, i.e. each `[c1,c2,...]` means `c1 ∨ c2 ∨ ...`. Cf. `C` from TIE § 6.3.
+      ctxOrConstraints  :: [[TyConstraint]]
+      -- | Map from type variables to their known subtypes.
       -- One half of `S_{<:}` from TIE § 6.3.
-      ciSubtypeCache :: Map TyVar (Set Ty)
+    , ctxSubtypeMap :: Map TyVar (Set Ty)
       -- | Map from type variables to their known supertypes.
       -- One half of `S_{<:}` from TIE § 6.3.
-    , ciSupertypeCache :: Map TyVar (Set Ty)
+    , ctxSupertypeMap :: Map TyVar (Set Ty)
     -- | Known type for type variables. `S_{=}` from TIE § 6.3. N.B., this map
     -- is used in conjunction with `substEqs` to apply substitutions lazily.
-    , ciVarTypes :: Map TyVar Ty
+    , ctxVarTypeMap :: Map TyVar Ty
     -- | Upper bounds for type variables. `B^{↑}` from TIE § 6.3.
-    , ciVarUpperBounds :: Map TyVar Ty
+    , ctxVarUpperBoundMap :: Map TyVar Ty
     -- | Lower bounds for type variables. `B^{↓}` from TIE § 6.3.
-    , ciVarLowerBounds :: Map TyVar Ty
+    , ctxVarLowerBoundMap :: Map TyVar Ty
     }
 
--- | Perform the substitutions implied thus far by the @ConstraintInfo@'s
--- @ciVarTypes@ map. (This is to avoid performing repeated substitutions on the
+addConstraints :: [TyConstraint] -> Context -> Context
+addConstraints [] ctx = ctx
+addConstraints ((EqC  t1 t2):cs) ctx =
+    addConstraints cs (ctx {ctxEqConstraints = (t1,t2):ctxEqConstraints ctx})
+addConstraints ((SubC t1 t2):cs) ctx =
+  addConstraints cs (ctx {ctxSubConstraints = (t1,t2):ctxSubConstraints ctx})
+addConstraints ((OrC cs'):cs) ctx =
+    addConstraints cs (ctx {ctxOrConstraints = cs':ctxOrConstraints ctx})
+addConstraints ((AndC cs'):cs) ctx =
+    addConstraints (cs'++cs) ctx
+
+
+-- | Perform the substitutions implied thus far by the @Context@'s
+-- @ctxVarTypes@ map. (This is to avoid performing repeated substitutions on the
 -- entire constraint set.)
-substEqs :: Ty -> ConstraintInfo -> Ty
+substEqs :: Ty -> Context -> Ty
 substEqs t cinfo = concretize t lookupVar
-  where lookupVar x = Map.findWithDefault (VarTy x) x (ciVarTypes cinfo)
+  where lookupVar x = Map.findWithDefault (VarTy x) x (ctxVarTypeMap cinfo)
 
 -- | Concretize the type using any available upper bounds for type variables.
-currentUpperBound :: Ty -> ConstraintInfo -> Ty
+currentUpperBound :: Ty -> Context -> Ty
 currentUpperBound t cinfo = concretize t lookupVar
-  where lookupVar x = Map.findWithDefault TopTy x (ciVarUpperBounds cinfo)
+  where lookupVar x = Map.findWithDefault TopTy x (ctxVarUpperBoundMap cinfo)
 
 -- | Concretize the type using any available lower bounds for type variables.
-currentLowerBound :: Ty -> ConstraintInfo -> Ty
+currentLowerBound :: Ty -> Context -> Ty
 currentLowerBound t cinfo = concretize t lookupVar
-  where lookupVar x = Map.findWithDefault BotTy x (ciVarLowerBounds cinfo)
+  where lookupVar x = Map.findWithDefault BotTy x (ctxVarLowerBoundMap cinfo)
 
-emptyConstraintInfo :: ConstraintInfo
-emptyConstraintInfo = ConstraintInfo Map.empty Map.empty Map.empty Map.empty Map.empty
+emptyContext :: Context
+emptyContext = Context [] [] [] Map.empty Map.empty Map.empty Map.empty Map.empty
 
-addConstraints :: [TyConstraint] -> ConstraintSet -> ConstraintSet
-addConstraints [] cset = cset
-addConstraints ((EqC  t1 t2):cs) cset =
-    addConstraints cs (cset {csRawEqConstraints = (RawEqC t1 t2):csRawEqConstraints cset})
-addConstraints ((SubC t1 t2):cs) cset =
-  addConstraints cs (cset {csRawSubConstraints = (RawSubC t1 t2):csRawSubConstraints cset})
-addConstraints ((OrC cs'):cs) cset =
-    addConstraints cs (cset {csRawOrConstraints = (RawOrC cs'):csRawOrConstraints cset})
-addConstraints ((AndC cs'):cs) cset =
-    addConstraints (cs'++cs) cset
-
--- | Partition the constraints into the @ConstraintSet@, which we use to order
+-- | Partition the constraints into the @Context@, which we use to order
 -- which are handled when during unification.
-initConstraintSet :: [TyConstraint] -> ConstraintSet
-initConstraintSet constraints = addConstraints constraints emptyConstraintSet
+initContext :: [TyConstraint] -> Context
+initContext constraints = addConstraints constraints emptyContext
 
 -- FIXME use S_{=} to not actually do full substitutions all the time and just
 -- do them _as_ we consider constraints...? Use a newtype?
@@ -354,16 +334,16 @@ initConstraintSet constraints = addConstraints constraints emptyConstraintSet
 -- | @solveEqC (s,t) cset cinfo@ updates @cset@ and @cinfo@ with the equality
 -- `s == t`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
 -- failed the occurs check. FIXME should we have a `decomposeEqC` similar to `decomposeSubC`?
-solveEqC :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> Maybe (ConstraintSet, ConstraintInfo)
-solveEqC (type1, type2) (cset, cinfo) = go type1 type2
-  where go :: Ty -> Ty -> Maybe (ConstraintSet, ConstraintInfo)
+solveEqC :: (Ty,Ty) -> Context -> Maybe Context
+solveEqC (type1, type2) ctx = go (substEqs type1 ctx) (substEqs type2 ctx)
+  where go :: Ty -> Ty -> Maybe Context
         go (VarTy x) t =
           if occursIn x t
             then Nothing
-            else Just (cset, cinfo{ciVarTypes = Map.insert x t (ciVarTypes cinfo)})
+            else Just $ ctx{ctxVarTypeMap = Map.insert x t (ctxVarTypeMap ctx)}
         go s t@(VarTy _) = go t s
-        go (PtrTy _w1 s) (PtrTy _w2 t) = Just (cset{csEqConstraints = (s,t):csEqConstraints cset} , cinfo)
-        go _ _ = Just (cset, cinfo)
+        go (PtrTy _w1 s) (PtrTy _w2 t) = Just $ ctx {ctxEqConstraints = (s,t):ctxEqConstraints ctx}
+        go _ _ = Just ctx
 
 
 -- | Given `s <: t`, for all type variables `α` where `α <: s`, we add `α <: t`,
@@ -372,31 +352,31 @@ solveEqC (type1, type2) (cset, cinfo) = go type1 type2
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(α <: S)` to quantify only over known subtype constraints where `α` is
 -- _explicitly a type variable_.
-updateUpperBounds :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+updateUpperBounds :: (Ty,Ty) -> Context -> Context
 updateUpperBounds (s, t) initial =
   -- Find all `α` where `α <: s` and perform updates to propogate `α <: t`.
-  Map.foldrWithKey update initial (ciSupertypeCache $ snd initial)
+  Map.foldrWithKey update initial (ctxSupertypeMap initial)
   where
-    update :: TyVar -> Set Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
-    update a ts (cset, cinfo) =
+    update :: TyVar -> Set Ty -> Context -> Context
+    update a ts ctx =
       -- If `α </: s` or if we _already_ know `α <: t` then simply move on.
-      if not (Set.member s ts) || (Set.member t ts) then (cset, cinfo)
+      if not (Set.member s ts) || (Set.member t ts) then ctx
       -- otherwise we need to compute the closure
       else
-        -- Add `Υ(α <: T)` to `C`. (N.B., TIE suggests adding `Υ(α <: S)`
-        -- instead, but if we previously recorded `α <: S` already, then we
-        -- would have already recorded `Υ(α <: S)` at that time as well).
-        let cset' = addConstraints (decomposeSubC (VarTy a) t) cset
-            -- `S_{<:} = S_{<:} ∪ {a <: t}`
-            supCache' = let updateSupSet mTys =
+        let -- `S_{<:} = S_{<:} ∪ {a <: t}`
+            supMap' = let updateSupSet mTys =
                               case mTys of Nothing  -> Just $ Set.singleton t
                                            Just tys -> Just $ Set.insert t tys
-                        in Map.alter updateSupSet a $ ciSupertypeCache cinfo
+                        in Map.alter updateSupSet a $ ctxSupertypeMap ctx
             -- `B↑(α) ← B↑(α) ⊓ B↑(T)`
-            upperBounds' = let aTy = lowerBound (currentUpperBound (VarTy a) cinfo) (currentUpperBound t cinfo)
-                             in Map.insert a aTy $ ciVarUpperBounds cinfo
-            cinfo' = cinfo{ciSupertypeCache = supCache', ciVarUpperBounds = upperBounds'}
-          in (cset', cinfo')
+            upperMap' = let aTy = lowerBound (currentUpperBound (VarTy a) ctx) (currentUpperBound t ctx)
+                          in Map.insert a aTy $ ctxVarUpperBoundMap ctx
+          in -- Add `Υ(α <: T)` to `C`. (N.B., TIE suggests adding `Υ(α <: S)`
+             -- instead, but if we previously recorded `α <: S` already, then we
+             -- would have already recorded `Υ(α <: S)` at that time as well).
+             addConstraints (decomposeSubC (VarTy a) t)
+             $ ctx { ctxSupertypeMap = supMap',
+                     ctxVarUpperBoundMap = upperMap'}
 
 -- | Given `s <: t`, for all type variables `β` where `t <: β`, we add `s <: β`,
 -- update the lower bound of `β`, and record any implied information from `s <:
@@ -404,44 +384,48 @@ updateUpperBounds (s, t) initial =
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(T <: α)` to quantify only over known subtype constraints where `β` is
 -- _explicitly a type variable_.
-updateLowerBounds :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
+updateLowerBounds :: (Ty,Ty) -> Context -> Context
 updateLowerBounds (s, t) initial =
   -- Find all `β` where `t <: β` and perform updates to propogate `s <: β`.
-  Map.foldrWithKey update initial (ciSubtypeCache $ snd initial)
+  Map.foldrWithKey update initial (ctxSubtypeMap initial)
   where
-    update :: TyVar -> Set Ty -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
-    update b ts (cset, cinfo) =
+    update :: TyVar -> Set Ty -> Context -> Context
+    update b ts ctx =
       -- If `t </: β` or if we _already_ know `s <: β` then simply move on.
-      if not (Set.member t ts) || (Set.member s ts) then (cset, cinfo)
+      if not (Set.member t ts) || (Set.member s ts) then ctx
       -- otherwise we need to compute the closure
       else
         -- Add `Υ(S <: β)` to `C`. (N.B., TIE suggests adding `Υ(T <: β)`
         -- instead, but if we previously recorded `T <: β` already, then we
         -- would have already recorded `Υ(T <: β)` at that time as well).
-        let cset' = addConstraints (decomposeSubC s (VarTy b)) cset
-            -- `S_{<:} = S_{<:} ∪ {s <: β}`
-            subCache' = let updateSubSet mTys =
+        let -- `S_{<:} = S_{<:} ∪ {s <: β}`
+            subMap' = let updateSubSet mTys =
                               case mTys of Nothing  -> Just $ Set.singleton s
                                            Just tys -> Just $ Set.insert s tys
-                        in Map.alter updateSubSet b $ ciSubtypeCache cinfo
+                        in Map.alter updateSubSet b $ ctxSubtypeMap ctx
             -- `B↓(α) ← B↓(β) ⊔ B↓(S)`
-            lowerBounds' = let bTy = upperBound (currentLowerBound (VarTy b) cinfo) (currentLowerBound s cinfo)
-                             in Map.insert b bTy $ ciVarLowerBounds cinfo
-            cinfo' = cinfo{ciSubtypeCache = subCache', ciVarUpperBounds = lowerBounds'}
-          in (cset', cinfo')
+            lowerMap' = let bTy = upperBound (currentLowerBound (VarTy b) ctx) (currentLowerBound s ctx)
+                          in Map.insert b bTy $ ctxVarLowerBoundMap ctx
+          in addConstraints (decomposeSubC s (VarTy b))
+             $ ctx { ctxSubtypeMap = subMap',
+                     ctxVarUpperBoundMap = lowerMap'}
 
 -- FIXME use `decomposeSubC` as a "preprocess" pass over the subtype constraint...???
 
 -- | @solveSubC (t1,t2) cset cinfo@ updates @cset@ and @cinfo@ with the subtype constraint
 -- `t1 <: t2`. Cf. TIE § 6.3.2.
-solveSubC :: (Ty,Ty) -> (ConstraintSet, ConstraintInfo) -> (ConstraintSet, ConstraintInfo)
-solveSubC (t1,t2) (cset, cinfo) = -- FIXME substEqs here
-    -- If `t1 <: t2` the contraint is trivial and should be discarded.
-    if subtype t1 t2 then (cset, cinfo)  -- FIXME occurs check!
-    else let (cset', cinfo') = updateLowerBounds (t1,t2)
-                               $ updateUpperBounds (t1,t2)
-                               $ (cset, cinfo)
-           in (addConstraints (decomposeSubC t1 t2) cset', cinfo')
+solveSubC :: (Ty,Ty) -> Context -> Context
+solveSubC (type1,type2) ctx =
+  let t1 = substEqs type1 ctx
+      t2 = substEqs type2 ctx
+  in -- Occurs check
+     if not $ Set.disjoint (tyFreeVars t1) (tyFreeVars t2) then ctx
+     -- If `t1 <: t2` the contraint is trivial and should be discarded.
+     else if subtype t1 t2 then ctx
+     else addConstraints (decomposeSubC t1 t2)
+           $ updateLowerBounds (t1,t2)
+           $ updateUpperBounds (t1,t2)
+           $ ctx
 
 
 newtype TyUnificationError = TyUnificationError String
