@@ -99,7 +99,7 @@ ptrTy w t = PtrTy w t
 andTy :: [Ty] -> Ty
 andTy = go Set.empty
   where go :: Set Ty -> [Ty] -> Ty
-        go acc [] = case Set.toList acc of
+        go acc [] = case Set.toAscList acc of
                       [] -> TopTy
                       [t] -> t
                       t1:t2:ts -> AndTy t1 t2 ts
@@ -113,7 +113,7 @@ andTy = go Set.empty
 orTy :: [Ty] -> Ty
 orTy = go Set.empty
   where go :: Set Ty -> [Ty] -> Ty
-        go acc [] = case Set.toList acc of
+        go acc [] = case Set.toAscList acc of
                       [] -> BotTy
                       [t] -> t
                       t1:t2:ts -> OrTy t1 t2 ts
@@ -157,7 +157,7 @@ subtype type1 type2 =
     (PtrTy w1 s, PtrTy w2 t) -> w1 <= w2 && subtype s t
     -- Register subtypes
     (RegTy w1,   RegTy w2) -> w1 <= w2
-    (PtrTy w1 n, RegTy w2) -> w1 <= w2
+    (PtrTy w1 _, RegTy w2) -> w1 <= w2
     (CodeTy w1,  RegTy w2) -> w1 <= w2
     (NumTy w1,   RegTy w2) -> w1 <= w2
     (IntTy w1,   RegTy w2) -> w1 <= w2
@@ -331,7 +331,7 @@ initContext constraints = addConstraints constraints emptyContext
 -- FIXME use S_{=} to not actually do full substitutions all the time and just
 -- do them _as_ we consider constraints...? Use a newtype?
 
--- | @solveEqC (s,t) cset cinfo@ updates @cset@ and @cinfo@ with the equality
+-- | @solveEqC (s,t) ctx@ updates @ctx@ with the equality
 -- `s == t`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
 -- failed the occurs check. FIXME should we have a `decomposeEqC` similar to `decomposeSubC`?
 solveEqC :: (Ty,Ty) -> Context -> Maybe Context
@@ -352,7 +352,7 @@ solveEqC (type1, type2) ctx = go (substEqs type1 ctx) (substEqs type2 ctx)
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(α <: S)` to quantify only over known subtype constraints where `α` is
 -- _explicitly a type variable_.
-updateUpperBounds :: (Ty,Ty) -> Context -> Context
+updateUpperBounds :: (Ty, Ty) -> Context -> Context
 updateUpperBounds (s, t) initial =
   -- Find all `α` where `α <: s` and perform updates to propogate `α <: t`.
   Map.foldrWithKey update initial (ctxSupertypeMap initial)
@@ -384,7 +384,7 @@ updateUpperBounds (s, t) initial =
 -- the `S <: T` constraint described by TIE to include any `S` and `T`, but for
 -- `∀(T <: α)` to quantify only over known subtype constraints where `β` is
 -- _explicitly a type variable_.
-updateLowerBounds :: (Ty,Ty) -> Context -> Context
+updateLowerBounds :: (Ty, Ty) -> Context -> Context
 updateLowerBounds (s, t) initial =
   -- Find all `β` where `t <: β` and perform updates to propogate `s <: β`.
   Map.foldrWithKey update initial (ctxSubtypeMap initial)
@@ -418,7 +418,7 @@ solveSubC :: (Ty,Ty) -> Context -> Context
 solveSubC (type1,type2) ctx =
   let t1 = substEqs type1 ctx
       t2 = substEqs type2 ctx
-  in -- Occurs check
+  in -- cycle check
      if not $ Set.disjoint (tyFreeVars t1) (tyFreeVars t2) then ctx
      -- If `t1 <: t2` the contraint is trivial and should be discarded.
      else if subtype t1 t2 then ctx
