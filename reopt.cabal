@@ -64,6 +64,7 @@ library
     Reopt.PltParser
     Reopt.Relinker.Binary
     Reopt.Server
+    Reopt.TypeInference.Constraints
     Reopt.TypeInference.FunTypeMaps
     Reopt.Utils.Dir
     Reopt.Utils.Exit
@@ -85,7 +86,6 @@ library
     Reopt.Relinker.Redirection
     Reopt.Relinker.Relations
     Reopt.Relinker.Relocations
-    Reopt.TypeInference.Constraints
     Reopt.TypeInference.DebugTypes
     Reopt.TypeInference.Header
     Reopt.TypeInference.HeaderTypes
@@ -186,7 +186,8 @@ test-suite reopt-tests
   default-language: Haskell2010
   ghc-options: -Wall
   main-is: Main.hs
-  other-modules: ReoptTests
+  other-modules:
+    ReoptTests
   hs-source-dirs: tests
   build-depends:
     base,
