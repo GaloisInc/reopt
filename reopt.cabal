@@ -188,6 +188,7 @@ test-suite reopt-tests
   main-is: Main.hs
   other-modules:
     ReoptTests
+    TyConstraintTests
   hs-source-dirs: tests
   build-depends:
     base,
