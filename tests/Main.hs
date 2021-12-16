@@ -5,7 +5,6 @@ import qualified Test.Tasty as T
 
 import qualified ReoptTests as T
 import qualified TyConstraintTests as TC
-import qualified Prettyprinter as PP
 
 main :: IO ()
 main = do
