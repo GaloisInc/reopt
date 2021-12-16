@@ -7,7 +7,12 @@
 
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE GADTs #-}
-module Reopt.TypeInference.ConstraintGen where
+module Reopt.TypeInference.ConstraintGen
+  ( genModule
+  , FunType
+  , Constraint
+  , ModuleConstraints(..)
+  ) where
 
 import           Control.Lens
 import           Control.Monad.Reader
@@ -30,6 +35,7 @@ import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
 import           Data.Macaw.Types
+import Data.List (intercalate)
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -46,19 +52,27 @@ import           Data.Macaw.Types
 
 -- type RegType arch = Map (Some (ArchReg arch)) IType
 
+-- FIXME: arch not required here
 data FunType arch = FunType {
     funArgs :: [ IType ]
   , funRet  :: Maybe IType
 }
 
-newtype TyVar = TyVar { getTyVar :: Int }
-  deriving (Eq, Ord, Show)
+instance Show (FunType arch) where
+  show ft =
+    "(" ++ intercalate ", " (map show (funArgs ft)) ++ ") -> " ++
+    maybe "_|_" show (funRet ft)
 
-data IType =
-  ITyVar TyVar
-  | IPtr
-  | IBV Int
-  deriving Show
+newtype TyVar = TyVar { getTyVar :: Int }
+  deriving (Eq, Ord)
+
+instance Show TyVar where
+  show (TyVar i) = "α" ++ show i
+
+data IType = ITyVar TyVar
+
+instance Show IType where
+  show (ITyVar tv) = show tv
 
 -- This is the free type for constraints, should be replace by the
 --  type from the constraint solver.
@@ -71,7 +85,15 @@ data Constraint =
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
   | CBVNotPtr IType -- ^ The argument cannot be a ptr (so should be a bv)
   | CIsPtr IType    -- ^ The type must point to something
-  deriving Show
+
+instance Show Constraint where
+  show c =
+    case c of
+      CEq t1 t2 -> show t1 ++ " = " ++ show t2
+      CAddrWidthAdd t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " + " ++ show t3
+      CAddrWidthSub t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " - " ++ show t3
+      CBVNotPtr t -> "non-ptr " ++ show t
+      CIsPtr t    -> "ptr " ++ show t
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -80,6 +102,9 @@ data Constraint =
 -- types/function types.
 
 newtype Warning = Warning String
+
+instance Show Warning where
+  show (Warning w) = w
 
 type PhiType arch = Map (Some (FnPhiVar arch)) IType
 
@@ -537,13 +562,17 @@ functionTypeToFunType ft = do
   ret  <- traverse (\_ -> ITyVar <$> freshTyVar) (fnReturnType ft)
   pure (FunType args ret)
 
+data ModuleConstraints arch = ModuleConstraints {
+    mcFunTypes :: Map (ArchSegmentOff arch) (FunType arch)
+  , mcExtFunTypes :: Map BSC.ByteString (FunType arch)
+  , mcAssignTypes :: Map FnAssignId IType
+  , mcWarnings    :: [Warning]
+  , mcConstraints :: [Constraint]
+}
+
 genModule :: RecoveredModule arch ->
              Memory (ArchAddrWidth arch) ->
-             ( Map (ArchSegmentOff arch) (FunType arch)
-             , Map BSC.ByteString (FunType arch)
-             , Map FnAssignId IType
-             , [Warning]
-             , [Constraint])
+             ModuleConstraints arch            
 genModule m mem = fst $ runCGenM mem $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
@@ -567,5 +596,9 @@ genModule m mem = fst $ runCGenM mem $ do
   warns <- CGenM $ use warnings
   cstrs <- CGenM $ use constraints
 
-  pure (addrMap, symMap, idMap, warns, cstrs)
+  pure ModuleConstraints { mcFunTypes = addrMap
+                         , mcExtFunTypes = symMap
+                         , mcAssignTypes = idMap
+                         , mcWarnings    = warns
+                         , mcConstraints = cstrs }
 
