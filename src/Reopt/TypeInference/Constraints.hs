@@ -309,8 +309,8 @@ tyFreeVars =
       IntTy{} -> Set.empty
       UIntTy{} -> Set.empty
       FloatTy{} -> Set.empty
-      (AndTy t1 t2 ts) -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
-      (OrTy t1 t2 ts)  -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
+      AndTy t1 t2 ts -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
+      OrTy t1 t2 ts  -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
 
 -- | @occursIn x t@, does `x` appear in `t`?
 occursIn :: TyVar -> Ty -> Bool
@@ -335,8 +335,8 @@ instance PP.Pretty TyConstraint where
   pretty BotC = "ff"
   pretty (EqC l r) = (PP.pretty l) PP.<+> "=" PP.<+> (PP.pretty r)
   pretty (SubC l r) = (PP.pretty l) PP.<+> "<:" PP.<+> (PP.pretty r)
-  pretty (OrC c1 c2 cs) = PP.parens $ PP.hsep $ "or":(map (\c -> PP.parens $ PP.pretty c) (c1:c2:cs))
-  pretty (AndC c1 c2 cs) = PP.parens $ PP.hsep $ "and":(map (\c -> PP.parens $ PP.pretty c) (c1:c2:cs))
+  pretty (OrC c1 c2 cs) = PP.parens $ PP.hsep $ "or":(map (PP.parens . PP.pretty) (c1:c2:cs))
+  pretty (AndC c1 c2 cs) = PP.parens $ PP.hsep $ "and":(map (PP.parens . PP.pretty) (c1:c2:cs))
 
 -- Constructs a conjunction constraint, simplifying some basic cases.
 andC :: [TyConstraint] -> TyConstraint
@@ -507,14 +507,14 @@ findLowerBound x = fst . findTyInterval x
 
 -- | Concretize the type using any available upper bounds for type variables from
 -- the current context.
-currentUpperBound :: Ty -> Context -> Ty
-currentUpperBound t ctx = concretize t lookupVar
+upperConcretization :: Ty -> Context -> Ty
+upperConcretization t ctx = concretize t lookupVar
   where lookupVar x = findUpperBound x (ctxVarBoundsMap ctx)
 
 -- | Concretize the type using any available lower bounds for type variables from
 -- the current context.
-currentLowerBound :: Ty -> Context -> Ty
-currentLowerBound t ctx = concretize t lookupVar
+lowerConcretization :: Ty -> Context -> Ty
+lowerConcretization t ctx = concretize t lookupVar
   where lookupVar x = findLowerBound x (ctxVarBoundsMap ctx)
 
 
@@ -592,7 +592,7 @@ upperBoundsClosure s t ctx0 = traceCOpContext "upperBoundsClosure" (SubC s t) ct
             supMap' = Map.insert a (lowerBounds, Set.insert t upperBounds) $ ctxSubtypeMap ctx
             -- `B↑(α) ← B↑(α) ⊓ B↑(T)`
             boundsMap' = let aLower = findLowerBound a $ ctxVarBoundsMap ctx
-                             aUpper = lowerBound (currentUpperBound (VarTy a) ctx) (currentUpperBound t ctx)
+                             aUpper = lowerBound (upperConcretization (VarTy a) ctx) (upperConcretization t ctx)
                           in Map.insert a (aLower, aUpper) $ ctxVarBoundsMap ctx
           in -- Add `Υ(α <: T)` to `C`. (N.B., TIE suggests adding `Υ(α <: S)`
              -- instead, but if we previously recorded `α <: S` already, then we
@@ -625,7 +625,7 @@ lowerBoundsClosure s t ctx0 = traceCOpContext "lowerBoundsClosure" (SubC s t) ct
         let -- `S_{<:} = S_{<:} ∪ {s <: β}`
             subMap' = Map.insert b (Set.insert s lowerBounds,upperBounds) $ ctxSubtypeMap ctx
             -- `B↓(α) ← B↓(β) ⊔ B↓(S)`
-            boundsMap' = let bLower = upperBound (currentLowerBound (VarTy b) ctx) (currentLowerBound s ctx)
+            boundsMap' = let bLower = upperBound (lowerConcretization (VarTy b) ctx) (lowerConcretization s ctx)
                              bUpper = findUpperBound b $ ctxVarBoundsMap ctx
                           in Map.insert b (bLower, bUpper) $ ctxVarBoundsMap ctx
           in addConstraints (decomposeSubC s (VarTy b))
@@ -642,7 +642,7 @@ atomicSubUpdate type1 type2 ctx0 = traceCOpContext "atomicSubUpdate" (SubC type1
               (lSet, uSet) = Map.findWithDefault (Set.empty, Set.empty) x sMap
               bMap = ctxVarBoundsMap ctx
               (lBound, uBound) = findTyInterval x bMap
-              lBound' = upperBound (currentLowerBound lBound ctx) (currentLowerBound s ctx)
+              lBound' = upperBound (lowerConcretization lBound ctx) (lowerConcretization s ctx)
             in ctx { ctxSubtypeMap = Map.insert x (Set.insert s lSet, uSet) sMap
                    , ctxVarBoundsMap = Map.insert x (lBound', uBound) bMap}
         updateLower _ _ ctx = ctx
@@ -651,7 +651,7 @@ atomicSubUpdate type1 type2 ctx0 = traceCOpContext "atomicSubUpdate" (SubC type1
               (lSet, uSet) = Map.findWithDefault (Set.empty, Set.empty) x sMap
               bMap = ctxVarBoundsMap ctx
               (lBound, uBound) = findTyInterval x bMap
-              uBound' = lowerBound (currentUpperBound uBound ctx) (currentUpperBound t ctx)
+              uBound' = lowerBound (upperConcretization uBound ctx) (upperConcretization t ctx)
             in ctx { ctxSubtypeMap = Map.insert x (lSet, Set.insert t uSet) sMap
                    , ctxVarBoundsMap = Map.insert x (lBound, uBound') bMap}
         updateUpper _ _ ctx = ctx
@@ -764,13 +764,7 @@ reduceDisjuncts initialContext = traceContext "reduceDisjuncts" initialContext $
       ctx0 = initialContext{ctxOrConstraints = []}
    in foldr elim ctx0 disjs
   where elim ::  [TyConstraint] -> Context -> Context
-        elim ds ctx = case orC $ map (reduceC ctx) ds of
-                       TopC -> ctx
-                       BotC -> ctx{ctxAbsurdConstraints = BotC:ctxAbsurdConstraints ctx}
-                       EqC s t -> ctx{ctxEqConstraints = (s,t):ctxEqConstraints ctx}
-                       SubC s t -> ctx{ctxSubConstraints = (s,t):ctxSubConstraints ctx}
-                       OrC c1 c2 cs -> ctx{ctxOrConstraints = (c1:c2:cs):ctxOrConstraints ctx}
-                       AndC c1 c2 cs -> addConstraints (c1:c2:cs) ctx
+        elim ds ctx = addConstraints [(orC $ map (reduceC ctx) ds)] ctx
 
 -- | Reduce a context by processing its atomic constraints and then attempting
 -- to reduce disjucts to atomic constraints.
@@ -785,7 +779,7 @@ reduceContext ctx0 = -- traceContext "reduceContext" ctx0 $
 -- variables.
 unifyConstraints :: [TyConstraint] -> Map TyVar Ty
 unifyConstraints initialConstraints =
-  let freeVars = foldr Set.union Set.empty $ map cFreeVars initialConstraints
+  let freeVars = foldr (Set.union . cFreeVars) Set.empty initialConstraints
       finalCtx = reduceContext $ initContext initialConstraints
       -- FIXME ^ this reduced context has not taken into account information still
       -- nested in disjucts (cf. § 6.3.4 in TIE). At some point we likely will

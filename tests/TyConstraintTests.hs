@@ -8,6 +8,8 @@ module TyConstraintTests
   )
 where
 
+import Data.Bifunctor (bimap)
+import Data.Function (on)
 import Data.List (sortBy)
 import qualified Data.Map as Map
 import qualified Test.Tasty as T
@@ -110,11 +112,10 @@ newtype TypeEnv = TypeEnv [(TyVar, Ty)]
   deriving (Eq)
 
 instance Show TypeEnv where
-  show (TypeEnv xs) = show $ map (\(x,xTy) -> (PP.pretty x, PP.pretty xTy)) xs
+  show (TypeEnv xs) = show $ bimap PP.pretty PP.pretty <$> xs
 
 tyEnv :: [(TyVar, Ty)] -> TypeEnv
-tyEnv = let cmp (x,_) (y,_) = compare x y
-          in TypeEnv . sortBy cmp
+tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> [TyConstraint] -> [(TyVar, Ty)] -> T.TestTree
 mkTest name cs expected =
