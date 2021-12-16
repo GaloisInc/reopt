@@ -6,7 +6,7 @@
 
 module Main (main) where
 
-import Control.Exception (SomeException, catch)
+import Control.Exception (SomeException, catch, handle)
 import Control.Monad (foldM, when)
 import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -15,7 +15,7 @@ import qualified Data.ElfEdit as Elf
 import Data.IORef (newIORef, readIORef)
 import Data.List (intercalate)
 import Data.Macaw.X86 (X86_64)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, mapMaybe)
 import qualified Data.Map as Map
 import Data.Parameterized.Some
 import Data.Set (Set)
@@ -248,6 +248,7 @@ llvmGenLogEvents (LLVMGenPass _ events) = events
 
 data ExplorationResult
   = ExplorationStats ReoptSummary ReoptStats LLVMGenResult ![LLVMLogEvent]
+  | ExplorationFailure FilePath String
 
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
@@ -256,14 +257,15 @@ renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
         LLVMGenFail errMsg -> "Failed: " ++ errMsg
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
+renderExplorationResult (ExplorationFailure path msg) =
+  "Exploration of " ++ path ++ "failed: " ++ msg
 
-
-renderLogEvents :: ExplorationResult -> [String]
-renderLogEvents stats = map renderRow $ logEvents ++ llvmGenLogEvents lgen
-  where (ExplorationStats summary _stats lgen logEvents) = stats
-        binPath = summaryBinaryPath summary
+renderLogEvents :: ExplorationResult -> Maybe [String]
+renderLogEvents (ExplorationStats summary _stats lgen logEvents) =
+    Just $ map renderRow $ logEvents ++ llvmGenLogEvents lgen
+  where binPath = summaryBinaryPath summary
         renderRow event = intercalate "," $ binPath:(llvmLogEventToStrings event)
-
+renderLogEvents (ExplorationFailure _ _) = Nothing
 
 exploreBinary ::
   Args ->
@@ -278,7 +280,7 @@ exploreBinary args opts results fPath = do
     lOpts = LoadOptions {loadOffset = Nothing}
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
-    performRecovery = do
+    performRecovery = handle handleSomeException $ do
       hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
       bs <- checkedReadFile fPath
       summaryRef <- newIORef $ initReoptSummary fPath
@@ -301,6 +303,8 @@ exploreBinary args opts results fPath = do
       summary <- readIORef summaryRef
       stats <- readIORef statsRef
       pure $ ExplorationStats summary stats res logEvents
+    handleSomeException :: SomeException -> IO ExplorationResult
+    handleSomeException exn = pure $ ExplorationFailure fPath (show exn)
 
     generateLLVM ::
       X86OS ->
@@ -340,7 +344,9 @@ data SummaryStats = SummaryStats
     -- | Summary of stats from individual runs
     totalStats :: !ReoptStats,
     -- | Number of binaries which we successfully produced LLVM bitcode for.
-    totalLLVMGenerated :: !Natural
+    totalLLVMGenerated :: !Natural,
+    -- | Total number of complete failures.
+    totalFailureCount :: !Natural
   }
 
 initSummaryStats :: SummaryStats
@@ -348,7 +354,8 @@ initSummaryStats =
   SummaryStats
     { totalBinaryCount = 0,
       totalStats = mempty,
-      totalLLVMGenerated = 0
+      totalLLVMGenerated = 0,
+      totalFailureCount = 0
     }
 
 renderSummaryStats :: [ExplorationResult] -> String
@@ -361,11 +368,16 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
           totalLLVMGenerated = totalLLVMGenerated acc + if llvmGenSuccess llvmGenRes then 1 else 0,
           totalStats = totalStats acc <> stats
         }
+    processResult (ExplorationFailure _fPath _msg) acc =
+      acc
+        { totalBinaryCount  = 1 + totalBinaryCount acc,
+          totalFailureCount = 1 + totalFailureCount acc
+        }
     formatSummary :: SummaryStats -> String
     formatSummary s =
       unlines $
         [ "",
-          printf "reopt analyzed %d binaries:" (totalBinaryCount s),
+          printf "reopt successfully analyzed %d out of %d binaries:" (totalFailureCount s) (totalBinaryCount s),
           printf
             "Generated LLVM bitcode for %s out of %s binaries."
             (show $ totalLLVMGenerated s)
@@ -505,7 +517,7 @@ main = do
         Nothing -> pure ()
         Just logEventsPath -> do
           let logEventsHeader = intercalate "," $ "File":llvmLogEventHeader
-              logEventsRows   =  concatMap renderLogEvents results
+              logEventsRows   =  concat $ mapMaybe renderLogEvents results
           writeFile logEventsPath $ unlines $ logEventsHeader:logEventsRows
           hPutStrLn stderr $ "LLVM logging events written to " ++ logEventsPath ++ "."
     (False, paths, DebugExploreMode) -> do
@@ -530,3 +542,4 @@ main = do
   where
     toRows :: ExplorationResult -> [[String]]
     toRows (ExplorationStats summary _stats _ _logEvents) = summaryRows summary
+    toRows ExplorationFailure{} = []
