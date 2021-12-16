@@ -259,8 +259,8 @@ uninhabited = \case
   UIntTy{} -> False
   IntTy{} -> False
   FloatTy{} -> False
-  AndTy t1 t2 ts -> any uninhabited (t1:t2:ts) -- conservative
-  OrTy  t1 t2 ts -> any uninhabited (t1:t2:ts)
+  AndTy t1 t2 ts -> any uninhabited (t1:t2:ts) -- may return False conservatively
+  OrTy  t1 t2 ts -> all uninhabited (t1:t2:ts)
 
 -- | Calculates the (least) upper bound of two types (denoted by the “join”
 -- operator ⊔).
@@ -490,15 +490,32 @@ substEqs :: Ty -> Context -> Ty
 substEqs t ctx = concretize t lookupVar
   where lookupVar x = Map.findWithDefault (VarTy x) x (ctxVarEqMap ctx)
 
--- | Concretize the type using any available upper bounds for type variables.
+-- | Naive lookup for the type interval `(s,t)` for variable `x` in the given
+-- bound map s.t. `s <: x <: t`. Default interval is `(⊥,⊤)`.
+findTyInterval :: TyVar -> Map TyVar (Ty, Ty) -> (Ty, Ty)
+findTyInterval = Map.findWithDefault (BotTy, TopTy)
+
+-- | Naive lookup for the upper bound `t` of variable `x` in the given
+-- bound map s.t. `x <: t`.
+findUpperBound :: TyVar -> Map TyVar (Ty, Ty) -> Ty
+findUpperBound x = snd . findTyInterval x
+
+-- | Naive lookup for the lower bound `s` of variable `x` in the given
+-- bound map s.t. `s <: x`.
+findLowerBound :: TyVar -> Map TyVar (Ty, Ty) -> Ty
+findLowerBound x = fst . findTyInterval x
+
+-- | Concretize the type using any available upper bounds for type variables from
+-- the current context.
 currentUpperBound :: Ty -> Context -> Ty
 currentUpperBound t ctx = concretize t lookupVar
-  where lookupVar x = snd $ Map.findWithDefault (BotTy, TopTy) x (ctxVarBoundsMap ctx)
+  where lookupVar x = findUpperBound x (ctxVarBoundsMap ctx)
 
--- | Concretize the type using any available lower bounds for type variables.
+-- | Concretize the type using any available lower bounds for type variables from
+-- the current context.
 currentLowerBound :: Ty -> Context -> Ty
 currentLowerBound t ctx = concretize t lookupVar
-  where lookupVar x = fst $ Map.findWithDefault (BotTy, TopTy) x (ctxVarBoundsMap ctx)
+  where lookupVar x = findLowerBound x (ctxVarBoundsMap ctx)
 
 
 -- | Is this subtype constraint trivial in the current context?
@@ -510,8 +527,8 @@ trivialSubC ctx s t = subtype' resolveVar resolveVar s t
 -- N.B., this is intended to be a conservative check (i.e., sound but incomplete).
 absurdSubC ::  Context -> Ty -> Ty -> Bool
 absurdSubC ctx s t = not $ subtype' resolveL resolveR s t
-  where resolveL x = fst $ Map.findWithDefault (BotTy, TopTy) x (ctxVarBoundsMap ctx)
-        resolveR x = snd $ Map.findWithDefault (BotTy, TopTy) x (ctxVarBoundsMap ctx)
+  where resolveL x = findLowerBound x (ctxVarBoundsMap ctx)
+        resolveR x = findUpperBound x (ctxVarBoundsMap ctx)
 
 -- | Is this equality constraint trivial in the current context?
 trivialEqC ::  Context -> Ty -> Ty -> Bool
@@ -574,7 +591,7 @@ upperBoundsClosure s t ctx0 = traceCOpContext "upperBoundsClosure" (SubC s t) ct
         let -- `S_{<:} = S_{<:} ∪ {a <: t}`
             supMap' = Map.insert a (lowerBounds, Set.insert t upperBounds) $ ctxSubtypeMap ctx
             -- `B↑(α) ← B↑(α) ⊓ B↑(T)`
-            boundsMap' = let aLower = fst $ Map.findWithDefault (BotTy, TopTy) a $ ctxVarBoundsMap ctx
+            boundsMap' = let aLower = findLowerBound a $ ctxVarBoundsMap ctx
                              aUpper = lowerBound (currentUpperBound (VarTy a) ctx) (currentUpperBound t ctx)
                           in Map.insert a (aLower, aUpper) $ ctxVarBoundsMap ctx
           in -- Add `Υ(α <: T)` to `C`. (N.B., TIE suggests adding `Υ(α <: S)`
@@ -609,7 +626,7 @@ lowerBoundsClosure s t ctx0 = traceCOpContext "lowerBoundsClosure" (SubC s t) ct
             subMap' = Map.insert b (Set.insert s lowerBounds,upperBounds) $ ctxSubtypeMap ctx
             -- `B↓(α) ← B↓(β) ⊔ B↓(S)`
             boundsMap' = let bLower = upperBound (currentLowerBound (VarTy b) ctx) (currentLowerBound s ctx)
-                             bUpper = snd $ Map.findWithDefault (BotTy, TopTy) b $ ctxVarBoundsMap ctx
+                             bUpper = findUpperBound b $ ctxVarBoundsMap ctx
                           in Map.insert b (bLower, bUpper) $ ctxVarBoundsMap ctx
           in addConstraints (decomposeSubC s (VarTy b))
              $ ctx { ctxSubtypeMap = subMap',
@@ -624,7 +641,7 @@ atomicSubUpdate type1 type2 ctx0 = traceCOpContext "atomicSubUpdate" (SubC type1
           let sMap = ctxSubtypeMap ctx
               (lSet, uSet) = Map.findWithDefault (Set.empty, Set.empty) x sMap
               bMap = ctxVarBoundsMap ctx
-              (lBound, uBound) = Map.findWithDefault (BotTy, TopTy) x bMap
+              (lBound, uBound) = findTyInterval x bMap
               lBound' = upperBound (currentLowerBound lBound ctx) (currentLowerBound s ctx)
             in ctx { ctxSubtypeMap = Map.insert x (Set.insert s lSet, uSet) sMap
                    , ctxVarBoundsMap = Map.insert x (lBound', uBound) bMap}
@@ -633,7 +650,7 @@ atomicSubUpdate type1 type2 ctx0 = traceCOpContext "atomicSubUpdate" (SubC type1
           let sMap = ctxSubtypeMap ctx
               (lSet, uSet) = Map.findWithDefault (Set.empty, Set.empty) x sMap
               bMap = ctxVarBoundsMap ctx
-              (lBound, uBound) = Map.findWithDefault (BotTy, TopTy) x bMap
+              (lBound, uBound) = findTyInterval x bMap
               uBound' = lowerBound (currentUpperBound uBound ctx) (currentUpperBound t ctx)
             in ctx { ctxSubtypeMap = Map.insert x (lSet, Set.insert t uSet) sMap
                    , ctxVarBoundsMap = Map.insert x (lBound, uBound') bMap}
@@ -696,17 +713,17 @@ finalizeBounds ctx vars = fsSolutions $ execState solveVars (FinalizerState vars
         getLType :: TyVar -> State FinalizerState Ty
         getLType x = do
           solveVar x
-          fst <$> Map.findWithDefault (BotTy, TopTy) x <$> gets fsSolutions
+          findLowerBound x <$> gets fsSolutions
         -- Get the upper bound for the type variable.
         getUType :: TyVar -> State FinalizerState Ty
         getUType x = do
           solveVar x
-          snd <$> Map.findWithDefault (BotTy, TopTy) x <$> gets fsSolutions
+          findUpperBound x <$> gets fsSolutions
         -- | Lookup the bounds of a type variable but "naively", in the sense we
         -- do no concretization or other operations.
         naiveLookupBounds :: TyVar -> (Ty, Ty)
         naiveLookupBounds x = case Map.lookup x (ctxVarEqMap ctx) of
-                                Nothing -> Map.findWithDefault (BotTy, TopTy) x (ctxVarBoundsMap ctx)
+                                Nothing -> findTyInterval x (ctxVarBoundsMap ctx)
                                 Just t -> (t,t)
 
 
