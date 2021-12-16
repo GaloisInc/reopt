@@ -184,6 +184,7 @@ executable reopt-relink
 test-suite reopt-tests
   type: exitcode-stdio-1.0
   default-language: Haskell2010
+  ghc-options: -Wall
   main-is: Main.hs
   other-modules:
     ReoptTests
