@@ -63,7 +63,7 @@ instance Show (FunType arch) where
     "(" ++ intercalate ", " (map show (funArgs ft)) ++ ") -> " ++
     maybe "_|_" show (funRet ft)
 
-newtype TyVar = TyVar { getTyVar :: Int }
+newtype TyVar = TyVar { _getTyVar :: Int }
   deriving (Eq, Ord)
 
 instance Show TyVar where
@@ -137,7 +137,7 @@ data CGenState = CGenState {
 makeLenses ''CGenState
 
 newtype CGenM arch a =
-  CGenM { getCGenM :: ReaderT (CGenContext arch) (State CGenState) a }
+  CGenM { _getCGenM :: ReaderT (CGenContext arch) (State CGenState) a }
   deriving (Functor, Applicative, Monad)
 
 runCGenM :: Memory (ArchAddrWidth arch) ->
