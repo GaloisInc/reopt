@@ -23,8 +23,6 @@ import Reopt.TypeInference.Constraints
    unifyConstraints,
    orC,
    andC,
-   andTy,
-   orTy,
    ptrTy,
    int32Ty,
    int64Ty)
