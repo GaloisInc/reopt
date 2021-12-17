@@ -526,17 +526,20 @@ trivialSubC ctx s t = subtype' resolveVar resolveVar s t
 -- | @absurdSubC s t ctx@ returns @True@ if `s <: t` is an absurd constraint given `ctx`.
 -- N.B., this is intended to be a conservative check (i.e., sound but incomplete).
 absurdSubC ::  Context -> Ty -> Ty -> Bool
-absurdSubC ctx s t = not $ subtype' resolveL resolveR s t
-  where resolveL x = findLowerBound x (ctxVarBoundsMap ctx)
-        resolveR x = findUpperBound x (ctxVarBoundsMap ctx)
+absurdSubC ctx s t = traceContextualBinOp "absurdSubC" ctx s t $
+  not $ subtype' resolveL resolveR s t
+  where resolveL x = lowerConcretization (VarTy x) ctx
+        resolveR x = upperConcretization (VarTy x) ctx
 
 -- | Is this equality constraint trivial in the current context?
 trivialEqC ::  Context -> Ty -> Ty -> Bool
-trivialEqC ctx s t = trivialSubC ctx s t && trivialSubC ctx t s
+trivialEqC ctx s t = traceContextualBinOp "trivialEqC" ctx s t $
+  trivialSubC ctx s t && trivialSubC ctx t s
 
 -- | @absurdEqC s t ctx@ returns @True@ if `s = t` is an absurd constraint given `ctx`.
 absurdEqC :: Context -> Ty -> Ty -> Bool
-absurdEqC ctx s t = (absurdSubC ctx s t) || (absurdSubC ctx t s)
+absurdEqC ctx s t = traceContextualBinOp "absurdEqC" ctx s t $
+  (absurdSubC ctx s t) || (absurdSubC ctx t s)
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> Context -> Context -> Context
@@ -551,6 +554,23 @@ traceContext description preCtx postCtx =
 traceCOpContext :: PP.Doc () -> TyConstraint -> Context -> Context -> Context
 traceCOpContext fnNm c ctx ctx' =
   traceContext (fnNm<>"(" <> (PP.pretty $ c)<> ")") ctx ctx'
+
+traceContextualUnOp :: (PP.Pretty a, PP.Pretty b) => PP.Doc () -> Context -> a -> b -> b
+traceContextualUnOp opName ctx arg res =
+  if not traceUnification then res else
+    let msg = PP.vsep [ PP.hsep [">>> ", opName , "(" , PP.pretty arg , ") in context"]
+                      , PP.indent 4 $ PP.pretty ctx
+                      , PP.hsep ["<<< ", PP.pretty res]]
+      in trace (show msg) res
+
+traceContextualBinOp :: (PP.Pretty a, PP.Pretty b, PP.Pretty c) => PP.Doc () -> Context -> a -> b -> c -> c
+traceContextualBinOp opName ctx arg1 arg2 res =
+  if not traceUnification then res else
+    let msg = PP.vsep [ PP.hsep [">>> ", opName , "(" , PP.pretty arg1 , ", ", PP.pretty arg2 , ") in context"]
+                      , PP.indent 4 $ PP.pretty ctx
+                      , PP.hsep ["<<< ", PP.pretty res]]
+      in trace (show msg) res
+
 
 -- | @solveEqC (s,t) ctx@ updates @ctx@ with the equality
 -- `s == t`. Cf. TIE Algorithm 1. If @Nothing@ is returned, the equality
@@ -730,31 +750,50 @@ finalizeBounds ctx vars = fsSolutions $ execState solveVars (FinalizerState vars
 newtype TyUnificationError = TyUnificationError String
 
 processAtomicConstraints :: Context -> Context
-processAtomicConstraints ctx = traceContext "processAtomicConstraints" ctx $
-  case dequeueEqC ctx of
-    Just (ctx', c) -> processAtomicConstraints $ solveEqC ctx' c
-    Nothing ->
-      case dequeueSubC ctx of
-        Just (ctx', c) -> processAtomicConstraints $ solveSubC ctx' c
-        Nothing -> ctx
+processAtomicConstraints ctx0 = traceContext "processAtomicConstraints" ctx0 $ go ctx0
+  where go :: Context -> Context
+        go ctx =
+          case dequeueEqC ctx of
+            Just (ctx', c) -> processAtomicConstraints $ solveEqC ctx' c
+            Nothing ->
+              case dequeueSubC ctx of
+                Just (ctx', c) -> processAtomicConstraints $ solveSubC ctx' c
+                Nothing -> ctx
 
 -- | Reduce a constraint given the context.
 reduceC :: Context -> TyConstraint -> TyConstraint
-reduceC ctx = go
+reduceC ctx c0 = traceContextualUnOp "reduceC" ctx c0 $ go c0
   where
+    sub t = substEqs t ctx
     go :: TyConstraint -> TyConstraint
     go =
       \case
         TopC -> TopC
         BotC -> BotC
-        c@(EqC s t) -> if absurdEqC ctx s t then BotC
-                      else if trivialEqC ctx s t then TopC
-                      else c
-        c@(SubC s t) -> if absurdSubC ctx s t then BotC
-                        else if trivialEqC ctx s t then TopC
-                        else c
+        c@(EqC rawS rawT) ->
+          let s = sub rawS
+              t = sub rawT
+            in if absurdEqC ctx s t then BotC
+               else if trivialEqC ctx s t then TopC
+               else c
+        c@(SubC rawS rawT) ->
+          let s = sub rawS
+              t = sub rawT
+            in if absurdSubC ctx s t then BotC
+               else if trivialEqC ctx s t then TopC
+               else c
         OrC c1 c2 cs -> orC $ map go $ c1:c2:cs
         AndC c1 c2 cs -> andC $ map go $ c1:c2:cs
+
+-- | `absurdC ctx c` returns @True@ if `c` is absurd/unsatisfiable in context
+-- `ctx`, otherwise @False@ is returned. N.B., this is intended to be a sound
+-- and conservative check in the sense that @True@ always implies the constraint
+-- is absurd, but @False@ really just means we were unable to prove it was
+-- unsatisfiable, which could be because it _is_ satisfiable, or because
+-- we need some additional logic to be more complete.
+absurdC :: Context -> TyConstraint -> Bool
+absurdC ctx c = reduceC ctx c == BotC
+
 
 -- | Attempt to reduce and eliminate disjunctions in the given context. Any
 -- resulting non-disjuncts are added to their respective field in the context.
