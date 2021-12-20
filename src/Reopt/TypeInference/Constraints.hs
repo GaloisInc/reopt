@@ -1,18 +1,26 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
 -- Loosely based on 'TIE: Principled Reverse Engineering of Types in Binary
 -- Programs' (NDSS 2011) by Jonghyup Lee, Thanassis Avgerinos, and David Brumley
 
 -- Not clear yet how much will directly be applicable etc.
 module Reopt.TypeInference.Constraints where
 
+import Control.Lens ( over )
 import Control.Monad.State
     ( when, State, gets, execState, modify' )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Generics.Product ( field )
+import GHC.Generics ( Generic )
 import qualified Prettyprinter as PP
 -- import Data.List.NonEmpty (NonEmpty)
 -- import qualified Data.List.NonEmpty as NonEmpty
@@ -425,7 +433,7 @@ data Context
     -- | Lower and upper bounds for type variables. `B^{↓}` and `B^{↑}` from TIE § 6.3.
     , ctxVarBoundsMap :: Map TyVar (Ty, Ty)
     }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Generic, Ord, Show)
 
 instance PP.Pretty Context where
   pretty ctx = let binop op (l,r) = (PP.pretty l) PP.<+> op PP.<+> (PP.pretty r)
@@ -463,17 +471,17 @@ dequeueSubC ctx = case ctxSubConstraints ctx of
 
 
 addConstraints :: [TyConstraint] -> Context -> Context
-addConstraints [] ctx = ctx
-addConstraints (TopC:cs) ctx = addConstraints cs ctx
-addConstraints (BotC:cs) ctx = addConstraints cs ctx{ctxAbsurdConstraints = BotC:ctxAbsurdConstraints ctx}
-addConstraints ((EqC  t1 t2):cs) ctx =
-    addConstraints cs (ctx {ctxEqConstraints = (t1,t2):ctxEqConstraints ctx})
-addConstraints ((SubC t1 t2):cs) ctx =
-  addConstraints cs (ctx {ctxSubConstraints = (t1,t2):ctxSubConstraints ctx})
-addConstraints ((OrC c1 c2 cs'):cs) ctx =
-    addConstraints cs (ctx {ctxOrConstraints = (c1:c2:cs'):ctxOrConstraints ctx})
-addConstraints ((AndC c1 c2 cs'):cs) ctx =
-    addConstraints (c1:c2:cs'++cs) ctx
+addConstraints = flip addConstraints'
+
+addConstraints' :: Context -> [TyConstraint] -> Context
+addConstraints' = foldr go
+  where
+    go TopC = id
+    go BotC = over (field @"ctxAbsurdConstraints") (BotC :)
+    go (EqC t1 t2) = over (field @"ctxEqConstraints") ((t1, t2) :)
+    go (SubC t1 t2) = over (field @"ctxSubConstraints") ((t1, t2) :)
+    go (OrC c1 c2 cs') = over (field @"ctxOrConstraints") ((c1 : c2 : cs') :)
+    go (AndC c1 c2 cs') = addConstraints (c1 : c2 : cs')
 
 emptyContext :: Context
 emptyContext = Context [] [] [] [] [] [] Map.empty Map.empty Map.empty
@@ -481,7 +489,7 @@ emptyContext = Context [] [] [] [] [] [] Map.empty Map.empty Map.empty
 -- | Partition the constraints into the @Context@, which we use to order
 -- which are handled when during unification.
 initContext :: [TyConstraint] -> Context
-initContext constraints = addConstraints constraints emptyContext
+initContext = addConstraints' emptyContext
 
 -- | Perform the substitutions implied thus far by the @Context@'s
 -- @ctxVarTypes@ map. (This is to avoid performing repeated substitutions on the
@@ -561,13 +569,13 @@ solveEqC ctx (type1, type2) = traceCOpContext "solveEqC" (EqC type1 type2) ctx $
   where go :: Ty -> Ty -> Context
         go s@(VarTy x) t =
           if occursIn x t
-            then ctx{ctxOccursCheckFailures=(s,t):(ctxOccursCheckFailures ctx)}
-            else ctx{ctxVarEqMap = Map.insert x t (ctxVarEqMap ctx)}
+            then over (field @"ctxOccursCheckFailures") ((s, t) :) ctx
+            else over (field @"ctxVarEqMap" ) (Map.insert x t) ctx
         go s t@(VarTy _) = go t s
-        go (PtrTy _w1 s) (PtrTy _w2 t) = ctx {ctxEqConstraints = (s,t):ctxEqConstraints ctx}
+        go (PtrTy _w1 s) (PtrTy _w2 t) = over (field @"ctxEqConstraints") ((s, t) :) ctx
         go s t = if absurdEqC ctx s t
-                 then ctx{ctxAbsurdConstraints = (EqC s t):ctxAbsurdConstraints ctx}
-                 else ctx{ctxDroppedEqConstraints= (s,t):(ctxDroppedEqConstraints ctx)}
+                 then over (field @"ctxAbsurdConstraints") (EqC s t :) ctx
+                 else over (field @"ctxDroppedEqConstraints") ((s, t) :) ctx
 
 
 -- | @upperBoundsClosure s t ctx@ says given `s <: t`, for all type variables
@@ -667,7 +675,7 @@ solveSubC ctx0 (type1,type2) = traceCOpContext "solveSubC" (SubC type1 type2) ct
      -- If `t1 <: t2` the contraint is trivial and should be discarded.
      else if subtype t1 t2 then ctx0
      -- If `t1 <: t2` appears absurd, record that and continue.
-     else if absurdSubC ctx0 t1 t2 then ctx0{ctxAbsurdConstraints = (SubC t1 t2):ctxAbsurdConstraints ctx0}
+     else if absurdSubC ctx0 t1 t2 then over (field @"ctxAbsurdConstraints") (SubC t1 t2 :) ctx0
      else addConstraints (decomposeSubC t1 t2)
           $ lowerBoundsClosure t1 t2
           $ upperBoundsClosure t1 t2
@@ -683,6 +691,7 @@ data FinalizerState =
     -- | Variables solved for already.
     fsSolutions :: Map TyVar (Ty, Ty)
   }
+  deriving (Generic)
 
 -- | @finalizeBounds ctx fvs@ computes the bounds closure in the given context,
 -- producing the final upper (`B^{↑}`) and lower (`B^{↓}`) bounds for variables
@@ -690,10 +699,10 @@ data FinalizerState =
 finalizeBounds :: Context -> Set TyVar -> Map TyVar (Ty, Ty)
 finalizeBounds ctx vars = fsSolutions $ execState solveVars (FinalizerState vars Set.empty Map.empty)
   where solveVars :: State FinalizerState ()
-        solveVars = Set.lookupMin <$> gets fsRemaining >>= \case
+        solveVars = gets (Set.lookupMin . fsRemaining) >>= \case
            Nothing -> pure ()
            Just x -> do
-             modify' $ \s -> s{fsRemaining= Set.deleteMin $ fsRemaining s}
+             modify' (over (field @"fsRemaining") Set.deleteMin)
              solveVar x
              solveVars
         solveVar :: TyVar -> State FinalizerState ()
@@ -703,12 +712,12 @@ finalizeBounds ctx vars = fsSolutions $ execState solveVars (FinalizerState vars
             error $ "Internal type unification error: The type of "
                     ++ (show $ PP.pretty x) ++ " depends on itself in the current context, i.e.\n"
                     ++ (show $ PP.pretty ctx)
-          modify' $ \s -> s{fsWorkingSet = Set.insert x $ fsWorkingSet s}
+          modify' (over (field @"fsWorkingSet") (Set.insert x))
           let (initL, initU) = naiveLookupBounds x
           finalL <- concretizeM initL getLType
           finalU <- concretizeM initU getUType
-          modify' $ \s -> s{fsSolutions = Map.insert x (finalL, finalU) $ fsSolutions s}
-          modify' $ \s -> s{fsWorkingSet = Set.delete x $ fsWorkingSet s}
+          modify' (over (field @"fsSolutions") (Map.insert x (finalL, finalU)))
+          modify' (over (field @"fsWorkingSet") (Set.delete x))
         -- | Get the lower bound for the type variable.
         getLType :: TyVar -> State FinalizerState Ty
         getLType x = do
@@ -764,7 +773,7 @@ reduceDisjuncts initialContext = traceContext "reduceDisjuncts" initialContext $
       ctx0 = initialContext{ctxOrConstraints = []}
    in foldr elim ctx0 disjs
   where elim ::  [TyConstraint] -> Context -> Context
-        elim ds ctx = addConstraints [(orC $ map (reduceC ctx) ds)] ctx
+        elim ds ctx = addConstraints [orC (map (reduceC ctx) ds)] ctx
 
 -- | Reduce a context by processing its atomic constraints and then attempting
 -- to reduce disjucts to atomic constraints.
