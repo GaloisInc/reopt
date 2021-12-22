@@ -71,6 +71,7 @@ import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile, hPrint)
 import System.Directory
   (createDirectoryIfMissing, getSymbolicLinkTarget, canonicalizePath, createFileLink,
    withCurrentDirectory, doesFileExist, removeFile)
+import System.Timeout (timeout)
 import Text.Printf (printf)
 
 reoptVersion :: String
@@ -112,7 +113,9 @@ data Args = Args
     -- | Additional locations to search for dynamic dependencies.
     dynDepPath :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
-    dynDepDebugPath :: ![FilePath]
+    dynDepDebugPath :: ![FilePath],
+    -- | Timeout in seconds for analyzing a single binary.
+    binTimeoutInSec :: !(Maybe Int)
   }
 
 defaultArgs :: Args
@@ -128,7 +131,8 @@ defaultArgs =
       verbose = False,
       emitLLVM = True,
       dynDepPath = [],
-      dynDepDebugPath = []
+      dynDepDebugPath = [],
+      binTimeoutInSec = Nothing
     }
 
 -- | Flag to set clang path.
@@ -206,6 +210,14 @@ dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
     upd path args = Right $ args {dynDepDebugPath = path:(dynDepDebugPath args)}
     help = "Additional location to search for dynamic dependencies' debug info."
 
+binTimeoutInSecFlag :: Flag Args
+binTimeoutInSecFlag = flagReq ["timeout"] upd "SEC" help
+  where
+    upd sec old = case reads sec of
+                  ((n,_):_) -> Right $ old {binTimeoutInSec = Just n}
+                  _    -> Left "Invalid timeout; please provide an integer."
+    help = "Timeout for analyzing individual binaries (in seconds)."
+
 arguments :: Mode Args
 arguments = mode "reopt-explore" defaultArgs help filenameArg flags
   where
@@ -220,7 +232,8 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
         debugInfoFlag,
         omitLLVMFlag,
         dynDepPathFlag,
-        dynDepDebugPathFlag
+        dynDepDebugPathFlag,
+        binTimeoutInSecFlag
       ]
 
 getCommandLineArgs :: IO Args
@@ -274,7 +287,13 @@ exploreBinary ::
   FilePath ->
   IO [ExplorationResult]
 exploreBinary args opts results fPath = do
-  result <- performRecovery
+  result <- case binTimeoutInSec args of
+              Nothing -> performRecovery
+              Just sec ->
+                -- timeout takes microseconds
+                timeout (sec * 1000000) performRecovery >>= \case
+                  Nothing -> pure $ ExplorationFailure fPath "timeout"
+                  Just res -> pure res
   pure $ result : results
   where
     lOpts = LoadOptions {loadOffset = Nothing}
