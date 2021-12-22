@@ -271,7 +271,7 @@ renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 renderExplorationResult (ExplorationFailure path msg) =
-  "Exploration of " ++ path ++ "failed: " ++ msg
+  "Exploration of " ++ path ++ " failed: " ++ msg
 
 renderLogEvents :: ExplorationResult -> Maybe [String]
 renderLogEvents (ExplorationStats summary _stats lgen logEvents) =
@@ -287,7 +287,8 @@ exploreBinary ::
   FilePath ->
   IO [ExplorationResult]
 exploreBinary args opts results fPath = do
-  result <- case binTimeoutInSec args of
+  result <- handle handleSomeException $
+            case binTimeoutInSec args of
               Nothing -> performRecovery
               Just sec ->
                 -- timeout takes microseconds
@@ -299,7 +300,7 @@ exploreBinary args opts results fPath = do
     lOpts = LoadOptions {loadOffset = Nothing}
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
-    performRecovery = handle handleSomeException $ do
+    performRecovery = do
       hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
       bs <- checkedReadFile fPath
       summaryRef <- newIORef $ initReoptSummary fPath
@@ -368,6 +369,9 @@ data SummaryStats = SummaryStats
     totalFailureCount :: !Natural
   }
 
+totalSuccessCount :: SummaryStats -> Natural
+totalSuccessCount stats = (totalBinaryCount stats) - (totalFailureCount stats)
+
 initSummaryStats :: SummaryStats
 initSummaryStats =
   SummaryStats
@@ -396,7 +400,7 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
     formatSummary s =
       unlines $
         [ "",
-          printf "reopt successfully analyzed %d out of %d binaries:" (totalFailureCount s) (totalBinaryCount s),
+          printf "reopt successfully analyzed %d out of %d binaries:" (totalSuccessCount s) (totalBinaryCount s),
           printf
             "Generated LLVM bitcode for %s out of %s binaries."
             (show $ totalLLVMGenerated s)
