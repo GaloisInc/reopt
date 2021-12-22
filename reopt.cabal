@@ -66,6 +66,7 @@ library
     Reopt.Relinker.Binary
     Reopt.Server
     Reopt.TypeInference.Constraints
+    Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
     Reopt.Utils.Dir
     Reopt.Utils.Exit
