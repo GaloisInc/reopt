@@ -7,11 +7,13 @@
 
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 module Reopt.TypeInference.ConstraintGen
   ( genModule
   , FunType
   , Constraint
   , ModuleConstraints(..)
+  , tyConstraint
   ) where
 
 import           Control.Lens
@@ -28,6 +30,8 @@ import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
 
 import           Reopt.CFG.FnRep
+import           Reopt.TypeInference.Constraints
+import qualified Prettyprinter as PP
 
 import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
                                              ArchSegmentOff)
@@ -63,16 +67,14 @@ instance Show (FunType arch) where
     "(" ++ intercalate ", " (map show (funArgs ft)) ++ ") -> " ++
     maybe "_|_" show (funRet ft)
 
-newtype TyVar = TyVar { _getTyVar :: Int }
+data IType = IType Ty
   deriving (Eq, Ord)
 
-instance Show TyVar where
-  show (TyVar i) = "α" ++ show i
-
-data IType = ITyVar TyVar
+varIType :: TyVar -> IType
+varIType tv = IType $ VarTy tv
 
 instance Show IType where
-  show (ITyVar tv) = show tv
+  show (IType t) = show (PP.pretty t)
 
 -- This is the free type for constraints, should be replace by the
 --  type from the constraint solver.
@@ -94,6 +96,27 @@ instance Show Constraint where
       CAddrWidthSub t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " - " ++ show t3
       CBVNotPtr t -> "non-ptr " ++ show t
       CIsPtr t    -> "ptr " ++ show t
+
+-- | Converts the limited `Constraint` grammar to the more general
+-- `TyConstraint` type used for constraint solving. We could completely
+-- replace `Constraint` with helpers that generate these essentially,
+-- but I (AMK) am leaving them in for now in case it's easier initially
+-- to debug/trace/etc with the more limited grammar.
+tyConstraint :: Constraint -> TyConstraint
+tyConstraint = \case
+  CEq (IType t1) (IType t2) -> eqC t1 t2
+  CAddrWidthAdd (IType ret) (IType lhs) (IType rhs) ->
+    orC [ andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
+        , andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
+        , andC [isPtr64C ret, isNum64C lhs, isPtr64C rhs]
+        ]
+  CAddrWidthSub (IType ret) (IType lhs) (IType rhs) ->
+    orC [ andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
+        , andC [isNum64C ret, isPtr64C lhs, isPtr64C rhs]
+        , andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
+        ]
+  CBVNotPtr (IType t) -> isNum64C t
+  CIsPtr (IType t) -> isPtr64C t
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -179,7 +202,7 @@ freshForAssignment :: FnAssignment arch tp -> CGenM arch TyVar
 freshForAssignment a = do
   tyv <- freshTyVar
   -- update assignment type map
-  CGenM $ assignTypes . at (fnAssignId a) ?= ITyVar tyv
+  CGenM $ assignTypes . at (fnAssignId a) ?= varIType tyv
   pure tyv
 
 -- freshForCallRet :: FnReturnVar tp -> CGenM arch TyVar
@@ -310,7 +333,7 @@ genFnValue v =
   where
     punt = do
       warn "Punting on FnValue"
-      ITyVar <$> freshTyVar
+      varIType <$> freshTyVar
 
 -- | Generate constraints for an App.  The first argument is the
 -- output (result) type.
@@ -424,7 +447,7 @@ genApp ty app =
 
 genFnAssignment :: FnAssignment arch tp -> CGenM arch ()
 genFnAssignment a = do
-  ty <- ITyVar <$> freshForAssignment a
+  ty <- varIType <$> freshForAssignment a
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
     FnReadMem ptr _sz -> emitPtr =<< genFnValue ptr
@@ -472,7 +495,7 @@ genBlockTransfer tgt = do
 genCall :: FnValue arch (BVType (ArchAddrWidth arch)) ->
            -- | arguments
            [ Some (FnValue arch) ] ->
-           -- | Name of return value           
+           -- | Name of return value
            Maybe (Some FnReturnVar) ->
            CGenM arch ()
 genCall fn args m_ret = do
@@ -531,7 +554,7 @@ genFnBlock b = do
 genFunction :: Function arch -> CGenM arch ()
 genFunction fn = do
   -- allocated tyvars for phi nodes.
-  let mkPhis b = (,) (fbLabel b) . map ITyVar <$> replicateM (V.length (fbPhiVars b)) freshTyVar
+  let mkPhis b = (,) (fbLabel b) . map varIType <$> replicateM (V.length (fbPhiVars b)) freshTyVar
   bphis <- Map.fromList <$> mapM mkPhis blocks
 
   -- FIXME: abstract over
@@ -558,8 +581,8 @@ genFunction fn = do
 -- Allocates new tyvars
 functionTypeToFunType :: FunctionType arch -> CGenM arch (FunType arch)
 functionTypeToFunType ft = do
-  args <- replicateM (length (fnArgTypes ft)) (ITyVar <$> freshTyVar)
-  ret  <- traverse (\_ -> ITyVar <$> freshTyVar) (fnReturnType ft)
+  args <- replicateM (length (fnArgTypes ft)) (varIType <$> freshTyVar)
+  ret  <- traverse (\_ -> varIType <$> freshTyVar) (fnReturnType ft)
   pure (FunType args ret)
 
 data ModuleConstraints arch = ModuleConstraints {
