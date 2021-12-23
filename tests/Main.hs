@@ -11,7 +11,8 @@ main = do
 
   x64AsmTests <- namesMatching "tests/x64/*.exe"
   T.defaultMain $ T.testGroup "ReoptTests" [
-    TC.constraintTests,
+    TC.absurdTests,
+    TC.tyEnvTests,
     T.reoptTests x64AsmTests
     ]
 
