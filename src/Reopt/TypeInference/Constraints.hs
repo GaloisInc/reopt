@@ -346,6 +346,13 @@ instance PP.Pretty TyConstraint where
   pretty (OrC c1 c2 cs) = PP.parens $ PP.hsep $ "or":(map (PP.parens . PP.pretty) (c1:c2:cs))
   pretty (AndC c1 c2 cs) = PP.parens $ PP.hsep $ "and":(map (PP.parens . PP.pretty) (c1:c2:cs))
 
+eqC :: Ty -> Ty -> TyConstraint
+eqC lhs rhs = EqC lhs rhs
+
+subC :: Ty -> Ty -> TyConstraint
+subC lhs rhs = SubC lhs rhs
+
+
 -- Constructs a conjunction constraint, simplifying some basic cases.
 andC :: [TyConstraint] -> TyConstraint
 andC = go Set.empty
@@ -376,6 +383,14 @@ orC = go Set.empty
         go acc (c@SubC{}:cs) = go (Set.insert c acc) cs
         go acc (OrC c1 c2 cs:cs') = go acc (c1:c2:(cs++cs'))
         go acc (c@AndC{}:cs) = go (Set.insert c acc) cs
+
+-- | Constrain the given type to be some kind of 64 bit pointer.
+isPtr64C :: Ty -> TyConstraint
+isPtr64C t = SubC t (ptrTy 64 TopTy)
+
+-- | Constrain the given type to be some kind of 64 bit number (i.e., non-pointer)
+isNum64C :: Ty -> TyConstraint
+isNum64C t = EqC t num64Ty
 
 
 cFreeVars :: TyConstraint -> Set TyVar
