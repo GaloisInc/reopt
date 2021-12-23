@@ -1321,8 +1321,8 @@ unixLibDirs = [ "/usr/local/lib"
               , "/lib64"]
 
 -- | Ask gdb where it looks for debug information.
-getGdbDebugInfoDirs :: IO [FilePath]
-getGdbDebugInfoDirs = do
+getGdbDebugInfoDirs :: Bool -> IO [FilePath]
+getGdbDebugInfoDirs verbose = do
   let cmd = shell "gdb --batch --eval-command=\"show debug-file-directory\""
   let stdIn = ""
   readCreateProcessWithExitCode cmd stdIn >>= \case
@@ -1336,8 +1336,9 @@ getGdbDebugInfoDirs = do
         _ -> couldNotFindDir $ "response on stdout did not match expected pattern: " ++ sOut
     (_,_,sErr) -> couldNotFindDir sErr
   where couldNotFindDir msg = do
-          hPutStrLn stderr "Could not determine gdb's debug-file-directory:"
-          hPutStrLn stderr $ "  " ++ msg
+          when verbose $ do
+            hPutStrLn stderr "Could not determine gdb's debug-file-directory:"
+            hPutStrLn stderr $ "  " ++ msg
           pure []
 
 -- | Populate function type information using debug information.
@@ -1446,7 +1447,8 @@ addDynDepDebugInfo ::
   IO (Map BS.ByteString ReoptFunType)
 addDynDepDebugInfo rDisOpt m rawDepName = do
   let depName = BSC.unpack rawDepName
-  hPutStrLn stderr $ "Searching for dynamic dependency " ++ depName ++ "'s debug info..."
+  when (roVerboseMode rDisOpt) $
+    hPutStrLn stderr $ "Searching for dynamic dependency " ++ depName ++ "'s debug info..."
   (findCachedDebugInfo depName) >>= \case
     Just (cacheFile, contents) -> do
       case (reads contents) :: [(Map BS.ByteString ReoptFunType, String)] of
@@ -1458,7 +1460,8 @@ addDynDepDebugInfo rDisOpt m rawDepName = do
     Nothing -> do
       findDebugDynDep rDisOpt depName >>= \case
         Nothing -> do
-          hPutStrLn stderr $ "No debug info for " ++ depName ++ " found."
+          when (roVerboseMode rDisOpt) $
+            hPutStrLn stderr $ "No debug info for " ++ depName ++ " found."
           pure m
         Just (fPath, fContent) ->
           case Elf.decodeElfHeaderInfo fContent of

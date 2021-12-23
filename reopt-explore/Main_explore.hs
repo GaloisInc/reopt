@@ -12,7 +12,7 @@ import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ElfEdit as Elf
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import Data.List (intercalate)
 import Data.Macaw.X86 (X86_64)
 import Data.Maybe (isJust, mapMaybe)
@@ -283,25 +283,25 @@ renderLogEvents (ExplorationFailure _ _) = Nothing
 exploreBinary ::
   Args ->
   ReoptOptions ->
-  [ExplorationResult] ->
-  FilePath ->
-  IO [ExplorationResult]
-exploreBinary args opts results fPath = do
-  result <- handle handleSomeException $
-            case binTimeoutInSec args of
-              Nothing -> performRecovery
-              Just sec ->
-                -- timeout takes microseconds
-                timeout (sec * 1000000) performRecovery >>= \case
-                  Nothing -> pure $ ExplorationFailure fPath "timeout"
-                  Just res -> pure res
-  pure $ result : results
+  Int ->
+  (Int, FilePath) ->
+  IO ExplorationResult
+exploreBinary args opts totalCount (index, fPath) = do
+  handle handleSomeException $
+    case binTimeoutInSec args of
+      Nothing -> performRecovery
+      Just sec ->
+        -- timeout takes microseconds
+        timeout (sec * 1000000) performRecovery >>= \case
+          Nothing -> pure $ ExplorationFailure fPath "timeout"
+          Just res -> pure res
   where
     lOpts = LoadOptions {loadOffset = Nothing}
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
     performRecovery = do
-      hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
+      hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
+                         ++ "] Analyzing " ++ fPath ++ " ..."
       bs <- checkedReadFile fPath
       summaryRef <- newIORef $ initReoptSummary fPath
       statsRef <- newIORef mempty
@@ -504,10 +504,32 @@ renderDebugSummary debugDir results =
                        then ""
                        else "\n  "++(show warnCnt)++" elf files had debug type information which was not incorporated."
 
+findAllElfFilesInDirs ::
+  [FilePath] ->
+  IO [(Int, FilePath)]
+findAllElfFilesInDirs paths = do
+  counter <- newIORef 1
+  files <- foldM (withElfExeFilesInDir (recordFile counter)) [] paths
+  pure $ reverse files
+  where recordFile :: IORef Int -> [(Int, FilePath)] -> FilePath -> IO [(Int, FilePath)]
+        recordFile counter ps p = do
+          index <- readIORef counter
+          modifyIORef' counter (+ 1)
+          pure $ (index, p):ps
+
+exploreAllElfInDirs ::
+  Args ->
+  ReoptOptions ->
+  [FilePath] ->
+  IO [ExplorationResult]
+exploreAllElfInDirs args opts paths = do
+  elfFiles <- findAllElfFilesInDirs paths
+  mapM (exploreBinary args opts (length elfFiles)) elfFiles
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs
-  gdbDebugDirs <- getGdbDebugInfoDirs
+  gdbDebugDirs <- getGdbDebugInfoDirs (verbose args)
   let opts = defaultReoptOptions { roVerboseMode = verbose args,
                                    roDynDepPaths = dynDepPath args,
                                    roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs}
@@ -519,7 +541,7 @@ main = do
       hPutStrLn stderr "Use --help to see additional options."
       exitFailure
     (False, paths, ReoptExploreMode) -> do
-      results <- foldM (withElfExeFilesInDir (exploreBinary args opts)) [] paths
+      results <- exploreAllElfInDirs args opts paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
       case exportFnResultsPath args of
