@@ -637,7 +637,7 @@ loadOptions args = LoadOptions {loadOffset = loadBaseAddress args}
 
 argsReoptOptions :: Args -> IO ReoptOptions
 argsReoptOptions args = do
-    gdbDebugDirs <- getGdbDebugInfoDirs
+    gdbDebugDirs <- getGdbDebugInfoDirs True
     pure $ ReoptOptions
             { roIncluded = includeAddrs args,
               roExcluded = excludeAddrs args,

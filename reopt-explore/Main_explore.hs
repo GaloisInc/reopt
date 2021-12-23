@@ -12,7 +12,7 @@ import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ElfEdit as Elf
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import Data.List (intercalate)
 import Data.Macaw.X86 (X86_64)
 import Data.Maybe (isJust, mapMaybe)
@@ -71,6 +71,7 @@ import System.IO (hPutStr, hPutStrLn, stderr, IOMode(..), withFile, hPrint)
 import System.Directory
   (createDirectoryIfMissing, getSymbolicLinkTarget, canonicalizePath, createFileLink,
    withCurrentDirectory, doesFileExist, removeFile)
+import System.Timeout (timeout)
 import Text.Printf (printf)
 
 reoptVersion :: String
@@ -112,7 +113,9 @@ data Args = Args
     -- | Additional locations to search for dynamic dependencies.
     dynDepPath :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
-    dynDepDebugPath :: ![FilePath]
+    dynDepDebugPath :: ![FilePath],
+    -- | Timeout in seconds for analyzing a single binary.
+    binTimeoutInSec :: !(Maybe Int)
   }
 
 defaultArgs :: Args
@@ -128,7 +131,8 @@ defaultArgs =
       verbose = False,
       emitLLVM = True,
       dynDepPath = [],
-      dynDepDebugPath = []
+      dynDepDebugPath = [],
+      binTimeoutInSec = Nothing
     }
 
 -- | Flag to set clang path.
@@ -206,6 +210,14 @@ dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
     upd path args = Right $ args {dynDepDebugPath = path:(dynDepDebugPath args)}
     help = "Additional location to search for dynamic dependencies' debug info."
 
+binTimeoutInSecFlag :: Flag Args
+binTimeoutInSecFlag = flagReq ["timeout"] upd "SEC" help
+  where
+    upd sec old = case reads sec of
+                  ((n,_):_) -> Right $ old {binTimeoutInSec = Just n}
+                  _    -> Left "Invalid timeout; please provide an integer."
+    help = "Timeout for analyzing individual binaries (in seconds)."
+
 arguments :: Mode Args
 arguments = mode "reopt-explore" defaultArgs help filenameArg flags
   where
@@ -220,7 +232,8 @@ arguments = mode "reopt-explore" defaultArgs help filenameArg flags
         debugInfoFlag,
         omitLLVMFlag,
         dynDepPathFlag,
-        dynDepDebugPathFlag
+        dynDepDebugPathFlag,
+        binTimeoutInSecFlag
       ]
 
 getCommandLineArgs :: IO Args
@@ -258,7 +271,7 @@ renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
 renderExplorationResult (ExplorationFailure path msg) =
-  "Exploration of " ++ path ++ "failed: " ++ msg
+  "Exploration of " ++ path ++ " failed: " ++ msg
 
 renderLogEvents :: ExplorationResult -> Maybe [String]
 renderLogEvents (ExplorationStats summary _stats lgen logEvents) =
@@ -270,18 +283,25 @@ renderLogEvents (ExplorationFailure _ _) = Nothing
 exploreBinary ::
   Args ->
   ReoptOptions ->
-  [ExplorationResult] ->
-  FilePath ->
-  IO [ExplorationResult]
-exploreBinary args opts results fPath = do
-  result <- performRecovery
-  pure $ result : results
+  Int ->
+  (Int, FilePath) ->
+  IO ExplorationResult
+exploreBinary args opts totalCount (index, fPath) = do
+  handle handleSomeException $
+    case binTimeoutInSec args of
+      Nothing -> performRecovery
+      Just sec ->
+        -- timeout takes microseconds
+        timeout (sec * 1000000) performRecovery >>= \case
+          Nothing -> pure $ ExplorationFailure fPath "timeout"
+          Just res -> pure res
   where
     lOpts = LoadOptions {loadOffset = Nothing}
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
-    performRecovery = handle handleSomeException $ do
-      hPutStrLn stderr $ "Analyzing " ++ fPath ++ " ..."
+    performRecovery = do
+      hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
+                         ++ "] Analyzing " ++ fPath ++ " ..."
       bs <- checkedReadFile fPath
       summaryRef <- newIORef $ initReoptSummary fPath
       statsRef <- newIORef mempty
@@ -349,6 +369,9 @@ data SummaryStats = SummaryStats
     totalFailureCount :: !Natural
   }
 
+totalSuccessCount :: SummaryStats -> Natural
+totalSuccessCount stats = (totalBinaryCount stats) - (totalFailureCount stats)
+
 initSummaryStats :: SummaryStats
 initSummaryStats =
   SummaryStats
@@ -377,7 +400,7 @@ renderSummaryStats results = formatSummary $ foldr processResult initSummaryStat
     formatSummary s =
       unlines $
         [ "",
-          printf "reopt successfully analyzed %d out of %d binaries:" (totalFailureCount s) (totalBinaryCount s),
+          printf "reopt successfully analyzed %d out of %d binaries:" (totalSuccessCount s) (totalBinaryCount s),
           printf
             "Generated LLVM bitcode for %s out of %s binaries."
             (show $ totalLLVMGenerated s)
@@ -481,10 +504,32 @@ renderDebugSummary debugDir results =
                        then ""
                        else "\n  "++(show warnCnt)++" elf files had debug type information which was not incorporated."
 
+findAllElfFilesInDirs ::
+  [FilePath] ->
+  IO [(Int, FilePath)]
+findAllElfFilesInDirs paths = do
+  counter <- newIORef 1
+  files <- foldM (withElfExeFilesInDir (recordFile counter)) [] paths
+  pure $ reverse files
+  where recordFile :: IORef Int -> [(Int, FilePath)] -> FilePath -> IO [(Int, FilePath)]
+        recordFile counter ps p = do
+          index <- readIORef counter
+          modifyIORef' counter (+ 1)
+          pure $ (index, p):ps
+
+exploreAllElfInDirs ::
+  Args ->
+  ReoptOptions ->
+  [FilePath] ->
+  IO [ExplorationResult]
+exploreAllElfInDirs args opts paths = do
+  elfFiles <- findAllElfFilesInDirs paths
+  mapM (exploreBinary args opts (length elfFiles)) elfFiles
+
 main :: IO ()
 main = do
   args <- getCommandLineArgs
-  gdbDebugDirs <- getGdbDebugInfoDirs
+  gdbDebugDirs <- getGdbDebugInfoDirs (verbose args)
   let opts = defaultReoptOptions { roVerboseMode = verbose args,
                                    roDynDepPaths = dynDepPath args,
                                    roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs}
@@ -496,7 +541,7 @@ main = do
       hPutStrLn stderr "Use --help to see additional options."
       exitFailure
     (False, paths, ReoptExploreMode) -> do
-      results <- foldM (withElfExeFilesInDir (exploreBinary args opts)) [] paths
+      results <- exploreAllElfInDirs args opts paths
       mapM_ (\s -> hPutStr stderr ("\n" ++ renderExplorationResult s)) results
       hPutStrLn stderr $ renderSummaryStats results
       case exportFnResultsPath args of
