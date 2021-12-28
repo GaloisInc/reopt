@@ -398,8 +398,8 @@ cFreeVars TopC = Set.empty
 cFreeVars BotC = Set.empty
 cFreeVars (EqC s t) = Set.union (tyFreeVars s) (tyFreeVars t)
 cFreeVars (SubC s t) = Set.union (tyFreeVars s) (tyFreeVars t)
-cFreeVars (OrC c1 c2 cs) = foldr Set.union Set.empty $ map cFreeVars (c1:c2:cs)
-cFreeVars (AndC c1 c2 cs) = foldr Set.union Set.empty $ map cFreeVars (c1:c2:cs)
+cFreeVars (OrC c1 c2 cs) = foldr (Set.union . cFreeVars) Set.empty (c1:c2:cs)
+cFreeVars (AndC c1 c2 cs) = foldr (Set.union . cFreeVars) Set.empty (c1:c2:cs)
 
 
 -- cSubst :: TyVar -> Ty -> TyConstraint -> TyConstraint
