@@ -716,10 +716,10 @@ showConstraints args = do -- FIXME: copied from main performReopt command
     pure (genModule recMod (memory discState))
 
   mc <-   handleEitherWithExit mr
-    
+
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings mc)))
-  putStrLn "Constraints"    
+  putStrLn "Constraints"
   putStrLn (unlines (map ((++) "\t" . show) (mcConstraints mc)))
 
 ------------------------------------------------------------------------

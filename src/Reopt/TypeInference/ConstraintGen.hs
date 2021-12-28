@@ -152,7 +152,7 @@ data CGenState = CGenState {
 
   -- | Offset of the current instruction, used (not right now) for
   -- tagging constraints and warnings.
-  -- , _curOffset     :: ArchAddrWord arch 
+  -- , _curOffset     :: ArchAddrWord arch
   , _warnings      :: [Warning]
   , _constraints   :: [Constraint] -- in reverse gen order
 }
@@ -388,7 +388,7 @@ genApp ty app =
     BVSbb _ l r _ -> nonptrBinOp l r
     BVMul _ l r   -> nonptrBinOp l r
 
-    -- We are allowed to compare pointers, and test their bits 
+    -- We are allowed to compare pointers, and test their bits
     BVUnsignedLe {} -> pure ()
     BVUnsignedLt {} -> pure ()
     BVSignedLe {} -> pure ()
@@ -595,7 +595,7 @@ data ModuleConstraints arch = ModuleConstraints {
 
 genModule :: RecoveredModule arch ->
              Memory (ArchAddrWidth arch) ->
-             ModuleConstraints arch            
+             ModuleConstraints arch
 genModule m mem = fst $ runCGenM mem $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
@@ -624,4 +624,3 @@ genModule m mem = fst $ runCGenM mem $ do
                          , mcAssignTypes = idMap
                          , mcWarnings    = warns
                          , mcConstraints = cstrs }
-
