@@ -716,11 +716,13 @@ showConstraints args = do -- FIXME: copied from main performReopt command
     pure (genModule recMod (memory discState))
 
   mc <-   handleEitherWithExit mr
-    
+
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings mc)))
-  putStrLn "Constraints"    
+  putStrLn "Constraints"
   putStrLn (unlines (map ((++) "\t" . show) (mcConstraints mc)))
+  putStrLn "Inferred types"
+  putStrLn (showInferredTypes mc)
 
 ------------------------------------------------------------------------
 -- Reopt action
@@ -857,6 +859,9 @@ performReopt args = do
         reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
+
+    -- Generate constraints
+    let _moduleConstraints = genModule recMod (memory discState)
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
