@@ -338,13 +338,16 @@ data TyConstraint
   | AndC TyConstraint TyConstraint [TyConstraint]
   deriving (Eq, Ord, Show)
 
+prettySExp :: [PP.Doc ann] -> PP.Doc ann
+prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
+
 instance PP.Pretty TyConstraint where
   pretty TopC = "tt"
   pretty BotC = "ff"
-  pretty (EqC l r) = (PP.pretty l) PP.<+> "=" PP.<+> (PP.pretty r)
-  pretty (SubC l r) = (PP.pretty l) PP.<+> "<:" PP.<+> (PP.pretty r)
-  pretty (OrC c1 c2 cs) = PP.parens $ PP.hsep $ "or":(map (PP.parens . PP.pretty) (c1:c2:cs))
-  pretty (AndC c1 c2 cs) = PP.parens $ PP.hsep $ "and":(map (PP.parens . PP.pretty) (c1:c2:cs))
+  pretty (EqC l r) = PP.parens $ (PP.pretty l) PP.<+> "=" PP.<+> (PP.pretty r)
+  pretty (SubC l r) = PP.parens $ (PP.pretty l) PP.<+> "<:" PP.<+> (PP.pretty r)
+  pretty (OrC c1 c2 cs) = prettySExp  $ "or":(map PP.pretty (c1:c2:cs))
+  pretty (AndC c1 c2 cs) = prettySExp $ "and":(map PP.pretty (c1:c2:cs))
 
 eqC :: Ty -> Ty -> TyConstraint
 eqC lhs rhs = EqC lhs rhs
@@ -459,7 +462,7 @@ instance PP.Pretty Context where
                   , row "Occurs check failures" $ map (binop "=") $ ctxOccursCheckFailures ctx
                   , row "Subtypes" $ map (binop "<:") $ ctxSubConstraints ctx
                   , row "Absurd Constraints" $ map PP.pretty $ ctxAbsurdConstraints ctx
-                  , row "Ors" $ map (\cs -> PP.list $ map PP.pretty cs) $ ctxOrConstraints ctx
+                  , row "Ors" $ map (\cs -> prettySExp $ "or":map PP.pretty cs) $ ctxOrConstraints ctx
                   , row "S_{<:}" $ map (\(x,(ls,us)) -> (PP.encloseSep "{" "}" "," $ map PP.pretty $ Set.toList ls)
                                                       PP.<+> "<:" PP.<+> PP.pretty x PP.<+> "<:"
                                                       PP.<+> (PP.encloseSep "{" "}" "," $ map PP.pretty $ Set.toList us))
