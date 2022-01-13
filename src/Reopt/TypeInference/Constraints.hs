@@ -35,7 +35,7 @@ newtype TyVar = TyVar {tyVarInt :: Int }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty TyVar where
-  pretty (TyVar n) = "α" <> (PP.pretty n)
+  pretty (TyVar n) = "α" <> PP.pretty n
 
 -- | Types of values in x86 machine code (missing reg types, records/memory, functions)
 data Ty
@@ -341,8 +341,8 @@ data TyConstraint
 instance PP.Pretty TyConstraint where
   pretty TopC = "tt"
   pretty BotC = "ff"
-  pretty (EqC l r) = (PP.pretty l) PP.<+> "=" PP.<+> (PP.pretty r)
-  pretty (SubC l r) = (PP.pretty l) PP.<+> "<:" PP.<+> (PP.pretty r)
+  pretty (EqC l r) = PP.pretty l PP.<+> "=" PP.<+> PP.pretty r
+  pretty (SubC l r) = PP.pretty l PP.<+> "<:" PP.<+> PP.pretty r
   pretty (OrC c1 c2 cs) = PP.parens $ PP.hsep $ "or":(map (PP.parens . PP.pretty) (c1:c2:cs))
   pretty (AndC c1 c2 cs) = PP.parens $ PP.hsep $ "and":(map (PP.parens . PP.pretty) (c1:c2:cs))
 
@@ -387,6 +387,9 @@ orC = go Set.empty
 -- | Constrain the given type to be some kind of 64 bit pointer.
 isPtr64C :: Ty -> TyConstraint
 isPtr64C t = SubC t (ptrTy 64 TopTy)
+
+isSizedPtr64C :: Int -> Ty -> TyConstraint
+isSizedPtr64C sz t = SubC t (ptrTy 64 (NumTy sz))
 
 -- | Constrain the given type to be some kind of 64 bit number (i.e., non-pointer)
 isNum64C :: Ty -> TyConstraint

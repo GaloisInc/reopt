@@ -11,8 +11,8 @@
 
 module Reopt.TypeInference.ConstraintGen
   ( Constraint
-  , FunType
-  , IType(..)
+  , FunType(..)
+  , Ty(..)
   , ModuleConstraints(..)
   , genModule
   , showInferredTypes
@@ -31,7 +31,7 @@ import           Data.Maybe                 (fromMaybe, isJust)
 import           Data.Parameterized         (FoldableF, FoldableFC)
 import qualified Data.Vector                as V
 
-import           Data.Parameterized.NatRepr (NatRepr, testEquality)
+import           Data.Parameterized.NatRepr (NatRepr, testEquality, widthVal)
 import           Data.Parameterized.Some    (Some(Some))
 
 import           Reopt.CFG.FnRep
@@ -43,7 +43,8 @@ import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType)
+import           Data.Macaw.Types           (BVType, TypeRepr (BVTypeRepr))
+import Debug.Trace (trace)
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -60,35 +61,29 @@ import           Data.Macaw.Types           (BVType)
 
 -- FIXME: arch not required here
 data FunType arch = FunType {
-    funArgs :: [IType]
-  , funRet  :: Maybe IType
+    funTypeArgs :: [TyVar]
+  , funTypeRet  :: Maybe TyVar
 }
 
 instance Show (FunType arch) where
   show ft =
-    "(" ++ intercalate ", " (map show (funArgs ft)) ++ ") -> " ++
-    maybe "_|_" show (funRet ft)
+    "(" ++ intercalate ", " (map show (funTypeArgs ft)) ++ ") -> " ++
+    maybe "_|_" show (funTypeRet ft)
 
-newtype IType = IType Ty
-  deriving (Eq, Ord)
-
-varIType :: TyVar -> IType
-varIType tv = IType $ VarTy tv
-
-instance Show IType where
-  show (IType t) = show (PP.pretty t)
+varIType :: TyVar -> Ty
+varIType = VarTy
 
 -- This is the free type for constraints, should be replace by the
 --  type from the constraint solver.
 
 data Constraint =
-  CEq IType IType -- ^ The types must be equal
-  | CAddrWidthAdd IType IType IType
+  CEq Ty Ty -- ^ The types must be equal
+  | CAddrWidthAdd Ty Ty Ty
   -- ^ At most one type may be a ptr, first type is the result
-  | CAddrWidthSub IType IType IType
+  | CAddrWidthSub Ty Ty Ty
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
-  | CBVNotPtr IType -- ^ The argument cannot be a ptr (so should be a bv)
-  | CIsPtr IType    -- ^ The type must point to something
+  | CBVNotPtr Ty -- ^ The argument cannot be a ptr (so should be a bv)
+  | CIsPtr Int Ty -- ^ The type must point to something of the given size
 
 instance Show Constraint where
   show c =
@@ -97,7 +92,7 @@ instance Show Constraint where
       CAddrWidthAdd t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " + " ++ show t3
       CAddrWidthSub t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " - " ++ show t3
       CBVNotPtr t -> "non-ptr " ++ show t
-      CIsPtr t    -> "ptr " ++ show t
+      CIsPtr sz t -> show t <> "-bit ptr to " <> show sz <> "-bit value"
 
 -- | Converts the limited `Constraint` grammar to the more general
 -- `TyConstraint` type used for constraint solving. We could completely
@@ -106,19 +101,19 @@ instance Show Constraint where
 -- to debug/trace/etc with the more limited grammar.
 tyConstraint :: Constraint -> TyConstraint
 tyConstraint = \case
-  CEq (IType t1) (IType t2) -> eqC t1 t2
-  CAddrWidthAdd (IType ret) (IType lhs) (IType rhs) ->
+  CEq t1 t2 -> eqC t1 t2
+  CAddrWidthAdd ret lhs rhs ->
     orC [ andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
         , andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
         , andC [isPtr64C ret, isNum64C lhs, isPtr64C rhs]
         ]
-  CAddrWidthSub (IType ret) (IType lhs) (IType rhs) ->
+  CAddrWidthSub ret lhs rhs ->
     orC [ andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
         , andC [isNum64C ret, isPtr64C lhs, isPtr64C rhs]
         , andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
         ]
-  CBVNotPtr (IType t) -> isNum64C t
-  CIsPtr (IType t) -> isPtr64C t
+  CBVNotPtr t -> isNum64C t
+  CIsPtr sz t -> isSizedPtr64C sz t
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -162,7 +157,7 @@ data CGenFunctionContext arch = CGenFunctionContext
 
     -- TODO (val) could this be just TyVars?  Does it become obsolete when we
     -- resolve TyVars?
-    _cgenBlockPhiTypes  :: Map (FnBlockLabel (ArchAddrWidth arch)) [IType]
+    _cgenBlockPhiTypes  :: Map (FnBlockLabel (ArchAddrWidth arch)) [Ty]
 
   -- (keep this last for convenient partial application)
 
@@ -189,7 +184,7 @@ data CGenState arch = CGenState {
     _nextFreeTyVar :: Int -- FIXME: use Nonce?
   , _assignTyVars  :: Map BSC.ByteString (Map FnAssignId TyVar)
   , _tyVarsOrigin  :: Map TyVar (BSC.ByteString, FnAssignId)
-  , _tyVarTypes    :: Map TyVar IType
+  , _tyVarTypes    :: Map TyVar Ty
 
   -- | Offset of the current instruction, used (not right now) for
   -- tagging constraints and warnings.
@@ -234,8 +229,15 @@ warn s = CGenM $ warnings <>= [Warning s]
 -- '<<+=' increment var, return old value
 
 -- | Returns a fresh type var.
-freshTyVar :: CGenM ctx arch TyVar
-freshTyVar = CGenM $ TyVar <$> (nextFreeTyVar <<+= 1)
+freshTyVar :: String -> CGenM ctx arch TyVar
+freshTyVar context =
+  CGenM $ do
+    tv <- nextFreeTyVar <<+= 1
+    trace (
+      "Created fresh type variable " <> show (PP.pretty (TyVar tv))
+      <> " for " <> context) (pure ()
+      )
+    pure (TyVar tv)
 
 atFnAssignId ::
   BSC.ByteString ->
@@ -247,7 +249,7 @@ atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
 freshTyVarForAssignId :: BSC.ByteString -> FnAssignId -> CGenM ctx arch TyVar
 freshTyVarForAssignId fn aId = do
   -- fn <- askContext cgenCurrentFunName
-  tyv <- freshTyVar
+  tyv <- freshTyVar (show fn <> "." <> show aId)
   CGenM $ atFnAssignId fn aId ?= tyv
   CGenM $ tyVarsOrigin . at tyv ?= (fn, aId)
   pure tyv
@@ -270,40 +272,40 @@ assignIdTyVar fn aId = do
     Just tyVar -> pure tyVar
 
 -- | Returns the associated type for a function assignment id, if any.
--- Otherwise, returns its type variable as an `IType`.
-assignIdTypeFor :: BSC.ByteString -> FnAssignId -> CGenM ctx arch IType
+-- Otherwise, returns its type variable as an `Ty`.
+assignIdTypeFor :: BSC.ByteString -> FnAssignId -> CGenM ctx arch Ty
 assignIdTypeFor fn aId = do
   tyVar <- assignIdTyVar fn aId
   CGenM $ use (tyVarTypes . at tyVar) <&> fromMaybe (varIType tyVar)
 
-assignIdType :: FnAssignId -> CGenM CGenBlockContext arch IType
+assignIdType :: FnAssignId -> CGenM CGenBlockContext arch Ty
 assignIdType aId = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   assignIdTypeFor fn aId
 
-assignmentType :: FnAssignment arch tp -> CGenM CGenBlockContext arch IType
+assignmentType :: FnAssignment arch tp -> CGenM CGenBlockContext arch Ty
 assignmentType = assignIdType . fnAssignId
 
 -- We lump returns and assigns into the same map
-funRetType :: FnReturnVar tp -> CGenM CGenBlockContext arch IType
+funRetType :: FnReturnVar tp -> CGenM CGenBlockContext arch Ty
 funRetType = assignIdType . frAssignId
 
-updFunRetType :: FnReturnVar tp -> IType -> CGenM CGenBlockContext arch ()
+updFunRetType :: FnReturnVar tp -> Ty -> CGenM CGenBlockContext arch ()
 updFunRetType fr ty = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   let aId = frAssignId fr
   tyVar <- assignIdTyVar fn aId
   CGenM $ tyVarTypes . at tyVar ?= ty
 
-phiType :: FnPhiVar arch tp -> CGenM CGenBlockContext arch IType
+phiType :: FnPhiVar arch tp -> CGenM CGenBlockContext arch Ty
 phiType = assignIdType . unFnPhiVar
 
-argumentType :: Int -> CGenM CGenBlockContext arch IType
+argumentType :: Int -> CGenM CGenBlockContext arch Ty
 argumentType i = do
-  tys <- funArgs <$> askContext (cgenFunctionContext . cgenCurrentFun)
+  tys <- funTypeArgs <$> askContext (cgenFunctionContext . cgenCurrentFun)
   case tys ^? ix i of
     Nothing -> error "Missing argument"
-    Just ty -> pure ty
+    Just ty -> pure (VarTy ty)
 
 emitConstraint :: Constraint -> CGenM ctx arch ()
 emitConstraint c = CGenM $ constraints %= (:) c
@@ -325,7 +327,7 @@ currentFunType :: CGenM CGenBlockContext arch (FunType arch)
 currentFunType = askContext (cgenFunctionContext . cgenCurrentFun)
 
 phisForBlock :: FnBlockLabel (ArchAddrWidth arch)
-             -> CGenM CGenBlockContext arch [IType]
+             -> CGenM CGenBlockContext arch [Ty]
 phisForBlock blockAddr =
   fromMaybe (error "Missing phi type")
     . Map.lookup blockAddr
@@ -361,28 +363,28 @@ funTypeAtAddr saddr = do
 -- ------------------------------------------------------------
 -- Constraints
 
-emitEq :: IType -> IType -> CGenM ctx arch ()
+emitEq :: Ty -> Ty -> CGenM ctx arch ()
 emitEq t1 t2 = emitConstraint (CEq t1 t2)
 
 -- | Emits an add which may be a pointer add
-emitPtrAdd :: IType -> IType -> IType -> CGenM ctx arch ()
+emitPtrAdd :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrAdd rty t1 t2 = emitConstraint (CAddrWidthAdd rty t1 t2)
 
 -- | Emits a sub which may return a pointer
-emitPtrSub :: IType -> IType -> IType -> CGenM ctx arch ()
+emitPtrSub :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrSub rty t1 t2 = emitConstraint (CAddrWidthSub rty t1 t2)
 
 -- | Emits a constraint that the argument isn't a pointer
-emitNotPtr :: IType -> CGenM ctx arch ()
+emitNotPtr :: Ty -> CGenM ctx arch ()
 emitNotPtr t = emitConstraint (CBVNotPtr t)
 
-emitPtr :: IType -> CGenM ctx arch ()
-emitPtr t = emitConstraint (CIsPtr t)
+emitPtr :: Int -> Ty -> CGenM ctx arch ()
+emitPtr sz t = emitConstraint (CIsPtr sz t)
 
 -- -----------------------------------------------------------------------------
 -- Core algorithm
 
-genFnValue :: FnValue arch tp -> CGenM CGenBlockContext arch IType
+genFnValue :: FnArchConstraints arch => FnValue arch tp -> CGenM CGenBlockContext arch Ty
 genFnValue v =
   case v of
     FnUndefined {}          -> punt
@@ -396,11 +398,13 @@ genFnValue v =
   where
     punt = do
       warn "Punting on FnValue"
-      varIType <$> freshTyVar
+      varIType <$> freshTyVar (show v)
 
 -- | Generate constraints for an App.  The first argument is the
 -- output (result) type.
-genApp :: IType -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
+genApp ::
+  FnArchConstraints arch =>
+  Ty -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
 genApp ty app =
   case app of
     Eq l r    -> vEq l r
@@ -480,14 +484,18 @@ genApp ty app =
     Bsf _ v          -> nonptrUnOp v
     Bsr _ v          -> nonptrUnOp v
   where
-    vEq :: forall arch tp tp'. FnValue arch tp -> FnValue arch tp' -> CGenM CGenBlockContext arch ()
+    vEq :: forall arch tp tp'.
+      FnArchConstraints arch =>
+      FnValue arch tp -> FnValue arch tp' -> CGenM CGenBlockContext arch ()
     vEq l r = do
       l_ty <- genFnValue l
       r_ty <- genFnValue r
       emitEq l_ty r_ty
       emitEq ty l_ty -- r_ty == ty by transitivity, so we don't add it
 
-    nonptrUnOp :: forall n arch. FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
+    nonptrUnOp :: forall n arch.
+      FnArchConstraints arch =>
+      FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
     nonptrUnOp v = do
       emitNotPtr =<< genFnValue v
       emitNotPtr ty
@@ -496,6 +504,7 @@ genApp ty app =
     -- We don't relate the sizes as that is given by the macaw type at
     -- the moment.
     nonptrBinOp :: forall n m arch.
+      FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinOp l r = do
       emitNotPtr =<< genFnValue l
@@ -503,21 +512,25 @@ genApp ty app =
       emitNotPtr ty
 
     nonptrBinCmp :: forall n m arch.
+      FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinCmp l r = do
       emitNotPtr =<< genFnValue l
       emitNotPtr =<< genFnValue r
 
 
-genFnAssignment :: FnAssignment arch tp -> CGenM CGenBlockContext arch ()
+genFnAssignment ::
+  FnArchConstraints arch =>
+  FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varIType <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr _sz -> emitPtr =<< genFnValue ptr
+    FnReadMem ptr (BVTypeRepr sz) -> emitPtr (widthVal sz) =<< genFnValue ptr
+    FnReadMem ptr _sz -> emitPtr 42069 =<< genFnValue ptr
     FnCondReadMem _sz _cond ptr def -> do
-      emitPtr =<< genFnValue ptr
+      emitPtr 1234567 =<< genFnValue ptr
       emitEq ty =<< genFnValue def
 
     FnEvalApp app -> genApp ty app
@@ -526,29 +539,31 @@ genFnAssignment a = do
 
 
 -- The offset argument is used by call term stmts
-genFnStmt :: FnStmt arch
-          -> CGenM CGenBlockContext arch ()
+genFnStmt ::
+  FnArchConstraints arch =>
+  FnStmt arch -> CGenM CGenBlockContext arch ()
 genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr _v -> emitPtr =<< genFnValue addr
-    FnCondWriteMem _cond addr _v _ -> emitPtr =<< genFnValue addr
+    FnWriteMem addr _v -> emitPtr 2345678 =<< genFnValue addr
+    FnCondWriteMem _cond addr _v _ -> emitPtr 3456789 =<< genFnValue addr
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
 -- -- | Matches up the argument registers with the destination.
 -- genRegType :: RegState (ArchReg arch) (Value arch ids)
 --            -> RegType arch
---            -> CGenM ctx arch IType
+--            -> CGenM ctx arch Ty
 -- genRegType regs rty = traverse_ go (Map.toList rty)
 --   where
 --     go (Some r, ty) = emitEq ty =<< genFnValue (regs ^. boundValue r)
 
 -- | Used at the end of a block on a control transfer.  In essence
 -- this unifies the block arguments with the values from the current block.
-genBlockTransfer :: FnJumpTarget arch
-                 -> CGenM CGenBlockContext arch ()
+genBlockTransfer ::
+  FnArchConstraints arch =>
+  FnJumpTarget arch -> CGenM CGenBlockContext arch ()
 genBlockTransfer tgt = do
   phiTys <- phisForBlock (fnJumpLabel tgt)
   let phiVals = V.toList (fnJumpPhiValues tgt)
@@ -556,7 +571,8 @@ genBlockTransfer tgt = do
   where
     go (Some v) ty = emitEq ty =<< genFnValue v
 
-genCall :: FnValue arch (BVType (ArchAddrWidth arch)) ->
+genCall :: FnArchConstraints arch =>
+           FnValue arch (BVType (ArchAddrWidth arch)) ->
            -- | arguments
            [ Some (FnValue arch) ] ->
            -- | Name of return value
@@ -569,18 +585,19 @@ genCall fn args m_ret = do
     Nothing -> warn "Couldn't determine target of call"
     Just ftyp -> do
       -- Arguments
-      zipWithM_ go args (funArgs ftyp)
+      zipWithM_ go args (funTypeArgs ftyp)
 
       -- Return
-      case (m_ret, funRet ftyp) of
-        (Just (Some rv), Just rty) -> updFunRetType rv rty
+      case (m_ret, funTypeRet ftyp) of
+        (Just (Some rv), Just rty) -> updFunRetType rv (VarTy rty)
         (Just _, _) -> warn "Missing return type"
         _ -> pure ()
 
   where
-    go (Some v) ty = emitEq ty =<< genFnValue v
+    go (Some v) ty = emitEq (VarTy ty) =<< genFnValue v
 
-genFnBlock :: FnBlock arch -- ^ Current block
+genFnBlock :: FnArchConstraints arch
+           => FnBlock arch -- ^ Current block
            -> CGenM CGenFunctionContext arch ()
 genFnBlock b = do
   withinContext CGenBlockContext $ do
@@ -601,8 +618,8 @@ genFnBlock b = do
 
       FnRet m_v -> do
         fty <- currentFunType
-        case (m_v, funRet fty) of
-          (Just (Some v), Just ty) -> emitEq ty =<< genFnValue v
+        case (m_v, funTypeRet fty) of
+          (Just (Some v), Just ty) -> emitEq (VarTy ty) =<< genFnValue v
           (Nothing, Nothing) -> pure ()
           _ -> warn "Mismatch between return type and return value"
 
@@ -610,14 +627,15 @@ genFnBlock b = do
         fty <- currentFunType
         m_calledFTy <- funTypeAtAddr fn
         genCall fn args Nothing
-        case (funRet fty, funRet <$> m_calledFTy) of
+        case (funTypeRet fty, funTypeRet <$> m_calledFTy) of
           (_, Nothing) -> warn "Unknown function"
-          (Just rty, Just (Just rty')) -> emitEq rty rty'
+          (Just rty, Just (Just rty')) -> emitEq (VarTy rty) (VarTy rty')
           (Just _, _) -> warn "Mismatch between return type and return type in tail call"
           _ -> pure ()
 
 genFunction ::
-  -- Map (FnBlockLabel (ArchAddrWidth arch)) [IType] ->
+  FnArchConstraints arch =>
+  -- Map (FnBlockLabel (ArchAddrWidth arch)) [Ty] ->
   Function arch -> CGenM CGenModuleContext arch ()
 genFunction fn {- blockPhis -} = do
   cFun <-
@@ -625,7 +643,7 @@ genFunction fn {- blockPhis -} = do
     <$> askContext cgenFunTypes
   let mkPhis b =
         (,) (fbLabel b)
-        <$> replicateM (V.length (fbPhiVars b)) (varIType <$> freshTyVar)
+        <$> replicateM (V.length (fbPhiVars b)) (varIType <$> freshTyVar "%phi#TODO")
   bphis <- Map.fromList <$> mapM mkPhis (fnBlocks fn)
   withinContext
     (CGenFunctionContext cFun (fnName fn) bphis)
@@ -634,8 +652,8 @@ genFunction fn {- blockPhis -} = do
 -- Allocates TyVars for the arguments and return type
 functionTypeToFunType :: FunctionType arch -> CGenM ctx arch (FunType arch)
 functionTypeToFunType ft = do
-  args <- replicateM (length (fnArgTypes ft)) (varIType <$> freshTyVar)
-  ret  <- traverse (\_ -> varIType <$> freshTyVar) (fnReturnType ft)
+  args <- replicateM (length (fnArgTypes ft)) (freshTyVar "arg of some function")
+  ret  <- traverse (const (freshTyVar "some return type")) (fnReturnType ft)
   pure (FunType args ret)
 
 data ModuleConstraints arch = ModuleConstraints
@@ -663,16 +681,22 @@ data ModuleConstraints arch = ModuleConstraints
 
 showInferredTypes :: ModuleConstraints arch -> String
 showInferredTypes mc =
-  unlines (showMapping =<< Map.assocs (mcTypeMap mc))
+  unlines (showMapping <$> Map.assocs (mcTypeMap mc))
   where
-    showMapping :: (TyVar, Ty) -> [String]
+    showMapping :: (TyVar, Ty) -> String
     showMapping (tv, ty) =
       case Map.lookup tv (mcTyVarOrigin mc) of
-        Nothing -> []
-        Just (fn, aId) -> [BSC.unpack fn <> " " <> show aId <> ": " <> show ty]
+        Nothing ->
+          concat [ show (PP.pretty tv), " : ", show ty ]
+        Just (fn, aId) ->
+          concat [ show (PP.pretty tv)
+                 , " (", show aId, " in ", BSC.unpack fn, ") : "
+                 , show ty
+                 ]
 
 
 genModule ::
+  FnArchConstraints arch =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->

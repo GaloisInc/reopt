@@ -61,6 +61,8 @@ import System.IO.Error
 import Text.Printf (printf)
 
 import Reopt.TypeInference.ConstraintGen
+-- import Reopt.CFG.FnRep (RecoveredModule(RecoveredModule))
+import Debug.Trace (trace)
 
 reoptVersion :: String
 reoptVersion = printf "Reopt binary reoptimizer (reopt) %d.%d.%d." h l r
@@ -720,7 +722,7 @@ showConstraints args = do -- FIXME: copied from main performReopt command
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings mc)))
   putStrLn "Constraints"
-  putStrLn (unlines (map ((++) "\t" . show) (mcConstraints mc)))
+  putStrLn (unlines (map ((++) "\t" . show . PP.pretty) (mcConstraints mc)))
   putStrLn "Inferred types"
   putStrLn (showInferredTypes mc)
 
@@ -861,11 +863,19 @@ performReopt args = do
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate constraints
-    let _moduleConstraints = genModule recMod (memory discState)
+    let moduleConstraints = genModule recMod (memory discState)
+
+    trace "Constraints" (pure ())
+    trace (unlines (map ((++) "\t" . show . PP.pretty) (mcConstraints moduleConstraints))) (pure ())
+    trace "Inferred types" (pure ())
+    trace (showInferredTypes moduleConstraints) (pure ())
+
+    let recMod' = updateRecoveredModule moduleConstraints recMod
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
-          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
+          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod' moduleConstraints
+
     -- Write LLVM if requested.
     case llvmExportPath args of
       Nothing -> pure ()

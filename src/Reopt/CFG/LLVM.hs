@@ -76,6 +76,7 @@ import           Control.Monad
 import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
+import           Data.Bifunctor (first)
 import qualified Data.ByteString.Char8 as BSC
 import           Data.Foldable
 import           Data.Int
@@ -106,7 +107,13 @@ import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
 
 import           Reopt.CFG.FnRep
 import           Reopt.Events (FunId, funId)
+import           Reopt.TypeInference.ConstraintGen (
+    FunType (..),
+    ModuleConstraints (..),
+    Ty (..),
+  )
 import qualified Reopt.VCG.Annotations as Ann
+import Reopt.TypeInference.Constraints (TyVar)
 
 
 data LLVMBitCastInfo =
@@ -448,11 +455,15 @@ data FunLLVMContext arch = FunLLVMContext
     -- ^ Architecture-specific functions
   , funLLVMGenOptions :: !LLVMGenOptions
     -- ^ Options for generating LLVM
-  , funArgs      :: !(V.Vector (L.Typed L.Value))
-     -- ^ Arguments to this function.
+  , funAddr :: ArchSegmentOff arch
+  , funName :: BSC.ByteString
+  , funArgs :: !(V.Vector (L.Typed L.Value))
+    -- ^ Arguments to this function.
   , funType :: !(FunctionType arch)
     -- ^ Type for this function
-  , funAllocaCount    :: !Int
+  , funAllocaCount :: !Int
+  , moduleConstraints :: ModuleConstraints arch
+    -- ^ Typing constraints inferred for the module
   , withArchConstraints :: forall a . (LLVMArchConstraints arch => a) -> a
   }
 
@@ -832,6 +843,20 @@ appToLLVM app = bbArchConstraints $ do
     Bitcast x tp -> do
       llvmVal <- mkLLVMValue x
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
+    BVAdd _sz x@(FnArg n _ty) y -> do
+      fn <- asks funAddr
+      modCs <- asks moduleConstraints
+      let argTyVar = funTypeArgs (mcFunTypes modCs Map.! fn) !! n
+      let argTy = mcTypeMap modCs Map.! argTyVar
+      case argTy of
+        PtrTy sz _ -> do
+          ptr <- mkLLVMValue x
+          ofs <- mkLLVMValue y
+          L.Typed (L.PtrTo (L.PrimType (L.Integer (fromIntegral sz))))
+            <$> evalInstr (L.GEP False ptr [ofs])
+        _ -> binop (arithop (L.Add False False)) x y
+    -- BVAdd _sz (FnPhiValue phi) y ->
+    --   binop (arithop (L.Add False False)) x y
     BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -1070,8 +1095,8 @@ stmtToLLVM stmt = bbArchConstraints $ do
 llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
 llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
 
--- | Add Phi values for for target block
-addTargetPhiValues :: forall arch . FnJumpTarget arch -> BBLLVM arch ()
+-- | Add Phi values for target block
+addTargetPhiValues :: forall arch. FnJumpTarget arch -> BBLLVM arch ()
 addTargetPhiValues tgt = do
   thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
   let tgtLbl :: FnBlockLabel (ArchAddrWidth arch)
@@ -1081,9 +1106,16 @@ addTargetPhiValues tgt = do
   let updateVar :: Map L.BlockLabel (Int, L.Value)
                 -> Some (FnValue arch)
                 -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
+      updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
+        modCs <- asks moduleConstraints
+        fn <- asks funName
+        let tyV = mcAssignTyVars modCs Map.! fn Map.! unFnPhiVar phiVar
+        let inferredType = mcTypeMap modCs Map.! tyV
+        thisVal <- mkLLVMValue v
+        pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
       updateVar prevVars (Some v) = do
         thisVal <- mkLLVMValue v
-        pure $! Map.insertWith (\_ (o,ov) -> (o+1, ov))  thisLabel (1, L.typedValue thisVal) prevVars
+        pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
   m <- BBLLVM $ use $ funStateLens . funBlockPhiMapLens
   let curEntries = phiAssignmentForBlock m tgtLbl
   newEntries <- V.zipWithM updateVar curEntries values
@@ -1420,22 +1452,33 @@ defineFunction :: forall arch
                   -- ^ Architecture specific operations
                -> LLVMGenOptions
                   -- ^ Options for generating LLVM
+               -> ModuleConstraints arch
+                  -- ^ Types inferred from constraint-solving
                -> Function arch
                   -- ^ Function to translate
                -> LLVMTrans (L.Define, Either String Ann.FunctionAnn)
-defineFunction archOps genOpts f = do
-  let mkInputReg :: Some TypeRepr -> Int -> L.Typed L.Ident
-      mkInputReg (Some tp) i = L.Typed (typeToLLVMType tp) (argIdent i)
+defineFunction archOps genOpts modCs f = do
+  let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
+      mkInputReg (Some tp, tyv) i =
+        case mcTypeMap modCs Map.! tyv of
+          PtrTy _ _ -> L.Typed (L.PtrTo (L.PrimType (L.Integer 32))) (argIdent i)
+          _ -> L.Typed (typeToLLVMType tp) (argIdent i)
+
+  let fty = mcFunTypes modCs Map.! fnAddr f
+  let argsWithTyVars = zip (fnArgTypes (fnType f)) (funTypeArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
-      inputArgs = zipWith mkInputReg (fnArgTypes (fnType f)) [0..]
+      inputArgs = zipWith mkInputReg argsWithTyVars [0..]
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
                            , funLLVMGenOptions = genOpts
+                           , funAddr = fnAddr f
+                           , funName = fnName f
                            , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
                            , funType = fnType f
                            , funAllocaCount = 0
-                           , withArchConstraints = \x -> x
+                           , moduleConstraints = modCs
+                           , withArchConstraints = id
                            }
 
   -- Create ordinary blocks
@@ -1541,15 +1584,16 @@ moduleForFunctions ::
   LLVMGenOptions ->
   -- | Module to generate
   RecoveredModule arch ->
+  ModuleConstraints arch ->
   (L.Module,
    [(FunId, Either String Ann.FunctionAnn)],
    [Ann.ExternalFunctionAnn],
    [LLVMLogEvent])
-moduleForFunctions archOps genOpts recMod =
+moduleForFunctions archOps genOpts recMod modCs =
   let (dynIntrinsics, logEvents, definesAndAnn) = runLLVMTrans $
         forM (recoveredDefs recMod) $ \f -> do
           let fId = funId (fnAddr f) (Just (fnName f))
-          (d, ma) <- defineFunction archOps genOpts f
+          (d, ma) <- defineFunction archOps genOpts modCs f
           pure (d, (fId, ma))
       llvmMod =  L.Module { L.modSourceName = Nothing
                           , L.modDataLayout = []
