@@ -549,9 +549,12 @@ trivialSubC ctx s t = subtype' resolveVar resolveVar s t
 -- | @absurdSubC s t ctx@ returns @True@ if `s <: t` is an absurd constraint given `ctx`.
 -- N.B., this is intended to be a conservative check (i.e., sound but incomplete).
 absurdSubC ::  Context -> Ty -> Ty -> Bool
-absurdSubC ctx s t = not $ subtype' resolveL resolveR s t
-  where resolveL x = findLowerBound x (ctxVarBoundsMap ctx)
-        resolveR x = findUpperBound x (ctxVarBoundsMap ctx)
+absurdSubC ctx s t = not $ subtype' resolveLower resolveUpper s t
+  where resolveVar findBound x = case Map.lookup x $ ctxVarEqMap ctx of
+                                   Nothing -> findBound x (ctxVarBoundsMap ctx)
+                                   Just xTy -> xTy
+        resolveLower = resolveVar findLowerBound
+        resolveUpper = resolveVar findUpperBound
 
 -- | Is this equality constraint trivial in the current context?
 trivialEqC ::  Context -> Ty -> Ty -> Bool
@@ -775,7 +778,7 @@ reduceC ctx = go
                       else if trivialEqC ctx s t then TopC
                       else c
         c@(SubC s t) -> if absurdSubC ctx s t then BotC
-                        else if trivialEqC ctx s t then TopC
+                        else if trivialSubC ctx s t then TopC
                         else c
         OrC c1 c2 cs -> orC $ map go $ c1:c2:cs
         AndC c1 c2 cs -> andC $ map go $ c1:c2:cs
