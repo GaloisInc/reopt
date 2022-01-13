@@ -25,18 +25,18 @@ import Reopt.TypeInference.Constraints
    andC,
    ptrTy,
    int32Ty,
-   int64Ty)
+   int64Ty,
+   num32Ty,
+   num64Ty)
 
-x0,x1,x2,x3 :: TyVar
+
+x0,x1,x2,x3  :: TyVar
 x0Ty,x1Ty,x2Ty,x3Ty :: Ty
-x0   = TyVar 0
-x0Ty = VarTy x0
-x1   = TyVar 1
-x1Ty = VarTy x1
-x2   = TyVar 2
-x2Ty = VarTy x2
-x3   = TyVar 3
-x3Ty = VarTy x3
+[(x0,x0Ty),
+ (x1,x1Ty),
+ (x2,x2Ty),
+ (x3,x3Ty)] = map (\i -> (TyVar i, VarTy $ TyVar i))
+                  [0..3]
 
 constraintTests :: T.TestTree
 constraintTests = T.testGroup "Type Constraint Tests"
@@ -83,7 +83,12 @@ subCTests = T.testGroup "Equality Constraint Tests"
 -- | Some (basic?) tests focusing on disjunctions.
 orCTests :: T.TestTree
 orCTests = T.testGroup "Disjunctive Constraint Tests"
-  [ mkTest "disjunctive syllogism 1"
+  [ mkTest "disjunctive syllogism 0"
+      [ orC [andC [EqC x0Ty int64Ty, EqC x1Ty int32Ty],
+             andC [SubC x0Ty (ptrTy 64 int64Ty), EqC x1Ty int64Ty]],
+        SubC x0Ty (ptrTy 64 TopTy)]
+      [(x0, (ptrTy 64 int64Ty)), (x1, int64Ty)],
+    mkTest "disjunctive syllogism 1"
       [ orC [andC [EqC x0Ty (ptrTy 64 int64Ty), SubC x1Ty int64Ty],
              andC [EqC x1Ty (ptrTy 64 int64Ty), SubC x0Ty int64Ty]],
         SubC x0Ty int64Ty]
@@ -103,7 +108,38 @@ orCTests = T.testGroup "Disjunctive Constraint Tests"
         SubC x3Ty x1Ty,
         SubC int32Ty x2Ty,
         SubC int32Ty x3Ty]
-      [(x0, int32Ty), (x1, int32Ty), (x2, int32Ty), (x3, int32Ty)]
+      [(x0, int32Ty), (x1, int32Ty), (x2, int32Ty), (x3, int32Ty)],
+    mkTest "disjunctive syllogism 4"
+      [ SubC x1Ty (ptrTy 64 TopTy),
+        orC [andC [EqC x0Ty num32Ty, EqC x1Ty num64Ty],
+             andC [EqC x0Ty num64Ty, SubC x1Ty (ptrTy 64 TopTy)]]
+      ]
+      [(x0, num64Ty),
+       (x1, (ptrTy 64 TopTy))],
+    mkTest "disjunctive syllogism 5"
+      [ SubC x1Ty (ptrTy 64 TopTy),
+        orC [andC [EqC x0Ty num64Ty, EqC x1Ty num64Ty],
+             andC [SubC x0Ty (ptrTy 64 TopTy), SubC x1Ty (ptrTy 64 TopTy)]]
+      ]
+      [(x0, (ptrTy 64 TopTy)),
+       (x1, (ptrTy 64 TopTy))],
+    mkTest "disjunctive syllogism 6"
+      [ EqC  x1Ty num64Ty,
+        orC [andC [EqC x0Ty num32Ty, EqC x1Ty num64Ty],
+             andC [EqC x0Ty num64Ty, SubC x1Ty (ptrTy 64 TopTy)]]
+      ]
+      [(x0, num32Ty),
+       (x1, num64Ty)],
+    mkTest "disjunctive syllogism 7"
+      [ EqC  x1Ty num64Ty,
+        SubC x2Ty (ptrTy 64 TopTy),
+        orC [andC [EqC x0Ty num64Ty, EqC x1Ty num64Ty, EqC x2Ty num64Ty],
+             andC [EqC x0Ty num64Ty, SubC x1Ty (ptrTy 64 TopTy), SubC x2Ty (ptrTy 64 TopTy)],
+             andC [SubC x0Ty (ptrTy 64 TopTy), EqC x1Ty num64Ty,  SubC x2Ty (ptrTy 64 TopTy)]]
+      ]
+      [(x0, (ptrTy 64 TopTy)),
+       (x1, num64Ty),
+       (x2, (ptrTy 64 TopTy))]
   ]
 
 newtype TypeEnv = TypeEnv [(TyVar, Ty)]
