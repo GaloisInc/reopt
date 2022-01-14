@@ -45,7 +45,8 @@ data Ty
     BotTy
   | -- Type unification variable.
     VarTy TyVar
-  | -- | A pointer of specified bit width pointing to some type of value (i.e., on X86_64 bit width would be 64).
+  | -- | A pointer of specified bit width pointing to some type of value
+    -- (i.e., on X86_64 bit width would be 64).
     PtrTy Int Ty
   | -- | Code of specified bit width (i.e., on X86_64 bit width would be 64).
     CodeTy Int
@@ -61,6 +62,14 @@ data Ty
     FloatTy Int
   | -- | Record type, mapping bit offsets to types
     RecTy (Map Int Ty)
+  | -- | Type indexing operator `ReadAtTy t i` describes a type which can be read
+    -- starting `i` bits into type `t`. N.B., smart constructor `readAtTy` should be
+    -- used to keep types in a normal form.
+    ReadAtTy Ty Int
+  | -- | Type updating operator `UpdateAtTy t1 i t2` describes a type `t1` which has
+    -- been updated starting `i` bits into type to contain a `t2`. N.B., smart constructor
+    -- `updateAtTy` should be used to keep types in a normal form.
+    UpdateAtTy Ty Int Ty
   | -- | Intersection of two or more types. Should not contain duplicates or nested intersections.
     AndTy Ty Ty [Ty]
   | -- | Union of two or more types. Should not contain duplicates or nested unions.
@@ -82,6 +91,8 @@ instance PP.Pretty Ty where
     RecTy flds -> PP.group $ PP.encloseSep "{" "}" ", "
                   $ map (\(off,t) -> (PP.pretty off PP.<+> ":" PP.<+> PP.pretty t))
                   $ Map.toAscList flds
+    ReadAtTy t i -> PP.pretty t <> "[" <> PP.pretty i<>"]"
+    UpdateAtTy t1 i t2 -> "{"<> PP.pretty t1 <> " | "<> (PP.pretty i) <>" := " <> PP.pretty t2<>"}"
     AndTy ty1 ty2 tys -> PP.parens $ "∩" PP.<+> PP.hsep (map PP.pretty (ty1:ty2:tys))
     OrTy ty1 ty2 tys ->  PP.parens $ "∪" PP.<+> PP.hsep (map PP.pretty (ty1:ty2:tys))
 
@@ -99,6 +110,8 @@ isBaseTy t = case t of
   IntTy{} -> True
   FloatTy{} -> True
   RecTy{} -> False
+  ReadAtTy{} -> False
+  UpdateAtTy{} -> False
   AndTy{} -> False
   OrTy{} -> False
 
@@ -136,6 +149,16 @@ ptrTy :: Int -> Ty -> Ty
 ptrTy _ BotTy = BotTy
 ptrTy w t = PtrTy w t
 
+-- | @readAtTy t i@ is the type which begins @i@ bits into @t@.
+readAtTy :: Ty -> Int -> Ty
+readAtTy t@(RecTy flds) i = Map.findWithDefault (ReadAtTy t i) i flds
+readAtTy t i = ReadAtTy t i
+
+-- | @updateAtTy t1 i t2@ is the result up writing a @t2@ at @i@ bits into @t1@.
+updateAtTy :: Ty -> Int -> Ty -> Ty
+updateAtTy (RecTy flds) i iTy = recTy $ Map.insert i iTy flds
+updateAtTy t1 i t2 = UpdateAtTy t1 i t2
+
 -- Constructs an intersection type, simplifying some basic cases.
 andTy :: [Ty] -> Ty
 andTy = go Set.empty
@@ -166,13 +189,13 @@ orTy = go Set.empty
 
 -- Constructs a record type, simplifying some cases. (AMK: should we flatten
 -- nested structs...?)
-recTy :: [(Int,Ty)] -> Ty
-recTy = go Map.empty
-  where go acc [] = RecTy acc
-        go _ ((_,BotTy):_) = BotTy
-        go acc ((f,fTy):rst) = go (Map.alter (updateTy fTy) f acc) rst
-        updateTy t1 Nothing = Just t1
-        updateTy t1 (Just t2) = Just $ andTy [t1,t2]
+recTy :: Map Int Ty -> Ty
+recTy flds = if any (== BotTy) (Map.elems flds) then BotTy else RecTy flds
+
+-- Constructs a record type from an association list.
+recTy' :: [(Int,Ty)] -> Ty
+recTy' = recTy . Map.fromList
+
 
 -- | Return the given type with all type variables replaced via the lookup function.
 concretize :: Ty -> (TyVar -> Ty) -> Ty
@@ -189,7 +212,9 @@ concretize initialTy lookupVar = go initialTy
     go t@FloatTy{} = t
     go (VarTy x)   = lookupVar x
     go (PtrTy w t) = ptrTy w (go t)
-    go (RecTy flds) = recTy $ Map.toList $ fmap go flds
+    go (RecTy flds) = recTy $ fmap go flds
+    go (ReadAtTy t i) = readAtTy (go t) i
+    go (UpdateAtTy t1 i t2) = updateAtTy (go t1) i (go t2)
     go (AndTy t1 t2 ts) = andTy $ map go (t1:t2:ts)
     go (OrTy t1 t2 ts)  = orTy  $ map go (t1:t2:ts)
 
@@ -208,7 +233,12 @@ concretizeM initialTy lookupVar = go initialTy
     go t@FloatTy{} = pure t
     go (VarTy x)   = lookupVar x
     go (PtrTy w t) = ptrTy w <$> (go t)
-    go (RecTy flds) = (recTy . Map.toList) <$> traverse go flds
+    go (RecTy flds) = recTy <$> traverse go flds
+    go (ReadAtTy t i) = do t' <- go t
+                           pure $ readAtTy t' i
+    go (UpdateAtTy t1 i t2) = do t1' <- go t1
+                                 t2' <- go t2
+                                 pure $ updateAtTy t1' i t2'
     go (AndTy t1 t2 ts) = andTy <$> mapM go (t1:t2:ts)
     go (OrTy t1 t2 ts)  = orTy  <$> mapM go (t1:t2:ts)
 
@@ -251,8 +281,8 @@ subtype' resolveL resolveR = go
                                               Nothing -> False
                                               Just fldTy1 -> go fldTy1 fldTy2)
                                           $ Map.toList flds2
-        (t1@RecTy{}, t2) -> go t1 (recTy [(0,t2)])
-        (t1, t2@RecTy{}) -> go (recTy [(0,t1)]) t2
+        (t1@RecTy{}, t2) -> go t1 (recTy' [(0,t2)])
+        (t1, t2@RecTy{}) -> go (recTy' [(0,t1)]) t2
         -- Set-theoretic subtypes
         (AndTy s1 s2 ss, t) -> any (\s -> go s t) (s1:s2:ss)
         (OrTy s1 s2 ss, t)  -> all (\s -> go s t) (s1:s2:ss)
@@ -267,6 +297,9 @@ subtype' resolveL resolveR = go
                           if yTy == type2
                             then False
                             else go s yTy
+        -- Type operators
+        (ReadAtTy s i, ReadAtTy t j) | i == j -> go s t
+        (UpdateAtTy s1 i s2, UpdateAtTy t1 j t2) | i == j-> go s1 t1 && go s2 t2
         -- Conservative base case
         (_, _) -> False
 
@@ -292,6 +325,8 @@ uninhabited = \case
   IntTy{} -> False
   FloatTy{} -> False
   RecTy flds -> any uninhabited $ Map.elems flds
+  ReadAtTy t _i -> uninhabited t
+  UpdateAtTy t1 _j t2 -> uninhabited t1 || uninhabited t2
   AndTy t1 t2 ts -> any uninhabited (t1:t2:ts) -- may return False conservatively
   OrTy  t1 t2 ts -> all uninhabited (t1:t2:ts)
 
@@ -311,8 +346,8 @@ upperBound type1 type2 =
     -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (upperBound s t)
     -- J-RecBase
-    (t1, t2@RecTy{}) | isBaseTy t1 -> upperBound (recTy [(0,t1)]) t2
-    (t1@RecTy{}, t2) | isBaseTy t2 -> upperBound t1 (recTy [(0,t2)])
+    (t1, t2@RecTy{}) | isBaseTy t1 -> upperBound (recTy' [(0,t1)]) t2
+    (t1@RecTy{}, t2) | isBaseTy t2 -> upperBound t1 (recTy' [(0,t2)])
     -- J-NoRel
     (_,_) -> TopTy
 
@@ -333,10 +368,10 @@ lowerBound type1 type2 =
     -- M-Ptr
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (lowerBound s t)
     -- M-Rec (not included in TIE but seems sound and useful)
-    ((RecTy flds1), (RecTy flds2)) -> recTy $ Map.toList $ Map.unionWith lowerBound flds1 flds2
+    ((RecTy flds1), (RecTy flds2)) -> recTy $ Map.unionWith lowerBound flds1 flds2
     -- M-RecBase
-    (t1, t2@RecTy{}) | isBaseTy t1 -> lowerBound (recTy [(0,t1)]) t2
-    (t1@RecTy{}, t2) | isBaseTy t2 -> lowerBound t1 (recTy [(0,t2)])
+    (t1, t2@RecTy{}) | isBaseTy t1 -> lowerBound (recTy' [(0,t1)]) t2
+    (t1@RecTy{}, t2) | isBaseTy t2 -> lowerBound t1 (recTy' [(0,t2)])
     -- M-NoRel
     (_,_) -> BotTy
 
@@ -354,6 +389,8 @@ tyFreeVars =
       UIntTy{} -> Set.empty
       FloatTy{} -> Set.empty
       RecTy flds -> foldr (Set.union . tyFreeVars) Set.empty $ Map.elems flds
+      ReadAtTy t _i -> tyFreeVars t
+      UpdateAtTy t1 _j t2 -> Set.union (tyFreeVars t1) (tyFreeVars t2)
       AndTy t1 t2 ts -> foldr (Set.union . tyFreeVars) Set.empty (t1:t2:ts)
       OrTy t1 t2 ts  -> foldr (Set.union . tyFreeVars) Set.empty (t1:t2:ts)
 
@@ -631,6 +668,9 @@ solveEqC ctx (type1, type2) = traceCOpContext "solveEqC" (EqC type1 type2) ctx $
             else over (field @"ctxVarEqMap" ) (Map.insert x t) ctx
         go s t@(VarTy _) = go t s
         go (PtrTy _w1 s) (PtrTy _w2 t) = over (field @"ctxEqConstraints") ((s, t) :) ctx
+        go (RecTy flds1) (RecTy flds2) =
+          let fldEqCs = Map.elems $ Map.intersectionWith (,) flds1 flds2
+          in over (field @"ctxEqConstraints") (fldEqCs ++) ctx
         go s t = if absurdEqC ctx s t
                  then over (field @"ctxAbsurdConstraints") (EqC s t :) ctx
                  else over (field @"ctxDroppedEqConstraints") ((s, t) :) ctx
