@@ -59,8 +59,8 @@ data Ty
     IntTy Int
   | -- | Float type of specified bit width (e.g., float32, float64).
     FloatTy Int
-  -- | -- | Record type, mapping bit offsets to types
-  --   RecordTy [(Int, Ty)]
+  | -- | Record type, mapping bit offsets to types
+    RecTy (Map Int Ty)
   | -- | Intersection of two or more types. Should not contain duplicates or nested intersections.
     AndTy Ty Ty [Ty]
   | -- | Union of two or more types. Should not contain duplicates or nested unions.
@@ -79,10 +79,13 @@ instance PP.Pretty Ty where
     UIntTy n -> "uint"<>(PP.pretty n)<>"_t"
     IntTy n -> "int"<>(PP.pretty n)<>"_t"
     FloatTy n -> "float"<>(PP.pretty n)<>"_t"
+    RecTy flds -> PP.group $ PP.encloseSep "{" "}" ", "
+                  $ map (\(off,t) -> (PP.pretty off PP.<+> ":" PP.<+> PP.pretty t))
+                  $ Map.toAscList flds
     AndTy ty1 ty2 tys -> PP.parens $ "∩" PP.<+> PP.hsep (map PP.pretty (ty1:ty2:tys))
     OrTy ty1 ty2 tys ->  PP.parens $ "∪" PP.<+> PP.hsep (map PP.pretty (ty1:ty2:tys))
 
--- | Is this a base type? I.e., a type that can fit in a single register.
+--- | Is this a base type? I.e., a type that can always fit in a single register.
 isBaseTy :: Ty -> Bool
 isBaseTy t = case t of
   TopTy -> False
@@ -95,6 +98,7 @@ isBaseTy t = case t of
   UIntTy{} -> True
   IntTy{} -> True
   FloatTy{} -> True
+  RecTy{} -> False
   AndTy{} -> False
   OrTy{} -> False
 
@@ -160,6 +164,16 @@ orTy = go Set.empty
         go acc (t:ts) = go (Set.insert t acc) ts
 
 
+-- Constructs a record type, simplifying some cases. (AMK: should we flatten
+-- nested structs...?)
+recTy :: [(Int,Ty)] -> Ty
+recTy = go Map.empty
+  where go acc [] = RecTy acc
+        go _ ((_,BotTy):_) = BotTy
+        go acc ((f,fTy):rst) = go (Map.alter (updateTy fTy) f acc) rst
+        updateTy t1 Nothing = Just t1
+        updateTy t1 (Just t2) = Just $ andTy [t1,t2]
+
 -- | Return the given type with all type variables replaced via the lookup function.
 concretize :: Ty -> (TyVar -> Ty) -> Ty
 concretize initialTy lookupVar = go initialTy
@@ -175,6 +189,7 @@ concretize initialTy lookupVar = go initialTy
     go t@FloatTy{} = t
     go (VarTy x)   = lookupVar x
     go (PtrTy w t) = ptrTy w (go t)
+    go (RecTy flds) = recTy $ Map.toList $ fmap go flds
     go (AndTy t1 t2 ts) = andTy $ map go (t1:t2:ts)
     go (OrTy t1 t2 ts)  = orTy  $ map go (t1:t2:ts)
 
@@ -193,6 +208,7 @@ concretizeM initialTy lookupVar = go initialTy
     go t@FloatTy{} = pure t
     go (VarTy x)   = lookupVar x
     go (PtrTy w t) = ptrTy w <$> (go t)
+    go (RecTy flds) = (recTy . Map.toList) <$> traverse go flds
     go (AndTy t1 t2 ts) = andTy <$> mapM go (t1:t2:ts)
     go (OrTy t1 t2 ts)  = orTy  <$> mapM go (t1:t2:ts)
 
@@ -229,6 +245,14 @@ subtype' resolveL resolveR = go
         -- Signed/Unsigned integer subtypes
         (IntTy w1,  IntTy w2)  -> w1 <= w2
         (UIntTy w1, UIntTy w2) -> w1 <= w2
+        -- Records
+        (RecTy flds1, RecTy flds2) -> all (\(fld, fldTy2) ->
+                                            case Map.lookup fld flds1 of
+                                              Nothing -> False
+                                              Just fldTy1 -> go fldTy1 fldTy2)
+                                          $ Map.toList flds2
+        (t1@RecTy{}, t2) -> go t1 (recTy [(0,t2)])
+        (t1, t2@RecTy{}) -> go (recTy [(0,t1)]) t2
         -- Set-theoretic subtypes
         (AndTy s1 s2 ss, t) -> any (\s -> go s t) (s1:s2:ss)
         (OrTy s1 s2 ss, t)  -> all (\s -> go s t) (s1:s2:ss)
@@ -267,15 +291,17 @@ uninhabited = \case
   UIntTy{} -> False
   IntTy{} -> False
   FloatTy{} -> False
+  RecTy flds -> any uninhabited $ Map.elems flds
   AndTy t1 t2 ts -> any uninhabited (t1:t2:ts) -- may return False conservatively
   OrTy  t1 t2 ts -> all uninhabited (t1:t2:ts)
 
--- | Calculates the (least) upper bound of two types (denoted by the “join”
--- operator ⊔).
+-- | `upperBound t1 t2 == t3` where `t3` is the least upper bound of two types
+-- `t1` and `t2` (denoted by the “join” operator ⊔). I.e., `t3` should be the
+-- "smallest" type (lowest in the subtype lattice) s.t. `t1 <: t3` and `t2 <: t3`,
+-- where "smallest" is aspirational/pragmatic.
 upperBound :: Ty -> Ty -> Ty
 upperBound type1 type2 =
     case (type1,type2) of
-    (s,t) | s == t -> s
     -- J-Subtype
     (s, t) | subtype s t -> t
     (s, t) | subtype t s -> s
@@ -284,11 +310,16 @@ upperBound type1 type2 =
     (s, t@(VarTy _)) -> orTy [s,t]
     -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (upperBound s t)
+    -- J-RecBase
+    (t1, t2@RecTy{}) | isBaseTy t1 -> upperBound (recTy [(0,t1)]) t2
+    (t1@RecTy{}, t2) | isBaseTy t2 -> upperBound t1 (recTy [(0,t2)])
     -- J-NoRel
     (_,_) -> TopTy
 
--- | Calculates the (greatest) lower bound of two types (denoted by the meet”
--- operator ⊓).
+-- | `lowerBound t1 t2 == t3` where `t3` is the greatest lower bound of two types
+-- `t1` and `t2` (denoted by the "meet" operator ⊓). I.e., `t3` should be the
+-- "largest" type (highest in the subtype lattice) s.t. `t3 <: t1` and `t3 <: t2`,
+-- where "largest" is aspirational/pragmatic.
 lowerBound :: Ty -> Ty -> Ty
 lowerBound type1 type2 =
   case (type1,type2) of
@@ -301,6 +332,11 @@ lowerBound type1 type2 =
     (s, t@(VarTy _)) -> andTy [s,t]
     -- M-Ptr
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (lowerBound s t)
+    -- M-Rec (not included in TIE but seems sound and useful)
+    ((RecTy flds1), (RecTy flds2)) -> recTy $ Map.toList $ Map.unionWith lowerBound flds1 flds2
+    -- M-RecBase
+    (t1, t2@RecTy{}) | isBaseTy t1 -> lowerBound (recTy [(0,t1)]) t2
+    (t1@RecTy{}, t2) | isBaseTy t2 -> lowerBound t1 (recTy [(0,t2)])
     -- M-NoRel
     (_,_) -> BotTy
 
@@ -317,8 +353,9 @@ tyFreeVars =
       IntTy{} -> Set.empty
       UIntTy{} -> Set.empty
       FloatTy{} -> Set.empty
-      AndTy t1 t2 ts -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
-      OrTy t1 t2 ts  -> foldl Set.union (tyFreeVars t1) (map tyFreeVars $ t2:ts)
+      RecTy flds -> foldr (Set.union . tyFreeVars) Set.empty $ Map.elems flds
+      AndTy t1 t2 ts -> foldr (Set.union . tyFreeVars) Set.empty (t1:t2:ts)
+      OrTy t1 t2 ts  -> foldr (Set.union . tyFreeVars) Set.empty (t1:t2:ts)
 
 -- | @occursIn x t@, does `x` appear in `t`?
 occursIn :: TyVar -> Ty -> Bool
