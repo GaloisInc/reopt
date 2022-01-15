@@ -152,6 +152,7 @@ ptrTy w t = PtrTy w t
 -- | @readAtTy t i@ is the type which begins @i@ bits into @t@.
 readAtTy :: Ty -> Int -> Ty
 readAtTy t@(RecTy flds) i = Map.findWithDefault (ReadAtTy t i) i flds
+readAtTy (UpdateAtTy _ i t2) j | i == j = t2
 readAtTy t i = ReadAtTy t i
 
 -- | @updateAtTy t1 i t2@ is the result up writing a @t2@ at @i@ bits into @t1@.
