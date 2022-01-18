@@ -11,7 +11,7 @@
 
 module Reopt.TypeInference.ConstraintGen
   ( Constraint
-  , FunType
+  , FunType(..)
   , IType(..)
   , ModuleConstraints(..)
   , genModule

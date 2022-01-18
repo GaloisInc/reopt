@@ -61,6 +61,7 @@ import System.IO.Error
 import Text.Printf (printf)
 
 import Reopt.TypeInference.ConstraintGen
+import Reopt.TypeInference.Pretty (ppFunction)
 
 reoptVersion :: String
 reoptVersion = printf "Reopt binary reoptimizer (reopt) %d.%d.%d." h l r
@@ -172,6 +173,8 @@ data Args = Args
     cfgExportPath :: !(Maybe FilePath),
     -- | Path to export functions file
     fnsExportPath :: !(Maybe FilePath),
+    -- | Path to export functions file
+    typedFnsExportPath :: !(Maybe FilePath),    
     -- | Path to export LLVM file
     llvmExportPath :: !(Maybe FilePath),
     -- | Path to export object file
@@ -227,6 +230,7 @@ defaultArgs =
       llvmGenOptions = defaultLLVMGenOptions,
       cfgExportPath = Nothing,
       fnsExportPath = Nothing,
+      typedFnsExportPath = Nothing,      
       llvmExportPath = Nothing,
       objectExportPath = Nothing,
       relinkerInfoExportPath = Nothing,
@@ -507,6 +511,13 @@ fnsExportFlag = exportFlag "export-fns" "functions file" upd
   where
     upd s v = s {fnsExportPath = v}
 
+-- | Path to export typed functions to.
+typedFnsExportFlag :: Flag Args
+typedFnsExportFlag = exportFlag "export-typed-fns" "functions file" upd
+  where
+    upd s v = s {typedFnsExportPath = v}
+
+
 -- | Path to export LLVM to
 llvmExportFlag :: Flag Args
 llvmExportFlag = exportFlag "export-llvm" "LLVM" upd
@@ -584,6 +595,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         -- Export
         cfgExportFlag,
         fnsExportFlag,
+        typedFnsExportFlag,
         llvmExportFlag,
         objectExportFlag,
         relinkerInfoExportFlag
@@ -745,6 +757,7 @@ shouldGenerateLLVM args =
 shouldRecover :: Args -> Bool
 shouldRecover args =
   isJust (fnsExportPath args)
+    || isJust (typedFnsExportPath args)
     || isJust (invariantsExportPath args)
     || isJust (relinkerInfoExportPath args)
     || shouldGenerateLLVM args
@@ -858,10 +871,16 @@ performReopt args = do
       Just path -> do
         reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
-    unless (shouldGenerateLLVM args) $ reoptEndNow ()
-
     -- Generate constraints
-    let _moduleConstraints = genModule recMod (memory discState)
+    let moduleConstraints = genModule recMod (memory discState)
+    case typedFnsExportPath args of
+      Nothing -> pure ()
+      Just path -> do
+        -- FIXME: should we add another file type?
+        reoptWrite FunsFileType path $ \h -> do
+          mapM_ (PP.hPutDoc h . ppFunction moduleConstraints) (recoveredDefs recMod)
+
+    unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
