@@ -58,7 +58,7 @@ ppBlock tyvs b =
     phiVars = V.toList $ viewSome ppPhiName <$> fbPhiVars b
     ppBinding v l = parens ("mc_binding " <> v <+> pretty l) <> hardline
 
-    ppPhiBindings :: Some (FnPhiVar arch) -> Doc a
+    ppPhiBindings :: ShowF (ArchReg arch) => Some (FnPhiVar arch) -> Doc a
     ppPhiBindings (Some v) = foldMap (ppBinding (pretty (unFnPhiVar v))) locs
       where locs = fnPhiVarRep v : fnPhiVarLocations v
 
