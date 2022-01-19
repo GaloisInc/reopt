@@ -24,6 +24,9 @@ import Reopt.TypeInference.Constraints
    orC,
    andC,
    ptrTy,
+   recTy',
+   readAtTy,
+   updateAtTy,
    int32Ty,
    int64Ty,
    num32Ty,
@@ -43,6 +46,7 @@ constraintTests = T.testGroup "Type Constraint Tests"
   [ eqCTests
   , subCTests
   , orCTests
+  , recTests
   ]
 
 -- Simple tests having to do with equality constraints
@@ -140,6 +144,69 @@ orCTests = T.testGroup "Disjunctive Constraint Tests"
       [(x0, (ptrTy 64 TopTy)),
        (x1, num64Ty),
        (x2, (ptrTy 64 TopTy))]
+  ]
+
+recTests :: T.TestTree
+recTests = T.testGroup "Record Type Tests"
+  [ mkTest "Record type var in field 1"
+      [ EqC x0Ty (recTy' [(0, x1Ty), (64, x2Ty)]),
+        EqC x1Ty int32Ty,
+        EqC x2Ty int64Ty]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type var in field 2"
+      [ EqC x1Ty int32Ty,
+        EqC x0Ty (recTy' [(0, x1Ty), (64, x2Ty)]),
+        EqC x2Ty int64Ty]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type var in field 3"
+      [ EqC x0Ty (recTy' [(0, x1Ty), (64, x2Ty)]),
+        SubC x1Ty int32Ty,
+        SubC x2Ty int64Ty]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type var in field 4"
+      [ SubC x1Ty int32Ty,
+        EqC x0Ty (recTy' [(0, x1Ty), (64, x2Ty)]),
+        SubC x2Ty int64Ty]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type var in field 5"
+      [ EqC x0Ty (recTy' [(0, x1Ty), (64, x2Ty)]),
+        EqC x0Ty x3Ty,
+        EqC x3Ty (recTy' [(0, int32Ty), (64, int64Ty)])]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty),
+       (x3, recTy' [(0, int32Ty), (64, int64Ty)])],
+    mkTest "Record type with field ref 1"
+      [ EqC x0Ty (recTy' [(0, int32Ty), (64, int64Ty)]),
+        EqC x1Ty (readAtTy x0Ty 0),
+        EqC x2Ty (readAtTy x0Ty 64)]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type with field ref 2"
+      [ EqC x1Ty (readAtTy x0Ty 0),
+        EqC x0Ty (recTy' [(0, int32Ty), (64, int64Ty)]),
+        EqC x2Ty (readAtTy x0Ty 64)]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, int64Ty)],
+    mkTest "Record type with update 1"
+      [ EqC x0Ty (recTy' [(0, int32Ty), (64, int64Ty)]),
+        EqC x1Ty (readAtTy x0Ty 0),
+        EqC x2Ty (updateAtTy x0Ty 64 (ptrTy 64 x1Ty)),
+        EqC x3Ty (readAtTy x2Ty 64)]
+      [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
+       (x1, int32Ty),
+       (x2, recTy' [(0, int32Ty), (64, (ptrTy 64 int32Ty))]),
+       (x3, (ptrTy 64 int32Ty))]
   ]
 
 newtype TypeEnv = TypeEnv [(TyVar, Ty)]
