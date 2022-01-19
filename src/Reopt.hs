@@ -197,11 +197,7 @@ import           Data.Macaw.VEX.AArch32 (armArch32le)
 import           Data.Macaw.VEX.AArch64 (armArch64le)
 #endif
 
-import Reopt.CFG.FnRep (RecoveredModule (RecoveredModule))
-import Reopt.TypeInference.ConstraintGen (FunType (funTypeArgs), ModuleConstraints (mcTypeMap), Ty (..), mcFunTypes)
-import Data.Macaw.Types (TypeRepr)
-import Reopt.TypeInference.Constraints (TyVar(TyVar))
-import Debug.Trace (trace)
+import Reopt.TypeInference.ConstraintGen (ModuleConstraints)
 
 copyrightNotice :: String
 copyrightNotice = "Copyright 2014-21 Galois, Inc."

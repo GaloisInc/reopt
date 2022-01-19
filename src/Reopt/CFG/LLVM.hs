@@ -86,6 +86,7 @@ import           Data.Int
 import           Data.List
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe (fromMaybe)
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.List as PL
 import           Data.Parameterized.Some
@@ -117,9 +118,6 @@ import           Reopt.TypeInference.ConstraintGen (
   )
 import qualified Reopt.VCG.Annotations as Ann
 import Reopt.TypeInference.Constraints (TyVar, tyToLLVMType)
-import Debug.Trace (trace)
-import Reopt.CFG.FnRep (FnAssignId(FnAssignId))
-import Data.Maybe (fromMaybe)
 
 
 data LLVMBitCastInfo =
