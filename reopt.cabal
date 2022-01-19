@@ -68,6 +68,7 @@ library
     Reopt.TypeInference.Constraints
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
+    Reopt.TypeInference.Pretty    
     Reopt.Utils.Dir
     Reopt.Utils.Exit
   other-modules:
