@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import Data.Generics.Product ( field )
 import GHC.Generics ( Generic )
 import qualified Prettyprinter as PP
+import qualified Text.LLVM as L
 -- import Data.List.NonEmpty (NonEmpty)
 -- import qualified Data.List.NonEmpty as NonEmpty
 
@@ -31,11 +32,14 @@ import Debug.Trace ( trace )
 traceUnification :: Bool
 traceUnification = False
 
-newtype TyVar = TyVar {tyVarInt :: Int }
+data TyVar = TyVar
+  { tyVarInt :: Int
+  , tyVarOrigin :: String
+  }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty TyVar where
-  pretty (TyVar n) = "α" <> PP.pretty n
+  pretty tyv = "α" <> PP.pretty (tyVarInt tyv) <> " (" <> PP.pretty (tyVarOrigin tyv) <> ")"
 
 -- | Types of values in x86 machine code (missing reg types, records/memory, functions)
 data Ty
@@ -66,6 +70,20 @@ data Ty
   | -- | Union of two or more types. Should not contain duplicates or nested unions.
     OrTy Ty Ty [Ty]
   deriving (Eq, Ord, Show)
+
+tyToLLVMType :: Ty -> L.Type
+tyToLLVMType TopTy = L.PrimType (L.Integer 64)
+tyToLLVMType BotTy = error "tyToLLVMType: encountered BotTy"
+tyToLLVMType (VarTy _tyVar) = error "TODO: tyToLLVMType for VarTy"
+tyToLLVMType (PtrTy _sz typ) = L.PtrTo (tyToLLVMType typ)
+tyToLLVMType (CodeTy _sz) = error "FunTy would require more information"
+tyToLLVMType (RegTy _r) = error "TODO: tyToLLVMType for RegTy"
+tyToLLVMType (NumTy n) = L.PrimType (L.Integer (fromIntegral n))
+tyToLLVMType (UIntTy u) = L.PrimType (L.Integer (fromIntegral u))
+tyToLLVMType (IntTy i) = L.PrimType (L.Integer (fromIntegral i))
+tyToLLVMType (FloatTy _f) = error "TODO: tyToLLVMType for FloatTy"
+tyToLLVMType AndTy{} = error "Cannot turn AndTy into LLVM type"
+tyToLLVMType OrTy{} = error "Cannot turn OrTy into LLVM type"
 
 instance PP.Pretty Ty where
   pretty = \case

@@ -7,12 +7,14 @@ architecture-specific functionality can be implemented on top of this
 layer.
 
 -}
+
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
@@ -22,6 +24,7 @@ layer.
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
+
 module Reopt.CFG.LLVM
   ( moduleForFunctions
   , LLVMGenOptions(..)
@@ -113,7 +116,10 @@ import           Reopt.TypeInference.ConstraintGen (
     Ty (..),
   )
 import qualified Reopt.VCG.Annotations as Ann
-import Reopt.TypeInference.Constraints (TyVar)
+import Reopt.TypeInference.Constraints (TyVar, tyToLLVMType)
+import Debug.Trace (trace)
+import Reopt.CFG.FnRep (FnAssignId(FnAssignId))
+import Data.Maybe (fromMaybe)
 
 
 data LLVMBitCastInfo =
@@ -843,21 +849,17 @@ appToLLVM app = bbArchConstraints $ do
     Bitcast x tp -> do
       llvmVal <- mkLLVMValue x
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
-    BVAdd _sz x@(FnArg n _ty) y -> do
-      fn <- asks funAddr
-      modCs <- asks moduleConstraints
-      let argTyVar = funTypeArgs (mcFunTypes modCs Map.! fn) !! n
-      let argTy = mcTypeMap modCs Map.! argTyVar
-      case argTy of
-        PtrTy sz _ -> do
-          ptr <- mkLLVMValue x
-          ofs <- mkLLVMValue y
-          L.Typed (L.PtrTo (L.PrimType (L.Integer (fromIntegral sz))))
-            <$> evalInstr (L.GEP False ptr [ofs])
+    BVAdd _sz x y -> do
+      tx <- getInferredType x
+      ty <- getInferredType y
+      case (tx, ty) of
+        (Just (PtrTy _ _), Just (PtrTy _ _)) ->
+          error "Inferred PtrTy for both addends, this suggests a bug in the constraint generation/solving!"
+        -- FIXME: this currently does not work when the bitvector constant is a
+        -- pointer due to limitations of the constraint gen/solve.
+        (Just (PtrTy sz _), _) -> llvmGetElementPtr sz x y
+        (_, Just (PtrTy sz _)) -> llvmGetElementPtr sz y x
         _ -> binop (arithop (L.Add False False)) x y
-    -- BVAdd _sz (FnPhiValue phi) y ->
-    --   binop (arithop (L.Add False False)) x y
-    BVAdd _sz x y -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
     BVAdc _sz x y c -> do
@@ -933,6 +935,18 @@ llvmAsPtr ctx ptr tp = do
   convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
 
 
+llvmGetElementPtr ::
+  Int -> -- FIXME: don't use this
+  FnValue arch (BVType n) ->
+  FnValue arch (BVType n) ->
+  BBLLVM arch (L.Typed L.Value)
+llvmGetElementPtr sz ptr ofs = do
+  ptrV <- mkLLVMValue ptr
+  ofsV <- mkLLVMValue ofs
+  L.Typed (L.PtrTo (L.PrimType (L.Integer (fromIntegral sz))))
+    <$> evalInstr (L.GEP False ptrV [ofsV])
+
+
 -- | Truncate and log.
 llvmTrunc :: forall arch.
              String
@@ -1002,7 +1016,8 @@ resolveLoadNameAndType memRep =
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
 -- | Convert an assignment to a llvm expression
-rhsToLLVM :: HasCallStack
+rhsToLLVM :: FnArchConstraints arch
+          => HasCallStack
           => FnAssignId -- ^ Value being assigned.
           -> FnAssignRhs arch (FnValue arch) tp
           -> BBLLVM arch ()
@@ -1013,10 +1028,17 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs llvmRhs
     FnSetUndefined tp -> do
       setAssignIdValue lhs (L.Typed (typeToLLVMType tp) L.ValUndef)
-    FnReadMem ptr typ -> do
-      p <- llvmAsPtr "rhsToLLVM(FnReadMem)" ptr (typeToLLVMType typ)
-      v <- evalInstr (L.Load p Nothing Nothing)
-      setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
+    FnReadMem ptr typ ->
+      getInferredType ptr >>= \case
+        Just (PtrTy _sz ty) -> do
+          L.Typed _origType origVal <- mkLLVMValue ptr
+          let retypedPtr = L.Typed (L.PtrTo (tyToLLVMType ty)) origVal
+          v <- evalInstr (L.Load retypedPtr Nothing Nothing)
+          setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
+        _ ->  do
+          p <- llvmAsPtr "rhsToLLVM(FnReadMem)" ptr (typeToLLVMType typ)
+          v <- evalInstr (L.Load p Nothing Nothing)
+          setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
     FnCondReadMem memRepr cond addr passthru -> do
       (loadName, eltType) <- resolveLoadNameAndType memRepr
       let intr = llvmMaskedLoad 1 loadName eltType
@@ -1106,13 +1128,13 @@ addTargetPhiValues tgt = do
   let updateVar :: Map L.BlockLabel (Int, L.Value)
                 -> Some (FnValue arch)
                 -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
-      updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
-        modCs <- asks moduleConstraints
-        fn <- asks funName
-        let tyV = mcAssignTyVars modCs Map.! fn Map.! unFnPhiVar phiVar
-        let inferredType = mcTypeMap modCs Map.! tyV
-        thisVal <- mkLLVMValue v
-        pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
+      -- updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
+        -- modCs <- asks moduleConstraints
+        -- fn <- asks funName
+        -- let tyV = mcAssignTyVars modCs Map.! fn Map.! unFnPhiVar phiVar
+        -- let inferredType = mcTypeMap modCs Map.! tyV
+        -- thisVal <- mkLLVMValue v
+        -- pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
       updateVar prevVars (Some v) = do
         thisVal <- mkLLVMValue v
         pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
@@ -1172,7 +1194,7 @@ termStmtToLLVM tm =
 
 resolvePhiStmt :: PhiValues
                -> PhiBinding arch
-               -> L.Stmt
+               -> [L.Stmt]
 resolvePhiStmt phiValues b =
   case phiFnRepVar b of
     Some phiVar ->
@@ -1184,7 +1206,10 @@ resolvePhiStmt phiValues b =
                           | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
                           , binding <- replicate llvmCnt (llvmVal, lbl)
                           ]
-       in L.Result lnm (L.Phi llvmType llvmPhiValues) []
+          showPhiAssignIdsInComments = True
+      in
+      [L.Effect (L.Comment (show (unFnPhiVar phiVar))) [] | showPhiAssignIdsInComments]
+      ++ [L.Result lnm (L.Phi llvmType llvmPhiValues) []]
 
 -- | Construct a basic block from a block result
 toBasicBlock :: (LLVMArchConstraints arch, HasCallStack)
@@ -1202,7 +1227,7 @@ toBasicBlock phiMap res
         phiVars = llvmPhiVars res
         phiAssignment = phiAssignmentForBlock phiMap (fbLabel b)
         lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
-        phiStmts = V.toList $ V.zipWith resolvePhiStmt phiAssignment phiVars
+        phiStmts = join . V.toList $ V.zipWith resolvePhiStmt phiAssignment phiVars
         finalState = finalBBState res
 
 -- | Information relating a Macaw funcation variable and LLVM identifier.
@@ -1460,11 +1485,11 @@ defineFunction :: forall arch
 defineFunction archOps genOpts modCs f = do
   let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
       mkInputReg (Some tp, tyv) i =
-        case mcTypeMap modCs Map.! tyv of
-          PtrTy _ _ -> L.Typed (L.PtrTo (L.PrimType (L.Integer 32))) (argIdent i)
+        case Map.lookup tyv (mcTypeMap modCs) of
+          Just (PtrTy _ _) -> L.Typed (L.PtrTo (L.PrimType (L.Integer 32))) (argIdent i)
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
-  let fty = mcFunTypes modCs Map.! fnAddr f
+  let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes modCs))
   let argsWithTyVars = zip (fnArgTypes (fnType f)) (funTypeArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
@@ -1611,3 +1636,31 @@ moduleForFunctions archOps genOpts recMod modCs =
                           }
       annDecls = mkExternalFunctionAnn <$> recoveredDecls recMod
    in (llvmMod, snd <$> definesAndAnn, annDecls, logEvents)
+
+-- | Returns the type that was inferred for the given value via constraint
+-- solving, if any.
+getInferredType :: FnValue arch (BVType n) -> BBLLVM arch (Maybe Ty)
+getInferredType FnUndefined{} = pure Nothing
+getInferredType FnConstantValue{} = pure Nothing
+getInferredType FnFunctionEntryValue{} = pure Nothing
+getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignId aId
+getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignId (unFnPhiVar phiVar)
+getInferredType (FnReturn _retVar) = error "getInferredType FnReturn" -- getInferredTypeForAssignId (frAssignId retVar)
+getInferredType (FnArg arg _typ) = do
+  fn <- asks funAddr
+  modCs <- asks moduleConstraints
+  let fnTypes = fromMaybe (error "fnTypes 1") (Map.lookup fn (mcFunTypes modCs))
+  let argTyVar = funTypeArgs fnTypes !! arg
+  return (Map.lookup argTyVar (mcTypeMap modCs))
+
+getInferredTypeForAssignId ::
+  FnAssignId -> BBLLVM arch (Maybe Ty)
+getInferredTypeForAssignId aId = do
+  fn <- asks funName
+  modCs <- asks moduleConstraints
+  let fnTypes = fromMaybe
+        (error ("Missing function key in mcAssignTyVars: " <> show fn))
+        (Map.lookup fn (mcAssignTyVars modCs))
+  return $ do -- This is just a 'Maybe Ty' computation
+    valTyVar <- Map.lookup aId fnTypes
+    Map.lookup valTyVar (mcTypeMap modCs)

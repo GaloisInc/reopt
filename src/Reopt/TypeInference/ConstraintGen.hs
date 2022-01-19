@@ -32,7 +32,7 @@ import           Data.Parameterized         (FoldableF, FoldableFC)
 import qualified Data.Vector                as V
 
 import           Data.Parameterized.NatRepr (NatRepr, testEquality, widthVal)
-import           Data.Parameterized.Some    (Some(Some))
+import           Data.Parameterized.Some    (Some(Some), viewSome)
 
 import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.Constraints
@@ -183,7 +183,6 @@ makeLenses ''CGenBlockContext
 data CGenState arch = CGenState {
     _nextFreeTyVar :: Int -- FIXME: use Nonce?
   , _assignTyVars  :: Map BSC.ByteString (Map FnAssignId TyVar)
-  , _tyVarsOrigin  :: Map TyVar (BSC.ByteString, FnAssignId)
   , _tyVarTypes    :: Map TyVar Ty
 
   -- | Offset of the current instruction, used (not right now) for
@@ -212,7 +211,6 @@ runCGenM mem (CGenM m) = runState (runReaderT m (CGenGlobalContext mem)) st0
   where
     st0 = CGenState { _nextFreeTyVar = 0
                     , _assignTyVars  = mempty
-                    , _tyVarsOrigin  = mempty
                     , _tyVarTypes    = mempty
                     , _warnings      = mempty
                     , _constraints   = mempty
@@ -233,11 +231,12 @@ freshTyVar :: String -> CGenM ctx arch TyVar
 freshTyVar context =
   CGenM $ do
     tv <- nextFreeTyVar <<+= 1
+    let tyv = TyVar tv context
     trace (
-      "Created fresh type variable " <> show (PP.pretty (TyVar tv))
+      "Created fresh type variable " <> show (PP.pretty tyv)
       <> " for " <> context) (pure ()
       )
-    pure (TyVar tv)
+    return tyv
 
 atFnAssignId ::
   BSC.ByteString ->
@@ -249,9 +248,8 @@ atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
 freshTyVarForAssignId :: BSC.ByteString -> FnAssignId -> CGenM ctx arch TyVar
 freshTyVarForAssignId fn aId = do
   -- fn <- askContext cgenCurrentFunName
-  tyv <- freshTyVar (show fn <> "." <> show aId)
+  tyv <- freshTyVar (show aId <> " in " <> show fn)
   CGenM $ atFnAssignId fn aId ?= tyv
-  CGenM $ tyVarsOrigin . at tyv ?= (fn, aId)
   pure tyv
 
 -- freshForCallRet :: FnReturnVar tp -> CGenM ctx arch TyVar
@@ -642,8 +640,9 @@ genFunction fn {- blockPhis -} = do
     Map.findWithDefault (error "Missing function") (fnAddr fn)
     <$> askContext cgenFunTypes
   let mkPhis b =
-        (,) (fbLabel b)
-        <$> replicateM (V.length (fbPhiVars b)) (varIType <$> freshTyVar "%phi#TODO")
+        let phiVars = viewSome unFnPhiVar <$> V.toList (fbPhiVars b) in
+        let mkPhiVar aId = varIType <$> freshTyVar ("%phi " <> show aId) in
+        (,) (fbLabel b) <$> mapM mkPhiVar phiVars
   bphis <- Map.fromList <$> mapM mkPhis (fnBlocks fn)
   withinContext
     (CGenFunctionContext cFun (fnName fn) bphis)
@@ -667,9 +666,6 @@ data ModuleConstraints arch = ModuleConstraints
     -- is on a per-function basis (using the `ByteString` name of the function
     -- as key).
   , mcAssignTyVars :: Map BSC.ByteString (Map FnAssignId TyVar)
-  -- | Map recording which function and assign id a given type variable was
-  -- created for.  Essentially the inverse map of `mcAssignTyVars`.
-  , mcTyVarOrigin :: Map TyVar (BSC.ByteString, FnAssignId)
     -- | Warnings gathered during constraint generation
   , mcWarnings :: [Warning]
     -- | The actual constraints
@@ -684,15 +680,7 @@ showInferredTypes mc =
   unlines (showMapping <$> Map.assocs (mcTypeMap mc))
   where
     showMapping :: (TyVar, Ty) -> String
-    showMapping (tv, ty) =
-      case Map.lookup tv (mcTyVarOrigin mc) of
-        Nothing ->
-          concat [ show (PP.pretty tv), " : ", show ty ]
-        Just (fn, aId) ->
-          concat [ show (PP.pretty tv)
-                 , " (", show aId, " in ", BSC.unpack fn, ") : "
-                 , show ty
-                 ]
+    showMapping (tv, ty) = concat [ show (PP.pretty tv), " : ", show ty ]
 
 
 genModule ::
@@ -723,14 +711,12 @@ genModule m mem = fst $ runCGenM mem $ do
 
   -- FIXME: abstract
   tyVars <- CGenM $ use assignTyVars
-  tvsO <- CGenM $ use tyVarsOrigin
   warns <- CGenM $ use warnings
   cstrs <- CGenM $ use constraints
 
   pure ModuleConstraints { mcFunTypes     = addrMap
                          , mcExtFunTypes  = symMap
                          , mcAssignTyVars = tyVars
-                         , mcTyVarOrigin  = tvsO
                          , mcWarnings     = warns
                          , mcConstraints  = tyConstraint <$> cstrs
                          , mcTypeMap      = unifyConstraints (tyConstraint <$> cstrs)
