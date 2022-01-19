@@ -276,7 +276,10 @@ subtype' resolveL resolveR = go
         -- Signed/Unsigned integer subtypes
         (IntTy w1,  IntTy w2)  -> w1 <= w2
         (UIntTy w1, UIntTy w2) -> w1 <= w2
-        -- Records
+        -- Records FIXME (?) there is some concern about reasoning too deeply
+        -- about structural subtyping and soundness we need to hammer out,
+        -- especially when dealing with pointers being passed around within
+        -- things. (This could apply to pointer pointers as well perhaps...?)
         (RecTy flds1, RecTy flds2) -> all (\(fld, fldTy2) ->
                                             case Map.lookup fld flds1 of
                                               Nothing -> False
@@ -346,7 +349,11 @@ upperBound type1 type2 =
     (s, t@(VarTy _)) -> orTy [s,t]
     -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (upperBound s t)
-    -- J-RecBase
+    -- J-RecBase // FIXME (?) these cases are in the TIE paper, but without more
+    -- complex record upper bound calculations there arguably useless (i.e.,
+    -- subtyping would already have checked the same thing, and so we likely
+    -- will just get `TopTy` out as `upperBound` doesn't know what to do with
+    -- two record types currently)
     (t1, t2@RecTy{}) | isBaseTy t1 -> upperBound (recTy' [(0,t1)]) t2
     (t1@RecTy{}, t2) | isBaseTy t2 -> upperBound t1 (recTy' [(0,t2)])
     -- J-NoRel
