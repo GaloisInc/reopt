@@ -711,15 +711,19 @@ genModule m mem = fst $ runCGenM mem $ do
   tvsO <- CGenM $ use tyVarsOrigin
   warns <- CGenM $ use warnings
 
-  -- Set to False if we _do not_ want to fresh type variables to describe
-  -- what the inferred pointers point to.
-  let tyConOpts = if True
-                  then TyConstraintOptions
-                       { tyConGenPtrTgt = VarTy <$> freshTyVar
-                       }
-                  else TyConstraintOptions
-                       { tyConGenPtrTgt = pure TopTy
-                       }
+  let tyConOpts =
+      -- If `True` then inferred pointers will be assigned type `ptr(α)` (where
+      -- `α` is a fresh type variable); if False, inferred pointers will be
+      -- assigned type `ptr(⊤)`. Importantly, the former allows us to relate
+      -- learned things about `α` back to other types when possible (e.g.,
+      -- learning things about records/structs, possibly), whereas the latter
+      -- permits no such transitive reasoning in the inference engine.
+        if True then TyConstraintOptions
+                     { tyConGenPtrTgt = VarTy <$> freshTyVar
+                     }
+                     else TyConstraintOptions
+                          { tyConGenPtrTgt = pure TopTy
+                          }
 
   cstrs <- mapM (tyConstraint tyConOpts) =<< (CGenM $ use constraints)
 
