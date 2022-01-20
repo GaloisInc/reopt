@@ -470,13 +470,16 @@ orC = go Set.empty
         go acc (c@AndC{}:cs) = go (Set.insert c acc) cs
 
 -- | Constrain the given type to be some kind of 64 bit pointer.
-isPtr64C :: Ty -> TyConstraint
-isPtr64C t = SubC t (ptrTy 64 TopTy)
+-- | @isPtr64ToC t1 t2@ constrains @t1@ to be a 64bit pointer to a @t2@.
+isPtr64ToC :: Ty -> Ty -> TyConstraint
+isPtr64ToC t1 t2 = SubC t1 (ptrTy 64 t2)
 
 -- | Constrain the given type to be some kind of 64 bit number (i.e., non-pointer)
 isNum64C :: Ty -> TyConstraint
 isNum64C t = EqC t num64Ty
 
+isSizedPtr64C :: Int -> Ty -> TyConstraint
+isSizedPtr64C sz t = SubC t (ptrTy 64 (RegTy sz))
 
 cFreeVars :: TyConstraint -> Set TyVar
 cFreeVars TopC = Set.empty
