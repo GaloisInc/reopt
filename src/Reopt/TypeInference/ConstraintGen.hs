@@ -69,7 +69,7 @@ instance Show (FunType arch) where
     "(" ++ intercalate ", " (map show (funArgs ft)) ++ ") -> " ++
     maybe "_|_" show (funRet ft)
 
-newtype IType = IType Ty
+newtype IType = IType {iTy :: Ty}
   deriving (Eq, Ord)
 
 varIType :: TyVar -> IType
@@ -99,26 +99,35 @@ instance Show Constraint where
       CBVNotPtr t -> "non-ptr " ++ show t
       CIsPtr t    -> "ptr " ++ show t
 
+
+data TyConstraintOptions m =
+  TyConstraintOptions
+  { -- | How to generate a type to describe
+    -- what a pointer points at.
+    tyConGenPtrTgt :: m Ty
+  }
+
 -- | Converts the limited `Constraint` grammar to the more general
--- `TyConstraint` type used for constraint solving. We could completely
--- replace `Constraint` with helpers that generate these essentially,
--- but I (AMK) am leaving them in for now in case it's easier initially
--- to debug/trace/etc with the more limited grammar.
-tyConstraint :: Constraint -> TyConstraint
-tyConstraint = \case
-  CEq (IType t1) (IType t2) -> eqC t1 t2
-  CAddrWidthAdd (IType ret) (IType lhs) (IType rhs) ->
-    orC [ andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
-        , andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
-        , andC [isPtr64C ret, isNum64C lhs, isPtr64C rhs]
-        ]
-  CAddrWidthSub (IType ret) (IType lhs) (IType rhs) ->
-    orC [ andC [isPtr64C ret, isPtr64C lhs, isNum64C rhs]
-        , andC [isNum64C ret, isPtr64C lhs, isPtr64C rhs]
-        , andC [isNum64C ret, isNum64C lhs, isNum64C rhs]
-        ]
-  CBVNotPtr (IType t) -> isNum64C t
-  CIsPtr (IType t) -> isPtr64C t
+-- `TyConstraint` type used for constraint solving.
+tyConstraint :: (Monad m) => TyConstraintOptions m -> Constraint -> m TyConstraint
+tyConstraint opts  = \case
+  CEq t1 t2 -> pure $ eqC (iTy t1) (iTy t2)
+  CAddrWidthAdd ret lhs rhs -> do
+    ty <- tyConGenPtrTgt opts
+    pure $ orC
+      [ andC [isNum64C (iTy ret), isNum64C (iTy lhs), isNum64C (iTy rhs)]
+      , andC [isPtr64ToC (iTy ret) ty, isPtr64ToC (iTy lhs) ty, isNum64C (iTy rhs)]
+      , andC [isPtr64ToC (iTy ret) ty, isNum64C (iTy lhs), isPtr64ToC (iTy rhs) ty]
+      ]
+  CAddrWidthSub ret lhs rhs -> do
+    ty <- tyConGenPtrTgt opts
+    pure $ orC
+      [ andC [isPtr64ToC (iTy ret) ty, isPtr64ToC (iTy lhs) ty, isNum64C (iTy rhs)]
+      , andC [isNum64C (iTy ret), isPtr64ToC (iTy lhs) ty, isPtr64ToC (iTy rhs) ty]
+      , andC [isNum64C (iTy ret), isNum64C (iTy lhs), isNum64C (iTy rhs)]
+      ]
+  CBVNotPtr t -> pure $ isNum64C (iTy t)
+  CIsPtr t -> pure $ isSizedPtr64C 64 (iTy t)
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -701,13 +710,24 @@ genModule m mem = fst $ runCGenM mem $ do
   tyVars <- CGenM $ use assignTyVars
   tvsO <- CGenM $ use tyVarsOrigin
   warns <- CGenM $ use warnings
-  cstrs <- CGenM $ use constraints
+
+  -- Set to False if we _do not_ want to fresh type variables to describe
+  -- what the inferred pointers point to.
+  let tyConOpts = if True
+                  then TyConstraintOptions
+                       { tyConGenPtrTgt = VarTy <$> freshTyVar
+                       }
+                  else TyConstraintOptions
+                       { tyConGenPtrTgt = pure TopTy
+                       }
+
+  cstrs <- mapM (tyConstraint tyConOpts) =<< (CGenM $ use constraints)
 
   pure ModuleConstraints { mcFunTypes     = addrMap
                          , mcExtFunTypes  = symMap
                          , mcAssignTyVars = tyVars
                          , mcTyVarOrigin  = tvsO
                          , mcWarnings     = warns
-                         , mcConstraints  = tyConstraint <$> cstrs
-                         , mcTypeMap      = unifyConstraints (tyConstraint <$> cstrs)
+                         , mcConstraints  = cstrs
+                         , mcTypeMap      = unifyConstraints cstrs
                          }
