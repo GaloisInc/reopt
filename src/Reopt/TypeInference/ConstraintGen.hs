@@ -43,7 +43,7 @@ import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType)
+import           Data.Macaw.Types           (BVType, TypeRepr, HasRepr (typeRepr))
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -89,6 +89,7 @@ data Constraint =
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
   | CBVNotPtr IType -- ^ The argument cannot be a ptr (so should be a bv)
   | CIsPtr IType    -- ^ The type must point to something
+  | CStructPtr IType IType Integer (Some TypeRepr) -- ^ The first type is accessed at the second type at the given offset, size
 
 instance Show Constraint where
   show c =
@@ -98,7 +99,7 @@ instance Show Constraint where
       CAddrWidthSub t1 t2 t3 -> show t1 ++ " = " ++ show t2 ++ " - " ++ show t3
       CBVNotPtr t -> "non-ptr " ++ show t
       CIsPtr t    -> "ptr " ++ show t
-
+      CStructPtr tr tp o sz -> "struct_ptr " ++ show tr ++ " " ++ show tp ++ " " ++ show o ++ " " ++ show sz
 
 data TyConstraintOptions m =
   TyConstraintOptions
@@ -128,7 +129,13 @@ tyConstraint opts  = \case
       ]
   CBVNotPtr t -> pure $ isNum64C (iTy t)
   CIsPtr t -> pure $ isSizedPtr64C 64 (iTy t)
-
+  CStructPtr (IType tr) (IType tp) o _sz -> do
+    -- Either tp is a ptr, or it is a num and the offset is actually a global.
+    -- FIXME: better handle the latter case
+    ty <- tyConGenPtrTgt opts    
+    pure $ orC [ andC [ isPtr64ToC tp ty, EqC tr (readAtTy tp (fromInteger o)) ]
+               , andC [ isNum64C tp ]]
+    
 -- -----------------------------------------------------------------------------
 -- Monad
 
@@ -388,6 +395,9 @@ emitNotPtr t = emitConstraint (CBVNotPtr t)
 emitPtr :: IType -> CGenM ctx arch ()
 emitPtr t = emitConstraint (CIsPtr t)
 
+emitStructPtr :: IType -> IType -> Integer -> Some TypeRepr -> CGenM ctx arch ()
+emitStructPtr tr tp o sz = emitConstraint (CStructPtr tr tp o sz)
+
 -- -----------------------------------------------------------------------------
 -- Core algorithm
 
@@ -518,15 +528,31 @@ genApp ty app =
       emitNotPtr =<< genFnValue r
 
 
-genFnAssignment :: FnAssignment arch tp -> CGenM CGenBlockContext arch ()
+genMemOp :: IType -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
+            CGenM CGenBlockContext arch ()
+genMemOp ty ptr sz =
+  case ptr of
+    FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q)}
+      -- We rely on macaw to have constant folded adds, so only one
+      -- will be a const.  We also need to deal with global +
+      -- computed.  This should be done in constrain translation.
+      | FnConstantValue _ o <- q ->
+        do tp <- genFnValue p
+           emitStructPtr ty tp o sz
+      | FnConstantValue _ o <- p ->
+        do tp <- genFnValue q
+           emitStructPtr ty tp o sz           
+    _ -> emitPtr =<< genFnValue ptr
+
+genFnAssignment :: FnArchConstraints arch => FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varIType <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr _sz -> emitPtr =<< genFnValue ptr
-    FnCondReadMem _sz _cond ptr def -> do
-      emitPtr =<< genFnValue ptr
+    FnReadMem ptr sz -> genMemOp ty ptr (Some sz)
+    FnCondReadMem _sz _cond ptr def -> do 
+      genMemOp ty ptr (Some (typeRepr def))
       emitEq ty =<< genFnValue def
 
     FnEvalApp app -> genApp ty app
@@ -535,14 +561,18 @@ genFnAssignment a = do
 
 
 -- The offset argument is used by call term stmts
-genFnStmt :: FnStmt arch
+genFnStmt :: FnArchConstraints arch => FnStmt arch
           -> CGenM CGenBlockContext arch ()
 genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr _v -> emitPtr =<< genFnValue addr
-    FnCondWriteMem _cond addr _v _ -> emitPtr =<< genFnValue addr
+    FnWriteMem addr v -> do
+      tr <- genFnValue v
+      genMemOp tr addr (Some (typeRepr v))
+    FnCondWriteMem _cond addr v _ -> do 
+      tr <- genFnValue v
+      genMemOp tr addr (Some (typeRepr v))
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
@@ -589,7 +619,7 @@ genCall fn args m_ret = do
   where
     go (Some v) ty = emitEq ty =<< genFnValue v
 
-genFnBlock :: FnBlock arch -- ^ Current block
+genFnBlock :: FnArchConstraints arch => FnBlock arch -- ^ Current block
            -> CGenM CGenFunctionContext arch ()
 genFnBlock b = do
   withinContext CGenBlockContext $ do
@@ -625,7 +655,7 @@ genFnBlock b = do
           (Just _, _) -> warn "Mismatch between return type and return type in tail call"
           _ -> pure ()
 
-genFunction ::
+genFunction :: FnArchConstraints arch =>
   -- Map (FnBlockLabel (ArchAddrWidth arch)) [IType] ->
   Function arch -> CGenM CGenModuleContext arch ()
 genFunction fn {- blockPhis -} = do
@@ -682,6 +712,7 @@ showInferredTypes mc =
 
 
 genModule ::
+  FnArchConstraints arch =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
