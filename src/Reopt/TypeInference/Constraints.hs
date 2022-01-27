@@ -495,16 +495,23 @@ orC = go Set.empty
         go acc (c@AndC{}:cs) = go (Set.insert c acc) cs
 
 -- | Constrain the given type to be some kind of 64 bit pointer.
--- | @isPtr64ToC t1 t2@ constrains @t1@ to be a 64bit pointer to a @t2@.
-isPtr64ToC :: Ty -> Ty -> TyConstraint
-isPtr64ToC t1 t2 = SubC t1 (ptrTy 64 t2)
+-- @isPtr64ToSubC t1 t2@ constrains @t1@ to be a 64bit pointer
+-- to a subtype of @t2@.
+isPtr64ToSubC :: Ty -> Ty -> TyConstraint
+isPtr64ToSubC t1 t2 = SubC t1 (ptrTy 64 t2)
 
--- | Constrain the given type to be some kind of 64 bit number (i.e., non-pointer)
+-- | Constrain the given type to be some kind of 64 bit number (i.e.,
+-- non-pointer). IMPORTANT: our use of @EqC@ is tied to us not currently
+-- explicitly reasoning about what _kind_ of integer types things are. If
+-- we start wanting to distinguish int32/int64/uint32/uint64/etc then
+-- this should be a @SubC@.
 isNum64C :: Ty -> TyConstraint
 isNum64C t = EqC t num64Ty
 
-isSizedPtr64C :: Int -> Ty -> TyConstraint
-isSizedPtr64C sz t = SubC t (ptrTy 64 (RegTy sz))
+-- | @isSizedPtr64SubC sz t@ constraints @t@ to be a subtype of
+-- a value that fits in a @RegTy sz@.
+isSizedPtr64SubC :: Int -> Ty -> TyConstraint
+isSizedPtr64SubC sz t = SubC t (ptrTy 64 (RegTy sz))
 
 cFreeVars :: TyConstraint -> Set TyVar
 cFreeVars TopC = Set.empty
@@ -689,7 +696,8 @@ trivialEqC ctx s t = trivialSubC ctx s t && trivialSubC ctx t s
 
 -- | @absurdEqC s t ctx@ returns @True@ if `s = t` is an absurd constraint given `ctx`.
 absurdEqC :: Context -> Ty -> Ty -> Bool
-absurdEqC ctx s t = (absurdSubC ctx s t) || (absurdSubC ctx t s)
+absurdEqC ctx s t =  (absurdSubC ctx s t) || (absurdSubC ctx t s)
+
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> Context -> Context -> Context

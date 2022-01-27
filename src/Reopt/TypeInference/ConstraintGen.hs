@@ -116,18 +116,20 @@ tyConstraint opts  = \case
     ty <- tyConGenPtrTgt opts
     pure $ orC
       [ andC [isNum64C (iTy ret), isNum64C (iTy lhs), isNum64C (iTy rhs)]
-      , andC [isPtr64ToC (iTy ret) ty, isPtr64ToC (iTy lhs) ty, isNum64C (iTy rhs)]
-      , andC [isPtr64ToC (iTy ret) ty, isNum64C (iTy lhs), isPtr64ToC (iTy rhs) ty]
+      , andC [isPtr64ToSubC (iTy ret) ty, isPtr64ToSubC (iTy lhs) ty, isNum64C (iTy rhs)]
+      , andC [isPtr64ToSubC (iTy ret) ty, isNum64C (iTy lhs), isPtr64ToSubC (iTy rhs) ty]
       ]
   CAddrWidthSub ret lhs rhs -> do
     ty <- tyConGenPtrTgt opts
     pure $ orC
-      [ andC [isPtr64ToC (iTy ret) ty, isPtr64ToC (iTy lhs) ty, isNum64C (iTy rhs)]
-      , andC [isNum64C (iTy ret), isPtr64ToC (iTy lhs) ty, isPtr64ToC (iTy rhs) ty]
+      [ andC [isPtr64ToSubC (iTy ret) ty, isPtr64ToSubC (iTy lhs) ty, isNum64C (iTy rhs)]
+      , andC [isNum64C (iTy ret), isPtr64ToSubC (iTy lhs) ty, isPtr64ToSubC (iTy rhs) ty]
       , andC [isNum64C (iTy ret), isNum64C (iTy lhs), isNum64C (iTy rhs)]
       ]
   CBVNotPtr t -> pure $ isNum64C (iTy t)
-  CIsPtr t -> pure $ isSizedPtr64C 64 (iTy t)
+  CIsPtr t -> do
+    ty <- tyConGenPtrTgt opts
+    pure $ isPtr64ToSubC (iTy t) ty
 
 -- -----------------------------------------------------------------------------
 -- Monad
