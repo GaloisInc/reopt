@@ -14,7 +14,7 @@ module Reopt.TypeInference.ConstraintGen
   , FunType(..)
   , Ty(..)
   , ModuleConstraints(..)
-  , genModule
+  , genModuleConstraints
   , showInferredTypes
   , tyConstraint
   ) where
@@ -683,14 +683,14 @@ showInferredTypes mc =
     showMapping (tv, ty) = concat [ show (PP.pretty tv), " : ", show ty ]
 
 
-genModule ::
+genModuleConstraints ::
   FnArchConstraints arch =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
   Memory (ArchAddrWidth arch) ->
   ModuleConstraints arch
-genModule m mem = fst $ runCGenM mem $ do
+genModuleConstraints m mem = fst $ runCGenM mem $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 

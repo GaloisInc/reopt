@@ -197,7 +197,7 @@ import           Data.Macaw.VEX.AArch32 (armArch32le)
 import           Data.Macaw.VEX.AArch64 (armArch64le)
 #endif
 
-import Reopt.TypeInference.ConstraintGen (ModuleConstraints)
+import Reopt.TypeInference.ConstraintGen (ModuleConstraints, genModuleConstraints)
 
 copyrightNotice :: String
 copyrightNotice = "Copyright 2014-21 Galois, Inc."
@@ -2422,6 +2422,7 @@ recoverX86Elf ::
     ( X86OS,
       DiscoveryState X86_64,
       RecoveredModule X86_64,
+      ModuleConstraints X86_64,
       MergeRelations,
       [LLVMLogEvent]
     )
@@ -2438,7 +2439,9 @@ recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   (recMod, mergeRel, logEvents) <-
     doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState
 
-  pure (os, discState, recMod, mergeRel, logEvents)
+  let constraints = genModuleConstraints recMod (memory discState)
+
+  pure (os, discState, recMod, constraints, mergeRel, logEvents)
 
 $(pure [])
 
@@ -2545,10 +2548,10 @@ renderLLVMBitcode ::
    [(FunId, Either String Ann.FunctionAnn)],
    [Ann.ExternalFunctionAnn],
    [LLVMLogEvent])
-renderLLVMBitcode llvmGenOpt cfg os recMod modCs =
+renderLLVMBitcode llvmGenOpt cfg os recMod constraints =
   -- Generate LLVM module
   let archOps = LLVM.x86LLVMArchOps (show os)
-      (m, ann, ext, logEvents) = moduleForFunctions archOps llvmGenOpt recMod modCs
+      (m, ann, ext, logEvents) = moduleForFunctions archOps llvmGenOpt recMod constraints
       -- Render into LLVM
       out = HPJ.fullRender HPJ.PageMode 10000 1 pp mempty (ppLLVM cfg m)
    in (out, ann, ext, logEvents)
@@ -2561,7 +2564,7 @@ renderLLVMBitcode llvmGenOpt cfg os recMod modCs =
 
 updateRecoveredModule ::
   forall arch. ModuleConstraints arch -> RecoveredModule arch -> RecoveredModule arch
-updateRecoveredModule _modCs rm =
+updateRecoveredModule _ rm =
   rm
   --   { recoveredDecls = updateFunctionDecl <$> recoveredDecls rm
   --   , recoveredDefs = updateFunction <$> recoveredDefs rm
@@ -2570,7 +2573,7 @@ updateRecoveredModule _modCs rm =
 
   --   updateFunctionDecl :: FunctionDecl arch -> FunctionDecl arch
   --   updateFunctionDecl fd =
-  --     let funType = mcFunTypes modCs Map.! funDeclAddr fd in
+  --     let funType = mcFunTypes constraints Map.! funDeclAddr fd in
   --     trace "Updating a FunctionDecl" $
   --     fd { funDeclType = updateFunctionType funType (funDeclType fd)
   --        }
@@ -2582,7 +2585,7 @@ updateRecoveredModule _modCs rm =
 
   --   updateFnArgType :: (Some TypeRepr, TyVar) -> Some TypeRepr
   --   updateFnArgType (ty, tyv) =
-  --     let found = mcTypeMap modCs Map.! tyv in
+  --     let found = mcTypeMap constraints Map.! tyv in
   --     trace (show tyv) $
   --     trace (show found) $
   --       case found of
@@ -2592,6 +2595,6 @@ updateRecoveredModule _modCs rm =
 
   --   updateFunction :: Function arch -> Function arch
   --   updateFunction f =
-  --     let funType = mcFunTypes modCs Map.! fnAddr f in
+  --     let funType = mcFunTypes constraints Map.! fnAddr f in
   --     f { fnType = updateFunctionType funType (fnType f)
   --       }

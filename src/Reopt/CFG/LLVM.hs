@@ -1140,10 +1140,10 @@ addTargetPhiValues tgt = do
                 -> Some (FnValue arch)
                 -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
       -- updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
-        -- modCs <- asks moduleConstraints
+        -- constraints <- asks moduleConstraints
         -- fn <- asks funName
-        -- let tyV = mcAssignTyVars modCs Map.! fn Map.! unFnPhiVar phiVar
-        -- let inferredType = mcTypeMap modCs Map.! tyV
+        -- let tyV = mcAssignTyVars constraints Map.! fn Map.! unFnPhiVar phiVar
+        -- let inferredType = mcTypeMap constraints Map.! tyV
         -- thisVal <- mkLLVMValue v
         -- pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
       updateVar prevVars (Some v) = do
@@ -1493,14 +1493,14 @@ defineFunction :: forall arch
                -> Function arch
                   -- ^ Function to translate
                -> LLVMTrans (L.Define, Either String Ann.FunctionAnn)
-defineFunction archOps genOpts modCs f = do
+defineFunction archOps genOpts constraints f = do
   let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
       mkInputReg (Some tp, tyv) i =
-        case Map.lookup tyv (mcTypeMap modCs) of
+        case Map.lookup tyv (mcTypeMap constraints) of
           Just (PtrTy _ _) -> L.Typed (L.PtrTo (L.PrimType (L.Integer 32))) (argIdent i)
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
-  let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes modCs))
+  let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes constraints))
   let argsWithTyVars = zip (fnArgTypes (fnType f)) (funTypeArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
@@ -1513,7 +1513,7 @@ defineFunction archOps genOpts modCs f = do
                            , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
                            , funType = fnType f
                            , funAllocaCount = 0
-                           , moduleConstraints = modCs
+                           , moduleConstraints = constraints
                            , withArchConstraints = id
                            }
 
@@ -1625,11 +1625,11 @@ moduleForFunctions ::
    [(FunId, Either String Ann.FunctionAnn)],
    [Ann.ExternalFunctionAnn],
    [LLVMLogEvent])
-moduleForFunctions archOps genOpts recMod modCs =
+moduleForFunctions archOps genOpts recMod constraints =
   let (dynIntrinsics, logEvents, definesAndAnn) = runLLVMTrans $
         forM (recoveredDefs recMod) $ \f -> do
           let fId = funId (fnAddr f) (Just (fnName f))
-          (d, ma) <- defineFunction archOps genOpts modCs f
+          (d, ma) <- defineFunction archOps genOpts constraints f
           pure (d, (fId, ma))
       llvmMod =  L.Module { L.modSourceName = Nothing
                           , L.modDataLayout = []
@@ -1659,19 +1659,19 @@ getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignId (unFnPhiVar phi
 getInferredType (FnReturn _retVar) = error "getInferredType FnReturn" -- getInferredTypeForAssignId (frAssignId retVar)
 getInferredType (FnArg arg _typ) = do
   fn <- asks funAddr
-  modCs <- asks moduleConstraints
-  let fnTypes = fromMaybe (error "fnTypes 1") (Map.lookup fn (mcFunTypes modCs))
+  constraints <- asks moduleConstraints
+  let fnTypes = fromMaybe (error "fnTypes 1") (Map.lookup fn (mcFunTypes constraints))
   let argTyVar = funTypeArgs fnTypes !! arg
-  return (Map.lookup argTyVar (mcTypeMap modCs))
+  return (Map.lookup argTyVar (mcTypeMap constraints))
 
 getInferredTypeForAssignId ::
   FnAssignId -> BBLLVM arch (Maybe Ty)
 getInferredTypeForAssignId aId = do
   fn <- asks funName
-  modCs <- asks moduleConstraints
+  constraints <- asks moduleConstraints
   let fnTypes = fromMaybe
         (error ("Missing function key in mcAssignTyVars: " <> show fn))
-        (Map.lookup fn (mcAssignTyVars modCs))
+        (Map.lookup fn (mcAssignTyVars constraints))
   return $ do -- This is just a 'Maybe Ty' computation
     valTyVar <- Map.lookup aId fnTypes
-    Map.lookup valTyVar (mcTypeMap modCs)
+    Map.lookup valTyVar (mcTypeMap constraints)

@@ -715,7 +715,7 @@ showConstraints args = do -- FIXME: copied from main performReopt command
     (recMod, _relinkerInfo, _logEvents) <-
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
 
-    pure (genModule recMod (memory discState))
+    pure (genModuleConstraints recMod (memory discState))
 
   mc <-   handleEitherWithExit mr
 
@@ -863,7 +863,7 @@ performReopt args = do
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate constraints
-    let moduleConstraints = genModule recMod (memory discState)
+    let moduleConstraints = genModuleConstraints recMod (memory discState)
 
     trace "Constraints" (pure ())
     trace (unlines (map ((++) "\t" . show . PP.pretty) (mcConstraints moduleConstraints))) (pure ())
