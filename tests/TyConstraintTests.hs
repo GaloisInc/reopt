@@ -207,6 +207,14 @@ recTests = T.testGroup "Record Type Tests"
        (x1, int32Ty),
        (x2, recTy' [(0, int32Ty), (64, (ptrTy 64 int32Ty))]),
        (x3, (ptrTy 64 int32Ty))],
+    -- These next tests check that record subtype constraints are unified
+    -- properly during constraint solving. This arises when we want to combine
+    -- different atomic facts describing offsets from a single memory location.
+    -- E.g., if we separately learn (1) at `p` there is an `int32` and (2) at
+    -- `p+32` there is an `int64`, these statements about `p` can be described
+    -- via the following two atomic subtype constraints: `p <: {0 : int32}` and
+    -- `p <: {32 : int64}`. Our unification should then combine these
+    -- constraints on `p` into `p <: {0 : int32, 32 : int64}`.
      mkTest "combining record types 1"
       [ SubC x0Ty (recTy' [(0, int32Ty)]),
         SubC x0Ty (recTy' [(32, int64Ty)])]
