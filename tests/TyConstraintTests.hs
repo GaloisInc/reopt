@@ -206,7 +206,23 @@ recTests = T.testGroup "Record Type Tests"
       [(x0, recTy' [(0, int32Ty), (64, int64Ty)]),
        (x1, int32Ty),
        (x2, recTy' [(0, int32Ty), (64, (ptrTy 64 int32Ty))]),
-       (x3, (ptrTy 64 int32Ty))]
+       (x3, (ptrTy 64 int32Ty))],
+     mkTest "combining record types 1"
+      [ SubC x0Ty (recTy' [(0, int32Ty)]),
+        SubC x0Ty (recTy' [(32, int64Ty)])]
+      [(x0, recTy' [(0, int32Ty), (32, int64Ty)])],
+     mkTest "combining record types 2"
+      [ SubC x0Ty (recTy' [(0, int32Ty), (32, int64Ty)]),
+        SubC x0Ty (recTy' [(32, int64Ty), (96, int64Ty)])]
+      [(x0, recTy' [(0, int32Ty), (32, int64Ty), (96, int64Ty)])],
+     mkTest "combining record types 2"
+      [ SubC x0Ty (recTy' [(0, int32Ty), (32, int32Ty)]),
+        SubC x0Ty (recTy' [(32, int64Ty), (96, int64Ty)])]
+      [(x0, recTy' [(0, int32Ty), (32, int32Ty), (96, int64Ty)])],
+     mkTest "combining record types 3"
+      [ SubC x0Ty (recTy' [(0, int32Ty), (32, (ptrTy 64 int64Ty))]),
+        SubC x0Ty (recTy' [(32, int64Ty), (96, int64Ty)])]
+      [(x0, BotTy)]
   ]
 
 newtype TypeEnv = TypeEnv [(TyVar, Ty)]

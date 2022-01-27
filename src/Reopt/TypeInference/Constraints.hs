@@ -247,10 +247,37 @@ concretizeM initialTy lookupVar = go initialTy
 subst :: TyVar -> Ty -> Ty -> Ty
 subst x xTy ty = concretize ty (\y -> if x == y then xTy else (VarTy y))
 
+-- | Customizations when calculating subtypes.
+data SubtypeOptions
+  = SubtypeOptions
+    { -- | A function for resolving type variables on the
+      --  left/lower side of the subtype inquiry.
+      soResolveL :: TyVar -> Ty,
+      -- | A function for resolving type variables on the
+      --  right/upper side of the subtype inquiry.
+      soResolveR :: TyVar -> Ty,
+      -- | How to handle the fields of two record types, given a
+      -- subtyping function for recursive calls.
+      soRecordFields :: (Ty -> Ty -> Bool) -> (Map Int Ty) -> (Map Int Ty) -> Bool
+    }
+
+dfltSubtypeOpts :: SubtypeOptions
+dfltSubtypeOpts =
+  SubtypeOptions
+  { soResolveL = VarTy,
+    soResolveR = VarTy,
+    soRecordFields = \subty flds1 flds2 ->
+      all (\(fld, fldTy2) ->
+            case Map.lookup fld flds1 of
+              Nothing -> False
+              Just fldTy1 -> subty fldTy1 fldTy2)
+          $ Map.toList flds2
+  }
+
 -- | @subtype' f g s t@ computes whether `s <: t` holds, applying @f@ to resolve
 -- type variables on the left and @g@ to resolve type variables on the right.
-subtype' :: (TyVar -> Ty) -> (TyVar -> Ty) -> Ty -> Ty -> Bool
-subtype' resolveL resolveR = go
+subtype' :: SubtypeOptions -> Ty -> Ty -> Bool
+subtype' opts = go
   where
     go :: Ty -> Ty -> Bool
     go type1 type2 =
@@ -276,15 +303,9 @@ subtype' resolveL resolveR = go
         -- Signed/Unsigned integer subtypes
         (IntTy w1,  IntTy w2)  -> w1 <= w2
         (UIntTy w1, UIntTy w2) -> w1 <= w2
-        -- Records FIXME (?) there is some concern about reasoning too deeply
-        -- about structural subtyping and soundness we need to hammer out,
-        -- especially when dealing with pointers being passed around within
-        -- things. (This could apply to pointer pointers as well perhaps...?)
-        (RecTy flds1, RecTy flds2) -> all (\(fld, fldTy2) ->
-                                            case Map.lookup fld flds1 of
-                                              Nothing -> False
-                                              Just fldTy1 -> go fldTy1 fldTy2)
-                                          $ Map.toList flds2
+        -- Records
+        (RecTy flds1, RecTy flds2) ->
+          (soRecordFields opts) go flds1 flds2
         (t1@RecTy{}, t2) -> go t1 (recTy' [(0,t2)])
         (t1, t2@RecTy{}) -> go (recTy' [(0,t1)]) t2
         -- Set-theoretic subtypes
@@ -293,11 +314,11 @@ subtype' resolveL resolveR = go
         (s, AndTy t1 t2 ts) -> all (go s) (t1:t2:ts)
         (s, OrTy t1 t2 ts)  -> any (go s) (t1:t2:ts)
         -- Type Variable special handling
-        (VarTy x, t) -> let xTy = resolveL x in
+        (VarTy x, t) -> let xTy = (soResolveL opts) x in
                           if xTy == type1
                             then False
                             else go xTy t
-        (s, VarTy y) -> let yTy = resolveR y in
+        (s, VarTy y) -> let yTy = (soResolveR opts) y in
                           if yTy == type2
                             then False
                             else go s yTy
@@ -311,7 +332,8 @@ subtype' resolveL resolveR = go
 -- a _syntactic_ treatment of set-theoretic types, it is _possible_ to return
 -- @False@ erroneously, but @True@ is always sound).
 subtype :: Ty -> Ty -> Bool
-subtype = subtype' VarTy VarTy
+subtype = subtype' opts
+  where opts = dfltSubtypeOpts
 
 -- | Sound but possibly incomplete check if the type is uninhabited. I.e.,
 -- @True@ means the type _is_ uninhabited, but @False@ could mean the type is
@@ -349,13 +371,16 @@ upperBound type1 type2 =
     (s, t@(VarTy _)) -> orTy [s,t]
     -- J-Ptr (N.B., TIE uses ⊓ in this rule, but I think that's a typo)
     ((PtrTy w1 s), (PtrTy w2 t)) | w1 == w2 -> ptrTy w1 (upperBound s t)
-    -- J-RecBase // FIXME (?) these cases are in the TIE paper, but without more
+    -- J-RecBase
+    -- // FIXME (?) these cases are in the TIE paper, but without more
     -- complex record upper bound calculations there arguably useless (i.e.,
     -- subtyping would already have checked the same thing, and so we likely
     -- will just get `TopTy` out as `upperBound` doesn't know what to do with
     -- two record types currently)
     (t1, t2@RecTy{}) | isBaseTy t1 -> upperBound (recTy' [(0,t1)]) t2
     (t1@RecTy{}, t2) | isBaseTy t2 -> upperBound t1 (recTy' [(0,t2)])
+    -- M-Rec (not included in TIE but seems sound and useful)
+    -- ((RecTy flds1), (RecTy flds2)) -> recTy $ Map.unionWith upperBound flds1 flds2
     -- J-NoRel
     (_,_) -> TopTy
 
@@ -631,18 +656,32 @@ lowerConcretization t ctx = concretize t lookupVar
 
 -- | Is this subtype constraint trivial in the current context?
 trivialSubC ::  Context -> Ty -> Ty -> Bool
-trivialSubC ctx s t = subtype' resolveVar resolveVar s t
+trivialSubC ctx = subtype' opts
   where resolveVar x = Map.findWithDefault (VarTy x) x (ctxVarEqMap ctx)
+        opts = dfltSubtypeOpts {soResolveL = resolveVar, soResolveR = resolveVar}
 
--- | @absurdSubC s t ctx@ returns @True@ if `s <: t` is an absurd constraint given `ctx`.
--- N.B., this is intended to be a conservative check (i.e., sound but incomplete).
+-- | @absurdSubC s t ctx@ returns @True@ if `s <: t` is an absurd constraint
+-- given `ctx`. N.B., this is intended to be a conservative check s.t. if @True@
+-- then the subtype constraint is indeed absurd, but @False@ could simply mean
+-- it's too hard to tell and so we can't rule it out.
 absurdSubC ::  Context -> Ty -> Ty -> Bool
-absurdSubC ctx s t = not $ subtype' resolveLower resolveUpper s t
+absurdSubC ctx = \s t -> not $ subtype' opts s t
   where resolveVar findBound x = case Map.lookup x $ ctxVarEqMap ctx of
                                    Nothing -> findBound x (ctxVarBoundsMap ctx)
                                    Just xTy -> xTy
-        resolveLower = resolveVar findLowerBound
-        resolveUpper = resolveVar findUpperBound
+        opts = SubtypeOptions
+               { soResolveL = resolveVar findLowerBound,
+                 soResolveR = resolveVar findUpperBound,
+                  -- We want to check that for all the shared fields
+                  -- their are no absurd subtype implications.
+                 soRecordFields =
+                   \subty flds1 flds2 ->
+                     all (\(fld, fldTy2) ->
+                            case Map.lookup fld flds1 of
+                              Nothing -> True
+                              Just fldTy1 -> subty fldTy1 fldTy2)
+                          $ Map.toList flds2
+               }
 
 -- | Is this equality constraint trivial in the current context?
 trivialEqC ::  Context -> Ty -> Ty -> Bool
