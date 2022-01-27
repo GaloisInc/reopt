@@ -776,9 +776,10 @@ intrinsicOverflows bop x y c = bbArchConstraints $ do
 
 appToLLVM :: forall arch tp
           .  HasCallStack
-          => App (FnValue arch) tp
+          => FnAssignId -- ^ Value being assigned
+          -> App (FnValue arch) tp
           -> BBLLVM arch (L.Typed L.Value)
-appToLLVM app = bbArchConstraints $ do
+appToLLVM lhs app = bbArchConstraints $ do
   let typ = typeToLLVMType $ typeRepr app
   let binop :: (L.Typed L.Value -> L.Value -> BBLLVM arch (L.Typed L.Value))
             -> FnValue arch utp
@@ -848,15 +849,28 @@ appToLLVM app = bbArchConstraints $ do
       llvmVal <- mkLLVMValue x
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
     BVAdd _sz x y -> do
+      typeOfResult <- getInferredTypeForAssignId lhs
       tx <- getInferredType x
       ty <- getInferredType y
-      case (tx, ty) of
-        (Just (PtrTy _ _), Just (PtrTy _ _)) ->
+      case (typeOfResult, tx, ty) of
+        (_, Just (PtrTy _ _), Just (PtrTy _ _)) ->
           error "Inferred PtrTy for both addends, this suggests a bug in the constraint generation/solving!"
         -- FIXME: this currently does not work when the bitvector constant is a
         -- pointer due to limitations of the constraint gen/solve.
-        (Just (PtrTy sz _), _) -> llvmGetElementPtr sz x y
-        (_, Just (PtrTy sz _)) -> llvmGetElementPtr sz y x
+        (_, Just (PtrTy _ pointee), _) -> llvmGetElementPtr (tyToLLVMType pointee) x y
+        (_, _, Just (PtrTy _ pointee)) -> llvmGetElementPtr (tyToLLVMType pointee) y x
+        -- When the result is a pointer, and one operand is known to be numeric,
+        -- we can also conclude that the other operand was a pointer.  You'd
+        -- likely expect the constraint solving to have inferred that the other
+        -- operand is a pointer, but this currently does **not** happen when the
+        -- pointer operand is a constant value: while the constraint solving
+        -- indeed unifies the unification variable corresponding to the constant
+        -- with `PtrTy`, we don't currently have a mechanism for tracking this
+        -- information back to the constant value.
+        -- This can be solved by giving unique identifiers to constant values,
+        -- or let-binding them so that we have a program variable to latch onto.
+        (Just (PtrTy _ pointee), Just (NumTy _), _) -> llvmGetElementPtr (tyToLLVMType pointee) y x
+        (Just (PtrTy _ pointee), _, Just (NumTy _)) -> llvmGetElementPtr (tyToLLVMType pointee) x y
         _ -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -934,15 +948,14 @@ llvmAsPtr ctx ptr tp = do
 
 
 llvmGetElementPtr ::
-  Int -> -- FIXME: don't use this
+  L.Type ->
   FnValue arch (BVType n) ->
   FnValue arch (BVType n) ->
   BBLLVM arch (L.Typed L.Value)
-llvmGetElementPtr sz ptr ofs = do
+llvmGetElementPtr pointee ptr ofs = do
   ptrV <- mkLLVMValue ptr
   ofsV <- mkLLVMValue ofs
-  L.Typed (L.PtrTo (L.PrimType (L.Integer (fromIntegral sz))))
-    <$> evalInstr (L.GEP False ptrV [ofsV])
+  L.Typed (L.PtrTo pointee) <$> evalInstr (L.GEP False ptrV [ofsV])
 
 
 -- | Truncate and log.
@@ -1022,13 +1035,13 @@ rhsToLLVM :: FnArchConstraints arch
 rhsToLLVM lhs rhs =
   case rhs of
     FnEvalApp app -> do
-      llvmRhs <- appToLLVM app
+      llvmRhs <- appToLLVM lhs app
       setAssignIdValue lhs llvmRhs
     FnSetUndefined tp -> do
       setAssignIdValue lhs (L.Typed (typeToLLVMType tp) L.ValUndef)
     FnReadMem ptr typ ->
       getInferredType ptr >>= \case
-        Just (PtrTy _sz ty) -> do
+        Just (PtrTy _ ty) -> do
           L.Typed _origType origVal <- mkLLVMValue ptr
           let retypedPtr = L.Typed (L.PtrTo (tyToLLVMType ty)) origVal
           v <- evalInstr (L.Load retypedPtr Nothing Nothing)
