@@ -16,7 +16,7 @@ unlzma_mv_untar () {
   fi
   TARVER=`tar --version | head -n 1`
   if [[ "$TARVER" =~ "tar (GNU tar)" ]]; then
-    tar --overwrite -xf $TAR_FILE
+    tar -xf $TAR_FILE
   elif [[ "$TARVER" =~ "bsdtar" ]]; then
     tar -xkf $TAR_FILE
   else
