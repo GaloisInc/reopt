@@ -21,6 +21,7 @@ layer.
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -118,6 +119,8 @@ import           Reopt.TypeInference.ConstraintGen (
   )
 import qualified Reopt.VCG.Annotations as Ann
 import Reopt.TypeInference.Constraints (TyVar, tyToLLVMType)
+import Debug.Trace (trace)
+import Data.Macaw.Memory.ElfLoader (memWidthNatRepr)
 
 
 data LLVMBitCastInfo =
@@ -854,9 +857,7 @@ appToLLVM lhs app = bbArchConstraints $ do
       ty <- getInferredType y
       case (typeOfResult, tx, ty) of
         (_, Just (PtrTy _ _), Just (PtrTy _ _)) ->
-          error "Inferred PtrTy for both addends, this suggests a bug in the constraint generation/solving!"
-        -- FIXME: this currently does not work when the bitvector constant is a
-        -- pointer due to limitations of the constraint gen/solve.
+          error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
         (_, Just (PtrTy _ pointee), _) -> llvmGetElementPtr (tyToLLVMType pointee) x y
         (_, _, Just (PtrTy _ pointee)) -> llvmGetElementPtr (tyToLLVMType pointee) y x
         -- When the result is a pointer, and one operand is known to be numeric,
@@ -869,8 +870,27 @@ appToLLVM lhs app = bbArchConstraints $ do
         -- information back to the constant value.
         -- This can be solved by giving unique identifiers to constant values,
         -- or let-binding them so that we have a program variable to latch onto.
-        (Just (PtrTy _ pointee), Just (NumTy _), _) -> llvmGetElementPtr (tyToLLVMType pointee) y x
-        (Just (PtrTy _ pointee), _, Just (NumTy _)) -> llvmGetElementPtr (tyToLLVMType pointee) x y
+        (Just (PtrTy _ pointee), Just (NumTy _), _) -> do
+          case testEquality (type_width (typeRepr y)) (memWidthNatRepr @(ArchAddrWidth arch)) of
+            Just Refl -> do
+              let pointeeType = tyToLLVMType pointee
+              yAsPtr <- llvmAsPtr "TODO" y pointeeType
+              ofs <- mkLLVMValue x
+              L.Typed (L.PtrTo pointeeType) <$> evalInstr (L.GEP False yAsPtr [ofs])
+            Nothing ->
+              error "Inferred a pointer type for an addition, but the size is wrong, likely a constraint bug!"
+        (Just (PtrTy _ pointee), _, Just (NumTy _)) -> do
+          trace (show x) (pure ())
+          error "This one needs be implemented too"
+          llvmGetElementPtr (tyToLLVMType pointee) x y
+        -- If the result ought to be a pointer, but we have no idea which of the
+        -- two arguments is the pointer, we must perform a bitvector add, but
+        -- then cast the result into the appropriate pointer type that will be
+        -- expected by the rest of the code.
+        (Just (PtrTy _ pointee), _, _) ->
+          do
+            result <- binop (arithop (L.Add False False)) x y
+            convop L.IntToPtr result (L.PtrTo (tyToLLVMType pointee))
         _ -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
@@ -1093,8 +1113,13 @@ stmtToLLVM stmt = bbArchConstraints $ do
      rhsToLLVM lhs rhs
    FnWriteMem addr v -> do
      llvmVal <- mkLLVMValue v
-     llvmPtr <- llvmAsPtr "stmtToLLVM(FnWriteMem)" addr (L.typedType llvmVal)
-     -- Cast LLVM point to appropriate type
+     llvmPtr <- getInferredType addr >>= \case
+       Just (PtrTy _ ty) -> do
+         L.Typed _origType origVal <- mkLLVMValue addr
+         return $ L.Typed (L.PtrTo (tyToLLVMType ty)) origVal
+       _ ->  do
+         -- Cast LLVM point to appropriate type
+         llvmAsPtr "stmtToLLVM(FnWriteMem)" addr (L.typedType llvmVal)
      effect $ L.Store llvmVal llvmPtr Nothing Nothing
    FnCondWriteMem cond addr v memRepr -> do
      -- Obtain llvm.masked.store intrinsic and ensure it will be declared.

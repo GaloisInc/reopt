@@ -3,7 +3,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- This module provides a constraint generation pass for inferring the
 -- types of Reopt (FnRep) programs, inspired by TIE.
@@ -29,9 +31,10 @@ import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 import           Data.Maybe                 (fromMaybe, isJust)
 import           Data.Parameterized         (FoldableF, FoldableFC)
+import           Data.Proxy                 (Proxy(Proxy))
 import qualified Data.Vector                as V
 
-import           Data.Parameterized.NatRepr (NatRepr, testEquality, widthVal)
+import           Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import           Data.Parameterized.Some    (Some(Some), viewSome)
 
 import           Reopt.CFG.FnRep
@@ -39,11 +42,12 @@ import           Reopt.TypeInference.Constraints
 import qualified Prettyprinter as PP
 
 import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
-                                             ArchSegmentOff, ArchFn)
+                                             ArchSegmentOff, ArchFn, MemWidth (addrSize),
+                                             memReprBytes)
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType, TypeRepr (BVTypeRepr))
+import           Data.Macaw.Types           (BVType, TypeRepr (..), type_width, typeRepr, typeWidth, floatInfoBytes)
 import Debug.Trace (trace)
 
 -- This algorithm proceeds in stages:
@@ -376,8 +380,13 @@ emitPtrSub rty t1 t2 = emitConstraint (CAddrWidthSub rty t1 t2)
 emitNotPtr :: Ty -> CGenM ctx arch ()
 emitNotPtr t = emitConstraint (CBVNotPtr t)
 
-emitPtr :: Int -> Ty -> CGenM ctx arch ()
-emitPtr sz t = emitConstraint (CIsPtr sz t)
+emitPtr ::
+  -- | Size of the pointee
+  Int ->
+  -- | Type that is recognized as pointer
+  Ty ->
+  CGenM ctx arch ()
+emitPtr pointeeSize pointer = emitConstraint (CIsPtr pointeeSize pointer)
 
 -- -----------------------------------------------------------------------------
 -- Core algorithm
@@ -525,15 +534,24 @@ genFnAssignment a = do
   ty <- varIType <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr (BVTypeRepr sz) -> emitPtr (widthVal sz) =<< genFnValue ptr
-    FnReadMem ptr _sz -> emitPtr 42069 =<< genFnValue ptr
-    FnCondReadMem _sz _cond ptr def -> do
-      emitPtr 1234567 =<< genFnValue ptr
+    FnReadMem ptr sz -> emitPtr (anyTypeWidth sz) =<< genFnValue ptr
+    FnCondReadMem sz _cond ptr def -> do
+      emitPtr (8 * fromIntegral (memReprBytes sz)) =<< genFnValue ptr
       emitEq ty =<< genFnValue def
 
     FnEvalApp app -> genApp ty app
 
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
+
+
+-- | In bytes
+anyTypeWidth :: TypeRepr tp -> Int
+anyTypeWidth typ = case typ of
+  BoolTypeRepr -> 1
+  BVTypeRepr nr -> fromIntegral (intValue nr)
+  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBytes fir))
+  TupleTypeRepr li -> error "anyTypeWidth TupleType"
+  VecTypeRepr nr tr -> error "anyTypeWidth VecType"
 
 
 -- The offset argument is used by call term stmts
@@ -544,8 +562,8 @@ genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr _v -> emitPtr 2345678 =<< genFnValue addr
-    FnCondWriteMem _cond addr _v _ -> emitPtr 3456789 =<< genFnValue addr
+    FnWriteMem addr v -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
+    FnCondWriteMem _cond addr v _ -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
