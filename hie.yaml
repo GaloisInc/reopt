@@ -102,6 +102,9 @@ cradle:
     - path: "src"
       component: "lib:reopt"
 
+    - path: "reopt-explore"
+      component: "reopt:exe:reopt-explore"
+
     - path: "reopt/Main_reopt.hs"
       component: "reopt:exe:reopt"
 
