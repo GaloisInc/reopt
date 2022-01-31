@@ -85,7 +85,7 @@ data Constraint =
   | CAddrWidthSub Ty Ty Ty
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
   | CBVNotPtr Ty -- ^ The argument cannot be a ptr (so should be a bv)
-  | CIsPtr Int Ty -- ^ The type must point to something of the given size
+  | CIsPtr Int Ty -- ^ The type must point to something of the given size (in bits)
 
 instance Show Constraint where
   show c =
@@ -375,7 +375,7 @@ emitNotPtr :: Ty -> CGenM ctx arch ()
 emitNotPtr t = emitConstraint (CBVNotPtr t)
 
 emitPtr ::
-  -- | Size of the pointee
+  -- | Bit size of the pointee
   Int ->
   -- | Type that is recognized as pointer
   Ty ->
@@ -528,7 +528,7 @@ genFnAssignment a = do
   ty <- varIType <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr sz -> emitPtr (anyTypeWidth sz) =<< genFnValue ptr
+    FnReadMem ptr sz -> emitPtr (bitWidth sz) =<< genFnValue ptr
     FnCondReadMem sz _cond ptr def -> do
       emitPtr (8 * fromIntegral (memReprBytes sz)) =<< genFnValue ptr
       emitEq ty =<< genFnValue def
@@ -538,14 +538,15 @@ genFnAssignment a = do
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
 
 
--- | In bytes
-anyTypeWidth :: TypeRepr tp -> Int
-anyTypeWidth typ = case typ of
-  BoolTypeRepr -> 1
+-- | This helper gives us the bitwidth of the types we can read/write from
+-- memory.
+bitWidth :: TypeRepr tp -> Int
+bitWidth typ = case typ of
+  BoolTypeRepr -> error "bitWidth: BoolType"
   BVTypeRepr nr -> fromIntegral (intValue nr)
-  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBytes fir))
-  TupleTypeRepr li -> error "anyTypeWidth TupleType"
-  VecTypeRepr nr tr -> error "anyTypeWidth VecType"
+  FloatTypeRepr fir -> 8 * fromIntegral (widthVal (floatInfoBytes fir))
+  TupleTypeRepr _li -> error "bitWidth: TupleType"
+  VecTypeRepr _nr _tr -> error "bitWidth: VecType"
 
 
 -- The offset argument is used by call term stmts
@@ -556,8 +557,8 @@ genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr v -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
-    FnCondWriteMem _cond addr v _ -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
+    FnWriteMem addr v -> emitPtr (bitWidth (typeRepr v)) =<< genFnValue addr
+    FnCondWriteMem _cond addr v _ -> emitPtr (bitWidth (typeRepr v)) =<< genFnValue addr
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
