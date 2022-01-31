@@ -31,7 +31,6 @@ import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 import           Data.Maybe                 (fromMaybe, isJust)
 import           Data.Parameterized         (FoldableF, FoldableFC)
-import           Data.Proxy                 (Proxy(Proxy))
 import qualified Data.Vector                as V
 
 import           Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
@@ -42,13 +41,12 @@ import           Reopt.TypeInference.Constraints
 import qualified Prettyprinter as PP
 
 import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
-                                             ArchSegmentOff, ArchFn, MemWidth (addrSize),
+                                             ArchSegmentOff, ArchFn,
                                              memReprBytes)
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType, TypeRepr (..), type_width, typeRepr, typeWidth, floatInfoBytes)
-import Debug.Trace (trace)
+import           Data.Macaw.Types           (BVType, TypeRepr (..), floatInfoBytes, typeRepr)
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -236,10 +234,6 @@ freshTyVar context =
   CGenM $ do
     tv <- nextFreeTyVar <<+= 1
     let tyv = TyVar tv context
-    trace (
-      "Created fresh type variable " <> show (PP.pretty tyv)
-      <> " for " <> context) (pure ()
-      )
     return tyv
 
 atFnAssignId ::

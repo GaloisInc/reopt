@@ -119,8 +119,6 @@ import           Reopt.TypeInference.ConstraintGen (
   )
 import qualified Reopt.VCG.Annotations as Ann
 import Reopt.TypeInference.Constraints (TyVar, tyToLLVMType)
-import Debug.Trace (trace)
-import Data.Macaw.Memory.ElfLoader (memWidthNatRepr)
 
 
 data LLVMBitCastInfo =
@@ -870,19 +868,12 @@ appToLLVM lhs app = bbArchConstraints $ do
         -- information back to the constant value.
         -- This can be solved by giving unique identifiers to constant values,
         -- or let-binding them so that we have a program variable to latch onto.
-        (Just (PtrTy _ pointee), Just (NumTy _), _) -> do
-          case testEquality (type_width (typeRepr y)) (memWidthNatRepr @(ArchAddrWidth arch)) of
-            Just Refl -> do
-              let pointeeType = tyToLLVMType pointee
-              yAsPtr <- llvmAsPtr "TODO" y pointeeType
-              ofs <- mkLLVMValue x
-              L.Typed (L.PtrTo pointeeType) <$> evalInstr (L.GEP False yAsPtr [ofs])
-            Nothing ->
-              error "Inferred a pointer type for an addition, but the size is wrong, likely a constraint bug!"
-        (Just (PtrTy _ pointee), _, Just (NumTy _)) -> do
-          trace (show x) (pure ())
-          error "This one needs be implemented too"
-          llvmGetElementPtr (tyToLLVMType pointee) x y
+        (Just (PtrTy _ pointee), Just (NumTy _), _) ->
+          -- x is an offset, therefore y must be a pointer
+          llvmGetElementPtrAfterCast (tyToLLVMType pointee) y =<< mkLLVMValue x
+        (Just (PtrTy _ pointee), _, Just (NumTy _)) ->
+          -- y is an offset, therefore x must be a pointer
+          llvmGetElementPtrAfterCast (tyToLLVMType pointee) x =<< mkLLVMValue y
         -- If the result ought to be a pointer, but we have no idea which of the
         -- two arguments is the pointer, we must perform a bitvector add, but
         -- then cast the result into the appropriate pointer type that will be
@@ -976,6 +967,39 @@ llvmGetElementPtr pointee ptr ofs = do
   ptrV <- mkLLVMValue ptr
   ofsV <- mkLLVMValue ofs
   L.Typed (L.PtrTo pointee) <$> evalInstr (L.GEP False ptrV [ofsV])
+
+
+-- | Emits a `getelementptr` instruction, but assumes the given pointer value is
+-- not yet of LLVM pointer type, so some sort of cast must happen prior to the
+-- `getelementptr`.  Based on the abstract value of the pointer, emits either a
+-- LLVM constant pointer expression, or if the value is not known to be
+-- constant, emits an `inttoptr` instruction.
+--
+-- For succintness at call sites, this does not place an `ArchAddrWidth arch`
+-- constraint on the size of the pointer bitvector, though in practice it only
+-- succeeds if the pointer value has the appropriate size.
+llvmGetElementPtrAfterCast ::
+  forall arch n.
+  LLVMArchConstraints arch =>
+  -- | Type of the pointee
+  L.Type ->
+  -- | Value of the address, to be turned into a pointer before GEP
+  FnValue arch (BVType n) ->
+  -- | Offset to add via GEP
+  L.Typed L.Value ->
+  BBLLVM arch (L.Typed L.Value)
+llvmGetElementPtrAfterCast pointeeType toBePointer offset =
+  case testEquality (type_width (typeRepr toBePointer)) (memWidthNatRepr @(ArchAddrWidth arch)) of
+    Just Refl -> do
+      let pointerType = L.PtrTo pointeeType
+      pointer <- case toBePointer of
+        FnConstantValue _ _ -> do
+          pointer <- mkLLVMValue toBePointer
+          pure (L.Typed pointerType (L.ValConstExpr (L.ConstConv L.IntToPtr pointer pointerType)))
+        _ -> llvmAsPtr "llvmGetElementPtrAfterCast" toBePointer pointeeType
+      L.Typed pointerType <$> evalInstr (L.GEP False pointer [offset])
+    Nothing ->
+      error "llvmGetElementPtrAfterCast was passed a candidate pointer value whose size does not match the architecture pointer size!"
 
 
 -- | Truncate and log.
