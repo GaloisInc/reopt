@@ -85,15 +85,16 @@ data Constraint =
   | CBVNotPtr ITy -- ^ The argument cannot be a ptr (so should be a bv)
   | CIsPtr ITy    -- ^ The type must point to something
 
-instance Show Constraint where
-  show c =
-    case c of
-      CEq t1 t2 -> show $ PP.pretty t1 PP.<+> "=" PP.<+> PP.pretty t2
-      CAddrWidthAdd t1 t2 t3 -> show $ PP.pretty t1 PP.<+> "=" PP.<+> PP.pretty t2 PP.<+> "+" PP.<+> PP.pretty t3
-      CAddrWidthSub t1 t2 t3 -> show $ PP.pretty t1 PP.<+> "=" PP.<+> PP.pretty t2 PP.<+> "-" PP.<+> PP.pretty t3
-      CBVNotPtr t -> show $ "non-ptr" PP.<+> PP.pretty t
-      CIsPtr t    -> show $ "ptr " PP.<+> PP.pretty t
+instance PP.Pretty Constraint where
+  pretty = \case
+    CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
+    CAddrWidthAdd t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
+    CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
+    CBVNotPtr t -> PP.hsep ["non-ptr", PP.pretty t]
+    CIsPtr t -> PP.hsep ["ptr ", PP.pretty t]
 
+instance Show Constraint where
+  show = show . PP.pretty
 
 -- -----------------------------------------------------------------------------
 -- Monad
