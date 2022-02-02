@@ -26,7 +26,7 @@ import Debug.Trace ( trace )
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool
-traceUnification = True
+traceUnification = False
 
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
