@@ -239,7 +239,7 @@ tyConstraint = \case
       pure $ orTC
         [ andTC [eqTC ret NumTy,      eqTC lhs NumTy,      eqTC rhs NumTy]
         , andTC [eqTC ret (PtrTy x2), eqTC lhs (PtrTy x1), eqTC rhs NumTy]
-        , andTC [eqTC ret (PtrTy x2), eqTC lhs NumTy,      eqTC lhs (PtrTy x1)]
+        , andTC [eqTC ret (PtrTy x2), eqTC lhs NumTy,      eqTC rhs (PtrTy x1)]
         ]
 
 atFnAssignId ::
