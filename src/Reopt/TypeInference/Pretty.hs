@@ -14,28 +14,28 @@ import qualified Data.Vector                       as V
 import           Prettyprinter
 import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.ConstraintGen (FunType (..),
-                                                    IType (IType),
+                                                    ITy, FTy,
                                                     ModuleConstraints (..))
-import           Reopt.TypeInference.Constraints   (Ty (VarTy))
+import           Reopt.TypeInference.Constraints   (Ty (UnknownTy))
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc a] -> Doc a
 commas = hsep . punctuate comma
 
-ppFnAssignId :: Map FnAssignId Ty -> FnAssignId -> Doc ()
+ppFnAssignId :: Map FnAssignId FTy -> FnAssignId -> Doc ()
 ppFnAssignId tyvs aid
   | Just ty <- Map.lookup aid tyvs =
                "(" <> pretty aid <+> "::" <+> pretty ty <> ")"
   | otherwise = pretty aid
 
 ppAssignment :: FnArchConstraints arch =>
-                Map FnAssignId Ty -> FnAssignment arch ty -> Doc ()
+                Map FnAssignId FTy -> FnAssignment arch ty -> Doc ()
 ppAssignment tyvs (FnAssignment lhs rhs) =
   ppFnAssignId tyvs lhs <> " := " <> pretty rhs
 
 ppFnStmt ::  ( FnArchConstraints arch
            , IsArchStmt (FnArchStmt arch)
-           ) => Map FnAssignId Ty -> FnStmt arch -> Doc ()
+           ) => Map FnAssignId FTy -> FnStmt arch -> Doc ()
 ppFnStmt tyvs (FnAssignStmt assign) = ppAssignment tyvs assign
 ppFnStmt tyvs (FnCall f args (Just (Some r))) =
   let argDocs = (\(Some v) -> pretty v) <$> args
@@ -45,7 +45,7 @@ ppFnStmt _ s = pretty s
 ppBlock :: (FnArchConstraints arch
            , ShowF (ArchReg arch)
            , IsArchStmt (FnArchStmt arch)
-           ) => Map FnAssignId Ty -> FnBlock arch -> Doc ()
+           ) => Map FnAssignId FTy -> FnBlock arch -> Doc ()
 ppBlock tyvs b =
   pretty (fbLabel b) <+> encloseSep lbracket rbracket " " phiVars <> hardline
   <> indent 2 (phiBindings <> stmts <> tstmt)
@@ -87,12 +87,12 @@ ppFunction mcs fn
 
 
     -- non
-    ppTy (IType (VarTy tyv))
+    ppTy (UnknownTy tyv)
       | Just tp <- Map.lookup tyv (mcTypeMap mcs) = pretty tp
       | otherwise = "???"
-    ppTy (IType ty) = pretty ty
+    ppTy ty = pretty ty
 
-    ppArg :: Integer -> IType -> Doc a
+    ppArg :: Integer -> ITy -> Doc a
     ppArg i tp = "arg" <> pretty i <> " : " <> ppTy tp
 
 -- Unknown type/unknown assigns  
