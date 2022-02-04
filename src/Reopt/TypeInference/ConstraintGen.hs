@@ -32,19 +32,19 @@ import           Data.Maybe                 (fromMaybe, isJust)
 import           Data.Parameterized         (FoldableF, FoldableFC)
 import qualified Data.Vector                as V
 
-import           Data.Parameterized.NatRepr (NatRepr, testEquality)
+import           Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
 import           Data.Parameterized.Some    (Some(Some))
 
 import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.Constraints
 import qualified Prettyprinter as PP
 
-import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
-                                             ArchSegmentOff, ArchFn)
+import           Data.Macaw.CFG             (App (..), ArchAddrWidth, ArchFn,
+                                             ArchSegmentOff, memReprBytes)
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType)
+import           Data.Macaw.Types           (BVType, TypeRepr (..), floatInfoBits, typeRepr)
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -82,16 +82,18 @@ data Constraint =
   -- ^ At most one type may be a ptr, first type is the result
   | CAddrWidthSub ITy ITy ITy
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
-  | CBVNotPtr ITy -- ^ The argument cannot be a ptr (so should be a bv)
-  | CIsPtr ITy    -- ^ The type must point to something
+  | CBVNotPtr Int ITy -- ^ The argument cannot be a ptr (so should be a bv)
+  | CIsPtr Int ITy -- ^ The type must point to something
+  | CAmbiguousBV ITy -- ^ This is a bitvector the size of an address, but we know nothing more
 
 instance PP.Pretty Constraint where
   pretty = \case
     CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
     CAddrWidthAdd t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
-    CBVNotPtr t -> PP.hsep ["non-ptr", PP.pretty t]
-    CIsPtr t -> PP.hsep ["ptr ", PP.pretty t]
+    CBVNotPtr sz t -> PP.hsep ["bv" <> PP.pretty sz, PP.pretty t]
+    CIsPtr sz t -> PP.hsep ["ptr@" <> PP.pretty sz, PP.pretty t]
+    CAmbiguousBV t -> PP.hsep ["bv-or-ptr?", PP.pretty t]
 
 instance Show Constraint where
   show = show . PP.pretty
@@ -223,23 +225,38 @@ _freshRowVar = CGenM $ RowVar <$> (nextFreeRowVar <<+= 1)
 
 -- | Converts the limited `Constraint` grammar to the more general
 -- `TyConstraint` type used for constraint solving.
-tyConstraint :: Constraint -> CGenM ctx arch TyConstraint
-tyConstraint = \case
+tyConstraint ::
+  -- | Size of pointers
+  Int ->
+  Constraint ->
+  CGenM ctx arch TyConstraint
+tyConstraint psz = \case
   CEq t1 t2 -> pure $ eqTC t1 t2
   CAddrWidthAdd ret lhs rhs -> maybePtrBinop ret lhs rhs
   CAddrWidthSub ret lhs rhs -> maybePtrBinop ret lhs rhs
-  CBVNotPtr t -> pure $ eqTC t NumTy
-  CIsPtr t -> do
-    x <- UnknownTy <$> freshTyVar
-    pure $ eqTC t (PtrTy x)
+  CBVNotPtr sz t -> pure $ eqTC t (NumTy sz)
+  CIsPtr sz t ->
+    if sz == psz
+      then do
+        pointee <- UnknownTy <$> freshTyVar
+        pointeePointee <- UnknownTy <$> freshTyVar
+        pure $ andTC [ eqTC t (PtrTy pointee)
+                     , orTC [ eqTC pointee (NumTy sz)
+                            , eqTC pointee (PtrTy pointeePointee)
+                            ]
+                     ]
+      else pure $ eqTC t (PtrTy (NumTy sz))
+  CAmbiguousBV t -> do
+    tv <- UnknownTy <$> freshTyVar
+    pure $ orTC [eqTC t (NumTy psz), eqTC t (PtrTy tv)]
   where
     maybePtrBinop ret lhs rhs = do
       x1 <- UnknownTy <$> freshTyVar
       x2 <- UnknownTy <$> freshTyVar
       pure $ orTC
-        [ andTC [eqTC ret NumTy,      eqTC lhs NumTy,      eqTC rhs NumTy]
-        , andTC [eqTC ret (PtrTy x2), eqTC lhs (PtrTy x1), eqTC rhs NumTy]
-        , andTC [eqTC ret (PtrTy x2), eqTC lhs NumTy,      eqTC rhs (PtrTy x1)]
+        [ andTC [eqTC ret (NumTy psz), eqTC lhs (NumTy psz), eqTC rhs (NumTy psz)]
+        , andTC [eqTC ret (PtrTy x2),  eqTC lhs (PtrTy x1),  eqTC rhs (NumTy psz)]
+        , andTC [eqTC ret (PtrTy x2),  eqTC lhs (NumTy psz), eqTC rhs (PtrTy x1)]
         ]
 
 atFnAssignId ::
@@ -378,11 +395,11 @@ emitPtrSub :: ITy -> ITy -> ITy -> CGenM ctx arch ()
 emitPtrSub rty t1 t2 = emitConstraint (CAddrWidthSub rty t1 t2)
 
 -- | Emits a constraint that the argument isn't a pointer
-emitNotPtr :: ITy -> CGenM ctx arch ()
-emitNotPtr t = emitConstraint (CBVNotPtr t)
+emitNotPtr :: Int -> ITy -> CGenM ctx arch ()
+emitNotPtr sz t = emitConstraint (CBVNotPtr sz t)
 
-emitPtr :: ITy -> CGenM ctx arch ()
-emitPtr t = emitConstraint (CIsPtr t)
+emitPtr :: Int -> ITy -> CGenM ctx arch ()
+emitPtr sz t = emitConstraint (CIsPtr sz t)
 
 -- -----------------------------------------------------------------------------
 -- Core algorithm
@@ -405,8 +422,10 @@ genFnValue v =
 
 -- | Generate constraints for an App.  The first argument is the
 -- output (result) type.
-genApp :: ITy -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
-genApp ty app =
+genApp ::
+  FnArchConstraints arch =>
+  (ITy, Int) -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
+genApp (ty, outSize) app =
   case app of
     Eq l r    -> vEq l r
     Mux _ _ l r -> vEq l r
@@ -485,60 +504,85 @@ genApp ty app =
     Bsf _ v          -> nonptrUnOp v
     Bsr _ v          -> nonptrUnOp v
   where
-    vEq :: forall arch tp tp'. FnValue arch tp -> FnValue arch tp' -> CGenM CGenBlockContext arch ()
+    vEq :: forall arch tp tp'.
+      FnArchConstraints arch =>
+      FnValue arch tp -> FnValue arch tp' -> CGenM CGenBlockContext arch ()
     vEq l r = do
       l_ty <- genFnValue l
       r_ty <- genFnValue r
       emitEq l_ty r_ty
       emitEq ty l_ty -- r_ty == ty by transitivity, so we don't add it
 
-    nonptrUnOp :: forall n arch. FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
+    nonptrUnOp :: forall n arch.
+      FnArchConstraints arch =>
+      FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
     nonptrUnOp v = do
-      emitNotPtr =<< genFnValue v
-      emitNotPtr ty
+      emitNotPtr (bvWidth v) =<< genFnValue v
+      emitNotPtr outSize ty
 
     -- | The result and arguments have to be bitvecs (i.e., not ptrs).
     -- We don't relate the sizes as that is given by the macaw type at
     -- the moment.
     nonptrBinOp :: forall n m arch.
+      FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinOp l r = do
-      emitNotPtr =<< genFnValue l
-      emitNotPtr =<< genFnValue r
-      emitNotPtr ty
+      emitNotPtr (bvWidth l) =<< genFnValue l
+      emitNotPtr (bvWidth r) =<< genFnValue r
+      emitNotPtr outSize ty
 
     nonptrBinCmp :: forall n m arch.
+      FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinCmp l r = do
-      emitNotPtr =<< genFnValue l
-      emitNotPtr =<< genFnValue r
+      emitNotPtr (bvWidth l) =<< genFnValue l
+      emitNotPtr (bvWidth r) =<< genFnValue r
 
 
-genFnAssignment :: FnAssignment arch tp -> CGenM CGenBlockContext arch ()
+bvWidth :: FnArchConstraints arch => FnValue arch (BVType n) -> Int
+bvWidth = anyTypeWidth . typeRepr
+
+
+anyTypeWidth :: TypeRepr tp -> Int
+anyTypeWidth = \case
+  BoolTypeRepr -> error "TODO"
+  BVTypeRepr sz -> fromIntegral (intValue sz)
+  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
+  TupleTypeRepr{} -> error "TODO"
+  VecTypeRepr{} -> error "TODO"
+
+
+genFnAssignment ::
+  FnArchConstraints arch =>
+  FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varITy <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr _sz -> emitPtr =<< genFnValue ptr
-    FnCondReadMem _sz _cond ptr def -> do
-      emitPtr =<< genFnValue ptr
+    FnReadMem ptr sz -> do
+      emitPtr (anyTypeWidth sz) =<< genFnValue ptr
+      emitEq ty ty
+    FnCondReadMem sz _cond ptr def -> do
+      emitPtr (8 * fromIntegral (memReprBytes sz)) =<< genFnValue ptr
       emitEq ty =<< genFnValue def
 
-    FnEvalApp app -> genApp ty app
+    FnEvalApp app -> genApp (ty, anyTypeWidth (typeRepr app)) app
 
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
 
 
 -- The offset argument is used by call term stmts
-genFnStmt :: FnStmt arch
-          -> CGenM CGenBlockContext arch ()
+genFnStmt ::
+  FnArchConstraints arch =>
+  FnStmt arch ->
+  CGenM CGenBlockContext arch ()
 genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr _v -> emitPtr =<< genFnValue addr
-    FnCondWriteMem _cond addr _v _ -> emitPtr =<< genFnValue addr
+    FnWriteMem addr v -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
+    FnCondWriteMem _cond addr v _ -> emitPtr (anyTypeWidth (typeRepr v)) =<< genFnValue addr
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
@@ -585,8 +629,11 @@ genCall fn args m_ret = do
   where
     go (Some v) ty = emitEq ty =<< genFnValue v
 
-genFnBlock :: FnBlock arch -- ^ Current block
-           -> CGenM CGenFunctionContext arch ()
+genFnBlock ::
+  FnArchConstraints arch =>
+  -- | Current block
+  FnBlock arch ->
+  CGenM CGenFunctionContext arch ()
 genFnBlock b = do
   withinContext CGenBlockContext $ do
     -- let blockAddr = pblockAddr b
@@ -622,6 +669,7 @@ genFnBlock b = do
           _ -> pure ()
 
 genFunction ::
+  FnArchConstraints arch =>
   -- Map (FnBlockLabel (ArchAddrWidth arch)) [ITy] ->
   Function arch -> CGenM CGenModuleContext arch ()
 genFunction fn {- blockPhis -} = do
@@ -678,6 +726,7 @@ showInferredTypes mc =
 
 
 genModule ::
+  FnArchConstraints arch =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
@@ -707,7 +756,7 @@ genModule m mem = fst $ runCGenM mem $ do
   tvsO <- CGenM $ use tyVarsOrigin
   warns <- CGenM $ use warnings
 
-  cstrs <- mapM tyConstraint =<< (CGenM $ use constraints)
+  cstrs <- mapM (tyConstraint (widthVal (memWidth mem))) =<< CGenM (use constraints)
 
   pure ModuleConstraints { mcFunTypes     = addrMap
                          , mcExtFunTypes  = symMap
