@@ -21,6 +21,9 @@ import Data.Generics.Product ( field )
 import GHC.Generics ( Generic )
 import qualified Data.Map.Strict as Map
 import qualified Prettyprinter as PP
+import qualified Text.LLVM as L
+-- import Data.List.NonEmpty (NonEmpty)
+-- import qualified Data.List.NonEmpty as NonEmpty
 
 import Debug.Trace ( trace )
 
@@ -32,11 +35,14 @@ traceUnification = False
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
 prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
 
-newtype TyVar = TyVar {tyVarInt :: Int }
+data TyVar = TyVar
+  { tyVarInt :: Int
+  , tyVarOrigin :: String
+  }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty TyVar where
-  pretty (TyVar n) = "α" <> (PP.pretty n)
+  pretty tyv = "α" <> PP.pretty (tyVarInt tyv) <> " (" <> PP.pretty (tyVarOrigin tyv) <> ")"
 
 class FreeTyVars a where
   freeTyVars :: a -> Set TyVar
@@ -108,6 +114,13 @@ instance FreeRowVars (Ty tvar RowVar) where
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
+
+
+tyToLLVMType :: FTy -> L.Type
+tyToLLVMType (NumTy n) = L.PrimType (L.Integer (fromIntegral n))
+tyToLLVMType (PtrTy typ) = L.PtrTo (tyToLLVMType typ)
+tyToLLVMType (RecTy _flds _row) = error "tyToLLVMType: RecTy"
+tyToLLVMType (UnknownTy Unknown) = L.PrimType (L.Integer 64)
 
 
 instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
@@ -260,8 +273,9 @@ andTC = go Set.empty
         go acc (c:cs) = go (Set.insert c acc) cs
 
 
-
 $(pure [])
+
+
 ----------------------------------------------------------------------------------------
 -- Type Operations
 
