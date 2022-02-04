@@ -174,7 +174,7 @@ data Args = Args
     -- | Path to export functions file
     fnsExportPath :: !(Maybe FilePath),
     -- | Path to export functions file
-    typedFnsExportPath :: !(Maybe FilePath),    
+    typedFnsExportPath :: !(Maybe FilePath),
     -- | Path to export LLVM file
     llvmExportPath :: !(Maybe FilePath),
     -- | Path to export object file
@@ -230,7 +230,7 @@ defaultArgs =
       llvmGenOptions = defaultLLVMGenOptions,
       cfgExportPath = Nothing,
       fnsExportPath = Nothing,
-      typedFnsExportPath = Nothing,      
+      typedFnsExportPath = Nothing,
       llvmExportPath = Nothing,
       objectExportPath = Nothing,
       relinkerInfoExportPath = Nothing,
@@ -725,14 +725,14 @@ showConstraints args = do -- FIXME: copied from main performReopt command
     (recMod, _relinkerInfo, _logEvents) <-
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
 
-    pure (genModule recMod (memory discState))
+    pure (genModuleConstraints recMod (memory discState))
 
   mc <-   handleEitherWithExit mr
 
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings mc)))
   putStrLn "Constraints"
-  putStrLn (unlines (map ((++) "\t" . show) (mcConstraints mc)))
+  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints mc)))
   putStrLn "Inferred types"
   putStrLn (showInferredTypes mc)
 
@@ -872,7 +872,7 @@ performReopt args = do
         reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
     -- Generate constraints
-    let moduleConstraints = genModule recMod (memory discState)
+    let moduleConstraints = genModuleConstraints recMod (memory discState)
     case typedFnsExportPath args of
       Nothing -> pure ()
       Just path -> do
@@ -880,11 +880,21 @@ performReopt args = do
         reoptWrite FunsFileType path $ \h -> do
           mapM_ (PP.hPutDoc h . ppFunction moduleConstraints) (recoveredDefs recMod)
 
+    -- TODO: DELETE THIS
+    reoptIO $ do
+      putStrLn "Warnings"
+      putStrLn (unlines (map ((++) "\t" . show) (mcWarnings moduleConstraints)))
+      putStrLn "Constraints"
+      putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
+      putStrLn "Inferred types"
+      putStrLn (showInferredTypes moduleConstraints)
+
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
     -- Generate LLVM
     let (objLLVM, ann, ext, _logEvents) =
-          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod
+          renderLLVMBitcode (llvmGenOptions args) (llvmVersion args) os recMod moduleConstraints
+
     -- Write LLVM if requested.
     case llvmExportPath args of
       Nothing -> pure ()
