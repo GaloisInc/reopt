@@ -64,7 +64,7 @@ data Ty tvar rvar
   = -- | An unknown type (e.g., type variable).
     UnknownTy tvar
   | -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
-    NumTy
+    NumTy Int
   | -- | A pointer to a value.
     PtrTy (Ty tvar rvar)
   | -- | Record type, mapping byte offsets to types and with a row variable
@@ -98,14 +98,14 @@ type FTy = Ty Unknown NoRow
 instance FreeTyVars (Ty TyVar rvar) where
   freeTyVars = \case
     UnknownTy x -> Set.singleton x
-    NumTy -> Set.empty
+    NumTy _ -> Set.empty
     PtrTy t -> freeTyVars t
     RecTy flds _row -> foldr (Set.union . freeTyVars) Set.empty flds
 
 instance FreeRowVars (Ty tvar RowVar) where
   freeRowVars = \case
     UnknownTy _ -> Set.empty
-    NumTy -> Set.empty
+    NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
 
@@ -113,8 +113,8 @@ instance FreeRowVars (Ty tvar RowVar) where
 instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
   pretty = \case
     UnknownTy x -> PP.pretty x
-    NumTy -> "num"
-    PtrTy t -> "ptr" <> (PP.parens $ PP.pretty t)
+    NumTy sz -> "num" <> PP.pretty sz
+    PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
     RecTy flds row -> PP.group $ PP.braces $ PP.cat
                       $ (++ ["|" PP.<> PP.pretty row])
                       $ PP.punctuate PP.comma
@@ -259,8 +259,8 @@ andTC = go Set.empty
         go acc (AndTC (AndC cs):cs') = go acc (cs++cs')
         go acc (c:cs) = go (Set.insert c acc) cs
 
-isNumTC :: ITy -> TyConstraint
-isNumTC t = EqTC (EqC t NumTy)
+isNumTC :: Int -> ITy -> TyConstraint
+isNumTC sz t = EqTC (EqC t (NumTy sz))
 
 isPtrTC :: ITy -> ITy -> TyConstraint
 isPtrTC pointer pointee = EqTC (EqC pointer (PtrTy pointee))
@@ -284,7 +284,7 @@ class SubstTyVar a where
 instance SubstTyVar ITy where
   substTyVar xt@(x, xTy) = \case
     UnknownTy y -> if x == y then xTy else UnknownTy y
-    NumTy -> NumTy
+    NumTy sz -> NumTy sz
     PtrTy t -> PtrTy $ substTyVar xt t
     RecTy flds rvar -> RecTy (fmap (substTyVar xt) flds) rvar
 
@@ -624,7 +624,7 @@ reduceContext ctx0 = traceContext "reduceContext" ctx0 $
 removeTyVars :: ITy -> Ty Unknown RowVar
 removeTyVars = \case
   UnknownTy _ -> unknownTy
-  NumTy -> NumTy
+  NumTy sz -> NumTy sz
   PtrTy ty -> PtrTy $ removeTyVars ty
   RecTy flds rv -> RecTy (fmap removeTyVars flds) rv
 
@@ -632,7 +632,7 @@ removeTyVars = \case
 removeRowVars :: Ty Unknown RowVar -> FTy
 removeRowVars = \case
   UnknownTy _ -> unknownTy
-  NumTy -> NumTy
+  NumTy sz -> NumTy sz
   PtrTy ty -> PtrTy $ removeRowVars ty
   RecTy flds _ -> RecTy (fmap removeRowVars flds) NoRow
 
@@ -643,7 +643,7 @@ removeRowVars = \case
 substRowVar :: Map RowVar (Map Offset FTy) -> Ty Unknown RowVar -> FTy
 substRowVar rowMaps = \case
   UnknownTy{} -> unknownTy
-  NumTy -> NumTy
+  NumTy sz -> NumTy sz
   PtrTy t -> PtrTy $ substRowVar rowMaps t
   RecTy flds r -> let flds' = fmap (substRowVar rowMaps) flds in
     case Map.lookup r rowMaps of
