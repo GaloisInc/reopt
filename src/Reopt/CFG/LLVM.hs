@@ -940,7 +940,8 @@ appToLLVM lhs app = bbArchConstraints $ do
       v' <- mkLLVMValue v
       call ctlz [v', L.iT 1 L.-: L.int 1]
 
--- | Evaluate a value as a pointer (and log).
+-- | Evaluate a value as a pointer (log if we need to perform a non-constant
+-- inttoptr cast).
 llvmAsPtr :: HasCallStack
           => String
           -- ^ Context calling this helper (for logging purposes)
@@ -949,12 +950,17 @@ llvmAsPtr :: HasCallStack
           -> L.Type
              -- ^ Type of value pointed to
           -> BBLLVM arch (L.Typed L.Value)
-llvmAsPtr ctx ptr tp = do
+llvmAsPtr ctx ptr pointeeType = do
+  let pointerType = L.PtrTo pointeeType
   llvmPtrAsBV  <- mkLLVMValue ptr
-  logEvent $ LLVMLogEvent ctx
-           $ LogInfoIntToPtr
-           $ LLVMBitCastInfo (L.typedType llvmPtrAsBV) (L.PtrTo tp)
-  convop L.IntToPtr llvmPtrAsBV (L.PtrTo tp)
+  case ptr of
+    FnConstantValue{} ->
+      pure (L.Typed pointerType (L.ValConstExpr (L.ConstConv L.IntToPtr llvmPtrAsBV pointerType)))
+    _ -> do
+      logEvent $ LLVMLogEvent ctx
+               $ LogInfoIntToPtr
+               $ LLVMBitCastInfo (L.typedType llvmPtrAsBV) pointerType
+      convop L.IntToPtr llvmPtrAsBV pointerType
 
 
 llvmGetElementPtr ::
@@ -991,11 +997,7 @@ llvmGetElementPtrAfterCast pointeeType toBePointer offset =
   case testEquality (type_width (typeRepr toBePointer)) (memWidthNatRepr @(ArchAddrWidth arch)) of
     Just Refl -> do
       let pointerType = L.PtrTo pointeeType
-      pointer <- case toBePointer of
-        FnConstantValue _ _ -> do
-          pointer <- mkLLVMValue toBePointer
-          pure (L.Typed pointerType (L.ValConstExpr (L.ConstConv L.IntToPtr pointer pointerType)))
-        _ -> llvmAsPtr "llvmGetElementPtrAfterCast" toBePointer pointeeType
+      pointer <- llvmAsPtr "llvmGetElementPtrAfterCast" toBePointer pointeeType
       L.Typed pointerType <$> evalInstr (L.GEP False pointer [offset])
     Nothing ->
       error "llvmGetElementPtrAfterCast was passed a candidate pointer value whose size does not match the architecture pointer size!"
