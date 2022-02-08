@@ -963,9 +963,10 @@ llvmGetElementPtr ::
   FnValue arch (BVType n) ->
   BBLLVM arch (L.Typed L.Value)
 llvmGetElementPtr pointee ptr ofs = do
-  ptrV <- mkLLVMValue ptr
+  L.Typed _ ptrV <- mkLLVMValue ptr
+  let pointerType = L.PtrTo pointee
   ofsV <- mkLLVMValue ofs
-  L.Typed (L.PtrTo pointee) <$> evalInstr (L.GEP False ptrV [ofsV])
+  L.Typed pointerType <$> evalInstr (L.GEP False (L.Typed pointerType ptrV) [ofsV])
 
 
 -- | Emits a `getelementptr` instruction, but assumes the given pointer value is
