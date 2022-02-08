@@ -268,13 +268,27 @@ atFnAssignId ::
   Lens' (CGenState arch) (Maybe TyVar)
 atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
 
--- | Creates a new type variable and associates it with the assignment
-freshTyVarForAssignId :: BSC.ByteString -> FnAssignId -> CGenM ctx arch TyVar
-freshTyVarForAssignId fn aId = do
-  -- fn <- askContext cgenCurrentFunName
-  tyv <- freshTyVar (show aId <> " in " <> show fn)
-  CGenM $ atFnAssignId fn aId ?= tyv
-  pure tyv
+
+-- | Retrieves the type variable associated to the given `FnAssignId`, if any,
+-- otherwise creates and registers a fresh type variable for it.
+--
+-- NOTE: This does **not** use the function name present in the monadic context,
+-- because we sometimes wants to resolve assign ids for other functions than the
+-- one currently being analyzed.
+tyVarForAssignId ::
+  -- | Function defining the `FnAssignId`
+  BSC.ByteString ->
+  FnAssignId ->
+  CGenM ctx arch TyVar
+tyVarForAssignId fn aId = do
+  mtv <- CGenM $ use (atFnAssignId fn aId)
+  case mtv of
+    Just tv -> pure tv
+    Nothing -> do
+      tyv <- freshTyVar (show aId <> " in " <> show fn)
+      CGenM $ atFnAssignId fn aId ?= tyv
+      pure tyv
+
 
 -- freshForCallRet :: FnReturnVar tp -> CGenM ctx arch TyVar
 -- freshForCallRet a = do
@@ -290,7 +304,7 @@ assignIdTyVar fn aId = do
   -- fn <- askContext cgenCurrentFunName
   mTyVar <- CGenM $ use (atFnAssignId fn aId)
   case mTyVar of
-    Nothing -> freshTyVarForAssignId fn aId
+    Nothing -> tyVarForAssignId fn aId
     Just tyVar -> pure tyVar
 
 -- | Returns the associated type for a function assignment id, if any.
@@ -555,7 +569,7 @@ genFnAssignment ::
   FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
-  ty <- varITy <$> freshTyVarForAssignId fn (fnAssignId a)
+  ty <- varITy <$> tyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
     FnReadMem ptr sz -> do
@@ -689,7 +703,7 @@ genFunction fn {- blockPhis -} = do
     <$> askContext cgenFunTypes
   let mkPhis b =
         let phiVars = viewSome unFnPhiVar <$> V.toList (fbPhiVars b) in
-        let mkPhiVar aId = varITy <$> freshTyVar ("%phi " <> show aId) in
+        let mkPhiVar aId = varITy <$> tyVarForAssignId (fnName fn) aId in
         (,) (fbLabel b) <$> mapM mkPhiVar phiVars
   bphis <- Map.fromList <$> mapM mkPhis (fnBlocks fn)
   withinContext
