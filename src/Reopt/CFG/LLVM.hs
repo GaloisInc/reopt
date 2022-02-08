@@ -1560,7 +1560,7 @@ defineFunction archOps genOpts constraints f = do
   let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
       mkInputReg (Some tp, tyv) i =
         case Map.lookup tyv (mcTypeMap constraints) of
-          Just (PtrTy _) -> L.Typed (L.PtrTo (L.PrimType (L.Integer 32))) (argIdent i)
+          Just (PtrTy pointee) -> L.Typed (L.PtrTo (tyToLLVMType pointee)) (argIdent i)
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
   let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes constraints))
