@@ -434,8 +434,15 @@ genApp ::
   (ITy, Int) -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
 genApp (ty, outSize) app =
   case app of
-    Eq l r    -> vEq l r
-    Mux _ _ l r -> vEq l r
+
+    Eq l r -> do
+      join (emitEq <$> genFnValue l <*> genFnValue r)
+      emitNotPtr 1 ty
+
+    Mux _ _ l r -> do
+      lTy <- genFnValue l
+      emitEq lTy =<< genFnValue r
+      emitEq ty lTy -- ty = rTy follows by transitivity, so we don't add it
 
     -- We don't generate any further constraints for boolean ops
     AndApp {} -> pure ()
@@ -511,14 +518,6 @@ genApp (ty, outSize) app =
     Bsf _ v          -> nonptrUnOp v
     Bsr _ v          -> nonptrUnOp v
   where
-    vEq :: forall arch tp tp'.
-      FnArchConstraints arch =>
-      FnValue arch tp -> FnValue arch tp' -> CGenM CGenBlockContext arch ()
-    vEq l r = do
-      l_ty <- genFnValue l
-      r_ty <- genFnValue r
-      emitEq l_ty r_ty
-      emitEq ty l_ty -- r_ty == ty by transitivity, so we don't add it
 
     nonptrUnOp :: forall n arch.
       FnArchConstraints arch =>
