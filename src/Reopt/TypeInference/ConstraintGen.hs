@@ -305,7 +305,7 @@ tyVarForAssignId fn aId = do
   case mtv of
     Just tv -> pure tv
     Nothing -> do
-      tyv <- freshTyVar (show aId <> " in " <> BSC.unpack fn)
+      tyv <- freshTyVar (BSC.unpack fn <> "." <> show aId)
       CGenM $ atFnAssignId fn aId ?= tyv
       pure tyv
 
