@@ -73,6 +73,7 @@ import System.Directory
    withCurrentDirectory, doesFileExist, removeFile)
 import System.Timeout (timeout)
 import Text.Printf (printf)
+import Reopt.TypeInference.ConstraintGen (ModuleConstraints)
 
 reoptVersion :: String
 reoptVersion = "Reopt binary explorer (reopt-explore) " ++ versionString ++ "."
@@ -312,13 +313,13 @@ exploreBinary args opts totalCount (index, fPath) = do
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-      (os, _, recMod, _, logEvents) <-
+      (os, _, recMod, constraints, _, logEvents) <-
         handleEitherWithExit =<<
           (runReoptM logger $
             recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo)
       res <-
         catch
-          (generateLLVM os recMod)
+          (generateLLVM os recMod constraints)
           (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
       summary <- readIORef summaryRef
       stats <- readIORef statsRef
@@ -329,14 +330,16 @@ exploreBinary args opts totalCount (index, fPath) = do
     generateLLVM ::
       X86OS ->
       RecoveredModule X86_64 ->
+      ModuleConstraints X86_64 ->
       IO LLVMGenResult
-    generateLLVM os recMod = do
+    generateLLVM os recMod constraints = do
       let (objLLVM, _, _, logEvents) =
             renderLLVMBitcode
               defaultLLVMGenOptions
               latestLLVMConfig
               os
               recMod
+              constraints
       let sz = BSL.length $ BS.toLazyByteString objLLVM
       llvmRes <- seq sz $ do
         if roVerboseMode opts

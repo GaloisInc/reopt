@@ -14,9 +14,9 @@ import qualified Data.Vector                       as V
 import           Prettyprinter
 import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.ConstraintGen (FunType (..),
-                                                    ITy, FTy,
+                                                    FTy,
                                                     ModuleConstraints (..))
-import           Reopt.TypeInference.Constraints   (Ty (UnknownTy))
+import           Reopt.TypeInference.Constraints   (TyVar)
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc a] -> Doc a
@@ -74,8 +74,8 @@ ppFunction mcs fn
   | Just tyvs <- Map.lookup (fnName fn) (mcAssignTyVars mcs)
   , Just fty  <- Map.lookup (fnAddr fn) (mcFunTypes mcs)
   = let tyvs' = Map.compose (mcTypeMap mcs) tyvs
-        atp = parens (commas (zipWith ppArg [0..] (funArgs fty)))
-        rtp = maybe "void" ppTy (funRet fty)
+        atp = parens (commas (zipWith ppArg [0..] (funTypeArgs fty)))
+        rtp = maybe "void" pretty (funTypeRet fty)
     in vcat [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
             , lbrace
             , nest 4 $ vcat (ppBlock tyvs' <$> fnBlocks fn)
@@ -85,16 +85,8 @@ ppFunction mcs fn
     nm = pretty (BSC.unpack (fnName fn))
     addr = pretty (fnAddr fn)
 
+    ppArg :: Integer -> TyVar -> Doc a
+    ppArg i tv = "arg" <> pretty i <> " : " <> pretty tv
 
-    -- non
-    ppTy (UnknownTy tyv)
-      | Just tp <- Map.lookup tyv (mcTypeMap mcs) = pretty tp
-      | otherwise = "???"
-    ppTy ty = pretty ty
-
-    ppArg :: Integer -> ITy -> Doc a
-    ppArg i tp = "arg" <> pretty i <> " : " <> ppTy tp
-
--- Unknown type/unknown assigns  
+-- Unknown type/unknown assigns
 ppFunction _mcs fn = pretty fn
-
