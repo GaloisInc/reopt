@@ -798,7 +798,7 @@ showInferredTypes mc =
   unlines (showMapping <$> Map.assocs (mcTypeMap mc))
   where
     showMapping :: (TyVar, FTy) -> String
-    showMapping (tv, ty) = concat [ show (PP.pretty tv), " : ", show ty ]
+    showMapping (tv, ty) = concat [ show (PP.pretty tv), " : ", show (PP.pretty ty) ]
 
 
 genModuleConstraints ::
