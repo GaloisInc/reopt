@@ -51,10 +51,9 @@ class FreeRowVars a where
   freeRowVars :: a -> Set RowVar
 
 -- | Byte offset.
-newtype Offset = Offset {offsetInt :: Int}
+newtype Offset = Offset { offsetInt :: Integer }
   deriving (Eq, Ord, Show)
-  deriving Num via Int
-
+  deriving Num via Integer
 
 
 instance PP.Pretty Offset where
@@ -121,10 +120,10 @@ instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
                       $ map (\(off,t) -> (PP.pretty off PP.<+> ":" PP.<+> PP.pretty t))
                       $ Map.toAscList flds
 
-iRecTy :: [(Int, ITy)] -> RowVar -> ITy
+iRecTy :: [(Integer, ITy)] -> RowVar -> ITy
 iRecTy flds r = RecTy (Map.fromList (map (first Offset) flds)) r
 
-fRecTy :: [(Int, FTy)] -> FTy
+fRecTy :: [(Integer, FTy)] -> FTy
 fRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) NoRow
 
 
