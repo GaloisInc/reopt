@@ -44,7 +44,7 @@ import           Data.Macaw.CFG             (App (..), ArchAddrWidth,
 import           Data.Macaw.Memory          (Memory, absoluteAddr,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth)
-import           Data.Macaw.Types           (BVType)
+import           Data.Macaw.Types           (BVType, TypeRepr, HasRepr (typeRepr))
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -71,7 +71,7 @@ instance Show (FunType arch) where
     maybe "_|_" show (funRet ft)
 
 varITy :: TyVar -> ITy
-varITy tv = UnknownTy tv
+varITy = UnknownTy
 
 -- This is the free type for constraints, should be replace by the
 --  type from the constraint solver.
@@ -83,7 +83,10 @@ data Constraint =
   | CAddrWidthSub ITy ITy ITy
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
   | CBVNotPtr ITy -- ^ The argument cannot be a ptr (so should be a bv)
-  | CIsPtr ITy    -- ^ The type must point to something
+  | CIsPtr ITy -- ^ The type must point to something
+  | CStructPtr ITy ITy Integer (Some TypeRepr)
+    -- ^ @CStructPtr r p o sz@ means @r@ is read from pointer type @p@ at offset
+    -- @o@, size @sz@
 
 instance PP.Pretty Constraint where
   pretty = \case
@@ -92,9 +95,47 @@ instance PP.Pretty Constraint where
     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
     CBVNotPtr t -> PP.hsep ["non-ptr", PP.pretty t]
     CIsPtr t -> PP.hsep ["ptr ", PP.pretty t]
+    CStructPtr tr tp o (Some sz) ->
+      PP.hsep ["struct_ptr", PP.pretty tr, PP.pretty tp, PP.pretty o, PP.pretty sz]
 
 instance Show Constraint where
   show = show . PP.pretty
+
+data TyConstraintOptions m =
+  TyConstraintOptions
+  { -- | How to generate a type to describe what a pointer points at
+    tyConGenPtrTgt :: m ITy
+    -- | How to generate a row
+  , tyConGenRowVar :: m RowVar
+  }
+
+-- | Converts the limited `Constraint` grammar to the more general
+-- `TyConstraint` type used for constraint solving.
+tyConstraint ::
+  Monad m =>
+  TyConstraintOptions m -> Constraint -> m TyConstraint
+tyConstraint opts  = \case
+  CEq t1 t2 -> pure $ eqTC t1 t2
+  CAddrWidthAdd ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
+  CAddrWidthSub ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
+  CBVNotPtr t -> pure $ isNumTC t
+  CIsPtr t -> isPtrTC t <$> tyConGenPtrTgt opts
+  CStructPtr fieldType pointerType offset _fieldSize -> do
+    -- Either pointerType is a ptr, or it is a num and the offset is actually a
+    -- global.
+    -- FIXME: better handle the latter case
+    row <- tyConGenRowVar opts
+    pure $ orTC [ andTC [ isOffsetTC pointerType (fromInteger offset) fieldType row ]
+                , andTC [ isNumTC pointerType ]
+                ]
+  where
+    possiblyPointerArithmetic ret lhs rhs = do
+      ty <- tyConGenPtrTgt opts
+      pure $ orTC
+        [ andTC [isNumTC ret,    isNumTC lhs,    isNumTC rhs]
+        , andTC [isPtrTC ret ty, isPtrTC lhs ty, isNumTC rhs]
+        , andTC [isPtrTC ret ty, isNumTC lhs,    isPtrTC rhs ty]
+        ]
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -220,27 +261,6 @@ freshTyVar = CGenM $ TyVar <$> (nextFreeTyVar <<+= 1)
 -- when doing so =)
 _freshRowVar :: CGenM ctx arch RowVar
 _freshRowVar = CGenM $ RowVar <$> (nextFreeRowVar <<+= 1)
-
--- | Converts the limited `Constraint` grammar to the more general
--- `TyConstraint` type used for constraint solving.
-tyConstraint :: Constraint -> CGenM ctx arch TyConstraint
-tyConstraint = \case
-  CEq t1 t2 -> pure $ eqTC t1 t2
-  CAddrWidthAdd ret lhs rhs -> maybePtrBinop ret lhs rhs
-  CAddrWidthSub ret lhs rhs -> maybePtrBinop ret lhs rhs
-  CBVNotPtr t -> pure $ eqTC t NumTy
-  CIsPtr t -> do
-    x <- UnknownTy <$> freshTyVar
-    pure $ eqTC t (PtrTy x)
-  where
-    maybePtrBinop ret lhs rhs = do
-      x1 <- UnknownTy <$> freshTyVar
-      x2 <- UnknownTy <$> freshTyVar
-      pure $ orTC
-        [ andTC [eqTC ret NumTy,      eqTC lhs NumTy,      eqTC rhs NumTy]
-        , andTC [eqTC ret (PtrTy x2), eqTC lhs (PtrTy x1), eqTC rhs NumTy]
-        , andTC [eqTC ret (PtrTy x2), eqTC lhs NumTy,      eqTC rhs (PtrTy x1)]
-        ]
 
 atFnAssignId ::
   BSC.ByteString ->
@@ -384,6 +404,9 @@ emitNotPtr t = emitConstraint (CBVNotPtr t)
 emitPtr :: ITy -> CGenM ctx arch ()
 emitPtr t = emitConstraint (CIsPtr t)
 
+emitStructPtr :: ITy -> ITy -> Integer -> Some TypeRepr -> CGenM ctx arch ()
+emitStructPtr tr tp o sz = emitConstraint (CStructPtr tr tp o sz)
+
 -- -----------------------------------------------------------------------------
 -- Core algorithm
 
@@ -514,15 +537,31 @@ genApp ty app =
       emitNotPtr =<< genFnValue r
 
 
-genFnAssignment :: FnAssignment arch tp -> CGenM CGenBlockContext arch ()
+genMemOp :: ITy -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
+            CGenM CGenBlockContext arch ()
+genMemOp ty ptr sz =
+  case ptr of
+    FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q)}
+      -- We rely on macaw to have constant folded adds, so only one
+      -- will be a const.  We also need to deal with global +
+      -- computed.  This should be done in constrain translation.
+      | FnConstantValue _ o <- q ->
+        do tp <- genFnValue p
+           emitStructPtr ty tp o sz
+      | FnConstantValue _ o <- p ->
+        do tp <- genFnValue q
+           emitStructPtr ty tp o sz
+    _ -> emitPtr =<< genFnValue ptr
+
+genFnAssignment :: FnArchConstraints arch => FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varITy <$> freshTyVarForAssignId fn (fnAssignId a)
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
-    FnReadMem ptr _sz -> emitPtr =<< genFnValue ptr
+    FnReadMem ptr sz -> genMemOp ty ptr (Some sz)
     FnCondReadMem _sz _cond ptr def -> do
-      emitPtr =<< genFnValue ptr
+      genMemOp ty ptr (Some (typeRepr def))
       emitEq ty =<< genFnValue def
 
     FnEvalApp app -> genApp ty app
@@ -531,14 +570,18 @@ genFnAssignment a = do
 
 
 -- The offset argument is used by call term stmts
-genFnStmt :: FnStmt arch
+genFnStmt :: FnArchConstraints arch => FnStmt arch
           -> CGenM CGenBlockContext arch ()
 genFnStmt stmt =
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
-    FnWriteMem addr _v -> emitPtr =<< genFnValue addr
-    FnCondWriteMem _cond addr _v _ -> emitPtr =<< genFnValue addr
+    FnWriteMem addr v -> do
+      tr <- genFnValue v
+      genMemOp tr addr (Some (typeRepr v))
+    FnCondWriteMem _cond addr v _ -> do
+      tr <- genFnValue v
+      genMemOp tr addr (Some (typeRepr v))
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
 
@@ -585,7 +628,7 @@ genCall fn args m_ret = do
   where
     go (Some v) ty = emitEq ty =<< genFnValue v
 
-genFnBlock :: FnBlock arch -- ^ Current block
+genFnBlock :: FnArchConstraints arch => FnBlock arch -- ^ Current block
            -> CGenM CGenFunctionContext arch ()
 genFnBlock b = do
   withinContext CGenBlockContext $ do
@@ -622,6 +665,7 @@ genFnBlock b = do
           _ -> pure ()
 
 genFunction ::
+  FnArchConstraints arch =>
   -- Map (FnBlockLabel (ArchAddrWidth arch)) [ITy] ->
   Function arch -> CGenM CGenModuleContext arch ()
 genFunction fn {- blockPhis -} = do
@@ -678,6 +722,7 @@ showInferredTypes mc =
 
 
 genModule ::
+  FnArchConstraints arch =>
   FoldableF (FnArchStmt arch) =>
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
@@ -707,7 +752,12 @@ genModule m mem = fst $ runCGenM mem $ do
   tvsO <- CGenM $ use tyVarsOrigin
   warns <- CGenM $ use warnings
 
-  cstrs <- mapM tyConstraint =<< (CGenM $ use constraints)
+  let tyConOpts = TyConstraintOptions
+        { tyConGenPtrTgt = UnknownTy <$> freshTyVar
+        , tyConGenRowVar = _freshRowVar
+        }
+
+  cstrs <- mapM (tyConstraint tyConOpts) =<< CGenM (use constraints)
 
   pure ModuleConstraints { mcFunTypes     = addrMap
                          , mcExtFunTypes  = symMap

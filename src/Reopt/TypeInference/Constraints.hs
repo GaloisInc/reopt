@@ -36,7 +36,7 @@ newtype TyVar = TyVar {tyVarInt :: Int }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty TyVar where
-  pretty (TyVar n) = "α" <> (PP.pretty n)
+  pretty (TyVar n) = "α" <> PP.pretty n
 
 class FreeTyVars a where
   freeTyVars :: a -> Set TyVar
@@ -45,7 +45,7 @@ newtype RowVar = RowVar {rowVarInt :: Int }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty RowVar where
-  pretty (RowVar n) = "ρ" <> (PP.pretty n)
+  pretty (RowVar n) = "ρ" <> PP.pretty n
 
 class FreeRowVars a where
   freeRowVars :: a -> Set RowVar
@@ -140,7 +140,7 @@ instance FreeRowVars EqC where
   freeRowVars (EqC t1 t2) = Set.union (freeRowVars t1) (freeRowVars t2)
 
 
--- | @InRowC o t r@ means in row @r@ offset @t@ must contain a @t@.
+-- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
 data InRowC = InRowC Offset ITy RowVar
   deriving (Eq, Ord, Show)
 
@@ -161,27 +161,27 @@ data RowShiftC = RowShiftC RowVar Offset RowVar
 instance PP.Pretty RowShiftC where
   pretty (RowShiftC r1 o r2) = prettySExp ["shift", PP.pretty r1,PP.pretty o,"=",PP.pretty r2]
 instance FreeTyVars RowShiftC where
-  freeTyVars (RowShiftC _ _ _) = Set.empty
+  freeTyVars RowShiftC{} = Set.empty
 instance FreeRowVars RowShiftC where
   freeRowVars (RowShiftC r1 _ r2) = Set.fromList [r1,r2]
 
 -- | Logical disjunction.
-data OrC = OrC [TyConstraint]
+newtype OrC = OrC [TyConstraint]
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty OrC where
-  pretty (OrC tcs) = prettySExp $ "or":(map PP.pretty tcs)
+  pretty (OrC tcs) = prettySExp $ "or" : map PP.pretty tcs
 instance FreeTyVars OrC where
   freeTyVars (OrC cs) = foldr (Set.union . freeTyVars) Set.empty cs
 instance FreeRowVars OrC where
   freeRowVars (OrC cs) = foldr (Set.union . freeRowVars) Set.empty cs
 
 -- | Logical conjunction.
-data AndC = AndC [TyConstraint]
+newtype AndC = AndC [TyConstraint]
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty AndC where
-  pretty (AndC tcs) = prettySExp $ "and":(map PP.pretty tcs)
+  pretty (AndC tcs) = prettySExp $ "and" : map PP.pretty tcs
 instance FreeTyVars AndC where
   freeTyVars (AndC cs) = foldr (Set.union . freeTyVars) Set.empty cs
 instance FreeRowVars AndC where
@@ -259,6 +259,15 @@ andTC = go Set.empty
         go acc (AndTC (AndC cs):cs') = go acc (cs++cs')
         go acc (c:cs) = go (Set.insert c acc) cs
 
+isNumTC :: ITy -> TyConstraint
+isNumTC t = EqTC (EqC t NumTy)
+
+isPtrTC :: ITy -> ITy -> TyConstraint
+isPtrTC pointer pointee = EqTC (EqC pointer (PtrTy pointee))
+
+isOffsetTC :: ITy -> Int -> ITy -> RowVar -> TyConstraint
+isOffsetTC base offset typ row =
+  EqTC (EqC base (PtrTy (RecTy (Map.singleton (Offset offset) typ) row)))
 
 
 $(pure [])
