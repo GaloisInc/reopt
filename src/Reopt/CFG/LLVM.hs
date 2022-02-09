@@ -849,7 +849,7 @@ appToLLVM lhs app = bbArchConstraints $ do
       llvmVal <- mkLLVMValue x
       llvmBitCast "appToLLVM" llvmVal (typeToLLVMType (widthEqTarget tp))
     BVAdd _sz x y -> do
-      typeOfResult <- getInferredTypeForAssignId lhs
+      typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
       tx <- getInferredType x
       ty <- getInferredType y
       case (typeOfResult, tx, ty) of
@@ -1253,31 +1253,43 @@ termStmtToLLVM tm =
         _ -> do
           error "Expected function type to tail call target."
 
-resolvePhiStmt :: PhiValues
-               -> PhiBinding arch
-               -> [L.Stmt]
-resolvePhiStmt phiValues b =
-  case phiFnRepVar b of
-    Some phiVar ->
-      let lnm = L.Ident (phiLLVMIdent b)
-          llvmType :: L.Type
-          llvmType  = typeToLLVMType (fnPhiVarType phiVar)
-          llvmPhiValues :: [(L.Value, L.BlockLabel)]
-          llvmPhiValues = [ binding
-                          | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
-                          , binding <- replicate llvmCnt (llvmVal, lbl)
-                          ]
-          showPhiAssignIdsInComments = True
-      in
-      [L.Effect (L.Comment (show (unFnPhiVar phiVar))) [] | showPhiAssignIdsInComments]
-      ++ [L.Result lnm (L.Phi llvmType llvmPhiValues) []]
+resolvePhiStmt ::
+  ModuleConstraints arch ->
+  BSC.ByteString ->
+  PhiValues ->
+  PhiBinding arch ->
+  [L.Stmt]
+resolvePhiStmt constraints function phiValues b =
+  let phiAssignId = viewSome unFnPhiVar (phiFnRepVar b)
+      lnm = L.Ident (phiLLVMIdent b)
+      -- If we inferred a type for the phi variable by constraint solving, it
+      -- takes precedence over the type we inferred at recovery time.
+      llvmType :: L.Type
+      llvmType  =
+        case getKnownInferredType constraints function phiAssignId of
+          Just inferredType -> tyToLLVMType inferredType
+          Nothing -> viewSome (typeToLLVMType . fnPhiVarType) (phiFnRepVar b)
+      llvmPhiValues :: [(L.Value, L.BlockLabel)]
+      llvmPhiValues = [ binding
+                      | (lbl, (llvmCnt, llvmVal)) <- Map.toList phiValues
+                      , binding <- replicate llvmCnt (llvmVal, lbl)
+                      ]
+      showPhiAssignIdsInComments = True
+  in
+  [L.Effect (L.Comment (show phiAssignId)) [] | showPhiAssignIdsInComments]
+  ++ [L.Result lnm (L.Phi llvmType llvmPhiValues) []]
 
 -- | Construct a basic block from a block result
-toBasicBlock :: (LLVMArchConstraints arch, HasCallStack)
-             => ResolvePhiMap (ArchAddrWidth arch)
-             -> LLVMBlockResult arch -- ^ This block
-             -> L.BasicBlock
-toBasicBlock phiMap res
+toBasicBlock ::
+  HasCallStack =>
+  LLVMArchConstraints arch =>
+  ModuleConstraints arch ->
+  BSC.ByteString ->
+  ResolvePhiMap (ArchAddrWidth arch) ->
+  -- | This block
+  LLVMBlockResult arch ->
+  L.BasicBlock
+toBasicBlock constraints function phiMap res
   | V.length phiVars /= V.length phiAssignment =
     error "Phi variables length does not match phi assignment."
   | otherwise =
@@ -1288,7 +1300,7 @@ toBasicBlock phiMap res
         phiVars = llvmPhiVars res
         phiAssignment = phiAssignmentForBlock phiMap (fbLabel b)
         lbl = L.Named (L.Ident (fnBlockLabelString (fbLabel b)))
-        phiStmts = join . V.toList $ V.zipWith resolvePhiStmt phiAssignment phiVars
+        phiStmts = join . V.toList $ V.zipWith (resolvePhiStmt constraints function) phiAssignment phiVars
         finalState = finalBBState res
 
 -- | Information relating a Macaw funcation variable and LLVM identifier.
@@ -1588,10 +1600,10 @@ defineFunction archOps genOpts constraints f = do
                                           ++ llvmTransLogEvents s}
 
   let entryLLVMBlock :: L.BasicBlock
-      entryLLVMBlock = toBasicBlock (funBlockPhiMap finalFunState) entryBlockRes
+      entryLLVMBlock = toBasicBlock constraints (fnName f) (funBlockPhiMap finalFunState) entryBlockRes
 
   let blocks :: [L.BasicBlock]
-      blocks = toBasicBlock (funBlockPhiMap finalFunState) <$> finalBlocks
+      blocks = toBasicBlock constraints (fnName f) (funBlockPhiMap finalFunState) <$> finalBlocks
 
   let finBlocks
         | needSwitchFailLabel finalFunState = entryLLVMBlock : (blocks ++ [failBlock])
@@ -1704,8 +1716,8 @@ getInferredType :: FnValue arch (BVType n) -> BBLLVM arch (Maybe FTy)
 getInferredType FnUndefined{} = pure Nothing
 getInferredType FnConstantValue{} = pure Nothing
 getInferredType FnFunctionEntryValue{} = pure Nothing
-getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignId aId
-getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignId (unFnPhiVar phiVar)
+getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignIdBBLLVM aId
+getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
 getInferredType (FnReturn _retVar) = error "getInferredType FnReturn" -- getInferredTypeForAssignId (frAssignId retVar)
 getInferredType (FnArg arg _typ) = do
   fn <- asks funAddr
@@ -1714,14 +1726,35 @@ getInferredType (FnArg arg _typ) = do
   let argTyVar = funTypeArgs fnTypes !! arg
   return (Map.lookup argTyVar (mcTypeMap constraints))
 
-getInferredTypeForAssignId ::
+
+getInferredTypeForAssignIdBBLLVM ::
   FnAssignId -> BBLLVM arch (Maybe FTy)
-getInferredTypeForAssignId aId = do
+getInferredTypeForAssignIdBBLLVM aId = do
   fn <- asks funName
   constraints <- asks moduleConstraints
+  return (getInferredTypeForAssignId constraints fn aId)
+
+
+getInferredTypeForAssignId ::
+  ModuleConstraints arch ->
+  BSC.ByteString ->
+  FnAssignId ->
+  Maybe FTy
+getInferredTypeForAssignId constraints fn aId = do
   let fnTypes = fromMaybe
         (error ("Missing function key in mcAssignTyVars: " <> show fn))
         (Map.lookup fn (mcAssignTyVars constraints))
-  return $ do -- This is just a 'Maybe Ty' computation
-    valTyVar <- Map.lookup aId fnTypes
-    Map.lookup valTyVar (mcTypeMap constraints)
+  valTyVar <- Map.lookup aId fnTypes
+  Map.lookup valTyVar (mcTypeMap constraints)
+
+
+getKnownInferredType ::
+  ModuleConstraints arch ->
+  BSC.ByteString ->
+  FnAssignId ->
+  Maybe FTy
+getKnownInferredType constraints fn aId =
+  case getInferredTypeForAssignId constraints fn aId of
+    Nothing -> Nothing
+    Just (UnknownTy _) -> Nothing
+    Just t -> Just t
