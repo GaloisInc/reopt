@@ -51,37 +51,40 @@ constraintTests = T.testGroup "Type Constraint Tests"
     orCTests
   ]
 
+num64 :: Ty tvar rvar
+num64 = NumTy 64
+
 -- Simple tests having to do with equality constraints
 eqCTests :: T.TestTree
 eqCTests = T.testGroup "Equality Constraint Tests"
-  [ mkTest "Single eqTC var left"  [eqTC x0Ty NumTy] [(x0, NumTy)],
-    mkTest "Single eqTC var right" [eqTC NumTy x0Ty] [(x0, NumTy)],
-    mkTest "Multiple eqTCs" [eqTC x0Ty NumTy, eqTC x1Ty (PtrTy NumTy)]
-                            [(x0, NumTy), (x1, (PtrTy NumTy))],
+  [ mkTest "Single eqTC var left"  [eqTC x0Ty num64] [(x0, num64)],
+    mkTest "Single eqTC var right" [eqTC num64 x0Ty] [(x0, num64)],
+    mkTest "Multiple eqTCs" [eqTC x0Ty num64, eqTC x1Ty (PtrTy num64)]
+                            [(x0, num64), (x1, (PtrTy num64))],
     mkTest "eqTC simple transitivity 1"
-     [eqTC x0Ty x1Ty, eqTC x1Ty NumTy]
-     [(x0, NumTy), (x1, NumTy)],
+     [eqTC x0Ty x1Ty, eqTC x1Ty num64]
+     [(x0, num64), (x1, num64)],
     mkTest "eqTC simple Transitivity 2"
-     [eqTC x1Ty NumTy, eqTC x0Ty x1Ty]
-     [(x0, NumTy), (x1, NumTy)],
+     [eqTC x1Ty num64, eqTC x0Ty x1Ty]
+     [(x0, num64), (x1, num64)],
     mkTest "eqTC simple transitivity 3"
-     [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty NumTy]
-     [(x0, NumTy), (x1, NumTy), (x2, NumTy)],
+     [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64]
+     [(x0, num64), (x1, num64), (x2, num64)],
     mkTest "eqTC with pointers 1"
-      [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty NumTy, eqTC x3Ty (PtrTy x0Ty)]
-      [(x0, NumTy), (x1, NumTy), (x2, NumTy), (x3, (PtrTy NumTy))],
+      [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64, eqTC x3Ty (PtrTy x0Ty)]
+      [(x0, num64), (x1, num64), (x2, num64), (x3, (PtrTy num64))],
     mkTest "eqTC with pointers 2"
-      [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x2Ty NumTy, eqTC x3Ty NumTy, eqTC x4Ty (PtrTy x3Ty)]
-      [(x0, NumTy), (x1, (PtrTy NumTy)), (x2, NumTy), (x3, NumTy), (x4, (PtrTy NumTy))],
+      [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x2Ty num64, eqTC x3Ty num64, eqTC x4Ty (PtrTy x3Ty)]
+      [(x0, num64), (x1, (PtrTy num64)), (x2, num64), (x3, num64), (x4, (PtrTy num64))],
     mkTest "eqTC with pointers 3"
-      [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x3Ty NumTy, eqTC x4Ty (PtrTy x3Ty)]
-      [(x0, unknownTy), (x1, (PtrTy (unknownTy))), (x2, unknownTy), (x3, NumTy), (x4, (PtrTy NumTy))],
+      [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x3Ty num64, eqTC x4Ty (PtrTy x3Ty)]
+      [(x0, unknownTy), (x1, (PtrTy (unknownTy))), (x2, unknownTy), (x3, num64), (x4, (PtrTy num64))],
     mkTest "eqTC with records 1"
-      [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty NumTy, eqTC x3Ty (iRecTy [(0, x0Ty)] r0)]
-      [(x0, NumTy), (x1, NumTy), (x2, NumTy), (x3, (fRecTy [(0, NumTy)]))],
+      [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64, eqTC x3Ty (iRecTy [(0, x0Ty)] r0)]
+      [(x0, num64), (x1, num64), (x2, num64), (x3, (fRecTy [(0, num64)]))],
     mkTest "eqTC with records 2"
-      [eqTC x1Ty x2Ty, eqTC x0Ty (PtrTy x1Ty), eqTC x2Ty NumTy, eqTC x3Ty (iRecTy [(0, x0Ty), (8, x1Ty)] r0)]
-      [(x0, (PtrTy NumTy)), (x1, NumTy), (x2, NumTy), (x3, (fRecTy [(0, (PtrTy NumTy)), (8, NumTy)]))],
+      [eqTC x1Ty x2Ty, eqTC x0Ty (PtrTy x1Ty), eqTC x2Ty num64, eqTC x3Ty (iRecTy [(0, x0Ty), (8, x1Ty)] r0)]
+      [(x0, (PtrTy num64)), (x1, num64), (x2, num64), (x3, (fRecTy [(0, (PtrTy num64)), (8, num64)]))],
        -- These next tests check that record constraints are unified properly
        -- during constraint solving when there are possible unknown other fields
        -- (i.e., the row variables). This arises when we want to combine
@@ -92,26 +95,26 @@ eqCTests = T.testGroup "Equality Constraint Tests"
        -- and `p = {8 : ptr(num)|ρ'}`. Our unification should then combine these
        -- constraints on `p` into `p = {0 : num, 8 : ptr(num)}`.
     mkTest "eqTC with records+rows 1"
-      [eqTC x0Ty (iRecTy [(0, NumTy)] r0),
-       eqTC x0Ty (iRecTy [(8, PtrTy NumTy)] r1)]
-      [(x0, fRecTy [(0, NumTy), (8, PtrTy NumTy)])],
+      [eqTC x0Ty (iRecTy [(0, num64)] r0),
+       eqTC x0Ty (iRecTy [(8, PtrTy num64)] r1)]
+      [(x0, fRecTy [(0, num64), (8, PtrTy num64)])],
     mkTest "eqTC with records+rows 2"
-      [eqTC x0Ty (iRecTy [(0, NumTy)] r0),
-       eqTC x0Ty (iRecTy [(8, PtrTy NumTy)] r1),
+      [eqTC x0Ty (iRecTy [(0, num64)] r0),
+       eqTC x0Ty (iRecTy [(8, PtrTy num64)] r1),
        eqTC x1Ty (iRecTy [] r0),
        eqTC x2Ty (iRecTy [] r1)]
-      [(x0, fRecTy [(0, NumTy), (8, PtrTy NumTy)]),
-       (x1, fRecTy [(8, PtrTy NumTy)]),
-       (x2, fRecTy [(0, NumTy)])],
+      [(x0, fRecTy [(0, num64), (8, PtrTy num64)]),
+       (x1, fRecTy [(8, PtrTy num64)]),
+       (x2, fRecTy [(0, num64)])],
     mkTest "eqTC with records+rows 3"
-      [eqTC x0Ty (iRecTy [(0, NumTy), (8, PtrTy x1Ty)] r0),
-       eqTC x0Ty (iRecTy [(8, PtrTy NumTy), (16, NumTy)] r1),
+      [eqTC x0Ty (iRecTy [(0, num64), (8, PtrTy x1Ty)] r0),
+       eqTC x0Ty (iRecTy [(8, PtrTy num64), (16, num64)] r1),
        eqTC x2Ty (iRecTy [] r0),
        eqTC x3Ty (iRecTy [] r1)]
-      [(x0, fRecTy [(0, NumTy), (8, PtrTy NumTy), (16, NumTy)]),
-       (x1, NumTy),
-       (x2, fRecTy [(16, NumTy)]),
-       (x3, fRecTy [(0, NumTy)])]
+      [(x0, fRecTy [(0, num64), (8, PtrTy num64), (16, num64)]),
+       (x1, num64),
+       (x2, fRecTy [(16, num64)]),
+       (x3, fRecTy [(0, num64)])]
 
   ]
 
@@ -120,21 +123,21 @@ eqCTests = T.testGroup "Equality Constraint Tests"
 orCTests :: T.TestTree
 orCTests = T.testGroup "Disjunctive Constraint Tests"
   [ mkTest "NumTy/PtrTy or-resolution"
-      [ orTC [andTC [eqTC x0Ty NumTy, eqTC x1Ty (PtrTy NumTy)],
-              andTC [eqTC x1Ty NumTy, eqTC x0Ty (PtrTy NumTy)]],
-        eqTC x0Ty NumTy]
-      [(x0, NumTy),
-       (x1, PtrTy NumTy)],
+      [ orTC [andTC [eqTC x0Ty num64, eqTC x1Ty (PtrTy num64)],
+              andTC [eqTC x1Ty num64, eqTC x0Ty (PtrTy num64)]],
+        eqTC x0Ty num64]
+      [(x0, num64),
+       (x1, PtrTy num64)],
     mkTest "PtrTy target or-resolution"
       [ orTC [andTC [eqTC x0Ty (PtrTy x3Ty), eqTC x1Ty (PtrTy x4Ty)],
               andTC [eqTC x0Ty (PtrTy x4Ty), eqTC x1Ty (PtrTy x3Ty)]],
-        eqTC x3Ty NumTy,
-        eqTC x4Ty (PtrTy NumTy),
-        eqTC x0Ty (PtrTy NumTy)]
-      [(x0, (PtrTy NumTy)),
-       (x1, PtrTy (PtrTy NumTy)),
-       (x3, NumTy),
-       (x4, (PtrTy NumTy))]
+        eqTC x3Ty num64,
+        eqTC x4Ty (PtrTy num64),
+        eqTC x0Ty (PtrTy num64)]
+      [(x0, (PtrTy num64)),
+       (x1, PtrTy (PtrTy num64)),
+       (x3, num64),
+       (x4, (PtrTy num64))]
 
   ]
 
@@ -152,7 +155,3 @@ mkTest :: String -> [TyConstraint] -> [(TyVar, FTy)] -> T.TestTree
 mkTest name cs expected =
   let actual = Map.toList $ unifyConstraints cs
     in T.testCase name $ (tyEnv actual) T.@?= (tyEnv expected)
-
-
-
-
