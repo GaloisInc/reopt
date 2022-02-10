@@ -126,16 +126,16 @@ tyToLLVMType (UnknownTy Unknown) = L.PrimType (L.Integer 64)
 instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
   pretty = \case
     UnknownTy x -> PP.pretty x
-    NumTy sz -> "num" <> PP.pretty sz
+    NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
     RecTy flds row -> PP.group $ PP.braces $ PP.cat
                       $ (++ ["|" PP.<> PP.pretty row])
                       $ PP.punctuate PP.comma
-                      $ map (\(off,t) -> (PP.pretty off PP.<+> ":" PP.<+> PP.pretty t))
+                      $ map (\(off,t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t)
                       $ Map.toAscList flds
 
 iRecTy :: [(Int, ITy)] -> RowVar -> ITy
-iRecTy flds r = RecTy (Map.fromList (map (first Offset) flds)) r
+iRecTy flds = RecTy (Map.fromList (map (first Offset) flds))
 
 fRecTy :: [(Int, FTy)] -> FTy
 fRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) NoRow
@@ -349,7 +349,7 @@ inconsistent = check
         (t1, RecTy fs2 _r2) -> case Map.lookup (Offset 0) fs2 of
                                  Nothing -> False
                                  Just ty0 -> check t1 ty0
-    checkCommonFields :: (Map Offset (Ty x r)) -> (Map Offset (Ty x r)) -> Bool
+    checkCommonFields :: Map Offset (Ty x r) -> Map Offset (Ty x r) -> Bool
     checkCommonFields fs1 fs2 =
       any (\(f,fTy) -> case Map.lookup f fs2 of
                          Nothing -> False
@@ -505,15 +505,15 @@ trivialEqC (EqC l r) = l == r
 -- sense that it may generate some additional implied constraints, but it does
 -- not also solve those as well. It handles exactly one constraint.
 solveEqC :: Context -> EqC -> Context
-solveEqC ctx0 c =
-  if trivialEqC c then ctx0
-  else if absurdEqC c then over (field @"ctxAbsurdEqCs") (c:) ctx0
-  else
-    let ctx1 = addConstraints (decomposeEqC c) ctx0
-     in case (eqLhs c, eqRhs c) of
-          (UnknownTy x, t) -> solveVarEq ctx1 x t
-          (t, UnknownTy x) -> solveVarEq ctx1 x t
-          (_,_) -> ctx1
+solveEqC ctx0 c
+  | trivialEqC c = ctx0
+  | absurdEqC c = over (field @"ctxAbsurdEqCs") (c:) ctx0
+  | otherwise =
+    let ctx1 = addConstraints (decomposeEqC c) ctx0 in
+    case (eqLhs c, eqRhs c) of
+      (UnknownTy x, t) -> solveVarEq ctx1 x t
+      (t, UnknownTy x) -> solveVarEq ctx1 x t
+      (_,_) -> ctx1
   where solveVarEq :: Context -> TyVar -> ITy -> Context
         solveVarEq ctx x t =
           if Set.member x (freeTyVars t)
@@ -521,8 +521,7 @@ solveEqC ctx0 c =
             then over (field @"ctxOccursCheckFailures") (c:) ctx
             -- Otherwise, record x -> t in the type map
             -- and perform that substutition everywhere else.
-            else substTyVar (x,t)
-                 $ over (field @"ctxTyVarMap") (Map.insert x t) ctx
+            else substTyVar (x,t) $ over (field @"ctxTyVarMap") (Map.insert x t) ctx
 
 -- | Updates the context with an @InRowC@ constraint. Like @solveEqC@ this is an
 -- "atomic" update.
@@ -610,8 +609,8 @@ reduceC ctx = go
                           else tc
         tc@(RowShiftTC c) -> if absurdRowShiftC ctx c then absurdTC
                              else tc
-        OrTC (OrC cs) -> orTC $ map go $ cs
-        AndTC (AndC cs) -> andTC $ map go $ cs
+        OrTC (OrC cs) -> orTC $ map go cs
+        AndTC (AndC cs) -> andTC $ map go cs
 
 -- | Attempt to reduce and eliminate disjunctions in the given context. Any
 -- resulting non-disjuncts are added to their respective field in the context.
@@ -673,7 +672,7 @@ unifyConstraints :: [TyConstraint] -> Map TyVar FTy
 unifyConstraints initialConstraints =
   let fvs = foldr (Set.union . freeTyVars) Set.empty initialConstraints
       finalCtx = reduceContext $ initContext initialConstraints
-      finalRowMap = fmap (fmap (removeRowVars . removeTyVars)) $ ctxInRowMap finalCtx
-      finalTyMap = fmap ((substRowVar finalRowMap) . removeTyVars) (ctxTyVarMap finalCtx)
-      unknownTyMap = Map.fromSet (const $ unknownTy) fvs
+      finalRowMap = fmap (removeRowVars . removeTyVars) <$> ctxInRowMap finalCtx
+      finalTyMap = fmap (substRowVar finalRowMap . removeTyVars) (ctxTyVarMap finalCtx)
+      unknownTyMap = Map.fromSet (const unknownTy) fvs
     in Map.union finalTyMap unknownTyMap
