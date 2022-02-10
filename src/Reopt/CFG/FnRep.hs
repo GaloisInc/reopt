@@ -345,7 +345,7 @@ instance ( FnArchConstraints arch
     case s of
       FnComment msg -> mconcat $ (\l -> "# " <> pretty l <> hardline) <$> Text.lines msg
       FnAssignStmt assign -> pretty assign
-      FnWriteMem addr val -> "write " <> pretty addr <+> pretty val
+      FnWriteMem addr val -> "*" <> pretty addr <+> ":=" <+> pretty val
       FnCondWriteMem cond addr val _repr -> "cond_write" <+> pretty cond <+> pretty addr <+> pretty val
       FnCall f args mret ->
         let argDocs = (\(Some v) -> pretty v) <$> args
