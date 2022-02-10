@@ -32,6 +32,7 @@ import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 import           Data.Maybe                 (fromMaybe, isJust)
 import           Data.Parameterized         (FoldableF, FoldableFC)
+import           Data.Traversable           (for)
 import qualified Data.Vector                as V
 
 import           Data.Parameterized.NatRepr (NatRepr, intValue, testEquality, widthVal)
@@ -304,7 +305,7 @@ tyVarForAssignId fn aId = do
   case mtv of
     Just tv -> pure tv
     Nothing -> do
-      tyv <- freshTyVar (show aId <> " in " <> show fn)
+      tyv <- freshTyVar (show aId <> " in " <> BSC.unpack fn)
       CGenM $ atFnAssignId fn aId ?= tyv
       pure tyv
 
@@ -461,7 +462,7 @@ genFnValue v =
   where
     punt = do
       warn "Punting on FnValue"
-      varITy <$> freshTyVar (show v)
+      varITy <$> freshTyVar (show (PP.pretty v))
 
 -- | Generate constraints for an App.  The first argument is the
 -- output (result) type.
@@ -762,10 +763,14 @@ genFunction fn {- blockPhis -} = do
     (mapM_ genFnBlock (fnBlocks fn))
 
 -- Allocates TyVars for the arguments and return type
-functionTypeToFunType :: FunctionType arch -> CGenM ctx arch (FunType arch)
-functionTypeToFunType ft = do
-  args <- replicateM (length (fnArgTypes ft)) (freshTyVar "arg of some function")
-  ret  <- traverse (const (freshTyVar "some return type")) (fnReturnType ft)
+functionTypeToFunType ::
+  -- | Name of the function
+  BSC.ByteString ->
+  FunctionType arch -> CGenM ctx arch (FunType arch)
+functionTypeToFunType fn ft = do
+  let fnStr = BSC.unpack fn
+  args <- for (zip (fnArgTypes ft) [(0 :: Int)..]) (\(_, i) -> freshTyVar (fnStr <> ".arg" <> show i))
+  ret  <- traverse (const (freshTyVar (fnStr <> ".ret"))) (fnReturnType ft)
   pure (FunType args ret)
 
 data ModuleConstraints arch = ModuleConstraints
@@ -808,12 +813,12 @@ genModuleConstraints m mem = fst $ runCGenM mem $ do
   -- FIXME: we currently ignore hints
 
   let doDecl d = do
-        fty <- functionTypeToFunType (funDeclType d)
+        fty <- functionTypeToFunType (funDeclName d) (funDeclType d)
         pure ((funDeclAddr d, fty), (funDeclName d, fty))
 
   (declAddrs, declSyms) <- unzip <$> mapM doDecl (recoveredDecls m)
   -- FIXME: how do symbolic calls work?
-  defAddrs <- mapM (\f -> (,) (fnAddr f) <$> functionTypeToFunType (fnType f)) (recoveredDefs m)
+  defAddrs <- mapM (\f -> (,) (fnAddr f) <$> functionTypeToFunType (fnName f) (fnType f)) (recoveredDefs m)
 
   let symMap = Map.fromList declSyms -- FIXME: not sure these are the correct functinos
       addrMap = Map.fromList (defAddrs ++ declAddrs)
