@@ -116,11 +116,34 @@ instance FreeRowVars (Ty tvar RowVar) where
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
 
 
-tyToLLVMType :: FTy -> L.Type
-tyToLLVMType (NumTy n) = L.PrimType (L.Integer (fromIntegral n))
-tyToLLVMType (PtrTy typ) = L.PtrTo (tyToLLVMType typ)
-tyToLLVMType (RecTy _flds _row) = error "tyToLLVMType: RecTy"
-tyToLLVMType (UnknownTy Unknown) = L.PrimType (L.Integer 64)
+recTyByteWidth :: Int -> [(Offset, FTy)] -> Int
+recTyByteWidth ptrSz = offsetAfterLast . last
+  where
+    offsetAfterLast (Offset o, ty) = o + tyByteWidth ptrSz ty
+
+
+tyByteWidth :: Int -> FTy -> Int
+tyByteWidth _ (NumTy n) = n `div` 8
+tyByteWidth ptrSz (PtrTy _) = fromIntegral ptrSz `div` 8
+tyByteWidth ptrSz (RecTy flds NoRow) = recTyByteWidth ptrSz (Map.assocs flds)
+tyByteWidth ptrSz (UnknownTy Unknown) = ptrSz `div` 8
+
+
+recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
+recTyToLLVMType ptrSz [(Offset 0, ty)] = tyToLLVMType ptrSz ty
+recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
+  where
+    go _ [] = []
+    go nextOffset flds@((Offset o, ty) : rest)
+      | o == nextOffset = tyToLLVMType ptrSz ty : go (o + tyByteWidth ptrSz ty) rest
+      | otherwise = L.PrimType (L.Integer (8 * fromIntegral (o - nextOffset))) : go o flds
+
+
+tyToLLVMType :: Int -> FTy -> L.Type
+tyToLLVMType _ (NumTy n) = L.PrimType (L.Integer (fromIntegral n))
+tyToLLVMType ptrSz (PtrTy typ) = L.PtrTo (tyToLLVMType ptrSz typ)
+tyToLLVMType ptrSz (RecTy flds NoRow) = recTyToLLVMType ptrSz (Map.assocs flds)
+tyToLLVMType ptrSz (UnknownTy Unknown) = L.PrimType (L.Integer (fromIntegral ptrSz))
 
 
 instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
@@ -130,7 +153,7 @@ instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
     PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
     RecTy flds row -> PP.group $ PP.braces $ PP.cat
                       $ (++ ["|" PP.<> PP.pretty row])
-                      $ PP.punctuate PP.comma
+                      $ PP.punctuate (PP.comma <> PP.space)
                       $ map (\(off,t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t)
                       $ Map.toAscList flds
 
@@ -183,7 +206,7 @@ newtype OrC = OrC [TyConstraint]
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty OrC where
-  pretty (OrC tcs) = prettySExp $ "or" : map PP.pretty tcs
+  pretty (OrC tcs) = PP.group ("(or" PP.<+> PP.hang 0 (PP.vsep (PP.pretty <$> tcs)) PP.<> ")")
 instance FreeTyVars OrC where
   freeTyVars (OrC cs) = foldr (Set.union . freeTyVars) Set.empty cs
 instance FreeRowVars OrC where
@@ -194,7 +217,7 @@ newtype AndC = AndC [TyConstraint]
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty AndC where
-  pretty (AndC tcs) = prettySExp $ "and" : map PP.pretty tcs
+  pretty (AndC tcs) = PP.group ("(and" PP.<+> PP.hang 0 (PP.vsep (PP.pretty <$> tcs)) PP.<> ")")
 instance FreeTyVars AndC where
   freeTyVars (AndC cs) = foldr (Set.union . freeTyVars) Set.empty cs
 instance FreeRowVars AndC where

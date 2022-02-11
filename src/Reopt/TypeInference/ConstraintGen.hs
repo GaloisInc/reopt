@@ -84,23 +84,23 @@ data Constraint =
   -- ^ At most one type may be a ptr, first type is the result
   | CAddrWidthSub ITy ITy ITy
   -- ^ The rhs may not be a ptr if the lhs is a bv, first type is the result
+  | CBV Int ITy -- ^ Bitvector of the given size (could be pointer if the size matches address size)
   | CBVNotPtr Int ITy -- ^ The argument cannot be a ptr (so should be a bv)
-  | CIsPtr Int ITy -- ^ The type must point to something
+  | CIsPtr Int ITy ITy -- ^ Second type is a pointer to first type, of given size
   | CStructPtr ITy ITy Integer (Some TypeRepr)
     -- ^ @CStructPtr r p o sz@ means @r@ is read from pointer type @p@ at offset
     -- @o@, size @sz@
-  | CAmbiguousBV ITy -- ^ This is a bitvector the size of an address, but we know nothing more
 
 instance PP.Pretty Constraint where
   pretty = \case
     CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
     CAddrWidthAdd t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
+    CBV sz t -> PP.hsep ["bv-or-ptr?(", PP.pretty sz, ")", PP.pretty t]
     CBVNotPtr sz t -> PP.hsep ["bv" <> PP.pretty sz, PP.pretty t]
-    CIsPtr sz t -> PP.hsep ["ptr@" <> PP.pretty sz, PP.pretty t]
+    CIsPtr sz pointee t -> PP.hsep ["ptr@" <> PP.pretty pointee, "(" <> PP.pretty sz <> ")", PP.pretty t]
     CStructPtr tr tp o (Some sz) ->
       PP.hsep ["struct_ptr", PP.pretty tr, PP.pretty tp, PP.pretty o, PP.pretty sz]
-    CAmbiguousBV t -> PP.hsep ["bv-or-ptr?", PP.pretty t]
 
 instance Show Constraint where
   show = show . PP.pretty
@@ -112,6 +112,18 @@ data TyConstraintOptions m =
     -- | How to generate a row
   , tyConGenRowVar :: m RowVar
   }
+
+
+-- | Size in bits of an unconstrained @TypeRepr tp@.  Currently only handling
+-- bitvectors and floats.
+anyTypeWidth :: TypeRepr tp -> Int
+anyTypeWidth = \case
+  BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
+  BVTypeRepr sz -> fromIntegral (intValue sz)
+  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
+  TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
+  VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
+
 
 -- | Converts the limited `Constraint` grammar to the more general
 -- `TyConstraint` type used for constraint solving.
@@ -126,34 +138,60 @@ tyConstraint opts ptrSz = \case
   CAddrWidthAdd ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
   CAddrWidthSub ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
   CBVNotPtr sz t -> pure $ isNumTC sz t
-  CIsPtr sz t -> do
+  CIsPtr sz pointee t -> do
+    pointeeConstraints <- tyConstraint opts ptrSz (CBV sz pointee)
+    pointerConstraints <- isOffsetTC t 0 pointee <$> tyConGenRowVar opts
+    return (andTC [pointeeConstraints, pointerConstraints])
+    -- if sz == ptrSz
+    --   then do
+    --     pointee <- tyConGenPtrTgt opts "pointee"
+    --     pointeePointee <- tyConGenPtrTgt opts "pointeePointee"
+    --     pure $ andTC
+    --       [ isPtrTC t pointee
+    --       , orTC [ isNumTC sz pointee, isPtrTC pointee pointeePointee ]
+    --       ]
+    --   else pure (isPtrTC t (NumTy sz))
+  CStructPtr fieldType pointerType offset fieldSize -> do
+    -- Essentially we are seeing an operation:
+    -- r := *(p + o)
+    -- which means either:
+    -- p is a pointer, and o a numeric offset,
+    -- or:
+    -- o is a constant pointer, and p is an offset.
+    -- freshTgtIfFieldIsPtr <- tyConGenPtrTgt opts "TODO: what to call this?"
+    row <- tyConGenRowVar opts
+    let fieldSz = viewSome anyTypeWidth fieldSize
+    pointeeConstraints <- tyConstraint opts ptrSz (CBV fieldSz fieldType)
+    pure $
+      andTC
+      [ pointeeConstraints
+      , orTC
+        [ isOffsetTC pointerType (fromInteger offset) fieldType row
+        , isNumTC ptrSz pointerType
+        ]
+      ]
+      -- andTC [ if fieldSz == ptrSz
+      --         then orTC [ isNumTC fieldSz fieldType, isPtrTC fieldType freshTgtIfFieldIsPtr ]
+      --         else isNumTC fieldSz fieldType
+      --       , orTC [ isOffsetTC pointerType (fromInteger offset) fieldType row
+      --              , isNumTC ptrSz pointerType
+      --              ]
+      --       ]
+  CBV sz t -> do
     if sz == ptrSz
       then do
-        pointee <- tyConGenPtrTgt opts "pointee"
-        pointeePointee <- tyConGenPtrTgt opts "pointeePointee"
-        pure $ andTC
-          [ isPtrTC t pointee
-          , orTC [ isNumTC sz pointee, isPtrTC pointee pointeePointee ]
-          ]
-      else pure (isPtrTC t (NumTy sz))
-  CStructPtr fieldType pointerType offset _fieldSize -> do
-    -- Either pointerType is a ptr, or it is a num and the offset is actually a
-    -- global.
-    -- FIXME: better handle the latter case
-    row <- tyConGenRowVar opts
-    pure $ orTC [ andTC [ isOffsetTC pointerType (fromInteger offset) fieldType row ]
-                , andTC [ isNumTC ptrSz pointerType ]
-                ]
-  CAmbiguousBV t -> do
-    tgt <- tyConGenPtrTgt opts "ambiguous bitvector"
-    pure $ orTC [isNumTC ptrSz t, isPtrTC t tgt]
+        tgt <- tyConGenPtrTgt opts "potential target of ambiguous bitvector"
+        pure $ orTC [isNumTC ptrSz t, isPtrTC t tgt]
+      else pure (isNumTC sz t)
   where
     possiblyPointerArithmetic ret lhs rhs = do
       ty <- tyConGenPtrTgt opts "pointer arithmetic"
       pure $ orTC
         [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
-        , andTC [isPtrTC ret ty,    isPtrTC lhs ty,    isNumTC ptrSz rhs]
-        , andTC [isPtrTC ret ty,    isNumTC ptrSz lhs, isPtrTC rhs ty]
+        , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
+                                      , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
+                                      ]
+                ]
         ]
 
 -- -----------------------------------------------------------------------------
@@ -437,10 +475,11 @@ emitNotPtr sz t = emitConstraint (CBVNotPtr sz t)
 emitPtr ::
   -- | Bit size of the pointee
   Int ->
+  ITy ->
   -- | Type that is recognized as pointer
   ITy ->
   CGenM ctx arch ()
-emitPtr pointeeSize pointer = emitConstraint (CIsPtr pointeeSize pointer)
+emitPtr pointeeSize pointee pointer = emitConstraint (CIsPtr pointeeSize pointee pointer)
 
 emitStructPtr :: ITy -> ITy -> Integer -> Some TypeRepr -> CGenM ctx arch ()
 emitStructPtr tr tp o sz = emitConstraint (CStructPtr tr tp o sz)
@@ -452,8 +491,8 @@ genFnValue :: FnArchConstraints arch => FnValue arch tp -> CGenM CGenBlockContex
 genFnValue v =
   case v of
     FnUndefined {}          -> punt
-    FnConstantBool {}       -> punt
-    FnConstantValue {}      -> punt
+    FnConstantBool {}       -> pure (NumTy 1)
+    FnConstantValue sz _    -> pure (NumTy (widthVal sz))
     FnAssignedValue a       -> assignmentType a
     FnPhiValue phiv         -> phiType phiv
     FnReturn frv            -> funRetType frv
@@ -586,34 +625,29 @@ genMemOp ::
   FnArchConstraints arch =>
   ITy -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
   CGenM CGenBlockContext arch ()
-genMemOp ty ptr sz =
+genMemOp ty ptr sz = do
   case ptr of
-    FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q)}
+    FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q) }
       -- We rely on macaw to have constant folded adds, so only one
       -- will be a const.  We also need to deal with global +
       -- computed.  This should be done in constrain translation.
-      | FnConstantValue _ o <- q ->
-        do tp <- genFnValue p
-           emitStructPtr ty tp o sz
-      | FnConstantValue _ o <- p ->
-        do tp <- genFnValue q
-           emitStructPtr ty tp o sz
-    _ -> emitPtr (viewSome anyTypeWidth sz) =<< genFnValue ptr
+      | FnConstantValue _ o <- q -> do
+          tp <- genFnValue p
+          emitStructPtr ty tp o sz
+      | FnConstantValue _ o <- p -> do
+          tp <- genFnValue q
+          emitStructPtr ty tp o sz
+    FnArg{} -> do
+      emitPtr (viewSome anyTypeWidth sz) ty =<< genFnValue ptr
+    FnPhiValue{} -> do
+      emitPtr (viewSome anyTypeWidth sz) ty =<< genFnValue ptr
+    _ ->
+      error (show ptr)
+      -- return ()
 
 
 bvWidth :: FnArchConstraints arch => FnValue arch (BVType n) -> Int
 bvWidth = bitWidth . typeRepr
-
-
--- | Size in bits of an unconstrained @TypeRepr tp@.  Currently only handling
--- bitvectors and floats.
-anyTypeWidth :: TypeRepr tp -> Int
-anyTypeWidth = \case
-  BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
-  BVTypeRepr sz -> fromIntegral (intValue sz)
-  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
-  TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
-  VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
 
 
 genFnAssignment ::
@@ -659,7 +693,7 @@ genFnStmt stmt =
       tr <- genFnValue v
       genMemOp tr addr (Some (typeRepr v))
     FnCall fn args m_rv -> genCall fn args m_rv
-    FnArchStmt _astmt   -> warn "Ignoring FnArchStmt"
+    FnArchStmt _astmt -> warn "Ignoring FnArchStmt"
 
 -- -- | Matches up the argument registers with the destination.
 -- genRegType :: RegState (ArchReg arch) (Value arch ids)
