@@ -857,8 +857,8 @@ appToLLVM lhs app = bbArchConstraints $ do
       case (typeOfResult, tx, ty) of
         (_, Just (PtrTy _), Just (PtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
-        (_, Just (PtrTy pointee), _) -> llvmGetElementPtr (tyToLLVMType ptrWidth pointee) x y
-        (_, _, Just (PtrTy pointee)) -> llvmGetElementPtr (tyToLLVMType ptrWidth pointee) y x
+        (_, Just (PtrTy pointee), _) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) x y
+        (_, _, Just (PtrTy pointee)) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) y x
         -- When the result is a pointer, and one operand is known to be numeric,
         -- we can also conclude that the other operand was a pointer.  You'd
         -- likely expect the constraint solving to have inferred that the other
@@ -966,11 +966,12 @@ llvmAsPtr ctx ptr pointeeType = do
 
 
 llvmGetElementPtr ::
+  Maybe FTy ->
   L.Type ->
   FnValue arch (BVType n) ->
   FnValue arch (BVType n) ->
   BBLLVM arch (L.Typed L.Value)
-llvmGetElementPtr pointee ptr ofs = do
+llvmGetElementPtr _typeOfResult pointee ptr ofs = do
   L.Typed _ ptrV <- mkLLVMValue ptr
   let pointerType = L.PtrTo pointee
   ofsV <- mkLLVMValue ofs

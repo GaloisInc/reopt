@@ -68,12 +68,12 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FunctionType (..),
                                                   RecoveredModule (..),
                                                   fnBlocks)
-import           Reopt.TypeInference.Constraints (FTy, ITy, RowVar (RowVar),
+import           Reopt.TypeInference.Constraints (FTy, ITy, Offset (Offset), RowVar (RowVar),
                                                   Ty (NumTy, UnknownTy),
                                                   TyConstraint, TyVar (TyVar),
                                                   andTC, eqTC, isNumTC,
                                                   isOffsetTC, isPtrTC, orTC,
-                                                  unifyConstraints)
+                                                  unifyConstraints, isPointerWithOffsetTC)
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -122,8 +122,8 @@ data Constraint
     ITy ITy
   | CAddrWidthAdd -- ^ At most one type may be a pointer
     ITy -- ^ Result
-    ITy -- ^ First added
-    ITy -- ^ Second addend
+    ITy -- ^ First addend
+    (Either Integer ITy) -- ^ Second addend
   | CAddrWidthSub -- ^ The RHS may not be a pointer if the LHS is a bitvector
     ITy -- ^ Result
     ITy -- ^ Minuend
@@ -144,7 +144,8 @@ data Constraint
 instance PP.Pretty Constraint where
   pretty = \case
     CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
-    CAddrWidthAdd t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
+    CAddrWidthAdd t1 t2 (Left o) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty o]
+    CAddrWidthAdd t1 t2 (Right t3) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
     CBV sz BVNotAddrWidth t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
     CBV sz (BVAddrWidth NotAPointer) t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
@@ -188,8 +189,43 @@ tyConstraint ::
   Constraint -> m TyConstraint
 tyConstraint opts ptrSz = \case
   CEq t1 t2 -> pure $ eqTC t1 t2
-  CAddrWidthAdd ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
-  CAddrWidthSub ret lhs rhs -> possiblyPointerArithmetic ret lhs rhs
+
+  CAddrWidthAdd ret lhs (Left o) -> do
+    -- tLHS <- tyConGenPtrTgt opts "constant addition variable input"
+    rLHS <- tyConGenRowVar opts
+    -- tRet <- tyConGenPtrTgt opts "constant addition return"
+    rRet <- tyConGenRowVar opts
+    pure $ orTC
+      -- Either everything is numeric
+      [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs]
+      -- Or one is a pointer and one is an offset
+      , isPointerWithOffsetTC (lhs, rLHS) (ret, rRet) (Offset (fromIntegral o))
+      ]
+
+  CAddrWidthAdd ret lhs (Right rhs) -> do
+    ty <- tyConGenPtrTgt opts "pointer arithmetic"
+    pure $ orTC
+      -- Either everything is numeric
+      [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
+      -- Or one is a pointer and one is an offset
+      , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
+                                    , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
+                                    ]
+              ]
+      ]
+
+  CAddrWidthSub ret lhs rhs -> do
+    ty <- tyConGenPtrTgt opts "pointer arithmetic"
+    pure $ orTC
+      -- Either everything is numeric
+      [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
+      -- Or one is a pointer and one is an offset
+      , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
+                                    , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
+                                    ]
+              ]
+      ]
+
   CBV sz BVNotAddrWidth t -> pure (isNumTC sz t)
   CBV sz (BVAddrWidth NotAPointer) t -> pure (isNumTC sz t)
   CBV sz (BVAddrWidth CouldBeAPointer) t -> bitvectorConstraint sz t
@@ -217,17 +253,6 @@ tyConstraint opts ptrSz = \case
         ]
       ]
  where
-    possiblyPointerArithmetic ret lhs rhs = do
-      ty <- tyConGenPtrTgt opts "pointer arithmetic"
-      pure $ orTC
-        -- Either everything is numeric
-        [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
-        -- Or one is a pointer and one is an offset
-        , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
-                                      , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
-                                      ]
-                ]
-        ]
 
     -- Emits a constraint appropriate for a bitvector of the given size, knowing
     -- no additional information about it.
@@ -506,7 +531,7 @@ emitEq t1 t2 = emitConstraint (CEq t1 t2)
 
 -- | Emits an add which may be a pointer add
 emitPtrAdd :: ITy -> ITy -> ITy -> CGenM ctx arch ()
-emitPtrAdd rty t1 t2 = emitConstraint (CAddrWidthAdd rty t1 t2)
+emitPtrAdd rty t1 t2 = emitConstraint (CAddrWidthAdd rty t1 (Right t2))
 
 -- | Emits a sub which may return a pointer
 emitPtrSub :: ITy -> ITy -> ITy -> CGenM ctx arch ()
@@ -608,6 +633,16 @@ genApp (ty, outSize) app =
     --
     -- In general we don't need to do much, as most are just bv ops.
     -- Add and Sub are the main exceptions
+    BVAdd sz (FnConstantValue _ o) r -> do
+      addrw <- addrWidth
+      when (isJust (testEquality addrw sz)) $ do
+        rTy <- genFnValue r
+        emitConstraint (CAddrWidthAdd ty rTy (Left o))
+    BVAdd sz l (FnConstantValue _ o) -> do
+      addrw <- addrWidth
+      when (isJust (testEquality addrw sz)) $ do
+        lTy <- genFnValue l
+        emitConstraint (CAddrWidthAdd ty lTy (Left o))
     BVAdd sz l r -> do
       addrw <- addrWidth
       when (isJust (testEquality addrw sz))
