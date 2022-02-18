@@ -192,7 +192,11 @@ instance FreeRowVars EqRowC where
   freeRowVars (EqRowC r1 r2) = Set.fromList [r1, r2]
 
 -- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
-data InRowC = InRowC Offset ITy RowVar
+data InRowC = InRowC
+  { inRowOffset       :: Offset
+  , inRowTypeAtOffset :: ITy
+  , inRowRowVar       :: RowVar
+  }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty InRowC where
@@ -206,7 +210,11 @@ instance FreeRowVars InRowC where
 -- I.e., if from other information we could derive @r1@ corresponded
 -- to @{0:NumTy}@ and @o@ = 42 then @RowShiftC r1 o r2@ would imply that in @r2@
 -- @{42:NumTy}@ holds.
-data RowShiftC = RowShiftC RowVar Offset RowVar
+data RowShiftC = RowShiftC
+  { rowShiftBase    :: RowVar
+  , rowShiftBy      :: Offset
+  , rowShiftShifted :: RowVar
+  }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty RowShiftC where
