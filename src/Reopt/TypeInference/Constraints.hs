@@ -14,18 +14,16 @@ module Reopt.TypeInference.Constraints where
 
 import Control.Lens ( over )
 import Data.Bifunctor (first, Bifunctor (second))
+import Data.Generics.Product ( field )
 import Data.Map.Strict (Map)
 import Data.Set (Set)
-import qualified Data.Set as Set
-import Data.Generics.Product ( field )
+import Debug.Trace ( trace )
 import GHC.Generics ( Generic )
+import Numeric.Natural (Natural)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Prettyprinter as PP
 import qualified Text.LLVM as L
--- import Data.List.NonEmpty (NonEmpty)
--- import qualified Data.List.NonEmpty as NonEmpty
-
-import Debug.Trace ( trace )
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool
@@ -57,10 +55,9 @@ class FreeRowVars a where
   freeRowVars :: a -> Set RowVar
 
 -- | Byte offset.
-newtype Offset = Offset {offsetInt :: Int}
+newtype Offset = Offset { getOffset :: Natural }
   deriving (Eq, Ord, Show)
-  deriving Num via Int
-
+  deriving Num via Natural
 
 
 instance PP.Pretty Offset where
@@ -116,27 +113,34 @@ instance FreeRowVars (Ty tvar RowVar) where
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
 
 
-recTyByteWidth :: Int -> [(Offset, FTy)] -> Int
+recTyByteWidth :: Int -> [(Offset, FTy)] -> Integer
 recTyByteWidth ptrSz = offsetAfterLast . last
   where
-    offsetAfterLast (Offset o, ty) = o + tyByteWidth ptrSz ty
+    offsetAfterLast (Offset o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
 
-tyByteWidth :: Int -> FTy -> Int
-tyByteWidth _ (NumTy n) = n `div` 8
+tyByteWidth :: Int -> FTy -> Integer
+tyByteWidth _ (NumTy n) = fromIntegral n `div` 8
 tyByteWidth ptrSz (PtrTy _) = fromIntegral ptrSz `div` 8
 tyByteWidth ptrSz (RecTy flds NoRow) = recTyByteWidth ptrSz (Map.assocs flds)
-tyByteWidth ptrSz (UnknownTy Unknown) = ptrSz `div` 8
+tyByteWidth ptrSz (UnknownTy Unknown) = fromIntegral ptrSz `div` 8
+
+
+bumpOffsetBy :: Int -> Offset -> Offset
+bumpOffsetBy n (Offset o)
+  | n < 0 = error "bumpOffsetBy negative number not allowed"
+  | otherwise = Offset (o + fromIntegral n)
 
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
 recTyToLLVMType ptrSz [(Offset 0, ty)] = tyToLLVMType ptrSz ty
 recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
   where
+    go :: Natural -> [(Offset, FTy)] -> [L.Type]
     go _ [] = []
     go nextOffset flds@((Offset o, ty) : rest)
-      | o == nextOffset = tyToLLVMType ptrSz ty : go (o + tyByteWidth ptrSz ty) rest
-      | otherwise = L.PrimType (L.Integer (8 * fromIntegral (o - nextOffset))) : go o flds
+      | o == nextOffset = tyToLLVMType ptrSz ty : go (o + fromIntegral (tyByteWidth ptrSz ty)) rest
+      | otherwise = L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset))) : go o flds
 
 
 tyToLLVMType :: Int -> FTy -> L.Type
@@ -157,10 +161,10 @@ instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
                       $ map (\(off,t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t)
                       $ Map.toAscList flds
 
-iRecTy :: [(Int, ITy)] -> RowVar -> ITy
+iRecTy :: [(Natural, ITy)] -> RowVar -> ITy
 iRecTy flds = RecTy (Map.fromList (map (first Offset) flds))
 
-fRecTy :: [(Int, FTy)] -> FTy
+fRecTy :: [(Natural, FTy)] -> FTy
 fRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) NoRow
 
 
@@ -316,7 +320,7 @@ isNumTC sz t = EqTC (EqC t (NumTy sz))
 isPtrTC :: ITy -> ITy -> TyConstraint
 isPtrTC pointer pointee = EqTC (EqC pointer (PtrTy pointee))
 
-isOffsetTC :: ITy -> Int -> ITy -> RowVar -> TyConstraint
+isOffsetTC :: ITy -> Natural -> ITy -> RowVar -> TyConstraint
 isOffsetTC base offset typ row =
   EqTC (EqC base (PtrTy (RecTy (Map.singleton (Offset offset) typ) row)))
 
@@ -821,20 +825,22 @@ substRowVar rowMaps = \case
             mergedFlds = Map.unionWith combineTypes flds' rMap
         in RecTy mergedFlds NoRow
 
-shiftStructuralInformationBy :: Offset -> Map Offset ITy -> Map Offset ITy
-shiftStructuralInformationBy o = Map.fromList . map (first (shiftBy o)) . Map.toList
+
+shiftStructuralInformationBy :: Integer -> Map Offset ITy -> Map Offset ITy
+shiftStructuralInformationBy o =
+  Map.fromList . concatMap retainPositiveOffsets . Map.toList
   where
-    shiftBy (Offset a) (Offset b) = Offset (a + b)
+    retainPositiveOffsets (Offset a, ty) =
+      let newOffset = fromIntegral a + o in
+      [(Offset (fromIntegral newOffset), ty) | newOffset >= 0]
 
 
 expandInRowMapWithOneShift :: RowVar -> Map RowVar (Map Offset ITy) -> (Offset, RowVar) -> Map RowVar (Map Offset ITy)
-expandInRowMapWithOneShift r1 inRowMap (offset, r2) =
+expandInRowMapWithOneShift r1 inRowMap (Offset o, r2) =
   inRowMap
   -- This is a little weird, we can probably do something smarter eventually
-  `Map.union` maybe Map.empty (Map.singleton r2 . shiftStructuralInformationBy offset) (Map.lookup r1 inRowMap)
-  `Map.union` maybe Map.empty (Map.singleton r1 . shiftStructuralInformationBy (negateOffset offset)) (Map.lookup r2 inRowMap)
-  where
-    negateOffset (Offset o) = Offset (negate o)
+  `Map.union` maybe Map.empty (Map.singleton r2 . shiftStructuralInformationBy (fromIntegral o)) (Map.lookup r1 inRowMap)
+  `Map.union` maybe Map.empty (Map.singleton r1 . shiftStructuralInformationBy (- fromIntegral o)) (Map.lookup r2 inRowMap)
 
 expandInRowMapWithSetOfShifts ::
   Map RowVar (Map Offset ITy) ->
