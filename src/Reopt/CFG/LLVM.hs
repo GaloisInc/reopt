@@ -148,7 +148,7 @@ llvmLogEventHeader = ["Reopt Source Context", "LLVM Operation" , "Source LLVM Ty
 
 -- | Render a log event as segments of textual info (amicable to, e.g., CSV rendering).
 llvmLogEventToStrings :: LLVMLogEvent -> [String]
-llvmLogEventToStrings e = (rLogEventContext e):(llvmLogInfoToStrings $ rLogEventInfo e)
+llvmLogEventToStrings e = rLogEventContext e : llvmLogInfoToStrings (rLogEventInfo e)
 
 llvmLogInfoToStrings :: LLVMLogEventInfo -> [String]
 llvmLogInfoToStrings info =
@@ -326,7 +326,7 @@ declareFunction d =
 
 -- Pads the given list of values to be the target lenght using undefs
 padUndef :: L.Type -> Int -> [L.Typed L.Value] -> [L.Typed L.Value]
-padUndef typ len xs = xs ++ (replicate (len - length xs) (L.Typed typ L.ValUndef))
+padUndef typ len xs = xs ++ replicate (len - length xs) (L.Typed typ L.ValUndef)
 
 -- | Result obtained by printing a block to LLVM
 data LLVMBlockResult arch =

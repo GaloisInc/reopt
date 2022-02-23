@@ -68,12 +68,16 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FunctionType (..),
                                                   RecoveredModule (..),
                                                   fnBlocks)
-import           Reopt.TypeInference.Constraints (FTy, ITy, Offset (Offset), RowVar (RowVar),
+import           Reopt.TypeInference.Constraints (ConstraintSolvingState (ConstraintSolvingState, nextRowVar),
+                                                  FTy, ITy, Offset (Offset),
+                                                  RowVar (RowVar),
                                                   Ty (NumTy, UnknownTy),
                                                   TyConstraint, TyVar (TyVar),
                                                   andTC, eqTC, isNumTC,
-                                                  isOffsetTC, isPtrTC, orTC,
-                                                  unifyConstraints, isPointerWithOffsetTC)
+                                                  isOffsetTC,
+                                                  isPointerWithOffsetTC,
+                                                  isPtrTC, orTC,
+                                                  unifyConstraints)
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -972,11 +976,14 @@ genModuleConstraints m mem = fst $ runCGenM mem $ do
   constraintsForSolving <-
     mapM (tyConstraint tyConOpts (widthVal (memWidth mem))) constraintsGenerated
 
+  next <- CGenM (use nextFreeRowVar)
+  let csState = ConstraintSolvingState { nextRowVar = next }
+
   pure ModuleConstraints { mcFunTypes      = addrMap
                          , mcExtFunTypes   = symMap
                          , mcAssignTyVars  = tyVars
                          , mcWarnings      = warns
                          , mcConstraints   = constraintsGenerated
                          , mcTyConstraints = constraintsForSolving
-                         , mcTypeMap       = unifyConstraints constraintsForSolving
+                         , mcTypeMap       = unifyConstraints csState constraintsForSolving
                          }

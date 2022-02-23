@@ -9,16 +9,18 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Reopt.TypeInference.Constraints where
 
-import Control.Lens ( over )
+import Control.Lens ((<<+=), over)
+import Control.Monad.State (State, StateT(StateT), evalState)
 import Data.Bifunctor (first, Bifunctor (second))
-import Data.Generics.Product ( field )
+import Data.Generics.Product (field)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
-import Debug.Trace ( trace )
-import GHC.Generics ( Generic )
+import Debug.Trace (trace)
+import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -180,16 +182,29 @@ instance FreeRowVars EqC where
   freeRowVars (EqC t1 t2) = Set.union (freeRowVars t1) (freeRowVars t2)
 
 
--- | TODO
-data EqRowC = EqRowC { eqRowLHS :: RowVar, eqRowRHS :: RowVar }
+-- | Stands for: lhs = { offsets | rhs }
+data EqRowC = EqRowC
+  { eqRowLHS :: RowVar
+  , eqRowOffsets :: Map Offset ITy
+  , eqRowRHS :: RowVar
+  }
   deriving (Eq, Ord, Show)
 
+prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
+prettyMap ppKey ppValue =
+  PP.punctuate PP.comma . map prettyEntry . Map.toAscList
+  where
+    prettyEntry (k, v) = PP.group (PP.hsep [ppKey k, "→", ppValue v])
+
+prettyRow :: PP.Pretty t => PP.Pretty r => Map Offset (Ty t r) -> RowVar -> PP.Doc d
+prettyRow os r = PP.hsep ["{", PP.hsep (prettyMap PP.pretty PP.pretty os), "|", PP.pretty r, "}"]
+
 instance PP.Pretty EqRowC where
-  pretty (EqRowC r1 r2) = prettySExp [PP.pretty r1, "=", PP.pretty r2]
+  pretty (EqRowC r1 os r2) = prettySExp [PP.pretty r1, "=", prettyRow os r2]
 instance FreeTyVars EqRowC where
-  freeTyVars (EqRowC _ _) = Set.empty
+  freeTyVars (EqRowC _ os _) = foldr (Set.union . freeTyVars) Set.empty os
 instance FreeRowVars EqRowC where
-  freeRowVars (EqRowC r1 r2) = Set.fromList [r1, r2]
+  freeRowVars (EqRowC r1 os r2) = Set.fromList [r1, r2] `Set.union` foldr (Set.union . freeRowVars) Set.empty os
 
 -- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
 data InRowC = InRowC
@@ -297,8 +312,11 @@ absurdTC = OrTC $ OrC []
 eqTC :: ITy -> ITy -> TyConstraint
 eqTC t1 t2 = EqTC $ EqC t1 t2
 
-inRowTC :: Offset -> ITy -> RowVar -> TyConstraint
-inRowTC o t r = InRowTC $ InRowC o t r
+eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
+eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
+
+inRowTC :: RowVar -> Offset -> ITy -> TyConstraint
+inRowTC r o t = InRowTC $ InRowC o t r
 
 -- | Disjunction smart constructor that performs NEEDED simplifications.
 orTC :: [TyConstraint] -> TyConstraint
@@ -380,7 +398,8 @@ instance UnifyRowVars AndC where
   unifyRowVars r1 r2 (AndC cs) = AndC (unifyRowVars r1 r2 <$> cs)
 
 instance UnifyRowVars EqRowC where
-  unifyRowVars r1 r2 (EqRowC r3 r4) = EqRowC (unifyRowVars r1 r2 r3) (unifyRowVars r1 r2 r4)
+  unifyRowVars r1 r2 (EqRowC r3 os r4) =
+    EqRowC (unifyRowVars r1 r2 r3) (unifyRowVars r1 r2 <$> os) (unifyRowVars r1 r2 r4)
 
 instance UnifyRowVars TyConstraint where
   unifyRowVars r1 r2 = \case
@@ -463,33 +482,47 @@ inconsistent = check
 
 
 -- | @decomposeEqC t1 t2@ returns constraints implied from @EqP t1 t2@.
-decomposeEqC :: EqC -> [TyConstraint]
+decomposeEqC :: forall m. IsConstraintSolvingMonad m => EqC -> m [TyConstraint]
 decomposeEqC (EqC lhs rhs) = go lhs rhs
   where
-    go :: ITy -> ITy -> [TyConstraint]
-    go UnknownTy{} _ = []
-    go _ UnknownTy{} = []
-    go (PtrTy t1) (PtrTy t2) = [eqTC t1 t2]
-    go (RecTy fs1 r1) (RecTy fs2 r2) =
-      let -- shared fields must be equal
-          fldPs = map (uncurry eqTC)
-                  $ Map.elems
-                  $ Map.intersectionWith (,) fs1 fs2
-          -- fields from fs2 not in fs1 must appear in r1
-          r1Ps = map (\(o, tTy) -> inRowTC o tTy r1)
-                  $ Map.toList $ Map.difference fs2 fs1
-          -- fields from fs1 not in fs2 must appear in r2
-          r2Ps = map (\(o, tTy) -> inRowTC o tTy r2)
-                  $ Map.toList $ Map.difference fs1 fs2
-      in fldPs ++ r1Ps ++ r2Ps ++ [EqRowTC (EqRowC r1 r2)]
-    go (RecTy fs r) t = goRecNonRec fs r t
-    go t (RecTy fs r) = goRecNonRec fs r t
-    go _ _ = []
+    go :: ITy -> ITy -> m [TyConstraint]
+    go UnknownTy{} _ = pure []
+    go _ UnknownTy{} = pure []
+    go (PtrTy t1) (PtrTy t2) = pure [eqTC t1 t2]
+    go (RecTy fs1 r1) (RecTy fs2 r2)
+      | Map.null fs1 && Map.null fs2 = pure [eqRowTC r1 mempty r2]
+      | Map.null fs1 = pure [eqRowTC r1 fs2 r2]
+      | Map.null fs2 = pure [eqRowTC r2 fs1 r1]
+      | otherwise = do
+        let -- shared fields must be equal
+            fldPs = map (uncurry eqTC)
+                    $ Map.elems
+                    $ Map.intersectionWith (,) fs1 fs2
+            -- fields from fs2 not in fs1 must appear in r1
+            r1Ps = map (uncurry (inRowTC r1))
+                    $ Map.toList $ Map.difference fs2 fs1
+            -- fields from fs1 not in fs2 must appear in r2
+            r2Ps = map (uncurry (inRowTC r2))
+                    $ Map.toList $ Map.difference fs1 fs2
+        -- We need a fresh row variable for the "remainder" of the row variables
+        -- on each side when you factor out the fields mentioned across.
+        --
+        -- E.g. when you start with RecTy { 0 : i8 } r1 = RecTy { 8 : i8 } r2, you
+        -- should conclude that there exists a r3 s. t.
+        --
+        -- r1 = { 8 : i8 | r3 }   and   r2 = { 0 : i8 | r3 }
+        r3 <- csmFreshRowVar
+        let eqr1 = eqTC (RecTy mempty r1) (RecTy fs2 r3)
+        let eqr2 = eqTC (RecTy mempty r2) (RecTy fs1 r3)
+        pure $ eqr1 : eqr2 : fldPs ++ r1Ps ++ r2Ps
+    go (RecTy fs r) t = pure $ goRecNonRec fs r t
+    go t (RecTy fs r) = pure $ goRecNonRec fs r t
+    go _ _ = pure []
     -- Handle the case when a record and a non-record are equal,
     -- i.e., treat the non-record as a record with one field `0`.
     goRecNonRec :: Map Offset ITy -> RowVar -> ITy -> [TyConstraint]
     goRecNonRec flds row nonRecTy = case Map.lookup (Offset 0) flds of
-      Nothing -> [inRowTC (Offset 0) nonRecTy row]
+      Nothing -> [inRowTC row (Offset 0) nonRecTy]
       Just ty0 -> [eqTC nonRecTy ty0]
 
 
@@ -513,7 +546,23 @@ data Context =
       -- | Known row offset relationships, i.e. @r -> (o,r')@
       --   says @r@ with offset @o@ applied corresponds to
       -- row @r'@. .
-      ctxRowShiftMap :: Map RowVar (Set (Offset, RowVar))
+      ctxRowShiftMap :: Map RowVar (Set (Offset, RowVar)),
+      -- | If we know that a given row variable is exactly equal to some other
+      -- row variable plus some offset information, we record it in this map.
+      -- We use a list because it makes row variable unification simpler.
+      -- Consider the case where the map only points to one (ofs, r) value, and
+      -- consider that we try to unify two row variables that have an entry:
+      --
+      -- r1 = r2   in   [ r1 -> (m1, r3), r2 -> (m2, r4) ]
+      --
+      -- To unify r1 and r2, we would need to put one information in the r2 slot
+      -- that summarizes (m1, r3) and (m2, r4): this would require further
+      -- unification and the create of a fresh row variable, which is painful in
+      -- the current architecture.
+      --
+      -- With the list approach, we can just append the knowledge about r1 to
+      -- the knowledge about r2 (and could do some simplification).
+      ctxRowVarEqs :: Map RowVar [(Map Offset ITy, RowVar)]
     }
   deriving (Eq, Generic, Ord, Show)
 
@@ -535,7 +584,9 @@ instance PP.Pretty Context where
           in concatMap prettyRMap $ Map.toList $ ctxInRowMap ctx,
         row "Row Shift Map" $
           let prettySMap (r,sSet) = map (\(o,r') -> PP.pretty (RowShiftC r o r')) $ Set.toList sSet
-          in concatMap prettySMap $ Map.toList $ ctxRowShiftMap ctx
+          in concatMap prettySMap $ Map.toList $ ctxRowShiftMap ctx,
+        row "Row Equality Map" $
+          prettyMap PP.pretty (PP.hsep . map (uncurry prettyRow)) (ctxRowVarEqs ctx)
       ]
 
 instance SubstTyVar Context where
@@ -553,6 +604,7 @@ instance SubstTyVar Context where
       , ctxAbsurdEqCs          = ctxAbsurdEqCs ctx
       , ctxOccursCheckFailures = ctxOccursCheckFailures ctx
       , ctxRowShiftMap         = ctxRowShiftMap ctx
+      , ctxRowVarEqs           = ctxRowVarEqs ctx
       }
 
 instance UnifyRowVars Context where
@@ -566,6 +618,7 @@ instance UnifyRowVars Context where
       , ctxTyVarMap    = unifyRowVars r1 r2 <$> ctxTyVarMap ctx
       , ctxInRowMap    = unifyRowVarMap r1 r2 (unifyRowVars r1 r2 <$>) (unifyInRowMap r1 r2) (ctxInRowMap ctx)
       , ctxRowShiftMap = unifyRowVarMap r1 r2 (Set.map (second (unifyRowVars r1 r2))) (unifyRowShiftMap r1 r2) (ctxRowShiftMap ctx)
+      , ctxRowVarEqs   = unifyRowVarMap r1 r2 (map (second (unifyRowVars r1 r2))) (++) (ctxRowVarEqs ctx)
       -- Not modified because we only substitute in unprocessed constraints:
       , ctxAbsurdEqCs          = ctxAbsurdEqCs ctx
       , ctxOccursCheckFailures = ctxOccursCheckFailures ctx
@@ -641,7 +694,7 @@ addConstraints' = foldr go
     go (EqRowTC c) = over (field @"ctxEqRowCs") (c :)
 
 emptyContext :: Context
-emptyContext = Context [] [] [] [] [] [] [] Map.empty Map.empty Map.empty
+emptyContext = Context [] [] [] [] [] [] [] Map.empty Map.empty Map.empty Map.empty
 
 -- | Partition the constraints into the @Context@, which we use to order
 -- which are handled when during unification.
@@ -660,13 +713,14 @@ trivialEqC (EqC l r) = l == r
 -- | Updates the context with the given equality. This action is "atomic" in the
 -- sense that it may generate some additional implied constraints, but it does
 -- not also solve those as well. It handles exactly one constraint.
-solveEqC :: Context -> EqC -> Context
+solveEqC :: IsConstraintSolvingMonad m => Context -> EqC -> m Context
 solveEqC ctx0 c
-  | trivialEqC c = ctx0
-  | absurdEqC c = over (field @"ctxAbsurdEqCs") (c:) ctx0
-  | otherwise =
-    let ctx1 = addConstraints (decomposeEqC c) ctx0 in
-    case (eqLhs c, eqRhs c) of
+  | trivialEqC c = pure ctx0
+  | absurdEqC c = pure $ over (field @"ctxAbsurdEqCs") (c:) ctx0
+  | otherwise = do
+    cs <- decomposeEqC c
+    let ctx1 = addConstraints cs ctx0
+    return $ case (eqLhs c, eqRhs c) of
       (UnknownTy x, t) -> solveVarEq ctx1 x t
       (t, UnknownTy x) -> solveVarEq ctx1 x t
       (_,_) -> ctx1
@@ -708,7 +762,7 @@ solveRowShiftC ctx0 (RowShiftC r1 n r2) =
     in case Map.lookup r1 (ctxInRowMap ctx0) of
         Nothing -> ctx1
         Just r1Entries ->
-          let newCs = map (\(m, t) -> inRowTC (n + m) t r2)
+          let newCs = map (\(m, t) -> inRowTC r2 (n + m) t)
                       $ Map.toList r1Entries
             in addConstraints newCs ctx1
 
@@ -717,15 +771,19 @@ solveRowShiftC ctx0 (RowShiftC r1 n r2) =
 -- This is mostly trivial, except in places where @r1@ is used as a key in a
 -- map.
 solveEqRowC :: Context -> EqRowC -> Context
-solveEqRowC ctx (EqRowC r1 r2) = unifyRowVars r1 r2 ctx
+solveEqRowC ctx (EqRowC r1 os r2)
+  | Map.null os = unifyRowVars r1 r2 ctx
+  | otherwise = over (field @"ctxRowVarEqs") (Map.alter alter r1) ctx
+  where
+    alter = Just . maybe [(os, r2)] ((os, r2) :)
 
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
-processAtomicConstraints :: Context -> Context
-processAtomicConstraints ctx =  traceContext "processAtomicConstraints" ctx $
-  case dequeueEqC ctx of
-    Just (ctx', c) -> processAtomicConstraints $ solveEqC ctx' c
+processAtomicConstraints :: IsConstraintSolvingMonad m => Context -> m Context
+processAtomicConstraints ctx = do
+  ctx' <- case dequeueEqC ctx of
+    Just (ctx', c) -> processAtomicConstraints =<< solveEqC ctx' c
     Nothing ->
       case dequeueInRowC ctx of
         Just (ctx', c) -> processAtomicConstraints $ solveInRowC ctx' c
@@ -735,7 +793,8 @@ processAtomicConstraints ctx =  traceContext "processAtomicConstraints" ctx $
             Nothing ->
               case dequeueEqRowC ctx of
                 Just (ctx', c) -> processAtomicConstraints $ solveEqRowC ctx' c
-                Nothing -> ctx
+                Nothing -> pure ctx
+  return $ traceContext "processAtomicConstraints" ctx ctx'
 
 -- | Is an @InRowC@ constraint absurd, given the other information present in the @Context@.
 absurdInRowC :: Context -> InRowC -> Bool
@@ -793,11 +852,11 @@ reduceDisjuncts initialContext = traceContext "reduceDisjuncts" initialContext $
 -- | Reduce a context by processing its atomic constraints and then attempting
 -- to reduce disjucts to atomic constraints. Halts once no more atomic constraints
 -- exist or can be inferred from the disjunctions.
-reduceContext :: Context -> Context
-reduceContext ctx0 = traceContext "reduceContext" ctx0 $
-  let ctx1 = reduceDisjuncts $ processAtomicConstraints ctx0
-    in if hasAtomicConstraints ctx1 then reduceContext ctx1
-       else ctx1
+reduceContext :: IsConstraintSolvingMonad m => Context -> m Context
+reduceContext ctx0 = do
+  ctx1 <- reduceDisjuncts <$> processAtomicConstraints ctx0
+  ctx2 <- if hasAtomicConstraints ctx1 then reduceContext ctx1 else pure ctx1
+  return $ traceContext "reduceContext" ctx0 ctx2
 
 
 -- | Remove any remaining @TyVar@s, replacing them with @UnknownTy ()@.
@@ -815,6 +874,9 @@ removeRowVars = \case
   NumTy sz -> NumTy sz
   PtrTy ty -> PtrTy $ removeRowVars ty
   RecTy flds _ -> RecTy (fmap removeRowVars flds) NoRow
+
+class Monad m => IsConstraintSolvingMonad m where
+  csmFreshRowVar :: m RowVar
 
 -- | Substitute out a row variable in a record type for the
 -- corresponding offset mappings. If this results in a single
@@ -864,15 +926,32 @@ expandInRowMapWithShiftMap ::
   Map RowVar (Map Offset ITy)
 expandInRowMapWithShiftMap = Map.foldlWithKey expandInRowMapWithSetOfShifts
 
+newtype ConstraintSolvingState =
+  ConstraintSolvingState
+  { nextRowVar :: Int
+  }
+  deriving (Generic)
+
+newtype ConstraintSolvingMonad a =
+  ConstraintSolvingMonad
+  { getConstraintSolvingMonad :: State ConstraintSolvingState a
+  }
+  deriving (Applicative, Functor, Monad)
+
+instance IsConstraintSolvingMonad ConstraintSolvingMonad where
+  csmFreshRowVar = ConstraintSolvingMonad $ RowVar <$> (field @"nextRowVar" <<+= 1)
+
+runConstraintSolvingMonad :: ConstraintSolvingState -> ConstraintSolvingMonad a -> a
+runConstraintSolvingMonad s = flip evalState s . getConstraintSolvingMonad
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
-unifyConstraints :: [TyConstraint] -> Map TyVar FTy
-unifyConstraints initialConstraints =
+unifyConstraints :: ConstraintSolvingState -> [TyConstraint] -> Map TyVar FTy
+unifyConstraints csState initialConstraints =
   let fvs = foldr (Set.union . freeTyVars) Set.empty initialConstraints
-      finalCtx = reduceContext $ initContext initialConstraints
+      finalCtx = runConstraintSolvingMonad csState $ reduceContext $ initContext initialConstraints
       finalInRowMap = expandInRowMapWithShiftMap (ctxInRowMap finalCtx) (ctxRowShiftMap finalCtx)
-      finalRowMap = fmap (removeRowVars . removeTyVars) <$> trace (show finalInRowMap) finalInRowMap
+      finalRowMap = fmap (removeRowVars . removeTyVars) <$> finalInRowMap
       finalTyMap = fmap (substRowVar finalRowMap . removeTyVars) (ctxTyVarMap finalCtx)
       unknownTyMap = Map.fromSet (const unknownTy) fvs
     in Map.union finalTyMap unknownTyMap
