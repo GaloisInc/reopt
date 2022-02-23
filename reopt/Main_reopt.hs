@@ -729,12 +729,7 @@ showConstraints args = do -- FIXME: copied from main performReopt command
 
   mc <-   handleEitherWithExit mr
 
-  putStrLn "Warnings"
-  putStrLn (unlines (map ((++) "\t" . show) (mcWarnings mc)))
-  putStrLn "Constraints"
-  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints mc)))
-  putStrLn "Inferred types"
-  putStrLn (showInferredTypes mc)
+  displayConstraintsInformation mc
 
 ------------------------------------------------------------------------
 -- Reopt action
@@ -880,14 +875,8 @@ performReopt args = do
         reoptWrite FunsFileType path $ \h -> do
           mapM_ (PP.hPutDoc h . ppFunction moduleConstraints) (recoveredDefs recMod)
 
-    -- TODO: DELETE THIS
-    reoptIO $ do
-      putStrLn "Warnings"
-      putStrLn (unlines (map ((++) "\t" . show) (mcWarnings moduleConstraints)))
-      putStrLn "Constraints"
-      putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
-      putStrLn "Inferred types"
-      putStrLn (showInferredTypes moduleConstraints)
+    -- set to True to dump constraints while generating LLVM, for debugging
+    when False $ reoptIO $ displayConstraintsInformation moduleConstraints
 
     unless (shouldGenerateLLVM args) $ reoptEndNow ()
 
@@ -1004,6 +993,19 @@ generateObjectFile args os objLLVM = do
         reoptRunSlash args cfgPath objLLVM
   reoptIO $ handleExceptTWithExit $
     compileLLVM (optLevel args) (llcPath args) (llvmMcPath args) (osLinkName os) optLLVM
+
+
+displayConstraintsInformation :: ModuleConstraints arch -> IO ()
+displayConstraintsInformation moduleConstraints = do
+  putStrLn "Warnings"
+  putStrLn (unlines (map ((++) "\t" . show) (mcWarnings moduleConstraints)))
+  putStrLn "Constraints (generated)"
+  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
+  putStrLn "Constraints (solving)"
+  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcTyConstraints moduleConstraints)))
+  putStrLn "Inferred types"
+  putStrLn (showInferredTypes moduleConstraints)
+
 
 main' :: IO ()
 main' = do

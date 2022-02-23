@@ -17,7 +17,8 @@ import qualified Test.Tasty.HUnit as T
 import qualified Prettyprinter as PP
 
 import Reopt.TypeInference.Constraints
-  (TyVar(..),
+  (ConstraintSolvingState(..),
+   TyVar(..),
    RowVar(..),
    Ty(..),
    TyConstraint(..),
@@ -156,5 +157,5 @@ tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> [TyConstraint] -> [(TyVar, FTy)] -> T.TestTree
 mkTest name cs expected =
-  let actual = Map.toList $ unifyConstraints cs
+  let actual = Map.toList $ unifyConstraints (ConstraintSolvingState 0) cs
     in T.testCase name $ tyEnv actual T.@?= tyEnv expected
