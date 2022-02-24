@@ -26,6 +26,7 @@ library
     containers,
     directory,
     elf-edit >= 0.40,
+    extra,
     filepath,
     flexdis86 >= 0.1.1,
     galois-dwarf >= 0.2.2,

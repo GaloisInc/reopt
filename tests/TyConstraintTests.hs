@@ -17,8 +17,7 @@ import qualified Test.Tasty.HUnit as T
 import qualified Prettyprinter as PP
 
 import Reopt.TypeInference.Constraints
-  (ConstraintSolvingState(..),
-   TyVar(..),
+  (TyVar(..),
    RowVar(..),
    Ty(..),
    TyConstraint(..),
@@ -45,8 +44,14 @@ x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
       let tv = TyVar i ("test" <> show i) in
       (tv, UnknownTy tv)
 
+usedRowVars :: [Int]
+usedRowVars = [0..3]
+
 r0,r1,_r2,_r3  :: RowVar
-[r0,r1,_r2,_r3] = map RowVar [0..3]
+[r0,r1,_r2,_r3] = map RowVar usedRowVars
+
+firstFreshRowVar :: Int
+firstFreshRowVar = maximum usedRowVars + 1
 
 
 constraintTests :: T.TestTree
@@ -157,5 +162,5 @@ tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> [TyConstraint] -> [(TyVar, FTy)] -> T.TestTree
 mkTest name cs expected =
-  let actual = Map.toList $ unifyConstraints (ConstraintSolvingState 0) cs
+  let actual = Map.toList $ unifyConstraints firstFreshRowVar cs
     in T.testCase name $ tyEnv actual T.@?= tyEnv expected
