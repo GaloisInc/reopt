@@ -68,8 +68,7 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FunctionType (..),
                                                   RecoveredModule (..),
                                                   fnBlocks)
-import           Reopt.TypeInference.Constraints (ConstraintSolvingState (ConstraintSolvingState, nextRowVar),
-                                                  FTy, ITy, Offset (Offset),
+import           Reopt.TypeInference.Constraints (FTy, ITy, Offset (Offset),
                                                   RowVar (RowVar),
                                                   Ty (NumTy, UnknownTy),
                                                   TyConstraint, TyVar (TyVar),
@@ -977,7 +976,6 @@ genModuleConstraints m mem = fst $ runCGenM mem $ do
     mapM (tyConstraint tyConOpts (widthVal (memWidth mem))) constraintsGenerated
 
   next <- CGenM (use nextFreeRowVar)
-  let csState = ConstraintSolvingState { nextRowVar = next }
 
   pure ModuleConstraints { mcFunTypes      = addrMap
                          , mcExtFunTypes   = symMap
@@ -985,5 +983,5 @@ genModuleConstraints m mem = fst $ runCGenM mem $ do
                          , mcWarnings      = warns
                          , mcConstraints   = constraintsGenerated
                          , mcTyConstraints = constraintsForSolving
-                         , mcTypeMap       = unifyConstraints csState constraintsForSolving
+                         , mcTypeMap       = unifyConstraints next constraintsForSolving
                          }
