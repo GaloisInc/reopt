@@ -16,7 +16,7 @@ import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Prettyprinter as PP
 
-import Reopt.TypeInference.Constraints
+import Reopt.TypeInference.Constraints.Solving
   (TyVar(..),
    RowVar(..),
    Ty(..),

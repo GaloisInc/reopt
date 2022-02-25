@@ -68,7 +68,8 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FunctionType (..),
                                                   RecoveredModule (..),
                                                   fnBlocks)
-import           Reopt.TypeInference.Constraints (FTy, ITy, Offset (Offset),
+import           Reopt.TypeInference.Constraints.Solving
+                                                 (FTy, ITy, Offset (Offset),
                                                   RowVar (RowVar),
                                                   Ty (NumTy, UnknownTy),
                                                   TyConstraint, TyVar (TyVar),
@@ -736,10 +737,10 @@ genMemOp ty ptr sz = do
       | FnConstantValue _ o <- p -> do
           tp <- genFnValue q
           emitStructPtr ty tp o sz
-          
+
     FnAssignedValue a ->
       emitPtr (viewSome anyTypeWidth sz) ty =<< assignmentType a
-          
+
     FnArg{} -> do
       emitPtr (viewSome anyTypeWidth sz) ty =<< genFnValue ptr
     FnPhiValue{} -> do
@@ -769,7 +770,7 @@ genFnAssignment a = do
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
     -- no constraints generated here, we will look at this assignment
     -- in context (i.e., on an add or a load).
-    FnAddrWidthConstant {} -> pure () 
+    FnAddrWidthConstant {} -> pure ()
 
 -- | This helper gives us the bitwidth of the types we can read/write from
 -- memory.

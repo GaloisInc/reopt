@@ -16,7 +16,7 @@ import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.ConstraintGen (FunType (..),
                                                     FTy,
                                                     ModuleConstraints (..))
-import           Reopt.TypeInference.Constraints   (TyVar)
+import           Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc a] -> Doc a
