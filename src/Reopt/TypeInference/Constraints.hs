@@ -66,30 +66,23 @@ newtype Offset = Offset {getOffset :: Natural}
 instance PP.Pretty Offset where
   pretty (Offset n) = PP.pretty n
 
-data Ty tvar rvar
-  = -- | An unknown type (e.g., type variable).
-    UnknownTy tvar
-  | -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
+data TyF rvar f
+  = -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
     NumTy Int
   | -- | A pointer to a value.
-    PtrTy (Ty tvar rvar)
+    PtrTy f
   | -- | Record type, mapping byte offsets to types and with a row variable
     -- for describing constraints on the existence/type of additional fields.
-    RecTy (Map Offset (Ty tvar rvar)) rvar
-  deriving (Eq, Ord, Show)
+    RecTy (Map Offset f) rvar
+  deriving (Eq, Ord, Show, Functor)
 
 -- | Type used during inference (i.e., can have free type/row variables)
-type ITy = Ty TyVar RowVar
+-- type ITy = Ty TyVar RowVar
 
--- | Used to denote a type could not be resolved to a known type.
-data Unknown = Unknown
-  deriving (Eq, Ord, Show)
-
-instance PP.Pretty Unknown where
-  pretty _ = "?"
-
-unknownTy :: Ty Unknown rvar
-unknownTy = UnknownTy Unknown
+data ITy
+  = VarTy TyVar
+  -- | Only TyVars are allowed in recursive positions.
+  | ITy (TyF RowVar TyVar)
 
 -- | Used to denote a record type has no row variable.
 data NoRow = NoRow
@@ -99,18 +92,16 @@ instance PP.Pretty NoRow where
   pretty _ = "∅"
 
 -- | Final types resulting from inference (i.e., no free type variables).
-type FTy = Ty Unknown NoRow
+data FTy = UnknownTy | FTy (TyF NoRow FTy)
 
-instance FreeTyVars (Ty TyVar rvar) where
+instance FreeTyVars f => FreeTyVars (TyF rvar f) where
   freeTyVars = \case
-    UnknownTy x -> Set.singleton x
     NumTy _ -> Set.empty
     PtrTy t -> freeTyVars t
     RecTy flds _row -> foldr (Set.union . freeTyVars) Set.empty flds
 
-instance FreeRowVars (Ty tvar RowVar) where
+instance FreeRowVars f => FreeRowVars (TyF RowVar f) where
   freeRowVars = \case
-    UnknownTy _ -> Set.empty
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
@@ -121,10 +112,12 @@ recTyByteWidth ptrSz = offsetAfterLast . last
     offsetAfterLast (Offset o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
 tyByteWidth :: Int -> FTy -> Integer
-tyByteWidth _ (NumTy n) = fromIntegral n `div` 8
-tyByteWidth ptrSz (PtrTy _) = fromIntegral ptrSz `div` 8
-tyByteWidth ptrSz (RecTy flds NoRow) = recTyByteWidth ptrSz (Map.assocs flds)
-tyByteWidth ptrSz (UnknownTy Unknown) = fromIntegral ptrSz `div` 8
+tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
+tyByteWidth ptrSz (FTy ty) =
+  case ty of
+    NumTy n -> fromIntegral n `div` 8
+    PtrTy _ -> fromIntegral ptrSz `div` 8
+    RecTy flds NoRow -> recTyByteWidth ptrSz (Map.assocs flds)
 
 bumpOffsetBy :: Int -> Offset -> Offset
 bumpOffsetBy n (Offset o)
@@ -138,18 +131,24 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
     go :: Natural -> [(Offset, FTy)] -> [L.Type]
     go _ [] = []
     go nextOffset flds@((Offset o, ty) : rest)
-      | o == nextOffset = tyToLLVMType ptrSz ty : go (o + fromIntegral (tyByteWidth ptrSz ty)) rest
-      | otherwise = L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset))) : go o flds
+      | o == nextOffset =
+          tyToLLVMType ptrSz ty
+          : go (o + fromIntegral (tyByteWidth ptrSz ty)) rest
+      | otherwise =
+          L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset)))
+          : go o flds
 
 tyToLLVMType :: Int -> FTy -> L.Type
-tyToLLVMType _ (NumTy n) = L.PrimType (L.Integer (fromIntegral n))
-tyToLLVMType ptrSz (PtrTy typ) = L.PtrTo (tyToLLVMType ptrSz typ)
-tyToLLVMType ptrSz (RecTy flds NoRow) = recTyToLLVMType ptrSz (Map.assocs flds)
-tyToLLVMType ptrSz (UnknownTy Unknown) = L.PrimType (L.Integer (fromIntegral ptrSz))
+tyToLLVMType ptrSz UnknownTy =
+  L.PrimType (L.Integer (fromIntegral ptrSz))
+tyToLLVMType ptrSz (FTy ty) =
+  case ty of
+    NumTy n -> L.PrimType (L.Integer (fromIntegral n))
+    PtrTy typ -> L.PtrTo (tyToLLVMType ptrSz typ)
+    RecTy flds NoRow -> recTyToLLVMType ptrSz (Map.assocs flds)
 
-instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
+instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
-    UnknownTy x -> PP.pretty x
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
     RecTy flds row ->
@@ -162,13 +161,13 @@ instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
                   Map.toAscList flds
 
 iRecTy :: [(Natural, ITy)] -> RowVar -> ITy
-iRecTy flds = RecTy (Map.fromList (map (first Offset) flds))
+iRecTy flds = ITy $ RecTy (Map.fromList (map (first Offset) flds))
 
 fRecTy :: [(Natural, FTy)] -> FTy
-fRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) NoRow
+fRecTy flds = ITy $ RecTy (Map.fromList (map (first Offset) flds)) NoRow
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: ITy, eqRhs :: ITy}
+data EqC = EqC {eqLhs :: TyVar, eqRhs :: ITy}
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty EqC where
@@ -183,7 +182,7 @@ instance FreeRowVars EqC where
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
   { eqRowLHS :: RowVar,
-    eqRowOffsets :: Map Offset ITy,
+    eqRowOffsets :: Map Offset TyVar,
     eqRowRHS :: RowVar
   }
   deriving (Eq, Ord, Show)
@@ -194,7 +193,7 @@ prettyMap ppKey ppValue =
   where
     prettyEntry (k, v) = PP.group (PP.hsep [ppKey k, "→", ppValue v])
 
-prettyRow :: PP.Pretty t => PP.Pretty r => Map Offset (Ty t r) -> RowVar -> PP.Doc d
+prettyRow :: PP.Pretty f => PP.Pretty r => Map Offset (TyF r f) -> RowVar -> PP.Doc d
 prettyRow os r = PP.hsep ["{", PP.hsep (prettyMap PP.pretty PP.pretty os), "|", PP.pretty r, "}"]
 
 instance PP.Pretty EqRowC where
