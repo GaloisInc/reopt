@@ -180,12 +180,18 @@ data FnAssignRhs (arch :: Type) (f :: M.Type -> Type) (tp :: M.Type) where
   FnEvalArchFn :: !(ArchFn arch f tp)
                -> FnAssignRhs arch f tp
 
+  -- | Arch-addr-width constant that may be a pointer.  Used to enable
+  -- easier type assignment when translating to LLVM.
+  FnAddrWidthConstant :: Integer
+                      -> FnAssignRhs arch f (BVType (ArchAddrWidth arch))
+
 instance FoldableFC (ArchFn arch) => FoldableFC (FnAssignRhs arch) where
   foldrFC _ s (FnSetUndefined {}) = s
   foldrFC f s (FnReadMem loc _)   = f loc s
   foldrFC f s (FnCondReadMem _ c a d)   = f c (f a (f d s))
   foldrFC f s (FnEvalApp a)       = foldrFC f s a
   foldrFC f s (FnEvalArchFn fn)   = foldrFC f s fn
+  foldrFC _ s (FnAddrWidthConstant {}) = s
 
 ------------------------------------------------------------------------
 -- FnAssignment/FnValue mutually recursive constructors
@@ -265,6 +271,10 @@ instance FnArchConstraints arch => Pretty (FnAssignRhs arch (FnValue arch) tp) w
       FnCondReadMem _ c a d -> sexpr "cond_read" [ pretty c, pretty a, pretty d ]
       FnEvalApp a -> ppApp pretty a
       FnEvalArchFn f -> runIdentity (ppArchFn (pure . pretty) f)
+      FnAddrWidthConstant i
+        | i >= 0 -> parens ("0x" <> pretty (showHex i "") <> " : " <> "bv"
+                             <+> pretty (8 * addrSize (Proxy :: Proxy (ArchAddrWidth arch))))
+        | otherwise -> error ("FnAddrWidthConstant given negative value: " ++ show i)
 
 instance FnArchConstraints arch => Pretty (FnAssignment arch tp) where
   pretty (FnAssignment lhs rhs) = pretty lhs <> " := " <> pretty rhs
@@ -293,6 +303,7 @@ instance (MemWidth (ArchAddrWidth arch), HasRepr (ArchFn arch f) TypeRepr)
       FnCondReadMem tp _ _ _ -> typeRepr tp
       FnEvalApp a    -> typeRepr a
       FnEvalArchFn f -> typeRepr f
+      FnAddrWidthConstant {} -> archWidthTypeRepr (Proxy :: Proxy arch)
 
 instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
   typeRepr v =
