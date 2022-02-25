@@ -407,12 +407,11 @@ instance SubstRowVar InRowC where
       (substRowVar r1 r2 os t)
 
 substRowVarInRowShiftC ::
-  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
   Map Offset ITy ->
   RowShiftC ->
-  m (RowShiftC, Maybe EqC)
+  ConstraintSolvingMonad (RowShiftC, Maybe EqC)
 substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
   | r3 == r1 = do
     -- Here we want to replace r1 with {os | r2} in a constraint meaning:
@@ -443,12 +442,11 @@ substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
 --   substRowVar r1 r2 os (AndC cs) = AndC (substRowVar r1 r2 os <$> cs)
 
 substRowVarInTyConstraint ::
-  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
   Map Offset ITy ->
   TyConstraint ->
-  m TyConstraint
+  ConstraintSolvingMonad TyConstraint
 substRowVarInTyConstraint r1 r2 os = \case
   EqTC c -> pure $ EqTC $ substRowVar r1 r2 os c
   InRowTC c -> pure $ InRowTC $ substRowVar r1 r2 os c
@@ -462,22 +460,20 @@ substRowVarInTyConstraint r1 r2 os = \case
   AndTC andC -> AndTC <$> substRowVarInAndC r1 r2 os andC
 
 substRowVarInAndC ::
-  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
   Map Offset ITy ->
   AndC ->
-  m AndC
+  ConstraintSolvingMonad AndC
 substRowVarInAndC r1 r2 os (AndC cs) =
   AndC <$> mapM (substRowVarInTyConstraint r1 r2 os) cs
 
 substRowVarInOrC ::
-  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
   Map Offset ITy ->
   OrC ->
-  m OrC
+  ConstraintSolvingMonad OrC
 substRowVarInOrC r1 r2 os (OrC cs) =
   OrC <$> mapM (substRowVarInTyConstraint r1 r2 os) cs
 
@@ -554,10 +550,10 @@ inconsistent = check
         $ Map.toList fs1
 
 -- | @decomposeEqC t1 t2@ returns constraints implied from @EqP t1 t2@.
-decomposeEqC :: forall m. IsConstraintSolvingMonad m => EqC -> m [TyConstraint]
+decomposeEqC :: EqC -> ConstraintSolvingMonad [TyConstraint]
 decomposeEqC (EqC lhs rhs) = go lhs rhs
   where
-    go :: ITy -> ITy -> m [TyConstraint]
+    go :: ITy -> ITy -> ConstraintSolvingMonad [TyConstraint]
     go UnknownTy {} _ = pure []
     go _ UnknownTy {} = pure []
     go (PtrTy t1) (PtrTy t2) = pure [eqTC t1 t2]
@@ -670,12 +666,11 @@ replaceRowVar :: RowVar -> RowVar -> RowVar -> RowVar
 replaceRowVar r1 r2 r = if r == r1 then r2 else r
 
 substRowVarInConstraintSolvingState ::
-  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
   Map Offset ITy ->
   ConstraintSolvingState ->
-  m ConstraintSolvingState
+  ConstraintSolvingMonad ConstraintSolvingState
 substRowVarInConstraintSolvingState r1 r2 os ctx = do
   (rowShiftCs, eqCsFromRowShiftCs) <-
     second catMaybes
@@ -713,7 +708,7 @@ unifyRowVarMap r1 r2 unify union m = unify <$> Map.delete r1 (Map.alter insertOr
     insertOrAlter (Just v) = Just (maybe v (union v) (Map.lookup r1 m))
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
-traceContext :: IsConstraintSolvingMonad m => PP.Doc () -> m () -> m ()
+traceContext :: PP.Doc () -> ConstraintSolvingMonad () -> ConstraintSolvingMonad ()
 traceContext description action = do
   tId <- field @"nextTraceId" <<+= 1
   when traceUnification $ do
@@ -746,7 +741,7 @@ hasAtomicConstraints ctx =
         ]
     )
 
-popField :: IsConstraintSolvingMonad m => Lens' ConstraintSolvingState [a] -> m (Maybe a)
+popField :: Lens' ConstraintSolvingState [a] -> ConstraintSolvingMonad (Maybe a)
 popField fld =
   use fld >>= \case
     [] -> return Nothing
@@ -754,22 +749,22 @@ popField fld =
       modify $ set fld cs
       return (Just c)
 
-dequeueEqC :: IsConstraintSolvingMonad m => m (Maybe EqC)
+dequeueEqC :: ConstraintSolvingMonad (Maybe EqC)
 dequeueEqC = popField (field @"ctxEqCs")
 
-dequeueInRowC :: IsConstraintSolvingMonad m => m (Maybe InRowC)
+dequeueInRowC :: ConstraintSolvingMonad (Maybe InRowC)
 dequeueInRowC = popField (field @"ctxInRowCs")
 
-dequeueRowShiftC :: IsConstraintSolvingMonad m => m (Maybe RowShiftC)
+dequeueRowShiftC :: ConstraintSolvingMonad (Maybe RowShiftC)
 dequeueRowShiftC = popField (field @"ctxRowShiftCs")
 
-dequeueEqRowC :: IsConstraintSolvingMonad m => m (Maybe EqRowC)
+dequeueEqRowC :: ConstraintSolvingMonad (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
 
-addConstraints :: forall m. IsConstraintSolvingMonad m => [TyConstraint] -> m ()
+addConstraints :: [TyConstraint] -> ConstraintSolvingMonad ()
 addConstraints = mapM_ go
   where
-    go :: TyConstraint -> m ()
+    go :: TyConstraint -> ConstraintSolvingMonad ()
     go (EqTC c) = modify $ over (field @"ctxEqCs") (c :)
     go (InRowTC c) = modify $ over (field @"ctxInRowCs") (c :)
     go (RowShiftTC c) = modify $ over (field @"ctxRowShiftCs") (c :)
@@ -791,7 +786,7 @@ trivialEqC (EqC l r) = l == r
 -- | Updates the context with the given equality. This action is "atomic" in the
 -- sense that it may generate some additional implied constraints, but it does
 -- not also solve those as well. It handles exactly one constraint.
-solveEqC :: forall m. IsConstraintSolvingMonad m => EqC -> m ()
+solveEqC :: EqC -> ConstraintSolvingMonad ()
 solveEqC c
   | trivialEqC c = pure ()
   | absurdEqC c = modify $ over (field @"ctxAbsurdEqCs") (c :)
@@ -802,7 +797,7 @@ solveEqC c
       (t, UnknownTy x) -> solveVarEq x t
       (_, _) -> pure ()
   where
-    solveVarEq :: TyVar -> ITy -> m ()
+    solveVarEq :: TyVar -> ITy -> ConstraintSolvingMonad ()
     solveVarEq x t =
       if Set.member x (freeTyVars t)
         then -- if we fail the occurs check, remember that for debugging and move on
@@ -815,7 +810,7 @@ solveEqC c
 
 -- | Updates the context with an @InRowC@ constraint. Like @solveEqC@ this is an
 -- "atomic" update.
-solveInRowC :: IsConstraintSolvingMonad m => InRowC -> m ()
+solveInRowC :: InRowC -> ConstraintSolvingMonad ()
 solveInRowC (InRowC r o t) = do
   r' <- freshRowVar
   addConstraints [eqRowTC r (Map.singleton o t) r']
@@ -826,7 +821,7 @@ shiftFields n = Map.mapKeys (+ n)
 
 -- | Updates the context with a @RowShiftC@ constraint. Like @solveEqC@ this is
 -- an "atomic" update.
-solveRowShiftC :: forall m. IsConstraintSolvingMonad m => RowShiftC -> m ()
+solveRowShiftC :: RowShiftC -> ConstraintSolvingMonad ()
 solveRowShiftC (RowShiftC r1 n r2) =
   modify $ over (field @"ctxRowShiftMap") (Map.alter alter r1)
   where
@@ -834,7 +829,7 @@ solveRowShiftC (RowShiftC r1 n r2) =
     alter (Just s) = Just (Set.union s (Set.singleton (n, r2)))
 
 -- | TODO
-solveEqRowC :: IsConstraintSolvingMonad m => EqRowC -> m ()
+solveEqRowC :: EqRowC -> ConstraintSolvingMonad ()
 solveEqRowC (EqRowC r1 os r2) = do
   -- TODO (val) There's gotta be a combinator for doing this?
   s <- get
@@ -843,7 +838,7 @@ solveEqRowC (EqRowC r1 os r2) = do
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
-processAtomicConstraints :: IsConstraintSolvingMonad m => m ()
+processAtomicConstraints :: ConstraintSolvingMonad ()
 processAtomicConstraints = traceContext "processAtomicConstraints" $ do
   dequeueEqC >>= \case
     Just c -> solveEqC c >> processAtomicConstraints
@@ -859,7 +854,7 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
                 Nothing -> return ()
 
 -- | Reduce/simplify a constraint in a given context.
-reduceC :: IsConstraintSolvingMonad m => TyConstraint -> m TyConstraint
+reduceC :: TyConstraint -> ConstraintSolvingMonad TyConstraint
 reduceC tc =
   case tc of
     EqTC c
@@ -874,19 +869,19 @@ reduceC tc =
 
 -- | Attempt to reduce and eliminate disjunctions in the given context. Any
 -- resulting non-disjuncts are added to their respective field in the context.
-reduceDisjuncts :: forall m. IsConstraintSolvingMonad m => m ()
+reduceDisjuncts :: ConstraintSolvingMonad ()
 reduceDisjuncts = traceContext "reduceDisjuncts" $ do
   disjs <- gets ctxOrCs
   modify $ set (field @"ctxOrCs") []
   mapM_ elimOr disjs
   where
-    elimOr :: OrC -> m ()
+    elimOr :: OrC -> ConstraintSolvingMonad ()
     elimOr (OrC ds) = addConstraints . (: []) . orTC =<< mapM reduceC ds
 
 -- | Reduce a context by processing its atomic constraints and then attempting
 -- to reduce disjucts to atomic constraints. Halts once no more atomic constraints
 -- exist or can be inferred from the disjunctions.
-reduceContext :: IsConstraintSolvingMonad m => m ()
+reduceContext :: ConstraintSolvingMonad ()
 reduceContext = traceContext "reduceContext" $ do
   processAtomicConstraints
   reduceDisjuncts
@@ -912,11 +907,6 @@ removeRowVars = \case
 
 class Monad m => CanFreshRowVar m where
   freshRowVar :: m RowVar
-
-type IsConstraintSolvingMonad m =
-  ( CanFreshRowVar m,
-    MonadState ConstraintSolvingState m
-  )
 
 -- | Substitute out a row variable in a record type for the corresponding offset
 -- mappings.  If this results in a single offset with conflicting types, replace
