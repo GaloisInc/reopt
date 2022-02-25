@@ -14,11 +14,12 @@
 
 module Reopt.TypeInference.Constraints where
 
-import Control.Lens (Lens', over, set, view, (<<+=))
+import Control.Lens (Lens', over, set, use, (<<+=))
 import Control.Monad (when)
 import Control.Monad.Extra (whenM)
-import Control.Monad.State (MonadState (get), State, StateT (StateT), execState, gets, modify)
+import Control.Monad.State (MonadState (get, put), State, StateT (StateT), execState, gets, modify)
 import Data.Bifunctor (Bifunctor (second), first)
+import Data.Either (partitionEithers)
 import Data.Generics.Product (field)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -29,22 +30,29 @@ import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import qualified Prettyprinter as PP
 import qualified Text.LLVM as L
+import Data.Maybe (catMaybes)
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool
-traceUnification = False
+traceUnification = True
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
 prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
 
 data TyVar = TyVar
   { tyVarInt :: Int,
-    tyVarOrigin :: String
+    -- | If you want to record the origin of this type variable, it will show
+    -- out when you pretty-print it.  Recommended, except in the test suite
+    -- where there is not much point in marking test type variables.
+    tyVarOrigin :: Maybe String
   }
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty TyVar where
-  pretty tyv = "α" <> PP.pretty (tyVarInt tyv) <> " (" <> PP.pretty (tyVarOrigin tyv) <> ")"
+  pretty tyv = PP.hcat ["α", PP.pretty (tyVarInt tyv), maybeOrigin (tyVarOrigin tyv)]
+    where
+      maybeOrigin Nothing = mempty
+      maybeOrigin (Just origin) = PP.space <> PP.parens (PP.pretty origin)
 
 class FreeTyVars a where
   freeTyVars :: a -> Set TyVar
@@ -208,9 +216,9 @@ instance FreeRowVars EqRowC where
 
 -- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
 data InRowC = InRowC
-  { inRowOffset :: Offset,
-    inRowTypeAtOffset :: ITy,
-    inRowRowVar :: RowVar
+  { inRowRowVar :: RowVar,
+    inRowOffset :: Offset,
+    inRowTypeAtOffset :: ITy
   }
   deriving (Eq, Ord, Show)
 
@@ -218,10 +226,10 @@ instance PP.Pretty InRowC where
   pretty (InRowC o t r) = prettySExp [PP.pretty o, ":", PP.pretty t, "∈", PP.pretty r]
 
 instance FreeTyVars InRowC where
-  freeTyVars (InRowC _ t _) = freeTyVars t
+  freeTyVars (InRowC _ _ t) = freeTyVars t
 
 instance FreeRowVars InRowC where
-  freeRowVars (InRowC _ t r) = Set.insert r (freeRowVars t)
+  freeRowVars (InRowC r _ t) = Set.insert r (freeRowVars t)
 
 -- | @RowShiftC r1 o r2@ means that @r1@ with offsets shifted by @o@ corresponds to @r2@.
 -- I.e., if from other information we could derive @r1@ corresponded
@@ -325,7 +333,7 @@ eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
 eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
 
 inRowTC :: RowVar -> Offset -> ITy -> TyConstraint
-inRowTC r o t = InRowTC $ InRowC o t r
+inRowTC r o t = InRowTC $ InRowC r o t
 
 -- | Disjunction smart constructor that performs NEEDED simplifications.
 orTC :: [TyConstraint] -> TyConstraint
@@ -375,48 +383,103 @@ isPointerWithOffsetTC (base, baseRow) (result, resultRow) offset =
       RowShiftTC (RowShiftC resultRow offset baseRow)
     ]
 
-class UnifyRowVars a where
-  unifyRowVars :: RowVar -> RowVar -> a -> a
+class SubstRowVar a where
+  substRowVar :: RowVar -> RowVar -> Map Offset ITy -> a -> a
 
-instance UnifyRowVars ITy where
-  unifyRowVars r1 r2 = \case
+instance SubstRowVar ITy where
+  substRowVar r1 r2 os = \case
     UnknownTy v -> UnknownTy v
     NumTy sz -> NumTy sz
-    PtrTy t -> PtrTy (unifyRowVars r1 r2 t)
-    RecTy flds rvar -> RecTy (unifyRowVars r1 r2 <$> flds) (unifyRowVars r1 r2 rvar)
+    PtrTy t -> PtrTy (substRowVar r1 r2 os t)
+    RecTy flds rvar
+      -- TODO: check for fields conflict
+      | rvar == r1 -> RecTy (Map.union (substRowVar r1 r2 os <$> flds) os) r2
+      | otherwise -> RecTy (substRowVar r1 r2 os <$> flds) rvar
 
-instance UnifyRowVars RowVar where
-  unifyRowVars r1 r2 r
-    | r1 == r = r2
-    | otherwise = r
+instance SubstRowVar EqC where
+  substRowVar r1 r2 os (EqC l r) = EqC (substRowVar r1 r2 os l) (substRowVar r1 r2 os r)
 
-instance UnifyRowVars EqC where
-  unifyRowVars r1 r2 (EqC l r) = EqC (unifyRowVars r1 r2 l) (unifyRowVars r1 r2 r)
+instance SubstRowVar InRowC where
+  substRowVar r1 r2 os (InRowC r o t) =
+    InRowC
+      (if r == r1 && o `notElem` Map.keys os then r2 else r)
+      o
+      (substRowVar r1 r2 os t)
 
-instance UnifyRowVars InRowC where
-  unifyRowVars r1 r2 (InRowC o t r) = InRowC o (unifyRowVars r1 r2 t) (unifyRowVars r1 r2 r)
+substRowVarInRowShiftC ::
+  IsConstraintSolvingMonad m =>
+  RowVar ->
+  RowVar ->
+  Map Offset ITy ->
+  RowShiftC ->
+  m (RowShiftC, Maybe EqC)
+substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
+  | r3 == r1 = do
+    -- Here we want to replace r1 with {os | r2} in a constraint meaning:
+    -- shift o r1 = r4   -->   shift o {os | r2} = r4
+    -- Which means we want to introduce a fresh r such that:
+    -- shift o {| r2} = r   and   r4 = {shift o os | r}
+    r <- freshRowVar
+    return
+      ( RowShiftC r2 o r,
+        Just (EqC (RecTy mempty r4) (RecTy (shiftStructuralInformationBy (fromIntegral n) os) r))
+      )
+  | r4 == r1 = do
+    -- Here we want to replace r1 with {os | r2} in a constraint meaning:
+    -- shift o r3 = r1   -->   shift o r3 {os | r2}
+    -- Which means we want to introduce a fresh r such that:
+    -- r3 = {shift (-o) os | r}   and   shift o {|r} = {|r2}
+    r <- freshRowVar
+    return
+      ( RowShiftC r o r2,
+        Just (EqC (RecTy mempty r3) (RecTy (shiftStructuralInformationBy (- (fromIntegral n)) os) r))
+      )
+  | otherwise = return (RowShiftC r3 o r4, Nothing)
 
-instance UnifyRowVars RowShiftC where
-  unifyRowVars r1 r2 (RowShiftC r3 o r4) = RowShiftC (unifyRowVars r1 r2 r3) o (unifyRowVars r1 r2 r4)
+-- instance SubstRowVar OrC where
+--   substRowVar r1 r2 os (OrC cs) = OrC (substRowVar r1 r2 os <$> cs)
 
-instance UnifyRowVars OrC where
-  unifyRowVars r1 r2 (OrC cs) = OrC (unifyRowVars r1 r2 <$> cs)
+-- instance SubstRowVar AndC where
+--   substRowVar r1 r2 os (AndC cs) = AndC (substRowVar r1 r2 os <$> cs)
 
-instance UnifyRowVars AndC where
-  unifyRowVars r1 r2 (AndC cs) = AndC (unifyRowVars r1 r2 <$> cs)
+substRowVarInTyConstraint ::
+  IsConstraintSolvingMonad m =>
+  RowVar ->
+  RowVar ->
+  Map Offset ITy ->
+  TyConstraint ->
+  m TyConstraint
+substRowVarInTyConstraint r1 r2 os = \case
+  EqTC c -> pure $ EqTC $ substRowVar r1 r2 os c
+  InRowTC c -> pure $ InRowTC $ substRowVar r1 r2 os c
+  RowShiftTC c -> do
+    (rsC, meqC) <- substRowVarInRowShiftC r1 r2 os c
+    return $ case meqC of
+      Nothing -> RowShiftTC rsC
+      Just eqC -> AndTC (AndC [RowShiftTC rsC, EqTC eqC])
+  EqRowTC c -> pure $ either EqTC EqRowTC (substRowVarInEqRowC r1 r2 os c)
+  OrTC orC -> OrTC <$> substRowVarInOrC r1 r2 os orC
+  AndTC andC -> AndTC <$> substRowVarInAndC r1 r2 os andC
 
-instance UnifyRowVars EqRowC where
-  unifyRowVars r1 r2 (EqRowC r3 os r4) =
-    EqRowC (unifyRowVars r1 r2 r3) (unifyRowVars r1 r2 <$> os) (unifyRowVars r1 r2 r4)
+substRowVarInAndC ::
+  IsConstraintSolvingMonad m =>
+  RowVar ->
+  RowVar ->
+  Map Offset ITy ->
+  AndC ->
+  m AndC
+substRowVarInAndC r1 r2 os (AndC cs) =
+  AndC <$> mapM (substRowVarInTyConstraint r1 r2 os) cs
 
-instance UnifyRowVars TyConstraint where
-  unifyRowVars r1 r2 = \case
-    EqTC c -> EqTC (unifyRowVars r1 r2 c)
-    InRowTC c -> InRowTC (unifyRowVars r1 r2 c)
-    RowShiftTC c -> RowShiftTC (unifyRowVars r1 r2 c)
-    OrTC c -> OrTC (unifyRowVars r1 r2 c)
-    AndTC c -> AndTC (unifyRowVars r1 r2 c)
-    EqRowTC c -> EqRowTC (unifyRowVars r1 r2 c)
+substRowVarInOrC ::
+  IsConstraintSolvingMonad m =>
+  RowVar ->
+  RowVar ->
+  Map Offset ITy ->
+  OrC ->
+  m OrC
+substRowVarInOrC r1 r2 os (OrC cs) =
+  OrC <$> mapM (substRowVarInTyConstraint r1 r2 os) cs
 
 ----------------------------------------------------------------------------------------
 -- Type Operations
@@ -439,7 +502,7 @@ instance SubstTyVar EqC where
   substTyVar xt (EqC l r) = EqC (substTyVar xt l) (substTyVar xt r)
 
 instance SubstTyVar InRowC where
-  substTyVar xt (InRowC o t r) = InRowC o (substTyVar xt t) r
+  substTyVar xt (InRowC r o t) = InRowC r o (substTyVar xt t)
 
 instance SubstTyVar RowShiftC where
   substTyVar _ c@RowShiftC {} = c
@@ -524,8 +587,8 @@ decomposeEqC (EqC lhs rhs) = go lhs rhs
         --
         -- r1 = { 8 : i8 | r3 }   and   r2 = { 0 : i8 | r3 }
         r3 <- freshRowVar
-        let eqr1 = eqTC (RecTy mempty r1) (RecTy fs2 r3)
-        let eqr2 = eqTC (RecTy mempty r2) (RecTy fs1 r3)
+        let eqr1 = eqTC (RecTy mempty r1) (RecTy (Map.difference fs2 fs1) r3)
+        let eqr2 = eqTC (RecTy mempty r2) (RecTy (Map.difference fs1 fs2) r3)
         pure $ eqr1 : eqr2 : fldPs ++ r1Ps ++ r2Ps
     go (RecTy fs r) t = pure $ goRecNonRec fs r t
     go t (RecTy fs r) = pure $ goRecNonRec fs r t
@@ -551,14 +614,9 @@ instance PP.Pretty ConstraintSolvingState where
             row "Type Var Map" $
               map (\(x, xTy) -> prettySExp [PP.pretty x, "↦", PP.pretty xTy]) $
                 Map.toList $ ctxTyVarMap ctx,
-            row "In Row Map" $
-              let prettyRMap (r, rMap) = map (\(o, t) -> PP.pretty (InRowC o t r)) $ Map.toList rMap
-               in concatMap prettyRMap $ Map.toList $ ctxInRowMap ctx,
             row "Row Shift Map" $
               let prettySMap (r, sSet) = map (\(o, r') -> PP.pretty (RowShiftC r o r')) $ Set.toList sSet
-               in concatMap prettySMap $ Map.toList $ ctxRowShiftMap ctx,
-            row "Row Equality Map" $
-              prettyMap PP.pretty (PP.hsep . map (uncurry prettyRow)) (ctxRowVarEqs ctx)
+               in concatMap prettySMap $ Map.toList $ ctxRowShiftMap ctx
           ]
 
 instance SubstTyVar ConstraintSolvingState where
@@ -571,41 +629,74 @@ instance SubstTyVar ConstraintSolvingState where
         ctxOrCs = fmap (substTyVar xt) (ctxOrCs ctx),
         ctxEqRowCs = ctxEqRowCs ctx, -- no TyVars in EqRowCs
         ctxTyVarMap = fmap (substTyVar xt) (ctxTyVarMap ctx),
-        ctxInRowMap = fmap (fmap (substTyVar xt)) (ctxInRowMap ctx),
         -- Not modified because we only substitute in unprocessed constraints:
         ctxAbsurdEqCs = ctxAbsurdEqCs ctx,
         ctxOccursCheckFailures = ctxOccursCheckFailures ctx,
         ctxRowShiftMap = ctxRowShiftMap ctx,
-        ctxRowVarEqs = ctxRowVarEqs ctx,
+        nextTraceId = nextTraceId ctx,
         nextRowVar = nextRowVar ctx
       }
 
-instance UnifyRowVars ConstraintSolvingState where
-  unifyRowVars r1 r2 ctx =
-    ConstraintSolvingState
-      { ctxEqCs = unifyRowVars r1 r2 <$> ctxEqCs ctx,
-        ctxInRowCs = unifyRowVars r1 r2 <$> ctxInRowCs ctx,
-        ctxRowShiftCs = unifyRowVars r1 r2 <$> ctxRowShiftCs ctx,
-        ctxOrCs = unifyRowVars r1 r2 <$> ctxOrCs ctx,
-        ctxEqRowCs = unifyRowVars r1 r2 <$> ctxEqRowCs ctx,
-        ctxTyVarMap = unifyRowVars r1 r2 <$> ctxTyVarMap ctx,
-        ctxInRowMap = unifyRowVarMap r1 r2 (unifyRowVars r1 r2 <$>) (unifyInRowMap r1 r2) (ctxInRowMap ctx),
-        ctxRowShiftMap = unifyRowVarMap r1 r2 (Set.map (second (unifyRowVars r1 r2))) (unifyRowShiftMap r1 r2) (ctxRowShiftMap ctx),
-        ctxRowVarEqs = unifyRowVarMap r1 r2 (map (second (unifyRowVars r1 r2))) (++) (ctxRowVarEqs ctx),
-        -- Not modified because we only substitute in unprocessed constraints:
-        ctxAbsurdEqCs = ctxAbsurdEqCs ctx,
-        ctxOccursCheckFailures = ctxOccursCheckFailures ctx,
-        nextRowVar = nextRowVar ctx
-      }
+-- Until we had a row-shift term, substituting a row in an EqRowC can not
+-- necessarily be represented as another EqRowC.
+substRowVarInEqRowC :: RowVar -> RowVar -> Map Offset ITy -> EqRowC -> Either EqC EqRowC
+-- substRowVarInEqRowC :: RowVar -> RowVar -> Map Offset ITy -> EqRowC -> (EqRowC, [InRowC])
+substRowVarInEqRowC r1 r2 os (EqRowC r3 os' r4)
+  -- In this case, we intend to replace r1 with {os | r2} in a constraint of the form:
+  -- r1 = {os' | r4}
+  -- This ought to mean the constraint:
+  -- {os | r2} = {os' | r4}
+  -- Now os and os' may overlap some.  For those offsets that overlap, we should
+  -- check for conflicts, and otherwise omit them entirely from the resulting
+  -- constraints.
+  -- The remaining constraint being:
+  -- {unique_os | r2} = {unique_os' | r4}
+  -- which we can represent either as an EqC, or as a combination of an EqRowC
+  -- and some InRowCs.
+  -- Let's try an EqC for now as it makes the type simpler (no need for lists).
+  | r3 == r1 =
+    let uniqOs = Map.filterWithKey (\k _ -> k `notElem` Map.keys os') os
+     in let uniqOs' = Map.filterWithKey (\k _ -> k `notElem` Map.keys os) os'
+         in Left $ EqC (RecTy uniqOs r2) (RecTy uniqOs' r4)
+  -- (EqRowC r2 os' r4, uncurry (InRowC r4) <$> filter ((`notElem` Map.keys os') . fst) (Map.assocs os))
+  -- TODO: check for conflicts?
+  | r4 == r1 = Right $ EqRowC r3 (Map.union os os') r4
+  -- It should never be the case that both r3 and r4 are equal to r1, so this
+  -- should only trigger when both are **not** r1.
+  | otherwise = Right $ EqRowC r3 os' r4
 
-unifyInRowMap ::
-  UnifyRowVars b =>
+-- TODO: check that this is used correctly!
+replaceRowVar :: RowVar -> RowVar -> RowVar -> RowVar
+replaceRowVar r1 r2 r = if r == r1 then r2 else r
+
+substRowVarInConstraintSolvingState ::
+  IsConstraintSolvingMonad m =>
   RowVar ->
   RowVar ->
-  Map Offset b ->
-  Map Offset b ->
-  Map Offset b
-unifyInRowMap r1 r2 m1 m2 = unifyRowVars r1 r2 <$> Map.union m1 m2
+  Map Offset ITy ->
+  ConstraintSolvingState ->
+  m ConstraintSolvingState
+substRowVarInConstraintSolvingState r1 r2 os ctx = do
+  (rowShiftCs, eqCsFromRowShiftCs) <-
+    second catMaybes
+    . unzip
+    <$> mapM (substRowVarInRowShiftC r1 r2 os) (ctxRowShiftCs ctx)
+  let (eqCsFromEqRowCs, newEqRowCs) = partitionEithers $ substRowVarInEqRowC r1 r2 os <$> ctxEqRowCs ctx
+  orCs <- mapM (substRowVarInOrC r1 r2 os) (ctxOrCs ctx)
+  return $ ConstraintSolvingState
+    { ctxEqCs = (substRowVar r1 r2 os <$> ctxEqCs ctx) ++ eqCsFromEqRowCs ++ eqCsFromRowShiftCs,
+      ctxInRowCs = substRowVar r1 r2 os <$> ctxInRowCs ctx,
+      ctxRowShiftCs = rowShiftCs, -- substRowVarInRowShiftC r1 r2 os <$> ctxRowShiftCs ctx,
+      ctxOrCs = orCs,
+      ctxEqRowCs = newEqRowCs,
+      ctxTyVarMap = substRowVar r1 r2 os <$> ctxTyVarMap ctx,
+      ctxRowShiftMap = unifyRowVarMap r1 r2 (Set.map (second (replaceRowVar r1 r2))) (unifyRowShiftMap r1 r2) (ctxRowShiftMap ctx),
+      -- Not modified because we only substitute in unprocessed constraints:
+      ctxAbsurdEqCs = ctxAbsurdEqCs ctx,
+      ctxOccursCheckFailures = ctxOccursCheckFailures ctx,
+      nextTraceId = nextTraceId ctx,
+      nextRowVar = nextRowVar ctx
+    }
 
 unifyRowShiftMap ::
   RowVar ->
@@ -613,7 +704,7 @@ unifyRowShiftMap ::
   Set (Offset, RowVar) ->
   Set (Offset, RowVar) ->
   Set (Offset, RowVar)
-unifyRowShiftMap r1 r2 s1 s2 = Set.map (second (unifyRowVars r1 r2)) (Set.union s1 s2)
+unifyRowShiftMap r1 r2 s1 s2 = Set.map (second (replaceRowVar r1 r2)) (Set.union s1 s2)
 
 unifyRowVarMap :: RowVar -> RowVar -> (v -> v) -> (v -> v -> v) -> Map RowVar v -> Map RowVar v
 unifyRowVarMap r1 r2 unify union m = unify <$> Map.delete r1 (Map.alter insertOrAlter r2 m)
@@ -624,15 +715,21 @@ unifyRowVarMap r1 r2 unify union m = unify <$> Map.delete r1 (Map.alter insertOr
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: IsConstraintSolvingMonad m => PP.Doc () -> m () -> m ()
 traceContext description action = do
-  stateBefore <- get
-  action
-  stateAfter <- get
+  tId <- field @"nextTraceId" <<+= 1
   when traceUnification $ do
+    stateBefore <- get
     let msg =
           PP.vsep
-            [ PP.hsep [">>> ", description],
-              PP.indent 4 $ PP.pretty stateBefore,
-              PP.hsep ["<<< ", description],
+            [ PP.hsep [">>>", PP.parens (PP.pretty tId), description],
+              PP.indent 4 $ PP.pretty stateBefore
+            ]
+    trace (show msg) (pure ())
+  action
+  when traceUnification $ do
+    stateAfter <- get
+    let msg =
+          PP.vsep
+            [ PP.hsep ["<<< ", PP.parens (PP.pretty tId), description],
               PP.indent 4 $ PP.pretty stateAfter
             ]
     trace (show msg) (return ())
@@ -651,7 +748,7 @@ hasAtomicConstraints ctx =
 
 popField :: IsConstraintSolvingMonad m => Lens' ConstraintSolvingState [a] -> m (Maybe a)
 popField fld =
-  gets (view fld) >>= \case
+  use fld >>= \case
     [] -> return Nothing
     (c : cs) -> do
       modify $ set fld cs
@@ -681,7 +778,7 @@ addConstraints = mapM_ go
     go (EqRowTC c) = modify $ over (field @"ctxEqRowCs") (c :)
 
 emptyContext :: Int -> ConstraintSolvingState
-emptyContext = ConstraintSolvingState [] [] [] [] [] [] [] Map.empty Map.empty Map.empty Map.empty
+emptyContext = ConstraintSolvingState [] [] [] [] [] [] [] Map.empty Map.empty 0
 
 -- | Is an equality constraint absurd?
 absurdEqC :: EqC -> Bool
@@ -719,13 +816,9 @@ solveEqC c
 -- | Updates the context with an @InRowC@ constraint. Like @solveEqC@ this is an
 -- "atomic" update.
 solveInRowC :: IsConstraintSolvingMonad m => InRowC -> m ()
-solveInRowC (InRowC o t r) = do
-  gets (Map.lookup r . ctxInRowMap) >>= \case
-    Nothing -> modify $ over (field @"ctxInRowMap") (Map.insert r (Map.singleton o t))
-    Just rMap ->
-      case Map.lookup o rMap of
-        Nothing -> modify $ over (field @"ctxInRowMap") (Map.insert r (Map.insert o t rMap))
-        Just t' -> addConstraints [eqTC t t']
+solveInRowC (InRowC r o t) = do
+  r' <- freshRowVar
+  addConstraints [eqRowTC r (Map.singleton o t) r']
 
 -- | @shiftFields o m@ adds offset @o@ to the offsets in @m@.
 shiftFields :: Offset -> Map Offset ITy -> Map Offset ITy
@@ -735,32 +828,18 @@ shiftFields n = Map.mapKeys (+ n)
 -- an "atomic" update.
 solveRowShiftC :: forall m. IsConstraintSolvingMonad m => RowShiftC -> m ()
 solveRowShiftC (RowShiftC r1 n r2) =
-  gets (Map.lookup r1 . ctxInRowMap) >>= \case
-    Nothing -> insertStuff
-    Just r1Entries -> do
-      let newCs =
-            map (\(m, t) -> inRowTC r2 (n + m) t) $
-              Map.toList r1Entries
-      insertStuff
-      addConstraints newCs
+  modify $ over (field @"ctxRowShiftMap") (Map.alter alter r1)
   where
-    -- FIXME rename insertStuff and new
-    insertStuff :: m ()
-    insertStuff = do
-      new <- gets (Map.findWithDefault Set.empty r1 . ctxRowShiftMap)
-      modify $
-        over (field @"ctxRowShiftMap") $
-          Map.insert r1 (Set.insert (n, r2) new)
+    alter Nothing = Just (Set.singleton (n, r2))
+    alter (Just s) = Just (Set.union s (Set.singleton (n, r2)))
 
--- | We solve an @EqRowC r1 r2@ by substituting all instances of @r1@ into @r2@.
--- This is mostly trivial, except in places where @r1@ is used as a key in a
--- map.
+-- | TODO
 solveEqRowC :: IsConstraintSolvingMonad m => EqRowC -> m ()
-solveEqRowC (EqRowC r1 os r2)
-  | Map.null os = modify $ unifyRowVars r1 r2
-  | otherwise = modify $ over (field @"ctxRowVarEqs") (Map.alter alter r1)
-  where
-    alter = Just . maybe [(os, r2)] ((os, r2) :)
+solveEqRowC (EqRowC r1 os r2) = do
+  -- TODO (val) There's gotta be a combinator for doing this?
+  s <- get
+  s' <- substRowVarInConstraintSolvingState r1 r2 os s
+  put s'
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
@@ -779,49 +858,19 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
                 Just c -> solveEqRowC c >> processAtomicConstraints
                 Nothing -> return ()
 
--- | Is an @InRowC@ constraint absurd, given the other information present in the @ConstraintSolvingState@.
-absurdInRowC :: ConstraintSolvingState -> InRowC -> Bool
-absurdInRowC ctx (InRowC o t r) = case Map.lookup r (ctxInRowMap ctx) >>= Map.lookup o of
-  Nothing -> False
-  Just t' -> absurdEqC (EqC t t')
-
--- | Is an @InRowC@ constraint trivial, given the other information present in the @ConstraintSolvingState@.
-trivialInRowC :: ConstraintSolvingState -> InRowC -> Bool
-trivialInRowC ctx (InRowC o t r) = case Map.lookup r (ctxInRowMap ctx) >>= Map.lookup o of
-  Nothing -> False
-  Just t' -> trivialEqC (EqC t t')
-
--- | Is a @RowShiftC@ constraint absurd, given the other information present in the @ConstraintSolvingState@.
-absurdRowShiftC :: ConstraintSolvingState -> RowShiftC -> Bool
-absurdRowShiftC ctx (RowShiftC r1 n r2) =
-  case (Map.lookup r1 rMap, Map.lookup r2 rMap) of
-    (Just flds1, Just flds2) ->
-      -- Compute the implied common field types and check if equality between any such pair
-      -- is absurd.
-      any absurdEqC $ Map.elems $ Map.intersectionWith EqC (Map.mapKeys (+ n) flds1) flds2
-    (_, _) -> False
-  where
-    rMap = ctxInRowMap ctx
-
 -- | Reduce/simplify a constraint in a given context.
 reduceC :: IsConstraintSolvingMonad m => TyConstraint -> m TyConstraint
-reduceC tc = do
-  ctx <- get
+reduceC tc =
   case tc of
     EqTC c
       | absurdEqC c -> return absurdTC
       | trivialEqC c -> return trivialTC
       | otherwise -> return tc
-    InRowTC c
-      | absurdInRowC ctx c -> return absurdTC
-      | trivialInRowC ctx c -> return trivialTC
-      | otherwise -> return tc
-    RowShiftTC c
-      | absurdRowShiftC ctx c -> return absurdTC
-      | otherwise -> return tc
-    OrTC (OrC cs) -> orTC <$> mapM reduceC cs
     AndTC (AndC cs) -> andTC <$> mapM reduceC cs
-    EqRowTC _ -> return tc -- TODO: (val) is this correct?
+    OrTC (OrC cs) -> orTC <$> mapM reduceC cs
+    EqRowTC {} -> return tc
+    InRowTC {} -> return tc
+    RowShiftTC {} -> return tc
 
 -- | Attempt to reduce and eliminate disjunctions in the given context. Any
 -- resulting non-disjuncts are added to their respective field in the context.
@@ -869,23 +918,28 @@ type IsConstraintSolvingMonad m =
     MonadState ConstraintSolvingState m
   )
 
--- | Substitute out a row variable in a record type for the
--- corresponding offset mappings. If this results in a single
--- offset with conflicting types, replace the type
--- with an @Unknown@.
-substRowVar :: Map RowVar (Map Offset FTy) -> Ty Unknown RowVar -> FTy
-substRowVar rowMaps = \case
+-- | Substitute out a row variable in a record type for the corresponding offset
+-- mappings.  If this results in a single offset with conflicting types, replace
+-- the type with an @Unknown@.
+-- substFinalRowVar :: Map RowVar (Map Offset FTy) -> Ty Unknown RowVar -> FTy
+-- substFinalRowVar rowMaps = \case
+--   UnknownTy {} -> unknownTy
+--   NumTy sz -> NumTy sz
+--   PtrTy t -> PtrTy $ substFinalRowVar rowMaps t
+--   RecTy flds r ->
+--     let flds' = fmap (substFinalRowVar rowMaps) flds
+--      in case Map.lookup r rowMaps of
+--           Nothing -> RecTy flds' NoRow
+--           Just rMap ->
+--             let combineTypes t1 t2 = if t1 == t2 then t1 else unknownTy
+--                 mergedFlds = Map.unionWith combineTypes flds' rMap
+--              in RecTy mergedFlds NoRow
+finalizeRowVar :: Ty Unknown RowVar -> FTy
+finalizeRowVar = \case
   UnknownTy {} -> unknownTy
   NumTy sz -> NumTy sz
-  PtrTy t -> PtrTy $ substRowVar rowMaps t
-  RecTy flds r ->
-    let flds' = fmap (substRowVar rowMaps) flds
-     in case Map.lookup r rowMaps of
-          Nothing -> RecTy flds' NoRow
-          Just rMap ->
-            let combineTypes t1 t2 = if t1 == t2 then t1 else unknownTy
-                mergedFlds = Map.unionWith combineTypes flds' rMap
-             in RecTy mergedFlds NoRow
+  PtrTy t -> PtrTy (finalizeRowVar t)
+  RecTy flds _ -> RecTy (finalizeRowVar <$> flds) NoRow
 
 shiftStructuralInformationBy :: Integer -> Map Offset ITy -> Map Offset ITy
 shiftStructuralInformationBy o =
@@ -928,29 +982,11 @@ data ConstraintSolvingState = ConstraintSolvingState
     ctxOccursCheckFailures :: [EqC],
     -- | Known type for type variables.
     ctxTyVarMap :: Map TyVar ITy,
-    -- | Known row membership constraints, i.e. @r -> o -> t@
-    --   says `r` contains at offset `o` type `t`.
-    ctxInRowMap :: Map RowVar (Map Offset ITy),
     -- | Known row offset relationships, i.e. @r -> (o,r')@
     --   says @r@ with offset @o@ applied corresponds to
     -- row @r'@. .
     ctxRowShiftMap :: Map RowVar (Set (Offset, RowVar)),
-    -- | If we know that a given row variable is exactly equal to some other
-    -- row variable plus some offset information, we record it in this map.
-    -- We use a list because it makes row variable unification simpler.
-    -- Consider the case where the map only points to one (ofs, r) value, and
-    -- consider that we try to unify two row variables that have an entry:
-    --
-    -- r1 = r2   in   [ r1 -> (m1, r3), r2 -> (m2, r4) ]
-    --
-    -- To unify r1 and r2, we would need to put one information in the r2 slot
-    -- that summarizes (m1, r3) and (m2, r4): this would require further
-    -- unification and the create of a fresh row variable, which is painful in
-    -- the current architecture.
-    --
-    -- With the list approach, we can just append the knowledge about r1 to
-    -- the knowledge about r2 (and could do some simplification).
-    ctxRowVarEqs :: Map RowVar [(Map Offset ITy, RowVar)],
+    nextTraceId :: Int,
     nextRowVar :: Int
   }
   deriving (Eq, Generic, Ord, Show)
@@ -972,8 +1008,9 @@ unifyConstraints :: Int -> [TyConstraint] -> Map TyVar FTy
 unifyConstraints nextRV initialConstraints =
   let fvs = foldr (Set.union . freeTyVars) Set.empty initialConstraints
       finalCtx = runConstraintSolvingMonad (emptyContext nextRV) (addConstraints initialConstraints >> reduceContext)
-      finalInRowMap = expandInRowMapWithShiftMap (ctxInRowMap finalCtx) (ctxRowShiftMap finalCtx)
-      finalRowMap = fmap (removeRowVars . removeTyVars) <$> finalInRowMap
-      finalTyMap = fmap (substRowVar finalRowMap . removeTyVars) (ctxTyVarMap finalCtx)
+      -- finalInRowMap = expandInRowMapWithShiftMap (ctxInRowMap finalCtx) (ctxRowShiftMap finalCtx)
+      -- finalRowMap = fmap (removeRowVars . removeTyVars) <$> finalInRowMap
+      -- finalTyMap = fmap (substFinalRowVar finalRowMap . removeTyVars) (ctxTyVarMap finalCtx)
+      finalTyMap = fmap (finalizeRowVar . removeTyVars) (ctxTyVarMap finalCtx)
       unknownTyMap = Map.fromSet (const unknownTy) fvs
    in Map.union finalTyMap unknownTyMap

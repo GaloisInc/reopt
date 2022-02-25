@@ -383,7 +383,7 @@ freshTyVar :: String -> CGenM ctx arch TyVar
 freshTyVar context =
   CGenM $ do
     tv <- nextFreeTyVar <<+= 1
-    let tyv = TyVar tv context
+    let tyv = TyVar tv (Just context)
     return tyv
 
 -- | Returns a fresh row var. N.B. IMPORTANT: this should be used for any record types
