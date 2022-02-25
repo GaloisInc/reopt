@@ -16,7 +16,7 @@ import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Prettyprinter as PP
 
-import Reopt.TypeInference.Constraints
+import Reopt.TypeInference.Constraints.Solving
   (TyVar(..),
    RowVar(..),
    Ty(..),
@@ -41,7 +41,7 @@ x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
  (_x5,_x5Ty)] = map mkTyVar [0..5]
   where
     mkTyVar i =
-      let tv = TyVar i ("test" <> show i) in
+      let tv = TyVar i Nothing in
       (tv, UnknownTy tv)
 
 usedRowVars :: [Int]

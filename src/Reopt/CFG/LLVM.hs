@@ -117,7 +117,7 @@ import           Reopt.TypeInference.ConstraintGen (
     FunType (..),
     ModuleConstraints (..),
   )
-import           Reopt.TypeInference.Constraints (FTy, Ty(..), TyVar, tyToLLVMType, Unknown (..))
+import           Reopt.TypeInference.Constraints.Solving (FTy, Ty(..), TyVar, tyToLLVMType, Unknown (..))
 import qualified Reopt.VCG.Annotations as Ann
 
 
@@ -1123,7 +1123,7 @@ rhsToLLVM lhs rhs =
       -- FIXME: this should always return a type, not Maybe
       typeOfResult <- fromMaybe (UnknownTy Unknown) <$> getInferredTypeForAssignIdBBLLVM lhs
       let ty = tyToLLVMType ptrWidth typeOfResult
-      let llvmRhs = L.Typed ty $ L.integer i 
+      let llvmRhs = L.Typed ty $ L.integer i
       setAssignIdValue lhs llvmRhs
 
 resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
