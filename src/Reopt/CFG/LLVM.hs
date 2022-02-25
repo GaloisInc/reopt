@@ -117,7 +117,7 @@ import           Reopt.TypeInference.ConstraintGen (
     FunType (..),
     ModuleConstraints (..),
   )
-import           Reopt.TypeInference.Constraints (FTy, Ty(..), TyVar, tyToLLVMType)
+import           Reopt.TypeInference.Constraints (FTy, Ty(..), TyVar, tyToLLVMType, Unknown (..))
 import qualified Reopt.VCG.Annotations as Ann
 
 
@@ -594,6 +594,7 @@ valueToLLVM ctx avmap val = withArchConstraints ctx $ do
     -- the start of a function.
     FnUndefined typ -> pure $ L.Typed (typeToLLVMType typ) L.ValUndef
     FnConstantBool b -> pure $ L.Typed (L.iT 1) $ L.integer (if b then 1 else 0)
+    -- ptr sized things are handled elsewhere (FnAddrWidthConstant)
     FnConstantValue sz n -> pure $ L.Typed (natReprToLLVMType sz) $ L.integer n
     -- Value from an assignment statement.
     FnAssignedValue (FnAssignment lhs _rhs) ->
@@ -1117,6 +1118,13 @@ rhsToLLVM lhs rhs =
     FnEvalArchFn f -> do
       fn <- asks $ archFnCallback  . archFns
       setAssignIdValue lhs  =<< fn f
+    FnAddrWidthConstant i -> do
+      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      -- FIXME: this should always return a type, not Maybe
+      typeOfResult <- fromMaybe (UnknownTy Unknown) <$> getInferredTypeForAssignIdBBLLVM lhs
+      let ty = tyToLLVMType ptrWidth typeOfResult
+      let llvmRhs = L.Typed ty $ L.integer i 
+      setAssignIdValue lhs llvmRhs
 
 resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
                      -> BBLLVM arch (L.Typed L.Value)

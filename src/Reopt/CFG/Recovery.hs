@@ -502,21 +502,28 @@ recoverCValue :: HasCallStack
 recoverCValue cv = do
   mem <- frcMemory <$> getFunCtx
   case cv of
-    BVCValue w i ->
-      pure $ FnConstantValue w i
+    BVCValue w i
+      | Just Refl <- testEquality w (knownNat :: NatRepr (ArchAddrWidth X86_64))
+        -> emitNewAssign i
+      | otherwise -> pure $ FnConstantValue w i
     BoolCValue b ->
       pure $ FnConstantBool b
-    RelocatableCValue w addr
+    RelocatableCValue _w addr
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
         throwErrorAt ReoptUnsupportedFnValueTag $ "Cannot lift code pointers."
       | otherwise ->
         case asAbsoluteAddr addr of
-          Just absAddr -> pure $ FnConstantValue (addrWidthNatRepr w) (toInteger absAddr)
+          Just absAddr -> emitNewAssign (toInteger absAddr)
           Nothing ->
             throwErrorAt ReoptUnsupportedFnValueTag $ "Cannot lift relative addr " ++ show addr
     SymbolCValue _w sym -> do
       throwErrorAt ReoptUnsupportedFnValueTag $ "Cannot lift symbols " ++ show sym
+  where
+    -- We want to name constants that could be pointers to globals to
+    -- make giving them types easier later.
+    emitNewAssign = evalAssignRhs . FnAddrWidthConstant
+      
 
 $(pure [])
 

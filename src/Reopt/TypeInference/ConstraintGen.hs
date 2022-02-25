@@ -55,7 +55,7 @@ import           Data.Parameterized.NatRepr      (NatRepr, intValue,
 import           Data.Parameterized.Some         (Some (Some), viewSome)
 import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FnAssignId,
-                                                  FnAssignRhs (FnCondReadMem, FnEvalApp, FnEvalArchFn, FnReadMem, FnSetUndefined),
+                                                  FnAssignRhs (..),
                                                   FnAssignment (..),
                                                   FnBlock (..), FnBlockLabel,
                                                   FnJumpTarget (..),
@@ -736,6 +736,10 @@ genMemOp ty ptr sz = do
       | FnConstantValue _ o <- p -> do
           tp <- genFnValue q
           emitStructPtr ty tp o sz
+          
+    FnAssignedValue a ->
+      emitPtr (viewSome anyTypeWidth sz) ty =<< assignmentType a
+          
     FnArg{} -> do
       emitPtr (viewSome anyTypeWidth sz) ty =<< genFnValue ptr
     FnPhiValue{} -> do
@@ -763,7 +767,9 @@ genFnAssignment a = do
       emitEq ty =<< genFnValue def
     FnEvalApp app -> genApp (ty, bitWidth (typeRepr app)) app
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
-
+    -- no constraints generated here, we will look at this assignment
+    -- in context (i.e., on an add or a load).
+    FnAddrWidthConstant {} -> pure () 
 
 -- | This helper gives us the bitwidth of the types we can read/write from
 -- memory.
