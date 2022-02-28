@@ -11,24 +11,18 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Numeric.Natural (Natural)
 import qualified Prettyprinter as PP
 import Reopt.TypeInference.Constraints.Solving.RowVariables
   ( NoRow (NoRow),
+    Offset (Offset),
+    RowExpr (RowExprShift, RowExprVar),
     RowVar,
+    rowVar,
   )
 import Reopt.TypeInference.Constraints.Solving.TypeVariables
   ( TyVar,
   )
 import qualified Text.LLVM as L
-
--- | Byte offset.
-newtype Offset = Offset {getOffset :: Natural}
-  deriving (Eq, Ord, Show)
-  deriving (Num) via Natural
-
-instance PP.Pretty Offset where
-  pretty (Offset n) = PP.pretty n
 
 data Ty tvar rvar
   = -- | An unknown type (e.g., type variable).
@@ -57,7 +51,7 @@ instance (PP.Pretty tv, PP.Pretty rv) => PP.Pretty (Ty tv rv) where
                   Map.toAscList flds
 
 -- | Type used during inference (i.e., can have free type/row variables)
-type ITy = Ty TyVar RowVar
+type ITy = Ty TyVar RowExpr
 
 -- | Used to denote a type could not be resolved to a known type.
 data Unknown = Unknown
@@ -75,6 +69,10 @@ class FreeTyVars a where
 class FreeRowVars a where
   freeRowVars :: a -> Set RowVar
 
+instance FreeRowVars RowExpr where
+  freeRowVars (RowExprVar v) = Set.singleton v
+  freeRowVars (RowExprShift _ v) = Set.singleton v
+
 -- | Final types resulting from inference (i.e., no free type variables).
 type FTy = Ty Unknown NoRow
 
@@ -85,12 +83,12 @@ instance FreeTyVars (Ty TyVar rvar) where
     PtrTy t -> freeTyVars t
     RecTy flds _row -> foldr (Set.union . freeTyVars) Set.empty flds
 
-instance FreeRowVars (Ty tvar RowVar) where
+instance FreeRowVars (Ty tvar RowExpr) where
   freeRowVars = \case
     UnknownTy _ -> Set.empty
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
-    RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
+    RecTy flds row -> foldr (Set.union . freeRowVars) (freeRowVars row) flds
 
 prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
 prettyMap ppKey ppValue =
@@ -98,13 +96,18 @@ prettyMap ppKey ppValue =
   where
     prettyEntry (k, v) = PP.group (PP.hsep [ppKey k, "→", ppValue v])
 
-prettyRow :: PP.Pretty t => PP.Pretty r => Map Offset (Ty t r) -> RowVar -> PP.Doc d
+prettyRow ::
+  PP.Pretty t =>
+  PP.Pretty r =>
+  Map Offset (Ty t r) ->
+  RowExpr ->
+  PP.Doc d
 prettyRow os r = PP.hsep ["{", PP.hsep (prettyMap PP.pretty PP.pretty os), "|", PP.pretty r, "}"]
 
 recTyByteWidth :: Int -> [(Offset, FTy)] -> Integer
 recTyByteWidth ptrSz = offsetAfterLast . last
   where
-    offsetAfterLast (Offset o, ty) = fromIntegral o + tyByteWidth ptrSz ty
+    offsetAfterLast (o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth _ (NumTy n) = fromIntegral n `div` 8
@@ -113,12 +116,12 @@ tyByteWidth ptrSz (RecTy flds NoRow) = recTyByteWidth ptrSz (Map.assocs flds)
 tyByteWidth ptrSz (UnknownTy Unknown) = fromIntegral ptrSz `div` 8
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
-recTyToLLVMType ptrSz [(Offset 0, ty)] = tyToLLVMType ptrSz ty
+recTyToLLVMType ptrSz [(0, ty)] = tyToLLVMType ptrSz ty
 recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
   where
-    go :: Natural -> [(Offset, FTy)] -> [L.Type]
+    go :: Offset -> [(Offset, FTy)] -> [L.Type]
     go _ [] = []
-    go nextOffset flds@((Offset o, ty) : rest)
+    go nextOffset flds@((o, ty) : rest)
       | o == nextOffset = tyToLLVMType ptrSz ty : go (o + fromIntegral (tyByteWidth ptrSz ty)) rest
       | otherwise = L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset))) : go o flds
 
@@ -128,10 +131,10 @@ tyToLLVMType ptrSz (PtrTy typ) = L.PtrTo (tyToLLVMType ptrSz typ)
 tyToLLVMType ptrSz (RecTy flds NoRow) = recTyToLLVMType ptrSz (Map.assocs flds)
 tyToLLVMType ptrSz (UnknownTy Unknown) = L.PrimType (L.Integer (fromIntegral ptrSz))
 
-iRecTy :: [(Natural, ITy)] -> RowVar -> ITy
-iRecTy flds = RecTy (Map.fromList (map (first Offset) flds))
+iRecTy :: [(Integer, ITy)] -> RowVar -> ITy
+iRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) . rowVar
 
-fRecTy :: [(Natural, FTy)] -> FTy
+fRecTy :: [(Integer, FTy)] -> FTy
 fRecTy flds = RecTy (Map.fromList (map (first Offset) flds)) NoRow
 
 -- | Checks if two types are inconsistent. Note that @inconsistent t1 t2 = False@

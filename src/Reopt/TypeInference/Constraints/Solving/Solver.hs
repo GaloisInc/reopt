@@ -13,13 +13,10 @@ import Control.Lens (Lens', over, set, use, (<<+=))
 import Control.Monad (when)
 import Control.Monad.Extra (whenM)
 import Control.Monad.State (MonadState (get, put), gets, modify)
-import Data.Bifunctor (Bifunctor (second))
 import Data.Either (partitionEithers)
 import Data.Generics.Product (field)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes)
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Debug.Trace (trace)
 import qualified Prettyprinter as PP
@@ -29,7 +26,6 @@ import Reopt.TypeInference.Constraints.Solving.Constraints
     EqRowC (EqRowC),
     InRowC (InRowC),
     OrC (..),
-    RowShiftC (RowShiftC),
     TyConstraint (..),
     absurdTC,
     andTC,
@@ -44,12 +40,17 @@ import Reopt.TypeInference.Constraints.Solving.Monad
     ConstraintSolvingMonad,
     ConstraintSolvingState (..),
     runConstraintSolvingMonad,
-    substRowVarInRowShiftC,
+    shiftOffsets,
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution (SubstRowVar (substRowVar), substRowVarInEqRowC, substRowVarInOrC)
 import Reopt.TypeInference.Constraints.Solving.RowVariables
   ( NoRow (NoRow),
+    Offset,
+    RowExpr (RowExprShift, RowExprVar),
     RowVar,
+    rowExprShift,
+    rowExprVar,
+    rowVar,
   )
 import Reopt.TypeInference.Constraints.Solving.TypeVariableSubstitution (SubstTyVar (substTyVar))
 import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
@@ -57,7 +58,6 @@ import Reopt.TypeInference.Constraints.Solving.Types
   ( FTy,
     FreeTyVars (freeTyVars),
     ITy,
-    Offset (Offset),
     Ty (NumTy, PtrTy, RecTy, UnknownTy),
     Unknown,
     inconsistent,
@@ -78,59 +78,35 @@ unifyConstraints nextRV initialConstraints =
       unknownTyMap = Map.fromSet (const unknownTy) fvs
    in Map.union finalTyMap unknownTyMap
 
-finalizeRowVar :: Ty Unknown RowVar -> FTy
+finalizeRowVar :: Ty Unknown RowExpr -> FTy
 finalizeRowVar = \case
   UnknownTy {} -> unknownTy
   NumTy sz -> NumTy sz
   PtrTy t -> PtrTy (finalizeRowVar t)
   RecTy flds _ -> RecTy (finalizeRowVar <$> flds) NoRow
 
--- TODO: check that this is used correctly!
-replaceRowVar :: RowVar -> RowVar -> RowVar -> RowVar
-replaceRowVar r1 r2 r = if r == r1 then r2 else r
-
 substRowVarInConstraintSolvingState ::
   RowVar ->
-  RowVar ->
+  RowExpr ->
   Map Offset ITy ->
   ConstraintSolvingState ->
   ConstraintSolvingMonad ConstraintSolvingState
 substRowVarInConstraintSolvingState r1 r2 os ctx = do
-  (rowShiftCs, eqCsFromRowShiftCs) <-
-    second catMaybes
-      . unzip
-      <$> mapM (substRowVarInRowShiftC r1 r2 os) (ctxRowShiftCs ctx)
   let (eqCsFromEqRowCs, newEqRowCs) = partitionEithers $ substRowVarInEqRowC r1 r2 os <$> ctxEqRowCs ctx
   orCs <- mapM (substRowVarInOrC r1 r2 os) (ctxOrCs ctx)
   return $
     ConstraintSolvingState
-      { ctxEqCs = (substRowVar r1 r2 os <$> ctxEqCs ctx) ++ eqCsFromEqRowCs ++ eqCsFromRowShiftCs,
+      { ctxEqCs = (substRowVar r1 r2 os <$> ctxEqCs ctx) ++ eqCsFromEqRowCs,
         ctxInRowCs = substRowVar r1 r2 os <$> ctxInRowCs ctx,
-        ctxRowShiftCs = rowShiftCs, -- substRowVarInRowShiftC r1 r2 os <$> ctxRowShiftCs ctx,
         ctxOrCs = orCs,
         ctxEqRowCs = newEqRowCs,
         ctxTyVarMap = substRowVar r1 r2 os <$> ctxTyVarMap ctx,
-        ctxRowShiftMap = unifyRowVarMap r1 r2 (Set.map (second (replaceRowVar r1 r2))) (unifyRowShiftMap r1 r2) (ctxRowShiftMap ctx),
         -- Not modified because we only substitute in unprocessed constraints:
         ctxAbsurdEqCs = ctxAbsurdEqCs ctx,
         ctxOccursCheckFailures = ctxOccursCheckFailures ctx,
         nextTraceId = nextTraceId ctx,
         nextRowVar = nextRowVar ctx
       }
-
-unifyRowShiftMap ::
-  RowVar ->
-  RowVar ->
-  Set (Offset, RowVar) ->
-  Set (Offset, RowVar) ->
-  Set (Offset, RowVar)
-unifyRowShiftMap r1 r2 s1 s2 = Set.map (second (replaceRowVar r1 r2)) (Set.union s1 s2)
-
-unifyRowVarMap :: RowVar -> RowVar -> (v -> v) -> (v -> v -> v) -> Map RowVar v -> Map RowVar v
-unifyRowVarMap r1 r2 unify union m = unify <$> Map.delete r1 (Map.alter insertOrAlter r2 m)
-  where
-    insertOrAlter Nothing = Map.lookup r1 m
-    insertOrAlter (Just v) = Just (maybe v (union v) (Map.lookup r1 m))
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> ConstraintSolvingMonad () -> ConstraintSolvingMonad ()
@@ -158,12 +134,7 @@ traceContext description action = do
 hasAtomicConstraints :: ConstraintSolvingState -> Bool
 hasAtomicConstraints ctx =
   not
-    ( and
-        [ null $ ctxEqCs ctx,
-          null $ ctxInRowCs ctx,
-          null $ ctxRowShiftCs ctx,
-          null $ ctxEqRowCs ctx
-        ]
+    ( null (ctxEqCs ctx) && null (ctxInRowCs ctx) && null (ctxEqRowCs ctx)
     )
 
 popField :: Lens' ConstraintSolvingState [a] -> ConstraintSolvingMonad (Maybe a)
@@ -180,9 +151,6 @@ dequeueEqC = popField (field @"ctxEqCs")
 dequeueInRowC :: ConstraintSolvingMonad (Maybe InRowC)
 dequeueInRowC = popField (field @"ctxInRowCs")
 
-dequeueRowShiftC :: ConstraintSolvingMonad (Maybe RowShiftC)
-dequeueRowShiftC = popField (field @"ctxRowShiftCs")
-
 dequeueEqRowC :: ConstraintSolvingMonad (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
 
@@ -192,13 +160,12 @@ addConstraints = mapM_ go
     go :: TyConstraint -> ConstraintSolvingMonad ()
     go (EqTC c) = modify $ over (field @"ctxEqCs") (c :)
     go (InRowTC c) = modify $ over (field @"ctxInRowCs") (c :)
-    go (RowShiftTC c) = modify $ over (field @"ctxRowShiftCs") (c :)
     go (OrTC c) = modify $ over (field @"ctxOrCs") (c :)
     go (AndTC (AndC cs)) = addConstraints cs
     go (EqRowTC c) = modify $ over (field @"ctxEqRowCs") (c :)
 
 emptyContext :: Int -> ConstraintSolvingState
-emptyContext = ConstraintSolvingState [] [] [] [] [] [] [] Map.empty Map.empty 0
+emptyContext = ConstraintSolvingState [] [] [] [] [] [] Map.empty 0
 
 -- | Is an equality constraint absurd?
 absurdEqC :: EqC -> Bool
@@ -238,24 +205,21 @@ solveEqC c
 solveInRowC :: InRowC -> ConstraintSolvingMonad ()
 solveInRowC (InRowC r o t) = do
   r' <- freshRowVar
-  addConstraints [eqRowTC r (Map.singleton o t) r']
-
--- | Updates the context with a @RowShiftC@ constraint. Like @solveEqC@ this is
--- an "atomic" update.
-solveRowShiftC :: RowShiftC -> ConstraintSolvingMonad ()
-solveRowShiftC (RowShiftC r1 n r2) =
-  modify $ over (field @"ctxRowShiftMap") (Map.alter alter r1)
-  where
-    alter Nothing = Just (Set.singleton (n, r2))
-    alter (Just s) = Just (Set.union s (Set.singleton (n, r2)))
+  addConstraints [eqRowTC r (Map.singleton o t) (rowVar r')]
 
 -- | TODO
 solveEqRowC :: EqRowC -> ConstraintSolvingMonad ()
-solveEqRowC (EqRowC r1 os r2) = do
+solveEqRowC (EqRowC (RowExprVar r1) os r2) = do
   -- TODO (val) There's gotta be a combinator for doing this?
   s <- get
   s' <- substRowVarInConstraintSolvingState r1 r2 os s
   put s'
+solveEqRowC (EqRowC (RowExprShift o r1) os r2) = do
+  r3 <- freshRowVar
+  addConstraints
+    [ eqRowTC (rowVar r1) (shiftOffsets (- o) os) (rowVar r3),
+      eqRowTC r2 mempty (RowExprShift o r3)
+    ]
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
@@ -267,12 +231,9 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
       dequeueInRowC >>= \case
         Just c -> solveInRowC c >> processAtomicConstraints
         Nothing ->
-          dequeueRowShiftC >>= \case
-            Just c -> solveRowShiftC c >> processAtomicConstraints
-            Nothing ->
-              dequeueEqRowC >>= \case
-                Just c -> solveEqRowC c >> processAtomicConstraints
-                Nothing -> return ()
+          dequeueEqRowC >>= \case
+            Just c -> solveEqRowC c >> processAtomicConstraints
+            Nothing -> return ()
 
 -- | Reduce/simplify a constraint in a given context.
 reduceC :: TyConstraint -> ConstraintSolvingMonad TyConstraint
@@ -286,7 +247,6 @@ reduceC tc =
     OrTC (OrC cs) -> orTC <$> mapM reduceC cs
     EqRowTC {} -> return tc
     InRowTC {} -> return tc
-    RowShiftTC {} -> return tc
 
 -- | Attempt to reduce and eliminate disjunctions in the given context. Any
 -- resulting non-disjuncts are added to their respective field in the context.
@@ -309,12 +269,26 @@ reduceContext = traceContext "reduceContext" $ do
   whenM (gets hasAtomicConstraints) reduceContext
 
 -- | Remove any remaining @TyVar@s, replacing them with @UnknownTy ()@.
-removeTyVars :: ITy -> Ty Unknown RowVar
+removeTyVars :: ITy -> Ty Unknown RowExpr
 removeTyVars = \case
   UnknownTy _ -> unknownTy
   NumTy sz -> NumTy sz
   PtrTy ty -> PtrTy $ removeTyVars ty
   RecTy flds rv -> RecTy (fmap removeTyVars flds) rv
+
+-- | Creates the assertion that the given row expression should have a given
+-- type at a given offset.  Handles the necessary shifting if the row expression
+-- is itself a shift expression.
+rowExprContains :: RowExpr -> Offset -> ITy -> TyConstraint
+rowExprContains (RowExprVar r) o t = inRowTC r o t
+rowExprContains (RowExprShift a r) b t = inRowTC r (b - a) t
+
+-- shift 10 { 0 : t1 } [5] = t2
+-- { 10 : t1 } [5] = t2
+-- { 5 : t2, 10 : t1 }
+-- shift 10 { -5 : t1, 10 : t1 } [5] = t2
+
+-- (shift a r)[b] = t  --->   r[a - b] = t
 
 -- | @decomposeEqC t1 t2@ returns constraints implied from @EqP t1 t2@.
 decomposeEqC :: EqC -> ConstraintSolvingMonad [TyConstraint]
@@ -336,11 +310,11 @@ decomposeEqC (EqC lhs rhs) = go lhs rhs
                   Map.intersectionWith (,) fs1 fs2
             -- fields from fs2 not in fs1 must appear in r1
             r1Ps =
-              map (uncurry (inRowTC r1)) $
+              map (uncurry (rowExprContains r1)) $
                 Map.toList $ Map.difference fs2 fs1
             -- fields from fs1 not in fs2 must appear in r2
             r2Ps =
-              map (uncurry (inRowTC r2)) $
+              map (uncurry (rowExprContains r2)) $
                 Map.toList $ Map.difference fs1 fs2
         -- We need a fresh row variable for the "remainder" of the row variables
         -- on each side when you factor out the fields mentioned across.
@@ -350,15 +324,17 @@ decomposeEqC (EqC lhs rhs) = go lhs rhs
         --
         -- r1 = { 8 : i8 | r3 }   and   r2 = { 0 : i8 | r3 }
         r3 <- freshRowVar
-        let eqr1 = eqTC (RecTy mempty r1) (RecTy (Map.difference fs2 fs1) r3)
-        let eqr2 = eqTC (RecTy mempty r2) (RecTy (Map.difference fs1 fs2) r3)
+        let eqr1 = eqRowTC r1 (Map.difference fs2 fs1) (rowVar r3)
+        let eqr2 = eqRowTC r2 (Map.difference fs1 fs2) (rowVar r3)
+        -- let eqr1 = eqTC (RecTy mempty r1) (RecTy (Map.difference fs2 fs1) r3)
+        -- let eqr2 = eqTC (RecTy mempty r2) (RecTy (Map.difference fs1 fs2) r3)
         pure $ eqr1 : eqr2 : fldPs ++ r1Ps ++ r2Ps
     go (RecTy fs r) t = pure $ goRecNonRec fs r t
     go t (RecTy fs r) = pure $ goRecNonRec fs r t
     go _ _ = pure []
     -- Handle the case when a record and a non-record are equal,
     -- i.e., treat the non-record as a record with one field `0`.
-    goRecNonRec :: Map Offset ITy -> RowVar -> ITy -> [TyConstraint]
-    goRecNonRec flds row nonRecTy = case Map.lookup (Offset 0) flds of
-      Nothing -> [inRowTC row (Offset 0) nonRecTy]
+    goRecNonRec :: Map Offset ITy -> RowExpr -> ITy -> [TyConstraint]
+    goRecNonRec flds r nonRecTy = case Map.lookup 0 flds of
+      Nothing -> [inRowTC (rowExprVar r) (rowExprShift r) nonRecTy]
       Just ty0 -> [eqTC nonRecTy ty0]

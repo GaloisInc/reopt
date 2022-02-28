@@ -20,8 +20,8 @@ import Reopt.TypeInference.Constraints.Solving.Constraints
     orTC,
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariables
-  ( -- NoRow (..),
-    RowVar (..),
+  ( Offset (Offset),
+    RowVar (RowVar),
   )
 import Reopt.TypeInference.Constraints.Solving.Solver
   ( unifyConstraints,
@@ -32,9 +32,8 @@ import Reopt.TypeInference.Constraints.Solving.TypeVariables
 import Reopt.TypeInference.Constraints.Solving.Types
   ( FTy,
     ITy,
-    Offset (..),
-    Ty (..),
-    Unknown (..),
+    Ty (NumTy, PtrTy, UnknownTy),
+    Unknown (Unknown),
     fRecTy,
     iRecTy,
     tyToLLVMType,
