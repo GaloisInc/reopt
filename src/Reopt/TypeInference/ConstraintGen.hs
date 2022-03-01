@@ -647,6 +647,7 @@ genApp (ty, outSize) app =
       when (isJust (testEquality addrw sz)) $ do
         lTy <- genFnValue l
         emitConstraint (CAddrWidthAdd ty lTy (Left o))
+        
     BVAdd sz l r -> do
       addrw <- addrWidth
       when (isJust (testEquality addrw sz))

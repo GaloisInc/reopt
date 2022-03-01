@@ -18,6 +18,7 @@ module Reopt.TypeInference.Constraints.Solving.TypeVariables
 where
 
 import qualified Prettyprinter as PP
+import Data.Function (on)
 
 data TyVar = TyVar
   { tyVarInt :: Int,
@@ -26,7 +27,13 @@ data TyVar = TyVar
     -- where there is not much point in marking test type variables.
     tyVarOrigin :: Maybe String
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
+
+instance Eq TyVar where
+  (==) = (==) `on` tyVarInt
+
+instance Ord TyVar where
+  compare = compare `on` tyVarInt
 
 instance PP.Pretty TyVar where
   pretty tyv = PP.hcat ["α", PP.pretty (tyVarInt tyv), maybeOrigin (tyVarOrigin tyv)]

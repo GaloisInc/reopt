@@ -13,14 +13,15 @@ import Reopt.TypeInference.Constraints.Solving.RowVariables (RowVar)
 import Reopt.TypeInference.Constraints.Solving.Types
   ( FreeRowVars (..),
     FreeTyVars (..),
-    ITy,
+    ITy(..),
     Offset (Offset),
-    Ty (..),
+    TyF (..),
     prettyRow,
   )
+import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: ITy, eqRhs :: ITy}
+data EqC = EqC {eqLhs :: TyVar, eqRhs :: TyVar}
   deriving (Eq, Ord, Show)
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
@@ -38,7 +39,7 @@ instance FreeRowVars EqC where
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
   { eqRowLHS :: RowVar,
-    eqRowOffsets :: Map Offset ITy,
+    eqRowOffsets :: Map Offset TyVar,
     eqRowRHS :: RowVar
   }
   deriving (Eq, Ord, Show)
@@ -47,7 +48,7 @@ instance PP.Pretty EqRowC where
   pretty (EqRowC r1 os r2) = prettySExp [PP.pretty r1, "=", prettyRow os r2]
 
 instance FreeTyVars EqRowC where
-  freeTyVars (EqRowC _ os _) = foldr (Set.union . freeTyVars) Set.empty os
+  freeTyVars (EqRowC _ os _) = foldMap Set.singleton os
 
 instance FreeRowVars EqRowC where
   freeRowVars (EqRowC r1 os r2) = Set.fromList [r1, r2] `Set.union` foldr (Set.union . freeRowVars) Set.empty os
@@ -56,7 +57,7 @@ instance FreeRowVars EqRowC where
 data InRowC = InRowC
   { inRowRowVar :: RowVar,
     inRowOffset :: Offset,
-    inRowTypeAtOffset :: ITy
+    inRowTypeAtOffset :: TyVar
   }
   deriving (Eq, Ord, Show)
 
@@ -156,67 +157,32 @@ instance FreeRowVars TyConstraint where
     AndTC c -> freeRowVars c
     EqRowTC c -> freeRowVars c
 
--- | The trivial constraint.
-trivialTC :: TyConstraint
-trivialTC = AndTC $ AndC []
+-- eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
+-- eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
 
--- | The absurd constraint.
-absurdTC :: TyConstraint
-absurdTC = OrTC $ OrC []
-
-eqTC :: ITy -> ITy -> TyConstraint
-eqTC t1 t2 = EqTC $ EqC t1 t2
-
-eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
-eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
-
-inRowTC :: RowVar -> Offset -> ITy -> TyConstraint
+inRowTC :: RowVar -> Offset -> TyVar -> TyConstraint
 inRowTC r o t = InRowTC $ InRowC r o t
 
--- | Disjunction smart constructor that performs NEEDED simplifications.
-orTC :: [TyConstraint] -> TyConstraint
-orTC = go Set.empty
-  where
-    go :: Set TyConstraint -> [TyConstraint] -> TyConstraint
-    go acc [] = case Set.toList acc of
-      [c] -> c
-      cs -> OrTC $ OrC cs
-    go _ (AndTC (AndC []) : _) = trivialTC
-    go acc (OrTC (OrC cs) : cs') = go acc (cs ++ cs')
-    go acc (c : cs) = go (Set.insert c acc) cs
+-- isNumTC :: Int -> ITy -> TyConstraint
+-- isNumTC sz t = EqTC (EqC t (ITy $ NumTy sz))
 
--- | Conjunction smart constructor that performs NEEDED simplifications.
-andTC :: [TyConstraint] -> TyConstraint
-andTC = go Set.empty
-  where
-    go :: Set TyConstraint -> [TyConstraint] -> TyConstraint
-    go acc [] = case Set.toList acc of
-      [c] -> c
-      cs -> AndTC $ AndC cs
-    go _ (OrTC (OrC []) : _) = absurdTC
-    go acc (AndTC (AndC cs) : cs') = go acc (cs ++ cs')
-    go acc (c : cs) = go (Set.insert c acc) cs
+-- isPtrTC :: ITy -> ITy -> TyConstraint
+-- isPtrTC pointer pointee = EqTC (EqC pointer (ITy $ PtrTy pointee))
 
-isNumTC :: Int -> ITy -> TyConstraint
-isNumTC sz t = EqTC (EqC t (NumTy sz))
+-- isOffsetTC :: ITy -> Natural -> ITy -> RowVar -> TyConstraint
+-- isOffsetTC base offset typ row =
+--   EqTC (EqC base (PtrTy (RecTy (Map.singleton (Offset offset) typ) row)))
 
-isPtrTC :: ITy -> ITy -> TyConstraint
-isPtrTC pointer pointee = EqTC (EqC pointer (PtrTy pointee))
-
-isOffsetTC :: ITy -> Natural -> ITy -> RowVar -> TyConstraint
-isOffsetTC base offset typ row =
-  EqTC (EqC base (PtrTy (RecTy (Map.singleton (Offset offset) typ) row)))
-
-isPointerWithOffsetTC :: (ITy, RowVar) -> (ITy, RowVar) -> Offset -> TyConstraint
-isPointerWithOffsetTC (base, baseRow) (result, resultRow) offset =
-  andTC
-    [ eqTC base (PtrTy (RecTy Map.empty baseRow)),
-      eqTC result (PtrTy (RecTy Map.empty resultRow)),
-      -- Make no mistake, here, since we have:
-      -- result = base + offset
-      -- Then in terms of rows, it's more like:
-      -- resultRow + offset = base
-      -- e.g.
-      -- { 0 : T } + 16 = { 16 : T }
-      RowShiftTC (RowShiftC resultRow offset baseRow)
-    ]
+-- isPointerWithOffsetTC :: (ITy, RowVar) -> (ITy, RowVar) -> Offset -> TyConstraint
+-- isPointerWithOffsetTC (base, baseRow) (result, resultRow) offset =
+--   andTC
+--     [ eqTC base (PtrTy (RecTy Map.empty baseRow)),
+--       eqTC result (PtrTy (RecTy Map.empty resultRow)),
+--       -- Make no mistake, here, since we have:
+--       -- result = base + offset
+--       -- Then in terms of rows, it's more like:
+--       -- resultRow + offset = base
+--       -- e.g.
+--       -- { 0 : T } + 16 = { 16 : T }
+--       RowShiftTC (RowShiftC resultRow offset baseRow)
+--     ]

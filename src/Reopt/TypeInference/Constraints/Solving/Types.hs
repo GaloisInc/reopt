@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFoldable #-}
 
 module Reopt.TypeInference.Constraints.Solving.Types where
 
@@ -39,7 +40,7 @@ data TyF rvar f
   | -- | Record type, mapping byte offsets to types and with a row variable
     -- for describing constraints on the existence/type of additional fields.
     RecTy (Map Offset f) rvar
-  deriving (Eq, Ord, Show, Functor)
+  deriving (Eq, Ord, Show, Functor, Foldable)
 
 instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
@@ -54,26 +55,14 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
                 map (\(off, t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t) $
                   Map.toAscList flds
 
--- | Type used during inference (i.e., can have free type/row variables)
-data ITy
-  = VarTy TyVar
-  -- | Only TyVars are allowed in recursive positions.
-  | ITy (TyF RowVar TyVar)
-
 class FreeTyVars a where
   freeTyVars :: a -> Set TyVar
 
 class FreeRowVars a where
   freeRowVars :: a -> Set RowVar
 
--- | Final types resulting from inference (i.e., no free type variables).
-data FTy = UnknownTy | FTy (TyF NoRow FTy)
-
 instance FreeTyVars f => FreeTyVars (TyF rvar f) where
-  freeTyVars = \case
-    NumTy _ -> Set.empty
-    PtrTy t -> freeTyVars t
-    RecTy flds _row -> foldr (Set.union . freeTyVars) Set.empty flds
+  freeTyVars = foldMap freeTyVars
 
 instance FreeRowVars f => FreeRowVars (TyF RowVar f) where
   freeRowVars = \case
@@ -81,13 +70,52 @@ instance FreeRowVars f => FreeRowVars (TyF RowVar f) where
     PtrTy t -> freeRowVars t
     RecTy flds row -> foldr (Set.union . freeRowVars) (Set.singleton row) flds
 
+-- | An unrolled ITy
+type ITy' = TyF RowVar TyVar
+
+-- | Type used during inference (i.e., can have free type/row variables)
+data ITy
+  = VarTy TyVar
+  -- | Only TyVars are allowed in recursive positions.
+  | ITy ITy'
+  deriving (Eq, Ord, Show)
+
+instance PP.Pretty ITy where
+  pretty = \case
+    VarTy v -> PP.pretty v
+    ITy ty  -> PP.pretty ty
+
+instance FreeTyVars TyVar where
+  freeTyVars = Set.singleton
+
+instance FreeRowVars TyVar where
+  freeRowVars _ = Set.empty
+
+instance FreeTyVars ITy where
+  freeTyVars = \case
+    VarTy v  -> Set.singleton v
+    ITy   ty -> freeTyVars ty
+
+instance FreeRowVars ITy where
+  freeRowVars = \case
+    VarTy {}  -> Set.empty
+    ITy   ty  -> freeRowVars ty
+
+-- | Final types resulting from inference (i.e., no free type variables).
+data FTy = UnknownTy | FTy (TyF NoRow FTy)
+
+instance PP.Pretty FTy where
+  pretty = \case
+    UnknownTy -> "?"
+    FTy ty  -> PP.pretty ty
+
 prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
 prettyMap ppKey ppValue =
   PP.punctuate PP.comma . map prettyEntry . Map.toAscList
   where
     prettyEntry (k, v) = PP.group (PP.hsep [ppKey k, "→", ppValue v])
 
-prettyRow :: PP.Pretty r => PP.Pretty f => Map Offset (TyF r f) -> RowVar -> PP.Doc d
+prettyRow :: PP.Pretty v => Map Offset v -> RowVar -> PP.Doc d
 prettyRow os r = PP.hsep ["{", PP.hsep (prettyMap PP.pretty PP.pretty os), "|", PP.pretty r, "}"]
 
 recTyByteWidth :: Int -> [(Offset, FTy)] -> Integer

@@ -9,15 +9,6 @@ where
 
 import Reopt.TypeInference.Constraints.Solving.Constraints
   ( TyConstraint (..),
-    andTC,
-    eqRowTC,
-    eqTC,
-    inRowTC,
-    isNumTC,
-    isOffsetTC,
-    isPointerWithOffsetTC,
-    isPtrTC,
-    orTC,
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariables
   ( -- NoRow (..),
@@ -33,10 +24,4 @@ import Reopt.TypeInference.Constraints.Solving.Types
   ( FTy,
     ITy,
     Offset (..),
-    Ty (..),
-    Unknown (..),
-    fRecTy,
-    iRecTy,
-    tyToLLVMType,
-    unknownTy,
   )

@@ -50,7 +50,8 @@ library
     unix,
     unordered-containers,
     utf8-string,
-    vector
+    vector,
+    GraphSCC
 
   hs-source-dirs: src
 
@@ -73,7 +74,6 @@ library
     Reopt.TypeInference.Constraints.Solving.RowVariables
     Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution
     Reopt.TypeInference.Constraints.Solving.TypeVariables
-    Reopt.TypeInference.Constraints.Solving.TypeVariableSubstitution
     Reopt.TypeInference.Constraints.Solving.Types
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
