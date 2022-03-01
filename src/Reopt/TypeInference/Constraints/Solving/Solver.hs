@@ -9,57 +9,42 @@ module Reopt.TypeInference.Constraints.Solving.Solver
   )
 where
 
-import Control.Lens (Lens', over, set, use, (<<+=))
+import Control.Lens ((<<+=), (<<.=), (.=))
 import Control.Monad (when)
-import Control.Monad.Extra (whenM)
-import Control.Monad.State (MonadState (get, put), gets, modify)
-import Data.Either (partitionEithers)
+import Control.Monad.State (MonadState (get), gets)
 import Data.Generics.Product (field)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Debug.Trace (trace)
 import qualified Prettyprinter as PP
+import Data.Foldable (traverse_)
 
 import Data.Graph (SCC(..))
 import Data.Graph.SCC (stronglyConnCompR)
 
 import Reopt.TypeInference.Constraints.Solving.Constraints
-  ( AndC (AndC),
-    EqC (..),
+  ( EqC (..),
     EqRowC (EqRowC),
-    InRowC (InRowC),
-    OrC (..),
-    TyConstraint (..),
   )
 import Reopt.TypeInference.Constraints.Solving.Monad
-  ( CanFreshRowVar (freshRowVar),
-    ConstraintSolvingMonad,
+  ( ConstraintSolvingMonad,
     ConstraintSolvingState (..),
-    runConstraintSolvingMonad,
-    dequeueEqC, dequeueRowShiftC, dequeueEqRowC, lookupTyVar, unsafeUnifyTyVars, undefineTyVar, addTyVarEq, emptyContext, addRowVarEq,
-    shiftOffsets,
+    dequeueEqC, dequeueEqRowC, lookupTyVar, unsafeUnifyTyVars, undefineTyVar, addTyVarEq,
   )
-import Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution (SubstRowVar (substRowVar), substRowVarInEqRowC)
+import Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution
+  (substRowVarInEqRowC, substRowVarInITy, unifyRecTy)
 import Reopt.TypeInference.Constraints.Solving.RowVariables
-  ( NoRow (NoRow),
-    Offset,
-    RowExpr (RowExprShift, RowExprVar),
-    RowVar,
-    rowExprShift,
-    rowExprVar,
-    rowVar,
+  ( NoRow (NoRow),    
   )
 import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
 import Reopt.TypeInference.Constraints.Solving.Types
   ( FreeTyVars (freeTyVars),
-    Offset (Offset),
     TyF (..),
     FTy (..),
-    ITy (..),
     ITy'
   )
-import Data.Foldable (sequenceA_)
+
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool
@@ -67,11 +52,13 @@ traceUnification = True
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
-unifyConstraints :: Int -> [TyConstraint] -> Map TyVar FTy
-unifyConstraints nextRV initialConstraints = error "FIXME"
-  -- finalizeTypeDefs finalCtx
-  -- where
-  --   finalCtx = runConstraintSolvingMonad (emptyContext nextRV) (addConstraints initialConstraints >> reduceContext)
+
+-- FIXME: probably want to export the Eqv map somehow
+unifyConstraints :: ConstraintSolvingMonad (Map TyVar FTy)
+unifyConstraints = do
+  processAtomicConstraints
+  m <- gets ctxTyVarDefs 
+  pure (finalizeTypeDefs m)
 
 finalizeTypeDefs :: Map TyVar ITy' -> Map TyVar FTy
 finalizeTypeDefs m = res
@@ -91,33 +78,10 @@ finalizeTypeDefs m = res
     nodes = [ (finalizeRowVar ty, tv, Set.toList (freeTyVars ty))
             | (tv, ty) <- Map.toList m ]
     
-finalizeRowVar :: TyF RowVar f -> TyF NoRow f
+finalizeRowVar :: TyF r f -> TyF NoRow f
 finalizeRowVar (NumTy sz) = NumTy sz
 finalizeRowVar (PtrTy t)  = PtrTy t
 finalizeRowVar (RecTy flds _) = RecTy flds NoRow
-
-substRowVarInConstraintSolvingState ::
-  RowVar ->
-  RowExpr ->
-  Map Offset ITy ->
-  ConstraintSolvingState ->
-  ConstraintSolvingMonad ConstraintSolvingState
-substRowVarInConstraintSolvingState r1 r2 os ctx = do
-  let (eqCsFromEqRowCs, newEqRowCs) = partitionEithers $ substRowVarInEqRowC r1 r2 os <$> ctxEqRowCs ctx
-  orCs <- mapM (substRowVarInOrC r1 r2 os) (ctxOrCs ctx)
-  return $
-    ConstraintSolvingState
-      { ctxEqCs = (substRowVar r1 r2 os <$> ctxEqCs ctx) ++ eqCsFromEqRowCs,
-        ctxInRowCs = substRowVar r1 r2 os <$> ctxInRowCs ctx,
-        ctxOrCs = orCs,
-        ctxEqRowCs = newEqRowCs,
-        ctxTyVarMap = substRowVar r1 r2 os <$> ctxTyVarMap ctx,
-        -- Not modified because we only substitute in unprocessed constraints:
-        ctxAbsurdEqCs = ctxAbsurdEqCs ctx,
-        ctxOccursCheckFailures = ctxOccursCheckFailures ctx,
-        nextTraceId = nextTraceId ctx,
-        nextRowVar = nextRowVar ctx
-      }
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> ConstraintSolvingMonad () -> ConstraintSolvingMonad ()
@@ -141,48 +105,18 @@ traceContext description action = do
             ]
     trace (show msg) (return ())
 
--- | Does the context have any equality or subtype constraints left to process?
-hasAtomicConstraints :: ConstraintSolvingState -> Bool
-hasAtomicConstraints ctx =
-  not
-    ( null (ctxEqCs ctx) && null (ctxInRowCs ctx) && null (ctxEqRowCs ctx)
-    )
+substEqRowC :: EqRowC -> ConstraintSolvingMonad ()
+substEqRowC (EqRowC r1 os r2) = do
+  -- The only places that we have row vars are in the tyvar defs, and
+  -- in the row eqs.
+  
+  defs  <- field @"ctxTyVarDefs" <<.= mempty -- get defs and clear them
+  defs' <- traverse (substRowVarInITy r1 os r2) defs
+  field @"ctxTyVarDefs" .= defs'
 
--- addConstraints :: [TyConstraint] -> ConstraintSolvingMonad ()
--- addConstraints = mapM_ go
---   where
---     go :: TyConstraint -> ConstraintSolvingMonad ()
---     go (EqTC c) = modify $ over (field @"ctxEqCs") (c :)
---     go (InRowTC c) = modify $ over (field @"ctxInRowCs") (c :)
---     go (RowShiftTC c) = modify $ over (field @"ctxRowShiftCs") (c :)
---     go (OrTC c) = modify $ over (field @"ctxOrCs") (c :)
---     go (AndTC (AndC cs)) = addConstraints cs
---     go (EqRowTC c) = modify $ over (field @"ctxEqRowCs") (c :)
-
-
-
--- | Updates the context with a @RowShiftC@ constraint. Like @solveEqC@ this is
--- an "atomic" update.
-solveRowShiftC :: RowShiftC -> ConstraintSolvingMonad ()
-solveRowShiftC (RowShiftC r1 n r2) =
-  modify $ over (field @"ctxRowShiftMap") (Map.alter alter r1)
-  where
-    alter Nothing = Just (Set.singleton (n, r2))
-    alter (Just s) = Just (Set.union s (Set.singleton (n, r2)))
-
--- | TODO
-solveEqRowC :: EqRowC -> ConstraintSolvingMonad ()
-solveEqRowC (EqRowC (RowExprVar r1) os r2) = do
-  -- TODO (val) There's gotta be a combinator for doing this?
-  s <- get
-  s' <- substRowVarInConstraintSolvingState r1 r2 os s
-  put s'
-solveEqRowC (EqRowC (RowExprShift o r1) os r2) = do
-  r3 <- freshRowVar
-  addConstraints
-    [ eqRowTC (rowVar r1) (shiftOffsets (- o) os) (rowVar r3),
-      eqRowTC r2 mempty (RowExprShift o r3)
-    ]
+  rEqs  <- field @"ctxEqRowCs" <<.= mempty -- get row eqs and clear them
+  -- This will add back any we still need
+  traverse_ (substRowVarInEqRowC r1 os r2) rEqs
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
@@ -191,12 +125,9 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
   dequeueEqC >>= \case
     Just c -> unifyTyVars c >> processAtomicConstraints
     Nothing ->
-      dequeueRowShiftC >>= \case
-        Just c -> solveRowShiftC c >> processAtomicConstraints
-        Nothing ->
-          dequeueEqRowC >>= \case
-            Just c -> solveEqRowC c >> processAtomicConstraints
-            Nothing -> return ()
+      dequeueEqRowC >>= \case
+        Just c -> substEqRowC c >> processAtomicConstraints
+        Nothing -> return ()
 
 -- | Unify two type variables, both of which may have definitions, in
 -- which case we unify their definitions as well.
@@ -224,49 +155,17 @@ unifyTypes tv ty1 ty2 =
         
     (PtrTy tv1', PtrTy tv2') -> addTyVarEq tv1' tv2'
 
-    (RecTy fs1 r1, RecTy fs2 r2) -> recordCase fs1 r1 fs2 r2
+    (RecTy fs1 r1, RecTy fs2 r2) -> unifyRecTy fs1 r1 fs2 r2
 
     -- Unification failure, we need to report a conflict.
     _ -> error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
-  where
-    recordCase fs1 r1 fs2 r2 = do    
-      let onlyIn1 = fs1 `Map.difference` fs2
-          onlyIn2 = fs2 `Map.difference` fs1
-
-      -- Unify overlapping vars.
-      sequenceA_ $ Map.intersectionWith addTyVarEq fs1 fs2
-      
-      case (Map.null onlyIn1, Map.null onlyIn2) of
-        -- fs1 is a superset of fs2, so we can set
-        --    r2 == { onlyIn1 | r1 }
-        -- We make ty1 the new defn. of tv2 as there is no more info
-        -- to add at that type.
-        (_, True) -> addRowVarEq r2 onlyIn1 r1
-        -- Dual of the above We could also update the defn. of tv to
-        -- be t2 to save work later, but this is cleaner.
-        (True, _) -> addRowVarEq r1 onlyIn2 r2
-
-        -- We need a fresh row variable for the "remainder" of the row variables
-        -- on each side when you factor out the fields mentioned across.
-        --
-        -- E.g. when you start with
-        --
-        --   RecTy { 0 : i8 } r1 = RecTy { 8 : i8 } r2
-        --
-        -- you should conclude that there exists a r3 s.t.
-        --
-        --   r1 = { 8 : i8 | r3 }   and   r2 = { 0 : i8 | r3 }
-        (False, False) -> do
-          r3 <- freshRowVar
-          addRowVarEq r1 onlyIn2 r3
-          addRowVarEq r2 onlyIn1 r3
 
 -- | Creates the assertion that the given row expression should have a given
 -- type at a given offset.  Handles the necessary shifting if the row expression
 -- is itself a shift expression.
-rowExprContains :: RowExpr -> Offset -> ITy -> TyConstraint
-rowExprContains (RowExprVar r) o t = inRowTC r o t
-rowExprContains (RowExprShift a r) b t = inRowTC r (b - a) t
+-- rowExprContains :: RowExpr -> Offset -> ITy -> TyConstraint
+-- rowExprContains (RowExprVar r) o t = inRowTC r o t
+-- rowExprContains (RowExprShift a r) b t = inRowTC r (b - a) t
 
 -- shift 10 { 0 : t1 } [5] = t2
 -- { 10 : t1 } [5] = t2

@@ -17,106 +17,87 @@ module Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution where
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Reopt.TypeInference.Constraints.Solving.Constraints
-  ( AndC (..),
-    EqC (EqC),
-    EqRowC (EqRowC),
-    InRowC (InRowC),
-    OrC (..),
-    TyConstraint (..),
+  ( EqRowC (EqRowC),
   )
 import Reopt.TypeInference.Constraints.Solving.Monad
   ( ConstraintSolvingMonad,
-    shiftOffsets,
+    shiftOffsets, addTyVarEq, addRowVarEq, freshRowVar, addRowExprEq
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariables
   ( RowExpr,
     RowVar,
-    replaceRowExprPreservingShift,
-    rowExprVar, rowExprShift, Offset
+    rowExprVar, rowExprShift, Offset, rowVar, shiftRowExpr
   )
 import Reopt.TypeInference.Constraints.Solving.Types
-  ( ITy(..),
-    Offset,
-    TyF (..),
+  ( TyF (..), ITy'
   )
 import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
+import Data.Foldable (sequenceA_)
 
-class SubstRowVar a where
-  substRowVar :: RowVar -> RowExpr -> Map Offset TyVar -> a -> a
--- instance SubstRowVar f => SubstRowVar (TyF RowVar f) where
---   substRowVar r1 r2 os ty =
---     case ty of
---       NumTy {} -> ty
---       PtrTy t -> PtrTy (substRowVar r1 r2 os t)
---       RecTy flds rvar
---         -- TODO: check for fields conflict
---         | rvar == r1 -> RecTy (Map.union (substRowVar r1 r2 os <$> flds) os) r2
---         | otherwise -> RecTy (substRowVar r1 r2 os <$> flds) rvar
+substRowVarInITy :: RowVar -> Map Offset TyVar -> RowExpr -> ITy' ->
+                    ConstraintSolvingMonad ITy'
+substRowVarInITy r1 os r2 = \case
+  RecTy os' r3 | rowExprVar r3 == r1 -> do
+    -- FIXME: copied from below.                   
+    let os_shifted = shiftOffsets (rowExprShift r3) os
+        r2'        = shiftRowExpr (rowExprShift r3) r2
+      
+    -- Assert common fields are the same
+    sequenceA_ $ Map.intersectionWith addTyVarEq os_shifted os'
+    pure (RecTy (Map.union os_shifted os') r2')
+         
+  ty -> pure ty
 
+-- FIXME: move?
+unifyRecTy :: Map Offset TyVar -> RowExpr ->
+              Map Offset TyVar -> RowExpr -> 
+              ConstraintSolvingMonad ()
+unifyRecTy fs1 r1 fs2 r2 = do    
+  let onlyIn1 = fs1 `Map.difference` fs2
+      onlyIn2 = fs2 `Map.difference` fs1
 
--- instance SubstRowVar ITy where
---   substRowVar r1 r2 os = \case
---     UnknownTy v -> UnknownTy v
---     NumTy sz -> NumTy sz
---     PtrTy t -> PtrTy (substRowVar r1 r2 os t)
---     RecTy flds r
---       | rowExprVar r == r1 ->
---         -- TODO: check for fields conflict
---         -- r1 becomes {os | r2}   in either   {flds | r1} or {flds | shift o r1}
---         -- should yield
---         -- {flds, os | r2} or {flds, shift o os | shift o r2 }
---         let flds' = substRowVar r1 r2 os <$> flds
---             extraFlds = shiftOffsets (rowExprShift r) os
---          in -- TODO: check for fields conflict
---             RecTy (Map.union flds' extraFlds) (replaceRowExprPreservingShift r r2)
---       | otherwise -> RecTy (substRowVar r1 r2 os <$> flds) r
+  -- Unify overlapping vars.
+  sequenceA_ $ Map.intersectionWith addTyVarEq fs1 fs2
+      
+  case (Map.null onlyIn1, Map.null onlyIn2) of
+    -- fs1 is a superset of fs2, so we can set
+    --    r2 == { onlyIn1 | r1 }
+    -- We make ty1 the new defn. of tv2 as there is no more info
+    -- to add at that type.
+    (_, True) -> addRowExprEq r2 onlyIn1 r1
+    -- Dual of the above
+    (True, _) -> addRowExprEq r1 onlyIn2 r2
+    
+    -- We need a fresh row variable for the "remainder" of the row variables
+    -- on each side when you factor out the fields mentioned across.
+    --
+    -- E.g. when you start with
+    --
+    --   RecTy { 0 : i8 } r1 = RecTy { 8 : i8 } r2
+    --
+    -- you should conclude that there exists a r3 s.t.
+    --
+    --   r1 = { 8 : i8 | r3 }   and   r2 = { 0 : i8 | r3 }
+    (False, False) -> do
+      r3 <- freshRowVar
+      addRowExprEq r1 onlyIn2 (rowVar r3)
+      addRowExprEq r2 onlyIn1 (rowVar r3)
+      
+substRowVarInEqRowC :: RowVar ->  Map Offset TyVar -> RowExpr -> EqRowC ->
+                       ConstraintSolvingMonad ()
+substRowVarInEqRowC r1 os r2 (EqRowC r3 os' r4)
+  -- { os | r2} = {os' | r4 }
+  | r1 == r3        = unifyRecTy os r2 os' r4
 
--- instance SubstRowVar ITy where
---   substRowVar r1 r2 os = \case
---     VarTy v -> VarTy v
---     ITy ty  -> ITy $ substRowVar r1 r2 os ty
+  -- r3 = { os' | { os | r2 } }
+  | rowExprVar r4 == r1 = do
+      let os_shifted = shiftOffsets (rowExprShift r4) os
+          r2'  = shiftRowExpr (rowExprShift r4) r2
+      
+      -- Assert common fields are the same
+      sequenceA_ $ Map.intersectionWith addTyVarEq os_shifted os'
+      addRowVarEq r3 (Map.union os_shifted os') r2'
 
--- instance SubstRowVar EqC where
---   substRowVar r1 r2 os (EqC l r) = EqC (substRowVar r1 r2 os l) (substRowVar r1 r2 os r)
-
--- instance SubstRowVar InRowC where
---   substRowVar r1 r2 os (InRowC r o t) =
---     InRowC
---       (if r == r1 && o `notElem` Map.keys os then r2 else r)
---       o
---       (substRowVar r1 r2 os t)
-
--- instance SubstRowVar OrC where
---   substRowVar r1 r2 os (OrC cs) = OrC (substRowVar r1 r2 os <$> cs)
-
--- instance SubstRowVar AndC where
---   substRowVar r1 r2 os (AndC cs) = AndC (substRowVar r1 r2 os <$> cs)
-
--- Until we had a row-shift term, substituting a row in an EqRowC can not
--- necessarily be represented as another EqRowC.
-substRowVarInEqRowC :: RowVar -> RowExpr -> Map Offset ITy -> EqRowC -> Either EqC EqRowC
--- substRowVarInEqRowC :: RowVar -> RowVar -> Map Offset ITy -> EqRowC -> (EqRowC, [InRowC])
-substRowVarInEqRowC r1 r2 os (EqRowC r3 os' r4)
-  -- In this case, we intend to replace r1 with {os | r2} in a constraint of the form:
-  -- r1 = {os' | r4}
-  -- This ought to mean the constraint:
-  -- {os | r2} = {os' | r4}
-  -- Now os and os' may overlap some.  For those offsets that overlap, we should
-  -- check for conflicts, and otherwise omit them entirely from the resulting
-  -- constraints.
-  -- The remaining constraint being:
-  -- {unique_os | r2} = {unique_os' | r4}
-  -- which we can represent either as an EqC, or as a combination of an EqRowC
-  -- and some InRowCs.
-  -- Let's try an EqC for now as it makes the type simpler (no need for lists).
-  | rowExprVar r3 == r1 =
-    let uniqOs = Map.filterWithKey (\k _ -> k `notElem` Map.keys os') os
-     in let uniqOs' = Map.filterWithKey (\k _ -> k `notElem` Map.keys os) os'
-         in Left $ EqC (RecTy uniqOs r2) (RecTy uniqOs' r4)
-  -- (EqRowC r2 os' r4, uncurry (InRowC r4) <$> filter ((`notElem` Map.keys os') . fst) (Map.assocs os))
-  -- TODO: check for conflicts?
-  | rowExprVar r4 == r1 = Right $ EqRowC r3 (Map.union os os') r4
-  -- It should never be the case that both r3 and r4 are equal to r1, so this
-  -- should only trigger when both are **not** r1.
-  | otherwise = Right $ EqRowC r3 os' r4
+  -- Just re-emit row eq.
+  | otherwise = addRowVarEq r3 os' r4
 

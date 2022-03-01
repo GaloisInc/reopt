@@ -9,48 +9,30 @@
 module Reopt.TypeInference.Constraints.Solving.Monad where
 
 import           Control.Lens                                          (Lens',
-                                                                        at, use,
                                                                         uses,
                                                                         (%%=),
                                                                         (%=),
-                                                                        (.=),
                                                                         (<<+=))
-import           Control.Monad.State                                   (MonadState (get, put),
-                                                                        State,
-                                                                        execState,
-                                                                        gets,
-                                                                        modify)
+import           Control.Monad.State                                   (MonadState, State, evalState)
 import           Data.Generics.Product                                 (field)
 import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
-import           Data.Set                                              (Set)
-import qualified Data.Set                                              as Set
 import           GHC.Generics                                          (Generic)
 import qualified Prettyprinter                                         as PP
 import           Reopt.TypeInference.Constraints.Solving.Constraints   (EqC (EqC),
-                                                                        EqRowC (EqRowC),
-                                                                        InRowC,
-                                                                        OrC,
-                                                                        RowShiftC (RowShiftC))
-import           Reopt.TypeInference.Constraints.Solving.RowVariables  (RowVar (RowVar))
+                                                                        EqRowC (EqRowC),)
+import           Reopt.TypeInference.Constraints.Solving.RowVariables  (RowVar (RowVar), Offset (Offset), RowExpr (RowExprVar, RowExprShift), rowVar)
 import           Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar (TyVar))
 import           Reopt.TypeInference.Constraints.Solving.Types         (ITy (..),
-                                                                        ITy',
-                                                                        Offset (Offset),
-                                                                        TyF (RecTy),
-                                                                        prettyMap)
+                                                                        ITy')
+import Data.Bifunctor (first)
 
 class Monad m => CanFreshRowVar m where
   freshRowVar :: m RowVar
 
 data ConstraintSolvingState = ConstraintSolvingState
-  { ctxEqCs :: [EqC],
-    ctxInRowCs :: [InRowC],
+  { ctxEqCs    :: [EqC],
     ctxEqRowCs :: [EqRowC],
-    -- | Known row offset relationships, i.e. @r -> (o,r')@
-    --   says @r@ with offset @o@ applied corresponds to
-    -- row @r'@. .
-    ctxRowShiftMap :: Map RowVar (Set (Offset, RowVar)),
     
     nextTraceId :: Int,
     nextRowVar :: Int,
@@ -70,15 +52,12 @@ data ConstraintSolvingState = ConstraintSolvingState
   }
   deriving (Eq, Generic, Ord, Show)
 
-emptyContext :: Int -> ConstraintSolvingState
-emptyContext nextRow = ConstraintSolvingState
+emptyContext :: ConstraintSolvingState
+emptyContext = ConstraintSolvingState
   { ctxEqCs    = []
-  , ctxInRowCs = []
-  , ctxRowShiftCs = []
   , ctxEqRowCs    = []
-  , ctxRowShiftMap = mempty
   , nextTraceId    = 0
-  , nextRowVar     = nextRow
+  , nextRowVar     = 0
   , nextTyVar      = 0
   , ctxTyVarEqv    = mempty
   , ctxTyVarDefs   = mempty
@@ -92,8 +71,8 @@ newtype ConstraintSolvingMonad a = ConstraintSolvingMonad
 instance CanFreshRowVar ConstraintSolvingMonad where
   freshRowVar = ConstraintSolvingMonad $ RowVar <$> (field @"nextRowVar" <<+= 1)
 
-runConstraintSolvingMonad :: ConstraintSolvingState -> ConstraintSolvingMonad () -> ConstraintSolvingState
-runConstraintSolvingMonad s = flip execState s . getConstraintSolvingMonad
+runConstraintSolvingMonad :: ConstraintSolvingMonad a -> a
+runConstraintSolvingMonad = flip evalState emptyContext . getConstraintSolvingMonad
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -101,9 +80,19 @@ runConstraintSolvingMonad s = flip execState s . getConstraintSolvingMonad
 addTyVarEq :: TyVar -> TyVar -> ConstraintSolvingMonad ()
 addTyVarEq tv1 tv2 = field @"ctxEqCs" %= (EqC tv1 tv2 :)
 
-addRowVarEq :: RowVar -> Map Offset TyVar -> RowVar -> ConstraintSolvingMonad ()
-addRowVarEq lhs offs rhs = field @"ctxEqRowCs" %= (EqRowC lhs offs rhs :)
+addRowVarEq :: RowVar -> Map Offset TyVar -> RowExpr ->
+               ConstraintSolvingMonad ()
+addRowVarEq r1 os r2 = field @"ctxEqRowCs" %= (EqRowC r1 os r2 :)
 
+addRowExprEq :: RowExpr -> Map Offset TyVar -> RowExpr ->
+               ConstraintSolvingMonad ()
+addRowExprEq (RowExprVar r1) os r2 = addRowVarEq r1 os r2
+addRowExprEq (RowExprShift o r1) os r2 = do
+  r3 <- freshRowVar
+  -- This terminates as eventually we will hit the above with r3
+  addRowExprEq r2 mempty (rowVar r3)
+  addRowVarEq r1 (shiftOffsets (- o) os) (rowVar r3)
+  
 --------------------------------------------------------------------------------
 -- Getting constraints
 
@@ -115,12 +104,6 @@ popField fld =
 
 dequeueEqC :: ConstraintSolvingMonad (Maybe EqC)
 dequeueEqC = popField (field @"ctxEqCs")
-
-dequeueInRowC :: ConstraintSolvingMonad (Maybe InRowC)
-dequeueInRowC = popField (field @"ctxInRowCs")
-
-dequeueRowShiftC :: ConstraintSolvingMonad (Maybe RowShiftC)
-dequeueRowShiftC = popField (field @"ctxRowShiftCs")
 
 dequeueEqRowC :: ConstraintSolvingMonad (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
@@ -241,6 +224,7 @@ instance PP.Pretty ConstraintSolvingState where
     --           in map pp $ Map.toList $ ctxTyVarEqv ctx
     --       ]
 
-shiftOffsets :: Offset -> Map Offset ITy -> Map Offset ITy
+shiftOffsets :: Offset -> Map Offset v -> Map Offset v
+shiftOffsets 0 = id
 shiftOffsets o =
   Map.fromList . map (first (+ o)) . Map.toList

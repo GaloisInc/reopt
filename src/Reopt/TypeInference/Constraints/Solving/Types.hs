@@ -5,10 +5,10 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Constraints.Solving.Types where
 
-import Data.Bifunctor (first)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -16,10 +16,8 @@ import qualified Data.Set as Set
 import qualified Prettyprinter as PP
 import Reopt.TypeInference.Constraints.Solving.RowVariables
   ( NoRow (NoRow),
-    Offset (Offset),
     RowExpr (RowExprShift, RowExprVar),
-    RowVar,
-    rowVar,
+    RowVar, Offset,
   )
 import Reopt.TypeInference.Constraints.Solving.TypeVariables
   ( TyVar,
@@ -34,7 +32,7 @@ data TyF rvar f
   | -- | Record type, mapping byte offsets to types and with a row variable
     -- for describing constraints on the existence/type of additional fields.
     RecTy (Map Offset f) rvar
-  deriving (Eq, Ord, Show, Functor, Foldable)
+  deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
@@ -61,13 +59,6 @@ instance FreeTyVars f => FreeTyVars (TyF rvar f) where
 instance FreeRowVars RowExpr where
   freeRowVars (RowExprVar v) = Set.singleton v
   freeRowVars (RowExprShift _ v) = Set.singleton v
-
-instance FreeTyVars (Ty TyVar rvar) where
-  freeTyVars = \case
-    UnknownTy x -> Set.singleton x
-    NumTy _ -> Set.empty
-    PtrTy t -> freeTyVars t
-    RecTy flds _row -> foldr (Set.union . freeTyVars) Set.empty flds
 
 instance FreeRowVars f => FreeRowVars (TyF RowExpr f) where
   freeRowVars = \case
@@ -120,7 +111,7 @@ prettyMap ppKey ppValue =
   where
     prettyEntry (k, v) = PP.group (PP.hsep [ppKey k, "→", ppValue v])
 
-prettyRow :: PP.Pretty v => Map Offset v -> RowVar -> PP.Doc d
+prettyRow :: PP.Pretty v => Map Offset v -> RowExpr -> PP.Doc d
 prettyRow os r = PP.hsep ["{", PP.hsep (prettyMap PP.pretty PP.pretty os), "|", PP.pretty r, "}"]
 
 recTyByteWidth :: Int -> [(Offset, FTy)] -> Integer
