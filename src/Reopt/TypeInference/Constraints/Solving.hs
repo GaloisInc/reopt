@@ -11,8 +11,8 @@ import Reopt.TypeInference.Constraints.Solving.Constraints
   ( TyConstraint (..),
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariables
-  ( -- NoRow (..),
-    RowVar (..),
+  ( Offset (Offset),
+    RowVar (RowVar),
   )
 import Reopt.TypeInference.Constraints.Solving.Solver
   ( unifyConstraints,

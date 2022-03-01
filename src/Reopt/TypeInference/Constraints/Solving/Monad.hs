@@ -8,11 +8,18 @@
 
 module Reopt.TypeInference.Constraints.Solving.Monad where
 
-import Control.Monad.State (MonadState (get, put), gets, modify)
-import           Control.Lens                                          ((<<+=), (%%=), at, uses, (%=), Lens', use, (.=))
-import           Control.Monad.State                                   (MonadState,
+import           Control.Lens                                          (Lens',
+                                                                        at, use,
+                                                                        uses,
+                                                                        (%%=),
+                                                                        (%=),
+                                                                        (.=),
+                                                                        (<<+=))
+import           Control.Monad.State                                   (MonadState (get, put),
                                                                         State,
-                                                                        execState)
+                                                                        execState,
+                                                                        gets,
+                                                                        modify)
 import           Data.Generics.Product                                 (field)
 import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
@@ -27,10 +34,10 @@ import           Reopt.TypeInference.Constraints.Solving.Constraints   (EqC (EqC
                                                                         RowShiftC (RowShiftC))
 import           Reopt.TypeInference.Constraints.Solving.RowVariables  (RowVar (RowVar))
 import           Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar (TyVar))
-import           Reopt.TypeInference.Constraints.Solving.Types         (ITy, ITy',                                                                      
+import           Reopt.TypeInference.Constraints.Solving.Types         (ITy (..),
+                                                                        ITy',
                                                                         Offset (Offset),
                                                                         TyF (RecTy),
-                                                                        ITy (..),
                                                                         prettyMap)
 
 class Monad m => CanFreshRowVar m where
@@ -39,7 +46,6 @@ class Monad m => CanFreshRowVar m where
 data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs :: [EqC],
     ctxInRowCs :: [InRowC],
-    ctxRowShiftCs :: [RowShiftC],
     ctxEqRowCs :: [EqRowC],
     -- | Known row offset relationships, i.e. @r -> (o,r')@
     --   says @r@ with offset @o@ applied corresponds to
@@ -234,3 +240,7 @@ instance PP.Pretty ConstraintSolvingState where
     --           let pp (ty, ty') = PP.pretty ty PP.<+> "=" PP.<+> PP.pretty ty'
     --           in map pp $ Map.toList $ ctxTyVarEqv ctx
     --       ]
+
+shiftOffsets :: Offset -> Map Offset ITy -> Map Offset ITy
+shiftOffsets o =
+  Map.fromList . map (first (+ o)) . Map.toList

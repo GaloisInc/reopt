@@ -637,6 +637,12 @@ genApp (ty, outSize) app =
     --
     -- In general we don't need to do much, as most are just bv ops.
     -- Add and Sub are the main exceptions
+    BVAdd _sz l (FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } ) -> do
+      lTy <- genFnValue l
+      emitConstraint (CAddrWidthAdd ty lTy (Left o))
+    BVAdd _sz (FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } ) r -> do
+      rTy <- genFnValue r
+      emitConstraint (CAddrWidthAdd ty rTy (Left o))
     BVAdd sz (FnConstantValue _ o) r -> do
       addrw <- addrWidth
       when (isJust (testEquality addrw sz)) $ do

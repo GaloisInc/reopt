@@ -11,7 +11,13 @@ module Reopt.TypeInference.Constraints.Solving.TypeVariableSubstitution
   )
 where
 
-import Reopt.TypeInference.Constraints.Solving.Constraints (AndC (AndC), EqC (EqC), InRowC (InRowC), OrC (OrC), RowShiftC (RowShiftC), TyConstraint (AndTC, EqRowTC, EqTC, InRowTC, OrTC, RowShiftTC))
+import Reopt.TypeInference.Constraints.Solving.Constraints
+  ( AndC (AndC),
+    EqC (EqC),
+    InRowC (InRowC),
+    OrC (OrC),
+    TyConstraint (AndTC, EqRowTC, EqTC, InRowTC, OrTC),
+  )
 import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
 import Reopt.TypeInference.Constraints.Solving.Types (ITy, Ty (NumTy, PtrTy, RecTy, UnknownTy))
 
@@ -35,9 +41,6 @@ instance SubstTyVar EqC where
 instance SubstTyVar InRowC where
   substTyVar xt (InRowC r o t) = InRowC r o (substTyVar xt t)
 
-instance SubstTyVar RowShiftC where
-  substTyVar _ c@RowShiftC {} = c
-
 instance SubstTyVar AndC where
   substTyVar xt (AndC cs) = AndC $ map (substTyVar xt) cs
 
@@ -48,7 +51,6 @@ instance SubstTyVar TyConstraint where
   substTyVar xt = \case
     EqTC c -> EqTC $ substTyVar xt c
     InRowTC c -> InRowTC $ substTyVar xt c
-    RowShiftTC c -> RowShiftTC $ substTyVar xt c
     OrTC c -> OrTC $ substTyVar xt c
     AndTC c -> AndTC $ substTyVar xt c
     EqRowTC c -> EqRowTC c -- no TyVars in Rows

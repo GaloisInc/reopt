@@ -1,5 +1,7 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Reopt.TypeInference.Constraints.Solving.Constraints where
 
@@ -7,9 +9,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Numeric.Natural (Natural)
 import qualified Prettyprinter as PP
-import Reopt.TypeInference.Constraints.Solving.RowVariables (RowVar)
+import Reopt.TypeInference.Constraints.Solving.RowVariables (Offset (Offset), RowExpr (RowExprShift), RowVar, rowVar)
 import Reopt.TypeInference.Constraints.Solving.Types
   ( FreeRowVars (..),
     FreeTyVars (..),
@@ -38,9 +39,9 @@ instance FreeRowVars EqC where
 
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
-  { eqRowLHS :: RowVar,
+  { eqRowLHS :: RowExpr,
     eqRowOffsets :: Map Offset TyVar,
-    eqRowRHS :: RowVar
+    eqRowRHS :: RowExpr
   }
   deriving (Eq, Ord, Show)
 
@@ -51,11 +52,14 @@ instance FreeTyVars EqRowC where
   freeTyVars (EqRowC _ os _) = foldMap Set.singleton os
 
 instance FreeRowVars EqRowC where
-  freeRowVars (EqRowC r1 os r2) = Set.fromList [r1, r2] `Set.union` foldr (Set.union . freeRowVars) Set.empty os
+  freeRowVars (EqRowC r1 os r2) =
+    freeRowVars r1
+      `Set.union` foldr (Set.union . freeRowVars) Set.empty os
+      `Set.union` freeRowVars r2
 
 -- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
 data InRowC = InRowC
-  { inRowRowVar :: RowVar,
+  { inRowRowExpr :: RowExpr,
     inRowOffset :: Offset,
     inRowTypeAtOffset :: TyVar
   }
@@ -68,27 +72,7 @@ instance FreeTyVars InRowC where
   freeTyVars (InRowC _ _ t) = freeTyVars t
 
 instance FreeRowVars InRowC where
-  freeRowVars (InRowC r _ t) = Set.insert r (freeRowVars t)
-
--- | @RowShiftC r1 o r2@ means that @r1@ with offsets shifted by @o@ corresponds to @r2@.
--- I.e., if from other information we could derive @r1@ corresponded
--- to @{0:NumTy}@ and @o@ = 42 then @RowShiftC r1 o r2@ would imply that in @r2@
--- @{42:NumTy}@ holds.
-data RowShiftC = RowShiftC
-  { rowShiftBase :: RowVar,
-    rowShiftBy :: Offset,
-    rowShiftShifted :: RowVar
-  }
-  deriving (Eq, Ord, Show)
-
-instance PP.Pretty RowShiftC where
-  pretty (RowShiftC r1 o r2) = prettySExp ["shift", PP.pretty r1, PP.pretty o, "=", PP.pretty r2]
-
-instance FreeTyVars RowShiftC where
-  freeTyVars RowShiftC {} = Set.empty
-
-instance FreeRowVars RowShiftC where
-  freeRowVars (RowShiftC r1 _ r2) = Set.fromList [r1, r2]
+  freeRowVars (InRowC r _ t) = freeRowVars r `Set.union` freeRowVars t
 
 -- | Logical disjunction.
 newtype OrC = OrC [TyConstraint]
@@ -121,8 +105,6 @@ data TyConstraint
     EqTC EqC
   | -- | @InRowC o t r@ means in row @r@ offset @t@ must contain a @t@.
     InRowTC InRowC
-  | -- | @RowOffsetC r1 o r2@ means that @r1@ with offsets shifted by @o@ corresponds to @r2@.
-    RowShiftTC RowShiftC
   | EqRowTC EqRowC
   | -- | Logical disjunction. Use @orTC@ smart constructor instead to perform NEEDED simplifications.
     OrTC OrC
@@ -134,7 +116,6 @@ instance PP.Pretty TyConstraint where
   pretty = \case
     EqTC c -> PP.pretty c
     InRowTC c -> PP.pretty c
-    RowShiftTC c -> PP.pretty c
     OrTC c -> PP.pretty c
     AndTC c -> PP.pretty c
     EqRowTC c -> PP.pretty c
@@ -143,7 +124,6 @@ instance FreeTyVars TyConstraint where
   freeTyVars = \case
     EqTC c -> freeTyVars c
     InRowTC c -> freeTyVars c
-    RowShiftTC c -> freeTyVars c
     OrTC c -> freeTyVars c
     AndTC c -> freeTyVars c
     EqRowTC c -> freeTyVars c
@@ -152,16 +132,12 @@ instance FreeRowVars TyConstraint where
   freeRowVars = \case
     EqTC c -> freeRowVars c
     InRowTC c -> freeRowVars c
-    RowShiftTC c -> freeRowVars c
     OrTC c -> freeRowVars c
     AndTC c -> freeRowVars c
     EqRowTC c -> freeRowVars c
 
 -- eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
 -- eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
-
-inRowTC :: RowVar -> Offset -> TyVar -> TyConstraint
-inRowTC r o t = InRowTC $ InRowC r o t
 
 -- isNumTC :: Int -> ITy -> TyConstraint
 -- isNumTC sz t = EqTC (EqC t (ITy $ NumTy sz))
