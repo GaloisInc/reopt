@@ -99,7 +99,8 @@ instance FreeRowVars ITy where
 
 -- | Final types resulting from inference (i.e., no free type variables).
 data FTy = UnknownTy | FTy (TyF NoRow FTy)
-
+  deriving (Eq, Ord, Show)
+  
 instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"

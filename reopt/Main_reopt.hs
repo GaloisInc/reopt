@@ -999,10 +999,10 @@ displayConstraintsInformation :: ModuleConstraints arch -> IO ()
 displayConstraintsInformation moduleConstraints = do
   putStrLn "Warnings"
   putStrLn (unlines (map ((++) "\t" . show) (mcWarnings moduleConstraints)))
-  putStrLn "Constraints (generated)"
-  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
-  putStrLn "Constraints (solving)"
-  putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcTyConstraints moduleConstraints)))
+  -- putStrLn "Constraints (generated)"
+  -- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcConstraints moduleConstraints)))
+  -- putStrLn "Constraints (solving)"
+  -- putStrLn (unlines (map (show . PP.indent 4 . PP.pretty) (mcTyConstraints moduleConstraints)))
   putStrLn "Inferred types"
   putStrLn (showInferredTypes moduleConstraints)
 
