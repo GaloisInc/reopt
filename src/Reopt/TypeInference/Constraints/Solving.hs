@@ -1,16 +1,21 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Reopt.TypeInference.Constraints.Solving
-  ( Ty (..), FTy, TyVar, numTy, ptrTy, varTy, -- structTy,
+  ( Ty (..), TyVar, numTy, ptrTy, varTy, -- structTy,
     ConstraintSolvingMonad, runConstraintSolvingMonad,
     eqTC, ptrTC, freshTyVar,
     unifyConstraints,
     tyToLLVMType,
+    -- FTy stuff
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FRecTy, pattern FUnknownTy,
+    -- Testing
   ) where
 
 import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
 
 import Reopt.TypeInference.Constraints.Solving.RowVariables
-  ( RowExpr (RowExprVar), RowVar, Offset
+  ( RowExpr (RowExprVar), RowVar(..), Offset, NoRow (NoRow)
   )
 import Reopt.TypeInference.Constraints.Solving.Solver
   ( unifyConstraints,
@@ -21,7 +26,7 @@ import Reopt.TypeInference.Constraints.Solving.TypeVariables
 import Reopt.TypeInference.Constraints.Solving.Types
   ( ITy(..),
     TyF(..),
-    FTy, tyToLLVMType
+    FTy(..), tyToLLVMType
   )
 import Reopt.TypeInference.Constraints.Solving.Monad (ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, addTyVarEq, freshRowVar)
 
@@ -70,5 +75,18 @@ ptrTC target ptr = do
   let pTy = ptrTy (structTy (Map.singleton 0 target) rv) 
   eqTC ptr pTy
   
-  
-  
+--------------------------------------------------------------------------------
+-- LLVM support (FTy patterns)
+
+pattern FNumTy :: Int -> FTy
+pattern FNumTy sz = FTy (NumTy sz)
+
+pattern FRecTy :: Map Offset FTy -> FTy
+pattern FRecTy ty = FTy (RecTy ty NoRow)
+
+pattern FPtrTy :: FTy -> FTy
+pattern FPtrTy ty = FTy (PtrTy ty)
+
+pattern FUnknownTy :: FTy
+pattern FUnknownTy = UnknownTy
+
