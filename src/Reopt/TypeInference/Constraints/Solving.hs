@@ -1,16 +1,16 @@
 module Reopt.TypeInference.Constraints.Solving
-  ( Ty (..), numTy, ptrTy, varTy, -- structTy,
+  ( Ty (..), FTy, TyVar, numTy, ptrTy, varTy, -- structTy,
     ConstraintSolvingMonad, runConstraintSolvingMonad,
-    eqTC,
+    eqTC, ptrTC, freshTyVar,
+    unifyConstraints,
+    tyToLLVMType,
   ) where
 
 import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
 
 import Reopt.TypeInference.Constraints.Solving.RowVariables
-  ( Offset (Offset),
-    RowVar (RowVar),
-    Offset (..), RowExpr
+  ( RowExpr (RowExprVar), RowVar, Offset
   )
 import Reopt.TypeInference.Constraints.Solving.Solver
   ( unifyConstraints,
@@ -19,11 +19,11 @@ import Reopt.TypeInference.Constraints.Solving.TypeVariables
   ( TyVar (..),
   )
 import Reopt.TypeInference.Constraints.Solving.Types
-  ( FTy,
-    ITy(..),
+  ( ITy(..),
     TyF(..),
+    FTy, tyToLLVMType
   )
-import Reopt.TypeInference.Constraints.Solving.Monad (ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, addTyVarEq)
+import Reopt.TypeInference.Constraints.Solving.Monad (ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, addTyVarEq, freshRowVar)
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
@@ -41,25 +41,34 @@ ptrTy = Ty . PtrTy
 varTy :: TyVar -> Ty
 varTy = Var
 
--- structTy :: Map Offset Ty -> Ty
--- structTy = Ty . RecTy 
+structTy :: Map Offset Ty -> RowVar -> Ty
+structTy os r = Ty $ RecTy os (RowExprVar r)
 
 --------------------------------------------------------------------------------
 -- Compilers from Ty into ITy
 
+nameTy :: Ty -> ConstraintSolvingMonad TyVar
+nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
+
 compileTy :: Ty -> ConstraintSolvingMonad ITy
 compileTy (Var tv) = pure (VarTy tv)
 compileTy (Ty ty)  = ITy <$> traverse nameTy ty
-  where
-    nameTy ty' = freshTyVar Nothing . Just =<< compileTy ty'
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
 eqTC :: Ty -> Ty -> ConstraintSolvingMonad ()
 eqTC ty1 ty2 = do
-  let mk = freshTyVar Nothing . Just
-  tv1 <- mk =<< compileTy ty1
-  tv2 <- mk =<< compileTy ty2
+  tv1 <- nameTy ty1
+  tv2 <- nameTy ty2
   addTyVarEq tv1 tv2
 
+ptrTC :: Ty -> Ty -> ConstraintSolvingMonad ()
+ptrTC target ptr = do
+  rv <- freshRowVar
+  -- emits ptr = { 0 -> target | rv }
+  let pTy = ptrTy (structTy (Map.singleton 0 target) rv) 
+  eqTC ptr pTy
+  
+  
+  
