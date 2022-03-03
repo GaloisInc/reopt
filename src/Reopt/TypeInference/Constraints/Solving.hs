@@ -2,7 +2,7 @@
 
 module Reopt.TypeInference.Constraints.Solving
   ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
-    ConstraintSolvingMonad, runConstraintSolvingMonad,
+    SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, 
     unifyConstraints,
     tyToLLVMType,
@@ -28,7 +28,7 @@ import Reopt.TypeInference.Constraints.Solving.Types
     TyF(..),
     FTy(..), tyToLLVMType
   )
-import Reopt.TypeInference.Constraints.Solving.Monad (ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, addTyVarEq, freshRowVar)
+import Reopt.TypeInference.Constraints.Solving.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar)
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
@@ -52,23 +52,23 @@ structTy os r = Ty $ RecTy os (RowExprVar r)
 --------------------------------------------------------------------------------
 -- Compilers from Ty into ITy
 
-nameTy :: Ty -> ConstraintSolvingMonad TyVar
+nameTy :: Ty -> SolverM TyVar
 nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
 
-compileTy :: Ty -> ConstraintSolvingMonad ITy
+compileTy :: Ty -> SolverM ITy
 compileTy (Var tv) = pure (VarTy tv)
 compileTy (Ty ty)  = ITy <$> traverse nameTy ty
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
-eqTC :: Ty -> Ty -> ConstraintSolvingMonad ()
+eqTC :: Ty -> Ty -> SolverM ()
 eqTC ty1 ty2 = do
   tv1 <- nameTy ty1
   tv2 <- nameTy ty2
   addTyVarEq tv1 tv2
 
-ptrTC :: Ty -> Ty -> ConstraintSolvingMonad ()
+ptrTC :: Ty -> Ty -> SolverM ()
 ptrTC target ptr = do
   rv <- freshRowVar
   -- emits ptr = { 0 -> target | rv }

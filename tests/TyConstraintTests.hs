@@ -23,7 +23,7 @@ import Reopt.TypeInference.Constraints.Solving
    Ty(..),
    Ty, FTy,
    unifyConstraints,
-   eqTC, ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, numTy, varTy
+   eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy
   , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy)
 
 import Data.Foldable (traverse_)
@@ -64,14 +64,14 @@ num64 = numTy 64
 fnum64 :: FTy
 fnum64 = FNumTy 64
 
-tv :: ConstraintSolvingMonad TyVar
+tv :: SolverM TyVar
 tv = freshTyVar Nothing Nothing
 
-tvEq :: TyVar -> TyVar -> ConstraintSolvingMonad ()
+tvEq :: TyVar -> TyVar -> SolverM ()
 tvEq v v' = eqTC (varTy v) (varTy v')
 
 
-tvEqs :: [(TyVar, TyVar)] -> ConstraintSolvingMonad ()
+tvEqs :: [(TyVar, TyVar)] -> SolverM ()
 tvEqs = traverse_ (uncurry tvEq)
 
 recTy :: [(Offset, Ty)] -> RowVar -> Ty
@@ -225,8 +225,8 @@ instance Show TypeEnv where
 tyEnv :: [(TyVar, FTy)] -> TypeEnv
 tyEnv = TypeEnv . sortBy (compare `on` fst)
 
-mkTest :: String -> ConstraintSolvingMonad [(TyVar, FTy)] -> T.TestTree
-mkTest name m = T.testCase name (runConstraintSolvingMonad test)
+mkTest :: String -> SolverM [(TyVar, FTy)] -> T.TestTree
+mkTest name m = T.testCase name (runSolverM test)
   where
     test = do
       expected <- m

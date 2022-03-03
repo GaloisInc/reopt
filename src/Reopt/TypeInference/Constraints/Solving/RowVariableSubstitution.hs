@@ -20,7 +20,7 @@ import Reopt.TypeInference.Constraints.Solving.Constraints
   ( EqRowC (EqRowC),
   )
 import Reopt.TypeInference.Constraints.Solving.Monad
-  ( ConstraintSolvingMonad,
+  ( SolverM,
     shiftOffsets, addTyVarEq, addRowVarEq, freshRowVar, addRowExprEq
   )
 import Reopt.TypeInference.Constraints.Solving.RowVariables
@@ -35,7 +35,7 @@ import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
 import Data.Foldable (sequenceA_)
 
 substRowVarInITy :: RowVar -> Map Offset TyVar -> RowExpr -> ITy' ->
-                    ConstraintSolvingMonad ITy'
+                    SolverM ITy'
 substRowVarInITy r1 os r2 = \case
   RecTy os' r3 | rowExprVar r3 == r1 -> do
     -- FIXME: copied from below.                   
@@ -51,7 +51,7 @@ substRowVarInITy r1 os r2 = \case
 -- FIXME: move?
 unifyRecTy :: Map Offset TyVar -> RowExpr ->
               Map Offset TyVar -> RowExpr -> 
-              ConstraintSolvingMonad ()
+              SolverM ()
 unifyRecTy fs1 r1 fs2 r2 = do    
   let onlyIn1 = fs1 `Map.difference` fs2
       onlyIn2 = fs2 `Map.difference` fs1
@@ -84,7 +84,7 @@ unifyRecTy fs1 r1 fs2 r2 = do
       addRowExprEq r2 onlyIn1 (rowVar r3)
       
 substRowVarInEqRowC :: RowVar ->  Map Offset TyVar -> RowExpr -> EqRowC ->
-                       ConstraintSolvingMonad ()
+                       SolverM ()
 substRowVarInEqRowC r1 os r2 (EqRowC r3 os' r4)
   -- { os | r2} = {os' | r4 }
   | r1 == r3        = unifyRecTy os r2 os' r4

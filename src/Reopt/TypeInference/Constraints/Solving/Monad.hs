@@ -55,26 +55,26 @@ emptyContext = ConstraintSolvingState
   , ctxTyVars      = empty
   }
 
-newtype ConstraintSolvingMonad a = ConstraintSolvingMonad
-  { getConstraintSolvingMonad :: State ConstraintSolvingState a
+newtype SolverM a = SolverM
+  { getSolverM :: State ConstraintSolvingState a
   }
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
 
-runConstraintSolvingMonad :: ConstraintSolvingMonad a -> a
-runConstraintSolvingMonad = flip evalState emptyContext . getConstraintSolvingMonad
+runSolverM :: SolverM a -> a
+runSolverM = flip evalState emptyContext . getSolverM
 
 --------------------------------------------------------------------------------
 -- Adding constraints
 
-addTyVarEq :: TyVar -> TyVar -> ConstraintSolvingMonad ()
+addTyVarEq :: TyVar -> TyVar -> SolverM ()
 addTyVarEq tv1 tv2 = field @"ctxEqCs" %= (EqC tv1 tv2 :)
 
 addRowVarEq :: RowVar -> Map Offset TyVar -> RowExpr ->
-               ConstraintSolvingMonad ()
+               SolverM ()
 addRowVarEq r1 os r2 = field @"ctxEqRowCs" %= (EqRowC r1 os r2 :)
 
 addRowExprEq :: RowExpr -> Map Offset TyVar -> RowExpr ->
-               ConstraintSolvingMonad ()
+               SolverM ()
 addRowExprEq (RowExprVar r1) os r2 = addRowVarEq r1 os r2
 addRowExprEq (RowExprShift o r1) os r2 = do
   r3 <- freshRowVar
@@ -85,43 +85,43 @@ addRowExprEq (RowExprShift o r1) os r2 = do
 --------------------------------------------------------------------------------
 -- Getting constraints
 
-popField :: Lens' ConstraintSolvingState [a] -> ConstraintSolvingMonad (Maybe a)
+popField :: Lens' ConstraintSolvingState [a] -> SolverM (Maybe a)
 popField fld =
   fld %%= \case
     [] -> (Nothing, [])
     (c : cs) -> (Just c, cs)
 
-dequeueEqC :: ConstraintSolvingMonad (Maybe EqC)
+dequeueEqC :: SolverM (Maybe EqC)
 dequeueEqC = popField (field @"ctxEqCs")
 
-dequeueEqRowC :: ConstraintSolvingMonad (Maybe EqRowC)
+dequeueEqRowC :: SolverM (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
 
 --------------------------------------------------------------------------------
 -- Operations over type variable state
 
-freshRowVar :: ConstraintSolvingMonad RowVar
+freshRowVar :: SolverM RowVar
 freshRowVar = RowVar <$> (field @"nextRowVar" <<+= 1)
 
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class.  This also updates the eqv. map to
 -- amortise lookups.
 
-lookupTyVarRep :: TyVar -> ConstraintSolvingMonad TyVar
+lookupTyVarRep :: TyVar -> SolverM TyVar
 lookupTyVarRep tv0 = field @"ctxTyVars" %%= UM.lookupRep tv0
 
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class, and the definition for that type
 -- var, if any.
 
-lookupTyVar :: TyVar -> ConstraintSolvingMonad (TyVar, Maybe ITy')
+lookupTyVar :: TyVar -> SolverM (TyVar, Maybe ITy')
 lookupTyVar tv = field @"ctxTyVars" %%= UM.lookup tv
 
 -- | Always return a new type variable.
-freshTyVar' :: Maybe String -> ConstraintSolvingMonad TyVar
+freshTyVar' :: Maybe String -> SolverM TyVar
 freshTyVar' orig = flip TyVar orig <$> (field @"nextTyVar" <<+= 1)
 
-freshTyVar :: Maybe String -> Maybe ITy -> ConstraintSolvingMonad TyVar
+freshTyVar :: Maybe String -> Maybe ITy -> SolverM TyVar
 freshTyVar orig Nothing = freshTyVar' orig
 freshTyVar _orig (Just (VarTy v)) = pure v -- Don't allocate, just return the equiv. var.
 freshTyVar orig  (Just (ITy ty)) = do
@@ -130,16 +130,16 @@ freshTyVar orig  (Just (ITy ty)) = do
   pure tyv
 
 -- | Always define a type variable, even if it has a def.
-defineTyVar :: TyVar -> ITy' -> ConstraintSolvingMonad ()
+defineTyVar :: TyVar -> ITy' -> SolverM ()
 defineTyVar tyv ty = field @"ctxTyVars" %= UM.insert tyv ty
 
-undefineTyVar :: TyVar -> ConstraintSolvingMonad ()
+undefineTyVar :: TyVar -> SolverM ()
 undefineTyVar ty = field @"ctxTyVars" %= UM.delete ty
 
 -- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes. 
-unsafeUnifyTyVars :: TyVar -> TyVar -> ConstraintSolvingMonad ()
+unsafeUnifyTyVars :: TyVar -> TyVar -> SolverM ()
 unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
 
 --------------------------------------------------------------------------------
@@ -158,7 +158,7 @@ shiftStructuralInformationBy o =
 --   RowVar ->
 --   Map Offset TyVar ->
 --   RowShiftC ->
---   ConstraintSolvingMonad (RowShiftC, Maybe EqC)
+--   SolverM (RowShiftC, Maybe EqC)
 -- substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
 --   | r3 == r1 = do
 --     -- Here we want to replace r1 with {os | r2} in a constraint meaning:

@@ -67,8 +67,8 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   RecoveredModule (..),
                                                   fnBlocks)
 import           Reopt.TypeInference.Constraints.Solving
-  (TyVar, Ty, FTy, varTy, eqTC, ptrTC, ConstraintSolvingMonad
-  , runConstraintSolvingMonad, numTy, unifyConstraints)
+  (TyVar, Ty, FTy, varTy, eqTC, ptrTC, SolverM
+  , runSolverM, numTy, unifyConstraints)
 import qualified Reopt.TypeInference.Constraints.Solving as S
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Control.Monad.Trans (lift)
@@ -338,7 +338,7 @@ makeLenses ''CGenState
 
 newtype CGenM ctx arch a =
   CGenM { _getCGenM :: ReaderT (ctx arch)
-                       (StateT (CGenState arch) ConstraintSolvingMonad) a }
+                       (StateT (CGenState arch) SolverM) a }
   deriving (Functor, Applicative, Monad)
 
 withinContext ::
@@ -347,14 +347,14 @@ withinContext ::
   CGenM outer arch a
 withinContext f (CGenM m) = CGenM (withReaderT f m)
 
-inConstraintSolvingMonad :: ConstraintSolvingMonad a -> CGenM ctxt arch a
-inConstraintSolvingMonad = CGenM . lift . lift
+inSolverM :: SolverM a -> CGenM ctxt arch a
+inSolverM = CGenM . lift . lift
 
 runCGenM :: Memory (ArchAddrWidth arch) ->
             CGenM CGenGlobalContext arch a ->
             a
 runCGenM mem (CGenM m) =
-  runConstraintSolvingMonad (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
+  runSolverM (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
   where
     st0 = CGenState { _assignTyVars  = mempty
                     , _warnings      = mempty
@@ -497,10 +497,10 @@ funTypeAtAddr saddr = do
 -- | Returns a fresh type var.
 freshTyVar :: String -> CGenM ctx arch TyVar
 freshTyVar context =
-  inConstraintSolvingMonad (S.freshTyVar (Just context) Nothing)
+  inSolverM (S.freshTyVar (Just context) Nothing)
 
 emitEq :: Ty -> Ty -> CGenM ctx arch ()
-emitEq t1 t2 = inConstraintSolvingMonad (eqTC t1 t2)
+emitEq t1 t2 = inSolverM (eqTC t1 t2)
 
 -- | Emits an add which may be a pointer add
 emitPtrAddSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
@@ -519,7 +519,7 @@ emitNotPtr ::
   FnArchConstraints arch =>
   Int -> Ty -> CGenM ctx arch ()
 emitNotPtr sz t =
-  inConstraintSolvingMonad (eqTC t (numTy sz))
+  inSolverM (eqTC t (numTy sz))
 
 pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
 pointerWidth Proxy =
@@ -531,7 +531,7 @@ emitPtr ::
   Ty ->
   CGenM ctx arch ()
 emitPtr pointee pointer =
-  inConstraintSolvingMonad (ptrTC pointee pointer)
+  inSolverM (ptrTC pointee pointer)
 
 -- emitStructPtr :: ITy -> ITy -> Integer -> Some TypeRepr -> CGenM ctx arch ()
 -- emitStructPtr tr tp o sz = emitConstraint (CPointerAndOffset tr sz tp o)
@@ -931,7 +931,7 @@ genModuleConstraints m mem = runCGenM mem $ do
   tyVars <- CGenM $ use assignTyVars
   warns <- CGenM $ use warnings
 
-  tyMap <- inConstraintSolvingMonad unifyConstraints
+  tyMap <- inSolverM unifyConstraints
 
   pure ModuleConstraints { mcFunTypes      = addrMap
                          , mcExtFunTypes   = symMap

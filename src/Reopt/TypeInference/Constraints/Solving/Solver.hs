@@ -28,7 +28,7 @@ import Reopt.TypeInference.Constraints.Solving.Constraints
     EqRowC (EqRowC),
   )
 import Reopt.TypeInference.Constraints.Solving.Monad
-  ( ConstraintSolvingMonad,
+  ( SolverM,
     ConstraintSolvingState (..),
     dequeueEqC, dequeueEqRowC, lookupTyVar, unsafeUnifyTyVars, undefineTyVar, addTyVarEq,
   )
@@ -55,7 +55,7 @@ traceUnification = False
 -- variables.
 
 -- FIXME: probably want to export the Eqv map somehow
-unifyConstraints :: ConstraintSolvingMonad (Map TyVar FTy)
+unifyConstraints :: SolverM (Map TyVar FTy)
 unifyConstraints = do
   processAtomicConstraints
   m <- gets ctxTyVars
@@ -92,7 +92,7 @@ finalizeRowVar (PtrTy t)  = PtrTy t
 finalizeRowVar (RecTy flds _) = RecTy flds NoRow
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
-traceContext :: PP.Doc () -> ConstraintSolvingMonad () -> ConstraintSolvingMonad ()
+traceContext :: PP.Doc () -> SolverM () -> SolverM ()
 traceContext description action = do
   tId <- field @"nextTraceId" <<+= 1
   when traceUnification $ do
@@ -113,7 +113,7 @@ traceContext description action = do
             ]
     trace (show msg) (return ())
 
-substEqRowC :: EqRowC -> ConstraintSolvingMonad ()
+substEqRowC :: EqRowC -> SolverM ()
 substEqRowC (EqRowC r1 os r2) = do
   -- The only places that we have row vars are in the tyvar defs, and
   -- in the row eqs.
@@ -128,7 +128,7 @@ substEqRowC (EqRowC r1 os r2) = do
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
-processAtomicConstraints :: ConstraintSolvingMonad ()
+processAtomicConstraints :: SolverM ()
 processAtomicConstraints = traceContext "processAtomicConstraints" $ do
   dequeueEqC >>= \case
     Just c -> unifyTyVars c >> processAtomicConstraints
@@ -139,7 +139,7 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
 
 -- | Unify two type variables, both of which may have definitions, in
 -- which case we unify their definitions as well.
-unifyTyVars :: EqC -> ConstraintSolvingMonad ()
+unifyTyVars :: EqC -> SolverM ()
 unifyTyVars EqC { eqLhs = tv1, eqRhs = tv2 } = do
   (tv1', m_ty1) <- lookupTyVar tv1
   (tv2', m_ty2) <- lookupTyVar tv2
@@ -154,7 +154,7 @@ unifyTyVars EqC { eqLhs = tv1, eqRhs = tv2 } = do
 
 -- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@
 -- named by the type variable @tv@.
-unifyTypes :: TyVar -> ITy' -> ITy' -> ConstraintSolvingMonad ()
+unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM ()
 unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
     (NumTy i, NumTy i')
@@ -183,10 +183,10 @@ unifyTypes tv ty1 ty2 =
 -- (shift a r)[b] = t  --->   r[a - b] = t
 
 -- -- | @decomposeEqC t1 t2@ returns constraints implied from @EqP t1 t2@.
--- decomposeEqC :: EqC -> ConstraintSolvingMonad [TyConstraint]
+-- decomposeEqC :: EqC -> SolverM [TyConstraint]
 -- decomposeEqC (EqC lhs rhs) = go lhs rhs
 --   where
---     go :: ITy -> ITy -> ConstraintSolvingMonad [TyConstraint]
+--     go :: ITy -> ITy -> SolverM [TyConstraint]
 --     go UnknownTy {} _ = pure []
 --     go _ UnknownTy {} = pure []
 --     go (PtrTy t1) (PtrTy t2) = pure [eqTC t1 t2]
