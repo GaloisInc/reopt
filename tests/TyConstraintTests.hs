@@ -17,7 +17,7 @@ import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
 import qualified Prettyprinter as PP
 
-import Reopt.TypeInference.Constraints.Solving
+import Reopt.TypeInference.Solver
   (TyVar,
    --   RowVar(..),
    Ty(..),
@@ -27,8 +27,8 @@ import Reopt.TypeInference.Constraints.Solving
   , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy)
 
 import Data.Foldable (traverse_)
-import Reopt.TypeInference.Constraints.Solving.Monad (freshRowVar)
-import Reopt.TypeInference.Constraints.Solving.RowVariables (Offset, RowVar)
+import Reopt.TypeInference.Solver.Monad (freshRowVar)
+import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy

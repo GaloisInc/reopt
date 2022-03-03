@@ -66,10 +66,10 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FunctionType (..),
                                                   RecoveredModule (..),
                                                   fnBlocks)
-import           Reopt.TypeInference.Constraints.Solving
+import           Reopt.TypeInference.Solver
   (TyVar, Ty, FTy, varTy, eqTC, ptrTC, SolverM
   , runSolverM, numTy, unifyConstraints)
-import qualified Reopt.TypeInference.Constraints.Solving as S
+import qualified Reopt.TypeInference.Solver as S
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Control.Monad.Trans (lift)
 

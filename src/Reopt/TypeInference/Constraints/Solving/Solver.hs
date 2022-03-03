@@ -4,7 +4,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Reopt.TypeInference.Constraints.Solving.Solver
+module Reopt.TypeInference.Solver.Solver
   ( unifyConstraints,
   )
 where
@@ -23,29 +23,29 @@ import Data.Foldable (traverse_)
 import Data.Graph (SCC(..))
 import Data.Graph.SCC (stronglyConnCompR)
 
-import Reopt.TypeInference.Constraints.Solving.Constraints
+import Reopt.TypeInference.Solver.Constraints
   ( EqC (..),
     EqRowC (EqRowC),
   )
-import Reopt.TypeInference.Constraints.Solving.Monad
+import Reopt.TypeInference.Solver.Monad
   ( SolverM,
     ConstraintSolvingState (..),
     dequeueEqC, dequeueEqRowC, lookupTyVar, unsafeUnifyTyVars, undefineTyVar, addTyVarEq,
   )
-import Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution
+import Reopt.TypeInference.Solver.RowVariableSubstitution
   (substRowVarInEqRowC, substRowVarInITy, unifyRecTy)
-import Reopt.TypeInference.Constraints.Solving.RowVariables
+import Reopt.TypeInference.Solver.RowVariables
   ( NoRow (NoRow),    
   )
-import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
-import Reopt.TypeInference.Constraints.Solving.Types
+import Reopt.TypeInference.Solver.TypeVariables (TyVar)
+import Reopt.TypeInference.Solver.Types
   ( FreeTyVars (freeTyVars),
     TyF (..),
     FTy (..),
     ITy'
   )
-import Reopt.TypeInference.Constraints.Solving.UnionFindMap (UnionFindMap)
-import qualified Reopt.TypeInference.Constraints.Solving.UnionFindMap as UM
+import Reopt.TypeInference.Solver.UnionFindMap (UnionFindMap)
+import qualified Reopt.TypeInference.Solver.UnionFindMap as UM
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool

@@ -5,7 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Reopt.TypeInference.Constraints.Solving.UnionFindMap where
+module Reopt.TypeInference.Solver.UnionFindMap where
 
 import           Control.Lens          (at, (%%~), (%~), (?~))
 import           Data.Generics.Product (field)

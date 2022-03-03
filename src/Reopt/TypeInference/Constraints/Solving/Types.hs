@@ -7,19 +7,19 @@
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveTraversable #-}
 
-module Reopt.TypeInference.Constraints.Solving.Types where
+module Reopt.TypeInference.Solver.Types where
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Prettyprinter as PP
-import Reopt.TypeInference.Constraints.Solving.RowVariables
+import Reopt.TypeInference.Solver.RowVariables
   ( NoRow (NoRow),
     RowExpr (RowExprShift, RowExprVar),
     RowVar, Offset,
   )
-import Reopt.TypeInference.Constraints.Solving.TypeVariables
+import Reopt.TypeInference.Solver.TypeVariables
   ( TyVar,
   )
 import qualified Text.LLVM as L

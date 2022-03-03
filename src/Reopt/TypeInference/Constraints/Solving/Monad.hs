@@ -19,14 +19,14 @@ import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
 import           GHC.Generics                                          (Generic)
 import qualified Prettyprinter                                         as PP
-import           Reopt.TypeInference.Constraints.Solving.Constraints   (EqC (EqC),
+import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
                                                                         EqRowC (EqRowC),)
-import           Reopt.TypeInference.Constraints.Solving.RowVariables  (RowVar (RowVar), Offset (Offset), RowExpr (RowExprVar, RowExprShift), rowVar)
-import           Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar (TyVar))
-import           Reopt.TypeInference.Constraints.Solving.Types         (ITy (..),
+import           Reopt.TypeInference.Solver.RowVariables  (RowVar (RowVar), Offset (Offset), RowExpr (RowExprVar, RowExprShift), rowVar)
+import           Reopt.TypeInference.Solver.TypeVariables (TyVar (TyVar))
+import           Reopt.TypeInference.Solver.Types         (ITy (..),
                                                                         ITy', prettyMap)
 
-import Reopt.TypeInference.Constraints.Solving.UnionFindMap as UM
+import Reopt.TypeInference.Solver.UnionFindMap as UM
 
 import Data.Bifunctor (first)
 

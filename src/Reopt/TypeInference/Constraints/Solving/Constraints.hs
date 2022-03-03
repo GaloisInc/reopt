@@ -3,18 +3,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Reopt.TypeInference.Constraints.Solving.Constraints where
+module Reopt.TypeInference.Solver.Constraints where
 
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import qualified Prettyprinter as PP
-import Reopt.TypeInference.Constraints.Solving.RowVariables (RowExpr, Offset, RowVar)
-import Reopt.TypeInference.Constraints.Solving.Types
+import Reopt.TypeInference.Solver.RowVariables (RowExpr, Offset, RowVar)
+import Reopt.TypeInference.Solver.Types
   ( FreeRowVars (..),
     FreeTyVars (..),
     prettyRow,
   )
-import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
+import Reopt.TypeInference.Solver.TypeVariables (TyVar)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
 data EqC = EqC {eqLhs :: TyVar, eqRhs :: TyVar}

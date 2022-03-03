@@ -12,7 +12,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Reopt.TypeInference.Constraints.Solving.TypeVariables
+module Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (TyVar),
   )
 where

@@ -12,26 +12,26 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution where
+module Reopt.TypeInference.Solver.RowVariableSubstitution where
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Reopt.TypeInference.Constraints.Solving.Constraints
+import Reopt.TypeInference.Solver.Constraints
   ( EqRowC (EqRowC),
   )
-import Reopt.TypeInference.Constraints.Solving.Monad
+import Reopt.TypeInference.Solver.Monad
   ( SolverM,
     shiftOffsets, addTyVarEq, addRowVarEq, freshRowVar, addRowExprEq
   )
-import Reopt.TypeInference.Constraints.Solving.RowVariables
+import Reopt.TypeInference.Solver.RowVariables
   ( RowExpr,
     RowVar,
     rowExprVar, rowExprShift, Offset, rowVar, shiftRowExpr
   )
-import Reopt.TypeInference.Constraints.Solving.Types
+import Reopt.TypeInference.Solver.Types
   ( TyF (..), ITy'
   )
-import Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar)
+import Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import Data.Foldable (sequenceA_)
 
 substRowVarInITy :: RowVar -> Map Offset TyVar -> RowExpr -> ITy' ->

@@ -2,7 +2,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Reopt.TypeInference.Constraints.Solving.RowVariables where
+module Reopt.TypeInference.Solver.RowVariables where
 
 import qualified Prettyprinter as PP
 

@@ -1,6 +1,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 
-module Reopt.TypeInference.Constraints.Solving
+module Reopt.TypeInference.Solver
   ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
     SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, 
@@ -14,21 +14,21 @@ module Reopt.TypeInference.Constraints.Solving
 import           Data.Map.Strict                                       (Map)
 import qualified Data.Map.Strict                                       as Map
 
-import Reopt.TypeInference.Constraints.Solving.RowVariables
+import Reopt.TypeInference.Solver.RowVariables
   ( RowExpr (RowExprVar), RowVar(..), Offset, NoRow (NoRow)
   )
-import Reopt.TypeInference.Constraints.Solving.Solver
+import Reopt.TypeInference.Solver.Solver
   ( unifyConstraints,
   )
-import Reopt.TypeInference.Constraints.Solving.TypeVariables
+import Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (..),
   )
-import Reopt.TypeInference.Constraints.Solving.Types
+import Reopt.TypeInference.Solver.Types
   ( ITy(..),
     TyF(..),
     FTy(..), tyToLLVMType
   )
-import Reopt.TypeInference.Constraints.Solving.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar)
+import Reopt.TypeInference.Solver.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar)
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
