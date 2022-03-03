@@ -9,43 +9,44 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import Control.Lens ((<<+=), (<<.=), (.=))
-import Control.Monad (when)
-import Control.Monad.State (MonadState (get), gets)
-import Data.Generics.Product (field)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
-import Debug.Trace (trace)
-import qualified Prettyprinter as PP
-import Data.Foldable (traverse_)
+import           Control.Lens                                       ((.=),
+                                                                     (<<+=),
+                                                                     (<<.=))
+import           Control.Monad                                      (when)
+import           Control.Monad.State                                (MonadState (get),
+                                                                     gets)
+import           Data.Foldable                                      (traverse_)
+import           Data.Generics.Product                              (field)
+import           Data.Map.Strict                                    (Map)
+import qualified Data.Map.Strict                                    as Map
+import qualified Data.Set                                           as Set
+import           Debug.Trace                                        (trace)
+import qualified Prettyprinter                                      as PP
 
-import Data.Graph (SCC(..))
-import Data.Graph.SCC (stronglyConnCompR)
+import           Data.Graph                                         (SCC (..))
+import           Data.Graph.SCC                                     (stronglyConnCompR)
 
-import Reopt.TypeInference.Solver.Constraints
-  ( EqC (..),
-    EqRowC (EqRowC),
-  )
-import Reopt.TypeInference.Solver.Monad
-  ( SolverM,
-    ConstraintSolvingState (..),
-    dequeueEqC, dequeueEqRowC, lookupTyVar, unsafeUnifyTyVars, undefineTyVar, addTyVarEq,
-  )
-import Reopt.TypeInference.Solver.RowVariableSubstitution
-  (substRowVarInEqRowC, substRowVarInITy, unifyRecTy)
-import Reopt.TypeInference.Solver.RowVariables
-  ( NoRow (NoRow),    
-  )
-import Reopt.TypeInference.Solver.TypeVariables (TyVar)
-import Reopt.TypeInference.Solver.Types
-  ( FreeTyVars (freeTyVars),
-    TyF (..),
-    FTy (..),
-    ITy'
-  )
-import Reopt.TypeInference.Solver.UnionFindMap (UnionFindMap)
-import qualified Reopt.TypeInference.Solver.UnionFindMap as UM
+import           Reopt.TypeInference.Solver.Constraints             (EqC (..),
+                                                                     EqRowC (EqRowC))
+import           Reopt.TypeInference.Solver.Monad                   (ConstraintSolvingState (..),
+                                                                     SolverM,
+                                                                     addTyVarEq,
+                                                                     dequeueEqC,
+                                                                     dequeueEqRowC,
+                                                                     lookupTyVar,
+                                                                     undefineTyVar,
+                                                                     unsafeUnifyTyVars)
+import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVarInEqRowC,
+                                                                     substRowVarInITy,
+                                                                     unifyRecTy)
+import           Reopt.TypeInference.Solver.RowVariables            (NoRow (NoRow))
+import           Reopt.TypeInference.Solver.TypeVariables           (TyVar)
+import           Reopt.TypeInference.Solver.Types                   (FTy (..),
+                                                                     FreeTyVars (freeTyVars),
+                                                                     ITy',
+                                                                     TyF (..))
+import           Reopt.TypeInference.Solver.UnionFindMap            (UnionFindMap)
+import qualified Reopt.TypeInference.Solver.UnionFindMap            as UM
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool

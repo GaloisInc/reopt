@@ -3,26 +3,23 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.Types where
 
-import Data.Map.Strict (Map)
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
-import qualified Prettyprinter as PP
-import Reopt.TypeInference.Solver.RowVariables
-  ( NoRow (NoRow),
-    RowExpr (RowExprShift, RowExprVar),
-    RowVar, Offset,
-  )
-import Reopt.TypeInference.Solver.TypeVariables
-  ( TyVar,
-  )
-import qualified Text.LLVM as L
+import           Data.Set        (Set)
+import qualified Data.Set        as Set
+import qualified Prettyprinter   as PP
+import qualified Text.LLVM                                as L
+
+import           Reopt.TypeInference.Solver.RowVariables  (NoRow (NoRow),
+                                                           Offset,
+                                                           RowExpr (RowExprShift, RowExprVar),
+                                                           RowVar)
+import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
+
 
 data TyF rvar f
   = -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
