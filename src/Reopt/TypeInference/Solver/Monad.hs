@@ -6,7 +6,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Reopt.TypeInference.Constraints.Solving.Monad where
+module Reopt.TypeInference.Solver.Monad where
 
 import           Control.Lens                                          (Lens',
                                                                         uses,
