@@ -75,6 +75,7 @@ library
     Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution
     Reopt.TypeInference.Constraints.Solving.TypeVariables
     Reopt.TypeInference.Constraints.Solving.Types
+    Reopt.TypeInference.Constraints.Solving.UnionFindMap    
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
     Reopt.TypeInference.Pretty

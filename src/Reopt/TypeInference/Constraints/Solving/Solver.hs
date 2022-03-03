@@ -44,11 +44,12 @@ import Reopt.TypeInference.Constraints.Solving.Types
     FTy (..),
     ITy'
   )
-
+import Reopt.TypeInference.Constraints.Solving.UnionFindMap (UnionFindMap)
+import qualified Reopt.TypeInference.Constraints.Solving.UnionFindMap as UM
 
 -- | Set to @True@ to enable tracing in unification
 traceUnification :: Bool
-traceUnification = True
+traceUnification = False
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -57,26 +58,33 @@ traceUnification = True
 unifyConstraints :: ConstraintSolvingMonad (Map TyVar FTy)
 unifyConstraints = do
   processAtomicConstraints
-  m <- gets ctxTyVarDefs 
+  m <- gets ctxTyVars
   pure (finalizeTypeDefs m)
 
-finalizeTypeDefs :: Map TyVar ITy' -> Map TyVar FTy
-finalizeTypeDefs m = res
+-- FIXME: this breaks the abstraction of the UnionFindMap.
+finalizeTypeDefs :: UnionFindMap TyVar ITy' -> Map TyVar FTy
+finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
+  Map.union eqvRes defRes -- Maps should be disjoint
   where
-    -- We use this in it's definition, but this is OK as we check for
-    -- cycles via the SCC checks below.  We could also just fold the
-    -- intermediate result through goSCC
-    res = Map.fromList (map goSCC sccs)
-    resolveOne t = Map.findWithDefault UnknownTy t res
+    -- Include equivalences.
+    eqvRes = Map.fromSet mkOneEqv (Map.keysSet eqvs)
+    mkOneEqv k =
+      let (k', _) = UM.lookupRep k um
+      in resolveOne defRes k'
     
-    goSCC (AcyclicSCC (ty, tv, _)) = (tv, FTy $ resolveOne <$> ty)
-    goSCC (CyclicSCC _ ) = error "FIXME: cycles detected"
+    defRes = foldl goSCC mempty sccs
+    resolveOne m t = Map.findWithDefault UnknownTy t m
+    
+    goSCC m  (AcyclicSCC (ty, tv, _)) = Map.insert tv (FTy $ resolveOne m <$> ty) m
+    goSCC _m (CyclicSCC _ ) = error "FIXME: cycles detected"
 
     sccs :: [ SCC (TyF NoRow TyVar, TyVar, [TyVar]) ]
     sccs  = stronglyConnCompR nodes
+
+    normTyVar t = fst (UM.lookupRep t um)
     
     nodes = [ (finalizeRowVar ty, tv, Set.toList (freeTyVars ty))
-            | (tv, ty) <- Map.toList m ]
+            | (tv, ty) <- Map.toList (fmap normTyVar <$> defs) ]
     
 finalizeRowVar :: TyF r f -> TyF NoRow f
 finalizeRowVar (NumTy sz) = NumTy sz
@@ -110,9 +118,9 @@ substEqRowC (EqRowC r1 os r2) = do
   -- The only places that we have row vars are in the tyvar defs, and
   -- in the row eqs.
   
-  defs  <- field @"ctxTyVarDefs" <<.= mempty -- get defs and clear them
+  defs  <- field @"ctxTyVars" <<.= UM.empty -- get defs and clear them
   defs' <- traverse (substRowVarInITy r1 os r2) defs
-  field @"ctxTyVarDefs" .= defs'
+  field @"ctxTyVars" .= defs'
 
   rEqs  <- field @"ctxEqRowCs" <<.= mempty -- get row eqs and clear them
   -- This will add back any we still need

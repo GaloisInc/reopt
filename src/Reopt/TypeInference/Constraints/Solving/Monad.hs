@@ -24,31 +24,24 @@ import           Reopt.TypeInference.Constraints.Solving.Constraints   (EqC (EqC
 import           Reopt.TypeInference.Constraints.Solving.RowVariables  (RowVar (RowVar), Offset (Offset), RowExpr (RowExprVar, RowExprShift), rowVar)
 import           Reopt.TypeInference.Constraints.Solving.TypeVariables (TyVar (TyVar))
 import           Reopt.TypeInference.Constraints.Solving.Types         (ITy (..),
-                                                                        ITy')
-import Data.Bifunctor (first)
+                                                                        ITy', prettyMap)
 
-class Monad m => CanFreshRowVar m where
-  freshRowVar :: m RowVar
+import Reopt.TypeInference.Constraints.Solving.UnionFindMap as UM
+
+import Data.Bifunctor (first)
 
 data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs    :: [EqC],
     ctxEqRowCs :: [EqRowC],
-    
+
     nextTraceId :: Int,
     nextRowVar :: Int,
     nextTyVar  :: Int,
-    
+
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
 
-    -- FIXME (perf): replace by a mutable array of unboxed ints, or at
-    -- least IntMap
-    ctxTyVarEqv :: Map TyVar TyVar,
-    -- | Known type for type variables.  Note that a variable is never
-    -- defined as another variable, that is what ctxTyVarEqv is for.
-    -- Invariant: every root in @ctxTyVarEqv@ has a mapping here, and
-    -- just those roots.
-    ctxTyVarDefs :: Map TyVar ITy'
+    ctxTyVars :: UnionFindMap TyVar ITy'
   }
   deriving (Eq, Generic, Ord, Show)
 
@@ -59,17 +52,13 @@ emptyContext = ConstraintSolvingState
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
-  , ctxTyVarEqv    = mempty
-  , ctxTyVarDefs   = mempty
+  , ctxTyVars      = empty
   }
 
 newtype ConstraintSolvingMonad a = ConstraintSolvingMonad
   { getConstraintSolvingMonad :: State ConstraintSolvingState a
   }
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
-
-instance CanFreshRowVar ConstraintSolvingMonad where
-  freshRowVar = ConstraintSolvingMonad $ RowVar <$> (field @"nextRowVar" <<+= 1)
 
 runConstraintSolvingMonad :: ConstraintSolvingMonad a -> a
 runConstraintSolvingMonad = flip evalState emptyContext . getConstraintSolvingMonad
@@ -92,7 +81,7 @@ addRowExprEq (RowExprShift o r1) os r2 = do
   -- This terminates as eventually we will hit the above with r3
   addRowExprEq r2 mempty (rowVar r3)
   addRowVarEq r1 (shiftOffsets (- o) os) (rowVar r3)
-  
+
 --------------------------------------------------------------------------------
 -- Getting constraints
 
@@ -111,35 +100,27 @@ dequeueEqRowC = popField (field @"ctxEqRowCs")
 --------------------------------------------------------------------------------
 -- Operations over type variable state
 
+freshRowVar :: ConstraintSolvingMonad RowVar
+freshRowVar = RowVar <$> (field @"nextRowVar" <<+= 1)
+
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class.  This also updates the eqv. map to
 -- amortise lookups.
 
 lookupTyVarRep :: TyVar -> ConstraintSolvingMonad TyVar
-lookupTyVarRep tv0 = field @"ctxTyVarEqv" %%= go tv0
-  where
-    go :: TyVar -> Map TyVar TyVar -> (TyVar, Map TyVar TyVar)
-    go tv m =
-      case Map.lookup tv m of
-        Nothing  -> (tv, m)
-        Just tv' ->
-          let (tv'', m') = go tv' m
-          in (tv'', Map.insert tv tv'' m') -- short circuit next lookup.
+lookupTyVarRep tv0 = field @"ctxTyVars" %%= UM.lookupRep tv0
 
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class, and the definition for that type
 -- var, if any.
 
 lookupTyVar :: TyVar -> ConstraintSolvingMonad (TyVar, Maybe ITy')
-lookupTyVar tv = do
-  tv' <- lookupTyVarRep tv
-  def <- uses (field @"ctxTyVarDefs") (Map.lookup tv')
-  pure (tv', def)
+lookupTyVar tv = field @"ctxTyVars" %%= UM.lookup tv
 
 -- | Always return a new type variable.
 freshTyVar' :: Maybe String -> ConstraintSolvingMonad TyVar
 freshTyVar' orig = flip TyVar orig <$> (field @"nextTyVar" <<+= 1)
-  
+
 freshTyVar :: Maybe String -> Maybe ITy -> ConstraintSolvingMonad TyVar
 freshTyVar orig Nothing = freshTyVar' orig
 freshTyVar _orig (Just (VarTy v)) = pure v -- Don't allocate, just return the equiv. var.
@@ -150,16 +131,16 @@ freshTyVar orig  (Just (ITy ty)) = do
 
 -- | Always define a type variable, even if it has a def.
 defineTyVar :: TyVar -> ITy' -> ConstraintSolvingMonad ()
-defineTyVar tyv ty = field @"ctxTyVarDefs" %= Map.insert tyv ty
+defineTyVar tyv ty = field @"ctxTyVars" %= UM.insert tyv ty
 
 undefineTyVar :: TyVar -> ConstraintSolvingMonad ()
-undefineTyVar ty = field @"ctxTyVarDefs" %= Map.delete ty
+undefineTyVar ty = field @"ctxTyVars" %= UM.delete ty
 
 -- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes. 
 unsafeUnifyTyVars :: TyVar -> TyVar -> ConstraintSolvingMonad ()
-unsafeUnifyTyVars root leaf = field @"ctxTyVarEqv" %= Map.insert leaf root
+unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
 
 --------------------------------------------------------------------------------
 -- Other stuff
@@ -205,24 +186,13 @@ shiftStructuralInformationBy o =
 -- Instances
 
 instance PP.Pretty ConstraintSolvingState where
-  pretty _ctx = "FIXME"
-    -- let row title entries = title PP.<+> PP.list entries
-    --  in PP.vsep
-    --       [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
-    --         row "InRowCs" $ map PP.pretty $ ctxInRowCs ctx,
-    --         row "RowShiftCs" $ map PP.pretty $ ctxRowShiftCs ctx,
-    --         row "OrCs" $ map PP.pretty $ ctxOrCs ctx,
-    --         row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
-    --         row "Absurd EqCs" $ map PP.pretty $ ctxAbsurdEqCs ctx,
-    --         row "Occurs check failures" $ map PP.pretty $ ctxOccursCheckFailures ctx,
-    --         row "Type Var Map" $ prettyMap PP.pretty PP.pretty $ ctxTyVarMap ctx,
-    --         row "Row Shift Map" $
-    --           let prettySMap (r, sSet) = map (\(o, r') -> PP.pretty (RowShiftC r o r')) $ Set.toList sSet
-    --            in concatMap prettySMap $ Map.toList $ ctxRowShiftMap ctx,
-    --         row "TyVar Equivalences" $
-    --           let pp (ty, ty') = PP.pretty ty PP.<+> "=" PP.<+> PP.pretty ty'
-    --           in map pp $ Map.toList $ ctxTyVarEqv ctx
-    --       ]
+  pretty ctx =
+    let row title entries = title PP.<+> PP.list entries
+     in PP.vsep
+          [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
+            row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
+            row "Type Var Map" [PP.pretty (ctxTyVars ctx)]
+          ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
 shiftOffsets 0 = id
