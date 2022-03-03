@@ -23,7 +23,12 @@ import Reopt.TypeInference.Constraints.Solving
    Ty(..),
    Ty, FTy,
    unifyConstraints,
-   eqTC, ConstraintSolvingMonad, runConstraintSolvingMonad, pattern FNumTy, freshTyVar, numTy, varTy)
+   eqTC, ConstraintSolvingMonad, runConstraintSolvingMonad, freshTyVar, numTy, varTy
+  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy)
+
+import Data.Foldable (traverse_)
+import Reopt.TypeInference.Constraints.Solving.Monad (freshRowVar)
+import Reopt.TypeInference.Constraints.Solving.RowVariables (Offset, RowVar)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
@@ -62,92 +67,153 @@ fnum64 = FNumTy 64
 tv :: ConstraintSolvingMonad TyVar
 tv = freshTyVar Nothing Nothing
 
+tvEq :: TyVar -> TyVar -> ConstraintSolvingMonad ()
+tvEq v v' = eqTC (varTy v) (varTy v')
+
+
+tvEqs :: [(TyVar, TyVar)] -> ConstraintSolvingMonad ()
+tvEqs = traverse_ (uncurry tvEq)
+
+recTy :: [(Offset, Ty)] -> RowVar -> Ty
+recTy os rv = structTy (Map.fromList os) rv
+
+frecTy :: [(Offset, FTy)] -> FTy
+frecTy os = FRecTy (Map.fromList os) 
+
 -- Simple tests having to do with equality constraints
 eqCTests :: T.TestTree
 eqCTests = T.testGroup "Equality Constraint Tests"
   [ mkTest "Single eqTC var left"  (do { x0 <- tv; eqTC (varTy x0) num64; pure [(x0, fnum64)] })
-    -- mkTest "Single eqTC var right" [eqTC num64 x0Ty] [(x0, num64)],
-    -- mkTest "Multiple eqTCs" [eqTC x0Ty num64, eqTC x1Ty (PtrTy num64)]
-    --                         [(x0, num64), (x1, PtrTy num64)],
-    -- mkTest "eqTC simple transitivity 1"
-    --  [eqTC x0Ty x1Ty, eqTC x1Ty num64]
-    --  [(x0, num64), (x1, num64)],
-    -- mkTest "eqTC simple Transitivity 2"
-    --  [eqTC x1Ty num64, eqTC x0Ty x1Ty]
-    --  [(x0, num64), (x1, num64)],
-    -- mkTest "eqTC simple transitivity 3"
-    --  [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64]
-    --  [(x0, num64), (x1, num64), (x2, num64)],
-    -- mkTest "eqTC with pointers 1"
-    --   [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64, eqTC x3Ty (PtrTy x0Ty)]
-    --   [(x0, num64), (x1, num64), (x2, num64), (x3, PtrTy num64)],
-    -- mkTest "eqTC with pointers 2"
-    --   [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x2Ty num64, eqTC x3Ty num64, eqTC x4Ty (PtrTy x3Ty)]
-    --   [(x0, num64), (x1, PtrTy num64), (x2, num64), (x3, num64), (x4, PtrTy num64)],
-    -- mkTest "eqTC with pointers 3"
-    --   [eqTC x0Ty x2Ty, eqTC x1Ty (PtrTy x2Ty), eqTC x3Ty num64, eqTC x4Ty (PtrTy x3Ty)]
-    --   [(x0, unknownTy), (x1, PtrTy unknownTy), (x2, unknownTy), (x3, num64), (x4, PtrTy num64)],
-    -- mkTest "eqTC with records 1"
-    --   [eqTC x1Ty x2Ty, eqTC x0Ty x1Ty, eqTC x2Ty num64, eqTC x3Ty (iRecTy [(0, x0Ty)] r0)]
-    --   [(x0, num64), (x1, num64), (x2, num64), (x3, fRecTy [(0, num64)])],
-    -- mkTest "eqTC with records 2"
-    --   [eqTC x1Ty x2Ty, eqTC x0Ty (PtrTy x1Ty), eqTC x2Ty num64, eqTC x3Ty (iRecTy [(0, x0Ty), (8, x1Ty)] r0)]
-    --   [(x0, PtrTy num64), (x1, num64), (x2, num64), (x3, fRecTy [(0, PtrTy num64), (8, num64)])],
-    --    -- These next tests check that record constraints are unified properly
-    --    -- during constraint solving when there are possible unknown other fields
-    --    -- (i.e., the row variables). This arises when we want to combine
-    --    -- different atomic facts describing offsets from a single memory
-    --    -- location. E.g., if we separately learn (1) at `p` there is a `num` and
-    --    -- (2) at `p+8` there is an `ptr(num)`, these statements about `p` can be
-    --    -- described via the following two atomic constraints: `p = {0 : num|ρ}`
-    --    -- and `p = {8 : ptr(num)|ρ'}`. Our unification should then combine these
-    --    -- constraints on `p` into `p = {0 : num, 8 : ptr(num)}`.
-    -- mkTest "eqTC with records+rows 1"
-    --   [eqTC x0Ty (iRecTy [(0, num64)] r0),
-    --    eqTC x0Ty (iRecTy [(8, PtrTy num64)] r1)]
-    --   [(x0, fRecTy [(0, num64), (8, PtrTy num64)])],
-    -- mkTest "eqTC with records+rows 2"
-    --   [eqTC x0Ty (iRecTy [(0, num64)] r0),
-    --    eqTC x0Ty (iRecTy [(8, PtrTy num64)] r1),
-    --    eqTC x1Ty (iRecTy [] r0),
-    --    eqTC x2Ty (iRecTy [] r1)]
-    --   [(x0, fRecTy [(0, num64), (8, PtrTy num64)]),
-    --    (x1, fRecTy [(8, PtrTy num64)]),
-    --    (x2, fRecTy [(0, num64)])],
-    -- mkTest "eqTC with records+rows 3"
-    --   [eqTC x0Ty (iRecTy [(0, num64), (8, PtrTy x1Ty)] r0),
-    --    eqTC x0Ty (iRecTy [(8, PtrTy num64), (16, num64)] r1),
-    --    eqTC x2Ty (iRecTy [] r0),
-    --    eqTC x3Ty (iRecTy [] r1)]
-    --   [(x0, fRecTy [(0, num64), (8, PtrTy num64), (16, num64)]),
-    --    (x1, num64),
-    --    (x2, fRecTy [(16, num64)]),
-    --    (x3, fRecTy [(0, num64)])]
+  , mkTest "Single eqTC var right" (do { x0 <- tv; eqTC num64 (varTy x0); pure [(x0, fnum64)] })
+  , mkTest "Multiple eqTCs" $ do
+      x0 <- tv
+      x1 <- tv
+      eqTC (varTy x0) num64
+      eqTC (varTy x1) (ptrTy num64)
+      pure [(x0, fnum64), (x1, FPtrTy fnum64)]
+  
+  , mkTest "eqTC simple transitivity 1" $ do
+      x0 <- tv
+      x1 <- tv
+      tvEq x0 x1
+      eqTC (varTy x1) num64
+      pure [(x0, fnum64), (x1, fnum64)]
+      
+  ,  mkTest "eqTC simple Transitivity 2" $ do
+      x0 <- tv
+      x1 <- tv
+      eqTC (varTy x1) num64
+      tvEq x0 x1
+      pure [(x0, fnum64), (x1, fnum64)]
+
+  , mkTest "eqTC simple transitivity 3" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      tvEqs [(x1, x2), (x0, x1)]
+      eqTC (varTy x2) num64
+      pure [(x0, fnum64), (x1, fnum64), (x2, fnum64)]
+      
+  , mkTest "eqTC with pointers 1" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      tvEqs [(x1, x2), (x0, x1) ]
+      eqTC (varTy x2) num64
+      eqTC (varTy x3) (ptrTy num64)
+      pure [(x0, fnum64), (x1, fnum64), (x2, fnum64), (x3, FPtrTy fnum64)]
+      
+  , mkTest "eqTC with pointers 2" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv; x4 <- tv
+      tvEqs [(x0, x2)]
+      eqTC (varTy x1) (ptrTy (varTy x2))
+      eqTC (varTy x2) num64
+      eqTC (varTy x3) num64
+      eqTC (varTy x4) (ptrTy (varTy x3))
+      
+      pure [(x0, fnum64), (x1, FPtrTy fnum64), (x2, fnum64), (x3, fnum64), (x4, FPtrTy fnum64)]
+
+  , mkTest "eqTC with pointers 3" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv; x4 <- tv
+      tvEqs [(x0, x2)]
+      eqTC (varTy x1) (ptrTy (varTy x2))
+      eqTC (varTy x3) num64
+      eqTC (varTy x4) (ptrTy (varTy x3))
+
+      pure [(x0, FUnknownTy), (x1, FPtrTy FUnknownTy), (x2, FUnknownTy), (x3, fnum64), (x4, FPtrTy fnum64)]
+
+  , mkTest "eqTC with records 1" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      tvEqs [ (x1, x2), (x0, x1) ]
+      eqTC (varTy x2) num64
+      r0 <- freshRowVar
+      eqTC (varTy x3) (structTy (Map.singleton 0 (varTy x0)) r0)
+      pure [(x0, fnum64), (x1, fnum64), (x2, fnum64), (x3, frecTy [(0, fnum64)])]
+  
+  , mkTest "eqTC with records 2" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      tvEqs [ (x1, x2) ]
+      eqTC (varTy x0) (ptrTy (varTy x1))
+      eqTC (varTy x2) num64
+      r0 <- freshRowVar
+      eqTC (varTy x3) (recTy [(0, varTy x0), (8, varTy x1)] r0)
+      
+      pure [ (x0, FPtrTy fnum64), (x1, fnum64), (x2, fnum64)
+           , (x3, frecTy [(0, FPtrTy fnum64), (8, fnum64)])
+           ]
+        
+       -- These next tests check that record constraints are unified properly
+       -- during constraint solving when there are possible unknown other fields
+       -- (i.e., the row variables). This arises when we want to combine
+       -- different atomic facts describing offsets from a single memory
+       -- location. E.g., if we separately learn (1) at `p` there is a `num` and
+       -- (2) at `p+8` there is an `ptr(num)`, these statements about `p` can be
+       -- described via the following two atomic constraints: `p = {0 : num|ρ}`
+       -- and `p = {8 : ptr(num)|ρ'}`. Our unification should then combine these
+       -- constraints on `p` into `p = {0 : num, 8 : ptr(num)}`.
+        
+  , mkTest "eqTC with records+rows 1" $ do
+      x0 <- tv
+      let x0Ty = varTy x0
+      r0 <- freshRowVar
+      r1 <- freshRowVar
+      eqTC x0Ty (recTy [(0, num64)] r0)     
+      eqTC x0Ty (recTy [(8, ptrTy num64)] r1)
+      pure [(x0, frecTy [(0, fnum64), (8, FPtrTy fnum64)])]
+      
+  , mkTest "eqTC with records+rows 2" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          
+      r0 <- freshRowVar      
+      r1 <- freshRowVar
+    
+      eqTC x0Ty (recTy [(0, num64)] r0)
+      eqTC x0Ty (recTy [(8, ptrTy num64)] r1)
+      eqTC x1Ty (recTy mempty r0)
+      eqTC x2Ty (recTy mempty r1)
+      pure [ (x0, frecTy [(0, fnum64), (8, FPtrTy fnum64)])
+           , (x1, frecTy [(8, FPtrTy fnum64)])
+           , (x2, frecTy [(0, fnum64)])
+           ]
+  , mkTest "eqTC with records+rows 3" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          x3Ty = varTy x3
+          
+      r0 <- freshRowVar      
+      r1 <- freshRowVar
+      
+      eqTC x0Ty (recTy [(0, num64), (8, ptrTy x1Ty)] r0)
+      eqTC x0Ty (recTy [(8, ptrTy num64), (16, num64)] r1)
+      eqTC x2Ty (recTy mempty r0)
+      eqTC x3Ty (recTy mempty r1)
+      pure [ (x0, frecTy [(0, fnum64), (8, FPtrTy fnum64), (16, fnum64)])
+            , (x1, fnum64)
+            , (x2, frecTy [(16, fnum64)])
+            , (x3, frecTy [(0, fnum64)])]
 
   ]
-
-
--- -- | Some (basic?) tests focusing on disjunctions.
--- orCTests :: T.TestTree
--- orCTests = T.testGroup "Disjunctive Constraint Tests"
---   [ mkTest "NumTy/PtrTy or-resolution"
---       [ orTC [andTC [eqTC x0Ty num64, eqTC x1Ty (PtrTy num64)],
---               andTC [eqTC x1Ty num64, eqTC x0Ty (PtrTy num64)]],
---         eqTC x0Ty num64]
---       [(x0, num64),
---        (x1, PtrTy num64)],
---     mkTest "PtrTy target or-resolution"
---       [ orTC [andTC [eqTC x0Ty (PtrTy x3Ty), eqTC x1Ty (PtrTy x4Ty)],
---               andTC [eqTC x0Ty (PtrTy x4Ty), eqTC x1Ty (PtrTy x3Ty)]],
---         eqTC x3Ty num64,
---         eqTC x4Ty (PtrTy num64),
---         eqTC x0Ty (PtrTy num64)]
---       [(x0, PtrTy num64),
---        (x1, PtrTy (PtrTy num64)),
---        (x3, num64),
---        (x4, PtrTy num64)]
-
---   ]
 
 
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
@@ -163,6 +229,8 @@ mkTest :: String -> ConstraintSolvingMonad [(TyVar, FTy)] -> T.TestTree
 mkTest name m = T.testCase name (runConstraintSolvingMonad test)
   where
     test = do
-      expected <- Map.fromList <$> m
-      actual   <- unifyConstraints
-      pure (Map.intersection actual expected T.@?= expected)
+      expected <- m
+      res      <- unifyConstraints
+      let actual = [ (k, Map.findWithDefault FUnknownTy k res)
+                   | (k, _) <- expected ]
+      pure (actual T.@?= expected)

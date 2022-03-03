@@ -1,9 +1,9 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 module Reopt.TypeInference.Constraints.Solving
-  ( Ty (..), TyVar, numTy, ptrTy, varTy, -- structTy,
+  ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
     ConstraintSolvingMonad, runConstraintSolvingMonad,
-    eqTC, ptrTC, freshTyVar,
+    eqTC, ptrTC, freshTyVar, 
     unifyConstraints,
     tyToLLVMType,
     -- FTy stuff
