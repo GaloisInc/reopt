@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
 
@@ -49,7 +50,7 @@ instance FreeRowVars EqRowC where
 -- -- Pointer addition (maybe, could be number add)
 
 -- | What sort of constant operand we are dealing with for an
--- addition.  
+-- addition.
 data OperandClass =
   OCSymbolic   -- ^ The second operand is not a constant
   | OCOffset Offset -- ^ The second operand is a small constant, we
@@ -75,7 +76,7 @@ instance FreeTyVars OperandClass where
 --   , ptrAddRHS    :: TyVar
 --   , ptrAddClass  :: OperandClass
 --   -- ^ If an operand is a constant then this is that constant.
---   } 
+--   }
 --   deriving (Eq, Ord, Show)
 
 -- instance PP.Pretty PtrAddC where
@@ -87,3 +88,21 @@ instance FreeTyVars OperandClass where
 
 -- instance FreeRowVars PtrAddC where
 --   freeRowVars PtrAddC {} = mempty
+
+data SubTypeC = SubTypeC TyVar TyVar
+  deriving (Eq, Ord, Show)
+
+infix 5 :<:
+pattern (:<:) :: TyVar -> TyVar -> SubTypeC
+pattern a :<: b = SubTypeC a b
+{-# COMPLETE (:<:) #-}
+
+instance PP.Pretty SubTypeC where
+  pretty (a :<: b) =
+    prettySExp [ PP.pretty a, "<:", PP.pretty b]
+
+instance FreeTyVars SubTypeC where
+  freeTyVars (a :<: b) = Set.fromList [a, b]
+
+instance FreeRowVars SubTypeC where
+  freeRowVars SubTypeC {} = mempty

@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
@@ -18,7 +19,9 @@ import           GHC.Generics          (Generic)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
-                                                           EqRowC (EqRowC))
+                                                           EqRowC (EqRowC),
+                                                           SubTypeC,
+                                                           pattern (:<:))
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
                                                            Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
@@ -36,18 +39,19 @@ import Data.Foldable (asum)
 type Conditional' = Conditional ([EqC], [EqRowC])
 
 data ConstraintSolvingState = ConstraintSolvingState
-  { ctxEqCs    :: [EqC],
-    ctxEqRowCs :: [EqRowC],
-    ctxCondEqs :: [Conditional'],
+  { ctxEqCs      :: [EqC],
+    ctxEqRowCs   :: [EqRowC],
+    ctxCondEqs   :: [Conditional'],
+    ctxSubTypeCs :: [SubTypeC],
 
-    nextTraceId :: Int,
-    nextRowVar :: Int,
-    nextTyVar  :: Int,
+    nextTraceId         :: Int,
+    nextRowVar          :: Int,
+    nextTyVar           :: Int,
 
     -- | The width of a pointer, in bits.  This can go away when
     -- tyvars have an associated size, it is only used for PtrAddC
     -- solving.
-    ptrWidth :: Int,
+    ptrWidth            :: Int,
 
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
@@ -66,6 +70,7 @@ emptyContext w trace = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
   , ctxCondEqs     = []
+  , ctxSubTypeCs   = []
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
@@ -97,13 +102,16 @@ addTyVarEq' tv1 tv2 = addTyVarEq tv1 (VarTy tv2)
 
 addEqRowC :: EqRowC -> SolverM ()
 addEqRowC eqc = field @"ctxEqRowCs" %= (eqc :)
-                      
+
 addRowExprEq :: RowExpr -> RowExpr -> SolverM ()
 addRowExprEq r1 r2 = addEqRowC (EqRowC r1 r2)
 
 addCondEq :: Conditional' -> SolverM ()
 addCondEq cs  =
   field @"ctxCondEqs" %= (cs :)
+
+addSubType :: TyVar -> TyVar -> SolverM ()
+addSubType a b = field @"ctxSubTypeCs" %= ((a :<: b) :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints
@@ -120,6 +128,9 @@ dequeueEqC = popField (field @"ctxEqCs")
 dequeueEqRowC :: SolverM (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
 
+dequeueSubTypeC :: SolverM (Maybe SubTypeC)
+dequeueSubTypeC = popField (field @"ctxSubTypeCs")
+
 --------------------------------------------------------------------------------
 -- Operations over type variable state
 
@@ -131,7 +142,7 @@ freshRowVarE e = do
   rowv <- freshRowVar
   unsafeUnifyRowVars e rowv
   pure rowv
-  
+
 freshRowVarFM :: FieldMap TyVar -> SolverM RowVar
 freshRowVarFM fm = do
   rowv <- freshRowVar
@@ -172,7 +183,7 @@ lookupRowVar rv = do
 lookupRowExpr :: RowExpr -> SolverM (RowExpr, Maybe (FieldMap TyVar))
 lookupRowExpr re = do
   (o, rv, m_fm) <- lookupRowVar (rowExprVar re)
-  let o' = o + rowExprShift re  
+  let o' = o + rowExprShift re
   pure (RowExprShift o' rv, m_fm)
 
 -- | Lookup a type variable, returns the representative of the
@@ -244,7 +255,7 @@ instance PP.Pretty a => PP.Pretty (Schematic a) where
 -- the RHS, instantiating schematics as required.
 data PatternRHS =
     IsPtr  (Schematic RowVar)
-  | IsNum 
+  | IsNum
 
 instance PP.Pretty PatternRHS where
   pretty (IsPtr sv) = "PtrTy " <> PP.pretty sv
@@ -264,7 +275,7 @@ data Conditional a = Conditional
     -- | Disjunction of conjunction of linear patterns -- each
     -- schematic should occur on one RHS only.
   , cGuard       :: [ [ Pattern ] ]
-  , cConstraints :: a 
+  , cConstraints :: a
   }
 
 -- | Simple matching --- the pattern matches, or it doesn't.  A more
@@ -278,13 +289,13 @@ condEnabled c = asum <$> mapM matchAll (cGuard c)
     match pat = do
       (_, m_ty) <- lookupTyVar (patVar pat)
       pure (matchRHS (patRHS pat) =<< m_ty)
-      
+
     matchRHS rhs ty =
       case (rhs, ty) of
         (IsPtr sv, PtrTy r) -> Just (bindSchem sv r)
         (IsNum,    NumTy _) -> Just []
         _                   -> Nothing
-        
+
     bindSchem (Schematic r) re = [EqRowC (RowExprVar r) re]
     bindSchem _             _  = []
 
@@ -310,14 +321,14 @@ instance CanFresh a => CanFresh (Schematic a) where
   makeFresh = Schematic <$> makeFresh
 
 class WithFresh t where
-  type Result t 
+  type Result t
   withFresh :: t -> SolverM (Result t)
 
 instance WithFresh (SolverM a) where
   type Result (SolverM a) = a
   withFresh m = m
 
-instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where  
+instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where
   type Result (a -> b) = Result b
   withFresh f = do
     v <- makeFresh
@@ -325,8 +336,8 @@ instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where
 
 instance WithFresh EqC where
   type Result EqC = EqC
-  withFresh v = pure v 
-  
+  withFresh v = pure v
+
 --------------------------------------------------------------------------------
 -- Instances
 
@@ -337,6 +348,7 @@ instance PP.Pretty ConstraintSolvingState where
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
             row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
+            row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
             PP.pretty (ctxTyVars ctx),
             PP.pretty (ctxRowVars ctx)
           ]
@@ -345,5 +357,3 @@ shiftOffsets :: Offset -> Map Offset v -> Map Offset v
 shiftOffsets 0 m = m
 shiftOffsets o m =
   Map.fromList [ (k - o, v) | (k, v) <- Map.toList m ]
-
-

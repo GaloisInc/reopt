@@ -1,48 +1,57 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Reopt.TypeInference.Solver.Solver
-  ( unifyConstraints 
+  ( unifyConstraints
   )
 where
 
-import           Control.Lens          ((.=), (<<+=), (<<.=))
+import           Control.Lens          ((.=), (<<+=), (<<.=), use)
 import           Control.Monad         (when)
+import           Control.Monad.Extra   (whenM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
+import qualified Data.Map              as Map
 import           Data.Maybe            (fromMaybe)
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
-                                                           EqRowC (..))
+                                                           EqRowC (..),
+                                                           pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
-                                                           SolverM,
+                                                           Conditional',
+                                                           SolverM, addEqC,
+                                                           addEqRowC,
                                                            addRowExprEq,
                                                            addTyVarEq',
+                                                           condEnabled,
                                                            defineRowVar,
                                                            defineTyVar,
                                                            dequeueEqC,
                                                            dequeueEqRowC,
+                                                           freshRowVar,
                                                            lookupRowExpr,
                                                            lookupTyVar,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars, Conditional', condEnabled, addEqC, addEqRowC)
-import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
+                                                           unsafeUnifyTyVars)
+import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
+                                                           RowExpr (..),
                                                            emptyFieldMap,
                                                            rowExprShift,
-                                                           rowExprVar,
+                                                           rowExprVar, rowVar,
                                                            shiftFieldMap,
                                                            unifyFieldMaps)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
@@ -82,6 +91,66 @@ traceContext description action = do
     trace (show msg) (return ())
   pure r
 
+asRecordPointer :: TyVar -> SolverM (Maybe (RowExpr, FieldMap TyVar))
+asRecordPointer v = do
+  lookupTyVar v >>= \case
+    (_, Just (PtrTy r)) -> do
+      lookupRowExpr r >>= \case
+        (rep, Just fm) -> return (Just (rep, fm))
+        _ -> return Nothing
+    _ -> return Nothing
+
+-- | Returns @True@ if we found a subtype constraint that we could extract new
+-- information from.  We never remove subtype constraints: every time we learn
+-- information about offsets of the supertype, we must propagate that
+-- information to the subtype.
+propagateSubTypeC :: SolverM Bool
+propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
+  where
+    go [] = return False
+    go ((a :<: b) : cs) = do
+      asRecordPointer b >>= \case
+        Just (_, bFM) -> do
+          asRecordPointer a >>= \case
+            Just (aRep, aFM) -> do
+              let
+                aKeys = Map.keys (getFieldMap aFM)
+                bKeys = Map.keys (getFieldMap aFM)
+                (unified, overlaps) = unifyFieldMaps aFM bFM
+              -- TODO Here we may need to shift based on the difference of
+              -- (rowExprShift bRep) and (rowExprShift aRep)?
+              defineRowVar (rowExprVar aRep) unified
+              traverse_ (uncurry addTyVarEq') overlaps
+              -- NOTE: We would also like to detect when unification made progress...
+              if not (all (`elem` aKeys) bKeys)
+                then return True
+                else go cs
+            Nothing -> do -- `b` is known to be a record pointer, but `a` is not
+              lookupTyVar a >>= \case
+                -- 1. We knew nothing about `a`.
+                (aRep, Nothing) -> do
+                  row <- freshRowVar
+                  defineRowVar row bFM
+                  defineTyVar aRep (PtrTy (rowVar row))
+                  return True
+                -- 2. We knew `a` was a pointer but knew nothing about offsets.
+                (_, Just (PtrTy row)) -> do
+                  -- TODO Here we may need to shift based on the difference of
+                  -- (rowExprShift bRep) and (rowExprShift aRep)?
+                  -- If `a` is `shift n c`, and `a <: b`, then `shift n c <: b`,
+                  -- so we need to shift the `b` offsets by `- n`?
+                  defineRowVar (rowExprVar row) (shiftFieldMap (- (rowExprShift row)) bFM)
+                  return True
+                -- 3. We knew `a` was **not** a pointer.
+                (aRep, Just aDef) ->
+                  error (show (PP.hsep ["Expected a PtrTy for", PP.pretty aRep, "but found:", PP.pretty aDef]))
+        Nothing -> go cs
+
+subTypeSolver :: SolverM ()
+subTypeSolver =
+  -- If we make progress, process atomic constraints again
+  whenM propagateSubTypeC processAtomicConstraints
+
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
 processAtomicConstraints :: SolverM ()
@@ -92,7 +161,7 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
       Just c  -> solveEqRowC c >> processAtomicConstraints
       Nothing -> condEqSolver >>= \case
         True -> processAtomicConstraints
-        False -> pure ()
+        False -> subTypeSolver
   where
     -- This solver will solve one at a time, which is important to get
     -- around the +p++ case.  We solve a single ptr add, then propagate
@@ -139,17 +208,17 @@ solveEqRowC eqc = do
   let lo  = rowExprShift le
       lv  = rowExprVar   le
       lfm = fromMaybe emptyFieldMap m_lfm
-      
+
   (re, m_rfm) <- lookupRowExpr (eqRowRHS eqc)
   let ro  = rowExprShift re
       rv  = rowExprVar   re
       rfm = fromMaybe emptyFieldMap m_rfm
-       
+
   case () of
     _ | (lo, lv) == (ro, rv) -> pure () -- trivial up to eqv.
       | lv == rv  -> trace "Recursive row var equation, ignoring" $ pure ()
-      | lo < ro   -> unify (ro - lo) rv rfm lv lfm 
-      | otherwise -> unify (lo - ro) lv lfm rv rfm 
+      | lo < ro   -> unify (ro - lo) rv rfm lv lfm
+      | otherwise -> unify (lo - ro) lv lfm rv rfm
   where
     unify delta lowv lowfm highv highfm = do
       undefineRowVar highv
@@ -170,7 +239,7 @@ solveEqC eqc = do
     ITy   ty -> pure (Nothing, Just ty)
   case (m_lty, m_rty) of
     _ | m_rv == Just lv -> pure () -- trivial up to eqv.
-    (_, Nothing)         -> traverse_ (unsafeUnifyTyVars lv) m_rv
+    (_, Nothing)        -> traverse_ (unsafeUnifyTyVars lv) m_rv
     (Nothing, Just rty)
       | Just rv <- m_rv -> unsafeUnifyTyVars rv lv
       -- the RHS was a term, so we define lv.
@@ -199,4 +268,3 @@ unifyTypes tv ty1 ty2 =
       trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $ pure ()
       -- pretend we saw nothing :(
       -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
-

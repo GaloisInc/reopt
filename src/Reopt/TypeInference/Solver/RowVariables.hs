@@ -72,7 +72,7 @@ newtype FieldMap t = FieldMap { getFieldMap :: Map Offset t }
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 instance PP.Pretty t => PP.Pretty (FieldMap t) where
-  pretty (FieldMap m) = 
+  pretty (FieldMap m) =
     PP.group $ PP.align $
       PP.encloseSep (PP.flatAlt "{ " "{") (PP.flatAlt " }" "}") mempty
         [ PP.encloseSep mempty mempty ", " $
@@ -83,14 +83,18 @@ instance PP.Pretty t => PP.Pretty (FieldMap t) where
 emptyFieldMap :: FieldMap t
 emptyFieldMap = FieldMap mempty
 
+-- | Shifts a field map right by the given offset.
 shiftFieldMap :: Offset -> FieldMap t -> FieldMap t
 shiftFieldMap off m = FieldMap $ Map.mapKeysMonotonic (+ off) (getFieldMap m)
 
+-- | Shifts a field map left by the given offset, dropping all negative offsets.
 dropFieldMap :: Offset -> FieldMap t -> FieldMap t
 dropFieldMap off (FieldMap m) = FieldMap $
   Map.filterWithKey (\off' _ -> off' >= 0) $
   Map.mapKeysMonotonic (\off' -> off' - off) m
 
+-- | Unifies two @FieldMap@s, returning the unified @FieldMap@, and a list of
+-- pairs that need to be themselves unified (coming from the shared offsets).
 unifyFieldMaps :: FieldMap t -> FieldMap t -> (FieldMap t, [(t, t)])
 unifyFieldMaps (FieldMap m1) (FieldMap m2) =
   ( FieldMap $ Map.union m1 m2
@@ -121,4 +125,3 @@ instance PP.Pretty RowInfo where
   pretty (RowInfo rv off)
     | off == 0  = PP.pretty rv
     | otherwise = PP.pretty rv <> " + " <> PP.pretty off
-    

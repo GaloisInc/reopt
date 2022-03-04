@@ -14,7 +14,7 @@ import           Data.Parameterized                (ShowF, Some (Some),
 import qualified Data.Vector                       as V
 import           Prettyprinter
 import           Reopt.CFG.FnRep
-import           Reopt.TypeInference.ConstraintGen (FunType (..),
+import           Reopt.TypeInference.ConstraintGen (FunctionTypeTyVars (..),
                                                     FTy,
                                                     ModuleConstraints (..))
 import           Reopt.TypeInference.Solver (TyVar, pattern FUnknownTy)
@@ -75,8 +75,8 @@ ppFunction mcs fn
   | Just tyvs <- Map.lookup (fnName fn) (mcAssignTyVars mcs)
   , Just fty  <- Map.lookup (fnAddr fn) (mcFunTypes mcs)
   = let tyvs' = Map.compose (mcTypeMap mcs) tyvs
-        atp = parens (commas (zipWith ppArg [0..] (funTypeArgs fty)))
-        rtp = maybe "void" pretty (funTypeRet fty)
+        atp = parens (commas (zipWith ppArg [0..] (fttvArgs fty)))
+        rtp = maybe "void" pretty (fttvRet fty)
     in vcat [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
             , lbrace
             , nest 4 $ vcat (ppBlock tyvs' <$> fnBlocks fn)
