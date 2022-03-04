@@ -1,22 +1,24 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Reopt.TypeInference.Solver.Constraints where
 
 import           Data.Map.Strict                          (Map)
 import qualified Data.Set                                 as Set
+import           GHC.Generics                             (Generic)
 import qualified Prettyprinter                            as PP
 import           Reopt.TypeInference.Solver.RowVariables  (Offset, RowExpr,
                                                            RowVar)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
-                                                           FreeTyVars (..),
+                                                           FreeTyVars (..), ITy,
                                                            prettyRow)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: TyVar, eqRhs :: TyVar}
-  deriving (Eq, Ord, Show)
+data EqC = EqC {eqLhs :: TyVar, eqRhs :: ITy }
+  deriving (Eq, Ord, Show, Generic)
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
 prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
@@ -66,30 +68,3 @@ instance FreeTyVars InRowC where
 
 instance FreeRowVars InRowC where
   freeRowVars (InRowC r _ t) = freeRowVars r `Set.union` freeRowVars t
-
--- eqRowTC :: RowVar -> Map Offset ITy -> RowVar -> TyConstraint
--- eqRowTC r1 os r2 = EqRowTC $ EqRowC r1 os r2
-
--- isNumTC :: Int -> ITy -> TyConstraint
--- isNumTC sz t = EqTC (EqC t (ITy $ NumTy sz))
-
--- isPtrTC :: ITy -> ITy -> TyConstraint
--- isPtrTC pointer pointee = EqTC (EqC pointer (ITy $ PtrTy pointee))
-
--- isOffsetTC :: ITy -> Natural -> ITy -> RowVar -> TyConstraint
--- isOffsetTC base offset typ row =
---   EqTC (EqC base (PtrTy (RecTy (Map.singleton (Offset offset) typ) row)))
-
--- isPointerWithOffsetTC :: (ITy, RowVar) -> (ITy, RowVar) -> Offset -> TyConstraint
--- isPointerWithOffsetTC (base, baseRow) (result, resultRow) offset =
---   andTC
---     [ eqTC base (PtrTy (RecTy Map.empty baseRow)),
---       eqTC result (PtrTy (RecTy Map.empty resultRow)),
---       -- Make no mistake, here, since we have:
---       -- result = base + offset
---       -- Then in terms of rows, it's more like:
---       -- resultRow + offset = base
---       -- e.g.
---       -- { 0 : T } + 16 = { 16 : T }
---       RowShiftTC (RowShiftC resultRow offset baseRow)
---     ]

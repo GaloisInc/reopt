@@ -65,8 +65,8 @@ compileTy (Ty ty)  = ITy <$> traverse nameTy ty
 eqTC :: Ty -> Ty -> SolverM ()
 eqTC ty1 ty2 = do
   tv1 <- nameTy ty1
-  tv2 <- nameTy ty2
-  addTyVarEq tv1 tv2
+  ity2 <- compileTy ty2
+  addTyVarEq tv1 ity2
 
 ptrTC :: Ty -> Ty -> SolverM ()
 ptrTC target ptr = do

@@ -18,7 +18,7 @@ import           Reopt.TypeInference.Solver.Constraints   (EqRowC (EqRowC))
 import           Reopt.TypeInference.Solver.Monad         (SolverM,
                                                            addRowExprEq,
                                                            addRowVarEq,
-                                                           addTyVarEq,
+                                                           addTyVarEq',
                                                            freshRowVar,
                                                            shiftOffsets)
 import           Reopt.TypeInference.Solver.RowVariables  (Offset, RowExpr,
@@ -26,18 +26,26 @@ import           Reopt.TypeInference.Solver.RowVariables  (Offset, RowExpr,
                                                            rowExprVar, rowVar,
                                                            shiftRowExpr)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
-import           Reopt.TypeInference.Solver.Types         (ITy', TyF (..))
+import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
+                                                           TyF (..))
 
-substRowVarInITy :: RowVar -> Map Offset TyVar -> RowExpr -> ITy' ->
-                    SolverM ITy'
-substRowVarInITy r1 os r2 = \case
+substRowVarInITy :: RowVar -> Map Offset TyVar -> RowExpr -> ITy ->
+                    SolverM ITy
+substRowVarInITy r1 os r2 ty =
+  case ty of
+    VarTy {}  -> pure ty
+    ITy   ty' -> ITy <$> substRowVarInITy' r1 os r2 ty'
+
+substRowVarInITy' :: RowVar -> Map Offset TyVar -> RowExpr -> ITy' ->
+                     SolverM ITy'
+substRowVarInITy' r1 os r2 = \case
   RecTy os' r3 | rowExprVar r3 == r1 -> do
     -- FIXME: copied from below.                   
     let os_shifted = shiftOffsets (rowExprShift r3) os
         r2'        = shiftRowExpr (rowExprShift r3) r2
 
     -- Assert common fields are the same
-    sequenceA_ $ Map.intersectionWith addTyVarEq os_shifted os'
+    sequenceA_ $ Map.intersectionWith addTyVarEq' os_shifted os'
     pure (RecTy (Map.union os_shifted os') r2')
 
   ty -> pure ty
@@ -51,7 +59,7 @@ unifyRecTy fs1 r1 fs2 r2 = do
       onlyIn2 = fs2 `Map.difference` fs1
 
   -- Unify overlapping vars.
-  sequenceA_ $ Map.intersectionWith addTyVarEq fs1 fs2
+  sequenceA_ $ Map.intersectionWith addTyVarEq' fs1 fs2
 
   case (Map.null onlyIn1, Map.null onlyIn2) of
     -- fs1 is a superset of fs2, so we can set
@@ -89,7 +97,7 @@ substRowVarInEqRowC r1 os r2 (EqRowC r3 os' r4)
           r2'  = shiftRowExpr (rowExprShift r4) r2
 
       -- Assert common fields are the same
-      sequenceA_ $ Map.intersectionWith addTyVarEq os_shifted os'
+      sequenceA_ $ Map.intersectionWith addTyVarEq' os_shifted os'
       addRowVarEq r3 (Map.union os_shifted os') r2'
 
   -- Just re-emit row eq.

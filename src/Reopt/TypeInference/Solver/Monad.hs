@@ -47,8 +47,8 @@ data ConstraintSolvingState = ConstraintSolvingState
 
 emptyContext :: ConstraintSolvingState
 emptyContext = ConstraintSolvingState
-  { ctxEqCs    = []
-  , ctxEqRowCs    = []
+  { ctxEqCs        = []
+  , ctxEqRowCs     = []
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
@@ -66,8 +66,11 @@ runSolverM = flip evalState emptyContext . getSolverM
 --------------------------------------------------------------------------------
 -- Adding constraints
 
-addTyVarEq :: TyVar -> TyVar -> SolverM ()
+addTyVarEq :: TyVar -> ITy -> SolverM ()
 addTyVarEq tv1 tv2 = field @"ctxEqCs" %= (EqC tv1 tv2 :)
+
+addTyVarEq' :: TyVar -> TyVar -> SolverM ()
+addTyVarEq' tv1 tv2 = addTyVarEq tv1 (VarTy tv2)
 
 addRowVarEq :: RowVar -> Map Offset TyVar -> RowExpr ->
                SolverM ()
