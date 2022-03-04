@@ -10,8 +10,6 @@ module TyConstraintTests
 where
 
 import Data.Bifunctor (bimap)
-import Data.Function (on)
-import Data.List (sortBy)
 import qualified Data.Map as Map
 import qualified Test.Tasty as T
 import qualified Test.Tasty.HUnit as T
@@ -29,7 +27,6 @@ import Reopt.TypeInference.Solver
 import Data.Foldable (traverse_)
 import Reopt.TypeInference.Solver.Monad (freshRowVar)
 import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
-import Reopt.TypeInference.Solver.Types (prettyMap)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
@@ -80,7 +77,7 @@ recTy :: [(Offset, Ty)] -> RowVar -> Ty
 recTy os rv = structTy (Map.fromList os) rv
 
 frecTy :: [(Offset, FTy)] -> FTy
-frecTy os = FRecTy (Map.fromList os) 
+frecTy os = FRecTy (Map.fromList os)
 
 -- Simple tests having to do with equality constraints
 eqCTests :: T.TestTree
@@ -93,14 +90,14 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       eqTC (varTy x0) num64
       eqTC (varTy x1) (ptrTy num64)
       pure [(x0, fnum64), (x1, FPtrTy fnum64)]
-  
+
   , mkTest "eqTC simple transitivity 1" $ do
       x0 <- tv
       x1 <- tv
       tvEq x0 x1
       eqTC (varTy x1) num64
       pure [(x0, fnum64), (x1, fnum64)]
-      
+
   ,  mkTest "eqTC simple Transitivity 2" $ do
       x0 <- tv
       x1 <- tv
@@ -113,14 +110,14 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       tvEqs [(x1, x2), (x0, x1)]
       eqTC (varTy x2) num64
       pure [(x0, fnum64), (x1, fnum64), (x2, fnum64)]
-      
+
   , mkTest "eqTC with pointers 1" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
       tvEqs [(x1, x2), (x0, x1) ]
       eqTC (varTy x2) num64
       eqTC (varTy x3) (ptrTy num64)
       pure [(x0, fnum64), (x1, fnum64), (x2, fnum64), (x3, FPtrTy fnum64)]
-      
+
   , mkTest "eqTC with pointers 2" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv; x4 <- tv
       tvEqs [(x0, x2)]
@@ -128,7 +125,7 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       eqTC (varTy x2) num64
       eqTC (varTy x3) num64
       eqTC (varTy x4) (ptrTy (varTy x3))
-      
+
       pure [(x0, fnum64), (x1, FPtrTy fnum64), (x2, fnum64), (x3, fnum64), (x4, FPtrTy fnum64)]
 
   , mkTest "eqTC with pointers 3" $ do
@@ -147,7 +144,7 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       r0 <- freshRowVar
       eqTC (varTy x3) (structTy (Map.singleton 0 (varTy x0)) r0)
       pure [(x0, fnum64), (x1, fnum64), (x2, fnum64), (x3, frecTy [(0, fnum64)])]
-  
+
   , mkTest "eqTC with records 2" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
       tvEqs [ (x1, x2) ]
@@ -155,11 +152,11 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       eqTC (varTy x2) num64
       r0 <- freshRowVar
       eqTC (varTy x3) (recTy [(0, varTy x0), (8, varTy x1)] r0)
-      
+
       pure [ (x0, FPtrTy fnum64), (x1, fnum64), (x2, fnum64)
            , (x3, frecTy [(0, FPtrTy fnum64), (8, fnum64)])
            ]
-        
+
        -- These next tests check that record constraints are unified properly
        -- during constraint solving when there are possible unknown other fields
        -- (i.e., the row variables). This arises when we want to combine
@@ -169,25 +166,25 @@ eqCTests = T.testGroup "Equality Constraint Tests"
        -- described via the following two atomic constraints: `p = {0 : num|ρ}`
        -- and `p = {8 : ptr(num)|ρ'}`. Our unification should then combine these
        -- constraints on `p` into `p = {0 : num, 8 : ptr(num)}`.
-        
+
   , mkTest "eqTC with records+rows 1" $ do
       x0 <- tv
       let x0Ty = varTy x0
       r0 <- freshRowVar
       r1 <- freshRowVar
-      eqTC x0Ty (recTy [(0, num64)] r0)     
+      eqTC x0Ty (recTy [(0, num64)] r0)
       eqTC x0Ty (recTy [(8, ptrTy num64)] r1)
       pure [(x0, frecTy [(0, fnum64), (8, FPtrTy fnum64)])]
-      
+
   , mkTest "eqTC with records+rows 2" $ do
       x0 <- tv; x1 <- tv; x2 <- tv
       let x0Ty = varTy x0
           x1Ty = varTy x1
           x2Ty = varTy x2
-          
-      r0 <- freshRowVar      
+
+      r0 <- freshRowVar
       r1 <- freshRowVar
-    
+
       eqTC x0Ty (recTy [(0, num64)] r0)
       eqTC x0Ty (recTy [(8, ptrTy num64)] r1)
       eqTC x1Ty (recTy mempty r0)
@@ -202,10 +199,10 @@ eqCTests = T.testGroup "Equality Constraint Tests"
           x1Ty = varTy x1
           x2Ty = varTy x2
           x3Ty = varTy x3
-          
-      r0 <- freshRowVar      
+
+      r0 <- freshRowVar
       r1 <- freshRowVar
-      
+
       eqTC x0Ty (recTy [(0, num64), (8, ptrTy x1Ty)] r0)
       eqTC x0Ty (recTy [(8, ptrTy num64), (16, num64)] r1)
       eqTC x2Ty (recTy mempty r0)
@@ -250,7 +247,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
           x2Ty = varTy x2
 
       r0 <- freshRowVar
-      
+
       eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
 
       ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
@@ -263,17 +260,17 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
 
       r0 <- freshRowVar
       r1 <- freshRowVar
-      
+
       eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
       eqTC x1Ty (ptrTy $ recTy [(0, num64)] r1)
 
       ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
-      pure [(x1, FPtrTy $ frecTy [(0, fnum64), (8, fnum64), (16, FPtrTy fnum64)])]      
+      pure [(x1, FPtrTy $ frecTy [(0, fnum64), (8, fnum64), (16, FPtrTy fnum64)])]
   ]
 
-ghciTest :: SolverM a -> PP.Doc d
-ghciTest t = runSolverM 64 . fmap PP.vsep $ 
-  t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
+-- ghciTest :: SolverM a -> PP.Doc d
+-- ghciTest t = runSolverM 64 . fmap PP.vsep $
+--   t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
 
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
   deriving (Eq)
@@ -281,8 +278,8 @@ newtype TypeEnv = TypeEnv [(TyVar, FTy)]
 instance Show TypeEnv where
   show (TypeEnv xs) = show $ bimap PP.pretty PP.pretty <$> xs
 
-tyEnv :: [(TyVar, FTy)] -> TypeEnv
-tyEnv = TypeEnv . sortBy (compare `on` fst)
+-- tyEnv :: [(TyVar, FTy)] -> TypeEnv
+-- tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> SolverM [(TyVar, FTy)] -> T.TestTree
 mkTest name m = T.testCase name (runSolverM 64 test)

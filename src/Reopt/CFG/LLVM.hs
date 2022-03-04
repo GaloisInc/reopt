@@ -118,9 +118,10 @@ import           Reopt.TypeInference.ConstraintGen (
     FunType (..),
     ModuleConstraints (..),
   )
-import           Reopt.TypeInference.Solver (FTy, Ty(..), TyVar, tyToLLVMType,
-                                                          pattern FNumTy, pattern FPtrTy, pattern FRecTy, pattern FUnknownTy,
-                                                         )
+import Reopt.TypeInference.Solver
+  ( FTy, TyVar, tyToLLVMType,
+    pattern FNumTy, pattern FPtrTy, {- pattern FRecTy, -} pattern FUnknownTy,
+  )
 import qualified Reopt.VCG.Annotations as Ann
 
 

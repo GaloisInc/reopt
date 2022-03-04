@@ -12,7 +12,6 @@ import           Control.Lens                             (Lens', (%%=), (%=),
                                                            (<<+=), use)
 import           Control.Monad.State                      (MonadState, State,
                                                            evalState)
-import           Data.Bifunctor                           (first)
 import           Data.Generics.Product                    (field)
 import           Data.Map.Strict                          (Map)
 import qualified Data.Map.Strict                          as Map
@@ -27,7 +26,7 @@ import           Reopt.TypeInference.Solver.RowVariables  (Offset (Offset),
                                                            rowVar)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar (TyVar))
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy', TyF (NumTy))
-import           Reopt.TypeInference.Solver.UnionFindMap (UnionFindMap)
+import           Reopt.TypeInference.Solver.UnionFindMap  (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap  as UM
 
 
@@ -35,7 +34,7 @@ data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs    :: [EqC],
     ctxEqRowCs :: [EqRowC],
     ctxPtrAddCs :: [PtrAddC],
-    
+
     nextTraceId :: Int,
     nextRowVar :: Int,
     nextTyVar  :: Int,
@@ -43,8 +42,8 @@ data ConstraintSolvingState = ConstraintSolvingState
     -- | The width of a pointer, in bits.  This can go away when
     -- tyvars have an associated size, it is only used for PtrAddC
     -- solving.
-    ptrWidth :: Int, 
-    
+    ptrWidth :: Int,
+
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
 
@@ -70,7 +69,7 @@ newtype SolverM a = SolverM
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
 
 runSolverM :: Int -> SolverM a -> a
-runSolverM w = flip evalState (emptyContext w) . getSolverM 
+runSolverM w = flip evalState (emptyContext w) . getSolverM
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -154,7 +153,7 @@ undefineTyVar ty = field @"ctxTyVars" %= UM.delete ty
 
 -- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
--- their corresponding equivalence classes. 
+-- their corresponding equivalence classes.
 unsafeUnifyTyVars :: TyVar -> TyVar -> SolverM ()
 unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
 

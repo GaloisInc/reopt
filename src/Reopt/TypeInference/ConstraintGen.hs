@@ -21,19 +21,17 @@ module Reopt.TypeInference.ConstraintGen
 
 import           Control.Lens                    (At (at), Getting, Ixed (ix),
                                                   Lens', makeLenses, non, use,
-                                                  view, (%=), (<&>), (<<+=),
+                                                  view,
                                                   (<>=), (?=), (^?))
 import           Control.Monad.Reader            (MonadReader (ask),
                                                   ReaderT (..), join, when,
                                                   withReaderT, zipWithM_)
-import           Control.Monad.State.Strict      (State, runState)
 import qualified Data.ByteString.Char8           as BSC
 import           Data.Foldable                   (traverse_)
 import           Data.List                       (intercalate)
 import           Data.Map.Strict                 (Map)
 import qualified Data.Map.Strict                 as Map
 import           Data.Maybe                      (fromMaybe, isJust)
-import           Data.Proxy                      (Proxy (Proxy))
 import           Data.Traversable                (for)
 import qualified Data.Vector                     as V
 import qualified Prettyprinter                   as PP
@@ -41,9 +39,7 @@ import qualified Prettyprinter                   as PP
 import           Data.Macaw.CFG                  (App (..), ArchAddrWidth,
                                                   ArchFn, ArchSegmentOff)
 import           Data.Macaw.Memory               (Memory, absoluteAddr,
-                                                  addrWidthClass,
-                                                  addrWidthNatRepr,
-                                                  addrWidthRepr, asSegmentOff,
+                                                  addrWidthClass, asSegmentOff,
                                                   memAddrWidth, memWidth, resolveAbsoluteAddr, memWord)
 import           Data.Macaw.Types                (BVType, TypeRepr (..),
                                                   floatInfoBits, typeRepr)
@@ -72,8 +68,6 @@ import           Reopt.TypeInference.Solver
 import qualified Reopt.TypeInference.Solver as S
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Control.Monad.Trans (lift)
-
-import Debug.Trace
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -170,13 +164,13 @@ instance Show (FunType arch) where
 
 -- | Size in bits of an unconstrained @TypeRepr tp@.  Currently only handling
 -- bitvectors and floats.
-anyTypeWidth :: TypeRepr tp -> Int
-anyTypeWidth = \case
-  BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
-  BVTypeRepr sz -> fromIntegral (intValue sz)
-  FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
-  TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
-  VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
+-- anyTypeWidth :: TypeRepr tp -> Int
+-- anyTypeWidth = \case
+--   BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
+--   BVTypeRepr sz -> fromIntegral (intValue sz)
+--   FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
+--   TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
+--   VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
 
 
 -- -- | Converts the limited `Constraint` grammar to the more general
@@ -514,7 +508,7 @@ emitPtrAddOffset rty t1 t2 off =
   inSolverM (ptrAddTC rty t1 t2 (OCOffset (fromInteger off))  )
 
 emitPtrAddGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer) 
+emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
 
 -- | Emits a sub which may return a pointer
 emitPtrSub :: Ty -> Ty -> Ty -> CGenM ctx arch ()
@@ -528,9 +522,9 @@ emitNotPtr ::
 emitNotPtr sz t =
   inSolverM (eqTC t (numTy sz))
 
-pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
-pointerWidth Proxy =
-  widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+-- pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
+-- pointerWidth Proxy =
+--   widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
 
 emitPtr ::
   Ty ->
@@ -612,18 +606,18 @@ genApp (ty, outSize) app =
 
       -- FIXME:
       mem <- askContext ( cgenFunctionContext . cgenModuleContext
-                          . cgenGlobalContext . cgenMemory)      
+                          . cgenGlobalContext . cgenMemory)
       case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
         Nothing -> emitPtrAddOffset ty pTy oTy o
         Just _  -> emitPtrAddGlobalPtr ty pTy oTy
-      
+
     BVAdd _sz (a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o }) ) r -> do
       pTy <- genFnValue r
       oTy <- genFnValue a
 
       -- FIXME:
       mem <- askContext ( cgenFunctionContext . cgenModuleContext
-                          . cgenGlobalContext . cgenMemory)      
+                          . cgenGlobalContext . cgenMemory)
       case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
         Nothing -> emitPtrAddOffset ty pTy oTy o
         Just _  -> emitPtrAddGlobalPtr ty pTy oTy
@@ -705,7 +699,7 @@ genMemOp ::
   FnArchConstraints arch =>
   Ty -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
   CGenM CGenBlockContext arch ()
--- FIXME: do we need sz here?  
+-- FIXME: do we need sz here?
 genMemOp ty ptr _sz = emitPtr ty =<< genFnValue ptr
 
   -- case ptr of
@@ -933,7 +927,7 @@ genModuleConstraints m mem = runCGenM mem $ do
   -- FIXME: we currently ignore hints
 
   -- traceM (show mem)
-  
+
   let doDecl d = do
         fty <- functionTypeToFunType (funDeclName d) (funDeclType d)
         pure ((funDeclAddr d, fty), (funDeclName d, fty))
