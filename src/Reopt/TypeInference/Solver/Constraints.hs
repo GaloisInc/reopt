@@ -52,19 +52,45 @@ instance FreeRowVars EqRowC where
       `Set.union` foldr (Set.union . freeRowVars) Set.empty os
       `Set.union` freeRowVars r2
 
--- | @InRowC o t r@ means in row @r@ offset @o@ must contain a @t@.
-data InRowC = InRowC
-  { inRowRowExpr :: RowExpr,
-    inRowOffset :: Offset,
-    inRowTypeAtOffset :: TyVar
-  }
+--------------------------------------------------------------------------------
+-- Pointer addition (maybe, could be number add)
+
+-- | What sort of constant operand we are dealing with for an
+-- addition.  
+data OperandClass =
+  OCSymbolic   -- ^ The second operand is not a constant
+  | OCOffset Offset -- ^ The second operand is a small constant, we
+                     -- already know it is a number (from constraint
+                     -- generation.)
+  | OCPointer -- ^ The second operand could be in an ELF segment.
   deriving (Eq, Ord, Show)
 
-instance PP.Pretty InRowC where
-  pretty (InRowC o t r) = prettySExp [PP.pretty o, ":", PP.pretty t, "∈", PP.pretty r]
+instance PP.Pretty OperandClass where
+  pretty c =
+    case c of
+      OCSymbolic      -> mempty
+      OCOffset offset -> prettySExp ["+", PP.pretty offset]
+      OCPointer       -> "?"
 
-instance FreeTyVars InRowC where
-  freeTyVars (InRowC _ _ t) = freeTyVars t
+instance FreeTyVars OperandClass where
+  freeTyVars _ = mempty
 
-instance FreeRowVars InRowC where
-  freeRowVars (InRowC r _ t) = freeRowVars r `Set.union` freeRowVars t
+data PtrAddC = PtrAddC
+  { ptrAddResult :: TyVar
+  , ptrAddLHS    :: TyVar
+  -- ^ The symbolic operand.
+  , ptrAddRHS    :: TyVar
+  , ptrAddClass  :: OperandClass
+  -- ^ If an operand is a constant then this is that constant.
+  } 
+  deriving (Eq, Ord, Show)
+
+instance PP.Pretty PtrAddC where
+  pretty (PtrAddC resTy lTy rTy oc) =
+    prettySExp [ PP.pretty resTy, "=", PP.pretty lTy, PP.pretty rTy, PP.pretty oc]
+
+instance FreeTyVars PtrAddC where
+  freeTyVars (PtrAddC resTy lTy rTy oc) = Set.fromList [resTy, lTy, rTy] <> freeTyVars oc
+
+instance FreeRowVars PtrAddC where
+  freeRowVars PtrAddC {} = mempty

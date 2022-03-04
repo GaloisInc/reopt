@@ -9,7 +9,7 @@
 module Reopt.TypeInference.Solver.Monad where
 
 import           Control.Lens                             (Lens', (%%=), (%=),
-                                                           (<<+=))
+                                                           (<<+=), use)
 import           Control.Monad.State                      (MonadState, State,
                                                            evalState)
 import           Data.Bifunctor                           (first)
@@ -20,24 +20,31 @@ import           GHC.Generics                             (Generic)
 import qualified Prettyprinter                            as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
-                                                           EqRowC (EqRowC))
+                                                           EqRowC (EqRowC), PtrAddC (PtrAddC), OperandClass)
 import           Reopt.TypeInference.Solver.RowVariables  (Offset (Offset),
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar (RowVar),
                                                            rowVar)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar (TyVar))
-import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy')
-import           Reopt.TypeInference.Solver.UnionFindMap  as UM
+import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy', TyF (NumTy))
+import           Reopt.TypeInference.Solver.UnionFindMap (UnionFindMap)
+import qualified Reopt.TypeInference.Solver.UnionFindMap  as UM
 
 
 data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs    :: [EqC],
     ctxEqRowCs :: [EqRowC],
-
+    ctxPtrAddCs :: [PtrAddC],
+    
     nextTraceId :: Int,
     nextRowVar :: Int,
     nextTyVar  :: Int,
 
+    -- | The width of a pointer, in bits.  This can go away when
+    -- tyvars have an associated size, it is only used for PtrAddC
+    -- solving.
+    ptrWidth :: Int, 
+    
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
 
@@ -45,14 +52,16 @@ data ConstraintSolvingState = ConstraintSolvingState
   }
   deriving (Eq, Generic, Ord, Show)
 
-emptyContext :: ConstraintSolvingState
-emptyContext = ConstraintSolvingState
+emptyContext :: Int -> ConstraintSolvingState
+emptyContext w = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
+  , ctxPtrAddCs    = []
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
-  , ctxTyVars      = empty
+  , ptrWidth       = w
+  , ctxTyVars      = UM.empty
   }
 
 newtype SolverM a = SolverM
@@ -60,8 +69,8 @@ newtype SolverM a = SolverM
   }
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
 
-runSolverM :: SolverM a -> a
-runSolverM = flip evalState emptyContext . getSolverM
+runSolverM :: Int -> SolverM a -> a
+runSolverM w = flip evalState (emptyContext w) . getSolverM 
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -84,6 +93,10 @@ addRowExprEq (RowExprShift o r1) os r2 = do
   -- This terminates as eventually we will hit the above with r3
   addRowExprEq r2 mempty (rowVar r3)
   addRowVarEq r1 (shiftOffsets (- o) os) (rowVar r3)
+
+addPtrAdd :: TyVar -> TyVar -> TyVar -> OperandClass -> SolverM ()
+addPtrAdd resTy lTy rTy oc  =
+  field @"ctxPtrAddCs" %= (PtrAddC resTy lTy rTy oc :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints
@@ -147,6 +160,9 @@ unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
 
 --------------------------------------------------------------------------------
 -- Other stuff
+
+ptrWidthNumTy :: SolverM ITy'
+ptrWidthNumTy = NumTy <$> use (field @"ptrWidth")
 
 shiftStructuralInformationBy :: Integer -> Map Offset v -> Map Offset v
 shiftStructuralInformationBy o =
