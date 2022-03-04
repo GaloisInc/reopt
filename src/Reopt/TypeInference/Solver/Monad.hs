@@ -214,6 +214,6 @@ instance PP.Pretty ConstraintSolvingState where
           ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
-shiftOffsets 0 = id
-shiftOffsets o =
-  Map.fromList . map (first (+ o)) . Map.toList
+shiftOffsets 0 m = m
+shiftOffsets o m =
+  Map.fromList [ (k - o, v) | (k, v) <- Map.toList m, k >= o ]

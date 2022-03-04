@@ -3,7 +3,8 @@
 module Reopt.TypeInference.Solver
   ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
     SolverM, runSolverM,
-    eqTC, ptrTC, freshTyVar, 
+    eqTC, ptrTC, freshTyVar, ptrAddTC,
+    OperandClass (..),
     unifyConstraints,
     tyToLLVMType,
     -- FTy stuff
@@ -28,7 +29,8 @@ import Reopt.TypeInference.Solver.Types
     TyF(..),
     FTy(..), tyToLLVMType
   )
-import Reopt.TypeInference.Solver.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar)
+import Reopt.TypeInference.Solver.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar, ptrWidthNumTy, addPtrAdd)
+import Reopt.TypeInference.Solver.Constraints (OperandClass(..))
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
@@ -74,6 +76,19 @@ ptrTC target ptr = do
   -- emits ptr = { 0 -> target | rv }
   let pTy = ptrTy (structTy (Map.singleton 0 target) rv) 
   eqTC ptr pTy
+
+ptrAddTC :: Ty -> Ty -> Ty -> OperandClass -> SolverM ()
+ptrAddTC rty lhsty rhsty oc = do
+  rv <- nameTy rty
+  lhstv <- nameTy lhsty
+  rhstv <- nameTy rhsty
+
+  -- Constrain rhsty if it is an offset
+  case oc of
+    OCOffset _ -> addTyVarEq rhstv . ITy =<< ptrWidthNumTy
+    _ -> pure ()
+
+  addPtrAdd rv lhstv rhstv oc
   
 --------------------------------------------------------------------------------
 -- LLVM support (FTy patterns)

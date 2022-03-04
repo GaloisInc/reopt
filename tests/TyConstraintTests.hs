@@ -24,11 +24,12 @@ import Reopt.TypeInference.Solver
    Ty, FTy,
    unifyConstraints,
    eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy
-  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy)
+  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy, ptrAddTC, OperandClass (OCOffset))
 
 import Data.Foldable (traverse_)
 import Reopt.TypeInference.Solver.Monad (freshRowVar)
 import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
+import Reopt.TypeInference.Solver.Types (prettyMap)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
@@ -56,6 +57,7 @@ import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
 constraintTests :: T.TestTree
 constraintTests = T.testGroup "Type Constraint Tests"
   [ eqCTests
+  , ptrCTests
   ]
 
 num64 :: Ty
@@ -215,6 +217,63 @@ eqCTests = T.testGroup "Equality Constraint Tests"
 
   ]
 
+
+-- t1 :: SolverM ()
+-- t1 = do
+--   x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--   let x0Ty = varTy x0
+--       x1Ty = varTy x1
+--       x2Ty = varTy x2
+--       x3Ty = varTy x3
+
+--   r0 <- freshRowVar
+--   eqTC x1Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
+--   ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
+
+ptrCTests :: T.TestTree
+ptrCTests = T.testGroup "Pointer Add Constraint Tests"
+  [ mkTest "Constrained by arg" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+
+      r0 <- freshRowVar
+      eqTC x1Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
+      ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
+      pure [(x0, FPtrTy $ frecTy [(0, FPtrTy fnum64)])]
+
+  , mkTest "Constrained by result 1" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+
+      r0 <- freshRowVar
+      
+      eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
+
+      ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
+      pure [(x1, FPtrTy $ frecTy [(8, fnum64), (16, FPtrTy fnum64)])]
+  , mkTest "Constrained by result 2" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+
+      r0 <- freshRowVar
+      r1 <- freshRowVar
+      
+      eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
+      eqTC x1Ty (ptrTy $ recTy [(0, num64)] r1)
+
+      ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
+      pure [(x1, FPtrTy $ frecTy [(0, fnum64), (8, fnum64), (16, FPtrTy fnum64)])]      
+  ]
+
+ghciTest :: SolverM a -> PP.Doc d
+ghciTest t = runSolverM 64 . fmap PP.vsep $ 
+  t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
 
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
   deriving (Eq)
