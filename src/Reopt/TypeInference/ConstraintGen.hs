@@ -44,7 +44,7 @@ import           Data.Macaw.Memory               (Memory, absoluteAddr,
                                                   addrWidthClass,
                                                   addrWidthNatRepr,
                                                   addrWidthRepr, asSegmentOff,
-                                                  memAddrWidth, memWidth)
+                                                  memAddrWidth, memWidth, resolveAbsoluteAddr, memWord)
 import           Data.Macaw.Types                (BVType, TypeRepr (..),
                                                   floatInfoBits, typeRepr)
 import           Data.Parameterized              (FoldableF, FoldableFC)
@@ -68,10 +68,12 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   fnBlocks)
 import           Reopt.TypeInference.Solver
   (TyVar, Ty, FTy, varTy, eqTC, ptrTC, SolverM
-  , runSolverM, numTy, unifyConstraints)
+  , runSolverM, numTy, unifyConstraints, ptrAddTC, OperandClass (OCSymbolic, OCOffset, OCPointer))
 import qualified Reopt.TypeInference.Solver as S
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Control.Monad.Trans (lift)
+
+import Debug.Trace
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -505,10 +507,14 @@ emitEq t1 t2 = inSolverM (eqTC t1 t2)
 
 -- | Emits an add which may be a pointer add
 emitPtrAddSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrAddSymbolic _rty _t1 _t2 = undefined  -- FIXME
+emitPtrAddSymbolic rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCSymbolic)
 
 emitPtrAddOffset :: Ty -> Ty -> Ty -> Integer -> CGenM ctx arch ()
-emitPtrAddOffset _rty _t1 _t2 _off = undefined  -- FIXME
+emitPtrAddOffset rty t1 t2 off =
+  inSolverM (ptrAddTC rty t1 t2 (OCOffset (fromInteger off))  )
+
+emitPtrAddGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer) 
 
 -- | Emits a sub which may return a pointer
 emitPtrSub :: Ty -> Ty -> Ty -> CGenM ctx arch ()
@@ -603,11 +609,24 @@ genApp (ty, outSize) app =
     BVAdd _sz l (a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o })) -> do
       pTy <- genFnValue l
       oTy <- genFnValue a
-      emitPtrAddOffset ty pTy oTy o
+
+      -- FIXME:
+      mem <- askContext ( cgenFunctionContext . cgenModuleContext
+                          . cgenGlobalContext . cgenMemory)      
+      case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
+        Nothing -> emitPtrAddOffset ty pTy oTy o
+        Just _  -> emitPtrAddGlobalPtr ty pTy oTy
+      
     BVAdd _sz (a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o }) ) r -> do
       pTy <- genFnValue r
       oTy <- genFnValue a
-      emitPtrAddOffset ty pTy oTy o
+
+      -- FIXME:
+      mem <- askContext ( cgenFunctionContext . cgenModuleContext
+                          . cgenGlobalContext . cgenMemory)      
+      case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
+        Nothing -> emitPtrAddOffset ty pTy oTy o
+        Just _  -> emitPtrAddGlobalPtr ty pTy oTy
 
     BVAdd sz l r -> do
       addrw <- addrWidth
@@ -913,6 +932,8 @@ genModuleConstraints m mem = runCGenM mem $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
+  -- traceM (show mem)
+  
   let doDecl d = do
         fty <- functionTypeToFunType (funDeclName d) (funDeclType d)
         pure ((funDeclAddr d, fty), (funDeclName d, fty))

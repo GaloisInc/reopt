@@ -193,7 +193,10 @@ unifyTypes tv ty1 ty2 =
     (RecTy fs1 r1, RecTy fs2 r2) -> unifyRecTy fs1 r1 fs2 r2
 
     -- Unification failure, we need to report a conflict.
-    _ -> error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
+    _ ->
+      trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $ pure ()
+      -- pretend we saw nothing :(
+      -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
 
 --------------------------------------------------------------------------------
 -- PtrAdd solving
