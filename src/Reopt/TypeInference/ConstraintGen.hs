@@ -512,7 +512,7 @@ emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
 
 -- | Emits a sub which may return a pointer
 emitPtrSub :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrSub _rty _t1 _t2 = undefined -- FIXME
+emitPtrSub _rty _t1 _t2 = pure () -- undefined -- FIXME
 
 -- | Emits a constraint that the argument isn't a pointer
 emitNotPtr ::
