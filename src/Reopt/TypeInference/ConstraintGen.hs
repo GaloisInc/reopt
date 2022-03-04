@@ -354,8 +354,9 @@ runCGenM :: Memory (ArchAddrWidth arch) ->
             CGenM CGenGlobalContext arch a ->
             a
 runCGenM mem (CGenM m) =
-  runSolverM (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
+  runSolverM ptrWidth (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
   where
+    ptrWidth = widthVal (memWidth mem)
     st0 = CGenState { _assignTyVars  = mempty
                     , _warnings      = mempty
                     }

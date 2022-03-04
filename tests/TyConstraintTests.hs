@@ -226,7 +226,7 @@ tyEnv :: [(TyVar, FTy)] -> TypeEnv
 tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> SolverM [(TyVar, FTy)] -> T.TestTree
-mkTest name m = T.testCase name (runSolverM test)
+mkTest name m = T.testCase name (runSolverM 64 test)
   where
     test = do
       expected <- m

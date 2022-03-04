@@ -145,11 +145,21 @@ substEqRowC (EqRowC r1 os r2) = do
 processAtomicConstraints :: SolverM ()
 processAtomicConstraints = traceContext "processAtomicConstraints" $ do
   dequeueEqC >>= \case
-    Just c -> solveEqC c >> processAtomicConstraints
-    Nothing ->
-      dequeueEqRowC >>= \case
-        Just c -> substEqRowC c >> processAtomicConstraints
-        Nothing -> return ()
+    Just c  -> solveEqC c >> processAtomicConstraints
+    Nothing -> dequeueEqRowC >>= \case
+      Just c  -> substEqRowC c >> processAtomicConstraints
+      Nothing -> ptrAddSolver
+  where
+    ptrAddSolver = do
+      ptrAdds <- field @"ctxPtrAddCs" <<.= mempty -- get constraints and clear them
+      m_ptrAdds' <- traverse solvePtrAdd ptrAdds
+      let (didWork, ptrAdds') = foldl goOne (False, []) m_ptrAdds'
+      field @"ctxPtrAddCs" .= ptrAdds'
+
+      when didWork processAtomicConstraints
+
+    goOne (_, acc)       Nothing       = (True, acc)
+    goOne (didWork, acc) (Just ptrAdd) = (didWork, ptrAdd : acc)
 
 solveEqC :: EqC -> SolverM ()
 solveEqC eqc = do
