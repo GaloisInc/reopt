@@ -186,7 +186,7 @@ unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
     (NumTy i, NumTy i')
       | i == i'   -> pure ()
-      | otherwise -> error "Mismatch in type widths"
+      | otherwise -> trace "Mismatch in type widths" $ pure ()
 
     (PtrTy tv1', PtrTy tv2') -> addTyVarEq' tv1' tv2'
 
