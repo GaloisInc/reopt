@@ -95,7 +95,7 @@ addRowExprEq (RowExprVar r1) os r2 = addRowVarEq r1 os r2
 addRowExprEq (RowExprShift o r1) os r2 = do
   r3 <- rowVar <$> freshRowVar
   addRowVarEq r1 (shiftOffsets (- o) os) r3
-  addRowVarEq (rowExprVar r2) mempty (shiftRowExpr (rowExprShift r2 - o) r3)
+  addRowVarEq (rowExprVar r2) mempty (shiftRowExpr (o - rowExprShift r2) r3)
 
 addPtrAdd :: TyVar -> TyVar -> TyVar -> OperandClass -> SolverM ()
 addPtrAdd resTy lTy rTy oc  =

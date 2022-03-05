@@ -98,7 +98,7 @@ finalizeRowVar (PtrTy t)  = PtrTy t
 finalizeRowVar (RecTy flds _) = RecTy (Map.filterWithKey (\k _ -> k >= 0) flds) NoRow
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
-traceContext :: PP.Doc () -> SolverM () -> SolverM ()
+traceContext :: PP.Doc () -> SolverM a -> SolverM a
 traceContext description action = do
   tId <- field @"nextTraceId" <<+= 1
   doTrace <- traceUnification
@@ -110,7 +110,7 @@ traceContext description action = do
               PP.indent 4 $ PP.pretty stateBefore
             ]
     trace (show msg) (pure ())
-  action
+  r <- action
   when doTrace $ do
     stateAfter <- get
     let msg =
@@ -119,6 +119,7 @@ traceContext description action = do
               PP.indent 4 $ PP.pretty stateAfter
             ]
     trace (show msg) (return ())
+  pure r
 
 substEqRowC :: EqRowC -> SolverM ()
 substEqRowC (EqRowC r1 os r2) = do
@@ -205,7 +206,7 @@ unifyTypes tv ty1 ty2 =
 -- | This solves pointer-sized addition, where the result may or may
 -- not be a pointer, dep. on its use and on the types of arguments. 
 solvePtrAdd :: PtrAddC -> SolverM (Maybe PtrAddC)
-solvePtrAdd c = do
+solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
   (rv, m_rty) <- lookupTyVar (ptrAddResult c)
   (lhsv, m_lhsTy) <- lookupTyVar (ptrAddLHS c)
   (rhsv, m_rhsTy) <- lookupTyVar (ptrAddRHS c)
