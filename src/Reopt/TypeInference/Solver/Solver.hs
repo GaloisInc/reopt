@@ -40,7 +40,7 @@ import           Reopt.TypeInference.Solver.Monad                   (ConstraintS
                                                                      lookupTyVar,
                                                                      ptrWidthNumTy,
                                                                      undefineTyVar,
-                                                                     unsafeUnifyTyVars)
+                                                                     unsafeUnifyTyVars, traceUnification)
 import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVarInEqRowC,
                                                                      substRowVarInITy,
                                                                      substRowVarInITy',
@@ -56,9 +56,6 @@ import           Reopt.TypeInference.Solver.Types                   (FTy (..),
 import           Reopt.TypeInference.Solver.UnionFindMap            (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap            as UM
 
--- | Set to @True@ to enable tracing in unification
-traceUnification :: Bool
-traceUnification = False
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -104,7 +101,8 @@ finalizeRowVar (RecTy flds _) = RecTy (Map.filterWithKey (\k _ -> k >= 0) flds) 
 traceContext :: PP.Doc () -> SolverM () -> SolverM ()
 traceContext description action = do
   tId <- field @"nextTraceId" <<+= 1
-  when traceUnification $ do
+  doTrace <- traceUnification
+  when doTrace $ do
     stateBefore <- get
     let msg =
           PP.vsep
@@ -113,7 +111,7 @@ traceContext description action = do
             ]
     trace (show msg) (pure ())
   action
-  when traceUnification $ do
+  when doTrace $ do
     stateAfter <- get
     let msg =
           PP.vsep

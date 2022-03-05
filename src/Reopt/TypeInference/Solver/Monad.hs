@@ -9,7 +9,7 @@
 module Reopt.TypeInference.Solver.Monad where
 
 import           Control.Lens                             (Lens', (%%=), (%=),
-                                                           (<<+=), use)
+                                                           (<<+=), use, (.=))
 import           Control.Monad.State                      (MonadState, State,
                                                            evalState)
 import           Data.Generics.Product                    (field)
@@ -47,7 +47,11 @@ data ConstraintSolvingState = ConstraintSolvingState
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
 
-    ctxTyVars :: UnionFindMap TyVar ITy'
+    ctxTyVars :: UnionFindMap TyVar ITy',
+
+    -- Debugging
+    ctxTraceUnification :: Bool
+    
   }
   deriving (Eq, Generic, Ord, Show)
 
@@ -61,6 +65,7 @@ emptyContext w = ConstraintSolvingState
   , nextTyVar      = 0
   , ptrWidth       = w
   , ctxTyVars      = UM.empty
+  , ctxTraceUnification = False
   }
 
 newtype SolverM a = SolverM
@@ -169,6 +174,12 @@ shiftStructuralInformationBy o =
     retainPositiveOffsets (Offset a, ty) =
       let newOffset = fromIntegral a + o
        in [(Offset (fromIntegral newOffset), ty) | newOffset >= 0]
+
+setTraceUnification :: Bool -> SolverM ()
+setTraceUnification b = field @"ctxTraceUnification" .= b
+
+traceUnification :: SolverM Bool
+traceUnification = use (field @"ctxTraceUnification")
 
 -- substRowVarInRowShiftC ::
 --   RowVar ->

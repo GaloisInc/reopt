@@ -5,7 +5,9 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 module TyConstraintTests
-  ( constraintTests,
+  ( constraintTests
+  -- utility
+  , ghciTest
   )
 where
 
@@ -25,8 +27,11 @@ import Reopt.TypeInference.Solver
   , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy, ptrAddTC, OperandClass (OCOffset))
 
 import Data.Foldable (traverse_)
-import Reopt.TypeInference.Solver.Monad (freshRowVar)
+import Reopt.TypeInference.Solver.Monad (freshRowVar, setTraceUnification)
+-- import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar, RowExpr (RowExprShift))
+-- import Reopt.TypeInference.Solver.Types (prettyMap, TyF (RecTy))
 import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
+import Reopt.TypeInference.Solver.Types (prettyMap)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
@@ -215,34 +220,57 @@ eqCTests = T.testGroup "Equality Constraint Tests"
             , (x1, fnum64)
             , (x2, frecTy [(16, fnum64)])
             , (x3, frecTy [(0, fnum64)])]
-
-  , mkTest "accessing pointer members from a struct pointer" $ do
-      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
-      let x0Ty = varTy x0
-          x1Ty = varTy x1
-          x2Ty = varTy x2
-          x3Ty = varTy x3
-
-      r0 <- freshRowVar
-      r1 <- freshRowVar
-      r2 <- freshRowVar
-      r3 <- freshRowVar
-
-      eqTC x0Ty (ptrTy (recTy [(0, num8)] r0))
-      eqTC x1Ty (ptrTy (recTy [(0, num64)] r1))
-      eqTC x2Ty (ptrTy (recTy [(0, num32)] r2))
-      eqTC x3Ty (ptrTy (recTy [] r3))
-      ptrAddTC x0Ty x3Ty num64 (OCOffset 0)
-      ptrAddTC x1Ty x3Ty num64 (OCOffset 8)
-      ptrAddTC x2Ty x3Ty num64 (OCOffset 72)
-      pure [ (x0, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))
-           , (x1, FPtrTy (frecTy [(0, fnum64), (64, fnum32)]))
-           , (x2, FPtrTy (frecTy [(0, fnum32)]))
-           , (x3, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))]
-
   ]
 
+-- t0 :: SolverM ()
+-- t0 = do
+--   x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--   let x0Ty = varTy x0
+--       x1Ty = varTy x1
+--       x2Ty = varTy x2
+--       x3Ty = varTy x3
+  
+--   r0 <- freshRowVar
+--   r1 <- freshRowVar
+--   eqTC x0Ty (Ty $ RecTy mempty (RowExprShift 8 r0))
+--   eqTC x1Ty (recTy [(0, num64)] r1)
+--   eqTC x0Ty x1Ty
+  
+-- t2 :: SolverM ()
+-- t2 = do
+--       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--       let x0Ty = varTy x0
+--           x1Ty = varTy x1
+--           x2Ty = varTy x2
+--           x3Ty = varTy x3
 
+--       r0 <- freshRowVar
+--       r1 <- freshRowVar
+--       r2 <- freshRowVar
+--       r3 <- freshRowVar
+
+--       eqTC x0Ty (ptrTy (recTy [(0, num8)] r0))
+--       eqTC x1Ty (ptrTy (recTy [(0, num64)] r1))
+--       eqTC x2Ty (ptrTy (recTy [(0, num32)] r2))
+--       eqTC x3Ty (ptrTy (recTy [] r3))
+--       ptrAddTC x0Ty x3Ty num64 (OCOffset 0)
+--       ptrAddTC x1Ty x3Ty num64 (OCOffset 8)
+--       ptrAddTC x2Ty x3Ty num64 (OCOffset 72)
+
+-- t1 = do
+--       x0 <- tv; x1 <- tv; x2 <- tv
+--       let x0Ty = varTy x0
+--           x1Ty = varTy x1
+--           x2Ty = varTy x2
+
+--       r0 <- freshRowVar
+--       r1 <- freshRowVar
+
+--       eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
+--       eqTC x1Ty (ptrTy $ recTy [(0, ptrTy num64)] r1)
+
+--       ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
+ 
 -- t1 :: SolverM ()
 -- t1 = do
 --   x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
@@ -290,15 +318,41 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       r1 <- freshRowVar
 
       eqTC x0Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
-      eqTC x1Ty (ptrTy $ recTy [(0, num64)] r1)
+      eqTC x1Ty (ptrTy $ recTy [(0, ptrTy num64)] r1)
 
       ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
-      pure [(x1, FPtrTy $ frecTy [(0, fnum64), (8, fnum64), (16, FPtrTy fnum64)])]
+      pure [(x1, FPtrTy $ frecTy [(0, FPtrTy fnum64), (8, fnum64), (16, FPtrTy fnum64)])]
+      
+  , mkTest "Accessing pointer members from a struct pointer" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          x3Ty = varTy x3
+
+      r0 <- freshRowVar
+      r1 <- freshRowVar
+      r2 <- freshRowVar
+      r3 <- freshRowVar
+
+      eqTC x0Ty (ptrTy (recTy [(0, num8)] r0))
+      eqTC x1Ty (ptrTy (recTy [(0, num64)] r1))
+      eqTC x2Ty (ptrTy (recTy [(0, num32)] r2))
+      eqTC x3Ty (ptrTy (recTy [] r3))
+      ptrAddTC x0Ty x3Ty num64 (OCOffset 0)
+      ptrAddTC x1Ty x3Ty num64 (OCOffset 8)
+      ptrAddTC x2Ty x3Ty num64 (OCOffset 72)
+      pure [ (x0, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))
+           , (x1, FPtrTy (frecTy [(0, fnum64), (64, fnum32)]))
+           , (x2, FPtrTy (frecTy [(0, fnum32)]))
+           , (x3, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))]
+      
   ]
 
--- ghciTest :: SolverM a -> PP.Doc d
--- ghciTest t = runSolverM 64 . fmap PP.vsep $
---   t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
+ghciTest :: Bool -> SolverM a -> PP.Doc d
+ghciTest doTrace t = runSolverM 64 . fmap PP.vsep $ do
+  setTraceUnification doTrace
+  t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
 
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
   deriving (Eq)
@@ -317,4 +371,4 @@ mkTest name m = T.testCase name (runSolverM 64 test)
       res      <- unifyConstraints
       let actual = [ (k, Map.findWithDefault FUnknownTy k res)
                    | (k, _) <- expected ]
-      pure (actual T.@?= expected)
+      pure (TypeEnv actual T.@?= TypeEnv expected)
