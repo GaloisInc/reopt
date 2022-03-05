@@ -57,10 +57,14 @@ constraintTests = T.testGroup "Type Constraint Tests"
   , ptrCTests
   ]
 
-num64 :: Ty
+num8, num32, num64 :: Ty
+num8 = numTy 8
+num32 = numTy 32
 num64 = numTy 64
 
-fnum64 :: FTy
+fnum8, fnum32, fnum64 :: FTy
+fnum8 = FNumTy 8
+fnum32 = FNumTy 32
 fnum64 = FNumTy 64
 
 tv :: SolverM TyVar
@@ -74,7 +78,7 @@ tvEqs :: [(TyVar, TyVar)] -> SolverM ()
 tvEqs = traverse_ (uncurry tvEq)
 
 recTy :: [(Offset, Ty)] -> RowVar -> Ty
-recTy os rv = structTy (Map.fromList os) rv
+recTy os = structTy (Map.fromList os)
 
 frecTy :: [(Offset, FTy)] -> FTy
 frecTy os = FRecTy (Map.fromList os)
@@ -211,6 +215,30 @@ eqCTests = T.testGroup "Equality Constraint Tests"
             , (x1, fnum64)
             , (x2, frecTy [(16, fnum64)])
             , (x3, frecTy [(0, fnum64)])]
+
+  , mkTest "accessing pointer members from a struct pointer" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          x3Ty = varTy x3
+
+      r0 <- freshRowVar
+      r1 <- freshRowVar
+      r2 <- freshRowVar
+      r3 <- freshRowVar
+
+      eqTC x0Ty (ptrTy (recTy [(0, num8)] r0))
+      eqTC x1Ty (ptrTy (recTy [(0, num64)] r1))
+      eqTC x2Ty (ptrTy (recTy [(0, num32)] r2))
+      eqTC x3Ty (ptrTy (recTy [] r3))
+      ptrAddTC x0Ty x3Ty num64 (OCOffset 0)
+      ptrAddTC x1Ty x3Ty num64 (OCOffset 8)
+      ptrAddTC x2Ty x3Ty num64 (OCOffset 72)
+      pure [ (x0, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))
+           , (x1, FPtrTy (frecTy [(0, fnum64), (64, fnum32)]))
+           , (x2, FPtrTy (frecTy [(0, fnum32)]))
+           , (x3, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))]
 
   ]
 
