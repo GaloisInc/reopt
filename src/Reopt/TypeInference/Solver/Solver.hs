@@ -98,7 +98,7 @@ finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
 finalizeRowVar :: TyF r f -> TyF NoRow f
 finalizeRowVar (NumTy sz) = NumTy sz
 finalizeRowVar (PtrTy t)  = PtrTy t
-finalizeRowVar (RecTy flds _) = RecTy flds NoRow
+finalizeRowVar (RecTy flds _) = RecTy (Map.filterWithKey (\k _ -> k >= 0) flds) NoRow
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
 traceContext :: PP.Doc () -> SolverM () -> SolverM ()
@@ -186,7 +186,10 @@ unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
     (NumTy i, NumTy i')
       | i == i'   -> pure ()
-      | otherwise -> trace "Mismatch in type widths" $ pure ()
+      | otherwise ->
+        trace ("Mismatch in type widths for " ++ show (PP.pretty tv) ++ ": "
+               ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2))
+        $ pure ()
 
     (PtrTy tv1', PtrTy tv2') -> addTyVarEq' tv1' tv2'
 

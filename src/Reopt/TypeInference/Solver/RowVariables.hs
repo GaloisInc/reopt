@@ -50,6 +50,7 @@ replaceRowExprPreservingShift (RowExprVar _) e = e
 replaceRowExprPreservingShift (RowExprShift o _) e = shiftRowExpr o e
 
 shiftRowExpr :: Offset -> RowExpr -> RowExpr
+shiftRowExpr 0 re = re
 shiftRowExpr s (RowExprVar v) = RowExprShift s v
 shiftRowExpr s (RowExprShift s' v) = RowExprShift (s + s') v
 

@@ -23,7 +23,7 @@ import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
 import           Reopt.TypeInference.Solver.RowVariables  (Offset (Offset),
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar (RowVar),
-                                                           rowVar)
+                                                           rowVar, rowExprVar, rowExprShift, shiftRowExpr)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar (TyVar))
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy', TyF (NumTy))
 import           Reopt.TypeInference.Solver.UnionFindMap  (UnionFindMap)
@@ -88,10 +88,9 @@ addRowExprEq :: RowExpr -> Map Offset TyVar -> RowExpr ->
                SolverM ()
 addRowExprEq (RowExprVar r1) os r2 = addRowVarEq r1 os r2
 addRowExprEq (RowExprShift o r1) os r2 = do
-  r3 <- freshRowVar
-  -- This terminates as eventually we will hit the above with r3
-  addRowExprEq r2 mempty (rowVar r3)
-  addRowVarEq r1 (shiftOffsets (- o) os) (rowVar r3)
+  r3 <- rowVar <$> freshRowVar
+  addRowVarEq r1 (shiftOffsets (- o) os) r3
+  addRowVarEq (rowExprVar r2) mempty (shiftRowExpr (rowExprShift r2 - o) r3)
 
 addPtrAdd :: TyVar -> TyVar -> TyVar -> OperandClass -> SolverM ()
 addPtrAdd resTy lTy rTy oc  =
@@ -209,10 +208,11 @@ instance PP.Pretty ConstraintSolvingState where
      in PP.vsep
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
+            row "PtrAddCs" $ map PP.pretty $ ctxPtrAddCs ctx,
             row "Type Var Map" [PP.pretty (ctxTyVars ctx)]
           ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
 shiftOffsets 0 m = m
 shiftOffsets o m =
-  Map.fromList [ (k - o, v) | (k, v) <- Map.toList m, k >= o ]
+  Map.fromList [ (k - o, v) | (k, v) <- Map.toList m ]
