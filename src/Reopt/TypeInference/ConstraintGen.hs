@@ -19,22 +19,22 @@ module Reopt.TypeInference.ConstraintGen
   , showInferredTypes
   ) where
 
-import           Control.Lens                    (At (at), Getting, Ixed (ix),
-                                                  Lens', makeLenses, non, use,
-                                                  view,
-                                                  (<>=), (?=), (^?))
-import           Control.Monad.Reader            (MonadReader (ask),
-                                                  ReaderT (..), join, when,
-                                                  withReaderT, zipWithM_)
-import qualified Data.ByteString.Char8           as BSC
-import           Data.Foldable                   (traverse_)
-import           Data.List                       (intercalate)
-import           Data.Map.Strict                 (Map)
-import qualified Data.Map.Strict                 as Map
-import           Data.Maybe                      (fromMaybe, isJust)
-import           Data.Traversable                (for)
-import qualified Data.Vector                     as V
-import qualified Prettyprinter                   as PP
+import           Control.Lens               (At (at), Getting, Ixed (ix), Lens',
+                                             makeLenses, non, use, view, (<>=),
+                                             (?=), (^?))
+import           Control.Monad.Reader       (MonadReader (ask), ReaderT (..),
+                                             join, when, withReaderT, zipWithM_)
+import           Control.Monad.State.Strict (StateT, evalStateT)
+import           Control.Monad.Trans        (lift)
+import qualified Data.ByteString.Char8      as BSC
+import           Data.Foldable              (traverse_)
+import           Data.List                  (intercalate)
+import           Data.Map.Strict            (Map)
+import qualified Data.Map.Strict            as Map
+import           Data.Maybe                 (fromMaybe, isJust)
+import           Data.Traversable           (for)
+import qualified Data.Vector                as V
+import qualified Prettyprinter              as PP
 
 import           Data.Macaw.CFG                  (App (..), ArchAddrWidth,
                                                   ArchFn, ArchSegmentOff)
@@ -67,9 +67,6 @@ import           Reopt.TypeInference.Solver
   , runSolverM, numTy, unifyConstraints, ptrAddTC, OperandClass (OCSymbolic, OCOffset, OCPointer)
   , ConstraintSolution(..), StructName)
 import qualified Reopt.TypeInference.Solver as S
-
-import Control.Monad.State.Strict (StateT, evalStateT)
-import Control.Monad.Trans (lift)
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -281,7 +278,7 @@ makeLenses ''CGenGlobalContext
 data CGenModuleContext arch = CGenModuleContext
   { _cgenFunTypes    :: Map (ArchSegmentOff arch) (FunType arch)
   , -- | External functions (only named).
-    _cgenExtFunTypes :: Map BSC.ByteString (FunType arch)
+    _cgenNamedFunTypes :: Map BSC.ByteString (FunType arch)
 
   -- (keep this last for convenient partial application)
 
@@ -475,10 +472,10 @@ funTypeAtAddr :: forall arch.
   CGenM CGenBlockContext arch (Maybe (FunType arch))
 funTypeAtAddr saddr = do
   moduleContext <- askContext (cgenFunctionContext . cgenModuleContext)
-  let ftypes    = view cgenFunTypes moduleContext
-  let extftypes = view cgenExtFunTypes moduleContext
-  let mem       = view (cgenGlobalContext . cgenMemory) moduleContext
-  let aWidth    = memAddrWidth mem
+  let ftypes      = view cgenFunTypes moduleContext
+  let namedftypes = view cgenNamedFunTypes moduleContext
+  let mem         = view (cgenGlobalContext . cgenMemory) moduleContext
+  let aWidth      = memAddrWidth mem
 
   case saddr of
     FnConstantValue _ v -> do
@@ -487,7 +484,7 @@ funTypeAtAddr saddr = do
                   absoluteAddr (fromInteger v)
       -- FIXME
       pure (flip Map.lookup ftypes =<< asSegmentOff mem faddr)
-    FnFunctionEntryValue _ fn -> pure (Map.lookup fn extftypes)
+    FnFunctionEntryValue _ fn -> pure (Map.lookup fn namedftypes)
     _ -> pure Nothing
 
 --------------------------------------------------------------------------------
@@ -808,7 +805,8 @@ genCall fn args m_ret = do
   m_ftyp <- funTypeAtAddr fn
 
   case m_ftyp of
-    Nothing -> warn "Couldn't determine target of call"
+    Nothing -> warn ("Couldn't determine target of call to "
+                      ++ show (PP.pretty fn) ++ " (" ++ show fn ++ ")")
     Just ftyp -> do
       -- Arguments
       zipWithM_ go args (funTypeArgs ftyp)
@@ -929,17 +927,20 @@ genModuleConstraints m mem = runCGenM mem $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
-  -- traceM (show mem)
-
   let doDecl d = do
         fty <- functionTypeToFunType (funDeclName d) (funDeclType d)
         pure ((funDeclAddr d, fty), (funDeclName d, fty))
 
   (declAddrs, declSyms) <- unzip <$> mapM doDecl (recoveredDecls m)
-  -- FIXME: how do symbolic calls work?
-  defAddrs <- mapM (\f -> (,) (fnAddr f) <$> functionTypeToFunType (fnName f) (fnType f)) (recoveredDefs m)
 
-  let symMap = Map.fromList declSyms -- FIXME: not sure these are the correct functinos
+  -- Sometimes definitions are called via their name.
+  let doDef d = do
+        fty <- functionTypeToFunType (fnName d) (fnType d)
+        pure ((fnAddr d, fty), (fnName d, fty))
+
+  (defAddrs, defSyms) <- unzip <$> mapM doDef (recoveredDefs m)
+
+  let symMap  = Map.fromList (defSyms ++ declSyms)
       addrMap = Map.fromList (defAddrs ++ declAddrs)
 
   withinContext

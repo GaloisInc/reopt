@@ -119,8 +119,19 @@ finaliseCyclic :: [(TyF NoRow TyVar, TyVar, [TyVar])] ->
 finaliseCyclic cs s
   -- We have cycles even after removing records, perhaps through
   -- pointers, so we just drop the types (i.e., make Unknown)
-  | any isCyclic sccs = s
-  | otherwise = over (field @"csNamedStructs") (namedDefs ++) sWithNonRecs
+  | any isCyclic sccs =
+      trace ("Ignoring too cyclic types " ++
+             show (PP.list
+                   [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
+                   | (ty, n, _) <- cs
+                   ])) s
+  | otherwise =
+      -- trace ("Keeping cyclic types " ++
+      --        show (PP.list
+      --              [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
+      --              | (ty, n, _) <- cs
+      --              ])) $
+      over (field @"csNamedStructs") (namedDefs ++) sWithNonRecs
   where
     namedDefs = [ (tyVarToStructName tv, FTy $ resolveOne <$> ty)
                 | (ty, tv, _) <- recs ]
@@ -339,7 +350,8 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
           | rowExprVar rr == rowExprVar lr
           , rowExprShift rr /= rowExprShift lr + o
           -- FIXME: This is a temporary fix for *p++
-            -> pure Nothing
+            -> trace ("Dropping add equality " ++ show (PP.pretty c)) $
+               pure Nothing
         _ -> structOffsetCase rptv' lptv' o
 
     -- Pointer argument cases, resolving the constraint.
