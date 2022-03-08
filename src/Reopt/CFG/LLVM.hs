@@ -1719,9 +1719,13 @@ moduleForFunctions archOps genOpts recMod constraints =
           let fId = funId (fnAddr f) (Just (fnName f))
           (d, ma) <- defineFunction archOps genOpts constraints f
           pure (d, (fId, ma))
+      -- FIXME: this is repeated in a bunch of places
+      ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      namedTypes = [ L.TypeDecl (L.Ident s) (tyToLLVMType ptrWidth ty)
+                   | (s, ty) <- mcNamedTypes constraints ]
       llvmMod =  L.Module { L.modSourceName = Nothing
                           , L.modDataLayout = []
-                          , L.modTypes      = []
+                          , L.modTypes      = namedTypes
                           , L.modNamedMd    = []
                           , L.modUnnamedMd  = []
                           , L.modGlobals    = []
