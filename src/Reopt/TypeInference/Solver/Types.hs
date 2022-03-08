@@ -18,7 +18,8 @@ import           Reopt.TypeInference.Solver.RowVariables  (NoRow (NoRow),
                                                            Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
+import           Reopt.TypeInference.Solver.TypeVariables (TyVar, tyVarInt)
+import Data.String (fromString)
 
 
 data TyF rvar f
@@ -95,13 +96,23 @@ instance FreeRowVars ITy where
     ITy   ty  -> freeRowVars ty
 
 -- | Final types resulting from inference (i.e., no free type variables).
-data FTy = UnknownTy | FTy (TyF NoRow FTy)
+
+type StructName = String
+
+data FTy =
+  UnknownTy
+  | NamedStruct StructName
+  | FTy (TyF NoRow FTy)
   deriving (Eq, Ord, Show)
-  
+
 instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"
+    NamedStruct n -> fromString n
     FTy ty  -> PP.pretty ty
+
+tyVarToStructName :: TyVar -> StructName
+tyVarToStructName tv = "%struct.named.t" ++ show (tyVarInt tv)
 
 prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
 prettyMap ppKey ppValue =
@@ -117,8 +128,11 @@ recTyByteWidth ptrSz = offsetAfterLast . last
   where
     offsetAfterLast (o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
+-- | This shoold only be called on types which can occur within a
+-- RecTy, i.e., not records.
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
+tyByteWidth _ptrSz NamedStruct {} = error "Saw a named struct in tyByteWidth"
 tyByteWidth ptrSz (FTy ty) =
   case ty of
     NumTy n -> fromIntegral n `div` 8
@@ -138,46 +152,9 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
 tyToLLVMType :: Int -> FTy -> L.Type
 tyToLLVMType ptrSz UnknownTy =
   L.PrimType (L.Integer (fromIntegral ptrSz))
+tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (fromString s)
 tyToLLVMType ptrSz (FTy ty) =
   case ty of
     NumTy n -> L.PrimType (L.Integer (fromIntegral n))
     PtrTy typ -> L.PtrTo (tyToLLVMType ptrSz typ)
     RecTy flds NoRow -> recTyToLLVMType ptrSz (Map.assocs flds)
-
--- iRecTy :: [(Natural, ITy)] -> RowVar -> ITy
--- iRecTy flds = ITy $ RecTy (Map.fromList (map (first Offset) flds))
-
--- fRecTy :: [(Natural, FTy)] -> FTy
--- fRecTy flds = FTy $ RecTy (Map.fromList (map (first Offset) flds)) NoRow
-
--- | Checks if two types are inconsistent. Note that @inconsistent t1 t2 = False@
--- does not imply @t1@ and @t2@ are equivalent. In particular, records need only
--- agree on common fields, type variables aren't necessarily inconsistent, etc.
-
--- inconsistent :: forall x r. TyF r f -> TyF x f -> Bool
--- inconsistent = check
---   where
---     check :: Ty x r -> Ty x r -> Bool
---     check type1 type2 =
---       case (type1, type2) of
---         (UnknownTy {}, _) -> False
---         (_, UnknownTy {}) -> False
---         (NumTy {}, NumTy {}) -> False
---         (PtrTy {}, NumTy {}) -> True
---         (NumTy {}, PtrTy {}) -> True
---         (PtrTy t1, PtrTy t2) -> check t1 t2
---         (RecTy fs1 _r1, RecTy fs2 _r2) -> checkCommonFields fs1 fs2
---         (RecTy fs1 _r1, t2) -> case Map.lookup (Offset 0) fs1 of
---           Nothing -> False
---           Just ty0 -> check ty0 t2
---         (t1, RecTy fs2 _r2) -> case Map.lookup (Offset 0) fs2 of
---           Nothing -> False
---           Just ty0 -> check t1 ty0
---     checkCommonFields :: Map Offset (Ty x r) -> Map Offset (Ty x r) -> Bool
---     checkCommonFields fs1 fs2 =
---       any
---         ( \(f, fTy) -> case Map.lookup f fs2 of
---             Nothing -> False
---             Just fTy' -> check fTy fTy'
---         )
---         $ Map.toList fs1

@@ -3,13 +3,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Reopt.TypeInference.Solver.Solver
-  ( unifyConstraints,
+  ( unifyConstraints
+  , ConstraintSolution (..)
+
   )
 where
 
-import           Control.Lens          ((%%~), (%=), (.=), (<<+=), (<<.=))
+import Data.List (partition)
+import           Control.Lens          ((%%~), (%=), (.=), (<<+=), (<<.=), view, _1, (%~), over)
 import           Control.Monad         (void, when)
 import           Control.Monad.State   (MonadState (get), gets)
 import           Data.Bifunctor        (first)
@@ -21,7 +25,7 @@ import qualified Data.Set              as Set
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
-import           Data.Graph            (SCC (..))
+import           Data.Graph            (SCC (..), flattenSCCs)
 import           Data.Graph.SCC        (stronglyConnCompR)
 
 import           Reopt.TypeInference.Solver.Constraints             (EqC (..),
@@ -52,47 +56,97 @@ import           Reopt.TypeInference.Solver.Types                   (FTy (..),
                                                                      FreeTyVars (freeTyVars),
                                                                      ITy (..),
                                                                      ITy',
-                                                                     TyF (..))
+                                                                     TyF (..), StructName, tyVarToStructName, prettyMap)
 import           Reopt.TypeInference.Solver.UnionFindMap            (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap            as UM
+import GHC.Generics (Generic)
 
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
 
+data ConstraintSolution = ConstraintSolution
+  { csTyVars :: Map TyVar FTy
+  , csNamedStructs :: [(StructName, FTy)]
+  }
+  deriving (Eq, Show, Generic)
+
 -- FIXME: probably want to export the Eqv map somehow
-unifyConstraints :: SolverM (Map TyVar FTy)
+unifyConstraints :: SolverM ConstraintSolution
 unifyConstraints = do
   processAtomicConstraints
   m <- gets ctxTyVars
   pure (finalizeTypeDefs m)
 
 -- FIXME: this breaks the abstraction of the UnionFindMap.
-finalizeTypeDefs :: UnionFindMap TyVar ITy' -> Map TyVar FTy
+finalizeTypeDefs :: UnionFindMap TyVar ITy' -> ConstraintSolution
 finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
-  Map.union eqvRes defRes -- Maps should be disjoint
+  over (field @"csTyVars") (Map.union eqvRes) preSoln
   where
     -- Include equivalences.
     eqvRes = Map.fromSet mkOneEqv (Map.keysSet eqvs)
+
     mkOneEqv k =
       let (k', _) = UM.lookupRep k um
-      in resolveOne defRes k'
+      in resolveOne (csTyVars preSoln) k'
 
-    defRes = foldl goSCC mempty sccs
+    preSoln = foldl goSCC (ConstraintSolution mempty mempty) sccs
+
+    -- duplicated from below.
     resolveOne m t = Map.findWithDefault UnknownTy t m
 
-    goSCC m  (AcyclicSCC (ty, tv, _)) = Map.insert tv (FTy $ resolveOne m <$> ty) m
-    goSCC m (CyclicSCC cs) =
-      let pcs = PP.list [ PP.pretty v PP.<+> "->" PP.<+> PP.pretty ty | (ty, v, _) <- cs ]
-      in trace ("FIXME: cycles detected" ++ show pcs) m
+    goSCC r (AcyclicSCC (ty, tv, _)) = finaliseTyF tv ty r
+    goSCC r (CyclicSCC cs) = finaliseCyclic cs r
 
     sccs :: [ SCC (TyF NoRow TyVar, TyVar, [TyVar]) ]
     sccs  = stronglyConnCompR nodes
 
     normTyVar t = fst (UM.lookupRep t um)
 
-    nodes = [ (finalizeRowVar ty, tv, Set.toList (freeTyVars ty))
-            | (tv, ty) <- Map.toList (fmap normTyVar <$> defs) ]
+    nodes = [ (ty, tv, Set.toList (freeTyVars ty))
+            | (tv, ty0) <- Map.toList defs -- tv is a rep. var.
+            , let ty = finalizeRowVar (normTyVar <$> ty0) ]
+
+finaliseTyF :: TyVar -> TyF NoRow TyVar ->
+               ConstraintSolution -> ConstraintSolution
+finaliseTyF tv ty =
+  field @"csTyVars" %~ \m -> Map.insert tv (FTy $ resolveOne m <$> ty) m
+  where
+    resolveOne m t = Map.findWithDefault UnknownTy t m
+
+finaliseCyclic :: [(TyF NoRow TyVar, TyVar, [TyVar])] ->
+                  ConstraintSolution -> ConstraintSolution
+finaliseCyclic cs s
+  -- We have cycles even after removing records, perhaps through
+  -- pointers, so we just drop the types (i.e., make Unknown)
+  | any isCyclic sccs = s
+  | otherwise = over (field @"csNamedStructs") (namedDefs ++) sWithNonRecs
+  where
+    namedDefs = [ (tyVarToStructName tv, FTy $ resolveOne <$> ty)
+                | (ty, tv, _) <- recs ]
+    
+    -- Perform this topologically to ensure we have defs before we see
+    -- them.
+    sWithNonRecs =
+      foldl (\s' (ty, v, _) -> finaliseTyF v ty s') sWithNamed nonRecs'
+
+    sWithNamed = over (field @"csTyVars") (Map.union named) s
+
+    named = Map.fromList [ (tv, NamedStruct $ tyVarToStructName tv)
+                         | (_, tv, _) <- recs ]
+
+    (recs, nonRecs) = partition (isRecTy . view _1) cs
+
+    sccs = stronglyConnCompR nonRecs
+    nonRecs' = flattenSCCs sccs
+
+    resolveOne t = Map.findWithDefault UnknownTy t (csTyVars sWithNonRecs)
+
+    isRecTy RecTy {} = True
+    isRecTy _        = False
+
+    isCyclic CyclicSCC {} = True
+    isCyclic _            = False
 
 finalizeRowVar :: TyF r f -> TyF NoRow f
 finalizeRowVar (NumTy sz) = NumTy sz
@@ -160,13 +214,13 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
 
     restore :: [PtrAddC] -> SolverM ()
     restore ptrAdds = field @"ctxPtrAddCs" .= ptrAdds
-    
+
     go acc [] = restore acc -- finished here, we didn't so anything.
     go acc (c : cs) = do
       r <- solvePtrAdd c
       case r of
         -- If we did something, put back the unsolved constraints and
-        -- keep going (note we put the seen constraints on the end)        
+        -- keep going (note we put the seen constraints on the end)
         Nothing -> restore (cs ++ acc) >> processAtomicConstraints
         -- Nothing happened. c == c' here, although we might want to
         -- normalise c in future (e.g. update to the rep. ty var).
@@ -216,7 +270,7 @@ unifyTypes tv ty1 ty2 =
 -- PtrAdd solving
 
 -- | This solves pointer-sized addition, where the result may or may
--- not be a pointer, dep. on its use and on the types of arguments. 
+-- not be a pointer, dep. on its use and on the types of arguments.
 solvePtrAdd :: PtrAddC -> SolverM (Maybe PtrAddC)
 solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
   (rv, m_rty) <- lookupTyVar (ptrAddResult c)
@@ -269,7 +323,7 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
     -- won't hav ethe same type variables, only the same row variable.
 
     -- Handles the recursive while () *p++ case.  If we try to unify
-    -- 
+    --
     -- shift k r = shift j r
     --
     -- k + off =/= r
@@ -287,7 +341,7 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
           -- FIXME: This is a temporary fix for *p++
             -> pure Nothing
         _ -> structOffsetCase rptv' lptv' o
-     
+
     -- Pointer argument cases, resolving the constraint.
     --  1. The lhs is a pointer, but the rhs is symbolic.  In this
     --     case we under constrain the output, This is probably an
@@ -350,12 +404,12 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
       pure Nothing
 
     --  2. The result is a pointer, the lhs is a number, the rhs is
-    --  then a pointer.  
+    --  then a pointer.
     (Just PtrTy {}, Just NumTy {}, _, _) -> do
       void $ isPtr rhsv -- Under constrained
       pure Nothing
 
-    --  3. LHS is a number, we can infer RHS is a pointer.    
+    --  3. LHS is a number, we can infer RHS is a pointer.
     (Just PtrTy {}, _, _, OCPointer) -> do
       void $ isPtr rhsv -- Under constrained
       isNum lhsv
@@ -374,5 +428,16 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
       addTyVarEq tv (ITy (PtrTy tv'))
       pure tv'
 
+--------------------------------------------------------------------------------
+-- Instances
 
+instance PP.Pretty ConstraintSolution where
+  pretty soln =
+    PP.vsep $ prettyDefs (csNamedStructs soln)
+           ++ prettyMap PP.pretty PP.pretty (csTyVars soln)
+    where
+      prettyDefs ds =
+         [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
+         | (n, ty) <- ds
+         ]
 

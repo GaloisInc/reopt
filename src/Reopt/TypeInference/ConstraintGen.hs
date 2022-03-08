@@ -64,8 +64,10 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   fnBlocks)
 import           Reopt.TypeInference.Solver
   (TyVar, Ty, FTy, varTy, eqTC, ptrTC, SolverM
-  , runSolverM, numTy, unifyConstraints, ptrAddTC, OperandClass (OCSymbolic, OCOffset, OCPointer))
+  , runSolverM, numTy, unifyConstraints, ptrAddTC, OperandClass (OCSymbolic, OCOffset, OCPointer)
+  , ConstraintSolution(..), StructName)
 import qualified Reopt.TypeInference.Solver as S
+
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Control.Monad.Trans (lift)
 
@@ -904,8 +906,9 @@ data ModuleConstraints arch = ModuleConstraints
   -- , mcTyConstraints :: [TyConstraint]
     -- | The final mapping of type variables to their inferred type
   , mcTypeMap :: Map TyVar FTy
+    -- | Type names used by @mcTypeMap@
+  , mcNamedTypes :: [(StructName, FTy)]
 }
-
 
 showInferredTypes :: ModuleConstraints arch -> String
 showInferredTypes mc =
@@ -953,5 +956,6 @@ genModuleConstraints m mem = runCGenM mem $ do
                          , mcExtFunTypes   = symMap
                          , mcAssignTyVars  = tyVars
                          , mcWarnings      = warns
-                         , mcTypeMap       = tyMap
+                         , mcTypeMap       = csTyVars tyMap
+                         , mcNamedTypes    = csNamedStructs tyMap
                          }
