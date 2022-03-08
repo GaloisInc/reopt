@@ -881,7 +881,7 @@ performReopt args = do
       Nothing -> pure ()
       Just path -> do
         -- FIXME: should we add another file type?
-        reoptWrite FunsFileType path $ \h ->
+        reoptWriteTextual FunsFileType path $ \h ->
           PP.hPutDoc h $ PP.vsep $
             prettyWarnings ++
             prettyDefs ++

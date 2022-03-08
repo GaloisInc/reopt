@@ -15,6 +15,7 @@ module Reopt
     runReoptM,
     reoptRunInit,
     reoptWrite,
+    reoptWriteTextual,    
     reoptWriteBuilder,
     reoptWriteByteString,
     reoptWriteStrictByteString,
@@ -364,6 +365,14 @@ reoptLog e = ReoptM $ ReaderT $ \logger -> lift (logger e)
 
 --reoptEnd :: ReoptM arch r ()
 --reoptEnd = reopt
+
+reoptWriteTextual :: ReoptFileType -> FilePath -> (Handle -> IO ()) -> ReoptM arch r ()
+reoptWriteTextual tp path f = 
+  ReoptM $ ReaderT $ \_ -> ContT $ \c -> do
+    mr <- try $ withFile path WriteMode f
+    case mr of
+      Left e ->  pure $ Left $ ReoptWriteError tp path e
+      Right () -> c ()
 
 reoptWrite :: ReoptFileType -> FilePath -> (Handle -> IO ()) -> ReoptM arch r ()
 reoptWrite tp path f =
