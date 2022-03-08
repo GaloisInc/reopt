@@ -46,7 +46,7 @@ import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVar
                                                                      substRowVarInITy',
                                                                      unifyRecTy)
 import           Reopt.TypeInference.Solver.RowVariables            (NoRow (NoRow),
-                                                                     RowExpr (..))
+                                                                     RowExpr (..), rowExprVar, rowExprShift)
 import           Reopt.TypeInference.Solver.TypeVariables           (TyVar)
 import           Reopt.TypeInference.Solver.Types                   (FTy (..),
                                                                      FreeTyVars (freeTyVars),
@@ -82,7 +82,9 @@ finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
     resolveOne m t = Map.findWithDefault UnknownTy t m
 
     goSCC m  (AcyclicSCC (ty, tv, _)) = Map.insert tv (FTy $ resolveOne m <$> ty) m
-    goSCC _m (CyclicSCC _ ) = error "FIXME: cycles detected"
+    goSCC m (CyclicSCC cs) =
+      let pcs = PP.list [ PP.pretty v PP.<+> "->" PP.<+> PP.pretty ty | (ty, v, _) <- cs ]
+      in trace ("FIXME: cycles detected" ++ show pcs) m
 
     sccs :: [ SCC (TyF NoRow TyVar, TyVar, [TyVar]) ]
     sccs  = stronglyConnCompR nodes
@@ -149,16 +151,26 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
       Just c  -> substEqRowC c >> processAtomicConstraints
       Nothing -> ptrAddSolver
   where
+   -- This solver will solve one at a time, which is important to get
+   -- around the +p++ case.  We solve a single ptr add, then propagate
+   -- the new eq and roweq constraints.
     ptrAddSolver = do
-      ptrAdds <- field @"ctxPtrAddCs" <<.= mempty -- get constraints and clear them
-      m_ptrAdds' <- traverse solvePtrAdd ptrAdds
-      let (didWork, ptrAdds') = foldl goOne (False, []) m_ptrAdds'
-      field @"ctxPtrAddCs" .= ptrAdds'
+      ptrAdds <- field @"ctxPtrAddCs" <<.= mempty -- get constraints and c
+      go [] ptrAdds
 
-      when didWork processAtomicConstraints
-
-    goOne (_, acc)       Nothing       = (True, acc)
-    goOne (didWork, acc) (Just ptrAdd) = (didWork, ptrAdd : acc)
+    restore :: [PtrAddC] -> SolverM ()
+    restore ptrAdds = field @"ctxPtrAddCs" .= ptrAdds
+    
+    go acc [] = restore acc -- finished here, we didn't so anything.
+    go acc (c : cs) = do
+      r <- solvePtrAdd c
+      case r of
+        -- If we did something, put back the unsolved constraints and
+        -- keep going (note we put the seen constraints on the end)        
+        Nothing -> restore (cs ++ acc) >> processAtomicConstraints
+        -- Nothing happened. c == c' here, although we might want to
+        -- normalise c in future (e.g. update to the rep. ty var).
+        Just c' -> go (c' : acc) cs
 
 solveEqC :: EqC -> SolverM ()
 solveEqC eqc = do
@@ -211,6 +223,18 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
   (lhsv, m_lhsTy) <- lookupTyVar (ptrAddLHS c)
   (rhsv, m_rhsTy) <- lookupTyVar (ptrAddRHS c)
 
+  -- If we see ptr' = ptr + off, this is what we do. Note we have
+  -- m_rty = Just (PtrTy rptrv), m_lhsTy = Just (PtrTy lptrv), up to
+  -- eqv.
+  let structOffsetCase rptrv lptrv off = do
+        rowv <- freshRowVar
+        addTyVarEq rptrv (ITy $ RecTy mempty (RowExprShift off rowv))
+        addTyVarEq lptrv (ITy $ RecTy mempty (RowExprVar       rowv))
+
+        -- rhsv is a number
+        isNum rhsv
+        pure Nothing -- In any case, we are done with this constraint.
+
   -- Note: try to avoid a default pattern here.
   case (m_rty, m_lhsTy, m_rhsTy, ptrAddClass c) of
     -- These shouldn't happen, added for completeness
@@ -239,6 +263,31 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
       addTyVarEq' rv rhsv
       pure Nothing
 
+    -- The *p++ case, where we are looping through via a pointer, and
+    -- we thus have a constant offset.  This boils down to x = x +
+    -- off, although there may be a bit of work to get here, and we
+    -- won't hav ethe same type variables, only the same row variable.
+
+    -- Handles the recursive while () *p++ case.  If we try to unify
+    -- 
+    -- shift k r = shift j r
+    --
+    -- k + off =/= r
+    --
+    -- The we are in the array stride case and can set the result to
+    -- the first operand (more or less?)
+    (Just (PtrTy rptv), Just (PtrTy lptv), _, OCOffset o) -> do
+      (rptv', rrec) <- lookupTyVar rptv
+      (lptv', lrec) <- lookupTyVar lptv
+
+      case (rrec, lrec) of
+        (Just (RecTy _ rr), Just (RecTy _ lr))
+          | rowExprVar rr == rowExprVar lr
+          , rowExprShift rr + o /= rowExprShift lr
+          -- FIXME: This is a temporary fix for *p++
+            -> pure Nothing
+        _ -> structOffsetCase rptv' lptv' o
+     
     -- Pointer argument cases, resolving the constraint.
     --  1. The lhs is a pointer, but the rhs is symbolic.  In this
     --     case we under constrain the output, This is probably an
@@ -265,13 +314,7 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
     --       rhsTy = num64
     (_, Just (PtrTy ptv), _, OCOffset o) -> do
       rptv <- isPtr rv
-      rowv <- freshRowVar
-      addTyVarEq rptv (ITy $ RecTy mempty (RowExprShift o rowv))
-      addTyVarEq ptv  (ITy $ RecTy mempty (RowExprVar     rowv))
-
-      -- rhsv is a number
-      isNum rhsv
-      pure Nothing
+      structOffsetCase rptv ptv o
 
     --  4. We need the rhs to be a pointer but it is a (small)
     --     constant.  FIXME: This should probably not happen?
@@ -298,13 +341,7 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
     --     (3) above
     (Just (PtrTy rptv), _, _, OCOffset o) -> do
       ptv <- isPtr lhsv
-      rowv <- freshRowVar
-      addTyVarEq rptv (ITy $ RecTy mempty (RowExprShift o rowv))
-      addTyVarEq ptv  (ITy $ RecTy mempty (RowExprVar     rowv))
-
-      -- rhsv is a number
-      isNum rhsv
-      pure Nothing
+      structOffsetCase rptv ptv o
 
     --  2. The result is a pointer, the rhs is a number, the rhs is
     --  then a pointer.
