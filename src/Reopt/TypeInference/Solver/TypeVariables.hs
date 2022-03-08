@@ -9,7 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Reopt.TypeInference.Solver.TypeVariables
-  ( TyVar (TyVar),
+  ( TyVar (TyVar, tyVarInt),
   )
 where
 

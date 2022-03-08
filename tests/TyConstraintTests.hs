@@ -23,15 +23,15 @@ import Reopt.TypeInference.Solver
    Ty(..),
    Ty, FTy,
    unifyConstraints,
-   eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy
-  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy, ptrAddTC, OperandClass (OCOffset), ptrTC)
+   eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy, ConstraintSolution (..)
+  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, pattern FNamedStruct
+  , structTy, ptrAddTC, OperandClass (OCOffset), ptrTC)
 
 import Data.Foldable (traverse_)
 import Reopt.TypeInference.Solver.Monad (freshRowVar, setTraceUnification)
 -- import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar, RowExpr (RowExprShift))
 -- import Reopt.TypeInference.Solver.Types (prettyMap, TyF (RecTy))
 import Reopt.TypeInference.Solver.RowVariables (Offset, RowVar)
-import Reopt.TypeInference.Solver.Types (prettyMap)
 
 -- x0,x1,x2,x3,x4,_x5  :: TyVar
 -- x0Ty,x1Ty,x2Ty,x3Ty,x4Ty,_x5Ty  :: ITy
@@ -60,6 +60,7 @@ constraintTests :: T.TestTree
 constraintTests = T.testGroup "Type Constraint Tests"
   [ eqCTests
   , ptrCTests
+  , recursiveTests
   ]
 
 num8, num32, num64 :: Ty
@@ -449,14 +450,34 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       -- to return a value once array stride detection produces a
       -- reasonable type.
       pure []
-    
+  ]
+
+-- t4 = do
+--       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--       let x0Ty = varTy x0
+--           x1Ty = varTy x1
+--           x2Ty = varTy x2
+--           x3Ty = varTy x3
+
+--       r0 <- freshRowVar
+--       eqTC x0Ty (recTy [(0, ptrTy x0Ty)] r0)
+
+recursiveTests :: T.TestTree
+recursiveTests = T.testGroup "Recursive Type Tests"
+  [  mkTest "Recursive linked list" $ do
+      x0 <- tv
+      let x0Ty = varTy x0
+
+      r0 <- freshRowVar
+      eqTC x0Ty (recTy [(0, ptrTy x0Ty)] r0)
+      pure [(x0, FNamedStruct "%struct.named.t0")]
   ]
 
 ghciTest :: Bool -> SolverM a -> PP.Doc d
-ghciTest doTrace t = runSolverM 64 . fmap PP.vsep $ do
+ghciTest doTrace t = PP.pretty . runSolverM 64 $ do
   setTraceUnification doTrace
-  t >> unifyConstraints >>= pure . prettyMap PP.pretty PP.pretty
-
+  t >> unifyConstraints
+  
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
   deriving (Eq)
 
@@ -472,6 +493,6 @@ mkTest name m = T.testCase name (runSolverM 64 test)
     test = do
       expected <- m
       res      <- unifyConstraints
-      let actual = [ (k, Map.findWithDefault FUnknownTy k res)
+      let actual = [ (k, Map.findWithDefault FUnknownTy k (csTyVars res))
                    | (k, _) <- expected ]
       pure (TypeEnv actual T.@?= TypeEnv expected)

@@ -868,12 +868,20 @@ performReopt args = do
 
     -- Generate constraints
     let moduleConstraints = genModuleConstraints recMod (memory discState)
+
+    -- FIXME: move
+    let prettyDefs ds =
+          [ PP.pretty n PP.<+> "=" PP.<+> PP.pretty ty
+          | (n, ty) <- ds
+          ]    
     case typedFnsExportPath args of
       Nothing -> pure ()
       Just path -> do
         -- FIXME: should we add another file type?
-        reoptWrite FunsFileType path $ \h -> do
-          mapM_ (PP.hPutDoc h . ppFunction moduleConstraints) (recoveredDefs recMod)
+        reoptWrite FunsFileType path $ \h ->
+          PP.hPutDoc h $ PP.vsep $ \
+            prettyDefs (mcNamedTypes moduleConstraints)
+            ++ map (ppFunction moduleConstraints) (recoveredDefs recMod)
 
     -- set to True to dump constraints while generating LLVM, for debugging
     when False $ reoptIO $ displayConstraintsInformation moduleConstraints

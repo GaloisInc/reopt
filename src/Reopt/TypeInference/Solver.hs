@@ -5,10 +5,10 @@ module Reopt.TypeInference.Solver
     SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, ptrAddTC,
     OperandClass (..),
-    unifyConstraints,
+    unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
     -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FRecTy, pattern FUnknownTy,
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FRecTy, pattern FUnknownTy, pattern FNamedStruct, 
     -- Testing
   ) where
 
@@ -19,7 +19,7 @@ import Reopt.TypeInference.Solver.RowVariables
   ( RowExpr (RowExprVar), RowVar(..), Offset, NoRow (NoRow)
   )
 import Reopt.TypeInference.Solver.Solver
-  ( unifyConstraints,
+  ( unifyConstraints, ConstraintSolution(..)
   )
 import Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (..),
@@ -27,7 +27,7 @@ import Reopt.TypeInference.Solver.TypeVariables
 import Reopt.TypeInference.Solver.Types
   ( ITy(..),
     TyF(..),
-    FTy(..), tyToLLVMType
+    FTy(..), tyToLLVMType, StructName
   )
 import Reopt.TypeInference.Solver.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar, ptrWidthNumTy, addPtrAdd)
 import Reopt.TypeInference.Solver.Constraints (OperandClass(..))
@@ -105,3 +105,5 @@ pattern FPtrTy ty = FTy (PtrTy ty)
 pattern FUnknownTy :: FTy
 pattern FUnknownTy = UnknownTy
 
+pattern FNamedStruct :: StructName -> FTy
+pattern FNamedStruct s = NamedStruct s
