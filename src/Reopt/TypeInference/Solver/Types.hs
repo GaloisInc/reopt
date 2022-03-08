@@ -19,7 +19,6 @@ import           Reopt.TypeInference.Solver.RowVariables  (NoRow (NoRow),
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar, tyVarInt)
-import Data.String (fromString)
 
 
 data TyF rvar f
@@ -108,11 +107,11 @@ data FTy =
 instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"
-    NamedStruct n -> fromString n
+    NamedStruct n -> PP.pretty n
     FTy ty  -> PP.pretty ty
 
 tyVarToStructName :: TyVar -> StructName
-tyVarToStructName tv = "%struct.named.t" ++ show (tyVarInt tv)
+tyVarToStructName tv = "struct.reopt.t" ++ show (tyVarInt tv)
 
 prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
 prettyMap ppKey ppValue =
@@ -152,7 +151,7 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
 tyToLLVMType :: Int -> FTy -> L.Type
 tyToLLVMType ptrSz UnknownTy =
   L.PrimType (L.Integer (fromIntegral ptrSz))
-tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (fromString s)
+tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
 tyToLLVMType ptrSz (FTy ty) =
   case ty of
     NumTy n -> L.PrimType (L.Integer (fromIntegral n))
