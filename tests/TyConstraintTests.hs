@@ -470,7 +470,7 @@ recursiveTests = T.testGroup "Recursive Type Tests"
 
       r0 <- freshRowVar
       eqTC x0Ty (recTy [(0, ptrTy x0Ty)] r0)
-      pure [(x0, FNamedStruct "%struct.named.t0")]
+      pure [(x0, FNamedStruct "struct.reopt.t0")]
   ]
 
 ghciTest :: Bool -> SolverM a -> PP.Doc d
