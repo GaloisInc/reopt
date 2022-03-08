@@ -24,7 +24,7 @@ import Reopt.TypeInference.Solver
    Ty, FTy,
    unifyConstraints,
    eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy
-  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy, ptrAddTC, OperandClass (OCOffset))
+  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, structTy, ptrAddTC, OperandClass (OCOffset), ptrTC)
 
 import Data.Foldable (traverse_)
 import Reopt.TypeInference.Solver.Monad (freshRowVar, setTraceUnification)
@@ -283,6 +283,47 @@ eqCTests = T.testGroup "Equality Constraint Tests"
 --   eqTC x1Ty (ptrTy $ recTy [(0, num64), (8, ptrTy num64)] r0)
 --   ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
 
+
+
+-- t3 :: SolverM ()
+-- t3 = do
+--   x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--   let x0Ty = varTy x0
+--       x1Ty = varTy x1
+--       x2Ty = varTy x2
+--       x3Ty = varTy x3
+
+
+--   -- x0 = ptr (recTy {0 -> x1} (freshRow))
+--   ptrTC x1Ty x0Ty
+
+--   -- x1 is a byte  
+--   eqTC x1Ty (numTy 8)
+
+--   eqTC x2Ty num64
+--   ptrAddTC x0Ty x0Ty x2Ty (OCOffset 1)
+
+
+  
+-- t4 :: SolverM ()
+-- t4 = do
+--   x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+--   let x0Ty = varTy x0
+--       x1Ty = varTy x1
+--       x2Ty = varTy x2
+--       x3Ty = varTy x3
+
+--   -- x0 = ptr (recTy {0 -> x1} (freshRow))
+--   ptrTC x1Ty x0Ty
+--   ptrTC x1Ty x3Ty
+
+--   -- x1 is a byte  
+--   eqTC x1Ty (numTy 8)
+
+--   eqTC x2Ty num64
+--   ptrAddTC x3Ty x0Ty x2Ty (OCOffset 1)
+--   ptrAddTC x0Ty x3Ty x2Ty (OCOffset 1)
+
 ptrCTests :: T.TestTree
 ptrCTests = T.testGroup "Pointer Add Constraint Tests"
   [ mkTest "Constrained by arg" $ do
@@ -346,7 +387,69 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
            , (x1, FPtrTy (frecTy [(0, fnum64), (64, fnum32)]))
            , (x2, FPtrTy (frecTy [(0, fnum32)]))
            , (x3, FPtrTy (frecTy [(0, fnum8), (8, fnum64), (72, fnum32)]))]
+
+
+  , mkTest "Simple cycle test (liveness)" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+
+      -- x0 = ptr (recTy {0 -> x1} (freshRow))
+      ptrTC x1Ty x0Ty
+
+      -- x1 is a byte  
+      eqTC x1Ty (numTy 8)
+
+      eqTC x2Ty num64
+      ptrAddTC x0Ty x0Ty x2Ty (OCOffset 1)
+      pure [] -- Liveness
       
+  , mkTest "Nested Cycle test (liveness)" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          x3Ty = varTy x3
+
+      -- x0 = ptr (recTy {0 -> x1} (freshRow))
+      ptrTC x1Ty x0Ty
+      ptrTC x1Ty x3Ty
+
+      -- x1 is a byte  
+      eqTC x1Ty (numTy 8)
+
+      eqTC x2Ty num64
+      ptrAddTC x3Ty x0Ty x2Ty (OCOffset 1)
+      ptrAddTC x0Ty x3Ty x2Ty (OCOffset 1)
+      -- If we get here, then we have succeeded, although we may want
+      -- to return a value once array stride detection produces a
+      -- reasonable type.
+      pure []
+
+  , mkTest "Nested cycle test 2 (liveness)" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+          x3Ty = varTy x3
+
+      -- x0 = ptr (recTy {0 -> x1} (freshRow))
+      ptrTC x1Ty x0Ty
+      ptrTC x1Ty x3Ty
+
+      -- x1 is a byte  
+      eqTC x1Ty (numTy 8)
+
+      eqTC x2Ty num64
+      -- Inverted constraint order from above
+      ptrAddTC x0Ty x3Ty x2Ty (OCOffset 1)
+      ptrAddTC x3Ty x0Ty x2Ty (OCOffset 1)
+      -- If we get here, then we have succeeded, although we may want
+      -- to return a value once array stride detection produces a
+      -- reasonable type.
+      pure []
+    
   ]
 
 ghciTest :: Bool -> SolverM a -> PP.Doc d

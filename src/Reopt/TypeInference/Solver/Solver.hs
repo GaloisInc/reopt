@@ -283,7 +283,7 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
       case (rrec, lrec) of
         (Just (RecTy _ rr), Just (RecTy _ lr))
           | rowExprVar rr == rowExprVar lr
-          , rowExprShift rr + o /= rowExprShift lr
+          , rowExprShift rr /= rowExprShift lr + o
           -- FIXME: This is a temporary fix for *p++
             -> pure Nothing
         _ -> structOffsetCase rptv' lptv' o
