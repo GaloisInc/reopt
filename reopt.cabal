@@ -50,7 +50,8 @@ library
     unix,
     unordered-containers,
     utf8-string,
-    vector
+    vector,
+    GraphSCC
 
   hs-source-dirs: src
 
@@ -66,15 +67,15 @@ library
     Reopt.PltParser
     Reopt.Relinker.Binary
     Reopt.Server
-    Reopt.TypeInference.Constraints.Solving
-    Reopt.TypeInference.Constraints.Solving.Constraints
-    Reopt.TypeInference.Constraints.Solving.Monad
-    Reopt.TypeInference.Constraints.Solving.Solver
-    Reopt.TypeInference.Constraints.Solving.RowVariables
-    Reopt.TypeInference.Constraints.Solving.RowVariableSubstitution
-    Reopt.TypeInference.Constraints.Solving.TypeVariables
-    Reopt.TypeInference.Constraints.Solving.TypeVariableSubstitution
-    Reopt.TypeInference.Constraints.Solving.Types
+    Reopt.TypeInference.Solver
+    Reopt.TypeInference.Solver.Constraints
+    Reopt.TypeInference.Solver.Monad
+    Reopt.TypeInference.Solver.Solver
+    Reopt.TypeInference.Solver.RowVariables
+    Reopt.TypeInference.Solver.RowVariableSubstitution
+    Reopt.TypeInference.Solver.TypeVariables
+    Reopt.TypeInference.Solver.Types
+    Reopt.TypeInference.Solver.UnionFindMap    
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
     Reopt.TypeInference.Pretty

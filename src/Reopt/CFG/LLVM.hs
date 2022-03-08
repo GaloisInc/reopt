@@ -25,6 +25,7 @@ layer.
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Reopt.CFG.LLVM
   ( moduleForFunctions
@@ -117,7 +118,10 @@ import           Reopt.TypeInference.ConstraintGen (
     FunType (..),
     ModuleConstraints (..),
   )
-import           Reopt.TypeInference.Constraints.Solving (FTy, Ty(..), TyVar, tyToLLVMType, Unknown (..))
+import Reopt.TypeInference.Solver
+  ( FTy, TyVar, tyToLLVMType,
+    pattern FNumTy, pattern FPtrTy, {- pattern FRecTy, -} pattern FUnknownTy,
+  )
 import qualified Reopt.VCG.Annotations as Ann
 
 
@@ -856,10 +860,10 @@ appToLLVM lhs app = bbArchConstraints $ do
       ty <- getInferredType y
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       case (typeOfResult, tx, ty) of
-        (_, Just (PtrTy _), Just (PtrTy _)) ->
+        (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
-        (_, Just (PtrTy pointee), _) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) x y
-        (_, _, Just (PtrTy pointee)) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) y x
+        (_, Just (FPtrTy pointee), _) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) x y
+        (_, _, Just (FPtrTy pointee)) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) y x
         -- When the result is a pointer, and one operand is known to be numeric,
         -- we can also conclude that the other operand was a pointer.  You'd
         -- likely expect the constraint solving to have inferred that the other
@@ -870,17 +874,17 @@ appToLLVM lhs app = bbArchConstraints $ do
         -- information back to the constant value.
         -- This can be solved by giving unique identifiers to constant values,
         -- or let-binding them so that we have a program variable to latch onto.
-        (Just (PtrTy pointee), Just (NumTy _), _) ->
+        (Just (FPtrTy pointee), Just (FNumTy _), _) ->
           -- x is an offset, therefore y must be a pointer
           llvmGetElementPtrAfterCast (tyToLLVMType ptrWidth pointee) y =<< mkLLVMValue x
-        (Just (PtrTy pointee), _, Just (NumTy _)) ->
+        (Just (FPtrTy pointee), _, Just (FNumTy _)) ->
           -- y is an offset, therefore x must be a pointer
           llvmGetElementPtrAfterCast (tyToLLVMType ptrWidth pointee) x =<< mkLLVMValue y
         -- If the result ought to be a pointer, but we have no idea which of the
         -- two arguments is the pointer, we must perform a bitvector add, but
         -- then cast the result into the appropriate pointer type that will be
         -- expected by the rest of the code.
-        (Just (PtrTy pointee), _, _) ->
+        (Just (FPtrTy pointee), _, _) ->
           do
             result <- binop (arithop (L.Add False False)) x y
             convop L.IntToPtr result (L.PtrTo (tyToLLVMType ptrWidth pointee))
@@ -1094,7 +1098,7 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs (L.Typed (typeToLLVMType tp) L.ValUndef)
     FnReadMem ptr typ ->
       getInferredType ptr >>= \case
-        Just (PtrTy ty) -> do
+        Just (FPtrTy ty) -> do
           L.Typed _origType origVal <- mkLLVMValue ptr
           let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
           let retypedPtr = L.Typed (L.PtrTo (tyToLLVMType ptrWidth ty)) origVal
@@ -1121,7 +1125,7 @@ rhsToLLVM lhs rhs =
     FnAddrWidthConstant i -> do
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       -- FIXME: this should always return a type, not Maybe
-      typeOfResult <- fromMaybe (UnknownTy Unknown) <$> getInferredTypeForAssignIdBBLLVM lhs
+      typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
       let ty = tyToLLVMType ptrWidth typeOfResult
       let llvmRhs = L.Typed ty $ L.integer i
       setAssignIdValue lhs llvmRhs
@@ -1155,7 +1159,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
    FnWriteMem addr v -> do
      llvmVal <- mkLLVMValue v
      llvmPtr <- getInferredType addr >>= \case
-       Just (PtrTy ty) -> do
+       Just (FPtrTy ty) -> do
          L.Typed _origType origVal <- mkLLVMValue addr
          let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
          return $ L.Typed (L.PtrTo (tyToLLVMType ptrWidth ty)) origVal
@@ -1581,7 +1585,7 @@ defineFunction archOps genOpts constraints f = do
   let mkInputReg :: (Some TypeRepr, TyVar) -> Int -> L.Typed L.Ident
       mkInputReg (Some tp, tyv) i =
         case Map.lookup tyv (mcTypeMap constraints) of
-          Just (PtrTy pointee) -> L.Typed (L.PtrTo (tyToLLVMType ptrWidth pointee)) (argIdent i)
+          Just (FPtrTy pointee) -> L.Typed (L.PtrTo (tyToLLVMType ptrWidth pointee)) (argIdent i)
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
   let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes constraints))
@@ -1778,5 +1782,5 @@ getKnownInferredType ::
 getKnownInferredType constraints fn aId =
   case getInferredTypeForAssignId constraints fn aId of
     Nothing -> Nothing
-    Just (UnknownTy _) -> Nothing
+    Just FUnknownTy -> Nothing
     Just t -> Just t

@@ -1,22 +1,19 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
-module Reopt.TypeInference.Constraints.Solving.TypeVariables
+module Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (TyVar),
   )
 where
 
+import           Data.Function (on)
 import qualified Prettyprinter as PP
 
 data TyVar = TyVar
@@ -26,7 +23,13 @@ data TyVar = TyVar
     -- where there is not much point in marking test type variables.
     tyVarOrigin :: Maybe String
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
+
+instance Eq TyVar where
+  (==) = (==) `on` tyVarInt
+
+instance Ord TyVar where
+  compare = compare `on` tyVarInt
 
 instance PP.Pretty TyVar where
   pretty tyv = PP.hcat ["α", PP.pretty (tyVarInt tyv), maybeOrigin (tyVarOrigin tyv)]

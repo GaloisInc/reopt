@@ -4,6 +4,8 @@ SOURCES  := $(wildcard *.c)
 ROOTS    := $(patsubst %.c,%,${SOURCES})
 TARGETS  := ${foreach bin,${ROOTS},$(foreach lvl,O0 O1 O2,$(bin)_$(lvl).exe)}
 
+CFLAGS += -std=c11
+
 all: ${TARGETS}
 
 # hack
