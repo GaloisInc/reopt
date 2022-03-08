@@ -51,7 +51,7 @@ data ConstraintSolvingState = ConstraintSolvingState
 
     -- Debugging
     ctxTraceUnification :: Bool
-    
+
   }
   deriving (Eq, Generic, Ord, Show)
 
@@ -215,12 +215,12 @@ traceUnification = use (field @"ctxTraceUnification")
 
 instance PP.Pretty ConstraintSolvingState where
   pretty ctx =
-    let row title entries = title PP.<+> PP.list entries
+    let row title entries = title PP.<+> PP.align (PP.list entries)
      in PP.vsep
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
             row "PtrAddCs" $ map PP.pretty $ ctxPtrAddCs ctx,
-            row "Type Var Map" [PP.pretty (ctxTyVars ctx)]
+            PP.pretty (ctxTyVars ctx)
           ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v

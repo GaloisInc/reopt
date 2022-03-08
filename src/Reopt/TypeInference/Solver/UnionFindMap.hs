@@ -66,15 +66,11 @@ eqvClasses um = Map.fromListWith (++) rmap
 -- instances
 
 instance (Ord k, PP.Pretty k, PP.Pretty v) => PP.Pretty (UnionFindMap k v) where
-  pretty um =
-    PP.vsep [ row "Equivalences" $ [ pretty k PP.<+> ": " PP.<+> PP.list (map pretty v)
-                                   | (k, v) <- Map.toList (eqvClasses um) ]
-            , row "Definitions" $ [ pretty k PP.<+> "→" PP.<+> pretty v
-                                  | (k, v) <- Map.toList (ufmDefs um) ]
-            ]
+  pretty um = PP.align . PP.vsep $
+    [ row "Equivalences" $ [ pretty k PP.<+> ": " PP.<+> PP.list (map pretty v)
+                           | (k, v) <- Map.toList (eqvClasses um) ]
+    , row "Definitions" $ [ pretty k PP.<+> "→" PP.<+> PP.hang 0 (pretty v)
+                          | (k, v) <- Map.toList (ufmDefs um) ]
+    ]
     where
-      row title entries = title PP.<+> PP.list entries
-
-    
-  
-
+      row title entries = title PP.<+> PP.align (PP.list entries)

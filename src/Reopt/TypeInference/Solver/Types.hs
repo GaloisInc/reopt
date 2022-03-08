@@ -37,13 +37,13 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
     RecTy flds row ->
-      PP.group $
-        PP.braces $
-          PP.cat $
-            (++ ["|" PP.<> PP.pretty row]) $
-              PP.punctuate (PP.comma <> PP.space) $
-                map (\(off, t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t) $
-                  Map.toAscList flds
+      PP.group $ PP.align $
+        PP.encloseSep (PP.flatAlt "{ " "{") (PP.flatAlt " }" "}") mempty
+          [ PP.encloseSep mempty mempty ", " $
+              map (\(off, t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t) $
+                Map.toAscList flds
+          , PP.hsep ["|", PP.pretty row]
+          ]
 
 class FreeTyVars a where
   freeTyVars :: a -> Set TyVar
