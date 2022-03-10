@@ -25,7 +25,7 @@ import Reopt.TypeInference.Solver
    unifyConstraints,
    eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy, ConstraintSolution (..)
   , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FRecTy, pattern FNamedStruct
-  , structTy, ptrAddTC, OperandClass (OCOffset), ptrTC)
+  , structTy, ptrAddTC, OperandClass (OCOffset), ptrTC, resolveTyVar)
 
 import Data.Foldable (traverse_)
 import Reopt.TypeInference.Solver.Monad (freshRowVar, setTraceUnification)
@@ -74,7 +74,10 @@ fnum32 = FNumTy 32
 fnum64 = FNumTy 64
 
 tv :: SolverM TyVar
-tv = freshTyVar Nothing Nothing
+tv = tv' 64
+
+tv' :: Int -> SolverM TyVar
+tv' sz = freshTyVar Nothing (Just sz) Nothing 
 
 tvEq :: TyVar -> TyVar -> SolverM ()
 tvEq v v' = eqTC (varTy v) (varTy v')
@@ -145,7 +148,8 @@ eqCTests = T.testGroup "Equality Constraint Tests"
       eqTC (varTy x3) num64
       eqTC (varTy x4) (ptrTy (varTy x3))
 
-      pure [(x0, FUnknownTy), (x1, FPtrTy FUnknownTy), (x2, FUnknownTy), (x3, fnum64), (x4, FPtrTy fnum64)]
+      pure [(x0, FUnknownTy 64), (x1, FPtrTy (FUnknownTy 64))
+           , (x2, FUnknownTy 64), (x3, fnum64), (x4, FPtrTy fnum64)]
 
   , mkTest "eqTC with records 1" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
@@ -391,7 +395,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
 
 
   , mkTest "Simple cycle test (liveness)" $ do
-      x0 <- tv; x1 <- tv; x2 <- tv
+      x0 <- tv; x1 <- tv' 8; x2 <- tv
       let x0Ty = varTy x0
           x1Ty = varTy x1
           x2Ty = varTy x2
@@ -407,7 +411,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       pure [] -- Liveness
       
   , mkTest "Nested Cycle test (liveness)" $ do
-      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      x0 <- tv; x1 <- tv' 8; x2 <- tv; x3 <- tv
       let x0Ty = varTy x0
           x1Ty = varTy x1
           x2Ty = varTy x2
@@ -429,7 +433,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       pure []
 
   , mkTest "Nested cycle test 2 (liveness)" $ do
-      x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
+      x0 <- tv; x1 <- tv' 8; x2 <- tv; x3 <- tv
       let x0Ty = varTy x0
           x1Ty = varTy x1
           x2Ty = varTy x2
@@ -493,6 +497,6 @@ mkTest name m = T.testCase name (runSolverM 64 test)
     test = do
       expected <- m
       res      <- unifyConstraints
-      let actual = [ (k, Map.findWithDefault FUnknownTy k (csTyVars res))
+      let actual = [ (k, resolveTyVar (csTyVars res) k)
                    | (k, _) <- expected ]
       pure (TypeEnv actual T.@?= TypeEnv expected)

@@ -9,16 +9,18 @@ module Reopt.TypeInference.Solver.Types where
 
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Maybe      (fromMaybe)
 import           Data.Set        (Set)
 import qualified Data.Set        as Set
 import qualified Prettyprinter   as PP
-import qualified Text.LLVM                                as L
+import qualified Text.LLVM       as L
 
 import           Reopt.TypeInference.Solver.RowVariables  (NoRow (NoRow),
                                                            Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar, tyVarInt)
+import           Reopt.TypeInference.Solver.TypeVariables (TyVar, tyVarInt, tyVarSize)
+
 
 
 data TyF rvar f
@@ -99,14 +101,14 @@ instance FreeRowVars ITy where
 type StructName = String
 
 data FTy =
-  UnknownTy
+  UnknownTy Int 
   | NamedStruct StructName
   | FTy (TyF NoRow FTy)
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty FTy where
   pretty = \case
-    UnknownTy -> "?"
+    UnknownTy n  -> "?[" <> PP.pretty n <> "]"
     NamedStruct n -> PP.pretty n
     FTy ty  -> PP.pretty ty
 
@@ -130,7 +132,7 @@ recTyByteWidth ptrSz = offsetAfterLast . last
 -- | This shoold only be called on types which can occur within a
 -- RecTy, i.e., not records.
 tyByteWidth :: Int -> FTy -> Integer
-tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
+tyByteWidth _ptrSz (UnknownTy n) = fromIntegral n `div` 8
 tyByteWidth _ptrSz NamedStruct {} = error "Saw a named struct in tyByteWidth"
 tyByteWidth ptrSz (FTy ty) =
   case ty of
@@ -149,11 +151,17 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
       | otherwise = L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset))) : go o flds
 
 tyToLLVMType :: Int -> FTy -> L.Type
-tyToLLVMType ptrSz UnknownTy =
-  L.PrimType (L.Integer (fromIntegral ptrSz))
+tyToLLVMType _ptrSz (UnknownTy n) =
+  L.PrimType (L.Integer (fromIntegral n))
 tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
 tyToLLVMType ptrSz (FTy ty) =
   case ty of
     NumTy n -> L.PrimType (L.Integer (fromIntegral n))
     PtrTy typ -> L.PtrTo (tyToLLVMType ptrSz typ)
     RecTy flds NoRow -> recTyToLLVMType ptrSz (Map.assocs flds)
+
+resolveTyVar :: Map TyVar FTy -> TyVar -> FTy
+resolveTyVar m t =
+  -- FIXME: 0 here for records
+  let def = UnknownTy $ fromMaybe 0 $ tyVarSize t
+  in Map.findWithDefault def t m

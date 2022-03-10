@@ -1125,7 +1125,7 @@ rhsToLLVM lhs rhs =
     FnAddrWidthConstant i -> do
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       -- FIXME: this should always return a type, not Maybe
-      typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
+      typeOfResult <- fromMaybe (FUnknownTy ptrWidth) <$> getInferredTypeForAssignIdBBLLVM lhs
       let ty = tyToLLVMType ptrWidth typeOfResult
       let llvmRhs = L.Typed ty $ L.integer i
       setAssignIdValue lhs llvmRhs
@@ -1786,5 +1786,5 @@ getKnownInferredType ::
 getKnownInferredType constraints fn aId =
   case getInferredTypeForAssignId constraints fn aId of
     Nothing -> Nothing
-    Just FUnknownTy -> Nothing
+    Just FUnknownTy {} -> Nothing
     Just t -> Just t

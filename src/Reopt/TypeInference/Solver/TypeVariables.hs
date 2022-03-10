@@ -9,7 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Reopt.TypeInference.Solver.TypeVariables
-  ( TyVar (TyVar, tyVarInt),
+  ( TyVar (TyVar, tyVarInt, tyVarSize),
   )
 where
 
@@ -17,11 +17,13 @@ import           Data.Function (on)
 import qualified Prettyprinter as PP
 
 data TyVar = TyVar
-  { tyVarInt :: Int,
+  { -- | Sise in bits, required for non-rectyp
+    tyVarSize :: Maybe Int  
     -- | If you want to record the origin of this type variable, it will show
     -- out when you pretty-print it.  Recommended, except in the test suite
     -- where there is not much point in marking test type variables.
-    tyVarOrigin :: Maybe String
+  , tyVarOrigin :: Maybe String
+  , tyVarInt :: Int
   }
   deriving (Show)
 

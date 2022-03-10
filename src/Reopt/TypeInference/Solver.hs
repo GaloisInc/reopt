@@ -1,7 +1,9 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DataKinds #-}
 
 module Reopt.TypeInference.Solver
-  ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
+  ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy, resolveTyVar,
     SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, ptrAddTC,
     OperandClass (..),
@@ -27,10 +29,12 @@ import Reopt.TypeInference.Solver.TypeVariables
 import Reopt.TypeInference.Solver.Types
   ( ITy(..),
     TyF(..),
-    FTy(..), tyToLLVMType, StructName
+    FTy(..), tyToLLVMType, StructName, resolveTyVar
   )
 import Reopt.TypeInference.Solver.Monad (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar, ptrWidthNumTy, addPtrAdd)
 import Reopt.TypeInference.Solver.Constraints (OperandClass(..))
+import Control.Lens (use)
+import Data.Generics.Product (field)
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
@@ -54,8 +58,19 @@ structTy os r = Ty $ RecTy os (RowExprVar r)
 --------------------------------------------------------------------------------
 -- Compilers from Ty into ITy
 
+tySize :: Int -> Ty -> Maybe Int
+tySize _ (Var tv) = tyVarSize tv
+tySize ptrSz (Ty ty) =
+  case ty of
+    NumTy n  -> Just n
+    PtrTy {} -> Just ptrSz
+    RecTy {} -> Nothing
+
 nameTy :: Ty -> SolverM TyVar
-nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
+nameTy ty = do
+  psz <- use (field @"ptrWidth")
+  let tysz = tySize psz ty
+  freshTyVar Nothing tysz . Just =<< compileTy ty
 
 compileTy :: Ty -> SolverM ITy
 compileTy (Var tv) = pure (VarTy tv)
@@ -102,8 +117,8 @@ pattern FRecTy ty = FTy (RecTy ty NoRow)
 pattern FPtrTy :: FTy -> FTy
 pattern FPtrTy ty = FTy (PtrTy ty)
 
-pattern FUnknownTy :: FTy
-pattern FUnknownTy = UnknownTy
+pattern FUnknownTy :: Int -> FTy
+pattern FUnknownTy n = UnknownTy n
 
 pattern FNamedStruct :: StructName -> FTy
 pattern FNamedStruct s = NamedStruct s
