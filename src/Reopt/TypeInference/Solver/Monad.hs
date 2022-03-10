@@ -5,6 +5,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Reopt.TypeInference.Solver.Monad where
 
@@ -19,7 +20,7 @@ import           GHC.Generics                             (Generic)
 import qualified Prettyprinter                            as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
-                                                           EqRowC (EqRowC), PtrAddC (PtrAddC), OperandClass)
+                                                           EqRowC (EqRowC))
 import           Reopt.TypeInference.Solver.RowVariables  (Offset (Offset),
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowVar (RowVar),
@@ -29,11 +30,10 @@ import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy', TyF (
 import           Reopt.TypeInference.Solver.UnionFindMap  (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap  as UM
 
-
 data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs    :: [EqC],
     ctxEqRowCs :: [EqRowC],
-    ctxPtrAddCs :: [PtrAddC],
+    ctxCondEqs :: [Conditional],
 
     nextTraceId :: Int,
     nextRowVar :: Int,
@@ -53,13 +53,13 @@ data ConstraintSolvingState = ConstraintSolvingState
     ctxTraceUnification :: Bool
 
   }
-  deriving (Eq, Generic, Ord, Show)
+  deriving (Generic)
 
 emptyContext :: Int -> ConstraintSolvingState
 emptyContext w = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
-  , ctxPtrAddCs    = []
+  , ctxCondEqs     = []
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
@@ -97,9 +97,9 @@ addRowExprEq (RowExprShift o r1) os r2 = do
   addRowVarEq r1 (shiftOffsets (- o) os) r3
   addRowVarEq (rowExprVar r2) mempty (shiftRowExpr (o - rowExprShift r2) r3)
 
-addPtrAdd :: TyVar -> TyVar -> TyVar -> OperandClass -> SolverM ()
-addPtrAdd resTy lTy rTy oc  =
-  field @"ctxPtrAddCs" %= (PtrAddC resTy lTy rTy oc :)
+addCondEq :: Conditional -> SolverM ()
+addCondEq cs  =
+  field @"ctxCondEqs" %= (cs :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints
@@ -181,35 +181,78 @@ setTraceUnification b = field @"ctxTraceUnification" .= b
 traceUnification :: SolverM Bool
 traceUnification = use (field @"ctxTraceUnification")
 
--- substRowVarInRowShiftC ::
---   RowVar ->
---   RowVar ->
---   Map Offset TyVar ->
---   RowShiftC ->
---   SolverM (RowShiftC, Maybe EqC)
--- substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
---   | r3 == r1 = do
---     -- Here we want to replace r1 with {os | r2} in a constraint meaning:
---     -- shift o r1 = r4   -->   shift o {os | r2} = r4
---     -- Which means we want to introduce a fresh r such that:
---     -- shift o {| r2} = r   and   r4 = {shift o os | r}
---     r <- freshRowVar
---     let eqC = EqC (ITy $ RecTy mempty r4)
---                   (ITy $ RecTy (shiftStructuralInformationBy (fromIntegral n) os) r)
---     return ( RowShiftC r2 o r, Just eqC )
---   | r4 == r1 = do
---     -- Here we want to replace r1 with {os | r2} in a constraint meaning:
---     -- shift o r3 = r1   -->   shift o r3 {os | r2}
---     -- Which means we want to introduce a fresh r such that:
---     -- r3 = {shift (-o) os | r}   and   shift o {|r} = {|r2}
---     r <- freshRowVar
---     let eqC = EqC (ITy $ RecTy mempty r3)
---                   (ITy $ RecTy (shiftStructuralInformationBy (- (fromIntegral n)) os) r)
---     return ( RowShiftC r o r2, Just eqC)
---   | otherwise = return (RowShiftC r3 o r4, Nothing)
 
+--------------------------------------------------------------------------------
+-- Conditional constraints
 
+class CanFresh t where
+  makeFresh :: SolverM t
 
+instance CanFresh RowVar where
+  makeFresh = freshRowVar
+
+instance CanFresh TyVar where
+  makeFresh = freshTyVar Nothing Nothing
+
+class WithFresh t where
+  type Result t 
+  withFresh :: t -> SolverM (Result t)
+
+instance WithFresh (SolverM a) where
+  type Result (SolverM a) = a
+  withFresh m = m
+
+instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where  
+  type Result (a -> b) = Result b
+  withFresh f = do
+    v <- makeFresh
+    withFresh (f v)
+
+instance WithFresh EqC where
+  type Result EqC = EqC
+  withFresh v = pure v 
+
+-- instance CanFresh RowVar where
+--   makeFresh = freshRowVar
+
+-- instance CanFresh TyVar where
+--   makeFresh = freshTyVar Nothing Nothing
+
+-- instance (CanFresh a, CanFresh b) => CanFresh (a, b) where
+--   makeFresh = (,) <$> makeFresh <*> makeFresh
+
+-- instance (CanFresh a, CanFresh b, CanFresh c) => CanFresh (a, b, c) where
+--   makeFresh = (,,) <$> makeFresh <*> makeFresh <*> makeFresh
+
+-- instance (CanFresh a, CanFresh b, CanFresh c, CanFresh d) =>
+--          CanFresh (a, b, c, d) where
+--   makeFresh = (,,,) <$> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh
+
+-- instance (CanFresh a, CanFresh b, CanFresh c, CanFresh d, CanFresh e) =>
+--          CanFresh (a, b, c, d, e) where
+--   makeFresh = (,,,,) <$> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh
+
+-- FIXME: this is pretty arcane
+data Conditional = Conditional
+  { cName           :: String
+  -- | This says whether the conditional is enabled, disabled, or
+  -- delayed.  Once a condition is disabled, it is never examined
+  -- again.
+  , cEnabled        :: SolverM (Maybe Bool)
+  , cAddConstraints :: SolverM ()
+  }
+
+-- -- | Returns Nothing if we do not have enough information to try, True
+-- -- if enabled, False otherswise.
+-- condEnabled :: Conditional c -> SolverM (Maybe Bool)
+-- condEnabled c = do
+--   ms <- traverse (fmap snd . lookupTyVar (cDomain c)
+--   let m_varMap = sequenceA [ (,) v <$> m | (v, m) <- zip (cDomain c) ms ]
+--   pure (cPredicate c <$> m_varMap)
+
+instance PP.Pretty Conditional where
+  pretty c = PP.pretty (cName c)
+  
 --------------------------------------------------------------------------------
 -- Instances
 
@@ -219,7 +262,7 @@ instance PP.Pretty ConstraintSolvingState where
      in PP.vsep
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
-            row "PtrAddCs" $ map PP.pretty $ ctxPtrAddCs ctx,
+            row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
             PP.pretty (ctxTyVars ctx)
           ]
 

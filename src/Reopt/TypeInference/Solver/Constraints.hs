@@ -14,7 +14,7 @@ import           Reopt.TypeInference.Solver.RowVariables  (Offset, RowExpr,
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
                                                            FreeTyVars (..), ITy,
-                                                           prettyRow)
+                                                           prettyRow, ITy')
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
 data EqC = EqC {eqLhs :: TyVar, eqRhs :: ITy }
