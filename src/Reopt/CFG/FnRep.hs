@@ -136,6 +136,9 @@ data FnReturnVar tp = FnReturnVar { frAssignId :: !FnAssignId
 instance Pretty (FnReturnVar tp) where
   pretty = pretty . frAssignId
 
+instance HasRepr FnReturnVar TypeRepr where
+  typeRepr = frReturnType
+
 ------------------------------------------------------------------------
 -- FunctionType
 
@@ -316,6 +319,10 @@ instance FnArchConstraints arch => HasRepr (FnValue arch) TypeRepr where
       FnReturn ret   -> frReturnType ret
       FnFunctionEntryValue {} -> archWidthTypeRepr (Proxy :: Proxy arch)
       FnArg _ tp -> tp
+
+instance (MemWidth (ArchAddrWidth arch), HasRepr (ArchFn arch (FnValue arch)) TypeRepr)
+      => HasRepr (FnAssignment arch) TypeRepr where
+  typeRepr a = typeRepr (fnAssignRhs a)
 
 ------------------------------------------------------------------------
 -- FnStmt

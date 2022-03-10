@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 -- This module provides a constraint generation pass for inferring the
 -- types of Reopt (FnRep) programs, inspired by TIE.
@@ -42,7 +43,7 @@ import           Data.Macaw.Memory               (Memory, absoluteAddr,
                                                   addrWidthClass, asSegmentOff,
                                                   memAddrWidth, memWidth, resolveAbsoluteAddr, memWord)
 import           Data.Macaw.Types                (BVType, TypeRepr (..),
-                                                  floatInfoBits, typeRepr)
+                                                  floatInfoBits, typeRepr, HasRepr)
 import           Data.Parameterized              (FoldableF, FoldableFC)
 import           Data.Parameterized.NatRepr      (NatRepr, intValue,
                                                   testEquality, widthVal)
@@ -53,8 +54,8 @@ import           Reopt.CFG.FnRep                 (FnArchConstraints, FnArchStmt,
                                                   FnAssignment (..),
                                                   FnBlock (..), FnBlockLabel,
                                                   FnJumpTarget (..),
-                                                  FnPhiVar (unFnPhiVar),
-                                                  FnReturnVar (frAssignId),
+                                                  FnPhiVar (..),
+                                                  FnReturnVar (..),
                                                   FnStmt (..),
                                                   FnTermStmt (FnBranch, FnJump, FnLookupTable, FnRet, FnTailCall),
                                                   FnValue (..), Function (..),
@@ -92,169 +93,6 @@ instance Show (FunType arch) where
   show ft =
     "(" ++ intercalate ", " (map show (funTypeArgs ft)) ++ ") -> " ++
     maybe "_|_" show (funTypeRet ft)
-
--- varITy :: TyVar -> ITy
--- varITy = UnknownTy
-
--- -- This is the free type for constraints, should be replace by the
--- --  type from the constraint solver.
-
--- data PointerInformation
---   = NotAPointer
---   | CouldBeAPointer
---   | IsAPointerTo
---     Int -- ^ Pointee size
---     ITy -- ^ Pointee type
-
--- data BVInformation
---   = BVNotAddrWidth
---   | BVAddrWidth PointerInformation
-
--- data Constraint
---   = CEq -- ^ The types must be equal
---     ITy ITy
---   | CAddrWidthAdd -- ^ At most one type may be a pointer
---     ITy -- ^ Result
---     ITy -- ^ First addend
---     (Either Integer ITy) -- ^ Second addend
---   | CAddrWidthSub -- ^ The RHS may not be a pointer if the LHS is a bitvector
---     ITy -- ^ Result
---     ITy -- ^ Minuend
---     ITy -- ^ Subtrahend
---   | CBV -- ^ Bitvector
---     Int -- ^ Bitvector size
---     BVInformation
---     ITy
---   | CPointerAndOffset
---     -- ^ @CPointerAndOffset r sz p o@ means @r@ of size @sz@ is read at address @p +
---     -- o@, indicating that either @p@ is a pointer and @o@ an offset, or @o@ is
---     -- a global address and @p@ an offset.
---     ITy             -- ^ Pointee type
---     (Some TypeRepr) -- ^ Pointee size
---     ITy             -- ^ Computed operand  (pointer or offset)
---     Integer         -- ^ Immediate operand (offset or pointer)
-
--- instance PP.Pretty Constraint where
---   pretty = \case
---     CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
---     CAddrWidthAdd t1 t2 (Left o) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty o]
---     CAddrWidthAdd t1 t2 (Right t3) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
---     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
---     CBV sz BVNotAddrWidth t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
---     CBV sz (BVAddrWidth NotAPointer) t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
---     CBV sz (BVAddrWidth CouldBeAPointer) t ->
---       PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz <> "-or-ptr"]
---     CBV _ (BVAddrWidth (IsAPointerTo sz ty)) t ->
---       PP.hsep [PP.pretty t, ": ptr to (" <> PP.pretty ty <> ", " <> "size " <> PP.pretty sz <> ")"]
---     CPointerAndOffset tr (Some sz) tp o ->
---       PP.hsep ["*(" <> PP.pretty tp, "+", PP.pretty o <> ") : ", PP.pretty tr, "(" <> PP.pretty sz <> ")"]
-
--- instance Show Constraint where
---   show = show . PP.pretty
-
--- data TyConstraintOptions m =
---   TyConstraintOptions
---   { -- | How to generate a type to describe what a pointer points at
---     tyConGenPtrTgt :: String -> m ITy
---     -- | How to generate a row
---   , tyConGenRowVar :: m RowVar
---   }
-
-
--- | Size in bits of an unconstrained @TypeRepr tp@.  Currently only handling
--- bitvectors and floats.
--- anyTypeWidth :: TypeRepr tp -> Int
--- anyTypeWidth = \case
---   BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
---   BVTypeRepr sz -> fromIntegral (intValue sz)
---   FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
---   TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
---   VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
-
-
--- -- | Converts the limited `Constraint` grammar to the more general
--- -- `TyConstraint` type used for constraint solving.
--- tyConstraint ::
---   Monad m =>
---   TyConstraintOptions m ->
---   -- | Size of pointers
---   Int ->
---   Constraint -> m TyConstraint
--- tyConstraint opts ptrSz = \case
---   CEq t1 t2 -> pure $ eqTC t1 t2
-
---   CAddrWidthAdd ret lhs (Left o) -> do
---     -- tLHS <- tyConGenPtrTgt opts "constant addition variable input"
---     rLHS <- tyConGenRowVar opts
---     -- tRet <- tyConGenPtrTgt opts "constant addition return"
---     rRet <- tyConGenRowVar opts
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs]
---       -- Or one is a pointer and one is an offset
---       , isPointerWithOffsetTC (lhs, rLHS) (ret, rRet) (Offset (fromIntegral o))
---       ]
-
---   CAddrWidthAdd ret lhs (Right rhs) -> do
---     ty <- tyConGenPtrTgt opts "pointer arithmetic"
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
---       -- Or one is a pointer and one is an offset
---       , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
---                                     , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
---                                     ]
---               ]
---       ]
-
---   CAddrWidthSub ret lhs rhs -> do
---     ty <- tyConGenPtrTgt opts "pointer arithmetic"
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
---       -- Or one is a pointer and one is an offset
---       , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
---                                     , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
---                                     ]
---               ]
---       ]
-
---   CBV sz BVNotAddrWidth t -> pure (isNumTC sz t)
---   CBV sz (BVAddrWidth NotAPointer) t -> pure (isNumTC sz t)
---   CBV sz (BVAddrWidth CouldBeAPointer) t -> bitvectorConstraint sz t
---   CBV _ (BVAddrWidth (IsAPointerTo pointeeSize pointeeType)) t -> do
---     pointeeConstraints <- bitvectorConstraint pointeeSize pointeeType
---     pointerConstraints <- isOffsetTC t 0 pointeeType <$> tyConGenRowVar opts
---     return (andTC [pointeeConstraints, pointerConstraints])
---   CPointerAndOffset fieldType fieldSize pointerType offset -> do
---     -- Essentially we are seeing an operation:
---     -- r := *(p + o)
---     -- which means either:
---     -- p is a pointer, and o a numeric offset,
---     -- or:
---     -- o is a constant pointer, and p is an offset.
---     -- freshTgtIfFieldIsPtr <- tyConGenPtrTgt opts "TODO: what to call this?"
---     row <- tyConGenRowVar opts
---     let fieldSz = viewSome anyTypeWidth fieldSize
---     pointeeConstraints <- bitvectorConstraint fieldSz fieldType
---     pure $
---       andTC
---       [ pointeeConstraints
---       , orTC
---         [ isOffsetTC pointerType (fromInteger offset) fieldType row
---         , isNumTC ptrSz pointerType
---         ]
---       ]
---  where
-
---     -- Emits a constraint appropriate for a bitvector of the given size, knowing
---     -- no additional information about it.
---     bitvectorConstraint sz t = do
---       if sz == ptrSz
---         then do
---           tgt <- tyConGenPtrTgt opts "potential target of ambiguous bitvector"
---           pure $ orTC [isNumTC ptrSz t, isPtrTC t tgt]
---         else pure (isNumTC sz t)
 
 -- -----------------------------------------------------------------------------
 -- Monad
@@ -372,6 +210,11 @@ atFnAssignId ::
 atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
 
 
+newtype IsTypeRepr tp = IsTypeRepr (TypeRepr tp)
+
+instance HasRepr IsTypeRepr TypeRepr where
+  typeRepr (IsTypeRepr t) = t
+
 -- | Retrieves the type variable associated to the given `FnAssignId`, if any,
 -- otherwise creates and registers a fresh type variable for it.
 --
@@ -379,16 +222,19 @@ atFnAssignId fn aId = assignTyVars . at fn . non Map.empty . at aId
 -- because we sometimes wants to resolve assign ids for other functions than the
 -- one currently being analyzed.
 tyVarForAssignId ::
+  HasRepr f TypeRepr =>
   -- | Function defining the `FnAssignId`
   BSC.ByteString ->
   FnAssignId ->
+  -- | Type of the thing, used for its size
+  f tp -> 
   CGenM ctx arch TyVar
-tyVarForAssignId fn aId = do
+tyVarForAssignId fn aId tp = do
   mtv <- CGenM $ use (atFnAssignId fn aId)
   case mtv of
     Just tv -> pure tv
     Nothing -> do
-      tyv <- freshTyVar (BSC.unpack fn <> "." <> show aId)
+      tyv <- freshTyVar (BSC.unpack fn <> "." <> show aId) (typeRepr tp)
       CGenM $ atFnAssignId fn aId ?= tyv
       pure tyv
 
@@ -402,40 +248,44 @@ tyVarForAssignId fn aId = do
 
 -- | Returns the type variable corresponding to the given assignment identifier,
 -- or creates a fresh one for it if needed.
-assignIdTyVar :: BSC.ByteString -> FnAssignId -> CGenM ctx arch TyVar
-assignIdTyVar fn aId = do
+assignIdTyVar :: HasRepr f TypeRepr => BSC.ByteString -> FnAssignId -> f tp ->
+                 CGenM ctx arch TyVar
+assignIdTyVar fn aId tp = do
   -- fn <- askContext cgenCurrentFunName
   mTyVar <- CGenM $ use (atFnAssignId fn aId)
   case mTyVar of
-    Nothing -> tyVarForAssignId fn aId
+    Nothing -> tyVarForAssignId fn aId tp
     Just tyVar -> pure tyVar
 
 -- | Returns the associated type for a function assignment id, if any.
 -- Otherwise, returns its type variable as an `ITy`.
-assignIdTypeFor :: BSC.ByteString -> FnAssignId -> CGenM ctx arch Ty
-assignIdTypeFor fn aId = varTy <$> assignIdTyVar fn aId
+assignIdTypeFor :: HasRepr f TypeRepr => BSC.ByteString -> FnAssignId -> f tp ->
+                   CGenM ctx arch Ty
+assignIdTypeFor fn aId tp = varTy <$> assignIdTyVar fn aId tp
 
-assignIdType :: FnAssignId -> CGenM CGenBlockContext arch Ty
-assignIdType aId = do
+assignIdType :: HasRepr f TypeRepr => FnAssignId -> f tp -> CGenM CGenBlockContext arch Ty
+assignIdType aId tp = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
-  assignIdTypeFor fn aId
+  assignIdTypeFor fn aId tp
 
-assignmentType :: FnAssignment arch tp -> CGenM CGenBlockContext arch Ty
-assignmentType = assignIdType . fnAssignId
+assignmentType ::   FnArchConstraints arch =>
+                    FnAssignment arch tp ->
+                    CGenM CGenBlockContext arch Ty
+assignmentType a = assignIdType (fnAssignId a) a
 
 -- We lump returns and assigns into the same map
 funRetType :: FnReturnVar tp -> CGenM CGenBlockContext arch Ty
-funRetType = assignIdType . frAssignId
+funRetType t = assignIdType (frAssignId t) t
 
 updFunRetType :: FnReturnVar tp -> TyVar -> CGenM CGenBlockContext arch ()
 updFunRetType fr tv = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   let aId = frAssignId fr
-  tyVar <- assignIdTyVar fn aId
+  tyVar <- assignIdTyVar fn aId fr
   emitEq (varTy tv) (varTy tyVar) -- FIXME: subtype?
 
 phiType :: FnPhiVar arch tp -> CGenM CGenBlockContext arch Ty
-phiType = assignIdType . unFnPhiVar
+phiType v = assignIdType (unFnPhiVar v) v
 
 argumentType :: Int -> CGenM CGenBlockContext arch Ty
 argumentType i = do
@@ -491,9 +341,9 @@ funTypeAtAddr saddr = do
 -- Forwarded functions (to solver)
 
 -- | Returns a fresh type var.
-freshTyVar :: String -> CGenM ctx arch TyVar
-freshTyVar context =
-  inSolverM (S.freshTyVar (Just context) Nothing)
+freshTyVar :: String -> TypeRepr tp -> CGenM ctx arch TyVar
+freshTyVar context sz =
+  inSolverM (S.freshTyVar (Just context) (Just (bitWidth sz)) Nothing)
 
 emitEq :: Ty -> Ty -> CGenM ctx arch ()
 emitEq t1 t2 = inSolverM (eqTC t1 t2)
@@ -553,7 +403,7 @@ genFnValue v =
   where
     punt = do
       warn "Punting on FnValue"
-      varTy <$> freshTyVar (show (PP.pretty v))
+      varTy <$> freshTyVar (show (PP.pretty v)) (typeRepr v)
 
 -- | Generate constraints for an App.  The first argument is the
 -- output (result) type.
@@ -732,7 +582,7 @@ genFnAssignment ::
   FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
-  ty <- varTy <$> tyVarForAssignId fn (fnAssignId a)
+  ty <- varTy <$> tyVarForAssignId fn (fnAssignId a) a
   case fnAssignRhs a of
     FnSetUndefined {} -> pure () -- no constraints generated
     FnReadMem ptr sz -> genMemOp ty ptr (Some sz)
@@ -867,10 +717,10 @@ genFunction fn {- blockPhis -} = do
   cFun <-
     Map.findWithDefault (error "Missing function") (fnAddr fn)
     <$> askContext cgenFunTypes
-  let mkPhis b =
-        let phiVars = viewSome unFnPhiVar <$> V.toList (fbPhiVars b) in
-        let mkPhiVar aId = varTy <$> tyVarForAssignId (fnName fn) aId in
-        (,) (fbLabel b) <$> mapM mkPhiVar phiVars
+  let mkPhiVar (Some pv) =
+        varTy <$> tyVarForAssignId (fnName fn) (unFnPhiVar pv) (IsTypeRepr $ fnPhiVarType pv)
+      mkPhis b = (,) (fbLabel b) <$> mapM mkPhiVar (V.toList (fbPhiVars b))
+      
   bphis <- Map.fromList <$> mapM mkPhis (fnBlocks fn)
   withinContext
     (CGenFunctionContext cFun (fnName fn) bphis)
@@ -883,8 +733,10 @@ functionTypeToFunType ::
   FunctionType arch -> CGenM ctx arch (FunType arch)
 functionTypeToFunType fn ft = do
   let fnStr = BSC.unpack fn
-  args <- for (zip (fnArgTypes ft) [(0 :: Int)..]) (\(_, i) -> freshTyVar (fnStr <> ".arg" <> show i))
-  ret  <- traverse (const (freshTyVar (fnStr <> ".ret"))) (fnReturnType ft)
+  args <- for (zip (fnArgTypes ft) [(0 :: Int)..])
+              (\(Some tp, i) -> freshTyVar (fnStr <> ".arg" <> show i) tp)
+  ret  <- traverse (viewSome (freshTyVar (fnStr <> ".ret")))
+                   (fnReturnType ft)
   pure (FunType args ret)
 
 data ModuleConstraints arch = ModuleConstraints

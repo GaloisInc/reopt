@@ -137,14 +137,14 @@ lookupTyVar :: TyVar -> SolverM (TyVar, Maybe ITy')
 lookupTyVar tv = field @"ctxTyVars" %%= UM.lookup tv
 
 -- | Always return a new type variable.
-freshTyVar' :: Maybe String -> SolverM TyVar
-freshTyVar' orig = flip TyVar orig <$> (field @"nextTyVar" <<+= 1)
+freshTyVar' :: Maybe String -> Maybe Int -> SolverM TyVar
+freshTyVar' orig sz = TyVar sz orig <$> (field @"nextTyVar" <<+= 1)
 
-freshTyVar :: Maybe String -> Maybe ITy -> SolverM TyVar
-freshTyVar orig Nothing = freshTyVar' orig
-freshTyVar _orig (Just (VarTy v)) = pure v -- Don't allocate, just return the equiv. var.
-freshTyVar orig  (Just (ITy ty)) = do
-  tyv <- freshTyVar' orig
+freshTyVar :: Maybe String -> Maybe Int -> Maybe ITy -> SolverM TyVar
+freshTyVar orig sz   Nothing = freshTyVar' orig sz
+freshTyVar _orig _sz (Just (VarTy v)) = pure v -- Don't allocate, just return the equiv. var.
+freshTyVar orig  sz  (Just (ITy ty)) = do
+  tyv <- freshTyVar' orig sz
   defineTyVar tyv ty
   pure tyv
 
@@ -180,35 +180,6 @@ setTraceUnification b = field @"ctxTraceUnification" .= b
 
 traceUnification :: SolverM Bool
 traceUnification = use (field @"ctxTraceUnification")
-
--- substRowVarInRowShiftC ::
---   RowVar ->
---   RowVar ->
---   Map Offset TyVar ->
---   RowShiftC ->
---   SolverM (RowShiftC, Maybe EqC)
--- substRowVarInRowShiftC r1 r2 os (RowShiftC r3 o@(Offset n) r4)
---   | r3 == r1 = do
---     -- Here we want to replace r1 with {os | r2} in a constraint meaning:
---     -- shift o r1 = r4   -->   shift o {os | r2} = r4
---     -- Which means we want to introduce a fresh r such that:
---     -- shift o {| r2} = r   and   r4 = {shift o os | r}
---     r <- freshRowVar
---     let eqC = EqC (ITy $ RecTy mempty r4)
---                   (ITy $ RecTy (shiftStructuralInformationBy (fromIntegral n) os) r)
---     return ( RowShiftC r2 o r, Just eqC )
---   | r4 == r1 = do
---     -- Here we want to replace r1 with {os | r2} in a constraint meaning:
---     -- shift o r3 = r1   -->   shift o r3 {os | r2}
---     -- Which means we want to introduce a fresh r such that:
---     -- r3 = {shift (-o) os | r}   and   shift o {|r} = {|r2}
---     r <- freshRowVar
---     let eqC = EqC (ITy $ RecTy mempty r3)
---                   (ITy $ RecTy (shiftStructuralInformationBy (- (fromIntegral n)) os) r)
---     return ( RowShiftC r o r2, Just eqC)
---   | otherwise = return (RowShiftC r3 o r4, Nothing)
-
-
 
 --------------------------------------------------------------------------------
 -- Instances

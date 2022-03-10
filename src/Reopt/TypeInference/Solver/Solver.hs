@@ -8,25 +8,26 @@
 module Reopt.TypeInference.Solver.Solver
   ( unifyConstraints
   , ConstraintSolution (..)
-
   )
 where
 
-import Data.List (partition)
-import           Control.Lens          ((%%~), (%=), (.=), (<<+=), (<<.=), view, _1, (%~), over)
+import           Control.Lens          (_1, over, view, (%%~), (%=), (%~), (.=),
+                                        (<<+=), (<<.=))
 import           Control.Monad         (void, when)
 import           Control.Monad.State   (MonadState (get), gets)
 import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
 import           Data.Generics.Product (field)
-import           Data.Map.Strict       (Map)
-import qualified Data.Map.Strict       as Map
-import qualified Data.Set              as Set
-import           Debug.Trace           (trace)
-import qualified Prettyprinter         as PP
-
 import           Data.Graph            (SCC (..), flattenSCCs)
 import           Data.Graph.SCC        (stronglyConnCompR)
+import           Data.List             (partition)
+import           Data.Map.Strict       (Map)
+import qualified Data.Map.Strict       as Map
+import           Data.Maybe            (fromMaybe)
+import qualified Data.Set              as Set
+import           Debug.Trace           (trace)
+import           GHC.Generics          (Generic)
+import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints             (EqC (..),
                                                                      EqRowC (EqRowC),
@@ -42,7 +43,6 @@ import           Reopt.TypeInference.Solver.Monad                   (ConstraintS
                                                                      freshRowVar,
                                                                      freshTyVar,
                                                                      lookupTyVar,
-                                                                     ptrWidthNumTy,
                                                                      undefineTyVar,
                                                                      unsafeUnifyTyVars, traceUnification)
 import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVarInEqRowC,
@@ -51,15 +51,14 @@ import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVar
                                                                      unifyRecTy)
 import           Reopt.TypeInference.Solver.RowVariables            (NoRow (NoRow),
                                                                      RowExpr (..), rowExprVar, rowExprShift)
-import           Reopt.TypeInference.Solver.TypeVariables           (TyVar)
+import           Reopt.TypeInference.Solver.TypeVariables           (TyVar, tyVarSize)
 import           Reopt.TypeInference.Solver.Types                   (FTy (..),
                                                                      FreeTyVars (freeTyVars),
                                                                      ITy (..),
                                                                      ITy',
-                                                                     TyF (..), StructName, tyVarToStructName, prettyMap)
+                                                                     TyF (..), StructName, tyVarToStructName, prettyMap, resolveTyVar)
 import           Reopt.TypeInference.Solver.UnionFindMap            (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap            as UM
-import GHC.Generics (Generic)
 
 
 -- | Unify the given constraints, returning a conservative type map for all type
@@ -88,12 +87,9 @@ finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
 
     mkOneEqv k =
       let (k', _) = UM.lookupRep k um
-      in resolveOne (csTyVars preSoln) k'
+      in resolveTyVar (csTyVars preSoln) k'
 
     preSoln = foldl goSCC (ConstraintSolution mempty mempty) sccs
-
-    -- duplicated from below.
-    resolveOne m t = Map.findWithDefault UnknownTy t m
 
     goSCC r (AcyclicSCC (ty, tv, _)) = finaliseTyF tv ty r
     goSCC r (CyclicSCC cs) = finaliseCyclic cs r
@@ -110,9 +106,7 @@ finalizeTypeDefs um@(UM.UnionFindMap eqvs defs) =
 finaliseTyF :: TyVar -> TyF NoRow TyVar ->
                ConstraintSolution -> ConstraintSolution
 finaliseTyF tv ty =
-  field @"csTyVars" %~ \m -> Map.insert tv (FTy $ resolveOne m <$> ty) m
-  where
-    resolveOne m t = Map.findWithDefault UnknownTy t m
+  field @"csTyVars" %~ \m -> Map.insert tv (FTy $ resolveTyVar m <$> ty) m
 
 finaliseCyclic :: [(TyF NoRow TyVar, TyVar, [TyVar])] ->
                   ConstraintSolution -> ConstraintSolution
@@ -133,7 +127,8 @@ finaliseCyclic cs s
       --              ])) $
       over (field @"csNamedStructs") (namedDefs ++) sWithNonRecs
   where
-    namedDefs = [ (tyVarToStructName tv, FTy $ resolveOne <$> ty)
+    namedDefs = [ (tyVarToStructName tv
+                  , FTy $ resolveTyVar (csTyVars sWithNonRecs) <$> ty)
                 | (ty, tv, _) <- recs ]
     
     -- Perform this topologically to ensure we have defs before we see
@@ -150,8 +145,6 @@ finaliseCyclic cs s
 
     sccs = stronglyConnCompR nonRecs
     nonRecs' = flattenSCCs sccs
-
-    resolveOne t = Map.findWithDefault UnknownTy t (csTyVars sWithNonRecs)
 
     isRecTy RecTy {} = True
     isRecTy _        = False
@@ -434,9 +427,14 @@ solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
     (Just PtrTy {}, Nothing, Nothing, _) -> tryLater
   where
     tryLater = pure (Just c)
-    isNum tv = addTyVarEq tv . ITy =<< ptrWidthNumTy
+    tvToSize tv =
+      fromMaybe (error $ "Missing size for " ++ show (PP.pretty tv))
+                (tyVarSize tv)
+
+    isNum tv = addTyVarEq tv (ITy (NumTy (tvToSize tv)))
+    
     isPtr tv = do
-      tv' <- freshTyVar Nothing Nothing
+      tv' <- freshTyVar Nothing (Just (tvToSize tv)) Nothing
       addTyVarEq tv (ITy (PtrTy tv'))
       pure tv'
 

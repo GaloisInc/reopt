@@ -1,7 +1,6 @@
 -- A specialised pretty printer for FnRep with recovered type information
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 
 module Reopt.TypeInference.Pretty (ppFunction) where
 
@@ -17,7 +16,7 @@ import           Reopt.CFG.FnRep
 import           Reopt.TypeInference.ConstraintGen (FunType (..),
                                                     FTy,
                                                     ModuleConstraints (..))
-import           Reopt.TypeInference.Solver (TyVar, pattern FUnknownTy)
+import           Reopt.TypeInference.Solver (TyVar, resolveTyVar)
 
 -- | Utility to pretty print with commas separating arguments.
 commas :: [Doc a] -> Doc a
@@ -89,7 +88,7 @@ ppFunction mcs fn
     ppArg :: Integer -> TyVar -> Doc a
     ppArg i tv = "arg" <> pretty i <> " : " <> pretty (getTv tv)
 
-    getTv v = Map.findWithDefault FUnknownTy v (mcTypeMap mcs)
+    getTv = resolveTyVar (mcTypeMap mcs)
 
 -- Unknown type/unknown assigns
 ppFunction _mcs fn = pretty fn
