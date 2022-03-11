@@ -12,54 +12,53 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import Data.List (partition)
-import           Control.Lens          ((%%~), (%=), (.=), (<<+=), (<<.=), view, _1, (%~), over)
-import           Control.Monad         (void, when)
+import           Control.Lens          (_1, over, view, (%%~), (%=), (%~), (.=),
+                                        (<<+=), (<<.=))
+import           Control.Monad         (when)
 import           Control.Monad.State   (MonadState (get), gets)
 import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
+import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
+import           Data.Graph            (SCC (..), flattenSCCs)
+import           Data.Graph.SCC        (stronglyConnCompR)
+import           Data.List             (partition)
 import           Data.Map.Strict       (Map)
 import qualified Data.Map.Strict       as Map
 import qualified Data.Set              as Set
 import           Debug.Trace           (trace)
+import           GHC.Generics          (Generic)
 import qualified Prettyprinter         as PP
 
-import           Data.Graph            (SCC (..), flattenSCCs)
-import           Data.Graph.SCC        (stronglyConnCompR)
-
 import           Reopt.TypeInference.Solver.Constraints             (EqC (..),
-                                                                     EqRowC (EqRowC),
-                                                                     OperandClass (..),
-                                                                     PtrAddC (..))
-import           Reopt.TypeInference.Solver.Monad                   (ConstraintSolvingState (..),
+                                                                     EqRowC (EqRowC))
+import           Reopt.TypeInference.Solver.Monad                   (Conditional (..),
+                                                                     ConstraintSolvingState (..),
                                                                      SolverM,
-                                                                     addTyVarEq,
                                                                      addTyVarEq',
                                                                      defineTyVar,
                                                                      dequeueEqC,
                                                                      dequeueEqRowC,
-                                                                     freshRowVar,
-                                                                     freshTyVar,
                                                                      lookupTyVar,
-                                                                     ptrWidthNumTy,
+                                                                     traceUnification,
                                                                      undefineTyVar,
-                                                                     unsafeUnifyTyVars, traceUnification)
+                                                                     unsafeUnifyTyVars)
 import           Reopt.TypeInference.Solver.RowVariableSubstitution (substRowVarInEqRowC,
                                                                      substRowVarInITy,
                                                                      substRowVarInITy',
                                                                      unifyRecTy)
-import           Reopt.TypeInference.Solver.RowVariables            (NoRow (NoRow),
-                                                                     RowExpr (..), rowExprVar, rowExprShift)
+import           Reopt.TypeInference.Solver.RowVariables            (NoRow (NoRow))
 import           Reopt.TypeInference.Solver.TypeVariables           (TyVar)
 import           Reopt.TypeInference.Solver.Types                   (FTy (..),
                                                                      FreeTyVars (freeTyVars),
                                                                      ITy (..),
                                                                      ITy',
-                                                                     TyF (..), StructName, tyVarToStructName, prettyMap)
+                                                                     StructName,
+                                                                     TyF (..),
+                                                                     prettyMap,
+                                                                     tyVarToStructName)
 import           Reopt.TypeInference.Solver.UnionFindMap            (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap            as UM
-import GHC.Generics (Generic)
 
 
 -- | Unify the given constraints, returning a conservative type map for all type
@@ -214,28 +213,30 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
     Just c  -> solveEqC c >> processAtomicConstraints
     Nothing -> dequeueEqRowC >>= \case
       Just c  -> substEqRowC c >> processAtomicConstraints
-      Nothing -> ptrAddSolver
+      Nothing -> condEqSolver >>= \case
+        True -> processAtomicConstraints
+        False -> pure ()
   where
-   -- This solver will solve one at a time, which is important to get
-   -- around the +p++ case.  We solve a single ptr add, then propagate
-   -- the new eq and roweq constraints.
-    ptrAddSolver = do
-      ptrAdds <- field @"ctxPtrAddCs" <<.= mempty -- get constraints and c
-      go [] ptrAdds
+    -- This solver will solve one at a time, which is important to get
+    -- around the +p++ case.  We solve a single ptr add, then propagate
+    -- the new eq and roweq constraints.
+    condEqSolver = do
+      ceqs <- field @"ctxCondEqs" <<.= mempty -- get constraints and c
+      go [] ceqs
 
-    restore :: [PtrAddC] -> SolverM ()
-    restore ptrAdds = field @"ctxPtrAddCs" .= ptrAdds
+    restore :: [Conditional] -> SolverM ()
+    restore cs = field @"ctxCondEqs" .= cs
 
-    go acc [] = restore acc -- finished here, we didn't so anything.
+    go acc [] = restore acc $> False -- finished here, we didn't so anything.
     go acc (c : cs) = do
-      r <- solvePtrAdd c
-      case r of
-        -- If we did something, put back the unsolved constraints and
-        -- keep going (note we put the seen constraints on the end)
-        Nothing -> restore (cs ++ acc) >> processAtomicConstraints
-        -- Nothing happened. c == c' here, although we might want to
-        -- normalise c in future (e.g. update to the rep. ty var).
-        Just c' -> go (c' : acc) cs
+      ce <- cEnabled c
+      case ce of
+        -- Not enough info to run yet, try the next one.
+        Nothing -> go (c : acc) cs
+        -- The constraint is no longer relevent, drop and keep going
+        Just False  -> go acc cs
+        -- The constraint(s) should be added
+        Just True   -> cAddConstraints c >> restore (cs ++ acc) $> True
 
 solveEqC :: EqC -> SolverM ()
 solveEqC eqc = do
@@ -280,165 +281,165 @@ unifyTypes tv ty1 ty2 =
 --------------------------------------------------------------------------------
 -- PtrAdd solving
 
--- | This solves pointer-sized addition, where the result may or may
--- not be a pointer, dep. on its use and on the types of arguments.
-solvePtrAdd :: PtrAddC -> SolverM (Maybe PtrAddC)
-solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
-  (rv, m_rty) <- lookupTyVar (ptrAddResult c)
-  (lhsv, m_lhsTy) <- lookupTyVar (ptrAddLHS c)
-  (rhsv, m_rhsTy) <- lookupTyVar (ptrAddRHS c)
+-- -- | This solves pointer-sized addition, where the result may or may
+-- -- not be a pointer, dep. on its use and on the types of arguments.
+-- solvePtrAdd :: PtrAddC -> SolverM (Maybe PtrAddC)
+-- solvePtrAdd c = traceContext ("solvePtrAdd" PP.<+> PP.pretty c) $ do
+--   (rv, m_rty) <- lookupTyVar (ptrAddResult c)
+--   (lhsv, m_lhsTy) <- lookupTyVar (ptrAddLHS c)
+--   (rhsv, m_rhsTy) <- lookupTyVar (ptrAddRHS c)
 
-  -- If we see ptr' = ptr + off, this is what we do. Note we have
-  -- m_rty = Just (PtrTy rptrv), m_lhsTy = Just (PtrTy lptrv), up to
-  -- eqv.
-  let structOffsetCase rptrv lptrv off = do
-        rowv <- freshRowVar
-        addTyVarEq rptrv (ITy $ RecTy mempty (RowExprShift off rowv))
-        addTyVarEq lptrv (ITy $ RecTy mempty (RowExprVar       rowv))
+--   -- If we see ptr' = ptr + off, this is what we do. Note we have
+--   -- m_rty = Just (PtrTy rptrv), m_lhsTy = Just (PtrTy lptrv), up to
+--   -- eqv.
+--   let structOffsetCase rptrv lptrv off = do
+--         rowv <- freshRowVar
+--         addTyVarEq rptrv (ITy $ RecTy mempty (RowExprShift off rowv))
+--         addTyVarEq lptrv (ITy $ RecTy mempty (RowExprVar       rowv))
 
-        -- rhsv is a number
-        isNum rhsv
-        pure Nothing -- In any case, we are done with this constraint.
+--         -- rhsv is a number
+--         isNum rhsv
+--         pure Nothing -- In any case, we are done with this constraint.
 
-  -- Note: try to avoid a default pattern here.
-  case (m_rty, m_lhsTy, m_rhsTy, ptrAddClass c) of
-    -- These shouldn't happen, added for completeness
-    (Just RecTy {}, _, _, _) -> error "Saw a recty"
-    (_, Just RecTy {}, _, _) -> error "Saw a recty"
-    (_, _, Just RecTy {}, _) -> error "Saw a recty"
+--   -- Note: try to avoid a default pattern here.
+--   case (m_rty, m_lhsTy, m_rhsTy, ptrAddClass c) of
+--     -- These shouldn't happen, added for completeness
+--     (Just RecTy {}, _, _, _) -> error "Saw a recty"
+--     (_, Just RecTy {}, _, _) -> error "Saw a recty"
+--     (_, _, Just RecTy {}, _) -> error "Saw a recty"
 
-    -- Number cases, resolving the constraint
-    --  1. The args must be numbers.  We could check the other types
-    --     as this might result in extra work, but this way is a bit
-    --     simpler.
-    (Just NumTy {}, _, _, _) -> do
-      addTyVarEq' rv lhsv
-      addTyVarEq' rv rhsv
-      pure Nothing
+--     -- Number cases, resolving the constraint
+--     --  1. The args must be numbers.  We could check the other types
+--     --     as this might result in extra work, but this way is a bit
+--     --     simpler.
+--     (Just NumTy {}, _, _, _) -> do
+--       addTyVarEq' rv lhsv
+--       addTyVarEq' rv rhsv
+--       pure Nothing
 
-    --  2. The result must be a number
-    (_, Just NumTy {}, Just NumTy {}, _) -> do
-      addTyVarEq' rv lhsv
-      addTyVarEq' rv rhsv -- probably redundant, but it unifies the vars.
-      pure Nothing
+--     --  2. The result must be a number
+--     (_, Just NumTy {}, Just NumTy {}, _) -> do
+--       addTyVarEq' rv lhsv
+--       addTyVarEq' rv rhsv -- probably redundant, but it unifies the vars.
+--       pure Nothing
 
-    --  3. Should be covered by 2, here to keep the completeness checker happy.
-    (_, Just NumTy {}, _, OCOffset _) -> do
-      addTyVarEq' rv lhsv
-      addTyVarEq' rv rhsv
-      pure Nothing
+--     --  3. Should be covered by 2, here to keep the completeness checker happy.
+--     (_, Just NumTy {}, _, OCOffset _) -> do
+--       addTyVarEq' rv lhsv
+--       addTyVarEq' rv rhsv
+--       pure Nothing
 
-    -- The *p++ case, where we are looping through via a pointer, and
-    -- we thus have a constant offset.  This boils down to x = x +
-    -- off, although there may be a bit of work to get here, and we
-    -- won't hav ethe same type variables, only the same row variable.
+--     -- The *p++ case, where we are looping through via a pointer, and
+--     -- we thus have a constant offset.  This boils down to x = x +
+--     -- off, although there may be a bit of work to get here, and we
+--     -- won't hav ethe same type variables, only the same row variable.
 
-    -- Handles the recursive while () *p++ case.  If we try to unify
-    --
-    -- shift k r = shift j r
-    --
-    -- k + off =/= r
-    --
-    -- The we are in the array stride case and can set the result to
-    -- the first operand (more or less?)
-    (Just (PtrTy rptv), Just (PtrTy lptv), _, OCOffset o) -> do
-      (rptv', rrec) <- lookupTyVar rptv
-      (lptv', lrec) <- lookupTyVar lptv
+--     -- Handles the recursive while () *p++ case.  If we try to unify
+--     --
+--     -- shift k r = shift j r
+--     --
+--     -- k + off =/= r
+--     --
+--     -- The we are in the array stride case and can set the result to
+--     -- the first operand (more or less?)
+--     (Just (PtrTy rptv), Just (PtrTy lptv), _, OCOffset o) -> do
+--       (rptv', rrec) <- lookupTyVar rptv
+--       (lptv', lrec) <- lookupTyVar lptv
 
-      case (rrec, lrec) of
-        (Just (RecTy _ rr), Just (RecTy _ lr))
-          | rowExprVar rr == rowExprVar lr
-          , rowExprShift rr /= rowExprShift lr + o
-          -- FIXME: This is a temporary fix for *p++
-            -> trace ("Dropping add equality " ++ show (PP.pretty c)) $
-               pure Nothing
-        _ -> structOffsetCase rptv' lptv' o
+--       case (rrec, lrec) of
+--         (Just (RecTy _ rr), Just (RecTy _ lr))
+--           | rowExprVar rr == rowExprVar lr
+--           , rowExprShift rr /= rowExprShift lr + o
+--           -- FIXME: This is a temporary fix for *p++
+--             -> trace ("Dropping add equality " ++ show (PP.pretty c)) $
+--                pure Nothing
+--         _ -> structOffsetCase rptv' lptv' o
 
-    -- Pointer argument cases, resolving the constraint.
-    --  1. The lhs is a pointer, but the rhs is symbolic.  In this
-    --     case we under constrain the output, This is probably an
-    --     array index.
-    (_, Just PtrTy {}, _, OCSymbolic) -> do
-      -- rv is a pointer, but otherwise unconstrained.
-      void $ isPtr rv -- Under constrained
-      -- rhsv is a number
-      isNum rhsv
-      pure Nothing
+--     -- Pointer argument cases, resolving the constraint.
+--     --  1. The lhs is a pointer, but the rhs is symbolic.  In this
+--     --     case we under constrain the output, This is probably an
+--     --     array index.
+--     (_, Just PtrTy {}, _, OCSymbolic) -> do
+--       -- rv is a pointer, but otherwise unconstrained.
+--       void $ isPtr rv -- Under constrained
+--       -- rhsv is a number
+--       isNum rhsv
+--       pure Nothing
 
-    --  2. Similar to (1)
-    (_, _, Just PtrTy {}, OCSymbolic) -> do
-      -- rv is a pointer, but otherwise unconstrained.
-      void $ isPtr rv -- Under constrained
-      -- lhsv is a number
-      isNum lhsv
-      pure Nothing
+--     --  2. Similar to (1)
+--     (_, _, Just PtrTy {}, OCSymbolic) -> do
+--       -- rv is a pointer, but otherwise unconstrained.
+--       void $ isPtr rv -- Under constrained
+--       -- lhsv is a number
+--       isNum lhsv
+--       pure Nothing
 
-    --  3. The lhs is a pointer, and the rhs is an offset.
-    --     In this case we have
-    --       rty   = Ptr (Rec { | shift off r1})
-    --       lhsTy = Ptr (Rec { | r1})
-    --       rhsTy = num64
-    (_, Just (PtrTy ptv), _, OCOffset o) -> do
-      rptv <- isPtr rv
-      structOffsetCase rptv ptv o
+--     --  3. The lhs is a pointer, and the rhs is an offset.
+--     --     In this case we have
+--     --       rty   = Ptr (Rec { | shift off r1})
+--     --       lhsTy = Ptr (Rec { | r1})
+--     --       rhsTy = num64
+--     (_, Just (PtrTy ptv), _, OCOffset o) -> do
+--       rptv <- isPtr rv
+--       structOffsetCase rptv ptv o
 
-    --  4. We need the rhs to be a pointer but it is a (small)
-    --     constant.  FIXME: This should probably not happen?
-    (_, _, Just PtrTy {}, OCOffset _) -> do
-      isNum rhsv
-      pure Nothing
+--     --  4. We need the rhs to be a pointer but it is a (small)
+--     --     constant.  FIXME: This should probably not happen?
+--     (_, _, Just PtrTy {}, OCOffset _) -> do
+--       isNum rhsv
+--       pure Nothing
 
-    --  5. The lhs is a pointer, and the rhs is a const. pointer.
-    (_, Just PtrTy {}, _, OCPointer) -> do
-      -- This is a conflict according to our heuristic, maybe we want
-      -- to record a message?
-      isNum lhsv
-      pure Nothing
+--     --  5. The lhs is a pointer, and the rhs is a const. pointer.
+--     (_, Just PtrTy {}, _, OCPointer) -> do
+--       -- This is a conflict according to our heuristic, maybe we want
+--       -- to record a message?
+--       isNum lhsv
+--       pure Nothing
 
-    --  6. The rhs is a pointer, not sure if this will occur.
-    (_, _, Just PtrTy {}, OCPointer) -> do
-      void $ isPtr rv -- Under constrained
-      isNum lhsv
-      pure Nothing
+--     --  6. The rhs is a pointer, not sure if this will occur.
+--     (_, _, Just PtrTy {}, OCPointer) -> do
+--       void $ isPtr rv -- Under constrained
+--       isNum lhsv
+--       pure Nothing
 
-    -- Pointer result cases, resolving the constraint
+--     -- Pointer result cases, resolving the constraint
 
-    --  1. The result is a pointer, and the rhs is an offset.  Similar to
-    --     (3) above
-    (Just (PtrTy rptv), _, _, OCOffset o) -> do
-      ptv <- isPtr lhsv
-      structOffsetCase rptv ptv o
+--     --  1. The result is a pointer, and the rhs is an offset.  Similar to
+--     --     (3) above
+--     (Just (PtrTy rptv), _, _, OCOffset o) -> do
+--       ptv <- isPtr lhsv
+--       structOffsetCase rptv ptv o
 
-    --  2. The result is a pointer, the rhs is a number, the rhs is
-    --  then a pointer.
-    (Just PtrTy {}, _, Just NumTy {}, _) -> do
-      void $ isPtr lhsv -- Under constrained
-      pure Nothing
+--     --  2. The result is a pointer, the rhs is a number, the rhs is
+--     --  then a pointer.
+--     (Just PtrTy {}, _, Just NumTy {}, _) -> do
+--       void $ isPtr lhsv -- Under constrained
+--       pure Nothing
 
-    --  2. The result is a pointer, the lhs is a number, the rhs is
-    --  then a pointer.
-    (Just PtrTy {}, Just NumTy {}, _, _) -> do
-      void $ isPtr rhsv -- Under constrained
-      pure Nothing
+--     --  2. The result is a pointer, the lhs is a number, the rhs is
+--     --  then a pointer.
+--     (Just PtrTy {}, Just NumTy {}, _, _) -> do
+--       void $ isPtr rhsv -- Under constrained
+--       pure Nothing
 
-    --  3. LHS is a number, we can infer RHS is a pointer.
-    (Just PtrTy {}, _, _, OCPointer) -> do
-      void $ isPtr rhsv -- Under constrained
-      isNum lhsv
-      pure Nothing
+--     --  3. LHS is a number, we can infer RHS is a pointer.
+--     (Just PtrTy {}, _, _, OCPointer) -> do
+--       void $ isPtr rhsv -- Under constrained
+--       isNum lhsv
+--       pure Nothing
 
-    -- We can't do anything for these constraints.
-    (Nothing, Nothing, Nothing, _)       -> tryLater
-    (Nothing, Just NumTy {}, Nothing, _) -> tryLater
-    (Nothing, Nothing, Just NumTy {}, _) -> tryLater
-    (Just PtrTy {}, Nothing, Nothing, _) -> tryLater
-  where
-    tryLater = pure (Just c)
-    isNum tv = addTyVarEq tv . ITy =<< ptrWidthNumTy
-    isPtr tv = do
-      tv' <- freshTyVar Nothing Nothing
-      addTyVarEq tv (ITy (PtrTy tv'))
-      pure tv'
+--     -- We can't do anything for these constraints.
+--     (Nothing, Nothing, Nothing, _)       -> tryLater
+--     (Nothing, Just NumTy {}, Nothing, _) -> tryLater
+--     (Nothing, Nothing, Just NumTy {}, _) -> tryLater
+--     (Just PtrTy {}, Nothing, Nothing, _) -> tryLater
+--   where
+--     tryLater = pure (Just c)
+--     isNum tv = addTyVarEq tv . ITy =<< ptrWidthNumTy
+--     isPtr tv = do
+--       tv' <- freshTyVar Nothing Nothing
+--       addTyVarEq tv (ITy (PtrTy tv'))
+--       pure tv'
 
 --------------------------------------------------------------------------------
 -- Instances
