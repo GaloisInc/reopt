@@ -9,7 +9,7 @@ module Reopt.TypeInference.Solver
     unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
     -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy, pattern FNamedStruct,
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy, pattern FNamedStruct,  pattern FStructTy,
     -- Testing
   ) where
 
@@ -227,11 +227,14 @@ cycleFilter rv0 lhsv0 off = do
 pattern FNumTy :: Int -> FTy
 pattern FNumTy sz = FTy (NumTy sz)
 
-pattern FPtrTy :: FieldMap FTy -> FTy
+pattern FPtrTy :: FTy -> FTy
 pattern FPtrTy ty = FTy (PtrTy ty)
 
 pattern FUnknownTy :: FTy
 pattern FUnknownTy = UnknownTy
+
+pattern FStructTy :: FieldMap FTy -> FTy
+pattern FStructTy fm = StructTy fm
 
 pattern FNamedStruct :: StructName -> FTy
 pattern FNamedStruct s = NamedStruct s

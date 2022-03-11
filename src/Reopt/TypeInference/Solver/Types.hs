@@ -45,7 +45,8 @@ type StructName = String
 data FTy =
   UnknownTy
   | NamedStruct StructName
-  | FTy (TyF (FieldMap FTy) FTy)
+  | StructTy (FieldMap FTy)
+  | FTy (TyF FTy FTy)
   deriving (Eq, Ord, Show)
 
 rowVarToStructName :: RowVar -> StructName
@@ -69,6 +70,7 @@ recTyByteWidth ptrSz = offsetAfterLast . last
 -- RecTy, i.e., not records.
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
+tyByteWidth _ptrSz StructTy {} = error "Saw a StructTy in tyByteWidth"
 tyByteWidth _ptrSz NamedStruct {} = error "Saw a named struct in tyByteWidth"
 tyByteWidth ptrSz (FTy ty) =
   case ty of
@@ -89,10 +91,11 @@ tyToLLVMType :: Int -> FTy -> L.Type
 tyToLLVMType ptrSz UnknownTy =
   L.PrimType (L.Integer (fromIntegral ptrSz))
 tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
-tyToLLVMType ptrSz (FTy ty) =
+tyToLLVMType ptrSz (StructTy fm) = recTyToLLVMType ptrSz (Map.assocs (getFieldMap fm))
+tyToLLVMType ptrSz (FTy ty) = 
   case ty of
-    NumTy n -> L.PrimType (L.Integer (fromIntegral n))
-    PtrTy flds -> L.PtrTo $ recTyToLLVMType ptrSz (Map.assocs (getFieldMap flds))
+    NumTy n   -> L.PrimType (L.Integer (fromIntegral n))
+    PtrTy ty' -> L.PtrTo $ tyToLLVMType ptrSz ty'
 
 --------------------------------------------------------------------------------
 -- Instances
@@ -114,6 +117,7 @@ instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"
     NamedStruct n -> PP.pretty n
+    StructTy tm -> PP.pretty tm
     FTy ty  -> PP.pretty ty
 
 -- FreeTyVars
