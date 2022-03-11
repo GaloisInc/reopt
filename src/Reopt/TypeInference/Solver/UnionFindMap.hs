@@ -3,6 +3,9 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Reopt.TypeInference.Solver.UnionFindMap where
 
@@ -14,58 +17,69 @@ import           GHC.Generics          (Generic)
 import           Prettyprinter         (pretty)
 import qualified Prettyprinter         as PP
 
-data UnionFindMap k v = UnionFindMap
-  { ufmEqv  :: Map k k
+data UnionFindMap k ki v = UnionFindMap
+  { ufmEqv  :: Map k ki
   , ufmDefs :: Map k v
   }
   deriving (Eq, Ord, Show, Generic, Functor, Foldable, Traversable)
 
-empty :: Ord k => UnionFindMap k v
+class Ord k => UFMKeyInfo k ki | ki -> k where
+  -- | @compact old new@ does path compression when forwarding pointers
+  compact      :: ki -> ki -> ki
+  projectKey   :: ki -> k
+  injectKey    :: k -> ki
+  invertKey    :: k -> ki -> ki
+
+empty :: UFMKeyInfo k ki => UnionFindMap k ki v
 empty = UnionFindMap mempty mempty
 
-lookupRep :: Ord k => k -> UnionFindMap k v -> (k, UnionFindMap k v)
+lookupRep :: UFMKeyInfo k ki => k -> UnionFindMap k ki v -> (ki, UnionFindMap k ki v)
 lookupRep k0 = field @"ufmEqv" %%~ go k0
   where
     go k m =
       case Map.lookup k m of
-        Nothing  -> (k, m)
-        Just k' ->
-          let (k'', m') = go k' m
-          in (k'', Map.insert k k'' m') -- short circuit next lookup.
+        Nothing  -> (injectKey k, m)
+        Just ki' ->
+          let (ki'', m') = go (projectKey ki') m
+              newki = compact ki' ki'' 
+          in (newki, Map.insert k newki m') -- short circuit next lookup.
 
 -- | Lookup a type variable, returns the representative of the
 -- corresponding equivalence class, and the definition for that type
 -- var, if any.
 
-lookup :: Ord k => k -> UnionFindMap k v -> ((k, Maybe v), UnionFindMap k v)
-lookup k m = ((k', Map.lookup k' (ufmDefs m)), m')
+lookup :: UFMKeyInfo k ki => k -> UnionFindMap k ki v -> ((ki, Maybe v), UnionFindMap k ki v)
+lookup k m = ((ki', Map.lookup (projectKey ki') (ufmDefs m)), m')
   where
-    (k', m') = lookupRep k m
+    (ki', m') = lookupRep k m
 
-insert :: Ord k => k -> v -> UnionFindMap k v -> UnionFindMap k v
+insert :: UFMKeyInfo k ki => k -> v -> UnionFindMap k ki v -> UnionFindMap k ki v
 insert k v = field @"ufmDefs" . at k ?~ v
 
 -- | @delete k m@ forgets any definition for @k@, without touching any
 -- equivalences.
-delete :: Ord k => k -> UnionFindMap k v -> UnionFindMap k v
+delete :: UFMKeyInfo k ki => k -> UnionFindMap k ki v -> UnionFindMap k ki v
 delete k = field @"ufmDefs" %~ Map.delete k
 
 -- | @unify root leaf@ will make @root@ the new equiv. rep
 -- for @leaf@.  Note that both root and leaf should be the reps. of
 -- their corresponding equivalence classes, and that only @root@ is allowed a definition.
-unify :: Ord k => k -> k -> UnionFindMap k v -> UnionFindMap k v
+unify :: UFMKeyInfo k ki => ki -> k -> UnionFindMap k ki v -> UnionFindMap k ki v
 unify root leaf = field @"ufmEqv" %~ Map.insert leaf root
 
 -- | Map the representative element onto the class.
-eqvClasses :: Ord k => UnionFindMap k v -> Map k [k]
+eqvClasses :: UFMKeyInfo k ki => UnionFindMap k ki v -> Map k [ki]
 eqvClasses um = Map.fromListWith (++) rmap
   where
-  rmap = [ (k', [k]) | k <- Map.keys (ufmEqv um), let (k', _) = lookupRep k um ]
-
+  rmap = [ (projectKey ki, [invertKey k ki])
+         | k <- Map.keys (ufmEqv um)
+         , let (ki, _) = lookupRep k um ]
+         
 --------------------------------------------------------------------------------
 -- instances
 
-instance (Ord k, PP.Pretty k, PP.Pretty v) => PP.Pretty (UnionFindMap k v) where
+instance (UFMKeyInfo k ki, PP.Pretty k, PP.Pretty ki, PP.Pretty v) =>
+         PP.Pretty (UnionFindMap k ki v) where
   pretty um = PP.align . PP.vsep $
     [ row "Equivalences" $ [ pretty k PP.<+> ": " PP.<+> PP.list (map pretty v)
                            | (k, v) <- Map.toList (eqvClasses um) ]

@@ -2,25 +2,26 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver
-  ( Ty (..), TyVar, numTy, ptrTy, varTy, structTy,
+  ( Ty (..), TyVar, numTy, ptrTy, varTy,
     SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, ptrAddTC,
     OperandClass (..),
     unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
     -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FRecTy, pattern FUnknownTy, pattern FNamedStruct,
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy, pattern FNamedStruct,
     -- Testing
   ) where
 
-import           Data.Map.Strict                                       (Map)
-import qualified Data.Map.Strict                                       as Map
 
 import Reopt.TypeInference.Solver.RowVariables
-  ( RowExpr (..), RowVar(..), Offset, NoRow (NoRow), rowExprVar, rowExprShift
+  ( RowExpr (..), Offset, rowExprVar, rowExprShift, FieldMap, singletonFieldMap
   )
 import Reopt.TypeInference.Solver.Solver
-  ( unifyConstraints, ConstraintSolution(..)
+  ( unifyConstraints
+  )
+import Reopt.TypeInference.Solver.Finalise
+  ( ConstraintSolution(..)
   )
 import Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (..),
@@ -31,32 +32,26 @@ import Reopt.TypeInference.Solver.Types
     FTy(..), tyToLLVMType, StructName
   )
 import Reopt.TypeInference.Solver.Monad
-  (SolverM, runSolverM, freshTyVar, addTyVarEq, freshRowVar
-  , ptrWidthNumTy, Conditional(..), addCondEq, withFresh, lookupTyVar)
+  (SolverM, runSolverM, freshTyVar, addTyVarEq
+  , ptrWidthNumTy, Conditional(..), addCondEq, withFresh, lookupTyVar, freshRowVarFM, lookupRowExprRep)
 import Reopt.TypeInference.Solver.Constraints (OperandClass(..))
 import qualified Prettyprinter as PP
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
   Var TyVar
-  | Ty  (TyF RowExpr Ty)
+  | Ty  (TyF (FieldMap Ty) Ty)
 
 -- Smart constructors for Ty
 
 numTy :: Int -> Ty
 numTy = Ty . NumTy
 
-ptrTy :: Ty -> Ty
+ptrTy :: FieldMap Ty -> Ty
 ptrTy = Ty . PtrTy
 
 varTy :: TyVar -> Ty
 varTy = Var
-
-recTy :: Map Offset Ty -> RowExpr -> Ty
-recTy os r = Ty $ RecTy os r
-
-structTy :: Map Offset Ty -> RowVar -> Ty
-structTy os r = Ty $ RecTy os (RowExprVar r)
 
 --------------------------------------------------------------------------------
 -- Compilers from Ty into ITy
@@ -66,7 +61,12 @@ nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
 
 compileTy :: Ty -> SolverM ITy
 compileTy (Var tv) = pure (VarTy tv)
-compileTy (Ty ty)  = ITy <$> traverse nameTy ty
+compileTy (Ty ty)  = ITy <$> 
+  case ty of
+    NumTy n  -> pure (NumTy n)
+    PtrTy fm -> do
+      fm' <- traverse nameTy fm
+      PtrTy . RowExprVar <$> freshRowVarFM fm'
 
 --------------------------------------------------------------------------------
 -- Constraint constructors
@@ -77,12 +77,11 @@ eqTC ty1 ty2 = do
   ity2 <- compileTy ty2
   addTyVarEq tv1 ity2
 
+
+  
+-- emits ptr :: PtrTy { 0 -> target }
 ptrTC :: Ty -> Ty -> SolverM ()
-ptrTC target ptr = do
-  rv <- freshRowVar
-  -- emits ptr = { 0 -> target | rv }
-  let pTy = ptrTy (structTy (Map.singleton 0 target) rv)
-  eqTC ptr pTy
+ptrTC target ptr = eqTC ptr (ptrTy (singletonFieldMap 0 target))
 
 --------------------------------------------------------------------------------
 -- Pointer-sized addition
@@ -134,8 +133,8 @@ ptrAddTC rty lhsty rhsty oc = do
         , cEnabled = cycleFilter rv lhstv o .*. (isPtr rv .*. isPtr lhstv)
         , cAddConstraints = withFresh $ \rowv -> do
             -- this is a bit gross, but should work.
-            eqTC (varTy rv)    (ptrTy (recTy mempty (RowExprShift o rowv)))
-            eqTC (varTy lhstv) (ptrTy (recTy mempty (RowExprVar     rowv)))
+            addTyVarEq rv    (ITy (PtrTy (RowExprShift o rowv)))
+            addTyVarEq lhstv (ITy (PtrTy (RowExprVar     rowv)))
         }
 
     OCSymbolic -> do
@@ -170,12 +169,12 @@ ptrAddTC rty lhsty rhsty oc = do
             addTyVarEq rhstv (ITy $ PtrTy rhst)
         }
 
-      addCondEq $ Conditional
-        { cName       = show (PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <> PP.pretty rhstv
-                          PP.<+> "(possible global pointer case 2)")
-        , cEnabled  = isNum lhstv
-        , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
-        }
+      -- addCondEq $ Conditional
+      --   { cName       = show (PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <> PP.pretty rhstv
+      --                     PP.<+> "(possible global pointer case 2)")
+      --   , cEnabled  = isNum lhstv
+      --   , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
+      --   }
   where
     isPtr' PtrTy {} = True
     isPtr' _         = False
@@ -191,7 +190,6 @@ ptrAddTC rty lhsty rhsty oc = do
     isPtr, isNum :: TyVar -> SolverM (Maybe Bool)
     isPtr = isThing isPtr'
     isNum = isThing isNum'
-
 
 -- | If this detects a looping add (i.e., from while () *p++;) then we
 -- disable the constraint.  This will could return Just True over
@@ -215,15 +213,12 @@ cycleFilter rv0 lhsv0 off = do
   -- The we are in the array stride case and can set the result to
   -- the first operand (more or less?)
   case (m_rty, m_lhsTy) of
-    (Just (PtrTy rptv), Just (PtrTy lptv)) -> do
-      (_rptv', rrec) <- lookupTyVar rptv
-      (_lptv', lrec) <- lookupTyVar lptv
-
-      pure $ case (rrec, lrec) of
-        (Just (RecTy _ rr), Just (RecTy _ lr)) -> Just . not $
-          rowExprVar rr == rowExprVar lr
-          && rowExprShift rr /= rowExprShift lr + off
-        _ -> Nothing
+    (Just (PtrTy rre), Just (PtrTy lre)) -> do
+      lre' <- lookupRowExprRep lre
+      rre' <- lookupRowExprRep rre
+      pure $ Just . not $
+        rowExprVar rre' == rowExprVar lre'
+        && rowExprShift rre' /= rowExprShift lre' + off
     _ -> pure Nothing
 
 --------------------------------------------------------------------------------
@@ -232,10 +227,7 @@ cycleFilter rv0 lhsv0 off = do
 pattern FNumTy :: Int -> FTy
 pattern FNumTy sz = FTy (NumTy sz)
 
-pattern FRecTy :: Map Offset FTy -> FTy
-pattern FRecTy ty = FTy (RecTy ty NoRow)
-
-pattern FPtrTy :: FTy -> FTy
+pattern FPtrTy :: FieldMap FTy -> FTy
 pattern FPtrTy ty = FTy (PtrTy ty)
 
 pattern FUnknownTy :: FTy

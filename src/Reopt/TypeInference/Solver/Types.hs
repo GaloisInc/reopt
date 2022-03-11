@@ -14,54 +14,19 @@ import qualified Data.Set        as Set
 import qualified Prettyprinter   as PP
 import qualified Text.LLVM                                as L
 
-import           Reopt.TypeInference.Solver.RowVariables  (NoRow (NoRow),
+import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (..),
                                                            Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
-                                                           RowVar)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar, tyVarInt)
+                                                           RowVar, FieldMap, rowVarInt)
+import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 
-
+-- FIXME: f will be used when we add e.g. tuples/vectors
 data TyF rvar f
   = -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
     NumTy Int
   | -- | A pointer to a value.
-    PtrTy f
-  | -- | Record type, mapping byte offsets to types and with a row variable
-    -- for describing constraints on the existence/type of additional fields.
-    RecTy (Map Offset f) rvar
+    PtrTy rvar
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
-
-instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
-  pretty = \case
-    NumTy sz -> "i" <> PP.pretty sz
-    PtrTy t -> "ptr" <> PP.parens (PP.pretty t)
-    RecTy flds row ->
-      PP.group $ PP.align $
-        PP.encloseSep (PP.flatAlt "{ " "{") (PP.flatAlt " }" "}") mempty
-          [ PP.encloseSep mempty mempty ", " $
-              map (\(off, t) -> PP.pretty off PP.<+> ":" PP.<+> PP.pretty t) $
-                Map.toAscList flds
-          , PP.hsep ["|", PP.pretty row]
-          ]
-
-class FreeTyVars a where
-  freeTyVars :: a -> Set TyVar
-
-class FreeRowVars a where
-  freeRowVars :: a -> Set RowVar
-
-instance FreeTyVars f => FreeTyVars (TyF rvar f) where
-  freeTyVars = foldMap freeTyVars
-
-instance FreeRowVars RowExpr where
-  freeRowVars (RowExprVar v) = Set.singleton v
-  freeRowVars (RowExprShift _ v) = Set.singleton v
-
-instance FreeRowVars f => FreeRowVars (TyF RowExpr f) where
-  freeRowVars = \case
-    NumTy _ -> Set.empty
-    PtrTy t -> freeRowVars t
-    RecTy flds row -> foldr (Set.union . freeRowVars) (freeRowVars row) flds
 
 -- | An unrolled ITy
 type ITy' = TyF RowExpr TyVar
@@ -73,27 +38,6 @@ data ITy
   | ITy ITy'
   deriving (Eq, Ord, Show)
 
-instance PP.Pretty ITy where
-  pretty = \case
-    VarTy v -> PP.pretty v
-    ITy ty  -> PP.pretty ty
-
-instance FreeTyVars TyVar where
-  freeTyVars = Set.singleton
-
-instance FreeRowVars TyVar where
-  freeRowVars _ = Set.empty
-
-instance FreeTyVars ITy where
-  freeTyVars = \case
-    VarTy v  -> Set.singleton v
-    ITy   ty -> freeTyVars ty
-
-instance FreeRowVars ITy where
-  freeRowVars = \case
-    VarTy {}  -> Set.empty
-    ITy   ty  -> freeRowVars ty
-
 -- | Final types resulting from inference (i.e., no free type variables).
 
 type StructName = String
@@ -101,17 +45,11 @@ type StructName = String
 data FTy =
   UnknownTy
   | NamedStruct StructName
-  | FTy (TyF NoRow FTy)
+  | FTy (TyF (FieldMap FTy) FTy)
   deriving (Eq, Ord, Show)
 
-instance PP.Pretty FTy where
-  pretty = \case
-    UnknownTy -> "?"
-    NamedStruct n -> PP.pretty n
-    FTy ty  -> PP.pretty ty
-
-tyVarToStructName :: TyVar -> StructName
-tyVarToStructName tv = "struct.reopt.t" ++ show (tyVarInt tv)
+rowVarToStructName :: RowVar -> StructName
+rowVarToStructName tv = "struct.reopt.t" ++ show (rowVarInt tv)
 
 prettyMap :: (k -> PP.Doc d) -> (v -> PP.Doc d) -> Map k v -> [PP.Doc d]
 prettyMap ppKey ppValue =
@@ -136,7 +74,6 @@ tyByteWidth ptrSz (FTy ty) =
   case ty of
     NumTy n -> fromIntegral n `div` 8
     PtrTy _ -> fromIntegral ptrSz `div` 8
-    RecTy flds NoRow -> recTyByteWidth ptrSz (Map.assocs flds)
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
 recTyToLLVMType ptrSz [(0, ty)] = tyToLLVMType ptrSz ty
@@ -155,5 +92,73 @@ tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
 tyToLLVMType ptrSz (FTy ty) =
   case ty of
     NumTy n -> L.PrimType (L.Integer (fromIntegral n))
-    PtrTy typ -> L.PtrTo (tyToLLVMType ptrSz typ)
-    RecTy flds NoRow -> recTyToLLVMType ptrSz (Map.assocs flds)
+    PtrTy flds -> L.PtrTo $ recTyToLLVMType ptrSz (Map.assocs (getFieldMap flds))
+
+--------------------------------------------------------------------------------
+-- Instances
+
+-- Pretty
+
+instance PP.Pretty ITy where
+  pretty = \case
+    VarTy v -> PP.pretty v
+    ITy ty  -> PP.pretty ty
+
+instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
+  pretty = \case
+    NumTy sz -> "i" <> PP.pretty sz
+    PtrTy t -> "ptr " <> PP.pretty t
+
+
+instance PP.Pretty FTy where
+  pretty = \case
+    UnknownTy -> "?"
+    NamedStruct n -> PP.pretty n
+    FTy ty  -> PP.pretty ty
+
+-- FreeTyVars
+
+class FreeTyVars a where
+  freeTyVars :: a -> Set TyVar
+
+instance FreeTyVars TyVar where
+  freeTyVars = Set.singleton
+
+instance FreeTyVars f => FreeTyVars (TyF rvar f) where
+  freeTyVars = foldMap freeTyVars
+
+instance FreeTyVars ITy where
+  freeTyVars = \case
+    VarTy v  -> Set.singleton v
+    ITy   ty -> freeTyVars ty
+
+instance FreeTyVars t => FreeTyVars (FieldMap t) where
+  freeTyVars = foldMap freeTyVars
+
+-- FreeRowVars
+
+class FreeRowVars a where
+  freeRowVars :: a -> Set RowVar
+
+instance FreeRowVars RowVar where
+  freeRowVars = Set.singleton
+
+instance FreeRowVars RowExpr where
+  freeRowVars (RowExprVar v) = Set.singleton v
+  freeRowVars (RowExprShift _ v) = Set.singleton v
+
+instance (FreeRowVars r, FreeRowVars f) => FreeRowVars (TyF r f) where
+  freeRowVars = \case
+    NumTy _ -> Set.empty
+    PtrTy t -> freeRowVars t
+
+instance FreeRowVars TyVar where
+  freeRowVars _ = Set.empty
+
+instance FreeRowVars ITy where
+  freeRowVars = \case
+    VarTy {}  -> Set.empty
+    ITy   ty  -> freeRowVars ty
+
+instance FreeRowVars t => FreeRowVars (FieldMap t) where
+  freeRowVars = foldMap freeRowVars

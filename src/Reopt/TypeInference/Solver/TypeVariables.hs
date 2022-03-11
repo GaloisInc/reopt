@@ -7,6 +7,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 module Reopt.TypeInference.Solver.TypeVariables
   ( TyVar (TyVar, tyVarInt),
@@ -15,6 +16,8 @@ where
 
 import           Data.Function (on)
 import qualified Prettyprinter as PP
+
+import Reopt.TypeInference.Solver.UnionFindMap  (UFMKeyInfo(..))
 
 data TyVar = TyVar
   { tyVarInt :: Int,
@@ -36,3 +39,10 @@ instance PP.Pretty TyVar where
     where
       maybeOrigin Nothing = mempty
       maybeOrigin (Just origin) = PP.space <> PP.parens (PP.pretty origin)
+
+instance UFMKeyInfo TyVar TyVar where
+  compact _ x = x
+  projectKey    = id
+  injectKey     = id
+  invertKey k _ = k
+  
