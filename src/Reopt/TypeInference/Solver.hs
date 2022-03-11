@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reopt.TypeInference.Solver
-  ( Ty (..), TyVar, numTy, ptrTy, varTy,
+  ( Ty (..), TyVar, numTy, ptrTy, ptrTy', varTy,
     SolverM, runSolverM,
     eqTC, ptrTC, freshTyVar, ptrAddTC,
     OperandClass (..),
@@ -49,6 +49,9 @@ numTy = Ty . NumTy
 
 ptrTy :: FieldMap Ty -> Ty
 ptrTy = Ty . PtrTy
+
+ptrTy' :: Ty -> Ty
+ptrTy' = Ty . PtrTy . singletonFieldMap 0
 
 varTy :: TyVar -> Ty
 varTy = Var

@@ -3,7 +3,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE DeriveGeneric #-}
 
 module Reopt.TypeInference.Solver.Solver
   ( unifyConstraints 
@@ -134,8 +133,8 @@ solveEqRowC eqc = do
   case () of
     _ | (lo, lv) == (ro, rv) -> pure () -- trivial up to eqv.
       | lv == rv  -> error "Recursive row var equation"
-      | lo < ro   -> unify (ro - lo) lv lfm rv rfm
-      | otherwise -> unify (lo - ro) rv rfm lv lfm
+      | lo < ro   -> unify (ro - lo) rv rfm lv lfm 
+      | otherwise -> unify (lo - ro) lv lfm rv rfm 
   where
     unify delta lowv lowfm highv highfm = do
       undefineRowVar highv
