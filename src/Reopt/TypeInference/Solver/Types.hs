@@ -71,7 +71,7 @@ recTyByteWidth ptrSz = offsetAfterLast . last
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
 tyByteWidth _ptrSz StructTy {} = error "Saw a StructTy in tyByteWidth"
-tyByteWidth _ptrSz NamedStruct {} = error "Saw a named struct in tyByteWidth"
+tyByteWidth _ptrSz (NamedStruct n) = error ("Saw a named struct in tyByteWidth " ++ n)
 tyByteWidth ptrSz (FTy ty) =
   case ty of
     NumTy n -> fromIntegral n `div` 8
@@ -85,7 +85,9 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
     go _ [] = []
     go nextOffset flds@((o, ty) : rest)
       | o == nextOffset = tyToLLVMType ptrSz ty : go (o + fromIntegral (tyByteWidth ptrSz ty)) rest
-      | otherwise = L.PrimType (L.Integer (8 * (fromIntegral o - fromIntegral nextOffset))) : go o flds
+      | otherwise =
+        let pad = L.Vector (fromIntegral o - fromIntegral nextOffset) (L.PrimType (L.Integer 8))
+        in pad : go o flds
 
 tyToLLVMType :: Int -> FTy -> L.Type
 tyToLLVMType ptrSz UnknownTy =
