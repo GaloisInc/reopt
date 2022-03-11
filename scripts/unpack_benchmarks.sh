@@ -14,10 +14,14 @@ unlzma_mv_untar () {
   if [[ "$TAR_FILE.lzma" -nt "$TAR_FILE"  ]] ; then
     unlzma -k "$TAR_FILE.lzma"
   fi
-  if [[ "$OSTYPE" == "darwin"* ]]; then
+  TARVER=`tar --version | head -n 1`
+  if [[ "$TARVER" =~ "tar (GNU tar)" ]]; then
+    tar -xf $TAR_FILE
+  elif [[ "$TARVER" =~ "bsdtar" ]]; then
     tar -xkf $TAR_FILE
   else
-    tar --overwrite -xf $TAR_FILE
+    echo "Unknown version of tar, please report!"
+    exit 1
   fi
   echo " done!"
   popd # $DIR
@@ -34,4 +38,4 @@ unlzma_mv_untar "lib64.tar" "centos7-dev/lib64"
 unlzma_mv_untar "debug-lib64.tar" "centos7-dev/debug-lib64"
 
 
-popd > /dev/null # $BENCHMARK_DIR 
+popd > /dev/null # $BENCHMARK_DIR
