@@ -273,7 +273,9 @@ data ReoptOptions = ReoptOptions
     -- | Additional paths to search for dynamic dependencies.
     roDynDepPaths :: ![FilePath],
     -- | Additional paths to search for debug versions of dynamic dependencies.
-    roDynDepDebugPaths :: ![FilePath]
+    roDynDepDebugPaths :: ![FilePath],
+    -- | Trace unification in the solver
+    roTraceUnification :: !Bool
   }
 
 -- | Reopt options with no additional functions to explore or not explore.
@@ -285,7 +287,9 @@ defaultReoptOptions =
       roVerboseMode = False,
       roDiscoveryOptions = reoptDefaultDiscoveryOptions,
       roDynDepPaths = [],
-      roDynDepDebugPaths = []}
+      roDynDepDebugPaths = [],
+      roTraceUnification = False
+    }
 
 addKnownFn ::
   SymAddrMap w ->
@@ -2449,6 +2453,7 @@ recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
     doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState
 
   let constraints = genModuleConstraints recMod (memory discState)
+                                         (roTraceUnification reoptOpts)
 
   pure (os, discState, recMod, constraints, mergeRel, logEvents)
 

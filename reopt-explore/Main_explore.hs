@@ -535,7 +535,8 @@ main = do
   gdbDebugDirs <- getGdbDebugInfoDirs (verbose args)
   let opts = defaultReoptOptions { roVerboseMode = verbose args,
                                    roDynDepPaths = dynDepPath args,
-                                   roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs}
+                                   roDynDepDebugPaths = (dynDepDebugPath args) ++ gdbDebugDirs
+                                 }
   case (showHelp args, programPaths args, exploreMode args) of
     (True, _, _) -> do
       print $ helpText [] HelpFormatAll arguments

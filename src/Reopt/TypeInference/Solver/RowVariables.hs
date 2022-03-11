@@ -99,6 +99,9 @@ unifyFieldMaps (FieldMap m1) (FieldMap m2) =
 singletonFieldMap :: Offset -> t -> FieldMap t
 singletonFieldMap off v = FieldMap $ Map.singleton off v
 
+fieldMapFromList :: [(Offset, t)] -> FieldMap t
+fieldMapFromList = FieldMap . Map.fromList
+
 --------------------------------------------------------------------------------
 -- Union find helpers
 
@@ -113,3 +116,9 @@ instance UFMKeyInfo RowVar RowInfo where
   projectKey     = riRowVar
   injectKey k    = RowInfo { riRowVar = k, riShift = 0 }
   invertKey k ki = ki { riRowVar = k }
+
+instance PP.Pretty RowInfo where
+  pretty (RowInfo rv off)
+    | off == 0  = PP.pretty rv
+    | otherwise = PP.pretty rv <> " + " <> PP.pretty off
+    

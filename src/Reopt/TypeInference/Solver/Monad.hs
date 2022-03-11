@@ -58,8 +58,8 @@ data ConstraintSolvingState = ConstraintSolvingState
   }
   deriving (Generic)
 
-emptyContext :: Int -> ConstraintSolvingState
-emptyContext w = ConstraintSolvingState
+emptyContext :: Int -> Bool -> ConstraintSolvingState
+emptyContext w trace = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
   , ctxCondEqs     = []
@@ -69,7 +69,7 @@ emptyContext w = ConstraintSolvingState
   , ptrWidth       = w
   , ctxTyVars      = UM.empty
   , ctxRowVars     = UM.empty
-  , ctxTraceUnification = False
+  , ctxTraceUnification = trace
   }
 
 newtype SolverM a = SolverM
@@ -77,8 +77,8 @@ newtype SolverM a = SolverM
   }
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
 
-runSolverM :: Int -> SolverM a -> a
-runSolverM w = flip evalState (emptyContext w) . getSolverM
+runSolverM :: Bool -> Int -> SolverM a -> a
+runSolverM b w = flip evalState (emptyContext w b) . getSolverM
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -311,7 +311,8 @@ instance PP.Pretty ConstraintSolvingState where
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
             row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
-            PP.pretty (ctxTyVars ctx)
+            PP.pretty (ctxTyVars ctx),
+            PP.pretty (ctxRowVars ctx)
           ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
