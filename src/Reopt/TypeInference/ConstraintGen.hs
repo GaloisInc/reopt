@@ -346,10 +346,11 @@ inSolverM :: SolverM a -> CGenM ctxt arch a
 inSolverM = CGenM . lift . lift
 
 runCGenM :: Memory (ArchAddrWidth arch) ->
+            Bool -> 
             CGenM CGenGlobalContext arch a ->
             a
-runCGenM mem (CGenM m) =
-  runSolverM ptrWidth (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
+runCGenM mem trace (CGenM m) =
+  runSolverM trace ptrWidth (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
   where
     ptrWidth = widthVal (memWidth mem)
     st0 = CGenState { _assignTyVars  = mempty
@@ -922,8 +923,9 @@ genModuleConstraints ::
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
   Memory (ArchAddrWidth arch) ->
+  Bool -> 
   ModuleConstraints arch
-genModuleConstraints m mem = runCGenM mem $ do
+genModuleConstraints m mem trace = runCGenM mem trace $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 

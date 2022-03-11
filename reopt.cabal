@@ -72,7 +72,7 @@ library
     Reopt.TypeInference.Solver.Monad
     Reopt.TypeInference.Solver.Solver
     Reopt.TypeInference.Solver.RowVariables
-    Reopt.TypeInference.Solver.RowVariableSubstitution
+    Reopt.TypeInference.Solver.Finalise
     Reopt.TypeInference.Solver.TypeVariables
     Reopt.TypeInference.Solver.Types
     Reopt.TypeInference.Solver.UnionFindMap    
