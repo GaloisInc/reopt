@@ -38,7 +38,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars)
+                                                           unsafeUnifyTyVars, Conditional', condEnabled, addEqC, addEqRowC)
 import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
                                                            emptyFieldMap,
                                                            rowExprShift,
@@ -101,19 +101,34 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
       ceqs <- field @"ctxCondEqs" <<.= mempty -- get constraints and c
       go [] ceqs
 
-    restore :: [Conditional] -> SolverM ()
+    restore :: [Conditional'] -> SolverM ()
     restore cs = field @"ctxCondEqs" .= cs
 
+    -- FIXME: we might want to drop conditionals when they are never
+    -- going to be satisfiable.
     go acc [] = restore acc $> False -- finished here, we didn't so anything.
     go acc (c : cs) = do
-      ce <- cEnabled c
-      case ce of
-        -- Not enough info to run yet, try the next one.
-        Nothing -> go (c : acc) cs
-        -- The constraint is no longer relevent, drop and keep going
-        Just False  -> go acc cs
-        -- The constraint(s) should be added
-        Just True   -> cAddConstraints c >> restore (cs ++ acc) $> True
+      solved <- solveConditional c
+      if solved
+        -- Conditional fired, remove it and continue solving
+        then restore (cs ++ acc) $> True
+        -- Conditional couldn't be fired, try next conditionals
+        else go (c : acc) cs
+
+--------------------------------------------------------------------------------
+-- Conditionals
+
+solveConditional :: Conditional' -> SolverM Bool
+solveConditional c = do
+  m_newEqs <- condEnabled c
+  case m_newEqs of
+    Just newEqs -> do
+      mapM_ addEqC eqcs
+      mapM_ addEqRowC (newEqs ++ eqrowcs)
+      pure True
+    Nothing -> pure False
+  where
+    (eqcs, eqrowcs) = cConstraints c
 
 --------------------------------------------------------------------------------
 -- Row unification
@@ -132,7 +147,7 @@ solveEqRowC eqc = do
        
   case () of
     _ | (lo, lv) == (ro, rv) -> pure () -- trivial up to eqv.
-      | lv == rv  -> error "Recursive row var equation"
+      | lv == rv  -> trace "Recursive row var equation, ignoring" $ pure ()
       | lo < ro   -> unify (ro - lo) rv rfm lv lfm 
       | otherwise -> unify (lo - ro) lv lfm rv rfm 
   where
