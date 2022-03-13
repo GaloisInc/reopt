@@ -10,8 +10,8 @@ module Reopt.TypeInference.Solver.Solver
 where
 
 import           Control.Lens          ((.=), (<<+=), (<<.=))
-import           Control.Monad         (when)
-import           Control.Monad.State   (MonadState (get))
+import           Control.Monad         (when, zipWithM_)
+import           Control.Monad.State   (MonadState (get), put)
 import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
@@ -38,7 +38,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars)
+                                                           unsafeUnifyTyVars, ConstraintSolvingState (ptrWidth), ctxTyVars)
 import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
                                                            emptyFieldMap,
                                                            rowExprShift,
@@ -48,6 +48,8 @@ import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
+import qualified Data.Map.Strict as Map
+import Reopt.TypeInference.Solver.UnionFindMap (eqvClasses)
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -55,7 +57,7 @@ import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
 -- FIXME: probably want to export the Eqv map somehow
 unifyConstraints :: SolverM ConstraintSolution
 unifyConstraints = do
-  processAtomicConstraints
+  processAtomicConstraints =<< get
   finalizeTypeDefs
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
@@ -84,16 +86,36 @@ traceContext description action = do
 
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
-processAtomicConstraints :: SolverM ()
-processAtomicConstraints = traceContext "processAtomicConstraints" $ do
+processAtomicConstraints :: ConstraintSolvingState -> SolverM ()
+processAtomicConstraints resetSt = traceContext "processAtomicConstraints" $ do
   dequeueEqC >>= \case
-    Just c  -> solveEqC c >> processAtomicConstraints
+    Just c  -> solveEqC c >>= \case
+      Just tv -> restart tv
+      Nothing -> processAtomicConstraints resetSt
     Nothing -> dequeueEqRowC >>= \case
-      Just c  -> solveEqRowC c >> processAtomicConstraints
+      Just c  -> solveEqRowC c >> processAtomicConstraints resetSt
       Nothing -> condEqSolver >>= \case
-        True -> processAtomicConstraints
+        True -> processAtomicConstraints resetSt
         False -> pure ()
   where
+    -- We detected a conflict, we need to restart after updating state
+    -- to reflect the conflict.
+    restart tv = do
+      oldSt <- get
+      put resetSt
+      -- Forget everything we know in resetSt about the eqvs for tv
+      let eqs = eqvClasses (ctxTyVars oldSt)
+          eqsTv = Map.findWithDefault [] tv eqs
+      traverse_ undefineTyVar eqsTv
+      -- FIXME: gross
+      defineTyVar tv (ConflictTy (ptrWidth resetSt))
+      -- FIXME: this could cause problems if we allocate tyvars after
+      -- we start solving.  Because we don't, this should work.
+      mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
+      
+      resetSt' <- get
+      processAtomicConstraints resetSt'
+    
     -- This solver will solve one at a time, which is important to get
     -- around the +p++ case.  We solve a single ptr add, then propagate
     -- the new eq and roweq constraints.
@@ -147,19 +169,19 @@ solveEqRowC eqc = do
 --------------------------------------------------------------------------------
 -- Type unification
 
-solveEqC :: EqC -> SolverM ()
+solveEqC :: EqC -> SolverM (Maybe TyVar)
 solveEqC eqc = do
   (lv, m_lty) <- lookupTyVar (eqLhs eqc)
   (m_rv, m_rty) <- case eqRhs eqc of
     VarTy tv -> first Just <$> lookupTyVar tv
     ITy   ty -> pure (Nothing, Just ty)
   case (m_lty, m_rty) of
-    _ | m_rv == Just lv -> pure () -- trivial up to eqv.
-    (_, Nothing)         -> traverse_ (unsafeUnifyTyVars lv) m_rv
+    _ | m_rv == Just lv -> pure Nothing -- trivial up to eqv.
+    (_, Nothing)         -> traverse_ (unsafeUnifyTyVars lv) m_rv $> Nothing
     (Nothing, Just rty)
-      | Just rv <- m_rv -> unsafeUnifyTyVars rv lv
+      | Just rv <- m_rv -> unsafeUnifyTyVars rv lv $> Nothing
       -- the RHS was a term, so we define lv.
-      | otherwise -> defineTyVar lv rty
+      | otherwise -> defineTyVar lv rty $> Nothing
     (Just ty1, Just ty2) -> do
       traverse_ (unsafeUnifyTyVars lv) m_rv
       traverse_ undefineTyVar m_rv
@@ -167,21 +189,29 @@ solveEqC eqc = do
 
 -- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@
 -- named by the type variable @tv@.
-unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM ()
+unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
 unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
+    _ | ty1 == ty2 -> pure Nothing
     (NumTy i, NumTy i')
-      | i == i'   -> pure ()
+      | i == i'   -> pure Nothing
       | otherwise ->
         trace ("Mismatch in type widths for " ++ show (PP.pretty tv) ++ ": "
                ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2))
-        $ pure ()
+        $ pure (Just tv) -- FIXME: this is a bit odd, as the tyvars will have different sizes
 
-    (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2
+    (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2 $> Nothing
 
-    -- Unification failure, we need to report a conflict.
-    _ ->
-      trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $ pure ()
+    (TupleTy ts, TupleTy ts') -> zipWithM_ addTyVarEq' ts ts' $> Nothing
+
+    -- Should always have n1 == n2
+    (VecTy n1 ty1', VecTy n2 ty2') | n1 == n2 -> addTyVarEq' ty1' ty2' $> Nothing
+
+    -- Unification failure, including the case where one is a
+    -- conflictty (but not both), we need to report a conflict.
+    _ -> 
+      trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $
+      pure (Just tv)
       -- pretend we saw nothing :(
       -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
 

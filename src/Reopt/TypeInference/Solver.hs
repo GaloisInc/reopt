@@ -70,7 +70,10 @@ compileTy (Ty ty)  = ITy <$>
     PtrTy fm -> do
       fm' <- traverse nameTy fm
       PtrTy . RowExprVar <$> freshRowVarFM fm'
-
+    ConflictTy n -> pure (ConflictTy n)
+    TupleTy ts -> TupleTy <$> traverse nameTy ts
+    VecTy n ty' -> VecTy n <$> nameTy ty'
+    
 --------------------------------------------------------------------------------
 -- Constraint constructors
 

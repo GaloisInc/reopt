@@ -146,6 +146,9 @@ class FreeTyVars a where
 instance FreeTyVars TyVar where
   freeTyVars = Set.singleton
 
+instance FreeTyVars RowVar where
+  freeTyVars _ = Set.empty
+
 instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
   freeTyVars = \case
     NumTy _ -> Set.empty
