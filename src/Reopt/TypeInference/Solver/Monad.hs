@@ -20,7 +20,7 @@ import qualified Prettyprinter         as PP
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
                                                            EqRowC (EqRowC))
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
-                                                           Offset (Offset),
+                                                           Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowInfo (..),
                                                            RowVar (RowVar),
