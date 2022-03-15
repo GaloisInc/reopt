@@ -16,6 +16,7 @@ import           Control.Monad.Extra   (whenM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (first, Bifunctor (second))
 import           Data.Foldable         (traverse_)
+import           Data.Function         (on)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
 import qualified Data.Map              as Map
@@ -33,6 +34,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            SolverM, addEqC,
                                                            addEqRowC,
                                                            addRowExprEq,
+                                                           addTyVarEq,
                                                            addTyVarEq',
                                                            condEnabled,
                                                            defineRowVar,
@@ -46,7 +48,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars, addTyVarEq)
+                                                           unsafeUnifyTyVars)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
                                                            RowExpr (..),
                                                            dropFieldMap,
@@ -111,22 +113,25 @@ propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
         Just (rhsRep, rhsFM) -> do
           let rhsOff = rowExprShift rhsRep
           asRecordPointer lhs >>= \case
-            Just (lhsRep, lhsFM) -> do
-              let
-                lhsOff = rowExprShift lhsRep
-                lhsKeys = Map.keys (getFieldMap lhsFM)
-                rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
-                rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
-                (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
-              if rowExprVar lhsRep == rowExprVar rhsRep
-                then go cs --TODO: drop if rowExprShift lhsRep == rowExprShift rhsRep?
-                else do
-                  defineRowVar (rowExprVar lhsRep) unified
-                  traverse_ (uncurry addTyVarEq') overlaps
-                  -- NOTE: We would also like to detect when unification made progress...
-                  if not (all (`elem` lhsKeys) rhsKeys)
-                    then return True
-                    else go cs
+            Just (lhsRep, lhsFM)
+              -- Nothing to do in this case (we could drop the constraint)
+              | lhsRep == rhsRep -> go cs
+              -- If there is some recursion going on, unification would result
+              -- in an infinite loop.
+              | on (==) rowExprVar lhsRep rhsRep -> go cs
+              | otherwise -> do
+                let
+                  lhsOff = rowExprShift lhsRep
+                  lhsKeys = Map.keys (getFieldMap lhsFM)
+                  rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
+                  rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
+                  (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
+                defineRowVar (rowExprVar lhsRep) unified
+                traverse_ (uncurry addTyVarEq') overlaps
+                -- NOTE: We would also like to detect when unification made progress...
+                if not (all (`elem` lhsKeys) rhsKeys)
+                  then return True
+                  else go cs
             Nothing -> do -- `b` is known to be a record pointer, but `a` is not
               row <- freshRowVar
               defineRowVar row (dropFieldMap rhsOff rhsFM)
