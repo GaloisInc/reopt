@@ -10,8 +10,9 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import           Control.Lens          ((<<+=), (<<.=), Lens', (%=))
+import           Control.Lens          (Lens', (%=), (<<+=), (<<.=))
 import           Control.Monad         (when)
+import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
@@ -26,18 +27,23 @@ import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
-                                                           SolverM,
+                                                           Conditional',
+                                                           ConstraintSolvingState,
+                                                           SolverM, addEqC,
+                                                           addEqRowC,
                                                            addRowExprEq,
                                                            addTyVarEq',
+                                                           condEnabled,
                                                            defineRowVar,
                                                            defineTyVar,
                                                            lookupRowExpr,
                                                            lookupTyVar,
+                                                           popField,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars, Conditional', condEnabled, addEqC, addEqRowC, ConstraintSolvingState, popField)
+                                                           unsafeUnifyTyVars)
 import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
                                                            emptyFieldMap,
                                                            rowExprShift,
@@ -51,7 +57,6 @@ import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
 
--- FIXME: probably want to export the Eqv map somehow
 unifyConstraints :: SolverM ConstraintSolution
 unifyConstraints = do
   solverLoop
@@ -99,16 +104,16 @@ madeProgress _        = False
 
 solveHead :: Lens' ConstraintSolvingState [a] ->
              (a -> SolverM ()) ->
-             SolverM Progress
+             SolverM Bool
 solveHead fld doit = do
   v <- popField fld
   case v of
-    Nothing -> pure NoProgress
-    Just v' -> doit v' $> Progress
+    Nothing -> pure False
+    Just v' -> doit v' $> True
 
 solveFirst :: Lens' ConstraintSolvingState [a] ->
               (a -> SolverM (Retain, Progress)) ->
-              SolverM Progress
+              SolverM Bool
 solveFirst fld solve = do
   cstrs <- fld <<.= [] -- get constraints and c
   go [] cstrs
@@ -117,27 +122,23 @@ solveFirst fld solve = do
 
     -- FIXME: we might want to drop constraints when they are never
     -- going to be satisfiable.
-    go acc [] = restore acc $> NoProgress -- finished here, we didn't so anything.
+    go acc [] = restore acc $> False -- finished here, we didn't so anything.
     go acc (c : cs) = do
       (retain, progress) <- solve c
       let acc' = if retain == Retain then c : acc else acc
       if madeProgress progress
-        then restore (cs ++ acc') $> Progress
+        then restore (cs ++ acc') $> True
         else go acc' cs
 
 solverLoop :: SolverM ()
 solverLoop = do
-  keepGoing <- foldr once (pure False) solvers
+  keepGoing <- orM solvers
   when keepGoing solverLoop
   where
     solvers = [ solveHead  (field @"ctxEqCs")    solveEqC
               , solveHead  (field @"ctxEqRowCs") solveEqRowC
               , solveFirst (field @"ctxCondEqs") solveConditional
               ]
-
-    once m rest = do
-      progress <- m
-      if madeProgress progress then pure True else rest
 
 --------------------------------------------------------------------------------
 -- Conditionals
@@ -223,4 +224,3 @@ unifyTypes tv ty1 ty2 =
       trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $ pure ()
       -- pretend we saw nothing :(
       -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
-
