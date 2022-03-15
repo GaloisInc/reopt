@@ -114,8 +114,8 @@ processAtomicConstraints resetSt = traceContext "processAtomicConstraints" $ do
       mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
 
       resetSt' <- get
-      processAtomicConstraints resetSt'
-
+      trace "Restarting" $ processAtomicConstraints resetSt'
+      
     -- This solver will solve one at a time, which is important to get
     -- around the +p++ case.  We solve a single ptr add, then propagate
     -- the new eq and roweq constraints.

@@ -9,7 +9,8 @@ module Reopt.TypeInference.Solver
     unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
     -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy, pattern FNamedStruct,  pattern FStructTy,
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy
+  , pattern FNamedStruct,  pattern FStructTy, pattern FConflictTy
     -- Testing
   ) where
 
@@ -244,3 +245,6 @@ pattern FStructTy fm = StructTy fm
 
 pattern FNamedStruct :: StructName -> FTy
 pattern FNamedStruct s = NamedStruct s
+
+pattern FConflictTy :: Int -> FTy
+pattern FConflictTy n = FTy (ConflictTy n)
