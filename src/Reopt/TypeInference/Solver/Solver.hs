@@ -208,10 +208,12 @@ unifyTypes tv ty1 ty2 =
 
     (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2 $> Nothing
 
-    (TupleTy ts, TupleTy ts') -> zipWithM_ addTyVarEq' ts ts' $> Nothing
+    (TupleTy ts, TupleTy ts')
+      | length ts == length ts' -> zipWithM_ addTyVarEq' ts ts' $> Nothing
 
     -- Should always have n1 == n2
-    (VecTy n1 ty1', VecTy n2 ty2') | n1 == n2 -> addTyVarEq' ty1' ty2' $> Nothing
+    (VecTy n1 ty1', VecTy n2 ty2')
+      | n1 == n2 -> addTyVarEq' ty1' ty2' $> Nothing
 
     -- Unification failure, including the case where one is a
     -- conflictty (but not both), we need to report a conflict.
