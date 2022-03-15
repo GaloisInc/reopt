@@ -5,7 +5,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Reopt.TypeInference.Solver.Solver
-  ( unifyConstraints 
+  ( unifyConstraints
   )
 where
 
@@ -16,7 +16,7 @@ import           Data.Bifunctor        (first)
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
-import           Data.Maybe            (fromMaybe)
+import           Data.Maybe            (fromMaybe, isNothing)
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
@@ -112,10 +112,10 @@ processAtomicConstraints resetSt = traceContext "processAtomicConstraints" $ do
       -- FIXME: this could cause problems if we allocate tyvars after
       -- we start solving.  Because we don't, this should work.
       mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
-      
+
       resetSt' <- get
       processAtomicConstraints resetSt'
-    
+
     -- This solver will solve one at a time, which is important to get
     -- around the +p++ case.  We solve a single ptr add, then propagate
     -- the new eq and roweq constraints.
@@ -146,17 +146,17 @@ solveEqRowC eqc = do
   let lo  = rowExprShift le
       lv  = rowExprVar   le
       lfm = fromMaybe emptyFieldMap m_lfm
-      
+
   (re, m_rfm) <- lookupRowExpr (eqRowRHS eqc)
   let ro  = rowExprShift re
       rv  = rowExprVar   re
       rfm = fromMaybe emptyFieldMap m_rfm
-       
+
   case () of
     _ | (lo, lv) == (ro, rv) -> pure () -- trivial up to eqv.
       | lv == rv  -> error "Recursive row var equation"
-      | lo < ro   -> unify (ro - lo) rv rfm lv lfm 
-      | otherwise -> unify (lo - ro) lv lfm rv rfm 
+      | lo < ro   -> unify (ro - lo) rv rfm lv lfm
+      | otherwise -> unify (lo - ro) lv lfm rv rfm
   where
     unify delta lowv lowfm highv highfm = do
       undefineRowVar highv
@@ -176,7 +176,13 @@ solveEqC eqc = do
     VarTy tv -> first Just <$> lookupTyVar tv
     ITy   ty -> pure (Nothing, Just ty)
   case (m_lty, m_rty) of
-    _ | m_rv == Just lv -> pure Nothing -- trivial up to eqv.
+    -- trivial up to eqv.
+    _ | m_rv == Just lv -> pure Nothing
+      -- We have eqc == (lhs = SomeTy ...) and lhs ~> ConflictTy ...,
+      -- so there is nothing further to do.
+      | isNothing m_rv
+      , Just ConflictTy {} <- m_lty -> pure Nothing
+
     (_, Nothing)         -> traverse_ (unsafeUnifyTyVars lv) m_rv $> Nothing
     (Nothing, Just rty)
       | Just rv <- m_rv -> unsafeUnifyTyVars rv lv $> Nothing
@@ -209,9 +215,8 @@ unifyTypes tv ty1 ty2 =
 
     -- Unification failure, including the case where one is a
     -- conflictty (but not both), we need to report a conflict.
-    _ -> 
+    _ ->
       trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $
       pure (Just tv)
       -- pretend we saw nothing :(
       -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)
-
