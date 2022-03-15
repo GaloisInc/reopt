@@ -94,12 +94,6 @@ traceContext description action = do
     trace (show msg) (return ())
   pure r
 
-asRecordPointer :: TyVar -> SolverM (Maybe (RowExpr, FieldMap TyVar))
-asRecordPointer v = do
-  lookupTyVar v >>= \case
-    (_, Just (PtrTy r)) -> Just . second (fromMaybe emptyFieldMap) <$> lookupRowExpr r
-    _ -> return Nothing
-
 -- | Returns @True@ if we found a subtype constraint that we could extract new
 -- information from.  We never remove subtype constraints: every time we learn
 -- information about offsets of the supertype, we must propagate that
@@ -107,37 +101,64 @@ asRecordPointer v = do
 propagateSubTypeC :: SolverM Bool
 propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
   where
+
     go [] = return False
-    go ((lhs :<: rhs) : cs) = do
-      asRecordPointer rhs >>= \case
-        Just (rhsRep, rhsFM) -> do
-          let rhsOff = rowExprShift rhsRep
-          asRecordPointer lhs >>= \case
-            Just (lhsRep, lhsFM)
-              -- Nothing to do in this case (we could drop the constraint)
-              | lhsRep == rhsRep -> go cs
-              -- If there is some recursion going on, unification would result
-              -- in an infinite loop.
-              | on (==) rowExprVar lhsRep rhsRep -> go cs
-              | otherwise -> do
-                let
-                  lhsOff = rowExprShift lhsRep
-                  lhsKeys = Map.keys (getFieldMap lhsFM)
-                  rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
-                  rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
-                  (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
-                defineRowVar (rowExprVar lhsRep) unified
-                traverse_ (uncurry addTyVarEq') overlaps
-                -- NOTE: We would also like to detect when unification made progress...
-                if not (all (`elem` lhsKeys) rhsKeys)
-                  then return True
-                  else go cs
-            Nothing -> do -- `b` is known to be a record pointer, but `a` is not
-              row <- freshRowVar
-              defineRowVar row (dropFieldMap rhsOff rhsFM)
-              addTyVarEq lhs (ITy (PtrTy (rowVar row)))
-              return True
-        Nothing -> go cs
+    go ((lhs :<: rhs) : cs) =
+      lookupTyVar rhs >>= \case
+        -- If we know that `lhs` is a pointer, we should propagate this fact to
+        -- `rhs`, at it could help solve some constraints that are waiting to
+        -- know whether `rhs` is a pointer.
+        (_, Nothing) ->
+          lookupTyVar lhs >>= \case
+            (_, Just (PtrTy _)) -> do
+              addTyVarEq rhs . ITy . PtrTy . rowVar =<< freshRowVar
+              go cs
+            _ -> go cs
+        (_, Just (PtrTy rhsRow)) -> do
+          (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+          goWithRHSPtrInfo lhs (rhsRep, rhsFM) cs
+        -- `rhs` is known **not** a pointer, nothing to do here.
+        (_, Just _) -> go cs
+
+    goWithRHSPtrInfo lhs rhsPtrInfo@(rhsRep, rhsFM) cs = do
+      let rhsOff = rowExprShift rhsRep
+      lookupTyVar lhs >>= \case
+
+        -- We did not yet know `lhs` was a pointer.  We can initialize it as
+        -- such, and immediately populate all its known offsets from `rhs`.
+        (_, Nothing) -> do
+          row <- freshRowVar
+          defineRowVar row (dropFieldMap rhsOff rhsFM)
+          addTyVarEq lhs (ITy (PtrTy (rowVar row)))
+          return True
+
+        -- We knew `lhs` was a pointer, we may be able to refine its offsets.
+        (_, Just (PtrTy lhsRow)) -> do
+          lhsPtrInfo@(lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
+          let isTrivial = lhsRep == rhsRep
+          let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
+          if isTrivial || isLoopy
+            then go cs
+            else goWithLHSAndRHSPtrInfo lhsPtrInfo rhsPtrInfo cs
+
+        -- We knew `lhs` was **not** a pointer!  That's inconsistent.
+        (lhsRep, Just lhsDef) ->
+          error (show (PP.hsep ["Expected a PtrTy for", PP.pretty lhsRep, "but found:", PP.pretty lhsDef]))
+
+    goWithLHSAndRHSPtrInfo (lhsRep, lhsFM) (rhsRep, rhsFM) cs = do
+      let
+        lhsOff = rowExprShift lhsRep
+        rhsOff = rowExprShift rhsRep
+        lhsKeys = Map.keys (getFieldMap lhsFM)
+        rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
+        rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
+        (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
+      defineRowVar (rowExprVar lhsRep) unified
+      traverse_ (uncurry addTyVarEq') overlaps
+      -- NOTE: We would also like to detect when unification made progress...
+      if not (all (`elem` lhsKeys) rhsKeys)
+        then return True
+        else go cs
 
 subTypeSolver :: SolverM ()
 subTypeSolver =
