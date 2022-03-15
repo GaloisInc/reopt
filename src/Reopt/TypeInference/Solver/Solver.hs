@@ -14,7 +14,7 @@ import           Control.Lens          ((.=), (<<+=), (<<.=), use)
 import           Control.Monad         (when)
 import           Control.Monad.Extra   (whenM)
 import           Control.Monad.State   (MonadState (get))
-import           Data.Bifunctor        (first)
+import           Data.Bifunctor        (first, Bifunctor (second))
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
@@ -49,6 +49,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            unsafeUnifyTyVars)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
                                                            RowExpr (..),
+                                                           dropFieldMap,
                                                            emptyFieldMap,
                                                            rowExprShift,
                                                            rowExprVar, rowVar,
@@ -94,10 +95,7 @@ traceContext description action = do
 asRecordPointer :: TyVar -> SolverM (Maybe (RowExpr, FieldMap TyVar))
 asRecordPointer v = do
   lookupTyVar v >>= \case
-    (_, Just (PtrTy r)) -> do
-      lookupRowExpr r >>= \case
-        (rep, Just fm) -> return (Just (rep, fm))
-        _ -> return Nothing
+    (_, Just (PtrTy r)) -> Just . second (fromMaybe emptyFieldMap) <$> lookupRowExpr r
     _ -> return Nothing
 
 -- | Returns @True@ if we found a subtype constraint that we could extract new
@@ -108,38 +106,31 @@ propagateSubTypeC :: SolverM Bool
 propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
   where
     go [] = return False
-    go ((a :<: b) : cs) = do
-      asRecordPointer b >>= \case
-        Just (_, bFM) -> do
-          asRecordPointer a >>= \case
-            Just (aRep, aFM) -> do
+    go ((lhs :<: rhs) : cs) = do
+      asRecordPointer rhs >>= \case
+        Just (rhsRep, rhsFM) -> do
+          asRecordPointer lhs >>= \case
+            Just (lhsRep, lhsFM) -> do
               let
-                aKeys = Map.keys (getFieldMap aFM)
-                bKeys = Map.keys (getFieldMap aFM)
-                (unified, overlaps) = unifyFieldMaps aFM bFM
-              -- TODO Here we may need to shift based on the difference of
-              -- (rowExprShift bRep) and (rowExprShift aRep)?
-              defineRowVar (rowExprVar aRep) unified
+                lhsOff = rowExprShift lhsRep
+                rhsOff = rowExprShift rhsRep
+                lhsKeys = Map.keys (getFieldMap lhsFM)
+                rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
+                rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
+                (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
+              defineRowVar (rowExprVar lhsRep) unified
               traverse_ (uncurry addTyVarEq') overlaps
               -- NOTE: We would also like to detect when unification made progress...
-              if not (all (`elem` aKeys) bKeys)
+              if not (all (`elem` lhsKeys) rhsKeys)
                 then return True
                 else go cs
             Nothing -> do -- `b` is known to be a record pointer, but `a` is not
-              lookupTyVar a >>= \case
+              lookupTyVar lhs >>= \case
                 -- 1. We knew nothing about `a`.
-                (aRep, Nothing) -> do
+                (lhsRep, Nothing) -> do
                   row <- freshRowVar
-                  defineRowVar row bFM
-                  defineTyVar aRep (PtrTy (rowVar row))
-                  return True
-                -- 2. We knew `a` was a pointer but knew nothing about offsets.
-                (_, Just (PtrTy row)) -> do
-                  -- TODO Here we may need to shift based on the difference of
-                  -- (rowExprShift bRep) and (rowExprShift aRep)?
-                  -- If `a` is `shift n c`, and `a <: b`, then `shift n c <: b`,
-                  -- so we need to shift the `b` offsets by `- n`?
-                  defineRowVar (rowExprVar row) (shiftFieldMap (- (rowExprShift row)) bFM)
+                  defineRowVar row rhsFM
+                  defineTyVar lhsRep (PtrTy (rowVar row))
                   return True
                 -- 3. We knew `a` was **not** a pointer.
                 (aRep, Just aDef) ->
