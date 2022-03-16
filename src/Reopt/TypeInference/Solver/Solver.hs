@@ -11,14 +11,11 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import           Control.Lens          ((.=), (<<+=), (<<.=), use)
-import           Control.Monad         (when)
-import           Control.Monad.Extra   (whenM)
 import           Control.Lens          (Lens', (%=), (<<+=), (<<.=))
 import           Control.Monad         (when)
 import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
-import           Data.Bifunctor        (first, Bifunctor (second))
+import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
 import           Data.Function         (on)
 import           Data.Functor          (($>))
@@ -29,7 +26,9 @@ import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
-                                                           EqRowC (..), SubTypeC, SubRowC,
+                                                           EqRowC (..),
+                                                           SubRowC (SubRowC),
+                                                           SubTypeC,
                                                            pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
@@ -39,13 +38,12 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            SolverM, addEqC,
                                                            addEqRowC,
                                                            addRowExprEq,
+                                                           addSubRow,
                                                            addTyVarEq,
                                                            addTyVarEq',
                                                            condEnabled,
                                                            defineRowVar,
                                                            defineTyVar,
-                                                           dequeueEqC,
-                                                           dequeueEqRowC,
                                                            freshRowVar,
                                                            lookupRowExpr,
                                                            lookupTyVar,
@@ -98,88 +96,6 @@ traceContext description action = do
             ]
     trace (show msg) (return ())
   pure r
-
--- | Returns @True@ if we found a subtype constraint that we could extract new
--- information from.  We never remove subtype constraints: every time we learn
--- information about offsets of the supertype, we must propagate that
--- information to the subtype.
-propagateSubTypeC :: SolverM Bool
-propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
-  where
-    go [] = return False
-    go ((lhs :<: rhs) : cs) =
-      lookupTyVar rhs >>= \case
-        -- If we know that `lhs` is a pointer, we should propagate this fact to
-        -- `rhs`, at it could help solve some constraints that are waiting to
-        -- know whether `rhs` is a pointer.
-        (_, Nothing) ->
-          lookupTyVar lhs >>= \case
-            (_, Just (PtrTy _)) -> do
-              addTyVarEq rhs . ITy . PtrTy . rowVar =<< freshRowVar
-              go cs
-            _ -> go cs
-        (_, Just (PtrTy rhsRow)) -> do
-          (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
-          goWithRHSPtrInfo lhs (rhsRep, rhsFM) cs
-        -- `rhs` is known **not** a pointer, nothing to do here.
-        (_, Just _) -> go cs
-
-    goWithRHSPtrInfo lhs rhsPtrInfo@(rhsRep, rhsFM) cs = do
-      let rhsOff = rowExprShift rhsRep
-      lookupTyVar lhs >>= \case
-
-        -- We did not yet know `lhs` was a pointer.  We can initialize it as
-        -- such, and immediately populate all its known offsets from `rhs`.
-        (_, Nothing) -> do
-          row <- freshRowVar
-          defineRowVar row (dropFieldMap rhsOff rhsFM)
-          addTyVarEq lhs (ITy (PtrTy (rowVar row)))
-          return True
-
-        -- We knew `lhs` was a pointer, we may be able to refine its offsets.
-        (_, Just (PtrTy lhsRow)) -> do
-          lhsPtrInfo@(lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
-          let isTrivial = lhsRep == rhsRep
-          let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
-          if isTrivial || isLoopy
-            then go cs
-            else goWithLHSAndRHSPtrInfo lhsPtrInfo rhsPtrInfo cs
-
-        -- We knew `lhs` was **not** a pointer!  That's inconsistent.
-        (lhsRep, Just lhsDef) ->
-          error (show (PP.hsep ["Expected a PtrTy for", PP.pretty lhsRep, "but found:", PP.pretty lhsDef]))
-
-    goWithLHSAndRHSPtrInfo (lhsRep, lhsFM) (rhsRep, rhsFM) cs = do
-      let
-        lhsOff = rowExprShift lhsRep
-        rhsOff = rowExprShift rhsRep
-        lhsKeys = Map.keys (getFieldMap lhsFM)
-        rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
-        rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
-        (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
-      defineRowVar (rowExprVar lhsRep) unified
-      traverse_ (uncurry addTyVarEq') overlaps
-      -- NOTE: We would also like to detect when unification made progress...
-      if not (all (`elem` lhsKeys) rhsKeys)
-        then return True
-        else go cs
-
-subTypeSolver :: SolverM ()
-subTypeSolver =
-  -- If we make progress, process atomic constraints again
-  whenM propagateSubTypeC processAtomicConstraints
-
--- | Process all atomic (i.e., non-disjunctive) constraints, updating the
--- context with each.
-processAtomicConstraints :: SolverM ()
-processAtomicConstraints = undefined -- traceContext "processAtomicConstraints" $ do
-  -- dequeueEqC >>= \case
-  --   Just c  -> solveEqC c >> processAtomicConstraints
-  --   Nothing -> dequeueEqRowC >>= \case
-  --     Just c  -> solveEqRowC c >> processAtomicConstraints
-  --     Nothing -> condEqSolver >>= \case
-  --       True -> processAtomicConstraints
-  --       False -> subTypeSolver
 
 traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
 traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
@@ -246,11 +162,67 @@ solverLoop = do
 -- Subtyping
 
 solveSubTypeC :: SubTypeC -> SolverM (Retain, Progress)
-solveSubTypeC = undefined
+solveSubTypeC (lhs :<: rhs) =
+  lookupTyVar rhs >>= \case
+    -- If we know that `lhs` is a pointer, we should propagate this fact to
+    -- `rhs`, at it could help solve some constraints that are waiting to
+    -- know whether `rhs` is a pointer.
+    (_, Nothing) ->
+      lookupTyVar lhs >>= \case
+        (_, Just (PtrTy lhsRow)) -> do
+          rhsRow <- rowVar <$> freshRowVar
+          addTyVarEq rhs (ITy (PtrTy rhsRow))
+          addSubRow lhsRow rhsRow
+          return (Discard, Progress)
+        _ -> return (Retain, NoProgress)
+    (_, Just (PtrTy rhsRow)) -> do
+      (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+      let rhsOff = rowExprShift rhsRep
+      lookupTyVar lhs >>= \case
+
+        -- We did not yet know `lhs` was a pointer.  We can initialize it as
+        -- such, and immediately populate all its known offsets from `rhs`.
+        (_, Nothing) -> do
+          row <- freshRowVar
+          defineRowVar row (dropFieldMap rhsOff rhsFM)
+          addTyVarEq lhs (ITy (PtrTy (rowVar row)))
+          return (Retain, Progress)
+
+        -- We knew `lhs` was a pointer, we may be able to refine its offsets.
+        (_, Just (PtrTy lhsRow)) -> do
+          (lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
+          let isTrivial = lhsRep == rhsRep
+          let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
+          if isTrivial || isLoopy
+            then return (Discard, NoProgress)
+            else do
+              addSubRow lhsRow rhsRow
+              return (Discard, Progress)
+
+        -- We knew `lhs` was **not** a pointer!  That's inconsistent.
+        (lhsRep, Just lhsDef) ->
+          error (show (PP.hsep ["Expected a PtrTy for", PP.pretty lhsRep, "but found:", PP.pretty lhsDef]))
+
+    -- `rhs` is known **not** a pointer, nothing to do here.
+    (_, Just _) -> return (Discard, NoProgress)
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
-solveSubRowC src = (,) Retain <$> do undefined
-  
+solveSubRowC (SubRowC lhsRow rhsRow) = (,) Retain <$> do
+  (lhsRep, lhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
+  (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+  let
+    lhsOff = rowExprShift lhsRep
+    rhsOff = rowExprShift rhsRep
+    lhsKeys = Map.keys (getFieldMap lhsFM)
+    rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
+    rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
+    (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
+  defineRowVar (rowExprVar lhsRep) unified
+  traverse_ (uncurry addTyVarEq') overlaps
+  -- NOTE: We would also like to detect when unification made progress...
+  if not (all (`elem` lhsKeys) rhsKeys)
+    then return Progress
+    else return NoProgress
 
 --------------------------------------------------------------------------------
 -- Conditionals
