@@ -89,6 +89,9 @@ instance FreeTyVars OperandClass where
 -- instance FreeRowVars PtrAddC where
 --   freeRowVars PtrAddC {} = mempty
 
+--------------------------------------------------------------------------------
+-- SubType
+
 data SubTypeC = SubTypeC TyVar TyVar
   deriving (Eq, Ord, Show)
 
@@ -106,3 +109,19 @@ instance FreeTyVars SubTypeC where
 
 instance FreeRowVars SubTypeC where
   freeRowVars SubTypeC {} = mempty
+
+--------------------------------------------------------------------------------
+-- SubRow
+
+data SubRowC = SubRowC RowExpr RowExpr
+  deriving (Eq, Ord, Show)
+
+instance PP.Pretty SubRowC where
+  pretty (SubRowC a b) =
+    prettySExp [ PP.pretty a, "<=", PP.pretty b]
+
+instance FreeTyVars SubRowC where
+  freeTyVars (SubRowC {}) = Set.empty
+
+instance FreeRowVars SubRowC where
+  freeRowVars (SubRowC a b) = freeRowVars a `Set.union` freeRowVars b

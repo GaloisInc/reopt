@@ -20,7 +20,7 @@ import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
                                                            EqRowC (EqRowC),
-                                                           SubTypeC,
+                                                           SubTypeC, SubRowC(..),
                                                            pattern (:<:))
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
                                                            Offset,
@@ -42,6 +42,7 @@ data ConstraintSolvingState = ConstraintSolvingState
   { ctxEqCs      :: [EqC],
     ctxEqRowCs   :: [EqRowC],
     ctxCondEqs   :: [Conditional'],
+    ctxSubRowCs  :: [SubRowC],
     ctxSubTypeCs :: [SubTypeC],
 
     nextTraceId         :: Int,
@@ -70,6 +71,7 @@ emptyContext w trace = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
   , ctxCondEqs     = []
+  , ctxSubRowCs    = []
   , ctxSubTypeCs   = []
   , nextTraceId    = 0
   , nextRowVar     = 0
@@ -112,6 +114,9 @@ addCondEq cs  =
 
 addSubType :: TyVar -> TyVar -> SolverM ()
 addSubType a b = field @"ctxSubTypeCs" %= ((a :<: b) :)
+
+addSubRow :: RowExpr -> RowExpr -> SolverM ()
+addSubRow a b = field @"ctxSubRowCs" %= (SubRowC a b :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints

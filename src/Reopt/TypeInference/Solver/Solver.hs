@@ -29,7 +29,7 @@ import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
-                                                           EqRowC (..),
+                                                           EqRowC (..), SubTypeC, SubRowC,
                                                            pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
@@ -172,21 +172,14 @@ subTypeSolver =
 -- | Process all atomic (i.e., non-disjunctive) constraints, updating the
 -- context with each.
 processAtomicConstraints :: SolverM ()
-processAtomicConstraints = traceContext "processAtomicConstraints" $ do
-  dequeueEqC >>= \case
-    Just c  -> solveEqC c >> processAtomicConstraints
-    Nothing -> dequeueEqRowC >>= \case
-      Just c  -> solveEqRowC c >> processAtomicConstraints
-      Nothing -> condEqSolver >>= \case
-        True -> processAtomicConstraints
-        False -> subTypeSolver
-  where
-    -- This solver will solve one at a time, which is important to get
-    -- around the +p++ case.  We solve a single ptr add, then propagate
-    -- the new eq and roweq constraints.
-    condEqSolver = do
-      ceqs <- field @"ctxCondEqs" <<.= mempty -- get constraints and c
-      go [] ceqs
+processAtomicConstraints = undefined -- traceContext "processAtomicConstraints" $ do
+  -- dequeueEqC >>= \case
+  --   Just c  -> solveEqC c >> processAtomicConstraints
+  --   Nothing -> dequeueEqRowC >>= \case
+  --     Just c  -> solveEqRowC c >> processAtomicConstraints
+  --     Nothing -> condEqSolver >>= \case
+  --       True -> processAtomicConstraints
+  --       False -> subTypeSolver
 
 traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
 traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
@@ -237,10 +230,27 @@ solverLoop = do
   keepGoing <- orM solvers
   when keepGoing solverLoop
   where
-    solvers = [ solveHead  (field @"ctxEqCs")    solveEqC
-              , solveHead  (field @"ctxEqRowCs") solveEqRowC
-              , solveFirst (field @"ctxCondEqs") solveConditional
+    solvers = [ solveHead  (field @"ctxEqCs")      solveEqC
+              , solveHead  (field @"ctxEqRowCs")   solveEqRowC
+              , solveFirst (field @"ctxCondEqs")   solveConditional
+              -- solve loops
+              , solveFirst (field @"ctxSubTypeCs") solveSubTypeC
+              , solveFirst (field @"ctxSubRowCs")  solveSubRowC
               ]
+
+--------------------------------------------------------------------------------
+-- Loop detection
+
+
+--------------------------------------------------------------------------------
+-- Subtyping
+
+solveSubTypeC :: SubTypeC -> SolverM (Retain, Progress)
+solveSubTypeC = undefined
+
+solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
+solveSubRowC src = (,) Retain <$> do undefined
+  
 
 --------------------------------------------------------------------------------
 -- Conditionals
