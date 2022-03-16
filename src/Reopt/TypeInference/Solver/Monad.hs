@@ -12,6 +12,7 @@ module Reopt.TypeInference.Solver.Monad where
 
 import           Control.Lens          (Lens', use, (%%=), (%=), (.=), (<<+=))
 import           Control.Monad.State   (MonadState, State, evalState)
+import           Data.Foldable         (asum)
 import           Data.Generics.Product (field)
 import           Data.Map.Strict       (Map)
 import qualified Data.Map.Strict       as Map
@@ -20,10 +21,9 @@ import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
                                                            EqRowC (EqRowC),
-                                                           SubTypeC, SubRowC(..),
+                                                           SubRowC, SubTypeC,
                                                            pattern (:<:))
-import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
-                                                           Offset,
+import           Reopt.TypeInference.Solver.RowVariables  (FieldMap, Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowInfo (..),
                                                            RowVar (RowVar),
@@ -34,7 +34,7 @@ import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
 import           Reopt.TypeInference.Solver.UnionFindMap  (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap  as UM
-import Data.Foldable (asum)
+
 
 type Conditional' = Conditional ([EqC], [EqRowC])
 
@@ -116,7 +116,7 @@ addSubType :: TyVar -> TyVar -> SolverM ()
 addSubType a b = field @"ctxSubTypeCs" %= ((a :<: b) :)
 
 addSubRow :: RowExpr -> RowExpr -> SolverM ()
-addSubRow a b = field @"ctxSubRowCs" %= (SubRowC a b :)
+addSubRow a b = field @"ctxSubRowCs" %= ((a :<: b) :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints

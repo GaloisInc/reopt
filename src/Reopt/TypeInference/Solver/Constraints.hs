@@ -3,6 +3,8 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.Constraints where
 
@@ -92,36 +94,23 @@ instance FreeTyVars OperandClass where
 --------------------------------------------------------------------------------
 -- SubType
 
-data SubTypeC = SubTypeC TyVar TyVar
-  deriving (Eq, Ord, Show)
+data SubC t = SubC t t
+  deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 infix 5 :<:
-pattern (:<:) :: TyVar -> TyVar -> SubTypeC
-pattern a :<: b = SubTypeC a b
+pattern (:<:) :: a -> a -> SubC a
+pattern a :<: b = SubC a b
 {-# COMPLETE (:<:) #-}
 
-instance PP.Pretty SubTypeC where
+type SubTypeC = SubC TyVar 
+type SubRowC  = SubC RowExpr
+
+instance PP.Pretty a => PP.Pretty (SubC a) where
   pretty (a :<: b) =
     prettySExp [ PP.pretty a, "<:", PP.pretty b]
 
-instance FreeTyVars SubTypeC where
-  freeTyVars (a :<: b) = Set.fromList [a, b]
+instance FreeTyVars a => FreeTyVars (SubC a) where
+  freeTyVars (a :<: b) = freeTyVars a `Set.union` freeTyVars b
 
-instance FreeRowVars SubTypeC where
-  freeRowVars SubTypeC {} = mempty
-
---------------------------------------------------------------------------------
--- SubRow
-
-data SubRowC = SubRowC RowExpr RowExpr
-  deriving (Eq, Ord, Show)
-
-instance PP.Pretty SubRowC where
-  pretty (SubRowC a b) =
-    prettySExp [ PP.pretty a, "<=", PP.pretty b]
-
-instance FreeTyVars SubRowC where
-  freeTyVars (SubRowC {}) = Set.empty
-
-instance FreeRowVars SubRowC where
-  freeRowVars (SubRowC a b) = freeRowVars a `Set.union` freeRowVars b
+instance FreeRowVars a => FreeRowVars (SubC a) where
+  freeRowVars (a :<: b) = freeRowVars a `Set.union` freeRowVars b

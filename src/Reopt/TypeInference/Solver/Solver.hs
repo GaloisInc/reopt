@@ -141,6 +141,17 @@ solveFirst fld solve = do
         then restore (cs ++ acc') $> True
         else go acc' cs
 
+-- | @preprocess l f# just pre-processes the element at @l@, and so
+-- does not make progress (otherwise it would loop forever).
+preprocess :: Monoid a =>
+              Lens' ConstraintSolvingState a ->
+              (a -> SolverM a) -> 
+              SolverM Bool
+preprocess fld f = False <$ do
+  cstrs <- fld <<.= mempty -- get constraints and c
+  r <- f cstrs
+  fld %= (<> r)
+
 solverLoop :: SolverM ()
 solverLoop = do
   keepGoing <- orM solvers
