@@ -4,6 +4,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Reopt.TypeInference.Solver.Solver
   ( unifyConstraints
@@ -13,6 +14,9 @@ where
 import           Control.Lens          ((.=), (<<+=), (<<.=), use)
 import           Control.Monad         (when)
 import           Control.Monad.Extra   (whenM)
+import           Control.Lens          (Lens', (%=), (<<+=), (<<.=))
+import           Control.Monad         (when)
+import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (first, Bifunctor (second))
 import           Data.Foldable         (traverse_)
@@ -31,6 +35,7 @@ import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            Conditional',
+                                                           ConstraintSolvingState,
                                                            SolverM, addEqC,
                                                            addEqRowC,
                                                            addRowExprEq,
@@ -44,6 +49,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            freshRowVar,
                                                            lookupRowExpr,
                                                            lookupTyVar,
+                                                           popField,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
@@ -64,10 +70,9 @@ import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
 
--- FIXME: probably want to export the Eqv map somehow
 unifyConstraints :: SolverM ConstraintSolution
 unifyConstraints = do
-  processAtomicConstraints
+  solverLoop
   finalizeTypeDefs
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
@@ -101,7 +106,6 @@ traceContext description action = do
 propagateSubTypeC :: SolverM Bool
 propagateSubTypeC = go =<< use (field @"ctxSubTypeCs")
   where
-
     go [] = return False
     go ((lhs :<: rhs) : cs) =
       lookupTyVar rhs >>= \case
@@ -184,32 +188,72 @@ processAtomicConstraints = traceContext "processAtomicConstraints" $ do
       ceqs <- field @"ctxCondEqs" <<.= mempty -- get constraints and c
       go [] ceqs
 
-    restore :: [Conditional'] -> SolverM ()
-    restore cs = field @"ctxCondEqs" .= cs
+traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
+traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
 
-    -- FIXME: we might want to drop conditionals when they are never
+--------------------------------------------------------------------------------
+-- Solver loop
+
+data Retain   = Retain | Discard
+  deriving Eq
+
+data Progress = Progress | NoProgress
+  deriving Eq
+
+madeProgress :: Progress -> Bool
+madeProgress Progress = True
+madeProgress _        = False
+
+solveHead :: Lens' ConstraintSolvingState [a] ->
+             (a -> SolverM ()) ->
+             SolverM Bool
+solveHead fld doit = do
+  v <- popField fld
+  case v of
+    Nothing -> pure False
+    Just v' -> doit v' $> True
+
+solveFirst :: Lens' ConstraintSolvingState [a] ->
+              (a -> SolverM (Retain, Progress)) ->
+              SolverM Bool
+solveFirst fld solve = do
+  cstrs <- fld <<.= [] -- get constraints and c
+  go [] cstrs
+  where
+    restore cs = fld %= (++ cs)
+
+    -- FIXME: we might want to drop constraints when they are never
     -- going to be satisfiable.
     go acc [] = restore acc $> False -- finished here, we didn't so anything.
     go acc (c : cs) = do
-      solved <- solveConditional c
-      if solved
-        -- Conditional fired, remove it and continue solving
-        then restore (cs ++ acc) $> True
-        -- Conditional couldn't be fired, try next conditionals
-        else go (c : acc) cs
+      (retain, progress) <- solve c
+      let acc' = if retain == Retain then c : acc else acc
+      if madeProgress progress
+        then restore (cs ++ acc') $> True
+        else go acc' cs
+
+solverLoop :: SolverM ()
+solverLoop = do
+  keepGoing <- orM solvers
+  when keepGoing solverLoop
+  where
+    solvers = [ solveHead  (field @"ctxEqCs")    solveEqC
+              , solveHead  (field @"ctxEqRowCs") solveEqRowC
+              , solveFirst (field @"ctxCondEqs") solveConditional
+              ]
 
 --------------------------------------------------------------------------------
 -- Conditionals
 
-solveConditional :: Conditional' -> SolverM Bool
-solveConditional c = do
+solveConditional :: Conditional' -> SolverM (Retain, Progress)
+solveConditional c = traceContext' "solveConditional" c $ do
   m_newEqs <- condEnabled c
   case m_newEqs of
     Just newEqs -> do
       mapM_ addEqC eqcs
       mapM_ addEqRowC (newEqs ++ eqrowcs)
-      pure True
-    Nothing -> pure False
+      pure (Discard, Progress)
+    Nothing -> pure (Retain, NoProgress)
   where
     (eqcs, eqrowcs) = cConstraints c
 
@@ -217,7 +261,7 @@ solveConditional c = do
 -- Row unification
 
 solveEqRowC :: EqRowC -> SolverM ()
-solveEqRowC eqc = do
+solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
   (le, m_lfm) <- lookupRowExpr (eqRowLHS eqc)
   let lo  = rowExprShift le
       lv  = rowExprVar   le
@@ -246,7 +290,7 @@ solveEqRowC eqc = do
 -- Type unification
 
 solveEqC :: EqC -> SolverM ()
-solveEqC eqc = do
+solveEqC eqc = traceContext' "solveEqC" eqc $ do
   (lv, m_lty) <- lookupTyVar (eqLhs eqc)
   (m_rv, m_rty) <- case eqRhs eqc of
     VarTy tv -> first Just <$> lookupTyVar tv
