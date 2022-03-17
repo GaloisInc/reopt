@@ -1,10 +1,10 @@
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms   #-}
 
 module Reopt.TypeInference.Solver
   ( Ty (..), TyVar, numTy, ptrTy, ptrTy', varTy,
     SolverM, runSolverM,
-    eqTC, ptrTC, freshTyVar, ptrAddTC,
+    eqTC, ptrTC, freshTyVar, ptrAddTC, subTypeTC,
     OperandClass (..),
     unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
@@ -14,19 +14,23 @@ module Reopt.TypeInference.Solver
   ) where
 
 
+import           Control.Monad                            (join)
 import qualified Prettyprinter                            as PP
-import           Reopt.TypeInference.Solver.Constraints   (OperandClass (..), EqC (EqC))
+import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
+                                                           OperandClass (..))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution (..))
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
+                                                           Pattern (Pattern),
                                                            PatternRHS (..),
                                                            Schematic (DontCare),
                                                            SolverM, addCondEq,
+                                                           addSubType,
                                                            addTyVarEq,
                                                            freshRowVarFM,
                                                            freshTyVar,
                                                            ptrWidthNumTy,
                                                            runSolverM,
-                                                           withFresh, Pattern (Pattern))
+                                                           withFresh)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
                                                            RowExpr (..),
                                                            singletonFieldMap)
@@ -63,7 +67,7 @@ nameTy ty = freshTyVar Nothing . Just =<< compileTy ty
 
 compileTy :: Ty -> SolverM ITy
 compileTy (Var tv) = pure (VarTy tv)
-compileTy (Ty ty)  = ITy <$> 
+compileTy (Ty ty)  = ITy <$>
   case ty of
     NumTy n  -> pure (NumTy n)
     PtrTy fm -> do
@@ -82,6 +86,9 @@ eqTC ty1 ty2 = do
 -- emits ptr :: PtrTy { 0 -> target }
 ptrTC :: Ty -> Ty -> SolverM ()
 ptrTC target ptr = eqTC ptr (ptrTy (singletonFieldMap 0 target))
+
+subTypeTC :: Ty -> Ty -> SolverM ()
+subTypeTC a b = join $ addSubType <$> nameTy a <*> nameTy b
 
 --------------------------------------------------------------------------------
 -- Pointer-sized addition
@@ -120,7 +127,7 @@ ptrAddTC rty lhsty rhsty oc = do
         }
 
     OCSymbolic -> do
-      withFresh $ \resrv lrv -> 
+      withFresh $ \resrv lrv ->
         addCondEq $ Conditional
         { cName       = show (name PP.<+> "(symbolic pointer case 1)")
         , cGuard  = [ [ isPtr rv   , isNum rhstv ]
@@ -130,7 +137,7 @@ ptrAddTC rty lhsty rhsty oc = do
                          , [] )
         }
 
-      withFresh $ \resrv rrv -> 
+      withFresh $ \resrv rrv ->
         addCondEq $ Conditional
         { cName       = show (name PP.<+> "(symbolic pointer case 2)")
         , cGuard  = [ [ isPtr rv   , isNum lhstv ], [ isPtr rhstv, isNum lhstv ] ]
@@ -140,7 +147,7 @@ ptrAddTC rty lhsty rhsty oc = do
         }
 
     OCPointer ->
-      withFresh $ \rhsrowv -> 
+      withFresh $ \rhsrowv ->
         addCondEq $ Conditional
         { cName       = show (name PP.<+> "(possible global pointer case)")
         , cGuard      = [[ isPtr rv ]]

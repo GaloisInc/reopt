@@ -115,7 +115,7 @@ import           Data.Macaw.X86 (X86_64, X86Reg(..), X86BlockPrecond(..))
 import           Reopt.CFG.FnRep
 import           Reopt.Events (FunId, funId)
 import           Reopt.TypeInference.ConstraintGen (
-    FunType (..),
+    FunctionTypeTyVars (..),
     ModuleConstraints (..),
   )
 import Reopt.TypeInference.Solver
@@ -1589,7 +1589,7 @@ defineFunction archOps genOpts constraints f = do
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
   let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes constraints))
-  let argsWithTyVars = zip (fnArgTypes (fnType f)) (funTypeArgs fty)
+  let argsWithTyVars = zip (fnArgTypes (fnType f)) (fttvArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
       inputArgs = zipWith mkInputReg argsWithTyVars [0..]
@@ -1753,7 +1753,7 @@ getInferredType (FnArg arg _typ) = do
   fn <- asks funAddr
   constraints <- asks moduleConstraints
   let fnTypes = fromMaybe (error "fnTypes 1") (Map.lookup fn (mcFunTypes constraints))
-  let argTyVar = funTypeArgs fnTypes !! arg
+  let argTyVar = fttvArgs fnTypes !! arg
   return (Map.lookup argTyVar (mcTypeMap constraints))
 
 

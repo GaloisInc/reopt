@@ -1,7 +1,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.Constraints where
 
@@ -49,7 +52,7 @@ instance FreeRowVars EqRowC where
 -- -- Pointer addition (maybe, could be number add)
 
 -- | What sort of constant operand we are dealing with for an
--- addition.  
+-- addition.
 data OperandClass =
   OCSymbolic   -- ^ The second operand is not a constant
   | OCOffset Offset -- ^ The second operand is a small constant, we
@@ -75,7 +78,7 @@ instance FreeTyVars OperandClass where
 --   , ptrAddRHS    :: TyVar
 --   , ptrAddClass  :: OperandClass
 --   -- ^ If an operand is a constant then this is that constant.
---   } 
+--   }
 --   deriving (Eq, Ord, Show)
 
 -- instance PP.Pretty PtrAddC where
@@ -87,3 +90,27 @@ instance FreeTyVars OperandClass where
 
 -- instance FreeRowVars PtrAddC where
 --   freeRowVars PtrAddC {} = mempty
+
+--------------------------------------------------------------------------------
+-- SubType
+
+data SubC t = SubC t t
+  deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+
+infix 5 :<:
+pattern (:<:) :: a -> a -> SubC a
+pattern a :<: b = SubC a b
+{-# COMPLETE (:<:) #-}
+
+type SubTypeC = SubC TyVar 
+type SubRowC  = SubC RowExpr
+
+instance PP.Pretty a => PP.Pretty (SubC a) where
+  pretty (a :<: b) =
+    prettySExp [ PP.pretty a, "<:", PP.pretty b]
+
+instance FreeTyVars a => FreeTyVars (SubC a) where
+  freeTyVars (a :<: b) = freeTyVars a `Set.union` freeTyVars b
+
+instance FreeRowVars a => FreeRowVars (SubC a) where
+  freeRowVars (a :<: b) = freeRowVars a `Set.union` freeRowVars b
