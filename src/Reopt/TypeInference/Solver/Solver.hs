@@ -17,10 +17,12 @@ import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
+import           Data.Function         (on)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
 import qualified Data.Map              as Map
 import           Data.Maybe            (fromMaybe)
+import qualified Data.Set              as Set
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
@@ -63,7 +65,6 @@ import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
-import qualified Data.Set as Set
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -195,7 +196,7 @@ filterCyclicEdges :: [SubRowC] -> [SubRowC]
 --                     ([SubC a], Map.Map a (Set.Set a), Map.Map a (Set.Set a))
 filterCyclicEdges = view _1 . foldr go mempty
   where
-    go c@(a :<: b) r@(acc, succs, preds) 
+    go c@(a :<: b) r@(acc, succs, preds)
       | r_a `Set.member` succs_a' = trace ("Removing cycle " ++ show (PP.pretty c)) r
       | otherwise = (c : acc, succs', preds')
       where
@@ -204,9 +205,9 @@ filterCyclicEdges = view _1 . foldr go mempty
         preds' = updRel preds preds_b' succs_a'
         succs' = updRel succs succs_a' preds_b'
 
-        updRel rel new keys = 
+        updRel rel new keys =
           foldr (\k -> Map.insertWith Set.union k new) rel (Set.toList keys)
-          
+
         succs_a' = Set.insert r_b succs_b
         preds_b' = Set.insert r_a preds_a
         preds_a  = Map.findWithDefault mempty r_a preds
@@ -219,48 +220,55 @@ filterCyclicEdges = view _1 . foldr go mempty
 -- Subtyping
 
 solveSubTypeC :: SubTypeC -> SolverM (Retain, Progress)
-solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $
-  lookupTyVar rhs >>= \case
+solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
+  (_, m_lhsTy) <- lookupTyVar lhs
+  (_, m_rhsTy) <- lookupTyVar rhs
+  case (m_lhsTy, m_rhsTy) of
+
+    -- We knew `lhs` was a pointer, we may be able to refine its offsets.
+    (Just (PtrTy lhsRow), Just (PtrTy rhsRow)) -> do
+      (lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
+      (rhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+      let isTrivial = lhsRep == rhsRep
+      let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
+      if isTrivial || isLoopy
+        then return (Discard, NoProgress)
+        else do
+          addSubRow lhsRow rhsRow
+          return (Discard, Progress)
+
     -- If we know that `lhs` is a pointer, we should propagate this fact to
     -- `rhs`, at it could help solve some constraints that are waiting to
     -- know whether `rhs` is a pointer.
-    (_, Nothing) ->
-      lookupTyVar lhs >>= \case
-        (_, Just (PtrTy lhsRow)) -> do
-          rhsRow <- rowVar <$> freshRowVar
-          addTyVarEq rhs (ITy (PtrTy rhsRow))
-          addSubRow lhsRow rhsRow
-          return (Discard, Progress)
-        _ -> return (Retain, NoProgress)
-    (_, Just (PtrTy rhsRow)) -> do
+    (Just (PtrTy lhsRow), Nothing) -> do
+      rhsRow <- rowVar <$> freshRowVar
+      addTyVarEq rhs (ITy (PtrTy rhsRow))
+      addSubRow lhsRow rhsRow
+      return (Discard, Progress)
+
+    -- We did not yet know `lhs` was a pointer.  We can initialize it as such,
+    -- and immediately populate all its known offsets from `rhs`.
+    (Nothing, Just (PtrTy rhsRow)) -> do
       (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
       let rhsOff = rowExprShift rhsRep
-      lookupTyVar lhs >>= \case
+      lhsRow <- freshRowVar
+      defineRowVar lhsRow (dropFieldMap rhsOff rhsFM)
+      addTyVarEq lhs (ITy (PtrTy (rowVar lhsRow)))
+      addSubRow (rowVar lhsRow) rhsRow
+      return (Discard, Progress)
 
-        -- We did not yet know `lhs` was a pointer.  We can initialize it as
-        -- such, and immediately populate all its known offsets from `rhs`.
-        (_, Nothing) -> do
-          row <- freshRowVar
-          defineRowVar row (dropFieldMap rhsOff rhsFM)
-          addTyVarEq lhs (ITy (PtrTy (rowVar row)))
-          return (Retain, Progress)
+    -- Next two cases are inconsistent!
+    (Just lhsDef, Just (PtrTy _)) ->
+      error (show (PP.hsep ["Expected a PtrTy left of a subtype constraint, but found:", PP.pretty lhsDef]))
+    (Just (PtrTy _), Just rhsDef) ->
+      error (show (PP.hsep ["Expected a PtrTy right of a subtype constraint, but found:", PP.pretty rhsDef]))
 
-        -- We knew `lhs` was a pointer, we may be able to refine its offsets.
-        (_, Just (PtrTy lhsRow)) -> do
-          (lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
-          let isTrivial = lhsRep == rhsRep
-          if isTrivial
-            then return (Discard, NoProgress)
-            else do
-              addSubRow lhsRow rhsRow
-              return (Discard, Progress)
+    -- FIXME: propagate and count as progress?
+    (Just _lhsTy, Just _rhsTy) -> return (Discard, NoProgress)
+    (Just _lhsTy, Nothing) -> return (Discard, NoProgress)
+    (Nothing, Just _rhsTy) -> return (Discard, NoProgress)
 
-        -- We knew `lhs` was **not** a pointer!  That's inconsistent.
-        (lhsRep, Just lhsDef) ->
-          error (show (PP.hsep ["Expected a PtrTy for", PP.pretty lhsRep, "but found:", PP.pretty lhsDef]))
-
-    -- `rhs` is known **not** a pointer, nothing to do here.
-    (_, Just _) -> return (Discard, NoProgress)
+    (Nothing, Nothing) -> return (Retain, NoProgress)
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
 solveSubRowC c@(lhsRow :<: rhsRow) = traceContext' "solveSubRowC" c $ (,) Retain <$> do
