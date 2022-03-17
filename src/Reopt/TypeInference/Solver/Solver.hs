@@ -225,17 +225,8 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
   (_, m_rhsTy) <- lookupTyVar rhs
   case (m_lhsTy, m_rhsTy) of
 
-    -- We knew `lhs` was a pointer, we may be able to refine its offsets.
-    (Just (PtrTy lhsRow), Just (PtrTy rhsRow)) -> do
-      (lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
-      (rhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
-      let isTrivial = lhsRep == rhsRep
-      let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
-      if isTrivial || isLoopy
-        then return (Discard, NoProgress)
-        else do
-          addSubRow lhsRow rhsRow
-          return (Discard, Progress)
+    (Just (PtrTy lhsRow), Just (PtrTy rhsRow)) ->
+      addSubRow lhsRow rhsRow >> return (Discard, Progress)
 
     -- If we know that `lhs` is a pointer, we should propagate this fact to
     -- `rhs`, at it could help solve some constraints that are waiting to
