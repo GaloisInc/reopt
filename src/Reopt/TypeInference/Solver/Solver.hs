@@ -17,7 +17,6 @@ import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
-import           Data.Function         (on)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
 import qualified Data.Map              as Map
@@ -254,10 +253,13 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
     (Just (PtrTy _), Just rhsDef) ->
       error (show (PP.hsep ["Expected a PtrTy right of a subtype constraint, but found:", PP.pretty rhsDef]))
 
-    -- FIXME: propagate and count as progress?
-    (Just _lhsTy, Just _rhsTy) -> return (Discard, NoProgress)
-    (Just _lhsTy, Nothing) -> return (Discard, NoProgress)
-    (Nothing, Just _rhsTy) -> return (Discard, NoProgress)
+    -- When both sides are defined (neither ptrs!), we just equate them.
+    (Just _, Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+
+    -- When one side is **not ptr** and the other is unclear, we propagate the
+    -- defined side to the unknown side.
+    (Just lhsTy, Nothing) -> addTyVarEq rhs (ITy lhsTy) >> return (Discard, Progress)
+    (Nothing, Just rhsTy) -> addTyVarEq lhs (ITy rhsTy) >> return (Discard, Progress)
 
     (Nothing, Nothing) -> return (Retain, NoProgress)
 
