@@ -11,13 +11,12 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import           Control.Lens          (Lens', (%=), (<<+=), (<<.=))
+import           Control.Lens          (Lens', (%=), (<<+=), (<<.=), _1, view)
 import           Control.Monad         (when)
 import           Control.Monad.Extra   (orM)
 import           Control.Monad.State   (MonadState (get))
 import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
-import           Data.Function         (on)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
 import qualified Data.Map              as Map
@@ -27,7 +26,7 @@ import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
                                                            EqRowC (..),
-                                                           SubRowC (SubRowC),
+                                                           SubRowC,
                                                            SubTypeC,
                                                            pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
@@ -52,7 +51,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars)
+                                                           unsafeUnifyTyVars, lookupRowExprRep)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
                                                            RowExpr (..),
                                                            dropFieldMap,
@@ -64,6 +63,7 @@ import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
+import qualified Data.Set as Set
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -141,11 +141,29 @@ solveFirst fld solve = do
         then restore (cs ++ acc') $> True
         else go acc' cs
 
+_solveAll :: Lens' ConstraintSolvingState [a] ->
+              (a -> SolverM (Retain, Progress)) ->
+              SolverM Bool
+_solveAll fld solve = do
+  cstrs <- fld <<.= [] -- get constraints and c
+  go [] False cstrs
+  where
+    restore cs = fld %= (++ cs)
+
+    -- FIXME: we might want to drop constraints when they are never
+    -- going to be satisfiable.
+    go acc progd [] = restore acc $> progd -- finished here, we didn't so anything.
+    go acc progd (c : cs) = do
+      (retain, progress) <- solve c
+      let acc'   = if retain == Retain then c : acc else acc
+          progd' = progd || madeProgress progress
+      go acc' progd' cs
+
 -- | @preprocess l f# just pre-processes the element at @l@, and so
 -- does not make progress (otherwise it would loop forever).
 preprocess :: Monoid a =>
               Lens' ConstraintSolvingState a ->
-              (a -> SolverM a) -> 
+              (a -> SolverM a) ->
               SolverM Bool
 preprocess fld f = False <$ do
   cstrs <- fld <<.= mempty -- get constraints and c
@@ -160,20 +178,48 @@ solverLoop = do
     solvers = [ solveHead  (field @"ctxEqCs")      solveEqC
               , solveHead  (field @"ctxEqRowCs")   solveEqRowC
               , solveFirst (field @"ctxCondEqs")   solveConditional
-              -- solve loops
               , solveFirst (field @"ctxSubTypeCs") solveSubTypeC
+              , preprocess (field @"ctxSubRowCs")  resolveCycles
               , solveFirst (field @"ctxSubRowCs")  solveSubRowC
               ]
 
 --------------------------------------------------------------------------------
 -- Loop detection
 
+resolveCycles :: [SubRowC] -> SolverM [SubRowC]
+resolveCycles subs =
+  filterCyclicEdges <$> mapM (traverse lookupRowExprRep) subs
+
+-- This will even remove r + 0 :<: r + 0, which is probably OK.
+filterCyclicEdges :: [SubRowC] -> [SubRowC]
+--                     ([SubC a], Map.Map a (Set.Set a), Map.Map a (Set.Set a))
+filterCyclicEdges = view _1 . foldr go mempty
+  where
+    go c@(a :<: b) r@(acc, succs, preds) 
+      | r_a `Set.member` succs_a' = trace ("Removing cycle " ++ show (PP.pretty c)) r
+      | otherwise = (c : acc, succs', preds')
+      where
+        -- Every pred. of a is now a pred of b and all its succs
+        -- likewise for succ/preds
+        preds' = updRel preds preds_b' succs_a'
+        succs' = updRel succs succs_a' preds_b'
+
+        updRel rel new keys = 
+          foldr (\k -> Map.insertWith Set.union k new) rel (Set.toList keys)
+          
+        succs_a' = Set.insert r_b succs_b
+        preds_b' = Set.insert r_a preds_a
+        preds_a  = Map.findWithDefault mempty r_a preds
+        succs_b  = Map.findWithDefault mempty r_b succs
+
+        r_a = rowExprVar a
+        r_b = rowExprVar b
 
 --------------------------------------------------------------------------------
 -- Subtyping
 
 solveSubTypeC :: SubTypeC -> SolverM (Retain, Progress)
-solveSubTypeC (lhs :<: rhs) =
+solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $
   lookupTyVar rhs >>= \case
     -- If we know that `lhs` is a pointer, we should propagate this fact to
     -- `rhs`, at it could help solve some constraints that are waiting to
@@ -203,8 +249,7 @@ solveSubTypeC (lhs :<: rhs) =
         (_, Just (PtrTy lhsRow)) -> do
           (lhsRep, _) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
           let isTrivial = lhsRep == rhsRep
-          let isLoopy = not isTrivial && on (==) rowExprVar lhsRep rhsRep
-          if isTrivial || isLoopy
+          if isTrivial
             then return (Discard, NoProgress)
             else do
               addSubRow lhsRow rhsRow
@@ -218,7 +263,7 @@ solveSubTypeC (lhs :<: rhs) =
     (_, Just _) -> return (Discard, NoProgress)
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
-solveSubRowC (SubRowC lhsRow rhsRow) = (,) Retain <$> do
+solveSubRowC c@(lhsRow :<: rhsRow) = traceContext' "solveSubRowC" c $ (,) Retain <$> do
   (lhsRep, lhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
   (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
   let

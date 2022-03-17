@@ -353,6 +353,7 @@ instance PP.Pretty ConstraintSolvingState where
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
             row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
+            row "SubRowCs" $ map PP.pretty $ ctxSubRowCs ctx,
             row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
             PP.pretty (ctxTyVars ctx),
             PP.pretty (ctxRowVars ctx)
