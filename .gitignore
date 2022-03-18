@@ -6,4 +6,5 @@
 /scratch
 /TAGS
 /tar
+/typegen-test-programs/*.exe
 .DS_Store
