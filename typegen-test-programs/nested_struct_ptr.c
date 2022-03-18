@@ -1,5 +1,4 @@
-// mixed_struct_pointer.c --- passing a pointer into a function containing a bitvec and a pointer
-
+// nested_struct_pointer.c --- passing a pointer into a function containing a bitvec and a pointer
 
 #include "test.h"
 
@@ -43,7 +42,5 @@ doit(void) {
 int
 main(void) {
   doit();
-  return 0;    
+  return 0;
 }
-
-  
