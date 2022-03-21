@@ -11,7 +11,8 @@ module Reopt.TypeInference.Solver
     tyToLLVMType,
    
     -- FTy stuff
-    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy, pattern FNamedStruct,  pattern FStructTy,
+    FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy
+  , pattern FNamedStruct,  pattern FStructTy, pattern FConflictTy
     -- Testing
   ) where
 
@@ -77,7 +78,10 @@ compileTy (Ty ty)  = ITy <$>
     PtrTy fm -> do
       fm' <- traverse nameTy fm
       PtrTy . RowExprVar <$> freshRowVarFM fm'
-
+    ConflictTy n -> pure (ConflictTy n)
+    TupleTy ts -> TupleTy <$> traverse nameTy ts
+    VecTy n ty' -> VecTy n <$> nameTy ty'
+    
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
@@ -207,3 +211,6 @@ pattern FStructTy fm = StructTy fm
 
 pattern FNamedStruct :: StructName -> FTy
 pattern FNamedStruct s = NamedStruct s
+
+pattern FConflictTy :: Int -> FTy
+pattern FConflictTy n = FTy (ConflictTy n)

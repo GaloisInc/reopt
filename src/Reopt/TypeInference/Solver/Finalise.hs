@@ -75,7 +75,10 @@ finalizeTypeDefs = do
           else PtrTy <$> freshRowVarFM (dropFieldMap off fm)
 
       NumTy n -> pure (NumTy n)
-
+      ConflictTy n -> pure (ConflictTy n)
+      TupleTy ts   -> TupleTy <$> traverse lookupTyVarRep ts
+      VecTy n ty   -> VecTy n <$> lookupTyVarRep ty 
+  
     normFieldMap :: FieldMap TyVar -> SolverM (FieldMap TyVar)
     normFieldMap = traverse lookupTyVarRep
 
@@ -133,7 +136,11 @@ finaliseTyF (ty, tv, _) r =
     norm = \case
       PtrTy rv -> FTy (PtrTy (Map.findWithDefault (StructTy emptyFieldMap) rv (csRowVars r)))
       NumTy n  -> FTy (NumTy n)
-
+      ConflictTy n -> FTy (ConflictTy n)
+      TupleTy ts   -> FTy (TupleTy (map normTy ts))
+      VecTy n t    -> FTy (VecTy n (normTy t))
+    normTy t = Map.findWithDefault UnknownTy t (csTyVars r)
+                          
 finaliseFieldMap :: (FieldMap TyVar, RowVar,a) ->
                     ConstraintSolution -> ConstraintSolution
 finaliseFieldMap (fm, rv, _) r =

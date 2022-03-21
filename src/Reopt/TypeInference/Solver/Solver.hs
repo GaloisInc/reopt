@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
@@ -11,30 +10,30 @@ module Reopt.TypeInference.Solver.Solver
   )
 where
 
-import           Control.Lens          (Lens', (%=), (<<+=), (<<.=), _1, view)
-import           Control.Monad         (when)
+import           Control.Lens          (Lens', _1, view, (%=), (<<+=),
+                                        (<<.=))
+import           Control.Monad         (when, zipWithM_)
 import           Control.Monad.Extra   (orM)
-import           Control.Monad.State   (MonadState (get))
+import           Control.Monad.State   (MonadState (get), put, StateT, evalStateT)
 import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
-import qualified Data.Map              as Map
-import           Data.Maybe            (fromMaybe)
+import qualified Data.Map.Strict       as Map
+import           Data.Maybe            (fromMaybe, isNothing)
 import qualified Data.Set              as Set
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
-                                                           EqRowC (..),
-                                                           SubRowC,
+                                                           EqRowC (..), SubRowC,
                                                            SubTypeC,
                                                            pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            Conditional',
-                                                           ConstraintSolvingState,
+                                                           ConstraintSolvingState (ptrWidth),
                                                            SolverM, addEqC,
                                                            addEqRowC,
                                                            addRowExprEq,
@@ -42,17 +41,19 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            addTyVarEq,
                                                            addTyVarEq',
                                                            condEnabled,
+                                                           ctxTyVars,
                                                            defineRowVar,
                                                            defineTyVar,
                                                            freshRowVar,
                                                            lookupRowExpr,
+                                                           lookupRowExprRep,
                                                            lookupTyVar,
                                                            popField,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars, lookupRowExprRep)
+                                                           unsafeUnifyTyVars)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
                                                            RowExpr (..),
                                                            dropFieldMap,
@@ -64,6 +65,8 @@ import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
+import           Reopt.TypeInference.Solver.UnionFindMap  (eqvClasses)
+import Control.Monad.Trans (lift)
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
@@ -109,23 +112,60 @@ data Retain   = Retain | Discard
 data Progress = Progress | NoProgress
   deriving Eq
 
+type SolverLoopM = StateT ConstraintSolvingState SolverM
+
 madeProgress :: Progress -> Bool
 madeProgress Progress = True
 madeProgress _        = False
 
 solveHead :: Lens' ConstraintSolvingState [a] ->
              (a -> SolverM ()) ->
-             SolverM Bool
-solveHead fld doit = do
+             SolverLoopM Bool
+solveHead fld doit = lift $ do
   v <- popField fld
   case v of
     Nothing -> pure False
     Just v' -> doit v' $> True
 
+
+solveHeadReset :: Lens' ConstraintSolvingState [a] ->
+             (a -> SolverM (Maybe TyVar)) ->
+             SolverLoopM Bool
+solveHeadReset fld doit = do
+  v <- lift $ popField fld
+  case v of
+    Nothing -> pure False
+    Just v' -> do
+      m_conflictTv <- lift $ doit v'
+      traverse_ restart m_conflictTv
+      pure True
+
+  where
+    -- We detected a conflict, we need to restart after updating state
+    -- to reflect the conflict.
+    restart tv = do
+      resetSt <- get
+      resetSt' <- lift $ do
+        oldSt   <- get
+        put resetSt
+        
+        -- Forget everything we know in resetSt about the eqvs for tv
+        let eqs   = eqvClasses (ctxTyVars oldSt)
+            eqsTv = Map.findWithDefault [] tv eqs
+        traverse_ undefineTyVar eqsTv
+        
+        -- FIXME: gross
+        defineTyVar tv (ConflictTy (ptrWidth resetSt))
+        -- FIXME: this could cause problems if we allocate tyvars after
+        -- we start solving.  Because we don't, this should work.
+        mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
+        get
+      put resetSt'
+
 solveFirst :: Lens' ConstraintSolvingState [a] ->
               (a -> SolverM (Retain, Progress)) ->
-              SolverM Bool
-solveFirst fld solve = do
+              SolverLoopM Bool
+solveFirst fld solve = lift $ do
   cstrs <- fld <<.= [] -- get constraints and c
   go [] cstrs
   where
@@ -164,23 +204,25 @@ _solveAll fld solve = do
 preprocess :: Monoid a =>
               Lens' ConstraintSolvingState a ->
               (a -> SolverM a) ->
-              SolverM Bool
-preprocess fld f = False <$ do
+              SolverLoopM Bool
+preprocess fld f = lift $ False <$ do
   cstrs <- fld <<.= mempty -- get constraints and c
   r <- f cstrs
   fld %= (<> r)
 
 solverLoop :: SolverM ()
-solverLoop = do
-  keepGoing <- orM solvers
-  when keepGoing solverLoop
+solverLoop = evalStateT go =<< get
   where
-    solvers = [ solveHead  (field @"ctxEqCs")      solveEqC
-              , solveHead  (field @"ctxEqRowCs")   solveEqRowC
-              , solveFirst (field @"ctxCondEqs")   solveConditional
-              , solveFirst (field @"ctxSubTypeCs") solveSubTypeC
-              , preprocess (field @"ctxSubRowCs")  resolveCycles
-              , solveFirst (field @"ctxSubRowCs")  solveSubRowC
+    go = do
+      keepGoing <- orM solvers
+      when keepGoing go
+
+    solvers = [ solveHeadReset (field @"ctxEqCs")      solveEqC
+              , solveHead      (field @"ctxEqRowCs")   solveEqRowC
+              , solveFirst     (field @"ctxCondEqs")   solveConditional
+              , solveFirst     (field @"ctxSubTypeCs") solveSubTypeC
+              , preprocess     (field @"ctxSubRowCs")  resolveCycles
+              , solveFirst     (field @"ctxSubRowCs")  solveSubRowC
               ]
 
 --------------------------------------------------------------------------------
@@ -230,37 +272,25 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
     -- If we know that `lhs` is a pointer, we should propagate this fact to
     -- `rhs`, at it could help solve some constraints that are waiting to
     -- know whether `rhs` is a pointer.
-    (Just (PtrTy lhsRow), Nothing) -> do
+    (Just (PtrTy lhsRow), _) -> do
       rhsRow <- rowVar <$> freshRowVar
       addTyVarEq rhs (ITy (PtrTy rhsRow))
       addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
-    -- We did not yet know `lhs` was a pointer.  We can initialize it as such,
-    -- and immediately populate all its known offsets from `rhs`.
-    (Nothing, Just (PtrTy rhsRow)) -> do
-      (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
-      let rhsOff = rowExprShift rhsRep
-      lhsRow <- freshRowVar
-      defineRowVar lhsRow (dropFieldMap rhsOff rhsFM)
-      addTyVarEq lhs (ITy (PtrTy (rowVar lhsRow)))
-      addSubRow (rowVar lhsRow) rhsRow
+    -- We did not yet know `lhs` was a pointer.  We can initialize it
+    -- as such, and let the solver propagate fields.
+    (_, Just (PtrTy rhsRow)) -> do
+      lhsRow <- rowVar <$> freshRowVar
+      addTyVarEq lhs (ITy (PtrTy rhsRow))
+      addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
-    -- Next two cases are inconsistent!
-    (Just lhsDef, Just (PtrTy _)) ->
-      error (show (PP.hsep ["Expected a PtrTy left of a subtype constraint, but found:", PP.pretty lhsDef]))
-    (Just (PtrTy _), Just rhsDef) ->
-      error (show (PP.hsep ["Expected a PtrTy right of a subtype constraint, but found:", PP.pretty rhsDef]))
+    -- When one side is **not ptr**, we unify the type variables.
+    (_     , Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+    (Just _, _         ) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
 
-    -- When both sides are defined (neither ptrs!), we just equate them.
-    (Just _, Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
-
-    -- When one side is **not ptr** and the other is unclear, we propagate the
-    -- defined side to the unknown side.
-    (Just lhsTy, Nothing) -> addTyVarEq rhs (ITy lhsTy) >> return (Discard, Progress)
-    (Nothing, Just rhsTy) -> addTyVarEq lhs (ITy rhsTy) >> return (Discard, Progress)
-
+    -- If neither side is defined, we save this constaint for later.
     (Nothing, Nothing) -> return (Retain, NoProgress)
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
@@ -328,19 +358,25 @@ solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
 --------------------------------------------------------------------------------
 -- Type unification
 
-solveEqC :: EqC -> SolverM ()
-solveEqC eqc = traceContext' "solveEqC" eqc $ do
+solveEqC :: EqC -> SolverM (Maybe TyVar)
+solveEqC eqc = do
   (lv, m_lty) <- lookupTyVar (eqLhs eqc)
   (m_rv, m_rty) <- case eqRhs eqc of
     VarTy tv -> first Just <$> lookupTyVar tv
     ITy   ty -> pure (Nothing, Just ty)
   case (m_lty, m_rty) of
-    _ | m_rv == Just lv -> pure () -- trivial up to eqv.
-    (_, Nothing)        -> traverse_ (unsafeUnifyTyVars lv) m_rv
+    -- trivial up to eqv.
+    _ | m_rv == Just lv -> pure Nothing
+      -- We have eqc == (lhs = SomeTy ...) and lhs ~> ConflictTy ...,
+      -- so there is nothing further to do.
+      | isNothing m_rv
+      , Just ConflictTy {} <- m_lty -> pure Nothing
+
+    (_, Nothing)         -> traverse_ (unsafeUnifyTyVars lv) m_rv $> Nothing
     (Nothing, Just rty)
-      | Just rv <- m_rv -> unsafeUnifyTyVars rv lv
+      | Just rv <- m_rv -> unsafeUnifyTyVars rv lv $> Nothing
       -- the RHS was a term, so we define lv.
-      | otherwise -> defineTyVar lv rty
+      | otherwise -> defineTyVar lv rty $> Nothing
     (Just ty1, Just ty2) -> do
       traverse_ (unsafeUnifyTyVars lv) m_rv
       traverse_ undefineTyVar m_rv
@@ -348,20 +384,30 @@ solveEqC eqc = traceContext' "solveEqC" eqc $ do
 
 -- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@
 -- named by the type variable @tv@.
-unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM ()
+unifyTypes :: TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
 unifyTypes tv ty1 ty2 =
   case (ty1, ty2) of
+    _ | ty1 == ty2 -> pure Nothing
     (NumTy i, NumTy i')
-      | i == i'   -> pure ()
+      | i == i'   -> pure Nothing
       | otherwise ->
         trace ("Mismatch in type widths for " ++ show (PP.pretty tv) ++ ": "
                ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2))
-        $ pure ()
+        $ pure (Just tv) -- FIXME: this is a bit odd, as the tyvars will have different sizes
 
-    (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2
+    (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2 $> Nothing
 
-    -- Unification failure, we need to report a conflict.
+    (TupleTy ts, TupleTy ts')
+      | length ts == length ts' -> zipWithM_ addTyVarEq' ts ts' $> Nothing
+
+    -- Should always have n1 == n2
+    (VecTy n1 ty1', VecTy n2 ty2')
+      | n1 == n2 -> addTyVarEq' ty1' ty2' $> Nothing
+
+    -- Unification failure, including the case where one is a
+    -- conflictty (but not both), we need to report a conflict.
     _ ->
-      trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $ pure ()
+      trace ("Unification failed at " ++ show (PP.pretty tv) ++ ": " ++ show (PP.pretty ty1) ++ " and " ++ show (PP.pretty ty2)) $
+      pure (Just tv)
       -- pretend we saw nothing :(
       -- error $ "FIXME: conflict detected at " ++ show (PP.pretty tv)

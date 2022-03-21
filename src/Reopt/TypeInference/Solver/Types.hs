@@ -26,6 +26,12 @@ data TyF rvar f
     NumTy Int
   | -- | A pointer to a value.
     PtrTy rvar
+  | -- | A type which is used differently in different contexts
+    ConflictTy Int
+  | -- | A n-ary tuple
+    TupleTy [f]
+  | -- | A vector
+    VecTy Int f
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | An unrolled ITy
@@ -74,8 +80,11 @@ tyByteWidth _ptrSz StructTy {} = error "Saw a StructTy in tyByteWidth"
 tyByteWidth _ptrSz (NamedStruct n) = error ("Saw a named struct in tyByteWidth " ++ n)
 tyByteWidth ptrSz (FTy ty) =
   case ty of
-    NumTy n -> fromIntegral n `div` 8
-    PtrTy _ -> fromIntegral ptrSz `div` 8
+    NumTy n      -> fromIntegral n `div` 8
+    PtrTy _      -> fromIntegral ptrSz `div` 8
+    ConflictTy n -> fromIntegral n `div` 8
+    TupleTy {}   -> error "Saw a TupleTy in tyByteWidth"
+    VecTy   {}   -> error "Saw a VecTy in tyByteWidth"
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
 recTyToLLVMType ptrSz [(0, ty)] = tyToLLVMType ptrSz ty
@@ -89,6 +98,7 @@ recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
         let pad = L.Vector (fromIntegral o - fromIntegral nextOffset) (L.PrimType (L.Integer 8))
         in pad : go o flds
 
+-- c.f. typeToLLVMType
 tyToLLVMType :: Int -> FTy -> L.Type
 tyToLLVMType ptrSz UnknownTy =
   L.PrimType (L.Integer (fromIntegral ptrSz))
@@ -96,8 +106,12 @@ tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
 tyToLLVMType ptrSz (StructTy fm) = recTyToLLVMType ptrSz (Map.assocs (getFieldMap fm))
 tyToLLVMType ptrSz (FTy ty) = 
   case ty of
-    NumTy n   -> L.PrimType (L.Integer (fromIntegral n))
-    PtrTy ty' -> L.PtrTo $ tyToLLVMType ptrSz ty'
+    NumTy n     -> L.PrimType (L.Integer (fromIntegral n))
+    PtrTy ty'   -> L.PtrTo $ tyToLLVMType ptrSz ty'
+    ConflictTy n -> L.PrimType (L.Integer (fromIntegral n))
+    TupleTy ts  -> L.Struct (map (tyToLLVMType ptrSz) ts)
+    VecTy n ty' -> L.Vector (fromIntegral n) (tyToLLVMType ptrSz ty')
+
 
 --------------------------------------------------------------------------------
 -- Instances
@@ -113,8 +127,10 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
   pretty = \case
     NumTy sz -> "i" <> PP.pretty sz
     PtrTy t -> "ptr " <> PP.pretty t
-
-
+    ConflictTy n -> "![" <> PP.pretty n <> "]"
+    TupleTy ts -> PP.tupled (map PP.pretty ts)
+    VecTy n ty  -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
+    
 instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"
@@ -130,16 +146,27 @@ class FreeTyVars a where
 instance FreeTyVars TyVar where
   freeTyVars = Set.singleton
 
-instance FreeTyVars f => FreeTyVars (TyF rvar f) where
-  freeTyVars = foldMap freeTyVars
+instance FreeTyVars RowVar where
+  freeTyVars _ = Set.empty
 
-instance FreeTyVars ITy where
+instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
+  freeTyVars = \case
+    NumTy _ -> Set.empty
+    PtrTy t -> freeTyVars t
+    ConflictTy {} -> Set.empty
+    TupleTy ts -> foldMap freeTyVars ts
+    VecTy _ ty -> freeTyVars ty
+
+instance FreeTyVars ITy where  
   freeTyVars = \case
     VarTy v  -> Set.singleton v
     ITy   ty -> freeTyVars ty
 
 instance FreeTyVars t => FreeTyVars (FieldMap t) where
   freeTyVars = foldMap freeTyVars
+
+instance FreeTyVars RowExpr where
+  freeTyVars _ = Set.empty
 
 -- FreeRowVars
 
@@ -157,6 +184,9 @@ instance (FreeRowVars r, FreeRowVars f) => FreeRowVars (TyF r f) where
   freeRowVars = \case
     NumTy _ -> Set.empty
     PtrTy t -> freeRowVars t
+    ConflictTy {} -> Set.empty
+    TupleTy ts -> foldMap freeRowVars ts
+    VecTy _ ty -> freeRowVars ty
 
 instance FreeRowVars TyVar where
   freeRowVars _ = Set.empty

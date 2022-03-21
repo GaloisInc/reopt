@@ -25,16 +25,20 @@ import Reopt.TypeInference.Solver
    Ty, FTy,
    unifyConstraints,
    eqTC, SolverM, runSolverM, freshTyVar, numTy, varTy, ConstraintSolution (..)
-  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy, pattern FStructTy, pattern FNamedStruct
+  , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy
+  , pattern FStructTy, pattern FNamedStruct
+  , pattern FConflictTy
   , ptrAddTC, OperandClass (OCOffset), ptrTC, ptrTy')
 
 import Reopt.TypeInference.Solver.RowVariables (Offset, singletonFieldMap, FieldMap, fieldMapFromList)
+import Reopt.TypeInference.Solver.Monad (withFresh)
 
 constraintTests :: T.TestTree
 constraintTests = T.testGroup "Type Constraint Tests"
   [ eqCTests
   , ptrCTests
   , recursiveTests
+  , conflictTests
   ]
 
 num8, num32, num64 :: Ty
@@ -175,7 +179,7 @@ eqCTests = T.testGroup "Equality Constraint Tests"
   --          , (x1, frecTy [(8, FPtrTy fnum64)])
   --          , (x2, frecTy [(0, fnum64)])
   --          ]
-  
+
   -- , mkTest "eqTC with records+rows 3" $ do
   --     x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
   --     let x0Ty = varTy x0
@@ -229,7 +233,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
 
       ptrAddTC x0Ty x1Ty x2Ty (OCOffset 8)
       pure [(x1, FPtrTy $ frecTy [(0, fptrTy' fnum64), (8, fnum64), (16, fptrTy' fnum64)])]
-      
+
   , mkTest "Accessing pointer members from a struct pointer" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
       let x0Ty = varTy x0
@@ -259,13 +263,13 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       -- x0 = ptr (recTy {0 -> x1} (freshRow))
       ptrTC x1Ty x0Ty
 
-      -- x1 is a byte  
+      -- x1 is a byte
       eqTC x1Ty (numTy 8)
 
       eqTC x2Ty num64
       ptrAddTC x0Ty x0Ty x2Ty (OCOffset 1)
       pure [] -- Liveness
-      
+
   , mkTest "Nested Cycle test (liveness)" $ do
       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
       let x0Ty = varTy x0
@@ -277,7 +281,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       ptrTC x1Ty x0Ty
       ptrTC x1Ty x3Ty
 
-      -- x1 is a byte  
+      -- x1 is a byte
       eqTC x1Ty (numTy 8)
 
       eqTC x2Ty num64
@@ -299,7 +303,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       ptrTC x1Ty x0Ty
       ptrTC x1Ty x3Ty
 
-      -- x1 is a byte  
+      -- x1 is a byte
       eqTC x1Ty (numTy 8)
 
       eqTC x2Ty num64
@@ -322,6 +326,7 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
 --       r0 <- freshRowVar
 --       eqTC x0Ty (recTy [(0, ptrTy x0Ty)] r0)
 
+
 recursiveTests :: T.TestTree
 recursiveTests = T.testGroup "Recursive Type Tests"
   [ mkTest "Recursive linked list" $ do
@@ -331,10 +336,22 @@ recursiveTests = T.testGroup "Recursive Type Tests"
       pure [(x0, FPtrTy $ FNamedStruct "struct.reopt.t1")]
   ]
 
+conflictTests :: T.TestTree
+conflictTests = T.testGroup "Conflict Type Tests"
+  [ mkTest "Simple conflict" $ withFresh $ \x0 -> do
+      let x0Ty = varTy x0
+      eqTC x0Ty num64
+      eqTC x0Ty (ptrTy' num64)
+      -- eqTC x0Ty (ptrTy' num64)
+      -- eqTC x0Ty (ptrTy' (ptrTy' num64))
+
+      pure [(x0, FConflictTy 64)]
+  ]
+
 ghciTest :: Bool -> SolverM a -> PP.Doc d
 ghciTest doTrace t = PP.pretty . runSolverM doTrace 64 $ do
   t >> unifyConstraints
-  
+
 newtype TypeEnv = TypeEnv [(TyVar, FTy)]
   deriving (Eq)
 
