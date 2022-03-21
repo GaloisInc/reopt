@@ -38,10 +38,10 @@ import qualified Prettyprinter              as PP
 
 import           Data.Macaw.CFG             (App (..), ArchAddrWidth, ArchFn,
                                              ArchSegmentOff)
-import           Data.Macaw.Memory          (Memory, absoluteAddr,
+import           Data.Macaw.Memory          (Memory, absoluteAddr, MemSegment, memSegments,
                                              addrWidthClass, asSegmentOff,
                                              memAddrWidth, memWidth, memWord,
-                                             resolveAbsoluteAddr)
+                                             resolveAbsoluteAddr, MemSegmentOff(..))
 import           Data.Macaw.Types           (BVType, TypeRepr (..),
                                              floatInfoBits, typeRepr)
 import           Data.Parameterized         (FoldableF, FoldableFC)
@@ -62,11 +62,12 @@ import           Reopt.CFG.FnRep            (FnArchConstraints, FnArchStmt,
                                              RecoveredModule (..), fnBlocks)
 import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              OperandClass (OCOffset, OCPointer, OCSymbolic),
-                                             SolverM, StructName, Ty, TyVar,
-                                             eqTC, numTy,
+                                             SolverM, StructName, Ty, TyVar, RowVar,
+                                             eqTC, numTy, isNumTC,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
                                              unifyConstraints, varTy)
 import qualified Reopt.TypeInference.Solver as S
+
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -92,174 +93,6 @@ instance Show FunctionTypeTyVars where
     "(" ++ intercalate ", " (map show (fttvArgs ft)) ++ ") -> " ++
     maybe "_|_" show (fttvRet ft)
 
--- data CallerCalleeTyVars = CallerCalleeTyVars
---   { callerTyVars :: FunctionTypeTyVars,
---     calleeTyVars :: FunctionTypeTyVars
---   }
-
--- varITy :: TyVar -> ITy
--- varITy = UnknownTy
-
--- -- This is the free type for constraints, should be replace by the
--- --  type from the constraint solver.
-
--- data PointerInformation
---   = NotAPointer
---   | CouldBeAPointer
---   | IsAPointerTo
---     Int -- ^ Pointee size
---     ITy -- ^ Pointee type
-
--- data BVInformation
---   = BVNotAddrWidth
---   | BVAddrWidth PointerInformation
-
--- data Constraint
---   = CEq -- ^ The types must be equal
---     ITy ITy
---   | CAddrWidthAdd -- ^ At most one type may be a pointer
---     ITy -- ^ Result
---     ITy -- ^ First addend
---     (Either Integer ITy) -- ^ Second addend
---   | CAddrWidthSub -- ^ The RHS may not be a pointer if the LHS is a bitvector
---     ITy -- ^ Result
---     ITy -- ^ Minuend
---     ITy -- ^ Subtrahend
---   | CBV -- ^ Bitvector
---     Int -- ^ Bitvector size
---     BVInformation
---     ITy
---   | CPointerAndOffset
---     -- ^ @CPointerAndOffset r sz p o@ means @r@ of size @sz@ is read at address @p +
---     -- o@, indicating that either @p@ is a pointer and @o@ an offset, or @o@ is
---     -- a global address and @p@ an offset.
---     ITy             -- ^ Pointee type
---     (Some TypeRepr) -- ^ Pointee size
---     ITy             -- ^ Computed operand  (pointer or offset)
---     Integer         -- ^ Immediate operand (offset or pointer)
-
--- instance PP.Pretty Constraint where
---   pretty = \case
---     CEq t1 t2 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2]
---     CAddrWidthAdd t1 t2 (Left o) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty o]
---     CAddrWidthAdd t1 t2 (Right t3) -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "+", PP.pretty t3]
---     CAddrWidthSub t1 t2 t3 -> PP.hsep [PP.pretty t1, "=", PP.pretty t2, "-", PP.pretty t3]
---     CBV sz BVNotAddrWidth t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
---     CBV sz (BVAddrWidth NotAPointer) t -> PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz]
---     CBV sz (BVAddrWidth CouldBeAPointer) t ->
---       PP.hsep [PP.pretty t, ":", "bv" <> PP.pretty sz <> "-or-ptr"]
---     CBV _ (BVAddrWidth (IsAPointerTo sz ty)) t ->
---       PP.hsep [PP.pretty t, ": ptr to (" <> PP.pretty ty <> ", " <> "size " <> PP.pretty sz <> ")"]
---     CPointerAndOffset tr (Some sz) tp o ->
---       PP.hsep ["*(" <> PP.pretty tp, "+", PP.pretty o <> ") : ", PP.pretty tr, "(" <> PP.pretty sz <> ")"]
-
--- instance Show Constraint where
---   show = show . PP.pretty
-
--- data TyConstraintOptions m =
---   TyConstraintOptions
---   { -- | How to generate a type to describe what a pointer points at
---     tyConGenPtrTgt :: String -> m ITy
---     -- | How to generate a row
---   , tyConGenRowVar :: m RowVar
---   }
-
-
--- | Size in bits of an unconstrained @TypeRepr tp@.  Currently only handling
--- bitvectors and floats.
--- anyTypeWidth :: TypeRepr tp -> Int
--- anyTypeWidth = \case
---   BoolTypeRepr -> error "Unexpected in anyTypeWidth: BoolTypeRepr"
---   BVTypeRepr sz -> fromIntegral (intValue sz)
---   FloatTypeRepr fir -> fromIntegral (widthVal (floatInfoBits fir))
---   TupleTypeRepr{} -> error "Unexpected in anyTypeWidth: TupleTypeRepr"
---   VecTypeRepr{} -> error "Unexpected in anyTypeWidth: VecTypeRepr"
-
-
--- -- | Converts the limited `Constraint` grammar to the more general
--- -- `TyConstraint` type used for constraint solving.
--- tyConstraint ::
---   Monad m =>
---   TyConstraintOptions m ->
---   -- | Size of pointers
---   Int ->
---   Constraint -> m TyConstraint
--- tyConstraint opts ptrSz = \case
---   CEq t1 t2 -> pure $ eqTC t1 t2
-
---   CAddrWidthAdd ret lhs (Left o) -> do
---     -- tLHS <- tyConGenPtrTgt opts "constant addition variable input"
---     rLHS <- tyConGenRowVar opts
---     -- tRet <- tyConGenPtrTgt opts "constant addition return"
---     rRet <- tyConGenRowVar opts
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs]
---       -- Or one is a pointer and one is an offset
---       , isPointerWithOffsetTC (lhs, rLHS) (ret, rRet) (Offset (fromIntegral o))
---       ]
-
---   CAddrWidthAdd ret lhs (Right rhs) -> do
---     ty <- tyConGenPtrTgt opts "pointer arithmetic"
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
---       -- Or one is a pointer and one is an offset
---       , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
---                                     , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
---                                     ]
---               ]
---       ]
-
---   CAddrWidthSub ret lhs rhs -> do
---     ty <- tyConGenPtrTgt opts "pointer arithmetic"
---     pure $ orTC
---       -- Either everything is numeric
---       [ andTC [isNumTC ptrSz ret, isNumTC ptrSz lhs, isNumTC ptrSz rhs]
---       -- Or one is a pointer and one is an offset
---       , andTC [isPtrTC ret ty, orTC [ andTC [ isPtrTC lhs ty, isNumTC ptrSz rhs]
---                                     , andTC [ isNumTC ptrSz lhs, isPtrTC rhs ty]
---                                     ]
---               ]
---       ]
-
---   CBV sz BVNotAddrWidth t -> pure (isNumTC sz t)
---   CBV sz (BVAddrWidth NotAPointer) t -> pure (isNumTC sz t)
---   CBV sz (BVAddrWidth CouldBeAPointer) t -> bitvectorConstraint sz t
---   CBV _ (BVAddrWidth (IsAPointerTo pointeeSize pointeeType)) t -> do
---     pointeeConstraints <- bitvectorConstraint pointeeSize pointeeType
---     pointerConstraints <- isOffsetTC t 0 pointeeType <$> tyConGenRowVar opts
---     return (andTC [pointeeConstraints, pointerConstraints])
---   CPointerAndOffset fieldType fieldSize pointerType offset -> do
---     -- Essentially we are seeing an operation:
---     -- r := *(p + o)
---     -- which means either:
---     -- p is a pointer, and o a numeric offset,
---     -- or:
---     -- o is a constant pointer, and p is an offset.
---     -- freshTgtIfFieldIsPtr <- tyConGenPtrTgt opts "TODO: what to call this?"
---     row <- tyConGenRowVar opts
---     let fieldSz = viewSome anyTypeWidth fieldSize
---     pointeeConstraints <- bitvectorConstraint fieldSz fieldType
---     pure $
---       andTC
---       [ pointeeConstraints
---       , orTC
---         [ isOffsetTC pointerType (fromInteger offset) fieldType row
---         , isNumTC ptrSz pointerType
---         ]
---       ]
---  where
-
---     -- Emits a constraint appropriate for a bitvector of the given size, knowing
---     -- no additional information about it.
---     bitvectorConstraint sz t = do
---       if sz == ptrSz
---         then do
---           tgt <- tyConGenPtrTgt opts "potential target of ambiguous bitvector"
---           pure $ orTC [isNumTC ptrSz t, isPtrTC t tgt]
---         else pure (isNumTC sz t)
-
 -- -----------------------------------------------------------------------------
 -- Monad
 
@@ -272,8 +105,10 @@ instance Show Warning where
   show (Warning w) = w
 
 -- | Context available throughout all of the constraint generation
-newtype CGenGlobalContext arch = CGenGlobalContext
-  { _cgenMemory      :: Memory (ArchAddrWidth arch)
+data CGenGlobalContext arch = CGenGlobalContext
+  { _cgenMemory        :: Memory (ArchAddrWidth arch)
+  -- | The map from memory segments to their row types.
+  , _cgenMemoryRegions :: Map (MemSegment (ArchAddrWidth arch)) RowVar
   }
 
 makeLenses ''CGenGlobalContext
@@ -353,10 +188,17 @@ runCGenM :: Memory (ArchAddrWidth arch) ->
             Bool -> 
             CGenM CGenGlobalContext arch a ->
             a
-runCGenM mem trace (CGenM m) =
-  runSolverM trace ptrWidth (evalStateT (runReaderT m (CGenGlobalContext mem)) st0)
+runCGenM mem trace (CGenM m) = runSolverM trace ptrWidth $ do
+  let segs = memSegments mem
+  -- Allocate a row variable for each memory segment
+  memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
+  let ctxt0 = CGenGlobalContext { _cgenMemory = mem
+                                , _cgenMemoryRegions = memRows
+                                }
+  evalStateT (runReaderT m ctxt0) st0
   where
     ptrWidth = widthVal (memWidth mem)
+    
     st0 = CGenState { _assignTyVars  = mempty
                     , _warnings      = mempty
                     }
@@ -456,6 +298,14 @@ addrWidth :: CGenM CGenBlockContext arch (NatRepr (ArchAddrWidth arch))
 addrWidth = memWidth <$> askContext ( cgenFunctionContext . cgenModuleContext
                                     . cgenGlobalContext . cgenMemory)
 
+addrToSegmentOff :: FnArchConstraints arch =>
+                    Integer ->
+                    CGenM CGenBlockContext arch (Maybe (MemSegmentOff (ArchAddrWidth arch)))
+addrToSegmentOff addr = do
+  mem <- askContext ( cgenFunctionContext . cgenModuleContext
+                      . cgenGlobalContext . cgenMemory)
+  pure (resolveAbsoluteAddr mem (memWord (fromInteger addr)))
+
 -- currentOffset :: CGenM ctx arch (ArchAddrWord arch)
 -- currentOffset = CGenM $ use curOffset
 
@@ -499,6 +349,19 @@ functionTypeTyVars saddr = do
 freshTyVar :: String -> CGenM ctx arch TyVar
 freshTyVar context =
   inSolverM (S.freshTyVar (Just context) Nothing)
+
+maybeGlobalTC :: FnArchConstraints arch =>
+                 Ty -> MemSegmentOff (ArchAddrWidth arch) ->
+                 CGenM CGenBlockContext arch ()
+maybeGlobalTC ty soff = do
+  rs <- askContext ( cgenFunctionContext . cgenModuleContext
+                     . cgenGlobalContext . cgenMemoryRegions)  
+  let rowv = Map.findWithDefault (error "Missing segment region") (segoffSegment soff) rs
+  inSolverM (S.maybeGlobalTC ty rowv (fromIntegral $ segoffOffset soff))
+
+-- -- | Returns a fresh row var.
+-- freshRowVar :: CGenM ctx arch RowVar
+-- freshRowVar = inSolverM S.freshRowVar
 
 emitEq :: Ty -> Ty -> CGenM ctx arch ()
 emitEq t1 t2 = inSolverM (eqTC t1 t2)
@@ -613,10 +476,8 @@ genApp (ty, outSize) app =
       pTy <- genFnValue l
       oTy <- genFnValue a
 
-      -- FIXME:
-      mem <- askContext ( cgenFunctionContext . cgenModuleContext
-                          . cgenGlobalContext . cgenMemory)
-      case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
+      mseg <- addrToSegmentOff o
+      case mseg of
         Nothing -> emitPtrAddOffset ty pTy oTy o
         Just _  -> emitPtrAddGlobalPtr ty pTy oTy
 
@@ -624,10 +485,8 @@ genApp (ty, outSize) app =
       pTy <- genFnValue r
       oTy <- genFnValue a
 
-      -- FIXME:
-      mem <- askContext ( cgenFunctionContext . cgenModuleContext
-                          . cgenGlobalContext . cgenMemory)
-      case resolveAbsoluteAddr mem (memWord (fromInteger o)) of
+      mseg <- addrToSegmentOff o
+      case mseg of
         Nothing -> emitPtrAddOffset ty pTy oTy o
         Just _  -> emitPtrAddGlobalPtr ty pTy oTy
 
@@ -737,7 +596,7 @@ genMemOp ty ptr _sz = emitPtr ty =<< genFnValue ptr
 bvWidth :: FnArchConstraints arch => FnValue arch (BVType n) -> Int
 bvWidth = bitWidth . typeRepr
 
-genFnAssignment ::
+genFnAssignment :: forall arch tp.
   FnArchConstraints arch =>
   FnAssignment arch tp -> CGenM CGenBlockContext arch ()
 genFnAssignment a = do
@@ -751,9 +610,11 @@ genFnAssignment a = do
       emitEq ty =<< genFnValue def
     FnEvalApp app -> genApp (ty, bitWidth (typeRepr app)) app
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
-    -- no constraints generated here, we will look at this assignment
-    -- in context (i.e., on an add or a load).
-    FnAddrWidthConstant {} -> pure ()
+    FnAddrWidthConstant addr -> do
+      m_mseg <- addrToSegmentOff addr
+      case m_mseg of
+        Nothing  -> inSolverM . isNumTC ty . widthVal =<< addrWidth
+        Just soff -> maybeGlobalTC ty soff 
 
 -- | This helper gives us the bitwidth of the types we can read/write from
 -- memory.
@@ -949,6 +810,8 @@ genModuleConstraints m mem trace = runCGenM mem trace $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
+  -- traceM (show (memSegmentMap mem))
+  
   let doDecl d = do
         fty <- freshFunctionTypeTyVars (funDeclName d) (funDeclType d)
         -- Declarations don't need a different type variable when called since
