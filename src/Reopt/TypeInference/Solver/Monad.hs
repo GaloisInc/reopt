@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
@@ -11,6 +12,7 @@ module Reopt.TypeInference.Solver.Monad where
 
 import           Control.Lens          (Lens', use, (%%=), (%=), (.=), (<<+=))
 import           Control.Monad.State   (MonadState, State, evalState)
+import           Data.Foldable         (asum)
 import           Data.Generics.Product (field)
 import           Data.Map.Strict       (Map)
 import qualified Data.Map.Strict       as Map
@@ -18,9 +20,10 @@ import           GHC.Generics          (Generic)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
-                                                           EqRowC (EqRowC))
-import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
-                                                           Offset (Offset),
+                                                           EqRowC (EqRowC),
+                                                           SubRowC, SubTypeC,
+                                                           pattern (:<:))
+import           Reopt.TypeInference.Solver.RowVariables  (FieldMap, Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowInfo (..),
                                                            RowVar (RowVar),
@@ -28,23 +31,28 @@ import           Reopt.TypeInference.Solver.RowVariables  (FieldMap,
                                                            rowExprVar)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar (TyVar))
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
-                                                           TyF (NumTy))
+                                                           TyF (..))
 import           Reopt.TypeInference.Solver.UnionFindMap  (UnionFindMap)
 import qualified Reopt.TypeInference.Solver.UnionFindMap  as UM
 
-data ConstraintSolvingState = ConstraintSolvingState
-  { ctxEqCs    :: [EqC],
-    ctxEqRowCs :: [EqRowC],
-    ctxCondEqs :: [Conditional],
 
-    nextTraceId :: Int,
-    nextRowVar :: Int,
-    nextTyVar  :: Int,
+type Conditional' = Conditional ([EqC], [EqRowC])
+
+data ConstraintSolvingState = ConstraintSolvingState
+  { ctxEqCs      :: [EqC],
+    ctxEqRowCs   :: [EqRowC],
+    ctxCondEqs   :: [Conditional'],
+    ctxSubRowCs  :: [SubRowC],
+    ctxSubTypeCs :: [SubTypeC],
+
+    nextTraceId         :: Int,
+    nextRowVar          :: Int,
+    nextTyVar           :: Int,
 
     -- | The width of a pointer, in bits.  This can go away when
     -- tyvars have an associated size, it is only used for PtrAddC
     -- solving.
-    ptrWidth :: Int,
+    ptrWidth            :: Int,
 
     -- | The union-find data-structure mapping each tyvar onto its
     -- representative tv.  If no mapping exists, it is a self-mapping.
@@ -63,6 +71,8 @@ emptyContext w trace = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
   , ctxCondEqs     = []
+  , ctxSubRowCs    = []
+  , ctxSubTypeCs   = []
   , nextTraceId    = 0
   , nextRowVar     = 0
   , nextTyVar      = 0
@@ -83,18 +93,30 @@ runSolverM b w = flip evalState (emptyContext w b) . getSolverM
 --------------------------------------------------------------------------------
 -- Adding constraints
 
+addEqC :: EqC -> SolverM ()
+addEqC eqc = field @"ctxEqCs" %= (eqc :)
+
 addTyVarEq :: TyVar -> ITy -> SolverM ()
-addTyVarEq tv1 tv2 = field @"ctxEqCs" %= (EqC tv1 tv2 :)
+addTyVarEq tv1 tv2 =  addEqC (EqC tv1 tv2)
 
 addTyVarEq' :: TyVar -> TyVar -> SolverM ()
 addTyVarEq' tv1 tv2 = addTyVarEq tv1 (VarTy tv2)
 
-addRowExprEq :: RowExpr -> RowExpr -> SolverM ()
-addRowExprEq r1 r2 = field @"ctxEqRowCs" %= (EqRowC r1 r2 :)
+addEqRowC :: EqRowC -> SolverM ()
+addEqRowC eqc = field @"ctxEqRowCs" %= (eqc :)
 
-addCondEq :: Conditional -> SolverM ()
+addRowExprEq :: RowExpr -> RowExpr -> SolverM ()
+addRowExprEq r1 r2 = addEqRowC (EqRowC r1 r2)
+
+addCondEq :: Conditional' -> SolverM ()
 addCondEq cs  =
   field @"ctxCondEqs" %= (cs :)
+
+addSubType :: TyVar -> TyVar -> SolverM ()
+addSubType a b = field @"ctxSubTypeCs" %= ((a :<: b) :)
+
+addSubRow :: RowExpr -> RowExpr -> SolverM ()
+addSubRow a b = field @"ctxSubRowCs" %= ((a :<: b) :)
 
 --------------------------------------------------------------------------------
 -- Getting constraints
@@ -111,6 +133,9 @@ dequeueEqC = popField (field @"ctxEqCs")
 dequeueEqRowC :: SolverM (Maybe EqRowC)
 dequeueEqRowC = popField (field @"ctxEqRowCs")
 
+dequeueSubTypeC :: SolverM (Maybe SubTypeC)
+dequeueSubTypeC = popField (field @"ctxSubTypeCs")
+
 --------------------------------------------------------------------------------
 -- Operations over type variable state
 
@@ -122,7 +147,7 @@ freshRowVarE e = do
   rowv <- freshRowVar
   unsafeUnifyRowVars e rowv
   pure rowv
-  
+
 freshRowVarFM :: FieldMap TyVar -> SolverM RowVar
 freshRowVarFM fm = do
   rowv <- freshRowVar
@@ -163,7 +188,7 @@ lookupRowVar rv = do
 lookupRowExpr :: RowExpr -> SolverM (RowExpr, Maybe (FieldMap TyVar))
 lookupRowExpr re = do
   (o, rv, m_fm) <- lookupRowVar (rowExprVar re)
-  let o' = o + rowExprShift re  
+  let o' = o + rowExprShift re
   pure (RowExprShift o' rv, m_fm)
 
 -- | Lookup a type variable, returns the representative of the
@@ -211,14 +236,6 @@ unsafeUnifyTyVars root leaf = field @"ctxTyVars" %= UM.unify root leaf
 ptrWidthNumTy :: SolverM ITy'
 ptrWidthNumTy = NumTy <$> use (field @"ptrWidth")
 
-shiftStructuralInformationBy :: Integer -> Map Offset v -> Map Offset v
-shiftStructuralInformationBy o =
-  Map.fromList . concatMap retainPositiveOffsets . Map.toList
-  where
-    retainPositiveOffsets (Offset a, ty) =
-      let newOffset = fromIntegral a + o
-       in [(Offset (fromIntegral newOffset), ty) | newOffset >= 0]
-
 setTraceUnification :: Bool -> SolverM ()
 setTraceUnification b = field @"ctxTraceUnification" .= b
 
@@ -229,6 +246,70 @@ traceUnification = use (field @"ctxTraceUnification")
 --------------------------------------------------------------------------------
 -- Conditional constraints
 
+data Schematic a = Schematic a | DontCare
+
+instance PP.Pretty a => PP.Pretty (Schematic a) where
+  pretty (Schematic a) = "?" <> PP.pretty a
+  pretty DontCare = "_"
+
+-- data Let v e = Let { letBinder :: Schematic v, letBody :: e }
+-- instance (PP.Pretty v, PP.Pretty e) => PP.Pretty (Let v e) where
+--   pretty (Let v e) = "let " <> PP.pretty v <> " := " <> PP.pretty e
+
+-- | Does the definition of the tyvar on the LHS match the pattern on
+-- the RHS, instantiating schematics as required.
+data PatternRHS =
+    IsPtr  (Schematic RowVar)
+  | IsNum
+
+instance PP.Pretty PatternRHS where
+  pretty (IsPtr sv) = "PtrTy " <> PP.pretty sv
+  pretty IsNum      = "NumTy _"
+
+data Pattern = Pattern
+  { patVar :: TyVar
+  , patRHS :: PatternRHS
+  }
+
+instance PP.Pretty Pattern where
+  pretty (Pattern v r) = PP.pretty v <> " =?= " <> PP.pretty r
+
+-- FIXME: this is pretty arcane
+data Conditional a = Conditional
+  { cName        :: String
+    -- | Disjunction of conjunction of linear patterns -- each
+    -- schematic should occur on one RHS only.
+  , cGuard       :: [ [ Pattern ] ]
+  , cConstraints :: a
+  }
+
+-- | Simple matching --- the pattern matches, or it doesn't.  A more
+-- advanced version of this might determine that a pattern can never
+-- match.  This returns a mapping from schematics to their unifiers if
+-- one exists.
+condEnabled :: Conditional c -> SolverM (Maybe [EqRowC])
+condEnabled c = asum <$> mapM matchAll (cGuard c)
+  where
+    matchAll pats = fmap concat . sequenceA <$> mapM match pats
+    match pat = do
+      (_, m_ty) <- lookupTyVar (patVar pat)
+      pure (matchRHS (patRHS pat) =<< m_ty)
+
+    matchRHS rhs ty =
+      case (rhs, ty) of
+        (IsPtr sv, PtrTy r) -> Just (bindSchem sv r)
+        (IsNum,    NumTy _) -> Just []
+        _                   -> Nothing
+
+    bindSchem (Schematic r) re = [EqRowC (RowExprVar r) re]
+    bindSchem _             _  = []
+
+instance PP.Pretty a => PP.Pretty (Conditional a) where
+  pretty c = PP.pretty (cName c) <> ": " <>
+             -- FIXME, could be nicer.
+             PP.list (map (PP.list . map PP.pretty) (cGuard c)) <> " |- " <>
+             PP.pretty (cConstraints c)
+
 class CanFresh t where
   makeFresh :: SolverM t
 
@@ -238,19 +319,21 @@ instance CanFresh RowVar where
 instance CanFresh RowExpr where
   makeFresh = RowExprVar <$> freshRowVar
 
-
 instance CanFresh TyVar where
   makeFresh = freshTyVar Nothing Nothing
 
+instance CanFresh a => CanFresh (Schematic a) where
+  makeFresh = Schematic <$> makeFresh
+
 class WithFresh t where
-  type Result t 
+  type Result t
   withFresh :: t -> SolverM (Result t)
 
 instance WithFresh (SolverM a) where
   type Result (SolverM a) = a
   withFresh m = m
 
-instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where  
+instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where
   type Result (a -> b) = Result b
   withFresh f = do
     v <- makeFresh
@@ -258,49 +341,8 @@ instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where
 
 instance WithFresh EqC where
   type Result EqC = EqC
-  withFresh v = pure v 
+  withFresh v = pure v
 
--- instance CanFresh RowVar where
---   makeFresh = freshRowVar
-
--- instance CanFresh TyVar where
---   makeFresh = freshTyVar Nothing Nothing
-
--- instance (CanFresh a, CanFresh b) => CanFresh (a, b) where
---   makeFresh = (,) <$> makeFresh <*> makeFresh
-
--- instance (CanFresh a, CanFresh b, CanFresh c) => CanFresh (a, b, c) where
---   makeFresh = (,,) <$> makeFresh <*> makeFresh <*> makeFresh
-
--- instance (CanFresh a, CanFresh b, CanFresh c, CanFresh d) =>
---          CanFresh (a, b, c, d) where
---   makeFresh = (,,,) <$> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh
-
--- instance (CanFresh a, CanFresh b, CanFresh c, CanFresh d, CanFresh e) =>
---          CanFresh (a, b, c, d, e) where
---   makeFresh = (,,,,) <$> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh <*> makeFresh
-
--- FIXME: this is pretty arcane
-data Conditional = Conditional
-  { cName           :: String
-  -- | This says whether the conditional is enabled, disabled, or
-  -- delayed.  Once a condition is disabled, it is never examined
-  -- again.
-  , cEnabled        :: SolverM (Maybe Bool)
-  , cAddConstraints :: SolverM ()
-  }
-
--- -- | Returns Nothing if we do not have enough information to try, True
--- -- if enabled, False otherswise.
--- condEnabled :: Conditional c -> SolverM (Maybe Bool)
--- condEnabled c = do
---   ms <- traverse (fmap snd . lookupTyVar (cDomain c)
---   let m_varMap = sequenceA [ (,) v <$> m | (v, m) <- zip (cDomain c) ms ]
---   pure (cPredicate c <$> m_varMap)
-
-instance PP.Pretty Conditional where
-  pretty c = PP.pretty (cName c)
-  
 --------------------------------------------------------------------------------
 -- Instances
 
@@ -311,6 +353,8 @@ instance PP.Pretty ConstraintSolvingState where
           [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
             row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
             row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
+            row "SubRowCs" $ map PP.pretty $ ctxSubRowCs ctx,
+            row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
             PP.pretty (ctxTyVars ctx),
             PP.pretty (ctxRowVars ctx)
           ]

@@ -23,7 +23,5 @@ doit(void) {
 int
 main(void) {
   doit();
-  return 0;    
+  return 0;
 }
-
-  

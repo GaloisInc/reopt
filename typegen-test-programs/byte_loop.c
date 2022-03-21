@@ -5,6 +5,8 @@
 #define N 1000
 char bytes[N];
 
+int byte_loop_result;
+
 int NOINLINE
 byte_loop(char *p, int n) {
   int count = 0;
@@ -15,13 +17,11 @@ byte_loop(char *p, int n) {
 
 void NOINLINE
 doit(void) {
-  byte_loop(bytes, N);
+  byte_loop_result = byte_loop(bytes, N);
 }
 
 int
 main(void) {
   doit();
-  return 0;    
+  return 0;
 }
-
-  

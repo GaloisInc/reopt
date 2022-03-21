@@ -41,7 +41,7 @@ lookupRep k0 = field @"ufmEqv" %%~ go k0
         Nothing  -> (injectKey k, m)
         Just ki' ->
           let (ki'', m') = go (projectKey ki') m
-              newki = compact ki' ki'' 
+              newki = compact ki' ki''
           in (newki, Map.insert k newki m') -- short circuit next lookup.
 
 -- | Lookup a type variable, returns the representative of the
@@ -74,7 +74,7 @@ eqvClasses um = Map.fromListWith (++) rmap
   rmap = [ (projectKey ki, [invertKey k ki])
          | k <- Map.keys (ufmEqv um)
          , let (ki, _) = lookupRep k um ]
-         
+
 --------------------------------------------------------------------------------
 -- instances
 

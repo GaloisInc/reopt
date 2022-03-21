@@ -1,63 +1,79 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Reopt.TypeInference.Solver.Solver
   ( unifyConstraints
   )
 where
 
-import           Control.Lens          ((.=), (<<+=), (<<.=))
+import           Control.Lens          (Lens', _1, view, (%=), (<<+=),
+                                        (<<.=))
 import           Control.Monad         (when, zipWithM_)
-import           Control.Monad.State   (MonadState (get), put)
-import           Data.Bifunctor        (first)
+import           Control.Monad.Extra   (orM)
+import           Control.Monad.State   (MonadState (get), put, StateT, evalStateT)
+import           Data.Bifunctor        (Bifunctor (second), first)
 import           Data.Foldable         (traverse_)
 import           Data.Functor          (($>))
 import           Data.Generics.Product (field)
+import qualified Data.Map.Strict       as Map
 import           Data.Maybe            (fromMaybe, isNothing)
+import qualified Data.Set              as Set
 import           Debug.Trace           (trace)
 import qualified Prettyprinter         as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
-                                                           EqRowC (..))
+                                                           EqRowC (..), SubRowC,
+                                                           SubTypeC,
+                                                           pattern (:<:))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
-                                                           SolverM,
+                                                           Conditional',
+                                                           ConstraintSolvingState (ptrWidth),
+                                                           SolverM, addEqC,
+                                                           addEqRowC,
                                                            addRowExprEq,
+                                                           addSubRow,
+                                                           addTyVarEq,
                                                            addTyVarEq',
+                                                           condEnabled,
+                                                           ctxTyVars,
                                                            defineRowVar,
                                                            defineTyVar,
-                                                           dequeueEqC,
-                                                           dequeueEqRowC,
+                                                           freshRowVar,
                                                            lookupRowExpr,
+                                                           lookupRowExprRep,
                                                            lookupTyVar,
+                                                           popField,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
                                                            unsafeUnifyRowVars,
-                                                           unsafeUnifyTyVars, ConstraintSolvingState (ptrWidth), ctxTyVars)
-import           Reopt.TypeInference.Solver.RowVariables  (RowExpr (..),
+                                                           unsafeUnifyTyVars)
+import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (getFieldMap),
+                                                           RowExpr (..),
+                                                           dropFieldMap,
                                                            emptyFieldMap,
                                                            rowExprShift,
-                                                           rowExprVar,
+                                                           rowExprVar, rowVar,
                                                            shiftFieldMap,
                                                            unifyFieldMaps)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (ITy (..), ITy',
                                                            TyF (..))
-import qualified Data.Map.Strict as Map
-import Reopt.TypeInference.Solver.UnionFindMap (eqvClasses)
+import           Reopt.TypeInference.Solver.UnionFindMap  (eqvClasses)
+import Control.Monad.Trans (lift)
 
 -- | Unify the given constraints, returning a conservative type map for all type
 -- variables.
 
--- FIXME: probably want to export the Eqv map somehow
 unifyConstraints :: SolverM ConstraintSolution
 unifyConstraints = do
-  processAtomicConstraints =<< get
+  solverLoop
   finalizeTypeDefs
 
 -- | @traceContext description ctx ctx'@ reports how the context changed via @trace@.
@@ -84,64 +100,249 @@ traceContext description action = do
     trace (show msg) (return ())
   pure r
 
--- | Process all atomic (i.e., non-disjunctive) constraints, updating the
--- context with each.
-processAtomicConstraints :: ConstraintSolvingState -> SolverM ()
-processAtomicConstraints resetSt = traceContext "processAtomicConstraints" $ do
-  dequeueEqC >>= \case
-    Just c  -> solveEqC c >>= \case
-      Just tv -> restart tv
-      Nothing -> processAtomicConstraints resetSt
-    Nothing -> dequeueEqRowC >>= \case
-      Just c  -> solveEqRowC c >> processAtomicConstraints resetSt
-      Nothing -> condEqSolver >>= \case
-        True -> processAtomicConstraints resetSt
-        False -> pure ()
+traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
+traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
+
+--------------------------------------------------------------------------------
+-- Solver loop
+
+data Retain   = Retain | Discard
+  deriving Eq
+
+data Progress = Progress | NoProgress
+  deriving Eq
+
+type SolverLoopM = StateT ConstraintSolvingState SolverM
+
+madeProgress :: Progress -> Bool
+madeProgress Progress = True
+madeProgress _        = False
+
+solveHead :: Lens' ConstraintSolvingState [a] ->
+             (a -> SolverM ()) ->
+             SolverLoopM Bool
+solveHead fld doit = lift $ do
+  v <- popField fld
+  case v of
+    Nothing -> pure False
+    Just v' -> doit v' $> True
+
+
+solveHeadReset :: Lens' ConstraintSolvingState [a] ->
+             (a -> SolverM (Maybe TyVar)) ->
+             SolverLoopM Bool
+solveHeadReset fld doit = do
+  v <- lift $ popField fld
+  case v of
+    Nothing -> pure False
+    Just v' -> do
+      m_conflictTv <- lift $ doit v'
+      traverse_ restart m_conflictTv
+      pure True
+
   where
     -- We detected a conflict, we need to restart after updating state
     -- to reflect the conflict.
     restart tv = do
-      oldSt <- get
-      put resetSt
-      -- Forget everything we know in resetSt about the eqvs for tv
-      let eqs = eqvClasses (ctxTyVars oldSt)
-          eqsTv = Map.findWithDefault [] tv eqs
-      traverse_ undefineTyVar eqsTv
-      -- FIXME: gross
-      defineTyVar tv (ConflictTy (ptrWidth resetSt))
-      -- FIXME: this could cause problems if we allocate tyvars after
-      -- we start solving.  Because we don't, this should work.
-      mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
+      resetSt <- get
+      resetSt' <- lift $ do
+        oldSt   <- get
+        put resetSt
+        
+        -- Forget everything we know in resetSt about the eqvs for tv
+        let eqs   = eqvClasses (ctxTyVars oldSt)
+            eqsTv = Map.findWithDefault [] tv eqs
+        traverse_ undefineTyVar eqsTv
+        
+        -- FIXME: gross
+        defineTyVar tv (ConflictTy (ptrWidth resetSt))
+        -- FIXME: this could cause problems if we allocate tyvars after
+        -- we start solving.  Because we don't, this should work.
+        mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
+        get
+      put resetSt'
 
-      resetSt' <- get
-      trace "Restarting" $ processAtomicConstraints resetSt'
-      
-    -- This solver will solve one at a time, which is important to get
-    -- around the +p++ case.  We solve a single ptr add, then propagate
-    -- the new eq and roweq constraints.
-    condEqSolver = do
-      ceqs <- field @"ctxCondEqs" <<.= mempty -- get constraints and c
-      go [] ceqs
+solveFirst :: Lens' ConstraintSolvingState [a] ->
+              (a -> SolverM (Retain, Progress)) ->
+              SolverLoopM Bool
+solveFirst fld solve = lift $ do
+  cstrs <- fld <<.= [] -- get constraints and c
+  go [] cstrs
+  where
+    restore cs = fld %= (++ cs)
 
-    restore :: [Conditional] -> SolverM ()
-    restore cs = field @"ctxCondEqs" .= cs
-
+    -- FIXME: we might want to drop constraints when they are never
+    -- going to be satisfiable.
     go acc [] = restore acc $> False -- finished here, we didn't so anything.
     go acc (c : cs) = do
-      ce <- cEnabled c
-      case ce of
-        -- Not enough info to run yet, try the next one.
-        Nothing -> go (c : acc) cs
-        -- The constraint is no longer relevent, drop and keep going
-        Just False  -> go acc cs
-        -- The constraint(s) should be added
-        Just True   -> cAddConstraints c >> restore (cs ++ acc) $> True
+      (retain, progress) <- solve c
+      let acc' = if retain == Retain then c : acc else acc
+      if madeProgress progress
+        then restore (cs ++ acc') $> True
+        else go acc' cs
+
+_solveAll :: Lens' ConstraintSolvingState [a] ->
+              (a -> SolverM (Retain, Progress)) ->
+              SolverM Bool
+_solveAll fld solve = do
+  cstrs <- fld <<.= [] -- get constraints and c
+  go [] False cstrs
+  where
+    restore cs = fld %= (++ cs)
+
+    -- FIXME: we might want to drop constraints when they are never
+    -- going to be satisfiable.
+    go acc progd [] = restore acc $> progd -- finished here, we didn't so anything.
+    go acc progd (c : cs) = do
+      (retain, progress) <- solve c
+      let acc'   = if retain == Retain then c : acc else acc
+          progd' = progd || madeProgress progress
+      go acc' progd' cs
+
+-- | @preprocess l f# just pre-processes the element at @l@, and so
+-- does not make progress (otherwise it would loop forever).
+preprocess :: Monoid a =>
+              Lens' ConstraintSolvingState a ->
+              (a -> SolverM a) ->
+              SolverLoopM Bool
+preprocess fld f = lift $ False <$ do
+  cstrs <- fld <<.= mempty -- get constraints and c
+  r <- f cstrs
+  fld %= (<> r)
+
+solverLoop :: SolverM ()
+solverLoop = evalStateT go =<< get
+  where
+    go = do
+      keepGoing <- orM solvers
+      when keepGoing go
+
+    solvers = [ solveHeadReset (field @"ctxEqCs")      solveEqC
+              , solveHead      (field @"ctxEqRowCs")   solveEqRowC
+              , solveFirst     (field @"ctxCondEqs")   solveConditional
+              , solveFirst     (field @"ctxSubTypeCs") solveSubTypeC
+              , preprocess     (field @"ctxSubRowCs")  resolveCycles
+              , solveFirst     (field @"ctxSubRowCs")  solveSubRowC
+              ]
+
+--------------------------------------------------------------------------------
+-- Loop detection
+
+resolveCycles :: [SubRowC] -> SolverM [SubRowC]
+resolveCycles subs =
+  filterCyclicEdges <$> mapM (traverse lookupRowExprRep) subs
+
+-- This will even remove r + 0 :<: r + 0, which is probably OK.
+filterCyclicEdges :: [SubRowC] -> [SubRowC]
+--                     ([SubC a], Map.Map a (Set.Set a), Map.Map a (Set.Set a))
+filterCyclicEdges = view _1 . foldr go mempty
+  where
+    go c@(a :<: b) r@(acc, succs, preds)
+      | r_a `Set.member` succs_a' = trace ("Removing cycle " ++ show (PP.pretty c)) r
+      | otherwise = (c : acc, succs', preds')
+      where
+        -- Every pred. of a is now a pred of b and all its succs
+        -- likewise for succ/preds
+        preds' = updRel preds preds_b' succs_a'
+        succs' = updRel succs succs_a' preds_b'
+
+        updRel rel new keys =
+          foldr (\k -> Map.insertWith Set.union k new) rel (Set.toList keys)
+
+        succs_a' = Set.insert r_b succs_b
+        preds_b' = Set.insert r_a preds_a
+        preds_a  = Map.findWithDefault mempty r_a preds
+        succs_b  = Map.findWithDefault mempty r_b succs
+
+        r_a = rowExprVar a
+        r_b = rowExprVar b
+
+--------------------------------------------------------------------------------
+-- Subtyping
+
+solveSubTypeC :: SubTypeC -> SolverM (Retain, Progress)
+solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
+  (_, m_lhsTy) <- lookupTyVar lhs
+  (_, m_rhsTy) <- lookupTyVar rhs
+  case (m_lhsTy, m_rhsTy) of
+
+    (Just (PtrTy lhsRow), Just (PtrTy rhsRow)) ->
+      addSubRow lhsRow rhsRow >> return (Discard, Progress)
+
+    -- If we know that `lhs` is a pointer, we should propagate this fact to
+    -- `rhs`, at it could help solve some constraints that are waiting to
+    -- know whether `rhs` is a pointer.
+    (Just (PtrTy lhsRow), Nothing) -> do
+      rhsRow <- rowVar <$> freshRowVar
+      addTyVarEq rhs (ITy (PtrTy rhsRow))
+      addSubRow lhsRow rhsRow
+      return (Discard, Progress)
+
+    -- We did not yet know `lhs` was a pointer.  We can initialize it as such,
+    -- and immediately populate all its known offsets from `rhs`.
+    (Nothing, Just (PtrTy rhsRow)) -> do
+      (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+      let rhsOff = rowExprShift rhsRep
+      lhsRow <- freshRowVar
+      defineRowVar lhsRow (dropFieldMap rhsOff rhsFM)
+      addTyVarEq lhs (ITy (PtrTy (rowVar lhsRow)))
+      addSubRow (rowVar lhsRow) rhsRow
+      return (Discard, Progress)
+
+    -- Next two cases are inconsistent!
+    (Just lhsDef, Just (PtrTy _)) ->
+      error (show (PP.hsep ["Expected a PtrTy left of a subtype constraint, but found:", PP.pretty lhsDef]))
+    (Just (PtrTy _), Just rhsDef) ->
+      error (show (PP.hsep ["Expected a PtrTy right of a subtype constraint, but found:", PP.pretty rhsDef]))
+
+    -- When both sides are defined (neither ptrs!), we just equate them.
+    (Just _, Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+
+    -- When one side is **not ptr** and the other is unclear, we propagate the
+    -- defined side to the unknown side.
+    (Just lhsTy, Nothing) -> addTyVarEq rhs (ITy lhsTy) >> return (Discard, Progress)
+    (Nothing, Just rhsTy) -> addTyVarEq lhs (ITy rhsTy) >> return (Discard, Progress)
+
+    (Nothing, Nothing) -> return (Retain, NoProgress)
+
+solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
+solveSubRowC c@(lhsRow :<: rhsRow) = traceContext' "solveSubRowC" c $ (,) Retain <$> do
+  (lhsRep, lhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr lhsRow
+  (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
+  let
+    lhsOff = rowExprShift lhsRep
+    rhsOff = rowExprShift rhsRep
+    lhsKeys = Map.keys (getFieldMap lhsFM)
+    rhsFMAdjusted = shiftFieldMap lhsOff (dropFieldMap rhsOff rhsFM)
+    rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
+    (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
+  defineRowVar (rowExprVar lhsRep) unified
+  traverse_ (uncurry addTyVarEq') overlaps
+  -- NOTE: We would also like to detect when unification made progress...
+  if not (all (`elem` lhsKeys) rhsKeys)
+    then return Progress
+    else return NoProgress
+
+--------------------------------------------------------------------------------
+-- Conditionals
+
+solveConditional :: Conditional' -> SolverM (Retain, Progress)
+solveConditional c = traceContext' "solveConditional" c $ do
+  m_newEqs <- condEnabled c
+  case m_newEqs of
+    Just newEqs -> do
+      mapM_ addEqC eqcs
+      mapM_ addEqRowC (newEqs ++ eqrowcs)
+      pure (Discard, Progress)
+    Nothing -> pure (Retain, NoProgress)
+  where
+    (eqcs, eqrowcs) = cConstraints c
 
 --------------------------------------------------------------------------------
 -- Row unification
 
 solveEqRowC :: EqRowC -> SolverM ()
-solveEqRowC eqc = do
+solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
   (le, m_lfm) <- lookupRowExpr (eqRowLHS eqc)
   let lo  = rowExprShift le
       lv  = rowExprVar   le
@@ -154,7 +355,7 @@ solveEqRowC eqc = do
 
   case () of
     _ | (lo, lv) == (ro, rv) -> pure () -- trivial up to eqv.
-      | lv == rv  -> error "Recursive row var equation"
+      | lv == rv  -> trace "Recursive row var equation, ignoring" $ pure ()
       | lo < ro   -> unify (ro - lo) rv rfm lv lfm
       | otherwise -> unify (lo - ro) lv lfm rv rfm
   where

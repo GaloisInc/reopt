@@ -1,4 +1,4 @@
-// mixed_struct_ptr2.c --- passing a pointer into a function containing a bitvec and a pointer
+// nested_struct_ptr2.c --- passing a pointer into a function containing a bitvec and a pointer
 
 
 #include "test.h"
@@ -54,7 +54,5 @@ doit(struct global_data *p) {
 int
 main(void) {
   doit(&global_data_v);
-  return 0;    
+  return 0;
 }
-
-  
