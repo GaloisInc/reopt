@@ -287,7 +287,7 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
       return (Discard, Progress)
 
     -- When one side is **not ptr**, we unify the type variables.
-    (_         , Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+    (_     , Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
     (Just _, _         ) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
 
     -- If neither side is defined, we save this constaint for later.
