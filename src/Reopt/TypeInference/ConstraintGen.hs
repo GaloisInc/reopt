@@ -613,7 +613,9 @@ genFnAssignment a = do
     FnAddrWidthConstant addr -> do
       m_mseg <- addrToSegmentOff addr
       case m_mseg of
-        Nothing  -> inSolverM . isNumTC ty . widthVal =<< addrWidth
+        Nothing
+          | addr == 0 -> pure () -- could be NULL or 0
+          | otherwise -> inSolverM . isNumTC ty . widthVal =<< addrWidth
         Just soff -> maybeGlobalTC ty soff 
 
 -- | This helper gives us the bitwidth of the types we can read/write from
