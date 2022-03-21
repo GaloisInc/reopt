@@ -23,7 +23,7 @@ import           Control.Lens               (At (at), Getting, Ixed (ix), Lens',
                                              makeLenses, non, use, view, (<>=),
                                              (?=), (^?))
 import           Control.Monad.Reader       (MonadReader (ask), ReaderT (..),
-                                             join, when, withReaderT, zipWithM_)
+                                             join, withReaderT, zipWithM_)
 import           Control.Monad.State.Strict (StateT, evalStateT)
 import           Control.Monad.Trans        (lift)
 import qualified Data.ByteString.Char8      as BSC
