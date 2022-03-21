@@ -272,37 +272,25 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
     -- If we know that `lhs` is a pointer, we should propagate this fact to
     -- `rhs`, at it could help solve some constraints that are waiting to
     -- know whether `rhs` is a pointer.
-    (Just (PtrTy lhsRow), Nothing) -> do
+    (Just (PtrTy lhsRow), _) -> do
       rhsRow <- rowVar <$> freshRowVar
       addTyVarEq rhs (ITy (PtrTy rhsRow))
       addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
-    -- We did not yet know `lhs` was a pointer.  We can initialize it as such,
-    -- and immediately populate all its known offsets from `rhs`.
-    (Nothing, Just (PtrTy rhsRow)) -> do
-      (rhsRep, rhsFM) <- second (fromMaybe emptyFieldMap) <$> lookupRowExpr rhsRow
-      let rhsOff = rowExprShift rhsRep
-      lhsRow <- freshRowVar
-      defineRowVar lhsRow (dropFieldMap rhsOff rhsFM)
-      addTyVarEq lhs (ITy (PtrTy (rowVar lhsRow)))
-      addSubRow (rowVar lhsRow) rhsRow
+    -- We did not yet know `lhs` was a pointer.  We can initialize it
+    -- as such, and let the solver propagate fields.
+    (_, Just (PtrTy rhsRow)) -> do
+      lhsRow <- rowVar <$> freshRowVar
+      addTyVarEq lhs (ITy (PtrTy rhsRow))
+      addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
-    -- Next two cases are inconsistent!
-    (Just lhsDef, Just (PtrTy _)) ->
-      error (show (PP.hsep ["Expected a PtrTy left of a subtype constraint, but found:", PP.pretty lhsDef]))
-    (Just (PtrTy _), Just rhsDef) ->
-      error (show (PP.hsep ["Expected a PtrTy right of a subtype constraint, but found:", PP.pretty rhsDef]))
+    -- When one side is **not ptr**, we unify the type variables.
+    (_         , Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+    (Just _, _         ) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
 
-    -- When both sides are defined (neither ptrs!), we just equate them.
-    (Just _, Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
-
-    -- When one side is **not ptr** and the other is unclear, we propagate the
-    -- defined side to the unknown side.
-    (Just lhsTy, Nothing) -> addTyVarEq rhs (ITy lhsTy) >> return (Discard, Progress)
-    (Nothing, Just rhsTy) -> addTyVarEq lhs (ITy rhsTy) >> return (Discard, Progress)
-
+    -- If neither side is defined, we save this constaint for later.
     (Nothing, Nothing) -> return (Retain, NoProgress)
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
