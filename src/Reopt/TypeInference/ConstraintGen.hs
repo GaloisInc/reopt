@@ -65,8 +65,9 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              SolverM, StructName, Ty, TyVar, RowVar,
                                              eqTC, numTy, isNumTC,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
-                                             unifyConstraints, varTy)
+                                             unifyConstraints, varTy, ptrSubTC)
 import qualified Reopt.TypeInference.Solver as S
+import Data.Bits (testBit)
 
 
 -- This algorithm proceeds in stages:
@@ -370,16 +371,32 @@ emitEq t1 t2 = inSolverM (eqTC t1 t2)
 emitPtrAddSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrAddSymbolic rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCSymbolic)
 
-emitPtrAddOffset :: Ty -> Ty -> Ty -> Integer -> CGenM ctx arch ()
-emitPtrAddOffset rty t1 t2 off =
-  inSolverM (ptrAddTC rty t1 t2 (OCOffset (fromInteger off))  )
+-- | ptr - N is sometimes encoded as ptr + (-N).  For very large
+-- numbers (i.e., upper bit set) we negate and use the subtraction
+-- constraint instead.
+emitPtrAddOffset :: Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
+emitPtrAddOffset rty t1 t2 off = do
+  awidth <- widthVal <$> addrWidth
+  if testBit off (awidth - 1)
+    then emitPtrSubOffset rty t1 t2 (2 ^ awidth - off)
+    else inSolverM (ptrAddTC rty t1 t2 (OCOffset (fromInteger off)))
 
 emitPtrAddGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
 
--- | Emits a sub which may return a pointer
-emitPtrSub :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrSub _rty _t1 _t2 = pure () -- undefined -- FIXME
+-- | Emits an add which may be a pointer add
+emitPtrSubSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrSubSymbolic rty t1 t2 = inSolverM (ptrSubTC rty t1 t2 OCSymbolic)
+
+emitPtrSubOffset :: Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
+emitPtrSubOffset rty t1 t2 off = do 
+  awidth <- widthVal <$> addrWidth
+  if testBit off (awidth - 1)
+    then emitPtrAddOffset rty t1 t2 (2 ^ awidth - off)
+    else inSolverM (ptrSubTC rty t1 t2 (OCOffset (fromInteger off)))
+
+emitPtrSubGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrSubGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
 
 -- | First type must be a valid value of the second type (more lax than equality
 -- at function/join boundaries).
@@ -499,10 +516,21 @@ genApp (ty, outSize) app =
     -- FIXME: should this be considered another add?
     BVAdc _ l r _c -> nonptrBinOp l r
 
+    BVSub _sz l a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o }) -> do
+      pTy <- genFnValue l
+      oTy <- genFnValue a
+
+      mseg <- addrToSegmentOff o
+      case mseg of
+        Nothing -> emitPtrSubOffset ty pTy oTy o
+        Just _  -> emitPtrSubGlobalPtr ty pTy oTy
+
+    -- We don't do anything special for (maybeGlobalConst - x)
     BVSub sz l r -> do
       addrw <- addrWidth
-      when (isJust (testEquality addrw sz))
-        (join $ emitPtrSub ty <$> genFnValue l <*> genFnValue r)
+      if isJust (testEquality addrw sz)
+        then join $ emitPtrSubSymbolic ty <$> genFnValue l <*> genFnValue r
+        else nonptrBinOp l r
 
     BVSbb _ l r _ -> nonptrBinOp l r
     BVMul _ l r   -> nonptrBinOp l r

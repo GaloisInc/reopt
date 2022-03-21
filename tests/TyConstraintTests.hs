@@ -28,7 +28,7 @@ import Reopt.TypeInference.Solver
   , pattern FPtrTy, pattern FNumTy, ptrTy, pattern FUnknownTy
   , pattern FStructTy, pattern FNamedStruct
   , pattern FConflictTy
-  , ptrAddTC, OperandClass (OCOffset), ptrTC, ptrTy')
+  , ptrAddTC, ptrSubTC, OperandClass (OCOffset), ptrTC, ptrTy')
 
 import Reopt.TypeInference.Solver.RowVariables (Offset, singletonFieldMap, FieldMap, fieldMapFromList)
 import Reopt.TypeInference.Solver.Monad (withFresh)
@@ -201,7 +201,7 @@ eqCTests = T.testGroup "Equality Constraint Tests"
   ]
 
 ptrCTests :: T.TestTree
-ptrCTests = T.testGroup "Pointer Add Constraint Tests"
+ptrCTests = T.testGroup "Pointer Arith Constraint Tests"
   [ mkTest "Constrained by arg" $ do
       x0 <- tv; x1 <- tv; x2 <- tv
       let x0Ty = varTy x0
@@ -314,8 +314,19 @@ ptrCTests = T.testGroup "Pointer Add Constraint Tests"
       -- to return a value once array stride detection produces a
       -- reasonable type.
       pure []
-  ]
 
+
+  , mkTest "Pointer offset subtraction" $ do
+      x0 <- tv; x1 <- tv; x2 <- tv
+      let x0Ty = varTy x0
+          x1Ty = varTy x1
+          x2Ty = varTy x2
+
+      eqTC x1Ty (ptrTy $ recTy [(0, num64), (8, ptrTy' num64)])
+      ptrSubTC x0Ty x1Ty x2Ty (OCOffset 8)
+      pure [(x0, FPtrTy $ frecTy [(8, fnum64), (16, fptrTy' fnum64)])]
+  ]
+  
 -- t4 = do
 --       x0 <- tv; x1 <- tv; x2 <- tv; x3 <- tv
 --       let x0Ty = varTy x0
