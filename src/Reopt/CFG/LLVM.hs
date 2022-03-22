@@ -1126,8 +1126,13 @@ rhsToLLVM lhs rhs =
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       -- FIXME: this should always return a type, not Maybe
       typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
-      let ty = tyToLLVMType ptrWidth typeOfResult
-      let llvmRhs = L.Typed ty $ L.integer i
+      let ty = tyToLLVMType ptrWidth typeOfResult      
+      let llvmRhs = case typeOfResult of
+            FPtrTy ty'
+              | i == 0    -> L.nullPtr (tyToLLVMType ptrWidth ty')
+              | otherwise -> L.Typed ty $
+                    L.ValConstExpr (L.ConstConv L.IntToPtr (L.Typed (L.iT (fromIntegral ptrWidth)) (L.integer i)) ty)
+            _             -> L.Typed ty $  L.integer i
       setAssignIdValue lhs llvmRhs
 
 resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
