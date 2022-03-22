@@ -314,6 +314,21 @@ functionTypeToLLVM ft = L.ptrT $
           (viewSome typeToLLVMType <$> fnArgTypes ft)
           (fnVarArgs ft)
 
+-- FIXME
+functionTypeToLLVM' :: forall arch. LLVMArchConstraints arch =>
+                       FunctionType arch ->
+                       [ Maybe FTy ] -> Maybe (Maybe FTy) -> L.Type
+functionTypeToLLVM' ft args m_ret = L.ptrT $
+  L.FunTy (fromMaybe (L.PrimType L.Void) m_ret')
+          (zipWith mkTy (viewSome typeToLLVMType <$> fnArgTypes ft) args)
+          (fnVarArgs ft)
+  where
+    m_ret'    = mkTy <$> (viewSome typeToLLVMType <$> fnReturnType ft) <*> m_ret
+    
+    mkTy lty = maybe lty (tyToLLVMType ptrWidth)
+    ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+
+
 declareFunction :: FunctionDecl arch
                 -> L.Declare
 declareFunction d =
@@ -374,6 +389,17 @@ phiAssignmentForBlock :: ResolvePhiMap w
 phiAssignmentForBlock m l =
     Map.findWithDefault (error emsg) l m
   where emsg = "Could not find phi assignment."
+
+
+-- | This is used for resolving type mismatch due to subtyping when
+-- doing a block transfer.
+type PhiMap arch = Map (FnBlockLabel (ArchAddrWidth arch)) (V.Vector (Some (FnPhiVar arch)))
+
+phiMapFromFunction :: Function arch -> PhiMap arch
+phiMapFromFunction f = Map.fromList [ (fbLabel b, fbPhiVars b) | b <- fnBlocks f ]
+
+
+
 
 ------------------------------------------------------------------------
 -- IntrinsicMap
@@ -468,10 +494,11 @@ data FunLLVMContext arch = FunLLVMContext
   , funName :: BSC.ByteString
   , funArgs :: !(V.Vector (L.Typed L.Value))
     -- ^ Arguments to this function.
-  , funType :: !(FunctionType arch)
-    -- ^ Type for this function
+  , funRetType :: !(Maybe (Maybe FTy))
+    -- ^ Return for this function
   , funAllocaCount :: !Int
   , moduleConstraints :: ModuleConstraints arch
+  , funBlockPhis :: !(PhiMap arch)
     -- ^ Typing constraints inferred for the module
   , withArchConstraints :: forall a . (LLVMArchConstraints arch => a) -> a
   }
@@ -1160,12 +1187,23 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs llvmRhs
 
 resolveFunctionEntry :: FnValue arch (BVType (ArchAddrWidth arch))
-                     -> BBLLVM arch (L.Typed L.Value)
+                     -> BBLLVM arch (L.Typed L.Value
+                                    , [Maybe FTy]
+                                    , Maybe (Maybe FTy))
 resolveFunctionEntry dest =
   case dest of
     FnFunctionEntryValue dest_ftp nm -> do
-      let sym = L.Symbol (BSC.unpack nm)
-      return $ L.Typed (functionTypeToLLVM dest_ftp) (L.ValSymbol sym)
+      ctx <- ask
+      withArchConstraints ctx $ do
+        let sym = L.Symbol (BSC.unpack nm)
+        constraints <- asks moduleConstraints
+        let fty = fromMaybe (error "fnTypes 1")
+                  (Map.lookup nm (mcExtFunTypes constraints))
+        let resolvetv tv= Map.lookup tv (mcTypeMap constraints)
+            args = map resolvetv (fttvArgs fty)
+            retty  = traverse resolvetv (fttvRet fty)
+        return (L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
+               , args, retty)
     _ -> do
       error "Do not support indirect calls."
 
@@ -1213,15 +1251,19 @@ stmtToLLVM stmt = bbArchConstraints $ do
      -- Call llvmn.masked.store intrinsic
      call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
    FnCall dest args mretv -> do
-     llvmFn <- resolveFunctionEntry dest
-     llvmArgs <- mapM (\(Some v) -> mkLLVMValue v) args
+     (llvmFn, args', retty') <- resolveFunctionEntry dest
+     let goSubtype (Some v) m_ty = mkLLVMSubtypeValue v m_ty
+     llvmArgs <- zipWithM goSubtype args args'
      -- Assign return values
      case mretv of
        Nothing -> do
          call_ llvmFn llvmArgs
        Just (Some rvar) -> do
          retv <- call llvmFn llvmArgs
-         setAssignIdValue (frAssignId rvar) retv
+         rvarty <- getInferredTypeForAssignIdBBLLVM (frAssignId rvar)
+         retv' <- coerceForSubtype (fromMaybe (error "Missing return type") retty') rvarty retv
+         setAssignIdValue (frAssignId rvar) retv'
+
    FnArchStmt astmt -> do
      fn <- asks $ archStmtCallback . archFns
      fn astmt
@@ -1229,16 +1271,48 @@ stmtToLLVM stmt = bbArchConstraints $ do
 llvmBlockLabel :: FnBlockLabel w -> L.BlockLabel
 llvmBlockLabel = L.Named . L.Ident . fnBlockLabelString
 
+getPtrWidth :: forall arch. BBLLVM arch (NatRepr (ArchAddrWidth arch))
+getPtrWidth =
+  asks (\ctx -> withArchConstraints ctx $
+                addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
+
+getPtrWidth' :: BBLLVM arch Int
+getPtrWidth' = widthVal <$> getPtrWidth
+
+coerceForSubtype :: Maybe FTy -> Maybe FTy -> L.Typed L.Value ->
+                    BBLLVM arch (L.Typed L.Value)
+coerceForSubtype m_vTy m_tgtTy v = do
+  ptrWidth <- getPtrWidth'
+  case (m_vTy, m_tgtTy) of
+    (Just t, Just t') | t == t' -> pure v
+    (Just FPtrTy {}, Just (FPtrTy tr)) ->
+      llvmBitCast "mkLLVMSubtypeValue" v (L.PtrTo (tyToLLVMType ptrWidth tr))
+    (Nothing, Nothing)          -> pure v
+    _ -> error "Type mismatch in mkLLVMSubtypeValue"
+
+mkLLVMSubtypeValue :: forall arch tp.
+                      FnValue arch tp
+                   -> Maybe FTy
+                   -> BBLLVM arch (L.Typed L.Value)
+mkLLVMSubtypeValue v m_tgtTy = do
+  m_vTy <- getInferredType v
+  coerceForSubtype m_vTy m_tgtTy =<< mkLLVMValue v
+
 -- | Add Phi values for target block
 addTargetPhiValues :: forall arch. FnJumpTarget arch -> BBLLVM arch ()
 addTargetPhiValues tgt = do
   thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
   let tgtLbl :: FnBlockLabel (ArchAddrWidth arch)
       tgtLbl = fnJumpLabel tgt
-  let values = fnJumpPhiValues tgt
+  tgtPhis <- asks (fromMaybe (error "Missing block") . Map.lookup tgtLbl . funBlockPhis)
+
+  let doSubtype (Some v) (Some phiv) =
+        mkLLVMSubtypeValue v =<< getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiv)
+  values <- V.zipWithM doSubtype (fnJumpPhiValues tgt) tgtPhis
+
   -- Add this block value to phi assignment
   let updateVar :: Map L.BlockLabel (Int, L.Value)
-                -> Some (FnValue arch)
+                -> L.Typed L.Value
                 -> BBLLVM arch (Map L.BlockLabel (Int, L.Value))
       -- updateVar prevVars (Some v@(FnPhiValue phiVar)) = do
         -- constraints <- asks moduleConstraints
@@ -1247,9 +1321,8 @@ addTargetPhiValues tgt = do
         -- let inferredType = mcTypeMap constraints Map.! tyV
         -- thisVal <- mkLLVMValue v
         -- pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
-      updateVar prevVars (Some v) = do
-        thisVal <- mkLLVMValue v
-        pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue thisVal) prevVars
+      updateVar prevVars v = do
+        pure $! Map.insertWith (const (first (+ 1))) thisLabel (1, L.typedValue v) prevVars
   m <- BBLLVM $ use $ funStateLens . funBlockPhiMapLens
   let curEntries = phiAssignmentForBlock m tgtLbl
   newEntries <- V.zipWithM updateVar curEntries values
@@ -1278,18 +1351,18 @@ termStmtToLLVM tm =
       markNeedSwitchFailLabel
       effect $ L.Switch idx' (L.Named (L.Ident switchFailLabel)) (zip [0..] dests)
     FnRet mret -> do
-      ftp <- asks funType
-      case (fnReturnType ftp, mret) of
+      ftp <- asks funRetType
+      case (ftp, mret) of
         (Nothing, Nothing) -> do
           effect L.RetVoid
-        (Just _, Nothing) -> error "Expected return value when none found."
+        (Just _, Nothing) -> error ("Expected return value when none found '" ++ show ftp ++ "'")
         (Nothing, Just _) -> error "Unexpected return value."
-        (Just _rtp, Just (Some rval)) -> do
-          llvmRetVal <- mkLLVMValue rval
-          effect $! L.Ret llvmRetVal
+        (Just _rtp, Just (Some rval)) -> ret =<< mkLLVMValue rval
     FnTailCall dest args -> do
-      callTarget <- resolveFunctionEntry dest
-      llvmArgs <- mapM (viewSome mkLLVMValue) args
+      (callTarget, args', retty') <- resolveFunctionEntry dest
+      let goSubtype (Some v) m_ty = mkLLVMSubtypeValue v m_ty
+      llvmArgs <- zipWithM goSubtype args args'
+      fret <- asks funRetType
       let callTargetType = L.typedType callTarget
       let callTargetValue = L.typedValue callTarget
       case callTargetType of
@@ -1300,7 +1373,12 @@ termStmtToLLVM tm =
               effect L.RetVoid
             _ -> do
               retv <- evalInstr $ L.Call False callTargetType callTargetValue llvmArgs
-              effect (L.Ret (L.Typed res retv))
+              -- FIXME: clean this up
+              retv' <- coerceForSubtype
+                       (fromMaybe (error "Missing return type") retty')
+                       (fromMaybe (error "Missing return type") fret)
+                       (L.Typed res retv)
+              ret retv'
         _ -> do
           error "Expected function type to tail call target."
 
@@ -1373,7 +1451,10 @@ addPhiBinding :: HasCallStack
               -> BBLLVM arch (PhiBinding arch)
 addPhiBinding (Some phiVar) = do
   L.Ident nm <- freshName
-  let llvmType = typeToLLVMType (fnPhiVarType phiVar)
+  ptrWidth <- getPtrWidth'
+  m_fty    <- getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
+  let llvmType =
+        maybe (typeToLLVMType (fnPhiVarType phiVar)) (tyToLLVMType ptrWidth) m_fty
   setAssignIdValue (unFnPhiVar phiVar) (L.Typed llvmType (L.ValIdent (L.Ident nm)))
   pure $! PhiBinding { phiFnRepVar = Some phiVar
                      , phiLLVMIdent = nm
@@ -1623,15 +1704,21 @@ defineFunction archOps genOpts constraints f = do
 
   let inputArgs :: [L.Typed L.Ident]
       inputArgs = zipWith mkInputReg argsWithTyVars [0..]
+
+  -- FIXME
+  -- let fret = traverse (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
+  let fret = const Nothing <$> (fnReturnType (fnType f))
+  
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
                            , funLLVMGenOptions = genOpts
                            , funAddr = fnAddr f
                            , funName = fnName f
                            , funArgs = V.fromList $ fmap L.ValIdent <$> inputArgs
-                           , funType = fnType f
+                           , funRetType = fret
                            , funAllocaCount = 0
                            , moduleConstraints = constraints
+                           , funBlockPhis = phiMapFromFunction f
                            , withArchConstraints = id
                            }
 
@@ -1781,12 +1868,16 @@ getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssig
 getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
 getInferredType (FnReturn _retVar) = error "getInferredType FnReturn" -- getInferredTypeForAssignId (frAssignId retVar)
 getInferredType (FnArg arg _typ) = do
-  fn <- asks funAddr
+  fn <- asks funName
+  getInferredFunctionArgType fn arg
+
+getInferredFunctionArgType :: BSC.ByteString -> Int -> BBLLVM arch (Maybe FTy)
+getInferredFunctionArgType fn arg = do
   constraints <- asks moduleConstraints
-  let fnTypes = fromMaybe (error "fnTypes 1") (Map.lookup fn (mcFunTypes constraints))
+  let fnTypes = fromMaybe (error "fnTypes 1")
+        (Map.lookup fn (mcExtFunTypes constraints))
   let argTyVar = fttvArgs fnTypes !! arg
   return (Map.lookup argTyVar (mcTypeMap constraints))
-
 
 getInferredTypeForAssignIdBBLLVM ::
   FnAssignId -> BBLLVM arch (Maybe FTy)
@@ -1794,7 +1885,6 @@ getInferredTypeForAssignIdBBLLVM aId = do
   fn <- asks funName
   constraints <- asks moduleConstraints
   return (getInferredTypeForAssignId constraints fn aId)
-
 
 getInferredTypeForAssignId ::
   ModuleConstraints arch ->
