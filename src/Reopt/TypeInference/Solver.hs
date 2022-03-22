@@ -4,7 +4,7 @@
 module Reopt.TypeInference.Solver
   ( Ty (..), TyVar, RowVar, numTy, ptrTy, ptrTy', varTy,
     SolverM, runSolverM,
-    eqTC, ptrTC, maybeGlobalTC, isNumTC,
+    eqTC, ptrTC, maybeGlobalTC, isNumTC, ptrSubTC, 
     freshTyVar, freshRowVar, ptrAddTC, subTypeTC,
     OperandClass (..),
     unifyConstraints, ConstraintSolution(..), StructName,
@@ -173,6 +173,67 @@ ptrAddTC rty lhsty rhsty oc = do
       --   , cEnabled  = isNum lhstv
       --   , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
       --   }
+
+-- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
+-- subtraction, or addition with a negative offset.
+ptrSubTC :: Ty -> Ty -> Ty -> OperandClass -> SolverM ()
+ptrSubTC rty lhsty rhsty oc = do
+  rv    <- nameTy rty
+  lhstv <- nameTy lhsty
+  rhstv <- nameTy rhsty
+  ptrNumTy <- ITy <$> ptrWidthNumTy
+
+  -- Numeric cases
+  let name       = PP.pretty rv <> " = " <> PP.pretty lhstv <> " - " <>
+                   PP.pretty rhstv
+
+  -- If we have a numeric result and at least one numberic argument,
+  -- or we have a numeric lhs, we can infer we are doing a numeric sub
+  addCondEq $ Conditional
+    { cName       = show (name PP.<+> "(numeric case)")
+    , cGuard       = [ [ isNum rv, isNum rhstv ]
+                     , [ isNum lhstv ] ]
+    , cConstraints = ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
+                     , [])
+    }
+
+  case oc of
+    OCOffset o -> do
+      let name' = name PP.<+> PP.parens ("- " <> PP.pretty o)
+      addTyVarEq rhstv ptrNumTy
+
+      -- dual to the rv = ptr + off
+      withFresh $ \rowv ->
+        addCondEq $ Conditional
+        { cName  = show (name' PP.<+> "(ptr - off)")
+        , cGuard = [ [ isPtr rv ], [ isPtr lhstv ] ]
+          -- Unify with new rowvar, and constrain.
+        , cConstraints = ( [ EqC lhstv (ITy (PtrTy (RowExprShift o rowv)))
+                           , EqC rv    (ITy (PtrTy (RowExprVar     rowv)))
+                           ]
+                         , [] )
+        }
+
+    _ -> do
+      withFresh $ \resrv lrv ->
+        addCondEq $ Conditional
+        { cName   = show (name PP.<+> "(ptr - num)")
+        , cGuard  = [ [ isPtr rv ]
+                    , [ isPtr lhstv, isNum rhstv ] ]
+        , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
+                           , EqC lhstv (ITy (PtrTy lrv))
+                           , EqC rhstv ptrNumTy]
+                         , [] )
+        }
+
+      -- If the lhs and rhs are both pointer, the result is a number
+      addCondEq $ Conditional
+        { cName   = show (name PP.<+> "(ptr - ptr)")
+        , cGuard  = [ [ isPtr lhstv, isPtr rhstv ] ]
+        , cConstraints = ( [ EqC rv    ptrNumTy ]
+                         , [] )
+        }
+
 
 
 isNum :: TyVar -> Pattern
