@@ -120,7 +120,7 @@ import           Reopt.TypeInference.ConstraintGen (
   )
 import Reopt.TypeInference.Solver
   ( FTy, TyVar, tyToLLVMType,
-    pattern FNumTy, pattern FPtrTy, {- pattern FRecTy, -} pattern FUnknownTy,
+    pattern FNumTy, pattern FPtrTy, pattern FConflictTy, pattern FUnknownTy,
   )
 import qualified Reopt.VCG.Annotations as Ann
 
@@ -960,16 +960,12 @@ llvmAsPtr :: HasCallStack
 llvmAsPtr ctx ptr pointeeType = do
   let pointerType = L.PtrTo pointeeType
   llvmPtrAsBV  <- mkLLVMValue ptr
-  case ptr of
-    FnConstantValue{} ->
-      pure (L.Typed pointerType (L.ValConstExpr (L.ConstConv L.IntToPtr llvmPtrAsBV pointerType)))
-    _ -> do
-      logEvent $ LLVMLogEvent ctx
-               $ LogInfoIntToPtr
-               $ LLVMBitCastInfo (L.typedType llvmPtrAsBV) pointerType
-      convop L.IntToPtr llvmPtrAsBV pointerType
+  logEvent $ LLVMLogEvent ctx
+           $ LogInfoIntToPtr
+           $ LLVMBitCastInfo (L.typedType llvmPtrAsBV) pointerType
+  convop L.IntToPtr llvmPtrAsBV pointerType
 
-
+-- sjw: this looks wrong? (the result ty should not be the same as the pointer arg)
 llvmGetElementPtr ::
   Maybe FTy ->
   L.Type ->
@@ -1080,6 +1076,29 @@ resolveLoadNameAndType memRep =
         error $ "Vector width of " ++ show n ++ " is too large."
       pure ("v" ++ show n ++ eltName, L.Vector (fromIntegral (natValue n)) eltType)
 
+-- | The type inference will infer a pointer-to-struct type for the
+-- pointer (or a conflict type if one is detected).  This will do a
+-- GEP or cast as required.
+pointerForMemOp :: forall arch. FnArchConstraints arch =>
+                   String
+                -- ^ Reason if we need to cast
+                -> FnValue arch (BVType (ArchAddrWidth arch))
+                -- ^ Value to evaluate
+                -> L.Type
+                -- ^ Type of value pointed to
+                -> BBLLVM arch (L.Typed L.Value)
+pointerForMemOp ctx ptr pointeeType = do
+  getInferredType ptr >>= \case
+    Just FPtrTy {} -> gep
+    Just FConflictTy {} -> llvmAsPtr ctx ptr pointeeType
+    t -> error $ "Unexpected type at pointerForMemOp " ++ show (pretty t)
+  where
+    gep = do
+      ptrV <- mkLLVMValue ptr
+      let pointerType = L.PtrTo pointeeType
+      let ofsV = L.Typed (L.iT 32) (L.int 0)
+      L.Typed pointerType <$> evalInstr (L.GEP False ptrV [ofsV])
+
 -- | Convert an assignment to a llvm expression
 rhsToLLVM ::
   forall arch tp.
@@ -1096,29 +1115,34 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs llvmRhs
     FnSetUndefined tp -> do
       setAssignIdValue lhs (L.Typed (typeToLLVMType tp) L.ValUndef)
-    FnReadMem ptr typ ->
-      getInferredType ptr >>= \case
-        Just (FPtrTy ty) -> do
-          L.Typed _origType origVal <- mkLLVMValue ptr
-          let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-          let retypedPtr = L.Typed (L.PtrTo (tyToLLVMType ptrWidth ty)) origVal
-          v <- evalInstr (L.Load retypedPtr Nothing Nothing)
-          setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
-        _ ->  do
-          p <- llvmAsPtr "rhsToLLVM(FnReadMem)" ptr (typeToLLVMType typ)
-          v <- evalInstr (L.Load p Nothing Nothing)
-          setAssignIdValue lhs (L.Typed (typeToLLVMType typ) v)
-    FnCondReadMem memRepr cond addr passthru -> do
+    FnReadMem ptr _typ -> do
+      typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
+      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      let typeOfResult' = tyToLLVMType ptrWidth typeOfResult
+      p <- pointerForMemOp "rhsToLLVM(FnReadMem)" ptr typeOfResult'
+      v <- evalInstr (L.Load p Nothing Nothing)
+      setAssignIdValue lhs (L.Typed typeOfResult' v)
+
+    FnCondReadMem memRepr cond ptr passthru -> do
       (loadName, eltType) <- resolveLoadNameAndType memRepr
       let intr = llvmMaskedLoad 1 loadName eltType
       addIntrinsic intr
-      llvmAddr     <- llvmAsPtr "rhsToLLVM(FnCondReadMem)" addr (L.Vector 1 eltType)
+
+      -- Copied from above
+      typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
+      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      let typeOfResult' = tyToLLVMType ptrWidth typeOfResult
+      p <- pointerForMemOp "rhsToLLVM(FnReadMem)" ptr typeOfResult'
+
+      -- cast as a vec so we can call the conditional read intrinsic
+      llvmAddr <- llvmBitCast "rhsToLLVM(FnCondReadMem)" p (L.PtrTo (L.Vector 1 eltType))
       let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
       llvmCond     <- singletonVector =<< mkLLVMValue cond
       llvmPassthru <- singletonVector =<< mkLLVMValue passthru
       rv <- call intr [ llvmAddr, llvmAlign, llvmCond, llvmPassthru ]
       r <- evalInstr $ L.ExtractElt rv (L.ValInteger 0)
       setAssignIdValue lhs (L.Typed eltType r)
+
     FnEvalArchFn f -> do
       fn <- asks $ archFnCallback  . archFns
       setAssignIdValue lhs  =<< fn f
@@ -1126,7 +1150,7 @@ rhsToLLVM lhs rhs =
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
       -- FIXME: this should always return a type, not Maybe
       typeOfResult <- fromMaybe FUnknownTy <$> getInferredTypeForAssignIdBBLLVM lhs
-      let ty = tyToLLVMType ptrWidth typeOfResult      
+      let ty = tyToLLVMType ptrWidth typeOfResult
       let llvmRhs = case typeOfResult of
             FPtrTy ty'
               | i == 0    -> L.nullPtr (tyToLLVMType ptrWidth ty')
@@ -1162,16 +1186,13 @@ stmtToLLVM stmt = bbArchConstraints $ do
    FnAssignStmt (FnAssignment lhs rhs) -> do
      rhsToLLVM lhs rhs
    FnWriteMem addr v -> do
+     vty <- fromMaybe FUnknownTy <$> getInferredType v
+     let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+     let vty' = tyToLLVMType ptrWidth vty
+     llvmPtr <- pointerForMemOp "rhsToLLVM(FnWriteMem)" addr vty'
      llvmVal <- mkLLVMValue v
-     llvmPtr <- getInferredType addr >>= \case
-       Just (FPtrTy ty) -> do
-         L.Typed _origType origVal <- mkLLVMValue addr
-         let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
-         return $ L.Typed (L.PtrTo (tyToLLVMType ptrWidth ty)) origVal
-       _ ->  do
-         -- Cast LLVM point to appropriate type
-         llvmAsPtr "stmtToLLVM(FnWriteMem)" addr (L.typedType llvmVal)
      effect $ L.Store llvmVal llvmPtr Nothing Nothing
+
    FnCondWriteMem cond addr v memRepr -> do
      -- Obtain llvm.masked.store intrinsic and ensure it will be declared.
      (loadName, eltType) <- resolveLoadNameAndType memRepr
@@ -1180,7 +1201,11 @@ stmtToLLVM stmt = bbArchConstraints $ do
      -- Compute value to write
      llvmValue <- singletonVector =<< mkLLVMValue v
      -- Convert addr to appropriate pointer.
-     llvmAddr <- llvmAsPtr "stmtToLLVM(FnCondWriteMem)" addr (L.Vector 1 eltType)
+     vty <- fromMaybe FUnknownTy <$> getInferredType v
+     let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+     let vty' = tyToLLVMType ptrWidth vty
+     p <- pointerForMemOp "rhsToLLVM(FnCondWriteMem)" addr vty'
+     llvmAddr <- llvmBitCast "rhsToLLVM(FnCondReadMem)" p (L.PtrTo (L.Vector 1 eltType))
      -- Just use zero alignment
      let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
      -- Construct mask
@@ -1747,9 +1772,10 @@ moduleForFunctions archOps genOpts recMod constraints =
 
 -- | Returns the type that was inferred for the given value via constraint
 -- solving, if any.
-getInferredType :: FnValue arch (BVType n) -> BBLLVM arch (Maybe FTy)
+getInferredType :: FnValue arch tp -> BBLLVM arch (Maybe FTy)
 getInferredType FnUndefined{} = pure Nothing
 getInferredType FnConstantValue{} = pure Nothing
+getInferredType FnConstantBool{} = pure Nothing
 getInferredType FnFunctionEntryValue{} = pure Nothing
 getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignIdBBLLVM aId
 getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
