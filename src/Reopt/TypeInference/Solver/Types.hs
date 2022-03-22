@@ -87,7 +87,8 @@ tyByteWidth ptrSz (FTy ty) =
     VecTy   {}   -> error "Saw a VecTy in tyByteWidth"
 
 recTyToLLVMType :: Int -> [(Offset, FTy)] -> L.Type
-recTyToLLVMType ptrSz [(0, ty)] = tyToLLVMType ptrSz ty
+-- This breaks recursive types.
+-- recTyToLLVMType ptrSz [(0, ty)] = tyToLLVMType ptrSz ty
 recTyToLLVMType ptrSz fields = L.Struct (go 0 fields)
   where
     go :: Offset -> [(Offset, FTy)] -> [L.Type]
