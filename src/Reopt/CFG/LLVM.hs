@@ -13,7 +13,6 @@ layer.
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -1199,7 +1198,7 @@ resolveFunctionEntry dest =
         constraints <- asks moduleConstraints
         let fty = fromMaybe (error "fnTypes 1")
                   (Map.lookup nm (mcExtFunTypes constraints))
-        let resolvetv tv= Map.lookup tv (mcTypeMap constraints)
+        let resolvetv tv = Map.lookup tv (mcTypeMap constraints)
             args = map resolvetv (fttvArgs fty)
             retty  = traverse resolvetv (fttvRet fty)
         return (L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
@@ -1353,8 +1352,7 @@ termStmtToLLVM tm =
     FnRet mret -> do
       ftp <- asks funRetType
       case (ftp, mret) of
-        (Nothing, Nothing) -> do
-          effect L.RetVoid
+        (Nothing, Nothing) -> effect L.RetVoid
         (Just _, Nothing) -> error ("Expected return value when none found '" ++ show ftp ++ "'")
         (Nothing, Just _) -> error "Unexpected return value."
         (Just _rtp, Just (Some rval)) -> ret =<< mkLLVMValue rval
@@ -1699,15 +1697,13 @@ defineFunction archOps genOpts constraints f = do
           Just (FPtrTy pointee) -> L.Typed (L.PtrTo (tyToLLVMType ptrWidth pointee)) (argIdent i)
           _ -> L.Typed (typeToLLVMType tp) (argIdent i)
 
-  let fty = fromMaybe (error "fty") (Map.lookup (fnAddr f) (mcFunTypes constraints))
+  let fty = fromMaybe (error "fty") (Map.lookup (fnName f) (mcExtFunTypes constraints))
   let argsWithTyVars = zip (fnArgTypes (fnType f)) (fttvArgs fty)
 
   let inputArgs :: [L.Typed L.Ident]
       inputArgs = zipWith mkInputReg argsWithTyVars [0..]
 
-  -- FIXME
-  -- let fret = traverse (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
-  let fret = const Nothing <$> (fnReturnType (fnType f))
+  let fret = fmap (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
   
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
