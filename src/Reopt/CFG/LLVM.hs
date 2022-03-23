@@ -884,7 +884,7 @@ appToLLVM lhs app = bbArchConstraints $ do
       typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
       tx <- getInferredType x
       ty <- getInferredType y
-      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
+      ptrWidth <- getPtrWidth'
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
@@ -1123,7 +1123,8 @@ pointerForMemOp ctx ptr pointeeType = do
       ptrV <- mkLLVMValue ptr
       let pointerType = L.PtrTo pointeeType
       let ofsV = L.Typed (L.iT 32) (L.int 0)
-      L.Typed pointerType <$> evalInstr (L.GEP False ptrV [ofsV])
+      -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
+      L.Typed pointerType <$> evalInstr (L.GEP False ptrV [ofsV, ofsV])
 
 -- | Convert an assignment to a llvm expression
 rhsToLLVM ::
