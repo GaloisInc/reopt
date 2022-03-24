@@ -122,6 +122,7 @@ import Reopt.TypeInference.Solver
     pattern FNumTy, pattern FPtrTy, pattern FConflictTy, pattern FUnknownTy,
   )
 import qualified Reopt.VCG.Annotations as Ann
+import Data.Bits (testBit)
 
 
 data LLVMBitCastInfo =
@@ -885,43 +886,57 @@ appToLLVM lhs app = bbArchConstraints $ do
       tx <- getInferredType x
       ty <- getInferredType y
       ptrWidth <- getPtrWidth'
+      
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
-        (_, Just (FPtrTy pointee), _) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) x y
-        (_, _, Just (FPtrTy pointee)) -> llvmGetElementPtr typeOfResult (tyToLLVMType ptrWidth pointee) y x
-        -- When the result is a pointer, and one operand is known to be numeric,
-        -- we can also conclude that the other operand was a pointer.  You'd
-        -- likely expect the constraint solving to have inferred that the other
-        -- operand is a pointer, but this currently does **not** happen when the
-        -- pointer operand is a constant value: while the constraint solving
-        -- indeed unifies the unification variable corresponding to the constant
-        -- with `PtrTy`, we don't currently have a mechanism for tracking this
-        -- information back to the constant value.
-        -- This can be solved by giving unique identifiers to constant values,
-        -- or let-binding them so that we have a program variable to latch onto.
-        (Just (FPtrTy pointee), Just (FNumTy _), _) ->
-          -- x is an offset, therefore y must be a pointer
-          llvmGetElementPtrAfterCast (tyToLLVMType ptrWidth pointee) y =<< mkLLVMValue x
-        (Just (FPtrTy pointee), _, Just (FNumTy _)) ->
-          -- y is an offset, therefore x must be a pointer
-          llvmGetElementPtrAfterCast (tyToLLVMType ptrWidth pointee) x =<< mkLLVMValue y
+
+        (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {})
+          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- y -> 
+            bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) x o
+          | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) x y
+
+        (Just (FPtrTy lhsty), Just FNumTy {}, Just FPtrTy {})
+          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- x ->
+            bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) y o
+          | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) y x
+
+        (_, Just FPtrTy {}, _) -> error "BUG: Expecting a ptr return ty"
+        (_, _, Just FPtrTy {}) -> error "BUG: Expecting a ptr return ty"
+        
         -- If the result ought to be a pointer, but we have no idea which of the
         -- two arguments is the pointer, we must perform a bitvector add, but
         -- then cast the result into the appropriate pointer type that will be
         -- expected by the rest of the code.
-        (Just (FPtrTy pointee), _, _) ->
-          do
-            result <- binop (arithop (L.Add False False)) x y
-            convop L.IntToPtr result (L.PtrTo (tyToLLVMType ptrWidth pointee))
-        _ -> binop (arithop (L.Add False False)) x y
+        (Just (FPtrTy pointee), _, _) -> do
+          result <- binop (arithop (L.Add False False)) x y
+          let pty = L.PtrTo (tyToLLVMType ptrWidth pointee)
+          logEvent $ LLVMLogEvent "BVAdd(ptr_result)"
+                   $ LogInfoIntToPtr
+                   $ LLVMBitCastInfo (L.typedType result) pty
+          convop L.IntToPtr result pty
+          
+        _ -> binop (arithop (L.Add False False)) x y 
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
     BVAdc _sz x y c -> do
       r <- binop (arithop (L.Add False False)) x y
       arithop (L.Add False False) r . L.typedValue =<< carryValue (typeWidth x) c
 
-    BVSub _sz x y -> binop (arithop (L.Sub False False)) x y
+    BVSub _sz x y -> do
+      typeOfResult <- getInferredTypeForAssignIdBBLLVM lhs
+      tx <- getInferredType x
+      ty <- getInferredType y
+      ptrWidth <- getPtrWidth'
+      
+      case (typeOfResult, tx, ty) of
+        (_, Just (FPtrTy _), Just (FPtrTy _)) -> bvSubPtrPtr x y
+
+        (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {}) ->
+          bvSubPtrNum (tyToLLVMType ptrWidth lhsty) x . L.typedValue =<< mkLLVMValue y
+          
+        _ -> binop (arithop (L.Sub False False)) x y 
+    
     BVSbb _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Sub False False)) x y
     BVSbb _sz x y b -> do
@@ -978,61 +993,95 @@ appToLLVM lhs app = bbArchConstraints $ do
 llvmAsPtr :: HasCallStack
           => String
           -- ^ Context calling this helper (for logging purposes)
-          -> FnValue arch (BVType (ArchAddrWidth arch))
-             -- ^ Value to evaluate
           -> L.Type
-             -- ^ Type of value pointed to
+          -- ^ Type of value pointed to
+          -> L.Typed L.Value -- FnValue arch (BVType (ArchAddrWidth arch))
+          -- ^ Value to evaluate
           -> BBLLVM arch (L.Typed L.Value)
-llvmAsPtr ctx ptr pointeeType = do
+llvmAsPtr ctx pointeeType ptrbv = do
   let pointerType = L.PtrTo pointeeType
-  llvmPtrAsBV  <- mkLLVMValue ptr
   logEvent $ LLVMLogEvent ctx
            $ LogInfoIntToPtr
-           $ LLVMBitCastInfo (L.typedType llvmPtrAsBV) pointerType
-  convop L.IntToPtr llvmPtrAsBV pointerType
+           $ LLVMBitCastInfo (L.typedType ptrbv) pointerType
+  convop L.IntToPtr ptrbv pointerType
 
--- sjw: this looks wrong? (the result ty should not be the same as the pointer arg)
-llvmGetElementPtr ::
-  Maybe FTy ->
+-- | Evaluate a value as a pointer (log if we need to perform a non-constant
+-- inttoptr cast).
+llvmPtrAsBV :: HasCallStack
+            => String
+            -- ^ Context calling this helper (for logging purposes)
+            -> L.Typed L.Value -- FnValue arch (BVType (ArchAddrWidth arch))
+            -- ^ Value to evaluate
+            -> BBLLVM arch (L.Typed L.Value)
+llvmPtrAsBV ctx llvmPtr = do
+  ptrWidth <- getPtrWidth'
+  let bvTy = L.iT (fromIntegral ptrWidth)
+  logEvent $ LLVMLogEvent ctx
+           $ LogInfoPtrToInt
+           $ LLVMBitCastInfo bvTy (L.typedType llvmPtr)
+  convop L.PtrToInt llvmPtr bvTy
+
+-- | We have a bvadd which is actually taking the address of a sub-field of a structure.
+bvAddPtrOffset :: L.Type ->
+                  FnValue arch tp ->
+                  Integer -> 
+                  BBLLVM arch (L.Typed L.Value)
+bvAddPtrOffset _lhsty x 0 = mkLLVMValue x
+bvAddPtrOffset lhsty  x off = do
+  ptrWidth <- getPtrWidth'
+  if testBit off (ptrWidth - 1)
+    then bvSubPtrNum lhsty x (L.integer (2 ^ ptrWidth - off))
+    else ptrCase
+  where
+    xty' = L.PtrTo (L.Struct [ L.Vector (fromInteger off) (L.iT 8), lhsty ])
+    
+    -- We cast make x :: { <N x i8>, rhs } * so we can use a gep to get a pointer to it.
+    ptrCase = do
+      xV <- mkLLVMValue x
+      x' <- llvmBitCast "bvAddPtrOffset" xV xty'
+      llvmGEPFromPtr lhsty 1 x'
+
+-- Not much we can do here but convert to/from a bv.  We know that x
+-- is a pointer, y a number.
+bvAddPtrSymbolic :: L.Type ->
+                    FnValue arch tp ->
+                    FnValue arch tp' ->
+                    BBLLVM arch (L.Typed L.Value)
+bvAddPtrSymbolic lhsty x y = do
+  x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
+  r  <- arithop (L.Add False False) x' . L.typedValue =<< mkLLVMValue y
+  llvmAsPtr "bvAddPtrSymbolic" lhsty r 
+
+-- | There isn't much we can do when we have ptrs, except to cast.
+bvSubPtrNum :: L.Type ->
+                  FnValue arch tp ->
+                  L.Value ->
+                  BBLLVM arch (L.Typed L.Value)
+bvSubPtrNum lhsty x rhs = do
+  x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
+  r  <- arithop (L.Sub False False) x' rhs
+  llvmAsPtr "bvAddPtrSymbolic" lhsty r 
+
+bvSubPtrPtr :: FnValue arch tp ->
+               FnValue arch tp' ->
+               BBLLVM arch (L.Typed L.Value)
+bvSubPtrPtr x y = do
+  x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
+  y' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue y
+  arithop (L.Sub False False) x' (L.typedValue y')
+  
+-- | This emits a getElementPointer in the special case where the value argument is a pointer.
+llvmGEPFromPtr :: 
   L.Type ->
-  FnValue arch (BVType n) ->
-  FnValue arch (BVType n) ->
+  Int ->
+  L.Typed L.Value -> 
   BBLLVM arch (L.Typed L.Value)
-llvmGetElementPtr _typeOfResult pointee ptr ofs = do
-  L.Typed _ ptrV <- mkLLVMValue ptr
-  let pointerType = L.PtrTo pointee
-  ofsV <- mkLLVMValue ofs
-  L.Typed pointerType <$> evalInstr (L.GEP False (L.Typed pointerType ptrV) [ofsV])
-
-
--- | Emits a `getelementptr` instruction, but assumes the given pointer value is
--- not yet of LLVM pointer type, so some sort of cast must happen prior to the
--- `getelementptr`.  Based on the abstract value of the pointer, emits either a
--- LLVM constant pointer expression, or if the value is not known to be
--- constant, emits an `inttoptr` instruction.
---
--- For succintness at call sites, this does not place an `ArchAddrWidth arch`
--- constraint on the size of the pointer bitvector, though in practice it only
--- succeeds if the pointer value has the appropriate size.
-llvmGetElementPtrAfterCast ::
-  forall arch n.
-  LLVMArchConstraints arch =>
-  -- | Type of the pointee
-  L.Type ->
-  -- | Value of the address, to be turned into a pointer before GEP
-  FnValue arch (BVType n) ->
-  -- | Offset to add via GEP
-  L.Typed L.Value ->
-  BBLLVM arch (L.Typed L.Value)
-llvmGetElementPtrAfterCast pointeeType toBePointer offset =
-  case testEquality (type_width (typeRepr toBePointer)) (memWidthNatRepr @(ArchAddrWidth arch)) of
-    Just Refl -> do
-      let pointerType = L.PtrTo pointeeType
-      pointer <- llvmAsPtr "llvmGetElementPtrAfterCast" toBePointer pointeeType
-      L.Typed pointerType <$> evalInstr (L.GEP False pointer [offset])
-    Nothing ->
-      error "llvmGetElementPtrAfterCast was passed a candidate pointer value whose size does not match the architecture pointer size!"
-
+llvmGEPFromPtr pointeeType ofs ptrV = do
+  let pointerType = L.PtrTo pointeeType
+  let zeroV = L.Typed (L.iT 32) (L.int 0)
+      ofsV  = L.Typed (L.iT 32) (L.int ofs)
+  -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
+  L.Typed pointerType <$> evalInstr (L.GEP False ptrV [zeroV, ofsV])
 
 -- | Truncate and log.
 llvmTrunc :: forall arch.
@@ -1114,17 +1163,11 @@ pointerForMemOp :: forall arch. FnArchConstraints arch =>
                 -- ^ Type of value pointed to
                 -> BBLLVM arch (L.Typed L.Value)
 pointerForMemOp ctx ptr pointeeType = do
+  ptrV <- mkLLVMValue ptr
   getInferredType ptr >>= \case
-    Just FPtrTy {} -> gep
-    Just FConflictTy {} -> llvmAsPtr ctx ptr pointeeType
+    Just FPtrTy {}      -> llvmGEPFromPtr pointeeType 0 ptrV
+    Just FConflictTy {} -> llvmAsPtr ctx pointeeType ptrV
     t -> error $ "Unexpected type at pointerForMemOp " ++ show (pretty t)
-  where
-    gep = do
-      ptrV <- mkLLVMValue ptr
-      let pointerType = L.PtrTo pointeeType
-      let ofsV = L.Typed (L.iT 32) (L.int 0)
-      -- https://llvm.org/docs/GetElementPtr.html#what-is-the-first-index-of-the-gep-instruction
-      L.Typed pointerType <$> evalInstr (L.GEP False ptrV [ofsV, ofsV])
 
 -- | Convert an assignment to a llvm expression
 rhsToLLVM ::
@@ -1243,7 +1286,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
      let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
      let vty' = tyToLLVMType ptrWidth vty
      p <- pointerForMemOp "rhsToLLVM(FnCondWriteMem)" addr vty'
-     llvmAddr <- llvmBitCast "rhsToLLVM(FnCondReadMem)" p (L.PtrTo (L.Vector 1 eltType))
+     llvmAddr <- llvmBitCast "rhsToLLVM(FnCondWriteMem)" p (L.PtrTo (L.Vector 1 eltType))
      -- Just use zero alignment
      let llvmAlign = L.Typed (L.iT 32) (L.ValInteger 0)
      -- Construct mask
