@@ -115,8 +115,11 @@ ptrAddTC rty lhsty rhsty oc = do
   let name       = PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <>
                    PP.pretty rhstv
   addCondEq $ Conditional
-    { cName       = show (name PP.<+> "(numeric case)")
-    , cGuard       = [ [ isNum rv ], [ isNum lhstv, isNum rhstv ] ]
+    { cName       = show (name PP.<+> "(non-ptr case)")
+    , cGuard       = [ [ isNum rv ], [ isNum lhstv, isNum rhstv ]
+                     -- add is strict wrt conflicts.
+                     , [ isConflict rv ], [ isConflict lhstv], [isConflict rhstv ]
+                     ]
     , cConstraints = ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
                      , [])
     }
@@ -142,21 +145,24 @@ ptrAddTC rty lhsty rhsty oc = do
         addCondEq $ Conditional
         { cName       = show (name PP.<+> "(symbolic pointer case 1)")
         , cGuard  = [ [ isPtr rv   , isNum rhstv ]
-                    , [ isPtr lhstv, isNum rhstv ] ]
+                    , [ isPtr lhstv ] ]
         , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
-                           , EqC lhstv (ITy (PtrTy lrv)) ]
+                           , EqC lhstv (ITy (PtrTy lrv))
+                           , EqC rhstv ptrNumTy ]
                          , [] )
         }
 
       withFresh $ \resrv rrv ->
         addCondEq $ Conditional
         { cName       = show (name PP.<+> "(symbolic pointer case 2)")
-        , cGuard  = [ [ isPtr rv   , isNum lhstv ], [ isPtr rhstv, isNum lhstv ] ]
+        , cGuard  = [ [ isPtr rv, isNum lhstv ], [ isPtr rhstv ] ]
         , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
-                           , EqC rhstv (ITy (PtrTy rrv)) ]
+                           , EqC rhstv (ITy (PtrTy rrv))
+                           , EqC lhstv ptrNumTy ]
                          , [] )
         }
 
+    -- FIXME: we are assuming that large numbers (in data seg.) cannot be offsets
     OCPointer ->
       withFresh $ \rhsrowv ->
         addCondEq $ Conditional
@@ -190,9 +196,10 @@ ptrSubTC rty lhsty rhsty oc = do
   -- If we have a numeric result and at least one numberic argument,
   -- or we have a numeric lhs, we can infer we are doing a numeric sub
   addCondEq $ Conditional
-    { cName       = show (name PP.<+> "(numeric case)")
-    , cGuard       = [ [ isNum rv, isNum rhstv ]
-                     , [ isNum lhstv ] ]
+    { cName       = show (name PP.<+> "(non-ptr case)")
+    , cGuard       = [ [ isNum rv, isNum rhstv ], [ isNum lhstv ]
+                     , [ isConflict rv ], [ isConflict lhstv], [isConflict rhstv ]
+                     ]
     , cConstraints = ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
                      , [])
     }
@@ -235,6 +242,8 @@ ptrSubTC rty lhsty rhsty oc = do
         }
 
 
+isConflict :: TyVar -> Pattern
+isConflict v = Pattern v IsConflict
 
 isNum :: TyVar -> Pattern
 isNum v = Pattern v IsNum

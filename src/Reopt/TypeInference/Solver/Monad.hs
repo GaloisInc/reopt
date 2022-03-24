@@ -261,11 +261,13 @@ instance PP.Pretty a => PP.Pretty (Schematic a) where
 data PatternRHS =
     IsPtr  (Schematic RowVar)
   | IsNum
+  | IsConflict
 
 instance PP.Pretty PatternRHS where
   pretty (IsPtr sv) = "PtrTy " <> PP.pretty sv
   pretty IsNum      = "NumTy _"
-
+  pretty IsConflict = "ConflictTy _"
+  
 data Pattern = Pattern
   { patVar :: TyVar
   , patRHS :: PatternRHS
@@ -297,9 +299,10 @@ condEnabled c = asum <$> mapM matchAll (cGuard c)
 
     matchRHS rhs ty =
       case (rhs, ty) of
-        (IsPtr sv, PtrTy r) -> Just (bindSchem sv r)
-        (IsNum,    NumTy _) -> Just []
-        _                   -> Nothing
+        (IsPtr sv  , PtrTy r)      -> Just (bindSchem sv r)
+        (IsNum     , NumTy _)      -> Just []
+        (IsConflict, ConflictTy _) -> Just []        
+        _                          -> Nothing
 
     bindSchem (Schematic r) re = [EqRowC (RowExprVar r) re]
     bindSchem _             _  = []
