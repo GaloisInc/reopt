@@ -1901,7 +1901,7 @@ moduleForFunctions archOps genOpts recMod constraints =
 -- solving, if any.
 getInferredType :: FnValue arch tp -> BBLLVM arch (Maybe FTy)
 getInferredType FnUndefined{} = pure Nothing
-getInferredType FnConstantValue{} = pure Nothing
+getInferredType (FnConstantValue sz _) = pure (Just (FNumTy (widthVal sz)))
 getInferredType FnConstantBool{} = pure Nothing
 getInferredType FnFunctionEntryValue{} = pure Nothing
 getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignIdBBLLVM aId
