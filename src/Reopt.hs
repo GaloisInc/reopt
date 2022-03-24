@@ -1812,19 +1812,6 @@ summarizeX86TermStmt _ UD2 _ =
     { termRegDemands = [],
       termRegTransfers = []
     }
-summarizeX86TermStmt sysp X86Syscall proc_state = do
-  -- Compute the arguments needed by the function
-  let argRegs
-        | BVValue _ call_no <- proc_state ^. boundValue syscall_num_reg,
-          Just (_, _, argtypes) <- Map.lookup (fromIntegral call_no) (spTypeInfo sysp) =
-          take (length argtypes) syscallArgumentRegs
-        | otherwise =
-          syscallArgumentRegs
-  let callRegs = [Some sp_reg] ++ Set.toList x86CalleeSavedRegs
-  ArchTermStmtRegEffects
-    { termRegDemands = Some <$> argRegs,
-      termRegTransfers = callRegs
-    }
 
 x86DemandInfo ::
   SyscallPersonality ->

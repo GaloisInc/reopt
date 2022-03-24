@@ -12,7 +12,6 @@ module Reopt.CFG.LLVM.X86
 import           Control.Lens
 import           Control.Monad
 import           Control.Monad.Reader
-import           Data.Parameterized.Some
 import           GHC.Stack
 import           Numeric.Natural
 import           Prettyprinter
@@ -314,6 +313,13 @@ x86ArchFnToLLVM f =
             [(llvmCntNonZero, llvmSameCnt)]
             (L.Typed (L.iT 64) $ L.ValInteger 0)
         _ -> Nothing -- no support for val size outside of [1,2,4,8] bytes or non-constant direction flag values
+
+    -- FIXME: use OS personality?
+    X86Syscall _w raxv rdiv rsiv rdxv r10v r8v r9v -> Just $ do
+      syscallNo <- mkLLVMValue raxv
+      args      <- traverse mkLLVMValue [rdiv, rsiv, rdxv, r10v, r8v, r9v]
+      emitSyscall syscallNo args
+      
     _ -> Nothing
 
 --   _ -> do
@@ -330,38 +336,19 @@ emitSyscall :: L.Typed L.Value
             -> BBLLVM X86_64 (L.Typed L.Value)
 emitSyscall callNum args =
   callAsm sideEffect
-          (L.iT 64)
+          (L.Struct [L.iT 64, L.iT 64])
           "syscall"
-          -- This string marks rax as an output.
+          -- This string marks rax and rdx as an output.
           -- It also marks rax, rdi, rsi, rdx, r10, r8, r9 as inputs.
           -- It indicates that the function can make arbitrary
           -- modifications to memory, flags, rcx, and r11.
-          "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
+          "={rax},={rdx},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{memory},~{flags},~{rcx},~{r11}"
           (callNum : padUndef (L.iT 64) 6 args)
 
 emitX86ArchStmt :: HasCallStack
                 => String -- ^ Prefix for system calls
                 -> X86FnStmt (FnValue X86_64)
                 -> BBLLVM X86_64 ()
-emitX86ArchStmt pname (X86FnSystemCall call_num args rets) = do
-  llvm_call_num <- mkLLVMValue call_num
-  llvm_args  <- mapM mkLLVMValue args
-  case pname of
-    "Linux" -> do
-      rvar <- emitSyscall llvm_call_num llvm_args
-      case rets of
-        [Some fr] -> do
-          -- Assign all return variables to the extracted result
-          setAssignIdValue (frAssignId fr) rvar
-        _ -> error "Unexpected return values"
-    "FreeBSD" -> do
-      rvar <- emitSyscall llvm_call_num llvm_args
-      case rets of
-        [Some fr] -> do
-          -- Assign all return variables to the extracted result
-          setAssignIdValue (frAssignId fr) rvar
-        _ -> error "Unexpected return values"
-    _ -> error $ "Unsupported operating system: " ++ show pname
 emitX86ArchStmt _ (X86FnStmt stmt) =
   case stmt of
     RepMovs bytesPerCopy destExpr srcExpr cntExpr dirExpr -> do

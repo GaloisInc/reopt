@@ -1010,60 +1010,17 @@ $(pure [])
 
 recoverX86TermStmt :: forall ids
                    .  StmtIndex
-                   -> X86TermStmt ids
+                   -> X86TermStmt (Value X86_64 ids)
                    -> RegState (ArchReg X86_64) (Value X86_64 ids)
                       -- ^ Register value at start of block
                    -> Maybe (MemSegmentOff 64)
                    -> Recover ids (FnTermStmt X86_64)
-recoverX86TermStmt tstmtIdx tstmt regs mnext_addr =
+recoverX86TermStmt _tstmtIdx tstmt _regs _mnext_addr =
   case tstmt of
     Hlt ->
       throwErrorAt ReoptUnsupportedInFnRecoveryTag "hlt is not supported in function recovery."
     UD2 -> do
       throwErrorAt ReoptUnsupportedInFnRecoveryTag "ud2 is not supported in function recovery."
-    X86Syscall -> do
-      sysp <- frcSyscallPersonality <$> getFunCtx
-
-      let syscallRegs :: [ArchReg X86_64 (BVType 64)]
-          syscallRegs = syscallArgumentRegs
-
-      let args
-            | BVValue _ this_call_no <- regs^.boundValue syscall_num_reg
-            , Just (_,_,argtypes) <- Map.lookup (fromInteger this_call_no) (spTypeInfo sysp) =
-              take (length argtypes) syscallRegs
-            | otherwise =
-              syscallRegs
-
-      let rregs = spResultRegisters sysp
-
-
-      let mkRet :: MapF X86Reg (FnValue X86_64)
-                -> Some X86Reg
-                -> Recover ids (MapF X86Reg (FnValue X86_64))
-          mkRet m (Some r) = do
-            rv <- mkReturnVar (typeRepr r)
-            return $ MapF.insert r (FnReturn rv) m
-
-      initMap <- foldM mkRet MapF.empty rregs
-
-      -- pull the return variables out of initMap (in order of rregs)
-      let getVar :: Maybe (FnValue X86_64 tp) -> FnReturnVar tp
-          getVar (Just (FnReturn rv)) = rv
-          getVar _ = error "impossible"
-
-      let rets :: [Some FnReturnVar]
-          rets = map f rregs
-            where f (Some r) = Some $ getVar $ MapF.lookup r initMap
-
-      call_num <- recoverValue (regs^.boundValue syscall_num_reg)
-      args'  <- mapM (recoverRegister tstmtIdx regs) args
-      addFnStmt (FnArchStmt (X86FnSystemCall call_num args' rets))
-      case mnext_addr of
-        Nothing -> do
-          -- TODO: Fix this by adding a
-          error "Recovery: Could not find system call return label"
-        Just nextAddr -> do
-          FnJump <$> recoverJumpTarget MapF.empty nextAddr
 
 -- | This parses the arguments that we are going to pass to a function call.
 evalFunctionArg :: StmtIndex -- ^ Index of terminal statement call is at.
@@ -1489,29 +1446,18 @@ $(pure [])
 x86TermStmtNext :: StartInferContext X86_64
                 -> InferState X86_64 ids
                 -> Int
-                -> X86TermStmt ids
+                -> X86TermStmt (Value X86_64 ids)
                 -> RegState X86Reg (Value X86_64 ids)
                 -> Either (RegisterUseError X86_64)
                           (PostValueMap X86_64 ids, BlockStartConstraints X86_64)
-x86TermStmtNext cns s idx X86Syscall regs =
-  postCallConstraints x86_64CallParams cns s idx regs
 x86TermStmtNext _ _ _ Hlt _ = error "Hlt has no successor."
 x86TermStmtNext _ _ _ UD2 _ = error "UD2 has no successor."
 
 x86TermStmtUsage :: SyscallPersonality
-                 -> X86TermStmt ids
+                 -> X86TermStmt (Value X86_64 ids)
                  -> RegState (ArchReg X86_64) (Value X86_64 ids)
                  -> BlockUsageSummary X86_64 ids
                  -> Either (RegisterUseError X86_64) (RegDependencyMap X86_64 ids)
-x86TermStmtUsage sysp X86Syscall regs s = do
-  let cns = blockUsageStartConstraints s
-      cache = assignDeps s
-      setSavedReg m (Some r) = setRegDep r (valueDeps cns cache (regs^.boundValue r)) m
-      clearReg m (Some r) = setRegDep r mempty m
-      m0 = setSavedReg mempty (Some sp_reg)
-      m1 = foldl' setSavedReg m0 x86CalleeSavedRegs
-      m2 = foldl clearReg m1 (spResultRegisters sysp)
-   in Right m2
 x86TermStmtUsage _ Hlt _ _ = pure mempty
 x86TermStmtUsage _ UD2 _ _ = pure mempty
 
