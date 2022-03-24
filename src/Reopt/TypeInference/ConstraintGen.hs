@@ -26,6 +26,7 @@ import           Control.Monad.Reader       (MonadReader (ask), ReaderT (..),
                                              join, withReaderT, zipWithM_)
 import           Control.Monad.State.Strict (StateT, evalStateT)
 import           Control.Monad.Trans        (lift)
+import           Data.Bits                  (testBit)
 import qualified Data.ByteString.Char8      as BSC
 import           Data.Foldable              (traverse_)
 import           Data.List                  (intercalate)
@@ -67,7 +68,6 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
                                              unifyConstraints, varTy, ptrSubTC)
 import qualified Reopt.TypeInference.Solver as S
-import Data.Bits (testBit)
 
 
 -- This algorithm proceeds in stages:

@@ -163,7 +163,7 @@ x86ArchFnToLLVM f =
      llvm_val <- mkLLVMValue val
      -- Convert buffer to LLVM
      let w = llvmITypeNat (8 * repValSizeByteCount sz)
-     llvm_ptr <- llvmAsPtr "RepnzScas" base w
+     llvm_ptr <- llvmAsPtr "RepnzScas" w =<< mkLLVMValue base
      -- Get count
      llvm_cnt <- mkLLVMValue cnt
      let reg = case sz of
