@@ -404,11 +404,11 @@ emitSubType :: Ty -> Ty -> CGenM ctx arch ()
 emitSubType a b = inSolverM (subTypeTC a b)
 
 -- | Emits a constraint that the argument isn't a pointer
-emitNotPtr ::
+emitNumTy ::
   forall ctx arch.
   FnArchConstraints arch =>
   Int -> Ty -> CGenM ctx arch ()
-emitNotPtr sz t =
+emitNumTy sz t =
   inSolverM (eqTC t (numTy sz))
 
 -- pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
@@ -455,7 +455,7 @@ genApp (ty, outSize) app =
 
     Eq l r -> do
       join (emitEq <$> genFnValue l <*> genFnValue r)
-      emitNotPtr 1 ty
+      emitNumTy 1 ty
 
     Mux _ _ l r -> do
       lTy <- genFnValue l
@@ -569,8 +569,8 @@ genApp (ty, outSize) app =
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
     nonptrUnOp v = do
-      emitNotPtr (bvWidth v) =<< genFnValue v
-      emitNotPtr outSize ty
+      emitNumTy (bvWidth v) =<< genFnValue v
+      emitNumTy outSize ty
 
     -- | The result and arguments have to be bitvecs (i.e., not ptrs).
     -- We don't relate the sizes as that is given by the macaw type at
@@ -579,25 +579,29 @@ genApp (ty, outSize) app =
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinOp l r = do
-      emitNotPtr (bvWidth l) =<< genFnValue l
-      emitNotPtr (bvWidth r) =<< genFnValue r
-      emitNotPtr outSize ty
+      emitNumTy (bvWidth l) =<< genFnValue l
+      emitNumTy (bvWidth r) =<< genFnValue r
+      emitNumTy outSize ty
 
     nonptrBinCmp :: forall n m arch.
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinCmp l r = do
-      emitNotPtr (bvWidth l) =<< genFnValue l
-      emitNotPtr (bvWidth r) =<< genFnValue r
+      emitNumTy (bvWidth l) =<< genFnValue l
+      emitNumTy (bvWidth r) =<< genFnValue r
 
 
 genMemOp ::
   FnArchConstraints arch =>
   Ty -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
   CGenM CGenBlockContext arch ()
--- FIXME: do we need sz here?
-genMemOp ty ptr _sz = emitPtr ty =<< genFnValue ptr
-
+genMemOp ty ptr (Some tp) = do
+  ptrWidth <- widthVal <$> addrWidth
+  emitPtr ty =<< genFnValue ptr
+  case tp of
+    BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy (widthVal n) ty
+    _ -> pure ()
+    
   -- case ptr of
   --   FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q) }
   --     -- We rely on macaw to have constant folded adds, so only one
