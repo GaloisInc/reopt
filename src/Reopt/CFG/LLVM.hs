@@ -324,7 +324,7 @@ functionTypeToLLVM' ft args m_ret = L.ptrT $
           (fnVarArgs ft)
   where
     m_ret'    = mkTy <$> (viewSome typeToLLVMType <$> fnReturnType ft) <*> m_ret
-    
+
     mkTy lty = maybe lty (tyToLLVMType ptrWidth)
     ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
 
@@ -886,13 +886,13 @@ appToLLVM lhs app = bbArchConstraints $ do
       tx <- getInferredType x
       ty <- getInferredType y
       ptrWidth <- getPtrWidth'
-      
+
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) ->
           error "Inferred a pointer type for both addends, this suggests a bug in the constraint generation/solving!"
 
         (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {})
-          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- y -> 
+          | FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o } <- y ->
             bvAddPtrOffset (tyToLLVMType ptrWidth lhsty) x o
           | otherwise -> bvAddPtrSymbolic (tyToLLVMType ptrWidth lhsty) x y
 
@@ -903,7 +903,7 @@ appToLLVM lhs app = bbArchConstraints $ do
 
         (_, Just FPtrTy {}, _) -> error "BUG: Expecting a ptr return ty"
         (_, _, Just FPtrTy {}) -> error "BUG: Expecting a ptr return ty"
-        
+
         -- If the result ought to be a pointer, but we have no idea which of the
         -- two arguments is the pointer, we must perform a bitvector add, but
         -- then cast the result into the appropriate pointer type that will be
@@ -915,8 +915,8 @@ appToLLVM lhs app = bbArchConstraints $ do
                    $ LogInfoIntToPtr
                    $ LLVMBitCastInfo (L.typedType result) pty
           convop L.IntToPtr result pty
-          
-        _ -> binop (arithop (L.Add False False)) x y 
+
+        _ -> binop (arithop (L.Add False False)) x y
     BVAdc _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Add False False)) x y
     BVAdc _sz x y c -> do
@@ -928,15 +928,15 @@ appToLLVM lhs app = bbArchConstraints $ do
       tx <- getInferredType x
       ty <- getInferredType y
       ptrWidth <- getPtrWidth'
-      
+
       case (typeOfResult, tx, ty) of
         (_, Just (FPtrTy _), Just (FPtrTy _)) -> bvSubPtrPtr x y
 
         (Just (FPtrTy lhsty), Just FPtrTy {}, Just FNumTy {}) ->
           bvSubPtrNum (tyToLLVMType ptrWidth lhsty) x . L.typedValue =<< mkLLVMValue y
-          
-        _ -> binop (arithop (L.Sub False False)) x y 
-    
+
+        _ -> binop (arithop (L.Sub False False)) x y
+
     BVSbb _sz x y (FnConstantBool False) -> do
       binop (arithop (L.Sub False False)) x y
     BVSbb _sz x y b -> do
@@ -1024,7 +1024,7 @@ llvmPtrAsBV ctx llvmPtr = do
 -- | We have a bvadd which is actually taking the address of a sub-field of a structure.
 bvAddPtrOffset :: L.Type ->
                   FnValue arch tp ->
-                  Integer -> 
+                  Integer ->
                   BBLLVM arch (L.Typed L.Value)
 bvAddPtrOffset _lhsty x 0 = mkLLVMValue x
 bvAddPtrOffset lhsty  x off = do
@@ -1034,7 +1034,7 @@ bvAddPtrOffset lhsty  x off = do
     else ptrCase
   where
     xty' = L.PtrTo (L.Struct [ L.Vector (fromInteger off) (L.iT 8), lhsty ])
-    
+
     -- We cast make x :: { <N x i8>, rhs } * so we can use a gep to get a pointer to it.
     ptrCase = do
       xV <- mkLLVMValue x
@@ -1050,7 +1050,7 @@ bvAddPtrSymbolic :: L.Type ->
 bvAddPtrSymbolic lhsty x y = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
   r  <- arithop (L.Add False False) x' . L.typedValue =<< mkLLVMValue y
-  llvmAsPtr "bvAddPtrSymbolic" lhsty r 
+  llvmAsPtr "bvAddPtrSymbolic" lhsty r
 
 -- | There isn't much we can do when we have ptrs, except to cast.
 bvSubPtrNum :: L.Type ->
@@ -1060,7 +1060,7 @@ bvSubPtrNum :: L.Type ->
 bvSubPtrNum lhsty x rhs = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
   r  <- arithop (L.Sub False False) x' rhs
-  llvmAsPtr "bvAddPtrSymbolic" lhsty r 
+  llvmAsPtr "bvAddPtrSymbolic" lhsty r
 
 bvSubPtrPtr :: FnValue arch tp ->
                FnValue arch tp' ->
@@ -1069,12 +1069,12 @@ bvSubPtrPtr x y = do
   x' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue x
   y' <- llvmPtrAsBV "bvAddPtrSymbolic" =<< mkLLVMValue y
   arithop (L.Sub False False) x' (L.typedValue y')
-  
+
 -- | This emits a getElementPointer in the special case where the value argument is a pointer.
-llvmGEPFromPtr :: 
+llvmGEPFromPtr ::
   L.Type ->
   Int ->
-  L.Typed L.Value -> 
+  L.Typed L.Value ->
   BBLLVM arch (L.Typed L.Value)
 llvmGEPFromPtr pointeeType ofs ptrV = do
   let pointerType = L.PtrTo pointeeType
@@ -1748,7 +1748,7 @@ defineFunction archOps genOpts constraints f = do
       inputArgs = zipWith mkInputReg argsWithTyVars [0..]
 
   let fret = fmap (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
-  
+
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
                            , funLLVMGenOptions = genOpts
@@ -1906,7 +1906,7 @@ getInferredType FnConstantBool{} = pure Nothing
 getInferredType FnFunctionEntryValue{} = pure Nothing
 getInferredType (FnAssignedValue (FnAssignment aId _)) = getInferredTypeForAssignIdBBLLVM aId
 getInferredType (FnPhiValue phiVar) = getInferredTypeForAssignIdBBLLVM (unFnPhiVar phiVar)
-getInferredType (FnReturn _retVar) = error "getInferredType FnReturn" -- getInferredTypeForAssignId (frAssignId retVar)
+getInferredType (FnReturn (FnReturnVar retVar _)) = getInferredTypeForAssignIdBBLLVM retVar
 getInferredType (FnArg arg _typ) = do
   fn <- asks funName
   getInferredFunctionArgType fn arg
