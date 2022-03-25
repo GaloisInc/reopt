@@ -237,6 +237,8 @@ filterCyclicEdges :: [SubRowC] -> [SubRowC]
 --                     ([SubC a], Map.Map a (Set.Set a), Map.Map a (Set.Set a))
 filterCyclicEdges = view _1 . foldr go mempty
   where
+    -- We filter out reflexive edges, this is always OK.
+    go (a :<: b) r | a == b = r
     go c@(a :<: b) r@(acc, succs, preds)
       | r_a `Set.member` succs_a' = trace ("Removing cycle " ++ show (PP.pretty c)) r
       | otherwise = (c : acc, succs', preds')
