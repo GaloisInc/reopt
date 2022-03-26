@@ -103,7 +103,7 @@ import           Numeric.Natural
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import qualified Text.PrettyPrint.HughesPJ as HPJ
-import           Prettyprinter (pretty)
+import           Prettyprinter (pretty, viaShow)
 import           Text.Printf
 
 import           Data.Macaw.Analysis.RegisterUse (BoundLoc(..))
@@ -1326,12 +1326,19 @@ coerceForSubtype :: Maybe FTy -> Maybe FTy -> L.Typed L.Value ->
                     BBLLVM arch (L.Typed L.Value)
 coerceForSubtype m_vTy m_tgtTy v = do
   ptrWidth <- getPtrWidth'
-  case (m_vTy, m_tgtTy) of
-    (Just t, Just t') | t == t' -> pure v
-    (Just FPtrTy {}, Just (FPtrTy tr)) ->
-      llvmBitCast "mkLLVMSubtypeValue" v (L.PtrTo (tyToLLVMType ptrWidth tr))
-    (Nothing, Nothing)          -> pure v
-    _ -> error "Type mismatch in mkLLVMSubtypeValue"
+  case (fromMaybe FUnknownTy m_vTy, fromMaybe FUnknownTy m_tgtTy) of
+    (t, t') | tyToLLVMType ptrWidth t == tyToLLVMType ptrWidth t' -> pure v
+    (FPtrTy {}, FPtrTy tr) ->
+      llvmBitCast "coerceForSubtype" v (L.PtrTo (tyToLLVMType ptrWidth tr))
+    -- We are casting from a ptr to a non-ptr, probably due to a
+    -- limitation in the type inference (e.g. during cycle detection)
+    (FPtrTy {}, _)       -> llvmPtrAsBV "coerceForSubtype" v
+    (_, FPtrTy ty)       ->
+      llvmAsPtr "coerceForSubtype" (tyToLLVMType ptrWidth ty) v
+    (t, t') -> do
+      thisLabel <- gets bbThisLabel :: BBLLVM arch L.BlockLabel
+      error $ show $ "Type mismatch at " <> viaShow thisLabel <>
+        ": " <> pretty t <> " and " <> pretty t'
 
 mkLLVMSubtypeValue :: forall arch tp.
                       FnValue arch tp
