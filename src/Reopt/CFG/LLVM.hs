@@ -1244,7 +1244,7 @@ resolveFunctionEntry dest =
                   (Map.lookup nm (mcExtFunTypes constraints))
         let resolvetv tv = Map.lookup tv (mcTypeMap constraints)
             args = map resolvetv (fttvArgs fty)
-            retty  = traverse resolvetv (fttvRet fty)
+            retty  = fmap resolvetv (fttvRet fty)
         return (L.Typed (functionTypeToLLVM' dest_ftp args retty) (L.ValSymbol sym)
                , args, retty)
     _ -> do
