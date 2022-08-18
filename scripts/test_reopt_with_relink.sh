@@ -26,7 +26,10 @@ run_reopt () {
   NUM_BINARIES=$(($NUM_BINARIES+1))
   $1
   PRE_RESULT=$?
-  $REOPT $1 --lib-dir=lib64 --debug-dir=debug-lib64 --output=$1.reopt
+  # 1. If you want no output from reopt:
+  # $REOPT $1 --lib-dir=lib64 --debug-dir=debug-lib64 --output=$1.reopt 1>/dev/null 2>/dev/null
+  # 2. If you want to pipe into less:
+  $REOPT $1 --lib-dir=lib64 --debug-dir=debug-lib64 --output=$1.reopt 2>&1
   if [[ $? -ne 0 ]]; then
     echo "Reopt terminated with a non-zero exit code on $1"
     NUM_BAD=$(($NUM_BAD+1))
@@ -47,10 +50,9 @@ report_results() {
   echo "$NUM_PASS binaries behaved identically after reopt ran."
   echo "$NUM_FAIL binaries behaved differently after reopt ran."
   if [[ $NUM_BAD -ne 0 ]]; then
-    echo "$NUM_FAIL binaries behaved differently after reopt ran."
+    echo "$NUM_BAD binaries caused reopt to fail."
   fi
 }
-
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
@@ -72,6 +74,7 @@ elif [[ $1 == "small" ]]; then
   run_reopt bin/mkdir
   run_reopt bin/curl
   run_reopt bin/date
+  report_results
   popd > /dev/null # $CENTOS7_DEV_DIR
 elif [[ $1 == "all" ]]; then
   echo "Running reopt on all centos7-dev binaries..."
