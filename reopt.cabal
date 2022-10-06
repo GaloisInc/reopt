@@ -57,6 +57,7 @@ library
 
   exposed-modules:
     Reopt
+    Reopt.CFG.FnRep    
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
@@ -84,7 +85,6 @@ library
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.ArgResolver
-    Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
@@ -164,11 +164,17 @@ executable reopt-explore
     mtl,
     parameterized-utils >= 0.1.6,
     reopt,
-    unix
+    unix,
+    optparse-applicative,
+    IntervalMap
 
   hs-source-dirs: reopt-explore
   main-is: Main_explore.hs
   other-modules: Paths_reopt
+               , CommandLine
+               , Residual
+               , LLVM
+               , Common
 
   if flag(enable-hpc)
     ghc-options: -fhpc
