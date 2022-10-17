@@ -1,21 +1,24 @@
-{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Residual (runResidual) where
 
-import qualified Data.ByteString.Char8 as BSC
-import           Data.IORef            (newIORef)
-import           Data.List             (intersperse)
-import           Data.Word             (Word64)
-import           Numeric               (showHex)
+import qualified Data.ByteString.Char8         as BSC
+import           Data.IORef                    (newIORef)
+import           Data.Word                     (Word64)
+import           Numeric                       (showHex)
 
 import           Data.Macaw.Discovery          (DiscoveryState (memory))
-import           Data.Macaw.Memory             (MemSegment (segmentBase),
-                                                Memory, 
-                                                memSegments, memWordValue,
-                                                segmentFlags, segmentOffset,
+import           Data.Macaw.Memory             (MemChunk (ByteRegion),
+                                                MemSegment (segmentBase, segmentFlags, segmentOffset),
+                                                MemWord (memWordValue), Memory,
+                                                forcedTakeMemChunks,
+                                                memSegments, memWord,
+                                                resolveAbsoluteAddr,
                                                 segmentSize,
-                                                segoffAsAbsoluteAddr)
+                                                segoffAsAbsoluteAddr,
+                                                segoffContentsAfter)
 import qualified Data.Macaw.Memory.Permissions as Perm
 
 import           Reopt                         (LoadOptions (LoadOptions),
@@ -36,6 +39,11 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 
 import           CommandLine
 import           Common
+import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
+                                                disassembleBuffer)
+import           Flexdis86.InstructionSet      (ppInstruction)
+import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
+import           Text.Printf                   (printf)
 
 
 runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
@@ -60,8 +68,8 @@ runResidual _opts gopts ropts = do
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
       (_os, ds, recMod, _, _, _logEvents) <-
         handleEitherWithExit =<<
-          (runReoptM logger $
-            recoverX86Elf lOpts ropts annDecl unnamedFunPrefix hdrInfo)
+          runReoptM logger
+            (recoverX86Elf lOpts ropts annDecl unnamedFunPrefix hdrInfo)
 
       let sl = memoryToSegmentList (memory ds)
           blocks = concatMap fnBlocks (recoveredDefs recMod)
@@ -71,12 +79,12 @@ runResidual _opts gopts ropts = do
               Just w  -> (memWordValue w, memWordValue w + fbSize b - 1)
           blockSegs = map blockSeg blocks
           residuals = foldl removeSegment sl blockSegs
-          
-      putStrLn (ppSegmentList residuals)
+
+      putStrLn (ppSegmentList (memory ds) residuals)
       pure ()
 
 memoryToSegmentList :: Memory 64 -> SegmentList
-memoryToSegmentList m = SegmentList (map segBounds esegs)
+memoryToSegmentList m = SegmentList (map segBounds esegs) []
   where
     esegs = filter (Perm.isExecutable . segmentFlags) (memSegments m)
     -- assumes sorted, non-overlapping
@@ -87,22 +95,54 @@ memoryToSegmentList m = SegmentList (map segBounds esegs)
                       + memWordValue (segmentSize eseg)
                       - 1
                     )
-                    
+
 --------------------------------------------------------------------------------
 -- Segment lists
 
-newtype SegmentList = SegmentList { segments :: [(Word64, Word64)] }
+data ResidualExplanation
+  = NopPadding
 
-ppSegmentList :: SegmentList -> String
-ppSegmentList sl =
-  "[" ++ concat (intersperse " " [ "0x" ++ showHex l "" ++ "--" ++ "0x" ++ showHex u ""
-                                 | (l, u) <- segments sl ]) ++ "]"
+ppResidualExplanation :: ResidualExplanation -> String
+ppResidualExplanation = \case
+  NopPadding -> "NOP padding"
 
--- segmentList :: Word64 -> Word64 -> SegmentList
--- segmentList l u = SegmentList [(l, u)]
+data SegmentList = SegmentList
+  { segments  :: [(Word64, Word64)]
+  , explained :: [((Word64, Word64), ResidualExplanation)]
+  }
+
+-- byteStringtoHexString :: BSC.ByteString -> String
+-- byteStringtoHexString = BSC.foldr ((<>) . printf "%02x") ""
+
+ppSegmentList :: Memory 64 -> SegmentList -> String
+ppSegmentList m sl = unlines $
+     [ "Residual segments (unexplained):" ]
+  ++ map ppSegment (segments sl)
+  ++ [ "Residual segments (explained)" ]
+  ++ map ppExplained (explained sl)
+  where
+    ppSegment s@(l, u) = unlines $
+      [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u "" ++ ":"
+      -- , maybe ":-(" byteStringtoHexString (segmentBytes m s)
+      , maybe "" (ppDisSegment l) (segmentInstrs m s)
+      ]
+    ppExplained (s, e) = ppSegment s ++ " (" ++ ppResidualExplanation e ++ ")"
+
+-- | Pretty-prints a disassembled instruction, taking the block offset so as to
+-- print the instruction address.
+ppDisInstr :: Int -> DisassembledAddr -> String
+ppDisInstr ofs da =
+  offset <> " " <> instr da
+  where
+    offset = printf "0x%08x" (ofs + disOffset da)
+    instr = maybe "???\n" (($ "\n") . displayS . renderCompact . ppInstruction) . disInstruction
+
+-- | Pretty-prints a disassembled block
+ppDisSegment :: Word64 -> [DisassembledAddr] -> String
+ppDisSegment ofs = concatMap (ppDisInstr (fromIntegral ofs))
 
 removeSegment :: SegmentList -> (Word64, Word64) -> SegmentList
-removeSegment sl (l, u) = SegmentList (ls ++ splitSegs us)
+removeSegment sl (l, u) = SegmentList (ls ++ splitSegs us) []
   where
     (ls, us) = span (\(_, u') -> u' < l) (segments sl)
     splitSegs [] = []
@@ -112,10 +152,35 @@ removeSegment sl (l, u) = SegmentList (ls ++ splitSegs us)
     --  1. R covers C, so forget C and delete R from the rest
     --  2. R covers the beginning of C, so delete that part of C and return (rest is untouched)
     --  3. R covers the end of C, so add the bit of C at the start and process the rest
-    -- 4. R is contained within C, so split C and return rest.    
+    -- 4. R is contained within C, so split C and return rest.
     splitSegs ((l', u') : rest)
       | l <= l', u' <= u = splitSegs rest
       | l <= l'          = (u + 1, u') : rest
       | u' <= u          = (l', l - 1) : splitSegs rest
       -- l > l', u' > u
       | otherwise        = (l', l - 1) : (u + 1, u') : rest
+
+chunkBytes :: MemChunk 64 -> Maybe BSC.ByteString
+chunkBytes = \case
+  ByteRegion bs -> Just bs
+  _             -> error "chunkBytes: not a ByteRegion"
+
+chunksBytes :: [MemChunk 64] -> Maybe [BSC.ByteString]
+chunksBytes = traverse chunkBytes
+
+-- segmentBytes :: Memory 64 -> (Word64, Word64) -> Maybe BSC.ByteString
+-- segmentBytes m (l, u) = do
+--   ofs <- resolveAbsoluteAddr m (memWord l)
+--   case segoffContentsAfter ofs of
+--     Right [mc] ->
+--       BSC.take (fromInteger $ toInteger $ u - l + 1) <$> chunkBytes mc
+--     _ -> Nothing
+
+segmentInstrs :: Memory 64 -> (Word64, Word64) -> Maybe [DisassembledAddr]
+segmentInstrs m (l, u) = do
+  ofs <- resolveAbsoluteAddr m (memWord l)
+  case segoffContentsAfter ofs of
+    Right chunks -> do
+      let seg = forcedTakeMemChunks chunks (memWord $ u - l + 1)
+      concat <$> traverse (fmap disassembleBuffer . chunkBytes) seg
+    _ -> Nothing

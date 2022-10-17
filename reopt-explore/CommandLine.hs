@@ -1,4 +1,3 @@
-
 module CommandLine (getOptions, Options(..), Command(..), ResidualOptions(..), LLVMOptions(..)) where
 
 import Options.Applicative
@@ -28,7 +27,7 @@ residualP = RunResidual <$> (ResidualOptions <$> some argsP)
 
 -- | Command line arguments.
 data LLVMOptions = LLVMOptions
-  { 
+  {
     -- | Path to `clang` command.
     --
     -- This is only used as a C preprocessor for parsing
@@ -64,7 +63,7 @@ exportFnResultsP =
              <> metavar "PATH"
              <> help "Path at which to write function discovery/recovery results."
             )
-  
+
 exportSummaryP :: Parser FilePath
 exportSummaryP =
   strOption (long "export-summary"
@@ -96,7 +95,7 @@ binTimeoutInSecP = option auto (long "timeout"
                                 <> metavar "SECS"
                                 <> help "Timeout for analyzing individual binaries (in seconds)."
                                )
-                   
+
 llvmOptionsP :: Parser LLVMOptions
 llvmOptionsP =
   LLVMOptions <$> clangPathP
@@ -106,10 +105,10 @@ llvmOptionsP =
               <*> omitLLVMP
               <*> optional binTimeoutInSecP
               <*> some argsP
-   
+
 llvmP :: Parser Command
 llvmP = RunLLVM <$> llvmOptionsP
-  
+
 --------------------------------------------------------------------------------
 -- Top-level
 
