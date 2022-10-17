@@ -205,7 +205,7 @@ to recover functions in an individual or collection of binaries.
 To examine a single binary, simply call `reopt-explore` with the a path to the binary:
 
 ```
-$ reopt-explore $(which ls)
+$ reopt-explore llvm $(which ls)
 ...
 /usr/bin/ls
   Initialization:
@@ -241,7 +241,7 @@ To recursively search a directory for binaries and examine each,
 call `reopt-explore` with the path to the directory to search:
 
 ```
-$ reopt-explore /usr/bin
+$ reopt-explore llvm /usr/bin
 ...
 reopt analyzed 394 binaries:
 Generated LLVM bitcode for 394 out of 394 binaries.
