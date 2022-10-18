@@ -25,11 +25,10 @@ import qualified Data.Macaw.Memory.Permissions as Perm
 
 import           Reopt                         (LoadOptions (LoadOptions),
                                                 ReoptOptions, X86_64,
-                                                emptyAnnDeclarations,
                                                 loadOffset,
                                                 parseElfHeaderInfo64,
-                                                recoverX86Elf, roVerboseMode,
-                                                runReoptM)
+                                                recoverX86Elf, resolveHeader,
+                                                roVerboseMode, runReoptM)
 import           Reopt.CFG.FnRep               (FnBlock, fbLabel, fbSize,
                                                 fnBlockLabelAddr, fnBlocks,
                                                 recoveredDefs)
@@ -41,6 +40,7 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 
 import           CommandLine
 import           Common
+import           Data.Either                   (fromRight)
 import           Data.ElfEdit                  (Symtab (symtabEntries),
                                                 SymtabEntry (steName, steValue),
                                                 decodeHeaderSymtab)
@@ -69,7 +69,8 @@ runResidual _opts gopts ropts = do
               joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
             | otherwise =
               recoverLogEvent summaryRef statsRef
-      let annDecl = emptyAnnDeclarations
+      annDecl <- fromRight (error "Could not resolve header") <$> runReoptM printLogEvent
+                  (resolveHeader (roHeader gopts) (roClangPath gopts))
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
       let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
       (_os, ds, recMod, _, _, _logEvents) <-
@@ -131,7 +132,7 @@ ppSegmentList mSymTab m sl = unlines $
       let symbolEntryForSegment symTab = Vec.find ((== l) . steValue) $ symtabEntries @64 symTab in
       let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
       let symbolString = symbolForSegment =<< mSymTab in
-      unlines $
+      unlines
       [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u ""
         ++ maybe "" ((" (" ++) . (++ ")")) symbolString ++ ":"
       -- , maybe ":-(" byteStringtoHexString (segmentBytes m s)

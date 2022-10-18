@@ -15,12 +15,20 @@ data Command = RunLLVM LLVMOptions | RunResidual ResidualOptions
 -- Residual
 
 data ResidualOptions = ResidualOptions
-  {
-  roPaths :: [FilePath]
+  { -- | TODO: document me
+    roClangPath :: !FilePath
+  , -- | TODO: document me
+    roHeader :: !(Maybe FilePath)
+  , -- | TODO: document me
+    roPaths :: ![FilePath]
   }
 
 residualP :: Parser Command
-residualP = RunResidual <$> (ResidualOptions <$> some argsP)
+residualP = fmap RunResidual
+  $ ResidualOptions
+  <$> clangPathP
+  <*> optional headerP
+  <*> some argsP
 
 --------------------------------------------------------------------------------
 -- LLVM
@@ -83,6 +91,13 @@ omitLLVMP =
   flag True False (long "omit-llvm"
                    <> help "Do not output generated LLVM."
                   )
+
+headerP :: Parser FilePath
+headerP =
+  strOption
+   $ long "header"
+  <> metavar "PATH"
+  <> help "Optional header with function declarations (as in reopt)"
 
 -- debugInfoFlag :: Flag Args
 -- debugInfoFlag = flagNone ["debug-info", "d"] upd help
