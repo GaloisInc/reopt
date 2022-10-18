@@ -1,11 +1,13 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 
 module Residual (runResidual) where
 
 import qualified Data.ByteString.Char8         as BSC
 import           Data.IORef                    (newIORef)
+import qualified Data.Vector                   as Vec
 import           Data.Word                     (Word64)
 import           Numeric                       (showHex)
 
@@ -39,6 +41,9 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 
 import           CommandLine
 import           Common
+import           Data.ElfEdit                  (Symtab (symtabEntries),
+                                                SymtabEntry (steName, steValue),
+                                                decodeHeaderSymtab)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
 import           Flexdis86.InstructionSet      (ppInstruction)
@@ -66,6 +71,7 @@ runResidual _opts gopts ropts = do
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
+      let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
       (_os, ds, recMod, _, _, _logEvents) <-
         handleEitherWithExit =<<
           runReoptM logger
@@ -80,7 +86,7 @@ runResidual _opts gopts ropts = do
           blockSegs = map blockSeg blocks
           residuals = foldl removeSegment sl blockSegs
 
-      putStrLn (ppSegmentList (memory ds) residuals)
+      putStrLn (ppSegmentList mSymTab (memory ds) residuals)
       pure ()
 
 memoryToSegmentList :: Memory 64 -> SegmentList
@@ -114,15 +120,20 @@ data SegmentList = SegmentList
 -- byteStringtoHexString :: BSC.ByteString -> String
 -- byteStringtoHexString = BSC.foldr ((<>) . printf "%02x") ""
 
-ppSegmentList :: Memory 64 -> SegmentList -> String
-ppSegmentList m sl = unlines $
+ppSegmentList :: Maybe (Symtab 64) -> Memory 64 -> SegmentList -> String
+ppSegmentList mSymTab m sl = unlines $
      [ "Residual segments (unexplained):" ]
   ++ map ppSegment (segments sl)
   ++ [ "Residual segments (explained)" ]
   ++ map ppExplained (explained sl)
   where
-    ppSegment s@(l, u) = unlines $
-      [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u "" ++ ":"
+    ppSegment s@(l, u) =
+      let symbolEntryForSegment symTab = Vec.find ((== l) . steValue) $ symtabEntries @64 symTab in
+      let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
+      let symbolString = symbolForSegment =<< mSymTab in
+      unlines $
+      [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u ""
+        ++ maybe "" ((" (" ++) . (++ ")")) symbolString ++ ":"
       -- , maybe ":-(" byteStringtoHexString (segmentBytes m s)
       , maybe "" (ppDisSegment l) (segmentInstrs m s)
       ]

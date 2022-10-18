@@ -160,15 +160,16 @@ executable reopt-explore
     elf-edit,
     filepath,
     flexdis86,
+    IntervalMap,
     lens,
     macaw-base,
     macaw-x86,
     mtl,
+    optparse-applicative,
     parameterized-utils >= 0.1.6,
     reopt,
     unix,
-    optparse-applicative,
-    IntervalMap
+    vector
 
   hs-source-dirs: reopt-explore
   main-is: Main_explore.hs
