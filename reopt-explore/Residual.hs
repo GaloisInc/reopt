@@ -165,8 +165,8 @@ chunkBytes = \case
   ByteRegion bs -> Just bs
   _             -> error "chunkBytes: not a ByteRegion"
 
-chunksBytes :: [MemChunk 64] -> Maybe [BSC.ByteString]
-chunksBytes = traverse chunkBytes
+-- chunksBytes :: [MemChunk 64] -> Maybe [BSC.ByteString]
+-- chunksBytes = traverse chunkBytes
 
 -- segmentBytes :: Memory 64 -> (Word64, Word64) -> Maybe BSC.ByteString
 -- segmentBytes m (l, u) = do

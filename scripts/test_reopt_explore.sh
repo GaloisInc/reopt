@@ -49,5 +49,6 @@ case $COMMAND in
       $REOPT_EXLPORE --lib-dir=lib64 --debug-dir=debug-lib64 llvm test-bins # --export-summary=centos7-small-bin-summary.txt
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
-    *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
+    # *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
+    *) echo "unknown command - use 'all' or 'small'; exit 1;;    
 esac
