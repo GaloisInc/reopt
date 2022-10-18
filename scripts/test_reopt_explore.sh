@@ -50,5 +50,5 @@ case $COMMAND in
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
     # *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
-    *) echo "unknown command - use 'all' or 'small'; exit 1;;    
+    *) echo "unknown command - use 'all' or 'small'"; exit 1;;    
 esac
