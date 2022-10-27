@@ -78,7 +78,7 @@ jobs:
     - name: CentOS7 reopt-explore executable tests
       run: |
         ./scripts/test_reopt_explore.sh small
-        ./scripts/test_reopt_explore.sh all-debug-info
+    #   ./scripts/test_reopt_explore.sh all-debug-info
     # Disabled temporarily so we can update reopt
     #- name: CentOS7 reopt-explore executable tests (long)
     #  run: ./scripts/test_reopt_explore.sh all

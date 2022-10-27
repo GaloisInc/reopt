@@ -57,6 +57,7 @@ library
 
   exposed-modules:
     Reopt
+    Reopt.CFG.FnRep
     Reopt.CFG.FnRep.X86
     Reopt.CFG.LLVM
     Reopt.EncodeInvariants
@@ -75,7 +76,7 @@ library
     Reopt.TypeInference.Solver.Finalise
     Reopt.TypeInference.Solver.TypeVariables
     Reopt.TypeInference.Solver.Types
-    Reopt.TypeInference.Solver.UnionFindMap    
+    Reopt.TypeInference.Solver.UnionFindMap
     Reopt.TypeInference.ConstraintGen
     Reopt.TypeInference.FunTypeMaps
     Reopt.TypeInference.Pretty
@@ -84,7 +85,6 @@ library
   other-modules:
     Reopt.Analysis.Domains.DiffEquations
     Reopt.ArgResolver
-    Reopt.CFG.FnRep
     Reopt.CFG.FunctionCheck
     Reopt.CFG.LLVM.X86
     Reopt.CFG.Recovery
@@ -151,6 +151,7 @@ executable reopt
 executable reopt-explore
   default-language: Haskell2010
   build-depends:
+    ansi-wl-pprint,
     base >= 4,
     bytestring,
     cmdargs,
@@ -158,17 +159,25 @@ executable reopt-explore
     directory,
     elf-edit,
     filepath,
+    flexdis86,
+    IntervalMap,
     lens,
     macaw-base,
     macaw-x86,
     mtl,
+    optparse-applicative,
     parameterized-utils >= 0.1.6,
     reopt,
-    unix
+    unix,
+    vector
 
   hs-source-dirs: reopt-explore
   main-is: Main_explore.hs
   other-modules: Paths_reopt
+               , CommandLine
+               , Residual
+               , LLVM
+               , Common
 
   if flag(enable-hpc)
     ghc-options: -fhpc

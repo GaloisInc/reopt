@@ -27,17 +27,17 @@ shift
 case $COMMAND in
     all)
       pushd $CENTOS7_DEV_DIR
-      $REOPT_EXLPORE bin --export-summary=centos7-bin-summary.txt \
-        --export-log=centos7-bin-casts.csv  \
-        --lib-dir=lib64 \
-        --debug-dir=debug-lib64
+      $REOPT_EXLPORE --lib-dir=lib64 --debug-dir=debug-lib64 llvm \
+		     --export-summary=centos7-bin-summary.txt \
+		     --export-log=centos7-bin-casts.csv \
+		     bin
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
-    all-debug-info)
-      pushd $CENTOS7_DEV_DIR
-      $REOPT_EXLPORE --debug-info debug-lib64
-      popd > /dev/null # $CENTOS7_DEV_DIR
-      ;;
+    # all-debug-info)
+    #   pushd $CENTOS7_DEV_DIR
+    #   $REOPT_EXLPORE --debug-info debug-lib64
+    #   popd > /dev/null # $CENTOS7_DEV_DIR
+    #   ;;
     small)
       pushd $CENTOS7_DEV_DIR
       rm -fr test-bins
@@ -45,9 +45,10 @@ case $COMMAND in
       cp bin/mkdir test-bins/mkdir
       cp bin/curl test-bins/curl
       cp bin/date test-bins/date
-      $REOPT_EXLPORE test-bins/mkdir --lib-dir=lib64 --debug-dir=debug-lib64 # --export-summary=centos7-small-bin-mkdir-summary.txt
-      $REOPT_EXLPORE test-bins --lib-dir=lib64 --debug-dir=debug-lib64 # --export-summary=centos7-small-bin-summary.txt
+      $REOPT_EXLPORE --lib-dir=lib64 --debug-dir=debug-lib64 llvm test-bins/mkdir # --export-summary=centos7-small-bin-mkdir-summary.txt
+      $REOPT_EXLPORE --lib-dir=lib64 --debug-dir=debug-lib64 llvm test-bins # --export-summary=centos7-small-bin-summary.txt
       popd > /dev/null # $CENTOS7_DEV_DIR
       ;;
-    *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
+    # *) echo "unknown command - use 'all', 'small', or 'all-debug-info'"; exit 1;;
+    *) echo "unknown command - use 'all' or 'small'"; exit 1;;    
 esac

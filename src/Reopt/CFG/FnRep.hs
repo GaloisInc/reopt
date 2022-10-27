@@ -539,6 +539,7 @@ instance (FnArchConstraints arch
       phiBindings = foldMap ppPhiBindings (fbPhiVars b)
       stmts = foldMap (\s -> pretty s <> hardline) (fbStmts b)
       tstmt = pretty (fbTerm b)
+
 instance FoldFnValue FnBlock where
   foldFnValue f s0 b = foldFnValue f (foldl (foldFnValue f) s0 (fbStmts b)) (fbTerm b)
 
