@@ -40,7 +40,6 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 
 import           CommandLine
 import           Common
-import           Data.Either                   (fromRight)
 import           Data.ElfEdit                  (Symtab (symtabEntries),
                                                 SymtabEntry (steName, steValue),
                                                 decodeHeaderSymtab)
@@ -69,8 +68,10 @@ runResidual _opts gopts ropts = do
               joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
             | otherwise =
               recoverLogEvent summaryRef statsRef
-      annDecl <- fromRight (error "Could not resolve header") <$> runReoptM printLogEvent
-                  (resolveHeader (roHeader gopts) (roClangPath gopts))
+      annDecl <-
+        runReoptM printLogEvent
+          (resolveHeader (roHeader gopts) (roClangPath gopts)) >>=
+            either (error . show) return
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
       let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
       (_os, ds, recMod, _, _, _logEvents) <-
