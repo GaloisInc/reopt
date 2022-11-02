@@ -1,10 +1,13 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE PatternSynonyms     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
 
 module Residual (runResidual) where
 
+import           Control.Monad                 (forM_)
 import qualified Data.ByteString.Char8         as BSC
 import           Data.IORef                    (newIORef)
 import qualified Data.Vector                   as Vec
@@ -38,21 +41,50 @@ import           Reopt.Utils.Exit              (checkedReadFile,
                                                 handleEitherStringWithExit,
                                                 handleEitherWithExit)
 
-import           CommandLine
-import           Common
-import           Data.ElfEdit                  (Symtab (symtabEntries),
+import           CommandLine                   (Options,
+                                                ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths))
+import           Common                        (findAllElfFilesInDirs)
+import           Data.ElfEdit                  (Shdr (shdrAddr, shdrName, shdrSize),
+                                                Symtab (symtabEntries),
                                                 SymtabEntry (steName, steValue),
-                                                decodeHeaderSymtab)
+                                                decodeHeaderSymtab,
+                                                headerNamedShdrs)
+import           Data.List                     (find)
+import           Data.Maybe                    (mapMaybe)
+-- import           Debug.Trace                   (trace)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
 import           Flexdis86.InstructionSet      (ppInstruction)
 import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
 import           Text.Printf                   (printf)
 
+import           Residual.Recognizers          (ResidualExplanation,
+                                                classifyInstrs,
+                                                ppResidualExplanation)
+
+newtype InclusiveRange w = InclusiveRange (w, w)
+
+ppInclusiveRange :: (Integral w, Show w) => InclusiveRange w -> String
+ppInclusiveRange (InclusiveRange (lo, hi)) = showHex lo "" <> " - " <> showHex hi ""
+
+shdrInclusiveRange :: (Eq w, Ord w, Num w) => Shdr nm w -> Maybe (InclusiveRange w)
+shdrInclusiveRange s =
+  let addr = shdrAddr s in
+  if addr == 0 || shdrSize s == 0
+    then Nothing
+    else Just $ InclusiveRange (shdrAddr s, shdrAddr s + shdrSize s - 1)
+
+inInclusiveRange :: (Num w, Ord w, Show w) => InclusiveRange w -> w -> Bool
+inInclusiveRange (InclusiveRange (lo, hi)) v = lo <= v && v <= hi
+
+type RangedShdr nm w = (InclusiveRange w, Shdr nm w)
+
+rangedShdr :: (Num w, Ord w) => Shdr nm w -> Maybe (RangedShdr nm w)
+rangedShdr s = (, s) <$> shdrInclusiveRange s
 
 runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
-runResidual _opts gopts ropts = do
-  files <- findAllElfFilesInDirs (roPaths gopts)
+runResidual _opts residualOpts reoptOpts = do
+  files <- findAllElfFilesInDirs (roPaths residualOpts)
   mapM_ performRecovery files
   where
     lOpts = LoadOptions {loadOffset = Nothing}
@@ -64,20 +96,22 @@ runResidual _opts gopts ropts = do
       summaryRef <- newIORef $ initReoptSummary fPath
       statsRef <- newIORef mempty
       let logger
-            | roVerboseMode ropts =
+            | roVerboseMode reoptOpts =
               joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
             | otherwise =
               recoverLogEvent summaryRef statsRef
       annDecl <-
         runReoptM printLogEvent
-          (resolveHeader (roHeader gopts) (roClangPath gopts)) >>=
+          (resolveHeader (roHeader residualOpts) (roClangPath residualOpts)) >>=
             either (error . show) return
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
+      let Right shdrs = headerNamedShdrs hdrInfo
+      let rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
       let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
       (_os, ds, recMod, _, _, _logEvents) <-
         handleEitherWithExit =<<
           runReoptM logger
-            (recoverX86Elf lOpts ropts annDecl unnamedFunPrefix hdrInfo)
+            (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
 
       let sl = memoryToSegmentList (memory ds)
           blocks = concatMap fnBlocks (recoveredDefs recMod)
@@ -88,8 +122,9 @@ runResidual _opts gopts ropts = do
           blockSegs = map blockSeg blocks
           residuals = foldl removeSegment sl blockSegs
 
-      putStrLn (ppSegmentList mSymTab (memory ds) residuals)
-      pure ()
+      if roOutputForSpreadsheet residualOpts
+        then outputForSpreadsheet mSymTab (memory ds) rangedShdrs residuals
+        else putStrLn (ppSegmentList mSymTab (memory ds) residuals)
 
 memoryToSegmentList :: Memory 64 -> SegmentList
 memoryToSegmentList m = SegmentList (map segBounds esegs) []
@@ -106,13 +141,6 @@ memoryToSegmentList m = SegmentList (map segBounds esegs) []
 
 --------------------------------------------------------------------------------
 -- Segment lists
-
-data ResidualExplanation
-  = NopPadding
-
-ppResidualExplanation :: ResidualExplanation -> String
-ppResidualExplanation = \case
-  NopPadding -> "NOP padding"
 
 data SegmentList = SegmentList
   { segments  :: [(Word64, Word64)]
@@ -136,7 +164,6 @@ ppSegmentList mSymTab m sl = unlines $
       unlines
       [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u ""
         ++ maybe "" ((" (" ++) . (++ ")")) symbolString ++ ":"
-      -- , maybe ":-(" byteStringtoHexString (segmentBytes m s)
       , maybe "" (ppDisSegment l) (segmentInstrs m s)
       ]
     ppExplained (s, e) = ppSegment s ++ " (" ++ ppResidualExplanation e ++ ")"
@@ -197,3 +224,23 @@ segmentInstrs m (l, u) = do
       let seg = forcedTakeMemChunks chunks (memWord $ u - l + 1)
       concat <$> traverse (fmap disassembleBuffer . chunkBytes) seg
     _ -> Nothing
+
+symbolAtAddress :: Maybe (Symtab 64) -> Word64 -> Maybe String
+symbolAtAddress mSymTab addr =
+  let symbolEntryForSegment symTab = Vec.find ((== addr) . steValue) $ symtabEntries @64 symTab in
+  let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
+  symbolForSegment =<< mSymTab
+
+outputForSpreadsheet :: Maybe (Symtab 64) -> Memory 64 -> [RangedShdr BSC.ByteString Word64] -> SegmentList -> IO ()
+outputForSpreadsheet mSymTab mem rangedShdrs residuals =
+  forM_ (segments residuals) $ \ (lo, hi) -> do
+    putStrLn
+      $ ppInclusiveRange (InclusiveRange (lo, hi))
+      <> maybe "" appendSymbol (symbolAtAddress mSymTab lo)
+      <> maybe "" appendSectionName (find ((`inInclusiveRange` lo) . fst) rangedShdrs)
+      <> maybe "" ppResidualExplanation (classifyInstrs =<< segmentInstrs mem (lo, hi))
+      -- Print the length if needed:
+      -- <> maybe "" ((" " <>) . show . length) (segmentInstrs mem (lo, hi))
+  where
+    appendSymbol s = " (" <> s <> ")"
+    appendSectionName (_, shdr) = " [" <> BSC.unpack (shdrName shdr) <> "]"

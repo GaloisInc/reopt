@@ -20,6 +20,8 @@ data ResidualOptions = ResidualOptions
   , -- | TODO: document me
     roHeader :: !(Maybe FilePath)
   , -- | TODO: document me
+    roOutputForSpreadsheet :: !Bool
+  , -- | TODO: document me
     roPaths :: ![FilePath]
   }
 
@@ -28,6 +30,7 @@ residualP = fmap RunResidual
   $ ResidualOptions
   <$> clangPathP
   <*> optional headerP
+  <*> outputForSpreadsheetP
   <*> some argsP
 
 --------------------------------------------------------------------------------
@@ -64,6 +67,12 @@ clangPathP =
               <> showDefaultWith (\s -> "`" ++ s ++ "'")
               <> help "Path to clang."
             )
+
+outputForSpreadsheetP :: Parser Bool
+outputForSpreadsheetP =
+  switch
+    $ long "output-for-spreadsheet"
+    <> help "Set to format the input for spreadsheet insertion."
 
 exportFnResultsP :: Parser FilePath
 exportFnResultsP =
