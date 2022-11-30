@@ -238,9 +238,10 @@ outputForSpreadsheet mSymTab mem rangedShdrs residuals =
       $ ppInclusiveRange (InclusiveRange (lo, hi))
       <> maybe "" appendSymbol (symbolAtAddress mSymTab lo)
       <> maybe "" appendSectionName (find ((`inInclusiveRange` lo) . fst) rangedShdrs)
-      <> maybe "" ppResidualExplanation (classifyInstrs =<< segmentInstrs mem (lo, hi))
+      <> maybe "" appendResidualExplanation (classifyInstrs =<< segmentInstrs mem (lo, hi))
       -- Print the length if needed:
       -- <> maybe "" ((" " <>) . show . length) (segmentInstrs mem (lo, hi))
   where
+    appendResidualExplanation e = " " <> ppResidualExplanation e
     appendSymbol s = " (" <> s <> ")"
     appendSectionName (_, shdr) = " [" <> BSC.unpack (shdrName shdr) <> "]"
