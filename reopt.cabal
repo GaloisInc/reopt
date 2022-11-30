@@ -107,13 +107,13 @@ library
     Reopt.Utils.Hex
     Reopt.Utils.Printf
 
-
   if flag(enable-arm)
     cpp-options: -DSUPPORT_ARM
     build-depends:
       hvex,
       macaw-arm-vex >= 0.1.0
 
+  ghc-options: -Wall -Werror
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
@@ -143,6 +143,7 @@ executable reopt
   other-modules:
     Paths_reopt
 
+  ghc-options: -Wall -Werror
   if flag(enable-hpc)
     ghc-options: -fhpc
 
@@ -176,13 +177,14 @@ executable reopt-explore
   other-modules: Paths_reopt
                , CommandLine
                , Residual
+               , Residual.Recognizers
                , LLVM
                , Common
 
   if flag(enable-hpc)
     ghc-options: -fhpc
 
-  ghc-options: -Wall
+  ghc-options: -Wall -Werror
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt-relink

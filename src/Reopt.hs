@@ -15,7 +15,7 @@ module Reopt
     runReoptM,
     reoptRunInit,
     reoptWrite,
-    reoptWriteTextual,    
+    reoptWriteTextual,
     reoptWriteBuilder,
     reoptWriteByteString,
     reoptWriteStrictByteString,
@@ -371,7 +371,7 @@ reoptLog e = ReoptM $ ReaderT $ \logger -> lift (logger e)
 --reoptEnd = reopt
 
 reoptWriteTextual :: ReoptFileType -> FilePath -> (Handle -> IO ()) -> ReoptM arch r ()
-reoptWriteTextual tp path f = 
+reoptWriteTextual tp path f =
   ReoptM $ ReaderT $ \_ -> ContT $ \c -> do
     mr <- try $ withFile path WriteMode f
     case mr of

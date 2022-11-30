@@ -98,7 +98,7 @@ parseQualType qm qtp =
     C.CStorageSpec _ : r -> parseQualType qm r
     C.CTypeSpec s : r ->
       case s of
-        C.CVoidType _ -> pure $! VoidAnnType
+        C.CVoidType _ -> pure VoidAnnType
         C.CCharType _ -> pure $! IAnnType 8
         C.CShortType n ->
           case qmLenMod qm of
@@ -113,8 +113,8 @@ parseQualType qm qtp =
             ShortLenMod -> longShortError n
             LongLenMod  -> parseQualType qm { qmLenMod = LongLongLenMod } r
             LongLongLenMod -> errorAt n $ "Type is too long."
-        C.CFloatType _  -> pure $! FloatAnnType
-        C.CDoubleType _ -> pure $! DoubleAnnType
+        C.CFloatType _  -> pure FloatAnnType
+        C.CDoubleType _ -> pure DoubleAnnType
         C.CSignedType _ -> parseQualType qm r
         C.CUnsigType _  -> parseQualType qm  r
         C.CBoolType _   -> pure $! IAnnType 1
@@ -181,7 +181,7 @@ parseFunDeclArg (C.CDecl ctype initDeclList n) = do
       errorAt n $ "Invalid declaration list:\n"
                    ++ show initDeclList ++ "\n"
 parseFunDeclArg (C.CStaticAssert _ _ n) =
-  errorAt n $ "Unexpected static assertion inside argument."
+  errorAt n "Unexpected static assertion inside argument."
 
 -- | Parse declarations
 parseExtDeclaration :: C.CExternalDeclaration C.NodeInfo -> CParser ()
@@ -200,8 +200,8 @@ parseExtDeclaration (C.CDeclExt d) = do
     C.CDecl [C.CTypeSpec ctype] [(Just declr, Nothing, Nothing)] n -> do
       case declr of
         C.CDeclr (Just fnIdent) (C.CFunDeclr cparams attrs _:derived) Nothing [] _ -> do
-          when (not (null attrs)) $ do
-            errorAt n $ "Functions may not have attributes."
+          unless (null attrs) $ do
+            errorAt n "Functions may not have attributes."
           case cparams of
             Left _ -> errorAt n "Function declarations require explicit arguments."
             Right (cArgs, varArgs) -> do
@@ -223,6 +223,8 @@ parseExtDeclaration (C.CDeclExt d) = do
                       ++ show masmName ++ "\n"
                       ++ show attrs ++ "\n"
                       ++ show declNode ++ "\n"
+    C.CDecl [C.CTypeSpec _] (_:_:_) n -> errorAt n "More than one thing in the list"
+    C.CDecl [C.CTypeSpec _] [_] n -> errorAt n "Not (J, N, N)"
     C.CDecl specs bleh n -> do
       errorAt n $ "Unexpected declaration:\n"
                  ++ show specs ++ "\n"

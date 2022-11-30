@@ -20,18 +20,18 @@ import qualified Data.Vector as V
 -- This needs to be both something other code can be parse, and
 -- capable of being rendered to the user.
 data AnnType
-   = VoidAnnType
-     -- ^ Void type (not directly allowed in arguments)
-   | IAnnType !Int
-     -- ^ An integer type with the given number of bits.
-   | FloatAnnType
-     -- ^ A C float (32bits IEEE)
-   | DoubleAnnType
-     -- ^ A C double (64bits IEEE)
-   | PtrAnnType !AnnType
-     -- ^ Pointer header type.
-   | TypedefAnnType !BSC.ByteString !AnnType
-     -- ^ A typedef with the name and resolved right hand side.
+  = VoidAnnType
+    -- ^ Void type (not directly allowed in arguments)
+  | IAnnType !Int
+    -- ^ An integer type with the given number of bits.
+  | FloatAnnType
+    -- ^ A C float (32bits IEEE)
+  | DoubleAnnType
+    -- ^ A C double (64bits IEEE)
+  | PtrAnnType !AnnType
+    -- ^ Pointer header type.
+  | TypedefAnnType !BSC.ByteString !AnnType
+    -- ^ A typedef with the name and resolved right hand side.
   deriving (Eq, Show, Read)
 
 -- | Pretty print the header type for the end user.
