@@ -103,11 +103,11 @@ data FnPhiVar arch (tp :: M.Type) =
   FnPhiVar { unFnPhiVar :: !FnAssignId
            , fnPhiVarType :: !(TypeRepr tp)
            , fnPhiVarRep :: !(BoundLoc (ArchReg arch) tp)
-             -- ^ Class representative for locations that lead to this
-             -- phi variable.
+             -- ^ Class representative for locations that lead to this phi
+             -- variable.
            , fnPhiVarLocations :: ![BoundLoc (ArchReg arch) tp]
-             -- ^ Locations read after this phi variable is introduced that
-             -- are equivalent to this phi variable.
+             -- ^ Locations read after this phi variable is introduced that are
+             -- equivalent to this phi variable.
            }
 
 instance HasRepr (FnPhiVar arch) TypeRepr where
@@ -151,12 +151,14 @@ data FunctionType (arch :: Type) =
 -- FnAssignRhs mutually recursive constructors
 
 -- | The right-hand side of a function assignment statement.
---
--- The first type paramter is the architecture.
--- The second type parameter is used for arguments to the operations described
--- by this.
--- The third type parameter is for the type of value returned.
-data FnAssignRhs (arch :: Type) (f :: M.Type -> Type) (tp :: M.Type) where
+data FnAssignRhs
+  -- Architecture
+  (arch :: Type)
+  -- Type constructor for the arguments of operations (in open recursion style)
+  (f :: M.Type -> Type)
+  -- Type of the value returned
+  (tp :: M.Type)
+  where
   -- | An expression with an undefined value.
   --
   -- NB. Undefined values in this representation are values with a
@@ -225,7 +227,7 @@ data FnValue (arch :: Type) (tp :: M.Type) where
   -- | Value is a function.
   --
   -- The int should be in the range @[0..argCount)@, and the type repr
-  -- is the type.
+  -- is the type of the argument.
   FnArg :: !Int -> !(TypeRepr tp) -> FnValue arch tp
 
 ------------------------------------------------------------------------
@@ -490,8 +492,8 @@ data FnMemAccessType
 
 -- | A block in the function.
 --
--- This representation is designed to be both easy to generate LLVM
--- and generate block annotations for `reopt-vcg`.
+-- This representation is designed to be both easy to generate LLVM and generate
+-- block annotations for `reopt-vcg`.
 data FnBlock arch
    = FnBlock { fbLabel :: !(FnBlockLabel (ArchAddrWidth arch))
                -- ^ Label for identifying block.
@@ -546,11 +548,11 @@ instance FoldFnValue FnBlock where
 ------------------------------------------------------------------------
 -- Function definitions
 
--- | A representation of machine-code function after stack alocation
--- and registers have been removed.
+-- | A representation of machine-code function after stack allocation and
+-- registers have been removed.
 --
--- This currently isn't the case, as Phi nodes still use `ArchReg` to
--- index the nodes.  However, this will be changed.
+-- This currently isn't the case, as Phi nodes still use `ArchReg` to index the
+-- nodes.  However, this will be changed.
 data Function arch
    = Function { fnAddr :: !(MemSegmentOff (ArchAddrWidth arch))
                 -- ^ The address for this function
@@ -570,7 +572,7 @@ data Function arch
 fnBlocks :: Function arch -> [FnBlock arch]
 fnBlocks f = fnEntryBlock f : fnRestBlocks f
 
-instance (FnArchConstraints arch
+instance ( FnArchConstraints arch
          , ShowF (ArchReg arch)
          , IsArchStmt (FnArchStmt arch)
          )
@@ -587,7 +589,7 @@ instance (FnArchConstraints arch
                 Just (Some tp) -> pretty tp
      in vcat [ "function " <> nm <> " @ " <> addr <> atp <> " : " <> rtp
              , lbrace
-             , nest 4 $ vcat (pretty <$> fnBlocks fn)
+             , indent 4 $ vcat (pretty <$> fnBlocks fn)
              , rbrace
              ]
 
@@ -603,8 +605,8 @@ data FunctionDecl arch =
                  funDeclNoReturn :: !Bool
                 }
 
--- | A set of function declarations and definitions needed to
--- construct an LLVM module.
+-- | A set of function declarations and definitions needed to construct an LLVM
+-- module.
 data RecoveredModule arch
    = RecoveredModule { recoveredDecls :: ![FunctionDecl arch]
                      , recoveredDefs  :: ![Function arch]
