@@ -45,16 +45,16 @@ export interface DisassemblyLineInformation {
     /** Where the bytes appear in the line. */
     bytesRange: vscode.Range
     /** Address of the first byte of this line. */
-    firstByteAddress: BigInt
+    firstByteAddress: bigint
     instruction: string
     /** Address of the last byte of this line. */
-    lastByteAddress: BigInt
+    lastByteAddress: bigint
     /** From the first address character to the end of the line. */
     wholeLineRange: vscode.Range
 }
 
 export type SerializationOf<T>
-    = T extends BigInt ? string
+    = T extends bigint ? string
     : T extends DisassemblyLineInformation ? SerializedDisassemblyLineInformation
     : T extends string ? string
     : T extends vscode.Position ? SerializedPosition
