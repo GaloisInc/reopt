@@ -2018,8 +2018,8 @@ isUsedPrefix :: BSC.ByteString -> SymAddrMap w -> Bool
 isUsedPrefix prefix sam = any (\s -> prefix `BSC.isPrefixOf` qsnBytes s) (Map.elems (samAddrMap sam))
 
 -- | Name of recovered function from a qualified symbol name.
-localFunctionName :: BSC.ByteString -> QualifiedSymbolName -> MemSegmentOff w -> BSC.ByteString
-localFunctionName prefix qnm segOff =
+localFunctionName :: BSC.ByteString -> MemSegmentOff w -> QualifiedSymbolName -> BSC.ByteString
+localFunctionName prefix segOff qnm =
   if qsnGlobal qnm
     then qsnBytes qnm
     else
@@ -2049,7 +2049,7 @@ recoveredFunctionName ::
   BSC.ByteString
 recoveredFunctionName m prefix segOff =
   case Map.lookup segOff (samAddrMap m) of
-    Just qname -> localFunctionName prefix qname segOff
+    Just qname -> localFunctionName prefix segOff qname
     Nothing -> nosymFunctionName prefix segOff
 
 $(pure [])
@@ -2203,7 +2203,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
   let funNameMap :: Map (MemSegmentOff 64) BS.ByteString
       funNameMap =
         Map.mapWithKey
-          (\addr qnm -> localFunctionName unnamedFunPrefix qnm addr)
+          (localFunctionName unnamedFunPrefix)
           (samAddrMap symAddrMap)
           <> Map.fromList
             [ (addr, nm)
@@ -2237,7 +2237,7 @@ doRecoverX86 unnamedFunPrefix sysp symAddrMap debugTypeMap discState = do
       let dnm = discoveredFunSymbol finfo
       let fnId = funId faddr dnm
       let nm = Map.findWithDefault (error "Address undefined in funNameMap") faddr funNameMap
-      case (\(_,tp) -> tp) <$> Map.lookup nm funTypeMap of
+      case snd <$> Map.lookup nm funTypeMap of
         Nothing -> do
           -- TODO: Check an error has already been reported on this.
           pure Nothing

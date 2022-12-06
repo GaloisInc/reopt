@@ -668,7 +668,7 @@ argsReoptOptions args = do
               roDynDepPaths = dynDepPath args,
               roDynDepDebugPaths = dynDepDebugPath args ++ gdbDebugDirs,
               roTraceUnification = traceTypeUnification args
-              
+
             }
 
 -- | Discovery symbols in program and show function CFGs.
@@ -739,7 +739,7 @@ showConstraints args = do -- FIXME: copied from main performReopt command
 
     pure (genModuleConstraints recMod (memory discState) (traceTypeUnification args))
 
-  mc <-   handleEitherWithExit mr
+  mc <- handleEitherWithExit mr
 
   displayConstraintsInformation mc
 
@@ -862,8 +862,8 @@ performReopt args = do
     case fnsExportPath args of
       Nothing -> pure ()
       Just path -> do
-        reoptWrite FunsFileType path $ \h -> do
-          mapM_ (PP.hPutDoc h . PP.pretty) (recoveredDefs recMod)
+        reoptWrite FunsFileType path $ \h ->
+          PP.hPutDoc h $ PP.vcat $ PP.punctuate PP.line $ map PP.pretty $ recoveredDefs recMod
 
     -- Write invariants
     case invariantsExportPath args of
@@ -888,7 +888,7 @@ performReopt args = do
           ]
         prettyWarnings =
           [ "# Warning: " <> PP.viaShow w | w <- mcWarnings moduleConstraints ]
-          
+
     case typedFnsExportPath args of
       Nothing -> pure ()
       Just path -> do

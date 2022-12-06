@@ -186,7 +186,7 @@ inSolverM :: SolverM a -> CGenM ctxt arch a
 inSolverM = CGenM . lift . lift
 
 runCGenM :: Memory (ArchAddrWidth arch) ->
-            Bool -> 
+            Bool ->
             CGenM CGenGlobalContext arch a ->
             a
 runCGenM mem trace (CGenM m) = runSolverM trace ptrWidth $ do
@@ -199,7 +199,7 @@ runCGenM mem trace (CGenM m) = runSolverM trace ptrWidth $ do
   evalStateT (runReaderT m ctxt0) st0
   where
     ptrWidth = widthVal (memWidth mem)
-    
+
     st0 = CGenState { _assignTyVars  = mempty
                     , _warnings      = mempty
                     }
@@ -356,7 +356,7 @@ maybeGlobalTC :: FnArchConstraints arch =>
                  CGenM CGenBlockContext arch ()
 maybeGlobalTC ty soff = do
   rs <- askContext ( cgenFunctionContext . cgenModuleContext
-                     . cgenGlobalContext . cgenMemoryRegions)  
+                     . cgenGlobalContext . cgenMemoryRegions)
   let rowv = Map.findWithDefault (error "Missing segment region") (segoffSegment soff) rs
   inSolverM (S.maybeGlobalTC ty rowv (fromIntegral $ segoffOffset soff))
 
@@ -389,7 +389,7 @@ emitPtrSubSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrSubSymbolic rty t1 t2 = inSolverM (ptrSubTC rty t1 t2 OCSymbolic)
 
 emitPtrSubOffset :: Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
-emitPtrSubOffset rty t1 t2 off = do 
+emitPtrSubOffset rty t1 t2 off = do
   awidth <- widthVal <$> addrWidth
   if testBit off (awidth - 1)
     then emitPtrAddOffset rty t1 t2 (2 ^ awidth - off)
@@ -601,7 +601,7 @@ genMemOp ty ptr (Some tp) = do
   case tp of
     BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy (widthVal n) ty
     _ -> pure ()
-    
+
   -- case ptr of
   --   FnAssignedValue FnAssignment { fnAssignRhs = FnEvalApp (BVAdd _sz p q) }
   --     -- We rely on macaw to have constant folded adds, so only one
@@ -648,7 +648,7 @@ genFnAssignment a = do
         Nothing
           | addr == 0 -> pure () -- could be NULL or 0
           | otherwise -> inSolverM . isNumTC ty . widthVal =<< addrWidth
-        Just soff -> maybeGlobalTC ty soff 
+        Just soff -> maybeGlobalTC ty soff
 
 -- | This helper gives us the bitwidth of the types we can read/write from
 -- memory.
@@ -838,14 +838,14 @@ genModuleConstraints ::
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
   Memory (ArchAddrWidth arch) ->
-  Bool -> 
+  Bool ->
   ModuleConstraints arch
 genModuleConstraints m mem trace = runCGenM mem trace $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
   -- traceM (show (memSegmentMap mem))
-  
+
   let doDecl d = do
         fty <- freshFunctionTypeTyVars (funDeclName d) (funDeclType d)
         -- Declarations don't need a different type variable when called since

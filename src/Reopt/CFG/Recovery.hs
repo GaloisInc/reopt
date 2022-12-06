@@ -8,7 +8,6 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
@@ -20,9 +19,9 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+
 module Reopt.CFG.Recovery
   ( recoverFunction
   , RecoveredFunction(..)
@@ -185,26 +184,25 @@ $(pure [])
 
 -- | This describes the registers and return value of an x86_64 function.
 --
--- This representation does not support arguments that spilled on the
--- stack, but this would be a good feature to add.
+-- This representation does not support arguments that spilled on the stack, but
+-- this would be a good feature to add.
 --
--- It uses a list for arguments so that we can use C headers and
--- ensure the arguments appear in a particular order (e.g.q from the
--- binary perspective a function that takes two integers followed by a
--- float is ABI compatible with a function that takes a float
--- followed by two integers.
+-- It uses a list for arguments so that we can use C headers and ensure the
+-- arguments appear in a particular order (e.g. from the binary perspective a
+-- function that takes two integers followed by a float is ABI compatible with a
+-- function that takes a float followed by two integers).
 data X86FunTypeInfo
    = X86NonvarargFunType [X86ArgInfo] [Some X86RetInfo]
    | X86PrintfFunType !Int
-     -- ^ @X86PrintfFunType n@ denotes a function that takes @n@
-     -- 64-bit bitvectors as arguments followed by a printf-style
-     -- format string that defines the number of subsequent
-     -- arguments.
+     -- ^ @X86PrintfFunType n@ denotes a function that takes @n@ 64-bit
+     -- bitvectors as arguments followed by a printf-style format string that
+     -- defines the number of subsequent arguments.
      --
      -- The function must return an int.
    | X86OpenFunType
      -- ^ @X86OpenFunType@ denotes the rtype of open.
   deriving (Eq, Show)
+
 ------------------------------------------------------------------------
 -- Embedding
 
@@ -523,7 +521,7 @@ recoverCValue cv = do
     -- We want to name constants that could be pointers to globals to
     -- make giving them types easier later.
     emitNewAssign = evalAssignRhs . FnAddrWidthConstant
-      
+
 
 $(pure [])
 
@@ -579,9 +577,9 @@ recoverInitialReg reg = do
   cns <- gets $ biStartConstraints . rsBlockInvariants
   case locDomain cns (RegLoc reg) of
     InferredStackOffset _ ->
-      throwErrorAt ReoptUnsupportedFnValueTag $ "Stack offset escaped."
+      throwErrorAt ReoptUnsupportedFnValueTag "Stack offset escaped."
     FnStartRegister _ ->
-      throwErrorAt ReoptUnsupportedFnValueTag $ "Callee-saved register escaped."
+      throwErrorAt ReoptUnsupportedFnValueTag "Callee-saved register escaped."
     RegEqualLoc lr -> do
       m <- gets rsPhiLocMap
       case MapF.lookup lr m of
@@ -709,7 +707,7 @@ recoverCallTarget = do
   mp <- gets $ biCallFunType . rsBlockInvariants
   case mp of
     Just p -> pure p
-    Nothing -> error $ "Expected call return type."
+    Nothing -> error "Expected call return type."
 
 ------------------------------------------------------------------------
 -- recoverStmt
@@ -1227,20 +1225,18 @@ retReturnType [] = Nothing
 retReturnType [r] = Just $! mapSome typeRepr r
 retReturnType l =
  case fromSomeList l of
-   Some rets -> Just $! (Some $ TupleTypeRepr (fmapFC typeRepr rets))
+   Some rets -> Just $! Some $ TupleTypeRepr (fmapFC typeRepr rets)
 
--- | Generate FnBlock fro mparsed block
+-- | Generate FnBlock from parsed block
 recoverBlock :: forall ids
              .  ParsedBlock X86_64 ids
                 -- ^ Entire block.
              -> Recover ids (FnTermStmt X86_64)
 recoverBlock b = do
-  -- Recover statements
-  --
-  -- Note that this will process the write of the return address
-  -- of the stack, but this should not count as a demanded value
-  -- and not affect the LLVM.  However, it is needed to ensure
-  -- annotations are generated for all memory events.
+  -- Note that this will process the write of the return address of the stack,
+  -- but this should not count as a demanded value and not affect the LLVM.
+  -- However, it is needed to ensure annotations are generated for all memory
+  -- events.
   recoverStmts (pblockStmts b)
   let tstmtIdx = length (pblockStmts b)
   -- Block recovery may need to strip statements, so we case split on terminal statement.
@@ -1461,7 +1457,7 @@ x86TermStmtUsage :: SyscallPersonality
 x86TermStmtUsage _ Hlt _ _ = pure mempty
 x86TermStmtUsage _ UD2 _ _ = pure mempty
 
--- | This contians a reference to the function to call, the arguments and return register.
+-- | This contains a reference to the function to call, the arguments and return register.
 type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
                                    , [X86ArgInfo]
                                    , [Some X86RetInfo]
@@ -1695,9 +1691,9 @@ x86TranslateCallType _mem nm regs x86Ftp@(X86NonvarargFunType args rets) = do
   let ftp = mkX86FunctionType x86Ftp
   let v = FnFunctionEntryValue ftp nm
   Right CallRegs { callRegsFnType = (v, args, rets)
-                  , callArgValues = argValue regs <$> args
-                  , callReturnRegs = viewSome retReg <$> rets
-                  }
+                 , callArgValues = argValue regs <$> args
+                 , callReturnRegs = viewSome retReg <$> rets
+                 }
 x86TranslateCallType mem nm regs (X86PrintfFunType icnt0) = do
   let resolveInitArgs 0 s = Right s
       resolveInitArgs n s = do
@@ -1740,16 +1736,16 @@ x86TranslateCallType _mem nm regs x86Ftp@X86OpenFunType = do
                   , callReturnRegs = [Some (X86_GP F.RAX)]
                   }
 
--- | Compute map from block starting addresses to the dependencies
--- required to run block.
+-- | Compute map from block starting addresses to the dependencies required to
+-- run block.
 x86CallRegs ::
   forall ids .
   Memory 64 ->
-  -- | Map function starting addresses to the function name.
+  -- | Maps start address of function to the function name.
   (MemSegmentOff 64 -> Maybe BSC.ByteString) ->
   -- | Maps function names to be exported to the type associated with that name.
   (BSC.ByteString -> Maybe X86FunTypeInfo) ->
-  -- | Address of the call statement
+  -- | Address of the call statement.
   MemSegmentOff 64 ->
   -- | Registers when call occurs.
   RegState X86Reg (Value X86_64 ids) ->
@@ -1828,22 +1824,18 @@ x86BlockInvariants
      -- ^ return arguments for function
   -> Either (RegisterUseError X86_64) (BlockInvariantMap X86_64 ids)
 x86BlockInvariants sysp mem funNameMap funTypeMap fInfo rets = do
-  -- Get return register from type.
-  let retRegs = viewSome retReg <$> rets
   let useCtx = RegisterUseContext
               { archCallParams = x86_64CallParams
               , archPostTermStmtInvariants = x86TermStmtNext
               , calleeSavedRegisters =
                   [ Some RBP, Some RBX, Some R12, Some R13, Some R14, Some R15 ]
               , callScratchRegisters = []
-              , returnRegisters = retRegs
+              , returnRegisters = viewSome retReg <$> rets
               , reguseTermFn = x86TermStmtUsage sysp
               , callDemandFn = x86CallRegs mem funNameMap funTypeMap
               , demandContext = x86DemandContext
               }
-  case runExcept (registerUse useCtx fInfo) of
-    Left e -> Left e
-    Right v -> Right v
+  runExcept (registerUse useCtx fInfo)
 
 data RecoveredFunction a =
   RecoveredFunction

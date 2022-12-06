@@ -148,12 +148,12 @@ solveHeadReset fld doit = do
       resetSt' <- lift $ do
         oldSt   <- get
         put resetSt
-        
+
         -- Forget everything we know in resetSt about the eqvs for tv
         let eqs   = eqvClasses (ctxTyVars oldSt)
             eqsTv = Map.findWithDefault [] tv eqs
         traverse_ undefineTyVar eqsTv
-        
+
         -- FIXME: gross
         defineTyVar tv (ConflictTy (ptrWidth resetSt))
         -- FIXME: this could cause problems if we allocate tyvars after
