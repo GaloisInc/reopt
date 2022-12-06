@@ -8,8 +8,8 @@ export async function checkMagicNumber(
 
     const fd = await Promisified.open(filePath, 'r')
     const buffer = new Uint8Array(elfMagicNumber.length)
-    const bytesRead = await Promisified.read(fd, buffer, 0, elfMagicNumber.length, 0)
-    if (bytesRead !== elfMagicNumber.length) {
+    const read = await Promisified.read(fd, buffer, 0, elfMagicNumber.length, 0)
+    if (read.bytesRead !== elfMagicNumber.length) {
         return false
     }
     Promisified.close(fd)

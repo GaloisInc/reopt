@@ -41,7 +41,7 @@ export const deserializeSymbolInformation
 
 
 export const deserializeBigInt
-    : DeserializerFor<BigInt>
+    : DeserializerFor<bigint>
     = (s) => {
         return BigInt(`0x${s}`)
     }

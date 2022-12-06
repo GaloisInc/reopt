@@ -50,7 +50,7 @@ export const serializeSymbolInformation
 
 
 export const serializeBigInt
-    : SerializerFor<BigInt>
+    : SerializerFor<bigint>
     = (bi) => {
         // currently using BigInt for 64-bit addresses, so hex encoding is
         // pleasant
