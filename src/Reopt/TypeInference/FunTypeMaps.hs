@@ -79,7 +79,7 @@ data SymAddrMap w =
                --
                -- In the case where multiple symbols have the same address, we
                -- use the first symbol with that address in the symbol table but
-               -- prioritze global symbols over local symbols.
+               -- prioritize global symbols over local symbols.
              }
 
 -- | Return list of names and addresses stored in sym addr map

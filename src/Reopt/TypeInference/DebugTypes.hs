@@ -359,7 +359,7 @@ resolveDebugFunTypes resolveFn annMap elfInfo = do
         case Map.findWithDefault [] nm secDataMap of
           [] -> pure BSC.empty
           (_, s):r -> do
-            when (not (null r)) $ reoptTypeWarning $ printf "Multiple %s sections in Elf file." (BSC.unpack nm)
+            unless (null r) $ reoptTypeWarning $ printf "Multiple %s sections in Elf file." (BSC.unpack nm)
             pure $! Elf.elfSectionData s
       r <- resolveCompileUnits resolveFn annMap (Dwarf.firstCUContext end sections)
       incCompLog (ReoptGlobalStepFinished DebugTypeInference ())
