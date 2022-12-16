@@ -1,6 +1,5 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE PatternSynonyms     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -32,11 +31,13 @@ import           Reopt                         (LoadOptions (LoadOptions),
                                                 parseElfHeaderInfo64,
                                                 recoverX86Elf, resolveHeader,
                                                 roVerboseMode, runReoptM)
-import           Reopt.CFG.FnRep               (FnBlock, fbLabel, fbSize,
+import           Reopt.CFG.FnRep               (FnBlock, RecoveredModule,
+                                                fbLabel, fbSize,
                                                 fnBlockLabelAddr, fnBlocks,
                                                 recoveredDefs)
-import           Reopt.Events                  (initReoptSummary, joinLogEvents,
-                                                printLogEvent, recoverLogEvent)
+import           Reopt.Events                  (ReoptLogEvent, initReoptSummary,
+                                                joinLogEvents, printLogEvent,
+                                                recoverLogEvent)
 import           Reopt.Utils.Exit              (checkedReadFile,
                                                 handleEitherStringWithExit,
                                                 handleEitherWithExit)
@@ -44,7 +45,8 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 import           CommandLine                   (Options,
                                                 ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths))
 import           Common                        (findAllElfFilesInDirs)
-import           Data.ElfEdit                  (Shdr (shdrAddr, shdrName, shdrSize),
+import           Data.ElfEdit                  (ElfHeaderInfo,
+                                                Shdr (shdrAddr, shdrName, shdrSize),
                                                 Symtab (symtabEntries),
                                                 SymtabEntry (steName, steValue),
                                                 decodeHeaderSymtab,
@@ -55,12 +57,11 @@ import           Data.Maybe                    (mapMaybe)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
 import           Flexdis86.InstructionSet      (ppInstruction)
-import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
-import           Text.Printf                   (printf)
-
 import           Residual.Recognizers          (ResidualExplanation,
                                                 classifyInstrs,
                                                 ppResidualExplanation)
+import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
+import           Text.Printf                   (printf)
 
 newtype InclusiveRange w = InclusiveRange (w, w)
 
@@ -82,49 +83,72 @@ type RangedShdr nm w = (InclusiveRange w, Shdr nm w)
 rangedShdr :: (Num w, Ord w) => Shdr nm w -> Maybe (RangedShdr nm w)
 rangedShdr s = (, s) <$> shdrInclusiveRange s
 
+createLogger :: ReoptOptions -> FilePath -> IO (ReoptLogEvent arch -> IO ())
+createLogger reoptOpts filePath = do
+  summaryRef <- newIORef $ initReoptSummary filePath
+  statsRef <- newIORef mempty
+  return $
+    if roVerboseMode reoptOpts
+      then joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
+      else recoverLogEvent summaryRef statsRef
+
+performRecovery ::
+  ResidualOptions ->
+  ReoptOptions ->
+  (a, FilePath) ->
+  IO (ElfHeaderInfo 64, DiscoveryState X86_64, RecoveredModule X86_64)
+performRecovery residualOpts reoptOpts (_idx, fPath) = do
+  let lOpts = LoadOptions {loadOffset = Nothing}
+  let unnamedFunPrefix = BSC.pack "reopt"
+  -- hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
+  --                    ++ "] Analyzing " ++ fPath ++ " ..."
+  bs <- checkedReadFile fPath
+  annDecl <-
+    runReoptM printLogEvent
+      (resolveHeader (roHeader residualOpts) (roClangPath residualOpts)) >>=
+        either (error . show) return
+  hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
+  logger <- createLogger reoptOpts fPath
+  (_os, ds, recoveredModule, _, _, _logEvents) <-
+    handleEitherWithExit =<<
+       runReoptM logger
+         (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
+  return (hdrInfo, ds, recoveredModule)
+
+computeResidualSegments ::
+  DiscoveryState X86_64 ->
+  RecoveredModule X86_64 ->
+  IO SegmentList
+computeResidualSegments discoveryState recoveredModule = do
+  let allMemorySegments = memoryToSegmentList (memory discoveryState)
+  let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
+  let blockSeg (b :: FnBlock X86_64) =
+        case segoffAsAbsoluteAddr (fnBlockLabelAddr (fbLabel b)) of
+          Nothing -> error "relative block"
+          Just w  -> (memWordValue w, memWordValue w + fbSize b - 1)
+  let blockSegs = map blockSeg blocks
+  return $ foldl removeSegment allMemorySegments blockSegs
+
+displayResiduals :: ResidualOptions -> Memory 64 -> ElfHeaderInfo 64 -> SegmentList -> IO ()
+displayResiduals residualOpts mem hdrInfo residuals = do
+  putStrLn $ "Residual footprint size: " <> show (residualFootprint residuals) <> " bytes"
+  let Right shdrs = headerNamedShdrs hdrInfo
+  let rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
+  let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
+  if roOutputForSpreadsheet residualOpts
+    then outputForSpreadsheet mSymTab mem rangedShdrs residuals
+    else putStrLn (ppSegmentList mSymTab mem residuals)
+
 runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
 runResidual _opts residualOpts reoptOpts = do
   files <- findAllElfFilesInDirs (roPaths residualOpts)
-  mapM_ performRecovery files
-  where
-    lOpts = LoadOptions {loadOffset = Nothing}
-    unnamedFunPrefix = BSC.pack "reopt"
-    performRecovery (_idx, fPath) = do
-      -- hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
-      --                    ++ "] Analyzing " ++ fPath ++ " ..."
-      bs <- checkedReadFile fPath
-      summaryRef <- newIORef $ initReoptSummary fPath
-      statsRef <- newIORef mempty
-      let logger
-            | roVerboseMode reoptOpts =
-              joinLogEvents printLogEvent (recoverLogEvent summaryRef statsRef)
-            | otherwise =
-              recoverLogEvent summaryRef statsRef
-      annDecl <-
-        runReoptM printLogEvent
-          (resolveHeader (roHeader residualOpts) (roClangPath residualOpts)) >>=
-            either (error . show) return
-      hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-      let Right shdrs = headerNamedShdrs hdrInfo
-      let rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
-      let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
-      (_os, ds, recMod, _, _, _logEvents) <-
-        handleEitherWithExit =<<
-          runReoptM logger
-            (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
+  forM_ files $ \ file -> do
+    (hdrInfo, discoveryState, recoveredModule) <- performRecovery residualOpts reoptOpts file
+    residuals <- computeResidualSegments discoveryState recoveredModule
+    displayResiduals residualOpts (memory discoveryState) hdrInfo residuals
 
-      let sl = memoryToSegmentList (memory ds)
-          blocks = concatMap fnBlocks (recoveredDefs recMod)
-          blockSeg (b :: FnBlock X86_64) =
-            case segoffAsAbsoluteAddr (fnBlockLabelAddr (fbLabel b)) of
-              Nothing -> error "relative block"
-              Just w  -> (memWordValue w, memWordValue w + fbSize b - 1)
-          blockSegs = map blockSeg blocks
-          residuals = foldl removeSegment sl blockSegs
-
-      if roOutputForSpreadsheet residualOpts
-        then outputForSpreadsheet mSymTab (memory ds) rangedShdrs residuals
-        else putStrLn (ppSegmentList mSymTab (memory ds) residuals)
+residualFootprint :: SegmentList -> Word64
+residualFootprint = sum . map (uncurry subtract) . segments
 
 memoryToSegmentList :: Memory 64 -> SegmentList
 memoryToSegmentList m = SegmentList (map segBounds esegs) []
