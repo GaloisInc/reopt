@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
@@ -51,9 +52,8 @@ import           Data.ElfEdit                  (ElfHeaderInfo,
                                                 SymtabEntry (steName, steValue),
                                                 decodeHeaderSymtab,
                                                 headerNamedShdrs)
-import           Data.List                     (find)
-import           Data.Maybe                    (mapMaybe)
--- import           Debug.Trace                   (trace)
+import           Data.List                     (find, partition)
+import           Data.Maybe                    (isJust, mapMaybe)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
 import           Flexdis86.InstructionSet      (ppInstruction)
@@ -63,7 +63,7 @@ import           Residual.Recognizers          (ResidualExplanation,
 import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
 import           Text.Printf                   (printf)
 
-newtype InclusiveRange w = InclusiveRange (w, w)
+newtype InclusiveRange w = InclusiveRange { getInclusiveRange :: (w, w) }
 
 ppInclusiveRange :: (Integral w, Show w) => InclusiveRange w -> String
 ppInclusiveRange (InclusiveRange (lo, hi)) = showHex lo "" <> " - " <> showHex hi ""
@@ -118,7 +118,7 @@ performRecovery residualOpts reoptOpts (_idx, fPath) = do
 computeResidualSegments ::
   DiscoveryState X86_64 ->
   RecoveredModule X86_64 ->
-  IO SegmentList
+  IO [Segment]
 computeResidualSegments discoveryState recoveredModule = do
   let allMemorySegments = memoryToSegmentList (memory discoveryState)
   let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
@@ -129,15 +129,20 @@ computeResidualSegments discoveryState recoveredModule = do
   let blockSegs = map blockSeg blocks
   return $ foldl removeSegment allMemorySegments blockSegs
 
-displayResiduals :: ResidualOptions -> Memory 64 -> ElfHeaderInfo 64 -> SegmentList -> IO ()
+displayResiduals :: ResidualOptions -> Memory 64 -> ElfHeaderInfo 64 -> [Segment] -> IO ()
 displayResiduals residualOpts mem hdrInfo residuals = do
-  putStrLn $ "Residual footprint size: " <> show (residualFootprint residuals) <> " bytes"
   let Right shdrs = headerNamedShdrs hdrInfo
   let rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
   let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
-  if roOutputForSpreadsheet residualOpts
-    then outputForSpreadsheet mSymTab mem rangedShdrs residuals
-    else putStrLn (ppSegmentList mSymTab mem residuals)
+  let residualInfos = constructResidualRangeInfos mSymTab mem rangedShdrs residuals
+  let (explained, unexplained) = partition (isJust . rriExplanation) residualInfos
+  let residualFootprint = segmentsFootprint residuals
+  let explainedFootprint = segmentsFootprint $ map (getInclusiveRange . rriRange) explained
+  let unexplainedFootprint = segmentsFootprint $ map (getInclusiveRange . rriRange) unexplained
+  let whichDisplayResiduals
+        | roOutputForSpreadsheet residualOpts = displayResidualsForSpreadsheet
+        | otherwise = displayResidualsForHuman
+  putStrLn $ whichDisplayResiduals residualInfos residualFootprint explainedFootprint unexplainedFootprint
 
 runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
 runResidual _opts residualOpts reoptOpts = do
@@ -147,11 +152,11 @@ runResidual _opts residualOpts reoptOpts = do
     residuals <- computeResidualSegments discoveryState recoveredModule
     displayResiduals residualOpts (memory discoveryState) hdrInfo residuals
 
-residualFootprint :: SegmentList -> Word64
-residualFootprint = sum . map (uncurry subtract) . segments
+segmentsFootprint :: [Segment] -> Word64
+segmentsFootprint = sum . map (uncurry subtract)
 
-memoryToSegmentList :: Memory 64 -> SegmentList
-memoryToSegmentList m = SegmentList (map segBounds esegs) []
+memoryToSegmentList :: Memory 64 -> [(Word64, Word64)]
+memoryToSegmentList m = map segBounds esegs
   where
     esegs = filter (Perm.isExecutable . segmentFlags) (memSegments m)
     -- assumes sorted, non-overlapping
@@ -166,31 +171,29 @@ memoryToSegmentList m = SegmentList (map segBounds esegs) []
 --------------------------------------------------------------------------------
 -- Segment lists
 
-data SegmentList = SegmentList
-  { segments  :: [(Word64, Word64)]
-  , explained :: [((Word64, Word64), ResidualExplanation)]
-  }
+type Segment = (Word64, Word64)
 
 -- byteStringtoHexString :: BSC.ByteString -> String
 -- byteStringtoHexString = BSC.foldr ((<>) . printf "%02x") ""
 
-ppSegmentList :: Maybe (Symtab 64) -> Memory 64 -> SegmentList -> String
-ppSegmentList mSymTab m sl = unlines $
-     [ "Residual segments (unexplained):" ]
-  ++ map ppSegment (segments sl)
-  ++ [ "Residual segments (explained)" ]
-  ++ map ppExplained (explained sl)
+displayResidualsForHuman :: [ResidualRangeInfo] -> Word64 -> Word64 -> Word64 -> String
+displayResidualsForHuman ranges residuals explained unexplained =
+  unlines $
+    [ "Residual footprint:      " <> show residuals <> " bytes"
+    , "→ Explained footprint:   " <> show explained <> " bytes"
+    , "→ Unexplained footprint: " <> show unexplained <> " bytes"
+    ]
+    ++ map ppResidualRange ranges
   where
-    ppSegment s@(l, u) =
-      let symbolEntryForSegment symTab = Vec.find ((== l) . steValue) $ symtabEntries @64 symTab in
-      let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
-      let symbolString = symbolForSegment =<< mSymTab in
+    ppResidualRange info =
+      let InclusiveRange (l, u) = rriRange info in
       unlines
       [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u ""
-        ++ maybe "" ((" (" ++) . (++ ")")) symbolString ++ ":"
-      , maybe "" (ppDisSegment l) (segmentInstrs m s)
+        ++ maybe "" ((" (" ++) . (++ ")")) (rriSymbolName info) ++ ":"
+        ++ maybe "" ((" (" ++) . (++ ")")) (ppResidualExplanation <$> rriExplanation info) ++ ":"
+        -- Temporarily disabling this, only useful for investigative purposes
+      , if False then maybe "" (ppDisSegment l) (rriInstructions info) else ""
       ]
-    ppExplained (s, e) = ppSegment s ++ " (" ++ ppResidualExplanation e ++ ")"
 
 -- | Pretty-prints a disassembled instruction, taking the block offset so as to
 -- print the instruction address.
@@ -205,10 +208,32 @@ ppDisInstr ofs da =
 ppDisSegment :: Word64 -> [DisassembledAddr] -> String
 ppDisSegment ofs = concatMap (ppDisInstr (fromIntegral ofs))
 
-removeSegment :: SegmentList -> (Word64, Word64) -> SegmentList
-removeSegment sl (l, u) = SegmentList (ls ++ splitSegs us) []
+-- | Splits one segment so that no remaining segment overlaps the addresses.
+splitSegmentAtAddresses :: [Word64] -> Segment -> [Segment]
+splitSegmentAtAddresses addrs seg@(lo, hi) =
+  case find (inInclusiveRange (InclusiveRange (lo + 1, hi))) addrs of
+    Nothing    -> [seg]
+    Just split -> (lo, split - 1) : splitSegmentAtAddresses addrs (split, hi)
+
+-- | Splits a list of segments into a more fine-grained list of segments, based
+-- on the list of addresses to split at.  This allows us to cut large residual
+-- ranges along the addresses of known symbols, so that residual analysis can be
+-- more precise.
+splitAtAddresses :: [Word64] -> [Segment] -> [Segment]
+splitAtAddresses addrs segs =
+  [ final_seg
+  | initial_seg <- segs
+  , final_seg <- splitSegmentAtAddresses addrs initial_seg
+  ]
+
+-- >>> splitAtAddresses [2, 5, 7] [(1, 5), (6, 7)]
+-- [(1,1),(2,4),(5,5),(6,6),(7,7)]
+
+-- NOTE: assumes a sorted segment list
+removeSegment :: [Segment] -> (Word64, Word64) -> [Segment]
+removeSegment sl (l, u) = ls ++ splitSegs us
   where
-    (ls, us) = span (\(_, u') -> u' < l) (segments sl)
+    (ls, us) = span (\(_, u') -> u' < l) sl
     splitSegs [] = []
     -- l <= u', we have the following cases, assume R is the
     -- region to delete and C is the current region
@@ -255,17 +280,52 @@ symbolAtAddress mSymTab addr =
   let symbolForSegment = fmap (BSC.unpack . steName) . symbolEntryForSegment in
   symbolForSegment =<< mSymTab
 
-outputForSpreadsheet :: Maybe (Symtab 64) -> Memory 64 -> [RangedShdr BSC.ByteString Word64] -> SegmentList -> IO ()
-outputForSpreadsheet mSymTab mem rangedShdrs residuals =
-  forM_ (segments residuals) $ \ (lo, hi) -> do
-    putStrLn
-      $ ppInclusiveRange (InclusiveRange (lo, hi))
-      <> maybe "" appendSymbol (symbolAtAddress mSymTab lo)
-      <> maybe "" appendSectionName (find ((`inInclusiveRange` lo) . fst) rangedShdrs)
-      <> maybe "" appendResidualExplanation (classifyInstrs =<< segmentInstrs mem (lo, hi))
-      -- Print the length if needed:
-      -- <> maybe "" ((" " <>) . show . length) (segmentInstrs mem (lo, hi))
+data ResidualRangeInfo = ResidualRangeInfo
+  { rriRange        :: InclusiveRange Word64
+  , -- | Just the difference between the bounds of the range, for convenience
+    rriFootprint    :: Word64
+  , rriSection      :: Maybe (Shdr BSC.ByteString Word64)
+  , rriSymbolName   :: Maybe String
+  , rriInstructions :: Maybe [DisassembledAddr]
+  , rriExplanation  :: Maybe ResidualExplanation
+  }
+
+constructResidualRangeInfos ::
+  Maybe (Symtab 64) ->
+  Memory 64 ->
+  [RangedShdr BSC.ByteString Word64] ->
+  [Segment] ->
+  [ResidualRangeInfo]
+constructResidualRangeInfos mSymTab mem rangedShdrs residuals =
+  let allSymbols = map steValue . Vec.toList . symtabEntries @64 <$> mSymTab in
+  let fineGrainedResiduals = splitAtAddresses (concat allSymbols) residuals in
+  flip map fineGrainedResiduals $ \ range@(lo, hi) ->
+    let rriInstructions = segmentInstrs mem range in
+    ResidualRangeInfo {
+      rriRange = InclusiveRange range,
+      rriFootprint = hi - lo,
+      rriSection = snd <$> find ((`inInclusiveRange` lo) . fst) rangedShdrs,
+      rriSymbolName = symbolAtAddress mSymTab lo ,
+      rriInstructions,
+      rriExplanation = classifyInstrs =<< rriInstructions
+    }
+
+displayResidualsForSpreadsheet :: [ResidualRangeInfo] -> Word64 -> Word64 -> Word64 -> String
+displayResidualsForSpreadsheet residualInfos residuals explained unexplained =
+  unlines
+    $
+    [ "Residuals " <> show residuals
+    , "Explained " <> show explained
+    , "Unexplained " <> show unexplained
+    ]
+    ++ map ppResidualInfo residualInfos
   where
     appendResidualExplanation e = " " <> ppResidualExplanation e
     appendSymbol s = " (" <> s <> ")"
-    appendSectionName (_, shdr) = " [" <> BSC.unpack (shdrName shdr) <> "]"
+    appendSectionName shdr = " [" <> BSC.unpack (shdrName shdr) <> "]"
+    ppResidualInfo info =
+      ppInclusiveRange (rriRange info)
+      <> printf " %5dB" (rriFootprint info)
+      <> maybe "" appendSectionName (rriSection info)
+      <> maybe "" appendSymbol (rriSymbolName info)
+      <> maybe "" appendResidualExplanation (rriExplanation info)

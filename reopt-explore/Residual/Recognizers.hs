@@ -16,6 +16,7 @@ data ResidualExplanation
   = DeregisterTmClones
   | NopPadding
   | RegisterTmClones
+  deriving (Eq, Ord)
 
 ppResidualExplanation :: ResidualExplanation -> String
 ppResidualExplanation = \case
