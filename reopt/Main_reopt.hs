@@ -1,67 +1,66 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PatternGuards       #-}
+{-# LANGUAGE RankNTypes          #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeOperators #-}
 
 module Main (main) where
 
-import Control.Exception (catch)
-import Control.Lens (Lens', lens, (%~), (&), (.~), (^.), (^..))
-import Control.Monad
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Encoding as AE
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Char8 as BSC
-import Data.Either (rights)
-import Data.ElfEdit
-  ( ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
-    elfSections,
-  )
-import qualified Data.ElfEdit as Elf
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (intercalate, nub, stripPrefix, (\\))
-import Data.Macaw.Analysis.RegisterUse (ruReason, ppRegisterUseErrorReason)
-import Data.Macaw.DebugLogging
-import Data.Macaw.Discovery
-  ( DiscoveryOptions (..),
-    ppDiscoveryStateBlocks,
-    memory
-  )
-import Data.Maybe
-import Data.Parameterized.Some
-import qualified Data.Text as T
-import Data.Version
-import Data.Word
-import Numeric
-import Paths_reopt (version)
-import qualified Prettyprinter as PP
-import qualified Prettyprinter.Render.Text as PP
-import Reopt
-import Reopt.CFG.FnRep.X86 ()
-import Reopt.EncodeInvariants
-import Reopt.Events
-import qualified Reopt.Events.Export as Export
-import Reopt.ExternalTools (runSlash)
-import Reopt.Occam
-import Reopt.Server
-import Reopt.Utils.Exit
-import Reopt.VCG.Annotations as Ann
-import System.Console.CmdArgs.Explicit
-import System.Environment (getArgs)
-import System.Exit
-import System.FilePath (splitFileName)
-import System.IO
-import System.IO.Error
-import Text.Printf (printf)
+import           Control.Exception                 (catch)
+import           Control.Lens                      (Lens', lens, (%~), (&),
+                                                    (.~), (^.), (^..))
+import           Control.Monad
+import qualified Data.Aeson                        as Aeson
+import qualified Data.Aeson.Encoding               as AE
+import qualified Data.ByteString                   as BS
+import qualified Data.ByteString.Builder           as Builder
+import qualified Data.ByteString.Char8             as BSC
+import           Data.Either                       (rights)
+import           Data.ElfEdit                      (ElfSection (elfSectionAddr, elfSectionData, elfSectionName),
+                                                    elfSections)
+import qualified Data.ElfEdit                      as Elf
+import           Data.IORef                        (IORef, modifyIORef',
+                                                    newIORef, readIORef)
+import           Data.List                         (intercalate, nub,
+                                                    stripPrefix, (\\))
+import           Data.Macaw.Analysis.RegisterUse   (ppRegisterUseErrorReason,
+                                                    ruReason)
+import           Data.Macaw.DebugLogging
+import           Data.Macaw.Discovery              (DiscoveryOptions (..),
+                                                    memory,
+                                                    ppDiscoveryStateBlocks)
+import           Data.Maybe
+import           Data.Parameterized.Some
+import qualified Data.Text                         as T
+import           Data.Version
+import           Data.Word
+import           Numeric
+import           Paths_reopt                       (version)
+import qualified Prettyprinter                     as PP
+import qualified Prettyprinter.Render.Text         as PP
+import           Reopt
+import           Reopt.CFG.FnRep.X86               ()
+import           Reopt.EncodeInvariants
+import           Reopt.Events
+import qualified Reopt.Events.Export               as Export
+import           Reopt.ExternalTools               (runSlash)
+import           Reopt.Occam
+import           Reopt.Server
+import           Reopt.Utils.Exit
+import           Reopt.VCG.Annotations             as Ann
+import           System.Console.CmdArgs.Explicit
+import           System.Environment                (getArgs)
+import           System.Exit
+import           System.FilePath                   (splitFileName)
+import           System.IO
+import           System.IO.Error
+import           Text.Printf                       (printf)
 
-import Reopt.TypeInference.ConstraintGen
-import Reopt.TypeInference.Pretty (ppFunction)
+import           Reopt.TypeInference.ConstraintGen
+import           Reopt.TypeInference.Pretty        (ppFunction)
 
 reoptVersion :: String
 reoptVersion = printf "Reopt binary reoptimizer (reopt) %d.%d.%d." h l r
@@ -70,7 +69,7 @@ reoptVersion = printf "Reopt binary reoptimizer (reopt) %d.%d.%d." h l r
 
 -- | Write a builder object to a file if defined or standard out if not.
 writeOutput :: Maybe FilePath -> (Handle -> IO a) -> IO a
-writeOutput Nothing f = f stdout
+writeOutput Nothing f   = f stdout
 writeOutput (Just nm) f = withBinaryFile nm WriteMode f
 
 ------------------------------------------------------------------------
@@ -113,84 +112,84 @@ data Action
 
 -- | Command line arguments.
 data Args = Args
-  { _reoptAction :: !Action,
+  { _reoptAction           :: !Action,
     -- | Path to input program to optimize/export
-    programPath :: !FilePath,
-    _debugKeys :: [DebugClass],
+    programPath            :: !FilePath,
+    _debugKeys             :: [DebugClass],
     -- Debug information ^ TODO: See if we can omit this.
 
     -- | Path to output
-    outputPath :: !(Maybe FilePath),
+    outputPath             :: !(Maybe FilePath),
     -- | Filepath for C header file that helps provide
     -- information about program.
-    headerPath :: !(Maybe FilePath),
+    headerPath             :: !(Maybe FilePath),
     -- | Path to `clang` command.
     --
     -- This is only used as a C preprocessor for parsing
     -- header files.
-    clangPath :: !FilePath,
+    clangPath              :: !FilePath,
     -- | LLVM version to generate LLVM for.
     --
     -- Only used when generating LLVM.
-    llvmVersion :: !LLVMConfig,
+    llvmVersion            :: !LLVMConfig,
     -- | Path to LLVM `llc` command
     --
     -- Only used when generating assembly file.
-    llcPath :: !FilePath,
+    llcPath                :: !FilePath,
     -- | Path to LLVM opt command.
     --
     -- Only used when generating LLVM to be optimized.
-    optPath :: !FilePath,
+    optPath                :: !FilePath,
     -- | Optimization level to pass to opt and llc
     --
     -- This defaults to 2
-    optLevel :: !Int,
+    optLevel               :: !Int,
     -- | Path to OCCCAM slash command.
-    slashPath :: !FilePath,
+    slashPath              :: !FilePath,
     -- | Path to llvm-mc
     --
     -- Only used when generating object file from assembly generated by llc.
-    llvmMcPath :: !FilePath,
+    llvmMcPath             :: !FilePath,
     -- | List of entry points for translation
-    includeAddrs :: ![String],
+    includeAddrs           :: ![String],
     -- | List of function entry points that we exclude for translation.
-    excludeAddrs :: ![String],
+    excludeAddrs           :: ![String],
     -- | Address to load binary at if relocatable.
-    loadBaseAddress :: !(Maybe Word64),
+    loadBaseAddress        :: !(Maybe Word64),
     -- | Options affecting discovery
-    _discOpts :: !DiscoveryOptions,
+    _discOpts              :: !DiscoveryOptions,
     -- | Prefix for unnamed functions identified in code discovery.
-    unnamedFunPrefix :: !BS.ByteString,
+    unnamedFunPrefix       :: !BS.ByteString,
     -- | Generation options for LLVM
-    llvmGenOptions :: !LLVMGenOptions,
+    llvmGenOptions         :: !LLVMGenOptions,
     -- | Path to export events if any
-    eventsExportPath :: !(Maybe FilePath),
+    eventsExportPath       :: !(Maybe FilePath),
     -- | Path to write reopt-vcg annotations to if any
-    annotationsExportPath :: !(Maybe FilePath),
+    annotationsExportPath  :: !(Maybe FilePath),
     -- | Path to export invariants
-    invariantsExportPath :: !(Maybe FilePath),
+    invariantsExportPath   :: !(Maybe FilePath),
     -- | Path to export CFG
-    cfgExportPath :: !(Maybe FilePath),
+    cfgExportPath          :: !(Maybe FilePath),
     -- | Path to export functions file
-    fnsExportPath :: !(Maybe FilePath),
+    fnsExportPath          :: !(Maybe FilePath),
     -- | Path to export functions file
-    typedFnsExportPath :: !(Maybe FilePath),
+    typedFnsExportPath     :: !(Maybe FilePath),
     -- | Path to export LLVM file
-    llvmExportPath :: !(Maybe FilePath),
+    llvmExportPath         :: !(Maybe FilePath),
     -- | Path to export object file
-    objectExportPath :: !(Maybe FilePath),
+    objectExportPath       :: !(Maybe FilePath),
     -- | Path to write relationships needed for relinker
     relinkerInfoExportPath :: !(Maybe FilePath),
     -- | OCCAM configuration (if applicable)
-    occamConfigPath :: !(Maybe FilePath),
+    occamConfigPath        :: !(Maybe FilePath),
     -- | Additional locations to search for dynamic dependencies.
-    dynDepPath :: ![FilePath],
+    dynDepPath             :: ![FilePath],
     -- | Additional locations to search for dynamic dependencies' debug info.
-    dynDepDebugPath :: ![FilePath],
+    dynDepDebugPath        :: ![FilePath],
     -- | Perform recovery regardless of other options.
-    performRecovery :: Bool,
+    performRecovery        :: Bool,
     -- | Trace unification of the type inference solver
-    traceTypeUnification :: Bool
+    traceTypeUnification   :: Bool
   }
 
 -- | Action to perform when running
@@ -335,10 +334,10 @@ llvmVersionFlag = flagReq ["llvm-version"] upd "VERSION" help
     upd :: String -> Args -> Either String Args
     upd s old = do
       v <- case versionOfString s of
-        Just v -> Right v
+        Just v  -> Right v
         Nothing -> Left "Could not interpret LLVM version."
       cfg <- case getLLVMConfig v of
-        Just c -> pure c
+        Just c  -> pure c
         Nothing -> Left $ printf "Unsupported LLVM version %s." s
       pure $ old {llvmVersion = cfg}
 
@@ -357,7 +356,7 @@ parseDebugFlags oldKeys cl =
     getKeys "all" = Right allDebugKeys
     getKeys str = case parseDebugKey str of
       Nothing -> Left $ "Unknown debug key `" ++ str ++ "'"
-      Just k -> Right [k]
+      Just k  -> Right [k]
 
 debugFlag :: Flag Args
 debugFlag = flagOpt "all" ["debug", "D"] upd "FLAGS" help
@@ -434,7 +433,7 @@ excludeAddrFlag = flagReq ["exclude"] upd "ADDR" help
 dynDepPathFlag :: Flag Args
 dynDepPathFlag = flagReq ["lib-dir"] upd "PATH" help
   where
-    upd path args = Right $ args {dynDepPath = path:(dynDepPath args)}
+    upd path args = Right $ args {dynDepPath = path : dynDepPath args}
     help = "Additional location to search for dynamic dependencies."
 
 
@@ -442,7 +441,7 @@ dynDepPathFlag = flagReq ["lib-dir"] upd "PATH" help
 dynDepDebugPathFlag :: Flag Args
 dynDepDebugPathFlag = flagReq ["debug-dir"] upd "PATH" help
   where
-    upd path args = Right $ args {dynDepDebugPath = path:(dynDepDebugPath args)}
+    upd path args = Right $ args {dynDepDebugPath = path : dynDepDebugPath args}
     help = "Additional location to search for dynamic dependencies' debug info."
 
 
@@ -734,9 +733,10 @@ showConstraints args = do -- FIXME: copied from main performReopt command
     (debugTypeMap, discState) <- doDiscovery hdrAnn origElf ainfo initState rOpts
 
     let sysp = osPersonality os
-    (recMod, _relinkerInfo, _logEvents) <-
+    recoverX86Output <-
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
 
+    let recMod = recoveredModule recoverX86Output
     pure (genModuleConstraints recMod (memory discState) (traceTypeUnification args))
 
   mc <- handleEitherWithExit mr
@@ -799,7 +799,7 @@ performReopt args = do
     exitFailure
 
   when (isJust (annotationsExportPath args) && isNothing (llvmExportPath args)) $ do
-    hPutStrLn stderr $
+    hPutStrLn stderr
       "Using --annotations requires --export-llvm."
     exitFailure
 
@@ -816,19 +816,19 @@ performReopt args = do
   let logger0 = printLogEvent
   let logger1 =
         case invariantsExportPath args of
-          Just _ -> joinLogEvents logger0 (collectInvariants invariantsRef)
+          Just _  -> joinLogEvents logger0 (collectInvariants invariantsRef)
           Nothing -> logger0
 
 
   eventExportHandle <-
     case eventsExportPath args of
-      Nothing -> pure Nothing
+      Nothing   -> pure Nothing
       Just path -> Just <$> openFile path WriteMode
 
   let logger2 =
         case eventExportHandle of
           Nothing -> logger1
-          Just h -> joinLogEvents logger1 (Export.exportEvent h)
+          Just h  -> joinLogEvents logger1 (Export.exportEvent h)
 
   rOpts <- argsReoptOptions args
 
@@ -856,8 +856,10 @@ performReopt args = do
     unless (shouldRecover args) $ reoptEndNow ()
 
     let sysp = osPersonality os
-    (recMod, relinkerInfo, _logEvents) <-
+    recoverX86Output <-
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
+    let recMod = recoveredModule recoverX86Output
+    let relinkerInfo = mergeRelations recoverX86Output
 
     case fnsExportPath args of
       Nothing -> pure ()
@@ -941,7 +943,7 @@ performReopt args = do
     -- Generate object file
     objContents <- generateObjectFile args os objLLVM
     case objectExportPath args of
-      Nothing -> pure ()
+      Nothing   -> pure ()
       Just path -> reoptWriteStrictByteString ObjectFileType path objContents
     case outputPath args of
       Nothing ->
@@ -963,14 +965,14 @@ performReopt args = do
     Left f -> do
       case eventExportHandle of
         Nothing -> pure ()
-        Just h -> Export.exportFatalError h f
+        Just h  -> Export.exportFatalError h f
       hPrint stderr f
       exitFailure
     Right () ->
       pure ()
   case eventExportHandle of
     Nothing -> pure ()
-    Just h -> hClose h
+    Just h  -> hClose h
 
 -- | Use OCCAM's slash on a bitcode file to optimize and recompile it.
 reoptRunSlash ::
@@ -1063,5 +1065,5 @@ main = main' `catch` h
         hPutStrLn stderr $ ioeGetErrorString e
       | otherwise = do
         hPutStrLn stderr "Other error"
-        hPutStrLn stderr $ show e
-        hPutStrLn stderr $ show (ioeGetErrorType e)
+        hPrint stderr e
+        hPrint stderr $ ioeGetErrorType e

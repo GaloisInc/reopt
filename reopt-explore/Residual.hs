@@ -27,6 +27,7 @@ import           Data.Macaw.Memory             (MemChunk (ByteRegion),
 import qualified Data.Macaw.Memory.Permissions as Perm
 
 import           Reopt                         (LoadOptions (LoadOptions),
+                                                RecoverX86Output (recoveredModule),
                                                 ReoptOptions, X86_64,
                                                 loadOffset,
                                                 parseElfHeaderInfo64,
@@ -109,11 +110,11 @@ performRecovery residualOpts reoptOpts (_idx, fPath) = do
         either (error . show) return
   hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
   logger <- createLogger reoptOpts fPath
-  (_os, ds, recoveredModule, _, _, _logEvents) <-
+  (_os, ds, recOut, _) <-
     handleEitherWithExit =<<
        runReoptM logger
          (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
-  return (hdrInfo, ds, recoveredModule)
+  return (hdrInfo, ds, recoveredModule recOut)
 
 computeResidualSegments ::
   DiscoveryState X86_64 ->

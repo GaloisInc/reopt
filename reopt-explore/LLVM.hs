@@ -20,6 +20,7 @@ import           Text.Printf                       (printf)
 
 import           Reopt                             (LLVMLogEvent,
                                                     LoadOptions (LoadOptions, loadOffset),
+                                                    RecoverX86Output (logEvents, recoveredModule),
                                                     RecoveredModule,
                                                     ReoptOptions (..), X86OS,
                                                     defaultLLVMGenOptions,
@@ -50,7 +51,7 @@ llvmGenSuccess LLVMGenPass {} = True
 llvmGenSuccess LLVMGenFail {} = False
 
 llvmGenLogEvents :: LLVMGenResult -> [LLVMLogEvent]
-llvmGenLogEvents (LLVMGenFail _) = []
+llvmGenLogEvents (LLVMGenFail _)        = []
 llvmGenLogEvents (LLVMGenPass _ events) = events
 
 data ExplorationResult
@@ -60,7 +61,7 @@ data ExplorationResult
 renderExplorationResult :: ExplorationResult -> String
 renderExplorationResult (ExplorationStats summary stats lgen _logEvents) = do
   let llvmGen = case lgen of
-        LLVMGenPass _ _ -> "Succeeded."
+        LLVMGenPass _ _    -> "Succeeded."
         LLVMGenFail errMsg -> "Failed: " ++ errMsg
   summaryBinaryPath summary ++ "\n"
     ++ unlines (ppIndent (ppStats stats ++ ["LLVM generation status: " ++ llvmGen]))
@@ -68,25 +69,25 @@ renderExplorationResult (ExplorationFailure path msg) =
   "Exploration of " ++ path ++ " failed: " ++ msg
 
 renderLogEvents :: ExplorationResult -> Maybe [String]
-renderLogEvents (ExplorationStats summary _stats lgen logEvents) =
-    Just $ map renderRow $ logEvents ++ llvmGenLogEvents lgen
+renderLogEvents (ExplorationStats summary _stats lgen events) =
+    Just $ map renderRow $ events ++ llvmGenLogEvents lgen
   where binPath = summaryBinaryPath summary
-        renderRow event = intercalate "," $ binPath:(llvmLogEventToStrings event)
+        renderRow event = intercalate "," $ binPath : llvmLogEventToStrings event
 renderLogEvents (ExplorationFailure _ _) = Nothing
 
 data SummaryStats = SummaryStats
   { -- | How many binaries were analyzed?
-    totalBinaryCount :: !Natural,
+    totalBinaryCount   :: !Natural,
     -- | Summary of stats from individual runs
-    totalStats :: !ReoptStats,
+    totalStats         :: !ReoptStats,
     -- | Number of binaries which we successfully produced LLVM bitcode for.
     totalLLVMGenerated :: !Natural,
     -- | Total number of complete failures.
-    totalFailureCount :: !Natural
+    totalFailureCount  :: !Natural
   }
 
 totalSuccessCount :: SummaryStats -> Natural
-totalSuccessCount stats = (totalBinaryCount stats) - (totalFailureCount stats)
+totalSuccessCount stats = totalBinaryCount stats - totalFailureCount stats
 
 initSummaryStats :: SummaryStats
 initSummaryStats =
@@ -146,14 +147,14 @@ exploreBinary args opts totalCount (index, fPath) = do
       Just sec ->
         -- timeout takes microseconds
         timeout (sec * 1000000) performRecovery >>= \case
-          Nothing -> pure $ ExplorationFailure fPath "timeout"
+          Nothing  -> pure $ ExplorationFailure fPath "timeout"
           Just res -> pure res
   where
     lOpts = LoadOptions {loadOffset = Nothing}
     unnamedFunPrefix = BSC.pack "reopt"
     performRecovery :: IO ExplorationResult
     performRecovery = do
-      hPutStrLn stderr $ "[" ++ (show index) ++ " of " ++ (show totalCount)
+      hPutStrLn stderr $ "[" ++ show index ++ " of " ++ show totalCount
                          ++ "] Analyzing " ++ fPath ++ " ..."
       bs <- checkedReadFile fPath
       summaryRef <- newIORef $ initReoptSummary fPath
@@ -165,16 +166,17 @@ exploreBinary args opts totalCount (index, fPath) = do
               recoverLogEvent summaryRef statsRef
       let annDecl = emptyAnnDeclarations
       hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
-      (os, _, recMod, constraints, _, logEvents) <-
+      (os, _, recovOut, constraints) <-
+      -- (os, _, recMod, constraints, _, logEvents) <-
         handleEitherWithExit =<<
           runReoptM logger (recoverX86Elf lOpts opts annDecl unnamedFunPrefix hdrInfo)
       res <-
         catch
-          (generateLLVM os recMod constraints)
+          (generateLLVM os (recoveredModule recovOut) constraints)
           (handleFailure $ \_ errMsg -> LLVMGenFail errMsg)
       summary <- readIORef summaryRef
       stats <- readIORef statsRef
-      pure $ ExplorationStats summary stats res logEvents
+      pure $ ExplorationStats summary stats res (logEvents recovOut)
     handleSomeException :: SomeException -> IO ExplorationResult
     handleSomeException exn = pure $ ExplorationFailure fPath (show exn)
 
@@ -184,7 +186,7 @@ exploreBinary args opts totalCount (index, fPath) = do
       ModuleConstraints X86_64 ->
       IO LLVMGenResult
     generateLLVM os recMod constraints = do
-      let (objLLVM, _, _, logEvents) =
+      let (objLLVM, _, _, events) =
             renderLLVMBitcode
               defaultLLVMGenOptions
               latestLLVMConfig
@@ -195,21 +197,21 @@ exploreBinary args opts totalCount (index, fPath) = do
       llvmRes <- seq sz $ do
         if roVerboseMode opts
           then hPutStrLn stderr $ "Completed " ++ fPath ++ "."
-          else hPutStrLn stderr $ "  Done."
+          else hPutStrLn stderr "  Done."
         let res = if sz < 0 then 0 else fromIntegral sz
-        pure $ (LLVMGenPass res logEvents)
+        pure $ LLVMGenPass res events
       when (loEmitLLVM args) $ do
         let llvmPath = fPath ++ ".ll"
         mr <- runReoptM printLogEvent $ do
           reoptWriteBuilder LlvmFileType llvmPath objLLVM
         case mr of
-          Left f -> hPrint stderr f
+          Left f   -> hPrint stderr f
           Right () -> hPutStrLn stderr $ "LLVM written to " ++ llvmPath ++ "."
       pure llvmRes
     handleFailure :: (FilePath -> String -> a) -> SomeException -> IO a
     handleFailure mkResult e = do
       hPutStrLn stderr "Error raised during exploration"
-      hPutStrLn stderr $ show e
+      hPrint stderr e
       pure $ mkResult fPath (show e)
 
 runLLVM :: Options -> LLVMOptions -> ReoptOptions -> IO ()
@@ -241,4 +243,4 @@ runLLVM _opts lopts ropts = do
   where
     toRows :: ExplorationResult -> [[String]]
     toRows (ExplorationStats summary _stats _ _logEvents) = summaryRows summary
-    toRows ExplorationFailure{} = []
+    toRows ExplorationFailure{}                           = []
