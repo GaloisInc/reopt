@@ -51,7 +51,8 @@ mkTest fp = T.testCase fp $ do
   mr <-
     runReoptM logger $ do
       recoverX86Elf loadOpts reoptOpts hdrAnn "reopt" hdrInfo
-  (os, discState, recMod, moduleConstraints, _, _logEvents) <- either (fail . show) pure mr
+  (os, discState, recovOut, moduleConstraints) <- either (fail . show) pure mr
+  let recMod = recoveredModule recovOut
 
   writeFile blocks_path $ show $ ppDiscoveryStateBlocks discState
   writeFile fns_path $ show (vcat (pretty <$> recoveredDefs recMod))
