@@ -1,28 +1,32 @@
+{-# LANGUAGE DataKinds       #-}
 {-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ViewPatterns    #-}
 
 module Residual.Recognizers where
 
-import qualified Data.ByteString.Char8 as BSC
-import           Flexdis86             (DisassembledAddr (disInstruction),
-                                        InstructionInstanceF (iiArgs, iiOp),
-                                        JumpSize (JSize8),
-                                        Value (DWordImm, DWordReg, JumpOffset, QWordReg, WordReg),
-                                        pattern AX, pattern EAX, pattern EDI,
-                                        pattern RAX)
+import qualified Data.ByteString.Char8            as BSC
+import           Data.Macaw.Analysis.FunctionArgs (FunctionArgAnalysisFailure (CallAnalysisError, PLTStubNotSupported))
+import           Flexdis86                        (DisassembledAddr (disInstruction),
+                                                   InstructionInstanceF (iiArgs, iiOp),
+                                                   JumpSize (JSize8),
+                                                   Value (DWordImm, DWordReg, JumpOffset, QWordReg, WordReg),
+                                                   pattern AX, pattern EAX,
+                                                   pattern EDI, pattern RAX)
 
 data ResidualExplanation
   = DeregisterTmClones
   | NopPadding
   | RegisterTmClones
-  deriving (Eq, Ord)
+  | BecauseFailure (FunctionArgAnalysisFailure 64)
 
 ppResidualExplanation :: ResidualExplanation -> String
 ppResidualExplanation = \case
-  DeregisterTmClones -> "deregister_tm_clones"
-  NopPadding         -> "nop padding"
-  RegisterTmClones   -> "register_tm_clones"
+  DeregisterTmClones                               -> "deregister_tm_clones"
+  NopPadding                                       -> "nop padding"
+  RegisterTmClones                                 -> "register_tm_clones"
+  BecauseFailure PLTStubNotSupported               -> "PLT stub not supported"
+  BecauseFailure (CallAnalysisError _callSite msg) -> msg
 
 classifyInstrs :: [DisassembledAddr] -> Maybe ResidualExplanation
 classifyInstrs instrs

@@ -23,7 +23,7 @@ class Residual:
     from_address: str
     to_address: str
     footprint: str
-    section: str
+    section: Optional[str]
     symbol: Optional[str]
     explanation: str
 
@@ -36,11 +36,11 @@ def process_reopt_residual_line(line: str) -> Residual:
     """
     address = "[0-9a-f]+"
     footprint = "\\s*(\\d*)B"
-    section = "\\[(.*)\\]"
+    section = "(?: \\[(.*)\\])?"
     symbol = "(?: \\((.*)\\))?"
     explanation = ".*"
     line_re = (
-        f"({address}) - ({address}) {footprint} {section}{symbol} ?({explanation})"
+        f"({address}) - ({address}) {footprint}{section}{symbol} ?({explanation})"
     )
     # print(line_re)
     print(line)
@@ -54,7 +54,7 @@ def process_reopt_residual_line(line: str) -> Residual:
         from_address=match.group(1),
         to_address=match.group(2),
         footprint=match.group(3),
-        section=match.group(4),
+        section=match.group(4) or None,
         symbol=match.group(5) or None,
         explanation=match.group(6),
     )
@@ -72,7 +72,7 @@ def main():
     try:
         service = build("sheets", "v4", credentials=creds)
 
-        which_binary = Binary.ZIP
+        which_binary = Binary.HELLO
         (binary_tag, binary) = (which_binary, which_binary.value)
 
         for (
@@ -167,6 +167,8 @@ def main():
             # the output
             nb_columns = len(values[0]) + 1
 
+            reserved_rows = 10
+
             first_column = grammatech.get_column_for_options(
                 compiler=compiler_tag,
                 optimization=optimization_tag,
@@ -179,7 +181,7 @@ def main():
                 break
             last_column = first_column + nb_columns - 1
 
-            first_cell = sheets.get_cell_for_coordinates((1, first_column))
+            first_cell = sheets.get_cell_for_coordinates((reserved_rows + 1, first_column))
             last_cell = sheets.sheets_col(last_column)  # as many rows as needed
 
             print(f"First cell: {first_cell}")

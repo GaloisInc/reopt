@@ -2,25 +2,24 @@
 This module provides methods for constructing functions from the basic
 blocks discovered by 'Data.Macaw.Discovery'.
 -}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE ExistentialQuantification  #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE PatternGuards              #-}
+{-# LANGUAGE PolyKinds                  #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE StandaloneDeriving         #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TupleSections              #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE TypeOperators              #-}
+{-# LANGUAGE UndecidableInstances       #-}
 
 module Reopt.CFG.Recovery
   ( recoverFunction
@@ -46,24 +45,24 @@ import           Control.Monad.Except
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Data.Bits
-import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Char8            as BSC
 import           Data.Foldable
-import           Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import           Data.Map.Strict                  (Map)
+import qualified Data.Map.Strict                  as Map
 import           Data.Parameterized.Classes
-import qualified Data.Parameterized.List as P
-import           Data.Parameterized.Map (MapF, Pair(..))
-import qualified Data.Parameterized.Map as MapF
+import qualified Data.Parameterized.List          as P
+import           Data.Parameterized.Map           (MapF, Pair (..))
+import qualified Data.Parameterized.Map           as MapF
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
-import Data.Parameterized.TraversableF ( TraversableF(traverseF) )
+import           Data.Parameterized.TraversableF  (TraversableF (traverseF))
 import           Data.Parameterized.TraversableFC
-import           Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
-import qualified Data.Text as Text
-import qualified Data.Vector as V
+import           Data.Sequence                    (Seq)
+import qualified Data.Sequence                    as Seq
+import qualified Data.Text                        as Text
+import qualified Data.Vector                      as V
 import           Data.Word
-import qualified Flexdis86 as F
+import qualified Flexdis86                        as F
 import           GHC.Stack
 import           Prettyprinter
 import           Text.Printf
@@ -71,28 +70,28 @@ import           Text.Printf
 import           Data.Macaw.Analysis.RegisterUse
 import           Data.Macaw.CFG
 import           Data.Macaw.Discovery.State
-import qualified Data.Macaw.Memory.Permissions as Perm
+import qualified Data.Macaw.Memory.Permissions    as Perm
 import           Data.Macaw.Types
 
+import           Data.Macaw.X86                   (x86DemandContext,
+                                                   x86_64CallParams)
 import           Data.Macaw.X86.ArchTypes
 import           Data.Macaw.X86.SyscallInfo
 import           Data.Macaw.X86.X86Reg
-import           Data.Macaw.X86 (x86DemandContext, x86_64CallParams)
 
 import           Reopt.CFG.FnRep
 import           Reopt.CFG.FnRep.X86
-import           Reopt.CFG.LLVM
-  ( LLVMLogEvent(..),
-    LLVMLogEvent(..),
-    LLVMLogEventInfo(..),
-    LLVMBitCastInfo(..),
-    typeToLLVMType,
-    llvmITypeNat,
-    llvmLogEventHeader,
-    llvmLogEventToStrings)
-import           Reopt.CFG.LLVM.X86 (x86ArchFnToLLVM)
-import           Reopt.Events (RecoverError(..), ReoptErrorTag(..))
-import qualified Reopt.Utils.Printf as Printf
+import           Reopt.CFG.LLVM                   (LLVMBitCastInfo (..),
+                                                   LLVMLogEvent (..),
+                                                   LLVMLogEventInfo (..),
+                                                   llvmITypeNat,
+                                                   llvmLogEventHeader,
+                                                   llvmLogEventToStrings,
+                                                   typeToLLVMType)
+import           Reopt.CFG.LLVM.X86               (x86ArchFnToLLVM)
+import           Reopt.Events                     (RecoverError (..),
+                                                   ReoptErrorTag (..))
+import qualified Reopt.Utils.Printf               as Printf
 
 -------------------------------------------------------------------------------
 --
@@ -116,8 +115,8 @@ data ZMMType tp where
 
 instance TestEquality ZMMType where
   testEquality ZMMDouble ZMMDouble = Just Refl
-  testEquality ZMM512D ZMM512D = Just Refl
-  testEquality _ _ = Nothing
+  testEquality ZMM512D ZMM512D     = Just Refl
+  testEquality _ _                 = Nothing
 
 deriving instance Show (ZMMType tp)
 
@@ -138,9 +137,9 @@ data X86ArgInfo where
 deriving instance Show X86ArgInfo
 
 instance Eq X86ArgInfo where
-  ArgBV64 i == ArgBV64 j = i == j
+  ArgBV64 i == ArgBV64 j         = i == j
   ArgZMM xtp xi == ArgZMM ytp yi = xi == yi && isJust (testEquality xtp ytp)
-  _ == _ = False
+  _ == _                         = False
 
 -- | This returns the value associate with a argument for demand computation purposes.
 argValue :: RegState X86Reg (Value X86_64 ids) ->  X86ArgInfo -> Some (Value X86_64 ids)
@@ -177,7 +176,7 @@ instance TestEquality X86RetInfo where
   testEquality _ _ = Nothing
 
 instance HasRepr X86RetInfo TypeRepr where
-  typeRepr (RetBV64 _) = knownRepr
+  typeRepr (RetBV64 _)   = knownRepr
   typeRepr (RetZMM tp _) = typeRepr tp
 
 $(pure [])
@@ -217,7 +216,7 @@ data Embedding i o where
                 -> Embedding i (BVType l)
 
 embeddingSource :: Embedding i o -> TypeRepr i
-embeddingSource (EqEmbedding p) = widthEqSource p
+embeddingSource (EqEmbedding p)     = widthEqSource p
 embeddingSource (UExtEmbedding p _) = widthEqSource p
 
 embeddingRefl :: TypeRepr tp -> Embedding tp tp
@@ -275,7 +274,7 @@ data FunRecoverContext ids =
 
 -- | State for function recovery common to all blocks in a function.
 data FunRecoverState = FRS { frsNextAssignId :: !FnAssignId,
-                             frsLogEvents :: ![LLVMLogEvent]
+                             frsLogEvents    :: ![LLVMLogEvent]
                            }
 
 -- | Monad for function recovery
@@ -295,7 +294,7 @@ runFunRecover ctx m =
 -- | Create a fresh assign id.
 funFreshId :: FunRecover ids FnAssignId
 funFreshId = FR $ do
-  FnAssignId nextId <- gets $ frsNextAssignId
+  FnAssignId nextId <- gets frsNextAssignId
   modify' $ \frs -> frs { frsNextAssignId = FnAssignId (nextId + 1) }
   return $! FnAssignId nextId
 
@@ -405,7 +404,7 @@ argRegTypeRepr (ArgBV64 _) = Some (BVTypeRepr n64)
 argRegTypeRepr (ArgZMM tp _) =
   case tp of
     ZMMDouble -> Some (FloatTypeRepr  DoubleFloatRepr)
-    ZMM512D -> Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
+    ZMM512D   -> Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
 
 $(pure [])
 
@@ -443,7 +442,7 @@ checkedBitcast :: String
 checkedBitcast ctx v pr =
   case testEquality (widthEqSource pr) (widthEqTarget pr) of
     Just Refl -> pure v
-    Nothing -> bitcast ctx v pr
+    Nothing   -> bitcast ctx v pr
 
 $(pure [])
 
@@ -509,7 +508,7 @@ recoverCValue cv = do
     RelocatableCValue _w addr
       | Just addrRef <- asSegmentOff mem addr
       , Perm.isExecutable (segmentFlags (segoffSegment addrRef)) -> do
-        throwErrorAt ReoptUnsupportedFnValueTag $ "Cannot lift code pointers."
+        throwErrorAt ReoptUnsupportedFnValueTag "Cannot lift code pointers."
       | otherwise ->
         case asAbsoluteAddr addr of
           Just absAddr -> emitNewAssign (toInteger absAddr)
@@ -609,8 +608,8 @@ recoverValue :: Value X86_64 ids tp
              -> Recover ids (FnValue X86_64 tp)
 recoverValue v = do
   case v of
-    CValue cv -> recoverCValue cv
-    Initial reg -> coerceRegValue =<< recoverInitialReg reg
+    CValue cv          -> recoverCValue cv
+    Initial reg        -> coerceRegValue =<< recoverInitialReg reg
     AssignedValue asgn -> recoverAssignId (assignId asgn)
 
 -- | Recover a stack value
@@ -642,7 +641,7 @@ $(pure [])
 
 zmmEmbedding :: ZMMType tp -> Embedding tp (BVType 512)
 zmmEmbedding ZMMDouble = UExtEmbedding (FromFloat DoubleFloatRepr) n512
-zmmEmbedding ZMM512D = EqEmbedding vec8DoubleToBV512
+zmmEmbedding ZMM512D   = EqEmbedding vec8DoubleToBV512
 
 -- | The returns the type a function return type of this register should return.
 --
@@ -706,7 +705,7 @@ recoverCallTarget :: Recover ids ( FnValue X86_64 (BVType 64)
 recoverCallTarget = do
   mp <- gets $ biCallFunType . rsBlockInvariants
   case mp of
-    Just p -> pure p
+    Just p  -> pure p
     Nothing -> error "Expected call return type."
 
 ------------------------------------------------------------------------
@@ -719,7 +718,7 @@ checkAssignmentUnused aid = do
   mSeen <- uses rsAssignMap (MapF.lookup aid)
   case mSeen of
     Nothing -> return ()
-    Just _ -> error $ "internal: Assign " ++ show aid ++ " already seen"
+    Just _  -> error $ "internal: Assign " ++ show aid ++ " already seen"
 
 -- | Associate assign id with the reuslt
 setAssignVal :: HasCallStack
@@ -904,7 +903,7 @@ recoverStmt stmtIdx stmt = do
             modify $ \s -> s { rsWriteMap = Map.insert stmtIdx v (rsWriteMap s) }
 
     CondWriteMem _cond _addr _memRepr _val -> do
-      error $ "Conditional writes are not yet supported."
+      error "Conditional writes are not yet supported."
     Comment msg -> do
       addFnStmt $ FnComment msg
     ExecArchStmt astmt0 -> do
@@ -964,7 +963,7 @@ resolveInferValue tgt pvm l =
         Nothing -> error "Could not find write value."
         Just (StackWriteVal rv writeRepr) ->
           case testEquality repr writeRepr of
-            Nothing -> error "Invalid type"
+            Nothing   -> error "Invalid type"
             Just Refl -> Some <$> coerceRegValue rv
 
 -- | Get the phi variable information for the block that starts at the
@@ -985,7 +984,7 @@ recoverJumpTarget :: forall ids
                   -> MemSegmentOff 64 -- ^ Address to jump to
                   -> Recover ids (FnJumpTarget X86_64)
 recoverJumpTarget retVarMap tgtAddr = do
-  thisAddr <- gets $ rsStartAddr
+  thisAddr <- gets rsStartAddr
   -- Get invariant info for target address.
   tgtInv <- liftFunRecover $ getBlockInvariants tgtAddr
   let postValues =
@@ -1115,14 +1114,14 @@ data RetRegRelation retType regType where
 data RetRegRelations retType =
   RetRegRelations { fnRetValuesType :: !(TypeRepr retType)
                   -- ^ Type actually returned.
-                  , fnRetValueMap :: !(MapF X86Reg (RetRegRelation retType))
+                  , fnRetValueMap   :: !(MapF X86Reg (RetRegRelation retType))
                   }
 
 retInfoRegPair :: X86RetInfo fieldType
                -> Pair X86Reg (FieldRegRelation fieldType)
-retInfoRegPair (RetBV64   r) = Pair (X86_GP r)     GPFieldRegRel
+retInfoRegPair (RetBV64   r)         = Pair (X86_GP r)     GPFieldRegRel
 retInfoRegPair (RetZMM ZMMDouble  i) = Pair (X86_ZMMReg i) ZmmDFieldRegRel
-retInfoRegPair (RetZMM ZMM512D i) = Pair (X86_ZMMReg i) ZmmV8DFieldRegRel
+retInfoRegPair (RetZMM ZMM512D i)    = Pair (X86_ZMMReg i) ZmmV8DFieldRegRel
 
 -- | Infer return values from ret info.
 inferRetRegRelations :: forall fields . P.List X86RetInfo fields -> Maybe (Some RetRegRelations)
@@ -1258,7 +1257,7 @@ recoverBlock b = do
           Nothing ->
             -- If we don't have a return value, then we make it up.
             case retReturnType thisReturnLocs of
-              Nothing -> pure $ FnRet Nothing
+              Nothing        -> pure $ FnRet Nothing
               Just (Some tp) -> pure $ FnRet $ Just $ Some (FnUndefined tp)
 --            throwErrorAt "Tail call returns no values, but function expects return values."
           Just (Some callRetInfo) -> do
@@ -1347,8 +1346,8 @@ ppInvariant :: Pair (BoundLoc (ArchReg arch)) (InitInferValue arch) -> FnBlockIn
 ppInvariant (Pair l d) =
   case d of
     InferredStackOffset o -> FnStackOff o l
-    FnStartRegister r -> FnCalleeSavedReg r l
-    RegEqualLoc r -> FnEqualLocs r l
+    FnStartRegister r     -> FnCalleeSavedReg r l
+    RegEqualLoc r         -> FnEqualLocs r l
 
 evalRecover :: forall ids
             .  ParsedBlock X86_64 ids
@@ -1386,15 +1385,15 @@ evalRecover b inv preds phiVars locMap = do
   modify' $ \fs -> fs {frsLogEvents = rsLogEvents s ++ frsLogEvents fs}
 
   return $! FnBlock { fbLabel = fnBlockLabelFromAddr (pblockAddr b)
-                     , fbPrecond = pr
-                     , fbSize  = fromIntegral (blockSize b)
-                     , fbPrevBlocks = fnBlockLabelFromAddr <$> preds
-                     , fbInvariants = ppInvariant <$> locMapToList (bscLocMap (biStartConstraints inv))
-                     , fbPhiVars = phiVars
-                     , fbStmts  = toList (s^.rsCurStmts)
-                     , fbTerm   = tm
-                     , fbMemInsnAddrs = V.fromList (reverse (rsSeenMemAccessTypes s))
-                     }
+                    , fbPrecond = pr
+                    , fbSize = fromIntegral (blockSize b)
+                    , fbPrevBlocks = fnBlockLabelFromAddr <$> preds
+                    , fbInvariants = ppInvariant <$> locMapToList (bscLocMap (biStartConstraints inv))
+                    , fbPhiVars = phiVars
+                    , fbStmts = toList (s^.rsCurStmts)
+                    , fbTerm = tm
+                    , fbMemInsnAddrs = V.fromList (reverse (rsSeenMemAccessTypes s))
+                    }
 
 $(pure [])
 
@@ -1418,7 +1417,7 @@ addPhiVarForClass inv (vl,m0) (Some phiLoc) = do
                         , fnPhiVarLocations = ll
                         }
   let v = mkIdentEmbeddingApp (FnPhiValue phiVar)
-  let isReg (RegLoc _) = True
+  let isReg (RegLoc _)        = True
       isReg (StackOffLoc _ _) = False
   let ins m l = MapF.insert l v m
   let m' = foldl' ins m0 (phiLoc : filter isReg ll)
@@ -1486,22 +1485,22 @@ data PrintfArgType
 printfIntArgType :: IsSigned -> Printf.Length -> Either String PrintfArgType
 printfIntArgType signed len =
   case len of
-    Printf.HH -> pure $ Char signed
-    Printf.H  -> pure $ Short signed
-    Printf.LongInt  -> pure $ Long signed
-    Printf.LLongInt -> pure $ LongLong signed
-    Printf.LongDouble -> Left $ "L prefix only applicable to floating point."
-    Printf.Q -> pure $ LongLong signed
-    Printf.J -> pure $ IntMaxT signed
-    Printf.Z -> pure $ SizeT signed
-    Printf.T -> pure $ PtrDiffT
-    Printf.NoLength -> pure $ Int signed
+    Printf.HH         -> pure $ Char signed
+    Printf.H          -> pure $ Short signed
+    Printf.LongInt    -> pure $ Long signed
+    Printf.LLongInt   -> pure $ LongLong signed
+    Printf.LongDouble -> Left "L prefix only applicable to floating point."
+    Printf.Q          -> pure $ LongLong signed
+    Printf.J          -> pure $ IntMaxT signed
+    Printf.Z          -> pure $ SizeT signed
+    Printf.T          -> pure PtrDiffT
+    Printf.NoLength   -> pure $ Int signed
 
 printfFloatLength :: Printf.Length -> Either String PrintfArgType
 printfFloatLength len =
   case len of
-    Printf.LongDouble -> pure $ LongDouble
-    Printf.NoLength -> pure $ Double
+    Printf.LongDouble -> pure LongDouble
+    Printf.NoLength -> pure Double
     _ -> Left $ Printf.ppLength len ++ " prefix not applicable to floating point."
 
 printfArgType :: Printf.Specifier -> Either String PrintfArgType
@@ -1518,12 +1517,12 @@ printfArgType sp = do
     Printf.FloatHexadecimal -> printfFloatLength len
     Printf.Char ->
       case len of
-        Printf.LongInt -> pure $ WIntT
-        _        -> pure $ Int True
+        Printf.LongInt -> pure WIntT
+        _              -> pure $ Int True
     Printf.String ->
       case len of
-        Printf.LongInt -> pure $ WCharPtrT
-        _        -> pure $ CharPtrT
+        Printf.LongInt -> pure WCharPtrT
+        _              -> pure CharPtrT
     Printf.Pointer -> pure VoidPtrT
     Printf.CharCount   -> pure NoArg
     Printf.PrintStderr -> pure NoArg
@@ -1531,8 +1530,8 @@ printfArgType sp = do
 
 data PrintfArgState = PrintfArgState
   { pasRemainingIntArgs :: [F.Reg64]
-  , pasFloatArgCount :: !Word8
-  , pasArgRegs :: [X86ArgInfo]
+  , pasFloatArgCount    :: !Word8
+  , pasArgRegs          :: [X86ArgInfo]
     -- ^ Argument registers  in reverse order.
   }
 
@@ -1558,7 +1557,7 @@ getPrintfIntArg pas =
 addIntArg :: PrintfArgState -> Either String PrintfArgState
 addIntArg pas =
   case getPrintfIntArg pas of
-    Nothing -> Left "Too many integer arguments."
+    Nothing       -> Left "Too many integer arguments."
     Just (_,pas') -> Right pas'
 
 addDoubleArg :: PrintfArgState -> Either String PrintfArgState
@@ -1572,21 +1571,21 @@ addDoubleArg pas = do
 addArg :: PrintfArgState -> PrintfArgType -> Either String PrintfArgState
 addArg pas tp =
   case tp of
-    Char _ -> addIntArg pas
-    Short _ -> addIntArg pas
-    Int _ -> addIntArg pas
-    Long _ -> addIntArg pas
+    Char _     -> addIntArg pas
+    Short _    -> addIntArg pas
+    Int _      -> addIntArg pas
+    Long _     -> addIntArg pas
     LongLong _ -> addIntArg pas
-    IntMaxT _ -> addIntArg pas
-    SizeT _ -> addIntArg pas
-    PtrDiffT -> addIntArg pas
-    WIntT    -> addIntArg pas
-    Double   -> addDoubleArg pas
+    IntMaxT _  -> addIntArg pas
+    SizeT _    -> addIntArg pas
+    PtrDiffT   -> addIntArg pas
+    WIntT      -> addIntArg pas
+    Double     -> addDoubleArg pas
     LongDouble -> Left "Do not support long double arguments."
-    VoidPtrT -> addIntArg pas
-    CharPtrT -> addIntArg pas
-    WCharPtrT -> addIntArg pas
-    NoArg     -> pure pas
+    VoidPtrT   -> addIntArg pas
+    CharPtrT   -> addIntArg pas
+    WCharPtrT  -> addIntArg pas
+    NoArg      -> pure pas
 
 parseUnpackedFormat :: PrintfArgState -> Printf.UnpackedRep -> Either String PrintfArgState
 parseUnpackedFormat pas (Printf.UnpackedTerm _) =
@@ -1609,7 +1608,7 @@ inferPrintfArgs mem nm regs initState = do
   (formatStringReg, initState') <-
     case getPrintfIntArg initState of
       Nothing -> Left "Could not get printf format string register."
-      Just p -> Right p
+      Just p  -> Right p
   let printfFormatValue = regs^.boundValue (X86_GP formatStringReg)
   printfFormatRawAddr <-
     case addrWidthClass (memAddrWidth mem) (valueAsMemAddr printfFormatValue) of
@@ -1840,7 +1839,7 @@ x86BlockInvariants sysp mem funNameMap funTypeMap fInfo rets = do
 data RecoveredFunction a =
   RecoveredFunction
   { recoveredFunction :: !(Function a)
-  , llvmLogEvents :: ![LLVMLogEvent]
+  , llvmLogEvents     :: ![LLVMLogEvent]
   }
 
 -- | Recover the function at a given address.
