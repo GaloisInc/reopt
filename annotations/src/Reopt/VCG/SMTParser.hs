@@ -27,6 +27,7 @@ module Reopt.VCG.SMTParser
 import           Control.Monad
 import           Data.Attoparsec.Text
 import           Data.Bits
+import           Data.Kind (Type)
 import           Data.String
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -113,7 +114,7 @@ data ExprType
 --
 -- The type @A@ allows one to create holes for
 -- variables or other known constants.
-data Expr (v :: *) where
+data Expr (v :: Type) where
   Eq    :: !(Expr v) -> !(Expr v) -> Expr v
   BVAdd :: !(Expr v) -> !(Expr v) -> Expr v
   BVSub :: !(Expr v) -> !(Expr v) -> Expr v

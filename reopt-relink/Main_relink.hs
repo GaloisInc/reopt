@@ -3,14 +3,13 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeOperators #-}
 
 module Main (main) where
 
 import Control.Exception
 import Control.Monad
+import Data.List (intercalate)
 import Data.Version (versionBranch)
 import qualified Data.Yaml as Yaml
 import Paths_reopt (version)
@@ -21,12 +20,12 @@ import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO
 import System.IO.Error
+import Text.Printf (printf)
 
 reoptVersion :: String
 reoptVersion = "Reopt relinker (reopt-relink) " ++ versionString ++ "."
   where
-    [h, l, r] = versionBranch version
-    versionString = show h ++ "." ++ show l ++ "." ++ show r
+    versionString = intercalate "." $ map (printf "%d") $ versionBranch version
 
 ------------------------------------------------------------------------
 -- Utilities

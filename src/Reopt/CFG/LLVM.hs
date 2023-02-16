@@ -9,6 +9,7 @@ layer.
 -}
 
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -20,7 +21,6 @@ layer.
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -99,7 +99,9 @@ import qualified Data.Vector as V
 import           Data.Word
 import           GHC.Stack
 import           GHC.TypeLits
+#if __GLASGOW_HASKELL__ < 900
 import           Numeric.Natural
+#endif
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
 import qualified Text.PrettyPrint.HughesPJ as HPJ
@@ -162,8 +164,6 @@ llvmLogInfoToStrings info =
     LogInfoIntToPtr i -> "inttoptr":renderCastInfo i
     LogInfoPtrToInt i -> "ptrtoint":renderCastInfo i
   where renderCastInfo (LLVMBitCastInfo src dst) = [ HPJ.render $ L.ppType src, HPJ.render $ L.ppType dst]
-
-
 
 -- | Return a LLVM type for a integer with the given width.
 llvmITypeNat :: Natural -> L.Type

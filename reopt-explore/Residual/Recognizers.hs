@@ -7,6 +7,7 @@ module Residual.Recognizers where
 
 import qualified Data.ByteString.Char8            as BSC
 import           Data.Macaw.Analysis.FunctionArgs (FunctionArgAnalysisFailure (CallAnalysisError, PLTStubNotSupported))
+import           Data.Maybe                       (fromJust)
 import           Flexdis86                        (DisassembledAddr (disInstruction),
                                                    InstructionInstanceF (iiArgs, iiOp),
                                                    JumpSize (JSize8),
@@ -37,7 +38,7 @@ classifyInstrs instrs
 
 inspectInstr :: DisassembledAddr -> (String, [Value])
 inspectInstr addr =
-  let Just i = disInstruction addr in
+  let i = fromJust $ disInstruction addr in
   (BSC.unpack $ iiOp i, fst <$> iiArgs i)
 
 isNopInstr :: DisassembledAddr -> Bool

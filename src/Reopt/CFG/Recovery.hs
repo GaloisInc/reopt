@@ -49,6 +49,7 @@ import qualified Data.ByteString.Char8            as BSC
 import           Data.Foldable
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as Map
+import           Data.Maybe                       (fromJust)
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.List          as P
 import           Data.Parameterized.Map           (MapF, Pair (..))
@@ -694,6 +695,12 @@ mkReturnValueFromRegs tstmtIdx retInfoList regs = do
   pure (Just (Some r))
 
 $(pure [])
+
+-- | This contains a reference to the function to call, the arguments and return register.
+type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
+                                   , [X86ArgInfo]
+                                   , [Some X86RetInfo]
+                                   )
 
 ------------------------------------------------------------------------
 -- recoverCallTarget
@@ -1431,7 +1438,7 @@ recoverInnerBlock b = do
   inv <- getBlockInvariants addr
   (phiVars, locMap) <- foldlM (addPhiVarForClass inv) ([],MapF.empty) (biPhiLocs inv)
    -- Get predecessors for this block.
-  let Just preds = Map.lookup addr (funBlockPreds fInfo)
+  let preds = fromJust (error "recoverInnerBlock: Nothing") (Map.lookup addr (funBlockPreds fInfo))
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let phiVarVec = V.fromList (reverse phiVars)
   evalRecover b inv preds phiVarVec locMap
@@ -1455,12 +1462,6 @@ x86TermStmtUsage :: SyscallPersonality
                  -> Either (RegisterUseError X86_64) (RegDependencyMap X86_64 ids)
 x86TermStmtUsage _ Hlt _ _ = pure mempty
 x86TermStmtUsage _ UD2 _ _ = pure mempty
-
--- | This contains a reference to the function to call, the arguments and return register.
-type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
-                                   , [X86ArgInfo]
-                                   , [Some X86RetInfo]
-                                   )
 
 type IsSigned = Bool
 
@@ -1867,7 +1868,7 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
                    , frcBlockDepMap = invMap
                    }
   runFunRecover funCtx $ do
-    let Just entryBlk = Map.lookup entryAddr (fInfo^.parsedBlocks)
+    let entryBlk = fromJust $ Map.lookup entryAddr (fInfo^.parsedBlocks)
 
     -- Insert uninitialized register into initial block location map.
     let insUninit :: Pair X86Reg (FnRegValue X86_64)

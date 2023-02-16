@@ -1,37 +1,39 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TemplateHaskell            #-}
+
 module Reopt.Server (runServer, Symbol(..)) where
 
-import qualified Codec.Base64 as Base64
 import           Control.Concurrent.MVar
 import           Control.Monad.Cont
 import           Control.Monad.Reader
 import           Control.Monad.State
-import qualified Data.Aeson as A
-import qualified Data.Aeson.Encoding as A
-import qualified Data.Attoparsec.ByteString as AT
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
-import qualified Data.ByteString.UTF8 as UTF8
-import qualified Data.ElfEdit as Elf
-import qualified Data.HashMap.Strict as HM
-import           Data.Map (Map)
-import qualified Data.Map as Map
-import qualified Data.Scientific as Sci
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Vector as V
+import qualified Data.Aeson                      as A
+import qualified Data.Aeson.Encoding             as A
+import qualified Data.Aeson.KeyMap               as A
+import qualified Data.Attoparsec.ByteString      as AT
+import qualified Data.ByteString                 as BS
+import qualified Data.ByteString.Lazy            as BSL
+import qualified Data.ByteString.UTF8            as UTF8
+import qualified Data.ElfEdit                    as Elf
+import           Data.Map                        (Map)
+import qualified Data.Map                        as Map
+import           Data.Maybe                      (fromMaybe)
+import qualified Data.Scientific                 as Sci
+import           Data.Text                       (Text)
+import qualified Data.Text                       as Text
+import           Data.Text.Encoding              (encodeUtf8)
+import qualified Data.Text.Encoding.Base64       as Base64
+import qualified Data.Vector                     as V
 import           Data.Word
 import           System.Exit
 import           System.IO
-import           Text.Printf (printf)
+import           Text.Printf                     (printf)
 
 import           Data.Macaw.Utils.IncComp
 
@@ -56,7 +58,7 @@ encodeList = A.list encode
 instance Encode a => Encode (V.Vector a) where
   encode = encodeList . V.toList
 
-(.=) :: Text -> A.Encoding -> A.Series
+(.=) :: A.Key -> A.Encoding -> A.Series
 nm .= val = A.pair nm val
 infix 7 .=
 
@@ -70,42 +72,43 @@ type Parser = Either String
 
 decodeObject :: A.Value -> Parser A.Object
 decodeObject (A.Object x) = pure x
-decodeObject _ = Left "Expected string."
+decodeObject _            = Left "Expected string."
 
-decodeField :: A.Object -> Text -> Parser A.Value
+decodeField :: A.Object -> A.Key -> Parser A.Value
 decodeField o nm = do
-  case HM.lookup nm o of
+  case A.lookup nm o of
     Nothing -> Left $ "Missing " <> show nm <> " field."
     Just x  -> pure x
 
-
-decodeStringField :: A.Object -> Text -> Parser Text
+decodeStringField :: A.Object -> A.Key -> Parser Text
 decodeStringField o nm = do
   v <- decodeField o nm
   case v of
     A.String x -> pure x
-    _ -> Left $ "Field " <> show nm <> " is not a string."
+    _          -> Left $ "Field " <> show nm <> " is not a string."
 
-decodeNumberField :: A.Object -> Text -> Parser Sci.Scientific
+decodeNumberField :: A.Object -> A.Key -> Parser Sci.Scientific
 decodeNumberField o nm = do
   v <- decodeField o nm
   case v of
     A.Number x -> pure x
-    _ -> Left $ "Field " <> show nm <> " is not a string."
+    _          -> Left $ "Field " <> show nm <> " is not a string."
 
-decodeWord64Field :: A.Object -> Text -> Parser Word64
+decodeWord64Field :: A.Object -> A.Key -> Parser Word64
 decodeWord64Field o nm = do
   s <- decodeNumberField o nm
   case Sci.toBoundedInteger s of
     Nothing -> Left $ "Expected " <> show nm <> " to be a valid Word64."
-    Just x -> pure x
+    Just x  -> pure x
 
-decodeBase64Field :: A.Object -> Text -> Parser BS.ByteString
+decodeBase64Field :: A.Object -> A.Key -> Parser BS.ByteString
 decodeBase64Field o nm = do
   t <- decodeStringField o nm
-  case Base64.decode t of
-    Left _ -> Left "Base64 decoding failed."
-    Right r -> Right r
+  -- NOTE: This may be incorrect, I was only following the types to remove a
+  -- dependency on base-encoding.
+  case Base64.decodeBase64 t of
+    Left _  -> Left "Base64 decoding failed."
+    Right r -> Right $ encodeUtf8 r
 
 -----------------------------------------------------------------------
 -- Server types
@@ -113,14 +116,14 @@ decodeBase64Field o nm = do
 -- | Identifier to indicate a particular binary.
 type JobId = Word64
 
-data Symbol = Symbol { symName :: !BS.ByteString
+data Symbol = Symbol { symName   :: !BS.ByteString
                      , symRegion :: !Int
                        -- ^ Region index:
                        --  0 for absolute
                        --  1+ for relative to some offset
                        --    base offset for dynamically linked executables, shared libraries, object files)
                        --  Numbers greater than 1 only appear in object files with function sections.
-                     , symAddr :: !Word64
+                     , symAddr   :: !Word64
                      }
 
 mkSymbol :: BS.ByteString -> MemSegmentOff w -> Symbol
@@ -166,8 +169,8 @@ instance Encode ServerOutput where
 -------------------------------------------------------------------------------
 -- Server
 
-data ServerState = ServerState {
-    ssJobs :: !(Map JobId ())
+newtype ServerState = ServerState {
+    ssJobs :: Map JobId ()
   }
 
 initialServerState :: ServerState
@@ -188,7 +191,7 @@ abort = ServerM $ StateT $ \_ -> ContT $ \_ -> pure Nothing
 fatalError :: String -> ServerM a
 fatalError msg = do
   output $ FatalError msg
-  liftIO $ exitFailure
+  liftIO exitFailure
 
 newtype Server = Server {
     serverStateVar :: MVar ServerState
@@ -198,9 +201,7 @@ withServer :: Server -> ServerM () -> IO ()
 withServer s (ServerM m) =
   modifyMVar_ (serverStateVar s) $ \ss -> do
     mr <- runContT (execStateT m ss) (pure . Just)
-    pure $! case mr of
-              Nothing -> ss
-              Just ss' -> ss'
+    pure $! fromMaybe ss mr
 
 -----------------------------------------------------------------------
 -- Open
@@ -247,7 +248,7 @@ openInit comp = do
   mr <- processIncCompLogs openWarning (runIncCompM (fmap Right comp))
   case mr of
     Left msg -> openFailed msg
-    Right r -> pure r
+    Right r  -> pure r
 
 -- | Interpret the given bytestring as a Elf64 file.
 doOpen :: BS.ByteString -> OpenM ()
@@ -344,7 +345,7 @@ doRun s = do
       withServer s $ processInput input
       case input of
         Shutdown -> pure ()
-        _ -> doRun s
+        _        -> doRun s
 
 -- | This command is called when reopt is called to run in server mode.
 --

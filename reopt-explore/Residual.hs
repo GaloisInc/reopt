@@ -48,6 +48,7 @@ import           Reopt.Utils.Exit              (checkedReadFile,
 import           CommandLine                   (Options,
                                                 ResidualOptions (roClangPath, roHeader, roOutputForSpreadsheet, roPaths))
 import           Common                        (findAllElfFilesInDirs)
+import           Data.Either                   (fromRight)
 import           Data.ElfEdit                  (ElfHeaderInfo,
                                                 Shdr (shdrAddr, shdrName, shdrSize),
                                                 Symtab (symtabEntries),
@@ -313,7 +314,7 @@ constructResidualRangeInfos ::
   [ResidualRangeInfo]
 constructResidualRangeInfos hdrInfo mem recovOut residuals =
   let
-    Right shdrs = headerNamedShdrs hdrInfo
+    shdrs = fromRight (error "shdrs") $ headerNamedShdrs hdrInfo
     rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
     mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
     allSymbols = map steValue . Vec.toList . symtabEntries @64 <$> mSymTab

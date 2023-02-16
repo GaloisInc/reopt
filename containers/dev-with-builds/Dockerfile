@@ -8,9 +8,9 @@ RUN  curl -o /root/.ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/0.1.14.
  && chmod a+x /root/.ghcup/bin/ghcup
 
 # Install GHC
-RUN ghcup install ghc 8.10.5 \
+RUN ghcup install ghc 8.10.7 \
  && ghcup install cabal 3.4.0.0 \
- && ghcup set ghc 8.10.5
+ && ghcup set ghc 8.10.7
 
 COPY . /home/vadd/reopt
 
@@ -24,4 +24,3 @@ RUN cabal build exe:reopt exe:reopt-explore
 RUN cp /home/vadd/reopt-vcg/deps/cvc4-2020-09-16-x86_64-linux-opt /usr/local/bin/cvc4
 COPY ./containers/dev-with-builds/README.md /home/vadd
 WORKDIR /home/vadd
-
