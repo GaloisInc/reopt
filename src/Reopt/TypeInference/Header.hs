@@ -72,6 +72,7 @@ parseType qm tp =
     C.CBoolType _   -> pure $! IAnnType  1
     C.CComplexType n -> errorAt n "_Complex is not supported."
     C.CInt128Type n   -> errorAt n "__int128 is not supported."
+    C.CUInt128Type n   -> errorAt n "__uint128 is not supported."
     C.CFloatNType _ _ n -> errorAt n "Floating point extensions are not supported."
 
     C.CEnumType en _ -> parseEnum en
@@ -120,6 +121,7 @@ parseQualType qm qtp =
         C.CBoolType _   -> pure $! IAnnType 1
         C.CComplexType n -> errorAt n "_Complex is not supported."
         C.CInt128Type n   -> errorAt n "__int128 is not supported."
+        C.CUInt128Type n   -> errorAt n "__uint128 is not supported."
         C.CFloatNType _ _ n -> errorAt n "Floating point extensions are not supported."
         C.CEnumType en _ -> parseEnum en
         C.CSUType su _ -> parseStructUnion su

@@ -10,6 +10,7 @@ module Residual (runResidual) where
 import           Control.Monad                 (forM_)
 import qualified Data.ByteString.Char8         as BSC
 import           Data.IORef                    (newIORef)
+import qualified Data.Map                      as Map
 import qualified Data.Vector                   as Vec
 import           Data.Word                     (Word64)
 import           Numeric                       (showHex)
@@ -27,7 +28,7 @@ import           Data.Macaw.Memory             (MemChunk (ByteRegion),
 import qualified Data.Macaw.Memory.Permissions as Perm
 
 import           Reopt                         (LoadOptions (LoadOptions),
-                                                RecoverX86Output (recoveredModule),
+                                                RecoverX86Output (recoveredModule, summaryFailures),
                                                 ReoptOptions, X86_64,
                                                 loadOffset,
                                                 parseElfHeaderInfo64,
@@ -58,7 +59,7 @@ import           Data.Maybe                    (isJust, mapMaybe)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
 import           Flexdis86.InstructionSet      (ppInstruction)
-import           Residual.Recognizers          (ResidualExplanation,
+import           Residual.Recognizers          (ResidualExplanation (BecauseFailure),
                                                 classifyInstrs,
                                                 ppResidualExplanation)
 import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
@@ -97,7 +98,7 @@ performRecovery ::
   ResidualOptions ->
   ReoptOptions ->
   (a, FilePath) ->
-  IO (ElfHeaderInfo 64, DiscoveryState X86_64, RecoveredModule X86_64)
+  IO (ElfHeaderInfo 64, DiscoveryState X86_64, RecoverX86Output)
 performRecovery residualOpts reoptOpts (_idx, fPath) = do
   let lOpts = LoadOptions {loadOffset = Nothing}
   let unnamedFunPrefix = BSC.pack "reopt"
@@ -110,11 +111,11 @@ performRecovery residualOpts reoptOpts (_idx, fPath) = do
         either (error . show) return
   hdrInfo <- handleEitherStringWithExit $ parseElfHeaderInfo64 fPath bs
   logger <- createLogger reoptOpts fPath
-  (_os, ds, recOut, _) <-
+  (_os, ds, recovOut, _) <-
     handleEitherWithExit =<<
        runReoptM logger
          (recoverX86Elf lOpts reoptOpts annDecl unnamedFunPrefix hdrInfo)
-  return (hdrInfo, ds, recoveredModule recOut)
+  return (hdrInfo, ds, recovOut)
 
 computeResidualSegments ::
   DiscoveryState X86_64 ->
@@ -130,12 +131,8 @@ computeResidualSegments discoveryState recoveredModule = do
   let blockSegs = map blockSeg blocks
   return $ foldl removeSegment allMemorySegments blockSegs
 
-displayResiduals :: ResidualOptions -> Memory 64 -> ElfHeaderInfo 64 -> [Segment] -> IO ()
-displayResiduals residualOpts mem hdrInfo residuals = do
-  let Right shdrs = headerNamedShdrs hdrInfo
-  let rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
-  let mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
-  let residualInfos = constructResidualRangeInfos mSymTab mem rangedShdrs residuals
+displayResiduals :: ResidualOptions -> [Segment] -> [ResidualRangeInfo] -> IO ()
+displayResiduals residualOpts residuals residualInfos = do
   let (explained, unexplained) = partition (isJust . rriExplanation) residualInfos
   let residualFootprint = segmentsFootprint residuals
   let explainedFootprint = segmentsFootprint $ map (getInclusiveRange . rriRange) explained
@@ -149,9 +146,11 @@ runResidual :: Options -> ResidualOptions -> ReoptOptions -> IO ()
 runResidual _opts residualOpts reoptOpts = do
   files <- findAllElfFilesInDirs (roPaths residualOpts)
   forM_ files $ \ file -> do
-    (hdrInfo, discoveryState, recoveredModule) <- performRecovery residualOpts reoptOpts file
-    residuals <- computeResidualSegments discoveryState recoveredModule
-    displayResiduals residualOpts (memory discoveryState) hdrInfo residuals
+    (hdrInfo, discoveryState, recovOut) <- performRecovery residualOpts reoptOpts file
+    let mem = memory discoveryState
+    residuals <- computeResidualSegments discoveryState $ recoveredModule recovOut
+    let residualInfos = constructResidualRangeInfos hdrInfo mem recovOut residuals
+    displayResiduals residualOpts residuals residualInfos
 
 segmentsFootprint :: [Segment] -> Word64
 segmentsFootprint = sum . map (uncurry subtract)
@@ -291,15 +290,35 @@ data ResidualRangeInfo = ResidualRangeInfo
   , rriExplanation  :: Maybe ResidualExplanation
   }
 
+classifyResidual ::
+  RecoverX86Output ->
+  InclusiveRange Word64 ->
+  Maybe [DisassembledAddr] ->
+  Maybe ResidualExplanation
+classifyResidual recovOut range instrs =
+  case classifyInstrs =<< instrs of
+    Just expl -> Just expl
+    Nothing   ->
+      let
+        failures = Map.toList $ summaryFailures recovOut
+        overlaps (k, _) = maybe False (inInclusiveRange range . memWordValue) (segoffAsAbsoluteAddr k)
+      in
+      BecauseFailure . snd <$> find overlaps failures
+
 constructResidualRangeInfos ::
-  Maybe (Symtab 64) ->
+  ElfHeaderInfo 64 ->
   Memory 64 ->
-  [RangedShdr BSC.ByteString Word64] ->
+  RecoverX86Output ->
   [Segment] ->
   [ResidualRangeInfo]
-constructResidualRangeInfos mSymTab mem rangedShdrs residuals =
-  let allSymbols = map steValue . Vec.toList . symtabEntries @64 <$> mSymTab in
-  let fineGrainedResiduals = splitAtAddresses (concat allSymbols) residuals in
+constructResidualRangeInfos hdrInfo mem recovOut residuals =
+  let
+    Right shdrs = headerNamedShdrs hdrInfo
+    rangedShdrs = mapMaybe rangedShdr (Vec.toList shdrs)
+    mSymTab = either (error . show) id <$> decodeHeaderSymtab hdrInfo
+    allSymbols = map steValue . Vec.toList . symtabEntries @64 <$> mSymTab
+    fineGrainedResiduals = splitAtAddresses (concat allSymbols) residuals
+  in
   flip map fineGrainedResiduals $ \ range@(lo, hi) ->
     let rriInstructions = segmentInstrs mem range in
     ResidualRangeInfo {
@@ -308,7 +327,7 @@ constructResidualRangeInfos mSymTab mem rangedShdrs residuals =
       rriSection = snd <$> find ((`inInclusiveRange` lo) . fst) rangedShdrs,
       rriSymbolName = symbolAtAddress mSymTab lo ,
       rriInstructions,
-      rriExplanation = classifyInstrs =<< rriInstructions
+      rriExplanation = classifyResidual recovOut (InclusiveRange range) rriInstructions
     }
 
 displayResidualsForSpreadsheet :: [ResidualRangeInfo] -> Word64 -> Word64 -> Word64 -> String

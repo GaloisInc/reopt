@@ -1617,6 +1617,7 @@ headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
           <> dynDepsTypeMap
           <> declFn "__errno_location" (ftype (PtrAnnType (IAnnType 32)) [])
           <> declFn "__fstat" (ftype intType (fmap nonmArg [intType, voidPtrType]))
+          <> declFn "__isoc99_sscanf" (ReoptPrintfFunType 1)
           <> declFn "__printf_chk" (ftype intType [nmArg "flag" intType, AnnFunArg (Just "format") charPtrType])
           <> declFn "__stack_chk_fail" (ftype VoidAnnType [])
           <> declFn "exit" (ftype VoidAnnType [AnnFunArg (Just "status") (IAnnType 64)])

@@ -20,7 +20,7 @@ haddock-html-location: https://hackage.haskell.org/package/$pkg-$version/docs
 tests: true
 
 package reopt
-  ghc-options: -Wall
+  ghc-options: -Wall -Werror
 package reopt-tools
   ghc-options: -Wall
 package reopt-vcg-ann
