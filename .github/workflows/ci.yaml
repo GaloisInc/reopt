@@ -41,7 +41,7 @@ jobs:
       uses: actions/checkout@v2
       with:
         submodules: true
-    - name: Set env.home and enc.ghc
+    - name: Set env.home and env.ghc
       run: |
         echo "home=$HOME" >> $GITHUB_ENV
         echo "ghc=`ghc --version --help | cut -d' ' -f8`" >> $GITHUB_ENV

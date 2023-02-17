@@ -10,14 +10,17 @@ ENV PATH=/opt/rh/devtoolset-8/root/bin:${PATH}
 
 # Install GHCUP
 ENV PATH=/root/.ghcup/bin:${PATH}
+ARG ghcupVer=0.1.19.0
+ARG cabalVer=3.4.0.0
+ARG ghcVer=8.10.7
 
 RUN mkdir -p /root/.ghcup/bin
-RUN  curl -o /root/.ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/0.1.14.1/x86_64-linux-ghcup-0.1.14.1 \
+RUN  curl -o /root/.ghcup/bin/ghcup https://downloads.haskell.org/~ghcup/${ghcupVer}/x86_64-linux-ghcup-${ghcupVer} \
  && chmod a+x /root/.ghcup/bin/ghcup
 
 # Install GHC
-RUN ghcup install ghc 8.10.5 \
- && ghcup install cabal 3.4.0.0 \
- && ghcup set ghc 8.10.5
+RUN ghcup install ghc ${ghcVer} \
+ && ghcup install cabal ${cabalVer} \
+ && ghcup set ghc ${ghcVer}
 
 WORKDIR /root

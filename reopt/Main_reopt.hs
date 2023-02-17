@@ -63,9 +63,9 @@ import           Reopt.TypeInference.ConstraintGen
 import           Reopt.TypeInference.Pretty        (ppFunction)
 
 reoptVersion :: String
-reoptVersion = printf "Reopt binary reoptimizer (reopt) %d.%d.%d." h l r
+reoptVersion = printf "Reopt binary reoptimizer (reopt) %s." v
   where
-    [h, l, r] = versionBranch version
+    v = intercalate "." $ map (printf "%d") $ versionBranch version
 
 -- | Write a builder object to a file if defined or standard out if not.
 writeOutput :: Maybe FilePath -> (Handle -> IO a) -> IO a
@@ -1038,23 +1038,18 @@ main' = do
   args <- getCommandLineArgs
   setDebugKeys (args ^. debugKeys)
   case args ^. reoptAction of
-    DumpDisassembly -> do
-      dumpDisassembly args
+    DumpDisassembly -> dumpDisassembly args
     ShowCFG ->
       writeOutput (outputPath args) $ \h -> do
         hPutStrLn h =<< showCFG args
     ShowConstraints -> showConstraints args
-    ServerMode -> do
-      runServer
-    ShowHelp -> do
-      print $ helpText [] HelpFormatAll arguments
+    ServerMode -> runServer
+    ShowHelp -> print $ helpText [] HelpFormatAll arguments
     ShowHomeDirectory -> do
       homeDir <- reoptHomeDir
       print $ "Reopt's current home directory: " ++ homeDir
-    ShowVersion ->
-      putStrLn (modeHelp arguments)
-    Reopt -> do
-      performReopt args
+    ShowVersion -> putStrLn (modeHelp arguments)
+    Reopt -> performReopt args
 
 main :: IO ()
 main = main' `catch` h

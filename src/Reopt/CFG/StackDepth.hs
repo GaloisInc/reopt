@@ -15,10 +15,11 @@ module Reopt.CFG.StackDepth
   , stackDepthOffsetValue
   ) where
 
-import Control.Lens
+import           Control.Lens
 import           Control.Monad.Except
 import           Control.Monad.State.Strict
 import           Data.Foldable as Fold (traverse_)
+import           Data.Maybe (fromJust)
 import           Data.Int
 import           Data.List (partition)
 import           Data.Map.Strict (Map)
@@ -299,9 +300,9 @@ recoverIter finfo = do
     [] -> return ()
     root_addr : s' -> do
       blockFrontier .= s'
-      spMap <- use $ blockInitStackPointers
-      let Just init_sp = Map.lookup root_addr spMap
-      let Just reg = Map.lookup root_addr (finfo^.parsedBlocks)
+      spMap <- use blockInitStackPointers
+      let init_sp = fromJust $ Map.lookup root_addr spMap
+      let reg = fromJust $ Map.lookup root_addr (finfo^.parsedBlocks)
       analyzeStmtReferences root_addr init_sp reg
       recoverIter finfo
 

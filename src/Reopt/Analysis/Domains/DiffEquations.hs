@@ -129,7 +129,7 @@ addEq x y c p = do
 addCCSet :: Ord v => v -> Map v Integer -> DiffEquations v -> DiffEquations v
 addCCSet x m0 p0 = Map.foldlWithKey f p0 m0
   where f p y d = p'
-          where Just p' = addEq x y d p
+          where p' = fromJust (addEq x y d p)
 
 {-# INLINE addCCSet #-}
 

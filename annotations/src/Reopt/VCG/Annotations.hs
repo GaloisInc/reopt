@@ -1,5 +1,4 @@
 {-|
-
 This module defines the data structures used to representation
 annotation information, and routines for serializing and deserializing
 to JSON.
@@ -7,6 +6,7 @@ to JSON.
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+
 module Reopt.VCG.Annotations
   ( ModuleAnnotations(..)
   , FunctionAnn(..)
@@ -31,6 +31,8 @@ module Reopt.VCG.Annotations
   ) where
 
 import           Control.Monad
+import qualified Data.Aeson.Key as Aeson
+import qualified Data.Aeson.KeyMap as Aeson
 import           Data.Aeson.Types ((.:), (.:!), (.!=), (.=), object)
 import qualified Data.Aeson.Types as Aeson
 import           Data.Bits
@@ -67,13 +69,13 @@ withFixedObject nm _ _ = fail $ "Expected an object for " ++ nm ++ "."
 -- non-empty, and leaves it blank otherwise.
 --
 -- This is useful for emitting lists that default to empty.
-optValList :: Aeson.ToJSON a => Text -> [a] -> [(Text,Aeson.Value)]
+optValList :: Aeson.ToJSON a => Aeson.Key -> [a] -> [(Aeson.Key, Aeson.Value)]
 optValList _ [] = []
 optValList nm l = [nm .= l]
 
 -- | @optVal nm v default@ generates a binding from @nm@ to @v@ if @v@
 -- is distinct from @default@, and the empty list otherwise.
-optVal :: (Eq a, Aeson.ToJSON a) => Text -> a -> a -> [(Text,Aeson.Value)]
+optVal :: (Eq a, Aeson.ToJSON a) => Aeson.Key -> a -> a -> [(Aeson.Key, Aeson.Value)]
 optVal nm v d | v == d = []
               | otherwise = [nm .= v]
 
@@ -169,7 +171,7 @@ parseMemoryAnn v = do
     "heap_access" -> pure HeapAccess
     _ -> fail "Unexpected alloca type"
 
-renderMemoryAnn :: MemoryAnn -> [(Text, Aeson.Value)]
+renderMemoryAnn :: MemoryAnn -> [(Aeson.Key, Aeson.Value)]
 renderMemoryAnn BinaryOnlyAccess =
   ["type" .= Aeson.String "binary_only_access"]
 renderMemoryAnn (JointStackAccess a) =
@@ -386,12 +388,12 @@ data BlockAnn
      -- ^ Indicates the block is unreachable.
   deriving (Show)
 
-parseArray :: Text -> (Aeson.Value -> Aeson.Parser a) -> Aeson.Object -> Aeson.Parser [a]
+parseArray :: Aeson.Key -> (Aeson.Value -> Aeson.Parser a) -> Aeson.Object -> Aeson.Parser [a]
 parseArray nm f o = do
   mo <- o .:! nm
   case mo of
     Nothing -> pure []
-    Just v -> Aeson.withArray (Text.unpack nm) (traverse f . V.toList) v
+    Just v -> Aeson.withArray (Aeson.toString nm) (traverse f . V.toList) v
 
 parseJSONBlockAnn :: LLVMVarMap
                   -> Aeson.Object
@@ -427,12 +429,12 @@ parseJSONBlockAnn llvmMap o = do
 -- | Convert a block annotation and label to JSON
 blockAnnToJSON :: String -> BlockAnn -> Aeson.Object
 blockAnnToJSON lbl UnreachableBlock =
-  HMap.fromList $
+  Aeson.fromList $
     [ "label" .= lbl
     , "reachable" .= False
     ]
 blockAnnToJSON lbl (ReachableBlock blk) =
-  HMap.fromList
+  Aeson.fromList
     $ [ "label"      .= lbl
       , "addr"       .= blockAddr blk
       , "size"       .= blockCodeSize blk

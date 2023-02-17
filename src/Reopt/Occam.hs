@@ -10,9 +10,9 @@ module Reopt.Occam
 where
 
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Aeson
+import qualified Data.Aeson.KeyMap as Aeson
 import qualified Data.Aeson.Types as Aeson
-import Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HM
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -45,15 +45,15 @@ instance Aeson.FromJSON ReoptOccamConfig where
         }
   parseJSON js = fail $ "Expected a JSON object describing the OCCAM config but got " ++ show js
 
-getJSONStringListFromObjField :: Aeson.Parser [Text] -> Text -> HashMap Text Aeson.Value -> Aeson.Parser [Text]
+getJSONStringListFromObjField :: Aeson.Parser [Text] -> Aeson.Key -> Aeson.KeyMap Aeson.Value -> Aeson.Parser [Text]
 getJSONStringListFromObjField dflt fieldName obj = do
-  case HM.lookup fieldName obj of
+  case Aeson.lookup fieldName obj of
     Nothing -> dflt
     Just (Aeson.Array elems) -> do
       let getStr (Aeson.String txt) = pure txt
           getStr other = fail $ "Expected a string but got " ++ (show other)
       mapM getStr $ V.toList elems
-    Just other -> fail $ "Expected a JSON array of strings in object field `" ++ (T.unpack fieldName) ++ "` but got " ++ (show other)
+    Just other -> fail $ "Expected a JSON array of strings in object field `" ++ (Aeson.toString fieldName) ++ "` but got " ++ (show other)
 
 -- | Generate an OCCAM manifest from a Reopt config for OCCAM.
 toOccamManifest ::
@@ -67,9 +67,9 @@ toOccamManifest ::
   [Text] ->
   Aeson.Value
 toOccamManifest inputPath progName bcOutFile ldFlags =
-  Aeson.Object $
-    HM.insert "main" (Aeson.String $ T.pack inputPath) $
-      HM.insert "binary" (Aeson.toJSON bcOutFile) $
-        HM.insert "name" (Aeson.String $ T.pack progName) $
-          HM.insert "ldflags" (Aeson.toJSON $ ["-c", "-emit-llvm"] ++ ldFlags) $
-            HM.empty
+  Aeson.Object $ Aeson.fromList
+    [ ("main", Aeson.String $ T.pack inputPath)
+    , ("binary", Aeson.toJSON bcOutFile)
+    , ("name", Aeson.String $ T.pack progName)
+    , ("ldflags", Aeson.toJSON $ ["-c", "-emit-llvm"] ++ ldFlags)
+    ]
