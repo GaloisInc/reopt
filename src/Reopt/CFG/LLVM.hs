@@ -445,8 +445,8 @@ tempIdent c = L.Ident ('t' : show c)
 -- LLVMGEneration options
 
 -- | Options for generating LLVM
-data LLVMGenOptions =
-  LLVMGenOptions { mcExceptionIsUB :: !Bool
+newtype LLVMGenOptions =
+  LLVMGenOptions { mcExceptionIsUB :: Bool
                    -- ^ Code with side effects is allowed to result in
                    -- LLVM undefined behavior if machine code would
                    -- have raised an exception.
@@ -602,7 +602,7 @@ setAssignIdValue :: HasCallStack
                  -> L.Typed L.Value
                  -> BBLLVM arch ()
 setAssignIdValue fid v = do
-  m <- gets $ bbAssignValMap
+  m <- gets bbAssignValMap
   case Map.lookup fid m of
     Just{} -> error $ "internal: Assign id " ++ show (pretty fid) ++ " already assigned."
     Nothing -> pure ()
@@ -753,7 +753,7 @@ call (valueOf -> f) args =
     L.PtrTo (L.FunTy res _argTypes _varArgs) -> do
       case res of
         L.PrimType L.Void -> do
-          error $ "Call expected to return a value, but returns void."
+          error "Call expected to return a value, but returns void."
         _ -> do
           fmap (L.Typed res) $ evalInstr $ L.Call False (L.typedType f) (L.typedValue f) args
     _ -> error $ "Call given non-function pointer argument:\n" ++ show f
@@ -1544,7 +1544,7 @@ addLLVMBlock ctx fs b = (finFS, res)
 -- Inline assembly
 
 -- | Attributes to annote inline assembly.
-data AsmAttrs = AsmAttrs { asmSideeffect :: !Bool }
+newtype AsmAttrs = AsmAttrs { asmSideeffect :: Bool }
 
 -- | Indicates all side effects  of inline assembly are captured in the constraint list.
 noSideEffect :: AsmAttrs
@@ -1599,7 +1599,7 @@ newtype LLVMTrans a = LLVMTrans (State LLVMTransState a)
 -- | Run the translation returning result and intrinsics.
 runLLVMTrans :: LLVMTrans a -> ([Intrinsic], [LLVMLogEvent], a)
 runLLVMTrans (LLVMTrans action) =
-  let (r, (LLVMTransState m events)) = runState action (LLVMTransState Map.empty [])
+  let (r, LLVMTransState m events) = runState action (LLVMTransState Map.empty [])
    in (Map.elems m, events, r)
 
 argIdent :: Int -> L.Ident
@@ -1655,7 +1655,7 @@ mkBoundLocExpr (StackOffLoc o tp) =
       _ ->
         throwError $ "Do not support stack references with type " ++ show tp
    else
-    throwError $ "Do not support positive stack offsets."
+    throwError "Do not support positive stack offsets."
 
 -- | Generate preconditions for a phi variable to associate LLVM phi
 -- variables with machine code.
@@ -1718,7 +1718,7 @@ getBlockAnn fnm blockRes = do
                                     , Ann.mcMemoryEvents = V.toList $ memAnn addr <$> fbMemInsnAddrs b
                                     , Ann.isTailCall     = isTail
                                     }
-    pure $! (fnBlockLabelString lbl, Ann.ReachableBlock ann)
+    pure (fnBlockLabelString lbl, Ann.ReachableBlock ann)
 
 -- | This translates the function to LLVM and returns the define.
 --
@@ -1785,8 +1785,8 @@ defineFunction archOps genOpts constraints f = do
 
   -- Update intrins map and log events
   modify' $ \s -> s {llvmTransIntrinsicMap = funIntrinsicMap finalFunState,
-                     llvmTransLogEvents = (bbLLVMLogEvents $ finalBBState entryBlockRes)
-                                          ++ (concatMap (bbLLVMLogEvents . finalBBState) finalBlocks)
+                     llvmTransLogEvents = bbLLVMLogEvents (finalBBState entryBlockRes)
+                                          ++ concatMap (bbLLVMLogEvents . finalBBState) finalBlocks
                                           ++ llvmTransLogEvents s}
 
   let entryLLVMBlock :: L.BasicBlock

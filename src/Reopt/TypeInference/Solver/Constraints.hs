@@ -3,7 +3,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.Constraints where
@@ -17,7 +16,7 @@ import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
                                                            FreeTyVars (..), ITy)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: TyVar, eqRhs :: ITy }
+data EqC = EqC {eqLhs :: !TyVar, eqRhs :: !ITy }
   deriving (Eq, Ord, Show, Generic)
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
@@ -34,8 +33,8 @@ instance FreeRowVars EqC where
 
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
-  { eqRowLHS :: RowExpr,
-    eqRowRHS :: RowExpr
+  { eqRowLHS :: !RowExpr,
+    eqRowRHS :: !RowExpr
   }
   deriving (Eq, Ord, Show)
 
@@ -94,7 +93,7 @@ instance FreeTyVars OperandClass where
 --------------------------------------------------------------------------------
 -- SubType
 
-data SubC t = SubC t t
+data SubC t = SubC !t !t
   deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 infix 5 :<:
@@ -102,7 +101,7 @@ pattern (:<:) :: a -> a -> SubC a
 pattern a :<: b = SubC a b
 {-# COMPLETE (:<:) #-}
 
-type SubTypeC = SubC TyVar 
+type SubTypeC = SubC TyVar
 type SubRowC  = SubC RowExpr
 
 instance PP.Pretty a => PP.Pretty (SubC a) where

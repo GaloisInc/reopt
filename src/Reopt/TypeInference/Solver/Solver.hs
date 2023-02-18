@@ -33,7 +33,7 @@ import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            Conditional',
-                                                           ConstraintSolvingState (ptrWidth),
+                                                           ConstraintSolvingState (..),
                                                            SolverM, addEqC,
                                                            addEqRowC,
                                                            addRowExprEq,
