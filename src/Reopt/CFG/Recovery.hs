@@ -49,7 +49,7 @@ import qualified Data.ByteString.Char8            as BSC
 import           Data.Foldable
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as Map
-import           Data.Maybe                       (fromJust)
+import           Data.Maybe                       (fromJust, fromMaybe)
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.List          as P
 import           Data.Parameterized.Map           (MapF, Pair (..))
@@ -1438,7 +1438,9 @@ recoverInnerBlock b = do
   inv <- getBlockInvariants addr
   (phiVars, locMap) <- foldlM (addPhiVarForClass inv) ([],MapF.empty) (biPhiLocs inv)
    -- Get predecessors for this block.
-  let preds = fromJust (error "recoverInnerBlock: Nothing") (Map.lookup addr (funBlockPreds fInfo))
+  -- let preds = fromJust (error "recoverInnerBlock: Nothing") (Map.lookup addr (funBlockPreds fInfo))
+  -- Temporary hack, likely unsound
+  let preds = fromMaybe [] (Map.lookup addr (funBlockPreds fInfo))
    -- Generate phi nodes from predecessors and registers that this block refers to.
   let phiVarVec = V.fromList (reverse phiVars)
   evalRecover b inv preds phiVarVec locMap
