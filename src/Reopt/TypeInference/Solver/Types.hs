@@ -21,11 +21,11 @@ import           Reopt.TypeInference.Solver.RowVariables  (FieldMap (..),
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 
 -- FIXME: f will be used when we add e.g. tuples/vectors
-data TyF rvar f
+data TyF row f
   = -- | A scalar numeric value (i.e., a signed/unsigned integer, but _not_ a pointer).
     NumTy Int
   | -- | A pointer to a value.
-    PtrTy rvar
+    PtrTy row
   | -- | A type which is used differently in different contexts
     ConflictTy Int
   | -- | A n-ary tuple
@@ -72,8 +72,8 @@ recTyByteWidth ptrSz = offsetAfterLast . last
   where
     offsetAfterLast (o, ty) = fromIntegral o + tyByteWidth ptrSz ty
 
--- | This shoold only be called on types which can occur within a
--- RecTy, i.e., not records.
+-- | This should only be called on types which can occur within a RecTy, i.e.,
+-- not records.
 tyByteWidth :: Int -> FTy -> Integer
 tyByteWidth ptrSz UnknownTy = fromIntegral ptrSz `div` 8
 tyByteWidth _ptrSz StructTy {} = error "Saw a StructTy in tyByteWidth"
@@ -105,7 +105,7 @@ tyToLLVMType ptrSz UnknownTy =
   L.PrimType (L.Integer (fromIntegral ptrSz))
 tyToLLVMType _ptrSz (NamedStruct s) = L.Alias (L.Ident s)
 tyToLLVMType ptrSz (StructTy fm) = recTyToLLVMType ptrSz (Map.assocs (getFieldMap fm))
-tyToLLVMType ptrSz (FTy ty) = 
+tyToLLVMType ptrSz (FTy ty) =
   case ty of
     NumTy n     -> L.PrimType (L.Integer (fromIntegral n))
     PtrTy ty'   -> L.PtrTo $ tyToLLVMType ptrSz ty'
@@ -131,7 +131,7 @@ instance (PP.Pretty f, PP.Pretty rv) => PP.Pretty (TyF rv f) where
     ConflictTy n -> "![" <> PP.pretty n <> "]"
     TupleTy ts -> PP.tupled (map PP.pretty ts)
     VecTy n ty  -> "< " <> PP.pretty n <> " x " <> PP.pretty ty <> " >"
-    
+
 instance PP.Pretty FTy where
   pretty = \case
     UnknownTy -> "?"
@@ -158,7 +158,7 @@ instance (FreeTyVars rvar, FreeTyVars f) => FreeTyVars (TyF rvar f) where
     TupleTy ts -> foldMap freeTyVars ts
     VecTy _ ty -> freeTyVars ty
 
-instance FreeTyVars ITy where  
+instance FreeTyVars ITy where
   freeTyVars = \case
     VarTy v  -> Set.singleton v
     ITy   ty -> freeTyVars ty

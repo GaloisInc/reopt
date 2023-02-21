@@ -60,13 +60,13 @@ emptyQualMods = QM { qmLenMod = NoLenMod
 parseType :: QualMods -> C.CTypeSpec -> CParser AnnType
 parseType qm tp =
   case tp of
-    C.CVoidType _   -> pure $! VoidAnnType
+    C.CVoidType _   -> pure VoidAnnType
     C.CCharType _   -> pure $! IAnnType 8
     C.CShortType _  -> pure $! IAnnType 16
     C.CIntType  _   -> pure $! declLenModIntType (qmLenMod qm)
     C.CLongType _   -> pure $! IAnnType 64
-    C.CFloatType _  -> pure $! FloatAnnType
-    C.CDoubleType _ -> pure $! DoubleAnnType
+    C.CFloatType _  -> pure FloatAnnType
+    C.CDoubleType _ -> pure DoubleAnnType
     C.CSignedType _ -> pure $! IAnnType 32
     C.CUnsigType _  -> pure $! IAnnType 32
     C.CBoolType _   -> pure $! IAnnType  1
@@ -84,7 +84,7 @@ parseType qm tp =
 
 
 longShortError :: C.NodeInfo -> CParser a
-longShortError n = errorAt n $ "Both 'long' and 'short in declaration specifier."
+longShortError n = errorAt n "Both 'long' and 'short in declaration specifier."
 
 -- | Parse the declaration specifiers to get a header type.
 parseQualType :: QualMods
@@ -104,7 +104,7 @@ parseQualType qm qtp =
         C.CShortType n ->
           case qmLenMod qm of
             NoLenMod -> parseQualType qm { qmLenMod = ShortLenMod } r
-            ShortLenMod -> errorAt n $ "Duplicate short"
+            ShortLenMod -> errorAt n "Duplicate short"
             LongLenMod  -> longShortError n
             LongLongLenMod -> longShortError n
         C.CIntType _ -> parseQualType qm r

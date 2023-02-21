@@ -15,8 +15,8 @@ blocks discovered by 'Data.Macaw.Discovery'.
 {-# LANGUAGE RankNTypes                 #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
-{-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE TupleSections              #-}
+-- {-# LANGUAGE TemplateHaskell            #-}
+-- {-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeOperators              #-}
 {-# LANGUAGE UndecidableInstances       #-}
@@ -147,7 +147,7 @@ argValue :: RegState X86Reg (Value X86_64 ids) ->  X86ArgInfo -> Some (Value X86
 argValue regs (ArgBV64 r)  = Some $ regs^.boundValue (X86_GP r)
 argValue regs (ArgZMM _ i) = Some $ regs^.boundValue (X86_ZMMReg i)
 
-$(pure [])
+-- $(pure [])
 
 -- | This identifies how a return value is passed from a callee to
 -- the callee.  The type indicates the type of the return value as opposed
@@ -180,7 +180,7 @@ instance HasRepr X86RetInfo TypeRepr where
   typeRepr (RetBV64 _)   = knownRepr
   typeRepr (RetZMM tp _) = typeRepr tp
 
-$(pure [])
+-- $(pure [])
 
 -- | This describes the registers and return value of an x86_64 function.
 --
@@ -255,7 +255,7 @@ instance HasRepr (EmbeddingInv f) TypeRepr where
 
 type FnRegValue arch = EmbeddingApp (FnValue arch)
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- Function recover monad
@@ -299,7 +299,7 @@ funFreshId = FR $ do
   modify' $ \frs -> frs { frsNextAssignId = FnAssignId (nextId + 1) }
   return $! FnAssignId nextId
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- RecoverState
@@ -394,7 +394,7 @@ throwErrorAt tag msg = do
     recoverErrorMessage = Text.pack msg
   }
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- X86FunctionType
@@ -407,7 +407,7 @@ argRegTypeRepr (ArgZMM tp _) =
     ZMMDouble -> Some (FloatTypeRepr  DoubleFloatRepr)
     ZMM512D   -> Some (VecTypeRepr n8 (FloatTypeRepr DoubleFloatRepr))
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- evalAssign
@@ -421,7 +421,7 @@ evalAssignRhs rhs = do
     addFnStmt $ FnAssignStmt fnAssign
     return $ FnAssignedValue fnAssign
 
-$(pure [])
+-- $(pure [])
 
 bitcast :: String
         -> FnValue X86_64 i
@@ -434,7 +434,7 @@ bitcast ctx x p = do
         dst = typeToLLVMType $ widthEqTarget p
         event = LLVMLogEvent ctx $ LogInfoBitCast $ LLVMBitCastInfo src dst
 
-$(pure [])
+-- $(pure [])
 
 checkedBitcast :: String
                -> FnValue X86_64 i
@@ -445,7 +445,7 @@ checkedBitcast ctx v pr =
     Just Refl -> pure v
     Nothing   -> bitcast ctx v pr
 
-$(pure [])
+-- $(pure [])
 
 -- | This turns a @FnRegValue@ into a @FnValue@.
 coerceRegValue :: FnRegValue X86_64 tp
@@ -478,7 +478,7 @@ coerceWriteToRead (EmbeddingApp v emb) writeRepr readRepr
         printf "Cannot read type %s from write of type %s."
                (show readRepr) (show writeRepr)
 
-$(pure [])
+-- $(pure [])
 ------------------------------------------------------------------------
 -- Return conversion
 
@@ -488,7 +488,7 @@ bv512ToVec8Double = WidthEqTrans (UnpackBits n8 n64) (VecEqCongruence n8 (ToFloa
 vec8DoubleToBV512 :: WidthEqProof (VecType 8 (FloatType DoubleFloat)) (BVType 512)
 vec8DoubleToBV512 = WidthEqTrans (VecEqCongruence n8 (FromFloat DoubleFloatRepr)) (PackBits n8 n64)
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- recoverValue
@@ -523,7 +523,7 @@ recoverCValue cv = do
     emitNewAssign = evalAssignRhs . FnAddrWidthConstant
 
 
-$(pure [])
+-- $(pure [])
 
 recoverAssignId :: AssignId ids tp -> Recover ids (FnValue X86_64 tp)
 recoverAssignId aid = do
@@ -560,7 +560,7 @@ recoverAssignId aid = do
             "Encountered uninitialized assignment: r" ++ show aid ++ "\n"
             ++ show (MapF.keys assignMap)
 
-$(pure [])
+-- $(pure [])
 
 prefixFailure :: String -> Recover ids a -> Recover ids a
 prefixFailure nm m = m `catchError` h
@@ -570,7 +570,7 @@ prefixFailure nm m = m `catchError` h
 recoverAssignId' :: String -> AssignId ids tp -> Recover ids (FnValue X86_64 tp)
 recoverAssignId' nm aid = prefixFailure nm (recoverAssignId aid)
 
-$(pure [])
+-- $(pure [])
 
 recoverInitialReg :: X86Reg tp -> Recover ids (FnRegValue X86_64 tp)
 recoverInitialReg reg = do
@@ -602,7 +602,7 @@ recoverRegValue val = do
     AssignedValue asgn -> do
       mkIdentEmbeddingApp <$> recoverAssignId (assignId asgn)
 
-$(pure [])
+-- $(pure [])
 
 -- | Recover a stack value
 recoverValue :: Value X86_64 ids tp
@@ -623,7 +623,7 @@ recoverValue' nm v = do
     Initial reg -> coerceRegValue =<< prefixFailure nm (recoverInitialReg reg)
     AssignedValue asgn -> recoverAssignId' nm (assignId asgn)
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- recoverRegister
@@ -635,7 +635,7 @@ recoverRegister :: HasCallStack
                 -> Recover ids (FnValue X86_64 tp)
 recoverRegister _ regs r = recoverValue' (show r) (regs^. boundValue r)
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- Return register/value handling
@@ -694,7 +694,7 @@ mkReturnValueFromRegs tstmtIdx retInfoList regs = do
   r <- evalAssignRhs $ FnEvalApp (MkTuple (fmapFC typeRepr fields) fields)
   pure (Just (Some r))
 
-$(pure [])
+-- $(pure [])
 
 -- | This contains a reference to the function to call, the arguments and return register.
 type instance ArchFunType X86_64 = ( FnValue X86_64 (BVType 64)
@@ -718,7 +718,7 @@ recoverCallTarget = do
 ------------------------------------------------------------------------
 -- recoverStmt
 
-$(pure [])
+-- $(pure [])
 
 checkAssignmentUnused :: HasCallStack => AssignId ids tp -> Recover ids ()
 checkAssignmentUnused aid = do
@@ -744,7 +744,7 @@ setAssignRhs aid rhs = do
   rval <- evalAssignRhs rhs
   setAssignVal aid rval
 
-$(pure [])
+-- $(pure [])
 
 whenAssignUsed :: AssignId ids tp -> Recover ids () -> Recover ids ()
 whenAssignUsed aid m = do
@@ -874,7 +874,7 @@ recoverAssign stmtIdx asgn = do
         CondReadMem _tp _cond _addr _def -> do
           throwErrorAt ReoptUnimplementedFeatureTag "Conditional reads are not yet supported."
 
-$(pure [])
+-- $(pure [])
 
 whenWriteUsed :: StmtIndex -> Recover ids () -> Recover ids ()
 whenWriteUsed idx m = do
@@ -1007,7 +1007,7 @@ recoverJumpTarget retVarMap tgtAddr = do
                        , fnJumpPhiValues = values
                        }
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- recoverBlock
@@ -1039,7 +1039,7 @@ evalFunctionArg tstmtIdx regs argInfo =
     ArgZMM tp i -> do
       Some <$> recoverZMMRegValue tstmtIdx tp i regs
 
-$(pure [])
+-- $(pure [])
 
 {-
 retTypeReprList :: [X86RetInfo] -> Some (P.List TypeRepr)
@@ -1088,7 +1088,7 @@ evalReturnVar l = do
   foldrM mkRetReg ([], MapF.empty) l
 -}
 
-$(pure [])
+-- $(pure [])
 
 recoverStmts :: [Stmt X86_64 ids] -> Recover ids ()
 recoverStmts [] = pure ()
@@ -1098,8 +1098,7 @@ recoverStmts (n:r) = do
   modify $ \s -> s { rsInsnIndex = stmtIdx + 1 }
   recoverStmts r
 
-$(pure [])
-
+-- $(pure [])
 
 data RetFieldRelation retType fieldType where
   IdentField :: RetFieldRelation retType retType
@@ -1347,7 +1346,7 @@ recoverBlock b = do
       -- Recover term statement
       recoverX86TermStmt tstmtIdx ts regs nextAddr
 
-$(pure [])
+-- $(pure [])
 
 ppInvariant :: Pair (BoundLoc (ArchReg arch)) (InitInferValue arch) -> FnBlockInvariant arch
 ppInvariant (Pair l d) =
@@ -1402,7 +1401,7 @@ evalRecover b inv preds phiVars locMap = do
                     , fbMemInsnAddrs = V.fromList (reverse (rsSeenMemAccessTypes s))
                     }
 
-$(pure [])
+-- $(pure [])
 
 ------------------------------------------------------------------------
 -- recoverFunction
@@ -1445,7 +1444,7 @@ recoverInnerBlock b = do
   let phiVarVec = V.fromList (reverse phiVars)
   evalRecover b inv preds phiVarVec locMap
 
-$(pure [])
+-- $(pure [])
 
 x86TermStmtNext :: StartInferContext X86_64
                 -> InferState X86_64 ids
