@@ -9,7 +9,7 @@ module Reopt.TypeInference.Solver.Finalise
   ( finalizeTypeDefs, ConstraintSolution(..)
   ) where
 
-import           Control.Lens          (_3, over)
+import           Control.Lens          (_3, over, (^.))
 import           Control.Monad.State   (gets)
 import           Data.Either           (lefts, partitionEithers)
 import           Data.Generics.Product (field)
@@ -77,23 +77,25 @@ finalizeTypeDefs = do
       NumTy n -> pure (NumTy n)
       ConflictTy n -> pure (ConflictTy n)
       TupleTy ts   -> TupleTy <$> traverse lookupTyVarRep ts
-      VecTy n ty   -> VecTy n <$> lookupTyVarRep ty 
-  
+      VecTy n ty   -> VecTy n <$> lookupTyVarRep ty
+
     normFieldMap :: FieldMap TyVar -> SolverM (FieldMap TyVar)
     normFieldMap = traverse lookupTyVarRep
 
 -- FIXME: breaks abstractions
-finalizeTypeDefs' :: UM.UnionFindMap TyVar TyVar (TyF RowVar TyVar) ->
-                     UM.UnionFindMap RowVar ki (FieldMap TyVar) ->
-                     ConstraintSolution
-finalizeTypeDefs' um@(UM.UnionFindMap teqvs tdefs) (UM.UnionFindMap _reqvs rdefs) =
+finalizeTypeDefs' ::
+  Ord r1 =>
+  UM.RevocableUnionFindMap r1 TyVar TyVar (TyF RowVar TyVar) ->
+  UM.RevocableUnionFindMap r2 RowVar ki (FieldMap TyVar) ->
+  ConstraintSolution
+finalizeTypeDefs' tm rm = -- um@(UM.RevocableUnionFindMap teqvs tdefs) (UM.RevocableUnionFindMap _reqvs rdefs) =
   over (field @"csTyVars") (Map.union eqvRes) preSoln
   where
     -- Include equivalences.
-    eqvRes = Map.fromSet mkOneEqv (Map.keysSet teqvs)
+    eqvRes = Map.fromSet mkOneEqv (Map.keysSet (tm ^. field @"rufmReal"))
 
     mkOneEqv k =
-      let (k', _) = UM.lookupRep k um
+      let (_, (k', _)) = UM.lookupRepFast k tm
       in resolveOne (csTyVars preSoln) k'
 
     preSoln = foldl goSCC (ConstraintSolution mempty mempty mempty) sccs
@@ -113,10 +115,10 @@ finalizeTypeDefs' um@(UM.UnionFindMap teqvs tdefs) (UM.UnionFindMap _reqvs rdefs
     mkNode _ = error "Impossible"
 
     nodes = [ ( Left ty, Left tv, edges ty)
-            | (tv, ty) <- Map.toList tdefs -- tv is a rep. var.
+            | (tv, ty) <- Map.toList (tm ^. field @"rufmDefs") -- tv is a rep. var.
             ] ++
             [ ( Right fm, Right rv, edges fm )
-            | (rv, fm) <- Map.toList rdefs -- tv is a rep. var.
+            | (rv, fm) <- Map.toList (rm ^. field @"rufmDefs") -- tv is a rep. var.
             ]
 
     edges :: forall a. (FreeTyVars a, FreeRowVars a) => a ->
@@ -140,7 +142,7 @@ finaliseTyF (ty, tv, _) r =
       TupleTy ts   -> FTy (TupleTy (map normTy ts))
       VecTy n t    -> FTy (VecTy n (normTy t))
     normTy t = Map.findWithDefault UnknownTy t (csTyVars r)
-                          
+
 finaliseFieldMap :: (FieldMap TyVar, RowVar,a) ->
                     ConstraintSolution -> ConstraintSolution
 finaliseFieldMap (fm, rv, _) r =

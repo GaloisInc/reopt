@@ -1,22 +1,36 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable #-}
 
-module Reopt.TypeInference.Solver.Constraints where
+module Reopt.TypeInference.Solver.Constraints (
+  pattern (:<:),
+  EqC (EqC),
+  EqRowC (EqRowC),
+  OperandClass (..),
+  SubRowC,
+  SubTypeC,
+  eqRowLHS,
+  eqRowRHS,
+  eqLHS,
+  eqRHS,
+) where
 
-import qualified Data.Set                                 as Set
-import           GHC.Generics                             (Generic)
-import qualified Prettyprinter                            as PP
-import           Reopt.TypeInference.Solver.RowVariables  (RowExpr, Offset)
-import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
-import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
-                                                           FreeTyVars (..), ITy)
+import Data.Set qualified as Set
+import GHC.Generics (Generic)
+import Prettyprinter qualified as PP
+import Reopt.TypeInference.Solver.RowVariables (Offset, RowExpr)
+import Reopt.TypeInference.Solver.TypeVariables (TyVar)
+import Reopt.TypeInference.Solver.Types (
+  FreeRowVars (..),
+  FreeTyVars (..),
+  ITy,
+ )
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: !TyVar, eqRhs :: !ITy }
+data EqC = EqC {eqLHS :: !TyVar, eqRHS :: !ITy}
   deriving (Eq, Ord, Show, Generic)
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
@@ -33,8 +47,8 @@ instance FreeRowVars EqC where
 
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
-  { eqRowLHS :: !RowExpr,
-    eqRowRHS :: !RowExpr
+  { eqRowLHS :: !RowExpr
+  , eqRowRHS :: !RowExpr
   }
   deriving (Eq, Ord, Show)
 
@@ -50,22 +64,26 @@ instance FreeRowVars EqRowC where
 -- --------------------------------------------------------------------------------
 -- -- Pointer addition (maybe, could be number add)
 
--- | What sort of constant operand we are dealing with for an
--- addition.
-data OperandClass =
-  OCSymbolic   -- ^ The second operand is not a constant
-  | OCOffset Offset -- ^ The second operand is a small constant, we
-                     -- already know it is a number (from constraint
-                     -- generation.)
-  | OCPointer -- ^ The second operand could be in an ELF segment.
+{- | What sort of constant operand we are dealing with for an
+addition.
+-}
+data OperandClass
+  = -- | The second operand is not a constant
+    OCSymbolic
+  | -- | The second operand is a small constant, we
+    -- already know it is a number (from constraint
+    -- generation.)
+    OCOffset Offset
+  | -- | The second operand could be in an ELF segment.
+    OCPointer
   deriving (Eq, Ord, Show)
 
 instance PP.Pretty OperandClass where
   pretty c =
     case c of
-      OCSymbolic      -> mempty
+      OCSymbolic -> mempty
       OCOffset offset -> prettySExp ["+", PP.pretty offset]
-      OCPointer       -> "?"
+      OCPointer -> "?"
 
 instance FreeTyVars OperandClass where
   freeTyVars _ = mempty
@@ -102,11 +120,11 @@ pattern a :<: b = SubC a b
 {-# COMPLETE (:<:) #-}
 
 type SubTypeC = SubC TyVar
-type SubRowC  = SubC RowExpr
+type SubRowC = SubC RowExpr
 
 instance PP.Pretty a => PP.Pretty (SubC a) where
   pretty (a :<: b) =
-    prettySExp [ PP.pretty a, "<:", PP.pretty b]
+    prettySExp [PP.pretty a, "<:", PP.pretty b]
 
 instance FreeTyVars a => FreeTyVars (SubC a) where
   freeTyVars (a :<: b) = freeTyVars a `Set.union` freeTyVars b

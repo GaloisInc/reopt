@@ -1,3 +1,5 @@
+/.ghcid
+/.vscode
 /attic
 /cabal.project.freeze
 /cabal.project.local

@@ -1,8 +1,4 @@
-{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE DeriveTraversable #-}
 
 module Reopt.TypeInference.Solver.RowVariables where
 
@@ -117,8 +113,8 @@ data RowInfo = RowInfo
 
 instance UFMKeyInfo RowVar RowInfo where
   compact old new = new { riShift = riShift old + riShift new }
-  projectKey     = riRowVar
-  injectKey k    = RowInfo { riRowVar = k, riShift = 0 }
+  projectKey = riRowVar
+  injectKey k = RowInfo { riRowVar = k, riShift = 0 }
   invertKey k ki = ki { riRowVar = k }
 
 instance PP.Pretty RowInfo where

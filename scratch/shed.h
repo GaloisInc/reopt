@@ -165,6 +165,7 @@ int poll(struct_pollfd *fds, nfds_t nfds, int timeout);
 FILE *popen(const char *command, const char *mode);
 int putc(int char, FILE *stream);
 
+int rand();
 long read(int fd, void *buf, size_t count);
 struct_dirent *readdir(DIR *dirp);
 struct_dirent64 *readdir64(DIR *dirp);
