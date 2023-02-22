@@ -100,7 +100,8 @@ import qualified Data.Vector as V
 import           Data.Word
 import           GHC.Stack
 import           GHC.TypeLits
-#if __GLASGOW_HASKELL__ < 910
+-- NOTE: 902 means 9.2
+#if __GLASGOW_HASKELL__ < 902
 import           Numeric.Natural (Natural)
 #endif
 import qualified Text.LLVM as L
