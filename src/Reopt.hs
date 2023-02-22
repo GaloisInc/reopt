@@ -1609,8 +1609,8 @@ headerTypeMap hdrAnn dynDepsTypeMap symAddrMap noretMap = do
   let intType = IAnnType 32
   let ftype res args = ReoptNonvarargFunType (AnnFunType {funRet = res, funArgs = V.fromList args})
   let declFn = Map.singleton
-  let nmArg nm tp = AnnFunArg (Just nm) tp
-  let nonmArg tp = AnnFunArg Nothing tp
+  let nmArg nm = AnnFunArg (Just nm)
+  let nonmArg = AnnFunArg Nothing
   -- Generate type information from annotations
   let nameAnnTypeMap =
         fmap ReoptNonvarargFunType (funDecls hdrAnn)
@@ -2074,7 +2074,7 @@ inferFunctionTypeFromDemands dm =
         DemandSet X86Reg ->
         Map (MemSegmentOff 64) (RegisterSet X86Reg) ->
         Map (MemSegmentOff 64) (RegisterSet X86Reg)
-      go ds m = Map.unionWith Set.union (functionResultDemands ds) m
+      go ds = Map.unionWith Set.union (functionResultDemands ds)
 
       retDemands :: Map (MemSegmentOff 64) (RegisterSet X86Reg)
       retDemands = foldr go Map.empty dm

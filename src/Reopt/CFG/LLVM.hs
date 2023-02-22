@@ -1298,7 +1298,7 @@ stmtToLLVM stmt = bbArchConstraints $ do
      call_ intr [ llvmValue, llvmAddr, llvmAlign, llvmMask ]
    FnCall dest args mretv -> do
      (llvmFn, args', retty') <- resolveFunctionEntry dest
-     let goSubtype (Some v) m_ty = mkLLVMSubtypeValue v m_ty
+     let goSubtype (Some v) = mkLLVMSubtypeValue v
      llvmArgs <- zipWithM goSubtype args args'
      -- Assign return values
      case mretv of
@@ -1412,7 +1412,7 @@ termStmtToLLVM tm =
         (Just _rtp, Just (Some rval)) -> ret =<< mkLLVMValue rval
     FnTailCall dest args -> do
       (callTarget, args', retty') <- resolveFunctionEntry dest
-      let goSubtype (Some v) m_ty = mkLLVMSubtypeValue v m_ty
+      let goSubtype (Some v) = mkLLVMSubtypeValue v
       llvmArgs <- zipWithM goSubtype args args'
       fret <- asks funRetType
       let callTargetType = L.typedType callTarget
@@ -1759,6 +1759,10 @@ defineFunction archOps genOpts constraints f = do
 
   let fret = fmap (\tv -> Map.lookup tv (mcTypeMap constraints)) (fttvRet fty)
 
+  let -- Needed for GHC >= 9
+    id' :: (LLVMArchConstraints arch => a) -> a
+    id' a = a
+
   let ctx :: FunLLVMContext arch
       ctx = FunLLVMContext { archFns = archOps
                            , funLLVMGenOptions = genOpts
@@ -1769,7 +1773,7 @@ defineFunction archOps genOpts constraints f = do
                            , funAllocaCount = 0
                            , moduleConstraints = constraints
                            , funBlockPhis = phiMapFromFunction f
-                           , withArchConstraints = \x -> x -- id does not unify for GHC >= 9
+                           , withArchConstraints = id'
                            }
 
   -- Create ordinary blocks
