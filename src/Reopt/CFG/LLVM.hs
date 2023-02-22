@@ -21,6 +21,7 @@ layer.
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -99,8 +100,8 @@ import qualified Data.Vector as V
 import           Data.Word
 import           GHC.Stack
 import           GHC.TypeLits
-#if __GLASGOW_HASKELL__ < 900
-import           Numeric.Natural
+#if __GLASGOW_HASKELL__ < 910
+import           Numeric.Natural (Natural)
 #endif
 import qualified Text.LLVM as L
 import qualified Text.LLVM.PP as L (ppType)
@@ -970,8 +971,9 @@ appToLLVM lhs app = bbArchConstraints $ do
     BVShl _sz x y -> binop shl  x y
     BVSar _sz x y -> binop ashr x y
     BVShr _sz x y -> binop lshr x y
-    PopCount w v  -> do
-      fn <- asks $ popCountCallback  . archFns
+    PopCount (w :: NatRepr n) v  -> do
+      let popCountCallbackInst ops = popCountCallback ops @n
+      fn <- asks $ popCountCallbackInst . archFns
       fn w v
     ReverseBytes{} -> unimplementedInstr' typ "ReverseBytes"
     UadcOverflows x y c -> intrinsicOverflows "uadd" x y c
@@ -1214,7 +1216,8 @@ rhsToLLVM lhs rhs =
       setAssignIdValue lhs (L.Typed eltType r)
 
     FnEvalArchFn f -> do
-      fn <- asks $ archFnCallback  . archFns
+      let archFnCallbackInst ops = archFnCallback ops @tp
+      fn <- asks $ archFnCallbackInst  . archFns
       setAssignIdValue lhs  =<< fn f
     FnAddrWidthConstant i -> do
       let ptrWidth = widthVal $ addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch)))
@@ -1766,7 +1769,7 @@ defineFunction archOps genOpts constraints f = do
                            , funAllocaCount = 0
                            , moduleConstraints = constraints
                            , funBlockPhis = phiMapFromFunction f
-                           , withArchConstraints = id
+                           , withArchConstraints = \x -> x -- id does not unify for GHC >= 9
                            }
 
   -- Create ordinary blocks
