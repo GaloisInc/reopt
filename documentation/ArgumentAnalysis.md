@@ -1,5 +1,16 @@
 # X86 argument analysis
 
+This is just a very thin error-handling wrapper over Macaw's function demand
+analysis.  The idea is that we want to know what registers every functions uses
+or sets, but we only get this information easily when we have access to C
+headers, ELF debug information, etc.  In the absence of such information, we use
+Macaw's function demand analysis to compute what registers a function demands.
+
+We need this information to run Macaw's "register use" analysis (also called
+"block invariant inference") during [recovery](./Recovery.md), as Macaw wants an
+oracle for register usage by functions in order to compute register usage for
+every single block.
+
 ## Inputs
 - System call personality
 - A map resolving addresses to function names
@@ -11,9 +22,6 @@
 - A map from addresses to explanations for argument analysis failure
 
 ## How it works
-
-This is just a very thin error-handling wrapper over Macaw's function demand
-analysis.
 
 1.  For every function whose type we must infer, for every block of such function,
     `x86CallRegs` computes the registers that the block execution depends upon,
