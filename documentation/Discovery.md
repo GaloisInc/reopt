@@ -1,5 +1,8 @@
 # Discovery
 
+The point of discovery is to identify all functions available in a binary, given
+only information about at least one entry point.
+
 ## Inputs
 - Types from "Header resolution"
 - ELF header information
@@ -19,9 +22,8 @@
 2. Builds the annotated function type map. (`headerTypeMap`)
 
     This includes:
-    - types for functions found from the ELF header,
-    - types from dynamic dependencies,
-    -
+    - types for functions declared in the [C header](./HeaderResolution.md),
+    - types from dynamic dependencies found in the ELF header,
     - and some hardcoded types for some standard functions (as a crutch,
       particularly for printf-style functions).
 
@@ -32,9 +34,11 @@
     - something called a "no return map" in the code, that seems to be initialized
       with addresses that are believed to be function entry points.
 
-3.  Computes more function types using the ELF debug information.
+3.  Reopt computes additional function types using the ELF debug information.
     (`resolveDebugFunTypes`)
 
 4.  At this point, Reopt calls Macaw to run its incremental discovery algorithm
     (`incCompleteDiscovery`).  From this comes back the Macaw `DiscoveryState`,
-    which is the remaining piece for the final output.
+    which is the remaining piece for the final output.  You can read more about
+    Macaw code discovery
+    [here](https://github.com/GaloisInc/macaw/blob/master/doc/Design.md#code-discovery).
