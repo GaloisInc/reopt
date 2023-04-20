@@ -40,14 +40,18 @@ VCG, and does not actually help at all in lifting and converting to LLVM.
         corresponding `FnValue`, for most other values, we fail.
 
     2.  A Macaw `Initial` value means "the initial value of the given register".
-    We ask Macaw what the block invariant tells us about this value.
+        We ask Macaw what the block invariant tells us about this value.
 
-    If it is an initialized, bound location, we can inspect its value and
-    convert it appropriately.
+        If it is an initialized, bound location, we can inspect its value and
+        convert it appropriately.
 
-    If it's supposed to be the value of a callee-saved register, we fail.
+        If it's supposed to be the value of a callee-saved register, we fail.
 
-    If it's some unknown value on the stack, we also fail.
+        If it's some unknown value on the stack, we also fail.
+
+    3.  A Macaw `AssignedValue` means the value returned by a previous
+        assignment.  We keep track of what values are assigned for each
+        assignment already, so this is just a lookup.
 
     When the recovered statement is an assignment, and only when its return
     value is actually used, we record the value assigned for the given
