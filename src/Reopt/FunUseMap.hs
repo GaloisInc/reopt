@@ -133,7 +133,11 @@ mkFunUseMap :: DiscoveryState arch -> FunUseMap (ArchAddrWidth arch)
 mkFunUseMap s = flip execState emptyFunUseMap $ do
   mapM_ (\(Some f) -> recordFunUse f) (s ^. funInfo)
 
--- | Return the number of bytes only allocated to the function.
+-- | This assumes a function owns sequential blocks for which it is the sole
+-- function in the list field of the `FunUseOffsetMap`, and returns the first
+-- block offset that the current function does not own.  That is, starting from
+-- the given offset, it goes through blocks until it encounters a block not
+-- owned by the given function, and returns the first offset of that block.
 endOwnedByFun :: FunAddress w -> BlockOff -> FunUseOffsetMap w -> BlockOff -> BlockOff
 endOwnedByFun f o m regionSize =
   case Map.lookupGE o m of

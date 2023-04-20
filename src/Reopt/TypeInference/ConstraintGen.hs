@@ -22,6 +22,7 @@ module Reopt.TypeInference.ConstraintGen
 import           Control.Lens               (At (at), Getting, Ixed (ix), Lens',
                                              makeLenses, non, use, view, (<>=),
                                              (?=), (^?))
+import           Control.Monad              (mapAndUnzipM)
 import           Control.Monad.Reader       (MonadReader (ask), ReaderT (..),
                                              join, withReaderT, zipWithM_)
 import           Control.Monad.State.Strict (StateT, evalStateT)
@@ -68,7 +69,6 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
                                              unifyConstraints, varTy, ptrSubTC)
 import qualified Reopt.TypeInference.Solver as S
-
 
 -- This algorithm proceeds in stages:
 -- This algorithm proceeds in stages:
@@ -853,14 +853,14 @@ genModuleConstraints m mem trace = runCGenM mem trace $ do
         -- let cc = CallerCalleeTyVars fty fty
         pure ((funDeclAddr d, fty), (funDeclName d, fty))
 
-  (declAddrs, declSyms) <- unzip <$> mapM doDecl (recoveredDecls m)
+  (declAddrs, declSyms) <- mapAndUnzipM doDecl (recoveredDecls m)
 
   -- Sometimes definitions are called via their name.
   let doDef d = do
         fty <- freshFunctionTypeTyVars (fnName d) (fnType d)
         pure ((fnAddr d, fty), (fnName d, fty))
 
-  (defAddrs, defSyms) <- unzip <$> mapM doDef (recoveredDefs m)
+  (defAddrs, defSyms) <- mapAndUnzipM doDef (recoveredDefs m)
 
   let symMap  = Map.fromList (defSyms ++ declSyms)
       addrMap = Map.fromList (defAddrs ++ declAddrs)
