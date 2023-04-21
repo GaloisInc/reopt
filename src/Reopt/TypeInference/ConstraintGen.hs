@@ -71,7 +71,6 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
 import qualified Reopt.TypeInference.Solver as S
 
 -- This algorithm proceeds in stages:
--- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
 -- 2. For each function:
 --  a. Give type variables to the arguments to all blocks
@@ -108,8 +107,8 @@ instance Show Warning where
 -- | Context available throughout all of the constraint generation
 data CGenGlobalContext arch = CGenGlobalContext
   { _cgenMemory        :: Memory (ArchAddrWidth arch)
-  -- | The map from memory segments to their row types.
-  , _cgenMemoryRegions :: Map (MemSegment (ArchAddrWidth arch)) RowVar
+  , -- | The map from memory segments to their row types.
+    _cgenMemoryRegions :: Map (MemSegment (ArchAddrWidth arch)) RowVar
   }
 
 makeLenses ''CGenGlobalContext
@@ -161,11 +160,11 @@ newtype CGenBlockContext arch = CGenBlockContext
 
 makeLenses ''CGenBlockContext
 
-data CGenState arch = CGenState {
-    _assignTyVars   :: Map BSC.ByteString (Map FnAssignId TyVar)
-  -- | Offset of the current instruction, used (not right now) for
-  -- tagging constraints and warnings.
-  -- , _curOffset     :: ArchAddrWord arch
+data CGenState arch = CGenState
+  { _assignTyVars   :: Map BSC.ByteString (Map FnAssignId TyVar)
+  -- , -- | Offset of the current instruction, used (not right now) for tagging
+  --   -- constraints and warnings.
+  --   _curOffset     :: ArchAddrWord arch
   , _warnings      :: [Warning]
 }
 
@@ -806,22 +805,22 @@ freshFunctionTypeTyVars fn ft = do
 data ModuleConstraints arch = ModuleConstraints
   { -- | Types for global functions
     mcFunTypes :: Map (ArchSegmentOff arch) FunctionTypeTyVars
-    -- | Types for the named external functions
-  , mcExtFunTypes :: Map BSC.ByteString FunctionTypeTyVars
-    -- | A mapping from `FnAssignId` to their known type (either a fresh type
+  , -- | Types for the named external functions
+    mcExtFunTypes :: Map BSC.ByteString FunctionTypeTyVars
+  , -- | A mapping from `FnAssignId` to their known type (either a fresh type
     -- variable, or the type witnessed at function call boundaries), for each
     -- function.  Because `FnAssignId` are only unique per-function, the mapping
     -- is on a per-function basis (using the `ByteString` name of the function
     -- as key).
-  , mcAssignTyVars :: Map BSC.ByteString (Map FnAssignId TyVar)
-    -- | Warnings gathered during constraint generation
-  , mcWarnings :: [Warning]
-    -- | The actual constraints
-  -- , mcTyConstraints :: [TyConstraint]
-    -- | The final mapping of type variables to their inferred type
-  , mcTypeMap :: Map TyVar FTy
-    -- | Type names used by @mcTypeMap@
-  , mcNamedTypes :: [(StructName, FTy)]
+    mcAssignTyVars :: Map BSC.ByteString (Map FnAssignId TyVar)
+  , -- | Warnings gathered during constraint generation
+    mcWarnings :: [Warning]
+    -- , -- | The actual constraints
+    --   mcTyConstraints :: [TyConstraint]
+  , -- | The final mapping of type variables to their inferred type
+    mcTypeMap :: Map TyVar FTy
+  , -- | Type names used by @mcTypeMap@
+    mcNamedTypes :: [(StructName, FTy)]
 }
 
 showInferredTypes :: ModuleConstraints arch -> String

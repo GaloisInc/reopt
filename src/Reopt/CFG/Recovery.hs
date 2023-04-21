@@ -313,7 +313,7 @@ data StackWriteVal arch =
 data RecoverState arch ids =
   RS { -- | Initial block
        rsStartAddr :: !(ArchSegmentOff arch)
-     , -- \ Invariants inferred about block
+     , -- | Invariants inferred about block
        rsBlockInvariants :: !(BlockInvariants arch ids)
      , -- | Predecessors for this block
        rsPredBlockAddrs :: ![ArchSegmentOff arch]
