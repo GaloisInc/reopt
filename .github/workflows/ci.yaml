@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
     - name: Export DEV_HASH
       run: echo "DEV_HASH=`shasum containers/dev/Dockerfile | cut -d' ' -f1`" >> $GITHUB_ENV
     - name: Cache Developer environment
       id: cache
-      uses: actions/cache@v1
+      uses: actions/cache@v3
       with:
         path: cache
         key: reopt-dev-${{ env.DEV_HASH }}
@@ -42,7 +42,7 @@ jobs:
     container: galoisbinaryanalysis/reopt-dev
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
         submodules: true
     - name: Set env.home and env.ghc
@@ -50,7 +50,7 @@ jobs:
         echo "home=$HOME" >> $GITHUB_ENV
         echo "ghc=`ghc --version --help | cut -d' ' -f8`" >> $GITHUB_ENV
     - name: Cache cabal files
-      uses: actions/cache@v1
+      uses: actions/cache@v3
       with:
         path: ${{env.home}}/.cabal/store/ghc-${{ env.ghc }}
         # Prefer previous ref
@@ -58,7 +58,7 @@ jobs:
         # otherwise just use most recent build.
         restore-keys: build-cabal-${{ env.ghc }}
     - name: Cache local build files
-      uses: actions/cache@v1
+      uses: actions/cache@v3
       with:
         path: dist-newstyle
         # Prefer previous ref
@@ -109,7 +109,7 @@ jobs:
   # vscode-extension:
   #   runs-on: ubuntu-20.04
   #   steps:
-  #   - uses: actions/checkout@v2
+  #   - uses: actions/checkout@v3
   #   - name: Install npm
   #     run: |
   #       sudo apt-get update
@@ -134,7 +134,7 @@ jobs:
   #   runs-on: ubuntu-20.04
   #   steps:
   #   - name: Get reopt
-  #     uses: actions/checkout@v2
+  #     uses: actions/checkout@v3
   #   - name: Dependencies
   #     run: sudo apt-get install -y --no-install-recommends llvm-8 llvm-8-dev clang-8
   #   - name: Clone reopt-vcg
@@ -170,7 +170,7 @@ jobs:
   #   - name: Install dependencies
   #     run: sudo apt-get update && sudo apt-get install -y gdb llvm-8
   #   - name: Checkout
-  #     uses: actions/checkout@v2
+  #     uses: actions/checkout@v3
   #   - name: Download reopt artifact
   #     uses: actions/download-artifact@v2
   #     with:
@@ -197,7 +197,7 @@ jobs:
   #   runs-on: ubuntu-20.04
   #   steps:
   #   - name: Checkout
-  #     uses: actions/checkout@v2
+  #     uses: actions/checkout@v3
   #     with:
   #       submodules: true
   #   - name: Download reopt artifact
