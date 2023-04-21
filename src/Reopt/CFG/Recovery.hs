@@ -311,30 +311,30 @@ data StackWriteVal arch =
 
 -- | State used for recovering a block
 data RecoverState arch ids =
-  RS { rsStartAddr :: !(ArchSegmentOff arch)
-       -- ^ Initial block
-     , rsBlockInvariants :: !(BlockInvariants arch ids)
-       -- ^ Invariants inferred about block
-     , rsPredBlockAddrs :: ![ArchSegmentOff arch]
-       -- ^ Predecessors for this block
-     , rsPhiLocMap :: !(MapF (BoundLoc (ArchReg arch)) (FnRegValue arch))
-       -- ^ Maps representative locations to the associated variable.
-       -- | Index of instruction recover is processing.
-     , rsInsnIndex :: !Int
+  RS { -- | Initial block
+       rsStartAddr :: !(ArchSegmentOff arch)
+     , -- | Invariants inferred about block
+       rsBlockInvariants :: !(BlockInvariants arch ids)
+     , -- | Predecessors for this block
+       rsPredBlockAddrs :: ![ArchSegmentOff arch]
+     , -- | Maps representative locations to the associated variable.
+       rsPhiLocMap :: !(MapF (BoundLoc (ArchReg arch)) (FnRegValue arch))
+     , -- | Index of instruction recover is processing.
+       rsInsnIndex :: !Int
      , rsBlockOff :: !(ArchAddrWord arch)
-     -- ^ The offset in the block of the current code.
-     , rsBlockSize :: !Int
-     , _rsCurStmts  :: !(Seq (FnStmt arch))
-       -- ^ Statements added to block so far
-       -- | Maps assignments processed so far to their values
-     , _rsAssignMap    :: !(MapF (AssignId ids) (FnValue arch))
-       -- | Map the index of processed used memory writes to the
+     , -- | The offset in the block of the current code.
+       rsBlockSize :: !Int
+     , -- | Statements added to block so far
+       _rsCurStmts  :: !(Seq (FnStmt arch))
+     , -- | Maps assignments processed so far to their values
+       _rsAssignMap    :: !(MapF (AssignId ids) (FnValue arch))
+     , -- | Map the index of processed used memory writes to the
        -- value stored in memory after they execute.
-     , rsWriteMap  :: !(Map StmtIndex (StackWriteVal arch))
-       -- | Instruction offset and type of previous accesses
-     , rsSeenMemAccessTypes :: ![(Word64, FnMemAccessType)]
-       -- | Memory accesses that have not yet been processed.
-     , rsPendingMemAccesses :: ![(StmtIndex, MemAccessInfo arch ids)]
+       rsWriteMap  :: !(Map StmtIndex (StackWriteVal arch))
+     , -- | Instruction offset and type of previous accesses
+       rsSeenMemAccessTypes :: ![(Word64, FnMemAccessType)]
+     , -- | Memory accesses that have not yet been processed.
+       rsPendingMemAccesses :: ![(StmtIndex, MemAccessInfo arch ids)]
      , rsLogEvents :: ![LLVMLogEvent]
      }
 
@@ -1876,7 +1876,7 @@ recoverFunction sysp mem fInfo invMap nm curArgs curRets = do
     let insUninit :: Pair X86Reg (FnRegValue X86_64)
                   -> MapF (BoundLoc X86Reg) (FnRegValue X86_64)
                   -> MapF (BoundLoc X86Reg) (FnRegValue X86_64)
-        insUninit (Pair r v) m = MapF.insertWith (\_n old -> old) (RegLoc r) v m
+        insUninit (Pair r v) = MapF.insertWith (\_n old -> old) (RegLoc r) v
     -- Compute registers for first block
     let locMap :: MapF (BoundLoc X86Reg) (FnRegValue X86_64)
         locMap

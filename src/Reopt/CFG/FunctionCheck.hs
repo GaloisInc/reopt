@@ -24,7 +24,10 @@ data CheckFunctionResult
    | FunctionIncomplete ReoptErrorTag
    | FunctionHasPLT
 
--- | This analyzes the block terminator to statement list to determine
+-- | This analyzes the block terminator statement to determine that it is not an
+-- error, in which case it returns the list of addresses it may proceed to, so
+-- that we can check that the blocks at those addresses also have valid
+-- terminator statements.
 checkTermStmt :: ParsedTermStmt  arch ids
               -> Either CheckFunctionResult [ArchSegmentOff arch]
 checkTermStmt ts =

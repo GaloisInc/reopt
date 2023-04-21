@@ -203,7 +203,7 @@ data FnAssignment arch tp
                   , fnAssignRhs :: !(FnAssignRhs arch (FnValue arch) tp)
                   }
 
--- | A function value.
+-- | A value within a function execution.
 data FnValue (arch :: Type) (tp :: M.Type) where
   -- | A value that is actually undefined, like a non-argument
   -- register at the start of a function.
