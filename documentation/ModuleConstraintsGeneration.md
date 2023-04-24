@@ -28,10 +28,27 @@ To support the former, we use **type variables**.  To support the latter, we use
 a flavor of **row variables**.
 
 We also have a notion of **row expressions**, which are either row variables
-`ρ`, or `shift` operations apply to a row variable, e.g. `ρ + 1`.  This means,
-e.g., that given knowledge that `ρ₁ = ρ₂ + 2`, and given knowledge that offset 3
-of `ρ₁` has type `τ`, we can conclude that offset 1 of `ρ₂` has type `τ`.
-Offsets are expressed in bytes, since we never need more granularity.
+`ρ`, or "shift" operations (denoted `+`) applied to a row variable, e.g. `ρ + 1`.
+For instance, given the following information about some row variable `ρ`:
+
+```
+{ 0 : i32, 4 : i8, 8 : i64 }
+```
+
+to be read as "at offset 0 it contains an `i32`, at offset 4 it contains an
+`i8`, and at offset 8 it contains an `i64`", then we ought to be able to deduce
+the following information about row expression `ρ + 4`:
+
+```
+{ -4 : i32, 0 : i8, 4 : i64 }
+```
+
+If you think of an original pointer `p` whose pointee type is described by `ρ`,
+then this describes the expected pointee contents for a pointer `p + 4`
+(assuming byte-semantics for the addition), describing its view as "shifted"
+from `p`'s view.
+
+Note that offsets are expressed in bytes, since we never need more granularity.
 
 The constraint language contains the following concepts (derived organically,
 there may be a better way to represent or solve these):
