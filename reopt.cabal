@@ -1,11 +1,30 @@
+cabal-version: 2.2
+
 name: reopt
 version: 0.1.0
 author: Galois, Inc.
-maintainer: jhendrix@galois.com
+maintainer: val@galois.com
 build-type: Simple
-cabal-version: >= 1.10
-license:       BSD3
+license: BSD-3-Clause
 license-file:  LICENSE
+
+common extensions
+  default-extensions:
+    ConstraintKinds
+    DataKinds
+    DeriveGeneric
+    DeriveTraversable
+    DerivingVia
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GeneralizedNewtypeDeriving
+    ImportQualifiedPost
+    MultiParamTypeClasses
+    NamedFieldPuns
+    RankNTypes
+    ScopedTypeVariables
+    TypeApplications
 
 flag enable-hpc
   Description: Collect HPC coverage information.
@@ -16,6 +35,8 @@ flag enable-arm
   Default: False
 
 library
+  import: extensions
+
   default-language: Haskell2010
   build-depends:
     base >= 4,
@@ -117,6 +138,7 @@ library
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt
+  import: extensions
   default-language: Haskell2010
   build-depends:
     base >= 4,
@@ -150,6 +172,7 @@ executable reopt
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt-explore
+  import: extensions
   default-language: Haskell2010
   build-depends:
     ansi-wl-pprint,
@@ -188,6 +211,7 @@ executable reopt-explore
   ghc-prof-options: -O2 -fprof-auto-top
 
 executable reopt-relink
+  import: extensions
   default-language: Haskell2010
   build-depends:
     base >= 4,
@@ -206,6 +230,7 @@ executable reopt-relink
   ghc-prof-options: -O2 -fprof-auto-top
 
 test-suite reopt-tests
+  import: extensions
   type: exitcode-stdio-1.0
   default-language: Haskell2010
   ghc-options: -Wall
