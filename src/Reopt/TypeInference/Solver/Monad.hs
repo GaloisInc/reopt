@@ -282,10 +282,10 @@ newtype Disjunction a = Disjunction {getDisjuncts :: [a]}
   deriving (Eq, Foldable, Functor, Ord, Traversable)
 
 instance PP.Pretty a => PP.Pretty (Conjunction a) where
-  pretty = PP.pretty . getConjuncts
+  pretty = PP.list . map PP.pretty . getConjuncts
 
 instance PP.Pretty a => PP.Pretty (Disjunction a) where
-  pretty = PP.pretty . getDisjuncts
+  pretty = PP.list . map PP.pretty . getDisjuncts
 
 -- FIXME: this is pretty arcane
 data Conditional a = Conditional
@@ -322,7 +322,7 @@ instance PP.Pretty a => PP.Pretty (Conditional a) where
   pretty c =
     PP.pretty (cName c)
     <> ": "
-    <> PP.list (getDisjuncts (fmap (PP.list . getConjuncts . fmap PP.pretty) (cGuard c)))
+    <> PP.pretty (cGuard c)
     <> " |- "
     <> PP.pretty (cConstraints c)
 
