@@ -4,12 +4,12 @@
 module Reopt.TypeInference.Solver
   ( Ty (..), TyVar, RowVar, numTy, ptrTy, ptrTy', varTy,
     SolverM, runSolverM,
-    eqTC, ptrTC, maybeGlobalTC, isNumTC, ptrSubTC, 
+    eqTC, ptrTC, maybeGlobalTC, isNumTC, ptrSubTC,
     freshTyVar, freshRowVar, ptrAddTC, subTypeTC,
     OperandClass (..),
     unifyConstraints, ConstraintSolution(..), StructName,
     tyToLLVMType,
-   
+
     -- FTy stuff
     FTy, pattern FNumTy, pattern FPtrTy, pattern FUnknownTy
   , pattern FNamedStruct,  pattern FStructTy, pattern FConflictTy
@@ -23,10 +23,12 @@ import qualified Prettyprinter                            as PP
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC), EqRowC (..),
                                                            OperandClass (..))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution (..))
-import           Reopt.TypeInference.Solver.Monad         (Conditional (..), Schematic (Schematic),
+import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
+                                                           Conjunction (Conjunction),
+                                                           Disjunction (Disjunction),
+                                                           Schematic (DontCare, Schematic),
                                                            Pattern (Pattern),
                                                            PatternRHS (..),
-                                                           Schematic (DontCare),
                                                            SolverM, addCondEq,
                                                            addSubType,
                                                            addTyVarEq,
@@ -81,7 +83,7 @@ compileTy (Ty ty)  = ITy <$>
     ConflictTy n -> pure (ConflictTy n)
     TupleTy ts -> TupleTy <$> traverse nameTy ts
     VecTy n ty' -> VecTy n <$> nameTy ty'
-    
+
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
@@ -112,17 +114,29 @@ ptrAddTC rty lhsty rhsty oc = do
   ptrNumTy <- ITy <$> ptrWidthNumTy
 
   -- Numeric cases
-  let name       = PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <>
-                   PP.pretty rhstv
-  addCondEq $ Conditional
-    { cName       = show (name PP.<+> "(non-ptr case)")
-    , cGuard       = [ [ isNum rv ], [ isNum lhstv, isNum rhstv ]
-                     -- add is strict wrt conflicts.
-                     , [ isConflict rv ], [ isConflict lhstv], [isConflict rhstv ]
-                     ]
-    , cConstraints = ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
-                     , [])
-    }
+  let name =
+        PP.pretty rv
+          <> " = "
+          <> PP.pretty lhstv
+          <> " + "
+          <> PP.pretty rhstv
+  addCondEq $
+    Conditional
+      { cName = show (name PP.<+> "(non-ptr case)")
+      , cGuard =
+          Disjunction
+            [ Conjunction [isNum rv]
+            , Conjunction [isNum lhstv, isNum rhstv]
+            , -- add is strict wrt conflicts.
+              Conjunction [isConflict rv]
+            , Conjunction [isConflict lhstv]
+            , Conjunction [isConflict rhstv]
+            ]
+      , cConstraints =
+          ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
+          , []
+          )
+      }
 
   case oc of
     OCOffset o -> do
@@ -130,58 +144,80 @@ ptrAddTC rty lhsty rhsty oc = do
       addTyVarEq rhstv ptrNumTy
 
       withFresh $ \rowv ->
-        addCondEq $ Conditional
-        { cName  = show (name' PP.<+> "(pointer case)")
-        , cGuard = [ [ isPtr rv ], [ isPtr lhstv ] ]
-          -- Unify with new rowvar, and constrain.
-        , cConstraints = ( [ EqC rv    (ITy (PtrTy (RowExprShift o rowv)))
-                           , EqC lhstv (ITy (PtrTy (RowExprVar     rowv)))
-                           ]
-                         , [] )
-        }
-
+        addCondEq $
+          Conditional
+            { cName = show (name' PP.<+> "(pointer case)")
+            , cGuard = Disjunction [Conjunction [isPtr rv], Conjunction [isPtr lhstv]]
+            , -- Unify with new rowvar, and constrain.
+              cConstraints =
+                (
+                  [ EqC rv (ITy (PtrTy (RowExprShift o rowv)))
+                  , EqC lhstv (ITy (PtrTy (RowExprVar rowv)))
+                  ]
+                , []
+                )
+            }
     OCSymbolic -> do
       withFresh $ \resrv lrv ->
-        addCondEq $ Conditional
-        { cName       = show (name PP.<+> "(symbolic pointer case 1)")
-        , cGuard  = [ [ isPtr rv   , isNum rhstv ]
-                    , [ isPtr lhstv ] ]
-        , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
-                           , EqC lhstv (ITy (PtrTy lrv))
-                           , EqC rhstv ptrNumTy ]
-                         , [] )
-        }
+        addCondEq $
+          Conditional
+            { cName = show (name PP.<+> "(symbolic pointer case 1)")
+            , cGuard =
+                Disjunction
+                  [ Conjunction [isPtr rv, isNum rhstv]
+                  , Conjunction [isPtr lhstv]
+                  ]
+            , cConstraints =
+                (
+                  [ EqC rv (ITy (PtrTy resrv))
+                  , EqC lhstv (ITy (PtrTy lrv))
+                  , EqC rhstv ptrNumTy
+                  ]
+                , []
+                )
+            }
 
       withFresh $ \resrv rrv ->
-        addCondEq $ Conditional
-        { cName       = show (name PP.<+> "(symbolic pointer case 2)")
-        , cGuard  = [ [ isPtr rv, isNum lhstv ], [ isPtr rhstv ] ]
-        , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
-                           , EqC rhstv (ITy (PtrTy rrv))
-                           , EqC lhstv ptrNumTy ]
-                         , [] )
-        }
+        addCondEq $
+          Conditional
+            { cName = show (name PP.<+> "(symbolic pointer case 2)")
+            , cGuard = Disjunction [Conjunction [isPtr rv, isNum lhstv], Conjunction [isPtr rhstv]]
+            , cConstraints =
+                (
+                  [ EqC rv (ITy (PtrTy resrv))
+                  , EqC rhstv (ITy (PtrTy rrv))
+                  , EqC lhstv ptrNumTy
+                  ]
+                , []
+                )
+            }
 
     -- FIXME: we are assuming that large numbers (in data seg.) cannot be offsets
     OCPointer ->
       withFresh $ \rhsrowv ->
-        addCondEq $ Conditional
-        { cName       = show (name PP.<+> "(possible global pointer case)")
-        , cGuard      = [[ isPtr rv ]]
-        , cConstraints = ( [ EqC lhstv ptrNumTy
-                           , EqC rhstv (ITy $ PtrTy rhsrowv) ]
-                         , [] )
-        }
+        addCondEq $
+          Conditional
+            { cName = show (name PP.<+> "(possible global pointer case)")
+            , cGuard = Disjunction [Conjunction [isPtr rv]]
+            , cConstraints =
+                (
+                  [ EqC lhstv ptrNumTy
+                  , EqC rhstv (ITy $ PtrTy rhsrowv)
+                  ]
+                , []
+                )
+            }
 
-      -- addCondEq $ Conditional
-      --   { cName       = show (PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <> PP.pretty rhstv
-      --                     PP.<+> "(possible global pointer case 2)")
-      --   , cEnabled  = isNum lhstv
-      --   , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
-      --   }
+-- addCondEq $ Conditional
+--   { cName       = show (PP.pretty rv <> " = " <> PP.pretty lhstv <> " + " <> PP.pretty rhstv
+--                     PP.<+> "(possible global pointer case 2)")
+--   , cEnabled  = isNum lhstv
+--   , cAddConstraints = addTyVarEq rv (VarTy lhstv) >> addTyVarEq rv (VarTy rhstv)
+--   }
 
--- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
--- subtraction, or addition with a negative offset.
+{- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
+subtraction, or addition with a negative offset.
+-}
 ptrSubTC :: Ty -> Ty -> Ty -> OperandClass -> SolverM ()
 ptrSubTC rty lhsty rhsty oc = do
   rv    <- nameTy rty
@@ -195,14 +231,22 @@ ptrSubTC rty lhsty rhsty oc = do
 
   -- If we have a numeric result and at least one numberic argument,
   -- or we have a numeric lhs, we can infer we are doing a numeric sub
-  addCondEq $ Conditional
-    { cName       = show (name PP.<+> "(non-ptr case)")
-    , cGuard       = [ [ isNum rv, isNum rhstv ], [ isNum lhstv ]
-                     , [ isConflict rv ], [ isConflict lhstv], [isConflict rhstv ]
-                     ]
-    , cConstraints = ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
-                     , [])
-    }
+  addCondEq $
+    Conditional
+      { cName = show (name PP.<+> "(non-ptr case)")
+      , cGuard =
+          Disjunction
+            [ Conjunction [isNum rv, isNum rhstv]
+            , Conjunction [isNum lhstv]
+            , Conjunction [isConflict rv]
+            , Conjunction [isConflict lhstv]
+            , Conjunction [isConflict rhstv]
+            ]
+      , cConstraints =
+          ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
+          , []
+          )
+      }
 
   case oc of
     OCOffset o -> do
@@ -211,36 +255,49 @@ ptrSubTC rty lhsty rhsty oc = do
 
       -- dual to the rv = ptr + off
       withFresh $ \rowv ->
-        addCondEq $ Conditional
-        { cName  = show (name' PP.<+> "(ptr - off)")
-        , cGuard = [ [ isPtr rv ], [ isPtr lhstv ] ]
-          -- Unify with new rowvar, and constrain.
-        , cConstraints = ( [ EqC lhstv (ITy (PtrTy (RowExprShift o rowv)))
-                           , EqC rv    (ITy (PtrTy (RowExprVar     rowv)))
-                           ]
-                         , [] )
-        }
-
+        addCondEq $
+          Conditional
+            { cName = show (name' PP.<+> "(ptr - off)")
+            , cGuard = Disjunction [Conjunction [isPtr rv], Conjunction [isPtr lhstv]]
+            , -- Unify with new rowvar, and constrain.
+              cConstraints =
+                (
+                  [ EqC lhstv (ITy (PtrTy (RowExprShift o rowv)))
+                  , EqC rv (ITy (PtrTy (RowExprVar rowv)))
+                  ]
+                , []
+                )
+            }
     _ -> do
       withFresh $ \resrv lrv ->
-        addCondEq $ Conditional
-        { cName   = show (name PP.<+> "(ptr - num)")
-        , cGuard  = [ [ isPtr rv ]
-                    , [ isPtr lhstv, isNum rhstv ] ]
-        , cConstraints = ( [ EqC rv    (ITy (PtrTy resrv))
-                           , EqC lhstv (ITy (PtrTy lrv))
-                           , EqC rhstv ptrNumTy]
-                         , [] )
-        }
+        addCondEq $
+          Conditional
+            { cName = show (name PP.<+> "(ptr - num)")
+            , cGuard =
+                Disjunction
+                  [ Conjunction [isPtr rv]
+                  , Conjunction [isPtr lhstv, isNum rhstv]
+                  ]
+            , cConstraints =
+                (
+                  [ EqC rv (ITy (PtrTy resrv))
+                  , EqC lhstv (ITy (PtrTy lrv))
+                  , EqC rhstv ptrNumTy
+                  ]
+                , []
+                )
+            }
 
       -- If the lhs and rhs are both pointer, the result is a number
-      addCondEq $ Conditional
-        { cName   = show (name PP.<+> "(ptr - ptr)")
-        , cGuard  = [ [ isPtr lhstv, isPtr rhstv ] ]
-        , cConstraints = ( [ EqC rv    ptrNumTy ]
-                         , [] )
-        }
-
+      addCondEq $
+        Conditional
+          { cName = show (name PP.<+> "(ptr - ptr)")
+          , cGuard = Disjunction [Conjunction [isPtr lhstv, isPtr rhstv]]
+          , cConstraints =
+              ( [EqC rv ptrNumTy]
+              , []
+              )
+          }
 
 isConflict :: TyVar -> Pattern
 isConflict v = Pattern v IsConflict
@@ -257,13 +314,14 @@ isPtr v = Pattern v (IsPtr DontCare)
 maybeGlobalTC :: Ty -> RowVar -> Offset -> SolverM ()
 maybeGlobalTC ty rowv off = do
   tv <- nameTy ty
-  withFresh $ \rowv' -> 
-    addCondEq $ Conditional
-    { cName       = show (PP.pretty tv <> " is " <> PP.pretty rowv <> " + " <> PP.pretty off )
-    , cGuard      = [[ Pattern tv (IsPtr (Schematic rowv')) ]]
-    , cConstraints = ( [], [EqRowC (RowExprVar rowv') (RowExprShift off rowv) ] )
-    }
-  
+  withFresh $ \rowv' ->
+    addCondEq $
+      Conditional
+        { cName = show (PP.pretty tv <> " is " <> PP.pretty rowv <> " + " <> PP.pretty off)
+        , cGuard = Disjunction [Conjunction [Pattern tv (IsPtr (Schematic rowv'))]]
+        , cConstraints = ([], [EqRowC (RowExprVar rowv') (RowExprShift off rowv)])
+        }
+
 --------------------------------------------------------------------------------
 -- LLVM support (FTy patterns)
 
