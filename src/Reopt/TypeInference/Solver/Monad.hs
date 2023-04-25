@@ -267,7 +267,7 @@ instance PP.Pretty PatternRHS where
   pretty (IsPtr sv) = "PtrTy " <> PP.pretty sv
   pretty IsNum      = "NumTy _"
   pretty IsConflict = "ConflictTy _"
-  
+
 data Pattern = Pattern
   { patVar :: TyVar
   , patRHS :: PatternRHS
@@ -276,12 +276,23 @@ data Pattern = Pattern
 instance PP.Pretty Pattern where
   pretty (Pattern v r) = PP.pretty v <> " =?= " <> PP.pretty r
 
+newtype Conjunction a = Conjunction {getConjuncts :: [a]}
+  deriving (Eq, Foldable, Functor, Ord, Traversable)
+newtype Disjunction a = Disjunction {getDisjuncts :: [a]}
+  deriving (Eq, Foldable, Functor, Ord, Traversable)
+
+instance PP.Pretty a => PP.Pretty (Conjunction a) where
+  pretty = PP.list . map PP.pretty . getConjuncts
+
+instance PP.Pretty a => PP.Pretty (Disjunction a) where
+  pretty = PP.list . map PP.pretty . getDisjuncts
+
 -- FIXME: this is pretty arcane
 data Conditional a = Conditional
-  { cName        :: String
-    -- | Disjunction of conjunction of linear patterns -- each
-    -- schematic should occur on one RHS only.
-  , cGuard       :: [ [ Pattern ] ]
+  { cName :: String
+  , cGuard :: Disjunction (Conjunction Pattern)
+  -- ^ Disjunction of conjunction of linear patterns -- each schematic should
+  -- occur on one RHS only.
   , cConstraints :: a
   }
 
@@ -291,27 +302,29 @@ data Conditional a = Conditional
 -- one exists.
 condEnabled :: Conditional c -> SolverM (Maybe [EqRowC])
 condEnabled c = asum <$> mapM matchAll (cGuard c)
-  where
-    matchAll pats = fmap concat . sequenceA <$> mapM match pats
-    match pat = do
-      (_, m_ty) <- lookupTyVar (patVar pat)
-      pure (matchRHS (patRHS pat) =<< m_ty)
+ where
+  matchAll (Conjunction pats) = fmap concat . sequenceA <$> mapM match pats
+  match pat = do
+    (_, m_ty) <- lookupTyVar (patVar pat)
+    pure (matchRHS (patRHS pat) =<< m_ty)
 
-    matchRHS rhs ty =
-      case (rhs, ty) of
-        (IsPtr sv  , PtrTy r)      -> Just (bindSchem sv r)
-        (IsNum     , NumTy _)      -> Just []
-        (IsConflict, ConflictTy _) -> Just []        
-        _                          -> Nothing
+  matchRHS rhs ty =
+    case (rhs, ty) of
+      (IsPtr sv, PtrTy r) -> Just (bindSchem sv r)
+      (IsNum, NumTy _) -> Just []
+      (IsConflict, ConflictTy _) -> Just []
+      _ -> Nothing
 
-    bindSchem (Schematic r) re = [EqRowC (RowExprVar r) re]
-    bindSchem _             _  = []
+  bindSchem (Schematic r) re = [EqRowC (RowExprVar r) re]
+  bindSchem _ _ = []
 
 instance PP.Pretty a => PP.Pretty (Conditional a) where
-  pretty c = PP.pretty (cName c) <> ": " <>
-             -- FIXME, could be nicer.
-             PP.list (map (PP.list . map PP.pretty) (cGuard c)) <> " |- " <>
-             PP.pretty (cConstraints c)
+  pretty c =
+    PP.pretty (cName c)
+    <> ": "
+    <> PP.pretty (cGuard c)
+    <> " |- "
+    <> PP.pretty (cConstraints c)
 
 class CanFresh t where
   makeFresh :: SolverM t
@@ -344,7 +357,7 @@ instance (CanFresh a, WithFresh b) => WithFresh (a -> b) where
 
 instance WithFresh EqC where
   type Result EqC = EqC
-  withFresh v = pure v
+  withFresh = pure
 
 --------------------------------------------------------------------------------
 -- Instances
