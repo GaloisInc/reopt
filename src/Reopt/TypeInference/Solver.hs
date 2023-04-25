@@ -29,6 +29,7 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            Schematic (DontCare, Schematic),
                                                            Pattern (Pattern),
                                                            PatternRHS (..),
+                                                           RevokePolicy(..),
                                                            SolverM, addCondEq,
                                                            addSubType,
                                                            addTyVarEq,
@@ -87,21 +88,21 @@ compileTy (Ty ty)  = ITy <$>
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
-eqTC :: Ty -> Ty -> SolverM ()
-eqTC ty1 ty2 = do
+eqTC :: RevokePolicy -> Ty -> Ty -> SolverM ()
+eqTC rp ty1 ty2 = do
   tv1 <- nameTy ty1
   ity2 <- compileTy ty2
-  addTyVarEq tv1 ity2
+  addTyVarEq rp tv1 ity2
 
 -- emits ptr :: PtrTy { 0 -> target }
-ptrTC :: Ty -> Ty -> SolverM ()
-ptrTC target ptr = eqTC ptr (ptrTy (singletonFieldMap 0 target))
+ptrTC :: RevokePolicy -> Ty -> Ty -> SolverM ()
+ptrTC rp target ptr = eqTC rp ptr (ptrTy (singletonFieldMap 0 target))
 
-subTypeTC :: Ty -> Ty -> SolverM ()
-subTypeTC a b = join $ addSubType <$> nameTy a <*> nameTy b
+subTypeTC :: RevokePolicy -> Ty -> Ty -> SolverM ()
+subTypeTC rp a b = join $ addSubType rp <$> nameTy a <*> nameTy b
 
-isNumTC :: Ty -> Int -> SolverM ()
-isNumTC tv n = join $ addTyVarEq <$> nameTy tv <*> pure (ITy $ NumTy n)
+isNumTC :: RevokePolicy -> Ty -> Int -> SolverM ()
+isNumTC rp tv n = join $ addTyVarEq rp <$> nameTy tv <*> pure (ITy $ NumTy n)
 
 --------------------------------------------------------------------------------
 -- Pointer-sized addition
@@ -141,7 +142,7 @@ ptrAddTC rty lhsty rhsty oc = do
   case oc of
     OCOffset o -> do
       let name' = name PP.<+> PP.parens ("+ " <> PP.pretty o)
-      addTyVarEq rhstv ptrNumTy
+      addTyVarEq NeverRevoke rhstv ptrNumTy
 
       withFresh $ \rowv ->
         addCondEq $
@@ -251,7 +252,7 @@ ptrSubTC rty lhsty rhsty oc = do
   case oc of
     OCOffset o -> do
       let name' = name PP.<+> PP.parens ("- " <> PP.pretty o)
-      addTyVarEq rhstv ptrNumTy
+      addTyVarEq NeverRevoke rhstv ptrNumTy
 
       -- dual to the rv = ptr + off
       withFresh $ \rowv ->

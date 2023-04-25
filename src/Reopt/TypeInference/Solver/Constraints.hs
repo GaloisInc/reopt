@@ -16,7 +16,7 @@ import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
                                                            FreeTyVars (..), ITy)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: !TyVar, eqRhs :: !ITy }
+data EqC = EqC {eqLHS :: !TyVar, eqRHS :: !ITy}
   deriving (Eq, Ord, Show, Generic)
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann

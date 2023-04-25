@@ -68,6 +68,7 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              eqTC, numTy, isNumTC,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
                                              unifyConstraints, varTy, ptrSubTC)
+import           Reopt.TypeInference.Solver.Monad (RevokePolicy (..))
 import qualified Reopt.TypeInference.Solver as S
 
 -- This algorithm proceeds in stages:
@@ -188,7 +189,7 @@ runCGenM :: Memory (ArchAddrWidth arch) ->
             Bool ->
             CGenM CGenGlobalContext arch a ->
             a
-runCGenM mem trace (CGenM m) = runSolverM trace ptrWidth $ do
+runCGenM mem shouldTrace (CGenM m) = runSolverM ptrWidth shouldTrace $ do
   let segs = memSegments mem
   -- Allocate a row variable for each memory segment
   memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
@@ -279,7 +280,7 @@ updFunRetType fr tv = do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   let aId = frAssignId fr
   tyVar <- assignIdTyVar fn aId
-  emitSubType (varTy tv) (varTy tyVar)
+  emitSubType NeverRevoke (varTy tv) (varTy tyVar)
 
 phiType :: FnPhiVar arch tp -> CGenM CGenBlockContext arch Ty
 phiType = assignIdType . unFnPhiVar
@@ -363,8 +364,8 @@ maybeGlobalTC ty soff = do
 -- freshRowVar :: CGenM ctx arch RowVar
 -- freshRowVar = inSolverM S.freshRowVar
 
-emitEq :: Ty -> Ty -> CGenM ctx arch ()
-emitEq t1 t2 = inSolverM (eqTC t1 t2)
+emitEq :: RevokePolicy -> Ty -> Ty -> CGenM ctx arch ()
+emitEq rp t1 t2 = inSolverM (eqTC rp t1 t2)
 
 -- | Emits an add which may be a pointer add
 emitPtrAddSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
@@ -397,30 +398,35 @@ emitPtrSubOffset rty t1 t2 off = do
 emitPtrSubGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
 emitPtrSubGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
 
--- | First type must be a valid value of the second type (more lax than equality
--- at function/join boundaries).
-emitSubType :: Ty -> Ty -> CGenM ctx arch ()
-emitSubType a b = inSolverM (subTypeTC a b)
+{- | First type must be a valid value of the second type (more lax than equality
+at function/join boundaries).
+-}
+emitSubType :: RevokePolicy -> Ty -> Ty -> CGenM ctx arch ()
+emitSubType rp a b = inSolverM (subTypeTC rp a b)
 
 -- | Emits a constraint that the argument isn't a pointer
 emitNumTy ::
   forall ctx arch.
   FnArchConstraints arch =>
-  Int -> Ty -> CGenM ctx arch ()
-emitNumTy sz t =
-  inSolverM (eqTC t (numTy sz))
+  RevokePolicy ->
+  Int ->
+  Ty ->
+  CGenM ctx arch ()
+emitNumTy rp sz t =
+  inSolverM (eqTC rp t (numTy sz))
 
 -- pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
 -- pointerWidth Proxy =
 --   widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
 
 emitPtr ::
+  RevokePolicy ->
   Ty ->
   -- | Type that is recognized as pointer
   Ty ->
   CGenM ctx arch ()
-emitPtr pointee pointer =
-  inSolverM (ptrTC pointee pointer)
+emitPtr rp pointee pointer =
+  inSolverM (ptrTC rp pointee pointer)
 
 -- emitStructPtr :: ITy -> ITy -> Integer -> Some TypeRepr -> CGenM ctx arch ()
 -- emitStructPtr tr tp o sz = emitConstraint (CPointerAndOffset tr sz tp o)
@@ -453,13 +459,12 @@ genApp (ty, outSize) app =
   case app of
 
     Eq l r -> do
-      join (emitEq <$> genFnValue l <*> genFnValue r)
-      emitNumTy 1 ty
-
+      join (emitEq NeverRevoke <$> genFnValue l <*> genFnValue r)
+      emitNumTy NeverRevoke 1 ty
     Mux _ _ l r -> do
       lTy <- genFnValue l
-      emitEq lTy =<< genFnValue r
-      emitEq ty lTy -- ty = rTy follows by transitivity, so we don't add it
+      emitEq NeverRevoke lTy =<< genFnValue r
+      emitEq NeverRevoke ty lTy -- ty = rTy follows by transitivity, so we don't add it
 
     -- We don't generate any further constraints for boolean ops
     AndApp {} -> pure ()
@@ -568,8 +573,8 @@ genApp (ty, outSize) app =
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
     nonptrUnOp v = do
-      emitNumTy (bvWidth v) =<< genFnValue v
-      emitNumTy outSize ty
+      emitNumTy NeverRevoke (bvWidth v) =<< genFnValue v
+      emitNumTy NeverRevoke outSize ty
 
     -- | The result and arguments have to be bitvecs (i.e., not ptrs).
     -- We don't relate the sizes as that is given by the macaw type at
@@ -578,16 +583,16 @@ genApp (ty, outSize) app =
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinOp l r = do
-      emitNumTy (bvWidth l) =<< genFnValue l
-      emitNumTy (bvWidth r) =<< genFnValue r
-      emitNumTy outSize ty
+      emitNumTy NeverRevoke (bvWidth l) =<< genFnValue l
+      emitNumTy NeverRevoke (bvWidth r) =<< genFnValue r
+      emitNumTy NeverRevoke outSize ty
 
     nonptrBinCmp :: forall n m arch.
       FnArchConstraints arch =>
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
     nonptrBinCmp l r = do
-      emitNumTy (bvWidth l) =<< genFnValue l
-      emitNumTy (bvWidth r) =<< genFnValue r
+      emitNumTy NeverRevoke (bvWidth l) =<< genFnValue l
+      emitNumTy NeverRevoke (bvWidth r) =<< genFnValue r
 
 
 genMemOp ::
@@ -596,9 +601,9 @@ genMemOp ::
   CGenM CGenBlockContext arch ()
 genMemOp ty ptr (Some tp) = do
   ptrWidth <- widthVal <$> addrWidth
-  emitPtr ty =<< genFnValue ptr
+  emitPtr NeverRevoke ty =<< genFnValue ptr
   case tp of
-    BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy (widthVal n) ty
+    BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy NeverRevoke (widthVal n) ty
     _ -> pure ()
 
   -- case ptr of
@@ -638,7 +643,7 @@ genFnAssignment a = do
     FnReadMem ptr sz -> genMemOp ty ptr (Some sz)
     FnCondReadMem _sz _cond ptr def -> do
       genMemOp ty ptr (Some (typeRepr def))
-      emitEq ty =<< genFnValue def
+      emitEq NeverRevoke ty =<< genFnValue def
     FnEvalApp app -> genApp (ty, bitWidth (typeRepr app)) app
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
     FnAddrWidthConstant addr -> do
@@ -646,7 +651,7 @@ genFnAssignment a = do
       case m_mseg of
         Nothing
           | addr == 0 -> pure () -- could be NULL or 0
-          | otherwise -> inSolverM . isNumTC ty . widthVal =<< addrWidth
+          | otherwise -> inSolverM . isNumTC NeverRevoke ty . widthVal =<< addrWidth
         Just soff -> maybeGlobalTC ty soff
 
 -- | This helper gives us the bitwidth of the types we can read/write from
@@ -695,8 +700,8 @@ genBlockTransfer tgt = do
   phiTys <- phisForBlock (fnJumpLabel tgt)
   let phiVals = V.toList (fnJumpPhiValues tgt)
   zipWithM_ go phiVals phiTys
-  where
-    go (Some v) ty = join (emitSubType <$> genFnValue v <*> pure ty)
+ where
+  go (Some v) ty = join (emitSubType NeverRevoke <$> genFnValue v <*> pure ty)
 
 genCall ::
   FnArchConstraints arch =>
@@ -721,9 +726,8 @@ genCall fn args m_ret = do
         (Just (Some rv), Just rty) -> updFunRetType rv rty
         (Just _, _) -> warn "Missing return type"
         _ -> pure ()
-
-  where
-    go (Some v) ty = join (emitSubType <$> genFnValue v <*> pure (varTy ty))
+ where
+  go (Some v) ty = join (emitSubType NeverRevoke <$> genFnValue v <*> pure (varTy ty))
 
 genFnBlock ::
   FnArchConstraints arch =>
@@ -750,7 +754,7 @@ genFnBlock b = do
       FnRet m_v -> do
         fty <- currentFunctionTyVars
         case (m_v, fttvRet fty) of
-          (Just (Some v), Just ty) -> emitSubType (varTy ty) =<< genFnValue v
+          (Just (Some v), Just ty) -> emitSubType NeverRevoke (varTy ty) =<< genFnValue v
           (Nothing, Nothing) -> pure ()
           _ -> warn "Mismatch between return type and return value"
 
@@ -760,7 +764,7 @@ genFnBlock b = do
         genCall fn args Nothing
         case (fttvRet fty, fttvRet <$> m_calledFTy) of
           (_, Nothing) -> warn "Unknown function"
-          (Just rty, Just (Just rty')) -> emitSubType (varTy rty) (varTy rty')
+          (Just rty, Just (Just rty')) -> emitSubType NeverRevoke (varTy rty) (varTy rty')
           (Just _, _) -> warn "Mismatch between return type and return type in tail call"
           _ -> pure ()
 
