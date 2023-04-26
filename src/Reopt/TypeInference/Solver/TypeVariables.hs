@@ -42,7 +42,6 @@ instance PP.Pretty TyVar where
 
 instance UFMKeyInfo TyVar TyVar where
   compact _ x = x
-  projectKey    = id
-  injectKey     = id
+  projectKey = id
+  injectKey = id
   invertKey k _ = k
-  

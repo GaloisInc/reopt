@@ -307,10 +307,9 @@ defineTyVar tyv ty = field @"ctxTyVars" %= UM.insert tyv ty
 undefineTyVar :: TyVar -> SolverM ()
 undefineTyVar ty = field @"ctxTyVars" %= UM.delete ty
 
-{- | @unsafeUnifyTyVars root leaf@ will make @root@ the new equiv. rep
-for @leaf@.  Note that both root and leaf should be the reps. of
-their corresponding equivalence classes.
--}
+-- | @unsafeUnifyTyVars root leaf@ will make `root` the new equiv. rep for
+-- `leaf`.  Note that both root and leaf should be the reps. of their
+-- corresponding equivalence classes.
 unsafeUnifyTyVars :: RevokePolicy -> TyVar -> TyVar -> SolverM ()
 unsafeUnifyTyVars orig root leaf = field @"ctxTyVars" %= UM.unify orig root leaf
 

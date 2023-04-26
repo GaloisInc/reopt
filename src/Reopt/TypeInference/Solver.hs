@@ -47,6 +47,7 @@ import           Reopt.TypeInference.Solver.TypeVariables (TyVar (..))
 import           Reopt.TypeInference.Solver.Types         (FTy (..), ITy (..),
                                                            StructName, TyF (..),
                                                            tyToLLVMType)
+import Debug.Trace (traceM)
 
 -- This type is easier to work with, as it isn't normalised.
 data Ty =
@@ -91,7 +92,9 @@ compileTy (Ty ty)  = ITy <$>
 eqTC :: RevokePolicy -> Ty -> Ty -> SolverM ()
 eqTC rp ty1 ty2 = do
   tv1 <- nameTy ty1
+  traceM $ "Name for ty1 is " <> show tv1
   ity2 <- compileTy ty2
+  traceM $ "Compyled ty2 to " <> show ity2
   addTyVarEq rp tv1 ity2
 
 -- emits ptr :: PtrTy { 0 -> target }

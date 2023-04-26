@@ -467,15 +467,19 @@ solveEqRowC (Revocable rp eqc) = traceContext' "solveEqRowC" eqc $ do
 solveEqC :: Revocable EqC -> SolverM (Maybe TyVar)
 solveEqC (Revocable rp eqc) = traceContext' "solveEqC" eqc $ do
   (lv, m_lty) <- lookupTyVar (eqLHS eqc)
+  traceM $ "Looked up " <> show (eqLHS eqc) <> ", found " <> show lv
   (m_rv, m_rty) <- case eqRHS eqc of
     VarTy tv -> first Just <$> lookupTyVar tv
     ITy ty -> pure (Nothing, Just ty)
+  traceM $ "Looked up " <> show (eqRHS eqc) <> ", found " <> show m_rv
+  traceM $ "m_lty is " <> show m_lty
+  traceM $ "m_rty is " <> show m_rty
   case (m_lty, m_rty) of
-    -- trivial up to eqv.
     _
+      -- trivial up to eqv.
       | m_rv == Just lv -> pure Nothing
-      -- We have eqc == (lhs = SomeTy ...) and lhs ~> ConflictTy ...,
-      -- so there is nothing further to do.
+      -- We have eqc == (lhs = SomeTy ...) and lhs ~> ConflictTy ..., so there
+      -- is nothing further to do.
       | isNothing m_rv
       , Just ConflictTy{} <- m_lty ->
           pure Nothing
@@ -489,9 +493,8 @@ solveEqC (Revocable rp eqc) = traceContext' "solveEqC" eqc $ do
       traverse_ undefineTyVar m_rv
       unifyTypes rp lv ty1 ty2
 
-{- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@
-named by the type variable @tv@.
--}
+-- | @unifyTypes tv1 t1 t2@ unifies the types @t1@ and @t2@ named by the type
+-- variable @tv@.
 unifyTypes :: RevokePolicy -> TyVar -> ITy' -> ITy' -> SolverM (Maybe TyVar)
 unifyTypes rp tv ty1 ty2 =
   case (ty1, ty2) of

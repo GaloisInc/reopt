@@ -9,6 +9,7 @@ module TyConstraintTests (
     ghciTest,
 ) where
 
+import           Control.Monad.State                     (get)
 import           Data.Bifunctor                          (bimap)
 import           Data.Foldable                           (traverse_)
 import qualified Data.Map                                as Map
@@ -43,6 +44,8 @@ import           Reopt.TypeInference.Solver.RowVariables (FieldMap, Offset,
                                                           fieldMapFromList,
                                                           singletonFieldMap)
 import           Reopt.TypeInference.Solver.Types        (ITy (ITy), TyF (..))
+import Debug.Trace (traceM)
+import Prettyprinter (pretty)
 
 constraintTests :: T.TestTree
 constraintTests = T.testGroup "Type Constraint Tests"
@@ -88,8 +91,14 @@ eqCTests :: T.TestTree
 eqCTests =
     T.testGroup
         "Equality Constraint Tests"
-        [ mkTest "Single eqTC var left" (do x0 <- tv; eqTC NeverRevoke (varTy x0) num64; pure [(x0, fnum64)])
-        , mkTest "Single eqTC var right" (do x0 <- tv; eqTC NeverRevoke num64 (varTy x0); pure [(x0, fnum64)])
+        [ mkTest "Single eqTC var left" $ do
+            x0 <- tv
+            eqTC NeverRevoke (varTy x0) num64
+            pure [(x0, fnum64)]
+        , mkTest "Single eqTC var right" $ do
+            x0 <- tv
+            eqTC NeverRevoke num64 (varTy x0)
+            pure [(x0, fnum64)]
         , mkTest "Multiple eqTCs" $ do
             (x0, x1) <- (,) <$> tv <*> tv
             eqTC NeverRevoke (varTy x0) num64
@@ -381,11 +390,15 @@ instance Show TypeEnv where
 -- tyEnv = TypeEnv . sortBy (compare `on` fst)
 
 mkTest :: String -> SolverM [(TyVar, FTy)] -> T.TestTree
-mkTest name m = T.testCase name (runSolverM 64 False test)
+mkTest name m = T.testCase name (runSolverM 64 True test)
   where
     test = do
         expected <- m
+        s <- get
+        traceM (show (pretty s))
         res <- unifyConstraints
+        s' <- get
+        traceM (show (pretty s'))
         let actual =
                 [ (k, Map.findWithDefault FUnknownTy k (csTyVars res))
                 | (k, _) <- expected

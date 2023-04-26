@@ -238,6 +238,7 @@ test-suite reopt-tests
   other-modules:
     ReoptTests
     TyConstraintTests
+    UnionFindMapTests
   hs-source-dirs: tests
   build-depends:
     base,
@@ -247,7 +248,10 @@ test-suite reopt-tests
     exceptions,
     filemanip,
     filepath,
+    generic-lens,
+    lens,
     macaw-base,
+    mtl,
     prettyprinter,
     reopt,
     tasty,
