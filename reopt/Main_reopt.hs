@@ -189,7 +189,9 @@ data Args = Args
     -- | Perform recovery regardless of other options.
     performRecovery        :: Bool,
     -- | Trace unification of the type inference solver
-    traceTypeUnification   :: Bool
+    traceTypeUnification   :: Bool,
+    -- | Trace the origin of constraints in the type inference solver
+    traceConstraintOrigins :: Bool
   }
 
 -- | Action to perform when running
@@ -239,7 +241,8 @@ defaultArgs =
       dynDepPath = [],
       dynDepDebugPath = [],
       performRecovery = False,
-      traceTypeUnification = False
+      traceTypeUnification = False,
+      traceConstraintOrigins = False
     }
 
 ------------------------------------------------------------------------
@@ -301,6 +304,12 @@ traceTypeUnificationFlag = flagNone ["trace-unification"] upd help
   where
     upd s = s {traceTypeUnification = True}
     help = "Trace unification in the type inference engine"
+
+traceConstraintOriginsFlag :: Flag Args
+traceConstraintOriginsFlag = flagNone ["trace-constraint-origins"] upd help
+  where
+    upd s = s {traceConstraintOrigins = True}
+    help = "Trace the origins of constraints in the type inference engine"
 
 showHomeDirFlag :: Flag Args
 showHomeDirFlag = flagNone ["home-dir"] upd help
@@ -563,6 +572,7 @@ arguments = mode "reopt" defaultArgs help filenameArg flags
         debugFlag,
         performRecoveryFlag,
         traceTypeUnificationFlag,
+        traceConstraintOriginsFlag,
         -- Output for final binary
         outputFlag,
         -- Output events
@@ -666,8 +676,8 @@ argsReoptOptions args = do
               roDiscoveryOptions = args ^. discOpts,
               roDynDepPaths = dynDepPath args,
               roDynDepDebugPaths = dynDepDebugPath args ++ gdbDebugDirs,
-              roTraceUnification = traceTypeUnification args
-
+              roTraceUnification = traceTypeUnification args,
+              roTraceConstraintOrigins = traceConstraintOrigins args
             }
 
 -- | Discovery symbols in program and show function CFGs.
@@ -737,7 +747,7 @@ showConstraints args = do -- FIXME: copied from main performReopt command
       doRecoverX86 funPrefix sysp symAddrMap debugTypeMap discState
 
     let recMod = recoveredModule recoverX86Output
-    pure (genModuleConstraints recMod (memory discState) (traceTypeUnification args))
+    pure $ genModuleConstraints recMod (memory discState) (traceTypeUnification args) (traceConstraintOrigins args)
 
   mc <- handleEitherWithExit mr
 
@@ -881,7 +891,8 @@ performReopt args = do
         reoptWriteByteString RelinkerInfoFileType path (Aeson.encode relinkerInfo)
 
     -- Generate constraints
-    let moduleConstraints = genModuleConstraints recMod (memory discState) (traceTypeUnification args)
+    let moduleConstraints = genModuleConstraints recMod (memory discState)
+                              (traceTypeUnification args) (traceConstraintOrigins args)
 
     -- FIXME: move
     let prettyDefs =

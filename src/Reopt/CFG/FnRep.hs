@@ -248,6 +248,7 @@ class FoldFnValue (v :: Type -> Type)  where
 
 type FnArchConstraints arch =
      ( IsArchFn (ArchFn arch)
+     , IsArchStmt (FnArchStmt arch)
      , MemWidth (ArchAddrWidth arch)
      , HasRepr (ArchFn arch (FnValue arch)) TypeRepr
      , HasRepr (ArchReg arch) TypeRepr

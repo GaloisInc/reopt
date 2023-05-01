@@ -282,7 +282,9 @@ data ReoptOptions = ReoptOptions
     -- | Additional paths to search for debug versions of dynamic dependencies.
     roDynDepDebugPaths :: ![FilePath],
     -- | Trace unification in the solver
-    roTraceUnification :: !Bool
+    roTraceUnification :: !Bool,
+    -- | Trace the origin of constraints
+    roTraceConstraintOrigins :: !Bool
   }
 
 -- | Reopt options with no additional functions to explore or not explore.
@@ -295,7 +297,8 @@ defaultReoptOptions =
       roDiscoveryOptions = reoptDefaultDiscoveryOptions,
       roDynDepPaths = [],
       roDynDepDebugPaths = [],
-      roTraceUnification = False
+      roTraceUnification = False,
+      roTraceConstraintOrigins = False
     }
 
 addKnownFn ::
@@ -2468,6 +2471,7 @@ recoverX86Elf loadOpts reoptOpts hdrAnn unnamedFunPrefix hdrInfo = do
   let recMod = recoveredModule recoverX86Output
   let constraints = genModuleConstraints recMod (memory discState)
                                          (roTraceUnification reoptOpts)
+                                         (roTraceConstraintOrigins reoptOpts)
 
   pure (os, discState, recoverX86Output, constraints)
 
