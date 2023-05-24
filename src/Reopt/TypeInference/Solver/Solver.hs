@@ -28,7 +28,8 @@ import qualified Prettyprinter         as PP
 import           Reopt.TypeInference.Solver.Constraints   (EqC (..),
                                                            EqRowC (..), SubRowC,
                                                            SubTypeC,
-                                                           pattern (:<:))
+                                                           pattern (:<:),
+                                                           ConstraintProvenance (..))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution,
                                                            finalizeTypeDefs)
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
@@ -49,6 +50,8 @@ import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            lookupRowExprRep,
                                                            lookupTyVar,
                                                            popField,
+                                                           ppConstraintSolvingStateProvs,
+                                                           traceConstraintOrigins,
                                                            traceUnification,
                                                            undefineRowVar,
                                                            undefineTyVar,
@@ -80,25 +83,34 @@ unifyConstraints = do
 traceContext :: PP.Doc () -> SolverM a -> SolverM a
 traceContext description action = do
   tId <- field @"nextTraceId" <<+= 1
-  doTrace <- traceUnification
-  when doTrace $ do
-    stateBefore <- get
-    let msg =
-          PP.vsep
-            [ PP.hsep [">>>", PP.parens (PP.pretty tId), description],
-              PP.indent 4 $ PP.pretty stateBefore
-            ]
-    trace (show msg) (pure ())
+  doTraceUnification <- traceUnification
+  doTraceConstraintOrigins <- traceConstraintOrigins
+
+  stateBefore <- get
+  traceIt doTraceUnification       tId ">>>" $ PP.pretty stateBefore
+  traceIt doTraceConstraintOrigins tId ">>>" $ ppConstraintSolvingStateProvs stateBefore
+
   r <- action
-  when doTrace $ do
-    stateAfter <- get
-    let msg =
-          PP.vsep
-            [ PP.hsep ["<<< ", PP.parens (PP.pretty tId), description],
-              PP.indent 4 $ PP.pretty stateAfter
-            ]
-    trace (show msg) (return ())
+
+  stateAfter <- get
+  traceIt doTraceUnification       tId "<<<" $ PP.pretty stateAfter
+  traceIt doTraceConstraintOrigins tId "<<<" $ ppConstraintSolvingStateProvs stateAfter
+
   pure r
+  where
+    traceIt :: Bool -- Only trace if this is True
+            -> Int -- The trace ID
+            -> PP.Doc () -- A herald to print at the start
+            -> PP.Doc () -- The pretty-printed state
+            -> SolverM ()
+    traceIt doTrace tId herald ppState =
+      when doTrace $ do
+        let msg =
+              PP.vsep
+                [ PP.hsep [herald, " ", PP.parens (PP.pretty tId), description],
+                  PP.indent 4 ppState
+                ]
+        trace (show msg) (return ())
 
 traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
 traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
@@ -158,7 +170,7 @@ solveHeadReset fld doit = do
         defineTyVar tv (ConflictTy (ptrWidth resetSt))
         -- FIXME: this could cause problems if we allocate tyvars after
         -- we start solving.  Because we don't, this should work.
-        mapM_ (addTyVarEq' tv) eqsTv -- retain eqv class for conflict var.
+        mapM_ (addTyVarEq' ConflictProv tv) eqsTv -- retain eqv class for conflict var.
         get
       put resetSt'
 
@@ -276,7 +288,7 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
     -- know whether `rhs` is a pointer.
     (Just (PtrTy lhsRow), _) -> do
       rhsRow <- rowVar <$> freshRowVar
-      addTyVarEq rhs (ITy (PtrTy rhsRow))
+      addTyVarEq prov rhs (ITy (PtrTy rhsRow))
       addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
@@ -284,16 +296,18 @@ solveSubTypeC c@(lhs :<: rhs) = traceContext' "solveSubTypeC" c $ do
     -- as such, and let the solver propagate fields.
     (_, Just (PtrTy rhsRow)) -> do
       lhsRow <- rowVar <$> freshRowVar
-      addTyVarEq lhs (ITy (PtrTy rhsRow))
+      addTyVarEq prov lhs (ITy (PtrTy rhsRow))
       addSubRow lhsRow rhsRow
       return (Discard, Progress)
 
     -- When one side is **not ptr**, we unify the type variables.
-    (_     , Just _) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
-    (Just _, _         ) -> addTyVarEq' lhs rhs >> return (Discard, Progress)
+    (_     , Just _) -> addTyVarEq' prov lhs rhs >> return (Discard, Progress)
+    (Just _, _         ) -> addTyVarEq' prov lhs rhs >> return (Discard, Progress)
 
     -- If neither side is defined, we save this constaint for later.
     (Nothing, Nothing) -> return (Retain, NoProgress)
+  where
+    prov = FromSubTypeCProv
 
 solveSubRowC :: SubRowC -> SolverM (Retain, Progress)
 solveSubRowC c@(lhsRow :<: rhsRow) = traceContext' "solveSubRowC" c $ (,) Retain <$> do
@@ -307,7 +321,7 @@ solveSubRowC c@(lhsRow :<: rhsRow) = traceContext' "solveSubRowC" c $ (,) Retain
     rhsKeys = Map.keys (getFieldMap rhsFMAdjusted)
     (unified, overlaps) = unifyFieldMaps lhsFM rhsFMAdjusted
   defineRowVar (rowExprVar lhsRep) unified
-  traverse_ (uncurry addTyVarEq') overlaps
+  traverse_ (uncurry (addTyVarEq' FromSubRowCProv)) overlaps
   -- NOTE: We would also like to detect when unification made progress...
   if not (all (`elem` lhsKeys) rhsKeys)
     then return Progress
@@ -355,7 +369,7 @@ solveEqRowC eqc = traceContext' "solveEqRowC" eqc $ do
       let highfm' = shiftFieldMap delta highfm
           (lowfm', newEqs) = unifyFieldMaps lowfm highfm'
       defineRowVar lowv lowfm'
-      traverse_ (uncurry addTyVarEq') newEqs
+      traverse_ (uncurry (addTyVarEq' FromEqRowCProv)) newEqs
 
 --------------------------------------------------------------------------------
 -- Type unification
@@ -400,11 +414,12 @@ unifyTypes tv ty1 ty2 =
     (PtrTy rv1, PtrTy rv2) -> addRowExprEq rv1 rv2 $> Nothing
 
     (TupleTy ts, TupleTy ts')
-      | length ts == length ts' -> zipWithM_ addTyVarEq' ts ts' $> Nothing
+      | length ts == length ts' ->
+          zipWithM_ (\t t' -> addTyVarEq' (UnificationProv t t') t t') ts ts' $> Nothing
 
     -- Should always have n1 == n2
     (VecTy n1 ty1', VecTy n2 ty2')
-      | n1 == n2 -> addTyVarEq' ty1' ty2' $> Nothing
+      | n1 == n2 -> addTyVarEq' (UnificationProv ty1' ty2') ty1' ty2' $> Nothing
 
     -- Unification failure, including the case where one is a
     -- conflictty (but not both), we need to report a conflict.

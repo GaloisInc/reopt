@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -7,29 +8,51 @@
 
 module Reopt.TypeInference.Solver.Constraints where
 
+import           Data.Function                            (on)
 import qualified Data.Set                                 as Set
 import           GHC.Generics                             (Generic)
 import qualified Prettyprinter                            as PP
+import           Reopt.CFG.FnRep                          (FnArchConstraints, FnAssignment, FnStmt)
 import           Reopt.TypeInference.Solver.RowVariables  (RowExpr, Offset)
 import           Reopt.TypeInference.Solver.TypeVariables (TyVar)
 import           Reopt.TypeInference.Solver.Types         (FreeRowVars (..),
                                                            FreeTyVars (..), ITy)
 
 -- | @EqC t1 t2@ means @t1@ and @t2@ are literally the same type.
-data EqC = EqC {eqLhs :: !TyVar, eqRhs :: !ITy }
-  deriving (Eq, Ord, Show, Generic)
+data EqC = EqC
+  { eqLhs  :: !TyVar,
+    eqRhs  :: !ITy,
+    eqProv :: !ConstraintProvenance
+  }
+  deriving (Show, Generic)
+
+instance Eq EqC where
+  x == y = ((==) `on` eqLhs) x y && ((==) `on` eqRhs) x y
+
+instance Ord EqC where
+  compare x y = (compare `on` eqLhs) x y <> (compare `on` eqRhs) x y
 
 prettySExp :: [PP.Doc ann] -> PP.Doc ann
 prettySExp docs = PP.group $ PP.encloseSep "(" ")" " " docs
 
+-- | This intentionally does /not/ print 'eqProv' to keep the pretty-printed
+-- output relatively compact. Use 'ppEqCWithProv' if you want to include
+-- 'eqProv'.
 instance PP.Pretty EqC where
-  pretty (EqC l r) = prettySExp [PP.pretty l, "=", PP.pretty r]
+  pretty (EqC l r _prov) = prettySExp [PP.pretty l, "=", PP.pretty r]
+
+-- | Pretty-print an 'EqC', including its provenance.
+ppEqCWithProv :: EqC -> PP.Doc ann
+ppEqCWithProv eqC =
+  PP.vsep [ PP.pretty eqC
+          , PP.pretty (eqProv eqC)
+          ]
 
 instance FreeTyVars EqC where
-  freeTyVars (EqC t1 t2) = Set.union (freeTyVars t1) (freeTyVars t2)
+  freeTyVars (EqC t1 t2 _) = Set.union (freeTyVars t1) (freeTyVars t2)
 
 instance FreeRowVars EqC where
-  freeRowVars (EqC t1 t2) = Set.union (freeRowVars t1) (freeRowVars t2)
+  freeRowVars (EqC t1 t2 _) = Set.union (freeRowVars t1) (freeRowVars t2)
 
 -- | Stands for: lhs = { offsets | rhs }
 data EqRowC = EqRowC
@@ -113,3 +136,72 @@ instance FreeTyVars a => FreeTyVars (SubC a) where
 
 instance FreeRowVars a => FreeRowVars (SubC a) where
   freeRowVars (a :<: b) = freeRowVars a `Set.union` freeRowVars b
+
+--------------------------------------------------------------------------------
+-- ConstraintProvenance
+
+-- | The provenance (origin) of a constraint.
+data ConstraintProvenance where
+  -- | A constraint arising from a @FnRep@-related value.
+  FnRepProv ::
+       FnArchConstraints arch
+    => FnRepProvenance arch tp
+    -> ConstraintProvenance
+  -- | A placeholder origin to use for @_cgenConstraintProv@ before constraints
+  -- have been generated for a particular block.
+  BlockProv ::
+       ConstraintProvenance
+  -- | A constraint arising from a conflict during type inference.
+  ConflictProv ::
+    ConstraintProvenance
+  -- | An 'EqC' that arose during unification.
+  UnificationProv ::
+       TyVar
+    -> TyVar
+    -> ConstraintProvenance
+  -- | A generic origin to use for constraints arising from 'EqRowC'
+  -- constraints. We may want to refine this to include more information.
+  FromEqRowCProv ::
+    ConstraintProvenance
+  -- | A generic origin to use for constraints arising from 'SubRowC'
+  -- constraints. We may want to refine this to include more information.
+  FromSubRowCProv ::
+    ConstraintProvenance
+  -- | A generic origin to use for constraints arising from 'SubTypeC'
+  -- constraints. We may want to refine this to include more information.
+  FromSubTypeCProv ::
+    ConstraintProvenance
+  -- | A generic origin to use for constraints arising in test suites.
+  TestingProv ::
+    ConstraintProvenance
+
+instance PP.Pretty ConstraintProvenance where
+  pretty (FnRepProv prov) = "FnRep:" PP.<+> PP.pretty prov
+  pretty BlockProv = "BlockProv"
+  pretty ConflictProv = "ConflictRep"
+  pretty (UnificationProv tv1 tv2) =
+    "UnificationProv" PP.<+> PP.pretty tv1 PP.<+> PP.pretty tv2
+  pretty FromEqRowCProv = "FromEqRowCProv"
+  pretty FromSubRowCProv = "FromSubRowCProv"
+  pretty FromSubTypeCProv = "FromSubTypeCProv"
+  pretty TestingProv = "TestingProv"
+
+instance Show ConstraintProvenance where
+  show = show . PP.pretty
+
+-- | The provenance (origin) of a constraint arising from something
+-- @FnRep@-related.
+data FnRepProvenance arch tp where
+  FnAssignmentProv ::
+       FnAssignment arch tp
+    -> FnRepProvenance arch tp
+  FnStmtProv ::
+       FnStmt arch
+    -> FnRepProvenance arch tp
+
+instance FnArchConstraints arch => PP.Pretty (FnRepProvenance arch tp) where
+  pretty (FnAssignmentProv rhs) = PP.pretty rhs
+  pretty (FnStmtProv stmt) = PP.pretty stmt
+
+instance FnArchConstraints arch => Show (FnRepProvenance arch tp) where
+  show = show . PP.pretty

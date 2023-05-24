@@ -21,7 +21,8 @@ import           Control.Monad                            (join)
 import qualified Prettyprinter                            as PP
 
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC), EqRowC (..),
-                                                           OperandClass (..))
+                                                           OperandClass (..),
+                                                           ConstraintProvenance (..))
 import           Reopt.TypeInference.Solver.Finalise      (ConstraintSolution (..))
 import           Reopt.TypeInference.Solver.Monad         (Conditional (..),
                                                            Conjunction (Conjunction),
@@ -87,27 +88,27 @@ compileTy (Ty ty)  = ITy <$>
 --------------------------------------------------------------------------------
 -- Constraint constructors
 
-eqTC :: Ty -> Ty -> SolverM ()
-eqTC ty1 ty2 = do
+eqTC :: ConstraintProvenance -> Ty -> Ty -> SolverM ()
+eqTC prov ty1 ty2 = do
   tv1 <- nameTy ty1
   ity2 <- compileTy ty2
-  addTyVarEq tv1 ity2
+  addTyVarEq prov tv1 ity2
 
 -- emits ptr :: PtrTy { 0 -> target }
-ptrTC :: Ty -> Ty -> SolverM ()
-ptrTC target ptr = eqTC ptr (ptrTy (singletonFieldMap 0 target))
+ptrTC :: ConstraintProvenance -> Ty -> Ty -> SolverM ()
+ptrTC prov target ptr = eqTC prov ptr (ptrTy (singletonFieldMap 0 target))
 
 subTypeTC :: Ty -> Ty -> SolverM ()
 subTypeTC a b = join $ addSubType <$> nameTy a <*> nameTy b
 
-isNumTC :: Ty -> Int -> SolverM ()
-isNumTC tv n = join $ addTyVarEq <$> nameTy tv <*> pure (ITy $ NumTy n)
+isNumTC :: ConstraintProvenance -> Ty -> Int -> SolverM ()
+isNumTC prov tv n = join $ addTyVarEq prov <$> nameTy tv <*> pure (ITy $ NumTy n)
 
 --------------------------------------------------------------------------------
 -- Pointer-sized addition
 
-ptrAddTC :: Ty -> Ty -> Ty -> OperandClass -> SolverM ()
-ptrAddTC rty lhsty rhsty oc = do
+ptrAddTC :: ConstraintProvenance -> Ty -> Ty -> Ty -> OperandClass -> SolverM ()
+ptrAddTC prov rty lhsty rhsty oc = do
   rv    <- nameTy rty
   lhstv <- nameTy lhsty
   rhstv <- nameTy rhsty
@@ -133,7 +134,9 @@ ptrAddTC rty lhsty rhsty oc = do
             , Conjunction [isConflict rhstv]
             ]
       , cConstraints =
-          ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
+          ( [ EqC rv (VarTy lhstv) prov
+            , EqC rv (VarTy rhstv) prov
+            ]
           , []
           )
       }
@@ -141,7 +144,7 @@ ptrAddTC rty lhsty rhsty oc = do
   case oc of
     OCOffset o -> do
       let name' = name PP.<+> PP.parens ("+ " <> PP.pretty o)
-      addTyVarEq rhstv ptrNumTy
+      addTyVarEq prov rhstv ptrNumTy
 
       withFresh $ \rowv ->
         addCondEq $
@@ -151,8 +154,8 @@ ptrAddTC rty lhsty rhsty oc = do
             , -- Unify with new rowvar, and constrain.
               cConstraints =
                 (
-                  [ EqC rv (ITy (PtrTy (RowExprShift o rowv)))
-                  , EqC lhstv (ITy (PtrTy (RowExprVar rowv)))
+                  [ EqC rv (ITy (PtrTy (RowExprShift o rowv))) prov
+                  , EqC lhstv (ITy (PtrTy (RowExprVar rowv))) prov
                   ]
                 , []
                 )
@@ -169,9 +172,9 @@ ptrAddTC rty lhsty rhsty oc = do
                   ]
             , cConstraints =
                 (
-                  [ EqC rv (ITy (PtrTy resrv))
-                  , EqC lhstv (ITy (PtrTy lrv))
-                  , EqC rhstv ptrNumTy
+                  [ EqC rv (ITy (PtrTy resrv)) prov
+                  , EqC lhstv (ITy (PtrTy lrv)) prov
+                  , EqC rhstv ptrNumTy prov
                   ]
                 , []
                 )
@@ -184,9 +187,9 @@ ptrAddTC rty lhsty rhsty oc = do
             , cGuard = Disjunction [Conjunction [isPtr rv, isNum lhstv], Conjunction [isPtr rhstv]]
             , cConstraints =
                 (
-                  [ EqC rv (ITy (PtrTy resrv))
-                  , EqC rhstv (ITy (PtrTy rrv))
-                  , EqC lhstv ptrNumTy
+                  [ EqC rv (ITy (PtrTy resrv)) prov
+                  , EqC rhstv (ITy (PtrTy rrv)) prov
+                  , EqC lhstv ptrNumTy prov
                   ]
                 , []
                 )
@@ -201,8 +204,8 @@ ptrAddTC rty lhsty rhsty oc = do
             , cGuard = Disjunction [Conjunction [isPtr rv]]
             , cConstraints =
                 (
-                  [ EqC lhstv ptrNumTy
-                  , EqC rhstv (ITy $ PtrTy rhsrowv)
+                  [ EqC lhstv ptrNumTy prov
+                  , EqC rhstv (ITy $ PtrTy rhsrowv) prov
                   ]
                 , []
                 )
@@ -218,8 +221,8 @@ ptrAddTC rty lhsty rhsty oc = do
 {- | @ptrAddTC rty lhsty rhsty oc@ is emitted when we have a
 subtraction, or addition with a negative offset.
 -}
-ptrSubTC :: Ty -> Ty -> Ty -> OperandClass -> SolverM ()
-ptrSubTC rty lhsty rhsty oc = do
+ptrSubTC :: ConstraintProvenance -> Ty -> Ty -> Ty -> OperandClass -> SolverM ()
+ptrSubTC prov rty lhsty rhsty oc = do
   rv    <- nameTy rty
   lhstv <- nameTy lhsty
   rhstv <- nameTy rhsty
@@ -243,7 +246,9 @@ ptrSubTC rty lhsty rhsty oc = do
             , Conjunction [isConflict rhstv]
             ]
       , cConstraints =
-          ( [EqC rv (VarTy lhstv), EqC rv (VarTy rhstv)]
+          ( [ EqC rv (VarTy lhstv) prov
+            , EqC rv (VarTy rhstv) prov
+            ]
           , []
           )
       }
@@ -251,7 +256,7 @@ ptrSubTC rty lhsty rhsty oc = do
   case oc of
     OCOffset o -> do
       let name' = name PP.<+> PP.parens ("- " <> PP.pretty o)
-      addTyVarEq rhstv ptrNumTy
+      addTyVarEq prov rhstv ptrNumTy
 
       -- dual to the rv = ptr + off
       withFresh $ \rowv ->
@@ -262,8 +267,8 @@ ptrSubTC rty lhsty rhsty oc = do
             , -- Unify with new rowvar, and constrain.
               cConstraints =
                 (
-                  [ EqC lhstv (ITy (PtrTy (RowExprShift o rowv)))
-                  , EqC rv (ITy (PtrTy (RowExprVar rowv)))
+                  [ EqC lhstv (ITy (PtrTy (RowExprShift o rowv))) prov
+                  , EqC rv (ITy (PtrTy (RowExprVar rowv))) prov
                   ]
                 , []
                 )
@@ -280,9 +285,9 @@ ptrSubTC rty lhsty rhsty oc = do
                   ]
             , cConstraints =
                 (
-                  [ EqC rv (ITy (PtrTy resrv))
-                  , EqC lhstv (ITy (PtrTy lrv))
-                  , EqC rhstv ptrNumTy
+                  [ EqC rv (ITy (PtrTy resrv)) prov
+                  , EqC lhstv (ITy (PtrTy lrv)) prov
+                  , EqC rhstv ptrNumTy prov
                   ]
                 , []
                 )
@@ -294,7 +299,7 @@ ptrSubTC rty lhsty rhsty oc = do
           { cName = show (name PP.<+> "(ptr - ptr)")
           , cGuard = Disjunction [Conjunction [isPtr lhstv, isPtr rhstv]]
           , cConstraints =
-              ( [EqC rv ptrNumTy]
+              ( [EqC rv ptrNumTy prov]
               , []
               )
           }

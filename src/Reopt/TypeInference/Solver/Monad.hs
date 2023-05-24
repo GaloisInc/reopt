@@ -22,7 +22,9 @@ import qualified Prettyprinter         as PP
 import           Reopt.TypeInference.Solver.Constraints   (EqC (EqC),
                                                            EqRowC (EqRowC),
                                                            SubRowC, SubTypeC,
-                                                           pattern (:<:))
+                                                           pattern (:<:),
+                                                           ConstraintProvenance,
+                                                           ppEqCWithProv)
 import           Reopt.TypeInference.Solver.RowVariables  (FieldMap, Offset,
                                                            RowExpr (RowExprShift, RowExprVar),
                                                            RowInfo (..),
@@ -61,13 +63,14 @@ data ConstraintSolvingState = ConstraintSolvingState
     ctxRowVars :: UnionFindMap RowVar RowInfo (FieldMap TyVar),
 
     -- Debugging
-    ctxTraceUnification :: Bool
+    ctxTraceUnification :: Bool,
+    ctxTraceConstraintOrigins :: Bool
 
   }
   deriving (Generic)
 
-emptyContext :: Int -> Bool -> ConstraintSolvingState
-emptyContext w trace = ConstraintSolvingState
+emptyContext :: Int -> Bool -> Bool -> ConstraintSolvingState
+emptyContext w trace orig = ConstraintSolvingState
   { ctxEqCs        = []
   , ctxEqRowCs     = []
   , ctxCondEqs     = []
@@ -80,6 +83,7 @@ emptyContext w trace = ConstraintSolvingState
   , ctxTyVars      = UM.empty
   , ctxRowVars     = UM.empty
   , ctxTraceUnification = trace
+  , ctxTraceConstraintOrigins = orig
   }
 
 newtype SolverM a = SolverM
@@ -87,8 +91,8 @@ newtype SolverM a = SolverM
   }
   deriving (Applicative, Functor, Monad, MonadState ConstraintSolvingState)
 
-runSolverM :: Bool -> Int -> SolverM a -> a
-runSolverM b w = flip evalState (emptyContext w b) . getSolverM
+runSolverM :: Bool -> Bool -> Int -> SolverM a -> a
+runSolverM b o w = flip evalState (emptyContext w b o) . getSolverM
 
 --------------------------------------------------------------------------------
 -- Adding constraints
@@ -96,11 +100,11 @@ runSolverM b w = flip evalState (emptyContext w b) . getSolverM
 addEqC :: EqC -> SolverM ()
 addEqC eqc = field @"ctxEqCs" %= (eqc :)
 
-addTyVarEq :: TyVar -> ITy -> SolverM ()
-addTyVarEq tv1 tv2 =  addEqC (EqC tv1 tv2)
+addTyVarEq :: ConstraintProvenance -> TyVar -> ITy -> SolverM ()
+addTyVarEq prov tv1 tv2 = addEqC (EqC tv1 tv2 prov)
 
-addTyVarEq' :: TyVar -> TyVar -> SolverM ()
-addTyVarEq' tv1 tv2 = addTyVarEq tv1 (VarTy tv2)
+addTyVarEq' :: ConstraintProvenance -> TyVar -> TyVar -> SolverM ()
+addTyVarEq' prov tv1 tv2 = addTyVarEq prov tv1 (VarTy tv2)
 
 addEqRowC :: EqRowC -> SolverM ()
 addEqRowC eqc = field @"ctxEqRowCs" %= (eqc :)
@@ -242,6 +246,8 @@ setTraceUnification b = field @"ctxTraceUnification" .= b
 traceUnification :: SolverM Bool
 traceUnification = use (field @"ctxTraceUnification")
 
+traceConstraintOrigins :: SolverM Bool
+traceConstraintOrigins = use (field @"ctxTraceConstraintOrigins")
 
 --------------------------------------------------------------------------------
 -- Conditional constraints
@@ -364,16 +370,25 @@ instance WithFresh EqC where
 
 instance PP.Pretty ConstraintSolvingState where
   pretty ctx =
-    let row title entries = title PP.<+> PP.align (PP.list entries)
-     in PP.vsep
-          [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
-            row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
-            row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
-            row "SubRowCs" $ map PP.pretty $ ctxSubRowCs ctx,
-            row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
-            PP.pretty (ctxTyVars ctx),
-            PP.pretty (ctxRowVars ctx)
-          ]
+    PP.vsep
+      [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
+        row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
+        row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
+        row "SubRowCs" $ map PP.pretty $ ctxSubRowCs ctx,
+        row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
+        PP.pretty (ctxTyVars ctx),
+        PP.pretty (ctxRowVars ctx)
+      ]
+
+-- | Pretty-print a 'ConstraintSolvingState', including provenance information.
+ppConstraintSolvingStateProvs :: ConstraintSolvingState -> PP.Doc a
+ppConstraintSolvingStateProvs ctx =
+    PP.vsep
+      [ row "EqCs" $ map ppEqCWithProv $ ctxEqCs ctx
+      ]
+
+row :: PP.Doc ann -> [PP.Doc ann] -> PP.Doc ann
+row title entries = title PP.<+> PP.align (PP.list entries)
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
 shiftOffsets 0 m = m

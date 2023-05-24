@@ -20,12 +20,12 @@ module Reopt.TypeInference.ConstraintGen
   ) where
 
 import           Control.Lens               (At (at), Getting, Ixed (ix), Lens',
-                                             makeLenses, non, use, view, (<>=),
+                                             makeLenses, non, set, use, view, (<>=),
                                              (?=), (^?))
 import           Control.Monad              (mapAndUnzipM)
 import           Control.Monad.Reader       (MonadReader (ask), ReaderT (..),
-                                             join, withReaderT, zipWithM_)
-import           Control.Monad.State.Strict (StateT, evalStateT)
+                                             asks, join, local, withReaderT, zipWithM_)
+import           Control.Monad.State.Strict (MonadState, StateT, evalStateT)
 import           Control.Monad.Trans        (lift)
 import           Data.Bits                  (testBit)
 import qualified Data.ByteString.Char8      as BSC
@@ -69,6 +69,8 @@ import           Reopt.TypeInference.Solver (ConstraintSolution (..), FTy,
                                              ptrAddTC, ptrTC, runSolverM, subTypeTC,
                                              unifyConstraints, varTy, ptrSubTC)
 import qualified Reopt.TypeInference.Solver as S
+import           Reopt.TypeInference.Solver.Constraints
+                                            (ConstraintProvenance (..), FnRepProvenance (..))
 
 -- This algorithm proceeds in stages:
 -- 1. Give type variables to the arguments to all functions
@@ -150,12 +152,14 @@ makeLenses ''CGenFunctionContext
 -- | Context available when generating constraints for a given block.  At the
 -- moment, I managed to make it so that we don't need anything special, but it's
 -- nice to set this up for being future-proof.
-newtype CGenBlockContext arch = CGenBlockContext
-  {
+data CGenBlockContext arch = CGenBlockContext
+  { -- | The provenance to use when generating constraints
+    _cgenConstraintProv :: ConstraintProvenance
+
     -- (keep this last for convenient partial application)
 
     -- | Enclosing function context
-    _cgenFunctionContext :: CGenFunctionContext arch
+  , _cgenFunctionContext :: CGenFunctionContext arch
   }
 
 makeLenses ''CGenBlockContext
@@ -173,7 +177,10 @@ makeLenses ''CGenState
 newtype CGenM ctx arch a =
   CGenM { _getCGenM :: ReaderT (ctx arch)
                        (StateT (CGenState arch) SolverM) a }
-  deriving (Functor, Applicative, Monad)
+  deriving ( Functor, Applicative, Monad
+           , MonadReader (ctx arch)
+           , MonadState (CGenState arch)
+           )
 
 withinContext ::
   (outer arch -> inner arch) ->
@@ -185,10 +192,10 @@ inSolverM :: SolverM a -> CGenM ctxt arch a
 inSolverM = CGenM . lift . lift
 
 runCGenM :: Memory (ArchAddrWidth arch) ->
-            Bool ->
+            Bool -> Bool ->
             CGenM CGenGlobalContext arch a ->
             a
-runCGenM mem trace (CGenM m) = runSolverM trace ptrWidth $ do
+runCGenM mem trace orig (CGenM m) = runSolverM trace orig ptrWidth $ do
   let segs = memSegments mem
   -- Allocate a row variable for each memory segment
   memRows <- Map.fromList <$> mapM (\seg -> (,) seg <$> S.freshRowVar) segs
@@ -363,39 +370,39 @@ maybeGlobalTC ty soff = do
 -- freshRowVar :: CGenM ctx arch RowVar
 -- freshRowVar = inSolverM S.freshRowVar
 
-emitEq :: Ty -> Ty -> CGenM ctx arch ()
-emitEq t1 t2 = inSolverM (eqTC t1 t2)
+emitEq :: ConstraintProvenance -> Ty -> Ty -> CGenM ctx arch ()
+emitEq prov t1 t2 = inSolverM (eqTC prov t1 t2)
 
 -- | Emits an add which may be a pointer add
-emitPtrAddSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrAddSymbolic rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCSymbolic)
+emitPtrAddSymbolic :: ConstraintProvenance -> Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrAddSymbolic prov rty t1 t2 = inSolverM (ptrAddTC prov rty t1 t2 OCSymbolic)
 
 -- | ptr - N is sometimes encoded as ptr + (-N).  For very large
 -- numbers (i.e., upper bit set) we negate and use the subtraction
 -- constraint instead.
-emitPtrAddOffset :: Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
-emitPtrAddOffset rty t1 t2 off = do
+emitPtrAddOffset :: ConstraintProvenance -> Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
+emitPtrAddOffset prov rty t1 t2 off = do
   awidth <- widthVal <$> addrWidth
   if testBit off (awidth - 1)
-    then emitPtrSubOffset rty t1 t2 (2 ^ awidth - off)
-    else inSolverM (ptrAddTC rty t1 t2 (OCOffset (fromInteger off)))
+    then emitPtrSubOffset prov rty t1 t2 (2 ^ awidth - off)
+    else inSolverM (ptrAddTC prov rty t1 t2 (OCOffset (fromInteger off)))
 
-emitPtrAddGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrAddGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
+emitPtrAddGlobalPtr :: ConstraintProvenance -> Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrAddGlobalPtr prov rty t1 t2 = inSolverM (ptrAddTC prov rty t1 t2 OCPointer)
 
 -- | Emits an add which may be a pointer add
-emitPtrSubSymbolic :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrSubSymbolic rty t1 t2 = inSolverM (ptrSubTC rty t1 t2 OCSymbolic)
+emitPtrSubSymbolic :: ConstraintProvenance -> Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrSubSymbolic prov rty t1 t2 = inSolverM (ptrSubTC prov rty t1 t2 OCSymbolic)
 
-emitPtrSubOffset :: Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
-emitPtrSubOffset rty t1 t2 off = do
+emitPtrSubOffset :: ConstraintProvenance -> Ty -> Ty -> Ty -> Integer -> CGenM CGenBlockContext arch ()
+emitPtrSubOffset prov rty t1 t2 off = do
   awidth <- widthVal <$> addrWidth
   if testBit off (awidth - 1)
-    then emitPtrAddOffset rty t1 t2 (2 ^ awidth - off)
-    else inSolverM (ptrSubTC rty t1 t2 (OCOffset (fromInteger off)))
+    then emitPtrAddOffset prov rty t1 t2 (2 ^ awidth - off)
+    else inSolverM (ptrSubTC prov rty t1 t2 (OCOffset (fromInteger off)))
 
-emitPtrSubGlobalPtr :: Ty -> Ty -> Ty -> CGenM ctx arch ()
-emitPtrSubGlobalPtr rty t1 t2 = inSolverM (ptrAddTC rty t1 t2 OCPointer)
+emitPtrSubGlobalPtr :: ConstraintProvenance -> Ty -> Ty -> Ty -> CGenM ctx arch ()
+emitPtrSubGlobalPtr prov rty t1 t2 = inSolverM (ptrAddTC prov rty t1 t2 OCPointer)
 
 -- | First type must be a valid value of the second type (more lax than equality
 -- at function/join boundaries).
@@ -406,21 +413,22 @@ emitSubType a b = inSolverM (subTypeTC a b)
 emitNumTy ::
   forall ctx arch.
   FnArchConstraints arch =>
-  Int -> Ty -> CGenM ctx arch ()
-emitNumTy sz t =
-  inSolverM (eqTC t (numTy sz))
+  ConstraintProvenance -> Int -> Ty -> CGenM ctx arch ()
+emitNumTy prov sz t =
+  inSolverM (eqTC prov t (numTy sz))
 
 -- pointerWidth :: forall arch. FnArchConstraints arch => Proxy arch -> Int
 -- pointerWidth Proxy =
 --   widthVal (addrWidthNatRepr (addrWidthRepr (Proxy :: Proxy (ArchAddrWidth arch))))
 
 emitPtr ::
+  ConstraintProvenance ->
   Ty ->
   -- | Type that is recognized as pointer
   Ty ->
   CGenM ctx arch ()
-emitPtr pointee pointer =
-  inSolverM (ptrTC pointee pointer)
+emitPtr prov pointee pointer =
+  inSolverM (ptrTC prov pointee pointer)
 
 -- emitStructPtr :: ITy -> ITy -> Integer -> Some TypeRepr -> CGenM ctx arch ()
 -- emitStructPtr tr tp o sz = emitConstraint (CPointerAndOffset tr sz tp o)
@@ -449,17 +457,20 @@ genFnValue v =
 genApp ::
   FnArchConstraints arch =>
   (Ty, Int) -> App (FnValue arch) tp -> CGenM CGenBlockContext arch ()
-genApp (ty, outSize) app =
+genApp (ty, outSize) app = do
+  prov <- asks $ view cgenConstraintProv
   case app of
 
     Eq l r -> do
-      join (emitEq <$> genFnValue l <*> genFnValue r)
-      emitNumTy 1 ty
+      join (emitEq prov <$> genFnValue l <*> genFnValue r)
+      emitNumTy prov 1 ty
 
     Mux _ _ l r -> do
+      -- let lProv = FnRepProv $ FnValueProv l
+      -- let rProv = FnRepProv $ FnValueProv r
       lTy <- genFnValue l
-      emitEq lTy =<< genFnValue r
-      emitEq ty lTy -- ty = rTy follows by transitivity, so we don't add it
+      emitEq prov lTy =<< genFnValue r
+      emitEq prov ty lTy -- ty = rTy follows by transitivity, so we don't add it
 
     -- We don't generate any further constraints for boolean ops
     AndApp {} -> pure ()
@@ -477,9 +488,9 @@ genApp (ty, outSize) app =
 
     -- BV size operations
     -- FIXME: for now we assume we can only do these on bitvecs (not pointers)
-    Trunc v _ -> nonptrUnOp v
-    SExt  v _ -> nonptrUnOp v
-    UExt  v _ -> nonptrUnOp v
+    Trunc v _ -> nonptrUnOp prov v
+    SExt  v _ -> nonptrUnOp prov v
+    UExt  v _ -> nonptrUnOp prov v
 
     -- FIXME: Not sure what to do with these, for now leave underconstrained.
     Bitcast {} -> warn "Ignoring Bitcast"
@@ -494,8 +505,8 @@ genApp (ty, outSize) app =
 
       mseg <- addrToSegmentOff o
       case mseg of
-        Nothing -> emitPtrAddOffset ty pTy oTy o
-        Just _  -> emitPtrAddGlobalPtr ty pTy oTy
+        Nothing -> emitPtrAddOffset prov ty pTy oTy o
+        Just _  -> emitPtrAddGlobalPtr prov ty pTy oTy
 
     BVAdd _sz a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o }) r -> do
       pTy <- genFnValue r
@@ -503,17 +514,17 @@ genApp (ty, outSize) app =
 
       mseg <- addrToSegmentOff o
       case mseg of
-        Nothing -> emitPtrAddOffset ty pTy oTy o
-        Just _  -> emitPtrAddGlobalPtr ty pTy oTy
+        Nothing -> emitPtrAddOffset prov ty pTy oTy o
+        Just _  -> emitPtrAddGlobalPtr prov ty pTy oTy
 
     BVAdd sz l r -> do
       addrw <- addrWidth
       if isJust (testEquality addrw sz)
-        then join $ emitPtrAddSymbolic ty <$> genFnValue l <*> genFnValue r
-        else nonptrBinOp l r
+        then join $ emitPtrAddSymbolic prov ty <$> genFnValue l <*> genFnValue r
+        else nonptrBinOp prov l r
 
     -- FIXME: should this be considered another add?
-    BVAdc _ l r _c -> nonptrBinOp l r
+    BVAdc _ l r _c -> nonptrBinOp prov l r
 
     BVSub _sz l a@(FnAssignedValue FnAssignment { fnAssignRhs = FnAddrWidthConstant o }) -> do
       pTy <- genFnValue l
@@ -521,18 +532,18 @@ genApp (ty, outSize) app =
 
       mseg <- addrToSegmentOff o
       case mseg of
-        Nothing -> emitPtrSubOffset ty pTy oTy o
-        Just _  -> emitPtrSubGlobalPtr ty pTy oTy
+        Nothing -> emitPtrSubOffset prov ty pTy oTy o
+        Just _  -> emitPtrSubGlobalPtr prov ty pTy oTy
 
     -- We don't do anything special for (maybeGlobalConst - x)
     BVSub sz l r -> do
       addrw <- addrWidth
       if isJust (testEquality addrw sz)
-        then join $ emitPtrSubSymbolic ty <$> genFnValue l <*> genFnValue r
-        else nonptrBinOp l r
+        then join $ emitPtrSubSymbolic prov ty <$> genFnValue l <*> genFnValue r
+        else nonptrBinOp prov l r
 
-    BVSbb _ l r _ -> nonptrBinOp l r
-    BVMul _ l r   -> nonptrBinOp l r
+    BVSbb _ l r _ -> nonptrBinOp prov l r
+    BVMul _ l r   -> nonptrBinOp prov l r
 
     -- We are allowed to compare pointers, and test their bits
     BVUnsignedLe {} -> pure ()
@@ -541,53 +552,56 @@ genApp (ty, outSize) app =
     BVSignedLt {} -> pure ()
     BVTestBit {}  -> pure ()
 
-    BVComplement _ v -> nonptrUnOp v
+    BVComplement _ v -> nonptrUnOp prov v
     -- FIXME: this could be a pointer op to mask bits off?
-    BVAnd _ l r      -> nonptrBinOp l r
+    BVAnd _ l r      -> nonptrBinOp prov l r
 
     -- FIXME: this could be a pointer op to do add on aligned ptrs?
-    BVOr  _ l r      -> nonptrBinOp l r
-    BVXor _ l r      -> nonptrBinOp l r
-    BVShl _ l r      -> nonptrBinOp l r
-    BVShr _ l r      -> nonptrBinOp l r
-    BVSar _ l r      -> nonptrBinOp l r
+    BVOr  _ l r      -> nonptrBinOp prov l r
+    BVXor _ l r      -> nonptrBinOp prov l r
+    BVShl _ l r      -> nonptrBinOp prov l r
+    BVShr _ l r      -> nonptrBinOp prov l r
+    BVSar _ l r      -> nonptrBinOp prov l r
 
     -- FIXME: e.g. l could be a ptr?  Not sure why you would use this though
-    UadcOverflows l r _ -> nonptrBinCmp l r
-    SadcOverflows l r _ -> nonptrBinCmp l r
-    UsbbOverflows l r _ -> nonptrBinCmp l r
-    SsbbOverflows l r _ -> nonptrBinCmp l r
+    UadcOverflows l r _ -> nonptrBinCmp prov l r
+    SadcOverflows l r _ -> nonptrBinCmp prov l r
+    UsbbOverflows l r _ -> nonptrBinCmp prov l r
+    SsbbOverflows l r _ -> nonptrBinCmp prov l r
 
-    PopCount _ v     -> nonptrUnOp v
-    ReverseBytes _ v -> nonptrUnOp v
-    Bsf _ v          -> nonptrUnOp v
-    Bsr _ v          -> nonptrUnOp v
+    PopCount _ v     -> nonptrUnOp prov v
+    ReverseBytes _ v -> nonptrUnOp prov v
+    Bsf _ v          -> nonptrUnOp prov v
+    Bsr _ v          -> nonptrUnOp prov v
   where
 
     nonptrUnOp :: forall n arch.
       FnArchConstraints arch =>
+      ConstraintProvenance ->
       FnValue arch (BVType n) -> CGenM CGenBlockContext arch ()
-    nonptrUnOp v = do
-      emitNumTy (bvWidth v) =<< genFnValue v
-      emitNumTy outSize ty
+    nonptrUnOp prov v = do
+      emitNumTy prov (bvWidth v) =<< genFnValue v
+      emitNumTy prov outSize ty
 
     -- | The result and arguments have to be bitvecs (i.e., not ptrs).
     -- We don't relate the sizes as that is given by the macaw type at
     -- the moment.
     nonptrBinOp :: forall n m arch.
       FnArchConstraints arch =>
+      ConstraintProvenance ->
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
-    nonptrBinOp l r = do
-      emitNumTy (bvWidth l) =<< genFnValue l
-      emitNumTy (bvWidth r) =<< genFnValue r
-      emitNumTy outSize ty
+    nonptrBinOp prov l r = do
+      emitNumTy prov (bvWidth l) =<< genFnValue l
+      emitNumTy prov (bvWidth r) =<< genFnValue r
+      emitNumTy prov outSize ty
 
     nonptrBinCmp :: forall n m arch.
       FnArchConstraints arch =>
+      ConstraintProvenance ->
       FnValue arch (BVType n) -> FnValue arch (BVType m) -> CGenM CGenBlockContext arch ()
-    nonptrBinCmp l r = do
-      emitNumTy (bvWidth l) =<< genFnValue l
-      emitNumTy (bvWidth r) =<< genFnValue r
+    nonptrBinCmp prov l r = do
+      emitNumTy prov (bvWidth l) =<< genFnValue l
+      emitNumTy prov (bvWidth r) =<< genFnValue r
 
 
 genMemOp ::
@@ -595,10 +609,11 @@ genMemOp ::
   Ty -> FnValue arch (BVType (ArchAddrWidth arch)) -> Some TypeRepr ->
   CGenM CGenBlockContext arch ()
 genMemOp ty ptr (Some tp) = do
+  prov <- asks $ view cgenConstraintProv
   ptrWidth <- widthVal <$> addrWidth
-  emitPtr ty =<< genFnValue ptr
+  emitPtr prov ty =<< genFnValue ptr
   case tp of
-    BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy (widthVal n) ty
+    BVTypeRepr n | widthVal n /= ptrWidth -> emitNumTy prov (widthVal n) ty
     _ -> pure ()
 
   -- case ptr of
@@ -630,24 +645,28 @@ bvWidth = bitWidth . typeRepr
 genFnAssignment :: forall arch tp.
   FnArchConstraints arch =>
   FnAssignment arch tp -> CGenM CGenBlockContext arch ()
-genFnAssignment a = do
+genFnAssignment a = local (set cgenConstraintProv prov) $ do
   fn <- askContext (cgenFunctionContext . cgenCurrentFunName)
   ty <- varTy <$> tyVarForAssignId fn (fnAssignId a)
-  case fnAssignRhs a of
+  case rhs of
     FnSetUndefined {} -> pure () -- no constraints generated
     FnReadMem ptr sz -> genMemOp ty ptr (Some sz)
     FnCondReadMem _sz _cond ptr def -> do
       genMemOp ty ptr (Some (typeRepr def))
-      emitEq ty =<< genFnValue def
-    FnEvalApp app -> genApp (ty, bitWidth (typeRepr app)) app
+      emitEq prov ty =<< genFnValue def
+    FnEvalApp app ->
+      genApp (ty, bitWidth (typeRepr app)) app
     FnEvalArchFn _afn -> warn "ignoring EvalArchFn"
     FnAddrWidthConstant addr -> do
       m_mseg <- addrToSegmentOff addr
       case m_mseg of
         Nothing
           | addr == 0 -> pure () -- could be NULL or 0
-          | otherwise -> inSolverM . isNumTC ty . widthVal =<< addrWidth
+          | otherwise -> inSolverM . isNumTC prov ty . widthVal =<< addrWidth
         Just soff -> maybeGlobalTC ty soff
+  where
+    rhs = fnAssignRhs a
+    prov = FnRepProv $ FnAssignmentProv a
 
 -- | This helper gives us the bitwidth of the types we can read/write from
 -- memory.
@@ -666,6 +685,7 @@ genFnStmt ::
   FnStmt arch ->
   CGenM CGenBlockContext arch ()
 genFnStmt stmt =
+  local (set cgenConstraintProv prov) $
   case stmt of
     FnComment _ -> pure ()
     FnAssignStmt a -> genFnAssignment a
@@ -677,6 +697,8 @@ genFnStmt stmt =
       genMemOp tr addr (Some (typeRepr v))
     FnCall fn args m_rv -> genCall fn args m_rv
     FnArchStmt _astmt -> warn "Ignoring FnArchStmt"
+  where
+    prov = FnRepProv $ FnStmtProv stmt
 
 -- -- | Matches up the argument registers with the destination.
 -- genRegType :: RegState (ArchReg arch) (Value arch ids)
@@ -731,7 +753,7 @@ genFnBlock ::
   FnBlock arch ->
   CGenM CGenFunctionContext arch ()
 genFnBlock b = do
-  withinContext CGenBlockContext $ do
+  withinContext (CGenBlockContext BlockProv) $ do
     -- let blockAddr = pblockAddr b
 
     -- Generate constraints (and type vars) for the stmts
@@ -837,9 +859,9 @@ genModuleConstraints ::
   FoldableFC (ArchFn arch) =>
   RecoveredModule arch ->
   Memory (ArchAddrWidth arch) ->
-  Bool ->
+  Bool -> Bool ->
   ModuleConstraints arch
-genModuleConstraints m mem trace = runCGenM mem trace $ do
+genModuleConstraints m mem trace orig = runCGenM mem trace orig $ do
   -- allocate type variables for functions without types
   -- FIXME: we currently ignore hints
 
