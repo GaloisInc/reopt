@@ -156,6 +156,7 @@ solveHeadReset fld doit = do
     -- We detected a conflict, we need to restart after updating state
     -- to reflect the conflict.
     restart tv = do
+      trace "Conflict, restarting" $ pure ()
       resetSt <- get
       resetSt' <- lift $ do
         oldSt   <- get

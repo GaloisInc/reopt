@@ -13,6 +13,7 @@ import           Data.IORef                    (newIORef)
 import qualified Data.Map                      as Map
 import qualified Data.Vector                   as Vec
 import           Data.Word                     (Word64)
+import           Debug.Trace                   (trace)
 import           Numeric                       (showHex)
 
 import           Data.Macaw.Discovery          (DiscoveryState (memory))
@@ -126,10 +127,11 @@ computeResidualSegments discoveryState recoveredModule = do
   let allMemorySegments = memoryToSegmentList (memory discoveryState)
   let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
   let blockSeg (b :: FnBlock X86_64) =
-        case segoffAsAbsoluteAddr (fnBlockLabelAddr (fbLabel b)) of
-          Nothing -> error "relative block"
-          Just w  -> (memWordValue w, memWordValue w + fbSize b - 1)
-  let blockSegs = map blockSeg blocks
+        let addr = fnBlockLabelAddr (fbLabel b) in
+        case segoffAsAbsoluteAddr addr of
+          Nothing -> trace ("Ignoring relative block: " <> show addr) Nothing
+          Just w  -> Just (memWordValue w, memWordValue w + fbSize b - 1)
+  let blockSegs = mapMaybe blockSeg blocks
   return $ foldl removeSegment allMemorySegments blockSegs
 
 displayResiduals :: ResidualOptions -> [Segment] -> [ResidualRangeInfo] -> IO ()
@@ -157,13 +159,14 @@ segmentsFootprint :: [Segment] -> Word64
 segmentsFootprint = sum . map (uncurry subtract)
 
 memoryToSegmentList :: Memory 64 -> [(Word64, Word64)]
-memoryToSegmentList m = map segBounds esegs
+memoryToSegmentList m = mapMaybe segBounds esegs
   where
     esegs = filter (Perm.isExecutable . segmentFlags) (memSegments m)
     -- assumes sorted, non-overlapping
     segBounds eseg
-      | segmentBase eseg /= 0 = error "Segment has non-zero base"
-      | otherwise = ( memWordValue (segmentOffset eseg)
+      | segmentBase eseg /= 0 = trace ("Ignoring segment with non-zero base: " <> show eseg) Nothing
+      | otherwise = Just
+                    ( memWordValue (segmentOffset eseg)
                     , memWordValue (segmentOffset eseg)
                       + memWordValue (segmentSize eseg)
                       - 1
@@ -191,7 +194,7 @@ displayResidualsForHuman ranges residuals explained unexplained =
       unlines
       [ "0x" ++ showHex l "" ++ " -- " ++ "0x" ++ showHex u ""
         ++ maybe "" ((" (" ++) . (++ ")")) (rriSymbolName info) ++ ":"
-        ++ maybe "" ((" (" ++) . (++ ")")) (ppResidualExplanation <$> rriExplanation info) ++ ":"
+        ++ maybe "" (((" (" ++) . (++ ")")) . ppResidualExplanation) (rriExplanation info) ++ ":"
         -- Temporarily disabling this, only useful for investigative purposes
       , if False then maybe "" (ppDisSegment l) (rriInstructions info) else ""
       ]
