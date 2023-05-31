@@ -332,6 +332,19 @@ instance PP.Pretty a => PP.Pretty (Conditional a) where
     <> " |- "
     <> PP.pretty (cConstraints c)
 
+-- | Pretty-print a `Conditional'` value, including constraint provenance.
+ppConditional'WithProv :: Conditional' -> PP.Doc a
+ppConditional'WithProv c =
+    PP.pretty (cName c)
+    <> ": "
+    <> PP.pretty (cGuard c)
+    <> " |- "
+    <> PP.tupled [ PP.align $ PP.list $ map ppEqCWithProv x
+                 , PP.pretty y
+                 ]
+  where
+    (x, y) = cConstraints c
+
 class CanFresh t where
   makeFresh :: SolverM t
 
@@ -385,6 +398,11 @@ ppConstraintSolvingStateProvs :: ConstraintSolvingState -> PP.Doc a
 ppConstraintSolvingStateProvs ctx =
     PP.vsep
       [ row "EqCs" $ map ppEqCWithProv $ ctxEqCs ctx
+      -- This produces an overwhelming amount of output, so it is disabled by
+      -- default. Be prepared if you choose to opt into this.
+      {-
+      , row "CondEqs" $ map ppConditional'WithProv $ ctxCondEqs ctx
+      -}
       ]
 
 row :: PP.Doc ann -> [PP.Doc ann] -> PP.Doc ann
