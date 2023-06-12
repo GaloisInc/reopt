@@ -326,22 +326,24 @@ condEnabled c = asum <$> mapM matchAll (cGuard c)
 
 instance PP.Pretty a => PP.Pretty (Conditional a) where
   pretty c =
-    PP.pretty (cName c)
-    <> ": "
-    <> PP.pretty (cGuard c)
-    <> " |- "
-    <> PP.pretty (cConstraints c)
+    PP.vcat
+      [ PP.pretty (cName c)
+      , PP.pretty (cGuard c)
+      , "⊢"
+      , PP.pretty (cConstraints c)
+      ]
 
 -- | Pretty-print a `Conditional'` value, including constraint provenance.
 ppConditional'WithProv :: Conditional' -> PP.Doc a
 ppConditional'WithProv c =
-    PP.pretty (cName c)
-    <> ": "
-    <> PP.pretty (cGuard c)
-    <> " |- "
-    <> PP.tupled [ PP.align $ PP.list $ map ppEqCWithProv x
-                 , PP.pretty y
-                 ]
+  PP.vcat
+    [ PP.pretty (cName c)
+    , PP.pretty (cGuard c)
+    , "⊢"
+    , PP.tupled [ PP.align $ PP.list $ map ppEqCWithProv x
+                , PP.pretty y
+                ]
+    ]
   where
     (x, y) = cConstraints c
 
@@ -384,29 +386,29 @@ instance WithFresh EqC where
 instance PP.Pretty ConstraintSolvingState where
   pretty ctx =
     PP.vsep
-      [ row "EqCs" $ map PP.pretty $ ctxEqCs ctx,
-        row "EqRowCs" $ map PP.pretty $ ctxEqRowCs ctx,
-        row "CondEqs" $ map PP.pretty $ ctxCondEqs ctx,
-        row "SubRowCs" $ map PP.pretty $ ctxSubRowCs ctx,
-        row "SubTypeCs" $ map PP.pretty $ ctxSubTypeCs ctx,
-        PP.pretty (ctxTyVars ctx),
-        PP.pretty (ctxRowVars ctx)
-      ]
+      $  section "Equalities" (map PP.pretty $ ctxEqCs ctx)
+      <> section "Row equalities" (map PP.pretty $ ctxEqRowCs ctx)
+      <> section "Conditionals" (map PP.pretty $ ctxCondEqs ctx)
+      <> section "Sub-row constraints" (map PP.pretty $ ctxSubRowCs ctx)
+      <> section "Sub-type constraints" (map PP.pretty $ ctxSubTypeCs ctx)
+      <> [ PP.pretty (ctxTyVars ctx)
+         , PP.pretty (ctxRowVars ctx)
+         ]
 
 -- | Pretty-print a 'ConstraintSolvingState', including provenance information.
 ppConstraintSolvingStateProvs :: ConstraintSolvingState -> PP.Doc a
 ppConstraintSolvingStateProvs ctx =
     PP.vsep
-      [ row "EqCs" $ map ppEqCWithProv $ ctxEqCs ctx
+      $  section "Equality constraints" (map ppEqCWithProv $ ctxEqCs ctx)
       -- This produces an overwhelming amount of output, so it is disabled by
       -- default. Be prepared if you choose to opt into this.
-      {-
-      , row "CondEqs" $ map ppConditional'WithProv $ ctxCondEqs ctx
-      -}
-      ]
+      <> section "Conditionals" (map ppConditional'WithProv $ ctxCondEqs ctx)
 
-row :: PP.Doc ann -> [PP.Doc ann] -> PP.Doc ann
-row title entries = title PP.<+> PP.align (PP.list entries)
+section :: PP.Doc ann -> [PP.Doc ann] -> [PP.Doc ann]
+section title entries =
+  [ title <> ":"
+  , PP.indent 2 $ PP.list entries
+  ]
 
 shiftOffsets :: Offset -> Map Offset v -> Map Offset v
 shiftOffsets 0 m = m
