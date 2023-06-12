@@ -107,13 +107,14 @@ traceContext description action = do
       when doTrace $ do
         let msg =
               PP.vsep
-                [ PP.hsep [herald, " ", PP.parens (PP.pretty tId), description],
-                  PP.indent 4 ppState
+                [ PP.hsep [herald, " ", PP.parens (PP.pretty tId)]
+                , description
+                , PP.indent 4 ppState
                 ]
         trace (show msg) (return ())
 
 traceContext' :: PP.Pretty v => PP.Doc () -> v -> SolverM a -> SolverM a
-traceContext' msg v = traceContext (msg <> ": " <> PP.pretty v)
+traceContext' msg v = traceContext (PP.vsep [msg, PP.indent 2 $ PP.pretty v])
 
 --------------------------------------------------------------------------------
 -- Solver loop

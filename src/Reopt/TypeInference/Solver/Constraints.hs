@@ -44,9 +44,10 @@ instance PP.Pretty EqC where
 -- | Pretty-print an 'EqC', including its provenance.
 ppEqCWithProv :: EqC -> PP.Doc ann
 ppEqCWithProv eqC =
-  PP.vsep [ PP.pretty eqC
-          , PP.pretty (eqProv eqC)
-          ]
+  PP.align $ PP.vsep
+    [ PP.pretty eqC
+    , PP.hang 2 $ "Provenance: " <> PP.pretty (eqProv eqC)
+    ]
 
 instance FreeTyVars EqC where
   freeTyVars (EqC t1 t2 _) = Set.union (freeTyVars t1) (freeTyVars t2)
