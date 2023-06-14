@@ -58,13 +58,15 @@ import           Data.ElfEdit                  (ElfHeaderInfo,
                                                 headerNamedShdrs)
 import           Data.List                     (find, partition)
 import           Data.Maybe                    (isJust, mapMaybe)
+import           Data.String                   (fromString)
 import           Flexdis86                     (DisassembledAddr (disInstruction, disOffset),
                                                 disassembleBuffer)
-import           Flexdis86.InstructionSet      (ppInstruction)
+import           Flexdis86.InstructionSet      (ppInstructionAsShowS)
 import           Residual.Recognizers          (ResidualExplanation (BecauseFailure),
                                                 classifyInstrs,
                                                 ppResidualExplanation)
-import           Text.PrettyPrint.ANSI.Leijen  (displayS, renderCompact)
+import qualified Prettyprinter                 as PP
+import           Prettyprinter.Render.String   (renderString)
 import           Text.Printf                   (printf)
 
 newtype InclusiveRange w = InclusiveRange { getInclusiveRange :: (w, w) }
@@ -206,7 +208,9 @@ ppDisInstr ofs da =
   offset <> " " <> instr da
   where
     offset = printf "0x%08x" (ofs + disOffset da)
-    instr = maybe "???\n" (($ "\n") . displayS . renderCompact . ppInstruction) . disInstruction
+    instr = maybe "???\n"
+      (renderString . PP.layoutCompact . (<> PP.hardline) . fromString . ($ "") . ppInstructionAsShowS)
+      . disInstruction
 
 -- | Pretty-prints a disassembled block
 ppDisSegment :: Word64 -> [DisassembledAddr] -> String
