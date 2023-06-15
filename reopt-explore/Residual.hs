@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 module Residual (runResidual) where
 
@@ -13,12 +14,11 @@ import           Data.IORef                    (newIORef)
 import qualified Data.Map                      as Map
 import qualified Data.Vector                   as Vec
 import           Data.Word                     (Word64)
-import           Debug.Trace                   (trace)
 import           Numeric                       (showHex)
 
 import           Data.Macaw.Discovery          (DiscoveryState (memory))
 import           Data.Macaw.Memory             (MemChunk (ByteRegion),
-                                                MemSegment (segmentBase, segmentFlags, segmentOffset),
+                                                MemSegment (segmentFlags, segmentOffset),
                                                 MemWord (memWordValue), Memory,
                                                 forcedTakeMemChunks,
                                                 memSegments, memWord,
@@ -69,8 +69,23 @@ import           Text.Printf                   (printf)
 
 newtype InclusiveRange w = InclusiveRange { getInclusiveRange :: (w, w) }
 
+instance Show w => Show (InclusiveRange w) where
+  show (getInclusiveRange -> (lo, hi)) = "[" <> show lo <> "-" <> show hi <> "]"
+
+rangeSize :: Num a => InclusiveRange a -> a
+rangeSize (getInclusiveRange -> (lo, hi)) = hi - lo + 1
+
+rangeLowerBound :: InclusiveRange w -> w
+rangeLowerBound (getInclusiveRange -> (lo, _)) = lo
+
+rangeUpperBound :: InclusiveRange w -> w
+rangeUpperBound (getInclusiveRange -> (_, hi)) = hi
+
+inclusiveRangeFromBaseAndSize :: Num w => w -> w -> InclusiveRange w
+inclusiveRangeFromBaseAndSize base size = InclusiveRange (base, base + size - 1)
+
 ppInclusiveRange :: (Integral w, Show w) => InclusiveRange w -> String
-ppInclusiveRange (InclusiveRange (lo, hi)) = showHex lo "" <> " - " <> showHex hi ""
+ppInclusiveRange (getInclusiveRange -> (lo, hi)) = showHex lo "" <> " - " <> showHex hi ""
 
 shdrInclusiveRange :: (Eq w, Ord w, Num w) => Shdr nm w -> Maybe (InclusiveRange w)
 shdrInclusiveRange s =
@@ -80,7 +95,7 @@ shdrInclusiveRange s =
     else Just $ InclusiveRange (shdrAddr s, shdrAddr s + shdrSize s - 1)
 
 inInclusiveRange :: (Num w, Ord w, Show w) => InclusiveRange w -> w -> Bool
-inInclusiveRange (InclusiveRange (lo, hi)) v = lo <= v && v <= hi
+inInclusiveRange r v = rangeLowerBound r <= v && v <= rangeUpperBound r
 
 type RangedShdr nm w = (InclusiveRange w, Shdr nm w)
 
@@ -125,21 +140,23 @@ computeResidualSegments ::
   IO [Segment]
 computeResidualSegments discoveryState recoveredModule = do
   let allMemorySegments = memoryToSegmentList (memory discoveryState)
+  putStrLn "All memory segments:"
+  print allMemorySegments
   let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
   let blockSeg (b :: FnBlock X86_64) =
         let addr = fnBlockLabelAddr (fbLabel b) in
         case segoffAsAbsoluteAddr addr of
-          Nothing -> trace ("Ignoring relative block: " <> show addr) Nothing
-          Just w  -> Just (memWordValue w, memWordValue w + fbSize b - 1)
-  let blockSegs = mapMaybe blockSeg blocks
+          Nothing -> inclusiveRangeFromBaseAndSize 0 (fbSize b)
+          Just w  -> inclusiveRangeFromBaseAndSize (memWordValue w) (fbSize b)
+  let blockSegs = map blockSeg blocks
   return $ foldl removeSegment allMemorySegments blockSegs
 
 displayResiduals :: ResidualOptions -> [Segment] -> [ResidualRangeInfo] -> IO ()
 displayResiduals residualOpts residuals residualInfos = do
   let (explained, unexplained) = partition (isJust . rriExplanation) residualInfos
   let residualFootprint = segmentsFootprint residuals
-  let explainedFootprint = segmentsFootprint $ map (getInclusiveRange . rriRange) explained
-  let unexplainedFootprint = segmentsFootprint $ map (getInclusiveRange . rriRange) unexplained
+  let explainedFootprint = segmentsFootprint $ map rriRange explained
+  let unexplainedFootprint = segmentsFootprint $ map rriRange unexplained
   let whichDisplayResiduals
         | roOutputForSpreadsheet residualOpts = displayResidualsForSpreadsheet
         | otherwise = displayResidualsForHuman
@@ -156,26 +173,22 @@ runResidual _opts residualOpts reoptOpts = do
     displayResiduals residualOpts residuals residualInfos
 
 segmentsFootprint :: [Segment] -> Word64
-segmentsFootprint = sum . map (uncurry subtract)
+segmentsFootprint = sum . map (uncurry subtract . getInclusiveRange)
 
-memoryToSegmentList :: Memory 64 -> [(Word64, Word64)]
-memoryToSegmentList m = mapMaybe segBounds esegs
+memoryToSegmentList :: Memory 64 -> [InclusiveRange Word64]
+memoryToSegmentList m = map segBounds esegs
   where
     esegs = filter (Perm.isExecutable . segmentFlags) (memSegments m)
     -- assumes sorted, non-overlapping
-    segBounds eseg
-      | segmentBase eseg /= 0 = trace ("Ignoring segment with non-zero base: " <> show eseg) Nothing
-      | otherwise = Just
-                    ( memWordValue (segmentOffset eseg)
-                    , memWordValue (segmentOffset eseg)
-                      + memWordValue (segmentSize eseg)
-                      - 1
-                    )
+    segBounds eseg =
+      inclusiveRangeFromBaseAndSize
+        (memWordValue (segmentOffset eseg))
+        (memWordValue (segmentSize eseg))
 
 --------------------------------------------------------------------------------
 -- Segment lists
 
-type Segment = (Word64, Word64)
+type Segment = InclusiveRange Word64
 
 -- byteStringtoHexString :: BSC.ByteString -> String
 -- byteStringtoHexString = BSC.foldr ((<>) . printf "%02x") ""
@@ -214,10 +227,10 @@ ppDisSegment ofs = concatMap (ppDisInstr (fromIntegral ofs))
 
 -- | Splits one segment so that no remaining segment overlaps the addresses.
 splitSegmentAtAddresses :: [Word64] -> Segment -> [Segment]
-splitSegmentAtAddresses addrs seg@(lo, hi) =
+splitSegmentAtAddresses addrs seg@(getInclusiveRange -> (lo, hi)) =
   case find (inInclusiveRange (InclusiveRange (lo + 1, hi))) addrs of
     Nothing    -> [seg]
-    Just split -> (lo, split - 1) : splitSegmentAtAddresses addrs (split, hi)
+    Just split -> InclusiveRange (lo, split - 1) : splitSegmentAtAddresses addrs (InclusiveRange (split, hi))
 
 -- | Splits a list of segments into a more fine-grained list of segments, based
 -- on the list of addresses to split at.  This allows us to cut large residual
@@ -234,8 +247,9 @@ splitAtAddresses addrs segs =
 -- [(1,1),(2,4),(5,5),(6,6),(7,7)]
 
 -- NOTE: assumes a sorted segment list
-removeSegment :: [Segment] -> (Word64, Word64) -> [Segment]
-removeSegment sl (l, u) = ls ++ splitSegs us
+removeSegment :: [Segment] -> InclusiveRange Word64 -> [Segment]
+removeSegment (map getInclusiveRange -> sl) (getInclusiveRange -> (l, u)) =
+  map InclusiveRange $ ls ++ splitSegs us
   where
     (ls, us) = span (\(_, u') -> u' < l) sl
     splitSegs [] = []
@@ -269,12 +283,12 @@ chunkBytes = \case
 --       BSC.take (fromInteger $ toInteger $ u - l + 1) <$> chunkBytes mc
 --     _ -> Nothing
 
-segmentInstrs :: Memory 64 -> (Word64, Word64) -> Maybe [DisassembledAddr]
-segmentInstrs m (l, u) = do
-  ofs <- resolveAbsoluteAddr m (memWord l)
+segmentInstrs :: Memory 64 -> InclusiveRange Word64 -> Maybe [DisassembledAddr]
+segmentInstrs m r = do
+  ofs <- resolveAbsoluteAddr m (memWord (rangeLowerBound r))
   case segoffContentsAfter ofs of
     Right chunks -> do
-      let seg = forcedTakeMemChunks chunks (memWord $ u - l + 1)
+      let seg = forcedTakeMemChunks chunks (memWord (rangeSize r))
       concat <$> traverse (fmap disassembleBuffer . chunkBytes) seg
     _ -> Nothing
 
@@ -323,15 +337,16 @@ constructResidualRangeInfos hdrInfo mem recovOut residuals =
     allSymbols = map steValue . Vec.toList . symtabEntries @64 <$> mSymTab
     fineGrainedResiduals = splitAtAddresses (concat allSymbols) residuals
   in
-  flip map fineGrainedResiduals $ \ range@(lo, hi) ->
-    let rriInstructions = segmentInstrs mem range in
+  flip map fineGrainedResiduals $ \ r ->
+    let rriInstructions = segmentInstrs mem r in
+    let lo = rangeLowerBound r in
     ResidualRangeInfo {
-      rriRange = InclusiveRange range,
-      rriFootprint = hi - lo,
+      rriRange = r,
+      rriFootprint = rangeSize r,
       rriSection = snd <$> find ((`inInclusiveRange` lo) . fst) rangedShdrs,
       rriSymbolName = symbolAtAddress mSymTab lo ,
       rriInstructions,
-      rriExplanation = classifyResidual recovOut (InclusiveRange range) rriInstructions
+      rriExplanation = classifyResidual recovOut r rriInstructions
     }
 
 displayResidualsForSpreadsheet :: [ResidualRangeInfo] -> Word64 -> Word64 -> Word64 -> String
