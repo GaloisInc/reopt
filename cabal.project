@@ -19,8 +19,10 @@ haddock-html-location: https://hackage.haskell.org/package/$pkg-$version/docs
 
 tests: true
 
+-- NOTE: This applies to the whole package: reopt and reopt-explore
 package reopt
-  ghc-options: -Wall -Werror
+  -- no-deprecations until we get rid of ansi-wl-pprint dependency in reopt-explore
+  ghc-options: -Wall -Werror -Wno-deprecations
 package reopt-tools
   ghc-options: -Wall
 package reopt-vcg-ann
