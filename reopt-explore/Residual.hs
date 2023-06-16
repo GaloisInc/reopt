@@ -25,7 +25,8 @@ import           Data.Macaw.Memory             (MemChunk (ByteRegion),
                                                 resolveAbsoluteAddr,
                                                 segmentSize,
                                                 segoffAsAbsoluteAddr,
-                                                segoffContentsAfter)
+                                                segoffContentsAfter,
+                                                segoffOffset, segoffSegment)
 import qualified Data.Macaw.Memory.Permissions as Perm
 
 import           Reopt                         (LoadOptions (LoadOptions),
@@ -69,8 +70,11 @@ import           Text.Printf                   (printf)
 
 newtype InclusiveRange w = InclusiveRange { getInclusiveRange :: (w, w) }
 
-instance Show w => Show (InclusiveRange w) where
-  show (getInclusiveRange -> (lo, hi)) = "[" <> show lo <> "-" <> show hi <> "]"
+instance (Integral w, Num w, Show w) => Show (InclusiveRange w) where
+  show r =
+    "0x" <> showHex (rangeLowerBound r) "" <> " - 0x" <> showHex (rangeUpperBound r) ""
+    -- sometimes nice when debugging:
+    -- <> " (size: " <> show (rangeSize r) <> "B)"
 
 rangeSize :: Num a => InclusiveRange a -> a
 rangeSize (getInclusiveRange -> (lo, hi)) = hi - lo + 1
@@ -140,13 +144,14 @@ computeResidualSegments ::
   IO [Segment]
 computeResidualSegments discoveryState recoveredModule = do
   let allMemorySegments = memoryToSegmentList (memory discoveryState)
-  putStrLn "All memory segments:"
-  print allMemorySegments
   let blocks = concatMap fnBlocks (recoveredDefs recoveredModule)
   let blockSeg (b :: FnBlock X86_64) =
         let addr = fnBlockLabelAddr (fbLabel b) in
         case segoffAsAbsoluteAddr addr of
-          Nothing -> inclusiveRangeFromBaseAndSize 0 (fbSize b)
+          Nothing ->
+            inclusiveRangeFromBaseAndSize
+              (memWordValue (segmentOffset (segoffSegment addr)) + memWordValue (segoffOffset addr))
+              (fbSize b)
           Just w  -> inclusiveRangeFromBaseAndSize (memWordValue w) (fbSize b)
   let blockSegs = map blockSeg blocks
   return $ foldl removeSegment allMemorySegments blockSegs
